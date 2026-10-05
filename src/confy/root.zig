@@ -1,4 +1,4 @@
-//! zefir-confy — конфигурация.
+//! zefir-confy — configuration.
 
 const std = @import("std");
 const logger = @import("logger");

@@ -1,4 +1,4 @@
-//! zefir-logger — логирование.
+//! zefir-logger — logging.
 
 const std = @import("std");
 

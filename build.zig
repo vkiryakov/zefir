@@ -4,8 +4,8 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // Модули фреймворка. Публичные имена ("zefir-*") используются потребителями
-    // через dep.module("..."), внутренние имена в .imports — через @import("...").
+    // Framework modules. Public names ("zefir-*") are used by consumers
+    // via dep.module("..."); internal names in .imports via @import("...").
 
     const logger = b.addModule("zefir-logger", .{
         .root_source_file = b.path("src/logger/root.zig"),
@@ -41,7 +41,7 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // Общий модуль: @import("zefir").logger, .confy, .rpc, .orm
+    // Umbrella module: @import("zefir").logger, .confy, .rpc, .orm
     const zefir = b.addModule("zefir", .{
         .root_source_file = b.path("src/zefir.zig"),
         .target = target,
