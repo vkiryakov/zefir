@@ -1,30 +1,31 @@
-const Tree = @import("tree.zig").Tree;
-const DotEnv = @import("parsers/dotenv.zig");
-const Env = @import("parsers/env.zig");
-const Json = @import("parsers/json.zig");
+//! Where configuration comes from.
 
+/// One configuration source. Create it with `.json(path)`, `.ini(path)`,
+/// `.env(path)` or `.osEnv()`.
 pub const ConfigSource = union(enum) {
-    dotenv: []const u8,
     json_file: []const u8,
-    environment,
+    ini_file: []const u8,
+    dotenv: []const u8,
+    os_env,
 
+    /// A JSON file. It must exist.
     pub fn json(path: []const u8) ConfigSource {
         return .{ .json_file = path };
     }
 
+    /// An INI file. It must exist.
+    pub fn ini(path: []const u8) ConfigSource {
+        return .{ .ini_file = path };
+    }
+
+    /// A `.env` file. It is skipped when it doesn't exist, so optional files
+    /// such as `.env.local` can always be listed.
     pub fn env(path: []const u8) ConfigSource {
         return .{ .dotenv = path };
     }
 
-    pub fn os_env() ConfigSource {
-        return .environment;
-    }
-
-    pub fn pase(self: ConfigSource, tree: *Tree) !void {
-        switch (self) {
-            .dotenv => |path| try DotEnv.parse(path, tree),
-            .json_file => |path| try Json.parse(path, tree),
-            .environment => try Env.load(tree),
-        }
+    /// The process environment, taken from `Options.environ`.
+    pub fn osEnv() ConfigSource {
+        return .os_env;
     }
 };
