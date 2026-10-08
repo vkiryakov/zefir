@@ -72,10 +72,10 @@ flowchart LR
 
 ## Installation
 
-Add zefir to your `build.zig.zon`:
+Add Zefir to your `build.zig.zon`:
 
 ```sh
-zig fetch --save git+https://github.com/vkiryakov/zefir#<ref>
+zig fetch --save git+https://github.com/vkiryakov/zefir#v0.1.0
 ```
 
 Then import the `zefir-confy` module in `build.zig`:
