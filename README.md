@@ -16,7 +16,7 @@
 
 ## Why zefir exists
 
-I'm building zefir for myself, for the kind of software that runs a business: web servers, web services, APIs. None of the existing frameworks worked the way I wanted for that, so I'm making the one I want to use: the building blocks every service needs, each a module I can take on its own, with my own types as the schema and errors that say exactly what's wrong and where.
+I'm building zefir to cover everything I need for enterprise applications: web servers, web services, APIs. It brings together the building blocks such software needs, each a module you can take on its own, with your own types as the schema and errors that say exactly what's wrong and where.
 
 It grows at my own pace, for my projects and for the joy of building it. If it fits the way you work too, you're welcome to use it.
 
