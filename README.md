@@ -14,8 +14,8 @@ A modular application framework for [Zig](https://ziglang.org).
 
 | Module         | Import name (for `dep.module(...)`) | Purpose                                                    | Status                                        |
 | -------------- | ----------------------------------- | ---------------------------------------------------------- | --------------------------------------------- |
-| logger         | `zefir-logger`                      | Logging                                                    | placeholder                                   |
 | confy          | `zefir-confy`                       | Configuration from JSON, INI, `.env` files and environment | usable — [docs](src/confy/examples/README.md) |
+| logger         | `zefir-logger`                      | Logging                                                    | placeholder                                   |
 | rpc            | `zefir-rpc`                         | RPC                                                        | placeholder                                   |
 | orm            | `zefir-orm`                         | ORM                                                        | placeholder                                   |
 | _all of above_ | `zefir`                             | Umbrella module                                            |                                               |
@@ -28,13 +28,13 @@ Zig **0.17.0**.
 
 ## Installation
 
-Add the dependency to your `build.zig.zon`:
+Add the dependency to your `build.zig.zon`. The latest release is **v0.1.0**:
 
 ```sh
-zig fetch --save git+https://github.com/vkiryakov/zefir#<ref>
+zig fetch --save git+https://github.com/vkiryakov/zefir#v0.1.0
 ```
 
-where `<ref>` is a release tag (e.g. `v0.1.0`) or a commit hash.
+Other versions are on the [releases page](https://github.com/vkiryakov/zefir/releases); a commit hash works too.
 
 Then import the modules you need in your `build.zig`:
 
