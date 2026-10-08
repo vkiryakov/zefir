@@ -7,18 +7,18 @@
 
 A modular application framework for [Zig](https://ziglang.org).
 
-> **Status: early development.** The modules are scaffolds without a usable API yet.
+> **Status: early development.** confy is ready to use; logger, rpc and orm are placeholders without an API yet.
 > Until 1.0, breaking changes may happen in any minor release.
 
 ## Modules
 
-| Module         | Import name (for `dep.module(...)`) | Purpose         |
-| -------------- | ----------------------------------- | --------------- |
-| logger         | `zefir-logger`                      | Logging         |
-| confy          | `zefir-confy`                       | Configuration   |
-| rpc            | `zefir-rpc`                         | RPC             |
-| orm            | `zefir-orm`                         | ORM             |
-| _all of above_ | `zefir`                             | Umbrella module |
+| Module         | Import name (for `dep.module(...)`) | Purpose                                                    | Status                                        |
+| -------------- | ----------------------------------- | ---------------------------------------------------------- | --------------------------------------------- |
+| logger         | `zefir-logger`                      | Logging                                                    | placeholder                                   |
+| confy          | `zefir-confy`                       | Configuration from JSON, INI, `.env` files and environment | usable — [docs](src/confy/examples/README.md) |
+| rpc            | `zefir-rpc`                         | RPC                                                        | placeholder                                   |
+| orm            | `zefir-orm`                         | ORM                                                        | placeholder                                   |
+| _all of above_ | `zefir`                             | Umbrella module                                            |                                               |
 
 Each module can be used on its own, or all of them through the umbrella module `zefir`.
 
