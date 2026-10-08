@@ -1,5 +1,5 @@
 <h1 align="center">
-  <img src="logo.png" alt="zefir" width="400">
+  <img src="logo.png" alt="Zefir" width="400">
 </h1>
 
 <p align="center">
@@ -14,16 +14,16 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
 </p>
 
-## Why zefir exists
+## Why Zefir exists
 
-I'm building zefir to cover everything I need for enterprise applications: web servers, web services, APIs. It brings together the building blocks such software needs, each a module you can take on its own, with your own types as the schema and errors that say exactly what's wrong and where.
+I'm building Zefir to cover everything I need for enterprise applications: web servers, web services, APIs. It's made to be convenient for me first, and I'll be really glad if it helps you too. It brings together the building blocks such software needs, each a module you can take on its own, with your own types as the schema and errors that say exactly what's wrong and where.
 
-If it fits the way you work too, use it, and please join in: bring your ideas and questions to [Discussions](https://github.com/vkiryakov/zefir/discussions), and pull requests are welcome too.
+If it fits the way you work, use it, and please join in: bring your ideas and questions to [Discussions](https://github.com/vkiryakov/zefir/discussions), and pull requests are welcome too.
 
 ## Highlights
 
-- **Built for services.** zefir is growing into the layers every web service needs: configuration, logging, RPC, database access and HTTP.
-- **Take only what you use.** Every module is its own import: depend on `zefir-confy` alone, or on everything through `zefir`.
+- **Built for services.** Zefir is growing into the layers every web service needs: configuration, logging, RPC, database access and HTTP.
+- **Take only what you use.** Every module is its own import, and the umbrella `zefir` module brings them all together.
 - **Your types are the contract.** Declare a struct, and confy fills it and checks every value against its field's type. It reports every problem at once, each pointing at the file and line, or the variable, it came from.
 - **No dependencies.** Pure Zig on top of the standard library; nothing else to fetch or audit.
 - **Tested on Linux, macOS and Windows.** CI runs the tests of every module on all three.
@@ -33,14 +33,14 @@ If it fits the way you work too, use it, and please join in: bring your ideas an
 | Module             | Import name    | What it does                                                         | Status                                         |
 | ------------------ | -------------- | -------------------------------------------------------------------- | ---------------------------------------------- |
 | **confy**          | `zefir-confy`  | Typed configuration from JSON, INI, `.env` files and the environment | ✅ Done · [docs](src/confy/examples/README.md) |
-| logger             | `zefir-logger` | Logging                                                              | 🚧 In progress                                 |
 | rpc                | `zefir-rpc`    | RPC                                                                  | 🚧 In progress                                 |
-| orm                | `zefir-orm`    | ORM                                                                  | 🚧 In progress                                 |
+| logger             | `zefir-logger` | Logging                                                              | 📋 Planned                                     |
+| orm                | `zefir-orm`    | ORM                                                                  | 📋 Planned                                     |
 | http               | —              | HTTP server                                                          | 📋 Planned                                     |
 | _all of the above_ | `zefir`        | Umbrella module                                                      |                                                |
 
 > [!NOTE]
-> zefir is in early development. Until 1.0, any minor release may change the API.
+> Zefir is in early development. Until 1.0, any minor release may change the API.
 
 ## confy in a minute
 
@@ -141,10 +141,10 @@ zig fmt --check build.zig build.zig.zon src   # check formatting
 
 Branches:
 
-- `dev` — the default branch. All work lands here through squash-merged pull requests.
-- `feature/<name>` — new functionality, created from `dev`.
-- `chore/<name>` — docs, CI, tooling and other maintenance, created from `dev`.
-- `main` — releases only: `dev` is merged in with a merge commit, and each release is tagged `vX.Y.Z`.
+- `dev` — the default branch and the next version in progress: its `.version` in `build.zig.zon` is that version with `-dev`, such as `0.2.0-dev`. Every change lands here first, through a squash-merged pull request.
+- `feature/<name>` — new functionality; `chore/<name>` — docs, CI, tooling and other maintenance. Both are created from `dev` and merged back into it; a big feature goes in as several smaller pull requests.
+- `main` — releases only. A release is a pull request from `dev`, merged with a merge commit and tagged `vX.Y.Z`.
+- `hotfix/<name>` — an urgent fix for the latest release: created from `main`, merged into it as a patch release such as `v0.1.1`, and then brought to `dev` as well.
 
 ## License
 
