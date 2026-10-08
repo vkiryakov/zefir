@@ -18,7 +18,7 @@
 
 I'm building zefir to cover everything I need for enterprise applications: web servers, web services, APIs. It brings together the building blocks such software needs, each a module you can take on its own, with your own types as the schema and errors that say exactly what's wrong and where.
 
-If it fits the way you work too, you're welcome to use it.
+If it fits the way you work too, use it, and please join in. Ideas, questions and pull requests are all welcome: let's discuss them in the [issues](https://github.com/vkiryakov/zefir/issues).
 
 ## Highlights
 
