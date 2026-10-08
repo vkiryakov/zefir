@@ -1,5 +1,5 @@
 <h1 align="center">
-  <img src="logo.png" alt="zefir" width="400">
+  <img src="logo.png" alt="Zefir" width="400">
 </h1>
 
 <p align="center">
@@ -14,16 +14,16 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
 </p>
 
-## Why zefir exists
+## Why Zefir exists
 
-I'm building zefir to cover everything I need for enterprise applications: web servers, web services, APIs. It's made to be convenient for me first, and I'll be really glad if it helps you too. It brings together the building blocks such software needs, each a module you can take on its own, with your own types as the schema and errors that say exactly what's wrong and where.
+I'm building Zefir to cover everything I need for enterprise applications: web servers, web services, APIs. It's made to be convenient for me first, and I'll be really glad if it helps you too. It brings together the building blocks such software needs, each a module you can take on its own, with your own types as the schema and errors that say exactly what's wrong and where.
 
 If it fits the way you work, use it, and please join in: bring your ideas and questions to [Discussions](https://github.com/vkiryakov/zefir/discussions), and pull requests are welcome too.
 
 ## Highlights
 
-- **Built for services.** zefir is growing into the layers every web service needs: configuration, logging, RPC, database access and HTTP.
-- **Take only what you use.** Every module is its own import: depend on `zefir-confy` alone, or on everything through `zefir`.
+- **Built for services.** Zefir is growing into the layers every web service needs: configuration, logging, RPC, database access and HTTP.
+- **Take only what you use.** Every module is its own import, and the umbrella `zefir` module brings them all together.
 - **Your types are the contract.** Declare a struct, and confy fills it and checks every value against its field's type. It reports every problem at once, each pointing at the file and line, or the variable, it came from.
 - **No dependencies.** Pure Zig on top of the standard library; nothing else to fetch or audit.
 - **Tested on Linux, macOS and Windows.** CI runs the tests of every module on all three.
@@ -40,7 +40,7 @@ If it fits the way you work, use it, and please join in: bring your ideas and qu
 | _all of the above_ | `zefir`        | Umbrella module                                                      |                                                |
 
 > [!NOTE]
-> zefir is in early development. Until 1.0, any minor release may change the API.
+> Zefir is in early development. Until 1.0, any minor release may change the API.
 
 ## confy in a minute
 
