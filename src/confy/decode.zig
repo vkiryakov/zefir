@@ -43,12 +43,13 @@ fn decodeStruct(comptime T: type, comptime base: ?T, ctx: Context, path: []const
     const problems_before = ctx.diag.problems.items.len;
 
     var result: T = undefined;
-    inline for (@typeInfo(T).@"struct".fields) |field| {
-        if (field.is_comptime) continue;
-        const field_path = try joinPath(ctx.arena, path, field.name);
-        const node = if (object) |o| o.fields.getPtr(field.name) else null;
-        const default: ?field.type = if (base) |b| @field(b, field.name) else field.defaultValue();
-        @field(result, field.name) = try decodeField(field.type, default, ctx, field_path, node);
+    const info = @typeInfo(T).@"struct";
+    inline for (info.field_names, info.field_types, info.field_attrs) |name, FieldType, attrs| {
+        if (attrs.@"comptime") continue;
+        const field_path = try joinPath(ctx.arena, path, name);
+        const node = if (object) |o| o.fields.getPtr(name) else null;
+        const default: ?FieldType = if (base) |b| @field(b, name) else attrs.defaultValue(FieldType);
+        @field(result, name) = try decodeField(FieldType, default, ctx, field_path, node);
     }
     if (object) |o| try reportUnknownKeys(T, ctx, path, o);
 
@@ -124,7 +125,7 @@ fn decodeValue(comptime T: type, comptime base: ?T, ctx: Context, path: []const 
             return invalid(T, ctx, path, node, comptime enumHint(T));
         },
         .pointer => |pointer| {
-            if (pointer.size != .slice or !pointer.is_const) @compileError(unsupported(T));
+            if (pointer.size != .slice or !pointer.attrs.@"const") @compileError(unsupported(T));
             if (pointer.child == u8) {
                 if (node.value == .string) return node.value.string;
                 return invalid(T, ctx, path, node, "expected a string");
@@ -224,14 +225,14 @@ fn parseBool(raw: []const u8) ?bool {
 
 fn fieldNames(comptime T: type) []const []const u8 {
     var names: []const []const u8 = &.{};
-    for (@typeInfo(T).@"struct".fields) |field| names = names ++ [_][]const u8{field.name};
+    for (@typeInfo(T).@"struct".field_names) |name| names = names ++ [_][]const u8{name};
     return names;
 }
 
 fn enumHint(comptime T: type) []const u8 {
     var hint: []const u8 = "expected one of:";
-    for (@typeInfo(T).@"enum".fields, 0..) |field, i| {
-        hint = hint ++ (if (i == 0) " " else ", ") ++ field.name;
+    for (@typeInfo(T).@"enum".field_names, 0..) |name, i| {
+        hint = hint ++ (if (i == 0) " " else ", ") ++ name;
     }
     return hint;
 }
@@ -295,7 +296,7 @@ test "bools in every spelling" {
 test "edit distance ignores case and gives up on long strings" {
     try std.testing.expectEqual(0, editDistance("PORT", "port"));
     try std.testing.expectEqual(3, editDistance("", "abc"));
-    try std.testing.expectEqual(null, editDistance("a" ** 65, "a"));
+    try std.testing.expectEqual(null, editDistance(&@as([65]u8, @splat('a')), "a"));
     try std.testing.expectEqual(null, closest("ab", &.{"xy"}));
 }
 

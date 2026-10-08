@@ -45,9 +45,10 @@ pub fn StructOf(comptime T: type) ?type {
 
 fn collect(comptime T: type, comptime prefix: []const []const u8) []const Leaf {
     var list: []const Leaf = &.{};
-    for (@typeInfo(T).@"struct".fields) |field| {
-        const path = prefix ++ [_][]const u8{field.name};
-        if (StructOf(field.type)) |Child| {
+    const info = @typeInfo(T).@"struct";
+    for (info.field_names, info.field_types) |name, FieldType| {
+        const path = prefix ++ [_][]const u8{name};
+        if (StructOf(FieldType)) |Child| {
             list = list ++ collect(Child, path);
         } else {
             list = list ++ [_]Leaf{.{ .path = path, .env_name = envName(path) }};

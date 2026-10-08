@@ -156,7 +156,7 @@ fn ConfigType(comptime CfgPtr: type) type {
     const info = @typeInfo(CfgPtr);
     if (info != .pointer or
         info.pointer.size != .one or
-        info.pointer.is_const or
+        info.pointer.attrs.@"const" or
         @typeInfo(info.pointer.child) != .@"struct")
     {
         @compileError("confy.load: expected a mutable pointer to a struct, like &config, got " ++ @typeName(CfgPtr));
