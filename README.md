@@ -16,9 +16,9 @@
 
 ## Why zefir exists
 
-I'm building zefir to cover everything I need for enterprise applications: web servers, web services, APIs. It brings together the building blocks such software needs, each a module you can take on its own, with your own types as the schema and errors that say exactly what's wrong and where.
+I'm building zefir to cover everything I need for enterprise applications: web servers, web services, APIs. It's made to be convenient for me first, and I'll be really glad if it helps you too. It brings together the building blocks such software needs, each a module you can take on its own, with your own types as the schema and errors that say exactly what's wrong and where.
 
-If it fits the way you work too, use it, and please join in: bring your ideas and questions to [Discussions](https://github.com/vkiryakov/zefir/discussions), and pull requests are welcome too.
+If it fits the way you work, use it, and please join in: bring your ideas and questions to [Discussions](https://github.com/vkiryakov/zefir/discussions), and pull requests are welcome too.
 
 ## Highlights
 
@@ -141,7 +141,7 @@ zig fmt --check build.zig build.zig.zon src   # check formatting
 
 Branches:
 
-- `dev` — the default branch and the next version in progress: its `.version` in `build.zig.zon` is that version with `-dev`, such as `0.2.0-dev`, and the commit that starts the version is tagged `dev-0.2.0`. Every change lands here first, through a squash-merged pull request.
+- `dev` — the default branch and the next version in progress: its `.version` in `build.zig.zon` is that version with `-dev`, such as `0.2.0-dev`. Every change lands here first, through a squash-merged pull request.
 - `feature/<name>` — new functionality; `chore/<name>` — docs, CI, tooling and other maintenance. Both are created from `dev` and merged back into it; a big feature goes in as several smaller pull requests.
 - `main` — releases only. A release is a pull request from `dev`, merged with a merge commit and tagged `vX.Y.Z`.
 - `hotfix/<name>` — an urgent fix for the latest release: created from `main`, merged into it as a patch release such as `v0.1.1`, and then brought to `dev` as well.
