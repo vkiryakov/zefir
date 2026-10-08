@@ -3,8 +3,8 @@
 </h1>
 
 <p align="center">
-  <strong>The modular application framework for Zig.</strong><br>
-  Pick the modules your app needs: typed configuration today; logging, RPC, an ORM and an HTTP server next.
+  <strong>A modular framework for enterprise applications in Zig.</strong><br>
+  Web servers, web services and APIs, built from modules you pick: typed configuration today; logging, RPC, an ORM and an HTTP server next.
 </p>
 
 <p align="center">
@@ -16,12 +16,13 @@
 
 ## Why zefir exists
 
-I'm building zefir for myself. None of the existing frameworks worked the way I wanted, so I'm making the one I want to use: modules I can pick one at a time, my own types as the schema, and errors that say exactly what's wrong and where.
+I'm building zefir for myself, for the kind of software that runs a business: web servers, web services, APIs. None of the existing frameworks worked the way I wanted for that, so I'm making the one I want to use: the building blocks every service needs, each a module I can take on its own, with my own types as the schema and errors that say exactly what's wrong and where.
 
 It grows at my own pace, for my projects and for the joy of building it. If it fits the way you work too, you're welcome to use it.
 
 ## Highlights
 
+- **Built for services.** zefir is growing into the layers every web service needs: configuration, logging, RPC, database access and HTTP.
 - **Take only what you use.** Every module is its own import: depend on `zefir-confy` alone, or on everything through `zefir`.
 - **Your types are the contract.** Declare a struct, and confy fills it and checks every value against its field's type. It reports every problem at once, each pointing at the file and line, or the variable, it came from.
 - **No dependencies.** Pure Zig on top of the standard library; nothing else to fetch or audit.
