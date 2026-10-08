@@ -33,9 +33,9 @@ If it fits the way you work, use it, and please join in: bring your ideas and qu
 | Module             | Import name    | What it does                                                         | Status                                         |
 | ------------------ | -------------- | -------------------------------------------------------------------- | ---------------------------------------------- |
 | **confy**          | `zefir-confy`  | Typed configuration from JSON, INI, `.env` files and the environment | ✅ Done · [docs](src/confy/examples/README.md) |
-| logger             | `zefir-logger` | Logging                                                              | 🚧 In progress                                 |
 | rpc                | `zefir-rpc`    | RPC                                                                  | 🚧 In progress                                 |
-| orm                | `zefir-orm`    | ORM                                                                  | 🚧 In progress                                 |
+| logger             | `zefir-logger` | Logging                                                              | 📋 Planned                                     |
+| orm                | `zefir-orm`    | ORM                                                                  | 📋 Planned                                     |
 | http               | —              | HTTP server                                                          | 📋 Planned                                     |
 | _all of the above_ | `zefir`        | Umbrella module                                                      |                                                |
 
