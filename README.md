@@ -24,7 +24,7 @@ Each module can be used on its own, or all of them through the umbrella module `
 
 ## Requirements
 
-Zig **0.16.0**.
+Zig **0.17.0**.
 
 ## Installation
 

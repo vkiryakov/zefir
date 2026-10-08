@@ -28,11 +28,11 @@ pub fn dupe(comptime T: type, gpa: Allocator, value: T) Allocator.Error!T {
         .@"struct" => |info| {
             var result: T = undefined;
             var copied: usize = 0;
-            errdefer inline for (info.fields, 0..) |field, i| {
-                if (!field.is_comptime and i < copied) free(field.type, gpa, @field(result, field.name));
+            errdefer inline for (info.field_names, info.field_types, info.field_attrs, 0..) |name, FieldType, attrs, i| {
+                if (!attrs.@"comptime" and i < copied) free(FieldType, gpa, @field(result, name));
             };
-            inline for (info.fields, 0..) |field, i| {
-                if (!field.is_comptime) @field(result, field.name) = try dupe(field.type, gpa, @field(value, field.name));
+            inline for (info.field_names, info.field_types, info.field_attrs, 0..) |name, FieldType, attrs, i| {
+                if (!attrs.@"comptime") @field(result, name) = try dupe(FieldType, gpa, @field(value, name));
                 copied = i + 1;
             }
             return result;
@@ -57,8 +57,8 @@ pub fn free(comptime T: type, gpa: Allocator, value: T) void {
             }
             gpa.free(value);
         },
-        .@"struct" => |info| inline for (info.fields) |field| {
-            if (!field.is_comptime) free(field.type, gpa, @field(value, field.name));
+        .@"struct" => |info| inline for (info.field_names, info.field_types, info.field_attrs) |name, FieldType, attrs| {
+            if (!attrs.@"comptime") free(FieldType, gpa, @field(value, name));
         },
         else => {},
     }
@@ -131,5 +131,5 @@ test "wipe zeroes the bytes of a secret" {
     defer gpa.free(secret.expose());
 
     wipe(secret);
-    try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 6), secret.expose());
+    try std.testing.expectEqualSlices(u8, &@as([6]u8, @splat(0)), secret.expose());
 }
