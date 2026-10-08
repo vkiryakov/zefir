@@ -14,7 +14,13 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
 </p>
 
-## Why zefir
+## Why zefir exists
+
+I'm building zefir for myself. None of the existing frameworks worked the way I wanted, so I'm making the one I want to use: modules I can pick one at a time, my own types as the schema, and errors that say exactly what's wrong and where.
+
+It grows at my own pace, for my projects and for the joy of building it. If it fits the way you work too, you're welcome to use it.
+
+## Highlights
 
 - **Take only what you use.** Every module is its own import: depend on `zefir-confy` alone, or on everything through `zefir`.
 - **Your types are the contract.** Declare a struct, and confy fills it and checks every value against its field's type. It reports every problem at once, each pointing at the file and line, or the variable, it came from.
@@ -82,8 +88,7 @@ error(confy): 1 configuration problem:
   environment: APP_HTTP_PORT: invalid (expected an integer 0..65535)
 ```
 
-The environment overrides the files, a bad value stops the program before it does anything, and
-`confy.Secret` prints as `[redacted]`. **[Read the confy guide →](src/confy/examples/README.md)**
+The environment overrides the files, a bad value stops the program before it does anything, and `confy.Secret` prints as `[redacted]`. **[Read the confy guide →](src/confy/examples/README.md)**
 
 ## Installation
 
