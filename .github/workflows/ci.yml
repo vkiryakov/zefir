@@ -5,6 +5,7 @@ on:
     branches: [main, dev]
   pull_request:
     branches: [main, dev]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -14,6 +15,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # The job names are required status checks on main and dev; keep them in sync.
   test:
     name: test (${{ matrix.os }})
     strategy:
