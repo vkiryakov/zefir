@@ -1,4 +1,6 @@
-# zefir
+<h1 align="center">
+  <img src="logo.png" alt="zefir" width="400">
+</h1>
 
 [![CI](https://github.com/vkiryakov/zefir/actions/workflows/ci.yml/badge.svg?branch=dev)](https://github.com/vkiryakov/zefir/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
