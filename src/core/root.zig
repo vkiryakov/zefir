@@ -44,3 +44,53 @@ test {
     _ = @import("errors.zig");
     _ = @import("trace.zig");
 }
+
+/// The first public function, reached from `T`'s public declarations, that
+/// takes a `std.mem.Allocator`; null when there is none.
+fn findAllocatorParam(comptime T: type) ?[]const u8 {
+    @setEvalBranchQuota(100_000);
+    const decl_names = switch (@typeInfo(T)) {
+        inline .@"struct", .@"enum", .@"union", .@"opaque" => |info| info.decl_names,
+        else => return null,
+    };
+    inline for (decl_names) |name| {
+        const decl = @field(T, name);
+        const Decl = @TypeOf(decl);
+        if (Decl == type) {
+            if (findAllocatorParam(decl)) |found| return found;
+        } else if (@typeInfo(Decl) == .@"fn") {
+            inline for (@typeInfo(Decl).@"fn".param_types) |Param| {
+                if (Param == std.mem.Allocator) return @typeName(T) ++ "." ++ name;
+            }
+        }
+    }
+    return null;
+}
+
+test "no public function takes an allocator" {
+    try std.testing.expectEqual(@as(?[]const u8, null), comptime findAllocatorParam(@This()));
+
+    const Planted = struct {
+        pub const Inner = struct {
+            pub fn grow(gpa: std.mem.Allocator) void {
+                _ = gpa;
+            }
+        };
+    };
+    try std.testing.expect(comptime findAllocatorParam(Planted) != null);
+}
+
+test "core sources do not use the heap" {
+    const sources = [_][]const u8{
+        @embedFile("CancellationToken.zig"),
+        @embedFile("Context.zig"),
+        @embedFile("Deadline.zig"),
+        @embedFile("errors.zig"),
+        @embedFile("trace.zig"),
+    };
+    // Split so that this file does not match itself.
+    const forbidden = [_][]const u8{ "std." ++ "heap", "mem." ++ "Allocator", "allocator" ++ "()" };
+    for (sources) |source| {
+        for (forbidden) |needle| try std.testing.expect(std.mem.find(u8, source, needle) == null);
+    }
+}
