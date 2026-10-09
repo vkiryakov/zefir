@@ -109,6 +109,41 @@ pub const TraceState = struct {
     pub fn isEmpty(state: TraceState) bool {
         return state.header.len == 0;
     }
+
+    pub const Entry = struct {
+        key: []const u8,
+        /// Leading spaces belong to the value; trailing ones are not kept.
+        value: []const u8,
+    };
+
+    /// Visits the entries from left to right, skipping empty members.
+    pub const Iterator = struct {
+        rest: []const u8,
+
+        pub fn next(it: *Iterator) ?Entry {
+            while (it.rest.len != 0) {
+                const comma = std.mem.findScalar(u8, it.rest, ',');
+                const member = std.mem.trim(u8, it.rest[0 .. comma orelse it.rest.len], " \t");
+                it.rest = if (comma) |i| it.rest[i + 1 ..] else "";
+                const eq = std.mem.findScalar(u8, member, '=') orelse continue;
+                return .{ .key = member[0..eq], .value = member[eq + 1 ..] };
+            }
+            return null;
+        }
+    };
+
+    pub fn iterator(state: TraceState) Iterator {
+        return .{ .rest = state.header };
+    }
+
+    /// The value of the left-most entry with `key`; W3C allows a repeated key.
+    pub fn get(state: TraceState, key: []const u8) ?[]const u8 {
+        var it = state.iterator();
+        while (it.next()) |entry| {
+            if (std.mem.eql(u8, entry.key, key)) return entry.value;
+        }
+        return null;
+    }
 };
 
 /// The identity of the current position in a trace.
@@ -217,6 +252,31 @@ test "an empty trace state has no header" {
     try std.testing.expect(TraceState.empty.isEmpty());
     const state: TraceState = .{ .header = "rojo=00f067aa0ba902b7" };
     try std.testing.expect(!state.isEmpty());
+}
+
+test "the iterator skips empty members and whitespace around them" {
+    const state: TraceState = .{ .header = "rojo=1,, \t congo= t61rcWkgMzE\t,foo=2" };
+    var it = state.iterator();
+    const first = it.next().?;
+    try std.testing.expectEqualStrings("rojo", first.key);
+    try std.testing.expectEqualStrings("1", first.value);
+    const second = it.next().?;
+    try std.testing.expectEqualStrings("congo", second.key);
+    try std.testing.expectEqualStrings(" t61rcWkgMzE", second.value);
+    try std.testing.expectEqualStrings("2", it.next().?.value);
+    try std.testing.expectEqual(@as(?TraceState.Entry, null), it.next());
+}
+
+test "get returns the left-most value of a key" {
+    const state: TraceState = .{ .header = "foo=1,bar=2,foo=3" };
+    try std.testing.expectEqualStrings("1", state.get("foo").?);
+    try std.testing.expectEqualStrings("2", state.get("bar").?);
+    try std.testing.expectEqual(@as(?[]const u8, null), state.get("baz"));
+}
+
+test "the iterator skips members without '=' instead of failing" {
+    const state: TraceState = .{ .header = "garbage,foo=1" };
+    try std.testing.expectEqualStrings("1", state.get("foo").?);
 }
 
 test "child keeps the trace, flags and state and becomes local" {
