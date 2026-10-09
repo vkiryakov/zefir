@@ -27,12 +27,14 @@ fn getUser(ctx: core.Context, io: std.Io, id: u64) !User {
 - [Cancellation](#cancellation)
 - [Deadlines and clocks](#deadlines-and-clocks)
 - [Trace identity](#trace-identity)
+- [W3C headers](#w3c-headers)
 - [Errors](#errors)
 - [Thread safety](#thread-safety)
 - [Limits](#limits)
+- [Benchmarks](#benchmarks)
 
 Examples that `zig build test` compiles and runs:
-[HTTP handler](http_handler.zig) · [RPC handler](rpc_handler.zig)
+[HTTP handler](http_handler.zig) · [RPC handler](rpc_handler.zig) · [Gateway → User → Billing](services.zig)
 
 ## Installation
 
@@ -207,6 +209,52 @@ io.random(&bytes);
 const span_id = core.SpanId.fromBytes(bytes) catch unreachable; // all zero: retry in real code
 ```
 
+## W3C headers
+
+`core.w3c` parses and formats the W3C Trace Context headers for any
+transport. It follows Level 1 plus the two Level 2 additions the official
+test suite checks: the `random` flag and the tracestate key grammar.
+
+Receiving:
+
+```zig
+const trace: ?core.TraceContext = if (core.w3c.parseTraceparent(traceparent)) |parsed| blk: {
+    var with_state = parsed;
+    with_state.state = core.w3c.parseTracestate(tracestate) catch .empty; // a bad tracestate is dropped
+    break :blk with_state;
+} else |_| null; // a bad traceparent restarts the trace; tracestate is not parsed
+```
+
+Sending, after `ctx.trace.?.child(span_id)` for your own span:
+
+```zig
+var traceparent: [core.w3c.traceparent_len]u8 = undefined;
+const value = core.w3c.formatTraceparent(trace, &traceparent); // always version 00
+if (!trace.state.isEmpty()) send("tracestate", trace.state.header);
+```
+
+- **traceparent:** version `00` exactly (55 characters, lowercase hex, no
+  all-zero ids); newer versions are read the W3C way and written back as
+  `00`; spaces and tabs around the value are ignored.
+- **Flags:** `sampled` and `random` are sent; unknown bits are kept in memory
+  but always sent as zero, as W3C requires.
+- **tracestate:** at most 32 entries; keys and values follow the W3C grammar;
+  empty members and whitespace around them are allowed; a repeated key is
+  allowed and kept (`get` returns the left-most value). Any other invalid
+  entry makes the whole tracestate invalid — the traceparent stays.
+- **Lifetime:** `TraceState` borrows the bytes you parsed. Parse them from a
+  buffer that lives as long as the request.
+
+The transport's part:
+
+- header names are case-insensitive;
+- two or more `traceparent` fields are invalid;
+- join several `tracestate` fields with `,` in their order before parsing;
+- drop a `tracestate` that arrives without a valid `traceparent`;
+- do not send an empty tracestate;
+- if your transport allows only `0x20-0x7E` in values, check tracestate with
+  `parseTracestate` instead: the whitespace it keeps may contain a tab.
+
 ## Errors
 
 Zig error sets stay the way code reports errors. `core.ErrorCode` names the
@@ -248,6 +296,17 @@ state.
 | --- | --- |
 | `Context` | 96 bytes, passed by value |
 | Allocation, clock reads, I/O | none |
+| traceparent written | 55 characters, version `00` |
+| tracestate | 32 entries; key and value up to 256 characters; no total length limit |
 
 Not in core: creating spans, sampling, exporting, generating ids, linked
 tokens, waking waiting tasks, baggage.
+
+## Benchmarks
+
+```sh
+zig build bench
+```
+
+prints the environment and nanoseconds per operation, built with
+ReleaseFast. Numbers depend on the machine.
