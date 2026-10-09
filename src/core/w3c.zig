@@ -24,12 +24,57 @@
 
 const std = @import("std");
 const TraceState = @import("trace.zig").TraceState;
+const TraceContext = @import("trace.zig").TraceContext;
+const TraceFlags = @import("trace.zig").TraceFlags;
+const TraceId = @import("trace.zig").TraceId;
+const SpanId = @import("trace.zig").SpanId;
 
 /// At most this many non-empty list members in a tracestate.
 const max_tracestate_members = 32;
 
 /// Optional whitespace around header values and tracestate members.
 const ows = " \t";
+
+/// The length of a version-00 traceparent, the only version written.
+pub const traceparent_len = 55;
+
+/// Parses a traceparent value. Versions above 00 are read the W3C way: the
+/// first four fields are used and anything after them is ignored.
+pub fn parseTraceparent(value: []const u8) error{InvalidTraceparent}!TraceContext {
+    const header = std.mem.trim(u8, value, ows);
+    if (header.len < traceparent_len) return error.InvalidTraceparent;
+    if (header[2] != '-' or header[35] != '-' or header[52] != '-') return error.InvalidTraceparent;
+
+    const version = lowerHexByte(header[0..2]) orelse return error.InvalidTraceparent;
+    if (version == 0xff) return error.InvalidTraceparent;
+    if (version == 0x00) {
+        if (header.len != traceparent_len) return error.InvalidTraceparent;
+    } else if (header.len > traceparent_len and header[traceparent_len] != '-') {
+        return error.InvalidTraceparent;
+    }
+
+    const trace_id = TraceId.parseHex(header[3..35]) catch return error.InvalidTraceparent;
+    const span_id = SpanId.parseHex(header[36..52]) catch return error.InvalidTraceparent;
+    var flags: TraceFlags = .fromByte(lowerHexByte(header[53..55]) orelse return error.InvalidTraceparent);
+    // Of a newer version's flags, only the bits this version defines are read.
+    if (version != 0x00) flags.reserved = 0;
+
+    return .{ .trace_id = trace_id, .span_id = span_id, .flags = flags, .state = .empty, .is_remote = true };
+}
+
+/// Writes `trace` as a version-00 traceparent into `out` and returns it.
+/// Only the `sampled` and `random` flags are sent; unknown bits are zeroed.
+pub fn formatTraceparent(trace: TraceContext, out: *[traceparent_len]u8) []const u8 {
+    std.debug.assert(trace.isValid());
+    const flags: TraceFlags = .{ .sampled = trace.flags.sampled, .random = trace.flags.random };
+    @memcpy(out[0..3], "00-");
+    out[3..35].* = trace.trace_id.toHex();
+    out[35] = '-';
+    out[36..52].* = trace.span_id.toHex();
+    out[52] = '-';
+    out[53..55].* = std.fmt.hex(flags.toByte());
+    return out;
+}
 
 /// Validates a tracestate value (several header fields joined with `,`) and
 /// returns it as a `TraceState` that borrows `value`. Duplicate keys are
@@ -50,6 +95,20 @@ pub fn parseTracestate(value: []const u8) error{InvalidTracestate}!TraceState {
     }
     if (members == 0) return .empty;
     return .{ .header = header };
+}
+
+fn lowerHexByte(hex: *const [2]u8) ?u8 {
+    const high = lowerHexDigit(hex[0]) orelse return null;
+    const low = lowerHexDigit(hex[1]) orelse return null;
+    return high << 4 | low;
+}
+
+fn lowerHexDigit(c: u8) ?u8 {
+    return switch (c) {
+        '0'...'9' => c - '0',
+        'a'...'f' => c - 'a' + 10,
+        else => null,
+    };
 }
 
 fn isValidMember(member: []const u8) bool {
@@ -87,6 +146,104 @@ fn isValidValue(value: []const u8) bool {
 // (w3c/trace-context@acab820, test/test.py). Several header fields are
 // joined with "," as a transport would. HTTP-level cases (header names,
 // repeated requests) belong to transports.
+
+const valid_parent = "00-12345678901234567890123456789012-1234567890123456-01";
+
+test "traceparent: continued traces" {
+    const continued = [_][]const u8{
+        valid_parent, // test_traceparent_included_tracestate_missing
+        " " ++ valid_parent, // test_traceparent_ows_handling a-e
+        "\t" ++ valid_parent,
+        valid_parent ++ " ",
+        valid_parent ++ "\t",
+        "\t " ++ valid_parent ++ " \t",
+        "cc-12345678901234567890123456789012-1234567890123456-01", // test_traceparent_version_0xcc a, b
+        "cc-12345678901234567890123456789012-1234567890123456-01-what-the-future-will-be-like",
+    };
+    for (continued) |value| {
+        const trace = try parseTraceparent(value);
+        try std.testing.expectEqualStrings("12345678901234567890123456789012", &trace.trace_id.toHex());
+        try std.testing.expectEqualStrings("1234567890123456", &trace.span_id.toHex());
+        try std.testing.expect(trace.flags.sampled);
+        try std.testing.expect(trace.is_remote);
+        try std.testing.expect(trace.state.isEmpty());
+    }
+}
+
+test "traceparent: restarted traces" {
+    const invalid = [_][]const u8{
+        valid_parent ++ ".", // test_traceparent_version_0x00 a, b
+        valid_parent ++ "-what-the-future-will-be-like",
+        "cc-12345678901234567890123456789012-1234567890123456-01.what-the-future-will-be-like", // test_traceparent_version_0xcc c
+        "ff-12345678901234567890123456789012-1234567890123456-01", // test_traceparent_version_0xff
+        ".0-12345678901234567890123456789012-1234567890123456-01", // test_traceparent_version_illegal_characters
+        "0.-12345678901234567890123456789012-1234567890123456-01",
+        "000-12345678901234567890123456789012-1234567890123456-01", // test_traceparent_version_too_long
+        "0000-12345678901234567890123456789012-1234567890123456-01",
+        "0-12345678901234567890123456789012-1234567890123456-01", // test_traceparent_version_too_short
+        "00-00000000000000000000000000000000-1234567890123456-01", // test_traceparent_trace_id_all_zero
+        "00-.2345678901234567890123456789012-1234567890123456-01", // test_traceparent_trace_id_illegal_characters
+        "00-1234567890123456789012345678901.-1234567890123456-01",
+        "00-123456789012345678901234567890123-1234567890123456-01", // test_traceparent_trace_id_too_long
+        "00-1234567890123456789012345678901-1234567890123456-01", // test_traceparent_trace_id_too_short
+        "00-12345678901234567890123456789012-0000000000000000-01", // test_traceparent_parent_id_all_zero
+        "00-12345678901234567890123456789012-.234567890123456-01", // test_traceparent_parent_id_illegal_characters
+        "00-12345678901234567890123456789012-123456789012345.-01",
+        "00-12345678901234567890123456789012-12345678901234567-01", // test_traceparent_parent_id_too_long
+        "00-12345678901234567890123456789012-123456789012345-01", // test_traceparent_parent_id_too_short
+        "00-12345678901234567890123456789012-1234567890123456-.0", // test_traceparent_trace_flags_illegal_characters
+        "00-12345678901234567890123456789012-1234567890123456-0.",
+        "00-12345678901234567890123456789012-1234567890123456-001", // test_traceparent_trace_flags_too_long
+        "00-12345678901234567890123456789012-1234567890123456-1", // test_traceparent_trace_flags_too_short
+        // test_traceparent_duplicated: two fields joined by a transport.
+        "00-12345678901234567890123456789011-1234567890123456-01,00-12345678901234567890123456789012-1234567890123456-01",
+        // Not covered by the suite.
+        "00-4BF92F3577B34DA6A3CE929D0E0E4736-00F067AA0BA902B7-01", // uppercase hex
+        "CC-12345678901234567890123456789012-1234567890123456-01", // uppercase version
+        "cc-4BF92F3577B34DA6A3CE929D0E0E4736-00f067aa0ba902b7-01", // uppercase in a newer version
+        valid_parent ++ "-", // a lone trailing dash on version 00
+        "cc-00000000000000000000000000000000-1234567890123456-01", // zero trace-id in a newer version
+        valid_parent ++ "\r\n", // CR LF is not whitespace
+        valid_parent ++ "\x00",
+        "",
+    };
+    for (invalid) |value| {
+        try std.testing.expectError(error.InvalidTraceparent, parseTraceparent(value));
+    }
+}
+
+test "traceparent: flags" {
+    // test_propagates_random_flag
+    const random = try parseTraceparent("00-12345678901234567890123456789012-1234567890123456-02");
+    try std.testing.expect(random.flags.random);
+    try std.testing.expect(!random.flags.sampled);
+
+    // Unknown bits of version 00 are kept but never sent.
+    const reserved = try parseTraceparent("00-12345678901234567890123456789012-1234567890123456-09");
+    try std.testing.expect(reserved.flags.sampled);
+    try std.testing.expectEqual(@as(u6, 0b10), reserved.flags.reserved);
+    var out: [traceparent_len]u8 = undefined;
+    try std.testing.expectEqualStrings(valid_parent, formatTraceparent(reserved, &out));
+
+    // Of a newer version's flags only sampled and random are read.
+    const newer = try parseTraceparent("cc-12345678901234567890123456789012-1234567890123456-ff");
+    try std.testing.expectEqual(@as(u8, 0x03), newer.flags.toByte());
+}
+
+test "traceparent: round trip and downgrade to version 00" {
+    const canonical = [_][]const u8{
+        "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00",
+        "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+        "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-02",
+        "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-03",
+    };
+    var out: [traceparent_len]u8 = undefined;
+    for (canonical) |value| {
+        try std.testing.expectEqualStrings(value, formatTraceparent(try parseTraceparent(value), &out));
+    }
+    const newer = try parseTraceparent("cc-12345678901234567890123456789012-1234567890123456-01-what-the-future-will-be-like");
+    try std.testing.expectEqualStrings(valid_parent, formatTraceparent(newer, &out));
+}
 
 const z256: *const [256]u8 = &@splat('z');
 const z257: *const [257]u8 = &@splat('z');
