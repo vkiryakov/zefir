@@ -33,6 +33,7 @@ If it fits the way you work, use it, and please join in: bring your ideas and qu
 | Module             | Import name    | What it does                                                         | Status                                         |
 | ------------------ | -------------- | -------------------------------------------------------------------- | ---------------------------------------------- |
 | **confy**          | `zefir-confy`  | Typed configuration from JSON, INI, `.env` files and the environment | ✅ Done · [docs](src/confy/examples/README.md) |
+| core               | `zefir-core`   | Execution context: deadlines, cancellation and W3C trace context     | ✅ Done · [docs](src/core/examples/README.md)  |
 | rpc                | `zefir-rpc`    | RPC                                                                  | 🚧 In progress                                 |
 | logger             | `zefir-logger` | Logging                                                              | 📋 Planned                                     |
 | orm                | `zefir-orm`    | ORM                                                                  | 📋 Planned                                     |
