@@ -69,7 +69,7 @@ pub fn build(b: *std.Build) void {
 
     // core examples: `zig build test` builds and runs them; an example that
     // exits with an error fails the step.
-    for ([_][]const u8{ "http_handler", "rpc_handler" }) |name| {
+    for ([_][]const u8{ "http_handler", "rpc_handler", "services" }) |name| {
         const example = b.addExecutable(.{
             .name = name,
             .root_module = b.createModule(.{
