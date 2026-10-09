@@ -204,6 +204,15 @@ test "flags round-trip every byte, unknown bits included" {
     try std.testing.expectEqual(@as(u6, 0b10), flags.reserved);
 }
 
+test "sampled and random are the W3C bits 0x01 and 0x02" {
+    const sampled = TraceFlags.fromByte(0x01);
+    try std.testing.expect(sampled.sampled and !sampled.random);
+    const random = TraceFlags.fromByte(0x02);
+    try std.testing.expect(random.random and !random.sampled);
+    try std.testing.expectEqual(@as(u8, 0x01), (TraceFlags{ .sampled = true }).toByte());
+    try std.testing.expectEqual(@as(u8, 0x02), (TraceFlags{ .random = true }).toByte());
+}
+
 test "an empty trace state has no header" {
     try std.testing.expect(TraceState.empty.isEmpty());
     const state: TraceState = .{ .header = "rojo=00f067aa0ba902b7" };
