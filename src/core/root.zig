@@ -21,12 +21,17 @@
 //! separate parameters.
 
 const std = @import("std");
+const errors = @import("errors.zig");
 
 pub const CancellationToken = @import("CancellationToken.zig");
 pub const Deadline = @import("Deadline.zig");
+pub const ErrorCode = errors.ErrorCode;
+pub const ErrorInfo = errors.ErrorInfo;
+pub const ContextError = errors.ContextError;
 
 test {
     std.testing.refAllDecls(@This());
     _ = @import("CancellationToken.zig");
     _ = @import("Deadline.zig");
+    _ = @import("errors.zig");
 }
