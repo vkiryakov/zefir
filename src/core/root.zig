@@ -22,8 +22,14 @@
 
 const std = @import("std");
 const errors = @import("errors.zig");
+const trace = @import("trace.zig");
 
 pub const CancellationToken = @import("CancellationToken.zig");
+pub const TraceId = trace.TraceId;
+pub const SpanId = trace.SpanId;
+pub const TraceFlags = trace.TraceFlags;
+pub const TraceState = trace.TraceState;
+pub const TraceContext = trace.TraceContext;
 pub const Deadline = @import("Deadline.zig");
 pub const ErrorCode = errors.ErrorCode;
 pub const ErrorInfo = errors.ErrorInfo;
@@ -34,4 +40,5 @@ test {
     _ = @import("CancellationToken.zig");
     _ = @import("Deadline.zig");
     _ = @import("errors.zig");
+    _ = @import("trace.zig");
 }
