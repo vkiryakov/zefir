@@ -23,8 +23,10 @@
 const std = @import("std");
 
 pub const CancellationToken = @import("CancellationToken.zig");
+pub const Deadline = @import("Deadline.zig");
 
 test {
     std.testing.refAllDecls(@This());
     _ = @import("CancellationToken.zig");
+    _ = @import("Deadline.zig");
 }
