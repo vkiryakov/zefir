@@ -24,6 +24,7 @@ const std = @import("std");
 const errors = @import("errors.zig");
 const trace = @import("trace.zig");
 
+pub const Context = @import("Context.zig");
 pub const CancellationToken = @import("CancellationToken.zig");
 pub const TraceId = trace.TraceId;
 pub const SpanId = trace.SpanId;
@@ -37,6 +38,7 @@ pub const ContextError = errors.ContextError;
 
 test {
     std.testing.refAllDecls(@This());
+    _ = @import("Context.zig");
     _ = @import("CancellationToken.zig");
     _ = @import("Deadline.zig");
     _ = @import("errors.zig");
