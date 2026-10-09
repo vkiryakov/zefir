@@ -66,4 +66,23 @@ pub fn build(b: *std.Build) void {
         const tests = b.addTest(.{ .root_module = module });
         test_step.dependOn(&b.addRunArtifact(tests).step);
     }
+
+    // core examples: `zig build test` builds and runs them; an example that
+    // exits with an error fails the step.
+    for ([_][]const u8{ "http_handler", "rpc_handler" }) |name| {
+        const example = b.addExecutable(.{
+            .name = name,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(b.fmt("src/core/examples/{s}.zig", .{name})),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "core", .module = core },
+                },
+            }),
+        });
+        const run = b.addRunArtifact(example);
+        run.expectExitCode(0);
+        test_step.dependOn(&run.step);
+    }
 }
