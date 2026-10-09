@@ -85,4 +85,26 @@ pub fn build(b: *std.Build) void {
         run.expectExitCode(0);
         test_step.dependOn(&run.step);
     }
+
+    // core benchmarks: `zig build test` only compiles them, `zig build bench`
+    // runs them. They get their own ReleaseFast copy of core, since the
+    // `core` module above is built in the mode the user asked for.
+    const bench = b.addExecutable(.{
+        .name = "core-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/core/bench.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{
+                .{ .name = "core", .module = b.createModule(.{
+                    .root_source_file = b.path("src/core/root.zig"),
+                    .target = target,
+                    .optimize = .ReleaseFast,
+                }) },
+            },
+        }),
+    });
+    test_step.dependOn(&bench.step);
+    const bench_step = b.step("bench", "Run benchmarks");
+    bench_step.dependOn(&b.addRunArtifact(bench).step);
 }
