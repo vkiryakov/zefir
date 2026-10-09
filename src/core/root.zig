@@ -35,6 +35,7 @@ pub const Deadline = @import("Deadline.zig");
 pub const ErrorCode = errors.ErrorCode;
 pub const ErrorInfo = errors.ErrorInfo;
 pub const ContextError = errors.ContextError;
+pub const w3c = @import("w3c.zig");
 
 test {
     std.testing.refAllDecls(@This());
@@ -43,6 +44,7 @@ test {
     _ = @import("Deadline.zig");
     _ = @import("errors.zig");
     _ = @import("trace.zig");
+    _ = @import("w3c.zig");
 }
 
 /// The first public function, reached from `T`'s public declarations, that
@@ -87,6 +89,7 @@ test "core sources do not use the heap" {
         @embedFile("Deadline.zig"),
         @embedFile("errors.zig"),
         @embedFile("trace.zig"),
+        @embedFile("w3c.zig"),
     };
     // Split so that this file does not match itself.
     const forbidden = [_][]const u8{ "std." ++ "heap", "mem." ++ "Allocator", "allocator" ++ "()" };
