@@ -28,6 +28,12 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    const validator = b.addModule("zefir-validator", .{
+        .root_source_file = b.path("src/validator/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     const rpc = b.addModule("zefir-rpc", .{
         .root_source_file = b.path("src/rpc/root.zig"),
         .target = target,
@@ -47,7 +53,7 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // Umbrella module: @import("zefir").core, .logger, .confy, .rpc, .orm
+    // Umbrella module: @import("zefir").core, .logger, .confy, .validator, .rpc, .orm
     const zefir = b.addModule("zefir", .{
         .root_source_file = b.path("src/zefir.zig"),
         .target = target,
@@ -56,13 +62,14 @@ pub fn build(b: *std.Build) void {
             .{ .name = "core", .module = core },
             .{ .name = "logger", .module = logger },
             .{ .name = "confy", .module = confy },
+            .{ .name = "validator", .module = validator },
             .{ .name = "rpc", .module = rpc },
             .{ .name = "orm", .module = orm },
         },
     });
 
     const test_step = b.step("test", "Run all tests");
-    for ([_]*std.Build.Module{ core, logger, confy, rpc, orm, zefir }) |module| {
+    for ([_]*std.Build.Module{ core, logger, confy, validator, rpc, orm, zefir }) |module| {
         const tests = b.addTest(.{ .root_module = module });
         test_step.dependOn(&b.addRunArtifact(tests).step);
     }
