@@ -556,6 +556,15 @@ test "a pub fn validate (confy's hook) is left alone" {
     try h.expectValid(&ConfyStyle{ .port = 7 });
 }
 
+const EmptyRules = struct {
+    n: u32,
+    pub const field_rules = .{};
+};
+
+test "an empty field_rules .{} is allowed and declares no rules" {
+    try h.expectValid(&EmptyRules{ .n = 0 });
+}
+
 // ------------------------------------------------------------------ roots
 
 const User = struct {
