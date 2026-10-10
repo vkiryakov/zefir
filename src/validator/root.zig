@@ -6,6 +6,9 @@
 
 const std = @import("std");
 const core = @import("core.zig");
+const common = @import("common.zig");
+const numbers = @import("numbers.zig");
+const custom_rules = @import("custom.zig");
 
 pub const Violation = core.Violation;
 pub const Rule = core.Rule;
@@ -14,8 +17,15 @@ pub const max_code_bytes = core.max_code_bytes;
 pub const max_message_bytes = core.max_message_bytes;
 pub const max_report_violations = core.max_report_violations;
 
+pub const notEmpty = common.notEmpty;
+pub const positive = numbers.positive;
+pub const custom = custom_rules.custom;
+
 test {
     _ = core;
+    _ = common;
+    _ = numbers;
+    _ = custom_rules;
 }
 
 test "limits match the catalog" {

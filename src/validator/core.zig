@@ -648,6 +648,44 @@ pub fn isFloat(comptime T: type) bool {
     return @typeInfo(T) == .float;
 }
 
+/// `T` coerces to `P` without a cast: the conversions a field value may take
+/// into the parameter of a `v.custom` predicate. Identical types; integers of
+/// the same signedness that are not narrower, and unsigned integers into
+/// strictly wider signed ones; floats that are not narrower; `?P` and `E!P`
+/// when `T` coerces to `P`; pointers and slices of the same size and child
+/// that only add `const` or drop a sentinel (`[]u8` and `[:0]const u8` to
+/// `[]const u8`). A different `volatile`, `allowzero` or alignment never
+/// coerces here. Zig itself coerces a few more (an integer into a float that
+/// holds it exactly, `*const [N]T` into `[]const T`, an explicitly aligned
+/// pointer into one whose alignment is not larger); `v.custom` keeps to this
+/// list.
+pub fn coerces(comptime T: type, comptime P: type) bool {
+    if (T == P) return true;
+    const from = @typeInfo(T);
+    return switch (@typeInfo(P)) {
+        .optional => |o| coerces(T, o.child),
+        .error_union => |e| coerces(T, e.payload),
+        .int => |to| switch (from) {
+            .int => |f| if (f.signedness == to.signedness) f.bits <= to.bits else f.signedness == .unsigned and f.bits < to.bits,
+            else => false,
+        },
+        .float => |to| switch (from) {
+            .float => |f| f.bits <= to.bits,
+            else => false,
+        },
+        .pointer => |to| switch (from) {
+            .pointer => |f| f.size == to.size and f.child == to.child and
+                (!f.attrs.@"const" or to.attrs.@"const") and
+                f.attrs.@"volatile" == to.attrs.@"volatile" and
+                f.attrs.@"allowzero" == to.attrs.@"allowzero" and
+                f.attrs.@"align" == to.attrs.@"align" and
+                (to.sentinel_ptr == null or (f.sentinel_ptr != null and to.sentinel().? == f.sentinel().?)),
+            else => false,
+        },
+        else => false,
+    };
+}
+
 // ------------------------------------------------------------------ declaration errors
 
 /// Every compile-error hint that names a rule lives here, so that one test
@@ -657,6 +695,8 @@ pub const hints = struct {
     pub const u8_array = "[N]u8 is an array of numbers, not a string: use []const u8";
     pub const one_each = "put all item rules into one v.each(.{ ... })";
     pub const wrap_predicate = "wrap a predicate in v.custom(code, message, f)";
+    /// `v.custom` on a list whose items its predicate would take.
+    pub const use_each_custom = "use v.each(v.custom(...))";
 
     /// A rule written on a list whose items it would accept.
     pub fn useEach(comptime rule: Rule) []const u8 {
@@ -1026,4 +1066,34 @@ test "a rule list with at most one each, placed last, passes the declaration che
     comptime checkRuleList(&.{test_rules.each_positive}, []const u32, where);
     comptime checkRuleList(&.{ test_rules.positive, test_rules.custom }, u32, where);
     comptime checkRuleList(&.{}, u32, where);
+}
+
+test "coerces accepts the conversions v.custom documents and nothing else" {
+    const accepted = [_][2]type{
+        .{ u32, u32 },           .{ u8, u32 },              .{ u32, u64 },         .{ i8, i64 },
+        .{ u32, i64 },           .{ f32, f64 },             .{ f16, f128 },        .{ u32, ?u32 },
+        .{ u32, anyerror!u32 },  .{ u32, ?anyerror!u32 },   .{ []u8, []const u8 }, .{ [:0]const u8, []const u8 },
+        .{ [:0]u8, []const u8 }, .{ [:0]u8, [:0]const u8 }, .{ *u32, *const u32 }, .{ []const u32, ?[]const u32 },
+    };
+    const rejected = [_][2]type{
+        .{ u64, u32 },                  .{ i32, u64 },                   .{ u32, i32 },                          .{ i8, u8 },
+        .{ f64, f32 },                  .{ []const u8, []u8 },           .{ []const u8, [:0]const u8 },          .{ *const u32, *u32 },
+        .{ []volatile u8, []const u8 }, .{ []allowzero u8, []const u8 }, .{ []align(1) const u32, []const u32 }, .{ [3]u8, []const u8 },
+        .{ []const u32, []const u64 },  .{ ?u32, u32 },
+    };
+    // Zig coerces these as well, but v.custom keeps to the documented set.
+    const narrower_than_zig = [_][2]type{
+        .{ u32, f64 }, .{ *const [3]u8, []const u8 }, .{ []align(1) const u8, []const u8 }, .{ []const u8, []allowzero const u8 },
+    };
+    const wrong = comptime blk: {
+        var out: []const u8 = "";
+        for (accepted) |pair| {
+            if (!coerces(pair[0], pair[1])) out = out ++ @typeName(pair[0]) ++ " should coerce to " ++ @typeName(pair[1]) ++ "\n";
+        }
+        for (rejected ++ narrower_than_zig) |pair| {
+            if (coerces(pair[0], pair[1])) out = out ++ @typeName(pair[0]) ++ " should not coerce to " ++ @typeName(pair[1]) ++ "\n";
+        }
+        break :blk out;
+    };
+    try std.testing.expectEqualStrings("", wrong);
 }
