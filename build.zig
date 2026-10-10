@@ -1,4 +1,5 @@
 const std = @import("std");
+const validator_cases = @import("src/validator/testdata/cases.zig");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -74,6 +75,8 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&b.addRunArtifact(tests).step);
     }
 
+    addValidatorTests(b, test_step, validator, target, optimize);
+
     // core examples: `zig build test` builds and runs them; an example that
     // exits with an error fails the step.
     for ([_][]const u8{ "http_handler", "rpc_handler", "services" }) |name| {
@@ -114,4 +117,36 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&bench.step);
     const bench_step = b.step("bench", "Run benchmarks");
     bench_step.dependOn(&b.addRunArtifact(bench).step);
+}
+
+/// The validator tests that use only its public API, compiled as client code
+/// from the lists in src/validator/testdata/cases.zig.
+fn addValidatorTests(
+    b: *std.Build,
+    test_step: *std.Build.Step,
+    validator: *std.Build.Module,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+) void {
+    const vtest = b.createModule(.{
+        .root_source_file = b.path("src/validator/testdata/helpers.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "validator", .module = validator }},
+    });
+    for (validator_cases.test_files) |file| {
+        const tests = b.addTest(.{
+            .name = std.fs.path.stem(file),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(file),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "validator", .module = validator },
+                    .{ .name = "vtest", .module = vtest },
+                },
+            }),
+        });
+        test_step.dependOn(&b.addRunArtifact(tests).step);
+    }
 }

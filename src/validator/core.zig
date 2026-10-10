@@ -1097,3 +1097,69 @@ test "coerces accepts the conversions v.custom documents and nothing else" {
     };
     try std.testing.expectEqualStrings("", wrong);
 }
+
+/// `; did you mean "name"?` for a likely typo of a non-comptime field of the
+/// struct `T`, or "". The rule is confy's: the closest field by edit
+/// distance, ignoring ASCII case, when that distance is below 3 and below the
+/// key's length; on a tie the first field in declaration order wins.
+pub fn suggestion(comptime T: type, comptime key: []const u8) []const u8 {
+    @setEvalBranchQuota(eval_quota);
+    var best: ?[]const u8 = null;
+    var best_distance: usize = 3;
+    for (@typeInfo(T).@"struct".field_names, @typeInfo(T).@"struct".field_attrs) |name, attrs| {
+        if (attrs.@"comptime") continue;
+        const distance = editDistance(key, name) orelse continue;
+        if (distance < best_distance and distance < key.len) {
+            best = name;
+            best_distance = distance;
+        }
+    }
+    return if (best) |name| "; did you mean \"" ++ name ++ "\"?" else "";
+}
+
+/// Levenshtein distance ignoring ASCII case; null when a name is longer than
+/// 64 bytes (no suggestion for such names).
+fn editDistance(comptime a: []const u8, comptime b: []const u8) ?usize {
+    @setEvalBranchQuota(eval_quota);
+    if (a.len > 64 or b.len > 64) return null;
+    var previous: [65]usize = undefined;
+    var current: [65]usize = undefined;
+    for (previous[0 .. b.len + 1], 0..) |*cell, j| cell.* = j;
+    for (a, 0..) |char_a, i| {
+        current[0] = i + 1;
+        for (b, 0..) |char_b, j| {
+            const cost: usize = if (std.ascii.toLower(char_a) == std.ascii.toLower(char_b)) 0 else 1;
+            current[j + 1] = @min(previous[j + 1] + 1, current[j] + 1, previous[j] + cost);
+        }
+        @memcpy(previous[0 .. b.len + 1], current[0 .. b.len + 1]);
+    }
+    return previous[b.len];
+}
+
+test "suggestion names a field within 2 edits, ignoring ASCII case" {
+    const S = struct { name: []const u8, email: []const u8 };
+    try std.testing.expectEqualStrings("; did you mean \"name\"?", comptime suggestion(S, "nmae"));
+    try std.testing.expectEqualStrings("; did you mean \"name\"?", comptime suggestion(S, "NAME"));
+    try std.testing.expectEqualStrings("; did you mean \"email\"?", comptime suggestion(S, "emial"));
+    try std.testing.expectEqualStrings("", comptime suggestion(S, "zzz"));
+}
+
+test "suggestion needs a distance below 3 and below the key's length, and never names a comptime field" {
+    const S = struct { ab: u32, address: []const u8, comptime version: u32 = 1 };
+    try std.testing.expectEqualStrings("", comptime suggestion(S, "versoin"));
+    try std.testing.expectEqualStrings("", comptime suggestion(S, "adrs"));
+    try std.testing.expectEqualStrings("", comptime suggestion(S, "a"));
+    try std.testing.expectEqualStrings("; did you mean \"ab\"?", comptime suggestion(S, "abc"));
+}
+
+test "suggestion prefers the first field in declaration order on a tie" {
+    const S = struct { cat: u32, car: u32 };
+    try std.testing.expectEqualStrings("; did you mean \"cat\"?", comptime suggestion(S, "cax"));
+}
+
+test "editDistance counts edits ignoring ASCII case and gives up over 64 bytes" {
+    try std.testing.expectEqual(@as(?usize, 3), comptime editDistance("kitten", "sitting"));
+    try std.testing.expectEqual(@as(?usize, 0), comptime editDistance("Email", "eMAIL"));
+    try std.testing.expectEqual(@as(?usize, 1), comptime editDistance(&@as([64]u8, @splat('a')), &@as([63]u8, @splat('a'))));
+    try std.testing.expectEqual(@as(?usize, null), comptime editDistance(&@as([65]u8, @splat('a')), "a"));
+}

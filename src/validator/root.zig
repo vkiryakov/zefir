@@ -6,8 +6,10 @@
 
 const std = @import("std");
 const core = @import("core.zig");
+const walk = @import("walk.zig");
 const common = @import("common.zig");
 const numbers = @import("numbers.zig");
+const lists = @import("lists.zig");
 const custom_rules = @import("custom.zig");
 
 pub const Violation = core.Violation;
@@ -17,14 +19,19 @@ pub const max_code_bytes = core.max_code_bytes;
 pub const max_message_bytes = core.max_message_bytes;
 pub const max_report_violations = core.max_report_violations;
 
+pub const check = walk.check;
+
 pub const notEmpty = common.notEmpty;
 pub const positive = numbers.positive;
+pub const each = lists.each;
 pub const custom = custom_rules.custom;
 
 test {
     _ = core;
+    _ = walk;
     _ = common;
     _ = numbers;
+    _ = lists;
     _ = custom_rules;
 }
 
