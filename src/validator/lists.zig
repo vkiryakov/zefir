@@ -36,3 +36,7 @@ pub fn each(comptime rules: anytype) Rule {
         }.eval,
     };
 }
+
+/// The arguments the hints show for an uncalled constructor of this file:
+/// `each must be called, e.g. v.each(v.notEmpty)`.
+pub const call_examples = .{ .each = "v.notEmpty" };

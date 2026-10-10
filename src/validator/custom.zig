@@ -52,6 +52,10 @@ pub fn custom(comptime code: []const u8, comptime message: []const u8, comptime 
     });
 }
 
+/// The arguments the hints show for `custom` used without a call:
+/// `custom must be called, e.g. v.custom("users.name_taken", "is taken", isFree)`.
+pub const call_examples = .{ .custom = "\"users.name_taken\", \"is taken\", isFree" };
+
 const CallForm = enum { none, by_value, by_pointer };
 
 /// How a value of type `T` is passed to a predicate of type `F`. A generic

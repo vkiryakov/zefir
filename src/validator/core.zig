@@ -3,6 +3,7 @@
 //! declarations. Only what `root.zig` re-exports is public API.
 
 const std = @import("std");
+const root = @import("root.zig");
 
 /// Rule constructors, declaration checks and walker functions share one
 /// comptime branch counter per declaration, so the library raises the quota
@@ -702,7 +703,171 @@ pub const hints = struct {
     pub fn useEach(comptime rule: Rule) []const u8 {
         return "use v.each(v." ++ rule.call() ++ ")";
     }
+
+    /// A rule constructor used without a call (`.tags = v.each`): its call
+    /// with the arguments its rule file declares in `call_examples`, else
+    /// `.{}` for an options struct, the first tag for an enum selector and
+    /// `...` otherwise: `each must be called, e.g. v.each(v.notEmpty)`.
+    pub fn mustBeCalled(comptime name: []const u8, comptime F: type) []const u8 {
+        return name ++ " must be called, e.g. v." ++ name ++ "(" ++ exampleArgs(name, F) ++ ")";
+    }
+
+    /// A built-in predicate used where a rule is expected (`.day = v.isDate`).
+    /// `Decl` is the type of the rule's public declaration: a rule value is
+    /// named alone (`use the rule v.date`), a constructor is shown called, as
+    /// `mustBeCalled` shows it (`use the rule v.hash(.sha256)`).
+    pub fn predicateAsRule(comptime predicate: []const u8, comptime rule: []const u8, comptime Decl: type) []const u8 {
+        const call = if (@typeInfo(Decl) == .@"fn") rule ++ "(" ++ exampleArgs(rule, Decl) ++ ")" else rule;
+        return "expected a rule, got the predicate " ++ predicate ++ "; use the rule v." ++ call;
+    }
 };
+
+/// The files that define rules. Each rule pull request adds its file here, so
+/// that its `call_examples` reach the hints.
+const rule_files = [_]type{ @import("common.zig"), @import("numbers.zig"), @import("lists.zig"), @import("custom.zig") };
+
+/// The arguments the hints show in a call of the constructor `name` of type
+/// `F`: its `call_examples` entry, else `.{}` for an options struct, the
+/// first tag for an enum selector, `...` otherwise.
+fn exampleArgs(comptime name: []const u8, comptime F: type) []const u8 {
+    if (callExample(name)) |example| return example;
+    const params = @typeInfo(F).@"fn".param_types;
+    if (params.len != 1) return "...";
+    const P = params[0] orelse return "...";
+    return switch (@typeInfo(P)) {
+        .@"struct" => ".{}",
+        .@"enum" => |e| "." ++ e.field_names[0],
+        else => "...",
+    };
+}
+
+/// The arguments a rule file shows for its constructor `name` in hints, from
+/// its `pub const call_examples = .{ .<name> = "<arguments>" };`, or null.
+fn callExample(comptime name: []const u8) ?[]const u8 {
+    inline for (rule_files) |file| {
+        if (@hasDecl(file, "call_examples") and @hasField(@TypeOf(file.call_examples), name)) return @field(file.call_examples, name);
+    }
+    return null;
+}
+
+/// The kinds whose rules `root.zig` does not export yet, by the pull request
+/// that ships them. Hints may name these rules, and the self-tests compare
+/// only the other kinds with the public names. Each rule pull request deletes
+/// its lines; the list is empty once all 96 rules are exported.
+pub const pending_kinds = [_]Kind{
+    // PR 1b
+    .equals,
+    .not_equals,
+    .one_of,
+    .none_of,
+    .empty,
+    .min,
+    .max,
+    .range,
+    .non_negative,
+    .negative,
+    .non_positive,
+    .divisible_by,
+    .finite,
+    .min_items,
+    .max_items,
+    // PR 1c
+    .unique_items,
+    .unique_by,
+    .contains_all,
+    .contains_none,
+    // PR 2a
+    .utf8,
+    .not_blank,
+    .ascii,
+    .printable_ascii,
+    .alphanumeric,
+    .alpha,
+    .digits,
+    .lowercase,
+    .uppercase,
+    .multibyte,
+    .full_width,
+    .half_width,
+    .variable_width,
+    // PR 2b
+    .min_length,
+    .max_length,
+    .length,
+    .min_bytes,
+    .max_bytes,
+    .contains,
+    .not_contains,
+    .strong_password,
+    // PR 3a
+    .number_string,
+    .decimal,
+    .boolean_string,
+    .hexadecimal,
+    .octal,
+    .port,
+    .latitude,
+    .longitude,
+    .lat_long,
+    // PR 3b
+    .email,
+    .http_url,
+    .fqdn,
+    .ip,
+    .ipv4,
+    .ipv6,
+    .mac_address,
+    // PR 4a
+    .date,
+    .rfc3339,
+    .iso8601,
+    .military_time,
+    // PR 4b
+    .min_date,
+    .max_date,
+    // PR 5a
+    .credit_card,
+    .isbn,
+    .isbn10,
+    .isbn13,
+    .issn,
+    .ean,
+    .isin,
+    .isrc,
+    .bic,
+    .iban,
+    // PR 5b
+    .uuid,
+    .mongo_id,
+    .firebase_push_id,
+    .hash,
+    .btc_address,
+    .ethereum_address,
+    // PR 6a
+    .json,
+    .jwt,
+    .base32,
+    .base58,
+    .base64,
+    .base64_url,
+    // PR 6b
+    .data_uri,
+    .magnet_uri,
+    .mime_type,
+    .locale,
+    .sem_ver,
+    .hex_color,
+    .rgb_color,
+    .hsl_color,
+};
+
+/// `name` is the public name of a pending kind.
+fn isPending(comptime name: []const u8) bool {
+    for (pending_kinds) |kind| {
+        if (std.mem.eql(u8, info(kind).name, name)) return true;
+    }
+    return false;
+}
 
 /// Stops compilation because `rule` does not take the unwrapped field type
 /// `T`: `validator: <where>: <kind> expects <expects>, field is <T>`, then
@@ -761,13 +926,46 @@ pub fn toRules(comptime value: anytype, comptime where: []const u8) []const Rule
     notARule(value, where, "expected a rule or a tuple of rules, got ");
 }
 
-/// The error for `value` where a rule is expected: `<prefix><type>`, plus,
-/// for a plain function (usually a predicate), how to make it a rule.
+/// Raises the error for a value that is not a rule. A function that
+/// `root.zig` exports is named, without the tuple item prefix: a built-in
+/// predicate gets the rule to use instead, a rule constructor (a function
+/// that returns a `Rule`) the call it needs. Any other function, `v.check`
+/// and the other entry points included, gets the hint to wrap it in
+/// `v.custom`.
 fn notARule(comptime value: anytype, comptime where: []const u8, comptime prefix: []const u8) noreturn {
     const V = @TypeOf(value);
-    if (@typeInfo(V) == .@"fn")
+    if (@typeInfo(V) == .@"fn") {
+        if (constructorName(value)) |name| {
+            if (predicateRuleName(name)) |rule|
+                @compileError("validator: " ++ where ++ ": " ++ hints.predicateAsRule(name, rule, @TypeOf(@field(root, rule))));
+            if ((@typeInfo(V).@"fn".return_type orelse void) == Rule)
+                @compileError("validator: " ++ where ++ ": " ++ hints.mustBeCalled(name, V));
+        }
         @compileError("validator: " ++ where ++ ": " ++ prefix ++ @typeName(V) ++ "; " ++ hints.wrap_predicate);
+    }
     @compileError("validator: " ++ where ++ ": " ++ prefix ++ @typeName(V));
+}
+
+/// The rule of a built-in predicate (`isDate` -> `date`, `isBase64Url` ->
+/// `base64Url`), or null.
+fn predicateRuleName(comptime name: []const u8) ?[]const u8 {
+    if (name.len < 3 or !std.mem.startsWith(u8, name, "is") or !std.ascii.isUpper(name[2])) return null;
+    const rule = [1]u8{std.ascii.toLower(name[2])} ++ name[3..];
+    for (kinds) |row| {
+        if (std.mem.eql(u8, row.name, rule)) return row.name;
+    }
+    return null;
+}
+
+/// The name under which `root.zig` exports the function `f` (`v.each` ->
+/// "each"), or null. Functions are compared by value at compile time.
+fn constructorName(comptime f: anytype) ?[]const u8 {
+    @setEvalBranchQuota(eval_quota);
+    const F = @TypeOf(f);
+    for (@typeInfo(root).@"struct".decl_names) |decl| {
+        if (@TypeOf(@field(root, decl)) == F and @field(root, decl) == f) return decl;
+    }
+    return null;
 }
 
 /// The rules that apply to the value itself (all but a trailing `each`).
@@ -1162,4 +1360,156 @@ test "editDistance counts edits ignoring ASCII case and gives up over 64 bytes" 
     try std.testing.expectEqual(@as(?usize, 0), comptime editDistance("Email", "eMAIL"));
     try std.testing.expectEqual(@as(?usize, 1), comptime editDistance(&@as([64]u8, @splat('a')), &@as([63]u8, @splat('a'))));
     try std.testing.expectEqual(@as(?usize, null), comptime editDistance(&@as([65]u8, @splat('a')), "a"));
+}
+
+/// The first problem of the public names of `ns` (`root.zig` in the library)
+/// against the kind table, or null: every kind that is not pending is
+/// exported under its public name, as a `Rule` of that kind or as a function
+/// that returns a `Rule`; no pending kind is exported or listed twice.
+fn exportProblem(comptime ns: type, comptime pending: []const Kind) ?[]const u8 {
+    @setEvalBranchQuota(eval_quota);
+    for (kinds) |row| {
+        var listed: usize = 0;
+        for (pending) |kind| {
+            if (kind == row.kind) listed += 1;
+        }
+        if (listed > 1) return "pending_kinds lists ." ++ @tagName(row.kind) ++ " twice";
+        if (listed == 1) {
+            if (@hasDecl(ns, row.name)) return "v." ++ row.name ++ " is exported; delete ." ++ @tagName(row.kind) ++ " from pending_kinds";
+            continue;
+        }
+        if (!@hasDecl(ns, row.name)) return "v." ++ row.name ++ " is not exported and ." ++ @tagName(row.kind) ++ " is not in pending_kinds";
+        const decl = @field(ns, row.name);
+        const D = @TypeOf(decl);
+        if (D == Rule) {
+            if (decl.kind != row.kind) return "v." ++ row.name ++ " is a rule of another kind";
+        } else if (@typeInfo(D) != .@"fn" or (@typeInfo(D).@"fn".return_type orelse void) != Rule) {
+            return "v." ++ row.name ++ " is not a rule";
+        }
+    }
+    return null;
+}
+
+/// The texts of the hints that may name rules: the non-function declarations
+/// of `hints` and the `call_examples` of every rule file.
+fn hintTexts() []const []const u8 {
+    comptime {
+        var texts: []const []const u8 = &.{};
+        for (@typeInfo(hints).@"struct".decl_names) |decl| {
+            const value = @field(hints, decl);
+            if (@typeInfo(@TypeOf(value)) != .@"fn") texts = texts ++ &[_][]const u8{value};
+        }
+        for (rule_files) |file| {
+            if (!@hasDecl(file, "call_examples")) continue;
+            const examples = file.call_examples;
+            for (@typeInfo(@TypeOf(examples)).@"struct".field_names) |name| texts = texts ++ &[_][]const u8{@field(examples, name)};
+        }
+        return texts;
+    }
+}
+
+/// The first `v.<name>` in `texts` that `root.zig` does not export and that
+/// is not a pending rule, or null.
+fn unknownHintName(comptime texts: []const []const u8) ?[]const u8 {
+    @setEvalBranchQuota(eval_quota);
+    for (texts) |text| {
+        var i: usize = 0;
+        while (std.mem.findPos(u8, text, i, "v.")) |at| {
+            var end = at + 2;
+            while (end < text.len and std.ascii.isAlphanumeric(text[end])) end += 1;
+            i = end;
+            if (at > 0 and std.ascii.isAlphanumeric(text[at - 1])) continue;
+            const name = text[at + 2 .. end];
+            if (name.len == 0 or @hasDecl(root, name) or isPending(name)) continue;
+            return name;
+        }
+    }
+    return null;
+}
+
+/// Every kind except `exported`, as a pending list for the self-test below.
+fn kindsExcept(comptime exported: []const Kind) []const Kind {
+    comptime {
+        var out: []const Kind = &.{};
+        for (kinds) |row| {
+            if (std.mem.findScalar(Kind, exported, row.kind) == null) out = out ++ &[_]Kind{row.kind};
+        }
+        return out;
+    }
+}
+
+test "every kind is exported under its public name unless it is pending, and no pending kind is exported" {
+    try std.testing.expectEqualStrings("", comptime exportProblem(root, &pending_kinds) orelse "");
+
+    // The check itself, on a namespace that exports two rules.
+    const Two = struct {
+        pub const notEmpty = root.notEmpty;
+        pub const positive = root.positive;
+    };
+    try std.testing.expectEqual(null, comptime exportProblem(Two, kindsExcept(&.{ .not_empty, .positive })));
+    try std.testing.expectEqualStrings("v.each is not exported and .each is not in pending_kinds", comptime exportProblem(Two, kindsExcept(&.{ .not_empty, .positive, .each })).?);
+    try std.testing.expectEqualStrings("v.positive is exported; delete .positive from pending_kinds", comptime exportProblem(Two, kindsExcept(&.{.not_empty})).?);
+    try std.testing.expectEqualStrings("pending_kinds lists .equals twice", comptime exportProblem(Two, kindsExcept(&.{ .not_empty, .positive }) ++ &[_]Kind{.equals}).?);
+    const OtherKind = struct {
+        pub const notEmpty = root.positive;
+        pub const positive = root.positive;
+    };
+    try std.testing.expectEqualStrings("v.notEmpty is a rule of another kind", comptime exportProblem(OtherKind, kindsExcept(&.{ .not_empty, .positive })).?);
+    const NotARule = struct {
+        pub const notEmpty = root.notEmpty;
+        pub const positive = root.check;
+    };
+    try std.testing.expectEqualStrings("v.positive is not a rule", comptime exportProblem(NotARule, kindsExcept(&.{ .not_empty, .positive })).?);
+}
+
+test "every rule name a hint mentions is exported or pending" {
+    try std.testing.expectEqualStrings("", comptime unknownHintName(hintTexts()) orelse "");
+    const texts = [_][]const u8{
+        "use v.each(v.notEmpty)",
+        "e.g. v.minItems(1)",
+        "codes such as dev.ops name no rule",
+        "use v.nonEmpty",
+    };
+    try std.testing.expectEqualStrings("nonEmpty", comptime unknownHintName(&texts).?);
+}
+
+test "hint for a constructor used without a call" {
+    const S = struct {
+        const Options = struct { strict: bool = false };
+        const Algorithm = enum { md5, sha1 };
+        fn withOptions(comptime _: Options) void {}
+        fn withSelector(comptime _: Algorithm) void {}
+        fn withCount(comptime _: usize) void {}
+        fn plain(_: u32) bool {
+            return true;
+        }
+    };
+    try std.testing.expectEqualStrings("layout must be called, e.g. v.layout(.{})", comptime hints.mustBeCalled("layout", @TypeOf(S.withOptions)));
+    try std.testing.expectEqualStrings("digest must be called, e.g. v.digest(.md5)", comptime hints.mustBeCalled("digest", @TypeOf(S.withSelector)));
+    try std.testing.expectEqualStrings("atLeast must be called, e.g. v.atLeast(...)", comptime hints.mustBeCalled("atLeast", @TypeOf(S.withCount)));
+    try std.testing.expectEqualStrings("each must be called, e.g. v.each(v.notEmpty)", comptime hints.mustBeCalled("each", @TypeOf(root.each)));
+    try std.testing.expectEqualStrings(
+        "custom must be called, e.g. v.custom(\"users.name_taken\", \"is taken\", isFree)",
+        comptime hints.mustBeCalled("custom", @TypeOf(root.custom)),
+    );
+    try std.testing.expectEqualStrings("each", comptime constructorName(root.each).?);
+    try std.testing.expectEqualStrings("custom", comptime constructorName(root.custom).?);
+    try std.testing.expectEqual(null, comptime constructorName(S.plain));
+}
+
+test "hint for a predicate used as a rule" {
+    const S = struct {
+        const Options = struct { strict: bool = false };
+        const Algorithm = enum { md5, sha1 };
+        fn withOptions(comptime _: Options) void {}
+        fn withSelector(comptime _: Algorithm) void {}
+    };
+    try std.testing.expectEqualStrings("expected a rule, got the predicate isPlain; use the rule v.plain", comptime hints.predicateAsRule("isPlain", "plain", Rule));
+    try std.testing.expectEqualStrings("expected a rule, got the predicate isLayout; use the rule v.layout(.{})", comptime hints.predicateAsRule("isLayout", "layout", @TypeOf(S.withOptions)));
+    try std.testing.expectEqualStrings("expected a rule, got the predicate isDigest; use the rule v.digest(.md5)", comptime hints.predicateAsRule("isDigest", "digest", @TypeOf(S.withSelector)));
+    try std.testing.expectEqualStrings("date", comptime predicateRuleName("isDate").?);
+    try std.testing.expectEqualStrings("base64Url", comptime predicateRuleName("isBase64Url").?);
+    try std.testing.expectEqual(null, comptime predicateRuleName("isEven"));
+    try std.testing.expectEqual(null, comptime predicateRuleName("isdate"));
+    try std.testing.expectEqual(null, comptime predicateRuleName("each"));
 }

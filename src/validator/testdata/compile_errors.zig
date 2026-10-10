@@ -30,6 +30,7 @@ pub const list = [_]Fixture{
     .{ .file = "src/validator/testdata/compile_errors/entry_tuple_item_not_rule.zig", .expect = "validator: entry_tuple_item_not_rule.Bad.field_rules.x: item 1 of the tuple is comptime_int", .row = "G-5" },
     .{ .file = "src/validator/testdata/compile_errors/entry_plain_function.zig", .expect = "validator: entry_plain_function.Bad.field_rules.x: expected a rule or a tuple of rules, got fn (u32) bool; wrap a predicate in v.custom(code, message, f)", .row = "G-7" },
     .{ .file = "src/validator/testdata/compile_errors/entry_plain_function_in_tuple.zig", .expect = "validator: entry_plain_function_in_tuple.Bad.field_rules.x: item 1 of the tuple is fn (u32) bool; wrap a predicate in v.custom(code, message, f)", .row = "variant of G-7" },
+    .{ .file = "src/validator/testdata/compile_errors/entry_check_function.zig", .expect = "validator: entry_check_function.Bad.field_rules.x: expected a rule or a tuple of rules, got fn (anytype, []u8) ?core.Violation; wrap a predicate in v.custom(code, message, f)", .row = "variant of G-7" },
     .{ .file = "src/validator/testdata/compile_errors/misnamed_validate.zig", .expect = "validator: misnamed_validate.Bad.validate: rules are declared in pub const field_rules; rename validate to field_rules (a pub fn validate is left to confy)", .row = "G-8" },
     .{ .file = "src/validator/testdata/compile_errors/comptime_field_rules.zig", .expect = "validator: comptime_field_rules.Bad.field_rules.x: comptime fields are not validated", .row = "G-9" },
     .{ .file = "src/validator/testdata/compile_errors/dotted_field.zig", .expect = "validator: dotted_field.Bad.a.b: a field name with '.', '[' or ']' makes paths ambiguous; rename the field", .row = "G-10" },
@@ -58,4 +59,8 @@ pub const list = [_]Fixture{
     .{ .file = "src/validator/testdata/compile_errors/bare_slice.zig", .expect = "validator: pass a pointer to the value (&value), got []const bare_slice.User; pass &slice, not the slice", .row = "G-22" },
     .{ .file = "src/validator/testdata/compile_errors/each_not_last.zig", .expect = "validator: each_not_last.Bad.field_rules.x: each must be the last rule", .row = "G-23" },
     .{ .file = "src/validator/testdata/compile_errors/each_twice.zig", .expect = "validator: each_twice.Bad.field_rules.x: each appears twice; put all item rules into one v.each(.{ ... })", .row = "G-24" },
+    .{ .file = "src/validator/testdata/compile_errors/each_uncalled.zig", .expect = "validator: each_uncalled.Bad.field_rules.x: each must be called, e.g. v.each(v.notEmpty)", .row = "each-6" },
+    .{ .file = "src/validator/testdata/compile_errors/custom_uncalled.zig", .expect = "validator: custom_uncalled.Bad.field_rules.x: custom must be called, e.g. v.custom(\"users.name_taken\", \"is taken\", isFree)", .row = "custom-4" },
+    .{ .file = "src/validator/testdata/compile_errors/entry_uncalled_in_tuple.zig", .expect = "validator: entry_uncalled_in_tuple.Bad.field_rules.x: each must be called, e.g. v.each(v.notEmpty)", .row = "variant of each-6" },
+    .{ .file = "src/validator/testdata/compile_errors/each_inner_uncalled.zig", .expect = "validator: each(...): each must be called, e.g. v.each(v.notEmpty)", .row = "variant of each-3" },
 };
