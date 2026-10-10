@@ -56,7 +56,9 @@ const CallForm = enum { none, by_value, by_pointer };
 
 /// How a value of type `T` is passed to a predicate of type `F`. A generic
 /// predicate (an `anytype` or `comptime` parameter) takes nothing: the value
-/// is only known at run time.
+/// is only known at run time. A pointer parameter must be a plain `*const Q`
+/// (no `volatile`, `allowzero` or `align`, as in `coerces`): `eval` passes a
+/// plain `*const` pointer to the value or to a copy of it as `Q`.
 fn callForm(comptime T: type, comptime F: type) CallForm {
     const info = @typeInfo(F).@"fn";
     if (info.is_generic or info.param_types.len != 1) return .none;
@@ -64,7 +66,8 @@ fn callForm(comptime T: type, comptime F: type) CallForm {
     const P = info.param_types[0] orelse return .none;
     if (core.coerces(T, P)) return .by_value;
     return switch (@typeInfo(P)) {
-        .pointer => |p| if (p.size == .one and p.attrs.@"const" and core.coerces(T, p.child)) .by_pointer else .none,
+        .pointer => |p| if (p.size == .one and p.attrs.@"const" and !p.attrs.@"volatile" and
+            !p.attrs.@"allowzero" and p.attrs.@"align" == null and core.coerces(T, p.child)) .by_pointer else .none,
         else => .none,
     };
 }
@@ -198,5 +201,44 @@ test "a generic predicate never fits, so a list field gets no each hint" {
     try std.testing.expectEqualStrings(
         ": f must be fn (P) bool or fn (*const P) bool where []const u32 coerces to P, got fn (comptime u32) bool",
         comptime paramProblem([]const u32, @TypeOf(isSmall)).?,
+    );
+}
+
+test "a pointer parameter fits only as a plain *const P" {
+    try std.testing.expectEqual(null, comptime paramProblem(u32, @TypeOf(isEvenPtr)));
+    try std.testing.expectEqual(null, comptime paramProblem(u16, @TypeOf(isEvenWidePtr)));
+    try std.testing.expectEqualStrings(
+        ": f must be fn (P) bool or fn (*const P) bool where u32 coerces to P, got fn (*u32) bool",
+        comptime paramProblem(u32, fn (*u32) bool).?,
+    );
+    try std.testing.expectEqualStrings(
+        ": f must be fn (P) bool or fn (*const P) bool where u32 coerces to P, got fn (*const volatile u32) bool",
+        comptime paramProblem(u32, fn (*const volatile u32) bool).?,
+    );
+    try std.testing.expectEqualStrings(
+        ": f must be fn (P) bool or fn (*const P) bool where u32 coerces to P, got fn (*allowzero const u32) bool",
+        comptime paramProblem(u32, fn (*allowzero const u32) bool).?,
+    );
+    try std.testing.expectEqualStrings(
+        ": f must be fn (P) bool or fn (*const P) bool where u32 coerces to P, got fn (*align(1) const u32) bool",
+        comptime paramProblem(u32, fn (*align(1) const u32) bool).?,
+    );
+    try std.testing.expectEqualStrings(
+        ": f must be fn (P) bool or fn (*const P) bool where u32 coerces to P, got fn (*align(4) const u32) bool",
+        comptime paramProblem(u32, fn (*align(4) const u32) bool).?,
+    );
+    // The pointer to the value, or to a copy of it, is not aligned to 16.
+    try std.testing.expectEqualStrings(
+        ": f must be fn (P) bool or fn (*const P) bool where u32 coerces to P, got fn (*align(16) const u32) bool",
+        comptime paramProblem(u32, fn (*align(16) const u32) bool).?,
+    );
+    try std.testing.expectEqualStrings(
+        ": f must be fn (P) bool or fn (*const P) bool where u16 coerces to P, got fn (*align(16) const u64) bool",
+        comptime paramProblem(u16, fn (*align(16) const u64) bool).?,
+    );
+    // Its items do not fit either, so a list gets no each hint.
+    try std.testing.expectEqualStrings(
+        ": f must be fn (P) bool or fn (*const P) bool where []const u32 coerces to P, got fn (*align(16) const u32) bool",
+        comptime paramProblem([]const u32, fn (*align(16) const u32) bool).?,
     );
 }
