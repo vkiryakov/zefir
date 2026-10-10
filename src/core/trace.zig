@@ -296,3 +296,19 @@ test "child keeps the trace, flags and state and becomes local" {
     try std.testing.expect(!child.is_remote);
     try std.testing.expect(parent.is_remote);
 }
+
+test "a trace context is valid only when both ids are" {
+    const valid: TraceContext = .{
+        .trace_id = try .parseHex(trace_hex),
+        .span_id = try .parseHex(span_hex),
+        .flags = .{},
+        .state = .empty,
+    };
+    try std.testing.expect(valid.isValid());
+    var zero_span = valid;
+    zero_span.span_id = .{ .bytes = @splat(0) };
+    try std.testing.expect(!zero_span.isValid());
+    var zero_trace = valid;
+    zero_trace.trace_id = .{ .bytes = @splat(0) };
+    try std.testing.expect(!zero_trace.isValid());
+}

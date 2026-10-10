@@ -202,6 +202,10 @@ test "traceparent: restarted traces" {
         "CC-12345678901234567890123456789012-1234567890123456-01", // uppercase version
         "cc-4BF92F3577B34DA6A3CE929D0E0E4736-00f067aa0ba902b7-01", // uppercase in a newer version
         valid_parent ++ "-", // a lone trailing dash on version 00
+        "00x12345678901234567890123456789012-1234567890123456-01", // a wrong delimiter after the version
+        "00-12345678901234567890123456789012x1234567890123456-01", // after the trace-id
+        "00-12345678901234567890123456789012-1234567890123456x01", // after the parent-id
+        "cc-12345678901234567890123456789012-1234567890123456x01", // after the parent-id in a newer version
         "cc-00000000000000000000000000000000-1234567890123456-01", // zero trace-id in a newer version
         valid_parent ++ "\r\n", // CR LF is not whitespace
         valid_parent ++ "\x00",
@@ -316,7 +320,12 @@ test "tracestate: dropped" {
         // Not covered by the suite.
         "foo=" ++ x257, // value too long
         "foo=a\tb", // a tab inside a value
+        "foo=a\x7fb", // DEL, just above the value range
+        "foo=a\x1fb", // just below the value range
         "foo=\xc3\xa9", // non-ASCII
+        "Foo=1", // an uppercase first character of a key
+        "fOO=1", // an uppercase character later in a key
+        "_foo=1", // a key starting with a character allowed only later
         "=1", // empty key
         "foo", // no value
     };
