@@ -24,6 +24,7 @@ const CancellationToken = @This();
 /// Internal state; use `cancel` and `isCancelled`.
 cancelled: std.atomic.Value(bool),
 
+/// A token that is not cancelled.
 pub const init: CancellationToken = .{ .cancelled = .init(false) };
 
 /// Cancels the token. Safe to call again and from any thread.

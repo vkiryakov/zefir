@@ -25,13 +25,13 @@ const errors = @import("errors.zig");
 const trace = @import("trace.zig");
 
 pub const Context = @import("Context.zig");
+pub const Deadline = @import("Deadline.zig");
 pub const CancellationToken = @import("CancellationToken.zig");
 pub const TraceId = trace.TraceId;
 pub const SpanId = trace.SpanId;
 pub const TraceFlags = trace.TraceFlags;
 pub const TraceState = trace.TraceState;
 pub const TraceContext = trace.TraceContext;
-pub const Deadline = @import("Deadline.zig");
 pub const ErrorCode = errors.ErrorCode;
 pub const ErrorInfo = errors.ErrorInfo;
 pub const ContextError = errors.ContextError;
@@ -50,7 +50,16 @@ test {
 /// The first public function, reached from `T`'s public declarations, that
 /// takes a `std.mem.Allocator`; null when there is none.
 fn findAllocatorParam(comptime T: type) ?[]const u8 {
+    return findAllocatorParamIn(T, &.{});
+}
+
+/// `visited` holds the types already searched, so a type that refers back to
+/// itself (`pub const Self = @This();`) ends the search instead of recursing.
+fn findAllocatorParamIn(comptime T: type, comptime visited: []const type) ?[]const u8 {
     @setEvalBranchQuota(100_000);
+    inline for (visited) |seen| {
+        if (seen == T) return null;
+    }
     const decl_names = switch (@typeInfo(T)) {
         inline .@"struct", .@"enum", .@"union", .@"opaque" => |info| info.decl_names,
         else => return null,
@@ -59,7 +68,7 @@ fn findAllocatorParam(comptime T: type) ?[]const u8 {
         const decl = @field(T, name);
         const Decl = @TypeOf(decl);
         if (Decl == type) {
-            if (findAllocatorParam(decl)) |found| return found;
+            if (findAllocatorParamIn(decl, visited ++ [_]type{T})) |found| return found;
         } else if (@typeInfo(Decl) == .@"fn") {
             inline for (@typeInfo(Decl).@"fn".param_types) |Param| {
                 if (Param == std.mem.Allocator) return @typeName(T) ++ "." ++ name;
@@ -80,6 +89,15 @@ test "no public function takes an allocator" {
         };
     };
     try std.testing.expect(comptime findAllocatorParam(Planted) != null);
+
+    // A type that refers to itself is searched once, not forever.
+    const Cyclic = struct {
+        pub const Self = @This();
+        pub fn grow(gpa: std.mem.Allocator) void {
+            _ = gpa;
+        }
+    };
+    try std.testing.expect(comptime findAllocatorParam(Cyclic) != null);
 }
 
 test "core sources do not use the heap" {

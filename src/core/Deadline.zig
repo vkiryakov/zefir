@@ -16,6 +16,7 @@ const Deadline = @This();
 /// When the deadline expires, on the `std.Io.Clock.awake` clock.
 expires: Timestamp,
 
+/// A deadline at `expires`, a time you already have on the awake clock.
 pub fn at(expires: Timestamp) Deadline {
     return .{ .expires = expires };
 }
@@ -38,6 +39,8 @@ pub fn remaining(deadline: Deadline, now: Timestamp) Duration {
     return .{ .nanoseconds = deadline.expires.nanoseconds -| now.nanoseconds };
 }
 
+/// The earlier of two deadlines, `a` when they are equal. `Context.withDeadline`
+/// combines deadlines this way.
 pub fn earliest(a: Deadline, b: Deadline) Deadline {
     return if (b.expires.nanoseconds < a.expires.nanoseconds) b else a;
 }
@@ -72,6 +75,7 @@ test "after adds the budget to now" {
 
 test "a negative budget has already expired" {
     const deadline: Deadline = .after(ts(1_000), .fromNanoseconds(-5));
+    try std.testing.expectEqual(@as(i96, 1_000), deadline.expires.nanoseconds);
     try std.testing.expect(deadline.isExpired(ts(1_000)));
 }
 

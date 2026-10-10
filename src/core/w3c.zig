@@ -16,7 +16,8 @@
 //! ```
 //!
 //! Transports keep these rules:
-//! - header names are case-insensitive;
+//! - header names are case-insensitive; send them as `traceparent_header` and
+//!   `tracestate_header` spell them;
 //! - two or more `traceparent` fields are invalid;
 //! - several `tracestate` fields are joined with `,` in order;
 //! - a `tracestate` without a valid `traceparent` is dropped;
@@ -38,8 +39,15 @@ const ows = " \t";
 /// The length of a version-00 traceparent, the only version written.
 pub const traceparent_len = 55;
 
+/// The traceparent header name. Match header names case-insensitively on
+/// receipt; send them as written here, in lowercase.
+pub const traceparent_header = "traceparent";
+/// The tracestate header name; see `traceparent_header`.
+pub const tracestate_header = "tracestate";
+
 /// Parses a traceparent value. Versions above 00 are read the W3C way: the
-/// first four fields are used and anything after them is ignored.
+/// first four fields are used; after the flags comes the end of the value or
+/// a `-` followed by fields this version does not know, which are ignored.
 pub fn parseTraceparent(value: []const u8) error{InvalidTraceparent}!TraceContext {
     const header = std.mem.trim(u8, value, ows);
     if (header.len < traceparent_len) return error.InvalidTraceparent;
@@ -159,6 +167,10 @@ test "traceparent: continued traces" {
         "\t " ++ valid_parent ++ " \t",
         "cc-12345678901234567890123456789012-1234567890123456-01", // test_traceparent_version_0xcc a, b
         "cc-12345678901234567890123456789012-1234567890123456-01-what-the-future-will-be-like",
+        // Not covered by the suite.
+        "cc-12345678901234567890123456789012-1234567890123456-01-", // a newer version may end with a dash
+        "01-12345678901234567890123456789012-1234567890123456-01", // the lowest newer version
+        "fe-12345678901234567890123456789012-1234567890123456-01", // the highest valid version
     };
     for (continued) |value| {
         const trace = try parseTraceparent(value);
@@ -207,6 +219,8 @@ test "traceparent: restarted traces" {
         "00-12345678901234567890123456789012-1234567890123456x01", // after the parent-id
         "cc-12345678901234567890123456789012-1234567890123456x01", // after the parent-id in a newer version
         "cc-00000000000000000000000000000000-1234567890123456-01", // zero trace-id in a newer version
+        "cc-12345678901234567890123456789012-0000000000000000-01", // zero parent-id in a newer version
+        "cc-12345678901234567890123456789012-1234567890123456-01.", // one wrong character after a newer version's flags
         valid_parent ++ "\r\n", // CR LF is not whitespace
         valid_parent ++ "\x00",
         "",
@@ -247,6 +261,11 @@ test "traceparent: round trip and downgrade to version 00" {
     }
     const newer = try parseTraceparent("cc-12345678901234567890123456789012-1234567890123456-01-what-the-future-will-be-like");
     try std.testing.expectEqualStrings(valid_parent, formatTraceparent(newer, &out));
+}
+
+test "header names are the lowercase W3C names" {
+    try std.testing.expectEqualStrings("traceparent", traceparent_header);
+    try std.testing.expectEqualStrings("tracestate", tracestate_header);
 }
 
 const z256: *const [256]u8 = &@splat('z');
@@ -346,4 +365,9 @@ test "tracestate: forwarded as received, without outer whitespace" {
 test "tracestate: a long run of empty members is accepted" {
     const commas: [100_000]u8 = @splat(',');
     try std.testing.expect((try parseTracestate(&commas)).isEmpty());
+}
+
+test "tracestate: a value keeps its leading spaces but may not end in one" {
+    try std.testing.expect(isValidValue(" t61rcWkgMzE"));
+    try std.testing.expect(!isValidValue("t61rcWkgMzE "));
 }

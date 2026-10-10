@@ -15,13 +15,13 @@ pub fn main(init: std.process.Init) !void {
     var stdout = std.Io.File.stdout().writerStreaming(io, &stdout_buffer);
     const out = &stdout.interface;
     defer out.flush() catch {};
-    var recorder: Recorder = .{};
 
     // The request scope owns the header bytes and the token; every context
     // below borrows them and ends with the request.
     const traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
     const tracestate = "rojo=00f067aa0ba902b7,congo=t61rcWkgMzE";
     var token: core.CancellationToken = .init;
+    var recorder: Recorder = .{ .incoming_state = tracestate };
 
     var incoming = try core.w3c.parseTraceparent(traceparent);
     incoming.state = core.w3c.parseTracestate(tracestate) catch .empty;
@@ -55,7 +55,7 @@ pub fn main(init: std.process.Init) !void {
         else => return err,
     }
     try job.check(std.Io.Clock.awake.now(io));
-    if (job.trace.?.trace_id.bytes[0] != incoming.trace_id.bytes[0]) return error.JobLostTrace;
+    if (!std.mem.eql(u8, &job.trace.?.trace_id.bytes, &incoming.trace_id.bytes)) return error.JobLostTrace;
     if (!job.trace.?.state.isEmpty()) return error.JobBorrowsRequestState;
     if (job.deadline.?.expires.nanoseconds <= ctx.deadline.?.expires.nanoseconds) return error.JobInheritedDeadline;
 }
@@ -86,7 +86,9 @@ fn callBilling(ctx: core.Context, io: std.Io, recorder: *Recorder) !void {
     var message: Message = .{};
     _ = core.w3c.formatTraceparent(ctx.trace.?, &message.traceparent);
     const state = ctx.trace.?.state.header;
-    // A transport with a size limit drops the whole tracestate, never part of it.
+    // Over its size limit this example drops the tracestate whole. W3C asks a
+    // transport to remove whole entries instead (entries over 128 characters
+    // first, then from the right); build that with `state.iterator()`.
     if (state.len <= message.tracestate.len) {
         @memcpy(message.tracestate[0..state.len], state);
         message.tracestate_len = state.len;
@@ -139,11 +141,17 @@ const Hop = struct {
     span_id: core.SpanId,
     parent_span_id: core.SpanId,
     budget: std.Io.Duration,
+    sampled: bool,
     vendor_entries: usize,
+    /// Whether the tracestate matched the incoming header byte for byte.
+    state_intact: bool,
 };
 
 /// Stands in for a tracer: every service records what its context says.
+/// It compares the tracestate while the bytes are alive: Billing's copy
+/// belongs to its call scope and ends with it.
 const Recorder = struct {
+    incoming_state: []const u8,
     hops: [3]Hop = undefined,
     len: usize = 0,
 
@@ -158,7 +166,9 @@ const Recorder = struct {
             .span_id = trace.span_id,
             .parent_span_id = parent_span_id,
             .budget = ctx.remaining(now).?,
+            .sampled = trace.flags.sampled,
             .vendor_entries = entries,
+            .state_intact = std.mem.eql(u8, trace.state.header, recorder.incoming_state),
         };
         recorder.len += 1;
     }
@@ -172,7 +182,8 @@ fn checkTrail(recorder: Recorder, incoming: core.TraceContext) !void {
         if (!std.mem.eql(u8, &hop.trace_id.bytes, &incoming.trace_id.bytes)) return error.TraceChanged;
         if (!std.mem.eql(u8, &hop.parent_span_id.bytes, &parent.bytes)) return error.WrongParent;
         if (std.mem.eql(u8, &hop.span_id.bytes, &parent.bytes)) return error.SpanReused;
-        if (hop.vendor_entries != 2) return error.VendorStateLost;
+        if (!hop.state_intact) return error.VendorStateLost;
+        if (!hop.sampled) return error.SamplingLost;
         if (i > 0 and hop.budget.nanoseconds > hops[i - 1].budget.nanoseconds) return error.BudgetGrew;
         parent = hop.span_id;
     }

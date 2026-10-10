@@ -12,6 +12,8 @@ const std = @import("std");
 pub const TraceId = struct {
     bytes: [16]u8,
 
+    /// The id from 16 bytes, for example drawn with `io.random`; all zero is
+    /// invalid.
     pub fn fromBytes(bytes: [16]u8) error{InvalidTraceId}!TraceId {
         const id: TraceId = .{ .bytes = bytes };
         if (!id.isValid()) return error.InvalidTraceId;
@@ -25,10 +27,12 @@ pub const TraceId = struct {
         return fromBytes(bytes);
     }
 
+    /// The id as lowercase hex, as it appears in a traceparent.
     pub fn toHex(id: TraceId) [32]u8 {
         return std.fmt.bytesToHex(id.bytes, .lower);
     }
 
+    /// Whether the id is not all zero.
     pub fn isValid(id: TraceId) bool {
         return !std.mem.allEqual(u8, &id.bytes, 0);
     }
@@ -47,6 +51,8 @@ pub const TraceId = struct {
 pub const SpanId = struct {
     bytes: [8]u8,
 
+    /// The id from 8 bytes, for example drawn with `io.random`; all zero is
+    /// invalid.
     pub fn fromBytes(bytes: [8]u8) error{InvalidSpanId}!SpanId {
         const id: SpanId = .{ .bytes = bytes };
         if (!id.isValid()) return error.InvalidSpanId;
@@ -60,10 +66,12 @@ pub const SpanId = struct {
         return fromBytes(bytes);
     }
 
+    /// The id as lowercase hex, as it appears in a traceparent.
     pub fn toHex(id: SpanId) [16]u8 {
         return std.fmt.bytesToHex(id.bytes, .lower);
     }
 
+    /// Whether the id is not all zero.
     pub fn isValid(id: SpanId) bool {
         return !std.mem.allEqual(u8, &id.bytes, 0);
     }
@@ -83,10 +91,13 @@ pub const TraceFlags = packed struct(u8) {
     random: bool = false,
     reserved: u6 = 0,
 
+    /// Flags from a trace-flags byte, unknown bits included.
     pub fn fromByte(byte: u8) TraceFlags {
         return @bitCast(byte);
     }
 
+    /// The flags as a byte, unknown bits included; `w3c.formatTraceparent`
+    /// sends only `sampled` and `random`.
     pub fn toByte(flags: TraceFlags) u8 {
         return @bitCast(flags);
     }
@@ -104,22 +115,27 @@ pub const TraceState = struct {
     /// is empty.
     header: []const u8 = "",
 
+    /// No entries.
     pub const empty: TraceState = .{};
 
+    /// Whether there are no entries; an empty state is not sent.
     pub fn isEmpty(state: TraceState) bool {
         return state.header.len == 0;
     }
 
+    /// One `key=value` member.
     pub const Entry = struct {
         key: []const u8,
         /// Leading spaces belong to the value; trailing ones are not kept.
         value: []const u8,
     };
 
-    /// Visits the entries from left to right, skipping empty members.
+    /// Visits the entries from left to right, skipping empty members and
+    /// members without `=`.
     pub const Iterator = struct {
         rest: []const u8,
 
+        /// The next entry, or null after the last one.
         pub fn next(it: *Iterator) ?Entry {
             while (it.rest.len != 0) {
                 const comma = std.mem.findScalar(u8, it.rest, ',');
@@ -132,6 +148,8 @@ pub const TraceState = struct {
         }
     };
 
+    /// The entries from left to right; build a changed tracestate from them in
+    /// a buffer you own.
     pub fn iterator(state: TraceState) Iterator {
         return .{ .rest = state.header };
     }
@@ -159,6 +177,7 @@ pub const TraceContext = struct {
     /// Set by `w3c.parseTraceparent`: the identity came from another process.
     is_remote: bool = false,
 
+    /// Whether both ids are valid (not all zero).
     pub fn isValid(trace: TraceContext) bool {
         return trace.trace_id.isValid() and trace.span_id.isValid();
     }
@@ -272,6 +291,10 @@ test "get returns the left-most value of a key" {
     try std.testing.expectEqualStrings("1", state.get("foo").?);
     try std.testing.expectEqualStrings("2", state.get("bar").?);
     try std.testing.expectEqual(@as(?[]const u8, null), state.get("baz"));
+
+    const prefixed: TraceState = .{ .header = "foobar=1,foo=2" };
+    try std.testing.expectEqualStrings("2", prefixed.get("foo").?);
+    try std.testing.expectEqual(@as(?[]const u8, null), prefixed.get("fo"));
 }
 
 test "the iterator skips members without '=' instead of failing" {
