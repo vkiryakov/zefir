@@ -21,7 +21,7 @@ pub fn check(value: anytype, path_buf: []u8) ?Violation {
     const T = comptime pointee(@TypeOf(value));
     comptime verify(T);
     var sink: First = .{ .buf = path_buf };
-    _ = walkValue(T, value, &.{}, &sink) catch |err| switch (err) {};
+    _ = walkRoot(T, value, &sink) catch |err| switch (err) {};
     return sink.found;
 }
 
@@ -37,7 +37,7 @@ pub fn checkAll(gpa: Allocator, value: anytype) Allocator.Error!Report {
     arena.* = .init(gpa);
     errdefer arena.deinit();
     var sink: All = .{ .arena = arena.allocator() };
-    _ = try walkValue(T, value, &.{}, &sink);
+    _ = try walkRoot(T, value, &sink);
     return .{ .violations = sink.list.items, .truncated = sink.truncated, .arena = arena };
 }
 
@@ -61,6 +61,18 @@ pub const Report = struct {
         gpa.destroy(report.arena);
     }
 };
+
+/// The compile-time declaration check of `T` and of every type the walker
+/// would visit from it, without walking a value: exactly the checks that
+/// `check` and `checkAll` run for a `*T`. Zig analyzes only code that is
+/// referenced, so a package that declares DTOs calls it in a test to have
+/// their declarations checked where they are written:
+/// `test { comptime v.assertRules(CreateUserRequest); }`. Pass the DTO type
+/// itself (`CreateUserRequest`, `[]const User`), not a pointer type: pointers
+/// are not walked. Does nothing at run time.
+pub fn assertRules(comptime T: type) void {
+    comptime verify(T);
+}
 
 /// The root type behind `&value`. A value or a bare slice is a compile error:
 /// the root must be passed by pointer, so that a slice root is unambiguous.
@@ -148,8 +160,9 @@ fn isWalkedStruct(comptime T: type) bool {
 
 // ------------------------------------------------------------------ declaration checks
 
-/// Every compile-time check of `Root` and of each type the walker visits
-/// from it. Each type is checked once (one `done` list per root).
+/// Every compile-time check of `Root` and of each type the walker visits from
+/// it: `check`, `checkAll` and `assertRules` run it before anything else.
+/// Each struct is checked once per root.
 fn verify(comptime Root: type) void {
     comptime {
         @setEvalBranchQuota(core.eval_quota);
@@ -157,26 +170,34 @@ fn verify(comptime Root: type) void {
     }
 }
 
-/// `where` is the path of this type for error messages (`Type.field[]`),
-/// `stack` the structs being visited (a struct met again on it contains
-/// itself, which is not supported), `done` the structs already checked.
-/// Returns `done` plus the structs checked here.
+/// Checks `T` and every type the walker visits below it, and returns `done`
+/// plus the structs it finished. `where` names `T` in errors: the root type
+/// or the nearest named struct above `T`, then `.field` per field and `[]`
+/// per list level (`shop.Order.items[]`). `stack` holds the structs being
+/// visited, so a struct that reaches itself is an error instead of an
+/// endless descent.
 fn visit(comptime T: type, comptime where: []const u8, comptime stack: []const type, comptime done: []const type) []const type {
     @setEvalBranchQuota(core.eval_quota);
     switch (@typeInfo(T)) {
         .optional => |o| return visit(o.child, where, stack, done),
         .array => |a| return visit(a.child, where ++ "[]", stack, done),
         .pointer => {
-            if (core.isString(T)) return done; // a string: a leaf
+            // A string is a leaf and a list slice is walked item by item, as
+            // in walkValue; every other pointer is opaque: one-item, many-item
+            // and C pointers, and volatile, allowzero or under-aligned slices.
+            if (core.isString(T)) return done;
             if (core.ListChild(T)) |Item| return visit(Item, where ++ "[]", stack, done);
-            // Any other pointer is not walked.
+            hidden(T, "pointers", where);
         },
         .@"struct" => |s| {
-            if (s.is_tuple) return done; // tuples are not walked
+            if (s.is_tuple) {
+                hidden(T, "tuples", where);
+                return done;
+            }
             if (!containsRules(T) or includes(done, T)) return done;
             if (includes(stack, T))
                 @compileError("validator: " ++ where ++ ": recursive types are not supported; " ++ @typeName(T) ++ " contains itself");
-            const label = @typeName(T);
+            const label = if (isAnonymous(T)) where else @typeName(T);
             checkStruct(T, label);
             var finished = done;
             for (s.field_names, s.field_types, s.field_attrs) |name, F, attrs| {
@@ -184,15 +205,58 @@ fn visit(comptime T: type, comptime where: []const u8, comptime stack: []const t
             }
             return finished ++ &[_]type{T};
         },
-        // Unions, enums, opaque types, vectors and error unions are not walked.
+        .@"union" => hidden(T, "unions", where),
+        .@"enum" => hidden(T, "enums", where),
+        .@"opaque" => hidden(T, "opaque types", where),
+        .vector => hidden(T, "vectors", where),
+        .error_union => hidden(T, "error unions", where),
         else => {},
     }
     return done;
 }
 
-/// The checks of one visited struct; `label` names it in errors.
+/// `T` is a type the walker does not descend into; `what` names its kind in
+/// the error ("pointers", "unions", ...). Rules declared below `T` would be
+/// skipped without a word, so reaching a type that declares them is a
+/// compile error.
+fn hidden(comptime T: type, comptime what: []const u8, comptime where: []const u8) void {
+    if (findRuleType(T)) |R| {
+        const reach = if (R == T) @typeName(T) ++ " declares" else @typeName(T) ++ " reaches " ++ @typeName(R) ++ ", which declares";
+        @compileError("validator: " ++ where ++ ": " ++ what ++ " are not walked; " ++ reach ++ " field_rules or validateSelf that would be skipped");
+    }
+}
+
+/// Zig names a struct declared in place, such as a field type
+/// (`address: struct { ... }`), after its parent with a generated suffix:
+/// `users.Request__struct_1234`, and a struct declared in place inside that
+/// one gets a second suffix, so the last suffix decides. Errors name such a
+/// struct by its path instead (`users.Request.address`). The suffix is a
+/// convention of the compiler, not of the language; the fixture
+/// `anonymous_struct_label` fails if a Zig release changes it.
+fn isAnonymous(comptime T: type) bool {
+    const name = @typeName(T);
+    const at = std.mem.findLast(u8, name, "__struct_") orelse return false;
+    const digits = name[at + "__struct_".len ..];
+    if (digits.len == 0) return false;
+    for (digits) |c| {
+        if (!std.ascii.isDigit(c)) return false;
+    }
+    return true;
+}
+
+/// The declaration checks of one walked struct, named `label` in errors: a
+/// `validate` that is not a function, field names that would make paths
+/// ambiguous, then `field_rules`.
 fn checkStruct(comptime T: type, comptime label: []const u8) void {
     @setEvalBranchQuota(core.eval_quota);
+    if (misnamedRules(T))
+        @compileError("validator: " ++ label ++ ".validate: rules are declared in pub const field_rules; rename validate to field_rules (a pub fn validate is left to confy)");
+    const info = @typeInfo(T).@"struct";
+    for (info.field_names, info.field_attrs) |name, attrs| {
+        if (attrs.@"comptime") continue;
+        if (std.mem.findAny(u8, name, ".[]") != null)
+            @compileError("validator: " ++ label ++ "." ++ name ++ ": a field name with '.', '[' or ']' makes paths ambiguous; rename the field");
+    }
     if (@hasDecl(T, "field_rules")) checkFieldRules(T, label);
 }
 
@@ -340,6 +404,22 @@ fn ErrorOf(comptime SinkPtr: type) type {
 }
 
 // ------------------------------------------------------------------ the walk
+
+/// Walks the root of `check` and `checkAll` behind `value`, the pointer they
+/// were given. A `*const T` or `*T` is walked in place; any other pointer to
+/// `T` is walked through a copy of its value, as walkStruct walks a packed or
+/// under-aligned field: `*volatile T`, `*allowzero T`, an under-aligned
+/// `*align(1) const T` and a bit pointer to a packed field do not coerce to
+/// the `*const T` that the walk takes.
+fn walkRoot(comptime T: type, value: anytype, sink: anytype) ErrorOf(@TypeOf(sink))!bool {
+    const P = @TypeOf(value);
+    if (comptime (P == *const T or P == *T)) return walkValue(T, value, &.{}, sink);
+    // A root without rules is never read: there is nothing to walk, and an
+    // opaque type has no value to copy.
+    if (comptime !containsRules(T)) return false;
+    const copy: T = value.*;
+    return walkValue(T, &copy, &.{}, sink);
+}
 
 /// Walks one value: its own rules left to right (the first failure is its
 /// only violation and nothing inside it is visited); then, if all passed,

@@ -149,4 +149,20 @@ fn addValidatorTests(
         });
         test_step.dependOn(&b.addRunArtifact(tests).step);
     }
+
+    // Compile-error fixtures: each one is compiled (never run) and passes only
+    // when the compilation fails with an error line that ends in `expect`.
+    for (validator_cases.compile_errors) |fixture| {
+        const t = b.addTest(.{
+            .name = std.fs.path.stem(fixture.file),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(fixture.file),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{.{ .name = "validator", .module = validator }},
+            }),
+        });
+        t.expect_errors = .{ .contains = fixture.expect };
+        test_step.dependOn(&t.step);
+    }
 }

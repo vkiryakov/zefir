@@ -19,6 +19,7 @@ pub const test_files = [_][]const u8{
     "src/validator/testdata/paths_test.zig",
     "src/validator/testdata/memory_test.zig",
     "src/validator/testdata/guarantees_test.zig",
+    "src/validator/testdata/assert_rules_test.zig",
 };
 
 /// Tests built with ReleaseSafe whatever -Doptimize says, for behaviour that
@@ -29,7 +30,7 @@ pub const release_test_files = [_][]const u8{};
 pub const panic_runs = [_]PanicRun{};
 
 /// Compile-error fixtures: compiled only, never run.
-pub const compile_errors = [_]Fixture{};
+pub const compile_errors = @import("compile_errors.zig").list;
 
 /// Golden-vector files in vectors/, by name without ".json".
 pub const vector_files = [_][]const u8{};

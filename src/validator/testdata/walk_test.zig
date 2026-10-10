@@ -592,6 +592,16 @@ test "roots: a struct, a slice passed as &slice, an array, nested slices and opt
     try h.expectAt(&mutable, "validation.not_empty", null, "email");
 }
 
+test "a root behind an under-aligned or volatile pointer is walked through a copy; a root without rules is not read" {
+    var user: User = .{ .email = "" };
+    const under_aligned: *align(1) const User = &user;
+    try h.expectAt(under_aligned, "validation.not_empty", "must not be empty", "email");
+    const volatile_root: *volatile User = &user;
+    try h.expectAt(volatile_root, "validation.not_empty", "must not be empty", "email");
+    const handle: *volatile anyopaque = &user; // an opaque value could not be copied
+    try h.expectValid(handle);
+}
+
 test "roots without rules have no violations: a number, a string, an enum, a union, a slice of numbers, void" {
     try h.expectValid(&@as(u32, 0));
     try h.expectValid(&@as([]const u8, ""));
