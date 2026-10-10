@@ -16,6 +16,9 @@ pub const PanicRun = struct { file: []const u8, stderr: []const u8 };
 /// import "validator" and "vtest" (helpers.zig).
 pub const test_files = [_][]const u8{
     "src/validator/testdata/walk_test.zig",
+    "src/validator/testdata/paths_test.zig",
+    "src/validator/testdata/memory_test.zig",
+    "src/validator/testdata/guarantees_test.zig",
 };
 
 /// Tests built with ReleaseSafe whatever -Doptimize says, for behaviour that

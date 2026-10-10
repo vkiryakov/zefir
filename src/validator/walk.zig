@@ -8,6 +8,7 @@
 //! a list, the fields of a struct) only when they all passed.
 const std = @import("std");
 const core = @import("core.zig");
+const Allocator = std.mem.Allocator;
 const Rule = core.Rule;
 const Violation = core.Violation;
 
@@ -23,6 +24,43 @@ pub fn check(value: anytype, path_buf: []u8) ?Violation {
     _ = walkValue(T, value, &.{}, &sink) catch |err| switch (err) {};
     return sink.found;
 }
+
+/// Every violation of `value.*` in walk order, at most
+/// `max_report_violations` of them. `value` is passed as for `check`. The
+/// report owns its memory, one arena from `gpa`, even when it is empty: call
+/// `deinit` once. On `error.OutOfMemory` everything is already freed.
+pub fn checkAll(gpa: Allocator, value: anytype) Allocator.Error!Report {
+    const T = comptime pointee(@TypeOf(value));
+    comptime verify(T);
+    const arena = try gpa.create(std.heap.ArenaAllocator);
+    errdefer gpa.destroy(arena);
+    arena.* = .init(gpa);
+    errdefer arena.deinit();
+    var sink: All = .{ .arena = arena.allocator() };
+    _ = try walkValue(T, value, &.{}, &sink);
+    return .{ .violations = sink.list.items, .truncated = sink.truncated, .arena = arena };
+}
+
+/// The result of `checkAll`, like `std.json.Parsed`: the violations and
+/// their paths live in `arena`. Copies share the memory; call `deinit` once.
+pub const Report = struct {
+    /// In walk order; the first one equals `check`'s result (its `field` too
+    /// when the path fits `check`'s `path_buf`).
+    violations: []const Violation,
+    /// More than `max_report_violations` violations existed: the walk stopped
+    /// at the next one, which is not in `violations`.
+    truncated: bool,
+    /// Holds `violations` and every `field`; code and message are static.
+    arena: *std.heap.ArenaAllocator,
+
+    /// Frees `violations` and every `field` through the allocator given to
+    /// `checkAll`.
+    pub fn deinit(report: Report) void {
+        const gpa = report.arena.child_allocator;
+        report.arena.deinit();
+        gpa.destroy(report.arena);
+    }
+};
 
 /// The root type behind `&value`. A value or a bare slice is a compile error:
 /// the root must be passed by pointer, so that a slice root is unambiguous.
@@ -258,6 +296,42 @@ const First = struct {
         const fits = sink.len != 0 and sink.len <= sink.buf.len;
         sink.found = .{ .code = code, .message = message, .field = if (fits) sink.buf[0..sink.len] else null };
         return true;
+    }
+};
+
+/// `checkAll`: every violation up to the cap; the paths and the list live
+/// in the report's arena.
+const All = struct {
+    arena: Allocator,
+    path: std.ArrayList(u8) = .empty,
+    list: std.ArrayList(Violation) = .empty,
+    truncated: bool = false,
+
+    const Error = Allocator.Error;
+
+    fn writeAll(sink: *All, bytes: []const u8) Error!void {
+        try sink.path.appendSlice(sink.arena, bytes);
+    }
+
+    fn push(sink: *All, segment: Segment) Error!usize {
+        const mark = sink.path.items.len;
+        try writeSegment(sink, mark == 0, segment);
+        return mark;
+    }
+
+    fn pop(sink: *All, mark: usize) void {
+        sink.path.shrinkRetainingCapacity(mark);
+    }
+
+    /// Returns true (stop) only when a violation beyond the cap shows up.
+    fn report(sink: *All, code: []const u8, message: []const u8) Error!bool {
+        if (sink.list.items.len == core.max_report_violations) {
+            sink.truncated = true;
+            return true;
+        }
+        const field: ?[]const u8 = if (sink.path.items.len == 0) null else try sink.arena.dupe(u8, sink.path.items);
+        try sink.list.append(sink.arena, .{ .code = code, .message = message, .field = field });
+        return false;
     }
 };
 

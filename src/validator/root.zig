@@ -14,12 +14,14 @@ const custom_rules = @import("custom.zig");
 
 pub const Violation = core.Violation;
 pub const Rule = core.Rule;
+pub const Report = walk.Report;
 
 pub const max_code_bytes = core.max_code_bytes;
 pub const max_message_bytes = core.max_message_bytes;
 pub const max_report_violations = core.max_report_violations;
 
 pub const check = walk.check;
+pub const checkAll = walk.checkAll;
 
 pub const notEmpty = common.notEmpty;
 pub const positive = numbers.positive;
