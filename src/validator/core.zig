@@ -475,3 +475,555 @@ test "escape writes strings as Zig string literals do" {
     try expect("users.name_taken", comptime escape("users.name_taken"));
     try expect("caf\u{e9}", comptime escape("caf\u{e9}"));
 }
+
+// ------------------------------------------------------------------ the rule
+
+/// What a rule's run-time check returns.
+pub const Outcome = enum {
+    pass,
+    /// Reported with the rule's own code and message.
+    fail,
+    /// Reported with the rule's `precondition` code and message, which are
+    /// fixed: a float that is NaN or ±inf fails every number rule with
+    /// `validation.finite` before the rule's own check runs.
+    precondition,
+};
+
+/// `.pass` when `ok`, else `.fail`.
+pub fn passIf(ok: bool) Outcome {
+    return if (ok) .pass else .fail;
+}
+
+/// The fixed code and message of a precondition failure.
+pub const Precondition = struct { code: []const u8, message: []const u8 };
+
+/// The preconditions that rules report.
+pub const preconditions = struct {
+    /// Every number rule on a float field whose value is NaN, +inf or -inf.
+    pub const finite: Precondition = .{ .code = "validation.finite", .message = "must be a finite number" };
+};
+
+/// A validation rule. Rules are values (`v.notEmpty`) or are built by
+/// constructors (`v.custom(...)`), and are declared in a DTO's
+/// `pub const field_rules`. A rule holds generic functions, so it is a
+/// comptime-only value: keep it in a `const` or pass it as a `comptime`
+/// parameter.
+///
+/// `code` and `message` are the stable public part, which applications and
+/// tests may read (`v.notEmpty.code` is `"validation.not_empty"`). The other
+/// fields and the methods are internal to the module and may change.
+pub const Rule = struct {
+    kind: Kind,
+    /// `validation.<kind>` for a built-in rule, the user's code for
+    /// `v.custom`, and "" for `each`, which reports through its inner rules.
+    code: []const u8,
+    /// The message of this rule's own failure; "" for `each`.
+    message: []const u8,
+    /// The arguments as written (`"users.ok", ...` for `custom`, `...` for
+    /// `each`), shown in compile errors and hints; null for a rule used as a
+    /// value (`v.notEmpty`).
+    args: ?[]const u8 = null,
+    /// The precondition this rule can report. Its run-time check returns
+    /// `.precondition` only on the field types where it applies (`finite`
+    /// on floats only).
+    precondition: ?Precondition = null,
+    /// `each` only: the rules applied to every item.
+    inner: []const Rule = &.{},
+    /// Compile-time check against the unwrapped field type (or the unwrapped
+    /// item type inside `each`). `where` is `<Type>.field_rules.<field>`,
+    /// with `[]` appended per `each` level. Reports problems with
+    /// `@compileError`, usually through `typeError` or `ruleError`.
+    fits: fn (comptime rule: *const Rule, comptime T: type, comptime where: []const u8) void,
+    /// Run-time check; receives `*const T`, with `T` unwrapped.
+    eval: fn (value: anytype) Outcome,
+
+    /// The public name: `notEmpty`.
+    pub fn name(comptime rule: Rule) []const u8 {
+        return comptime info(rule.kind).name;
+    }
+
+    /// The call as written in `field_rules`: `positive`, `custom("users.ok", ...)`.
+    pub fn call(comptime rule: Rule) []const u8 {
+        return comptime info(rule.kind).name ++ if (rule.args) |a| "(" ++ a ++ ")" else "";
+    }
+
+    /// The snake_case form that declaration errors use: `not_empty`,
+    /// `custom("users.ok", ...)`.
+    pub fn label(comptime rule: Rule) []const u8 {
+        return comptime @tagName(rule.kind) ++ if (rule.args) |a| "(" ++ a ++ ")" else "";
+    }
+};
+
+/// Everything `define` needs to build a built-in rule.
+pub const Spec = struct {
+    /// The default message: 1-512 bytes of valid UTF-8.
+    message: []const u8,
+    /// Replaces `codeOf(kind)`; only `v.custom` sets it.
+    code: ?[]const u8 = null,
+    args: ?[]const u8 = null,
+    precondition: ?Precondition = null,
+    fits: fn (comptime rule: *const Rule, comptime T: type, comptime where: []const u8) void,
+    eval: fn (value: anytype) Outcome,
+};
+
+/// Builds a rule of `kind`: the code of its kind (or `spec.code`), the
+/// default message and the checks. `each` is built by hand instead, since it
+/// has no code or message of its own.
+pub fn define(comptime kind: Kind, comptime spec: Spec) Rule {
+    @setEvalBranchQuota(eval_quota);
+    if (messageProblem(spec.message)) |problem|
+        @compileError("validator: internal: the default message of " ++ @tagName(kind) ++ ": " ++ describeMessageProblem(problem));
+    return .{
+        .kind = kind,
+        .code = spec.code orelse codeOf(kind),
+        .message = spec.message,
+        .args = spec.args,
+        .precondition = spec.precondition,
+        .fits = spec.fits,
+        .eval = spec.eval,
+    };
+}
+
+// ------------------------------------------------------------------ field types
+
+/// A string: a slice of u8 of any constness, sentinel and alignment.
+/// `volatile` and `allowzero` slices are not strings (rules read strings as
+/// `[]const u8`, which they do not coerce to), and `[N]u8` is an array of
+/// numbers.
+pub fn isString(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .pointer => |p| p.size == .slice and p.child == u8 and !p.attrs.@"volatile" and !p.attrs.@"allowzero",
+        else => false,
+    };
+}
+
+/// A slice that the walker treats as a list: its items are not u8, and it is
+/// neither `volatile` nor `allowzero` nor aligned below the alignment of its
+/// items (`[]align(1) const u32`), since a pointer to an item of such a slice
+/// does not coerce to the `*const T` that rules take.
+pub fn isListSlice(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .pointer => |p| p.size == .slice and p.child != u8 and !p.attrs.@"volatile" and !p.attrs.@"allowzero" and
+            (p.attrs.@"align" == null or p.attrs.@"align".? >= @alignOf(p.child)),
+        else => false,
+    };
+}
+
+/// The item type of a list (a slice that `isListSlice` accepts, or an
+/// array, `[N]u8` included), or null.
+pub fn ListChild(comptime T: type) ?type {
+    return switch (@typeInfo(T)) {
+        .pointer => |p| if (isListSlice(T)) p.child else null,
+        .array => |a| a.child,
+        else => null,
+    };
+}
+
+/// Strips every optional layer: `??T` -> `T`.
+pub fn Unwrap(comptime T: type) type {
+    return switch (@typeInfo(T)) {
+        .optional => |o| Unwrap(o.child),
+        else => T,
+    };
+}
+
+/// `[N]u8` or `[N:s]u8`.
+pub fn isU8Array(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .array => |a| a.child == u8,
+        else => false,
+    };
+}
+
+/// An integer or a float type.
+pub fn isNumber(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .int, .float => true,
+        else => false,
+    };
+}
+
+/// `f16`, `f32`, `f64`, `f80`, `f128` or `c_longdouble`.
+pub fn isFloat(comptime T: type) bool {
+    return @typeInfo(T) == .float;
+}
+
+// ------------------------------------------------------------------ declaration errors
+
+/// Every compile-error hint that names a rule lives here, so that one test
+/// can check each `v.<name>` these texts mention against the public
+/// namespace.
+pub const hints = struct {
+    pub const u8_array = "[N]u8 is an array of numbers, not a string: use []const u8";
+    pub const one_each = "put all item rules into one v.each(.{ ... })";
+    pub const wrap_predicate = "wrap a predicate in v.custom(code, message, f)";
+
+    /// A rule written on a list whose items it would accept.
+    pub fn useEach(comptime rule: Rule) []const u8 {
+        return "use v.each(v." ++ rule.call() ++ ")";
+    }
+};
+
+/// Stops compilation because `rule` does not take the unwrapped field type
+/// `T`: `validator: <where>: <kind> expects <expects>, field is <T>`, then
+/// one hint after `; `. `accepts` tells which unwrapped types the rule takes
+/// and picks the hint: the `[N]u8` hint when the rule would take a string,
+/// `use v.each(v.<call>)` when it would take the list's unwrapped items,
+/// else `hint`. A string is a slice of bytes but rules treat it as one
+/// value, so when a rule that takes lists (its `accepts` takes `[]const u32`)
+/// rejects a string and no hint follows, ` (a string)` follows the type.
+pub fn typeError(comptime rule: *const Rule, comptime T: type, comptime where: []const u8, comptime expects: []const u8, comptime accepts: fn (comptime type) bool, comptime hint: ?[]const u8) noreturn {
+    @compileError(typeErrorText(rule, T, where, expects, accepts, hint));
+}
+
+/// The text of `typeError`, separate so that tests can read it.
+fn typeErrorText(comptime rule: *const Rule, comptime T: type, comptime where: []const u8, comptime expects: []const u8, comptime accepts: fn (comptime type) bool, comptime hint: ?[]const u8) []const u8 {
+    @setEvalBranchQuota(eval_quota);
+    var extra: ?[]const u8 = hint;
+    if (isU8Array(T) and accepts([]const u8)) {
+        extra = hints.u8_array;
+    } else if (ListChild(T)) |Item| {
+        if (accepts(Unwrap(Item))) extra = hints.useEach(rule.*);
+    }
+    const note = if (extra == null and isString(T) and accepts([]const u32)) " (a string)" else "";
+    return "validator: " ++ where ++ ": " ++ @tagName(rule.kind) ++ " expects " ++ expects ++ ", field is " ++ @typeName(T) ++ note ++
+        (if (extra) |h| "; " ++ h else "");
+}
+
+/// A declaration error about one rule: `validator: <where>: <label><text>`.
+pub fn ruleError(comptime rule: *const Rule, comptime where: []const u8, comptime text: []const u8) noreturn {
+    @compileError("validator: " ++ where ++ ": " ++ rule.label() ++ text);
+}
+
+// ------------------------------------------------------------------ rule lists
+
+/// One rule or a tuple of rules -> a slice of rules. Anything else stops
+/// compilation; `where` (`<Type>.field_rules.<field>` or `each(...)`) starts
+/// the error. A nested tuple is not flattened: it is an item that is not a
+/// rule.
+pub fn toRules(comptime value: anytype, comptime where: []const u8) []const Rule {
+    @setEvalBranchQuota(eval_quota);
+    const V = @TypeOf(value);
+    if (V == Rule) return &.{value};
+    switch (@typeInfo(V)) {
+        .@"struct" => |s| if (s.is_tuple) {
+            var out: [value.len]Rule = undefined;
+            for (&out, 0..) |*slot, i| {
+                const E = @TypeOf(value[i]);
+                if (E != Rule) notARule(value[i], where, std.fmt.comptimePrint("item {d} of the tuple is ", .{i}));
+                slot.* = value[i];
+            }
+            const final = out;
+            return &final;
+        },
+        else => {},
+    }
+    notARule(value, where, "expected a rule or a tuple of rules, got ");
+}
+
+/// The error for `value` where a rule is expected: `<prefix><type>`, plus,
+/// for a plain function (usually a predicate), how to make it a rule.
+fn notARule(comptime value: anytype, comptime where: []const u8, comptime prefix: []const u8) noreturn {
+    const V = @TypeOf(value);
+    if (@typeInfo(V) == .@"fn")
+        @compileError("validator: " ++ where ++ ": " ++ prefix ++ @typeName(V) ++ "; " ++ hints.wrap_predicate);
+    @compileError("validator: " ++ where ++ ": " ++ prefix ++ @typeName(V));
+}
+
+/// The rules that apply to the value itself (all but a trailing `each`).
+pub fn ownRules(comptime rules: []const Rule) []const Rule {
+    if (rules.len > 0 and rules[rules.len - 1].kind == .each) return rules[0 .. rules.len - 1];
+    return rules;
+}
+
+/// The item rules of a trailing `each`, or none.
+pub fn itemRules(comptime rules: []const Rule) []const Rule {
+    if (rules.len > 0 and rules[rules.len - 1].kind == .each) return rules[rules.len - 1].inner;
+    return &.{};
+}
+
+/// The declaration check of one value's rules: at most one `each`, placed
+/// last; then each rule's `fits` against `T`, the unwrapped field or item
+/// type, in tuple order.
+pub fn checkRuleList(comptime rules: []const Rule, comptime T: type, comptime where: []const u8) void {
+    @setEvalBranchQuota(eval_quota);
+    var each_count: usize = 0;
+    for (rules) |rule| {
+        if (rule.kind == .each) each_count += 1;
+    }
+    if (each_count > 1) @compileError("validator: " ++ where ++ ": each appears twice; " ++ hints.one_each);
+    if (each_count == 1 and rules[rules.len - 1].kind != .each) @compileError("validator: " ++ where ++ ": each must be the last rule");
+    for (rules) |*rule| rule.fits(rule, T, where);
+}
+
+/// Stand-in rules for the self-tests below; the real rules live in the rule
+/// files and are tested there.
+const test_rules = struct {
+    fn fitsAnything(comptime _: *const Rule, comptime _: type, comptime _: []const u8) void {}
+
+    fn evalPositive(value: anytype) Outcome {
+        return passIf(value.* > 0);
+    }
+
+    fn acceptsList(comptime T: type) bool {
+        return ListChild(T) != null;
+    }
+
+    fn acceptsStringOrSlice(comptime T: type) bool {
+        return isString(T) or isListSlice(T);
+    }
+
+    const positive = define(.positive, .{
+        .message = "must be greater than 0",
+        .precondition = preconditions.finite,
+        .fits = fitsAnything,
+        .eval = evalPositive,
+    });
+    const min_items = define(.min_items, .{ .message = "must have at least 3 items", .args = "3", .fits = fitsAnything, .eval = evalPositive });
+    const custom = define(.custom, .{
+        .code = "users.name_taken",
+        .message = "is taken",
+        .args = "\"users.name_taken\", ...",
+        .fits = fitsAnything,
+        .eval = evalPositive,
+    });
+    const not_empty = define(.not_empty, .{ .message = "must not be empty", .fits = fitsAnything, .eval = evalPositive });
+    const email = define(.email, .{ .message = "must be an email address", .fits = fitsAnything, .eval = evalPositive });
+    const unique_items = define(.unique_items, .{ .message = "must not contain duplicates", .fits = fitsAnything, .eval = evalPositive });
+    const unique_by = define(.unique_by, .{ .message = "must not contain duplicates", .args = ".id", .fits = fitsAnything, .eval = evalPositive });
+    /// Built by hand, as `v.each` builds it: no code and no message of its own.
+    const each_positive: Rule = .{
+        .kind = .each,
+        .code = "",
+        .message = "",
+        .args = "...",
+        .inner = &.{positive},
+        .fits = fitsAnything,
+        .eval = evalPositive,
+    };
+};
+
+test "define gives a rule its kind's code, the message and the data" {
+    const rule = test_rules.positive;
+    try std.testing.expectEqual(Kind.positive, rule.kind);
+    try std.testing.expectEqualStrings("validation.positive", rule.code);
+    try std.testing.expectEqualStrings("must be greater than 0", rule.message);
+    try std.testing.expectEqual(null, rule.args);
+    try std.testing.expectEqualStrings("validation.finite", rule.precondition.?.code);
+    try std.testing.expectEqualStrings("must be a finite number", rule.precondition.?.message);
+    try std.testing.expectEqual(0, rule.inner.len);
+
+    const custom_rule = test_rules.custom;
+    try std.testing.expectEqual(Kind.custom, custom_rule.kind);
+    try std.testing.expectEqualStrings("users.name_taken", custom_rule.code);
+    try std.testing.expectEqualStrings("is taken", custom_rule.message);
+    try std.testing.expectEqualStrings("\"users.name_taken\", ...", custom_rule.args.?);
+    try std.testing.expectEqual(null, custom_rule.precondition);
+}
+
+test "a rule is named by its public name, its call and its snake_case label" {
+    const expect = std.testing.expectEqualStrings;
+    const r = test_rules;
+    try expect("positive", comptime r.positive.name());
+    try expect("positive", comptime r.positive.call());
+    try expect("positive", comptime r.positive.label());
+    try expect("minItems", comptime r.min_items.name());
+    try expect("minItems(3)", comptime r.min_items.call());
+    try expect("min_items(3)", comptime r.min_items.label());
+    try expect("custom(\"users.name_taken\", ...)", comptime r.custom.call());
+    try expect("custom(\"users.name_taken\", ...)", comptime r.custom.label());
+    try expect("each(...)", comptime r.each_positive.call());
+    try expect("each(...)", comptime r.each_positive.label());
+}
+
+test "a rule's run-time check returns pass or fail" {
+    try std.testing.expectEqual(Outcome.pass, passIf(true));
+    try std.testing.expectEqual(Outcome.fail, passIf(false));
+    const zero: u32 = 0;
+    const one: u32 = 1;
+    try std.testing.expectEqual(Outcome.fail, test_rules.positive.eval(&zero));
+    try std.testing.expectEqual(Outcome.pass, test_rules.positive.eval(&one));
+}
+
+test "a string is a u8 slice that is neither volatile nor allowzero" {
+    inline for (.{ []const u8, []u8, [:0]const u8, [:0]u8, []align(4) const u8 }) |T| {
+        try std.testing.expect(isString(T));
+        try std.testing.expect(!isListSlice(T));
+        try std.testing.expect(ListChild(T) == null);
+    }
+    inline for (.{ []volatile u8, []const volatile u8, []allowzero const u8, []allowzero u8, [*]u8, [*:0]const u8, *const [3]u8, *const [3:0]u8, [3]u8, ?[]const u8, u8, []const u32 }) |T| {
+        try std.testing.expect(!isString(T));
+    }
+}
+
+test "a list is a slice of non-u8 items that is neither volatile nor allowzero, or an array" {
+    inline for (.{ []const u32, []u32, [:0]const u32, []const ?u32, []const []const u8, []align(8) const u32 }) |T| {
+        try std.testing.expect(isListSlice(T));
+    }
+    inline for (.{ []const u8, []u8, []volatile u32, []const volatile u32, []allowzero const u32, []volatile u8, [*]u32, *const [3]u32, [3]u32, ?[]const u32, u32 }) |T| {
+        try std.testing.expect(!isListSlice(T));
+    }
+    try std.testing.expect(ListChild([]const u32).? == u32);
+    try std.testing.expect(ListChild([]u32).? == u32);
+    try std.testing.expect(ListChild([]const ?u32).? == ?u32);
+    try std.testing.expect(ListChild([3]u8).? == u8);
+    try std.testing.expect(ListChild([0]u32).? == u32);
+    try std.testing.expect(ListChild([2][]const u8).? == []const u8);
+    inline for (.{ []const u8, []volatile u32, []allowzero const u32, [*]u32, *const [3]u32, ?[]const u32, u32 }) |T| {
+        try std.testing.expect(ListChild(T) == null);
+    }
+}
+
+test "a slice aligned below the alignment of its items is not a list" {
+    // `&items[i]` of such a slice does not coerce to the `*const T` that rules
+    // and predicates take, so a rule on it reports its own type error.
+    inline for (.{ []align(1) const u32, []align(2) u32, []align(1) const ?u64, []align(1) const []const u8 }) |T| {
+        try std.testing.expect(!isListSlice(T));
+        try std.testing.expect(ListChild(T) == null);
+    }
+    inline for (.{ []align(4) const u32, []align(16) u64 }) |T| {
+        try std.testing.expect(isListSlice(T));
+    }
+    try std.testing.expect(ListChild([]align(4) const u32).? == u32);
+    // One-byte items are never under-aligned: an aligned u8 slice is a string.
+    inline for (.{ []align(1) const u8, [:0]align(1) u8 }) |T| {
+        try std.testing.expect(isString(T));
+    }
+    const where = "Dto.field_rules.x";
+    try std.testing.expectEqualStrings(
+        "validator: Dto.field_rules.x: each expects a slice or an array, field is []align(1) const u32",
+        comptime typeErrorText(&test_rules.each_positive, []align(1) const u32, where, "a slice or an array", test_rules.acceptsList, null),
+    );
+    try std.testing.expectEqualStrings(
+        "validator: Dto.field_rules.x: positive expects a number, field is []align(1) const u32",
+        comptime typeErrorText(&test_rules.positive, []align(1) const u32, where, "a number", isNumber, null),
+    );
+}
+
+test "optional layers unwrap, and number, float and u8-array types are recognized" {
+    try std.testing.expect(Unwrap(u32) == u32);
+    try std.testing.expect(Unwrap(?u32) == u32);
+    try std.testing.expect(Unwrap(??u32) == u32);
+    try std.testing.expect(Unwrap(?[]const ?u8) == []const ?u8);
+    try std.testing.expect(Unwrap(?*const ?u32) == *const ?u32);
+
+    inline for (.{ [4]u8, [4:0]u8, [0]u8 }) |T| try std.testing.expect(isU8Array(T));
+    inline for (.{ [4]u16, [4]i8, []const u8, *const [4]u8, u8 }) |T| try std.testing.expect(!isU8Array(T));
+
+    inline for (.{ u8, i64, u128, usize, f16, f32, f64, f80, f128, c_longdouble }) |T| try std.testing.expect(isNumber(T));
+    inline for (.{ bool, Kind, []const u8, ?u32, [2]u32 }) |T| try std.testing.expect(!isNumber(T));
+
+    inline for (.{ f16, f32, f64, f80, f128, c_longdouble }) |T| try std.testing.expect(isFloat(T));
+    inline for (.{ u32, i64, ?f64, bool }) |T| try std.testing.expect(!isFloat(T));
+}
+
+test "a type error names the rule and the field type, then the one hint that applies" {
+    const expect = std.testing.expectEqualStrings;
+    const where = "Dto.field_rules.x";
+    const r = test_rules;
+    // A rule that takes lists says that a string field is a string.
+    try expect(
+        "validator: Dto.field_rules.x: each expects a slice or an array, field is []const u8 (a string)",
+        comptime typeErrorText(&r.each_positive, []const u8, where, "a slice or an array", r.acceptsList, null),
+    );
+    try expect(
+        "validator: Dto.field_rules.x: each expects a slice or an array, field is [:0]const u8 (a string)",
+        comptime typeErrorText(&r.each_positive, [:0]const u8, where, "a slice or an array", r.acceptsList, null),
+    );
+    try expect(
+        "validator: Dto.field_rules.x: unique_items expects a slice or an array, field is []const u8 (a string)",
+        comptime typeErrorText(&r.unique_items, []const u8, where, "a slice or an array", r.acceptsList, null),
+    );
+    try expect(
+        "validator: Dto.field_rules.x: unique_by expects a slice or an array of structs, field is []const u8 (a string)",
+        comptime typeErrorText(&r.unique_by, []const u8, where, "a slice or an array of structs", r.acceptsList, null),
+    );
+    try expect(
+        "validator: Dto.field_rules.x: each expects a slice or an array, field is u32",
+        comptime typeErrorText(&r.each_positive, u32, where, "a slice or an array", r.acceptsList, null),
+    );
+    // A rule that does not take lists, or one with its own hint, adds no note.
+    try expect(
+        "validator: Dto.field_rules.x: positive expects a number, field is []const u8",
+        comptime typeErrorText(&r.positive, []const u8, where, "a number", isNumber, null),
+    );
+    try expect(
+        "validator: Dto.field_rules.x: min_items expects a slice, field is []const u8; for strings use v.minLength or v.minBytes",
+        comptime typeErrorText(&r.min_items, []const u8, where, "a slice", isListSlice, "for strings use v.minLength or v.minBytes"),
+    );
+    // A list whose unwrapped items the rule takes: use each.
+    try expect(
+        "validator: Dto.field_rules.x: positive expects a number, field is []const u32; use v.each(v.positive)",
+        comptime typeErrorText(&r.positive, []const u32, where, "a number", isNumber, null),
+    );
+    try expect(
+        "validator: Dto.field_rules.x: positive expects a number, field is [2]?u64; use v.each(v.positive)",
+        comptime typeErrorText(&r.positive, [2]?u64, where, "a number", isNumber, null),
+    );
+    try expect(
+        "validator: Dto.field_rules.x: email expects a string, field is []const []const u8; use v.each(v.email)",
+        comptime typeErrorText(&r.email, []const []const u8, where, "a string", isString, null),
+    );
+    // [N]u8 where the rule would take a string.
+    try expect(
+        "validator: Dto.field_rules.x: email expects a string, field is [4]u8; [N]u8 is an array of numbers, not a string: use []const u8",
+        comptime typeErrorText(&r.email, [4]u8, where, "a string", isString, null),
+    );
+    // volatile and allowzero slices are neither strings nor lists.
+    try expect(
+        "validator: Dto.field_rules.x: email expects a string, field is []volatile u8",
+        comptime typeErrorText(&r.email, []volatile u8, where, "a string", isString, null),
+    );
+    try expect(
+        "validator: Dto.field_rules.x: email expects a string, field is []allowzero const u8",
+        comptime typeErrorText(&r.email, []allowzero const u8, where, "a string", isString, null),
+    );
+    try expect(
+        "validator: Dto.field_rules.x: not_empty expects a string or a slice, field is []volatile u8",
+        comptime typeErrorText(&r.not_empty, []volatile u8, where, "a string or a slice", r.acceptsStringOrSlice, null),
+    );
+    try expect(
+        "validator: Dto.field_rules.x: each expects a slice or an array, field is []volatile u32",
+        comptime typeErrorText(&r.each_positive, []volatile u32, where, "a slice or an array", r.acceptsList, null),
+    );
+}
+
+test "one rule or a tuple of rules becomes a list of rules" {
+    const where = "Dto.field_rules.x";
+    const one = comptime toRules(test_rules.positive, where);
+    try std.testing.expectEqual(1, one.len);
+    try std.testing.expectEqual(Kind.positive, one[0].kind);
+    const two = comptime toRules(.{ test_rules.positive, test_rules.custom }, where);
+    try std.testing.expectEqual(2, two.len);
+    try std.testing.expectEqual(Kind.positive, two[0].kind);
+    try std.testing.expectEqual(Kind.custom, two[1].kind);
+    const none = comptime toRules(.{}, where);
+    try std.testing.expectEqual(0, none.len);
+}
+
+test "a trailing each holds the item rules and the others apply to the value itself" {
+    const where = "Dto.field_rules.x";
+    const with_each = comptime toRules(.{ test_rules.min_items, test_rules.each_positive }, where);
+    const own = comptime ownRules(with_each);
+    try std.testing.expectEqual(1, own.len);
+    try std.testing.expectEqual(Kind.min_items, own[0].kind);
+    const items = comptime itemRules(with_each);
+    try std.testing.expectEqual(1, items.len);
+    try std.testing.expectEqual(Kind.positive, items[0].kind);
+
+    const only_each = comptime toRules(test_rules.each_positive, where);
+    try std.testing.expectEqual(0, (comptime ownRules(only_each)).len);
+    try std.testing.expectEqual(1, (comptime itemRules(only_each)).len);
+
+    const without_each = comptime toRules(.{ test_rules.positive, test_rules.custom }, where);
+    try std.testing.expectEqual(2, (comptime ownRules(without_each)).len);
+    try std.testing.expectEqual(0, (comptime itemRules(without_each)).len);
+}
+
+test "a rule list with at most one each, placed last, passes the declaration check" {
+    const where = "Dto.field_rules.x";
+    comptime checkRuleList(&.{ test_rules.min_items, test_rules.each_positive }, []const u32, where);
+    comptime checkRuleList(&.{test_rules.each_positive}, []const u32, where);
+    comptime checkRuleList(&.{ test_rules.positive, test_rules.custom }, u32, where);
+    comptime checkRuleList(&.{}, u32, where);
+}

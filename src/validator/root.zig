@@ -8,6 +8,7 @@ const std = @import("std");
 const core = @import("core.zig");
 
 pub const Violation = core.Violation;
+pub const Rule = core.Rule;
 
 pub const max_code_bytes = core.max_code_bytes;
 pub const max_message_bytes = core.max_message_bytes;
