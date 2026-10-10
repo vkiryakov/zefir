@@ -185,6 +185,9 @@ deadline.remaining(now);   // never negative
 deadline.toTimeout();      // a std.Io.Timeout on the awake clock
 ```
 
+`Deadline.at(expires)` wraps a timestamp you already have, and
+`a.earliest(b)` keeps the earlier of two deadlines — `withDeadline` uses it.
+
 A timestamp means nothing on another machine. **Send the remaining budget**,
 not the deadline: the caller writes `ctx.remaining(now)` (for example in
 milliseconds) and the receiver builds its own `Deadline.after(now, budget)`.
@@ -195,10 +198,10 @@ safe; a negative one has already expired.
 
 - `TraceId` (16 bytes) and `SpanId` (8 bytes) are byte arrays. Build them with
   `fromBytes` or `parseHex` (lowercase hex); all-zero ids are rejected. Print
-  them with `{f}`. A struct literal can hold an invalid id: don't build them
-  that way.
+  them with `{f}`, or get the hex with `toHex()`. A struct literal can hold an
+  invalid id: don't build them that way.
 - `TraceFlags` is a byte with `sampled` and `random` fields; unknown bits are
-  kept in `reserved`.
+  kept in `reserved`. `TraceFlags.fromByte` and `toByte` convert all eight bits.
 - `TraceContext` is `trace_id`, `span_id`, `flags`, `state` and `is_remote`.
   `parent.child(span_id)` is the identity of a child span: same trace, flags
   and state, local.
@@ -232,8 +235,14 @@ Sending, after `ctx.trace.?.child(span_id)` for your own span:
 ```zig
 var traceparent: [core.w3c.traceparent_len]u8 = undefined;
 const value = core.w3c.formatTraceparent(trace, &traceparent); // always version 00
-if (!trace.state.isEmpty()) send("tracestate", trace.state.header);
+if (!trace.state.isEmpty()) send(core.w3c.tracestate_header, trace.state.header);
 ```
+
+core forwards the received tracestate unchanged. To add or move your own
+entry, build a new value from `trace.state.iterator()` (`Entry{ key, value }`)
+into a buffer you own and parse it back with `parseTracestate`. Truncation
+under a size limit is your transport's policy: W3C removes whole entries,
+those over 128 characters first, then from the right.
 
 - **traceparent:** version `00` exactly (55 characters, lowercase hex, no
   all-zero ids); newer versions are read the W3C way and written back as
@@ -249,7 +258,8 @@ if (!trace.state.isEmpty()) send("tracestate", trace.state.header);
 
 The transport's part:
 
-- header names are case-insensitive;
+- header names are case-insensitive; send them in lowercase, as
+  `core.w3c.traceparent_header` and `core.w3c.tracestate_header` spell them;
 - two or more `traceparent` fields are invalid;
 - join several `tracestate` fields with `,` in their order before parsing;
 - drop a `tracestate` that arrives without a valid `traceparent`;
@@ -301,8 +311,8 @@ state.
 | traceparent written | 55 characters, version `00` |
 | tracestate | 32 entries; key and value up to 256 characters; no total length limit |
 
-Not in core: creating spans, sampling, exporting, generating ids, linked
-tokens, waking waiting tasks, baggage.
+Not in core: creating spans, sampling, exporting, generating ids, changing
+or truncating a tracestate, linked tokens, waking waiting tasks, baggage.
 
 ## Benchmarks
 
