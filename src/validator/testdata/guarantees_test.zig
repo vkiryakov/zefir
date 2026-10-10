@@ -66,11 +66,12 @@ test "check stops at the first violation; checkAll goes on with the next sibling
 }
 
 fn notRejected(entry: *const Entry) bool {
-    return !std.mem.eql(u8, entry.name, "reject");
+    return !std.mem.eql(u8, entry.tag, "reject");
 }
 
 const Entry = struct {
     name: []const u8,
+    tag: []const u8 = "ok",
     pub const field_rules = .{ .name = v.notEmpty };
 };
 
@@ -79,12 +80,38 @@ const Entries = struct {
     pub const field_rules = .{ .entries = v.each(v.custom("t.rejected", "entry rejected", notRejected)) };
 };
 
+fn never(_: u32) bool {
+    return false;
+}
+
 test "checkAll reports at most one violation per value: a failed item is not descended into, the next items are" {
-    try h.expectAll(&Entries{ .entries = &.{ .{ .name = "" }, .{ .name = "reject" }, .{ .name = "" } } }, &.{
+    // entries[1].name is empty too: descending into the rejected item would report it.
+    try h.expectAll(&Entries{ .entries = &.{ .{ .name = "" }, .{ .name = "", .tag = "reject" }, .{ .name = "" } } }, &.{
         .{ .code = "validation.not_empty", .field = "entries[0].name" },
         .{ .code = "t.rejected", .field = "entries[1]" },
         .{ .code = "validation.not_empty", .field = "entries[2].name" },
     });
+    // Two failing own rules: only the first is reported (expectFail expects exactly one violation from checkAll).
+    try h.expectFail(u32, .{ v.custom("t.a", "a failed", never), v.custom("t.b", "b failed", never) }, 0, "t.a", "a failed");
+}
+
+const Leaf = struct {
+    n: u32,
+    pub const field_rules = .{ .n = v.positive };
+};
+
+fn alwaysRejected(_: *const Leaf) bool {
+    return false;
+}
+
+const Failing = struct {
+    leaf: Leaf,
+    pub const field_rules = .{ .leaf = .{ v.custom("t.first", "first rule failed", alwaysRejected), v.custom("t.second", "second rule failed", alwaysRejected) } };
+};
+
+test "checkAll: a value whose own rule failed has that one violation only; later own rules do not run and nothing inside it is visited" {
+    // leaf.n = 0 would add leaf.n if the walk descended into leaf, and t.second if it ran the next rule.
+    try h.expectAll(&Failing{ .leaf = .{ .n = 0 } }, &.{.{ .code = "t.first", .field = "leaf" }});
 }
 
 fn notAbc(s: []const u8) bool {
@@ -187,13 +214,17 @@ test "nothing is normalized: rules see the bytes as they are, untrimmed, in thei
 const thread_rounds = 500;
 
 /// Counts the rounds in which `check` and `checkAll` gave the expected
-/// result; `path_buf` belongs to this thread.
+/// result; `path_buf` and the memory `checkAll` allocates from belong to this
+/// thread, so the threads share only the checked value (a shared allocator
+/// would make the test measure its lock, not the validator).
 fn worker(agreed: *[2]usize) void {
     var buf: [64]u8 = undefined;
+    var memory: [16 * 1024]u8 = undefined;
     for (0..thread_rounds) |_| {
         const got = v.check(&frozen, &buf) orelse continue;
         if (std.mem.eql(u8, got.field orelse "", "items[0].name")) agreed[0] += 1;
-        const report = v.checkAll(testing.allocator, &frozen) catch continue;
+        var fba: std.heap.FixedBufferAllocator = .init(&memory);
+        const report = v.checkAll(fba.allocator(), &frozen) catch continue;
         defer report.deinit();
         if (report.violations.len == frozen_violations.len and std.mem.eql(u8, report.violations[3].field orelse "", "note")) agreed[1] += 1;
     }
