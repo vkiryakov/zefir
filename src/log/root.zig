@@ -19,4 +19,5 @@ test {
     _ = @import("escape.zig");
     _ = @import("redact.zig");
     _ = @import("fields.zig");
+    _ = @import("encode.zig");
 }
