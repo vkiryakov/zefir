@@ -46,7 +46,6 @@ test "void value" {
     logger().info("m", .{ .nothing = {} });
 }
 
-test "struct value" {
-    const Point = struct { x: i32, y: i32 };
-    logger().info("m", .{ .point = Point{ .x = 1, .y = 2 } });
+test "value of a type that has no loggable form" {
+    logger().info("m", .{ .x = undefined });
 }

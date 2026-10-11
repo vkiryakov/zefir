@@ -127,8 +127,7 @@ pub fn build(b: *std.Build) void {
         .{ "src of the wrong type", "zefir.log: field 'src' is the call site and must be a std.lang.SourceLocation; pass .src = @src()" },
         .{ "error union value", "zefir.log: field 'value': cannot log error union 'anyerror!u8'; handle it with try or catch first, then log the payload or the error" },
         .{ "void value", "zefir.log: field 'nothing': cannot log 'void'; remove the field" },
-        // The type name depends on the file, so only the end of the line is checked.
-        .{ "struct value", "' in field 'point'; log scalars and strings, e.g. .{ .user_id = user.id }" },
+        .{ "value of a type that has no loggable form", "zefir.log: cannot log type '@TypeOf(undefined)' in field 'x'; give it a format or logValue method, or log one of its fields" },
     }, 0..) |case, i| {
         const compile = b.addTest(.{
             .name = b.fmt("log-compile-error-{d}", .{i}),
