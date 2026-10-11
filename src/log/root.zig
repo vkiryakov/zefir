@@ -1,7 +1,7 @@
-//! zefir-logger — logging.
+//! zefir-log — structured logging.
 
 const std = @import("std");
 
-test "logger placeholder" {
+test "log placeholder" {
     try std.testing.expect(true);
 }

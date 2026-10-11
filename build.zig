@@ -13,8 +13,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    const logger = b.addModule("zefir-logger", .{
-        .root_source_file = b.path("src/logger/root.zig"),
+    const log = b.addModule("zefir-log", .{
+        .root_source_file = b.path("src/log/root.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -24,7 +24,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "logger", .module = logger },
+            .{ .name = "log", .module = log },
         },
     });
 
@@ -33,7 +33,6 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "logger", .module = logger },
             .{ .name = "confy", .module = confy },
         },
     });
@@ -43,18 +42,18 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "logger", .module = logger },
+            .{ .name = "log", .module = log },
         },
     });
 
-    // Umbrella module: @import("zefir").core, .logger, .confy, .rpc, .orm
+    // Umbrella module: @import("zefir").core, .log, .confy, .rpc, .orm
     const zefir = b.addModule("zefir", .{
         .root_source_file = b.path("src/zefir.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
             .{ .name = "core", .module = core },
-            .{ .name = "logger", .module = logger },
+            .{ .name = "log", .module = log },
             .{ .name = "confy", .module = confy },
             .{ .name = "rpc", .module = rpc },
             .{ .name = "orm", .module = orm },
@@ -62,7 +61,7 @@ pub fn build(b: *std.Build) void {
     });
 
     const test_step = b.step("test", "Run all tests");
-    for ([_]*std.Build.Module{ core, logger, confy, rpc, orm, zefir }) |module| {
+    for ([_]*std.Build.Module{ core, log, confy, rpc, orm, zefir }) |module| {
         const tests = b.addTest(.{ .root_module = module });
         test_step.dependOn(&b.addRunArtifact(tests).step);
     }
