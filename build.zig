@@ -212,4 +212,42 @@ fn addValidatorTests(
         run.expectExitCode(3);
         test_step.dependOn(&run.step);
     }
+
+    // Golden vectors: vector_gen turns each JSON file of `vector_files` into
+    // a test file in the build cache, one test per record. It is built for
+    // the host, so it also runs when -Dtarget names another system.
+    const gen_module = b.createModule(.{
+        .root_source_file = b.path("src/validator/testdata/vector_gen.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    const gen = b.addExecutable(.{ .name = "vector_gen", .root_module = gen_module });
+    const gen_tests = b.addTest(.{ .name = "vector_gen", .root_module = gen_module });
+    test_step.dependOn(&b.addRunArtifact(gen_tests).step);
+    const harness = b.createModule(.{
+        .root_source_file = b.path("src/validator/testdata/vector_harness.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "validator", .module = validator }},
+    });
+    const harness_tests = b.addTest(.{ .name = "vector_harness", .root_module = harness });
+    test_step.dependOn(&b.addRunArtifact(harness_tests).step);
+    for (validator_cases.vector_files) |name| {
+        const run_gen = b.addRunArtifact(gen);
+        run_gen.addFileArg(b.path(b.fmt("src/validator/testdata/vectors/{s}.json", .{name})));
+        const generated = run_gen.addOutputFileArg(b.fmt("{s}_vectors_test.zig", .{name}));
+        const vector_tests = b.addTest(.{
+            .name = b.fmt("{s}_vectors", .{name}),
+            .root_module = b.createModule(.{
+                .root_source_file = generated,
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "validator", .module = validator },
+                    .{ .name = "harness", .module = harness },
+                },
+            }),
+        });
+        test_step.dependOn(&b.addRunArtifact(vector_tests).step);
+    }
 }
