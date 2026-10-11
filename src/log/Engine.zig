@@ -71,6 +71,9 @@ output: options.Output,
 /// `,"service.name":"…"…`, written into every JSON record; empty for text.
 service: []const u8,
 scope_table: scopes.Table,
+/// What `.stdout` writes to; tests point it at a pipe.
+stdout: Io.File,
+output_lock: Io.Mutex = .init,
 counters: Counters = .{},
 
 const Counter = std.atomic.Value(u64);
@@ -107,6 +110,7 @@ pub fn create(gpa: std.mem.Allocator, io: Io, opts: options.Options) InitError!*
         .output = opts.output,
         .service = service,
         .scope_table = undefined,
+        .stdout = .stdout(),
     };
     try engine.scope_table.init(opts.level, opts.scopes);
     return engine;
@@ -132,6 +136,63 @@ pub fn stats(engine: *Engine) Stats {
         .torn_lines = c.torn_lines.load(.monotonic),
         .scopes_overflow = engine.scope_table.overflow.load(.monotonic),
         .scope_names_truncated = engine.scope_table.names_truncated.load(.monotonic),
+    };
+}
+
+/// Encodes and writes one record; the caller has checked the level.
+pub fn emit(engine: *Engine, comptime level: Level, scope: *const scopes.Entry, comptime message: []const u8, fields: anytype) void {
+    bump(&engine.counters.accepted);
+    var buf: [max_record_limit]u8 = undefined;
+    const header: encode.Header = .{
+        .timestamp = Io.Clock.real.now(engine.io),
+        .service = engine.service,
+        .scope = scope.name(),
+        .oversize = engine.oversize,
+    };
+    const out = buf[0..engine.max_record_bytes];
+    const encoded = switch (engine.format) {
+        inline else => |format| encode.record(format, level, message, out, header, fields),
+    } orelse return bump(&engine.counters.dropped_oversize);
+    if (encoded.truncated) bump(&engine.counters.truncated);
+    engine.write(out[0..encoded.len]);
+}
+
+/// Writes one record under the output lock, through the application's Io.
+fn write(engine: *Engine, bytes: []const u8) void {
+    const io = engine.io;
+    // A log call is never a cancelation point: the record goes out whole.
+    const protection = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(protection);
+    engine.output_lock.lockUncancelable(io);
+    defer engine.output_lock.unlock(io);
+
+    var sent: usize = 0;
+    const result = switch (engine.output) {
+        .stdout => writeFile(engine.stdout, io, bytes, &sent),
+        .writer => |w| writeWriter(w, bytes, &sent),
+    };
+    if (result) |_| {
+        bump(&engine.counters.written);
+    } else |_| {
+        bump(&engine.counters.write_errors);
+        bump(&engine.counters.dropped_write_failed);
+    }
+}
+
+/// Writes `bytes` with streaming writes; `File.writer()` would be
+/// positional and overwrite the start of a redirected file. On failure
+/// `sent` says how much reached the OS.
+fn writeFile(file: Io.File, io: Io, bytes: []const u8, sent: *usize) Io.File.Writer.Error!void {
+    while (sent.* < bytes.len) sent.* += try file.writeStreaming(io, &.{}, &.{bytes[sent.*..]}, 1);
+}
+
+/// Writes and flushes `bytes`. A failed flush counts all of them as sent:
+/// a buffered writer does not tell how much went out.
+fn writeWriter(w: *Io.Writer, bytes: []const u8, sent: *usize) Io.Writer.Error!void {
+    while (sent.* < bytes.len) sent.* += try w.write(bytes[sent.*..]);
+    w.flush() catch |e| {
+        sent.* = bytes.len;
+        return e;
     };
 }
 
