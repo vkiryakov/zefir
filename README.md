@@ -36,7 +36,7 @@ If it fits the way you work, use it, and please join in: bring your ideas and qu
 | **core**           | `zefir-core`      | Execution context: deadlines, cancellation and W3C trace context     | ✅ Done · [docs](src/core/examples/README.md)  |
 | validator          | `zefir-validator` | Declarative validation rules for struct fields                       | 🚧 In progress                                 |
 | rpc                | `zefir-rpc`       | RPC                                                                  | 📋 Planned                                     |
-| logger             | `zefir-logger`    | Logging                                                              | 📋 Planned                                     |
+| log                | `zefir-log`       | Structured logging: JSON Lines, scopes, levels changed at run time   | 🚧 In progress                                 |
 | orm                | `zefir-orm`       | ORM                                                                  | 📋 Planned                                     |
 | http               | —                 | HTTP server                                                          | 📋 Planned                                     |
 | _all of the above_ | `zefir`           | Umbrella module                                                      |                                                |
