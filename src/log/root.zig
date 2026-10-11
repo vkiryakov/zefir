@@ -3,24 +3,38 @@
 //! to stdout before the call returns.
 //!
 //! ```zig
+//! pub const std_options: std.Options = .{ .logFn = zefir.log.stdLogFn };
+//!
 //! const logger = try zefir.log.Logger.init(init.gpa, init.io, .{
 //!     .service = .{ .name = "user-service", .version = "1.0.0" },
 //! });
 //! defer logger.deinit();
+//! logger.installStdLog(); // std.log records go to the logger too
 //!
 //! logger.info("Application started", .{ .port = 9000 });
 //! const users = logger.scoped("users");
-//! users.info("User created", .{ .user_id = id, .password = password }); // "password":"[REDACTED]"
+//! users.withContext(ctx).info("User created", .{ .src = @src(), .user = user, .password = password });
+//! // …"scope":"users","source":{"file":"users.zig","line":12},"trace_id":"…","span_id":"…",
+//! //   "user":{"id":42,"name":"Ada"},"password":"[REDACTED]"}
 //! ```
 //!
 //! The message is a constant; variable data goes in the fields, a struct
-//! literal. Fields are scalars and strings: bool, integers (wider than 64
-//! bits as strings), floats (NaN and infinities as strings), strings
-//! (invalid UTF-8 becomes U+FFFD), enums and errors by name, optionals and
-//! null. A field named like a secret (`password`, `api_key`, `cookie`, …)
-//! is written as "[REDACTED]". Names that records use themselves (`level`,
-//! `message`, `scope`, …) and types the logger cannot write are compile
-//! errors at the call.
+//! literal. A field holds scalars and strings (integers wider than 64 bits
+//! and NaN or infinities are written as strings, invalid UTF-8 as U+FFFD,
+//! enums and errors by name), structs (objects; dotted keys in text),
+//! tagged unions, arrays, slices and tuples, optionals and pointers (all
+//! followed to 8 levels at most). A type logs its own text through the
+//! `format` method that `{f}` uses, or another value through
+//! `pub fn logValue(self) T`; `zefir.log.hex(bytes)` logs bytes as hex.
+//! `.src = @src()` adds the call site, `withContext(ctx)` the trace ids.
+//!
+//! A type marked `pub const zefir_sensitive = true;` (`confy.Secret` is) is
+//! written as "[REDACTED]", also inside an optional, a pointer, a slice or
+//! an array; so is any field named like a secret (`password`, `api_key`,
+//! `accessToken`, …), at any depth. Names that records use themselves
+//! (`level`, `message`, `scope`, …, also as a dotted path such as
+//! `.service = .{ .name = … }`) and types the logger cannot write are
+//! compile errors at the call.
 //!
 //! Levels change at run time: `setLevel` for the global threshold and
 //! `setScopeLevel` for a scope and its subscopes; existing handles see the

@@ -322,6 +322,49 @@ test "text puts the trace ids after the fields" {
     try c.expect(.text, &.{" INFO  Fetching user user_id=42 trace_id=4bf92f3577b34da6a3ce929d0e0e4736 span_id=00f067aa0ba902b7"});
 }
 
+test "nested values, format, logValue, hex, the call site, the context and std.log never allocate" {
+    const hex = @import("hex.zig").hex;
+    const Price = struct {
+        cents: u32,
+        pub fn format(p: @This(), w: *std.Io.Writer) std.Io.Writer.Error!void {
+            try w.print("{d} cents", .{p.cents});
+        }
+    };
+    const User = struct {
+        id: u64,
+        password_hash: []const u8,
+        pub fn logValue(u: @This()) struct { id: u64 } {
+            return .{ .id = u.id };
+        }
+    };
+    const Config = struct { host: []const u8, ports: [2]u16, state: union(enum) { idle, running: u32 }, next: ?*const @This() };
+    var failing: std.testing.FailingAllocator = .init(testing.allocator, .{});
+    var sink: std.Io.Writer.Discarding = .init(&.{});
+    const json: Logger = try .init(failing.allocator(), testing.io, .{ .level = .trace, .source = .{ .default = .full }, .output = .{ .writer = &sink.writer } });
+    defer json.deinit();
+    const text: Logger = try .init(failing.allocator(), testing.io, .{ .format = .text, .max_record_bytes = 512, .output = .{ .writer = &sink.writer } });
+    defer text.deinit();
+    failing.fail_index = failing.alloc_index; // every allocation from here on fails
+    const before = failing.allocations;
+
+    const ctx = core.Context.root.withTrace(try traceContext("4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7"));
+    const inner: Config = .{ .host = "replica", .ports = .{ 1, 2 }, .state = .idle, .next = null };
+    var config: Config = .{ .host = "pg", .ports = .{ 5432, 5433 }, .state = .{ .running = 3 }, .next = &inner };
+    var user: User = .{ .id = 7, .password_hash = "x" };
+    _ = .{ &config, &user };
+    const digest = [_]u8{ 0xde, 0xad };
+    const huge = &@as([5000]u8, @splat('y'));
+    inline for (.{ json, text }) |logger| {
+        const handle = logger.withContext(ctx).scoped("alloc.free");
+        handle.info("nested", .{ .src = @src(), .config = config, .price = Price{ .cents = 5 }, .user = user, .digest = hex(&digest) });
+        handle.warn(huge, .{ .config = config });
+        logger.installStdLog();
+        std_log.stdLogFn(.info, .alloc, "std {d} {s}", .{ 1, huge });
+        uninstallStdLog();
+    }
+    try testing.expectEqual(before, failing.allocations);
+}
+
 test "std.log goes to the installed logger: its scope, its level and its text" {
     var c: Capture = undefined;
     try c.open(.{ .level = .debug });

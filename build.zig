@@ -89,7 +89,7 @@ pub fn build(b: *std.Build) void {
     }
 
     // log examples: `zig build test` builds and runs them, like the core ones.
-    for ([_][]const u8{"service"}) |name| {
+    for ([_][]const u8{ "service", "config" }) |name| {
         const example = b.addExecutable(.{
             .name = b.fmt("log-{s}", .{name}),
             .root_module = b.createModule(.{
@@ -97,6 +97,7 @@ pub fn build(b: *std.Build) void {
                 .target = target,
                 .optimize = optimize,
                 .imports = &.{
+                    .{ .name = "core", .module = core },
                     .{ .name = "log", .module = log },
                 },
             }),
@@ -128,6 +129,17 @@ pub fn build(b: *std.Build) void {
         .{ "error union value", "zefir.log: field 'value': cannot log error union 'anyerror!u8'; handle it with try or catch first, then log the payload or the error" },
         .{ "void value", "zefir.log: field 'nothing': cannot log 'void'; remove the field" },
         .{ "value of a type that has no loggable form", "zefir.log: cannot log type '@TypeOf(undefined)' in field 'x'; give it a format or logValue method, or log one of its fields" },
+        // Type names depend on the file, so these check only the end of the line.
+        .{ "untagged union", "': its active field is unknown; use union(enum) or log one of its fields" },
+        .{ "many-item pointer", "zefir.log: field 'p': cannot log many-item pointer '[*]const u8': it has no length; log a slice, ptr[0..len]" },
+        .{ "C pointer", "zefir.log: field 'p': cannot log C pointer '[*c]const u8'; convert it to a slice or log the address as an integer" },
+        .{ "pointer to an opaque type", "zefir.log: field 'p': cannot log '*anyopaque': an opaque type has no value to log" },
+        .{ "function pointer", "zefir.log: field 'f': cannot log function '*const fn () void'" },
+        .{ "reserved name on the flat path", "zefir.log: field 'service.name' is reserved for record metadata; rename 'service', e.g. 'user_service'" },
+        .{ "nested name with a space", "zefir.log: field name 's.a b' may contain only [A-Za-z0-9_.-]" },
+        .{ "nested error union", "zefir.log: field 'cfg.r': cannot log error union 'anyerror!u8'; handle it with try or catch first, then log the payload or the error" },
+        .{ "sensitive marker of the wrong type", ".zefir_sensitive must be a bool: pub const zefir_sensitive = true;" },
+        .{ "logValue that returns its own type", " itself; return another type, such as a struct of the fields to log" },
     }, 0..) |case, i| {
         const compile = b.addTest(.{
             .name = b.fmt("log-compile-error-{d}", .{i}),

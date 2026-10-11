@@ -166,7 +166,7 @@ pub fn LogValue(comptime T: type) ?type {
     const f = method(T, "logValue") orelse return null;
     if (f.param_types.len != 1) return null;
     const R = f.return_type orelse return null;
-    if (R == T) @compileError("zefir.log: " ++ @typeName(T) ++ ".logValue must return another type, not " ++ @typeName(T) ++ " itself");
+    if (R == T) @compileError("zefir.log: " ++ @typeName(T) ++ ".logValue returns " ++ @typeName(T) ++ " itself; return another type, such as a struct of the fields to log");
     return R;
 }
 
