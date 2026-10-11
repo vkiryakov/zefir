@@ -23,6 +23,7 @@ pub const max_report_violations = core.max_report_violations;
 pub const check = walk.check;
 pub const checkAll = walk.checkAll;
 pub const assertRules = walk.assertRules;
+pub const fail = walk.fail;
 
 pub const notEmpty = common.notEmpty;
 pub const positive = numbers.positive;

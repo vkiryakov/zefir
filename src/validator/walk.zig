@@ -7,6 +7,7 @@
 //! as the value's only violation, and descends into the value (the items of
 //! a list, the fields of a struct) only when they all passed.
 const std = @import("std");
+const builtin = @import("builtin");
 const core = @import("core.zig");
 const Allocator = std.mem.Allocator;
 const Rule = core.Rule;
@@ -69,9 +70,40 @@ pub const Report = struct {
 /// their declarations checked where they are written:
 /// `test { comptime v.assertRules(CreateUserRequest); }`. Pass the DTO type
 /// itself (`CreateUserRequest`, `[]const User`), not a pointer type: pointers
-/// are not walked. Does nothing at run time.
+/// are not walked. It also analyzes the body of every `validateSelf`, an
+/// `inline fn` included, so the compile-time checks of `v.fail` run too.
+/// Does nothing at run time.
 pub fn assertRules(comptime T: type) void {
     comptime verify(T);
+}
+
+/// Builds the result of a `validateSelf`, checked at compile time: `T` is the
+/// struct that declares `validateSelf` (usually `@This()`), `field` names one
+/// of its non-comptime fields (`.end`) or is null for the struct itself, and
+/// `code` and `message` follow the rules of `v.custom`.
+///
+///     return v.fail(@This(), .end, "orders.end_before_start", "must not be before start");
+pub fn fail(comptime T: type, comptime field: ?FailField(T), comptime code: []const u8, comptime message: []const u8) Violation {
+    comptime {
+        @setEvalBranchQuota(core.eval_quota);
+        const where = "fail(" ++ @typeName(T) ++ ", " ++ (if (field) |f| "." ++ @tagName(f) else "null") ++ ")";
+        if (field) |f| {
+            if (isComptimeField(T, @tagName(f)))
+                @compileError("validator: " ++ where ++ ": " ++ @tagName(f) ++ " is a comptime field; comptime fields are not validated");
+        }
+        core.checkCode(where, code);
+        core.checkMessage(where, message);
+    }
+    return .{ .code = code, .message = message, .field = if (field) |f| @tagName(f) else null };
+}
+
+/// The type of `fail`'s `field`: the field names of `T` as an enum, so that a
+/// misspelled field is Zig's own error at the caller's line. A `T` that is not
+/// a struct is rejected here, before `std.meta.FieldEnum` would fail inside std.
+fn FailField(comptime T: type) type {
+    if (@typeInfo(T) != .@"struct")
+        @compileError("validator: fail(" ++ @typeName(T) ++ "): expects the struct that declares validateSelf, e.g. v.fail(@This(), .field, code, message)");
+    return std.meta.FieldEnum(T);
 }
 
 /// The root type behind `&value`. A value or a bare slice is a compile error:
@@ -258,6 +290,7 @@ fn checkStruct(comptime T: type, comptime label: []const u8) void {
             @compileError("validator: " ++ label ++ "." ++ name ++ ": a field name with '.', '[' or ']' makes paths ambiguous; rename the field");
     }
     if (@hasDecl(T, "field_rules")) checkFieldRules(T, label);
+    if (@hasDecl(T, "validateSelf")) checkValidateSelf(T, label);
 }
 
 /// `field_rules` is a struct literal whose keys are non-comptime fields of
@@ -276,6 +309,28 @@ fn checkFieldRules(comptime T: type, comptime label: []const u8) void {
         if (isComptimeField(T, key)) @compileError("validator: " ++ where ++ ": comptime fields are not validated");
         core.checkRuleList(rulesFor(T, key, label), core.Unwrap(@FieldType(T, key)), where);
     }
+}
+
+/// `validateSelf` must be `pub fn validateSelf(self: *const T) ?Violation`;
+/// an `inline fn` is accepted (only the parameter and return types are
+/// compared). The body is then analyzed through a generated caller, so the
+/// compile-time checks of `v.fail` inside it run under `assertRules` too
+/// (taking `&T.validateSelf` would not analyze an inline body).
+fn checkValidateSelf(comptime T: type, comptime label: []const u8) void {
+    const F = @TypeOf(T.validateSelf);
+    const ok = switch (@typeInfo(F)) {
+        .@"fn" => |f| f.param_types.len == 1 and f.param_types[0] == *const T and
+            f.return_type != null and f.return_type.? == ?Violation,
+        else => false,
+    };
+    const self_type = if (isAnonymous(T)) "@This()" else @typeName(T);
+    if (!ok) @compileError("validator: " ++ label ++ ".validateSelf: must be `pub fn validateSelf(self: *const " ++ self_type ++
+        ") ?validator.Violation`, got " ++ @typeName(F));
+    _ = &struct {
+        fn call(self: *const T) ?Violation {
+            return T.validateSelf(self);
+        }
+    }.call;
 }
 
 fn fieldIndex(comptime T: type, comptime name: []const u8) ?usize {
@@ -361,6 +416,11 @@ const First = struct {
         sink.found = .{ .code = code, .message = message, .field = if (fits) sink.buf[0..sink.len] else null };
         return true;
     }
+
+    /// Violations reported so far: 0 or 1.
+    fn count(sink: *const First) usize {
+        return @intFromBool(sink.found != null);
+    }
 };
 
 /// `checkAll`: every violation up to the cap; the paths and the list live
@@ -396,6 +456,11 @@ const All = struct {
         const field: ?[]const u8 = if (sink.path.items.len == 0) null else try sink.arena.dupe(u8, sink.path.items);
         try sink.list.append(sink.arena, .{ .code = code, .message = message, .field = field });
         return false;
+    }
+
+    /// Violations kept so far.
+    fn count(sink: *const All) usize {
+        return sink.list.items.len;
     }
 };
 
@@ -458,6 +523,7 @@ fn walkValue(comptime T: type, value: *const T, comptime rules: []const Rule, si
 fn walkStruct(comptime T: type, value: *const T, sink: anytype) ErrorOf(@TypeOf(sink))!bool {
     @setEvalBranchQuota(core.eval_quota);
     const info = @typeInfo(T).@"struct";
+    const before = sink.count();
     inline for (info.field_names, info.field_types, info.field_attrs) |name, F, attrs| {
         if (attrs.@"comptime") continue;
         const rules = comptime rulesFor(T, name, @typeName(T));
@@ -474,5 +540,41 @@ fn walkStruct(comptime T: type, value: *const T, sink: anytype) ErrorOf(@TypeOf(
         } else try walkValue(F, &@field(value.*, name), rules, sink);
         if (stop) return true;
     }
+    // validateSelf runs only when nothing in this struct's subtree failed.
+    if (@hasDecl(T, "validateSelf") and sink.count() == before) {
+        if (T.validateSelf(value)) |violation| return reportSelf(T, violation, sink);
+    }
     return false;
+}
+
+/// Checks a `validateSelf` result at run time, because a hand-built result
+/// is not checked by the compiler: the code follows the custom-code grammar,
+/// the message is 1-512 bytes of valid UTF-8, and `field` is null or the name
+/// of a non-comptime field of `T`. The result is reported at the struct's
+/// path plus that field name taken from `T`, so the path never points into
+/// the caller's memory. A malformed result is a programmer error: Debug
+/// builds panic; other modes report `validation.invalid` / "is invalid" at
+/// the struct's path, so the value is rejected, not accepted.
+fn reportSelf(comptime T: type, violation: Violation, sink: anytype) ErrorOf(@TypeOf(sink))!bool {
+    if (core.codeProblem(violation.code) != null) {
+        if (builtin.mode == .debug)
+            std.debug.panic("validator: {s}.validateSelf returned a malformed violation: code \"{f}\" is not a valid custom code", .{ @typeName(T), std.zig.fmtString(violation.code) });
+        return sink.report("validation.invalid", "is invalid");
+    }
+    if (core.messageProblem(violation.message) != null) {
+        if (builtin.mode == .debug)
+            std.debug.panic("validator: {s}.validateSelf returned a malformed violation: its message is not 1-{d} bytes of valid UTF-8", .{ @typeName(T), core.max_message_bytes });
+        return sink.report("validation.invalid", "is invalid");
+    }
+    const field = violation.field orelse return sink.report(violation.code, violation.message);
+    inline for (@typeInfo(T).@"struct".field_names, @typeInfo(T).@"struct".field_attrs) |name, attrs| {
+        if (!attrs.@"comptime" and std.mem.eql(u8, name, field)) {
+            const mark = try sink.push(.{ .field = name });
+            defer sink.pop(mark);
+            return sink.report(violation.code, violation.message);
+        }
+    }
+    if (builtin.mode == .debug)
+        std.debug.panic("validator: {s}.validateSelf returned a malformed violation: field \"{f}\" is not a field of {s}", .{ @typeName(T), std.zig.fmtString(field), @typeName(T) });
+    return sink.report("validation.invalid", "is invalid");
 }

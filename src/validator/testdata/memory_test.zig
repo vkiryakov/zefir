@@ -114,3 +114,38 @@ test "check allocates nothing: it also runs at compile time, where no allocator 
         if (v.check(&valid, &buf) != null) @compileError("expected no violation");
     }
 }
+
+// ------------------------------------------------------------- validateSelf
+
+const SelfRange = struct {
+    start: u32,
+    end: u32,
+    pub fn validateSelf(range: *const SelfRange) ?v.Violation {
+        if (range.end < range.start) return v.fail(SelfRange, .end, "orders.end_before_start", "must not be before start");
+        return null;
+    }
+};
+const SelfRanges = struct { ranges: []const SelfRange };
+
+/// Every field passes; the only violation comes from `validateSelf`.
+const self_ranges: SelfRanges = .{ .ranges = &.{ .{ .start = 1, .end = 2 }, .{ .start = 5, .end = 3 } } };
+
+fn checkAllSelfRanges(gpa: std.mem.Allocator, value: *const SelfRanges) !void {
+    const report = try v.checkAll(gpa, value);
+    defer report.deinit();
+    try std.testing.expectEqual(1, report.violations.len);
+    try std.testing.expectEqualStrings("ranges[1].end", report.violations[0].field.?);
+}
+
+test "checkAll fails cleanly at every allocation when the only violation comes from validateSelf" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, checkAllSelfRanges, .{&self_ranges});
+}
+
+test "check runs validateSelf at comptime too, so its path needs no allocation" {
+    comptime {
+        var buf: [64]u8 = undefined;
+        const got = v.check(&self_ranges, &buf) orelse @compileError("expected the validateSelf violation");
+        if (!std.mem.eql(u8, got.code, "orders.end_before_start")) @compileError("wrong code: " ++ got.code);
+        if (!std.mem.eql(u8, got.field.?, "ranges[1].end")) @compileError("wrong path: " ++ got.field.?);
+    }
+}

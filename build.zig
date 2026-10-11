@@ -165,4 +165,51 @@ fn addValidatorTests(
         t.expect_errors = .{ .contains = fixture.expect };
         test_step.dependOn(&t.step);
     }
+
+    // A malformed validateSelf result is reported as validation.invalid
+    // outside Debug. These files get their own ReleaseSafe copy of the
+    // module, whatever -Doptimize says.
+    const validator_safe = b.createModule(.{
+        .root_source_file = b.path("src/validator/root.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+    });
+    for (validator_cases.release_test_files) |file| {
+        const t = b.addTest(.{
+            .name = std.fs.path.stem(file),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(file),
+                .target = target,
+                .optimize = .ReleaseSafe,
+                .imports = &.{.{ .name = "validator", .module = validator_safe }},
+            }),
+        });
+        test_step.dependOn(&b.addRunArtifact(t).step);
+    }
+
+    // In Debug, a malformed validateSelf result panics: each program must
+    // print the panic message and end in its own panic handler, which exits
+    // with code 3 instead of aborting (see the programs in panic/).
+    const validator_debug = b.createModule(.{
+        .root_source_file = b.path("src/validator/root.zig"),
+        .target = target,
+        .optimize = .Debug,
+    });
+    for (validator_cases.panic_runs) |entry| {
+        const exe = b.addExecutable(.{
+            .name = std.fs.path.stem(entry.file),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(entry.file),
+                .target = target,
+                .optimize = .Debug,
+                .imports = &.{.{ .name = "validator", .module = validator_debug }},
+            }),
+        });
+        const run = b.addRunArtifact(exe);
+        run.expectStdErrMatch(entry.stderr);
+        // expectStdErrMatch accepts any exit: only the panic handler exits
+        // with 3, so a program that printed the text and returned fails.
+        run.expectExitCode(3);
+        test_step.dependOn(&run.step);
+    }
 }
