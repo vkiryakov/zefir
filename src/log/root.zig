@@ -17,4 +17,6 @@ test {
     _ = @import("timestamp.zig");
     _ = @import("options.zig");
     _ = @import("escape.zig");
+    _ = @import("redact.zig");
+    _ = @import("fields.zig");
 }
