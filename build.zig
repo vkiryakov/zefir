@@ -85,6 +85,24 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&run.step);
     }
 
+    // log examples: `zig build test` builds and runs them, like the core ones.
+    for ([_][]const u8{"service"}) |name| {
+        const example = b.addExecutable(.{
+            .name = b.fmt("log-{s}", .{name}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(b.fmt("src/log/examples/{s}.zig", .{name})),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "log", .module = log },
+                },
+            }),
+        });
+        const run = b.addRunArtifact(example);
+        run.expectExitCode(0);
+        test_step.dependOn(&run.step);
+    }
+
     // log compile errors: each test of the file must fail to compile with
     // the message next to its name. The filter compiles one test at a time;
     // the message must be the end of an error line.
