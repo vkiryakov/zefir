@@ -17,6 +17,9 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/log/root.zig"),
         .target = target,
         .optimize = optimize,
+        .imports = &.{
+            .{ .name = "core", .module = core },
+        },
     });
 
     const confy = b.addModule("zefir-confy", .{

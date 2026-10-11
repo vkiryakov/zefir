@@ -36,6 +36,10 @@ const std = @import("std");
 const options = @import("options.zig");
 
 pub const Level = @import("level.zig").Level;
+/// Whether a type is marked `pub const zefir_sensitive = true;`: the logger
+/// writes such values as "[REDACTED]". The check lives in zefir-core, so
+/// every module shares one marker.
+pub const isSensitive = @import("core").isSensitive;
 pub const Logger = @import("Logger.zig");
 pub const Stats = @import("Engine.zig").Stats;
 pub const InitError = Logger.InitError;
@@ -45,6 +49,15 @@ pub const ScopeRule = options.ScopeRule;
 pub const Format = options.Format;
 pub const OversizePolicy = options.OversizePolicy;
 pub const Output = options.Output;
+
+test "isSensitive is core's check, so one marker serves every module" {
+    const Token = struct {
+        value: []const u8,
+        pub const zefir_sensitive = true;
+    };
+    try std.testing.expect(isSensitive(Token));
+    try std.testing.expect(!isSensitive(struct { value: []const u8 }));
+}
 
 test {
     std.testing.refAllDecls(@This());
