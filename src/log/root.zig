@@ -4,6 +4,9 @@ const std = @import("std");
 const options = @import("options.zig");
 
 pub const Level = @import("level.zig").Level;
+pub const Logger = @import("Logger.zig");
+pub const Stats = @import("Engine.zig").Stats;
+pub const InitError = Logger.InitError;
 pub const Options = options.Options;
 pub const Service = options.Service;
 pub const ScopeRule = options.ScopeRule;
@@ -21,4 +24,6 @@ test {
     _ = @import("fields.zig");
     _ = @import("encode.zig");
     _ = @import("scopes.zig");
+    _ = @import("Engine.zig");
+    _ = @import("Logger.zig");
 }
