@@ -126,6 +126,114 @@ pub fn fittingPrefix(s: []const u8, budget: usize) usize {
     return i;
 }
 
+/// A writer that escapes what it is given into `out`, as `write` does: the
+/// output of `format` methods and of std.log messages goes through it. A
+/// UTF-8 sequence split between two writes is held back until it is whole;
+/// `finish` writes out what is left. Use it in place: `init` points its
+/// writer at its own buffer.
+pub const Escaper = struct {
+    out: *std.Io.Writer,
+    writer: std.Io.Writer,
+    /// Escaped bytes written to `out` so far.
+    count: usize = 0,
+    /// When set, stop at this many escaped bytes, between characters, and
+    /// drop the rest; `cut` tells whether that happened.
+    budget: ?usize = null,
+    cut: bool = false,
+    /// Nothing so far needs quotes in the text format: no escape, no space
+    /// or '=', and, when `strict`, none of ",[]{}" either.
+    plain: bool = true,
+    strict: bool = false,
+    /// The start of a UTF-8 sequence that the last write cut short.
+    pending: [4]u8 = undefined,
+    pending_len: u8 = 0,
+    buffer: [256]u8 = undefined,
+
+    const vtable: std.Io.Writer.VTable = .{ .drain = drain, .flush = flush };
+
+    pub fn init(e: *Escaper, out: *std.Io.Writer) void {
+        e.* = .{ .out = out, .writer = .{ .buffer = &e.buffer, .vtable = &vtable } };
+    }
+
+    /// Writes out what is held back; an unfinished sequence becomes U+FFFD.
+    pub fn finish(e: *Escaper) std.Io.Writer.Error!void {
+        try e.writer.flush();
+    }
+
+    fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+        const e: *Escaper = @alignCast(@fieldParentPtr("writer", w));
+        try e.feed(w.buffer[0..w.end]);
+        w.end = 0;
+        var consumed: usize = 0;
+        for (data[0 .. data.len - 1]) |bytes| {
+            try e.feed(bytes);
+            consumed += bytes.len;
+        }
+        const pattern = data[data.len - 1];
+        for (0..splat) |_| try e.feed(pattern);
+        return consumed + pattern.len * splat;
+    }
+
+    fn flush(w: *std.Io.Writer) std.Io.Writer.Error!void {
+        const e: *Escaper = @alignCast(@fieldParentPtr("writer", w));
+        try e.feed(w.buffer[0..w.end]);
+        w.end = 0;
+        const held = e.pending_len;
+        e.pending_len = 0;
+        try e.emit(e.pending[0..held]);
+    }
+
+    fn feed(e: *Escaper, bytes: []const u8) std.Io.Writer.Error!void {
+        var rest = bytes;
+        if (e.pending_len > 0) {
+            const need = std.unicode.utf8ByteSequenceLength(e.pending[0]) catch unreachable;
+            while (e.pending_len < need and rest.len > 0 and rest[0] & 0xc0 == 0x80) {
+                e.pending[e.pending_len] = rest[0];
+                e.pending_len += 1;
+                rest = rest[1..];
+            }
+            if (e.pending_len < need and rest.len == 0) return; // still unfinished
+            const held = e.pending_len;
+            e.pending_len = 0;
+            try e.emit(e.pending[0..held]);
+        }
+        const keep = unfinishedTail(rest);
+        try e.emit(rest[0 .. rest.len - keep]);
+        @memcpy(e.pending[0..keep], rest[rest.len - keep ..]);
+        e.pending_len = @intCast(keep);
+    }
+
+    fn emit(e: *Escaper, s: []const u8) std.Io.Writer.Error!void {
+        if (e.cut or s.len == 0) return;
+        var part = s;
+        if (e.budget) |budget| {
+            const n = fittingPrefix(s, budget - e.count);
+            if (n < s.len) {
+                e.cut = true;
+                part = s[0..n];
+            }
+        }
+        const len = escapedLen(part);
+        const special: []const u8 = if (e.strict) " =,[]{}" else " =";
+        if (len != part.len or std.mem.findAny(u8, part, special) != null) e.plain = false;
+        try write(e.out, part);
+        e.count += len;
+    }
+};
+
+/// How many bytes at the end of `s` start a UTF-8 sequence that `s` cuts
+/// short.
+fn unfinishedTail(s: []const u8) usize {
+    var back: usize = 1;
+    while (back <= 3 and back <= s.len) : (back += 1) {
+        const c = s[s.len - back];
+        if (c & 0xc0 == 0x80) continue; // a continuation byte: look further back
+        const n = std.unicode.utf8ByteSequenceLength(c) catch return 0;
+        return if (n > back) back else 0;
+    }
+    return 0;
+}
+
 /// Whether the text format may write `s` without quotes: it is not empty
 /// and has no spaces, no `=`, nothing that needs escaping and no invalid
 /// UTF-8.
@@ -199,6 +307,77 @@ test "fittingPrefix cuts between characters, never inside one" {
     try testing.expectEqual(@as(usize, 0), fittingPrefix("\x01", 5)); // "\\u0001" takes 6
     try testing.expectEqual(@as(usize, 1), fittingPrefix("\xffz", 3)); // U+FFFD takes 3
     try testing.expectEqual(@as(usize, 0), fittingPrefix("", 0));
+}
+
+/// Writes `parts` through an escaper, one write each, and finishes it.
+fn escapeParts(out: *std.Io.Writer, e: *Escaper, parts: []const []const u8) !void {
+    e.init(out);
+    for (parts) |part| try e.writer.writeAll(part);
+    try e.finish();
+}
+
+test "an escaper escapes a stream; a UTF-8 sequence split between writes stays whole" {
+    var buf: [64]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&buf);
+    var e: Escaper = undefined;
+    try escapeParts(&out, &e, &.{ "a\"b ", "\xe2\x82", "\xac", "\n!" });
+    try testing.expectEqualStrings("a\\\"b €\\n!", out.buffered());
+    try testing.expectEqual(out.buffered().len, e.count);
+    try testing.expect(!e.plain);
+}
+
+test "an escaper ends an unfinished sequence with U+FFFD" {
+    var buf: [64]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&buf);
+    var e: Escaper = undefined;
+    try escapeParts(&out, &e, &.{ "x\xe2", "\x82" });
+    try testing.expectEqualStrings("x\u{FFFD}\u{FFFD}", out.buffered());
+    out = .fixed(&buf);
+    try escapeParts(&out, &e, &.{ "\xe2\x82", "y" }); // broken by a byte that does not continue it
+    try testing.expectEqualStrings("\u{FFFD}\u{FFFD}y", out.buffered());
+}
+
+test "an escaper takes long writes and prints" {
+    var buf: [4096]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&buf);
+    var e: Escaper = undefined;
+    e.init(&out);
+    const long = &@as([1000]u8, @splat('z'));
+    try e.writer.writeAll(long);
+    try e.writer.print(" {d} {s}", .{ 42, "q\"" });
+    try e.finish();
+    try testing.expectEqualStrings(long ++ " 42 q\\\"", out.buffered());
+}
+
+test "an escaper tells whether the text needs quotes" {
+    var buf: [64]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&buf);
+    var e: Escaper = undefined;
+    try escapeParts(&out, &e, &.{ "abc", "-def/é" });
+    try testing.expect(e.plain);
+    out = .fixed(&buf);
+    try escapeParts(&out, &e, &.{"a=b"});
+    try testing.expect(!e.plain);
+    out = .fixed(&buf);
+    e.init(&out);
+    e.strict = true;
+    try e.writer.writeAll("a,b");
+    try e.finish();
+    try testing.expect(!e.plain);
+}
+
+test "an escaper with a budget stops between characters and drops the rest" {
+    var buf: [64]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&buf);
+    var e: Escaper = undefined;
+    e.init(&out);
+    e.budget = 6;
+    try e.writer.writeAll("ab€");
+    try e.writer.writeAll("\ncd");
+    try e.finish();
+    try testing.expectEqualStrings("ab€", out.buffered()); // "\\n" would take 2 bytes more than the budget allows
+    try testing.expect(e.cut);
+    try testing.expectEqual(@as(usize, 5), e.count);
 }
 
 test "isBare: which text values may go without quotes" {

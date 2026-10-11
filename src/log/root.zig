@@ -40,6 +40,8 @@ pub const Level = @import("level.zig").Level;
 /// writes such values as "[REDACTED]". The check lives in zefir-core, so
 /// every module shares one marker.
 pub const isSensitive = @import("core").isSensitive;
+/// Logs bytes as lowercase hex: `.digest = zefir.log.hex(&digest)`.
+pub const hex = @import("hex.zig").hex;
 pub const Logger = @import("Logger.zig");
 pub const Stats = @import("Engine.zig").Stats;
 pub const InitError = Logger.InitError;
@@ -71,4 +73,5 @@ test {
     _ = @import("scopes.zig");
     _ = @import("Engine.zig");
     _ = @import("Logger.zig");
+    _ = @import("hex.zig");
 }

@@ -72,12 +72,14 @@ fn isReserved(comptime path: []const u8) bool {
 /// Checks a value of type `T` at `path`. `visited` holds the types on the
 /// way to it, so a type that contains itself is checked once.
 fn checkValue(comptime path: []const u8, comptime T: type, comptime flat: bool, comptime visited: []const type) void {
-    if (redactsWhole(T) or hasFormat(T) or isString(T)) return;
+    // The same order as the encoder: marker, logValue, format, the rest.
+    if (redactsWhole(T)) return;
     for (visited) |seen| {
         if (seen == T) return;
     }
     const next = visited ++ [_]type{T};
     if (LogValue(T)) |R| return checkValue(path, R, flat, next);
+    if (hasFormat(T) or isString(T)) return;
     switch (@typeInfo(T)) {
         .bool, .int, .float, .comptime_int, .comptime_float, .@"enum", .enum_literal, .error_set, .null, .type => {},
         .optional => |o| checkValue(path, o.child, flat, next),

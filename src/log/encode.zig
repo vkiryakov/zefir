@@ -22,10 +22,12 @@ const depth_marker = "[MAX_DEPTH]";
 
 /// How a value is written. `fields.check` has ruled out every type that
 /// fits none of these.
-const Class = enum { redacted, string, scalar, optional, pointer, sequence, object, tagged };
+const Class = enum { redacted, log_value, format, string, scalar, optional, pointer, sequence, object, tagged };
 
 fn classOf(comptime T: type) Class {
     if (field_checks.redactsWhole(T)) return .redacted;
+    if (field_checks.LogValue(T) != null) return .log_value;
+    if (field_checks.hasFormat(T)) return .format;
     if (field_checks.isString(T)) return .string;
     return switch (@typeInfo(T)) {
         .optional => .optional,
@@ -50,6 +52,8 @@ fn writeJson(w: *Writer, value: anytype, comptime depth: u8) Writer.Error!void {
     const too_deep = "\"" ++ depth_marker ++ "\"";
     switch (comptime classOf(T)) {
         .redacted => try w.writeAll("\"" ++ redact.placeholder ++ "\""),
+        .log_value => if (depth == max_depth) try w.writeAll(too_deep) else try writeJson(w, value.logValue(), depth + 1),
+        .format => try writeFormatted(.json, w, value, false),
         .string => try writeString(.json, w, stringOf(&value), false),
         .scalar => try writeScalar(.json, w, value, false),
         .optional => if (value) |payload| try writeJson(w, payload, depth) else try w.writeAll("null"),
@@ -75,6 +79,8 @@ fn writeText(w: *Writer, value: anytype, comptime depth: u8, comptime nested: bo
     const T = @TypeOf(value);
     switch (comptime classOf(T)) {
         .redacted => try w.writeAll(redact.placeholder),
+        .log_value => if (depth == max_depth) try w.writeAll(depth_marker) else try writeText(w, value.logValue(), depth + 1, nested),
+        .format => try writeFormatted(.text, w, value, nested),
         .string => try writeString(.text, w, stringOf(&value), nested),
         .scalar => try writeScalar(.text, w, value, nested),
         .optional => if (value) |payload| try writeText(w, payload, depth, nested) else try w.writeAll("null"),
@@ -179,6 +185,7 @@ fn placeholderToken(comptime f: Format) []const u8 {
 fn writeTextField(w: *Writer, comptime path: []const u8, value: anytype, comptime depth: u8) Writer.Error!void {
     const T = @TypeOf(value);
     if (depth < max_depth) switch (comptime classOf(T)) {
+        .log_value => return writeTextField(w, path, value.logValue(), depth + 1),
         .pointer => if (@typeInfo(@typeInfo(T).pointer.child) != .array) return writeTextField(w, path, value.*, depth),
         .object => {
             const s = @typeInfo(T).@"struct";
@@ -213,6 +220,31 @@ fn writeTextField(w: *Writer, comptime path: []const u8, value: anytype, comptim
     };
     try w.writeAll(" " ++ path ++ "=");
     try writeText(w, value, depth, false);
+}
+
+/// What `value.format(writer)` writes, as a string: escaped, in quotes for
+/// JSON, and bare in text when nothing in it needs quotes.
+fn writeFormatted(comptime f: Format, w: *Writer, value: anytype, comptime nested: bool) Writer.Error!void {
+    if (f == .text) {
+        // A dry run tells whether the text needs quotes.
+        var sink: Writer.Discarding = .init(&.{});
+        var probe: escape.Escaper = undefined;
+        probe.init(&sink.writer);
+        probe.strict = nested;
+        value.format(&probe.writer) catch {};
+        probe.finish() catch {};
+        if (probe.plain and probe.count > 0) return formatEscaped(w, value);
+    }
+    try w.writeByte('"');
+    try formatEscaped(w, value);
+    try w.writeByte('"');
+}
+
+fn formatEscaped(w: *Writer, value: anytype) Writer.Error!void {
+    var e: escape.Escaper = undefined;
+    e.init(w);
+    try value.format(&e.writer);
+    try e.finish();
 }
 
 /// The string a string-like value holds. Takes a pointer, so an array
@@ -748,6 +780,97 @@ test "text spreads the objects of a field into dotted keys; arrays and optionals
     const got = record(.text, .info, "Config", &buf, header, .{ .config = cfg, .self = &cfg.db }).?;
     try testing.expectEqualStrings("2026-10-10T21:08:00.123Z INFO  Config config.name=svc config.db.host=pg config.db.port=5432 config.db.password=[REDACTED] " ++
         "config.tags=[a] config.state.running=3 config.backup=null self.host=pg self.port=5432 self.password=[REDACTED]\n", buf[0..got.len]);
+}
+
+const Money = struct {
+    cents: i64,
+    pub fn format(m: Money, w: *Writer) Writer.Error!void {
+        try w.print("{d}.{d:0>2} EUR", .{ @divTrunc(m.cents, 100), @abs(@rem(m.cents, 100)) });
+    }
+};
+
+test "format: a type's own text, as a string" {
+    try expectValue(Money{ .cents = 1999 }, "\"19.99 EUR\"", "\"19.99 EUR\"");
+    const Code = struct {
+        id: u32,
+        pub fn format(c: *const @This(), w: *Writer) Writer.Error!void {
+            try w.print("C-{d}", .{c.id});
+        }
+    };
+    try expectValue(Code{ .id = 7 }, "\"C-7\"", "C-7");
+    try expectValue([2]Code{ .{ .id = 1 }, .{ .id = 2 } }, "[\"C-1\",\"C-2\"]", "[C-1,C-2]");
+    const Color = enum {
+        red,
+        pub fn format(c: @This(), w: *Writer) Writer.Error!void {
+            try w.writeAll(if (c == .red) "#ff0000" else "?");
+        }
+    };
+    try expectValue(Color.red, "\"#ff0000\"", "#ff0000");
+}
+
+test "format: whatever the method writes stays one valid line" {
+    const Weird = struct {
+        pub fn format(_: @This(), w: *Writer) Writer.Error!void {
+            try w.writeAll("a\"b\nc\xff");
+            try w.writeAll("\xe2\x82"); // a sequence split between two writes
+            try w.writeAll("\xac,]");
+        }
+    };
+    try expectValue(Weird{}, "\"a\\\"b\\nc\u{FFFD}€,]\"", "\"a\\\"b\\nc\u{FFFD}€,]\"");
+    const Empty = struct {
+        pub fn format(_: @This(), _: *Writer) Writer.Error!void {}
+    };
+    try expectValue(Empty{}, "\"\"", "\"\"");
+}
+
+test "logValue: the value the type logs instead of itself, under the same rules" {
+    const Key = struct {
+        raw: []const u8,
+        pub const zefir_sensitive = true;
+    };
+    const User = struct {
+        id: u64,
+        password_hash: []const u8,
+        key: Key,
+        pub fn logValue(u: @This()) struct { id: u64, key: Key } {
+            return .{ .id = u.id, .key = u.key };
+        }
+    };
+    const user: User = .{ .id = 1, .password_hash = "x", .key = .{ .raw = "k" } };
+    try expectValue(user, "{\"id\":1,\"key\":\"[REDACTED]\"}", "{id=1,key=[REDACTED]}");
+    var buf: [256]u8 = undefined;
+    const header: Header = .{ .timestamp = fixed_time, .service = "", .scope = "", .oversize = .truncate };
+    var u = user;
+    _ = &u;
+    const got = record(.text, .info, "m", &buf, header, .{ .user = u }).?;
+    try testing.expectStringEndsWith(buf[0..got.len], " m user.id=1 user.key=[REDACTED]\n");
+}
+
+test "the marker comes first, then logValue, then format, then the fields" {
+    const MarkedFormat = struct {
+        x: u8,
+        pub const zefir_sensitive = true;
+        pub fn format(_: @This(), w: *Writer) Writer.Error!void {
+            try w.writeAll("leak");
+        }
+    };
+    const Both = struct {
+        x: u8,
+        pub fn logValue(b: @This()) u8 {
+            return b.x;
+        }
+        pub fn format(_: @This(), w: *Writer) Writer.Error!void {
+            try w.writeAll("format");
+        }
+    };
+    try expectValue(MarkedFormat{ .x = 1 }, "\"[REDACTED]\"", "[REDACTED]");
+    try expectValue(Both{ .x = 5 }, "5", "5");
+}
+
+test "hex: bytes as lowercase hex" {
+    const hex = @import("hex.zig").hex;
+    const digest = [_]u8{ 0xde, 0xad, 0x00, 0x0f };
+    try expectValue(hex(&digest), "\"dead000f\"", "dead000f");
 }
 
 test "literal nested values are rendered at compile time" {
