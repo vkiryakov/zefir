@@ -15,22 +15,240 @@ const Format = options.Format;
 const Writer = std.Io.Writer;
 const testing = std.testing;
 
-/// Writes one value. Values known only at compile time (`comptime_int`,
-/// enum literals, `null`) are written at compile time, see `literalField`.
+/// Objects, arrays and unions nested deeper than this are written as
+/// "[MAX_DEPTH]", so a cycle through pointers ends.
+const max_depth = 8;
+const depth_marker = "[MAX_DEPTH]";
+
+/// How a value is written. `fields.check` has ruled out every type that
+/// fits none of these.
+const Class = enum { redacted, string, scalar, optional, pointer, sequence, object, tagged };
+
+fn classOf(comptime T: type) Class {
+    if (field_checks.redactsWhole(T)) return .redacted;
+    if (field_checks.isString(T)) return .string;
+    return switch (@typeInfo(T)) {
+        .optional => .optional,
+        .pointer => |p| if (p.size == .one) .pointer else .sequence,
+        .array, .vector => .sequence,
+        .@"struct" => |s| if (s.is_tuple) .sequence else .object,
+        .@"union" => .tagged,
+        else => .scalar,
+    };
+}
+
+/// Writes one value: JSON, or text as it reads inside a field.
 fn writeValue(comptime f: Format, w: *Writer, value: anytype) Writer.Error!void {
+    return switch (f) {
+        .json => writeJson(w, value, 0),
+        .text => writeText(w, value, 0, false),
+    };
+}
+
+fn writeJson(w: *Writer, value: anytype, comptime depth: u8) Writer.Error!void {
     const T = @TypeOf(value);
-    if (comptime field_checks.isString(T)) {
-        const s: []const u8 = switch (@typeInfo(T)) {
-            .array => &value,
-            .pointer => |p| switch (p.size) {
-                .slice, .one => value,
-                .many => std.mem.span(value),
-                .c => unreachable,
-            },
-            else => unreachable,
-        };
-        return writeString(f, w, s);
+    const too_deep = "\"" ++ depth_marker ++ "\"";
+    switch (comptime classOf(T)) {
+        .redacted => try w.writeAll("\"" ++ redact.placeholder ++ "\""),
+        .string => try writeString(.json, w, stringOf(&value), false),
+        .scalar => try writeScalar(.json, w, value, false),
+        .optional => if (value) |payload| try writeJson(w, payload, depth) else try w.writeAll("null"),
+        .pointer => try writeJson(w, deref(value), depth),
+        .sequence => if (depth == max_depth) try w.writeAll(too_deep) else {
+            try w.writeByte('[');
+            try writeItems(.json, w, value, depth + 1);
+            try w.writeByte(']');
+        },
+        .object => if (depth == max_depth) try w.writeAll(too_deep) else {
+            try w.writeByte('{');
+            try writeMembers(.json, w, value, depth + 1);
+            try w.writeByte('}');
+        },
+        .tagged => if (depth == max_depth) try w.writeAll(too_deep) else try writeTagged(.json, w, value, depth + 1),
     }
+}
+
+/// A value inside a text field: scalars and strings as they are, the rest
+/// inline: `[1,2]`, `{host=pg,port=5432}`. `nested` is set inside a
+/// composite, where strings with `,[]{}` take quotes too.
+fn writeText(w: *Writer, value: anytype, comptime depth: u8, comptime nested: bool) Writer.Error!void {
+    const T = @TypeOf(value);
+    switch (comptime classOf(T)) {
+        .redacted => try w.writeAll(redact.placeholder),
+        .string => try writeString(.text, w, stringOf(&value), nested),
+        .scalar => try writeScalar(.text, w, value, nested),
+        .optional => if (value) |payload| try writeText(w, payload, depth, nested) else try w.writeAll("null"),
+        .pointer => try writeText(w, deref(value), depth, nested),
+        .sequence => if (depth == max_depth) try w.writeAll(depth_marker) else {
+            try w.writeByte('[');
+            try writeItems(.text, w, value, depth + 1);
+            try w.writeByte(']');
+        },
+        .object => if (depth == max_depth) try w.writeAll(depth_marker) else {
+            try w.writeByte('{');
+            try writeMembers(.text, w, value, depth + 1);
+            try w.writeByte('}');
+        },
+        .tagged => if (depth == max_depth) try w.writeAll(depth_marker) else try writeTagged(.text, w, value, depth + 1),
+    }
+}
+
+/// A value inside an array, an object or a union.
+fn writeNested(comptime f: Format, w: *Writer, value: anytype, comptime depth: u8) Writer.Error!void {
+    return switch (f) {
+        .json => writeJson(w, value, depth),
+        .text => writeText(w, value, depth, true),
+    };
+}
+
+fn writeItems(comptime f: Format, w: *Writer, value: anytype, comptime depth: u8) Writer.Error!void {
+    switch (@typeInfo(@TypeOf(value))) {
+        // A tuple: its items may be known at compile time.
+        .@"struct" => |s| inline for (s.field_names, s.field_types, s.field_attrs, 0..) |name, Item, attrs, i| {
+            if (i > 0) try w.writeByte(',');
+            if (attrs.@"comptime" and comptime renderAtComptime(Item))
+                try w.writeAll(comptime renderedNested(f, @field(value, name), depth))
+            else
+                try writeNested(f, w, @field(value, name), depth);
+        },
+        .vector => |v| {
+            const items: [v.len]v.child = value;
+            for (items, 0..) |item, i| {
+                if (i > 0) try w.writeByte(',');
+                try writeNested(f, w, item, depth);
+            }
+        },
+        else => for (value, 0..) |item, i| {
+            if (i > 0) try w.writeByte(',');
+            try writeNested(f, w, item, depth);
+        },
+    }
+}
+
+/// `"name":value` (JSON) or `name=value` (text) pairs, comma-separated.
+fn writeMembers(comptime f: Format, w: *Writer, value: anytype, comptime depth: u8) Writer.Error!void {
+    const s = @typeInfo(@TypeOf(value)).@"struct";
+    comptime var first = true;
+    inline for (s.field_names, s.field_types, s.field_attrs) |name, Member, attrs| {
+        if (Member == void) continue;
+        try w.writeAll(comptime (if (first) "" else ",") ++ memberKey(f, name));
+        first = false;
+        if (comptime redact.isSensitiveName(name))
+            try w.writeAll(comptime placeholderToken(f))
+        else if (attrs.@"comptime" and comptime renderAtComptime(Member))
+            try w.writeAll(comptime renderedNested(f, @field(value, name), depth))
+        else
+            try writeNested(f, w, @field(value, name), depth);
+    }
+}
+
+/// `{"tag":payload}` or `{tag=payload}`; a void payload is `{}`.
+fn writeTagged(comptime f: Format, w: *Writer, value: anytype, comptime depth: u8) Writer.Error!void {
+    switch (value) {
+        inline else => |payload, tag| {
+            const name = @tagName(tag);
+            try w.writeAll(comptime "{" ++ memberKey(f, name));
+            if (comptime redact.isSensitiveName(name))
+                try w.writeAll(comptime placeholderToken(f))
+            else if (@TypeOf(payload) == void)
+                try w.writeAll("{}")
+            else
+                try writeNested(f, w, payload, depth);
+            try w.writeByte('}');
+        },
+    }
+}
+
+fn memberKey(comptime f: Format, comptime name: []const u8) []const u8 {
+    return switch (f) {
+        .json => "\"" ++ name ++ "\":",
+        .text => name ++ "=",
+    };
+}
+
+fn placeholderToken(comptime f: Format) []const u8 {
+    return switch (f) {
+        .json => "\"" ++ redact.placeholder ++ "\"",
+        .text => redact.placeholder,
+    };
+}
+
+/// One field of a text record: ` path=value`. An object or a union reached
+/// from the field through objects, unions, pointers and `logValue` is
+/// spread into one ` path.member=value` per member instead.
+fn writeTextField(w: *Writer, comptime path: []const u8, value: anytype, comptime depth: u8) Writer.Error!void {
+    const T = @TypeOf(value);
+    if (depth < max_depth) switch (comptime classOf(T)) {
+        .pointer => if (@typeInfo(@typeInfo(T).pointer.child) != .array) return writeTextField(w, path, value.*, depth),
+        .object => {
+            const s = @typeInfo(T).@"struct";
+            comptime var empty = true;
+            inline for (s.field_names, s.field_types, s.field_attrs) |name, Member, attrs| {
+                if (Member == void) continue;
+                empty = false;
+                const member = path ++ "." ++ name;
+                if (comptime redact.isSensitiveName(name))
+                    try w.writeAll(" " ++ member ++ "=" ++ redact.placeholder)
+                else if (attrs.@"comptime" and comptime renderAtComptime(Member))
+                    try w.writeAll(comptime renderedTextField(member, @field(value, name), depth + 1))
+                else
+                    try writeTextField(w, member, @field(value, name), depth + 1);
+            }
+            if (empty) try w.writeAll(" " ++ path ++ "={}");
+            return;
+        },
+        .tagged => switch (value) {
+            inline else => |payload, tag| {
+                const member = path ++ "." ++ @tagName(tag);
+                if (comptime redact.isSensitiveName(@tagName(tag)))
+                    try w.writeAll(" " ++ member ++ "=" ++ redact.placeholder)
+                else if (@TypeOf(payload) == void)
+                    try w.writeAll(" " ++ member ++ "={}")
+                else
+                    try writeTextField(w, member, payload, depth + 1);
+                return;
+            },
+        },
+        else => {},
+    };
+    try w.writeAll(" " ++ path ++ "=");
+    try writeText(w, value, depth, false);
+}
+
+/// The string a string-like value holds. Takes a pointer, so an array
+/// argument is not copied into a slice that outlives it.
+fn stringOf(ptr: anytype) []const u8 {
+    const T = @typeInfo(@TypeOf(ptr)).pointer.child;
+    return switch (@typeInfo(T)) {
+        .array => ptr,
+        .pointer => |p| switch (p.size) {
+            .slice, .one => ptr.*,
+            .many => std.mem.span(ptr.*),
+            .c => unreachable,
+        },
+        else => unreachable,
+    };
+}
+
+/// What a single-item pointer points to; a pointer to an array gives a
+/// slice, so the array is not copied.
+fn deref(ptr: anytype) Deref(@TypeOf(ptr)) {
+    return switch (@typeInfo(@typeInfo(@TypeOf(ptr)).pointer.child)) {
+        .array => ptr,
+        else => ptr.*,
+    };
+}
+
+fn Deref(comptime P: type) type {
+    const Child = @typeInfo(P).pointer.child;
+    return switch (@typeInfo(Child)) {
+        .array => |a| []const a.child,
+        else => Child,
+    };
+}
+
+fn writeScalar(comptime f: Format, w: *Writer, value: anytype, comptime nested: bool) Writer.Error!void {
+    const T = @TypeOf(value);
     switch (@typeInfo(T)) {
         .bool => try w.writeAll(if (value) "true" else "false"),
         .int => |int| if (int.bits <= 64) try w.print("{d}", .{value}) else try writeQuotedDigits(f, w, value),
@@ -43,22 +261,24 @@ fn writeValue(comptime f: Format, w: *Writer, value: anytype) Writer.Error!void 
         // rendered at compile time, so this costs nothing at run time.
         .comptime_float => try writeFloat(f, w, @as(f128, value)),
         .null => try w.writeAll("null"),
-        .optional => if (value) |payload| try writeValue(f, w, payload) else try w.writeAll("null"),
         // Every value of an exhaustive enum has a name: one table lookup.
         .@"enum" => |e| if (e.mode == .exhaustive)
-            try writeString(f, w, @tagName(value))
+            try writeString(f, w, @tagName(value), nested)
         else if (std.enums.tagName(T, value)) |name|
-            try writeString(f, w, name)
+            try writeString(f, w, name, nested)
         else
             try writeQuotedDigits(f, w, @backingInt(value)),
-        .enum_literal => try writeString(f, w, @tagName(value)),
-        .error_set => try writeString(f, w, @errorName(value)),
+        .enum_literal => try writeString(f, w, @tagName(value), nested),
+        .error_set => try writeString(f, w, @errorName(value), nested),
+        .type => try writeString(f, w, @typeName(value), nested),
         else => @compileError("unreachable: fields.check lets no other type through"),
     }
 }
 
-fn writeString(comptime f: Format, w: *Writer, s: []const u8) Writer.Error!void {
-    if (f == .text and escape.isBare(s)) return w.writeAll(s);
+/// A JSON string, or a text value: bare when it is safe, else quoted.
+fn writeString(comptime f: Format, w: *Writer, s: []const u8, comptime nested: bool) Writer.Error!void {
+    if (f == .text and escape.isBare(s) and !(nested and std.mem.findAny(u8, s, ",[]{}") != null))
+        return w.writeAll(s);
     try w.writeByte('"');
     try escape.write(w, s);
     try w.writeByte('"');
@@ -86,8 +306,8 @@ fn writeFloat(comptime f: Format, w: *Writer, value: anytype) Writer.Error!void 
     }
 }
 
-/// The separator and the key: `,"name":` or ` name=`. Field names are
-/// limited to [A-Za-z0-9_.-], so they never need escaping.
+/// The separator and the key of a top-level field: `,"name":` or ` name=`.
+/// Field names are limited to [A-Za-z0-9_.-], so they never need escaping.
 fn key(comptime f: Format, comptime name: []const u8) []const u8 {
     return switch (f) {
         .json => ",\"" ++ name ++ "\":",
@@ -96,30 +316,85 @@ fn key(comptime f: Format, comptime name: []const u8) []const u8 {
 }
 
 fn writeField(comptime f: Format, w: *Writer, comptime name: []const u8, value: anytype) Writer.Error!void {
-    try w.writeAll(comptime key(f, name));
-    try writeValue(f, w, value);
+    switch (f) {
+        .json => {
+            try w.writeAll(comptime key(.json, name));
+            try writeJson(w, value, 0);
+        },
+        .text => try writeTextField(w, name, value, 0),
+    }
 }
 
 /// A field whose value is known at compile time, rendered once: at run
 /// time it costs one copy.
 fn literalField(comptime f: Format, comptime name: []const u8, comptime value: anytype) []const u8 {
+    return rendered(struct {
+        fn write(w: *Writer) Writer.Error!void {
+            return writeField(f, w, name, value);
+        }
+    }.write);
+}
+
+/// `writeNested` for a value known at compile time.
+fn renderedNested(comptime f: Format, comptime value: anytype, comptime depth: u8) []const u8 {
+    return rendered(struct {
+        fn write(w: *Writer) Writer.Error!void {
+            return writeNested(f, w, value, depth);
+        }
+    }.write);
+}
+
+/// `writeTextField` for a value known at compile time.
+fn renderedTextField(comptime path: []const u8, comptime value: anytype, comptime depth: u8) []const u8 {
+    return rendered(struct {
+        fn write(w: *Writer) Writer.Error!void {
+            return writeTextField(w, path, value, depth);
+        }
+    }.write);
+}
+
+/// What `write` writes, computed at compile time.
+fn rendered(comptime write: fn (*Writer) Writer.Error!void) []const u8 {
     return comptime blk: {
         @setEvalBranchQuota(1_000_000);
         var counter: Writer.Discarding = .init(&.{});
-        writeField(f, &counter.writer, name, value) catch unreachable;
+        write(&counter.writer) catch unreachable;
         var buf: [@intCast(counter.count + counter.writer.end)]u8 = undefined;
         var w: Writer = .fixed(&buf);
-        writeField(f, &w, name, value) catch unreachable;
+        write(&w) catch unreachable;
         const final = buf;
         break :blk &final;
     };
 }
 
-fn redactedField(comptime f: Format, comptime name: []const u8) []const u8 {
-    return key(f, name) ++ switch (f) {
-        .json => "\"" ++ redact.placeholder ++ "\"",
-        .text => redact.placeholder,
+/// Whether a value known at compile time may also be written then. Not
+/// when it reads through a pointer that is not const: the address of a
+/// global `var` is known at compile time, what it holds is not.
+fn renderAtComptime(comptime T: type) bool {
+    return !readsMutable(T, &.{});
+}
+
+fn readsMutable(comptime T: type, comptime visited: []const type) bool {
+    for (visited) |seen| {
+        if (seen == T) return false;
+    }
+    const next = visited ++ [_]type{T};
+    return switch (@typeInfo(T)) {
+        .pointer => |p| !p.attrs.@"const" or readsMutable(p.child, next),
+        .optional => |o| readsMutable(o.child, next),
+        .array => |a| readsMutable(a.child, next),
+        .@"struct" => |s| for (s.field_types) |Member| {
+            if (readsMutable(Member, next)) break true;
+        } else false,
+        .@"union" => |u| for (u.field_types) |Payload| {
+            if (readsMutable(Payload, next)) break true;
+        } else false,
+        else => false,
     };
+}
+
+fn redactedField(comptime f: Format, comptime name: []const u8) []const u8 {
+    return key(f, name) ++ placeholderToken(f);
 }
 
 /// What the engine adds to every record.
@@ -269,13 +544,13 @@ fn escapedLiteral(comptime s: []const u8) []const u8 {
 
 fn writeFields(comptime f: Format, w: *Writer, fields: anytype, comptime cut: bool) Writer.Error!void {
     const info = @typeInfo(@TypeOf(fields)).@"struct";
-    inline for (info.field_names, info.field_attrs) |name, attrs| {
+    inline for (info.field_names, info.field_types, info.field_attrs) |name, Field, attrs| {
         // `.src` is the call site, never a field of the record.
         if (comptime std.mem.eql(u8, name, field_checks.source_field)) continue;
         const mark = w.end;
         const written = if (comptime redact.isSensitiveName(name))
             w.writeAll(comptime redactedField(f, name))
-        else if (attrs.@"comptime")
+        else if (attrs.@"comptime" and comptime renderAtComptime(Field))
             w.writeAll(comptime literalField(f, name, @field(fields, name)))
         else
             writeField(f, w, name, @field(fields, name));
@@ -386,6 +661,112 @@ test "enums and errors by name" {
     var failure: anyerror = error.Timeout;
     _ = &failure;
     try expectValue(failure, "\"Timeout\"", "Timeout");
+}
+
+test "structs are objects in declaration order; void members are left out" {
+    const Db = struct { host: []const u8, port: u16, nothing: void = {} };
+    const Config = struct { name: []const u8, db: Db, empty: struct {} = .{} };
+    try expectValue(
+        Config{ .name = "svc", .db = .{ .host = "pg", .port = 5432 } },
+        "{\"name\":\"svc\",\"db\":{\"host\":\"pg\",\"port\":5432},\"empty\":{}}",
+        "{name=svc,db={host=pg,port=5432},empty={}}",
+    );
+    const Flags = packed struct { sampled: bool, random: bool, reserved: u6 };
+    try expectValue(Flags{ .sampled = true, .random = false, .reserved = 0 }, "{\"sampled\":true,\"random\":false,\"reserved\":0}", "{sampled=true,random=false,reserved=0}");
+}
+
+test "tagged unions, arrays, slices, tuples, vectors and types" {
+    const State = union(enum) { idle, running: u32 };
+    try expectValue(State{ .running = 3 }, "{\"running\":3}", "{running=3}");
+    try expectValue(@as(State, .idle), "{\"idle\":{}}", "{idle={}}");
+    try expectValue([3]i32{ 1, -2, 3 }, "[1,-2,3]", "[1,-2,3]");
+    var tags: []const []const u8 = &.{ "a", "b c", "d,e", "[x]" };
+    _ = &tags;
+    try expectValue(tags, "[\"a\",\"b c\",\"d,e\",\"[x]\"]", "[a,\"b c\",\"d,e\",\"[x]\"]");
+    try expectValue(.{ 1, "two", true }, "[1,\"two\",true]", "[1,two,true]");
+    try expectValue(@as(@Vector(3, u8), .{ 1, 2, 3 }), "[1,2,3]", "[1,2,3]");
+    try expectValue(u8, "\"u8\"", "u8");
+    try expectValue([]const u8, "\"[]const u8\"", "\"[]const u8\"");
+}
+
+test "pointers are followed; a pointer to an array is the array" {
+    const Point = struct { x: i32, y: i32 };
+    const p: Point = .{ .x = 1, .y = 2 };
+    const arr = [2]u16{ 7, 8 };
+    try expectValue(&p, "{\"x\":1,\"y\":2}", "{x=1,y=2}");
+    try expectValue(@as(?*const Point, null), "null", "null");
+    try expectValue(&arr, "[7,8]", "[7,8]");
+}
+
+test "containers nested deeper than 8 levels become [MAX_DEPTH]" {
+    const Node = struct { v: u32, next: ?*const @This() };
+    var nodes: [12]Node = undefined;
+    for (&nodes, 0..) |*n, i| n.* = .{ .v = @intCast(i), .next = if (i + 1 < nodes.len) &nodes[i + 1] else null };
+    inline for (.{ Format.json, Format.text }) |f| {
+        var want: Writer.Allocating = .init(testing.allocator);
+        defer want.deinit();
+        for (0..8) |i| try want.writer.print(if (f == .json) "{{\"v\":{d},\"next\":" else "{{v={d},next=", .{i});
+        try want.writer.writeAll(if (f == .json) "\"[MAX_DEPTH]\"" else "[MAX_DEPTH]");
+        for (0..8) |_| try want.writer.writeByte('}');
+        var buf: [1024]u8 = undefined;
+        var w: Writer = .fixed(&buf);
+        try writeValue(f, &w, nodes[0]);
+        try testing.expectEqualStrings(want.written(), w.buffered());
+    }
+}
+
+test "redaction: a marked type and any wrapper around it give one placeholder; secret names at any depth" {
+    const Key = struct {
+        bytes: [4]u8,
+        pub const zefir_sensitive = true;
+    };
+    const k: Key = .{ .bytes = "abcd".* };
+    const keys = [_]Key{ k, k };
+    const Config = struct {
+        user: []const u8,
+        key: Key,
+        keys: []const Key,
+        maybe: ?Key,
+        db: struct { password: []const u8, host: []const u8 },
+    };
+    try expectValue(
+        Config{ .user = "ada", .key = k, .keys = &keys, .maybe = null, .db = .{ .password = "hunter2", .host = "pg" } },
+        "{\"user\":\"ada\",\"key\":\"[REDACTED]\",\"keys\":\"[REDACTED]\",\"maybe\":\"[REDACTED]\",\"db\":{\"password\":\"[REDACTED]\",\"host\":\"pg\"}}",
+        "{user=ada,key=[REDACTED],keys=[REDACTED],maybe=[REDACTED],db={password=[REDACTED],host=pg}}",
+    );
+    const Auth = union(enum) { user: []const u8, api_key: []const u8 };
+    try expectValue(Auth{ .api_key = "k" }, "{\"api_key\":\"[REDACTED]\"}", "{api_key=[REDACTED]}");
+}
+
+test "text spreads the objects of a field into dotted keys; arrays and optionals stay inline" {
+    const Db = struct { host: []const u8, port: u16, password: []const u8 };
+    const Config = struct { name: []const u8, db: Db, tags: []const []const u8, state: union(enum) { idle, running: u32 }, backup: ?Db };
+    var cfg: Config = .{ .name = "svc", .db = .{ .host = "pg", .port = 5432, .password = "x" }, .tags = &.{"a"}, .state = .{ .running = 3 }, .backup = null };
+    _ = &cfg;
+    var buf: [512]u8 = undefined;
+    const header: Header = .{ .timestamp = fixed_time, .service = "", .scope = "", .oversize = .truncate };
+    const got = record(.text, .info, "Config", &buf, header, .{ .config = cfg, .self = &cfg.db }).?;
+    try testing.expectEqualStrings("2026-10-10T21:08:00.123Z INFO  Config config.name=svc config.db.host=pg config.db.port=5432 config.db.password=[REDACTED] " ++
+        "config.tags=[a] config.state.running=3 config.backup=null self.host=pg self.port=5432 self.password=[REDACTED]\n", buf[0..got.len]);
+}
+
+test "literal nested values are rendered at compile time" {
+    var buf: [256]u8 = undefined;
+    const header: Header = .{ .timestamp = fixed_time, .service = "", .scope = "", .oversize = .truncate };
+    const got = record(.json, .info, "m", &buf, header, .{ .cfg = .{ .a = 1, .kind = .admin, .list = .{ 1, "two" } } }).?;
+    try testing.expectStringEndsWith(buf[0..got.len], ",\"cfg\":{\"a\":1,\"kind\":\"admin\",\"list\":[1,\"two\"]}}\n");
+}
+
+var global_name: [4]u8 = "abcd".*;
+var global_point: struct { x: i32 } = .{ .x = 1 };
+
+test "a field that points to a global variable is read when the record is written" {
+    global_name = "wxyz".*;
+    global_point.x = 42;
+    var buf: [256]u8 = undefined;
+    const header: Header = .{ .timestamp = fixed_time, .service = "", .scope = "", .oversize = .truncate };
+    const got = record(.json, .info, "m", &buf, header, .{ .name = &global_name, .point = &global_point }).?;
+    try testing.expectStringEndsWith(buf[0..got.len], ",\"name\":\"wxyz\",\"point\":{\"x\":42}}\n");
 }
 
 test "a literal field renders to the bytes a runtime one writes" {
@@ -526,6 +907,28 @@ test "every size from the mandatory part up gives one valid line" {
             const line = buf[0..got.len];
             try testing.expectEqual(size < whole.len, got.truncated);
             try testing.expect(std.unicode.utf8ValidateSlice(line));
+            try testing.expectEqual(@as(?usize, line.len - 1), std.mem.findScalar(u8, line, '\n'));
+            if (f == .json) try testing.expect(try std.json.validate(testing.allocator, line));
+        }
+    }
+}
+
+test "nested fields: every size from the mandatory part up gives one valid line" {
+    const header: Header = .{ .timestamp = fixed_time, .service = "", .scope = "users", .oversize = .truncate };
+    const Db = struct { host: []const u8, ports: []const u16 };
+    var db: Db = .{ .host = "pg \"main\"", .ports = &.{ 5432, 5433 } };
+    _ = &db;
+    const State = union(enum) { idle, running: u32 };
+    const fields = .{ .db = db, .list = .{ 1, "two" }, .state = State{ .running = 3 } };
+    inline for (.{ Format.json, Format.text }) |f| {
+        var whole_buf: [1024]u8 = undefined;
+        const whole = record(f, .info, "Nested", &whole_buf, header, fields).?;
+        var size = mandatoryBytes(f, 0, header.scope.len);
+        while (size <= whole.len) : (size += 1) {
+            var buf: [1024]u8 = undefined;
+            const got = record(f, .info, "Nested", buf[0..size], header, fields) orelse return error.TestUnexpectedResult;
+            const line = buf[0..got.len];
+            try testing.expectEqual(size < whole.len, got.truncated);
             try testing.expectEqual(@as(?usize, line.len - 1), std.mem.findScalar(u8, line, '\n'));
             if (f == .json) try testing.expect(try std.json.validate(testing.allocator, line));
         }
