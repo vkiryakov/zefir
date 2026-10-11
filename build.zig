@@ -250,4 +250,38 @@ fn addValidatorTests(
         });
         test_step.dependOn(&b.addRunArtifact(vector_tests).step);
     }
+
+    // The examples of src/validator/examples/README.md: a program must print
+    // exactly its `stdout`, a test must pass, and readme_test.zig checks that
+    // README.md shows every example and output verbatim.
+    for (validator_cases.examples) |example| {
+        const example_module = b.createModule(.{
+            .root_source_file = b.path(b.fmt("src/validator/examples/{s}.zig", .{example.name})),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "validator", .module = validator }},
+        });
+        if (example.stdout) |stdout| {
+            const example_run = b.addRunArtifact(b.addExecutable(.{ .name = example.name, .root_module = example_module }));
+            example_run.expectStdOutEqual(stdout);
+            test_step.dependOn(&example_run.step);
+        } else {
+            const example_test = b.addTest(.{ .name = example.name, .root_module = example_module });
+            test_step.dependOn(&b.addRunArtifact(example_test).step);
+        }
+    }
+    const readme_test = b.addTest(.{
+        .name = "readme_test",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/validator/examples/readme_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "cases", .module = b.createModule(.{
+                .root_source_file = b.path("src/validator/testdata/cases.zig"),
+                .target = target,
+                .optimize = optimize,
+            }) }},
+        }),
+    });
+    test_step.dependOn(&b.addRunArtifact(readme_test).step);
 }

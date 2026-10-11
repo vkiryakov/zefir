@@ -1,8 +1,34 @@
-//! zefir-validator: declarative validation of DTOs. Rules are comptime
-//! values declared next to the fields they check: a rule that does not fit
-//! its field type is a compile error, and a value that breaks a rule is
-//! reported as a `Violation` with a stable code, a message and the path of
-//! the field.
+//! zefir-validator — validation rules declared on your structs: a struct
+//! lists the rules of its fields in `pub const field_rules`, and `v.check`
+//! returns the first violation of a value without allocating.
+//!
+//! ```zig
+//! const SignUp = struct {
+//!     name: []const u8,
+//!     age: u8,
+//!     tags: []const []const u8 = &.{},
+//!
+//!     pub const field_rules = .{
+//!         .name = v.notEmpty,
+//!         .age = v.positive,
+//!         .tags = v.each(v.notEmpty),
+//!     };
+//! };
+//!
+//! var path_buf: [256]u8 = undefined;
+//! if (v.check(&request, &path_buf)) |violation| {
+//!     // violation.code, violation.message, violation.field ("tags[1]")
+//! }
+//! ```
+//!
+//! Rules are checked against their fields' types at compile time, when
+//! `v.check`, `v.checkAll` or `v.assertRules` is instantiated for a type; a
+//! mistake is a compile error that starts with "validator: ". Since Zig
+//! compiles only code that is used, a DTO package calls
+//! `comptime v.assertRules(T)` in a test. `v.checkAll` collects every
+//! violation into a `Report`, `validateSelf` with `v.fail` checks across
+//! fields, and `v.custom` turns a predicate of your own into a rule. The guide
+//! is src/validator/examples/README.md.
 
 const std = @import("std");
 const core = @import("core.zig");

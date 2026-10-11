@@ -46,3 +46,22 @@ pub const compile_errors = @import("compile_errors.zig").list;
 
 /// Golden-vector files in vectors/, by name without ".json".
 pub const vector_files = [_][]const u8{ "common", "numbers", "lists" };
+
+/// A compiled example of src/validator/examples/, by file stem: a program
+/// must print exactly `stdout`, a test (`stdout` null) must pass, and
+/// README.md shows each file and each output verbatim (readme_test.zig).
+pub const Example = struct { name: []const u8, stdout: ?[]const u8 = null };
+
+pub const examples = [_]Example{
+    .{ .name = "getting_started", .stdout = "tags[1]: must not be empty (validation.not_empty)\n" },
+    .{
+        .name = "validate_self",
+        .stdout =
+        \\bookings[0]: must not be longer than 30 days (bookings.too_long)
+        \\bookings[1].end_day: must not be before the start day (bookings.end_before_start)
+        \\bookings[2].guests: must be greater than 0 (validation.positive)
+        \\
+        ,
+    },
+    .{ .name = "dto_test" },
+};
