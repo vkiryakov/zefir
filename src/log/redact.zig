@@ -7,8 +7,9 @@ const std = @import("std");
 /// What a redacted value is written as.
 pub const placeholder = "[REDACTED]";
 
-/// Exact names, compared after lowercasing and mapping '-' to '_'. A bare
-/// `token` is left out on purpose: lexers and pagination use it.
+/// Exact names, compared after lowercasing and dropping '_' and '-', so
+/// `api_key`, `apiKey` and `API-KEY` are one name. A bare `token` is left
+/// out on purpose: lexers and pagination use it.
 const names = [_][]const u8{
     "password",   "passwd",      "secret",        "client_secret",
     "api_key",    "apikey",      "access_token",  "refresh_token",
@@ -30,13 +31,23 @@ pub fn isSensitiveName(comptime name: []const u8) bool {
     return false;
 }
 
+/// Whether `segment` spells `sensitive` (lowercase) in any case, with or
+/// without '_' and '-'.
 fn sameName(segment: []const u8, sensitive: []const u8) bool {
-    if (segment.len != sensitive.len) return false;
-    for (segment, sensitive) |a, b| {
-        const normalized = if (a == '-') '_' else std.ascii.toLower(a);
-        if (normalized != b) return false;
+    var a: usize = 0;
+    var b: usize = 0;
+    while (true) {
+        while (a < segment.len and isSeparator(segment[a])) a += 1;
+        while (b < sensitive.len and isSeparator(sensitive[b])) b += 1;
+        if (a == segment.len or b == sensitive.len) return a == segment.len and b == sensitive.len;
+        if (std.ascii.toLower(segment[a]) != sensitive[b]) return false;
+        a += 1;
+        b += 1;
     }
-    return true;
+}
+
+fn isSeparator(c: u8) bool {
+    return c == '_' or c == '-';
 }
 
 test "secret names are redacted whatever their case or dashes" {
@@ -50,6 +61,12 @@ test "secret names are redacted whatever their case or dashes" {
 test "any segment of a dotted name counts" {
     try std.testing.expect(comptime isSensitiveName("db.password"));
     try std.testing.expect(comptime isSensitiveName("http.authorization.scheme"));
+}
+
+test "camelCase and SCREAMING_CASE spellings count too" {
+    inline for (.{ "apiKey", "accessToken", "refreshToken", "idToken", "authToken", "clientSecret", "privateKey", "setCookie", "API_KEY", "Pass-Word" }) |name| {
+        try std.testing.expect(comptime isSensitiveName(name));
+    }
 }
 
 test "similar names are written as they are" {

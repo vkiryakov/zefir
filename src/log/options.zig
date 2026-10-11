@@ -51,7 +51,7 @@ pub const Format = enum {
 
 pub const OversizePolicy = enum {
     /// Cut the message, leave out the fields that do not fit, and end the
-    /// record with `"truncated":true`.
+    /// record with `"truncated":true` (` truncated=true` in text).
     truncate,
     /// Drop the whole record and count it.
     drop,
@@ -62,6 +62,9 @@ pub const Output = union(enum) {
     stdout,
     /// A writer the application owns, for tests and embedding. It must
     /// outlive the logger; each record is written and flushed in one go.
+    /// The logger calls it from one thread at a time, so it need not be
+    /// thread-safe, but it must not log through the same logger: that
+    /// call would wait for itself.
     writer: *std.Io.Writer,
 };
 

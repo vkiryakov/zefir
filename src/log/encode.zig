@@ -1,7 +1,7 @@
 //! Encodes records as JSON Lines or text into a caller's buffer. The
 //! message, the keys and literal field values are rendered at compile
-//! time; at run time only the timestamp, the scope and runtime values are
-//! written.
+//! time; at run time only the timestamp, the service fragment (encoded once
+//! at `init`), the scope and runtime values are written.
 
 const std = @import("std");
 const escape = @import("escape.zig");
@@ -39,10 +39,15 @@ fn writeValue(comptime f: Format, w: *Writer, value: anytype) Writer.Error!void 
         else
             try writeQuotedDigits(f, w, value),
         .float => try writeFloat(f, w, value),
-        .comptime_float => try writeFloat(f, w, @as(f64, value)),
+        // f128 keeps the literal's range and digits; literal fields are
+        // rendered at compile time, so this costs nothing at run time.
+        .comptime_float => try writeFloat(f, w, @as(f128, value)),
         .null => try w.writeAll("null"),
         .optional => if (value) |payload| try writeValue(f, w, payload) else try w.writeAll("null"),
-        .@"enum" => if (std.enums.tagName(T, value)) |name|
+        // Every value of an exhaustive enum has a name: one table lookup.
+        .@"enum" => |e| if (e.mode == .exhaustive)
+            try writeString(f, w, @tagName(value))
+        else if (std.enums.tagName(T, value)) |name|
             try writeString(f, w, name)
         else
             try writeQuotedDigits(f, w, @backingInt(value)),
@@ -124,6 +129,9 @@ pub const Header = struct {
     service: []const u8,
     /// The scope, escaped; empty without a scope.
     scope: []const u8,
+    /// The text format writes the scope in quotes: it has a space, `=`,
+    /// a bracket or an escape that would make it pass for something else.
+    scope_quoted: bool = false,
     oversize: options.OversizePolicy,
 };
 
@@ -214,9 +222,9 @@ fn writeHead(
             try w.writeAll(stamp);
             try w.writeAll(comptime " " ++ level.label());
             if (header.scope.len > 0) {
-                try w.writeAll(" [");
+                try w.writeAll(if (header.scope_quoted) " [\"" else " [");
                 try w.writeAll(header.scope);
-                try w.writeByte(']');
+                try w.writeAll(if (header.scope_quoted) "\"]" else "]");
             }
             if (message.len > 0) try writeMessage(w, " ", message, "", 0, cut);
         },
@@ -287,14 +295,14 @@ const longest_level = blk: {
 
 /// The bytes every record needs, whatever it logs: the head with the
 /// message cut down to "…", the longest level, a scope of `max_scope`
-/// bytes, the service fragment and the cut closing. `Engine.create`
-/// rejects a smaller `max_record_bytes`.
+/// bytes (in quotes for text), the service fragment and the cut closing.
+/// `Engine.create` rejects a smaller `max_record_bytes`.
 pub fn mandatoryBytes(f: Format, service_len: usize, max_scope: usize) usize {
     return switch (f) {
         .json => "{\"timestamp\":\"".len + timestamp.len + "\",\"level\":\"".len + longest_level +
             "\",\"message\":\"".len + ellipsis.len + "\"".len + service_len +
             ",\"scope\":\"".len + max_scope + "\"".len + closing(.json).cut.len,
-        .text => timestamp.len + " ".len + 5 + " [".len + max_scope + "]".len +
+        .text => timestamp.len + " ".len + 5 + " [\"".len + max_scope + "\"]".len +
             " ".len + ellipsis.len + closing(.text).cut.len,
     };
 }
@@ -337,6 +345,12 @@ test "floats: the shortest form, an exponent outside 1e-6..1e21, specials as str
     try expectValue(std.math.nan(f64), "\"NaN\"", "NaN");
     try expectValue(std.math.inf(f64), "\"+Inf\"", "+Inf");
     try expectValue(-std.math.inf(f64), "\"-Inf\"", "-Inf");
+}
+
+test "float literals keep their range and precision" {
+    try expectValue(1e400, "1e400", "1e400");
+    try expectValue(1e-400, "1e-400", "1e-400");
+    try expectValue(1.0000000000000000001, "1.0000000000000000001", "1.0000000000000000001");
 }
 
 test "strings in every form" {
@@ -434,6 +448,15 @@ test "a text record: time, level, scope, message, then the fields" {
     try testing.expectEqualStrings("2026-10-10T21:08:00.123Z ERROR [billing] Payment failed order_id=1001 reason=\"card declined\" password=[REDACTED]\n", buf[0..got.len]);
 }
 
+test "a text scope marked for quotes is written in quotes; JSON ignores the mark" {
+    var buf: [256]u8 = undefined;
+    const header: Header = .{ .timestamp = fixed_time, .service = "", .scope = "a] fake=1 [b", .scope_quoted = true, .oversize = .truncate };
+    var got = record(.text, .info, "m", &buf, header, .{}).?;
+    try testing.expectEqualStrings("2026-10-10T21:08:00.123Z INFO  [\"a] fake=1 [b\"] m\n", buf[0..got.len]);
+    got = record(.json, .info, "m", &buf, header, .{}).?;
+    try testing.expectStringEndsWith(buf[0..got.len], ",\"scope\":\"a] fake=1 [b\"}\n");
+}
+
 test "no scope, no fields and an empty text message leave no gaps" {
     var buf: [256]u8 = undefined;
     const header: Header = .{ .timestamp = fixed_time, .service = "", .scope = "", .oversize = .truncate };
@@ -458,6 +481,33 @@ test "a record that fits exactly is written whole; one byte less cuts it" {
     var drop = header;
     drop.oversize = .drop;
     try testing.expect(record(.json, .info, "User created", buf[0 .. whole.len - 1], drop, fields) == null);
+}
+
+test "runtime fields: a record that fits exactly is written whole in both formats" {
+    const Status = enum { active, banned };
+    const header: Header = .{ .timestamp = fixed_time, .service = "", .scope = "users", .oversize = .truncate };
+    var n: u64 = 18446744073709551615;
+    var big: i128 = -170141183460469231731687303715884105728;
+    var ratio: f64 = 0.125;
+    var small: f32 = 0.1;
+    var status: Status = .banned;
+    var failure: anyerror = error.Timeout;
+    var maybe: ?u16 = null;
+    var text: []const u8 = "a value with spaces";
+    _ = .{ &n, &big, &ratio, &small, &status, &failure, &maybe, &text };
+    const fields = .{ .n = n, .big = big, .ratio = ratio, .small = small, .status = status, .failure = failure, .maybe = maybe, .text = text };
+    inline for (.{ Format.json, Format.text }) |f| {
+        var whole_buf: [512]u8 = undefined;
+        const whole = record(f, .info, "Runtime", &whole_buf, header, fields).?;
+        try testing.expect(!whole.truncated);
+        var buf: [512]u8 = undefined;
+        const exact = record(f, .info, "Runtime", buf[0..whole.len], header, fields).?;
+        try testing.expect(!exact.truncated);
+        try testing.expectEqualStrings(whole_buf[0..whole.len], buf[0..exact.len]);
+        const short = record(f, .info, "Runtime", buf[0 .. whole.len - 1], header, fields).?;
+        try testing.expect(short.truncated);
+        if (f == .json) try testing.expect(try std.json.validate(testing.allocator, buf[0..short.len]));
+    }
 }
 
 test "every size from the mandatory part up gives one valid line" {
@@ -499,7 +549,8 @@ test "mandatoryBytes holds the worst head: the longest level, the longest scope 
     const scope = &@as([128]u8, @splat('s'));
     const service = ",\"service.name\":\"" ++ &@as([100]u8, @splat('v')) ++ "\"";
     inline for (.{ Format.json, Format.text }) |f| {
-        const header: Header = .{ .timestamp = fixed_time, .service = if (f == .json) service else "", .scope = scope, .oversize = .truncate };
+        // A text scope that needs quotes is the longest one.
+        const header: Header = .{ .timestamp = fixed_time, .service = if (f == .json) service else "", .scope = scope, .scope_quoted = f == .text, .oversize = .truncate };
         var buf: [2048]u8 = undefined;
         const size = mandatoryBytes(f, header.service.len, 128);
         const got = record(f, .err, "A message that cannot fit", buf[0..size], header, .{ .id = 1 }) orelse return error.TestUnexpectedResult;

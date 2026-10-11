@@ -27,6 +27,10 @@
 //! change at once. Logging never allocates and never fails: problems are
 //! counted in `stats()`. Tests capture records with
 //! `.output = .{ .writer = &writer }`.
+//!
+//! If stdout is closed, the logger notes it once on stderr and drops the
+//! records that follow. That needs SIGPIPE ignored, as `main(init:
+//! std.process.Init)` does; a bare `main()` is killed by SIGPIPE first.
 
 const std = @import("std");
 const options = @import("options.zig");

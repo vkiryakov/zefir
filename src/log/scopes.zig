@@ -24,6 +24,8 @@ pub const Entry = struct {
     /// The level this scope logs at: its longest matching rule's, or the
     /// global one.
     level: std.atomic.Value(Level),
+    /// The text format writes the name in quotes, see `encode.Header`.
+    quoted: bool = false,
     len: u8 = 0,
     bytes: [max_name_bytes]u8 = undefined,
 
@@ -93,7 +95,11 @@ pub const Table = struct {
             return &table.root;
         }
         const entry = &table.entries[count];
-        entry.* = .{ .level = .init(table.levelFor(key.name)), .len = @intCast(key.name.len) };
+        entry.* = .{
+            .level = .init(table.levelFor(key.name)),
+            .quoted = !escape.isBare(key.name) or std.mem.findAny(u8, key.name, "[]") != null,
+            .len = @intCast(key.name.len),
+        };
         @memcpy(entry.bytes[0..key.name.len], key.name);
         table.count.store(count + 1, .release);
         return entry;
@@ -108,11 +114,12 @@ pub const Table = struct {
     }
 
     /// Adds or changes the rule for `prefix`, or removes it when `level` is
-    /// null.
+    /// null. A trailing dot is ignored: `zefir.` is the rule for `zefir`.
     pub fn setRule(table: *Table, prefix: []const u8, level: ?Level) error{ TooManyRules, EmptyPrefix }!void {
-        if (prefix.len == 0) return error.EmptyPrefix;
+        const trimmed = std.mem.trimEnd(u8, prefix, ".");
+        if (trimmed.len == 0) return error.EmptyPrefix;
         var buf: [max_name_bytes]u8 = undefined;
-        const key = escapeName(prefix, &buf).name;
+        const key = escapeName(trimmed, &buf).name;
         table.lockSpin();
         defer table.lock.unlock();
         const rules = table.rules[0..table.rule_count];
@@ -151,8 +158,14 @@ pub const Table = struct {
         }
     }
 
+    /// Spins, and now and then gives the CPU away, so a preempted holder
+    /// can finish its short critical section.
     fn lockSpin(table: *Table) void {
-        while (!table.lock.tryLock()) std.atomic.spinLoopHint();
+        var spins: u32 = 0;
+        while (!table.lock.tryLock()) {
+            spins +%= 1;
+            if (spins % 64 == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+        }
     }
 };
 
@@ -225,6 +238,28 @@ test "rule and global changes reach existing entries" {
     try testing.expectEqual(Level.trace, api.level.load(.monotonic));
     try table.setRule("orders", .warn); // a new entry picks up the rules in place
     try testing.expectEqual(Level.warn, table.find("orders.db").level.load(.monotonic));
+}
+
+test "a trailing dot in a rule prefix is ignored" {
+    const table = try newTable(.info, &.{});
+    defer testing.allocator.destroy(table);
+    try table.setRule("zefir.", .debug);
+    try testing.expectEqual(Level.debug, table.find("zefir.rpc").level.load(.monotonic));
+    try table.setRule("zefir", null); // the same rule
+    try testing.expectEqual(Level.info, table.find("zefir.rpc").level.load(.monotonic));
+    try testing.expectError(error.EmptyPrefix, table.setRule("..", .debug));
+}
+
+test "an entry knows whether the text format must quote its name" {
+    const table = try newTable(.info, &.{});
+    defer testing.allocator.destroy(table);
+    try testing.expect(!table.find("zefir.rpc-v2_x").quoted);
+    try testing.expect(table.find("a] fake=1 [b").quoted);
+    try testing.expect(table.find("[x").quoted);
+    try testing.expect(table.find("a b").quoted);
+    try testing.expect(table.find("a=b").quoted);
+    try testing.expect(table.find("a\nb").quoted);
+    try testing.expect(!table.root.quoted);
 }
 
 test "at most 64 rules, none with an empty prefix" {

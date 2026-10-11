@@ -23,6 +23,9 @@ pub const InitError = Engine.InitError;
 /// `deinit` once, after the last record, on any handle of this logger: all
 /// of them become invalid. Use one logger per process for stdout: two
 /// loggers on one stdout do not coordinate their writes.
+///
+/// Records are read from the clock and written through `io`, so log only
+/// from threads or tasks of that `io` (under `std.Io.Threaded`, any thread).
 pub fn init(gpa: std.mem.Allocator, io: std.Io, opts: options.Options) InitError!Logger {
     const engine = try Engine.create(gpa, io, opts);
     return .{ .engine = engine, .scope = &engine.scope_table.root };
@@ -76,11 +79,13 @@ pub fn enabled(self: Logger, level: Level) bool {
 }
 
 /// A handle that writes `name` as its records' scope, in place of this
-/// handle's scope. The name is copied (up to 128 bytes, cut between
-/// characters), so it need not outlive the handle. The first call with a
-/// new name takes a short lock; later calls only search. Past 256 names a
-/// handle logs without a scope, at the global level, and
-/// `stats().scopes_overflow` counts it.
+/// handle's scope. The name is copied, so it need not outlive the handle.
+/// It is kept as records write it, escaped, and cut between characters to
+/// 128 bytes (`stats().scope_names_truncated` counts it): names that agree
+/// in those 128 bytes are one scope. The first call with a new name takes a
+/// short lock; later calls only search. Past 256 names a handle logs
+/// without a scope, at the global level, and `stats().scopes_overflow`
+/// counts it.
 pub fn scoped(self: Logger, name: []const u8) Logger {
     return .{ .engine = self.engine, .scope = self.engine.scope_table.find(name) };
 }
@@ -94,7 +99,9 @@ pub fn setLevel(self: Logger, level: Level) void {
 /// Sets the level of scope `prefix` and its subscopes (`zefir.rpc` covers
 /// `zefir.rpc.server`, not `zefir.rpcx`), or removes the rule when `level`
 /// is null. The longest matching prefix wins, and every handle sees the
-/// change at once. A logger keeps at most 64 rules.
+/// change at once. A trailing dot is ignored (`zefir.` is `zefir`), and the
+/// prefix is cut to 128 bytes as scope names are. A logger keeps at most 64
+/// rules.
 pub fn setScopeLevel(self: Logger, prefix: []const u8, level: ?Level) error{ TooManyRules, EmptyPrefix }!void {
     return self.engine.scope_table.setRule(prefix, level);
 }
@@ -448,10 +455,12 @@ test "a call with many fields writes them all, in order" {
     try c.expect(.json, &.{want.written()});
 }
 
-/// A writer that takes `budget` bytes, fails once, then takes everything.
+/// A writer that, for each budget in turn, takes that many bytes and then
+/// fails once; after the last budget it takes everything.
 const Gate = struct {
-    budget: usize,
-    tripped: bool = false,
+    budgets: []const usize,
+    /// Bytes taken against `budgets[0]`.
+    taken: usize = 0,
     sink: std.Io.Writer.Allocating,
     writer: std.Io.Writer = .{ .buffer = &.{}, .vtable = &.{ .drain = drain } },
 
@@ -460,21 +469,68 @@ const Gate = struct {
         std.debug.assert(data.len == 1 and splat == 1);
         const gate: *Gate = @alignCast(@fieldParentPtr("writer", w));
         var bytes = data[0];
-        if (!gate.tripped) {
-            if (gate.budget == 0) {
-                gate.tripped = true;
+        if (gate.budgets.len > 0) {
+            const budget = gate.budgets[0];
+            if (gate.taken == budget) {
+                gate.budgets = gate.budgets[1..];
+                gate.taken = 0;
                 return error.WriteFailed;
             }
-            bytes = bytes[0..@min(bytes.len, gate.budget)];
-            gate.budget -= bytes.len;
+            bytes = bytes[0..@min(bytes.len, budget - gate.taken)];
+            gate.taken += bytes.len;
         }
         gate.sink.writer.writeAll(bytes) catch return error.WriteFailed;
         return bytes.len;
     }
 };
 
+test "after a torn line, a write that sends nothing keeps it open and one that sends only the newline closes it" {
+    var gate: Gate = .{ .budgets = &.{ 10, 0, 1 }, .sink = .init(testing.allocator) };
+    defer gate.sink.deinit();
+    const logger: Logger = try .init(testing.allocator, testing.io, .{ .output = .{ .writer = &gate.writer } });
+    defer logger.deinit();
+    logger.info("first", .{}); // 10 bytes go out, then the write fails: the line is torn
+    logger.info("second", .{}); // nothing goes out: the line stays torn
+    logger.info("third", .{}); // only the '\n' that ends the torn line goes out
+    logger.info("fourth", .{}); // written whole, on a line of its own
+    var lines = std.mem.splitScalar(u8, gate.sink.written(), '\n');
+    try testing.expectEqualStrings("{\"timestam", lines.next().?);
+    try testing.expectStringEndsWith(lines.next().?, "\"message\":\"fourth\"}");
+    try testing.expectEqualStrings("", lines.rest());
+    const s = logger.stats();
+    try testing.expectEqual(@as(u64, 1), s.written);
+    try testing.expectEqual(@as(u64, 3), s.write_errors);
+    try testing.expectEqual(@as(u64, 3), s.dropped.write_failed);
+    try testing.expectEqual(@as(u64, 1), s.torn_lines);
+}
+
+test "past 256 scope names a handle logs without a scope, at the global level" {
+    var c: Capture = undefined;
+    try c.open(.{ .scopes = &.{.{ .prefix = "late", .level = .debug }} });
+    defer c.close();
+    var buf: [8]u8 = undefined;
+    for (0..scopes.max_scopes) |i| _ = c.logger.scoped(try std.fmt.bufPrint(&buf, "s{d}", .{i}));
+    const late = c.logger.scoped("late");
+    late.debug("hidden: the late handle follows the global level", .{});
+    late.info("m", .{});
+    try c.expect(.json, &.{"\",\"level\":\"info\",\"message\":\"m\"}"});
+    try testing.expectEqual(@as(u64, 1), c.logger.stats().scopes_overflow);
+}
+
+test "a text scope that could pass for a field is quoted" {
+    var c: Capture = undefined;
+    try c.open(.{ .format = .text });
+    defer c.close();
+    c.logger.scoped("a] fake=1 [b").info("m", .{});
+    c.logger.scoped("db.pool").info("m", .{});
+    try c.expect(.text, &.{
+        " INFO  [\"a] fake=1 [b\"] m",
+        " INFO  [db.pool] m",
+    });
+}
+
 test "a write that fails mid-line costs that line only" {
-    var gate: Gate = .{ .budget = 10, .sink = .init(testing.allocator) };
+    var gate: Gate = .{ .budgets = &.{10}, .sink = .init(testing.allocator) };
     defer gate.sink.deinit();
     const logger: Logger = try .init(testing.allocator, testing.io, .{ .output = .{ .writer = &gate.writer } });
     defer logger.deinit();
@@ -514,14 +570,7 @@ test "a closed stdout is noted on stderr once; the records after it are dropped"
     stderr_write.close(io);
 
     var buf: [512]u8 = undefined;
-    var len: usize = 0;
-    while (true) {
-        len += stderr_read.readStreaming(io, &.{buf[len..]}) catch |e| switch (e) {
-            error.EndOfStream => break,
-            else => return e,
-        };
-    }
-    try testing.expectEqualStrings("zefir.log: stdout is closed (BrokenPipe); dropping the records that follow\n", buf[0..len]);
+    try testing.expectEqualStrings("zefir.log: stdout is closed (BrokenPipe); dropping the records that follow\n", try readToEnd(stderr_read, io, &buf));
     const s = logger.stats();
     try testing.expectEqual(@as(u64, 2), s.accepted);
     try testing.expectEqual(@as(u64, 0), s.written);
@@ -529,6 +578,102 @@ test "a closed stdout is noted on stderr once; the records after it are dropped"
     try testing.expectEqual(@as(u64, 2), s.dropped.write_failed);
 }
 
+test "a stdout not open for writing is noted on stderr once" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest; // the test needs POSIX pipes
+    const io = testing.io;
+    const stdout_pipe = try std.Io.Threaded.pipe2(.{});
+    const stderr_pipe = try std.Io.Threaded.pipe2(.{});
+    const stdout_read = pipeEnd(stdout_pipe[0]); // writing to the read end fails with EBADF
+    const stderr_read = pipeEnd(stderr_pipe[0]);
+    const stderr_write = pipeEnd(stderr_pipe[1]);
+    defer stdout_read.close(io);
+    defer pipeEnd(stdout_pipe[1]).close(io);
+    defer stderr_read.close(io);
+
+    const logger: Logger = try .init(testing.allocator, io, .{});
+    defer logger.deinit();
+    logger.engine.stdout = stdout_read;
+    logger.engine.stderr = stderr_write;
+    logger.info("first", .{});
+    logger.info("second", .{});
+    stderr_write.close(io);
+
+    var buf: [512]u8 = undefined;
+    try testing.expectEqualStrings("zefir.log: stdout is not open for writing (NotOpenForWriting); dropping the records that follow\n", try readToEnd(stderr_read, io, &buf));
+    const s = logger.stats();
+    try testing.expectEqual(@as(u64, 0), s.written);
+    try testing.expectEqual(@as(u64, 1), s.write_errors);
+    try testing.expectEqual(@as(u64, 2), s.dropped.write_failed);
+}
+
+test "a full nonblocking stdout drops records and never glues two of them together" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest; // the test needs POSIX pipes
+    const io = testing.io;
+    const fds = try std.Io.Threaded.pipe2(.{ .NONBLOCK = true });
+    const read_end: std.Io.File = .{ .handle = fds[0], .flags = .{ .nonblocking = true } };
+    const write_end: std.Io.File = .{ .handle = fds[1], .flags = .{ .nonblocking = true } };
+    defer read_end.close(io);
+    defer write_end.close(io);
+
+    // Fill the pipe, then make room for one page: a long record fits only in part.
+    var filled: usize = 0;
+    for ([_]usize{ 4096, 1 }) |chunk| {
+        const filler: [4096]u8 = @splat('f');
+        while (true) filled += write_end.writeStreaming(io, &.{}, &.{filler[0..chunk]}, 1) catch |e| switch (e) {
+            error.WouldBlock => break,
+            else => return e,
+        };
+    }
+    var all: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer all.deinit();
+    try readAvailable(read_end, io, &all, 4096);
+
+    const logger: Logger = try .init(testing.allocator, io, .{ .max_record_bytes = 16384 });
+    defer logger.deinit();
+    logger.engine.stdout = write_end;
+    const data: [8000]u8 = @splat('d');
+    logger.info("long", .{ .data = @as([]const u8, &data) }); // goes out in part, or not at all
+    logger.info("short", .{}); // the pipe may be full again
+    try readAvailable(read_end, io, &all, std.math.maxInt(usize));
+    logger.info("last", .{});
+    try readAvailable(read_end, io, &all, std.math.maxInt(usize));
+
+    const out = all.written()[filled..];
+    try testing.expectStringEndsWith(out, "\"message\":\"last\"}\n");
+    const start = std.mem.findLast(u8, out, "{\"timestamp\"").?;
+    try testing.expect(start == 0 or out[start - 1] == '\n'); // a torn line before it was ended
+    try testing.expect(try std.json.validate(testing.allocator, out[start .. out.len - 1]));
+    const s = logger.stats();
+    try testing.expectEqual(@as(u64, 3), s.accepted);
+    try testing.expectEqual(s.accepted, s.written + s.dropped.write_failed);
+    try testing.expect(s.write_errors >= 1);
+}
+
 fn pipeEnd(fd: std.posix.fd_t) std.Io.File {
     return .{ .handle = fd, .flags = .{ .nonblocking = false } };
+}
+
+/// Reads `file` until its write end is closed.
+fn readToEnd(file: std.Io.File, io: std.Io, buf: []u8) ![]u8 {
+    var len: usize = 0;
+    while (true) {
+        len += file.readStreaming(io, &.{buf[len..]}) catch |e| switch (e) {
+            error.EndOfStream => return buf[0..len],
+            else => return e,
+        };
+    }
+}
+
+/// Reads up to `limit` bytes that a nonblocking pipe holds right now.
+fn readAvailable(file: std.Io.File, io: std.Io, out: *std.Io.Writer.Allocating, limit: usize) !void {
+    var buf: [4096]u8 = undefined;
+    var left = limit;
+    while (left > 0) {
+        const n = file.readStreaming(io, &.{buf[0..@min(buf.len, left)]}) catch |e| switch (e) {
+            error.WouldBlock => return,
+            else => return e,
+        };
+        try out.writer.writeAll(buf[0..n]);
+        left -= n;
+    }
 }

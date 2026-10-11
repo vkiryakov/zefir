@@ -43,7 +43,8 @@ pub const Stats = struct {
     dropped: Dropped,
     /// Write calls that failed.
     write_errors: u64,
-    /// Records cut to `max_record_bytes`; they end with "truncated":true.
+    /// Records cut to `max_record_bytes`; they end with "truncated":true
+    /// (` truncated=true` in text).
     truncated: u64,
     /// Records that broke off mid-line because a write failed; the next
     /// record starts on a new line.
@@ -162,6 +163,7 @@ pub fn emit(engine: *Engine, comptime level: Level, scope: *const scopes.Entry, 
         .timestamp = Io.Clock.real.now(engine.io),
         .service = engine.service,
         .scope = scope.name(),
+        .scope_quoted = scope.quoted,
         .oversize = engine.oversize,
     };
     const out = buf[1..][0..engine.max_record_bytes];

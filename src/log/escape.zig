@@ -1,9 +1,11 @@
 //! Escaping of record strings, shared by the JSON and text formats.
 //!
-//! `"`, `\`, control characters and DEL become escape sequences, valid
-//! UTF-8 passes through, and every byte that does not start a valid UTF-8
-//! sequence becomes U+FFFD. The output is valid UTF-8 without line breaks,
-//! so one record stays one line, also in a terminal.
+//! `"`, `\`, control characters (C0, DEL and C1), the line and paragraph
+//! separators U+2028 and U+2029, and the bidi controls that reorder text
+//! become escape sequences; other valid UTF-8 passes through, and every byte
+//! that does not start a valid UTF-8 sequence becomes U+FFFD. The output is
+//! valid UTF-8 without line breaks, so one record stays one line, also in a
+//! terminal.
 
 const std = @import("std");
 const testing = std.testing;
@@ -17,6 +19,8 @@ const Kind = enum { verbatim, short_escape, unicode_escape, invalid };
 const Unit = struct {
     kind: Kind,
     len: u3,
+    /// The code point a `.unicode_escape` writes.
+    cp: u21 = 0,
 
     fn outLen(unit: Unit) usize {
         return switch (unit.kind) {
@@ -30,19 +34,28 @@ const Unit = struct {
 
 fn unitAt(s: []const u8, i: usize) Unit {
     const c = s[i];
-    if (c < 0x80) return .{
-        .kind = switch (c) {
-            '"', '\\', '\n', '\r', '\t' => .short_escape,
-            0x00...0x08, 0x0b, 0x0c, 0x0e...0x1f, 0x7f => .unicode_escape,
-            else => .verbatim,
-        },
-        .len = 1,
+    if (c < 0x80) return switch (c) {
+        '"', '\\', '\n', '\r', '\t' => .{ .kind = .short_escape, .len = 1 },
+        0x00...0x08, 0x0b, 0x0c, 0x0e...0x1f, 0x7f => .{ .kind = .unicode_escape, .len = 1, .cp = c },
+        else => .{ .kind = .verbatim, .len = 1 },
     };
     const bad: Unit = .{ .kind = .invalid, .len = 1 };
     const n = std.unicode.utf8ByteSequenceLength(c) catch return bad;
     if (n > s.len - i) return bad;
-    _ = std.unicode.utf8Decode(s[i..][0..n]) catch return bad;
+    const cp = std.unicode.utf8Decode(s[i..][0..n]) catch return bad;
+    if (isHidden(cp)) return .{ .kind = .unicode_escape, .len = n, .cp = cp };
     return .{ .kind = .verbatim, .len = n };
+}
+
+/// Valid code points that would still break a line or fool a reader: C1
+/// controls (U+0085 ends a line for some readers, U+009B starts a terminal
+/// escape), the line and paragraph separators, and the bidi controls that
+/// make a terminal show text in another order.
+fn isHidden(cp: u21) bool {
+    return switch (cp) {
+        0x80...0x9f, 0x2028, 0x2029, 0x202a...0x202e, 0x2066...0x2069 => true,
+        else => false,
+    };
 }
 
 /// Writes `s` escaped, without quotes.
@@ -53,7 +66,7 @@ pub fn write(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void {
         const unit = unitAt(s, i);
         if (unit.kind != .verbatim) {
             try w.writeAll(s[start..i]);
-            try writeEscape(w, s[i], unit.kind);
+            try writeEscape(w, s[i], unit);
             start = i + unit.len;
         }
         i += unit.len;
@@ -61,9 +74,9 @@ pub fn write(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void {
     try w.writeAll(s[start..]);
 }
 
-fn writeEscape(w: *std.Io.Writer, c: u8, kind: Kind) std.Io.Writer.Error!void {
+fn writeEscape(w: *std.Io.Writer, c: u8, unit: Unit) std.Io.Writer.Error!void {
     const hex = "0123456789abcdef";
-    switch (kind) {
+    switch (unit.kind) {
         .verbatim => unreachable,
         .short_escape => try w.writeAll(&[2]u8{
             '\\',
@@ -74,7 +87,14 @@ fn writeEscape(w: *std.Io.Writer, c: u8, kind: Kind) std.Io.Writer.Error!void {
                 else => c, // '"' and '\\'
             },
         }),
-        .unicode_escape => try w.writeAll(&[6]u8{ '\\', 'u', '0', '0', hex[c >> 4], hex[c & 0xf] }),
+        .unicode_escape => try w.writeAll(&[6]u8{
+            '\\',
+            'u',
+            hex[unit.cp >> 12 & 0xf],
+            hex[unit.cp >> 8 & 0xf],
+            hex[unit.cp >> 4 & 0xf],
+            hex[unit.cp & 0xf],
+        }),
         .invalid => try w.writeAll(replacement),
     }
 }
@@ -132,6 +152,18 @@ test "quotes, backslashes, control characters and DEL become escapes" {
     try expectEscaped("a\\\"b\\\\c", "a\"b\\c");
     try expectEscaped("\\n\\r\\t", "\n\r\t");
     try expectEscaped("\\u0000\\u0001\\u001b\\u007f", "\x00\x01\x1b\x7f");
+}
+
+test "C1 controls, line and paragraph separators and bidi controls become escapes" {
+    try expectEscaped("nel\\u0085x", "nel\u{85}x");
+    try expectEscaped("\\u0080\\u009b31m", "\u{80}\u{9b}31m");
+    try expectEscaped("a\\u2028b\\u2029c", "a\u{2028}b\u{2029}c");
+    try expectEscaped("\\u202a\\u202e\\u2066\\u2069", "\u{202a}\u{202e}\u{2066}\u{2069}");
+    try expectEscaped("\u{a0}\u{2027}\u{202f}\u{2065}\u{206a}", "\u{a0}\u{2027}\u{202f}\u{2065}\u{206a}"); // their neighbours pass
+    try testing.expect(!isBare("x\u{2028}y"));
+    try testing.expect(!isBare("\u{9b}31mred"));
+    try testing.expectEqual(@as(usize, 1), fittingPrefix("a\u{85}", 6)); // "\\u0085" takes 6
+    try testing.expectEqual(@as(usize, 3), fittingPrefix("a\u{85}", 7));
 }
 
 test "valid UTF-8 passes through" {
