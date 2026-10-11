@@ -439,6 +439,8 @@ pub const Header = struct {
     /// The text format writes the scope in quotes: it has a space, `=`,
     /// a bracket or an escape that would make it pass for something else.
     scope_quoted: bool = false,
+    /// How a `.src` field is written at this record's level.
+    source: options.SourceMode = .file_line,
     oversize: options.OversizePolicy,
 };
 
@@ -462,8 +464,9 @@ fn closing(comptime f: Format) Closing {
 
 /// Encodes one record into `out`, '\n' included. A record that fits is
 /// written whole. One that does not is cut (`.truncate`: the message loses
-/// its end, fields that do not fit are left out, and the record ends with
-/// the truncation marker) or not written at all (`.drop`: null).
+/// its end, the call site and the fields that do not fit are left out, and
+/// the record ends with the truncation marker) or not written at all
+/// (`.drop`: null).
 pub fn record(
     comptime f: Format,
     comptime level: Level,
@@ -472,94 +475,242 @@ pub fn record(
     header: Header,
     fields: anytype,
 ) ?Encoded {
+    var source_buf: [max_source_bytes]u8 = undefined;
+    const source = sourceOf(f, fields, header.source, &source_buf);
+    return encodeRecord(f, level, Literal(message){}, out, header, source, fields);
+}
+
+fn encodeRecord(
+    comptime f: Format,
+    comptime level: Level,
+    message: anytype,
+    out: []u8,
+    header: Header,
+    source: []const u8,
+    fields: anytype,
+) ?Encoded {
     var stamp: [timestamp.len]u8 = undefined;
     timestamp.format(header.timestamp, &stamp);
-    if (encode(f, level, message, out, header, &stamp, fields, false)) |len| return .{ .len = len, .truncated = false };
+    const parts: Parts = .{ .stamp = &stamp, .source = source };
+    if (encode(f, level, message, out, header, parts, fields, false)) |len| return .{ .len = len, .truncated = false };
     if (header.oversize == .drop) return null;
-    const len = encode(f, level, message, out, header, &stamp, fields, true) orelse return null;
+    const len = encode(f, level, message, out, header, parts, fields, true) orelse return null;
     return .{ .len = len, .truncated = true };
 }
 
+/// What `record` prepares once for both passes.
+const Parts = struct {
+    stamp: *const [timestamp.len]u8,
+    /// The call site, ready to copy; empty without one.
+    source: []const u8,
+};
+
 /// One pass of `record`. Whole: everything must fit, else null. Cut: the
-/// message and the fields give way, and the record ends with the
-/// truncation marker.
+/// message, the call site and the fields give way, and the record ends
+/// with the truncation marker.
 fn encode(
     comptime f: Format,
     comptime level: Level,
-    comptime message: []const u8,
+    message: anytype,
     out: []u8,
     header: Header,
-    stamp: *const [timestamp.len]u8,
+    parts: Parts,
     fields: anytype,
     comptime cut: bool,
 ) ?usize {
     const close = comptime if (cut) closing(f).cut else closing(f).whole;
     if (out.len < close.len) return null;
     var w: Writer = .fixed(out[0 .. out.len - close.len]);
-    writeHead(f, level, message, &w, header, stamp, cut) catch return null;
-    writeFields(f, &w, fields, cut) catch return null;
+    const source = writeHead(f, level, message, &w, header, parts, cut) catch return null;
+    switch (f) {
+        .json => writeFields(f, &w, fields, cut) catch return null,
+        .text => {
+            // The call site goes last in text: the fields give way to it.
+            const full = w.buffer;
+            if (w.end + source.len > full.len) return null;
+            w.buffer = full[0 .. full.len - source.len];
+            const written = writeFields(f, &w, fields, cut);
+            w.buffer = full;
+            written catch return null;
+            w.writeAll(source) catch return null;
+        },
+    }
     @memcpy(out[w.end..][0..close.len], close);
     return w.end + close.len;
 }
 
+/// Writes the head of the record and returns the call site still to
+/// write: the one in `parts`, or nothing when it gave way to the message.
 fn writeHead(
     comptime f: Format,
     comptime level: Level,
-    comptime message: []const u8,
+    message: anytype,
     w: *Writer,
     header: Header,
-    stamp: *const [timestamp.len]u8,
+    parts: Parts,
     comptime cut: bool,
-) Writer.Error!void {
+) Writer.Error![]const u8 {
     switch (f) {
         .json => {
             try w.writeAll("{\"timestamp\":\"");
-            try w.writeAll(stamp);
+            try w.writeAll(parts.stamp);
             try w.writeAll(comptime "\",\"level\":\"" ++ level.asText() ++ "\",\"message\":\"");
             const scope_len = if (header.scope.len > 0) ",\"scope\":\"".len + header.scope.len + 1 else 0;
-            try writeMessage(w, "", message, "\"", header.service.len + scope_len, cut);
+            const source = try writeMessageBeside(w, message, "", "\"", header.service.len + scope_len, parts.source, cut);
             try w.writeAll(header.service);
             if (header.scope.len > 0) {
                 try w.writeAll(",\"scope\":\"");
                 try w.writeAll(header.scope);
                 try w.writeByte('"');
             }
+            try w.writeAll(source);
+            return source;
         },
         .text => {
-            try w.writeAll(stamp);
+            try w.writeAll(parts.stamp);
             try w.writeAll(comptime " " ++ level.label());
             if (header.scope.len > 0) {
                 try w.writeAll(if (header.scope_quoted) " [\"" else " [");
                 try w.writeAll(header.scope);
                 try w.writeAll(if (header.scope_quoted) "\"]" else "]");
             }
-            if (message.len > 0) try writeMessage(w, " ", message, "", 0, cut);
+            if (comptime @TypeOf(message).empty)
+                return if (!cut or parts.source.len <= w.unusedCapacityLen()) parts.source else "";
+            return writeMessageBeside(w, message, " ", "", 0, parts.source, cut);
         },
     }
 }
 
-/// Writes `open`, the escaped message and `close`, leaving `keep` bytes
-/// for the rest of the head. In a cut pass a message that does not fit
-/// loses its end, between characters, and ends with "…".
-fn writeMessage(
+/// Writes the message, keeping room for the `keep` bytes that follow it
+/// and, while the message still fits in some form, for the call site.
+/// Returns the call site to write, or nothing when it gave way.
+fn writeMessageBeside(
     w: *Writer,
+    message: anytype,
     comptime open: []const u8,
-    comptime message: []const u8,
     comptime close: []const u8,
     keep: usize,
+    source: []const u8,
     comptime cut: bool,
-) Writer.Error!void {
-    const escaped = comptime escapedLiteral(message);
-    const free = w.unusedCapacityLen();
-    if (!cut or open.len + escaped.len + close.len + keep <= free) {
-        return w.writeAll(open ++ escaped ++ close);
+) Writer.Error![]const u8 {
+    if (!cut) {
+        try message.write(w, open, close, 0, false);
+        return source;
     }
-    const fixed_len = open.len + ellipsis.len + close.len + keep;
-    if (fixed_len > free) return error.WriteFailed;
-    const n = escape.fittingPrefix(message, free - fixed_len);
-    try w.writeAll(open);
-    try escape.write(w, message[0..n]);
-    try w.writeAll(ellipsis ++ close);
+    // A failed cut write leaves the writer as it was, so it can be retried.
+    message.write(w, open, close, keep + source.len, true) catch |e| {
+        if (source.len == 0) return e;
+        try message.write(w, open, close, keep, true);
+        return "";
+    };
+    return source;
+}
+
+/// A message known at compile time: escaped then, cut at run time.
+fn Literal(comptime message: []const u8) type {
+    return struct {
+        const empty = message.len == 0;
+
+        /// Writes `open`, the escaped message and `close`, leaving `keep`
+        /// bytes free. In a cut pass a message that does not fit loses its
+        /// end, between characters, and ends with "…"; when even that does
+        /// not fit, nothing is written.
+        fn write(_: @This(), w: *Writer, comptime open: []const u8, comptime close: []const u8, keep: usize, comptime cut: bool) Writer.Error!void {
+            const escaped = comptime escapedLiteral(message);
+            const free = w.unusedCapacityLen();
+            if (!cut or open.len + escaped.len + close.len + keep <= free) {
+                return w.writeAll(open ++ escaped ++ close);
+            }
+            const fixed_len = open.len + ellipsis.len + close.len + keep;
+            if (fixed_len > free) return error.WriteFailed;
+            const n = escape.fittingPrefix(message, free - fixed_len);
+            try w.writeAll(open);
+            try escape.write(w, message[0..n]);
+            try w.writeAll(ellipsis ++ close);
+        }
+    };
+}
+
+/// The longest call site written from a value known only at run time; a
+/// longer one is left out.
+const max_source_bytes = 1024;
+
+/// The call-site fragment of a record whose fields have `.src`, in `mode`.
+/// A call site known at compile time (`.src = @src()`) is rendered then.
+fn sourceOf(comptime f: Format, fields: anytype, mode: options.SourceMode, buf: *[max_source_bytes]u8) []const u8 {
+    const Fields = @TypeOf(fields);
+    const name = field_checks.source_field;
+    if (comptime !@hasField(Fields, name)) return "";
+    if (mode == .none) return "";
+    const info = @typeInfo(Fields).@"struct";
+    const index = comptime for (info.field_names, 0..) |field, i| {
+        if (std.mem.eql(u8, field, name)) break i;
+    } else unreachable;
+    if (comptime info.field_attrs[index].@"comptime") {
+        const src = @field(fields, name);
+        return switch (mode) {
+            .none => unreachable,
+            .file_line => comptime renderedSource(f, src, .file_line),
+            .full => comptime renderedSource(f, src, .full),
+        };
+    }
+    var w: Writer = .fixed(buf);
+    writeSource(f, &w, @field(fields, name), mode) catch return "";
+    return w.buffered();
+}
+
+/// `,"source":{"file":…,"line":…}` in JSON, ` src=file:line` in text.
+fn writeSource(comptime f: Format, w: *Writer, src: std.lang.SourceLocation, mode: options.SourceMode) Writer.Error!void {
+    switch (f) {
+        .json => {
+            try w.writeAll(",\"source\":{\"file\":\"");
+            try escape.write(w, src.file);
+            try w.print("\",\"line\":{d}", .{src.line});
+            if (mode == .full) {
+                try w.print(",\"column\":{d},\"function\":\"", .{src.column});
+                try escape.write(w, functionName(src.fn_name));
+                try w.writeAll("\",\"module\":\"");
+                try escape.write(w, src.module);
+                try w.writeByte('"');
+            }
+            try w.writeByte('}');
+        },
+        .text => {
+            const bare = escape.isBare(src.file);
+            try w.writeAll(if (bare) " src=" else " src=\"");
+            try escape.write(w, src.file);
+            try w.print(":{d}", .{src.line});
+            if (mode == .full) try w.print(":{d}", .{src.column});
+            if (!bare) try w.writeByte('"');
+            if (mode == .full) {
+                try w.writeAll(" function=");
+                try writeString(.text, w, functionName(src.fn_name), false);
+                try w.writeAll(" module=");
+                try writeString(.text, w, src.module, false);
+            }
+        },
+    }
+}
+
+fn renderedSource(comptime f: Format, comptime src: std.lang.SourceLocation, comptime mode: options.SourceMode) []const u8 {
+    return rendered(struct {
+        fn write(w: *Writer) Writer.Error!void {
+            return writeSource(f, w, src, mode);
+        }
+    }.write);
+}
+
+/// `name` without the `__func_<n>` suffix that generic functions get, so
+/// the same function logs the same name in every build.
+fn functionName(name: []const u8) []const u8 {
+    const suffix = "__func_";
+    const at = std.mem.findLast(u8, name, suffix) orelse return name;
+    const digits = name[at + suffix.len ..];
+    if (digits.len == 0) return name;
+    for (digits) |c| {
+        if (!std.ascii.isDigit(c)) return name;
+    }
+    return name[0..at];
 }
 
 /// `s` escaped at compile time.
@@ -930,14 +1081,16 @@ test "a JSON record: metadata, then the fields in declaration order" {
     var buf: [512]u8 = undefined;
     var email: []const u8 = "ada@example.com";
     _ = &email;
+    const here = comptime callSite();
     const got = record(.json, .info, "User created", &buf, .{
         .timestamp = fixed_time,
         .service = ",\"service.name\":\"user-service\"",
         .scope = "users",
         .oversize = .truncate,
-    }, .{ .user_id = 42, .email = email, .password = "hunter2", .src = @src() }) orelse return error.TestUnexpectedResult;
+    }, .{ .user_id = 42, .email = email, .password = "hunter2", .src = here }) orelse return error.TestUnexpectedResult;
     try testing.expectEqualStrings("{\"timestamp\":\"2026-10-10T21:08:00.123Z\",\"level\":\"info\",\"message\":\"User created\"," ++
-        "\"service.name\":\"user-service\",\"scope\":\"users\",\"user_id\":42,\"email\":\"ada@example.com\",\"password\":\"[REDACTED]\"}\n", buf[0..got.len]);
+        "\"service.name\":\"user-service\",\"scope\":\"users\",\"source\":{\"file\":\"encode.zig\",\"line\":" ++ std.fmt.comptimePrint("{d}", .{here.line}) ++
+        "},\"user_id\":42,\"email\":\"ada@example.com\",\"password\":\"[REDACTED]\"}\n", buf[0..got.len]);
     try testing.expect(!got.truncated);
 }
 
@@ -950,6 +1103,70 @@ test "a text record: time, level, scope, message, then the fields" {
         .oversize = .truncate,
     }, .{ .order_id = 1001, .reason = "card declined", .password = "x" }) orelse return error.TestUnexpectedResult;
     try testing.expectEqualStrings("2026-10-10T21:08:00.123Z ERROR [billing] Payment failed order_id=1001 reason=\"card declined\" password=[REDACTED]\n", buf[0..got.len]);
+}
+
+/// A call site with a known function name.
+fn callSite() std.lang.SourceLocation {
+    return @src();
+}
+
+test "the call site: after the scope in JSON, last in text; the mode picks the detail" {
+    const here = comptime callSite();
+    const line = std.fmt.comptimePrint("{d}", .{here.line});
+    const column = std.fmt.comptimePrint("{d}", .{here.column});
+    var buf: [512]u8 = undefined;
+    var header: Header = .{ .timestamp = fixed_time, .service = "", .scope = "users", .oversize = .truncate };
+    var got = record(.json, .info, "m", &buf, header, .{ .src = here, .n = 1 }).?;
+    try testing.expectStringEndsWith(buf[0..got.len], ",\"scope\":\"users\",\"source\":{\"file\":\"encode.zig\",\"line\":" ++ line ++ "},\"n\":1}\n");
+    got = record(.text, .info, "m", &buf, header, .{ .src = here, .n = 1 }).?;
+    try testing.expectStringEndsWith(buf[0..got.len], " [users] m n=1 src=encode.zig:" ++ line ++ "\n");
+    header.source = .full;
+    got = record(.json, .info, "m", &buf, header, .{ .src = here }).?;
+    try testing.expectStringEndsWith(buf[0..got.len], ",\"source\":{\"file\":\"encode.zig\",\"line\":" ++ line ++ ",\"column\":" ++ column ++
+        ",\"function\":\"callSite\",\"module\":\"" ++ here.module ++ "\"}}\n");
+    got = record(.text, .info, "m", &buf, header, .{ .src = here }).?;
+    try testing.expectStringEndsWith(buf[0..got.len], " src=encode.zig:" ++ line ++ ":" ++ column ++ " function=callSite module=" ++ here.module ++ "\n");
+    header.source = .none;
+    got = record(.json, .info, "m", &buf, header, .{ .src = here }).?;
+    try testing.expectStringEndsWith(buf[0..got.len], ",\"scope\":\"users\"}\n");
+}
+
+test "a call site known only at run time is written the same way" {
+    var here = @src();
+    _ = &here;
+    var buf: [512]u8 = undefined;
+    const header: Header = .{ .timestamp = fixed_time, .service = "", .scope = "", .oversize = .truncate };
+    const got = record(.json, .warn, "m", &buf, header, .{ .src = here }).?;
+    var want: [128]u8 = undefined;
+    try testing.expectStringEndsWith(buf[0..got.len], try std.fmt.bufPrint(&want, ",\"source\":{{\"file\":\"encode.zig\",\"line\":{d}}}}}\n", .{here.line}));
+}
+
+test "generic functions lose their __func_N suffix" {
+    try testing.expectEqualStrings("parse", functionName("parse__func_1234"));
+    try testing.expectEqualStrings("parse", functionName("parse"));
+    try testing.expectEqualStrings("my__func_x", functionName("my__func_x"));
+}
+
+test "a call site that does not fit gives way before the message does" {
+    const here = @src();
+    const header: Header = .{ .timestamp = fixed_time, .service = "", .scope = "", .oversize = .truncate };
+    var whole_buf: [512]u8 = undefined;
+    const without = record(.json, .info, "a long message that has to be cut", &whole_buf, header, .{}).?;
+    var buf: [512]u8 = undefined;
+    // Room for the message cut down to a few characters, not for the source.
+    const got = record(.json, .info, "a long message that has to be cut", buf[0 .. without.len - 10], header, .{ .src = here }).?;
+    try testing.expect(got.truncated);
+    try testing.expect(std.mem.find(u8, buf[0..got.len], "source") == null);
+    try testing.expect(try std.json.validate(testing.allocator, buf[0..got.len]));
+    inline for (.{ Format.json, Format.text }) |f| {
+        var full: [512]u8 = undefined;
+        const whole = record(f, .info, "m", &full, header, .{ .src = here, .note = "some words to drop" }).?;
+        var size = mandatoryBytes(f, 0, 0);
+        while (size <= whole.len) : (size += 1) {
+            const cut = record(f, .info, "m", buf[0..size], header, .{ .src = here, .note = "some words to drop" }) orelse return error.TestUnexpectedResult;
+            if (f == .json) try testing.expect(try std.json.validate(testing.allocator, buf[0..cut.len]));
+        }
+    }
 }
 
 test "a text scope marked for quotes is written in quotes; JSON ignores the mark" {

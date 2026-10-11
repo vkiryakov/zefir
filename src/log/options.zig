@@ -13,6 +13,8 @@ pub const Options = struct {
     /// Initial levels of scopes; change them later with `setScopeLevel`.
     scopes: []const ScopeRule = &.{},
     format: Format = .json,
+    /// How much of the call site, `.src = @src()`, records write per level.
+    source: SourceOptions = .{},
     /// The longest record, '\n' included: at most 16384. Longer records are
     /// cut or dropped, see `oversize`.
     max_record_bytes: u32 = 4096,
@@ -49,6 +51,38 @@ pub const Format = enum {
     text,
 };
 
+pub const SourceMode = enum {
+    /// Leave the call site out.
+    none,
+    /// `"source":{"file":"users.zig","line":84}`; in text `src=users.zig:84`.
+    file_line,
+    /// Also the column, the function and the module.
+    full,
+};
+
+/// The call-site mode of each level; a level without its own uses
+/// `default`. Only records that pass `.src = @src()` have a call site.
+pub const SourceOptions = struct {
+    default: SourceMode = .file_line,
+    trace: ?SourceMode = null,
+    debug: ?SourceMode = null,
+    info: ?SourceMode = null,
+    warn: ?SourceMode = null,
+    err: ?SourceMode = null,
+
+    /// The mode records at `level` use.
+    pub fn mode(o: SourceOptions, level: Level) SourceMode {
+        const own = switch (level) {
+            .trace => o.trace,
+            .debug => o.debug,
+            .info => o.info,
+            .warn => o.warn,
+            .err => o.err,
+        };
+        return own orelse o.default;
+    }
+};
+
 pub const OversizePolicy = enum {
     /// Cut the message, leave out the fields that do not fit, and end the
     /// record with `"truncated":true` (` truncated=true` in text).
@@ -77,4 +111,12 @@ test "defaults: JSON to stdout at info, 4 KiB records, cut when longer" {
     try std.testing.expect(o.output == .stdout);
     try std.testing.expectEqual(@as(usize, 0), o.scopes.len);
     try std.testing.expectEqual(@as(?[]const u8, null), o.service.name);
+    try std.testing.expectEqual(SourceMode.file_line, o.source.mode(.info));
+}
+
+test "a level's own source mode outranks the default" {
+    const s: SourceOptions = .{ .default = .none, .err = .full, .debug = .file_line };
+    try std.testing.expectEqual(SourceMode.none, s.mode(.info));
+    try std.testing.expectEqual(SourceMode.full, s.mode(.err));
+    try std.testing.expectEqual(SourceMode.file_line, s.mode(.debug));
 }

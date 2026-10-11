@@ -243,15 +243,35 @@ test "scoped replaces the scope; an empty name means no scope" {
     });
 }
 
-test "secret names are redacted; .src is not a field" {
+test "secret names are redacted; .src is the call site, not a field" {
     var c: Capture = undefined;
     try c.open(.{});
     defer c.close();
     var password: []const u8 = "hunter2";
     _ = &password;
-    c.logger.info("Login", .{ .src = @src(), .user = "ada", .password = password, .@"db.api_key" = "k", .Cookie = "c" });
+    const here = @src();
+    c.logger.info("Login", .{ .src = here, .user = "ada", .password = password, .@"db.api_key" = "k", .Cookie = "c" });
     try c.expect(.json, &.{
-        "\",\"level\":\"info\",\"message\":\"Login\",\"user\":\"ada\",\"password\":\"[REDACTED]\",\"db.api_key\":\"[REDACTED]\",\"Cookie\":\"[REDACTED]\"}",
+        "\",\"level\":\"info\",\"message\":\"Login\",\"source\":{\"file\":\"Logger.zig\",\"line\":" ++ std.fmt.comptimePrint("{d}", .{here.line}) ++
+            "},\"user\":\"ada\",\"password\":\"[REDACTED]\",\"db.api_key\":\"[REDACTED]\",\"Cookie\":\"[REDACTED]\"}",
+    });
+}
+
+test "the call-site mode is chosen per level" {
+    var c: Capture = undefined;
+    try c.open(.{ .level = .trace, .source = .{ .default = .none, .err = .full } });
+    defer c.close();
+    const here = @src();
+    c.logger.info("no call site", .{ .src = here });
+    c.logger.err("full call site", .{ .src = here });
+    c.logger.err("none passed", .{});
+    const line = std.fmt.comptimePrint("{d}", .{here.line});
+    const column = std.fmt.comptimePrint("{d}", .{here.column});
+    try c.expect(.json, &.{
+        "\",\"level\":\"info\",\"message\":\"no call site\"}",
+        "\",\"level\":\"error\",\"message\":\"full call site\",\"source\":{\"file\":\"Logger.zig\",\"line\":" ++ line ++ ",\"column\":" ++ column ++
+            ",\"function\":\"" ++ here.fn_name ++ "\",\"module\":\"" ++ here.module ++ "\"}}",
+        "\",\"level\":\"error\",\"message\":\"none passed\"}",
     });
 }
 

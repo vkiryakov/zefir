@@ -68,6 +68,8 @@ io: Io,
 format: options.Format,
 max_record_bytes: u32,
 oversize: options.OversizePolicy,
+/// The call-site mode of each level, by `@backingInt(level)`.
+source_modes: [level_count]options.SourceMode,
 output: options.Output,
 /// `,"service.name":"…"…`, written into every JSON record; empty for text.
 service: []const u8,
@@ -118,6 +120,7 @@ pub fn create(gpa: std.mem.Allocator, io: Io, opts: options.Options) InitError!*
         .format = opts.format,
         .max_record_bytes = opts.max_record_bytes,
         .oversize = opts.oversize,
+        .source_modes = sourceModes(opts.source),
         .output = opts.output,
         .service = service,
         .scope_table = undefined,
@@ -164,6 +167,7 @@ pub fn emit(engine: *Engine, comptime level: Level, scope: *const scopes.Entry, 
         .service = engine.service,
         .scope = scope.name(),
         .scope_quoted = scope.quoted,
+        .source = engine.source_modes[@backingInt(level)],
         .oversize = engine.oversize,
     };
     const out = buf[1..][0..engine.max_record_bytes];
@@ -243,6 +247,14 @@ fn writeWriter(w: *Io.Writer, bytes: []const u8, sent: *usize) Io.Writer.Error!v
         sent.* = bytes.len;
         return e;
     };
+}
+
+const level_count = std.enums.values(Level).len;
+
+fn sourceModes(source: options.SourceOptions) [level_count]options.SourceMode {
+    var modes: [level_count]options.SourceMode = undefined;
+    for (std.enums.values(Level)) |level| modes[@backingInt(level)] = source.mode(level);
+    return modes;
 }
 
 const service_keys = [_][]const u8{ "service.name", "service.instance.id", "service.version", "deployment.environment.name" };

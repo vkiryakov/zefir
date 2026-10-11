@@ -50,6 +50,8 @@ pub const Service = options.Service;
 pub const ScopeRule = options.ScopeRule;
 pub const Format = options.Format;
 pub const OversizePolicy = options.OversizePolicy;
+pub const SourceMode = options.SourceMode;
+pub const SourceOptions = options.SourceOptions;
 pub const Output = options.Output;
 
 test "isSensitive is core's check, so one marker serves every module" {
