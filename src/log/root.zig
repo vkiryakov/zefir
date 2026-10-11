@@ -42,6 +42,10 @@ pub const Level = @import("level.zig").Level;
 pub const isSensitive = @import("core").isSensitive;
 /// Logs bytes as lowercase hex: `.digest = zefir.log.hex(&digest)`.
 pub const hex = @import("hex.zig").hex;
+/// The `logFn` that bridges std.log: see `Logger.installStdLog`.
+pub const stdLogFn = @import("std_log.zig").stdLogFn;
+/// Sends std.log back to `std.log.defaultLog`.
+pub const uninstallStdLog = @import("std_log.zig").uninstall;
 pub const Logger = @import("Logger.zig");
 pub const Stats = @import("Engine.zig").Stats;
 pub const InitError = Logger.InitError;
@@ -76,4 +80,5 @@ test {
     _ = @import("Engine.zig");
     _ = @import("Logger.zig");
     _ = @import("hex.zig");
+    _ = @import("std_log.zig");
 }

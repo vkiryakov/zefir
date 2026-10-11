@@ -485,6 +485,19 @@ pub fn record(
     return encodeRecord(f, level, Literal(message){}, out, header, source, fields);
 }
 
+/// `record` for a message formatted at run time, as std.log gives it.
+pub fn recordFormatted(
+    comptime f: Format,
+    comptime level: Level,
+    comptime format: []const u8,
+    args: anytype,
+    out: []u8,
+    header: Header,
+) ?Encoded {
+    const message: Formatted(format, @TypeOf(args)) = .{ .args = args };
+    return encodeRecord(f, level, message, out, header, "", .{});
+}
+
 fn encodeRecord(
     comptime f: Format,
     comptime level: Level,
@@ -641,6 +654,49 @@ fn Literal(comptime message: []const u8) type {
             try w.writeAll(open);
             try escape.write(w, message[0..n]);
             try w.writeAll(ellipsis ++ close);
+        }
+    };
+}
+
+/// A message formatted at run time: escaped as it is formatted.
+fn Formatted(comptime format: []const u8, comptime Args: type) type {
+    return struct {
+        args: Args,
+
+        const empty = format.len == 0;
+
+        /// As `Literal.write`; a cut pass formats the message twice, once
+        /// to measure it.
+        fn write(m: @This(), w: *Writer, comptime open: []const u8, comptime close: []const u8, keep: usize, comptime cut: bool) Writer.Error!void {
+            if (!cut) {
+                try w.writeAll(open);
+                try m.print(w, null);
+                return w.writeAll(close);
+            }
+            const free = w.unusedCapacityLen();
+            if (open.len + ellipsis.len + close.len + keep > free) return error.WriteFailed;
+            const room = free - open.len - close.len - keep;
+            var sink: Writer.Discarding = .init(&.{});
+            var probe: escape.Escaper = undefined;
+            probe.init(&sink.writer);
+            probe.writer.print(format, m.args) catch {};
+            probe.finish() catch {};
+            try w.writeAll(open);
+            if (probe.count <= room) {
+                try m.print(w, null);
+            } else {
+                try m.print(w, room - ellipsis.len);
+                try w.writeAll(ellipsis);
+            }
+            try w.writeAll(close);
+        }
+
+        fn print(m: @This(), w: *Writer, budget: ?usize) Writer.Error!void {
+            var e: escape.Escaper = undefined;
+            e.init(w);
+            e.budget = budget;
+            try e.writer.print(format, m.args);
+            try e.finish();
         }
     };
 }

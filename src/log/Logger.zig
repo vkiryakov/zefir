@@ -7,6 +7,8 @@ const builtin = @import("builtin");
 const core = @import("core");
 const Engine = @import("Engine.zig");
 const encode = @import("encode.zig");
+const std_log = @import("std_log.zig");
+const uninstallStdLog = std_log.uninstall;
 const options = @import("options.zig");
 const scopes = @import("scopes.zig");
 const field_checks = @import("fields.zig");
@@ -126,6 +128,15 @@ pub fn setLevel(self: Logger, level: Level) void {
 /// rules.
 pub fn setScopeLevel(self: Logger, prefix: []const u8, level: ?Level) error{ TooManyRules, EmptyPrefix }!void {
     return self.engine.scope_table.setRule(prefix, level);
+}
+
+/// Sends std.log to this logger. The root file must set
+/// `pub const std_options: std.Options = .{ .logFn = zefir.log.stdLogFn };`.
+/// std.log's scope becomes the record's scope and its text the message;
+/// std's compile-time level filter still runs first. `deinit` removes the
+/// bridge, `zefir.log.uninstallStdLog` does it earlier.
+pub fn installStdLog(self: Logger) void {
+    std_log.install(self.engine);
 }
 
 /// Counters since `init`, readable from any thread.
@@ -309,6 +320,60 @@ test "text puts the trace ids after the fields" {
     const ctx = core.Context.root.withTrace(try traceContext("4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7"));
     c.logger.withContext(ctx).info("Fetching user", .{ .user_id = 42 });
     try c.expect(.text, &.{" INFO  Fetching user user_id=42 trace_id=4bf92f3577b34da6a3ce929d0e0e4736 span_id=00f067aa0ba902b7"});
+}
+
+test "std.log goes to the installed logger: its scope, its level and its text" {
+    var c: Capture = undefined;
+    try c.open(.{ .level = .debug });
+    defer c.close();
+    c.logger.installStdLog();
+    std_log.stdLogFn(.info, .users, "user {d} created: {s}", .{ 42, "a\nb\xff" });
+    std_log.stdLogFn(.err, .default, "disk {s}", .{"full"});
+    std_log.stdLogFn(.debug, .confy, "loaded", .{});
+    try c.expect(.json, &.{
+        "\",\"level\":\"info\",\"message\":\"user 42 created: a\\nb\u{FFFD}\",\"scope\":\"users\"}",
+        "\",\"level\":\"error\",\"message\":\"disk full\"}",
+        "\",\"level\":\"debug\",\"message\":\"loaded\",\"scope\":\"confy\"}",
+    });
+}
+
+test "std.log records follow the logger's levels, scope rules included" {
+    var c: Capture = undefined;
+    try c.open(.{ .format = .text, .scopes = &.{.{ .prefix = "noisy", .level = .err }} });
+    defer c.close();
+    c.logger.installStdLog();
+    std_log.stdLogFn(.debug, .users, "hidden: below info", .{});
+    std_log.stdLogFn(.warn, .noisy, "hidden: noisy logs from err", .{});
+    std_log.stdLogFn(.warn, .users, "shown {d}", .{1});
+    try c.expect(.text, &.{" WARN  [users] shown 1"});
+}
+
+test "a long std.log message is cut between characters" {
+    var c: Capture = undefined;
+    try c.open(.{ .max_record_bytes = 400 });
+    defer c.close();
+    c.logger.installStdLog();
+    std_log.stdLogFn(.info, .default, "{s}", .{&@as([300]u8, @splat('m')) ++ "ééééééééééééééééééééééééééééééééééééééééééééééééééé"});
+    const line = c.out.written();
+    try testing.expect(line.len <= 400);
+    try testing.expectStringEndsWith(line, "…\",\"truncated\":true}\n");
+    try testing.expect(std.unicode.utf8ValidateSlice(line));
+    try testing.expect(try std.json.validate(testing.allocator, line[0 .. line.len - 1]));
+}
+
+test "deinit and uninstallStdLog send std.log back to its default" {
+    var sink: std.Io.Writer.Discarding = .init(&.{});
+    const first: Logger = try .init(testing.allocator, testing.io, .{ .output = .{ .writer = &sink.writer } });
+    const second: Logger = try .init(testing.allocator, testing.io, .{ .output = .{ .writer = &sink.writer } });
+    first.installStdLog();
+    try testing.expect(std_log.installed() == first.engine);
+    second.deinit(); // not the installed one: std.log stays with `first`
+    try testing.expect(std_log.installed() == first.engine);
+    uninstallStdLog();
+    try testing.expect(std_log.installed() == null);
+    first.installStdLog();
+    first.deinit();
+    try testing.expect(std_log.installed() == null);
 }
 
 test "the call-site mode is chosen per level" {
