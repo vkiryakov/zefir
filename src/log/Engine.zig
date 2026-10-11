@@ -74,6 +74,16 @@ scope_table: scopes.Table,
 /// What `.stdout` writes to; tests point it at a pipe.
 stdout: Io.File,
 output_lock: Io.Mutex = .init,
+/// The logger's own Io, for the stderr note about a closed stdout, so the
+/// note never depends on the application's Io.
+own: Io.Threaded = .init_single_threaded,
+/// Where that note goes; tests point it at a pipe.
+stderr: Io.File,
+/// The last record broke off mid-line, so the next one starts with '\n'.
+/// Guarded by `output_lock`.
+torn: bool = false,
+/// stdout is closed for good: records are dropped from now on.
+dead: std.atomic.Value(bool) = .init(false),
 counters: Counters = .{},
 
 const Counter = std.atomic.Value(u64);
@@ -111,6 +121,7 @@ pub fn create(gpa: std.mem.Allocator, io: Io, opts: options.Options) InitError!*
         .service = service,
         .scope_table = undefined,
         .stdout = .stdout(),
+        .stderr = .stderr(),
     };
     try engine.scope_table.init(opts.level, opts.scopes);
     return engine;
@@ -118,6 +129,7 @@ pub fn create(gpa: std.mem.Allocator, io: Io, opts: options.Options) InitError!*
 
 pub fn destroy(engine: *Engine) void {
     const gpa = engine.gpa;
+    engine.own.deinit();
     gpa.free(engine.service);
     gpa.destroy(engine);
 }
@@ -142,23 +154,30 @@ pub fn stats(engine: *Engine) Stats {
 /// Encodes and writes one record; the caller has checked the level.
 pub fn emit(engine: *Engine, comptime level: Level, scope: *const scopes.Entry, comptime message: []const u8, fields: anytype) void {
     bump(&engine.counters.accepted);
-    var buf: [max_record_limit]u8 = undefined;
+    if (engine.dead.load(.monotonic)) return bump(&engine.counters.dropped_write_failed);
+    // One byte more than the longest record: room for the '\n' that ends a
+    // torn line.
+    var buf: [1 + max_record_limit]u8 = undefined;
     const header: encode.Header = .{
         .timestamp = Io.Clock.real.now(engine.io),
         .service = engine.service,
         .scope = scope.name(),
         .oversize = engine.oversize,
     };
-    const out = buf[0..engine.max_record_bytes];
+    const out = buf[1..][0..engine.max_record_bytes];
     const encoded = switch (engine.format) {
         inline else => |format| encode.record(format, level, message, out, header, fields),
     } orelse return bump(&engine.counters.dropped_oversize);
     if (encoded.truncated) bump(&engine.counters.truncated);
-    engine.write(out[0..encoded.len]);
+    engine.write(&buf, encoded.len);
 }
 
-/// Writes one record under the output lock, through the application's Io.
-fn write(engine: *Engine, bytes: []const u8) void {
+const WriteError = Io.File.Writer.Error || Io.Writer.Error;
+
+/// Writes the record in `buf[1..][0..len]` under the output lock, through
+/// the application's Io. `buf[0]` is free for the '\n' that ends a torn
+/// line.
+fn write(engine: *Engine, buf: []u8, len: usize) void {
     const io = engine.io;
     // A log call is never a cancelation point: the record goes out whole.
     const protection = io.swapCancelProtection(.blocked);
@@ -166,17 +185,45 @@ fn write(engine: *Engine, bytes: []const u8) void {
     engine.output_lock.lockUncancelable(io);
     defer engine.output_lock.unlock(io);
 
+    const lead: usize = @intFromBool(engine.torn);
+    buf[0] = '\n';
+    const bytes = buf[1 - lead .. 1 + len];
     var sent: usize = 0;
     const result = switch (engine.output) {
         .stdout => writeFile(engine.stdout, io, bytes, &sent),
         .writer => |w| writeWriter(w, bytes, &sent),
     };
-    if (result) |_| {
-        bump(&engine.counters.written);
-    } else |_| {
-        bump(&engine.counters.write_errors);
-        bump(&engine.counters.dropped_write_failed);
+    result catch |e| return engine.failed(e, sent, lead);
+    engine.torn = false;
+    bump(&engine.counters.written);
+}
+
+/// Counts a failed write. A record cut mid-line costs that line only: the
+/// next record starts with '\n'.
+fn failed(engine: *Engine, e: WriteError, sent: usize, lead: usize) void {
+    bump(&engine.counters.write_errors);
+    bump(&engine.counters.dropped_write_failed);
+    if (sent > lead) {
+        engine.torn = true;
+        bump(&engine.counters.torn_lines);
+    } else if (sent > 0) {
+        engine.torn = false; // only the '\n' that ends the previous torn line went out
     }
+    switch (e) {
+        error.BrokenPipe, error.NotOpenForWriting => engine.die(e),
+        else => {}, // e.g. WouldBlock on a stdout someone made nonblocking: drop this record only
+    }
+}
+
+/// stdout is closed: drop every record from now on, and say so on stderr
+/// once, through the logger's own Io.
+fn die(engine: *Engine, e: WriteError) void {
+    if (engine.dead.swap(true, .monotonic)) return;
+    const note = switch (e) {
+        error.BrokenPipe => "zefir.log: stdout is closed (BrokenPipe); dropping the records that follow\n",
+        else => "zefir.log: stdout is not open for writing (NotOpenForWriting); dropping the records that follow\n",
+    };
+    engine.stderr.writeStreamingAll(engine.own.io(), note) catch {};
 }
 
 /// Writes `bytes` with streaming writes; `File.writer()` would be

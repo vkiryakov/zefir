@@ -3,6 +3,7 @@
 //! `scoped` derives handles that write a scope.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Engine = @import("Engine.zig");
 const options = @import("options.zig");
 const scopes = @import("scopes.zig");
@@ -445,4 +446,89 @@ test "a call with many fields writes them all, in order" {
     for (0..32) |i| try want.writer.print(",\"f{d:0>2}\":{d}", .{ i, if (i % 2 == 0) i else 7 });
     try want.writer.writeByte('}');
     try c.expect(.json, &.{want.written()});
+}
+
+/// A writer that takes `budget` bytes, fails once, then takes everything.
+const Gate = struct {
+    budget: usize,
+    tripped: bool = false,
+    sink: std.Io.Writer.Allocating,
+    writer: std.Io.Writer = .{ .buffer = &.{}, .vtable = &.{ .drain = drain } },
+
+    fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+        // The logger writes one slice at a time.
+        std.debug.assert(data.len == 1 and splat == 1);
+        const gate: *Gate = @alignCast(@fieldParentPtr("writer", w));
+        var bytes = data[0];
+        if (!gate.tripped) {
+            if (gate.budget == 0) {
+                gate.tripped = true;
+                return error.WriteFailed;
+            }
+            bytes = bytes[0..@min(bytes.len, gate.budget)];
+            gate.budget -= bytes.len;
+        }
+        gate.sink.writer.writeAll(bytes) catch return error.WriteFailed;
+        return bytes.len;
+    }
+};
+
+test "a write that fails mid-line costs that line only" {
+    var gate: Gate = .{ .budget = 10, .sink = .init(testing.allocator) };
+    defer gate.sink.deinit();
+    const logger: Logger = try .init(testing.allocator, testing.io, .{ .output = .{ .writer = &gate.writer } });
+    defer logger.deinit();
+    logger.info("first", .{});
+    logger.info("second", .{});
+    logger.info("third", .{});
+    var lines = std.mem.splitScalar(u8, gate.sink.written(), '\n');
+    try testing.expectEqualStrings("{\"timestam", lines.next().?); // the 10 bytes that went out
+    try testing.expectStringEndsWith(lines.next().?, "\"message\":\"second\"}");
+    try testing.expectStringEndsWith(lines.next().?, "\"message\":\"third\"}");
+    try testing.expectEqualStrings("", lines.rest());
+    const s = logger.stats();
+    try testing.expectEqual(@as(u64, 2), s.written);
+    try testing.expectEqual(@as(u64, 1), s.write_errors);
+    try testing.expectEqual(@as(u64, 1), s.dropped.write_failed);
+    try testing.expectEqual(@as(u64, 1), s.torn_lines);
+}
+
+test "a closed stdout is noted on stderr once; the records after it are dropped" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest; // the test needs POSIX pipes
+    const io = testing.io;
+    const stdout_pipe = try std.Io.Threaded.pipe2(.{});
+    const stderr_pipe = try std.Io.Threaded.pipe2(.{});
+    const stdout_write = pipeEnd(stdout_pipe[1]);
+    const stderr_read = pipeEnd(stderr_pipe[0]);
+    const stderr_write = pipeEnd(stderr_pipe[1]);
+    defer stdout_write.close(io);
+    defer stderr_read.close(io);
+    pipeEnd(stdout_pipe[0]).close(io); // nobody reads stdout: writes fail with BrokenPipe
+
+    const logger: Logger = try .init(testing.allocator, io, .{});
+    defer logger.deinit();
+    logger.engine.stdout = stdout_write;
+    logger.engine.stderr = stderr_write;
+    logger.info("first", .{});
+    logger.info("second", .{});
+    stderr_write.close(io);
+
+    var buf: [512]u8 = undefined;
+    var len: usize = 0;
+    while (true) {
+        len += stderr_read.readStreaming(io, &.{buf[len..]}) catch |e| switch (e) {
+            error.EndOfStream => break,
+            else => return e,
+        };
+    }
+    try testing.expectEqualStrings("zefir.log: stdout is closed (BrokenPipe); dropping the records that follow\n", buf[0..len]);
+    const s = logger.stats();
+    try testing.expectEqual(@as(u64, 2), s.accepted);
+    try testing.expectEqual(@as(u64, 0), s.written);
+    try testing.expectEqual(@as(u64, 1), s.write_errors);
+    try testing.expectEqual(@as(u64, 2), s.dropped.write_failed);
+}
+
+fn pipeEnd(fd: std.posix.fd_t) std.Io.File {
+    return .{ .handle = fd, .flags = .{ .nonblocking = false } };
 }
