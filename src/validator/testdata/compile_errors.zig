@@ -137,4 +137,6 @@ pub const list = [_]Fixture{
     .{ .file = "src/validator/testdata/compile_errors/custom_message_too_long.zig", .expect = "validator: custom(\"users.ok\", ...): message is longer than 512 bytes", .row = "CU-7" },
     .{ .file = "src/validator/testdata/compile_errors/custom_message_bad_utf8.zig", .expect = "validator: custom(\"users.ok\", ...): message must be valid UTF-8", .row = "CU-8" },
     .{ .file = "src/validator/testdata/compile_errors/custom_message_truncated_utf8.zig", .expect = "validator: custom(\"users.ok\", ...): message must be valid UTF-8", .row = "variant of CU-8" },
+    .{ .file = "src/validator/testdata/compile_errors/not_empty_called.zig", .expect = "type 'core.Rule' not a function", .row = "Z-8" },
+    .{ .file = "src/validator/testdata/compile_errors/positive_called.zig", .expect = "type 'core.Rule' not a function", .row = "Z-8" },
 };
