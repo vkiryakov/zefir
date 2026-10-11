@@ -20,4 +20,5 @@ test {
     _ = @import("redact.zig");
     _ = @import("fields.zig");
     _ = @import("encode.zig");
+    _ = @import("scopes.zig");
 }
