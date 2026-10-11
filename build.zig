@@ -85,6 +85,39 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&run.step);
     }
 
+    // log compile errors: each test of the file must fail to compile with
+    // the message next to its name. The filter compiles one test at a time;
+    // the message must be the end of an error line.
+    const log_compile_errors = b.createModule(.{
+        .root_source_file = b.path("src/log/tests/compile_errors.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "log", .module = log },
+        },
+    });
+    for ([_][2][]const u8{
+        .{ "fields that are not a struct", "zefir.log: fields must be a struct literal such as .{ .user_id = id }, got 'comptime_int'" },
+        .{ "positional fields", "zefir.log: fields need names: write .{ .user_id = id }, not .{ id }" },
+        .{ "reserved field name", "zefir.log: field name 'level' is reserved for record metadata; rename it, e.g. 'user_level'" },
+        .{ "dotted service field", "zefir.log: field name 'service.name' is reserved for record metadata; rename it, e.g. 'user_service.name'" },
+        .{ "subfield of the source object", "zefir.log: field name 'source.file' is reserved for record metadata; rename it, e.g. 'user_source.file'" },
+        .{ "name with a space", "zefir.log: field name 'user id' may contain only [A-Za-z0-9_.-]" },
+        .{ "src of the wrong type", "zefir.log: field 'src' is the call site and must be a std.lang.SourceLocation; pass .src = @src()" },
+        .{ "error union value", "zefir.log: field 'value': cannot log error union 'anyerror!u8'; handle it with try or catch first, then log the payload or the error" },
+        .{ "void value", "zefir.log: field 'nothing': cannot log 'void'; remove the field" },
+        // The type name depends on the file, so only the end of the line is checked.
+        .{ "struct value", "' in field 'point'; log scalars and strings, e.g. .{ .user_id = user.id }" },
+    }, 0..) |case, i| {
+        const compile = b.addTest(.{
+            .name = b.fmt("log-compile-error-{d}", .{i}),
+            .root_module = log_compile_errors,
+            .filters = &.{case[0]},
+        });
+        compile.expect_errors = .{ .contains = case[1] };
+        test_step.dependOn(&compile.step);
+    }
+
     // core benchmarks: `zig build test` only compiles them, `zig build bench`
     // runs them. They get their own ReleaseFast copy of core, since the
     // `core` module above is built in the mode the user asked for.
