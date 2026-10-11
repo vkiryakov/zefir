@@ -1,0 +1,127 @@
+[
+  {
+    "id": "notEmpty-001",
+    "rule": "notEmpty",
+    "params": "",
+    "field_type": "[]const u32",
+    "input": [],
+    "expect": "fail",
+    "code": "validation.not_empty",
+    "reason": "empty slice",
+    "source": "catalog/numbers-lists/vectors.json#notEmpty-01"
+  },
+  {
+    "id": "notEmpty-002",
+    "rule": "notEmpty",
+    "params": "",
+    "field_type": "[]const u32",
+    "input": [
+      "1"
+    ],
+    "expect": "pass",
+    "reason": "one item",
+    "source": "catalog/numbers-lists/vectors.json#notEmpty-02"
+  },
+  {
+    "id": "notEmpty-003",
+    "rule": "notEmpty",
+    "params": "",
+    "field_type": "[]const u32",
+    "input": [
+      "0"
+    ],
+    "expect": "pass",
+    "reason": "item values do not matter",
+    "source": "catalog/numbers-lists/vectors.json#notEmpty-03"
+  },
+  {
+    "id": "notEmpty-004",
+    "rule": "notEmpty",
+    "params": "",
+    "field_type": "[]const []const u8",
+    "input": [
+      ""
+    ],
+    "expect": "pass",
+    "reason": "one empty string is an item; item rules go in each(...)",
+    "source": "catalog/numbers-lists/vectors.json#notEmpty-04"
+  },
+  {
+    "id": "notEmpty-005",
+    "rule": "notEmpty",
+    "params": "",
+    "field_type": "[]const ?u32",
+    "input": [
+      null
+    ],
+    "expect": "pass",
+    "reason": "one null item is an item",
+    "source": "catalog/numbers-lists/vectors.json#notEmpty-05"
+  },
+  {
+    "id": "notEmpty-006",
+    "rule": "notEmpty",
+    "params": "",
+    "field_type": "[]const bool",
+    "input": [
+      false
+    ],
+    "expect": "pass",
+    "reason": "one item",
+    "source": "catalog/numbers-lists/vectors.json#notEmpty-06"
+  },
+  {
+    "id": "notEmpty-007",
+    "rule": "notEmpty",
+    "params": "",
+    "field_type": "[]const []const u32",
+    "input": [
+      []
+    ],
+    "expect": "pass",
+    "reason": "an empty inner list is an item",
+    "source": "catalog/numbers-lists/vectors.json#notEmpty-07"
+  },
+  {
+    "id": "notEmpty-008",
+    "rule": "notEmpty",
+    "params": "",
+    "field_type": "[]const Role",
+    "input": [],
+    "expect": "fail",
+    "code": "validation.not_empty",
+    "reason": "empty slice of enums",
+    "source": "catalog/numbers-lists/vectors.json#notEmpty-08"
+  },
+  {
+    "id": "notEmpty-009",
+    "rule": "notEmpty",
+    "params": "",
+    "field_type": "?[]const u32",
+    "input": null,
+    "expect": "pass",
+    "reason": "null skips the rules (class-validator arrayNotEmpty(null) is false; with @IsOptional it is skipped)",
+    "source": "catalog/numbers-lists/vectors.json#notEmpty-09"
+  },
+  {
+    "id": "notEmpty-010",
+    "rule": "notEmpty",
+    "params": "",
+    "field_type": "[]const u8",
+    "input": "",
+    "expect": "fail",
+    "code": "validation.not_empty",
+    "reason": "string form: empty string",
+    "source": "catalog/numbers-lists/vectors.json#notEmpty-10"
+  },
+  {
+    "id": "notEmpty-011",
+    "rule": "notEmpty",
+    "params": "",
+    "field_type": "[]const u8",
+    "input": " ",
+    "expect": "pass",
+    "reason": "string form: whitespace passes (use notBlank)",
+    "source": "catalog/numbers-lists/vectors.json#notEmpty-11"
+  }
+]

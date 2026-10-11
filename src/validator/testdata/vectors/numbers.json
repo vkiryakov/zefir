@@ -1,0 +1,150 @@
+[
+  {
+    "id": "positive-001",
+    "rule": "positive",
+    "params": "",
+    "field_type": "u8",
+    "input": "0",
+    "expect": "fail",
+    "code": "validation.positive",
+    "message": "must be greater than 0",
+    "reason": "0 is not greater than 0",
+    "source": "errata VE-098"
+  },
+  {
+    "id": "positive-002",
+    "rule": "positive",
+    "params": "",
+    "field_type": "u8",
+    "input": "1",
+    "expect": "pass",
+    "reason": "1 is the smallest positive u8",
+    "source": "errata VE-099"
+  },
+  {
+    "id": "positive-003",
+    "rule": "positive",
+    "params": "",
+    "field_type": "i64",
+    "input": "-1",
+    "expect": "fail",
+    "code": "validation.positive",
+    "message": "must be greater than 0",
+    "reason": "-1 fails on a signed type",
+    "source": "errata VE-100"
+  },
+  {
+    "id": "positive-004",
+    "rule": "positive",
+    "params": "",
+    "field_type": "i64",
+    "input": "-9223372036854775808",
+    "expect": "fail",
+    "code": "validation.positive",
+    "message": "must be greater than 0",
+    "reason": "the smallest i64 fails",
+    "source": "errata VE-101"
+  },
+  {
+    "id": "positive-005",
+    "rule": "positive",
+    "params": "",
+    "field_type": "i64",
+    "input": "9223372036854775807",
+    "expect": "pass",
+    "reason": "the largest i64 passes",
+    "source": "errata VE-102"
+  },
+  {
+    "id": "positive-006",
+    "rule": "positive",
+    "params": "",
+    "field_type": "u64",
+    "input": "18446744073709551615",
+    "expect": "pass",
+    "reason": "the largest u64 passes",
+    "source": "errata VE-103"
+  },
+  {
+    "id": "positive-007",
+    "rule": "positive",
+    "params": "",
+    "field_type": "f64",
+    "input": "-0",
+    "expect": "fail",
+    "code": "validation.positive",
+    "message": "must be greater than 0",
+    "reason": "-0.0 is not greater than 0",
+    "source": "errata VE-104"
+  },
+  {
+    "id": "positive-008",
+    "rule": "positive",
+    "params": "",
+    "field_type": "f64",
+    "input": "0",
+    "expect": "fail",
+    "code": "validation.positive",
+    "message": "must be greater than 0",
+    "reason": "0.0 is not greater than 0",
+    "source": "errata VE-105"
+  },
+  {
+    "id": "positive-009",
+    "rule": "positive",
+    "params": "",
+    "field_type": "f64",
+    "input": "5e-324",
+    "bits": "0000000000000001",
+    "expect": "pass",
+    "reason": "the smallest f64 subnormal is greater than 0",
+    "source": "errata VE-106"
+  },
+  {
+    "id": "positive-010",
+    "rule": "positive",
+    "params": "",
+    "field_type": "f32",
+    "input": "1e-45",
+    "bits": "00000001",
+    "expect": "pass",
+    "reason": "the smallest f32 subnormal is greater than 0",
+    "source": "errata VE-107"
+  },
+  {
+    "id": "positive-011",
+    "rule": "positive",
+    "params": "",
+    "field_type": "f64",
+    "input": "nan",
+    "expect": "precondition",
+    "code": "validation.finite",
+    "message": "must be a finite number",
+    "reason": "NaN fails the finite precondition before the sign check",
+    "source": "errata VE-108"
+  },
+  {
+    "id": "positive-012",
+    "rule": "positive",
+    "params": "",
+    "field_type": "f64",
+    "input": "inf",
+    "expect": "precondition",
+    "code": "validation.finite",
+    "message": "must be a finite number",
+    "reason": "+inf fails the finite precondition (validator.js accepts Infinity as positive)",
+    "source": "errata VE-109"
+  },
+  {
+    "id": "positive-013",
+    "rule": "positive",
+    "params": "",
+    "field_type": "??f64",
+    "input": "0",
+    "expect": "fail",
+    "code": "validation.positive",
+    "message": "must be greater than 0",
+    "reason": "nested optionals are unwrapped to the number",
+    "source": "errata VE-110"
+  }
+]

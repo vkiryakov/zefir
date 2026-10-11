@@ -1,2 +1,4 @@
 *.zig text eol=lf
 *.zon text eol=lf
+src/validator/testdata/** -text
+*.md text eol=lf

@@ -44,4 +44,4 @@ pub const panic_runs = [_]PanicRun{
 pub const compile_errors = @import("compile_errors.zig").list;
 
 /// Golden-vector files in vectors/, by name without ".json".
-pub const vector_files = [_][]const u8{};
+pub const vector_files = [_][]const u8{ "common", "numbers", "lists" };
