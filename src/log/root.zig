@@ -16,4 +16,5 @@ test {
     _ = @import("level.zig");
     _ = @import("timestamp.zig");
     _ = @import("options.zig");
+    _ = @import("escape.zig");
 }
