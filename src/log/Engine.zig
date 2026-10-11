@@ -156,7 +156,7 @@ pub fn stats(engine: *Engine) Stats {
 }
 
 /// Encodes and writes one record; the caller has checked the level.
-pub fn emit(engine: *Engine, comptime level: Level, scope: *const scopes.Entry, comptime message: []const u8, fields: anytype) void {
+pub fn emit(engine: *Engine, comptime level: Level, scope: *const scopes.Entry, trace: ?*const encode.TraceHex, comptime message: []const u8, fields: anytype) void {
     bump(&engine.counters.accepted);
     if (engine.dead.load(.monotonic)) return bump(&engine.counters.dropped_write_failed);
     // One byte more than the longest record: room for the '\n' that ends a
@@ -168,6 +168,7 @@ pub fn emit(engine: *Engine, comptime level: Level, scope: *const scopes.Entry, 
         .scope = scope.name(),
         .scope_quoted = scope.quoted,
         .source = engine.source_modes[@backingInt(level)],
+        .trace = trace,
         .oversize = engine.oversize,
     };
     const out = buf[1..][0..engine.max_record_bytes];

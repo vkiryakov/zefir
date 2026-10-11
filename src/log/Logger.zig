@@ -4,7 +4,9 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const core = @import("core");
 const Engine = @import("Engine.zig");
+const encode = @import("encode.zig");
 const options = @import("options.zig");
 const scopes = @import("scopes.zig");
 const field_checks = @import("fields.zig");
@@ -15,6 +17,11 @@ const Logger = @This();
 
 engine: *Engine,
 scope: *const scopes.Entry,
+/// The trace this handle writes, from `withContext`.
+ids: ?Ids = null,
+
+/// Copied from a `core.Context`: the handle borrows nothing.
+const Ids = struct { trace_id: core.TraceId, span_id: core.SpanId };
 
 pub const InitError = Engine.InitError;
 
@@ -69,7 +76,12 @@ pub fn err(self: Logger, comptime message: []const u8, fields: anytype) void {
 
 fn log(self: Logger, comptime level: Level, comptime message: []const u8, fields: anytype) void {
     if (!self.enabled(level)) return;
-    self.engine.emit(level, self.scope, message, fields);
+    var hex: encode.TraceHex = undefined;
+    const ids_hex: ?*const encode.TraceHex = if (self.ids) |ids| blk: {
+        hex = .{ .trace_id = ids.trace_id.toHex(), .span_id = ids.span_id.toHex() };
+        break :blk &hex;
+    } else null;
+    self.engine.emit(level, self.scope, ids_hex, message, fields);
 }
 
 /// Whether a record at `level` would be written. Field values are computed
@@ -87,7 +99,17 @@ pub fn enabled(self: Logger, level: Level) bool {
 /// without a scope, at the global level, and `stats().scopes_overflow`
 /// counts it.
 pub fn scoped(self: Logger, name: []const u8) Logger {
-    return .{ .engine = self.engine, .scope = self.engine.scope_table.find(name) };
+    return .{ .engine = self.engine, .scope = self.engine.scope_table.find(name), .ids = self.ids };
+}
+
+/// A handle whose records carry the trace and span ids of `ctx`, in place
+/// of this handle's; a context without a trace gives a handle without them.
+/// The ids are copied, so the handle may outlive `ctx`. A deadline or a
+/// cancellation in `ctx` does not affect logging.
+pub fn withContext(self: Logger, ctx: core.Context) Logger {
+    var handle = self;
+    handle.ids = if (ctx.trace) |t| .{ .trace_id = t.trace_id, .span_id = t.span_id } else null;
+    return handle;
 }
 
 /// Sets the global threshold. Scopes without a rule follow it; every
@@ -160,7 +182,7 @@ fn expectTimestamp(s: []const u8) !void {
     }
 }
 
-/// 600 bytes: longer than a 300-byte record.
+/// 600 bytes: longer than a 400-byte record.
 const long_message = &@as([600]u8, @splat('x'));
 
 test "records carry the level, message, service, scope and fields" {
@@ -257,6 +279,38 @@ test "secret names are redacted; .src is the call site, not a field" {
     });
 }
 
+fn traceContext(trace_hex: []const u8, span_hex: []const u8) !core.TraceContext {
+    return .{ .trace_id = try .parseHex(trace_hex), .span_id = try .parseHex(span_hex), .flags = .{}, .state = .empty };
+}
+
+test "withContext adds the trace and span ids; scoped and withContext compose in either order" {
+    var c: Capture = undefined;
+    try c.open(.{});
+    defer c.close();
+    const ctx = core.Context.root.withTrace(try traceContext("4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7"));
+    const here = @src();
+    c.logger.withContext(ctx).scoped("users").info("a", .{ .id = 1 });
+    c.logger.scoped("users").withContext(ctx).info("b", .{ .src = here });
+    c.logger.withContext(ctx).withContext(.root).info("c", .{}); // a context without a trace clears the ids
+    c.logger.info("d", .{});
+    const ids = ",\"trace_id\":\"4bf92f3577b34da6a3ce929d0e0e4736\",\"span_id\":\"00f067aa0ba902b7\"";
+    try c.expect(.json, &.{
+        "\",\"level\":\"info\",\"message\":\"a\",\"scope\":\"users\"" ++ ids ++ ",\"id\":1}",
+        "\",\"level\":\"info\",\"message\":\"b\",\"scope\":\"users\",\"source\":{\"file\":\"Logger.zig\",\"line\":" ++ std.fmt.comptimePrint("{d}", .{here.line}) ++ "}" ++ ids ++ "}",
+        "\",\"level\":\"info\",\"message\":\"c\"}",
+        "\",\"level\":\"info\",\"message\":\"d\"}",
+    });
+}
+
+test "text puts the trace ids after the fields" {
+    var c: Capture = undefined;
+    try c.open(.{ .format = .text });
+    defer c.close();
+    const ctx = core.Context.root.withTrace(try traceContext("4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7"));
+    c.logger.withContext(ctx).info("Fetching user", .{ .user_id = 42 });
+    try c.expect(.text, &.{" INFO  Fetching user user_id=42 trace_id=4bf92f3577b34da6a3ce929d0e0e4736 span_id=00f067aa0ba902b7"});
+}
+
 test "the call-site mode is chosen per level" {
     var c: Capture = undefined;
     try c.open(.{ .level = .trace, .source = .{ .default = .none, .err = .full } });
@@ -290,7 +344,7 @@ test "scope names with control characters, broken UTF-8 or too many bytes stay o
 
 test "stats count accepted, written, cut and dropped records" {
     var cut: Capture = undefined;
-    try cut.open(.{ .max_record_bytes = 300 });
+    try cut.open(.{ .max_record_bytes = 400 });
     defer cut.close();
     cut.logger.info(long_message, .{});
     cut.logger.info("short", .{});
@@ -301,7 +355,7 @@ test "stats count accepted, written, cut and dropped records" {
     try testing.expectEqual(@as(u64, 1), s.truncated);
 
     var dropped: Capture = undefined;
-    try dropped.open(.{ .max_record_bytes = 300, .oversize = .drop });
+    try dropped.open(.{ .max_record_bytes = 400, .oversize = .drop });
     defer dropped.close();
     dropped.logger.info(long_message, .{});
     s = dropped.logger.stats();

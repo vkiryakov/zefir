@@ -441,8 +441,13 @@ pub const Header = struct {
     scope_quoted: bool = false,
     /// How a `.src` field is written at this record's level.
     source: options.SourceMode = .file_line,
+    /// The trace ids the record carries; null without a trace.
+    trace: ?*const TraceHex = null,
     oversize: options.OversizePolicy,
 };
+
+/// The ids of a trace, as lowercase hex.
+pub const TraceHex = struct { trace_id: [32]u8, span_id: [16]u8 };
 
 pub const Encoded = struct {
     /// Bytes written, '\n' included.
@@ -491,7 +496,9 @@ fn encodeRecord(
 ) ?Encoded {
     var stamp: [timestamp.len]u8 = undefined;
     timestamp.format(header.timestamp, &stamp);
-    const parts: Parts = .{ .stamp = &stamp, .source = source };
+    var ids_buf: [idsLen(f)]u8 = undefined;
+    const ids: []const u8 = if (header.trace) |trace| idsFragment(f, trace, &ids_buf) else "";
+    const parts: Parts = .{ .stamp = &stamp, .source = source, .ids = ids };
     if (encode(f, level, message, out, header, parts, fields, false)) |len| return .{ .len = len, .truncated = false };
     if (header.oversize == .drop) return null;
     const len = encode(f, level, message, out, header, parts, fields, true) orelse return null;
@@ -503,6 +510,8 @@ const Parts = struct {
     stamp: *const [timestamp.len]u8,
     /// The call site, ready to copy; empty without one.
     source: []const u8,
+    /// The trace ids, ready to copy; empty without them.
+    ids: []const u8,
 };
 
 /// One pass of `record`. Whole: everything must fit, else null. Cut: the
@@ -525,13 +534,16 @@ fn encode(
     switch (f) {
         .json => writeFields(f, &w, fields, cut) catch return null,
         .text => {
-            // The call site goes last in text: the fields give way to it.
+            // The trace ids and the call site go last in text: the fields
+            // give way to them.
+            const tail = parts.ids.len + source.len;
             const full = w.buffer;
-            if (w.end + source.len > full.len) return null;
-            w.buffer = full[0 .. full.len - source.len];
+            if (w.end + tail > full.len) return null;
+            w.buffer = full[0 .. full.len - tail];
             const written = writeFields(f, &w, fields, cut);
             w.buffer = full;
             written catch return null;
+            w.writeAll(parts.ids) catch return null;
             w.writeAll(source) catch return null;
         },
     }
@@ -556,7 +568,8 @@ fn writeHead(
             try w.writeAll(parts.stamp);
             try w.writeAll(comptime "\",\"level\":\"" ++ level.asText() ++ "\",\"message\":\"");
             const scope_len = if (header.scope.len > 0) ",\"scope\":\"".len + header.scope.len + 1 else 0;
-            const source = try writeMessageBeside(w, message, "", "\"", header.service.len + scope_len, parts.source, cut);
+            const keep = header.service.len + scope_len + parts.ids.len;
+            const source = try writeMessageBeside(w, message, "", "\"", keep, parts.source, cut);
             try w.writeAll(header.service);
             if (header.scope.len > 0) {
                 try w.writeAll(",\"scope\":\"");
@@ -564,6 +577,7 @@ fn writeHead(
                 try w.writeByte('"');
             }
             try w.writeAll(source);
+            try w.writeAll(parts.ids);
             return source;
         },
         .text => {
@@ -575,8 +589,8 @@ fn writeHead(
                 try w.writeAll(if (header.scope_quoted) "\"]" else "]");
             }
             if (comptime @TypeOf(message).empty)
-                return if (!cut or parts.source.len <= w.unusedCapacityLen()) parts.source else "";
-            return writeMessageBeside(w, message, " ", "", 0, parts.source, cut);
+                return if (!cut or parts.ids.len + parts.source.len <= w.unusedCapacityLen()) parts.source else "";
+            return writeMessageBeside(w, message, " ", "", parts.ids.len, parts.source, cut);
         },
     }
 }
@@ -629,6 +643,26 @@ fn Literal(comptime message: []const u8) type {
             try w.writeAll(ellipsis ++ close);
         }
     };
+}
+
+fn idsLen(comptime f: Format) usize {
+    return switch (f) {
+        .json => ",\"trace_id\":\"".len + 32 + "\",\"span_id\":\"".len + 16 + "\"".len,
+        .text => " trace_id=".len + 32 + " span_id=".len + 16,
+    };
+}
+
+/// `,"trace_id":"…","span_id":"…"` in JSON, ` trace_id=… span_id=…` in text.
+fn idsFragment(comptime f: Format, trace: *const TraceHex, buf: *[idsLen(f)]u8) []const u8 {
+    const before_trace, const before_span, const after = switch (f) {
+        .json => .{ ",\"trace_id\":\"", "\",\"span_id\":\"", "\"" },
+        .text => .{ " trace_id=", " span_id=", "" },
+    };
+    var w: Writer = .fixed(buf);
+    for ([_][]const u8{ before_trace, &trace.trace_id, before_span, &trace.span_id, after }) |part| {
+        w.writeAll(part) catch unreachable; // `buf` is exactly this long
+    }
+    return buf;
 }
 
 /// The longest call site written from a value known only at run time; a
@@ -753,15 +787,15 @@ const longest_level = blk: {
 
 /// The bytes every record needs, whatever it logs: the head with the
 /// message cut down to "…", the longest level, a scope of `max_scope`
-/// bytes (in quotes for text), the service fragment and the cut closing.
-/// `Engine.create` rejects a smaller `max_record_bytes`.
+/// bytes (in quotes for text), the service fragment, the trace ids and the
+/// cut closing. `Engine.create` rejects a smaller `max_record_bytes`.
 pub fn mandatoryBytes(f: Format, service_len: usize, max_scope: usize) usize {
     return switch (f) {
         .json => "{\"timestamp\":\"".len + timestamp.len + "\",\"level\":\"".len + longest_level +
             "\",\"message\":\"".len + ellipsis.len + "\"".len + service_len +
-            ",\"scope\":\"".len + max_scope + "\"".len + closing(.json).cut.len,
+            ",\"scope\":\"".len + max_scope + "\"".len + idsLen(.json) + closing(.json).cut.len,
         .text => timestamp.len + " ".len + 5 + " [\"".len + max_scope + "\"]".len +
-            " ".len + ellipsis.len + closing(.text).cut.len,
+            " ".len + ellipsis.len + idsLen(.text) + closing(.text).cut.len,
     };
 }
 
@@ -1065,6 +1099,9 @@ test "a redacted field hides its value in both formats" {
 /// 2026-10-10T21:08:00.123Z
 const fixed_time: std.Io.Timestamp = .{ .nanoseconds = 1_791_666_480_123 * std.time.ns_per_ms };
 
+/// Trace ids for the tests that cover the whole head.
+const test_trace: TraceHex = .{ .trace_id = "4bf92f3577b34da6a3ce929d0e0e4736".*, .span_id = "00f067aa0ba902b7".* };
+
 /// 20 000 bytes of 'é': far longer than any record.
 const long_message = blk: {
     @setEvalBranchQuota(100_000);
@@ -1232,7 +1269,7 @@ test "runtime fields: a record that fits exactly is written whole in both format
 }
 
 test "every size from the mandatory part up gives one valid line" {
-    const header: Header = .{ .timestamp = fixed_time, .service = ",\"service.name\":\"svc\"", .scope = "users", .oversize = .truncate };
+    const header: Header = .{ .timestamp = fixed_time, .service = ",\"service.name\":\"svc\"", .scope = "users", .trace = &test_trace, .oversize = .truncate };
     const message = "User \"créé\" 😀 with a fairly long message";
     var detail: []const u8 = "0123456789€0123456789";
     _ = &detail;
@@ -1254,7 +1291,7 @@ test "every size from the mandatory part up gives one valid line" {
 }
 
 test "nested fields: every size from the mandatory part up gives one valid line" {
-    const header: Header = .{ .timestamp = fixed_time, .service = "", .scope = "users", .oversize = .truncate };
+    const header: Header = .{ .timestamp = fixed_time, .service = "", .scope = "users", .trace = &test_trace, .oversize = .truncate };
     const Db = struct { host: []const u8, ports: []const u16 };
     var db: Db = .{ .host = "pg \"main\"", .ports = &.{ 5432, 5433 } };
     _ = &db;
@@ -1288,12 +1325,12 @@ test "a message longer than the record is cut between characters" {
     try testing.expect(record(.json, .info, long_message, &buf, header, .{}) == null);
 }
 
-test "mandatoryBytes holds the worst head: the longest level, the longest scope and the service" {
+test "mandatoryBytes holds the worst head: the longest level, the longest scope, the service and the trace ids" {
     const scope = &@as([128]u8, @splat('s'));
     const service = ",\"service.name\":\"" ++ &@as([100]u8, @splat('v')) ++ "\"";
     inline for (.{ Format.json, Format.text }) |f| {
         // A text scope that needs quotes is the longest one.
-        const header: Header = .{ .timestamp = fixed_time, .service = if (f == .json) service else "", .scope = scope, .scope_quoted = f == .text, .oversize = .truncate };
+        const header: Header = .{ .timestamp = fixed_time, .service = if (f == .json) service else "", .scope = scope, .scope_quoted = f == .text, .trace = &test_trace, .oversize = .truncate };
         var buf: [2048]u8 = undefined;
         const size = mandatoryBytes(f, header.service.len, 128);
         const got = record(f, .err, "A message that cannot fit", buf[0..size], header, .{ .id = 1 }) orelse return error.TestUnexpectedResult;
