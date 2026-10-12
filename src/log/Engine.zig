@@ -10,6 +10,7 @@ const scopes = @import("scopes.zig");
 const std_log = @import("std_log.zig");
 const Queue = @import("Queue.zig");
 const writer = @import("writer.zig");
+const rate_limit = @import("emergency.zig");
 const Level = @import("level.zig").Level;
 
 const Io = std.Io;
@@ -70,6 +71,13 @@ pub const Stats = struct {
     /// Queued mode: records accepted and not yet written or dropped; after
     /// a `shutdown` that timed out, the records `deinit` drops.
     pending: u64,
+    /// Records `emergency` wrote to stderr.
+    emergency_written: u64,
+    /// `emergency` records left out: past the rate limit (100 at once, then
+    /// 100 per second), or logged while an emergency record was being
+    /// written on the same thread. The next one written tells how many
+    /// with `"suppressed":N`.
+    emergency_suppressed: u64,
 
     pub const Dropped = struct {
         /// Longer than `max_record_bytes` with `.oversize = .drop`.
@@ -80,6 +88,12 @@ pub const Stats = struct {
         queue_full: u64,
         /// Logged after `shutdown`.
         closed: u64,
+        /// Records at `.err` refused because the queue was full or the
+        /// logger was shut down; not counted in `queue_full` or `closed`.
+        /// The writer thread reports them in the log with one record,
+        /// "zefir.log: error records dropped" with `"suppressed":N`;
+        /// `shutdown` and `deinit` note on stderr those it could not.
+        err: u64,
     };
 };
 
@@ -102,6 +116,10 @@ output_lock: Io.Mutex = .init,
 own: Io.Threaded = .init_single_threaded,
 /// Where that note goes; tests point it at a pipe.
 stderr: Io.File,
+/// Keeps the logger's own stderr lines whole; taken through its own Io.
+stderr_lock: Io.Mutex = .init,
+/// `emergency`'s rate limit.
+bucket: rate_limit.Bucket = .{},
 /// The last record broke off mid-line, so the next one starts with '\n'.
 /// Guarded by `output_lock` in sync mode; the writer thread's own in
 /// queued mode.
@@ -129,6 +147,8 @@ progress_waiters: std.atomic.Value(u32) = .init(0),
 /// Set by `deinit` after a `shutdown` that timed out: the writer thread
 /// stops without writing what is left.
 abandon: std.atomic.Value(bool) = .init(false),
+/// Error records dropped that no summary has reported yet.
+errors_unreported: Counter = .init(0),
 counters: Counters = .{},
 
 const State = enum(u8) { running, stopping, stopped };
@@ -142,10 +162,17 @@ const Counters = struct {
     dropped_write_failed: Counter = .init(0),
     dropped_queue_full: Counter = .init(0),
     dropped_closed: Counter = .init(0),
+    dropped_err: Counter = .init(0),
     write_errors: Counter = .init(0),
     truncated: Counter = .init(0),
     torn_lines: Counter = .init(0),
+    emergency_written: Counter = .init(0),
+    emergency_suppressed: Counter = .init(0),
 };
+
+/// Set while this thread writes an emergency record: an emergency call
+/// from inside it (a field's `format`) is left out.
+threadlocal var emergency_active = false;
 
 fn bump(counter: *Counter) void {
     _ = counter.fetchAdd(1, .monotonic);
@@ -226,6 +253,7 @@ pub fn destroy(engine: *Engine) void {
         gpa.free(engine.batch);
         gpa.free(engine.batch_ends);
     }
+    engine.noteDroppedErrors();
     engine.own.deinit();
     gpa.free(engine.service);
     gpa.destroy(engine);
@@ -241,6 +269,7 @@ pub fn stats(engine: *Engine) Stats {
             .write_failed = c.dropped_write_failed.load(.monotonic),
             .queue_full = c.dropped_queue_full.load(.monotonic),
             .closed = c.dropped_closed.load(.monotonic),
+            .err = c.dropped_err.load(.monotonic),
         },
         .write_errors = c.write_errors.load(.monotonic),
         .truncated = c.truncated.load(.monotonic),
@@ -250,6 +279,8 @@ pub fn stats(engine: *Engine) Stats {
         .queue_depth = if (engine.queue) |*q| q.depth() else 0,
         .queue_capacity = if (engine.queue) |*q| q.mask + 1 else 0,
         .pending = if (engine.queue) |*q| q.reserved() -| engine.processed.load(.monotonic) else 0,
+        .emergency_written = c.emergency_written.load(.monotonic),
+        .emergency_suppressed = c.emergency_suppressed.load(.monotonic),
     };
 }
 
@@ -272,6 +303,7 @@ pub fn shutdown(engine: *Engine, timeout: Io.Timeout) error{Timeout}!void {
         engine.joinWriter();
     }
     engine.state.store(.stopped, .release);
+    engine.noteDroppedErrors();
 }
 
 /// `flush` and `shutdown` on the writer thread (an output writer that
@@ -318,7 +350,7 @@ fn joinWriter(engine: *Engine) void {
 
 /// Encodes and writes one record; the caller has checked the level.
 pub fn emit(engine: *Engine, comptime level: Level, scope: *const scopes.Entry, trace: ?*const encode.TraceHex, comptime message: []const u8, fields: anytype) void {
-    if (!engine.accept()) return;
+    if (!engine.accept(level)) return;
     // One byte more than the longest record: room for the '\n' that ends a
     // torn line.
     var buf: [1 + max_record_limit]u8 = undefined;
@@ -327,32 +359,41 @@ pub fn emit(engine: *Engine, comptime level: Level, scope: *const scopes.Entry, 
     const encoded = switch (engine.format) {
         inline else => |format| encode.record(format, level, message, out, header, fields),
     };
-    engine.finish(&buf, encoded);
+    engine.finish(level, &buf, encoded);
 }
 
 /// `emit` for a message formatted at run time: the std.log bridge.
 pub fn emitFormatted(engine: *Engine, comptime level: Level, scope: *const scopes.Entry, comptime format: []const u8, args: anytype) void {
-    if (!engine.accept()) return;
+    if (!engine.accept(level)) return;
     var buf: [1 + max_record_limit]u8 = undefined;
     const out = buf[1..][0..engine.max_record_bytes];
     const header = engine.headerFor(level, scope, null);
     const encoded = switch (engine.format) {
         inline else => |f| encode.recordFormatted(f, level, format, args, out, header),
     };
-    engine.finish(&buf, encoded);
+    engine.finish(level, &buf, encoded);
 }
 
 /// Counts a record that passed the level filter; false when the logger is
 /// shut down or stdout is closed, and the record is dropped.
-fn accept(engine: *Engine) bool {
+fn accept(engine: *Engine, comptime level: Level) bool {
     bump(&engine.counters.accepted);
     if (engine.state.load(.monotonic) != .running) {
-        bump(&engine.counters.dropped_closed);
+        engine.refuse(level, &engine.counters.dropped_closed);
         return false;
     }
     if (!engine.dead.load(.monotonic)) return true;
     bump(&engine.counters.dropped_write_failed);
     return false;
+}
+
+/// Counts a record refused because the queue is full or the logger is
+/// shut down: in `counter`, or in `dropped.err` for an error record, which
+/// a summary then reports.
+fn refuse(engine: *Engine, comptime level: Level, counter: *Counter) void {
+    if (level != .err) return bump(counter);
+    bump(&engine.counters.dropped_err);
+    bump(&engine.errors_unreported);
 }
 
 fn headerFor(engine: *Engine, comptime level: Level, scope: *const scopes.Entry, trace: ?*const encode.TraceHex) encode.Header {
@@ -369,24 +410,65 @@ fn headerFor(engine: *Engine, comptime level: Level, scope: *const scopes.Entry,
 
 /// Writes or queues the record encoded in `buf[1..]`, or counts why there
 /// is none.
-fn finish(engine: *Engine, buf: []u8, encoded: ?encode.Encoded) void {
+fn finish(engine: *Engine, comptime level: Level, buf: []u8, encoded: ?encode.Encoded) void {
     const done = encoded orelse return bump(&engine.counters.dropped_oversize);
     if (done.truncated) bump(&engine.counters.truncated);
-    if (engine.queue) |*q| return engine.enqueue(q, buf[1..][0..done.len]);
+    if (engine.queue) |*q| return engine.enqueue(level, q, buf[1..][0..done.len]);
     engine.write(buf, done.len);
 }
 
 /// Queued mode: copies the record into the queue; the writer thread
 /// writes it.
-fn enqueue(engine: *Engine, q: *Queue, bytes: []const u8) void {
+fn enqueue(engine: *Engine, comptime level: Level, q: *Queue, bytes: []const u8) void {
     const pushed = switch (engine.overflow) {
         .drop_new => q.tryPush(bytes),
         .block => q.pushBlocking(bytes),
     };
-    pushed catch |e| switch (e) {
-        error.Full => bump(&engine.counters.dropped_queue_full),
-        error.Closed => bump(&engine.counters.dropped_closed),
+    pushed catch |e| engine.refuse(level, switch (e) {
+        error.Full => &engine.counters.dropped_queue_full,
+        error.Closed => &engine.counters.dropped_closed,
+    });
+}
+
+/// `Logger.emergency`: writes the record to stderr at once, through the
+/// logger's own Io, if the rate limit lets it out.
+pub fn emergency(engine: *Engine, scope: *const scopes.Entry, trace: ?*const encode.TraceHex, comptime message: []const u8, fields: anytype) void {
+    if (emergency_active) {
+        engine.bucket.refuse();
+        return bump(&engine.counters.emergency_suppressed);
+    }
+    const io = engine.own.io();
+    const left_out = engine.bucket.take(Io.Clock.awake.now(io).nanoseconds) orelse
+        return bump(&engine.counters.emergency_suppressed);
+    emergency_active = true;
+    defer emergency_active = false;
+    var buf: [max_record_limit]u8 = undefined;
+    const out = buf[0..engine.max_record_bytes];
+    var header = engine.headerFor(.err, scope, trace);
+    header.timestamp = Io.Clock.real.now(io);
+    const done = switch (engine.format) {
+        inline else => |f| encodeTelling(f, message, out, header, fields, left_out),
+    } orelse {
+        engine.bucket.giveBack(left_out);
+        return bump(&engine.counters.dropped_oversize);
     };
+    if (!done.told) engine.bucket.giveBack(left_out);
+    if (done.truncated) bump(&engine.counters.truncated);
+    if (engine.writeStderr(out[0..done.len])) bump(&engine.counters.emergency_written);
+}
+
+const Told = struct { len: usize, truncated: bool, told: bool };
+
+/// Encodes an error record that tells, with `"suppressed":N`, of the
+/// `left_out` records before it, when there are any and it has room for
+/// that.
+fn encodeTelling(comptime f: options.Format, comptime message: []const u8, out: []u8, header: encode.Header, fields: anytype, left_out: u64) ?Told {
+    if (left_out > 0 and out.len > encode.suppressed_max_bytes) {
+        if (encode.record(f, .err, message, out[0 .. out.len - encode.suppressed_max_bytes], header, fields)) |done|
+            return .{ .len = encode.appendSuppressed(f, out, done.len, left_out), .truncated = done.truncated, .told = true };
+    }
+    const done = encode.record(f, .err, message, out, header, fields) orelse return null;
+    return .{ .len = done.len, .truncated = done.truncated, .told = left_out == 0 };
 }
 
 /// For the writer thread: writes the `n` records the queue copied into
@@ -402,6 +484,61 @@ pub fn writeBatch(engine: *Engine, n: usize) void {
     engine.writeRetrying(bytes, &sent) catch |e| return engine.failed(e, ends, sent, lead);
     engine.torn = false;
     bumpBy(&engine.counters.written, n);
+}
+
+/// For the writer thread: writes one record in place of the error records
+/// dropped since the last one, "zefir.log: error records dropped" with
+/// `"suppressed":N`. It is the logger's own record, not counted in
+/// `written`. While stdout is dead the count waits for `shutdown`.
+pub fn reportDroppedErrors(engine: *Engine) void {
+    if (engine.errors_unreported.load(.monotonic) == 0 or engine.dead.load(.monotonic)) return;
+    const n = engine.errors_unreported.swap(0, .monotonic);
+    const out = engine.batch[1..][0..engine.max_record_bytes];
+    const header: encode.Header = .{
+        .timestamp = Io.Clock.real.now(engine.own.io()),
+        .service = engine.service,
+        .scope = "",
+        .oversize = .truncate,
+    };
+    const len = switch (engine.format) {
+        inline else => |f| blk: {
+            const room = out[0 .. out.len - encode.suppressed_max_bytes];
+            const done = encode.record(f, .err, "zefir.log: error records dropped", room, header, .{}) orelse break :blk null;
+            break :blk encode.appendSuppressed(f, out, done.len, n);
+        },
+    } orelse {
+        _ = engine.errors_unreported.fetchAdd(n, .monotonic);
+        return;
+    };
+    const lead: usize = @intFromBool(engine.torn);
+    engine.batch[0] = '\n';
+    var sent: usize = 0;
+    engine.writeRetrying(engine.batch[1 - lead .. 1 + len], &sent) catch |e| {
+        if (sent < lead + len) _ = engine.errors_unreported.fetchAdd(n, .monotonic);
+        return engine.broke(e, sent, lead);
+    };
+    engine.torn = false;
+}
+
+/// Notes on stderr the error records dropped that no summary in the log
+/// reports: those refused once the writer thread was gone, or while stdout
+/// was dead.
+fn noteDroppedErrors(engine: *Engine) void {
+    const n = engine.errors_unreported.swap(0, .monotonic);
+    if (n == 0) return;
+    var buf: [96]u8 = undefined;
+    const note = std.fmt.bufPrint(&buf, "zefir.log: error records dropped and not in the log: {d}\n", .{n}) catch unreachable; // `buf` fits the longest count
+    _ = engine.writeStderr(note);
+}
+
+/// Writes one of the logger's own lines to stderr, whole, through its own
+/// Io; false when the write failed.
+fn writeStderr(engine: *Engine, bytes: []const u8) bool {
+    const io = engine.own.io();
+    engine.stderr_lock.lockUncancelable(io);
+    defer engine.stderr_lock.unlock(io);
+    engine.stderr.writeStreamingAll(io, bytes) catch return false;
+    return true;
 }
 
 /// The writer thread's write: a stdout someone made nonblocking gets up to
@@ -454,12 +591,17 @@ fn write(engine: *Engine, buf: []u8, len: usize) void {
 /// whole are written, the rest dropped. A record cut mid-line costs that
 /// line only: the next record starts with '\n'.
 fn failed(engine: *Engine, e: WriteError, ends: []const usize, sent: usize, lead: usize) void {
-    bump(&engine.counters.write_errors);
     var whole: usize = 0;
     while (whole < ends.len and lead + ends[whole] <= sent) whole += 1;
     bumpBy(&engine.counters.written, whole);
     bumpBy(&engine.counters.dropped_write_failed, ends.len - whole);
-    const boundary = lead + if (whole > 0) ends[whole - 1] else 0;
+    engine.broke(e, sent, lead + if (whole > 0) ends[whole - 1] else 0);
+}
+
+/// Counts a write that failed after `sent` bytes, the last whole record
+/// in them ending at `boundary`.
+fn broke(engine: *Engine, e: WriteError, sent: usize, boundary: usize) void {
+    bump(&engine.counters.write_errors);
     if (sent > boundary) {
         engine.torn = true;
         bump(&engine.counters.torn_lines);
@@ -480,7 +622,7 @@ fn die(engine: *Engine, e: WriteError) void {
         error.BrokenPipe => "zefir.log: stdout is closed (BrokenPipe); dropping the records that follow\n",
         else => "zefir.log: stdout is not open for writing (NotOpenForWriting); dropping the records that follow\n",
     };
-    engine.stderr.writeStreamingAll(engine.own.io(), note) catch {};
+    _ = engine.writeStderr(note);
 }
 
 /// Writes `bytes` with streaming writes; `File.writer()` would be

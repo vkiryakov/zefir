@@ -111,4 +111,5 @@ test {
     _ = @import("std_log.zig");
     _ = @import("Queue.zig");
     _ = @import("writer.zig");
+    _ = @import("emergency.zig");
 }

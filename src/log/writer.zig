@@ -21,9 +21,13 @@ pub fn run(engine: *Engine) void {
         const n = q.pop(engine.batch[1..], engine.batch_ends);
         if (n > 0) {
             engine.writeBatch(n);
+            // Before the batch counts as done: a flush that returns has
+            // seen the summary of the error records dropped before it.
+            engine.reportDroppedErrors();
             engine.markProcessed(n);
             continue;
         }
+        engine.reportDroppedErrors();
         const reserved = q.reserved();
         if (q.head == reserved and q.isClosed()) return; // closed and drained
         if (q.head != reserved) {
