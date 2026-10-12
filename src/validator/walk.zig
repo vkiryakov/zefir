@@ -351,6 +351,34 @@ fn rulesFor(comptime T: type, comptime name: []const u8, comptime label: []const
     return core.toRules(@field(T.field_rules, name), label ++ ".field_rules." ++ name);
 }
 
+/// The indices of the fields of struct `T` that the walk visits, in
+/// declaration order: not comptime, with rules in or below them.
+fn walkedFields(comptime T: type) []const usize {
+    comptime {
+        @setEvalBranchQuota(core.eval_quota);
+        const info = @typeInfo(T).@"struct";
+        var out: []const usize = &.{};
+        for (info.field_names, info.field_types, info.field_attrs, 0..) |name, F, attrs, i| {
+            if (attrs.@"comptime") continue;
+            if (rulesFor(T, name, @typeName(T)).len == 0 and !containsRules(F)) continue;
+            out = out ++ &[_]usize{i};
+        }
+        return out;
+    }
+}
+
+/// The names of the non-comptime fields of struct `T`.
+fn fieldNames(comptime T: type) []const []const u8 {
+    comptime {
+        const info = @typeInfo(T).@"struct";
+        var out: []const []const u8 = &.{};
+        for (info.field_names, info.field_attrs) |name, attrs| {
+            if (!attrs.@"comptime") out = out ++ &[_][]const u8{name};
+        }
+        return out;
+    }
+}
+
 // ------------------------------------------------------------------ paths
 
 const Segment = union(enum) { field: []const u8, index: usize };
@@ -400,10 +428,13 @@ const First = struct {
         sink.len += bytes.len;
     }
 
-    fn push(sink: *First, segment: Segment) Error!usize {
-        const mark = sink.len;
-        try writeSegment(sink, mark == 0, segment);
-        return mark;
+    /// The mark that `pop` takes the path back to.
+    fn pathLen(sink: *const First) usize {
+        return sink.len;
+    }
+
+    fn push(sink: *First, segment: Segment) Error!void {
+        try writeSegment(sink, sink.len == 0, segment);
     }
 
     fn pop(sink: *First, mark: usize) void {
@@ -437,10 +468,13 @@ const All = struct {
         try sink.path.appendSlice(sink.arena, bytes);
     }
 
-    fn push(sink: *All, segment: Segment) Error!usize {
-        const mark = sink.path.items.len;
-        try writeSegment(sink, mark == 0, segment);
-        return mark;
+    /// The mark that `pop` takes the path back to.
+    fn pathLen(sink: *const All) usize {
+        return sink.path.items.len;
+    }
+
+    fn push(sink: *All, segment: Segment) Error!void {
+        try writeSegment(sink, sink.path.items.len == 0, segment);
     }
 
     fn pop(sink: *All, mark: usize) void {
@@ -508,8 +542,9 @@ fn walkValue(comptime T: type, value: *const T, comptime rules: []const Rule, si
         if (comptime (item_rules.len == 0 and !containsRules(Child))) return false;
         const items: []const Child = if (@typeInfo(T) == .array) value else value.*;
         for (items, 0..) |*item, i| {
-            const mark = try sink.push(.{ .index = i });
+            const mark = sink.pathLen();
             defer sink.pop(mark);
+            try sink.push(.{ .index = i });
             if (try walkValue(Child, item, item_rules, sink)) return true;
         }
         return false;
@@ -524,12 +559,18 @@ fn walkStruct(comptime T: type, value: *const T, sink: anytype) ErrorOf(@TypeOf(
     @setEvalBranchQuota(core.eval_quota);
     const info = @typeInfo(T).@"struct";
     const before = sink.count();
-    inline for (info.field_names, info.field_types, info.field_attrs) |name, F, attrs| {
-        if (attrs.@"comptime") continue;
+    // The loop is unrolled, and each unrolled copy gets stack slots of its
+    // own, so the frame grows with every unrolled field: fields without rules
+    // are not unrolled, the mark is taken once (every field is pushed onto the
+    // same path), and push returns nothing.
+    const mark = sink.pathLen();
+    inline for (comptime walkedFields(T)) |i| {
+        const name = info.field_names[i];
+        const F = info.field_types[i];
+        const attrs = info.field_attrs[i];
         const rules = comptime rulesFor(T, name, @typeName(T));
-        if (comptime (rules.len == 0 and !containsRules(F))) continue;
-        const mark = try sink.push(.{ .field = name });
         defer sink.pop(mark);
+        try sink.push(.{ .field = name });
         // A packed field has a bit pointer, and a field declared below the
         // alignment of its type (`n: u32 align(1)`) an under-aligned one:
         // neither coerces to `*const F`, so such a field is walked as a copy.
@@ -567,10 +608,13 @@ fn reportSelf(comptime T: type, violation: Violation, sink: anytype) ErrorOf(@Ty
         return sink.report("validation.invalid", "is invalid");
     }
     const field = violation.field orelse return sink.report(violation.code, violation.message);
-    inline for (@typeInfo(T).@"struct".field_names, @typeInfo(T).@"struct".field_attrs) |name, attrs| {
-        if (!attrs.@"comptime" and std.mem.eql(u8, name, field)) {
-            const mark = try sink.push(.{ .field = name });
+    // A run-time loop over the names: unrolling it would give every field its
+    // own stack slots.
+    for (comptime fieldNames(T)) |name| {
+        if (std.mem.eql(u8, name, field)) {
+            const mark = sink.pathLen();
             defer sink.pop(mark);
+            try sink.push(.{ .field = name });
             return sink.report(violation.code, violation.message);
         }
     }
