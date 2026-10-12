@@ -31,7 +31,7 @@ pub fn each(comptime rules: anytype) Rule {
         .eval = struct {
             fn eval(value: anytype) Outcome {
                 _ = value;
-                unreachable; // the walker applies `inner` to the items instead
+                @compileError("validator: internal: each is applied by the walker and never evaluated");
             }
         }.eval,
     };

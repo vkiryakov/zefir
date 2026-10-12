@@ -141,4 +141,6 @@ pub const list = [_]Fixture{
     .{ .file = "src/validator/testdata/compile_errors/positive_called.zig", .expect = "type 'core.Rule' not a function", .row = "Z-8" },
     .{ .file = "src/validator/testdata/compile_errors/custom_missing_argument.zig", .expect = "expected 3 argument(s), found 2", .row = "variant of Z-4" },
     .{ .file = "src/validator/testdata/compile_errors/custom_code_escaped.zig", .expect = "validator: custom(\"users.a\\tb\", ...): code 'users.a\\tb' has a character outside [a-z0-9_.]; use segments of [a-z][a-z0-9_]* joined by '.', e.g. 'users.name_taken'", .row = "variant of CU-3" },
+    .{ .file = "src/validator/testdata/compile_errors/each_eval_direct.zig", .expect = "validator: internal: each is applied by the walker and never evaluated", .row = "internal" },
+    .{ .file = "src/validator/testdata/compile_errors/custom_eval_direct.zig", .expect = "validator: internal: custom's eval was instantiated for a type its fits rejected", .row = "internal" },
 };

@@ -1,6 +1,7 @@
 //! `v.custom(code, message, f)`: a rule with the caller's own predicate, code
 //! and message. For a check across fields use `validateSelf` with `v.fail`.
 const std = @import("std");
+const builtin = @import("builtin");
 const core = @import("core.zig");
 const Rule = core.Rule;
 const Outcome = core.Outcome;
@@ -45,7 +46,7 @@ pub fn custom(comptime code: []const u8, comptime message: []const u8, comptime 
                         const copy: @typeInfo(P).pointer.child = value.*;
                         break :blk f(&copy);
                     },
-                    .none => unreachable,
+                    .none => @compileError("validator: internal: custom's eval was instantiated for a type its fits rejected"),
                 });
             }
         }.eval,
@@ -61,8 +62,9 @@ const CallForm = enum { none, by_value, by_pointer };
 /// How a value of type `T` is passed to a predicate of type `F`. A generic
 /// predicate (an `anytype` or `comptime` parameter) takes nothing: the value
 /// is only known at run time. A pointer parameter must be a plain `*const Q`
-/// (no `volatile`, `allowzero` or `align`, as in `coerces`): `eval` passes a
-/// plain `*const` pointer to the value or to a copy of it as `Q`.
+/// (no `volatile`, `allowzero`, `align` or address space, as in `coerces`):
+/// `eval` passes a plain `*const` pointer to the value or to a copy of it as
+/// `Q`.
 fn callForm(comptime T: type, comptime F: type) CallForm {
     const info = @typeInfo(F).@"fn";
     if (info.is_generic or info.param_types.len != 1) return .none;
@@ -71,7 +73,8 @@ fn callForm(comptime T: type, comptime F: type) CallForm {
     if (core.coerces(T, P)) return .by_value;
     return switch (@typeInfo(P)) {
         .pointer => |p| if (p.size == .one and p.attrs.@"const" and !p.attrs.@"volatile" and
-            !p.attrs.@"allowzero" and p.attrs.@"align" == null and core.coerces(T, p.child)) .by_pointer else .none,
+            !p.attrs.@"allowzero" and p.attrs.@"align" == null and
+            (p.attrs.@"addrspace" orelse .generic) == .generic and core.coerces(T, p.child)) .by_pointer else .none,
         else => .none,
     };
 }
@@ -245,4 +248,12 @@ test "a pointer parameter fits only as a plain *const P" {
         ": f must be fn (P) bool or fn (*const P) bool where []const u32 coerces to P, got fn (*align(16) const u32) bool",
         comptime paramProblem([]const u32, fn (*align(16) const u32) bool).?,
     );
+    // eval passes a pointer in the default address space. Of the targets CI
+    // runs, only x86_64 has another one.
+    if (builtin.cpu.arch == .x86_64) {
+        try std.testing.expectEqualStrings(
+            ": f must be fn (P) bool or fn (*const P) bool where u32 coerces to P, got fn (*addrspace(.gs) const u32) bool",
+            comptime paramProblem(u32, fn (*addrspace(.gs) const u32) bool).?,
+        );
+    }
 }

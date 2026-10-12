@@ -3,6 +3,7 @@
 //! declarations. Only what `root.zig` re-exports is public API.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const root = @import("root.zig");
 
 /// Rule constructors, declaration checks and walker functions share one
@@ -279,7 +280,7 @@ pub fn info(comptime kind: Kind) KindInfo {
 }
 
 /// `notEmpty` -> `not_empty`, `base64Url` -> `base64_url`, `isbn10` -> `isbn10`.
-pub fn snakeCase(comptime name: []const u8) []const u8 {
+pub inline fn snakeCase(comptime name: []const u8) []const u8 {
     comptime {
         var out: []const u8 = "";
         for (name) |c| out = out ++ if (std.ascii.isUpper(c)) "_" ++ [1]u8{std.ascii.toLower(c)} else [1]u8{c};
@@ -328,24 +329,28 @@ pub fn codeProblem(code: []const u8) ?CodeProblem {
 const code_grammar = "use segments of [a-z][a-z0-9_]* joined by '.', e.g. 'users.name_taken'";
 
 /// The error text for a code with `problem`; the code is shown escaped.
-pub fn describeCodeProblem(comptime code: []const u8, comptime problem: CodeProblem) []const u8 {
-    const head = "code '" ++ escape(code) ++ "' ";
-    return head ++ switch (problem) {
-        .too_long => std.fmt.comptimePrint("is longer than {d} bytes", .{max_code_bytes}),
-        .empty_segment => "has an empty segment; " ++ code_grammar,
-        .bad_start => "has a segment that does not start with a letter; " ++ code_grammar,
-        .bad_char => "has a character outside [a-z0-9_.]; " ++ code_grammar,
-        .one_segment => "needs at least 2 segments, e.g. 'users.name_taken'",
-        .reserved => "uses a reserved prefix (validation., rpc.)",
-    };
+pub inline fn describeCodeProblem(comptime code: []const u8, comptime problem: CodeProblem) []const u8 {
+    comptime {
+        const head = "code '" ++ escape(code) ++ "' ";
+        return head ++ switch (problem) {
+            .too_long => std.fmt.comptimePrint("is longer than {d} bytes", .{max_code_bytes}),
+            .empty_segment => "has an empty segment; " ++ code_grammar,
+            .bad_start => "has a segment that does not start with a letter; " ++ code_grammar,
+            .bad_char => "has a character outside [a-z0-9_.]; " ++ code_grammar,
+            .one_segment => "needs at least 2 segments, e.g. 'users.name_taken'",
+            .reserved => "uses a reserved prefix (validation., rpc.)",
+        };
+    }
 }
 
 /// Stops compilation with `validator: <where>: code '<code>' ...` when
 /// `code` is not a valid custom code. `where` is the call: `custom("<code>", ...)`
 /// or `fail(<Type>, .<field>)`.
 pub fn checkCode(comptime where: []const u8, comptime code: []const u8) void {
-    @setEvalBranchQuota(eval_quota);
-    if (codeProblem(code)) |problem| @compileError("validator: " ++ where ++ ": " ++ describeCodeProblem(code, problem));
+    comptime {
+        @setEvalBranchQuota(eval_quota);
+        if (codeProblem(code)) |problem| @compileError("validator: " ++ where ++ ": " ++ describeCodeProblem(code, problem));
+    }
 }
 
 // ------------------------------------------------------------------ messages
@@ -374,17 +379,21 @@ pub fn describeMessageProblem(comptime problem: MessageProblem) []const u8 {
 /// Stops compilation with `validator: <where>: message ...` when a
 /// `v.custom` or `v.fail` message is not 1-512 bytes of valid UTF-8.
 pub fn checkMessage(comptime where: []const u8, comptime message: []const u8) void {
-    @setEvalBranchQuota(eval_quota);
-    if (messageProblem(message)) |problem| @compileError("validator: " ++ where ++ ": " ++ describeMessageProblem(problem));
+    comptime {
+        @setEvalBranchQuota(eval_quota);
+        if (messageProblem(message)) |problem| @compileError("validator: " ++ where ++ ": " ++ describeMessageProblem(problem));
+    }
 }
 
 /// `s` as it is written inside a Zig string literal (`std.zig.fmtString`):
 /// `\n \r \t \\ "` are escaped; control bytes, invalid UTF-8, U+0085,
 /// U+2028, U+2029 and U+FEFF are hex-encoded. Compile errors show codes
 /// and arguments this way, so every text stays on one readable line.
-pub fn escape(comptime s: []const u8) []const u8 {
-    @setEvalBranchQuota(eval_quota);
-    return std.fmt.comptimePrint("{f}", .{std.zig.fmtString(s)});
+pub inline fn escape(comptime s: []const u8) []const u8 {
+    comptime {
+        @setEvalBranchQuota(eval_quota);
+        return std.fmt.comptimePrint("{f}", .{std.zig.fmtString(s)});
+    }
 }
 
 test "the kind table has a row for each of the 96 kinds" {
@@ -477,6 +486,14 @@ test "escape writes strings as Zig string literals do" {
     try expect("a\\\"b\\n\\x01\\xe2\\x80\\xa8\\xff", comptime escape("a\"b\n\x01\u{2028}\xff"));
     try expect("users.name_taken", comptime escape("users.name_taken"));
     try expect("caf\u{e9}", comptime escape("caf\u{e9}"));
+}
+
+test "the code, message and name helpers can be called outside a comptime block" {
+    try std.testing.expectEqualStrings("not_empty", snakeCase("notEmpty"));
+    try std.testing.expectEqualStrings("a\\nb", escape("a\nb"));
+    try std.testing.expectEqualStrings("code 'taken' needs at least 2 segments, e.g. 'users.name_taken'", describeCodeProblem("taken", .one_segment));
+    checkCode("custom(\"users.ok\", ...)", "users.ok");
+    checkMessage("custom(\"users.ok\", ...)", "must be ok");
 }
 
 // ------------------------------------------------------------------ the rule
@@ -657,11 +674,11 @@ pub fn isFloat(comptime T: type) bool {
 /// strictly wider signed ones; floats that are not narrower; `?P` and `E!P`
 /// when `T` coerces to `P`; pointers and slices of the same size and child
 /// that only add `const` or drop a sentinel (`[]u8` and `[:0]const u8` to
-/// `[]const u8`). A different `volatile`, `allowzero` or alignment never
-/// coerces here. Zig itself coerces a few more (an integer into a float that
-/// holds it exactly, `*const [N]T` into `[]const T`, an explicitly aligned
-/// pointer into one whose alignment is not larger); `v.custom` keeps to this
-/// list.
+/// `[]const u8`). A different `volatile`, `allowzero`, alignment or address
+/// space never coerces here. Zig itself coerces a few more (an integer into a
+/// float that holds it exactly, `*const [N]T` into `[]const T`, an explicitly
+/// aligned pointer into one whose alignment is not larger); `v.custom` keeps
+/// to this list.
 pub fn coerces(comptime T: type, comptime P: type) bool {
     if (T == P) return true;
     const from = @typeInfo(T);
@@ -682,6 +699,7 @@ pub fn coerces(comptime T: type, comptime P: type) bool {
                 f.attrs.@"volatile" == to.attrs.@"volatile" and
                 f.attrs.@"allowzero" == to.attrs.@"allowzero" and
                 f.attrs.@"align" == to.attrs.@"align" and
+                (f.attrs.@"addrspace" orelse .generic) == (to.attrs.@"addrspace" orelse .generic) and
                 (to.sentinel_ptr == null or (f.sentinel_ptr != null and to.sentinel().? == f.sentinel().?)),
             else => false,
         },
@@ -938,7 +956,7 @@ fn notARule(comptime value: anytype, comptime where: []const u8, comptime prefix
     const V = @TypeOf(value);
     if (@typeInfo(V) == .@"fn") {
         if (constructorName(value)) |name| {
-            if (predicateRuleName(name)) |rule|
+            if (exportedPredicateRule(root, name)) |rule|
                 @compileError("validator: " ++ where ++ ": " ++ hints.predicateAsRule(name, rule, @TypeOf(@field(root, rule))));
             if ((@typeInfo(V).@"fn".return_type orelse void) == Rule)
                 @compileError("validator: " ++ where ++ ": " ++ hints.mustBeCalled(name, V));
@@ -957,6 +975,14 @@ fn predicateRuleName(comptime name: []const u8) ?[]const u8 {
         if (std.mem.eql(u8, row.name, rule)) return row.name;
     }
     return null;
+}
+
+/// The rule of the built-in predicate `name` when `ns` (`root.zig` in the
+/// library) exports that rule, or null: a predicate exported before its rule
+/// gets the text of any other function.
+fn exportedPredicateRule(comptime ns: type, comptime name: []const u8) ?[]const u8 {
+    const rule = predicateRuleName(name) orelse return null;
+    return if (@hasDecl(ns, rule)) rule else null;
 }
 
 /// The name under which `root.zig` exports the function `f` (`v.each` ->
@@ -1304,6 +1330,13 @@ test "coerces accepts the conversions v.custom documents and nothing else" {
         break :blk out;
     };
     try std.testing.expectEqualStrings("", wrong);
+    // The address space must match as well. Of the targets CI runs, only
+    // x86_64 has one besides the default.
+    if (builtin.cpu.arch == .x86_64) {
+        try std.testing.expect(!coerces(*addrspace(.gs) const u32, *const u32));
+        try std.testing.expect(!coerces(*const u32, *addrspace(.gs) const u32));
+        try std.testing.expect(coerces(*addrspace(.gs) u32, *addrspace(.gs) const u32));
+    }
 }
 
 /// `; did you mean "name"?` for a likely typo of a non-comptime field of the
@@ -1546,4 +1579,11 @@ test "hint for a predicate used as a rule" {
     try std.testing.expectEqual(null, comptime predicateRuleName("isEven"));
     try std.testing.expectEqual(null, comptime predicateRuleName("isdate"));
     try std.testing.expectEqual(null, comptime predicateRuleName("each"));
+    // The hint names a rule only when it is exported.
+    const Exports = struct {
+        pub const date = root.notEmpty;
+    };
+    try std.testing.expectEqualStrings("date", comptime exportedPredicateRule(Exports, "isDate").?);
+    try std.testing.expectEqual(null, comptime exportedPredicateRule(Exports, "isEquals"));
+    try std.testing.expectEqual(null, comptime exportedPredicateRule(Exports, "isEven"));
 }
