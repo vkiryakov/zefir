@@ -218,6 +218,168 @@ test "finite is a rule value with code validation.finite and message \"must be a
     try expectNoViolation(f64, v.finite, 0);
 }
 
+test "uuid is a rule value with code validation.uuid and message \"must be a valid UUID\"; no precondition" {
+    try testing.expect(@hasDecl(v, "uuid"));
+    try testing.expect(@TypeOf(v.uuid) == v.Rule);
+    try expectRule(v.uuid, "validation.uuid", "must be a valid UUID", "must be a valid UUID");
+    try expectViolation([]const u8, v.uuid, "f81d4fae-7dec-11d0-a765-00a0c91e6bf", "validation.uuid", "must be a valid UUID", "x");
+    try expectViolation([]const u8, v.uuid.withMessage("another message"), "\xff", "validation.uuid", "another message", "x");
+    try expectNoViolation([]const u8, v.uuid, "f81d4fae-7dec-11d0-a765-00a0c91e6bf6");
+}
+
+test "mongoId is a rule value with code validation.mongo_id and message \"must be a valid MongoDB ObjectId\"; no precondition" {
+    try testing.expect(@hasDecl(v, "mongoId"));
+    try testing.expect(@TypeOf(v.mongoId) == v.Rule);
+    try expectRule(v.mongoId, "validation.mongo_id", "must be a valid MongoDB ObjectId", "must be a valid MongoDB ObjectId");
+    try expectViolation([]const u8, v.mongoId, "0xaaaaaaaaaaaaaaaaaaaaaa", "validation.mongo_id", "must be a valid MongoDB ObjectId", "x");
+    try expectViolation([]const u8, v.mongoId.withMessage("another message"), "\xff", "validation.mongo_id", "another message", "x");
+    try expectNoViolation([]const u8, v.mongoId, "507f1f77bcf86cd799439011");
+}
+
+test "firebasePushId is a rule value with code validation.firebase_push_id and message \"must be a valid Firebase push ID\"; no precondition" {
+    try testing.expect(@hasDecl(v, "firebasePushId"));
+    try testing.expect(@TypeOf(v.firebasePushId) == v.Rule);
+    try expectRule(v.firebasePushId, "validation.firebase_push_id", "must be a valid Firebase push ID", "must be a valid Firebase push ID");
+    try expectViolation([]const u8, v.firebasePushId, "-JhLeOlGIEjaIOFHR0x", "validation.firebase_push_id", "must be a valid Firebase push ID", "x");
+    try expectViolation([]const u8, v.firebasePushId.withMessage("another message"), "\xff", "validation.firebase_push_id", "another message", "x");
+    try expectNoViolation([]const u8, v.firebasePushId, "-JhLeOlGIEjaIOFHR0xd");
+}
+
+test "hash is a rule constructor with code validation.hash and message \"must be a valid {algorithm} hash\" for each of its 13 algorithms; placeholder {algorithm}; no precondition" {
+    try testing.expect(@hasDecl(v, "hash"));
+    try testing.expect(@typeInfo(@TypeOf(v.hash)).@"fn".return_type == v.Rule);
+    const algorithms = [_][]const u8{ "md4", "md5", "sha1", "sha256", "sha384", "sha512", "ripemd128", "ripemd160", "tiger128", "tiger160", "tiger192", "crc32", "crc32b" };
+    try testing.expect(@typeInfo(v.HashAlgorithm).@"enum".mode == .exhaustive);
+    try testing.expectEqual(algorithms.len, comptime std.meta.fieldNames(v.HashAlgorithm).len);
+    inline for (algorithms, comptime std.meta.fieldNames(v.HashAlgorithm)) |name, tag| {
+        try testing.expectEqualStrings(name, tag);
+        const rule = v.hash(@field(v.HashAlgorithm, name));
+        try expectRule(rule, "validation.hash", "must be a valid " ++ name ++ " hash", "must be a valid {algorithm} hash");
+        try expectPlaceholder(rule, "{algorithm}", name);
+    }
+    try expectViolation([]const u8, v.hash(.sha256), "d41d8cd98f00b204e9800998ecf8427e", "validation.hash", "must be a valid sha256 hash", "x");
+    try expectViolation([]const u8, v.hash(.md5).withMessage("another message"), "\xff", "validation.hash", "another message", "x");
+    try expectNoViolation([]const u8, v.hash(.md5), "d41d8cd98f00b204e9800998ecf8427e");
+}
+
+test "creditCard is a rule value with code validation.credit_card and message \"must be a valid credit card number\"; no precondition" {
+    try testing.expect(@hasDecl(v, "creditCard"));
+    try testing.expect(@TypeOf(v.creditCard) == v.Rule);
+    try expectRule(v.creditCard, "validation.credit_card", "must be a valid credit card number", "must be a valid credit card number");
+    try expectViolation([]const u8, v.creditCard, "4111111111111112", "validation.credit_card", "must be a valid credit card number", "x");
+    try expectViolation([]const u8, v.creditCard.withMessage("another message"), "\xff", "validation.credit_card", "another message", "x");
+    try expectNoViolation([]const u8, v.creditCard, "4111111111111111");
+}
+
+test "isbn is a rule value with code validation.isbn and message \"must be a valid ISBN\"; no precondition" {
+    try testing.expect(@hasDecl(v, "isbn"));
+    try testing.expect(@TypeOf(v.isbn) == v.Rule);
+    try expectRule(v.isbn, "validation.isbn", "must be a valid ISBN", "must be a valid ISBN");
+    try expectViolation([]const u8, v.isbn, "978-0-306-40615-7", "validation.isbn", "must be a valid ISBN", "x");
+    try expectViolation([]const u8, v.isbn.withMessage("another message"), "\xff", "validation.isbn", "another message", "x");
+    try expectNoViolation([]const u8, v.isbn, "9780306406157");
+}
+
+test "isbn10 is a rule value with code validation.isbn10 and message \"must be a valid ISBN-10\"; no precondition" {
+    try testing.expect(@hasDecl(v, "isbn10"));
+    try testing.expect(@TypeOf(v.isbn10) == v.Rule);
+    try expectRule(v.isbn10, "validation.isbn10", "must be a valid ISBN-10", "must be a valid ISBN-10");
+    try expectViolation([]const u8, v.isbn10, "9780306406157", "validation.isbn10", "must be a valid ISBN-10", "x");
+    try expectViolation([]const u8, v.isbn10.withMessage("another message"), "\xff", "validation.isbn10", "another message", "x");
+    try expectNoViolation([]const u8, v.isbn10, "0306406152");
+}
+
+test "isbn13 is a rule value with code validation.isbn13 and message \"must be a valid ISBN-13\"; no precondition" {
+    try testing.expect(@hasDecl(v, "isbn13"));
+    try testing.expect(@TypeOf(v.isbn13) == v.Rule);
+    try expectRule(v.isbn13, "validation.isbn13", "must be a valid ISBN-13", "must be a valid ISBN-13");
+    try expectViolation([]const u8, v.isbn13, "0306406152", "validation.isbn13", "must be a valid ISBN-13", "x");
+    try expectViolation([]const u8, v.isbn13.withMessage("another message"), "\xff", "validation.isbn13", "another message", "x");
+    try expectNoViolation([]const u8, v.isbn13, "9780306406157");
+}
+
+test "issn is a rule value with code validation.issn and message \"must be a valid ISSN\"; no precondition" {
+    try testing.expect(@hasDecl(v, "issn"));
+    try testing.expect(@TypeOf(v.issn) == v.Rule);
+    try expectRule(v.issn, "validation.issn", "must be a valid ISSN", "must be a valid ISSN");
+    try expectViolation([]const u8, v.issn, "03178471", "validation.issn", "must be a valid ISSN", "x");
+    try expectViolation([]const u8, v.issn.withMessage("another message"), "\xff", "validation.issn", "another message", "x");
+    try expectNoViolation([]const u8, v.issn, "0317-8471");
+}
+
+test "ean is a rule value with code validation.ean and message \"must be a valid EAN\"; no precondition" {
+    try testing.expect(@hasDecl(v, "ean"));
+    try testing.expect(@TypeOf(v.ean) == v.Rule);
+    try expectRule(v.ean, "validation.ean", "must be a valid EAN", "must be a valid EAN");
+    try expectViolation([]const u8, v.ean, "036000291452", "validation.ean", "must be a valid EAN", "x");
+    try expectViolation([]const u8, v.ean.withMessage("another message"), "\xff", "validation.ean", "another message", "x");
+    try expectNoViolation([]const u8, v.ean, "4006381333931");
+}
+
+test "isin is a rule value with code validation.isin and message \"must be a valid ISIN\"; no precondition" {
+    try testing.expect(@hasDecl(v, "isin"));
+    try testing.expect(@TypeOf(v.isin) == v.Rule);
+    try expectRule(v.isin, "validation.isin", "must be a valid ISIN", "must be a valid ISIN");
+    try expectViolation([]const u8, v.isin, "US0378331006", "validation.isin", "must be a valid ISIN", "x");
+    try expectViolation([]const u8, v.isin.withMessage("another message"), "\xff", "validation.isin", "another message", "x");
+    try expectNoViolation([]const u8, v.isin, "US0378331005");
+}
+
+test "isrc is a rule value with code validation.isrc and message \"must be a valid ISRC\"; no precondition" {
+    try testing.expect(@hasDecl(v, "isrc"));
+    try testing.expect(@TypeOf(v.isrc) == v.Rule);
+    try expectRule(v.isrc, "validation.isrc", "must be a valid ISRC", "must be a valid ISRC");
+    try expectViolation([]const u8, v.isrc, "US-RC1-76-07839", "validation.isrc", "must be a valid ISRC", "x");
+    try expectViolation([]const u8, v.isrc.withMessage("another message"), "\xff", "validation.isrc", "another message", "x");
+    try expectNoViolation([]const u8, v.isrc, "USRC17607839");
+}
+
+test "bic is a rule value with code validation.bic and message \"must be a valid BIC\"; no precondition" {
+    try testing.expect(@hasDecl(v, "bic"));
+    try testing.expect(@TypeOf(v.bic) == v.Rule);
+    try expectRule(v.bic, "validation.bic", "must be a valid BIC", "must be a valid BIC");
+    try expectViolation([]const u8, v.bic, "deutdeff", "validation.bic", "must be a valid BIC", "x");
+    try expectViolation([]const u8, v.bic.withMessage("another message"), "\xff", "validation.bic", "another message", "x");
+    try expectNoViolation([]const u8, v.bic, "DEUTDEFF");
+}
+
+test "iban is a rule value with code validation.iban and message \"must be a valid IBAN\"; no precondition" {
+    try testing.expect(@hasDecl(v, "iban"));
+    try testing.expect(@TypeOf(v.iban) == v.Rule);
+    try expectRule(v.iban, "validation.iban", "must be a valid IBAN", "must be a valid IBAN");
+    try expectViolation([]const u8, v.iban, "DE01370400441000000008", "validation.iban", "must be a valid IBAN", "x");
+    try expectViolation([]const u8, v.iban.withMessage("another message"), "\xff", "validation.iban", "another message", "x");
+    try expectNoViolation([]const u8, v.iban, "DE89370400440532013000");
+}
+
+test "btcAddress is a rule constructor with code validation.btc_address and message \"must be a valid Bitcoin address\", or \"must be a valid Bitcoin testnet address\" for .testnet; placeholder {network}; no precondition" {
+    try testing.expect(@hasDecl(v, "btcAddress"));
+    try testing.expect(@typeInfo(@TypeOf(v.btcAddress)).@"fn".return_type == v.Rule);
+    const networks = [_][]const u8{ "mainnet", "testnet", "any" };
+    try testing.expect(@typeInfo(v.BtcNetwork).@"enum".mode == .exhaustive);
+    try testing.expectEqual(networks.len, comptime std.meta.fieldNames(v.BtcNetwork).len);
+    inline for (networks, comptime std.meta.fieldNames(v.BtcNetwork)) |name, tag| try testing.expectEqualStrings(name, tag);
+    try expectRule(v.btcAddress(.mainnet), "validation.btc_address", "must be a valid Bitcoin address", "must be a valid Bitcoin address");
+    try expectRule(v.btcAddress(.any), "validation.btc_address", "must be a valid Bitcoin address", "must be a valid Bitcoin address");
+    try expectRule(v.btcAddress(.testnet), "validation.btc_address", "must be a valid Bitcoin testnet address", "must be a valid Bitcoin testnet address");
+    try expectPlaceholder(v.btcAddress(.mainnet), "{network}", "mainnet");
+    try expectPlaceholder(v.btcAddress(.testnet), "{network}", "testnet");
+    try expectPlaceholder(v.btcAddress(.any), "{network}", "any");
+    try expectViolation([]const u8, v.btcAddress(.mainnet), "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx", "validation.btc_address", "must be a valid Bitcoin address", "x");
+    try expectViolation([]const u8, v.btcAddress(.testnet), "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", "validation.btc_address", "must be a valid Bitcoin testnet address", "x");
+    try expectViolation([]const u8, v.btcAddress(.any).withMessage("another message"), "\xff", "validation.btc_address", "another message", "x");
+    try expectNoViolation([]const u8, v.btcAddress(.any), "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4");
+}
+
+test "ethereumAddress is a rule value with code validation.ethereum_address and message \"must be a valid Ethereum address\"; no precondition" {
+    try testing.expect(@hasDecl(v, "ethereumAddress"));
+    try testing.expect(@TypeOf(v.ethereumAddress) == v.Rule);
+    try expectRule(v.ethereumAddress, "validation.ethereum_address", "must be a valid Ethereum address", "must be a valid Ethereum address");
+    try expectViolation([]const u8, v.ethereumAddress, "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAeD", "validation.ethereum_address", "must be a valid Ethereum address", "x");
+    try expectViolation([]const u8, v.ethereumAddress.withMessage("another message"), "\xff", "validation.ethereum_address", "another message", "x");
+    try expectNoViolation([]const u8, v.ethereumAddress, "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed");
+}
+
 test "minItems is a rule constructor with code validation.min_items and message \"must have at least {min} items\", or \"must have at least 1 item\" when min = 1; placeholder {min}" {
     try testing.expect(@hasDecl(v, "minItems"));
     try testing.expect(@typeInfo(@TypeOf(v.minItems)).@"fn".return_type == v.Rule);
@@ -428,15 +590,16 @@ test "finite has no precondition: nan, inf and -inf on a float field fail its ow
     }
 }
 
-test "the module exports exactly its 34 public names, and Rule.withMessage" {
-    const names = [_][]const u8{ "Violation", "Rule", "Report", "max_code_bytes", "max_message_bytes", "max_report_violations", "max_unique_items", "check", "checkAll", "assertRules", "fail", "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "minItems", "maxItems", "uniqueItems", "uniqueBy", "containsAll", "containsNone", "each", "custom" };
+test "the module exports exactly its 68 public names, and Rule.withMessage" {
+    const names = [_][]const u8{ "Violation", "Rule", "Report", "max_code_bytes", "max_message_bytes", "max_report_violations", "max_unique_items", "check", "checkAll", "assertRules", "fail", "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "uuid", "mongoId", "firebasePushId", "hash", "creditCard", "isbn", "isbn10", "isbn13", "issn", "ean", "isin", "isrc", "bic", "iban", "btcAddress", "ethereumAddress", "isUuid", "isMongoId", "isFirebasePushId", "isHash", "isCreditCard", "isIsbn", "isIsbn10", "isIsbn13", "isIssn", "isEan", "isIsin", "isIsrc", "isBic", "isIban", "isBtcAddress", "isEthereumAddress", "HashAlgorithm", "BtcNetwork", "minItems", "maxItems", "uniqueItems", "uniqueBy", "containsAll", "containsNone", "each", "custom" };
     inline for (names) |name| try testing.expect(@hasDecl(v, name));
     try testing.expectEqual(names.len, comptime std.meta.declarations(v).len);
     try testing.expect(@hasDecl(v.Rule, "withMessage"));
 }
 
 test "every rule the module exports has a catalog test" {
-    const tested = [_][]const u8{ "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "minItems", "maxItems", "uniqueItems", "uniqueBy", "containsAll", "containsNone", "each", "custom" };
+    @setEvalBranchQuota(100_000);
+    const tested = [_][]const u8{ "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "uuid", "mongoId", "firebasePushId", "hash", "creditCard", "isbn", "isbn10", "isbn13", "issn", "ean", "isin", "isrc", "bic", "iban", "btcAddress", "ethereumAddress", "minItems", "maxItems", "uniqueItems", "uniqueBy", "containsAll", "containsNone", "each", "custom" };
     inline for (comptime std.meta.declarations(v)) |name| {
         const T = @TypeOf(@field(v, name));
         if (comptime T == v.Rule or (@typeInfo(T) == .@"fn" and @typeInfo(T).@"fn".return_type == v.Rule)) {
@@ -452,7 +615,8 @@ test "every rule the module exports has a catalog test" {
 }
 
 test "the module exports exactly the catalog predicates of the shipped rules" {
-    const predicates = [_][]const u8{};
+    @setEvalBranchQuota(100_000);
+    const predicates = [_][]const u8{ "isUuid", "isMongoId", "isFirebasePushId", "isHash", "isCreditCard", "isIsbn", "isIsbn10", "isIsbn13", "isIssn", "isEan", "isIsin", "isIsrc", "isBic", "isIban", "isBtcAddress", "isEthereumAddress" };
     comptime var exported: usize = 0;
     inline for (comptime std.meta.declarations(v)) |name| {
         if (comptime name.len > 2 and std.mem.startsWith(u8, name, "is") and std.ascii.isUpper(name[2])) {
@@ -467,6 +631,14 @@ test "the module exports exactly the catalog predicates of the shipped rules" {
         }
     }
     try testing.expectEqual(predicates.len, exported);
+}
+
+test "the predicates of the identifier rules have their catalog signatures" {
+    inline for (.{ v.isUuid, v.isMongoId, v.isFirebasePushId, v.isCreditCard, v.isIsbn, v.isIsbn10, v.isIsbn13, v.isIssn, v.isEan, v.isIsin, v.isIsrc, v.isBic, v.isIban, v.isEthereumAddress }) |predicate| {
+        try testing.expect(@TypeOf(predicate) == fn ([]const u8) bool);
+    }
+    try testing.expect(@TypeOf(v.isHash) == fn ([]const u8, v.HashAlgorithm) bool);
+    try testing.expect(@TypeOf(v.isBtcAddress) == fn ([]const u8, v.BtcNetwork) bool);
 }
 
 test "the limits have their catalog values" {
