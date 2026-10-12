@@ -231,7 +231,7 @@ pub fn create(gpa: std.mem.Allocator, io: Io, opts: options.Options) InitError!*
 fn startQueue(engine: *Engine, q: options.Queued, max_record_bytes: u32) InitError!void {
     const gpa = engine.gpa;
     engine.queue = try Queue.init(gpa, q.capacity, max_record_bytes, engine.own.io());
-    errdefer engine.queue.?.deinit(gpa);
+    errdefer if (engine.queue) |*queue| queue.deinit(gpa);
     const batch_bytes = std.math.mul(usize, q.batch_size, max_record_bytes) catch return error.OutOfMemory;
     engine.batch = try gpa.alloc(u8, std.math.add(usize, batch_bytes, 1) catch return error.OutOfMemory);
     errdefer gpa.free(engine.batch);
@@ -298,9 +298,11 @@ pub fn stats(engine: *Engine) Stats {
 /// Queued mode: waits until the writer thread has written, or dropped,
 /// every record accepted before the call.
 pub fn flush(engine: *Engine, timeout: Io.Timeout) error{Timeout}!void {
-    if (engine.queue == null) return;
+    // Through a pointer: a copy of the queue would read the fields other
+    // threads change.
+    const q = if (engine.queue) |*queue| queue else return;
     try engine.refuseOnOwnThread();
-    return engine.waitProcessed(engine.queue.?.reserved(), timeout);
+    return engine.waitProcessed(q.reserved(), timeout);
 }
 
 /// Refuses records from now on; in queued mode waits until the queue is
