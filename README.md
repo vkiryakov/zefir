@@ -30,16 +30,16 @@ If it fits the way you work, use it, and please join in: bring your ideas and qu
 
 ## Modules
 
-| Module             | Import name       | What it does                                                         | Status                                         |
-| ------------------ | ----------------- | -------------------------------------------------------------------- | ---------------------------------------------- |
-| **confy**          | `zefir-confy`     | Typed configuration from JSON, INI, `.env` files and the environment | ✅ Done · [docs](src/confy/examples/README.md) |
-| **core**           | `zefir-core`      | Execution context: deadlines, cancellation and W3C trace context     | ✅ Done · [docs](src/core/examples/README.md)  |
-| validator          | `zefir-validator` | Declarative validation rules for struct fields                       | 🚧 In progress                                 |
-| rpc                | `zefir-rpc`       | RPC                                                                  | 📋 Planned                                     |
-| log                | `zefir-log`       | Structured logging: JSON Lines, scopes, levels changed at run time   | 🚧 In progress                                 |
-| orm                | `zefir-orm`       | ORM                                                                  | 📋 Planned                                     |
-| http               | —                 | HTTP server                                                          | 📋 Planned                                     |
-| _all of the above_ | `zefir`           | Umbrella module                                                      |                                                |
+| Module             | Import name       | What it does                                                         | Status                                                    |
+| ------------------ | ----------------- | -------------------------------------------------------------------- | --------------------------------------------------------- |
+| **confy**          | `zefir-confy`     | Typed configuration from JSON, INI, `.env` files and the environment | ✅ Done · [docs](src/confy/examples/README.md)            |
+| **core**           | `zefir-core`      | Execution context: deadlines, cancellation and W3C trace context     | ✅ Done · [docs](src/core/examples/README.md)             |
+| validator          | `zefir-validator` | Declarative validation rules for struct fields                       | 🚧 In progress · [docs](src/validator/examples/README.md) |
+| rpc                | `zefir-rpc`       | RPC                                                                  | 📋 Planned                                                |
+| log                | `zefir-log`       | Structured logging: JSON Lines, scopes, levels changed at run time   | 🚧 In progress                                            |
+| orm                | `zefir-orm`       | ORM                                                                  | 📋 Planned                                                |
+| http               | —                 | HTTP server                                                          | 📋 Planned                                                |
+| _all of the above_ | `zefir`           | Umbrella module                                                      |                                                           |
 
 > [!NOTE]
 > Zefir is in early development. Until 1.0, any minor release may change the API.
