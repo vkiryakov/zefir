@@ -71,8 +71,7 @@ flowchart LR
     hooks --> subs[["subscribers"]]
     subs --> handler["your<br/>handler"]
     hooks -->|sync| stdout(["stdout"])
-    hooks -->|queued| queue[["queue"]]
-    queue --> writer["writer<br/>thread"]
+    hooks -->|queued| writer[["queue and<br/>writer thread"]]
     writer --> stdout
 ```
 
