@@ -91,7 +91,7 @@ error(confy): 1 configuration problem:
   environment: APP_HTTP_PORT: invalid (expected an integer 0..65535)
 ```
 
-The environment overrides the files, a bad value stops the program before it does anything, and `confy.Secret` prints as `[redacted]`. **[Read the confy guide →](src/confy/examples/README.md)**
+The environment overrides the files, a bad value stops the program before it does anything, and `confy.Secret` prints as `[REDACTED]`. **[Read the confy guide →](src/confy/examples/README.md)**
 
 ## core in a minute
 

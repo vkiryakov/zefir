@@ -7,6 +7,7 @@ const encode = @import("encode.zig");
 const escape = @import("escape.zig");
 const options = @import("options.zig");
 const scopes = @import("scopes.zig");
+const std_log = @import("std_log.zig");
 const Level = @import("level.zig").Level;
 
 const Io = std.Io;
@@ -49,8 +50,9 @@ pub const Stats = struct {
     /// Records that broke off mid-line because a write failed; the next
     /// record starts on a new line.
     torn_lines: u64,
-    /// `scoped` calls that found the scope table full; those handles log
-    /// without a scope, at the global level.
+    /// New scope names that found the scope table full, from `scoped` and
+    /// from std.log records; those log without a scope, at the global
+    /// level, and each such lookup takes the table's short lock again.
     scopes_overflow: u64,
     /// `scoped` calls whose name was cut to 128 bytes.
     scope_names_truncated: u64,
@@ -68,6 +70,8 @@ io: Io,
 format: options.Format,
 max_record_bytes: u32,
 oversize: options.OversizePolicy,
+/// The call-site mode of each level, by `@backingInt(level)`.
+source_modes: [level_count]options.SourceMode,
 output: options.Output,
 /// `,"service.name":"…"…`, written into every JSON record; empty for text.
 service: []const u8,
@@ -118,6 +122,7 @@ pub fn create(gpa: std.mem.Allocator, io: Io, opts: options.Options) InitError!*
         .format = opts.format,
         .max_record_bytes = opts.max_record_bytes,
         .oversize = opts.oversize,
+        .source_modes = sourceModes(opts.source),
         .output = opts.output,
         .service = service,
         .scope_table = undefined,
@@ -129,6 +134,7 @@ pub fn create(gpa: std.mem.Allocator, io: Io, opts: options.Options) InitError!*
 }
 
 pub fn destroy(engine: *Engine) void {
+    std_log.uninstallIf(engine);
     const gpa = engine.gpa;
     engine.own.deinit();
     gpa.free(engine.service);
@@ -153,25 +159,57 @@ pub fn stats(engine: *Engine) Stats {
 }
 
 /// Encodes and writes one record; the caller has checked the level.
-pub fn emit(engine: *Engine, comptime level: Level, scope: *const scopes.Entry, comptime message: []const u8, fields: anytype) void {
-    bump(&engine.counters.accepted);
-    if (engine.dead.load(.monotonic)) return bump(&engine.counters.dropped_write_failed);
+pub fn emit(engine: *Engine, comptime level: Level, scope: *const scopes.Entry, trace: ?*const encode.TraceHex, comptime message: []const u8, fields: anytype) void {
+    if (!engine.accept()) return;
     // One byte more than the longest record: room for the '\n' that ends a
     // torn line.
     var buf: [1 + max_record_limit]u8 = undefined;
-    const header: encode.Header = .{
+    const out = buf[1..][0..engine.max_record_bytes];
+    const header = engine.headerFor(level, scope, trace);
+    const encoded = switch (engine.format) {
+        inline else => |format| encode.record(format, level, message, out, header, fields),
+    };
+    engine.finish(&buf, encoded);
+}
+
+/// `emit` for a message formatted at run time: the std.log bridge.
+pub fn emitFormatted(engine: *Engine, comptime level: Level, scope: *const scopes.Entry, comptime format: []const u8, args: anytype) void {
+    if (!engine.accept()) return;
+    var buf: [1 + max_record_limit]u8 = undefined;
+    const out = buf[1..][0..engine.max_record_bytes];
+    const header = engine.headerFor(level, scope, null);
+    const encoded = switch (engine.format) {
+        inline else => |f| encode.recordFormatted(f, level, format, args, out, header),
+    };
+    engine.finish(&buf, encoded);
+}
+
+/// Counts a record that passed the level filter; false when stdout is
+/// closed and the record is dropped.
+fn accept(engine: *Engine) bool {
+    bump(&engine.counters.accepted);
+    if (!engine.dead.load(.monotonic)) return true;
+    bump(&engine.counters.dropped_write_failed);
+    return false;
+}
+
+fn headerFor(engine: *Engine, comptime level: Level, scope: *const scopes.Entry, trace: ?*const encode.TraceHex) encode.Header {
+    return .{
         .timestamp = Io.Clock.real.now(engine.io),
         .service = engine.service,
         .scope = scope.name(),
         .scope_quoted = scope.quoted,
+        .source = engine.source_modes[@backingInt(level)],
+        .trace = trace,
         .oversize = engine.oversize,
     };
-    const out = buf[1..][0..engine.max_record_bytes];
-    const encoded = switch (engine.format) {
-        inline else => |format| encode.record(format, level, message, out, header, fields),
-    } orelse return bump(&engine.counters.dropped_oversize);
-    if (encoded.truncated) bump(&engine.counters.truncated);
-    engine.write(&buf, encoded.len);
+}
+
+/// Writes the record encoded in `buf[1..]`, or counts why there is none.
+fn finish(engine: *Engine, buf: []u8, encoded: ?encode.Encoded) void {
+    const done = encoded orelse return bump(&engine.counters.dropped_oversize);
+    if (done.truncated) bump(&engine.counters.truncated);
+    engine.write(buf, done.len);
 }
 
 const WriteError = Io.File.Writer.Error || Io.Writer.Error;
@@ -243,6 +281,14 @@ fn writeWriter(w: *Io.Writer, bytes: []const u8, sent: *usize) Io.Writer.Error!v
         sent.* = bytes.len;
         return e;
     };
+}
+
+const level_count = std.enums.values(Level).len;
+
+fn sourceModes(source: options.SourceOptions) [level_count]options.SourceMode {
+    var modes: [level_count]options.SourceMode = undefined;
+    for (std.enums.values(Level)) |level| modes[@backingInt(level)] = source.mode(level);
+    return modes;
 }
 
 const service_keys = [_][]const u8{ "service.name", "service.instance.id", "service.version", "deployment.environment.name" };

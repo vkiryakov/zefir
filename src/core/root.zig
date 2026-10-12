@@ -36,6 +36,7 @@ pub const ErrorCode = errors.ErrorCode;
 pub const ErrorInfo = errors.ErrorInfo;
 pub const ContextError = errors.ContextError;
 pub const w3c = @import("w3c.zig");
+pub const isSensitive = @import("sensitive.zig").isSensitive;
 
 test {
     std.testing.refAllDecls(@This());
@@ -45,6 +46,7 @@ test {
     _ = @import("errors.zig");
     _ = @import("trace.zig");
     _ = @import("w3c.zig");
+    _ = @import("sensitive.zig");
 }
 
 /// The first public function, reached from `T`'s public declarations, that
