@@ -1195,6 +1195,19 @@ test "every secret name on the list is redacted inside a field, in both formats"
     try testing.expectStringEndsWith(buf[0..got.len], " m" ++ text ++ "\n");
 }
 
+test "a field whose name ends in a secret name is redacted, in both formats" {
+    const Config = struct { db_host: []const u8, db_password: []const u8, api_keys: []const []const u8, password_hash: []const u8 };
+    var cfg: Config = .{ .db_host = "pg", .db_password = "S3CR3T", .api_keys = &.{"S3CR3T"}, .password_hash = "h" };
+    _ = &cfg;
+    var buf: [512]u8 = undefined;
+    const header: Header = .{ .timestamp = fixed_time, .service = "", .scope = "", .oversize = .truncate };
+    var got = record(.json, .info, "m", &buf, header, .{ .cfg = cfg, .newPassword = cfg.db_password }).?;
+    try testing.expectStringEndsWith(buf[0..got.len], ",\"message\":\"m\",\"cfg\":{\"db_host\":\"pg\",\"db_password\":\"[REDACTED]\"," ++
+        "\"api_keys\":\"[REDACTED]\",\"password_hash\":\"h\"},\"newPassword\":\"[REDACTED]\"}\n");
+    got = record(.text, .info, "m", &buf, header, .{ .cfg = cfg, .newPassword = cfg.db_password }).?;
+    try testing.expectStringEndsWith(buf[0..got.len], " m cfg.db_host=pg cfg.db_password=[REDACTED] cfg.api_keys=[REDACTED] cfg.password_hash=h newPassword=[REDACTED]\n");
+}
+
 test "a std.crypto key pair is written without its secret key" {
     const kp = std.crypto.dh.X25519.KeyPair.generateDeterministic("S3CR3T-x25519-seed-0123456789abc".*);
     var buf: [1024]u8 = undefined;

@@ -42,14 +42,16 @@
 //! A type marked `pub const zefir_sensitive = true;` (`confy.Secret` is) is
 //! written as "[REDACTED]", also inside an optional, a pointer, a slice or
 //! an array. So is a field, at any depth, whose name, or one dot-separated
-//! part of it, is exactly a secret name, in any case and with or without
-//! `_` and `-` (`password`, `api_key`, `accessToken`, `secret_key`, …; the
-//! full list is in `examples/README.md`). Close names such as `db_password`
-//! or a nested `api.key` are written as they are: give such values a
-//! marked type. Names that records use themselves (`level`, `message`,
-//! `scope`, …, also as a dotted path such as `.service = .{ .name = … }`),
-//! a `core.Context` (bind it with `withContext`) and types the logger
-//! cannot write are compile errors at the call.
+//! part of it, ends in a secret name or its plural, in any case and with
+//! or without `_` and `-` (`password`, `api_key`, `accessToken`, …; the
+//! full list is in `examples/README.md`): `db_password`, `newPassword` and
+//! `api_keys` are redacted. The secret name must start a word, so
+//! `password_hash` and `dbpassword` are written as they are, and so is a
+//! nested `api.key`: give such values a marked type. Names that records
+//! use themselves (`level`, `message`, `scope`, …, also as a dotted path
+//! such as `.service = .{ .name = … }`), a `core.Context` (bind it with
+//! `withContext`) and types the logger cannot write are compile errors at
+//! the call.
 //!
 //! Levels change at run time: `setLevel` for the global threshold and
 //! `setScopeLevel` for a scope and its subscopes; existing handles see the

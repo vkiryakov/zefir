@@ -154,17 +154,19 @@ neither its presence nor a count leaks. `confy.Secret` carries the marker.
 `log.isSensitive(T)` tells whether a type has it.
 
 A field is redacted too, at any depth, when its name, or one dot-separated
-part of it, is exactly one of these names, in any case and with or
-without `_` and `-` (`api_key`, `apiKey` and `API-KEY` are one name):
-`password`, `passwd`, `secret`, `client_secret`, `secret_key`,
+part of it, ends in one of these names or its plural, in any case and
+with or without `_` and `-` (`api_key`, `apiKey` and `API-KEY` are one
+name): `password`, `passwd`, `secret`, `client_secret`, `secret_key`,
 `secret_access_key`, `aws_secret_access_key`, `api_key`, `apikey`,
 `access_token`, `refresh_token`, `id_token`, `auth_token`,
-`authorization`, `cookie`, `set_cookie`, `private_key`. So `db.password`
-and a nested `.db = .{ .password = … }` are redacted. Other names are
-written as they are, close ones too: `db_password`, `password_hash`,
-`token`, and `api.key` or `.api = .{ .key = … }`, since a dot or a nested
-struct separates names. Give such values a marked type, such as
-`confy.Secret`.
+`authorization`, `cookie`, `set_cookie`, `private_key`. So `db_password`,
+`newPassword`, `X-Api-Key`, `api_keys`, `db.password` and a nested
+`.db = .{ .password = … }` are redacted. The name must start a word: at
+the start, after `_` or `-`, or at a capital letter. Other names are
+written as they are, close ones too: `password_hash`, `secret_name`,
+`dbpassword`, `token`, and `api.key` or `.api = .{ .key = … }`, since a
+dot or a nested struct separates names. Give such values a marked type,
+such as `confy.Secret`.
 
 `std.Uri` is written with its password as `[REDACTED]`
 (`postgres://app:[REDACTED]@db:5432/main`), wherever it sits; a URL
