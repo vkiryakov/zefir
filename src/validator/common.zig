@@ -15,9 +15,9 @@ const Outcome = core.Outcome;
 /// non-exhaustive enum never matches; strings byte for byte, with no
 /// decoding, trimming or case folding. The parameter is one integer, finite
 /// float, bool, named enum tag or non-empty valid UTF-8 string, and must fit
-/// the field type (a typed float narrower than a float field, as for
-/// `v.min`). The message shows it as written: `v.equals(.admin)` says
-/// "must be equal to admin".
+/// the field type; a typed float narrower than a float field must also show
+/// the same value there, as for `v.min`. The message shows it as written:
+/// `v.equals(.admin)` says "must be equal to admin".
 pub fn equals(comptime expected: anytype) Rule {
     return comparison(.equals, expected);
 }

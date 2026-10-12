@@ -173,14 +173,17 @@ pub fn main(init: std.process.Init) !void {
 }
 
 /// The ids of the deviations that the table of class_validator.md describes:
-/// every line that starts with `| D<n> |`.
+/// every row whose first cell, the text between its first two `|` without
+/// the spaces around it, is `D<n>`: `| D16 |`, and `| D9  |` as Markdown
+/// formatters pad it.
 fn deviationIds(arena: Allocator, table: []const u8) Allocator.Error![]const []const u8 {
     var ids: std.ArrayList([]const u8) = .empty;
     var lines = std.mem.splitScalar(u8, table, '\n');
     while (lines.next()) |line| {
-        const rest = std.mem.cutPrefix(u8, line, "| ") orelse continue;
-        const end = std.mem.findScalar(u8, rest, ' ') orelse continue;
-        if (isDeviationId(rest[0..end]) and std.mem.startsWith(u8, rest[end..], " |")) try ids.append(arena, rest[0..end]);
+        const row = std.mem.cutPrefix(u8, std.mem.trimStart(u8, line, " \t"), "|") orelse continue;
+        const end = std.mem.findScalar(u8, row, '|') orelse continue;
+        const cell = std.mem.trim(u8, row[0..end], " \t");
+        if (isDeviationId(cell)) try ids.append(arena, cell);
     }
     return ids.items;
 }
@@ -1059,15 +1062,19 @@ test "the deviation ids are the rows of the table in class_validator.md" {
         \\| --- | --- | --- | --- | --- |
         \\| D14 | `notEmpty` | A `null` `?T` skips the rule. | `IsNotEmpty` fails `null`. | `null` |
         \\| D16 | `min` | NaN fails with `validation.finite`. | NaN passes. | NaN |
+        \\| D9  | a cell padded as Markdown formatters write it |
+        \\|D18| a cell without spaces |
         \\The text may name D99 outside the table.
         \\| D7x | not an id |
         \\| D0 | not an id |
-        \\|D18| not a row of the table's shape |
+        \\| D20 without a closing bar
         \\
     );
-    try std.testing.expectEqual(2, ids.len);
+    try std.testing.expectEqual(4, ids.len);
     try std.testing.expectEqualStrings("D14", ids[0]);
     try std.testing.expectEqualStrings("D16", ids[1]);
+    try std.testing.expectEqualStrings("D9", ids[2]);
+    try std.testing.expectEqualStrings("D18", ids[3]);
 }
 
 test "a rule with fewer than 10 records is rejected" {
