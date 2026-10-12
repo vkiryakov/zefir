@@ -258,6 +258,34 @@ test "uniqueBy is a rule constructor with code validation.unique_items and messa
     try expectNoViolation([]const Item, .{ v.maxItems(10), v.uniqueBy(.id) }, &.{ .{ .id = 1 }, .{ .id = 2 } });
 }
 
+test "containsAll is a rule constructor with code validation.contains_all and message \"must contain all of: {values}\", \"must contain {values}\" for one value, or \"must contain all of the required values\" when that would be longer than 512 bytes; placeholder {values}" {
+    try testing.expect(@hasDecl(v, "containsAll"));
+    try testing.expect(@typeInfo(@TypeOf(v.containsAll)).@"fn".return_type == v.Rule);
+    try expectRule(v.containsAll(.{ "a", "b" }), "validation.contains_all", "must contain all of: a, b", "must contain all of: {values}");
+    try expectPlaceholder(v.containsAll(.{ "a", "b" }), "{values}", "a, b");
+    try expectViolation([]const []const u8, v.containsAll(.{ "a", "b" }), &.{"a"}, "validation.contains_all", "must contain all of: a, b", "x");
+    try expectRule(v.containsAll(.{"a"}), "validation.contains_all", "must contain a", "must contain {values}");
+    try expectPlaceholder(v.containsAll(.{"a"}), "{values}", "a");
+    try expectViolation([]const []const u8, v.containsAll(.{"a"}), &.{"b"}, "validation.contains_all", "must contain a", "x");
+    try expectRule(v.containsAll(long_values), "validation.contains_all", "must contain all of the required values", "must contain all of the required values");
+    try expectViolation([]const []const u8, v.containsAll(long_values), &.{"c"}, "validation.contains_all", "must contain all of the required values", "x");
+    try expectNoViolation([]const []const u8, v.containsAll(.{ "a", "b" }), &.{ "b", "a" });
+}
+
+test "containsNone is a rule constructor with code validation.contains_none and message \"must not contain any of: {values}\", \"must not contain {values}\" for one value, or \"must not contain any of the forbidden values\" when that would be longer than 512 bytes; placeholder {values}" {
+    try testing.expect(@hasDecl(v, "containsNone"));
+    try testing.expect(@typeInfo(@TypeOf(v.containsNone)).@"fn".return_type == v.Rule);
+    try expectRule(v.containsNone(.{ "a", "b" }), "validation.contains_none", "must not contain any of: a, b", "must not contain any of: {values}");
+    try expectPlaceholder(v.containsNone(.{ "a", "b" }), "{values}", "a, b");
+    try expectViolation([]const []const u8, v.containsNone(.{ "a", "b" }), &.{"b"}, "validation.contains_none", "must not contain any of: a, b", "x");
+    try expectRule(v.containsNone(.{"a"}), "validation.contains_none", "must not contain a", "must not contain {values}");
+    try expectPlaceholder(v.containsNone(.{"a"}), "{values}", "a");
+    try expectViolation([]const []const u8, v.containsNone(.{"a"}), &.{"a"}, "validation.contains_none", "must not contain a", "x");
+    try expectRule(v.containsNone(long_values), "validation.contains_none", "must not contain any of the forbidden values", "must not contain any of the forbidden values");
+    try expectViolation([]const []const u8, v.containsNone(long_values), &.{long_values[1]}, "validation.contains_none", "must not contain any of the forbidden values", "x");
+    try expectNoViolation([]const []const u8, v.containsNone(.{ "a", "b" }), &.{"c"});
+}
+
 test "each is a rule constructor with no code or message of its own; an item reports the inner rule's code and message at its index" {
     try testing.expect(@hasDecl(v, "each"));
     try testing.expect(@typeInfo(@TypeOf(v.each)).@"fn".return_type == v.Rule);
@@ -400,15 +428,15 @@ test "finite has no precondition: nan, inf and -inf on a float field fail its ow
     }
 }
 
-test "the module exports exactly its 32 public names, and Rule.withMessage" {
-    const names = [_][]const u8{ "Violation", "Rule", "Report", "max_code_bytes", "max_message_bytes", "max_report_violations", "max_unique_items", "check", "checkAll", "assertRules", "fail", "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "minItems", "maxItems", "uniqueItems", "uniqueBy", "each", "custom" };
+test "the module exports exactly its 34 public names, and Rule.withMessage" {
+    const names = [_][]const u8{ "Violation", "Rule", "Report", "max_code_bytes", "max_message_bytes", "max_report_violations", "max_unique_items", "check", "checkAll", "assertRules", "fail", "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "minItems", "maxItems", "uniqueItems", "uniqueBy", "containsAll", "containsNone", "each", "custom" };
     inline for (names) |name| try testing.expect(@hasDecl(v, name));
     try testing.expectEqual(names.len, comptime std.meta.declarations(v).len);
     try testing.expect(@hasDecl(v.Rule, "withMessage"));
 }
 
 test "every rule the module exports has a catalog test" {
-    const tested = [_][]const u8{ "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "minItems", "maxItems", "uniqueItems", "uniqueBy", "each", "custom" };
+    const tested = [_][]const u8{ "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "minItems", "maxItems", "uniqueItems", "uniqueBy", "containsAll", "containsNone", "each", "custom" };
     inline for (comptime std.meta.declarations(v)) |name| {
         const T = @TypeOf(@field(v, name));
         if (comptime T == v.Rule or (@typeInfo(T) == .@"fn" and @typeInfo(T).@"fn".return_type == v.Rule)) {

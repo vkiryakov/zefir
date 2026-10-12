@@ -4,6 +4,8 @@
 //! kind of slice, optional slices, and inner lists through `each`.
 //! `v.uniqueItems` and `v.uniqueBy` on slices and arrays of every item and
 //! key type they take, behind their `maxItems` cap and inside `each`.
+//! `v.containsAll` and `v.containsNone` on lists of every item kind, and how
+//! they differ from item rules.
 const std = @import("std");
 const v = @import("validator");
 const h = @import("vtest");
@@ -273,4 +275,42 @@ test "uniqueItems inside each checks every inner list behind its own cap, at the
     const Tags = h.One([]const []const u8, .{ v.maxItems(5), v.uniqueItems, v.each(v.notEmpty) });
     try h.expectAt(&Tags{ .x = &.{ "", "" } }, unique_code, unique_message, "x");
     try h.expectAt(&Tags{ .x = &.{ "a", "" } }, not_empty_code, not_empty_message, "x[1]");
+}
+
+const Color = enum { red, green, blue };
+
+test "containsAll needs every listed value among the items; its message lists them" {
+    const all_of = "must contain all of: read, write";
+    try h.expectPass([]const []const u8, v.containsAll(.{ "read", "write" }), &.{ "write", "admin", "read" });
+    try h.expectFail([]const []const u8, v.containsAll(.{ "read", "write" }), &.{ "read", "read" }, "validation.contains_all", all_of);
+    try h.expectFail([]const []const u8, v.containsAll(.{ "read", "write" }), &.{}, "validation.contains_all", all_of);
+    try h.expectFail([]const []const u8, v.containsAll(.{"read"}), &.{"READ"}, "validation.contains_all", "must contain read");
+    try h.expectPass([]const u64, v.containsAll(.{ 9007199254740993, 1 }), &.{ 1, 9007199254740993 });
+    try h.expectFail([]const u64, v.containsAll(.{9007199254740993}), &.{9007199254740992}, "validation.contains_all", "must contain 9007199254740993");
+    try h.expectPass([]const Role, v.containsAll(.{.admin}), &.{ .viewer, .admin });
+    try h.expectFail([]const Role, v.containsAll(.{.admin}), &.{.viewer}, "validation.contains_all", "must contain admin");
+    try h.expectPass([]const bool, v.containsAll(.{true}), &.{ false, true });
+    try h.expectPass([3]u8, v.containsAll(.{ 2, 3 }), .{ 3, 1, 2 });
+    try h.expectFail([3]u8, v.containsAll([_]u8{ 2, 3 }), .{ 3, 1, 1 }, "validation.contains_all", "must contain all of: 2, 3");
+    try h.expectPass(?[]const Role, v.containsAll(.{.admin}), null);
+}
+
+test "containsNone fails when any listed value is an item; an empty list passes" {
+    try h.expectPass([]const []const u8, v.containsNone(.{ "root", "admin" }), &.{ "Root", "user" });
+    try h.expectFail([]const []const u8, v.containsNone(.{ "root", "admin" }), &.{ "user", "admin" }, "validation.contains_none", "must not contain any of: root, admin");
+    try h.expectPass([]const []const u8, v.containsNone(.{"root"}), &.{});
+    try h.expectFail([]const i32, v.containsNone(.{0}), &.{ 1, 0 }, "validation.contains_none", "must not contain 0");
+    try h.expectFail([]const Mode, v.containsNone(.{.write}), &.{ @fromBackingInt(9), .write }, "validation.contains_none", "must not contain write");
+    try h.expectPass([]const Mode, v.containsNone(.{.write}), &.{ @fromBackingInt(9), .read });
+    try h.expectFail([2]bool, v.containsNone(.{false}), .{ true, false }, "validation.contains_none", "must not contain false");
+}
+
+test "containsNone reports the list at its path, each(noneOf) the item at its index" {
+    const Whole = h.One([]const Color, v.containsNone(.{.blue}));
+    try h.expectAt(&Whole{ .x = &.{ .red, .blue, .blue } }, "validation.contains_none", "must not contain blue", "x");
+    const Items = h.One([]const Color, v.each(v.noneOf(.{.blue})));
+    try h.expectAll(&Items{ .x = &.{ .red, .blue, .blue } }, &.{
+        .{ .code = "validation.none_of", .field = "x[1]" },
+        .{ .code = "validation.none_of", .field = "x[2]" },
+    });
 }

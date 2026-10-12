@@ -1,6 +1,7 @@
-//! List rules: `minItems`, `maxItems`, `uniqueItems`, `uniqueBy` and `each`.
-//! A list is a slice whose items are not `u8`, or an array `[N]T` (`[N]u8`
-//! included: it is an array of numbers).
+//! List rules: `minItems`, `maxItems`, `uniqueItems`, `uniqueBy`,
+//! `containsAll`, `containsNone` and `each`. A list is a slice whose items
+//! are not `u8`, or an array `[N]T` (`[N]u8` included: it is an array of
+//! numbers).
 const std = @import("std");
 const core = @import("core.zig");
 const Rule = core.Rule;
@@ -408,6 +409,142 @@ fn sortedTagValues(comptime E: type) []const comptime_int {
     }
 }
 
+// ------------------------------------------------------------------ containsAll, containsNone
+
+/// Every listed value is among the items. The list is a tuple or an array
+/// `[N]T` (not a pointer to one, not a slice) of at least one value, none
+/// twice, all of one kind matching the items: non-empty strings, compared
+/// byte for byte; enum tags of the item type; integers within it, compared
+/// exactly; or bools. Items are scanned in index order and the rule passes
+/// once every value was found, so one item never counts for two values; an
+/// empty list fails. The message lists the values: "must contain all of: a,
+/// b", "must contain a" for one value, and "must contain all of the required
+/// values" when the list would make it longer than 512 bytes.
+pub fn containsAll(comptime values: anytype) Rule {
+    @setEvalBranchQuota(core.eval_quota);
+    const list = core.analyzeList("containsAll", values, contains_all_list);
+    const message = if (list.len == 1) "must contain " ++ list.text else "must contain all of: " ++ list.text;
+    return itemMembership(.contains_all, values, list, message, "must contain all of the required values");
+}
+
+/// No item equals a listed value, with the lists and comparisons of
+/// `containsAll`; an empty list passes. The list may not hold every value
+/// of the item type (both bools, every tag of an exhaustive enum, every
+/// value of an integer type): use `v.empty` on a slice. To reject empty
+/// strings among the items, use `v.each(v.notEmpty)`.
+pub fn containsNone(comptime values: anytype) Rule {
+    @setEvalBranchQuota(core.eval_quota);
+    const list = core.analyzeList("containsNone", values, contains_none_list);
+    const message = if (list.len == 1) "must not contain " ++ list.text else "must not contain any of: " ++ list.text;
+    return itemMembership(.contains_none, values, list, message, "must not contain any of the forbidden values");
+}
+
+/// The lists `containsAll` and `containsNone` take.
+const contains_all_list: core.ListOptions = .{ .allow_bool = true, .empty_string = "the empty string cannot be listed" };
+const contains_none_list: core.ListOptions = .{ .allow_bool = true, .empty_string = "the empty string cannot be listed; " ++ core.hints.reject_empty_items };
+
+/// `containsAll` or `containsNone` over a checked list.
+fn itemMembership(comptime kind: core.Kind, comptime values: anytype, comptime list: core.ValueList, comptime message: []const u8, comptime fallback: []const u8) Rule {
+    const all = kind == .contains_all;
+    return core.define(kind, .{
+        .message = message,
+        .fallback = fallback,
+        .args = list.args,
+        .params = &.{core.param("values", values)},
+        .fits = struct {
+            fn fits(comptime rule: *const Rule, comptime T: type, comptime where: []const u8) void {
+                if (itemsProblem(rule, values, list, T, where)) |text| @compileError(text);
+            }
+        }.fits,
+        .eval = struct {
+            fn eval(value: anytype) Outcome {
+                const T = @TypeOf(value.*);
+                const Item = core.ListChild(T) orelse @compileError("validator: internal: " ++ @tagName(kind) ++ "'s eval was instantiated for a type its fits rejected");
+                const items: []const Item = if (@typeInfo(T) == .array) value else value.*;
+                const wanted = comptime core.listAs(if (core.isString(Item)) []const u8 else Item, values);
+                if (!all) {
+                    for (items) |item| {
+                        for (wanted) |w| {
+                            if (itemEql(Item, item, w)) return .fail;
+                        }
+                    }
+                    return .pass;
+                }
+                var found: [wanted.len]bool = @splat(false);
+                var missing: usize = wanted.len;
+                for (items) |item| {
+                    for (wanted, &found) |w, *seen| {
+                        if (!seen.* and itemEql(Item, item, w)) {
+                            seen.* = true;
+                            missing -= 1;
+                            if (missing == 0) return .pass;
+                            // The values differ, so no other one equals this item.
+                            break;
+                        }
+                    }
+                }
+                return .fail;
+            }
+        }.eval,
+    });
+}
+
+/// An item equals a listed value: strings byte for byte, the rest by `==`.
+fn itemEql(comptime Item: type, item: Item, listed: if (core.isString(Item)) []const u8 else Item) bool {
+    return if (comptime core.isString(Item)) std.mem.eql(u8, item, listed) else item == listed;
+}
+
+/// The declaration error of `containsAll` or `containsNone` with the checked
+/// list `values` on the unwrapped field type `T`, or null. The field is a
+/// list whose items are not optional or floats and are of the listed kind:
+/// strings, the enum of the listed tags, an integer type holding the listed
+/// integers, or bools. On `[N]T`, an array without items decides the rule,
+/// `containsAll` cannot list more values than the array has items, and
+/// `containsNone` cannot list every value of the item type, which leaves a
+/// slice only the empty list.
+fn itemsProblem(comptime rule: *const Rule, comptime values: anytype, comptime list: core.ValueList, comptime T: type, comptime where: []const u8) ?[]const u8 {
+    @setEvalBranchQuota(core.eval_quota);
+    const all = rule.kind == .contains_all;
+    const string_hint = if (all) core.hints.contains_all_on_string else core.hints.contains_none_on_string;
+    const Item = core.ListChild(T) orelse return core.typeErrorText(rule, T, where, "a slice or an array", acceptsList, if (core.isString(T)) string_hint else null);
+    switch (@typeInfo(Item)) {
+        .optional => return core.ruleErrorText(rule, where, ": items are " ++ @typeName(Item) ++ "; optional items are not supported"),
+        .float => return core.ruleErrorText(rule, where, ": items are " ++ @typeName(Item) ++ "; float items are not supported"),
+        else => {},
+    }
+    const matches = switch (list.kind) {
+        .string => core.isString(Item),
+        .tag => @typeInfo(Item) == .@"enum",
+        .int => @typeInfo(Item) == .int,
+        .bool => Item == bool,
+    };
+    if (!matches) return core.ruleErrorText(rule, where, " lists " ++ list.kind.plural() ++ ", items are " ++ @typeName(Item));
+    switch (list.kind) {
+        .tag => inline for (0..values.len) |i| {
+            if (core.itemTagProblem(values[i], Item)) |text| return core.ruleErrorText(rule, where, text);
+        },
+        .int => inline for (0..values.len) |i| {
+            if (core.numberParamProblem(values[i], Item, "use an integer", if (all) "; the rule would never pass" else "; remove it")) |text|
+                return core.ruleErrorText(rule, where, text);
+        },
+        .string, .bool => {},
+    }
+    const array_len: ?usize = switch (@typeInfo(T)) {
+        .array => |a| a.len,
+        else => null,
+    };
+    if (array_len) |n| {
+        if (n == 0) return core.ruleErrorText(rule, where, " on " ++ @typeName(T) ++ if (all) " is always false: the array has no items" else " is always true: the array has no items; remove it");
+        if (all and list.len > n)
+            return core.ruleErrorText(rule, where, std.fmt.comptimePrint(" on {s}: an array of {d} items cannot contain {d} different values", .{ @typeName(T), n, list.len }));
+    }
+    if (!all and list.len == valueCount(Item)) {
+        const tail = if (array_len == null) "; only an empty list would pass; " ++ core.hints.use_empty else "; no value would pass";
+        return core.ruleErrorText(rule, where, " lists every value of " ++ @typeName(Item) ++ tail);
+    }
+    return null;
+}
+
 // ------------------------------------------------------------------ each
 
 /// The rules for every item of a slice or an array: one rule or a tuple of
@@ -441,7 +578,7 @@ pub fn each(comptime rules: anytype) Rule {
 
 /// The arguments the hints show for an uncalled constructor of this file:
 /// `each must be called, e.g. v.each(v.notEmpty)`.
-pub const call_examples = .{ .minItems = "1", .maxItems = "100", .uniqueBy = ".id", .each = "v.notEmpty" };
+pub const call_examples = .{ .minItems = "1", .maxItems = "100", .uniqueBy = ".id", .containsAll = ".{\"a\"}", .containsNone = ".{\"a\"}", .each = "v.notEmpty" };
 
 const expectOutcome = core.expectOutcome;
 
@@ -809,4 +946,142 @@ test "uniqueItems sorts short lists, long lists and arrays up to max_unique_item
         try expectOutcome(.fail, uniqueItems, @as([]const []const u8, &strings_dup));
         try expectOutcome(.fail, uniqueItems, strings_dup);
     }
+}
+
+/// The declaration error of `containsAll(values)` or `containsNone(values)`
+/// on a field of type `T`, or null.
+fn containsAllText(comptime values: anytype, comptime T: type) ?[]const u8 {
+    return itemsProblem(&containsAll(values), values, core.analyzeList("containsAll", values, contains_all_list), T, test_where);
+}
+
+fn containsNoneText(comptime values: anytype, comptime T: type) ?[]const u8 {
+    return itemsProblem(&containsNone(values), values, core.analyzeList("containsNone", values, contains_none_list), T, test_where);
+}
+
+/// Another enum with a tag of the same name, for the tag tests.
+const Color = enum { red, admin };
+
+test "containsAll and containsNone have their documented codes, messages and {values} placeholder" {
+    const t = std.testing;
+    const both = containsAll(.{ "read", "write" });
+    try t.expectEqual(core.Kind.contains_all, both.kind);
+    try t.expectEqualStrings("validation.contains_all", both.code);
+    try t.expectEqualStrings("must contain all of: read, write", both.message);
+    try t.expectEqualStrings(".{ \"read\", \"write\" }", both.args.?);
+    try t.expectEqualStrings("values", both.params[0].name);
+    try t.expectEqualStrings("read, write", both.params[0].text);
+    try t.expectEqual(null, both.precondition);
+    try t.expectEqualStrings("must contain read", containsAll(.{"read"}).message);
+    try t.expectEqualStrings("must contain all of: 1, 2", containsAll(.{ 1, 2 }).message);
+    const none = containsNone(.{ .guest, .root });
+    try t.expectEqual(core.Kind.contains_none, none.kind);
+    try t.expectEqualStrings("validation.contains_none", none.code);
+    try t.expectEqualStrings("must not contain any of: guest, root", none.message);
+    try t.expectEqualStrings("must not contain root", containsNone(.{"root"}).message);
+    try t.expectEqualStrings("must not contain true", containsNone(.{true}).message);
+    try t.expectEqualStrings("contains_none(.{.guest})", comptime containsNone(.{.guest}).label());
+    // A message that would be longer than 512 bytes falls back; the placeholder keeps every value.
+    const long = .{ &@as([300]u8, @splat('a')), &@as([300]u8, @splat('b')) };
+    try t.expectEqualStrings("must contain all of the required values", containsAll(long).message);
+    try t.expectEqualStrings("must not contain any of the forbidden values", containsNone(long).message);
+    try t.expectEqual(602, containsAll(long).params[0].text.len);
+}
+
+test "containsAll and containsNone take a tuple or an array of distinct strings, tags, integers or bools" {
+    const expect = std.testing.expectEqualStrings;
+    const list_args = contains_all_list;
+    try expect("validator: containsAll(.{}): the list is empty", comptime core.listProblem("containsAll", .{}, list_args).?);
+    try expect("validator: containsAll(\"a\"): expected a tuple or an array of values, e.g. .{ \"a\", \"b\" }, got *const [1:0]u8", comptime core.listProblem("containsAll", "a", list_args).?);
+    const required = [_][]const u8{ "a", "b" };
+    try expect(
+        "validator: containsAll(...): expected a tuple or an array of values, e.g. .{ \"a\", \"b\" }, got *const [2][]const u8; pass the array itself, not a pointer to it",
+        comptime core.listProblem("containsAll", &required, list_args).?,
+    );
+    try expect(
+        "validator: containsNone(...): expected a tuple or an array of values, e.g. .{ \"a\", \"b\" }, got a pointer to a tuple; drop the &: write .{ ... }, not &.{ ... }",
+        comptime core.listProblem("containsNone", &.{ "a", "b" }, contains_none_list).?,
+    );
+    try expect("validator: containsAll(.{ 1, 2, 1 }): 1 is listed twice", comptime core.listProblem("containsAll", .{ 1, 2, 1 }, list_args).?);
+    try expect("validator: containsAll(.{ 1, \"a\" }): the list mixes integers and strings", comptime core.listProblem("containsAll", .{ 1, "a" }, list_args).?);
+    try expect("validator: containsAll(.{1.5}): floats cannot be listed: exact float equality is fragile", comptime core.listProblem("containsAll", .{1.5}, list_args).?);
+    try expect("validator: containsAll(.{\"\"}): the empty string cannot be listed", comptime core.listProblem("containsAll", .{""}, contains_all_list).?);
+    try expect("validator: containsNone(.{\"\"}): the empty string cannot be listed; use v.each(v.notEmpty) to reject empty items", comptime core.listProblem("containsNone", .{""}, contains_none_list).?);
+    try expect("validator: containsAll(.{\"\\xff\"}): \"\\xff\" is not valid UTF-8", comptime core.listProblem("containsAll", .{"\xff"}, contains_all_list).?);
+    try expect("validator: containsNone(.{...}): cannot list a value of type @TypeOf(null)", comptime core.listProblem("containsNone", .{null}, contains_none_list).?);
+    try expect("validator: containsAll(.{@fromBackingInt(7)}): @fromBackingInt(7) is not a named tag of lists.Open", comptime core.listProblem("containsAll", .{@as(Open, @fromBackingInt(7))}, contains_all_list).?);
+    // Bools may be listed.
+    try std.testing.expectEqual(null, comptime core.listProblem("containsAll", .{ true, false }, contains_all_list));
+    try std.testing.expectEqual(null, comptime core.listProblem("containsNone", [_]u8{ 1, 2 }, contains_none_list));
+}
+
+test "containsAll and containsNone take lists of the listed kind of value, not strings" {
+    const expect = std.testing.expectEqualStrings;
+    const head = "validator: Dto.field_rules.x: ";
+    try expect(head ++ "contains_all expects a slice or an array, field is []const u8; for a substring use v.contains", comptime containsAllText(.{"a"}, []const u8).?);
+    try expect(head ++ "contains_none expects a slice or an array, field is [:0]const u8; for a substring use v.notContains", comptime containsNoneText(.{"a"}, [:0]const u8).?);
+    try expect(head ++ "contains_all expects a slice or an array, field is u32", comptime containsAllText(.{1}, u32).?);
+    try expect(head ++ "contains_all(.{1}): items are ?u32; optional items are not supported", comptime containsAllText(.{1}, []const ?u32).?);
+    try expect(head ++ "contains_none(.{1}): items are f64; float items are not supported", comptime containsNoneText(.{1}, []const f64).?);
+    try expect(head ++ "contains_all(.{\"1\"}) lists strings, items are u32", comptime containsAllText(.{"1"}, []const u32).?);
+    try expect(head ++ "contains_none(.{1}) lists integers, items are lists.Record", comptime containsNoneText(.{1}, []const Record).?);
+    try expect(head ++ "contains_all(.{true}) lists bools, items are u8", comptime containsAllText(.{true}, [2]u8).?);
+    try expect(head ++ "contains_all(.{.admin}) lists enum tags, items are []const u8", comptime containsAllText(.{.admin}, []const []const u8).?);
+    try expect(head ++ "contains_all(.{300}): 300 is outside i8 (-128..127); the rule would never pass", comptime containsAllText(.{300}, []const i8).?);
+    try expect(head ++ "contains_none(.{300}): 300 is outside i8 (-128..127); remove it", comptime containsNoneText(.{300}, []const i8).?);
+    try expect(head ++ "contains_all(.{.root}): lists.Role has no tag root; tags: admin, user, guest", comptime containsAllText(.{.root}, []const Role).?);
+    try expect(head ++ "contains_none(.{.red}): .red is a tag of lists.Color, the items are lists.Role", comptime containsNoneText(.{Color.red}, []const Role).?);
+    try expect(head ++ "contains_all(.{.admin}): .admin is a tag of lists.Color, the items are lists.Role", comptime containsAllText(.{Color.admin}, []const Role).?);
+    inline for (.{ []const []const u8, [][:0]u8, [3][]const u8 }) |T| try std.testing.expectEqual(null, comptime containsAllText(.{ "a", "b" }, T));
+    inline for (.{ []const u16, []const i64, [4]u8, []const u128 }) |T| try std.testing.expectEqual(null, comptime containsNoneText(.{ 1, 2 }, T));
+    try std.testing.expectEqual(null, comptime containsAllText(.{ .admin, Role.user }, []const Role));
+    try std.testing.expectEqual(null, comptime containsAllText(.{ .a, .b }, []const Open));
+    try std.testing.expectEqual(null, comptime containsNoneText(.{true}, []const bool));
+}
+
+test "containsAll and containsNone on arrays, and lists that leave no value" {
+    const expect = std.testing.expectEqualStrings;
+    const head = "validator: Dto.field_rules.x: ";
+    try expect(head ++ "contains_all(.{ 1, 2, 3 }) on [2]u8: an array of 2 items cannot contain 3 different values", comptime containsAllText(.{ 1, 2, 3 }, [2]u8).?);
+    try expect(head ++ "contains_all(.{1}) on [0]u8 is always false: the array has no items", comptime containsAllText(.{1}, [0]u8).?);
+    try expect(head ++ "contains_none(.{1}) on [0]u8 is always true: the array has no items; remove it", comptime containsNoneText(.{1}, [0]u8).?);
+    try expect(head ++ "contains_none(.{ true, false }) lists every value of bool; only an empty list would pass; use v.empty", comptime containsNoneText(.{ true, false }, []const bool).?);
+    try expect(head ++ "contains_none(.{ true, false }) lists every value of bool; no value would pass", comptime containsNoneText(.{ true, false }, [2]bool).?);
+    try expect(head ++ "contains_none(.{ .guest, .admin, .user }) lists every value of lists.Role; no value would pass", comptime containsNoneText(.{ .guest, .admin, .user }, [1]Role).?);
+    try expect(head ++ "contains_none(.{ 0, 1 }) lists every value of u1; only an empty list would pass; use v.empty", comptime containsNoneText(.{ 0, 1 }, []const u1).?);
+    // As many values as items, and every value in containsAll, are fine.
+    try std.testing.expectEqual(null, comptime containsAllText(.{ 1, 2 }, [2]u8));
+    try std.testing.expectEqual(null, comptime containsAllText(.{ true, false }, []const bool));
+    try std.testing.expectEqual(null, comptime containsNoneText(.{ .a, .b }, []const Open));
+}
+
+test "an uncalled containsAll or containsNone gets an example call" {
+    const expect = std.testing.expectEqualStrings;
+    try expect("validator: Dto.field_rules.x: containsAll must be called, e.g. v.containsAll(.{\"a\"})", comptime uncalledText("containsAll", @TypeOf(containsAll)));
+    try expect("validator: Dto.field_rules.x: containsNone must be called, e.g. v.containsNone(.{\"a\"})", comptime uncalledText("containsNone", @TypeOf(containsNone)));
+}
+
+test "containsAll finds every listed value among the items, one item per value" {
+    try expectOutcome(.pass, containsAll(.{ "read", "write" }), @as([]const []const u8, &.{ "write", "x", "read" }));
+    try expectOutcome(.fail, containsAll(.{ "read", "write" }), @as([]const []const u8, &.{ "read", "read" }));
+    try expectOutcome(.fail, containsAll(.{"read"}), @as([]const []const u8, &.{}));
+    try expectOutcome(.fail, containsAll(.{"read"}), @as([]const []const u8, &.{ "Read", "read " }));
+    try expectOutcome(.pass, containsAll(.{ 1, 2 }), @as([]const u64, &.{ 2, 2, 1 }));
+    try expectOutcome(.fail, containsAll(.{9007199254740993}), @as([]const u64, &.{9007199254740992}));
+    try expectOutcome(.pass, containsAll(.{ .admin, .guest }), @as([]const Role, &.{ .guest, .user, .admin }));
+    try expectOutcome(.fail, containsAll(.{.a}), @as([]const Open, &.{ .b, @fromBackingInt(0xff) }));
+    try expectOutcome(.pass, containsAll(.{true}), @as([]const bool, &.{ false, true }));
+    try expectOutcome(.pass, containsAll(.{ 3, 4 }), [4]u8{ 1, 2, 3, 4 });
+    try expectOutcome(.pass, containsAll([_][]const u8{ "x", "y" }), @as([]const [:0]const u8, &.{ "y", "x" }));
+}
+
+test "containsNone fails on any listed value among the items" {
+    try expectOutcome(.pass, containsNone(.{ "root", "admin" }), @as([]const []const u8, &.{ "user", "Root" }));
+    try expectOutcome(.fail, containsNone(.{ "root", "admin" }), @as([]const []const u8, &.{ "user", "admin" }));
+    try expectOutcome(.pass, containsNone(.{"root"}), @as([]const []const u8, &.{}));
+    try expectOutcome(.fail, containsNone(.{ -1, 0 }), @as([]const i32, &.{ 5, 0 }));
+    try expectOutcome(.pass, containsNone(.{.guest}), @as([]const Role, &.{ .admin, .user }));
+    try expectOutcome(.fail, containsNone(.{.guest}), [2]Role{ .admin, .guest });
+    try expectOutcome(.pass, containsNone(.{.a}), @as([]const Open, &.{ .b, @fromBackingInt(9) }));
+    try expectOutcome(.fail, containsNone(.{.a}), @as([]const Open, &.{ @fromBackingInt(9), @fromBackingInt(0) }));
+    try expectOutcome(.fail, containsNone(.{false}), @as([]const bool, &.{ true, false }));
 }

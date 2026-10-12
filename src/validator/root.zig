@@ -72,6 +72,8 @@ pub const minItems = lists.minItems;
 pub const maxItems = lists.maxItems;
 pub const uniqueItems = lists.uniqueItems;
 pub const uniqueBy = lists.uniqueBy;
+pub const containsAll = lists.containsAll;
+pub const containsNone = lists.containsNone;
 pub const each = lists.each;
 pub const custom = custom_rules.custom;
 

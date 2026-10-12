@@ -151,6 +151,17 @@ pub const list = [_]Fixture{
     .{ .file = "src/validator/testdata/compile_errors/unique_by_not_literal.zig", .expect = "validator: uniqueBy(\"id\"): the key must be a field name such as .id, got *const [2:0]u8", .row = "uniqueBy-1" },
     .{ .file = "src/validator/testdata/compile_errors/unique_by_unknown_key.zig", .expect = "validator: unique_by_unknown_key.Bad.field_rules.x: unique_by(.idd): unique_by_unknown_key.Item has no field idd; did you mean \"id\"?", .row = "uniqueBy-6" },
     .{ .file = "src/validator/testdata/compile_errors/unique_by_uncalled.zig", .expect = "validator: unique_by_uncalled.Bad.field_rules.x: uniqueBy must be called, e.g. v.uniqueBy(.id)", .row = "uniqueBy-16" },
+    // containsAll and containsNone: one fixture per kind of error; the text of
+    // every catalog row is checked by the tests of lists.zig
+    .{ .file = "src/validator/testdata/compile_errors/contains_all_empty.zig", .expect = "validator: containsAll(.{}): the list is empty", .row = "containsAll-1" },
+    .{ .file = "src/validator/testdata/compile_errors/contains_none_pointer.zig", .expect = "validator: containsNone(...): expected a tuple or an array of values, e.g. .{ \"a\", \"b\" }, got *const [2][]const u8; pass the array itself, not a pointer to it", .row = "containsNone-3" },
+    .{ .file = "src/validator/testdata/compile_errors/contains_all_tuple_pointer.zig", .expect = "validator: containsAll(...): expected a tuple or an array of values, e.g. .{ \"a\", \"b\" }, got a pointer to a tuple; drop the &: write .{ ... }, not &.{ ... }", .row = "variant of containsAll-2" },
+    .{ .file = "src/validator/testdata/compile_errors/contains_all_on_string.zig", .expect = "validator: contains_all_on_string.Bad.field_rules.x: contains_all expects a slice or an array, field is []const u8; for a substring use v.contains", .row = "containsAll-11" },
+    .{ .file = "src/validator/testdata/compile_errors/contains_all_optional_items.zig", .expect = "validator: contains_all_optional_items.Bad.field_rules.x: contains_all(.{1}): items are ?u32; optional items are not supported", .row = "containsAll-13" },
+    .{ .file = "src/validator/testdata/compile_errors/contains_all_wrong_kind.zig", .expect = "validator: contains_all_wrong_kind.Bad.field_rules.x: contains_all(.{\"1\"}) lists strings, items are u32", .row = "containsAll-15" },
+    .{ .file = "src/validator/testdata/compile_errors/contains_none_other_enum.zig", .expect = "validator: contains_none_other_enum.Bad.field_rules.x: contains_none(.{.red}): .red is a tag of contains_none_other_enum.Color, the items are contains_none_other_enum.Role", .row = "containsNone-18" },
+    .{ .file = "src/validator/testdata/compile_errors/contains_none_every_value_array.zig", .expect = "validator: contains_none_every_value_array.Bad.field_rules.x: contains_none(.{ true, false }) lists every value of bool; no value would pass", .row = "containsNone-20" },
+    .{ .file = "src/validator/testdata/compile_errors/contains_all_uncalled.zig", .expect = "validator: contains_all_uncalled.Bad.field_rules.x: containsAll must be called, e.g. v.containsAll(.{\"a\"})", .row = "containsAll-21" },
     // contradictions: two rules whose bounds let no value pass; the texts of
     // every pair are checked by the tests of core.zig
     .{ .file = "src/validator/testdata/compile_errors/contradiction_min_max.zig", .expect = "validator: contradiction_min_max.Bad.field_rules.x: min(10) and max(5) contradict; no value can pass", .row = "min-14" },

@@ -1734,6 +1734,11 @@ pub const hints = struct {
     pub const use_unique_items = "use v.uniqueItems";
     /// `uniqueItems` or `uniqueBy` on a slice that needs a cap and has none before it.
     pub const unique_cap = std.fmt.comptimePrint("needs an earlier v.maxItems(n) with n <= {d} (max_unique_items) in the same tuple", .{max_unique_items});
+    /// `containsAll` and `containsNone` on a string field: the substring rules.
+    pub const contains_all_on_string = "for a substring use v.contains";
+    pub const contains_none_on_string = "for a substring use v.notContains";
+    /// A `""` listed in `containsNone`.
+    pub const reject_empty_items = "use v.each(v.notEmpty) to reject empty items";
 
     /// A rule written on a list whose items it would accept.
     pub fn useEach(comptime rule: Rule) []const u8 {
@@ -1791,9 +1796,6 @@ fn callExample(comptime name: []const u8) ?[]const u8 {
 /// only the other kinds with the public names. Each rule pull request deletes
 /// its lines; the list is empty once all 96 rules are exported.
 pub const pending_kinds = [_]Kind{
-    // PR 1c
-    .contains_all,
-    .contains_none,
     // PR 2a
     .utf8,
     .not_blank,
@@ -2061,10 +2063,21 @@ pub fn tagList(comptime E: type) []const u8 {
 /// text lists the tags `E` has. Names are written as `tagIdentifier` writes
 /// them. Constructors reject unnamed values first.
 pub fn tagProblem(comptime x: anytype, comptime E: type) ?[]const u8 {
+    return tagProblemOf(x, E, "the field is ");
+}
+
+/// `tagProblem` for a tag listed against the items of a list, whose item
+/// type is the enum `E`: a value of another enum type says `the items are`.
+pub fn itemTagProblem(comptime x: anytype, comptime E: type) ?[]const u8 {
+    return tagProblemOf(x, E, "the items are ");
+}
+
+/// `tagProblem` with `holder` naming what has the type `E`.
+fn tagProblemOf(comptime x: anytype, comptime E: type, comptime holder: []const u8) ?[]const u8 {
     @setEvalBranchQuota(eval_quota);
     const X = @TypeOf(x);
     if (@typeInfo(X) == .@"enum" and X != E)
-        return ": " ++ renderArg(x) ++ " is a tag of " ++ @typeName(X) ++ ", the field is " ++ @typeName(E);
+        return ": " ++ renderArg(x) ++ " is a tag of " ++ @typeName(X) ++ ", " ++ holder ++ @typeName(E);
     const name = tagName(x) orelse @compileError("validator: internal: " ++ unnamedTag(x) ++ " has no tag name");
     if (@hasField(E, name)) return null;
     const tags = tagList(E);
@@ -2100,6 +2113,10 @@ test "a tag parameter names a tag of the field's enum; a value of another enum i
     // Names are written as Zig source writes them.
     try expect(": core.TestQuoted has no tag @\"a b\"; tags: @\"error\", @\"a\\nb\", plain", comptime tagProblem(.@"a b", TestQuoted).?);
     try std.testing.expectEqual(null, comptime tagProblem(.@"error", TestQuoted));
+    // Against the items of a list, a value of another enum names the items' type.
+    try expect(": .red is a tag of core.TestColor, the items are core.TestRole", comptime itemTagProblem(TestColor.red, TestRole).?);
+    try expect(": core.TestRole has no tag root; tags: admin, user, guest", comptime itemTagProblem(.root, TestRole).?);
+    try std.testing.expectEqual(null, comptime itemTagProblem(.admin, TestRole));
 }
 
 test "a checked parameter converts to the field type: numbers as numberAs does, bools as they are, tags by name" {

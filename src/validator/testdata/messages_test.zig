@@ -52,6 +52,10 @@ test "every rule has its default code and message, in the singular and the plura
     try h.expectRule(v.maxItems(100), "validation.max_items", "must have at most 100 items");
     try h.expectRule(v.uniqueItems, "validation.unique_items", "must not contain duplicates");
     try h.expectRule(v.uniqueBy(.email), "validation.unique_items", "must not contain duplicate email values");
+    try h.expectRule(v.containsAll(.{ "read", "write" }), "validation.contains_all", "must contain all of: read, write");
+    try h.expectRule(v.containsAll(.{"read"}), "validation.contains_all", "must contain read");
+    try h.expectRule(v.containsNone(.{ "root", "admin" }), "validation.contains_none", "must not contain any of: root, admin");
+    try h.expectRule(v.containsNone(.{"root"}), "validation.contains_none", "must not contain root");
     // each reports through its inner rules.
     try h.expectRule(v.each(v.notEmpty), "", "");
 }
@@ -216,4 +220,51 @@ test "a bound whose default message would be longer than 512 bytes compiles and 
     try h.expectAt(&Big{ .c = (1 << 830) + 1 }, "validation.range", "out of range", "c");
     try h.expectAt(&Big{ .d = 1 }, "validation.divisible_by", "must be a multiple of 2^2000", "d");
     try h.expectAt(&Big{ .d = math.nan(f128) }, finite_code, finite_message, "d");
+}
+
+const Role = enum { admin, editor, viewer, guest };
+
+/// A DTO of common, number and list rules with messages in two languages.
+const SignUp = struct {
+    username: []const u8,
+    age: u8,
+    roles: []const Role,
+    referral_code: ?[]const u8 = null,
+    accept_terms: bool,
+    score: f64 = 0,
+
+    pub const field_rules = .{
+        .username = .{ v.notEmpty.withMessage("имя обязательно"), v.noneOf(.{ "admin", "root" }) },
+        .age = v.range(18, 120),
+        .roles = .{ v.notEmpty, v.uniqueItems, v.containsNone(.{.guest}) },
+        .referral_code = v.notEmpty,
+        .accept_terms = v.equals(true).withMessage("нужно принять условия"),
+        .score = .{ v.finite.withMessage("score must be a number"), v.range(0, 100) },
+    };
+};
+
+const valid_sign_up: SignUp = .{ .username = "ann", .age = 30, .roles = &.{ .admin, .editor }, .accept_terms = true };
+
+/// `valid_sign_up` with the field `name` set to `value`.
+fn signUpWith(comptime name: []const u8, value: @FieldType(SignUp, name)) SignUp {
+    var out = valid_sign_up;
+    @field(out, name) = value;
+    return out;
+}
+
+test "a DTO with messages in two languages reports each field's first failing rule" {
+    // uniqueItems on an exhaustive enum needs no maxItems.
+    comptime v.assertRules(SignUp);
+    try h.expectValid(&valid_sign_up);
+    try h.expectAt(&signUpWith("username", ""), "validation.not_empty", "имя обязательно", "username");
+    try h.expectAt(&signUpWith("age", 121), "validation.range", "must be from 18 to 120", "age");
+    try h.expectAt(&signUpWith("username", "root"), "validation.none_of", "must not be one of: admin, root", "username");
+    try h.expectAt(&signUpWith("roles", &.{.guest}), "validation.contains_none", "must not contain guest", "roles");
+    try h.expectAt(&signUpWith("roles", &.{ .admin, .admin }), "validation.unique_items", "must not contain duplicates", "roles");
+    try h.expectAt(&signUpWith("roles", &.{}), "validation.not_empty", "must not be empty", "roles");
+    try h.expectValid(&signUpWith("referral_code", null));
+    try h.expectAt(&signUpWith("referral_code", ""), "validation.not_empty", "must not be empty", "referral_code");
+    try h.expectAt(&signUpWith("accept_terms", false), "validation.equals", "нужно принять условия", "accept_terms");
+    try h.expectAt(&signUpWith("score", math.inf(f64)), "validation.finite", "score must be a number", "score");
+    try h.expectAt(&signUpWith("score", 101), "validation.range", "must be from 0 to 100", "score");
 }
