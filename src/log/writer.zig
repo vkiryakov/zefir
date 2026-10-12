@@ -10,12 +10,18 @@ const Engine = @import("Engine.zig");
 /// safety net, producers wake it.
 const idle_recheck: std.Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } };
 
+/// The engine whose writer thread this is: `flush` and `shutdown` called
+/// on it would wait for the thread itself.
+pub threadlocal var thread_of: ?*const Engine = null;
+
 pub fn run(engine: *Engine) void {
+    thread_of = engine;
     const q = &engine.queue.?;
-    while (true) {
+    while (!engine.abandon.load(.acquire)) {
         const n = q.pop(engine.batch[1..], engine.batch_ends);
         if (n > 0) {
             engine.writeBatch(n);
+            engine.markProcessed(n);
             continue;
         }
         const reserved = q.reserved();

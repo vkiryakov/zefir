@@ -67,6 +67,9 @@ pub const Stats = struct {
     /// Queued mode: records in the queue now, and the most it holds.
     queue_depth: u64,
     queue_capacity: u64,
+    /// Queued mode: records accepted and not yet written or dropped; after
+    /// a `shutdown` that timed out, the records `deinit` drops.
+    pending: u64,
 
     pub const Dropped = struct {
         /// Longer than `max_record_bytes` with `.oversize = .drop`.
@@ -113,7 +116,22 @@ overflow: options.OverflowPolicy = .drop_new,
 batch: []u8 = &.{},
 batch_ends: []usize = &.{},
 writer_thread: ?std.Thread = null,
+/// Whether a call has joined, or is joining, the writer thread.
+writer_joined: std.atomic.Value(bool) = .init(false),
+/// Records logged once the logger is not running are refused.
+state: std.atomic.Value(State) = .init(.running),
+/// Queued mode: queue positions the writer thread has written or dropped.
+/// `flush` and `shutdown` wait for it to reach theirs.
+processed: Counter = .init(0),
+/// Bumped after each batch; `flush` and `shutdown` wait on it.
+progress: std.atomic.Value(u32) = .init(0),
+progress_waiters: std.atomic.Value(u32) = .init(0),
+/// Set by `deinit` after a `shutdown` that timed out: the writer thread
+/// stops without writing what is left.
+abandon: std.atomic.Value(bool) = .init(false),
 counters: Counters = .{},
+
+const State = enum(u8) { running, stopping, stopped };
 
 const Counter = std.atomic.Value(u64);
 
@@ -194,8 +212,16 @@ pub fn destroy(engine: *Engine) void {
     std_log.uninstallIf(engine);
     const gpa = engine.gpa;
     if (engine.queue) |*q| {
-        _ = q.close();
-        engine.writer_thread.?.join();
+        // Without a shutdown first, everything accepted is written. After
+        // one that timed out, what is left is dropped: only the write in
+        // progress is waited for.
+        if (engine.state.load(.acquire) == .running) {
+            engine.shutdown(.none) catch {};
+        } else {
+            engine.abandon.store(true, .release);
+            q.wakeConsumer();
+        }
+        engine.joinWriter();
         q.deinit(gpa);
         gpa.free(engine.batch);
         gpa.free(engine.batch_ends);
@@ -223,7 +249,71 @@ pub fn stats(engine: *Engine) Stats {
         .scope_names_truncated = engine.scope_table.names_truncated.load(.monotonic),
         .queue_depth = if (engine.queue) |*q| q.depth() else 0,
         .queue_capacity = if (engine.queue) |*q| q.mask + 1 else 0,
+        .pending = if (engine.queue) |*q| q.reserved() -| engine.processed.load(.monotonic) else 0,
     };
+}
+
+/// Queued mode: waits until the writer thread has written, or dropped,
+/// every record accepted before the call.
+pub fn flush(engine: *Engine, timeout: Io.Timeout) error{Timeout}!void {
+    if (engine.queue == null) return;
+    try engine.refuseOnOwnThread();
+    return engine.waitProcessed(engine.queue.?.reserved(), timeout);
+}
+
+/// Refuses records from now on; in queued mode waits until the queue is
+/// written and the writer thread has exited. After a call that timed out,
+/// another one waits again.
+pub fn shutdown(engine: *Engine, timeout: Io.Timeout) error{Timeout}!void {
+    try engine.refuseOnOwnThread();
+    _ = engine.state.cmpxchgStrong(.running, .stopping, .acq_rel, .monotonic);
+    if (engine.queue) |*q| {
+        try engine.waitProcessed(q.close(), timeout);
+        engine.joinWriter();
+    }
+    engine.state.store(.stopped, .release);
+}
+
+/// `flush` and `shutdown` on the writer thread (an output writer that
+/// calls them) would wait for that thread itself: a panic in safe builds,
+/// `error.Timeout` at once otherwise.
+fn refuseOnOwnThread(engine: *const Engine) error{Timeout}!void {
+    if (writer.thread_of != engine) return;
+    if (std.debug.runtime_safety) @panic("zefir.log: flush or shutdown called from the logger's writer thread would wait for itself");
+    return error.Timeout;
+}
+
+/// Waits until the writer thread has processed every queue position before
+/// `target`, or `timeout` passes.
+fn waitProcessed(engine: *Engine, target: u64, timeout: Io.Timeout) error{Timeout}!void {
+    const io = engine.own.io();
+    const deadline = timeout.toDeadline(io);
+    _ = engine.progress_waiters.fetchAdd(1, .seq_cst);
+    defer _ = engine.progress_waiters.fetchSub(1, .seq_cst);
+    while (true) {
+        // Read the epoch first: a batch done after this read bumps it, so
+        // the wait below returns at once instead of missing the wake-up.
+        const epoch = engine.progress.load(.seq_cst);
+        if (engine.processed.load(.seq_cst) >= target) return;
+        if (deadline.toDurationFromNow(io)) |left| {
+            if (left.raw.nanoseconds <= 0) return error.Timeout;
+        }
+        io.futexWaitTimeout(u32, &engine.progress.raw, epoch, deadline) catch {};
+    }
+}
+
+/// For the writer thread: counts `n` more queue positions as written or
+/// dropped, and wakes the `flush` and `shutdown` calls waiting for them.
+pub fn markProcessed(engine: *Engine, n: usize) void {
+    _ = engine.processed.fetchAdd(n, .seq_cst);
+    // Bump before reading the waiter count: a waiter that missed the new
+    // count either sees the new epoch or is seen here.
+    _ = engine.progress.fetchAdd(1, .seq_cst);
+    if (engine.progress_waiters.load(.seq_cst) != 0) engine.own.io().futexWake(u32, &engine.progress.raw, std.math.maxInt(u32));
+}
+
+fn joinWriter(engine: *Engine) void {
+    if (!engine.writer_joined.swap(true, .acq_rel)) engine.writer_thread.?.join();
 }
 
 /// Encodes and writes one record; the caller has checked the level.
@@ -252,10 +342,14 @@ pub fn emitFormatted(engine: *Engine, comptime level: Level, scope: *const scope
     engine.finish(&buf, encoded);
 }
 
-/// Counts a record that passed the level filter; false when stdout is
-/// closed and the record is dropped.
+/// Counts a record that passed the level filter; false when the logger is
+/// shut down or stdout is closed, and the record is dropped.
 fn accept(engine: *Engine) bool {
     bump(&engine.counters.accepted);
+    if (engine.state.load(.monotonic) != .running) {
+        bump(&engine.counters.dropped_closed);
+        return false;
+    }
     if (!engine.dead.load(.monotonic)) return true;
     bump(&engine.counters.dropped_write_failed);
     return false;

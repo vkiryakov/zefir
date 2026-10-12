@@ -40,8 +40,34 @@ pub fn init(gpa: std.mem.Allocator, io: std.Io, opts: options.Options) InitError
     return .{ .engine = engine, .scope = &engine.scope_table.root };
 }
 
+/// Frees the logger. In queued mode, without a `shutdown` first, it waits
+/// until everything queued is written, with no time limit; after a
+/// `shutdown` that timed out it drops what is left and waits only for the
+/// write in progress. To exit on time, call `shutdown` with a deadline
+/// first.
 pub fn deinit(self: Logger) void {
     self.engine.destroy();
+}
+
+/// Queued mode: waits until every record logged before the call is
+/// written, or dropped by a failed write. When `timeout` passes first it
+/// returns `error.Timeout`, and `stats().pending` tells how many records
+/// are not written yet. Sync mode writes each record before the call that
+/// logs it returns: there is nothing to wait for. Blocks the OS thread.
+pub fn flush(self: Logger, timeout: std.Io.Timeout) error{Timeout}!void {
+    return self.engine.flush(timeout);
+}
+
+/// Stops the logger: records logged after it starts are refused and
+/// counted in `stats().dropped.closed`. In queued mode it waits until the
+/// queue is written and the writer thread has exited. When `timeout`
+/// passes first it returns `error.Timeout`: `stats().pending` tells how
+/// many records are left, another `shutdown` may wait for them again, and
+/// `deinit` drops them. `core.Deadline.toTimeout()` gives a timeout. Stop
+/// the application's own threads before; a record that another thread is
+/// writing at that moment still goes out. Blocks the OS thread.
+pub fn shutdown(self: Logger, timeout: std.Io.Timeout) error{Timeout}!void {
+    return self.engine.shutdown(timeout);
 }
 
 /// Logs at `.trace`. `message` is a constant: variable data goes in
@@ -1042,6 +1068,77 @@ test "queued, block: a full queue makes the caller wait for room; nothing is los
     try testing.expect(waited);
     try testing.expectEqual(@as(u64, 0), s.dropped.queue_full);
     try testing.expectEqual(@as(usize, 6), lock.lines());
+}
+
+test "queued: flush waits until every record logged before it is written" {
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    const logger: Logger = try .init(testing.allocator, testing.io, .{ .mode = .{ .queued = .{ .capacity = 256 } }, .output = .{ .writer = &out.writer } });
+    defer logger.deinit();
+    for (0..100) |i| logger.info("tick", .{ .i = i });
+    try logger.flush(.none);
+    try testing.expectEqual(@as(usize, 100), std.mem.count(u8, out.written(), "\n"));
+    try testing.expectEqual(@as(u64, 0), logger.stats().pending);
+}
+
+test "queued: flush with a deadline gives up while the writer is held" {
+    var lock: Lock = .{ .sink = .init(testing.allocator) };
+    defer lock.sink.deinit();
+    const logger: Logger = try .init(testing.allocator, testing.io, .{ .mode = .{ .queued = .{} }, .output = .{ .writer = &lock.writer } });
+    defer logger.deinit();
+    logger.info("held", .{});
+    lock.waitEntered();
+    try testing.expectError(error.Timeout, logger.flush(.{ .duration = .{ .raw = .fromMilliseconds(20), .clock = .awake } }));
+    lock.open.store(true, .seq_cst);
+    try logger.flush(.none);
+    try testing.expectEqual(@as(usize, 1), lock.lines());
+}
+
+test "queued: shutdown writes what is queued, then refuses records and counts them" {
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    const logger: Logger = try .init(testing.allocator, testing.io, .{ .mode = .{ .queued = .{} }, .output = .{ .writer = &out.writer } });
+    defer logger.deinit();
+    for (0..10) |i| logger.info("before", .{ .i = i });
+    try logger.shutdown(.none);
+    try logger.shutdown(.none); // a second shutdown has nothing left to do
+    logger.info("after", .{});
+    const s = logger.stats();
+    try testing.expectEqual(@as(usize, 10), std.mem.count(u8, out.written(), "\n"));
+    try testing.expectEqual(@as(u64, 1), s.dropped.closed);
+    try testing.expectEqual(@as(u64, 10), s.written);
+}
+
+fn openLater(lock: *Lock) void {
+    testing.io.sleep(.fromMilliseconds(20), .awake) catch {};
+    lock.open.store(true, .seq_cst);
+}
+
+test "queued: a shutdown that times out leaves records pending; deinit then drops them" {
+    var lock: Lock = .{ .sink = .init(testing.allocator) };
+    defer lock.sink.deinit();
+    const logger: Logger = try .init(testing.allocator, testing.io, .{ .mode = .{ .queued = .{ .batch_size = 1 } }, .output = .{ .writer = &lock.writer } });
+    logger.info("held", .{});
+    lock.waitEntered();
+    for (0..3) |i| logger.info("queued", .{ .i = i });
+    try testing.expectError(error.Timeout, logger.shutdown(.{ .duration = .{ .raw = .fromMilliseconds(20), .clock = .awake } }));
+    try testing.expectEqual(@as(u64, 4), logger.stats().pending);
+    const opener = try std.Thread.spawn(.{}, openLater, .{&lock});
+    logger.deinit(); // waits for the write in progress, drops the three queued records
+    opener.join();
+    try testing.expectEqual(@as(usize, 1), lock.lines());
+}
+
+test "sync: shutdown refuses later records and counts them" {
+    var c: Capture = undefined;
+    try c.open(.{});
+    defer c.close();
+    c.logger.info("before", .{});
+    try c.logger.shutdown(.none);
+    try c.logger.flush(.none); // nothing to wait for in sync mode
+    c.logger.info("after", .{});
+    try c.expect(.json, &.{"\",\"level\":\"info\",\"message\":\"before\"}"});
+    try testing.expectEqual(@as(u64, 1), c.logger.stats().dropped.closed);
 }
 
 test "queued: the writer thread writes the records, not the caller" {
