@@ -26,6 +26,11 @@ const cases = [_]Case{
     .{ .predicate_name = "isBase32", .rule = v.base32, .predicate = v.isBase32, .code = "validation.base32", .message = "must be valid base32", .good = "MZXW6===", .bad = "MZXW6YTBOI" },
     .{ .predicate_name = "isBase58", .rule = v.base58, .predicate = v.isBase58, .code = "validation.base58", .message = "must be valid base58", .good = "3yZe7d", .bad = "3yZe7O" },
     .{ .predicate_name = "isBase64", .rule = v.base64, .predicate = v.isBase64, .code = "validation.base64", .message = "must be valid base64", .good = "Zm9vYg==", .bad = "Zm9vYh==" },
+    .{ .predicate_name = "isDataUri", .rule = v.dataUri, .predicate = v.isDataUri, .code = "validation.data_uri", .message = "must be a valid data URI", .good = "data:text/plain;base64,SGVsbG8=", .bad = "data:text/plain;base64,SGVsbG8" },
+    .{ .predicate_name = "isMagnetUri", .rule = v.magnetUri, .predicate = v.isMagnetUri, .code = "validation.magnet_uri", .message = "must be a valid magnet URI", .good = "magnet:?xt=urn:btih:c12fe1c06bba254a9dc9f519b335aa7c1367a88a", .bad = "magnet:?xt=urn:btih:c12fe1c06bba254a9dc9f519b335aa7c1367a88" },
+    .{ .predicate_name = "isMimeType", .rule = v.mimeType, .predicate = v.isMimeType, .code = "validation.mime_type", .message = "must be a valid MIME type", .good = "text/plain; charset=utf-8", .bad = "text/plain; charset=utf-8;" },
+    .{ .predicate_name = "isLocale", .rule = v.locale, .predicate = v.isLocale, .code = "validation.locale", .message = "must be a valid locale", .good = "zh-Hant-TW", .bad = "zh_Hant_TW" },
+    .{ .predicate_name = "isSemVer", .rule = v.semVer, .predicate = v.isSemVer, .code = "validation.sem_ver", .message = "must be a valid semantic version", .good = "1.0.0-rc.1", .bad = "1.0.0-rc.01" },
     .{ .predicate_name = "isBase64Url", .rule = v.base64Url, .predicate = v.isBase64Url, .code = "validation.base64_url", .message = "must be valid base64url", .good = "Zm9vYg", .bad = "Zm9vYg==" },
 };
 

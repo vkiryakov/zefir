@@ -204,11 +204,378 @@ pub fn isBase58(s: []const u8) bool {
     return true;
 }
 
+// ------------------------------------------------------------------ dataUri, magnetUri
+
+/// An RFC 2397 data URL: `data:[<type>/<subtype>][;<attribute>=<value>]*[;base64],<data>`.
+/// The scheme is lowercase `data:`; the media type, when present, passes the
+/// type check of `v.mimeType` without `#` and `^`; an attribute and its value
+/// are not empty and use `A-Z a-z 0-9 - . _ ~ ! $ & ' * +` or `%HH`;
+/// `;base64` (in any case) comes last, and then the data must pass
+/// `v.isBase64` (`data:;base64,` passes); otherwise the data is RFC 2396 URI
+/// characters or `%HH`. No whitespace, no trimming; nothing is decoded.
+pub const dataUri: Rule = core.predicateRule(.data_uri, "must be a valid data URI", isDataUri);
+
+/// Whether `v.dataUri` passes `s`.
+pub fn isDataUri(s: []const u8) bool {
+    if (!std.mem.startsWith(u8, s, "data:")) return false;
+    const comma = std.mem.findScalar(u8, s, ',') orelse return false;
+    var parts = std.mem.splitScalar(u8, s["data:".len..comma], ';');
+    const media_type = parts.first();
+    if (media_type.len != 0) {
+        if (!isMediaTypeEssence(media_type)) return false;
+        // Media type names may hold them, URIs may not.
+        if (std.mem.findAny(u8, media_type, "#^") != null) return false;
+    }
+    var base64_data = false;
+    while (parts.next()) |part| {
+        // `;base64` must be the last part.
+        if (base64_data) return false;
+        if (std.ascii.eqlIgnoreCase(part, "base64")) {
+            base64_data = true;
+            continue;
+        }
+        const eq = std.mem.findScalar(u8, part, '=') orelse return false;
+        const attribute = part[0..eq];
+        const value = part[eq + 1 ..];
+        if (attribute.len == 0 or value.len == 0) return false;
+        if (!isEscaped(attribute, isDataParamChar) or !isEscaped(value, isDataParamChar)) return false;
+    }
+    const data = s[comma + 1 ..];
+    return if (base64_data) isBase64(data) else isEscaped(data, isUric);
+}
+
+/// The URI characters of RFC 2396 (`uric`, what RFC 2397 allows in the data)
+/// but `%`, which `isEscaped` checks.
+fn isUric(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or switch (c) {
+        ';', '/', '?', ':', '@', '&', '=', '+', '$', ',', '-', '_', '.', '!', '~', '*', '\'', '(', ')' => true,
+        else => false,
+    };
+}
+
+/// The characters of a data URL attribute or value: RFC 2045 token
+/// characters that are URI characters too, but `%`.
+fn isDataParamChar(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or switch (c) {
+        '-', '.', '_', '~', '!', '$', '&', '\'', '*', '+' => true,
+        else => false,
+    };
+}
+
+/// Every byte of `s` is `allowed` or starts a `%HH` escape.
+fn isEscaped(s: []const u8, comptime allowed: fn (u8) bool) bool {
+    var i: usize = 0;
+    while (i < s.len) : (i += 1) {
+        if (s[i] == '%') {
+            if (s.len - i < 3 or !std.ascii.isHex(s[i + 1]) or !std.ascii.isHex(s[i + 2])) return false;
+            i += 2;
+        } else if (!allowed(s[i])) return false;
+    }
+    return true;
+}
+
+/// A magnet URI that names its content: lowercase `magnet:?`, then a query
+/// of RFC 3986 query characters and valid `%HH` escapes (no spaces, no `#`,
+/// ASCII only), split on `&`, with an `xt` or `xt.1` parameter (in any case)
+/// whose raw value is an exact topic in one of the forms validator.js knows,
+/// in any case: `urn:` and one of `aich`, `bitprint`, `btih`, `ed2k`,
+/// `ed2khash`, `kzhash`, `md5`, `sha1`, `tree:tiger`, then `:` and 32 or 40
+/// letters and digits, or `urn:btmh:1220` and 64 letters and digits. Empty
+/// parameters and parameters without `=` are skipped; `xt.2` and later do
+/// not count.
+pub const magnetUri: Rule = core.predicateRule(.magnet_uri, "must be a valid magnet URI", isMagnetUri);
+
+/// Whether `v.magnetUri` passes `s`.
+pub fn isMagnetUri(s: []const u8) bool {
+    if (!std.mem.startsWith(u8, s, "magnet:?")) return false;
+    const query = s["magnet:?".len..];
+    if (!isEscaped(query, isQueryChar)) return false;
+    var params = std.mem.splitScalar(u8, query, '&');
+    while (params.next()) |param| {
+        const eq = std.mem.findScalar(u8, param, '=') orelse continue;
+        const key = param[0..eq];
+        if ((std.ascii.eqlIgnoreCase(key, "xt") or std.ascii.eqlIgnoreCase(key, "xt.1")) and isExactTopic(param[eq + 1 ..])) return true;
+    }
+    return false;
+}
+
+/// The query characters of RFC 3986 (`pchar`, `/` and `?`) but `%`.
+fn isQueryChar(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or switch (c) {
+        '-', '.', '_', '~', '!', '$', '&', '\'', '(', ')', '*', '+', ',', ';', '=', ':', '@', '/', '?' => true,
+        else => false,
+    };
+}
+
+/// An exact topic value of a magnet URI in validator.js's forms, any case.
+fn isExactTopic(value: []const u8) bool {
+    if (!std.ascii.startsWithIgnoreCase(value, "urn:")) return false;
+    const rest = value["urn:".len..];
+    if (std.ascii.startsWithIgnoreCase(rest, "btmh:1220")) {
+        const digest = rest["btmh:1220".len..];
+        return digest.len == 64 and allAlphanumeric(digest);
+    }
+    inline for (.{ "aich", "bitprint", "btih", "ed2k", "ed2khash", "kzhash", "md5", "sha1", "tree:tiger" }) |topic| {
+        if (rest.len > topic.len and std.ascii.startsWithIgnoreCase(rest, topic) and rest[topic.len] == ':') {
+            const digest = rest[topic.len + 1 ..];
+            if ((digest.len == 32 or digest.len == 40) and allAlphanumeric(digest)) return true;
+        }
+    }
+    return false;
+}
+
+// ------------------------------------------------------------------ mimeType
+
+/// A media type as `Content-Type` carries it: `<type>/<subtype>`, then
+/// parameters. The type is one of the 11 top-level types of the IANA registry
+/// (`application`, `audio`, `example`, `font`, `haptics`, `image`,
+/// `message`, `model`, `multipart`, `text`, `video`) in any case; the subtype
+/// is an RFC 6838 name of 1-127 bytes that starts with a letter or a digit
+/// and uses `A-Z a-z 0-9 ! # $ & - ^ _ . +`. Each parameter (RFC 9110 §5.6.6)
+/// is optional spaces or tabs, `;`, optional spaces or tabs, then
+/// `name=value`: the name a token, the value a token or a quoted string
+/// without obs-text (`charset=""` passes). A `;` needs a parameter after
+/// it; there are no spaces around `=` or at the end. ASCII only, so CR and
+/// LF never pass. Subtypes are not looked up in the registry.
+pub const mimeType: Rule = core.predicateRule(.mime_type, "must be a valid MIME type", isMimeType);
+
+/// Whether `v.mimeType` passes `s`.
+pub fn isMimeType(s: []const u8) bool {
+    var i: usize = 0;
+    while (i < s.len and s[i] != ';' and s[i] != ' ' and s[i] != '\t') i += 1;
+    if (!isMediaTypeEssence(s[0..i])) return false;
+    while (i < s.len) {
+        i = skipOptionalSpace(s, i);
+        if (i >= s.len or s[i] != ';') return false;
+        i = skipOptionalSpace(s, i + 1);
+        const name_start = i;
+        while (i < s.len and isTokenChar(s[i])) i += 1;
+        if (i == name_start or i >= s.len or s[i] != '=') return false;
+        i += 1;
+        if (i < s.len and s[i] == '"') {
+            i = quotedStringEnd(s, i + 1) orelse return false;
+        } else {
+            const value_start = i;
+            while (i < s.len and isTokenChar(s[i])) i += 1;
+            if (i == value_start) return false;
+        }
+    }
+    return true;
+}
+
+/// The index after the closing quote of the RFC 9110 quoted-string whose
+/// content starts at `s[start]`, or null: `\` escapes a tab or a visible
+/// ASCII character, and obs-text (bytes above 0x7e) is not allowed.
+fn quotedStringEnd(s: []const u8, start: usize) ?usize {
+    var i = start;
+    while (i < s.len) {
+        const c = s[i];
+        if (c == '"') return i + 1;
+        if (c == '\\') {
+            if (i + 1 >= s.len) return null;
+            const escaped = s[i + 1];
+            if (escaped != '\t' and (escaped < 0x20 or escaped > 0x7e)) return null;
+            i += 2;
+        } else if (c == '\t' or c == ' ' or c == 0x21 or (c >= 0x23 and c <= 0x5b) or (c >= 0x5d and c <= 0x7e)) {
+            i += 1;
+        } else return null;
+    }
+    return null;
+}
+
+/// The top-level media types of the IANA registry (updated 2025-03-18).
+const top_level_types = [_][]const u8{ "application", "audio", "example", "font", "haptics", "image", "message", "model", "multipart", "text", "video" };
+
+/// `<type>/<subtype>`: a top-level type of the registry and an RFC 6838
+/// subtype name, the check `v.mimeType` and `v.dataUri` share.
+fn isMediaTypeEssence(s: []const u8) bool {
+    const slash = std.mem.findScalar(u8, s, '/') orelse return false;
+    const type_name = s[0..slash];
+    const subtype = s[slash + 1 ..];
+    const known = for (top_level_types) |name| {
+        if (std.ascii.eqlIgnoreCase(type_name, name)) break true;
+    } else false;
+    if (!known) return false;
+    if (subtype.len == 0 or subtype.len > 127 or !std.ascii.isAlphanumeric(subtype[0])) return false;
+    for (subtype) |c| {
+        if (!std.ascii.isAlphanumeric(c) and std.mem.findScalar(u8, "!#$&-^_.+", c) == null) return false;
+    }
+    return true;
+}
+
+/// An RFC 9110 `tchar`.
+fn isTokenChar(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or std.mem.findScalar(u8, "!#$%&'*+-.^_`|~", c) != null;
+}
+
+/// The index of the first byte at or after `i` that is not a space or a tab.
+fn skipOptionalSpace(s: []const u8, i: usize) usize {
+    var j = i;
+    while (j < s.len and (s[j] == ' ' or s[j] == '\t')) j += 1;
+    return j;
+}
+
+// ------------------------------------------------------------------ locale
+
+/// A well-formed BCP 47 language tag (RFC 5646 §2.2.9), checked by syntax in
+/// any ASCII case: one of the 17 irregular grandfathered tags (`i-klingon`,
+/// `en-GB-oed`, ...); a private-use tag (`x-` and subtags of 1-8 letters and
+/// digits); or a language of 2-3 or 5-8 letters (4 letters fail, as in
+/// validator.js), up to 3 extlangs of 3 letters after a 2-3 letter language,
+/// an optional script of 4 letters, an optional region of 2 letters or 3
+/// digits, variants (5-8 letters and digits, or 4 starting with a digit),
+/// extensions (a singleton other than `x` and subtags of 2-8), and an
+/// optional private-use part. Subtags are separated by `-` only (`en_US`
+/// fails). Nothing is looked up in the registry, so `english` passes.
+pub const locale: Rule = core.predicateRule(.locale, "must be a valid locale", isLocale);
+
+/// Whether `v.locale` passes `s`.
+pub fn isLocale(s: []const u8) bool {
+    for (irregular_tags) |tag| {
+        if (std.ascii.eqlIgnoreCase(s, tag)) return true;
+    }
+    var subtags = std.mem.splitScalar(u8, s, '-');
+    const language = subtags.first();
+    if (!isSubtag(language)) return false;
+    if (std.ascii.eqlIgnoreCase(language, "x")) return isPrivateUseRest(&subtags);
+    if (!allAlpha(language) or language.len < 2 or language.len == 4) return false;
+    // What may come next, in the order of the grammar.
+    const Stage = enum(u8) { extlang, script, region, variant };
+    var stage: Stage = if (language.len <= 3) .extlang else .script;
+    var extlangs: usize = 0;
+    var in_extension = false;
+    var extension_has_subtag = false;
+    while (subtags.next()) |subtag| {
+        if (!isSubtag(subtag)) return false;
+        if (subtag.len == 1) {
+            if (in_extension and !extension_has_subtag) return false;
+            if (subtag[0] == 'x' or subtag[0] == 'X') return isPrivateUseRest(&subtags);
+            in_extension = true;
+            extension_has_subtag = false;
+            continue;
+        }
+        if (in_extension) {
+            extension_has_subtag = true;
+            continue;
+        }
+        const at = @backingInt(stage);
+        if (stage == .extlang and subtag.len == 3 and allAlpha(subtag) and extlangs < 3) {
+            extlangs += 1;
+        } else if (at <= @backingInt(Stage.script) and subtag.len == 4 and allAlpha(subtag)) {
+            stage = .region;
+        } else if (at <= @backingInt(Stage.region) and ((subtag.len == 2 and allAlpha(subtag)) or (subtag.len == 3 and allDigits(subtag)))) {
+            stage = .variant;
+        } else if (subtag.len >= 5 or (subtag.len == 4 and std.ascii.isDigit(subtag[0]))) {
+            stage = .variant;
+        } else return false;
+    }
+    return !in_extension or extension_has_subtag;
+}
+
+/// The irregular grandfathered tags of RFC 5646 §2.1, which the grammar of
+/// language tags does not match.
+const irregular_tags = [_][]const u8{
+    "en-GB-oed", "i-ami", "i-bnn", "i-default", "i-enochian", "i-hak",     "i-klingon", "i-lux",     "i-mingo",
+    "i-navajo",  "i-pwn", "i-tao", "i-tay",     "i-tsu",      "sgn-BE-FR", "sgn-BE-NL", "sgn-CH-DE",
+};
+
+/// 1-8 letters and digits.
+fn isSubtag(s: []const u8) bool {
+    return s.len >= 1 and s.len <= 8 and allAlphanumeric(s);
+}
+
+/// The subtags after a private-use `x`: at least one, each of 1-8 letters
+/// and digits.
+fn isPrivateUseRest(subtags: *std.mem.SplitIterator(u8, .scalar)) bool {
+    var count: usize = 0;
+    while (subtags.next()) |subtag| : (count += 1) {
+        if (!isSubtag(subtag)) return false;
+    }
+    return count > 0;
+}
+
+// ------------------------------------------------------------------ semVer
+
+/// A version by the grammar of Semantic Versioning 2.0.0: `MAJOR.MINOR.PATCH`,
+/// three numbers without leading zeros; then an optional pre-release after
+/// `-` and optional build metadata after `+`, each made of non-empty
+/// dot-separated identifiers of `0-9 A-Z a-z -` (in a pre-release, an
+/// identifier of digits only has no leading zero). Numbers have no size
+/// limit. No `v` prefix, no whitespace.
+pub const semVer: Rule = core.predicateRule(.sem_ver, "must be a valid semantic version", isSemVer);
+
+/// Whether `v.semVer` passes `s`.
+pub fn isSemVer(s: []const u8) bool {
+    const plus = std.mem.findScalar(u8, s, '+');
+    if (plus) |p| {
+        var build = std.mem.splitScalar(u8, s[p + 1 ..], '.');
+        while (build.next()) |identifier| {
+            if (!isIdentifier(identifier)) return false;
+        }
+    }
+    const version = s[0 .. plus orelse s.len];
+    const dash = std.mem.findScalar(u8, version, '-');
+    if (dash) |d| {
+        var pre_release = std.mem.splitScalar(u8, version[d + 1 ..], '.');
+        while (pre_release.next()) |identifier| {
+            if (!isIdentifier(identifier)) return false;
+            if (allDigits(identifier) and !isNumber(identifier)) return false;
+        }
+    }
+    var numbers: usize = 0;
+    var core_numbers = std.mem.splitScalar(u8, version[0 .. dash orelse version.len], '.');
+    while (core_numbers.next()) |number| : (numbers += 1) {
+        if (numbers == 3 or !isNumber(number)) return false;
+    }
+    return numbers == 3;
+}
+
+/// A numeric identifier: `0`, or digits that do not start with `0`.
+fn isNumber(s: []const u8) bool {
+    return s.len > 0 and allDigits(s) and (s.len == 1 or s[0] != '0');
+}
+
+/// A non-empty identifier of `0-9 A-Z a-z -`.
+fn isIdentifier(s: []const u8) bool {
+    if (s.len == 0) return false;
+    for (s) |c| {
+        if (!std.ascii.isAlphanumeric(c) and c != '-') return false;
+    }
+    return true;
+}
+
+// ------------------------------------------------------------------ byte classes
+
+fn allDigits(s: []const u8) bool {
+    for (s) |c| {
+        if (!std.ascii.isDigit(c)) return false;
+    }
+    return true;
+}
+
+fn allAlpha(s: []const u8) bool {
+    for (s) |c| {
+        if (!std.ascii.isAlphabetic(c)) return false;
+    }
+    return true;
+}
+
+fn allAlphanumeric(s: []const u8) bool {
+    for (s) |c| {
+        if (!std.ascii.isAlphanumeric(c)) return false;
+    }
+    return true;
+}
+
 // ------------------------------------------------------------------ tests
 
 const expectOutcome = core.expectOutcome;
 
 const test_where = "Dto.field_rules.x";
+
+/// Field types for the tests below.
+const TestContentType = enum { json, html };
+const TestVersion = struct { major: u32, minor: u32, patch: u32 };
 
 /// The declaration error of `rule` on a field of type `T`, or null.
 fn fieldText(comptime rule: Rule, comptime T: type) ?[]const u8 {
@@ -217,10 +584,10 @@ fn fieldText(comptime rule: Rule, comptime T: type) ?[]const u8 {
 
 test "the encoding rules are values with their documented codes and messages, without parameters or precondition" {
     const t = std.testing;
-    const rules = .{ json, jwt, base64, base64Url, base32, base58 };
-    const kinds = [_]core.Kind{ .json, .jwt, .base64, .base64_url, .base32, .base58 };
-    const codes = [_][]const u8{ "validation.json", "validation.jwt", "validation.base64", "validation.base64_url", "validation.base32", "validation.base58" };
-    const messages = [_][]const u8{ "must be a valid JSON object or array", "must be a valid JWT", "must be valid base64", "must be valid base64url", "must be valid base32", "must be valid base58" };
+    const rules = .{ json, jwt, base64, base64Url, base32, base58, dataUri, magnetUri, mimeType, locale, semVer };
+    const kinds = [_]core.Kind{ .json, .jwt, .base64, .base64_url, .base32, .base58, .data_uri, .magnet_uri, .mime_type, .locale, .sem_ver };
+    const codes = [_][]const u8{ "validation.json", "validation.jwt", "validation.base64", "validation.base64_url", "validation.base32", "validation.base58", "validation.data_uri", "validation.magnet_uri", "validation.mime_type", "validation.locale", "validation.sem_ver" };
+    const messages = [_][]const u8{ "must be a valid JSON object or array", "must be a valid JWT", "must be valid base64", "must be valid base64url", "must be valid base32", "must be valid base58", "must be a valid data URI", "must be a valid magnet URI", "must be a valid MIME type", "must be a valid locale", "must be a valid semantic version" };
     inline for (rules, kinds, codes, messages) |rule, kind, code, message| {
         try t.expectEqual(kind, rule.kind);
         try t.expectEqualStrings(code, rule.code);
@@ -238,6 +605,11 @@ test "a rule of this file takes strings; [N]u8 and lists of strings get their hi
     try expect(head ++ "json expects a string, field is [64]u8; [N]u8 is an array of numbers, not a string: use []const u8", comptime fieldText(json, [64]u8).?);
     try expect(head ++ "json expects a string, field is []const []const u8; use v.each(v.json)", comptime fieldText(json, []const []const u8).?);
     try expect(head ++ "jwt expects a string, field is u64", comptime fieldText(jwt, u64).?);
+    try expect(head ++ "data_uri expects a string, field is []const u32", comptime fieldText(dataUri, []const u32).?);
+    try expect(head ++ "magnet_uri expects a string, field is [60]u8; [N]u8 is an array of numbers, not a string: use []const u8", comptime fieldText(magnetUri, [60]u8).?);
+    try expect(head ++ "mime_type expects a string, field is encodings.TestContentType", comptime fieldText(mimeType, TestContentType).?);
+    try expect(head ++ "locale expects a string, field is []const []const u8; use v.each(v.locale)", comptime fieldText(locale, []const []const u8).?);
+    try expect(head ++ "sem_ver expects a string, field is encodings.TestVersion", comptime fieldText(semVer, TestVersion).?);
     try expect(head ++ "base64 expects a string, field is u32", comptime fieldText(base64, u32).?);
     try expect(head ++ "base64_url expects a string, field is [64]u8; [N]u8 is an array of numbers, not a string: use []const u8", comptime fieldText(base64Url, [64]u8).?);
     try expect(head ++ "base32 expects a string, field is [4:0]u8; [N]u8 is an array of numbers, not a string: use []const u8", comptime fieldText(base32, [4:0]u8).?);
@@ -415,4 +787,126 @@ test "jwt passes three canonical base64url segments with a header and a payload"
             return err;
         };
     }
+}
+
+/// Runs `predicate` on each string and fails with the first that it does not
+/// answer with `expected`.
+fn expectAll(comptime name: []const u8, predicate: fn ([]const u8) bool, expected: bool, inputs: []const []const u8) !void {
+    for (inputs) |s| {
+        if (predicate(s) != expected) {
+            std.debug.print("{s} {s} \"{f}\"\n", .{ name, if (expected) "rejected" else "accepted", std.zig.fmtString(s) });
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
+const btih = "c12fe1c06bba254a9dc9f519b335aa7c1367a88a";
+
+test "dataUri passes RFC 2397 data URLs with a known media type, parameters and checked base64" {
+    try expectAll("isDataUri", isDataUri, true, &.{
+        "data:,",
+        "data:,A%20brief%20note",
+        "data:text/plain;BASE64,SGVsbG8=",
+        "data:;base64,",
+        "data:application/pdf;name=report.pdf;base64,JVBERi0=",
+        "data:text/plain;charset=utf-8,hello,world",
+        "data:image/svg+xml,%3Csvg%3E%3C/svg%3E",
+        "data:text/plain;charset=US-ASCII;x=%41,a",
+    });
+    try expectAll("isDataUri", isDataUri, false, &.{
+        "",                              "data:",                                    "data:text/plain",
+        "DATA:,x",                       "data:,a b",                                " data:,x",
+        "data:,x ",                      "data:,%zz",                                "data:,%fg",
+        "data:,%2",                      "data:text/plain;base64,!!!",               "data:;base64,SGVsbG8",
+        "data:foo/bar,x",                "data:image/png;base64;charset=utf-8,AAAA", "data:image/svg+xml;utf8,<svg></svg>",
+        "data:,a#b",                     "data:text/plain;charset=,x",               "data:text/plain;=utf-8,x",
+        "data:text/plain;base64,SGk%3D", "data:image/a#b,x",                         "data:image/a^b,x",
+        "data:,caf\xc3\xa9",             "data:text/plain;;base64,",                 "data:text/plain;charset=a=b,x",
+    });
+}
+
+test "magnetUri passes a magnet URI whose xt or xt.1 is an exact topic validator.js knows" {
+    try expectAll("isMagnetUri", isMagnetUri, true, &.{
+        "magnet:?xt=urn:btih:" ++ btih,
+        "magnet:?xt=urn:btih:" ++ btih ++ "&",
+        "magnet:?dn&xt=urn:btih:" ++ btih,
+        "magnet:?&xt=urn:btih:" ++ btih,
+        "magnet:?XT=URN:BTIH:C12FE1C06BBA254A9DC9F519B335AA7C1367A88A",
+        "magnet:?dn=file.txt&xt.1=urn:sha1:" ++ btih ++ "&tr=udp%3A%2F%2Ftracker",
+        "magnet:?xt=urn:btih:" ++ btih[0..32],
+        "magnet:?xt=urn:tree:tiger:" ++ btih[0..32],
+        "magnet:?xt=urn:btmh:1220" ++ btih ++ btih[0..24],
+    });
+    try expectAll("isMagnetUri", isMagnetUri, false, &.{
+        "",
+        "magnet:?",
+        "magnet:",
+        "MAGNET:?xt=urn:btih:" ++ btih,
+        "magnet:?xt=urn:btih:" ++ btih ++ "&dn=a b",
+        "magnet:?xt=urn:btih:" ++ btih ++ "&dn=%ZZ",
+        "magnet:?xt=urn:btih:" ++ btih ++ "#top",
+        "magnet:?xt.2=urn:btih:" ++ btih,
+        "magnet:?xt=urn:tree:tiger:" ++ btih[0..39],
+        "magnet:?xt=urn:btih:" ++ btih[0..33],
+        "magnet:?xt=urn:sha256:" ++ btih,
+        "magnet:?xt=urn:btmh:1220" ++ btih,
+        "magnet:?xt=urn:btih:" ++ btih[0..39] ++ "-",
+        "magnet:?dn=urn:btih:" ++ btih,
+    });
+}
+
+test "mimeType passes an IANA top-level type, an RFC 6838 subtype and RFC 9110 parameters" {
+    try expectAll("isMimeType", isMimeType, true, &.{
+        "text/plain",
+        "application/json; charset=utf-8",
+        "example/foo",
+        "haptics/ivs",
+        "IMAGE/PNG",
+        "application/vnd.api+json",
+        "text/plain; charset=\"\"",
+        "text/plain ;charset=utf-8",
+        "text/plain;a=b;c=d",
+        "multipart/form-data; boundary=\"a b\\\"c\"",
+        "text/plain;\tcharset=utf-8",
+        "font/woff2",
+        "model/gltf+json",
+    });
+    try expectAll("isMimeType", isMimeType, false, &.{
+        "",                                    "text",                             "text/",
+        "/plain",                              "foo/bar",                          "image/.png",
+        "image/png;",                          "text/plain; charset=",             "text/plain; charset = utf-8",
+        "text/plain; charset=utf-8 ",          "text/plain; charset=\"\xc3\xa9\"", "text/plain; charset=utf-8 (comment)",
+        "text/plain\r\n",                      "text/plain; charset=\"open",       "text/plain; =utf-8",
+        "text/plain charset=utf-8",            "text/pl ain",                      "text/plain;charset=\"a\\\x01\"",
+        "image/" ++ @as([128]u8, @splat('a')),
+    });
+    try std.testing.expect(isMimeType("image/" ++ @as([127]u8, @splat('a'))));
+}
+
+test "locale passes well-formed BCP 47 tags in any case, grandfathered and private-use ones included" {
+    try expectAll("isLocale", isLocale, true, &.{
+        "en",              "en-US",          "zh-Hant-TW", "de-CH-1901", "zh-min-nan",     "SGN-be-FR",
+        "i-klingon",       "I-KLINGON",      "x-private",  "X-PRIVATE",  "english",        "en-a-bbb-a-ccc",
+        "en-US-x-twain",   "sl-rozaj-biske", "es-419",     "en-GB-oed",  "zh-yue-cmn-ara", "de-1996",
+        "en-u-ca-gregory", "x-a",
+    });
+    try expectAll("isLocale", isLocale, false, &.{
+        "",             "x",        "en_US",      "abcd",               "e",          "en-",
+        "-en",          "de-1---",  "en-a",       "en-x",               "en-a-x-foo", "i-foo",
+        "123",          "en-US-",   "toolongtag", "en-abc-abc-abc-abc", "en US",      "en-US\n",
+        "en-Latn-Latn", "en-US-DE", "en-a-b",     "e\xc3\xa9",
+    });
+}
+
+test "semVer passes the grammar of Semantic Versioning 2.0.0, numbers of any size" {
+    try expectAll("isSemVer", isSemVer, true, &.{
+        "0.0.0",                       "1.2.3",                       "1.0.0-alpha", "1.0.0-alpha.1",
+        "1.0.0-0.3.7",                 "1.0.0-x.7.z.92",              "1.0.0+001",   "1.0.0-01a",
+        "1.0.0-alpha+exp.sha.5114f85", "99999999999999999999999.0.0", "1.0.0--",     "1.0.0-a-b+c-d",
+    });
+    try expectAll("isSemVer", isSemVer, false, &.{
+        "",         "v1.2.3",         "1.2",           "1.2.3.4",   "01.2.3",     "1.02.3",
+        "1.2.3-01", "1.2.3-alpha..1", "1.2.3-alpha_1", "1.0.0+a+b", "1.0.0+",     "1.0.0-",
+        " 1.2.3",   "1.2.3 ",         "1..3",          "1.2.3-",    "1.2.3+a..b", "a.b.c",
+    });
 }

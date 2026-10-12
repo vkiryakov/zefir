@@ -266,6 +266,46 @@ test "base64Url is a rule value with code validation.base64_url and message \"mu
     try expectNoViolation([]const u8, v.base64Url, "Zg");
 }
 
+test "dataUri is a rule value with code validation.data_uri and message \"must be a valid data URI\"" {
+    try testing.expect(@hasDecl(v, "dataUri"));
+    try testing.expect(@TypeOf(v.dataUri) == v.Rule);
+    try expectRule(v.dataUri, "validation.data_uri", "must be a valid data URI", "must be a valid data URI");
+    try expectViolation([]const u8, v.dataUri, "data:text/plain", "validation.data_uri", "must be a valid data URI", "x");
+    try expectNoViolation([]const u8, v.dataUri, "data:,A%20brief%20note");
+}
+
+test "magnetUri is a rule value with code validation.magnet_uri and message \"must be a valid magnet URI\"" {
+    try testing.expect(@hasDecl(v, "magnetUri"));
+    try testing.expect(@TypeOf(v.magnetUri) == v.Rule);
+    try expectRule(v.magnetUri, "validation.magnet_uri", "must be a valid magnet URI", "must be a valid magnet URI");
+    try expectViolation([]const u8, v.magnetUri, "magnet:?", "validation.magnet_uri", "must be a valid magnet URI", "x");
+    try expectNoViolation([]const u8, v.magnetUri, "magnet:?xt=urn:btih:c12fe1c06bba254a9dc9f519b335aa7c1367a88a");
+}
+
+test "mimeType is a rule value with code validation.mime_type and message \"must be a valid MIME type\"" {
+    try testing.expect(@hasDecl(v, "mimeType"));
+    try testing.expect(@TypeOf(v.mimeType) == v.Rule);
+    try expectRule(v.mimeType, "validation.mime_type", "must be a valid MIME type", "must be a valid MIME type");
+    try expectViolation([]const u8, v.mimeType, "text", "validation.mime_type", "must be a valid MIME type", "x");
+    try expectNoViolation([]const u8, v.mimeType, "application/json; charset=utf-8");
+}
+
+test "locale is a rule value with code validation.locale and message \"must be a valid locale\"" {
+    try testing.expect(@hasDecl(v, "locale"));
+    try testing.expect(@TypeOf(v.locale) == v.Rule);
+    try expectRule(v.locale, "validation.locale", "must be a valid locale", "must be a valid locale");
+    try expectViolation([]const u8, v.locale, "en_US", "validation.locale", "must be a valid locale", "x");
+    try expectNoViolation([]const u8, v.locale, "en-US");
+}
+
+test "semVer is a rule value with code validation.sem_ver and message \"must be a valid semantic version\"" {
+    try testing.expect(@hasDecl(v, "semVer"));
+    try testing.expect(@TypeOf(v.semVer) == v.Rule);
+    try expectRule(v.semVer, "validation.sem_ver", "must be a valid semantic version", "must be a valid semantic version");
+    try expectViolation([]const u8, v.semVer, "v1.2.3", "validation.sem_ver", "must be a valid semantic version", "x");
+    try expectNoViolation([]const u8, v.semVer, "1.2.3-alpha.1+build.5");
+}
+
 test "minItems is a rule constructor with code validation.min_items and message \"must have at least {min} items\", or \"must have at least 1 item\" when min = 1; placeholder {min}" {
     try testing.expect(@hasDecl(v, "minItems"));
     try testing.expect(@typeInfo(@TypeOf(v.minItems)).@"fn".return_type == v.Rule);
@@ -430,15 +470,16 @@ test "finite has no precondition: nan, inf and -inf on a float field fail its ow
     }
 }
 
-test "the module exports exactly its 42 public names, and Rule.withMessage" {
-    const names = [_][]const u8{ "Violation", "Rule", "Report", "max_code_bytes", "max_message_bytes", "max_report_violations", "max_json_depth", "check", "checkAll", "assertRules", "fail", "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "json", "isJson", "jwt", "isJwt", "base32", "isBase32", "base58", "isBase58", "base64", "isBase64", "base64Url", "isBase64Url", "minItems", "maxItems", "each", "custom" };
+test "the module exports exactly its 52 public names, and Rule.withMessage" {
+    const names = [_][]const u8{ "Violation", "Rule", "Report", "max_code_bytes", "max_message_bytes", "max_report_violations", "max_json_depth", "check", "checkAll", "assertRules", "fail", "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "json", "isJson", "jwt", "isJwt", "base32", "isBase32", "base58", "isBase58", "base64", "isBase64", "base64Url", "isBase64Url", "dataUri", "isDataUri", "magnetUri", "isMagnetUri", "mimeType", "isMimeType", "locale", "isLocale", "semVer", "isSemVer", "minItems", "maxItems", "each", "custom" };
     inline for (names) |name| try testing.expect(@hasDecl(v, name));
     try testing.expectEqual(names.len, comptime std.meta.declarations(v).len);
     try testing.expect(@hasDecl(v.Rule, "withMessage"));
 }
 
 test "every rule the module exports has a catalog test" {
-    const tested = [_][]const u8{ "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "json", "jwt", "base32", "base58", "base64", "base64Url", "minItems", "maxItems", "each", "custom" };
+    @setEvalBranchQuota(100_000);
+    const tested = [_][]const u8{ "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "json", "jwt", "base32", "base58", "base64", "base64Url", "dataUri", "magnetUri", "mimeType", "locale", "semVer", "minItems", "maxItems", "each", "custom" };
     inline for (comptime std.meta.declarations(v)) |name| {
         const T = @TypeOf(@field(v, name));
         if (comptime T == v.Rule or (@typeInfo(T) == .@"fn" and @typeInfo(T).@"fn".return_type == v.Rule)) {
@@ -454,7 +495,8 @@ test "every rule the module exports has a catalog test" {
 }
 
 test "the module exports exactly the catalog predicates of the shipped rules" {
-    const predicates = [_][]const u8{ "isJson", "isJwt", "isBase32", "isBase58", "isBase64", "isBase64Url" };
+    @setEvalBranchQuota(100_000);
+    const predicates = [_][]const u8{ "isJson", "isJwt", "isBase32", "isBase58", "isBase64", "isBase64Url", "isDataUri", "isMagnetUri", "isMimeType", "isLocale", "isSemVer" };
     comptime var exported: usize = 0;
     inline for (comptime std.meta.declarations(v)) |name| {
         if (comptime name.len > 2 and std.mem.startsWith(u8, name, "is") and std.ascii.isUpper(name[2])) {
