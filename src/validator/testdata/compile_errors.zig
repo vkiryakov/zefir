@@ -65,6 +65,7 @@ pub const list = [_]Fixture{
     .{ .file = "src/validator/testdata/compile_errors/custom_uncalled.zig", .expect = "validator: custom_uncalled.Bad.field_rules.x: custom must be called, e.g. v.custom(\"users.name_taken\", \"is taken\", isFree)", .row = "custom-4" },
     .{ .file = "src/validator/testdata/compile_errors/entry_uncalled_in_tuple.zig", .expect = "validator: entry_uncalled_in_tuple.Bad.field_rules.x: each must be called, e.g. v.each(v.notEmpty)", .row = "variant of each-6" },
     .{ .file = "src/validator/testdata/compile_errors/each_inner_uncalled.zig", .expect = "validator: each(...): each must be called, e.g. v.each(v.notEmpty)", .row = "variant of each-3" },
+    .{ .file = "src/validator/testdata/compile_errors/each_inner_min_items_uncalled.zig", .expect = "validator: each(...): minItems must be called, e.g. v.minItems(1)", .row = "each-3" },
     .{ .file = "src/validator/testdata/compile_errors/self_signature_by_value.zig", .expect = "validator: self_signature_by_value.Bad.validateSelf: must be `pub fn validateSelf(self: *const self_signature_by_value.Bad) ?validator.Violation`, got fn (self_signature_by_value.Bad) ?core.Violation", .row = "G-20" },
     .{ .file = "src/validator/testdata/compile_errors/self_signature_mut_pointer.zig", .expect = "validator: self_signature_mut_pointer.Bad.validateSelf: must be `pub fn validateSelf(self: *const self_signature_mut_pointer.Bad) ?validator.Violation`, got fn (*self_signature_mut_pointer.Bad) ?core.Violation", .row = "variant of G-20" },
     .{ .file = "src/validator/testdata/compile_errors/self_signature_return.zig", .expect = "validator: self_signature_return.Bad.validateSelf: must be `pub fn validateSelf(self: *const self_signature_return.Bad) ?validator.Violation`, got fn (*const self_signature_return.Bad) bool", .row = "variant of G-20" },
@@ -128,6 +129,11 @@ pub const list = [_]Fixture{
     .{ .file = "src/validator/testdata/compile_errors/divisible_by_zero.zig", .expect = "validator: divisibleBy(0): division by zero; no value would pass", .row = "divisibleBy-1" },
     .{ .file = "src/validator/testdata/compile_errors/divisible_by_too_big.zig", .expect = "validator: divisible_by_too_big.Bad.field_rules.x: divisible_by(1000) on u8 (0..255): only 0 would pass; use v.equals(0)", .row = "divisibleBy-6" },
     .{ .file = "src/validator/testdata/compile_errors/finite_on_int.zig", .expect = "validator: finite_on_int.Bad.field_rules.x: finite is always true for u32; remove it", .row = "finite-1" },
+    // minItems and maxItems: one fixture per kind of error; the text of every
+    // catalog row is checked by the tests of lists.zig
+    .{ .file = "src/validator/testdata/compile_errors/min_items_zero.zig", .expect = "validator: minItems(0): min must be at least 1 (minItems(0) is always true; remove it)", .row = "minItems-1" },
+    .{ .file = "src/validator/testdata/compile_errors/min_items_on_array.zig", .expect = "validator: min_items_on_array.Bad.field_rules.x: min_items(1) on [3]u32 is always true: the length of an array is fixed", .row = "minItems-2" },
+    .{ .file = "src/validator/testdata/compile_errors/min_items_on_string.zig", .expect = "validator: min_items_on_string.Bad.field_rules.x: min_items expects a slice, field is []const u8; for strings use v.minLength or v.minBytes", .row = "minItems-3" },
     // each
     .{ .file = "src/validator/testdata/compile_errors/each_not_rule.zig", .expect = "validator: each(...): expected a rule or a tuple of rules, got *const [1:0]u8", .row = "each-1" },
     .{ .file = "src/validator/testdata/compile_errors/each_tuple_item_not_rule.zig", .expect = "validator: each(...): item 1 of the tuple is comptime_int", .row = "each-2" },

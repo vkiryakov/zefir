@@ -1226,6 +1226,9 @@ pub const hints = struct {
     pub const use_not_empty = "use v.notEmpty";
     /// A bool listed in `oneOf` or `noneOf`.
     pub const use_equals_or_not_equals = "use v.equals or v.notEquals";
+    /// `minItems` and `maxItems` on a string field.
+    pub const min_items_on_string = "for strings use v.minLength or v.minBytes";
+    pub const max_items_on_string = "for strings use v.maxLength or v.maxBytes";
 
     /// A rule written on a list whose items it would accept.
     pub fn useEach(comptime rule: Rule) []const u8 {
@@ -1283,9 +1286,6 @@ fn callExample(comptime name: []const u8) ?[]const u8 {
 /// only the other kinds with the public names. Each rule pull request deletes
 /// its lines; the list is empty once all 96 rules are exported.
 pub const pending_kinds = [_]Kind{
-    // PR 1b
-    .min_items,
-    .max_items,
     // PR 1c
     .unique_items,
     .unique_by,

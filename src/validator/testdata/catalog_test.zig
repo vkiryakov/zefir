@@ -194,6 +194,34 @@ test "finite is a rule value with code validation.finite and message \"must be a
     try testing.expectEqualStrings("must be a finite number", v.finite.message);
 }
 
+test "minItems is a rule constructor with code validation.min_items and message \"must have at least {min} items\", or \"must have at least 1 item\" when min = 1" {
+    try testing.expect(@hasDecl(v, "minItems"));
+    try testing.expect(@typeInfo(@TypeOf(v.minItems)).@"fn".return_type == v.Rule);
+    try testing.expectEqualStrings("validation.min_items", v.minItems(2).code);
+    try testing.expectEqualStrings("must have at least 2 items", v.minItems(2).message);
+    try testing.expectEqualStrings("validation.min_items", v.minItems(1).code);
+    try testing.expectEqualStrings("must have at least 1 item", v.minItems(1).message);
+    try expectViolation([]const u32, v.minItems(2), &.{1}, "validation.min_items", "must have at least 2 items", "x");
+    try expectViolation([]const u32, v.minItems(1), &.{}, "validation.min_items", "must have at least 1 item", "x");
+    try expectNoViolation([]const u32, v.minItems(2), &.{ 1, 2 });
+    // No precondition: items are counted, never checked.
+    try expectNoViolation([]const f64, v.minItems(1), &.{std.math.nan(f64)});
+}
+
+test "maxItems is a rule constructor with code validation.max_items and message \"must have at most {max} items\", or \"must have at most 1 item\" when max = 1" {
+    try testing.expect(@hasDecl(v, "maxItems"));
+    try testing.expect(@typeInfo(@TypeOf(v.maxItems)).@"fn".return_type == v.Rule);
+    try testing.expectEqualStrings("validation.max_items", v.maxItems(100).code);
+    try testing.expectEqualStrings("must have at most 100 items", v.maxItems(100).message);
+    try testing.expectEqualStrings("validation.max_items", v.maxItems(1).code);
+    try testing.expectEqualStrings("must have at most 1 item", v.maxItems(1).message);
+    try expectViolation([]const u32, v.maxItems(2), &.{ 1, 2, 3 }, "validation.max_items", "must have at most 2 items", "x");
+    try expectViolation([]const u32, v.maxItems(1), &.{ 1, 2 }, "validation.max_items", "must have at most 1 item", "x");
+    try expectNoViolation([]const u32, v.maxItems(2), &.{ 1, 2 });
+    // No precondition: items are counted, never checked.
+    try expectNoViolation([]const f64, v.maxItems(1), &.{std.math.nan(f64)});
+}
+
 test "each is a rule constructor with no code or message of its own; an item reports the inner rule's code and message at its index" {
     try testing.expect(@hasDecl(v, "each"));
     try testing.expect(@typeInfo(@TypeOf(v.each)).@"fn".return_type == v.Rule);
@@ -255,7 +283,7 @@ test "finite has no precondition: nan, inf and -inf fail its own check" {
 }
 
 test "every rule the module exports has a catalog test" {
-    const tested = [_][]const u8{ "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "each", "custom" };
+    const tested = [_][]const u8{ "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "minItems", "maxItems", "each", "custom" };
     inline for (comptime std.meta.declarations(v)) |name| {
         const T = @TypeOf(@field(v, name));
         if (comptime T == v.Rule or (@typeInfo(T) == .@"fn" and @typeInfo(T).@"fn".return_type == v.Rule)) {

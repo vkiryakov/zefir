@@ -67,6 +67,8 @@ pub const negative = numbers.negative;
 pub const nonPositive = numbers.nonPositive;
 pub const divisibleBy = numbers.divisibleBy;
 pub const finite = numbers.finite;
+pub const minItems = lists.minItems;
+pub const maxItems = lists.maxItems;
 pub const each = lists.each;
 pub const custom = custom_rules.custom;
 
