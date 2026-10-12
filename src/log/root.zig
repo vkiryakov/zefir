@@ -109,4 +109,5 @@ test {
     _ = @import("Logger.zig");
     _ = @import("hex.zig");
     _ = @import("std_log.zig");
+    _ = @import("Queue.zig");
 }
