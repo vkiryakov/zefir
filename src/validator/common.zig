@@ -284,6 +284,7 @@ fn listAccepts(comptime kind: core.ListKind) fn (comptime type) bool {
 /// length of an array never changes.
 pub const empty: Rule = core.define(.empty, .{
     .message = "must be empty",
+    .bounds = &.{ .atMost(.bytes, 0), .atMost(.items, 0) },
     .fits = lengthFits,
     .eval = struct {
         fn eval(value: anytype) Outcome {
@@ -297,6 +298,7 @@ pub const empty: Rule = core.define(.empty, .{
 /// array `[N]T` it is a compile error: the length of an array never changes.
 pub const notEmpty: Rule = core.define(.not_empty, .{
     .message = "must not be empty",
+    .bounds = &.{ .atLeast(.bytes, 1), .atLeast(.items, 1) },
     .fits = lengthFits,
     .eval = struct {
         fn eval(value: anytype) Outcome {

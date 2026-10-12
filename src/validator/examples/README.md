@@ -615,10 +615,11 @@ to the contract of a rule, like its code.
 | --- | --- | --- | --- |
 | `{expected}` | `v.equals` | the value | a value, as below |
 | `{forbidden}` | `v.notEquals` | the value | a value, as below |
-| `{values}` | `v.oneOf`, `v.noneOf` | the listed values | each value as below, joined with `, ` |
+| `{values}` | `v.oneOf`, `v.noneOf`, `v.containsAll`, `v.containsNone` | the listed values | each value as below, joined with `, ` |
 | `{min}` | `v.min`, `v.range`, `v.minItems` | the lower bound; the least number of items | a number as written; a count in decimal |
 | `{max}` | `v.max`, `v.range`, `v.maxItems` | the upper bound; the largest number of items | as `{min}` |
 | `{divisor}` | `v.divisibleBy` | the divisor | an integer in decimal |
+| `{key}` | `v.uniqueBy` | the key | the field name, without the dot |
 
 A rule that is not listed has no placeholders, and the page of each rule names
 its own. A placeholder that the rule does not have is a compile error that lists
@@ -1001,6 +1002,7 @@ library runs. These errors point at your line and do not start with
 | `v.max_code_bytes` | 128 | a code: `v.custom`, `v.fail` and `validateSelf` results |
 | `v.max_message_bytes` | 512 | a message, in bytes |
 | `v.max_report_violations` | 100 | the violations in a `Report` |
+| `v.max_unique_items` | 1000 | the items of a list whose integers, strings or non-exhaustive enum tags `v.uniqueItems` and `v.uniqueBy` compare: a slice needs an earlier `v.maxItems(n)` with `n` at most this, `[N]T` an `N` at most this |
 
 The limits are `comptime_int` constants and part of the contract (see below).
 
@@ -1051,5 +1053,9 @@ The limits are `comptime_int` constants and part of the contract (see below).
 | `v.finite` | a float is neither NaN nor an infinity | `validation.finite` | [numbers](numbers.md#vfinite) |
 | `v.minItems(min)` | a slice has at least `min` items | `validation.min_items` | [lists](lists.md#vminitemsmin) |
 | `v.maxItems(max)` | a slice has at most `max` items | `validation.max_items` | [lists](lists.md#vmaxitemsmax) |
+| `v.uniqueItems` | no two items of a slice or an array are equal | `validation.unique_items` | [lists](lists.md#vuniqueitems) |
+| `v.uniqueBy(.key)` | no two struct items of a slice or an array have equal values of the field `key` | `validation.unique_items` | [lists](lists.md#vuniquebykey) |
+| `v.containsAll(.{ ... })` | every listed value is an item of a slice or an array | `validation.contains_all` | [lists](lists.md#vcontainsallvalues) |
+| `v.containsNone(.{ ... })` | no item of a slice or an array is a listed value | `validation.contains_none` | [lists](lists.md#vcontainsnonevalues) |
 | `v.each(rules)` | the rules of every item of a slice or an array | the inner rule's code | [lists](lists.md#veachrules) |
 | `v.custom(code, message, f)` | your predicate `f` returns `true` | your `code` | [v.custom](#vcustom) |

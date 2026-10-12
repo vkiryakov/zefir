@@ -140,6 +140,32 @@ pub const list = [_]Fixture{
     .{ .file = "src/validator/testdata/compile_errors/min_items_negative.zig", .expect = "type 'usize' cannot represent integer value '-1'", .row = "Z-1" },
     .{ .file = "src/validator/testdata/compile_errors/max_items_fractional.zig", .expect = "fractional component prevents float value '1.5' from coercion to type 'usize'", .row = "Z-2" },
     .{ .file = "src/validator/testdata/compile_errors/min_items_uncalled_with_message.zig", .expect = "no field or member function named 'withMessage' in 'fn (comptime usize) core.Rule'", .row = "variant of Z-5" },
+    // uniqueItems and uniqueBy: one fixture per kind of error; the text of every
+    // catalog row is checked by the tests of lists.zig
+    .{ .file = "src/validator/testdata/compile_errors/unique_items_without_cap.zig", .expect = "validator: unique_items_without_cap.Bad.field_rules.x: unique_items needs an earlier v.maxItems(n) with n <= 1000 (max_unique_items) in the same tuple", .row = "uniqueItems-1" },
+    .{ .file = "src/validator/testdata/compile_errors/unique_items_cap_after_in_each.zig", .expect = "validator: unique_items_cap_after_in_each.Bad.field_rules.x[]: unique_items needs an earlier v.maxItems(n) with n <= 1000 (max_unique_items) in the same tuple", .row = "variant of uniqueItems-1" },
+    .{ .file = "src/validator/testdata/compile_errors/unique_items_cap_too_big.zig", .expect = "validator: unique_items_cap_too_big.Bad.field_rules.x: unique_items after max_items(1001): 1001 is more than max_unique_items (1000)", .row = "uniqueItems-2" },
+    .{ .file = "src/validator/testdata/compile_errors/unique_items_float_items.zig", .expect = "validator: unique_items_float_items.Bad.field_rules.x: unique_items: items are f64; float items are not supported (NaN != NaN, -0.0 == 0.0)", .row = "uniqueItems-6" },
+    .{ .file = "src/validator/testdata/compile_errors/unique_items_on_string.zig", .expect = "validator: unique_items_on_string.Bad.field_rules.x: unique_items expects a slice or an array, field is []const u8 (a string)", .row = "uniqueItems-10" },
+    .{ .file = "src/validator/testdata/compile_errors/unique_items_one_item_array.zig", .expect = "validator: unique_items_one_item_array.Bad.field_rules.x: unique_items on [1]u32 is always true; remove it", .row = "uniqueItems-4" },
+    .{ .file = "src/validator/testdata/compile_errors/unique_by_not_literal.zig", .expect = "validator: uniqueBy(\"id\"): the key must be a field name such as .id, got *const [2:0]u8", .row = "uniqueBy-1" },
+    .{ .file = "src/validator/testdata/compile_errors/unique_by_unknown_key.zig", .expect = "validator: unique_by_unknown_key.Bad.field_rules.x: unique_by(.idd): unique_by_unknown_key.Item has no field idd; did you mean \"id\"?", .row = "uniqueBy-6" },
+    .{ .file = "src/validator/testdata/compile_errors/unique_by_uncalled.zig", .expect = "validator: unique_by_uncalled.Bad.field_rules.x: uniqueBy must be called, e.g. v.uniqueBy(.id)", .row = "uniqueBy-16" },
+    // containsAll and containsNone: one fixture per kind of error; the text of
+    // every catalog row is checked by the tests of lists.zig
+    .{ .file = "src/validator/testdata/compile_errors/contains_all_empty.zig", .expect = "validator: containsAll(.{}): the list is empty", .row = "containsAll-1" },
+    .{ .file = "src/validator/testdata/compile_errors/contains_none_pointer.zig", .expect = "validator: containsNone(...): expected a tuple or an array of values, e.g. .{ \"a\", \"b\" }, got *const [2][]const u8; pass the array itself, not a pointer to it", .row = "containsNone-3" },
+    .{ .file = "src/validator/testdata/compile_errors/contains_all_tuple_pointer.zig", .expect = "validator: containsAll(...): expected a tuple or an array of values, e.g. .{ \"a\", \"b\" }, got a pointer to a tuple; drop the &: write .{ ... }, not &.{ ... }", .row = "variant of containsAll-2" },
+    .{ .file = "src/validator/testdata/compile_errors/contains_all_on_string.zig", .expect = "validator: contains_all_on_string.Bad.field_rules.x: contains_all expects a slice or an array, field is []const u8; for a substring use v.contains", .row = "containsAll-11" },
+    .{ .file = "src/validator/testdata/compile_errors/contains_all_optional_items.zig", .expect = "validator: contains_all_optional_items.Bad.field_rules.x: contains_all(.{1}): items are ?u32; optional items are not supported", .row = "containsAll-13" },
+    .{ .file = "src/validator/testdata/compile_errors/contains_all_wrong_kind.zig", .expect = "validator: contains_all_wrong_kind.Bad.field_rules.x: contains_all(.{\"1\"}) lists strings, items are u32", .row = "containsAll-15" },
+    .{ .file = "src/validator/testdata/compile_errors/contains_none_other_enum.zig", .expect = "validator: contains_none_other_enum.Bad.field_rules.x: contains_none(.{.red}): .red is a tag of contains_none_other_enum.Color, the items are contains_none_other_enum.Role", .row = "containsNone-18" },
+    .{ .file = "src/validator/testdata/compile_errors/contains_none_every_value_array.zig", .expect = "validator: contains_none_every_value_array.Bad.field_rules.x: contains_none(.{ true, false }) lists every value of bool; no value would pass", .row = "containsNone-20" },
+    .{ .file = "src/validator/testdata/compile_errors/contains_all_uncalled.zig", .expect = "validator: contains_all_uncalled.Bad.field_rules.x: containsAll must be called, e.g. v.containsAll(.{\"a\"})", .row = "containsAll-21" },
+    // contradictions: two rules whose bounds let no value pass; the texts of
+    // every pair are checked by the tests of core.zig
+    .{ .file = "src/validator/testdata/compile_errors/contradiction_min_max.zig", .expect = "validator: contradiction_min_max.Bad.field_rules.x: min(10) and max(5) contradict; no value can pass", .row = "min-14" },
+    .{ .file = "src/validator/testdata/compile_errors/contradiction_in_each.zig", .expect = "validator: contradiction_in_each.Bad.field_rules.x[]: not_empty and empty contradict; no value can pass", .row = "variant of notEmpty-5" },
     // each
     .{ .file = "src/validator/testdata/compile_errors/each_not_rule.zig", .expect = "validator: each(...): expected a rule or a tuple of rules, got *const [1:0]u8", .row = "each-1" },
     .{ .file = "src/validator/testdata/compile_errors/each_tuple_item_not_rule.zig", .expect = "validator: each(...): item 1 of the tuple is comptime_int", .row = "each-2" },

@@ -75,11 +75,14 @@ fn callProblem(comptime name: []const u8, comptime bounds: anytype) ?[]const u8 
 fn boundRule(comptime kind: core.Kind, comptime lo: anytype, comptime hi: anytype, comptime args: []const u8, comptime message: []const u8, comptime params: []const core.Param) Rule {
     const has_lo = @TypeOf(lo) != @TypeOf(null);
     const has_hi = @TypeOf(hi) != @TypeOf(null);
+    const lower: []const core.Bound = if (has_lo) &.{.atLeast(.value, lo)} else &.{};
+    const upper: []const core.Bound = if (has_hi) &.{.atMost(.value, hi)} else &.{};
     return core.define(kind, .{
         .message = message,
         .args = args,
         .params = params,
         .precondition = core.preconditions.finite,
+        .bounds = lower ++ upper,
         .fits = struct {
             fn fits(comptime rule: *const Rule, comptime T: type, comptime where: []const u8) void {
                 if (boundProblem(rule, lo, hi, T, where)) |text| @compileError(text);
@@ -133,6 +136,7 @@ fn boundProblem(comptime rule: *const Rule, comptime lo: anytype, comptime hi: a
 pub const positive: Rule = core.define(.positive, .{
     .message = "must be greater than 0",
     .precondition = core.preconditions.finite,
+    .bounds = &.{.above(.value, 0)},
     .fits = struct {
         fn fits(comptime rule: *const Rule, comptime T: type, comptime where: []const u8) void {
             if (!core.isNumber(T)) core.typeError(rule, T, where, "a number", core.isNumber, null);
@@ -160,6 +164,7 @@ fn signEval(comptime op: std.math.CompareOperator) fn (anytype) Outcome {
 pub const nonNegative: Rule = core.define(.non_negative, .{
     .message = "must not be negative",
     .precondition = core.preconditions.finite,
+    .bounds = &.{.atLeast(.value, 0)},
     .fits = signFits,
     .eval = signEval(.gte),
 });
@@ -169,6 +174,7 @@ pub const nonNegative: Rule = core.define(.non_negative, .{
 pub const negative: Rule = core.define(.negative, .{
     .message = "must be less than 0",
     .precondition = core.preconditions.finite,
+    .bounds = &.{.below(.value, 0)},
     .fits = signFits,
     .eval = signEval(.lt),
 });
@@ -178,6 +184,7 @@ pub const negative: Rule = core.define(.negative, .{
 pub const nonPositive: Rule = core.define(.non_positive, .{
     .message = "must not be positive",
     .precondition = core.preconditions.finite,
+    .bounds = &.{.atMost(.value, 0)},
     .fits = signFits,
     .eval = signEval(.lte),
 });
