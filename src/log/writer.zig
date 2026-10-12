@@ -14,12 +14,18 @@ const idle_recheck: std.Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(1), .
 /// on it would wait for the thread itself.
 pub threadlocal var thread_of: ?*const Engine = null;
 
+/// Yields to a producer that copies its record in before the writer sleeps
+/// until it publishes: a producer preempted there takes a while.
+const filling_yields = 64;
+
 pub fn run(engine: *Engine) void {
     thread_of = engine;
     const q = &engine.queue.?;
+    var yields: u32 = 0;
     while (!engine.abandon.load(.acquire)) {
         const n = q.pop(engine.batch[1..], engine.batch_ends);
         if (n > 0) {
+            yields = 0;
             engine.writeBatch(n);
             // Before the batch counts as done: a flush that returns has
             // seen the summary of the error records dropped before it.
@@ -28,13 +34,15 @@ pub fn run(engine: *Engine) void {
             continue;
         }
         engine.reportDroppedErrors();
-        const reserved = q.reserved();
-        if (q.head == reserved and q.isClosed()) return; // closed and drained
-        if (q.head != reserved) {
-            // A producer is still copying its record in: it publishes soon.
-            std.Thread.yield() catch {};
-            continue;
+        switch (q.idle()) {
+            .closed => return,
+            .empty => q.waitForWork(idle_recheck),
+            .filling => if (yields < filling_yields) {
+                yields += 1;
+                std.Thread.yield() catch {};
+            } else {
+                q.waitForPublish(idle_recheck, &engine.abandon);
+            },
         }
-        q.waitForWork(idle_recheck);
     }
 }

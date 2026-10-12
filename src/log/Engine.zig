@@ -245,7 +245,9 @@ pub fn destroy(engine: *Engine) void {
         if (engine.state.load(.acquire) == .running) {
             engine.shutdown(.none) catch {};
         } else {
-            engine.abandon.store(true, .release);
+            // seq_cst: pairs with the writer's announcement that it sleeps
+            // in `waitForPublish`, so one of the two sees the other.
+            engine.abandon.store(true, .seq_cst);
             q.wakeConsumer();
         }
         engine.joinWriter();

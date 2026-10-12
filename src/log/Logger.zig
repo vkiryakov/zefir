@@ -1129,6 +1129,46 @@ test "queued: a producer stopped between reserving and publishing holds flush ba
     try testing.expectEqualStrings("", lines.rest());
 }
 
+/// Waits, at most five seconds, until the writer thread sleeps.
+fn waitWriterAsleep(logger: Logger) !void {
+    const q = &logger.engine.queue.?;
+    for (0..5000) |_| {
+        if (q.consumer_sleeping.load(.seq_cst) == 1) return;
+        try testing.io.sleep(.fromMilliseconds(1), .awake);
+    }
+    return error.TestWriterNeverSlept;
+}
+
+test "queued: while a producer holds a reserved slot the writer thread sleeps, and the publish wakes it" {
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    const logger: Logger = try .init(testing.allocator, testing.io, .{ .mode = .{ .queued = .{} }, .output = .{ .writer = &out.writer } });
+    defer logger.deinit();
+    const q = &logger.engine.queue.?;
+    const stopped = try q.reserve();
+    const asleep = waitWriterAsleep(logger);
+    q.publish(stopped, "{\"stopped\":true}\n");
+    try asleep;
+    // Well within the writer's one-second recheck: the publish woke it.
+    try logger.flush(.{ .duration = .{ .raw = .fromMilliseconds(500), .clock = .awake } });
+    try testing.expectEqualStrings("{\"stopped\":true}\n", out.written());
+}
+
+test "queued: deinit after a timed-out shutdown wakes a writer thread that waits for a stopped producer" {
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    const logger: Logger = try .init(testing.allocator, testing.io, .{ .mode = .{ .queued = .{} }, .output = .{ .writer = &out.writer } });
+    _ = try logger.engine.queue.?.reserve(); // its producer never goes on
+    const timed_out = logger.shutdown(.{ .duration = .{ .raw = .fromMilliseconds(20), .clock = .awake } });
+    const asleep = waitWriterAsleep(logger);
+    const start = std.Io.Clock.awake.now(testing.io);
+    logger.deinit();
+    const took = start.durationTo(std.Io.Clock.awake.now(testing.io));
+    try testing.expectError(error.Timeout, timed_out);
+    try asleep;
+    try testing.expect(took.nanoseconds < 500 * std.time.ns_per_ms); // not the one-second recheck
+}
+
 test "queued: shutdown writes what is queued, then refuses records and counts them" {
     var out: std.Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();

@@ -178,6 +178,25 @@ pub fn depth(q: *const Queue) u64 {
     return q.reserved() -| q.head_shared.load(.monotonic);
 }
 
+pub const Idle = enum {
+    /// Nothing reserved: the next record has yet to come.
+    empty,
+    /// A producer has reserved the next slot and is still copying its
+    /// record in.
+    filling,
+    /// Closed, and every record accepted before the close was taken.
+    closed,
+};
+
+/// For the consumer, after `pop` took nothing: what the queue waits for.
+/// One load of `tail`, so a record reserved just before the close is never
+/// mistaken for none.
+pub fn idle(q: *const Queue) Idle {
+    const tail = q.tail.load(.seq_cst);
+    if (q.head != tail & ~closed_bit) return .filling;
+    return if (tail & closed_bit != 0) .closed else .empty;
+}
+
 /// For the consumer: whether the next record is published.
 pub fn ready(q: *const Queue) bool {
     return q.seq(q.head & q.mask).load(.seq_cst) == q.head + 1;
@@ -188,6 +207,20 @@ pub fn ready(q: *const Queue) bool {
 pub fn waitForWork(q: *Queue, timeout: std.Io.Timeout) void {
     q.consumer_sleeping.store(1, .seq_cst);
     if (q.ready() or q.isClosed()) {
+        q.consumer_sleeping.store(0, .monotonic);
+        return;
+    }
+    q.io.futexWaitTimeout(u32, &q.consumer_sleeping.raw, 1, timeout) catch {};
+    q.consumer_sleeping.store(0, .monotonic);
+}
+
+/// For the consumer, while a producer copies its record into the next
+/// slot: sleeps until it is published, `stop` is set (by a thread that
+/// then calls `wakeConsumer`), or `timeout` passes. Unlike `waitForWork`
+/// it sleeps on a closed queue too: the record still comes.
+pub fn waitForPublish(q: *Queue, timeout: std.Io.Timeout, stop: *const std.atomic.Value(bool)) void {
+    q.consumer_sleeping.store(1, .seq_cst);
+    if (q.ready() or stop.load(.seq_cst)) {
         q.consumer_sleeping.store(0, .monotonic);
         return;
     }
@@ -411,6 +444,25 @@ test "a sleeping consumer is woken by a push" {
     try q.tryPush("wake up");
     consumer.join();
     try testing.expect(woke.load(.seq_cst));
+}
+
+test "after an empty pop: empty, a record still being copied in, or closed and drained" {
+    var threaded: std.Io.Threaded = .init_single_threaded;
+    var q = try Queue.init(testing.allocator, 8, 64, threaded.io());
+    defer q.deinit(testing.allocator);
+    try testing.expectEqual(Idle.empty, q.idle());
+    const pos = try q.reserve();
+    try testing.expectEqual(Idle.filling, q.idle());
+    // Closed while that record is still being copied in: it was accepted,
+    // so the queue is not drained until the consumer has taken it.
+    _ = q.close();
+    try testing.expectEqual(Idle.filling, q.idle());
+    q.publish(pos, "late");
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try drainLines(&q, &out);
+    try testing.expectEqualStrings("late\n", out.written());
+    try testing.expectEqual(Idle.closed, q.idle());
 }
 
 test "a producer stopped between reserving and publishing holds back the records after it, and loses none" {
