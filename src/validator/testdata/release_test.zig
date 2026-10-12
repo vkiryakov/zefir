@@ -62,6 +62,13 @@ const Fine = struct {
     }
 };
 const Wrapper = struct { fine: Fine };
+const NearName = struct {
+    name: []const u8 = "n",
+    returned: []const u8,
+    pub fn validateSelf(self: *const NearName) ?v.Violation {
+        return .{ .code = "t.near", .message = "near", .field = self.returned };
+    }
+};
 
 /// `check` and `checkAll` both report validation.invalid first, at `field`.
 fn expectInvalid(value: anytype, field: ?[]const u8) !void {
@@ -96,6 +103,16 @@ test "a malformed validateSelf result is reported as validation.invalid at the s
     try expectInvalid(&BadUtf8{ .n = 1 }, null); // invalid UTF-8
     try expectInvalid(&Holder{ .a = &.{ .{ .n = 1 }, .{ .n = 2 } } }, "a[0]");
     try expectInvalid(&Holder{ .b = .{ .n = 1 } }, "b");
+}
+
+test "a hand-built field must be a field name exactly: a prefix, a longer name or another case is invalid" {
+    try expectInvalid(&NearName{ .returned = "na" }, null);
+    try expectInvalid(&NearName{ .returned = "names" }, null);
+    try expectInvalid(&NearName{ .returned = "Name" }, null);
+    var buf: [64]u8 = undefined;
+    const exact = v.check(&NearName{ .returned = "name" }, &buf) orelse return error.NoViolation;
+    try testing.expectEqualStrings("t.near", exact.code);
+    try testing.expectEqualStrings("name", exact.field orelse return error.FieldIsNull);
 }
 
 test "a well-formed hand-built result is reported as returned" {

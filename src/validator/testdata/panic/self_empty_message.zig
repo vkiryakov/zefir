@@ -1,6 +1,7 @@
-//! Debug build: a validateSelf result with an empty message panics. build.zig
-//! runs this program and checks the panic message on stderr and the exit
-//! code 3 of the panic handler below.
+//! Debug build: a validateSelf result with an empty message panics. Its field
+//! is malformed too, and the panic names the message, which is checked before
+//! the field. build.zig runs this program and checks the panic message on
+//! stderr and the exit code 3 of the panic handler below.
 const std = @import("std");
 const v = @import("validator");
 
@@ -17,7 +18,7 @@ fn exitOnPanic(message: []const u8, _: ?usize) noreturn {
 const Bad = struct {
     n: u32,
     pub fn validateSelf(_: *const Bad) ?v.Violation {
-        return .{ .code = "t.empty", .message = "", .field = "n" };
+        return .{ .code = "t.empty", .message = "", .field = "nope" };
     }
 };
 

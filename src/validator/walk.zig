@@ -367,13 +367,14 @@ fn walkedFields(comptime T: type) []const usize {
     }
 }
 
-/// The names of the non-comptime fields of struct `T`.
-fn fieldNames(comptime T: type) []const []const u8 {
+/// The names of the comptime fields of struct `T` (`comptime_fields` true)
+/// or of its other fields.
+fn fieldNames(comptime T: type, comptime comptime_fields: bool) []const []const u8 {
     comptime {
         const info = @typeInfo(T).@"struct";
         var out: []const []const u8 = &.{};
         for (info.field_names, info.field_attrs) |name, attrs| {
-            if (!attrs.@"comptime") out = out ++ &[_][]const u8{name};
+            if (attrs.@"comptime" == comptime_fields) out = out ++ &[_][]const u8{name};
         }
         return out;
     }
@@ -622,9 +623,9 @@ fn reportSelf(comptime T: type, violation: Violation, sink: anytype) ErrorOf(@Ty
         return sink.report("validation.invalid", "is invalid");
     }
     const field = violation.field orelse return sink.report(violation.code, violation.message);
-    // A run-time loop over the names: unrolling it would give every field its
+    // Run-time loops over the names: unrolling them would give every field its
     // own stack slots.
-    for (comptime fieldNames(T)) |name| {
+    for (comptime fieldNames(T, false)) |name| {
         if (std.mem.eql(u8, name, field)) {
             const mark = sink.pathLen();
             defer sink.pop(mark);
@@ -632,7 +633,12 @@ fn reportSelf(comptime T: type, violation: Violation, sink: anytype) ErrorOf(@Ty
             return sink.report(violation.code, violation.message);
         }
     }
-    if (builtin.mode == .debug)
+    if (builtin.mode == .debug) {
+        for (comptime fieldNames(T, true)) |name| {
+            if (std.mem.eql(u8, name, field))
+                std.debug.panic("validator: {s}.validateSelf returned a malformed violation: field \"{f}\" is a comptime field of {s}; comptime fields are not validated", .{ @typeName(T), std.zig.fmtString(field), @typeName(T) });
+        }
         std.debug.panic("validator: {s}.validateSelf returned a malformed violation: field \"{f}\" is not a field of {s}", .{ @typeName(T), std.zig.fmtString(field), @typeName(T) });
+    }
     return sink.report("validation.invalid", "is invalid");
 }

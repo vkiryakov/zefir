@@ -1,6 +1,7 @@
-//! Debug build: a validateSelf result with a reserved code panics. build.zig
-//! runs this program and checks the panic message on stderr and the exit
-//! code 3 of the panic handler below.
+//! Debug build: a validateSelf result with a reserved code panics. Its message
+//! and field are malformed too, and the panic names the code, which is
+//! checked first. build.zig runs this program and checks the panic message on
+//! stderr and the exit code 3 of the panic handler below.
 const std = @import("std");
 const v = @import("validator");
 
@@ -17,7 +18,7 @@ fn exitOnPanic(message: []const u8, _: ?usize) noreturn {
 const Bad = struct {
     n: u32,
     pub fn validateSelf(_: *const Bad) ?v.Violation {
-        return .{ .code = "validation.fake", .message = "fake" };
+        return .{ .code = "validation.fake", .message = "", .field = "nope" };
     }
 };
 

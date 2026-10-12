@@ -39,6 +39,7 @@ pub const panic_runs = [_]PanicRun{
     .{ .file = "src/validator/testdata/panic/self_malformed.zig", .stderr = "validator: self_malformed.Bad.validateSelf returned a malformed violation: field \"nope\" is not a field of self_malformed.Bad" },
     .{ .file = "src/validator/testdata/panic/self_reserved_code.zig", .stderr = "validator: self_reserved_code.Bad.validateSelf returned a malformed violation: code \"validation.fake\" is not a valid custom code" },
     .{ .file = "src/validator/testdata/panic/self_empty_message.zig", .stderr = "validator: self_empty_message.Bad.validateSelf returned a malformed violation: its message is not 1-512 bytes of valid UTF-8" },
+    .{ .file = "src/validator/testdata/panic/self_comptime_field.zig", .stderr = "validator: self_comptime_field.Bad.validateSelf returned a malformed violation: field \"version\" is a comptime field of self_comptime_field.Bad; comptime fields are not validated" },
 };
 
 /// Compile-error fixtures: compiled only, never run.
