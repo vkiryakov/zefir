@@ -303,8 +303,8 @@ pub const Line = struct {
 ```
 
 A tuple inside a tuple is not flattened: `.pack = .{ rules.quantity, v.custom(...) }`
-is a compile error (`item 0 of the tuple is struct { ... }`). Use a tuple as the
-whole entry, or join tuples with `++`.
+is a compile error (`item 0 of the tuple is a tuple; tuples are not flattened: join them with ++, e.g. name_rules ++ .{ v.notEmpty }, or use the tuple as the whole entry`).
+Use a tuple as the whole entry, or join tuples with `++`.
 
 A `v.Rule` exists only at compile time: keep rules in `const` declarations, or
 return them from functions that take `comptime` parameters. A `var` or a struct
