@@ -54,6 +54,8 @@ pub const fail = walk.fail;
 
 pub const equals = common.equals;
 pub const notEquals = common.notEquals;
+pub const oneOf = common.oneOf;
+pub const noneOf = common.noneOf;
 pub const empty = common.empty;
 pub const notEmpty = common.notEmpty;
 pub const min = numbers.min;

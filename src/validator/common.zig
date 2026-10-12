@@ -1,4 +1,5 @@
-//! Common rules: `equals`, `notEquals`, `empty` and `notEmpty`.
+//! Common rules: `equals`, `notEquals`, `oneOf`, `noneOf`, `empty` and
+//! `notEmpty`.
 const std = @import("std");
 const core = @import("core.zig");
 const Rule = core.Rule;
@@ -140,6 +141,139 @@ fn wrongParamText(comptime x: anytype, comptime T: type, comptime hint: ?[]const
         if (hint) |h| "; " ++ h else "";
 }
 
+// ------------------------------------------------------------------ oneOf, noneOf
+
+/// The value equals one of the listed values. The list is a tuple or an
+/// array `[N]T` (not a pointer to one, not a slice) of at least one value,
+/// none twice: strings, compared byte for byte (`""` may be listed); enum
+/// tags, so an unnamed value of a non-exhaustive enum never matches; or
+/// integers, compared exactly in the field type. Listing every tag of an
+/// enum is allowed: it pins the current set. The message lists the values:
+/// "must be one of: a, b", "must be admin" for one value, and "must be one
+/// of the allowed values" when the list would make it longer than 512
+/// bytes. A value that contains ", " reads ambiguously in the list: give
+/// such a list a message of its own.
+pub fn oneOf(comptime values: anytype) Rule {
+    @setEvalBranchQuota(core.eval_quota);
+    const list = core.analyzeList("oneOf", values, one_of_list);
+    const message = if (list.len == 1) "must be " ++ list.text else "must be one of: " ++ list.text;
+    return membership(.one_of, values, list, message, "must be one of the allowed values");
+}
+
+/// The value equals none of the listed values, with the lists and
+/// comparisons of `oneOf`; exact matches only, without prefixes, case
+/// folding or look-alike characters. `""` cannot be listed (use
+/// `v.notEmpty`), and the list may not leave the field type without a value
+/// that passes. An unnamed value of a non-exhaustive enum always passes.
+pub fn noneOf(comptime values: anytype) Rule {
+    @setEvalBranchQuota(core.eval_quota);
+    const list = core.analyzeList("noneOf", values, none_of_list);
+    const message = if (list.len == 1) "must not be " ++ list.text else "must not be one of: " ++ list.text;
+    return membership(.none_of, values, list, message, "must not be one of the forbidden values");
+}
+
+/// The lists `oneOf` and `noneOf` take.
+const one_of_list: core.ListOptions = .{};
+const none_of_list: core.ListOptions = .{ .empty_string = "the empty string cannot be listed; " ++ core.hints.use_not_empty };
+
+/// `oneOf` or `noneOf` over a checked list.
+fn membership(comptime kind: core.Kind, comptime values: anytype, comptime list: core.ValueList, comptime message: []const u8, comptime fallback: []const u8) Rule {
+    const is_one_of = kind == .one_of;
+    return core.define(kind, .{
+        .message = message,
+        .fallback = fallback,
+        .args = list.args,
+        .params = &.{core.param("values", values)},
+        .fits = struct {
+            fn fits(comptime rule: *const Rule, comptime T: type, comptime where: []const u8) void {
+                if (membershipProblem(rule, values, list, T, where)) |text| @compileError(text);
+            }
+        }.fits,
+        .eval = struct {
+            fn eval(value: anytype) Outcome {
+                const T = @TypeOf(value.*);
+                const found = if (comptime core.isString(T)) blk: {
+                    const strings = comptime core.listAs([]const u8, values);
+                    for (strings) |s| {
+                        if (std.mem.eql(u8, value.*, s)) break :blk true;
+                    }
+                    break :blk false;
+                } else switch (@typeInfo(T)) {
+                    .int, .@"enum" => blk: {
+                        const items = comptime core.listAs(T, values);
+                        for (items) |item| {
+                            if (value.* == item) break :blk true;
+                        }
+                        break :blk false;
+                    },
+                    else => @compileError("validator: internal: " ++ @tagName(kind) ++ "'s eval was instantiated for a type its fits rejected"),
+                };
+                return core.passIf(found == is_one_of);
+            }
+        }.eval,
+    });
+}
+
+/// The declaration error of `oneOf` or `noneOf` with the checked list
+/// `values` on the unwrapped field type `T`, or null. The list holds the
+/// field's kind of value: strings on a string field, the enum's own tags on
+/// an enum field, integers within the type on an integer field; a `noneOf`
+/// list may not hold every tag of an exhaustive enum or every value of an
+/// integer type. Other fields are a type error, with the `each` hint for a
+/// list whose items take the listed kind.
+fn membershipProblem(comptime rule: *const Rule, comptime values: anytype, comptime list: core.ValueList, comptime T: type, comptime where: []const u8) ?[]const u8 {
+    @setEvalBranchQuota(core.eval_quota);
+    const field: core.ListKind = if (core.isString(T)) .string else switch (@typeInfo(T)) {
+        .@"enum" => .tag,
+        .int => .int,
+        else => return core.typeErrorText(rule, T, where, "a string, an enum or an integer", listAccepts(list.kind), null),
+    };
+    if (list.kind != field) {
+        const instead = switch (field) {
+            .string => "list strings instead: .{ \"a\", ... }",
+            .tag => "list the enum's tags instead: .{ .tag, ... }",
+            .int => "list integers instead: .{ 1, ... }",
+            .bool => @compileError("validator: internal: no field takes a list of bools here"),
+        };
+        return core.ruleErrorText(rule, where, " lists " ++ list.kind.plural() ++ ", field is " ++ @typeName(T) ++ "; " ++ instead);
+    }
+    const excludes_all = rule.kind == .none_of;
+    switch (field) {
+        .tag => {
+            inline for (0..values.len) |i| {
+                if (core.tagProblem(values[i], T)) |text| return core.ruleErrorText(rule, where, text);
+            }
+            const e = @typeInfo(T).@"enum";
+            if (excludes_all and e.mode == .exhaustive and list.len == e.field_names.len)
+                return core.ruleErrorText(rule, where, " lists every tag of " ++ @typeName(T) ++ "; no value would pass");
+        },
+        .int => {
+            inline for (0..values.len) |i| {
+                if (core.numberParamProblem(values[i], T, "use an integer", "; remove it")) |text| return core.ruleErrorText(rule, where, text);
+            }
+            if (excludes_all and @as(comptime_int, list.len) == std.math.maxInt(T) - std.math.minInt(T) + 1)
+                return core.ruleErrorText(rule, where, " lists every value of " ++ @typeName(T) ++ "; no value would pass");
+        },
+        .string, .bool => {},
+    }
+    return null;
+}
+
+/// The field types a list of `kind` takes: strings, enums or integers. It
+/// picks the type error's hint.
+fn listAccepts(comptime kind: core.ListKind) fn (comptime type) bool {
+    return struct {
+        fn accepts(comptime F: type) bool {
+            return switch (kind) {
+                .string => core.isString(F),
+                .tag => @typeInfo(F) == .@"enum",
+                .int => @typeInfo(F) == .int,
+                .bool => F == bool,
+            };
+        }
+    }.accepts;
+}
+
 // ------------------------------------------------------------------ empty, notEmpty
 
 /// `len == 0`. Strings count bytes without decoding them, so `" "`,
@@ -197,7 +331,7 @@ fn lengthProblem(comptime rule: *const Rule, comptime T: type, comptime where: [
 
 /// The arguments the hints show for an uncalled constructor of this file:
 /// `equals must be called, e.g. v.equals(true)`.
-pub const call_examples = .{ .equals = "true", .notEquals = "0" };
+pub const call_examples = .{ .equals = "true", .notEquals = "0", .oneOf = ".{ \"a\", \"b\" }", .noneOf = ".{ \"a\", \"b\" }" };
 
 const expectOutcome = core.expectOutcome;
 
@@ -557,4 +691,255 @@ test "empty and notEmpty on a fixed-size array or a type without a length are er
         try std.testing.expectEqual(null, comptime lengthText(empty, T));
         try std.testing.expectEqual(null, comptime lengthText(notEmpty, T));
     }
+}
+
+/// The error of the call `oneOf(values)` or `noneOf(values)`, or null.
+fn oneOfCallText(comptime values: anytype) ?[]const u8 {
+    return core.listProblem("oneOf", values, one_of_list);
+}
+
+fn noneOfCallText(comptime values: anytype) ?[]const u8 {
+    return core.listProblem("noneOf", values, none_of_list);
+}
+
+/// The declaration error of `oneOf(values)` or `noneOf(values)` on a field
+/// of type `T`, or null.
+fn oneOfText(comptime values: anytype, comptime T: type) ?[]const u8 {
+    return membershipProblem(&oneOf(values), values, core.analyzeList("oneOf", values, one_of_list), T, test_where);
+}
+
+fn noneOfText(comptime values: anytype, comptime T: type) ?[]const u8 {
+    return membershipProblem(&noneOf(values), values, core.analyzeList("noneOf", values, none_of_list), T, test_where);
+}
+
+/// Ten values whose list is longer than compile errors show it.
+const ten_values = .{ "value_000", "value_001", "value_002", "value_003", "value_004", "value_005", "value_006", "value_007", "value_008", "value_009" };
+const ten_values_cut = ".{ \"value_000\", \"value_001\", \"value_002\", \"value_003\", \"value_004\", ... }";
+
+test "oneOf and noneOf have their documented codes, messages, parameters and no precondition" {
+    const t = std.testing;
+    const allowed = oneOf(.{ "a", "b" });
+    try t.expectEqual(core.Kind.one_of, allowed.kind);
+    try t.expectEqualStrings("validation.one_of", allowed.code);
+    try t.expectEqualStrings("must be one of: a, b", allowed.message);
+    try t.expectEqualStrings(".{ \"a\", \"b\" }", allowed.args.?);
+    try t.expectEqual(1, allowed.params.len);
+    try t.expectEqualStrings("values", allowed.params[0].name);
+    try t.expectEqualStrings("a, b", allowed.params[0].text);
+    try t.expectEqual(2, allowed.params[0].value.list.len);
+    try t.expectEqual(null, allowed.precondition);
+    try t.expectEqualStrings("must be admin", oneOf(.{.admin}).message);
+    try t.expectEqualStrings(".{.admin}", oneOf(.{.admin}).args.?);
+
+    const forbidden = noneOf(.{ "admin", "root" });
+    try t.expectEqual(core.Kind.none_of, forbidden.kind);
+    try t.expectEqualStrings("validation.none_of", forbidden.code);
+    try t.expectEqualStrings("must not be one of: admin, root", forbidden.message);
+    try t.expectEqualStrings("values", forbidden.params[0].name);
+    try t.expectEqualStrings("admin, root", forbidden.params[0].text);
+    try t.expectEqual(null, forbidden.precondition);
+    try t.expectEqualStrings("must not be root", noneOf(.{"root"}).message);
+}
+
+test "oneOf and noneOf show the values as written: strings escaped, the empty string as \"\", tags by name, integers in decimal" {
+    const expect = std.testing.expectEqualStrings;
+    try expect("must be one of: \"\", x", oneOf(.{ "", "x" }).message);
+    try expect("must be \\xe2\\x80\\xa8", oneOf(.{"\u{2028}"}).message);
+    try expect("must be one of: tab\\there, имя", oneOf(.{ "tab\there", "имя" }).message);
+    try expect("must be one of: user, admin", oneOf(.{ .user, Role.admin }).message);
+    try expect("must not be one of: 0, -170141183460469231731687303715884105728", noneOf(.{ 0, std.math.minInt(i128) }).message);
+    try expect("must be one of: 1, 2, 3", oneOf([_]u8{ 1, 2, 3 }).message);
+    try expect("must be one of: DE, FR", oneOf([_][]const u8{ "DE", "FR" }).message);
+    try expect("one_of(.{ 1, 2, 3 })", comptime oneOf([_]u8{ 1, 2, 3 }).label());
+    try expect("oneOf(" ++ ten_values_cut ++ ")", comptime oneOf(ten_values).call());
+}
+
+test "oneOf and noneOf keep a default message of exactly 512 bytes and take the fallback above it" {
+    const t = std.testing;
+    // "must be one of: " is 16 bytes and ", " 2.
+    const a: [247]u8 = @splat('a');
+    const b: [247]u8 = @splat('b');
+    const b_over: [248]u8 = @splat('b');
+    try t.expectEqual(512, oneOf(.{ &a, &b }).message.len);
+    try t.expectEqualStrings("must be one of: " ++ a ++ ", " ++ b, oneOf(.{ &a, &b }).message);
+    try t.expectEqualStrings("must be one of the allowed values", oneOf(.{ &a, &b_over }).message);
+    // "must not be one of: " is 20 bytes.
+    const c: [245]u8 = @splat('c');
+    const d: [245]u8 = @splat('d');
+    const d_over: [246]u8 = @splat('d');
+    try t.expectEqual(512, noneOf(.{ &c, &d }).message.len);
+    try t.expectEqualStrings("must not be one of the forbidden values", noneOf(.{ &c, &d_over }).message);
+    // One value: "must be " is 8 bytes, "must not be " 12.
+    const one: [504]u8 = @splat('s');
+    const one_over: [505]u8 = @splat('s');
+    try t.expectEqualStrings("must be " ++ one, oneOf(.{&one}).message);
+    try t.expectEqualStrings("must be one of the allowed values", oneOf(.{&one_over}).message);
+    const one_not: [500]u8 = @splat('s');
+    const one_not_over: [501]u8 = @splat('s');
+    try t.expectEqualStrings("must not be " ++ one_not, noneOf(.{&one_not}).message);
+    try t.expectEqualStrings("must not be one of the forbidden values", noneOf(.{&one_not_over}).message);
+    // Only the message falls back: the parameter keeps every value.
+    try t.expectEqualStrings(a ++ ", " ++ b_over, oneOf(.{ &a, &b_over }).params[0].text);
+}
+
+test "oneOf and noneOf take a tuple or an array of strings, enum tags or integers, none listed twice" {
+    const expect = std.testing.expectEqualStrings;
+    const expected_list = "expected a tuple or an array of values, e.g. .{ \"a\", \"b\" }, got ";
+    const pointer_hint = "; pass the array itself, not a pointer to it";
+    const allowed = [_][]const u8{ "a", "b" };
+    try expect("validator: oneOf(.{}): the list is empty", comptime oneOfCallText(.{}).?);
+    try expect("validator: noneOf(.{}): the list is empty", comptime noneOfCallText(.{}).?);
+    try expect("validator: oneOf(.{}): the list is empty", comptime oneOfCallText([0]u8{}).?);
+    try expect("validator: oneOf(\"a\"): " ++ expected_list ++ "*const [1:0]u8", comptime oneOfCallText("a").?);
+    try expect("validator: noneOf(\"a\"): " ++ expected_list ++ "*const [1:0]u8", comptime noneOfCallText("a").?);
+    try expect("validator: oneOf(5): " ++ expected_list ++ "comptime_int", comptime oneOfCallText(5).?);
+    try expect("validator: oneOf(...): " ++ expected_list ++ "[]const []const u8", comptime oneOfCallText(@as([]const []const u8, &allowed)).?);
+    try expect("validator: oneOf(...): " ++ expected_list ++ "@TypeOf(null)", comptime oneOfCallText(null).?);
+    try expect("validator: oneOf(...): " ++ expected_list ++ "*const [2][]const u8" ++ pointer_hint, comptime oneOfCallText(&allowed).?);
+    try expect("validator: noneOf(...): " ++ expected_list ++ "*const [2][]const u8" ++ pointer_hint, comptime noneOfCallText(&allowed).?);
+    try expect("validator: oneOf(...): " ++ expected_list ++ "*const [2]u32" ++ pointer_hint, comptime oneOfCallText(&[_]u32{ 1, 2 }).?);
+    try expect("validator: oneOf(.{ \"a\", \"b\", \"a\" }): \"a\" is listed twice", comptime oneOfCallText(.{ "a", "b", "a" }).?);
+    try expect("validator: noneOf(.{ \"root\", \"admin\", \"root\" }): \"root\" is listed twice", comptime noneOfCallText(.{ "root", "admin", "root" }).?);
+    try expect("validator: oneOf(.{ 1, 1 }): 1 is listed twice", comptime oneOfCallText(.{ 1, @as(u8, 1) }).?);
+    try expect("validator: oneOf(.{ .admin, .admin }): .admin is listed twice", comptime oneOfCallText(.{ .admin, Role.admin }).?);
+    try expect("validator: oneOf(" ++ ten_values_cut ++ "): \"value_000\" is listed twice", comptime oneOfCallText(ten_values ++ .{"value_000"}).?);
+    try expect("validator: oneOf(.{ \"a\", .b }): the list mixes strings and enum tags", comptime oneOfCallText(.{ "a", .b }).?);
+    try expect("validator: noneOf(.{ .admin, \"root\" }): the list mixes enum tags and strings", comptime noneOfCallText(.{ .admin, "root" }).?);
+    try expect("validator: oneOf(.{ 1, \"a\" }): the list mixes integers and strings", comptime oneOfCallText(.{ 1, "a" }).?);
+    try expect("validator: oneOf(.{ 0.5, 1.5 }): floats cannot be listed: exact float equality is fragile", comptime oneOfCallText(.{ 0.5, 1.5 }).?);
+    try expect("validator: noneOf(.{ 0.5, 1.5 }): floats cannot be listed: exact float equality is fragile", comptime noneOfCallText(.{ 0.5, 1.5 }).?);
+    // A float that holds an integer is shown as one, as compile errors show floats.
+    try expect("validator: oneOf(.{ 1, 2 }): floats cannot be listed: exact float equality is fragile", comptime oneOfCallText(.{ 1, 2.0 }).?);
+    try expect("validator: oneOf(.{true}): bools cannot be listed; use v.equals or v.notEquals", comptime oneOfCallText(.{true}).?);
+    try expect("validator: noneOf(.{true}): bools cannot be listed; use v.equals or v.notEquals", comptime noneOfCallText(.{true}).?);
+    try expect("validator: noneOf(.{ true, false }): bools cannot be listed; use v.equals or v.notEquals", comptime noneOfCallText([_]bool{ true, false }).?);
+    try expect("validator: oneOf(.{...}): cannot list a value of type @TypeOf(null)", comptime oneOfCallText(.{null}).?);
+    try expect("validator: noneOf(.{...}): cannot list a value of type @TypeOf(null)", comptime noneOfCallText(.{null}).?);
+    try expect("validator: oneOf(.{ \"a\", ... }): cannot list a value of type ?u8", comptime oneOfCallText(.{ "a", @as(?u8, 1) }).?);
+    try expect("validator: oneOf(.{...}): cannot list a value of type common.Item", comptime oneOfCallText(.{Item{ .id = 1 }}).?);
+    try expect("validator: oneOf(.{\"\\xff\"}): \"\\xff\" is not valid UTF-8", comptime oneOfCallText(.{"\xff"}).?);
+    try expect("validator: noneOf(.{ \"ok\", \"\\xc0\\x80\" }): \"\\xc0\\x80\" is not valid UTF-8", comptime noneOfCallText(.{ "ok", "\xc0\x80" }).?);
+    try expect("validator: oneOf(.{ .a, @fromBackingInt(7) }): @fromBackingInt(7) is not a named tag of common.Open", comptime oneOfCallText(.{ .a, @as(Open, @fromBackingInt(7)) }).?);
+    try expect("validator: noneOf(.{ .a, @fromBackingInt(7) }): @fromBackingInt(7) is not a named tag of common.Open", comptime noneOfCallText(.{ .a, @as(Open, @fromBackingInt(7)) }).?);
+    try expect("validator: noneOf(.{ \"\", \"root\" }): the empty string cannot be listed; use v.notEmpty", comptime noneOfCallText(.{ "", "root" }).?);
+    inline for (.{ .{ "a", "" }, .{"x"}, allowed, .{ .admin, .user }, .{Role.guest}, .{ 1, 2, 3 }, [_]u8{ 1, 2 }, .{ @as(u64, std.math.maxInt(u64)), 0 }, ten_values }) |values| {
+        try std.testing.expectEqual(null, comptime oneOfCallText(values));
+    }
+    try std.testing.expectEqual(null, comptime noneOfCallText(.{ "admin", "root" }));
+}
+
+test "the values listed by oneOf and noneOf are of the field's kind: strings, enum tags or integers" {
+    const expect = std.testing.expectEqualStrings;
+    const head = "validator: Dto.field_rules.x: ";
+    const strings = "; list strings instead: .{ \"a\", ... }";
+    const tags = "; list the enum's tags instead: .{ .tag, ... }";
+    const integers = "; list integers instead: .{ 1, ... }";
+    try expect(head ++ "one_of(.{\"admin\"}) lists strings, field is common.Role" ++ tags, comptime oneOfText(.{"admin"}, Role).?);
+    try expect(head ++ "one_of(.{.a}) lists enum tags, field is []const u8" ++ strings, comptime oneOfText(.{.a}, []const u8).?);
+    try expect(head ++ "one_of(.{\"1\"}) lists strings, field is u32" ++ integers, comptime oneOfText(.{"1"}, u32).?);
+    try expect(head ++ "one_of(.{ 1, 2 }) lists integers, field is []const u8" ++ strings, comptime oneOfText(.{ 1, 2 }, []const u8).?);
+    try expect(head ++ "one_of(.{ 1, 2 }) lists integers, field is common.Role" ++ tags, comptime oneOfText(.{ 1, 2 }, Role).?);
+    try expect(head ++ "one_of(.{.a}) lists enum tags, field is u32" ++ integers, comptime oneOfText(.{.a}, u32).?);
+    try expect(head ++ "none_of(.{\"admin\"}) lists strings, field is common.Role" ++ tags, comptime noneOfText(.{"admin"}, Role).?);
+    try expect(head ++ "none_of(.{.a}) lists enum tags, field is []const u8" ++ strings, comptime noneOfText(.{.a}, []const u8).?);
+    try expect(head ++ "none_of(.{\"1\"}) lists strings, field is u32" ++ integers, comptime noneOfText(.{"1"}, u32).?);
+    try expect(head ++ "none_of(.{ 1, 2 }) lists integers, field is []const u8" ++ strings, comptime noneOfText(.{ 1, 2 }, []const u8).?);
+    try expect(head ++ "none_of(.{ 1, 2 }) lists integers, field is common.Role" ++ tags, comptime noneOfText(.{ 1, 2 }, Role).?);
+    try expect(head ++ "none_of(.{.a}) lists enum tags, field is u32" ++ integers, comptime noneOfText(.{.a}, u32).?);
+    // The call is cut after 72 bytes.
+    try expect(head ++ "one_of(" ++ ten_values_cut ++ ") lists strings, field is common.Role" ++ tags, comptime oneOfText(ten_values, Role).?);
+    inline for (.{ []const u8, []u8, [:0]const u8, [:0]u8 }) |S| {
+        try std.testing.expectEqual(null, comptime oneOfText(.{ "a", "" }, S));
+        try std.testing.expectEqual(null, comptime noneOfText(.{"root"}, S));
+    }
+}
+
+test "on an enum field oneOf and noneOf list tags of that enum; noneOf may not list every tag of an exhaustive enum" {
+    const expect = std.testing.expectEqualStrings;
+    const head = "validator: Dto.field_rules.x: ";
+    try expect(head ++ "one_of(.{ .admin, .root }): common.Role has no tag root; tags: admin, user, guest", comptime oneOfText(.{ .admin, .root }, Role).?);
+    try expect(head ++ "none_of(.{ .admin, .root }): common.Role has no tag root; tags: admin, user, guest", comptime noneOfText(.{ .admin, .root }, Role).?);
+    try expect(head ++ "one_of(.{.red}): .red is a tag of common.Color, the field is common.Role", comptime oneOfText(.{Color.red}, Role).?);
+    try expect(head ++ "none_of(.{.red}): .red is a tag of common.Color, the field is common.Role", comptime noneOfText(.{Color.red}, Role).?);
+    try expect(head ++ "one_of(.{ .user, .admin }): .admin is a tag of common.Color, the field is common.Role", comptime oneOfText(.{ .user, Color.admin }, Role).?);
+    try expect(head ++ "none_of(.{ .admin, .user, .guest }) lists every tag of common.Role; no value would pass", comptime noneOfText(.{ .admin, .user, .guest }, Role).?);
+    try expect(head ++ "none_of(.{.only}) lists every tag of common.Only; no value would pass", comptime noneOfText(.{.only}, Only).?);
+    try expect(head ++ "none_of(.{ .guest, .user, .admin }) lists every tag of common.Role; no value would pass", comptime noneOfText([_]Role{ .guest, .user, .admin }, Role).?);
+    // oneOf may list every tag: it pins the set. A non-exhaustive enum may
+    // list every named tag in noneOf: its unnamed values pass.
+    try std.testing.expectEqual(null, comptime oneOfText(.{ .admin, .user, .guest }, Role));
+    try std.testing.expectEqual(null, comptime noneOfText(.{ .a, .b }, Open));
+    try std.testing.expectEqual(null, comptime noneOfText(.{.only}, OpenOne));
+    try std.testing.expectEqual(null, comptime noneOfText(.{ .admin, .user }, Role));
+    try std.testing.expectEqual(null, comptime oneOfText(.{ Role.guest, .admin }, Role));
+    try std.testing.expectEqual(null, comptime oneOfText(.{.high}, Sparse));
+}
+
+test "on an integer field oneOf and noneOf list integers within the type; noneOf may not list every value" {
+    const expect = std.testing.expectEqualStrings;
+    const head = "validator: Dto.field_rules.x: ";
+    try expect(head ++ "one_of(.{ 1, 300 }): 300 is outside u8 (0..255); remove it", comptime oneOfText(.{ 1, 300 }, u8).?);
+    try expect(head ++ "none_of(.{ 1, 300 }): 300 is outside u8 (0..255); remove it", comptime noneOfText(.{ 1, 300 }, u8).?);
+    try expect(head ++ "one_of(.{ -1, 0 }): -1 is outside u64 (0..18446744073709551615); remove it", comptime oneOfText(.{ -1, 0 }, u64).?);
+    try expect(head ++ "none_of(.{ 0, 1 }) lists every value of u1; no value would pass", comptime noneOfText(.{ 0, 1 }, u1).?);
+    try expect(head ++ "none_of(.{ -1, 0 }) lists every value of i1; no value would pass", comptime noneOfText(.{ -1, 0 }, i1).?);
+    try expect(head ++ "none_of(.{0}) lists every value of u0; no value would pass", comptime noneOfText(.{0}, u0).?);
+    try std.testing.expectEqual(null, comptime oneOfText(.{ 0, 1 }, u1));
+    try std.testing.expectEqual(null, comptime noneOfText(.{1}, u1));
+    try std.testing.expectEqual(null, comptime noneOfText(.{ 0, 1 }, u8));
+    try std.testing.expectEqual(null, comptime oneOfText(.{ std.math.minInt(i128), std.math.maxInt(i128) }, i128));
+    try std.testing.expectEqual(null, comptime oneOfText([_]u64{ std.math.maxInt(u64), 0 }, u64));
+    try std.testing.expectEqual(null, comptime oneOfText(.{ @as(u8, 7), 9 }, i8));
+}
+
+test "oneOf and noneOf on a field that is not a string, an enum or an integer name the field type" {
+    const expect = std.testing.expectEqualStrings;
+    const head = "validator: Dto.field_rules.x: ";
+    const expects = " expects a string, an enum or an integer, field is ";
+    try expect(head ++ "one_of" ++ expects ++ "f64", comptime oneOfText(.{ 1, 2 }, f64).?);
+    try expect(head ++ "none_of" ++ expects ++ "f64", comptime noneOfText(.{ 1, 2 }, f64).?);
+    try expect(head ++ "one_of" ++ expects ++ "bool", comptime oneOfText(.{"true"}, bool).?);
+    try expect(head ++ "one_of" ++ expects ++ "common.Item", comptime oneOfText(.{.a}, Item).?);
+    try expect(head ++ "one_of" ++ expects ++ "[]const []const u8; use v.each(v.oneOf(.{ \"a\", \"b\" }))", comptime oneOfText(.{ "a", "b" }, []const []const u8).?);
+    try expect(head ++ "none_of" ++ expects ++ "[]const []const u8; use v.each(v.noneOf(.{ \"a\", \"b\" }))", comptime noneOfText(.{ "a", "b" }, []const []const u8).?);
+    try expect(head ++ "one_of" ++ expects ++ "[2]u8; [N]u8 is an array of numbers, not a string: use []const u8", comptime oneOfText(.{"ab"}, [2]u8).?);
+    try expect(head ++ "none_of" ++ expects ++ "[2]u8; [N]u8 is an array of numbers, not a string: use []const u8", comptime noneOfText(.{"ab"}, [2]u8).?);
+    // The each hint follows the listed kind, and its call is cut after 72 bytes.
+    try expect(head ++ "one_of" ++ expects ++ "[]const common.Role; use v.each(v.oneOf(.{.admin}))", comptime oneOfText(.{.admin}, []const Role).?);
+    try expect(head ++ "one_of" ++ expects ++ "[4]u8; use v.each(v.oneOf(.{ 1, 2 }))", comptime oneOfText(.{ 1, 2 }, [4]u8).?);
+    try expect(head ++ "none_of" ++ expects ++ "[]const ?u16; use v.each(v.noneOf(.{ 1, 2 }))", comptime noneOfText(.{ 1, 2 }, []const ?u16).?);
+    try expect(head ++ "one_of" ++ expects ++ "[]const []const u8; use v.each(v.oneOf(" ++ ten_values_cut ++ "))", comptime oneOfText(ten_values, []const []const u8).?);
+    try expect(head ++ "one_of" ++ expects ++ "[]const u32", comptime oneOfText(.{"a"}, []const u32).?);
+}
+
+test "an uncalled oneOf or noneOf gets an example call" {
+    const expect = std.testing.expectEqualStrings;
+    try expect("validator: Dto.field_rules.x: oneOf must be called, e.g. v.oneOf(.{ \"a\", \"b\" })", comptime uncalledText("oneOf", @TypeOf(oneOf)));
+    try expect("validator: Dto.field_rules.x: noneOf must be called, e.g. v.noneOf(.{ \"a\", \"b\" })", comptime uncalledText("noneOf", @TypeOf(noneOf)));
+}
+
+test "oneOf passes a listed value: strings by bytes, tags by name, integers exactly in the field type" {
+    try expectOutcome(.pass, oneOf(.{ "a", "b" }), @as([]const u8, "b"));
+    try expectOutcome(.fail, oneOf(.{ "a", "b" }), @as([]const u8, "A"));
+    try expectOutcome(.fail, oneOf(.{ "a", "b" }), @as([:0]const u8, "ab"));
+    try expectOutcome(.pass, oneOf(.{ "", "a" }), @as([]const u8, ""));
+    try expectOutcome(.pass, oneOf([_][]const u8{ "DE", "FR" }), @as([]const u8, "FR"));
+    try expectOutcome(.pass, oneOf(.{ .user, .admin }), Role.admin);
+    try expectOutcome(.fail, oneOf(.{ .user, .admin }), Role.guest);
+    try expectOutcome(.fail, oneOf(.{ .a, .b }), @as(Open, @fromBackingInt(9)));
+    try expectOutcome(.pass, oneOf(.{ 1, 300 }), @as(u16, 300));
+    try expectOutcome(.pass, oneOf([_]u64{ std.math.maxInt(u64), 0 }), @as(u64, std.math.maxInt(u64)));
+    try expectOutcome(.fail, oneOf(.{9007199254740993}), @as(u64, 9007199254740992));
+    try expectOutcome(.pass, oneOf(.{ std.math.minInt(i128), 0 }), @as(i128, std.math.minInt(i128)));
+}
+
+test "noneOf passes a value that is not listed; an unnamed value of a non-exhaustive enum passes" {
+    try expectOutcome(.fail, noneOf(.{ "admin", "root" }), @as([]const u8, "root"));
+    try expectOutcome(.pass, noneOf(.{ "admin", "root" }), @as([]const u8, "Root"));
+    try expectOutcome(.pass, noneOf(.{ "admin", "root" }), @as([]const u8, ""));
+    try expectOutcome(.fail, noneOf(.{.guest}), Role.guest);
+    try expectOutcome(.pass, noneOf(.{.guest}), Role.user);
+    try expectOutcome(.pass, noneOf(.{ .a, .b }), @as(Open, @fromBackingInt(77)));
+    try expectOutcome(.fail, noneOf(.{ 0, 13 }), @as(i32, 13));
+    try expectOutcome(.pass, noneOf(.{0}), @as(u1, 1));
 }

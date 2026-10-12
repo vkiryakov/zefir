@@ -1224,6 +1224,8 @@ pub const hints = struct {
     pub const use_empty = "use v.empty";
     /// `notEquals("")` and a `""` listed in `noneOf`.
     pub const use_not_empty = "use v.notEmpty";
+    /// A bool listed in `oneOf` or `noneOf`.
+    pub const use_equals_or_not_equals = "use v.equals or v.notEquals";
 
     /// A rule written on a list whose items it would accept.
     pub fn useEach(comptime rule: Rule) []const u8 {
@@ -1282,8 +1284,6 @@ fn callExample(comptime name: []const u8) ?[]const u8 {
 /// its lines; the list is empty once all 96 rules are exported.
 pub const pending_kinds = [_]Kind{
     // PR 1b
-    .one_of,
-    .none_of,
     .min_items,
     .max_items,
     // PR 1c
@@ -1592,6 +1592,214 @@ test "a checked parameter converts to the field type: numbers as numberAs does, 
     try t.expectEqual(TestRole.guest, comptime valueAs(TestRole, TestRole.guest));
     try t.expectEqual(TestOpen.b, comptime valueAs(TestOpen, .b));
     try t.expectEqualStrings("abc", comptime valueAs([]const u8, "abc"));
+}
+
+// ------------------------------------------------------------------ value lists
+
+/// The kind of the values a list parameter holds (`oneOf`, `noneOf`,
+/// `containsAll`, `containsNone`): one kind per list.
+pub const ListKind = enum {
+    string,
+    tag,
+    int,
+    bool,
+
+    /// The kind as error texts name it: `strings`, `enum tags`.
+    pub fn plural(comptime kind: ListKind) []const u8 {
+        return switch (kind) {
+            .string => "strings",
+            .tag => "enum tags",
+            .int => "integers",
+            .bool => "bools",
+        };
+    }
+};
+
+/// A list parameter that `analyzeList` accepted.
+pub const ValueList = struct {
+    kind: ListKind,
+    len: usize,
+    /// The values as messages show them, joined by `, `: the text of
+    /// `{values}`.
+    text: []const u8,
+    /// The list as compile errors show it: `.{ "a", "b" }`, cut after 72
+    /// bytes.
+    args: []const u8,
+};
+
+/// What a list rule accepts beyond a list of strings, enum tags or integers.
+pub const ListOptions = struct {
+    /// Bools may be listed; otherwise a listed bool is an error that points
+    /// to `v.equals` and `v.notEquals`.
+    allow_bool: bool = false,
+    /// The error text for a listed `""` (after `<call>: `), or null when
+    /// `""` may be listed.
+    empty_string: ?[]const u8 = null,
+};
+
+/// Checks the list parameter of the rule `name` (`oneOf`) at the user's
+/// call and describes it: a problem stops compilation with the text of
+/// `listProblem`.
+pub fn analyzeList(comptime name: []const u8, comptime values: anytype, comptime options: ListOptions) ValueList {
+    @setEvalBranchQuota(eval_quota);
+    if (listProblem(name, values, options)) |text| @compileError(text);
+    return .{
+        .kind = listKind(@TypeOf(values[0])) orelse @compileError("validator: internal: an accepted list has values of no list kind"),
+        .len = values.len,
+        .text = renderValue(values),
+        .args = renderArg(values),
+    };
+}
+
+/// The error of the call `name(values)` of a list rule, or null. `values`
+/// is a tuple or an array `[N]T` (not a pointer to an array, not a slice)
+/// of at least one value; all of them strings, all enum tags or all
+/// integers (or all bools, when `options` allows them); strings in valid
+/// UTF-8 (and not empty, when `options` says so), tags named, and no value
+/// listed twice: strings by bytes, tags by name, integers by value. The
+/// values are checked left to right and the first problem wins.
+pub fn listProblem(comptime name: []const u8, comptime values: anytype, comptime options: ListOptions) ?[]const u8 {
+    comptime {
+        @setEvalBranchQuota(eval_quota);
+        const V = @TypeOf(values);
+        const head = "validator: " ++ name ++ "(" ++ renderArg(values) ++ "): ";
+        if (valueKind(V) != .list)
+            return head ++ "expected a tuple or an array of values, e.g. .{ \"a\", \"b\" }, got " ++ @typeName(V) ++
+                if (isArrayPointer(V)) "; pass the array itself, not a pointer to it" else "";
+        if (values.len == 0) return head ++ "the list is empty";
+        var first: ListKind = undefined;
+        for (0..values.len) |i| {
+            const item = values[i];
+            const X = @TypeOf(item);
+            const kind = listKind(X) orelse return head ++ switch (valueKind(X)) {
+                .float => "floats cannot be listed: exact float equality is fragile",
+                else => "cannot list a value of type " ++ @typeName(X),
+            };
+            if (kind == .bool and !options.allow_bool) return head ++ "bools cannot be listed; " ++ hints.use_equals_or_not_equals;
+            if (i == 0) {
+                first = kind;
+            } else if (kind != first) {
+                return head ++ "the list mixes " ++ first.plural() ++ " and " ++ kind.plural();
+            }
+            switch (kind) {
+                .tag => if (tagName(item) == null) return head ++ renderArg(item) ++ " is not a named tag of " ++ @typeName(X),
+                .string => {
+                    if (item.len == 0) {
+                        if (options.empty_string) |text| return head ++ text;
+                    }
+                    if (!std.unicode.utf8ValidateSlice(item)) return head ++ renderArg(item) ++ " is not valid UTF-8";
+                },
+                .int, .bool => {},
+            }
+            for (0..i) |j| {
+                if (sameListValue(values[j], item)) return head ++ renderArg(item) ++ " is listed twice";
+            }
+        }
+        return null;
+    }
+}
+
+/// The list kind of a value of type `X`, or null for a value no list holds.
+fn listKind(comptime X: type) ?ListKind {
+    return switch (valueKind(X)) {
+        .string => .string,
+        .tag => .tag,
+        .int => .int,
+        .bool => .bool,
+        .float, .list, .other => null,
+    };
+}
+
+/// A single-item pointer to an array of other items than u8 (a pointer to
+/// `[N]u8` is a string): `&allowed` where the array itself was meant.
+fn isArrayPointer(comptime V: type) bool {
+    return switch (@typeInfo(V)) {
+        .pointer => |p| p.size == .one and @typeInfo(p.child) == .array and @typeInfo(p.child).array.child != u8,
+        else => false,
+    };
+}
+
+/// Two listed values of the same list kind are the same value: strings by
+/// bytes, tags by name, integers and bools by value.
+fn sameListValue(comptime a: anytype, comptime b: anytype) bool {
+    return switch (listKind(@TypeOf(a)).?) {
+        .string => std.mem.eql(u8, a, b),
+        .tag => std.mem.eql(u8, tagName(a).?, tagName(b).?),
+        .int => @as(comptime_int, a) == @as(comptime_int, b),
+        .bool => a == b,
+    };
+}
+
+/// The values of a checked list as an array of the field type `T`: `[]const
+/// u8` for strings, an enum (each tag by its name) or an integer type, for
+/// the run-time comparisons. Call it at comptime, for a list that the
+/// rule's checks accepted for `T`.
+pub fn listAs(comptime T: type, comptime values: anytype) [values.len]T {
+    comptime {
+        @setEvalBranchQuota(eval_quota);
+        var out: [values.len]T = undefined;
+        for (&out, 0..) |*slot, i| slot.* = valueAs(T, values[i]);
+        return out;
+    }
+}
+
+test "a list kind is named in the plural" {
+    const expect = std.testing.expectEqualStrings;
+    try expect("strings", comptime ListKind.string.plural());
+    try expect("enum tags", comptime ListKind.tag.plural());
+    try expect("integers", comptime ListKind.int.plural());
+    try expect("bools", comptime ListKind.bool.plural());
+}
+
+test "a checked list keeps its kind, its length, its values as messages show them and its call as written" {
+    const t = std.testing;
+    const strings = comptime analyzeList("oneOf", .{ "a", "" }, .{});
+    try t.expectEqual(ListKind.string, strings.kind);
+    try t.expectEqual(2, strings.len);
+    try t.expectEqualStrings("a, \"\"", strings.text);
+    try t.expectEqualStrings(".{ \"a\", \"\" }", strings.args);
+    const tags = comptime analyzeList("oneOf", .{ .admin, TestRole.user }, .{});
+    try t.expectEqual(ListKind.tag, tags.kind);
+    try t.expectEqualStrings("admin, user", tags.text);
+    try t.expectEqualStrings(".{ .admin, .user }", tags.args);
+    // An array is a list too, [N]u8 included: its items are integers.
+    const bytes = comptime analyzeList("oneOf", [_]u8{ 1, 2 }, .{});
+    try t.expectEqual(ListKind.int, bytes.kind);
+    try t.expectEqualStrings("1, 2", bytes.text);
+    try t.expectEqualStrings(".{ 1, 2 }", bytes.args);
+    const one = comptime analyzeList("oneOf", [_][]const u8{"x"}, .{});
+    try t.expectEqual(1, one.len);
+    try t.expectEqualStrings(".{\"x\"}", one.args);
+    const bools = comptime analyzeList("containsAll", .{ true, false }, .{ .allow_bool = true });
+    try t.expectEqual(ListKind.bool, bools.kind);
+    try t.expectEqualStrings("true, false", bools.text);
+}
+
+test "the list options allow bools and reject the empty string with the rule's own text" {
+    const expect = std.testing.expectEqualStrings;
+    try std.testing.expectEqual(null, comptime listProblem("containsAll", .{true}, .{ .allow_bool = true }));
+    try expect("validator: oneOf(.{true}): bools cannot be listed; use v.equals or v.notEquals", comptime listProblem("oneOf", .{true}, .{}).?);
+    try std.testing.expectEqual(null, comptime listProblem("oneOf", .{""}, .{}));
+    try expect("validator: noneOf(.{\"\"}): no empty string", comptime listProblem("noneOf", .{""}, .{ .empty_string = "no empty string" }).?);
+    // Mixed with bools, the first kind is named first.
+    try expect("validator: containsAll(.{ true, 1 }): the list mixes bools and integers", comptime listProblem("containsAll", .{ true, 1 }, .{ .allow_bool = true }).?);
+}
+
+test "a checked list converts to an array of the field type: strings, tags by name, integers" {
+    const t = std.testing;
+    const strings = comptime listAs([]const u8, .{ "a", @as([]const u8, "bc") });
+    try t.expectEqual(2, strings.len);
+    try t.expectEqualStrings("a", strings[0]);
+    try t.expectEqualStrings("bc", strings[1]);
+    const tags = comptime listAs(TestRole, .{ .guest, TestRole.admin });
+    try t.expectEqual(TestRole.guest, tags[0]);
+    try t.expectEqual(TestRole.admin, tags[1]);
+    const ints = comptime listAs(i64, .{ @as(u8, 255), -1, std.math.minInt(i64) });
+    try t.expectEqual(@as(i64, 255), ints[0]);
+    try t.expectEqual(@as(i64, -1), ints[1]);
+    try t.expectEqual(@as(i64, std.math.minInt(i64)), ints[2]);
+    const from_array = comptime listAs(u16, [_]u8{ 7, 9 });
+    try t.expectEqual(@as(u16, 9), from_array[1]);
 }
 
 // ------------------------------------------------------------------ rule lists

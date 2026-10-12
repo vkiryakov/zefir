@@ -76,6 +76,34 @@ test "notEquals is a rule constructor with code validation.not_equals and messag
     try expectNoViolation(i32, v.notEquals(0), 1);
 }
 
+test "oneOf is a rule constructor with code validation.one_of and message \"must be one of: {values}\", \"must be {values}\" for one value, or \"must be one of the allowed values\" when that would be longer than 512 bytes" {
+    try testing.expect(@hasDecl(v, "oneOf"));
+    try testing.expect(@typeInfo(@TypeOf(v.oneOf)).@"fn".return_type == v.Rule);
+    try testing.expectEqualStrings("validation.one_of", v.oneOf(.{ "a", "b" }).code);
+    try testing.expectEqualStrings("must be one of: a, b", v.oneOf(.{ "a", "b" }).message);
+    try testing.expectEqualStrings("must be admin", v.oneOf(.{.admin}).message);
+    const long = .{ &@as([300]u8, @splat('a')), &@as([300]u8, @splat('b')) };
+    try testing.expectEqualStrings("validation.one_of", v.oneOf(long).code);
+    try testing.expectEqualStrings("must be one of the allowed values", v.oneOf(long).message);
+    try expectViolation([]const u8, v.oneOf(.{ "a", "b" }), "c", "validation.one_of", "must be one of: a, b", "x");
+    try expectViolation([]const u8, v.oneOf(long), "c", "validation.one_of", "must be one of the allowed values", "x");
+    try expectNoViolation([]const u8, v.oneOf(.{ "a", "b" }), "b");
+}
+
+test "noneOf is a rule constructor with code validation.none_of and message \"must not be one of: {values}\", \"must not be {values}\" for one value, or \"must not be one of the forbidden values\" when that would be longer than 512 bytes" {
+    try testing.expect(@hasDecl(v, "noneOf"));
+    try testing.expect(@typeInfo(@TypeOf(v.noneOf)).@"fn".return_type == v.Rule);
+    try testing.expectEqualStrings("validation.none_of", v.noneOf(.{ "a", "b" }).code);
+    try testing.expectEqualStrings("must not be one of: a, b", v.noneOf(.{ "a", "b" }).message);
+    try testing.expectEqualStrings("must not be admin", v.noneOf(.{.admin}).message);
+    const long = .{ &@as([300]u8, @splat('a')), &@as([300]u8, @splat('b')) };
+    try testing.expectEqualStrings("validation.none_of", v.noneOf(long).code);
+    try testing.expectEqualStrings("must not be one of the forbidden values", v.noneOf(long).message);
+    try expectViolation([]const u8, v.noneOf(.{ "a", "b" }), "a", "validation.none_of", "must not be one of: a, b", "x");
+    try expectViolation([]const u8, v.noneOf(long), long[0], "validation.none_of", "must not be one of the forbidden values", "x");
+    try expectNoViolation([]const u8, v.noneOf(.{ "a", "b" }), "c");
+}
+
 test "empty is a rule value with code validation.empty and message \"must be empty\"" {
     try testing.expect(@hasDecl(v, "empty"));
     try testing.expect(@TypeOf(v.empty) == v.Rule);
@@ -227,7 +255,7 @@ test "finite has no precondition: nan, inf and -inf fail its own check" {
 }
 
 test "every rule the module exports has a catalog test" {
-    const tested = [_][]const u8{ "equals", "notEquals", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "each", "custom" };
+    const tested = [_][]const u8{ "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "each", "custom" };
     inline for (comptime std.meta.declarations(v)) |name| {
         const T = @TypeOf(@field(v, name));
         if (comptime T == v.Rule or (@typeInfo(T) == .@"fn" and @typeInfo(T).@"fn".return_type == v.Rule)) {

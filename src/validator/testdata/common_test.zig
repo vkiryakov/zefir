@@ -1,7 +1,7 @@
 //! The common rules on every field type they accept: `notEmpty` and `empty`
 //! on each string kind and on lists of every item kind, `equals` and
-//! `notEquals` on integers, floats, bools, enums and strings, optionals and
-//! list items.
+//! `notEquals` on integers, floats, bools, enums and strings, `oneOf` and
+//! `noneOf` on strings, enums and integers, optionals and list items.
 const std = @import("std");
 const v = @import("validator");
 const h = @import("vtest");
@@ -322,4 +322,147 @@ test "equals and notEquals keep a default message of exactly 512 bytes and fall 
     const quotes_over = &@as([248]u8, @splat('"'));
     try testing.expectEqual(511, v.equals(quotes_fit).message.len);
     try h.expectFail([]const u8, v.equals(quotes_over), "y", equals_code, "must be equal to the expected value");
+}
+
+const one_of_code = "validation.one_of";
+const none_of_code = "validation.none_of";
+
+test "oneOf and noneOf have their documented codes and default messages, with one value and with many" {
+    try h.expectRule(v.oneOf(.{ "a", "b" }), one_of_code, "must be one of: a, b");
+    try h.expectRule(v.oneOf(.{.admin}), one_of_code, "must be admin");
+    try h.expectRule(v.noneOf(.{ "admin", "root" }), none_of_code, "must not be one of: admin, root");
+    try h.expectRule(v.noneOf(.{"root"}), none_of_code, "must not be root");
+    try h.expectRule(v.oneOf(.{ "", "x" }), one_of_code, "must be one of: \"\", x");
+    try h.expectRule(v.oneOf(.{"\u{2028}"}), one_of_code, "must be \\xe2\\x80\\xa8");
+    try h.expectRule(v.oneOf([_]u8{ 1, 2, 3 }), one_of_code, "must be one of: 1, 2, 3");
+}
+
+test "oneOf on every string kind compares bytes exactly; the list may be a tuple or an array, and may hold \"\"" {
+    const rule = v.oneOf(.{ "a", "b" });
+    inline for (.{ []const u8, [:0]const u8 }) |S| {
+        try h.expectPass(S, rule, "a");
+        try h.expectPass(S, rule, "b");
+        inline for (.{ "c", "A", "", "a ", " a", "ab" }) |s| try h.expectFail(S, rule, s, one_of_code, "must be one of: a, b");
+    }
+    var mutable = "b".*;
+    try h.expectPass([]u8, rule, &mutable);
+    var mutable_z = [_:0]u8{'z'};
+    try h.expectFail([:0]u8, rule, &mutable_z, one_of_code, "must be one of: a, b");
+    try h.expectPass([]const u8, v.oneOf(.{ "", "a" }), "");
+    try h.expectFail([]const u8, v.oneOf(.{ "", "a" }), "b", one_of_code, "must be one of: \"\", a");
+    try h.expectFail([]const u8, v.oneOf(.{"caf\u{e9}"}), "cafe\u{301}", one_of_code, "must be caf\u{e9}"); // no Unicode normalization
+    const countries = [_][]const u8{ "DE", "FR", "US" };
+    try h.expectPass([]const u8, v.oneOf(countries), "FR");
+    try h.expectFail([]const u8, v.oneOf(countries), "XX", one_of_code, "must be one of: DE, FR, US");
+    try h.expectPass([]const u8, v.oneOf(.{ @as([]const u8, "x"), "y" }), "x");
+}
+
+test "noneOf on strings matches exactly: no prefixes, case folding or look-alike characters" {
+    const rule = v.noneOf(.{ "admin", "root", "system" });
+    const text = "must not be one of: admin, root, system";
+    try h.expectFail([]const u8, rule, "root", none_of_code, text);
+    try h.expectFail([:0]const u8, rule, "admin", none_of_code, text);
+    // The empty string is not listed, so it passes: add v.notEmpty to reject it.
+    inline for (.{ "alice", "Admin", "", "ad", "roots", "r\u{43e}\u{43e}t" }) |s| try h.expectPass([]const u8, rule, s);
+    try h.expectFail([]const u8, v.noneOf(.{"root"}), "root", none_of_code, "must not be root");
+}
+
+test "oneOf and noneOf on enums: exhaustive, non-exhaustive with an unnamed value, every tag listed, sparse values" {
+    try h.expectPass(Role, v.oneOf(.{.admin}), .admin);
+    try h.expectFail(Role, v.oneOf(.{.admin}), .user, one_of_code, "must be admin");
+    try h.expectPass(Role, v.oneOf(.{ .admin, .user }), .user); // every tag: the rule pins the set
+    try h.expectPass(Role, v.oneOf(.{ Role.admin, Role.user }), .admin); // enum values as the list
+    try h.expectPass(Role, v.oneOf([_]Role{.user}), .user); // an array of the field's enum
+    try h.expectFail(Role, v.noneOf(.{.user}), .user, none_of_code, "must not be user");
+    try h.expectPass(Role, v.noneOf(.{.user}), .admin);
+    try h.expectPass(Open, v.oneOf(.{ .a, .b }), .b);
+    try h.expectFail(Open, v.oneOf(.{ .a, .b }), @fromBackingInt(9), one_of_code, "must be one of: a, b");
+    // A non-exhaustive enum may list every named tag in noneOf: its unnamed values pass.
+    try h.expectPass(Open, v.noneOf(.{ .a, .b }), @fromBackingInt(77));
+    try h.expectFail(Open, v.noneOf(.{ .a, .b }), .a, none_of_code, "must not be one of: a, b");
+    try h.expectPass(OpenOne, v.noneOf(.{.only}), @fromBackingInt(1));
+    try h.expectPass(Sparse, v.oneOf(.{.high}), .high);
+    try h.expectFail(Sparse, v.oneOf(.{.high}), .low, one_of_code, "must be high");
+}
+
+test "oneOf and noneOf on integers of every width: minInt and maxInt, typed values, exact above 2^53, a tiny type" {
+    inline for (ints) |T| {
+        const lo = math.minInt(T);
+        const hi = math.maxInt(T);
+        const ends = v.oneOf(.{ lo, hi });
+        const ends_message = comptime std.fmt.comptimePrint("must be one of: {d}, {d}", .{ lo, hi });
+        try h.expectPass(T, ends, lo);
+        try h.expectPass(T, ends, hi);
+        try h.expectFail(T, ends, lo + 1, one_of_code, ends_message);
+        const not_ends = v.noneOf(.{ lo, hi });
+        try h.expectFail(T, not_ends, hi, none_of_code, comptime std.fmt.comptimePrint("must not be one of: {d}, {d}", .{ lo, hi }));
+        try h.expectPass(T, not_ends, hi - 1);
+        try h.expectPass(T, v.oneOf(.{ @as(u8, 7), 9 }), 7);
+    }
+    try h.expectPass(u64, v.oneOf(.{9007199254740993}), 9007199254740993);
+    try h.expectFail(u64, v.oneOf(.{9007199254740993}), 9007199254740992, one_of_code, "must be 9007199254740993");
+    try h.expectPass(u64, v.oneOf([_]u64{ math.maxInt(u64), 0 }), math.maxInt(u64));
+    // noneOf may leave one value of a tiny type; oneOf may list every value.
+    try h.expectPass(u1, v.noneOf(.{0}), 1);
+    try h.expectFail(u1, v.noneOf(.{0}), 0, none_of_code, "must not be 0");
+    try h.expectPass(u1, v.oneOf(.{ 0, 1 }), 1);
+}
+
+test "oneOf and noneOf on ?T and ??T skip null, and inside each they check every item" {
+    try h.expectPass(?Role, v.oneOf(.{.admin}), null);
+    try h.expectFail(?Role, v.oneOf(.{.admin}), .user, one_of_code, "must be admin");
+    try h.expectPass(??[]const u8, v.noneOf(.{"root"}), @as(?[]const u8, null));
+    try h.expectFail(??[]const u8, v.noneOf(.{"root"}), @as(?[]const u8, "root"), none_of_code, "must not be root");
+    try h.expectPass(?u32, v.oneOf(.{ 1, 2 }), null);
+    const Dto = struct {
+        tags: []const []const u8 = &.{},
+        roles: [2]Role = .{ .admin, .admin },
+        codes: []const ?u16 = &.{},
+        pub const field_rules = .{
+            .tags = v.each(v.oneOf(.{ "red", "green" })),
+            .roles = v.each(v.noneOf(.{.user})),
+            .codes = v.each(v.oneOf([_]u16{ 200, 404 })),
+        };
+    };
+    try h.expectValid(&Dto{ .tags = &.{ "red", "green" }, .codes = &.{ null, 404 } });
+    try h.expectAt(&Dto{ .tags = &.{ "red", "blue" } }, one_of_code, "must be one of: red, green", "tags[1]");
+    try h.expectAt(&Dto{ .roles = .{ .admin, .user } }, none_of_code, "must not be user", "roles[1]");
+    try h.expectAt(&Dto{ .codes = &.{ null, 500 } }, one_of_code, "must be one of: 200, 404", "codes[1]");
+    try h.expectAll(&Dto{ .tags = &.{"x"}, .roles = .{ .user, .user } }, &.{
+        .{ .code = one_of_code, .field = "tags[0]" },
+        .{ .code = none_of_code, .field = "roles[0]" },
+        .{ .code = none_of_code, .field = "roles[1]" },
+    });
+}
+
+test "oneOf / noneOf: a list whose default message would exceed 512 bytes falls back" {
+    // "must be one of: " is 16 bytes and ", " 2: two values of 247 bytes make 512.
+    const a = &@as([247]u8, @splat('a'));
+    const b = &@as([247]u8, @splat('b'));
+    const b_over = &@as([248]u8, @splat('b'));
+    try testing.expectEqual(512, v.oneOf(.{ a, b }).message.len);
+    try h.expectFail([]const u8, v.oneOf(.{ a, b }), "z", one_of_code, "must be one of: " ++ a ++ ", " ++ b);
+    try h.expectFail([]const u8, v.oneOf(.{ a, b_over }), "z", one_of_code, "must be one of the allowed values");
+    try h.expectPass([]const u8, v.oneOf(.{ a, b_over }), b_over);
+    // "must not be one of: " is 20 bytes.
+    const c = &@as([245]u8, @splat('c'));
+    const d = &@as([245]u8, @splat('d'));
+    const d_over = &@as([246]u8, @splat('d'));
+    try testing.expectEqual(512, v.noneOf(.{ c, d }).message.len);
+    try h.expectFail([]const u8, v.noneOf(.{ c, d }), c, none_of_code, "must not be one of: " ++ c ++ ", " ++ d);
+    try h.expectFail([]const u8, v.noneOf(.{ c, d_over }), d_over, none_of_code, "must not be one of the forbidden values");
+    // Many short values fall back the same way: a message never cuts a list.
+    const many = comptime blk: {
+        var out: [50][]const u8 = undefined;
+        for (&out, 0..) |*slot, i| slot.* = std.fmt.comptimePrint("value_{d:0>3}", .{i});
+        break :blk out;
+    };
+    try h.expectPass([]const u8, v.oneOf(many), "value_049");
+    try h.expectFail([]const u8, v.oneOf(many), "value_050", one_of_code, "must be one of the allowed values");
+    try h.expectFail([]const u8, v.noneOf(many), "value_000", none_of_code, "must not be one of the forbidden values");
+    // One value: "must be " is 8 bytes.
+    const one = &@as([504]u8, @splat('s'));
+    const one_over = &@as([505]u8, @splat('s'));
+    try h.expectFail([]const u8, v.oneOf(.{one}), "z", one_of_code, "must be " ++ one);
+    try h.expectFail([]const u8, v.oneOf(.{one_over}), "z", one_of_code, "must be one of the allowed values");
 }
