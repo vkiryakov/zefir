@@ -12,7 +12,8 @@
 //! ```
 //!
 //! The server forwards a publisher's block without checking it, so reading
-//! never fails: a line without a colon is skipped, and a status is read only
+//! never fails: a line without a colon is skipped, a block without the
+//! `NATS/1.0` line is read from its first line, and a status is read only
 //! from a well-formed `NATS/1.0 <code>` line. Headers to send are checked
 //! strictly by `validate`: a name is printable ASCII without `:`, a value
 //! has no CR or LF.
@@ -70,7 +71,8 @@ pub fn getAll(h: Headers, name: []const u8) ValueIterator {
 /// Every field in wire order.
 pub fn iterator(h: Headers) Iterator {
     var lines = std.mem.splitSequence(u8, h.block, "\r\n");
-    _ = lines.next(); // the version line
+    // A block without the version line is read from its first line.
+    if (std.mem.startsWith(u8, h.block, version_line)) _ = lines.next();
     return .{ .lines = lines };
 }
 
@@ -192,6 +194,13 @@ test "a malformed block from a foreign publisher is read leniently" {
     const garbage: Headers = .{ .block = "garbage without line ends" };
     try testing.expect(garbage.status() == null);
     try testing.expect(garbage.get("garbage without line ends") == null);
+}
+
+test "a block without the version line keeps its first header" {
+    const h: Headers = .{ .block = "X-Id: 1\r\nY: 2\r\n\r\n" };
+    try testing.expectEqualStrings("1", h.get("X-Id") orelse "");
+    try testing.expectEqualStrings("2", h.get("Y") orelse "");
+    try testing.expect(h.status() == null);
 }
 
 test "validate headers to send" {
