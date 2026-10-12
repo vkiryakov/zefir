@@ -6,17 +6,13 @@
 const std = @import("std");
 const Engine = @import("Engine.zig");
 
-/// How long the writer sleeps without a wake-up before it looks again: a
-/// safety net, producers wake it.
-const idle_recheck: std.Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } };
+/// How long a logger thread sleeps without a wake-up before it looks
+/// again: a safety net, producers wake it.
+pub const idle_recheck: std.Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } };
 
 /// The engine whose writer thread this is: `flush` and `shutdown` called
 /// on it would wait for the thread itself.
 pub threadlocal var thread_of: ?*const Engine = null;
-
-/// Yields to a producer that copies its record in before the writer sleeps
-/// until it publishes: a producer preempted there takes a while.
-const filling_yields = 64;
 
 pub fn run(engine: *Engine) void {
     thread_of = engine;
@@ -36,15 +32,6 @@ pub fn run(engine: *Engine) void {
             continue;
         }
         engine.reportDroppedErrors();
-        switch (q.idle()) {
-            .closed => return,
-            .empty => q.waitForWork(idle_recheck),
-            .filling => if (yields < filling_yields) {
-                yields += 1;
-                std.Thread.yield() catch {};
-            } else {
-                q.waitForPublish(idle_recheck, &engine.abandon);
-            },
-        }
+        if (!q.waitNext(idle_recheck, &yields, &engine.abandon)) return;
     }
 }

@@ -83,6 +83,7 @@
 
 const std = @import("std");
 const options = @import("options.zig");
+const hooks = @import("hooks.zig");
 
 pub const Level = @import("level.zig").Level;
 /// Whether a type is marked `pub const zefir_sensitive = true;`: the logger
@@ -109,6 +110,11 @@ pub const Mode = options.Mode;
 pub const Queued = options.Queued;
 pub const OverflowPolicy = options.OverflowPolicy;
 pub const Output = options.Output;
+pub const Event = hooks.Event;
+pub const Subscription = hooks.Subscription;
+pub const SubscriptionId = hooks.SubscriptionId;
+pub const SubscribeError = hooks.SubscribeError;
+pub const Interceptor = hooks.Interceptor;
 
 test "isSensitive is core's check, so one marker serves every module" {
     const Token = struct {
@@ -137,4 +143,6 @@ test {
     _ = @import("writer.zig");
     _ = @import("emergency.zig");
     _ = @import("tests/stress.zig");
+    _ = @import("hooks.zig");
+    _ = @import("tests/hooks.zig");
 }

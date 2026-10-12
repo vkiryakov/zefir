@@ -73,8 +73,15 @@ fn payload(q: *const Queue, index: u64) []u8 {
 /// Copies `bytes` into the queue, or fails at once: `error.Full` when no
 /// slot is free, `error.Closed` after `close`.
 pub fn tryPush(q: *Queue, bytes: []const u8) error{ Full, Closed }!void {
-    std.debug.assert(bytes.len <= q.slot_size - header_bytes);
-    q.publish(try q.reserve(), bytes);
+    return q.tryPushParts(&.{bytes});
+}
+
+/// `tryPush` for a record given in parts, copied in one after another.
+pub fn tryPushParts(q: *Queue, parts: []const []const u8) error{ Full, Closed }!void {
+    var total: usize = 0;
+    for (parts) |part| total += part.len;
+    std.debug.assert(total <= q.slot_size - header_bytes);
+    q.publishParts(try q.reserve(), parts);
 }
 
 /// Reserves the next position: its slot is the caller's until `publish`.
@@ -97,9 +104,18 @@ pub fn reserve(q: *Queue) error{ Full, Closed }!u64 {
 /// Copies `bytes` into the slot of position `pos`, which `reserve` gave,
 /// and hands it to the consumer.
 pub fn publish(q: *Queue, pos: u64, bytes: []const u8) void {
+    q.publishParts(pos, &.{bytes});
+}
+
+fn publishParts(q: *Queue, pos: u64, parts: []const []const u8) void {
     const index = pos & q.mask;
-    @memcpy(q.payload(index)[0..bytes.len], bytes);
-    q.len(index).* = @intCast(bytes.len);
+    const dest = q.payload(index);
+    var filled: usize = 0;
+    for (parts) |part| {
+        @memcpy(dest[filled..][0..part.len], part);
+        filled += part.len;
+    }
+    q.len(index).* = @intCast(filled);
     // seq_cst, not just release: with the load below it pairs with the
     // consumer's announcement that it sleeps, so one of the two sees the other.
     q.seq(index).store(pos + 1, .seq_cst);
@@ -233,6 +249,29 @@ pub fn waitForPublish(q: *Queue, timeout: std.Io.Timeout, stop: *const std.atomi
     }
     q.io.futexWaitTimeout(u32, &q.consumer_sleeping.raw, 1, timeout) catch {};
     q.consumer_sleeping.store(0, .monotonic);
+}
+
+/// Yields to a producer that fills the next slot before the consumer
+/// sleeps until it publishes: a producer preempted there takes a while.
+const filling_yields = 64;
+
+/// For the consumer, after `pop` took nothing: waits for the next record,
+/// at most `timeout`, and returns false once the queue is closed and
+/// drained. `yields` counts the yields to a producer still filling its
+/// slot; zero it after each record taken. `stop` ends a wait for such a
+/// producer, see `waitForPublish`.
+pub fn waitNext(q: *Queue, timeout: std.Io.Timeout, yields: *u32, stop: *const std.atomic.Value(bool)) bool {
+    switch (q.idle()) {
+        .closed => return false,
+        .empty => q.waitForWork(timeout),
+        .filling => if (yields.* < filling_yields) {
+            yields.* += 1;
+            std.Thread.yield() catch {};
+        } else {
+            q.waitForPublish(timeout, stop);
+        },
+    }
+    return true;
 }
 
 /// Wakes the consumer if it sleeps.

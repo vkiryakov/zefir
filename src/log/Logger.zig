@@ -7,6 +7,7 @@ const builtin = @import("builtin");
 const core = @import("core");
 const Engine = @import("Engine.zig");
 const encode = @import("encode.zig");
+const hooks = @import("hooks.zig");
 const std_log = @import("std_log.zig");
 const uninstallStdLog = std_log.uninstall;
 const options = @import("options.zig");
@@ -109,6 +110,31 @@ fn log(self: Logger, comptime level: Level, comptime message: []const u8, fields
     if (!self.enabled(level)) return;
     var hex: encode.TraceHex = undefined;
     self.engine.emit(level, self.scope, self.traceHex(&hex), message, fields);
+}
+
+/// Adds a subscriber: from now on it gets a copy of each record of its
+/// levels (and scope) on a thread of its own, through a queue of its own,
+/// so a slow handler never holds up a caller. A record goes to the
+/// subscribers before the output, so they get an error record even when
+/// the queue refuses it or stdout is closed. A logger takes 8 subscribers
+/// in its life; `unsubscribe` gives no slot back. The queue takes
+/// `capacity` × (`max_record_bytes` + about 100 bytes), until `deinit`.
+pub fn subscribe(self: Logger, subscription: hooks.Subscription) hooks.SubscribeError!hooks.SubscriptionId {
+    return self.engine.subscribe(subscription);
+}
+
+/// Removes a subscriber and waits until its thread has handed the records
+/// in its queue to the handler and exited: once it returns, the handler is
+/// never called again, so its context may go. A second call does nothing.
+/// Not from a handler: that panics in safe builds.
+pub fn unsubscribe(self: Logger, id: hooks.SubscriptionId) void {
+    self.engine.unsubscribe(id);
+}
+
+/// Adds an interceptor; a logger takes 8. It sees every record that
+/// passes the level filter, and drops it by returning false.
+pub fn use(self: Logger, interceptor: hooks.Interceptor) error{TooManyInterceptors}!void {
+    return self.engine.use(interceptor);
 }
 
 /// Writes an error record to stderr before it returns, past the queue:
