@@ -37,6 +37,7 @@ If it fits the way you work, use it, and please join in: bring your ideas and qu
 | validator          | `zefir-validator` | Declarative validation rules for struct fields                       | 🚧 In progress · [docs](src/validator/examples/README.md) |
 | rpc                | `zefir-rpc`       | RPC                                                                  | 📋 Planned                                                |
 | **log**            | `zefir-log`       | Structured logging: JSON Lines, redaction, live levels, alerts       | ✅ Done · [docs](src/log/examples/README.md)              |
+| nats               | `zefir-nats`      | Core NATS client: publish/subscribe, request/reply, reconnect        | 🚧 In progress                                            |
 | orm                | `zefir-orm`       | ORM                                                                  | 📋 Planned                                                |
 | http               | —                 | HTTP server                                                          | 📋 Planned                                                |
 | _all of the above_ | `zefir`           | Umbrella module                                                      |                                                           |
