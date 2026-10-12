@@ -1090,6 +1090,9 @@ test "an uncalled decimal gets an example call, and inside each the head is each
 }
 
 test "latitude and longitude on floats: the finite precondition, then the range in the field type" {
+    // Twelve unrolled bodies of float arithmetic at compile time: more
+    // branches than a test allows by default on some targets (x86).
+    @setEvalBranchQuota(10_000);
     inline for (.{ f16, f32, f64, f80, f128, c_longdouble }) |F| {
         inline for (.{ .{ latitude, 90 }, .{ longitude, 180 } }) |row| {
             const rule = row[0];

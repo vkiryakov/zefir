@@ -716,7 +716,8 @@ test "the length rules have their documented codes, messages, parameters and the
     try t.expectEqualStrings("must be exactly 5 characters", length(5, 5).message);
     try t.expectEqualStrings("must be exactly 1 character", length(1, 1).message);
     try t.expectEqualStrings("must be from 1 to 2 characters", length(1, 2).message);
-    try t.expectEqualStrings("must be at most 18446744073709551615 characters", maxLength(std.math.maxInt(u64)).message);
+    // The largest count of the target: 18446744073709551615 on 64-bit ones.
+    try t.expectEqualStrings(std.fmt.comptimePrint("must be at most {d} characters", .{std.math.maxInt(usize)}), maxLength(std.math.maxInt(usize)).message);
 }
 
 test "minBytes and maxBytes have their documented codes, messages and parameters and no precondition" {

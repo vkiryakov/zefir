@@ -636,7 +636,8 @@ test "minItems and maxItems have their documented codes, messages and count para
     // One item is singular; counts are decimal at every size.
     try t.expectEqualStrings("must have at least 1 item", minItems(1).message);
     try t.expectEqualStrings("must have at most 1 item", maxItems(1).message);
-    try t.expectEqualStrings("must have at most 18446744073709551615 items", maxItems(std.math.maxInt(u64)).message);
+    // The largest count of the target: 18446744073709551615 on 64-bit ones.
+    try t.expectEqualStrings(std.fmt.comptimePrint("must have at most {d} items", .{std.math.maxInt(usize)}), maxItems(std.math.maxInt(usize)).message);
 }
 
 test "minItems and maxItems take a count of at least 1" {
