@@ -65,7 +65,7 @@ test {
     _ = custom_rules;
 }
 
-test "limits match the catalog" {
+test "limits have their documented values" {
     try std.testing.expectEqual(128, max_code_bytes);
     try std.testing.expectEqual(512, max_message_bytes);
     try std.testing.expectEqual(100, max_report_violations);

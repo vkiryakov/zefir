@@ -9,14 +9,17 @@ const Outcome = core.Outcome;
 /// A rule that passes when `f(value)` returns true; otherwise the violation
 /// has `code` and `message`. `f` is a function (not a function pointer) that
 /// returns `bool` and takes one parameter: `P`, or `*const P` (a pointer to
-/// the value, or to a copy of it as `P`), where the field type without its
-/// optionals coerces to `P` (`core.coerces` lists the conversions); inside
-/// `each` the item type takes the place of the field type. The code is
-/// segments of `[a-z][a-z0-9_]*` joined by `.`: at least 2, at most
-/// `max_code_bytes` bytes, not starting with `validation.` or `rpc.`. The
-/// message is literal (braces are plain text): 1 to `max_message_bytes` bytes
-/// of valid UTF-8. `f` sees every value, NaN, invalid UTF-8 and `""`
-/// included, and must be pure: no I/O, no global state, no allocation.
+/// the value, or to a copy of it as `P`), where the field type `T` without
+/// its optionals coerces to `P`: `P` is `T`; an integer of `T`'s signedness
+/// at least as wide, or a wider signed one when `T` is unsigned; a float at
+/// least as wide; a slice or pointer like `T` that adds `const` or drops the
+/// sentinel; or `?Q` or `E!Q` for such a `Q`. Inside `each` the item type
+/// takes the place of the field type. The code is segments of
+/// `[a-z][a-z0-9_]*` joined by `.`: at least 2, at most `max_code_bytes`
+/// bytes, not starting with `validation.` or `rpc.`. The message is literal
+/// (braces are plain text): 1 to `max_message_bytes` bytes of valid UTF-8.
+/// `f` sees every value, NaN, invalid UTF-8 and `""` included, and must be
+/// pure: no I/O, no global state, no allocation.
 pub fn custom(comptime code: []const u8, comptime message: []const u8, comptime f: anytype) Rule {
     @setEvalBranchQuota(core.eval_quota);
     const args = "\"" ++ core.escape(code) ++ "\", ...";
@@ -131,9 +134,7 @@ fn isPositiveMoney(m: *const Money) bool {
     return m.cents > 0;
 }
 
-fn expectOutcome(expected: Outcome, comptime rule: Rule, value: anytype) !void {
-    try std.testing.expectEqual(expected, rule.eval(&value));
-}
+const expectOutcome = core.expectOutcome;
 
 test "custom keeps the caller's code and message" {
     const rule = custom("numbers.even", "must be even", isEven);

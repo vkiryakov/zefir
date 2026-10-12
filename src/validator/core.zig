@@ -12,7 +12,7 @@ const root = @import("root.zig");
 /// `evaluation exceeded 1000 backwards branches`.
 pub const eval_quota = 10_000_000;
 
-/// Longest `v.custom` and `v.fail` code, in bytes.
+/// Longest code of `v.custom`, `v.fail` and a `validateSelf` result, in bytes.
 pub const max_code_bytes = 128;
 /// Longest message, in bytes (not code points).
 pub const max_message_bytes = 512;
@@ -21,7 +21,9 @@ pub const max_report_violations = 100;
 
 /// One failed rule. The library builds `code` and `message` at compile time:
 /// they live as long as the program and never contain the checked value, so
-/// a violation can be logged or sent to a client as it is.
+/// a violation can be logged or sent to a client as it is. A hand-built
+/// `validateSelf` result must use static strings too (literals or comptime
+/// values); `v.fail` guarantees them.
 pub const Violation = struct {
     /// `validation.<kind>` for a built-in rule (`validation.not_empty`), a
     /// precondition's code (`validation.finite`), `validation.invalid` for a
@@ -40,7 +42,7 @@ pub const Violation = struct {
 
 // ------------------------------------------------------------------ kinds
 
-/// Every rule of the catalog, 96 kinds, declared once: shipping a rule adds
+/// Every rule of the validator, 96 kinds, declared once: shipping a rule adds
 /// its constructor, never a kind. The tag is the snake_case name used in
 /// codes (`validation.<kind>`) and in compile errors.
 pub const Kind = enum {
@@ -602,6 +604,12 @@ pub fn define(comptime kind: Kind, comptime spec: Spec) Rule {
         .fits = spec.fits,
         .eval = spec.eval,
     };
+}
+
+/// For the tests of the rule files: `rule`'s run-time check on `value`
+/// returns `expected`.
+pub fn expectOutcome(expected: Outcome, comptime rule: Rule, value: anytype) !void {
+    try std.testing.expectEqual(expected, rule.eval(&value));
 }
 
 // ------------------------------------------------------------------ field types

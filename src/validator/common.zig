@@ -37,11 +37,9 @@ fn lengthFits(comptime rule: *const Rule, comptime T: type, comptime where: []co
     }.accepts, null);
 }
 
-fn expectOutcome(expected: Outcome, comptime rule: Rule, value: anytype) !void {
-    try std.testing.expectEqual(expected, rule.eval(&value));
-}
+const expectOutcome = core.expectOutcome;
 
-test "notEmpty has the catalog code and message and no precondition" {
+test "notEmpty has its documented code and message and no precondition" {
     try std.testing.expectEqualStrings("validation.not_empty", notEmpty.code);
     try std.testing.expectEqualStrings("must not be empty", notEmpty.message);
     try std.testing.expectEqual(core.Kind.not_empty, notEmpty.kind);
