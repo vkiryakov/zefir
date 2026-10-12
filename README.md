@@ -4,7 +4,7 @@
 
 <p align="center">
   <strong>A modular framework for enterprise applications in Zig.</strong><br>
-  Web servers, web services and APIs, built from modules you pick: typed configuration, request deadlines, cancellation, tracing and structured logging today; validation, RPC, an ORM and an HTTP server next.
+  Web servers, web services and APIs, built from modules you pick: typed configuration, request deadlines, cancellation, tracing, structured logging and validation today; RPC, an ORM and an HTTP server next.
 </p>
 
 <p align="center">
@@ -120,18 +120,37 @@ fn findUser(ctx: core.Context, io: std.Io, id: u64) ![]const u8 {
 
 Cancel the token when the client goes away, and every check below fails with `error.Cancelled`; once the deadline passes, they fail with `error.DeadlineExceeded`. `core.w3c` reads and writes the W3C `traceparent` and `tracestate` headers, and nothing in core allocates, reads a clock or does I/O. **[Read the core guide →](src/core/examples/README.md)**
 
-## Installation
+## log in a minute
 
-Requires **Zig 0.17.0**. Add the dependency to your `build.zig.zon`; the latest release is **v0.2.0**:
+Create the logger at the start of `main`, then log constant messages with named fields:
 
-```sh
-zig fetch --save git+https://github.com/vkiryakov/zefir#v0.2.0
+```zig
+const std = @import("std");
+const log = @import("log");
+
+pub fn main(init: std.process.Init) !void {
+    const logger: log.Logger = try .init(init.gpa, init.io, .{
+        .service = .{ .name = "user-service", .version = "1.0.0" },
+    });
+    defer logger.deinit();
+
+    const users = logger.scoped("users");
+    users.info("User created", .{ .user_id = 42, .email = "ada@example.com", .password = "hunter2" });
+}
 ```
 
-The log module is on the `dev` branch until the next release:
+```json
+{"timestamp":"2026-10-12T09:41:07.415Z","level":"info","message":"User created","service.name":"user-service","service.version":"1.0.0","scope":"users","user_id":42,"email":"ada@example.com","password":"[REDACTED]"}
+```
+
+Every record is one line of JSON on stdout, ready for a log collector. The fields are checked when the program compiles, secrets come out as `[REDACTED]`, levels change while the service runs, and a queued mode keeps stdout off the request path. **[Read the log guide →](src/log/examples/README.md)**
+
+## Installation
+
+Requires **Zig 0.17.0**. Add the dependency to your `build.zig.zon`; the latest release is **v0.3.0**:
 
 ```sh
-zig fetch --save git+https://github.com/vkiryakov/zefir#dev
+zig fetch --save git+https://github.com/vkiryakov/zefir#v0.3.0
 ```
 
 Other versions are on the [releases page](https://github.com/vkiryakov/zefir/releases); a commit hash works too.
