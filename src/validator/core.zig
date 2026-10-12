@@ -977,10 +977,22 @@ pub fn passIf(ok: bool) Outcome {
 /// The fixed code and message of a precondition failure.
 pub const Precondition = struct { code: []const u8, message: []const u8 };
 
-/// The preconditions that rules report.
+/// The preconditions that rules report. Each code is also the code of the
+/// rule of the same name (`v.finite`), whose `.withMessage` words the case
+/// when that rule is put first.
 pub const preconditions = struct {
+    /// The rules that decode code points (`minLength`, `maxLength`,
+    /// `length`, `notBlank`, the width rules and `strongPassword`), on a
+    /// string that is not valid UTF-8.
+    pub const utf8: Precondition = .{ .code = "validation.utf8", .message = "must be valid UTF-8" };
     /// Every number rule on a float field whose value is NaN, +inf or -inf.
     pub const finite: Precondition = .{ .code = "validation.finite", .message = "must be a finite number" };
+    /// `minDate` and `maxDate` with a date bound, on a value that is not a
+    /// date.
+    pub const date: Precondition = .{ .code = "validation.date", .message = "must be a valid date in YYYY-MM-DD format" };
+    /// `minDate` and `maxDate` with a date-time bound, on a value that is not
+    /// an RFC 3339 date-time.
+    pub const rfc3339: Precondition = .{ .code = "validation.rfc3339", .message = "must be a valid RFC 3339 date-time" };
 };
 
 /// A validation rule. Rules are values (`v.notEmpty`) or are built by
@@ -990,14 +1002,19 @@ pub const preconditions = struct {
 /// parameter.
 ///
 /// `code` and `message` are the stable public part, which applications and
-/// tests may read (`v.notEmpty.code` is `"validation.not_empty"`). The other
-/// fields and the methods are internal to the module and may change.
+/// tests may read (`v.notEmpty.code` is `"validation.not_empty"`), and
+/// `withMessage` replaces the message. The other fields and methods are
+/// internal to the module and may change.
 pub const Rule = struct {
     kind: Kind,
     /// `validation.<kind>` for a built-in rule, the user's code for
     /// `v.custom`, and "" for `each`, which reports through its inner rules.
     code: []const u8,
-    /// The message of this rule's own failure; "" for `each`.
+    /// The message of this rule's own failure: the default one, its
+    /// fallback, or the result of `.withMessage`; "" for `each`. A default
+    /// message longer than 512 bytes without a fallback (a bound of hundreds
+    /// of digits) stays here as built, and the declaration check of the field
+    /// rejects it unless `.withMessage` replaced it.
     message: []const u8,
     /// The arguments as written (`"users.ok", ...` for `custom`, `...` for
     /// `each`), shown in compile errors and hints; null for a rule used as a
@@ -1035,6 +1052,28 @@ pub const Rule = struct {
     pub fn label(comptime rule: Rule) []const u8 {
         return comptime @tagName(rule.kind) ++ if (rule.args) |a| "(" ++ a ++ ")" else "";
     }
+
+    /// The rule with another message for its own failure:
+    /// `v.range(1, 100).withMessage("from {min} to {max} items")`. The code
+    /// stays, and a precondition failure keeps its fixed code and message
+    /// (NaN under `v.positive.withMessage(...)` still reports
+    /// `validation.finite`). `{name}` is a placeholder of the rule: its
+    /// parameter `name` as the default message shows it. `{{` writes `{`,
+    /// `}}` writes `}`, and any other `}` stays. The message must be 1-512
+    /// bytes of valid UTF-8, in any language. A second `.withMessage`
+    /// replaces the first; the rule it is called on keeps its message. `each`
+    /// has no message of its own: give its inner rules theirs. A mistake is a
+    /// compile error at the call.
+    pub fn withMessage(comptime rule: Rule, comptime template: []const u8) Rule {
+        switch (renderTemplate(rule, template)) {
+            .message => |message| {
+                var copy = rule;
+                copy.message = message;
+                return copy;
+            },
+            .problem => |text| @compileError(text),
+        }
+    }
 };
 
 /// Everything `define` needs to build a built-in rule.
@@ -1058,13 +1097,17 @@ pub const Spec = struct {
 
 /// Builds a rule of `kind`: the code of its kind (or `spec.code`), the
 /// default message (or `spec.fallback` when the default message is longer
-/// than 512 bytes) and the checks. `each` is built by hand instead, since it
-/// has no code or message of its own.
+/// than 512 bytes) and the checks. A longer default message without a
+/// fallback is kept as it is: the declaration check of the field reports it
+/// (`defaultMessageProblem`) unless `.withMessage` replaces it. `each` is
+/// built by hand instead, since it has no code or message of its own.
 pub fn define(comptime kind: Kind, comptime spec: Spec) Rule {
     @setEvalBranchQuota(eval_quota);
     const message = if (spec.message.len > max_message_bytes) spec.fallback orelse spec.message else spec.message;
-    if (messageProblem(message)) |problem|
-        @compileError("validator: internal: the default message of " ++ @tagName(kind) ++ ": " ++ describeMessageProblem(problem));
+    if (messageProblem(message)) |problem| {
+        const kept = problem == .too_long and spec.fallback == null;
+        if (!kept) @compileError("validator: internal: the default message of " ++ @tagName(kind) ++ ": " ++ describeMessageProblem(problem));
+    }
     return .{
         .kind = kind,
         .code = spec.code orelse codeOf(kind),
@@ -1081,6 +1124,267 @@ pub fn define(comptime kind: Kind, comptime spec: Spec) Rule {
 /// returns `expected`.
 pub fn expectOutcome(expected: Outcome, comptime rule: Rule, value: anytype) !void {
     try std.testing.expectEqual(expected, rule.eval(&value));
+}
+
+// ------------------------------------------------------------------ message templates
+
+/// What `.withMessage(template)` makes of a rule: its new message, or the
+/// whole text of the compile error.
+pub const Template = union(enum) { message: []const u8, problem: []const u8 };
+
+/// Renders the `.withMessage` template of `rule`. `{name}` becomes the text
+/// of the rule's placeholder `name`, `{{` becomes `{`, `}}` becomes `}`, and
+/// any other `}` stays. The template is read left to right, and its first
+/// unknown or unclosed placeholder is the problem; then the message must be
+/// 1-512 bytes of valid UTF-8. `each` takes no template. An error text starts
+/// with the call and the template: `validator: min(1).withMessage("..."): `.
+pub fn renderTemplate(comptime rule: Rule, comptime template: []const u8) Template {
+    comptime {
+        @setEvalBranchQuota(eval_quota);
+        const head = "validator: " ++ rule.call() ++ ".withMessage(\"" ++ escape(template) ++ "\"): ";
+        if (rule.kind == .each) return .{ .problem = head ++ "each has no message of its own; put .withMessage on the inner rules" };
+        var out: []const u8 = "";
+        // The first byte of the literal text not copied to `out` yet.
+        var start: usize = 0;
+        var i: usize = 0;
+        while (i < template.len) {
+            switch (template[i]) {
+                '{' => {
+                    out = out ++ template[start..i];
+                    if (i + 1 < template.len and template[i + 1] == '{') {
+                        out = out ++ "{";
+                        i += 2;
+                    } else {
+                        const close = std.mem.findScalarPos(u8, template, i + 1, '}') orelse
+                            return .{ .problem = head ++ "'{' without a closing '}'; write '{{' for a literal '{'" };
+                        const name = template[i + 1 .. close];
+                        out = out ++ (placeholderText(rule, name) orelse return .{ .problem = head ++ unknownPlaceholder(rule, name) });
+                        i = close + 1;
+                    }
+                    start = i;
+                },
+                '}' => {
+                    if (i + 1 < template.len and template[i + 1] == '}') {
+                        out = out ++ template[start..i] ++ "}";
+                        i += 2;
+                        start = i;
+                    } else {
+                        i += 1;
+                    }
+                },
+                else => i += 1,
+            }
+        }
+        const message = out ++ template[start..];
+        if (messageProblem(message)) |problem| return .{ .problem = head ++ describeMessageProblem(problem) };
+        return .{ .message = message };
+    }
+}
+
+/// The text of the placeholder `name` of `rule`: its parameter as messages
+/// show it. Null when the rule has no such placeholder.
+pub fn placeholderText(comptime rule: Rule, comptime name: []const u8) ?[]const u8 {
+    comptime {
+        for (rule.params) |p| {
+            if (p.placeholder and std.mem.eql(u8, p.name, name)) return p.text;
+        }
+        return null;
+    }
+}
+
+/// The placeholders of `rule` in the order of its parameters, as error texts
+/// list them: `{min}, {max}`; "" for a rule without placeholders.
+pub fn placeholderList(comptime rule: Rule) []const u8 {
+    comptime {
+        var out: []const u8 = "";
+        for (rule.params) |p| {
+            if (p.placeholder) out = out ++ (if (out.len == 0) "" else ", ") ++ "{" ++ p.name ++ "}";
+        }
+        return out;
+    }
+}
+
+/// The problem of the placeholder `name`, which `rule` does not have. The
+/// name is shown as written.
+fn unknownPlaceholder(comptime rule: Rule, comptime name: []const u8) []const u8 {
+    const available = placeholderList(rule);
+    return "unknown placeholder {" ++ name ++ "}; " ++ if (available.len == 0) "this rule has no placeholders" else "available: " ++ available;
+}
+
+/// The declaration error of a rule whose default message is longer than 512
+/// bytes, or null. Only a rule without a fallback keeps such a message (`min`,
+/// `max`, `range` and `divisibleBy` with a bound of hundreds of digits), and
+/// `.withMessage` replaces it with one of at most 512 bytes.
+pub fn defaultMessageProblem(comptime rule: *const Rule, comptime where: []const u8) ?[]const u8 {
+    if (rule.message.len <= max_message_bytes) return null;
+    return ruleErrorText(rule, where, std.fmt.comptimePrint(": the default message would be {d} bytes (limit {d}); use .withMessage(...)", .{ rule.message.len, max_message_bytes }));
+}
+
+/// What `.withMessage(template)` gives `rule`, for the tests below: the new
+/// message, or the whole text of the compile error.
+fn withMessageText(comptime rule: Rule, comptime template: []const u8) []const u8 {
+    return switch (comptime renderTemplate(rule, template)) {
+        .message, .problem => |text| text,
+    };
+}
+
+fn isEvenForTest(n: u32) bool {
+    return n % 2 == 0;
+}
+
+test "the preconditions have their fixed codes and messages; each code is the code of the rule of the same name" {
+    const expect = std.testing.expectEqualStrings;
+    try expect("validation.utf8", preconditions.utf8.code);
+    try expect("must be valid UTF-8", preconditions.utf8.message);
+    try expect("validation.finite", preconditions.finite.code);
+    try expect("must be a finite number", preconditions.finite.message);
+    try expect("validation.date", preconditions.date.code);
+    try expect("must be a valid date in YYYY-MM-DD format", preconditions.date.message);
+    try expect("validation.rfc3339", preconditions.rfc3339.code);
+    try expect("must be a valid RFC 3339 date-time", preconditions.rfc3339.message);
+    try expect(comptime codeOf(.utf8), preconditions.utf8.code);
+    try expect(comptime codeOf(.finite), preconditions.finite.code);
+    try expect(comptime codeOf(.date), preconditions.date.code);
+    try expect(comptime codeOf(.rfc3339), preconditions.rfc3339.code);
+}
+
+test "a rule's placeholders are its placeholder parameters, listed in the order of its arguments" {
+    const expect = std.testing.expectEqualStrings;
+    try expect("{min}, {max}", comptime placeholderList(root.range(1, 100)));
+    try expect("{min}", comptime placeholderList(root.min(1)));
+    try expect("{max}", comptime placeholderList(root.max(1)));
+    try expect("{divisor}", comptime placeholderList(root.divisibleBy(5)));
+    try expect("{expected}", comptime placeholderList(root.equals(5)));
+    try expect("{forbidden}", comptime placeholderList(root.notEquals(5)));
+    try expect("{values}", comptime placeholderList(root.oneOf(.{"a"})));
+    try expect("{values}", comptime placeholderList(root.noneOf(.{"a"})));
+    try expect("{min}", comptime placeholderList(root.minItems(1)));
+    try expect("{max}", comptime placeholderList(root.maxItems(1)));
+    try expect("", comptime placeholderList(root.notEmpty));
+    try expect("", comptime placeholderList(root.custom("acme.even", "must be even", isEvenForTest)));
+    try expect("1", comptime placeholderText(root.range(1, 100), "min").?);
+    try expect("100", comptime placeholderText(root.range(1, 100), "max").?);
+    try std.testing.expectEqual(null, comptime placeholderText(root.range(1, 100), "divisor"));
+    try std.testing.expectEqual(null, comptime placeholderText(root.notEmpty, "value"));
+    // A data parameter, such as an option of an options rule, is no placeholder.
+    const with_option = comptime define(.fqdn, .{ .message = "must be a valid domain name", .args = ".{...}", .params = &.{dataParam("require_tld", true)}, .fits = test_rules.fitsAnything, .eval = test_rules.evalPositive });
+    try expect("", comptime placeholderList(with_option));
+    try std.testing.expectEqual(null, comptime placeholderText(with_option, "require_tld"));
+}
+
+test "an unknown placeholder is an error at the call that lists the placeholders the rule has" {
+    const expect = std.testing.expectEqualStrings;
+    try expect(
+        "validator: divisibleBy(5).withMessage(\"must be a multiple of {n}\"): unknown placeholder {n}; available: {divisor}",
+        comptime withMessageText(root.divisibleBy(5), "must be a multiple of {n}"),
+    );
+    // {} has an empty name; the names are listed in the order of the arguments.
+    try expect("validator: range(1, 100).withMessage(\"{}\"): unknown placeholder {}; available: {min}, {max}", comptime withMessageText(root.range(1, 100), "{}"));
+    // Names are case-sensitive, and a placeholder of another rule is unknown here.
+    try expect("validator: min(1).withMessage(\"{Min}\"): unknown placeholder {Min}; available: {min}", comptime withMessageText(root.min(1), "{Min}"));
+    try expect("validator: maxItems(5).withMessage(\"{min}\"): unknown placeholder {min}; available: {max}", comptime withMessageText(root.maxItems(5), "{min}"));
+    // {value} and {field} exist on no rule.
+    try expect("validator: equals(5).withMessage(\"{value}\"): unknown placeholder {value}; available: {expected}", comptime withMessageText(root.equals(5), "{value}"));
+}
+
+test "a placeholder on a rule without placeholders is an error, custom included" {
+    const expect = std.testing.expectEqualStrings;
+    try expect(
+        "validator: negative.withMessage(\"{value} must be negative\"): unknown placeholder {value}; this rule has no placeholders",
+        comptime withMessageText(root.negative, "{value} must be negative"),
+    );
+    try expect(
+        "validator: custom(\"acme.even\", ...).withMessage(\"{odd}\"): unknown placeholder {odd}; this rule has no placeholders",
+        comptime withMessageText(root.custom("acme.even", "must be even, not {odd}", isEvenForTest), "{odd}"),
+    );
+    try expect("validator: notEmpty.withMessage(\"{field} is required\"): unknown placeholder {field}; this rule has no placeholders", comptime withMessageText(root.notEmpty, "{field} is required"));
+}
+
+test "a { without a closing } is an error; {{ writes a literal {" {
+    const expect = std.testing.expectEqualStrings;
+    const unclosed = "'{' without a closing '}'; write '{{' for a literal '{'";
+    try expect("validator: divisibleBy(5).withMessage(\"must be divisible by {divisor\"): " ++ unclosed, comptime withMessageText(root.divisibleBy(5), "must be divisible by {divisor"));
+    try expect("validator: notEmpty.withMessage(\"{\"): " ++ unclosed, comptime withMessageText(root.notEmpty, "{"));
+    try expect("validator: min(1).withMessage(\"{{min} {min\"): " ++ unclosed, comptime withMessageText(root.min(1), "{{min} {min"));
+    try expect("{min} 1", comptime withMessageText(root.min(1), "{{min} {min}"));
+}
+
+test "the message of a template must not be empty, longer than 512 bytes or invalid UTF-8" {
+    const expect = std.testing.expectEqualStrings;
+    try expect("validator: notEmpty.withMessage(\"\"): message must not be empty", comptime withMessageText(root.notEmpty, ""));
+    const long: [513]u8 = @splat('m');
+    try expect("validator: maxItems(5).withMessage(\"" ++ long ++ "\"): message is longer than 512 bytes", comptime withMessageText(root.maxItems(5), &long));
+    try expect("validator: min(1).withMessage(\"\\xc3\"): message must be valid UTF-8", comptime withMessageText(root.min(1), "\xc3"));
+    try expect("validator: notEmpty.withMessage(\"caf\\xc3\"): message must be valid UTF-8", comptime withMessageText(root.notEmpty, "caf\xc3"));
+    // The limit applies to the message after substitution: 511 bytes and {max} = 5 fit, 512 bytes and {max} do not.
+    const fill: [511]u8 = @splat('m');
+    try expect(fill ++ "5", comptime withMessageText(root.maxItems(5), fill ++ "{max}"));
+    try expect("validator: maxItems(5).withMessage(\"" ++ fill ++ "m{max}\"): message is longer than 512 bytes", comptime withMessageText(root.maxItems(5), fill ++ "m{max}"));
+    // A long placeholder can make a short template too long.
+    const values = .{ &@as([300]u8, @splat('a')), &@as([300]u8, @splat('b')) };
+    try std.testing.expect(std.mem.endsWith(u8, comptime withMessageText(root.oneOf(values), "{values}"), "\"): message is longer than 512 bytes"));
+}
+
+test "withMessage on each is an error: its inner rules carry the messages" {
+    try std.testing.expectEqualStrings(
+        "validator: each(...).withMessage(\"x\"): each has no message of its own; put .withMessage on the inner rules",
+        comptime withMessageText(root.each(root.notEmpty), "x"),
+    );
+}
+
+test "a template is read left to right: the first unknown or unclosed placeholder wins, then the message is checked" {
+    const expect = std.testing.expectEqualStrings;
+    try expect("validator: divisibleBy(5).withMessage(\"{n} {divisor\"): unknown placeholder {n}; available: {divisor}", comptime withMessageText(root.divisibleBy(5), "{n} {divisor"));
+    try expect("validator: divisibleBy(5).withMessage(\"{divisor} {n}\"): unknown placeholder {n}; available: {divisor}", comptime withMessageText(root.divisibleBy(5), "{divisor} {n}"));
+    // A placeholder name ends at the first }.
+    try expect("validator: divisibleBy(5).withMessage(\"{x {divisor}\"): unknown placeholder {x {divisor}; available: {divisor}", comptime withMessageText(root.divisibleBy(5), "{x {divisor}"));
+    // Placeholders come before the length: a long template with an unknown one names the placeholder.
+    const long: [600]u8 = @splat('m');
+    try expect("validator: min(1).withMessage(\"" ++ long ++ "{n}\"): unknown placeholder {n}; available: {min}", comptime withMessageText(root.min(1), long ++ "{n}"));
+    // Then emptiness, length and UTF-8, in that order.
+    const invalid: [513]u8 = @splat(0xff);
+    try std.testing.expect(std.mem.endsWith(u8, comptime withMessageText(root.min(1), &invalid), "\"): message is longer than 512 bytes"));
+}
+
+test "withMessage replaces the message only: the code, the parameters and the precondition stay" {
+    const t = std.testing;
+    const base = root.range(1, 100);
+    const custom_message = comptime base.withMessage("from {min} to {max} items");
+    try t.expectEqualStrings("from 1 to 100 items", custom_message.message);
+    try t.expectEqualStrings("validation.range", custom_message.code);
+    try t.expectEqualStrings("1, 100", custom_message.args.?);
+    try t.expectEqual(2, custom_message.params.len);
+    try t.expectEqualStrings("validation.finite", custom_message.precondition.?.code);
+    try t.expectEqualStrings("must be a finite number", custom_message.precondition.?.message);
+    // The rule it was called on keeps its default message.
+    try t.expectEqualStrings("must be from 1 to 100", base.message);
+    // A second withMessage replaces the first, with the same placeholders.
+    try t.expectEqualStrings("b 8", (comptime root.minItems(8).withMessage("a {min}").withMessage("b {min}")).message);
+}
+
+test "a default message over 512 bytes without a fallback stays in the rule, and the field's declaration check reports it" {
+    const t = std.testing;
+    const where = "Dto.field_rules.x";
+    const longer: [513]u8 = @splat('m');
+    const kept = comptime define(.min, .{ .message = &longer, .args = "5", .fits = test_rules.fitsAnything, .eval = test_rules.evalPositive });
+    try t.expectEqualStrings(&longer, kept.message);
+    try t.expectEqualStrings(
+        "validator: Dto.field_rules.x: min(5): the default message would be 513 bytes (limit 512); use .withMessage(...)",
+        comptime defaultMessageProblem(&kept, where).?,
+    );
+    try t.expectEqualStrings(
+        "validator: Dto.field_rules.x[]: min(5): the default message would be 513 bytes (limit 512); use .withMessage(...)",
+        comptime defaultMessageProblem(&kept, where ++ "[]").?,
+    );
+    // withMessage replaces it, so the check passes.
+    try t.expectEqual(null, comptime defaultMessageProblem(&kept.withMessage("too small"), where));
+    // 512 bytes stay; a rule with a fallback never keeps a longer message.
+    const exactly: [512]u8 = @splat('m');
+    const fits = comptime define(.min, .{ .message = &exactly, .args = "5", .fits = test_rules.fitsAnything, .eval = test_rules.evalPositive });
+    try t.expectEqual(null, comptime defaultMessageProblem(&fits, where));
+    const fallback = comptime define(.equals, .{ .message = &longer, .fallback = "must be equal to the expected value", .fits = test_rules.fitsAnything, .eval = test_rules.evalPositive });
+    try t.expectEqual(null, comptime defaultMessageProblem(&fallback, where));
+    try t.expectEqual(null, comptime defaultMessageProblem(&test_rules.each_positive, where));
 }
 
 // ------------------------------------------------------------------ field types
@@ -1921,8 +2225,8 @@ pub fn itemRules(comptime rules: []const Rule) []const Rule {
 }
 
 /// The declaration check of one value's rules: at most one `each`, placed
-/// last; then each rule's `fits` against `T`, the unwrapped field or item
-/// type, in tuple order.
+/// last; then, in tuple order, each rule's `fits` against `T`, the unwrapped
+/// field or item type, and the size of its default message.
 pub fn checkRuleList(comptime rules: []const Rule, comptime T: type, comptime where: []const u8) void {
     @setEvalBranchQuota(eval_quota);
     var each_count: usize = 0;
@@ -1931,7 +2235,10 @@ pub fn checkRuleList(comptime rules: []const Rule, comptime T: type, comptime wh
     }
     if (each_count > 1) @compileError("validator: " ++ where ++ ": each appears twice; " ++ hints.one_each);
     if (each_count == 1 and rules[rules.len - 1].kind != .each) @compileError("validator: " ++ where ++ ": each must be the last rule");
-    for (rules) |*rule| rule.fits(rule, T, where);
+    for (rules) |*rule| {
+        rule.fits(rule, T, where);
+        if (defaultMessageProblem(rule, where)) |text| @compileError(text);
+    }
 }
 
 /// Stand-in rules for the self-tests below; the real rules live in the rule

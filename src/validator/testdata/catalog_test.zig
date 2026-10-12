@@ -4,8 +4,8 @@
 //! catalog precondition code and message, every rule the module exports has
 //! a test here, the module exports exactly the catalog predicates of the
 //! shipped rules, and the limits have their catalog values.
-//! Placeholders are not checked yet: `withMessage`, which substitutes them,
-//! is not shipped.
+//! Placeholders are not checked here yet: messages_test.zig checks them
+//! through `withMessage`.
 //!
 //! In the repository, this file is the source of truth for the contract of
 //! the shipped rules. It is generated from the rule catalog, which the

@@ -129,6 +129,7 @@ pub const list = [_]Fixture{
     .{ .file = "src/validator/testdata/compile_errors/divisible_by_zero.zig", .expect = "validator: divisibleBy(0): division by zero; no value would pass", .row = "divisibleBy-1" },
     .{ .file = "src/validator/testdata/compile_errors/divisible_by_too_big.zig", .expect = "validator: divisible_by_too_big.Bad.field_rules.x: divisible_by(1000) on u8 (0..255): only 0 would pass; use v.equals(0)", .row = "divisibleBy-6" },
     .{ .file = "src/validator/testdata/compile_errors/finite_on_int.zig", .expect = "validator: finite_on_int.Bad.field_rules.x: finite is always true for u32; remove it", .row = "finite-1" },
+    .{ .file = "src/validator/testdata/compile_errors/min_default_message_too_long.zig", .expect = "validator: min_default_message_too_long.Bad.field_rules.x: min(56362808934785782620655415167470525914030964411108314940402423418609289689068355355971379591897745173403010078263747529856646401949852539644969848434700186501722593132609102394906926373262117075563330306831364144677433787178189964179613588058505555939250641616528896329618001580624087604790707070002646363767810376024580461947390375276158858357529962546338406854636102805723631292609311399696875316557143945391102311532165688506692261634047197324706752950818927815472385992693228752306187618995383028460736741376): the default message would be 529 bytes (limit 512); use .withMessage(...)", .row = "min-13" },
     // minItems and maxItems: one fixture per kind of error; the text of every
     // catalog row is checked by the tests of lists.zig
     .{ .file = "src/validator/testdata/compile_errors/min_items_zero.zig", .expect = "validator: minItems(0): min must be at least 1 (minItems(0) is always true; remove it)", .row = "minItems-1" },
@@ -179,6 +180,15 @@ pub const list = [_]Fixture{
     .{ .file = "src/validator/testdata/compile_errors/custom_message_too_long.zig", .expect = "validator: custom(\"users.ok\", ...): message is longer than 512 bytes", .row = "CU-7" },
     .{ .file = "src/validator/testdata/compile_errors/custom_message_bad_utf8.zig", .expect = "validator: custom(\"users.ok\", ...): message must be valid UTF-8", .row = "CU-8" },
     .{ .file = "src/validator/testdata/compile_errors/custom_message_truncated_utf8.zig", .expect = "validator: custom(\"users.ok\", ...): message must be valid UTF-8", .row = "variant of CU-8" },
+    // withMessage: one fixture per row; the texts are checked by the tests of
+    // core.zig as well
+    .{ .file = "src/validator/testdata/compile_errors/with_message_unknown_placeholder.zig", .expect = "validator: divisibleBy(5).withMessage(\"must be a multiple of {n}\"): unknown placeholder {n}; available: {divisor}", .row = "W-1" },
+    .{ .file = "src/validator/testdata/compile_errors/with_message_no_placeholders.zig", .expect = "validator: negative.withMessage(\"{value} must be negative\"): unknown placeholder {value}; this rule has no placeholders", .row = "W-2" },
+    .{ .file = "src/validator/testdata/compile_errors/with_message_unclosed.zig", .expect = "validator: divisibleBy(5).withMessage(\"must be divisible by {divisor\"): '{' without a closing '}'; write '{{' for a literal '{'", .row = "W-3" },
+    .{ .file = "src/validator/testdata/compile_errors/with_message_empty.zig", .expect = "validator: notEmpty.withMessage(\"\"): message must not be empty", .row = "W-4" },
+    .{ .file = "src/validator/testdata/compile_errors/with_message_too_long.zig", .expect = "validator: maxItems(5).withMessage(\"" ++ @as([513]u8, @splat('m')) ++ "\"): message is longer than 512 bytes", .row = "W-5" },
+    .{ .file = "src/validator/testdata/compile_errors/with_message_bad_utf8.zig", .expect = "validator: min(1).withMessage(\"\\xc3\"): message must be valid UTF-8", .row = "W-6" },
+    .{ .file = "src/validator/testdata/compile_errors/with_message_on_each.zig", .expect = "validator: each(...).withMessage(\"x\"): each has no message of its own; put .withMessage on the inner rules", .row = "W-7" },
     .{ .file = "src/validator/testdata/compile_errors/not_empty_called.zig", .expect = "type 'core.Rule' not a function", .row = "Z-8" },
     .{ .file = "src/validator/testdata/compile_errors/positive_called.zig", .expect = "type 'core.Rule' not a function", .row = "Z-8" },
     .{ .file = "src/validator/testdata/compile_errors/custom_missing_argument.zig", .expect = "expected 3 argument(s), found 2", .row = "variant of Z-4" },

@@ -676,6 +676,71 @@ test "an uncalled number rule constructor gets an example call" {
     try expect("validator: Dto.field_rules.x: divisibleBy must be called, e.g. v.divisibleBy(2)", comptime uncalledText("divisibleBy", @TypeOf(divisibleBy)));
 }
 
+/// `n` in decimal; a number of hundreds of digits takes more comptime
+/// branches than a test body allows by default.
+fn decimal(comptime n: comptime_int) []const u8 {
+    @setEvalBranchQuota(core.eval_quota);
+    return std.fmt.comptimePrint("{d}", .{n});
+}
+
+test "a bound or divisor whose default message would be longer than 512 bytes is an error at the field unless withMessage replaces it" {
+    const t = std.testing;
+    const expect = t.expectEqualStrings;
+    const two_1700 = comptime decimal(1 << 1700);
+    const two_820 = comptime decimal(1 << 820);
+    const two_830 = comptime decimal(1 << 830);
+    const two_2000 = comptime decimal(1 << 2000);
+    try t.expectEqual(512, two_1700.len);
+    try t.expectEqual(247, two_820.len);
+    try t.expectEqual(250, two_830.len);
+    try t.expectEqual(603, two_2000.len);
+    const head = "validator: Dto.field_rules.x: ";
+    const tail = " (limit 512); use .withMessage(...)";
+    try expect(head ++ "min(" ++ two_1700 ++ "): the default message would be 529 bytes" ++ tail, comptime core.defaultMessageProblem(&min(1 << 1700), test_where).?);
+    try expect(head ++ "max(" ++ two_1700 ++ "): the default message would be 528 bytes" ++ tail, comptime core.defaultMessageProblem(&max(1 << 1700), test_where).?);
+    try expect(
+        head ++ "range(" ++ two_820 ++ ", " ++ two_830 ++ "): the default message would be 514 bytes" ++ tail,
+        comptime core.defaultMessageProblem(&range(1 << 820, 1 << 830), test_where).?,
+    );
+    try expect(
+        head ++ "divisible_by(" ++ two_2000 ++ "): the default message would be 624 bytes" ++ tail,
+        comptime core.defaultMessageProblem(&divisibleBy(1 << 2000), test_where).?,
+    );
+    // On these fields the bounds fit: the size of the message is the only problem.
+    try t.expectEqual(null, comptime minText(1 << 1700, u2000));
+    try t.expectEqual(null, comptime maxText(1 << 1700, u2000));
+    try t.expectEqual(null, comptime rangeText(1 << 820, 1 << 830, u1000));
+    try t.expectEqual(null, comptime divisibleText(1 << 2000, f128));
+    // The rule keeps the message as built; withMessage replaces it.
+    try t.expectEqual(529, min(1 << 1700).message.len);
+    try t.expectEqual(null, comptime core.defaultMessageProblem(&min(1 << 1700).withMessage("too small"), test_where));
+    try t.expectEqual(null, comptime core.defaultMessageProblem(&divisibleBy(1 << 2000).withMessage("must be a multiple of 2^2000"), test_where));
+    // A placeholder fills in the whole bound, so it can make the message too long.
+    try expect(
+        "validator: min(" ++ two_1700 ++ ").withMessage(\"at least {min}\"): message is longer than 512 bytes",
+        comptime switch (core.renderTemplate(min(1 << 1700), "at least {min}")) {
+            .message, .problem => |text| text,
+        },
+    );
+}
+
+test "the default message of min reaches 513 bytes at a 496-digit bound, max at 497 digits, divisibleBy at 492" {
+    const t = std.testing;
+    // 2^1644 has 495 digits, 2^1645 496; 2^1647 has 496, 2^1648 497; 2^1630 has 491, 2^1634 492.
+    try t.expectEqual(512, min(1 << 1644).message.len);
+    try t.expectEqual(null, comptime core.defaultMessageProblem(&min(1 << 1644), test_where));
+    try t.expectEqual(513, min(1 << 1645).message.len);
+    try t.expect(comptime core.defaultMessageProblem(&min(1 << 1645), test_where) != null);
+    try t.expectEqual(512, max(1 << 1647).message.len);
+    try t.expectEqual(null, comptime core.defaultMessageProblem(&max(1 << 1647), test_where));
+    try t.expectEqual(513, max(1 << 1648).message.len);
+    try t.expect(comptime core.defaultMessageProblem(&max(1 << 1648), test_where) != null);
+    try t.expectEqual(512, divisibleBy(1 << 1630).message.len);
+    try t.expectEqual(null, comptime core.defaultMessageProblem(&divisibleBy(1 << 1630), test_where));
+    try t.expectEqual(513, divisibleBy(1 << 1634).message.len);
+    try t.expect(comptime core.defaultMessageProblem(&divisibleBy(1 << 1634), test_where) != null);
+}
+
 test "the sign rules take signed integers and floats; on an unsigned field each one is an error" {
     const expect = std.testing.expectEqualStrings;
     try expect("validator: Dto.field_rules.x: non_negative is always true for u32; remove it", comptime signText(nonNegative, u32).?);
