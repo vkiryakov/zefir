@@ -1610,7 +1610,7 @@ pub const hints = struct {
 
 /// The files that define rules. Each rule pull request adds its file here, so
 /// that its `call_examples` reach the hints.
-const rule_files = [_]type{ @import("common.zig"), @import("numbers.zig"), @import("lists.zig"), @import("custom.zig") };
+const rule_files = [_]type{ @import("common.zig"), @import("numbers.zig"), @import("identifiers.zig"), @import("lists.zig"), @import("custom.zig") };
 
 /// The arguments the hints show in a call of the constructor `name` of type
 /// `F`: its `call_examples` entry, else `.{}` for an options struct, the
@@ -1707,10 +1707,6 @@ pub const pending_kinds = [_]Kind{
     .bic,
     .iban,
     // PR 5b
-    .uuid,
-    .mongo_id,
-    .firebase_push_id,
-    .hash,
     .btc_address,
     .ethereum_address,
     // PR 6a

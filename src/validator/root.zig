@@ -36,6 +36,7 @@ const core = @import("core.zig");
 const walk = @import("walk.zig");
 const common = @import("common.zig");
 const numbers = @import("numbers.zig");
+const identifiers = @import("identifiers.zig");
 const lists = @import("lists.zig");
 const custom_rules = @import("custom.zig");
 
@@ -67,6 +68,15 @@ pub const negative = numbers.negative;
 pub const nonPositive = numbers.nonPositive;
 pub const divisibleBy = numbers.divisibleBy;
 pub const finite = numbers.finite;
+pub const uuid = identifiers.uuid;
+pub const mongoId = identifiers.mongoId;
+pub const firebasePushId = identifiers.firebasePushId;
+pub const hash = identifiers.hash;
+pub const isUuid = identifiers.isUuid;
+pub const isMongoId = identifiers.isMongoId;
+pub const isFirebasePushId = identifiers.isFirebasePushId;
+pub const isHash = identifiers.isHash;
+pub const HashAlgorithm = identifiers.HashAlgorithm;
 pub const minItems = lists.minItems;
 pub const maxItems = lists.maxItems;
 pub const each = lists.each;
@@ -77,6 +87,7 @@ test {
     _ = walk;
     _ = common;
     _ = numbers;
+    _ = identifiers;
     _ = lists;
     _ = custom_rules;
 }

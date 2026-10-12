@@ -218,6 +218,50 @@ test "finite is a rule value with code validation.finite and message \"must be a
     try expectNoViolation(f64, v.finite, 0);
 }
 
+test "uuid is a rule value with code validation.uuid and message \"must be a valid UUID\"; no precondition" {
+    try testing.expect(@hasDecl(v, "uuid"));
+    try testing.expect(@TypeOf(v.uuid) == v.Rule);
+    try expectRule(v.uuid, "validation.uuid", "must be a valid UUID", "must be a valid UUID");
+    try expectViolation([]const u8, v.uuid, "f81d4fae-7dec-11d0-a765-00a0c91e6bf", "validation.uuid", "must be a valid UUID", "x");
+    try expectViolation([]const u8, v.uuid.withMessage("another message"), "\xff", "validation.uuid", "another message", "x");
+    try expectNoViolation([]const u8, v.uuid, "f81d4fae-7dec-11d0-a765-00a0c91e6bf6");
+}
+
+test "mongoId is a rule value with code validation.mongo_id and message \"must be a valid MongoDB ObjectId\"; no precondition" {
+    try testing.expect(@hasDecl(v, "mongoId"));
+    try testing.expect(@TypeOf(v.mongoId) == v.Rule);
+    try expectRule(v.mongoId, "validation.mongo_id", "must be a valid MongoDB ObjectId", "must be a valid MongoDB ObjectId");
+    try expectViolation([]const u8, v.mongoId, "0xaaaaaaaaaaaaaaaaaaaaaa", "validation.mongo_id", "must be a valid MongoDB ObjectId", "x");
+    try expectViolation([]const u8, v.mongoId.withMessage("another message"), "\xff", "validation.mongo_id", "another message", "x");
+    try expectNoViolation([]const u8, v.mongoId, "507f1f77bcf86cd799439011");
+}
+
+test "firebasePushId is a rule value with code validation.firebase_push_id and message \"must be a valid Firebase push ID\"; no precondition" {
+    try testing.expect(@hasDecl(v, "firebasePushId"));
+    try testing.expect(@TypeOf(v.firebasePushId) == v.Rule);
+    try expectRule(v.firebasePushId, "validation.firebase_push_id", "must be a valid Firebase push ID", "must be a valid Firebase push ID");
+    try expectViolation([]const u8, v.firebasePushId, "-JhLeOlGIEjaIOFHR0x", "validation.firebase_push_id", "must be a valid Firebase push ID", "x");
+    try expectViolation([]const u8, v.firebasePushId.withMessage("another message"), "\xff", "validation.firebase_push_id", "another message", "x");
+    try expectNoViolation([]const u8, v.firebasePushId, "-JhLeOlGIEjaIOFHR0xd");
+}
+
+test "hash is a rule constructor with code validation.hash and message \"must be a valid {algorithm} hash\" for each of its 13 algorithms; placeholder {algorithm}; no precondition" {
+    try testing.expect(@hasDecl(v, "hash"));
+    try testing.expect(@typeInfo(@TypeOf(v.hash)).@"fn".return_type == v.Rule);
+    const algorithms = [_][]const u8{ "md4", "md5", "sha1", "sha256", "sha384", "sha512", "ripemd128", "ripemd160", "tiger128", "tiger160", "tiger192", "crc32", "crc32b" };
+    try testing.expect(@typeInfo(v.HashAlgorithm).@"enum".mode == .exhaustive);
+    try testing.expectEqual(algorithms.len, comptime std.meta.fieldNames(v.HashAlgorithm).len);
+    inline for (algorithms, comptime std.meta.fieldNames(v.HashAlgorithm)) |name, tag| {
+        try testing.expectEqualStrings(name, tag);
+        const rule = v.hash(@field(v.HashAlgorithm, name));
+        try expectRule(rule, "validation.hash", "must be a valid " ++ name ++ " hash", "must be a valid {algorithm} hash");
+        try expectPlaceholder(rule, "{algorithm}", name);
+    }
+    try expectViolation([]const u8, v.hash(.sha256), "d41d8cd98f00b204e9800998ecf8427e", "validation.hash", "must be a valid sha256 hash", "x");
+    try expectViolation([]const u8, v.hash(.md5).withMessage("another message"), "\xff", "validation.hash", "another message", "x");
+    try expectNoViolation([]const u8, v.hash(.md5), "d41d8cd98f00b204e9800998ecf8427e");
+}
+
 test "minItems is a rule constructor with code validation.min_items and message \"must have at least {min} items\", or \"must have at least 1 item\" when min = 1; placeholder {min}" {
     try testing.expect(@hasDecl(v, "minItems"));
     try testing.expect(@typeInfo(@TypeOf(v.minItems)).@"fn".return_type == v.Rule);
@@ -382,15 +426,15 @@ test "finite has no precondition: nan, inf and -inf on a float field fail its ow
     }
 }
 
-test "the module exports exactly its 29 public names, and Rule.withMessage" {
-    const names = [_][]const u8{ "Violation", "Rule", "Report", "max_code_bytes", "max_message_bytes", "max_report_violations", "check", "checkAll", "assertRules", "fail", "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "minItems", "maxItems", "each", "custom" };
+test "the module exports exactly its 38 public names, and Rule.withMessage" {
+    const names = [_][]const u8{ "Violation", "Rule", "Report", "max_code_bytes", "max_message_bytes", "max_report_violations", "check", "checkAll", "assertRules", "fail", "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "uuid", "mongoId", "firebasePushId", "hash", "isUuid", "isMongoId", "isFirebasePushId", "isHash", "HashAlgorithm", "minItems", "maxItems", "each", "custom" };
     inline for (names) |name| try testing.expect(@hasDecl(v, name));
     try testing.expectEqual(names.len, comptime std.meta.declarations(v).len);
     try testing.expect(@hasDecl(v.Rule, "withMessage"));
 }
 
 test "every rule the module exports has a catalog test" {
-    const tested = [_][]const u8{ "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "minItems", "maxItems", "each", "custom" };
+    const tested = [_][]const u8{ "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "uuid", "mongoId", "firebasePushId", "hash", "minItems", "maxItems", "each", "custom" };
     inline for (comptime std.meta.declarations(v)) |name| {
         const T = @TypeOf(@field(v, name));
         if (comptime T == v.Rule or (@typeInfo(T) == .@"fn" and @typeInfo(T).@"fn".return_type == v.Rule)) {
@@ -406,7 +450,7 @@ test "every rule the module exports has a catalog test" {
 }
 
 test "the module exports exactly the catalog predicates of the shipped rules" {
-    const predicates = [_][]const u8{};
+    const predicates = [_][]const u8{ "isUuid", "isMongoId", "isFirebasePushId", "isHash" };
     comptime var exported: usize = 0;
     inline for (comptime std.meta.declarations(v)) |name| {
         if (comptime name.len > 2 and std.mem.startsWith(u8, name, "is") and std.ascii.isUpper(name[2])) {
