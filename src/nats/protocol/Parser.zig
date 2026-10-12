@@ -18,11 +18,18 @@ const std = @import("std");
 const Parser = @This();
 
 pub const Limits = struct {
-    /// The longest line other than INFO, CRLF not counted.
+    /// The server's `max_control_line`: the longest arguments it takes on a
+    /// line from a client. The lines it sends back may be longer by
+    /// `msg_line_overhead`. CRLF is not counted.
     max_control_line: usize = 4096,
-    /// The longest INFO line, CRLF not counted: INFO lists the cluster.
+    /// The longest INFO or -ERR line, CRLF not counted: INFO lists the
+    /// cluster, and -ERR quotes the subject it refused.
     max_info_line: usize = 64 * 1024,
 };
+
+/// What a MSG or HMSG line adds to the arguments a publisher sent: the
+/// operation and a subscription id of up to 20 digits, with its space.
+pub const msg_line_overhead = "HMSG ".len + 20 + 1;
 
 pub const Error = error{
     /// No line end within the limit.
@@ -105,9 +112,12 @@ pub fn next(p: *Parser, input: []const u8) Error!Step {
 }
 
 fn nextLine(p: *Parser, input: []const u8) Error!Step {
-    // INFO has a limit of its own; the first four bytes tell which applies.
-    const is_info = input.len >= 4 and std.ascii.eqlIgnoreCase(input[0..4], "INFO");
-    const limit = if (is_info) p.limits.max_info_line else p.limits.max_control_line;
+    // INFO and -ERR have a limit of their own; the first four bytes tell
+    // which applies. Any line may take more than four bytes, so a shorter
+    // input never meets a limit before they are known.
+    const is_long = input.len >= 4 and
+        (std.ascii.eqlIgnoreCase(input[0..4], "INFO") or std.ascii.eqlIgnoreCase(input[0..4], "-ERR"));
+    const limit = if (is_long) p.limits.max_info_line else p.limits.max_control_line +| msg_line_overhead;
     // A line may take `limit` bytes, then CR and LF.
     const window = input[0..@min(input.len, limit +| 2)];
     const lf = std.mem.findScalar(u8, window, '\n') orelse {
@@ -324,20 +334,52 @@ test "payload bytes that look like frames are payload" {
 }
 
 test "line limits: exactly at the limit passes, one byte more fails" {
-    const subject: [4096 - "MSG ".len - " 1 0".len]u8 = @splat('a');
+    // A line may take the server's limit plus msg_line_overhead.
+    const subject: [4096 + msg_line_overhead - "MSG ".len - " 1 0".len]u8 = @splat('a');
     try expectTranscript("MSG " ++ subject ++ " 1 - 0 0\nEND\n", "MSG " ++ subject ++ " 1 0\r\n\r\n");
     try expectTranscript("ERROR LineTooLong\n", "MSG " ++ subject ++ "a 1 0\r\n\r\n");
     try expectTranscript("ERROR LineTooLong\n", "MSG " ++ subject ++ "a 1 0\n\r\n");
 
     const small: Limits = .{ .max_control_line = 16, .max_info_line = 32 };
-    try expectTranscriptWith("PING\nERROR LineTooLong\n", "PING\r\nMSG abcdefgh 1 01\r\n\r\n", small);
-    try expectTranscriptWith("MSG abcdefgh 1 - 0 0\nEND\n", "MSG abcdefgh 1 0\r\n\r\n", small);
+    const name: [16 + msg_line_overhead - "MSG ".len - " 1 0".len]u8 = @splat('b');
+    try expectTranscriptWith("PING\nERROR LineTooLong\n", "PING\r\nMSG " ++ name ++ "b 1 0\r\n\r\n", small);
+    try expectTranscriptWith("MSG " ++ name ++ " 1 - 0 0\nEND\n", "MSG " ++ name ++ " 1 0\r\n\r\n", small);
+    // INFO and -ERR take the longer limit.
     const info: [32 - "INFO ".len]u8 = @splat('x');
     try expectTranscriptWith("INFO " ++ info ++ "\n", "INFO " ++ info ++ "\r\n", small);
     try expectTranscriptWith("ERROR LineTooLong\n", "INFO " ++ info ++ "x\r\n", small);
+    const text: [32 - "-ERR ''".len]u8 = @splat('e');
+    try expectTranscriptWith("ERR " ++ text ++ "\n", "-ERR '" ++ text ++ "'\r\n", small);
+    try expectTranscriptWith("ERROR LineTooLong\n", "-ERR '" ++ text ++ "e'\r\n", small);
     // Without a line end the parser waits until the limit is reached, then fails.
-    try expectTranscriptWith("INCOMPLETE 17\n", "MSG abcdefgh 1 01", small);
-    try expectTranscriptWith("ERROR LineTooLong\n", "MSG abcdefgh 1 012", small);
+    try expectTranscriptWith("INCOMPLETE 43\n", "MSG " ++ name ++ "b 1 0", small);
+    try expectTranscriptWith("ERROR LineTooLong\n", "MSG " ++ name ++ "bb 1 0", small);
+}
+
+test "lines the server sends for the longest arguments a client may send" {
+    // nats-server limits only the arguments of a client's line, 4096 bytes by
+    // default. The lines it sends add the operation and the subscription id,
+    // and -ERR quotes the subject.
+    const subject: [4096 - " 0".len]u8 = @splat('p'); // PUB <subject> 0
+    try expectTranscript(
+        "MSG " ++ subject ++ " 18446744073709551615 - 0 0\nEND\n",
+        "MSG " ++ subject ++ " 18446744073709551615 0\r\n\r\n",
+    );
+    const headers_subject: [4096 - " 0 0".len]u8 = @splat('h'); // HPUB <subject> 0 0
+    try expectTranscript(
+        "MSG " ++ headers_subject ++ " 18446744073709551615 - 0 0\nEND\n",
+        "HMSG " ++ headers_subject ++ " 18446744073709551615 0 0\r\n\r\n",
+    );
+    try expectTranscript(
+        "ERR Permissions Violation for Publish to \"" ++ subject ++ "\"\n",
+        "-ERR 'Permissions Violation for Publish to \"" ++ subject ++ "\"'\r\n",
+    );
+    const queue_subject: [2000]u8 = @splat('s');
+    const queue: [4096 - queue_subject.len - " ".len - " 1".len]u8 = @splat('q'); // SUB <subject> <queue> 1
+    try expectTranscript(
+        "ERR Permissions Violation for Subscription to \"" ++ queue_subject ++ "\" using queue \"" ++ queue ++ "\"\n",
+        "-ERR 'Permissions Violation for Subscription to \"" ++ queue_subject ++ "\" using queue \"" ++ queue ++ "\"'\r\n",
+    );
 }
 
 test "malformed frames" {

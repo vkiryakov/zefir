@@ -81,8 +81,10 @@ pub const Limits = struct {
     subscription_bytes: usize = 8 * 1024 * 1024,
     max_pending_requests: u32 = 65_536,
     max_subscriptions: u32 = 65_536,
-    /// The longest line from the server, INFO aside. Raise it together with
-    /// the server's `max_control_line`.
+    /// The server's `max_control_line`: the longest arguments of a protocol
+    /// line, such as a subject with its reply-to. Messages the server sends
+    /// may be a few bytes longer, INFO and -ERR up to 64 KiB. Raise it
+    /// together with the server's setting.
     max_control_line_bytes: u32 = 4096,
     /// The largest message accepted, headers included; larger ones are
     /// read past, dropped and counted.
@@ -97,7 +99,8 @@ pub const Error = error{InvalidOptions};
 pub const max_connect_json = 4096;
 /// Servers given and discovered, together.
 pub const max_servers = 64;
-/// The read buffer is sized by `limits.max_control_line_bytes`.
+/// The largest `limits.max_control_line_bytes`: the read buffer holds the
+/// longest line the server may send.
 pub const max_control_line_limit = 64 * 1024;
 
 /// Checks every option; nothing touches the network.
