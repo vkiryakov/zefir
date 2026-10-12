@@ -283,6 +283,32 @@ test "the format rules combine with other rules: notEmpty first, withMessage, in
     try h.expectAt(&Server{ .admin = "x" }, "validation.email", "ungültige E-Mail", "admin");
 }
 
+test "the example at the top of formats.md compiles and checks a value" {
+    const Server = struct {
+        host: []const u8,
+        port: []const u8,
+        admin: ?[]const u8 = null,
+        mirrors: []const []const u8 = &.{},
+        lat: f64,
+
+        pub const field_rules = .{
+            .host = v.fqdn(.{ .require_tld = false }), // "localhost" passes
+            .port = v.port,
+            .admin = v.email, // null skips the rule
+            .mirrors = .{ v.maxItems(5), v.each(v.httpUrl) },
+            .lat = v.latitude, // a float field: NaN fails with validation.finite
+        };
+    };
+    try h.expectValid(&Server{ .host = "localhost", .port = "8080", .mirrors = &.{"https://mirror.example.com/"}, .lat = 59.9 });
+    try h.expectAll(&Server{ .host = "-bad", .port = "080", .admin = "ops@localhost", .mirrors = &.{"ftp://x"}, .lat = std.math.nan(f64) }, &.{
+        .{ .code = "validation.fqdn", .field = "host" },
+        .{ .code = "validation.port", .field = "port" },
+        .{ .code = "validation.email", .field = "admin" },
+        .{ .code = "validation.http_url", .field = "mirrors[0]" },
+        .{ .code = "validation.finite", .field = "lat" },
+    });
+}
+
 test "port and the numbers in strings: the spec's own examples" {
     try h.expectPass([]const u8, v.port, "0");
     try h.expectFail([]const u8, v.port, "080", "validation.port", "must be a port number from 0 to 65535");

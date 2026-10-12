@@ -42,8 +42,8 @@ if (v.check(&request, &path_buf)) |violation| {
 - [Compatibility](#compatibility)
 - [All rules](#all-rules)
 
-Rules by category: [Common](common.md) · [Numbers](numbers.md) · [Lists](lists.md) ·
-[Coming from class-validator](class_validator.md)
+Rules by category: [Common](common.md) · [Numbers](numbers.md) · [Formats](formats.md) ·
+[Lists](lists.md) · [Coming from class-validator](class_validator.md)
 
 Examples that `zig build test` compiles and runs:
 [Getting started](getting_started.zig) · [validateSelf](validate_self.zig) · [withMessage](with_message.zig) · [DTO package test](dto_test.zig)
@@ -729,9 +729,9 @@ anything. The rules that compare a number need a finite one on a float field:
 NaN, `+inf` and `-inf` fail with `validation.finite` /
 `must be a finite number`, before the check of the rule runs. The rules with
 this precondition are `v.equals`, `v.notEquals`, `v.min`, `v.max`, `v.range`,
-`v.positive`, `v.nonNegative`, `v.negative`, `v.nonPositive` and
-`v.divisibleBy`; integers, `bool`, enums and strings have no precondition
-([D16](class_validator.md#deviations-from-validatorjs)).
+`v.positive`, `v.nonNegative`, `v.negative`, `v.nonPositive`, `v.divisibleBy`,
+`v.latitude` and `v.longitude`; integers, `bool`, enums and strings have no
+precondition ([D16](class_validator.md#deviations-from-validatorjs)).
 
 - The code and the message of a precondition are fixed: `.withMessage` does not
   change them. `v.positive.withMessage("must be above zero")` reports
@@ -1049,6 +1049,22 @@ The limits are `comptime_int` constants and part of the contract (see below).
 | `v.nonPositive` | a number is at most 0 | `validation.non_positive` | [numbers](numbers.md#vnonpositive) |
 | `v.divisibleBy(divisor)` | a number is a multiple of `divisor` | `validation.divisible_by` | [numbers](numbers.md#vdivisiblebydivisor) |
 | `v.finite` | a float is neither NaN nor an infinity | `validation.finite` | [numbers](numbers.md#vfinite) |
+| `v.numberString` | a string is a number in decimal notation | `validation.number_string` | [formats](formats.md#vnumberstring) |
+| `v.decimal(.{ ... })` | a string is a decimal number with as many digits after the point as the options allow | `validation.decimal` | [formats](formats.md#vdecimaloptions) |
+| `v.booleanString` | a string is `true`, `false`, `1` or `0` | `validation.boolean_string` | [formats](formats.md#vbooleanstring) |
+| `v.hexadecimal` | a string is a hexadecimal number | `validation.hexadecimal` | [formats](formats.md#vhexadecimal) |
+| `v.octal` | a string is an octal number | `validation.octal` | [formats](formats.md#voctal) |
+| `v.port` | a string is a port number from 0 to 65535 | `validation.port` | [formats](formats.md#vport) |
+| `v.latitude` | a string or a float is a latitude from -90 to 90 | `validation.latitude` | [formats](formats.md#vlatitude) |
+| `v.longitude` | a string or a float is a longitude from -180 to 180 | `validation.longitude` | [formats](formats.md#vlongitude) |
+| `v.latLong` | a string is a `latitude,longitude` pair | `validation.lat_long` | [formats](formats.md#vlatlong) |
+| `v.email` | a string is an email address | `validation.email` | [formats](formats.md#vemail) |
+| `v.httpUrl` | a string is an http or https URL | `validation.http_url` | [formats](formats.md#vhttpurl) |
+| `v.fqdn(.{ ... })` | a string is a domain name | `validation.fqdn` | [formats](formats.md#vfqdnoptions) |
+| `v.ip` | a string is an IPv4 or an IPv6 address | `validation.ip` | [formats](formats.md#vip) |
+| `v.ipv4` | a string is an IPv4 address | `validation.ipv4` | [formats](formats.md#vipv4) |
+| `v.ipv6` | a string is an IPv6 address | `validation.ipv6` | [formats](formats.md#vipv6) |
+| `v.macAddress(.{ ... })` | a string is a MAC address | `validation.mac_address` | [formats](formats.md#vmacaddressoptions) |
 | `v.minItems(min)` | a slice has at least `min` items | `validation.min_items` | [lists](lists.md#vminitemsmin) |
 | `v.maxItems(max)` | a slice has at most `max` items | `validation.max_items` | [lists](lists.md#vmaxitemsmax) |
 | `v.each(rules)` | the rules of every item of a slice or an array | the inner rule's code | [lists](lists.md#veachrules) |
