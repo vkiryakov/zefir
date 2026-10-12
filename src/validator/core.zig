@@ -23,6 +23,9 @@ pub const max_report_violations = 100;
 /// keys need an earlier `maxItems(n)` with `n` at most this on a slice, and
 /// `N` at most this on `[N]T`.
 pub const max_unique_items = 1000;
+/// Deepest nesting of `[` and `{` that `v.json` and `v.isJson` accept, the
+/// top level included (`[]` is 1); a deeper document fails.
+pub const max_json_depth = 64;
 
 /// One failed rule. The library builds `code` and `message` at compile time:
 /// they live as long as the program and never contain the checked value, so
@@ -1191,10 +1194,11 @@ pub const Rule = struct {
     /// with `[]` appended per `each` level. Reports problems with
     /// `@compileError`, usually through `typeError` or `ruleError`.
     fits: fn (comptime rule: *const Rule, comptime T: type, comptime where: []const u8) void,
-    /// The declaration check that also sees the other rules of the value
-    /// (`rules[index]` is this rule), run after every rule's `fits`; null
-    /// for most rules. `uniqueItems` and `uniqueBy` find the `maxItems`
-    /// before them with it.
+    /// The declaration check that also sees the other rules of the value,
+    /// run after every rule's `fits`: `rules` is the value's tuple (a
+    /// trailing `each` included) and `rules[index]` this rule; null for most
+    /// rules. `uniqueItems` and `uniqueBy` find the `maxItems` before them
+    /// with it, `minDate` and `maxDate` the date forms their neighbours need.
     check_list: ?ListCheck = null,
     /// Run-time check; receives `*const T`, with `T` unwrapped.
     eval: fn (value: anytype) Outcome,
@@ -1764,6 +1768,15 @@ pub const hints = struct {
     /// `contains` and `notContains` on a list of other items.
     pub const require_items = "use v.containsAll(.{ ... }) to require list items";
     pub const forbid_items = "use v.containsNone(.{ ... }) to forbid list items";
+    /// `minDate` and `maxDate` on a number field.
+    pub const timestamp_min = "for a numeric timestamp use v.min";
+    pub const timestamp_max = "for a numeric timestamp use v.max";
+    /// A `minDate` or `maxDate` bound that every value of its form passes.
+    pub const use_date = "use v.date";
+    pub const use_rfc3339 = "use v.rfc3339";
+    /// `iso8601` beside a `minDate` or `maxDate`, whose bound fixes the form.
+    pub const iso8601_with_date = "use v.date instead of v.iso8601";
+    pub const iso8601_with_date_time = "use v.rfc3339 instead of v.iso8601";
 
     /// A rule written on a list whose items it would accept.
     pub fn useEach(comptime rule: Rule) []const u8 {
@@ -1812,7 +1825,7 @@ pub const hints = struct {
 
 /// The files that define rules. Each rule pull request adds its file here, so
 /// that its `call_examples` reach the hints.
-const rule_files = [_]type{ @import("common.zig"), @import("numbers.zig"), @import("strings.zig"), @import("formats.zig"), @import("identifiers.zig"), @import("lists.zig"), @import("custom.zig") };
+const rule_files = [_]type{ @import("common.zig"), @import("numbers.zig"), @import("strings.zig"), @import("formats.zig"), @import("encodings.zig"), @import("identifiers.zig"), @import("dates.zig"), @import("lists.zig"), @import("custom.zig") };
 
 /// The arguments the hints show in a call of the constructor `name` of type
 /// `F`: its `call_examples` entry, else `.{}` for an options struct, the
@@ -1842,32 +1855,7 @@ fn callExample(comptime name: []const u8) ?[]const u8 {
 /// that ships them. Hints may name these rules, and the self-tests compare
 /// only the other kinds with the public names. Each rule pull request deletes
 /// its lines; the list is empty once all 96 rules are exported.
-pub const pending_kinds = [_]Kind{
-    // PR 4a
-    .date,
-    .rfc3339,
-    .iso8601,
-    .military_time,
-    // PR 4b
-    .min_date,
-    .max_date,
-    // PR 6a
-    .json,
-    .jwt,
-    .base32,
-    .base58,
-    .base64,
-    .base64_url,
-    // PR 6b
-    .data_uri,
-    .magnet_uri,
-    .mime_type,
-    .locale,
-    .sem_ver,
-    .hex_color,
-    .rgb_color,
-    .hsl_color,
-};
+pub const pending_kinds = [_]Kind{};
 
 /// `name` is the public name of a pending kind.
 fn isPending(comptime name: []const u8) bool {
@@ -1927,6 +1915,37 @@ pub fn ruleError(comptime rule: *const Rule, comptime where: []const u8, comptim
 /// The text of `ruleError`, separate so that tests can read it.
 pub fn ruleErrorText(comptime rule: *const Rule, comptime where: []const u8, comptime text: []const u8) []const u8 {
     return "validator: " ++ where ++ ": " ++ rule.label() ++ text;
+}
+
+// ------------------------------------------------------------------ string rules
+
+/// The field-type check of a rule that takes strings only.
+pub fn fitsString(comptime rule: *const Rule, comptime T: type, comptime where: []const u8) void {
+    if (stringProblem(rule, T, where, null)) |text| @compileError(text);
+}
+
+/// The declaration error of a rule that takes strings only on the unwrapped
+/// field type `T`, or null: the field is a string. The error is
+/// `<kind> expects a string, field is <T>` with the hints of `typeError`;
+/// `hint` follows when none of those applies.
+pub fn stringProblem(comptime rule: *const Rule, comptime T: type, comptime where: []const u8, comptime hint: ?[]const u8) ?[]const u8 {
+    if (isString(T)) return null;
+    return typeErrorText(rule, T, where, "a string", isString, hint);
+}
+
+/// A rule value for string fields that passes when `predicate` accepts the
+/// value, as `v.json` passes when `v.isJson` does: no parameters, no
+/// precondition, and the rule and its predicate always agree.
+pub fn predicateRule(comptime kind: Kind, comptime message: []const u8, comptime predicate: fn ([]const u8) bool) Rule {
+    return define(kind, .{
+        .message = message,
+        .fits = fitsString,
+        .eval = struct {
+            fn eval(value: anytype) Outcome {
+                return passIf(predicate(value.*));
+            }
+        }.eval,
+    });
 }
 
 // ------------------------------------------------------------------ number parameters

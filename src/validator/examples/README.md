@@ -43,7 +43,8 @@ if (v.check(&request, &path_buf)) |violation| {
 - [All rules](#all-rules)
 
 Rules by category: [Common](common.md) · [Numbers](numbers.md) · [Strings](strings.md) ·
-[Formats](formats.md) · [Identifiers](identifiers.md) · [Lists](lists.md) ·
+[Formats](formats.md) · [Encodings](encodings.md) · [Identifiers](identifiers.md) ·
+[Dates](dates.md) · [Lists](lists.md) ·
 [Coming from class-validator](class_validator.md)
 
 Examples that `zig build test` compiles and runs:
@@ -742,6 +743,11 @@ that read code points need valid UTF-8: invalid UTF-8 fails `v.minLength`,
 `v.maxLength`, `v.length`, `v.notBlank`, `v.fullWidth`, `v.halfWidth`,
 `v.variableWidth` and `v.strongPassword` with `validation.utf8` /
 `must be valid UTF-8` ([D13](class_validator.md#deviations-from-validatorjs)).
+`v.minDate` and `v.maxDate` need a value of the form of their bound: with a
+date bound, a value that is not a date fails with `validation.date` /
+`must be a valid date in YYYY-MM-DD format`; with a date-time bound, a value
+that is not an RFC 3339 date-time fails with `validation.rfc3339` /
+`must be a valid RFC 3339 date-time` ([Dates](dates.md#vmindatemin)).
 
 - The code and the message of a precondition are fixed: `.withMessage` does not
   change them. `v.positive.withMessage("must be above zero")` reports
@@ -1027,6 +1033,7 @@ library runs. These errors point at your line and do not start with
 | `v.max_message_bytes` | 512 | a message, in bytes |
 | `v.max_report_violations` | 100 | the violations in a `Report` |
 | `v.max_unique_items` | 1000 | the items of a list whose integers, strings or non-exhaustive enum tags `v.uniqueItems` and `v.uniqueBy` compare: a slice needs an earlier `v.maxItems(n)` with `n` at most this, `[N]T` an `N` at most this |
+| `v.max_json_depth` | 64 | the nesting of a JSON text that `v.json` and `v.isJson` accept |
 
 The limits are `comptime_int` constants and part of the contract (see below).
 
@@ -1112,6 +1119,20 @@ The limits are `comptime_int` constants and part of the contract (see below).
 | `v.ipv4` | a string is an IPv4 address | `validation.ipv4` | [formats](formats.md#vipv4) |
 | `v.ipv6` | a string is an IPv6 address | `validation.ipv6` | [formats](formats.md#vipv6) |
 | `v.macAddress(.{ ... })` | a string is a MAC address | `validation.mac_address` | [formats](formats.md#vmacaddressoptions) |
+| `v.json` | a string is a JSON object or array, nested at most 64 levels | `validation.json` | [encodings](encodings.md#vjson) |
+| `v.jwt` | a string has the shape of a JWT | `validation.jwt` | [encodings](encodings.md#vjwt) |
+| `v.base32` | a string is canonical padded base32 | `validation.base32` | [encodings](encodings.md#vbase32) |
+| `v.base58` | a string uses the base58 alphabet | `validation.base58` | [encodings](encodings.md#vbase58) |
+| `v.base64` | a string is canonical padded base64 | `validation.base64` | [encodings](encodings.md#vbase64) |
+| `v.base64Url` | a string is canonical base64url without padding | `validation.base64_url` | [encodings](encodings.md#vbase64url) |
+| `v.dataUri` | a string is an RFC 2397 data URL | `validation.data_uri` | [encodings](encodings.md#vdatauri) |
+| `v.magnetUri` | a string is a magnet URI with an exact topic | `validation.magnet_uri` | [encodings](encodings.md#vmagneturi) |
+| `v.mimeType` | a string is a media type with parameters | `validation.mime_type` | [encodings](encodings.md#vmimetype) |
+| `v.locale` | a string is a well-formed BCP 47 language tag | `validation.locale` | [encodings](encodings.md#vlocale) |
+| `v.semVer` | a string is a semantic version | `validation.sem_ver` | [encodings](encodings.md#vsemver) |
+| `v.hexColor` | a string is a CSS hex color | `validation.hex_color` | [encodings](encodings.md#vhexcolor) |
+| `v.rgbColor` | a string is a CSS `rgb()` or `rgba()` color | `validation.rgb_color` | [encodings](encodings.md#vrgbcolor) |
+| `v.hslColor` | a string is a CSS `hsl()` or `hsla()` color | `validation.hsl_color` | [encodings](encodings.md#vhslcolor) |
 | `v.uuid` | a string is a UUID: 8-4-4-4-12 hex digits | `validation.uuid` | [identifiers](identifiers.md#vuuid) |
 | `v.mongoId` | a string is a MongoDB ObjectId: 24 hex digits | `validation.mongo_id` | [identifiers](identifiers.md#vmongoid) |
 | `v.firebasePushId` | a string is a Firebase push ID | `validation.firebase_push_id` | [identifiers](identifiers.md#vfirebasepushid) |
@@ -1128,6 +1149,12 @@ The limits are `comptime_int` constants and part of the contract (see below).
 | `v.iban` | a string is an IBAN | `validation.iban` | [identifiers](identifiers.md#viban) |
 | `v.btcAddress(network)` | a string is a Bitcoin address of `network` | `validation.btc_address` | [identifiers](identifiers.md#vbtcaddressnetwork) |
 | `v.ethereumAddress` | a string is an Ethereum address | `validation.ethereum_address` | [identifiers](identifiers.md#vethereumaddress) |
+| `v.date` | a string is a date `YYYY-MM-DD` | `validation.date` | [dates](dates.md#vdate) |
+| `v.rfc3339` | a string is an RFC 3339 date-time with an offset | `validation.rfc3339` | [dates](dates.md#vrfc3339) |
+| `v.iso8601` | a string is an ISO 8601 date or date-time | `validation.iso8601` | [dates](dates.md#viso8601) |
+| `v.minDate(min)` | a date or a date-time is not before `min` | `validation.min_date` | [dates](dates.md#vmindatemin) |
+| `v.maxDate(max)` | a date or a date-time is not after `max` | `validation.max_date` | [dates](dates.md#vmaxdatemax) |
+| `v.militaryTime` | a string is a time `HH:MM` or `HHMM` | `validation.military_time` | [dates](dates.md#vmilitarytime) |
 | `v.minItems(min)` | a slice has at least `min` items | `validation.min_items` | [lists](lists.md#vminitemsmin) |
 | `v.maxItems(max)` | a slice has at most `max` items | `validation.max_items` | [lists](lists.md#vmaxitemsmax) |
 | `v.uniqueItems` | no two items of a slice or an array are equal | `validation.unique_items` | [lists](lists.md#vuniqueitems) |

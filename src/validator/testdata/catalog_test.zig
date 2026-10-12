@@ -641,6 +641,118 @@ test "macAddress is a rule constructor with code validation.mac_address and mess
     try expectNoViolation([]const u8, v.macAddress(.{}), "00-00-5E-00-53-01");
 }
 
+test "json is a rule value with code validation.json and message \"must be a valid JSON object or array\"" {
+    try testing.expect(@hasDecl(v, "json"));
+    try testing.expect(@TypeOf(v.json) == v.Rule);
+    try expectRule(v.json, "validation.json", "must be a valid JSON object or array", "must be a valid JSON object or array");
+    try expectViolation([]const u8, v.json, "1", "validation.json", "must be a valid JSON object or array", "x");
+    try expectNoViolation([]const u8, v.json, "{\"a\":[1]}");
+}
+
+test "jwt is a rule value with code validation.jwt and message \"must be a valid JWT\"" {
+    try testing.expect(@hasDecl(v, "jwt"));
+    try testing.expect(@TypeOf(v.jwt) == v.Rule);
+    try expectRule(v.jwt, "validation.jwt", "must be a valid JWT", "must be a valid JWT");
+    try expectViolation([]const u8, v.jwt, "e30.e30", "validation.jwt", "must be a valid JWT", "x");
+    try expectNoViolation([]const u8, v.jwt, "e30.e30.e30");
+}
+
+test "base32 is a rule value with code validation.base32 and message \"must be valid base32\"" {
+    try testing.expect(@hasDecl(v, "base32"));
+    try testing.expect(@TypeOf(v.base32) == v.Rule);
+    try expectRule(v.base32, "validation.base32", "must be valid base32", "must be valid base32");
+    try expectViolation([]const u8, v.base32, "MZXW6YTBOI", "validation.base32", "must be valid base32", "x");
+    try expectNoViolation([]const u8, v.base32, "MZXW6YTBOI======");
+}
+
+test "base58 is a rule value with code validation.base58 and message \"must be valid base58\"" {
+    try testing.expect(@hasDecl(v, "base58"));
+    try testing.expect(@TypeOf(v.base58) == v.Rule);
+    try expectRule(v.base58, "validation.base58", "must be valid base58", "must be valid base58");
+    try expectViolation([]const u8, v.base58, "0OIl", "validation.base58", "must be valid base58", "x");
+    try expectNoViolation([]const u8, v.base58, "3yZe7d");
+}
+
+test "base64 is a rule value with code validation.base64 and message \"must be valid base64\"" {
+    try testing.expect(@hasDecl(v, "base64"));
+    try testing.expect(@TypeOf(v.base64) == v.Rule);
+    try expectRule(v.base64, "validation.base64", "must be valid base64", "must be valid base64");
+    try expectViolation([]const u8, v.base64, "Zg", "validation.base64", "must be valid base64", "x");
+    try expectNoViolation([]const u8, v.base64, "Zg==");
+}
+
+test "base64Url is a rule value with code validation.base64_url and message \"must be valid base64url\"" {
+    try testing.expect(@hasDecl(v, "base64Url"));
+    try testing.expect(@TypeOf(v.base64Url) == v.Rule);
+    try expectRule(v.base64Url, "validation.base64_url", "must be valid base64url", "must be valid base64url");
+    try expectViolation([]const u8, v.base64Url, "Zg==", "validation.base64_url", "must be valid base64url", "x");
+    try expectNoViolation([]const u8, v.base64Url, "Zg");
+}
+
+test "dataUri is a rule value with code validation.data_uri and message \"must be a valid data URI\"" {
+    try testing.expect(@hasDecl(v, "dataUri"));
+    try testing.expect(@TypeOf(v.dataUri) == v.Rule);
+    try expectRule(v.dataUri, "validation.data_uri", "must be a valid data URI", "must be a valid data URI");
+    try expectViolation([]const u8, v.dataUri, "data:text/plain", "validation.data_uri", "must be a valid data URI", "x");
+    try expectNoViolation([]const u8, v.dataUri, "data:,A%20brief%20note");
+}
+
+test "magnetUri is a rule value with code validation.magnet_uri and message \"must be a valid magnet URI\"" {
+    try testing.expect(@hasDecl(v, "magnetUri"));
+    try testing.expect(@TypeOf(v.magnetUri) == v.Rule);
+    try expectRule(v.magnetUri, "validation.magnet_uri", "must be a valid magnet URI", "must be a valid magnet URI");
+    try expectViolation([]const u8, v.magnetUri, "magnet:?", "validation.magnet_uri", "must be a valid magnet URI", "x");
+    try expectNoViolation([]const u8, v.magnetUri, "magnet:?xt=urn:btih:c12fe1c06bba254a9dc9f519b335aa7c1367a88a");
+}
+
+test "mimeType is a rule value with code validation.mime_type and message \"must be a valid MIME type\"" {
+    try testing.expect(@hasDecl(v, "mimeType"));
+    try testing.expect(@TypeOf(v.mimeType) == v.Rule);
+    try expectRule(v.mimeType, "validation.mime_type", "must be a valid MIME type", "must be a valid MIME type");
+    try expectViolation([]const u8, v.mimeType, "text", "validation.mime_type", "must be a valid MIME type", "x");
+    try expectNoViolation([]const u8, v.mimeType, "application/json; charset=utf-8");
+}
+
+test "locale is a rule value with code validation.locale and message \"must be a valid locale\"" {
+    try testing.expect(@hasDecl(v, "locale"));
+    try testing.expect(@TypeOf(v.locale) == v.Rule);
+    try expectRule(v.locale, "validation.locale", "must be a valid locale", "must be a valid locale");
+    try expectViolation([]const u8, v.locale, "en_US", "validation.locale", "must be a valid locale", "x");
+    try expectNoViolation([]const u8, v.locale, "en-US");
+}
+
+test "semVer is a rule value with code validation.sem_ver and message \"must be a valid semantic version\"" {
+    try testing.expect(@hasDecl(v, "semVer"));
+    try testing.expect(@TypeOf(v.semVer) == v.Rule);
+    try expectRule(v.semVer, "validation.sem_ver", "must be a valid semantic version", "must be a valid semantic version");
+    try expectViolation([]const u8, v.semVer, "v1.2.3", "validation.sem_ver", "must be a valid semantic version", "x");
+    try expectNoViolation([]const u8, v.semVer, "1.2.3-alpha.1+build.5");
+}
+
+test "hexColor is a rule value with code validation.hex_color and message \"must be a valid hex color\"" {
+    try testing.expect(@hasDecl(v, "hexColor"));
+    try testing.expect(@TypeOf(v.hexColor) == v.Rule);
+    try expectRule(v.hexColor, "validation.hex_color", "must be a valid hex color", "must be a valid hex color");
+    try expectViolation([]const u8, v.hexColor, "fff", "validation.hex_color", "must be a valid hex color", "x");
+    try expectNoViolation([]const u8, v.hexColor, "#ff0000");
+}
+
+test "rgbColor is a rule value with code validation.rgb_color and message \"must be a valid RGB color\"" {
+    try testing.expect(@hasDecl(v, "rgbColor"));
+    try testing.expect(@TypeOf(v.rgbColor) == v.Rule);
+    try expectRule(v.rgbColor, "validation.rgb_color", "must be a valid RGB color", "must be a valid RGB color");
+    try expectViolation([]const u8, v.rgbColor, "rgb(256,0,0)", "validation.rgb_color", "must be a valid RGB color", "x");
+    try expectNoViolation([]const u8, v.rgbColor, "rgb(255, 0, 0)");
+}
+
+test "hslColor is a rule value with code validation.hsl_color and message \"must be a valid HSL color\"" {
+    try testing.expect(@hasDecl(v, "hslColor"));
+    try testing.expect(@TypeOf(v.hslColor) == v.Rule);
+    try expectRule(v.hslColor, "validation.hsl_color", "must be a valid HSL color", "must be a valid HSL color");
+    try expectViolation([]const u8, v.hslColor, "hsl(120,100,50%)", "validation.hsl_color", "must be a valid HSL color", "x");
+    try expectNoViolation([]const u8, v.hslColor, "hsl(120 100% 50% / 0.5)");
+}
+
 test "uuid is a rule value with code validation.uuid and message \"must be a valid UUID\"; no precondition" {
     try testing.expect(@hasDecl(v, "uuid"));
     try testing.expect(@TypeOf(v.uuid) == v.Rule);
@@ -801,6 +913,63 @@ test "ethereumAddress is a rule value with code validation.ethereum_address and 
     try expectViolation([]const u8, v.ethereumAddress, "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAeD", "validation.ethereum_address", "must be a valid Ethereum address", "x");
     try expectViolation([]const u8, v.ethereumAddress.withMessage("another message"), "\xff", "validation.ethereum_address", "another message", "x");
     try expectNoViolation([]const u8, v.ethereumAddress, "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed");
+}
+
+test "date is a rule value with code validation.date and message \"must be a valid date in YYYY-MM-DD format\"" {
+    try testing.expect(@hasDecl(v, "date"));
+    try testing.expect(@TypeOf(v.date) == v.Rule);
+    try expectRule(v.date, "validation.date", "must be a valid date in YYYY-MM-DD format", "must be a valid date in YYYY-MM-DD format");
+    try expectViolation([]const u8, v.date, "2021-02-29", "validation.date", "must be a valid date in YYYY-MM-DD format", "x");
+    try expectNoViolation([]const u8, v.date, "2020-02-29");
+}
+
+test "rfc3339 is a rule value with code validation.rfc3339 and message \"must be a valid RFC 3339 date-time\"" {
+    try testing.expect(@hasDecl(v, "rfc3339"));
+    try testing.expect(@TypeOf(v.rfc3339) == v.Rule);
+    try expectRule(v.rfc3339, "validation.rfc3339", "must be a valid RFC 3339 date-time", "must be a valid RFC 3339 date-time");
+    try expectViolation([]const u8, v.rfc3339, "2020-05-17T10:30:00", "validation.rfc3339", "must be a valid RFC 3339 date-time", "x");
+    try expectNoViolation([]const u8, v.rfc3339, "2020-05-17T10:30:00Z");
+}
+
+test "iso8601 is a rule value with code validation.iso8601 and message \"must be a valid ISO 8601 date\"" {
+    try testing.expect(@hasDecl(v, "iso8601"));
+    try testing.expect(@TypeOf(v.iso8601) == v.Rule);
+    try expectRule(v.iso8601, "validation.iso8601", "must be a valid ISO 8601 date", "must be a valid ISO 8601 date");
+    try expectViolation([]const u8, v.iso8601, "2020-W00", "validation.iso8601", "must be a valid ISO 8601 date", "x");
+    try expectNoViolation([]const u8, v.iso8601, "2020-W20-7");
+}
+
+/// A date-time bound whose default message would be longer than 512 bytes.
+const long_date_time = "2020-01-01T00:00:00." ++ @as([600]u8, @splat('0')) ++ "Z";
+
+test "minDate is a rule constructor with code validation.min_date and message \"must not be before {min}\", or \"must not be before the minimum date\" when that would be longer than 512 bytes; placeholder {min}" {
+    try testing.expect(@hasDecl(v, "minDate"));
+    try testing.expect(@typeInfo(@TypeOf(v.minDate)).@"fn".return_type == v.Rule);
+    try expectRule(v.minDate("2020-01-01"), "validation.min_date", "must not be before 2020-01-01", "must not be before {min}");
+    try expectPlaceholder(v.minDate("2020-01-01"), "{min}", "2020-01-01");
+    try expectViolation([]const u8, v.minDate("2020-01-01"), "2019-12-31", "validation.min_date", "must not be before 2020-01-01", "x");
+    try expectRule(v.minDate(long_date_time), "validation.min_date", "must not be before the minimum date", "must not be before the minimum date");
+    try expectViolation([]const u8, v.minDate(long_date_time), "2019-12-31T23:59:59Z", "validation.min_date", "must not be before the minimum date", "x");
+    try expectNoViolation([]const u8, v.minDate("2020-01-01"), "2020-01-01");
+}
+
+test "maxDate is a rule constructor with code validation.max_date and message \"must not be after {max}\", or \"must not be after the maximum date\" when that would be longer than 512 bytes; placeholder {max}" {
+    try testing.expect(@hasDecl(v, "maxDate"));
+    try testing.expect(@typeInfo(@TypeOf(v.maxDate)).@"fn".return_type == v.Rule);
+    try expectRule(v.maxDate("2020-12-31"), "validation.max_date", "must not be after 2020-12-31", "must not be after {max}");
+    try expectPlaceholder(v.maxDate("2020-12-31"), "{max}", "2020-12-31");
+    try expectViolation([]const u8, v.maxDate("2020-12-31"), "2021-01-01", "validation.max_date", "must not be after 2020-12-31", "x");
+    try expectRule(v.maxDate(long_date_time), "validation.max_date", "must not be after the maximum date", "must not be after the maximum date");
+    try expectViolation([]const u8, v.maxDate(long_date_time), "2020-01-01T00:00:01Z", "validation.max_date", "must not be after the maximum date", "x");
+    try expectNoViolation([]const u8, v.maxDate("2020-12-31"), "2020-12-31");
+}
+
+test "militaryTime is a rule value with code validation.military_time and message \"must be a valid time in 24-hour HH:MM format\"" {
+    try testing.expect(@hasDecl(v, "militaryTime"));
+    try testing.expect(@TypeOf(v.militaryTime) == v.Rule);
+    try expectRule(v.militaryTime, "validation.military_time", "must be a valid time in 24-hour HH:MM format", "must be a valid time in 24-hour HH:MM format");
+    try expectViolation([]const u8, v.militaryTime, "24:00", "validation.military_time", "must be a valid time in 24-hour HH:MM format", "x");
+    try expectNoViolation([]const u8, v.militaryTime, "23:59");
 }
 
 test "minItems is a rule constructor with code validation.min_items and message \"must have at least {min} items\", or \"must have at least 1 item\" when min = 1; placeholder {min}" {
@@ -1035,26 +1204,45 @@ test "finite has no precondition: nan, inf and -inf on a float field fail its ow
     }
 }
 
-test "the module exports exactly its 139 public names, and Rule.withMessage" {
+test "minDate fails a value without the form of its bound with the date-form precondition, also under withMessage" {
+    try expectViolation([]const u8, v.minDate("2020-01-01"), "2020-01-01T00:00:00Z", "validation.date", "must be a valid date in YYYY-MM-DD format", "x");
+    try expectViolation([]const u8, v.minDate("2020-01-01").withMessage("another message"), "", "validation.date", "must be a valid date in YYYY-MM-DD format", "x");
+    try expectViolation([]const u8, v.minDate("2020-01-01T00:00:00Z"), "2020-01-01", "validation.rfc3339", "must be a valid RFC 3339 date-time", "x");
+    try expectViolation([]const u8, v.minDate("2020-01-01T00:00:00Z").withMessage("another message"), "", "validation.rfc3339", "must be a valid RFC 3339 date-time", "x");
+}
+
+test "maxDate fails a value without the form of its bound with the date-form precondition, also under withMessage" {
+    try expectViolation([]const u8, v.maxDate("2020-12-31"), "2020-12-31T00:00:00Z", "validation.date", "must be a valid date in YYYY-MM-DD format", "x");
+    try expectViolation([]const u8, v.maxDate("2020-12-31").withMessage("another message"), "", "validation.date", "must be a valid date in YYYY-MM-DD format", "x");
+    try expectViolation([]const u8, v.maxDate("2020-12-31T23:59:59Z"), "2020-12-31", "validation.rfc3339", "must be a valid RFC 3339 date-time", "x");
+    try expectViolation([]const u8, v.maxDate("2020-12-31T23:59:59Z").withMessage("another message"), "", "validation.rfc3339", "must be a valid RFC 3339 date-time", "x");
+}
+
+test "the module exports exactly its 178 public names, and Rule.withMessage" {
     const names = [_][]const u8{
-        "Violation",         "Rule",           "Report",         "max_code_bytes",   "max_message_bytes", "max_report_violations", "max_unique_items", "check",
-        "checkAll",          "assertRules",    "fail",           "equals",           "notEquals",         "oneOf",                 "noneOf",           "empty",
-        "notEmpty",          "min",            "max",            "range",            "positive",          "nonNegative",           "negative",         "nonPositive",
-        "divisibleBy",       "finite",         "minLength",      "maxLength",        "length",            "minBytes",              "maxBytes",         "utf8",
-        "notBlank",          "ascii",          "printableAscii", "alphanumeric",     "alpha",             "digits",                "lowercase",        "uppercase",
-        "multibyte",         "fullWidth",      "halfWidth",      "variableWidth",    "contains",          "notContains",           "strongPassword",   "StrongPasswordOptions",
-        "isUtf8",            "isNotBlank",     "isAscii",        "isPrintableAscii", "isAlphanumeric",    "isAlpha",               "isDigits",         "isLowercase",
-        "isUppercase",       "isMultibyte",    "isFullWidth",    "isHalfWidth",      "isVariableWidth",   "isStrongPassword",      "numberString",     "decimal",
-        "booleanString",     "hexadecimal",    "octal",          "port",             "latitude",          "longitude",             "latLong",          "email",
-        "httpUrl",           "fqdn",           "ip",             "ipv4",             "ipv6",              "macAddress",            "DecimalOptions",   "FqdnOptions",
-        "MacAddressOptions", "isNumberString", "isDecimal",      "isBooleanString",  "isHexadecimal",     "isOctal",               "isPort",           "isLatitude",
-        "isLongitude",       "isLatLong",      "isEmail",        "isHttpUrl",        "isFqdn",            "isIp",                  "isIpv4",           "isIpv6",
-        "isMacAddress",      "uuid",           "mongoId",        "firebasePushId",   "hash",              "creditCard",            "isbn",             "isbn10",
-        "isbn13",            "issn",           "ean",            "isin",             "isrc",              "bic",                   "iban",             "btcAddress",
-        "ethereumAddress",   "isUuid",         "isMongoId",      "isFirebasePushId", "isHash",            "isCreditCard",          "isIsbn",           "isIsbn10",
-        "isIsbn13",          "isIssn",         "isEan",          "isIsin",           "isIsrc",            "isBic",                 "isIban",           "isBtcAddress",
-        "isEthereumAddress", "HashAlgorithm",  "BtcNetwork",     "minItems",         "maxItems",          "uniqueItems",           "uniqueBy",         "containsAll",
-        "containsNone",      "each",           "custom",
+        "Violation",             "Rule",              "Report",         "max_code_bytes", "max_message_bytes", "max_report_violations", "max_unique_items", "max_json_depth",
+        "check",                 "checkAll",          "assertRules",    "fail",           "equals",            "notEquals",             "oneOf",            "noneOf",
+        "empty",                 "notEmpty",          "min",            "max",            "range",             "positive",              "nonNegative",      "negative",
+        "nonPositive",           "divisibleBy",       "finite",         "minLength",      "maxLength",         "length",                "minBytes",         "maxBytes",
+        "utf8",                  "notBlank",          "ascii",          "printableAscii", "alphanumeric",      "alpha",                 "digits",           "lowercase",
+        "uppercase",             "multibyte",         "fullWidth",      "halfWidth",      "variableWidth",     "contains",              "notContains",      "strongPassword",
+        "StrongPasswordOptions", "isUtf8",            "isNotBlank",     "isAscii",        "isPrintableAscii",  "isAlphanumeric",        "isAlpha",          "isDigits",
+        "isLowercase",           "isUppercase",       "isMultibyte",    "isFullWidth",    "isHalfWidth",       "isVariableWidth",       "isStrongPassword", "numberString",
+        "decimal",               "booleanString",     "hexadecimal",    "octal",          "port",              "latitude",              "longitude",        "latLong",
+        "email",                 "httpUrl",           "fqdn",           "ip",             "ipv4",              "ipv6",                  "macAddress",       "DecimalOptions",
+        "FqdnOptions",           "MacAddressOptions", "isNumberString", "isDecimal",      "isBooleanString",   "isHexadecimal",         "isOctal",          "isPort",
+        "isLatitude",            "isLongitude",       "isLatLong",      "isEmail",        "isHttpUrl",         "isFqdn",                "isIp",             "isIpv4",
+        "isIpv6",                "isMacAddress",      "json",           "isJson",         "jwt",               "isJwt",                 "base32",           "isBase32",
+        "base58",                "isBase58",          "base64",         "isBase64",       "base64Url",         "isBase64Url",           "dataUri",          "isDataUri",
+        "magnetUri",             "isMagnetUri",       "mimeType",       "isMimeType",     "locale",            "isLocale",              "semVer",           "isSemVer",
+        "hexColor",              "isHexColor",        "rgbColor",       "isRgbColor",     "hslColor",          "isHslColor",            "uuid",             "mongoId",
+        "firebasePushId",        "hash",              "creditCard",     "isbn",           "isbn10",            "isbn13",                "issn",             "ean",
+        "isin",                  "isrc",              "bic",            "iban",           "btcAddress",        "ethereumAddress",       "isUuid",           "isMongoId",
+        "isFirebasePushId",      "isHash",            "isCreditCard",   "isIsbn",         "isIsbn10",          "isIsbn13",              "isIssn",           "isEan",
+        "isIsin",                "isIsrc",            "isBic",          "isIban",         "isBtcAddress",      "isEthereumAddress",     "HashAlgorithm",    "BtcNetwork",
+        "date",                  "isDate",            "rfc3339",        "isRfc3339",      "iso8601",           "isIso8601",             "minDate",          "maxDate",
+        "militaryTime",          "isMilitaryTime",    "minItems",       "maxItems",       "uniqueItems",       "uniqueBy",              "containsAll",      "containsNone",
+        "each",                  "custom",
     };
     inline for (names) |name| try testing.expect(@hasDecl(v, name));
     try testing.expectEqual(names.len, comptime std.meta.declarations(v).len);
@@ -1066,16 +1254,18 @@ test "every rule the module exports has a catalog test" {
     // comptime branches than a test allows by default.
     @setEvalBranchQuota(100_000);
     const tested = [_][]const u8{
-        "equals",        "notEquals",    "oneOf",       "noneOf",          "empty",        "notEmpty",    "min",            "max",
-        "range",         "positive",     "nonNegative", "negative",        "nonPositive",  "divisibleBy", "finite",         "minLength",
-        "maxLength",     "length",       "minBytes",    "maxBytes",        "utf8",         "notBlank",    "ascii",          "printableAscii",
-        "alphanumeric",  "alpha",        "digits",      "lowercase",       "uppercase",    "multibyte",   "fullWidth",      "halfWidth",
-        "variableWidth", "contains",     "notContains", "strongPassword",  "numberString", "decimal",     "booleanString",  "hexadecimal",
-        "octal",         "port",         "latitude",    "longitude",       "latLong",      "email",       "httpUrl",        "fqdn",
-        "ip",            "ipv4",         "ipv6",        "macAddress",      "uuid",         "mongoId",     "firebasePushId", "hash",
-        "creditCard",    "isbn",         "isbn10",      "isbn13",          "issn",         "ean",         "isin",           "isrc",
-        "bic",           "iban",         "btcAddress",  "ethereumAddress", "minItems",     "maxItems",    "uniqueItems",    "uniqueBy",
-        "containsAll",   "containsNone", "each",        "custom",
+        "equals",        "notEquals",       "oneOf",       "noneOf",         "empty",          "notEmpty",     "min",           "max",
+        "range",         "positive",        "nonNegative", "negative",       "nonPositive",    "divisibleBy",  "finite",        "minLength",
+        "maxLength",     "length",          "minBytes",    "maxBytes",       "utf8",           "notBlank",     "ascii",         "printableAscii",
+        "alphanumeric",  "alpha",           "digits",      "lowercase",      "uppercase",      "multibyte",    "fullWidth",     "halfWidth",
+        "variableWidth", "contains",        "notContains", "strongPassword", "numberString",   "decimal",      "booleanString", "hexadecimal",
+        "octal",         "port",            "latitude",    "longitude",      "latLong",        "email",        "httpUrl",       "fqdn",
+        "ip",            "ipv4",            "ipv6",        "macAddress",     "json",           "jwt",          "base32",        "base58",
+        "base64",        "base64Url",       "dataUri",     "magnetUri",      "mimeType",       "locale",       "semVer",        "hexColor",
+        "rgbColor",      "hslColor",        "uuid",        "mongoId",        "firebasePushId", "hash",         "creditCard",    "isbn",
+        "isbn10",        "isbn13",          "issn",        "ean",            "isin",           "isrc",         "bic",           "iban",
+        "btcAddress",    "ethereumAddress", "date",        "rfc3339",        "iso8601",        "minDate",      "maxDate",       "militaryTime",
+        "minItems",      "maxItems",        "uniqueItems", "uniqueBy",       "containsAll",    "containsNone", "each",          "custom",
     };
     inline for (comptime std.meta.declarations(v)) |name| {
         const T = @TypeOf(@field(v, name));
@@ -1094,12 +1284,14 @@ test "every rule the module exports has a catalog test" {
 test "the module exports exactly the catalog predicates of the shipped rules" {
     @setEvalBranchQuota(100_000);
     const predicates = [_][]const u8{
-        "isUtf8",           "isNotBlank",    "isAscii",      "isPrintableAscii", "isAlphanumeric",  "isAlpha",           "isDigits",       "isLowercase",
-        "isUppercase",      "isMultibyte",   "isFullWidth",  "isHalfWidth",      "isVariableWidth", "isStrongPassword",  "isNumberString", "isDecimal",
-        "isBooleanString",  "isHexadecimal", "isOctal",      "isPort",           "isLatitude",      "isLongitude",       "isLatLong",      "isEmail",
-        "isHttpUrl",        "isFqdn",        "isIp",         "isIpv4",           "isIpv6",          "isMacAddress",      "isUuid",         "isMongoId",
-        "isFirebasePushId", "isHash",        "isCreditCard", "isIsbn",           "isIsbn10",        "isIsbn13",          "isIssn",         "isEan",
-        "isIsin",           "isIsrc",        "isBic",        "isIban",           "isBtcAddress",    "isEthereumAddress",
+        "isUtf8",          "isNotBlank",    "isAscii",      "isPrintableAscii",  "isAlphanumeric",  "isAlpha",          "isDigits",         "isLowercase",
+        "isUppercase",     "isMultibyte",   "isFullWidth",  "isHalfWidth",       "isVariableWidth", "isStrongPassword", "isNumberString",   "isDecimal",
+        "isBooleanString", "isHexadecimal", "isOctal",      "isPort",            "isLatitude",      "isLongitude",      "isLatLong",        "isEmail",
+        "isHttpUrl",       "isFqdn",        "isIp",         "isIpv4",            "isIpv6",          "isMacAddress",     "isJson",           "isJwt",
+        "isBase32",        "isBase58",      "isBase64",     "isBase64Url",       "isDataUri",       "isMagnetUri",      "isMimeType",       "isLocale",
+        "isSemVer",        "isHexColor",    "isRgbColor",   "isHslColor",        "isUuid",          "isMongoId",        "isFirebasePushId", "isHash",
+        "isCreditCard",    "isIsbn",        "isIsbn10",     "isIsbn13",          "isIssn",          "isEan",            "isIsin",           "isIsrc",
+        "isBic",           "isIban",        "isBtcAddress", "isEthereumAddress", "isDate",          "isRfc3339",        "isIso8601",        "isMilitaryTime",
     };
     comptime var exported: usize = 0;
     inline for (comptime std.meta.declarations(v)) |name| {
@@ -1182,4 +1374,6 @@ test "the limits have their catalog values" {
     try testing.expectEqual(100, v.max_report_violations);
     try testing.expect(@TypeOf(v.max_unique_items) == comptime_int);
     try testing.expectEqual(1000, v.max_unique_items);
+    try testing.expect(@TypeOf(v.max_json_depth) == comptime_int);
+    try testing.expectEqual(64, v.max_json_depth);
 }
