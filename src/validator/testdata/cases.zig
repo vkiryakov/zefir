@@ -29,6 +29,7 @@ pub const test_files = [_][]const u8{
     "src/validator/testdata/self_test.zig",
     "src/validator/testdata/common_test.zig",
     "src/validator/testdata/numbers_test.zig",
+    "src/validator/testdata/formats_test.zig",
     "src/validator/testdata/lists_test.zig",
     "src/validator/testdata/custom_test.zig",
     "src/validator/testdata/field_types_test.zig",

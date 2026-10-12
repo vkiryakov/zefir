@@ -1,0 +1,697 @@
+//! Format rules: numbers, booleans and coordinates written as strings
+//! (`numberString`, `decimal`, `booleanString`, `hexadecimal`, `octal`,
+//! `port`, `latitude`, `longitude`, `latLong`), each with its predicate
+//! (`isNumberString`, ...). Every grammar is ASCII and is read byte by byte:
+//! nothing is trimmed or decoded, so invalid UTF-8 and any byte >= 0x80 fail
+//! under the rule's own code, and "" fails every rule of this file. A
+//! predicate takes any bytes, never allocates, never backtracks and runs in
+//! O(n); `v.isX(s)` is true exactly when the rule `v.x` passes `s`.
+//! `latitude` and `longitude` also take float fields, where they are range
+//! checks behind the finite precondition; their predicates cover strings
+//! only.
+const std = @import("std");
+const core = @import("core.zig");
+const Rule = core.Rule;
+const Outcome = core.Outcome;
+
+/// How compile errors and hints show the options of a rule:
+/// `decimal(.{...})`, `use v.each(v.decimal(.{...}))`, whatever the options.
+const options_args = ".{...}";
+
+// ------------------------------------------------------------------ options
+
+/// The options of `v.decimal(.{ ... })` and `v.isDecimal`, the names of
+/// validator.js `isDecimal` (en-US).
+pub const DecimalOptions = struct {
+    /// The point and at least `min_decimal_digits` digits after it are
+    /// required: "12" fails.
+    force_decimal: bool = false,
+    /// The fewest digits after the point, when there is one; at least 1 in
+    /// the rule.
+    min_decimal_digits: usize = 1,
+    /// The most digits after the point; null for no limit. When set, at
+    /// least `min_decimal_digits` in the rule.
+    max_decimal_digits: ?usize = null,
+};
+
+// ------------------------------------------------------------------ numbers in strings
+
+fn isDigit(c: u8) bool {
+    return c >= '0' and c <= '9';
+}
+
+/// The length of the run of ASCII digits at the start of `s`.
+fn digitRun(s: []const u8) usize {
+    var i: usize = 0;
+    while (i < s.len and isDigit(s[i])) i += 1;
+    return i;
+}
+
+fn allDigits(s: []const u8) bool {
+    return digitRun(s) == s.len;
+}
+
+/// `s` without one leading '+' or '-'.
+fn skipSign(s: []const u8) []const u8 {
+    return if (s.len != 0 and (s[0] == '+' or s[0] == '-')) s[1..] else s;
+}
+
+/// The value of 1-3 ASCII digits; callers check the length of the run.
+fn smallValue(digits: []const u8) u16 {
+    var value: u16 = 0;
+    for (digits) |c| value = value * 10 + (c - '0');
+    return value;
+}
+
+/// A number in decimal notation, as validator.js `isNumeric` reads it with
+/// its default options: one optional leading '+' or '-', then 1 or more
+/// ASCII digits, or 0 or more digits, '.', and 1 or more digits (".5" and
+/// "-.5" pass). No exponent, digit grouping, '_' or whitespace; the
+/// magnitude is not limited, so combine the rule with a length limit.
+pub fn isNumberString(s: []const u8) bool {
+    const r = skipSign(s);
+    const whole = digitRun(r);
+    if (whole == r.len) return whole != 0;
+    if (r[whole] != '.') return false;
+    const fraction = r[whole + 1 ..];
+    return fraction.len != 0 and allDigits(fraction);
+}
+
+/// A decimal number, as validator.js `isDecimal` reads it with these
+/// options and the en-US locale: one optional leading '+' or '-', a run of
+/// ASCII digits, then either the end (when `force_decimal` is false and the
+/// run is not empty) or '.' and only digits, from `min_decimal_digits` to
+/// `max_decimal_digits` of them. The digits before the point may be absent
+/// (".5"). With the default options it accepts exactly what
+/// `isNumberString` accepts. The options are applied as given:
+/// `min_decimal_digits = 0` accepts "1." and ".", which the rule refuses at
+/// compile time.
+pub fn isDecimal(s: []const u8, options: DecimalOptions) bool {
+    const r = skipSign(s);
+    const whole = digitRun(r);
+    if (whole == r.len) return !options.force_decimal and whole != 0;
+    if (r[whole] != '.') return false;
+    const fraction = r[whole + 1 ..];
+    if (!allDigits(fraction)) return false;
+    if (fraction.len < options.min_decimal_digits) return false;
+    if (options.max_decimal_digits) |most| {
+        if (fraction.len > most) return false;
+    }
+    return true;
+}
+
+/// Exactly "true", "false", "1" or "0", as validator.js `isBoolean` with its
+/// default options: case-sensitive, without "yes", "no" or "on".
+pub fn isBooleanString(s: []const u8) bool {
+    for ([_][]const u8{ "true", "false", "1", "0" }) |literal| {
+        if (std.mem.eql(u8, s, literal)) return true;
+    }
+    return false;
+}
+
+/// A hexadecimal number, as validator.js `isHexadecimal`: an optional
+/// prefix "0x", "0X", "0h" or "0H", then 1 or more digits 0-9, a-f, A-F in
+/// any case. No sign, '#', 'h' suffix or separators; the prefix counts
+/// toward length rules.
+pub fn isHexadecimal(s: []const u8) bool {
+    const prefixed = s.len >= 2 and s[0] == '0' and switch (s[1]) {
+        'x', 'X', 'h', 'H' => true,
+        else => false,
+    };
+    const digits = if (prefixed) s[2..] else s;
+    if (digits.len == 0) return false;
+    for (digits) |c| {
+        if (!std.ascii.isHex(c)) return false;
+    }
+    return true;
+}
+
+/// An octal number, as validator.js `isOctal`: an optional prefix "0o" or
+/// "0O", then 1 or more digits 0-7. No sign and no other prefix; "017" is
+/// octal digits only.
+pub fn isOctal(s: []const u8) bool {
+    const prefixed = s.len >= 2 and s[0] == '0' and (s[1] == 'o' or s[1] == 'O');
+    const digits = if (prefixed) s[2..] else s;
+    if (digits.len == 0) return false;
+    for (digits) |c| {
+        if (c < '0' or c > '7') return false;
+    }
+    return true;
+}
+
+/// A TCP or UDP port as text, 0 to 65535: 1-5 ASCII digits without a
+/// leading zero, unless the port is "0" itself. No sign (validator.js
+/// `isPort` lets "+80" and "-0" through).
+pub fn isPort(s: []const u8) bool {
+    if (s.len == 0 or s.len > 5) return false;
+    if (s.len > 1 and s[0] == '0') return false;
+    var value: u32 = 0;
+    for (s) |c| {
+        if (!isDigit(c)) return false;
+        value = value * 10 + (c - '0');
+    }
+    return value <= 65535;
+}
+
+// ------------------------------------------------------------------ coordinates
+
+/// What follows the whole degrees of a coordinate: nothing, or '.' and 1 or
+/// more ASCII digits, all '0' at the limit (90 or 180).
+fn coordinateFraction(rest: []const u8, at_limit: bool) bool {
+    if (rest.len == 0) return true;
+    if (rest[0] != '.' or rest.len == 1) return false;
+    for (rest[1..]) |c| {
+        if (!isDigit(c)) return false;
+        if (at_limit and c != '0') return false;
+    }
+    return true;
+}
+
+/// A latitude in decimal degrees, -90 to 90, as the latitude of validator.js
+/// `isLatLong`: one optional leading '+' or '-', 1 or 2 digits of whole
+/// degrees (2 digits do not start with '0': "05" fails), then nothing or
+/// '.' and 1 or more digits, all '0' after 90. No ',', whitespace, exponent,
+/// degree sign or hemisphere letter. The string form only: on a float field
+/// the rule `v.latitude` is a range check.
+pub fn isLatitude(s: []const u8) bool {
+    const r = skipSign(s);
+    const whole = digitRun(r);
+    if (whole == 0 or whole > 2) return false;
+    if (whole == 2 and r[0] == '0') return false;
+    const degrees = smallValue(r[0..whole]);
+    if (degrees > 90) return false;
+    return coordinateFraction(r[whole..], degrees == 90);
+}
+
+/// A longitude in decimal degrees, -180 to 180, as the longitude of
+/// validator.js `isLatLong`: one optional leading '+' or '-', 1 to 3 digits
+/// of whole degrees (3 digits start with '1': "099" fails; 2 digits may start
+/// with '0': "05" passes), then nothing or '.' and 1 or more digits, all '0'
+/// after 180. No leading whitespace and no ','. The string form only, as
+/// `isLatitude`.
+pub fn isLongitude(s: []const u8) bool {
+    const r = skipSign(s);
+    const whole = digitRun(r);
+    if (whole == 0 or whole > 3) return false;
+    if (whole == 3 and r[0] != '1') return false;
+    const degrees = smallValue(r[0..whole]);
+    if (degrees > 180) return false;
+    return coordinateFraction(r[whole..], degrees == 180);
+}
+
+/// A "latitude,longitude" pair, as validator.js `isLatLong` without DMS:
+/// optionally in parentheses, "(lat,long)"; exactly one ',', and after it at
+/// most one space (the byte 0x20). The order is not checked beyond the
+/// ranges: a swapped pair passes when its longitude is within -90 to 90.
+pub fn isLatLong(s: []const u8) bool {
+    var pair = s;
+    if (s.len != 0 and s[0] == '(') {
+        // s.len >= 2 here: its first byte is '(' and its last is ')'.
+        if (s[s.len - 1] != ')') return false;
+        pair = s[1 .. s.len - 1];
+    } else if (s.len != 0 and s[s.len - 1] == ')') return false;
+    const comma = std.mem.findScalar(u8, pair, ',') orelse return false;
+    var second = pair[comma + 1 ..];
+    if (std.mem.findScalar(u8, second, ',') != null) return false;
+    if (second.len != 0 and second[0] == ' ') second = second[1..];
+    return isLatitude(pair[0..comma]) and isLongitude(second);
+}
+
+// ------------------------------------------------------------------ rules
+
+/// The hint a rule of `kind` gives on the field type `T` that it does not
+/// take, for the field types it has one for; the `[N]u8` and
+/// `use v.each(...)` hints of `core.typeErrorText` come first.
+fn typeHint(comptime kind: core.Kind, comptime T: type) ?[]const u8 {
+    return switch (kind) {
+        .number_string, .decimal, .hexadecimal, .octal => if (core.isNumber(T)) core.hints.already_a_number else null,
+        .boolean_string => if (T == bool) core.hints.bool_needs_no_rule else if (core.isNumber(T)) core.hints.use_bool_field else null,
+        .port => if (core.isNumber(T)) core.hints.port_on_number else null,
+        .latitude => if (@typeInfo(T) == .int) core.hints.latitude_on_int else null,
+        .longitude => if (@typeInfo(T) == .int) core.hints.longitude_on_int else null,
+        .lat_long => if (core.isNumber(T)) core.hints.lat_long_on_number else null,
+        else => null,
+    };
+}
+
+/// The declaration error of a string rule on the unwrapped field type `T`,
+/// or null: the field is a string.
+fn stringProblem(comptime rule: *const Rule, comptime T: type, comptime where: []const u8) ?[]const u8 {
+    if (core.isString(T)) return null;
+    return core.typeErrorText(rule, T, where, "a string", core.isString, typeHint(rule.kind, T));
+}
+
+fn stringFits(comptime rule: *const Rule, comptime T: type, comptime where: []const u8) void {
+    if (stringProblem(rule, T, where)) |text| @compileError(text);
+}
+
+/// A rule value of `kind` that passes the strings `predicate` accepts.
+fn stringRule(comptime kind: core.Kind, comptime message: []const u8, comptime predicate: fn ([]const u8) bool) Rule {
+    return core.define(kind, .{
+        .message = message,
+        .fits = stringFits,
+        .eval = struct {
+            fn eval(value: anytype) Outcome {
+                return core.passIf(predicate(value.*));
+            }
+        }.eval,
+    });
+}
+
+/// A number in decimal notation, as `isNumberString` reads it: "-12.5" and
+/// ".5" pass, "1e5", "1,000" and " 1" fail. class-validator `@IsNumberString()`.
+pub const numberString: Rule = stringRule(.number_string, "must be a number", isNumberString);
+
+/// A decimal number with as many digits after the point as the options
+/// allow, as `isDecimal` reads it. `v.decimal(.{})` accepts what
+/// `v.numberString` accepts. `min_decimal_digits` is at least 1, and
+/// `max_decimal_digits`, when set, is not less than it: other options are a
+/// compile error at the call. The default message names the digits the
+/// options require; its placeholders are `{min_decimal_digits}` and, when it
+/// is set, `{max_decimal_digits}`. class-validator `@IsDecimal()`.
+pub fn decimal(comptime options: DecimalOptions) Rule {
+    @setEvalBranchQuota(core.eval_quota);
+    if (decimalCallProblem(options)) |text| @compileError(text);
+    return core.define(.decimal, .{
+        .message = decimalMessage(options),
+        .args = options_args,
+        .params = decimalParams(options),
+        .fits = stringFits,
+        .eval = struct {
+            fn eval(value: anytype) Outcome {
+                return core.passIf(isDecimal(value.*, options));
+            }
+        }.eval,
+    });
+}
+
+/// The error of the call `decimal(options)`, or null: at least 1 digit after
+/// the point, and a maximum, when set, not below the minimum.
+fn decimalCallProblem(comptime options: DecimalOptions) ?[]const u8 {
+    const head = "validator: decimal(" ++ options_args ++ "): ";
+    if (options.min_decimal_digits == 0) return head ++ "min_decimal_digits must be at least 1 (0 would accept \"1.\" and \".\")";
+    const most = options.max_decimal_digits orelse return null;
+    if (most < options.min_decimal_digits)
+        return head ++ std.fmt.comptimePrint("max_decimal_digits ({d}) is less than min_decimal_digits ({d})", .{ most, options.min_decimal_digits });
+    return null;
+}
+
+/// The parameters of `decimal(options)`, in the order of the options:
+/// `force_decimal` as data only, `{min_decimal_digits}`, and
+/// `{max_decimal_digits}` only when it is set.
+fn decimalParams(comptime options: DecimalOptions) []const core.Param {
+    const force = core.dataParam("force_decimal", options.force_decimal);
+    const fewest = core.param("min_decimal_digits", options.min_decimal_digits);
+    const most = options.max_decimal_digits orelse return &.{ force, fewest };
+    return &.{ force, fewest, core.param("max_decimal_digits", most) };
+}
+
+/// `n decimal places`, or `1 decimal place`.
+fn places(comptime n: usize) []const u8 {
+    return core.plural(n, "decimal place", "decimal places");
+}
+
+/// The default message of `decimal(options)`: one of 8 texts chosen by the
+/// options.
+fn decimalMessage(comptime options: DecimalOptions) []const u8 {
+    const fewest = options.min_decimal_digits;
+    if (!options.force_decimal) {
+        const most = options.max_decimal_digits orelse {
+            if (fewest == 1) return "must be a decimal number";
+            return "must be a whole number or have at least " ++ places(fewest);
+        };
+        if (fewest == 1) return "must be a decimal number with at most " ++ places(most);
+        if (fewest == most) return "must be a whole number or have exactly " ++ places(fewest);
+        return std.fmt.comptimePrint("must be a whole number or have {d} to {d} decimal places", .{ fewest, most });
+    }
+    const most = options.max_decimal_digits orelse return "must be a decimal number with at least " ++ places(fewest);
+    if (fewest == most) return "must be a decimal number with exactly " ++ places(fewest);
+    return std.fmt.comptimePrint("must be a decimal number with {d} to {d} decimal places", .{ fewest, most });
+}
+
+/// Exactly "true", "false", "1" or "0", case-sensitive. On a `bool` field
+/// the rule is a compile error: the field is already a boolean.
+/// class-validator `@IsBooleanString()`.
+pub const booleanString: Rule = stringRule(.boolean_string, "must be true, false, 1 or 0", isBooleanString);
+
+/// Hexadecimal digits with an optional "0x" or "0h" prefix in any case:
+/// "0xDEADbeef" and "ff" pass, "0x" and "#ff" fail. class-validator
+/// `@IsHexadecimal()`.
+pub const hexadecimal: Rule = stringRule(.hexadecimal, "must be a hexadecimal number", isHexadecimal);
+
+/// Octal digits with an optional "0o" or "0O" prefix: "0o17" and "755" pass,
+/// "8" and "0x17" fail. class-validator `@IsOctal()`.
+pub const octal: Rule = stringRule(.octal, "must be an octal number", isOctal);
+
+/// A port number from 0 to 65535 as text, without a sign or leading zeros:
+/// "0" and "8080" pass, "080", "+80" and "65536" fail. For a number, use a
+/// `u16` field. class-validator `@IsPort()`.
+pub const port: Rule = stringRule(.port, "must be a port number from 0 to 65535", isPort);
+
+/// A "latitude,longitude" pair, optionally in parentheses, with at most one
+/// space after the comma: "40.7128,-74.0060" and "(40.7128, -74.0060)" pass.
+/// class-validator `@IsLatLong()`.
+pub const latLong: Rule = stringRule(.lat_long, "must be a latitude,longitude pair", isLatLong);
+
+fn isStringOrFloat(comptime T: type) bool {
+    return core.isString(T) or core.isFloat(T);
+}
+
+/// The declaration error of `latitude` or `longitude` on the unwrapped field
+/// type `T`, or null: the field is a string or a float.
+fn coordinateProblem(comptime rule: *const Rule, comptime T: type, comptime where: []const u8) ?[]const u8 {
+    if (isStringOrFloat(T)) return null;
+    return core.typeErrorText(rule, T, where, "a string or a float", isStringOrFloat, typeHint(rule.kind, T));
+}
+
+/// `latitude` or `longitude`: on a string the grammar of `predicate`; on a
+/// float the finite precondition, then `-limit <= value <= limit` in the
+/// field type.
+fn coordinateRule(comptime kind: core.Kind, comptime message: []const u8, comptime limit: comptime_int, comptime predicate: fn ([]const u8) bool) Rule {
+    return core.define(kind, .{
+        .message = message,
+        .precondition = core.preconditions.finite,
+        .fits = struct {
+            fn fits(comptime rule: *const Rule, comptime T: type, comptime where: []const u8) void {
+                if (coordinateProblem(rule, T, where)) |text| @compileError(text);
+            }
+        }.fits,
+        .eval = struct {
+            fn eval(value: anytype) Outcome {
+                if (comptime core.isFloat(@TypeOf(value.*))) {
+                    if (!std.math.isFinite(value.*)) return .precondition;
+                    return core.passIf(value.* >= -limit and value.* <= limit);
+                }
+                return core.passIf(predicate(value.*));
+            }
+        }.eval,
+    });
+}
+
+/// A latitude from -90 to 90. On a string field, decimal degrees as
+/// `isLatitude` reads them: "-33.8688" passes, "05", "90.5" and "1,5" fail.
+/// On a float field, NaN and infinities fail with the precondition
+/// `validation.finite`, and the value must be within -90 to 90 (-0.0 and
+/// 1e-7 pass). An integer field is a compile error: integer coordinates are
+/// usually scaled, so use `v.range` in their unit. class-validator
+/// `@IsLatitude()`.
+pub const latitude: Rule = coordinateRule(.latitude, "must be a latitude from -90 to 90", 90, isLatitude);
+
+/// A longitude from -180 to 180, as `latitude`: on a string field decimal
+/// degrees as `isLongitude` reads them ("05" passes, "099" fails), on a float
+/// field the finite precondition and the range. class-validator
+/// `@IsLongitude()`.
+pub const longitude: Rule = coordinateRule(.longitude, "must be a longitude from -180 to 180", 180, isLongitude);
+
+/// The arguments the hints show for an uncalled constructor of this file:
+/// `decimal must be called, e.g. v.decimal(.{})`.
+pub const call_examples = .{ .decimal = ".{}" };
+
+const expectOutcome = core.expectOutcome;
+const test_where = "Dto.field_rules.x";
+
+fn expectAll(predicate: fn ([]const u8) bool, expected: bool, inputs: []const []const u8) !void {
+    for (inputs) |s| {
+        std.testing.expectEqual(expected, predicate(s)) catch |err| {
+            std.debug.print("input \"{f}\"\n", .{std.zig.fmtString(s)});
+            return err;
+        };
+    }
+}
+
+fn decimalDefault(s: []const u8) bool {
+    return isDecimal(s, .{});
+}
+
+test "numberString: an optional sign, digits, and an optional point with digits after it" {
+    try expectAll(isNumberString, true, &.{ "0", "7", "+0", "-0", "007", ".5", "-.5", "+.5", "12.5", "-12.5", "1234567890123456789012345678901234567890" });
+    try expectAll(isNumberString, false, &.{ "", "+", "-", ".", "+.", "5.", "-5.", "1e5", "1E5", "1,000", "1_000", "0x1F", " 1", "1 ", "--1", "+-1", "1.2.3", "..5", "1.5\x00", "\xd9\xa1", "\xff", "\xef\xbc\x91" });
+}
+
+test "decimal with the default options accepts what numberString accepts" {
+    try expectAll(decimalDefault, true, &.{ "0", "+0", "007", ".5", "-.5", "12.5", "-12.5" });
+    try expectAll(decimalDefault, false, &.{ "", "+", "-", ".", "1.", "1e5", "1,5", " 1", "1.2.3" });
+}
+
+test "decimal counts the digits after the point, and force_decimal requires them" {
+    const t = std.testing;
+    try t.expect(isDecimal("1.25", .{ .max_decimal_digits = 2 }));
+    try t.expect(!isDecimal("1.255", .{ .max_decimal_digits = 2 }));
+    try t.expect(isDecimal("12", .{ .max_decimal_digits = 2 }));
+    try t.expect(!isDecimal("1.5", .{ .min_decimal_digits = 2 }));
+    try t.expect(isDecimal("15", .{ .min_decimal_digits = 2 }));
+    try t.expect(isDecimal("1.50", .{ .min_decimal_digits = 2, .max_decimal_digits = 2 }));
+    try t.expect(!isDecimal("12", .{ .force_decimal = true }));
+    try t.expect(isDecimal("-.75", .{ .force_decimal = true, .max_decimal_digits = 2 }));
+    try t.expect(!isDecimal(".", .{ .force_decimal = true }));
+    try t.expect(!isDecimal("1.2a", .{}));
+    try t.expect(!isDecimal("a1.2", .{}));
+    // The predicate applies its options as given, even those the rule refuses.
+    try t.expect(isDecimal("1.", .{ .min_decimal_digits = 0 }));
+    try t.expect(isDecimal(".", .{ .min_decimal_digits = 0 }));
+    try t.expect(!isDecimal("1.25", .{ .min_decimal_digits = 3, .max_decimal_digits = 2 }));
+    try t.expect(isDecimal("12", .{ .min_decimal_digits = 3, .max_decimal_digits = 2 }));
+}
+
+test "booleanString: exactly true, false, 1 or 0" {
+    try expectAll(isBooleanString, true, &.{ "true", "false", "1", "0" });
+    try expectAll(isBooleanString, false, &.{ "", "TRUE", "True", "FALSE", "yes", "no", "on", " true", "true ", "01", "00", "2", "tru", "truee" });
+}
+
+test "hexadecimal: an optional 0x or 0h prefix in any case, then hex digits" {
+    // "0b1" is three hex digits, not a binary prefix.
+    try expectAll(isHexadecimal, true, &.{ "0", "00", "f", "ff", "0x0", "0X1f", "0h1F", "0Hff", "deadBEEF", "0xDEADbeef", "123", "0b1" });
+    try expectAll(isHexadecimal, false, &.{ "", "0x", "0X", "0h", "0H", "x1", "h1", "#ff", "-1", "+1", "0xg", "1h", "0x0x1", "ff ", "\xff" });
+}
+
+test "octal: an optional 0o prefix in any case, then digits 0-7" {
+    try expectAll(isOctal, true, &.{ "0", "7", "017", "755", "0o17", "0O17", "0o0" });
+    try expectAll(isOctal, false, &.{ "", "0o", "0O", "8", "19", "0x17", "0b1", "-7", "+7", "0o8", "1_0", "o17", "0o 1" });
+}
+
+test "port: 0 to 65535 without a sign or leading zeros" {
+    try expectAll(isPort, true, &.{ "0", "1", "80", "443", "8080", "65535" });
+    try expectAll(isPort, false, &.{ "", "65536", "99999", "123456", "080", "00", "0080", "+80", "-0", "-1", "1.0", " 80", "80 ", "8_0", "0x50", "1e3" });
+}
+
+test "latitude strings: 1 or 2 digits of degrees up to 90, and only zeros after 90" {
+    try expectAll(isLatitude, true, &.{ "0", "-0", "+0", "5", "45.5", "0.5", "89.999999", "90", "-90", "+90", "90.0", "90.000", "-90.000", "9.99" });
+    try expectAll(isLatitude, false, &.{ "", "+", "-", "05", "-05", "00", "90.1", "90.0001", "91", "-91", "100", "1,5", " 45", "45 ", "4e1", "45.", ".5", "45\xc2\xb0", "45N", "NaN", "Infinity", "--45", "(45" });
+}
+
+test "longitude strings: 1 to 3 digits of degrees up to 180, 3 digits start with 1, and only zeros after 180" {
+    try expectAll(isLongitude, true, &.{ "0", "05", "00", "99", "100", "180", "-180", "+180", "180.0", "179.9999", "+45.5" });
+    try expectAll(isLongitude, false, &.{ "", "099", "000", "181", "180.1", "200", "1000", " 45", "-180.5", "45.", "1,2", "45)", "1e2" });
+}
+
+test "latLong: latitude, a comma, at most one space and longitude, optionally in parentheses" {
+    try expectAll(isLatLong, true, &.{ "40.7128,-74.0060", "40.7128, -74.0060", "(40.7128,-74.0060)", "(40.7128, -74.0060)", "90,180", "-90,-180", "0,0", "-74.0060,40.7128" });
+    try expectAll(isLatLong, false, &.{
+        "",                  "40.7128",         "40.7128,-74.0060)", "(40.7128,-74.0060", "40.7128,\t-74.0060", "40.7128,  -74.0060",
+        "40.7128 ,-74.0060", "1,2,garbage",     "()",                "(,)",               ",",                  "(",
+        ")",                 "-122.4194,37.77", "91,0",              "0,181",             "(0,0) ",             " (0,0)",
+    });
+}
+
+test "the number and coordinate rules have their codes and default messages, and only latitude and longitude a precondition" {
+    const t = std.testing;
+    const rules = .{
+        .{ numberString, core.Kind.number_string, "validation.number_string", "must be a number" },
+        .{ booleanString, core.Kind.boolean_string, "validation.boolean_string", "must be true, false, 1 or 0" },
+        .{ hexadecimal, core.Kind.hexadecimal, "validation.hexadecimal", "must be a hexadecimal number" },
+        .{ octal, core.Kind.octal, "validation.octal", "must be an octal number" },
+        .{ port, core.Kind.port, "validation.port", "must be a port number from 0 to 65535" },
+        .{ latitude, core.Kind.latitude, "validation.latitude", "must be a latitude from -90 to 90" },
+        .{ longitude, core.Kind.longitude, "validation.longitude", "must be a longitude from -180 to 180" },
+        .{ latLong, core.Kind.lat_long, "validation.lat_long", "must be a latitude,longitude pair" },
+    };
+    inline for (rules) |row| {
+        try t.expectEqual(row[1], row[0].kind);
+        try t.expectEqualStrings(row[2], row[0].code);
+        try t.expectEqualStrings(row[3], row[0].message);
+        try t.expectEqual(null, row[0].args);
+        try t.expectEqual(0, row[0].params.len);
+        const coordinate = comptime (row[1] == .latitude or row[1] == .longitude);
+        if (coordinate) {
+            try t.expectEqualStrings("validation.finite", row[0].precondition.?.code);
+            try t.expectEqualStrings("must be a finite number", row[0].precondition.?.message);
+        } else {
+            try t.expectEqual(null, row[0].precondition);
+        }
+    }
+}
+
+test "decimal shows its options as .{...} and keeps them as parameters: two placeholders at most" {
+    const t = std.testing;
+    const rule = decimal(.{ .force_decimal = true, .max_decimal_digits = 3 });
+    try t.expectEqual(core.Kind.decimal, rule.kind);
+    try t.expectEqualStrings("validation.decimal", rule.code);
+    try t.expectEqualStrings(".{...}", rule.args.?);
+    try t.expectEqualStrings("decimal(.{...})", comptime rule.call());
+    try t.expectEqualStrings("decimal(.{...})", comptime rule.label());
+    try t.expectEqual(null, rule.precondition);
+    try t.expectEqual(3, rule.params.len);
+    try t.expectEqualStrings("force_decimal", rule.params[0].name);
+    try t.expect(!rule.params[0].placeholder);
+    try t.expect(comptime rule.params[0].value.bool);
+    try t.expectEqualStrings("min_decimal_digits", rule.params[1].name);
+    try t.expectEqualStrings("1", rule.params[1].text);
+    try t.expectEqualStrings("max_decimal_digits", rule.params[2].name);
+    try t.expectEqualStrings("3", rule.params[2].text);
+    try t.expectEqualStrings("{min_decimal_digits}, {max_decimal_digits}", comptime core.placeholderList(rule));
+    // Without a maximum, {max_decimal_digits} is no placeholder.
+    try t.expectEqualStrings("{min_decimal_digits}", comptime core.placeholderList(decimal(.{})));
+    try t.expectEqual(2, decimal(.{}).params.len);
+}
+
+test "decimal picks one of 8 default messages from its options, a count of 1 in the singular" {
+    const expect = std.testing.expectEqualStrings;
+    try expect("must be a decimal number", decimal(.{}).message);
+    try expect("must be a whole number or have at least 2 decimal places", decimal(.{ .min_decimal_digits = 2 }).message);
+    try expect("must be a decimal number with at most 1 decimal place", decimal(.{ .max_decimal_digits = 1 }).message);
+    try expect("must be a decimal number with at most 2 decimal places", decimal(.{ .max_decimal_digits = 2 }).message);
+    try expect("must be a whole number or have exactly 2 decimal places", decimal(.{ .min_decimal_digits = 2, .max_decimal_digits = 2 }).message);
+    try expect("must be a whole number or have 2 to 4 decimal places", decimal(.{ .min_decimal_digits = 2, .max_decimal_digits = 4 }).message);
+    try expect("must be a decimal number with at least 1 decimal place", decimal(.{ .force_decimal = true }).message);
+    try expect("must be a decimal number with at least 3 decimal places", decimal(.{ .force_decimal = true, .min_decimal_digits = 3 }).message);
+    try expect("must be a decimal number with exactly 1 decimal place", decimal(.{ .force_decimal = true, .max_decimal_digits = 1 }).message);
+    try expect("must be a decimal number with exactly 2 decimal places", decimal(.{ .force_decimal = true, .min_decimal_digits = 2, .max_decimal_digits = 2 }).message);
+    try expect("must be a decimal number with 1 to 3 decimal places", decimal(.{ .force_decimal = true, .max_decimal_digits = 3 }).message);
+    // The placeholders give the same texts.
+    try expect("2..4 places", decimal(.{ .min_decimal_digits = 2, .max_decimal_digits = 4 }).withMessage("{min_decimal_digits}..{max_decimal_digits} places").message);
+}
+
+test "decimal takes at least 1 digit after the point and a maximum not below the minimum" {
+    const expect = std.testing.expectEqualStrings;
+    try expect("validator: decimal(.{...}): min_decimal_digits must be at least 1 (0 would accept \"1.\" and \".\")", comptime decimalCallProblem(.{ .min_decimal_digits = 0 }).?);
+    try expect("validator: decimal(.{...}): min_decimal_digits must be at least 1 (0 would accept \"1.\" and \".\")", comptime decimalCallProblem(.{ .force_decimal = true, .min_decimal_digits = 0, .max_decimal_digits = 2 }).?);
+    try expect("validator: decimal(.{...}): max_decimal_digits (2) is less than min_decimal_digits (3)", comptime decimalCallProblem(.{ .min_decimal_digits = 3, .max_decimal_digits = 2 }).?);
+    try expect("validator: decimal(.{...}): max_decimal_digits (0) is less than min_decimal_digits (1)", comptime decimalCallProblem(.{ .max_decimal_digits = 0 }).?);
+    try std.testing.expectEqual(null, comptime decimalCallProblem(.{}));
+    try std.testing.expectEqual(null, comptime decimalCallProblem(.{ .min_decimal_digits = 2, .max_decimal_digits = 2 }));
+    try std.testing.expectEqual(null, comptime decimalCallProblem(.{ .max_decimal_digits = std.math.maxInt(usize) }));
+}
+
+test "decimal's placeholder {max_decimal_digits} exists only when the maximum is set" {
+    try std.testing.expectEqualStrings(
+        "validator: decimal(.{...}).withMessage(\"at most {max_decimal_digits} places\"): unknown placeholder {max_decimal_digits}; available: {min_decimal_digits}",
+        comptime switch (core.renderTemplate(decimal(.{}), "at most {max_decimal_digits} places")) {
+            .message, .problem => |text| text,
+        },
+    );
+}
+
+/// The declaration error of the string rule `rule` on a field of type `T`.
+fn stringText(comptime rule: Rule, comptime T: type) ?[]const u8 {
+    return stringProblem(&rule, T, test_where);
+}
+
+fn coordinateText(comptime rule: Rule, comptime T: type) ?[]const u8 {
+    return coordinateProblem(&rule, T, test_where);
+}
+
+test "the string rules take strings only, and a number field gets the rule's own hint" {
+    const expect = std.testing.expectEqualStrings;
+    const head = "validator: Dto.field_rules.x: ";
+    const number = "; the field is already a number: use v.min, v.max or v.range";
+    try expect(head ++ "number_string expects a string, field is u32" ++ number, comptime stringText(numberString, u32).?);
+    try expect(head ++ "number_string expects a string, field is f64" ++ number, comptime stringText(numberString, f64).?);
+    try expect(head ++ "decimal expects a string, field is f64" ++ number, comptime stringText(decimal(.{ .max_decimal_digits = 2 }), f64).?);
+    try expect(head ++ "hexadecimal expects a string, field is u32" ++ number, comptime stringText(hexadecimal, u32).?);
+    try expect(head ++ "octal expects a string, field is u16" ++ number, comptime stringText(octal, u16).?);
+    try expect(head ++ "boolean_string expects a string, field is bool; a bool field is already a boolean and needs no rule", comptime stringText(booleanString, bool).?);
+    try expect(head ++ "boolean_string expects a string, field is u8; use a bool field", comptime stringText(booleanString, u8).?);
+    try expect(head ++ "boolean_string expects a string, field is f64; use a bool field", comptime stringText(booleanString, f64).?);
+    try expect(
+        head ++ "port expects a string, field is u16; a u16 field already holds 0-65535: add v.min(1) to exclude 0, or use v.range(0, 65535) on a wider type",
+        comptime stringText(port, u16).?,
+    );
+    try expect(
+        head ++ "port expects a string, field is f32; a u16 field already holds 0-65535: add v.min(1) to exclude 0, or use v.range(0, 65535) on a wider type",
+        comptime stringText(port, f32).?,
+    );
+    try expect(head ++ "lat_long expects a string, field is f64; use two float fields with v.latitude and v.longitude", comptime stringText(latLong, f64).?);
+    try expect(head ++ "lat_long expects a string, field is i32; use two float fields with v.latitude and v.longitude", comptime stringText(latLong, i32).?);
+}
+
+test "the string rules on [N]u8, on lists of strings and on other types" {
+    const expect = std.testing.expectEqualStrings;
+    const head = "validator: Dto.field_rules.x: ";
+    const u8_array = "; [N]u8 is an array of numbers, not a string: use []const u8";
+    try expect(head ++ "number_string expects a string, field is [8]u8" ++ u8_array, comptime stringText(numberString, [8]u8).?);
+    try expect(head ++ "boolean_string expects a string, field is [4:0]u8" ++ u8_array, comptime stringText(booleanString, [4:0]u8).?);
+    try expect(head ++ "number_string expects a string, field is []const []const u8; use v.each(v.numberString)", comptime stringText(numberString, []const []const u8).?);
+    try expect(head ++ "decimal expects a string, field is []const []const u8; use v.each(v.decimal(.{...}))", comptime stringText(decimal(.{ .max_decimal_digits = 2 }), []const []const u8).?);
+    try expect(head ++ "port expects a string, field is [2]?[]const u8; use v.each(v.port)", comptime stringText(port, [2]?[]const u8).?);
+    // A list of items the rule rejects gets no hint, even a list of numbers.
+    try expect(head ++ "number_string expects a string, field is []const u32", comptime stringText(numberString, []const u32).?);
+    try expect(head ++ "boolean_string expects a string, field is []const bool", comptime stringText(booleanString, []const bool).?);
+    try expect(head ++ "hexadecimal expects a string, field is core.Kind", comptime stringText(hexadecimal, core.Kind).?);
+    try expect(head ++ "lat_long expects a string, field is bool", comptime stringText(latLong, bool).?);
+    try expect(
+        head ++ "octal expects a string, field is []volatile u8; volatile, allowzero and under-aligned slices are neither strings nor lists",
+        comptime stringText(octal, []volatile u8).?,
+    );
+    inline for (.{ []const u8, []u8, [:0]const u8, [:0]u8, []align(4) const u8 }) |T| {
+        try std.testing.expectEqual(null, comptime stringText(numberString, T));
+        try std.testing.expectEqual(null, comptime stringText(decimal(.{}), T));
+        try std.testing.expectEqual(null, comptime stringText(latLong, T));
+    }
+}
+
+test "latitude and longitude take strings and floats; an integer field gets the scaled-coordinates hint" {
+    const expect = std.testing.expectEqualStrings;
+    const head = "validator: Dto.field_rules.x: ";
+    try expect(
+        head ++ "latitude expects a string or a float, field is i32; integer coordinates are usually scaled (E6, E7): use v.range in your unit, e.g. v.range(-90_000_000, 90_000_000) for E6",
+        comptime coordinateText(latitude, i32).?,
+    );
+    // The hint is the same on an unsigned field, where that range would not compile.
+    try expect(
+        head ++ "latitude expects a string or a float, field is u8; integer coordinates are usually scaled (E6, E7): use v.range in your unit, e.g. v.range(-90_000_000, 90_000_000) for E6",
+        comptime coordinateText(latitude, u8).?,
+    );
+    try expect(
+        head ++ "longitude expects a string or a float, field is i64; integer coordinates are usually scaled (E6, E7): use v.range in your unit, e.g. v.range(-180_000_000, 180_000_000) for E6",
+        comptime coordinateText(longitude, i64).?,
+    );
+    try expect(head ++ "latitude expects a string or a float, field is [8]u8; [N]u8 is an array of numbers, not a string: use []const u8", comptime coordinateText(latitude, [8]u8).?);
+    try expect(head ++ "latitude expects a string or a float, field is []const f64; use v.each(v.latitude)", comptime coordinateText(latitude, []const f64).?);
+    try expect(head ++ "longitude expects a string or a float, field is []const []const u8; use v.each(v.longitude)", comptime coordinateText(longitude, []const []const u8).?);
+    try expect(head ++ "latitude expects a string or a float, field is bool", comptime coordinateText(latitude, bool).?);
+    try expect(head ++ "longitude expects a string or a float, field is []const i32", comptime coordinateText(longitude, []const i32).?);
+    inline for (.{ []const u8, [:0]u8, f16, f32, f64, f80, f128, c_longdouble }) |T| {
+        try std.testing.expectEqual(null, comptime coordinateText(latitude, T));
+        try std.testing.expectEqual(null, comptime coordinateText(longitude, T));
+    }
+}
+
+test "an uncalled decimal gets an example call, and inside each the head is each(...)" {
+    const expect = std.testing.expectEqualStrings;
+    try expect("decimal must be called, e.g. v.decimal(.{})", comptime core.hints.mustBeCalled("decimal", @TypeOf(decimal)));
+    try expect("expected a rule, got the predicate isDecimal; use the rule v.decimal(.{})", comptime core.hints.predicateAsRule("isDecimal", "decimal", @TypeOf(decimal)));
+    try expect("expected a rule, got the predicate isPort; use the rule v.port", comptime core.hints.predicateAsRule("isPort", "port", Rule));
+}
+
+test "latitude and longitude on floats: the finite precondition, then the range in the field type" {
+    inline for (.{ f16, f32, f64, f80, f128, c_longdouble }) |F| {
+        inline for (.{ .{ latitude, 90 }, .{ longitude, 180 } }) |row| {
+            const rule = row[0];
+            const limit: F = row[1];
+            try expectOutcome(.pass, rule, limit);
+            try expectOutcome(.pass, rule, -limit);
+            try expectOutcome(.pass, rule, @as(F, -0.0));
+            try expectOutcome(.pass, rule, std.math.floatTrueMin(F));
+            try expectOutcome(.pass, rule, @as(F, 1e-7));
+            try expectOutcome(.fail, rule, std.math.nextAfter(F, limit, std.math.inf(F)));
+            try expectOutcome(.fail, rule, std.math.nextAfter(F, -limit, -std.math.inf(F)));
+            try expectOutcome(.fail, rule, std.math.floatMax(F));
+            try expectOutcome(.precondition, rule, std.math.nan(F));
+            try expectOutcome(.precondition, rule, std.math.inf(F));
+            try expectOutcome(.precondition, rule, -std.math.inf(F));
+        }
+    }
+    // On a string, "NaN" is just not a coordinate.
+    try expectOutcome(.fail, latitude, @as([]const u8, "NaN"));
+    try expectOutcome(.pass, longitude, @as([]const u8, "-180"));
+}

@@ -218,6 +218,97 @@ test "finite is a rule value with code validation.finite and message \"must be a
     try expectNoViolation(f64, v.finite, 0);
 }
 
+test "numberString is a rule value with code validation.number_string and message \"must be a number\"" {
+    try testing.expect(@hasDecl(v, "numberString"));
+    try testing.expect(@TypeOf(v.numberString) == v.Rule);
+    try expectRule(v.numberString, "validation.number_string", "must be a number", "must be a number");
+    try expectViolation([]const u8, v.numberString, "1e5", "validation.number_string", "must be a number", "x");
+    try expectNoViolation([]const u8, v.numberString, "-12.5");
+}
+
+test "decimal is a rule constructor with code validation.decimal and message \"must be a decimal number\", or one of 7 messages for other options, \"decimal place\" for a count of 1; placeholders {min_decimal_digits} and, when set, {max_decimal_digits}" {
+    try testing.expect(@hasDecl(v, "decimal"));
+    try testing.expect(@typeInfo(@TypeOf(v.decimal)).@"fn".return_type == v.Rule);
+    const code = "validation.decimal";
+    try expectRule(v.decimal(.{}), code, "must be a decimal number", "must be a decimal number");
+    try expectRule(v.decimal(.{ .min_decimal_digits = 2 }), code, "must be a whole number or have at least 2 decimal places", "must be a whole number or have at least {min_decimal_digits} decimal places");
+    try expectRule(v.decimal(.{ .max_decimal_digits = 2 }), code, "must be a decimal number with at most 2 decimal places", "must be a decimal number with at most {max_decimal_digits} decimal places");
+    try expectRule(v.decimal(.{ .max_decimal_digits = 1 }), code, "must be a decimal number with at most 1 decimal place", "must be a decimal number with at most {max_decimal_digits} decimal place");
+    try expectRule(v.decimal(.{ .min_decimal_digits = 2, .max_decimal_digits = 2 }), code, "must be a whole number or have exactly 2 decimal places", "must be a whole number or have exactly {min_decimal_digits} decimal places");
+    try expectRule(v.decimal(.{ .min_decimal_digits = 2, .max_decimal_digits = 4 }), code, "must be a whole number or have 2 to 4 decimal places", "must be a whole number or have {min_decimal_digits} to {max_decimal_digits} decimal places");
+    try expectRule(v.decimal(.{ .force_decimal = true, .min_decimal_digits = 2 }), code, "must be a decimal number with at least 2 decimal places", "must be a decimal number with at least {min_decimal_digits} decimal places");
+    try expectRule(v.decimal(.{ .force_decimal = true }), code, "must be a decimal number with at least 1 decimal place", "must be a decimal number with at least {min_decimal_digits} decimal place");
+    try expectRule(v.decimal(.{ .force_decimal = true, .min_decimal_digits = 2, .max_decimal_digits = 2 }), code, "must be a decimal number with exactly 2 decimal places", "must be a decimal number with exactly {min_decimal_digits} decimal places");
+    try expectRule(v.decimal(.{ .force_decimal = true, .max_decimal_digits = 1 }), code, "must be a decimal number with exactly 1 decimal place", "must be a decimal number with exactly {min_decimal_digits} decimal place");
+    try expectRule(v.decimal(.{ .force_decimal = true, .max_decimal_digits = 3 }), code, "must be a decimal number with 1 to 3 decimal places", "must be a decimal number with {min_decimal_digits} to {max_decimal_digits} decimal places");
+    try expectPlaceholder(v.decimal(.{}), "{min_decimal_digits}", "1");
+    try expectPlaceholder(v.decimal(.{ .min_decimal_digits = 2, .max_decimal_digits = 4 }), "{min_decimal_digits}", "2");
+    try expectPlaceholder(v.decimal(.{ .min_decimal_digits = 2, .max_decimal_digits = 4 }), "{max_decimal_digits}", "4");
+    try expectViolation([]const u8, v.decimal(.{}), "1.", code, "must be a decimal number", "x");
+    try expectViolation([]const u8, v.decimal(.{ .max_decimal_digits = 2 }), "1.234", code, "must be a decimal number with at most 2 decimal places", "x");
+    try expectNoViolation([]const u8, v.decimal(.{}), "+.5");
+}
+
+test "booleanString is a rule value with code validation.boolean_string and message \"must be true, false, 1 or 0\"" {
+    try testing.expect(@hasDecl(v, "booleanString"));
+    try testing.expect(@TypeOf(v.booleanString) == v.Rule);
+    try expectRule(v.booleanString, "validation.boolean_string", "must be true, false, 1 or 0", "must be true, false, 1 or 0");
+    try expectViolation([]const u8, v.booleanString, "TRUE", "validation.boolean_string", "must be true, false, 1 or 0", "x");
+    try expectNoViolation([]const u8, v.booleanString, "false");
+}
+
+test "hexadecimal is a rule value with code validation.hexadecimal and message \"must be a hexadecimal number\"" {
+    try testing.expect(@hasDecl(v, "hexadecimal"));
+    try testing.expect(@TypeOf(v.hexadecimal) == v.Rule);
+    try expectRule(v.hexadecimal, "validation.hexadecimal", "must be a hexadecimal number", "must be a hexadecimal number");
+    try expectViolation([]const u8, v.hexadecimal, "0x", "validation.hexadecimal", "must be a hexadecimal number", "x");
+    try expectNoViolation([]const u8, v.hexadecimal, "0xDEADbeef");
+}
+
+test "octal is a rule value with code validation.octal and message \"must be an octal number\"" {
+    try testing.expect(@hasDecl(v, "octal"));
+    try testing.expect(@TypeOf(v.octal) == v.Rule);
+    try expectRule(v.octal, "validation.octal", "must be an octal number", "must be an octal number");
+    try expectViolation([]const u8, v.octal, "0o8", "validation.octal", "must be an octal number", "x");
+    try expectNoViolation([]const u8, v.octal, "0o755");
+}
+
+test "port is a rule value with code validation.port and message \"must be a port number from 0 to 65535\"" {
+    try testing.expect(@hasDecl(v, "port"));
+    try testing.expect(@TypeOf(v.port) == v.Rule);
+    try expectRule(v.port, "validation.port", "must be a port number from 0 to 65535", "must be a port number from 0 to 65535");
+    try expectViolation([]const u8, v.port, "65536", "validation.port", "must be a port number from 0 to 65535", "x");
+    try expectNoViolation([]const u8, v.port, "0");
+}
+
+test "latitude is a rule value with code validation.latitude and message \"must be a latitude from -90 to 90\"" {
+    try testing.expect(@hasDecl(v, "latitude"));
+    try testing.expect(@TypeOf(v.latitude) == v.Rule);
+    try expectRule(v.latitude, "validation.latitude", "must be a latitude from -90 to 90", "must be a latitude from -90 to 90");
+    try expectViolation([]const u8, v.latitude, "90.1", "validation.latitude", "must be a latitude from -90 to 90", "x");
+    try expectViolation(f64, v.latitude, -90.5, "validation.latitude", "must be a latitude from -90 to 90", "x");
+    try expectNoViolation([]const u8, v.latitude, "-90.000");
+    try expectNoViolation(f64, v.latitude, 90);
+}
+
+test "longitude is a rule value with code validation.longitude and message \"must be a longitude from -180 to 180\"" {
+    try testing.expect(@hasDecl(v, "longitude"));
+    try testing.expect(@TypeOf(v.longitude) == v.Rule);
+    try expectRule(v.longitude, "validation.longitude", "must be a longitude from -180 to 180", "must be a longitude from -180 to 180");
+    try expectViolation([]const u8, v.longitude, "-180.5", "validation.longitude", "must be a longitude from -180 to 180", "x");
+    try expectViolation(f32, v.longitude, 180.5, "validation.longitude", "must be a longitude from -180 to 180", "x");
+    try expectNoViolation([]const u8, v.longitude, "180.0");
+    try expectNoViolation(f32, v.longitude, -180);
+}
+
+test "latLong is a rule value with code validation.lat_long and message \"must be a latitude,longitude pair\"" {
+    try testing.expect(@hasDecl(v, "latLong"));
+    try testing.expect(@TypeOf(v.latLong) == v.Rule);
+    try expectRule(v.latLong, "validation.lat_long", "must be a latitude,longitude pair", "must be a latitude,longitude pair");
+    try expectViolation([]const u8, v.latLong, "40.7128,\t-74.0060", "validation.lat_long", "must be a latitude,longitude pair", "x");
+    try expectNoViolation([]const u8, v.latLong, "(40.7128, -74.0060)");
+}
+
 test "minItems is a rule constructor with code validation.min_items and message \"must have at least {min} items\", or \"must have at least 1 item\" when min = 1; placeholder {min}" {
     try testing.expect(@hasDecl(v, "minItems"));
     try testing.expect(@typeInfo(@TypeOf(v.minItems)).@"fn".return_type == v.Rule);
@@ -370,6 +461,28 @@ test "divisibleBy on a float field fails nan, inf and -inf with the finite preco
     }
 }
 
+test "latitude on a float field fails nan, inf and -inf with the finite precondition, also under withMessage" {
+    inline for (.{ f16, f32, f64, f80, f128, c_longdouble }) |F| {
+        try expectViolation(F, v.latitude, std.math.nan(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.latitude, std.math.inf(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.latitude, -std.math.inf(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.latitude.withMessage("another message"), std.math.nan(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.latitude.withMessage("another message"), std.math.inf(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.latitude.withMessage("another message"), -std.math.inf(F), "validation.finite", "must be a finite number", "x");
+    }
+}
+
+test "longitude on a float field fails nan, inf and -inf with the finite precondition, also under withMessage" {
+    inline for (.{ f16, f32, f64, f80, f128, c_longdouble }) |F| {
+        try expectViolation(F, v.longitude, std.math.nan(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.longitude, std.math.inf(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.longitude, -std.math.inf(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.longitude.withMessage("another message"), std.math.nan(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.longitude.withMessage("another message"), std.math.inf(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.longitude.withMessage("another message"), -std.math.inf(F), "validation.finite", "must be a finite number", "x");
+    }
+}
+
 test "finite has no precondition: nan, inf and -inf on a float field fail its own check, so withMessage changes their message" {
     inline for (.{ f16, f32, f64, f80, f128, c_longdouble }) |F| {
         try expectViolation(F, v.finite, std.math.nan(F), "validation.finite", "must be a finite number", "x");
@@ -382,15 +495,29 @@ test "finite has no precondition: nan, inf and -inf on a float field fail its ow
     }
 }
 
-test "the module exports exactly its 29 public names, and Rule.withMessage" {
-    const names = [_][]const u8{ "Violation", "Rule", "Report", "max_code_bytes", "max_message_bytes", "max_report_violations", "check", "checkAll", "assertRules", "fail", "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "minItems", "maxItems", "each", "custom" };
+test "the module exports exactly its 48 public names, and Rule.withMessage" {
+    const names = [_][]const u8{
+        "Violation",   "Rule",         "Report",         "max_code_bytes", "max_message_bytes", "max_report_violations", "check",         "checkAll",
+        "assertRules", "fail",         "equals",         "notEquals",      "oneOf",             "noneOf",                "empty",         "notEmpty",
+        "min",         "max",          "range",          "positive",       "nonNegative",       "negative",              "nonPositive",   "divisibleBy",
+        "finite",      "numberString", "decimal",        "booleanString",  "hexadecimal",       "octal",                 "port",          "latitude",
+        "longitude",   "latLong",      "DecimalOptions", "isNumberString", "isDecimal",         "isBooleanString",       "isHexadecimal", "isOctal",
+        "isPort",      "isLatitude",   "isLongitude",    "isLatLong",      "minItems",          "maxItems",              "each",          "custom",
+    };
     inline for (names) |name| try testing.expect(@hasDecl(v, name));
     try testing.expectEqual(names.len, comptime std.meta.declarations(v).len);
     try testing.expect(@hasDecl(v.Rule, "withMessage"));
 }
 
 test "every rule the module exports has a catalog test" {
-    const tested = [_][]const u8{ "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "minItems", "maxItems", "each", "custom" };
+    // Comparing every exported name with every listed one takes more
+    // comptime branches than a test allows by default.
+    @setEvalBranchQuota(100_000);
+    const tested = [_][]const u8{
+        "equals",      "notEquals", "oneOf",        "noneOf",  "empty",         "notEmpty",    "min",   "max",  "range",    "positive",  "nonNegative", "negative", "nonPositive",
+        "divisibleBy", "finite",    "numberString", "decimal", "booleanString", "hexadecimal", "octal", "port", "latitude", "longitude", "latLong",     "minItems", "maxItems",
+        "each",        "custom",
+    };
     inline for (comptime std.meta.declarations(v)) |name| {
         const T = @TypeOf(@field(v, name));
         if (comptime T == v.Rule or (@typeInfo(T) == .@"fn" and @typeInfo(T).@"fn".return_type == v.Rule)) {
@@ -406,7 +533,8 @@ test "every rule the module exports has a catalog test" {
 }
 
 test "the module exports exactly the catalog predicates of the shipped rules" {
-    const predicates = [_][]const u8{};
+    @setEvalBranchQuota(100_000);
+    const predicates = [_][]const u8{ "isNumberString", "isDecimal", "isBooleanString", "isHexadecimal", "isOctal", "isPort", "isLatitude", "isLongitude", "isLatLong" };
     comptime var exported: usize = 0;
     inline for (comptime std.meta.declarations(v)) |name| {
         if (comptime name.len > 2 and std.mem.startsWith(u8, name, "is") and std.ascii.isUpper(name[2])) {
@@ -421,6 +549,12 @@ test "the module exports exactly the catalog predicates of the shipped rules" {
         }
     }
     try testing.expectEqual(predicates.len, exported);
+}
+
+test "the predicates have their catalog signatures: the input first, the options last" {
+    const plain = [_][]const u8{ "isNumberString", "isBooleanString", "isHexadecimal", "isOctal", "isPort", "isLatitude", "isLongitude", "isLatLong" };
+    inline for (plain) |name| try testing.expect(@TypeOf(@field(v, name)) == fn ([]const u8) bool);
+    try testing.expect(@TypeOf(v.isDecimal) == fn ([]const u8, v.DecimalOptions) bool);
 }
 
 test "the limits have their catalog values" {
