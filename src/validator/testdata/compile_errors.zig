@@ -139,4 +139,6 @@ pub const list = [_]Fixture{
     .{ .file = "src/validator/testdata/compile_errors/custom_message_truncated_utf8.zig", .expect = "validator: custom(\"users.ok\", ...): message must be valid UTF-8", .row = "variant of CU-8" },
     .{ .file = "src/validator/testdata/compile_errors/not_empty_called.zig", .expect = "type 'core.Rule' not a function", .row = "Z-8" },
     .{ .file = "src/validator/testdata/compile_errors/positive_called.zig", .expect = "type 'core.Rule' not a function", .row = "Z-8" },
+    .{ .file = "src/validator/testdata/compile_errors/custom_missing_argument.zig", .expect = "expected 3 argument(s), found 2", .row = "variant of Z-4" },
+    .{ .file = "src/validator/testdata/compile_errors/custom_code_escaped.zig", .expect = "validator: custom(\"users.a\\tb\", ...): code 'users.a\\tb' has a character outside [a-z0-9_.]; use segments of [a-z][a-z0-9_]* joined by '.', e.g. 'users.name_taken'", .row = "variant of CU-3" },
 };

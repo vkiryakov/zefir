@@ -444,6 +444,8 @@ test "a message is 1-512 bytes of valid UTF-8, counted in bytes" {
     const filler: [509]u8 = @splat('m');
     try std.testing.expectEqual(null, messageProblem(filler ++ "\u{20ac}"));
     try std.testing.expectEqual(MessageProblem.too_long, messageProblem(filler ++ "m\u{20ac}").?);
+    // Empty, then length, then UTF-8: 513 bytes of invalid UTF-8 are too long.
+    try std.testing.expectEqual(MessageProblem.too_long, messageProblem(&@as([513]u8, @splat(0xff))).?);
 }
 
 test "code and message problems are described with the texts of the custom and fail errors" {
@@ -1273,11 +1275,19 @@ test "coerces accepts the conversions v.custom documents and nothing else" {
         .{ u32, anyerror!u32 },  .{ u32, ?anyerror!u32 },   .{ []u8, []const u8 }, .{ [:0]const u8, []const u8 },
         .{ [:0]u8, []const u8 }, .{ [:0]u8, [:0]const u8 }, .{ *u32, *const u32 }, .{ []const u32, ?[]const u32 },
     };
+    // Equal volatile and allowzero, with const added.
+    const same_attributes = [_][2]type{
+        .{ []volatile u8, []const volatile u8 }, .{ []allowzero u8, []allowzero const u8 }, .{ *allowzero u32, *allowzero const u32 },
+    };
+    // Distinct types of the same width.
+    const same_width = [_][2]type{
+        .{ c_uint, u32 }, .{ i32, c_int }, .{ usize, u64 }, .{ c_longdouble, std.meta.Float(@bitSizeOf(c_longdouble)) },
+    };
     const rejected = [_][2]type{
         .{ u64, u32 },                  .{ i32, u64 },                   .{ u32, i32 },                          .{ i8, u8 },
         .{ f64, f32 },                  .{ []const u8, []u8 },           .{ []const u8, [:0]const u8 },          .{ *const u32, *u32 },
         .{ []volatile u8, []const u8 }, .{ []allowzero u8, []const u8 }, .{ []align(1) const u32, []const u32 }, .{ [3]u8, []const u8 },
-        .{ []const u32, []const u64 },  .{ ?u32, u32 },
+        .{ []const u32, []const u64 },  .{ ?u32, u32 },                  .{ *allowzero const u32, *const u32 },
     };
     // Zig coerces these as well, but v.custom keeps to the documented set.
     const narrower_than_zig = [_][2]type{
@@ -1285,7 +1295,7 @@ test "coerces accepts the conversions v.custom documents and nothing else" {
     };
     const wrong = comptime blk: {
         var out: []const u8 = "";
-        for (accepted) |pair| {
+        for (accepted ++ same_attributes ++ same_width) |pair| {
             if (!coerces(pair[0], pair[1])) out = out ++ @typeName(pair[0]) ++ " should coerce to " ++ @typeName(pair[1]) ++ "\n";
         }
         for (rejected ++ narrower_than_zig) |pair| {
@@ -1464,6 +1474,14 @@ test "every kind is exported under its public name unless it is pending, and no 
 
 test "every rule name a hint mentions is exported or pending" {
     try std.testing.expectEqualStrings("", comptime unknownHintName(hintTexts()) orelse "");
+    // The texts come from both sources: the hints and the rule files' call_examples.
+    const collected = comptime hintTexts();
+    for ([_][]const u8{ hints.wrap_predicate, "v.notEmpty" }) |expected| {
+        const found = for (collected) |text| {
+            if (std.mem.eql(u8, text, expected)) break true;
+        } else false;
+        try std.testing.expect(found);
+    }
     const texts = [_][]const u8{
         "use v.each(v.notEmpty)",
         "e.g. v.minItems(1)",
@@ -1494,7 +1512,23 @@ test "hint for a constructor used without a call" {
     );
     try std.testing.expectEqualStrings("each", comptime constructorName(root.each).?);
     try std.testing.expectEqualStrings("custom", comptime constructorName(root.custom).?);
+    // Every exported function is named, not only constructors: a built-in
+    // predicate used as a rule is recognized by its name.
+    try std.testing.expectEqualStrings("check", comptime constructorName(root.check).?);
     try std.testing.expectEqual(null, comptime constructorName(S.plain));
+}
+
+test "every exported rule constructor shows a real call in its must-be-called hint" {
+    const missing = comptime blk: {
+        var out: []const u8 = "";
+        for (@typeInfo(root).@"struct".decl_names) |decl| {
+            const D = @TypeOf(@field(root, decl));
+            if (@typeInfo(D) == .@"fn" and (@typeInfo(D).@"fn".return_type orelse void) == Rule and std.mem.eql(u8, exampleArgs(decl, D), "..."))
+                out = out ++ decl ++ " needs a call_examples entry\n";
+        }
+        break :blk out;
+    };
+    try std.testing.expectEqualStrings("", missing);
 }
 
 test "hint for a predicate used as a rule" {
