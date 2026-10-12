@@ -25,13 +25,14 @@ pub const Options = struct {
 
     /// The memory `init` takes for the queue in queued mode: `capacity`
     /// slots of `max_record_bytes` + 16 bytes rounded up to 128, and one
-    /// batch of `batch_size` records. None in sync mode.
+    /// batch of `batch_size` records with their ends. None in sync mode.
     pub fn queueBytes(o: Options) usize {
         const q = switch (o.mode) {
             .sync => return 0,
             .queued => |q| q,
         };
-        return @as(usize, q.capacity) * slotSize(o.max_record_bytes) + @as(usize, q.batch_size) * o.max_record_bytes;
+        return @as(usize, q.capacity) * slotSize(o.max_record_bytes) + 1 +
+            @as(usize, q.batch_size) * (o.max_record_bytes + @sizeOf(usize));
     }
 };
 
@@ -167,8 +168,9 @@ test "queued mode: defaults and the memory init takes for it" {
     try std.testing.expectEqual(@as(u32, 4096), o.mode.queued.capacity);
     try std.testing.expectEqual(@as(u32, 128), o.mode.queued.batch_size);
     try std.testing.expectEqual(OverflowPolicy.drop_new, o.mode.queued.overflow);
-    // 4096 slots of 4096 + 16 bytes rounded up to 128, and one batch of 128 records.
-    try std.testing.expectEqual(@as(usize, 4096 * 4224 + 128 * 4096), o.queueBytes());
+    // 4096 slots of 4096 + 16 bytes rounded up to 128, and one batch of 128
+    // records (and the line break that may lead it) with their ends.
+    try std.testing.expectEqual(@as(usize, 4096 * 4224 + 1 + 128 * (4096 + @sizeOf(usize))), o.queueBytes());
     try std.testing.expectEqual(@as(usize, 0), (Options{}).queueBytes());
     try std.testing.expectEqual(@as(usize, 384), slotSize(300));
 }

@@ -8,6 +8,8 @@ const escape = @import("escape.zig");
 const options = @import("options.zig");
 const scopes = @import("scopes.zig");
 const std_log = @import("std_log.zig");
+const Queue = @import("Queue.zig");
+const writer = @import("writer.zig");
 const Level = @import("level.zig").Level;
 
 const Io = std.Io;
@@ -37,6 +39,8 @@ pub const InitError = error{
     CapacityNotPowerOfTwo,
     /// The writer thread would take no records per write.
     BatchSizeZero,
+    /// The writer thread of the queued mode could not be started.
+    SystemResources,
 };
 
 /// What a logger has done since `init`.
@@ -89,10 +93,19 @@ own: Io.Threaded = .init_single_threaded,
 /// Where that note goes; tests point it at a pipe.
 stderr: Io.File,
 /// The last record broke off mid-line, so the next one starts with '\n'.
-/// Guarded by `output_lock`.
+/// Guarded by `output_lock` in sync mode; the writer thread's own in
+/// queued mode.
 torn: bool = false,
 /// stdout is closed for good: records are dropped from now on.
 dead: std.atomic.Value(bool) = .init(false),
+/// Queued mode: the queue, what to do when it is full, and the writer
+/// thread with its batch (a line break that may end a torn line, then the
+/// records) and the records' ends in it.
+queue: ?Queue = null,
+overflow: options.OverflowPolicy = .drop_new,
+batch: []u8 = &.{},
+batch_ends: []usize = &.{},
+writer_thread: ?std.Thread = null,
 counters: Counters = .{},
 
 const Counter = std.atomic.Value(u64);
@@ -109,6 +122,10 @@ const Counters = struct {
 
 fn bump(counter: *Counter) void {
     _ = counter.fetchAdd(1, .monotonic);
+}
+
+fn bumpBy(counter: *Counter, n: usize) void {
+    if (n != 0) _ = counter.fetchAdd(n, .monotonic);
 }
 
 pub fn create(gpa: std.mem.Allocator, io: Io, opts: options.Options) InitError!*Engine {
@@ -141,12 +158,39 @@ pub fn create(gpa: std.mem.Allocator, io: Io, opts: options.Options) InitError!*
         .stderr = .stderr(),
     };
     try engine.scope_table.init(opts.level, opts.scopes);
+    switch (opts.mode) {
+        .sync => {},
+        .queued => |q| try engine.startQueue(q, opts.max_record_bytes),
+    }
     return engine;
+}
+
+/// Allocates the queue and the batch, and starts the writer thread.
+fn startQueue(engine: *Engine, q: options.Queued, max_record_bytes: u32) InitError!void {
+    const gpa = engine.gpa;
+    engine.queue = try Queue.init(gpa, q.capacity, max_record_bytes, engine.own.io());
+    errdefer engine.queue.?.deinit(gpa);
+    engine.batch = try gpa.alloc(u8, 1 + @as(usize, q.batch_size) * max_record_bytes);
+    errdefer gpa.free(engine.batch);
+    engine.batch_ends = try gpa.alloc(usize, q.batch_size);
+    errdefer gpa.free(engine.batch_ends);
+    engine.overflow = q.overflow;
+    engine.writer_thread = std.Thread.spawn(.{}, writer.run, .{engine}) catch |e| return switch (e) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => error.SystemResources,
+    };
 }
 
 pub fn destroy(engine: *Engine) void {
     std_log.uninstallIf(engine);
     const gpa = engine.gpa;
+    if (engine.queue) |*q| {
+        _ = q.close();
+        engine.writer_thread.?.join();
+        q.deinit(gpa);
+        gpa.free(engine.batch);
+        gpa.free(engine.batch_ends);
+    }
     engine.own.deinit();
     gpa.free(engine.service);
     gpa.destroy(engine);
@@ -216,11 +260,57 @@ fn headerFor(engine: *Engine, comptime level: Level, scope: *const scopes.Entry,
     };
 }
 
-/// Writes the record encoded in `buf[1..]`, or counts why there is none.
+/// Writes or queues the record encoded in `buf[1..]`, or counts why there
+/// is none.
 fn finish(engine: *Engine, buf: []u8, encoded: ?encode.Encoded) void {
     const done = encoded orelse return bump(&engine.counters.dropped_oversize);
     if (done.truncated) bump(&engine.counters.truncated);
+    if (engine.queue) |*q| return engine.enqueue(q, buf[1..][0..done.len]);
     engine.write(buf, done.len);
+}
+
+/// Queued mode: copies the record into the queue; the writer thread
+/// writes it.
+fn enqueue(engine: *Engine, q: *Queue, bytes: []const u8) void {
+    const pushed = switch (engine.overflow) {
+        .drop_new => q.tryPush(bytes),
+        .block => q.pushBlocking(bytes),
+    };
+    pushed catch bump(&engine.counters.dropped_write_failed);
+}
+
+/// For the writer thread: writes the `n` records the queue copied into
+/// the batch with one write loop, through the logger's own Io, and counts
+/// them.
+pub fn writeBatch(engine: *Engine, n: usize) void {
+    const ends = engine.batch_ends[0..n];
+    if (engine.dead.load(.monotonic)) return bumpBy(&engine.counters.dropped_write_failed, n);
+    const lead: usize = @intFromBool(engine.torn);
+    engine.batch[0] = '\n';
+    const bytes = engine.batch[1 - lead .. 1 + ends[n - 1]];
+    var sent: usize = 0;
+    engine.writeRetrying(bytes, &sent) catch |e| return engine.failed(e, ends, sent, lead);
+    engine.torn = false;
+    bumpBy(&engine.counters.written, n);
+}
+
+/// The writer thread's write: a stdout someone made nonblocking gets up to
+/// 10 ms of retries before the write fails.
+fn writeRetrying(engine: *Engine, bytes: []const u8, sent: *usize) WriteError!void {
+    const io = engine.own.io();
+    switch (engine.output) {
+        .writer => |w| return writeWriter(w, bytes, sent),
+        .stdout => for (0..10) |_| {
+            writeFile(engine.stdout, io, bytes, sent) catch |e| switch (e) {
+                error.WouldBlock => {
+                    io.sleep(.fromMilliseconds(1), .awake) catch {};
+                    continue;
+                },
+                else => return e,
+            };
+            return;
+        } else return writeFile(engine.stdout, io, bytes, sent),
+    }
 }
 
 const WriteError = Io.File.Writer.Error || Io.Writer.Error;
@@ -244,25 +334,31 @@ fn write(engine: *Engine, buf: []u8, len: usize) void {
         .stdout => writeFile(engine.stdout, io, bytes, &sent),
         .writer => |w| writeWriter(w, bytes, &sent),
     };
-    result catch |e| return engine.failed(e, sent, lead);
+    result catch |e| return engine.failed(e, &.{len}, sent, lead);
     engine.torn = false;
     bump(&engine.counters.written);
 }
 
-/// Counts a failed write. A record cut mid-line costs that line only: the
-/// next record starts with '\n'.
-fn failed(engine: *Engine, e: WriteError, sent: usize, lead: usize) void {
+/// Counts a write of the records ending at `ends` that failed after `sent`
+/// bytes, `lead` of them a '\n' that ends a torn line: the records sent
+/// whole are written, the rest dropped. A record cut mid-line costs that
+/// line only: the next record starts with '\n'.
+fn failed(engine: *Engine, e: WriteError, ends: []const usize, sent: usize, lead: usize) void {
     bump(&engine.counters.write_errors);
-    bump(&engine.counters.dropped_write_failed);
-    if (sent > lead) {
+    var whole: usize = 0;
+    while (whole < ends.len and lead + ends[whole] <= sent) whole += 1;
+    bumpBy(&engine.counters.written, whole);
+    bumpBy(&engine.counters.dropped_write_failed, ends.len - whole);
+    const boundary = lead + if (whole > 0) ends[whole - 1] else 0;
+    if (sent > boundary) {
         engine.torn = true;
         bump(&engine.counters.torn_lines);
     } else if (sent > 0) {
-        engine.torn = false; // only the '\n' that ends the previous torn line went out
+        engine.torn = false; // the write stopped between records
     }
     switch (e) {
         error.BrokenPipe, error.NotOpenForWriting => engine.die(e),
-        else => {}, // e.g. WouldBlock on a stdout someone made nonblocking: drop this record only
+        else => {}, // e.g. WouldBlock on a stdout someone made nonblocking: drop these records only
     }
 }
 
