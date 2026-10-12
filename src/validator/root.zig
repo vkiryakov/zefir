@@ -18,6 +18,7 @@
 //! var path_buf: [256]u8 = undefined;
 //! if (v.check(&request, &path_buf)) |violation| {
 //!     // violation.code, violation.message, violation.field ("tags[1]")
+//!     std.debug.print("{s}: {s} ({s})\n", .{ violation.field orelse "(root)", violation.message, violation.code });
 //! }
 //! ```
 //!

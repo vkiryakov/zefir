@@ -22,6 +22,7 @@ var path_buf: [256]u8 = undefined;
 if (v.check(&request, &path_buf)) |violation| {
     // violation.field: "tags[1]", violation.code: "validation.not_empty",
     // violation.message: "must not be empty"
+    std.debug.print("{s}: {s} ({s})\n", .{ violation.field orelse "(root)", violation.message, violation.code });
 }
 ```
 
@@ -511,6 +512,7 @@ pub fn check(value: anytype, path_buf: []u8) ?v.Violation
 var path_buf: [256]u8 = undefined;
 if (v.check(&request, &path_buf)) |violation| {
     // violation.code, violation.message, violation.field: ?[]const u8
+    std.debug.print("{s}: {s} ({s})\n", .{ violation.field orelse "(root)", violation.message, violation.code });
 }
 ```
 
@@ -684,7 +686,7 @@ Errors come from two places, and Zig points to them differently:
 | --- | --- | --- |
 | What | the arguments of `v.custom` and `v.each`, whatever the field | a rule that does not fit its field, an unknown key, a wrong `validateSelf`, a field type the walk cannot enter |
 | Text | the call as written: `validator: custom("Taken", ...): code 'Taken' has a character outside [a-z0-9_.]; ...` | the path: `validator: orders.Order.field_rules.id: ...` |
-| Where Zig points | into the library; a `note: called at comptime here` shows your line with the call | into the library; `referenced by:` ends at the `v.check`, `v.checkAll` or `v.assertRules` call, not at the DTO, so the path in the text is your pointer |
+| Where Zig points | into the library; a `note: called at comptime here` shows your line with the call | into the library. With `v.check` or `v.checkAll`, in a test or a program, the first entry under `referenced by:` is your call and the rest are its callers; with `comptime v.assertRules(T)` there is no such list, and the last `note: called at comptime here` shows your call. Either way Zig shows the call, not the DTO, so the path in the text is your pointer |
 
 For example, a code that breaks the grammar (file and line numbers shortened):
 
