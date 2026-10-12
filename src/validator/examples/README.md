@@ -42,8 +42,8 @@ if (v.check(&request, &path_buf)) |violation| {
 - [Compatibility](#compatibility)
 - [All rules](#all-rules)
 
-Rules by category: [Common](common.md) · [Numbers](numbers.md) · [Lists](lists.md) ·
-[Coming from class-validator](class_validator.md)
+Rules by category: [Common](common.md) · [Numbers](numbers.md) · [Identifiers](identifiers.md) ·
+[Lists](lists.md) · [Coming from class-validator](class_validator.md)
 
 Examples that `zig build test` compiles and runs:
 [Getting started](getting_started.zig) · [validateSelf](validate_self.zig) · [withMessage](with_message.zig) · [DTO package test](dto_test.zig)
@@ -1049,6 +1049,22 @@ The limits are `comptime_int` constants and part of the contract (see below).
 | `v.nonPositive` | a number is at most 0 | `validation.non_positive` | [numbers](numbers.md#vnonpositive) |
 | `v.divisibleBy(divisor)` | a number is a multiple of `divisor` | `validation.divisible_by` | [numbers](numbers.md#vdivisiblebydivisor) |
 | `v.finite` | a float is neither NaN nor an infinity | `validation.finite` | [numbers](numbers.md#vfinite) |
+| `v.uuid` | a string is a UUID: 8-4-4-4-12 hex digits | `validation.uuid` | [identifiers](identifiers.md#vuuid) |
+| `v.mongoId` | a string is a MongoDB ObjectId: 24 hex digits | `validation.mongo_id` | [identifiers](identifiers.md#vmongoid) |
+| `v.firebasePushId` | a string is a Firebase push ID | `validation.firebase_push_id` | [identifiers](identifiers.md#vfirebasepushid) |
+| `v.hash(algorithm)` | a string is a hex digest of `algorithm` | `validation.hash` | [identifiers](identifiers.md#vhashalgorithm) |
+| `v.creditCard` | a string is a card number with a valid Luhn check digit | `validation.credit_card` | [identifiers](identifiers.md#vcreditcard) |
+| `v.isbn` | a string is an ISBN-10 or an ISBN-13 | `validation.isbn` | [identifiers](identifiers.md#visbn) |
+| `v.isbn10` | a string is an ISBN-10 | `validation.isbn10` | [identifiers](identifiers.md#visbn10) |
+| `v.isbn13` | a string is an ISBN-13 | `validation.isbn13` | [identifiers](identifiers.md#visbn13) |
+| `v.issn` | a string is an ISSN, `NNNN-NNNC` | `validation.issn` | [identifiers](identifiers.md#vissn) |
+| `v.ean` | a string is an EAN-8, EAN-13 or GTIN-14 | `validation.ean` | [identifiers](identifiers.md#vean) |
+| `v.isin` | a string is an ISIN | `validation.isin` | [identifiers](identifiers.md#visin) |
+| `v.isrc` | a string is an ISRC | `validation.isrc` | [identifiers](identifiers.md#visrc) |
+| `v.bic` | a string is a BIC | `validation.bic` | [identifiers](identifiers.md#vbic) |
+| `v.iban` | a string is an IBAN | `validation.iban` | [identifiers](identifiers.md#viban) |
+| `v.btcAddress(network)` | a string is a Bitcoin address of `network` | `validation.btc_address` | [identifiers](identifiers.md#vbtcaddressnetwork) |
+| `v.ethereumAddress` | a string is an Ethereum address | `validation.ethereum_address` | [identifiers](identifiers.md#vethereumaddress) |
 | `v.minItems(min)` | a slice has at least `min` items | `validation.min_items` | [lists](lists.md#vminitemsmin) |
 | `v.maxItems(max)` | a slice has at most `max` items | `validation.max_items` | [lists](lists.md#vmaxitemsmax) |
 | `v.each(rules)` | the rules of every item of a slice or an array | the inner rule's code | [lists](lists.md#veachrules) |
