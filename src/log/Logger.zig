@@ -1308,6 +1308,56 @@ test "a writer whose flush fails: the record counts as dropped and its line as t
     try expectFailedFlushTorn(.{ .queued = .{} });
 }
 
+fn shutdownThenCheckJoined(logger: Logger, joined: *std.atomic.Value(u32)) void {
+    logger.shutdown(.none) catch return;
+    if (logger.engine.writer_thread == null) _ = joined.fetchAdd(1, .seq_cst);
+}
+
+test "queued: two shutdowns at once both return after the writer thread has exited" {
+    var lock: Lock = .{ .sink = .init(testing.allocator) };
+    defer lock.sink.deinit();
+    const logger: Logger = try .init(testing.allocator, testing.io, .{ .mode = .{ .queued = .{} }, .output = .{ .writer = &lock.writer } });
+    logger.info("held", .{});
+    lock.waitEntered();
+    var joined: std.atomic.Value(u32) = .init(0);
+    const first = try std.Thread.spawn(.{}, shutdownThenCheckJoined, .{ logger, &joined });
+    const second = try std.Thread.spawn(.{}, shutdownThenCheckJoined, .{ logger, &joined });
+    const waited = waitWaiters(&logger.engine.progress_waiters, 2);
+    lock.open.store(true, .seq_cst);
+    first.join();
+    second.join();
+    logger.deinit();
+    try waited;
+    try testing.expectEqual(@as(u32, 2), joined.load(.seq_cst));
+}
+
+fn flushThenCount(logger: Logger, flushed: *std.atomic.Value(u32)) void {
+    logger.flush(.none) catch return;
+    _ = flushed.fetchAdd(1, .seq_cst);
+}
+
+test "queued: a flush during a shutdown returns once the queue is written" {
+    var lock: Lock = .{ .sink = .init(testing.allocator) };
+    defer lock.sink.deinit();
+    const logger: Logger = try .init(testing.allocator, testing.io, .{ .mode = .{ .queued = .{} }, .output = .{ .writer = &lock.writer } });
+    logger.info("held", .{});
+    lock.waitEntered();
+    logger.info("queued", .{});
+    var joined: std.atomic.Value(u32) = .init(0);
+    var flushed: std.atomic.Value(u32) = .init(0);
+    const stopper = try std.Thread.spawn(.{}, shutdownThenCheckJoined, .{ logger, &joined });
+    const flusher = try std.Thread.spawn(.{}, flushThenCount, .{ logger, &flushed });
+    const waited = waitWaiters(&logger.engine.progress_waiters, 2);
+    lock.open.store(true, .seq_cst);
+    stopper.join();
+    flusher.join();
+    logger.deinit();
+    try waited;
+    try testing.expectEqual(@as(u32, 1), joined.load(.seq_cst));
+    try testing.expectEqual(@as(u32, 1), flushed.load(.seq_cst));
+    try testing.expectEqual(@as(usize, 2), lock.lines());
+}
+
 test "queued: shutdown writes what is queued, then refuses records and counts them" {
     var out: std.Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();

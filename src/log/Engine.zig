@@ -136,8 +136,9 @@ overflow: options.OverflowPolicy = .drop_new,
 batch: []u8 = &.{},
 batch_ends: []usize = &.{},
 writer_thread: ?std.Thread = null,
-/// Whether a call has joined, or is joining, the writer thread.
-writer_joined: std.atomic.Value(bool) = .init(false),
+/// Held while a call joins the writer thread, so a second call waits for
+/// it; taken through the logger's own Io.
+join_lock: Io.Mutex = .init,
 /// Records logged once the logger is not running are refused.
 state: std.atomic.Value(State) = .init(.running),
 /// Queued mode: queue positions the writer thread has written or dropped.
@@ -353,8 +354,16 @@ pub fn markProcessed(engine: *Engine, n: usize) void {
     if (engine.progress_waiters.load(.seq_cst) != 0) engine.own.io().futexWake(u32, &engine.progress.raw, std.math.maxInt(u32));
 }
 
+/// Joins the writer thread once; a call that comes second returns after
+/// the first has joined it.
 fn joinWriter(engine: *Engine) void {
-    if (!engine.writer_joined.swap(true, .acq_rel)) engine.writer_thread.?.join();
+    const io = engine.own.io();
+    engine.join_lock.lockUncancelable(io);
+    defer engine.join_lock.unlock(io);
+    if (engine.writer_thread) |thread| {
+        thread.join();
+        engine.writer_thread = null;
+    }
 }
 
 /// Encodes and writes one record; the caller has checked the level.
