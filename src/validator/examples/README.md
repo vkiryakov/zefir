@@ -618,11 +618,14 @@ to the contract of a rule, like its code.
 | `{expected}` | `v.equals` | the value | a value, as below |
 | `{forbidden}` | `v.notEquals` | the value | a value, as below |
 | `{values}` | `v.oneOf`, `v.noneOf`, `v.containsAll`, `v.containsNone` | the listed values | each value as below, joined with `, ` |
-| `{min}` | `v.min`, `v.range`, `v.minLength`, `v.length`, `v.minBytes`, `v.minItems` | the lower bound; the least number of characters, bytes or items | a number as written; a count in decimal |
-| `{max}` | `v.max`, `v.range`, `v.maxLength`, `v.length`, `v.maxBytes`, `v.maxItems` | the upper bound; the largest number of characters, bytes or items | as `{min}` |
+| `{min}` | `v.min`, `v.range`, `v.minLength`, `v.length`, `v.minBytes`, `v.minDate`, `v.minItems` | the lower bound; the least number of characters, bytes or items; the earliest date | a number as written; a count in decimal; a date bound as written |
+| `{max}` | `v.max`, `v.range`, `v.maxLength`, `v.length`, `v.maxBytes`, `v.maxDate`, `v.maxItems` | the upper bound; the largest number of characters, bytes or items; the latest date | as `{min}` |
 | `{divisor}` | `v.divisibleBy` | the divisor | an integer in decimal |
 | `{seed}` | `v.contains`, `v.notContains` | the substring | a string as below |
 | `{min_length}`, `{min_lowercase}`, `{min_uppercase}`, `{min_numbers}`, `{min_symbols}` | `v.strongPassword` | the options of the same names, all five also when 0 | an integer in decimal |
+| `{min_decimal_digits}`, `{max_decimal_digits}` | `v.decimal` | the options of the same names; `{max_decimal_digits}` only when the option is set | an integer in decimal |
+| `{algorithm}` | `v.hash` | the algorithm | its tag name, without the dot: `sha256` |
+| `{network}` | `v.btcAddress` | the network | its tag name, without the dot: `mainnet`, `testnet` or `any` |
 | `{key}` | `v.uniqueBy` | the key | the field name, without the dot |
 
 A rule that is not listed has no placeholders, and the page of each rule names
@@ -704,8 +707,9 @@ or not known at compile time) are listed under [Compile errors](#compile-errors)
 
 A default message that shows a list, a string or a number of hundreds of digits
 can grow beyond 512 bytes. The rules `v.equals`, `v.notEquals`, `v.oneOf`,
-`v.noneOf`, `v.contains` and `v.notContains` then use a general message instead,
-chosen at compile time; the code does not change:
+`v.noneOf`, `v.contains`, `v.notContains`, `v.minDate`, `v.maxDate`,
+`v.containsAll` and `v.containsNone` then use a general message instead, chosen
+at compile time; the code does not change:
 
 | Rule | Fallback message |
 | --- | --- |
@@ -715,6 +719,10 @@ chosen at compile time; the code does not change:
 | `v.noneOf` | `must not be one of the forbidden values` |
 | `v.contains` | `must contain the required text` |
 | `v.notContains` | `must not contain the forbidden text` |
+| `v.minDate` | `must not be before the minimum date` |
+| `v.maxDate` | `must not be after the maximum date` |
+| `v.containsAll` | `must contain all of the required values` |
+| `v.containsNone` | `must not contain any of the forbidden values` |
 
 A message of exactly 512 bytes stays; one byte more falls back. `.withMessage`
 replaces a fallback as it replaces any message, and its placeholders still show
