@@ -603,3 +603,153 @@ test "stats().alert_pending counts the records waiting in the subscribers' queue
     logger.unsubscribe(id);
     try testing.expectEqual(@as(u64, 0), logger.stats().alert_pending);
 }
+
+/// Counts a subscription's handler calls, and those after it was removed.
+const Watch = struct {
+    calls: std.atomic.Value(u32) = .init(0),
+    removed: std.atomic.Value(bool) = .init(false),
+    late: std.atomic.Value(u32) = .init(0),
+    broken: std.atomic.Value(u32) = .init(0),
+
+    fn handler(context: ?*anyopaque, event: *const log.Event) anyerror!void {
+        const w: *Watch = @ptrCast(@alignCast(context orelse return error.NoContext));
+        if (w.removed.load(.seq_cst)) _ = w.late.fetchAdd(1, .seq_cst);
+        const whole = std.mem.eql(u8, event.message, "load") and std.mem.endsWith(u8, event.line, "}") and
+            std.mem.find(u8, event.line, "\"message\":\"load\"") != null;
+        if (!whole) _ = w.broken.fetchAdd(1, .seq_cst);
+        _ = w.calls.fetchAdd(1, .seq_cst);
+    }
+};
+
+fn logUntil(logger: log.Logger, stop: *const std.atomic.Value(bool)) void {
+    var i: u64 = 0;
+    while (!stop.load(.seq_cst)) : (i += 1) logger.err("load", .{ .i = i });
+}
+
+/// Adds and removes a subscriber for each of `watches` while 4 threads
+/// log, and stops the threads before it returns.
+fn churn(logger: log.Logger, watches: []Watch) !void {
+    var stop: std.atomic.Value(bool) = .init(false);
+    var threads: [4]std.Thread = undefined;
+    var spawned: usize = 0;
+    defer {
+        stop.store(true, .seq_cst);
+        for (threads[0..spawned]) |t| t.join();
+    }
+    for (&threads) |*t| {
+        t.* = try std.Thread.spawn(.{}, logUntil, .{ logger, &stop });
+        spawned += 1;
+    }
+    for (watches) |*w| {
+        const id = try logger.subscribe(.{ .levels = &.{.err}, .capacity = 16, .context = w, .handler = Watch.handler });
+        try testing.io.sleep(.fromMilliseconds(2), .awake);
+        logger.unsubscribe(id);
+        w.removed.store(true, .seq_cst);
+    }
+}
+
+test "subscribers come and go while 4 threads log: no call after unsubscribe, no broken event, counters add up" {
+    for ([_]log.Mode{ .sync, .{ .queued = .{} }, .{ .queued = .{ .overflow = .block } } }) |mode| {
+        var sink: std.Io.Writer.Discarding = .init(&.{});
+        const logger: log.Logger = try .init(testing.allocator, testing.io, .{ .mode = mode, .output = .{ .writer = &sink.writer } });
+        defer logger.deinit();
+        var watches: [8]Watch = @splat(.{});
+        try churn(logger, &watches);
+        try logger.flush(.none);
+        var calls: u32 = 0;
+        for (&watches) |*w| {
+            try testing.expectEqual(@as(u32, 0), w.late.load(.seq_cst));
+            try testing.expectEqual(@as(u32, 0), w.broken.load(.seq_cst));
+            calls += w.calls.load(.seq_cst);
+        }
+        try testing.expect(calls > 0);
+        const s = logger.stats();
+        try testing.expectEqual(s.accepted, s.written + s.dropped.queue_full + s.dropped.err + s.pending);
+        try testing.expectEqual(@as(u64, 0), logger.engine.registry.levels.load(.seq_cst));
+    }
+}
+
+test "an event matches its line: text, a quoted scope, the call site, a cut record and a std.log record" {
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    var c: Collector = .init();
+    defer c.deinit();
+    const logger: log.Logger = try .init(testing.allocator, testing.io, .{ .format = .text, .max_record_bytes = 400, .output = .{ .writer = &out.writer } });
+    defer logger.deinit();
+    const id = try logger.subscribe(.{ .levels = &.{ .info, .warn }, .context = &c, .handler = Collector.handler });
+    logger.scoped("db pool").withContext(try traced()).info("Query done", .{ .src = @src(), .ms = 5 });
+    logger.warn(&@as([600]u8, @splat('x')), .{});
+    logger.installStdLog();
+    log.stdLogFn(.info, .std_scope, "n={d}", .{7});
+    log.uninstallStdLog();
+    logger.unsubscribe(id);
+    try testing.expectEqual(@as(usize, 3), c.events.items.len);
+    for (0..3) |i| try testing.expectEqualStrings(try lineAt(out.written(), i), (try c.get(i)).line);
+    const first = try c.get(0);
+    try testing.expectEqualStrings("db pool", first.scope);
+    try testing.expectEqualStrings("Query done", first.message);
+    try testing.expectEqualStrings("00f067aa0ba902b7", first.span_id orelse return error.TestNoSpanId);
+    try testing.expectStringEndsWith((try c.get(1)).message, "…");
+    const third = try c.get(2);
+    try testing.expectEqualStrings("std_scope", third.scope);
+    try testing.expectEqualStrings("n=7", third.message);
+}
+
+/// An interceptor that keeps a copy of the line and trace id it saw.
+const Peek = struct {
+    line: [512]u8 = undefined,
+    line_len: usize = 0,
+    trace_id: [32]u8 = undefined,
+    traced: bool = false,
+
+    fn filter(context: ?*anyopaque, event: *const log.Event) bool {
+        const p: *Peek = @ptrCast(@alignCast(context orelse return true));
+        p.line_len = @min(event.line.len, p.line.len);
+        @memcpy(p.line[0..p.line_len], event.line[0..p.line_len]);
+        if (event.trace_id) |id| {
+            if (id.len == p.trace_id.len) {
+                @memcpy(&p.trace_id, id);
+                p.traced = true;
+            }
+        }
+        return true;
+    }
+};
+
+test "an interceptor's event has the line written and the trace ids" {
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    var peek: Peek = .{};
+    const logger: log.Logger = try .init(testing.allocator, testing.io, .{ .output = .{ .writer = &out.writer } });
+    defer logger.deinit();
+    try logger.use(.{ .context = &peek, .filter = Peek.filter });
+    logger.withContext(try traced()).info("Checked", .{ .ok = true });
+    try testing.expectEqualStrings(try lineAt(out.written(), 0), peek.line[0..peek.line_len]);
+    try testing.expect(peek.traced);
+    try testing.expectEqualStrings("4bf92f3577b34da6a3ce929d0e0e4736", &peek.trace_id);
+}
+
+/// Tries to subscribe `results.len` times; each result is null or the
+/// error.
+fn subscribeMany(logger: log.Logger, results: []?anyerror) void {
+    for (results) |*r| {
+        r.* = if (logger.subscribe(.{ .levels = &.{.err}, .capacity = 2, .handler = ignore })) |_| null else |e| e;
+    }
+}
+
+test "subscribe racing shutdown: each call subscribes, or is refused with ShutDown; nothing hangs or leaks" {
+    for (0..10) |round| {
+        var sink: std.Io.Writer.Discarding = .init(&.{});
+        const logger: log.Logger = try .init(testing.allocator, testing.io, .{ .mode = .{ .queued = .{} }, .output = .{ .writer = &sink.writer } });
+        var results: [8]?anyerror = @splat(error.TestNotRun);
+        const subscriber = try std.Thread.spawn(.{}, subscribeMany, .{ logger, &results });
+        for (0..round) |_| std.Thread.yield() catch {};
+        const stopped = logger.shutdown(.none);
+        subscriber.join();
+        logger.deinit();
+        try stopped;
+        for (results) |r| {
+            if (r) |e| try testing.expectEqual(@as(anyerror, error.ShutDown), e);
+        }
+    }
+}
