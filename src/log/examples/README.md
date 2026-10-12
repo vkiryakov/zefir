@@ -62,7 +62,7 @@ Examples that `zig build test` compiles and runs:
 ## How it works
 
 ```mermaid
-flowchart LR
+flowchart TD
     call["logger.info()"] --> level{{"level on?"}}
     level -->|no| skipped(["skipped"])
     level -->|yes| encode["encode,<br/>redact"]
