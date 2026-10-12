@@ -14,4 +14,5 @@ test {
     std.testing.refAllDecls(@This());
     _ = @import("protocol/subject.zig");
     _ = @import("Headers.zig");
+    _ = @import("protocol/encoder.zig");
 }
