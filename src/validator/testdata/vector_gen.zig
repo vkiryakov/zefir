@@ -1,10 +1,11 @@
 //! vector_gen turns one golden-vector file into a Zig test file:
 //!
-//!     vector_gen <in.json> <out.zig> <rule>...
+//!     vector_gen <in.json> <class_validator.md> <out.zig> <rule>...
 //!     vector_gen --check-list <dir> <name>...
 //!
 //! build.zig builds it for the host and runs it on every file of
-//! `vector_files` in cases.zig, with the rules that the entry lists; the
+//! `vector_files` in cases.zig, with src/validator/examples/class_validator.md
+//! (its table of deviations) and the rules that the entry lists; the
 //! output lives in the build cache, is never committed, and is compiled
 //! against the `validator` and `harness` (vector_harness.zig) modules, one
 //! test per record. A file it rejects fails the build with one line per
@@ -55,8 +56,9 @@
 //! - `vjs`: what validator.js or class-validator returns for the input
 //!   (`true`/`false`), when measured
 //! - `deviation`: the deviation from them that the record shows, by its id
-//!   in the table of src/validator/examples/class_validator.md (`D16`);
-//!   required when `vjs` differs from `expect == "pass"`
+//!   in the table of src/validator/examples/class_validator.md (`D16`), which
+//!   must have a row `| D16 | ...` there; required when `vjs` differs from
+//!   `expect == "pass"`
 //!
 //! The generator also rejects: unknown fields; a failing record of a single
 //! rule (no `call`) whose code is not the rule's own (`validation.` and the
@@ -140,8 +142,8 @@ pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
     const args = try init.minimal.args.toSlice(arena);
     if (args.len >= 3 and std.mem.eql(u8, args[1], "--check-list")) return checkList(init.io, args[2], args[3..]);
-    if (args.len < 4) {
-        std.debug.print("usage: vector_gen <in.json> <out.zig> <rule>...\n       vector_gen --check-list <dir> <name>...\n", .{});
+    if (args.len < 5) {
+        std.debug.print("usage: vector_gen <in.json> <class_validator.md> <out.zig> <rule>...\n       vector_gen --check-list <dir> <name>...\n", .{});
         std.process.exit(2);
     }
     const file_name = std.fs.path.basename(args[1]);
@@ -150,7 +152,11 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("vector_gen: {s}: cannot read the file: {s}\n", .{ args[1], @errorName(err) });
         std.process.exit(1);
     };
-    const checked = try checkFile(arena, text, args[3..]);
+    const table = cwd.readFileAlloc(init.io, args[2], arena, .unlimited) catch |err| {
+        std.debug.print("vector_gen: {s}: cannot read the file: {s}\n", .{ args[2], @errorName(err) });
+        std.process.exit(1);
+    };
+    const checked = try checkFile(arena, text, args[4..], try deviationIds(arena, table));
     if (checked.problems.len > 0) {
         for (checked.problems) |problem| {
             if (problem.where.len == 0) {
@@ -163,7 +169,20 @@ pub fn main(init: std.process.Init) !void {
     }
     var out: std.Io.Writer.Allocating = .init(arena);
     try writeTests(&out.writer, arena, file_name, checked.records);
-    try cwd.writeFile(init.io, .{ .sub_path = args[2], .data = out.written() });
+    try cwd.writeFile(init.io, .{ .sub_path = args[3], .data = out.written() });
+}
+
+/// The ids of the deviations that the table of class_validator.md describes:
+/// every line that starts with `| D<n> |`.
+fn deviationIds(arena: Allocator, table: []const u8) Allocator.Error![]const []const u8 {
+    var ids: std.ArrayList([]const u8) = .empty;
+    var lines = std.mem.splitScalar(u8, table, '\n');
+    while (lines.next()) |line| {
+        const rest = std.mem.cutPrefix(u8, line, "| ") orelse continue;
+        const end = std.mem.findScalar(u8, rest, ' ') orelse continue;
+        if (isDeviationId(rest[0..end]) and std.mem.startsWith(u8, rest[end..], " |")) try ids.append(arena, rest[0..end]);
+    }
+    return ids.items;
 }
 
 /// The `--check-list` mode: fails when `dir_path` holds a `.json` file that
@@ -195,8 +214,9 @@ fn isUnlisted(file_name: []const u8, names: []const []const u8) bool {
 }
 
 /// Parses a vector file that holds `rules` and checks its format and every
-/// record; `problems` is empty when the file is accepted.
-fn checkFile(arena: Allocator, text: []const u8, rules: []const []const u8) Allocator.Error!Checked {
+/// record, with `deviations` the ids that class_validator.md describes;
+/// `problems` is empty when the file is accepted.
+fn checkFile(arena: Allocator, text: []const u8, rules: []const []const u8, deviations: []const []const u8) Allocator.Error!Checked {
     var problems: std.ArrayList(Problem) = .empty;
     var records: std.ArrayList(Record) = .empty;
     var scanner: std.json.Scanner = .initCompleteInput(arena, text);
@@ -220,7 +240,7 @@ fn checkFile(arena: Allocator, text: []const u8, rules: []const []const u8) Allo
     // The id and rule of every record that has them, malformed or not.
     var keys: std.ArrayList(struct { id: []const u8, rule: []const u8 }) = .empty;
     for (root.array.items, 0..) |value, index| {
-        if (try readRecord(arena, &problems, index, value)) |record| try records.append(arena, record);
+        if (try readRecord(arena, &problems, index, value, deviations)) |record| try records.append(arena, record);
         if (value != .object) continue;
         const id = value.object.get("id") orelse continue;
         const rule = value.object.get("rule") orelse continue;
@@ -341,7 +361,7 @@ const FieldReader = struct {
     }
 };
 
-fn readRecord(arena: Allocator, problems: *std.ArrayList(Problem), index: usize, value: std.json.Value) Allocator.Error!?Record {
+fn readRecord(arena: Allocator, problems: *std.ArrayList(Problem), index: usize, value: std.json.Value, deviations: []const []const u8) Allocator.Error!?Record {
     const position = try std.fmt.allocPrint(arena, "[{d}]", .{index});
     if (value != .object) {
         try problems.append(arena, .{ .where = position, .text = "a record must be a JSON object" });
@@ -380,7 +400,11 @@ fn readRecord(arena: Allocator, problems: *std.ArrayList(Problem), index: usize,
     if (!isOneLine(reason)) try r.problem("field \"reason\" must be one non-empty line", .{});
     if (!isOneLine(source)) try r.problem("field \"source\" must be one non-empty line", .{});
     if (deviation) |d| {
-        if (!isDeviationId(d)) try r.problem("deviation must be \"D<n>\"", .{});
+        if (!isDeviationId(d)) {
+            try r.problem("deviation must be \"D<n>\"", .{});
+        } else if (!contains(deviations, d)) {
+            try r.problem("deviation {s} has no row in the table of src/validator/examples/class_validator.md", .{d});
+        }
     }
     return if (r.ok) record else null;
 }
@@ -659,6 +683,8 @@ fn writeTest(w: *std.Io.Writer, arena: Allocator, record: Record) !void {
 
 /// The rules of the files that the tests check, unless a test names others.
 const test_rules = [_][]const u8{ "notEmpty", "positive", "each", "custom", "uniqueBy", "base64Url" };
+/// The deviation ids of the table the tests check against.
+const test_deviations = [_][]const u8{ "D16", "D63" };
 
 /// Fails unless checking `text` reports `problem` at `where`.
 fn expectProblem(text: []const u8, where: []const u8, problem: []const u8) !void {
@@ -670,7 +696,7 @@ fn expectProblem(text: []const u8, where: []const u8, problem: []const u8) !void
 fn expectProblemIn(rules: []const []const u8, text: []const u8, where: []const u8, problem: []const u8) !void {
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_state.deinit();
-    const checked = try checkFile(arena_state.allocator(), text, rules);
+    const checked = try checkFile(arena_state.allocator(), text, rules, &test_deviations);
     for (checked.problems) |p| {
         if (std.mem.eql(u8, p.where, where) and std.mem.eql(u8, p.text, problem)) return;
     }
@@ -684,7 +710,7 @@ fn expectProblemIn(rules: []const []const u8, text: []const u8, where: []const u
 fn expectAccepted(text: []const u8, id: []const u8) !void {
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_state.deinit();
-    const checked = try checkFile(arena_state.allocator(), text, &test_rules);
+    const checked = try checkFile(arena_state.allocator(), text, &test_rules, &test_deviations);
     for (checked.problems) |p| {
         if (std.mem.eql(u8, p.where, id)) {
             std.debug.print("unexpected problem {s}: {s}\n", .{ p.where, p.text });
@@ -1006,11 +1032,15 @@ test "a call must use the rule under test" {
     , "each-001", "call must use v.each, the rule under test");
 }
 
-test "a deviation is D<n>, and reason and source are one line each" {
+test "a deviation is D<n> with a row in class_validator.md, and reason and source are one line each" {
     try expectProblem(
         \\[{"id": "positive-001", "rule": "positive", "params": "", "field_type": "u8", "input": "1",
         \\  "expect": "pass", "reason": "r", "source": "s", "deviation": "whatever"}]
     , "positive-001", "deviation must be \"D<n>\"");
+    try expectProblem(
+        \\[{"id": "positive-001", "rule": "positive", "params": "", "field_type": "u8", "input": "1",
+        \\  "expect": "pass", "reason": "r", "source": "s", "deviation": "D99"}]
+    , "positive-001", "deviation D99 has no row in the table of src/validator/examples/class_validator.md");
     try expectProblem(
         \\[{"id": "positive-001", "rule": "positive", "params": "", "field_type": "u8", "input": "1",
         \\  "expect": "pass", "reason": " ", "source": "s"}]
@@ -1019,6 +1049,25 @@ test "a deviation is D<n>, and reason and source are one line each" {
         \\[{"id": "positive-001", "rule": "positive", "params": "", "field_type": "u8", "input": "1",
         \\  "expect": "pass", "reason": "r", "source": "a\nb"}]
     , "positive-001", "field \"source\" must be one non-empty line");
+}
+
+test "the deviation ids are the rows of the table in class_validator.md" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const ids = try deviationIds(arena_state.allocator(),
+        \\| Id | Rules | Zefir | validator.js and class-validator | Example |
+        \\| --- | --- | --- | --- | --- |
+        \\| D14 | `notEmpty` | A `null` `?T` skips the rule. | `IsNotEmpty` fails `null`. | `null` |
+        \\| D16 | `min` | NaN fails with `validation.finite`. | NaN passes. | NaN |
+        \\The text may name D99 outside the table.
+        \\| D7x | not an id |
+        \\| D0 | not an id |
+        \\|D18| not a row of the table's shape |
+        \\
+    );
+    try std.testing.expectEqual(2, ids.len);
+    try std.testing.expectEqualStrings("D14", ids[0]);
+    try std.testing.expectEqualStrings("D16", ids[1]);
 }
 
 test "a rule with fewer than 10 records is rejected" {
@@ -1103,7 +1152,7 @@ test "a file of well-formed records is accepted" {
         \\  {"id": "positive-009", "rule": "positive", "params": "", "field_type": "u64", "input": "18446744073709551615", "expect": "pass", "reason": "r", "source": "s"},
         \\  {"id": "positive-010", "rule": "positive", "params": "", "field_type": "??f64", "input": "0", "expect": "fail", "code": "validation.positive", "reason": "r", "source": "s"}
         \\]
-    ), &.{"positive"});
+    ), &.{"positive"}, &test_deviations);
     try std.testing.expectEqual(@as(usize, 0), checked.problems.len);
     try std.testing.expectEqual(@as(usize, 10), checked.records.len);
 }
@@ -1126,7 +1175,7 @@ test "the generated file aliases the fixtures and has one test per record" {
         \\  {"id": "positive-001", "rule": "positive", "params": "", "field_type": "f32", "input": "1e-45",
         \\   "bits": "00000001", "expect": "pass", "reason": "r", "source": "s"}
         \\]
-    , &test_rules);
+    , &test_rules, &test_deviations);
     var out: std.Io.Writer.Allocating = .init(arena);
     try writeTests(&out.writer, arena, "lists.json", checked.records);
     try std.testing.expectEqualStrings(
