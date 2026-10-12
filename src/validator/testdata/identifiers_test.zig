@@ -34,6 +34,12 @@ const cases = .{
     Case(v.isin, "US0378331005", "US0378331006", "validation.isin", "must be a valid ISIN"),
     Case(v.bic, "DEUTDEFF", "deutdeff", "validation.bic", "must be a valid BIC"),
     Case(v.iban, "DE89370400440532013000", "DE89370400440532013001", "validation.iban", "must be a valid IBAN"),
+    Case(v.isbn, "9780306406157", "978-0-306-40615-7", "validation.isbn", "must be a valid ISBN"),
+    Case(v.isbn10, "0306406152", "9780306406157", "validation.isbn10", "must be a valid ISBN-10"),
+    Case(v.isbn13, "9780306406157", "0306406152", "validation.isbn13", "must be a valid ISBN-13"),
+    Case(v.issn, "0317-8471", "03178471", "validation.issn", "must be a valid ISSN"),
+    Case(v.ean, "4006381333931", "4006381333932", "validation.ean", "must be a valid EAN"),
+    Case(v.isrc, "USRC17607839", "US-RC1-76-07839", "validation.isrc", "must be a valid ISRC"),
 };
 
 test "every string type: []const u8, []u8, [:0]const u8, [:0]u8" {
@@ -194,11 +200,42 @@ test "the Luhn check of creditCard and isin catches every single wrong digit" {
     }
 }
 
+test "the check digits of isbn10, isbn13, issn and ean catch every single wrong digit" {
+    const numbers = .{
+        .{ v.isIsbn10, [_]S{ "0306406152", "080442957X", "0000000000" } },
+        .{ v.isIsbn13, [_]S{ "9780306406157", "9791090636071", "9780000000002" } },
+        .{ v.isIssn, [_]S{ "0317-8471", "2434-561X", "1050-124X" } },
+        .{ v.isEan, [_]S{ "4006381333931", "73513537", "12345678901231" } },
+    };
+    var buf: [14]u8 = undefined;
+    inline for (numbers) |row| {
+        for (row[1]) |number| {
+            try testing.expect(row[0](number));
+            const s = buf[0..number.len];
+            for (number, 0..) |c, i| {
+                if (!std.ascii.isDigit(c)) continue;
+                for ("0123456789") |d| {
+                    if (d == c) continue;
+                    @memcpy(s, number);
+                    s[i] = d;
+                    try testing.expect(!row[0](s));
+                }
+            }
+        }
+    }
+}
+
 test "the first failing rule is the value's only violation" {
     try h.expectFail(S, .{ v.notEmpty, v.uuid }, "", "validation.not_empty", "must not be empty");
     try h.expectFail(S, .{ v.uuid, v.notEmpty }, "", "validation.uuid", "must be a valid UUID");
     try h.expectFail(S, .{ v.mongoId, v.noneOf(.{"000000000000000000000000"}) }, "000000000000000000000000", "validation.none_of", "must not be 000000000000000000000000");
     try h.expectFail(S, .{ v.hash(.md5), v.hash(.sha1) }, "d41d8cd98f00b204e9800998ecf8427e", "validation.hash", "must be a valid sha1 hash");
+    try h.expectFail(S, .{ v.isbn10, v.isbn13 }, "9780306406157", "validation.isbn10", "must be a valid ISBN-10");
+    try h.expectFail(S, .{ v.isbn10, v.isbn13 }, "0306406152", "validation.isbn13", "must be a valid ISBN-13");
+    try h.expectPass(S, .{ v.isbn, v.isbn13 }, "9780306406157");
+    const Books = h.One([]const S, .{ v.maxItems(3), v.each(.{ v.notEmpty, v.isbn.withMessage("bad ISBN") }) });
+    try h.expectAt(&Books{ .x = &.{ "9780306406157", "" } }, "validation.not_empty", "must not be empty", "x[1]");
+    try h.expectAt(&Books{ .x = &.{ "9780306406157", "0306406153" } }, "validation.isbn", "bad ISBN", "x[1]");
 }
 
 // ------------------------------------------------------------------ random input
@@ -207,10 +244,10 @@ test "the first failing rule is the value's only violation" {
 const iterations = 20_000;
 
 /// The bytes that the grammars of the rules care about, and some they reject.
-const alphabet = "0123456789abcdefABCDEF" ++ "0123456789" ++ "GHKLMNPQRSTUVWXYZ" ++ "-_" ++ "ghxz" ++ " \x00\x7f\x80\xff";
+const alphabet = "0123456789abcdefABCDEF" ++ "0123456789" ++ "GHKLMNPQRSTUVWXYZ" ++ "-_" ++ "ghxz" ++ "X-" ++ " \x00\x7f\x80\xff";
 
 /// The lengths the rules check for, give or take one byte.
-const lengths = [_]usize{ 8, 11, 12, 13, 16, 19, 15, 20, 22, 24, 32, 34, 36, 40, 48, 64, 96, 128 };
+const lengths = [_]usize{ 8, 9, 10, 11, 12, 13, 14, 15, 16, 19, 20, 22, 24, 32, 34, 36, 40, 48, 64, 96, 128 };
 
 /// Valid identifiers: edits of them reach checks that random bytes rarely
 /// reach.
@@ -235,6 +272,12 @@ const seeds = [_]S{
     "DE89370400440532013000",
     "NO9386011117947",
     "XX621234567890ABCDEFGHIJ1234567890",
+    "9780306406157",
+    "080442957X",
+    "2434-561X",
+    "73513537",
+    "12345678901231",
+    "USRC17607839",
 };
 
 /// `rule` passes `s` exactly when `predicate` accepts it.
@@ -266,6 +309,12 @@ fn agreeAll(s: S) !void {
     try agree(v.isin, v.isIsin, s);
     try agree(v.bic, v.isBic, s);
     try agree(v.iban, v.isIban, s);
+    try agree(v.isbn, v.isIsbn, s);
+    try agree(v.isbn10, v.isIsbn10, s);
+    try agree(v.isbn13, v.isIsbn13, s);
+    try agree(v.issn, v.isIssn, s);
+    try agree(v.ean, v.isEan, s);
+    try agree(v.isrc, v.isIsrc, s);
     inline for (comptime std.enums.values(v.HashAlgorithm)) |algorithm| try agree(v.hash(algorithm), isHashOf(algorithm), s);
 }
 

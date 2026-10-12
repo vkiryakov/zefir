@@ -1695,13 +1695,6 @@ pub const pending_kinds = [_]Kind{
     // PR 4b
     .min_date,
     .max_date,
-    // PR 5a
-    .isbn,
-    .isbn10,
-    .isbn13,
-    .issn,
-    .ean,
-    .isrc,
     // PR 5b
     .btc_address,
     .ethereum_address,

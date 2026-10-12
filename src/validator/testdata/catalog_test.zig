@@ -271,6 +271,51 @@ test "creditCard is a rule value with code validation.credit_card and message \"
     try expectNoViolation([]const u8, v.creditCard, "4111111111111111");
 }
 
+test "isbn is a rule value with code validation.isbn and message \"must be a valid ISBN\"; no precondition" {
+    try testing.expect(@hasDecl(v, "isbn"));
+    try testing.expect(@TypeOf(v.isbn) == v.Rule);
+    try expectRule(v.isbn, "validation.isbn", "must be a valid ISBN", "must be a valid ISBN");
+    try expectViolation([]const u8, v.isbn, "978-0-306-40615-7", "validation.isbn", "must be a valid ISBN", "x");
+    try expectViolation([]const u8, v.isbn.withMessage("another message"), "\xff", "validation.isbn", "another message", "x");
+    try expectNoViolation([]const u8, v.isbn, "9780306406157");
+}
+
+test "isbn10 is a rule value with code validation.isbn10 and message \"must be a valid ISBN-10\"; no precondition" {
+    try testing.expect(@hasDecl(v, "isbn10"));
+    try testing.expect(@TypeOf(v.isbn10) == v.Rule);
+    try expectRule(v.isbn10, "validation.isbn10", "must be a valid ISBN-10", "must be a valid ISBN-10");
+    try expectViolation([]const u8, v.isbn10, "9780306406157", "validation.isbn10", "must be a valid ISBN-10", "x");
+    try expectViolation([]const u8, v.isbn10.withMessage("another message"), "\xff", "validation.isbn10", "another message", "x");
+    try expectNoViolation([]const u8, v.isbn10, "0306406152");
+}
+
+test "isbn13 is a rule value with code validation.isbn13 and message \"must be a valid ISBN-13\"; no precondition" {
+    try testing.expect(@hasDecl(v, "isbn13"));
+    try testing.expect(@TypeOf(v.isbn13) == v.Rule);
+    try expectRule(v.isbn13, "validation.isbn13", "must be a valid ISBN-13", "must be a valid ISBN-13");
+    try expectViolation([]const u8, v.isbn13, "0306406152", "validation.isbn13", "must be a valid ISBN-13", "x");
+    try expectViolation([]const u8, v.isbn13.withMessage("another message"), "\xff", "validation.isbn13", "another message", "x");
+    try expectNoViolation([]const u8, v.isbn13, "9780306406157");
+}
+
+test "issn is a rule value with code validation.issn and message \"must be a valid ISSN\"; no precondition" {
+    try testing.expect(@hasDecl(v, "issn"));
+    try testing.expect(@TypeOf(v.issn) == v.Rule);
+    try expectRule(v.issn, "validation.issn", "must be a valid ISSN", "must be a valid ISSN");
+    try expectViolation([]const u8, v.issn, "03178471", "validation.issn", "must be a valid ISSN", "x");
+    try expectViolation([]const u8, v.issn.withMessage("another message"), "\xff", "validation.issn", "another message", "x");
+    try expectNoViolation([]const u8, v.issn, "0317-8471");
+}
+
+test "ean is a rule value with code validation.ean and message \"must be a valid EAN\"; no precondition" {
+    try testing.expect(@hasDecl(v, "ean"));
+    try testing.expect(@TypeOf(v.ean) == v.Rule);
+    try expectRule(v.ean, "validation.ean", "must be a valid EAN", "must be a valid EAN");
+    try expectViolation([]const u8, v.ean, "036000291452", "validation.ean", "must be a valid EAN", "x");
+    try expectViolation([]const u8, v.ean.withMessage("another message"), "\xff", "validation.ean", "another message", "x");
+    try expectNoViolation([]const u8, v.ean, "4006381333931");
+}
+
 test "isin is a rule value with code validation.isin and message \"must be a valid ISIN\"; no precondition" {
     try testing.expect(@hasDecl(v, "isin"));
     try testing.expect(@TypeOf(v.isin) == v.Rule);
@@ -278,6 +323,15 @@ test "isin is a rule value with code validation.isin and message \"must be a val
     try expectViolation([]const u8, v.isin, "US0378331006", "validation.isin", "must be a valid ISIN", "x");
     try expectViolation([]const u8, v.isin.withMessage("another message"), "\xff", "validation.isin", "another message", "x");
     try expectNoViolation([]const u8, v.isin, "US0378331005");
+}
+
+test "isrc is a rule value with code validation.isrc and message \"must be a valid ISRC\"; no precondition" {
+    try testing.expect(@hasDecl(v, "isrc"));
+    try testing.expect(@TypeOf(v.isrc) == v.Rule);
+    try expectRule(v.isrc, "validation.isrc", "must be a valid ISRC", "must be a valid ISRC");
+    try expectViolation([]const u8, v.isrc, "US-RC1-76-07839", "validation.isrc", "must be a valid ISRC", "x");
+    try expectViolation([]const u8, v.isrc.withMessage("another message"), "\xff", "validation.isrc", "another message", "x");
+    try expectNoViolation([]const u8, v.isrc, "USRC17607839");
 }
 
 test "bic is a rule value with code validation.bic and message \"must be a valid BIC\"; no precondition" {
@@ -462,15 +516,16 @@ test "finite has no precondition: nan, inf and -inf on a float field fail its ow
     }
 }
 
-test "the module exports exactly its 46 public names, and Rule.withMessage" {
-    const names = [_][]const u8{ "Violation", "Rule", "Report", "max_code_bytes", "max_message_bytes", "max_report_violations", "check", "checkAll", "assertRules", "fail", "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "uuid", "mongoId", "firebasePushId", "hash", "creditCard", "isin", "bic", "iban", "isUuid", "isMongoId", "isFirebasePushId", "isHash", "isCreditCard", "isIsin", "isBic", "isIban", "HashAlgorithm", "minItems", "maxItems", "each", "custom" };
+test "the module exports exactly its 58 public names, and Rule.withMessage" {
+    const names = [_][]const u8{ "Violation", "Rule", "Report", "max_code_bytes", "max_message_bytes", "max_report_violations", "check", "checkAll", "assertRules", "fail", "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "uuid", "mongoId", "firebasePushId", "hash", "creditCard", "isbn", "isbn10", "isbn13", "issn", "ean", "isin", "isrc", "bic", "iban", "isUuid", "isMongoId", "isFirebasePushId", "isHash", "isCreditCard", "isIsbn", "isIsbn10", "isIsbn13", "isIssn", "isEan", "isIsin", "isIsrc", "isBic", "isIban", "HashAlgorithm", "minItems", "maxItems", "each", "custom" };
     inline for (names) |name| try testing.expect(@hasDecl(v, name));
     try testing.expectEqual(names.len, comptime std.meta.declarations(v).len);
     try testing.expect(@hasDecl(v.Rule, "withMessage"));
 }
 
 test "every rule the module exports has a catalog test" {
-    const tested = [_][]const u8{ "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "uuid", "mongoId", "firebasePushId", "hash", "creditCard", "isin", "bic", "iban", "minItems", "maxItems", "each", "custom" };
+    @setEvalBranchQuota(100_000);
+    const tested = [_][]const u8{ "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "uuid", "mongoId", "firebasePushId", "hash", "creditCard", "isbn", "isbn10", "isbn13", "issn", "ean", "isin", "isrc", "bic", "iban", "minItems", "maxItems", "each", "custom" };
     inline for (comptime std.meta.declarations(v)) |name| {
         const T = @TypeOf(@field(v, name));
         if (comptime T == v.Rule or (@typeInfo(T) == .@"fn" and @typeInfo(T).@"fn".return_type == v.Rule)) {
@@ -486,7 +541,8 @@ test "every rule the module exports has a catalog test" {
 }
 
 test "the module exports exactly the catalog predicates of the shipped rules" {
-    const predicates = [_][]const u8{ "isUuid", "isMongoId", "isFirebasePushId", "isHash", "isCreditCard", "isIsin", "isBic", "isIban" };
+    @setEvalBranchQuota(100_000);
+    const predicates = [_][]const u8{ "isUuid", "isMongoId", "isFirebasePushId", "isHash", "isCreditCard", "isIsbn", "isIsbn10", "isIsbn13", "isIssn", "isEan", "isIsin", "isIsrc", "isBic", "isIban" };
     comptime var exported: usize = 0;
     inline for (comptime std.meta.declarations(v)) |name| {
         if (comptime name.len > 2 and std.mem.startsWith(u8, name, "is") and std.ascii.isUpper(name[2])) {

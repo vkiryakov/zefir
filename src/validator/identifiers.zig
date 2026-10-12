@@ -1,11 +1,12 @@
 //! Identifier rules: `uuid`, `mongoId`, `firebasePushId`, `hash`,
-//! `creditCard`, `isin`, `bic` and `iban`, each with its predicate
-//! (`v.isUuid`, ..., `v.isIban`). The rules take strings only and read
-//! bytes, never code points: a byte outside a rule's ASCII alphabet, invalid
-//! UTF-8 included, fails under the rule's own code, and `""` fails every
-//! rule. Nothing is trimmed, case-folded or normalized: a rule accepts the
-//! canonical form of its identifier only. A predicate takes any input,
-//! allocates nothing and reads each byte a bounded number of times.
+//! `creditCard`, `isin`, `bic`, `iban`, `isbn`, `isbn10`, `isbn13`, `issn`,
+//! `ean` and `isrc`, each with its predicate (`v.isUuid`, ..., `v.isIsrc`).
+//! The rules take strings only and read bytes, never code points: a byte
+//! outside a rule's ASCII alphabet, invalid UTF-8 included, fails under the
+//! rule's own code, and `""` fails every rule. Nothing is trimmed,
+//! case-folded or normalized: a rule accepts the canonical form of its
+//! identifier only. A predicate takes any input, allocates nothing and reads
+//! each byte a bounded number of times.
 const std = @import("std");
 const core = @import("core.zig");
 const Rule = core.Rule;
@@ -264,6 +265,107 @@ fn mod97(remainder: u32, c: u8) u32 {
     return if (std.ascii.isDigit(c)) (remainder * 10 + (c - '0')) % 97 else (remainder * 100 + (c - 'A' + 10)) % 97;
 }
 
+// ------------------------------------------------------------------ isbn, isbn10, isbn13, issn, ean, isrc
+
+/// The GS1 check (EAN, GTIN, ISBN-13) over ASCII digits: from the right,
+/// the check digit has weight 1, then 3, 1, 3, …, and the sum is a multiple
+/// of 10.
+fn gs1Ok(digits: []const u8) bool {
+    var sum: u32 = 0;
+    for (digits, 0..) |c, i| {
+        const weight: u32 = if ((digits.len - 1 - i) % 2 == 1) 3 else 1;
+        sum += weight * (c - '0');
+    }
+    return sum % 10 == 0;
+}
+
+/// An ISBN-10 or an ISBN-13, as `v.isbn10` and `v.isbn13` define them.
+pub const isbn: Rule = predicateRule(.isbn, "must be a valid ISBN", isIsbn);
+
+/// `s` passes `v.isbn`.
+pub fn isIsbn(s: []const u8) bool {
+    return isIsbn10(s) or isIsbn13(s);
+}
+
+/// An ISBN-10 without hyphens or spaces: nine digits and a check
+/// character, a digit or an upper-case `X` for 10; the sum of each value
+/// times its position (1 to 10) is a multiple of 11.
+pub const isbn10: Rule = predicateRule(.isbn10, "must be a valid ISBN-10", isIsbn10);
+
+/// `s` passes `v.isbn10`.
+pub fn isIsbn10(s: []const u8) bool {
+    if (s.len != 10) return false;
+    var sum: u32 = 0;
+    var position: u32 = 1;
+    for (s[0..9]) |c| {
+        if (!std.ascii.isDigit(c)) return false;
+        sum += position * (c - '0');
+        position += 1;
+    }
+    const check: u32 = if (s[9] == 'X') 10 else if (std.ascii.isDigit(s[9])) s[9] - '0' else return false;
+    return (sum + 10 * check) % 11 == 0;
+}
+
+/// An ISBN-13 without hyphens or spaces: 13 digits with the GS1 check
+/// digit, starting with 978, or with 979 and a digit other than 0 (979-0 is
+/// the range of ISMN, the numbers of printed music).
+pub const isbn13: Rule = predicateRule(.isbn13, "must be a valid ISBN-13", isIsbn13);
+
+/// `s` passes `v.isbn13`.
+pub fn isIsbn13(s: []const u8) bool {
+    if (s.len != 13 or !allDigits(s)) return false;
+    const prefix_ok = std.mem.startsWith(u8, s, "978") or (std.mem.startsWith(u8, s, "979") and s[3] != '0');
+    return prefix_ok and gs1Ok(s);
+}
+
+/// An ISSN in its printed form `NNNN-NNNC` (ISO 3297): 9 bytes with one
+/// hyphen, at index 4, and a check character, a digit or an upper-case `X`
+/// for 10; the eight values weighted 8 down to 1 sum to a multiple of 11.
+pub const issn: Rule = predicateRule(.issn, "must be a valid ISSN", isIssn);
+
+/// `s` passes `v.issn`.
+pub fn isIssn(s: []const u8) bool {
+    if (s.len != 9 or s[4] != '-') return false;
+    var sum: u32 = 0;
+    var weight: u32 = 8;
+    for (s, 0..) |c, i| {
+        if (i == 4) continue;
+        const value: u32 = if (std.ascii.isDigit(c)) c - '0' else if (i == 8 and c == 'X') 10 else return false;
+        sum += weight * value;
+        weight -= 1;
+    }
+    return sum % 11 == 0;
+}
+
+/// An EAN-8, EAN-13 or GTIN-14: 8, 13 or 14 digits with the GS1 check
+/// digit. A 12-digit UPC-A fails: write it as an EAN-13 with a leading 0.
+pub const ean: Rule = predicateRule(.ean, "must be a valid EAN", isEan);
+
+/// `s` passes `v.ean`.
+pub fn isEan(s: []const u8) bool {
+    return (s.len == 8 or s.len == 13 or s.len == 14) and allDigits(s) and gs1Ok(s);
+}
+
+/// An ISRC (ISO 3901) without hyphens: 12 bytes; two upper-case letters for
+/// the country, three upper-case letters or digits for the registrant, then
+/// seven digits for the year and the recording. The country is not looked
+/// up: `QM` passes. An ISRC has no check digit.
+pub const isrc: Rule = predicateRule(.isrc, "must be a valid ISRC", isIsrc);
+
+/// `s` passes `v.isrc`.
+pub fn isIsrc(s: []const u8) bool {
+    if (s.len != 12) return false;
+    for (s, 0..) |c, i| {
+        const ok = switch (i) {
+            0, 1 => std.ascii.isUpper(c),
+            2, 3, 4 => isUpperAlnum(c),
+            else => std.ascii.isDigit(c),
+        };
+        if (!ok) return false;
+    }
+    return true;
+}
+
 // ------------------------------------------------------------------ tests
 
 const expectOutcome = core.expectOutcome;
@@ -302,6 +404,12 @@ test "the rules without parameters have their documented codes and messages and 
         .{ isin, core.Kind.isin, "validation.isin", "must be a valid ISIN" },
         .{ bic, core.Kind.bic, "validation.bic", "must be a valid BIC" },
         .{ iban, core.Kind.iban, "validation.iban", "must be a valid IBAN" },
+        .{ isbn, core.Kind.isbn, "validation.isbn", "must be a valid ISBN" },
+        .{ isbn10, core.Kind.isbn10, "validation.isbn10", "must be a valid ISBN-10" },
+        .{ isbn13, core.Kind.isbn13, "validation.isbn13", "must be a valid ISBN-13" },
+        .{ issn, core.Kind.issn, "validation.issn", "must be a valid ISSN" },
+        .{ ean, core.Kind.ean, "validation.ean", "must be a valid EAN" },
+        .{ isrc, core.Kind.isrc, "validation.isrc", "must be a valid ISRC" },
     };
     inline for (rules) |row| {
         try t.expectEqual(row[1], row[0].kind);
@@ -363,6 +471,24 @@ test "the rules take strings only: [N]u8 and lists of strings get hints, other t
     try expect(head ++ "iban expects a string, field is u128", comptime typeText(iban, u128).?);
     try expect(head ++ "iban expects a string, field is [34]u8" ++ u8_array, comptime typeText(iban, [34]u8).?);
     try expect(head ++ "iban expects a string, field is []const []const u8; use v.each(v.iban)", comptime typeText(iban, []const []const u8).?);
+    try expect(head ++ "isbn expects a string, field is u64", comptime typeText(isbn, u64).?);
+    try expect(head ++ "isbn expects a string, field is [13]u8" ++ u8_array, comptime typeText(isbn, [13]u8).?);
+    try expect(head ++ "isbn expects a string, field is []const []const u8; use v.each(v.isbn)", comptime typeText(isbn, []const []const u8).?);
+    try expect(head ++ "isbn10 expects a string, field is u64", comptime typeText(isbn10, u64).?);
+    try expect(head ++ "isbn10 expects a string, field is [10]u8" ++ u8_array, comptime typeText(isbn10, [10]u8).?);
+    try expect(head ++ "isbn10 expects a string, field is []const []const u8; use v.each(v.isbn10)", comptime typeText(isbn10, []const []const u8).?);
+    try expect(head ++ "isbn13 expects a string, field is u64", comptime typeText(isbn13, u64).?);
+    try expect(head ++ "isbn13 expects a string, field is [13]u8" ++ u8_array, comptime typeText(isbn13, [13]u8).?);
+    try expect(head ++ "isbn13 expects a string, field is []const []const u8; use v.each(v.isbn13)", comptime typeText(isbn13, []const []const u8).?);
+    try expect(head ++ "issn expects a string, field is u32", comptime typeText(issn, u32).?);
+    try expect(head ++ "issn expects a string, field is [9]u8" ++ u8_array, comptime typeText(issn, [9]u8).?);
+    try expect(head ++ "issn expects a string, field is []const []const u8; use v.each(v.issn)", comptime typeText(issn, []const []const u8).?);
+    try expect(head ++ "ean expects a string, field is u64", comptime typeText(ean, u64).?);
+    try expect(head ++ "ean expects a string, field is [13]u8" ++ u8_array, comptime typeText(ean, [13]u8).?);
+    try expect(head ++ "ean expects a string, field is []const []const u8; use v.each(v.ean)", comptime typeText(ean, []const []const u8).?);
+    try expect(head ++ "isrc expects a string, field is u64", comptime typeText(isrc, u64).?);
+    try expect(head ++ "isrc expects a string, field is [12]u8" ++ u8_array, comptime typeText(isrc, [12]u8).?);
+    try expect(head ++ "isrc expects a string, field is []const []const u8; use v.each(v.isrc)", comptime typeText(isrc, []const []const u8).?);
     try expect(
         head ++ "uuid expects a string, field is []volatile u8; volatile, allowzero and under-aligned slices are neither strings nor lists",
         comptime typeText(uuid, []volatile u8).?,
@@ -594,5 +720,83 @@ test "iban: 15 to 34 bytes, check digits 02 to 98 and MOD 97-10, any country, up
         "GB82WE\u{17f}T12345698765432",
         "XX361234567890",
         "XX851234567890ABCDEFGHIJ1234567890X",
+    });
+}
+
+test "isbn, isbn10 and isbn13: the canonical digits with their check digit, X only as the ISBN-10 check" {
+    try expectPredicate(isIsbn, &.{
+        "9780306406157",
+        "0306406152",
+        "080442957X",
+        "9791090636071",
+    }, &.{
+        "",
+        "080442957x",
+        "978-0-306-40615-7",
+        "0-306-40615-2",
+        "978 0306406157",
+        "978\u{a0}0306406157",
+        "9780306406158",
+        "0306406153",
+        "4006381333931",
+        "9790060115615",
+        "97803064061570",
+    });
+    try expectPredicate(isIsbn10, &.{ "0306406152", "080442957X", "0000000000" }, &.{ "", "9780306406157", "08044295X7", "X306406152", "030640615" });
+    try expectPredicate(isIsbn13, &.{ "9780306406157", "9791090636071" }, &.{ "", "0306406152", "080442957X", "4006381333931", "9790060115615", "978030640615X" });
+}
+
+test "issn: NNNN-NNNC with the hyphen at index 4 and an upper-case X as the only letter" {
+    try expectPredicate(isIssn, &.{
+        "0317-8471",
+        "2434-561X",
+        "1050-124X",
+        "0000-0000",
+    }, &.{
+        "",
+        "2434-561x",
+        "03178471",
+        "0317-8472",
+        "0317 8471",
+        "0317--8471",
+        " 0317-8471",
+        "X317-8471",
+        "0317-847",
+        "03178-471",
+    });
+}
+
+test "ean: 8, 13 or 14 digits with the GS1 check digit; 12-digit UPC-A fails" {
+    try expectPredicate(isEan, &.{
+        "4006381333931",
+        "73513537",
+        "12345678901231",
+        "0036000291452",
+        "00000000",
+    }, &.{
+        "",
+        "4006381333932",
+        "036000291452",
+        "12345678901232",
+        "4006-381333931",
+        "abcdefgh",
+    });
+}
+
+test "isrc: country, registrant, year and designation without hyphens; no check digit" {
+    try expectPredicate(isIsrc, &.{
+        "USRC17607839",
+        "GBAYE6800011",
+        "QMDA71418090",
+        "USRCX7607839",
+    }, &.{
+        "",
+        "US-RC1-76-07839",
+        "usrc17607839",
+        "USRC1760783",
+        "USRC176078390",
+        "U1RC17607839",
+        "USRC1X607839",
+        "USRC1760783A",
     });
 }
