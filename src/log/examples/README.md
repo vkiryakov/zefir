@@ -1049,17 +1049,34 @@ errors for a debug page.
 The payments part of an orders service logs an error when a charge fails. The
 team wants each such error in a Slack channel. Slack gives a channel an
 incoming webhook: a URL, and whatever JSON is posted to it appears in the
-channel. The whole program:
+channel. Anyone who has the URL can post to the channel, so it is a secret:
+the program reads it with [confy](../../confy/examples/README.md), as a
+`confy.Secret`, together with the log level. Add confy to the imports in
+`build.zig`, next to log:
+
+```zig
+.{ .name = "confy", .module = zefir.module("zefir-confy") },
+```
+
+The whole program:
 
 ```zig
 const std = @import("std");
+const confy = @import("confy");
 const log = @import("log");
+
+const Config = struct {
+    log_level: log.Level = .info,
+    slack: struct {
+        webhook_url: confy.Secret,
+    },
+};
 
 /// Posts error records to a Slack channel through an incoming webhook.
 const SlackAlerts = struct {
     gpa: std.mem.Allocator,
     http: std.http.Client,
-    webhook_url: []const u8,
+    webhook_url: confy.Secret,
 
     /// The handler. The logger calls it on the subscriber's own thread, once
     /// per record, so a slow post holds up no request.
@@ -1071,7 +1088,7 @@ const SlackAlerts = struct {
         const body = try std.json.Stringify.valueAlloc(slack.gpa, .{ .text = text }, .{});
         defer slack.gpa.free(body);
         const response = try slack.http.fetch(.{
-            .location = .{ .url = slack.webhook_url },
+            .location = .{ .url = slack.webhook_url.expose() },
             .payload = body, // a payload makes it a POST
             .headers = .{ .content_type = .{ .override = "application/json" } },
         });
@@ -1080,8 +1097,17 @@ const SlackAlerts = struct {
 };
 
 pub fn main(init: std.process.Init) !void {
+    var config: Config = undefined;
+    confy.loadOrExit(init.arena.allocator(), &config, .{
+        .io = init.io,
+        .environ = init.environ_map,
+        .env_prefix = "APP_",
+        .sources = &.{ .env(".env"), .osEnv() },
+    });
+
     const logger: log.Logger = try .init(init.gpa, init.io, .{
         .service = .{ .name = "orders", .version = "3.0.0" },
+        .level = config.log_level,
         .mode = .{ .queued = .{} },
     });
     defer logger.deinit();
@@ -1089,7 +1115,7 @@ pub fn main(init: std.process.Init) !void {
     var slack: SlackAlerts = .{
         .gpa = init.gpa,
         .http = .{ .allocator = init.gpa, .io = init.io },
-        .webhook_url = init.environ_map.get("SLACK_WEBHOOK_URL") orelse return error.MissingWebhookUrl,
+        .webhook_url = config.slack.webhook_url,
     };
     defer slack.http.deinit();
 
@@ -1108,10 +1134,17 @@ pub fn main(init: std.process.Init) !void {
 }
 ```
 
-Run it with the webhook URL Slack gave you:
+Put the URL Slack gave you in `.env`, next to the program, and keep that file
+out of git:
+
+```sh
+APP_SLACK_WEBHOOK_URL=https://hooks.slack.com/services/T000/B000/XXXX
+```
+
+Run it:
 
 ```text
-$ SLACK_WEBHOOK_URL=https://hooks.slack.com/services/T000/B000/XXXX zig build run
+$ zig build run
 {"timestamp":"2026-10-12T09:41:07.415Z","level":"info","message":"Charge started","service.name":"orders","service.version":"3.0.0","scope":"payments","order_id":7,"amount_cents":4200}
 {"timestamp":"2026-10-12T09:41:07.416Z","level":"error","message":"Charge declined","service.name":"orders","service.version":"3.0.0","scope":"payments","order_id":7,"reason":"card_expired"}
 {"timestamp":"2026-10-12T09:41:07.416Z","level":"error","message":"Upstream timeout","service.name":"orders","service.version":"3.0.0","scope":"http","path":"/v1/orders"}
@@ -1131,6 +1164,14 @@ And the channel shows:
 {"timestamp":"2026-10-12T09:41:07.416Z","level":"error","message":"Charge declined","service.name":"orders","service.version":"3.0.0","scope":"payments","order_id":7,"reason":"card_expired"}
 ```
 
+Without the URL, the service does not start, and confy says what to set:
+
+```text
+$ zig build run
+error(confy): 1 configuration problem:
+  slack.webhook_url: missing (set APP_SLACK_WEBHOOK_URL)
+```
+
 What happens, step by step:
 
 ```mermaid
@@ -1141,17 +1182,19 @@ flowchart LR
     handler --> slack(["the Slack channel"])
 ```
 
-1. `subscribe` registers the handler with its filter, `.err` records of
+1. `confy.loadOrExit` reads `.env` and the environment into `Config`. The URL
+   stays a `confy.Secret`: logging `config` would write it as `[REDACTED]`.
+2. `subscribe` registers the handler with its filter, `.err` records of
    `payments` and its subscopes, starts the subscriber's thread and gives it a
    queue of 256 records.
-2. `payments.err(...)` goes through the level filter and the encoding as
+3. `payments.err(...)` goes through the level filter and the encoding as
    usual. The logger sees that this subscriber wants the record and copies it
    into the subscriber's queue (a copy, no waiting), then writes it to stdout.
-3. The subscriber's thread takes the record from its queue and calls
+4. The subscriber's thread takes the record from its queue and calls
    `SlackAlerts.send`. The post takes as long as Slack needs; the code that
    logged the error has long gone on.
-4. The `http` error reaches no subscriber: its scope is not `payments`.
-5. At the end of `main`, `unsubscribe` waits until the queue is empty, so the
+5. The `http` error reaches no subscriber: its scope is not `payments`.
+6. At the end of `main`, `unsubscribe` waits until the queue is empty, so the
    last alert is posted, and stops the thread.
 
 The handler gets an `Event`, valid only during the call:
