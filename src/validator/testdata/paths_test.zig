@@ -233,3 +233,11 @@ test "the first violation of checkAll equals check: code and message always, fie
     var exact: [12]u8 = undefined;
     try h.expectSame(report.violations[0], v.check(&value, &exact) orelse return error.NoViolation);
 }
+
+test "check returns the first violation, not a later one, when the first path does not fit path_buf" {
+    const value: Customer = .{ .name = "", .matrix = .{ .{ 0, 1 }, .{ 1, 1 } } };
+    var empty: [0]u8 = .{};
+    try h.expectSame(.{ .code = "validation.not_empty", .message = "must not be empty", .field = null }, v.check(&value, &empty) orelse return error.NoViolation);
+    var short: [3]u8 = undefined; // "name" needs 4 bytes
+    try h.expectSame(.{ .code = "validation.not_empty", .message = "must not be empty", .field = null }, v.check(&value, &short) orelse return error.NoViolation);
+}

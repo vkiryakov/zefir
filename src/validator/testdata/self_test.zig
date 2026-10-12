@@ -263,3 +263,45 @@ test "a hand-built result without a field at the root has field = null" {
     try h.expectAll(&RootSelf{ .ok = false }, &.{.{ .code = "t.root", .field = null }});
     try h.expectValid(&RootSelf{ .ok = true });
 }
+
+// ------------------------------------------------------------- the report cap
+
+var capped_calls: usize = 0;
+
+const Capped = struct {
+    n: u32,
+    pub const field_rules = .{ .n = v.positive };
+    pub fn validateSelf(_: *const Capped) ?v.Violation {
+        capped_calls += 1;
+        return null;
+    }
+};
+
+const Named = struct {
+    name: []const u8,
+    pub const field_rules = .{ .name = v.notEmpty };
+};
+
+const FullBefore = struct {
+    names: []const Named,
+    capped: Capped,
+};
+
+test "validateSelf does not run when the violation beyond the cap is in its struct's subtree" {
+    const names: [v.max_report_violations]Named = @splat(.{ .name = "" });
+    capped_calls = 0;
+    {
+        // The report is full but capped is clean: its validateSelf runs.
+        const report = try v.checkAll(testing.allocator, &FullBefore{ .names = &names, .capped = .{ .n = 1 } });
+        defer report.deinit();
+        try testing.expect(!report.truncated);
+        try testing.expectEqual(1, capped_calls);
+    }
+    {
+        // capped.n is the violation beyond the cap: it is dropped, yet capped's subtree failed.
+        const report = try v.checkAll(testing.allocator, &FullBefore{ .names = &names, .capped = .{ .n = 0 } });
+        defer report.deinit();
+        try testing.expect(report.truncated);
+        try testing.expectEqual(1, capped_calls);
+    }
+}
