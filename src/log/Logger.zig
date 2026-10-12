@@ -514,15 +514,21 @@ test "a long std.log message is cut between characters" {
 test "deinit and uninstallStdLog send std.log back to its default" {
     var sink: std.Io.Writer.Discarding = .init(&.{});
     const first: Logger = try .init(testing.allocator, testing.io, .{ .output = .{ .writer = &sink.writer } });
+    var first_live = true;
+    defer if (first_live) first.deinit();
     const second: Logger = try .init(testing.allocator, testing.io, .{ .output = .{ .writer = &sink.writer } });
+    var second_live = true;
+    defer if (second_live) second.deinit();
     first.installStdLog();
     try testing.expect(std_log.installed() == first.engine);
     second.deinit(); // not the installed one: std.log stays with `first`
+    second_live = false;
     try testing.expect(std_log.installed() == first.engine);
     uninstallStdLog();
     try testing.expect(std_log.installed() == null);
     first.installStdLog();
     first.deinit();
+    first_live = false;
     try testing.expect(std_log.installed() == null);
 }
 
@@ -1410,11 +1416,14 @@ test "emergency writes its record while a cancel request is pending, and keeps t
     var stderr: StderrFile = try .open();
     defer stderr.close();
     const logger: Logger = try .init(testing.allocator, testing.io, .{});
+    var live = true;
+    defer if (live) logger.deinit();
     logger.engine.stderr = stderr.file;
     var task = try testing.io.concurrent(emergencyThenCheckCancel, .{logger});
     const result = task.cancel(testing.io);
     const s = logger.stats();
     logger.deinit();
+    live = false;
     var buf: [256]u8 = undefined;
     try testing.expectStringEndsWith(try stderr.read(&buf), "\"message\":\"Going down\"}\n");
     try testing.expectError(error.Canceled, result);
@@ -2175,6 +2184,8 @@ test "emergency: a record with no room for the count goes out without it, and th
     // The smallest record that holds every mandatory part.
     const smallest: u32 = @intCast(encode.mandatoryBytes(.json, 0, scopes.max_name_bytes));
     const logger: Logger = try .init(testing.allocator, testing.io, .{ .max_record_bytes = smallest });
+    var live = true;
+    defer if (live) logger.deinit();
     logger.engine.stderr = stderr.file;
     const long_scope: [scopes.max_name_bytes]u8 = @splat('s');
     const ctx = core.Context.root.withTrace(try traceContext("4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7"));
@@ -2188,6 +2199,7 @@ test "emergency: a record with no room for the count goes out without it, and th
     logger.emergency("Next", .{});
     const s = logger.stats();
     logger.deinit();
+    live = false;
     var buf: [2048]u8 = undefined;
     var lines = std.mem.splitScalar(u8, try stderr.read(&buf), '\n');
     const whole = lines.next().?;

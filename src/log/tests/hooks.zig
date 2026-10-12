@@ -842,12 +842,15 @@ test "sync mode under an Io other than std.Io.Threaded: records a handler logs a
     var out: std.Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
     const logger: log.Logger = try .init(testing.allocator, otherIo(), .{ .output = .{ .writer = &out.writer } });
+    var live = true;
+    defer if (live) logger.deinit();
     var echo: Echo = .{ .logger = logger };
     const id = try logger.subscribe(.{ .levels = &.{.err}, .context = &echo, .handler = Echo.handler });
     logger.err("disk full", .{});
     logger.unsubscribe(id);
     const s = logger.stats();
     logger.deinit();
+    live = false;
     try testing.expectEqual(@as(u32, 1), echo.calls.load(.seq_cst));
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, out.written(), "\n"));
     try testing.expectEqual(@as(u64, 1), s.hook_errors);
