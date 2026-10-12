@@ -1068,6 +1068,11 @@ pub const Rule = struct {
     /// with `[]` appended per `each` level. Reports problems with
     /// `@compileError`, usually through `typeError` or `ruleError`.
     fits: fn (comptime rule: *const Rule, comptime T: type, comptime where: []const u8) void,
+    /// Compile-time check against the other rules of the same value, run
+    /// after every rule's `fits`: `rules` is the value's tuple (a trailing
+    /// `each` included) and `index` this rule's place in it. Null for a rule
+    /// without such a check.
+    check_list: ?fn (comptime rule: *const Rule, comptime rules: []const Rule, comptime index: usize, comptime T: type, comptime where: []const u8) void = null,
     /// Run-time check; receives `*const T`, with `T` unwrapped.
     eval: fn (value: anytype) Outcome,
 
@@ -1129,6 +1134,7 @@ pub const Spec = struct {
     params: []const Param = &.{},
     precondition: ?Precondition = null,
     fits: fn (comptime rule: *const Rule, comptime T: type, comptime where: []const u8) void,
+    check_list: ?fn (comptime rule: *const Rule, comptime rules: []const Rule, comptime index: usize, comptime T: type, comptime where: []const u8) void = null,
     eval: fn (value: anytype) Outcome,
 };
 
@@ -1153,6 +1159,7 @@ pub fn define(comptime kind: Kind, comptime spec: Spec) Rule {
         .params = spec.params,
         .precondition = spec.precondition,
         .fits = spec.fits,
+        .check_list = spec.check_list,
         .eval = spec.eval,
     };
 }
@@ -1593,6 +1600,9 @@ pub const hints = struct {
     /// A `minDate` or `maxDate` bound that every value of its form passes.
     pub const use_date = "use v.date";
     pub const use_rfc3339 = "use v.rfc3339";
+    /// `iso8601` beside a `minDate` or `maxDate`, whose bound fixes the form.
+    pub const iso8601_with_date = "use v.date instead of v.iso8601";
+    pub const iso8601_with_date_time = "use v.rfc3339 instead of v.iso8601";
 
     /// A rule written on a list whose items it would accept.
     pub fn useEach(comptime rule: Rule) []const u8 {
@@ -1619,7 +1629,7 @@ pub const hints = struct {
 
 /// The files that define rules. Each rule pull request adds its file here, so
 /// that its `call_examples` reach the hints.
-const rule_files = [_]type{ @import("common.zig"), @import("numbers.zig"), @import("encodings.zig"), @import("lists.zig"), @import("custom.zig") };
+const rule_files = [_]type{ @import("common.zig"), @import("numbers.zig"), @import("encodings.zig"), @import("dates.zig"), @import("lists.zig"), @import("custom.zig") };
 
 /// The arguments the hints show in a call of the constructor `name` of type
 /// `F`: its `call_examples` entry, else `.{}` for an options struct, the
@@ -1714,13 +1724,6 @@ pub const pending_kinds = [_]Kind{
     .hash,
     .btc_address,
     .ethereum_address,
-    // dates
-    .date,
-    .rfc3339,
-    .iso8601,
-    .min_date,
-    .max_date,
-    .military_time,
 };
 
 /// `name` is the public name of a pending kind.
@@ -2388,7 +2391,8 @@ pub fn itemRules(comptime rules: []const Rule) []const Rule {
 
 /// The declaration check of one value's rules: at most one `each`, placed
 /// last; then, in tuple order, each rule's `fits` against `T`, the unwrapped
-/// field or item type, and the size of its default message.
+/// field or item type, and the size of its default message; then, in tuple
+/// order, each rule's `check_list` against its neighbours.
 pub fn checkRuleList(comptime rules: []const Rule, comptime T: type, comptime where: []const u8) void {
     @setEvalBranchQuota(eval_quota);
     var each_count: usize = 0;
@@ -2400,6 +2404,9 @@ pub fn checkRuleList(comptime rules: []const Rule, comptime T: type, comptime wh
     for (rules) |*rule| {
         rule.fits(rule, T, where);
         if (defaultMessageProblem(rule, where)) |text| @compileError(text);
+    }
+    for (rules, 0..) |*rule, i| {
+        if (rule.check_list) |check| check(rule, rules, i, T, where);
     }
 }
 

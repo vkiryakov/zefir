@@ -37,6 +37,7 @@ const walk = @import("walk.zig");
 const common = @import("common.zig");
 const numbers = @import("numbers.zig");
 const encodings = @import("encodings.zig");
+const dates = @import("dates.zig");
 const lists = @import("lists.zig");
 const custom_rules = @import("custom.zig");
 
@@ -97,6 +98,16 @@ pub const rgbColor = encodings.rgbColor;
 pub const isRgbColor = encodings.isRgbColor;
 pub const hslColor = encodings.hslColor;
 pub const isHslColor = encodings.isHslColor;
+pub const date = dates.date;
+pub const isDate = dates.isDate;
+pub const rfc3339 = dates.rfc3339;
+pub const isRfc3339 = dates.isRfc3339;
+pub const iso8601 = dates.iso8601;
+pub const isIso8601 = dates.isIso8601;
+pub const minDate = dates.minDate;
+pub const maxDate = dates.maxDate;
+pub const militaryTime = dates.militaryTime;
+pub const isMilitaryTime = dates.isMilitaryTime;
 pub const minItems = lists.minItems;
 pub const maxItems = lists.maxItems;
 pub const each = lists.each;
@@ -108,6 +119,7 @@ test {
     _ = common;
     _ = numbers;
     _ = encodings;
+    _ = dates;
     _ = lists;
     _ = custom_rules;
 }

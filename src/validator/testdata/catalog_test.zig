@@ -330,6 +330,63 @@ test "hslColor is a rule value with code validation.hsl_color and message \"must
     try expectNoViolation([]const u8, v.hslColor, "hsl(120 100% 50% / 0.5)");
 }
 
+test "date is a rule value with code validation.date and message \"must be a valid date in YYYY-MM-DD format\"" {
+    try testing.expect(@hasDecl(v, "date"));
+    try testing.expect(@TypeOf(v.date) == v.Rule);
+    try expectRule(v.date, "validation.date", "must be a valid date in YYYY-MM-DD format", "must be a valid date in YYYY-MM-DD format");
+    try expectViolation([]const u8, v.date, "2021-02-29", "validation.date", "must be a valid date in YYYY-MM-DD format", "x");
+    try expectNoViolation([]const u8, v.date, "2020-02-29");
+}
+
+test "rfc3339 is a rule value with code validation.rfc3339 and message \"must be a valid RFC 3339 date-time\"" {
+    try testing.expect(@hasDecl(v, "rfc3339"));
+    try testing.expect(@TypeOf(v.rfc3339) == v.Rule);
+    try expectRule(v.rfc3339, "validation.rfc3339", "must be a valid RFC 3339 date-time", "must be a valid RFC 3339 date-time");
+    try expectViolation([]const u8, v.rfc3339, "2020-05-17T10:30:00", "validation.rfc3339", "must be a valid RFC 3339 date-time", "x");
+    try expectNoViolation([]const u8, v.rfc3339, "2020-05-17T10:30:00Z");
+}
+
+test "iso8601 is a rule value with code validation.iso8601 and message \"must be a valid ISO 8601 date\"" {
+    try testing.expect(@hasDecl(v, "iso8601"));
+    try testing.expect(@TypeOf(v.iso8601) == v.Rule);
+    try expectRule(v.iso8601, "validation.iso8601", "must be a valid ISO 8601 date", "must be a valid ISO 8601 date");
+    try expectViolation([]const u8, v.iso8601, "2020-W00", "validation.iso8601", "must be a valid ISO 8601 date", "x");
+    try expectNoViolation([]const u8, v.iso8601, "2020-W20-7");
+}
+
+/// A date-time bound whose default message would be longer than 512 bytes.
+const long_date_time = "2020-01-01T00:00:00." ++ @as([600]u8, @splat('0')) ++ "Z";
+
+test "minDate is a rule constructor with code validation.min_date and message \"must not be before {min}\", or \"must not be before the minimum date\" when that would be longer than 512 bytes; placeholder {min}" {
+    try testing.expect(@hasDecl(v, "minDate"));
+    try testing.expect(@typeInfo(@TypeOf(v.minDate)).@"fn".return_type == v.Rule);
+    try expectRule(v.minDate("2020-01-01"), "validation.min_date", "must not be before 2020-01-01", "must not be before {min}");
+    try expectPlaceholder(v.minDate("2020-01-01"), "{min}", "2020-01-01");
+    try expectViolation([]const u8, v.minDate("2020-01-01"), "2019-12-31", "validation.min_date", "must not be before 2020-01-01", "x");
+    try expectRule(v.minDate(long_date_time), "validation.min_date", "must not be before the minimum date", "must not be before the minimum date");
+    try expectViolation([]const u8, v.minDate(long_date_time), "2019-12-31T23:59:59Z", "validation.min_date", "must not be before the minimum date", "x");
+    try expectNoViolation([]const u8, v.minDate("2020-01-01"), "2020-01-01");
+}
+
+test "maxDate is a rule constructor with code validation.max_date and message \"must not be after {max}\", or \"must not be after the maximum date\" when that would be longer than 512 bytes; placeholder {max}" {
+    try testing.expect(@hasDecl(v, "maxDate"));
+    try testing.expect(@typeInfo(@TypeOf(v.maxDate)).@"fn".return_type == v.Rule);
+    try expectRule(v.maxDate("2020-12-31"), "validation.max_date", "must not be after 2020-12-31", "must not be after {max}");
+    try expectPlaceholder(v.maxDate("2020-12-31"), "{max}", "2020-12-31");
+    try expectViolation([]const u8, v.maxDate("2020-12-31"), "2021-01-01", "validation.max_date", "must not be after 2020-12-31", "x");
+    try expectRule(v.maxDate(long_date_time), "validation.max_date", "must not be after the maximum date", "must not be after the maximum date");
+    try expectViolation([]const u8, v.maxDate(long_date_time), "2020-01-01T00:00:01Z", "validation.max_date", "must not be after the maximum date", "x");
+    try expectNoViolation([]const u8, v.maxDate("2020-12-31"), "2020-12-31");
+}
+
+test "militaryTime is a rule value with code validation.military_time and message \"must be a valid time in 24-hour HH:MM format\"" {
+    try testing.expect(@hasDecl(v, "militaryTime"));
+    try testing.expect(@TypeOf(v.militaryTime) == v.Rule);
+    try expectRule(v.militaryTime, "validation.military_time", "must be a valid time in 24-hour HH:MM format", "must be a valid time in 24-hour HH:MM format");
+    try expectViolation([]const u8, v.militaryTime, "24:00", "validation.military_time", "must be a valid time in 24-hour HH:MM format", "x");
+    try expectNoViolation([]const u8, v.militaryTime, "23:59");
+}
+
 test "minItems is a rule constructor with code validation.min_items and message \"must have at least {min} items\", or \"must have at least 1 item\" when min = 1; placeholder {min}" {
     try testing.expect(@hasDecl(v, "minItems"));
     try testing.expect(@typeInfo(@TypeOf(v.minItems)).@"fn".return_type == v.Rule);
@@ -494,8 +551,22 @@ test "finite has no precondition: nan, inf and -inf on a float field fail its ow
     }
 }
 
-test "the module exports exactly its 58 public names, and Rule.withMessage" {
-    const names = [_][]const u8{ "Violation", "Rule", "Report", "max_code_bytes", "max_message_bytes", "max_report_violations", "max_json_depth", "check", "checkAll", "assertRules", "fail", "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "json", "isJson", "jwt", "isJwt", "base32", "isBase32", "base58", "isBase58", "base64", "isBase64", "base64Url", "isBase64Url", "dataUri", "isDataUri", "magnetUri", "isMagnetUri", "mimeType", "isMimeType", "locale", "isLocale", "semVer", "isSemVer", "hexColor", "isHexColor", "rgbColor", "isRgbColor", "hslColor", "isHslColor", "minItems", "maxItems", "each", "custom" };
+test "minDate fails a value without the form of its bound with the date-form precondition, also under withMessage" {
+    try expectViolation([]const u8, v.minDate("2020-01-01"), "2020-01-01T00:00:00Z", "validation.date", "must be a valid date in YYYY-MM-DD format", "x");
+    try expectViolation([]const u8, v.minDate("2020-01-01").withMessage("another message"), "", "validation.date", "must be a valid date in YYYY-MM-DD format", "x");
+    try expectViolation([]const u8, v.minDate("2020-01-01T00:00:00Z"), "2020-01-01", "validation.rfc3339", "must be a valid RFC 3339 date-time", "x");
+    try expectViolation([]const u8, v.minDate("2020-01-01T00:00:00Z").withMessage("another message"), "", "validation.rfc3339", "must be a valid RFC 3339 date-time", "x");
+}
+
+test "maxDate fails a value without the form of its bound with the date-form precondition, also under withMessage" {
+    try expectViolation([]const u8, v.maxDate("2020-12-31"), "2020-12-31T00:00:00Z", "validation.date", "must be a valid date in YYYY-MM-DD format", "x");
+    try expectViolation([]const u8, v.maxDate("2020-12-31").withMessage("another message"), "", "validation.date", "must be a valid date in YYYY-MM-DD format", "x");
+    try expectViolation([]const u8, v.maxDate("2020-12-31T23:59:59Z"), "2020-12-31", "validation.rfc3339", "must be a valid RFC 3339 date-time", "x");
+    try expectViolation([]const u8, v.maxDate("2020-12-31T23:59:59Z").withMessage("another message"), "", "validation.rfc3339", "must be a valid RFC 3339 date-time", "x");
+}
+
+test "the module exports exactly its 68 public names, and Rule.withMessage" {
+    const names = [_][]const u8{ "Violation", "Rule", "Report", "max_code_bytes", "max_message_bytes", "max_report_violations", "max_json_depth", "check", "checkAll", "assertRules", "fail", "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "json", "isJson", "jwt", "isJwt", "base32", "isBase32", "base58", "isBase58", "base64", "isBase64", "base64Url", "isBase64Url", "dataUri", "isDataUri", "magnetUri", "isMagnetUri", "mimeType", "isMimeType", "locale", "isLocale", "semVer", "isSemVer", "hexColor", "isHexColor", "rgbColor", "isRgbColor", "hslColor", "isHslColor", "date", "isDate", "rfc3339", "isRfc3339", "iso8601", "isIso8601", "minDate", "maxDate", "militaryTime", "isMilitaryTime", "minItems", "maxItems", "each", "custom" };
     inline for (names) |name| try testing.expect(@hasDecl(v, name));
     try testing.expectEqual(names.len, comptime std.meta.declarations(v).len);
     try testing.expect(@hasDecl(v.Rule, "withMessage"));
@@ -503,7 +574,7 @@ test "the module exports exactly its 58 public names, and Rule.withMessage" {
 
 test "every rule the module exports has a catalog test" {
     @setEvalBranchQuota(100_000);
-    const tested = [_][]const u8{ "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "json", "jwt", "base32", "base58", "base64", "base64Url", "dataUri", "magnetUri", "mimeType", "locale", "semVer", "hexColor", "rgbColor", "hslColor", "minItems", "maxItems", "each", "custom" };
+    const tested = [_][]const u8{ "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "json", "jwt", "base32", "base58", "base64", "base64Url", "dataUri", "magnetUri", "mimeType", "locale", "semVer", "hexColor", "rgbColor", "hslColor", "date", "rfc3339", "iso8601", "minDate", "maxDate", "militaryTime", "minItems", "maxItems", "each", "custom" };
     inline for (comptime std.meta.declarations(v)) |name| {
         const T = @TypeOf(@field(v, name));
         if (comptime T == v.Rule or (@typeInfo(T) == .@"fn" and @typeInfo(T).@"fn".return_type == v.Rule)) {
@@ -520,7 +591,7 @@ test "every rule the module exports has a catalog test" {
 
 test "the module exports exactly the catalog predicates of the shipped rules" {
     @setEvalBranchQuota(100_000);
-    const predicates = [_][]const u8{ "isJson", "isJwt", "isBase32", "isBase58", "isBase64", "isBase64Url", "isDataUri", "isMagnetUri", "isMimeType", "isLocale", "isSemVer", "isHexColor", "isRgbColor", "isHslColor" };
+    const predicates = [_][]const u8{ "isJson", "isJwt", "isBase32", "isBase58", "isBase64", "isBase64Url", "isDataUri", "isMagnetUri", "isMimeType", "isLocale", "isSemVer", "isHexColor", "isRgbColor", "isHslColor", "isDate", "isRfc3339", "isIso8601", "isMilitaryTime" };
     comptime var exported: usize = 0;
     inline for (comptime std.meta.declarations(v)) |name| {
         if (comptime name.len > 2 and std.mem.startsWith(u8, name, "is") and std.ascii.isUpper(name[2])) {

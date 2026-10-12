@@ -137,6 +137,20 @@ pub const list = [_]Fixture{
     .{ .file = "src/validator/testdata/compile_errors/base64_url_on_u8_array.zig", .expect = "validator: base64_url_on_u8_array.Bad.field_rules.x: base64_url expects a string, field is [22]u8; [N]u8 is an array of numbers, not a string: use []const u8", .row = "base64Url-2" },
     .{ .file = "src/validator/testdata/compile_errors/base58_on_list.zig", .expect = "validator: base58_on_list.Bad.field_rules.x: base58 expects a string, field is []const []const u8; use v.each(v.base58)", .row = "base58-3" },
     .{ .file = "src/validator/testdata/compile_errors/is_base64_url_in_tuple.zig", .expect = "validator: is_base64_url_in_tuple.Bad.field_rules.x: expected a rule, got the predicate isBase64Url; use the rule v.base64Url", .row = "variant of G-25" },
+    // dates: one fixture per kind of error; the text of every catalog row is
+    // checked by the tests of dates.zig
+    .{ .file = "src/validator/testdata/compile_errors/min_date_bad_bound.zig", .expect = "validator: minDate(\"2020-02-30\"): the bound must be an RFC 3339 full-date (2020-01-31) or date-time (2020-01-31T00:00:00Z)", .row = "minDate-1" },
+    .{ .file = "src/validator/testdata/compile_errors/max_date_today.zig", .expect = "validator: maxDate(\"today\"): \"now\" is not supported: rules have no clock; compare with the current time in the handler", .row = "maxDate-2" },
+    .{ .file = "src/validator/testdata/compile_errors/min_date_vacuous.zig", .expect = "validator: minDate(\"0000-01-01\"): accepts every valid date; use v.date", .row = "minDate-3" },
+    .{ .file = "src/validator/testdata/compile_errors/min_date_vacuous_date_time.zig", .expect = "validator: minDate(\"0000-01-01T00:00:00+23:59\"): accepts every valid date-time; use v.rfc3339", .row = "minDate-4" },
+    .{ .file = "src/validator/testdata/compile_errors/min_date_uncalled.zig", .expect = "validator: min_date_uncalled.Bad.field_rules.x: minDate must be called, e.g. v.minDate(\"2020-01-01\")", .row = "minDate-9" },
+    .{ .file = "src/validator/testdata/compile_errors/min_date_on_list.zig", .expect = "validator: min_date_on_list.Bad.field_rules.x: min_date expects a string, field is []const []const u8; use v.each(v.minDate(\"2020-01-01\"))", .row = "minDate-12" },
+    .{ .file = "src/validator/testdata/compile_errors/max_date_on_i64.zig", .expect = "validator: max_date_on_i64.Bad.field_rules.x: max_date expects a string, field is i64; for a numeric timestamp use v.max", .row = "maxDate-12" },
+    .{ .file = "src/validator/testdata/compile_errors/min_date_rfc3339.zig", .expect = "validator: min_date_rfc3339.Bad.field_rules.x: rfc3339 and min_date(\"2020-01-01\") need different forms (date-time vs date); no value can pass", .row = "minDate-19" },
+    .{ .file = "src/validator/testdata/compile_errors/max_date_iso8601.zig", .expect = "validator: max_date_iso8601.Bad.field_rules.x: max_date(\"2020-12-31\") accepts only the form of its bound, so most iso8601 values would fail it; use v.date instead of v.iso8601", .row = "maxDate-21" },
+    .{ .file = "src/validator/testdata/compile_errors/is_date_as_rule.zig", .expect = "validator: is_date_as_rule.Bad.field_rules.x: expected a rule, got the predicate isDate; use the rule v.date", .row = "G-25" },
+    .{ .file = "src/validator/testdata/compile_errors/is_iso8601_in_each.zig", .expect = "validator: each(...): expected a rule, got the predicate isIso8601; use the rule v.iso8601", .row = "variant of G-25" },
+    .{ .file = "src/validator/testdata/compile_errors/min_date_int_bound.zig", .expect = "expected type '[]const u8', found 'comptime_int'", .row = "Z-33" },
     // minItems and maxItems: one fixture per kind of error; the text of every
     // catalog row is checked by the tests of lists.zig
     .{ .file = "src/validator/testdata/compile_errors/min_items_zero.zig", .expect = "validator: minItems(0): min must be at least 1 (minItems(0) is always true; remove it)", .row = "minItems-1" },
