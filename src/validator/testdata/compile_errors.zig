@@ -1,9 +1,10 @@
-//! The compile-error fixtures: every file listed here must fail to compile,
-//! and one line of the compiler's error output must end with `expect`.
-//! `build.zig` compiles each file as a test root that imports `validator`
-//! (analysis only: nothing is emitted or run) with
-//! `expect_errors = .{ .contains = expect }`, which matches the end of an
-//! error line, so `expect` is the whole tail of the line from `validator: `.
+//! The compile-error fixtures: every file listed here must fail to compile
+//! with an error whose message is `expect`. `build.zig` compiles each file
+//! as a test root that imports `validator` (analysis only: nothing is
+//! emitted or run) and matches `error: ` followed by `expect` against the
+//! end of each error line (`expect_errors = .{ .contains = ... }`), so
+//! `expect` is the whole message to the end of the line: from `validator: `
+//! on for the validator's own errors.
 //!
 //! To add a fixture, write `compile_errors/<case>.zig`: a struct `Bad` with a
 //! field `x` and the declaration under test, and a test that runs

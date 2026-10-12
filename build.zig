@@ -151,7 +151,9 @@ fn addValidatorTests(
     }
 
     // Compile-error fixtures: each one is compiled (never run) and passes only
-    // when the compilation fails with an error line that ends in `expect`.
+    // when the compilation fails with an error whose message is `expect`.
+    // `.contains` matches the end of an error line, so `error: ` in front
+    // makes `expect` the whole message, from its start.
     for (validator_cases.compile_errors) |fixture| {
         const t = b.addTest(.{
             .name = std.fs.path.stem(fixture.file),
@@ -162,7 +164,7 @@ fn addValidatorTests(
                 .imports = &.{.{ .name = "validator", .module = validator }},
             }),
         });
-        t.expect_errors = .{ .contains = fixture.expect };
+        t.expect_errors = .{ .contains = b.fmt("error: {s}", .{fixture.expect}) };
         test_step.dependOn(&t.step);
     }
 

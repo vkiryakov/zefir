@@ -3,13 +3,18 @@
 //! inside `src/`, the part of the package that `build.zig.zon` ships, since
 //! a client's build runs zefir's build.zig too.
 
-/// A file that must fail to compile with an error line that ends in `expect`.
-/// `Step.Compile.expect_errors` with `.contains` matches the end of an error
-/// line, so `expect` is the whole tail from "validator: ". `row` names the
-/// catalog row the text comes from ("G-1", or "variant of G-13").
+/// A file that must fail to compile with an error whose message is `expect`:
+/// the whole text after `error: ` to the end of the line, which starts with
+/// "validator: " for the validator's own errors. build.zig matches
+/// `error: <expect>` against the end of each error line, so the tail of a
+/// longer message does not match. `row` names the catalog row the text
+/// comes from ("G-1", or "variant of G-13").
 pub const Fixture = struct { file: []const u8, expect: []const u8, row: []const u8 };
 
 /// A program that must end in a Debug panic whose stderr contains `stderr`.
+/// It declares the root panic handler of panic/self_malformed.zig, which
+/// prints `panic: <message>` and exits with code 3: build.zig expects exit
+/// code 3, and the default handler aborts instead on Linux and macOS.
 pub const PanicRun = struct { file: []const u8, stderr: []const u8 };
 
 /// Tests that use only the public API, compiled as client code: each file may
