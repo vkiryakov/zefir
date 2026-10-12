@@ -18,6 +18,7 @@ pub const CreateUserRequest = struct {
 };
 
 test "every DTO of this file passes v.assertRules" {
+    comptime v.assertRules(@This()); // the file itself: a DTO when it has top-level fields
     inline for (comptime std.meta.declarations(@This())) |name| {
         const decl = @field(@This(), name);
         if (@TypeOf(decl) == type) comptime v.assertRules(decl);

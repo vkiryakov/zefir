@@ -633,6 +633,7 @@ pub const CreateUserRequest = struct {
 };
 
 test "every DTO of this file passes v.assertRules" {
+    comptime v.assertRules(@This()); // the file itself: a DTO when it has top-level fields
     inline for (comptime std.meta.declarations(@This())) |name| {
         const decl = @field(@This(), name);
         if (@TypeOf(decl) == type) comptime v.assertRules(decl);
@@ -648,13 +649,18 @@ test "CreateUserRequest rejects an empty name" {
 }
 ```
 
-- The first test checks every `pub` type of its file. DTOs in other files get
-  the same test in their file, and the package root pulls those tests in with
-  `test { _ = @import("orders.zig"); }`.
+- The first test checks the file itself, for a file that is a DTO (top-level
+  fields, as in `User.zig`), and every `pub` type declared at the top level of
+  the file. DTOs in other files get the same test in their file, and the
+  package root pulls those tests in with `test { _ = @import("orders.zig"); }`.
+- The checks reach types through fields, not declarations: DTOs nested in a
+  namespace struct (`pub const users = struct { pub const Create = ... };`)
+  are not checked by the first test. List them:
+  `inline for (.{ users.Create, users.Update }) |Dto| comptime v.assertRules(Dto);`.
 - `assertRules` takes the type itself. A `pub` alias of a pointer type
-  (`pub const UserRef = *const User;`) fails the first test, because pointers
-  are not walked; list the DTOs instead:
-  `inline for (.{ CreateUserRequest, User }) |Dto| comptime v.assertRules(Dto);`.
+  (`pub const UserRef = *const User;`) or a `pub` union of DTOs fails the first
+  test, because pointers and unions are not walked; list the DTOs instead of
+  the loop: `inline for (.{ CreateUserRequest, User }) |Dto| comptime v.assertRules(Dto);`.
 - `assertRules` cannot see a private `field_rules` and does not run the rules.
   The second test, a value that must fail, catches both.
 
