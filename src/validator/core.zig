@@ -1714,10 +1714,6 @@ pub const pending_kinds = [_]Kind{
     .hash,
     .btc_address,
     .ethereum_address,
-    // encodings and other formats
-    .hex_color,
-    .rgb_color,
-    .hsl_color,
     // dates
     .date,
     .rfc3339,

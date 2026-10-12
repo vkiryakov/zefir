@@ -306,6 +306,30 @@ test "semVer is a rule value with code validation.sem_ver and message \"must be 
     try expectNoViolation([]const u8, v.semVer, "1.2.3-alpha.1+build.5");
 }
 
+test "hexColor is a rule value with code validation.hex_color and message \"must be a valid hex color\"" {
+    try testing.expect(@hasDecl(v, "hexColor"));
+    try testing.expect(@TypeOf(v.hexColor) == v.Rule);
+    try expectRule(v.hexColor, "validation.hex_color", "must be a valid hex color", "must be a valid hex color");
+    try expectViolation([]const u8, v.hexColor, "fff", "validation.hex_color", "must be a valid hex color", "x");
+    try expectNoViolation([]const u8, v.hexColor, "#ff0000");
+}
+
+test "rgbColor is a rule value with code validation.rgb_color and message \"must be a valid RGB color\"" {
+    try testing.expect(@hasDecl(v, "rgbColor"));
+    try testing.expect(@TypeOf(v.rgbColor) == v.Rule);
+    try expectRule(v.rgbColor, "validation.rgb_color", "must be a valid RGB color", "must be a valid RGB color");
+    try expectViolation([]const u8, v.rgbColor, "rgb(256,0,0)", "validation.rgb_color", "must be a valid RGB color", "x");
+    try expectNoViolation([]const u8, v.rgbColor, "rgb(255, 0, 0)");
+}
+
+test "hslColor is a rule value with code validation.hsl_color and message \"must be a valid HSL color\"" {
+    try testing.expect(@hasDecl(v, "hslColor"));
+    try testing.expect(@TypeOf(v.hslColor) == v.Rule);
+    try expectRule(v.hslColor, "validation.hsl_color", "must be a valid HSL color", "must be a valid HSL color");
+    try expectViolation([]const u8, v.hslColor, "hsl(120,100,50%)", "validation.hsl_color", "must be a valid HSL color", "x");
+    try expectNoViolation([]const u8, v.hslColor, "hsl(120 100% 50% / 0.5)");
+}
+
 test "minItems is a rule constructor with code validation.min_items and message \"must have at least {min} items\", or \"must have at least 1 item\" when min = 1; placeholder {min}" {
     try testing.expect(@hasDecl(v, "minItems"));
     try testing.expect(@typeInfo(@TypeOf(v.minItems)).@"fn".return_type == v.Rule);
@@ -470,8 +494,8 @@ test "finite has no precondition: nan, inf and -inf on a float field fail its ow
     }
 }
 
-test "the module exports exactly its 52 public names, and Rule.withMessage" {
-    const names = [_][]const u8{ "Violation", "Rule", "Report", "max_code_bytes", "max_message_bytes", "max_report_violations", "max_json_depth", "check", "checkAll", "assertRules", "fail", "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "json", "isJson", "jwt", "isJwt", "base32", "isBase32", "base58", "isBase58", "base64", "isBase64", "base64Url", "isBase64Url", "dataUri", "isDataUri", "magnetUri", "isMagnetUri", "mimeType", "isMimeType", "locale", "isLocale", "semVer", "isSemVer", "minItems", "maxItems", "each", "custom" };
+test "the module exports exactly its 58 public names, and Rule.withMessage" {
+    const names = [_][]const u8{ "Violation", "Rule", "Report", "max_code_bytes", "max_message_bytes", "max_report_violations", "max_json_depth", "check", "checkAll", "assertRules", "fail", "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "json", "isJson", "jwt", "isJwt", "base32", "isBase32", "base58", "isBase58", "base64", "isBase64", "base64Url", "isBase64Url", "dataUri", "isDataUri", "magnetUri", "isMagnetUri", "mimeType", "isMimeType", "locale", "isLocale", "semVer", "isSemVer", "hexColor", "isHexColor", "rgbColor", "isRgbColor", "hslColor", "isHslColor", "minItems", "maxItems", "each", "custom" };
     inline for (names) |name| try testing.expect(@hasDecl(v, name));
     try testing.expectEqual(names.len, comptime std.meta.declarations(v).len);
     try testing.expect(@hasDecl(v.Rule, "withMessage"));
@@ -479,7 +503,7 @@ test "the module exports exactly its 52 public names, and Rule.withMessage" {
 
 test "every rule the module exports has a catalog test" {
     @setEvalBranchQuota(100_000);
-    const tested = [_][]const u8{ "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "json", "jwt", "base32", "base58", "base64", "base64Url", "dataUri", "magnetUri", "mimeType", "locale", "semVer", "minItems", "maxItems", "each", "custom" };
+    const tested = [_][]const u8{ "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "json", "jwt", "base32", "base58", "base64", "base64Url", "dataUri", "magnetUri", "mimeType", "locale", "semVer", "hexColor", "rgbColor", "hslColor", "minItems", "maxItems", "each", "custom" };
     inline for (comptime std.meta.declarations(v)) |name| {
         const T = @TypeOf(@field(v, name));
         if (comptime T == v.Rule or (@typeInfo(T) == .@"fn" and @typeInfo(T).@"fn".return_type == v.Rule)) {
@@ -496,7 +520,7 @@ test "every rule the module exports has a catalog test" {
 
 test "the module exports exactly the catalog predicates of the shipped rules" {
     @setEvalBranchQuota(100_000);
-    const predicates = [_][]const u8{ "isJson", "isJwt", "isBase32", "isBase58", "isBase64", "isBase64Url", "isDataUri", "isMagnetUri", "isMimeType", "isLocale", "isSemVer" };
+    const predicates = [_][]const u8{ "isJson", "isJwt", "isBase32", "isBase58", "isBase64", "isBase64Url", "isDataUri", "isMagnetUri", "isMimeType", "isLocale", "isSemVer", "isHexColor", "isRgbColor", "isHslColor" };
     comptime var exported: usize = 0;
     inline for (comptime std.meta.declarations(v)) |name| {
         if (comptime name.len > 2 and std.mem.startsWith(u8, name, "is") and std.ascii.isUpper(name[2])) {

@@ -31,6 +31,9 @@ const cases = [_]Case{
     .{ .predicate_name = "isMimeType", .rule = v.mimeType, .predicate = v.isMimeType, .code = "validation.mime_type", .message = "must be a valid MIME type", .good = "text/plain; charset=utf-8", .bad = "text/plain; charset=utf-8;" },
     .{ .predicate_name = "isLocale", .rule = v.locale, .predicate = v.isLocale, .code = "validation.locale", .message = "must be a valid locale", .good = "zh-Hant-TW", .bad = "zh_Hant_TW" },
     .{ .predicate_name = "isSemVer", .rule = v.semVer, .predicate = v.isSemVer, .code = "validation.sem_ver", .message = "must be a valid semantic version", .good = "1.0.0-rc.1", .bad = "1.0.0-rc.01" },
+    .{ .predicate_name = "isHexColor", .rule = v.hexColor, .predicate = v.isHexColor, .code = "validation.hex_color", .message = "must be a valid hex color", .good = "#ff000080", .bad = "#ff00008" },
+    .{ .predicate_name = "isRgbColor", .rule = v.rgbColor, .predicate = v.isRgbColor, .code = "validation.rgb_color", .message = "must be a valid RGB color", .good = "rgba(255, 0, 0, 0.5)", .bad = "rgba(255, 0, 0)" },
+    .{ .predicate_name = "isHslColor", .rule = v.hslColor, .predicate = v.isHslColor, .code = "validation.hsl_color", .message = "must be a valid HSL color", .good = "hsl(120deg 100% 50%)", .bad = "hsl(120deg 100% 50)" },
     .{ .predicate_name = "isBase64Url", .rule = v.base64Url, .predicate = v.isBase64Url, .code = "validation.base64_url", .message = "must be valid base64url", .good = "Zm9vYg", .bad = "Zm9vYg==" },
 };
 

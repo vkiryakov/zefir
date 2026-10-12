@@ -544,6 +544,213 @@ fn isIdentifier(s: []const u8) bool {
     return true;
 }
 
+// ------------------------------------------------------------------ hexColor, rgbColor, hslColor
+
+/// A CSS hex color (CSS Color 4 §5.2): `#` and 3, 4, 6 or 8 hex digits in
+/// any case: `#fff`, `#ffff`, `#ff0000`, `#ff000080`. The `#` is required,
+/// so words such as `cafe` are not colors.
+pub const hexColor: Rule = core.predicateRule(.hex_color, "must be a valid hex color", isHexColor);
+
+/// Whether `v.hexColor` passes `s`.
+pub fn isHexColor(s: []const u8) bool {
+    if (s.len == 0 or s[0] != '#') return false;
+    switch (s.len - 1) {
+        3, 4, 6, 8 => {},
+        else => return false,
+    }
+    for (s[1..]) |c| {
+        if (!std.ascii.isHex(c)) return false;
+    }
+    return true;
+}
+
+/// A CSS `rgb()` or `rgba()` color in the legacy comma syntax, with
+/// validator.js's grammar of values: `rgb(R, G, B)` or `rgba(R, G, B, A)`,
+/// the function name in lowercase. R, G and B are all integers 0-255 or all
+/// percentages 0%-100%, without leading zeros; A is `0`, `1`, or a decimal
+/// from 0 to 1 such as `0.5`, `.5` or `1.00`. CSS whitespace (space, tab,
+/// LF, CR, FF) may surround each value. `rgb` takes no alpha and `rgba`
+/// needs one; the space-separated syntax fails (`v.hslColor` takes it).
+pub const rgbColor: Rule = core.predicateRule(.rgb_color, "must be a valid RGB color", isRgbColor);
+
+/// Whether `v.rgbColor` passes `s`.
+pub fn isRgbColor(s: []const u8) bool {
+    const with_alpha = std.mem.startsWith(u8, s, "rgba(");
+    if (!with_alpha and !std.mem.startsWith(u8, s, "rgb(")) return false;
+    var i: usize = if (with_alpha) "rgba(".len else "rgb(".len;
+    // Whether the channels are percentages: the first channel decides.
+    var percent: ?bool = null;
+    for (0..3) |channel| {
+        i = skipCssSpace(s, i);
+        const value = channelValue(s, &i) orelse return false;
+        const is_percent = i < s.len and s[i] == '%';
+        if (is_percent) i += 1;
+        if ((percent orelse is_percent) != is_percent) return false;
+        percent = is_percent;
+        if (value > @as(u16, if (is_percent) 100 else 255)) return false;
+        i = skipCssSpace(s, i);
+        if (channel < 2 or with_alpha) {
+            if (i >= s.len or s[i] != ',') return false;
+            i += 1;
+        }
+    }
+    if (with_alpha) {
+        i = skipCssSpace(s, i);
+        if (!legacyAlpha(s, &i)) return false;
+        i = skipCssSpace(s, i);
+    }
+    return i + 1 == s.len and s[i] == ')';
+}
+
+/// The value of the 1-3 digits at `s[i.*]`, `0` or without a leading zero,
+/// advancing `i.*` past them; null when malformed.
+fn channelValue(s: []const u8, i: *usize) ?u16 {
+    const start = i.*;
+    var value: u16 = 0;
+    while (i.* < s.len and std.ascii.isDigit(s[i.*])) : (i.* += 1) {
+        if (i.* - start == 3) return null;
+        value = value * 10 + (s[i.*] - '0');
+    }
+    const len = i.* - start;
+    if (len == 0 or (len > 1 and s[start] == '0')) return null;
+    return value;
+}
+
+/// The alpha of the legacy syntax at `s[i.*]`: `0`, `1`, `0.` and digits,
+/// `.` and digits, or `1.` and zeros; advances `i.*` past it.
+fn legacyAlpha(s: []const u8, i: *usize) bool {
+    var j = i.*;
+    var integer: ?u8 = null;
+    if (j < s.len and (s[j] == '0' or s[j] == '1')) {
+        integer = s[j];
+        j += 1;
+    }
+    if (j < s.len and s[j] == '.') {
+        j += 1;
+        const fraction_start = j;
+        while (j < s.len and std.ascii.isDigit(s[j])) : (j += 1) {
+            if (integer == '1' and s[j] != '0') return false;
+        }
+        if (j == fraction_start) return false;
+    } else if (integer == null) return false;
+    i.* = j;
+    return true;
+}
+
+/// A CSS `hsl()` or `hsla()` color with validator.js's grammar, the name in
+/// any case: legacy `hsl(H, S%, L%[, A])` or modern `hsl(H S% L%[ / A])`,
+/// either name with or without an alpha. H is a number with an optional unit
+/// `deg`, `grad`, `rad` or `turn` (any case); S and L are numbers with `%`;
+/// A is a number with an optional `%`. A number is
+/// `[+-](digits[.digits] | .digits)[e[+-]digits]`. Ranges are not checked:
+/// CSS clamps them. CSS whitespace (space, tab, LF, CR, FF) inside the
+/// parentheses only; nothing before the name or after `)`.
+pub const hslColor: Rule = core.predicateRule(.hsl_color, "must be a valid HSL color", isHslColor);
+
+/// Whether `v.hslColor` passes `s`.
+pub fn isHslColor(s: []const u8) bool {
+    var i: usize = if (std.ascii.startsWithIgnoreCase(s, "hsla("))
+        "hsla(".len
+    else if (std.ascii.startsWithIgnoreCase(s, "hsl("))
+        "hsl(".len
+    else
+        return false;
+    i = skipCssSpace(s, i);
+    if (!cssNumber(s, &i)) return false;
+    i += hueUnitLength(s[i..]);
+    const after_hue = i;
+    i = skipCssSpace(s, i);
+    if (i < s.len and s[i] == ',') {
+        // Legacy: H, S%, L%[, A]
+        i = skipCssSpace(s, i + 1);
+        if (!cssPercentage(s, &i)) return false;
+        i = skipCssSpace(s, i);
+        if (i >= s.len or s[i] != ',') return false;
+        i = skipCssSpace(s, i + 1);
+        if (!cssPercentage(s, &i)) return false;
+        i = skipCssSpace(s, i);
+        if (i < s.len and s[i] == ',') {
+            i = skipCssSpace(s, i + 1);
+            if (!cssAlpha(s, &i)) return false;
+            i = skipCssSpace(s, i);
+        }
+    } else {
+        // Modern: H S% L%[ / A], whitespace between the first three.
+        if (i == after_hue) return false;
+        if (!cssPercentage(s, &i)) return false;
+        const after_saturation = i;
+        i = skipCssSpace(s, i);
+        if (i == after_saturation) return false;
+        if (!cssPercentage(s, &i)) return false;
+        i = skipCssSpace(s, i);
+        if (i < s.len and s[i] == '/') {
+            i = skipCssSpace(s, i + 1);
+            if (!cssAlpha(s, &i)) return false;
+            i = skipCssSpace(s, i);
+        }
+    }
+    return i + 1 == s.len and s[i] == ')';
+}
+
+/// The index of the first byte at or after `i` that is not CSS whitespace
+/// (CSS Syntax 3 §4.2: space, tab, LF, CR, FF).
+fn skipCssSpace(s: []const u8, i: usize) usize {
+    var j = i;
+    while (j < s.len) : (j += 1) {
+        switch (s[j]) {
+            ' ', '\t', '\n', '\r', 0x0c => {},
+            else => break,
+        }
+    }
+    return j;
+}
+
+/// A CSS number at `s[i.*]` as validator.js reads it; advances `i.*` past
+/// it. An exponent without digits is left unread.
+fn cssNumber(s: []const u8, i: *usize) bool {
+    var j = i.*;
+    if (j < s.len and (s[j] == '+' or s[j] == '-')) j += 1;
+    const integer_start = j;
+    while (j < s.len and std.ascii.isDigit(s[j])) j += 1;
+    const has_integer = j > integer_start;
+    if (j + 1 < s.len and s[j] == '.' and std.ascii.isDigit(s[j + 1])) {
+        j += 1;
+        while (j < s.len and std.ascii.isDigit(s[j])) j += 1;
+    } else if (!has_integer) return false;
+    if (j < s.len and (s[j] == 'e' or s[j] == 'E')) {
+        var k = j + 1;
+        if (k < s.len and (s[k] == '+' or s[k] == '-')) k += 1;
+        const exponent_start = k;
+        while (k < s.len and std.ascii.isDigit(s[k])) k += 1;
+        if (k > exponent_start) j = k;
+    }
+    i.* = j;
+    return true;
+}
+
+/// The length of the angle unit that `s` starts with, in any case, or 0.
+fn hueUnitLength(s: []const u8) usize {
+    inline for (.{ "deg", "grad", "rad", "turn" }) |unit| {
+        if (std.ascii.startsWithIgnoreCase(s, unit)) return unit.len;
+    }
+    return 0;
+}
+
+/// A CSS number and `%`.
+fn cssPercentage(s: []const u8, i: *usize) bool {
+    if (!cssNumber(s, i)) return false;
+    if (i.* >= s.len or s[i.*] != '%') return false;
+    i.* += 1;
+    return true;
+}
+
+/// A CSS number and an optional `%`.
+fn cssAlpha(s: []const u8, i: *usize) bool {
+    if (!cssNumber(s, i)) return false;
+    if (i.* < s.len and s[i.*] == '%') i.* += 1;
+    return true;
+}
+
 // ------------------------------------------------------------------ byte classes
 
 fn allDigits(s: []const u8) bool {
@@ -584,10 +791,10 @@ fn fieldText(comptime rule: Rule, comptime T: type) ?[]const u8 {
 
 test "the encoding rules are values with their documented codes and messages, without parameters or precondition" {
     const t = std.testing;
-    const rules = .{ json, jwt, base64, base64Url, base32, base58, dataUri, magnetUri, mimeType, locale, semVer };
-    const kinds = [_]core.Kind{ .json, .jwt, .base64, .base64_url, .base32, .base58, .data_uri, .magnet_uri, .mime_type, .locale, .sem_ver };
-    const codes = [_][]const u8{ "validation.json", "validation.jwt", "validation.base64", "validation.base64_url", "validation.base32", "validation.base58", "validation.data_uri", "validation.magnet_uri", "validation.mime_type", "validation.locale", "validation.sem_ver" };
-    const messages = [_][]const u8{ "must be a valid JSON object or array", "must be a valid JWT", "must be valid base64", "must be valid base64url", "must be valid base32", "must be valid base58", "must be a valid data URI", "must be a valid magnet URI", "must be a valid MIME type", "must be a valid locale", "must be a valid semantic version" };
+    const rules = .{ json, jwt, base64, base64Url, base32, base58, dataUri, magnetUri, mimeType, locale, semVer, hexColor, rgbColor, hslColor };
+    const kinds = [_]core.Kind{ .json, .jwt, .base64, .base64_url, .base32, .base58, .data_uri, .magnet_uri, .mime_type, .locale, .sem_ver, .hex_color, .rgb_color, .hsl_color };
+    const codes = [_][]const u8{ "validation.json", "validation.jwt", "validation.base64", "validation.base64_url", "validation.base32", "validation.base58", "validation.data_uri", "validation.magnet_uri", "validation.mime_type", "validation.locale", "validation.sem_ver", "validation.hex_color", "validation.rgb_color", "validation.hsl_color" };
+    const messages = [_][]const u8{ "must be a valid JSON object or array", "must be a valid JWT", "must be valid base64", "must be valid base64url", "must be valid base32", "must be valid base58", "must be a valid data URI", "must be a valid magnet URI", "must be a valid MIME type", "must be a valid locale", "must be a valid semantic version", "must be a valid hex color", "must be a valid RGB color", "must be a valid HSL color" };
     inline for (rules, kinds, codes, messages) |rule, kind, code, message| {
         try t.expectEqual(kind, rule.kind);
         try t.expectEqualStrings(code, rule.code);
@@ -610,6 +817,9 @@ test "a rule of this file takes strings; [N]u8 and lists of strings get their hi
     try expect(head ++ "mime_type expects a string, field is encodings.TestContentType", comptime fieldText(mimeType, TestContentType).?);
     try expect(head ++ "locale expects a string, field is []const []const u8; use v.each(v.locale)", comptime fieldText(locale, []const []const u8).?);
     try expect(head ++ "sem_ver expects a string, field is encodings.TestVersion", comptime fieldText(semVer, TestVersion).?);
+    try expect(head ++ "hex_color expects a string, field is [7]u8; [N]u8 is an array of numbers, not a string: use []const u8", comptime fieldText(hexColor, [7]u8).?);
+    try expect(head ++ "rgb_color expects a string, field is [3]u8; [N]u8 is an array of numbers, not a string: use []const u8", comptime fieldText(rgbColor, [3]u8).?);
+    try expect(head ++ "hsl_color expects a string, field is f32", comptime fieldText(hslColor, f32).?);
     try expect(head ++ "base64 expects a string, field is u32", comptime fieldText(base64, u32).?);
     try expect(head ++ "base64_url expects a string, field is [64]u8; [N]u8 is an array of numbers, not a string: use []const u8", comptime fieldText(base64Url, [64]u8).?);
     try expect(head ++ "base32 expects a string, field is [4:0]u8; [N]u8 is an array of numbers, not a string: use []const u8", comptime fieldText(base32, [4:0]u8).?);
@@ -908,5 +1118,47 @@ test "semVer passes the grammar of Semantic Versioning 2.0.0, numbers of any siz
         "",         "v1.2.3",         "1.2",           "1.2.3.4",   "01.2.3",     "1.02.3",
         "1.2.3-01", "1.2.3-alpha..1", "1.2.3-alpha_1", "1.0.0+a+b", "1.0.0+",     "1.0.0-",
         " 1.2.3",   "1.2.3 ",         "1..3",          "1.2.3-",    "1.2.3+a..b", "a.b.c",
+    });
+}
+
+test "hexColor passes # and 3, 4, 6 or 8 hex digits in any case" {
+    try expectAll("isHexColor", isHexColor, true, &.{ "#fff", "#FFFF", "#ff0000", "#Ff000080", "#000", "#abcdef" });
+    try expectAll("isHexColor", isHexColor, false, &.{
+        "",     "#",           "fff",   "ff0000", "#ff",   "#fffff", "#fffffff",
+        "#ggg", "#ff00000080", " #fff", "#fff ",  "##fff", "#ff 0",  "#\xc3\xa9f",
+    });
+}
+
+test "rgbColor passes the legacy comma syntax: all integers or all percentages, and an alpha for rgba only" {
+    try expectAll("isRgbColor", isRgbColor, true, &.{
+        "rgb(255,0,0)",        "rgb(255, 0, 0)",       "rgb( 0 , 0 , 0 )",    "rgb(100%,0%,50%)",
+        "rgba(0,0,0,0)",       "rgba(0, 0, 0, 0.004)", "rgba(0,0,0,1.00)",    "rgba(0,0,0,.5)",
+        "rgba(255,255,255,1)", "rgb(255,\r\n0,\x0c0)", "rgba(1%,2%,3%,0.25)",
+    });
+    try expectAll("isRgbColor", isRgbColor, false, &.{
+        "",                "rgb(256,0,0)",   "rgb(255,0%,0)",   "rgb(101%,0%,0%)",
+        "rgb(255 0 0)",    "RGB(255,0,0)",   "rgb(255,0,0,1)",  "rgba(255,0,0)",
+        "rgba(0,0,0,1.5)", "rgba(0,0,0,01)", "rgba(0,0,0,50%)", "rgb(01,0,0)",
+        "rgb(1000,0,0)",   " rgb(0,0,0)",    "rgb(0,0,0) ",     "rgb(255,\x0b0,0)",
+        "rgb(0,0,0",       "rgb(,0,0)",      "rgba(0,0,0,)",    "rgba(0,0,0,1.01)",
+        "rgb(-1,0,0)",     "rgb(0,0,0)x",    "rgb(0.5,0,0)",    "rgba(0,0,0,0.5%)",
+        "rgba(0,0,0,0.)",
+    });
+}
+
+test "hslColor passes the legacy and modern syntaxes with units, exponents and any range" {
+    try expectAll("isHslColor", isHslColor, true, &.{
+        "hsl(120,100%,50%)",       "hsl(120, 100%, 50%, 0.5)",  "hsla(120,100%,50%,.5)",
+        "hsl(120 100% 50%)",       "hsl(120 100% 50% / 0.5)",   "hsl(120 100% 50%/0.5)",
+        "hsla(120 100% 50%)",      "HSL(120,100%,50%)",         "hsl(120deg,100%,50%)",
+        "hsl(0.5TURN 100% 50%)",   "hsl(-120, 200%, -5%)",      "hsl(1e2, 1e1%, 5E-1%)",
+        "hsl(+.5rad 0% 0% / 50%)", "hsl(\t120\n100%\r50%\x0c)", "hsl(100grad,1%,1%)",
+    });
+    try expectAll("isHslColor", isHslColor, false, &.{
+        "",                      " hsl(120,100%,50%)",  "hsl(120,100%,50%) ",       "hsl(120,100,50%)",
+        "hsl(120 100% 50% 0.5)", "hsl(120,100% 50%)",   "hsl(120deggrad,100%,50%)", "hsl(120\xc2\xa0100% 50%)",
+        "hsl(120\x0b100% 50%)",  "hsl(120 100%50%)",    "hsl(120100% 50%)",         "hsl(1.,100%,50%)",
+        "hsl(120,100%,50%,)",    "hsl(120 100% 50% /)", "hsl()",                    "hsl(120,100%,50%",
+        "hsb(120,100%,50%)",     "hsl(e1,100%,50%)",    "hsl(120,100%,50%,0.5,1)",  "hsl(1e,100%,50%)",
     });
 }
