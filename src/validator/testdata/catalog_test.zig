@@ -218,6 +218,93 @@ test "finite is a rule value with code validation.finite and message \"must be a
     try expectNoViolation(f64, v.finite, 0);
 }
 
+test "minLength is a rule constructor with code validation.min_length and message \"must be at least {min} characters\", or \"must be at least 1 character\" when min = 1; placeholder {min}" {
+    try testing.expect(@hasDecl(v, "minLength"));
+    try testing.expect(@typeInfo(@TypeOf(v.minLength)).@"fn".return_type == v.Rule);
+    try expectRule(v.minLength(3), "validation.min_length", "must be at least 3 characters", "must be at least {min} characters");
+    try expectPlaceholder(v.minLength(3), "{min}", "3");
+    try expectViolation([]const u8, v.minLength(3), "ab", "validation.min_length", "must be at least 3 characters", "x");
+    try expectRule(v.minLength(1), "validation.min_length", "must be at least 1 character", "must be at least 1 character");
+    try expectViolation([]const u8, v.minLength(1), "", "validation.min_length", "must be at least 1 character", "x");
+    try expectNoViolation([]const u8, v.minLength(3), "abc");
+}
+
+test "maxLength is a rule constructor with code validation.max_length and message \"must be at most {max} characters\", or \"must be at most 1 character\" when max = 1; placeholder {max}" {
+    try testing.expect(@hasDecl(v, "maxLength"));
+    try testing.expect(@typeInfo(@TypeOf(v.maxLength)).@"fn".return_type == v.Rule);
+    try expectRule(v.maxLength(64), "validation.max_length", "must be at most 64 characters", "must be at most {max} characters");
+    try expectPlaceholder(v.maxLength(64), "{max}", "64");
+    try expectViolation([]const u8, v.maxLength(2), "abc", "validation.max_length", "must be at most 2 characters", "x");
+    try expectRule(v.maxLength(1), "validation.max_length", "must be at most 1 character", "must be at most 1 character");
+    try expectViolation([]const u8, v.maxLength(1), "ab", "validation.max_length", "must be at most 1 character", "x");
+    try expectNoViolation([]const u8, v.maxLength(2), "");
+}
+
+test "length is a rule constructor with code validation.length and message \"must be from {min} to {max} characters\", \"must be exactly {min} characters\" when min = max, or \"must be exactly 1 character\" when min = max = 1; placeholders {min}, {max}" {
+    try testing.expect(@hasDecl(v, "length"));
+    try testing.expect(@typeInfo(@TypeOf(v.length)).@"fn".return_type == v.Rule);
+    try expectRule(v.length(3, 32), "validation.length", "must be from 3 to 32 characters", "must be from {min} to {max} characters");
+    try expectPlaceholder(v.length(3, 32), "{min}", "3");
+    try expectPlaceholder(v.length(3, 32), "{max}", "32");
+    try expectViolation([]const u8, v.length(3, 32), "ab", "validation.length", "must be from 3 to 32 characters", "x");
+    try expectRule(v.length(5, 5), "validation.length", "must be exactly 5 characters", "must be exactly {min} characters");
+    try expectPlaceholder(v.length(5, 5), "{max}", "5");
+    try expectViolation([]const u8, v.length(5, 5), "abcd", "validation.length", "must be exactly 5 characters", "x");
+    try expectRule(v.length(1, 1), "validation.length", "must be exactly 1 character", "must be exactly 1 character");
+    try expectViolation([]const u8, v.length(1, 1), "ab", "validation.length", "must be exactly 1 character", "x");
+    try expectNoViolation([]const u8, v.length(3, 32), "abc");
+}
+
+test "minBytes is a rule constructor with code validation.min_bytes and message \"must be at least {min} bytes\", or \"must be at least 1 byte\" when min = 1; placeholder {min}" {
+    try testing.expect(@hasDecl(v, "minBytes"));
+    try testing.expect(@typeInfo(@TypeOf(v.minBytes)).@"fn".return_type == v.Rule);
+    try expectRule(v.minBytes(8), "validation.min_bytes", "must be at least 8 bytes", "must be at least {min} bytes");
+    try expectPlaceholder(v.minBytes(8), "{min}", "8");
+    try expectViolation([]const u8, v.minBytes(8), "abc", "validation.min_bytes", "must be at least 8 bytes", "x");
+    try expectRule(v.minBytes(1), "validation.min_bytes", "must be at least 1 byte", "must be at least 1 byte");
+    try expectViolation([]const u8, v.minBytes(1), "", "validation.min_bytes", "must be at least 1 byte", "x");
+    try expectNoViolation([]const u8, v.minBytes(2), "\xff\xff");
+}
+
+test "maxBytes is a rule constructor with code validation.max_bytes and message \"must be at most {max} bytes\", or \"must be at most 1 byte\" when max = 1; placeholder {max}" {
+    try testing.expect(@hasDecl(v, "maxBytes"));
+    try testing.expect(@typeInfo(@TypeOf(v.maxBytes)).@"fn".return_type == v.Rule);
+    try expectRule(v.maxBytes(255), "validation.max_bytes", "must be at most 255 bytes", "must be at most {max} bytes");
+    try expectPlaceholder(v.maxBytes(255), "{max}", "255");
+    try expectViolation([]const u8, v.maxBytes(2), "abc", "validation.max_bytes", "must be at most 2 bytes", "x");
+    try expectRule(v.maxBytes(1), "validation.max_bytes", "must be at most 1 byte", "must be at most 1 byte");
+    try expectViolation([]const u8, v.maxBytes(1), "\u{E9}", "validation.max_bytes", "must be at most 1 byte", "x");
+    try expectNoViolation([]const u8, v.maxBytes(3), "\xff\xff\xff");
+}
+
+/// `rules` fail an invalid UTF-8 value with the utf8 precondition on every
+/// kind of string field.
+fn expectUtf8Precondition(comptime rules: anytype) !void {
+    const code = "validation.utf8";
+    const message = "must be valid UTF-8";
+    try expectViolation([]const u8, rules, "a\xff", code, message, "x");
+    try expectViolation([:0]const u8, rules, "a\xff", code, message, "x");
+    var bytes = "a\xff".*;
+    try expectViolation([]u8, rules, &bytes, code, message, "x");
+    try expectViolation([:0]u8, rules, bytes[0..2 :0], code, message, "x");
+    try expectViolation(?[]const u8, rules, "\xed\xa0\x80", code, message, "x");
+}
+
+test "minLength on a string field fails invalid UTF-8 with the utf8 precondition, also under withMessage" {
+    try expectUtf8Precondition(v.minLength(1));
+    try expectUtf8Precondition(v.minLength(1).withMessage("another message"));
+}
+
+test "maxLength on a string field fails invalid UTF-8 with the utf8 precondition, also under withMessage" {
+    try expectUtf8Precondition(v.maxLength(10));
+    try expectUtf8Precondition(v.maxLength(10).withMessage("another message"));
+}
+
+test "length on a string field fails invalid UTF-8 with the utf8 precondition, also under withMessage" {
+    try expectUtf8Precondition(v.length(1, 10));
+    try expectUtf8Precondition(v.length(1, 10).withMessage("another message"));
+}
+
 test "minItems is a rule constructor with code validation.min_items and message \"must have at least {min} items\", or \"must have at least 1 item\" when min = 1; placeholder {min}" {
     try testing.expect(@hasDecl(v, "minItems"));
     try testing.expect(@typeInfo(@TypeOf(v.minItems)).@"fn".return_type == v.Rule);
@@ -382,15 +469,16 @@ test "finite has no precondition: nan, inf and -inf on a float field fail its ow
     }
 }
 
-test "the module exports exactly its 29 public names, and Rule.withMessage" {
-    const names = [_][]const u8{ "Violation", "Rule", "Report", "max_code_bytes", "max_message_bytes", "max_report_violations", "check", "checkAll", "assertRules", "fail", "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "minItems", "maxItems", "each", "custom" };
+test "the module exports exactly its 34 public names, and Rule.withMessage" {
+    const names = [_][]const u8{ "Violation", "Rule", "Report", "max_code_bytes", "max_message_bytes", "max_report_violations", "check", "checkAll", "assertRules", "fail", "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "minLength", "maxLength", "length", "minBytes", "maxBytes", "minItems", "maxItems", "each", "custom" };
     inline for (names) |name| try testing.expect(@hasDecl(v, name));
     try testing.expectEqual(names.len, comptime std.meta.declarations(v).len);
     try testing.expect(@hasDecl(v.Rule, "withMessage"));
 }
 
 test "every rule the module exports has a catalog test" {
-    const tested = [_][]const u8{ "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "minItems", "maxItems", "each", "custom" };
+    @setEvalBranchQuota(100_000);
+    const tested = [_][]const u8{ "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "minLength", "maxLength", "length", "minBytes", "maxBytes", "minItems", "maxItems", "each", "custom" };
     inline for (comptime std.meta.declarations(v)) |name| {
         const T = @TypeOf(@field(v, name));
         if (comptime T == v.Rule or (@typeInfo(T) == .@"fn" and @typeInfo(T).@"fn".return_type == v.Rule)) {
@@ -406,6 +494,7 @@ test "every rule the module exports has a catalog test" {
 }
 
 test "the module exports exactly the catalog predicates of the shipped rules" {
+    @setEvalBranchQuota(100_000);
     const predicates = [_][]const u8{};
     comptime var exported: usize = 0;
     inline for (comptime std.meta.declarations(v)) |name| {

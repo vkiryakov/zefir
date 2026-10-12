@@ -1584,10 +1584,28 @@ pub const hints = struct {
     /// `minItems` and `maxItems` on a string field.
     pub const min_items_on_string = "for strings use v.minLength or v.minBytes";
     pub const max_items_on_string = "for strings use v.maxLength or v.maxBytes";
+    /// `minLength(0)`, which every valid UTF-8 string passes.
+    pub const use_utf8 = "use v.utf8 to require valid UTF-8";
 
     /// A rule written on a list whose items it would accept.
     pub fn useEach(comptime rule: Rule) []const u8 {
         return "use v.each(v." ++ rule.call() ++ ")";
+    }
+
+    /// `minLength`, `maxLength` or `length` on a slice of other items: the
+    /// list rules with the same counts.
+    pub fn itemCount(comptime rule: Rule) []const u8 {
+        return "for the number of items use " ++ switch (rule.kind) {
+            .min_length => "v.minItems(" ++ rule.params[0].text ++ ")",
+            .max_length => "v.maxItems(" ++ rule.params[0].text ++ ")",
+            .length => "v.minItems(" ++ rule.params[0].text ++ ") and v.maxItems(" ++ rule.params[1].text ++ ")",
+            else => @compileError("validator: internal: " ++ @tagName(rule.kind) ++ " counts no characters"),
+        };
+    }
+
+    /// `length(0, max)`: the rule without a lower bound.
+    pub fn useMaxLength(comptime max: usize) []const u8 {
+        return "use v.maxLength(" ++ renderArg(max) ++ ")";
     }
 
     /// A rule constructor used without a call (`.tags = v.each`): its call
@@ -1610,7 +1628,7 @@ pub const hints = struct {
 
 /// The files that define rules. Each rule pull request adds its file here, so
 /// that its `call_examples` reach the hints.
-const rule_files = [_]type{ @import("common.zig"), @import("numbers.zig"), @import("lists.zig"), @import("custom.zig") };
+const rule_files = [_]type{ @import("common.zig"), @import("numbers.zig"), @import("strings.zig"), @import("lists.zig"), @import("custom.zig") };
 
 /// The arguments the hints show in a call of the constructor `name` of type
 /// `F`: its `call_examples` entry, else `.{}` for an options struct, the
@@ -1661,11 +1679,6 @@ pub const pending_kinds = [_]Kind{
     .half_width,
     .variable_width,
     // PR 2b
-    .min_length,
-    .max_length,
-    .length,
-    .min_bytes,
-    .max_bytes,
     .contains,
     .not_contains,
     .strong_password,

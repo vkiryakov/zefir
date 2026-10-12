@@ -36,6 +36,7 @@ const core = @import("core.zig");
 const walk = @import("walk.zig");
 const common = @import("common.zig");
 const numbers = @import("numbers.zig");
+const strings = @import("strings.zig");
 const lists = @import("lists.zig");
 const custom_rules = @import("custom.zig");
 
@@ -67,6 +68,11 @@ pub const negative = numbers.negative;
 pub const nonPositive = numbers.nonPositive;
 pub const divisibleBy = numbers.divisibleBy;
 pub const finite = numbers.finite;
+pub const minLength = strings.minLength;
+pub const maxLength = strings.maxLength;
+pub const length = strings.length;
+pub const minBytes = strings.minBytes;
+pub const maxBytes = strings.maxBytes;
 pub const minItems = lists.minItems;
 pub const maxItems = lists.maxItems;
 pub const each = lists.each;
@@ -77,6 +83,7 @@ test {
     _ = walk;
     _ = common;
     _ = numbers;
+    _ = strings;
     _ = lists;
     _ = custom_rules;
 }
