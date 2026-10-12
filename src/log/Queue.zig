@@ -381,7 +381,8 @@ const Producer = struct {
         for (0..p.count) |number| {
             const record = std.fmt.bufPrint(&buf, "{d} {d}", .{ p.id, number }) catch unreachable;
             if (p.blocking) {
-                p.q.pushBlocking(record) catch unreachable;
+                // Closed only when the test gives up early.
+                p.q.pushBlocking(record) catch return;
             } else {
                 p.q.tryPush(record) catch {
                     p.refused += 1;
@@ -433,15 +434,20 @@ test "producers on many threads, blocking: nothing lost or doubled, each produce
     var q = try Queue.init(testing.allocator, 16, 64, threaded.io());
     defer q.deinit(testing.allocator);
     var producers: [8]Producer = undefined;
-    var threads: [8]std.Thread = undefined;
-    for (&producers, &threads, 0..) |*p, *t, i| {
-        p.* = .{ .q = &q, .id = @intCast(i), .count = 2000, .blocking = true };
-        t.* = try std.Thread.spawn(.{}, Producer.run, .{p});
-    }
     var out: std.Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
-    try consume(&q, 8 * 2000, &out);
-    for (threads) |t| t.join();
+    {
+        var threads: [8]std.Thread = undefined;
+        var spawned: usize = 0;
+        defer for (threads[0..spawned]) |t| t.join();
+        errdefer _ = q.close(); // lets the producers that wait for room go
+        for (&producers, &threads, 0..) |*p, *t, i| {
+            p.* = .{ .q = &q, .id = @intCast(i), .count = 2000, .blocking = true };
+            t.* = try std.Thread.spawn(.{}, Producer.run, .{p});
+            spawned += 1;
+        }
+        try consume(&q, 8 * 2000, &out);
+    }
     var delivered: [8]u32 = @splat(0);
     try checkOrder(out.written(), &delivered, true);
     for (delivered) |count| try testing.expectEqual(@as(u32, 2000), count);
@@ -452,12 +458,16 @@ test "producers on many threads, dropping: what came out and what was refused ad
     var q = try Queue.init(testing.allocator, 8, 64, threaded.io());
     defer q.deinit(testing.allocator);
     var producers: [8]Producer = undefined;
-    var threads: [8]std.Thread = undefined;
-    for (&producers, &threads, 0..) |*p, *t, i| {
-        p.* = .{ .q = &q, .id = @intCast(i), .count = 2000, .blocking = false };
-        t.* = try std.Thread.spawn(.{}, Producer.run, .{p});
+    {
+        var threads: [8]std.Thread = undefined;
+        var spawned: usize = 0;
+        defer for (threads[0..spawned]) |t| t.join();
+        for (&producers, &threads, 0..) |*p, *t, i| {
+            p.* = .{ .q = &q, .id = @intCast(i), .count = 2000, .blocking = false };
+            t.* = try std.Thread.spawn(.{}, Producer.run, .{p});
+            spawned += 1;
+        }
     }
-    for (threads) |t| t.join();
     _ = q.close();
     var out: std.Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
@@ -482,18 +492,23 @@ test "a blocked producer goes on when room is freed, and gets Closed when the qu
     try q.tryPush("a");
     try q.tryPush("b");
     var result: ?anyerror = error.TestUnexpectedResult;
-    var producer = try std.Thread.spawn(.{}, pushOne, .{ &q, &result });
-    var batch: [64]u8 = undefined;
-    var ends: [1]usize = undefined;
-    try testing.expectEqual(@as(usize, 1), q.pop(&batch, &ends)); // room for "late"
-    producer.join();
+    {
+        const producer = try std.Thread.spawn(.{}, pushOne, .{ &q, &result });
+        defer producer.join();
+        errdefer _ = q.close(); // lets it go if it still waits for room
+        var batch: [64]u8 = undefined;
+        var ends: [1]usize = undefined;
+        try testing.expectEqual(@as(usize, 1), q.pop(&batch, &ends)); // room for "late"
+    }
     try testing.expectEqual(@as(?anyerror, null), result);
 
     // Full again ("b" and "late"): the next producer waits until the close.
-    producer = try std.Thread.spawn(.{}, pushOne, .{ &q, &result });
-    try testing.io.sleep(.fromMilliseconds(10), .awake);
-    _ = q.close();
-    producer.join();
+    {
+        const producer = try std.Thread.spawn(.{}, pushOne, .{ &q, &result });
+        defer producer.join();
+        defer _ = q.close();
+        try testing.io.sleep(.fromMilliseconds(10), .awake);
+    }
     try testing.expectEqual(@as(?anyerror, error.Closed), result);
 }
 
@@ -507,10 +522,13 @@ test "a sleeping consumer is woken by a push" {
     var q = try Queue.init(testing.allocator, 4, 64, threaded.io());
     defer q.deinit(testing.allocator);
     var woke: std.atomic.Value(bool) = .init(false);
-    const consumer = try std.Thread.spawn(.{}, sleepUntilWork, .{ &q, &woke });
-    try testing.io.sleep(.fromMilliseconds(10), .awake);
-    try q.tryPush("wake up");
-    consumer.join();
+    {
+        const consumer = try std.Thread.spawn(.{}, sleepUntilWork, .{ &q, &woke });
+        defer consumer.join();
+        errdefer _ = q.close(); // wakes it when the push does not come
+        try testing.io.sleep(.fromMilliseconds(10), .awake);
+        try q.tryPush("wake up");
+    }
     try testing.expect(woke.load(.seq_cst));
 }
 
@@ -555,7 +573,8 @@ const patience_ms = 500;
 
 /// Takes `rounds` records one at a time, sleeping whenever none is there,
 /// and counts the sleeps that ran out with a record waiting: lost
-/// wake-ups. After one it only finishes the rounds, without sleeping.
+/// wake-ups. After one it only finishes the rounds, without sleeping; it
+/// returns early once the queue is closed and drained.
 fn consumeRounds(q: *Queue, rounds: usize, lost: *std.atomic.Value(u32)) void {
     var batch: [64]u8 = undefined;
     var ends: [1]usize = undefined;
@@ -566,6 +585,7 @@ fn consumeRounds(q: *Queue, rounds: usize, lost: *std.atomic.Value(u32)) void {
             taken += 1;
             continue;
         }
+        if (q.idle() == .closed) return;
         if (lost.load(.seq_cst) > 0) {
             std.Thread.yield() catch {};
             continue;
@@ -583,20 +603,23 @@ test "lost wake-up detector: a consumer that sleeps between pushes is always wok
     defer q.deinit(testing.allocator);
     const rounds = 2000;
     var lost: std.atomic.Value(u32) = .init(0);
-    const consumer = try std.Thread.spawn(.{}, consumeRounds, .{ &q, rounds, &lost });
-    for (0..rounds) |round| {
-        // Push at once, right after the consumer says it sleeps, or a little
-        // later: the race sits in each of these windows.
-        switch (round % 3) {
-            0 => {},
-            1 => while (q.consumer_sleeping.load(.seq_cst) == 0 and q.depth() == 0 and lost.load(.seq_cst) == 0) {
-                std.Thread.yield() catch {};
-            },
-            else => for (0..round % 7) |_| std.Thread.yield() catch {},
+    {
+        const consumer = try std.Thread.spawn(.{}, consumeRounds, .{ &q, rounds, &lost });
+        defer consumer.join();
+        errdefer _ = q.close(); // the consumer ends at the close when a round fails
+        for (0..rounds) |round| {
+            // Push at once, right after the consumer says it sleeps, or a
+            // little later: the race sits in each of these windows.
+            switch (round % 3) {
+                0 => {},
+                1 => while (q.consumer_sleeping.load(.seq_cst) == 0 and q.depth() == 0 and lost.load(.seq_cst) == 0) {
+                    std.Thread.yield() catch {};
+                },
+                else => for (0..round % 7) |_| std.Thread.yield() catch {},
+            }
+            try q.pushBlocking("x");
         }
-        try q.pushBlocking("x");
     }
-    consumer.join();
     try testing.expectEqual(@as(u32, 0), lost.load(.seq_cst));
 }
 
