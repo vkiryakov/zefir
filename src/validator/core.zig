@@ -1089,7 +1089,8 @@ pub const Rule = struct {
     /// stays, and a precondition failure keeps its fixed code and message
     /// (NaN under `v.positive.withMessage(...)` still reports
     /// `validation.finite`). `{name}` is a placeholder of the rule: its
-    /// parameter `name` as the default message shows it. `{{` writes `{`,
+    /// parameter as the rule's page names it (`v.range(lo, hi)` has `{min}`
+    /// and `{max}`), shown as the default message shows it. `{{` writes `{`,
     /// `}}` writes `}`, and any other `}` stays. On `v.custom` the template
     /// replaces its literal message: braces are syntax here, and custom has no
     /// placeholders. The message must be 1-512 bytes of valid UTF-8, in any

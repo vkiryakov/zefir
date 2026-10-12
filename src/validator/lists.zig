@@ -14,8 +14,9 @@ fn acceptsList(comptime T: type) bool {
 
 /// `len >= min` on a slice: items are counted, null items included, never
 /// checked. `min` is at least 1 (`minItems(0)` is always true). `v.notEmpty`
-/// says the same as `minItems(1)` with its own code; either may be used. A
-/// fixed-size array `[N]T` is a compile error: its length never changes.
+/// says the same as `minItems(1)` with its own code: prefer `v.notEmpty`
+/// unless clients branch on `validation.min_items`. A fixed-size array `[N]T`
+/// is a compile error: its length never changes.
 pub fn minItems(comptime min: usize) Rule {
     @setEvalBranchQuota(core.eval_quota);
     if (countCallProblem(.min_items, min)) |text| @compileError(text);

@@ -61,6 +61,10 @@ const Payment = struct {
   (`v.max(0.1)` on an `f32` says `must be at most 0.1`), and
   `.withMessage` can use it as a placeholder
   ([Messages](README.md#placeholders)).
+- `v.min`, `v.max`, `v.range` and `v.divisibleBy` have no fallback message: a
+  bound or a divisor of hundreds of digits makes the field a compile error
+  unless `.withMessage` replaces the message
+  ([Fallback messages](README.md#fallback-messages)).
 - Every rule also accepts `?T` and `??T` of the types it accepts: `null` skips
   the rule. Inside `v.each(...)` it checks each item; on a slice or an array of
   numbers itself it is a compile error that suggests `v.each`.

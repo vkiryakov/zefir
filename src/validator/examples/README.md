@@ -175,10 +175,6 @@ tags[1]: must not be empty (validation.not_empty)
 left to right.
 
 ```zig
-fn atMost1000(n: u32) bool {
-    return n <= 1000;
-}
-
 const Order = struct {
     id: []const u8,
     quantity: u32,
@@ -187,7 +183,7 @@ const Order = struct {
 
     pub const field_rules = .{
         .id = v.notEmpty, // one rule
-        .quantity = .{ v.positive, v.custom("orders.max_quantity", "must be at most 1000", atMost1000) }, // a tuple
+        .quantity = .{ v.positive, v.max(1000) }, // a tuple
         .tags = .{ v.notEmpty, v.each(v.notEmpty) },
         .note = v.notEmpty, // null skips the rule; "" fails it
     };
@@ -277,21 +273,13 @@ Rules are compile-time values, so a project declares its own once:
 // rules.zig
 const v = @import("validator");
 
-fn atMost1000(n: u32) bool {
-    return n <= 1000;
-}
-
-pub const quantity = .{ v.positive, v.custom("orders.max_quantity", "must be at most 1000", atMost1000) }; // a tuple
+pub const quantity = .{ v.positive, v.max(1000) }; // a tuple
 pub const sku: v.Rule = v.notEmpty; // one rule
 ```
 
 ```zig
 const v = @import("validator");
 const rules = @import("rules.zig");
-
-fn isEven(n: u32) bool {
-    return n % 2 == 0;
-}
 
 pub const Line = struct {
     sku: []const u8,
@@ -300,12 +288,12 @@ pub const Line = struct {
     pub const field_rules = .{
         .sku = rules.sku,
         .qty = rules.quantity, // the tuple is the whole entry
-        .pack = rules.quantity ++ .{v.custom("orders.odd_pack", "must be even", isEven)}, // ++ joins tuples
+        .pack = rules.quantity ++ .{v.divisibleBy(2)}, // ++ joins tuples
     };
 };
 ```
 
-A tuple inside a tuple is not flattened: `.pack = .{ rules.quantity, v.custom(...) }`
+A tuple inside a tuple is not flattened: `.pack = .{ rules.quantity, v.divisibleBy(2) }`
 is a compile error (`item 0 of the tuple is a tuple; tuples are not flattened: join them with ++, e.g. name_rules ++ .{ v.notEmpty }, or use the tuple as the whole entry`).
 Use a tuple as the whole entry, or join tuples with `++`.
 
@@ -532,8 +520,9 @@ pub fn withMessage(comptime rule: v.Rule, comptime template: []const u8) v.Rule
 ```
 
 `rule.withMessage(template)` returns a copy of the rule with another message;
-the code stays. The template is a literal: the compiler fills in the
-placeholders, and the rule keeps the result as a static string.
+the code stays. The template must be known at compile time (a literal, a
+`const`, or `++` of them): the compiler fills in the placeholders, and the rule
+keeps the result as a static string.
 
 ```zig
 const std = @import("std");
@@ -589,7 +578,8 @@ pub fn main(init: std.process.Init) !void {
 ```
 
 It prints the violation of every field that fails (`nickname` passes). The codes
-are the rules' own; only the messages are new:
+are the rules' own, and the messages come from the templates, except for
+`height`, whose precondition keeps its own:
 
 ```text
 name: заполните поле (validation.not_empty)
@@ -688,6 +678,9 @@ validator: min(1).withMessage("\xc3"): message must be valid UTF-8
 validator: each(...).withMessage("x"): each has no message of its own; put .withMessage on the inner rules
 ```
 
+Mistakes that Zig itself rejects (no template, a template that is not a string
+or not known at compile time) are listed under [Compile errors](#compile-errors).
+
 ### Any language, and the 512-byte limit
 
 - Templates of `.withMessage` and messages of `v.custom` and `v.fail` can be in
@@ -704,9 +697,10 @@ validator: each(...).withMessage("x"): each has no message of its own; put .with
 
 ### Fallback messages
 
-A default message that shows a list or a string can grow beyond 512 bytes. The
-rules `v.equals`, `v.notEquals`, `v.oneOf` and `v.noneOf` then use a general
-message instead, chosen at compile time; the code does not change:
+A default message that shows a list, a string or a number of hundreds of digits
+can grow beyond 512 bytes. The rules `v.equals`, `v.notEquals`, `v.oneOf` and
+`v.noneOf` then use a general message instead, chosen at compile time; the code
+does not change:
 
 | Rule | Fallback message |
 | --- | --- |
@@ -721,8 +715,8 @@ the whole list (the result must still fit in 512 bytes).
 
 `v.min`, `v.max`, `v.range` and `v.divisibleBy` have no fallback. Their default
 message is longer than 512 bytes only for a bound or a divisor of hundreds of
-digits (very wide integer types and `f128`), and then the field is a compile
-error unless `.withMessage` replaces the message:
+digits (very wide integer types, `f80` and `f128`), and then the field is a
+compile error unless `.withMessage` replaces the message:
 
 ```text
 validator: <Type>.field_rules.<field>: min(<the 512-digit value of 2^1700>): the default message would be 529 bytes (limit 512); use .withMessage(...)
@@ -757,9 +751,6 @@ same condition first in the tuple, with your message:
 `v.finite` is an ordinary rule: its own check reports the same code as the
 precondition, so `.withMessage` applies to it. It stands first, the first rule
 that fails is the only violation of the field, and `v.positive` never sees a NaN.
-The rules that arrive later have preconditions of other kinds (such as valid
-UTF-8 for the rules that count characters); the recipe is the same: the ordinary
-rule with that name goes first, with your message.
 
 ## Checking values
 
@@ -840,7 +831,7 @@ pub const Violation = struct {
 | Field | Content |
 | --- | --- |
 | `code` | `validation.<rule>` for a built-in rule (`validation.not_empty`); your code for `v.custom` and `v.fail`; `validation.finite` for NaN or an infinity in a float field; `validation.invalid` for a malformed `validateSelf` result outside Debug |
-| `message` | the rule's default message (`must not be empty`) or yours: 1-512 bytes of UTF-8, without the field name or the value |
+| `message` | the rule's default message (`must not be empty`) or yours: 1-512 bytes of UTF-8, never containing the value (a default message has no field name either) |
 | `field` | the path of the value from the root (`email`, `address.city`, `items[2].name`, `[1].email`); `null` for the root itself |
 
 A violation from a built-in rule, `v.custom` or `v.fail` never contains the
@@ -985,6 +976,11 @@ library runs. These errors point at your line and do not start with
 | `v.fail(@This(), .ned, ...)`: a field the struct does not have | `enum 'meta.FieldEnum(bookings.Booking)' has no member named 'ned'` |
 | `v.custom("users.ok", isFree)`: a missing argument | `expected 3 argument(s), found 2` |
 | `v.minItems.withMessage("...")`: `.withMessage` on a rule that needs a call | `no field or member function named 'withMessage' in 'fn (comptime usize) core.Rule'` |
+| `v.minItems(-1)`: a negative count, or one above `maxInt(usize)` | `type 'usize' cannot represent integer value '-1'` |
+| `v.maxItems(1.5)`: a fractional count (`3.0` is accepted) | `fractional component prevents float value '1.5' from coercion to type 'usize'` |
+| `v.notEmpty.withMessage()`: no template, or two | `member function expected 1 argument(s), found 0` |
+| `v.notEmpty.withMessage(5)`: a template that is not a string | `expected type '[]const u8', found 'comptime_int'` |
+| `v.maxItems(limit)`, `.withMessage(text)`: a parameter or a template known only at run time | `unable to resolve comptime value` (note: `argument to comptime parameter must be comptime-known`) |
 
 **What is not checked at compile time:**
 
@@ -1011,9 +1007,9 @@ The limits are `comptime_int` constants and part of the contract (see below).
 ## Compatibility
 
 - **The behaviour of a rule is a contract** from the first release that ships
-  it: what it accepts, its code, its default message. So are the walk — which
-  violations `check` and `checkAll` return, in which order, with which paths —
-  and the values of the limits.
+  it: what it accepts, its code, its default message and the names of its
+  placeholders. So are the walk — which violations `check` and `checkAll`
+  return, in which order, with which paths — and the values of the limits.
 - Until 1.0, such a change comes only in a minor release, and its release notes
   say so; a patch release never changes a rule.
 - **Security fixes** are the exception: a rule that panics on some input, takes

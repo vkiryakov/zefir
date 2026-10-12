@@ -17,14 +17,15 @@ const Outcome = core.Outcome;
 /// "must be at least 0.5". A typed float narrower than a float field keeps
 /// its exact value there (`@as(f32, 0.1)` is 0.10000000149011612 in f64), so
 /// one whose value would show otherwise is a compile error: write the bound
-/// as a literal or in the field's type.
+/// as a literal or in the field's type. Its placeholder is `{min}`.
 pub fn min(comptime bound: anytype) Rule {
     @setEvalBranchQuota(core.eval_quota);
     if (callProblem("min", .{bound})) |text| @compileError(text);
     return boundRule(.min, bound, null, argsText(.{bound}), "must be at least " ++ core.renderValue(bound), &.{core.param("min", bound)});
 }
 
-/// `value <= bound`, compared in the field type; the bound as for `min`.
+/// `value <= bound`, compared in the field type; the bound as for `min`. Its
+/// placeholder is `{max}`.
 pub fn max(comptime bound: anytype) Rule {
     @setEvalBranchQuota(core.eval_quota);
     if (callProblem("max", .{bound})) |text| @compileError(text);
@@ -33,7 +34,7 @@ pub fn max(comptime bound: anytype) Rule {
 
 /// `lo <= value <= hi`, compared in the field type; each bound as for `min`,
 /// and `lo` not greater than `hi` as written. Equal bounds accept one value:
-/// "must be 7".
+/// "must be 7". Its placeholders are `{min}` and `{max}`.
 pub fn range(comptime lo: anytype, comptime hi: anytype) Rule {
     @setEvalBranchQuota(core.eval_quota);
     if (callProblem("range", .{ lo, hi })) |text| @compileError(text);

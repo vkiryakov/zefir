@@ -139,6 +139,7 @@ pub const list = [_]Fixture{
     .{ .file = "src/validator/testdata/compile_errors/max_items_zero.zig", .expect = "validator: maxItems(0): max must be at least 1; use v.empty", .row = "maxItems-1" },
     .{ .file = "src/validator/testdata/compile_errors/min_items_negative.zig", .expect = "type 'usize' cannot represent integer value '-1'", .row = "Z-1" },
     .{ .file = "src/validator/testdata/compile_errors/max_items_fractional.zig", .expect = "fractional component prevents float value '1.5' from coercion to type 'usize'", .row = "Z-2" },
+    .{ .file = "src/validator/testdata/compile_errors/min_items_uncalled_with_message.zig", .expect = "no field or member function named 'withMessage' in 'fn (comptime usize) core.Rule'", .row = "variant of Z-5" },
     // each
     .{ .file = "src/validator/testdata/compile_errors/each_not_rule.zig", .expect = "validator: each(...): expected a rule or a tuple of rules, got *const [1:0]u8", .row = "each-1" },
     .{ .file = "src/validator/testdata/compile_errors/each_tuple_item_not_rule.zig", .expect = "validator: each(...): item 1 of the tuple is comptime_int", .row = "each-2" },
@@ -197,6 +198,7 @@ pub const list = [_]Fixture{
     .{ .file = "src/validator/testdata/compile_errors/positive_called.zig", .expect = "type 'core.Rule' not a function", .row = "Z-8" },
     .{ .file = "src/validator/testdata/compile_errors/with_message_no_argument.zig", .expect = "member function expected 1 argument(s), found 0", .row = "Z-15" },
     .{ .file = "src/validator/testdata/compile_errors/with_message_not_string.zig", .expect = "expected type '[]const u8', found 'comptime_int'", .row = "Z-9" },
+    .{ .file = "src/validator/testdata/compile_errors/with_message_runtime_template.zig", .expect = "unable to resolve comptime value", .row = "variant of Z-32" },
     .{ .file = "src/validator/testdata/compile_errors/custom_missing_argument.zig", .expect = "expected 3 argument(s), found 2", .row = "variant of Z-4" },
     .{ .file = "src/validator/testdata/compile_errors/custom_code_escaped.zig", .expect = "validator: custom(\"users.a\\tb\", ...): code 'users.a\\tb' has a character outside [a-z0-9_.]; use segments of [a-z][a-z0-9_]* joined by '.', e.g. 'users.name_taken'", .row = "variant of CU-3" },
     .{ .file = "src/validator/testdata/compile_errors/each_eval_direct.zig", .expect = "validator: internal: each is applied by the walker and never evaluated", .row = "internal" },
