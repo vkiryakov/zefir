@@ -52,6 +52,9 @@ pub const checkAll = walk.checkAll;
 pub const assertRules = walk.assertRules;
 pub const fail = walk.fail;
 
+pub const equals = common.equals;
+pub const notEquals = common.notEquals;
+pub const empty = common.empty;
 pub const notEmpty = common.notEmpty;
 pub const min = numbers.min;
 pub const max = numbers.max;

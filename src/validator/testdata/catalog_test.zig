@@ -50,6 +50,41 @@ fn isEven(n: u32) bool {
     return n % 2 == 0;
 }
 
+test "equals is a rule constructor with code validation.equals and message \"must be equal to {expected}\", or \"must be equal to the expected value\" when that would be longer than 512 bytes" {
+    try testing.expect(@hasDecl(v, "equals"));
+    try testing.expect(@typeInfo(@TypeOf(v.equals)).@"fn".return_type == v.Rule);
+    try testing.expectEqualStrings("validation.equals", v.equals(true).code);
+    try testing.expectEqualStrings("must be equal to true", v.equals(true).message);
+    const long = &@as([600]u8, @splat('x'));
+    try testing.expectEqualStrings("validation.equals", v.equals(long).code);
+    try testing.expectEqualStrings("must be equal to the expected value", v.equals(long).message);
+    try expectViolation(bool, v.equals(true), false, "validation.equals", "must be equal to true", "x");
+    try expectViolation([]const u8, v.equals(long), "x", "validation.equals", "must be equal to the expected value", "x");
+    try expectNoViolation(bool, v.equals(true), true);
+}
+
+test "notEquals is a rule constructor with code validation.not_equals and message \"must not be equal to {forbidden}\", or \"must not be equal to the forbidden value\" when that would be longer than 512 bytes" {
+    try testing.expect(@hasDecl(v, "notEquals"));
+    try testing.expect(@typeInfo(@TypeOf(v.notEquals)).@"fn".return_type == v.Rule);
+    try testing.expectEqualStrings("validation.not_equals", v.notEquals(0).code);
+    try testing.expectEqualStrings("must not be equal to 0", v.notEquals(0).message);
+    const long = &@as([600]u8, @splat('x'));
+    try testing.expectEqualStrings("validation.not_equals", v.notEquals(long).code);
+    try testing.expectEqualStrings("must not be equal to the forbidden value", v.notEquals(long).message);
+    try expectViolation(i32, v.notEquals(0), 0, "validation.not_equals", "must not be equal to 0", "x");
+    try expectViolation([]const u8, v.notEquals(long), long, "validation.not_equals", "must not be equal to the forbidden value", "x");
+    try expectNoViolation(i32, v.notEquals(0), 1);
+}
+
+test "empty is a rule value with code validation.empty and message \"must be empty\"" {
+    try testing.expect(@hasDecl(v, "empty"));
+    try testing.expect(@TypeOf(v.empty) == v.Rule);
+    try testing.expectEqualStrings("validation.empty", v.empty.code);
+    try testing.expectEqualStrings("must be empty", v.empty.message);
+    try expectViolation([]const u8, v.empty, "a", "validation.empty", "must be empty", "x");
+    try expectNoViolation([]const u8, v.empty, "");
+}
+
 test "notEmpty is a rule value with code validation.not_empty and message \"must not be empty\"" {
     try testing.expect(@hasDecl(v, "notEmpty"));
     try testing.expect(@TypeOf(v.notEmpty) == v.Rule);
@@ -173,6 +208,15 @@ test "min, max, range, nonNegative, negative, nonPositive and divisibleBy on a f
     }
 }
 
+test "equals and notEquals on a float field fail nan, inf and -inf with the finite precondition" {
+    inline for (.{ f16, f32, f64, f80, f128, c_longdouble }) |F| {
+        inline for (.{ std.math.nan(F), std.math.inf(F), -std.math.inf(F) }) |bad| {
+            try expectViolation(F, v.equals(0), bad, "validation.finite", "must be a finite number", "x");
+            try expectViolation(F, v.notEquals(0), bad, "validation.finite", "must be a finite number", "x");
+        }
+    }
+}
+
 test "finite has no precondition: nan, inf and -inf fail its own check" {
     inline for (.{ f16, f32, f64, f80, f128, c_longdouble }) |F| {
         inline for (.{ std.math.nan(F), std.math.inf(F), -std.math.inf(F) }) |bad| {
@@ -183,7 +227,7 @@ test "finite has no precondition: nan, inf and -inf fail its own check" {
 }
 
 test "every rule the module exports has a catalog test" {
-    const tested = [_][]const u8{ "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "each", "custom" };
+    const tested = [_][]const u8{ "equals", "notEquals", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "each", "custom" };
     inline for (comptime std.meta.declarations(v)) |name| {
         const T = @TypeOf(@field(v, name));
         if (comptime T == v.Rule or (@typeInfo(T) == .@"fn" and @typeInfo(T).@"fn".return_type == v.Rule)) {

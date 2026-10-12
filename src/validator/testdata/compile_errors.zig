@@ -83,6 +83,16 @@ pub const list = [_]Fixture{
     .{ .file = "src/validator/testdata/compile_errors/fail_bad_utf8.zig", .expect = "validator: fail(fail_bad_utf8.Bad, .end): message must be valid UTF-8", .row = "FA-11" },
     .{ .file = "src/validator/testdata/compile_errors/fail_digit_start.zig", .expect = "validator: fail(fail_digit_start.Bad, .end): code 'orders.1st' has a segment that does not start with a letter; use segments of [a-z][a-z0-9_]* joined by '.', e.g. 'users.name_taken'", .row = "FA-12" },
     .{ .file = "src/validator/testdata/compile_errors/assert_rules_inline_self.zig", .expect = "validator: fail(assert_rules_inline_self.Bad, .end): code 'rpc.end_before_start' uses a reserved prefix (validation., rpc.)", .row = "variant of FA-8" },
+    // equals, notEquals and empty: one fixture per kind of error; the text of
+    // every catalog row is checked by the tests of common.zig
+    .{ .file = "src/validator/testdata/compile_errors/equals_empty_string.zig", .expect = "validator: equals(\"\"): the expected value is the empty string; use v.empty", .row = "equals-1" },
+    .{ .file = "src/validator/testdata/compile_errors/equals_unnamed_tag.zig", .expect = "validator: equals(@fromBackingInt(7)): @fromBackingInt(7) is not a named tag of equals_unnamed_tag.Open", .row = "equals-5" },
+    .{ .file = "src/validator/testdata/compile_errors/not_equals_out_of_range.zig", .expect = "validator: not_equals_out_of_range.Bad.field_rules.x: not_equals(-1): -1 is outside u32 (0..4294967295); the rule would always pass", .row = "notEquals-6" },
+    .{ .file = "src/validator/testdata/compile_errors/equals_string_on_enum.zig", .expect = "validator: equals_string_on_enum.Bad.field_rules.x: equals(\"admin\"): \"admin\" is a string, field is equals_string_on_enum.Role; use a tag such as .admin", .row = "equals-13" },
+    .{ .file = "src/validator/testdata/compile_errors/equals_unknown_tag.zig", .expect = "validator: equals_unknown_tag.Bad.field_rules.x: equals(.root): equals_unknown_tag.Role has no tag root; tags: admin, user, guest", .row = "equals-14" },
+    .{ .file = "src/validator/testdata/compile_errors/equals_single_tag.zig", .expect = "validator: equals_single_tag.Bad.field_rules.x: equals(.only): equals_single_tag.Only has a single tag; the rule would always pass", .row = "equals-16" },
+    .{ .file = "src/validator/testdata/compile_errors/equals_on_slice.zig", .expect = "validator: equals_on_slice.Bad.field_rules.x: equals expects a number, a bool, an enum or a string, field is []const u32; use v.each(v.equals(5))", .row = "equals-18" },
+    .{ .file = "src/validator/testdata/compile_errors/empty_on_array.zig", .expect = "validator: empty_on_array.Bad.field_rules.x: empty on [3]u32 is always false: the length of an array is fixed", .row = "empty-1" },
     // notEmpty
     .{ .file = "src/validator/testdata/compile_errors/not_empty_on_array.zig", .expect = "validator: not_empty_on_array.Bad.field_rules.x: not_empty on [3]u32 is always true: the length of an array is fixed", .row = "notEmpty-1" },
     .{ .file = "src/validator/testdata/compile_errors/not_empty_on_zero_array.zig", .expect = "validator: not_empty_on_zero_array.Bad.field_rules.x: not_empty on [0]u32 is always false: the length of an array is fixed", .row = "notEmpty-2" },

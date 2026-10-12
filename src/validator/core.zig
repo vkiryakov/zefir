@@ -585,7 +585,7 @@ fn renderFloat(comptime x: anytype) []const u8 {
 
 /// The name of an enum literal or enum value, or null for an unnamed value
 /// of a non-exhaustive enum.
-fn tagName(comptime x: anytype) ?[]const u8 {
+pub fn tagName(comptime x: anytype) ?[]const u8 {
     const X = @TypeOf(x);
     if (@typeInfo(X) == .enum_literal) return @tagName(x);
     const e = @typeInfo(X).@"enum";
@@ -1039,8 +1039,14 @@ pub const Rule = struct {
 
 /// Everything `define` needs to build a built-in rule.
 pub const Spec = struct {
-    /// The default message: 1-512 bytes of valid UTF-8.
+    /// The default message: 1-512 bytes of valid UTF-8, unless `fallback`
+    /// replaces it.
     message: []const u8,
+    /// The general message that replaces `message` when the parameters shown
+    /// in it make it longer than 512 bytes ("must be equal to the expected
+    /// value"); a message of exactly 512 bytes stays. Null for a rule without
+    /// one.
+    fallback: ?[]const u8 = null,
     /// Replaces `codeOf(kind)`; only `v.custom` sets it.
     code: ?[]const u8 = null,
     args: ?[]const u8 = null,
@@ -1051,16 +1057,18 @@ pub const Spec = struct {
 };
 
 /// Builds a rule of `kind`: the code of its kind (or `spec.code`), the
-/// default message and the checks. `each` is built by hand instead, since it
+/// default message (or `spec.fallback` when the default message is longer
+/// than 512 bytes) and the checks. `each` is built by hand instead, since it
 /// has no code or message of its own.
 pub fn define(comptime kind: Kind, comptime spec: Spec) Rule {
     @setEvalBranchQuota(eval_quota);
-    if (messageProblem(spec.message)) |problem|
+    const message = if (spec.message.len > max_message_bytes) spec.fallback orelse spec.message else spec.message;
+    if (messageProblem(message)) |problem|
         @compileError("validator: internal: the default message of " ++ @tagName(kind) ++ ": " ++ describeMessageProblem(problem));
     return .{
         .kind = kind,
         .code = spec.code orelse codeOf(kind),
-        .message = spec.message,
+        .message = message,
         .args = spec.args,
         .params = spec.params,
         .precondition = spec.precondition,
@@ -1212,6 +1220,10 @@ pub const hints = struct {
     pub const struct_literal = "the rules of a nested struct's fields go into that struct's own field_rules";
     /// A rule that only 0 of the field type would pass.
     pub const use_equals_zero = "use v.equals(0)";
+    /// `equals("")`: the empty string has its own rule.
+    pub const use_empty = "use v.empty";
+    /// `notEquals("")` and a `""` listed in `noneOf`.
+    pub const use_not_empty = "use v.notEmpty";
 
     /// A rule written on a list whose items it would accept.
     pub fn useEach(comptime rule: Rule) []const u8 {
@@ -1270,11 +1282,8 @@ fn callExample(comptime name: []const u8) ?[]const u8 {
 /// its lines; the list is empty once all 96 rules are exported.
 pub const pending_kinds = [_]Kind{
     // PR 1b
-    .equals,
-    .not_equals,
     .one_of,
     .none_of,
-    .empty,
     .min_items,
     .max_items,
     // PR 1c
@@ -1449,6 +1458,18 @@ pub fn numberAs(comptime T: type, comptime x: anytype) T {
     };
 }
 
+/// The parameter `x` as a value of the field type `T`: a number as
+/// `numberAs` converts it, a tag as the tag of `T` with its name, a bool or
+/// a string as it is. Call it at comptime, for a parameter that the rule's
+/// checks accepted for `T`.
+pub fn valueAs(comptime T: type, comptime x: anytype) T {
+    return switch (@typeInfo(T)) {
+        .int, .float => numberAs(T, x),
+        .@"enum" => @field(T, tagName(x) orelse @compileError("validator: internal: " ++ unnamedTag(x) ++ " has no tag name")),
+        else => x,
+    };
+}
+
 /// The kind of a parameter of type `X` in error texts: `an integer`,
 /// `a float (f64)`, `a bool`, `an enum tag`, `a string`, `a list`, or the
 /// type's name for anything else.
@@ -1504,6 +1525,73 @@ pub fn numberParamProblem(comptime x: anytype, comptime T: type, comptime use_in
         },
         else => @compileError("validator: internal: numberParamProblem needs a number field type, got " ++ @typeName(T)),
     }
+}
+
+// ------------------------------------------------------------------ tag parameters
+
+/// The tags of the enum `E` by name, joined by `, `: `admin, user, guest`.
+pub fn tagList(comptime E: type) []const u8 {
+    comptime {
+        var out: []const u8 = "";
+        for (@typeInfo(E).@"enum".field_names, 0..) |tag, i| out = out ++ (if (i == 0) "" else ", ") ++ tag;
+        return out;
+    }
+}
+
+/// Why the tag parameter `x` (an enum literal or a named enum value) does
+/// not stand for a tag of the enum field type `E`, as the text after the
+/// rule's label (`: Role has no tag root; tags: admin, user, guest`), or
+/// null. A value of another enum type is named with its type, even when `E`
+/// has a tag of the same name; a literal must name a tag of `E`, and the
+/// text lists the tags `E` has. Constructors reject unnamed values first.
+pub fn tagProblem(comptime x: anytype, comptime E: type) ?[]const u8 {
+    @setEvalBranchQuota(eval_quota);
+    const X = @TypeOf(x);
+    if (@typeInfo(X) == .@"enum" and X != E)
+        return ": " ++ renderArg(x) ++ " is a tag of " ++ @typeName(X) ++ ", the field is " ++ @typeName(E);
+    const name = tagName(x) orelse @compileError("validator: internal: " ++ unnamedTag(x) ++ " has no tag name");
+    if (@hasField(E, name)) return null;
+    const tags = tagList(E);
+    return ": " ++ @typeName(E) ++ " has no tag " ++ name ++ if (tags.len == 0) "" else "; tags: " ++ tags;
+}
+
+/// Enums for the tag tests: a field's enum, another enum with a tag of the
+/// same name, and an enum without named tags.
+const TestRole = enum { admin, user, guest };
+const TestColor = enum { red, admin };
+const TestNoTags = enum(u8) { _ };
+
+test "an enum's tags are listed by name, joined by commas" {
+    const expect = std.testing.expectEqualStrings;
+    try expect("admin, user, guest", comptime tagList(TestRole));
+    try expect("a, b", comptime tagList(TestOpen));
+    try expect("", comptime tagList(TestNoTags));
+}
+
+test "a tag parameter names a tag of the field's enum; a value of another enum is named with its type" {
+    const expect = std.testing.expectEqualStrings;
+    try std.testing.expectEqual(null, comptime tagProblem(.admin, TestRole));
+    try std.testing.expectEqual(null, comptime tagProblem(TestRole.guest, TestRole));
+    try std.testing.expectEqual(null, comptime tagProblem(.b, TestOpen));
+    try expect(": core.TestRole has no tag root; tags: admin, user, guest", comptime tagProblem(.root, TestRole).?);
+    try expect(": .red is a tag of core.TestColor, the field is core.TestRole", comptime tagProblem(TestColor.red, TestRole).?);
+    // The type decides before the name: TestRole has a tag admin too.
+    try expect(": .admin is a tag of core.TestColor, the field is core.TestRole", comptime tagProblem(TestColor.admin, TestRole).?);
+    // An enum without named tags has no tags to list.
+    try expect(": core.TestNoTags has no tag a", comptime tagProblem(.a, TestNoTags).?);
+}
+
+test "a checked parameter converts to the field type: numbers as numberAs does, bools as they are, tags by name" {
+    const t = std.testing;
+    try t.expectEqual(@as(u8, 5), comptime valueAs(u8, 5));
+    try t.expectEqual(@as(i64, 7), comptime valueAs(i64, @as(u8, 7)));
+    try t.expectEqual(@as(f32, 0.1), comptime valueAs(f32, 0.1));
+    try t.expectEqual(@as(f64, 2), comptime valueAs(f64, 2));
+    try t.expectEqual(true, comptime valueAs(bool, true));
+    try t.expectEqual(TestRole.guest, comptime valueAs(TestRole, .guest));
+    try t.expectEqual(TestRole.guest, comptime valueAs(TestRole, TestRole.guest));
+    try t.expectEqual(TestOpen.b, comptime valueAs(TestOpen, .b));
+    try t.expectEqualStrings("abc", comptime valueAs([]const u8, "abc"));
 }
 
 // ------------------------------------------------------------------ rule lists
@@ -1701,6 +1789,28 @@ test "define gives a rule its kind's code, the message and the data" {
     try std.testing.expectEqualStrings("is taken", custom_rule.message);
     try std.testing.expectEqualStrings("\"users.name_taken\", ...", custom_rule.args.?);
     try std.testing.expectEqual(null, custom_rule.precondition);
+}
+
+test "define takes the fallback when the default message would be longer than 512 bytes; 512 bytes stay" {
+    const t = std.testing;
+    const exactly: [512]u8 = @splat('m');
+    const longer: [513]u8 = @splat('m');
+    const fallback = "must be equal to the expected value";
+    const kept = comptime define(.equals, .{ .message = &exactly, .fallback = fallback, .fits = test_rules.fitsAnything, .eval = test_rules.evalPositive });
+    try t.expectEqualStrings(&exactly, kept.message);
+    const replaced = comptime define(.equals, .{
+        .message = &longer,
+        .fallback = fallback,
+        .params = &.{param("expected", 5)},
+        .fits = test_rules.fitsAnything,
+        .eval = test_rules.evalPositive,
+    });
+    try t.expectEqualStrings(fallback, replaced.message);
+    // Only the message changes: the code and the parameters stay.
+    try t.expectEqualStrings("validation.equals", replaced.code);
+    try t.expectEqualStrings("5", replaced.params[0].text);
+    const short = comptime define(.equals, .{ .message = "must be equal to 5", .fallback = fallback, .fits = test_rules.fitsAnything, .eval = test_rules.evalPositive });
+    try t.expectEqualStrings("must be equal to 5", short.message);
 }
 
 test "a rule is named by its public name, its call and its snake_case label" {
