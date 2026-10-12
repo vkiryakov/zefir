@@ -466,3 +466,17 @@ test "oneOf / noneOf: a list whose default message would exceed 512 bytes falls 
     try h.expectFail([]const u8, v.oneOf(.{one}), "z", one_of_code, "must be " ++ one);
     try h.expectFail([]const u8, v.oneOf(.{one_over}), "z", one_of_code, "must be one of the allowed values");
 }
+
+test "oneOf and noneOf take lists of thousands of values" {
+    const codes = comptime blk: {
+        @setEvalBranchQuota(10_000_000);
+        var out: [2000][]const u8 = undefined;
+        for (&out, 0..) |*slot, i| slot.* = std.fmt.comptimePrint("SKU-{d:0>6}", .{i});
+        break :blk out;
+    };
+    try h.expectPass([]const u8, v.oneOf(codes), "SKU-001999");
+    try h.expectFail([]const u8, v.oneOf(codes), "SKU-002000", one_of_code, "must be one of the allowed values");
+    const first = codes[0..1400].*;
+    try h.expectFail([]const u8, v.noneOf(first), "SKU-001399", none_of_code, "must not be one of the forbidden values");
+    try h.expectPass([]const u8, v.noneOf(first), "SKU-001400");
+}

@@ -1971,6 +1971,7 @@ pub fn listProblem(comptime name: []const u8, comptime values: anytype, comptime
             return head ++ "expected a tuple or an array of values, e.g. .{ \"a\", \"b\" }, got " ++ @typeName(V) ++
                 if (isArrayPointer(V)) "; pass the array itself, not a pointer to it" else "";
         if (values.len == 0) return head ++ "the list is empty";
+        const duplicate = firstDuplicate(values);
         var first: ListKind = undefined;
         for (0..values.len) |i| {
             const item = values[i];
@@ -1995,11 +1996,54 @@ pub fn listProblem(comptime name: []const u8, comptime values: anytype, comptime
                 },
                 .int, .bool => {},
             }
-            for (0..i) |j| {
-                if (sameListValue(values[j], item)) return head ++ renderArg(item) ++ " is listed twice";
-            }
+            if (duplicate == i) return head ++ renderArg(item) ++ " is listed twice";
         }
         return null;
+    }
+}
+
+/// The index of the first listed value that equals an earlier one (strings
+/// by bytes, tags by name, integers and bools by value), or null. A value of
+/// no list kind and an unnamed tag have no key and are skipped:
+/// `listProblem` stops at them first. The keys are sorted, so the check
+/// takes O(n log n) comparisons and a list of thousands of values stays
+/// within the comptime branch quota.
+fn firstDuplicate(comptime values: anytype) ?usize {
+    comptime {
+        @setEvalBranchQuota(eval_quota);
+        const Entry = struct { key: []const u8, index: usize };
+        var entries: [values.len]Entry = undefined;
+        var n: usize = 0;
+        for (0..values.len) |i| {
+            const item = values[i];
+            // The kind prefix keeps values of different kinds apart.
+            entries[n] = .{ .index = i, .key = switch (listKind(@TypeOf(item)) orelse continue) {
+                .string => "s" ++ item,
+                .tag => "t" ++ (tagName(item) orelse continue),
+                .int => std.fmt.comptimePrint("i{d}", .{item}),
+                .bool => if (item) "b1" else "b0",
+            } };
+            n += 1;
+        }
+        // `for (1..n)` below needs n >= 1; a list without two keys has no duplicate.
+        if (n < 2) return null;
+        std.mem.sortUnstable(Entry, entries[0..n], {}, struct {
+            fn lessThan(_: void, a: Entry, b: Entry) bool {
+                return switch (std.mem.order(u8, a.key, b.key)) {
+                    .lt => true,
+                    .gt => false,
+                    .eq => a.index < b.index,
+                };
+            }
+        }.lessThan);
+        // Equal keys are adjacent and ordered by index: the second of each run
+        // repeats an earlier value, and the smallest such index comes first.
+        var found: ?usize = null;
+        for (1..n) |e| {
+            if (std.mem.eql(u8, entries[e - 1].key, entries[e].key) and (found == null or entries[e].index < found.?))
+                found = entries[e].index;
+        }
+        return found;
     }
 }
 
@@ -2020,17 +2064,6 @@ fn isArrayPointer(comptime V: type) bool {
     return switch (@typeInfo(V)) {
         .pointer => |p| p.size == .one and @typeInfo(p.child) == .array and @typeInfo(p.child).array.child != u8,
         else => false,
-    };
-}
-
-/// Two listed values of the same list kind are the same value: strings by
-/// bytes, tags by name, integers and bools by value.
-fn sameListValue(comptime a: anytype, comptime b: anytype) bool {
-    return switch (listKind(@TypeOf(a)).?) {
-        .string => std.mem.eql(u8, a, b),
-        .tag => std.mem.eql(u8, tagName(a).?, tagName(b).?),
-        .int => @as(comptime_int, a) == @as(comptime_int, b),
-        .bool => a == b,
     };
 }
 
@@ -2087,6 +2120,31 @@ test "the list options allow bools and reject the empty string with the rule's o
     try expect("validator: noneOf(.{\"\"}): no empty string", comptime listProblem("noneOf", .{""}, .{ .empty_string = "no empty string" }).?);
     // Mixed with bools, the first kind is named first.
     try expect("validator: containsAll(.{ true, 1 }): the list mixes bools and integers", comptime listProblem("containsAll", .{ true, 1 }, .{ .allow_bool = true }).?);
+    try expect("validator: containsAll(.{ true, false, true }): true is listed twice", comptime listProblem("containsAll", .{ true, false, true }, .{ .allow_bool = true }).?);
+}
+
+/// `n` codes of the same width, `"SKU-000000"` to `"SKU-<n - 1>"`: a long list
+/// of strings.
+fn testCodes(comptime n: usize) [n][]const u8 {
+    comptime {
+        @setEvalBranchQuota(eval_quota);
+        var out: [n][]const u8 = undefined;
+        for (&out, 0..) |*slot, i| slot.* = std.fmt.comptimePrint("SKU-{d:0>6}", .{i});
+        return out;
+    }
+}
+
+test "a list of thousands of values is checked within the comptime branch quota, a late duplicate included" {
+    const t = std.testing;
+    try t.expectEqual(null, comptime listProblem("oneOf", testCodes(1400), .{}));
+    try t.expectEqual(null, comptime listProblem("noneOf", testCodes(2000), .{}));
+    try t.expectEqualStrings(
+        "validator: oneOf(.{ \"SKU-000000\", \"SKU-000001\", \"SKU-000002\", \"SKU-000003\", \"SKU-000004\", ... }): \"SKU-001999\" is listed twice",
+        comptime listProblem("oneOf", testCodes(2000) ++ [_][]const u8{"SKU-001999"}, .{}).?,
+    );
+    // The value reported is the first one that repeats an earlier value.
+    try t.expectEqualStrings("validator: oneOf(.{ \"a\", \"b\", \"b\", \"a\" }): \"b\" is listed twice", comptime listProblem("oneOf", .{ "a", "b", "b", "a" }, .{}).?);
+    try t.expectEqualStrings("validator: oneOf(.{ 7, -7, 7, 7 }): 7 is listed twice", comptime listProblem("oneOf", .{ 7, -7, @as(i8, 7), 7 }, .{}).?);
 }
 
 test "a checked list converts to an array of the field type: strings, tags by name, integers" {
