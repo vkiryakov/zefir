@@ -12,6 +12,7 @@ pub const Auth = Options.Auth;
 pub const ReconnectOptions = Options.ReconnectOptions;
 pub const Limits = Options.Limits;
 pub const ServerAddress = @import("ServerAddress.zig");
+pub const ServerInfo = @import("ServerInfo.zig");
 pub const Headers = @import("Headers.zig");
 pub const Header = Headers.Header;
 
@@ -22,4 +23,6 @@ test {
     _ = @import("protocol/encoder.zig");
     _ = @import("ServerAddress.zig");
     _ = @import("Options.zig");
+    _ = @import("ServerInfo.zig");
+    _ = @import("protocol/golden.zig");
 }
