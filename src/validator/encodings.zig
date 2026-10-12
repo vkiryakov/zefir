@@ -2,9 +2,10 @@
 //! predicate: `v.base64` and `v.isBase64(s)`. Every rule here is a value
 //! without parameters, placeholders or precondition, and passes exactly when
 //! its predicate returns true. Nothing is trimmed and nothing is decoded into
-//! memory; a byte of 0x80 or above fails under the rule's own code, so
-//! invalid UTF-8 needs no rule of its own. The predicates take any bytes,
-//! never allocate, never backtrack and run in time linear in the input.
+//! memory. A byte of 0x80 or above fails under the rule's own code, except
+//! inside a JSON string, where `v.json` takes valid UTF-8; so invalid UTF-8
+//! needs no rule of its own. The predicates take any bytes, never allocate,
+//! never backtrack and run in time linear in the input.
 const std = @import("std");
 const core = @import("core.zig");
 const Rule = core.Rule;
