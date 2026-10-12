@@ -17,8 +17,20 @@ const users = logger.scoped("users");
 users.info("User created", .{ .user_id = 42, .email = "ada@example.com", .password = password });
 ```
 
+The record, one line on stdout (formatted here):
+
 ```json
-{"timestamp":"2026-10-12T09:41:07.416Z","level":"info","message":"User created","service.name":"user-service","service.version":"1.0.0","scope":"users","user_id":42,"email":"ada@example.com","password":"[REDACTED]"}
+{
+  "timestamp": "2026-10-12T09:41:07.416Z",
+  "level": "info",
+  "message": "User created",
+  "service.name": "user-service",
+  "service.version": "1.0.0",
+  "scope": "users",
+  "user_id": 42,
+  "email": "ada@example.com",
+  "password": "[REDACTED]"
+}
 ```
 
 - **Checked at compile time.** A value that cannot be logged, a field without
