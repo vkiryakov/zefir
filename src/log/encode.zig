@@ -529,6 +529,22 @@ fn encodeRecord(
     return .{ .len = len, .truncated = true };
 }
 
+/// The most `appendSuppressed` adds to a record.
+pub const suppressed_max_bytes = ",\"suppressed\":".len + std.fmt.count("{d}", .{std.math.maxInt(u64)});
+
+/// Adds `"suppressed":n` (` suppressed=n` in text) to the end of the
+/// record in `buf[0..len]`, before its line break and closing brace: how
+/// many records the logger left out before this one. `buf` has room for
+/// `suppressed_max_bytes` more. Returns the new length.
+pub fn appendSuppressed(comptime f: Format, buf: []u8, len: usize, n: u64) usize {
+    const end = comptime closing(f).whole;
+    var w: Writer = .fixed(buf[len - end.len ..]);
+    w.writeAll(key(f, "suppressed")) catch unreachable; // `buf` has room, see above
+    w.print("{d}", .{n}) catch unreachable;
+    w.writeAll(end) catch unreachable;
+    return len - end.len + w.end;
+}
+
 /// What `record` prepares once for both passes.
 const Parts = struct {
     stamp: *const [timestamp.len]u8,
@@ -1549,4 +1565,31 @@ test "mandatoryBytes holds the worst head: the longest level, the longest scope,
         try testing.expect(got.truncated);
         if (f == .json) try testing.expect(try std.json.validate(testing.allocator, buf[0..got.len]));
     }
+}
+
+test "appendSuppressed adds the count at the end of a record" {
+    var buf: [64 + suppressed_max_bytes]u8 = undefined;
+    const json = "{\"message\":\"m\"}\n";
+    @memcpy(buf[0..json.len], json);
+    const json_len = appendSuppressed(.json, &buf, json.len, std.math.maxInt(u64));
+    try testing.expectEqualStrings("{\"message\":\"m\",\"suppressed\":18446744073709551615}\n", buf[0..json_len]);
+    const text = "TIME ERROR m\n";
+    @memcpy(buf[0..text.len], text);
+    const text_len = appendSuppressed(.text, &buf, text.len, 2);
+    try testing.expectEqualStrings("TIME ERROR m suppressed=2\n", buf[0..text_len]);
+}
+
+test "appendSuppressed after a cut record: the count follows the truncation marker" {
+    var buf: [160 + suppressed_max_bytes]u8 = undefined;
+    const header: Header = .{ .timestamp = fixed_time, .service = "", .scope = "", .oversize = .truncate };
+    const message = "A message far too long for the record it is in, so it is cut";
+    const json = record(.json, .err, message, buf[0..120], header, .{ .id = 1 }).?;
+    try testing.expect(json.truncated);
+    const json_len = appendSuppressed(.json, &buf, json.len, 3);
+    try testing.expectStringEndsWith(buf[0..json_len], "…\",\"truncated\":true,\"suppressed\":3}\n");
+    try testing.expect(try std.json.validate(testing.allocator, buf[0 .. json_len - 1]));
+    const text = record(.text, .err, message, buf[0..60], header, .{ .id = 1 }).?;
+    try testing.expect(text.truncated);
+    const text_len = appendSuppressed(.text, &buf, text.len, 3);
+    try testing.expectStringEndsWith(buf[0..text_len], "… truncated=true suppressed=3\n");
 }
