@@ -2,6 +2,8 @@
 //! every test on its own and checks its error message; the list of
 //! messages is in build.zig.
 
+const std = @import("std");
+const core = @import("core");
 const log = @import("log");
 
 /// Never called at run time: these tests only have to fail to compile.
@@ -29,7 +31,7 @@ test "subfield of the source object" {
     logger().info("m", .{ .@"source.file" = "x" });
 }
 
-test "name with a space" {
+test "field name with a space" {
     logger().info("m", .{ .@"user id" = 1 });
 }
 
@@ -46,7 +48,7 @@ test "void value" {
     logger().info("m", .{ .nothing = {} });
 }
 
-test "value of a type that has no loggable form" {
+test "undefined value" {
     logger().info("m", .{ .x = undefined });
 }
 
@@ -55,7 +57,7 @@ test "untagged union" {
     logger().info("m", .{ .u = U{ .a = 1 } });
 }
 
-test "many-item pointer" {
+test "many-item pointer to u8" {
     var p: [*]const u8 = "x";
     _ = &p;
     logger().info("m", .{ .p = p });
@@ -80,7 +82,7 @@ test "function pointer" {
     logger().info("m", .{ .f = f });
 }
 
-test "reserved name on the flat path" {
+test "reserved name on the flat path through a struct" {
     logger().info("m", .{ .service = .{ .name = "x" } });
 }
 
@@ -186,4 +188,98 @@ test "packed union" {
 
 test "optional void" {
     logger().info("m", .{ .x = @as(?void, {}) });
+}
+
+test "context as a field" {
+    logger().info("m", .{ .ctx = core.Context.root });
+}
+
+test "context as the fields" {
+    logger().info("m", core.Context.root);
+}
+
+test "context inside a field" {
+    const ctx: core.Context = .root;
+    logger().info("m", .{ .request = .{ .ctx = @as(?*const core.Context, &ctx) } });
+}
+
+test "call site under the name source" {
+    logger().info("m", .{ .source = @src() });
+}
+
+test "logValue without self" {
+    const Card = struct {
+        user: []const u8,
+        pin: []const u8,
+        pub fn logValue() []const u8 {
+            return "hidden";
+        }
+    };
+    logger().info("m", .{ .card = Card{ .user = "ada", .pin = "1234" } });
+}
+
+test "format with a foreign self" {
+    const Masked = struct { len: usize };
+    const Card = struct {
+        user: []const u8,
+        pin: []const u8,
+        pub fn format(m: Masked, w: *std.Io.Writer) !void {
+            try w.print("{d} chars", .{m.len});
+        }
+    };
+    logger().info("m", .{ .card = Card{ .user = "ada", .pin = "1234" } });
+}
+
+test "format that can return another error" {
+    const Limited = struct {
+        x: u32,
+        pub fn format(l: @This(), w: *std.Io.Writer) !void {
+            if (l.x > 10) return error.TooBig;
+            try w.print("{d}", .{l.x});
+        }
+    };
+    logger().info("m", .{ .l = Limited{ .x = 1 } });
+}
+
+test "format that returns anyerror" {
+    const Wide = struct {
+        pub fn format(_: @This(), w: *std.Io.Writer) anyerror!void {
+            try w.writeAll("wide");
+        }
+    };
+    logger().info("m", .{ .w = Wide{} });
+}
+
+test "format that returns void" {
+    const Plain = struct {
+        pub fn format(_: @This(), w: *std.Io.Writer) void {
+            w.writeAll("plain") catch {};
+        }
+    };
+    logger().info("m", .{ .p = Plain{} });
+}
+
+test "a format error names the nested field" {
+    const Other = struct {
+        pub fn format(_: @This(), _: []const u8) void {}
+    };
+    logger().info("m", .{ .req = .{ .x = Other{} } });
+}
+
+test "a logValue error names the nested field" {
+    const Mutable = struct {
+        x: u8,
+        pub fn logValue(m: *@This()) u8 {
+            return m.x;
+        }
+    };
+    logger().info("m", .{ .req = .{ .m = Mutable{ .x = 1 } } });
+}
+
+test "a marker error names the nested field" {
+    const Key = struct {
+        x: u8,
+        pub const zefir_sensitive = 1;
+    };
+    logger().info("m", .{ .req = .{ .k = @as(?Key, null) } });
 }
