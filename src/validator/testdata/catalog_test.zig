@@ -587,6 +587,14 @@ test "the module exports exactly the catalog predicates of the shipped rules" {
     try testing.expectEqual(predicates.len, exported);
 }
 
+test "the predicates of the identifier rules have their catalog signatures" {
+    inline for (.{ v.isUuid, v.isMongoId, v.isFirebasePushId, v.isCreditCard, v.isIsbn, v.isIsbn10, v.isIsbn13, v.isIssn, v.isEan, v.isIsin, v.isIsrc, v.isBic, v.isIban, v.isEthereumAddress }) |predicate| {
+        try testing.expect(@TypeOf(predicate) == fn ([]const u8) bool);
+    }
+    try testing.expect(@TypeOf(v.isHash) == fn ([]const u8, v.HashAlgorithm) bool);
+    try testing.expect(@TypeOf(v.isBtcAddress) == fn ([]const u8, v.BtcNetwork) bool);
+}
+
 test "the limits have their catalog values" {
     try testing.expect(@TypeOf(v.max_code_bytes) == comptime_int);
     try testing.expectEqual(128, v.max_code_bytes);

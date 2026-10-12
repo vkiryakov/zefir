@@ -138,7 +138,7 @@ pub fn isHash(s: []const u8, algorithm: HashAlgorithm) bool {
 
 /// The arguments the hints show for an uncalled constructor of this file:
 /// `hash must be called, e.g. v.hash(.sha256)`.
-pub const call_examples = .{ .hash = ".sha256" };
+pub const call_examples = .{ .hash = ".sha256", .btcAddress = ".mainnet" };
 
 // ------------------------------------------------------------------ creditCard, isin, bic, iban
 
