@@ -3,6 +3,7 @@
 pub const core = @import("core");
 pub const log = @import("log");
 pub const confy = @import("confy");
+pub const validator = @import("validator");
 pub const rpc = @import("rpc");
 pub const orm = @import("orm");
 
