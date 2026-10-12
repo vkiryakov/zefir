@@ -17,8 +17,10 @@ pub const Options = struct {
     mode: Mode = .sync,
     /// How much of the call site, `.src = @src()`, records write per level.
     source: SourceOptions = .{},
-    /// The longest record, '\n' included: at most 16384. Longer records are
-    /// cut or dropped, see `oversize`.
+    /// The longest record, '\n' included: at most 16384, and at least 304
+    /// in JSON plus the service fields as JSON writes them
+    /// (`,"service.name":"api"` adds 21), or 250 in text. Longer records
+    /// are cut or dropped, see `oversize`.
     max_record_bytes: u32 = 4096,
     oversize: OversizePolicy = .truncate,
     output: Output = .stdout,
@@ -49,11 +51,14 @@ pub const Mode = union(enum) {
     /// application's `io`: simple, and a record is out even if the process
     /// dies right after.
     sync,
-    /// Each call copies its record into a queue, with no lock and no system
-    /// call, and a writer thread writes the queue in batches: callers do
-    /// not wait for the output, only, with `.overflow = .block`, for room
-    /// in the queue. The mode for services; `flush` and `shutdown` drain
-    /// it.
+    /// Each call copies its record into a queue: no lock, and no system
+    /// call unless a logger thread (the writer, or a subscriber's) sleeps
+    /// and has to be woken, which at low rates is almost every record. A
+    /// producer stopped between taking a slot and filling it holds back
+    /// the records after it. A writer thread writes the queue in batches:
+    /// callers do not wait for the output, only, with `.overflow = .block`,
+    /// for room in the queue. The mode for services; `flush` and `shutdown`
+    /// drain it.
     queued: Queued,
 };
 
@@ -66,7 +71,7 @@ pub const Queued = struct {
     capacity: u32 = 4096,
     /// Records the writer thread takes for one write. With a slow output
     /// fewer, larger writes keep up longer; past 128 the benchmark gains
-    /// nothing more.
+    /// little.
     batch_size: u32 = 128,
     overflow: OverflowPolicy = .drop_new,
 };
@@ -143,10 +148,14 @@ pub const SourceOptions = struct {
 };
 
 pub const OversizePolicy = enum {
-    /// Cut the message, leave out the fields that do not fit, and end the
-    /// record with `"truncated":true` (` truncated=true` in text).
+    /// Cut the message and leave out the fields that do not fit, and the
+    /// call site when not even the message cut to "…" leaves room for it;
+    /// end the record with `"truncated":true` (` truncated=true` in text).
     truncate,
-    /// Drop the whole record and count it.
+    /// Drop the whole record and count it: in `dropped.oversize`, an error
+    /// record in `dropped.err`, reported like the other error records the
+    /// logger drops, and an emergency record in `emergency_suppressed`. No
+    /// interceptor or subscriber gets it: there is no line to give them.
     drop,
 };
 
@@ -159,6 +168,13 @@ pub const Output = union(enum) {
     /// thread. The logger calls it from one thread at a time, so it need
     /// not be thread-safe, but it must not log through the same logger
     /// (that call could wait for itself) or call its `flush` or `shutdown`.
+    /// The writer thread is an OS thread of the logger's, not a task of the
+    /// application's `io`: in queued mode a writer that does I/O, such as
+    /// a `File.Writer`, must be made with an Io any thread may call
+    /// (`std.Io.Threaded`), not an evented one. A writer with a buffer does
+    /// not tell how much went out when a write or its flush fails: the
+    /// records of that write are then counted as dropped, and the next
+    /// record starts on a new line.
     writer: *std.Io.Writer,
 };
 

@@ -9,7 +9,11 @@ const log = @import("log");
 
 /// Where alerts go. A real handler posts `event.line` to a webhook or a
 /// pager, with its own timeout: it runs on the subscriber's own thread, so
-/// it may take its time.
+/// it may take its time. That thread is the logger's, not a task of the
+/// application's `io`: under an evented `io`, post through a
+/// `std.Io.Threaded` of the handler's own. A failed post is best returned,
+/// or logged by the handler itself: a task it hands the post to logs like
+/// any caller, and its error record would come back as an alert.
 const Alerts = struct {
     sent: std.atomic.Value(u32) = .init(0),
 

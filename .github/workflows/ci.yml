@@ -15,8 +15,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # The names of `test` and `fmt` are required status checks on main and
-  # dev; keep them in sync. `tsan` is not required (yet).
+  # The names of `test`, `tsan` and `fmt` are required status checks on
+  # main and dev; keep them in sync.
   test:
     name: test (${{ matrix.os }})
     timeout-minutes: 30
@@ -29,7 +29,10 @@ jobs:
       - uses: actions/checkout@v7
       # Zig version is taken from minimum_zig_version in build.zig.zon.
       - uses: mlugg/setup-zig@v2
-      - run: zig build test --summary all
+      # A test that hangs fails after 5 minutes, by name and with its
+      # stderr, and the other tests still run. Without the flag the job
+      # would hit its timeout and print nothing about the test.
+      - run: zig build test --summary all --test-timeout 5m
 
   # The tests again under ThreadSanitizer; it does not build for Windows.
   tsan:
@@ -47,7 +50,7 @@ jobs:
       # randomness of recent Ubuntu kernels can take.
       - if: runner.os == 'Linux'
         run: sudo sysctl vm.mmap_rnd_bits=28
-      - run: zig build test -Dtsan=true --summary all
+      - run: zig build test -Dtsan=true --summary all --test-timeout 5m
 
   fmt:
     name: fmt

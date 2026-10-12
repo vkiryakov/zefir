@@ -128,6 +128,53 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&run.step);
     }
 
+    // log panic programs: `flush`, `shutdown` or `unsubscribe` called from a
+    // handler or the writer thread panics in safe builds. Each program must
+    // print the panic message and end in its own panic handler, which exits
+    // with code 3 instead of aborting (see the programs in
+    // src/log/tests/panic/). They get their own Debug copies of log and
+    // core, whatever -Doptimize says.
+    const panic_core = b.createModule(.{
+        .root_source_file = b.path("src/core/root.zig"),
+        .target = target,
+        .optimize = .Debug,
+    });
+    const panic_log = b.createModule(.{
+        .root_source_file = b.path("src/log/root.zig"),
+        .target = target,
+        .optimize = .Debug,
+        .imports = &.{
+            .{ .name = "core", .module = panic_core },
+        },
+    });
+    const flush_refused = "zefir.log: flush or shutdown called from one of the logger's threads could wait for itself";
+    const unsubscribe_refused = "zefir.log: unsubscribe called from one of the logger's threads could wait for itself";
+    for ([_][2][]const u8{
+        .{ "handler_flush", flush_refused },
+        .{ "handler_shutdown", flush_refused },
+        .{ "handler_unsubscribe", unsubscribe_refused },
+        .{ "writer_flush", flush_refused },
+        .{ "writer_unsubscribe", unsubscribe_refused },
+    }) |case| {
+        const exe = b.addExecutable(.{
+            .name = b.fmt("log-panic-{s}", .{case[0]}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(b.fmt("src/log/tests/panic/{s}.zig", .{case[0]})),
+                .target = target,
+                .optimize = .Debug,
+                .imports = &.{
+                    .{ .name = "log", .module = panic_log },
+                },
+            }),
+        });
+        const run = b.addRunArtifact(exe);
+        run.expectStdErrMatch(case[1]);
+        // expectStdErrMatch accepts any exit: only the panic handler exits
+        // with 3, so a program that printed the text and returned fails.
+        run.expectExitCode(3);
+        test_step.dependOn(&run.step);
+    }
+
     // log compile errors: each test of the file must fail to compile with
     // the message next to its name. The filter compiles one test at a time;
     // the message must be the end of an error line.
@@ -137,6 +184,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .sanitize_thread = tsan,
         .imports = &.{
+            .{ .name = "core", .module = core },
             .{ .name = "log", .module = log },
         },
     });
@@ -146,33 +194,48 @@ pub fn build(b: *std.Build) void {
         .{ "reserved field name", "zefir.log: field name 'level' is reserved for record metadata; rename it, e.g. 'user_level'" },
         .{ "dotted service field", "zefir.log: field name 'service.name' is reserved for record metadata; rename it, e.g. 'user_service.name'" },
         .{ "subfield of the source object", "zefir.log: field name 'source.file' is reserved for record metadata; rename it, e.g. 'user_source.file'" },
-        .{ "name with a space", "zefir.log: field name 'user id' may contain only [A-Za-z0-9_.-]" },
+        .{ "field name with a space", "zefir.log: field name 'user id' may contain only [A-Za-z0-9_.-]" },
         .{ "src of the wrong type", "zefir.log: field 'src' is the call site and must be a std.lang.SourceLocation; pass .src = @src()" },
         .{ "error union value", "zefir.log: field 'value': cannot log error union 'anyerror!u8'; handle it with try or catch first, then log the payload or the error" },
         .{ "void value", "zefir.log: field 'nothing': cannot log 'void'; remove the field" },
-        .{ "value of a type that has no loggable form", "zefir.log: cannot log type '@TypeOf(undefined)' in field 'x'; give it a format or logValue method, or log one of its fields" },
+        .{ "undefined value", "zefir.log: field 'x' is undefined; give it a value" },
         // Type names depend on the file, so these check only the end of the line.
         .{ "untagged union", "': its active field is unknown; use union(enum) or log one of its fields" },
-        .{ "many-item pointer", "zefir.log: field 'p': cannot log many-item pointer '[*]const u8': it has no length; log a slice, ptr[0..len]" },
+        .{ "many-item pointer to u8", "zefir.log: field 'p': cannot log many-item pointer '[*]const u8': it has no length; log a slice, ptr[0..len]" },
         .{ "C pointer", "zefir.log: field 'p': cannot log C pointer '[*c]const u8'; convert it to a slice or log the address as an integer" },
         .{ "pointer to an opaque type", "zefir.log: field 'p': cannot log '*anyopaque': an opaque type has no value to log" },
         .{ "function pointer", "zefir.log: field 'f': cannot log function '*const fn () void'" },
-        .{ "reserved name on the flat path", "zefir.log: field 'service.name' is reserved for record metadata; rename 'service', e.g. 'user_service'" },
+        .{ "reserved name on the flat path through a struct", "zefir.log: field 'service.name' is reserved for record metadata; rename 'service', e.g. 'user_service'" },
         .{ "nested name with a space", "zefir.log: field name 's.a b' may contain only [A-Za-z0-9_.-]" },
         .{ "nested error union", "zefir.log: field 'cfg.r': cannot log error union 'anyerror!u8'; handle it with try or catch first, then log the payload or the error" },
-        .{ "sensitive marker of the wrong type", ".zefir_sensitive must be a bool: pub const zefir_sensitive = true;" },
-        .{ "logValue that returns its own type", " itself; return another type, such as a struct of the fields to log" },
+        .{ "sensitive marker of the wrong type", ".zefir_sensitive' must be a bool: pub const zefir_sensitive = true;" },
+        .{ "logValue that returns its own type", "' itself; return another type, such as a struct of the fields to log" },
         .{ "sensitive type as the fields", "' is sensitive and cannot be the fields; log it as one field: .{ .key = key }" },
         .{ "type with its own logged form as the fields", "' has its own logged form; log it as one field: .{ .value = value }" },
-        .{ "format of another form", ".format has another form than the one {f} uses; write pub fn format(self, w: *std.Io.Writer) !void" },
-        .{ "logValue with a mutable self", ".logValue has another form; write pub fn logValue(self) U, taking self by value or by *const" },
-        .{ "logValue that returns an error union", ".logValue returns an error union; return a value, since logging cannot fail" },
+        .{ "format of another form", ".format' has another form than the one {f} uses; write pub fn format(self: @This(), w: *std.Io.Writer) !void" },
+        .{ "logValue with a mutable self", ".logValue' has another form; write pub fn logValue(self: @This()) U, taking self by value or by *const" },
+        .{ "logValue that returns an error union", ".logValue' returns an error union; return a value, since logging cannot fail" },
         .{ "reserved name on the flat path through an array", "zefir.log: field 'service[].name' is reserved for record metadata; rename 'service', e.g. 'user_service'" },
         .{ "subfield of the call site", "zefir.log: field name 'src.function' is reserved for record metadata; rename it, e.g. 'user_src.function'" },
         .{ "function value", "zefir.log: field 'f': cannot log function 'fn () void'" },
         .{ "many-item pointer to u16 with a sentinel", "zefir.log: field 'p': cannot log many-item pointer '[*:0]const u16': it has no length; log a slice, ptr[0..len]" },
         .{ "packed union", "': its active field is unknown; use union(enum) or log one of its fields" },
         .{ "optional void", "zefir.log: field 'x': cannot log 'void'; remove the field" },
+        .{ "context as a field", "zefir.log: field 'ctx': bind a core.Context with logger.withContext(ctx), not as a field" },
+        .{ "context as the fields", "zefir.log: a core.Context is not the fields; bind it with logger.withContext(ctx)" },
+        .{ "context inside a field", "zefir.log: field 'request.ctx': bind a core.Context with logger.withContext(ctx), not as a field" },
+        .{ "call site under the name source", "zefir.log: field name 'source' is reserved for record metadata; the call site goes in .src = @src()" },
+        .{ "logValue without self", ".logValue' has another form; write pub fn logValue(self: @This()) U, taking self by value or by *const" },
+        .{ "format with a foreign self", ".format' has another form than the one {f} uses; write pub fn format(self: @This(), w: *std.Io.Writer) !void" },
+        .{ "format that can return another error", ".format' can return error.TooBig; {f} lets it return only std.Io.Writer.Error" },
+        .{ "format that returns anyerror", ".format' returns anyerror; {f} lets it return only std.Io.Writer.Error" },
+        .{ "format that returns void", ".format' returns void; write pub fn format(self: @This(), w: *std.Io.Writer) !void" },
+        .{ "format of an opaque type with a mutable self", ".format' has another form than the one {f} uses; write pub fn format(self: *const @This(), w: *std.Io.Writer) !void" },
+        // A type declared in a test is named after the file and the test, so
+        // these can name it in full.
+        .{ "a format error names the nested field", "zefir.log: field 'req.x': 'compile_errors.test.a format error names the nested field.Other.format' has another form than the one {f} uses; write pub fn format(self: @This(), w: *std.Io.Writer) !void" },
+        .{ "a logValue error names the nested field", "zefir.log: field 'req.m': 'compile_errors.test.a logValue error names the nested field.Mutable.logValue' has another form; write pub fn logValue(self: @This()) U, taking self by value or by *const" },
+        .{ "a marker error names the nested field", "zefir.log: field 'req.k': 'compile_errors.test.a marker error names the nested field.Key.zefir_sensitive' must be a bool: pub const zefir_sensitive = true;" },
     }, 0..) |case, i| {
         const compile = b.addTest(.{
             .name = b.fmt("log-compile-error-{d}", .{i}),

@@ -5,6 +5,7 @@
 const std = @import("std");
 const redact = @import("redact.zig");
 const isSensitive = @import("core").isSensitive;
+const Context = @import("core").Context;
 
 /// The input field that carries the call site: `.src = @src()`.
 pub const source_field = "src";
@@ -25,7 +26,8 @@ const reserved = [_][]const u8{
 const reserved_objects = [_][]const u8{ "source", "labels", "src" };
 
 /// Checks the fields of one call. Every level method calls it at compile
-/// time, so the error points at the user's call.
+/// time, so the first "referenced by" line under the error is the user's
+/// call.
 pub fn check(comptime Fields: type) void {
     @setEvalBranchQuota(1_000_000);
     const info = switch (@typeInfo(Fields)) {
@@ -34,13 +36,20 @@ pub fn check(comptime Fields: type) void {
     };
     if (info.is_tuple and info.field_names.len > 0)
         @compileError("zefir.log: fields need names: write .{ .user_id = id }, not .{ id }");
+    checkMarker("", Fields);
     // A value with its own logged form would lose it as the fields: its
     // members would be written one by one.
     if (redactsWhole(Fields))
         @compileError("zefir.log: '" ++ @typeName(Fields) ++ "' is sensitive and cannot be the fields; log it as one field: .{ .key = key }");
     if (LogValue(Fields) != null or hasFormat(Fields))
         @compileError("zefir.log: '" ++ @typeName(Fields) ++ "' has its own logged form; log it as one field: .{ .value = value }");
+    if (Fields == Context)
+        @compileError("zefir.log: a core.Context is not the fields; bind it with logger.withContext(ctx)");
     inline for (info.field_names, info.field_types) |name, T| {
+        // Records write the call site as "source", so this name is a likely
+        // slip for `.src`.
+        if (T == std.lang.SourceLocation and comptime std.mem.eql(u8, name, "source"))
+            @compileError("zefir.log: field name 'source' is reserved for record metadata; the call site goes in .src = @src()");
         checkName(name, name);
         if (comptime std.mem.eql(u8, name, source_field)) {
             if (T != std.lang.SourceLocation)
@@ -93,13 +102,17 @@ fn isReserved(comptime path: []const u8) bool {
 /// way to it, so a type that contains itself is checked once.
 fn checkValue(comptime path: []const u8, comptime T: type, comptime visited: []const type) void {
     // The same order as the encoder: marker, logValue, format, the rest.
+    const where = "field '" ++ path ++ "': ";
+    checkMarker(where, T);
     if (redactsWhole(T)) return;
+    if (T == Context)
+        @compileError("zefir.log: field '" ++ path ++ "': bind a core.Context with logger.withContext(ctx), not as a field");
     for (visited) |seen| {
         if (seen == T) return;
     }
     const next = visited ++ [_]type{T};
-    if (LogValue(T)) |R| return checkValue(path, R, next);
-    if (hasFormat(T) or isString(T)) return;
+    if (logValueAt(where, T)) |R| return checkValue(path, R, next);
+    if (formatAt(where, T) or isString(T)) return;
     switch (@typeInfo(T)) {
         .bool, .int, .float, .comptime_int, .comptime_float, .@"enum", .enum_literal, .error_set, .null, .type => {},
         .optional => |o| checkValue(path, o.child, next),
@@ -107,7 +120,12 @@ fn checkValue(comptime path: []const u8, comptime T: type, comptime visited: []c
         .void => @compileError("zefir.log: field '" ++ path ++ "': cannot log 'void'; remove the field"),
         .pointer => |p| switch (p.size) {
             .one => switch (@typeInfo(p.child)) {
-                .@"opaque" => @compileError("zefir.log: field '" ++ path ++ "': cannot log '" ++ @typeName(T) ++ "': an opaque type has no value to log"),
+                // An opaque type has no value of its own, but its methods
+                // take the pointer.
+                .@"opaque" => if (logValueAt(where, p.child)) |R|
+                    checkValue(path, R, next)
+                else if (!formatAt(where, p.child))
+                    @compileError("zefir.log: field '" ++ path ++ "': cannot log '" ++ @typeName(T) ++ "': an opaque type has no value to log"),
                 .@"fn" => @compileError("zefir.log: field '" ++ path ++ "': cannot log function '" ++ @typeName(T) ++ "'"),
                 else => checkValue(path, p.child, next),
             },
@@ -135,7 +153,22 @@ fn checkValue(comptime path: []const u8, comptime T: type, comptime visited: []c
             }
         },
         .@"fn" => @compileError("zefir.log: field '" ++ path ++ "': cannot log function '" ++ @typeName(T) ++ "'"),
-        else => @compileError("zefir.log: cannot log type '" ++ @typeName(T) ++ "' in field '" ++ path ++ "'; give it a format or logValue method, or log one of its fields"),
+        .undefined => @compileError("zefir.log: field '" ++ path ++ "' is undefined; give it a value"),
+        else => @compileError("zefir.log: field '" ++ path ++ "': cannot log '" ++ @typeName(T) ++ "'"),
+    }
+}
+
+/// A marker that is not a bool is an error at the field that holds it,
+/// also inside an optional, a pointer, a slice or an array.
+fn checkMarker(comptime where: []const u8, comptime T: type) void {
+    switch (@typeInfo(T)) {
+        .optional => |o| checkMarker(where, o.child),
+        .pointer => |p| checkMarker(where, p.child),
+        .array => |a| checkMarker(where, a.child),
+        .vector => |v| checkMarker(where, v.child),
+        .@"struct", .@"union", .@"enum", .@"opaque" => if (@hasDecl(T, "zefir_sensitive") and @TypeOf(T.zefir_sensitive) != bool)
+            @compileError("zefir.log: " ++ where ++ "'" ++ @typeName(T) ++ ".zefir_sensitive' must be a bool: pub const zefir_sensitive = true;"),
+        else => {},
     }
 }
 
@@ -160,49 +193,89 @@ pub fn redactsWhole(comptime T: type) bool {
     };
 }
 
-/// The function `name` declared in `T` whose first parameter is the type
-/// itself or a pointer to it (or `anytype`); null when there is none.
+/// The function `name` that `T` declares; null when it declares none, or
+/// something else under that name. The callers check its form: a method
+/// of another form is a compile error, never a fallback to the fields.
 fn method(comptime T: type, comptime name: []const u8) ?std.lang.Type.Fn {
     if (!isContainer(T) or !@hasDecl(T, name)) return null;
-    const info = switch (@typeInfo(@TypeOf(@field(T, name)))) {
+    return switch (@typeInfo(@TypeOf(@field(T, name)))) {
         .@"fn" => |f| f,
-        else => return null,
+        else => null,
     };
-    if (info.param_types.len == 0) return null;
-    const Self = info.param_types[0] orelse return info;
-    return if (Self == T or Self == *const T or Self == *T) info else null;
+}
+
+/// The `self` a hint shows: an opaque type is reached through a pointer.
+fn selfHint(comptime T: type) []const u8 {
+    return if (@typeInfo(T) == .@"opaque") "*const @This()" else "@This()";
+}
+
+/// Whether `f` takes self the way the encoder passes it: by value, by
+/// `*const` or as `anytype`.
+fn selfOk(comptime T: type, comptime f: std.lang.Type.Fn) bool {
+    if (f.param_types.len == 0) return false;
+    const Self = f.param_types[0] orelse return true;
+    return Self == T or Self == *const T;
 }
 
 /// Whether `T` has the method that `{f}` uses,
-/// `pub fn format(self, w: *std.Io.Writer) !void`, with self by value or by
-/// `*const` and any error set; its output is logged as a string. A
-/// `format` of another form is a compile error rather than a fallback to
-/// the fields, which the method may have meant to hide.
+/// `pub fn format(self: @This(), w: *std.Io.Writer) !void`, with self by
+/// value or by `*const` and no errors but `std.Io.Writer.Error`, declared
+/// or inferred; its output is logged as a string. A `format` of another
+/// form is a compile error rather than a fallback to the fields, which the
+/// method may have meant to hide.
 pub fn hasFormat(comptime T: type) bool {
+    return comptime formatAt("", T);
+}
+
+/// `hasFormat`, with `where` (the field) in front of its errors.
+fn formatAt(comptime where: []const u8, comptime T: type) bool {
     const f = method(T, "format") orelse return false;
-    const self_ok = if (f.param_types[0]) |Self| Self != *T else true;
+    const name = "'" ++ @typeName(T) ++ ".format'";
+    // An opaque type has no value to take by value.
+    const hint = "write pub fn format(self: " ++ selfHint(T) ++ ", w: *std.Io.Writer) !void";
     const writer_ok = f.param_types.len == 2 and (f.param_types[1] == null or f.param_types[1].? == *std.Io.Writer);
-    const result_ok = if (f.return_type) |R| switch (@typeInfo(R)) {
-        .void => true,
-        .error_union => |e| e.payload == void,
-        else => false,
-    } else true;
-    if (self_ok and writer_ok and result_ok) return true;
-    @compileError("zefir.log: " ++ @typeName(T) ++ ".format has another form than the one {f} uses; write pub fn format(self, w: *std.Io.Writer) !void");
+    if (!selfOk(T, f) or !writer_ok)
+        @compileError("zefir.log: " ++ where ++ name ++ " has another form than the one {f} uses; " ++ hint);
+    // The type of the call the encoder makes: the errors of a generic
+    // writer are known only then. An opaque type is called through a
+    // pointer.
+    const Result = if (@typeInfo(T) == .@"opaque")
+        @TypeOf(@as(*const T, undefined).format(@as(*std.Io.Writer, undefined)))
+    else
+        @TypeOf(@as(T, undefined).format(@as(*std.Io.Writer, undefined)));
+    switch (@typeInfo(Result)) {
+        .void => @compileError("zefir.log: " ++ where ++ name ++ " returns void; " ++ hint),
+        .error_union => |e| if (e.payload == void) {
+            const errors = @typeInfo(e.error_set).error_set.error_names orelse
+                @compileError("zefir.log: " ++ where ++ name ++ " returns anyerror; {f} lets it return only std.Io.Writer.Error");
+            for (errors) |error_name| {
+                if (!std.mem.eql(u8, error_name, "WriteFailed"))
+                    @compileError("zefir.log: " ++ where ++ name ++ " can return error." ++ error_name ++ "; {f} lets it return only std.Io.Writer.Error");
+            }
+            return true;
+        },
+        else => {},
+    }
+    @compileError("zefir.log: " ++ where ++ name ++ " has another form than the one {f} uses; " ++ hint);
 }
 
 /// The type `T.logValue(self)` returns, when `T` has that method: the
 /// logger writes what it returns in place of the value. A `logValue` of
 /// another form is a compile error, as for `format`.
 pub fn LogValue(comptime T: type) ?type {
+    return logValueAt("", T);
+}
+
+/// `LogValue`, with `where` (the field) in front of its errors.
+fn logValueAt(comptime where: []const u8, comptime T: type) ?type {
     const f = method(T, "logValue") orelse return null;
-    const self_ok = if (f.param_types[0]) |Self| Self != *T else true;
-    if (!self_ok or f.param_types.len != 1 or f.return_type == null)
-        @compileError("zefir.log: " ++ @typeName(T) ++ ".logValue has another form; write pub fn logValue(self) U, taking self by value or by *const");
+    const name = "'" ++ @typeName(T) ++ ".logValue'";
+    if (!selfOk(T, f) or f.param_types.len != 1 or f.return_type == null) @compileError("zefir.log: " ++ where ++ name ++ " has another form; write pub fn logValue(self: " ++ selfHint(T) ++
+        ") U, taking self " ++ (if (@typeInfo(T) == .@"opaque") "by *const" else "by value or by *const"));
     const R = f.return_type.?;
-    if (R == T) @compileError("zefir.log: " ++ @typeName(T) ++ ".logValue returns " ++ @typeName(T) ++ " itself; return another type, such as a struct of the fields to log");
+    if (R == T) @compileError("zefir.log: " ++ where ++ name ++ " returns '" ++ @typeName(T) ++ "' itself; return another type, such as a struct of the fields to log");
     if (@typeInfo(R) == .error_union)
-        @compileError("zefir.log: " ++ @typeName(T) ++ ".logValue returns an error union; return a value, since logging cannot fail");
+        @compileError("zefir.log: " ++ where ++ name ++ " returns an error union; return a value, since logging cannot fail");
     return R;
 }
 
@@ -238,6 +311,24 @@ test "scalars, strings, optionals, enums, errors and the call site pass" {
     comptime check(@TypeOf(.{ .ok = true, .count = 3, .ratio = 0.5, .note = "x", .kind = .admin, .none = null, .failure = error.Boom }));
     comptime check(@TypeOf(.{ .id = id, .text = text, .maybe = maybe, .status = status, .src = @src() }));
     comptime check(@TypeOf(.{ .@"http.method" = "GET", .@"user-agent" = "curl" }));
+}
+
+test "service names other than the record's own pass" {
+    comptime check(@TypeOf(.{ .service = "x" }));
+    comptime check(@TypeOf(.{ .service = .{ .region = "eu" } }));
+    comptime check(@TypeOf(.{ .@"service.namespace" = "billing" }));
+}
+
+test "every key the record writes is reserved, and names close to them are not" {
+    @setEvalBranchQuota(100_000);
+    inline for (.{
+        "timestamp",                   "level",          "message",    "service.name", "service.instance.id", "service.version",
+        "deployment.environment.name", "scope",          "source",     "trace_id",     "span_id",             "truncated",
+        "request_id",                  "correlation_id", "tenant_id",  "pid",          "thread_id",           "labels",
+        "suppressed",                  "source.file",    "labels.env", "src.function", "src.module",
+    }) |name| try std.testing.expect(comptime isReserved(name));
+    inline for (.{ "service", "service.namespace", "levels", "trace", "src", "sources", "label", "trace_id_x" }) |name|
+        try std.testing.expect(comptime !isReserved(name));
 }
 
 test "a named struct of scalars passes as the fields" {

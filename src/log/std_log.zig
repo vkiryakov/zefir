@@ -49,13 +49,19 @@ pub fn stdLogFn(
 /// Counts the call in the current generation, and returns its counter.
 fn enter() *std.atomic.Value(u32) {
     while (true) {
-        const g = generation.load(.seq_cst);
-        const counter = &in_flight[g & 1];
-        _ = counter.fetchAdd(1, .seq_cst);
-        // Counted before any removal that flips `g`: that removal waits.
-        if (generation.load(.seq_cst) == g) return counter;
-        _ = counter.fetchSub(1, .seq_cst);
+        if (count(generation.load(.seq_cst))) |counter| return counter;
     }
+}
+
+/// Counts the call in generation `g`, read before; null, and not counted,
+/// when a removal has flipped `g` since.
+fn count(g: u32) ?*std.atomic.Value(u32) {
+    const counter = &in_flight[g & 1];
+    _ = counter.fetchAdd(1, .seq_cst);
+    // Counted before any removal that flips `g`: that removal waits.
+    if (generation.load(.seq_cst) == g) return counter;
+    _ = counter.fetchSub(1, .seq_cst);
+    return null;
 }
 
 fn levelOf(comptime level: std.log.Level) Level {
@@ -103,6 +109,18 @@ fn waitForCalls() void {
     defer removing.unlock();
     const old = generation.fetchAdd(1, .seq_cst) & 1;
     while (in_flight[old].load(.seq_cst) != 0) std.Thread.yield() catch {};
+}
+
+test "a call that read the generation before a removal flipped it counts in the new one" {
+    const stale = generation.load(.seq_cst);
+    waitForCalls(); // a removal, of another engine, flips the generation
+    const late = count(stale);
+    if (late) |counted| _ = counted.fetchSub(1, .seq_cst); // keeps the counters right when this fails
+    try std.testing.expect(late == null);
+    try std.testing.expectEqual(@as(u32, 0), in_flight[stale & 1].load(.seq_cst));
+    const counter = enter();
+    defer _ = counter.fetchSub(1, .seq_cst);
+    try std.testing.expect(counter == &in_flight[generation.load(.seq_cst) & 1]);
 }
 
 test "std.log levels map to records' levels by name" {

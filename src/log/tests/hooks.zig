@@ -142,6 +142,29 @@ test "subscribe refuses a ninth subscriber, a capacity that is not a power of tw
     logger.unsubscribe(ids[0]); // a second time does nothing
 }
 
+test "subscribe frees what it took when an allocation fails" {
+    var failing: std.testing.FailingAllocator = .init(testing.allocator, .{});
+    var sink: std.Io.Writer.Discarding = .init(&.{});
+    const logger: log.Logger = try .init(failing.allocator(), testing.io, .{ .output = .{ .writer = &sink.writer } });
+    defer logger.deinit();
+    var failures: usize = 0;
+    var n: usize = 0;
+    while (true) : (n += 1) {
+        // Relative to the allocations so far: allocation n (from 0) of this
+        // call fails.
+        failing.fail_index = failing.alloc_index + n;
+        const id = logger.subscribe(.{ .levels = &.{.err}, .handler = ignore }) catch |e| {
+            try testing.expectEqual(@as(log.SubscribeError, error.OutOfMemory), e);
+            failures += 1;
+            continue;
+        };
+        failing.fail_index = std.math.maxInt(usize);
+        logger.unsubscribe(id);
+        break;
+    }
+    try testing.expectEqual(@as(usize, 2), failures); // the queue, then the buffer a record is copied out into
+}
+
 test "only the levels of active subscribers are routed" {
     var sink: std.Io.Writer.Discarding = .init(&.{});
     const logger: log.Logger = try .init(testing.allocator, testing.io, .{ .output = .{ .writer = &sink.writer } });
@@ -185,6 +208,7 @@ test "a full subscriber queue drops records into alert_dropped; handler errors c
     c.fail = true;
     const logger: log.Logger = try .init(testing.allocator, testing.io, .{ .output = .{ .writer = &sink.writer } });
     defer logger.deinit();
+    defer open.store(true, .seq_cst);
     const id = try logger.subscribe(.{ .levels = &.{.err}, .capacity = 2, .context = &c, .handler = Collector.handler });
     logger.err("held", .{}); // the handler takes it and waits
     while (c.entered.load(.seq_cst) == 0) std.Thread.yield() catch {};
@@ -214,14 +238,56 @@ test "records logged by a handler go to the output, never back to subscribers" {
         var out: std.Io.Writer.Allocating = .init(testing.allocator);
         defer out.deinit();
         const logger: log.Logger = try .init(testing.allocator, testing.io, .{ .mode = mode, .output = .{ .writer = &out.writer } });
+        var live = true;
+        defer if (live) logger.deinit();
         var echo: Echo = .{ .logger = logger };
         const id = try logger.subscribe(.{ .levels = &.{.err}, .context = &echo, .handler = Echo.handler });
         logger.err("disk full", .{});
         logger.unsubscribe(id);
         logger.deinit();
+        live = false;
         try testing.expectEqual(@as(u32, 1), echo.calls.load(.seq_cst));
         try testing.expectEqual(@as(usize, 2), std.mem.count(u8, out.written(), "\n"));
         try testing.expect(std.mem.find(u8, out.written(), "\"message\":\"alert failed\"") != null);
+    }
+}
+
+/// Hands its post to an Io task on its first call; the task logs that the
+/// post failed.
+const HandOff = struct {
+    logger: log.Logger,
+    calls: std.atomic.Value(u32) = .init(0),
+    logged: std.atomic.Value(bool) = .init(false),
+
+    fn post(h: *HandOff) void {
+        h.logger.err("webhook post failed", .{});
+        h.logged.store(true, .seq_cst);
+    }
+
+    fn handler(context: ?*anyopaque, _: *const log.Event) anyerror!void {
+        const h: *HandOff = @ptrCast(@alignCast(context orelse return error.NoContext));
+        if (h.calls.fetchAdd(1, .seq_cst) > 0) return;
+        var task = try testing.io.concurrent(post, .{h});
+        task.await(testing.io);
+    }
+};
+
+test "a record an Io task of a handler logs reaches the subscribers: only the handler's own thread is kept out" {
+    for ([_]log.Mode{ .sync, .{ .queued = .{} } }) |mode| {
+        var out: std.Io.Writer.Allocating = .init(testing.allocator);
+        defer out.deinit();
+        const logger: log.Logger = try .init(testing.allocator, testing.io, .{ .mode = mode, .output = .{ .writer = &out.writer } });
+        defer logger.deinit();
+        var hand_off: HandOff = .{ .logger = logger };
+        const id = try logger.subscribe(.{ .levels = &.{.err}, .context = &hand_off, .handler = HandOff.handler });
+        logger.err("disk full", .{});
+        var waited: usize = 0;
+        while (!hand_off.logged.load(.seq_cst) and waited < 5000) : (waited += 1) try testing.io.sleep(.fromMilliseconds(1), .awake);
+        logger.unsubscribe(id); // the task's record is queued for the handler: it gets it first
+        try logger.flush(.none);
+        try testing.expect(hand_off.logged.load(.seq_cst));
+        try testing.expectEqual(@as(u32, 2), hand_off.calls.load(.seq_cst));
+        try testing.expectEqual(@as(usize, 2), std.mem.count(u8, out.written(), "\n"));
     }
 }
 
@@ -237,6 +303,37 @@ test "shutdown waits until the subscribers have handled their queues" {
     try testing.expectEqual(@as(usize, 3), c.events.items.len);
 }
 
+test "deinit without a shutdown waits until the subscribers have handled their queues" {
+    for ([_]log.Mode{ .sync, .{ .queued = .{} } }) |mode| {
+        var sink: std.Io.Writer.Discarding = .init(&.{});
+        var open: std.atomic.Value(bool) = .init(false);
+        var c: Collector = .init();
+        defer c.deinit();
+        c.gate = &open;
+        {
+            const logger: log.Logger = try .init(testing.allocator, testing.io, .{ .mode = mode, .output = .{ .writer = &sink.writer } });
+            errdefer logger.deinit();
+            errdefer open.store(true, .seq_cst);
+            _ = try logger.subscribe(.{ .levels = &.{.err}, .context = &c, .handler = Collector.handler });
+            for (0..3) |_| logger.err("queued", .{});
+            while (c.entered.load(.seq_cst) == 0) std.Thread.yield() catch {};
+            // Two records are still queued for the handler when deinit begins.
+            const opener = try std.Thread.spawn(.{}, openOnStopping, .{ &open, logger });
+            logger.deinit();
+            opener.join();
+        }
+        try testing.expectEqual(@as(usize, 3), c.events.items.len);
+    }
+}
+
+/// Opens `open` once `deinit` has begun its shutdown; `deinit` waits for
+/// the handler that `open` holds, so the logger is alive while this reads
+/// it.
+fn openOnStopping(open: *std.atomic.Value(bool), logger: log.Logger) void {
+    while (logger.engine.state.load(.seq_cst) == .running) std.Thread.yield() catch {};
+    open.store(true, .seq_cst);
+}
+
 test "a shutdown that times out on a subscriber leaves it to deinit, which stops it after the record in hand" {
     var sink: std.Io.Writer.Discarding = .init(&.{});
     var open: std.atomic.Value(bool) = .init(false);
@@ -244,12 +341,18 @@ test "a shutdown that times out on a subscriber leaves it to deinit, which stops
     defer c.deinit();
     c.gate = &open;
     const logger: log.Logger = try .init(testing.allocator, testing.io, .{ .output = .{ .writer = &sink.writer } });
+    var live = true;
+    defer if (live) {
+        open.store(true, .seq_cst);
+        logger.deinit();
+    };
     _ = try logger.subscribe(.{ .levels = &.{.err}, .context = &c, .handler = Collector.handler });
     for (0..3) |_| logger.err("queued", .{});
     while (c.entered.load(.seq_cst) == 0) std.Thread.yield() catch {};
     const timed_out = logger.shutdown(.{ .duration = .{ .raw = .fromMilliseconds(20), .clock = .awake } });
     const opener = try std.Thread.spawn(.{}, openOnAbandon, .{ &open, logger });
     logger.deinit();
+    live = false;
     opener.join();
     try testing.expectError(error.Timeout, timed_out);
     try testing.expectEqual(@as(usize, 1), c.events.items.len);
@@ -284,6 +387,126 @@ const Held = struct {
     }
 };
 
+/// Logs a warning from its handler once `go` is set: in `.block` mode with
+/// the queue full, that call waits for room. Then it waits for `release`,
+/// so the logger stays alive while the test looks at it.
+const BlockedEcho = struct {
+    logger: log.Logger,
+    go: std.atomic.Value(bool) = .init(false),
+    returned: std.atomic.Value(bool) = .init(false),
+    release: std.atomic.Value(bool) = .init(false),
+
+    fn handler(context: ?*anyopaque, _: *const log.Event) anyerror!void {
+        const e: *BlockedEcho = @ptrCast(@alignCast(context orelse return error.NoContext));
+        while (!e.go.load(.seq_cst)) std.Thread.yield() catch {};
+        e.logger.warn("alert failed", .{});
+        e.returned.store(true, .seq_cst);
+        while (!e.release.load(.seq_cst)) std.Thread.yield() catch {};
+    }
+};
+
+fn deinitLogger(logger: log.Logger) void {
+    logger.deinit();
+}
+
+test "deinit after a shutdown that timed out ends a handler's wait for room in .block mode" {
+    var held: Held = .{};
+    var blocked = false;
+    var timed_out: error{Timeout}!void = {};
+    var returned = false;
+    var refused: u64 = 0;
+    {
+        const logger: log.Logger = try .init(testing.allocator, testing.io, .{
+            .mode = .{ .queued = .{ .capacity = 2, .batch_size = 1, .overflow = .block } },
+            .output = .{ .writer = &held.writer },
+        });
+        var echo: BlockedEcho = .{ .logger = logger };
+        const q = &logger.engine.queue.?;
+        // Until a thread runs deinit, an error lets every waiter go and
+        // frees the logger here.
+        errdefer {
+            held.open.store(true, .seq_cst);
+            echo.go.store(true, .seq_cst);
+            _ = q.close();
+            echo.release.store(true, .seq_cst);
+            logger.deinit();
+        }
+        _ = try logger.subscribe(.{ .levels = &.{.err}, .context = &echo, .handler = BlockedEcho.handler });
+        logger.info("held", .{}); // the writer thread takes it and waits inside the write
+        held.waitEntered();
+        logger.err("alert", .{}); // to the handler, and into the queue
+        logger.info("fill", .{}); // the queue is full now
+        echo.go.store(true, .seq_cst); // the handler's warning waits for room
+        var waited: usize = 0;
+        while (q.space_waiters.load(.seq_cst) == 0 and waited < 5000) : (waited += 1) testing.io.sleep(.fromMilliseconds(1), .awake) catch {};
+        blocked = q.space_waiters.load(.seq_cst) == 1;
+        timed_out = logger.shutdown(.{ .duration = .{ .raw = .fromMilliseconds(20), .clock = .awake } });
+        const stopper = try std.Thread.spawn(.{}, deinitLogger, .{logger});
+        // deinit cannot free the logger before the handler returns, and the
+        // handler waits for `release`: the logger is alive while this reads
+        // it. The writer thread stays inside its write, so only the closed
+        // queue can end the handler's wait.
+        waited = 0;
+        while (!echo.returned.load(.seq_cst) and waited < 2000) : (waited += 1) testing.io.sleep(.fromMilliseconds(1), .awake) catch {};
+        returned = echo.returned.load(.seq_cst);
+        if (!returned) _ = q.close(); // deinit left it waiting: let it go, so the test fails instead of hanging
+        held.open.store(true, .seq_cst);
+        refused = logger.stats().dropped.closed;
+        echo.release.store(true, .seq_cst);
+        stopper.join();
+    }
+    try testing.expect(blocked);
+    try testing.expectError(error.Timeout, timed_out);
+    try testing.expect(returned);
+    try testing.expectEqual(@as(u64, 1), refused); // the handler's warning, refused by the closed queue
+}
+
+/// A gate that opens after a delay and keeps the time it opened.
+const TimedGate = struct {
+    open: std.atomic.Value(bool) = .init(false),
+    /// Awake-clock nanoseconds when `open` was set.
+    opened_at: std.atomic.Value(i64) = .init(0),
+
+    fn openAfter(gate: *TimedGate, ms: i64) void {
+        testing.io.sleep(.fromMilliseconds(ms), .awake) catch {};
+        gate.opened_at.store(@intCast(std.Io.Clock.awake.now(testing.io).nanoseconds), .seq_cst);
+        gate.open.store(true, .seq_cst);
+    }
+};
+
+test "shutdown has one deadline for the subscribers and the queue" {
+    var held: Held = .{};
+    var gate: TimedGate = .{};
+    var c: Collector = .init();
+    defer c.deinit();
+    c.gate = &gate.open;
+    const timeout_ms = 300;
+    var stopped: error{Timeout}!void = {};
+    var after_open: i96 = 0;
+    {
+        const logger: log.Logger = try .init(testing.allocator, testing.io, .{ .mode = .{ .queued = .{} }, .output = .{ .writer = &held.writer } });
+        defer logger.deinit();
+        defer held.open.store(true, .seq_cst);
+        defer gate.open.store(true, .seq_cst);
+        _ = try logger.subscribe(.{ .levels = &.{.err}, .context = &c, .handler = Collector.handler });
+        logger.info("held", .{}); // the writer thread waits inside this write until the end
+        held.waitEntered();
+        logger.err("alert", .{});
+        while (c.entered.load(.seq_cst) == 0) std.Thread.yield() catch {};
+        // The handler returns 200 ms into the shutdown; the queue stays stuck.
+        const opener = try std.Thread.spawn(.{}, TimedGate.openAfter, .{ &gate, 200 });
+        stopped = logger.shutdown(.{ .duration = .{ .raw = .fromMilliseconds(timeout_ms), .clock = .awake } });
+        const end = std.Io.Clock.awake.now(testing.io).nanoseconds;
+        opener.join();
+        after_open = end - gate.opened_at.load(.seq_cst);
+    }
+    try testing.expectError(error.Timeout, stopped);
+    try testing.expectEqual(@as(usize, 1), c.events.items.len);
+    // A queue wait with a timeout of its own would end a whole timeout
+    // after the handler returned.
+    try testing.expect(after_open < timeout_ms * std.time.ns_per_ms);
+}
+
 test "an error record reaches the subscribers even when the queue refuses it" {
     var held: Held = .{};
     var c: Collector = .init();
@@ -293,6 +516,7 @@ test "an error record reaches the subscribers even when the queue refuses it" {
         .output = .{ .writer = &held.writer },
     });
     defer logger.deinit();
+    defer held.open.store(true, .seq_cst);
     const id = try logger.subscribe(.{ .levels = &.{.err}, .context = &c, .handler = Collector.handler });
     logger.info("held", .{});
     held.waitEntered();
@@ -454,16 +678,22 @@ test "two unsubscribes at once both return after the handler's call is over" {
     c.gate = &open;
     const logger: log.Logger = try .init(testing.allocator, testing.io, .{ .output = .{ .writer = &sink.writer } });
     defer logger.deinit();
+    defer open.store(true, .seq_cst);
     const id = try logger.subscribe(.{ .levels = &.{.err}, .context = &c, .handler = Collector.handler });
     logger.err("held", .{});
     while (c.entered.load(.seq_cst) == 0) std.Thread.yield() catch {};
     var after_handler: std.atomic.Value(u32) = .init(0);
-    const first = try std.Thread.spawn(.{}, unsubscribeThenCheck, .{ logger, id, &c, &after_handler });
-    const second = try std.Thread.spawn(.{}, unsubscribeThenCheck, .{ logger, id, &c, &after_handler });
-    try testing.io.sleep(.fromMilliseconds(20), .awake); // both are inside unsubscribe by now
-    open.store(true, .seq_cst);
-    first.join();
-    second.join();
+    {
+        var threads: [2]std.Thread = undefined;
+        var spawned: usize = 0;
+        defer for (threads[0..spawned]) |thread| thread.join();
+        defer open.store(true, .seq_cst);
+        for (&threads) |*thread| {
+            thread.* = try std.Thread.spawn(.{}, unsubscribeThenCheck, .{ logger, id, &c, &after_handler });
+            spawned += 1;
+        }
+        try testing.io.sleep(.fromMilliseconds(20), .awake); // both are inside unsubscribe by now
+    }
     try testing.expectEqual(@as(u32, 2), after_handler.load(.seq_cst));
 }
 
@@ -480,6 +710,7 @@ test "removing an idle subscriber does not wait for another subscriber's handler
     busy.gate = &open;
     const logger: log.Logger = try .init(testing.allocator, testing.io, .{ .output = .{ .writer = &sink.writer } });
     defer logger.deinit();
+    defer open.store(true, .seq_cst);
     const busy_id = try logger.subscribe(.{ .levels = &.{.err}, .context = &busy, .handler = Collector.handler });
     const idle_id = try logger.subscribe(.{ .levels = &.{.warn}, .handler = ignore });
     logger.err("held", .{});
@@ -487,15 +718,15 @@ test "removing an idle subscriber does not wait for another subscriber's handler
     var busy_gone: std.atomic.Value(bool) = .init(false);
     var idle_gone: std.atomic.Value(bool) = .init(false);
     const remover = try std.Thread.spawn(.{}, unsubscribeAndMark, .{ logger, busy_id, &busy_gone });
+    defer remover.join();
+    var idle_remover: ?std.Thread = null;
+    defer if (idle_remover) |thread| thread.join();
+    defer open.store(true, .seq_cst);
     try testing.io.sleep(.fromMilliseconds(20), .awake); // the remover waits for the held handler
-    const idle_remover = try std.Thread.spawn(.{}, unsubscribeAndMark, .{ logger, idle_id, &idle_gone });
+    idle_remover = try std.Thread.spawn(.{}, unsubscribeAndMark, .{ logger, idle_id, &idle_gone });
     var waited: usize = 0;
     while (!idle_gone.load(.seq_cst) and waited < 2000) : (waited += 1) try testing.io.sleep(.fromMilliseconds(1), .awake);
-    const idle_first = idle_gone.load(.seq_cst) and !busy_gone.load(.seq_cst);
-    open.store(true, .seq_cst);
-    remover.join();
-    idle_remover.join();
-    try testing.expect(idle_first);
+    try testing.expect(idle_gone.load(.seq_cst) and !busy_gone.load(.seq_cst));
 }
 
 test "after a shutdown that timed out, unsubscribe waits only for the call in hand" {
@@ -506,6 +737,7 @@ test "after a shutdown that timed out, unsubscribe waits only for the call in ha
     c.gate = &open;
     const logger: log.Logger = try .init(testing.allocator, testing.io, .{ .output = .{ .writer = &sink.writer } });
     defer logger.deinit();
+    defer open.store(true, .seq_cst);
     const id = try logger.subscribe(.{ .levels = &.{.err}, .context = &c, .handler = Collector.handler });
     for (0..4) |_| logger.err("alert", .{});
     while (c.entered.load(.seq_cst) == 0) std.Thread.yield() catch {};
@@ -549,6 +781,11 @@ test "records a handler logs while shutdown waits for the subscribers still reac
         defer out.deinit();
         const logger: log.Logger = try .init(testing.allocator, testing.io, .{ .mode = mode, .output = .{ .writer = &out.writer } });
         var echo: LateEcho = .{ .logger = logger };
+        var live = true;
+        defer if (live) {
+            echo.open.store(true, .seq_cst);
+            logger.deinit();
+        };
         _ = try logger.subscribe(.{ .levels = &.{.err}, .context = &echo, .handler = LateEcho.handler });
         logger.err("disk full", .{});
         while (!echo.entered.load(.seq_cst)) std.Thread.yield() catch {};
@@ -557,9 +794,38 @@ test "records a handler logs while shutdown waits for the subscribers still reac
         opener.join();
         const s = logger.stats();
         logger.deinit();
+        live = false;
         try stopped;
         try testing.expectEqual(@as(usize, 2), std.mem.count(u8, out.written(), "\n"));
         try testing.expectEqual(@as(u64, 0), s.dropped.closed);
+    }
+}
+
+/// Logs a warning through the std.log bridge once the logger has begun to
+/// stop.
+const BridgeEcho = struct {
+    logger: log.Logger,
+
+    fn handler(context: ?*anyopaque, _: *const log.Event) anyerror!void {
+        const e: *BridgeEcho = @ptrCast(@alignCast(context orelse return error.NoContext));
+        while (e.logger.engine.state.load(.seq_cst) == .running) std.Thread.yield() catch {};
+        log.stdLogFn(.warn, .webhook, "alert post failed", .{});
+    }
+};
+
+test "what a handler logs through std.log while deinit waits for the subscribers reaches the output" {
+    for ([_]log.Mode{ .sync, .{ .queued = .{} } }) |mode| {
+        var out: std.Io.Writer.Allocating = .init(testing.allocator);
+        defer out.deinit();
+        {
+            const logger: log.Logger = try .init(testing.allocator, testing.io, .{ .mode = mode, .output = .{ .writer = &out.writer } });
+            defer logger.deinit(); // no shutdown first: deinit runs one
+            var echo: BridgeEcho = .{ .logger = logger };
+            _ = try logger.subscribe(.{ .levels = &.{.err}, .context = &echo, .handler = BridgeEcho.handler });
+            logger.installStdLog();
+            logger.err("disk full", .{});
+        }
+        try testing.expectEqual(@as(usize, 1), std.mem.count(u8, out.written(), "alert post failed"));
     }
 }
 
@@ -576,15 +842,64 @@ test "sync mode under an Io other than std.Io.Threaded: records a handler logs a
     var out: std.Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
     const logger: log.Logger = try .init(testing.allocator, otherIo(), .{ .output = .{ .writer = &out.writer } });
+    var live = true;
+    defer if (live) logger.deinit();
     var echo: Echo = .{ .logger = logger };
     const id = try logger.subscribe(.{ .levels = &.{.err}, .context = &echo, .handler = Echo.handler });
     logger.err("disk full", .{});
     logger.unsubscribe(id);
     const s = logger.stats();
     logger.deinit();
+    live = false;
     try testing.expectEqual(@as(u32, 1), echo.calls.load(.seq_cst));
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, out.written(), "\n"));
     try testing.expectEqual(@as(u64, 1), s.hook_errors);
+}
+
+var app_clock_reads: std.atomic.Value(u32) = .init(0);
+var counting_vtable: std.Io.VTable = undefined;
+
+fn countingNow(userdata: ?*anyopaque, clock: std.Io.Clock) std.Io.Timestamp {
+    _ = app_clock_reads.fetchAdd(1, .seq_cst);
+    return testing.io.vtable.now(userdata, clock);
+}
+
+/// `testing.io`, counting the reads of its clock. To the logger it is an Io
+/// other than `std.Io.Threaded`, as an evented one would be.
+fn countingIo() std.Io {
+    counting_vtable = testing.io.vtable.*;
+    counting_vtable.now = countingNow;
+    return .{ .userdata = testing.io.userdata, .vtable = &counting_vtable };
+}
+
+/// Logs a warning from inside the handler.
+const Warner = struct {
+    logger: log.Logger,
+    calls: std.atomic.Value(u32) = .init(0),
+
+    fn handler(context: ?*anyopaque, _: *const log.Event) anyerror!void {
+        const w: *Warner = @ptrCast(@alignCast(context orelse return error.NoContext));
+        _ = w.calls.fetchAdd(1, .seq_cst);
+        w.logger.warn("alert sent", .{});
+    }
+};
+
+test "a record a handler logs reads the logger's own clock, never the application's" {
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    // Queued: in sync mode, under this Io, the handler's record is dropped.
+    const logger: log.Logger = try .init(testing.allocator, countingIo(), .{ .mode = .{ .queued = .{} }, .output = .{ .writer = &out.writer } });
+    defer logger.deinit();
+    var warner: Warner = .{ .logger = logger };
+    const id = try logger.subscribe(.{ .levels = &.{.err}, .context = &warner, .handler = Warner.handler });
+    const before = app_clock_reads.load(.seq_cst);
+    logger.err("disk full", .{});
+    logger.unsubscribe(id); // waits for the handler's record
+    const reads = app_clock_reads.load(.seq_cst) - before;
+    try logger.flush(.none);
+    try testing.expectEqual(@as(u32, 1), warner.calls.load(.seq_cst));
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, out.written(), "\n"));
+    try testing.expectEqual(@as(u32, 1), reads); // the caller's record only
 }
 
 test "stats().alert_pending counts the records waiting in the subscribers' queues" {
@@ -595,6 +910,7 @@ test "stats().alert_pending counts the records waiting in the subscribers' queue
     c.gate = &open;
     const logger: log.Logger = try .init(testing.allocator, testing.io, .{ .output = .{ .writer = &sink.writer } });
     defer logger.deinit();
+    defer open.store(true, .seq_cst);
     const id = try logger.subscribe(.{ .levels = &.{.err}, .context = &c, .handler = Collector.handler });
     for (0..3) |_| logger.err("alert", .{});
     while (c.entered.load(.seq_cst) == 0) std.Thread.yield() catch {};
@@ -741,12 +1057,15 @@ test "subscribe racing shutdown: each call subscribes, or is refused with ShutDo
     for (0..10) |round| {
         var sink: std.Io.Writer.Discarding = .init(&.{});
         const logger: log.Logger = try .init(testing.allocator, testing.io, .{ .mode = .{ .queued = .{} }, .output = .{ .writer = &sink.writer } });
+        var live = true;
+        defer if (live) logger.deinit();
         var results: [8]?anyerror = @splat(error.TestNotRun);
         const subscriber = try std.Thread.spawn(.{}, subscribeMany, .{ logger, &results });
         for (0..round) |_| std.Thread.yield() catch {};
         const stopped = logger.shutdown(.none);
         subscriber.join();
         logger.deinit();
+        live = false;
         try stopped;
         for (results) |r| {
             if (r) |e| try testing.expectEqual(@as(anyerror, error.ShutDown), e);

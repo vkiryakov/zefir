@@ -31,7 +31,15 @@ fn classOf(comptime T: type) Class {
     if (field_checks.isString(T)) return .string;
     return switch (@typeInfo(T)) {
         .optional => .optional,
-        .pointer => |p| if (p.size == .one) .pointer else .sequence,
+        // An opaque type is written through its methods, on the pointer.
+        .pointer => |p| if (p.size != .one)
+            .sequence
+        else if (@typeInfo(p.child) != .@"opaque")
+            .pointer
+        else if (field_checks.LogValue(p.child) != null)
+            .log_value
+        else
+            .format,
         .array, .vector => .sequence,
         .@"struct" => |s| if (s.is_tuple) .sequence else .object,
         .@"union" => .tagged,
@@ -112,7 +120,7 @@ fn writeItems(comptime f: Format, w: *Writer, value: anytype, comptime depth: u8
         // A tuple: its items may be known at compile time.
         .@"struct" => |s| inline for (s.field_names, s.field_types, s.field_attrs, 0..) |name, Item, attrs, i| {
             if (i > 0) try w.writeByte(',');
-            if (attrs.@"comptime" and comptime renderAtComptime(Item))
+            if (attrs.@"comptime" and comptime renderAtComptime(Item) and readable(@field(value, name)))
                 try w.writeAll(comptime renderedNested(f, @field(value, name), depth))
             else
                 try writeNested(f, w, @field(value, name), depth);
@@ -141,7 +149,7 @@ fn writeMembers(comptime f: Format, w: *Writer, value: anytype, comptime depth: 
         first = false;
         if (comptime redact.isSensitiveName(name))
             try w.writeAll(comptime placeholderToken(f))
-        else if (attrs.@"comptime" and comptime renderAtComptime(Member))
+        else if (attrs.@"comptime" and comptime renderAtComptime(Member) and readable(@field(value, name)))
             try w.writeAll(comptime renderedNested(f, @field(value, name), depth))
         else
             try writeNested(f, w, @field(value, name), depth);
@@ -196,7 +204,7 @@ fn writeTextField(w: *Writer, comptime path: []const u8, value: anytype, comptim
                 const member = path ++ "." ++ name;
                 if (comptime redact.isSensitiveName(name))
                     try w.writeAll(" " ++ member ++ "=" ++ redact.placeholder)
-                else if (attrs.@"comptime" and comptime renderAtComptime(Member))
+                else if (attrs.@"comptime" and comptime renderAtComptime(Member) and readable(@field(value, name)))
                     try w.writeAll(comptime renderedTextField(member, @field(value, name), depth + 1))
                 else
                     try writeTextField(w, member, @field(value, name), depth + 1);
@@ -233,7 +241,7 @@ fn writeFormatted(comptime f: Format, w: *Writer, value: anytype, comptime neste
     var e: escape.Escaper = undefined;
     e.init(w);
     e.strict = nested;
-    try value.format(&e.writer);
+    if (@TypeOf(value) == std.Uri) try writeUri(&e.writer, &value) else try value.format(&e.writer);
     try e.finish();
     if (f == .json) return w.writeByte('"');
     if (e.plain and e.count > 0) return;
@@ -243,6 +251,18 @@ fn writeFormatted(comptime f: Format, w: *Writer, value: anytype, comptime neste
     w.buffer[start] = '"';
     w.end += 1;
     try w.writeByte('"');
+}
+
+/// A std.Uri as std writes it, but with "[REDACTED]" for the password:
+/// std's `format` writes `user:password@`, and the password is a member
+/// named like a secret. The user, the host and the rest stay.
+fn writeUri(w: *Writer, uri: *const std.Uri) Writer.Error!void {
+    // std writes a password only after a user, and only with a host.
+    if (uri.password == null or uri.user == null or uri.host == null) return uri.format(w);
+    try w.print("{s}://", .{uri.scheme});
+    try uri.user.?.formatUser(w);
+    try w.writeAll(":" ++ redact.placeholder ++ "@");
+    try uri.writeToStream(w, .{ .authority = true, .path = true, .query = true, .fragment = true });
 }
 
 /// The string a string-like value holds. Takes a pointer, so an array
@@ -385,15 +405,24 @@ fn renderedTextField(comptime path: []const u8, comptime value: anytype, comptim
 
 /// What `write` writes, computed at compile time.
 fn rendered(comptime write: fn (*Writer) Writer.Error!void) []const u8 {
-    return comptime blk: {
-        @setEvalBranchQuota(1_000_000);
-        var counter: Writer.Discarding = .init(&.{});
-        write(&counter.writer) catch unreachable;
-        var buf: [@intCast(counter.count + counter.writer.end)]u8 = undefined;
-        var w: Writer = .fixed(&buf);
-        write(&w) catch unreachable;
-        const final = buf;
-        break :blk &final;
+    return Rendered(write).bytes;
+}
+
+/// A declaration of its own for each rendered value, so each gets its own
+/// count of compile-time steps: the literal fields of one call do not add
+/// up.
+fn Rendered(comptime write: fn (*Writer) Writer.Error!void) type {
+    return struct {
+        const bytes: []const u8 = blk: {
+            @setEvalBranchQuota(1_000_000);
+            var counter: Writer.Discarding = .init(&.{});
+            write(&counter.writer) catch unreachable;
+            var buf: [@intCast(counter.count + counter.writer.end)]u8 = undefined;
+            var w: Writer = .fixed(&buf);
+            write(&w) catch unreachable;
+            const final = buf;
+            break :blk &final;
+        };
     };
 }
 
@@ -401,14 +430,36 @@ fn rendered(comptime write: fn (*Writer) Writer.Error!void) []const u8 {
 /// them at compile time is slow, and the record cuts them anyway.
 const max_literal_bytes = 16 * 1024;
 
+/// The same for other literal values with more items than this, nested
+/// ones included: an item takes up to a few hundred compile-time steps (a
+/// float), and 1024 of them fit the quota of `Rendered`.
+const max_literal_items = 1024;
+
 /// Whether a value known at compile time may also be written then: plain
-/// data only. A pointer may lead to memory that only exists at run time
-/// (the address of a global `var` is known at compile time, what it holds
-/// is not), and `format` or `logValue` may read run-time state, so those
-/// are written at run time. String literals are the one kind of pointer
-/// rendered at compile time.
+/// data only, and not too much of it. A pointer may lead to memory that
+/// only exists at run time (the address of a global `var` is known at
+/// compile time, what it holds is not), and `format` or `logValue` may
+/// read run-time state, so those are written at run time. A string pointer
+/// is the one pointer rendered at compile time, and only as a value of its
+/// own, which `readable` checks.
 fn renderAtComptime(comptime T: type) bool {
-    return plainData(T, &.{});
+    // Walking the type of a wide value takes many steps.
+    @setEvalBranchQuota(1_000_000);
+    if (!plainData(T, &.{})) return false;
+    return field_checks.isString(T) or comptimeOnly(T) or literalItems(T) <= max_literal_items;
+}
+
+/// Whether an array of `T`, or `T` itself, holds values that exist only at
+/// compile time, such as `comptime_int`: those can be written only then,
+/// however many there are.
+fn comptimeOnly(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .comptime_int, .comptime_float, .enum_literal, .type, .null => true,
+        .array => |a| comptimeOnly(a.child),
+        .vector => |v| comptimeOnly(v.child),
+        .optional => |o| comptimeOnly(o.child),
+        else => false,
+    };
 }
 
 fn plainData(comptime T: type, comptime visited: []const type) bool {
@@ -419,21 +470,54 @@ fn plainData(comptime T: type, comptime visited: []const type) bool {
     if (field_checks.LogValue(T) != null or field_checks.hasFormat(T)) return false;
     const next = visited ++ [_]type{T};
     return switch (@typeInfo(T)) {
-        .pointer => |p| p.size == .one and p.attrs.@"const" and switch (@typeInfo(p.child)) {
+        // Not inside another value: `readable` sees one pointer only.
+        .pointer => |p| visited.len == 0 and p.size == .one and p.attrs.@"const" and switch (@typeInfo(p.child)) {
             .array => |a| a.child == u8 and a.sentinel() != null and a.len <= max_literal_bytes,
             else => false,
         },
         .array => |a| a.len <= max_literal_bytes and plainData(a.child, next),
         .optional => |o| plainData(o.child, next),
         .vector => |v| plainData(v.child, next),
-        .@"struct" => |s| for (s.field_types) |Member| {
-            if (!plainData(Member, next)) break false;
+        // A member or a tag named like a secret is written as a constant,
+        // so its type does not matter.
+        .@"struct" => |s| for (s.field_names, s.field_types) |name, Member| {
+            if (!redact.isSensitiveName(name) and !plainData(Member, next)) break false;
         } else true,
-        .@"union" => |u| for (u.field_types) |Payload| {
-            if (!plainData(Payload, next)) break false;
+        .@"union" => |u| for (u.field_names, u.field_types) |name, Payload| {
+            if (!redact.isSensitiveName(name) and !plainData(Payload, next)) break false;
         } else true,
         else => true,
     };
+}
+
+/// How many values rendering a plain-data `T` writes; each byte of a
+/// string inside it counts as one.
+fn literalItems(comptime T: type) comptime_int {
+    if (field_checks.redactsWhole(T)) return 1;
+    return switch (@typeInfo(T)) {
+        .array => |a| a.len * literalItems(a.child),
+        .vector => |v| v.len * literalItems(v.child),
+        .optional => |o| literalItems(o.child),
+        .@"struct" => |s| blk: {
+            var n = 0;
+            for (s.field_types) |Member| n += literalItems(Member);
+            break :blk n;
+        },
+        .@"union" => |u| blk: {
+            var n = 1;
+            for (u.field_types) |Payload| n = @max(n, literalItems(Payload));
+            break :blk n;
+        },
+        else => 1,
+    };
+}
+
+/// Whether what a value known at compile time points to is known then
+/// too: a string literal is, `&global_var` seen through a const pointer is
+/// not. Other values are known whole.
+inline fn readable(value: anytype) bool {
+    if (@typeInfo(@TypeOf(value)) != .pointer) return true;
+    return @typeInfo(@TypeOf(.{value.*})).@"struct".field_attrs[0].@"comptime";
 }
 
 fn redactedField(comptime f: Format, comptime name: []const u8) []const u8 {
@@ -538,10 +622,15 @@ fn encodeRecord(
 /// The most `appendSuppressed` adds to a record.
 pub const suppressed_max_bytes = ",\"suppressed\":".len + std.fmt.count("{d}", .{std.math.maxInt(u64)});
 
+/// What `appendSuppressed` adds to a record for `n`.
+pub fn suppressedBytes(comptime f: Format, n: u64) usize {
+    return key(f, "suppressed").len + std.fmt.count("{d}", .{n});
+}
+
 /// Adds `"suppressed":n` (` suppressed=n` in text) to the end of the
 /// record in `buf[0..len]`, before its line break and closing brace: how
 /// many records the logger left out before this one. `buf` has room for
-/// `suppressed_max_bytes` more. Returns the new length.
+/// `suppressedBytes(f, n)` more. Returns the new length.
 pub fn appendSuppressed(comptime f: Format, buf: []u8, len: usize, n: u64) usize {
     const end = comptime closing(f).whole;
     var w: Writer = .fixed(buf[len - end.len ..]);
@@ -869,7 +958,7 @@ fn writeFields(comptime f: Format, w: *Writer, fields: anytype, comptime cut: bo
         const mark = w.end;
         const written = if (comptime redact.isSensitiveName(name))
             w.writeAll(comptime redactedField(f, name))
-        else if (attrs.@"comptime" and comptime renderAtComptime(Field))
+        else if (attrs.@"comptime" and comptime renderAtComptime(Field) and readable(@field(fields, name)))
             w.writeAll(comptime literalField(f, name, @field(fields, name)))
         else
             writeField(f, w, name, @field(fields, name));
@@ -1069,6 +1158,89 @@ test "text spreads the objects of a field into dotted keys; arrays and optionals
         "config.tags=[a] config.state.running=3 config.backup=null self.host=pg self.port=5432 self.password=[REDACTED]\n", buf[0..got.len]);
 }
 
+test "text spreads a union into one dotted key; a tag named like a secret is redacted wherever it spreads" {
+    const Auth = union(enum) { user: []const u8, api_key: []const u8 };
+    const Pin = union(enum) { none, password: u32 }; // plain data: rendered at compile time
+    var auth: Auth = .{ .api_key = "sk-live-123" };
+    _ = &auth;
+    var buf: [512]u8 = undefined;
+    const header: Header = .{ .timestamp = fixed_time, .service = "", .scope = "", .oversize = .truncate };
+    const got = record(.text, .info, "login", &buf, header, .{ .who = Auth{ .user = "ada" }, .auth = auth, .cfg = .{ .mode = auth }, .ptr = &auth, .pin = Pin{ .password = 4321 } }).?;
+    try testing.expectEqualStrings("2026-10-10T21:08:00.123Z INFO  login who.user=ada auth.api_key=[REDACTED] cfg.mode.api_key=[REDACTED] " ++
+        "ptr.api_key=[REDACTED] pin.password=[REDACTED]\n", buf[0..got.len]);
+}
+
+test "every secret name on the list is redacted inside a field, in both formats" {
+    // The list, written out: a name dropped from redact.zig fails here.
+    const names = [_][]const u8{
+        "password",              "passwd",      "secret",        "client_secret",
+        "api_key",               "apikey",      "access_token",  "refresh_token",
+        "id_token",              "auth_token",  "authorization", "cookie",
+        "set_cookie",            "private_key", "secret_key",    "secret_access_key",
+        "aws_secret_access_key",
+    };
+    var cfg: @Struct(.auto, null, &names, &@splat([]const u8), &@splat(.{})) = undefined;
+    inline for (names) |name| @field(cfg, name) = "S3CR3T";
+    comptime var json: []const u8 = "";
+    comptime var text: []const u8 = "";
+    inline for (names, 0..) |name, i| {
+        json = json ++ (if (i == 0) "" else ",") ++ "\"" ++ name ++ "\":\"[REDACTED]\"";
+        text = text ++ " cfg." ++ name ++ "=[REDACTED]";
+    }
+    var buf: [1024]u8 = undefined;
+    const header: Header = .{ .timestamp = fixed_time, .service = "", .scope = "", .oversize = .truncate };
+    var got = record(.json, .info, "m", &buf, header, .{ .cfg = cfg }).?;
+    try testing.expectStringEndsWith(buf[0..got.len], ",\"message\":\"m\",\"cfg\":{" ++ json ++ "}}\n");
+    got = record(.text, .info, "m", &buf, header, .{ .cfg = cfg }).?;
+    try testing.expectStringEndsWith(buf[0..got.len], " m" ++ text ++ "\n");
+}
+
+test "a field whose name ends in a secret name is redacted, in both formats" {
+    const Config = struct { db_host: []const u8, db_password: []const u8, api_keys: []const []const u8, password_hash: []const u8 };
+    var cfg: Config = .{ .db_host = "pg", .db_password = "S3CR3T", .api_keys = &.{"S3CR3T"}, .password_hash = "h" };
+    _ = &cfg;
+    var buf: [512]u8 = undefined;
+    const header: Header = .{ .timestamp = fixed_time, .service = "", .scope = "", .oversize = .truncate };
+    var got = record(.json, .info, "m", &buf, header, .{ .cfg = cfg, .newPassword = cfg.db_password }).?;
+    try testing.expectStringEndsWith(buf[0..got.len], ",\"message\":\"m\",\"cfg\":{\"db_host\":\"pg\",\"db_password\":\"[REDACTED]\"," ++
+        "\"api_keys\":\"[REDACTED]\",\"password_hash\":\"h\"},\"newPassword\":\"[REDACTED]\"}\n");
+    got = record(.text, .info, "m", &buf, header, .{ .cfg = cfg, .newPassword = cfg.db_password }).?;
+    try testing.expectStringEndsWith(buf[0..got.len], " m cfg.db_host=pg cfg.db_password=[REDACTED] cfg.api_keys=[REDACTED] cfg.password_hash=h newPassword=[REDACTED]\n");
+}
+
+test "a std.crypto key pair is written without its secret key" {
+    const kp = std.crypto.dh.X25519.KeyPair.generateDeterministic("S3CR3T-x25519-seed-0123456789abc".*);
+    var buf: [1024]u8 = undefined;
+    const header: Header = .{ .timestamp = fixed_time, .service = "", .scope = "", .oversize = .truncate };
+    var got = record(.json, .info, "m", &buf, header, .{ .kp = kp }).?;
+    try testing.expect(std.mem.find(u8, buf[0..got.len], "S3CR3T") == null);
+    try testing.expectStringEndsWith(buf[0..got.len], ",\"secret_key\":\"[REDACTED]\"}}\n");
+    got = record(.text, .info, "m", &buf, header, .{ .kp = kp }).?;
+    try testing.expect(std.mem.find(u8, buf[0..got.len], "S3CR3T") == null);
+    try testing.expectStringEndsWith(buf[0..got.len], " kp.secret_key=[REDACTED]\n");
+}
+
+test "std.Uri: the password of a URL is redacted, the rest is written as std writes it" {
+    const uri = try std.Uri.parse("postgres://app:S3CR3T@db:5432/main?ssl=on#top");
+    const shown = "postgres://app:[REDACTED]@db:5432/main?ssl=on#top";
+    const Db = struct { url: std.Uri, pool: u8 };
+    const maybe: ?std.Uri = uri;
+    const list = [_]std.Uri{ uri, uri };
+    var buf: [1024]u8 = undefined;
+    const header: Header = .{ .timestamp = fixed_time, .service = "", .scope = "", .oversize = .truncate };
+    const fields = .{ .uri = uri, .dsn = &uri, .db = Db{ .url = uri, .pool = 4 }, .maybe = maybe, .list = &list };
+    var got = record(.json, .info, "m", &buf, header, fields).?;
+    try testing.expectStringEndsWith(buf[0..got.len], ",\"message\":\"m\",\"uri\":\"" ++ shown ++ "\",\"dsn\":\"" ++ shown ++ "\",\"db\":{\"url\":\"" ++ shown ++
+        "\",\"pool\":4},\"maybe\":\"" ++ shown ++ "\",\"list\":[\"" ++ shown ++ "\",\"" ++ shown ++ "\"]}\n");
+    got = record(.text, .info, "m", &buf, header, fields).?;
+    try testing.expectStringEndsWith(buf[0..got.len], " m uri=\"" ++ shown ++ "\" dsn=\"" ++ shown ++ "\" db.url=\"" ++ shown ++
+        "\" db.pool=4 maybe=\"" ++ shown ++ "\" list=[\"" ++ shown ++ "\",\"" ++ shown ++ "\"]\n");
+    // A URL without a password is written as std writes it.
+    try expectValue(try std.Uri.parse("https://ada@example.com:8443/a?b=c"), "\"https://ada@example.com:8443/a?b=c\"", "\"https://ada@example.com:8443/a?b=c\"");
+    try expectValue(try std.Uri.parse("postgres://app:@db/main"), "\"postgres://app@db/main\"", "postgres://app@db/main");
+    try expectValue(try std.Uri.parse("mailto:ada@example.com"), "\"mailto:ada@example.com\"", "mailto:ada@example.com");
+}
+
 const Money = struct {
     cents: i64,
     pub fn format(m: Money, w: *Writer) Writer.Error!void {
@@ -1154,7 +1326,7 @@ test "the marker comes first, then logValue, then format, then the fields" {
     try expectValue(Both{ .x = 5 }, "5", "5");
 }
 
-test "format: any error set and a generic writer are the form {f} uses too" {
+test "format: inferred errors and a generic writer are the form {f} uses too" {
     const Inferred = struct {
         user: []const u8,
         token_value: []const u8,
@@ -1627,4 +1799,108 @@ test "appendSuppressed after a cut record: the count follows the truncation mark
     try testing.expect(text.truncated);
     const text_len = appendSuppressed(.text, &buf, text.len, 3);
     try testing.expectStringEndsWith(buf[0..text_len], "… truncated=true suppressed=3\n");
+}
+
+var global_label: [5:0]u8 = "alpha".*;
+
+test "a const pointer to a global sentinel array is read when the record is written" {
+    global_label = "omega".*;
+    const label: *const [5:0]u8 = &global_label;
+    var buf: [256]u8 = undefined;
+    const header: Header = .{ .timestamp = fixed_time, .service = "", .scope = "", .oversize = .truncate };
+    var got = record(.json, .info, "m", &buf, header, .{ .label = label, .user = .{ .label = label }, .list = .{label}, .lit = "lit" }).?;
+    try testing.expectStringEndsWith(buf[0..got.len], ",\"label\":\"omega\",\"user\":{\"label\":\"omega\"},\"list\":[\"omega\"],\"lit\":\"lit\"}\n");
+    got = record(.text, .info, "m", &buf, header, .{ .label = label, .user = .{ .label = label }, .list = .{label}, .lit = "lit" }).?;
+    try testing.expectStringEndsWith(buf[0..got.len], " label=omega user.label=omega list=[omega] lit=lit\n");
+}
+
+test "a string literal can be read at compile time, a view of a global variable cannot" {
+    try testing.expect(comptime readable(@as(*const [3:0]u8, "lit")));
+    try testing.expect(!readable(@as(*const [5:0]u8, &global_label)));
+    try testing.expect(readable(42));
+}
+
+test "a literal array too long to render at compile time is written at run time" {
+    var buf: [16384]u8 = undefined;
+    const header: Header = .{ .timestamp = fixed_time, .service = "", .scope = "", .oversize = .truncate };
+    const table: [8000]u32 = @splat(0);
+    var got = record(.json, .info, "m", &buf, header, .{ .table = table }).?;
+    try testing.expect(!got.truncated);
+    try testing.expect(try std.json.validate(testing.allocator, buf[0..got.len]));
+    try testing.expectEqual(@as(usize, 7999), std.mem.count(u8, buf[0..got.len], ",0"));
+    // Each literal field is rendered on its own, so their costs do not add up.
+    const part: [1024]u32 = @splat(7);
+    got = record(.json, .info, "m", &buf, header, .{
+        .a = part,
+        .b = part,
+        .c = part,
+        .d = part,
+        .e = part,
+        .f = part,
+        .g = part,
+        .h = part,
+        .i = part,
+        .j = part,
+        .k = part,
+        .l = part,
+        .m = part,
+        .n = part,
+        .o = part,
+        .p = part,
+    }).?;
+    try testing.expect(try std.json.validate(testing.allocator, buf[0..got.len]));
+}
+
+var opaque_backing: u64 = 0;
+
+test "a pointer to an opaque type is written through its format or logValue" {
+    const Handle = opaque {
+        pub fn format(_: *const @This(), w: *Writer) Writer.Error!void {
+            try w.writeAll("handle");
+        }
+    };
+    const Conn = opaque {
+        pub fn logValue(_: *const @This()) struct { id: u32 } {
+            return .{ .id = 7 };
+        }
+    };
+    var backing: u64 = 0;
+    const h: *const Handle = @ptrCast(&backing);
+    const c: *Conn = @ptrCast(&backing);
+    try expectValue(h, "\"handle\"", "handle");
+    try expectValue(c, "{\"id\":7}", "{id=7}");
+    // Known at compile time, so a literal field; still written at run time.
+    const known: *const Handle = @ptrCast(&opaque_backing);
+    var buf: [256]u8 = undefined;
+    const header: Header = .{ .timestamp = fixed_time, .service = "", .scope = "", .oversize = .truncate };
+    var got = record(.json, .info, "m", &buf, header, .{ .h = known, .c = c, .maybe = @as(?*const Handle, h) }).?;
+    try testing.expectStringEndsWith(buf[0..got.len], ",\"h\":\"handle\",\"c\":{\"id\":7},\"maybe\":\"handle\"}\n");
+    got = record(.text, .info, "m", &buf, header, .{ .h = known, .c = c, .maybe = @as(?*const Handle, h) }).?;
+    try testing.expectStringEndsWith(buf[0..got.len], " m h=handle c.id=7 maybe=handle\n");
+    comptime field_checks.check(@TypeOf(.{ .h = h, .c = c, .list = @as([]const *const Handle, &.{h}) }));
+}
+
+test "a literal member or tag named like a secret is redacted whatever its type" {
+    // Its value is never looked at, so neither is its type's form.
+    const VoidFormat = struct {
+        pub fn format(_: @This(), _: *Writer) void {}
+    };
+    const Auth = union(enum) { secret: VoidFormat, none };
+    const fields = .{ .cfg = .{ .port = 5432, .password = VoidFormat{} }, .auth = Auth{ .secret = .{} } };
+    comptime field_checks.check(@TypeOf(fields));
+    var buf: [256]u8 = undefined;
+    const header: Header = .{ .timestamp = fixed_time, .service = "", .scope = "", .oversize = .truncate };
+    var got = record(.json, .info, "m", &buf, header, fields).?;
+    try testing.expectStringEndsWith(buf[0..got.len], ",\"cfg\":{\"port\":5432,\"password\":\"[REDACTED]\"},\"auth\":{\"secret\":\"[REDACTED]\"}}\n");
+    got = record(.text, .info, "m", &buf, header, fields).?;
+    try testing.expectStringEndsWith(buf[0..got.len], " m cfg.port=5432 cfg.password=[REDACTED] auth.secret=[REDACTED]\n");
+}
+
+test "a literal array of values that exist only at compile time is rendered then, whatever its length" {
+    const ids: [1100]comptime_int = @splat(7);
+    var buf: [8192]u8 = undefined;
+    const header: Header = .{ .timestamp = fixed_time, .service = "", .scope = "", .oversize = .truncate };
+    const got = record(.json, .info, "m", &buf, header, .{ .ids = ids }).?;
+    try testing.expect(!got.truncated);
+    try testing.expectEqual(@as(usize, 1100), std.mem.count(u8, buf[0..got.len], "7"));
 }
