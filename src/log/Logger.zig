@@ -1169,6 +1169,86 @@ test "queued: deinit after a timed-out shutdown wakes a writer thread that waits
     try testing.expect(took.nanoseconds < 500 * std.time.ns_per_ms); // not the one-second recheck
 }
 
+/// Waits, at most five seconds, until `count` threads wait on `waiters`.
+fn waitWaiters(waiters: *const std.atomic.Value(u32), count: u32) !void {
+    for (0..5000) |_| {
+        if (waiters.load(.seq_cst) >= count) return;
+        try testing.io.sleep(.fromMilliseconds(1), .awake);
+    }
+    return error.TestNobodyWaited;
+}
+
+fn logThenCheckCancel(logger: Logger) std.Io.Cancelable!void {
+    logger.info("waited", .{});
+    return testing.io.checkCancel();
+}
+
+test "queued, block: a caller's cancel request outlives its wait for room" {
+    var lock: Lock = .{ .sink = .init(testing.allocator) };
+    defer lock.sink.deinit();
+    const logger: Logger = try .init(testing.allocator, testing.io, .{
+        .mode = .{ .queued = .{ .capacity = 4, .batch_size = 1, .overflow = .block } },
+        .output = .{ .writer = &lock.writer },
+    });
+    defer logger.deinit();
+    logger.info("held", .{});
+    lock.waitEntered();
+    for (0..4) |i| logger.info("queued", .{ .i = i });
+    var task = try testing.io.concurrent(logThenCheckCancel, .{logger});
+    const waited = waitWaiters(&logger.engine.queue.?.space_waiters, 1);
+    const opener = try std.Thread.spawn(.{}, openLater, .{&lock});
+    defer opener.join();
+    try testing.expectError(error.Canceled, task.cancel(testing.io));
+    try waited;
+}
+
+fn flushThenCheckCancel(logger: Logger) std.Io.Cancelable!void {
+    logger.flush(.none) catch {};
+    return testing.io.checkCancel();
+}
+
+test "queued: a caller's cancel request outlives a flush's wait" {
+    var lock: Lock = .{ .sink = .init(testing.allocator) };
+    defer lock.sink.deinit();
+    const logger: Logger = try .init(testing.allocator, testing.io, .{ .mode = .{ .queued = .{} }, .output = .{ .writer = &lock.writer } });
+    defer logger.deinit();
+    logger.info("held", .{});
+    lock.waitEntered();
+    var task = try testing.io.concurrent(flushThenCheckCancel, .{logger});
+    const waited = waitWaiters(&logger.engine.progress_waiters, 1);
+    const opener = try std.Thread.spawn(.{}, openLater, .{&lock});
+    defer opener.join();
+    try testing.expectError(error.Canceled, task.cancel(testing.io));
+    try waited;
+}
+
+fn emergencyThenCheckCancel(logger: Logger, go: *std.atomic.Value(bool)) std.Io.Cancelable!void {
+    while (!go.load(.seq_cst)) std.atomic.spinLoopHint();
+    // No cancelation point while the cancel request lands.
+    const start = std.Io.Clock.awake.now(testing.io);
+    while (start.durationTo(std.Io.Clock.awake.now(testing.io)).nanoseconds < 20 * std.time.ns_per_ms) std.atomic.spinLoopHint();
+    logger.emergency("Going down", .{});
+    return testing.io.checkCancel();
+}
+
+test "emergency writes its record while a cancel request is pending, and keeps the request" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest; // the test needs POSIX pipes
+    var stderr: StderrPipe = try .open();
+    defer stderr.close();
+    const logger: Logger = try .init(testing.allocator, testing.io, .{});
+    logger.engine.stderr = stderr.write_end;
+    var go: std.atomic.Value(bool) = .init(false);
+    var task = try testing.io.concurrent(emergencyThenCheckCancel, .{ logger, &go });
+    go.store(true, .seq_cst);
+    const result = task.cancel(testing.io);
+    const s = logger.stats();
+    logger.deinit();
+    var buf: [256]u8 = undefined;
+    try testing.expectStringEndsWith(try stderr.finish(&buf), "\"message\":\"Going down\"}\n");
+    try testing.expectError(error.Canceled, result);
+    try testing.expectEqual(@as(u64, 1), s.emergency_written);
+}
+
 test "queued: shutdown writes what is queued, then refuses records and counts them" {
     var out: std.Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();

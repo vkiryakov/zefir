@@ -110,6 +110,10 @@ pub fn pushBlocking(q: *Queue, bytes: []const u8) error{Closed}!void {
         error.Closed => return error.Closed,
         error.Full => {},
     }
+    // Not a cancelation point: a cancel request for the caller's task stays
+    // for the task's own next one.
+    const protection = q.io.swapCancelProtection(.blocked);
+    defer _ = q.io.swapCancelProtection(protection);
     _ = q.space_waiters.fetchAdd(1, .seq_cst);
     defer _ = q.space_waiters.fetchSub(1, .seq_cst);
     while (true) {

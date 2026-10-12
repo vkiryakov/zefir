@@ -321,6 +321,10 @@ fn refuseOnOwnThread(engine: *const Engine) error{Timeout}!void {
 /// `target`, or `timeout` passes.
 fn waitProcessed(engine: *Engine, target: u64, timeout: Io.Timeout) error{Timeout}!void {
     const io = engine.own.io();
+    // Not a cancelation point: a cancel request for the caller's task stays
+    // for the task's own next one.
+    const protection = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(protection);
     const deadline = timeout.toDeadline(io);
     _ = engine.progress_waiters.fetchAdd(1, .seq_cst);
     defer _ = engine.progress_waiters.fetchSub(1, .seq_cst);
@@ -537,6 +541,10 @@ fn noteDroppedErrors(engine: *Engine) void {
 /// Io; false when the write failed.
 fn writeStderr(engine: *Engine, bytes: []const u8) bool {
     const io = engine.own.io();
+    // Not a cancelation point, as above: the line goes out, and a cancel
+    // request stays.
+    const protection = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(protection);
     engine.stderr_lock.lockUncancelable(io);
     defer engine.stderr_lock.unlock(io);
     engine.stderr.writeStreamingAll(io, bytes) catch return false;
