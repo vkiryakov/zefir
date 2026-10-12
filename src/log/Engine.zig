@@ -33,6 +33,10 @@ pub const InitError = error{
     TooManyRules,
     /// A scope rule with an empty prefix.
     EmptyPrefix,
+    /// The queue capacity is not a power of two.
+    CapacityNotPowerOfTwo,
+    /// The writer thread would take no records per write.
+    BatchSizeZero,
 };
 
 /// What a logger has done since `init`.
@@ -109,6 +113,13 @@ fn bump(counter: *Counter) void {
 
 pub fn create(gpa: std.mem.Allocator, io: Io, opts: options.Options) InitError!*Engine {
     if (opts.max_record_bytes > max_record_limit) return error.RecordLimitTooLarge;
+    switch (opts.mode) {
+        .sync => {},
+        .queued => |q| {
+            if (q.capacity == 0 or !std.math.isPowerOfTwo(q.capacity)) return error.CapacityNotPowerOfTwo;
+            if (q.batch_size == 0) return error.BatchSizeZero;
+        },
+    }
     if (serviceBytes(opts.service) > max_service_bytes) return error.ServiceTooLong;
     const service: []const u8 = if (opts.format == .json) try encodeService(gpa, opts.service) else &.{};
     errdefer gpa.free(service);
@@ -328,6 +339,9 @@ test "create checks the options" {
     var names: [scopes.max_rules + 1][8]u8 = undefined;
     for (&rules, &names, 0..) |*rule, *name, i| rule.* = .{ .prefix = try std.fmt.bufPrint(name, "r{d}", .{i}), .level = .debug };
     try testing.expectError(error.TooManyRules, create(gpa, io, .{ .scopes = &rules }));
+    try testing.expectError(error.CapacityNotPowerOfTwo, create(gpa, io, .{ .mode = .{ .queued = .{ .capacity = 1000 } } }));
+    try testing.expectError(error.CapacityNotPowerOfTwo, create(gpa, io, .{ .mode = .{ .queued = .{ .capacity = 0 } } }));
+    try testing.expectError(error.BatchSizeZero, create(gpa, io, .{ .mode = .{ .queued = .{ .batch_size = 0 } } }));
     const largest = try create(gpa, io, .{ .max_record_bytes = max_record_limit });
     largest.destroy();
 }

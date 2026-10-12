@@ -81,6 +81,9 @@ pub const Format = options.Format;
 pub const OversizePolicy = options.OversizePolicy;
 pub const SourceMode = options.SourceMode;
 pub const SourceOptions = options.SourceOptions;
+pub const Mode = options.Mode;
+pub const Queued = options.Queued;
+pub const OverflowPolicy = options.OverflowPolicy;
 pub const Output = options.Output;
 
 test "isSensitive is core's check, so one marker serves every module" {
