@@ -52,8 +52,23 @@ pub const checkAll = walk.checkAll;
 pub const assertRules = walk.assertRules;
 pub const fail = walk.fail;
 
+pub const equals = common.equals;
+pub const notEquals = common.notEquals;
+pub const oneOf = common.oneOf;
+pub const noneOf = common.noneOf;
+pub const empty = common.empty;
 pub const notEmpty = common.notEmpty;
+pub const min = numbers.min;
+pub const max = numbers.max;
+pub const range = numbers.range;
 pub const positive = numbers.positive;
+pub const nonNegative = numbers.nonNegative;
+pub const negative = numbers.negative;
+pub const nonPositive = numbers.nonPositive;
+pub const divisibleBy = numbers.divisibleBy;
+pub const finite = numbers.finite;
+pub const minItems = lists.minItems;
+pub const maxItems = lists.maxItems;
 pub const each = lists.each;
 pub const custom = custom_rules.custom;
 

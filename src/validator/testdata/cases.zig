@@ -31,6 +31,8 @@ pub const test_files = [_][]const u8{
     "src/validator/testdata/numbers_test.zig",
     "src/validator/testdata/lists_test.zig",
     "src/validator/testdata/custom_test.zig",
+    "src/validator/testdata/field_types_test.zig",
+    "src/validator/testdata/messages_test.zig",
     "src/validator/testdata/catalog_test.zig",
 };
 
@@ -59,9 +61,9 @@ pub const VectorFile = struct { name: []const u8, rules: []const []const u8 };
 
 /// The golden-vector files, one per documentation page.
 pub const vector_files = [_]VectorFile{
-    .{ .name = "common", .rules = &.{"notEmpty"} },
-    .{ .name = "numbers", .rules = &.{"positive"} },
-    .{ .name = "lists", .rules = &.{ "each", "custom" } },
+    .{ .name = "common", .rules = &.{ "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty" } },
+    .{ .name = "numbers", .rules = &.{ "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite" } },
+    .{ .name = "lists", .rules = &.{ "minItems", "maxItems", "each", "custom" } },
 };
 
 /// A compiled example of src/validator/examples/, by file stem: a program
@@ -77,6 +79,18 @@ pub const examples = [_]Example{
         \\bookings[0]: must not be longer than 30 days (bookings.too_long)
         \\bookings[1].end_day: must not be before the start day (bookings.end_before_start)
         \\bookings[2].guests: must be greater than 0 (validation.positive)
+        \\
+        ,
+    },
+    .{
+        .name = "with_message",
+        .stdout =
+        \\name: заполните поле (validation.not_empty)
+        \\age: age must be from 18 to 120 (validation.range)
+        \\role: role must be one of: admin, editor (validation.one_of)
+        \\tags: не больше 2 тегов (validation.max_items)
+        \\height: must be a finite number (validation.finite)
+        \\weight: weight must be a number (validation.finite)
         \\
         ,
     },

@@ -34,6 +34,7 @@ if (v.check(&request, &path_buf)) |violation| {
 - [Declaring rules](#declaring-rules)
 - [validateSelf and v.fail](#validateself-and-vfail)
 - [v.custom](#vcustom)
+- [Messages](#messages)
 - [Checking values](#checking-values)
 - [Testing a DTO package](#testing-a-dto-package)
 - [Compile errors](#compile-errors)
@@ -45,7 +46,7 @@ Rules by category: [Common](common.md) · [Numbers](numbers.md) · [Lists](lists
 [Coming from class-validator](class_validator.md)
 
 Examples that `zig build test` compiles and runs:
-[Getting started](getting_started.zig) · [validateSelf](validate_self.zig) · [DTO package test](dto_test.zig)
+[Getting started](getting_started.zig) · [validateSelf](validate_self.zig) · [withMessage](with_message.zig) · [DTO package test](dto_test.zig)
 
 ## How it works
 
@@ -174,10 +175,6 @@ tags[1]: must not be empty (validation.not_empty)
 left to right.
 
 ```zig
-fn atMost1000(n: u32) bool {
-    return n <= 1000;
-}
-
 const Order = struct {
     id: []const u8,
     quantity: u32,
@@ -186,7 +183,7 @@ const Order = struct {
 
     pub const field_rules = .{
         .id = v.notEmpty, // one rule
-        .quantity = .{ v.positive, v.custom("orders.max_quantity", "must be at most 1000", atMost1000) }, // a tuple
+        .quantity = .{ v.positive, v.max(1000) }, // a tuple
         .tags = .{ v.notEmpty, v.each(v.notEmpty) },
         .note = v.notEmpty, // null skips the rule; "" fails it
     };
@@ -276,21 +273,13 @@ Rules are compile-time values, so a project declares its own once:
 // rules.zig
 const v = @import("validator");
 
-fn atMost1000(n: u32) bool {
-    return n <= 1000;
-}
-
-pub const quantity = .{ v.positive, v.custom("orders.max_quantity", "must be at most 1000", atMost1000) }; // a tuple
+pub const quantity = .{ v.positive, v.max(1000) }; // a tuple
 pub const sku: v.Rule = v.notEmpty; // one rule
 ```
 
 ```zig
 const v = @import("validator");
 const rules = @import("rules.zig");
-
-fn isEven(n: u32) bool {
-    return n % 2 == 0;
-}
 
 pub const Line = struct {
     sku: []const u8,
@@ -299,12 +288,12 @@ pub const Line = struct {
     pub const field_rules = .{
         .sku = rules.sku,
         .qty = rules.quantity, // the tuple is the whole entry
-        .pack = rules.quantity ++ .{v.custom("orders.odd_pack", "must be even", isEven)}, // ++ joins tuples
+        .pack = rules.quantity ++ .{v.divisibleBy(2)}, // ++ joins tuples
     };
 };
 ```
 
-A tuple inside a tuple is not flattened: `.pack = .{ rules.quantity, v.custom(...) }`
+A tuple inside a tuple is not flattened: `.pack = .{ rules.quantity, v.divisibleBy(2) }`
 is a compile error (`item 0 of the tuple is a tuple; tuples are not flattened: join them with ++, e.g. name_rules ++ .{ v.notEmpty }, or use the tuple as the whole entry`).
 Use a tuple as the whole entry, or join tuples with `++`.
 
@@ -502,13 +491,266 @@ zefir's RPC module. Start a code with your service or domain:
 `v.fail` and to every `validateSelf` result.
 
 **The message** is literal: 1-512 bytes (`v.max_message_bytes`) of valid UTF-8,
-counted in bytes, so a Cyrillic letter takes two. Braces are plain characters.
+counted in bytes, so a Cyrillic letter takes two. Braces are plain characters
+here; a message given later with `.withMessage` is a template
+([Messages](#messages)).
 
 **Behaviour.** There is no precondition: `f` sees NaN, invalid UTF-8 and `""`.
 The rule works on a field of any type, unions and structs included, inside
 `v.each`, and several times on one field (the first one that fails is
 reported). `f` must be pure: no I/O, no global state, no allocation, the same
 answer every time, bounded in time; it must not keep a pointer it receives.
+
+## Messages
+
+A built-in rule reports its code and a **default message**: English, a fragment
+in lower case that starts with `must` and has no trailing period. It names
+neither the field (the path is in `field`) nor the value (a violation never
+contains it), and it shows the parameters of the rule, which are known when the
+program is compiled: `v.min(18)` says `must be at least 18`. The compiler also
+chooses the singular or the plural (`must have at least 1 item`,
+`must have at least 2 items`), the variant for one listed value
+(`v.oneOf(.{.admin})` says `must be admin`) and the variant for equal bounds
+(`v.range(7, 7)` says `must be 7`). The page of each rule lists its messages.
+
+### .withMessage
+
+```zig
+pub fn withMessage(comptime rule: v.Rule, comptime template: []const u8) v.Rule
+```
+
+`rule.withMessage(template)` returns a copy of the rule with another message;
+the code stays. The template must be known at compile time (a literal, a
+`const`, or `++` of them): the compiler fills in the placeholders, and the rule
+keeps the result as a static string.
+
+```zig
+const std = @import("std");
+const v = @import("validator");
+
+const Role = enum { admin, editor, viewer };
+
+// A rule with a message is a value: declare it once, use it on any field.
+const filled = v.notEmpty.withMessage("заполните поле");
+
+const Profile = struct {
+    name: []const u8,
+    nickname: []const u8,
+    age: u8,
+    role: Role,
+    tags: []const []const u8,
+    height: f64,
+    weight: f64,
+
+    pub const field_rules = .{
+        .name = filled,
+        .nickname = filled,
+        .age = v.range(18, 120).withMessage("age must be from {min} to {max}"),
+        .role = v.oneOf(.{ .admin, .editor }).withMessage("role must be one of: {values}"),
+        .tags = v.maxItems(2).withMessage("не больше {max} тегов"),
+        .height = v.positive.withMessage("height must be above zero"), // NaN keeps validation.finite
+        .weight = .{ v.finite.withMessage("weight must be a number"), v.positive },
+    };
+};
+
+pub fn main(init: std.process.Init) !void {
+    var stdout_buffer: [1024]u8 = undefined;
+    var stdout = std.Io.File.stdout().writerStreaming(init.io, &stdout_buffer);
+    const out = &stdout.interface;
+    defer out.flush() catch {};
+
+    const profile: Profile = .{
+        .name = "",
+        .nickname = "ada",
+        .age = 17,
+        .role = .viewer,
+        .tags = &.{ "a", "b", "c" },
+        .height = std.math.nan(f64),
+        .weight = std.math.nan(f64),
+    };
+
+    const report = try v.checkAll(init.gpa, &profile);
+    defer report.deinit();
+    for (report.violations) |violation| {
+        try out.print("{s}: {s} ({s})\n", .{ violation.field orelse "(root)", violation.message, violation.code });
+    }
+}
+```
+
+It prints the violation of every field that fails (`nickname` passes). The codes
+are the rules' own, and the messages come from the templates, except for
+`height`, whose precondition keeps its own:
+
+```text
+name: заполните поле (validation.not_empty)
+age: age must be from 18 to 120 (validation.range)
+role: role must be one of: admin, editor (validation.one_of)
+tags: не больше 2 тегов (validation.max_items)
+height: must be a finite number (validation.finite)
+weight: weight must be a number (validation.finite)
+```
+
+- `.withMessage` works on every rule except `v.each`, which has no message of
+  its own: put it on the rules inside, `v.each(v.notEmpty.withMessage("..."))`.
+- It replaces the message of the rule's own check and never changes the code.
+  A violation of a precondition keeps its code and message, as `height` shows
+  ([Preconditions](#preconditions)).
+- A second `.withMessage` replaces the first:
+  `v.minItems(8).withMessage("a {min}").withMessage("b {min}")` says `b 8`. The
+  rule that `.withMessage` was called on keeps its message.
+- A rule with a message is a value like any rule: `filled` above is declared
+  once and used on two fields, and a tuple of rules with messages can be the
+  whole entry of a field ([Reusing rules](#reusing-rules)).
+- The message of `v.custom` and `v.fail` is literal text, braces included. A
+  template given to `.withMessage` on a `v.custom` rule is read like any other,
+  and `v.custom` has no placeholders.
+
+### Placeholders
+
+A placeholder is the name of a parameter of the rule in braces. `.withMessage`
+replaces it with the parameter as the default message shows it. The names belong
+to the contract of a rule, like its code.
+
+| Placeholder | Rules | The parameter | Shown as |
+| --- | --- | --- | --- |
+| `{expected}` | `v.equals` | the value | a value, as below |
+| `{forbidden}` | `v.notEquals` | the value | a value, as below |
+| `{values}` | `v.oneOf`, `v.noneOf` | the listed values | each value as below, joined with `, ` |
+| `{min}` | `v.min`, `v.range`, `v.minItems` | the lower bound; the least number of items | a number as written; a count in decimal |
+| `{max}` | `v.max`, `v.range`, `v.maxItems` | the upper bound; the largest number of items | as `{min}` |
+| `{divisor}` | `v.divisibleBy` | the divisor | an integer in decimal |
+
+A rule that is not listed has no placeholders, and the page of each rule names
+its own. A placeholder that the rule does not have is a compile error that lists
+the ones it has.
+
+A parameter is shown the same way in a default message and in a placeholder:
+
+| A value | Shown as | Example |
+| --- | --- | --- |
+| an integer | decimal | `v.max(255)`: `must be at most 255` |
+| a float | decimal digits when 1e-6 ≤ \|x\| < 1e21, scientific notation otherwise; `0.0` and `-0.0` as `0` | `v.min(0.5)`: `must be at least 0.5`; `v.max(1e-7)`: `must be at most 1e-7` |
+| a `bool` | `true` or `false` | `v.notEquals(false)`: `must not be equal to false` |
+| an enum tag | its name, without the dot | `v.equals(.admin)`: `must be equal to admin` |
+| a string | escaped, without quotes; the empty string as `""` | `v.oneOf(.{ "", "x" })`: `must be one of: "", x` |
+| a list | its values joined with `, ` | `v.oneOf(.{ 1, 2, 3 })`: `must be one of: 1, 2, 3` |
+
+- A number is shown as written, before it is converted to the field type:
+  `v.max(0.1)` on an `f32` field says `must be at most 0.1`, not
+  `0.10000000149011612`.
+- Escaping is that of `std.zig.fmtString`, so a message stays on one line: `\n`,
+  `\r`, `\t`, `\\` and `"` are escaped, and control bytes, invalid UTF-8, U+0085,
+  U+2028, U+2029 and U+FEFF are written in hex (`\xe2\x80\xa8`). Cyrillic and other
+  valid UTF-8 stays as it is.
+- A listed value that contains `, ` itself makes the message ambiguous:
+  `v.oneOf(.{ "a, b", "c" })` says `must be one of: a, b, c`. Give such a list a
+  message of your own with `.withMessage`.
+
+### Template syntax
+
+| In the template | Result |
+| --- | --- |
+| `{name}` | the placeholder `name` |
+| `{{` | `{` |
+| `}}` | `}` |
+| a `}` alone | `}` |
+| a `{` without a closing `}` | a compile error |
+
+For example, `v.min(18).withMessage("at least {min} years")` says
+`at least 18 years`, `v.divisibleBy(5).withMessage("{{divisor}} = {divisor}")`
+says `{divisor} = 5`, and `v.negative.withMessage("a } b")` says `a } b`.
+
+There is no `{value}` (a violation never contains the value), no `{field}` (the
+path exists only at run time) and no syntax for plurals: the number is known at
+compile time, so write the word in the form you need. The template is read from
+left to right, and its first unknown or unclosed placeholder is the error.
+
+A mistake in a template is a compile error at the `.withMessage` call. It starts
+with the call of the rule and the template, escaped:
+
+```text
+validator: divisibleBy(5).withMessage("must be a multiple of {n}"): unknown placeholder {n}; available: {divisor}
+validator: negative.withMessage("{value} must be negative"): unknown placeholder {value}; this rule has no placeholders
+validator: divisibleBy(5).withMessage("must be divisible by {divisor"): '{' without a closing '}'; write '{{' for a literal '{'
+validator: notEmpty.withMessage(""): message must not be empty
+validator: maxItems(5).withMessage("<the 513-byte template>"): message is longer than 512 bytes
+validator: min(1).withMessage("\xc3"): message must be valid UTF-8
+validator: each(...).withMessage("x"): each has no message of its own; put .withMessage on the inner rules
+```
+
+Mistakes that Zig itself rejects (no template, a template that is not a string
+or not known at compile time) are listed under [Compile errors](#compile-errors).
+
+### Any language, and the 512-byte limit
+
+- Templates of `.withMessage` and messages of `v.custom` and `v.fail` can be in
+  any language: any valid UTF-8, 1-512 bytes (`v.max_message_bytes`). Bytes are
+  counted, not characters: a Cyrillic letter takes 2, a CJK character 3 and an
+  emoji 4, so 512 bytes hold about 250 Cyrillic letters. The limit applies to the
+  message after the placeholders are filled in.
+- Placeholders work the same in every language. Since the number in a
+  placeholder is known at compile time, write the word in the form you need.
+- Default messages are English only, and there are no translation catalogs. To
+  localize, give the rules messages in your language with `.withMessage`, or
+  translate on the client by `code`, which is stable and part of the contract of
+  the rule.
+
+### Fallback messages
+
+A default message that shows a list, a string or a number of hundreds of digits
+can grow beyond 512 bytes. The rules `v.equals`, `v.notEquals`, `v.oneOf` and
+`v.noneOf` then use a general message instead, chosen at compile time; the code
+does not change:
+
+| Rule | Fallback message |
+| --- | --- |
+| `v.equals` | `must be equal to the expected value` |
+| `v.notEquals` | `must not be equal to the forbidden value` |
+| `v.oneOf` | `must be one of the allowed values` |
+| `v.noneOf` | `must not be one of the forbidden values` |
+
+A message of exactly 512 bytes stays; one byte more falls back. `.withMessage`
+replaces a fallback as it replaces any message, and its placeholders still show
+the whole list (the result must still fit in 512 bytes).
+
+`v.min`, `v.max`, `v.range` and `v.divisibleBy` have no fallback. Their default
+message is longer than 512 bytes only for a bound or a divisor of hundreds of
+digits (very wide integer types, `f80` and `f128`), and then the field is a
+compile error unless `.withMessage` replaces the message:
+
+```text
+validator: <Type>.field_rules.<field>: min(<the 512-digit value of 2^1700>): the default message would be 529 bytes (limit 512); use .withMessage(...)
+```
+
+### Preconditions
+
+A precondition is what a rule needs from its input before its own check means
+anything. The rules that compare a number need a finite one on a float field:
+NaN, `+inf` and `-inf` fail with `validation.finite` /
+`must be a finite number`, before the check of the rule runs. The rules with
+this precondition are `v.equals`, `v.notEquals`, `v.min`, `v.max`, `v.range`,
+`v.positive`, `v.nonNegative`, `v.negative`, `v.nonPositive` and
+`v.divisibleBy`; integers, `bool`, enums and strings have no precondition
+([D16](class_validator.md#deviations-from-validatorjs)).
+
+- The code and the message of a precondition are fixed: `.withMessage` does not
+  change them. `v.positive.withMessage("must be above zero")` reports
+  `validation.finite` / `must be a finite number` for NaN and
+  `validation.positive` / `must be above zero` for `-1`. A text such as "name is
+  too long" for an input of the wrong form would be false.
+- A precondition is checked first, even when the check of the rule could decide
+  without it. Its violation is the value's only violation, like any other.
+
+To give the precondition a message of your own, put the rule that checks the
+same condition first in the tuple, with your message:
+
+```zig
+.price = .{ v.finite.withMessage("price must be a number"), v.positive },
+```
+
+`v.finite` is an ordinary rule: its own check reports the same code as the
+precondition, so `.withMessage` applies to it. It stands first, the first rule
+that fails is the only violation of the field, and `v.positive` never sees a NaN.
 
 ## Checking values
 
@@ -589,7 +831,7 @@ pub const Violation = struct {
 | Field | Content |
 | --- | --- |
 | `code` | `validation.<rule>` for a built-in rule (`validation.not_empty`); your code for `v.custom` and `v.fail`; `validation.finite` for NaN or an infinity in a float field; `validation.invalid` for a malformed `validateSelf` result outside Debug |
-| `message` | the rule's default message (`must not be empty`) or yours: 1-512 bytes of UTF-8, without the field name or the value |
+| `message` | the rule's default message (`must not be empty`) or yours: 1-512 bytes of UTF-8, never containing the value (a default message has no field name either) |
 | `field` | the path of the value from the root (`email`, `address.city`, `items[2].name`, `[1].email`); `null` for the root itself |
 
 A violation from a built-in rule, `v.custom` or `v.fail` never contains the
@@ -708,7 +950,7 @@ Errors come from two places, and Zig points to them differently:
 
 | | Rule constructors | Declarations |
 | --- | --- | --- |
-| What | the arguments of `v.custom` and `v.each`, whatever the field | a rule that does not fit its field, an unknown key, a wrong `validateSelf`, a field type the walk cannot enter |
+| What | the arguments of a rule (`v.custom`, `v.each`, `v.min`, `v.oneOf`, …) and the template of `.withMessage`, whatever the field | a rule that does not fit its field, an unknown key, a wrong `validateSelf`, a field type the walk cannot enter |
 | Text | the call as written: `validator: custom("Taken", ...): code 'Taken' has a character outside [a-z0-9_.]; ...` | the path: `validator: orders.Order.field_rules.id: ...` |
 | Where Zig points | into the library; a `note: called at comptime here` shows your line with the call | into the library. With `v.check` or `v.checkAll`, in a test or a program, the first entry under `referenced by:` is your call and the rest are its callers; with `comptime v.assertRules(T)` there is no such list, and the last `note: called at comptime here` shows your call. Either way Zig shows the call, not the DTO, so the path in the text is your pointer |
 
@@ -733,6 +975,12 @@ library runs. These errors point at your line and do not start with
 | `v.notEmpty()`: a rule without parameters called like a function | `type 'core.Rule' not a function` |
 | `v.fail(@This(), .ned, ...)`: a field the struct does not have | `enum 'meta.FieldEnum(bookings.Booking)' has no member named 'ned'` |
 | `v.custom("users.ok", isFree)`: a missing argument | `expected 3 argument(s), found 2` |
+| `v.minItems.withMessage("...")`: `.withMessage` on a rule that needs a call | `no field or member function named 'withMessage' in 'fn (comptime usize) core.Rule'` |
+| `v.minItems(-1)`: a negative count, or one above `maxInt(usize)` | `type 'usize' cannot represent integer value '-1'` |
+| `v.maxItems(1.5)`: a fractional count (`3.0` is accepted) | `fractional component prevents float value '1.5' from coercion to type 'usize'` |
+| `v.notEmpty.withMessage()`: no template, or two | `member function expected 1 argument(s), found 0` |
+| `v.notEmpty.withMessage(5)`: a template that is not a string | `expected type '[]const u8', found 'comptime_int'` |
+| `v.maxItems(limit)`, `.withMessage(text)`: a parameter or a template known only at run time | `unable to resolve comptime value` (note: `argument to comptime parameter must be comptime-known`) |
 
 **What is not checked at compile time:**
 
@@ -759,9 +1007,9 @@ The limits are `comptime_int` constants and part of the contract (see below).
 ## Compatibility
 
 - **The behaviour of a rule is a contract** from the first release that ships
-  it: what it accepts, its code, its default message. So are the walk — which
-  violations `check` and `checkAll` return, in which order, with which paths —
-  and the values of the limits.
+  it: what it accepts, its code, its default message and the names of its
+  placeholders. So are the walk — which violations `check` and `checkAll`
+  return, in which order, with which paths — and the values of the limits.
 - Until 1.0, such a change comes only in a minor release, and its release notes
   say so; a patch release never changes a rule.
 - **Security fixes** are the exception: a rule that panics on some input, takes
@@ -786,7 +1034,22 @@ The limits are `comptime_int` constants and part of the contract (see below).
 
 | Rule | Checks | Code | Page |
 | --- | --- | --- | --- |
+| `v.equals(expected)` | a value is equal to `expected` | `validation.equals` | [common](common.md#vequalsexpected) |
+| `v.notEquals(forbidden)` | a value is not equal to `forbidden` | `validation.not_equals` | [common](common.md#vnotequalsforbidden) |
+| `v.oneOf(.{ ... })` | a string, an enum tag or an integer is one of the listed values | `validation.one_of` | [common](common.md#voneofvalues) |
+| `v.noneOf(.{ ... })` | a string, an enum tag or an integer is none of the listed values | `validation.none_of` | [common](common.md#vnoneofvalues) |
+| `v.empty` | a string has no bytes, a slice no items | `validation.empty` | [common](common.md#vempty) |
 | `v.notEmpty` | a string has at least 1 byte, a slice at least 1 item | `validation.not_empty` | [common](common.md#vnotempty) |
+| `v.min(min)` | a number is at least `min` | `validation.min` | [numbers](numbers.md#vminmin) |
+| `v.max(max)` | a number is at most `max` | `validation.max` | [numbers](numbers.md#vmaxmax) |
+| `v.range(min, max)` | a number is from `min` to `max` | `validation.range` | [numbers](numbers.md#vrangemin-max) |
 | `v.positive` | a number is greater than 0 | `validation.positive` | [numbers](numbers.md#vpositive) |
+| `v.nonNegative` | a number is at least 0 | `validation.non_negative` | [numbers](numbers.md#vnonnegative) |
+| `v.negative` | a number is less than 0 | `validation.negative` | [numbers](numbers.md#vnegative) |
+| `v.nonPositive` | a number is at most 0 | `validation.non_positive` | [numbers](numbers.md#vnonpositive) |
+| `v.divisibleBy(divisor)` | a number is a multiple of `divisor` | `validation.divisible_by` | [numbers](numbers.md#vdivisiblebydivisor) |
+| `v.finite` | a float is neither NaN nor an infinity | `validation.finite` | [numbers](numbers.md#vfinite) |
+| `v.minItems(min)` | a slice has at least `min` items | `validation.min_items` | [lists](lists.md#vminitemsmin) |
+| `v.maxItems(max)` | a slice has at most `max` items | `validation.max_items` | [lists](lists.md#vmaxitemsmax) |
 | `v.each(rules)` | the rules of every item of a slice or an array | the inner rule's code | [lists](lists.md#veachrules) |
 | `v.custom(code, message, f)` | your predicate `f` returns `true` | your `code` | [v.custom](#vcustom) |

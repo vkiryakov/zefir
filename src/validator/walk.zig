@@ -93,18 +93,51 @@ pub fn assertRules(comptime T: type) void {
 pub fn fail(comptime T: type, comptime field: ?FailField(T), comptime code: []const u8, comptime message: []const u8) Violation {
     comptime {
         @setEvalBranchQuota(core.eval_quota);
-        // A struct declared in place has a generated name: show the name its
-        // own code uses for it.
-        const type_name = if (isAnonymous(T)) "@This()" else @typeName(T);
-        const where = "fail(" ++ type_name ++ ", " ++ (if (field) |f| "." ++ @tagName(f) else "null") ++ ")";
-        if (field) |f| {
-            if (isComptimeField(T, @tagName(f)))
-                @compileError("validator: " ++ where ++ ": " ++ @tagName(f) ++ " is a comptime field; comptime fields are not validated");
-        }
+        const where = failCall(T, field);
+        if (failFieldProblem(T, field)) |text| @compileError(text);
         core.checkCode(where, code);
         core.checkMessage(where, message);
     }
     return .{ .code = code, .message = message, .field = if (field) |f| @tagName(f) else null };
+}
+
+/// The call of `fail` as its errors show it: `fail(orders.Booking, .end)`,
+/// or `null` for the struct itself; the field is written as zig fmt writes
+/// it (`.@"error"`).
+fn failCall(comptime T: type, comptime field: ?FailField(T)) []const u8 {
+    // A struct declared in place has a generated name: show the name its
+    // own code uses for it.
+    const type_name = if (isAnonymous(T)) "@This()" else @typeName(T);
+    return "fail(" ++ type_name ++ ", " ++ (if (field) |f| "." ++ core.tagIdentifier(@tagName(f)) else "null") ++ ")";
+}
+
+/// The error of `fail` about its `field`, or null: a comptime field is not
+/// validated, so no violation may name it.
+fn failFieldProblem(comptime T: type, comptime field: ?FailField(T)) ?[]const u8 {
+    const f = field orelse return null;
+    if (!isComptimeField(T, @tagName(f))) return null;
+    return "validator: " ++ failCall(T, field) ++ ": " ++ core.tagIdentifier(@tagName(f)) ++ " is a comptime field; comptime fields are not validated";
+}
+
+/// A struct with fields that Zig source writes with `@"..."`, for the tests of
+/// `fail`'s texts.
+const TestQuotedFields = struct {
+    @"error": u32,
+    plain: u32,
+    comptime @"while": u32 = 0,
+};
+
+test "fail's errors show the call with the field as zig fmt writes it" {
+    const expect = std.testing.expectEqualStrings;
+    try expect("fail(walk.TestQuotedFields, .@\"error\")", comptime failCall(TestQuotedFields, .@"error"));
+    try expect("fail(walk.TestQuotedFields, .plain)", comptime failCall(TestQuotedFields, .plain));
+    try expect("fail(walk.TestQuotedFields, null)", comptime failCall(TestQuotedFields, null));
+    try expect(
+        "validator: fail(walk.TestQuotedFields, .@\"while\"): @\"while\" is a comptime field; comptime fields are not validated",
+        comptime failFieldProblem(TestQuotedFields, .@"while").?,
+    );
+    try std.testing.expectEqual(null, comptime failFieldProblem(TestQuotedFields, .@"error"));
+    try std.testing.expectEqual(null, comptime failFieldProblem(TestQuotedFields, null));
 }
 
 /// The type of `fail`'s `field`: the field names of `T` as an enum, so that a
