@@ -140,6 +140,10 @@ pub const list = [_]Fixture{
     .{ .file = "src/validator/testdata/compile_errors/min_items_negative.zig", .expect = "type 'usize' cannot represent integer value '-1'", .row = "Z-1" },
     .{ .file = "src/validator/testdata/compile_errors/max_items_fractional.zig", .expect = "fractional component prevents float value '1.5' from coercion to type 'usize'", .row = "Z-2" },
     .{ .file = "src/validator/testdata/compile_errors/min_items_uncalled_with_message.zig", .expect = "no field or member function named 'withMessage' in 'fn (comptime usize) core.Rule'", .row = "variant of Z-5" },
+    // contradictions: two rules whose bounds let no value pass; the texts of
+    // every pair are checked by the tests of core.zig
+    .{ .file = "src/validator/testdata/compile_errors/contradiction_min_max.zig", .expect = "validator: contradiction_min_max.Bad.field_rules.x: min(10) and max(5) contradict; no value can pass", .row = "min-14" },
+    .{ .file = "src/validator/testdata/compile_errors/contradiction_in_each.zig", .expect = "validator: contradiction_in_each.Bad.field_rules.x[]: not_empty and empty contradict; no value can pass", .row = "variant of notEmpty-5" },
     // each
     .{ .file = "src/validator/testdata/compile_errors/each_not_rule.zig", .expect = "validator: each(...): expected a rule or a tuple of rules, got *const [1:0]u8", .row = "each-1" },
     .{ .file = "src/validator/testdata/compile_errors/each_tuple_item_not_rule.zig", .expect = "validator: each(...): item 1 of the tuple is comptime_int", .row = "each-2" },

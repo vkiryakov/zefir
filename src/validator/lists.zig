@@ -48,6 +48,7 @@ fn countRule(comptime kind: core.Kind, comptime n: usize, comptime message: []co
         .message = message,
         .args = core.renderArg(n),
         .params = &.{core.param(name, n)},
+        .bounds = &.{if (kind == .min_items) .atLeast(.items, n) else .atMost(.items, n)},
         .fits = countFits(n),
         .eval = struct {
             fn eval(value: anytype) Outcome {
