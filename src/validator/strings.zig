@@ -1,17 +1,18 @@
 //! String rules: the length of a string in code points (`minLength`,
 //! `maxLength`, `length`) or in bytes (`minBytes`, `maxBytes`); `utf8` and
 //! `notBlank`; the ASCII classes (`ascii`, `printableAscii`, `alphanumeric`,
-//! `alpha`, `digits`, `lowercase`, `uppercase`) and `multibyte`; and the
-//! widths of validator.js (`fullWidth`, `halfWidth`, `variableWidth`). A
-//! string is a slice of u8 (`core.isString`).
+//! `alpha`, `digits`, `lowercase`, `uppercase`) and `multibyte`; the widths
+//! of validator.js (`fullWidth`, `halfWidth`, `variableWidth`); substrings
+//! (`contains`, `notContains`); and `strongPassword`. A string is a slice of
+//! u8 (`core.isString`).
 //!
 //! The rules that read code points (`minLength`, `maxLength`, `length`,
-//! `notBlank` and the width rules) validate the whole value first and fail
-//! invalid UTF-8 with the precondition `validation.utf8` / "must be valid
-//! UTF-8"; the others read bytes and never decode. Every rule without a
-//! parameter has a public predicate `is<Name>` that answers what the rule
-//! does, with `false` for invalid UTF-8 where the rule reports the
-//! precondition.
+//! `notBlank`, the width rules and `strongPassword`) validate the whole value
+//! first and fail invalid UTF-8 with the precondition `validation.utf8` /
+//! "must be valid UTF-8"; the others read bytes and never decode. Every rule
+//! without a parameter, and `strongPassword`, has a public predicate
+//! `is<Name>` that answers what the rule does, with `false` for invalid UTF-8
+//! where the rule reports the precondition.
 const std = @import("std");
 const core = @import("core.zig");
 const Rule = core.Rule;
@@ -45,6 +46,33 @@ fn lengthFits(comptime rule: *const Rule, comptime T: type, comptime where: []co
 fn digitsFits(comptime rule: *const Rule, comptime T: type, comptime where: []const u8) void {
     const hint = if (core.isNumber(T)) core.hints.number_field else null;
     if (stringProblem(rule, T, where, hint)) |text| @compileError(text);
+}
+
+/// The field-type check of `contains` and `notContains`.
+fn seedFits(comptime rule: *const Rule, comptime T: type, comptime where: []const u8) void {
+    if (seedProblem(rule, T, where)) |text| @compileError(text);
+}
+
+/// The declaration error of `contains` or `notContains` on the unwrapped
+/// field type `T`, or null. On a list of strings the hint offers the search
+/// inside each item or the list rule for whole items; on a list of other
+/// items, the list rule alone. `[N]u8` gets the core's hint.
+fn seedProblem(comptime rule: *const Rule, comptime T: type, comptime where: []const u8) ?[]const u8 {
+    if (core.isString(T)) return null;
+    if (!core.isU8Array(T)) {
+        if (core.ListChild(T)) |Item| {
+            const hint = if (core.isString(core.Unwrap(Item)))
+                core.hints.searchItems(rule.*)
+            else if (rule.kind == .contains) core.hints.require_items else core.hints.forbid_items;
+            // Nothing is accepted, so the core keeps this hint.
+            return core.typeErrorText(rule, T, where, "a string", rejectsAll, hint);
+        }
+    }
+    return core.typeErrorText(rule, T, where, "a string", core.isString, null);
+}
+
+fn rejectsAll(comptime _: type) bool {
+    return false;
 }
 
 // ------------------------------------------------------------------ minLength, maxLength, length
@@ -400,6 +428,228 @@ fn widthRule(comptime kind: core.Kind, comptime message: []const u8, comptime fu
     });
 }
 
+// ------------------------------------------------------------------ contains, notContains
+
+/// `seed` occurs in the value as a contiguous run of bytes: case-sensitive,
+/// without decoding, case folding or Unicode normalization (`"\u{FF21}"` is
+/// not `"A"`). `seed` is a non-empty valid UTF-8 string of any length; the
+/// search takes linear time whatever its length. The message shows the seed
+/// escaped, or "must contain the required text" when that would be longer
+/// than 512 bytes. Its placeholder is `{seed}`, without the quotes.
+pub fn contains(comptime seed: []const u8) Rule {
+    return seedRule(.contains, seed);
+}
+
+/// `seed` does not occur in the value as a contiguous run of bytes; the
+/// seed and the search are those of `contains`, and "" passes. An overlong
+/// encoding is not the character it would decode to: `"x\xc0\xafy"` passes
+/// `notContains("/")`, so put `v.utf8` first when a lenient decoder reads
+/// the value later. The fallback message is "must not contain the forbidden
+/// text".
+pub fn notContains(comptime seed: []const u8) Rule {
+    return seedRule(.not_contains, seed);
+}
+
+/// The error of the call `contains(seed)` or `notContains(seed)`, or null:
+/// the seed is non-empty valid UTF-8.
+fn seedCallProblem(comptime kind: core.Kind, comptime seed: []const u8) ?[]const u8 {
+    @setEvalBranchQuota(core.eval_quota);
+    if (seed.len != 0 and std.unicode.utf8ValidateSlice(seed)) return null;
+    const head = "validator: " ++ core.info(kind).name ++ "(" ++ core.renderArg(seed) ++ "): ";
+    if (seed.len == 0) return head ++ "an empty seed is " ++ (if (kind == .contains) "vacuous" else "unsatisfiable") ++ ": every string contains \"\"";
+    return head ++ "the seed must be valid UTF-8";
+}
+
+fn seedRule(comptime kind: core.Kind, comptime seed: []const u8) Rule {
+    @setEvalBranchQuota(core.eval_quota);
+    if (seedCallProblem(kind, seed)) |text| @compileError(text);
+    const found = kind == .contains;
+    return core.define(kind, .{
+        .message = (if (found) "must contain \"" else "must not contain \"") ++ core.renderValue(seed) ++ "\"",
+        .fallback = if (found) "must contain the required text" else "must not contain the forbidden text",
+        .args = core.renderArg(seed),
+        .params = &.{core.param("seed", seed)},
+        .fits = seedFits,
+        .eval = struct {
+            fn eval(value: anytype) Outcome {
+                return core.passIf(occurs(seed, value.*) == found);
+            }
+        }.eval,
+    });
+}
+
+/// `needle` occurs in `haystack`, in O(n) for any needle. A needle of 1-4
+/// bytes takes `std.mem.find`, linear for such needles; a longer one the
+/// Knuth-Morris-Pratt scan over a failure table that the compiler builds,
+/// since `std.mem.find` turns to Boyer-Moore-Horspool there, which is
+/// O(n·m) on periodic input. The table is read-only data: the needle's m
+/// bytes and m integers of the smallest type that holds m.
+fn occurs(comptime needle: []const u8, haystack: []const u8) bool {
+    if (comptime needle.len <= 4) return std.mem.find(u8, haystack, needle) != null;
+    const Index = std.math.IntFittingRange(0, needle.len);
+    const table = struct {
+        const bytes: [needle.len]u8 = needle[0..needle.len].*;
+        const failure: [needle.len]Index = kmpTable(Index, needle);
+    };
+    // The length of the needle's prefix that ends here; below needle.len at
+    // the top of every iteration.
+    var matched: Index = 0;
+    for (haystack) |c| {
+        while (matched > 0 and c != table.bytes[matched]) matched = table.failure[matched - 1];
+        if (c == table.bytes[matched]) {
+            matched += 1;
+            if (matched == needle.len) return true;
+        }
+    }
+    return false;
+}
+
+/// `failure[i]` is the length of the longest proper prefix of
+/// `needle[0..i + 1]` that is also its suffix.
+fn kmpTable(comptime Index: type, comptime needle: []const u8) [needle.len]Index {
+    @setEvalBranchQuota(core.eval_quota);
+    var failure: [needle.len]Index = undefined;
+    failure[0] = 0;
+    var k: Index = 0;
+    for (1..needle.len) |i| {
+        while (k > 0 and needle[i] != needle[k]) k = failure[k - 1];
+        if (needle[i] == needle[k]) k += 1;
+        failure[i] = k;
+    }
+    return failure;
+}
+
+// ------------------------------------------------------------------ strongPassword
+
+/// The options of `v.strongPassword` and `v.isStrongPassword`, with the
+/// defaults of validator.js. `min_length` counts code points; the other
+/// minima count occurrences, not distinct characters, of ASCII lowercase
+/// letters, ASCII uppercase letters, ASCII digits and symbols: a space, the
+/// 32 ASCII punctuation characters and `£` (34 in all). Any other code point
+/// (TAB, NBSP, `€`, `é`, an emoji) counts toward the length only.
+pub const StrongPasswordOptions = struct {
+    min_length: usize = 8,
+    min_lowercase: usize = 1,
+    min_uppercase: usize = 1,
+    min_numbers: usize = 1,
+    min_symbols: usize = 1,
+};
+
+/// What a password has: its code points and the four classes.
+const PasswordCounts = struct {
+    length: usize = 0,
+    lower: usize = 0,
+    upper: usize = 0,
+    numbers: usize = 0,
+    symbols: usize = 0,
+
+    fn meets(counts: PasswordCounts, options: StrongPasswordOptions) bool {
+        return counts.length >= options.min_length and counts.lower >= options.min_lowercase and
+            counts.upper >= options.min_uppercase and counts.numbers >= options.min_numbers and
+            counts.symbols >= options.min_symbols;
+    }
+};
+
+/// The symbols of validator.js: U+0020-002F, U+003A-0040, U+005B-0060,
+/// U+007B-007E and U+00A3 (`£`), 34 code points.
+fn isPasswordSymbol(cp: u21) bool {
+    return switch (cp) {
+        0x20...0x2F, 0x3A...0x40, 0x5B...0x60, 0x7B...0x7E, 0xA3 => true,
+        else => false,
+    };
+}
+
+/// The counts of `s`, or null when it is not valid UTF-8.
+fn countPassword(s: []const u8) ?PasswordCounts {
+    if (!std.unicode.utf8ValidateSlice(s)) return null;
+    var counts: PasswordCounts = .{};
+    var it = std.unicode.Utf8View.initUnchecked(s).iterator();
+    while (it.nextCodepoint()) |cp| {
+        counts.length += 1;
+        switch (cp) {
+            'a'...'z' => counts.lower += 1,
+            'A'...'Z' => counts.upper += 1,
+            '0'...'9' => counts.numbers += 1,
+            else => {
+                if (isPasswordSymbol(cp)) counts.symbols += 1;
+            },
+        }
+    }
+    return counts;
+}
+
+/// Valid UTF-8 that meets every minimum of `options`. The options may be
+/// run-time values and are not checked: with every minimum 0 any valid
+/// UTF-8 string passes, "" included, although the rule rejects such options
+/// at compile time. False on invalid UTF-8.
+pub fn isStrongPassword(s: []const u8, options: StrongPasswordOptions) bool {
+    const counts = countPassword(s) orelse return false;
+    return counts.meets(options);
+}
+
+/// At least `options.min_length` code points and at least the minimum of
+/// each class (`StrongPasswordOptions`); `.{}` takes the defaults of
+/// validator.js. Not every minimum may be 0, and `min_length` is at least
+/// the sum of the four class minima. Invalid UTF-8 fails with the
+/// precondition `validation.utf8`; "" fails. The message names the minima
+/// that are not 0, and its placeholders are the five option names, all of
+/// them available also when 0. Compile errors show the call as
+/// `strongPassword(.{...})`.
+pub fn strongPassword(comptime options: StrongPasswordOptions) Rule {
+    @setEvalBranchQuota(core.eval_quota);
+    if (passwordCallProblem(options)) |text| @compileError(text);
+    return core.define(.strong_password, .{
+        .message = passwordMessage(options),
+        .args = ".{...}",
+        .params = &.{
+            core.param("min_length", options.min_length),
+            core.param("min_lowercase", options.min_lowercase),
+            core.param("min_uppercase", options.min_uppercase),
+            core.param("min_numbers", options.min_numbers),
+            core.param("min_symbols", options.min_symbols),
+        },
+        .precondition = core.preconditions.utf8,
+        .fits = stringFits,
+        .eval = struct {
+            fn eval(value: anytype) Outcome {
+                const counts = countPassword(value.*) orelse return .precondition;
+                return core.passIf(counts.meets(options));
+            }
+        }.eval,
+    });
+}
+
+/// The error of the call `strongPassword(options)`, or null: not every
+/// minimum is 0, and `min_length` is at least the sum of the class minima,
+/// so that some string passes.
+fn passwordCallProblem(comptime options: StrongPasswordOptions) ?[]const u8 {
+    const head = "validator: strongPassword(.{...}): ";
+    // In comptime_int, so that huge minima cannot overflow the sum.
+    const sum = @as(comptime_int, options.min_lowercase) + @as(comptime_int, options.min_uppercase) +
+        @as(comptime_int, options.min_numbers) + @as(comptime_int, options.min_symbols);
+    if (options.min_length == 0 and sum == 0) return head ++ "every minimum is 0, so every string passes; set at least one minimum";
+    if (options.min_length < sum)
+        return head ++ std.fmt.comptimePrint("min_length = {d} is less than the {s} the other minima already require; set min_length to at least {d}", .{ options.min_length, core.plural(sum, "character", "characters"), sum });
+    return null;
+}
+
+/// "must be at least 8 characters and contain at least 1 lowercase letter,
+/// 1 uppercase letter, 1 digit and 1 symbol": a class whose minimum is 0 is
+/// left out, the parts are joined by ", " with " and " before the last, and
+/// a noun is singular for 1.
+fn passwordMessage(comptime options: StrongPasswordOptions) []const u8 {
+    var parts: []const []const u8 = &.{};
+    if (options.min_lowercase > 0) parts = parts ++ &[_][]const u8{core.plural(options.min_lowercase, "lowercase letter", "lowercase letters")};
+    if (options.min_uppercase > 0) parts = parts ++ &[_][]const u8{core.plural(options.min_uppercase, "uppercase letter", "uppercase letters")};
+    if (options.min_numbers > 0) parts = parts ++ &[_][]const u8{core.plural(options.min_numbers, "digit", "digits")};
+    if (options.min_symbols > 0) parts = parts ++ &[_][]const u8{core.plural(options.min_symbols, "symbol", "symbols")};
+    var out: []const u8 = "must be at least " ++ core.plural(options.min_length, "character", "characters");
+    for (parts, 0..) |part, i| {
+        out = out ++ (if (i == 0) " and contain at least " else if (i == parts.len - 1) " and " else ", ") ++ part;
+    }
+    return out;
+}
+
 /// The arguments the hints show for an uncalled constructor of this file:
 /// `minLength must be called, e.g. v.minLength(1)`.
 pub const call_examples = .{
@@ -408,6 +658,9 @@ pub const call_examples = .{
     .length = "1, 100",
     .minBytes = "1",
     .maxBytes = "100",
+    .contains = "\"@\"",
+    .notContains = "\" \"",
+    .strongPassword = ".{}",
 };
 
 const expectOutcome = core.expectOutcome;
@@ -422,6 +675,7 @@ fn fitsText(comptime rule: Rule, comptime T: type) ?[]const u8 {
     return switch (rule.kind) {
         .min_length, .max_length, .length => stringProblem(&rule, T, test_where, if (core.isListSlice(T)) core.hints.itemCount(rule) else null),
         .digits => stringProblem(&rule, T, test_where, if (core.isNumber(T)) core.hints.number_field else null),
+        .contains, .not_contains => seedProblem(&rule, T, test_where),
         else => stringProblem(&rule, T, test_where, null),
     };
 }
@@ -636,4 +890,163 @@ test "digits on a number field says the field is already a number" {
     try expect(head ++ "digits expects a string, field is bool", comptime fitsText(digits, bool).?);
     try expect(head ++ "digits expects a string, field is []const []const u8; use v.each(v.digits)", comptime fitsText(digits, []const []const u8).?);
     try expect(head ++ "digits expects a string, field is []const u32", comptime fitsText(digits, []const u32).?);
+}
+
+test "contains and notContains show the seed escaped and fall back to a general message past 512 bytes" {
+    const t = std.testing;
+    const at = contains("@");
+    try t.expectEqual(core.Kind.contains, at.kind);
+    try t.expectEqualStrings("validation.contains", at.code);
+    try t.expectEqualStrings("must contain \"@\"", at.message);
+    try t.expectEqualStrings("\"@\"", at.args.?);
+    try t.expectEqualStrings("seed", at.params[0].name);
+    try t.expectEqualStrings("@", at.params[0].text);
+    try t.expectEqual(null, at.precondition);
+    try t.expectEqualStrings("contains(\"@\")", comptime at.call());
+
+    const no_space = notContains(" ");
+    try t.expectEqual(core.Kind.not_contains, no_space.kind);
+    try t.expectEqualStrings("validation.not_contains", no_space.code);
+    try t.expectEqualStrings("must not contain \" \"", no_space.message);
+    try t.expectEqualStrings("not_contains(\" \")", comptime no_space.label());
+    try t.expectEqual(null, no_space.precondition);
+
+    // Escaped as Zig string literals are; the quotes come from the message.
+    try t.expectEqualStrings("must contain \"\\n\"", contains("\n").message);
+    try t.expectEqualStrings("must contain \"say \\\"hi\\\"\"", contains("say \"hi\"").message);
+    try t.expectEqualStrings("must not contain \"\\xe2\\x80\\xa8\"", notContains("\u{2028}").message);
+    try t.expectEqualStrings("must not contain \"\u{E4}\"", notContains("\u{E4}").message);
+
+    // 15 bytes and the escaped seed for contains, 19 for notContains.
+    const fits_contains: [497]u8 = @splat('x');
+    const over_contains: [498]u8 = @splat('x');
+    try t.expectEqual(512, contains(&fits_contains).message.len);
+    try t.expectEqualStrings("must contain the required text", contains(&over_contains).message);
+    const newlines: [249]u8 = @splat('\n');
+    try t.expectEqualStrings("must contain the required text", contains(&newlines).message);
+    const fits_not: [493]u8 = @splat('y');
+    const over_not: [494]u8 = @splat('y');
+    try t.expectEqual(512, notContains(&fits_not).message.len);
+    try t.expectEqualStrings("must not contain the forbidden text", notContains(&over_not).message);
+    // The placeholder keeps the whole seed.
+    try t.expectEqualStrings(&over_not, notContains(&over_not).params[0].text);
+}
+
+test "strongPassword names the minima that are not 0, singular for 1, and keeps all five as parameters" {
+    const t = std.testing;
+    const defaults = strongPassword(.{});
+    try t.expectEqual(core.Kind.strong_password, defaults.kind);
+    try t.expectEqualStrings("validation.strong_password", defaults.code);
+    try t.expectEqualStrings("must be at least 8 characters and contain at least 1 lowercase letter, 1 uppercase letter, 1 digit and 1 symbol", defaults.message);
+    try t.expectEqualStrings(".{...}", defaults.args.?);
+    try t.expectEqualStrings("strongPassword(.{...})", comptime defaults.call());
+    try t.expectEqualStrings("strong_password(.{...})", comptime defaults.label());
+    try t.expectEqualStrings("validation.utf8", defaults.precondition.?.code);
+    try t.expectEqual(5, defaults.params.len);
+    inline for (.{ "min_length", "min_lowercase", "min_uppercase", "min_numbers", "min_symbols" }, .{ "8", "1", "1", "1", "1" }, 0..) |name, text, i| {
+        try t.expectEqualStrings(name, defaults.params[i].name);
+        try t.expectEqualStrings(text, defaults.params[i].text);
+    }
+    try t.expectEqualStrings("must be at least 12 characters", strongPassword(.{ .min_length = 12, .min_lowercase = 0, .min_uppercase = 0, .min_numbers = 0, .min_symbols = 0 }).message);
+    try t.expectEqualStrings("must be at least 1 character", strongPassword(.{ .min_length = 1, .min_lowercase = 0, .min_uppercase = 0, .min_numbers = 0, .min_symbols = 0 }).message);
+    try t.expectEqualStrings("must be at least 8 characters and contain at least 1 digit and 1 symbol", strongPassword(.{ .min_lowercase = 0, .min_uppercase = 0 }).message);
+    try t.expectEqualStrings("must be at least 10 characters and contain at least 1 digit", strongPassword(.{ .min_length = 10, .min_lowercase = 0, .min_uppercase = 0, .min_symbols = 0 }).message);
+    try t.expectEqualStrings("must be at least 8 characters and contain at least 1 lowercase letter, 1 uppercase letter and 1 symbol", strongPassword(.{ .min_numbers = 0 }).message);
+    try t.expectEqualStrings(
+        "must be at least 12 characters and contain at least 2 lowercase letters, 2 uppercase letters, 2 digits and 2 symbols",
+        strongPassword(.{ .min_length = 12, .min_lowercase = 2, .min_uppercase = 2, .min_numbers = 2, .min_symbols = 2 }).message,
+    );
+    try t.expectEqualStrings("must be at least 4 characters and contain at least 4 digits", strongPassword(.{ .min_length = 4, .min_lowercase = 0, .min_uppercase = 0, .min_numbers = 4, .min_symbols = 0 }).message);
+    // min_length may equal the sum of the class minima.
+    try t.expectEqualStrings("must be at least 4 characters and contain at least 1 lowercase letter, 1 uppercase letter, 1 digit and 1 symbol", strongPassword(.{ .min_length = 4 }).message);
+}
+
+test "contains and notContains take a non-empty valid UTF-8 seed" {
+    const expect = std.testing.expectEqualStrings;
+    try expect("validator: contains(\"\"): an empty seed is vacuous: every string contains \"\"", comptime seedCallProblem(.contains, "").?);
+    try expect("validator: notContains(\"\"): an empty seed is unsatisfiable: every string contains \"\"", comptime seedCallProblem(.not_contains, "").?);
+    try expect("validator: contains(\"\\xff\"): the seed must be valid UTF-8", comptime seedCallProblem(.contains, "\xff").?);
+    try expect("validator: notContains(\"\\xc0\\xaf\"): the seed must be valid UTF-8", comptime seedCallProblem(.not_contains, "\xc0\xaf").?);
+    try std.testing.expectEqual(null, comptime seedCallProblem(.contains, "@"));
+    try std.testing.expectEqual(null, comptime seedCallProblem(.not_contains, "\u{1F600}"));
+}
+
+test "strongPassword needs a minimum that is not 0 and a min_length that holds the class minima" {
+    const expect = std.testing.expectEqualStrings;
+    const head = "validator: strongPassword(.{...}): ";
+    try expect(head ++ "every minimum is 0, so every string passes; set at least one minimum", comptime passwordCallProblem(.{ .min_length = 0, .min_lowercase = 0, .min_uppercase = 0, .min_numbers = 0, .min_symbols = 0 }).?);
+    try expect(head ++ "min_length = 3 is less than the 4 characters the other minima already require; set min_length to at least 4", comptime passwordCallProblem(.{ .min_length = 3 }).?);
+    try expect(head ++ "min_length = 0 is less than the 1 character the other minima already require; set min_length to at least 1", comptime passwordCallProblem(.{ .min_length = 0, .min_lowercase = 1, .min_uppercase = 0, .min_numbers = 0, .min_symbols = 0 }).?);
+    const max = std.math.maxInt(usize);
+    try std.testing.expect(comptime passwordCallProblem(.{ .min_length = max, .min_lowercase = max, .min_uppercase = max }) != null);
+    try std.testing.expectEqual(null, comptime passwordCallProblem(.{}));
+    try std.testing.expectEqual(null, comptime passwordCallProblem(.{ .min_length = 4 }));
+    try std.testing.expectEqual(null, comptime passwordCallProblem(.{ .min_length = 1, .min_lowercase = 0, .min_uppercase = 0, .min_numbers = 0, .min_symbols = 0 }));
+}
+
+test "contains and notContains on a list point at the search inside each item or at the list rules" {
+    const expect = std.testing.expectEqualStrings;
+    const head = "validator: Dto.field_rules.x: ";
+    try expect(
+        head ++ "contains expects a string, field is []const []const u8; use v.each(v.contains(\"@\")) to search inside each item, or v.containsAll(.{ ... }) to require whole items",
+        comptime fitsText(contains("@"), []const []const u8).?,
+    );
+    try expect(
+        head ++ "not_contains expects a string, field is [2][]const u8; use v.each(v.notContains(\" \")) to search inside each item, or v.containsNone(.{ ... }) to forbid whole items",
+        comptime fitsText(notContains(" "), [2][]const u8).?,
+    );
+    try expect(head ++ "contains expects a string, field is []const u32; use v.containsAll(.{ ... }) to require list items", comptime fitsText(contains("1"), []const u32).?);
+    try expect(head ++ "contains expects a string, field is [3]u32; use v.containsAll(.{ ... }) to require list items", comptime fitsText(contains("1"), [3]u32).?);
+    try expect(head ++ "not_contains expects a string, field is []const strings.Record; use v.containsNone(.{ ... }) to forbid list items", comptime fitsText(notContains("a"), []const Record).?);
+    try expect(head ++ "contains expects a string, field is [4]u8; [N]u8 is an array of numbers, not a string: use []const u8", comptime fitsText(contains("@"), [4]u8).?);
+    try expect(head ++ "not_contains expects a string, field is u32", comptime fitsText(notContains("\n"), u32).?);
+    try expect(head ++ "contains expects a string, field is []allowzero const u8; volatile, allowzero and under-aligned slices are neither strings nor lists", comptime fitsText(contains("@"), []allowzero const u8).?);
+}
+
+test "strongPassword takes strings; on a list of strings the each hint shows the options as .{...}" {
+    const expect = std.testing.expectEqualStrings;
+    try expect("validator: Dto.field_rules.x: strong_password expects a string, field is []const []const u8; use v.each(v.strongPassword(.{...}))", comptime fitsText(strongPassword(.{}), []const []const u8).?);
+    try expect("validator: Dto.field_rules.x: strong_password expects a string, field is u32", comptime fitsText(strongPassword(.{}), u32).?);
+    inline for (.{ []const u8, []u8, [:0]const u8, [:0]u8, []align(4) const u8 }) |T| {
+        inline for (.{ contains("a"), notContains("a"), strongPassword(.{}) }) |rule| {
+            try std.testing.expectEqual(null, comptime fitsText(rule, T));
+        }
+    }
+}
+
+test "an uncalled contains, notContains or strongPassword gets an example call" {
+    const expect = std.testing.expectEqualStrings;
+    try expect("validator: Dto.field_rules.x: contains must be called, e.g. v.contains(\"@\")", comptime uncalledText("contains", @TypeOf(contains)));
+    try expect("validator: Dto.field_rules.x: notContains must be called, e.g. v.notContains(\" \")", comptime uncalledText("notContains", @TypeOf(notContains)));
+    try expect("validator: Dto.field_rules.x: strongPassword must be called, e.g. v.strongPassword(.{})", comptime uncalledText("strongPassword", @TypeOf(strongPassword)));
+}
+
+test "the Knuth-Morris-Pratt table and the search agree with a naive search on both paths" {
+    try std.testing.expectEqualSlices(u3, &.{ 0, 1, 2, 3, 0 }, &kmpTable(u3, "aaaab"));
+    try std.testing.expectEqualSlices(u3, &.{ 0, 0, 1, 2, 0 }, &kmpTable(u3, "ababc"));
+    try std.testing.expectEqualSlices(u3, &.{ 0, 0, 1, 2, 3, 0, 1 }, &kmpTable(u3, "ababaca"));
+    try std.testing.expect(occurs("aaaab", "aaaaaaaab"));
+    try std.testing.expect(!occurs("aaaab", "aaabaaa"));
+    try std.testing.expect(occurs("aabaab", "aabaabaab"));
+    try std.testing.expect(!occurs("aabaab", "aabaa"));
+    try std.testing.expect(occurs("ab", "xxab"));
+    try std.testing.expect(!occurs("ab", "a\xffb"));
+    try std.testing.expect(!occurs("abcde", ""));
+    try std.testing.expect(!occurs("a", ""));
+}
+
+test "the password counts: code points, ASCII letters and digits, and 34 symbols" {
+    const counts = countPassword("Ab1! \u{A3}\u{20AC}\t").?;
+    try std.testing.expectEqual(8, counts.length);
+    try std.testing.expectEqual(1, counts.lower);
+    try std.testing.expectEqual(1, counts.upper);
+    try std.testing.expectEqual(1, counts.numbers);
+    try std.testing.expectEqual(3, counts.symbols);
+    try std.testing.expectEqual(null, countPassword("Ab1!\xff"));
+    var symbols: usize = 0;
+    var cp: u21 = 0;
+    while (cp < 0x100) : (cp += 1) {
+        if (isPasswordSymbol(cp)) symbols += 1;
+    }
+    try std.testing.expectEqual(34, symbols);
 }

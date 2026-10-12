@@ -42,8 +42,8 @@ if (v.check(&request, &path_buf)) |violation| {
 - [Compatibility](#compatibility)
 - [All rules](#all-rules)
 
-Rules by category: [Common](common.md) · [Numbers](numbers.md) · [Lists](lists.md) ·
-[Coming from class-validator](class_validator.md)
+Rules by category: [Common](common.md) · [Numbers](numbers.md) · [Strings](strings.md) ·
+[Lists](lists.md) · [Coming from class-validator](class_validator.md)
 
 Examples that `zig build test` compiles and runs:
 [Getting started](getting_started.zig) · [validateSelf](validate_self.zig) · [withMessage](with_message.zig) · [DTO package test](dto_test.zig)
@@ -616,9 +616,11 @@ to the contract of a rule, like its code.
 | `{expected}` | `v.equals` | the value | a value, as below |
 | `{forbidden}` | `v.notEquals` | the value | a value, as below |
 | `{values}` | `v.oneOf`, `v.noneOf` | the listed values | each value as below, joined with `, ` |
-| `{min}` | `v.min`, `v.range`, `v.minItems` | the lower bound; the least number of items | a number as written; a count in decimal |
-| `{max}` | `v.max`, `v.range`, `v.maxItems` | the upper bound; the largest number of items | as `{min}` |
+| `{min}` | `v.min`, `v.range`, `v.minLength`, `v.length`, `v.minBytes`, `v.minItems` | the lower bound; the least number of characters, bytes or items | a number as written; a count in decimal |
+| `{max}` | `v.max`, `v.range`, `v.maxLength`, `v.length`, `v.maxBytes`, `v.maxItems` | the upper bound; the largest number of characters, bytes or items | as `{min}` |
 | `{divisor}` | `v.divisibleBy` | the divisor | an integer in decimal |
+| `{seed}` | `v.contains`, `v.notContains` | the substring | a string as below |
+| `{min_length}`, `{min_lowercase}`, `{min_uppercase}`, `{min_numbers}`, `{min_symbols}` | `v.strongPassword` | the options of the same names, all five also when 0 | an integer in decimal |
 
 A rule that is not listed has no placeholders, and the page of each rule names
 its own. A placeholder that the rule does not have is a compile error that lists
@@ -698,9 +700,9 @@ or not known at compile time) are listed under [Compile errors](#compile-errors)
 ### Fallback messages
 
 A default message that shows a list, a string or a number of hundreds of digits
-can grow beyond 512 bytes. The rules `v.equals`, `v.notEquals`, `v.oneOf` and
-`v.noneOf` then use a general message instead, chosen at compile time; the code
-does not change:
+can grow beyond 512 bytes. The rules `v.equals`, `v.notEquals`, `v.oneOf`,
+`v.noneOf`, `v.contains` and `v.notContains` then use a general message instead,
+chosen at compile time; the code does not change:
 
 | Rule | Fallback message |
 | --- | --- |
@@ -708,6 +710,8 @@ does not change:
 | `v.notEquals` | `must not be equal to the forbidden value` |
 | `v.oneOf` | `must be one of the allowed values` |
 | `v.noneOf` | `must not be one of the forbidden values` |
+| `v.contains` | `must contain the required text` |
+| `v.notContains` | `must not contain the forbidden text` |
 
 A message of exactly 512 bytes stays; one byte more falls back. `.withMessage`
 replaces a fallback as it replaces any message, and its placeholders still show
@@ -730,8 +734,12 @@ NaN, `+inf` and `-inf` fail with `validation.finite` /
 `must be a finite number`, before the check of the rule runs. The rules with
 this precondition are `v.equals`, `v.notEquals`, `v.min`, `v.max`, `v.range`,
 `v.positive`, `v.nonNegative`, `v.negative`, `v.nonPositive` and
-`v.divisibleBy`; integers, `bool`, enums and strings have no precondition
-([D16](class_validator.md#deviations-from-validatorjs)).
+`v.divisibleBy`; on integers, `bool`, enums and strings they have none
+([D16](class_validator.md#deviations-from-validatorjs)). The string rules that
+read code points need valid UTF-8: invalid UTF-8 fails `v.minLength`,
+`v.maxLength`, `v.length`, `v.notBlank`, `v.fullWidth`, `v.halfWidth`,
+`v.variableWidth` and `v.strongPassword` with `validation.utf8` /
+`must be valid UTF-8` ([D13](class_validator.md#deviations-from-validatorjs)).
 
 - The code and the message of a precondition are fixed: `.withMessage` does not
   change them. `v.positive.withMessage("must be above zero")` reports
@@ -746,11 +754,13 @@ same condition first in the tuple, with your message:
 
 ```zig
 .price = .{ v.finite.withMessage("price must be a number"), v.positive },
+.name = .{ v.utf8.withMessage("the name must be UTF-8"), v.maxLength(64) },
 ```
 
-`v.finite` is an ordinary rule: its own check reports the same code as the
-precondition, so `.withMessage` applies to it. It stands first, the first rule
-that fails is the only violation of the field, and `v.positive` never sees a NaN.
+`v.finite` and `v.utf8` are ordinary rules: their own check reports the same
+code as the precondition, so `.withMessage` applies to them. Each stands first,
+the first rule that fails is the only violation of the field, and `v.positive`
+never sees a NaN, nor `v.maxLength` invalid UTF-8.
 
 ## Checking values
 
@@ -978,6 +988,7 @@ library runs. These errors point at your line and do not start with
 | `v.minItems.withMessage("...")`: `.withMessage` on a rule that needs a call | `no field or member function named 'withMessage' in 'fn (comptime usize) core.Rule'` |
 | `v.minItems(-1)`: a negative count, or one above `maxInt(usize)` | `type 'usize' cannot represent integer value '-1'` |
 | `v.maxItems(1.5)`: a fractional count (`3.0` is accepted) | `fractional component prevents float value '1.5' from coercion to type 'usize'` |
+| `v.strongPassword(.{ .minLength = 12 })`: an option the struct does not have | `no field named 'minLength' in struct 'strings.StrongPasswordOptions'` |
 | `v.notEmpty.withMessage()`: no template, or two | `member function expected 1 argument(s), found 0` |
 | `v.notEmpty.withMessage(5)`: a template that is not a string | `expected type '[]const u8', found 'comptime_int'` |
 | `v.maxItems(limit)`, `.withMessage(text)`: a parameter or a template known only at run time | `unable to resolve comptime value` (note: `argument to comptime parameter must be comptime-known`) |
@@ -1049,6 +1060,27 @@ The limits are `comptime_int` constants and part of the contract (see below).
 | `v.nonPositive` | a number is at most 0 | `validation.non_positive` | [numbers](numbers.md#vnonpositive) |
 | `v.divisibleBy(divisor)` | a number is a multiple of `divisor` | `validation.divisible_by` | [numbers](numbers.md#vdivisiblebydivisor) |
 | `v.finite` | a float is neither NaN nor an infinity | `validation.finite` | [numbers](numbers.md#vfinite) |
+| `v.minLength(min)` | a string has at least `min` code points | `validation.min_length` | [strings](strings.md#vminlengthmin) |
+| `v.maxLength(max)` | a string has at most `max` code points | `validation.max_length` | [strings](strings.md#vmaxlengthmax) |
+| `v.length(min, max)` | a string has from `min` to `max` code points | `validation.length` | [strings](strings.md#vlengthmin-max) |
+| `v.minBytes(min)` | a string has at least `min` bytes | `validation.min_bytes` | [strings](strings.md#vminbytesmin) |
+| `v.maxBytes(max)` | a string has at most `max` bytes | `validation.max_bytes` | [strings](strings.md#vmaxbytesmax) |
+| `v.utf8` | a string is valid UTF-8 | `validation.utf8` | [strings](strings.md#vutf8) |
+| `v.notBlank` | a string has a code point outside Unicode White_Space | `validation.not_blank` | [strings](strings.md#vnotblank) |
+| `v.ascii` | every byte of a string is ASCII | `validation.ascii` | [strings](strings.md#vascii) |
+| `v.printableAscii` | every byte of a string is printable ASCII (0x20-0x7E) | `validation.printable_ascii` | [strings](strings.md#vprintableascii) |
+| `v.alphanumeric` | every byte of a string is an ASCII letter or digit | `validation.alphanumeric` | [strings](strings.md#valphanumeric) |
+| `v.alpha` | every byte of a string is an ASCII letter | `validation.alpha` | [strings](strings.md#valpha) |
+| `v.digits` | every byte of a string is an ASCII digit | `validation.digits` | [strings](strings.md#vdigits) |
+| `v.lowercase` | a string has no ASCII uppercase letter | `validation.lowercase` | [strings](strings.md#vlowercase) |
+| `v.uppercase` | a string has no ASCII lowercase letter | `validation.uppercase` | [strings](strings.md#vuppercase) |
+| `v.multibyte` | a string has a byte outside ASCII | `validation.multibyte` | [strings](strings.md#vmultibyte) |
+| `v.fullWidth` | a string has a character outside validator.js's half-width class | `validation.full_width` | [strings](strings.md#vfullwidth) |
+| `v.halfWidth` | a string has a character in validator.js's half-width class | `validation.half_width` | [strings](strings.md#vhalfwidth) |
+| `v.variableWidth` | a string has characters in and outside that class | `validation.variable_width` | [strings](strings.md#vvariablewidth) |
+| `v.contains(seed)` | a string contains `seed` | `validation.contains` | [strings](strings.md#vcontainsseed) |
+| `v.notContains(seed)` | a string does not contain `seed` | `validation.not_contains` | [strings](strings.md#vnotcontainsseed) |
+| `v.strongPassword(.{ ... })` | a password has the length and the classes of characters that the options ask for | `validation.strong_password` | [strings](strings.md#vstrongpasswordoptions) |
 | `v.minItems(min)` | a slice has at least `min` items | `validation.min_items` | [lists](lists.md#vminitemsmin) |
 | `v.maxItems(max)` | a slice has at most `max` items | `validation.max_items` | [lists](lists.md#vmaxitemsmax) |
 | `v.each(rules)` | the rules of every item of a slice or an array | the inner rule's code | [lists](lists.md#veachrules) |

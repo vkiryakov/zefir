@@ -381,6 +381,50 @@ test "variableWidth is a rule value with code validation.variable_width and mess
     try expectNoViolation([]const u8, v.variableWidth, "\u{3042}a");
 }
 
+test "contains is a rule constructor with code validation.contains and message \"must contain \\\"{seed}\\\"\", or \"must contain the required text\" when that would be longer than 512 bytes; placeholder {seed}" {
+    try testing.expect(@hasDecl(v, "contains"));
+    try testing.expect(@typeInfo(@TypeOf(v.contains)).@"fn".return_type == v.Rule);
+    try expectRule(v.contains("@"), "validation.contains", "must contain \"@\"", "must contain \"{seed}\"");
+    try expectPlaceholder(v.contains("@"), "{seed}", "@");
+    try expectViolation([]const u8, v.contains("@"), "ab", "validation.contains", "must contain \"@\"", "x");
+    try expectRule(v.contains(long_string), "validation.contains", "must contain the required text", "must contain the required text");
+    try expectViolation([]const u8, v.contains(long_string), "x", "validation.contains", "must contain the required text", "x");
+    try expectNoViolation([]const u8, v.contains("@"), "a@b");
+}
+
+test "notContains is a rule constructor with code validation.not_contains and message \"must not contain \\\"{seed}\\\"\", or \"must not contain the forbidden text\" when that would be longer than 512 bytes; placeholder {seed}" {
+    try testing.expect(@hasDecl(v, "notContains"));
+    try testing.expect(@typeInfo(@TypeOf(v.notContains)).@"fn".return_type == v.Rule);
+    try expectRule(v.notContains(" "), "validation.not_contains", "must not contain \" \"", "must not contain \"{seed}\"");
+    try expectPlaceholder(v.notContains(" "), "{seed}", " ");
+    try expectViolation([]const u8, v.notContains(" "), "a b", "validation.not_contains", "must not contain \" \"", "x");
+    try expectRule(v.notContains(long_string), "validation.not_contains", "must not contain the forbidden text", "must not contain the forbidden text");
+    try expectViolation([]const u8, v.notContains(long_string), long_string, "validation.not_contains", "must not contain the forbidden text", "x");
+    try expectNoViolation([]const u8, v.notContains(" "), "");
+}
+
+test "strongPassword is a rule constructor with code validation.strong_password and message \"must be at least {min_length} characters and contain at least {min_lowercase} lowercase letters, {min_uppercase} uppercase letters, {min_numbers} digits and {min_symbols} symbols\", leaving out a minimum of 0, singular for 1; placeholders {min_length}, {min_lowercase}, {min_uppercase}, {min_numbers}, {min_symbols}" {
+    try testing.expect(@hasDecl(v, "strongPassword"));
+    try testing.expect(@typeInfo(@TypeOf(v.strongPassword)).@"fn".return_type == v.Rule);
+    try testing.expect(@hasDecl(v, "StrongPasswordOptions"));
+    const template = "must be at least {min_length} characters and contain at least {min_lowercase} lowercase letters, {min_uppercase} uppercase letters, {min_numbers} digits and {min_symbols} symbols";
+    const two = v.strongPassword(.{ .min_length = 12, .min_lowercase = 2, .min_uppercase = 2, .min_numbers = 2, .min_symbols = 2 });
+    try expectRule(two, "validation.strong_password", "must be at least 12 characters and contain at least 2 lowercase letters, 2 uppercase letters, 2 digits and 2 symbols", template);
+    try expectPlaceholder(two, "{min_length}", "12");
+    try expectPlaceholder(two, "{min_lowercase}", "2");
+    try expectPlaceholder(two, "{min_uppercase}", "2");
+    try expectPlaceholder(two, "{min_numbers}", "2");
+    try expectPlaceholder(two, "{min_symbols}", "2");
+    const defaults = "must be at least 8 characters and contain at least 1 lowercase letter, 1 uppercase letter, 1 digit and 1 symbol";
+    try expectRule(v.strongPassword(.{}), "validation.strong_password", defaults, "must be at least {min_length} characters and contain at least {min_lowercase} lowercase letter, {min_uppercase} uppercase letter, {min_numbers} digit and {min_symbols} symbol");
+    try expectViolation([]const u8, v.strongPassword(.{}), "abcdefgh", "validation.strong_password", defaults, "x");
+    const length_only = v.strongPassword(.{ .min_length = 12, .min_lowercase = 0, .min_uppercase = 0, .min_numbers = 0, .min_symbols = 0 });
+    try expectRule(length_only, "validation.strong_password", "must be at least 12 characters", "must be at least {min_length} characters");
+    try expectPlaceholder(length_only, "{min_symbols}", "0");
+    try expectRule(v.strongPassword(.{ .min_lowercase = 0, .min_uppercase = 0 }), "validation.strong_password", "must be at least 8 characters and contain at least 1 digit and 1 symbol", "must be at least {min_length} characters and contain at least {min_numbers} digit and {min_symbols} symbol");
+    try expectNoViolation([]const u8, v.strongPassword(.{}), "Abcdef1!");
+}
+
 /// `rules` fail an invalid UTF-8 value with the utf8 precondition on every
 /// kind of string field.
 fn expectUtf8Precondition(comptime rules: anytype) !void {
@@ -427,6 +471,11 @@ test "halfWidth on a string field fails invalid UTF-8 with the utf8 precondition
 test "variableWidth on a string field fails invalid UTF-8 with the utf8 precondition, also under withMessage" {
     try expectUtf8Precondition(v.variableWidth);
     try expectUtf8Precondition(v.variableWidth.withMessage("another message"));
+}
+
+test "strongPassword on a string field fails invalid UTF-8 with the utf8 precondition, also under withMessage" {
+    try expectUtf8Precondition(v.strongPassword(.{}));
+    try expectUtf8Precondition(v.strongPassword(.{}).withMessage("another message"));
 }
 
 test "utf8 has no precondition: invalid UTF-8 fails its own check, so withMessage changes its message" {
@@ -599,8 +648,8 @@ test "finite has no precondition: nan, inf and -inf on a float field fail its ow
     }
 }
 
-test "the module exports exactly its 60 public names, and Rule.withMessage" {
-    const names = [_][]const u8{ "Violation", "Rule", "Report", "max_code_bytes", "max_message_bytes", "max_report_violations", "check", "checkAll", "assertRules", "fail", "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "minLength", "maxLength", "length", "minBytes", "maxBytes", "utf8", "notBlank", "ascii", "printableAscii", "alphanumeric", "alpha", "digits", "lowercase", "uppercase", "multibyte", "fullWidth", "halfWidth", "variableWidth", "isUtf8", "isNotBlank", "isAscii", "isPrintableAscii", "isAlphanumeric", "isAlpha", "isDigits", "isLowercase", "isUppercase", "isMultibyte", "isFullWidth", "isHalfWidth", "isVariableWidth", "minItems", "maxItems", "each", "custom" };
+test "the module exports exactly its 65 public names, and Rule.withMessage" {
+    const names = [_][]const u8{ "Violation", "Rule", "Report", "max_code_bytes", "max_message_bytes", "max_report_violations", "check", "checkAll", "assertRules", "fail", "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "minLength", "maxLength", "length", "minBytes", "maxBytes", "utf8", "notBlank", "ascii", "printableAscii", "alphanumeric", "alpha", "digits", "lowercase", "uppercase", "multibyte", "fullWidth", "halfWidth", "variableWidth", "contains", "notContains", "strongPassword", "StrongPasswordOptions", "isUtf8", "isNotBlank", "isAscii", "isPrintableAscii", "isAlphanumeric", "isAlpha", "isDigits", "isLowercase", "isUppercase", "isMultibyte", "isFullWidth", "isHalfWidth", "isVariableWidth", "isStrongPassword", "minItems", "maxItems", "each", "custom" };
     inline for (names) |name| try testing.expect(@hasDecl(v, name));
     try testing.expectEqual(names.len, comptime std.meta.declarations(v).len);
     try testing.expect(@hasDecl(v.Rule, "withMessage"));
@@ -608,7 +657,7 @@ test "the module exports exactly its 60 public names, and Rule.withMessage" {
 
 test "every rule the module exports has a catalog test" {
     @setEvalBranchQuota(100_000);
-    const tested = [_][]const u8{ "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "minLength", "maxLength", "length", "minBytes", "maxBytes", "utf8", "notBlank", "ascii", "printableAscii", "alphanumeric", "alpha", "digits", "lowercase", "uppercase", "multibyte", "fullWidth", "halfWidth", "variableWidth", "minItems", "maxItems", "each", "custom" };
+    const tested = [_][]const u8{ "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "minLength", "maxLength", "length", "minBytes", "maxBytes", "utf8", "notBlank", "ascii", "printableAscii", "alphanumeric", "alpha", "digits", "lowercase", "uppercase", "multibyte", "fullWidth", "halfWidth", "variableWidth", "contains", "notContains", "strongPassword", "minItems", "maxItems", "each", "custom" };
     inline for (comptime std.meta.declarations(v)) |name| {
         const T = @TypeOf(@field(v, name));
         if (comptime T == v.Rule or (@typeInfo(T) == .@"fn" and @typeInfo(T).@"fn".return_type == v.Rule)) {
@@ -625,7 +674,7 @@ test "every rule the module exports has a catalog test" {
 
 test "the module exports exactly the catalog predicates of the shipped rules" {
     @setEvalBranchQuota(100_000);
-    const predicates = [_][]const u8{ "isUtf8", "isNotBlank", "isAscii", "isPrintableAscii", "isAlphanumeric", "isAlpha", "isDigits", "isLowercase", "isUppercase", "isMultibyte", "isFullWidth", "isHalfWidth", "isVariableWidth" };
+    const predicates = [_][]const u8{ "isUtf8", "isNotBlank", "isAscii", "isPrintableAscii", "isAlphanumeric", "isAlpha", "isDigits", "isLowercase", "isUppercase", "isMultibyte", "isFullWidth", "isHalfWidth", "isVariableWidth", "isStrongPassword" };
     comptime var exported: usize = 0;
     inline for (comptime std.meta.declarations(v)) |name| {
         if (comptime name.len > 2 and std.mem.startsWith(u8, name, "is") and std.ascii.isUpper(name[2])) {

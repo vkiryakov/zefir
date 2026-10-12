@@ -1,7 +1,8 @@
 //! The string rules through `check` and `checkAll`: code points and bytes,
 //! the utf8 precondition and its order, the character classes on every byte,
-//! White_Space and the width classes on every scalar value, messages and
-//! placeholders, every kind of string field, and random bytes into every rule.
+//! White_Space and the width classes on every scalar value, the substring
+//! search against a naive one, password counting, messages and placeholders,
+//! every kind of string field, and random bytes into every rule.
 const std = @import("std");
 const v = @import("validator");
 const h = @import("vtest");
@@ -466,5 +467,176 @@ test "random bytes into every predicate of a rule without parameters: no panic, 
         try testing.expectEqual(v.isFullWidth(s), passes(v.fullWidth, s));
         try testing.expectEqual(v.isHalfWidth(s), passes(v.halfWidth, s));
         try testing.expectEqual(v.isVariableWidth(s), passes(v.variableWidth, s));
+    }
+}
+
+// ------------------------------------------------------------------ contains, notContains, strongPassword
+
+fn naiveFind(hay: S, needle: S) bool {
+    if (needle.len > hay.len) return false;
+    var i: usize = 0;
+    while (i + needle.len <= hay.len) : (i += 1) {
+        if (std.mem.eql(u8, hay[i..][0..needle.len], needle)) return true;
+    }
+    return false;
+}
+
+/// Seeds of 1-4 bytes take std.mem.find; longer ones the linear scan.
+const seeds = .{ "a", "b", "ab", "ba", "aab", "abab", "aaaa", "aaaab", "ababa", "abaab", "aabaa", "abbab", "baaaa", "aabaab", "abababb", "aaaaaaaaab" };
+
+test "contains and notContains agree with a naive search on every string over {a, b} up to 11 bytes" {
+    var buf: [11]u8 = undefined;
+    for (0..buf.len + 1) |n| {
+        for (0..@as(usize, 1) << @intCast(n)) |bits| {
+            for (buf[0..n], 0..) |*c, i| c.* = if ((bits >> @intCast(i)) & 1 == 1) 'b' else 'a';
+            const s = buf[0..n];
+            inline for (seeds) |seed| {
+                const want = naiveFind(s, seed);
+                try testing.expectEqual(want, passes(v.contains(seed), s));
+                try testing.expectEqual(!want, passes(v.notContains(seed), s));
+            }
+        }
+    }
+}
+
+test "contains and notContains: long and periodic seeds, edges, overlaps, bytes without decoding, case" {
+    const long_seed = repeat("abcdefghij", 30);
+    const hay = repeat("x", 1000) ++ long_seed ++ "y";
+    try h.expectPass(S, v.contains(long_seed), hay);
+    try h.expectFail(S, v.contains(long_seed), hay[0 .. hay.len - 2], "validation.contains", "must contain \"" ++ long_seed ++ "\"");
+    const periodic = repeat("a", 63) ++ "b";
+    try h.expectFail(S, v.contains(periodic), repeat("a", 4096), "validation.contains", "must contain \"" ++ periodic ++ "\"");
+    try h.expectPass(S, v.contains(periodic), repeat("a", 4096) ++ "b");
+    try h.expectFail(S, v.notContains(periodic), repeat("a", 4096) ++ "b", "validation.not_contains", "must not contain \"" ++ periodic ++ "\"");
+    try h.expectPass(S, v.contains("needle"), "needle");
+    try h.expectPass(S, v.contains("needle"), "haystack needle");
+    try h.expectFail(S, v.contains("needle"), "needl", "validation.contains", "must contain \"needle\"");
+    try h.expectFail(S, v.contains("@"), "", "validation.contains", "must contain \"@\"");
+    try h.expectPass(S, v.notContains("@"), "");
+    try h.expectPass(S, v.contains("aabaab"), "aabaabaab");
+    try h.expectPass(S, v.contains("abc"), "\xffabc");
+    try h.expectPass(S, v.notContains("a").withMessage("x"), "\xff");
+    try h.expectFail(S, v.contains("\u{FFFD}"), "a\xffb", "validation.contains", "must contain \"\u{FFFD}\"");
+    try h.expectPass(S, v.notContains("/"), "x\xc0\xafy"); // an overlong '/' is not '/'
+    try h.expectFail(S, .{ v.utf8, v.notContains("/") }, "x\xc0\xafy", utf8_code, utf8_message);
+    try h.expectPass(S, v.notContains("\u{EF}"), "nai\u{308}ve"); // no normalization
+    try h.expectPass(S, v.notContains("A"), "\u{FF21}\u{FF22}");
+    try h.expectFail(S, v.contains("Hello"), "hello", "validation.contains", "must contain \"Hello\"");
+    try h.expectFail(S, v.notContains(" "), "a b", "validation.not_contains", "must not contain \" \"");
+}
+
+test "contains and notContains with a seed too long for the message fall back to a general one" {
+    try h.expectFail(S, v.contains(repeat("ab", 400)), "ab", "validation.contains", "must contain the required text");
+    try h.expectPass(S, v.contains(repeat("ab", 400)), "x" ++ repeat("ab", 401));
+    try h.expectFail(S, v.notContains(repeat("y", 494)), repeat("y", 495), "validation.not_contains", "must not contain the forbidden text");
+    try h.expectRule(v.contains(repeat("ab", 300)).withMessage("needs the token"), "validation.contains", "needs the token");
+}
+
+const no_minimum: v.StrongPasswordOptions = .{ .min_length = 0, .min_lowercase = 0, .min_uppercase = 0, .min_numbers = 0, .min_symbols = 0 };
+
+const PasswordClass = enum { none, lower, upper, number, symbol };
+
+/// The class of `cp` as isStrongPassword counts it.
+fn classOf(cp: u21) PasswordClass {
+    var one: [4]u8 = undefined;
+    const s = encode(cp, &one);
+    var options = no_minimum;
+    options.min_lowercase = 1;
+    if (v.isStrongPassword(s, options)) return .lower;
+    options = no_minimum;
+    options.min_uppercase = 1;
+    if (v.isStrongPassword(s, options)) return .upper;
+    options = no_minimum;
+    options.min_numbers = 1;
+    if (v.isStrongPassword(s, options)) return .number;
+    options = no_minimum;
+    options.min_symbols = 1;
+    if (v.isStrongPassword(s, options)) return .symbol;
+    return .none;
+}
+
+test "strongPassword classes over the Basic Multilingual Plane: 26 lowercase, 26 uppercase, 10 digits, 34 symbols" {
+    var counts: [5]usize = @splat(0);
+    var cp: u21 = 0;
+    while (cp <= 0xFFFF) : (cp += 1) {
+        if (cp >= 0xD800 and cp <= 0xDFFF) continue;
+        counts[@backingInt(classOf(cp))] += 1;
+    }
+    try testing.expectEqual(26, counts[@backingInt(PasswordClass.lower)]);
+    try testing.expectEqual(26, counts[@backingInt(PasswordClass.upper)]);
+    try testing.expectEqual(10, counts[@backingInt(PasswordClass.number)]);
+    try testing.expectEqual(34, counts[@backingInt(PasswordClass.symbol)]);
+    for (" !\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~") |c| try testing.expectEqual(PasswordClass.symbol, classOf(c));
+    try testing.expectEqual(PasswordClass.symbol, classOf(0xA3));
+    for ([_]u21{ 0x09, 0xA0, 0x20AC, 0xE9, 0xFF01, 0x1F600, 0x7F, 0xA2, 0xA5 }) |c| try testing.expectEqual(PasswordClass.none, classOf(c));
+}
+
+test "isStrongPassword applies run-time options literally; it is false on invalid UTF-8" {
+    try testing.expect(v.isStrongPassword("", no_minimum));
+    try testing.expect(v.isStrongPassword("\u{1F600}", no_minimum));
+    try testing.expect(!v.isStrongPassword("\xff", no_minimum));
+    try testing.expect(v.isStrongPassword("Abcdef1!", .{}));
+    try testing.expect(!v.isStrongPassword("Abcdef1!", .{ .min_length = 9 }));
+    var options: v.StrongPasswordOptions = .{};
+    options.min_symbols = 2;
+    try testing.expect(!v.isStrongPassword("Abcdef1!", options));
+    try testing.expect(v.isStrongPassword("Abcdef1!?", options));
+}
+
+test "strongPassword counts occurrences and code points; every minimum is checked" {
+    const message = "must be at least 8 characters and contain at least 1 lowercase letter, 1 uppercase letter, 1 digit and 1 symbol";
+    try h.expectPass(S, v.strongPassword(.{ .min_uppercase = 2 }), "AAbcde1!"); // occurrences, not distinct
+    try h.expectPass(S, v.strongPassword(.{}), "Ab1!\u{1F600}\u{1F600}\u{1F600}\u{1F600}"); // 8 code points
+    try h.expectFail(S, v.strongPassword(.{}), "Ab1!\u{1F600}\u{1F600}", "validation.strong_password", message);
+    try h.expectFail(S, v.strongPassword(.{}), "Abcdef1\u{A0}", "validation.strong_password", message);
+    try h.expectPass(S, v.strongPassword(.{}), "Abcdef1\u{A3}");
+    try h.expectFail(S, v.strongPassword(.{}), "", "validation.strong_password", message);
+    const pin = v.strongPassword(.{ .min_length = 4, .min_lowercase = 0, .min_uppercase = 0, .min_numbers = 4, .min_symbols = 0 });
+    try h.expectPass(S, pin, "1234");
+    try h.expectFail(S, pin, "123a", "validation.strong_password", "must be at least 4 characters and contain at least 4 digits");
+    const each_class = [_]struct { v.StrongPasswordOptions, S, S }{
+        .{ .{ .min_length = 3, .min_lowercase = 3, .min_uppercase = 0, .min_numbers = 0, .min_symbols = 0 }, "abc", "abC" },
+        .{ .{ .min_length = 3, .min_lowercase = 0, .min_uppercase = 3, .min_numbers = 0, .min_symbols = 0 }, "ABC", "ABc" },
+        .{ .{ .min_length = 3, .min_lowercase = 0, .min_uppercase = 0, .min_numbers = 3, .min_symbols = 0 }, "123", "12a" },
+        .{ .{ .min_length = 3, .min_lowercase = 0, .min_uppercase = 0, .min_numbers = 0, .min_symbols = 3 }, " !\u{A3}", " !a" },
+        .{ .{ .min_length = 3, .min_lowercase = 0, .min_uppercase = 0, .min_numbers = 0, .min_symbols = 0 }, "\u{E9}\u{E9}\u{E9}", "\u{E9}\u{E9}" },
+    };
+    for (each_class) |c| {
+        try testing.expect(v.isStrongPassword(c[1], c[0]));
+        try testing.expect(!v.isStrongPassword(c[2], c[0]));
+    }
+    try h.expectFail(S, v.strongPassword(.{}), "Abcdef1!\xff", utf8_code, utf8_message);
+    try h.expectFail(S, v.strongPassword(.{}).withMessage("weak"), "\xff", utf8_code, utf8_message);
+    try h.expectFail(S, v.strongPassword(.{}).withMessage("weak"), "", "validation.strong_password", "weak");
+}
+
+test "withMessage: the placeholders of contains, notContains and strongPassword" {
+    try h.expectRule(v.contains("@").withMessage("must include {seed}"), "validation.contains", "must include @");
+    try h.expectRule(v.notContains("\n").withMessage("no {seed} allowed"), "validation.not_contains", "no \\n allowed");
+    try h.expectRule(v.notContains("\"").withMessage("no '{seed}'"), "validation.not_contains", "no '\\\"'");
+    try h.expectRule(v.contains("@").withMessage("{{seed}} is literal, {seed} is not"), "validation.contains", "{seed} is literal, @ is not");
+    try h.expectRule(v.strongPassword(.{}).withMessage("{min_length}/{min_lowercase}/{min_uppercase}/{min_numbers}/{min_symbols}"), "validation.strong_password", "8/1/1/1/1");
+    // Every strongPassword placeholder is there also when its minimum is 0.
+    try h.expectRule(v.strongPassword(.{ .min_length = 12, .min_symbols = 0 }).withMessage("{min_length} chars, {min_symbols} symbols"), "validation.strong_password", "12 chars, 0 symbols");
+    try h.expectFail(S, v.strongPassword(.{ .min_length = 10 }).withMessage("{min_length}/{min_lowercase}/{min_uppercase}/{min_numbers}/{min_symbols}"), "Abcdef1!", "validation.strong_password", "10/1/1/1/1");
+}
+
+test "contains, notContains and strongPassword take every kind of string and optional ones" {
+    try expectEveryKindOfString(.{ v.contains("a"), v.notContains(" ") }, .{ v.contains("@"), v.notContains("b"), v.strongPassword(.{}) });
+    try h.expectPass(?[:0]const u8, v.strongPassword(.{}), null);
+    try h.expectFail(?S, v.strongPassword(.{}), "Abcdefg1", "validation.strong_password", "must be at least 8 characters and contain at least 1 lowercase letter, 1 uppercase letter, 1 digit and 1 symbol");
+    try h.expectPass(??S, v.contains("@"), null);
+    try h.expectFail(??S, v.notContains("@"), "a@b", "validation.not_contains", "must not contain \"@\"");
+}
+
+test "random bytes into contains, notContains and strongPassword: no panic, and they agree with a naive search and the predicate" {
+    var prng = std.Random.DefaultPrng.init(0x5715_0004);
+    const random = prng.random();
+    var buf: [24]u8 = undefined;
+    for (0..20_000) |_| {
+        const s = randomString(random, &buf);
+        try testing.expectEqual(v.isStrongPassword(s, .{ .min_length = 4 }), passes(v.strongPassword(.{ .min_length = 4 }), s));
+        try testing.expectEqual(naiveFind(s, "a1"), passes(v.contains("a1"), s));
+        try testing.expectEqual(!naiveFind(s, "\u{FF}aA1 "), passes(v.notContains("\u{FF}aA1 "), s));
     }
 }

@@ -1588,10 +1588,23 @@ pub const hints = struct {
     pub const use_utf8 = "use v.utf8 to require valid UTF-8";
     /// `digits` on an integer or a float field.
     pub const number_field = "the field is already a number: use v.min, v.max or v.range";
+    /// `contains` and `notContains` on a list of strings, after the `each`
+    /// call (`searchItems`).
+    pub const search_items = "to search inside each item, or v.containsAll(.{ ... }) to require whole items";
+    pub const search_items_not = "to search inside each item, or v.containsNone(.{ ... }) to forbid whole items";
+    /// `contains` and `notContains` on a list of other items.
+    pub const require_items = "use v.containsAll(.{ ... }) to require list items";
+    pub const forbid_items = "use v.containsNone(.{ ... }) to forbid list items";
 
     /// A rule written on a list whose items it would accept.
     pub fn useEach(comptime rule: Rule) []const u8 {
         return "use v.each(v." ++ rule.call() ++ ")";
+    }
+
+    /// `contains` or `notContains` on a list of strings: the search inside
+    /// each item, or the list rule for whole items.
+    pub fn searchItems(comptime rule: Rule) []const u8 {
+        return useEach(rule) ++ " " ++ if (rule.kind == .contains) search_items else search_items_not;
     }
 
     /// `minLength`, `maxLength` or `length` on a slice of other items: the
@@ -1666,10 +1679,6 @@ pub const pending_kinds = [_]Kind{
     .unique_by,
     .contains_all,
     .contains_none,
-    // PR 2b
-    .contains,
-    .not_contains,
-    .strong_password,
     // PR 3a
     .number_string,
     .decimal,
