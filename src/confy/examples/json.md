@@ -84,7 +84,7 @@ const Config = struct {
 | `http.timeout_s`       | `2.5`                                                      |                               |
 | `http.allowed_origins` | `"https://app.example.com"`, `"https://admin.example.com"` |                               |
 | `db.url`               | `"postgres://db.internal:5432/app"`                        |                               |
-| `db.password`          | `"change-me"`                                              | prints as `[redacted]`        |
+| `db.password`          | `"change-me"`                                              | prints as `[REDACTED]`        |
 | `db.replica_url`       | `null`                                                     | `null` in the file            |
 | `db.pool.size`         | `8`                                                        |                               |
 | `db.pool.max_idle`     | `2`                                                        | not in the file: the default  |

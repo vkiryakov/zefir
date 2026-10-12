@@ -29,6 +29,7 @@ fn getUser(ctx: core.Context, io: std.Io, id: u64) !User {
 - [Trace identity](#trace-identity)
 - [W3C headers](#w3c-headers)
 - [Errors](#errors)
+- [Sensitive types](#sensitive-types)
 - [Thread safety](#thread-safety)
 - [Limits](#limits)
 - [Benchmarks](#benchmarks)
@@ -294,6 +295,26 @@ class of a failure, so a transport can map it to its own status:
 These are the canonical codes of gRPC, Connect and Twirp. `ErrorCode.fromContextError`
 maps `error.Cancelled` and `error.DeadlineExceeded`; `ErrorInfo` pairs a code
 with a borrowed message that core never fills in by itself.
+
+## Sensitive types
+
+A type whose values must never be written out — a password, a token, a
+key — marks itself with one public declaration:
+
+```zig
+const ApiKey = struct {
+    value: []const u8,
+    pub const zefir_sensitive = true;
+};
+
+comptime std.debug.assert(core.isSensitive(ApiKey));
+```
+
+Modules that write values out check `core.isSensitive(T)` and write a
+placeholder instead: zefir-log writes `"[REDACTED]"`, also for `?ApiKey`,
+`*const ApiKey`, `[]const ApiKey` and `[N]ApiKey`. `confy.Secret` is marked
+already. The declaration must be `pub`: a private one is invisible to the
+check, which is why each sensitive type should assert it, as above.
 
 ## Thread safety
 

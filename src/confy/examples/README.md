@@ -561,7 +561,7 @@ db: struct {
 ```
 
 - `expose()` returns the value: `config.db.password.expose()`.
-- `{f}` prints `[redacted]`; `{any}` shows no value; `{s}` doesn't compile.
+- `{f}` prints `[REDACTED]`; `{any}` shows no value; `{s}` doesn't compile.
 - A secret is read from any source like a string.
 - `confy.free` overwrites secrets with zeros before freeing them.
 
