@@ -1065,11 +1065,12 @@ pub const Rule = struct {
     /// (NaN under `v.positive.withMessage(...)` still reports
     /// `validation.finite`). `{name}` is a placeholder of the rule: its
     /// parameter `name` as the default message shows it. `{{` writes `{`,
-    /// `}}` writes `}`, and any other `}` stays. The message must be 1-512
-    /// bytes of valid UTF-8, in any language. A second `.withMessage`
-    /// replaces the first; the rule it is called on keeps its message. `each`
-    /// has no message of its own: give its inner rules theirs. A mistake is a
-    /// compile error at the call.
+    /// `}}` writes `}`, and any other `}` stays. On `v.custom` the template
+    /// replaces its literal message: braces are syntax here, and custom has no
+    /// placeholders. The message must be 1-512 bytes of valid UTF-8, in any
+    /// language. A second `.withMessage` replaces the first; the rule it is
+    /// called on keeps its message. `each` has no message of its own: give its
+    /// inner rules theirs. A mistake is a compile error at the call.
     pub fn withMessage(comptime rule: Rule, comptime template: []const u8) Rule {
         switch (renderTemplate(rule, template)) {
             .message => |message| {
@@ -1084,8 +1085,9 @@ pub const Rule = struct {
 
 /// Everything `define` needs to build a built-in rule.
 pub const Spec = struct {
-    /// The default message: 1-512 bytes of valid UTF-8, unless `fallback`
-    /// replaces it.
+    /// The default message: 1-512 bytes of valid UTF-8; a longer one takes
+    /// `fallback`, or, without one, stays and fails the field's declaration
+    /// check (see `define`).
     message: []const u8,
     /// The general message that replaces `message` when the parameters shown
     /// in it make it longer than 512 bytes ("must be equal to the expected
@@ -1147,8 +1149,7 @@ pub const Template = union(enum) { message: []const u8, problem: []const u8 };
 pub fn renderTemplate(comptime rule: Rule, comptime template: []const u8) Template {
     comptime {
         @setEvalBranchQuota(eval_quota);
-        const head = "validator: " ++ rule.call() ++ ".withMessage(\"" ++ escape(template) ++ "\"): ";
-        if (rule.kind == .each) return .{ .problem = head ++ "each has no message of its own; put .withMessage on the inner rules" };
+        if (rule.kind == .each) return .{ .problem = templateHead(rule, template) ++ "each has no message of its own; put .withMessage on the inner rules" };
         var out: []const u8 = "";
         // The first byte of the literal text not copied to `out` yet.
         var start: usize = 0;
@@ -1162,9 +1163,9 @@ pub fn renderTemplate(comptime rule: Rule, comptime template: []const u8) Templa
                         i += 2;
                     } else {
                         const close = std.mem.findScalarPos(u8, template, i + 1, '}') orelse
-                            return .{ .problem = head ++ "'{' without a closing '}'; write '{{' for a literal '{'" };
+                            return .{ .problem = templateHead(rule, template) ++ "'{' without a closing '}'; write '{{' for a literal '{'" };
                         const name = template[i + 1 .. close];
-                        out = out ++ (placeholderText(rule, name) orelse return .{ .problem = head ++ unknownPlaceholder(rule, name) });
+                        out = out ++ (placeholderText(rule, name) orelse return .{ .problem = templateHead(rule, template) ++ unknownPlaceholder(rule, name) });
                         i = close + 1;
                     }
                     start = i;
@@ -1182,9 +1183,16 @@ pub fn renderTemplate(comptime rule: Rule, comptime template: []const u8) Templa
             }
         }
         const message = out ++ template[start..];
-        if (messageProblem(message)) |problem| return .{ .problem = head ++ describeMessageProblem(problem) };
+        if (messageProblem(message)) |problem| return .{ .problem = templateHead(rule, template) ++ describeMessageProblem(problem) };
         return .{ .message = message };
     }
+}
+
+/// The start of a `.withMessage` error: `validator: min(1).withMessage("..."): `,
+/// with the template escaped. Built only for an error: escaping every
+/// template up front would slow down the analysis of every DTO with messages.
+fn templateHead(comptime rule: Rule, comptime template: []const u8) []const u8 {
+    return "validator: " ++ rule.call() ++ ".withMessage(\"" ++ escape(template) ++ "\"): ";
 }
 
 /// The text of the placeholder `name` of `rule`: its parameter as messages
@@ -1211,10 +1219,10 @@ pub fn placeholderList(comptime rule: Rule) []const u8 {
 }
 
 /// The problem of the placeholder `name`, which `rule` does not have. The
-/// name is shown as written.
+/// name is escaped as the template in the head is.
 fn unknownPlaceholder(comptime rule: Rule, comptime name: []const u8) []const u8 {
     const available = placeholderList(rule);
-    return "unknown placeholder {" ++ name ++ "}; " ++ if (available.len == 0) "this rule has no placeholders" else "available: " ++ available;
+    return "unknown placeholder {" ++ escape(name) ++ "}; " ++ if (available.len == 0) "this rule has no placeholders" else "available: " ++ available;
 }
 
 /// The declaration error of a rule whose default message is longer than 512
@@ -1291,6 +1299,14 @@ test "an unknown placeholder is an error at the call that lists the placeholders
     try expect("validator: maxItems(5).withMessage(\"{min}\"): unknown placeholder {min}; available: {max}", comptime withMessageText(root.maxItems(5), "{min}"));
     // {value} and {field} exist on no rule.
     try expect("validator: equals(5).withMessage(\"{value}\"): unknown placeholder {value}; available: {expected}", comptime withMessageText(root.equals(5), "{value}"));
+    // The name is escaped as the template is, so the error stays on one line.
+    try expect("validator: min(1).withMessage(\"{a\\nb}\"): unknown placeholder {a\\nb}; available: {min}", comptime withMessageText(root.min(1), "{a\nb}"));
+    // In a chain, the head shows the rule's call and the template that fails,
+    // not the earlier .withMessage.
+    try expect(
+        "validator: minItems(8).withMessage(\"{x}\"): unknown placeholder {x}; available: {min}",
+        comptime withMessageText(root.minItems(8).withMessage("a {min}"), "{x}"),
+    );
 }
 
 test "a placeholder on a rule without placeholders is an error, custom included" {
@@ -1304,6 +1320,7 @@ test "a placeholder on a rule without placeholders is an error, custom included"
         comptime withMessageText(root.custom("acme.even", "must be even, not {odd}", isEvenForTest), "{odd}"),
     );
     try expect("validator: notEmpty.withMessage(\"{field} is required\"): unknown placeholder {field}; this rule has no placeholders", comptime withMessageText(root.notEmpty, "{field} is required"));
+    try expect("validator: negative.withMessage(\"{\\xff}\"): unknown placeholder {\\xff}; this rule has no placeholders", comptime withMessageText(root.negative, "{\xff}"));
 }
 
 test "a { without a closing } is an error; {{ writes a literal {" {
@@ -1366,6 +1383,8 @@ test "withMessage replaces the message only: the code, the parameters and the pr
     try t.expectEqualStrings("must be from 1 to 100", base.message);
     // A second withMessage replaces the first, with the same placeholders.
     try t.expectEqualStrings("b 8", (comptime root.minItems(8).withMessage("a {min}").withMessage("b {min}")).message);
+    // On custom the template replaces the literal message, and its braces are syntax.
+    try t.expectEqualStrings("{x} } {", (comptime root.custom("acme.even", "{x} }} {{", isEvenForTest).withMessage("{{x}} }} {{")).message);
 }
 
 test "a default message over 512 bytes without a fallback stays in the rule, and the field's declaration check reports it" {
