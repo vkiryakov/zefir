@@ -1111,6 +1111,24 @@ test "queued: flush with a deadline gives up while the writer is held" {
     try testing.expectEqual(@as(usize, 1), lock.lines());
 }
 
+test "queued: a producer stopped between reserving and publishing holds flush back; nothing is lost" {
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    const logger: Logger = try .init(testing.allocator, testing.io, .{ .mode = .{ .queued = .{} }, .output = .{ .writer = &out.writer } });
+    defer logger.deinit();
+    const q = &logger.engine.queue.?;
+    const stopped = try q.reserve(); // a producer stops right after reserving
+    logger.info("after", .{});
+    try testing.expectError(error.Timeout, logger.flush(.{ .duration = .{ .raw = .fromMilliseconds(20), .clock = .awake } }));
+    try testing.expectEqual(@as(u64, 2), logger.stats().pending);
+    q.publish(stopped, "{\"stopped\":true}\n"); // queued records keep their '\n'
+    try logger.flush(.none);
+    var lines = std.mem.splitScalar(u8, out.written(), '\n');
+    try testing.expectEqualStrings("{\"stopped\":true}", lines.next().?);
+    try testing.expectStringEndsWith(lines.next().?, "\"message\":\"after\"}");
+    try testing.expectEqualStrings("", lines.rest());
+}
+
 test "queued: shutdown writes what is queued, then refuses records and counts them" {
     var out: std.Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();

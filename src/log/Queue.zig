@@ -71,20 +71,30 @@ fn payload(q: *const Queue, index: u64) []u8 {
 /// slot is free, `error.Closed` after `close`.
 pub fn tryPush(q: *Queue, bytes: []const u8) error{ Full, Closed }!void {
     std.debug.assert(bytes.len <= q.slot_size - header_bytes);
+    q.publish(try q.reserve(), bytes);
+}
+
+/// Reserves the next position: its slot is the caller's until `publish`.
+pub fn reserve(q: *Queue) error{ Full, Closed }!u64 {
     var pos = q.tail.load(.monotonic);
-    const index = while (true) {
+    while (true) {
         if (pos & closed_bit != 0) return error.Closed;
-        const index = pos & q.mask;
         // Acquire: the consumer's reads of this slot's last record are done.
-        const dif: i64 = @bitCast(q.seq(index).load(.acquire) -% pos);
+        const dif: i64 = @bitCast(q.seq(pos & q.mask).load(.acquire) -% pos);
         if (dif == 0) {
-            pos = q.tail.cmpxchgWeak(pos, pos + 1, .monotonic, .monotonic) orelse break index;
+            pos = q.tail.cmpxchgWeak(pos, pos + 1, .monotonic, .monotonic) orelse return pos;
         } else if (dif < 0) {
             return error.Full; // the slot still holds the record of the last lap
         } else {
             pos = q.tail.load(.monotonic); // another producer took this position
         }
-    };
+    }
+}
+
+/// Copies `bytes` into the slot of position `pos`, which `reserve` gave,
+/// and hands it to the consumer.
+pub fn publish(q: *Queue, pos: u64, bytes: []const u8) void {
+    const index = pos & q.mask;
     @memcpy(q.payload(index)[0..bytes.len], bytes);
     q.len(index).* = @intCast(bytes.len);
     // seq_cst, not just release: with the load below it pairs with the
@@ -401,4 +411,61 @@ test "a sleeping consumer is woken by a push" {
     try q.tryPush("wake up");
     consumer.join();
     try testing.expect(woke.load(.seq_cst));
+}
+
+test "a producer stopped between reserving and publishing holds back the records after it, and loses none" {
+    var threaded: std.Io.Threaded = .init_single_threaded;
+    var q = try Queue.init(testing.allocator, 8, 64, threaded.io());
+    defer q.deinit(testing.allocator);
+    try q.tryPush("a");
+    const stopped = try q.reserve(); // its producer stops here
+    try q.tryPush("c");
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try drainLines(&q, &out);
+    try testing.expectEqualStrings("a\n", out.written());
+    try testing.expectEqual(@as(u64, 2), q.depth());
+    q.publish(stopped, "b"); // and goes on
+    try drainLines(&q, &out);
+    try testing.expectEqualStrings("a\nb\nc\n", out.written());
+}
+
+/// Takes `rounds` records one at a time, sleeping whenever none is there,
+/// and counts the sleeps that ran out without a record: lost wake-ups.
+fn consumeRounds(q: *Queue, rounds: usize, lost: *u32) void {
+    var batch: [64]u8 = undefined;
+    var ends: [1]usize = undefined;
+    var taken: usize = 0;
+    const patience: std.Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } };
+    while (taken < rounds) {
+        if (q.pop(&batch, &ends) == 1) {
+            taken += 1;
+            continue;
+        }
+        const start = std.Io.Clock.awake.now(q.io);
+        q.waitForWork(patience);
+        const slept = start.durationTo(std.Io.Clock.awake.now(q.io));
+        if (!q.ready() and slept.nanoseconds >= std.time.ns_per_s * 5) lost.* += 1;
+    }
+}
+
+test "lost wake-up detector: a consumer that sleeps between pushes is always woken" {
+    var threaded: std.Io.Threaded = .init_single_threaded;
+    var q = try Queue.init(testing.allocator, 4, 64, threaded.io());
+    defer q.deinit(testing.allocator);
+    const rounds = 2000;
+    var lost: u32 = 0;
+    const consumer = try std.Thread.spawn(.{}, consumeRounds, .{ &q, rounds, &lost });
+    for (0..rounds) |round| {
+        // Push at once, right after the consumer says it sleeps, or a little
+        // later: the race sits in each of these windows.
+        switch (round % 3) {
+            0 => {},
+            1 => while (q.consumer_sleeping.load(.seq_cst) == 0 and q.depth() == 0) std.Thread.yield() catch {},
+            else => for (0..round % 7) |_| std.Thread.yield() catch {},
+        }
+        try q.pushBlocking("x");
+    }
+    consumer.join();
+    try testing.expectEqual(@as(u32, 0), lost);
 }

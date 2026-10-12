@@ -3,6 +3,9 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    // `-Dtsan=true` builds the modules, tests and examples with
+    // ThreadSanitizer (Linux and macOS); the CI job `tsan` runs the tests so.
+    const tsan = b.option(bool, "tsan", "Build with ThreadSanitizer") orelse false;
 
     // Framework modules. Public names ("zefir-*") are used by consumers
     // via dep.module("..."); internal names in .imports via @import("...").
@@ -11,12 +14,14 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/core/root.zig"),
         .target = target,
         .optimize = optimize,
+        .sanitize_thread = tsan,
     });
 
     const log = b.addModule("zefir-log", .{
         .root_source_file = b.path("src/log/root.zig"),
         .target = target,
         .optimize = optimize,
+        .sanitize_thread = tsan,
         .imports = &.{
             .{ .name = "core", .module = core },
         },
@@ -26,6 +31,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/confy/root.zig"),
         .target = target,
         .optimize = optimize,
+        .sanitize_thread = tsan,
         .imports = &.{
             .{ .name = "log", .module = log },
         },
@@ -35,6 +41,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/rpc/root.zig"),
         .target = target,
         .optimize = optimize,
+        .sanitize_thread = tsan,
         .imports = &.{
             .{ .name = "confy", .module = confy },
         },
@@ -44,6 +51,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/orm/root.zig"),
         .target = target,
         .optimize = optimize,
+        .sanitize_thread = tsan,
         .imports = &.{
             .{ .name = "log", .module = log },
         },
@@ -54,6 +62,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/zefir.zig"),
         .target = target,
         .optimize = optimize,
+        .sanitize_thread = tsan,
         .imports = &.{
             .{ .name = "core", .module = core },
             .{ .name = "log", .module = log },
@@ -66,7 +75,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run all tests");
     for ([_]*std.Build.Module{ core, log, confy, rpc, orm, zefir }) |module| {
         const tests = b.addTest(.{ .root_module = module });
-        test_step.dependOn(&b.addRunArtifact(tests).step);
+        test_step.dependOn(&addRun(b, tests, tsan).step);
     }
 
     // core examples: `zig build test` builds and runs them; an example that
@@ -78,12 +87,13 @@ pub fn build(b: *std.Build) void {
                 .root_source_file = b.path(b.fmt("src/core/examples/{s}.zig", .{name})),
                 .target = target,
                 .optimize = optimize,
+                .sanitize_thread = tsan,
                 .imports = &.{
                     .{ .name = "core", .module = core },
                 },
             }),
         });
-        const run = b.addRunArtifact(example);
+        const run = addRun(b, example, tsan);
         run.expectExitCode(0);
         test_step.dependOn(&run.step);
     }
@@ -96,13 +106,14 @@ pub fn build(b: *std.Build) void {
                 .root_source_file = b.path(b.fmt("src/log/examples/{s}.zig", .{name})),
                 .target = target,
                 .optimize = optimize,
+                .sanitize_thread = tsan,
                 .imports = &.{
                     .{ .name = "core", .module = core },
                     .{ .name = "log", .module = log },
                 },
             }),
         });
-        const run = b.addRunArtifact(example);
+        const run = addRun(b, example, tsan);
         run.expectExitCode(0);
         test_step.dependOn(&run.step);
     }
@@ -114,6 +125,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/log/tests/compile_errors.zig"),
         .target = target,
         .optimize = optimize,
+        .sanitize_thread = tsan,
         .imports = &.{
             .{ .name = "log", .module = log },
         },
@@ -182,4 +194,12 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&bench.step);
     const bench_step = b.step("bench", "Run benchmarks");
     bench_step.dependOn(&b.addRunArtifact(bench).step);
+}
+
+/// Runs `artifact`. Under ThreadSanitizer the first report fails the run at
+/// once, with an exit code rather than an abort and its crash report.
+fn addRun(b: *std.Build, artifact: *std.Build.Step.Compile, tsan: bool) *std.Build.Step.Run {
+    const run = b.addRunArtifact(artifact);
+    if (tsan) run.setEnvironmentVariable("TSAN_OPTIONS", "halt_on_error=1:abort_on_error=0");
+    return run;
 }

@@ -29,6 +29,23 @@ jobs:
       - uses: mlugg/setup-zig@v2
       - run: zig build test --summary all
 
+  # The tests again under ThreadSanitizer; it does not build for Windows.
+  tsan:
+    name: tsan (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: mlugg/setup-zig@v2
+      # TSan maps its shadow memory at fixed addresses, which the mmap
+      # randomness of recent Ubuntu kernels can take.
+      - if: runner.os == 'Linux'
+        run: sudo sysctl vm.mmap_rnd_bits=28
+      - run: zig build test -Dtsan=true --summary all
+
   fmt:
     name: fmt
     runs-on: ubuntu-latest

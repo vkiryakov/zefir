@@ -112,4 +112,5 @@ test {
     _ = @import("Queue.zig");
     _ = @import("writer.zig");
     _ = @import("emergency.zig");
+    _ = @import("tests/stress.zig");
 }
