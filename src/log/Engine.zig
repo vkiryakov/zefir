@@ -576,6 +576,17 @@ fn callerIo(engine: *Engine) Io {
     return if (hooks.subscriber_of == engine) engine.own.io() else engine.io;
 }
 
+/// Whether the logger runs in queued mode. Through a pointer: comparing
+/// the optional queue itself with null copies it, reading the fields other
+/// threads change.
+fn isQueued(engine: *const Engine) bool {
+    if (engine.queue) |*q| {
+        _ = q;
+        return true;
+    }
+    return false;
+}
+
 /// Whether the application's Io is a `std.Io.Threaded`, as the logger's
 /// own is: then both wait on the same OS futexes and can share a lock.
 fn appIoIsThreaded(engine: *Engine) bool {
@@ -590,7 +601,7 @@ fn accept(engine: *Engine, comptime level: Level) bool {
     // A sync write from a handler takes the output lock through the
     // logger's own Io; an application on another Io (an evented one) waits
     // for that lock in a way the logger's own Io cannot wake.
-    if (hooks.in_interceptor or (from_handler and engine.queue == null and !engine.appIoIsThreaded())) {
+    if (hooks.in_interceptor or (from_handler and !engine.isQueued() and !engine.appIoIsThreaded())) {
         bump(&engine.counters.hook_errors);
         return false;
     }
