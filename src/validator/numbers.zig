@@ -14,7 +14,10 @@ const Outcome = core.Outcome;
 /// bound is an integer within the type; on a float field a finite number,
 /// rounded to the nearest value of the type, and an integer bound must be
 /// exact in it. The message shows the bound as written: `v.min(0.5)` says
-/// "must be at least 0.5" whatever the field type.
+/// "must be at least 0.5". A typed float narrower than a float field keeps
+/// its exact value there (`@as(f32, 0.1)` is 0.10000000149011612 in f64), so
+/// one whose value would show otherwise is a compile error: write the bound
+/// as a literal or in the field's type.
 pub fn min(comptime bound: anytype) Rule {
     @setEvalBranchQuota(core.eval_quota);
     if (callProblem("min", .{bound})) |text| @compileError(text);
@@ -588,6 +591,9 @@ test "a bound must be a finite number, and the min of range must not be greater 
     try std.testing.expectEqual(null, comptime callProblem("range", .{ -0.0, 0 }));
     try std.testing.expectEqual(null, comptime callProblem("min", .{std.math.floatMax(f128)}));
     try std.testing.expectEqual(null, comptime callProblem("max", .{std.math.maxInt(u128)}));
+    // A literal beyond the range of f64 is finite: a bound for f80 and f128 fields.
+    try std.testing.expectEqual(null, comptime callProblem("max", .{1e400}));
+    try std.testing.expectEqual(null, comptime callProblem("range", .{ 1e-400, 1e400 }));
 }
 
 test "an integer field takes integer bounds within its type" {
@@ -637,6 +643,26 @@ test "a float field takes bounds that stay finite and non-zero in it, and intege
     try std.testing.expectEqual(null, comptime minText(-std.math.floatMax(f64), f64));
     // c_longdouble holds 9007199254740993 exactly only when it is wider than f64.
     try std.testing.expectEqual(@bitSizeOf(c_longdouble) > 64, comptime maxText(9007199254740993, c_longdouble) == null);
+}
+
+test "a typed float bound narrower than a float field is an error when its value there has another shortest text" {
+    const expect = std.testing.expectEqualStrings;
+    const t = std.testing;
+    const head = "validator: Dto.field_rules.x: ";
+    const tail = "; write it as a literal or as f64";
+    try expect(head ++ "min(0.1): 0.1 is a float (f32), 0.10000000149011612 in f64" ++ tail, comptime minText(@as(f32, 0.1), f64).?);
+    try expect(head ++ "max(0.7): 0.7 is a float (f32), 0.699999988079071 in f64" ++ tail, comptime maxText(@as(f32, 0.7), f64).?);
+    try expect(head ++ "range(0.1, 0.7): 0.1 is a float (f32), 0.10000000149011612 in f64" ++ tail, comptime rangeText(@as(f32, 0.1), @as(f32, 0.7), f64).?);
+    try expect(head ++ "range(0, 0.7): 0.7 is a float (f32), 0.699999988079071 in f64" ++ tail, comptime rangeText(0, @as(f32, 0.7), f64).?);
+    // The constructor compares the bounds as written, in f32 here, so this
+    // range reads "must be 0.1"; on an f64 field it would reject every value.
+    try expect(head ++ "range(0.1, 0.1): 0.1 is a float (f32), 0.10000000149011612 in f64" ++ tail, comptime rangeText(@as(f32, 0.1), 0.1, f64).?);
+    try expect(head ++ "max(65500): 65500 is a float (f16), 65504 in f32; write it as a literal or as f32", comptime maxText(std.math.floatMax(f16), f32).?);
+    try t.expectEqual(null, comptime minText(@as(f32, 0.1), f32));
+    try t.expectEqual(null, comptime maxText(std.math.floatMax(f16), f16));
+    try t.expectEqual(null, comptime maxText(@as(f32, 0.5), f64));
+    try t.expectEqual(null, comptime minText(1.0 / 3.0, f64));
+    try t.expectEqual(null, comptime maxText(@as(f64, 0.1), f32));
 }
 
 test "a bound rule that every value of an integer field passes is an error; one bound at a limit is fine" {

@@ -15,7 +15,8 @@ const Outcome = core.Outcome;
 /// non-exhaustive enum never matches; strings byte for byte, with no
 /// decoding, trimming or case folding. The parameter is one integer, finite
 /// float, bool, named enum tag or non-empty valid UTF-8 string, and must fit
-/// the field type. The message shows it as written: `v.equals(.admin)` says
+/// the field type (a typed float narrower than a float field, as for
+/// `v.min`). The message shows it as written: `v.equals(.admin)` says
 /// "must be equal to admin".
 pub fn equals(comptime expected: anytype) Rule {
     return comparison(.equals, expected);
@@ -543,6 +544,16 @@ test "on a float field the parameter is a number that stays finite and non-zero 
     }
     try std.testing.expectEqual(null, comptime equalsText(@as(f64, 0.1), f32));
     try std.testing.expectEqual(null, comptime equalsText(9007199254740993, f80));
+    // A typed float narrower than the field must show the value it has there.
+    try expect(
+        "validator: Dto.field_rules.x: equals(0.1): 0.1 is a float (f32), 0.10000000149011612 in f64; write it as a literal or as f64",
+        comptime equalsText(@as(f32, 0.1), f64).?,
+    );
+    try expect(
+        "validator: Dto.field_rules.x: not_equals(0.1): 0.1 is a float (f32), 0.10000000149011612 in f64; write it as a literal or as f64",
+        comptime notEqualsText(@as(f32, 0.1), f64).?,
+    );
+    try std.testing.expectEqual(null, comptime equalsText(@as(f32, 0.5), f64));
 }
 
 test "on a bool field the parameter of equals and notEquals is true or false; on a string field, a string" {

@@ -51,6 +51,12 @@ const Payment = struct {
   `v.nonNegative` on an unsigned integer or `v.finite` on an integer, is a
   compile error with a hint to remove it
   ([D61](class_validator.md#deviations-from-validatorjs)).
+- A typed float bound narrower than a float field, such as an `f32` constant
+  on an `f64` field, keeps its exact value there: `@as(f32, 0.1)` is
+  0.10000000149011612 in `f64`. When that value reads differently from the
+  bound as written, the bound is a compile error, since the message would show
+  another value than the one compared: write it as a literal or in the field's
+  type. On a `c_longdouble` field this depends on the target.
 - The default messages show a bound as written, before the conversion
   (`v.max(0.1)` on an `f32` says `must be at most 0.1`), and
   `.withMessage` can use it as a placeholder
@@ -69,8 +75,10 @@ A number is at least `min`.
   must fit the field type. On an integer field it is an integer within the type,
   not a float (`2.0` included), and not `minInt(T)`, which every value passes. On
   a float field an integer must be exactly representable (`v.min(16777217)` on an
-  `f32` is an error that names the nearest value), and a float must not become
-  infinite or, when it is not zero, round to 0.
+  `f32` is an error that names the nearest value), a float must not become
+  infinite or, when it is not zero, round to 0, and a typed float narrower than
+  the field must read the same there (`v.min(@as(f32, 0.1))` on an `f64` is an
+  error).
 - **Passes when:** on a float field, the value is finite first; then
   `value >= min`, compared in the field type `T`: integers exactly at every width,
   floats against `min` rounded to nearest, so `v.min(0.1)` on an `f32` accepts the
@@ -97,6 +105,7 @@ validator: min("5"): the bound must be a number, got *const [1:0]u8
 validator: <Type>.field_rules.<field>: min(1.5): 1.5 is a float (comptime_float), field is u8; use an integer bound
 validator: <Type>.field_rules.<field>: min(-1): -1 is outside u64 (0..18446744073709551615)
 validator: <Type>.field_rules.<field>: min(16777217): 16777217 is not exactly representable in f32 (nearest: 16777216)
+validator: <Type>.field_rules.<field>: min(0.1): 0.1 is a float (f32), 0.10000000149011612 in f64; write it as a literal or as f64
 validator: <Type>.field_rules.<field>: min(0) is always true for u8; remove it
 validator: <Type>.field_rules.<field>: min must be called, e.g. v.min(0)
 ```

@@ -677,6 +677,8 @@ test "a number parameter is finite unless it is a float NaN or infinity" {
     try std.testing.expect(comptime isFiniteNumber(-0.0));
     try std.testing.expect(comptime isFiniteNumber(std.math.floatMax(f80)));
     try std.testing.expect(comptime isFiniteNumber(std.math.floatTrueMin(f16)));
+    // A comptime_float is checked as an f128, so a literal beyond f64 is finite.
+    try std.testing.expect(comptime isFiniteNumber(1e400));
     try std.testing.expect(!comptime isFiniteNumber(std.math.nan(f64)));
     try std.testing.expect(!comptime isFiniteNumber(std.math.inf(f32)));
     try std.testing.expect(!comptime isFiniteNumber(-std.math.inf(f128)));
@@ -713,6 +715,10 @@ test "messages show floats as written: decimal from 1e-6 to below 1e21, scientif
     try expect("1e-50", comptime renderValue(1e-50));
     try expect("-1.7976931348623157e308", comptime renderValue(-std.math.floatMax(f64)));
     try expect("5e-324", comptime renderValue(std.math.floatTrueMin(f64)));
+    // A comptime_float is an f128: a literal beyond the range of f64, a bound
+    // for an f80 or f128 field, keeps its value.
+    try expect("1e400", comptime renderValue(1e400));
+    try expect("1e-400", comptime renderValue(1e-400));
     try expect("0", comptime renderValue(0.0));
     try expect("0", comptime renderValue(-0.0));
     // A typed value shows the shortest text that gives it back in its own
@@ -1794,9 +1800,13 @@ pub fn describeValueType(comptime X: type) []const u8 {
 /// (0..255)`), or null. An integer field takes an integer within its type;
 /// any other parameter gets `use_integer` as the hint. A float field takes a
 /// number that stays finite in it and, unless zero, does not round to 0, and
-/// an integer it holds exactly; anything else gets `use a number`. `outside`
-/// follows the texts about a parameter outside the type (`; the rule would
-/// never pass`). The parameter is shown as it is written.
+/// an integer it holds exactly; anything else gets `use a number`. A typed
+/// float narrower than the field (`@as(f32, 0.1)` on f64) is taken only when
+/// its value shows the same in the field type: its exact value there,
+/// 0.10000000149011612, is what the rule would compare with. On a
+/// `c_longdouble` field this depends on the target. `outside` follows the
+/// texts about a parameter outside the type (`; the rule would never pass`).
+/// The parameter is shown as it is written.
 pub fn numberParamProblem(comptime x: anytype, comptime T: type, comptime use_integer: []const u8, comptime outside: []const u8) ?[]const u8 {
     @setEvalBranchQuota(eval_quota);
     const X = @TypeOf(x);
@@ -1823,6 +1833,13 @@ pub fn numberParamProblem(comptime x: anytype, comptime T: type, comptime use_in
                 const f: T = @floatCast(x);
                 if (std.math.isInf(f)) return ": " ++ shown ++ " is outside the finite range of " ++ @typeName(T) ++ outside;
                 if (f == 0 and x != 0) return ": " ++ shown ++ " rounds to 0 in " ++ @typeName(T);
+                // A narrower typed float widens exactly, so the rule would
+                // compare with a value whose text differs from the one shown.
+                if (X != comptime_float and std.math.floatFractionalBits(X) < std.math.floatFractionalBits(T)) {
+                    const widened = renderValue(f);
+                    if (!std.mem.eql(u8, widened, shown))
+                        return ": " ++ shown ++ " is " ++ describeValueType(X) ++ ", " ++ widened ++ " in " ++ @typeName(T) ++ "; write it as a literal or as " ++ @typeName(T);
+                }
                 return null;
             },
             else => return ": " ++ shown ++ " is " ++ describeValueType(X) ++ ", field is " ++ @typeName(T) ++ "; use a number",
@@ -2595,6 +2612,32 @@ test "a float field takes a parameter that stays finite and, unless zero, non-ze
     try expect(": 1e-50 rounds to 0 in f32", comptime numberParamProblem(1e-50, f32, "use an integer bound", "").?);
     try expect(": 5e-324 rounds to 0 in f32", comptime numberParamProblem(std.math.floatTrueMin(f64), f32, "use an integer bound", "").?);
     try expect(": true is a bool, field is f64; use a number", comptime numberParamProblem(true, f64, "use an integer", "").?);
+}
+
+test "a typed float narrower than a float field is an error when its value there has another shortest text" {
+    const expect = std.testing.expectEqualStrings;
+    const t = std.testing;
+    const tail = "; write it as a literal or as ";
+    try expect(": 0.1 is a float (f32), 0.10000000149011612 in f64" ++ tail ++ "f64", comptime numberParamProblem(@as(f32, 0.1), f64, "use an integer bound", "").?);
+    try expect(": 0.7 is a float (f32), 0.699999988079071 in f64" ++ tail ++ "f64", comptime numberParamProblem(@as(f32, 0.7), f64, "use an integer", "; the rule would never pass").?);
+    try expect(": 0.1 is a float (f32), 0.100000001490116119384765625 in f128" ++ tail ++ "f128", comptime numberParamProblem(@as(f32, 0.1), f128, "use an integer bound", "").?);
+    try expect(": 0.1 is a float (f16), 0.099975586 in f32" ++ tail ++ "f32", comptime numberParamProblem(@as(f16, 0.1), f32, "use an integer bound", "").?);
+    // The largest f16 shows as 65500, which reads back as 65504 in f16 only.
+    try expect(": 65500 is a float (f16), 65504 in f32" ++ tail ++ "f32", comptime numberParamProblem(std.math.floatMax(f16), f32, "use an integer bound", "").?);
+    try expect(": 0.1 is a float (f64), 0.10000000000000000555 in f80" ++ tail ++ "f80", comptime numberParamProblem(@as(f64, 0.1), f80, "use an integer bound", "").?);
+    try expect(": 0.1 is a float (f64), 0.1000000000000000055511151231257827 in f128" ++ tail ++ "f128", comptime numberParamProblem(@as(f64, 0.1), f128, "use an integer bound", "").?);
+    // A narrower value with the same text there, a literal, the field's own
+    // type and a wider type are fine.
+    try t.expectEqual(null, comptime numberParamProblem(@as(f32, 0.5), f64, "use an integer bound", ""));
+    try t.expectEqual(null, comptime numberParamProblem(@as(f16, 1), f32, "use an integer bound", ""));
+    try t.expectEqual(null, comptime numberParamProblem(@as(f32, -0.0), f64, "use an integer bound", ""));
+    try t.expectEqual(null, comptime numberParamProblem(@as(f32, 16777216), f128, "use an integer bound", ""));
+    try t.expectEqual(null, comptime numberParamProblem(0.1, f64, "use an integer bound", ""));
+    try t.expectEqual(null, comptime numberParamProblem(1.0 / 3.0, f64, "use an integer bound", ""));
+    try t.expectEqual(null, comptime numberParamProblem(@as(f32, 0.1), f32, "use an integer bound", ""));
+    try t.expectEqual(null, comptime numberParamProblem(@as(f128, 0.1), f64, "use an integer bound", ""));
+    // c_longdouble is f64 on some targets and wider on others.
+    try t.expectEqual(std.math.floatFractionalBits(c_longdouble) <= 52, comptime numberParamProblem(@as(f64, 0.1), c_longdouble, "use an integer bound", "") == null);
 }
 
 test "a rule error names the field path and the rule with its arguments" {

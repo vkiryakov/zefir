@@ -68,7 +68,11 @@ A value is equal to the one value you give.
   `true` or `false`, a named enum tag such as `.admin`, or a non-empty string of
   valid UTF-8. It must fit the field type: an integer within the range of an
   integer field (and exactly representable in a float field), a float only for a
-  float field, a tag of the field's enum, a string only for a string field.
+  float field, a tag of the field's enum, a string only for a string field. A
+  typed float narrower than a float field keeps its exact value there, so it is
+  an error when that value reads differently: `v.equals(@as(f32, 0.1))` on an
+  `f64` would compare with 0.10000000149011612; write it as a literal or in the
+  field's type.
 - **Passes when:** on a float field, the value is finite first; then, for an
   integer or a `bool`, `value == expected`, exact at every width. A float is
   compared under IEEE `==` with `expected` converted to the field type at
@@ -103,6 +107,7 @@ Compile errors (`<Type>.field_rules.<field>` is the entry of your struct):
 ```text
 validator: equals(""): the expected value is the empty string; use v.empty
 validator: <Type>.field_rules.<field>: equals(300): 300 is outside u8 (0..255); the rule would never pass
+validator: <Type>.field_rules.<field>: equals(0.1): 0.1 is a float (f32), 0.10000000149011612 in f64; write it as a literal or as f64
 validator: <Type>.field_rules.<field>: equals("admin"): "admin" is a string, field is teams.Role; use a tag such as .admin
 validator: <Type>.field_rules.<field>: equals expects a number, a bool, an enum or a string, field is []const u32; use v.each(v.equals(5))
 validator: <Type>.field_rules.<field>: equals must be called, e.g. v.equals(true)

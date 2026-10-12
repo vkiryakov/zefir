@@ -123,6 +123,7 @@ pub const list = [_]Fixture{
     .{ .file = "src/validator/testdata/compile_errors/max_nan_bound.zig", .expect = "validator: max(nan): nan is not finite", .row = "max-2" },
     .{ .file = "src/validator/testdata/compile_errors/range_inverted.zig", .expect = "validator: range(10, 5): min is greater than max", .row = "range-3" },
     .{ .file = "src/validator/testdata/compile_errors/min_inexact_f32.zig", .expect = "validator: min_inexact_f32.Bad.field_rules.x: min(16777217): 16777217 is not exactly representable in f32 (nearest: 16777216)", .row = "min-5" },
+    .{ .file = "src/validator/testdata/compile_errors/min_narrow_float.zig", .expect = "validator: min_narrow_float.Bad.field_rules.x: min(0.1): 0.1 is a float (f32), 0.10000000149011612 in f64; write it as a literal or as f64", .row = "min-15" },
     .{ .file = "src/validator/testdata/compile_errors/min_vacuous_u8.zig", .expect = "validator: min_vacuous_u8.Bad.field_rules.x: min(0) is always true for u8; remove it", .row = "min-9" },
     .{ .file = "src/validator/testdata/compile_errors/min_on_slice.zig", .expect = "validator: min_on_slice.Bad.field_rules.x: min expects a number, field is []const i32; use v.each(v.min(0))", .row = "min-11" },
     .{ .file = "src/validator/testdata/compile_errors/negative_unsigned.zig", .expect = "validator: negative_unsigned.Bad.field_rules.x: negative is always false for u32 (an unsigned type)", .row = "negative-1" },

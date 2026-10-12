@@ -331,6 +331,35 @@ test "messages show bounds as written, while values are compared in the field ty
     try h.expectRule(v.max(math.maxInt(u128)), "validation.max", "must be at most 340282366920938463463374607431768211455");
 }
 
+test "a bound that f32 cannot hold is rounded to each wider float type: the neighbours on both sides decide" {
+    inline for (.{ f64, f80, f128, c_longdouble }) |F| {
+        const at_most = "must be at most 0.1";
+        try h.expectPass(F, v.max(0.1), math.nextAfter(F, 0.1, 0));
+        try h.expectPass(F, v.max(0.1), 0.1);
+        try h.expectFail(F, v.max(0.1), math.nextAfter(F, 0.1, 1), "validation.max", at_most);
+        const at_least = "must be at least 0.1";
+        try h.expectFail(F, v.min(0.1), math.nextAfter(F, 0.1, 0), "validation.min", at_least);
+        try h.expectPass(F, v.min(0.1), 0.1);
+        try h.expectPass(F, v.min(0.1), math.nextAfter(F, 0.1, 1));
+        const from_to = "must be from 0.1 to 0.2";
+        try h.expectFail(F, v.range(0.1, 0.2), math.nextAfter(F, 0.1, 0), "validation.range", from_to);
+        try h.expectPass(F, v.range(0.1, 0.2), 0.1);
+        try h.expectPass(F, v.range(0.1, 0.2), math.nextAfter(F, 0.1, 1));
+        try h.expectPass(F, v.range(0.1, 0.2), math.nextAfter(F, 0.2, 0));
+        try h.expectPass(F, v.range(0.1, 0.2), 0.2);
+        try h.expectFail(F, v.range(0.1, 0.2), math.nextAfter(F, 0.2, 1), "validation.range", from_to);
+    }
+}
+
+test "a bound beyond the range of f64 keeps its value on f80 and f128 fields" {
+    inline for (.{ f80, f128 }) |F| {
+        try h.expectPass(F, v.max(1e400), 1e400);
+        try h.expectFail(F, v.max(1e400), math.nextAfter(F, 1e400, math.inf(F)), "validation.max", "must be at most 1e400");
+        try h.expectPass(F, v.min(1e-400), 1e-400);
+        try h.expectFail(F, v.min(1e-400), math.nextAfter(F, 1e-400, 0), "validation.min", "must be at least 1e-400");
+    }
+}
+
 test "the number rules on ?T and ??T: null skips them" {
     try h.expectPass(?i64, v.min(0), null);
     try h.expectFail(?i64, v.min(0), -1, "validation.min", "must be at least 0");
