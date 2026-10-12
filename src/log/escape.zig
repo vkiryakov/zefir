@@ -140,6 +140,11 @@ pub const Escaper = struct {
     /// drop the rest; `cut` tells whether that happened.
     budget: ?usize = null,
     cut: bool = false,
+    /// With a budget: `safe_count` is the last count, at a character
+    /// boundary, that leaves `reserve` bytes of the budget free, so a cut
+    /// text can end there and still take a "…".
+    reserve: usize = 0,
+    safe_count: usize = 0,
     /// Nothing so far needs quotes in the text format: no escape, no space
     /// or '=', and, when `strict`, none of ",[]{}" either.
     plain: bool = true,
@@ -212,6 +217,8 @@ pub const Escaper = struct {
                 e.cut = true;
                 part = s[0..n];
             }
+            const limit = budget -| e.reserve;
+            if (e.count < limit) e.safe_count = e.count + escapedLen(part[0..fittingPrefix(part, limit - e.count)]);
         }
         const len = escapedLen(part);
         const special: []const u8 = if (e.strict) " =,[]{}" else " =";
@@ -378,6 +385,20 @@ test "an escaper with a budget stops between characters and drops the rest" {
     try testing.expectEqualStrings("ab€", out.buffered()); // "\\n" would take 2 bytes more than the budget allows
     try testing.expect(e.cut);
     try testing.expectEqual(@as(usize, 5), e.count);
+}
+
+test "an escaper remembers where a cut text can end and still take a reserve" {
+    var buf: [64]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&buf);
+    var e: Escaper = undefined;
+    e.init(&out);
+    e.budget = 8;
+    e.reserve = 3;
+    try e.writer.writeAll("abcd€fgh");
+    try e.finish();
+    try testing.expectEqualStrings("abcd€f", out.buffered());
+    try testing.expect(e.cut);
+    try testing.expectEqual(@as(usize, 4), e.safe_count); // "abcd": the € would leave less than 3 bytes
 }
 
 test "isBare: which text values may go without quotes" {

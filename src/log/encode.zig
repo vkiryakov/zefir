@@ -223,28 +223,26 @@ fn writeTextField(w: *Writer, comptime path: []const u8, value: anytype, comptim
 }
 
 /// What `value.format(writer)` writes, as a string: escaped, in quotes for
-/// JSON, and bare in text when nothing in it needs quotes.
+/// JSON, and bare in text when nothing in it needs quotes. The method runs
+/// once: text gets its quotes after the fact, by shifting the escaped text
+/// in `w`'s buffer, so `w` must keep what it is given there, as the
+/// record's fixed writer does.
 fn writeFormatted(comptime f: Format, w: *Writer, value: anytype, comptime nested: bool) Writer.Error!void {
-    if (f == .text) {
-        // A dry run tells whether the text needs quotes.
-        var sink: Writer.Discarding = .init(&.{});
-        var probe: escape.Escaper = undefined;
-        probe.init(&sink.writer);
-        probe.strict = nested;
-        value.format(&probe.writer) catch {};
-        probe.finish() catch {};
-        if (probe.plain and probe.count > 0) return formatEscaped(w, value);
-    }
-    try w.writeByte('"');
-    try formatEscaped(w, value);
-    try w.writeByte('"');
-}
-
-fn formatEscaped(w: *Writer, value: anytype) Writer.Error!void {
+    if (f == .json) try w.writeByte('"');
+    const start = w.end;
     var e: escape.Escaper = undefined;
     e.init(w);
+    e.strict = nested;
     try value.format(&e.writer);
     try e.finish();
+    if (f == .json) return w.writeByte('"');
+    if (e.plain and e.count > 0) return;
+    std.debug.assert(w.end - start == e.count);
+    if (w.unusedCapacityLen() < 2) return error.WriteFailed;
+    @memmove(w.buffer[start + 1 ..][0..e.count], w.buffer[start..][0..e.count]);
+    w.buffer[start] = '"';
+    w.end += 1;
+    try w.writeByte('"');
 }
 
 /// The string a string-like value holds. Takes a pointer, so an array
@@ -399,29 +397,42 @@ fn rendered(comptime write: fn (*Writer) Writer.Error!void) []const u8 {
     };
 }
 
-/// Whether a value known at compile time may also be written then. Not
-/// when it reads through a pointer that is not const: the address of a
-/// global `var` is known at compile time, what it holds is not.
+/// Literal strings longer than this are written at run time: rendering
+/// them at compile time is slow, and the record cuts them anyway.
+const max_literal_bytes = 16 * 1024;
+
+/// Whether a value known at compile time may also be written then: plain
+/// data only. A pointer may lead to memory that only exists at run time
+/// (the address of a global `var` is known at compile time, what it holds
+/// is not), and `format` or `logValue` may read run-time state, so those
+/// are written at run time. String literals are the one kind of pointer
+/// rendered at compile time.
 fn renderAtComptime(comptime T: type) bool {
-    return !readsMutable(T, &.{});
+    return plainData(T, &.{});
 }
 
-fn readsMutable(comptime T: type, comptime visited: []const type) bool {
+fn plainData(comptime T: type, comptime visited: []const type) bool {
+    if (field_checks.redactsWhole(T)) return true; // written as a constant
     for (visited) |seen| {
-        if (seen == T) return false;
+        if (seen == T) return true;
     }
+    if (field_checks.LogValue(T) != null or field_checks.hasFormat(T)) return false;
     const next = visited ++ [_]type{T};
     return switch (@typeInfo(T)) {
-        .pointer => |p| !p.attrs.@"const" or readsMutable(p.child, next),
-        .optional => |o| readsMutable(o.child, next),
-        .array => |a| readsMutable(a.child, next),
+        .pointer => |p| p.size == .one and p.attrs.@"const" and switch (@typeInfo(p.child)) {
+            .array => |a| a.child == u8 and a.sentinel() != null and a.len <= max_literal_bytes,
+            else => false,
+        },
+        .array => |a| a.len <= max_literal_bytes and plainData(a.child, next),
+        .optional => |o| plainData(o.child, next),
+        .vector => |v| plainData(v.child, next),
         .@"struct" => |s| for (s.field_types) |Member| {
-            if (readsMutable(Member, next)) break true;
-        } else false,
+            if (!plainData(Member, next)) break false;
+        } else true,
         .@"union" => |u| for (u.field_types) |Payload| {
-            if (readsMutable(Payload, next)) break true;
-        } else false,
-        else => false,
+            if (!plainData(Payload, next)) break false;
+        } else true,
+        else => true,
     };
 }
 
@@ -643,10 +654,20 @@ fn Literal(comptime message: []const u8) type {
         /// end, between characters, and ends with "…"; when even that does
         /// not fit, nothing is written.
         fn write(_: @This(), w: *Writer, comptime open: []const u8, comptime close: []const u8, keep: usize, comptime cut: bool) Writer.Error!void {
-            const escaped = comptime escapedLiteral(message);
             const free = w.unusedCapacityLen();
-            if (!cut or open.len + escaped.len + close.len + keep <= free) {
-                return w.writeAll(open ++ escaped ++ close);
+            if (comptime message.len > max_literal_bytes) {
+                // Escaped at run time: it is cut anyway, and escaping it at
+                // compile time would be slow.
+                if (!cut or open.len + escape.escapedLen(message) + close.len + keep <= free) {
+                    try w.writeAll(open);
+                    try escape.write(w, message);
+                    return w.writeAll(close);
+                }
+            } else {
+                const escaped = comptime escapedLiteral(message);
+                if (!cut or open.len + escaped.len + close.len + keep <= free) {
+                    return w.writeAll(open ++ escaped ++ close);
+                }
             }
             const fixed_len = open.len + ellipsis.len + close.len + keep;
             if (fixed_len > free) return error.WriteFailed;
@@ -665,38 +686,34 @@ fn Formatted(comptime format: []const u8, comptime Args: type) type {
 
         const empty = format.len == 0;
 
-        /// As `Literal.write`; a cut pass formats the message twice, once
-        /// to measure it.
+        /// As `Literal.write`, formatting the message once per pass: a cut
+        /// pass stops at the room left, then backs up to a character
+        /// boundary that leaves room for the "…". `w` must keep what it is
+        /// given in its buffer, as the record's fixed writer does.
         fn write(m: @This(), w: *Writer, comptime open: []const u8, comptime close: []const u8, keep: usize, comptime cut: bool) Writer.Error!void {
             if (!cut) {
                 try w.writeAll(open);
-                try m.print(w, null);
+                var e: escape.Escaper = undefined;
+                e.init(w);
+                try e.writer.print(format, m.args);
+                try e.finish();
                 return w.writeAll(close);
             }
             const free = w.unusedCapacityLen();
             if (open.len + ellipsis.len + close.len + keep > free) return error.WriteFailed;
-            const room = free - open.len - close.len - keep;
-            var sink: Writer.Discarding = .init(&.{});
-            var probe: escape.Escaper = undefined;
-            probe.init(&sink.writer);
-            probe.writer.print(format, m.args) catch {};
-            probe.finish() catch {};
             try w.writeAll(open);
-            if (probe.count <= room) {
-                try m.print(w, null);
-            } else {
-                try m.print(w, room - ellipsis.len);
+            const start = w.end;
+            var e: escape.Escaper = undefined;
+            e.init(w);
+            e.budget = free - open.len - close.len - keep;
+            e.reserve = ellipsis.len;
+            try e.writer.print(format, m.args);
+            try e.finish();
+            if (e.cut) {
+                w.end = start + e.safe_count;
                 try w.writeAll(ellipsis);
             }
             try w.writeAll(close);
-        }
-
-        fn print(m: @This(), w: *Writer, budget: ?usize) Writer.Error!void {
-            var e: escape.Escaper = undefined;
-            e.init(w);
-            e.budget = budget;
-            try e.writer.print(format, m.args);
-            try e.finish();
         }
     };
 }
@@ -773,9 +790,9 @@ fn writeSource(comptime f: Format, w: *Writer, src: std.lang.SourceLocation, mod
             if (mode == .full) try w.print(":{d}", .{src.column});
             if (!bare) try w.writeByte('"');
             if (mode == .full) {
-                try w.writeAll(" function=");
+                try w.writeAll(" src.function=");
                 try writeString(.text, w, functionName(src.fn_name), false);
-                try w.writeAll(" module=");
+                try w.writeAll(" src.module=");
                 try writeString(.text, w, src.module, false);
             }
         },
@@ -1108,6 +1125,145 @@ test "the marker comes first, then logValue, then format, then the fields" {
     try expectValue(Both{ .x = 5 }, "5", "5");
 }
 
+test "format: any error set and a generic writer are the form {f} uses too" {
+    const Inferred = struct {
+        user: []const u8,
+        token_value: []const u8,
+        pub fn format(c: @This(), w: *Writer) !void {
+            try w.print("{s}:***", .{c.user});
+        }
+    };
+    const Generic = struct {
+        secret: []const u8,
+        pub fn format(_: *const @This(), w: anytype) !void {
+            try w.writeAll("generic");
+        }
+    };
+    try expectValue(Inferred{ .user = "alice", .token_value = "LEAKED" }, "\"alice:***\"", "alice:***");
+    try expectValue(Generic{ .secret = "LEAKED" }, "\"generic\"", "generic");
+}
+
+test "a marked payload, a pointer to a pointer, a slice of optionals and a vector of pointers give one placeholder" {
+    const Key = struct {
+        v: u8,
+        pub const zefir_sensitive = true;
+    };
+    const k: Key = .{ .v = 1 };
+    const ptr: *const Key = &k;
+    const Auth = union(enum) { key: Key, none };
+    try expectValue(Auth{ .key = k }, "{\"key\":\"[REDACTED]\"}", "{key=[REDACTED]}");
+    try expectValue(&ptr, "\"[REDACTED]\"", "[REDACTED]");
+    try expectValue(@as([]const ?Key, &.{ k, null }), "\"[REDACTED]\"", "[REDACTED]");
+    try expectValue(@as(@Vector(2, *const Key), .{ &k, &k }), "\"[REDACTED]\"", "[REDACTED]");
+}
+
+var format_calls: u32 = 0;
+
+const Counted = struct {
+    words: []const u8,
+    pub fn format(c: Counted, w: *Writer) Writer.Error!void {
+        format_calls += 1;
+        try w.writeAll(c.words);
+    }
+};
+
+test "format runs once for a record that fits, and in text its output is quoted only when it needs to be" {
+    var buf: [256]u8 = undefined;
+    const header: Header = .{ .timestamp = fixed_time, .service = "", .scope = "", .oversize = .truncate };
+    format_calls = 0;
+    var got = record(.text, .info, "m", &buf, header, .{ .a = Counted{ .words = "two words" }, .b = Counted{ .words = "one" } }).?;
+    try testing.expectStringEndsWith(buf[0..got.len], " m a=\"two words\" b=one\n");
+    try testing.expectEqual(@as(u32, 2), format_calls);
+    format_calls = 0;
+    got = record(.json, .info, "m", &buf, header, .{ .a = Counted{ .words = "x" } }).?;
+    try testing.expectEqual(@as(u32, 1), format_calls);
+    format_calls = 0;
+    got = record(.text, .info, "m", buf[0..60], header, .{ .a = Counted{ .words = "far too long to fit in the room that is left" } }).?;
+    try testing.expect(got.truncated);
+    try testing.expect(format_calls <= 2); // a record that is cut is encoded twice
+}
+
+var global_count: u32 = 5;
+var global_bytes: [3]u8 = "abc".*;
+
+test "literal fields that read run-time memory are written at run time" {
+    global_count = 6;
+    global_bytes = "xyz".*;
+    const count: *const u32 = &global_count;
+    const bytes: []const u8 = &global_bytes;
+    // Zero-sized, so every value is known at compile time; its text is not.
+    const Live = struct {
+        pub fn format(_: @This(), w: *Writer) Writer.Error!void {
+            try w.print("seen {d}", .{global_count});
+        }
+    };
+    var buf: [256]u8 = undefined;
+    const header: Header = .{ .timestamp = fixed_time, .service = "", .scope = "", .oversize = .truncate };
+    const got = record(.json, .info, "m", &buf, header, .{ .count = count, .bytes = bytes, .live = Live{} }).?;
+    try testing.expectStringEndsWith(buf[0..got.len], ",\"count\":6,\"bytes\":\"xyz\",\"live\":\"seen 6\"}\n");
+}
+
+test "formatted messages: every size from the mandatory part up gives one valid line" {
+    const header: Header = .{ .timestamp = fixed_time, .service = "", .scope = "users", .trace = &test_trace, .oversize = .truncate };
+    const args = .{ @as(u32, 42), "a\nlong \"quoted\" text é😀 \xff and more" };
+    inline for (.{ Format.json, Format.text }) |f| {
+        var whole_buf: [1024]u8 = undefined;
+        const whole = recordFormatted(f, .info, "user {d}: {s}", args, &whole_buf, header).?;
+        var size = mandatoryBytes(f, 0, header.scope.len);
+        while (size <= whole.len) : (size += 1) {
+            var buf: [1024]u8 = undefined;
+            const got = recordFormatted(f, .info, "user {d}: {s}", args, buf[0..size], header) orelse return error.TestUnexpectedResult;
+            const line = buf[0..got.len];
+            try testing.expectEqual(size < whole.len, got.truncated);
+            try testing.expect(std.unicode.utf8ValidateSlice(line));
+            try testing.expectEqual(@as(?usize, line.len - 1), std.mem.findScalar(u8, line, '\n'));
+            if (f == .json) try testing.expect(try std.json.validate(testing.allocator, line));
+        }
+    }
+}
+
+test "a formatted message is formatted once when it fits, at most twice when it is cut" {
+    const header: Header = .{ .timestamp = fixed_time, .service = "", .scope = "", .oversize = .truncate };
+    var buf: [256]u8 = undefined;
+    format_calls = 0;
+    _ = recordFormatted(.json, .info, "{f}", .{Counted{ .words = "short" }}, &buf, header).?;
+    try testing.expectEqual(@as(u32, 1), format_calls);
+    format_calls = 0;
+    const got = recordFormatted(.json, .info, "{f}", .{Counted{ .words = &@as([300]u8, @splat('w')) }}, buf[0..200], header).?;
+    try testing.expect(got.truncated);
+    try testing.expect(format_calls <= 2);
+    try testing.expect(try std.json.validate(testing.allocator, buf[0 .. got.len - 1]));
+}
+
+test "the call site with format and logValue values: every size gives one valid line" {
+    const here = comptime callSite();
+    const User = struct {
+        id: u64,
+        pin: []const u8,
+        pub fn logValue(u: @This()) struct { id: u64 } {
+            return .{ .id = u.id };
+        }
+    };
+    var user: User = .{ .id = 7, .pin = "1234" };
+    _ = &user;
+    const fields = .{ .src = here, .price = Money{ .cents = 1999 }, .user = user, .note = Counted{ .words = "a \"note\"" } };
+    inline for (.{ Format.json, Format.text }) |f| {
+        inline for (.{ options.SourceMode.file_line, options.SourceMode.full }) |mode| {
+            const header: Header = .{ .timestamp = fixed_time, .service = "", .scope = "users", .source = mode, .trace = &test_trace, .oversize = .truncate };
+            var whole_buf: [1024]u8 = undefined;
+            const whole = record(f, .info, "With a call site", &whole_buf, header, fields).?;
+            var size = mandatoryBytes(f, 0, header.scope.len);
+            while (size <= whole.len) : (size += 1) {
+                var buf: [1024]u8 = undefined;
+                const got = record(f, .info, "With a call site", buf[0..size], header, fields) orelse return error.TestUnexpectedResult;
+                const line = buf[0..got.len];
+                try testing.expect(std.mem.find(u8, line, "1234") == null);
+                if (f == .json) try testing.expect(try std.json.validate(testing.allocator, line));
+            }
+        }
+    }
+}
+
 test "hex: bytes as lowercase hex" {
     const hex = @import("hex.zig").hex;
     const digest = [_]u8{ 0xde, 0xad, 0x00, 0x0f };
@@ -1218,7 +1374,7 @@ test "the call site: after the scope in JSON, last in text; the mode picks the d
     try testing.expectStringEndsWith(buf[0..got.len], ",\"source\":{\"file\":\"encode.zig\",\"line\":" ++ line ++ ",\"column\":" ++ column ++
         ",\"function\":\"callSite\",\"module\":\"" ++ here.module ++ "\"}}\n");
     got = record(.text, .info, "m", &buf, header, .{ .src = here }).?;
-    try testing.expectStringEndsWith(buf[0..got.len], " src=encode.zig:" ++ line ++ ":" ++ column ++ " function=callSite module=" ++ here.module ++ "\n");
+    try testing.expectStringEndsWith(buf[0..got.len], " src=encode.zig:" ++ line ++ ":" ++ column ++ " src.function=callSite src.module=" ++ here.module ++ "\n");
     header.source = .none;
     got = record(.json, .info, "m", &buf, header, .{ .src = here }).?;
     try testing.expectStringEndsWith(buf[0..got.len], ",\"scope\":\"users\"}\n");

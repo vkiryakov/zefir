@@ -140,6 +140,17 @@ pub fn build(b: *std.Build) void {
         .{ "nested error union", "zefir.log: field 'cfg.r': cannot log error union 'anyerror!u8'; handle it with try or catch first, then log the payload or the error" },
         .{ "sensitive marker of the wrong type", ".zefir_sensitive must be a bool: pub const zefir_sensitive = true;" },
         .{ "logValue that returns its own type", " itself; return another type, such as a struct of the fields to log" },
+        .{ "sensitive type as the fields", "' is sensitive and cannot be the fields; log it as one field: .{ .key = key }" },
+        .{ "type with its own logged form as the fields", "' has its own logged form; log it as one field: .{ .value = value }" },
+        .{ "format of another form", ".format has another form than the one {f} uses; write pub fn format(self, w: *std.Io.Writer) !void" },
+        .{ "logValue with a mutable self", ".logValue has another form; write pub fn logValue(self) U, taking self by value or by *const" },
+        .{ "logValue that returns an error union", ".logValue returns an error union; return a value, since logging cannot fail" },
+        .{ "reserved name on the flat path through an array", "zefir.log: field 'service[].name' is reserved for record metadata; rename 'service', e.g. 'user_service'" },
+        .{ "subfield of the call site", "zefir.log: field name 'src.function' is reserved for record metadata; rename it, e.g. 'user_src.function'" },
+        .{ "function value", "zefir.log: field 'f': cannot log function 'fn () void'" },
+        .{ "many-item pointer to u16 with a sentinel", "zefir.log: field 'p': cannot log many-item pointer '[*:0]const u16': it has no length; log a slice, ptr[0..len]" },
+        .{ "packed union", "': its active field is unknown; use union(enum) or log one of its fields" },
+        .{ "optional void", "zefir.log: field 'x': cannot log 'void'; remove the field" },
     }, 0..) |case, i| {
         const compile = b.addTest(.{
             .name = b.fmt("log-compile-error-{d}", .{i}),

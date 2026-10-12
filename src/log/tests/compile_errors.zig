@@ -111,3 +111,79 @@ test "logValue that returns its own type" {
     };
     logger().info("m", .{ .l = L{ .x = 1 } });
 }
+
+test "sensitive type as the fields" {
+    const Key = struct {
+        value: []const u8,
+        pub const zefir_sensitive = true;
+    };
+    logger().info("m", Key{ .value = "x" });
+}
+
+test "type with its own logged form as the fields" {
+    const Creds = struct {
+        user: []const u8,
+        pin: []const u8,
+        pub fn logValue(c: @This()) []const u8 {
+            return c.user;
+        }
+    };
+    logger().info("m", Creds{ .user = "ada", .pin = "1234" });
+}
+
+test "format of another form" {
+    const Other = struct {
+        pub fn format(_: @This(), _: []const u8) void {}
+    };
+    logger().info("m", .{ .o = Other{} });
+}
+
+test "logValue with a mutable self" {
+    const Mutable = struct {
+        x: u8,
+        pub fn logValue(m: *@This()) u8 {
+            return m.x;
+        }
+    };
+    logger().info("m", .{ .m = Mutable{ .x = 1 } });
+}
+
+test "logValue that returns an error union" {
+    const Failing = struct {
+        x: u8,
+        pub fn logValue(f: @This()) anyerror!u8 {
+            return f.x;
+        }
+    };
+    logger().info("m", .{ .f = Failing{ .x = 1 } });
+}
+
+test "reserved name on the flat path through an array" {
+    const Named = struct { name: []const u8 };
+    logger().info("m", .{ .service = [_]Named{.{ .name = "x" }} });
+}
+
+test "subfield of the call site" {
+    logger().info("m", .{ .@"src.function" = "x" });
+}
+
+fn someFunction() void {}
+
+test "function value" {
+    logger().info("m", .{ .f = someFunction });
+}
+
+test "many-item pointer to u16 with a sentinel" {
+    var p: [*:0]const u16 = &[_:0]u16{1};
+    _ = &p;
+    logger().info("m", .{ .p = p });
+}
+
+test "packed union" {
+    const P = packed union { a: u8, b: i8 };
+    logger().info("m", .{ .p = P{ .a = 1 } });
+}
+
+test "optional void" {
+    logger().info("m", .{ .x = @as(?void, {}) });
+}

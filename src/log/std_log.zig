@@ -13,25 +13,49 @@ const Level = @import("level.zig").Level;
 
 /// The engine std.log records go to.
 var target: std.atomic.Value(?*Engine) = .init(null);
-/// stdLogFn calls in progress, so removing the target can wait for them.
-var in_flight: std.atomic.Value(u32) = .init(0);
+/// stdLogFn calls in progress that may use an engine, counted in two
+/// generations: removing an engine starts a new generation and waits for
+/// the calls of the old one only, so steady std.log traffic cannot hold
+/// the removal up.
+var in_flight: [2]std.atomic.Value(u32) = .{ .init(0), .init(0) };
+var generation: std.atomic.Value(u32) = .init(0);
+/// Removals flip the generation one at a time.
+var removing: std.atomic.Mutex = .unlocked;
 
 /// The `logFn` for `std_options`. std.log's scope becomes the record's
 /// scope (none for `.default`) and its formatted text the message; the
-/// logger's levels apply after std's own compile-time filter.
+/// logger's levels apply after std's own compile-time filter. The
+/// arguments are formatted by std.fmt, not walked by the logger, so
+/// redaction does not reach inside them.
 pub fn stdLogFn(
     comptime message_level: std.log.Level,
     comptime scope: @EnumLiteral(),
     comptime format: []const u8,
     args: anytype,
 ) void {
-    _ = in_flight.fetchAdd(1, .seq_cst);
-    defer _ = in_flight.fetchSub(1, .seq_cst);
-    const engine = target.load(.seq_cst) orelse return std.log.defaultLog(message_level, scope, format, args);
+    const counter = enter();
+    const engine = target.load(.seq_cst) orelse {
+        // Leave first: a call into std's own log holds no engine.
+        _ = counter.fetchSub(1, .seq_cst);
+        return std.log.defaultLog(message_level, scope, format, args);
+    };
+    defer _ = counter.fetchSub(1, .seq_cst);
     const level = comptime levelOf(message_level);
     const entry = if (scope == .default) &engine.scope_table.root else engine.scope_table.find(@tagName(scope));
     if (@backingInt(level) < @backingInt(entry.level.load(.monotonic))) return;
     engine.emitFormatted(level, entry, format, args);
+}
+
+/// Counts the call in the current generation, and returns its counter.
+fn enter() *std.atomic.Value(u32) {
+    while (true) {
+        const g = generation.load(.seq_cst);
+        const counter = &in_flight[g & 1];
+        _ = counter.fetchAdd(1, .seq_cst);
+        // Counted before any removal that flips `g`: that removal waits.
+        if (generation.load(.seq_cst) == g) return counter;
+        _ = counter.fetchSub(1, .seq_cst);
+    }
 }
 
 fn levelOf(comptime level: std.log.Level) Level {
@@ -43,21 +67,26 @@ fn levelOf(comptime level: std.log.Level) Level {
     };
 }
 
-/// Sends std.log records to `engine` from now on.
+/// Sends std.log records to `engine` from now on, in place of the engine
+/// installed before.
 pub fn install(engine: *Engine) void {
     target.store(engine, .seq_cst);
 }
 
-/// Sends std.log back to `std.log.defaultLog`, once the calls in progress
-/// have finished. `Logger.deinit` does this for the logger it ends.
+/// Sends std.log back to `std.log.defaultLog`, once the calls that may be
+/// using the removed engine have finished. Must not be called from inside
+/// a log call.
 pub fn uninstall() void {
     target.store(null, .seq_cst);
-    waitIdle();
+    waitForCalls();
 }
 
-/// `uninstall`, if `engine` is the one installed.
+/// For `Logger.deinit`: removes `engine` if it is installed, and waits for
+/// the calls that may still be inside it, also when std.log had already
+/// moved on to another engine.
 pub fn uninstallIf(engine: *Engine) void {
-    if (target.cmpxchgStrong(engine, null, .seq_cst, .seq_cst) == null) waitIdle();
+    _ = target.cmpxchgStrong(engine, null, .seq_cst, .seq_cst);
+    waitForCalls();
 }
 
 /// The installed engine, if any.
@@ -65,10 +94,15 @@ pub fn installed() ?*Engine {
     return target.load(.seq_cst);
 }
 
-/// A call that loaded the target before it was removed has added itself to
-/// `in_flight` first (both are seq_cst), so this wait sees it.
-fn waitIdle() void {
-    while (in_flight.load(.seq_cst) != 0) std.atomic.spinLoopHint();
+/// Waits for the calls counted before now. A call that went on to use a
+/// removed engine loaded the target before the removal, so it entered
+/// before this flip and is counted in the old generation (all seq_cst);
+/// calls that enter later count in the new one and are not waited for.
+fn waitForCalls() void {
+    while (!removing.tryLock()) std.atomic.spinLoopHint();
+    defer removing.unlock();
+    const old = generation.fetchAdd(1, .seq_cst) & 1;
+    while (in_flight[old].load(.seq_cst) != 0) std.Thread.yield() catch {};
 }
 
 test "std.log levels map to records' levels by name" {

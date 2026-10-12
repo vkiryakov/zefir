@@ -56,7 +56,8 @@ pub const SourceMode = enum {
     none,
     /// `"source":{"file":"users.zig","line":84}`; in text `src=users.zig:84`.
     file_line,
-    /// Also the column, the function and the module.
+    /// Also the column, the function and the module; in text
+    /// `src=users.zig:84:5 src.function=create src.module=app`.
     full,
 };
 

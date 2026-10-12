@@ -130,11 +130,13 @@ pub fn setScopeLevel(self: Logger, prefix: []const u8, level: ?Level) error{ Too
     return self.engine.scope_table.setRule(prefix, level);
 }
 
-/// Sends std.log to this logger. The root file must set
+/// Sends std.log to this logger, in place of a logger installed before. The
+/// root file must set
 /// `pub const std_options: std.Options = .{ .logFn = zefir.log.stdLogFn };`.
 /// std.log's scope becomes the record's scope and its text the message;
 /// std's compile-time level filter still runs first. `deinit` removes the
-/// bridge, `zefir.log.uninstallStdLog` does it earlier.
+/// bridge, `zefir.log.uninstallStdLog` does it earlier; both wait for the
+/// std.log calls that may still be inside this logger.
 pub fn installStdLog(self: Logger) void {
     std_log.install(self.engine);
 }
@@ -417,6 +419,71 @@ test "deinit and uninstallStdLog send std.log back to its default" {
     first.installStdLog();
     first.deinit();
     try testing.expect(std_log.installed() == null);
+}
+
+/// A std.log argument that keeps its call inside the bridge until released.
+const Gatekeeper = struct {
+    entered: *std.atomic.Value(bool),
+    released: *const std.atomic.Value(bool),
+
+    pub fn format(g: Gatekeeper, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        g.entered.store(true, .seq_cst);
+        while (!g.released.load(.seq_cst)) std.Thread.yield() catch {};
+        try w.writeAll("released");
+    }
+};
+
+fn logThroughBridge(g: Gatekeeper) void {
+    std_log.stdLogFn(.debug, .bridge, "{f}", .{g});
+}
+
+fn callAndMark(comptime f: anytype, args: anytype, done: *std.atomic.Value(bool)) void {
+    @call(.auto, f, args);
+    done.store(true, .seq_cst);
+}
+
+fn deinitLogger(logger: Logger) void {
+    logger.deinit();
+}
+
+test "deinit of a logger that std.log has moved away from still waits for the calls inside it" {
+    var sink: std.Io.Writer.Discarding = .init(&.{});
+    const first: Logger = try .init(testing.allocator, testing.io, .{ .level = .debug, .output = .{ .writer = &sink.writer } });
+    const second: Logger = try .init(testing.allocator, testing.io, .{ .output = .{ .writer = &sink.writer } });
+    defer second.deinit();
+    var entered: std.atomic.Value(bool) = .init(false);
+    var released: std.atomic.Value(bool) = .init(false);
+    var done: std.atomic.Value(bool) = .init(false);
+    first.installStdLog();
+    const caller = try std.Thread.spawn(.{}, logThroughBridge, .{Gatekeeper{ .entered = &entered, .released = &released }});
+    while (!entered.load(.seq_cst)) std.Thread.yield() catch {};
+    second.installStdLog(); // std.log moves on; the call above is still inside `first`
+    const ender = try std.Thread.spawn(.{}, callAndMark, .{ deinitLogger, .{first}, &done });
+    try testing.io.sleep(.fromMilliseconds(20), .awake);
+    const ended_early = done.load(.seq_cst);
+    released.store(true, .seq_cst);
+    caller.join();
+    ender.join();
+    try testing.expect(!ended_early);
+    try testing.expect(done.load(.seq_cst));
+}
+
+test "removing the bridge does not wait for std.log calls that went to the default log" {
+    var entered: std.atomic.Value(bool) = .init(false);
+    var released: std.atomic.Value(bool) = .init(false);
+    var done: std.atomic.Value(bool) = .init(false);
+    uninstallStdLog();
+    // Nothing is installed: this call goes to std.log.defaultLog (one line on stderr).
+    const caller = try std.Thread.spawn(.{}, logThroughBridge, .{Gatekeeper{ .entered = &entered, .released = &released }});
+    while (!entered.load(.seq_cst)) std.Thread.yield() catch {};
+    const remover = try std.Thread.spawn(.{}, callAndMark, .{ uninstallStdLog, .{}, &done });
+    var waited: u32 = 0;
+    while (!done.load(.seq_cst) and waited < 1000) : (waited += 1) try testing.io.sleep(.fromMilliseconds(1), .awake);
+    const returned = done.load(.seq_cst);
+    released.store(true, .seq_cst);
+    caller.join();
+    remover.join();
+    try testing.expect(returned);
 }
 
 test "the call-site mode is chosen per level" {

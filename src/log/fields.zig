@@ -20,7 +20,9 @@ const reserved = [_][]const u8{
 };
 
 /// Record keys that hold objects: their dotted subfields are reserved too.
-const reserved_objects = [_][]const u8{ "source", "labels" };
+/// `src` stands for the call site, which text writes as `src.function`
+/// and `src.module`.
+const reserved_objects = [_][]const u8{ "source", "labels", "src" };
 
 /// Checks the fields of one call. Every level method calls it at compile
 /// time, so the error points at the user's call.
@@ -32,31 +34,49 @@ pub fn check(comptime Fields: type) void {
     };
     if (info.is_tuple and info.field_names.len > 0)
         @compileError("zefir.log: fields need names: write .{ .user_id = id }, not .{ id }");
+    // A value with its own logged form would lose it as the fields: its
+    // members would be written one by one.
+    if (redactsWhole(Fields))
+        @compileError("zefir.log: '" ++ @typeName(Fields) ++ "' is sensitive and cannot be the fields; log it as one field: .{ .key = key }");
+    if (LogValue(Fields) != null or hasFormat(Fields))
+        @compileError("zefir.log: '" ++ @typeName(Fields) ++ "' has its own logged form; log it as one field: .{ .value = value }");
     inline for (info.field_names, info.field_types) |name, T| {
-        checkName(name, name, true);
+        checkName(name, name);
         if (comptime std.mem.eql(u8, name, source_field)) {
             if (T != std.lang.SourceLocation)
                 @compileError("zefir.log: field 'src' is the call site and must be a std.lang.SourceLocation; pass .src = @src()");
         } else if (comptime !redact.isSensitiveName(name)) {
-            if (T == void) @compileError("zefir.log: field '" ++ name ++ "': cannot log 'void'; remove the field");
-            checkValue(name, T, true, &.{});
+            checkValue(name, T, &.{});
         }
     }
 }
 
 /// Checks one key: `name` is its own part, `path` the way to it from the
-/// fields. `flat` paths reach it through objects only, so they are keys of
-/// the record as a flat view sees it, and must not take a reserved name.
-fn checkName(comptime path: []const u8, comptime name: []const u8, comptime flat: bool) void {
+/// fields, with `[]` for the items of an array. The path without the `[]`
+/// is the key a flat view of the record shows (search engines flatten
+/// arrays of objects too), so it must not take a reserved name.
+fn checkName(comptime path: []const u8, comptime name: []const u8) void {
     for (name) |c| {
         if (!std.ascii.isAlphanumeric(c) and c != '_' and c != '.' and c != '-')
             @compileError("zefir.log: field name '" ++ path ++ "' may contain only [A-Za-z0-9_.-]");
     }
-    if (!flat or !isReserved(path)) return;
+    const flat = comptime flatPath(path);
+    if (!isReserved(flat)) return;
     if (path.len == name.len)
         @compileError("zefir.log: field name '" ++ name ++ "' is reserved for record metadata; rename it, e.g. 'user_" ++ name ++ "'");
-    const top = path[0 .. std.mem.findScalar(u8, path, '.') orelse path.len];
+    const top = flat[0 .. std.mem.findScalar(u8, flat, '.') orelse flat.len];
     @compileError("zefir.log: field '" ++ path ++ "' is reserved for record metadata; rename '" ++ top ++ "', e.g. 'user_" ++ top ++ "'");
+}
+
+/// `path` without its `[]` marks.
+fn flatPath(comptime path: []const u8) []const u8 {
+    var flat: []const u8 = "";
+    var rest = path;
+    while (std.mem.find(u8, rest, "[]")) |i| {
+        flat = flat ++ rest[0..i];
+        rest = rest[i + 2 ..];
+    }
+    return flat ++ rest;
 }
 
 fn isReserved(comptime path: []const u8) bool {
@@ -71,46 +91,47 @@ fn isReserved(comptime path: []const u8) bool {
 
 /// Checks a value of type `T` at `path`. `visited` holds the types on the
 /// way to it, so a type that contains itself is checked once.
-fn checkValue(comptime path: []const u8, comptime T: type, comptime flat: bool, comptime visited: []const type) void {
+fn checkValue(comptime path: []const u8, comptime T: type, comptime visited: []const type) void {
     // The same order as the encoder: marker, logValue, format, the rest.
     if (redactsWhole(T)) return;
     for (visited) |seen| {
         if (seen == T) return;
     }
     const next = visited ++ [_]type{T};
-    if (LogValue(T)) |R| return checkValue(path, R, flat, next);
+    if (LogValue(T)) |R| return checkValue(path, R, next);
     if (hasFormat(T) or isString(T)) return;
     switch (@typeInfo(T)) {
         .bool, .int, .float, .comptime_int, .comptime_float, .@"enum", .enum_literal, .error_set, .null, .type => {},
-        .optional => |o| checkValue(path, o.child, flat, next),
+        .optional => |o| checkValue(path, o.child, next),
         .error_union => @compileError("zefir.log: field '" ++ path ++ "': cannot log error union '" ++ @typeName(T) ++ "'; handle it with try or catch first, then log the payload or the error"),
+        .void => @compileError("zefir.log: field '" ++ path ++ "': cannot log 'void'; remove the field"),
         .pointer => |p| switch (p.size) {
             .one => switch (@typeInfo(p.child)) {
                 .@"opaque" => @compileError("zefir.log: field '" ++ path ++ "': cannot log '" ++ @typeName(T) ++ "': an opaque type has no value to log"),
                 .@"fn" => @compileError("zefir.log: field '" ++ path ++ "': cannot log function '" ++ @typeName(T) ++ "'"),
-                else => checkValue(path, p.child, flat, next),
+                else => checkValue(path, p.child, next),
             },
-            .slice => checkValue(path ++ "[]", p.child, false, next),
+            .slice => checkValue(path ++ "[]", p.child, next),
             .many => @compileError("zefir.log: field '" ++ path ++ "': cannot log many-item pointer '" ++ @typeName(T) ++ "': it has no length; log a slice, ptr[0..len]"),
             .c => @compileError("zefir.log: field '" ++ path ++ "': cannot log C pointer '" ++ @typeName(T) ++ "'; convert it to a slice or log the address as an integer"),
         },
-        .array => |a| checkValue(path ++ "[]", a.child, false, next),
-        .vector => |v| checkValue(path ++ "[]", v.child, false, next),
+        .array => |a| checkValue(path ++ "[]", a.child, next),
+        .vector => |v| checkValue(path ++ "[]", v.child, next),
         .@"struct" => |s| if (s.is_tuple) {
-            inline for (s.field_types) |Item| checkValue(path ++ "[]", Item, false, next);
+            inline for (s.field_types) |Item| checkValue(path ++ "[]", Item, next);
         } else {
             inline for (s.field_names, s.field_types) |name, Field| {
                 if (Field == void) continue;
-                checkName(path ++ "." ++ name, name, flat);
-                if (comptime !redact.isSensitiveName(name)) checkValue(path ++ "." ++ name, Field, flat, next);
+                checkName(path ++ "." ++ name, name);
+                if (comptime !redact.isSensitiveName(name)) checkValue(path ++ "." ++ name, Field, next);
             }
         },
         .@"union" => |u| {
             if (u.tag_type == null)
                 @compileError("zefir.log: field '" ++ path ++ "': cannot log untagged union '" ++ @typeName(T) ++ "': its active field is unknown; use union(enum) or log one of its fields");
             inline for (u.field_names, u.field_types) |name, Payload| {
-                checkName(path ++ "." ++ name, name, flat);
-                if (Payload != void and comptime !redact.isSensitiveName(name)) checkValue(path ++ "." ++ name, Payload, flat, next);
+                checkName(path ++ "." ++ name, name);
+                if (Payload != void and comptime !redact.isSensitiveName(name)) checkValue(path ++ "." ++ name, Payload, next);
             }
         },
         .@"fn" => @compileError("zefir.log: field '" ++ path ++ "': cannot log function '" ++ @typeName(T) ++ "'"),
@@ -139,7 +160,8 @@ pub fn redactsWhole(comptime T: type) bool {
     };
 }
 
-/// The method `name` of `T` if its first parameter is `T` or `*const T`.
+/// The function `name` declared in `T` whose first parameter is the type
+/// itself or a pointer to it (or `anytype`); null when there is none.
 fn method(comptime T: type, comptime name: []const u8) ?std.lang.Type.Fn {
     if (!isContainer(T) or !@hasDecl(T, name)) return null;
     const info = switch (@typeInfo(@TypeOf(@field(T, name)))) {
@@ -147,26 +169,40 @@ fn method(comptime T: type, comptime name: []const u8) ?std.lang.Type.Fn {
         else => return null,
     };
     if (info.param_types.len == 0) return null;
-    const Self = info.param_types[0] orelse return null;
-    return if (Self == T or Self == *const T) info else null;
+    const Self = info.param_types[0] orelse return info;
+    return if (Self == T or Self == *const T or Self == *T) info else null;
 }
 
-/// Whether `T` has the method that `{f}` uses:
-/// `pub fn format(self, w: *std.Io.Writer) std.Io.Writer.Error!void`. Its
-/// output is logged as a string.
+/// Whether `T` has the method that `{f}` uses,
+/// `pub fn format(self, w: *std.Io.Writer) !void`, with self by value or by
+/// `*const` and any error set; its output is logged as a string. A
+/// `format` of another form is a compile error rather than a fallback to
+/// the fields, which the method may have meant to hide.
 pub fn hasFormat(comptime T: type) bool {
     const f = method(T, "format") orelse return false;
-    return f.param_types.len == 2 and f.param_types[1] == *std.Io.Writer and
-        f.return_type == std.Io.Writer.Error!void;
+    const self_ok = if (f.param_types[0]) |Self| Self != *T else true;
+    const writer_ok = f.param_types.len == 2 and (f.param_types[1] == null or f.param_types[1].? == *std.Io.Writer);
+    const result_ok = if (f.return_type) |R| switch (@typeInfo(R)) {
+        .void => true,
+        .error_union => |e| e.payload == void,
+        else => false,
+    } else true;
+    if (self_ok and writer_ok and result_ok) return true;
+    @compileError("zefir.log: " ++ @typeName(T) ++ ".format has another form than the one {f} uses; write pub fn format(self, w: *std.Io.Writer) !void");
 }
 
 /// The type `T.logValue(self)` returns, when `T` has that method: the
-/// logger writes what it returns in place of the value.
+/// logger writes what it returns in place of the value. A `logValue` of
+/// another form is a compile error, as for `format`.
 pub fn LogValue(comptime T: type) ?type {
     const f = method(T, "logValue") orelse return null;
-    if (f.param_types.len != 1) return null;
-    const R = f.return_type orelse return null;
+    const self_ok = if (f.param_types[0]) |Self| Self != *T else true;
+    if (!self_ok or f.param_types.len != 1 or f.return_type == null)
+        @compileError("zefir.log: " ++ @typeName(T) ++ ".logValue has another form; write pub fn logValue(self) U, taking self by value or by *const");
+    const R = f.return_type.?;
     if (R == T) @compileError("zefir.log: " ++ @typeName(T) ++ ".logValue returns " ++ @typeName(T) ++ " itself; return another type, such as a struct of the fields to log");
+    if (@typeInfo(R) == .error_union)
+        @compileError("zefir.log: " ++ @typeName(T) ++ ".logValue returns an error union; return a value, since logging cannot fail");
     return R;
 }
 
@@ -299,8 +335,14 @@ test "format and logValue count only with the signatures zefir.log calls" {
     const ByPointer = struct {
         pub fn format(_: *const @This(), _: *std.Io.Writer) std.Io.Writer.Error!void {}
     };
-    const OtherFormat = struct {
-        pub fn format(_: @This(), _: []const u8) void {}
+    const AnyErrors = struct {
+        pub fn format(_: @This(), _: *std.Io.Writer) !void {}
+    };
+    const AnyWriter = struct {
+        pub fn format(_: @This(), _: anytype) !void {}
+    };
+    const NotAMethod = struct {
+        pub const format = "json";
     };
     const Valued = struct {
         pub fn logValue(_: @This()) u32 {
@@ -309,7 +351,9 @@ test "format and logValue count only with the signatures zefir.log calls" {
     };
     try std.testing.expect(hasFormat(ByValue));
     try std.testing.expect(hasFormat(ByPointer));
-    try std.testing.expect(!hasFormat(OtherFormat));
+    try std.testing.expect(hasFormat(AnyErrors));
+    try std.testing.expect(hasFormat(AnyWriter));
+    try std.testing.expect(!hasFormat(NotAMethod));
     try std.testing.expect(!hasFormat(u8));
     try std.testing.expect(LogValue(Valued).? == u32);
     try std.testing.expect(LogValue(ByValue) == null);

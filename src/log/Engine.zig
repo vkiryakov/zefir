@@ -50,8 +50,9 @@ pub const Stats = struct {
     /// Records that broke off mid-line because a write failed; the next
     /// record starts on a new line.
     torn_lines: u64,
-    /// `scoped` calls that found the scope table full; those handles log
-    /// without a scope, at the global level.
+    /// New scope names that found the scope table full, from `scoped` and
+    /// from std.log records; those log without a scope, at the global
+    /// level, and each such lookup takes the table's short lock again.
     scopes_overflow: u64,
     /// `scoped` calls whose name was cut to 128 bytes.
     scope_names_truncated: u64,

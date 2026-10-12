@@ -22,11 +22,18 @@
 //! literal. A field holds scalars and strings (integers wider than 64 bits
 //! and NaN or infinities are written as strings, invalid UTF-8 as U+FFFD,
 //! enums and errors by name), structs (objects; dotted keys in text),
-//! tagged unions, arrays, slices and tuples, optionals and pointers (all
-//! followed to 8 levels at most). A type logs its own text through the
-//! `format` method that `{f}` uses, or another value through
-//! `pub fn logValue(self) T`; `zefir.log.hex(bytes)` logs bytes as hex.
-//! `.src = @src()` adds the call site, `withContext(ctx)` the trace ids.
+//! tagged unions, arrays, slices and tuples, optionals and pointers (both
+//! followed). Objects, arrays and unions nested deeper than 8 levels are
+//! written as "[MAX_DEPTH]". `.src = @src()` adds the call site,
+//! `withContext(ctx)` the trace ids, and `zefir.log.hex(bytes)` logs bytes
+//! as hex.
+//!
+//! A type logs its own text through the `format` method that `{f}` uses,
+//! or another value through `pub fn logValue(self) U`. Both run when the
+//! record is written, twice when it has to be cut, so they must have no
+//! side effects; `logValue` must not return slices into a by-value `self`.
+//! The text `format` writes is trusted: the logger escapes it, but redacts
+//! nothing inside it.
 //!
 //! A type marked `pub const zefir_sensitive = true;` (`confy.Secret` is) is
 //! written as "[REDACTED]", also inside an optional, a pointer, a slice or
@@ -41,6 +48,10 @@
 //! change at once. Logging never allocates and never fails: problems are
 //! counted in `stats()`. Tests capture records with
 //! `.output = .{ .writer = &writer }`.
+//!
+//! With the std.log bridge, std.log's scope becomes the record's scope and
+//! its formatted text the message. The arguments are formatted by std.fmt,
+//! not walked by the logger, so redaction does not reach inside them.
 //!
 //! If stdout is closed, the logger notes it once on stderr and drops the
 //! records that follow. That needs SIGPIPE ignored, as `main(init:
