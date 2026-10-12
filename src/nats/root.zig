@@ -7,8 +7,11 @@
 //! addresses and INFO, header handling and the protocol layer underneath.
 
 const std = @import("std");
+pub const Headers = @import("Headers.zig");
+pub const Header = Headers.Header;
 
 test {
     std.testing.refAllDecls(@This());
     _ = @import("protocol/subject.zig");
+    _ = @import("Headers.zig");
 }
