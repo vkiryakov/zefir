@@ -636,7 +636,7 @@ A string contains `seed`.
 - **Precondition:** none: invalid UTF-8 in the value is not checked.
 - **Code:** `validation.contains`.
 - **Default message:** `must contain "{seed}"`, the seed escaped as in Zig
-  source (`\n`, `\"`, `\xff`); `must contain the required text` when that would
+  source (`\n`, `\"`, `\x00`); `must contain the required text` when that would
   be longer than 512 bytes ([Fallback messages](README.md#fallback-messages)).
 - **Placeholders:** `{seed}`: the escaped seed, without the quotes.
 - **Predicate:** none.

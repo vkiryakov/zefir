@@ -34,18 +34,28 @@ fn stringProblem(comptime rule: *const Rule, comptime T: type, comptime where: [
     return core.typeErrorText(rule, T, where, "a string", core.isString, hint);
 }
 
-/// The field-type check of `minLength`, `maxLength` and `length`: on a slice
-/// of other items the hint names the list rules with the same counts (an
-/// array has a fixed length, so it gets none).
+/// The field-type check of `minLength`, `maxLength` and `length`.
 fn lengthFits(comptime rule: *const Rule, comptime T: type, comptime where: []const u8) void {
-    const hint = if (core.isListSlice(T)) core.hints.itemCount(rule.*) else null;
-    if (stringProblem(rule, T, where, hint)) |text| @compileError(text);
+    if (lengthProblem(rule, T, where)) |text| @compileError(text);
 }
 
-/// The field-type check of `digits`: a number field is already a number.
+/// The declaration error of `minLength`, `maxLength` or `length` on the
+/// unwrapped field type `T`, or null: on a slice of other items the hint
+/// names the list rules with the same counts (an array has a fixed length, so
+/// it gets none).
+fn lengthProblem(comptime rule: *const Rule, comptime T: type, comptime where: []const u8) ?[]const u8 {
+    return stringProblem(rule, T, where, if (core.isListSlice(T)) core.hints.itemCount(rule.*) else null);
+}
+
+/// The field-type check of `digits`.
 fn digitsFits(comptime rule: *const Rule, comptime T: type, comptime where: []const u8) void {
-    const hint = if (core.isNumber(T)) core.hints.number_field else null;
-    if (stringProblem(rule, T, where, hint)) |text| @compileError(text);
+    if (digitsProblem(rule, T, where)) |text| @compileError(text);
+}
+
+/// The declaration error of `digits` on the unwrapped field type `T`, or
+/// null: a number field is already a number.
+fn digitsProblem(comptime rule: *const Rule, comptime T: type, comptime where: []const u8) ?[]const u8 {
+    return stringProblem(rule, T, where, if (core.isNumber(T)) core.hints.number_field else null);
 }
 
 /// The field-type check of `contains` and `notContains`.
@@ -673,8 +683,8 @@ const Record = struct { id: u32 };
 /// The declaration error of `rule` on a field of type `T`, or null.
 fn fitsText(comptime rule: Rule, comptime T: type) ?[]const u8 {
     return switch (rule.kind) {
-        .min_length, .max_length, .length => stringProblem(&rule, T, test_where, if (core.isListSlice(T)) core.hints.itemCount(rule) else null),
-        .digits => stringProblem(&rule, T, test_where, if (core.isNumber(T)) core.hints.number_field else null),
+        .min_length, .max_length, .length => lengthProblem(&rule, T, test_where),
+        .digits => digitsProblem(&rule, T, test_where),
         .contains, .not_contains => seedProblem(&rule, T, test_where),
         else => stringProblem(&rule, T, test_where, null),
     };
@@ -792,6 +802,9 @@ test "minLength, maxLength and length on a slice of other items name the list ru
     try expect(head ++ "min_length expects a string, field is []const u32; for the number of items use v.minItems(3)", comptime fitsText(minLength(3), []const u32).?);
     try expect(head ++ "max_length expects a string, field is []const u32; for the number of items use v.maxItems(64)", comptime fitsText(maxLength(64), []const u32).?);
     try expect(head ++ "length expects a string, field is []const u32; for the number of items use v.minItems(3) and v.maxItems(32)", comptime fitsText(length(3, 32), []const u32).?);
+    try expect(head ++ "min_length expects a string, field is []const ?u32; for the number of items use v.minItems(3)", comptime fitsText(minLength(3), []const ?u32).?);
+    try expect(head ++ "max_length expects a string, field is []u32; for the number of items use v.maxItems(64)", comptime fitsText(maxLength(64), []u32).?);
+    try expect(head ++ "length expects a string, field is []const f64; for the number of items use v.minItems(1) and v.maxItems(1)", comptime fitsText(length(1, 1), []const f64).?);
     try expect(head ++ "min_length expects a string, field is []const []const u8; use v.each(v.minLength(3))", comptime fitsText(minLength(3), []const []const u8).?);
     try expect(head ++ "length expects a string, field is [4]u8; [N]u8 is an array of numbers, not a string: use []const u8", comptime fitsText(length(3, 32), [4]u8).?);
     try expect(head ++ "max_length expects a string, field is [3]u32", comptime fitsText(maxLength(64), [3]u32).?);
@@ -886,7 +899,10 @@ test "digits on a number field says the field is already a number" {
     const head = "validator: Dto.field_rules.x: ";
     const number = "; the field is already a number: use v.min, v.max or v.range";
     try expect(head ++ "digits expects a string, field is u32" ++ number, comptime fitsText(digits, u32).?);
+    try expect(head ++ "digits expects a string, field is i8" ++ number, comptime fitsText(digits, i8).?);
     try expect(head ++ "digits expects a string, field is f64" ++ number, comptime fitsText(digits, f64).?);
+    try expect(head ++ "digits expects a string, field is f32" ++ number, comptime fitsText(digits, f32).?);
+    try expect(head ++ "digits expects a string, field is f16" ++ number, comptime fitsText(digits, f16).?);
     try expect(head ++ "digits expects a string, field is bool", comptime fitsText(digits, bool).?);
     try expect(head ++ "digits expects a string, field is []const []const u8; use v.each(v.digits)", comptime fitsText(digits, []const []const u8).?);
     try expect(head ++ "digits expects a string, field is []const u32", comptime fitsText(digits, []const u32).?);
