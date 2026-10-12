@@ -121,7 +121,8 @@ level is off, so check `enabled` before costly ones.
 | a type with `pub fn logValue(self) U` | the value it returns, logged by these rules | the same |
 
 A pointer to an opaque type is logged through the type's `format` or
-`logValue`. Nesting deeper than 8 levels is written as `"[MAX_DEPTH]"`, so
+`logValue`, which take `self: *const @This()`. Nesting deeper than 8
+levels is written as `"[MAX_DEPTH]"`, so
 a cycle through pointers ends. What cannot be logged is a compile error at
 the call, naming the field: untagged unions, many-item and C pointers,
 pointers to opaque types without `format` or `logValue` (such as
@@ -350,11 +351,12 @@ as `main(init: std.process.Init)` does.
 Error records are never lost silently. When the queue refuses one, or one
 is too long for `.oversize = .drop`, the writer thread writes one record
 in its place, `"message":"zefir.log: error records dropped","suppressed":N`,
-after its next batch or within a second when it is idle; `shutdown` and
-`deinit` note on stderr the ones it could not report, and in sync mode,
-which has no writer thread, all of them. A record dropped for its size
-reaches no interceptor and no subscriber: there is no line to give them.
-Apart from these notes, a caller in queued mode never writes to stderr.
+after its current batch, or at once when it is idle (`flush` does not wait
+for it); `shutdown` and `deinit` note on stderr the ones it could not
+report, and in sync mode, which has no writer thread, all of them. A
+record dropped for its size reaches no interceptor and no subscriber:
+there is no line to give them. Apart from these notes, a caller in queued
+mode never writes to stderr.
 
 ## Emergency records
 

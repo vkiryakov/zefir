@@ -218,6 +218,17 @@ test "logValue without self" {
     logger().info("m", .{ .card = Card{ .user = "ada", .pin = "1234" } });
 }
 
+test "format of an opaque type with a mutable self" {
+    const Handle = opaque {
+        pub fn format(_: *@This(), w: *std.Io.Writer) !void {
+            try w.writeAll("handle");
+        }
+    };
+    var backing: u64 = 0;
+    const h: *Handle = @ptrCast(&backing);
+    logger().info("m", .{ .h = h });
+}
+
 test "format with a foreign self" {
     const Masked = struct { len: usize };
     const Card = struct {

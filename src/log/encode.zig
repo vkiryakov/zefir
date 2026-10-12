@@ -446,7 +446,20 @@ fn renderAtComptime(comptime T: type) bool {
     // Walking the type of a wide value takes many steps.
     @setEvalBranchQuota(1_000_000);
     if (!plainData(T, &.{})) return false;
-    return field_checks.isString(T) or literalItems(T) <= max_literal_items;
+    return field_checks.isString(T) or comptimeOnly(T) or literalItems(T) <= max_literal_items;
+}
+
+/// Whether an array of `T`, or `T` itself, holds values that exist only at
+/// compile time, such as `comptime_int`: those can be written only then,
+/// however many there are.
+fn comptimeOnly(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .comptime_int, .comptime_float, .enum_literal, .type, .null => true,
+        .array => |a| comptimeOnly(a.child),
+        .vector => |v| comptimeOnly(v.child),
+        .optional => |o| comptimeOnly(o.child),
+        else => false,
+    };
 }
 
 fn plainData(comptime T: type, comptime visited: []const type) bool {
@@ -465,11 +478,13 @@ fn plainData(comptime T: type, comptime visited: []const type) bool {
         .array => |a| a.len <= max_literal_bytes and plainData(a.child, next),
         .optional => |o| plainData(o.child, next),
         .vector => |v| plainData(v.child, next),
-        .@"struct" => |s| for (s.field_types) |Member| {
-            if (!plainData(Member, next)) break false;
+        // A member or a tag named like a secret is written as a constant,
+        // so its type does not matter.
+        .@"struct" => |s| for (s.field_names, s.field_types) |name, Member| {
+            if (!redact.isSensitiveName(name) and !plainData(Member, next)) break false;
         } else true,
-        .@"union" => |u| for (u.field_types) |Payload| {
-            if (!plainData(Payload, next)) break false;
+        .@"union" => |u| for (u.field_names, u.field_types) |name, Payload| {
+            if (!redact.isSensitiveName(name) and !plainData(Payload, next)) break false;
         } else true,
         else => true,
     };
@@ -615,7 +630,7 @@ pub fn suppressedBytes(comptime f: Format, n: u64) usize {
 /// Adds `"suppressed":n` (` suppressed=n` in text) to the end of the
 /// record in `buf[0..len]`, before its line break and closing brace: how
 /// many records the logger left out before this one. `buf` has room for
-/// `suppressed_max_bytes` more. Returns the new length.
+/// `suppressedBytes(f, n)` more. Returns the new length.
 pub fn appendSuppressed(comptime f: Format, buf: []u8, len: usize, n: u64) usize {
     const end = comptime closing(f).whole;
     var w: Writer = .fixed(buf[len - end.len ..]);
@@ -1850,4 +1865,29 @@ test "a pointer to an opaque type is written through its format or logValue" {
     got = record(.text, .info, "m", &buf, header, .{ .h = known, .c = c, .maybe = @as(?*const Handle, h) }).?;
     try testing.expectStringEndsWith(buf[0..got.len], " m h=handle c.id=7 maybe=handle\n");
     comptime field_checks.check(@TypeOf(.{ .h = h, .c = c, .list = @as([]const *const Handle, &.{h}) }));
+}
+
+test "a literal member or tag named like a secret is redacted whatever its type" {
+    // Its value is never looked at, so neither is its type's form.
+    const VoidFormat = struct {
+        pub fn format(_: @This(), _: *Writer) void {}
+    };
+    const Auth = union(enum) { secret: VoidFormat, none };
+    const fields = .{ .cfg = .{ .port = 5432, .password = VoidFormat{} }, .auth = Auth{ .secret = .{} } };
+    comptime field_checks.check(@TypeOf(fields));
+    var buf: [256]u8 = undefined;
+    const header: Header = .{ .timestamp = fixed_time, .service = "", .scope = "", .oversize = .truncate };
+    var got = record(.json, .info, "m", &buf, header, fields).?;
+    try testing.expectStringEndsWith(buf[0..got.len], ",\"cfg\":{\"port\":5432,\"password\":\"[REDACTED]\"},\"auth\":{\"secret\":\"[REDACTED]\"}}\n");
+    got = record(.text, .info, "m", &buf, header, fields).?;
+    try testing.expectStringEndsWith(buf[0..got.len], " m cfg.port=5432 cfg.password=[REDACTED] auth.secret=[REDACTED]\n");
+}
+
+test "a literal array of values that exist only at compile time is rendered then, whatever its length" {
+    const ids: [1100]comptime_int = @splat(7);
+    var buf: [8192]u8 = undefined;
+    const header: Header = .{ .timestamp = fixed_time, .service = "", .scope = "", .oversize = .truncate };
+    const got = record(.json, .info, "m", &buf, header, .{ .ids = ids }).?;
+    try testing.expect(!got.truncated);
+    try testing.expectEqual(@as(usize, 1100), std.mem.count(u8, buf[0..got.len], "7"));
 }

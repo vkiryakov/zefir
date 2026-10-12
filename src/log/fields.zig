@@ -204,6 +204,11 @@ fn method(comptime T: type, comptime name: []const u8) ?std.lang.Type.Fn {
     };
 }
 
+/// The `self` a hint shows: an opaque type is reached through a pointer.
+fn selfHint(comptime T: type) []const u8 {
+    return if (@typeInfo(T) == .@"opaque") "*const @This()" else "@This()";
+}
+
 /// Whether `f` takes self the way the encoder passes it: by value, by
 /// `*const` or as `anytype`.
 fn selfOk(comptime T: type, comptime f: std.lang.Type.Fn) bool {
@@ -226,7 +231,8 @@ pub fn hasFormat(comptime T: type) bool {
 fn formatAt(comptime where: []const u8, comptime T: type) bool {
     const f = method(T, "format") orelse return false;
     const name = "'" ++ @typeName(T) ++ ".format'";
-    const hint = "write pub fn format(self: @This(), w: *std.Io.Writer) !void";
+    // An opaque type has no value to take by value.
+    const hint = "write pub fn format(self: " ++ selfHint(T) ++ ", w: *std.Io.Writer) !void";
     const writer_ok = f.param_types.len == 2 and (f.param_types[1] == null or f.param_types[1].? == *std.Io.Writer);
     if (!selfOk(T, f) or !writer_ok)
         @compileError("zefir.log: " ++ where ++ name ++ " has another form than the one {f} uses; " ++ hint);
@@ -264,8 +270,8 @@ pub fn LogValue(comptime T: type) ?type {
 fn logValueAt(comptime where: []const u8, comptime T: type) ?type {
     const f = method(T, "logValue") orelse return null;
     const name = "'" ++ @typeName(T) ++ ".logValue'";
-    if (!selfOk(T, f) or f.param_types.len != 1 or f.return_type == null)
-        @compileError("zefir.log: " ++ where ++ name ++ " has another form; write pub fn logValue(self: @This()) U, taking self by value or by *const");
+    if (!selfOk(T, f) or f.param_types.len != 1 or f.return_type == null) @compileError("zefir.log: " ++ where ++ name ++ " has another form; write pub fn logValue(self: " ++ selfHint(T) ++
+        ") U, taking self " ++ (if (@typeInfo(T) == .@"opaque") "by *const" else "by value or by *const"));
     const R = f.return_type.?;
     if (R == T) @compileError("zefir.log: " ++ where ++ name ++ " returns '" ++ @typeName(T) ++ "' itself; return another type, such as a struct of the fields to log");
     if (@typeInfo(R) == .error_union)

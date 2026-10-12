@@ -85,8 +85,10 @@ pub const Stats = struct {
     /// `emergency` records left out: past the rate limit (100 at once, then
     /// 100 per second), logged while an emergency record was being written
     /// on the same thread, too long for `.oversize = .drop`, or lost by a
-    /// failed write to stderr. The next one written tells how many with
-    /// `"suppressed":N`; emergency records are not counted in `accepted`.
+    /// failed write to stderr. A later record tells how many with
+    /// `"suppressed":N`: the next one written, unless it fits whole with no
+    /// room left for the count; emergency records are not counted in
+    /// `accepted`.
     emergency_suppressed: u64,
     /// Records in the subscribers' queues, not yet handed to their
     /// handlers; after a `shutdown` that timed out, the ones `deinit` drops.
@@ -671,7 +673,13 @@ fn headerFor(engine: *Engine, comptime level: Level, scope: *const scopes.Entry,
 /// Hands the record encoded in `buf[1..]` to the interceptors, then to the
 /// subscribers, then writes or queues it; or counts why it goes nowhere.
 fn finish(engine: *Engine, comptime level: Level, scope: *const scopes.Entry, header: encode.Header, buf: []u8, encoded: ?encode.Encoded, io: Io) void {
-    const done = encoded orelse return engine.refuse(level, &engine.counters.dropped_oversize);
+    const done = encoded orelse {
+        engine.refuse(level, &engine.counters.dropped_oversize);
+        // The record takes no slot, so nothing else would wake a sleeping
+        // writer thread for its summary.
+        if (level == .err) if (engine.queue) |*q| q.wakeConsumer();
+        return;
+    };
     if (done.truncated) bump(&engine.counters.truncated);
     const record = buf[1..][0..done.len];
     if (!engine.intercept(level, scope, header, done, record)) return;

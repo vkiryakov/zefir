@@ -61,10 +61,13 @@ pub fn deinit(self: Logger) void {
 }
 
 /// Queued mode: waits until every record logged before the call is
-/// written, or dropped by a failed write. When `timeout` passes first it
-/// returns `error.Timeout`, and `stats().pending` tells how many records
-/// are not written yet. Sync mode writes each record before the call that
-/// logs it returns: there is nothing to wait for. Blocks the OS thread.
+/// written, or dropped by a failed write. It does not wait for the summary
+/// record of the error records the logger dropped: the writer thread writes
+/// it as soon as it can, and `shutdown` reports every one. When `timeout`
+/// passes first it returns `error.Timeout`, and `stats().pending` tells how
+/// many records are not written yet. Sync mode writes each record before
+/// the call that logs it returns: there is nothing to wait for. Blocks the
+/// OS thread.
 /// Not from a handler or the writer thread, in either mode: that panics in
 /// safe builds and returns `error.Timeout` otherwise.
 pub fn flush(self: Logger, timeout: std.Io.Timeout) error{Timeout}!void {
@@ -73,7 +76,9 @@ pub fn flush(self: Logger, timeout: std.Io.Timeout) error{Timeout}!void {
 
 /// Stops the logger: records logged after it starts are refused and
 /// counted in `stats().dropped.closed` (error records in
-/// `stats().dropped.err`, and noted on stderr); only what the handlers
+/// `stats().dropped.err`, reported like every error record the logger
+/// drops: by the summary record, or on stderr once no writer thread is
+/// left); only what the handlers
 /// log while it waits for them still goes out. It waits until the
 /// subscribers have handled their queues, then, in queued mode, until the
 /// queue is written, and stops the logger's threads. When `timeout`
@@ -2444,6 +2449,24 @@ test "queued: an error record too long for .drop is reported by the summary reco
     try testing.expectEqual(@as(usize, 2), std.mem.count(u8, out, "\n"));
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, out, "\",\"level\":\"info\",\"message\":\"After\"}\n"));
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, out, "\",\"level\":\"error\",\"message\":\"zefir.log: error records dropped\",\"suppressed\":1}\n"));
+}
+
+test "queued: an error record too long for .drop wakes the sleeping writer thread, which reports it at once" {
+    var c: Capture = undefined;
+    try c.open(.{ .mode = .{ .queued = .{ .capacity = 4 } }, .oversize = .drop, .max_record_bytes = 512 });
+    defer c.close();
+    try waitWriterAsleep(c.logger);
+    const data: [1024]u8 = @splat('d');
+    c.logger.err("Too long", .{ .data = @as([]const u8, &data) });
+    // Well within the writer's one-second recheck: the refusal woke it, and
+    // it took the count for its summary.
+    const start = std.Io.Clock.awake.now(testing.io);
+    while (c.logger.engine.errors_unreported.load(.seq_cst) != 0) {
+        if (start.durationTo(std.Io.Clock.awake.now(testing.io)).nanoseconds > 900 * std.time.ns_per_ms) return error.TestWriterNotWoken;
+        try testing.io.sleep(.fromMilliseconds(1), .awake);
+    }
+    try c.logger.shutdown(.none);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, c.out.written(), "\",\"level\":\"error\",\"message\":\"zefir.log: error records dropped\",\"suppressed\":1}\n"));
 }
 
 test "queued: deinit after a timed-out shutdown writes no summary record; it notes the error records on stderr" {

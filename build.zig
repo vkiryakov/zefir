@@ -230,6 +230,7 @@ pub fn build(b: *std.Build) void {
         .{ "format that can return another error", ".format' can return error.TooBig; {f} lets it return only std.Io.Writer.Error" },
         .{ "format that returns anyerror", ".format' returns anyerror; {f} lets it return only std.Io.Writer.Error" },
         .{ "format that returns void", ".format' returns void; write pub fn format(self: @This(), w: *std.Io.Writer) !void" },
+        .{ "format of an opaque type with a mutable self", ".format' has another form than the one {f} uses; write pub fn format(self: *const @This(), w: *std.Io.Writer) !void" },
         // A type declared in a test is named after the file and the test, so
         // these can name it in full.
         .{ "a format error names the nested field", "zefir.log: field 'req.x': 'compile_errors.test.a format error names the nested field.Other.format' has another form than the one {f} uses; write pub fn format(self: @This(), w: *std.Io.Writer) !void" },
