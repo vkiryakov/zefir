@@ -20,20 +20,6 @@ const Outcome = core.Outcome;
 
 // ------------------------------------------------------------------ field types
 
-/// The field-type check of a rule that takes strings and gives no hint of
-/// its own.
-fn stringFits(comptime rule: *const Rule, comptime T: type, comptime where: []const u8) void {
-    if (stringProblem(rule, T, where, null)) |text| @compileError(text);
-}
-
-/// The declaration error of a string rule on the unwrapped field type `T`,
-/// or null: the field is a string. `hint` follows the text unless a hint of
-/// the core applies (`[N]u8`, a list of strings, an odd slice).
-fn stringProblem(comptime rule: *const Rule, comptime T: type, comptime where: []const u8, comptime hint: ?[]const u8) ?[]const u8 {
-    if (core.isString(T)) return null;
-    return core.typeErrorText(rule, T, where, "a string", core.isString, hint);
-}
-
 /// The field-type check of `minLength`, `maxLength` and `length`.
 fn lengthFits(comptime rule: *const Rule, comptime T: type, comptime where: []const u8) void {
     if (lengthProblem(rule, T, where)) |text| @compileError(text);
@@ -44,7 +30,7 @@ fn lengthFits(comptime rule: *const Rule, comptime T: type, comptime where: []co
 /// names the list rules with the same counts (an array has a fixed length, so
 /// it gets none).
 fn lengthProblem(comptime rule: *const Rule, comptime T: type, comptime where: []const u8) ?[]const u8 {
-    return stringProblem(rule, T, where, if (core.isListSlice(T)) core.hints.itemCount(rule.*) else null);
+    return core.stringProblem(rule, T, where, if (core.isListSlice(T)) core.hints.itemCount(rule.*) else null);
 }
 
 /// The field-type check of `digits`.
@@ -55,7 +41,7 @@ fn digitsFits(comptime rule: *const Rule, comptime T: type, comptime where: []co
 /// The declaration error of `digits` on the unwrapped field type `T`, or
 /// null: a number field is already a number.
 fn digitsProblem(comptime rule: *const Rule, comptime T: type, comptime where: []const u8) ?[]const u8 {
-    return stringProblem(rule, T, where, if (core.isNumber(T)) core.hints.number_field else null);
+    return core.stringProblem(rule, T, where, if (core.isNumber(T)) core.hints.number_field else null);
 }
 
 /// The field-type check of `contains` and `notContains`.
@@ -195,7 +181,7 @@ fn byteRule(comptime kind: core.Kind, comptime n: usize, comptime message: []con
         .message = message,
         .args = core.renderArg(n),
         .params = &.{core.param(name, n)},
-        .fits = stringFits,
+        .fits = core.fitsString,
         .eval = struct {
             fn eval(value: anytype) Outcome {
                 return core.passIf(if (kind == .min_bytes) value.*.len >= n else value.*.len <= n);
@@ -217,7 +203,7 @@ pub fn isUtf8(s: []const u8) bool {
 /// precondition, so its `.withMessage` applies: put it first in a tuple to
 /// word the case for the rules that report the precondition,
 /// `.{ v.utf8.withMessage("..."), v.maxLength(64) }`.
-pub const utf8: Rule = classRule(.utf8, "must be valid UTF-8", isUtf8, stringFits);
+pub const utf8: Rule = core.predicateRule(.utf8, "must be valid UTF-8", isUtf8);
 
 /// Unicode White_Space (PropList.txt): 25 code points.
 fn isWhiteSpace(cp: u21) bool {
@@ -250,7 +236,7 @@ pub fn isNotBlank(s: []const u8) bool {
 pub const notBlank: Rule = core.define(.not_blank, .{
     .message = "must not be blank",
     .precondition = core.preconditions.utf8,
-    .fits = stringFits,
+    .fits = core.fitsString,
     .eval = struct {
         fn eval(value: anytype) Outcome {
             if (!std.unicode.utf8ValidateSlice(value.*)) return .precondition;
@@ -328,41 +314,27 @@ pub fn isMultibyte(s: []const u8) bool {
 }
 
 /// Only ASCII: a byte of 0x80 or above fails, valid UTF-8 or not; "" passes.
-pub const ascii: Rule = classRule(.ascii, "must contain only ASCII characters", isAscii, stringFits);
+pub const ascii: Rule = core.predicateRule(.ascii, "must contain only ASCII characters", isAscii);
 /// Only printable ASCII (0x20-0x7E): also TAB, LF and CR fail; "" passes.
-pub const printableAscii: Rule = classRule(.printable_ascii, "must contain only printable ASCII characters", isPrintableAscii, stringFits);
+pub const printableAscii: Rule = core.predicateRule(.printable_ascii, "must contain only printable ASCII characters", isPrintableAscii);
 /// Only ASCII letters and digits (en-US): `_`, `-`, a space and letters or
 /// digits outside ASCII fail; "" passes.
-pub const alphanumeric: Rule = classRule(.alphanumeric, "must contain only ASCII letters and digits", isAlphanumeric, stringFits);
+pub const alphanumeric: Rule = core.predicateRule(.alphanumeric, "must contain only ASCII letters and digits", isAlphanumeric);
 /// Only ASCII letters (en-US); "" passes.
-pub const alpha: Rule = classRule(.alpha, "must contain only ASCII letters", isAlpha, stringFits);
+pub const alpha: Rule = core.predicateRule(.alpha, "must contain only ASCII letters", isAlpha);
 /// Only ASCII digits: a code or a PIN, not a number (its size is not
 /// bounded; leading zeros stay); "" passes. On a number field it is a
 /// compile error: the field is already a number.
-pub const digits: Rule = classRule(.digits, "must contain only ASCII digits", isDigits, digitsFits);
+pub const digits: Rule = core.predicateRuleFits(.digits, "must contain only ASCII digits", isDigits, digitsFits);
 /// No ASCII uppercase letter; letters outside ASCII are not inspected (the
 /// standard library has no case tables); "" passes.
-pub const lowercase: Rule = classRule(.lowercase, "must be lowercase", isLowercase, stringFits);
+pub const lowercase: Rule = core.predicateRule(.lowercase, "must be lowercase", isLowercase);
 /// No ASCII lowercase letter; letters outside ASCII are not inspected; ""
 /// passes.
-pub const uppercase: Rule = classRule(.uppercase, "must be uppercase", isUppercase, stringFits);
+pub const uppercase: Rule = core.predicateRule(.uppercase, "must be uppercase", isUppercase);
 /// At least one byte of 0x80 or above, without decoding, so invalid UTF-8
 /// passes; "" fails.
-pub const multibyte: Rule = classRule(.multibyte, "must contain at least one non-ASCII character", isMultibyte, stringFits);
-
-/// A rule of `kind` without parameters or precondition whose check is
-/// `predicate` on every input.
-fn classRule(comptime kind: core.Kind, comptime message: []const u8, comptime predicate: fn ([]const u8) bool, comptime fits: fn (comptime *const Rule, comptime type, comptime []const u8) void) Rule {
-    return core.define(kind, .{
-        .message = message,
-        .fits = fits,
-        .eval = struct {
-            fn eval(value: anytype) Outcome {
-                return core.passIf(predicate(value.*));
-            }
-        }.eval,
-    });
-}
+pub const multibyte: Rule = core.predicateRule(.multibyte, "must contain at least one non-ASCII character", isMultibyte);
 
 // ------------------------------------------------------------------ fullWidth, halfWidth, variableWidth
 
@@ -428,7 +400,7 @@ fn widthRule(comptime kind: core.Kind, comptime message: []const u8, comptime fu
     return core.define(kind, .{
         .message = message,
         .precondition = core.preconditions.utf8,
-        .fits = stringFits,
+        .fits = core.fitsString,
         .eval = struct {
             fn eval(value: anytype) Outcome {
                 const found = hasWidths(value.*, full, half) orelse return .precondition;
@@ -619,7 +591,7 @@ pub fn strongPassword(comptime options: StrongPasswordOptions) Rule {
             core.param("min_symbols", options.min_symbols),
         },
         .precondition = core.preconditions.utf8,
-        .fits = stringFits,
+        .fits = core.fitsString,
         .eval = struct {
             fn eval(value: anytype) Outcome {
                 const counts = countPassword(value.*) orelse return .precondition;
@@ -686,7 +658,7 @@ fn fitsText(comptime rule: Rule, comptime T: type) ?[]const u8 {
         .min_length, .max_length, .length => lengthProblem(&rule, T, test_where),
         .digits => digitsProblem(&rule, T, test_where),
         .contains, .not_contains => seedProblem(&rule, T, test_where),
-        else => stringProblem(&rule, T, test_where, null),
+        else => core.stringProblem(&rule, T, test_where, null),
     };
 }
 

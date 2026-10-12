@@ -13,33 +13,6 @@ const core = @import("core.zig");
 const Rule = core.Rule;
 const Outcome = core.Outcome;
 
-/// The field-type check of every rule of this file.
-fn stringFits(comptime rule: *const Rule, comptime T: type, comptime where: []const u8) void {
-    if (stringProblem(rule, T, where)) |text| @compileError(text);
-}
-
-/// The declaration error of a rule of this file on the unwrapped field type
-/// `T`, or null: the field is a string. `[N]u8` gets the hint that it is no
-/// string, and a slice or an array of strings the hint to use `v.each`.
-fn stringProblem(comptime rule: *const Rule, comptime T: type, comptime where: []const u8) ?[]const u8 {
-    if (core.isString(T)) return null;
-    return core.typeErrorText(rule, T, where, "a string", core.isString, null);
-}
-
-/// A rule of `kind` without parameters that passes the strings `predicate`
-/// accepts.
-fn predicateRule(comptime kind: core.Kind, comptime message: []const u8, comptime predicate: fn ([]const u8) bool) Rule {
-    return core.define(kind, .{
-        .message = message,
-        .fits = stringFits,
-        .eval = struct {
-            fn eval(value: anytype) Outcome {
-                return core.passIf(predicate(value.*));
-            }
-        }.eval,
-    });
-}
-
 fn allHex(s: []const u8) bool {
     for (s) |c| {
         if (!std.ascii.isHex(c)) return false;
@@ -53,7 +26,7 @@ fn allHex(s: []const u8) bool {
 /// and 23 and hex digits of any case elsewhere. The version and the variant
 /// are not checked, so the Nil and Max UUIDs pass; braces, `urn:uuid:` and
 /// the 32-digit form fail.
-pub const uuid: Rule = predicateRule(.uuid, "must be a valid UUID", isUuid);
+pub const uuid: Rule = core.predicateRule(.uuid, "must be a valid UUID", isUuid);
 
 /// `s` passes `v.uuid`.
 pub fn isUuid(s: []const u8) bool {
@@ -70,7 +43,7 @@ pub fn isUuid(s: []const u8) bool {
 
 /// A MongoDB ObjectId as text: 24 hex digits of any case, as bson's
 /// `ObjectId.isValid` takes a string; no `0x` or `0h` prefix.
-pub const mongoId: Rule = predicateRule(.mongo_id, "must be a valid MongoDB ObjectId", isMongoId);
+pub const mongoId: Rule = core.predicateRule(.mongo_id, "must be a valid MongoDB ObjectId", isMongoId);
 
 /// `s` passes `v.mongoId`.
 pub fn isMongoId(s: []const u8) bool {
@@ -79,7 +52,7 @@ pub fn isMongoId(s: []const u8) bool {
 
 /// A Firebase push ID: 20 bytes of the alphabet `-`, `0-9`, `A-Z`, `_`,
 /// `a-z`. The timestamp in its first 8 characters is not decoded.
-pub const firebasePushId: Rule = predicateRule(.firebase_push_id, "must be a valid Firebase push ID", isFirebasePushId);
+pub const firebasePushId: Rule = core.predicateRule(.firebase_push_id, "must be a valid Firebase push ID", isFirebasePushId);
 
 /// `s` passes `v.firebasePushId`.
 pub fn isFirebasePushId(s: []const u8) bool {
@@ -121,7 +94,7 @@ pub fn hash(comptime algorithm: HashAlgorithm) Rule {
         .message = "must be a valid " ++ @tagName(algorithm) ++ " hash",
         .args = core.renderArg(algorithm),
         .params = &.{core.param("algorithm", algorithm)},
-        .fits = stringFits,
+        .fits = core.fitsString,
         .eval = struct {
             fn eval(value: anytype) Outcome {
                 return core.passIf(isHash(value.*, algorithm));
@@ -179,7 +152,7 @@ fn luhnOk(digits: []const u8) bool {
 /// A payment card number: 12 to 19 ASCII digits whose Luhn check digit
 /// (ISO/IEC 7812-1) holds. There is no table of issuers, so any prefix
 /// passes, a leading 0 included; spaces and hyphens fail.
-pub const creditCard: Rule = predicateRule(.credit_card, "must be a valid credit card number", isCreditCard);
+pub const creditCard: Rule = core.predicateRule(.credit_card, "must be a valid credit card number", isCreditCard);
 
 /// `s` passes `v.creditCard`.
 pub fn isCreditCard(s: []const u8) bool {
@@ -190,7 +163,7 @@ pub fn isCreditCard(s: []const u8) bool {
 /// letters or digits and a check digit. With each letter written as its
 /// two-digit value (`A` = 10 … `Z` = 35), the digits pass the Luhn check.
 /// The country prefix is not looked up: `XS` passes.
-pub const isin: Rule = predicateRule(.isin, "must be a valid ISIN", isIsin);
+pub const isin: Rule = core.predicateRule(.isin, "must be a valid ISIN", isIsin);
 
 /// `s` passes `v.isin`.
 pub fn isIsin(s: []const u8) bool {
@@ -222,7 +195,7 @@ pub fn isIsin(s: []const u8) bool {
 /// institution, two for the country, two upper-case letters or digits for
 /// the location and, in 11 bytes, three more for the branch. The country is
 /// not looked up: `DEUTXXFF` passes. Upper case only, no separators.
-pub const bic: Rule = predicateRule(.bic, "must be a valid BIC", isBic);
+pub const bic: Rule = core.predicateRule(.bic, "must be a valid BIC", isBic);
 
 /// `s` passes `v.bic`.
 pub fn isBic(s: []const u8) bool {
@@ -243,7 +216,7 @@ pub fn isBic(s: []const u8) bool {
 /// letter written as its value (`A` = 10 … `Z` = 35), the number leaves 1
 /// modulo 97 (ISO 7064 MOD 97-10). The country is not looked up, and the
 /// length is not checked per country. Upper case only, no spaces.
-pub const iban: Rule = predicateRule(.iban, "must be a valid IBAN", isIban);
+pub const iban: Rule = core.predicateRule(.iban, "must be a valid IBAN", isIban);
 
 /// `s` passes `v.iban`.
 pub fn isIban(s: []const u8) bool {
@@ -281,7 +254,7 @@ fn gs1Ok(digits: []const u8) bool {
 }
 
 /// An ISBN-10 or an ISBN-13, as `v.isbn10` and `v.isbn13` define them.
-pub const isbn: Rule = predicateRule(.isbn, "must be a valid ISBN", isIsbn);
+pub const isbn: Rule = core.predicateRule(.isbn, "must be a valid ISBN", isIsbn);
 
 /// `s` passes `v.isbn`.
 pub fn isIsbn(s: []const u8) bool {
@@ -291,7 +264,7 @@ pub fn isIsbn(s: []const u8) bool {
 /// An ISBN-10 without hyphens or spaces: nine digits and a check
 /// character, a digit or an upper-case `X` for 10; the sum of each value
 /// times its position (1 to 10) is a multiple of 11.
-pub const isbn10: Rule = predicateRule(.isbn10, "must be a valid ISBN-10", isIsbn10);
+pub const isbn10: Rule = core.predicateRule(.isbn10, "must be a valid ISBN-10", isIsbn10);
 
 /// `s` passes `v.isbn10`.
 pub fn isIsbn10(s: []const u8) bool {
@@ -310,7 +283,7 @@ pub fn isIsbn10(s: []const u8) bool {
 /// An ISBN-13 without hyphens or spaces: 13 digits with the GS1 check
 /// digit, starting with 978, or with 979 and a digit other than 0 (979-0 is
 /// the range of ISMN, the numbers of printed music).
-pub const isbn13: Rule = predicateRule(.isbn13, "must be a valid ISBN-13", isIsbn13);
+pub const isbn13: Rule = core.predicateRule(.isbn13, "must be a valid ISBN-13", isIsbn13);
 
 /// `s` passes `v.isbn13`.
 pub fn isIsbn13(s: []const u8) bool {
@@ -322,7 +295,7 @@ pub fn isIsbn13(s: []const u8) bool {
 /// An ISSN in its printed form `NNNN-NNNC` (ISO 3297): 9 bytes with one
 /// hyphen, at index 4, and a check character, a digit or an upper-case `X`
 /// for 10; the eight values weighted 8 down to 1 sum to a multiple of 11.
-pub const issn: Rule = predicateRule(.issn, "must be a valid ISSN", isIssn);
+pub const issn: Rule = core.predicateRule(.issn, "must be a valid ISSN", isIssn);
 
 /// `s` passes `v.issn`.
 pub fn isIssn(s: []const u8) bool {
@@ -340,7 +313,7 @@ pub fn isIssn(s: []const u8) bool {
 
 /// An EAN-8, EAN-13 or GTIN-14: 8, 13 or 14 digits with the GS1 check
 /// digit. A 12-digit UPC-A fails: write it as an EAN-13 with a leading 0.
-pub const ean: Rule = predicateRule(.ean, "must be a valid EAN", isEan);
+pub const ean: Rule = core.predicateRule(.ean, "must be a valid EAN", isEan);
 
 /// `s` passes `v.ean`.
 pub fn isEan(s: []const u8) bool {
@@ -351,7 +324,7 @@ pub fn isEan(s: []const u8) bool {
 /// the country, three upper-case letters or digits for the registrant, then
 /// seven digits for the year and the recording. The country is not looked
 /// up: `QM` passes. An ISRC has no check digit.
-pub const isrc: Rule = predicateRule(.isrc, "must be a valid ISRC", isIsrc);
+pub const isrc: Rule = core.predicateRule(.isrc, "must be a valid ISRC", isIsrc);
 
 /// `s` passes `v.isrc`.
 pub fn isIsrc(s: []const u8) bool {
@@ -396,7 +369,7 @@ pub fn btcAddress(comptime network: BtcNetwork) Rule {
         },
         .args = core.renderArg(network),
         .params = &.{core.param("network", network)},
-        .fits = stringFits,
+        .fits = core.fitsString,
         .eval = struct {
             fn eval(value: anytype) Outcome {
                 return core.passIf(isBtcAddress(value.*, network));
@@ -529,7 +502,7 @@ fn isSegwitAddress(s: []const u8, network: BtcNetwork) bool {
 /// letter is upper case exactly when the matching hex digit of the
 /// Keccak-256 hash of the 40 digits in lower case is 8 or more. Keccak-256
 /// is Ethereum's hash, not SHA3-256.
-pub const ethereumAddress: Rule = predicateRule(.ethereum_address, "must be a valid Ethereum address", isEthereumAddress);
+pub const ethereumAddress: Rule = core.predicateRule(.ethereum_address, "must be a valid Ethereum address", isEthereumAddress);
 
 /// `s` passes `v.ethereumAddress`.
 pub fn isEthereumAddress(s: []const u8) bool {
@@ -567,7 +540,7 @@ const test_where = "Dto.field_rules.x";
 /// The declaration error of `rule` on a field whose unwrapped type is `T`,
 /// or null.
 fn typeText(comptime rule: Rule, comptime T: type) ?[]const u8 {
-    return stringProblem(&rule, T, test_where);
+    return core.stringProblem(&rule, T, test_where, null);
 }
 
 /// `predicate` accepts every string of `good` and rejects every one of `bad`.

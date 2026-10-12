@@ -1937,9 +1937,16 @@ pub fn stringProblem(comptime rule: *const Rule, comptime T: type, comptime wher
 /// value, as `v.json` passes when `v.isJson` does: no parameters, no
 /// precondition, and the rule and its predicate always agree.
 pub fn predicateRule(comptime kind: Kind, comptime message: []const u8, comptime predicate: fn ([]const u8) bool) Rule {
+    return predicateRuleFits(kind, message, predicate, fitsString);
+}
+
+/// `predicateRule` with the field-type check `fits` instead of `fitsString`,
+/// for a rule whose error adds a hint of its own (`v.digits` on a number
+/// field: the field is already a number).
+pub fn predicateRuleFits(comptime kind: Kind, comptime message: []const u8, comptime predicate: fn ([]const u8) bool, comptime fits: fn (comptime rule: *const Rule, comptime T: type, comptime where: []const u8) void) Rule {
     return define(kind, .{
         .message = message,
-        .fits = fitsString,
+        .fits = fits,
         .eval = struct {
             fn eval(value: anytype) Outcome {
                 return passIf(predicate(value.*));

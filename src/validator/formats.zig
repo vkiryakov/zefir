@@ -578,33 +578,21 @@ fn typeHint(comptime kind: core.Kind, comptime T: type) ?[]const u8 {
     };
 }
 
-/// The declaration error of a string rule on the unwrapped field type `T`,
-/// or null: the field is a string.
-fn stringProblem(comptime rule: *const Rule, comptime T: type, comptime where: []const u8) ?[]const u8 {
-    if (core.isString(T)) return null;
-    return core.typeErrorText(rule, T, where, "a string", core.isString, typeHint(rule.kind, T));
+/// The declaration error of a string rule of this file on the unwrapped
+/// field type `T`, or null: the field is a string. The hint of `typeHint`
+/// follows when it has one for `T`.
+fn formatProblem(comptime rule: *const Rule, comptime T: type, comptime where: []const u8) ?[]const u8 {
+    return core.stringProblem(rule, T, where, typeHint(rule.kind, T));
 }
 
-fn stringFits(comptime rule: *const Rule, comptime T: type, comptime where: []const u8) void {
-    if (stringProblem(rule, T, where)) |text| @compileError(text);
-}
-
-/// A rule value of `kind` that passes the strings `predicate` accepts.
-fn stringRule(comptime kind: core.Kind, comptime message: []const u8, comptime predicate: fn ([]const u8) bool) Rule {
-    return core.define(kind, .{
-        .message = message,
-        .fits = stringFits,
-        .eval = struct {
-            fn eval(value: anytype) Outcome {
-                return core.passIf(predicate(value.*));
-            }
-        }.eval,
-    });
+/// The field-type check of the string rules of this file.
+fn formatFits(comptime rule: *const Rule, comptime T: type, comptime where: []const u8) void {
+    if (formatProblem(rule, T, where)) |text| @compileError(text);
 }
 
 /// A number in decimal notation, as `isNumberString` reads it: "-12.5" and
 /// ".5" pass, "1e5", "1,000" and " 1" fail. class-validator `@IsNumberString()`.
-pub const numberString: Rule = stringRule(.number_string, "must be a number", isNumberString);
+pub const numberString: Rule = core.predicateRuleFits(.number_string, "must be a number", isNumberString, formatFits);
 
 /// A decimal number with as many digits after the point as the options
 /// allow, as `isDecimal` reads it. `v.decimal(.{})` accepts what
@@ -620,7 +608,7 @@ pub fn decimal(comptime options: DecimalOptions) Rule {
         .message = decimalMessage(options),
         .args = options_args,
         .params = decimalParams(options),
-        .fits = stringFits,
+        .fits = formatFits,
         .eval = struct {
             fn eval(value: anytype) Outcome {
                 return core.passIf(isDecimal(value.*, options));
@@ -676,26 +664,26 @@ fn decimalMessage(comptime options: DecimalOptions) []const u8 {
 /// Exactly "true", "false", "1" or "0", case-sensitive. On a `bool` field
 /// the rule is a compile error: the field is already a boolean.
 /// class-validator `@IsBooleanString()`.
-pub const booleanString: Rule = stringRule(.boolean_string, "must be true, false, 1 or 0", isBooleanString);
+pub const booleanString: Rule = core.predicateRuleFits(.boolean_string, "must be true, false, 1 or 0", isBooleanString, formatFits);
 
 /// Hexadecimal digits with an optional "0x" or "0h" prefix in any case:
 /// "0xDEADbeef" and "ff" pass, "0x" and "#ff" fail. class-validator
 /// `@IsHexadecimal()`.
-pub const hexadecimal: Rule = stringRule(.hexadecimal, "must be a hexadecimal number", isHexadecimal);
+pub const hexadecimal: Rule = core.predicateRuleFits(.hexadecimal, "must be a hexadecimal number", isHexadecimal, formatFits);
 
 /// Octal digits with an optional "0o" or "0O" prefix: "0o17" and "755" pass,
 /// "8" and "0x17" fail. class-validator `@IsOctal()`.
-pub const octal: Rule = stringRule(.octal, "must be an octal number", isOctal);
+pub const octal: Rule = core.predicateRuleFits(.octal, "must be an octal number", isOctal, formatFits);
 
 /// A port number from 0 to 65535 as text, without a sign or leading zeros:
 /// "0" and "8080" pass, "080", "+80" and "65536" fail. For a number, use a
 /// `u16` field. class-validator `@IsPort()`.
-pub const port: Rule = stringRule(.port, "must be a port number from 0 to 65535", isPort);
+pub const port: Rule = core.predicateRuleFits(.port, "must be a port number from 0 to 65535", isPort, formatFits);
 
 /// A "latitude,longitude" pair, optionally in parentheses, with at most one
 /// space after the comma: "40.7128,-74.0060" and "(40.7128, -74.0060)" pass.
 /// class-validator `@IsLatLong()`.
-pub const latLong: Rule = stringRule(.lat_long, "must be a latitude,longitude pair", isLatLong);
+pub const latLong: Rule = core.predicateRuleFits(.lat_long, "must be a latitude,longitude pair", isLatLong, formatFits);
 
 fn isStringOrFloat(comptime T: type) bool {
     return core.isString(T) or core.isFloat(T);
@@ -749,16 +737,16 @@ pub const longitude: Rule = coordinateRule(.longitude, "must be a longitude from
 
 /// An IPv4 or an IPv6 address, as `isIpv4` and `isIpv6` read them, without
 /// a zone id, brackets, prefix length or port. class-validator `@IsIP()`.
-pub const ip: Rule = stringRule(.ip, "must be a valid IP address", isIp);
+pub const ip: Rule = core.predicateRuleFits(.ip, "must be a valid IP address", isIp, formatFits);
 
 /// An IPv4 address in strict dotted decimal: "192.0.2.1" passes, "127.1",
 /// "01.2.3.4" and "1.2.3.4:80" fail. class-validator `@IsIP(4)`.
-pub const ipv4: Rule = stringRule(.ipv4, "must be a valid IPv4 address", isIpv4);
+pub const ipv4: Rule = core.predicateRuleFits(.ipv4, "must be a valid IPv4 address", isIpv4, formatFits);
 
 /// An IPv6 address in any RFC 4291 text form, an embedded IPv4 address
 /// included: "2001:db8::1" and "::ffff:192.0.2.1" pass, "fe80::1%eth0" and
 /// "1::2::3" fail. class-validator `@IsIP(6)`.
-pub const ipv6: Rule = stringRule(.ipv6, "must be a valid IPv6 address", isIpv6);
+pub const ipv6: Rule = core.predicateRuleFits(.ipv6, "must be a valid IPv6 address", isIpv6, formatFits);
 
 /// A MAC address in the sizes and the format of the options, as
 /// `isMacAddress` reads it. `v.macAddress(.{})` takes EUI-48 and EUI-64 with
@@ -770,7 +758,7 @@ pub fn macAddress(comptime options: MacAddressOptions) Rule {
         .message = macAddressMessage(options),
         .args = options_args,
         .params = &.{ core.dataParam("eui", options.eui), core.dataParam("format", options.format) },
-        .fits = stringFits,
+        .fits = formatFits,
         .eval = struct {
             fn eval(value: anytype) Outcome {
                 return core.passIf(isMacAddress(value.*, options));
@@ -799,14 +787,14 @@ fn macAddressMessage(comptime options: MacAddressOptions) []const u8 {
 /// "user@localhost", "user@example.c" and `"a b"@example.com` fail. It
 /// checks the syntax only, not that mail can be delivered. class-validator
 /// `@IsEmail()`.
-pub const email: Rule = stringRule(.email, "must be a valid email address", isEmail);
+pub const email: Rule = core.predicateRuleFits(.email, "must be a valid email address", isEmail, formatFits);
 
 /// An http or https URL as `isHttpUrl` reads it: "https://example.com/a?b#c"
 /// and "http://localhost:8080" pass; "example.com", "ftp://example.com" and
 /// "https://user@example.com" fail. Not a guard against server-side request
 /// forgery: loopback and private addresses pass. Its length is not limited:
 /// add a length rule. class-validator `@IsUrl()`.
-pub const httpUrl: Rule = stringRule(.http_url, "must be a valid HTTP or HTTPS URL", isHttpUrl);
+pub const httpUrl: Rule = core.predicateRuleFits(.http_url, "must be a valid HTTP or HTTPS URL", isHttpUrl, formatFits);
 
 /// A domain name as `isFqdn` reads it with these options: `v.fqdn(.{})`
 /// takes "example.com" and rejects "localhost", which
@@ -822,7 +810,7 @@ pub fn fqdn(comptime options: FqdnOptions) Rule {
             core.dataParam("allow_trailing_dot", options.allow_trailing_dot),
             core.dataParam("allow_wildcard", options.allow_wildcard),
         },
-        .fits = stringFits,
+        .fits = formatFits,
         .eval = struct {
             fn eval(value: anytype) Outcome {
                 return core.passIf(isFqdn(value.*, options));
@@ -1011,7 +999,7 @@ test "decimal's placeholder {max_decimal_digits} exists only when the maximum is
 
 /// The declaration error of the string rule `rule` on a field of type `T`.
 fn stringText(comptime rule: Rule, comptime T: type) ?[]const u8 {
-    return stringProblem(&rule, T, test_where);
+    return formatProblem(&rule, T, test_where);
 }
 
 fn coordinateText(comptime rule: Rule, comptime T: type) ?[]const u8 {
