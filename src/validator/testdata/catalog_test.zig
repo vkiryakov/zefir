@@ -635,6 +635,43 @@ test "the predicates have their catalog signatures: the input first, the options
     try testing.expect(@TypeOf(v.isMacAddress) == fn ([]const u8, v.MacAddressOptions) bool);
 }
 
+/// The fields of the struct `T` are `names`, in this order, of these types.
+fn expectFields(comptime T: type, comptime names: []const []const u8, comptime types: []const type) !void {
+    const info = @typeInfo(T).@"struct";
+    try testing.expectEqual(names.len, info.field_names.len);
+    inline for (names, types, info.field_names, info.field_types) |name, Expected, field_name, Field| {
+        try testing.expectEqualStrings(name, field_name);
+        try testing.expect(Field == Expected);
+    }
+}
+
+/// The tags of the enum `E` are `names`, in this order.
+fn expectTags(comptime E: type, comptime names: []const []const u8) !void {
+    const info = @typeInfo(E).@"enum";
+    try testing.expectEqual(names.len, info.field_names.len);
+    inline for (names, info.field_names) |name, tag| try testing.expectEqualStrings(name, tag);
+}
+
+test "the options of decimal, fqdn and macAddress have their catalog fields, in order, with their defaults" {
+    try expectFields(v.DecimalOptions, &.{ "force_decimal", "min_decimal_digits", "max_decimal_digits" }, &.{ bool, usize, ?usize });
+    const decimal_defaults: v.DecimalOptions = .{};
+    try testing.expectEqual(false, decimal_defaults.force_decimal);
+    try testing.expectEqual(1, decimal_defaults.min_decimal_digits);
+    try testing.expectEqual(null, decimal_defaults.max_decimal_digits);
+    try expectFields(v.FqdnOptions, &.{ "require_tld", "allow_underscores", "allow_trailing_dot", "allow_wildcard" }, &.{ bool, bool, bool, bool });
+    const fqdn_defaults: v.FqdnOptions = .{};
+    try testing.expectEqual(true, fqdn_defaults.require_tld);
+    try testing.expectEqual(false, fqdn_defaults.allow_underscores);
+    try testing.expectEqual(false, fqdn_defaults.allow_trailing_dot);
+    try testing.expectEqual(false, fqdn_defaults.allow_wildcard);
+    try expectFields(v.MacAddressOptions, &.{ "eui", "format" }, &.{ v.MacAddressOptions.Eui, v.MacAddressOptions.Format });
+    const mac_defaults: v.MacAddressOptions = .{};
+    try testing.expectEqual(v.MacAddressOptions.Eui.any, mac_defaults.eui);
+    try testing.expectEqual(v.MacAddressOptions.Format.separated, mac_defaults.format);
+    try expectTags(v.MacAddressOptions.Eui, &.{ "any", "eui48", "eui64" });
+    try expectTags(v.MacAddressOptions.Format, &.{ "separated", "bare" });
+}
+
 test "the limits have their catalog values" {
     try testing.expect(@TypeOf(v.max_code_bytes) == comptime_int);
     try testing.expectEqual(128, v.max_code_bytes);
