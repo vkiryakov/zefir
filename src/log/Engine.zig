@@ -38,6 +38,8 @@ pub const InitError = error{
     EmptyPrefix,
     /// The queue capacity is not a power of two.
     CapacityNotPowerOfTwo,
+    /// The queue capacity is 1: a queue holds at least 2 records.
+    CapacityTooSmall,
     /// The writer thread would take no records per write.
     BatchSizeZero,
     /// The writer thread of the queued mode could not be started.
@@ -188,6 +190,7 @@ pub fn create(gpa: std.mem.Allocator, io: Io, opts: options.Options) InitError!*
         .sync => {},
         .queued => |q| {
             if (q.capacity == 0 or !std.math.isPowerOfTwo(q.capacity)) return error.CapacityNotPowerOfTwo;
+            if (q.capacity == 1) return error.CapacityTooSmall;
             if (q.batch_size == 0) return error.BatchSizeZero;
         },
     }
@@ -700,6 +703,11 @@ test "create checks the options" {
     try testing.expectError(error.TooManyRules, create(gpa, io, .{ .scopes = &rules }));
     try testing.expectError(error.CapacityNotPowerOfTwo, create(gpa, io, .{ .mode = .{ .queued = .{ .capacity = 1000 } } }));
     try testing.expectError(error.CapacityNotPowerOfTwo, create(gpa, io, .{ .mode = .{ .queued = .{ .capacity = 0 } } }));
+    // A queue of one slot could not tell a record from room for the next.
+    if (create(gpa, io, .{ .mode = .{ .queued = .{ .capacity = 1 } } })) |engine| {
+        engine.destroy();
+        return error.TestUnexpectedResult;
+    } else |e| try testing.expectEqual(@as(InitError, error.CapacityTooSmall), e);
     try testing.expectError(error.BatchSizeZero, create(gpa, io, .{ .mode = .{ .queued = .{ .batch_size = 0 } } }));
     const largest = try create(gpa, io, .{ .max_record_bytes = max_record_limit });
     largest.destroy();

@@ -38,10 +38,11 @@ consumer_sleeping: std.atomic.Value(u32) align(std.atomic.cache_line) = .init(0)
 space_epoch: std.atomic.Value(u32) align(std.atomic.cache_line) = .init(0),
 space_waiters: std.atomic.Value(u32) = .init(0),
 
-/// A queue of `capacity` slots (a power of two), each for a record of up
-/// to `max_record_bytes`.
+/// A queue of `capacity` slots, each for a record of up to
+/// `max_record_bytes`. `capacity` is a power of two and at least 2: with
+/// one slot, a published record would look like room for the next one.
 pub fn init(gpa: std.mem.Allocator, capacity: u32, max_record_bytes: u32, io: std.Io) error{OutOfMemory}!Queue {
-    std.debug.assert(capacity > 0 and std.math.isPowerOfTwo(capacity));
+    std.debug.assert(capacity >= 2 and std.math.isPowerOfTwo(capacity));
     const slot_size = options.slotSize(max_record_bytes);
     const slots = try gpa.alignedAlloc(u8, .fromByteUnits(std.atomic.cache_line), @as(usize, capacity) * slot_size);
     var q: Queue = .{ .slots = slots, .slot_size = slot_size, .mask = capacity - 1, .io = io };
@@ -486,22 +487,30 @@ test "a producer stopped between reserving and publishing holds back the records
     try testing.expectEqualStrings("a\nb\nc\n", out.written());
 }
 
+/// How long a woken thread may take before its wake-up counts as lost.
+const patience_ms = 500;
+
 /// Takes `rounds` records one at a time, sleeping whenever none is there,
-/// and counts the sleeps that ran out without a record: lost wake-ups.
-fn consumeRounds(q: *Queue, rounds: usize, lost: *u32) void {
+/// and counts the sleeps that ran out with a record waiting: lost
+/// wake-ups. After one it only finishes the rounds, without sleeping.
+fn consumeRounds(q: *Queue, rounds: usize, lost: *std.atomic.Value(u32)) void {
     var batch: [64]u8 = undefined;
     var ends: [1]usize = undefined;
     var taken: usize = 0;
-    const patience: std.Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } };
+    const patience: std.Io.Timeout = .{ .duration = .{ .raw = .fromMilliseconds(patience_ms), .clock = .awake } };
     while (taken < rounds) {
         if (q.pop(&batch, &ends) == 1) {
             taken += 1;
             continue;
         }
+        if (lost.load(.seq_cst) > 0) {
+            std.Thread.yield() catch {};
+            continue;
+        }
         const start = std.Io.Clock.awake.now(q.io);
         q.waitForWork(patience);
         const slept = start.durationTo(std.Io.Clock.awake.now(q.io));
-        if (!q.ready() and slept.nanoseconds >= std.time.ns_per_s * 5) lost.* += 1;
+        if (q.ready() and slept.nanoseconds >= patience_ms * std.time.ns_per_ms) _ = lost.fetchAdd(1, .seq_cst);
     }
 }
 
@@ -510,18 +519,69 @@ test "lost wake-up detector: a consumer that sleeps between pushes is always wok
     var q = try Queue.init(testing.allocator, 4, 64, threaded.io());
     defer q.deinit(testing.allocator);
     const rounds = 2000;
-    var lost: u32 = 0;
+    var lost: std.atomic.Value(u32) = .init(0);
     const consumer = try std.Thread.spawn(.{}, consumeRounds, .{ &q, rounds, &lost });
     for (0..rounds) |round| {
         // Push at once, right after the consumer says it sleeps, or a little
         // later: the race sits in each of these windows.
         switch (round % 3) {
             0 => {},
-            1 => while (q.consumer_sleeping.load(.seq_cst) == 0 and q.depth() == 0) std.Thread.yield() catch {},
+            1 => while (q.consumer_sleeping.load(.seq_cst) == 0 and q.depth() == 0 and lost.load(.seq_cst) == 0) {
+                std.Thread.yield() catch {};
+            },
             else => for (0..round % 7) |_| std.Thread.yield() catch {},
         }
         try q.pushBlocking("x");
     }
     consumer.join();
-    try testing.expectEqual(@as(u32, 0), lost);
+    try testing.expectEqual(@as(u32, 0), lost.load(.seq_cst));
+}
+
+/// The producer's side of the detector below.
+const Pusher = struct {
+    q: *Queue,
+    rounds: usize,
+    /// Pushes done so far.
+    pushed: std.atomic.Value(usize) = .init(0),
+    /// Pushes that waited as long as the 100 ms recheck: the room made for
+    /// them did not wake them. The pusher stops at the first.
+    lost: std.atomic.Value(u32) = .init(0),
+    done: std.atomic.Value(bool) = .init(false),
+
+    fn run(p: *Pusher) void {
+        defer p.done.store(true, .seq_cst);
+        for (0..p.rounds) |_| {
+            const start = std.Io.Clock.awake.now(p.q.io);
+            p.q.pushBlocking("x") catch return;
+            const waited = start.durationTo(std.Io.Clock.awake.now(p.q.io));
+            if (waited.nanoseconds >= 90 * std.time.ns_per_ms) {
+                _ = p.lost.fetchAdd(1, .seq_cst);
+                return;
+            }
+            _ = p.pushed.fetchAdd(1, .seq_cst);
+        }
+    }
+};
+
+test "lost wake-up detector: a producer that waits for room is woken as soon as there is some" {
+    var threaded: std.Io.Threaded = .init_single_threaded;
+    var q = try Queue.init(testing.allocator, 2, 64, threaded.io());
+    defer q.deinit(testing.allocator);
+    try q.tryPush("x");
+    try q.tryPush("x"); // full: every push below waits for room
+    var pusher: Pusher = .{ .q = &q, .rounds = 500 };
+    const thread = try std.Thread.spawn(.{}, Pusher.run, .{&pusher});
+    var batch: [64]u8 = undefined;
+    var ends: [1]usize = undefined;
+    for (0..pusher.rounds) |round| {
+        while (q.space_waiters.load(.seq_cst) == 0 and !pusher.done.load(.seq_cst)) std.Thread.yield() catch {};
+        if (pusher.done.load(.seq_cst)) break;
+        // Room at once, or a moment later, when the producer sleeps and
+        // has to be woken.
+        if (round % 2 == 1) testing.io.sleep(.fromMicroseconds(500), .awake) catch {};
+        _ = q.pop(&batch, &ends);
+        while (pusher.pushed.load(.seq_cst) <= round and !pusher.done.load(.seq_cst)) std.Thread.yield() catch {};
+    }
+    thread.join();
+    try testing.expectEqual(@as(u32, 0), pusher.lost.load(.seq_cst));
 }

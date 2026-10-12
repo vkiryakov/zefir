@@ -54,7 +54,7 @@ pub const Mode = union(enum) {
 };
 
 pub const Queued = struct {
-    /// Records the queue holds; a power of two. Each takes a slot of
+    /// Records the queue holds; a power of two, at least 2. Each takes a slot of
     /// `max_record_bytes` + 16 bytes, rounded up to 128: with 4 KiB
     /// records the default takes 17 MiB (see `Options.queueBytes`). It is
     /// the burst the logger absorbs while the output is stuck; past it,
