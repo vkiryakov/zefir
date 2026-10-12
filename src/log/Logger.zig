@@ -1249,6 +1249,65 @@ test "emergency writes its record while a cancel request is pending, and keeps t
     try testing.expectEqual(@as(u64, 1), s.emergency_written);
 }
 
+/// A buffered writer whose first flush fails and loses what it held, as a
+/// writer whose sink broke for a moment would; later ones keep everything.
+const FlakyFlush = struct {
+    broke: bool = false,
+    sink: std.Io.Writer.Allocating,
+    buffer: [1024]u8 = undefined,
+    writer: std.Io.Writer = undefined,
+
+    fn open(f: *FlakyFlush) void {
+        f.writer = .{ .buffer = &f.buffer, .vtable = &.{ .drain = drain } };
+    }
+
+    fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+        const f: *FlakyFlush = @alignCast(@fieldParentPtr("writer", w));
+        if (!f.broke) {
+            f.broke = true;
+            w.end = 0;
+            return error.WriteFailed;
+        }
+        f.sink.writer.writeAll(w.buffered()) catch return error.WriteFailed;
+        w.end = 0;
+        var n: usize = 0;
+        for (data[0 .. data.len - 1]) |bytes| {
+            f.sink.writer.writeAll(bytes) catch return error.WriteFailed;
+            n += bytes.len;
+        }
+        for (0..splat) |_| f.sink.writer.writeAll(data[data.len - 1]) catch return error.WriteFailed;
+        return n + data[data.len - 1].len * splat;
+    }
+};
+
+fn expectFailedFlushTorn(mode: options.Mode) !void {
+    var flaky: FlakyFlush = .{ .sink = .init(testing.allocator) };
+    defer flaky.sink.deinit();
+    flaky.open();
+    const logger: Logger = try .init(testing.allocator, testing.io, .{ .mode = mode, .output = .{ .writer = &flaky.writer } });
+    logger.info("first", .{});
+    try logger.flush(.none);
+    logger.info("second", .{});
+    try logger.flush(.none);
+    const s = logger.stats();
+    logger.deinit();
+    const out = flaky.sink.written();
+    // How much of the first record went out is unknown: its line is ended
+    // before the next record.
+    try testing.expect(std.mem.startsWith(u8, out, "\n{"));
+    try testing.expectStringEndsWith(out, "\"message\":\"second\"}\n");
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, out, "\n"));
+    try testing.expectEqual(@as(u64, 1), s.written);
+    try testing.expectEqual(@as(u64, 1), s.dropped.write_failed);
+    try testing.expectEqual(@as(u64, 1), s.torn_lines);
+    try testing.expectEqual(@as(u64, 1), s.write_errors);
+}
+
+test "a writer whose flush fails: the record counts as dropped and its line as torn" {
+    try expectFailedFlushTorn(.sync);
+    try expectFailedFlushTorn(.{ .queued = .{} });
+}
+
 test "queued: shutdown writes what is queued, then refuses records and counts them" {
     var out: std.Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();

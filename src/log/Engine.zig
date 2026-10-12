@@ -520,7 +520,7 @@ pub fn reportDroppedErrors(engine: *Engine) void {
     engine.batch[0] = '\n';
     var sent: usize = 0;
     engine.writeRetrying(engine.batch[1 - lead .. 1 + len], &sent) catch |e| {
-        if (sent < lead + len) _ = engine.errors_unreported.fetchAdd(n, .monotonic);
+        if (e == error.FlushFailed or sent < lead + len) _ = engine.errors_unreported.fetchAdd(n, .monotonic);
         return engine.broke(e, sent, lead);
     };
     engine.torn = false;
@@ -570,7 +570,7 @@ fn writeRetrying(engine: *Engine, bytes: []const u8, sent: *usize) WriteError!vo
     }
 }
 
-const WriteError = Io.File.Writer.Error || Io.Writer.Error;
+const WriteError = Io.File.Writer.Error || Io.Writer.Error || error{FlushFailed};
 
 /// Writes the record in `buf[1..][0..len]` under the output lock, through
 /// the application's Io. `buf[0]` is free for the '\n' that ends a torn
@@ -602,7 +602,10 @@ fn write(engine: *Engine, buf: []u8, len: usize) void {
 /// line only: the next record starts with '\n'.
 fn failed(engine: *Engine, e: WriteError, ends: []const usize, sent: usize, lead: usize) void {
     var whole: usize = 0;
-    while (whole < ends.len and lead + ends[whole] <= sent) whole += 1;
+    // After a failed flush none of the records counts as written.
+    if (e != error.FlushFailed) {
+        while (whole < ends.len and lead + ends[whole] <= sent) whole += 1;
+    }
     bumpBy(&engine.counters.written, whole);
     bumpBy(&engine.counters.dropped_write_failed, ends.len - whole);
     engine.broke(e, sent, lead + if (whole > 0) ends[whole - 1] else 0);
@@ -612,7 +615,7 @@ fn failed(engine: *Engine, e: WriteError, ends: []const usize, sent: usize, lead
 /// in them ending at `boundary`.
 fn broke(engine: *Engine, e: WriteError, sent: usize, boundary: usize) void {
     bump(&engine.counters.write_errors);
-    if (sent > boundary) {
+    if (e == error.FlushFailed or sent > boundary) {
         engine.torn = true;
         bump(&engine.counters.torn_lines);
     } else if (sent > 0) {
@@ -642,14 +645,12 @@ fn writeFile(file: Io.File, io: Io, bytes: []const u8, sent: *usize) Io.File.Wri
     while (sent.* < bytes.len) sent.* += try file.writeStreaming(io, &.{}, &.{bytes[sent.*..]}, 1);
 }
 
-/// Writes and flushes `bytes`. A failed flush counts all of them as sent:
-/// a buffered writer does not tell how much went out.
-fn writeWriter(w: *Io.Writer, bytes: []const u8, sent: *usize) Io.Writer.Error!void {
+/// Writes and flushes `bytes`. A buffered writer does not tell how much
+/// went out when its flush fails: `error.FlushFailed` counts the records as
+/// dropped and the line as torn, so the next record starts on a new line.
+fn writeWriter(w: *Io.Writer, bytes: []const u8, sent: *usize) (Io.Writer.Error || error{FlushFailed})!void {
     while (sent.* < bytes.len) sent.* += try w.write(bytes[sent.*..]);
-    w.flush() catch |e| {
-        sent.* = bytes.len;
-        return e;
-    };
+    w.flush() catch return error.FlushFailed;
 }
 
 const level_count = std.enums.values(Level).len;
