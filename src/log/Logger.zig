@@ -43,8 +43,9 @@ pub fn init(gpa: std.mem.Allocator, io: std.Io, opts: options.Options) InitError
 /// Frees the logger. In queued mode, without a `shutdown` first, it waits
 /// until everything queued is written, with no time limit; after a
 /// `shutdown` that timed out it drops what is left and waits only for the
-/// write in progress. To exit on time, call `shutdown` with a deadline
-/// first.
+/// write in progress. A write that never returns (stdout stuck for good)
+/// keeps it waiting too: to exit on time, call `shutdown` with a deadline,
+/// and when it times out, let the process exit without `deinit`.
 pub fn deinit(self: Logger) void {
     self.engine.destroy();
 }
@@ -59,13 +60,15 @@ pub fn flush(self: Logger, timeout: std.Io.Timeout) error{Timeout}!void {
 }
 
 /// Stops the logger: records logged after it starts are refused and
-/// counted in `stats().dropped.closed`. In queued mode it waits until the
-/// queue is written and the writer thread has exited. When `timeout`
-/// passes first it returns `error.Timeout`: `stats().pending` tells how
-/// many records are left, another `shutdown` may wait for them again, and
-/// `deinit` drops them. `core.Deadline.toTimeout()` gives a timeout. Stop
-/// the application's own threads before; a record that another thread is
-/// writing at that moment still goes out. Blocks the OS thread.
+/// counted in `stats().dropped.closed` (error records in
+/// `stats().dropped.err`, and noted on stderr). In queued mode it waits
+/// until the queue is written and the writer thread has exited. When
+/// `timeout` passes first it returns `error.Timeout`: `stats().pending`
+/// tells how many records are left, another `shutdown` may wait for them
+/// again, and `deinit` drops them. `core.Deadline.toTimeout()` gives a
+/// timeout. Stop the application's own threads before; a record that
+/// another thread is writing at that moment still goes out. Blocks the OS
+/// thread.
 pub fn shutdown(self: Logger, timeout: std.Io.Timeout) error{Timeout}!void {
     return self.engine.shutdown(timeout);
 }

@@ -15,9 +15,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # The job names are required status checks on main and dev; keep them in sync.
+  # The names of `test` and `fmt` are required status checks on main and
+  # dev; keep them in sync. `tsan` is not required (yet).
   test:
     name: test (${{ matrix.os }})
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -32,6 +34,7 @@ jobs:
   # The tests again under ThreadSanitizer; it does not build for Windows.
   tsan:
     name: tsan (${{ matrix.os }})
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -48,6 +51,7 @@ jobs:
 
   fmt:
     name: fmt
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

@@ -1,6 +1,7 @@
 //! zefir-log — structured logging. One engine per process and any number of
-//! cheap handles. Each record is one JSON line (or one text line), written
-//! to stdout before the call returns.
+//! cheap handles. Each record is one JSON line (or one text line) on stdout:
+//! written before the call returns (`.sync`, the default), or copied into a
+//! queue that a writer thread writes in batches (`.queued`, for services).
 //!
 //! ```zig
 //! pub const std_options: std.Options = .{ .logFn = zefir.log.stdLogFn };
@@ -56,6 +57,29 @@
 //! If stdout is closed, the logger notes it once on stderr and drops the
 //! records that follow. That needs SIGPIPE ignored, as `main(init:
 //! std.process.Init)` does; a bare `main()` is killed by SIGPIPE first.
+//!
+//! In queued mode a call encodes its record, then copies it into the queue
+//! with no lock and no system call; only a producer stopped between taking
+//! a slot and filling it holds back the records after it. A full queue
+//! drops the record (`.drop_new`, counted) or makes the caller wait
+//! (`.block`, which blocks the OS thread and wakes all waiters at once,
+//! so it is not fair). Records of one thread keep their order; records of
+//! different threads are ordered as they took their slots, so timestamps
+//! can go back a little between threads. An error record the logger has to
+//! drop is never lost silently: one summary record with `"suppressed":N`
+//! takes its place.
+//!
+//! Stop in this order: stop taking work, wait for the application's own
+//! threads, `shutdown(timeout)` (records still queued are written; later
+//! ones are refused), then `deinit()`. Without `shutdown`, `deinit` waits
+//! for the queue with no time limit. Records still queued are lost when the
+//! process ends without them: `std.process.exit`, a panic, a signal.
+//! `emergency(msg, fields)` writes to stderr at once, for what must be seen
+//! even then.
+//!
+//! Do not log from a signal handler: a sync record or a queued one in
+//! `.block` mode may wait for a lock or for room that the interrupted
+//! thread holds.
 
 const std = @import("std");
 const options = @import("options.zig");

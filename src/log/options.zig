@@ -49,9 +49,11 @@ pub const Mode = union(enum) {
     /// application's `io`: simple, and a record is out even if the process
     /// dies right after.
     sync,
-    /// Each call copies its record into a lock-free queue, and a writer
-    /// thread writes the queue in batches: callers never wait for the
-    /// output. The mode for services; `flush` and `shutdown` drain it.
+    /// Each call copies its record into a queue, with no lock and no system
+    /// call, and a writer thread writes the queue in batches: callers do
+    /// not wait for the output, only, with `.overflow = .block`, for room
+    /// in the queue. The mode for services; `flush` and `shutdown` drain
+    /// it.
     queued: Queued,
 };
 
@@ -152,10 +154,11 @@ pub const Output = union(enum) {
     /// The process's standard output.
     stdout,
     /// A writer the application owns, for tests and embedding. It must
-    /// outlive the logger; each record is written and flushed in one go.
-    /// The logger calls it from one thread at a time, so it need not be
-    /// thread-safe, but it must not log through the same logger: that
-    /// call would wait for itself.
+    /// outlive the logger. Each write is flushed: one record per write in
+    /// sync mode, a batch of records in queued mode, from the writer
+    /// thread. The logger calls it from one thread at a time, so it need
+    /// not be thread-safe, but it must not log through the same logger
+    /// (that call could wait for itself) or call its `flush` or `shutdown`.
     writer: *std.Io.Writer,
 };
 
