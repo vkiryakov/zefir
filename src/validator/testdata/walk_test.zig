@@ -2,6 +2,7 @@
 //! types the walker descends into, and the roots `check` accepts. Tests that
 //! count predicate calls call `v.check` directly, so each count is one walk.
 const std = @import("std");
+const builtin = @import("builtin");
 const v = @import("validator");
 const h = @import("vtest");
 const testing = std.testing;
@@ -679,12 +680,14 @@ test "a root behind a pointer that coerces to *const T is walked in place: an ov
 
 const PackedHolder = packed struct { flag: u3 = 0, bits: Bits, rest: u5 = 0 };
 
-test "a root behind an under-aligned, volatile or bit pointer is walked through a copy; an opaque root without rules is never read" {
+test "a root behind an under-aligned, volatile, allowzero or bit pointer is walked through a copy; an opaque root without rules is never read" {
     var user: User = .{ .email = "" };
     const under_aligned: *align(1) const User = &user;
     try h.expectAt(under_aligned, "validation.not_empty", "must not be empty", "email");
     const volatile_root: *volatile User = &user;
     try h.expectAt(volatile_root, "validation.not_empty", "must not be empty", "email");
+    const allowzero_root: *allowzero User = &user;
+    try h.expectAt(allowzero_root, "validation.not_empty", "must not be empty", "email");
     var holder: PackedHolder = .{ .bits = .{ .low = 1, .high = 0 } };
     try h.expectAt(&holder.bits, "validation.positive", "must be greater than 0", "high");
     // An opaque value could not be copied, and an opaque type has no alignment to compare.
@@ -694,8 +697,23 @@ test "a root behind an under-aligned, volatile or bit pointer is walked through 
     try h.expectValid(aligned_handle);
 }
 
-test "roots without rules have no violations: a number, a string, an enum, a union, a slice of numbers, void" {
+test "a root outside the default address space compiles and is walked through a copy" {
+    // Of the targets CI runs, only x86_64 has an address space besides the
+    // default; the check is that v.check accepts such a root at all.
+    if (builtin.cpu.arch == .x86_64) {
+        _ = &struct {
+            fn f(root: *addrspace(.gs) const User, path_buf: []u8) ?v.Violation {
+                return v.check(root, path_buf);
+            }
+        }.f;
+    }
+}
+
+test "roots without rules have no violations: a number, a pointer to one, a string, an enum, a union, a slice of numbers, void" {
     try h.expectValid(&@as(u32, 0));
+    const number: u32 = 0;
+    const number_pointer: *const u32 = &number;
+    try h.expectValid(&number_pointer);
     try h.expectValid(&@as([]const u8, ""));
     try h.expectValid(&Color.blue);
     try h.expectValid(&Shape{ .circle = -1 });

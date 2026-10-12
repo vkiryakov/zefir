@@ -17,9 +17,10 @@ const Violation = core.Violation;
 
 /// The first violation of `value.*` in walk order, or null. `value` is a
 /// single-item pointer (`&dto`); the path is written into `path_buf`, and
-/// `field` is null when it does not fit. Allocates nothing. Calls on several
-/// threads at once are safe when each has its own `path_buf`, no `path_buf`
-/// overlaps the checked value, and no thread changes the value meanwhile.
+/// `field` is null when it does not fit. `path_buf` must not overlap the
+/// checked value: the walk writes the path while it still reads the value.
+/// Allocates nothing. Calls on several threads at once are safe when each
+/// has its own `path_buf` and no thread changes the value meanwhile.
 pub fn check(value: anytype, path_buf: []u8) ?Violation {
     const T = comptime pointee(@TypeOf(value));
     comptime verify(T);
@@ -284,7 +285,7 @@ fn hidden(comptime T: type, comptime what: []const u8, comptime where: []const u
         const declared = if (@hasDecl(R, "field_rules") or @hasDecl(R, "validateSelf"))
             " field_rules or validateSelf that would be skipped"
         else if (@typeInfo(@TypeOf(R.validate)) == .@"fn")
-            " a pub fn validate shaped like validateSelf, which counts as rules that would be skipped; rename it to validateSelf"
+            " a pub fn validate shaped like validateSelf, which counts as rules that would be skipped"
         else
             " a non-function validate, which counts as rules that would be skipped; rename it (rules belong in pub const field_rules)";
         @compileError("validator: " ++ where ++ ": " ++ what ++ " are not walked; " ++ reach ++ declared);
@@ -304,7 +305,7 @@ fn checkStruct(comptime T: type, comptime label: []const u8) void {
         const fix = if (@typeInfo(@TypeOf(T.validate)) == .@"fn")
             "returns ?validator.Violation; rename it to validateSelf (a pub fn validate returning !void is left to confy)"
         else
-            "rules are declared in pub const field_rules; rename validate to field_rules (a pub fn validate is left to confy)";
+            "rules are declared in pub const field_rules; rename validate to field_rules (a pub fn validate returning !void is left to confy)";
         @compileError("validator: " ++ label ++ ".validate: " ++ fix);
     }
     const info = @typeInfo(T).@"struct";

@@ -615,24 +615,27 @@ pub fn expectOutcome(expected: Outcome, comptime rule: Rule, value: anytype) !vo
 // ------------------------------------------------------------------ field types
 
 /// A string: a slice of u8 of any constness, sentinel and alignment.
-/// `volatile` and `allowzero` slices are not strings (rules read strings as
-/// `[]const u8`, which they do not coerce to), and `[N]u8` is an array of
-/// numbers.
+/// `volatile` and `allowzero` slices and slices outside the default address
+/// space are not strings (rules read strings as `[]const u8`, which they do
+/// not coerce to), and `[N]u8` is an array of numbers.
 pub fn isString(comptime T: type) bool {
     return switch (@typeInfo(T)) {
-        .pointer => |p| p.size == .slice and p.child == u8 and !p.attrs.@"volatile" and !p.attrs.@"allowzero",
+        .pointer => |p| p.size == .slice and p.child == u8 and !p.attrs.@"volatile" and !p.attrs.@"allowzero" and
+            (p.attrs.@"addrspace" orelse .generic) == .generic,
         else => false,
     };
 }
 
 /// A slice that the walker treats as a list: its items are not u8, and it is
 /// neither `volatile` nor `allowzero` nor aligned below the alignment of its
-/// items (`[]align(1) const u32`), since a pointer to an item of such a slice
-/// does not coerce to the `*const T` that rules take.
+/// items (`[]align(1) const u32`) nor outside the default address space,
+/// since a pointer to an item of such a slice does not coerce to the
+/// `*const T` that rules take.
 pub fn isListSlice(comptime T: type) bool {
     return switch (@typeInfo(T)) {
         .pointer => |p| p.size == .slice and p.child != u8 and !p.attrs.@"volatile" and !p.attrs.@"allowzero" and
-            (p.attrs.@"align" == null or p.attrs.@"align".? >= @alignOf(p.child)),
+            (p.attrs.@"align" == null or p.attrs.@"align".? >= @alignOf(p.child)) and
+            (p.attrs.@"addrspace" orelse .generic) == .generic,
         else => false,
     };
 }
@@ -937,10 +940,13 @@ fn typeErrorText(comptime rule: *const Rule, comptime T: type, comptime where: [
 }
 
 /// `[]const T` for a slice of `T` that its `volatile`, `allowzero` or
-/// alignment keeps from being a string or a list, else null.
+/// alignment keeps from being a string or a list, else null. A slice outside
+/// the default address space gets null too: the hint names only the other
+/// three, and the type in the error shows the address space.
 fn plainSlice(comptime T: type) ?type {
     return switch (@typeInfo(T)) {
-        .pointer => |p| if (p.size == .slice and !isString(T) and !isListSlice(T)) []const p.child else null,
+        .pointer => |p| if (p.size == .slice and !isString(T) and !isListSlice(T) and
+            (p.attrs.@"addrspace" orelse .generic) == .generic) []const p.child else null,
         else => null,
     };
 }
@@ -1197,6 +1203,17 @@ test "a list is a slice of non-u8 items that is neither volatile nor allowzero, 
     try std.testing.expect(ListChild([2][]const u8).? == []const u8);
     inline for (.{ []const u8, []volatile u32, []allowzero const u32, [*]u32, *const [3]u32, ?[]const u32, u32 }) |T| {
         try std.testing.expect(ListChild(T) == null);
+    }
+}
+
+test "a slice outside the default address space is neither a string nor a list" {
+    // Of the targets CI runs, only x86_64 has an address space besides the
+    // default; a pointer into it does not coerce to the `*const T` rules take.
+    if (builtin.cpu.arch == .x86_64) {
+        try std.testing.expect(!isString([]addrspace(.gs) const u8));
+        try std.testing.expect(!isListSlice([]addrspace(.gs) const u32));
+        try std.testing.expect(ListChild([]addrspace(.gs) const u32) == null);
+        try std.testing.expect(plainSlice([]addrspace(.gs) const u32) == null);
     }
 }
 
