@@ -3,7 +3,7 @@
 </h1>
 
 <p align="center">
-  <strong>A modular framework for enterprise applications in Zig.</strong><br>
+  <strong>A modular framework for building services in Zig.</strong><br>
   Web servers, web services and APIs, built from modules you pick: typed configuration, request deadlines, cancellation, tracing, structured logging and validation today; RPC, an ORM and an HTTP server next.
 </p>
 
@@ -16,9 +16,13 @@
 
 ## Why Zefir exists
 
-I'm building Zefir to cover everything I need for enterprise applications: web servers, web services, APIs. It's made to be convenient for me first, and I'll be really glad if it helps you too. It brings together the building blocks such software needs, each a module you can take on its own, with your own types as the schema and errors that say exactly what's wrong and where.
+I'm writing a large application in Zig, and Zefir is the framework I'm building for it. Every module is here because that application needed it, and some of them already run in its production code.
 
-If it fits the way you work, use it, and please join in: bring your ideas and questions to [Discussions](https://github.com/vkiryakov/zefir/discussions), and pull requests are welcome too.
+Zig is still young. Each release reshapes the language and its standard library, and many Zig projects don't survive that: they start with enthusiasm and are abandoned a release or two later. I didn't want my production code to stand on that, so I'm building the whole stack myself and keeping it on the current Zig. Zefir is in active development: new modules arrive as the application needs them.
+
+Every module stands on its own: take only the ones you need, with your own types as the schema and errors that say exactly what's wrong and where.
+
+Zefir is shaped by my needs first, and it's open to everyone. If it fits the way you work, use it. Found a bug? Open an [issue](https://github.com/vkiryakov/zefir/issues). Ideas and questions are welcome in [Discussions](https://github.com/vkiryakov/zefir/discussions), and so are pull requests.
 
 ## Highlights
 
