@@ -30,6 +30,10 @@ const cases = .{
     Case(v.firebasePushId, "-JhLeOlGIEjaIOFHR0xd", "-JhLeOlGIEjaIOFHR0x.", "validation.firebase_push_id", "must be a valid Firebase push ID"),
     Case(v.hash(.sha256), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "d41d8cd98f00b204e9800998ecf8427e", "validation.hash", "must be a valid sha256 hash"),
     Case(v.hash(.md5), "d41d8cd98f00b204e9800998ecf8427e", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "validation.hash", "must be a valid md5 hash"),
+    Case(v.creditCard, "4111111111111111", "4111111111111112", "validation.credit_card", "must be a valid credit card number"),
+    Case(v.isin, "US0378331005", "US0378331006", "validation.isin", "must be a valid ISIN"),
+    Case(v.bic, "DEUTDEFF", "deutdeff", "validation.bic", "must be a valid BIC"),
+    Case(v.iban, "DE89370400440532013000", "DE89370400440532013001", "validation.iban", "must be a valid IBAN"),
 };
 
 test "every string type: []const u8, []u8, [:0]const u8, [:0]u8" {
@@ -107,6 +111,89 @@ test "the selector of isHash may be known at run time only" {
     try testing.expect(!v.isHash("d41d8cd98f00b204e9800998ecf8427e", algorithm));
 }
 
+/// The examples of the SWIFT IBAN registry: 97 official ones and 24 of
+/// countries outside it.
+const registry_ibans = [_]S{
+    "AL47212110090000000235698741",   "AD1200012030200359100100",          "AT611904300234573201",             "AZ21NABZ00000000137010001944",
+    "BH67BMAG00001299123456",         "BE68539007547034",                  "BA391290079401028494",             "BR9700360305000010009795493P1",
+    "VG96VPVG0000012345678901",       "BG80BNBG96611020345678",            "BI4210000100010000332045181",      "BY13NBRB3600900000002Z00AB00",
+    "CG3930013020003710721836132",    "CR05015202001026284066",            "HR1210010051863000160",            "CY17002001280000001200527600",
+    "CZ6508000000192000145399",       "DK5000400440116243",                "FO2000400440116243",               "GL2000400440116243",
+    "DJ2100010000000154000100186",    "DO28BAGR00000001212453611324",      "SV62CENR00000000000000700025",     "EE382200221020145685",
+    "FI2112345600000785",             "AX2112345600000785",                "FR1420041010050500013M02606",      "GF4120041010050500013M02606",
+    "PF5720041010050500013M02606",    "TF2120041010050500013M02606",       "GP1120041010050500013M02606",      "MQ5120041010050500013M02606",
+    "YT3120041010050500013M02606",    "NC8420041010050500013M02606",       "RE4220041010050500013M02606",      "BL6820041010050500013M02606",
+    "MF8420041010050500013M02606",    "PM3620041010050500013M02606",       "WF9120041010050500013M02606",      "GE29NB0000000101904917",
+    "DE89370400440532013000",         "GI75NWBK000000007099453",           "GR1601101250000000012300695",      "GT82TRAJ01020000001210029690",
+    "HN88CABF00000000000250005469",   "HU42117730161111101800000000",      "IS140159260076545510730339",       "IQ98NBIQ850123456789012",
+    "IE29AIBK93115212345678",         "IL620108000000099999999",           "IT60X0542811101000000123456",      "JO94CBJO0010000000000131000302",
+    "KZ86125KZT5004100100",           "XK051212012345678906",              "KW81CBKU0000000000001234560101",   "LV80BANK0000435195001",
+    "LB62099900000001001901229114",   "LI21088100002324013AA",             "LT121000011101001000",             "LU280019400644750000",
+    "MK07250120000058984",            "MT84MALT011000012345MTLCAST001S",   "MR1300020001010000123456753",      "MU17BOMM0101101030300200000MUR",
+    "MD24AG000225100013104168",       "MC5811222000010123456789030",       "ME25505000012345678951",           "NL91ABNA0417164300",
+    "NI45BAPR00000013000003558124",   "NO9386011117947",                   "OM810180000001299123456",          "PK36SCBL0000001123456702",
+    "PS92PALS000000000400123456702",  "PL61109010140000071219812874",      "PT50000201231234567890154",        "QA58DOHB00001234567890ABCDEFG",
+    "RO49AAAA1B31007593840000",       "RU0304452522540817810538091310419", "LC55HEMM000100010012001200023015", "SM86U0322509800000000270100",
+    "ST68000100010051845310112",      "SA0380000000608010167519",          "RS35260005601001611379",           "SC18SSCB11010000000000001497USD",
+    "SK3112000000198742637541",       "SI56191000000123438",               "ES9121000418450200051332",         "SD2129010501234001",
+    "SE4550000000058398257466",       "CH9300762011623852957",             "TL380080012345678910157",          "TN5910006035183598478831",
+    "TR330006100519786457841326",     "AE070331234567890123456",           "GB29NWBK60161331926819",           "VA59001123000012345678",
+    "YE15CBYE0001018861234567891234", "DZ3512341234123412341234",          "AO44123412341234123412341",        "BJ83A12312341234123412341234",
+    "BF4512341234123412341234123",    "CM1512341234123412341234123",       "CV05123412341234123412341",        "CF4220001000010120069700160",
+    "TD8960003000203710253860174",    "KM4600005000010010904400137",       "CI77A12312341234123412341234",     "EG380019000500000000263180002",
+    "GQ7050002001003715228190196",    "GA2142001007341520000106963",       "GW04GW1430010181800637601",        "AA110011123Z5678",
+    "IR081234123412341234123412",     "MG4012341234123412341234123",       "ML75A12312341234123412341234",     "MA64011519000001205000534921",
+    "MZ97123412341234123412341",      "NE58NE0380100100130305000268",      "SN15A12312341234123412341234",     "TG53TG0090604310346500400070",
+    "UA213996220000026007233566001",
+};
+
+test "iban passes every example of the IBAN registry, and no single wrong digit in them" {
+    try testing.expectEqual(121, registry_ibans.len);
+    var buf: [34]u8 = undefined;
+    for (registry_ibans) |example| {
+        try h.expectPass(S, v.iban, example);
+        const s = buf[0..example.len];
+        for (example, 0..) |c, i| {
+            if (!std.ascii.isDigit(c)) continue;
+            for ("0123456789") |d| {
+                if (d == c) continue;
+                @memcpy(s, example);
+                s[i] = d;
+                try testing.expect(!v.isIban(s));
+            }
+        }
+    }
+}
+
+test "the Luhn check of creditCard and isin catches every single wrong digit" {
+    var buf: [19]u8 = undefined;
+    for ([_]S{ "4111111111111111", "378282246310005", "2200700000000009", "0000000000000", "4000000000000000006" }) |number| {
+        try testing.expect(v.isCreditCard(number));
+        const s = buf[0..number.len];
+        for (0..number.len) |i| {
+            for ("0123456789") |d| {
+                if (d == number[i]) continue;
+                @memcpy(s, number);
+                s[i] = d;
+                try testing.expect(!v.isCreditCard(s));
+            }
+        }
+    }
+    for ([_]S{ "US0378331005", "AU0000XVGZA3", "DE000BAY0017" }) |code| {
+        try testing.expect(v.isIsin(code));
+        const s = buf[0..code.len];
+        for (code, 0..) |c, i| {
+            if (!std.ascii.isDigit(c)) continue;
+            for ("0123456789") |d| {
+                if (d == c) continue;
+                @memcpy(s, code);
+                s[i] = d;
+                try testing.expect(!v.isIsin(s));
+            }
+        }
+    }
+}
+
 test "the first failing rule is the value's only violation" {
     try h.expectFail(S, .{ v.notEmpty, v.uuid }, "", "validation.not_empty", "must not be empty");
     try h.expectFail(S, .{ v.uuid, v.notEmpty }, "", "validation.uuid", "must be a valid UUID");
@@ -120,10 +207,10 @@ test "the first failing rule is the value's only violation" {
 const iterations = 20_000;
 
 /// The bytes that the grammars of the rules care about, and some they reject.
-const alphabet = "0123456789abcdefABCDEF" ++ "-_" ++ "ghxzGXZ" ++ " \x00\x7f\x80\xff";
+const alphabet = "0123456789abcdefABCDEF" ++ "0123456789" ++ "GHKLMNPQRSTUVWXYZ" ++ "-_" ++ "ghxz" ++ " \x00\x7f\x80\xff";
 
 /// The lengths the rules check for, give or take one byte.
-const lengths = [_]usize{ 8, 20, 24, 32, 36, 40, 48, 64, 96, 128 };
+const lengths = [_]usize{ 8, 11, 12, 13, 16, 19, 15, 20, 22, 24, 32, 34, 36, 40, 48, 64, 96, 128 };
 
 /// Valid identifiers: edits of them reach checks that random bytes rarely
 /// reach.
@@ -138,6 +225,16 @@ const seeds = [_]S{
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "38b060a751ac96384cd9327eb1b1e36a21fdb71114be07434c0cc7bf63f6e1da274edebfe76f65fbd51ad2f14898b95b",
     "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e",
+    "4111111111111111",
+    "675900000000",
+    "4000000000000000006",
+    "US0378331005",
+    "AU0000XVGZA3",
+    "DEUTDEFF",
+    "DEUTDEFF500",
+    "DE89370400440532013000",
+    "NO9386011117947",
+    "XX621234567890ABCDEFGHIJ1234567890",
 };
 
 /// `rule` passes `s` exactly when `predicate` accepts it.
@@ -165,6 +262,10 @@ fn agreeAll(s: S) !void {
     try agree(v.uuid, v.isUuid, s);
     try agree(v.mongoId, v.isMongoId, s);
     try agree(v.firebasePushId, v.isFirebasePushId, s);
+    try agree(v.creditCard, v.isCreditCard, s);
+    try agree(v.isin, v.isIsin, s);
+    try agree(v.bic, v.isBic, s);
+    try agree(v.iban, v.isIban, s);
     inline for (comptime std.enums.values(v.HashAlgorithm)) |algorithm| try agree(v.hash(algorithm), isHashOf(algorithm), s);
 }
 

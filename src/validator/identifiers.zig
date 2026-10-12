@@ -1,11 +1,11 @@
-//! Identifier rules: `uuid`, `mongoId`, `firebasePushId` and `hash`, each
-//! with its predicate (`v.isUuid`, `v.isMongoId`, `v.isFirebasePushId`,
-//! `v.isHash`). The rules take strings only and read bytes, never code
-//! points: a byte outside a rule's ASCII alphabet, invalid UTF-8 included,
-//! fails under the rule's own code, and `""` fails every rule. Nothing is
-//! trimmed, case-folded or normalized: a rule accepts the canonical form of
-//! its identifier only. A predicate takes any input, allocates nothing and
-//! reads each byte a bounded number of times.
+//! Identifier rules: `uuid`, `mongoId`, `firebasePushId`, `hash`,
+//! `creditCard`, `isin`, `bic` and `iban`, each with its predicate
+//! (`v.isUuid`, ..., `v.isIban`). The rules take strings only and read
+//! bytes, never code points: a byte outside a rule's ASCII alphabet, invalid
+//! UTF-8 included, fails under the rule's own code, and `""` fails every
+//! rule. Nothing is trimmed, case-folded or normalized: a rule accepts the
+//! canonical form of its identifier only. A predicate takes any input,
+//! allocates nothing and reads each byte a bounded number of times.
 const std = @import("std");
 const core = @import("core.zig");
 const Rule = core.Rule;
@@ -138,6 +138,132 @@ pub fn isHash(s: []const u8, algorithm: HashAlgorithm) bool {
 /// `hash must be called, e.g. v.hash(.sha256)`.
 pub const call_examples = .{ .hash = ".sha256" };
 
+// ------------------------------------------------------------------ creditCard, isin, bic, iban
+
+fn allDigits(s: []const u8) bool {
+    for (s) |c| {
+        if (!std.ascii.isDigit(c)) return false;
+    }
+    return true;
+}
+
+fn isUpperAlnum(c: u8) bool {
+    return std.ascii.isUpper(c) or std.ascii.isDigit(c);
+}
+
+/// What the decimal digit `d` adds to a Luhn sum: itself, or, when
+/// `double`, twice itself less 9 above 9.
+fn luhnDigit(d: u8, double: bool) u32 {
+    if (!double) return d;
+    const twice = 2 * @as(u32, d);
+    return if (twice > 9) twice - 9 else twice;
+}
+
+/// The Luhn check (ISO/IEC 7812-1, annex B) over ASCII digits: from the
+/// right, every second digit is doubled, starting left of the check digit,
+/// and the sum is a multiple of 10.
+fn luhnOk(digits: []const u8) bool {
+    var sum: u32 = 0;
+    var double = false;
+    var i = digits.len;
+    while (i > 0) {
+        i -= 1;
+        sum += luhnDigit(digits[i] - '0', double);
+        double = !double;
+    }
+    return sum % 10 == 0;
+}
+
+/// A payment card number: 12 to 19 ASCII digits whose Luhn check digit
+/// (ISO/IEC 7812-1) holds. There is no table of issuers, so any prefix
+/// passes, a leading 0 included; spaces and hyphens fail.
+pub const creditCard: Rule = predicateRule(.credit_card, "must be a valid credit card number", isCreditCard);
+
+/// `s` passes `v.creditCard`.
+pub fn isCreditCard(s: []const u8) bool {
+    return s.len >= 12 and s.len <= 19 and allDigits(s) and luhnOk(s);
+}
+
+/// An ISIN (ISO 6166): 12 bytes, two upper-case letters, nine upper-case
+/// letters or digits and a check digit. With each letter written as its
+/// two-digit value (`A` = 10 … `Z` = 35), the digits pass the Luhn check.
+/// The country prefix is not looked up: `XS` passes.
+pub const isin: Rule = predicateRule(.isin, "must be a valid ISIN", isIsin);
+
+/// `s` passes `v.isin`.
+pub fn isIsin(s: []const u8) bool {
+    if (s.len != 12) return false;
+    if (!std.ascii.isUpper(s[0]) or !std.ascii.isUpper(s[1]) or !std.ascii.isDigit(s[11])) return false;
+    for (s[2..11]) |c| {
+        if (!isUpperAlnum(c)) return false;
+    }
+    // Luhn from the right over the digits that the letters expand to: a
+    // letter adds its ones digit, then its tens digit.
+    var sum: u32 = 0;
+    var double = false;
+    var i = s.len;
+    while (i > 0) {
+        i -= 1;
+        if (std.ascii.isDigit(s[i])) {
+            sum += luhnDigit(s[i] - '0', double);
+            double = !double;
+        } else {
+            const value = s[i] - 'A' + 10;
+            sum += luhnDigit(value % 10, double);
+            sum += luhnDigit(value / 10, !double);
+        }
+    }
+    return sum % 10 == 0;
+}
+
+/// A BIC (ISO 9362): 8 or 11 bytes; four upper-case letters for the
+/// institution, two for the country, two upper-case letters or digits for
+/// the location and, in 11 bytes, three more for the branch. The country is
+/// not looked up: `DEUTXXFF` passes. Upper case only, no separators.
+pub const bic: Rule = predicateRule(.bic, "must be a valid BIC", isBic);
+
+/// `s` passes `v.bic`.
+pub fn isBic(s: []const u8) bool {
+    if (s.len != 8 and s.len != 11) return false;
+    for (s[0..6]) |c| {
+        if (!std.ascii.isUpper(c)) return false;
+    }
+    for (s[6..]) |c| {
+        if (!isUpperAlnum(c)) return false;
+    }
+    return true;
+}
+
+/// An IBAN in its electronic form (ISO 13616): 15 to 34 bytes; two
+/// upper-case letters for the country, two check digits from 02 to 98 (00,
+/// 01 and 99 would give one account a second spelling), then upper-case
+/// letters and digits. With the first four bytes moved to the end and each
+/// letter written as its value (`A` = 10 … `Z` = 35), the number leaves 1
+/// modulo 97 (ISO 7064 MOD 97-10). The country is not looked up, and the
+/// length is not checked per country. Upper case only, no spaces.
+pub const iban: Rule = predicateRule(.iban, "must be a valid IBAN", isIban);
+
+/// `s` passes `v.iban`.
+pub fn isIban(s: []const u8) bool {
+    if (s.len < 15 or s.len > 34) return false;
+    if (!std.ascii.isUpper(s[0]) or !std.ascii.isUpper(s[1])) return false;
+    if (!std.ascii.isDigit(s[2]) or !std.ascii.isDigit(s[3])) return false;
+    const check = (s[2] - '0') * 10 + (s[3] - '0');
+    if (check < 2 or check > 98) return false;
+    for (s[4..]) |c| {
+        if (!isUpperAlnum(c)) return false;
+    }
+    var remainder: u32 = 0;
+    for (s[4..]) |c| remainder = mod97(remainder, c);
+    for (s[0..4]) |c| remainder = mod97(remainder, c);
+    return remainder == 1;
+}
+
+/// The MOD 97-10 remainder after the upper-case letter or digit `c`.
+fn mod97(remainder: u32, c: u8) u32 {
+    return if (std.ascii.isDigit(c)) (remainder * 10 + (c - '0')) % 97 else (remainder * 100 + (c - 'A' + 10)) % 97;
+}
+
 // ------------------------------------------------------------------ tests
 
 const expectOutcome = core.expectOutcome;
@@ -172,6 +298,10 @@ test "the rules without parameters have their documented codes and messages and 
         .{ uuid, core.Kind.uuid, "validation.uuid", "must be a valid UUID" },
         .{ mongoId, core.Kind.mongo_id, "validation.mongo_id", "must be a valid MongoDB ObjectId" },
         .{ firebasePushId, core.Kind.firebase_push_id, "validation.firebase_push_id", "must be a valid Firebase push ID" },
+        .{ creditCard, core.Kind.credit_card, "validation.credit_card", "must be a valid credit card number" },
+        .{ isin, core.Kind.isin, "validation.isin", "must be a valid ISIN" },
+        .{ bic, core.Kind.bic, "validation.bic", "must be a valid BIC" },
+        .{ iban, core.Kind.iban, "validation.iban", "must be a valid IBAN" },
     };
     inline for (rules) |row| {
         try t.expectEqual(row[1], row[0].kind);
@@ -221,6 +351,18 @@ test "the rules take strings only: [N]u8 and lists of strings get hints, other t
     try expect(head ++ "hash expects a string, field is u256", comptime typeText(hash(.sha256), u256).?);
     try expect(head ++ "hash expects a string, field is [32]u8" ++ u8_array, comptime typeText(hash(.sha256), [32]u8).?);
     try expect(head ++ "hash expects a string, field is []const []const u8; use v.each(v.hash(.sha256))", comptime typeText(hash(.sha256), []const []const u8).?);
+    try expect(head ++ "credit_card expects a string, field is u64", comptime typeText(creditCard, u64).?);
+    try expect(head ++ "credit_card expects a string, field is [16]u8" ++ u8_array, comptime typeText(creditCard, [16]u8).?);
+    try expect(head ++ "credit_card expects a string, field is []const []const u8; use v.each(v.creditCard)", comptime typeText(creditCard, []const []const u8).?);
+    try expect(head ++ "isin expects a string, field is u64", comptime typeText(isin, u64).?);
+    try expect(head ++ "isin expects a string, field is [12]u8" ++ u8_array, comptime typeText(isin, [12]u8).?);
+    try expect(head ++ "isin expects a string, field is []const []const u8; use v.each(v.isin)", comptime typeText(isin, []const []const u8).?);
+    try expect(head ++ "bic expects a string, field is u64", comptime typeText(bic, u64).?);
+    try expect(head ++ "bic expects a string, field is [11]u8" ++ u8_array, comptime typeText(bic, [11]u8).?);
+    try expect(head ++ "bic expects a string, field is []const []const u8; use v.each(v.bic)", comptime typeText(bic, []const []const u8).?);
+    try expect(head ++ "iban expects a string, field is u128", comptime typeText(iban, u128).?);
+    try expect(head ++ "iban expects a string, field is [34]u8" ++ u8_array, comptime typeText(iban, [34]u8).?);
+    try expect(head ++ "iban expects a string, field is []const []const u8; use v.each(v.iban)", comptime typeText(iban, []const []const u8).?);
     try expect(
         head ++ "uuid expects a string, field is []volatile u8; volatile, allowzero and under-aligned slices are neither strings nor lists",
         comptime typeText(uuid, []volatile u8).?,
@@ -347,4 +489,110 @@ test "hash: each algorithm takes exactly its number of hex digits, any case" {
     try t.expect(!isHash(" da39a3ee5e6b4b0d3255bfef95601890afd8070", .sha1));
     try t.expect(!isHash("47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=", .sha256));
     try t.expect(!isHash("", .crc32));
+}
+
+test "creditCard: 12 to 19 digits with a valid Luhn check digit, any issuer, no separators" {
+    try expectPredicate(isCreditCard, &.{
+        "4111111111111111",
+        "4222222222222",
+        "4000000000000000006",
+        "378282246310005",
+        "5555555555554444",
+        "2221000000000009",
+        "30569309025904",
+        "6011111111111117",
+        "3530111333300000",
+        "6200000000000005",
+        "2200700000000009",
+        "675900000000",
+        "6440000000000005",
+        "9792000000000003",
+        "0000000000000",
+    }, &.{
+        "",
+        "4111111111111112",
+        "4111 1111 1111 1111",
+        "4111-1111-1111-1111",
+        " 4111111111111111 ",
+        "4111\t1111111111111",
+        "4111111111111111\n",
+        "12345678903",
+        "51000008",
+        "510000000000000000000008",
+        "99992221000000000003",
+        "\u{ff14}\u{ff11}\u{ff11}\u{ff11}\u{ff11}\u{ff11}\u{ff11}\u{ff11}\u{ff11}\u{ff11}\u{ff11}\u{ff11}\u{ff11}\u{ff11}\u{ff11}\u{ff11}",
+    });
+}
+
+test "isin: two letters, nine letters or digits and a Luhn check digit over the letters' values" {
+    try expectPredicate(isIsin, &.{
+        "US0378331005",
+        "AU0000XVGZA3",
+        "GB0002634946",
+        "DE000BAY0017",
+        "XS2021832634",
+    }, &.{
+        "",
+        "US0378331006",
+        "us0378331005",
+        "US037833100",
+        "US03783310055",
+        "US-037833100-5",
+        "1S0378331005",
+        "US037833100X",
+    });
+}
+
+test "bic: 4 + 2 letters, 2 letters or digits, an optional branch of 3; any country code" {
+    try expectPredicate(isBic, &.{
+        "DEUTDEFF",
+        "DEUTDEFF500",
+        "DEUTDEFFXXX",
+        "NEDSZAJJ",
+        "ABCDXK22",
+        "DEUTXXFF",
+        "DEUTUKFF",
+    }, &.{
+        "",
+        "deutdeff",
+        "DEUTDEff",
+        "DEUTDEF",
+        "DEUTDEFF5",
+        "DEUTDEFF50",
+        "DEU1DEFF",
+        "DEUT DE FF",
+        "DEUT12FF",
+        "DEUTDEFF500X",
+    });
+}
+
+test "iban: 15 to 34 bytes, check digits 02 to 98 and MOD 97-10, any country, upper case only" {
+    try expectPredicate(isIban, &.{
+        "DE89370400440532013000",
+        "GB82WEST12345698765432",
+        "NO9386011117947",
+        "RU0304452522540817810538091310419",
+        "BY13NBRB3600900000002Z00AB00",
+        "DE98370400441000000008",
+        "DE02370400440000000024",
+        "DZ910001234567890123456789",
+        "XX46370400440532013000",
+        "XX0812345678901",
+        "XX621234567890ABCDEFGHIJ1234567890",
+    }, &.{
+        "",
+        "DE01370400441000000008",
+        "DE00370400441000000026",
+        "DE99370400441000000087",
+        "DE89 3704 0044 0532 0130 00",
+        "de89370400440532013000",
+        "GB82west12345698765432",
+        "GB82-WEST-1234-5698-7654-32",
+        "DE89370400440532013001",
+        "DE8937040044053201300",
+        "XX89370400440532013000",
+        "GB82WE\u{17f}T12345698765432",
+        "XX361234567890",
+        "XX851234567890ABCDEFGHIJ1234567890X",
+    });
 }

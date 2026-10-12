@@ -136,6 +136,7 @@ pub const list = [_]Fixture{
     .{ .file = "src/validator/testdata/compile_errors/hash_on_u8_array.zig", .expect = "validator: hash_on_u8_array.Bad.field_rules.x: hash expects a string, field is [32]u8; [N]u8 is an array of numbers, not a string: use []const u8", .row = "hash-2" },
     .{ .file = "src/validator/testdata/compile_errors/hash_uncalled.zig", .expect = "validator: hash_uncalled.Bad.field_rules.x: hash must be called, e.g. v.hash(.sha256)", .row = "hash-4" },
     .{ .file = "src/validator/testdata/compile_errors/is_hash_as_rule.zig", .expect = "validator: is_hash_as_rule.Bad.field_rules.x: expected a rule, got the predicate isHash; use the rule v.hash(.sha256)", .row = "variant of G-25" },
+    .{ .file = "src/validator/testdata/compile_errors/credit_card_on_int.zig", .expect = "validator: credit_card_on_int.Bad.field_rules.x: credit_card expects a string, field is u64", .row = "creditCard-1" },
     .{ .file = "src/validator/testdata/compile_errors/hash_unknown_tag.zig", .expect = "enum 'identifiers.HashAlgorithm' has no member named 'sha3_256'", .row = "Z-35" },
     // minItems and maxItems: one fixture per kind of error; the text of every
     // catalog row is checked by the tests of lists.zig

@@ -262,6 +262,42 @@ test "hash is a rule constructor with code validation.hash and message \"must be
     try expectNoViolation([]const u8, v.hash(.md5), "d41d8cd98f00b204e9800998ecf8427e");
 }
 
+test "creditCard is a rule value with code validation.credit_card and message \"must be a valid credit card number\"; no precondition" {
+    try testing.expect(@hasDecl(v, "creditCard"));
+    try testing.expect(@TypeOf(v.creditCard) == v.Rule);
+    try expectRule(v.creditCard, "validation.credit_card", "must be a valid credit card number", "must be a valid credit card number");
+    try expectViolation([]const u8, v.creditCard, "4111111111111112", "validation.credit_card", "must be a valid credit card number", "x");
+    try expectViolation([]const u8, v.creditCard.withMessage("another message"), "\xff", "validation.credit_card", "another message", "x");
+    try expectNoViolation([]const u8, v.creditCard, "4111111111111111");
+}
+
+test "isin is a rule value with code validation.isin and message \"must be a valid ISIN\"; no precondition" {
+    try testing.expect(@hasDecl(v, "isin"));
+    try testing.expect(@TypeOf(v.isin) == v.Rule);
+    try expectRule(v.isin, "validation.isin", "must be a valid ISIN", "must be a valid ISIN");
+    try expectViolation([]const u8, v.isin, "US0378331006", "validation.isin", "must be a valid ISIN", "x");
+    try expectViolation([]const u8, v.isin.withMessage("another message"), "\xff", "validation.isin", "another message", "x");
+    try expectNoViolation([]const u8, v.isin, "US0378331005");
+}
+
+test "bic is a rule value with code validation.bic and message \"must be a valid BIC\"; no precondition" {
+    try testing.expect(@hasDecl(v, "bic"));
+    try testing.expect(@TypeOf(v.bic) == v.Rule);
+    try expectRule(v.bic, "validation.bic", "must be a valid BIC", "must be a valid BIC");
+    try expectViolation([]const u8, v.bic, "deutdeff", "validation.bic", "must be a valid BIC", "x");
+    try expectViolation([]const u8, v.bic.withMessage("another message"), "\xff", "validation.bic", "another message", "x");
+    try expectNoViolation([]const u8, v.bic, "DEUTDEFF");
+}
+
+test "iban is a rule value with code validation.iban and message \"must be a valid IBAN\"; no precondition" {
+    try testing.expect(@hasDecl(v, "iban"));
+    try testing.expect(@TypeOf(v.iban) == v.Rule);
+    try expectRule(v.iban, "validation.iban", "must be a valid IBAN", "must be a valid IBAN");
+    try expectViolation([]const u8, v.iban, "DE01370400441000000008", "validation.iban", "must be a valid IBAN", "x");
+    try expectViolation([]const u8, v.iban.withMessage("another message"), "\xff", "validation.iban", "another message", "x");
+    try expectNoViolation([]const u8, v.iban, "DE89370400440532013000");
+}
+
 test "minItems is a rule constructor with code validation.min_items and message \"must have at least {min} items\", or \"must have at least 1 item\" when min = 1; placeholder {min}" {
     try testing.expect(@hasDecl(v, "minItems"));
     try testing.expect(@typeInfo(@TypeOf(v.minItems)).@"fn".return_type == v.Rule);
@@ -426,15 +462,15 @@ test "finite has no precondition: nan, inf and -inf on a float field fail its ow
     }
 }
 
-test "the module exports exactly its 38 public names, and Rule.withMessage" {
-    const names = [_][]const u8{ "Violation", "Rule", "Report", "max_code_bytes", "max_message_bytes", "max_report_violations", "check", "checkAll", "assertRules", "fail", "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "uuid", "mongoId", "firebasePushId", "hash", "isUuid", "isMongoId", "isFirebasePushId", "isHash", "HashAlgorithm", "minItems", "maxItems", "each", "custom" };
+test "the module exports exactly its 46 public names, and Rule.withMessage" {
+    const names = [_][]const u8{ "Violation", "Rule", "Report", "max_code_bytes", "max_message_bytes", "max_report_violations", "check", "checkAll", "assertRules", "fail", "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "uuid", "mongoId", "firebasePushId", "hash", "creditCard", "isin", "bic", "iban", "isUuid", "isMongoId", "isFirebasePushId", "isHash", "isCreditCard", "isIsin", "isBic", "isIban", "HashAlgorithm", "minItems", "maxItems", "each", "custom" };
     inline for (names) |name| try testing.expect(@hasDecl(v, name));
     try testing.expectEqual(names.len, comptime std.meta.declarations(v).len);
     try testing.expect(@hasDecl(v.Rule, "withMessage"));
 }
 
 test "every rule the module exports has a catalog test" {
-    const tested = [_][]const u8{ "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "uuid", "mongoId", "firebasePushId", "hash", "minItems", "maxItems", "each", "custom" };
+    const tested = [_][]const u8{ "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "uuid", "mongoId", "firebasePushId", "hash", "creditCard", "isin", "bic", "iban", "minItems", "maxItems", "each", "custom" };
     inline for (comptime std.meta.declarations(v)) |name| {
         const T = @TypeOf(@field(v, name));
         if (comptime T == v.Rule or (@typeInfo(T) == .@"fn" and @typeInfo(T).@"fn".return_type == v.Rule)) {
@@ -450,7 +486,7 @@ test "every rule the module exports has a catalog test" {
 }
 
 test "the module exports exactly the catalog predicates of the shipped rules" {
-    const predicates = [_][]const u8{ "isUuid", "isMongoId", "isFirebasePushId", "isHash" };
+    const predicates = [_][]const u8{ "isUuid", "isMongoId", "isFirebasePushId", "isHash", "isCreditCard", "isIsin", "isBic", "isIban" };
     comptime var exported: usize = 0;
     inline for (comptime std.meta.declarations(v)) |name| {
         if (comptime name.len > 2 and std.mem.startsWith(u8, name, "is") and std.ascii.isUpper(name[2])) {

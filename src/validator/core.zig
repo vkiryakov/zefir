@@ -1696,16 +1696,12 @@ pub const pending_kinds = [_]Kind{
     .min_date,
     .max_date,
     // PR 5a
-    .credit_card,
     .isbn,
     .isbn10,
     .isbn13,
     .issn,
     .ean,
-    .isin,
     .isrc,
-    .bic,
-    .iban,
     // PR 5b
     .btc_address,
     .ethereum_address,
