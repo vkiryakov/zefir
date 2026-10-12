@@ -1085,8 +1085,8 @@ What happens, step by step:
 
 ```mermaid
 flowchart LR
-    call["payments.err(...)"] --> out(["stdout,<br/>as always"])
-    call --> queue[["the subscriber's queue,<br/>256 records"]]
+    record["payments.err(...)"] --> out(["stdout,<br/>as always"])
+    record --> queue[["the subscriber's queue,<br/>256 records"]]
     queue --> handler["SlackAlerts.send,<br/>on the subscriber's thread"]
     handler --> slack(["the Slack channel"])
 ```
