@@ -742,14 +742,16 @@ test "the service fragment: OpenTelemetry names, fixed order, empty fields left 
 }
 
 test "create frees what it took when an allocation fails" {
-    var fail_index: usize = 0;
-    while (true) : (fail_index += 1) {
-        var failing: std.testing.FailingAllocator = .init(testing.allocator, .{ .fail_index = fail_index });
-        const engine = create(failing.allocator(), testing.io, .{ .service = .{ .name = "svc", .version = "1.0.0" } }) catch |e| {
-            try testing.expectEqual(@as(InitError, error.OutOfMemory), e);
-            continue;
-        };
-        engine.destroy();
-        break;
+    for ([_]options.Mode{ .sync, .{ .queued = .{ .capacity = 16, .batch_size = 4 } } }) |mode| {
+        var fail_index: usize = 0;
+        while (true) : (fail_index += 1) {
+            var failing: std.testing.FailingAllocator = .init(testing.allocator, .{ .fail_index = fail_index });
+            const engine = create(failing.allocator(), testing.io, .{ .mode = mode, .service = .{ .name = "svc", .version = "1.0.0" } }) catch |e| {
+                try testing.expectEqual(@as(InitError, error.OutOfMemory), e);
+                continue;
+            };
+            engine.destroy();
+            break;
+        }
     }
 }

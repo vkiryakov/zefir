@@ -1578,3 +1578,18 @@ test "appendSuppressed adds the count at the end of a record" {
     const text_len = appendSuppressed(.text, &buf, text.len, 2);
     try testing.expectEqualStrings("TIME ERROR m suppressed=2\n", buf[0..text_len]);
 }
+
+test "appendSuppressed after a cut record: the count follows the truncation marker" {
+    var buf: [160 + suppressed_max_bytes]u8 = undefined;
+    const header: Header = .{ .timestamp = fixed_time, .service = "", .scope = "", .oversize = .truncate };
+    const message = "A message far too long for the record it is in, so it is cut";
+    const json = record(.json, .err, message, buf[0..120], header, .{ .id = 1 }).?;
+    try testing.expect(json.truncated);
+    const json_len = appendSuppressed(.json, &buf, json.len, 3);
+    try testing.expectStringEndsWith(buf[0..json_len], "…\",\"truncated\":true,\"suppressed\":3}\n");
+    try testing.expect(try std.json.validate(testing.allocator, buf[0 .. json_len - 1]));
+    const text = record(.text, .err, message, buf[0..60], header, .{ .id = 1 }).?;
+    try testing.expect(text.truncated);
+    const text_len = appendSuppressed(.text, &buf, text.len, 3);
+    try testing.expectStringEndsWith(buf[0..text_len], "… truncated=true suppressed=3\n");
+}

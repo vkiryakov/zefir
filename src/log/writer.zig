@@ -27,8 +27,10 @@ pub fn run(engine: *Engine) void {
         if (n > 0) {
             yields = 0;
             engine.writeBatch(n);
-            // Before the batch counts as done: a flush that returns has
-            // seen the summary of the error records dropped before it.
+            // Before the batch counts as done, so a flush waiting for it
+            // finds the summary of the error records dropped so far
+            // written; one dropped after this check is reported after the
+            // next batch, before the writer sleeps, or by shutdown.
             engine.reportDroppedErrors();
             engine.markProcessed(n);
             continue;

@@ -1378,6 +1378,14 @@ fn openLater(lock: *Lock) void {
     lock.open.store(true, .seq_cst);
 }
 
+/// Opens `lock` once `deinit` has told the writer thread to drop what is
+/// left. `deinit` waits for the write `lock` holds, so `engine` is alive
+/// while this reads it.
+fn openOnAbandon(lock: *Lock, engine: *const Engine) void {
+    while (!engine.abandon.load(.seq_cst)) std.Thread.yield() catch {};
+    lock.open.store(true, .seq_cst);
+}
+
 test "queued: a shutdown that times out leaves records pending; deinit then drops them" {
     var lock: Lock = .{ .sink = .init(testing.allocator) };
     defer lock.sink.deinit();
@@ -1387,7 +1395,7 @@ test "queued: a shutdown that times out leaves records pending; deinit then drop
     for (0..3) |i| logger.info("queued", .{ .i = i });
     try testing.expectError(error.Timeout, logger.shutdown(.{ .duration = .{ .raw = .fromMilliseconds(20), .clock = .awake } }));
     try testing.expectEqual(@as(u64, 4), logger.stats().pending);
-    const opener = try std.Thread.spawn(.{}, openLater, .{&lock});
+    const opener = try std.Thread.spawn(.{}, openOnAbandon, .{ &lock, logger.engine });
     logger.deinit(); // waits for the write in progress, drops the three queued records
     opener.join();
     try testing.expectEqual(@as(usize, 1), lock.lines());
@@ -1555,6 +1563,98 @@ test "queued: error records the full queue refuses are reported in the log by on
     }
     s = logger.stats();
     try testing.expectEqual(@as(u64, 5), s.written); // the summary is the logger's own record
+}
+
+test "queued: in text the summary of dropped error records is a line of its own" {
+    var lock: Lock = .{ .sink = .init(testing.allocator) };
+    defer lock.sink.deinit();
+    const logger: Logger = try .init(testing.allocator, testing.io, .{
+        .format = .text,
+        .mode = .{ .queued = .{ .capacity = 2, .batch_size = 1 } },
+        .output = .{ .writer = &lock.writer },
+    });
+    defer logger.deinit();
+    logger.info("held", .{});
+    lock.waitEntered();
+    for (0..2) |i| logger.info("queued", .{ .i = i });
+    logger.err("lost", .{});
+    lock.open.store(true, .seq_cst);
+    try logger.flush(.none);
+    var lines = std.mem.splitScalar(u8, lock.sink.written(), '\n');
+    _ = lines.next(); // "held"
+    try testing.expectStringEndsWith(lines.next().?, " ERROR zefir.log: error records dropped suppressed=1");
+}
+
+test "queued: logging, waits for room, the error summary, emergency, flush and shutdown never allocate" {
+    var failing: std.testing.FailingAllocator = .init(testing.allocator, .{});
+    var dropping_lock: Lock = .{ .sink = .init(testing.allocator) };
+    defer dropping_lock.sink.deinit();
+    var blocking_lock: Lock = .{ .sink = .init(testing.allocator) };
+    defer blocking_lock.sink.deinit();
+    const dropping: Logger = try .init(failing.allocator(), testing.io, .{ .mode = .{ .queued = .{ .capacity = 4, .batch_size = 1 } }, .output = .{ .writer = &dropping_lock.writer } });
+    defer dropping.deinit();
+    const blocking: Logger = try .init(failing.allocator(), testing.io, .{ .mode = .{ .queued = .{ .capacity = 2, .batch_size = 1, .overflow = .block } }, .output = .{ .writer = &blocking_lock.writer } });
+    defer blocking.deinit();
+    failing.fail_index = failing.alloc_index; // every allocation from here on fails
+    const before = failing.allocations;
+
+    dropping.info("held", .{});
+    dropping_lock.waitEntered();
+    for (0..4) |i| dropping.info("queued", .{ .i = i });
+    dropping.err("dropped", .{});
+    dropping.info("dropped", .{});
+    dropping_lock.open.store(true, .seq_cst);
+    try dropping.flush(.none);
+
+    blocking.info("held", .{});
+    blocking_lock.waitEntered();
+    for (0..2) |i| blocking.info("queued", .{ .i = i });
+    var done: std.atomic.Value(bool) = .init(false);
+    const producer = try std.Thread.spawn(.{}, logBlocking, .{ blocking, &done });
+    const waited = waitWaiters(&blocking.engine.queue.?.space_waiters, 1);
+    blocking_lock.open.store(true, .seq_cst);
+    producer.join();
+    try waited;
+    try blocking.flush(.none);
+
+    if (builtin.os.tag != .windows) {
+        var stderr: StderrPipe = try .open();
+        defer stderr.close();
+        dropping.engine.stderr = stderr.write_end;
+        dropping.emergency("Going down", .{ .code = 7 });
+    }
+    try dropping.shutdown(.none);
+    try blocking.shutdown(.none);
+    try testing.expectEqual(before, failing.allocations);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, dropping_lock.sink.written(), "zefir.log: error records dropped"));
+    try testing.expectEqual(@as(usize, 4), blocking_lock.lines());
+}
+
+test "emergency: a record with no room for the count goes out without it, and the next one tells" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest; // the test needs POSIX pipes
+    var stderr: StderrPipe = try .open();
+    defer stderr.close();
+    // The smallest record that holds every mandatory part.
+    const smallest: u32 = @intCast(encode.mandatoryBytes(.json, 0, scopes.max_name_bytes));
+    const logger: Logger = try .init(testing.allocator, testing.io, .{ .max_record_bytes = smallest });
+    logger.engine.stderr = stderr.write_end;
+    const long_scope: [scopes.max_name_bytes]u8 = @splat('s');
+    const ctx = core.Context.root.withTrace(try traceContext("4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7"));
+    const widest = logger.scoped(&long_scope).withContext(ctx);
+    logger.engine.bucket.tokens = 0;
+    logger.engine.bucket.earned_at = std.math.maxInt(i64); // earns nothing for now
+    logger.emergency("Dropped", .{});
+    logger.emergency("Dropped", .{});
+    logger.engine.bucket.earned_at = 0; // long ago: the bucket is full again
+    widest.emergency("M", .{});
+    logger.emergency("Next", .{});
+    const s = logger.stats();
+    logger.deinit();
+    var buf: [2048]u8 = undefined;
+    var lines = std.mem.splitScalar(u8, try stderr.finish(&buf), '\n');
+    try testing.expect(std.mem.find(u8, lines.next().?, "suppressed") == null);
+    try testing.expectStringEndsWith(lines.next().?, "\"message\":\"Next\",\"suppressed\":2}");
+    try testing.expectEqual(@as(u64, 2), s.emergency_written);
 }
 
 /// A pipe for the logger's stderr; POSIX only.

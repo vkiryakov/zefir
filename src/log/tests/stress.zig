@@ -1,4 +1,4 @@
-//! Stress tests of the queued mode: eight producers, an oracle for every
+//! Stress tests of the queued mode: many producers, an oracle for every
 //! record, and counters that must add up.
 
 const std = @import("std");
@@ -7,12 +7,15 @@ const testing = std.testing;
 
 const producers = 8;
 const per_producer = 2000;
+const max_producers = alphabet.len;
+/// One letter per producer, none of them escaped in JSON.
+const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-";
 
 /// The oracle's mark: producer `p`'s record `i` carries a pattern of its
 /// own, so a record mixed with another or cut short shows.
 fn pattern(buf: *[64]u8, p: usize, i: usize) []const u8 {
     const len = 1 + (i * 7 + p) % 40;
-    @memset(buf[0..len], @intCast('a' + p));
+    @memset(buf[0..len], alphabet[p]);
     return buf[0..len];
 }
 
@@ -21,12 +24,12 @@ fn produce(logger: log.Logger, p: usize, count: usize) void {
     for (0..count) |i| logger.info("stress", .{ .producer = p, .seq = i, .pattern = pattern(&buf, p, i) });
 }
 
-/// Runs `producers` threads of `count` records each, and waits for them.
-fn runProducers(logger: log.Logger, count: usize) !void {
-    var threads: [producers]std.Thread = undefined;
+/// Runs `n` producer threads of `count` records each, and waits for them.
+fn runProducers(logger: log.Logger, n: usize, count: usize) !void {
+    var threads: [max_producers]std.Thread = undefined;
     var spawned: usize = 0;
     defer for (threads[0..spawned]) |t| t.join();
-    for (&threads, 0..) |*t, p| {
+    for (threads[0..n], 0..) |*t, p| {
         t.* = try std.Thread.spawn(.{}, produce, .{ logger, p, count });
         spawned += 1;
     }
@@ -47,8 +50,8 @@ fn field(line: []const u8, comptime name: []const u8) ![]const u8 {
 }
 
 const Oracle = struct {
-    next: [producers]usize = @splat(0),
-    delivered: [producers]usize = @splat(0),
+    next: [max_producers]usize = @splat(0),
+    delivered: [max_producers]usize = @splat(0),
 
     /// Checks one record: valid JSON with its producer's pattern, after
     /// that producer's previous record (`gapless`: right after it).
@@ -56,7 +59,7 @@ const Oracle = struct {
         if (!try std.json.validate(testing.allocator, line)) return error.TestInvalidRecord;
         const p = try std.fmt.parseInt(usize, try field(line, "producer"), 10);
         const i = try std.fmt.parseInt(usize, try field(line, "seq"), 10);
-        if (p >= producers) return error.TestUnknownProducer;
+        if (p >= max_producers) return error.TestUnknownProducer;
         var buf: [64]u8 = undefined;
         if (!std.mem.eql(u8, pattern(&buf, p, i), try field(line, "pattern"))) return error.TestWrongPattern;
         if (gapless and i != o.next[p]) return error.TestOutOfOrder;
@@ -121,7 +124,10 @@ test "the oracle catches a doubled, a reordered, a cut and a mixed record" {
     try testing.expectError(error.TestWrongPattern, mixed.checkAll("{\"producer\":0,\"seq\":0,\"pattern\":\"b\"}", true));
 }
 
-test "block: records of 8 producers all come out, none doubled, each producer's in order" {
+/// `n` producers in block mode: every record comes out once, each
+/// producer's in its order.
+fn expectBlockDeliversAll(n: usize) !void {
+    const count = producers * per_producer / n;
     var out: std.Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
     const logger: log.Logger = try .init(testing.allocator, testing.io, .{
@@ -129,14 +135,54 @@ test "block: records of 8 producers all come out, none doubled, each producer's 
         .output = .{ .writer = &out.writer },
     });
     defer logger.deinit();
-    try runProducers(logger, per_producer);
+    try runProducers(logger, n, count);
     try logger.flush(.none);
     var oracle: Oracle = .{};
     try oracle.checkAll(out.written(), true);
-    for (oracle.delivered) |n| try testing.expectEqual(@as(usize, per_producer), n);
+    for (oracle.delivered[0..n]) |delivered| try testing.expectEqual(count, delivered);
     const s = logger.stats();
-    try testing.expectEqual(@as(u64, producers * per_producer), s.written);
+    try testing.expectEqual(@as(u64, n * count), s.written);
     try testing.expectEqual(@as(u64, 0), s.dropped.queue_full + s.dropped.closed + s.dropped.write_failed);
+}
+
+test "block: 1, 2, 8 and twice as many producers as CPUs lose and double nothing, each in its order" {
+    const cpus = std.Thread.getCpuCount() catch 4;
+    // Twice the CPUs: producers get preempted between reserving and
+    // publishing.
+    for ([_]usize{ 1, 2, producers, @min(2 * cpus, max_producers) }) |n| try expectBlockDeliversAll(n);
+}
+
+/// Keeps what it is given, after 20 us per write: a slow reader.
+const SlowSink = struct {
+    out: std.Io.Writer.Allocating,
+    writer: std.Io.Writer = .{ .buffer = &.{}, .vtable = &.{ .drain = drain } },
+
+    fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+        const sink: *SlowSink = @alignCast(@fieldParentPtr("writer", w));
+        testing.io.sleep(.fromMicroseconds(20), .awake) catch {};
+        var n: usize = 0;
+        for (data[0 .. data.len - 1]) |bytes| {
+            sink.out.writer.writeAll(bytes) catch return error.WriteFailed;
+            n += bytes.len;
+        }
+        for (0..splat) |_| sink.out.writer.writeAll(data[data.len - 1]) catch return error.WriteFailed;
+        return n + data[data.len - 1].len * splat;
+    }
+};
+
+test "block with a slow writer: producers wait, and nothing is lost or doubled" {
+    var sink: SlowSink = .{ .out = .init(testing.allocator) };
+    defer sink.out.deinit();
+    const logger: log.Logger = try .init(testing.allocator, testing.io, .{
+        .mode = .{ .queued = .{ .capacity = 16, .batch_size = 4, .overflow = .block } },
+        .output = .{ .writer = &sink.writer },
+    });
+    defer logger.deinit();
+    try runProducers(logger, producers, 250);
+    try logger.flush(.none);
+    var oracle: Oracle = .{};
+    try oracle.checkAll(sink.out.written(), true);
+    for (oracle.delivered[0..producers]) |delivered| try testing.expectEqual(@as(usize, 250), delivered);
 }
 
 test "drop_new: what came out and what was dropped add up, each producer's records in order" {
@@ -147,7 +193,7 @@ test "drop_new: what came out and what was dropped add up, each producer's recor
         .output = .{ .writer = &out.writer },
     });
     defer logger.deinit();
-    try runProducers(logger, per_producer);
+    try runProducers(logger, producers, per_producer);
     try logger.flush(.none);
     var oracle: Oracle = .{};
     try oracle.checkAll(out.written(), false);
