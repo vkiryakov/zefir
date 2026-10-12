@@ -1753,10 +1753,43 @@ pub const hints = struct {
     pub const longitude_on_int = "integer coordinates are usually scaled (E6, E7): use v.range in your unit, e.g. v.range(-180_000_000, 180_000_000) for E6";
     /// `latLong` on a number field.
     pub const lat_long_on_number = "use two float fields with v.latitude and v.longitude";
+    /// `minLength(0)`, which every valid UTF-8 string passes.
+    pub const use_utf8 = "use v.utf8 to require valid UTF-8";
+    /// `digits` on an integer or a float field.
+    pub const number_field = "the field is already a number: use v.min, v.max or v.range";
+    /// `contains` and `notContains` on a list of strings, after the `each`
+    /// call (`searchItems`).
+    pub const search_items = "to search inside each item, or v.containsAll(.{ ... }) to require whole items";
+    pub const search_items_not = "to search inside each item, or v.containsNone(.{ ... }) to forbid whole items";
+    /// `contains` and `notContains` on a list of other items.
+    pub const require_items = "use v.containsAll(.{ ... }) to require list items";
+    pub const forbid_items = "use v.containsNone(.{ ... }) to forbid list items";
 
     /// A rule written on a list whose items it would accept.
     pub fn useEach(comptime rule: Rule) []const u8 {
         return "use v.each(v." ++ rule.call() ++ ")";
+    }
+
+    /// `contains` or `notContains` on a list of strings: the search inside
+    /// each item, or the list rule for whole items.
+    pub fn searchItems(comptime rule: Rule) []const u8 {
+        return useEach(rule) ++ " " ++ if (rule.kind == .contains) search_items else search_items_not;
+    }
+
+    /// `minLength`, `maxLength` or `length` on a slice of other items: the
+    /// list rules with the same counts.
+    pub fn itemCount(comptime rule: Rule) []const u8 {
+        return "for the number of items use " ++ switch (rule.kind) {
+            .min_length => "v.minItems(" ++ rule.params[0].text ++ ")",
+            .max_length => "v.maxItems(" ++ rule.params[0].text ++ ")",
+            .length => "v.minItems(" ++ rule.params[0].text ++ ") and v.maxItems(" ++ rule.params[1].text ++ ")",
+            else => @compileError("validator: internal: " ++ @tagName(rule.kind) ++ " counts no characters"),
+        };
+    }
+
+    /// `length(0, max)`: the rule without a lower bound.
+    pub fn useMaxLength(comptime max: usize) []const u8 {
+        return "use v.maxLength(" ++ renderArg(max) ++ ")";
     }
 
     /// A rule constructor used without a call (`.tags = v.each`): its call
@@ -1779,7 +1812,7 @@ pub const hints = struct {
 
 /// The files that define rules. Each rule pull request adds its file here, so
 /// that its `call_examples` reach the hints.
-const rule_files = [_]type{ @import("common.zig"), @import("numbers.zig"), @import("formats.zig"), @import("identifiers.zig"), @import("lists.zig"), @import("custom.zig") };
+const rule_files = [_]type{ @import("common.zig"), @import("numbers.zig"), @import("strings.zig"), @import("formats.zig"), @import("identifiers.zig"), @import("lists.zig"), @import("custom.zig") };
 
 /// The arguments the hints show in a call of the constructor `name` of type
 /// `F`: its `call_examples` entry, else `.{}` for an options struct, the
@@ -1810,29 +1843,6 @@ fn callExample(comptime name: []const u8) ?[]const u8 {
 /// only the other kinds with the public names. Each rule pull request deletes
 /// its lines; the list is empty once all 96 rules are exported.
 pub const pending_kinds = [_]Kind{
-    // PR 2a
-    .utf8,
-    .not_blank,
-    .ascii,
-    .printable_ascii,
-    .alphanumeric,
-    .alpha,
-    .digits,
-    .lowercase,
-    .uppercase,
-    .multibyte,
-    .full_width,
-    .half_width,
-    .variable_width,
-    // PR 2b
-    .min_length,
-    .max_length,
-    .length,
-    .min_bytes,
-    .max_bytes,
-    .contains,
-    .not_contains,
-    .strong_password,
     // PR 4a
     .date,
     .rfc3339,

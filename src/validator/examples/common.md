@@ -370,7 +370,9 @@ A string has at least one byte; a list has at least one item.
 
 [v.minItems(1)](lists.md#vminitemsmin) fails an empty list too, with the code
 `validation.min_items`. The two overlap and differ in the code; prefer
-`v.notEmpty`.
+`v.notEmpty`. For text a user must fill in, use
+[v.notBlank](strings.md#vnotblank); [v.minBytes(1)](strings.md#vminbytesmin)
+fails an empty string too, with `validation.min_bytes`.
 
 Compile errors (`<Type>.field_rules.<field>` is the entry of your struct):
 

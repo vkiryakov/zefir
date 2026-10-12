@@ -59,7 +59,8 @@ A list has at least `min` items.
   and `??T` of these. A fixed-length array `[N]T` is a compile error: the rule
   would always pass or always fail. A string is not a list: on a string field the
   rule is a compile error, and its hint names the rules for the length of a
-  string, which arrive with the string rules.
+  string, [v.minLength](strings.md#vminlengthmin) and
+  [v.minBytes](strings.md#vminbytesmin).
 - **Parameters:** `min`, a `usize` known at compile time, at least 1.
 - **Passes when:** `value.len >= min`. It counts items, `null` items included,
   and never looks at them.
@@ -111,7 +112,8 @@ A list has at most `max` items.
   and `??T` of these. A fixed-length array `[N]T` is a compile error: the rule
   would always pass or always fail. A string is not a list: on a string field the
   rule is a compile error, and its hint names the rules for the length of a
-  string, which arrive with the string rules.
+  string, [v.maxLength](strings.md#vmaxlengthmax) and
+  [v.maxBytes](strings.md#vmaxbytesmax).
 - **Parameters:** `max`, a `usize` known at compile time, at least 1. For an empty
   list use `v.empty`.
 - **Passes when:** `value.len <= max`. It counts items, `null` items included,
