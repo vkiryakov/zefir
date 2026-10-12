@@ -26,13 +26,15 @@ pub const Options = struct {
     /// The memory `init` takes for the queue in queued mode: `capacity`
     /// slots of `max_record_bytes` + 16 bytes rounded up to 128, and one
     /// batch of `batch_size` records with their ends. None in sync mode.
+    /// Saturates at the largest `usize`, which no allocator can give.
     pub fn queueBytes(o: Options) usize {
         const q = switch (o.mode) {
             .sync => return 0,
             .queued => |q| q,
         };
-        return @as(usize, q.capacity) * slotSize(o.max_record_bytes) + 1 +
-            @as(usize, q.batch_size) * (o.max_record_bytes + @sizeOf(usize));
+        const slot = std.mem.alignForward(u64, @as(u64, o.max_record_bytes) + 16, 128);
+        const total = @as(u64, q.capacity) *| slot +| 1 +| @as(u64, q.batch_size) *| (@as(u64, o.max_record_bytes) + @sizeOf(usize));
+        return std.math.cast(usize, total) orelse std.math.maxInt(usize);
     }
 };
 
@@ -179,6 +181,9 @@ test "queued mode: defaults and the memory init takes for it" {
     try std.testing.expectEqual(@as(usize, 4096 * 4224 + 1 + 128 * (4096 + @sizeOf(usize))), o.queueBytes());
     try std.testing.expectEqual(@as(usize, 0), (Options{}).queueBytes());
     try std.testing.expectEqual(@as(usize, 384), slotSize(300));
+    // Sizes no machine has saturate instead of overflowing.
+    const huge: Options = .{ .mode = .{ .queued = .{ .capacity = 1 << 31, .batch_size = std.math.maxInt(u32) } }, .max_record_bytes = std.math.maxInt(u32) };
+    try std.testing.expectEqual(@as(usize, std.math.maxInt(usize)), huge.queueBytes());
 }
 
 test "a level's own source mode outranks the default" {

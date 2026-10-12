@@ -44,7 +44,9 @@ space_waiters: std.atomic.Value(u32) = .init(0),
 pub fn init(gpa: std.mem.Allocator, capacity: u32, max_record_bytes: u32, io: std.Io) error{OutOfMemory}!Queue {
     std.debug.assert(capacity >= 2 and std.math.isPowerOfTwo(capacity));
     const slot_size = options.slotSize(max_record_bytes);
-    const slots = try gpa.alignedAlloc(u8, .fromByteUnits(std.atomic.cache_line), @as(usize, capacity) * slot_size);
+    // Too much for a 32-bit address space is too much memory.
+    const bytes = std.math.mul(usize, capacity, slot_size) catch return error.OutOfMemory;
+    const slots = try gpa.alignedAlloc(u8, .fromByteUnits(std.atomic.cache_line), bytes);
     var q: Queue = .{ .slots = slots, .slot_size = slot_size, .mask = capacity - 1, .io = io };
     for (0..capacity) |i| q.seq(i).* = .init(i);
     return q;

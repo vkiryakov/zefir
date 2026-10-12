@@ -229,7 +229,8 @@ fn startQueue(engine: *Engine, q: options.Queued, max_record_bytes: u32) InitErr
     const gpa = engine.gpa;
     engine.queue = try Queue.init(gpa, q.capacity, max_record_bytes, engine.own.io());
     errdefer engine.queue.?.deinit(gpa);
-    engine.batch = try gpa.alloc(u8, 1 + @as(usize, q.batch_size) * max_record_bytes);
+    const batch_bytes = std.math.mul(usize, q.batch_size, max_record_bytes) catch return error.OutOfMemory;
+    engine.batch = try gpa.alloc(u8, std.math.add(usize, batch_bytes, 1) catch return error.OutOfMemory);
     errdefer gpa.free(engine.batch);
     engine.batch_ends = try gpa.alloc(usize, q.batch_size);
     errdefer gpa.free(engine.batch_ends);
