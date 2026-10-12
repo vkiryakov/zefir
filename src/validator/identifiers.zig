@@ -1,12 +1,13 @@
 //! Identifier rules: `uuid`, `mongoId`, `firebasePushId`, `hash`,
 //! `creditCard`, `isin`, `bic`, `iban`, `isbn`, `isbn10`, `isbn13`, `issn`,
-//! `ean` and `isrc`, each with its predicate (`v.isUuid`, ..., `v.isIsrc`).
-//! The rules take strings only and read bytes, never code points: a byte
-//! outside a rule's ASCII alphabet, invalid UTF-8 included, fails under the
-//! rule's own code, and `""` fails every rule. Nothing is trimmed,
-//! case-folded or normalized: a rule accepts the canonical form of its
-//! identifier only. A predicate takes any input, allocates nothing and reads
-//! each byte a bounded number of times.
+//! `ean`, `isrc`, `btcAddress` and `ethereumAddress`, each with its
+//! predicate (`v.isUuid`, ..., `v.isEthereumAddress`). The rules take
+//! strings only and read bytes, never code points: a byte outside a rule's
+//! ASCII alphabet, invalid UTF-8 included, fails under the rule's own code,
+//! and `""` fails every rule. Nothing is trimmed, case-folded or normalized:
+//! a rule accepts the canonical form of its identifier only, and no rule
+//! looks a country, an issuer or a bank up in a table. A predicate takes any
+//! input, allocates nothing and reads each byte a bounded number of times.
 const std = @import("std");
 const core = @import("core.zig");
 const Rule = core.Rule;
@@ -366,6 +367,197 @@ pub fn isIsrc(s: []const u8) bool {
     return true;
 }
 
+// ------------------------------------------------------------------ btcAddress, ethereumAddress
+
+/// The networks of `v.btcAddress` and `v.isBtcAddress`. `.testnet` also
+/// takes the Base58 addresses of signet and regtest, which share its version
+/// bytes, and signet's segwit addresses, which share its `tb1` prefix;
+/// regtest's `bcrt1` addresses pass no network. `.any` is mainnet or
+/// testnet.
+pub const BtcNetwork = enum { mainnet, testnet, any };
+
+/// A Bitcoin address of `network`, with its checksum verified, in one of
+/// two forms. A segwit address (BIP-173, BIP-350), in lower case only: 10 to
+/// 90 bytes, `bc1` on mainnet or `tb1` on testnet, then Bech32 symbols: the
+/// witness version 0 to 16, the witness program and a checksum, Bech32 for
+/// version 0 and Bech32m for the others; the program regroups into 2 to 40
+/// bytes, 20 or 32 for version 0, with at most 4 padding bits, all zero. Or
+/// a Base58Check address (P2PKH, P2SH): 1 to 35 bytes of the Base58
+/// alphabet that decode to exactly 25 bytes, whose last 4 bytes are the
+/// first 4 of SHA-256(SHA-256(the first 21)), and whose first byte, the
+/// version, is 0x00 or 0x05 on mainnet and 0x6f or 0xc4 on testnet.
+/// `{network}` is the tag's name; `.mainnet` and `.any` share the message
+/// "must be a valid Bitcoin address".
+pub fn btcAddress(comptime network: BtcNetwork) Rule {
+    return core.define(.btc_address, .{
+        .message = switch (network) {
+            .mainnet, .any => "must be a valid Bitcoin address",
+            .testnet => "must be a valid Bitcoin testnet address",
+        },
+        .args = core.renderArg(network),
+        .params = &.{core.param("network", network)},
+        .fits = stringFits,
+        .eval = struct {
+            fn eval(value: anytype) Outcome {
+                return core.passIf(isBtcAddress(value.*, network));
+            }
+        }.eval,
+    });
+}
+
+/// `s` passes `v.btcAddress(network)`. The network may be known at run time
+/// only.
+pub fn isBtcAddress(s: []const u8, network: BtcNetwork) bool {
+    return isSegwitAddress(s, network) or isBase58Address(s, network);
+}
+
+const base58_alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+/// The value of each byte in Base58, or 0xff for a byte outside the alphabet.
+const base58_values: [256]u8 = blk: {
+    var values: [256]u8 = @splat(0xff);
+    for (base58_alphabet, 0..) |c, i| values[c] = i;
+    break :blk values;
+};
+
+/// The Base58Check form of `v.btcAddress`. The number the symbols spell is
+/// decoded into 25 bytes, big-endian; each leading `1` stands for one
+/// leading zero byte, so the decoded length is 25 exactly when the leading
+/// `1`s and the leading zero bytes are as many.
+fn isBase58Address(s: []const u8, network: BtcNetwork) bool {
+    if (s.len == 0 or s.len > 35) return false;
+    var bytes: [25]u8 = @splat(0);
+    var leading_ones: usize = 0;
+    var in_prefix = true;
+    for (s) |c| {
+        const digit = base58_values[c];
+        if (digit == 0xff) return false;
+        if (in_prefix and digit == 0) leading_ones += 1 else in_prefix = false;
+        // bytes = bytes * 58 + digit; a carry out of the first byte means
+        // more than 25 bytes.
+        var carry: u32 = digit;
+        var i: usize = bytes.len;
+        while (i > 0) {
+            i -= 1;
+            carry += @as(u32, bytes[i]) * 58;
+            bytes[i] = @truncate(carry);
+            carry >>= 8;
+        }
+        if (carry != 0) return false;
+    }
+    var leading_zeros: usize = 0;
+    while (leading_zeros < bytes.len and bytes[leading_zeros] == 0) leading_zeros += 1;
+    if (leading_zeros != leading_ones) return false;
+    const Sha256 = std.crypto.hash.sha2.Sha256;
+    var first: [Sha256.digest_length]u8 = undefined;
+    var second: [Sha256.digest_length]u8 = undefined;
+    Sha256.hash(bytes[0..21], &first, .{});
+    Sha256.hash(&first, &second, .{});
+    if (!std.mem.eql(u8, second[0..4], bytes[21..25])) return false;
+    return switch (bytes[0]) {
+        0x00, 0x05 => network != .testnet,
+        0x6f, 0xc4 => network != .mainnet,
+        else => false,
+    };
+}
+
+const bech32_alphabet = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+
+/// The value of each byte in the lower-case Bech32 alphabet, or 0xff.
+const bech32_values: [256]u8 = blk: {
+    var values: [256]u8 = @splat(0xff);
+    for (bech32_alphabet, 0..) |c, i| values[c] = i;
+    break :blk values;
+};
+
+/// One step of the BIP-173 checksum over the 5-bit `value`.
+fn polymodStep(checksum: u32, value: u8) u32 {
+    const top = checksum >> 25;
+    var next = ((checksum & 0x1ffffff) << 5) ^ value;
+    const generators = [5]u32{ 0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3 };
+    inline for (generators, 0..) |generator, i| {
+        if ((top >> i) & 1 != 0) next ^= generator;
+    }
+    return next;
+}
+
+/// The segwit form of `v.btcAddress`. Bech32 has no `1`, so the separator
+/// is the `1` after the network's prefix, `bc` or `tb`; the checksum covers
+/// the prefix too.
+fn isSegwitAddress(s: []const u8, network: BtcNetwork) bool {
+    if (s.len < 10 or s.len > 90) return false;
+    const prefix: []const u8 = if (std.mem.startsWith(u8, s, "bc1") and network != .testnet)
+        "bc"
+    else if (std.mem.startsWith(u8, s, "tb1") and network != .mainnet)
+        "tb"
+    else
+        return false;
+    const data = s[3..];
+    var checksum: u32 = 1;
+    for (prefix) |c| checksum = polymodStep(checksum, c >> 5);
+    checksum = polymodStep(checksum, 0);
+    for (prefix) |c| checksum = polymodStep(checksum, c & 31);
+    for (data) |c| {
+        const value = bech32_values[c];
+        if (value == 0xff) return false;
+        checksum = polymodStep(checksum, value);
+    }
+    const version = bech32_values[data[0]];
+    if (version > 16) return false;
+    if (checksum != @as(u32, if (version == 0) 1 else 0x2bc830a3)) return false;
+    // The program: the symbols between the version and the 6 of the
+    // checksum, regrouped from 5 bits into bytes.
+    var pending: u32 = 0;
+    var bits: u5 = 0;
+    var bytes: usize = 0;
+    for (data[1 .. data.len - 6]) |c| {
+        pending = ((pending << 5) | bech32_values[c]) & 0xfff;
+        bits += 5;
+        if (bits >= 8) {
+            bits -= 8;
+            bytes += 1;
+        }
+    }
+    if (bits > 4 or pending & ((@as(u32, 1) << bits) - 1) != 0) return false;
+    if (bytes < 2 or bytes > 40) return false;
+    return version != 0 or bytes == 20 or bytes == 32;
+}
+
+/// An Ethereum address: `0x` (with a lower-case `x`) and 40 hex digits.
+/// Digits whose letters are all lower case or all upper case carry no
+/// checksum and pass; in mixed case they follow the EIP-55 checksum: a
+/// letter is upper case exactly when the matching hex digit of the
+/// Keccak-256 hash of the 40 digits in lower case is 8 or more. Keccak-256
+/// is Ethereum's hash, not SHA3-256.
+pub const ethereumAddress: Rule = predicateRule(.ethereum_address, "must be a valid Ethereum address", isEthereumAddress);
+
+/// `s` passes `v.ethereumAddress`.
+pub fn isEthereumAddress(s: []const u8) bool {
+    if (s.len != 42 or s[0] != '0' or s[1] != 'x') return false;
+    const digits = s[2..];
+    var has_lower = false;
+    var has_upper = false;
+    for (digits) |c| {
+        switch (c) {
+            '0'...'9' => {},
+            'a'...'f' => has_lower = true,
+            'A'...'F' => has_upper = true,
+            else => return false,
+        }
+    }
+    if (!has_lower or !has_upper) return true;
+    var lower: [40]u8 = undefined;
+    for (digits, &lower) |c, *l| l.* = std.ascii.toLower(c);
+    var digest: [std.crypto.hash.sha3.Keccak256.digest_length]u8 = undefined;
+    std.crypto.hash.sha3.Keccak256.hash(&lower, &digest, .{});
+    for (digits, 0..) |c, i| {
+        if (std.ascii.isDigit(c)) continue;
+        const nibble = if (i % 2 == 0) digest[i / 2] >> 4 else digest[i / 2] & 0x0f;
+        if ((nibble >= 8) != std.ascii.isUpper(c)) return false;
+    }
+    return true;
+}
+
 // ------------------------------------------------------------------ tests
 
 const expectOutcome = core.expectOutcome;
@@ -410,6 +602,7 @@ test "the rules without parameters have their documented codes and messages and 
         .{ issn, core.Kind.issn, "validation.issn", "must be a valid ISSN" },
         .{ ean, core.Kind.ean, "validation.ean", "must be a valid EAN" },
         .{ isrc, core.Kind.isrc, "validation.isrc", "must be a valid ISRC" },
+        .{ ethereumAddress, core.Kind.ethereum_address, "validation.ethereum_address", "must be a valid Ethereum address" },
     };
     inline for (rules) |row| {
         try t.expectEqual(row[1], row[0].kind);
@@ -441,6 +634,25 @@ test "hash names its algorithm in the message and in the placeholder {algorithm}
     inline for (comptime std.enums.values(HashAlgorithm)) |algorithm| {
         try t.expectEqualStrings("must be a valid " ++ @tagName(algorithm) ++ " hash", hash(algorithm).message);
     }
+}
+
+test "btcAddress names its network in the placeholder {network}; testnet has its own message" {
+    const t = std.testing;
+    const main = btcAddress(.mainnet);
+    try t.expectEqual(core.Kind.btc_address, main.kind);
+    try t.expectEqualStrings("validation.btc_address", main.code);
+    try t.expectEqualStrings("must be a valid Bitcoin address", main.message);
+    try t.expectEqualStrings(".mainnet", main.args.?);
+    try t.expectEqual(1, main.params.len);
+    try t.expectEqualStrings("network", main.params[0].name);
+    try t.expectEqualStrings("mainnet", main.params[0].text);
+    try t.expect(main.params[0].placeholder);
+    try t.expectEqual(null, main.precondition);
+    try t.expectEqualStrings("must be a valid Bitcoin testnet address", btcAddress(.testnet).message);
+    try t.expectEqualStrings("must be a valid Bitcoin address", btcAddress(.any).message);
+    try t.expectEqualStrings("any", btcAddress(.any).params[0].text);
+    try t.expectEqualStrings("btcAddress(.any)", comptime btcAddress(.any).call());
+    try t.expectEqualStrings("btc_address(.testnet)", comptime btcAddress(.testnet).label());
 }
 
 test "the rules take strings only: [N]u8 and lists of strings get hints, other types none" {
@@ -489,6 +701,13 @@ test "the rules take strings only: [N]u8 and lists of strings get hints, other t
     try expect(head ++ "isrc expects a string, field is u64", comptime typeText(isrc, u64).?);
     try expect(head ++ "isrc expects a string, field is [12]u8" ++ u8_array, comptime typeText(isrc, [12]u8).?);
     try expect(head ++ "isrc expects a string, field is []const []const u8; use v.each(v.isrc)", comptime typeText(isrc, []const []const u8).?);
+    try expect(head ++ "btc_address expects a string, field is u160", comptime typeText(btcAddress(.mainnet), u160).?);
+    try expect(head ++ "btc_address expects a string, field is [25]u8" ++ u8_array, comptime typeText(btcAddress(.mainnet), [25]u8).?);
+    try expect(head ++ "btc_address expects a string, field is []const []const u8; use v.each(v.btcAddress(.mainnet))", comptime typeText(btcAddress(.mainnet), []const []const u8).?);
+    try expect(head ++ "btc_address expects a string, field is []const []const u8; use v.each(v.btcAddress(.any))", comptime typeText(btcAddress(.any), []const []const u8).?);
+    try expect(head ++ "ethereum_address expects a string, field is u160", comptime typeText(ethereumAddress, u160).?);
+    try expect(head ++ "ethereum_address expects a string, field is [20]u8" ++ u8_array, comptime typeText(ethereumAddress, [20]u8).?);
+    try expect(head ++ "ethereum_address expects a string, field is []const []const u8; use v.each(v.ethereumAddress)", comptime typeText(ethereumAddress, []const []const u8).?);
     try expect(
         head ++ "uuid expects a string, field is []volatile u8; volatile, allowzero and under-aligned slices are neither strings nor lists",
         comptime typeText(uuid, []volatile u8).?,
@@ -499,10 +718,12 @@ test "the rules take strings only: [N]u8 and lists of strings get hints, other t
     }
 }
 
-test "an uncalled hash shows the call with .sha256; isHash in place of a rule names that call" {
+test "an uncalled hash or btcAddress shows a call; their predicates in place of a rule name that call" {
     const expect = std.testing.expectEqualStrings;
     try expect("hash must be called, e.g. v.hash(.sha256)", comptime core.hints.mustBeCalled("hash", @TypeOf(hash)));
+    try expect("btcAddress must be called, e.g. v.btcAddress(.mainnet)", comptime core.hints.mustBeCalled("btcAddress", @TypeOf(btcAddress)));
     try expect("expected a rule, got the predicate isHash; use the rule v.hash(.sha256)", comptime core.hints.predicateAsRule("isHash", "hash", @TypeOf(hash)));
+    try expect("expected a rule, got the predicate isBtcAddress; use the rule v.btcAddress(.mainnet)", comptime core.hints.predicateAsRule("isBtcAddress", "btcAddress", @TypeOf(btcAddress)));
     try expect("expected a rule, got the predicate isUuid; use the rule v.uuid", comptime core.hints.predicateAsRule("isUuid", "uuid", Rule));
 }
 
@@ -799,4 +1020,123 @@ test "isrc: country, registrant, year and designation without hyphens; no check 
         "USRC1X607839",
         "USRC1760783A",
     });
+}
+
+/// `isBtcAddress` gives `s` these verdicts on mainnet and on testnet, and
+/// their `or` on `.any`.
+fn expectBtc(s: []const u8, mainnet: bool, testnet: bool) !void {
+    const got = [3]bool{ isBtcAddress(s, .mainnet), isBtcAddress(s, .testnet), isBtcAddress(s, .any) };
+    const want = [3]bool{ mainnet, testnet, mainnet or testnet };
+    if (!std.mem.eql(bool, &got, &want)) {
+        std.debug.print("\"{f}\": mainnet, testnet, any expected {any}, got {any}\n", .{ std.zig.fmtString(s), want, got });
+        return error.TestUnexpectedResult;
+    }
+}
+
+test "btcAddress: segwit and Base58Check addresses with valid checksums, by network" {
+    try expectBtc("1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2", true, false);
+    try expectBtc("3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy", true, false);
+    try expectBtc("1111111111111111111114oLvT2", true, false);
+    try expectBtc("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", true, false);
+    try expectBtc("bc1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3qccfmv3", true, false);
+    try expectBtc("bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqzk5jj0", true, false);
+    try expectBtc("bc1z2rksukkjr8", true, false);
+    try expectBtc("tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx", false, true);
+    try expectBtc("2NC2hEhe28ULKAJkW5MjZ3jtTMJdvXmByvK", false, true);
+    try expectBtc("n4YNbYuFdPwFrxSP8sjHFbAhUbLMUiY9jE", false, true);
+    try expectBtc("mzK2FFDEhxqHcmrJw1ysqFkVyhUULo45hZ", false, true);
+    // A wrong checksum, the wrong Bech32 variant for the version, a symbol
+    // outside the alphabet, no data, upper case, regtest, a trailing space.
+    for ([_][]const u8{
+        "",
+        "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t5",
+        "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN3",
+        "BC1QW508D6QEJXTDG4Y5R3ZARVARY0C5XW7KV8F3T4",
+        "bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqh2y7hd",
+        "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kemeawh",
+        "bc1p38j9r5y49hruaue7wxjce0updqjuyyx0kh56v8s25huc6995vvpql3jow4",
+        "bc1gmk9yu",
+        "bcrt1qdavt4j2sd7dlhqsavtnfxvzppw6k7qy97tmnu9",
+        "1FsSia9rv4NeEwvJ2GvXrX7LyxYspbN2mo ",
+        "11111111111111111111111111111111111",
+    }) |s| try expectBtc(s, false, false);
+}
+
+test "btcAddress: the BIP-350 test vectors, in lower case only" {
+    // The valid vectors in lower case; BIP-350 also lists two of them in
+    // upper case, which fail here.
+    for ([_][]const u8{
+        "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4",
+        "bc1pw508d6qejxtdg4y5r3zarvary0c5xw7kw508d6qejxtdg4y5r3zarvary0c5xw7kt5nd6y",
+        "bc1sw50qgdz25j",
+        "bc1zw508d6qejxtdg4y5r3zarvaryvaxxpcs",
+        "bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqzk5jj0",
+    }) |s| try expectBtc(s, true, false);
+    for ([_][]const u8{
+        "tb1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3q0sl5k7",
+        "tb1qqqqqp399et2xygdj5xreqhjjvcmzhxw4aywxecjdzew6hylgvsesrxh6hy",
+        "tb1pqqqqp399et2xygdj5xreqhjjvcmzhxw4aywxecjdzew6hylgvsesf3hn0c",
+    }) |s| try expectBtc(s, false, true);
+    for ([_][]const u8{
+        "BC1QW508D6QEJXTDG4Y5R3ZARVARY0C5XW7KV8F3T4",
+        "BC1SW50QGDZ25J",
+        "tc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vq5zuyut",
+        "bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqh2y7hd",
+        "tb1z0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqglt7rf",
+        "BC1S0XLXVLHEMJA6C4DQV22UAPCTQUPFHLXM9H8Z3K2E72Q4K9HCZ7VQ54WELL",
+        "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kemeawh",
+        "tb1q0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vq24jc47",
+        "bc1p38j9r5y49hruaue7wxjce0updqjuyyx0kh56v8s25huc6995vvpql3jow4",
+        "BC130XLXVLHEMJA6C4DQV22UAPCTQUPFHLXM9H8Z3K2E72Q4K9HCZ7VQ7ZWS8R",
+        "bc1pw5dgrnzv",
+        "bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7v8n0nx0muaewav253zgeav",
+        "BC1QR508D6QEJXTDG4Y5R3ZARVARYV98GJ9P",
+        "tb1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vq47Zagq",
+        "bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7v07qwwzcrf",
+        "tb1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vpggkg4j",
+        "bc1gmk9yu",
+    }) |s| try expectBtc(s, false, false);
+}
+
+test "ethereumAddress: 0x and 40 hex digits; the EIP-55 checksum when the letters mix cases" {
+    try expectPredicate(isEthereumAddress, &.{
+        "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
+        "0xfB6916095ca1df60bB79Ce92cE3Ea74c37c5d359",
+        "0xdbF03B407c01E7cD3CBea99509d93f8DDDC8C6FB",
+        "0xD1220A0cf47c7B9Be7A2E6BA89F429762e7b9aDb",
+        "0x52908400098527886E0F7030069857D2E4169EE7",
+        "0xde709f2102306220921060314715629080e2fb77",
+        "0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed",
+        "0x5AAEB6053F3E94C9B9A09F33669435E7EF1BEAED",
+        "0x0000000000000000000000000000000000000000",
+    }, &.{
+        "",
+        "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAeD",
+        "0X5aaeb6053f3e94c9b9a09f33669435e7ef1beaed",
+        "5aaeb6053f3e94c9b9a09f33669435e7ef1beaed",
+        "0x5aaeb6053f3e94c9b9a09f33669435e7ef1beae",
+        "0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaedd",
+        "0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaeg",
+        " 0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed",
+    });
+}
+
+test "ethereumAddress: flipping the case of any one letter of a checksummed address fails" {
+    var flips: usize = 0;
+    for ([_][]const u8{
+        "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
+        "0xfB6916095ca1df60bB79Ce92cE3Ea74c37c5d359",
+        "0xdbF03B407c01E7cD3CBea99509d93f8DDDC8C6FB",
+        "0xD1220A0cf47c7B9Be7A2E6BA89F429762e7b9aDb",
+    }) |address| {
+        var buf: [42]u8 = undefined;
+        for (2..42) |i| {
+            if (!std.ascii.isAlphabetic(address[i])) continue;
+            @memcpy(&buf, address);
+            buf[i] = if (std.ascii.isUpper(address[i])) std.ascii.toLower(address[i]) else std.ascii.toUpper(address[i]);
+            try std.testing.expect(!isEthereumAddress(&buf));
+            flips += 1;
+        }
+    }
+    try std.testing.expectEqual(74, flips);
 }

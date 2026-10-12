@@ -1695,9 +1695,6 @@ pub const pending_kinds = [_]Kind{
     // PR 4b
     .min_date,
     .max_date,
-    // PR 5b
-    .btc_address,
-    .ethereum_address,
     // PR 6a
     .json,
     .jwt,

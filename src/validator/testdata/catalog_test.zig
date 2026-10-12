@@ -352,6 +352,34 @@ test "iban is a rule value with code validation.iban and message \"must be a val
     try expectNoViolation([]const u8, v.iban, "DE89370400440532013000");
 }
 
+test "btcAddress is a rule constructor with code validation.btc_address and message \"must be a valid Bitcoin address\", or \"must be a valid Bitcoin testnet address\" for .testnet; placeholder {network}; no precondition" {
+    try testing.expect(@hasDecl(v, "btcAddress"));
+    try testing.expect(@typeInfo(@TypeOf(v.btcAddress)).@"fn".return_type == v.Rule);
+    const networks = [_][]const u8{ "mainnet", "testnet", "any" };
+    try testing.expect(@typeInfo(v.BtcNetwork).@"enum".mode == .exhaustive);
+    try testing.expectEqual(networks.len, comptime std.meta.fieldNames(v.BtcNetwork).len);
+    inline for (networks, comptime std.meta.fieldNames(v.BtcNetwork)) |name, tag| try testing.expectEqualStrings(name, tag);
+    try expectRule(v.btcAddress(.mainnet), "validation.btc_address", "must be a valid Bitcoin address", "must be a valid Bitcoin address");
+    try expectRule(v.btcAddress(.any), "validation.btc_address", "must be a valid Bitcoin address", "must be a valid Bitcoin address");
+    try expectRule(v.btcAddress(.testnet), "validation.btc_address", "must be a valid Bitcoin testnet address", "must be a valid Bitcoin testnet address");
+    try expectPlaceholder(v.btcAddress(.mainnet), "{network}", "mainnet");
+    try expectPlaceholder(v.btcAddress(.testnet), "{network}", "testnet");
+    try expectPlaceholder(v.btcAddress(.any), "{network}", "any");
+    try expectViolation([]const u8, v.btcAddress(.mainnet), "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx", "validation.btc_address", "must be a valid Bitcoin address", "x");
+    try expectViolation([]const u8, v.btcAddress(.testnet), "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", "validation.btc_address", "must be a valid Bitcoin testnet address", "x");
+    try expectViolation([]const u8, v.btcAddress(.any).withMessage("another message"), "\xff", "validation.btc_address", "another message", "x");
+    try expectNoViolation([]const u8, v.btcAddress(.any), "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4");
+}
+
+test "ethereumAddress is a rule value with code validation.ethereum_address and message \"must be a valid Ethereum address\"; no precondition" {
+    try testing.expect(@hasDecl(v, "ethereumAddress"));
+    try testing.expect(@TypeOf(v.ethereumAddress) == v.Rule);
+    try expectRule(v.ethereumAddress, "validation.ethereum_address", "must be a valid Ethereum address", "must be a valid Ethereum address");
+    try expectViolation([]const u8, v.ethereumAddress, "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAeD", "validation.ethereum_address", "must be a valid Ethereum address", "x");
+    try expectViolation([]const u8, v.ethereumAddress.withMessage("another message"), "\xff", "validation.ethereum_address", "another message", "x");
+    try expectNoViolation([]const u8, v.ethereumAddress, "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed");
+}
+
 test "minItems is a rule constructor with code validation.min_items and message \"must have at least {min} items\", or \"must have at least 1 item\" when min = 1; placeholder {min}" {
     try testing.expect(@hasDecl(v, "minItems"));
     try testing.expect(@typeInfo(@TypeOf(v.minItems)).@"fn".return_type == v.Rule);
@@ -516,8 +544,8 @@ test "finite has no precondition: nan, inf and -inf on a float field fail its ow
     }
 }
 
-test "the module exports exactly its 58 public names, and Rule.withMessage" {
-    const names = [_][]const u8{ "Violation", "Rule", "Report", "max_code_bytes", "max_message_bytes", "max_report_violations", "check", "checkAll", "assertRules", "fail", "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "uuid", "mongoId", "firebasePushId", "hash", "creditCard", "isbn", "isbn10", "isbn13", "issn", "ean", "isin", "isrc", "bic", "iban", "isUuid", "isMongoId", "isFirebasePushId", "isHash", "isCreditCard", "isIsbn", "isIsbn10", "isIsbn13", "isIssn", "isEan", "isIsin", "isIsrc", "isBic", "isIban", "HashAlgorithm", "minItems", "maxItems", "each", "custom" };
+test "the module exports exactly its 63 public names, and Rule.withMessage" {
+    const names = [_][]const u8{ "Violation", "Rule", "Report", "max_code_bytes", "max_message_bytes", "max_report_violations", "check", "checkAll", "assertRules", "fail", "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "uuid", "mongoId", "firebasePushId", "hash", "creditCard", "isbn", "isbn10", "isbn13", "issn", "ean", "isin", "isrc", "bic", "iban", "btcAddress", "ethereumAddress", "isUuid", "isMongoId", "isFirebasePushId", "isHash", "isCreditCard", "isIsbn", "isIsbn10", "isIsbn13", "isIssn", "isEan", "isIsin", "isIsrc", "isBic", "isIban", "isBtcAddress", "isEthereumAddress", "HashAlgorithm", "BtcNetwork", "minItems", "maxItems", "each", "custom" };
     inline for (names) |name| try testing.expect(@hasDecl(v, name));
     try testing.expectEqual(names.len, comptime std.meta.declarations(v).len);
     try testing.expect(@hasDecl(v.Rule, "withMessage"));
@@ -525,7 +553,7 @@ test "the module exports exactly its 58 public names, and Rule.withMessage" {
 
 test "every rule the module exports has a catalog test" {
     @setEvalBranchQuota(100_000);
-    const tested = [_][]const u8{ "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "uuid", "mongoId", "firebasePushId", "hash", "creditCard", "isbn", "isbn10", "isbn13", "issn", "ean", "isin", "isrc", "bic", "iban", "minItems", "maxItems", "each", "custom" };
+    const tested = [_][]const u8{ "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "uuid", "mongoId", "firebasePushId", "hash", "creditCard", "isbn", "isbn10", "isbn13", "issn", "ean", "isin", "isrc", "bic", "iban", "btcAddress", "ethereumAddress", "minItems", "maxItems", "each", "custom" };
     inline for (comptime std.meta.declarations(v)) |name| {
         const T = @TypeOf(@field(v, name));
         if (comptime T == v.Rule or (@typeInfo(T) == .@"fn" and @typeInfo(T).@"fn".return_type == v.Rule)) {
@@ -542,7 +570,7 @@ test "every rule the module exports has a catalog test" {
 
 test "the module exports exactly the catalog predicates of the shipped rules" {
     @setEvalBranchQuota(100_000);
-    const predicates = [_][]const u8{ "isUuid", "isMongoId", "isFirebasePushId", "isHash", "isCreditCard", "isIsbn", "isIsbn10", "isIsbn13", "isIssn", "isEan", "isIsin", "isIsrc", "isBic", "isIban" };
+    const predicates = [_][]const u8{ "isUuid", "isMongoId", "isFirebasePushId", "isHash", "isCreditCard", "isIsbn", "isIsbn10", "isIsbn13", "isIssn", "isEan", "isIsin", "isIsrc", "isBic", "isIban", "isBtcAddress", "isEthereumAddress" };
     comptime var exported: usize = 0;
     inline for (comptime std.meta.declarations(v)) |name| {
         if (comptime name.len > 2 and std.mem.startsWith(u8, name, "is") and std.ascii.isUpper(name[2])) {

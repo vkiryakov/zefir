@@ -40,6 +40,10 @@ const cases = .{
     Case(v.issn, "0317-8471", "03178471", "validation.issn", "must be a valid ISSN"),
     Case(v.ean, "4006381333931", "4006381333932", "validation.ean", "must be a valid EAN"),
     Case(v.isrc, "USRC17607839", "US-RC1-76-07839", "validation.isrc", "must be a valid ISRC"),
+    Case(v.btcAddress(.mainnet), "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx", "validation.btc_address", "must be a valid Bitcoin address"),
+    Case(v.btcAddress(.testnet), "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx", "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", "validation.btc_address", "must be a valid Bitcoin testnet address"),
+    Case(v.btcAddress(.any), "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2", "bcrt1qdavt4j2sd7dlhqsavtnfxvzppw6k7qy97tmnu9", "validation.btc_address", "must be a valid Bitcoin address"),
+    Case(v.ethereumAddress, "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed", "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAeD", "validation.ethereum_address", "must be a valid Ethereum address"),
 };
 
 test "every string type: []const u8, []u8, [:0]const u8, [:0]u8" {
@@ -109,12 +113,204 @@ test "hash shows its algorithm through {algorithm}" {
     }
 }
 
-test "the selector of isHash may be known at run time only" {
+test "btcAddress shows its network through {network}" {
+    inline for (comptime std.enums.values(v.BtcNetwork)) |network| {
+        const rule = comptime v.btcAddress(network).withMessage("must be a {network} Bitcoin address");
+        try h.expectRule(rule, "validation.btc_address", "must be a " ++ @tagName(network) ++ " Bitcoin address");
+        try h.expectFail(S, rule, "", "validation.btc_address", "must be a " ++ @tagName(network) ++ " Bitcoin address");
+    }
+}
+
+test "the selectors of isHash and isBtcAddress may be known at run time only" {
     var algorithm: v.HashAlgorithm = .md5;
     _ = &algorithm;
     try testing.expect(v.isHash("d41d8cd98f00b204e9800998ecf8427e", algorithm));
     algorithm = .sha1;
     try testing.expect(!v.isHash("d41d8cd98f00b204e9800998ecf8427e", algorithm));
+    var network: v.BtcNetwork = .testnet;
+    _ = &network;
+    try testing.expect(v.isBtcAddress("tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx", network));
+    network = .mainnet;
+    try testing.expect(!v.isBtcAddress("tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx", network));
+}
+
+test "btcAddress: the network selects the addresses; .any takes both" {
+    inline for (.{ "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", "3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy" }) |main| {
+        try h.expectPass(S, v.btcAddress(.mainnet), main);
+        try h.expectPass(S, v.btcAddress(.any), main);
+        try h.expectFail(S, v.btcAddress(.testnet), main, "validation.btc_address", "must be a valid Bitcoin testnet address");
+    }
+    inline for (.{ "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx", "2NC2hEhe28ULKAJkW5MjZ3jtTMJdvXmByvK" }) |testnet| {
+        try h.expectPass(S, v.btcAddress(.testnet), testnet);
+        try h.expectPass(S, v.btcAddress(.any), testnet);
+        try h.expectFail(S, v.btcAddress(.mainnet), testnet, "validation.btc_address", "must be a valid Bitcoin address");
+    }
+}
+
+/// Mainnet addresses of the Bitcoin Core test list.
+const core_mainnet = [_]S{
+    "1FsSia9rv4NeEwvJ2GvXrX7LyxYspbN2mo",
+    "36j4NfKv6Akva9amjWrLG6MuSQym1GuEmm",
+    "bc1qvyq0cc6rahyvsazfdje0twl7ez82ndmuac2lhv",
+    "bc1qyucykdlhp62tezs0hagqury402qwhk589q80tqs5myh3rxq34nwqhkdhv7",
+    "bc1p83n3au0rjylefxq2nc2xh2y4jzz4pm6zxj4mw5pagdjjr2a9f36s6jjnnu",
+    "bc1z2rksukkjr8",
+    "1FjL87pn8ky6Vbavd1ZHeChRXtoxwRGCRd",
+    "3BZECeAH8gSKkjrTx8PwMrNQBLG18yHpvf",
+    "bc1qhxt04s5xnpy0kxw4x99n5hpdf5pmtzpqs52es2",
+    "bc1qgc9ljrvdf2e0zg9rmmq86xklqwfys7r6wptjlacdgrcdc7sa6ggqu4rrxf",
+    "bc1pve739yap4uxjvfk0jrey69078u0gasm2nwvv483ec6zkzulgw9xqu4w9fd",
+    "bc1zmjtqxkzs89",
+    "1G9A9j6W8TLuh6dEeVwWeyibK1Uc5MfVFV",
+    "33GA3ZXbw5o5HeUrBEaqkWXFYYZmdxGRRP",
+};
+
+/// Testnet, signet and regtest addresses of the Bitcoin Core test list that .testnet takes: regtest and signet share the testnet version bytes and signet the tb1 prefix.
+const core_testnet = [_]S{
+    "mzK2FFDEhxqHcmrJw1ysqFkVyhUULo45hZ",
+    "2NC2hEhe28ULKAJkW5MjZ3jtTMJdvXmByvK",
+    "mww4LvqtTMKvmeQvizPz2EQv26xTneWrbg",
+    "2N1r7aC69VHeE7yQJPDLi9T1PYq4wnwvjuT",
+    "n4fajahJrAuKbN7uNsKjLjQkz9Qn5ewJXQ",
+    "2MxFajLApXpYk4VodBSZSt7rw8y4ryABkfA",
+    "tb1qcrh3yqn4nlleplcez2yndq2ry8h9ncg3qh7n54",
+    "tb1quyl9ujpgwr2chdzdnnalen48sup245vdfnh2jxhsuq3yx80rrwlq5hqfe4",
+    "tb1p35n52jy6xkm4wd905tdy8qtagrn73kqdz73xe4zxpvq9t3fp50aqk3s6gz",
+    "tb1rgv5m6uvdk3kc7qsuz0c79v88ycr5w4wa",
+    "tb1q3vya2h5435jkugq2few7dmktlrwq4ejmfaw7kr",
+    "tb1qxkhrl2s6ttrclckldruea0e8anhrehffl8xv7t0pdyrzm08v2hyqy408nf",
+    "tb1pae5um27ahn8n73pgexe3kcwlp8dhswpn684h2k2w6t9a7w3eq65qephd5y",
+    "tb1rx9n9g37az8mu236e5jpxdt0m67y4fuq8rhs0ss3djnm0kscfrwvq0ntlyg",
+    "n4YNbYuFdPwFrxSP8sjHFbAhUbLMUiY9jE",
+    "2NAeQVZayzVFAtgeC3iYJsjpjWDmsDph71A",
+    "mnCBpkNMJEJLehgdEkzSo2eioniyJMxLpZ",
+    "2N5sNHomeNJDZv67AcFx9ES7FBZY4jx9KDA",
+    "mfhE6jAUwjUDNZhaX1PAsDTKfneQF2Nshc",
+    "2MxNm1VHyVU4RuP3u1c1v5aQLk2dQjwy1Qk",
+    "tb1ql4k5ayv7p7w0t0ge7tpntgpkgw53g2payxkszr",
+    "tb1q9jx3x2qqdpempxrcfgyrkjd5fzeacaqj4ua7cs7fe2sfd2wdaueq5wn26y",
+    "tb1pdswckwd9ym5yf5eyzg8j4jjwnzla8y0tf9cp7aasfkek0u29sz9qfr00yf",
+    "tb1r0ecpfxg2udhtc556gqrpwwhk4sw3f0kc",
+    "tb1q6mwf89hnqhlu8txjgjfs4s7p93ugffn3k062ll",
+    "tb1qafrjalu4d73dql0czau9j6z422434kef235mzljf48ckd5xz3sys09jm97",
+    "tb1pwst9qszjrhuv2e7as0flcq9gm698v6gdxzz9e87p07s8rssdx3zqklm3vf",
+    "tb1r3ss76jtsuxe8c8c8lxsehnpak55ylrgr345pww076l536ahjr6jsydamx3",
+    "mwgS2HRbjyfYxFnR1nF9VKLvmdgMfFBmGq",
+    "2MwBVrJQ76BdaGD76CTmou8cZzQYLpe4NqU",
+    "mfnJ8tEkqKNFE5YaHTXFxyHk2mnDK2fvDh",
+    "2My83D67ir7K8PPzeT6mE2oth3ZwNTVRS9F",
+};
+
+/// Regtest segwit addresses of the Bitcoin Core test list: bcrt1 passes no network.
+const core_regtest = [_]S{
+    "bcrt1qdavt4j2sd7dlhqsavtnfxvzppw6k7qy97tmnu9",
+    "bcrt1qan8gntac7z7me2ejt4hpru42ad2f759fmy0m3ejvs98656znv7eqga4uhv",
+    "bcrt1pfwxjqvtt4tcxrtdluukfmy2dv7xd2qzdfy6kajv5nwn4yam3wxkq3553uh",
+    "bcrt1sx6p8njlx7h9mc2agz4yg82dzne23050ncq72cneeecez2pst8mahn8xecsf8g6hzx94420",
+    "bcrt1q65nhlm4hf2ptg3t264al57p7wjxj2c3s6kyt83",
+    "bcrt1qawvc90lpytw3z3k9etdx54l0exq5f5sqfzu5e45kjnl6slwayeeqx2dyac",
+    "bcrt1p39a4s4vdcw9kqa8w2t0rp7aj8kfxyw7mce5sk5d70x6wnnmpvt7skf2kxy",
+    "bcrt1s489d9fhmyel0vzfqsrmew4x7r80asuqesm5hgqacy35daflcyufh3j8cgdtflvt99ph05m",
+};
+
+/// Invalid addresses of the Bitcoin Core test list.
+const core_invalid = [_]S{
+    "",
+    "x",
+    "1GAdfviErV2Ew95FPtZyikz2qGP3gyCB6Hyu94sedAkPpA523m3fQwps9YKUZkKgQckGPKhRsFR",
+    "37G2kMDLpmWVhimxRdzwNfE8JFvWXnJYnVcXeeGrek2qumdJuK7XArcVVpRtLLjRra3t64BEPF2",
+    "giymtio7u7oqWtmC9YnvAEKkLF3JQpAdkEFkVJKYrVDfaLbhaDpX1ihfF2vZmya1i61fwLPC3YQ",
+    "8iVk9nLM3nYwRuwypjy9NK5rsuZH7BbrQRZ1pgcQmvMnjAgRXD",
+    "cPTVQ1hbo4qdoysf6Jx5GthqucNmdfqt6J2pZRFeXv8Ep7Kmjqud",
+    "cQbR2Ny85XFBzUMx3Ed6HsTLw2pVruSgPvt5AofnBUnhiv86gYeW",
+    "2UB3iG3VJbX2TRrMwm6ssWskgvU9VjFBYSqCzwqkrihCwo7mg4mtS4WuGZgxTKuxf5A3EcotYEymz",
+    "cQe12pqwPR6ExtZKfrKf1q4b3CTh1Qi7MwuvMvzs79nWXDvESfBJ",
+    "tc1qeul5g2xfkvdkrhcfmdursv73ad64jnkjl9c40f",
+    "bt1pq65rzej5glw3ra79gav6fqnx4haa0z257qr3mc8cggkefahmgvyseufhc0",
+    "tb13hty4qmumlwpp6chxjvcyzza4duqgtmxw3xhm3u9ahj4nyhtwz8eq7ynrj4",
+    "bcrt1r2qxpwuge",
+    "bc10uexgzna2dpfk0vjt35srz6a27ps6m0l89jweznt83n2sqn2fx4hvn9ym5af8wut34sfrqhk3",
+    "tb1qum6uh0pt4q253qaf520929737v63w5gf",
+    "bcrt1q888ryfgxpvl0k7vum8zpyar2u2sexvdhkf38ue37yknmqq0ycrwpl3w48y",
+    "bc1qdsuzmn04k2z8vryw8l4dj8m5ygqgnne5n",
+    "tb1qlj8es50nc8j8r8xshrjgzmw5azx89efghmw8ju6zcqla0g6xcnrstsjz7k",
+    "bcrt1qzwmyj0z924g7fzs5yvnrkc43y76RVyr2lh5t4r",
+    "bc1qpu6d26mrulzetu4jqhd7rsunv9aqru26f5c4j8",
+    "tb1qun6d26ufh77ghny6u5u8cwz9da7qwc6k4wkuceae9tth06eqlw0syupl4w",
+    "bcrt1qj7g2jps453kj9htk9cxyyc2nxe69x4kzzmth7v",
+    "bc1p702xksx4z3uqf0u2phllxkfe5cgu0adxptqs0uelx0tqt8e885sqryes2l",
+    "tb1z7gmh0v6pc30z4xum76lmw8w86yswrlmw",
+    "bcrt1sjsrw6nun4h502cr97xmnyyuhkr22q0s6efrgtu",
+    "2UVPFpGYnLHJezFzjUo42our6PMEoozzRdM",
+    "2MygHQjE1U33q3LSC53p69YqFjP8PihumJAF",
+    "KzNbAQ4mexfAxa6RKBzHQqfoTycaeWpv2p",
+    "2jDPrDfAKihCGPbPD9ztY8TswAia4V8Bc6vx",
+    "4VQUNG1hG64QFtaNyQZQWDdwpxB275Pwb3tvyPt2HDxB8Mi2MgH8Tz3AC83YYiz9LydsLNXEZJLHY",
+    "39TKsUQ5QpEL1wowc6GMUqak94ijirPuP69ooV3xsFmiKQX2dau",
+    "2UEJjT3dSdwc8dAo7oedPzznXceXCEsBbDfAvSymqpqDrkZMv7JBEUpLyhkghioYAWC9W4sKysry",
+    "7VmMEkphxCFSV1y659Th4dkk6x6bJS5eQvbt8rzUYKQyd6ACgwQ4vXHtXKFUwP2kW3XULipnHJdZ7",
+    "tc1qdlapns4zkn03juf2k9xwwpct209suj6mgcd9gh",
+    "bt1psa5eptk29c4jc9yumeseat3a0l5e2fpmw635za2p4gpwdnthueysxga9je",
+    "tb13w8c43lykfj3lvm9sgp6dsnfjla3d57cm83seykunf0ltxjc9lt2q4efm4d",
+    "bcrt1rjqr2tdkm",
+    "bc10lyxwnxa70l270e6fcmxr4x7dtgu2yvy7gzkurwxy4zhdvgaqrrn6pfg2flyhqzy5t5se8yu3",
+    "TB1QFDFM763VXVSUNZHQLPWC0Q8FG5LJX6ZN",
+    "bcrt1q60chha7wfwlau4kdr4mlvyeyc8mnnh9dhxk05e0hmrxcuhghefj36uwyha",
+    "bc1gmk9yu",
+    "tb1ly0q7p",
+    "bcrt1qdwttaw38uf42wxw40kwk3u8nguyTQH3hx6jmqp",
+    "bc1qtsvlht6730n04f2mpaj5vv8hrledn5n5ug8c79",
+    "tb1dclvmr",
+    "bcrt1q3fqvctqu48wsvggrt09vj0yk2gzzcscdp4h98u",
+    "bc1prklpq7tjcawg89cmwwqr3u5apwav36xa4zz56ady7crsllm6mpnqts7p86",
+    "tb1zkm58zyhxz3ffkfgsyprflg543slsl4c4",
+    "bcrt1snzr5kaypnfhpnjanrhd20fhqcjxm3hfh7dw9fu",
+    "2GgnYKqBGuA2Mm5GnrPsMTZR81xPhNtgMYoFUZngZGiobhCuUpCaTriUHRcgFreEekNdPAR17q8d",
+    "AZEah8d1EK362okRBS66e8SvdtYkrE8tsX",
+    "gep8xr77FyPW6zYP15RiV9W8nL6w2HyHB16cUDakfyDceMA6ZzUdhJjk2LPuLYHnLkBqkRTTi6z",
+    "2NDNP7GY59tTJPZTpbkprhM9SR99Nn5rUs7",
+    "2Csgzy2T287YAjeU5tFtt1nPshBZAUFQi4WtgaWyZGKSBNnKXHy2Tmxo8QK4Mfdds977ShcDWC5o",
+    "Kwjk3Vy6sdXMQDGWJzaWmqFxUNtWZCX1q4F4Kpt8jNNUoWJUUaTY",
+    "Svj8kk98bAS9V4L2crmxakbhmnPm3cJ1tJ4Je4yVzDreU8eSTFURS1SPYv5oWEQD8Q9VBDvx5uF",
+    "KNYsv6v9GtkGeD4WdQnBEJCrPKQm91PTxAbCfXr66LEd4JDmhPWC",
+    "2UJ2H2xvAeXmFKfQwMyDoSdQTTPFMNCT3SsoUafBWKzoGP3NsUK1buEgQZG38viyD53jgMdpqfT7",
+    "6aLMfayKF4TW4ecn5SEc8FExpyJA2peKxYRGZhes6tQ4NTTzuGy",
+    "7VP4FmcebU2thJns9MnXde7LWfuqR5vMizrAuUoq2GcJjzTyA4RHFcPVdZL8PLg1SbpSFdJrvLXoY5",
+    "tc1q5qdvt99uc92jyz663dtdpfpv6nr67ahmgwcpq2",
+    "bt1peu3ppd7x796sjjenp09r8cs22rhylqm9lhggk72qp8q22vzft0wq2a0x6j",
+    "tb1323z3lnz7dl3kd0nsuh6xy4he9almzl67anxgg3xdzkaxc9rwntlqdhdzd7",
+    "bcrt1r2gc42sky",
+    "bc10fd889x4hd54tqu2ewg9t4hhft2wl7m6x50av4uswzw46xe6as0xmltfg7vrjfkvm459vld7w",
+    "TB1QZY7V0F2AT3308YGGNGN66ULJTCN3RY6F",
+    "bcrt1qjg3cwht92znyw0l4r5rtctmls337nrc7g0ry9drjxmlecjd3atl3fake7c",
+    "bc1qmgf8xt8xkecl79k04mma3lz34gqep7hg4",
+    "TB1Q3F9WGNXE9ZMTTMDN5VKVKHYZ8Y0LCV72YV7V5LSXTJXEYHNHEHASLYL0TZ",
+};
+
+/// `v.isBtcAddress` gives `s` these verdicts on mainnet and on testnet, and
+/// their `or` on `.any`.
+fn expectBtc(s: S, mainnet: bool, testnet: bool) !void {
+    const got = [3]bool{ v.isBtcAddress(s, .mainnet), v.isBtcAddress(s, .testnet), v.isBtcAddress(s, .any) };
+    const want = [3]bool{ mainnet, testnet, mainnet or testnet };
+    if (!std.mem.eql(bool, &got, &want)) {
+        std.debug.print("\"{f}\": mainnet, testnet, any expected {any}, got {any}\n", .{ std.zig.fmtString(s), want, got });
+        return error.TestUnexpectedResult;
+    }
+}
+
+test "btcAddress follows the Bitcoin Core test list; segwit addresses pass in lower case only" {
+    var buf: [90]u8 = undefined;
+    for (core_mainnet) |s| try expectBtc(s, true, false);
+    for (core_testnet) |s| try expectBtc(s, false, true);
+    for (core_regtest) |s| try expectBtc(s, false, false);
+    for (core_invalid) |s| try expectBtc(s, false, false);
+    var flips: usize = 0;
+    for (core_mainnet ++ core_testnet ++ core_regtest) |s| {
+        if (!std.mem.startsWith(u8, s, "bc1") and !std.mem.startsWith(u8, s, "tb1") and !std.mem.startsWith(u8, s, "bcrt1")) continue;
+        try expectBtc(std.ascii.upperString(buf[0..s.len], s), false, false);
+        flips += 1;
+    }
+    try testing.expectEqual(32, flips);
 }
 
 /// The examples of the SWIFT IBAN registry: 97 official ones and 24 of
@@ -244,10 +440,10 @@ test "the first failing rule is the value's only violation" {
 const iterations = 20_000;
 
 /// The bytes that the grammars of the rules care about, and some they reject.
-const alphabet = "0123456789abcdefABCDEF" ++ "0123456789" ++ "GHKLMNPQRSTUVWXYZ" ++ "-_" ++ "ghxz" ++ "X-" ++ " \x00\x7f\x80\xff";
+const alphabet = "0123456789abcdefABCDEF" ++ "0123456789" ++ "GHKLMNPQRSTUVWXYZ" ++ "qpzry9x8gf2tvdw0s3jn54khce6mua7l" ++ "ijkmno" ++ "-_" ++ "X-" ++ " \x00\x7f\x80\xff";
 
 /// The lengths the rules check for, give or take one byte.
-const lengths = [_]usize{ 8, 9, 10, 11, 12, 13, 14, 15, 16, 19, 20, 22, 24, 32, 34, 36, 40, 48, 64, 96, 128 };
+const lengths = [_]usize{ 8, 9, 10, 11, 12, 13, 14, 15, 16, 19, 20, 22, 24, 26, 32, 34, 35, 36, 40, 42, 48, 62, 64, 74, 90, 96, 128 };
 
 /// Valid identifiers: edits of them reach checks that random bytes rarely
 /// reach.
@@ -278,6 +474,16 @@ const seeds = [_]S{
     "73513537",
     "12345678901231",
     "USRC17607839",
+    "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2",
+    "3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy",
+    "2NC2hEhe28ULKAJkW5MjZ3jtTMJdvXmByvK",
+    "1111111111111111111114oLvT2",
+    "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4",
+    "tb1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3q0sl5k7",
+    "bc1pw508d6qejxtdg4y5r3zarvary0c5xw7kw508d6qejxtdg4y5r3zarvary0c5xw7kt5nd6y",
+    "bc1z2rksukkjr8",
+    "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
+    "0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed",
 };
 
 /// `rule` passes `s` exactly when `predicate` accepts it.
@@ -300,6 +506,15 @@ fn isHashOf(comptime algorithm: v.HashAlgorithm) fn (S) bool {
     }.f;
 }
 
+/// `v.isBtcAddress(s, network)` as a predicate of one argument.
+fn isBtcAddressOn(comptime network: v.BtcNetwork) fn (S) bool {
+    return struct {
+        fn f(s: S) bool {
+            return v.isBtcAddress(s, network);
+        }
+    }.f;
+}
+
 /// Every predicate on `s`, each against its rule.
 fn agreeAll(s: S) !void {
     try agree(v.uuid, v.isUuid, s);
@@ -315,6 +530,8 @@ fn agreeAll(s: S) !void {
     try agree(v.issn, v.isIssn, s);
     try agree(v.ean, v.isEan, s);
     try agree(v.isrc, v.isIsrc, s);
+    inline for (comptime std.enums.values(v.BtcNetwork)) |network| try agree(v.btcAddress(network), isBtcAddressOn(network), s);
+    try agree(v.ethereumAddress, v.isEthereumAddress, s);
     inline for (comptime std.enums.values(v.HashAlgorithm)) |algorithm| try agree(v.hash(algorithm), isHashOf(algorithm), s);
 }
 
