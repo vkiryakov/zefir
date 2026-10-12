@@ -309,6 +309,46 @@ test "latLong is a rule value with code validation.lat_long and message \"must b
     try expectNoViolation([]const u8, v.latLong, "(40.7128, -74.0060)");
 }
 
+test "ip is a rule value with code validation.ip and message \"must be a valid IP address\"" {
+    try testing.expect(@hasDecl(v, "ip"));
+    try testing.expect(@TypeOf(v.ip) == v.Rule);
+    try expectRule(v.ip, "validation.ip", "must be a valid IP address", "must be a valid IP address");
+    try expectViolation([]const u8, v.ip, "fe80::1%eth0", "validation.ip", "must be a valid IP address", "x");
+    try expectNoViolation([]const u8, v.ip, "192.0.2.1");
+    try expectNoViolation([]const u8, v.ip, "::ffff:192.0.2.1");
+}
+
+test "ipv4 is a rule value with code validation.ipv4 and message \"must be a valid IPv4 address\"" {
+    try testing.expect(@hasDecl(v, "ipv4"));
+    try testing.expect(@TypeOf(v.ipv4) == v.Rule);
+    try expectRule(v.ipv4, "validation.ipv4", "must be a valid IPv4 address", "must be a valid IPv4 address");
+    try expectViolation([]const u8, v.ipv4, "192.168.1.01", "validation.ipv4", "must be a valid IPv4 address", "x");
+    try expectNoViolation([]const u8, v.ipv4, "192.0.2.1");
+}
+
+test "ipv6 is a rule value with code validation.ipv6 and message \"must be a valid IPv6 address\"" {
+    try testing.expect(@hasDecl(v, "ipv6"));
+    try testing.expect(@TypeOf(v.ipv6) == v.Rule);
+    try expectRule(v.ipv6, "validation.ipv6", "must be a valid IPv6 address", "must be a valid IPv6 address");
+    try expectViolation([]const u8, v.ipv6, "1::2::3", "validation.ipv6", "must be a valid IPv6 address", "x");
+    try expectNoViolation([]const u8, v.ipv6, "2001:db8::1");
+}
+
+test "macAddress is a rule constructor with code validation.mac_address and message \"must be a valid MAC address\", or one of 5 messages for other options" {
+    try testing.expect(@hasDecl(v, "macAddress"));
+    try testing.expect(@typeInfo(@TypeOf(v.macAddress)).@"fn".return_type == v.Rule);
+    const code = "validation.mac_address";
+    try expectRule(v.macAddress(.{}), code, "must be a valid MAC address", "must be a valid MAC address");
+    try expectRule(v.macAddress(.{ .eui = .eui48 }), code, "must be a valid 48-bit MAC address", "must be a valid 48-bit MAC address");
+    try expectRule(v.macAddress(.{ .eui = .eui64 }), code, "must be a valid 64-bit MAC address", "must be a valid 64-bit MAC address");
+    try expectRule(v.macAddress(.{ .format = .bare }), code, "must be a MAC address of 12 or 16 hex digits without separators", "must be a MAC address of 12 or 16 hex digits without separators");
+    try expectRule(v.macAddress(.{ .eui = .eui48, .format = .bare }), code, "must be a MAC address of 12 hex digits without separators", "must be a MAC address of 12 hex digits without separators");
+    try expectRule(v.macAddress(.{ .eui = .eui64, .format = .bare }), code, "must be a MAC address of 16 hex digits without separators", "must be a MAC address of 16 hex digits without separators");
+    try expectViolation([]const u8, v.macAddress(.{}), "00:00:5e-00:53:01", code, "must be a valid MAC address", "x");
+    try expectViolation([]const u8, v.macAddress(.{ .eui = .eui64, .format = .bare }), "00005e005301", code, "must be a MAC address of 16 hex digits without separators", "x");
+    try expectNoViolation([]const u8, v.macAddress(.{}), "00-00-5E-00-53-01");
+}
+
 test "minItems is a rule constructor with code validation.min_items and message \"must have at least {min} items\", or \"must have at least 1 item\" when min = 1; placeholder {min}" {
     try testing.expect(@hasDecl(v, "minItems"));
     try testing.expect(@typeInfo(@TypeOf(v.minItems)).@"fn".return_type == v.Rule);
@@ -495,14 +535,16 @@ test "finite has no precondition: nan, inf and -inf on a float field fail its ow
     }
 }
 
-test "the module exports exactly its 48 public names, and Rule.withMessage" {
+test "the module exports exactly its 57 public names, and Rule.withMessage" {
     const names = [_][]const u8{
-        "Violation",   "Rule",         "Report",         "max_code_bytes", "max_message_bytes", "max_report_violations", "check",         "checkAll",
-        "assertRules", "fail",         "equals",         "notEquals",      "oneOf",             "noneOf",                "empty",         "notEmpty",
-        "min",         "max",          "range",          "positive",       "nonNegative",       "negative",              "nonPositive",   "divisibleBy",
-        "finite",      "numberString", "decimal",        "booleanString",  "hexadecimal",       "octal",                 "port",          "latitude",
-        "longitude",   "latLong",      "DecimalOptions", "isNumberString", "isDecimal",         "isBooleanString",       "isHexadecimal", "isOctal",
-        "isPort",      "isLatitude",   "isLongitude",    "isLatLong",      "minItems",          "maxItems",              "each",          "custom",
+        "Violation",      "Rule",         "Report",          "max_code_bytes", "max_message_bytes", "max_report_violations", "check",          "checkAll",
+        "assertRules",    "fail",         "equals",          "notEquals",      "oneOf",             "noneOf",                "empty",          "notEmpty",
+        "min",            "max",          "range",           "positive",       "nonNegative",       "negative",              "nonPositive",    "divisibleBy",
+        "finite",         "numberString", "decimal",         "booleanString",  "hexadecimal",       "octal",                 "port",           "latitude",
+        "longitude",      "latLong",      "ip",              "ipv4",           "ipv6",              "macAddress",            "DecimalOptions", "MacAddressOptions",
+        "isNumberString", "isDecimal",    "isBooleanString", "isHexadecimal",  "isOctal",           "isPort",                "isLatitude",     "isLongitude",
+        "isLatLong",      "isIp",         "isIpv4",          "isIpv6",         "isMacAddress",      "minItems",              "maxItems",       "each",
+        "custom",
     };
     inline for (names) |name| try testing.expect(@hasDecl(v, name));
     try testing.expectEqual(names.len, comptime std.meta.declarations(v).len);
@@ -514,9 +556,9 @@ test "every rule the module exports has a catalog test" {
     // comptime branches than a test allows by default.
     @setEvalBranchQuota(100_000);
     const tested = [_][]const u8{
-        "equals",      "notEquals", "oneOf",        "noneOf",  "empty",         "notEmpty",    "min",   "max",  "range",    "positive",  "nonNegative", "negative", "nonPositive",
-        "divisibleBy", "finite",    "numberString", "decimal", "booleanString", "hexadecimal", "octal", "port", "latitude", "longitude", "latLong",     "minItems", "maxItems",
-        "each",        "custom",
+        "equals",      "notEquals",  "oneOf",        "noneOf",   "empty",         "notEmpty",    "min",   "max",  "range",    "positive",  "nonNegative", "negative", "nonPositive",
+        "divisibleBy", "finite",     "numberString", "decimal",  "booleanString", "hexadecimal", "octal", "port", "latitude", "longitude", "latLong",     "ip",       "ipv4",
+        "ipv6",        "macAddress", "minItems",     "maxItems", "each",          "custom",
     };
     inline for (comptime std.meta.declarations(v)) |name| {
         const T = @TypeOf(@field(v, name));
@@ -534,7 +576,7 @@ test "every rule the module exports has a catalog test" {
 
 test "the module exports exactly the catalog predicates of the shipped rules" {
     @setEvalBranchQuota(100_000);
-    const predicates = [_][]const u8{ "isNumberString", "isDecimal", "isBooleanString", "isHexadecimal", "isOctal", "isPort", "isLatitude", "isLongitude", "isLatLong" };
+    const predicates = [_][]const u8{ "isNumberString", "isDecimal", "isBooleanString", "isHexadecimal", "isOctal", "isPort", "isLatitude", "isLongitude", "isLatLong", "isIp", "isIpv4", "isIpv6", "isMacAddress" };
     comptime var exported: usize = 0;
     inline for (comptime std.meta.declarations(v)) |name| {
         if (comptime name.len > 2 and std.mem.startsWith(u8, name, "is") and std.ascii.isUpper(name[2])) {
@@ -552,9 +594,10 @@ test "the module exports exactly the catalog predicates of the shipped rules" {
 }
 
 test "the predicates have their catalog signatures: the input first, the options last" {
-    const plain = [_][]const u8{ "isNumberString", "isBooleanString", "isHexadecimal", "isOctal", "isPort", "isLatitude", "isLongitude", "isLatLong" };
+    const plain = [_][]const u8{ "isNumberString", "isBooleanString", "isHexadecimal", "isOctal", "isPort", "isLatitude", "isLongitude", "isLatLong", "isIp", "isIpv4", "isIpv6" };
     inline for (plain) |name| try testing.expect(@TypeOf(@field(v, name)) == fn ([]const u8) bool);
     try testing.expect(@TypeOf(v.isDecimal) == fn ([]const u8, v.DecimalOptions) bool);
+    try testing.expect(@TypeOf(v.isMacAddress) == fn ([]const u8, v.MacAddressOptions) bool);
 }
 
 test "the limits have their catalog values" {

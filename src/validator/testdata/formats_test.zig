@@ -24,6 +24,10 @@ fn isDecimalDefault(s: []const u8) bool {
     return v.isDecimal(s, .{});
 }
 
+fn isMacAddressDefault(s: []const u8) bool {
+    return v.isMacAddress(s, .{});
+}
+
 const cases = [_]Case{
     .{ .rule = v.numberString, .predicate = v.isNumberString, .code = "validation.number_string", .message = "must be a number", .good = "-12.5", .bad = "1e5" },
     .{ .rule = v.decimal(.{}), .predicate = isDecimalDefault, .code = "validation.decimal", .message = "must be a decimal number", .good = "+.5", .bad = "1." },
@@ -34,6 +38,10 @@ const cases = [_]Case{
     .{ .rule = v.latitude, .predicate = v.isLatitude, .code = "validation.latitude", .message = "must be a latitude from -90 to 90", .good = "-90.000", .bad = "90.1" },
     .{ .rule = v.longitude, .predicate = v.isLongitude, .code = "validation.longitude", .message = "must be a longitude from -180 to 180", .good = "180.0", .bad = "-180.5" },
     .{ .rule = v.latLong, .predicate = v.isLatLong, .code = "validation.lat_long", .message = "must be a latitude,longitude pair", .good = "(40.7128, -74.0060)", .bad = "40.7128,\t-74.0060" },
+    .{ .rule = v.ip, .predicate = v.isIp, .code = "validation.ip", .message = "must be a valid IP address", .good = "::ffff:192.0.2.1", .bad = "fe80::1%eth0" },
+    .{ .rule = v.ipv4, .predicate = v.isIpv4, .code = "validation.ipv4", .message = "must be a valid IPv4 address", .good = "192.0.2.1", .bad = "192.168.1.01" },
+    .{ .rule = v.ipv6, .predicate = v.isIpv6, .code = "validation.ipv6", .message = "must be a valid IPv6 address", .good = "2001:db8::1", .bad = "1::2::3" },
+    .{ .rule = v.macAddress(.{}), .predicate = isMacAddressDefault, .code = "validation.mac_address", .message = "must be a valid MAC address", .good = "00-00-5E-00-53-01", .bad = "00:00:5e-00:53:01" },
 };
 
 test "every format rule has its code and default message, and its predicate agrees on samples" {
@@ -164,6 +172,21 @@ test "decimal reports the default message of its options" {
     try h.expectFail([]const u8, v.decimal(.{ .min_decimal_digits = 2.0, .max_decimal_digits = 3.0 }), "1.2", code, "must be a whole number or have 2 to 3 decimal places");
 }
 
+test "macAddress reports the default message of its options" {
+    const code = "validation.mac_address";
+    const eui64 = "00:00:5e:ef:10:00:00:01";
+    try h.expectFail([]const u8, v.macAddress(.{}), "00:00:5e:00:53", code, "must be a valid MAC address");
+    try h.expectFail([]const u8, v.macAddress(.{ .eui = .eui48 }), eui64, code, "must be a valid 48-bit MAC address");
+    try h.expectFail([]const u8, v.macAddress(.{ .eui = .eui64 }), "00:00:5e:00:53:01", code, "must be a valid 64-bit MAC address");
+    try h.expectFail([]const u8, v.macAddress(.{ .format = .bare }), "00:00:5e:00:53:01", code, "must be a MAC address of 12 or 16 hex digits without separators");
+    try h.expectFail([]const u8, v.macAddress(.{ .eui = .eui48, .format = .bare }), "00005eef10000001", code, "must be a MAC address of 12 hex digits without separators");
+    try h.expectFail([]const u8, v.macAddress(.{ .eui = .eui64, .format = .bare }), "00005e005301", code, "must be a MAC address of 16 hex digits without separators");
+    try h.expectPass([]const u8, v.macAddress(.{}), eui64);
+    try h.expectPass([]const u8, v.macAddress(.{ .eui = .eui64 }), "0000.5eef.1000.0001");
+    try h.expectPass([]const u8, v.macAddress(.{ .eui = .eui48, .format = .bare }), "00005E005301");
+    try h.expectFail([]const u8, v.macAddress(.{}), "00\t00\t5e\t00\t53\t01", code, "must be a valid MAC address");
+}
+
 test "port and the numbers in strings: the spec's own examples" {
     try h.expectPass([]const u8, v.port, "0");
     try h.expectFail([]const u8, v.port, "080", "validation.port", "must be a port number from 0 to 65535");
@@ -182,16 +205,18 @@ test "port and the numbers in strings: the spec's own examples" {
 /// The pieces random inputs are built from: the bytes and tokens that matter
 /// to the grammars of this file.
 const tokens = [_][]const u8{
-    "0",     "1",     "5",    "9",    "05",   "12",       "45",       "89", "90", "099", "100", "179", "180", "181", "255",  "256",
-    "65535", "65536", "080",  "+",    "-",    ".",        ".0",       ".5", ",",  ", ",  "(",   ")",   " ",   "\t",  "e",    "E5",
-    "_",     "0x",    "0X",   "0h",   "0o",   "0O",       "x",        "h",  "o",  "g",   "a",   "f",   "F",   "8",   "true", "false",
-    "TRUE",  "yes",   "\x00", "\x7f", "\xff", "\xc3\xa9", "\xc2\xa0", "#",
+    "0",     "1",     "5",    "9",    "05",   "12",       "45",       "89", "90", "099", "100", "179",  "180",  "181",  "255",   "256",
+    "65535", "65536", "080",  "+",    "-",    ".",        ".0",       ".5", ",",  ", ",  "(",   ")",    " ",    "\t",   "e",     "E5",
+    "_",     "0x",    "0X",   "0h",   "0o",   "0O",       "x",        "h",  "o",  "g",   "a",   "f",    "F",    "8",    "true",  "false",
+    "TRUE",  "yes",   "\x00", "\x7f", "\xff", "\xc3\xa9", "\xc2\xa0", "#",  ":",  "::",  ":::", "ffff", "FFFF", "1234", "12345", "1.2.3.4",
+    "%eth0", "/64",   "[",    "]",    "0000", "5eef",     "00",       "5e",
 };
 
 /// Inputs the rules accept, which random edits turn into near misses.
 const seeds = [_][]const u8{
-    "-12.5",   "+.5",  "0.25",  "true", "0",                   "1",                "0xDEADbeef", "0h1F", "0o755", "017", "65535", "8080",
-    "-90.000", "45.5", "180.0", "05",   "(40.7128, -74.0060)", "40.7128,-74.0060", "90,180",
+    "-12.5",           "+.5",    "0.25",              "true",                    "0",                   "1",                   "0xDEADbeef",   "0h1F",             "0o755",           "017", "65535",       "8080",
+    "-90.000",         "45.5",   "180.0",             "05",                      "(40.7128, -74.0060)", "40.7128,-74.0060",    "90,180",       "192.0.2.1",        "255.255.255.255", "::1", "2001:db8::1", "::ffff:192.0.2.1",
+    "1:2:3:4:5:6:7:8", "fe80::", "00:1A:2B:3C:4D:5E", "00-1a-2b-3c-4d-5e-6f-70", "001a.2b3c.4d5e",      "0000.5eef.1000.0001", "001A2B3C4D5E", "00005eef10000001",
 };
 
 /// One random input in `buf`: random bytes, a sequence of tokens, or 1-3
@@ -284,10 +309,19 @@ test "random inputs: no predicate panics, each rule passes what its predicate ac
             const valid = comptime options.min_decimal_digits != 0 and (options.max_decimal_digits orelse options.min_decimal_digits) >= options.min_decimal_digits;
             if (valid) try expectAgrees(v.decimal(options), s, ok);
         }
+        inline for (.{ .any, .eui48, .eui64 }) |eui| {
+            inline for (.{ .separated, .bare }) |format| {
+                const options: v.MacAddressOptions = .{ .eui = eui, .format = format };
+                try expectAgrees(v.macAddress(options), s, v.isMacAddress(s, options));
+            }
+        }
         // decimal with the default options is numberString; a port is a
         // number string; latLong is latitude, ", " and longitude.
         try testing.expectEqual(v.isNumberString(s), v.isDecimal(s, .{}));
         if (v.isPort(s)) try testing.expect(v.isNumberString(s));
+        // ip is the union of ipv4 and ipv6, which share no string.
+        try testing.expectEqual(v.isIpv4(s) or v.isIpv6(s), v.isIp(s));
+        try testing.expect(!(v.isIpv4(s) and v.isIpv6(s)));
         if (s.len <= 40 and std.mem.findAny(u8, s, ",()") == null) {
             var pair_buf: [96]u8 = undefined;
             const pair = try std.fmt.bufPrint(&pair_buf, "{s}, {s}", .{ s, s });

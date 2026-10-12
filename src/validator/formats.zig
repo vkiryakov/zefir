@@ -1,6 +1,7 @@
 //! Format rules: numbers, booleans and coordinates written as strings
 //! (`numberString`, `decimal`, `booleanString`, `hexadecimal`, `octal`,
-//! `port`, `latitude`, `longitude`, `latLong`), each with its predicate
+//! `port`, `latitude`, `longitude`, `latLong`) and network addresses (`ip`,
+//! `ipv4`, `ipv6`, `macAddress`), each with its predicate
 //! (`isNumberString`, ...). Every grammar is ASCII and is read byte by byte:
 //! nothing is trimmed or decoded, so invalid UTF-8 and any byte >= 0x80 fail
 //! under the rule's own code, and "" fails every rule of this file. A
@@ -32,6 +33,21 @@ pub const DecimalOptions = struct {
     /// The most digits after the point; null for no limit. When set, at
     /// least `min_decimal_digits` in the rule.
     max_decimal_digits: ?usize = null,
+};
+
+/// The options of `v.macAddress(.{ ... })` and `v.isMacAddress`, after
+/// validator.js `isMACAddress`. Every combination is valid.
+pub const MacAddressOptions = struct {
+    /// The sizes that pass: `.any` for EUI-48 (6 octets) or EUI-64 (8
+    /// octets), `.eui48` or `.eui64` for one of them.
+    eui: Eui = .any,
+    /// `.separated`: two-digit octets joined by ':', '-' or a space, the same
+    /// one throughout, or groups of four digits joined by '.'. `.bare`: hex
+    /// digits only.
+    format: Format = .separated,
+
+    pub const Eui = enum { any, eui48, eui64 };
+    pub const Format = enum { separated, bare };
 };
 
 // ------------------------------------------------------------------ numbers in strings
@@ -215,6 +231,117 @@ pub fn isLatLong(s: []const u8) bool {
     if (std.mem.findScalar(u8, second, ',') != null) return false;
     if (second.len != 0 and second[0] == ' ') second = second[1..];
     return isLatitude(pair[0..comma]) and isLongitude(second);
+}
+
+// ------------------------------------------------------------------ IP addresses
+
+fn allHex(s: []const u8) bool {
+    for (s) |c| {
+        if (!std.ascii.isHex(c)) return false;
+    }
+    return true;
+}
+
+/// An IPv4 address in dotted decimal, as RFC 3986 `IPv4address` and
+/// validator.js `isIP(s, 4)`: four numbers from 0 to 255 joined by '.', each
+/// without leading zeros ("0" itself is fine). No shorthand ("127.1"),
+/// single number, hex or octal parts, sign, prefix length, port or
+/// whitespace.
+pub fn isIpv4(s: []const u8) bool {
+    // From "0.0.0.0" to "255.255.255.255".
+    if (s.len < 7 or s.len > 15) return false;
+    var parts: usize = 0;
+    var it = std.mem.splitScalar(u8, s, '.');
+    while (it.next()) |part| {
+        parts += 1;
+        if (parts > 4 or !isDecOctet(part)) return false;
+    }
+    return parts == 4;
+}
+
+/// A number from 0 to 255 in 1-3 ASCII digits without a leading zero.
+fn isDecOctet(part: []const u8) bool {
+    if (part.len == 0 or part.len > 3) return false;
+    if (part.len > 1 and part[0] == '0') return false;
+    return allDigits(part) and smallValue(part) <= 255;
+}
+
+/// An IPv6 address in the text forms of RFC 4291 (RFC 3986 `IPv6address`):
+/// 8 groups of 1-4 hex digits in any case joined by ':', or fewer around one
+/// "::" that stands for one or more zero groups; the last 32 bits may be an
+/// IPv4 address ("::ffff:192.0.2.1"). Leading zeros and uppercase pass. No
+/// zone id ("fe80::1%eth0"), brackets or prefix length.
+pub fn isIpv6(s: []const u8) bool {
+    // From "::" to "0000:0000:0000:0000:0000:ffff:255.255.255.255".
+    if (s.len < 2 or s.len > 45) return false;
+    const gap = std.mem.find(u8, s, "::") orelse return (ipv6Groups(s, true) orelse return false) == 8;
+    const head = s[0..gap];
+    const tail = s[gap + 2 ..];
+    if (std.mem.find(u8, tail, "::") != null) return false;
+    const head_groups = if (head.len == 0) 0 else ipv6Groups(head, false) orelse return false;
+    const tail_groups = if (tail.len == 0) 0 else ipv6Groups(tail, true) orelse return false;
+    return head_groups + tail_groups <= 7;
+}
+
+/// The number of 16-bit groups in `s`, groups of 1-4 hex digits joined by
+/// ':'; when `allow_ipv4`, the last one may be an IPv4 address, worth 2.
+/// Null when a group is malformed.
+fn ipv6Groups(s: []const u8, allow_ipv4: bool) ?usize {
+    var groups: usize = 0;
+    var it = std.mem.splitScalar(u8, s, ':');
+    while (it.next()) |group| {
+        if (allow_ipv4 and it.peek() == null and std.mem.findScalar(u8, group, '.') != null) {
+            if (!isIpv4(group)) return null;
+            groups += 2;
+        } else {
+            if (group.len == 0 or group.len > 4 or !allHex(group)) return null;
+            groups += 1;
+        }
+    }
+    return groups;
+}
+
+/// An IPv4 or an IPv6 address: `isIpv4(s) or isIpv6(s)`; no string is both.
+pub fn isIp(s: []const u8) bool {
+    return isIpv4(s) or isIpv6(s);
+}
+
+// ------------------------------------------------------------------ MAC addresses
+
+/// A MAC address in the sizes and the format of `options`, as validator.js
+/// `isMACAddress`: separated, "00:1A:2B:3C:4D:5E", "00-1a-2b-3c-4d-5e",
+/// "00 1a 2b 3c 4d 5e" or "001a.2b3c.4d5e"; bare, "001A2B3C4D5E". Only the
+/// byte 0x20 is a space: a tab or a line feed is not a separator. The
+/// options are applied as given.
+pub fn isMacAddress(s: []const u8, options: MacAddressOptions) bool {
+    const sizes: []const usize = switch (options.eui) {
+        .any => &.{ 6, 8 },
+        .eui48 => &.{6},
+        .eui64 => &.{8},
+    };
+    for (sizes) |octets| {
+        const matches = switch (options.format) {
+            .bare => s.len == 2 * octets and allHex(s),
+            .separated => isGrouped(s, octets, 2, ":- ") or isGrouped(s, octets, 4, "."),
+        };
+        if (matches) return true;
+    }
+    return false;
+}
+
+/// `octets` written as groups of `digits` hex digits joined by one byte of
+/// `separators`, the same byte throughout.
+fn isGrouped(s: []const u8, octets: usize, digits: usize, separators: []const u8) bool {
+    const count = 2 * octets / digits;
+    if (s.len != count * digits + count - 1) return false;
+    const separator = s[digits];
+    if (std.mem.findScalar(u8, separators, separator) == null) return false;
+    for (s, 0..) |c, i| {
+        if ((i + 1) % (digits + 1) == 0) {
+            if (c != separator) return false;
+        } else if (!std.ascii.isHex(c)) return false;
+    }
+    return true;
 }
 
 // ------------------------------------------------------------------ rules
@@ -403,9 +530,57 @@ pub const latitude: Rule = coordinateRule(.latitude, "must be a latitude from -9
 /// `@IsLongitude()`.
 pub const longitude: Rule = coordinateRule(.longitude, "must be a longitude from -180 to 180", 180, isLongitude);
 
+/// An IPv4 or an IPv6 address, as `isIpv4` and `isIpv6` read them, without
+/// a zone id, brackets, prefix length or port. class-validator `@IsIP()`.
+pub const ip: Rule = stringRule(.ip, "must be a valid IP address", isIp);
+
+/// An IPv4 address in strict dotted decimal: "192.0.2.1" passes, "127.1",
+/// "01.2.3.4" and "1.2.3.4:80" fail. class-validator `@IsIP(4)`.
+pub const ipv4: Rule = stringRule(.ipv4, "must be a valid IPv4 address", isIpv4);
+
+/// An IPv6 address in any RFC 4291 text form, an embedded IPv4 address
+/// included: "2001:db8::1" and "::ffff:192.0.2.1" pass, "fe80::1%eth0" and
+/// "1::2::3" fail. class-validator `@IsIP(6)`.
+pub const ipv6: Rule = stringRule(.ipv6, "must be a valid IPv6 address", isIpv6);
+
+/// A MAC address in the sizes and the format of the options, as
+/// `isMacAddress` reads it. `v.macAddress(.{})` takes EUI-48 and EUI-64 with
+/// separators; the default message names the size and the format the
+/// options allow. class-validator `@IsMACAddress()`.
+pub fn macAddress(comptime options: MacAddressOptions) Rule {
+    @setEvalBranchQuota(core.eval_quota);
+    return core.define(.mac_address, .{
+        .message = macAddressMessage(options),
+        .args = options_args,
+        .params = &.{ core.dataParam("eui", options.eui), core.dataParam("format", options.format) },
+        .fits = stringFits,
+        .eval = struct {
+            fn eval(value: anytype) Outcome {
+                return core.passIf(isMacAddress(value.*, options));
+            }
+        }.eval,
+    });
+}
+
+/// The default message of `macAddress(options)`: one of 6 texts.
+fn macAddressMessage(comptime options: MacAddressOptions) []const u8 {
+    return switch (options.format) {
+        .separated => switch (options.eui) {
+            .any => "must be a valid MAC address",
+            .eui48 => "must be a valid 48-bit MAC address",
+            .eui64 => "must be a valid 64-bit MAC address",
+        },
+        .bare => switch (options.eui) {
+            .any => "must be a MAC address of 12 or 16 hex digits without separators",
+            .eui48 => "must be a MAC address of 12 hex digits without separators",
+            .eui64 => "must be a MAC address of 16 hex digits without separators",
+        },
+    };
+}
+
 /// The arguments the hints show for an uncalled constructor of this file:
 /// `decimal must be called, e.g. v.decimal(.{})`.
-pub const call_examples = .{ .decimal = ".{}" };
+pub const call_examples = .{ .decimal = ".{}", .macAddress = ".{}" };
 
 const expectOutcome = core.expectOutcome;
 const test_where = "Dto.field_rules.x";
@@ -694,4 +869,125 @@ test "latitude and longitude on floats: the finite precondition, then the range 
     // On a string, "NaN" is just not a coordinate.
     try expectOutcome(.fail, latitude, @as([]const u8, "NaN"));
     try expectOutcome(.pass, longitude, @as([]const u8, "-180"));
+}
+
+test "ipv4: four numbers from 0 to 255 joined by dots, without leading zeros" {
+    try expectAll(isIpv4, true, &.{ "0.0.0.0", "255.255.255.255", "192.0.2.1", "127.0.0.1", "1.2.3.4", "10.0.0.255", "100.64.0.0" });
+    try expectAll(isIpv4, false, &.{
+        "",           "256.0.0.1",  "999.1.1.1",  "1.2.3",      "1.2.3.4.5",  "01.2.3.4",         "1.2.3.04",    "00.1.2.3",
+        "127.1",      "2130706433", "0x7f.0.0.1", "1.2.3.4/24", "1.2.3.4:80", " 1.2.3.4",         "1.2.3.4 ",    "1..2.3",
+        ".1.2.3",     "1.2.3.",     "1.2.3.4.",   "+1.2.3.4",   "-1.2.3.4",   "::ffff:192.0.2.1", "1.2.3.4\x00", "1.2.3.\xd9\xa1",
+        "1.2.3.1000", "1.2.3.a",
+    });
+}
+
+test "ipv6: 8 groups, or fewer around one ::, with an optional IPv4 tail; no zone id" {
+    try expectAll(isIpv6, true, &.{
+        "::",                                            "::1",                 "1::",                "2001:db8::1",                             "2001:DB8:0:0:0:0:0:0001",
+        "fe80::",                                        "::ffff:192.0.2.1",    "64:ff9b::192.0.2.1", "1:2:3:4:5:6:7:8",                         "1:2:3:4:5:6:7::",
+        "::2:3:4:5:6:7:8",                               "1:2:3:4:5:6:1.2.3.4", "::1.2.3.4",          "ABCD:ef01:2345:6789:abcd:EF01:2345:6789", "2001:db8:85a3:0000:0000:8a2e:0370:7334",
+        "0000:0000:0000:0000:0000:ffff:255.255.255.255",
+    });
+    try expectAll(isIpv6, false, &.{
+        "",                  ":",             ":::",                   "1::2::3",     "::1:2:3:4:5:6:7:8",
+        "1:2:3:4:5:6:7:8:9", "1:2:3:4:5:6:7", "12345::",               "g::",         "fe80::1%eth0",
+        "[::1]",             "::1/128",       "1:2:3:4:5:6:7:1.2.3.4", "1.2.3.4::",   "::1.2.3",
+        "1:2:3:4:5:1.2.3.4", " ::1",          "::1 ",                  ":1::",        "1::2:",
+        "1:::2",             "1.2.3.4",       "::256.0.0.1",           "::1.2.3.4:5", "0000:0000:0000:0000:0000:ffff:255.255.255.2550",
+    });
+}
+
+test "ip: an IPv4 or an IPv6 address" {
+    try expectAll(isIp, true, &.{ "192.0.2.1", "::1", "::ffff:192.0.2.1" });
+    try expectAll(isIp, false, &.{ "", "fe80::1%eth0", "1.2.3", "localhost", "[::1]", "1.2.3.4:80" });
+}
+
+fn macDefault(s: []const u8) bool {
+    return isMacAddress(s, .{});
+}
+
+test "macAddress with the default options: EUI-48 or EUI-64, one separator throughout or dotted groups of four" {
+    try expectAll(macDefault, true, &.{
+        "00:1A:2B:3C:4D:5E", "00-1a-2b-3c-4d-5e", "00 1a 2b 3c 4d 5e", "001a.2b3c.4d5e", "00:1a:2b:3c:4d:5e:6f:70", "0000.5eef.1000.0001",
+        "00-00-5E-00-53-01",
+    });
+    try expectAll(macDefault, false, &.{
+        "",                     "00:1a-2b:3c:4d:5e",                                    "0:1a:2b:3c:4d:5e", "001A2B3C4D5E",   "00\t00\t5e\t00\t53\t01", "00:1a:2b:3c:4d",
+        "00:1a:2b:3c:4d:5e:6f", "00:1a:2b:3c:4d:5g",                                    "001a.2b3c.4d5e.",  "001a:2b3c:4d5e", "00.1a.2b.3c.4d.5e",      "00_1a_2b_3c_4d_5e",
+        "00:1a:2b:3c:4d:5e ",   "00\xc2\xa01a\xc2\xa02b\xc2\xa03c\xc2\xa04d\xc2\xa05e",
+    });
+}
+
+test "macAddress options pick the sizes and the format" {
+    const t = std.testing;
+    const eui48 = "00:00:5e:00:53:01";
+    const eui64 = "00:00:5e:ef:10:00:00:01";
+    try t.expect(isMacAddress(eui48, .{ .eui = .eui48 }));
+    try t.expect(!isMacAddress(eui64, .{ .eui = .eui48 }));
+    try t.expect(isMacAddress(eui64, .{ .eui = .eui64 }));
+    try t.expect(!isMacAddress(eui48, .{ .eui = .eui64 }));
+    try t.expect(isMacAddress("0000.5eef.1000.0001", .{ .eui = .eui64 }));
+    try t.expect(isMacAddress("00005E005301", .{ .format = .bare }));
+    try t.expect(isMacAddress("00005eef10000001", .{ .format = .bare }));
+    try t.expect(!isMacAddress(eui48, .{ .format = .bare }));
+    try t.expect(isMacAddress("00005e005301", .{ .eui = .eui48, .format = .bare }));
+    try t.expect(!isMacAddress("00005eef10000001", .{ .eui = .eui48, .format = .bare }));
+    try t.expect(isMacAddress("00005eef10000001", .{ .eui = .eui64, .format = .bare }));
+    try t.expect(!isMacAddress("00005e005301", .{ .eui = .eui64, .format = .bare }));
+    try t.expect(!isMacAddress("00005e00530g", .{ .format = .bare }));
+}
+
+test "ip, ipv4 and ipv6 have their codes and default messages and no precondition" {
+    const t = std.testing;
+    const rules = .{
+        .{ ip, core.Kind.ip, "validation.ip", "must be a valid IP address" },
+        .{ ipv4, core.Kind.ipv4, "validation.ipv4", "must be a valid IPv4 address" },
+        .{ ipv6, core.Kind.ipv6, "validation.ipv6", "must be a valid IPv6 address" },
+    };
+    inline for (rules) |row| {
+        try t.expectEqual(row[1], row[0].kind);
+        try t.expectEqualStrings(row[2], row[0].code);
+        try t.expectEqualStrings(row[3], row[0].message);
+        try t.expectEqual(null, row[0].args);
+        try t.expectEqual(0, row[0].params.len);
+        try t.expectEqual(null, row[0].precondition);
+    }
+}
+
+test "macAddress picks one of 6 default messages and keeps its options as data, no placeholders" {
+    const t = std.testing;
+    const expect = t.expectEqualStrings;
+    try expect("must be a valid MAC address", macAddress(.{}).message);
+    try expect("must be a valid 48-bit MAC address", macAddress(.{ .eui = .eui48 }).message);
+    try expect("must be a valid 64-bit MAC address", macAddress(.{ .eui = .eui64 }).message);
+    try expect("must be a MAC address of 12 or 16 hex digits without separators", macAddress(.{ .format = .bare }).message);
+    try expect("must be a MAC address of 12 hex digits without separators", macAddress(.{ .eui = .eui48, .format = .bare }).message);
+    try expect("must be a MAC address of 16 hex digits without separators", macAddress(.{ .eui = .eui64, .format = .bare }).message);
+    const rule = macAddress(.{ .eui = .eui64, .format = .bare });
+    try t.expectEqual(core.Kind.mac_address, rule.kind);
+    try expect("validation.mac_address", rule.code);
+    try expect("macAddress(.{...})", comptime rule.call());
+    try expect("mac_address(.{...})", comptime rule.label());
+    try t.expectEqual(null, rule.precondition);
+    try t.expectEqual(2, rule.params.len);
+    try expect("eui", rule.params[0].name);
+    try expect("eui64", rule.params[0].text);
+    try expect("format", rule.params[1].name);
+    try expect("bare", rule.params[1].text);
+    try expect("", comptime core.placeholderList(rule));
+}
+
+test "the address rules take strings only, with the [N]u8 and each hints" {
+    const expect = std.testing.expectEqualStrings;
+    const head = "validator: Dto.field_rules.x: ";
+    try expect(head ++ "ip expects a string, field is u32", comptime stringText(ip, u32).?);
+    try expect(head ++ "ipv4 expects a string, field is u32", comptime stringText(ipv4, u32).?);
+    try expect(head ++ "ipv6 expects a string, field is u128", comptime stringText(ipv6, u128).?);
+    try expect(head ++ "mac_address expects a string, field is u64", comptime stringText(macAddress(.{}), u64).?);
+    try expect(head ++ "ip expects a string, field is [8]u8; [N]u8 is an array of numbers, not a string: use []const u8", comptime stringText(ip, [8]u8).?);
+    try expect(head ++ "mac_address expects a string, field is [8]u8; [N]u8 is an array of numbers, not a string: use []const u8", comptime stringText(macAddress(.{}), [8]u8).?);
+    try expect(head ++ "ipv4 expects a string, field is []const []const u8; use v.each(v.ipv4)", comptime stringText(ipv4, []const []const u8).?);
+    try expect(head ++ "mac_address expects a string, field is []const []const u8; use v.each(v.macAddress(.{...}))", comptime stringText(macAddress(.{ .eui = .eui48 }), []const []const u8).?);
+    try expect("macAddress must be called, e.g. v.macAddress(.{})", comptime core.hints.mustBeCalled("macAddress", @TypeOf(macAddress)));
+    try expect("expected a rule, got the predicate isMacAddress; use the rule v.macAddress(.{})", comptime core.hints.predicateAsRule("isMacAddress", "macAddress", @TypeOf(macAddress)));
 }

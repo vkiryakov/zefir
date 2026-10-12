@@ -1687,10 +1687,6 @@ pub const pending_kinds = [_]Kind{
     .email,
     .http_url,
     .fqdn,
-    .ip,
-    .ipv4,
-    .ipv6,
-    .mac_address,
     // PR 4a
     .date,
     .rfc3339,

@@ -138,6 +138,8 @@ pub const list = [_]Fixture{
     .{ .file = "src/validator/testdata/compile_errors/decimal_min_zero.zig", .expect = "validator: decimal(.{...}): min_decimal_digits must be at least 1 (0 would accept \"1.\" and \".\")", .row = "decimal-6" },
     .{ .file = "src/validator/testdata/compile_errors/decimal_uncalled.zig", .expect = "validator: decimal_uncalled.Bad.field_rules.x: decimal must be called, e.g. v.decimal(.{})", .row = "decimal-5" },
     .{ .file = "src/validator/testdata/compile_errors/decimal_unknown_placeholder.zig", .expect = "validator: decimal(.{...}).withMessage(\"at most {max_decimal_digits} places\"): unknown placeholder {max_decimal_digits}; available: {min_decimal_digits}", .row = "decimal-18" },
+    .{ .file = "src/validator/testdata/compile_errors/ip_on_int.zig", .expect = "validator: ip_on_int.Bad.field_rules.x: ip expects a string, field is u32", .row = "ip-3" },
+    .{ .file = "src/validator/testdata/compile_errors/mac_address_on_list.zig", .expect = "validator: mac_address_on_list.Bad.field_rules.x: mac_address expects a string, field is []const []const u8; use v.each(v.macAddress(.{...}))", .row = "macAddress-2" },
     .{ .file = "src/validator/testdata/compile_errors/predicate_as_rule.zig", .expect = "validator: predicate_as_rule.Bad.field_rules.x: expected a rule, got the predicate isDecimal; use the rule v.decimal(.{})", .row = "G-25" },
     // minItems and maxItems: one fixture per kind of error; the text of every
     // catalog row is checked by the tests of lists.zig
