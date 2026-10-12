@@ -1260,6 +1260,65 @@ test "queued: a caller's cancel request outlives a flush's wait" {
     try waited;
 }
 
+/// Waits until the cancel request lands, then puts it back: it is pending,
+/// for certain, when the log call runs.
+fn logWhileCancelPending(logger: Logger) std.Io.Cancelable!void {
+    while (true) {
+        testing.io.checkCancel() catch break;
+        std.atomic.spinLoopHint();
+    }
+    testing.io.recancel();
+    logger.info("Logged while a cancel request is pending", .{});
+    return testing.io.checkCancel();
+}
+
+/// A writer that writes through the caller's Io, as a `File.Writer` does:
+/// each write is a cancelation point.
+const CancelPoint = struct {
+    sink: std.Io.Writer.Allocating,
+    writer: std.Io.Writer = .{ .buffer = &.{}, .vtable = &.{ .drain = drain } },
+
+    fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+        // The logger writes one slice at a time.
+        std.debug.assert(data.len == 1 and splat == 1);
+        const point: *CancelPoint = @alignCast(@fieldParentPtr("writer", w));
+        testing.io.checkCancel() catch return error.WriteFailed;
+        point.sink.writer.writeAll(data[0]) catch return error.WriteFailed;
+        return data[0].len;
+    }
+};
+
+test "sync: a log call writes its record to a writer that is a cancelation point while a cancel request is pending, and keeps the request" {
+    var point: CancelPoint = .{ .sink = .init(testing.allocator) };
+    defer point.sink.deinit();
+    const logger: Logger = try .init(testing.allocator, testing.io, .{ .output = .{ .writer = &point.writer } });
+    defer logger.deinit();
+    var task = try testing.io.concurrent(logWhileCancelPending, .{logger});
+    try testing.expectError(error.Canceled, task.cancel(testing.io));
+    try testing.expectStringEndsWith(point.sink.written(), "\"message\":\"Logged while a cancel request is pending\"}\n");
+    try testing.expectEqual(@as(u64, 1), logger.stats().written);
+}
+
+test "sync: a log call writes its record to stdout while a cancel request is pending, and keeps the request" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest; // the test needs POSIX pipes
+    const io = testing.io;
+    const fds = try std.Io.Threaded.pipe2(.{});
+    const read_end = pipeEnd(fds[0]);
+    defer read_end.close(io);
+    {
+        const write_end = pipeEnd(fds[1]);
+        defer write_end.close(io); // after deinit, so the read below ends
+        const logger: Logger = try .init(testing.allocator, io, .{});
+        defer logger.deinit();
+        logger.engine.stdout = write_end;
+        var task = try testing.io.concurrent(logWhileCancelPending, .{logger});
+        try testing.expectError(error.Canceled, task.cancel(io));
+        try testing.expectEqual(@as(u64, 1), logger.stats().written);
+    }
+    var buf: [256]u8 = undefined;
+    try testing.expectStringEndsWith(try readToEnd(read_end, io, &buf), "\"message\":\"Logged while a cancel request is pending\"}\n");
+}
+
 fn emergencyThenCheckCancel(logger: Logger, go: *std.atomic.Value(bool)) std.Io.Cancelable!void {
     while (!go.load(.seq_cst)) std.atomic.spinLoopHint();
     // No cancelation point while the cancel request lands.
@@ -1558,7 +1617,7 @@ test "queued: init takes the memory queueBytes names, and gives it all back" {
     try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
 }
 
-test "queued: a batch write that fails mid-record costs that line only" {
+test "queued: a one-record batch whose write fails mid-record tears that line only" {
     var gate: Gate = .{ .budgets = &.{10}, .sink = .init(testing.allocator) };
     defer gate.sink.deinit();
     const logger: Logger = try .init(testing.allocator, testing.io, .{ .mode = .{ .queued = .{} }, .output = .{ .writer = &gate.writer } });
@@ -1575,6 +1634,115 @@ test "queued: a batch write that fails mid-record costs that line only" {
     try testing.expectEqual(@as(u64, 1), s.written);
     try testing.expectEqual(@as(u64, 1), s.dropped.write_failed);
     try testing.expectEqual(@as(u64, 1), s.torn_lines);
+}
+
+/// A writer that holds the writer thread inside its first write until
+/// `open` is set, as `Lock` does, and fails once: write number `cut`
+/// (from 1) takes its bytes through line break number `lines` and `extra`
+/// bytes more, then the write after it fails. A cut that leaves nothing
+/// fails at once. Every other write takes everything.
+const FailingLock = struct {
+    cut: usize,
+    lines: usize = 0,
+    extra: usize = 0,
+    entered: std.atomic.Value(bool) = .init(false),
+    open: std.atomic.Value(bool) = .init(false),
+    /// The writer thread's alone.
+    writes: usize = 0,
+    fail_next: bool = false,
+    sink: std.Io.Writer.Allocating,
+    writer: std.Io.Writer = .{ .buffer = &.{}, .vtable = &.{ .drain = drain } },
+
+    fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+        // The logger writes one slice at a time.
+        std.debug.assert(data.len == 1 and splat == 1);
+        const lock: *FailingLock = @alignCast(@fieldParentPtr("writer", w));
+        lock.writes += 1;
+        if (lock.writes == 1) {
+            lock.entered.store(true, .seq_cst);
+            while (!lock.open.load(.seq_cst)) std.Thread.yield() catch {};
+        }
+        if (lock.fail_next) {
+            lock.fail_next = false;
+            return error.WriteFailed;
+        }
+        var bytes = data[0];
+        if (lock.writes == lock.cut) {
+            var keep: usize = 0;
+            for (0..lock.lines) |_| keep = if (std.mem.findScalarPos(u8, bytes, keep, '\n')) |at| at + 1 else bytes.len;
+            keep = @min(bytes.len, keep + lock.extra);
+            if (keep == 0) return error.WriteFailed;
+            bytes = bytes[0..keep];
+            lock.fail_next = true;
+        }
+        lock.sink.writer.writeAll(bytes) catch return error.WriteFailed;
+        return bytes.len;
+    }
+};
+
+/// Waits, at most five seconds, until a writer holds the writer thread.
+fn waitHeld(entered: *const std.atomic.Value(bool)) !void {
+    for (0..5000) |_| {
+        if (entered.load(.seq_cst)) return;
+        try testing.io.sleep(.fromMilliseconds(1), .awake);
+    }
+    return error.TestWriterNeverEntered;
+}
+
+test "queued: a batch write that fails mid-record drops the rest of the batch; the next record starts a new line" {
+    // The batch's write takes its first record and 10 bytes of the second.
+    var lock: FailingLock = .{ .cut = 2, .lines = 1, .extra = 10, .sink = .init(testing.allocator) };
+    defer lock.sink.deinit();
+    const logger: Logger = try .init(testing.allocator, testing.io, .{ .mode = .{ .queued = .{} }, .output = .{ .writer = &lock.writer } });
+    defer logger.deinit();
+    defer lock.open.store(true, .seq_cst);
+    logger.info("held", .{});
+    try waitHeld(&lock.entered);
+    for (1..5) |i| logger.info("queued", .{ .i = i }); // one batch of four
+    lock.open.store(true, .seq_cst);
+    try logger.flush(.none);
+    logger.info("after", .{});
+    try logger.flush(.none);
+    var lines = std.mem.splitScalar(u8, lock.sink.written(), '\n');
+    try testing.expectStringEndsWith(lines.next().?, "\"message\":\"held\"}");
+    try testing.expectStringEndsWith(lines.next().?, "\"message\":\"queued\",\"i\":1}");
+    try testing.expectEqualStrings("{\"timestam", lines.next().?);
+    try testing.expectStringEndsWith(lines.next().?, "\"message\":\"after\"}");
+    try testing.expectEqualStrings("", lines.rest());
+    const s = logger.stats();
+    try testing.expectEqual(@as(u64, 3), s.written);
+    try testing.expectEqual(@as(u64, 3), s.dropped.write_failed);
+    try testing.expectEqual(@as(u64, 1), s.torn_lines);
+    try testing.expectEqual(@as(u64, 1), s.write_errors);
+}
+
+test "queued: a batch write that fails right after a whole record counts that record written and tears no line" {
+    // The batch's write takes its first record whole, then fails.
+    var lock: FailingLock = .{ .cut = 2, .lines = 1, .sink = .init(testing.allocator) };
+    defer lock.sink.deinit();
+    const logger: Logger = try .init(testing.allocator, testing.io, .{ .mode = .{ .queued = .{ .batch_size = 8 } }, .output = .{ .writer = &lock.writer } });
+    defer logger.deinit();
+    defer lock.open.store(true, .seq_cst);
+    logger.info("held", .{});
+    try waitHeld(&lock.entered);
+    logger.info("rec1", .{});
+    logger.info("rec2", .{}); // one batch with rec1
+    lock.open.store(true, .seq_cst);
+    try logger.flush(.none);
+    logger.info("rec3", .{});
+    try logger.flush(.none);
+    const out = lock.sink.written();
+    try testing.expect(std.mem.find(u8, out, "\n\n") == null);
+    var lines = std.mem.splitScalar(u8, out, '\n');
+    try testing.expectStringEndsWith(lines.next().?, "\"message\":\"held\"}");
+    try testing.expectStringEndsWith(lines.next().?, "\"message\":\"rec1\"}");
+    try testing.expectStringEndsWith(lines.next().?, "\"message\":\"rec3\"}");
+    try testing.expectEqualStrings("", lines.rest());
+    const s = logger.stats();
+    try testing.expectEqual(@as(u64, 3), s.written);
+    try testing.expectEqual(@as(u64, 1), s.dropped.write_failed);
+    try testing.expectEqual(@as(u64, 0), s.torn_lines);
+    try testing.expectEqual(@as(u64, 1), s.write_errors);
 }
 
 test "queued: a stdout that stays full drops the batch after a short retry" {
@@ -1608,6 +1776,49 @@ test "queued: a stdout that stays full drops the batch after a short retry" {
     const out = all.written()[filled..];
     try testing.expect(std.mem.startsWith(u8, out, "{\"timestamp\""));
     try testing.expectStringEndsWith(out, "\"message\":\"kept\"}\n");
+}
+
+test "queued: a stdout that is full for a moment keeps the batch" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest; // the test needs POSIX pipes
+    const io = testing.io;
+    const fds = try std.Io.Threaded.pipe2(.{ .NONBLOCK = true });
+    const read_end: std.Io.File = .{ .handle = fds[0], .flags = .{ .nonblocking = true } };
+    const write_end: std.Io.File = .{ .handle = fds[1], .flags = .{ .nonblocking = true } };
+    defer read_end.close(io);
+    defer write_end.close(io);
+    const logger: Logger = try .init(testing.allocator, io, .{ .mode = .{ .queued = .{} } });
+    defer logger.deinit();
+    logger.engine.stdout = write_end;
+    var all: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer all.deinit();
+    // The writer thread meets a full pipe and retries for 10 ms; room comes
+    // a millisecond later. A round in which this thread made room only after
+    // 9 ms tells nothing, as the retries may have run out: it is tried again.
+    for (0..5) |_| {
+        all.clearRetainingCapacity();
+        const filled = try fillPipe(write_end, io);
+        const before = logger.stats();
+        const start = std.Io.Clock.awake.now(io);
+        logger.info("kept", .{});
+        for (0..5000) |_| {
+            if (logger.stats().queue_depth == 0) break; // the writer thread has it
+            try io.sleep(.fromMicroseconds(50), .awake);
+        } else return error.TestTimedOut;
+        try io.sleep(.fromMilliseconds(1), .awake);
+        try readAvailable(read_end, io, &all, std.math.maxInt(usize));
+        const in_time = start.durationTo(std.Io.Clock.awake.now(io)).nanoseconds < 9 * std.time.ns_per_ms;
+        try waitProcessed(logger, before.written + before.dropped.write_failed + 1);
+        try readAvailable(read_end, io, &all, std.math.maxInt(usize));
+        if (!in_time) continue;
+        const s = logger.stats();
+        try testing.expectEqual(before.written + 1, s.written);
+        try testing.expectEqual(before.write_errors, s.write_errors);
+        const out = all.written()[filled..];
+        try testing.expect(std.mem.startsWith(u8, out, "{\"timestamp\""));
+        try testing.expectStringEndsWith(out, "\"message\":\"kept\"}\n");
+        return;
+    }
+    return error.SkipZigTest; // this machine never made room in time
 }
 
 test "queued: a closed stdout is noted on stderr once by the writer thread" {
@@ -1688,6 +1899,109 @@ test "queued: in text the summary of dropped error records is a line of its own"
     var lines = std.mem.splitScalar(u8, lock.sink.written(), '\n');
     _ = lines.next(); // "held"
     try testing.expectStringEndsWith(lines.next().?, " ERROR zefir.log: error records dropped suppressed=1");
+}
+
+/// A buffered writer that holds the writer thread inside its first drain
+/// until `open` is set; drain number `fail_drain` (from 1) fails and loses
+/// what the buffer held, as `FlakyFlush` does.
+const FlakyFlushLock = struct {
+    fail_drain: usize,
+    entered: std.atomic.Value(bool) = .init(false),
+    open: std.atomic.Value(bool) = .init(false),
+    /// The writer thread's alone.
+    drains: usize = 0,
+    sink: std.Io.Writer.Allocating,
+    buffer: [1024]u8 = undefined,
+    writer: std.Io.Writer = undefined,
+
+    fn start(f: *FlakyFlushLock) void {
+        f.writer = .{ .buffer = &f.buffer, .vtable = &.{ .drain = drain } };
+    }
+
+    fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+        const f: *FlakyFlushLock = @alignCast(@fieldParentPtr("writer", w));
+        f.drains += 1;
+        if (f.drains == 1) {
+            f.entered.store(true, .seq_cst);
+            while (!f.open.load(.seq_cst)) std.Thread.yield() catch {};
+        }
+        if (f.drains == f.fail_drain) {
+            w.end = 0;
+            return error.WriteFailed;
+        }
+        f.sink.writer.writeAll(w.buffered()) catch return error.WriteFailed;
+        w.end = 0;
+        var n: usize = 0;
+        for (data[0 .. data.len - 1]) |bytes| {
+            f.sink.writer.writeAll(bytes) catch return error.WriteFailed;
+            n += bytes.len;
+        }
+        for (0..splat) |_| f.sink.writer.writeAll(data[data.len - 1]) catch return error.WriteFailed;
+        return n + data[data.len - 1].len * splat;
+    }
+};
+
+/// Holds the writer thread on "held", fills a queue of 2 and has it refuse
+/// one error record, then lets the writer go and flushes; returns the
+/// stats. `lock` is a `FailingLock` or a `FlakyFlushLock`.
+fn logPastFullQueue(lock: anytype) !Engine.Stats {
+    const logger: Logger = try .init(testing.allocator, testing.io, .{
+        .mode = .{ .queued = .{ .capacity = 2, .batch_size = 1 } },
+        .output = .{ .writer = &lock.writer },
+    });
+    defer logger.deinit();
+    defer lock.open.store(true, .seq_cst);
+    logger.info("held", .{});
+    try waitHeld(&lock.entered);
+    for (0..2) |i| logger.info("queued", .{ .i = i });
+    logger.err("lost", .{}); // refused: the queue is full
+    lock.open.store(true, .seq_cst);
+    try logger.flush(.none);
+    return logger.stats();
+}
+
+/// How the summary of one dropped error record ends.
+const summary_of_one = "\"message\":\"zefir.log: error records dropped\",\"suppressed\":1}";
+
+test "queued: a summary of dropped error records whose write fails keeps its count for the next summary" {
+    // Write 2, the summary after "held", fails with nothing sent.
+    var lock: FailingLock = .{ .cut = 2, .sink = .init(testing.allocator) };
+    defer lock.sink.deinit();
+    const s = try logPastFullQueue(&lock);
+    const out = lock.sink.written();
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, out, summary_of_one));
+    try testing.expectEqual(@as(usize, 4), std.mem.count(u8, out, "\n"));
+    try testing.expectEqual(@as(u64, 1), s.dropped.err);
+    try testing.expectEqual(@as(u64, 1), s.write_errors);
+    try testing.expectEqual(@as(u64, 3), s.written);
+}
+
+test "queued: a summary after a torn line ends that line, and the record after it starts its own" {
+    // Write 1, "held", sends 10 bytes, then the next write fails: its line is torn.
+    var lock: FailingLock = .{ .cut = 1, .extra = 10, .sink = .init(testing.allocator) };
+    defer lock.sink.deinit();
+    const s = try logPastFullQueue(&lock);
+    var lines = std.mem.splitScalar(u8, lock.sink.written(), '\n');
+    try testing.expectEqualStrings("{\"timestam", lines.next().?);
+    const summary = lines.next().?;
+    try testing.expectStringEndsWith(summary, summary_of_one);
+    try testing.expect(try std.json.validate(testing.allocator, summary));
+    try testing.expectStringEndsWith(lines.next().?, "\"message\":\"queued\",\"i\":0}");
+    try testing.expectStringEndsWith(lines.next().?, "\"message\":\"queued\",\"i\":1}");
+    try testing.expectEqualStrings("", lines.rest());
+    try testing.expectEqual(@as(u64, 1), s.torn_lines);
+    try testing.expectEqual(@as(u64, 2), s.written);
+}
+
+test "queued: a summary of dropped error records whose flush fails keeps its count for the next summary" {
+    // Drain 2 is the flush of the summary after "held": it fails.
+    var flaky: FlakyFlushLock = .{ .fail_drain = 2, .sink = .init(testing.allocator) };
+    defer flaky.sink.deinit();
+    flaky.start();
+    const s = try logPastFullQueue(&flaky);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, flaky.sink.written(), summary_of_one));
+    try testing.expectEqual(@as(u64, 1), s.torn_lines);
+    try testing.expectEqual(@as(u64, 3), s.written);
 }
 
 test "queued: logging, waits for room, the error summary, emergency, flush and shutdown never allocate" {

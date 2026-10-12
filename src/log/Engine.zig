@@ -388,21 +388,31 @@ fn waitFor(engine: *Engine, target: u64, subscribers: bool, timeout: Io.Timeout)
     // for the task's own next one.
     const protection = io.swapCancelProtection(.blocked);
     defer _ = io.swapCancelProtection(protection);
-    const deadline = timeout.toDeadline(io);
+    const goal: Goal = .{ .engine = engine, .target = target, .subscribers = subscribers, .deadline = timeout.toDeadline(io) };
     _ = engine.progress_waiters.fetchAdd(1, .seq_cst);
     defer _ = engine.progress_waiters.fetchSub(1, .seq_cst);
-    while (true) {
-        // Read the epoch first: a batch done after this read bumps it, so
-        // the wait below returns at once instead of missing the wake-up.
-        const epoch = engine.progress.load(.seq_cst);
-        if (engine.processed.load(.seq_cst) >= target and
-            (!subscribers or engine.registry.live.load(.seq_cst) == 0)) return;
-        if (deadline.toDurationFromNow(io)) |left| {
+    // `markProcessed` and `subscriberExited` bump `progress`.
+    return Queue.waitUntil(io, &engine.progress, goal.deadline, goal);
+}
+
+/// What `waitFor` waits for; `done` fails with `error.Timeout` once the
+/// deadline has passed.
+const Goal = struct {
+    engine: *Engine,
+    target: u64,
+    subscribers: bool,
+    deadline: Io.Timeout,
+
+    pub fn done(goal: Goal) error{Timeout}!bool {
+        const engine = goal.engine;
+        if (engine.processed.load(.seq_cst) >= goal.target and
+            (!goal.subscribers or engine.registry.live.load(.seq_cst) == 0)) return true;
+        if (goal.deadline.toDurationFromNow(engine.own.io())) |left| {
             if (left.raw.nanoseconds <= 0) return error.Timeout;
         }
-        io.futexWaitTimeout(u32, &engine.progress.raw, epoch, deadline) catch {};
+        return false;
     }
-}
+};
 
 /// For the writer thread: counts `n` more queue positions as written or
 /// dropped, and wakes the `flush` and `shutdown` calls waiting for them.

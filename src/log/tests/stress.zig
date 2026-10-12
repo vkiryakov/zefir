@@ -288,13 +288,17 @@ test "flush after each record: no wake-up of the writer thread or of flush is lo
         .output = .{ .writer = &out.writer },
     });
     defer logger.deinit();
-    // A lost wake-up of flush would wait out the whole timeout, and one of
-    // the writer thread would sleep until its recheck a second later.
+    // A lost wake-up of the writer thread would sleep until its recheck a
+    // second later, past the timeout. One of flush would sleep out the
+    // whole timeout and then find the record written, so each flush is
+    // timed too.
     const patience: std.Io.Timeout = .{ .duration = .{ .raw = .fromMilliseconds(900), .clock = .awake } };
     var buf: [64]u8 = undefined;
     for (0..500) |i| {
         logger.info("stress", .{ .producer = 0, .seq = i, .pattern = pattern(&buf, 0, i) });
+        const start = std.Io.Clock.awake.now(testing.io);
         try logger.flush(patience);
+        try testing.expect(start.durationTo(std.Io.Clock.awake.now(testing.io)).nanoseconds < 800 * std.time.ns_per_ms);
     }
     var oracle: Oracle = .{};
     try oracle.checkAll(out.written(), true);
