@@ -1912,10 +1912,11 @@ test "queued: a stdout that is full for a moment keeps the batch" {
         const before = logger.stats();
         const start = std.Io.Clock.awake.now(io);
         logger.info("kept", .{});
-        for (0..5000) |_| {
-            if (logger.stats().queue_depth == 0) break; // the writer thread has it
+        // Until the writer thread has it; a late pop only makes a late round.
+        while (logger.stats().queue_depth != 0) {
+            if (start.durationTo(std.Io.Clock.awake.now(io)).nanoseconds > 5 * std.time.ns_per_s) return error.TestTimedOut;
             try io.sleep(.fromMicroseconds(50), .awake);
-        } else return error.TestTimedOut;
+        }
         try io.sleep(.fromMilliseconds(1), .awake);
         try readAvailable(read_end, io, &all, std.math.maxInt(usize));
         const in_time = start.durationTo(std.Io.Clock.awake.now(io)).nanoseconds < 9 * std.time.ns_per_ms;
