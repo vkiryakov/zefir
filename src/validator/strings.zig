@@ -132,11 +132,14 @@ fn lengthCallProblem(comptime min: usize, comptime max: usize) ?[]const u8 {
 /// A rule of `kind` that keeps strings of `lo` to `hi` code points; null
 /// stands for no bound on that side.
 fn codePointRule(comptime kind: core.Kind, comptime lo: ?usize, comptime hi: ?usize, comptime args: []const u8, comptime message: []const u8, comptime params: []const core.Param) Rule {
+    const lower: []const core.Bound = if (lo) |n| &.{.atLeast(.code_points, n)} else &.{};
+    const upper: []const core.Bound = if (hi) |n| &.{.atMost(.code_points, n)} else &.{};
     return core.define(kind, .{
         .message = message,
         .args = args,
         .params = params,
         .precondition = core.preconditions.utf8,
+        .bounds = lower ++ upper,
         .fits = lengthFits,
         .eval = struct {
             fn eval(value: anytype) Outcome {
@@ -181,6 +184,7 @@ fn byteRule(comptime kind: core.Kind, comptime n: usize, comptime message: []con
         .message = message,
         .args = core.renderArg(n),
         .params = &.{core.param(name, n)},
+        .bounds = &.{if (kind == .min_bytes) .atLeast(.bytes, n) else .atMost(.bytes, n)},
         .fits = core.fitsString,
         .eval = struct {
             fn eval(value: anytype) Outcome {
@@ -591,6 +595,9 @@ pub fn strongPassword(comptime options: StrongPasswordOptions) Rule {
             core.param("min_symbols", options.min_symbols),
         },
         .precondition = core.preconditions.utf8,
+        // `min_length` is a lower bound on code points, the measure of
+        // `maxLength` and `length`.
+        .bounds = &.{.atLeast(.code_points, options.min_length)},
         .fits = core.fitsString,
         .eval = struct {
             fn eval(value: anytype) Outcome {

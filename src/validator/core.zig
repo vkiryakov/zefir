@@ -1007,14 +1007,30 @@ pub const Measure = enum {
     items,
     /// The number of bytes of a string.
     bytes,
+    /// The number of code points of a string.
+    code_points,
+    /// The date of a string that is a full-date (`minDate` and `maxDate`
+    /// with a date bound).
+    date,
+    /// The instant of a string that is a date-time (`minDate` and `maxDate`
+    /// with a date-time bound).
+    date_time,
 
     /// Bounds on this measure limit the values of the unwrapped field type `T`.
     pub fn applies(comptime measure: Measure, comptime T: type) bool {
         return switch (measure) {
             .value => isNumber(T),
             .items => isListSlice(T),
-            .bytes => isString(T),
+            .bytes, .code_points, .date, .date_time => isString(T),
         };
+    }
+
+    /// Which two rules a contradiction on this measure names: the first
+    /// pair in tuple order for numbers and items; for strings and dates the
+    /// rule with the largest lower bound and the rule with the smallest
+    /// upper bound, the earlier one on ties.
+    fn namesFirstPair(comptime measure: Measure) bool {
+        return measure == .value or measure == .items;
     }
 };
 
@@ -1025,6 +1041,9 @@ pub const Bound = struct {
     side: Side,
     /// The bound as written: `.int` or `.float`.
     value: Value,
+    /// The bound is `value / 10^scale`: a date-time bound keeps every digit of
+    /// its fraction of a second. An exclusive bound is a whole number.
+    scale: comptime_int = 0,
     /// The bound itself passes (`>=`, `<=`) rather than not (`>`, `<`).
     inclusive: bool = true,
 
@@ -1051,18 +1070,32 @@ pub const Bound = struct {
     }
 };
 
-/// The indexes of the first two rules, in tuple order, whose bounds on one
-/// measure let no value of the unwrapped field type `T` pass, or null.
-/// Comparing pairs is enough: a set of lower and upper bounds leaves a value
-/// exactly when every lower bound fits under every upper bound.
+/// The indexes, in tuple order, of two rules whose bounds on one measure let
+/// no value of the unwrapped field type `T` pass, or null. The measures are
+/// checked in their order, and `Measure.namesFirstPair` tells which pair a
+/// contradiction names. Comparing pairs is enough: a set of lower and upper
+/// bounds leaves a value exactly when every lower bound fits under every
+/// upper bound, that is, when the largest lower bound fits under the
+/// smallest upper bound.
 pub fn contradiction(comptime rules: []const Rule, comptime T: type) ?[2]usize {
     @setEvalBranchQuota(eval_quota);
+    inline for (comptime std.enums.values(Measure)) |measure| {
+        if (!comptime measure.applies(T)) continue;
+        const pair = if (measure.namesFirstPair()) firstContradiction(rules, measure, T) else extremeContradiction(rules, measure, T);
+        if (pair != null) return pair;
+    }
+    return null;
+}
+
+/// The first two rules, in tuple order, whose bounds on `measure` let no
+/// value of `T` pass, or null.
+fn firstContradiction(comptime rules: []const Rule, comptime measure: Measure, comptime T: type) ?[2]usize {
     for (rules, 0..) |a, i| {
         for (rules[i + 1 ..], i + 1..) |b, j| {
             for (a.bounds) |x| {
-                if (!x.measure.applies(T)) continue;
+                if (x.measure != measure) continue;
                 for (b.bounds) |y| {
-                    if (x.measure != y.measure or x.side == y.side) continue;
+                    if (y.measure != measure or x.side == y.side) continue;
                     const lower = if (x.side == .lower) x else y;
                     const upper = if (x.side == .lower) y else x;
                     if (!satisfiable(lower, upper, T)) return .{ i, j };
@@ -1073,18 +1106,69 @@ pub fn contradiction(comptime rules: []const Rule, comptime T: type) ?[2]usize {
     return null;
 }
 
+/// The rule with the largest lower bound on `measure` and the rule with the
+/// smallest upper bound, each the earlier one on ties, in tuple order, when
+/// the two bounds let no value of `T` pass; else null.
+fn extremeContradiction(comptime rules: []const Rule, comptime measure: Measure, comptime T: type) ?[2]usize {
+    comptime {
+        const Extreme = struct { index: usize, bound: Bound };
+        var lower: ?Extreme = null;
+        var upper: ?Extreme = null;
+        for (rules, 0..) |rule, i| {
+            for (rule.bounds) |b| {
+                if (b.measure != measure) continue;
+                switch (b.side) {
+                    .lower => if (lower == null or edgeOrder(b, lower.?.bound) == .gt) {
+                        lower = .{ .index = i, .bound = b };
+                    },
+                    .upper => if (upper == null or edgeOrder(b, upper.?.bound) == .lt) {
+                        upper = .{ .index = i, .bound = b };
+                    },
+                }
+            }
+        }
+        const lo = lower orelse return null;
+        const hi = upper orelse return null;
+        if (satisfiable(lo.bound, hi.bound, T)) return null;
+        return if (lo.index < hi.index) .{ lo.index, hi.index } else .{ hi.index, lo.index };
+    }
+}
+
 /// Some value of the measure lies between `lower` and `upper`. A float field
 /// compares the bounds in its own type, as its rules do; counts and integer
-/// fields move an exclusive bound by one.
+/// fields move an exclusive bound by one; other bounds compare exactly.
 fn satisfiable(comptime lower: Bound, comptime upper: Bound, comptime T: type) bool {
     if (lower.measure == .value and isFloat(T)) {
         const lo = boundAs(T, lower.value);
         const hi = boundAs(T, upper.value);
         return lo < hi or (lo == hi and lower.inclusive and upper.inclusive);
     }
-    const lo: comptime_int = if (lower.inclusive) boundInt(lower.value) else boundInt(lower.value) + 1;
-    const hi: comptime_int = if (upper.inclusive) boundInt(upper.value) else boundInt(upper.value) - 1;
-    return lo <= hi;
+    return edgeOrder(lower, upper) != .gt;
+}
+
+/// The order of the least (lower bound) or largest (upper bound) values that
+/// the whole-number or decimal bounds `a` and `b` let pass: an exclusive
+/// bound moves by one.
+fn edgeOrder(comptime a: Bound, comptime b: Bound) std.math.Order {
+    return std.math.order(edge(a) * pow10(b.scale), edge(b) * pow10(a.scale));
+}
+
+/// The least (lower bound) or largest (upper bound) value that `bound` lets
+/// pass, times `10^bound.scale`.
+fn edge(comptime bound: Bound) comptime_int {
+    const x = boundInt(bound.value);
+    if (bound.inclusive) return x;
+    if (bound.scale != 0) @compileError("validator: internal: an exclusive bound is a whole number");
+    return if (bound.side == .lower) x + 1 else x - 1;
+}
+
+/// `10^n`.
+fn pow10(comptime n: comptime_int) comptime_int {
+    comptime {
+        var result: comptime_int = 1;
+        for (0..n) |_| result *= 10;
+        return result;
+    }
 }
 
 /// A bound as a value of the float field type `T`, as `numberAs` converts it.
@@ -3051,6 +3135,59 @@ test "equal bounds, redundant rules and bounds on different measures do not cont
     try std.testing.expectEqual(null, comptime contradiction(&.{ r.min(5), r.maxItems(3) }, u32));
     comptime checkRuleList(&.{ r.min(5), r.max(5) }, i32, "Dto.field_rules.x");
     comptime checkRuleList(&.{ r.notEmpty, r.maxItems(3), r.each(r.positive) }, []const u32, "Dto.field_rules.x");
+}
+
+test "string lengths, byte counts and dates contradict by the largest lower and the smallest upper bound, named in tuple order" {
+    const expect = std.testing.expectEqualStrings;
+    const where = "Dto.field_rules.x";
+    const r = root;
+    const S = []const u8;
+    const head = "validator: Dto.field_rules.x: ";
+    const tail = " contradict; no value can pass";
+    // Code points: minLength, maxLength, length and strongPassword's min_length.
+    try expect(head ++ "min_length(10) and max_length(5)" ++ tail, comptime contradictionText(&.{ r.minLength(10), r.maxLength(5) }, S, where).?);
+    try expect(head ++ "min_length(10) and length(1, 5)" ++ tail, comptime contradictionText(&.{ r.minLength(10), r.length(1, 5) }, S, where).?);
+    try expect(head ++ "length(6, 10) and max_length(5)" ++ tail, comptime contradictionText(&.{ r.length(6, 10), r.maxLength(5) }, S, where).?);
+    try expect(head ++ "length(1, 3) and length(5, 8)" ++ tail, comptime contradictionText(&.{ r.length(1, 3), r.length(5, 8) }, S, where).?);
+    try expect(head ++ "max_length(8) and strong_password(.{...})" ++ tail, comptime contradictionText(&.{ r.maxLength(8), r.strongPassword(.{ .min_length = 12 }) }, S, where).?);
+    try expect(head ++ "length(4, 10) and strong_password(.{...})" ++ tail, comptime contradictionText(&.{ r.length(4, 10), r.strongPassword(.{ .min_length = 12 }) }, S, where).?);
+    // Bytes: minBytes and maxBytes, and empty and notEmpty on a string.
+    try expect(head ++ "min_bytes(10) and max_bytes(5)" ++ tail, comptime contradictionText(&.{ r.minBytes(10), r.maxBytes(5) }, S, where).?);
+    try expect(head ++ "empty and min_bytes(1)" ++ tail, comptime contradictionText(&.{ r.empty, r.minBytes(1) }, S, where).?);
+    try expect(head ++ "min_bytes(1) and empty" ++ tail, comptime contradictionText(&.{ r.minBytes(1), r.empty }, S, where).?);
+    // Dates byte-wise, date-times as UTC instants.
+    try expect(head ++ "min_date(\"2021-01-01\") and max_date(\"2020-12-31\")" ++ tail, comptime contradictionText(&.{ r.minDate("2021-01-01"), r.maxDate("2020-12-31") }, S, where).?);
+    try expect(head ++ "min_date(\"2020-01-01T00:00:00+01:00\") and max_date(\"2019-12-31T22:59:59Z\")" ++ tail, comptime contradictionText(&.{ r.minDate("2020-01-01T00:00:00+01:00"), r.maxDate("2019-12-31T22:59:59Z") }, S, where).?);
+    // The largest lower bound and the smallest upper bound, not the first pair.
+    try expect(head ++ "min_length(10) and max_length(2)" ++ tail, comptime contradictionText(&.{ r.minLength(6), r.maxLength(5), r.minLength(10), r.maxLength(2) }, S, where).?);
+    try expect(head ++ "max_date(\"2019-06-30\") and min_date(\"2020-01-01\")" ++ tail, comptime contradictionText(&.{ r.minDate("2019-07-01"), r.maxDate("2019-06-30"), r.minDate("2020-01-01") }, S, where).?);
+    // On ties the earlier rule: minLength(10) before length(10, 20), the first maxLength(5).
+    try expect(head ++ "max_length(5) and min_length(10)" ++ tail, comptime contradictionText(&.{ r.maxLength(5), r.minLength(10), r.length(10, 20), r.maxLength(5) }, S, where).?);
+}
+
+test "equal bounds, every digit of a fraction, and bounds of different measures or forms on strings" {
+    const r = root;
+    const S = []const u8;
+    try std.testing.expectEqual(null, comptime contradiction(&.{ r.minLength(5), r.maxLength(5) }, S));
+    try std.testing.expectEqual(null, comptime contradiction(&.{ r.length(1, 5), r.length(5, 8) }, S));
+    try std.testing.expectEqual(null, comptime contradiction(&.{ r.maxLength(128), r.strongPassword(.{ .min_length = 12 }) }, S));
+    try std.testing.expectEqual(null, comptime contradiction(&.{ r.notEmpty, r.minBytes(5), r.maxBytes(5) }, S));
+    try std.testing.expectEqual(null, comptime contradiction(&.{ r.minDate("2020-01-01"), r.maxDate("2020-01-01") }, S));
+    // Equal instants: .5 is .50, and 01:00+01:00 is 00:00Z.
+    try std.testing.expectEqual(null, comptime contradiction(&.{ r.minDate("2020-01-01T00:00:00.5Z"), r.maxDate("2020-01-01T00:00:00.50Z") }, S));
+    try std.testing.expectEqual(null, comptime contradiction(&.{ r.minDate("2020-01-01T01:00:00+01:00"), r.maxDate("2020-01-01T00:00:00Z") }, S));
+    // Every digit of the fraction counts, the tenth too.
+    try std.testing.expectEqual([2]usize{ 0, 1 }, comptime contradiction(&.{ r.minDate("2020-01-01T00:00:00.0000000001Z"), r.maxDate("2020-01-01T00:00:00Z") }, S).?);
+    try std.testing.expectEqual(null, comptime contradiction(&.{ r.minDate("2020-01-01T00:00:00.0000000001Z"), r.maxDate("2020-01-01T00:00:00.00000000010Z") }, S));
+    // The leap second 23:59:60 comes after 23:59:59 and before the next day.
+    try std.testing.expectEqual(null, comptime contradiction(&.{ r.minDate("2016-12-31T23:59:60Z"), r.maxDate("2016-12-31T23:59:60.5Z") }, S));
+    try std.testing.expectEqual([2]usize{ 0, 1 }, comptime contradiction(&.{ r.minDate("2016-12-31T23:59:60Z"), r.maxDate("2016-12-31T23:59:59.9Z") }, S).?);
+    try std.testing.expectEqual([2]usize{ 0, 1 }, comptime contradiction(&.{ r.minDate("2017-01-01T00:00:00Z"), r.maxDate("2016-12-31T23:59:60Z") }, S).?);
+    // Different measures and forms are never compared.
+    try std.testing.expectEqual(null, comptime contradiction(&.{ r.minLength(10), r.maxBytes(5) }, S));
+    try std.testing.expectEqual(null, comptime contradiction(&.{ r.empty, r.minLength(1) }, S));
+    try std.testing.expectEqual(null, comptime contradiction(&.{ r.minDate("2021-01-01"), r.maxDate("2020-12-31T00:00:00Z") }, S));
+    comptime checkRuleList(&.{ r.minLength(5), r.maxLength(5), r.maxBytes(20) }, S, "Dto.field_rules.x");
 }
 
 test "coerces accepts the conversions v.custom documents and nothing else" {

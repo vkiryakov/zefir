@@ -75,6 +75,18 @@ const SignUp = struct {
   never decode, and have no precondition: a byte of invalid UTF-8 is a byte.
 - **No transformations.** The rules only read the value: no trimming, no case
   folding and no Unicode normalization.
+- **Contradictions are compile errors.** Bounds of one measure in one tuple
+  that let no value pass do not compile
+  ([D60](class_validator.md#deviations-from-validatorjs)).
+  Code points: the lower bounds `v.minLength(a)`, `v.length(a, _)` and the
+  `.min_length` of `v.strongPassword`, the upper bounds `v.maxLength(b)` and
+  `v.length(_, b)`. Bytes: the lower bounds `v.minBytes(a)` and `v.notEmpty`
+  (1 byte), the upper bounds `v.maxBytes(b)` and `v.empty` (0 bytes). The error
+  names the rule with the largest lower bound and the rule with the smallest
+  upper bound (the earlier one on ties), in tuple order. Equal bounds are fine
+  (`.{ v.minLength(5), v.maxLength(5) }`), and bounds of different measures are
+  not compared: `.{ v.minLength(10), v.maxBytes(5) }` compiles, though no value
+  can pass.
 - **`""`** passes the character classes (`v.utf8`, `v.ascii`, `v.printableAscii`,
   `v.alphanumeric`, `v.alpha`, `v.digits`, `v.lowercase`, `v.uppercase`),
   `v.notContains`, `v.maxLength` and `v.maxBytes`, and fails the others. To
@@ -137,7 +149,7 @@ A string has at least `min` characters (code points).
 - **Placeholders:** `{min}`: the count, in decimal.
 - **Predicate:** none.
 - **Complexity:** O(n), one pass that validates and counts; allocates nothing.
-- **Deviations:** [D12](class_validator.md#deviations-from-validatorjs), [D13](class_validator.md#deviations-from-validatorjs), [D61](class_validator.md#deviations-from-validatorjs).
+- **Deviations:** [D12](class_validator.md#deviations-from-validatorjs), [D13](class_validator.md#deviations-from-validatorjs), [D60](class_validator.md#deviations-from-validatorjs), [D61](class_validator.md#deviations-from-validatorjs).
 
 Compile errors (`<Type>.field_rules.<field>` is the entry of your struct):
 
@@ -148,6 +160,8 @@ validator: <Type>.field_rules.<field>: min_length expects a string, field is [4]
 validator: <Type>.field_rules.<field>: min_length expects a string, field is []const []const u8; use v.each(v.minLength(3))
 validator: <Type>.field_rules.<field>: min_length expects a string, field is []const u32; for the number of items use v.minItems(3)
 validator: <Type>.field_rules.<field>: minLength must be called, e.g. v.minLength(1)
+validator: <Type>.field_rules.<field>: min_length(10) and max_length(5) contradict; no value can pass
+validator: <Type>.field_rules.<field>: min_length(10) and length(1, 5) contradict; no value can pass
 ```
 
 Examples:
@@ -178,7 +192,7 @@ A string has at most `max` characters (code points).
 - **Placeholders:** `{max}`: the count, in decimal.
 - **Predicate:** none.
 - **Complexity:** O(n), one pass; allocates nothing.
-- **Deviations:** [D12](class_validator.md#deviations-from-validatorjs), [D13](class_validator.md#deviations-from-validatorjs), [D61](class_validator.md#deviations-from-validatorjs).
+- **Deviations:** [D12](class_validator.md#deviations-from-validatorjs), [D13](class_validator.md#deviations-from-validatorjs), [D60](class_validator.md#deviations-from-validatorjs), [D61](class_validator.md#deviations-from-validatorjs).
 
 Compile errors:
 
@@ -216,7 +230,7 @@ A string has from `min` to `max` characters (code points).
 - **Placeholders:** `{min}` and `{max}`: the counts, in decimal.
 - **Predicate:** none.
 - **Complexity:** O(n), one pass; allocates nothing.
-- **Deviations:** [D12](class_validator.md#deviations-from-validatorjs), [D13](class_validator.md#deviations-from-validatorjs), [D61](class_validator.md#deviations-from-validatorjs).
+- **Deviations:** [D12](class_validator.md#deviations-from-validatorjs), [D13](class_validator.md#deviations-from-validatorjs), [D60](class_validator.md#deviations-from-validatorjs), [D61](class_validator.md#deviations-from-validatorjs).
 
 Compile errors:
 
@@ -226,6 +240,8 @@ validator: length(0, 0): min must be at least 1; use v.empty
 validator: length(5, 3): min is greater than max
 validator: <Type>.field_rules.<field>: length expects a string, field is []const u32; for the number of items use v.minItems(3) and v.maxItems(32)
 validator: <Type>.field_rules.<field>: length must be called, e.g. v.length(1, 100)
+validator: <Type>.field_rules.<field>: length(6, 10) and max_length(5) contradict; no value can pass
+validator: <Type>.field_rules.<field>: length(1, 3) and length(5, 8) contradict; no value can pass
 ```
 
 Examples:
@@ -253,7 +269,7 @@ A string has at least `min` bytes.
 - **Placeholders:** `{min}`: the count, in decimal.
 - **Predicate:** none.
 - **Complexity:** O(1); allocates nothing.
-- **Deviations:** [D23](class_validator.md#deviations-from-validatorjs), [D61](class_validator.md#deviations-from-validatorjs).
+- **Deviations:** [D23](class_validator.md#deviations-from-validatorjs), [D60](class_validator.md#deviations-from-validatorjs), [D61](class_validator.md#deviations-from-validatorjs).
 
 [v.notEmpty](common.md#vnotempty) is the same check as `v.minBytes(1)` with its
 own code.
@@ -264,6 +280,8 @@ Compile errors:
 validator: minBytes(0): min must be at least 1 (minBytes(0) is always true; remove it)
 validator: <Type>.field_rules.<field>: min_bytes expects a string, field is u32
 validator: <Type>.field_rules.<field>: minBytes must be called, e.g. v.minBytes(1)
+validator: <Type>.field_rules.<field>: min_bytes(10) and max_bytes(5) contradict; no value can pass
+validator: <Type>.field_rules.<field>: empty and min_bytes(1) contradict; no value can pass
 ```
 
 Examples:
@@ -291,7 +309,7 @@ A string has at most `max` bytes.
 - **Placeholders:** `{max}`: the count, in decimal.
 - **Predicate:** none.
 - **Complexity:** O(1); allocates nothing.
-- **Deviations:** [D23](class_validator.md#deviations-from-validatorjs), [D61](class_validator.md#deviations-from-validatorjs).
+- **Deviations:** [D23](class_validator.md#deviations-from-validatorjs), [D60](class_validator.md#deviations-from-validatorjs), [D61](class_validator.md#deviations-from-validatorjs).
 
 Put first in a tuple, it caps the work of the rules after it:
 `.{ v.maxBytes(1024), v.maxLength(256) }`. The byte length of class-validator,
@@ -752,7 +770,7 @@ pub const StrongPasswordOptions = struct {
   string passes, `""` included; `false` on invalid UTF-8.
 - **Complexity:** O(n): a validation pass and a counting pass; allocates
   nothing.
-- **Deviations:** [D13](class_validator.md#deviations-from-validatorjs), [D31](class_validator.md#deviations-from-validatorjs).
+- **Deviations:** [D13](class_validator.md#deviations-from-validatorjs), [D31](class_validator.md#deviations-from-validatorjs), [D60](class_validator.md#deviations-from-validatorjs).
 
 NIST SP 800-63B counts every code point as a character of a password and
 advises against required mixes of classes. For a length rule only, use
@@ -767,6 +785,8 @@ validator: strongPassword(.{...}): every minimum is 0, so every string passes; s
 validator: strongPassword(.{...}): min_length = 3 is less than the 4 characters the other minima already require; set min_length to at least 4
 validator: <Type>.field_rules.<field>: strong_password expects a string, field is []const []const u8; use v.each(v.strongPassword(.{...}))
 validator: <Type>.field_rules.<field>: strongPassword must be called, e.g. v.strongPassword(.{})
+validator: <Type>.field_rules.<field>: max_length(8) and strong_password(.{...}) contradict; no value can pass
+validator: <Type>.field_rules.<field>: length(4, 10) and strong_password(.{...}) contradict; no value can pass
 ```
 
 An option the struct does not have, such as validator.js's `minLength`, is Zig's

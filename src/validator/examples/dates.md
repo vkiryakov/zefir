@@ -231,8 +231,9 @@ A date or a date-time not before `min`.
   nothing.
 - **Deviations:** [D57](class_validator.md#deviations-from-validatorjs) (a
   string bound fixed at compile time; the value needs the bound's form; exact
-  instants), [D61](class_validator.md#deviations-from-validatorjs)
-  (`v.minDate("0000-01-01")` is a compile error).
+  instants), [D60](class_validator.md#deviations-from-validatorjs)
+  (a bound after a `v.maxDate` bound is a compile error),
+  [D61](class_validator.md#deviations-from-validatorjs) (`v.minDate("0000-01-01")` is a compile error).
 
 A date-time bound needs date-time values with an offset; the forms do not mix,
 since a date has no time zone. Next to `v.rfc3339` a date bound, next to
@@ -240,6 +241,14 @@ since a date has no time zone. Next to `v.rfc3339` a date bound, next to
 the other form leave no value that passes: these are compile errors, and so
 is `v.iso8601` next to a bound, since most of its values would fail the
 bound's form.
+
+Bounds of one form that leave no value are a compile error too
+([D60](class_validator.md#deviations-from-validatorjs)): a `v.minDate` bound after a `v.maxDate`
+bound of the same form. Every pair is checked, dates by the calendar and
+date-times as exact instants, every digit of the fraction included; the error
+names the latest `v.minDate` and the earliest `v.maxDate` bound (the earlier
+rule on ties), in tuple order. Equal bounds are fine:
+`.{ v.minDate("2020-01-01"), v.maxDate("2020-01-01") }` accepts one day.
 
 Compile errors (`<Type>.field_rules.<field>` is the entry of your struct):
 
@@ -253,6 +262,8 @@ validator: <Type>.field_rules.<field>: min_date expects a string, field is []con
 validator: <Type>.field_rules.<field>: rfc3339 and min_date("2020-01-01") need different forms (date-time vs date); no value can pass
 validator: <Type>.field_rules.<field>: min_date("2020-01-01") accepts only the form of its bound, so most iso8601 values would fail it; use v.date instead of v.iso8601
 validator: <Type>.field_rules.<field>: minDate must be called, e.g. v.minDate("2020-01-01")
+validator: <Type>.field_rules.<field>: min_date("2021-01-01") and max_date("2020-12-31") contradict; no value can pass
+validator: <Type>.field_rules.<field>: min_date("2020-01-01T00:00:00+01:00") and max_date("2019-12-31T22:59:59Z") contradict; no value can pass
 ```
 
 Examples:
@@ -288,11 +299,13 @@ A date or a date-time not after `max`.
 - **Complexity:** O(n); the bound is parsed at compile time; allocates
   nothing.
 - **Deviations:** [D57](class_validator.md#deviations-from-validatorjs),
-  [D61](class_validator.md#deviations-from-validatorjs)
+  [D60](class_validator.md#deviations-from-validatorjs) (a bound before a `v.minDate` bound is a
+  compile error), [D61](class_validator.md#deviations-from-validatorjs)
   (`v.maxDate("9999-12-31")` is a compile error).
 
-Next to other rules, `v.maxDate` behaves as `v.minDate`: forms do not mix, and
-`v.iso8601` next to it is a compile error.
+Next to other rules, `v.maxDate` behaves as `v.minDate`: forms do not mix,
+`v.iso8601` next to it is a compile error, and so is a bound before a
+`v.minDate` bound of the same form.
 
 Compile errors (`<Type>.field_rules.<field>` is the entry of your struct):
 

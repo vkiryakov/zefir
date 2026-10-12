@@ -296,6 +296,7 @@ fn boundRule(comptime kind: core.Kind, comptime bound: []const u8) Rule {
         .args = core.renderArg(bound),
         .params = &.{core.param(if (is_min) "min" else "max", bound)},
         .precondition = if (parsed == .date) core.preconditions.date else core.preconditions.rfc3339,
+        .bounds = &.{contradictionBound(is_min, parsed)},
         .fits = fitsBound,
         .check_list = checkBoundList,
         .eval = struct {
@@ -310,6 +311,38 @@ fn boundRule(comptime kind: core.Kind, comptime bound: []const u8) Rule {
             }
         }.eval,
     });
+}
+
+/// The bound of `minDate` (`is_min`) or `maxDate` that the contradiction
+/// check compares with the other bounds of the same form: a date as the
+/// number `YYYYMMDD`, which orders as the calendar does; a date-time as its
+/// exact UTC instant, on a scale of 86,401 seconds a day (the leap second
+/// 23:59:60 included), with every digit of its fraction.
+fn contradictionBound(comptime is_min: bool, comptime parsed: Bound) core.Bound {
+    const side: core.Bound.Side = if (is_min) .lower else .upper;
+    return switch (parsed) {
+        .date => |text| .{
+            .measure = .date,
+            .side = side,
+            .value = .{ .int = @as(comptime_int, digitsAt(text, 0, 4).?) * 10000 + @as(comptime_int, digitsAt(text, 5, 2).?) * 100 + @as(comptime_int, digitsAt(text, 8, 2).?) },
+        },
+        .date_time => |instant| .{
+            .measure = .date_time,
+            .side = side,
+            .value = .{ .int = instantNumber(instant) },
+            .scale = instant.fraction.len,
+        },
+    };
+}
+
+/// `instant` as `(days * 86401 + second) * 10^n + fraction`, where `n` is
+/// the number of digits of its fraction.
+fn instantNumber(comptime instant: Instant) comptime_int {
+    comptime {
+        var n: comptime_int = @as(comptime_int, instant.days) * 86401 + @as(comptime_int, instant.second);
+        for (instant.fraction) |c| n = n * 10 + @as(comptime_int, c - '0');
+        return n;
+    }
 }
 
 /// The field-type check of `minDate` and `maxDate`.

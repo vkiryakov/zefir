@@ -319,7 +319,7 @@ A string has no bytes; a list has no items.
   empty slice passes), [D61](class_validator.md#deviations-from-validatorjs) (a
   fixed-length array is a compile error),
   [D60](class_validator.md#deviations-from-validatorjs) (`v.empty` with
-  `v.notEmpty` or `v.minItems(1)` is a compile error).
+  `v.notEmpty`, `v.minItems(1)` or `v.minBytes(1)` is a compile error).
 
 Compile errors (`<Type>.field_rules.<field>` is the entry of your struct):
 
