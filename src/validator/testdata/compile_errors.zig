@@ -140,6 +140,9 @@ pub const list = [_]Fixture{
     .{ .file = "src/validator/testdata/compile_errors/length_zero_min.zig", .expect = "validator: length(0, 5): min must be at least 1; use v.maxLength(5)", .row = "length-1" },
     .{ .file = "src/validator/testdata/compile_errors/length_inverted.zig", .expect = "validator: length(5, 3): min is greater than max", .row = "length-3" },
     .{ .file = "src/validator/testdata/compile_errors/min_length_uncalled.zig", .expect = "validator: min_length_uncalled.Bad.field_rules.x: minLength must be called, e.g. v.minLength(1)", .row = "minLength-10" },
+    .{ .file = "src/validator/testdata/compile_errors/ascii_on_int.zig", .expect = "validator: ascii_on_int.Bad.field_rules.x: ascii expects a string, field is u32", .row = "ascii-1" },
+    .{ .file = "src/validator/testdata/compile_errors/digits_on_int.zig", .expect = "validator: digits_on_int.Bad.field_rules.x: digits expects a string, field is u32; the field is already a number: use v.min, v.max or v.range", .row = "digits-4" },
+    .{ .file = "src/validator/testdata/compile_errors/predicate_as_rule.zig", .expect = "validator: predicate_as_rule.Bad.field_rules.x: expected a rule, got the predicate isAlpha; use the rule v.alpha", .row = "G-25" },
     // minItems and maxItems: one fixture per kind of error; the text of every
     // catalog row is checked by the tests of lists.zig
     .{ .file = "src/validator/testdata/compile_errors/min_items_zero.zig", .expect = "validator: minItems(0): min must be at least 1 (minItems(0) is always true; remove it)", .row = "minItems-1" },

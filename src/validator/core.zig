@@ -1586,6 +1586,8 @@ pub const hints = struct {
     pub const max_items_on_string = "for strings use v.maxLength or v.maxBytes";
     /// `minLength(0)`, which every valid UTF-8 string passes.
     pub const use_utf8 = "use v.utf8 to require valid UTF-8";
+    /// `digits` on an integer or a float field.
+    pub const number_field = "the field is already a number: use v.min, v.max or v.range";
 
     /// A rule written on a list whose items it would accept.
     pub fn useEach(comptime rule: Rule) []const u8 {
@@ -1664,20 +1666,6 @@ pub const pending_kinds = [_]Kind{
     .unique_by,
     .contains_all,
     .contains_none,
-    // PR 2a
-    .utf8,
-    .not_blank,
-    .ascii,
-    .printable_ascii,
-    .alphanumeric,
-    .alpha,
-    .digits,
-    .lowercase,
-    .uppercase,
-    .multibyte,
-    .full_width,
-    .half_width,
-    .variable_width,
     // PR 2b
     .contains,
     .not_contains,

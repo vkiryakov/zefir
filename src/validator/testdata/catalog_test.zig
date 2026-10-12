@@ -277,6 +277,110 @@ test "maxBytes is a rule constructor with code validation.max_bytes and message 
     try expectNoViolation([]const u8, v.maxBytes(3), "\xff\xff\xff");
 }
 
+test "utf8 is a rule value with code validation.utf8 and message \"must be valid UTF-8\"" {
+    try testing.expect(@hasDecl(v, "utf8"));
+    try testing.expect(@TypeOf(v.utf8) == v.Rule);
+    try expectRule(v.utf8, "validation.utf8", "must be valid UTF-8", "must be valid UTF-8");
+    try expectViolation([]const u8, v.utf8, "\xff", "validation.utf8", "must be valid UTF-8", "x");
+    try expectNoViolation([]const u8, v.utf8, "");
+}
+
+test "notBlank is a rule value with code validation.not_blank and message \"must not be blank\"" {
+    try testing.expect(@hasDecl(v, "notBlank"));
+    try testing.expect(@TypeOf(v.notBlank) == v.Rule);
+    try expectRule(v.notBlank, "validation.not_blank", "must not be blank", "must not be blank");
+    try expectViolation([]const u8, v.notBlank, " \u{3000}", "validation.not_blank", "must not be blank", "x");
+    try expectNoViolation([]const u8, v.notBlank, " a ");
+}
+
+test "ascii is a rule value with code validation.ascii and message \"must contain only ASCII characters\"" {
+    try testing.expect(@hasDecl(v, "ascii"));
+    try testing.expect(@TypeOf(v.ascii) == v.Rule);
+    try expectRule(v.ascii, "validation.ascii", "must contain only ASCII characters", "must contain only ASCII characters");
+    try expectViolation([]const u8, v.ascii, "caf\u{E9}", "validation.ascii", "must contain only ASCII characters", "x");
+    try expectNoViolation([]const u8, v.ascii, "");
+}
+
+test "printableAscii is a rule value with code validation.printable_ascii and message \"must contain only printable ASCII characters\"" {
+    try testing.expect(@hasDecl(v, "printableAscii"));
+    try testing.expect(@TypeOf(v.printableAscii) == v.Rule);
+    try expectRule(v.printableAscii, "validation.printable_ascii", "must contain only printable ASCII characters", "must contain only printable ASCII characters");
+    try expectViolation([]const u8, v.printableAscii, "a\tb", "validation.printable_ascii", "must contain only printable ASCII characters", "x");
+    try expectNoViolation([]const u8, v.printableAscii, "a b");
+}
+
+test "alphanumeric is a rule value with code validation.alphanumeric and message \"must contain only ASCII letters and digits\"" {
+    try testing.expect(@hasDecl(v, "alphanumeric"));
+    try testing.expect(@TypeOf(v.alphanumeric) == v.Rule);
+    try expectRule(v.alphanumeric, "validation.alphanumeric", "must contain only ASCII letters and digits", "must contain only ASCII letters and digits");
+    try expectViolation([]const u8, v.alphanumeric, "a_1", "validation.alphanumeric", "must contain only ASCII letters and digits", "x");
+    try expectNoViolation([]const u8, v.alphanumeric, "a1");
+}
+
+test "alpha is a rule value with code validation.alpha and message \"must contain only ASCII letters\"" {
+    try testing.expect(@hasDecl(v, "alpha"));
+    try testing.expect(@TypeOf(v.alpha) == v.Rule);
+    try expectRule(v.alpha, "validation.alpha", "must contain only ASCII letters", "must contain only ASCII letters");
+    try expectViolation([]const u8, v.alpha, "a1", "validation.alpha", "must contain only ASCII letters", "x");
+    try expectNoViolation([]const u8, v.alpha, "Ab");
+}
+
+test "digits is a rule value with code validation.digits and message \"must contain only ASCII digits\"" {
+    try testing.expect(@hasDecl(v, "digits"));
+    try testing.expect(@TypeOf(v.digits) == v.Rule);
+    try expectRule(v.digits, "validation.digits", "must contain only ASCII digits", "must contain only ASCII digits");
+    try expectViolation([]const u8, v.digits, "-1", "validation.digits", "must contain only ASCII digits", "x");
+    try expectNoViolation([]const u8, v.digits, "0123");
+}
+
+test "lowercase is a rule value with code validation.lowercase and message \"must be lowercase\"" {
+    try testing.expect(@hasDecl(v, "lowercase"));
+    try testing.expect(@TypeOf(v.lowercase) == v.Rule);
+    try expectRule(v.lowercase, "validation.lowercase", "must be lowercase", "must be lowercase");
+    try expectViolation([]const u8, v.lowercase, "aB", "validation.lowercase", "must be lowercase", "x");
+    try expectNoViolation([]const u8, v.lowercase, "ab-1");
+}
+
+test "uppercase is a rule value with code validation.uppercase and message \"must be uppercase\"" {
+    try testing.expect(@hasDecl(v, "uppercase"));
+    try testing.expect(@TypeOf(v.uppercase) == v.Rule);
+    try expectRule(v.uppercase, "validation.uppercase", "must be uppercase", "must be uppercase");
+    try expectViolation([]const u8, v.uppercase, "Ab", "validation.uppercase", "must be uppercase", "x");
+    try expectNoViolation([]const u8, v.uppercase, "AB-1");
+}
+
+test "multibyte is a rule value with code validation.multibyte and message \"must contain at least one non-ASCII character\"" {
+    try testing.expect(@hasDecl(v, "multibyte"));
+    try testing.expect(@TypeOf(v.multibyte) == v.Rule);
+    try expectRule(v.multibyte, "validation.multibyte", "must contain at least one non-ASCII character", "must contain at least one non-ASCII character");
+    try expectViolation([]const u8, v.multibyte, "abc", "validation.multibyte", "must contain at least one non-ASCII character", "x");
+    try expectNoViolation([]const u8, v.multibyte, "caf\u{E9}");
+}
+
+test "fullWidth is a rule value with code validation.full_width and message \"must contain at least one full-width character\"" {
+    try testing.expect(@hasDecl(v, "fullWidth"));
+    try testing.expect(@TypeOf(v.fullWidth) == v.Rule);
+    try expectRule(v.fullWidth, "validation.full_width", "must contain at least one full-width character", "must contain at least one full-width character");
+    try expectViolation([]const u8, v.fullWidth, "\u{FF71}", "validation.full_width", "must contain at least one full-width character", "x");
+    try expectNoViolation([]const u8, v.fullWidth, "\u{3042}");
+}
+
+test "halfWidth is a rule value with code validation.half_width and message \"must contain at least one half-width character\"" {
+    try testing.expect(@hasDecl(v, "halfWidth"));
+    try testing.expect(@TypeOf(v.halfWidth) == v.Rule);
+    try expectRule(v.halfWidth, "validation.half_width", "must contain at least one half-width character", "must contain at least one half-width character");
+    try expectViolation([]const u8, v.halfWidth, "\u{3042}", "validation.half_width", "must contain at least one half-width character", "x");
+    try expectNoViolation([]const u8, v.halfWidth, "\u{FF71}");
+}
+
+test "variableWidth is a rule value with code validation.variable_width and message \"must contain both full-width and half-width characters\"" {
+    try testing.expect(@hasDecl(v, "variableWidth"));
+    try testing.expect(@TypeOf(v.variableWidth) == v.Rule);
+    try expectRule(v.variableWidth, "validation.variable_width", "must contain both full-width and half-width characters", "must contain both full-width and half-width characters");
+    try expectViolation([]const u8, v.variableWidth, "\u{3042}", "validation.variable_width", "must contain both full-width and half-width characters", "x");
+    try expectNoViolation([]const u8, v.variableWidth, "\u{3042}a");
+}
+
 /// `rules` fail an invalid UTF-8 value with the utf8 precondition on every
 /// kind of string field.
 fn expectUtf8Precondition(comptime rules: anytype) !void {
@@ -303,6 +407,32 @@ test "maxLength on a string field fails invalid UTF-8 with the utf8 precondition
 test "length on a string field fails invalid UTF-8 with the utf8 precondition, also under withMessage" {
     try expectUtf8Precondition(v.length(1, 10));
     try expectUtf8Precondition(v.length(1, 10).withMessage("another message"));
+}
+
+test "notBlank on a string field fails invalid UTF-8 with the utf8 precondition, also under withMessage" {
+    try expectUtf8Precondition(v.notBlank);
+    try expectUtf8Precondition(v.notBlank.withMessage("another message"));
+}
+
+test "fullWidth on a string field fails invalid UTF-8 with the utf8 precondition, also under withMessage" {
+    try expectUtf8Precondition(v.fullWidth);
+    try expectUtf8Precondition(v.fullWidth.withMessage("another message"));
+}
+
+test "halfWidth on a string field fails invalid UTF-8 with the utf8 precondition, also under withMessage" {
+    try expectUtf8Precondition(v.halfWidth);
+    try expectUtf8Precondition(v.halfWidth.withMessage("another message"));
+}
+
+test "variableWidth on a string field fails invalid UTF-8 with the utf8 precondition, also under withMessage" {
+    try expectUtf8Precondition(v.variableWidth);
+    try expectUtf8Precondition(v.variableWidth.withMessage("another message"));
+}
+
+test "utf8 has no precondition: invalid UTF-8 fails its own check, so withMessage changes its message" {
+    try expectViolation([]const u8, v.utf8, "a\xff", "validation.utf8", "must be valid UTF-8", "x");
+    try expectViolation([]const u8, v.utf8.withMessage("another message"), "a\xff", "validation.utf8", "another message", "x");
+    try expectNoViolation([]const u8, v.utf8, "\u{10FFFF}");
 }
 
 test "minItems is a rule constructor with code validation.min_items and message \"must have at least {min} items\", or \"must have at least 1 item\" when min = 1; placeholder {min}" {
@@ -469,8 +599,8 @@ test "finite has no precondition: nan, inf and -inf on a float field fail its ow
     }
 }
 
-test "the module exports exactly its 34 public names, and Rule.withMessage" {
-    const names = [_][]const u8{ "Violation", "Rule", "Report", "max_code_bytes", "max_message_bytes", "max_report_violations", "check", "checkAll", "assertRules", "fail", "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "minLength", "maxLength", "length", "minBytes", "maxBytes", "minItems", "maxItems", "each", "custom" };
+test "the module exports exactly its 60 public names, and Rule.withMessage" {
+    const names = [_][]const u8{ "Violation", "Rule", "Report", "max_code_bytes", "max_message_bytes", "max_report_violations", "check", "checkAll", "assertRules", "fail", "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "minLength", "maxLength", "length", "minBytes", "maxBytes", "utf8", "notBlank", "ascii", "printableAscii", "alphanumeric", "alpha", "digits", "lowercase", "uppercase", "multibyte", "fullWidth", "halfWidth", "variableWidth", "isUtf8", "isNotBlank", "isAscii", "isPrintableAscii", "isAlphanumeric", "isAlpha", "isDigits", "isLowercase", "isUppercase", "isMultibyte", "isFullWidth", "isHalfWidth", "isVariableWidth", "minItems", "maxItems", "each", "custom" };
     inline for (names) |name| try testing.expect(@hasDecl(v, name));
     try testing.expectEqual(names.len, comptime std.meta.declarations(v).len);
     try testing.expect(@hasDecl(v.Rule, "withMessage"));
@@ -478,7 +608,7 @@ test "the module exports exactly its 34 public names, and Rule.withMessage" {
 
 test "every rule the module exports has a catalog test" {
     @setEvalBranchQuota(100_000);
-    const tested = [_][]const u8{ "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "minLength", "maxLength", "length", "minBytes", "maxBytes", "minItems", "maxItems", "each", "custom" };
+    const tested = [_][]const u8{ "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "minLength", "maxLength", "length", "minBytes", "maxBytes", "utf8", "notBlank", "ascii", "printableAscii", "alphanumeric", "alpha", "digits", "lowercase", "uppercase", "multibyte", "fullWidth", "halfWidth", "variableWidth", "minItems", "maxItems", "each", "custom" };
     inline for (comptime std.meta.declarations(v)) |name| {
         const T = @TypeOf(@field(v, name));
         if (comptime T == v.Rule or (@typeInfo(T) == .@"fn" and @typeInfo(T).@"fn".return_type == v.Rule)) {
@@ -495,7 +625,7 @@ test "every rule the module exports has a catalog test" {
 
 test "the module exports exactly the catalog predicates of the shipped rules" {
     @setEvalBranchQuota(100_000);
-    const predicates = [_][]const u8{};
+    const predicates = [_][]const u8{ "isUtf8", "isNotBlank", "isAscii", "isPrintableAscii", "isAlphanumeric", "isAlpha", "isDigits", "isLowercase", "isUppercase", "isMultibyte", "isFullWidth", "isHalfWidth", "isVariableWidth" };
     comptime var exported: usize = 0;
     inline for (comptime std.meta.declarations(v)) |name| {
         if (comptime name.len > 2 and std.mem.startsWith(u8, name, "is") and std.ascii.isUpper(name[2])) {

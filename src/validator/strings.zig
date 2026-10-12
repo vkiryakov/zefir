@@ -1,8 +1,17 @@
 //! String rules: the length of a string in code points (`minLength`,
-//! `maxLength`, `length`) or in bytes (`minBytes`, `maxBytes`). A string is a
-//! slice of u8 (`core.isString`). The rules that count code points validate
-//! the whole value first and fail invalid UTF-8 with the precondition
-//! `validation.utf8` / "must be valid UTF-8"; the byte rules never decode.
+//! `maxLength`, `length`) or in bytes (`minBytes`, `maxBytes`); `utf8` and
+//! `notBlank`; the ASCII classes (`ascii`, `printableAscii`, `alphanumeric`,
+//! `alpha`, `digits`, `lowercase`, `uppercase`) and `multibyte`; and the
+//! widths of validator.js (`fullWidth`, `halfWidth`, `variableWidth`). A
+//! string is a slice of u8 (`core.isString`).
+//!
+//! The rules that read code points (`minLength`, `maxLength`, `length`,
+//! `notBlank` and the width rules) validate the whole value first and fail
+//! invalid UTF-8 with the precondition `validation.utf8` / "must be valid
+//! UTF-8"; the others read bytes and never decode. Every rule without a
+//! parameter has a public predicate `is<Name>` that answers what the rule
+//! does, with `false` for invalid UTF-8 where the rule reports the
+//! precondition.
 const std = @import("std");
 const core = @import("core.zig");
 const Rule = core.Rule;
@@ -29,6 +38,12 @@ fn stringProblem(comptime rule: *const Rule, comptime T: type, comptime where: [
 /// array has a fixed length, so it gets none).
 fn lengthFits(comptime rule: *const Rule, comptime T: type, comptime where: []const u8) void {
     const hint = if (core.isListSlice(T)) core.hints.itemCount(rule.*) else null;
+    if (stringProblem(rule, T, where, hint)) |text| @compileError(text);
+}
+
+/// The field-type check of `digits`: a number field is already a number.
+fn digitsFits(comptime rule: *const Rule, comptime T: type, comptime where: []const u8) void {
+    const hint = if (core.isNumber(T)) core.hints.number_field else null;
     if (stringProblem(rule, T, where, hint)) |text| @compileError(text);
 }
 
@@ -151,6 +166,240 @@ fn byteRule(comptime kind: core.Kind, comptime n: usize, comptime message: []con
     });
 }
 
+// ------------------------------------------------------------------ utf8, notBlank
+
+/// Well-formed UTF-8 (RFC 3629), as `std.unicode.utf8ValidateSlice` checks
+/// it: C0, C1 and F5-FF, stray continuation bytes, truncated and overlong
+/// sequences, surrogates and code points above U+10FFFF fail; "" passes.
+pub fn isUtf8(s: []const u8) bool {
+    return std.unicode.utf8ValidateSlice(s);
+}
+
+/// Valid UTF-8. Its failure is its own check with the code of the
+/// precondition, so its `.withMessage` applies: put it first in a tuple to
+/// word the case for the rules that report the precondition,
+/// `.{ v.utf8.withMessage("..."), v.maxLength(64) }`.
+pub const utf8: Rule = classRule(.utf8, "must be valid UTF-8", isUtf8, stringFits);
+
+/// Unicode White_Space (PropList.txt): 25 code points.
+fn isWhiteSpace(cp: u21) bool {
+    return switch (cp) {
+        0x09...0x0D, 0x20, 0x85, 0xA0, 0x1680, 0x2000...0x200A, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000 => true,
+        else => false,
+    };
+}
+
+/// `s`, which must be valid UTF-8, has a code point outside White_Space.
+fn hasContent(s: []const u8) bool {
+    var it = std.unicode.Utf8View.initUnchecked(s).iterator();
+    while (it.nextCodepoint()) |cp| {
+        if (!isWhiteSpace(cp)) return true;
+    }
+    return false;
+}
+
+/// Valid UTF-8 with at least one code point outside Unicode White_Space.
+/// Format characters and fillers such as U+200B, U+FEFF, U+2060 and U+3164
+/// are content. False on invalid UTF-8, on "" and on White_Space alone.
+pub fn isNotBlank(s: []const u8) bool {
+    return std.unicode.utf8ValidateSlice(s) and hasContent(s);
+}
+
+/// At least one code point outside Unicode White_Space (25 code points:
+/// TAB to CR, space, U+0085, U+00A0, U+1680, U+2000-200A, U+2028, U+2029,
+/// U+202F, U+205F, U+3000). The whole value is validated before the scan:
+/// invalid UTF-8 anywhere fails with the precondition `validation.utf8`.
+pub const notBlank: Rule = core.define(.not_blank, .{
+    .message = "must not be blank",
+    .precondition = core.preconditions.utf8,
+    .fits = stringFits,
+    .eval = struct {
+        fn eval(value: anytype) Outcome {
+            if (!std.unicode.utf8ValidateSlice(value.*)) return .precondition;
+            return core.passIf(hasContent(value.*));
+        }
+    }.eval,
+});
+
+// ------------------------------------------------------------------ ASCII classes, multibyte
+
+/// Every byte is at most 0x7F; control bytes, NUL and DEL included.
+pub fn isAscii(s: []const u8) bool {
+    for (s) |c| {
+        if (!std.ascii.isAscii(c)) return false;
+    }
+    return true;
+}
+
+/// Every byte is printable ASCII, 0x20-0x7E: TAB, LF, CR, other control
+/// bytes and DEL fail.
+pub fn isPrintableAscii(s: []const u8) bool {
+    for (s) |c| {
+        if (!std.ascii.isPrint(c)) return false;
+    }
+    return true;
+}
+
+/// Every byte is an ASCII letter or digit: `0-9`, `A-Z`, `a-z`.
+pub fn isAlphanumeric(s: []const u8) bool {
+    for (s) |c| {
+        if (!std.ascii.isAlphanumeric(c)) return false;
+    }
+    return true;
+}
+
+/// Every byte is an ASCII letter: `A-Z`, `a-z`.
+pub fn isAlpha(s: []const u8) bool {
+    for (s) |c| {
+        if (!std.ascii.isAlphabetic(c)) return false;
+    }
+    return true;
+}
+
+/// Every byte is an ASCII digit `0-9`: no sign, point, exponent or
+/// separator; leading zeros stay.
+pub fn isDigits(s: []const u8) bool {
+    for (s) |c| {
+        if (!std.ascii.isDigit(c)) return false;
+    }
+    return true;
+}
+
+/// No byte is an uppercase ASCII letter `A-Z`; other bytes are not
+/// inspected, so `"Émile"` passes.
+pub fn isLowercase(s: []const u8) bool {
+    for (s) |c| {
+        if (std.ascii.isUpper(c)) return false;
+    }
+    return true;
+}
+
+/// No byte is a lowercase ASCII letter `a-z`; other bytes are not
+/// inspected, so `"STRAßE"` passes.
+pub fn isUppercase(s: []const u8) bool {
+    for (s) |c| {
+        if (std.ascii.isLower(c)) return false;
+    }
+    return true;
+}
+
+/// At least one byte is 0x80 or above, invalid UTF-8 included: the opposite
+/// of `isAscii` on every input.
+pub fn isMultibyte(s: []const u8) bool {
+    return !isAscii(s);
+}
+
+/// Only ASCII: a byte of 0x80 or above fails, valid UTF-8 or not; "" passes.
+pub const ascii: Rule = classRule(.ascii, "must contain only ASCII characters", isAscii, stringFits);
+/// Only printable ASCII (0x20-0x7E): also TAB, LF and CR fail; "" passes.
+pub const printableAscii: Rule = classRule(.printable_ascii, "must contain only printable ASCII characters", isPrintableAscii, stringFits);
+/// Only ASCII letters and digits (en-US): `_`, `-`, a space and letters or
+/// digits outside ASCII fail; "" passes.
+pub const alphanumeric: Rule = classRule(.alphanumeric, "must contain only ASCII letters and digits", isAlphanumeric, stringFits);
+/// Only ASCII letters (en-US); "" passes.
+pub const alpha: Rule = classRule(.alpha, "must contain only ASCII letters", isAlpha, stringFits);
+/// Only ASCII digits: a code or a PIN, not a number (its size is not
+/// bounded; leading zeros stay); "" passes. On a number field it is a
+/// compile error: the field is already a number.
+pub const digits: Rule = classRule(.digits, "must contain only ASCII digits", isDigits, digitsFits);
+/// No ASCII uppercase letter; letters outside ASCII are not inspected (the
+/// standard library has no case tables); "" passes.
+pub const lowercase: Rule = classRule(.lowercase, "must be lowercase", isLowercase, stringFits);
+/// No ASCII lowercase letter; letters outside ASCII are not inspected; ""
+/// passes.
+pub const uppercase: Rule = classRule(.uppercase, "must be uppercase", isUppercase, stringFits);
+/// At least one byte of 0x80 or above, without decoding, so invalid UTF-8
+/// passes; "" fails.
+pub const multibyte: Rule = classRule(.multibyte, "must contain at least one non-ASCII character", isMultibyte, stringFits);
+
+/// A rule of `kind` without parameters or precondition whose check is
+/// `predicate` on every input.
+fn classRule(comptime kind: core.Kind, comptime message: []const u8, comptime predicate: fn ([]const u8) bool, comptime fits: fn (comptime *const Rule, comptime type, comptime []const u8) void) Rule {
+    return core.define(kind, .{
+        .message = message,
+        .fits = fits,
+        .eval = struct {
+            fn eval(value: anytype) Outcome {
+                return core.passIf(predicate(value.*));
+            }
+        }.eval,
+    });
+}
+
+// ------------------------------------------------------------------ fullWidth, halfWidth, variableWidth
+
+/// The half-width class H of validator.js: printable ASCII U+0020-007E and
+/// the half-width forms U+FF61-FFDC and U+FFE8-FFEE, 226 scalar values. It
+/// is not Unicode East Asian Width: control characters, Latin-1, Cyrillic
+/// and emoji are outside H, so the width rules count them as full-width.
+fn isHalfWidthCodePoint(cp: u21) bool {
+    return switch (cp) {
+        0x20...0x7E, 0xFF61...0xFFDC, 0xFFE8...0xFFEE => true,
+        else => false,
+    };
+}
+
+/// Whether `s` has a code point outside H (when `full`) and one in H (when
+/// `half`); null when `s` is not valid UTF-8. After the validation the scan
+/// stops as soon as both are seen.
+fn hasWidths(s: []const u8, comptime full: bool, comptime half: bool) ?bool {
+    if (!std.unicode.utf8ValidateSlice(s)) return null;
+    var seen_full = !full;
+    var seen_half = !half;
+    var it = std.unicode.Utf8View.initUnchecked(s).iterator();
+    while (it.nextCodepoint()) |cp| {
+        if (isHalfWidthCodePoint(cp)) seen_half = true else seen_full = true;
+        if (seen_full and seen_half) return true;
+    }
+    return false;
+}
+
+/// Valid UTF-8 with a code point outside the half-width class of
+/// validator.js (see `v.fullWidth`).
+pub fn isFullWidth(s: []const u8) bool {
+    return hasWidths(s, true, false) orelse false;
+}
+
+/// Valid UTF-8 with a code point in the half-width class of validator.js:
+/// printable ASCII or a half-width form.
+pub fn isHalfWidth(s: []const u8) bool {
+    return hasWidths(s, false, true) orelse false;
+}
+
+/// Valid UTF-8 with code points both in and outside the half-width class of
+/// validator.js.
+pub fn isVariableWidth(s: []const u8) bool {
+    return hasWidths(s, true, true) orelse false;
+}
+
+/// At least one code point outside the half-width class of validator.js
+/// (printable ASCII U+0020-007E, U+FF61-FFDC, U+FFE8-FFEE). Kept for parity
+/// with validator.js, it is not Unicode East Asian Width: `"привет"`,
+/// `"café"` and `"\n"` count as full-width. Invalid UTF-8 fails with the
+/// precondition `validation.utf8`; "" fails.
+pub const fullWidth: Rule = widthRule(.full_width, "must contain at least one full-width character", true, false);
+/// At least one code point in the half-width class of validator.js (see
+/// `fullWidth`). Invalid UTF-8 fails with the precondition; "" fails.
+pub const halfWidth: Rule = widthRule(.half_width, "must contain at least one half-width character", false, true);
+/// Code points both in and outside the half-width class of validator.js
+/// (see `fullWidth`): `"abc\n"` and `"café"` pass. Invalid UTF-8 fails with
+/// the precondition; "" fails.
+pub const variableWidth: Rule = widthRule(.variable_width, "must contain both full-width and half-width characters", true, true);
+
+fn widthRule(comptime kind: core.Kind, comptime message: []const u8, comptime full: bool, comptime half: bool) Rule {
+    return core.define(kind, .{
+        .message = message,
+        .precondition = core.preconditions.utf8,
+        .fits = stringFits,
+        .eval = struct {
+            fn eval(value: anytype) Outcome {
+                const found = hasWidths(value.*, full, half) orelse return .precondition;
+                return core.passIf(found);
+            }
+        }.eval,
+    });
+}
+
 /// The arguments the hints show for an uncalled constructor of this file:
 /// `minLength must be called, e.g. v.minLength(1)`.
 pub const call_examples = .{
@@ -165,10 +414,14 @@ const expectOutcome = core.expectOutcome;
 
 const test_where = "Dto.field_rules.x";
 
+/// A struct for the tests below.
+const Record = struct { id: u32 };
+
 /// The declaration error of `rule` on a field of type `T`, or null.
 fn fitsText(comptime rule: Rule, comptime T: type) ?[]const u8 {
     return switch (rule.kind) {
         .min_length, .max_length, .length => stringProblem(&rule, T, test_where, if (core.isListSlice(T)) core.hints.itemCount(rule) else null),
+        .digits => stringProblem(&rule, T, test_where, if (core.isNumber(T)) core.hints.number_field else null),
         else => stringProblem(&rule, T, test_where, null),
     };
 }
@@ -322,4 +575,65 @@ test "minBytes and maxBytes read the length of the slice and never decode" {
     try expectOutcome(.fail, maxBytes(2), @as([]const u8, "\xff\xff\xff"));
     try expectOutcome(.fail, maxBytes(8), @as([]const u8, "日本語"));
     try expectOutcome(.pass, maxBytes(9), @as([]const u8, "日本語"));
+}
+
+test "the rules without parameters have their documented codes and messages; the decoding ones have the utf8 precondition" {
+    const t = std.testing;
+    const Case = struct { rule: Rule, kind: core.Kind, code: []const u8, message: []const u8, decodes: bool };
+    const cases = [_]Case{
+        .{ .rule = utf8, .kind = .utf8, .code = "validation.utf8", .message = "must be valid UTF-8", .decodes = false },
+        .{ .rule = notBlank, .kind = .not_blank, .code = "validation.not_blank", .message = "must not be blank", .decodes = true },
+        .{ .rule = ascii, .kind = .ascii, .code = "validation.ascii", .message = "must contain only ASCII characters", .decodes = false },
+        .{ .rule = printableAscii, .kind = .printable_ascii, .code = "validation.printable_ascii", .message = "must contain only printable ASCII characters", .decodes = false },
+        .{ .rule = alphanumeric, .kind = .alphanumeric, .code = "validation.alphanumeric", .message = "must contain only ASCII letters and digits", .decodes = false },
+        .{ .rule = alpha, .kind = .alpha, .code = "validation.alpha", .message = "must contain only ASCII letters", .decodes = false },
+        .{ .rule = digits, .kind = .digits, .code = "validation.digits", .message = "must contain only ASCII digits", .decodes = false },
+        .{ .rule = lowercase, .kind = .lowercase, .code = "validation.lowercase", .message = "must be lowercase", .decodes = false },
+        .{ .rule = uppercase, .kind = .uppercase, .code = "validation.uppercase", .message = "must be uppercase", .decodes = false },
+        .{ .rule = multibyte, .kind = .multibyte, .code = "validation.multibyte", .message = "must contain at least one non-ASCII character", .decodes = false },
+        .{ .rule = fullWidth, .kind = .full_width, .code = "validation.full_width", .message = "must contain at least one full-width character", .decodes = true },
+        .{ .rule = halfWidth, .kind = .half_width, .code = "validation.half_width", .message = "must contain at least one half-width character", .decodes = true },
+        .{ .rule = variableWidth, .kind = .variable_width, .code = "validation.variable_width", .message = "must contain both full-width and half-width characters", .decodes = true },
+    };
+    inline for (cases) |c| {
+        try t.expectEqual(c.kind, c.rule.kind);
+        try t.expectEqualStrings(c.code, c.rule.code);
+        try t.expectEqualStrings(c.message, c.rule.message);
+        try t.expectEqual(null, c.rule.args);
+        try t.expectEqual(0, c.rule.params.len);
+        if (c.decodes) {
+            try t.expectEqualStrings("validation.utf8", c.rule.precondition.?.code);
+        } else {
+            try t.expectEqual(null, c.rule.precondition);
+        }
+    }
+}
+
+test "the rules without parameters take strings; [N]u8, lists of strings and odd slices get their hints" {
+    const expect = std.testing.expectEqualStrings;
+    const head = "validator: Dto.field_rules.x: ";
+    try expect(head ++ "ascii expects a string, field is u32", comptime fitsText(ascii, u32).?);
+    try expect(head ++ "utf8 expects a string, field is bool", comptime fitsText(utf8, bool).?);
+    try expect(head ++ "not_blank expects a string, field is [4]u8; [N]u8 is an array of numbers, not a string: use []const u8", comptime fitsText(notBlank, [4]u8).?);
+    try expect(head ++ "full_width expects a string, field is [2:0]u8; [N]u8 is an array of numbers, not a string: use []const u8", comptime fitsText(fullWidth, [2:0]u8).?);
+    try expect(head ++ "lowercase expects a string, field is []const []const u8; use v.each(v.lowercase)", comptime fitsText(lowercase, []const []const u8).?);
+    try expect(head ++ "multibyte expects a string, field is [2]?[]const u8; use v.each(v.multibyte)", comptime fitsText(multibyte, [2]?[]const u8).?);
+    try expect(head ++ "alpha expects a string, field is []volatile u8; volatile, allowzero and under-aligned slices are neither strings nor lists", comptime fitsText(alpha, []volatile u8).?);
+    try expect(head ++ "uppercase expects a string, field is strings.Record", comptime fitsText(uppercase, Record).?);
+    inline for (.{ []const u8, []u8, [:0]const u8, [:0]u8, []align(4) const u8 }) |T| {
+        inline for (.{ utf8, notBlank, ascii, printableAscii, alphanumeric, alpha, digits, lowercase, uppercase, multibyte, fullWidth, halfWidth, variableWidth }) |rule| {
+            try std.testing.expectEqual(null, comptime fitsText(rule, T));
+        }
+    }
+}
+
+test "digits on a number field says the field is already a number" {
+    const expect = std.testing.expectEqualStrings;
+    const head = "validator: Dto.field_rules.x: ";
+    const number = "; the field is already a number: use v.min, v.max or v.range";
+    try expect(head ++ "digits expects a string, field is u32" ++ number, comptime fitsText(digits, u32).?);
+    try expect(head ++ "digits expects a string, field is f64" ++ number, comptime fitsText(digits, f64).?);
+    try expect(head ++ "digits expects a string, field is bool", comptime fitsText(digits, bool).?);
+    try expect(head ++ "digits expects a string, field is []const []const u8; use v.each(v.digits)", comptime fitsText(digits, []const []const u8).?);
+    try expect(head ++ "digits expects a string, field is []const u32", comptime fitsText(digits, []const u32).?);
 }
