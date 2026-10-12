@@ -16,7 +16,7 @@ const ints = .{ u8, i8, u16, i16, u32, i32, u64, i64, u128, i128, usize, isize }
 const signed_ints = .{ i8, i16, i32, i64, i128, isize };
 const floats = .{ f16, f32, f64, f80, f128, c_longdouble };
 
-test "positive has the catalog code and default message" {
+test "positive has its documented code and default message" {
     try h.expectRule(v.positive, code, message);
 }
 

@@ -1007,11 +1007,14 @@ fn isTuple(comptime T: type) bool {
     return @typeInfo(T) == .@"struct" and @typeInfo(T).@"struct".is_tuple;
 }
 
-/// A struct declared in place, such as the type of a struct literal
-/// (`.{ .city = v.notEmpty }`), which Zig names after its parent with a
-/// generated suffix: `users.Request.field_rules__struct_1234`. walk.zig's
-/// `isAnonymous` makes the same test; the suffix is a convention of the
-/// compiler, and the fixture `entry_struct_literal` fails if it changes.
+/// A struct declared in place: a field type (`address: struct { ... }`) or
+/// the type of a struct literal (`.{ .city = v.notEmpty }`). Zig names it
+/// after its parent with a generated suffix (`users.Request__struct_1234`,
+/// `users.Request.field_rules__struct_1234`), and a struct declared in place
+/// inside that one gets a second suffix, so the last suffix decides. The
+/// suffix is a convention of the compiler, not of the language; the fixtures
+/// `anonymous_struct_label` and `entry_struct_literal` fail if a Zig release
+/// changes it.
 pub fn isAnonymous(comptime T: type) bool {
     const name = @typeName(T);
     const at = std.mem.findLast(u8, name, "__struct_") orelse return false;

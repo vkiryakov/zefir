@@ -8,7 +8,7 @@ const message = "must not be empty";
 
 const Role = enum { admin, user };
 
-test "notEmpty has the catalog code and default message" {
+test "notEmpty has its documented code and default message" {
     try h.expectRule(v.notEmpty, code, message);
 }
 

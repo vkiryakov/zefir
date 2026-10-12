@@ -279,23 +279,9 @@ fn hidden(comptime T: type, comptime what: []const u8, comptime where: []const u
     }
 }
 
-/// Zig names a struct declared in place, such as a field type
-/// (`address: struct { ... }`), after its parent with a generated suffix:
-/// `users.Request__struct_1234`, and a struct declared in place inside that
-/// one gets a second suffix, so the last suffix decides. Errors name such a
-/// struct by its path instead (`users.Request.address`). The suffix is a
-/// convention of the compiler, not of the language; the fixture
-/// `anonymous_struct_label` fails if a Zig release changes it.
-fn isAnonymous(comptime T: type) bool {
-    const name = @typeName(T);
-    const at = std.mem.findLast(u8, name, "__struct_") orelse return false;
-    const digits = name[at + "__struct_".len ..];
-    if (digits.len == 0) return false;
-    for (digits) |c| {
-        if (!std.ascii.isDigit(c)) return false;
-    }
-    return true;
-}
+/// Errors name a struct declared in place by its path instead of its
+/// generated name (`users.Request.address`, not `users.Request__struct_1234`).
+const isAnonymous = core.isAnonymous;
 
 /// The declaration checks of one walked struct, named `label` in errors: a
 /// `validate` that is not a function, field names that would make paths

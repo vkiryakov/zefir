@@ -13,10 +13,11 @@
 //! the text the error is meant to have (for a catalog error, `<Type>` is
 //! `<file stem>.Bad` and `<field>` is `x`), never by copying the compiler's
 //! output: a copied text would only check the implementation against itself.
-//! `row` is the id of the error in the catalog (`G-13`), or `variant of G-13`
-//! for another example of the same error. Fixtures are never imported by the
-//! module or by its tests; they must stay `zig fmt`-clean, since only their
-//! semantic analysis is meant to fail.
+//! `row` is the id of the error in the catalog (`G-13`), `variant of G-13`
+//! for another example of the same error, or `internal` for an error that
+//! only a misuse of the module's internals can reach. Fixtures are never
+//! imported by the module or by its tests; they must stay `zig fmt`-clean,
+//! since only their semantic analysis is meant to fail.
 const Fixture = @import("cases.zig").Fixture;
 
 pub const list = [_]Fixture{
