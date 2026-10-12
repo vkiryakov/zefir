@@ -7,6 +7,7 @@
 //! addresses and INFO, header handling and the protocol layer underneath.
 
 const std = @import("std");
+
 pub const Options = @import("Options.zig");
 pub const Auth = Options.Auth;
 pub const ReconnectOptions = Options.ReconnectOptions;
@@ -18,13 +19,14 @@ pub const Header = Headers.Header;
 
 test {
     std.testing.refAllDecls(@This());
-    _ = @import("protocol/subject.zig");
-    _ = @import("Headers.zig");
-    _ = @import("protocol/encoder.zig");
-    _ = @import("ServerAddress.zig");
     _ = @import("Options.zig");
+    _ = @import("ServerAddress.zig");
     _ = @import("ServerInfo.zig");
-    _ = @import("protocol/golden.zig");
+    _ = @import("Headers.zig");
+    _ = @import("protocol/subject.zig");
+    _ = @import("protocol/encoder.zig");
     _ = @import("protocol/Parser.zig");
     _ = @import("protocol/server_error.zig");
+    _ = @import("protocol/golden.zig");
+    _ = @import("protocol/fuzz.zig");
 }
