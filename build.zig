@@ -424,6 +424,8 @@ fn addValidatorTests(
     for (validator_cases.vector_files) |file| {
         const run_gen = b.addRunArtifact(gen);
         run_gen.addFileArg(b.path(b.fmt("src/validator/testdata/vectors/{s}.json", .{file.name})));
+        // A record may cite only a deviation that this table has a row for.
+        run_gen.addFileArg(b.path("src/validator/examples/class_validator.md"));
         const generated = run_gen.addOutputFileArg(b.fmt("{s}_vectors_test.zig", .{file.name}));
         for (file.rules) |rule| run_gen.addArg(rule);
         const vector_tests = b.addTest(.{

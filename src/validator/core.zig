@@ -498,6 +498,495 @@ test "the code, message and name helpers can be called outside a comptime block"
     checkMessage("custom(\"users.ok\", ...)", "must be ok");
 }
 
+// ------------------------------------------------------------------ rendering
+
+/// How the renderer and the rules with parameters treat a comptime value.
+pub const ValueKind = enum { int, float, bool, tag, string, list, other };
+
+/// The kind of a parameter of type `X`. A string is a slice of u8 (of any
+/// constness and sentinel) or a pointer to an array of u8, as string
+/// literals are. A list is a tuple or an array `[N]T` only (`[N]u8`
+/// included: an array of numbers); a pointer to an array and a slice of
+/// other items are `other`, so a list rule can reject them.
+pub fn valueKind(comptime X: type) ValueKind {
+    return switch (@typeInfo(X)) {
+        .comptime_int, .int => .int,
+        .comptime_float, .float => .float,
+        .bool => .bool,
+        .enum_literal, .@"enum" => .tag,
+        .pointer => |p| switch (p.size) {
+            .slice => if (p.child == u8) .string else .other,
+            .one => switch (@typeInfo(p.child)) {
+                .array => |a| if (a.child == u8) .string else .other,
+                else => .other,
+            },
+            else => .other,
+        },
+        .array => .list,
+        .@"struct" => |s| if (s.is_tuple) .list else .other,
+        else => .other,
+    };
+}
+
+/// `x` is not a float NaN or infinity. `std.math.isFinite` does not take a
+/// `comptime_float`, which holds an f128.
+pub fn isFiniteNumber(comptime x: anytype) bool {
+    return switch (@typeInfo(@TypeOf(x))) {
+        .comptime_float => std.math.isFinite(@as(f128, x)),
+        .float => std.math.isFinite(x),
+        else => true,
+    };
+}
+
+/// A parameter as messages and placeholders show it: integers in decimal;
+/// floats as written (`renderFloat`); `true`/`false`; an enum tag by its
+/// name, escaped as strings are (`@"a\nb"` shows as `a\nb`), an unnamed
+/// value of a non-exhaustive enum as `@fromBackingInt(n)`; a string escaped
+/// as `escape` does, without quotes, and the empty string as `""`; a list
+/// as its items joined by `, `, never cut. Evaluate it at comptime; it
+/// accepts only the kinds above.
+pub fn renderValue(comptime x: anytype) []const u8 {
+    @setEvalBranchQuota(eval_quota);
+    return switch (comptime valueKind(@TypeOf(x))) {
+        .int => std.fmt.comptimePrint("{d}", .{x}),
+        .float => renderFloat(x),
+        .bool => if (x) "true" else "false",
+        .tag => if (tagName(x)) |name| escape(name) else unnamedTag(x),
+        .string => if (x.len == 0) "\"\"" else escape(x),
+        .list => blk: {
+            var out: []const u8 = "";
+            for (0..x.len) |i| out = out ++ (if (i == 0) "" else ", ") ++ renderValue(x[i]);
+            break :blk out;
+        },
+        .other => @compileError("validator: internal: cannot render a value of type " ++ @typeName(@TypeOf(x))),
+    };
+}
+
+/// A float as written: the shortest text that gives the value back in its
+/// own type (a `comptime_float` is an f128), so `0.1` stays `0.1` whatever
+/// the field type. Decimal when 1e-6 <= |x| < 1e21, scientific (`1e-7`,
+/// `1e21`) otherwise, both bounds taken in the value's own type; `0` for
+/// both zeros; `nan`, `inf` and `-inf` for the values only compile errors
+/// show.
+fn renderFloat(comptime x: anytype) []const u8 {
+    const F = if (@TypeOf(x) == comptime_float) f128 else @TypeOf(x);
+    const f: F = x;
+    if (std.math.isNan(f)) return "nan";
+    if (std.math.isInf(f)) return if (f > 0) "inf" else "-inf";
+    if (f == 0) return "0";
+    const magnitude = @abs(f);
+    // f16 cannot hold 1e21: every finite f16 is below it.
+    const below_1e21 = std.math.floatMax(F) < 1e21 or magnitude < @as(F, 1e21);
+    return if (magnitude >= @as(F, 1e-6) and below_1e21)
+        std.fmt.comptimePrint("{d}", .{f})
+    else
+        std.fmt.comptimePrint("{e}", .{f});
+}
+
+/// The name of an enum literal or enum value, or null for an unnamed value
+/// of a non-exhaustive enum.
+pub fn tagName(comptime x: anytype) ?[]const u8 {
+    const X = @TypeOf(x);
+    if (@typeInfo(X) == .enum_literal) return @tagName(x);
+    const e = @typeInfo(X).@"enum";
+    for (e.field_names, e.field_values) |field_name, value| {
+        if (value == @backingInt(x)) return field_name;
+    }
+    return null;
+}
+
+/// An unnamed value of a non-exhaustive enum as Zig source writes it:
+/// `@fromBackingInt(7)`.
+fn unnamedTag(comptime x: anytype) []const u8 {
+    return std.fmt.comptimePrint("@fromBackingInt({d})", .{@backingInt(x)});
+}
+
+/// A tag name as `zig fmt` writes it after a dot, for compile errors:
+/// `admin`, `@"error"` for a keyword, `@"a\nb"` for a name that is no
+/// identifier.
+pub inline fn tagIdentifier(comptime name: []const u8) []const u8 {
+    comptime {
+        @setEvalBranchQuota(eval_quota);
+        return std.fmt.comptimePrint("{f}", .{std.zig.fmtIdPU(name)});
+    }
+}
+
+/// Compile errors show the items of a list argument while `.{ ` and the
+/// items so far fit in this many bytes.
+const max_args_text = 72;
+
+/// A parameter as compile errors show it in a call, as `zig fmt` writes it
+/// in source: numbers and bools as messages show them; `.admin` for a tag
+/// (`.@"error"` for a keyword, as `tagIdentifier` writes names) and
+/// `@fromBackingInt(n)` for an unnamed value; a string quoted and
+/// escaped; a list as `.{ "a", "b" }`, one item as `.{"a"}`, none as `.{}`;
+/// anything else (`null`, a struct, a pointer, a slice of other items) as
+/// `...`. A long list keeps its items while `.{ ` and the items so far fit
+/// in `max_args_text` bytes (the first item always) and ends with
+/// `, ... }` after the last one that fits. Evaluate it at comptime.
+pub fn renderArg(comptime x: anytype) []const u8 {
+    @setEvalBranchQuota(eval_quota);
+    return switch (comptime valueKind(@TypeOf(x))) {
+        .int, .float, .bool => renderValue(x),
+        .tag => if (tagName(x)) |name| "." ++ tagIdentifier(name) else unnamedTag(x),
+        .string => "\"" ++ escape(x) ++ "\"",
+        .list => renderArgList(x),
+        .other => "...",
+    };
+}
+
+fn renderArgList(comptime x: anytype) []const u8 {
+    if (x.len == 0) return ".{}";
+    if (x.len == 1) return ".{" ++ renderArg(x[0]) ++ "}";
+    var out: []const u8 = ".{ " ++ renderArg(x[0]);
+    for (1..x.len) |i| {
+        const longer = out ++ ", " ++ renderArg(x[i]);
+        if (longer.len > max_args_text) return out ++ ", ... }";
+        out = longer;
+    }
+    return out ++ " }";
+}
+
+/// `n` and the noun for it: `1 item`, `2 items`, `0 items`.
+pub fn plural(comptime n: comptime_int, comptime one: []const u8, comptime many: []const u8) []const u8 {
+    return std.fmt.comptimePrint("{d} ", .{n}) ++ if (n == 1) one else many;
+}
+
+/// A non-exhaustive enum for the renderer tests: `@fromBackingInt(7)` is a
+/// value without a name.
+const TestOpen = enum(u8) { a, b, _ };
+
+/// An enum whose tags Zig source writes with `@"..."`: a keyword and a name
+/// with a newline.
+const TestQuoted = enum { @"error", @"a\nb", plain };
+
+test "a parameter is a number, a bool, a tag, a string or a list; lists are tuples and arrays only" {
+    const expectKind = struct {
+        fn expectKind(expected: ValueKind, comptime types: anytype) !void {
+            inline for (types) |T| {
+                std.testing.expectEqual(expected, comptime valueKind(T)) catch |err| {
+                    std.debug.print("valueKind({s})\n", .{@typeName(T)});
+                    return err;
+                };
+            }
+        }
+    }.expectKind;
+    try expectKind(.int, .{ comptime_int, u8, i128, usize, u0 });
+    try expectKind(.float, .{ comptime_float, f16, f32, f64, f80, f128, c_longdouble });
+    try expectKind(.bool, .{bool});
+    try expectKind(.tag, .{ @TypeOf(.admin), TestOpen, Kind });
+    // A string literal is a pointer to an array of u8; a u8 slice of any
+    // constness and sentinel is a string too.
+    try expectKind(.string, .{ *const [3:0]u8, *const [3]u8, *const [0:0]u8, []const u8, []u8, [:0]const u8 });
+    // [N]u8 is an array of numbers, as on a field.
+    try expectKind(.list, .{ @TypeOf(.{}), @TypeOf(.{ 1, 2 }), @TypeOf(.{"a"}), [2]u8, [3]i64, [2][]const u8, [0]u32 });
+    // A pointer to an array, a slice of other items and anything else is no
+    // list: the list rules reject them.
+    try expectKind(.other, .{ *const [2]u32, []const u32, []const []const u8, *const @TypeOf(.{ 1, 2 }), @TypeOf(null), ?u8, void, type, struct { x: u8 }, [*]const u8 });
+}
+
+test "a number parameter is finite unless it is a float NaN or infinity" {
+    try std.testing.expect(comptime isFiniteNumber(5));
+    try std.testing.expect(comptime isFiniteNumber(std.math.maxInt(u128)));
+    try std.testing.expect(comptime isFiniteNumber(1.5));
+    try std.testing.expect(comptime isFiniteNumber(-0.0));
+    try std.testing.expect(comptime isFiniteNumber(std.math.floatMax(f80)));
+    try std.testing.expect(comptime isFiniteNumber(std.math.floatTrueMin(f16)));
+    // A comptime_float is checked as an f128, so a literal beyond f64 is finite.
+    try std.testing.expect(comptime isFiniteNumber(1e400));
+    try std.testing.expect(!comptime isFiniteNumber(std.math.nan(f64)));
+    try std.testing.expect(!comptime isFiniteNumber(std.math.inf(f32)));
+    try std.testing.expect(!comptime isFiniteNumber(-std.math.inf(f128)));
+    try std.testing.expect(!comptime isFiniteNumber(-std.math.inf(c_longdouble)));
+    try std.testing.expect(!comptime isFiniteNumber(@as(comptime_float, std.math.inf(f64))));
+}
+
+test "messages show integers of every width in decimal" {
+    const expect = std.testing.expectEqualStrings;
+    try expect("5", comptime renderValue(5));
+    try expect("0", comptime renderValue(@as(u8, 0)));
+    try expect("255", comptime renderValue(@as(u8, std.math.maxInt(u8))));
+    try expect("-128", comptime renderValue(@as(i8, std.math.minInt(i8))));
+    try expect("18446744073709551615", comptime renderValue(@as(u64, std.math.maxInt(u64))));
+    try expect("-9223372036854775808", comptime renderValue(@as(i64, std.math.minInt(i64))));
+    try expect("340282366920938463463374607431768211455", comptime renderValue(@as(u128, std.math.maxInt(u128))));
+    try expect("-170141183460469231731687303715884105728", comptime renderValue(@as(i128, std.math.minInt(i128))));
+    try expect("42", comptime renderValue(@as(usize, 42)));
+    try expect("-1", comptime renderValue(-1));
+}
+
+test "messages show floats as written: decimal from 1e-6 to below 1e21, scientific outside, 0 for both zeros" {
+    const expect = std.testing.expectEqualStrings;
+    try expect("0.5", comptime renderValue(0.5));
+    try expect("0.1", comptime renderValue(0.1));
+    try expect("2", comptime renderValue(2.0));
+    try expect("-1.5", comptime renderValue(-1.5));
+    try expect("0.000001", comptime renderValue(1e-6));
+    try expect("-0.000001", comptime renderValue(-1e-6));
+    try expect("9.99e-7", comptime renderValue(9.99e-7));
+    try expect("100000000000000000000", comptime renderValue(1e20));
+    try expect("1e21", comptime renderValue(1e21));
+    try expect("-1e21", comptime renderValue(-1e21));
+    try expect("1e-50", comptime renderValue(1e-50));
+    try expect("-1.7976931348623157e308", comptime renderValue(-std.math.floatMax(f64)));
+    try expect("5e-324", comptime renderValue(std.math.floatTrueMin(f64)));
+    // A comptime_float is an f128: a literal beyond the range of f64, a bound
+    // for an f80 or f128 field, keeps its value.
+    try expect("1e400", comptime renderValue(1e400));
+    try expect("1e-400", comptime renderValue(1e-400));
+    try expect("0", comptime renderValue(0.0));
+    try expect("0", comptime renderValue(-0.0));
+    // A typed value shows the shortest text that gives it back in its own
+    // type: 0.1 in f32, not 0.10000000149011612.
+    inline for (.{ f16, f32, f64, f80, f128, c_longdouble }) |F| {
+        try expect("0.1", comptime renderValue(@as(F, 0.1)));
+        try expect("-2.5", comptime renderValue(@as(F, -2.5)));
+        try expect("0", comptime renderValue(@as(F, -0.0)));
+        // The 1e-6 boundary is taken in the value's own type.
+        try expect("0.000001", comptime renderValue(@as(F, 1e-6)));
+    }
+    try expect("1e-7", comptime renderValue(@as(f32, 1e-7)));
+    try expect("1e21", comptime renderValue(@as(f32, 1e21)));
+    // The largest f16, 65504, reads back from the shorter 65500.
+    try expect("65500", comptime renderValue(std.math.floatMax(f16)));
+    // Only compile errors show non-finite numbers: a non-finite bound is
+    // itself an error.
+    try expect("nan", comptime renderValue(std.math.nan(f64)));
+    try expect("inf", comptime renderValue(std.math.inf(f32)));
+    try expect("-inf", comptime renderValue(-std.math.inf(f128)));
+}
+
+test "messages show bools, tags by name, escaped strings without quotes and lists joined by commas" {
+    const expect = std.testing.expectEqualStrings;
+    try expect("true", comptime renderValue(true));
+    try expect("false", comptime renderValue(false));
+    try expect("admin", comptime renderValue(.admin));
+    try expect("b", comptime renderValue(TestOpen.b));
+    try expect("@fromBackingInt(7)", comptime renderValue(@as(TestOpen, @fromBackingInt(7))));
+    try expect("tab\\there", comptime renderValue("tab\there"));
+    try expect("say \\\"hi\\\"", comptime renderValue("say \"hi\""));
+    try expect("a\\xe2\\x80\\xa8b", comptime renderValue("a\u{2028}b"));
+    try expect("имя", comptime renderValue("имя"));
+    try expect("\\xff", comptime renderValue("\xff"));
+    try expect("\"\"", comptime renderValue(""));
+    try expect("abc", comptime renderValue(@as([]const u8, "abc")));
+    try expect("abc", comptime renderValue(@as(*const [3]u8, "abc")));
+    try expect("a, b, \"\"", comptime renderValue(.{ "a", "b", "" }));
+    try expect("x", comptime renderValue(.{"x"}));
+    try expect("1, 2", comptime renderValue([_]u8{ 1, 2 }));
+    try expect("admin, @fromBackingInt(7)", comptime renderValue(.{ .admin, @as(TestOpen, @fromBackingInt(7)) }));
+    // A tag name is escaped as strings are, so a message stays on one line
+    // and valid UTF-8.
+    try expect("error", comptime renderValue(TestQuoted.@"error"));
+    try expect("a\\nb, plain", comptime renderValue(.{ TestQuoted.@"a\nb", .plain }));
+    try expect("\\xff", comptime renderValue(.@"\xff"));
+    // A message never cuts a list; a default message that would be too long
+    // falls back to a general one instead.
+    const long = .{ "value_000", "value_001", "value_002", "value_003", "value_004", "value_005", "value_006", "value_007" };
+    try expect("value_000, value_001, value_002, value_003, value_004, value_005, value_006, value_007", comptime renderValue(long));
+}
+
+test "compile errors show arguments as zig fmt writes them" {
+    const expect = std.testing.expectEqualStrings;
+    try expect("5", comptime renderArg(5));
+    try expect("-170141183460469231731687303715884105728", comptime renderArg(@as(i128, std.math.minInt(i128))));
+    try expect("340282366920938463463374607431768211455", comptime renderArg(@as(u128, std.math.maxInt(u128))));
+    try expect("0.1", comptime renderArg(@as(f32, 0.1)));
+    try expect("2", comptime renderArg(2.0));
+    try expect("1e-50", comptime renderArg(1e-50));
+    try expect("0", comptime renderArg(-0.0));
+    try expect("nan", comptime renderArg(std.math.nan(f64)));
+    try expect("inf", comptime renderArg(std.math.inf(f64)));
+    try expect("-inf", comptime renderArg(-std.math.inf(f16)));
+    try expect("inf", comptime renderArg(@as(comptime_float, std.math.inf(f64))));
+    try expect("true", comptime renderArg(true));
+    try expect(".admin", comptime renderArg(.admin));
+    try expect(".b", comptime renderArg(TestOpen.b));
+    try expect("@fromBackingInt(7)", comptime renderArg(@as(TestOpen, @fromBackingInt(7))));
+    // A tag that is no plain identifier is quoted as zig fmt writes it.
+    try expect(".@\"error\"", comptime renderArg(TestQuoted.@"error"));
+    try expect(".@\"a\\nb\"", comptime renderArg(.@"a\nb"));
+    try expect(".{ .@\"error\", .plain }", comptime renderArg(.{ .@"error", TestQuoted.plain }));
+    try expect(".u8", comptime renderArg(.u8));
+    try expect("\"a\\tb\"", comptime renderArg("a\tb"));
+    try expect("\"\\\"\"", comptime renderArg("\""));
+    try expect("\"\\xe2\\x80\\xa8\"", comptime renderArg("\u{2028}"));
+    try expect("\"имя\"", comptime renderArg("имя"));
+    try expect("\"\"", comptime renderArg(""));
+    try expect("\"abc\"", comptime renderArg(@as([]const u8, "abc")));
+    try expect("\"abc\"", comptime renderArg(@as(*const [3]u8, "abc")));
+}
+
+test "compile errors show lists as zig fmt writes them, one item without spaces" {
+    const expect = std.testing.expectEqualStrings;
+    try expect(".{}", comptime renderArg(.{}));
+    try expect(".{\"a\"}", comptime renderArg(.{"a"}));
+    try expect(".{true}", comptime renderArg(.{true}));
+    try expect(".{.admin}", comptime renderArg(.{.admin}));
+    try expect(".{@fromBackingInt(7)}", comptime renderArg(.{@as(TestOpen, @fromBackingInt(7))}));
+    try expect(".{ \"a\", \"b\" }", comptime renderArg(.{ "a", "b" }));
+    try expect(".{ \"a\", .b, 3 }", comptime renderArg(.{ "a", .b, 3 }));
+    try expect(".{ .a, @fromBackingInt(7) }", comptime renderArg(.{ .a, @as(TestOpen, @fromBackingInt(7)) }));
+    // An array is a list, [N]u8 included.
+    try expect(".{ 1, 2 }", comptime renderArg([_]u8{ 1, 2 }));
+    try expect(".{5}", comptime renderArg([_]i64{5}));
+    try expect(".{ \"x\", \"y\" }", comptime renderArg([_][]const u8{ "x", "y" }));
+}
+
+test "compile errors show ... for what the renderer cannot show" {
+    const expect = std.testing.expectEqualStrings;
+    try expect("...", comptime renderArg(null));
+    try expect("...", comptime renderArg(@as(?u8, 5)));
+    try expect("...", comptime renderArg(.{ .x = 1 }));
+    // A pointer to an array and a slice of non-u8 items are not lists.
+    try expect("...", comptime renderArg(&[_]u32{ 1, 2 }));
+    try expect("...", comptime renderArg(@as([]const u32, &.{ 1, 2 })));
+    try expect(".{...}", comptime renderArg(.{null}));
+    try expect(".{ ..., 1 }", comptime renderArg(.{ null, 1 }));
+}
+
+test "compile errors show the items of a list while they fit in 72 bytes, then , ... }" {
+    const expect = std.testing.expectEqualStrings;
+    const ten = .{ "value_000", "value_001", "value_002", "value_003", "value_004", "value_005", "value_006", "value_007", "value_008", "value_009" };
+    try expect(".{ \"value_000\", \"value_001\", \"value_002\", \"value_003\", \"value_004\", ... }", comptime renderArg(ten));
+    // An item is shown when `.{ ` and the items through it fit in 72 bytes.
+    const a30: [30]u8 = @splat('a');
+    const b33: [33]u8 = @splat('b');
+    const b34: [34]u8 = @splat('b');
+    try std.testing.expectEqual(72, (".{ \"" ++ a30 ++ "\", \"" ++ b33 ++ "\"").len);
+    try expect(".{ \"" ++ a30 ++ "\", \"" ++ b33 ++ "\" }", comptime renderArg(.{ &a30, &b33 }));
+    try expect(".{ \"" ++ a30 ++ "\", ... }", comptime renderArg(.{ &a30, &b34 }));
+    // The first item stays even when it is longer than 72 bytes; a list of
+    // one item has nothing to cut.
+    const a80: [80]u8 = @splat('a');
+    try expect(".{ \"" ++ a80 ++ "\", ... }", comptime renderArg(.{ &a80, "b" }));
+    try expect(".{\"" ++ a80 ++ "\"}", comptime renderArg(.{&a80}));
+    // Integers are cut the same way.
+    const ints = .{ 1000000000, 2000000000, 3000000000, 4000000000, 5000000000, 6000000000, 7000000000 };
+    try expect(".{ 1000000000, 2000000000, 3000000000, 4000000000, 5000000000, ... }", comptime renderArg(ints));
+}
+
+test "plural picks the noun for a count" {
+    const expect = std.testing.expectEqualStrings;
+    try expect("1 item", comptime plural(1, "item", "items"));
+    try expect("2 items", comptime plural(2, "item", "items"));
+    try expect("0 items", comptime plural(0, "item", "items"));
+    try expect("1 byte", comptime plural(@as(usize, 1), "byte", "bytes"));
+    try expect("512 bytes", comptime plural(@as(usize, 512), "byte", "bytes"));
+}
+
+// ------------------------------------------------------------------ parameters
+
+/// A rule parameter as data: what `.withMessage` substitutes and a schema
+/// export could show.
+pub const Value = union(enum) {
+    int: comptime_int,
+    float: comptime_float,
+    bool: bool,
+    string: []const u8,
+    /// An enum tag, without the leading dot.
+    tag: []const u8,
+    list: []const Value,
+};
+
+/// A parameter of a rule, named as its placeholder (`{min}` is the
+/// parameter `min`).
+pub const Param = struct {
+    name: []const u8,
+    value: Value,
+    /// The value as messages show it (`renderValue`): `{name}` in a
+    /// `.withMessage` template becomes this text.
+    text: []const u8,
+    /// `{name}` may appear in `.withMessage` templates.
+    placeholder: bool = true,
+};
+
+/// A parameter that templates may use as `{name}`.
+pub fn param(comptime name: []const u8, comptime x: anytype) Param {
+    return .{ .name = name, .value = valueOf(x), .text = renderValue(x) };
+}
+
+/// A parameter kept as data only: `{name}` is not a placeholder.
+pub fn dataParam(comptime name: []const u8, comptime x: anytype) Param {
+    return .{ .name = name, .value = valueOf(x), .text = renderValue(x), .placeholder = false };
+}
+
+/// `x` as data. A rule checks its parameters before it keeps them: an
+/// unnamed value of a non-exhaustive enum or a value of another kind stops
+/// compilation here with an internal error.
+pub fn valueOf(comptime x: anytype) Value {
+    @setEvalBranchQuota(eval_quota);
+    return switch (comptime valueKind(@TypeOf(x))) {
+        .int => .{ .int = x },
+        .float => .{ .float = x },
+        .bool => .{ .bool = x },
+        .tag => .{ .tag = tagName(x) orelse @compileError("validator: internal: " ++ unnamedTag(x) ++ " has no tag name") },
+        .string => .{ .string = x },
+        .list => blk: {
+            var items: [x.len]Value = undefined;
+            for (&items, 0..) |*slot, i| slot.* = valueOf(x[i]);
+            const final = items;
+            break :blk .{ .list = &final };
+        },
+        .other => @compileError("validator: internal: no parameter value of type " ++ @typeName(@TypeOf(x))),
+    };
+}
+
+test "a parameter keeps its value as data: numbers, bools, tags without the dot, strings and lists" {
+    const t = std.testing;
+    try t.expect(comptime valueOf(5).int == 5);
+    try t.expect(comptime valueOf(@as(i128, std.math.minInt(i128))).int == std.math.minInt(i128));
+    try t.expect(comptime valueOf(0.5).float == 0.5);
+    try t.expect(comptime valueOf(@as(f32, 0.1)).float == @as(f32, 0.1));
+    try t.expect(comptime valueOf(true).bool);
+    try t.expect(!comptime valueOf(false).bool);
+    try t.expectEqualStrings("admin", comptime valueOf(.admin).tag);
+    try t.expectEqualStrings("b", comptime valueOf(TestOpen.b).tag);
+    try t.expectEqualStrings("a\tb", comptime valueOf("a\tb").string);
+    try t.expectEqualStrings("", comptime valueOf("").string);
+    const list = comptime valueOf(.{ "a", .b, 3 });
+    try t.expectEqual(3, list.list.len);
+    try t.expectEqualStrings("a", list.list[0].string);
+    try t.expectEqualStrings("b", list.list[1].tag);
+    try t.expect(comptime list.list[2].int == 3);
+    const array = comptime valueOf([_]u8{ 1, 2 });
+    try t.expectEqual(2, array.list.len);
+    try t.expect(comptime array.list[1].int == 2);
+}
+
+test "a parameter has a name, its value and its text as messages show it; a data parameter is no placeholder" {
+    const t = std.testing;
+    const max = comptime param("max", 0.1);
+    try t.expectEqualStrings("max", max.name);
+    try t.expectEqualStrings("0.1", max.text);
+    try t.expect(comptime max.value.float == 0.1);
+    try t.expect(max.placeholder);
+    const zero = comptime param("min", -0.0);
+    try t.expectEqualStrings("0", zero.text);
+    const values = comptime param("values", .{ "a", "" });
+    try t.expectEqualStrings("a, \"\"", values.text);
+    try t.expect(values.placeholder);
+    const key = comptime dataParam("key", .id);
+    try t.expectEqualStrings("key", key.name);
+    try t.expectEqualStrings("id", key.text);
+    try t.expectEqualStrings("id", key.value.tag);
+    try t.expect(!key.placeholder);
+}
+
+test "define gives a rule the parameters of its spec" {
+    const rule = comptime define(.min, .{
+        .message = "must be at least 18",
+        .args = "18",
+        .params = &.{param("min", 18)},
+        .fits = test_rules.fitsAnything,
+        .eval = test_rules.evalPositive,
+    });
+    try std.testing.expectEqual(1, rule.params.len);
+    try std.testing.expectEqualStrings("min", rule.params[0].name);
+    try std.testing.expectEqualStrings("18", rule.params[0].text);
+    try std.testing.expectEqual(0, test_rules.positive.params.len);
+}
+
 // ------------------------------------------------------------------ the rule
 
 /// What a rule's run-time check returns.
@@ -519,10 +1008,22 @@ pub fn passIf(ok: bool) Outcome {
 /// The fixed code and message of a precondition failure.
 pub const Precondition = struct { code: []const u8, message: []const u8 };
 
-/// The preconditions that rules report.
+/// The preconditions that rules report. Each code is also the code of the
+/// rule of the same name (`v.finite`), whose `.withMessage` words the case
+/// when that rule is put first.
 pub const preconditions = struct {
+    /// The rules that decode code points (`minLength`, `maxLength`,
+    /// `length`, `notBlank`, the width rules and `strongPassword`), on a
+    /// string that is not valid UTF-8.
+    pub const utf8: Precondition = .{ .code = "validation.utf8", .message = "must be valid UTF-8" };
     /// Every number rule on a float field whose value is NaN, +inf or -inf.
     pub const finite: Precondition = .{ .code = "validation.finite", .message = "must be a finite number" };
+    /// `minDate` and `maxDate` with a date bound, on a value that is not a
+    /// date.
+    pub const date: Precondition = .{ .code = "validation.date", .message = "must be a valid date in YYYY-MM-DD format" };
+    /// `minDate` and `maxDate` with a date-time bound, on a value that is not
+    /// an RFC 3339 date-time.
+    pub const rfc3339: Precondition = .{ .code = "validation.rfc3339", .message = "must be a valid RFC 3339 date-time" };
 };
 
 /// A validation rule. Rules are values (`v.notEmpty`) or are built by
@@ -532,19 +1033,27 @@ pub const preconditions = struct {
 /// parameter.
 ///
 /// `code` and `message` are the stable public part, which applications and
-/// tests may read (`v.notEmpty.code` is `"validation.not_empty"`). The other
-/// fields and the methods are internal to the module and may change.
+/// tests may read (`v.notEmpty.code` is `"validation.not_empty"`), and
+/// `withMessage` replaces the message. The other fields and methods are
+/// internal to the module and may change.
 pub const Rule = struct {
     kind: Kind,
     /// `validation.<kind>` for a built-in rule, the user's code for
     /// `v.custom`, and "" for `each`, which reports through its inner rules.
     code: []const u8,
-    /// The message of this rule's own failure; "" for `each`.
+    /// The message of this rule's own failure: the default one, its
+    /// fallback, or the result of `.withMessage`; "" for `each`. A default
+    /// message longer than 512 bytes without a fallback (a bound of hundreds
+    /// of digits) stays here as built, and the declaration check of the field
+    /// rejects it unless `.withMessage` replaced it.
     message: []const u8,
     /// The arguments as written (`"users.ok", ...` for `custom`, `...` for
     /// `each`), shown in compile errors and hints; null for a rule used as a
     /// value (`v.notEmpty`).
     args: ?[]const u8 = null,
+    /// The parameters as data, in the order of the constructor's arguments;
+    /// the placeholder ones are `{name}` in `.withMessage` templates.
+    params: []const Param = &.{},
     /// The precondition this rule can report. Its run-time check returns
     /// `.precondition` only on the field types where it applies (`finite`
     /// on floats only).
@@ -574,32 +1083,71 @@ pub const Rule = struct {
     pub fn label(comptime rule: Rule) []const u8 {
         return comptime @tagName(rule.kind) ++ if (rule.args) |a| "(" ++ a ++ ")" else "";
     }
+
+    /// The rule with another message for its own failure:
+    /// `v.range(1, 100).withMessage("from {min} to {max} items")`. The code
+    /// stays, and a precondition failure keeps its fixed code and message
+    /// (NaN under `v.positive.withMessage(...)` still reports
+    /// `validation.finite`). `{name}` is a placeholder of the rule: its
+    /// parameter as the rule's page names it (`v.range(lo, hi)` has `{min}`
+    /// and `{max}`), shown as the default message shows it. `{{` writes `{`,
+    /// `}}` writes `}`, and any other `}` stays. On `v.custom` the template
+    /// replaces its literal message: braces are syntax here, and custom has no
+    /// placeholders. The message must be 1-512 bytes of valid UTF-8, in any
+    /// language. A second `.withMessage` replaces the first; the rule it is
+    /// called on keeps its message. `each` has no message of its own: give its
+    /// inner rules theirs. A mistake is a compile error at the call.
+    pub fn withMessage(comptime rule: Rule, comptime template: []const u8) Rule {
+        switch (renderTemplate(rule, template)) {
+            .message => |message| {
+                var copy = rule;
+                copy.message = message;
+                return copy;
+            },
+            .problem => |text| @compileError(text),
+        }
+    }
 };
 
 /// Everything `define` needs to build a built-in rule.
 pub const Spec = struct {
-    /// The default message: 1-512 bytes of valid UTF-8.
+    /// The default message: 1-512 bytes of valid UTF-8; a longer one takes
+    /// `fallback`, or, without one, stays and fails the field's declaration
+    /// check (see `define`).
     message: []const u8,
+    /// The general message that replaces `message` when the parameters shown
+    /// in it make it longer than 512 bytes ("must be equal to the expected
+    /// value"); a message of exactly 512 bytes stays. Null for a rule without
+    /// one.
+    fallback: ?[]const u8 = null,
     /// Replaces `codeOf(kind)`; only `v.custom` sets it.
     code: ?[]const u8 = null,
     args: ?[]const u8 = null,
+    params: []const Param = &.{},
     precondition: ?Precondition = null,
     fits: fn (comptime rule: *const Rule, comptime T: type, comptime where: []const u8) void,
     eval: fn (value: anytype) Outcome,
 };
 
 /// Builds a rule of `kind`: the code of its kind (or `spec.code`), the
-/// default message and the checks. `each` is built by hand instead, since it
-/// has no code or message of its own.
+/// default message (or `spec.fallback` when the default message is longer
+/// than 512 bytes) and the checks. A longer default message without a
+/// fallback is kept as it is: the declaration check of the field reports it
+/// (`defaultMessageProblem`) unless `.withMessage` replaces it. `each` is
+/// built by hand instead, since it has no code or message of its own.
 pub fn define(comptime kind: Kind, comptime spec: Spec) Rule {
     @setEvalBranchQuota(eval_quota);
-    if (messageProblem(spec.message)) |problem|
-        @compileError("validator: internal: the default message of " ++ @tagName(kind) ++ ": " ++ describeMessageProblem(problem));
+    const message = if (spec.message.len > max_message_bytes) spec.fallback orelse spec.message else spec.message;
+    if (messageProblem(message)) |problem| {
+        const kept = problem == .too_long and spec.fallback == null;
+        if (!kept) @compileError("validator: internal: the default message of " ++ @tagName(kind) ++ ": " ++ describeMessageProblem(problem));
+    }
     return .{
         .kind = kind,
         .code = spec.code orelse codeOf(kind),
-        .message = spec.message,
+        .message = message,
         .args = spec.args,
+        .params = spec.params,
         .precondition = spec.precondition,
         .fits = spec.fits,
         .eval = spec.eval,
@@ -610,6 +1158,284 @@ pub fn define(comptime kind: Kind, comptime spec: Spec) Rule {
 /// returns `expected`.
 pub fn expectOutcome(expected: Outcome, comptime rule: Rule, value: anytype) !void {
     try std.testing.expectEqual(expected, rule.eval(&value));
+}
+
+// ------------------------------------------------------------------ message templates
+
+/// What `.withMessage(template)` makes of a rule: its new message, or the
+/// whole text of the compile error.
+pub const Template = union(enum) { message: []const u8, problem: []const u8 };
+
+/// Renders the `.withMessage` template of `rule`. `{name}` becomes the text
+/// of the rule's placeholder `name`, `{{` becomes `{`, `}}` becomes `}`, and
+/// any other `}` stays. The template is read left to right, and its first
+/// unknown or unclosed placeholder is the problem; then the message must be
+/// 1-512 bytes of valid UTF-8. `each` takes no template. An error text starts
+/// with the call and the template: `validator: min(1).withMessage("..."): `.
+pub fn renderTemplate(comptime rule: Rule, comptime template: []const u8) Template {
+    comptime {
+        @setEvalBranchQuota(eval_quota);
+        if (rule.kind == .each) return .{ .problem = templateHead(rule, template) ++ "each has no message of its own; put .withMessage on the inner rules" };
+        var out: []const u8 = "";
+        // The first byte of the literal text not copied to `out` yet.
+        var start: usize = 0;
+        var i: usize = 0;
+        while (i < template.len) {
+            switch (template[i]) {
+                '{' => {
+                    out = out ++ template[start..i];
+                    if (i + 1 < template.len and template[i + 1] == '{') {
+                        out = out ++ "{";
+                        i += 2;
+                    } else {
+                        const close = std.mem.findScalarPos(u8, template, i + 1, '}') orelse
+                            return .{ .problem = templateHead(rule, template) ++ "'{' without a closing '}'; write '{{' for a literal '{'" };
+                        const name = template[i + 1 .. close];
+                        out = out ++ (placeholderText(rule, name) orelse return .{ .problem = templateHead(rule, template) ++ unknownPlaceholder(rule, name) });
+                        i = close + 1;
+                    }
+                    start = i;
+                },
+                '}' => {
+                    if (i + 1 < template.len and template[i + 1] == '}') {
+                        out = out ++ template[start..i] ++ "}";
+                        i += 2;
+                        start = i;
+                    } else {
+                        i += 1;
+                    }
+                },
+                else => i += 1,
+            }
+        }
+        const message = out ++ template[start..];
+        if (messageProblem(message)) |problem| return .{ .problem = templateHead(rule, template) ++ describeMessageProblem(problem) };
+        return .{ .message = message };
+    }
+}
+
+/// The start of a `.withMessage` error: `validator: min(1).withMessage("..."): `,
+/// with the template escaped. Built only for an error: escaping every
+/// template up front would slow down the analysis of every DTO with messages.
+fn templateHead(comptime rule: Rule, comptime template: []const u8) []const u8 {
+    return "validator: " ++ rule.call() ++ ".withMessage(\"" ++ escape(template) ++ "\"): ";
+}
+
+/// The text of the placeholder `name` of `rule`: its parameter as messages
+/// show it. Null when the rule has no such placeholder.
+pub fn placeholderText(comptime rule: Rule, comptime name: []const u8) ?[]const u8 {
+    comptime {
+        for (rule.params) |p| {
+            if (p.placeholder and std.mem.eql(u8, p.name, name)) return p.text;
+        }
+        return null;
+    }
+}
+
+/// The placeholders of `rule` in the order of its parameters, as error texts
+/// list them: `{min}, {max}`; "" for a rule without placeholders.
+pub fn placeholderList(comptime rule: Rule) []const u8 {
+    comptime {
+        var out: []const u8 = "";
+        for (rule.params) |p| {
+            if (p.placeholder) out = out ++ (if (out.len == 0) "" else ", ") ++ "{" ++ p.name ++ "}";
+        }
+        return out;
+    }
+}
+
+/// The problem of the placeholder `name`, which `rule` does not have. The
+/// name is escaped as the template in the head is.
+fn unknownPlaceholder(comptime rule: Rule, comptime name: []const u8) []const u8 {
+    const available = placeholderList(rule);
+    return "unknown placeholder {" ++ escape(name) ++ "}; " ++ if (available.len == 0) "this rule has no placeholders" else "available: " ++ available;
+}
+
+/// The declaration error of a rule whose default message is longer than 512
+/// bytes, or null. Only a rule without a fallback keeps such a message (`min`,
+/// `max`, `range` and `divisibleBy` with a bound of hundreds of digits), and
+/// `.withMessage` replaces it with one of at most 512 bytes.
+pub fn defaultMessageProblem(comptime rule: *const Rule, comptime where: []const u8) ?[]const u8 {
+    if (rule.message.len <= max_message_bytes) return null;
+    return ruleErrorText(rule, where, std.fmt.comptimePrint(": the default message would be {d} bytes (limit {d}); use .withMessage(...)", .{ rule.message.len, max_message_bytes }));
+}
+
+/// What `.withMessage(template)` gives `rule`, for the tests below: the new
+/// message, or the whole text of the compile error.
+fn withMessageText(comptime rule: Rule, comptime template: []const u8) []const u8 {
+    return switch (comptime renderTemplate(rule, template)) {
+        .message, .problem => |text| text,
+    };
+}
+
+fn isEvenForTest(n: u32) bool {
+    return n % 2 == 0;
+}
+
+test "the preconditions have their fixed codes and messages; each code is the code of the rule of the same name" {
+    const expect = std.testing.expectEqualStrings;
+    try expect("validation.utf8", preconditions.utf8.code);
+    try expect("must be valid UTF-8", preconditions.utf8.message);
+    try expect("validation.finite", preconditions.finite.code);
+    try expect("must be a finite number", preconditions.finite.message);
+    try expect("validation.date", preconditions.date.code);
+    try expect("must be a valid date in YYYY-MM-DD format", preconditions.date.message);
+    try expect("validation.rfc3339", preconditions.rfc3339.code);
+    try expect("must be a valid RFC 3339 date-time", preconditions.rfc3339.message);
+    try expect(comptime codeOf(.utf8), preconditions.utf8.code);
+    try expect(comptime codeOf(.finite), preconditions.finite.code);
+    try expect(comptime codeOf(.date), preconditions.date.code);
+    try expect(comptime codeOf(.rfc3339), preconditions.rfc3339.code);
+}
+
+test "a rule's placeholders are its placeholder parameters, listed in the order of its arguments" {
+    const expect = std.testing.expectEqualStrings;
+    try expect("{min}, {max}", comptime placeholderList(root.range(1, 100)));
+    try expect("{min}", comptime placeholderList(root.min(1)));
+    try expect("{max}", comptime placeholderList(root.max(1)));
+    try expect("{divisor}", comptime placeholderList(root.divisibleBy(5)));
+    try expect("{expected}", comptime placeholderList(root.equals(5)));
+    try expect("{forbidden}", comptime placeholderList(root.notEquals(5)));
+    try expect("{values}", comptime placeholderList(root.oneOf(.{"a"})));
+    try expect("{values}", comptime placeholderList(root.noneOf(.{"a"})));
+    try expect("{min}", comptime placeholderList(root.minItems(1)));
+    try expect("{max}", comptime placeholderList(root.maxItems(1)));
+    try expect("", comptime placeholderList(root.notEmpty));
+    try expect("", comptime placeholderList(root.custom("acme.even", "must be even", isEvenForTest)));
+    try expect("1", comptime placeholderText(root.range(1, 100), "min").?);
+    try expect("100", comptime placeholderText(root.range(1, 100), "max").?);
+    try std.testing.expectEqual(null, comptime placeholderText(root.range(1, 100), "divisor"));
+    try std.testing.expectEqual(null, comptime placeholderText(root.notEmpty, "value"));
+    // A data parameter, such as an option of an options rule, is no placeholder.
+    const with_option = comptime define(.fqdn, .{ .message = "must be a valid domain name", .args = ".{...}", .params = &.{dataParam("require_tld", true)}, .fits = test_rules.fitsAnything, .eval = test_rules.evalPositive });
+    try expect("", comptime placeholderList(with_option));
+    try std.testing.expectEqual(null, comptime placeholderText(with_option, "require_tld"));
+}
+
+test "an unknown placeholder is an error at the call that lists the placeholders the rule has" {
+    const expect = std.testing.expectEqualStrings;
+    try expect(
+        "validator: divisibleBy(5).withMessage(\"must be a multiple of {n}\"): unknown placeholder {n}; available: {divisor}",
+        comptime withMessageText(root.divisibleBy(5), "must be a multiple of {n}"),
+    );
+    // {} has an empty name; the names are listed in the order of the arguments.
+    try expect("validator: range(1, 100).withMessage(\"{}\"): unknown placeholder {}; available: {min}, {max}", comptime withMessageText(root.range(1, 100), "{}"));
+    // Names are case-sensitive, and a placeholder of another rule is unknown here.
+    try expect("validator: min(1).withMessage(\"{Min}\"): unknown placeholder {Min}; available: {min}", comptime withMessageText(root.min(1), "{Min}"));
+    try expect("validator: maxItems(5).withMessage(\"{min}\"): unknown placeholder {min}; available: {max}", comptime withMessageText(root.maxItems(5), "{min}"));
+    // {value} and {field} exist on no rule.
+    try expect("validator: equals(5).withMessage(\"{value}\"): unknown placeholder {value}; available: {expected}", comptime withMessageText(root.equals(5), "{value}"));
+    // The name is escaped as the template is, so the error stays on one line.
+    try expect("validator: min(1).withMessage(\"{a\\nb}\"): unknown placeholder {a\\nb}; available: {min}", comptime withMessageText(root.min(1), "{a\nb}"));
+    // In a chain, the head shows the rule's call and the template that fails,
+    // not the earlier .withMessage.
+    try expect(
+        "validator: minItems(8).withMessage(\"{x}\"): unknown placeholder {x}; available: {min}",
+        comptime withMessageText(root.minItems(8).withMessage("a {min}"), "{x}"),
+    );
+}
+
+test "a placeholder on a rule without placeholders is an error, custom included" {
+    const expect = std.testing.expectEqualStrings;
+    try expect(
+        "validator: negative.withMessage(\"{value} must be negative\"): unknown placeholder {value}; this rule has no placeholders",
+        comptime withMessageText(root.negative, "{value} must be negative"),
+    );
+    try expect(
+        "validator: custom(\"acme.even\", ...).withMessage(\"{odd}\"): unknown placeholder {odd}; this rule has no placeholders",
+        comptime withMessageText(root.custom("acme.even", "must be even, not {odd}", isEvenForTest), "{odd}"),
+    );
+    try expect("validator: notEmpty.withMessage(\"{field} is required\"): unknown placeholder {field}; this rule has no placeholders", comptime withMessageText(root.notEmpty, "{field} is required"));
+    try expect("validator: negative.withMessage(\"{\\xff}\"): unknown placeholder {\\xff}; this rule has no placeholders", comptime withMessageText(root.negative, "{\xff}"));
+}
+
+test "a { without a closing } is an error; {{ writes a literal {" {
+    const expect = std.testing.expectEqualStrings;
+    const unclosed = "'{' without a closing '}'; write '{{' for a literal '{'";
+    try expect("validator: divisibleBy(5).withMessage(\"must be divisible by {divisor\"): " ++ unclosed, comptime withMessageText(root.divisibleBy(5), "must be divisible by {divisor"));
+    try expect("validator: notEmpty.withMessage(\"{\"): " ++ unclosed, comptime withMessageText(root.notEmpty, "{"));
+    try expect("validator: min(1).withMessage(\"{{min} {min\"): " ++ unclosed, comptime withMessageText(root.min(1), "{{min} {min"));
+    try expect("{min} 1", comptime withMessageText(root.min(1), "{{min} {min}"));
+}
+
+test "the message of a template must not be empty, longer than 512 bytes or invalid UTF-8" {
+    const expect = std.testing.expectEqualStrings;
+    try expect("validator: notEmpty.withMessage(\"\"): message must not be empty", comptime withMessageText(root.notEmpty, ""));
+    const long: [513]u8 = @splat('m');
+    try expect("validator: maxItems(5).withMessage(\"" ++ long ++ "\"): message is longer than 512 bytes", comptime withMessageText(root.maxItems(5), &long));
+    try expect("validator: min(1).withMessage(\"\\xc3\"): message must be valid UTF-8", comptime withMessageText(root.min(1), "\xc3"));
+    try expect("validator: notEmpty.withMessage(\"caf\\xc3\"): message must be valid UTF-8", comptime withMessageText(root.notEmpty, "caf\xc3"));
+    // The limit applies to the message after substitution: 511 bytes and {max} = 5 fit, 512 bytes and {max} do not.
+    const fill: [511]u8 = @splat('m');
+    try expect(fill ++ "5", comptime withMessageText(root.maxItems(5), fill ++ "{max}"));
+    try expect("validator: maxItems(5).withMessage(\"" ++ fill ++ "m{max}\"): message is longer than 512 bytes", comptime withMessageText(root.maxItems(5), fill ++ "m{max}"));
+    // A long placeholder can make a short template too long.
+    const values = .{ &@as([300]u8, @splat('a')), &@as([300]u8, @splat('b')) };
+    try std.testing.expect(std.mem.endsWith(u8, comptime withMessageText(root.oneOf(values), "{values}"), "\"): message is longer than 512 bytes"));
+}
+
+test "withMessage on each is an error: its inner rules carry the messages" {
+    try std.testing.expectEqualStrings(
+        "validator: each(...).withMessage(\"x\"): each has no message of its own; put .withMessage on the inner rules",
+        comptime withMessageText(root.each(root.notEmpty), "x"),
+    );
+}
+
+test "a template is read left to right: the first unknown or unclosed placeholder wins, then the message is checked" {
+    const expect = std.testing.expectEqualStrings;
+    try expect("validator: divisibleBy(5).withMessage(\"{n} {divisor\"): unknown placeholder {n}; available: {divisor}", comptime withMessageText(root.divisibleBy(5), "{n} {divisor"));
+    try expect("validator: divisibleBy(5).withMessage(\"{divisor} {n}\"): unknown placeholder {n}; available: {divisor}", comptime withMessageText(root.divisibleBy(5), "{divisor} {n}"));
+    // A placeholder name ends at the first }.
+    try expect("validator: divisibleBy(5).withMessage(\"{x {divisor}\"): unknown placeholder {x {divisor}; available: {divisor}", comptime withMessageText(root.divisibleBy(5), "{x {divisor}"));
+    // Placeholders come before the length: a long template with an unknown one names the placeholder.
+    const long: [600]u8 = @splat('m');
+    try expect("validator: min(1).withMessage(\"" ++ long ++ "{n}\"): unknown placeholder {n}; available: {min}", comptime withMessageText(root.min(1), long ++ "{n}"));
+    // Then emptiness, length and UTF-8, in that order.
+    const invalid: [513]u8 = @splat(0xff);
+    try std.testing.expect(std.mem.endsWith(u8, comptime withMessageText(root.min(1), &invalid), "\"): message is longer than 512 bytes"));
+}
+
+test "withMessage replaces the message only: the code, the parameters and the precondition stay" {
+    const t = std.testing;
+    const base = root.range(1, 100);
+    const custom_message = comptime base.withMessage("from {min} to {max} items");
+    try t.expectEqualStrings("from 1 to 100 items", custom_message.message);
+    try t.expectEqualStrings("validation.range", custom_message.code);
+    try t.expectEqualStrings("1, 100", custom_message.args.?);
+    try t.expectEqual(2, custom_message.params.len);
+    try t.expectEqualStrings("validation.finite", custom_message.precondition.?.code);
+    try t.expectEqualStrings("must be a finite number", custom_message.precondition.?.message);
+    // The rule it was called on keeps its default message.
+    try t.expectEqualStrings("must be from 1 to 100", base.message);
+    // A second withMessage replaces the first, with the same placeholders.
+    try t.expectEqualStrings("b 8", (comptime root.minItems(8).withMessage("a {min}").withMessage("b {min}")).message);
+    // On custom the template replaces the literal message, and its braces are syntax.
+    try t.expectEqualStrings("{x} } {", (comptime root.custom("acme.even", "{x} }} {{", isEvenForTest).withMessage("{{x}} }} {{")).message);
+}
+
+test "a default message over 512 bytes without a fallback stays in the rule, and the field's declaration check reports it" {
+    const t = std.testing;
+    const where = "Dto.field_rules.x";
+    const longer: [513]u8 = @splat('m');
+    const kept = comptime define(.min, .{ .message = &longer, .args = "5", .fits = test_rules.fitsAnything, .eval = test_rules.evalPositive });
+    try t.expectEqualStrings(&longer, kept.message);
+    try t.expectEqualStrings(
+        "validator: Dto.field_rules.x: min(5): the default message would be 513 bytes (limit 512); use .withMessage(...)",
+        comptime defaultMessageProblem(&kept, where).?,
+    );
+    try t.expectEqualStrings(
+        "validator: Dto.field_rules.x[]: min(5): the default message would be 513 bytes (limit 512); use .withMessage(...)",
+        comptime defaultMessageProblem(&kept, where ++ "[]").?,
+    );
+    // withMessage replaces it, so the check passes.
+    try t.expectEqual(null, comptime defaultMessageProblem(&kept.withMessage("too small"), where));
+    // 512 bytes stay; a rule with a fallback never keeps a longer message.
+    const exactly: [512]u8 = @splat('m');
+    const fits = comptime define(.min, .{ .message = &exactly, .args = "5", .fits = test_rules.fitsAnything, .eval = test_rules.evalPositive });
+    try t.expectEqual(null, comptime defaultMessageProblem(&fits, where));
+    const fallback = comptime define(.equals, .{ .message = &longer, .fallback = "must be equal to the expected value", .fits = test_rules.fitsAnything, .eval = test_rules.evalPositive });
+    try t.expectEqual(null, comptime defaultMessageProblem(&fallback, where));
+    try t.expectEqual(null, comptime defaultMessageProblem(&test_rules.each_positive, where));
 }
 
 // ------------------------------------------------------------------ field types
@@ -679,6 +1505,15 @@ pub fn isFloat(comptime T: type) bool {
     return @typeInfo(T) == .float;
 }
 
+/// A signed integer or a float type: the field types of the sign rules.
+pub fn isSignedNumber(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .int => |i| i.signedness == .signed,
+        .float => true,
+        else => false,
+    };
+}
+
 /// `T` coerces to `P` without a cast: the conversions a field value may take
 /// into the parameter of a `v.custom` predicate. Identical types; integers of
 /// the same signedness that are not narrower, and unsigned integers into
@@ -738,6 +1573,17 @@ pub const hints = struct {
     pub const tuple_pointer = "drop the &: write .{ ... }, not &.{ ... }";
     /// The rules of a struct field's own fields written as a struct literal.
     pub const struct_literal = "the rules of a nested struct's fields go into that struct's own field_rules";
+    /// A rule that only 0 of the field type would pass.
+    pub const use_equals_zero = "use v.equals(0)";
+    /// `equals("")`: the empty string has its own rule.
+    pub const use_empty = "use v.empty";
+    /// `notEquals("")` and a `""` listed in `noneOf`.
+    pub const use_not_empty = "use v.notEmpty";
+    /// A bool listed in `oneOf` or `noneOf`.
+    pub const use_equals_or_not_equals = "use v.equals or v.notEquals";
+    /// `minItems` and `maxItems` on a string field.
+    pub const min_items_on_string = "for strings use v.minLength or v.minBytes";
+    pub const max_items_on_string = "for strings use v.maxLength or v.maxBytes";
 
     /// A rule written on a list whose items it would accept.
     pub fn useEach(comptime rule: Rule) []const u8 {
@@ -795,22 +1641,6 @@ fn callExample(comptime name: []const u8) ?[]const u8 {
 /// only the other kinds with the public names. Each rule pull request deletes
 /// its lines; the list is empty once all 96 rules are exported.
 pub const pending_kinds = [_]Kind{
-    // PR 1b
-    .equals,
-    .not_equals,
-    .one_of,
-    .none_of,
-    .empty,
-    .min,
-    .max,
-    .range,
-    .non_negative,
-    .negative,
-    .non_positive,
-    .divisible_by,
-    .finite,
-    .min_items,
-    .max_items,
     // PR 1c
     .unique_items,
     .unique_by,
@@ -924,7 +1754,7 @@ pub fn typeError(comptime rule: *const Rule, comptime T: type, comptime where: [
 }
 
 /// The text of `typeError`, separate so that tests can read it.
-fn typeErrorText(comptime rule: *const Rule, comptime T: type, comptime where: []const u8, comptime expects: []const u8, comptime accepts: fn (comptime type) bool, comptime hint: ?[]const u8) []const u8 {
+pub fn typeErrorText(comptime rule: *const Rule, comptime T: type, comptime where: []const u8, comptime expects: []const u8, comptime accepts: fn (comptime type) bool, comptime hint: ?[]const u8) []const u8 {
     @setEvalBranchQuota(eval_quota);
     var extra: ?[]const u8 = hint;
     if (isU8Array(T) and accepts([]const u8)) {
@@ -953,7 +1783,467 @@ fn plainSlice(comptime T: type) ?type {
 
 /// A declaration error about one rule: `validator: <where>: <label><text>`.
 pub fn ruleError(comptime rule: *const Rule, comptime where: []const u8, comptime text: []const u8) noreturn {
-    @compileError("validator: " ++ where ++ ": " ++ rule.label() ++ text);
+    @compileError(ruleErrorText(rule, where, text));
+}
+
+/// The text of `ruleError`, separate so that tests can read it.
+pub fn ruleErrorText(comptime rule: *const Rule, comptime where: []const u8, comptime text: []const u8) []const u8 {
+    return "validator: " ++ where ++ ": " ++ rule.label() ++ text;
+}
+
+// ------------------------------------------------------------------ number parameters
+
+/// The range of an integer type as error texts show it: `0..255` for u8.
+pub fn intRange(comptime T: type) []const u8 {
+    return std.fmt.comptimePrint("{d}..{d}", .{ std.math.minInt(T), std.math.maxInt(T) });
+}
+
+/// The comptime number `x` as a value of the numeric field type `T`:
+/// integers exactly, floats rounded to the nearest value of `T`, as a
+/// decoder rounds the input. Call it at comptime, for a parameter that
+/// `numberParamProblem` accepted for `T`.
+pub fn numberAs(comptime T: type, comptime x: anytype) T {
+    return switch (@typeInfo(T)) {
+        .int => @intCast(x),
+        .float => switch (@typeInfo(@TypeOf(x))) {
+            .comptime_int, .int => @floatFromInt(x),
+            else => @floatCast(x),
+        },
+        else => @compileError("validator: internal: numberAs needs a number type, got " ++ @typeName(T)),
+    };
+}
+
+/// The parameter `x` as a value of the field type `T`: a number as
+/// `numberAs` converts it, a tag as the tag of `T` with its name, a bool or
+/// a string as it is. Call it at comptime, for a parameter that the rule's
+/// checks accepted for `T`.
+pub fn valueAs(comptime T: type, comptime x: anytype) T {
+    return switch (@typeInfo(T)) {
+        .int, .float => numberAs(T, x),
+        .@"enum" => @field(T, tagName(x) orelse @compileError("validator: internal: " ++ unnamedTag(x) ++ " has no tag name")),
+        else => x,
+    };
+}
+
+/// The kind of a parameter of type `X` in error texts: `an integer`,
+/// `a float (f64)`, `a bool`, `an enum tag`, `a string`, `a list`, or the
+/// type's name for anything else.
+pub fn describeValueType(comptime X: type) []const u8 {
+    return switch (valueKind(X)) {
+        .int => "an integer",
+        .float => "a float (" ++ @typeName(X) ++ ")",
+        .bool => "a bool",
+        .tag => "an enum tag",
+        .string => "a string",
+        .list => "a list",
+        .other => @typeName(X),
+    };
+}
+
+/// Why the parameter `x` cannot be compared with values of the numeric field
+/// type `T`, as the text after the rule's label (`: 300 is outside u8
+/// (0..255)`), or null. An integer field takes an integer within its type;
+/// any other parameter gets `use_integer` as the hint. A float field takes a
+/// number that stays finite in it and, unless zero, does not round to 0, and
+/// an integer it holds exactly; anything else gets `use a number`. A typed
+/// float narrower than the field (`@as(f32, 0.1)` on f64) is taken only when
+/// its value shows the same in the field type: its exact value there,
+/// 0.10000000149011612, is what the rule would compare with. On a
+/// `c_longdouble` field this depends on the target. `outside` follows the
+/// texts about a parameter outside the type (`; the rule would never pass`).
+/// The parameter is shown as it is written.
+pub fn numberParamProblem(comptime x: anytype, comptime T: type, comptime use_integer: []const u8, comptime outside: []const u8) ?[]const u8 {
+    @setEvalBranchQuota(eval_quota);
+    const X = @TypeOf(x);
+    const shown = renderArg(x);
+    const kind = comptime valueKind(X);
+    switch (@typeInfo(T)) {
+        .int => {
+            if (kind != .int) return ": " ++ shown ++ " is " ++ describeValueType(X) ++ ", field is " ++ @typeName(T) ++ "; " ++ use_integer;
+            const n: comptime_int = x;
+            if (n < std.math.minInt(T) or n > std.math.maxInt(T))
+                return ": " ++ shown ++ " is outside " ++ @typeName(T) ++ " (" ++ intRange(T) ++ ")" ++ outside;
+            return null;
+        },
+        .float => switch (kind) {
+            .int => {
+                const f: T = @floatFromInt(x);
+                if (std.math.isInf(f)) return ": " ++ shown ++ " is outside the finite range of " ++ @typeName(T) ++ outside;
+                const nearest: comptime_int = @intFromFloat(f);
+                if (nearest != x)
+                    return ": " ++ shown ++ " is not exactly representable in " ++ @typeName(T) ++ std.fmt.comptimePrint(" (nearest: {d})", .{nearest});
+                return null;
+            },
+            .float => {
+                const f: T = @floatCast(x);
+                if (std.math.isInf(f)) return ": " ++ shown ++ " is outside the finite range of " ++ @typeName(T) ++ outside;
+                if (f == 0 and x != 0) return ": " ++ shown ++ " rounds to 0 in " ++ @typeName(T);
+                // A narrower typed float widens exactly, so the rule would
+                // compare with a value whose text differs from the one shown.
+                if (X != comptime_float and std.math.floatFractionalBits(X) < std.math.floatFractionalBits(T)) {
+                    const widened = renderValue(f);
+                    if (!std.mem.eql(u8, widened, shown))
+                        return ": " ++ shown ++ " is " ++ describeValueType(X) ++ ", " ++ widened ++ " in " ++ @typeName(T) ++ "; write it as a literal or as " ++ @typeName(T);
+                }
+                return null;
+            },
+            else => return ": " ++ shown ++ " is " ++ describeValueType(X) ++ ", field is " ++ @typeName(T) ++ "; use a number",
+        },
+        else => @compileError("validator: internal: numberParamProblem needs a number field type, got " ++ @typeName(T)),
+    }
+}
+
+// ------------------------------------------------------------------ tag parameters
+
+/// The tags of the enum `E` by name, as `tagIdentifier` writes them, joined
+/// by `, `: `admin, user, guest`.
+pub fn tagList(comptime E: type) []const u8 {
+    comptime {
+        var out: []const u8 = "";
+        for (@typeInfo(E).@"enum".field_names, 0..) |tag, i| out = out ++ (if (i == 0) "" else ", ") ++ tagIdentifier(tag);
+        return out;
+    }
+}
+
+/// Why the tag parameter `x` (an enum literal or a named enum value) does
+/// not stand for a tag of the enum field type `E`, as the text after the
+/// rule's label (`: Role has no tag root; tags: admin, user, guest`), or
+/// null. A value of another enum type is named with its type, even when `E`
+/// has a tag of the same name; a literal must name a tag of `E`, and the
+/// text lists the tags `E` has. Names are written as `tagIdentifier` writes
+/// them. Constructors reject unnamed values first.
+pub fn tagProblem(comptime x: anytype, comptime E: type) ?[]const u8 {
+    @setEvalBranchQuota(eval_quota);
+    const X = @TypeOf(x);
+    if (@typeInfo(X) == .@"enum" and X != E)
+        return ": " ++ renderArg(x) ++ " is a tag of " ++ @typeName(X) ++ ", the field is " ++ @typeName(E);
+    const name = tagName(x) orelse @compileError("validator: internal: " ++ unnamedTag(x) ++ " has no tag name");
+    if (@hasField(E, name)) return null;
+    const tags = tagList(E);
+    return ": " ++ @typeName(E) ++ " has no tag " ++ tagIdentifier(name) ++ if (tags.len == 0) "" else "; tags: " ++ tags;
+}
+
+/// Enums for the tag tests: a field's enum, another enum with a tag of the
+/// same name, and an enum without named tags.
+const TestRole = enum { admin, user, guest };
+const TestColor = enum { red, admin };
+const TestNoTags = enum(u8) { _ };
+
+test "an enum's tags are listed by name, joined by commas" {
+    const expect = std.testing.expectEqualStrings;
+    try expect("admin, user, guest", comptime tagList(TestRole));
+    try expect("a, b", comptime tagList(TestOpen));
+    try expect("", comptime tagList(TestNoTags));
+    // Names are written as Zig source writes them.
+    try expect("@\"error\", @\"a\\nb\", plain", comptime tagList(TestQuoted));
+}
+
+test "a tag parameter names a tag of the field's enum; a value of another enum is named with its type" {
+    const expect = std.testing.expectEqualStrings;
+    try std.testing.expectEqual(null, comptime tagProblem(.admin, TestRole));
+    try std.testing.expectEqual(null, comptime tagProblem(TestRole.guest, TestRole));
+    try std.testing.expectEqual(null, comptime tagProblem(.b, TestOpen));
+    try expect(": core.TestRole has no tag root; tags: admin, user, guest", comptime tagProblem(.root, TestRole).?);
+    try expect(": .red is a tag of core.TestColor, the field is core.TestRole", comptime tagProblem(TestColor.red, TestRole).?);
+    // The type decides before the name: TestRole has a tag admin too.
+    try expect(": .admin is a tag of core.TestColor, the field is core.TestRole", comptime tagProblem(TestColor.admin, TestRole).?);
+    // An enum without named tags has no tags to list.
+    try expect(": core.TestNoTags has no tag a", comptime tagProblem(.a, TestNoTags).?);
+    // Names are written as Zig source writes them.
+    try expect(": core.TestQuoted has no tag @\"a b\"; tags: @\"error\", @\"a\\nb\", plain", comptime tagProblem(.@"a b", TestQuoted).?);
+    try std.testing.expectEqual(null, comptime tagProblem(.@"error", TestQuoted));
+}
+
+test "a checked parameter converts to the field type: numbers as numberAs does, bools as they are, tags by name" {
+    const t = std.testing;
+    try t.expectEqual(@as(u8, 5), comptime valueAs(u8, 5));
+    try t.expectEqual(@as(i64, 7), comptime valueAs(i64, @as(u8, 7)));
+    try t.expectEqual(@as(f32, 0.1), comptime valueAs(f32, 0.1));
+    try t.expectEqual(@as(f64, 2), comptime valueAs(f64, 2));
+    try t.expectEqual(true, comptime valueAs(bool, true));
+    try t.expectEqual(TestRole.guest, comptime valueAs(TestRole, .guest));
+    try t.expectEqual(TestRole.guest, comptime valueAs(TestRole, TestRole.guest));
+    try t.expectEqual(TestOpen.b, comptime valueAs(TestOpen, .b));
+    try t.expectEqualStrings("abc", comptime valueAs([]const u8, "abc"));
+}
+
+// ------------------------------------------------------------------ value lists
+
+/// The kind of the values a list parameter holds (`oneOf`, `noneOf`,
+/// `containsAll`, `containsNone`): one kind per list.
+pub const ListKind = enum {
+    string,
+    tag,
+    int,
+    bool,
+
+    /// The kind as error texts name it: `strings`, `enum tags`.
+    pub fn plural(comptime kind: ListKind) []const u8 {
+        return switch (kind) {
+            .string => "strings",
+            .tag => "enum tags",
+            .int => "integers",
+            .bool => "bools",
+        };
+    }
+};
+
+/// A list parameter that `analyzeList` accepted.
+pub const ValueList = struct {
+    kind: ListKind,
+    len: usize,
+    /// The values as messages show them, joined by `, `: the text of
+    /// `{values}`.
+    text: []const u8,
+    /// The list as compile errors show it: `.{ "a", "b" }`, cut after 72
+    /// bytes.
+    args: []const u8,
+};
+
+/// What a list rule accepts beyond a list of strings, enum tags or integers.
+pub const ListOptions = struct {
+    /// Bools may be listed; otherwise a listed bool is an error that points
+    /// to `v.equals` and `v.notEquals`.
+    allow_bool: bool = false,
+    /// The error text for a listed `""` (after `<call>: `), or null when
+    /// `""` may be listed.
+    empty_string: ?[]const u8 = null,
+};
+
+/// Checks the list parameter of the rule `name` (`oneOf`) at the user's
+/// call and describes it: a problem stops compilation with the text of
+/// `listProblem`.
+pub fn analyzeList(comptime name: []const u8, comptime values: anytype, comptime options: ListOptions) ValueList {
+    @setEvalBranchQuota(eval_quota);
+    if (listProblem(name, values, options)) |text| @compileError(text);
+    return .{
+        .kind = listKind(@TypeOf(values[0])) orelse @compileError("validator: internal: an accepted list has values of no list kind"),
+        .len = values.len,
+        .text = renderValue(values),
+        .args = renderArg(values),
+    };
+}
+
+/// The error of the call `name(values)` of a list rule, or null. `values`
+/// is a tuple or an array `[N]T` (not a pointer to an array or a tuple, not
+/// a slice) of at least one value; all of them strings, all enum tags or all
+/// integers (or all bools, when `options` allows them); strings in valid
+/// UTF-8 (and not empty, when `options` says so), tags named, and no value
+/// listed twice: strings by bytes, tags by name, integers by value. The
+/// values are checked left to right and the first problem wins.
+pub fn listProblem(comptime name: []const u8, comptime values: anytype, comptime options: ListOptions) ?[]const u8 {
+    comptime {
+        @setEvalBranchQuota(eval_quota);
+        const V = @TypeOf(values);
+        const head = "validator: " ++ name ++ "(" ++ renderArg(values) ++ "): ";
+        if (valueKind(V) != .list) {
+            // The generated type of a tuple repeats every value: name it instead.
+            const got = if (isTuplePointer(V))
+                "a pointer to a tuple; " ++ hints.tuple_pointer
+            else
+                @typeName(V) ++ if (isArrayPointer(V)) "; pass the array itself, not a pointer to it" else "";
+            return head ++ "expected a tuple or an array of values, e.g. .{ \"a\", \"b\" }, got " ++ got;
+        }
+        if (values.len == 0) return head ++ "the list is empty";
+        const duplicate = firstDuplicate(values);
+        var first: ListKind = undefined;
+        for (0..values.len) |i| {
+            const item = values[i];
+            const X = @TypeOf(item);
+            const kind = listKind(X) orelse return head ++ switch (valueKind(X)) {
+                .float => "floats cannot be listed: exact float equality is fragile",
+                else => "cannot list a value of type " ++ @typeName(X),
+            };
+            if (kind == .bool and !options.allow_bool) return head ++ "bools cannot be listed; " ++ hints.use_equals_or_not_equals;
+            if (i == 0) {
+                first = kind;
+            } else if (kind != first) {
+                return head ++ "the list mixes " ++ first.plural() ++ " and " ++ kind.plural();
+            }
+            switch (kind) {
+                .tag => if (tagName(item) == null) return head ++ renderArg(item) ++ " is not a named tag of " ++ @typeName(X),
+                .string => {
+                    if (item.len == 0) {
+                        if (options.empty_string) |text| return head ++ text;
+                    }
+                    if (!std.unicode.utf8ValidateSlice(item)) return head ++ renderArg(item) ++ " is not valid UTF-8";
+                },
+                .int, .bool => {},
+            }
+            if (duplicate == i) return head ++ renderArg(item) ++ " is listed twice";
+        }
+        return null;
+    }
+}
+
+/// The index of the first listed value that equals an earlier one (strings
+/// by bytes, tags by name, integers and bools by value), or null. A value of
+/// no list kind and an unnamed tag have no key and are skipped:
+/// `listProblem` stops at them first. The keys are sorted, so the check
+/// takes O(n log n) comparisons and a list of thousands of values stays
+/// within the comptime branch quota.
+fn firstDuplicate(comptime values: anytype) ?usize {
+    comptime {
+        @setEvalBranchQuota(eval_quota);
+        const Entry = struct { key: []const u8, index: usize };
+        var entries: [values.len]Entry = undefined;
+        var n: usize = 0;
+        for (0..values.len) |i| {
+            const item = values[i];
+            // The kind prefix keeps values of different kinds apart.
+            entries[n] = .{ .index = i, .key = switch (listKind(@TypeOf(item)) orelse continue) {
+                .string => "s" ++ item,
+                .tag => "t" ++ (tagName(item) orelse continue),
+                .int => std.fmt.comptimePrint("i{d}", .{item}),
+                .bool => if (item) "b1" else "b0",
+            } };
+            n += 1;
+        }
+        // `for (1..n)` below needs n >= 1; a list without two keys has no duplicate.
+        if (n < 2) return null;
+        std.mem.sortUnstable(Entry, entries[0..n], {}, struct {
+            fn lessThan(_: void, a: Entry, b: Entry) bool {
+                return switch (std.mem.order(u8, a.key, b.key)) {
+                    .lt => true,
+                    .gt => false,
+                    .eq => a.index < b.index,
+                };
+            }
+        }.lessThan);
+        // Equal keys are adjacent and ordered by index: the second of each run
+        // repeats an earlier value, and the smallest such index comes first.
+        var found: ?usize = null;
+        for (1..n) |e| {
+            if (std.mem.eql(u8, entries[e - 1].key, entries[e].key) and (found == null or entries[e].index < found.?))
+                found = entries[e].index;
+        }
+        return found;
+    }
+}
+
+/// The list kind of a value of type `X`, or null for a value no list holds.
+fn listKind(comptime X: type) ?ListKind {
+    return switch (valueKind(X)) {
+        .string => .string,
+        .tag => .tag,
+        .int => .int,
+        .bool => .bool,
+        .float, .list, .other => null,
+    };
+}
+
+/// A single-item pointer to an array of other items than u8 (a pointer to
+/// `[N]u8` is a string): `&allowed` where the array itself was meant.
+fn isArrayPointer(comptime V: type) bool {
+    return switch (@typeInfo(V)) {
+        .pointer => |p| p.size == .one and @typeInfo(p.child) == .array and @typeInfo(p.child).array.child != u8,
+        else => false,
+    };
+}
+
+/// A single-item pointer to a tuple: `&.{ ... }` where the tuple was meant.
+fn isTuplePointer(comptime V: type) bool {
+    return switch (@typeInfo(V)) {
+        .pointer => |p| p.size == .one and isTuple(p.child),
+        else => false,
+    };
+}
+
+/// The values of a checked list as an array of the field type `T`: `[]const
+/// u8` for strings, an enum (each tag by its name) or an integer type, for
+/// the run-time comparisons. Call it at comptime, for a list that the
+/// rule's checks accepted for `T`.
+pub fn listAs(comptime T: type, comptime values: anytype) [values.len]T {
+    comptime {
+        @setEvalBranchQuota(eval_quota);
+        var out: [values.len]T = undefined;
+        for (&out, 0..) |*slot, i| slot.* = valueAs(T, values[i]);
+        return out;
+    }
+}
+
+test "a list kind is named in the plural" {
+    const expect = std.testing.expectEqualStrings;
+    try expect("strings", comptime ListKind.string.plural());
+    try expect("enum tags", comptime ListKind.tag.plural());
+    try expect("integers", comptime ListKind.int.plural());
+    try expect("bools", comptime ListKind.bool.plural());
+}
+
+test "a checked list keeps its kind, its length, its values as messages show them and its call as written" {
+    const t = std.testing;
+    const strings = comptime analyzeList("oneOf", .{ "a", "" }, .{});
+    try t.expectEqual(ListKind.string, strings.kind);
+    try t.expectEqual(2, strings.len);
+    try t.expectEqualStrings("a, \"\"", strings.text);
+    try t.expectEqualStrings(".{ \"a\", \"\" }", strings.args);
+    const tags = comptime analyzeList("oneOf", .{ .admin, TestRole.user }, .{});
+    try t.expectEqual(ListKind.tag, tags.kind);
+    try t.expectEqualStrings("admin, user", tags.text);
+    try t.expectEqualStrings(".{ .admin, .user }", tags.args);
+    // An array is a list too, [N]u8 included: its items are integers.
+    const bytes = comptime analyzeList("oneOf", [_]u8{ 1, 2 }, .{});
+    try t.expectEqual(ListKind.int, bytes.kind);
+    try t.expectEqualStrings("1, 2", bytes.text);
+    try t.expectEqualStrings(".{ 1, 2 }", bytes.args);
+    const one = comptime analyzeList("oneOf", [_][]const u8{"x"}, .{});
+    try t.expectEqual(1, one.len);
+    try t.expectEqualStrings(".{\"x\"}", one.args);
+    const bools = comptime analyzeList("containsAll", .{ true, false }, .{ .allow_bool = true });
+    try t.expectEqual(ListKind.bool, bools.kind);
+    try t.expectEqualStrings("true, false", bools.text);
+}
+
+test "the list options allow bools and reject the empty string with the rule's own text" {
+    const expect = std.testing.expectEqualStrings;
+    try std.testing.expectEqual(null, comptime listProblem("containsAll", .{true}, .{ .allow_bool = true }));
+    try expect("validator: oneOf(.{true}): bools cannot be listed; use v.equals or v.notEquals", comptime listProblem("oneOf", .{true}, .{}).?);
+    try std.testing.expectEqual(null, comptime listProblem("oneOf", .{""}, .{}));
+    try expect("validator: noneOf(.{\"\"}): no empty string", comptime listProblem("noneOf", .{""}, .{ .empty_string = "no empty string" }).?);
+    // Mixed with bools, the first kind is named first.
+    try expect("validator: containsAll(.{ true, 1 }): the list mixes bools and integers", comptime listProblem("containsAll", .{ true, 1 }, .{ .allow_bool = true }).?);
+    try expect("validator: containsAll(.{ true, false, true }): true is listed twice", comptime listProblem("containsAll", .{ true, false, true }, .{ .allow_bool = true }).?);
+}
+
+/// `n` codes of the same width, `"SKU-000000"` to `"SKU-<n - 1>"`: a long list
+/// of strings.
+fn testCodes(comptime n: usize) [n][]const u8 {
+    comptime {
+        @setEvalBranchQuota(eval_quota);
+        var out: [n][]const u8 = undefined;
+        for (&out, 0..) |*slot, i| slot.* = std.fmt.comptimePrint("SKU-{d:0>6}", .{i});
+        return out;
+    }
+}
+
+test "a list of thousands of values is checked within the comptime branch quota, a late duplicate included" {
+    const t = std.testing;
+    try t.expectEqual(null, comptime listProblem("oneOf", testCodes(1400), .{}));
+    try t.expectEqual(null, comptime listProblem("noneOf", testCodes(2000), .{}));
+    try t.expectEqualStrings(
+        "validator: oneOf(.{ \"SKU-000000\", \"SKU-000001\", \"SKU-000002\", \"SKU-000003\", \"SKU-000004\", ... }): \"SKU-001999\" is listed twice",
+        comptime listProblem("oneOf", testCodes(2000) ++ [_][]const u8{"SKU-001999"}, .{}).?,
+    );
+    // The value reported is the first one that repeats an earlier value.
+    try t.expectEqualStrings("validator: oneOf(.{ \"a\", \"b\", \"b\", \"a\" }): \"b\" is listed twice", comptime listProblem("oneOf", .{ "a", "b", "b", "a" }, .{}).?);
+    try t.expectEqualStrings("validator: oneOf(.{ 7, -7, 7, 7 }): 7 is listed twice", comptime listProblem("oneOf", .{ 7, -7, @as(i8, 7), 7 }, .{}).?);
+}
+
+test "a checked list converts to an array of the field type: strings, tags by name, integers" {
+    const t = std.testing;
+    const strings = comptime listAs([]const u8, .{ "a", @as([]const u8, "bc") });
+    try t.expectEqual(2, strings.len);
+    try t.expectEqualStrings("a", strings[0]);
+    try t.expectEqualStrings("bc", strings[1]);
+    const tags = comptime listAs(TestRole, .{ .guest, TestRole.admin });
+    try t.expectEqual(TestRole.guest, tags[0]);
+    try t.expectEqual(TestRole.admin, tags[1]);
+    const ints = comptime listAs(i64, .{ @as(u8, 255), -1, std.math.minInt(i64) });
+    try t.expectEqual(@as(i64, 255), ints[0]);
+    try t.expectEqual(@as(i64, -1), ints[1]);
+    try t.expectEqual(@as(i64, std.math.minInt(i64)), ints[2]);
+    const from_array = comptime listAs(u16, [_]u8{ 7, 9 });
+    try t.expectEqual(@as(u16, 9), from_array[1]);
 }
 
 // ------------------------------------------------------------------ rule lists
@@ -1003,8 +2293,7 @@ fn notARule(comptime value: anytype, comptime where: []const u8, comptime prefix
         @compileError("validator: " ++ where ++ ": " ++ prefix ++ @typeName(V) ++ "; " ++ hints.wrap_predicate);
     }
     if (isTuple(V)) @compileError("validator: " ++ where ++ ": " ++ prefix ++ "a tuple; " ++ hints.nested_tuple);
-    if (@typeInfo(V) == .pointer and @typeInfo(V).pointer.size == .one and isTuple(@typeInfo(V).pointer.child))
-        @compileError("validator: " ++ where ++ ": " ++ prefix ++ "a pointer to a tuple; " ++ hints.tuple_pointer);
+    if (isTuplePointer(V)) @compileError("validator: " ++ where ++ ": " ++ prefix ++ "a pointer to a tuple; " ++ hints.tuple_pointer);
     if (isAnonymous(V)) @compileError("validator: " ++ where ++ ": " ++ prefix ++ "a struct literal; " ++ hints.struct_literal);
     @compileError("validator: " ++ where ++ ": " ++ prefix ++ @typeName(V));
 }
@@ -1075,8 +2364,8 @@ pub fn itemRules(comptime rules: []const Rule) []const Rule {
 }
 
 /// The declaration check of one value's rules: at most one `each`, placed
-/// last; then each rule's `fits` against `T`, the unwrapped field or item
-/// type, in tuple order.
+/// last; then, in tuple order, each rule's `fits` against `T`, the unwrapped
+/// field or item type, and the size of its default message.
 pub fn checkRuleList(comptime rules: []const Rule, comptime T: type, comptime where: []const u8) void {
     @setEvalBranchQuota(eval_quota);
     var each_count: usize = 0;
@@ -1085,7 +2374,10 @@ pub fn checkRuleList(comptime rules: []const Rule, comptime T: type, comptime wh
     }
     if (each_count > 1) @compileError("validator: " ++ where ++ ": each appears twice; " ++ hints.one_each);
     if (each_count == 1 and rules[rules.len - 1].kind != .each) @compileError("validator: " ++ where ++ ": each must be the last rule");
-    for (rules) |*rule| rule.fits(rule, T, where);
+    for (rules) |*rule| {
+        rule.fits(rule, T, where);
+        if (defaultMessageProblem(rule, where)) |text| @compileError(text);
+    }
 }
 
 /// Stand-in rules for the self-tests below; the real rules live in the rule
@@ -1151,6 +2443,28 @@ test "define gives a rule its kind's code, the message and the data" {
     try std.testing.expectEqualStrings("is taken", custom_rule.message);
     try std.testing.expectEqualStrings("\"users.name_taken\", ...", custom_rule.args.?);
     try std.testing.expectEqual(null, custom_rule.precondition);
+}
+
+test "define takes the fallback when the default message would be longer than 512 bytes; 512 bytes stay" {
+    const t = std.testing;
+    const exactly: [512]u8 = @splat('m');
+    const longer: [513]u8 = @splat('m');
+    const fallback = "must be equal to the expected value";
+    const kept = comptime define(.equals, .{ .message = &exactly, .fallback = fallback, .fits = test_rules.fitsAnything, .eval = test_rules.evalPositive });
+    try t.expectEqualStrings(&exactly, kept.message);
+    const replaced = comptime define(.equals, .{
+        .message = &longer,
+        .fallback = fallback,
+        .params = &.{param("expected", 5)},
+        .fits = test_rules.fitsAnything,
+        .eval = test_rules.evalPositive,
+    });
+    try t.expectEqualStrings(fallback, replaced.message);
+    // Only the message changes: the code and the parameters stay.
+    try t.expectEqualStrings("validation.equals", replaced.code);
+    try t.expectEqualStrings("5", replaced.params[0].text);
+    const short = comptime define(.equals, .{ .message = "must be equal to 5", .fallback = fallback, .fits = test_rules.fitsAnything, .eval = test_rules.evalPositive });
+    try t.expectEqualStrings("must be equal to 5", short.message);
 }
 
 test "a rule is named by its public name, its call and its snake_case label" {
@@ -1258,6 +2572,147 @@ test "optional layers unwrap, and number, float and u8-array types are recognize
 
     inline for (.{ f16, f32, f64, f80, f128, c_longdouble }) |T| try std.testing.expect(isFloat(T));
     inline for (.{ u32, i64, ?f64, bool }) |T| try std.testing.expect(!isFloat(T));
+}
+
+test "a signed number is a signed integer or a float" {
+    inline for (.{ i8, i64, i128, isize, i1, f16, f32, f64, f80, f128, c_longdouble }) |T| try std.testing.expect(isSignedNumber(T));
+    inline for (.{ u8, u64, u128, usize, u0, bool, ?i32, []const u8, [2]i8 }) |T| try std.testing.expect(!isSignedNumber(T));
+}
+
+test "an integer type's range is written min..max" {
+    const expect = std.testing.expectEqualStrings;
+    try expect("0..255", comptime intRange(u8));
+    try expect("-128..127", comptime intRange(i8));
+    try expect("0..18446744073709551615", comptime intRange(u64));
+    try expect("-170141183460469231731687303715884105728..170141183460469231731687303715884105727", comptime intRange(i128));
+    try expect("0..0", comptime intRange(u0));
+}
+
+test "a checked number parameter converts to the field type: integers exactly, floats to the nearest value" {
+    const t = std.testing;
+    try t.expectEqual(@as(u8, 255), comptime numberAs(u8, 255));
+    try t.expectEqual(@as(i8, 5), comptime numberAs(i8, @as(u8, 5)));
+    try t.expectEqual(@as(i128, std.math.minInt(i128)), comptime numberAs(i128, std.math.minInt(i128)));
+    try t.expectEqual(@as(f32, 0.1), comptime numberAs(f32, 0.1));
+    try t.expectEqual(@as(f32, 0.1), comptime numberAs(f32, @as(f64, 0.1)));
+    try t.expectEqual(@as(f32, 16777216), comptime numberAs(f32, 16777216));
+    try t.expectEqual(@as(f64, 9007199254740992), comptime numberAs(f64, @as(u64, 9007199254740992)));
+    try t.expectEqual(@as(f16, 0.5), comptime numberAs(f16, 0.5));
+    try t.expectEqual(std.math.floatMax(f80), comptime numberAs(f80, std.math.floatMax(f80)));
+    try t.expect(std.math.signbit(comptime numberAs(f32, -0.0)));
+    try t.expectEqual(@as(c_longdouble, -1.5), comptime numberAs(c_longdouble, -1.5));
+}
+
+test "a parameter's type is described by its kind, a float with its type" {
+    const expect = std.testing.expectEqualStrings;
+    try expect("an integer", comptime describeValueType(comptime_int));
+    try expect("an integer", comptime describeValueType(u8));
+    try expect("a float (comptime_float)", comptime describeValueType(comptime_float));
+    try expect("a float (f64)", comptime describeValueType(f64));
+    try expect("a bool", comptime describeValueType(bool));
+    try expect("an enum tag", comptime describeValueType(@TypeOf(.admin)));
+    try expect("an enum tag", comptime describeValueType(TestOpen));
+    try expect("a string", comptime describeValueType(*const [1:0]u8));
+    try expect("a list", comptime describeValueType(@TypeOf(.{ 1, 2 })));
+    try expect("@TypeOf(null)", comptime describeValueType(@TypeOf(null)));
+    try expect("?u8", comptime describeValueType(?u8));
+}
+
+test "an integer field takes an integer parameter within its type" {
+    const expect = std.testing.expectEqualStrings;
+    const t = std.testing;
+    try t.expectEqual(null, comptime numberParamProblem(0, u8, "use an integer bound", ""));
+    try t.expectEqual(null, comptime numberParamProblem(255, u8, "use an integer bound", ""));
+    try t.expectEqual(null, comptime numberParamProblem(@as(u64, 7), i8, "use an integer bound", ""));
+    try t.expectEqual(null, comptime numberParamProblem(std.math.minInt(i128), i128, "use an integer bound", ""));
+    try expect(": 1.5 is a float (comptime_float), field is u8; use an integer bound", comptime numberParamProblem(1.5, u8, "use an integer bound", "").?);
+    // A float that holds an integer renders as one, so the text names its type.
+    try expect(": 2 is a float (comptime_float), field is u8; use an integer bound", comptime numberParamProblem(2.0, u8, "use an integer bound", "").?);
+    try expect(": 10 is a float (f64), field is u64; use an integer", comptime numberParamProblem(@as(f64, 10), u64, "use an integer", "").?);
+    try expect(": -1 is outside u64 (0..18446744073709551615)", comptime numberParamProblem(-1, u64, "use an integer bound", "").?);
+    try expect(": 300 is outside u8 (0..255); the rule would never pass", comptime numberParamProblem(300, u8, "use an integer", "; the rule would never pass").?);
+    try expect(": -129 is outside i8 (-128..127)", comptime numberParamProblem(-129, i8, "use an integer bound", "").?);
+    try expect(
+        ": 170141183460469231731687303715884105728 is outside i128 (-170141183460469231731687303715884105728..170141183460469231731687303715884105727)",
+        comptime numberParamProblem(std.math.maxInt(i128) + 1, i128, "use an integer bound", "").?,
+    );
+    // A parameter of another kind shows as it is written.
+    try expect(": \"5\" is a string, field is i32; use an integer", comptime numberParamProblem("5", i32, "use an integer", "").?);
+    try expect(": true is a bool, field is u8; use an integer", comptime numberParamProblem(true, u8, "use an integer", "").?);
+    try expect(": .admin is an enum tag, field is u8; use an integer", comptime numberParamProblem(.admin, u8, "use an integer", "").?);
+}
+
+test "a float field takes a parameter that stays finite and, unless zero, non-zero, and an integer it holds exactly" {
+    const expect = std.testing.expectEqualStrings;
+    const t = std.testing;
+    try t.expectEqual(null, comptime numberParamProblem(0.1, f32, "use an integer bound", ""));
+    try t.expectEqual(null, comptime numberParamProblem(-0.0, f32, "use an integer bound", ""));
+    try t.expectEqual(null, comptime numberParamProblem(0, f16, "use an integer bound", ""));
+    try t.expectEqual(null, comptime numberParamProblem(16777216, f32, "use an integer bound", ""));
+    try t.expectEqual(null, comptime numberParamProblem(65504, f16, "use an integer bound", ""));
+    try t.expectEqual(null, comptime numberParamProblem(std.math.maxInt(u64), f80, "use an integer bound", ""));
+    try t.expectEqual(null, comptime numberParamProblem(std.math.floatTrueMin(f32), f32, "use an integer bound", ""));
+    // A float rounds to the nearest value of the field type; a subnormal result is kept.
+    try t.expectEqual(null, comptime numberParamProblem(1e-40, f32, "use an integer bound", ""));
+    try t.expectEqual(null, comptime numberParamProblem(@as(f64, 0.1), f16, "use an integer bound", ""));
+    try expect(": 16777217 is not exactly representable in f32 (nearest: 16777216)", comptime numberParamProblem(16777217, f32, "use an integer bound", "").?);
+    try expect(
+        ": 9007199254740993 is not exactly representable in f64 (nearest: 9007199254740992)",
+        comptime numberParamProblem(9007199254740993, f64, "use an integer bound", "").?,
+    );
+    try expect(
+        ": 18446744073709551615 is not exactly representable in f64 (nearest: 18446744073709551616)",
+        comptime numberParamProblem(@as(u64, std.math.maxInt(u64)), f64, "use an integer bound", "").?,
+    );
+    try expect(": 65505 is not exactly representable in f16 (nearest: 65504)", comptime numberParamProblem(65505, f16, "use an integer bound", "").?);
+    try expect(": 65520 is outside the finite range of f16", comptime numberParamProblem(65520, f16, "use an integer bound", "").?);
+    try expect(
+        ": 1606938044258990275541962092341162602522202993782792835301376 is outside the finite range of f32",
+        comptime numberParamProblem(1 << 200, f32, "use an integer bound", "").?,
+    );
+    try expect(": 1e39 is outside the finite range of f32", comptime numberParamProblem(1e39, f32, "use an integer bound", "").?);
+    try expect(": -1e39 is outside the finite range of f32", comptime numberParamProblem(-1e39, f32, "use an integer bound", "").?);
+    try expect(": 1e300 is outside the finite range of f32; the rule would never pass", comptime numberParamProblem(1e300, f32, "use an integer", "; the rule would never pass").?);
+    try expect(": 1e-50 rounds to 0 in f32", comptime numberParamProblem(1e-50, f32, "use an integer bound", "").?);
+    try expect(": 5e-324 rounds to 0 in f32", comptime numberParamProblem(std.math.floatTrueMin(f64), f32, "use an integer bound", "").?);
+    try expect(": true is a bool, field is f64; use a number", comptime numberParamProblem(true, f64, "use an integer", "").?);
+}
+
+test "a typed float narrower than a float field is an error when its value there has another shortest text" {
+    const expect = std.testing.expectEqualStrings;
+    const t = std.testing;
+    const tail = "; write it as a literal or as ";
+    try expect(": 0.1 is a float (f32), 0.10000000149011612 in f64" ++ tail ++ "f64", comptime numberParamProblem(@as(f32, 0.1), f64, "use an integer bound", "").?);
+    try expect(": 0.7 is a float (f32), 0.699999988079071 in f64" ++ tail ++ "f64", comptime numberParamProblem(@as(f32, 0.7), f64, "use an integer", "; the rule would never pass").?);
+    try expect(": 0.1 is a float (f32), 0.100000001490116119384765625 in f128" ++ tail ++ "f128", comptime numberParamProblem(@as(f32, 0.1), f128, "use an integer bound", "").?);
+    try expect(": 0.1 is a float (f16), 0.099975586 in f32" ++ tail ++ "f32", comptime numberParamProblem(@as(f16, 0.1), f32, "use an integer bound", "").?);
+    // The largest f16 shows as 65500, which reads back as 65504 in f16 only.
+    try expect(": 65500 is a float (f16), 65504 in f32" ++ tail ++ "f32", comptime numberParamProblem(std.math.floatMax(f16), f32, "use an integer bound", "").?);
+    try expect(": 0.1 is a float (f64), 0.10000000000000000555 in f80" ++ tail ++ "f80", comptime numberParamProblem(@as(f64, 0.1), f80, "use an integer bound", "").?);
+    try expect(": 0.1 is a float (f64), 0.1000000000000000055511151231257827 in f128" ++ tail ++ "f128", comptime numberParamProblem(@as(f64, 0.1), f128, "use an integer bound", "").?);
+    // A narrower value with the same text there, a literal, the field's own
+    // type and a wider type are fine.
+    try t.expectEqual(null, comptime numberParamProblem(@as(f32, 0.5), f64, "use an integer bound", ""));
+    try t.expectEqual(null, comptime numberParamProblem(@as(f16, 1), f32, "use an integer bound", ""));
+    try t.expectEqual(null, comptime numberParamProblem(@as(f32, -0.0), f64, "use an integer bound", ""));
+    try t.expectEqual(null, comptime numberParamProblem(@as(f32, 16777216), f128, "use an integer bound", ""));
+    try t.expectEqual(null, comptime numberParamProblem(0.1, f64, "use an integer bound", ""));
+    try t.expectEqual(null, comptime numberParamProblem(1.0 / 3.0, f64, "use an integer bound", ""));
+    try t.expectEqual(null, comptime numberParamProblem(@as(f32, 0.1), f32, "use an integer bound", ""));
+    try t.expectEqual(null, comptime numberParamProblem(@as(f128, 0.1), f64, "use an integer bound", ""));
+    // c_longdouble is f64 on some targets and wider on others.
+    try t.expectEqual(std.math.floatFractionalBits(c_longdouble) <= 52, comptime numberParamProblem(@as(f64, 0.1), c_longdouble, "use an integer bound", "") == null);
+}
+
+test "a rule error names the field path and the rule with its arguments" {
+    try std.testing.expectEqualStrings(
+        "validator: Dto.field_rules.x: min_items(3) is always true",
+        comptime ruleErrorText(&test_rules.min_items, "Dto.field_rules.x", " is always true"),
+    );
+    try std.testing.expectEqualStrings(
+        "validator: Dto.field_rules.x[]: positive is wrong",
+        comptime ruleErrorText(&test_rules.positive, "Dto.field_rules.x[]", " is wrong"),
+    );
 }
 
 test "a type error names the rule and the field type, then the one hint that applies" {
