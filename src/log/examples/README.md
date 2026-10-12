@@ -545,24 +545,129 @@ With `.oversize = .drop`, it is not written and is counted instead.
 
 ## Sync and queued modes
 
+The mode decides who writes a record to stdout: the thread that logs it, or a
+thread of the logger's own.
+
+### Sync mode
+
+`.mode = .sync`, the default. The call encodes the record and writes it to
+stdout itself, before it returns. There is no queue and no extra thread, and
+when the call returns, the record is out, even if the process crashes right
+after. The price: the caller waits for stdout, and callers on different
+threads take turns on one lock, so a slow reader of stdout (a terminal, a full
+pipe to a log collector) slows down every call.
+
+```mermaid
+flowchart LR
+    t1["thread 1"] --> lock{{"output lock"}}
+    t2["thread 2"] --> lock
+    t3["thread 3"] --> lock
+    lock -->|"one record at a time,<br/>through your io"| stdout(["stdout"])
+```
+
+Everything happens on your thread, inside the call:
+
 ```mermaid
 sequenceDiagram
-    participant T as your threads
+    autonumber
+    participant T as your thread
+    participant S as subscriber queues
+    participant L as output lock
+    participant O as stdout
+    T->>T: is the level on for the scope? (one atomic load)
+    T->>T: read the clock, encode the record into a buffer on the stack
+    opt longer than max_record_bytes
+        T->>T: .truncate cuts it, .drop counts it and returns
+    end
+    T->>T: run the interceptors, which may drop the record
+    T->>S: copy it to each subscriber that wants its level
+    T->>L: take the lock
+    T->>O: write the line
+    T->>L: release the lock
+    Note over T: the call returns, and the record is out
+```
+
+A failed write is counted in `dropped.write_failed`, and the next record
+starts on a new line; see [Failures and stats](#failures-and-stats). Use sync
+mode for tests, command-line tools and short programs.
+
+### Queued mode
+
+`.mode = .{ .queued = .{} }`. The call encodes the record, copies it into a
+lock-free queue in memory and returns at once. A writer thread of the logger
+takes the records from the queue and writes them to stdout in batches, one
+write for many records. The caller does not wait for stdout (unless the queue
+is full and `.overflow = .block`). The price: the queue takes memory, 17 MiB
+with the defaults, and the records still in it are lost if the process ends
+without [`shutdown`](#stopping).
+
+```mermaid
+flowchart LR
+    t1["thread 1"] --> ring[("queue: a ring<br/>of 4096 slots")]
+    t2["thread 2"] --> ring
+    t3["thread 3"] --> ring
+    ring -->|"batches of up to 128"| writer["writer thread"]
+    writer -->|"one write per batch,<br/>through the logger's own Io"| stdout(["stdout"])
+```
+
+Your thread puts the record into the queue, and the writer thread takes it out:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant T as your thread
+    participant S as subscriber queues
     participant Q as queue
     participant W as writer thread
     participant O as stdout
-    T->>Q: take a slot, copy the record in
+    T->>T: level, clock, encoding and interceptors, as in sync mode
+    T->>S: copy it to each subscriber that wants its level
+    T->>Q: take the next free slot (one compare-and-swap)
+    opt the queue is full
+        Q-->>T: .drop_new counts the record and returns, .block waits for a free slot
+    end
+    T->>Q: copy the record into the slot and publish it
+    T->>W: wake it, if it sleeps
     Note over T: the call returns
-    W->>Q: take a batch of records
+    W->>Q: take up to 128 published records, in order, and free their slots
     W->>O: one write for the whole batch
+    Note over W: the next batch, or sleep until a thread wakes it
 ```
 
-|          | `.sync` (default)                                                 | `.{ .queued = .{} }`                                                                           |
-| -------- | ----------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| The call | encodes the record and writes it before it returns                | encodes the record and copies it into a queue                                                  |
-| Output   | through the application's `io`, under a lock                      | a writer thread, in batches, through the logger's own Io; a `.writer` is called on that thread |
-| Good for | tests, tools, CLIs: a record is out even if the process dies next | services: a caller never waits for stdout                                                      |
-| Memory   | none                                                              | `Options.queueBytes()`: 17 MiB with the defaults                                               |
+The writer thread runs this loop until `shutdown` has closed the queue and
+everything in it is written:
+
+```mermaid
+flowchart TD
+    take["take up to 128 published records,<br/>free their slots"] --> any{{"took any?"}}
+    any -->|yes| write["write them with one write"]
+    write --> count["if error records were dropped,<br/>write one record that counts them"]
+    count --> take
+    any -->|no| why{{"why not?"}}
+    why -->|"a thread is still<br/>copying its record in"| wait["yield, then wait<br/>until it is published"]
+    why -->|"the queue is empty"| sleep["sleep until a thread<br/>wakes it, at most 1 s"]
+    why -->|"closed by shutdown,<br/>and drained"| exit(["the thread exits"])
+    wait --> take
+    sleep --> take
+```
+
+Freeing slots wakes the threads that wait for room in `.block` mode. The record
+that counts the dropped error records also goes out before the writer thread
+sleeps. Use queued mode for services: a request handler never waits for
+stdout.
+
+### Side by side
+
+|                  | `.sync` (default)                                    | `.{ .queued = .{} }`                                                                            |
+| ---------------- | ---------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| Who writes       | the calling thread, before the call returns          | a writer thread of the logger, in batches                                                       |
+| The caller waits | for stdout                                           | only for a copy into the queue                                                                  |
+| Through          | the application's `io`, under a lock                 | the logger's own Io; a `.writer` output is called on the writer thread                          |
+| After a crash    | every record that was logged is out                  | the records still in the queue are lost                                                         |
+| Memory           | no queue                                             | `Options.queueBytes()`: 17 MiB with the defaults                                                |
+| Good for         | tests, command-line tools, short programs            | services                                                                                        |
+
+The queue is set up by these options:
 
 ```zig
 .mode = .{ .queued = .{
