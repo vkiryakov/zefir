@@ -540,18 +540,18 @@ pub fn isFiniteNumber(comptime x: anytype) bool {
 
 /// A parameter as messages and placeholders show it: integers in decimal;
 /// floats as written (`renderFloat`); `true`/`false`; an enum tag by its
-/// name, an unnamed value of a non-exhaustive enum as
-/// `@fromBackingInt(n)`; a string escaped as `escape` does, without
-/// quotes, and the empty string as `""`; a list as its items joined by
-/// `, `, never cut. Evaluate it at comptime; it accepts only the kinds
-/// above.
+/// name, escaped as strings are (`@"a\nb"` shows as `a\nb`), an unnamed
+/// value of a non-exhaustive enum as `@fromBackingInt(n)`; a string escaped
+/// as `escape` does, without quotes, and the empty string as `""`; a list
+/// as its items joined by `, `, never cut. Evaluate it at comptime; it
+/// accepts only the kinds above.
 pub fn renderValue(comptime x: anytype) []const u8 {
     @setEvalBranchQuota(eval_quota);
     return switch (comptime valueKind(@TypeOf(x))) {
         .int => std.fmt.comptimePrint("{d}", .{x}),
         .float => renderFloat(x),
         .bool => if (x) "true" else "false",
-        .tag => tagName(x) orelse unnamedTag(x),
+        .tag => if (tagName(x)) |name| escape(name) else unnamedTag(x),
         .string => if (x.len == 0) "\"\"" else escape(x),
         .list => blk: {
             var out: []const u8 = "";
@@ -601,13 +601,24 @@ fn unnamedTag(comptime x: anytype) []const u8 {
     return std.fmt.comptimePrint("@fromBackingInt({d})", .{@backingInt(x)});
 }
 
+/// A tag name as `zig fmt` writes it after a dot, for compile errors:
+/// `admin`, `@"error"` for a keyword, `@"a\nb"` for a name that is no
+/// identifier.
+pub inline fn tagIdentifier(comptime name: []const u8) []const u8 {
+    comptime {
+        @setEvalBranchQuota(eval_quota);
+        return std.fmt.comptimePrint("{f}", .{std.zig.fmtIdPU(name)});
+    }
+}
+
 /// Compile errors show the items of a list argument while `.{ ` and the
 /// items so far fit in this many bytes.
 const max_args_text = 72;
 
 /// A parameter as compile errors show it in a call, as `zig fmt` writes it
 /// in source: numbers and bools as messages show them; `.admin` for a tag
-/// and `@fromBackingInt(n)` for an unnamed value; a string quoted and
+/// (`.@"error"` for a keyword, as `tagIdentifier` writes names) and
+/// `@fromBackingInt(n)` for an unnamed value; a string quoted and
 /// escaped; a list as `.{ "a", "b" }`, one item as `.{"a"}`, none as `.{}`;
 /// anything else (`null`, a struct, a pointer, a slice of other items) as
 /// `...`. A long list keeps its items while `.{ ` and the items so far fit
@@ -617,7 +628,7 @@ pub fn renderArg(comptime x: anytype) []const u8 {
     @setEvalBranchQuota(eval_quota);
     return switch (comptime valueKind(@TypeOf(x))) {
         .int, .float, .bool => renderValue(x),
-        .tag => if (tagName(x)) |name| "." ++ name else unnamedTag(x),
+        .tag => if (tagName(x)) |name| "." ++ tagIdentifier(name) else unnamedTag(x),
         .string => "\"" ++ escape(x) ++ "\"",
         .list => renderArgList(x),
         .other => "...",
@@ -644,6 +655,10 @@ pub fn plural(comptime n: comptime_int, comptime one: []const u8, comptime many:
 /// A non-exhaustive enum for the renderer tests: `@fromBackingInt(7)` is a
 /// value without a name.
 const TestOpen = enum(u8) { a, b, _ };
+
+/// An enum whose tags Zig source writes with `@"..."`: a keyword and a name
+/// with a newline.
+const TestQuoted = enum { @"error", @"a\nb", plain };
 
 test "a parameter is a number, a bool, a tag, a string or a list; lists are tuples and arrays only" {
     const expectKind = struct {
@@ -760,6 +775,11 @@ test "messages show bools, tags by name, escaped strings without quotes and list
     try expect("x", comptime renderValue(.{"x"}));
     try expect("1, 2", comptime renderValue([_]u8{ 1, 2 }));
     try expect("admin, @fromBackingInt(7)", comptime renderValue(.{ .admin, @as(TestOpen, @fromBackingInt(7)) }));
+    // A tag name is escaped as strings are, so a message stays on one line
+    // and valid UTF-8.
+    try expect("error", comptime renderValue(TestQuoted.@"error"));
+    try expect("a\\nb, plain", comptime renderValue(.{ TestQuoted.@"a\nb", .plain }));
+    try expect("\\xff", comptime renderValue(.@"\xff"));
     // A message never cuts a list; a default message that would be too long
     // falls back to a general one instead.
     const long = .{ "value_000", "value_001", "value_002", "value_003", "value_004", "value_005", "value_006", "value_007" };
@@ -783,6 +803,11 @@ test "compile errors show arguments as zig fmt writes them" {
     try expect(".admin", comptime renderArg(.admin));
     try expect(".b", comptime renderArg(TestOpen.b));
     try expect("@fromBackingInt(7)", comptime renderArg(@as(TestOpen, @fromBackingInt(7))));
+    // A tag that is no plain identifier is quoted as zig fmt writes it.
+    try expect(".@\"error\"", comptime renderArg(TestQuoted.@"error"));
+    try expect(".@\"a\\nb\"", comptime renderArg(.@"a\nb"));
+    try expect(".{ .@\"error\", .plain }", comptime renderArg(.{ .@"error", TestQuoted.plain }));
+    try expect(".u8", comptime renderArg(.u8));
     try expect("\"a\\tb\"", comptime renderArg("a\tb"));
     try expect("\"\\\"\"", comptime renderArg("\""));
     try expect("\"\\xe2\\x80\\xa8\"", comptime renderArg("\u{2028}"));
@@ -1869,11 +1894,12 @@ pub fn numberParamProblem(comptime x: anytype, comptime T: type, comptime use_in
 
 // ------------------------------------------------------------------ tag parameters
 
-/// The tags of the enum `E` by name, joined by `, `: `admin, user, guest`.
+/// The tags of the enum `E` by name, as `tagIdentifier` writes them, joined
+/// by `, `: `admin, user, guest`.
 pub fn tagList(comptime E: type) []const u8 {
     comptime {
         var out: []const u8 = "";
-        for (@typeInfo(E).@"enum".field_names, 0..) |tag, i| out = out ++ (if (i == 0) "" else ", ") ++ tag;
+        for (@typeInfo(E).@"enum".field_names, 0..) |tag, i| out = out ++ (if (i == 0) "" else ", ") ++ tagIdentifier(tag);
         return out;
     }
 }
@@ -1883,7 +1909,8 @@ pub fn tagList(comptime E: type) []const u8 {
 /// rule's label (`: Role has no tag root; tags: admin, user, guest`), or
 /// null. A value of another enum type is named with its type, even when `E`
 /// has a tag of the same name; a literal must name a tag of `E`, and the
-/// text lists the tags `E` has. Constructors reject unnamed values first.
+/// text lists the tags `E` has. Names are written as `tagIdentifier` writes
+/// them. Constructors reject unnamed values first.
 pub fn tagProblem(comptime x: anytype, comptime E: type) ?[]const u8 {
     @setEvalBranchQuota(eval_quota);
     const X = @TypeOf(x);
@@ -1892,7 +1919,7 @@ pub fn tagProblem(comptime x: anytype, comptime E: type) ?[]const u8 {
     const name = tagName(x) orelse @compileError("validator: internal: " ++ unnamedTag(x) ++ " has no tag name");
     if (@hasField(E, name)) return null;
     const tags = tagList(E);
-    return ": " ++ @typeName(E) ++ " has no tag " ++ name ++ if (tags.len == 0) "" else "; tags: " ++ tags;
+    return ": " ++ @typeName(E) ++ " has no tag " ++ tagIdentifier(name) ++ if (tags.len == 0) "" else "; tags: " ++ tags;
 }
 
 /// Enums for the tag tests: a field's enum, another enum with a tag of the
@@ -1906,6 +1933,8 @@ test "an enum's tags are listed by name, joined by commas" {
     try expect("admin, user, guest", comptime tagList(TestRole));
     try expect("a, b", comptime tagList(TestOpen));
     try expect("", comptime tagList(TestNoTags));
+    // Names are written as Zig source writes them.
+    try expect("@\"error\", @\"a\\nb\", plain", comptime tagList(TestQuoted));
 }
 
 test "a tag parameter names a tag of the field's enum; a value of another enum is named with its type" {
@@ -1919,6 +1948,9 @@ test "a tag parameter names a tag of the field's enum; a value of another enum i
     try expect(": .admin is a tag of core.TestColor, the field is core.TestRole", comptime tagProblem(TestColor.admin, TestRole).?);
     // An enum without named tags has no tags to list.
     try expect(": core.TestNoTags has no tag a", comptime tagProblem(.a, TestNoTags).?);
+    // Names are written as Zig source writes them.
+    try expect(": core.TestQuoted has no tag @\"a b\"; tags: @\"error\", @\"a\\nb\", plain", comptime tagProblem(.@"a b", TestQuoted).?);
+    try std.testing.expectEqual(null, comptime tagProblem(.@"error", TestQuoted));
 }
 
 test "a checked parameter converts to the field type: numbers as numberAs does, bools as they are, tags by name" {
@@ -1992,8 +2024,8 @@ pub fn analyzeList(comptime name: []const u8, comptime values: anytype, comptime
 }
 
 /// The error of the call `name(values)` of a list rule, or null. `values`
-/// is a tuple or an array `[N]T` (not a pointer to an array, not a slice)
-/// of at least one value; all of them strings, all enum tags or all
+/// is a tuple or an array `[N]T` (not a pointer to an array or a tuple, not
+/// a slice) of at least one value; all of them strings, all enum tags or all
 /// integers (or all bools, when `options` allows them); strings in valid
 /// UTF-8 (and not empty, when `options` says so), tags named, and no value
 /// listed twice: strings by bytes, tags by name, integers by value. The
@@ -2003,9 +2035,14 @@ pub fn listProblem(comptime name: []const u8, comptime values: anytype, comptime
         @setEvalBranchQuota(eval_quota);
         const V = @TypeOf(values);
         const head = "validator: " ++ name ++ "(" ++ renderArg(values) ++ "): ";
-        if (valueKind(V) != .list)
-            return head ++ "expected a tuple or an array of values, e.g. .{ \"a\", \"b\" }, got " ++ @typeName(V) ++
-                if (isArrayPointer(V)) "; pass the array itself, not a pointer to it" else "";
+        if (valueKind(V) != .list) {
+            // The generated type of a tuple repeats every value: name it instead.
+            const got = if (isTuplePointer(V))
+                "a pointer to a tuple; " ++ hints.tuple_pointer
+            else
+                @typeName(V) ++ if (isArrayPointer(V)) "; pass the array itself, not a pointer to it" else "";
+            return head ++ "expected a tuple or an array of values, e.g. .{ \"a\", \"b\" }, got " ++ got;
+        }
         if (values.len == 0) return head ++ "the list is empty";
         const duplicate = firstDuplicate(values);
         var first: ListKind = undefined;
@@ -2099,6 +2136,14 @@ fn listKind(comptime X: type) ?ListKind {
 fn isArrayPointer(comptime V: type) bool {
     return switch (@typeInfo(V)) {
         .pointer => |p| p.size == .one and @typeInfo(p.child) == .array and @typeInfo(p.child).array.child != u8,
+        else => false,
+    };
+}
+
+/// A single-item pointer to a tuple: `&.{ ... }` where the tuple was meant.
+fn isTuplePointer(comptime V: type) bool {
+    return switch (@typeInfo(V)) {
+        .pointer => |p| p.size == .one and isTuple(p.child),
         else => false,
     };
 }
@@ -2247,8 +2292,7 @@ fn notARule(comptime value: anytype, comptime where: []const u8, comptime prefix
         @compileError("validator: " ++ where ++ ": " ++ prefix ++ @typeName(V) ++ "; " ++ hints.wrap_predicate);
     }
     if (isTuple(V)) @compileError("validator: " ++ where ++ ": " ++ prefix ++ "a tuple; " ++ hints.nested_tuple);
-    if (@typeInfo(V) == .pointer and @typeInfo(V).pointer.size == .one and isTuple(@typeInfo(V).pointer.child))
-        @compileError("validator: " ++ where ++ ": " ++ prefix ++ "a pointer to a tuple; " ++ hints.tuple_pointer);
+    if (isTuplePointer(V)) @compileError("validator: " ++ where ++ ": " ++ prefix ++ "a pointer to a tuple; " ++ hints.tuple_pointer);
     if (isAnonymous(V)) @compileError("validator: " ++ where ++ ": " ++ prefix ++ "a struct literal; " ++ hints.struct_literal);
     @compileError("validator: " ++ where ++ ": " ++ prefix ++ @typeName(V));
 }

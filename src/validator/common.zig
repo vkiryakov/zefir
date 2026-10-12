@@ -106,7 +106,7 @@ fn scalarProblem(comptime rule: *const Rule, comptime x: anytype, comptime T: ty
     if (@typeInfo(T) == .@"enum") {
         const e = @typeInfo(T).@"enum";
         if (kind != .tag) {
-            const hint = if (e.field_names.len == 0) null else "use a tag such as ." ++ e.field_names[0];
+            const hint = if (e.field_names.len == 0) null else "use a tag such as ." ++ core.tagIdentifier(e.field_names[0]);
             return core.ruleErrorText(rule, where, wrongParamText(x, T, hint));
         }
         if (core.tagProblem(x, T)) |text| return core.ruleErrorText(rule, where, text);
@@ -230,13 +230,14 @@ fn membershipProblem(comptime rule: *const Rule, comptime values: anytype, compt
         else => return core.typeErrorText(rule, T, where, "a string, an enum or an integer", listAccepts(list.kind), null),
     };
     if (list.kind != field) {
-        const instead = switch (field) {
+        const instead: ?[]const u8 = switch (field) {
             .string => "list strings instead: .{ \"a\", ... }",
-            .tag => "list the enum's tags instead: .{ .tag, ... }",
+            // An enum without named tags has no tag to list.
+            .tag => if (@typeInfo(T).@"enum".field_names.len == 0) null else "list the enum's tags instead: .{ .tag, ... }",
             .int => "list integers instead: .{ 1, ... }",
             .bool => @compileError("validator: internal: no field takes a list of bools here"),
         };
-        return core.ruleErrorText(rule, where, " lists " ++ list.kind.plural() ++ ", field is " ++ @typeName(T) ++ "; " ++ instead);
+        return core.ruleErrorText(rule, where, " lists " ++ list.kind.plural() ++ ", field is " ++ @typeName(T) ++ if (instead) |hint| "; " ++ hint else "");
     }
     const excludes_all = rule.kind == .none_of;
     switch (field) {
@@ -372,7 +373,8 @@ test "notEmpty fits strings of every kind and slices" {
 
 /// Types for the tests below: an exhaustive enum, another enum with a tag
 /// of the same name, a non-exhaustive enum, single-tag enums, sparse tag
-/// values, an enum without named tags and a struct.
+/// values, an enum without named tags, an enum whose tags need `@"..."` and
+/// a struct.
 const Role = enum { admin, user, guest };
 const Color = enum { red, admin };
 const Open = enum(u8) { a, b, _ };
@@ -380,6 +382,7 @@ const OpenOne = enum(u8) { only, _ };
 const Only = enum { only };
 const Sparse = enum(u32) { low = 1, high = 1_000_000 };
 const NoTags = enum(u8) { _ };
+const Quoted = enum { @"error", @"a\nb", plain };
 const Item = struct { id: u32 };
 
 const test_where = "Dto.field_rules.x";
@@ -445,6 +448,11 @@ test "equals and notEquals show the parameter as written: -0.0 as 0, floats as w
     try expect("must not be equal to \\xe2\\x80\\xa8", notEquals("\u{2028}").message);
     try expect("must be equal to имя", equals("имя").message);
     try expect("not_equals(.only)", comptime notEquals(.only).label());
+    // A tag that is no plain identifier: escaped in the message, quoted as
+    // zig fmt writes it in the call.
+    try expect("must be equal to a\\nb", equals(Quoted.@"a\nb").message);
+    try expect("equals(.@\"error\")", comptime equals(.@"error").call());
+    try expect("must be equal to \\xff", equals(.@"\xff").message);
 }
 
 test "equals and notEquals keep a default message of exactly 512 bytes and take the fallback above it" {
@@ -592,6 +600,9 @@ test "on an enum field the parameter of equals and notEquals is a tag of that en
     // An enum without named tags has no tag to suggest or to list.
     try expect("validator: Dto.field_rules.x: equals(\"a\"): \"a\" is a string, field is common.NoTags", comptime equalsText("a", NoTags).?);
     try expect("validator: Dto.field_rules.x: equals(.a): common.NoTags has no tag a", comptime equalsText(.a, NoTags).?);
+    // Tags are written as Zig source writes them.
+    try expect("validator: Dto.field_rules.x: equals(\"x\"): \"x\" is a string, field is common.Quoted; use a tag such as .@\"error\"", comptime equalsText("x", Quoted).?);
+    try expect("validator: Dto.field_rules.x: equals(.x): common.Quoted has no tag x; tags: @\"error\", @\"a\\nb\", plain", comptime equalsText(.x, Quoted).?);
     try std.testing.expectEqual(null, comptime equalsText(.admin, Role));
     try std.testing.expectEqual(null, comptime notEqualsText(Role.guest, Role));
     try std.testing.expectEqual(null, comptime equalsText(.b, Open));
@@ -809,6 +820,11 @@ test "oneOf and noneOf take a tuple or an array of strings, enum tags or integer
     try expect("validator: oneOf(...): " ++ expected_list ++ "*const [2][]const u8" ++ pointer_hint, comptime oneOfCallText(&allowed).?);
     try expect("validator: noneOf(...): " ++ expected_list ++ "*const [2][]const u8" ++ pointer_hint, comptime noneOfCallText(&allowed).?);
     try expect("validator: oneOf(...): " ++ expected_list ++ "*const [2]u32" ++ pointer_hint, comptime oneOfCallText(&[_]u32{ 1, 2 }).?);
+    // &.{ ... } is named by what it is, not by its generated type.
+    const tuple_pointer = "a pointer to a tuple; drop the &: write .{ ... }, not &.{ ... }";
+    try expect("validator: oneOf(...): " ++ expected_list ++ tuple_pointer, comptime oneOfCallText(&.{ "a", "b" }).?);
+    try expect("validator: noneOf(...): " ++ expected_list ++ tuple_pointer, comptime noneOfCallText(&.{ 1, 2, 3 }).?);
+    try expect("validator: oneOf(...): " ++ expected_list ++ tuple_pointer, comptime oneOfCallText(&.{}).?);
     try expect("validator: oneOf(.{ \"a\", \"b\", \"a\" }): \"a\" is listed twice", comptime oneOfCallText(.{ "a", "b", "a" }).?);
     try expect("validator: noneOf(.{ \"root\", \"admin\", \"root\" }): \"root\" is listed twice", comptime noneOfCallText(.{ "root", "admin", "root" }).?);
     try expect("validator: oneOf(.{ 1, 1 }): 1 is listed twice", comptime oneOfCallText(.{ 1, @as(u8, 1) }).?);
@@ -859,6 +875,9 @@ test "the values listed by oneOf and noneOf are of the field's kind: strings, en
     try expect(head ++ "none_of(.{.a}) lists enum tags, field is u32" ++ integers, comptime noneOfText(.{.a}, u32).?);
     // The call is cut after 72 bytes.
     try expect(head ++ "one_of(" ++ ten_values_cut ++ ") lists strings, field is common.Role" ++ tags, comptime oneOfText(ten_values, Role).?);
+    // An enum without named tags has no tag to list instead.
+    try expect(head ++ "none_of(.{ 1, 2 }) lists integers, field is common.NoTags", comptime noneOfText(.{ 1, 2 }, NoTags).?);
+    try expect(head ++ "one_of(.{\"a\"}) lists strings, field is common.NoTags", comptime oneOfText(.{"a"}, NoTags).?);
     inline for (.{ []const u8, []u8, [:0]const u8, [:0]u8 }) |S| {
         try std.testing.expectEqual(null, comptime oneOfText(.{ "a", "" }, S));
         try std.testing.expectEqual(null, comptime noneOfText(.{"root"}, S));
@@ -876,6 +895,12 @@ test "on an enum field oneOf and noneOf list tags of that enum; noneOf may not l
     try expect(head ++ "none_of(.{ .admin, .user, .guest }) lists every tag of common.Role; no value would pass", comptime noneOfText(.{ .admin, .user, .guest }, Role).?);
     try expect(head ++ "none_of(.{.only}) lists every tag of common.Only; no value would pass", comptime noneOfText(.{.only}, Only).?);
     try expect(head ++ "none_of(.{ .guest, .user, .admin }) lists every tag of common.Role; no value would pass", comptime noneOfText([_]Role{ .guest, .user, .admin }, Role).?);
+    // Tags are written as Zig source writes them, in the call and in the message.
+    try expect(
+        head ++ "none_of(.{ .@\"error\", .@\"a\\nb\", .plain }) lists every tag of common.Quoted; no value would pass",
+        comptime noneOfText(.{ .@"error", .@"a\nb", .plain }, Quoted).?,
+    );
+    try std.testing.expectEqualStrings("must be one of: error, a\\nb", oneOf(.{ .@"error", Quoted.@"a\nb" }).message);
     // oneOf may list every tag: it pins the set. A non-exhaustive enum may
     // list every named tag in noneOf: its unnamed values pass.
     try std.testing.expectEqual(null, comptime oneOfText(.{ .admin, .user, .guest }, Role));
