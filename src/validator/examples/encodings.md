@@ -65,7 +65,8 @@ const Upload = struct {
   the answer of their rule on any bytes. Use them in `validateSelf`, services
   and tests; in `field_rules` use the rule.
 - The rules take time linear in the input, never backtrack and allocate
-  nothing (`v.json` keeps its nesting stack in a 141-byte buffer on the stack).
+  nothing (`v.json` keeps its nesting stack in a buffer on the stack, whose
+  size follows the target's cache line: 141 bytes on x86_64 and aarch64).
 - Combinations that no value passes, such as `.{ v.empty, v.json }` or
   `.{ v.hexColor, v.rgbColor }`, are not compile errors.
 
@@ -100,8 +101,8 @@ A JSON object or array: RFC 8259 text whose top-level value is `{...}` or
 - **Default message:** `must be a valid JSON object or array`.
 - **Placeholders:** none.
 - **Predicate:** `v.isJson(s)`.
-- **Complexity:** O(n); a 141-byte buffer on the stack, no recursion: a
-  document of any depth fails at level 65.
+- **Complexity:** O(n); a buffer on the stack (141 bytes on x86_64 and
+  aarch64), no recursion: a document of any depth fails at level 65.
 - **Deviations:** [D34](class_validator.md#deviations-from-validatorjs)
   (unpaired surrogates, invalid UTF-8 and nesting deeper than 64 fail).
 
@@ -541,7 +542,7 @@ A CSS `hsl()` or `hsla()` color, in the legacy or the modern syntax.
   `H, S%, L%` with an optional `, A`, or `H S% L%` with an optional `/ A`, then
   `)`. H is a number with an optional unit `deg`, `grad`, `rad` or `turn`; S
   and L are numbers with `%`; A is a number with an optional `%`; a number is
-  `[+-](digits[.digits] | .digits)[e[+-]digits]`. Either name takes an alpha
+  `[+-](digits[.digits] | .digits)[(e | E)[+-]digits]`. Either name takes an alpha
   or none. Ranges are not checked: CSS clamps them. CSS whitespace (space,
   tab, LF, CR, FF) inside the parentheses only.
 - **`""`:** fails.

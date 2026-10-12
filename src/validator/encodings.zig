@@ -643,7 +643,7 @@ fn legacyAlpha(s: []const u8, i: *usize) bool {
 /// either name with or without an alpha. H is a number with an optional unit
 /// `deg`, `grad`, `rad` or `turn` (any case); S and L are numbers with `%`;
 /// A is a number with an optional `%`. A number is
-/// `[+-](digits[.digits] | .digits)[e[+-]digits]`. Ranges are not checked:
+/// `[+-](digits[.digits] | .digits)[(e | E)[+-]digits]`. Ranges are not checked:
 /// CSS clamps them. CSS whitespace (space, tab, LF, CR, FF) inside the
 /// parentheses only; nothing before the name or after `)`.
 pub const hslColor: Rule = core.predicateRule(.hsl_color, "must be a valid HSL color", isHslColor);

@@ -731,10 +731,10 @@ NaN, `+inf` and `-inf` fail with `validation.finite` /
 `must be a finite number`, before the check of the rule runs. The rules with
 this precondition are `v.equals`, `v.notEquals`, `v.min`, `v.max`, `v.range`,
 `v.positive`, `v.nonNegative`, `v.negative`, `v.nonPositive` and
-`v.divisibleBy`; integers, `bool`, enums and strings have no precondition
-([D16](class_validator.md#deviations-from-validatorjs)). `v.minDate` and
-`v.maxDate` need a value of the form of their bound: with a date bound, a value
-that is not a date fails with `validation.date` /
+`v.divisibleBy`; integers, `bool`, enums and strings have no such
+precondition ([D16](class_validator.md#deviations-from-validatorjs)).
+`v.minDate` and `v.maxDate` need a value of the form of their bound: with a
+date bound, a value that is not a date fails with `validation.date` /
 `must be a valid date in YYYY-MM-DD format`; with a date-time bound, a value
 that is not an RFC 3339 date-time fails with `validation.rfc3339` /
 `must be a valid RFC 3339 date-time` ([Dates](dates.md#vmindatemin)).
