@@ -354,10 +354,52 @@ flowchart LR
 | `.dsn = uri`, a `std.Uri` with a password                 | `"dsn":"postgres://app:[REDACTED]@db:5432/main"`      |
 | `.password_hash = hash`, `.api = .{ .key = k }`           | written as they are                                   |
 
-**By type.** A type marked `pub const zefir_sensitive = true;` is written as
-`"[REDACTED]"`, also inside an optional, a pointer, a slice or an array, so
-neither its presence nor a count leaks. `confy.Secret` carries the marker, and
-`log.isSensitive(T)` tells whether a type has it.
+**By type.** Mark your own secret types with `pub const zefir_sensitive = true;`:
+
+```zig
+/// A key from a vault: marked, so the logger never writes it.
+const ApiKey = struct {
+    value: []const u8,
+
+    pub const zefir_sensitive = true;
+};
+
+// A missing or private marker would leak the key: check it at compile time.
+comptime {
+    std.debug.assert(log.isSensitive(ApiKey));
+}
+
+const key: ApiKey = .{ .value = "sk-live-123" };
+const backup: ?ApiKey = null;
+logger.info("Vault keys loaded", .{ .vault = "payments", .key = key, .backup = backup, .all = &[_]ApiKey{ key, key } });
+```
+
+The record (formatted here):
+
+```json
+{
+  "timestamp": "2026-10-12T09:41:07.416Z",
+  "level": "info",
+  "message": "Vault keys loaded",
+  "service.name": "billing",
+  "service.version": "2.1.0",
+  "vault": "payments",
+  "key": "[REDACTED]",
+  "backup": "[REDACTED]",
+  "all": "[REDACTED]"
+}
+```
+
+None of these names is a secret name: the type alone hides them. A marked
+value is written as `"[REDACTED]"` also inside an optional, a pointer, a slice
+or an array, so neither its presence nor a count leaks: `backup` is `null` and
+`all` holds two keys, yet the record shows neither. `confy.Secret` carries the
+marker, so a configuration loaded by confy can be logged as it is.
+
+> [!IMPORTANT]
+> The marker must be `pub`: the logger cannot see a private one, and the type
+> is then written in full. `log.isSensitive(T)` in a `comptime` block, as
+> above, turns that mistake into a build error.
 
 **By name.** A field is redacted at any depth when its name, or one
 dot-separated part of it, ends in one of these names or its plural, in any
