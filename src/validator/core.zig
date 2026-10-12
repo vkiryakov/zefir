@@ -844,6 +844,118 @@ test "plural picks the noun for a count" {
     try expect("512 bytes", comptime plural(@as(usize, 512), "byte", "bytes"));
 }
 
+// ------------------------------------------------------------------ parameters
+
+/// A rule parameter as data: what `.withMessage` substitutes and a schema
+/// export could show.
+pub const Value = union(enum) {
+    int: comptime_int,
+    float: comptime_float,
+    bool: bool,
+    string: []const u8,
+    /// An enum tag, without the leading dot.
+    tag: []const u8,
+    list: []const Value,
+};
+
+/// A parameter of a rule, named as its placeholder (`{min}` is the
+/// parameter `min`).
+pub const Param = struct {
+    name: []const u8,
+    value: Value,
+    /// The value as messages show it (`renderValue`): `{name}` in a
+    /// `.withMessage` template becomes this text.
+    text: []const u8,
+    /// `{name}` may appear in `.withMessage` templates.
+    placeholder: bool = true,
+};
+
+/// A parameter that templates may use as `{name}`.
+pub fn param(comptime name: []const u8, comptime x: anytype) Param {
+    return .{ .name = name, .value = valueOf(x), .text = renderValue(x) };
+}
+
+/// A parameter kept as data only: `{name}` is not a placeholder.
+pub fn dataParam(comptime name: []const u8, comptime x: anytype) Param {
+    return .{ .name = name, .value = valueOf(x), .text = renderValue(x), .placeholder = false };
+}
+
+/// `x` as data. A rule checks its parameters before it keeps them: an
+/// unnamed value of a non-exhaustive enum or a value of another kind stops
+/// compilation here with an internal error.
+pub fn valueOf(comptime x: anytype) Value {
+    @setEvalBranchQuota(eval_quota);
+    return switch (comptime valueKind(@TypeOf(x))) {
+        .int => .{ .int = x },
+        .float => .{ .float = x },
+        .bool => .{ .bool = x },
+        .tag => .{ .tag = tagName(x) orelse @compileError("validator: internal: " ++ unnamedTag(x) ++ " has no tag name") },
+        .string => .{ .string = x },
+        .list => blk: {
+            var items: [x.len]Value = undefined;
+            for (&items, 0..) |*slot, i| slot.* = valueOf(x[i]);
+            const final = items;
+            break :blk .{ .list = &final };
+        },
+        .other => @compileError("validator: internal: no parameter value of type " ++ @typeName(@TypeOf(x))),
+    };
+}
+
+test "a parameter keeps its value as data: numbers, bools, tags without the dot, strings and lists" {
+    const t = std.testing;
+    try t.expect(comptime valueOf(5).int == 5);
+    try t.expect(comptime valueOf(@as(i128, std.math.minInt(i128))).int == std.math.minInt(i128));
+    try t.expect(comptime valueOf(0.5).float == 0.5);
+    try t.expect(comptime valueOf(@as(f32, 0.1)).float == @as(f32, 0.1));
+    try t.expect(comptime valueOf(true).bool);
+    try t.expect(!comptime valueOf(false).bool);
+    try t.expectEqualStrings("admin", comptime valueOf(.admin).tag);
+    try t.expectEqualStrings("b", comptime valueOf(TestOpen.b).tag);
+    try t.expectEqualStrings("a\tb", comptime valueOf("a\tb").string);
+    try t.expectEqualStrings("", comptime valueOf("").string);
+    const list = comptime valueOf(.{ "a", .b, 3 });
+    try t.expectEqual(3, list.list.len);
+    try t.expectEqualStrings("a", list.list[0].string);
+    try t.expectEqualStrings("b", list.list[1].tag);
+    try t.expect(comptime list.list[2].int == 3);
+    const array = comptime valueOf([_]u8{ 1, 2 });
+    try t.expectEqual(2, array.list.len);
+    try t.expect(comptime array.list[1].int == 2);
+}
+
+test "a parameter has a name, its value and its text as messages show it; a data parameter is no placeholder" {
+    const t = std.testing;
+    const max = comptime param("max", 0.1);
+    try t.expectEqualStrings("max", max.name);
+    try t.expectEqualStrings("0.1", max.text);
+    try t.expect(comptime max.value.float == 0.1);
+    try t.expect(max.placeholder);
+    const zero = comptime param("min", -0.0);
+    try t.expectEqualStrings("0", zero.text);
+    const values = comptime param("values", .{ "a", "" });
+    try t.expectEqualStrings("a, \"\"", values.text);
+    try t.expect(values.placeholder);
+    const key = comptime dataParam("key", .id);
+    try t.expectEqualStrings("key", key.name);
+    try t.expectEqualStrings("id", key.text);
+    try t.expectEqualStrings("id", key.value.tag);
+    try t.expect(!key.placeholder);
+}
+
+test "define gives a rule the parameters of its spec" {
+    const rule = comptime define(.min, .{
+        .message = "must be at least 18",
+        .args = "18",
+        .params = &.{param("min", 18)},
+        .fits = test_rules.fitsAnything,
+        .eval = test_rules.evalPositive,
+    });
+    try std.testing.expectEqual(1, rule.params.len);
+    try std.testing.expectEqualStrings("min", rule.params[0].name);
+    try std.testing.expectEqualStrings("18", rule.params[0].text);
+    try std.testing.expectEqual(0, test_rules.positive.params.len);
+}
+
 // ------------------------------------------------------------------ the rule
 
 /// What a rule's run-time check returns.
@@ -891,6 +1003,9 @@ pub const Rule = struct {
     /// `each`), shown in compile errors and hints; null for a rule used as a
     /// value (`v.notEmpty`).
     args: ?[]const u8 = null,
+    /// The parameters as data, in the order of the constructor's arguments;
+    /// the placeholder ones are `{name}` in `.withMessage` templates.
+    params: []const Param = &.{},
     /// The precondition this rule can report. Its run-time check returns
     /// `.precondition` only on the field types where it applies (`finite`
     /// on floats only).
@@ -929,6 +1044,7 @@ pub const Spec = struct {
     /// Replaces `codeOf(kind)`; only `v.custom` sets it.
     code: ?[]const u8 = null,
     args: ?[]const u8 = null,
+    params: []const Param = &.{},
     precondition: ?Precondition = null,
     fits: fn (comptime rule: *const Rule, comptime T: type, comptime where: []const u8) void,
     eval: fn (value: anytype) Outcome,
@@ -946,6 +1062,7 @@ pub fn define(comptime kind: Kind, comptime spec: Spec) Rule {
         .code = spec.code orelse codeOf(kind),
         .message = spec.message,
         .args = spec.args,
+        .params = spec.params,
         .precondition = spec.precondition,
         .fits = spec.fits,
         .eval = spec.eval,
@@ -1025,6 +1142,15 @@ pub fn isFloat(comptime T: type) bool {
     return @typeInfo(T) == .float;
 }
 
+/// A signed integer or a float type: the field types of the sign rules.
+pub fn isSignedNumber(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .int => |i| i.signedness == .signed,
+        .float => true,
+        else => false,
+    };
+}
+
 /// `T` coerces to `P` without a cast: the conversions a field value may take
 /// into the parameter of a `v.custom` predicate. Identical types; integers of
 /// the same signedness that are not narrower, and unsigned integers into
@@ -1084,6 +1210,8 @@ pub const hints = struct {
     pub const tuple_pointer = "drop the &: write .{ ... }, not &.{ ... }";
     /// The rules of a struct field's own fields written as a struct literal.
     pub const struct_literal = "the rules of a nested struct's fields go into that struct's own field_rules";
+    /// A rule that only 0 of the field type would pass.
+    pub const use_equals_zero = "use v.equals(0)";
 
     /// A rule written on a list whose items it would accept.
     pub fn useEach(comptime rule: Rule) []const u8 {
@@ -1147,14 +1275,6 @@ pub const pending_kinds = [_]Kind{
     .one_of,
     .none_of,
     .empty,
-    .min,
-    .max,
-    .range,
-    .non_negative,
-    .negative,
-    .non_positive,
-    .divisible_by,
-    .finite,
     .min_items,
     .max_items,
     // PR 1c
@@ -1270,7 +1390,7 @@ pub fn typeError(comptime rule: *const Rule, comptime T: type, comptime where: [
 }
 
 /// The text of `typeError`, separate so that tests can read it.
-fn typeErrorText(comptime rule: *const Rule, comptime T: type, comptime where: []const u8, comptime expects: []const u8, comptime accepts: fn (comptime type) bool, comptime hint: ?[]const u8) []const u8 {
+pub fn typeErrorText(comptime rule: *const Rule, comptime T: type, comptime where: []const u8, comptime expects: []const u8, comptime accepts: fn (comptime type) bool, comptime hint: ?[]const u8) []const u8 {
     @setEvalBranchQuota(eval_quota);
     var extra: ?[]const u8 = hint;
     if (isU8Array(T) and accepts([]const u8)) {
@@ -1299,7 +1419,91 @@ fn plainSlice(comptime T: type) ?type {
 
 /// A declaration error about one rule: `validator: <where>: <label><text>`.
 pub fn ruleError(comptime rule: *const Rule, comptime where: []const u8, comptime text: []const u8) noreturn {
-    @compileError("validator: " ++ where ++ ": " ++ rule.label() ++ text);
+    @compileError(ruleErrorText(rule, where, text));
+}
+
+/// The text of `ruleError`, separate so that tests can read it.
+pub fn ruleErrorText(comptime rule: *const Rule, comptime where: []const u8, comptime text: []const u8) []const u8 {
+    return "validator: " ++ where ++ ": " ++ rule.label() ++ text;
+}
+
+// ------------------------------------------------------------------ number parameters
+
+/// The range of an integer type as error texts show it: `0..255` for u8.
+pub fn intRange(comptime T: type) []const u8 {
+    return std.fmt.comptimePrint("{d}..{d}", .{ std.math.minInt(T), std.math.maxInt(T) });
+}
+
+/// The comptime number `x` as a value of the numeric field type `T`:
+/// integers exactly, floats rounded to the nearest value of `T`, as a
+/// decoder rounds the input. Call it at comptime, for a parameter that
+/// `numberParamProblem` accepted for `T`.
+pub fn numberAs(comptime T: type, comptime x: anytype) T {
+    return switch (@typeInfo(T)) {
+        .int => @intCast(x),
+        .float => switch (@typeInfo(@TypeOf(x))) {
+            .comptime_int, .int => @floatFromInt(x),
+            else => @floatCast(x),
+        },
+        else => @compileError("validator: internal: numberAs needs a number type, got " ++ @typeName(T)),
+    };
+}
+
+/// The kind of a parameter of type `X` in error texts: `an integer`,
+/// `a float (f64)`, `a bool`, `an enum tag`, `a string`, `a list`, or the
+/// type's name for anything else.
+pub fn describeValueType(comptime X: type) []const u8 {
+    return switch (valueKind(X)) {
+        .int => "an integer",
+        .float => "a float (" ++ @typeName(X) ++ ")",
+        .bool => "a bool",
+        .tag => "an enum tag",
+        .string => "a string",
+        .list => "a list",
+        .other => @typeName(X),
+    };
+}
+
+/// Why the parameter `x` cannot be compared with values of the numeric field
+/// type `T`, as the text after the rule's label (`: 300 is outside u8
+/// (0..255)`), or null. An integer field takes an integer within its type;
+/// any other parameter gets `use_integer` as the hint. A float field takes a
+/// number that stays finite in it and, unless zero, does not round to 0, and
+/// an integer it holds exactly; anything else gets `use a number`. `outside`
+/// follows the texts about a parameter outside the type (`; the rule would
+/// never pass`). The parameter is shown as it is written.
+pub fn numberParamProblem(comptime x: anytype, comptime T: type, comptime use_integer: []const u8, comptime outside: []const u8) ?[]const u8 {
+    @setEvalBranchQuota(eval_quota);
+    const X = @TypeOf(x);
+    const shown = renderArg(x);
+    const kind = comptime valueKind(X);
+    switch (@typeInfo(T)) {
+        .int => {
+            if (kind != .int) return ": " ++ shown ++ " is " ++ describeValueType(X) ++ ", field is " ++ @typeName(T) ++ "; " ++ use_integer;
+            const n: comptime_int = x;
+            if (n < std.math.minInt(T) or n > std.math.maxInt(T))
+                return ": " ++ shown ++ " is outside " ++ @typeName(T) ++ " (" ++ intRange(T) ++ ")" ++ outside;
+            return null;
+        },
+        .float => switch (kind) {
+            .int => {
+                const f: T = @floatFromInt(x);
+                if (std.math.isInf(f)) return ": " ++ shown ++ " is outside the finite range of " ++ @typeName(T) ++ outside;
+                const nearest: comptime_int = @intFromFloat(f);
+                if (nearest != x)
+                    return ": " ++ shown ++ " is not exactly representable in " ++ @typeName(T) ++ std.fmt.comptimePrint(" (nearest: {d})", .{nearest});
+                return null;
+            },
+            .float => {
+                const f: T = @floatCast(x);
+                if (std.math.isInf(f)) return ": " ++ shown ++ " is outside the finite range of " ++ @typeName(T) ++ outside;
+                if (f == 0 and x != 0) return ": " ++ shown ++ " rounds to 0 in " ++ @typeName(T);
+                return null;
+            },
+            else => return ": " ++ shown ++ " is " ++ describeValueType(X) ++ ", field is " ++ @typeName(T) ++ "; use a number",
+        },
+        else => @compileError("validator: internal: numberParamProblem needs a number field type, got " ++ @typeName(T)),
+    }
 }
 
 // ------------------------------------------------------------------ rule lists
@@ -1604,6 +1808,121 @@ test "optional layers unwrap, and number, float and u8-array types are recognize
 
     inline for (.{ f16, f32, f64, f80, f128, c_longdouble }) |T| try std.testing.expect(isFloat(T));
     inline for (.{ u32, i64, ?f64, bool }) |T| try std.testing.expect(!isFloat(T));
+}
+
+test "a signed number is a signed integer or a float" {
+    inline for (.{ i8, i64, i128, isize, i1, f16, f32, f64, f80, f128, c_longdouble }) |T| try std.testing.expect(isSignedNumber(T));
+    inline for (.{ u8, u64, u128, usize, u0, bool, ?i32, []const u8, [2]i8 }) |T| try std.testing.expect(!isSignedNumber(T));
+}
+
+test "an integer type's range is written min..max" {
+    const expect = std.testing.expectEqualStrings;
+    try expect("0..255", comptime intRange(u8));
+    try expect("-128..127", comptime intRange(i8));
+    try expect("0..18446744073709551615", comptime intRange(u64));
+    try expect("-170141183460469231731687303715884105728..170141183460469231731687303715884105727", comptime intRange(i128));
+    try expect("0..0", comptime intRange(u0));
+}
+
+test "a checked number parameter converts to the field type: integers exactly, floats to the nearest value" {
+    const t = std.testing;
+    try t.expectEqual(@as(u8, 255), comptime numberAs(u8, 255));
+    try t.expectEqual(@as(i8, 5), comptime numberAs(i8, @as(u8, 5)));
+    try t.expectEqual(@as(i128, std.math.minInt(i128)), comptime numberAs(i128, std.math.minInt(i128)));
+    try t.expectEqual(@as(f32, 0.1), comptime numberAs(f32, 0.1));
+    try t.expectEqual(@as(f32, 0.1), comptime numberAs(f32, @as(f64, 0.1)));
+    try t.expectEqual(@as(f32, 16777216), comptime numberAs(f32, 16777216));
+    try t.expectEqual(@as(f64, 9007199254740992), comptime numberAs(f64, @as(u64, 9007199254740992)));
+    try t.expectEqual(@as(f16, 0.5), comptime numberAs(f16, 0.5));
+    try t.expectEqual(std.math.floatMax(f80), comptime numberAs(f80, std.math.floatMax(f80)));
+    try t.expect(std.math.signbit(comptime numberAs(f32, -0.0)));
+    try t.expectEqual(@as(c_longdouble, -1.5), comptime numberAs(c_longdouble, -1.5));
+}
+
+test "a parameter's type is described by its kind, a float with its type" {
+    const expect = std.testing.expectEqualStrings;
+    try expect("an integer", comptime describeValueType(comptime_int));
+    try expect("an integer", comptime describeValueType(u8));
+    try expect("a float (comptime_float)", comptime describeValueType(comptime_float));
+    try expect("a float (f64)", comptime describeValueType(f64));
+    try expect("a bool", comptime describeValueType(bool));
+    try expect("an enum tag", comptime describeValueType(@TypeOf(.admin)));
+    try expect("an enum tag", comptime describeValueType(TestOpen));
+    try expect("a string", comptime describeValueType(*const [1:0]u8));
+    try expect("a list", comptime describeValueType(@TypeOf(.{ 1, 2 })));
+    try expect("@TypeOf(null)", comptime describeValueType(@TypeOf(null)));
+    try expect("?u8", comptime describeValueType(?u8));
+}
+
+test "an integer field takes an integer parameter within its type" {
+    const expect = std.testing.expectEqualStrings;
+    const t = std.testing;
+    try t.expectEqual(null, comptime numberParamProblem(0, u8, "use an integer bound", ""));
+    try t.expectEqual(null, comptime numberParamProblem(255, u8, "use an integer bound", ""));
+    try t.expectEqual(null, comptime numberParamProblem(@as(u64, 7), i8, "use an integer bound", ""));
+    try t.expectEqual(null, comptime numberParamProblem(std.math.minInt(i128), i128, "use an integer bound", ""));
+    try expect(": 1.5 is a float (comptime_float), field is u8; use an integer bound", comptime numberParamProblem(1.5, u8, "use an integer bound", "").?);
+    // A float that holds an integer renders as one, so the text names its type.
+    try expect(": 2 is a float (comptime_float), field is u8; use an integer bound", comptime numberParamProblem(2.0, u8, "use an integer bound", "").?);
+    try expect(": 10 is a float (f64), field is u64; use an integer", comptime numberParamProblem(@as(f64, 10), u64, "use an integer", "").?);
+    try expect(": -1 is outside u64 (0..18446744073709551615)", comptime numberParamProblem(-1, u64, "use an integer bound", "").?);
+    try expect(": 300 is outside u8 (0..255); the rule would never pass", comptime numberParamProblem(300, u8, "use an integer", "; the rule would never pass").?);
+    try expect(": -129 is outside i8 (-128..127)", comptime numberParamProblem(-129, i8, "use an integer bound", "").?);
+    try expect(
+        ": 170141183460469231731687303715884105728 is outside i128 (-170141183460469231731687303715884105728..170141183460469231731687303715884105727)",
+        comptime numberParamProblem(std.math.maxInt(i128) + 1, i128, "use an integer bound", "").?,
+    );
+    // A parameter of another kind shows as it is written.
+    try expect(": \"5\" is a string, field is i32; use an integer", comptime numberParamProblem("5", i32, "use an integer", "").?);
+    try expect(": true is a bool, field is u8; use an integer", comptime numberParamProblem(true, u8, "use an integer", "").?);
+    try expect(": .admin is an enum tag, field is u8; use an integer", comptime numberParamProblem(.admin, u8, "use an integer", "").?);
+}
+
+test "a float field takes a parameter that stays finite and, unless zero, non-zero, and an integer it holds exactly" {
+    const expect = std.testing.expectEqualStrings;
+    const t = std.testing;
+    try t.expectEqual(null, comptime numberParamProblem(0.1, f32, "use an integer bound", ""));
+    try t.expectEqual(null, comptime numberParamProblem(-0.0, f32, "use an integer bound", ""));
+    try t.expectEqual(null, comptime numberParamProblem(0, f16, "use an integer bound", ""));
+    try t.expectEqual(null, comptime numberParamProblem(16777216, f32, "use an integer bound", ""));
+    try t.expectEqual(null, comptime numberParamProblem(65504, f16, "use an integer bound", ""));
+    try t.expectEqual(null, comptime numberParamProblem(std.math.maxInt(u64), f80, "use an integer bound", ""));
+    try t.expectEqual(null, comptime numberParamProblem(std.math.floatTrueMin(f32), f32, "use an integer bound", ""));
+    // A float rounds to the nearest value of the field type; a subnormal result is kept.
+    try t.expectEqual(null, comptime numberParamProblem(1e-40, f32, "use an integer bound", ""));
+    try t.expectEqual(null, comptime numberParamProblem(@as(f64, 0.1), f16, "use an integer bound", ""));
+    try expect(": 16777217 is not exactly representable in f32 (nearest: 16777216)", comptime numberParamProblem(16777217, f32, "use an integer bound", "").?);
+    try expect(
+        ": 9007199254740993 is not exactly representable in f64 (nearest: 9007199254740992)",
+        comptime numberParamProblem(9007199254740993, f64, "use an integer bound", "").?,
+    );
+    try expect(
+        ": 18446744073709551615 is not exactly representable in f64 (nearest: 18446744073709551616)",
+        comptime numberParamProblem(@as(u64, std.math.maxInt(u64)), f64, "use an integer bound", "").?,
+    );
+    try expect(": 65505 is not exactly representable in f16 (nearest: 65504)", comptime numberParamProblem(65505, f16, "use an integer bound", "").?);
+    try expect(": 65520 is outside the finite range of f16", comptime numberParamProblem(65520, f16, "use an integer bound", "").?);
+    try expect(
+        ": 1606938044258990275541962092341162602522202993782792835301376 is outside the finite range of f32",
+        comptime numberParamProblem(1 << 200, f32, "use an integer bound", "").?,
+    );
+    try expect(": 1e39 is outside the finite range of f32", comptime numberParamProblem(1e39, f32, "use an integer bound", "").?);
+    try expect(": -1e39 is outside the finite range of f32", comptime numberParamProblem(-1e39, f32, "use an integer bound", "").?);
+    try expect(": 1e300 is outside the finite range of f32; the rule would never pass", comptime numberParamProblem(1e300, f32, "use an integer", "; the rule would never pass").?);
+    try expect(": 1e-50 rounds to 0 in f32", comptime numberParamProblem(1e-50, f32, "use an integer bound", "").?);
+    try expect(": 5e-324 rounds to 0 in f32", comptime numberParamProblem(std.math.floatTrueMin(f64), f32, "use an integer bound", "").?);
+    try expect(": true is a bool, field is f64; use a number", comptime numberParamProblem(true, f64, "use an integer", "").?);
+}
+
+test "a rule error names the field path and the rule with its arguments" {
+    try std.testing.expectEqualStrings(
+        "validator: Dto.field_rules.x: min_items(3) is always true",
+        comptime ruleErrorText(&test_rules.min_items, "Dto.field_rules.x", " is always true"),
+    );
+    try std.testing.expectEqualStrings(
+        "validator: Dto.field_rules.x[]: positive is wrong",
+        comptime ruleErrorText(&test_rules.positive, "Dto.field_rules.x[]", " is wrong"),
+    );
 }
 
 test "a type error names the rule and the field type, then the one hint that applies" {

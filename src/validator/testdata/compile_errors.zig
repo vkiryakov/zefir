@@ -94,6 +94,19 @@ pub const list = [_]Fixture{
     .{ .file = "src/validator/testdata/compile_errors/positive_on_string.zig", .expect = "validator: positive_on_string.Bad.field_rules.x: positive expects a number, field is []const u8", .row = "positive-1" },
     .{ .file = "src/validator/testdata/compile_errors/positive_on_enum.zig", .expect = "validator: positive_on_enum.Bad.field_rules.x: positive expects a number, field is positive_on_enum.Role", .row = "variant of positive-1" },
     .{ .file = "src/validator/testdata/compile_errors/positive_on_slice.zig", .expect = "validator: positive_on_slice.Bad.field_rules.x: positive expects a number, field is []const u32; use v.each(v.positive)", .row = "positive-2" },
+    // min, max, range, the sign rules, divisibleBy and finite: one fixture per
+    // kind of error; the text of every catalog row is checked by the tests of
+    // numbers.zig
+    .{ .file = "src/validator/testdata/compile_errors/min_string_bound.zig", .expect = "validator: min(\"5\"): the bound must be a number, got *const [1:0]u8", .row = "min-1" },
+    .{ .file = "src/validator/testdata/compile_errors/max_nan_bound.zig", .expect = "validator: max(nan): nan is not finite", .row = "max-2" },
+    .{ .file = "src/validator/testdata/compile_errors/range_inverted.zig", .expect = "validator: range(10, 5): min is greater than max", .row = "range-3" },
+    .{ .file = "src/validator/testdata/compile_errors/min_inexact_f32.zig", .expect = "validator: min_inexact_f32.Bad.field_rules.x: min(16777217): 16777217 is not exactly representable in f32 (nearest: 16777216)", .row = "min-5" },
+    .{ .file = "src/validator/testdata/compile_errors/min_vacuous_u8.zig", .expect = "validator: min_vacuous_u8.Bad.field_rules.x: min(0) is always true for u8; remove it", .row = "min-9" },
+    .{ .file = "src/validator/testdata/compile_errors/min_on_slice.zig", .expect = "validator: min_on_slice.Bad.field_rules.x: min expects a number, field is []const i32; use v.each(v.min(0))", .row = "min-11" },
+    .{ .file = "src/validator/testdata/compile_errors/negative_unsigned.zig", .expect = "validator: negative_unsigned.Bad.field_rules.x: negative is always false for u32 (an unsigned type)", .row = "negative-1" },
+    .{ .file = "src/validator/testdata/compile_errors/divisible_by_zero.zig", .expect = "validator: divisibleBy(0): division by zero; no value would pass", .row = "divisibleBy-1" },
+    .{ .file = "src/validator/testdata/compile_errors/divisible_by_too_big.zig", .expect = "validator: divisible_by_too_big.Bad.field_rules.x: divisible_by(1000) on u8 (0..255): only 0 would pass; use v.equals(0)", .row = "divisibleBy-6" },
+    .{ .file = "src/validator/testdata/compile_errors/finite_on_int.zig", .expect = "validator: finite_on_int.Bad.field_rules.x: finite is always true for u32; remove it", .row = "finite-1" },
     // each
     .{ .file = "src/validator/testdata/compile_errors/each_not_rule.zig", .expect = "validator: each(...): expected a rule or a tuple of rules, got *const [1:0]u8", .row = "each-1" },
     .{ .file = "src/validator/testdata/compile_errors/each_tuple_item_not_rule.zig", .expect = "validator: each(...): item 1 of the tuple is comptime_int", .row = "each-2" },

@@ -53,7 +53,15 @@ pub const assertRules = walk.assertRules;
 pub const fail = walk.fail;
 
 pub const notEmpty = common.notEmpty;
+pub const min = numbers.min;
+pub const max = numbers.max;
+pub const range = numbers.range;
 pub const positive = numbers.positive;
+pub const nonNegative = numbers.nonNegative;
+pub const negative = numbers.negative;
+pub const nonPositive = numbers.nonPositive;
+pub const divisibleBy = numbers.divisibleBy;
+pub const finite = numbers.finite;
 pub const each = lists.each;
 pub const custom = custom_rules.custom;
 
