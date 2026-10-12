@@ -72,6 +72,19 @@ const Payout = struct {
   does not exist (`XX46370400440532013000` for `v.iban`, `DEUTXXFF` for
   `v.bic`). The rules check the syntax of an identifier, not that the account,
   the card or the bank exists.
+- **Built-in data sets** are part of the rules' behaviour, and a change to one
+  is a rule change ([Compatibility](README.md#compatibility)):
+  - the 13 algorithms and 7 digest lengths of `v.hash`, from validator.js; a new
+    tag would also break an exhaustive `switch` on `v.HashAlgorithm`;
+  - the 64-character alphabet of `v.firebasePushId`;
+  - the constants of `v.btcAddress`: the version bytes 0x00, 0x05, 0x6f and
+    0xc4, the prefixes `bc` and `tb`, the Bech32 and Bech32m checksum constants
+    and the 5 generators of their checksum, and the Base58 and Bech32 alphabets
+    (58 and 32 characters);
+  - the ISBN-13 prefixes of `v.isbn` and `v.isbn13`: 978, and 979 followed by
+    1-9;
+  - the constants of `v.iban`: 15 to 34 bytes, check digits 02 to 98, MOD
+    97-10.
 - **Complexity:** each rule checks the length first, then makes one or two
   passes over at most 128 bytes (`v.hash(.sha512)`), and allocates nothing. The
   most expensive are `v.btcAddress` (a Bech32 checksum over at most 90 symbols,

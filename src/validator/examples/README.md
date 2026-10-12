@@ -978,9 +978,12 @@ library runs. These errors point at your line and do not start with
 | `v.minItems.withMessage("...")`: `.withMessage` on a rule that needs a call | `no field or member function named 'withMessage' in 'fn (comptime usize) core.Rule'` |
 | `v.minItems(-1)`: a negative count, or one above `maxInt(usize)` | `type 'usize' cannot represent integer value '-1'` |
 | `v.maxItems(1.5)`: a fractional count (`3.0` is accepted) | `fractional component prevents float value '1.5' from coercion to type 'usize'` |
+| `v.hash(.sha3_256)`, `v.btcAddress(.regtest)`: a tag the selector's enum does not have (tags are lower case: `.sha256`, not `.SHA256`) | `enum 'identifiers.HashAlgorithm' has no member named 'sha3_256'` |
+| `v.hash("sha256")`: a string instead of a tag, as in class-validator | `expected type 'identifiers.HashAlgorithm', found '*const [6:0]u8'` |
+| `v.hash(@fromBackingInt(14))`: a number that is no tag of the selector's enum | `enum 'identifiers.HashAlgorithm' has no tag with value '14'` |
 | `v.notEmpty.withMessage()`: no template, or two | `member function expected 1 argument(s), found 0` |
 | `v.notEmpty.withMessage(5)`: a template that is not a string | `expected type '[]const u8', found 'comptime_int'` |
-| `v.maxItems(limit)`, `.withMessage(text)`: a parameter or a template known only at run time | `unable to resolve comptime value` (note: `argument to comptime parameter must be comptime-known`) |
+| `v.maxItems(limit)`, `v.hash(alg)`, `.withMessage(text)`: a parameter or a template known only at run time; for an algorithm or a network chosen at run time, call the predicate in `validateSelf`: `v.isHash(s, alg)`, `v.isBtcAddress(s, network)` | `unable to resolve comptime value` (note: `argument to comptime parameter must be comptime-known`) |
 
 **What is not checked at compile time:**
 
