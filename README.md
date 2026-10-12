@@ -20,7 +20,7 @@ I'm writing a large application in Zig, and I'm building it on Zefir, the framew
 
 Life is too short to write in a boring language, and I think Zig is a really cool one.
 
-Zig is still young. Each release reshapes the language and its standard library, and many Zig projects don't survive that: they start with enthusiasm and are abandoned a release or two later. It's not that I think I'm smarter than their authors. I just don't want my production code to depend on code that may be abandoned, or that catches up with a new Zig months late. So I'm building the whole stack myself and keeping it on the current Zig.
+Zig is still young. Each release reshapes the language and its standard library, and many Zig projects don't survive that: they start with enthusiasm and are abandoned a release or two later. It's not that I think I'm smarter than their authors; in fact, I borrowed plenty of ideas from existing projects. I just don't want my production code to depend on code that may be abandoned, or that catches up with a new Zig months late. So I'm building the whole stack myself and keeping it on the current Zig.
 
 Maybe that's a bad idea. But building it gives me more joy than I can put into words: I write this code for myself, and I'm having a lot of fun doing it. Zefir is in active development, and new modules arrive as the application needs them.
 
