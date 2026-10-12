@@ -83,10 +83,11 @@ const exe = b.addExecutable(.{
 
 ## Logging
 
-`Logger.init(gpa, io, options)` creates the logger: the only allocations it
-makes. `deinit` frees it; call it once, on any handle. A `Logger` is a
-small handle, copied by value and shared freely between threads; `scoped`
-and `withContext` derive more of them.
+`Logger.init(gpa, io, options)` creates the logger: logging allocates
+nothing after it, and only `subscribe` allocates again. `deinit` frees
+it; call it once, on any handle. A `Logger` is a small handle, copied by
+value and shared freely between threads; `scoped` and `withContext`
+derive more of them.
 
 | Method | Writes |
 |---|---|
@@ -255,15 +256,18 @@ Stop in this order: stop taking work, wait for your own threads, then
 
 - `flush(timeout)` waits until every record logged before it is written.
 - `shutdown(timeout)` refuses records from then on (counted in
-  `stats().dropped.closed`), waits until the queue is written and the
-  subscribers have handled theirs, and stops the logger's threads.
+  `stats().dropped.closed`), waits until the subscribers have handled
+  their queues and then until the queue is written, and stops the
+  logger's threads. `stats().pending` and `stats().alert_pending` tell
+  what is left when it times out.
 - Both return `error.Timeout` when the timeout passes first; another
   `shutdown` may wait again.
 - `deinit` without a `shutdown` waits for everything queued, with no time
   limit. After a `shutdown` that timed out, it drops what is left and
   waits only for the write and the handler calls in progress. If stdout
   is stuck for good, exit without `deinit`.
-- In sync mode there is nothing to wait for: `flush` returns at once.
+- In sync mode `flush` returns at once, and `shutdown` waits only for the
+  subscribers.
 
 Records still queued are lost when the process ends without these steps:
 `std.process.exit`, a panic, a signal. Do not log from a signal handler: a
@@ -288,8 +292,9 @@ room that the interrupted thread holds.
 | `queue_depth`, `queue_capacity`, `pending` | records in the queue, its size, records not yet written |
 | `scopes_overflow`, `scope_names_truncated` | scope names past the table, or cut to 128 bytes |
 | `emergency_written`, `emergency_suppressed` | emergency records written, and left out |
+| `alert_pending` | records waiting in the subscribers' queues |
 | `alert_dropped`, `alert_failures` | records a subscriber's queue had no room for, handler errors |
-| `filtered`, `hook_errors` | records interceptors dropped on purpose, records logged from an interceptor |
+| `filtered`, `hook_errors` | records interceptors dropped on purpose; records dropped because a hook logged them |
 
 A write that fails mid-line costs that line only: the next record starts on
 a new line. If stdout is closed, the logger notes it once on stderr and
@@ -321,7 +326,8 @@ const id = try logger.subscribe(.{
     .context = &alerter,
     .handler = sendAlert,
 });
-defer logger.unsubscribe(id);
+...
+logger.unsubscribe(id); // before `alerter` goes, and before `deinit`
 
 fn sendAlert(context: ?*anyopaque, event: *const zefir.log.Event) anyerror!void {
     const alerter: *Alerter = @ptrCast(@alignCast(context.?));
@@ -329,20 +335,25 @@ fn sendAlert(context: ?*anyopaque, event: *const zefir.log.Event) anyerror!void 
 }
 ```
 
-Each subscriber has a queue (`capacity`, 256 records by default) and a
-thread of its own, so a slow handler holds up nobody else. A record goes
-to the subscribers before the output, so they get an error record even when
-the queue refuses it or stdout is closed. A full subscriber queue drops the
-record (`alert_dropped`); a handler error is counted (`alert_failures`) and
-not retried. The `Event` gives the level, the timestamp, the scope, the
-message, the trace ids and the whole line; it is valid only during the
-call.
+Each subscriber has a queue (`capacity`, 256 records by default; a slot
+is `max_record_bytes` + 112 bytes rounded up to 128) and a thread of its
+own, so a slow handler holds up nobody else. It gets the records of its
+levels that pass the logger's level filter, before the output, so it gets
+an error record even when the queue refuses it or stdout is closed. A full
+subscriber queue drops the record (`alert_dropped`); a handler error is
+counted (`alert_failures`) and not retried. The `Event` gives the level,
+the timestamp, the scope and the message as the record writes them
+(escaped, and cut when the record is), the trace ids and the whole line;
+it is valid only during the call.
 
 A handler may log: those records go to the output only, never back to the
-subscribers, so an alert cannot trigger itself. It must not call
-`unsubscribe`, `flush` or `shutdown`. `unsubscribe` waits until the
-subscriber has handled its queue; after it returns, the handler is never
-called again. A logger takes 8 subscribers in its life.
+subscribers, so an alert cannot trigger itself; while `shutdown` waits for
+the subscribers they still go out. It must not call `unsubscribe`,
+`flush` or `shutdown`. `unsubscribe` waits until the subscriber has
+handled its queue (with no time limit while the logger runs; once
+`shutdown` has begun, only for the call in hand); after it returns, the
+handler is never called again. Call it before `deinit`. A logger takes 8
+subscribers in its life.
 
 ## Interceptors
 
@@ -365,7 +376,11 @@ The application's `io` reads the clock and does the sync writes, so log
 only from threads or tasks of that `io` (under `std.Io.Threaded`, any
 thread). The logger's own threads (the writer, the subscribers) and every
 wait for them run on a `std.Io.Threaded` of the logger's own, and those
-waits keep a cancel request for the caller's task. Two loggers on one
+waits keep a cancel request for the caller's task. A handler that logs
+writes through that own Io too; in sync mode under an application `io`
+that is not a `std.Io.Threaded` (an evented one), it could not share the
+output lock with the application's tasks, so those records are dropped
+and counted in `hook_errors`: use queued mode there. Two loggers on one
 stdout do not coordinate their writes: use one per process.
 
 ## Limits

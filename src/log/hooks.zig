@@ -54,8 +54,9 @@ pub const Subscription = struct {
     /// may take its time: a network call, with its own timeout. An error
     /// is counted in `stats().alert_failures`; the record is not retried.
     /// It may log through the logger: those records go to the output only,
-    /// never to subscribers. It must not call `unsubscribe`, `flush` or
-    /// `shutdown`.
+    /// never to subscribers (in sync mode under an application Io that is
+    /// not a `std.Io.Threaded` they are dropped, see `stats().hook_errors`).
+    /// It must not call `unsubscribe`, `flush` or `shutdown`.
     handler: Handler,
 };
 
