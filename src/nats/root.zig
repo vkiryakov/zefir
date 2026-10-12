@@ -25,4 +25,5 @@ test {
     _ = @import("Options.zig");
     _ = @import("ServerInfo.zig");
     _ = @import("protocol/golden.zig");
+    _ = @import("protocol/Parser.zig");
 }
