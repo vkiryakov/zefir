@@ -42,8 +42,8 @@ if (v.check(&request, &path_buf)) |violation| {
 - [Compatibility](#compatibility)
 - [All rules](#all-rules)
 
-Rules by category: [Common](common.md) · [Numbers](numbers.md) · [Identifiers](identifiers.md) ·
-[Lists](lists.md) · [Coming from class-validator](class_validator.md)
+Rules by category: [Common](common.md) · [Numbers](numbers.md) · [Formats](formats.md) ·
+[Identifiers](identifiers.md) · [Lists](lists.md) · [Coming from class-validator](class_validator.md)
 
 Examples that `zig build test` compiles and runs:
 [Getting started](getting_started.zig) · [validateSelf](validate_self.zig) · [withMessage](with_message.zig) · [DTO package test](dto_test.zig)
@@ -730,9 +730,9 @@ anything. The rules that compare a number need a finite one on a float field:
 NaN, `+inf` and `-inf` fail with `validation.finite` /
 `must be a finite number`, before the check of the rule runs. The rules with
 this precondition are `v.equals`, `v.notEquals`, `v.min`, `v.max`, `v.range`,
-`v.positive`, `v.nonNegative`, `v.negative`, `v.nonPositive` and
-`v.divisibleBy`; integers, `bool`, enums and strings have no precondition
-([D16](class_validator.md#deviations-from-validatorjs)).
+`v.positive`, `v.nonNegative`, `v.negative`, `v.nonPositive`, `v.divisibleBy`,
+`v.latitude` and `v.longitude`; integers, `bool`, enums and strings have no
+precondition ([D16](class_validator.md#deviations-from-validatorjs)).
 
 - The code and the message of a precondition are fixed: `.withMessage` does not
   change them. `v.positive.withMessage("must be above zero")` reports
@@ -979,6 +979,15 @@ library runs. These errors point at your line and do not start with
 | `v.minItems.withMessage("...")`: `.withMessage` on a rule that needs a call | `no field or member function named 'withMessage' in 'fn (comptime usize) core.Rule'` |
 | `v.minItems(-1)`: a negative count, or one above `maxInt(usize)` | `type 'usize' cannot represent integer value '-1'` |
 | `v.maxItems(1.5)`: a fractional count (`3.0` is accepted) | `fractional component prevents float value '1.5' from coercion to type 'usize'` |
+| `v.decimal(.{ .decimal_digits = "1,2" })`: an option the rule does not have, such as validator.js's `decimal_digits` | `no field named 'decimal_digits' in struct 'formats.DecimalOptions'` |
+| `v.macAddress(.{ .no_separators = true })`: the same for `isMACAddress`'s `no_separators`; write `.format = .bare` | `no field named 'no_separators' in struct 'formats.MacAddressOptions'` |
+| `v.macAddress(.{ .eui = .eui32 })`: a tag the option does not have | `enum 'formats.MacAddressOptions.Eui' has no member named 'eui32'` |
+| `v.macAddress(.{ .eui = "48" })`: validator.js's string instead of a tag | `expected type 'formats.MacAddressOptions.Eui', found '*const [2:0]u8'` |
+| `v.decimal(.{ .max_decimal_digits = -1 })`: an option value of another type, such as a negative count, a string, or `1` for a bool | `expected type '?usize', found 'comptime_int'` |
+| `v.fqdn(true)`, `v.decimal(2)`: a value instead of the options struct | `expected type 'formats.FqdnOptions', found 'bool'` |
+| `v.macAddress(.eui48)`: a tag instead of the options struct; write `v.macAddress(.{ .eui = .eui48 })` | `struct 'formats.MacAddressOptions' has no member named 'eui48'` |
+| `v.fqdn()`: the options left out; write `v.fqdn(.{})` | `expected 1 argument(s), found 0` |
+| `v.decimal.withMessage("...")`: `.withMessage` on a rule that needs its options | `no field or member function named 'withMessage' in 'fn (comptime formats.DecimalOptions) core.Rule'` |
 | `v.hash(.sha3_256)`, `v.btcAddress(.regtest)`: a tag the selector's enum does not have (tags are lower case: `.sha256`, not `.SHA256`) | `enum 'identifiers.HashAlgorithm' has no member named 'sha3_256'` |
 | `v.hash("sha256")`: a string instead of a tag, as in class-validator | `expected type 'identifiers.HashAlgorithm', found '*const [6:0]u8'` |
 | `v.hash(@fromBackingInt(14))`: a number that is no tag of the selector's enum | `enum 'identifiers.HashAlgorithm' has no tag with value '14'` |
@@ -1054,6 +1063,22 @@ The limits are `comptime_int` constants and part of the contract (see below).
 | `v.nonPositive` | a number is at most 0 | `validation.non_positive` | [numbers](numbers.md#vnonpositive) |
 | `v.divisibleBy(divisor)` | a number is a multiple of `divisor` | `validation.divisible_by` | [numbers](numbers.md#vdivisiblebydivisor) |
 | `v.finite` | a float is neither NaN nor an infinity | `validation.finite` | [numbers](numbers.md#vfinite) |
+| `v.numberString` | a string is a number in decimal notation | `validation.number_string` | [formats](formats.md#vnumberstring) |
+| `v.decimal(.{ ... })` | a string is a decimal number with as many digits after the point as the options allow | `validation.decimal` | [formats](formats.md#vdecimaloptions) |
+| `v.booleanString` | a string is `true`, `false`, `1` or `0` | `validation.boolean_string` | [formats](formats.md#vbooleanstring) |
+| `v.hexadecimal` | a string is a hexadecimal number | `validation.hexadecimal` | [formats](formats.md#vhexadecimal) |
+| `v.octal` | a string is an octal number | `validation.octal` | [formats](formats.md#voctal) |
+| `v.port` | a string is a port number from 0 to 65535 | `validation.port` | [formats](formats.md#vport) |
+| `v.latitude` | a string or a float is a latitude from -90 to 90 | `validation.latitude` | [formats](formats.md#vlatitude) |
+| `v.longitude` | a string or a float is a longitude from -180 to 180 | `validation.longitude` | [formats](formats.md#vlongitude) |
+| `v.latLong` | a string is a `latitude,longitude` pair | `validation.lat_long` | [formats](formats.md#vlatlong) |
+| `v.email` | a string is an email address | `validation.email` | [formats](formats.md#vemail) |
+| `v.httpUrl` | a string is an http or https URL | `validation.http_url` | [formats](formats.md#vhttpurl) |
+| `v.fqdn(.{ ... })` | a string is a domain name | `validation.fqdn` | [formats](formats.md#vfqdnoptions) |
+| `v.ip` | a string is an IPv4 or an IPv6 address | `validation.ip` | [formats](formats.md#vip) |
+| `v.ipv4` | a string is an IPv4 address | `validation.ipv4` | [formats](formats.md#vipv4) |
+| `v.ipv6` | a string is an IPv6 address | `validation.ipv6` | [formats](formats.md#vipv6) |
+| `v.macAddress(.{ ... })` | a string is a MAC address | `validation.mac_address` | [formats](formats.md#vmacaddressoptions) |
 | `v.uuid` | a string is a UUID: 8-4-4-4-12 hex digits | `validation.uuid` | [identifiers](identifiers.md#vuuid) |
 | `v.mongoId` | a string is a MongoDB ObjectId: 24 hex digits | `validation.mongo_id` | [identifiers](identifiers.md#vmongoid) |
 | `v.firebasePushId` | a string is a Firebase push ID | `validation.firebase_push_id` | [identifiers](identifiers.md#vfirebasepushid) |

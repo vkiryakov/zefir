@@ -1138,7 +1138,8 @@ pub const preconditions = struct {
     /// `length`, `notBlank`, the width rules and `strongPassword`), on a
     /// string that is not valid UTF-8.
     pub const utf8: Precondition = .{ .code = "validation.utf8", .message = "must be valid UTF-8" };
-    /// Every number rule on a float field whose value is NaN, +inf or -inf.
+    /// Every number rule, `latitude` and `longitude` on a float field whose
+    /// value is NaN, +inf or -inf.
     pub const finite: Precondition = .{ .code = "validation.finite", .message = "must be a finite number" };
     /// `minDate` and `maxDate` with a date bound, on a value that is not a
     /// date.
@@ -1739,6 +1740,19 @@ pub const hints = struct {
     pub const contains_none_on_string = "for a substring use v.notContains";
     /// A `""` listed in `containsNone`.
     pub const reject_empty_items = "use v.each(v.notEmpty) to reject empty items";
+    /// `numberString`, `decimal`, `hexadecimal` and `octal` on a number field.
+    pub const already_a_number = "the field is already a number: use v.min, v.max or v.range";
+    /// `booleanString` on a bool field.
+    pub const bool_needs_no_rule = "a bool field is already a boolean and needs no rule";
+    /// `booleanString` on a number field.
+    pub const use_bool_field = "use a bool field";
+    /// `port` on a number field.
+    pub const port_on_number = "a u16 field already holds 0-65535: add v.min(1) to exclude 0, or use v.range(0, 65535) on a wider type";
+    /// `latitude` and `longitude` on an integer field.
+    pub const latitude_on_int = "integer coordinates are usually scaled (E6, E7): use v.range in your unit, e.g. v.range(-90_000_000, 90_000_000) for E6";
+    pub const longitude_on_int = "integer coordinates are usually scaled (E6, E7): use v.range in your unit, e.g. v.range(-180_000_000, 180_000_000) for E6";
+    /// `latLong` on a number field.
+    pub const lat_long_on_number = "use two float fields with v.latitude and v.longitude";
 
     /// A rule written on a list whose items it would accept.
     pub fn useEach(comptime rule: Rule) []const u8 {
@@ -1765,7 +1779,7 @@ pub const hints = struct {
 
 /// The files that define rules. Each rule pull request adds its file here, so
 /// that its `call_examples` reach the hints.
-const rule_files = [_]type{ @import("common.zig"), @import("numbers.zig"), @import("identifiers.zig"), @import("lists.zig"), @import("custom.zig") };
+const rule_files = [_]type{ @import("common.zig"), @import("numbers.zig"), @import("formats.zig"), @import("identifiers.zig"), @import("lists.zig"), @import("custom.zig") };
 
 /// The arguments the hints show in a call of the constructor `name` of type
 /// `F`: its `call_examples` entry, else `.{}` for an options struct, the
@@ -1819,24 +1833,6 @@ pub const pending_kinds = [_]Kind{
     .contains,
     .not_contains,
     .strong_password,
-    // PR 3a
-    .number_string,
-    .decimal,
-    .boolean_string,
-    .hexadecimal,
-    .octal,
-    .port,
-    .latitude,
-    .longitude,
-    .lat_long,
-    // PR 3b
-    .email,
-    .http_url,
-    .fqdn,
-    .ip,
-    .ipv4,
-    .ipv6,
-    .mac_address,
     // PR 4a
     .date,
     .rfc3339,
