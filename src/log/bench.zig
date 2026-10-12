@@ -1,11 +1,14 @@
 //! Benchmarks for zefir-log. `zig build bench` builds them with ReleaseFast
-//! and prints the environment, then one table per question: records per
-//! second, the caller's time per record (two clock reads included), the
-//! records dropped, the process's CPU time per record and the memory the
-//! queue takes. Unless a table says otherwise, the records go to a writer
+//! and prints the environment, then one table per question: calls per
+//! second (the dropped ones included) and records written per second, the
+//! caller's time per call (two clock reads included), the records dropped,
+//! the process's CPU time per call and the memory the logger allocated in
+//! `init` and `subscribe`, which is all it takes: it allocates nothing
+//! after them. Unless a table says otherwise, the records go to a writer
 //! that throws them away, so the numbers measure the logger rather than a
 //! terminal; a "slow reader" adds a fixed cost to every write the logger
-//! makes. The numbers depend on the machine.
+//! makes, and the CPU column leaves that busy wait out. The numbers depend
+//! on the machine.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -118,15 +121,21 @@ const Scenario = struct {
 };
 
 const Result = struct {
-    per_second: f64,
+    /// Every call, the dropped ones included.
+    calls_per_second: f64,
+    /// Records that reached the output in full.
+    written_per_second: f64,
     p50: u64,
     p95: u64,
     p99: u64,
     p999: u64,
     max: u64,
     dropped_percent: f64,
-    /// User and system time of the whole process, per record.
+    /// User and system time of the whole process, per call, without the
+    /// slow reader's busy wait.
     cpu_ns: u64,
+    /// What the logger allocated in `init` and `subscribe`.
+    logger_bytes: usize,
 };
 
 const Bench = struct {
@@ -138,8 +147,8 @@ const Bench = struct {
 
     fn table(b: *Bench, comptime title: []const u8, args: anytype) !void {
         try b.out.print("\n" ++ title ++ "\n", args);
-        try b.out.print("{s:<92} {s:>11} {s:>7} {s:>7} {s:>7} {s:>8} {s:>9} {s:>8} {s:>7} {s:>6}\n", .{
-            "scenario", "records/s", "p50 ns", "p95 ns", "p99 ns", "p99.9 ns", "max ns", "dropped", "CPU ns", "MiB",
+        try b.out.print("{s:<92} {s:>11} {s:>11} {s:>7} {s:>7} {s:>7} {s:>8} {s:>9} {s:>8} {s:>7} {s:>6}\n", .{
+            "scenario", "calls/s", "written/s", "p50 ns", "p95 ns", "p99 ns", "p99.9 ns", "max ns", "dropped", "CPU ns", "MiB",
         });
     }
 
@@ -150,10 +159,9 @@ const Bench = struct {
             .sync => try std.fmt.bufPrint(&name_buf, "sync, {d} producer(s), {t}, {t}, {t}", .{ s.producers, s.record, s.output, s.hooks }),
             .queued => |q| try std.fmt.bufPrint(&name_buf, "queued {t}, cap {d}, batch {d}, {d} producer(s), {t}, {t}, {t}", .{ q.overflow, q.capacity, q.batch_size, s.producers, s.record, s.output, s.hooks }),
         };
-        const options: log.Options = .{ .mode = s.mode };
-        const mib = @as(f64, @floatFromInt(options.queueBytes())) / (1024 * 1024);
-        try b.out.print("{s:<92} {d:>11.0} {d:>7} {d:>7} {d:>7} {d:>8} {d:>9} {d:>7.2}% {d:>7} {d:>6.1}\n", .{
-            name, r.per_second, r.p50, r.p95, r.p99, r.p999, r.max, r.dropped_percent, r.cpu_ns, mib,
+        const mib = @as(f64, @floatFromInt(r.logger_bytes)) / (1024 * 1024);
+        try b.out.print("{s:<92} {d:>11.0} {d:>11.0} {d:>7} {d:>7} {d:>7} {d:>8} {d:>9} {d:>7.2}% {d:>7} {d:>6.1}\n", .{
+            name, r.calls_per_second, r.written_per_second, r.p50, r.p95, r.p99, r.p999, r.max, r.dropped_percent, r.cpu_ns, mib,
         });
         try b.out.flush();
     }
@@ -165,17 +173,22 @@ const Bench = struct {
         var target: Target = try .open(io, s.output, &sink);
         target.point(io, &file_buffer);
         defer target.close(io);
-        const logger: log.Logger = try .init(b.gpa, io, .{ .mode = s.mode, .output = .{ .writer = target.writer } });
-        defer logger.deinit();
         const latencies = try b.gpa.alloc(u64, s.producers * s.records);
         defer b.gpa.free(latencies);
+        const before_init = b.counting.allocated_bytes;
+        const logger: log.Logger = try .init(b.gpa, io, .{ .mode = s.mode, .output = .{ .writer = target.writer } });
+        defer logger.deinit();
         const handle = if (s.record == .traced) logger.withContext(tracedContext()) else logger;
         switch (s.hooks) {
             .none => {},
             .err_subscriber => _ = try logger.subscribe(.{ .levels = &.{.err}, .handler = ignoreEvent }),
+            // 4096 slots, as many as the queue: with the default 256 the
+            // subscriber's queue overflows now and then at this rate, and
+            // the row would measure its drops instead of the copy.
             .info_subscriber => _ = try logger.subscribe(.{ .levels = &.{.info}, .capacity = 4096, .handler = ignoreEvent }),
             .interceptor => try logger.use(.{ .filter = keepEvent }),
         }
+        const logger_bytes = b.counting.allocated_bytes - before_init;
         const allocations = b.counting.allocations;
 
         const cpu_start = cpuNanoseconds();
@@ -192,20 +205,24 @@ const Bench = struct {
         try logger.flush(.none);
         const elapsed = start.durationTo(Io.Clock.awake.now(io));
         const cpu = cpuNanoseconds() - cpu_start;
+        const spin = sink.spin_cpu_ns.load(.monotonic);
         b.allocations_after_init += b.counting.allocations - allocations;
 
         std.mem.sort(u64, latencies, {}, std.sort.asc(u64));
         const stats = logger.stats();
         const total: f64 = @floatFromInt(latencies.len);
+        const seconds = @as(f64, @floatFromInt(elapsed.nanoseconds)) / std.time.ns_per_s;
         return .{
-            .per_second = total / (@as(f64, @floatFromInt(elapsed.nanoseconds)) / std.time.ns_per_s),
+            .calls_per_second = total / seconds,
+            .written_per_second = @as(f64, @floatFromInt(stats.written)) / seconds,
             .p50 = percentile(latencies, 50, 100),
             .p95 = percentile(latencies, 95, 100),
             .p99 = percentile(latencies, 99, 100),
             .p999 = percentile(latencies, 999, 1000),
             .max = latencies[latencies.len - 1],
             .dropped_percent = @as(f64, @floatFromInt(stats.dropped.queue_full + stats.alert_dropped)) * 100 / total,
-            .cpu_ns = @intFromFloat(@as(f64, @floatFromInt(cpu)) / total),
+            .cpu_ns = @intFromFloat(@as(f64, @floatFromInt(cpu -| spin)) / total),
+            .logger_bytes = logger_bytes,
         };
     }
 };
@@ -307,18 +324,24 @@ fn readAll(file: Io.File, io: Io) void {
 }
 
 /// Throws the records away, after `write_ns` of busy waiting per write:
-/// a reader that takes that long for each write.
+/// a reader that takes that long for each write. The CPU time of that wait
+/// is kept apart, since a real slow reader would block instead.
 const Sink = struct {
     write_ns: u64,
     io: Io,
     bytes: usize = 0,
+    /// The thread CPU time the busy waiting took, all writes together.
+    spin_cpu_ns: std.atomic.Value(u64) = .init(0),
     writer: Io.Writer = .{ .buffer = &.{}, .vtable = &.{ .drain = drain } },
 
     fn drain(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
         const sink: *Sink = @alignCast(@fieldParentPtr("writer", w));
         if (sink.write_ns > 0) {
+            const cpu_start = Io.Clock.cpu_thread.now(sink.io);
             const start = Io.Clock.awake.now(sink.io);
             while (start.durationTo(Io.Clock.awake.now(sink.io)).nanoseconds < sink.write_ns) std.atomic.spinLoopHint();
+            const spin = cpu_start.durationTo(Io.Clock.cpu_thread.now(sink.io)).nanoseconds;
+            _ = sink.spin_cpu_ns.fetchAdd(std.math.lossyCast(u64, spin), .monotonic);
         }
         var n: usize = 0;
         for (data[0 .. data.len - 1]) |bytes| n += bytes.len;
