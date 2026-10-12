@@ -82,11 +82,16 @@ pub const Stats = struct {
     /// failed write to stderr. The next one written tells how many with
     /// `"suppressed":N`; emergency records are not counted in `accepted`.
     emergency_suppressed: u64,
+    /// Records in the subscribers' queues, not yet handed to their
+    /// handlers; after a `shutdown` that timed out, the ones `deinit` drops.
+    alert_pending: u64,
     /// Records a subscriber's full queue dropped; each subscriber counts.
     alert_dropped: u64,
     /// Handler calls that returned an error.
     alert_failures: u64,
-    /// Records logged from an interceptor, and dropped.
+    /// Records dropped because a hook logged them: from an interceptor,
+    /// or, in sync mode under an Io other than `std.Io.Threaded`, from a
+    /// subscriber's handler.
     hook_errors: u64,
     /// Records an interceptor dropped on purpose: not a loss.
     filtered: u64,
@@ -145,10 +150,7 @@ queue: ?Queue = null,
 overflow: options.OverflowPolicy = .drop_new,
 batch: []u8 = &.{},
 batch_ends: []usize = &.{},
-writer_thread: ?std.Thread = null,
-/// Held while a call joins the writer thread, so a second call waits for
-/// it; taken through the logger's own Io.
-join_lock: Io.Mutex = .init,
+writer_thread: Joinable = .{},
 /// Records logged once the logger is not running are refused.
 state: std.atomic.Value(State) align(std.atomic.cache_line) = .init(.running),
 /// Queued mode: queue positions the writer thread has written or dropped.
@@ -253,7 +255,7 @@ fn startQueue(engine: *Engine, q: options.Queued, max_record_bytes: u32) InitErr
     engine.batch_ends = try gpa.alloc(usize, q.batch_size);
     errdefer gpa.free(engine.batch_ends);
     engine.overflow = q.overflow;
-    engine.writer_thread = std.Thread.spawn(.{}, writer.run, .{engine}) catch |e| return switch (e) {
+    engine.writer_thread.thread = std.Thread.spawn(.{}, writer.run, .{engine}) catch |e| return switch (e) {
         error.OutOfMemory => error.OutOfMemory,
         else => error.SystemResources,
     };
@@ -272,8 +274,12 @@ pub fn destroy(engine: *Engine) void {
         // seq_cst: pairs with the logger threads' announcement that they
         // sleep in `waitForPublish`, so one of the two sees the other.
         engine.abandon.store(true, .seq_cst);
-        if (engine.queue) |*q| q.wakeConsumer();
-        for (engine.registry.subscriberSlots()) |*s| s.queue.wakeConsumer();
+        for (engine.registry.subscriberSlots()) |*s| {
+            s.stop.store(true, .seq_cst);
+            s.queue.wakeConsumer();
+        }
+        // Closed, so a handler waiting for room in `.block` mode gives up.
+        if (engine.queue) |*q| _ = q.close();
     }
     engine.joinThreads();
     if (engine.queue) |*q| {
@@ -313,6 +319,7 @@ pub fn stats(engine: *Engine) Stats {
         .pending = if (engine.queue) |*q| q.reserved() -| engine.processed.load(.monotonic) else 0,
         .emergency_written = c.emergency_written.load(.monotonic),
         .emergency_suppressed = c.emergency_suppressed.load(.monotonic),
+        .alert_pending = engine.alertPending(),
         .alert_dropped = c.alert_dropped.load(.monotonic),
         .alert_failures = c.alert_failures.load(.monotonic),
         .hook_errors = c.hook_errors.load(.monotonic),
@@ -336,9 +343,13 @@ pub fn flush(engine: *Engine, timeout: Io.Timeout) error{Timeout}!void {
 pub fn shutdown(engine: *Engine, timeout: Io.Timeout) error{Timeout}!void {
     try engine.refuseOnOwnThread();
     _ = engine.state.cmpxchgStrong(.running, .stopping, .acq_rel, .monotonic);
-    const final: u64 = if (engine.queue) |*q| q.close() else 0;
+    const deadline = timeout.toDeadline(engine.own.io());
+    // The subscribers first: records their handlers log meanwhile still go
+    // into the queue.
     engine.closeSubscribers();
-    try engine.waitFor(final, true, timeout);
+    try engine.waitFor(0, true, deadline);
+    const final: u64 = if (engine.queue) |*q| q.close() else 0;
+    try engine.waitFor(final, false, deadline);
     engine.joinThreads();
     engine.state.store(.stopped, .release);
     engine.noteDroppedErrors();
@@ -411,20 +422,32 @@ fn notifyProgress(engine: *Engine) void {
 
 /// Joins the writer thread and the subscriber threads.
 fn joinThreads(engine: *Engine) void {
-    engine.joinThread(&engine.writer_thread);
-    for (engine.registry.subscriberSlots()) |*s| engine.joinThread(&s.thread);
+    const io = engine.own.io();
+    engine.writer_thread.join(io);
+    for (engine.registry.subscriberSlots()) |*s| s.thread.join(io);
 }
 
-/// Joins `thread` once; a call that comes second returns after the first
-/// has joined it.
-fn joinThread(engine: *Engine, thread: *?std.Thread) void {
-    const io = engine.own.io();
-    engine.join_lock.lockUncancelable(io);
-    defer engine.join_lock.unlock(io);
-    if (thread.*) |running| {
-        running.join();
-        thread.* = null;
+/// A thread of the logger, joined once by whichever call comes first; a
+/// call that comes second returns after the first has joined it. Each
+/// thread has its own lock, so waiting for one never waits for another.
+pub const Joinable = struct {
+    thread: ?std.Thread = null,
+    lock: Io.Mutex = .init,
+
+    pub fn join(j: *Joinable, io: Io) void {
+        j.lock.lockUncancelable(io);
+        defer j.lock.unlock(io);
+        if (j.thread) |running| {
+            running.join();
+            j.thread = null;
+        }
     }
+};
+
+fn alertPending(engine: *Engine) u64 {
+    var pending: u64 = 0;
+    for (engine.registry.subscriberSlots()) |*s| pending += s.queue.depth();
+    return pending;
 }
 
 pub fn countAlertDropped(engine: *Engine) void {
@@ -470,7 +493,7 @@ pub fn subscribe(engine: *Engine, s: hooks.Subscription) hooks.SubscribeError!ho
     errdefer gpa.free(sub.record);
     _ = registry.live.fetchAdd(1, .seq_cst);
     errdefer _ = registry.live.fetchSub(1, .seq_cst);
-    sub.thread = std.Thread.spawn(.{}, hooks.Subscriber.run, .{sub}) catch |e| return switch (e) {
+    sub.thread.thread = std.Thread.spawn(.{}, hooks.Subscriber.run, .{sub}) catch |e| return switch (e) {
         error.OutOfMemory => error.OutOfMemory,
         else => error.SystemResources,
     };
@@ -482,23 +505,28 @@ pub fn subscribe(engine: *Engine, s: hooks.Subscription) hooks.SubscribeError!ho
 /// `Logger.unsubscribe`: takes the subscriber off the list, then waits
 /// until its thread has handled its queue and exited.
 pub fn unsubscribe(engine: *Engine, id: hooks.SubscriptionId) void {
-    if (hooks.subscriber_of == engine) {
-        if (std.debug.runtime_safety) @panic("zefir.log: unsubscribe called from a handler would wait for itself");
+    if (hooks.subscriber_of == engine or writer.thread_of == engine) {
+        if (std.debug.runtime_safety) @panic("zefir.log: unsubscribe called from one of the logger's threads could wait for itself");
         return;
     }
     const slots = engine.registry.subscriberSlots();
     const index = @backingInt(id);
     if (index >= slots.len) return;
     const sub = &slots[index];
+    const io = engine.own.io();
     {
-        const io = engine.own.io();
         engine.registry.lock.lockUncancelable(io);
         defer engine.registry.lock.unlock(io);
-        if (!sub.active.swap(false, .acq_rel)) return; // removed already
-        engine.registry.recomputeLevels();
+        // Once `shutdown` has begun, only the call in hand is waited for,
+        // as `deinit` would: the deadline was for the queue.
+        if (engine.state.load(.acquire) != .running) sub.stop.store(true, .seq_cst);
+        if (sub.active.swap(false, .acq_rel)) engine.registry.recomputeLevels();
     }
+    // Every call closes and joins, so each one returns after the handler's
+    // last call.
     _ = sub.queue.close();
-    engine.joinThread(&sub.thread);
+    sub.queue.wakeConsumer();
+    sub.thread.join(io);
 }
 
 /// `Logger.use`.
@@ -548,16 +576,29 @@ fn callerIo(engine: *Engine) Io {
     return if (hooks.subscriber_of == engine) engine.own.io() else engine.io;
 }
 
+/// Whether the application's Io is a `std.Io.Threaded`, as the logger's
+/// own is: then both wait on the same OS futexes and can share a lock.
+fn appIoIsThreaded(engine: *Engine) bool {
+    return engine.io.vtable == engine.own.io().vtable;
+}
+
 /// Counts a record that passed the level filter; false when it is dropped:
-/// logged from an interceptor, after `shutdown`, or to a closed stdout
-/// with no subscriber to take it.
+/// logged from an interceptor, from a handler that cannot write it, after
+/// `shutdown`, or to a closed stdout with no subscriber to take it.
 fn accept(engine: *Engine, comptime level: Level) bool {
-    if (hooks.in_interceptor) {
+    const from_handler = hooks.subscriber_of == engine;
+    // A sync write from a handler takes the output lock through the
+    // logger's own Io; an application on another Io (an evented one) waits
+    // for that lock in a way the logger's own Io cannot wake.
+    if (hooks.in_interceptor or (from_handler and engine.queue == null and !engine.appIoIsThreaded())) {
         bump(&engine.counters.hook_errors);
         return false;
     }
     bump(&engine.counters.accepted);
-    if (engine.state.load(.monotonic) != .running) {
+    const state = engine.state.load(.monotonic);
+    // While `shutdown` waits for the subscribers, what their handlers log
+    // still goes out.
+    if (state != .running and !(state == .stopping and from_handler)) {
         engine.refuse(level, &engine.counters.dropped_closed);
         return false;
     }

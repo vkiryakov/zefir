@@ -1339,7 +1339,7 @@ test "a writer whose flush fails: the record counts as dropped and its line as t
 
 fn shutdownThenCheckJoined(logger: Logger, joined: *std.atomic.Value(u32)) void {
     logger.shutdown(.none) catch return;
-    if (logger.engine.writer_thread == null) _ = joined.fetchAdd(1, .seq_cst);
+    if (logger.engine.writer_thread.thread == null) _ = joined.fetchAdd(1, .seq_cst);
 }
 
 test "queued: two shutdowns at once both return after the writer thread has exited" {

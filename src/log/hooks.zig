@@ -122,9 +122,13 @@ pub const Subscriber = struct {
     queue: Queue,
     /// One record as `pop` copies it out: its head, then the record.
     record: []u8,
-    thread: ?std.Thread = null,
+    thread: Engine.Joinable = .{},
     /// Cleared by `unsubscribe`: records stop going to it.
     active: std.atomic.Value(bool) = .init(true),
+    /// Set when the subscriber must stop after the call in hand, without
+    /// the records still queued: by `unsubscribe` once `shutdown` has
+    /// begun, and by `deinit` after a `shutdown` that timed out.
+    stop: std.atomic.Value(bool) = .init(false),
 
     pub fn wants(s: *const Subscriber, level: Level, scope: []const u8) bool {
         if (s.levels & levelBit(level) == 0 or !s.active.load(.acquire)) return false;
@@ -154,13 +158,13 @@ pub const Subscriber = struct {
         const q = &s.queue;
         var ends: [1]usize = undefined;
         var yields: u32 = 0;
-        while (!s.engine.abandon.load(.acquire)) {
+        while (!s.stop.load(.acquire)) {
             if (q.pop(s.record, &ends) == 1) {
                 yields = 0;
                 s.deliver(s.record[0..ends[0]]);
                 continue;
             }
-            if (!q.waitNext(writer.idle_recheck, &yields, &s.engine.abandon)) return;
+            if (!q.waitNext(writer.idle_recheck, &yields, &s.stop)) return;
         }
     }
 
