@@ -21,11 +21,13 @@
 //!   `"nan"`, `"-nan"`, `"inf"`, `"-inf"`, `"-0"`; when the record has `bits`
 //!   (lowercase hex of the IEEE bits in the type's width), they are the value
 //!   and the text must parse to the same bits (to a NaN of the same sign for
-//!   a NaN)
+//!   a NaN). A `c_longdouble` record has no `bits`, since the width depends
+//!   on the target: its decimal is exact in `f64`, so it decodes to the same
+//!   value everywhere
 //! - string (a slice of `u8`, with or without a sentinel): a JSON string
 //!   with the text; when the record has `hex` (lowercase hex of the bytes),
-//!   the bytes come from it; a string item of a list that needs hex is
-//!   `{ "hex": "..." }`
+//!   the bytes come from it; a string inside a list or a struct that needs
+//!   hex is `{ "hex": "..." }`
 //! - bool: `true` or `false`
 //! - enum: `".tag"`, or `"@fromBackingInt(9)"` for a value given by number
 //! - optional: `null`, or the payload's encoding

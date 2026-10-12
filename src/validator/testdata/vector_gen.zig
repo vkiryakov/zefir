@@ -23,9 +23,12 @@
 //! - `input` (required): the value, encoded as vector_harness.zig describes
 //! - `hex`: the bytes of a string input in lowercase hex, present exactly
 //!   when a byte is outside 0x20-0x7E or the bytes are not valid UTF-8;
-//!   `input` then shows the bytes as `std.zig.fmtString` does
+//!   `input` then shows the bytes as `std.zig.fmtString` does. A string
+//!   inside a list or a struct follows the same rule as `{ "hex": "..." }`
 //! - `bits`: the IEEE bits of a float input in lowercase hex, in the width
-//!   of the field type
+//!   of the field type (4, 8, 16, 20 or 32 digits for `f16` to `f128`);
+//!   never on `c_longdouble`, whose width depends on the target, so its
+//!   records use a decimal input that is exact in `f64`
 //! - `expect` (required): `pass`, `fail` (a rule failed) or `precondition`
 //!   (a rule's precondition failed)
 //! - `code`: the violation's code; required unless `expect` is `pass`
@@ -35,18 +38,27 @@
 //! - `mode`: `check` (default) or `checkAll`; a `checkAll` record lists the
 //!   whole report in `violations`, `[{ "code": ..., "path": ... }]` in walk
 //!   order, the first of which `code` and `path` describe
-//! - `reason` (required): one line on why the record exists
-//! - `source` (required): where the record comes from
-//! - `vjs`: what validator.js returns for the input (`true`/`false`), when measured
-//! - `deviation`: the documented deviation (`D<n>`), required when `vjs`
-//!   differs from `expect == "pass"`
+//! - `reason` (required): one line on why the record exists, readable
+//!   without any file outside the repository
+//! - `source` (required): one line on where the record comes from in the
+//!   maintainer's research catalog, which is kept outside the repository:
+//!   `<research file>#<id>` for a converted research vector, `errata
+//!   VE-NNN` for a record that the catalog's errata add; the maintainer
+//!   assigns the errata id of a new record
+//! - `vjs`: what validator.js or class-validator returns for the input
+//!   (`true`/`false`), when measured
+//! - `deviation`: the deviation from them that the record shows, by its id
+//!   in the table of src/validator/examples/class_validator.md (`D16`);
+//!   required when `vjs` differs from `expect == "pass"`
 //!
 //! The generator also rejects: unknown fields; a failing record of a single
 //! rule (no `call`) whose code is not the rule's own (`validation.` and the
 //! rule's name in snake_case; `validation.unique_items` for `uniqueBy`;
-//! `each` and `custom` have no code of their own); a precondition code other
-//! than `validation.utf8`, `validation.finite`, `validation.date` and
-//! `validation.rfc3339`; a rule with fewer than 10 records.
+//! `each` and `custom` have no code of their own); a `call` that does not
+//! use `v.<rule>`; a precondition code other than `validation.utf8`,
+//! `validation.finite`, `validation.date` and `validation.rfc3339`; a
+//! passing record with a `code`, `message`, `path` or non-empty
+//! `violations`; a rule with fewer than 10 records.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
@@ -76,7 +88,15 @@ const required_fields = [_][]const u8{ "id", "rule", "params", "field_type", "in
 const optional_fields = [_][]const u8{ "call", "hex", "bits", "code", "message", "path", "mode", "violations", "vjs", "deviation" };
 const precondition_codes = [_][]const u8{ "validation.utf8", "validation.finite", "validation.date", "validation.rfc3339" };
 const string_types = [_][]const u8{ "[]const u8", "[]u8", "[:0]const u8", "[:0]u8" };
-const float_types = [_][]const u8{ "f16", "f32", "f64", "f80", "f128", "c_longdouble" };
+/// The float types that take `bits`, with the number of hex digits of their
+/// bits. c_longdouble takes none: its width depends on the target.
+const float_types = [_]struct { name: []const u8, digits: usize }{
+    .{ .name = "f16", .digits = 4 },
+    .{ .name = "f32", .digits = 8 },
+    .{ .name = "f64", .digits = 16 },
+    .{ .name = "f80", .digits = 20 },
+    .{ .name = "f128", .digits = 32 },
+};
 /// Every rule of a file needs at least this many records.
 const min_records = 10;
 
@@ -279,12 +299,17 @@ fn readRecord(arena: Allocator, problems: *std.ArrayList(Problem), index: usize,
         .mode = try r.oneOf(Mode, "mode", .check),
         .violations = try r.violations(),
     };
-    _ = try r.string("reason");
-    _ = try r.string("source");
-    _ = try r.string("deviation");
+    const reason = try r.string("reason") orelse "";
+    const source = try r.string("source") orelse "";
+    const deviation = try r.string("deviation");
     const vjs = try r.boolean("vjs");
     if (!r.ok) return null;
     try checkRecord(&r, record, vjs);
+    if (!isOneLine(reason)) try r.problem("field \"reason\" must be one non-empty line", .{});
+    if (!isOneLine(source)) try r.problem("field \"source\" must be one non-empty line", .{});
+    if (deviation) |d| {
+        if (!isDeviationId(d)) try r.problem("deviation must be \"D<n>\"", .{});
+    }
     return if (r.ok) record else null;
 }
 
@@ -295,6 +320,11 @@ fn checkRecord(r: *FieldReader, record: Record, vjs: ?bool) Allocator.Error!void
     if (record.mode == .check and record.violations != null) try r.problem("\"violations\" needs \"mode\": \"checkAll\"", .{});
     if (record.expect == .pass) {
         if (record.code != null) try r.problem("a passing record has no code", .{});
+        if (record.message != null) try r.problem("a passing record has no message", .{});
+        if (record.path != null) try r.problem("a passing record has no path", .{});
+        if (record.violations) |list| {
+            if (list.len > 0) try r.problem("the violations of a passing record must be []", .{});
+        }
     } else if (record.code) |code| {
         if (record.expect == .precondition and !contains(&precondition_codes, code)) {
             try r.problem("a precondition code is one of validation.utf8, validation.finite, validation.date, validation.rfc3339", .{});
@@ -304,7 +334,16 @@ fn checkRecord(r: *FieldReader, record: Record, vjs: ?bool) Allocator.Error!void
                 if (!std.mem.eql(u8, code, own)) try r.problem("code must be {s}, the code of {s}; a record that expects another code needs a call", .{ own, record.rule });
             }
         }
+        if (record.violations) |list| {
+            const path = record.path orelse "";
+            if (list.len == 0 or !std.mem.eql(u8, list[0].code, code) or !std.mem.eql(u8, list[0].path, path)) {
+                try r.problem("violations must start with {{\"code\": \"{s}\", \"path\": \"{s}\"}}, the violation that code and path describe", .{ code, path });
+            }
+        }
     } else try r.problem("a failing record needs a code", .{});
+    if (record.call) |call| {
+        if (!usesRule(call, record.rule)) try r.problem("call must use v.{s}, the rule under test", .{record.rule});
+    }
     if (vjs) |result| {
         if (result != (record.expect == .pass) and r.object.get("deviation") == null) {
             try r.problem("vjs disagrees with expect, so the record needs \"deviation\"", .{});
@@ -332,15 +371,19 @@ fn checkRecord(r: *FieldReader, record: Record, vjs: ?bool) Allocator.Error!void
     if (record.bits) |bits| {
         if (!isHex(bits)) {
             try r.problem("bits must be lowercase hex digits", .{});
-        } else if (!contains(&float_types, field_type)) {
-            try r.problem("bits is only for float fields", .{});
-        }
+        } else if (std.mem.eql(u8, field_type, "c_longdouble")) {
+            try r.problem("bits is not allowed on c_longdouble, whose width depends on the target; write a decimal input that is exact in f64", .{});
+        } else for (float_types) |float| {
+            if (!std.mem.eql(u8, float.name, field_type)) continue;
+            if (bits.len != float.digits) try r.problem("bits on {s} must be {d} hex digits", .{ float.name, float.digits });
+            break;
+        } else try r.problem("bits is only for float fields", .{});
     }
 }
 
-/// A string in `value` (the input, or an item of a list of strings) whose
-/// bytes need hex: the input must use the record's `hex`, an item must be
-/// written `{ "hex": "..." }`.
+/// A string in `value` (the input, an item of a list of strings, or a
+/// string in a struct) whose bytes need hex: the input must use the
+/// record's `hex`, any other string must be written `{ "hex": "..." }`.
 fn checkStrings(r: *FieldReader, field_type: []const u8, value: std.json.Value, name: []const u8) Allocator.Error!void {
     const T = std.mem.trimStart(u8, field_type, "?");
     if (contains(&string_types, T)) {
@@ -352,21 +395,57 @@ fn checkStrings(r: *FieldReader, field_type: []const u8, value: std.json.Value, 
                     try r.problem("{s} has bytes outside 0x20-0x7E; write it as {{\"hex\": \"...\"}}", .{name});
                 }
             },
-            .object => |o| {
-                const hex = o.get("hex") orelse std.json.Value.null;
-                if (std.mem.eql(u8, name, "input") or o.count() != 1 or hex != .string or !isHex(hex.string) or hex.string.len % 2 != 0) {
-                    try r.problem("{s} must be a string, or {{\"hex\": \"...\"}} in a list", .{name});
-                }
-            },
+            .object => |o| if (std.mem.eql(u8, name, "input")) {
+                try r.problem("{s} must be a string, or {{\"hex\": \"...\"}} in a list or a struct", .{name});
+            } else try checkHexItem(r, o, name),
             else => {},
         }
         return;
     }
-    const child = listChild(T) orelse return;
-    if (value != .array) return;
-    for (value.array.items, 0..) |item, i| {
-        try checkStrings(r, child, item, try std.fmt.allocPrint(r.arena, "{s}[{d}]", .{ name, i }));
+    if (listChild(T)) |child| {
+        if (value != .array) return;
+        for (value.array.items, 0..) |item, i| {
+            try checkStrings(r, child, item, try std.fmt.allocPrint(r.arena, "{s}[{d}]", .{ name, i }));
+        }
+    } else if (value == .object) {
+        // A struct: the generator does not know its field types, but every
+        // encoding other than a string's is printable ASCII, so each string
+        // in it is checked.
+        for (value.object.keys(), value.object.values()) |key, field| {
+            try checkStructStrings(r, field, try std.fmt.allocPrint(r.arena, "{s}.{s}", .{ name, key }));
+        }
     }
+}
+
+/// The strings of a struct field's value: `{ "hex": "..." }` is a string,
+/// any other object a nested struct.
+fn checkStructStrings(r: *FieldReader, value: std.json.Value, name: []const u8) Allocator.Error!void {
+    switch (value) {
+        .string => |s| if (needsHex(s)) {
+            try r.problem("{s} has bytes outside 0x20-0x7E; write it as {{\"hex\": \"...\"}}", .{name});
+        },
+        .array => |a| for (a.items, 0..) |item, i| {
+            try checkStructStrings(r, item, try std.fmt.allocPrint(r.arena, "{s}[{d}]", .{ name, i }));
+        },
+        .object => |o| if (o.count() == 1 and o.contains("hex")) {
+            try checkHexItem(r, o, name);
+        } else for (o.keys(), o.values()) |key, field| {
+            try checkStructStrings(r, field, try std.fmt.allocPrint(r.arena, "{s}.{s}", .{ name, key }));
+        },
+        else => {},
+    }
+}
+
+/// `{ "hex": "..." }`: lowercase hex, two digits per byte, of bytes that
+/// could not be written as a plain string.
+fn checkHexItem(r: *FieldReader, object: std.json.ObjectMap, name: []const u8) Allocator.Error!void {
+    const hex = object.get("hex") orelse std.json.Value.null;
+    if (object.count() != 1 or hex != .string or !isHex(hex.string) or hex.string.len % 2 != 0) {
+        return r.problem("{s} must be a string, or {{\"hex\": \"...\"}} in a list or a struct", .{name});
+    }
+    const bytes = try r.arena.alloc(u8, hex.string.len / 2);
+    _ = std.fmt.hexToBytes(bytes, hex.string) catch unreachable;
+    if (!needsHex(bytes)) try r.problem("{s} has no bytes outside 0x20-0x7E; write it as a string", .{name});
 }
 
 /// The item type of a slice or array type: `[]const T`, `[]T`, `[N]T`.
@@ -399,6 +478,34 @@ fn isId(id: []const u8, rule: []const u8) bool {
     if (!std.mem.startsWith(u8, id, rule) or id[rule.len] != '-') return false;
     for (id[rule.len + 1 ..]) |c| if (!std.ascii.isDigit(c)) return false;
     return true;
+}
+
+/// Whether `call` names `v.<rule>` as a whole word.
+fn usesRule(call: []const u8, rule: []const u8) bool {
+    var start: usize = 0;
+    while (std.mem.findPos(u8, call, start, "v.")) |i| : (start = i + 1) {
+        const end = i + "v.".len + rule.len;
+        if (i > 0 and isWordChar(call[i - 1])) continue;
+        if (!std.mem.startsWith(u8, call[i + "v.".len ..], rule)) continue;
+        if (end < call.len and isWordChar(call[end])) continue;
+        return true;
+    }
+    return false;
+}
+
+fn isWordChar(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or c == '_';
+}
+
+/// `D<n>`: the id of a deviation in src/validator/examples/class_validator.md.
+fn isDeviationId(s: []const u8) bool {
+    if (s.len < 2 or s[0] != 'D' or s[1] == '0') return false;
+    for (s[1..]) |c| if (!std.ascii.isDigit(c)) return false;
+    return true;
+}
+
+fn isOneLine(s: []const u8) bool {
+    return std.mem.trim(u8, s, " \t").len > 0 and std.mem.findAny(u8, s, "\r\n") == null;
 }
 
 /// The code a rule reports for its own check, or null for `each` and
@@ -622,7 +729,11 @@ test "strings that need hex must have it, and hex and bits must be well-formed" 
     try expectProblem(
         \\[{"id": "each-001", "rule": "each", "params": "v.notEmpty", "field_type": "[2][]const u8",
         \\  "input": ["a", {"hex": "f"}], "expect": "pass", "reason": "r", "source": "s"}]
-    , "each-001", "input[1] must be a string, or {\"hex\": \"...\"} in a list");
+    , "each-001", "input[1] must be a string, or {\"hex\": \"...\"} in a list or a struct");
+    try expectProblem(
+        \\[{"id": "each-001", "rule": "each", "params": "v.notEmpty", "field_type": "[]const []const u8",
+        \\  "input": ["a", {"hex": "61"}], "expect": "pass", "reason": "r", "source": "s"}]
+    , "each-001", "input[1] has no bytes outside 0x20-0x7E; write it as a string");
     try expectProblem(
         \\[{"id": "notEmpty-001", "rule": "notEmpty", "params": "", "field_type": "[]const u8", "input": "\\xff",
         \\  "hex": "FF", "expect": "pass", "reason": "r", "source": "s"}]
@@ -647,6 +758,97 @@ test "strings that need hex must have it, and hex and bits must be well-formed" 
         \\[{"id": "positive-001", "rule": "positive", "params": "", "field_type": "u32", "input": "1",
         \\  "bits": "00000001", "expect": "pass", "reason": "r", "source": "s"}]
     , "positive-001", "bits is only for float fields");
+    try expectProblem(
+        \\[{"id": "positive-001", "rule": "positive", "params": "", "field_type": "f64", "input": "1",
+        \\  "bits": "3ff0", "expect": "pass", "reason": "r", "source": "s"}]
+    , "positive-001", "bits on f64 must be 16 hex digits");
+    try expectProblem(
+        \\[{"id": "positive-001", "rule": "positive", "params": "", "field_type": "?f80", "input": "1",
+        \\  "bits": "3ff0000000000000", "expect": "pass", "reason": "r", "source": "s"}]
+    , "positive-001", "bits on f80 must be 20 hex digits");
+    try expectProblem(
+        \\[{"id": "positive-001", "rule": "positive", "params": "", "field_type": "c_longdouble", "input": "0.5",
+        \\  "bits": "3fe0000000000000", "expect": "pass", "reason": "r", "source": "s"}]
+    , "positive-001", "bits is not allowed on c_longdouble, whose width depends on the target; write a decimal input that is exact in f64");
+}
+
+test "a string inside a struct input needs hex like a string in a list" {
+    try expectProblem(
+        \\[{"id": "custom-001", "rule": "custom", "params": "\"orders.out_of_stock\", \"must be in stock\", hasStock",
+        \\  "field_type": "Stock", "input": {"sku": "a\tb", "qty": "1"}, "expect": "pass", "reason": "r", "source": "s"}]
+    , "custom-001", "input.sku has bytes outside 0x20-0x7E; write it as {\"hex\": \"...\"}");
+    try expectProblem(
+        \\[{"id": "custom-001", "rule": "custom", "params": "\"orders.out_of_stock\", \"must be in stock\", hasStock",
+        \\  "field_type": "?Stock", "input": {"sku": {"hex": "61"}, "qty": "1"}, "expect": "pass", "reason": "r", "source": "s"}]
+    , "custom-001", "input.sku has no bytes outside 0x20-0x7E; write it as a string");
+    try expectProblem(
+        \\[{"id": "custom-001", "rule": "custom", "params": "\"orders.out_of_stock\", \"must be in stock\", hasStock",
+        \\  "field_type": "Stock", "input": {"sku": {"hex": "6"}, "qty": "1"}, "expect": "pass", "reason": "r", "source": "s"}]
+    , "custom-001", "input.sku must be a string, or {\"hex\": \"...\"} in a list or a struct");
+    try expectProblem(
+        \\[{"id": "each-001", "rule": "each", "params": "v.custom(\"orders.out_of_stock\", \"must be in stock\", hasStock)",
+        \\  "field_type": "[]const Stock", "input": [{"sku": "ab", "qty": "1"}, {"sku": "\n", "qty": "1"}],
+        \\  "expect": "pass", "reason": "r", "source": "s"}]
+    , "each-001", "input[1].sku has bytes outside 0x20-0x7E; write it as {\"hex\": \"...\"}");
+}
+
+test "a passing record has no message, path or violations" {
+    try expectProblem(
+        \\[{"id": "positive-001", "rule": "positive", "params": "", "field_type": "u8", "input": "1",
+        \\  "expect": "pass", "message": "must be greater than 0", "reason": "r", "source": "s"}]
+    , "positive-001", "a passing record has no message");
+    try expectProblem(
+        \\[{"id": "positive-001", "rule": "positive", "params": "", "field_type": "u8", "input": "1",
+        \\  "expect": "pass", "path": "[3]", "reason": "r", "source": "s"}]
+    , "positive-001", "a passing record has no path");
+    try expectProblem(
+        \\[{"id": "each-001", "rule": "each", "params": "v.positive", "field_type": "[]const u32", "input": ["1"],
+        \\  "expect": "pass", "mode": "checkAll", "violations": [{"code": "validation.positive", "path": "[0]"}],
+        \\  "reason": "r", "source": "s"}]
+    , "each-001", "the violations of a passing record must be []");
+}
+
+test "the first violation of a checkAll record is the one that code and path describe" {
+    try expectProblem(
+        \\[{"id": "each-001", "rule": "each", "params": "v.positive", "field_type": "[]const f64", "input": ["nan"],
+        \\  "expect": "fail", "code": "validation.positive", "mode": "checkAll",
+        \\  "violations": [{"code": "validation.finite", "path": "[9]"}], "reason": "r", "source": "s"}]
+    , "each-001", "violations must start with {\"code\": \"validation.positive\", \"path\": \"\"}, the violation that code and path describe");
+    try expectProblem(
+        \\[{"id": "each-001", "rule": "each", "params": "v.positive", "field_type": "[]const u32", "input": ["0"],
+        \\  "expect": "fail", "code": "validation.positive", "path": "[0]", "mode": "checkAll", "violations": [],
+        \\  "reason": "r", "source": "s"}]
+    , "each-001", "violations must start with {\"code\": \"validation.positive\", \"path\": \"[0]\"}, the violation that code and path describe");
+}
+
+test "a call must use the rule under test" {
+    try expectProblem(
+        \\[{"id": "positive-001", "rule": "positive", "params": "", "call": ".{ v.notEmpty }", "field_type": "[]const u8",
+        \\  "input": "", "expect": "fail", "code": "validation.not_empty", "reason": "r", "source": "s"}]
+    , "positive-001", "call must use v.positive, the rule under test");
+    try expectProblem(
+        \\[{"id": "positve-001", "rule": "positve", "params": "", "call": "v.positive", "field_type": "u8",
+        \\  "input": "1", "expect": "pass", "reason": "r", "source": "s"}]
+    , "positve-001", "call must use v.positve, the rule under test");
+    try expectProblem(
+        \\[{"id": "each-001", "rule": "each", "params": "v.positive", "call": ".{ v.notEmpty, v.eachItem(v.positive) }",
+        \\  "field_type": "[]const u32", "input": ["1"], "expect": "pass", "reason": "r", "source": "s"}]
+    , "each-001", "call must use v.each, the rule under test");
+}
+
+test "a deviation is D<n>, and reason and source are one line each" {
+    try expectProblem(
+        \\[{"id": "positive-001", "rule": "positive", "params": "", "field_type": "u8", "input": "1",
+        \\  "expect": "pass", "reason": "r", "source": "s", "deviation": "whatever"}]
+    , "positive-001", "deviation must be \"D<n>\"");
+    try expectProblem(
+        \\[{"id": "positive-001", "rule": "positive", "params": "", "field_type": "u8", "input": "1",
+        \\  "expect": "pass", "reason": " ", "source": "s"}]
+    , "positive-001", "field \"reason\" must be one non-empty line");
+    try expectProblem(
+        \\[{"id": "positive-001", "rule": "positive", "params": "", "field_type": "u8", "input": "1",
+        \\  "expect": "pass", "reason": "r", "source": "a\nb"}]
+    , "positive-001", "field \"source\" must be one non-empty line");
 }
 
 test "a rule with fewer than 10 records is rejected" {
@@ -702,6 +904,16 @@ test "records the checks must accept" {
         \\[{"id": "notEmpty-001", "rule": "notEmpty", "params": "", "field_type": "?[]const u8", "input": null,
         \\  "expect": "pass", "reason": "r", "source": "s"}]
     , "notEmpty-001");
+    // a hex string in a struct, a passing checkAll record, a deviation that was not measured
+    try expectAccepted(
+        \\[{"id": "custom-001", "rule": "custom", "params": "\"orders.out_of_stock\", \"must be in stock\", hasStock",
+        \\  "field_type": "?Stock", "input": {"sku": {"hex": "c3a9"}, "qty": "0"}, "expect": "fail",
+        \\  "code": "orders.out_of_stock", "reason": "r", "source": "s"}]
+    , "custom-001");
+    try expectAccepted(
+        \\[{"id": "each-001", "rule": "each", "params": "v.positive", "field_type": "[]const ?u32", "input": [null],
+        \\  "expect": "pass", "mode": "checkAll", "violations": [], "reason": "r", "source": "s", "deviation": "D63"}]
+    , "each-001");
 }
 
 test "a file of well-formed records is accepted" {
