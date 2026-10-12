@@ -267,7 +267,6 @@ fn startQueue(engine: *Engine, q: options.Queued, max_record_bytes: u32) InitErr
 }
 
 pub fn destroy(engine: *Engine) void {
-    std_log.uninstallIf(engine);
     const gpa = engine.gpa;
     // Without a shutdown first, everything accepted is written and handed
     // to the subscribers. After one that timed out, what is left is
@@ -287,6 +286,11 @@ pub fn destroy(engine: *Engine) void {
         if (engine.queue) |*q| _ = q.close();
     }
     engine.joinThreads();
+    // The std.log bridge stays until the threads are joined, so what a
+    // handler logs through std.log meanwhile still reaches this logger.
+    // Removing it waits for the std.log calls still inside, before anything
+    // is freed.
+    std_log.uninstallIf(engine);
     if (engine.queue) |*q| {
         q.deinit(gpa);
         gpa.free(engine.batch);
@@ -335,10 +339,12 @@ pub fn stats(engine: *Engine) Stats {
 /// Queued mode: waits until the writer thread has written, or dropped,
 /// every record accepted before the call.
 pub fn flush(engine: *Engine, timeout: Io.Timeout) error{Timeout}!void {
+    // Checked first, so sync mode refuses it too: tests mostly run in sync
+    // mode, and a handler that flushes fails there, not in production.
+    try engine.refuseOnOwnThread();
     // Through a pointer: a copy of the queue would read the fields other
     // threads change.
     const q = if (engine.queue) |*queue| queue else return;
-    try engine.refuseOnOwnThread();
     return engine.waitFor(q.reserved(), false, timeout);
 }
 

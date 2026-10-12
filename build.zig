@@ -128,6 +128,53 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&run.step);
     }
 
+    // log panic programs: `flush`, `shutdown` or `unsubscribe` called from a
+    // handler or the writer thread panics in safe builds. Each program must
+    // print the panic message and end in its own panic handler, which exits
+    // with code 3 instead of aborting (see the programs in
+    // src/log/tests/panic/). They get their own Debug copies of log and
+    // core, whatever -Doptimize says.
+    const panic_core = b.createModule(.{
+        .root_source_file = b.path("src/core/root.zig"),
+        .target = target,
+        .optimize = .Debug,
+    });
+    const panic_log = b.createModule(.{
+        .root_source_file = b.path("src/log/root.zig"),
+        .target = target,
+        .optimize = .Debug,
+        .imports = &.{
+            .{ .name = "core", .module = panic_core },
+        },
+    });
+    const flush_refused = "zefir.log: flush or shutdown called from one of the logger's threads could wait for itself";
+    const unsubscribe_refused = "zefir.log: unsubscribe called from one of the logger's threads could wait for itself";
+    for ([_][2][]const u8{
+        .{ "handler_flush", flush_refused },
+        .{ "handler_shutdown", flush_refused },
+        .{ "handler_unsubscribe", unsubscribe_refused },
+        .{ "writer_flush", flush_refused },
+        .{ "writer_unsubscribe", unsubscribe_refused },
+    }) |case| {
+        const exe = b.addExecutable(.{
+            .name = b.fmt("log-panic-{s}", .{case[0]}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(b.fmt("src/log/tests/panic/{s}.zig", .{case[0]})),
+                .target = target,
+                .optimize = .Debug,
+                .imports = &.{
+                    .{ .name = "log", .module = panic_log },
+                },
+            }),
+        });
+        const run = b.addRunArtifact(exe);
+        run.expectStdErrMatch(case[1]);
+        // expectStdErrMatch accepts any exit: only the panic handler exits
+        // with 3, so a program that printed the text and returned fails.
+        run.expectExitCode(3);
+        test_step.dependOn(&run.step);
+    }
+
     // log compile errors: each test of the file must fail to compile with
     // the message next to its name. The filter compiles one test at a time;
     // the message must be the end of an error line.
