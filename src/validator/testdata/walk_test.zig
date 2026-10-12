@@ -565,6 +565,54 @@ test "an empty field_rules .{} is allowed and declares no rules" {
     try h.expectValid(&EmptyRules{ .n = 0 });
 }
 
+// ------------------------------------------------------------------ in place
+
+/// Holds its own address in `at`, so its rules tell the value from a copy.
+const Pinned = struct {
+    at: usize = 0,
+    pub fn validateSelf(self: *const Pinned) ?v.Violation {
+        if (self.at != @intFromPtr(self)) return v.fail(Pinned, null, "t.copied", "was walked through a copy");
+        return null;
+    }
+};
+
+fn pin(pinned: *Pinned) void {
+    pinned.at = @intFromPtr(pinned);
+}
+
+fn seesItself(pinned: *const Pinned) bool {
+    return pinned.at == @intFromPtr(pinned);
+}
+
+const PinnedFields = struct {
+    one: Pinned = .{},
+    maybe: ?Pinned = null,
+    list: []const Pinned = &.{},
+    array: [2]Pinned = .{ .{}, .{} },
+    pub const field_rules = .{
+        .one = v.custom("t.copied", "was walked through a copy", seesItself),
+        .maybe = v.custom("t.copied", "was walked through a copy", seesItself),
+        .list = v.each(v.custom("t.copied", "was walked through a copy", seesItself)),
+        .array = v.each(v.custom("t.copied", "was walked through a copy", seesItself)),
+    };
+};
+
+const UnderAlignedPinned = struct { pinned: Pinned align(1) = .{} };
+
+test "fields, items and optional payloads are walked in place: a fn (*const T) bool predicate and validateSelf get the value itself" {
+    var items: [3]Pinned = undefined;
+    for (&items) |*item| pin(item);
+    var value: PinnedFields = .{ .maybe = .{}, .list = &items };
+    pin(&value.one);
+    pin(&value.maybe.?);
+    for (&value.array) |*item| pin(item);
+    try h.expectValid(&value);
+    // An under-aligned field is walked through a copy, which the check above would see.
+    var copied: UnderAlignedPinned = .{};
+    copied.pinned.at = @intFromPtr(&copied.pinned);
+    try h.expectAt(&copied, "t.copied", "was walked through a copy", "pinned");
+}
+
 // ------------------------------------------------------------------ roots
 
 const User = struct {
@@ -592,14 +640,43 @@ test "roots: a struct, a slice passed as &slice, an array, nested slices and opt
     try h.expectAt(&mutable, "validation.not_empty", null, "email");
 }
 
-test "a root behind an under-aligned or volatile pointer is walked through a copy; a root without rules is not read" {
+test "a root behind a pointer that coerces to *const T is walked in place: an over-aligned or explicitly aligned value, a MemoryPool item" {
+    var plain: Pinned = undefined;
+    pin(&plain);
+    try h.expectValid(&plain);
+    try h.expectValid(@as(*const Pinned, &plain));
+    var over_aligned: Pinned align(64) = undefined;
+    pin(&over_aligned);
+    try h.expectValid(&over_aligned);
+    // An explicit alignment equal to the natural one is still a pointer type of its own.
+    var naturally_aligned: Pinned align(@alignOf(Pinned)) = undefined;
+    pin(&naturally_aligned);
+    try h.expectValid(&naturally_aligned);
+    var pool: std.heap.MemoryPool(Pinned) = .empty;
+    defer pool.deinit(testing.allocator);
+    const pooled = try pool.create(testing.allocator); // an explicitly aligned *align(N) Pinned
+    pin(pooled);
+    try h.expectValid(pooled);
+    var array: [2]Pinned align(64) = undefined;
+    for (&array) |*item| pin(item);
+    try h.expectValid(&array);
+}
+
+const PackedHolder = packed struct { flag: u3 = 0, bits: Bits, rest: u5 = 0 };
+
+test "a root behind an under-aligned, volatile or bit pointer is walked through a copy; an opaque root without rules is never read" {
     var user: User = .{ .email = "" };
     const under_aligned: *align(1) const User = &user;
     try h.expectAt(under_aligned, "validation.not_empty", "must not be empty", "email");
     const volatile_root: *volatile User = &user;
     try h.expectAt(volatile_root, "validation.not_empty", "must not be empty", "email");
-    const handle: *volatile anyopaque = &user; // an opaque value could not be copied
+    var holder: PackedHolder = .{ .bits = .{ .low = 1, .high = 0 } };
+    try h.expectAt(&holder.bits, "validation.positive", "must be greater than 0", "high");
+    // An opaque value could not be copied, and an opaque type has no alignment to compare.
+    const handle: *volatile anyopaque = &user;
     try h.expectValid(handle);
+    const aligned_handle: *align(@alignOf(User)) const anyopaque = @ptrCast(&user);
+    try h.expectValid(aligned_handle);
 }
 
 test "roots without rules have no violations: a number, a string, an enum, a union, a slice of numbers, void" {

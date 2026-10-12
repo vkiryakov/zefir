@@ -505,19 +505,32 @@ fn ErrorOf(comptime SinkPtr: type) type {
 // ------------------------------------------------------------------ the walk
 
 /// Walks the root of `check` and `checkAll` behind `value`, the pointer they
-/// were given. A `*const T` or `*T` is walked in place; any other pointer to
-/// `T` is walked through a copy of its value, as walkStruct walks a packed or
-/// under-aligned field: `*volatile T`, `*allowzero T`, an under-aligned
-/// `*align(1) const T` and a bit pointer to a packed field do not coerce to
-/// the `*const T` that the walk takes.
+/// were given. A pointer that coerces to the `*const T` that the walk takes
+/// is walked in place, an over-aligned or explicitly aligned one too (a
+/// `std.heap.MemoryPool(T)` item is a `*align(N) T`, a pointer type of its
+/// own). `*volatile T`, `*allowzero T`, an under-aligned `*align(1) const T`
+/// and a bit pointer to a packed field do not coerce: such a root is walked
+/// through a copy of its value, as walkStruct walks a packed or under-aligned
+/// field, and the copy takes the whole value onto the stack.
 fn walkRoot(comptime T: type, value: anytype, sink: anytype) ErrorOf(@TypeOf(sink))!bool {
-    const P = @TypeOf(value);
-    if (comptime (P == *const T or P == *T)) return walkValue(T, value, &.{}, sink);
-    // A root without rules is never read: there is nothing to walk, and an
-    // opaque type has no value to copy.
+    // A root without rules is never read: there is nothing to walk, an opaque
+    // type has no value to copy, and inPlace would ask for its alignment.
     if (comptime !containsRules(T)) return false;
+    if (comptime inPlace(@TypeOf(value), T)) return walkValue(T, value, &.{}, sink);
     const copy: T = value.*;
     return walkValue(T, &copy, &.{}, sink);
+}
+
+/// `P`, a single-item pointer to `T`, coerces to `*const T`: it is neither
+/// volatile nor allowzero, points into the generic address space, is aligned
+/// at least as `T`, and is not a bit pointer (rebuilt from its attributes, a
+/// bit pointer gives another type).
+fn inPlace(comptime P: type, comptime T: type) bool {
+    const p = @typeInfo(P).pointer;
+    if (p.attrs.@"volatile" or p.attrs.@"allowzero") return false;
+    if ((p.attrs.@"addrspace" orelse .generic) != .generic) return false;
+    if ((p.attrs.@"align" orelse @alignOf(T)) < @alignOf(T)) return false;
+    return P == @Pointer(.one, p.attrs, T, null);
 }
 
 /// Walks one value: its own rules left to right (the first failure is its
@@ -573,7 +586,8 @@ fn walkStruct(comptime T: type, value: *const T, sink: anytype) ErrorOf(@TypeOf(
         try sink.push(.{ .field = name });
         // A packed field has a bit pointer, and a field declared below the
         // alignment of its type (`n: u32 align(1)`) an under-aligned one:
-        // neither coerces to `*const F`, so such a field is walked as a copy.
+        // neither coerces to `*const F`, so such a field is walked as a copy,
+        // which takes the whole field onto the stack.
         const by_copy = comptime (info.layout == .@"packed" or (attrs.@"align" != null and attrs.@"align".? < @alignOf(F)));
         const stop = if (by_copy) blk: {
             const copy: F = @field(value.*, name);
