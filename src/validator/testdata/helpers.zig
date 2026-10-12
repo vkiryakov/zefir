@@ -110,7 +110,10 @@ pub fn expectAt(value: anytype, code: []const u8, message: ?[]const u8, field: ?
     try expectField(field, got.field);
     const report = try v.checkAll(testing.allocator, value);
     defer report.deinit();
-    if (report.violations.len == 0) return error.CheckAllFoundNothing;
+    if (report.violations.len == 0) {
+        std.debug.print("check found {s} at {?s}, checkAll found nothing\n", .{ got.code, got.field });
+        return error.CheckAllFoundNothing;
+    }
     try expectSame(got, report.violations[0]);
 }
 

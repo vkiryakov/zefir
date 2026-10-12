@@ -233,7 +233,13 @@ fn worker(agreed: *[2]usize) void {
 test "no global state: 8 threads check one value at once, each with its own path_buf, and agree" {
     var agreed: [8][2]usize = @splat(.{ 0, 0 });
     var threads: [8]std.Thread = undefined;
-    for (&threads, &agreed) |*thread, *counts| thread.* = try std.Thread.spawn(.{}, worker, .{counts});
+    for (&threads, &agreed, 0..) |*thread, *counts, i| {
+        thread.* = std.Thread.spawn(.{}, worker, .{counts}) catch |err| {
+            // The threads already running write into `agreed`: wait for them.
+            for (threads[0..i]) |running| running.join();
+            return err;
+        };
+    }
     for (threads) |thread| thread.join();
     for (agreed) |counts| try testing.expectEqual([2]usize{ thread_rounds, thread_rounds }, counts);
 }

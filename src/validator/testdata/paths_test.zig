@@ -150,29 +150,37 @@ const Many = struct { items: []const Item };
 
 test "checkAll keeps the first max_report_violations violations in walk order and says when it dropped more" {
     var items: [250]Item = @splat(.{ .name = "" });
-    var report = try v.checkAll(testing.allocator, &Many{ .items = &items });
-    try testing.expectEqual(v.max_report_violations, report.violations.len);
-    try testing.expect(report.truncated);
-    try testing.expectEqualStrings("items[0].name", report.violations[0].field.?);
-    try testing.expectEqualStrings("items[99].name", report.violations[99].field.?);
-    report.deinit();
-    // exactly the cap: nothing was dropped
-    report = try v.checkAll(testing.allocator, &Many{ .items = items[0..v.max_report_violations] });
-    try testing.expectEqual(v.max_report_violations, report.violations.len);
-    try testing.expect(!report.truncated);
-    report.deinit();
-    // one more than the cap
-    report = try v.checkAll(testing.allocator, &Many{ .items = items[0 .. v.max_report_violations + 1] });
-    try testing.expectEqual(v.max_report_violations, report.violations.len);
-    try testing.expect(report.truncated);
-    try testing.expectEqualStrings("items[99].name", report.violations[99].field.?);
-    report.deinit();
-    // a valid value: an empty report, still to be freed
-    items[0].name = "x";
-    report = try v.checkAll(testing.allocator, &Many{ .items = items[0..1] });
-    try testing.expectEqual(0, report.violations.len);
-    try testing.expect(!report.truncated);
-    report.deinit();
+    {
+        const report = try v.checkAll(testing.allocator, &Many{ .items = &items });
+        defer report.deinit();
+        try testing.expectEqual(v.max_report_violations, report.violations.len);
+        try testing.expect(report.truncated);
+        try testing.expectEqualStrings("items[0].name", report.violations[0].field.?);
+        try testing.expectEqualStrings("items[99].name", report.violations[99].field.?);
+    }
+    {
+        // exactly the cap: nothing was dropped
+        const report = try v.checkAll(testing.allocator, &Many{ .items = items[0..v.max_report_violations] });
+        defer report.deinit();
+        try testing.expectEqual(v.max_report_violations, report.violations.len);
+        try testing.expect(!report.truncated);
+    }
+    {
+        // one more than the cap
+        const report = try v.checkAll(testing.allocator, &Many{ .items = items[0 .. v.max_report_violations + 1] });
+        defer report.deinit();
+        try testing.expectEqual(v.max_report_violations, report.violations.len);
+        try testing.expect(report.truncated);
+        try testing.expectEqualStrings("items[99].name", report.violations[99].field.?);
+    }
+    {
+        // a valid value: an empty report, still to be freed
+        items[0].name = "x";
+        const report = try v.checkAll(testing.allocator, &Many{ .items = items[0..1] });
+        defer report.deinit();
+        try testing.expectEqual(0, report.violations.len);
+        try testing.expect(!report.truncated);
+    }
 }
 
 const WithAddress = struct { address: Address };

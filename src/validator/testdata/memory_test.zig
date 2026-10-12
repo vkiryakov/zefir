@@ -86,21 +86,26 @@ const Counting = struct {
     }
 };
 
-test "checkAll allocates only from the given allocator, and deinit frees all of it" {
+test "checkAll allocates through the given allocator, and deinit frees all of it" {
     var counting: Counting = .{ .child = testing.allocator };
-    const report = try v.checkAll(counting.allocator(), &bad_order);
-    try testing.expectEqual(3, report.violations.len);
-    try testing.expect(counting.total > 0);
-    try testing.expect(counting.live > 0); // the report owns its memory until deinit
-    report.deinit();
+    {
+        const report = try v.checkAll(counting.allocator(), &bad_order);
+        defer report.deinit();
+        try testing.expectEqual(3, report.violations.len);
+        try testing.expect(counting.total > 0);
+        try testing.expect(counting.live > 0); // the report owns its memory until deinit
+    }
     try testing.expectEqual(0, counting.live);
 
     // A valid value gets a report too, which must be freed the same way.
     var counting_valid: Counting = .{ .child = testing.allocator };
-    const valid: Order = .{ .items = &.{.{ .name = "a", .qty = 1 }} };
-    const empty = try v.checkAll(counting_valid.allocator(), &valid);
-    try testing.expectEqual(0, empty.violations.len);
-    empty.deinit();
+    {
+        const valid: Order = .{ .items = &.{.{ .name = "a", .qty = 1 }} };
+        const empty = try v.checkAll(counting_valid.allocator(), &valid);
+        defer empty.deinit();
+        try testing.expectEqual(0, empty.violations.len);
+        try testing.expect(counting_valid.total > 0); // the empty report still owns an arena
+    }
     try testing.expectEqual(0, counting_valid.live);
 }
 

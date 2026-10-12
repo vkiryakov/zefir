@@ -2,10 +2,10 @@
 //! checks of every type the walker visits.
 //!
 //! Before walking, an entry point runs `verify(T)` at comptime: the checks of
-//! `T` and of each type the walk can reach from it, each type once. The walk
-//! runs a value's own rules left to right, reports the first one that fails
-//! as the value's only violation, and descends into the value (the items of
-//! a list, the fields of a struct) only when they all passed.
+//! `T` and of each type the walk can reach from it, each struct once per
+//! root. The walk runs a value's own rules left to right, reports the first
+//! one that fails as the value's only violation, and descends into the value
+//! (the items of a list, the fields of a struct) only when they all passed.
 const std = @import("std");
 const builtin = @import("builtin");
 const core = @import("core.zig");
@@ -17,7 +17,9 @@ const Violation = core.Violation;
 
 /// The first violation of `value.*` in walk order, or null. `value` is a
 /// single-item pointer (`&dto`); the path is written into `path_buf`, and
-/// `field` is null when it does not fit. Allocates nothing.
+/// `field` is null when it does not fit. Allocates nothing. Calls on several
+/// threads at once are safe when each has its own `path_buf`, no `path_buf`
+/// overlaps the checked value, and no thread changes the value meanwhile.
 pub fn check(value: anytype, path_buf: []u8) ?Violation {
     const T = comptime pointee(@TypeOf(value));
     comptime verify(T);
@@ -26,10 +28,13 @@ pub fn check(value: anytype, path_buf: []u8) ?Violation {
     return sink.found;
 }
 
-/// Every violation of `value.*` in walk order, at most
-/// `max_report_violations` of them. `value` is passed as for `check`. The
+/// The violations of `value.*` in walk order: at most one per path, since the
+/// walk does not descend into a value that failed, and at most
+/// `max_report_violations` in all. `value` is passed as for `check`. The
 /// report owns its memory, one arena from `gpa`, even when it is empty: call
-/// `deinit` once. On `error.OutOfMemory` everything is already freed.
+/// `deinit` once. On `error.OutOfMemory` everything is already freed. Calls
+/// on several threads at once are safe when `gpa` is thread-safe and no
+/// thread changes the value meanwhile.
 pub fn checkAll(gpa: Allocator, value: anytype) Allocator.Error!Report {
     const T = comptime pointee(@TypeOf(value));
     comptime verify(T);
@@ -51,7 +56,8 @@ pub const Report = struct {
     /// More than `max_report_violations` violations existed: the walk stopped
     /// at the next one, which is not in `violations`.
     truncated: bool,
-    /// Holds `violations` and every `field`; code and message are static.
+    /// Implementation detail: holds `violations` and every `field` (code and
+    /// message are static). Do not read or free it; call `deinit`.
     arena: *std.heap.ArenaAllocator,
 
     /// Frees `violations` and every `field` through the allocator given to
@@ -86,7 +92,8 @@ pub fn assertRules(comptime T: type) void {
 pub fn fail(comptime T: type, comptime field: ?FailField(T), comptime code: []const u8, comptime message: []const u8) Violation {
     comptime {
         @setEvalBranchQuota(core.eval_quota);
-        // A struct declared in place has a generated name; the caller wrote @This().
+        // A struct declared in place has a generated name: show the name its
+        // own code uses for it.
         const type_name = if (isAnonymous(T)) "@This()" else @typeName(T);
         const where = "fail(" ++ type_name ++ ", " ++ (if (field) |f| "." ++ @tagName(f) else "null") ++ ")";
         if (field) |f| {
@@ -555,8 +562,8 @@ fn inPlace(comptime P: type, comptime T: type) bool {
 
 /// Walks one value: its own rules left to right (the first failure is its
 /// only violation and nothing inside it is visited); then, if all passed,
-/// its items (with the list's `each` rules) or its fields. Returns true when
-/// the sink wants to stop.
+/// its items (with the list's `each` rules) or its fields and then its
+/// `validateSelf`. Returns true when the sink wants to stop.
 fn walkValue(comptime T: type, value: *const T, comptime rules: []const Rule, sink: anytype) ErrorOf(@TypeOf(sink))!bool {
     @setEvalBranchQuota(core.eval_quota);
     if (@typeInfo(T) == .optional) {
@@ -587,7 +594,9 @@ fn walkValue(comptime T: type, value: *const T, comptime rules: []const Rule, si
 }
 
 /// Walks the fields of a struct in declaration order; comptime fields and
-/// fields with no rules in or below them are skipped.
+/// fields with no rules in or below them are skipped. Then, when nothing in
+/// the struct's subtree failed, runs `validateSelf` and reports its result
+/// through `reportSelf`.
 fn walkStruct(comptime T: type, value: *const T, sink: anytype) ErrorOf(@TypeOf(sink))!bool {
     @setEvalBranchQuota(core.eval_quota);
     const info = @typeInfo(T).@"struct";
