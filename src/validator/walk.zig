@@ -86,7 +86,9 @@ pub fn assertRules(comptime T: type) void {
 pub fn fail(comptime T: type, comptime field: ?FailField(T), comptime code: []const u8, comptime message: []const u8) Violation {
     comptime {
         @setEvalBranchQuota(core.eval_quota);
-        const where = "fail(" ++ @typeName(T) ++ ", " ++ (if (field) |f| "." ++ @tagName(f) else "null") ++ ")";
+        // A struct declared in place has a generated name; the caller wrote @This().
+        const type_name = if (isAnonymous(T)) "@This()" else @typeName(T);
+        const where = "fail(" ++ type_name ++ ", " ++ (if (field) |f| "." ++ @tagName(f) else "null") ++ ")";
         if (field) |f| {
             if (isComptimeField(T, @tagName(f)))
                 @compileError("validator: " ++ where ++ ": " ++ @tagName(f) ++ " is a comptime field; comptime fields are not validated");
@@ -108,9 +110,16 @@ fn FailField(comptime T: type) type {
 
 /// The root type behind `&value`. A value or a bare slice is a compile error:
 /// the root must be passed by pointer, so that a slice root is unambiguous.
+/// So is `&request` when `request` is already a pointer to rules, the usual
+/// slip in a handler that takes `request: *const T`.
 fn pointee(comptime P: type) type {
     switch (@typeInfo(P)) {
-        .pointer => |p| if (p.size == .one) return p.child,
+        .pointer => |p| if (p.size == .one) {
+            const inner = @typeInfo(p.child);
+            if (inner == .pointer and inner.pointer.size == .one and containsRules(p.child))
+                @compileError("validator: pass a pointer to the value (&value), got " ++ @typeName(P) ++ "; the value is already a pointer: pass it without &");
+            return p.child;
+        },
         else => {},
     }
     const slice_hint = if (@typeInfo(P) == .pointer and @typeInfo(P).pointer.size == .slice) "; pass &slice, not the slice" else "";
@@ -254,7 +263,12 @@ fn visit(comptime T: type, comptime where: []const u8, comptime stack: []const t
 fn hidden(comptime T: type, comptime what: []const u8, comptime where: []const u8) void {
     if (findRuleType(T)) |R| {
         const reach = if (R == T) @typeName(T) ++ " declares" else @typeName(T) ++ " reaches " ++ @typeName(R) ++ ", which declares";
-        @compileError("validator: " ++ where ++ ": " ++ what ++ " are not walked; " ++ reach ++ " field_rules or validateSelf that would be skipped");
+        // A type that declares only a non-function validate has neither name.
+        const declared = if (@hasDecl(R, "field_rules") or @hasDecl(R, "validateSelf"))
+            " field_rules or validateSelf that would be skipped"
+        else
+            " a non-function validate, which counts as rules that would be skipped; rename it (rules belong in pub const field_rules)";
+        @compileError("validator: " ++ where ++ ": " ++ what ++ " are not walked; " ++ reach ++ declared);
     }
 }
 
@@ -307,6 +321,11 @@ fn checkFieldRules(comptime T: type, comptime label: []const u8) void {
         const where = label ++ ".field_rules." ++ key;
         if (fieldIndex(T, key) == null) @compileError("validator: " ++ where ++ ": no such field" ++ core.suggestion(T, key));
         if (isComptimeField(T, key)) @compileError("validator: " ++ where ++ ": comptime fields are not validated");
+        // An entry is one rule or a tuple of one or more: `.x = .{}` is
+        // usually a leftover whose rules were deleted.
+        const entry = @typeInfo(@TypeOf(@field(T.field_rules, key)));
+        if (entry == .@"struct" and entry.@"struct".is_tuple and entry.@"struct".field_names.len == 0)
+            @compileError("validator: " ++ where ++ ": the list is empty");
         core.checkRuleList(rulesFor(T, key, label), core.Unwrap(@FieldType(T, key)), where);
     }
 }

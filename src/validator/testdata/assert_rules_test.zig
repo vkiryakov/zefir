@@ -13,6 +13,10 @@ const Plain = struct { n: u32 };
 const Kind = enum { a, b };
 const Choice = union(enum) { plain: Plain, none: void };
 
+/// Types that reach themselves, with no rules below them.
+const Node = struct { n: u32, next: ?*const Node = null };
+const Tree = struct { kids: []const Tree = &.{} };
+
 fn noop() void {}
 
 /// Every field before `items` is a type the walker does not descend into;
@@ -32,6 +36,8 @@ const Opaque = struct {
     volatile_bytes: []volatile u8,
     allowzero_bytes: []allowzero const u8,
     volatile_plains: []volatile Plain,
+    list: ?*const Node = null,
+    tree: Tree = .{},
     items: []const Item,
     pub const field_rules = .{ .items = v.notEmpty };
 };
