@@ -309,7 +309,7 @@ test "the example at the top of formats.md compiles and checks a value" {
     });
 }
 
-test "port and the numbers in strings: the spec's own examples" {
+test "port, numberString, hexadecimal, octal, booleanString and latLong on typical values" {
     try h.expectPass([]const u8, v.port, "0");
     try h.expectFail([]const u8, v.port, "080", "validation.port", "must be a port number from 0 to 65535");
     try h.expectFail([]const u8, v.port, "+80", "validation.port", "must be a port number from 0 to 65535");

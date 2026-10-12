@@ -978,6 +978,15 @@ library runs. These errors point at your line and do not start with
 | `v.minItems.withMessage("...")`: `.withMessage` on a rule that needs a call | `no field or member function named 'withMessage' in 'fn (comptime usize) core.Rule'` |
 | `v.minItems(-1)`: a negative count, or one above `maxInt(usize)` | `type 'usize' cannot represent integer value '-1'` |
 | `v.maxItems(1.5)`: a fractional count (`3.0` is accepted) | `fractional component prevents float value '1.5' from coercion to type 'usize'` |
+| `v.decimal(.{ .decimal_digits = "1,2" })`: an option the rule does not have, such as validator.js's `decimal_digits` | `no field named 'decimal_digits' in struct 'formats.DecimalOptions'` |
+| `v.macAddress(.{ .no_separators = true })`: the same for `isMACAddress`'s `no_separators`; write `.format = .bare` | `no field named 'no_separators' in struct 'formats.MacAddressOptions'` |
+| `v.macAddress(.{ .eui = .eui32 })`: a tag the option does not have | `enum 'formats.MacAddressOptions.Eui' has no member named 'eui32'` |
+| `v.macAddress(.{ .eui = "48" })`: validator.js's string instead of a tag | `expected type 'formats.MacAddressOptions.Eui', found '*const [2:0]u8'` |
+| `v.decimal(.{ .max_decimal_digits = -1 })`: an option value of another type, such as a negative count, a string, or `1` for a bool | `expected type '?usize', found 'comptime_int'` |
+| `v.fqdn(true)`, `v.decimal(2)`: a value instead of the options struct | `expected type 'formats.FqdnOptions', found 'bool'` |
+| `v.macAddress(.eui48)`: a tag instead of the options struct; write `v.macAddress(.{ .eui = .eui48 })` | `struct 'formats.MacAddressOptions' has no member named 'eui48'` |
+| `v.fqdn()`: the options left out; write `v.fqdn(.{})` | `expected 1 argument(s), found 0` |
+| `v.decimal.withMessage("...")`: `.withMessage` on a rule that needs its options | `no field or member function named 'withMessage' in 'fn (comptime formats.DecimalOptions) core.Rule'` |
 | `v.notEmpty.withMessage()`: no template, or two | `member function expected 1 argument(s), found 0` |
 | `v.notEmpty.withMessage(5)`: a template that is not a string | `expected type '[]const u8', found 'comptime_int'` |
 | `v.maxItems(limit)`, `.withMessage(text)`: a parameter or a template known only at run time | `unable to resolve comptime value` (note: `argument to comptime parameter must be comptime-known`) |

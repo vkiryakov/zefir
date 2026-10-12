@@ -534,6 +534,8 @@ An `http` or `https` URL.
   - The path, query and fragment are printable ASCII (0x21 to 0x7E) without
     `"`, `<`, `>` and `\`; `%` is followed by 2 hex digits; at most one `#`.
   - The length is not limited: combine the rule with a length rule.
+  - `xn--` labels are not checked as Punycode, so a URL that passes may still
+    be rejected by a WHATWG URL parser (`https://xn--a.example.com/`).
 - **`""`:** fails.
 - **Precondition:** none.
 - **Code:** `validation.http_url`.

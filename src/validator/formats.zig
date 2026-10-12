@@ -239,8 +239,8 @@ pub fn isLongitude(s: []const u8) bool {
 pub fn isLatLong(s: []const u8) bool {
     var pair = s;
     if (s.len != 0 and s[0] == '(') {
-        // s.len >= 2 here: its first byte is '(' and its last is ')'.
         if (s[s.len - 1] != ')') return false;
+        // s.len >= 2 here: its first byte is '(' and its last is ')'.
         pair = s[1 .. s.len - 1];
     } else if (s.len != 0 and s[s.len - 1] == ')') return false;
     const comma = std.mem.findScalar(u8, pair, ',') orelse return false;
