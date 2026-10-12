@@ -14,22 +14,28 @@
 //! what `v.check` and, for a `checkAll` record, `v.checkAll` return with the
 //! record.
 //!
-//! Input encoding, by the field type with its optionals removed:
+//! Input encoding, by the field type with its optionals removed; a number
+//! text that is not in the canonical spelling given here does not decode:
 //!
-//! - integer: a JSON string of decimal digits, exact at every width: `"-128"`
-//! - float: a JSON string: a decimal that round-trips in the field type, or
-//!   `"nan"`, `"-nan"`, `"inf"`, `"-inf"`, `"-0"`; when the record has `bits`
-//!   (lowercase hex of the IEEE bits in the type's width), they are the value
-//!   and the text must parse to the same bits (to a NaN of the same sign for
-//!   a NaN). A `c_longdouble` record has no `bits`, since the width depends
-//!   on the target: its decimal is exact in `f64`, so it decodes to the same
-//!   value everywhere
+//! - integer: a JSON string of decimal digits, exact at every width, spelled
+//!   `-?(0|[1-9][0-9]*)` and never `-0`: `"-128"`, not `"+1"`, `"01"` or
+//!   `"1_000"`
+//! - float: a JSON string: a decimal that round-trips in the field type,
+//!   spelled `-?(0|[1-9][0-9]*)(\.[0-9]+)?(e-?[0-9]+)?` (`"5e-324"`, and
+//!   `"-0"` or `"-0.0"` for negative zero; not `"1E5"`, `".5"` or `"5."`),
+//!   or `"nan"`, `"-nan"`, `"inf"`, `"-inf"` (not `"NaN"` or `"Infinity"`);
+//!   when the record has `bits` (lowercase hex of the IEEE bits in the
+//!   type's width), they are the value and the text must parse to the same
+//!   bits (to a NaN of the same sign for a NaN). A `c_longdouble` record has
+//!   no `bits`, since the width depends on the target: its decimal is exact
+//!   in `f64`, so it decodes to the same value everywhere
 //! - string (a slice of `u8`, with or without a sentinel): a JSON string
 //!   with the text; when the record has `hex` (lowercase hex of the bytes),
 //!   the bytes come from it; a string inside a list or a struct that needs
 //!   hex is `{ "hex": "..." }`
 //! - bool: `true` or `false`
-//! - enum: `".tag"`, or `"@fromBackingInt(9)"` for a value given by number
+//! - enum: `".tag"`, or `"@fromBackingInt(9)"` (the number spelled as an
+//!   integer) for a value given by number
 //! - optional: `null`, or the payload's encoding
 //! - any other slice or array: a JSON array of the item encodings
 //! - struct: a JSON object of field name to encoding; a field with a default
@@ -192,7 +198,8 @@ const DecodeError = error{
     /// The JSON value has the wrong kind for the type (a number where the
     /// encoding asks for a string, an object for a list, ...).
     WrongKind,
-    /// An integer or float text that does not parse or does not fit.
+    /// An integer or float text that is not in its canonical spelling, or an
+    /// integer that does not fit.
     InvalidNumber,
     /// `hex` or `bits` that are not hex digits of the right length.
     InvalidHex,
@@ -230,7 +237,7 @@ fn decode(comptime T: type, arena: Allocator, json: std.json.Value, hex: ?[]cons
             .bool => |b| b,
             else => error.WrongKind,
         },
-        .int => return std.fmt.parseInt(T, try jsonString(json), 10) catch error.InvalidNumber,
+        .int => return decodeInt(T, try jsonString(json)),
         .float => return decodeFloat(T, try jsonString(json), bits),
         .@"enum" => return decodeEnum(T, try jsonString(json)),
         .pointer => |info| {
@@ -294,6 +301,11 @@ fn isFieldName(comptime names: []const [:0]const u8, key: []const u8) bool {
     return false;
 }
 
+fn decodeInt(comptime T: type, s: []const u8) DecodeError!T {
+    if (!isCanonicalInt(s)) return error.InvalidNumber;
+    return std.fmt.parseInt(T, s, 10) catch error.InvalidNumber;
+}
+
 fn decodeFloat(comptime T: type, s: []const u8, bits: ?[]const u8) DecodeError!T {
     // Parsed as the IEEE type of the same width: std.fmt.parseFloat takes no
     // c_longdouble, and it drops the sign of "-nan", so NaNs are spelled out.
@@ -310,8 +322,10 @@ fn decodeFloat(comptime T: type, s: []const u8, bits: ?[]const u8) DecodeError!T
         std.math.nan(F)
     else if (std.mem.eql(u8, s, "-nan"))
         -std.math.nan(F)
+    else if (std.mem.eql(u8, s, "inf") or std.mem.eql(u8, s, "-inf") or isCanonicalDecimal(s))
+        std.fmt.parseFloat(F, s) catch return error.InvalidNumber
     else
-        std.fmt.parseFloat(F, s) catch return error.InvalidNumber;
+        return error.InvalidNumber;
     const hex = bits orelse return @bitCast(parsed);
     if (hex.len != @bitSizeOf(T) / 4) return error.InvalidHex;
     const exact: F = @bitCast(std.fmt.parseInt(Bits, hex, 16) catch return error.InvalidHex);
@@ -321,12 +335,48 @@ fn decodeFloat(comptime T: type, s: []const u8, bits: ?[]const u8) DecodeError!T
     return @bitCast(exact);
 }
 
+/// Whether `s` is an integer in its canonical spelling, `-?(0|[1-9][0-9]*)`
+/// other than `-0`. std.fmt.parseInt also takes `+1`, `1_000` and `007`,
+/// which would give a value a second spelling.
+fn isCanonicalInt(s: []const u8) bool {
+    const rest = cutInteger(s) orelse return false;
+    return rest.len == 0 and !std.mem.eql(u8, s, "-0");
+}
+
+/// Whether `s` is a decimal in its canonical spelling,
+/// `-?(0|[1-9][0-9]*)(\.[0-9]+)?(e-?[0-9]+)?`. std.fmt.parseFloat also
+/// takes `+1`, `.5`, `5.`, `1E5` and hex floats.
+fn isCanonicalDecimal(s: []const u8) bool {
+    var rest = cutInteger(s) orelse return false;
+    if (std.mem.cutPrefix(u8, rest, ".")) |fraction| rest = cutDigits(fraction) orelse return false;
+    if (std.mem.cutPrefix(u8, rest, "e")) |exponent| {
+        rest = cutDigits(std.mem.cutPrefix(u8, exponent, "-") orelse exponent) orelse return false;
+    }
+    return rest.len == 0;
+}
+
+/// What follows `-?(0|[1-9][0-9]*)` at the start of `s`, or null when `s`
+/// does not start with it.
+fn cutInteger(s: []const u8) ?[]const u8 {
+    const digits = std.mem.cutPrefix(u8, s, "-") orelse s;
+    const rest = cutDigits(digits) orelse return null;
+    if (digits[0] == '0' and digits.len - rest.len > 1) return null;
+    return rest;
+}
+
+/// What follows the decimal digits at the start of `s`, or null when `s`
+/// does not start with a digit.
+fn cutDigits(s: []const u8) ?[]const u8 {
+    const count = std.mem.findNone(u8, s, "0123456789") orelse s.len;
+    return if (count == 0) null else s[count..];
+}
+
 fn decodeEnum(comptime T: type, s: []const u8) DecodeError!T {
     if (std.mem.startsWith(u8, s, ".")) return std.meta.stringToEnum(T, s[1..]) orelse error.UnknownTag;
     const prefix = "@fromBackingInt(";
     if (!std.mem.startsWith(u8, s, prefix) or !std.mem.endsWith(u8, s, ")")) return error.WrongKind;
     const Tag = @typeInfo(T).@"enum".tag_type;
-    const n = std.fmt.parseInt(Tag, s[prefix.len .. s.len - 1], 10) catch return error.InvalidNumber;
+    const n = try decodeInt(Tag, s[prefix.len .. s.len - 1]);
     return std.enums.fromInt(T, n) orelse error.UnknownTag;
 }
 
@@ -369,6 +419,22 @@ test "integers decode from decimal strings, exact at every width" {
     try std.testing.expectError(error.InvalidJson, decodeTest(u8, arena, "\"5"));
 }
 
+test "integers decode only from canonical text: no +, _, leading zero or -0" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try std.testing.expectEqual(@as(u32, 0), try decodeTest(u32, arena, "\"0\""));
+    try std.testing.expectEqual(@as(u32, 1000), try decodeTest(u32, arena, "\"1000\""));
+    try std.testing.expectEqual(@as(i32, -1000), try decodeTest(i32, arena, "\"-1000\""));
+    inline for (.{ "+1", "+0", "1_000", "01", "00", "-01", "-0", "", "-", " 1" }) |text| {
+        try std.testing.expectError(error.InvalidNumber, decodeTest(u32, arena, "\"" ++ text ++ "\""));
+        try std.testing.expectError(error.InvalidNumber, decodeTest(i32, arena, "\"" ++ text ++ "\""));
+    }
+    try std.testing.expectEqual(@as(Open, @fromBackingInt(10)), try decodeTest(Open, arena, "\"@fromBackingInt(10)\""));
+    try std.testing.expectError(error.InvalidNumber, decodeTest(Open, arena, "\"@fromBackingInt(+9)\""));
+    try std.testing.expectError(error.InvalidNumber, decodeTest(Open, arena, "\"@fromBackingInt(09)\""));
+}
+
 test "floats decode from text, and from bits that the text must match" {
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_state.deinit();
@@ -392,6 +458,25 @@ test "floats decode from text, and from bits that the text must match" {
     try std.testing.expectEqual(@as(f16, 65504), try decodeTest(f16, arena, "\"65504\""));
     try std.testing.expectError(error.InvalidHex, decodeInput(f64, arena, .{ .id = "t-001", .input = "\"0.1\"", .bits = "3dcccccd", .expect = .pass }));
     try std.testing.expectError(error.InvalidNumber, decodeTest(f64, arena, "\"one\""));
+}
+
+test "floats decode only from canonical text: no +, _, hex, capitals, leading zero or bare point" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const negative_zero = try decodeTest(f64, arena, "\"-0.0\"");
+    try std.testing.expect(negative_zero == 0 and std.math.signbit(negative_zero));
+    try std.testing.expectEqual(@as(f64, 0), try decodeTest(f64, arena, "\"0\""));
+    try std.testing.expectEqual(@as(f64, 10.5), try decodeTest(f64, arena, "\"10.5\""));
+    try std.testing.expectEqual(@as(f64, 1e5), try decodeTest(f64, arena, "\"1e5\""));
+    try std.testing.expectEqual(@as(f64, -1.25e-7), try decodeTest(f64, arena, "\"-1.25e-7\""));
+    try std.testing.expect(std.math.isPositiveInf(try decodeTest(f64, arena, "\"inf\"")));
+    const negative_nan = try decodeTest(f64, arena, "\"-nan\"");
+    try std.testing.expect(std.math.isNan(negative_nan) and std.math.signbit(negative_nan));
+    inline for (.{ "1E5", ".5", "5.", "1.e5", "NaN", "-NaN", "Infinity", "INF", "+1", "+inf", "1_000.5", "0x1p-2", "01", "-01.5", "1e+5", "1e", "1e-", "-", "" }) |text| {
+        try std.testing.expectError(error.InvalidNumber, decodeTest(f64, arena, "\"" ++ text ++ "\""));
+    }
+    try std.testing.expectError(error.InvalidNumber, decodeInput(f64, arena, .{ .id = "t-001", .input = "\"NaN\"", .bits = "7ff8000000000000", .expect = .pass }));
 }
 
 test "strings decode from text, from hex and from hex items" {
