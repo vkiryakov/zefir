@@ -260,6 +260,10 @@ test "uniqueBy compares one field of struct items" {
     try h.expectFail([]const Line, v.uniqueBy(.gift), &.{ .{ .sku = "A", .qty = 1 }, .{ .sku = "B", .qty = 2 } }, unique_code, "must not contain duplicate gift values");
     try h.expectPass([]const Line, v.uniqueBy(.role), &.{ .{ .sku = "A", .qty = 1, .role = .admin }, .{ .sku = "A", .qty = 1 } });
     try h.expectPass([2]Line, v.uniqueBy(.sku), .{ .{ .sku = "A", .qty = 1 }, .{ .sku = "B", .qty = 1 } });
+    // On an optional list, null skips the rule.
+    try h.expectPass(?[]const Line, by_sku, null);
+    const twice: []const Line = &.{ .{ .sku = "A", .qty = 1 }, .{ .sku = "A", .qty = 2 } };
+    try h.expectFail(?[]const Line, by_sku, twice, unique_code, "must not contain duplicate sku values");
     try h.expectFail([2]Line, v.uniqueBy(.qty), .{ .{ .sku = "A", .qty = 1 }, .{ .sku = "B", .qty = 1 } }, unique_code, "must not contain duplicate qty values");
 }
 
@@ -303,6 +307,9 @@ test "containsNone fails when any listed value is an item; an empty list passes"
     try h.expectFail([]const Mode, v.containsNone(.{.write}), &.{ @fromBackingInt(9), .write }, "validation.contains_none", "must not contain write");
     try h.expectPass([]const Mode, v.containsNone(.{.write}), &.{ @fromBackingInt(9), .read });
     try h.expectFail([2]bool, v.containsNone(.{false}), .{ true, false }, "validation.contains_none", "must not contain false");
+    // On an optional list, null skips the rule.
+    try h.expectPass(?[]const Role, v.containsNone(.{.viewer}), null);
+    try h.expectFail(?[]const Role, v.containsNone(.{.viewer}), @as([]const Role, &.{ .admin, .viewer }), "validation.contains_none", "must not contain viewer");
 }
 
 test "containsNone reports the list at its path, each(noneOf) the item at its index" {
