@@ -36,6 +36,7 @@ const core = @import("core.zig");
 const walk = @import("walk.zig");
 const common = @import("common.zig");
 const numbers = @import("numbers.zig");
+const encodings = @import("encodings.zig");
 const lists = @import("lists.zig");
 const custom_rules = @import("custom.zig");
 
@@ -67,6 +68,14 @@ pub const negative = numbers.negative;
 pub const nonPositive = numbers.nonPositive;
 pub const divisibleBy = numbers.divisibleBy;
 pub const finite = numbers.finite;
+pub const base32 = encodings.base32;
+pub const isBase32 = encodings.isBase32;
+pub const base58 = encodings.base58;
+pub const isBase58 = encodings.isBase58;
+pub const base64 = encodings.base64;
+pub const isBase64 = encodings.isBase64;
+pub const base64Url = encodings.base64Url;
+pub const isBase64Url = encodings.isBase64Url;
 pub const minItems = lists.minItems;
 pub const maxItems = lists.maxItems;
 pub const each = lists.each;
@@ -77,6 +86,7 @@ test {
     _ = walk;
     _ = common;
     _ = numbers;
+    _ = encodings;
     _ = lists;
     _ = custom_rules;
 }

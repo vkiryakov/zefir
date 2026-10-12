@@ -218,6 +218,38 @@ test "finite is a rule value with code validation.finite and message \"must be a
     try expectNoViolation(f64, v.finite, 0);
 }
 
+test "base32 is a rule value with code validation.base32 and message \"must be valid base32\"" {
+    try testing.expect(@hasDecl(v, "base32"));
+    try testing.expect(@TypeOf(v.base32) == v.Rule);
+    try expectRule(v.base32, "validation.base32", "must be valid base32", "must be valid base32");
+    try expectViolation([]const u8, v.base32, "MZXW6YTBOI", "validation.base32", "must be valid base32", "x");
+    try expectNoViolation([]const u8, v.base32, "MZXW6YTBOI======");
+}
+
+test "base58 is a rule value with code validation.base58 and message \"must be valid base58\"" {
+    try testing.expect(@hasDecl(v, "base58"));
+    try testing.expect(@TypeOf(v.base58) == v.Rule);
+    try expectRule(v.base58, "validation.base58", "must be valid base58", "must be valid base58");
+    try expectViolation([]const u8, v.base58, "0OIl", "validation.base58", "must be valid base58", "x");
+    try expectNoViolation([]const u8, v.base58, "3yZe7d");
+}
+
+test "base64 is a rule value with code validation.base64 and message \"must be valid base64\"" {
+    try testing.expect(@hasDecl(v, "base64"));
+    try testing.expect(@TypeOf(v.base64) == v.Rule);
+    try expectRule(v.base64, "validation.base64", "must be valid base64", "must be valid base64");
+    try expectViolation([]const u8, v.base64, "Zg", "validation.base64", "must be valid base64", "x");
+    try expectNoViolation([]const u8, v.base64, "Zg==");
+}
+
+test "base64Url is a rule value with code validation.base64_url and message \"must be valid base64url\"" {
+    try testing.expect(@hasDecl(v, "base64Url"));
+    try testing.expect(@TypeOf(v.base64Url) == v.Rule);
+    try expectRule(v.base64Url, "validation.base64_url", "must be valid base64url", "must be valid base64url");
+    try expectViolation([]const u8, v.base64Url, "Zg==", "validation.base64_url", "must be valid base64url", "x");
+    try expectNoViolation([]const u8, v.base64Url, "Zg");
+}
+
 test "minItems is a rule constructor with code validation.min_items and message \"must have at least {min} items\", or \"must have at least 1 item\" when min = 1; placeholder {min}" {
     try testing.expect(@hasDecl(v, "minItems"));
     try testing.expect(@typeInfo(@TypeOf(v.minItems)).@"fn".return_type == v.Rule);
@@ -382,15 +414,15 @@ test "finite has no precondition: nan, inf and -inf on a float field fail its ow
     }
 }
 
-test "the module exports exactly its 29 public names, and Rule.withMessage" {
-    const names = [_][]const u8{ "Violation", "Rule", "Report", "max_code_bytes", "max_message_bytes", "max_report_violations", "check", "checkAll", "assertRules", "fail", "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "minItems", "maxItems", "each", "custom" };
+test "the module exports exactly its 37 public names, and Rule.withMessage" {
+    const names = [_][]const u8{ "Violation", "Rule", "Report", "max_code_bytes", "max_message_bytes", "max_report_violations", "check", "checkAll", "assertRules", "fail", "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "base32", "isBase32", "base58", "isBase58", "base64", "isBase64", "base64Url", "isBase64Url", "minItems", "maxItems", "each", "custom" };
     inline for (names) |name| try testing.expect(@hasDecl(v, name));
     try testing.expectEqual(names.len, comptime std.meta.declarations(v).len);
     try testing.expect(@hasDecl(v.Rule, "withMessage"));
 }
 
 test "every rule the module exports has a catalog test" {
-    const tested = [_][]const u8{ "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "minItems", "maxItems", "each", "custom" };
+    const tested = [_][]const u8{ "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "base32", "base58", "base64", "base64Url", "minItems", "maxItems", "each", "custom" };
     inline for (comptime std.meta.declarations(v)) |name| {
         const T = @TypeOf(@field(v, name));
         if (comptime T == v.Rule or (@typeInfo(T) == .@"fn" and @typeInfo(T).@"fn".return_type == v.Rule)) {
@@ -406,7 +438,7 @@ test "every rule the module exports has a catalog test" {
 }
 
 test "the module exports exactly the catalog predicates of the shipped rules" {
-    const predicates = [_][]const u8{};
+    const predicates = [_][]const u8{ "isBase32", "isBase58", "isBase64", "isBase64Url" };
     comptime var exported: usize = 0;
     inline for (comptime std.meta.declarations(v)) |name| {
         if (comptime name.len > 2 and std.mem.startsWith(u8, name, "is") and std.ascii.isUpper(name[2])) {

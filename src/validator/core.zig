@@ -18,6 +18,9 @@ pub const max_code_bytes = 128;
 pub const max_message_bytes = 512;
 /// Most violations `checkAll` keeps; `Report.truncated` says when more existed.
 pub const max_report_violations = 100;
+/// Deepest nesting of `[` and `{` that `v.json` and `v.isJson` accept, the
+/// top level included (`[]` is 1); a deeper document fails.
+pub const max_json_depth = 64;
 
 /// One failed rule. The library builds `code` and `message` at compile time:
 /// they live as long as the program and never contain the checked value, so
@@ -1584,6 +1587,12 @@ pub const hints = struct {
     /// `minItems` and `maxItems` on a string field.
     pub const min_items_on_string = "for strings use v.minLength or v.minBytes";
     pub const max_items_on_string = "for strings use v.maxLength or v.maxBytes";
+    /// `minDate` and `maxDate` on a number field.
+    pub const timestamp_min = "for a numeric timestamp use v.min";
+    pub const timestamp_max = "for a numeric timestamp use v.max";
+    /// A `minDate` or `maxDate` bound that every value of its form passes.
+    pub const use_date = "use v.date";
+    pub const use_rfc3339 = "use v.rfc3339";
 
     /// A rule written on a list whose items it would accept.
     pub fn useEach(comptime rule: Rule) []const u8 {
@@ -1610,7 +1619,7 @@ pub const hints = struct {
 
 /// The files that define rules. Each rule pull request adds its file here, so
 /// that its `call_examples` reach the hints.
-const rule_files = [_]type{ @import("common.zig"), @import("numbers.zig"), @import("lists.zig"), @import("custom.zig") };
+const rule_files = [_]type{ @import("common.zig"), @import("numbers.zig"), @import("encodings.zig"), @import("lists.zig"), @import("custom.zig") };
 
 /// The arguments the hints show in a call of the constructor `name` of type
 /// `F`: its `call_examples` entry, else `.{}` for an options struct, the
@@ -1687,14 +1696,6 @@ pub const pending_kinds = [_]Kind{
     .ipv4,
     .ipv6,
     .mac_address,
-    // PR 4a
-    .date,
-    .rfc3339,
-    .iso8601,
-    .military_time,
-    // PR 4b
-    .min_date,
-    .max_date,
     // PR 5a
     .credit_card,
     .isbn,
@@ -1713,14 +1714,9 @@ pub const pending_kinds = [_]Kind{
     .hash,
     .btc_address,
     .ethereum_address,
-    // PR 6a
+    // encodings and other formats
     .json,
     .jwt,
-    .base32,
-    .base58,
-    .base64,
-    .base64_url,
-    // PR 6b
     .data_uri,
     .magnet_uri,
     .mime_type,
@@ -1729,6 +1725,13 @@ pub const pending_kinds = [_]Kind{
     .hex_color,
     .rgb_color,
     .hsl_color,
+    // dates
+    .date,
+    .rfc3339,
+    .iso8601,
+    .min_date,
+    .max_date,
+    .military_time,
 };
 
 /// `name` is the public name of a pending kind.
@@ -1789,6 +1792,37 @@ pub fn ruleError(comptime rule: *const Rule, comptime where: []const u8, comptim
 /// The text of `ruleError`, separate so that tests can read it.
 pub fn ruleErrorText(comptime rule: *const Rule, comptime where: []const u8, comptime text: []const u8) []const u8 {
     return "validator: " ++ where ++ ": " ++ rule.label() ++ text;
+}
+
+// ------------------------------------------------------------------ string rules
+
+/// The field-type check of a rule that takes strings only.
+pub fn fitsString(comptime rule: *const Rule, comptime T: type, comptime where: []const u8) void {
+    if (stringProblem(rule, T, where, null)) |text| @compileError(text);
+}
+
+/// The declaration error of a rule that takes strings only on the unwrapped
+/// field type `T`, or null: the field is a string. The error is
+/// `<kind> expects a string, field is <T>` with the hints of `typeError`;
+/// `hint` follows when none of those applies.
+pub fn stringProblem(comptime rule: *const Rule, comptime T: type, comptime where: []const u8, comptime hint: ?[]const u8) ?[]const u8 {
+    if (isString(T)) return null;
+    return typeErrorText(rule, T, where, "a string", isString, hint);
+}
+
+/// A rule value for string fields that passes when `predicate` accepts the
+/// value, as `v.json` passes when `v.isJson` does: no parameters, no
+/// precondition, and the rule and its predicate always agree.
+pub fn predicateRule(comptime kind: Kind, comptime message: []const u8, comptime predicate: fn ([]const u8) bool) Rule {
+    return define(kind, .{
+        .message = message,
+        .fits = fitsString,
+        .eval = struct {
+            fn eval(value: anytype) Outcome {
+                return passIf(predicate(value.*));
+            }
+        }.eval,
+    });
 }
 
 // ------------------------------------------------------------------ number parameters
