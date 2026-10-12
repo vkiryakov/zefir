@@ -80,6 +80,15 @@
 //! Do not log from a signal handler: a sync record or a queued one in
 //! `.block` mode may wait for a lock or for room that the interrupted
 //! thread holds.
+//!
+//! `subscribe` adds a subscriber for alerts: it gets copies of the records
+//! of its levels (and scope) on a thread and a queue of its own, before
+//! they reach the output, so it gets an error record even when the queue
+//! or stdout refuses it. Records a handler logs never return to the
+//! subscribers. `use` adds an interceptor: it sees each record at the
+//! caller, once encoded, and drops it by returning false. Both get an
+//! `Event`: the level, the time, the scope, the message, the trace ids and
+//! the whole line, valid during the call. More in `examples/README.md`.
 
 const std = @import("std");
 const options = @import("options.zig");
