@@ -62,17 +62,17 @@ Examples that `zig build test` compiles and runs:
 ## How it works
 
 ```mermaid
-flowchart TD
-    call["users.info(...)"] --> level{{"level on for the scope?"}}
+flowchart LR
+    call["logger.info()"] --> level{{"level on?"}}
     level -->|no| skipped(["skipped"])
-    level -->|yes| encode["one line of JSON, secrets as [REDACTED]"]
+    level -->|yes| encode["encode,<br/>redact"]
     encode --> hooks{{"interceptors"}}
     hooks -->|drop| filtered(["filtered"])
-    hooks -->|keep| subs[["subscriber queues"]]
-    hooks -->|sync mode| stdout(["stdout"])
-    hooks -->|queued mode| queue[["lock-free queue"]]
-    subs --> handler["your handler, on its own thread"]
-    queue --> writer["writer thread, in batches"]
+    hooks --> subs[["subscribers"]]
+    subs --> handler["your<br/>handler"]
+    hooks -->|sync| stdout(["stdout"])
+    hooks -->|queued| queue[["queue"]]
+    queue --> writer["writer<br/>thread"]
     writer --> stdout
 ```
 
