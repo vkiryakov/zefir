@@ -65,6 +65,7 @@ pub const list = [_]Fixture{
     .{ .file = "src/validator/testdata/compile_errors/custom_uncalled.zig", .expect = "validator: custom_uncalled.Bad.field_rules.x: custom must be called, e.g. v.custom(\"users.name_taken\", \"is taken\", isFree)", .row = "custom-4" },
     .{ .file = "src/validator/testdata/compile_errors/entry_uncalled_in_tuple.zig", .expect = "validator: entry_uncalled_in_tuple.Bad.field_rules.x: each must be called, e.g. v.each(v.notEmpty)", .row = "variant of each-6" },
     .{ .file = "src/validator/testdata/compile_errors/each_inner_uncalled.zig", .expect = "validator: each(...): each must be called, e.g. v.each(v.notEmpty)", .row = "variant of each-3" },
+    .{ .file = "src/validator/testdata/compile_errors/each_inner_min_items_uncalled.zig", .expect = "validator: each(...): minItems must be called, e.g. v.minItems(1)", .row = "each-3" },
     .{ .file = "src/validator/testdata/compile_errors/self_signature_by_value.zig", .expect = "validator: self_signature_by_value.Bad.validateSelf: must be `pub fn validateSelf(self: *const self_signature_by_value.Bad) ?validator.Violation`, got fn (self_signature_by_value.Bad) ?core.Violation", .row = "G-20" },
     .{ .file = "src/validator/testdata/compile_errors/self_signature_mut_pointer.zig", .expect = "validator: self_signature_mut_pointer.Bad.validateSelf: must be `pub fn validateSelf(self: *const self_signature_mut_pointer.Bad) ?validator.Violation`, got fn (*self_signature_mut_pointer.Bad) ?core.Violation", .row = "variant of G-20" },
     .{ .file = "src/validator/testdata/compile_errors/self_signature_return.zig", .expect = "validator: self_signature_return.Bad.validateSelf: must be `pub fn validateSelf(self: *const self_signature_return.Bad) ?validator.Violation`, got fn (*const self_signature_return.Bad) bool", .row = "variant of G-20" },
@@ -83,6 +84,27 @@ pub const list = [_]Fixture{
     .{ .file = "src/validator/testdata/compile_errors/fail_bad_utf8.zig", .expect = "validator: fail(fail_bad_utf8.Bad, .end): message must be valid UTF-8", .row = "FA-11" },
     .{ .file = "src/validator/testdata/compile_errors/fail_digit_start.zig", .expect = "validator: fail(fail_digit_start.Bad, .end): code 'orders.1st' has a segment that does not start with a letter; use segments of [a-z][a-z0-9_]* joined by '.', e.g. 'users.name_taken'", .row = "FA-12" },
     .{ .file = "src/validator/testdata/compile_errors/assert_rules_inline_self.zig", .expect = "validator: fail(assert_rules_inline_self.Bad, .end): code 'rpc.end_before_start' uses a reserved prefix (validation., rpc.)", .row = "variant of FA-8" },
+    // equals, notEquals and empty: one fixture per kind of error; the text of
+    // every catalog row is checked by the tests of common.zig
+    .{ .file = "src/validator/testdata/compile_errors/equals_empty_string.zig", .expect = "validator: equals(\"\"): the expected value is the empty string; use v.empty", .row = "equals-1" },
+    .{ .file = "src/validator/testdata/compile_errors/equals_unnamed_tag.zig", .expect = "validator: equals(@fromBackingInt(7)): @fromBackingInt(7) is not a named tag of equals_unnamed_tag.Open", .row = "equals-5" },
+    .{ .file = "src/validator/testdata/compile_errors/not_equals_out_of_range.zig", .expect = "validator: not_equals_out_of_range.Bad.field_rules.x: not_equals(-1): -1 is outside u32 (0..4294967295); the rule would always pass", .row = "notEquals-6" },
+    .{ .file = "src/validator/testdata/compile_errors/equals_string_on_enum.zig", .expect = "validator: equals_string_on_enum.Bad.field_rules.x: equals(\"admin\"): \"admin\" is a string, field is equals_string_on_enum.Role; use a tag such as .admin", .row = "equals-13" },
+    .{ .file = "src/validator/testdata/compile_errors/equals_unknown_tag.zig", .expect = "validator: equals_unknown_tag.Bad.field_rules.x: equals(.root): equals_unknown_tag.Role has no tag root; tags: admin, user, guest", .row = "equals-14" },
+    .{ .file = "src/validator/testdata/compile_errors/equals_single_tag.zig", .expect = "validator: equals_single_tag.Bad.field_rules.x: equals(.only): equals_single_tag.Only has a single tag; the rule would always pass", .row = "equals-16" },
+    .{ .file = "src/validator/testdata/compile_errors/equals_on_slice.zig", .expect = "validator: equals_on_slice.Bad.field_rules.x: equals expects a number, a bool, an enum or a string, field is []const u32; use v.each(v.equals(5))", .row = "equals-18" },
+    .{ .file = "src/validator/testdata/compile_errors/empty_on_array.zig", .expect = "validator: empty_on_array.Bad.field_rules.x: empty on [3]u32 is always false: the length of an array is fixed", .row = "empty-1" },
+    // oneOf and noneOf: one fixture per kind of error; the text of every
+    // catalog row is checked by the tests of common.zig
+    .{ .file = "src/validator/testdata/compile_errors/one_of_empty.zig", .expect = "validator: oneOf(.{}): the list is empty", .row = "oneOf-1" },
+    .{ .file = "src/validator/testdata/compile_errors/one_of_pointer.zig", .expect = "validator: oneOf(...): expected a tuple or an array of values, e.g. .{ \"a\", \"b\" }, got *const [2][]const u8; pass the array itself, not a pointer to it", .row = "oneOf-3" },
+    .{ .file = "src/validator/testdata/compile_errors/none_of_duplicate.zig", .expect = "validator: noneOf(.{ \"root\", \"admin\", \"root\" }): \"root\" is listed twice", .row = "noneOf-4" },
+    .{ .file = "src/validator/testdata/compile_errors/one_of_unnamed_tag.zig", .expect = "validator: oneOf(.{ .a, @fromBackingInt(7) }): @fromBackingInt(7) is not a named tag of one_of_unnamed_tag.Open", .row = "oneOf-10" },
+    .{ .file = "src/validator/testdata/compile_errors/one_of_strings_on_enum.zig", .expect = "validator: one_of_strings_on_enum.Bad.field_rules.x: one_of(.{\"admin\"}) lists strings, field is one_of_strings_on_enum.Role; list the enum's tags instead: .{ .tag, ... }", .row = "oneOf-11" },
+    .{ .file = "src/validator/testdata/compile_errors/none_of_unknown_tag.zig", .expect = "validator: none_of_unknown_tag.Bad.field_rules.x: none_of(.{ .admin, .root }): none_of_unknown_tag.Role has no tag root; tags: admin, user, guest", .row = "noneOf-18" },
+    .{ .file = "src/validator/testdata/compile_errors/one_of_out_of_range.zig", .expect = "validator: one_of_out_of_range.Bad.field_rules.x: one_of(.{ 1, 300 }): 300 is outside u8 (0..255); remove it", .row = "oneOf-19" },
+    .{ .file = "src/validator/testdata/compile_errors/none_of_all_tags.zig", .expect = "validator: none_of_all_tags.Bad.field_rules.x: none_of(.{ .admin, .user, .guest }) lists every tag of none_of_all_tags.Role; no value would pass", .row = "noneOf-21" },
+    .{ .file = "src/validator/testdata/compile_errors/one_of_long_list_on_slice.zig", .expect = "validator: one_of_long_list_on_slice.Bad.field_rules.x: one_of expects a string, an enum or an integer, field is []const []const u8; use v.each(v.oneOf(.{ \"value_000\", \"value_001\", \"value_002\", \"value_003\", \"value_004\", ... }))", .row = "variant of oneOf-21" },
     // notEmpty
     .{ .file = "src/validator/testdata/compile_errors/not_empty_on_array.zig", .expect = "validator: not_empty_on_array.Bad.field_rules.x: not_empty on [3]u32 is always true: the length of an array is fixed", .row = "notEmpty-1" },
     .{ .file = "src/validator/testdata/compile_errors/not_empty_on_zero_array.zig", .expect = "validator: not_empty_on_zero_array.Bad.field_rules.x: not_empty on [0]u32 is always false: the length of an array is fixed", .row = "notEmpty-2" },
@@ -94,6 +116,30 @@ pub const list = [_]Fixture{
     .{ .file = "src/validator/testdata/compile_errors/positive_on_string.zig", .expect = "validator: positive_on_string.Bad.field_rules.x: positive expects a number, field is []const u8", .row = "positive-1" },
     .{ .file = "src/validator/testdata/compile_errors/positive_on_enum.zig", .expect = "validator: positive_on_enum.Bad.field_rules.x: positive expects a number, field is positive_on_enum.Role", .row = "variant of positive-1" },
     .{ .file = "src/validator/testdata/compile_errors/positive_on_slice.zig", .expect = "validator: positive_on_slice.Bad.field_rules.x: positive expects a number, field is []const u32; use v.each(v.positive)", .row = "positive-2" },
+    // min, max, range, the sign rules, divisibleBy and finite: one fixture per
+    // kind of error; the text of every catalog row is checked by the tests of
+    // numbers.zig
+    .{ .file = "src/validator/testdata/compile_errors/min_string_bound.zig", .expect = "validator: min(\"5\"): the bound must be a number, got *const [1:0]u8", .row = "min-1" },
+    .{ .file = "src/validator/testdata/compile_errors/max_nan_bound.zig", .expect = "validator: max(nan): nan is not finite", .row = "max-2" },
+    .{ .file = "src/validator/testdata/compile_errors/range_inverted.zig", .expect = "validator: range(10, 5): min is greater than max", .row = "range-3" },
+    .{ .file = "src/validator/testdata/compile_errors/min_inexact_f32.zig", .expect = "validator: min_inexact_f32.Bad.field_rules.x: min(16777217): 16777217 is not exactly representable in f32 (nearest: 16777216)", .row = "min-5" },
+    .{ .file = "src/validator/testdata/compile_errors/min_narrow_float.zig", .expect = "validator: min_narrow_float.Bad.field_rules.x: min(0.1): 0.1 is a float (f32), 0.10000000149011612 in f64; write it as a literal or as f64", .row = "min-15" },
+    .{ .file = "src/validator/testdata/compile_errors/min_vacuous_u8.zig", .expect = "validator: min_vacuous_u8.Bad.field_rules.x: min(0) is always true for u8; remove it", .row = "min-9" },
+    .{ .file = "src/validator/testdata/compile_errors/min_on_slice.zig", .expect = "validator: min_on_slice.Bad.field_rules.x: min expects a number, field is []const i32; use v.each(v.min(0))", .row = "min-11" },
+    .{ .file = "src/validator/testdata/compile_errors/negative_unsigned.zig", .expect = "validator: negative_unsigned.Bad.field_rules.x: negative is always false for u32 (an unsigned type)", .row = "negative-1" },
+    .{ .file = "src/validator/testdata/compile_errors/divisible_by_zero.zig", .expect = "validator: divisibleBy(0): division by zero; no value would pass", .row = "divisibleBy-1" },
+    .{ .file = "src/validator/testdata/compile_errors/divisible_by_too_big.zig", .expect = "validator: divisible_by_too_big.Bad.field_rules.x: divisible_by(1000) on u8 (0..255): only 0 would pass; use v.equals(0)", .row = "divisibleBy-6" },
+    .{ .file = "src/validator/testdata/compile_errors/finite_on_int.zig", .expect = "validator: finite_on_int.Bad.field_rules.x: finite is always true for u32; remove it", .row = "finite-1" },
+    .{ .file = "src/validator/testdata/compile_errors/min_default_message_too_long.zig", .expect = "validator: min_default_message_too_long.Bad.field_rules.x: min(56362808934785782620655415167470525914030964411108314940402423418609289689068355355971379591897745173403010078263747529856646401949852539644969848434700186501722593132609102394906926373262117075563330306831364144677433787178189964179613588058505555939250641616528896329618001580624087604790707070002646363767810376024580461947390375276158858357529962546338406854636102805723631292609311399696875316557143945391102311532165688506692261634047197324706752950818927815472385992693228752306187618995383028460736741376): the default message would be 529 bytes (limit 512); use .withMessage(...)", .row = "min-13" },
+    // minItems and maxItems: one fixture per kind of error; the text of every
+    // catalog row is checked by the tests of lists.zig
+    .{ .file = "src/validator/testdata/compile_errors/min_items_zero.zig", .expect = "validator: minItems(0): min must be at least 1 (minItems(0) is always true; remove it)", .row = "minItems-1" },
+    .{ .file = "src/validator/testdata/compile_errors/min_items_on_array.zig", .expect = "validator: min_items_on_array.Bad.field_rules.x: min_items(1) on [3]u32 is always true: the length of an array is fixed", .row = "minItems-2" },
+    .{ .file = "src/validator/testdata/compile_errors/min_items_on_string.zig", .expect = "validator: min_items_on_string.Bad.field_rules.x: min_items expects a slice, field is []const u8; for strings use v.minLength or v.minBytes", .row = "minItems-3" },
+    .{ .file = "src/validator/testdata/compile_errors/max_items_zero.zig", .expect = "validator: maxItems(0): max must be at least 1; use v.empty", .row = "maxItems-1" },
+    .{ .file = "src/validator/testdata/compile_errors/min_items_negative.zig", .expect = "type 'usize' cannot represent integer value '-1'", .row = "Z-1" },
+    .{ .file = "src/validator/testdata/compile_errors/max_items_fractional.zig", .expect = "fractional component prevents float value '1.5' from coercion to type 'usize'", .row = "Z-2" },
+    .{ .file = "src/validator/testdata/compile_errors/min_items_uncalled_with_message.zig", .expect = "no field or member function named 'withMessage' in 'fn (comptime usize) core.Rule'", .row = "variant of Z-5" },
     // each
     .{ .file = "src/validator/testdata/compile_errors/each_not_rule.zig", .expect = "validator: each(...): expected a rule or a tuple of rules, got *const [1:0]u8", .row = "each-1" },
     .{ .file = "src/validator/testdata/compile_errors/each_tuple_item_not_rule.zig", .expect = "validator: each(...): item 1 of the tuple is comptime_int", .row = "each-2" },
@@ -139,8 +185,20 @@ pub const list = [_]Fixture{
     .{ .file = "src/validator/testdata/compile_errors/custom_message_too_long.zig", .expect = "validator: custom(\"users.ok\", ...): message is longer than 512 bytes", .row = "CU-7" },
     .{ .file = "src/validator/testdata/compile_errors/custom_message_bad_utf8.zig", .expect = "validator: custom(\"users.ok\", ...): message must be valid UTF-8", .row = "CU-8" },
     .{ .file = "src/validator/testdata/compile_errors/custom_message_truncated_utf8.zig", .expect = "validator: custom(\"users.ok\", ...): message must be valid UTF-8", .row = "variant of CU-8" },
+    // withMessage: one fixture per row; the texts are checked by the tests of
+    // core.zig as well
+    .{ .file = "src/validator/testdata/compile_errors/with_message_unknown_placeholder.zig", .expect = "validator: divisibleBy(5).withMessage(\"must be a multiple of {n}\"): unknown placeholder {n}; available: {divisor}", .row = "W-1" },
+    .{ .file = "src/validator/testdata/compile_errors/with_message_no_placeholders.zig", .expect = "validator: negative.withMessage(\"{value} must be negative\"): unknown placeholder {value}; this rule has no placeholders", .row = "W-2" },
+    .{ .file = "src/validator/testdata/compile_errors/with_message_unclosed.zig", .expect = "validator: divisibleBy(5).withMessage(\"must be divisible by {divisor\"): '{' without a closing '}'; write '{{' for a literal '{'", .row = "W-3" },
+    .{ .file = "src/validator/testdata/compile_errors/with_message_empty.zig", .expect = "validator: notEmpty.withMessage(\"\"): message must not be empty", .row = "W-4" },
+    .{ .file = "src/validator/testdata/compile_errors/with_message_too_long.zig", .expect = "validator: maxItems(5).withMessage(\"" ++ @as([513]u8, @splat('m')) ++ "\"): message is longer than 512 bytes", .row = "W-5" },
+    .{ .file = "src/validator/testdata/compile_errors/with_message_bad_utf8.zig", .expect = "validator: min(1).withMessage(\"\\xc3\"): message must be valid UTF-8", .row = "W-6" },
+    .{ .file = "src/validator/testdata/compile_errors/with_message_on_each.zig", .expect = "validator: each(...).withMessage(\"x\"): each has no message of its own; put .withMessage on the inner rules", .row = "W-7" },
     .{ .file = "src/validator/testdata/compile_errors/not_empty_called.zig", .expect = "type 'core.Rule' not a function", .row = "Z-8" },
     .{ .file = "src/validator/testdata/compile_errors/positive_called.zig", .expect = "type 'core.Rule' not a function", .row = "Z-8" },
+    .{ .file = "src/validator/testdata/compile_errors/with_message_no_argument.zig", .expect = "member function expected 1 argument(s), found 0", .row = "Z-15" },
+    .{ .file = "src/validator/testdata/compile_errors/with_message_not_string.zig", .expect = "expected type '[]const u8', found 'comptime_int'", .row = "Z-9" },
+    .{ .file = "src/validator/testdata/compile_errors/with_message_runtime_template.zig", .expect = "unable to resolve comptime value", .row = "variant of Z-32" },
     .{ .file = "src/validator/testdata/compile_errors/custom_missing_argument.zig", .expect = "expected 3 argument(s), found 2", .row = "variant of Z-4" },
     .{ .file = "src/validator/testdata/compile_errors/custom_code_escaped.zig", .expect = "validator: custom(\"users.a\\tb\", ...): code 'users.a\\tb' has a character outside [a-z0-9_.]; use segments of [a-z][a-z0-9_]* joined by '.', e.g. 'users.name_taken'", .row = "variant of CU-3" },
     .{ .file = "src/validator/testdata/compile_errors/each_eval_direct.zig", .expect = "validator: internal: each is applied by the walker and never evaluated", .row = "internal" },

@@ -316,6 +316,12 @@ placeholder instead: zefir-log writes `"[REDACTED]"`, also for `?ApiKey`,
 already. The declaration must be `pub`: a private one is invisible to the
 check, which is why each sensitive type should assert it, as above.
 
+std.fmt does not check the marker: `{any}` and `{}` print the fields of
+`ApiKey` above, bytes and all, so std.log text shows them, also through
+zefir-log's std.log bridge. To keep the bytes out of formatted text too,
+hold them behind a many-item pointer, as `confy.Secret` does, or use
+`confy.Secret`.
+
 ## Thread safety
 
 A context is an immutable value: any number of threads may read the same

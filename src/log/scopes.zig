@@ -116,10 +116,8 @@ pub const Table = struct {
     /// Adds or changes the rule for `prefix`, or removes it when `level` is
     /// null. A trailing dot is ignored: `zefir.` is the rule for `zefir`.
     pub fn setRule(table: *Table, prefix: []const u8, level: ?Level) error{ TooManyRules, EmptyPrefix }!void {
-        const trimmed = std.mem.trimEnd(u8, prefix, ".");
-        if (trimmed.len == 0) return error.EmptyPrefix;
         var buf: [max_name_bytes]u8 = undefined;
-        const key = escapeName(trimmed, &buf).name;
+        const key = try prefixKey(prefix, &buf);
         table.lockSpin();
         defer table.lock.unlock();
         const rules = table.rules[0..table.rule_count];
@@ -169,9 +167,17 @@ pub const Table = struct {
     }
 };
 
+/// A scope prefix as scope names are kept: trailing dots dropped
+/// (`zefir.` is `zefir`), escaped, and cut to 128 bytes.
+pub fn prefixKey(prefix: []const u8, buf: *[max_name_bytes]u8) error{EmptyPrefix}![]const u8 {
+    const trimmed = std.mem.trimEnd(u8, prefix, ".");
+    if (trimmed.len == 0) return error.EmptyPrefix;
+    return escapeName(trimmed, buf).name;
+}
+
 /// Whether the rule for `prefix` covers scope `name`: the same name, or a
 /// subscope after a dot.
-fn covers(prefix: []const u8, name: []const u8) bool {
+pub fn covers(prefix: []const u8, name: []const u8) bool {
     return std.mem.startsWith(u8, name, prefix) and (name.len == prefix.len or name[prefix.len] == '.');
 }
 

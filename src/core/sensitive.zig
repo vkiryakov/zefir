@@ -10,9 +10,13 @@
 //! ```
 //!
 //! Modules that write values out (the logger, error details, query logs)
-//! check `isSensitive` and write a placeholder instead. The marker must be
-//! `pub`: a private one is invisible to the check, so test each sensitive
-//! type with `comptime std.debug.assert(core.isSensitive(T))`.
+//! check `isSensitive` and write a placeholder instead. std.fmt does not
+//! check the marker: `{any}` and `{}` print a marked struct's fields, so
+//! std.log text shows them, also through the logger's std.log bridge. To
+//! keep the bytes out of that text too, hold them behind a many-item
+//! pointer, as `confy.Secret` does, or use `confy.Secret`. The marker must
+//! be `pub`: a private one is invisible to the check, so test each
+//! sensitive type with `comptime std.debug.assert(core.isSensitive(T))`.
 
 const std = @import("std");
 
