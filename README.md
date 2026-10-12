@@ -34,9 +34,9 @@ If it fits the way you work, use it, and please join in: bring your ideas and qu
 | ------------------ | ----------------- | -------------------------------------------------------------------- | --------------------------------------------------------- |
 | **confy**          | `zefir-confy`     | Typed configuration from JSON, INI, `.env` files and the environment | ✅ Done · [docs](src/confy/examples/README.md)            |
 | **core**           | `zefir-core`      | Execution context: deadlines, cancellation and W3C trace context     | ✅ Done · [docs](src/core/examples/README.md)             |
+| **log**            | `zefir-log`       | Structured logging: JSON Lines, redaction, live levels, alerts       | ✅ Done · [docs](src/log/examples/README.md)              |
 | validator          | `zefir-validator` | Declarative validation rules for struct fields                       | 🚧 In progress · [docs](src/validator/examples/README.md) |
 | rpc                | `zefir-rpc`       | RPC                                                                  | 📋 Planned                                                |
-| **log**            | `zefir-log`       | Structured logging: JSON Lines, redaction, live levels, alerts       | ✅ Done · [docs](src/log/examples/README.md)              |
 | orm                | `zefir-orm`       | ORM                                                                  | 📋 Planned                                                |
 | http               | —                 | HTTP server                                                          | 📋 Planned                                                |
 | _all of the above_ | `zefir`           | Umbrella module                                                      |                                                           |
