@@ -1851,20 +1851,6 @@ fn callExample(comptime name: []const u8) ?[]const u8 {
     return null;
 }
 
-/// The kinds whose rules `root.zig` does not export yet, by the pull request
-/// that ships them. Hints may name these rules, and the self-tests compare
-/// only the other kinds with the public names. Each rule pull request deletes
-/// its lines; the list is empty once all 96 rules are exported.
-pub const pending_kinds = [_]Kind{};
-
-/// `name` is the public name of a pending kind.
-fn isPending(comptime name: []const u8) bool {
-    for (pending_kinds) |kind| {
-        if (std.mem.eql(u8, info(kind).name, name)) return true;
-    }
-    return false;
-}
-
 /// Stops compilation because `rule` does not take the unwrapped field type
 /// `T`: `validator: <where>: <kind> expects <expects>, field is <T>`, then
 /// one hint after `; `. `accepts` tells which unwrapped types the rule takes
@@ -3179,22 +3165,13 @@ test "editDistance counts edits ignoring ASCII case and gives up over 64 bytes" 
 }
 
 /// The first problem of the public names of `ns` (`root.zig` in the library)
-/// against the kind table, or null: every kind that is not pending is
-/// exported under its public name, as a `Rule` of that kind or as a function
-/// that returns a `Rule`; no pending kind is exported or listed twice.
-fn exportProblem(comptime ns: type, comptime pending: []const Kind) ?[]const u8 {
+/// against the kind table rows `rows`, or null: each kind is exported under
+/// its public name, as a `Rule` of that kind or as a function that returns a
+/// `Rule`.
+fn exportProblem(comptime ns: type, comptime rows: []const KindInfo) ?[]const u8 {
     @setEvalBranchQuota(eval_quota);
-    for (kinds) |row| {
-        var listed: usize = 0;
-        for (pending) |kind| {
-            if (kind == row.kind) listed += 1;
-        }
-        if (listed > 1) return "pending_kinds lists ." ++ @tagName(row.kind) ++ " twice";
-        if (listed == 1) {
-            if (@hasDecl(ns, row.name)) return "v." ++ row.name ++ " is exported; delete ." ++ @tagName(row.kind) ++ " from pending_kinds";
-            continue;
-        }
-        if (!@hasDecl(ns, row.name)) return "v." ++ row.name ++ " is not exported and ." ++ @tagName(row.kind) ++ " is not in pending_kinds";
+    for (rows) |row| {
+        if (!@hasDecl(ns, row.name)) return "v." ++ row.name ++ " is not exported";
         const decl = @field(ns, row.name);
         const D = @TypeOf(decl);
         if (D == Rule) {
@@ -3224,8 +3201,7 @@ fn hintTexts() []const []const u8 {
     }
 }
 
-/// The first `v.<name>` in `texts` that `root.zig` does not export and that
-/// is not a pending rule, or null.
+/// The first `v.<name>` in `texts` that `root.zig` does not export, or null.
 fn unknownHintName(comptime texts: []const []const u8) ?[]const u8 {
     @setEvalBranchQuota(eval_quota);
     for (texts) |text| {
@@ -3236,49 +3212,45 @@ fn unknownHintName(comptime texts: []const []const u8) ?[]const u8 {
             i = end;
             if (at > 0 and std.ascii.isAlphanumeric(text[at - 1])) continue;
             const name = text[at + 2 .. end];
-            if (name.len == 0 or @hasDecl(root, name) or isPending(name)) continue;
+            if (name.len == 0 or @hasDecl(root, name)) continue;
             return name;
         }
     }
     return null;
 }
 
-/// Every kind except `exported`, as a pending list for the self-test below.
-fn kindsExcept(comptime exported: []const Kind) []const Kind {
+/// The kind table rows of `list`, for the self-test below.
+fn rowsOf(comptime list: []const Kind) []const KindInfo {
     comptime {
-        var out: []const Kind = &.{};
-        for (kinds) |row| {
-            if (std.mem.findScalar(Kind, exported, row.kind) == null) out = out ++ &[_]Kind{row.kind};
-        }
+        var out: []const KindInfo = &.{};
+        for (list) |kind| out = out ++ &[_]KindInfo{info(kind)};
         return out;
     }
 }
 
-test "every kind is exported under its public name unless it is pending, and no pending kind is exported" {
-    try std.testing.expectEqualStrings("", comptime exportProblem(root, &pending_kinds) orelse "");
+test "every kind is exported under its public name as a rule of that kind" {
+    try std.testing.expectEqualStrings("", comptime exportProblem(root, &kinds) orelse "");
 
     // The check itself, on a namespace that exports two rules.
     const Two = struct {
         pub const notEmpty = root.notEmpty;
         pub const positive = root.positive;
     };
-    try std.testing.expectEqual(null, comptime exportProblem(Two, kindsExcept(&.{ .not_empty, .positive })));
-    try std.testing.expectEqualStrings("v.each is not exported and .each is not in pending_kinds", comptime exportProblem(Two, kindsExcept(&.{ .not_empty, .positive, .each })).?);
-    try std.testing.expectEqualStrings("v.positive is exported; delete .positive from pending_kinds", comptime exportProblem(Two, kindsExcept(&.{.not_empty})).?);
-    try std.testing.expectEqualStrings("pending_kinds lists .equals twice", comptime exportProblem(Two, kindsExcept(&.{ .not_empty, .positive }) ++ &[_]Kind{.equals}).?);
+    try std.testing.expectEqual(null, comptime exportProblem(Two, rowsOf(&.{ .not_empty, .positive })));
+    try std.testing.expectEqualStrings("v.each is not exported", comptime exportProblem(Two, rowsOf(&.{ .not_empty, .positive, .each })).?);
     const OtherKind = struct {
         pub const notEmpty = root.positive;
         pub const positive = root.positive;
     };
-    try std.testing.expectEqualStrings("v.notEmpty is a rule of another kind", comptime exportProblem(OtherKind, kindsExcept(&.{ .not_empty, .positive })).?);
+    try std.testing.expectEqualStrings("v.notEmpty is a rule of another kind", comptime exportProblem(OtherKind, rowsOf(&.{ .not_empty, .positive })).?);
     const NotARule = struct {
         pub const notEmpty = root.notEmpty;
         pub const positive = root.check;
     };
-    try std.testing.expectEqualStrings("v.positive is not a rule", comptime exportProblem(NotARule, kindsExcept(&.{ .not_empty, .positive })).?);
+    try std.testing.expectEqualStrings("v.positive is not a rule", comptime exportProblem(NotARule, rowsOf(&.{ .not_empty, .positive })).?);
 }
 
-test "every rule name a hint mentions is exported or pending" {
+test "every rule name a hint mentions is exported" {
     try std.testing.expectEqualStrings("", comptime unknownHintName(hintTexts()) orelse "");
     // The texts come from both sources: the hints and the rule files' call_examples.
     const collected = comptime hintTexts();
