@@ -135,8 +135,8 @@ fn pointee(comptime P: type) type {
 
 // ------------------------------------------------------------------ which types carry rules
 
-/// A type declares rules: `field_rules`, `validateSelf`, or a non-function
-/// `validate` (rules written under confy's hook name).
+/// A type declares rules: `field_rules`, `validateSelf`, or rules written
+/// under confy's hook name `validate` (see `misnamedRules`).
 fn declaresRules(comptime T: type) bool {
     return switch (@typeInfo(T)) {
         .@"struct", .@"union", .@"enum", .@"opaque" => @hasDecl(T, "field_rules") or @hasDecl(T, "validateSelf") or misnamedRules(T),
@@ -144,8 +144,18 @@ fn declaresRules(comptime T: type) bool {
     };
 }
 
+/// A `validate` that is not a function (a `field_rules` table under the
+/// wrong name), or a `pub fn validate` shaped like `validateSelf`: one
+/// parameter `*const T`, `T` or `*T`, returning `?Violation`. Confy's hook
+/// returns an error union, so it and every other signature are left alone.
 fn misnamedRules(comptime T: type) bool {
-    return @hasDecl(T, "validate") and @typeInfo(@TypeOf(T.validate)) != .@"fn";
+    if (!@hasDecl(T, "validate")) return false;
+    return switch (@typeInfo(@TypeOf(T.validate))) {
+        .@"fn" => |f| f.param_types.len == 1 and
+            (f.param_types[0] == *const T or f.param_types[0] == T or f.param_types[0] == *T) and
+            f.return_type != null and f.return_type.? == ?Violation,
+        else => true,
+    };
 }
 
 fn includes(comptime list: []const type, comptime T: type) bool {
@@ -270,9 +280,11 @@ fn visit(comptime T: type, comptime where: []const u8, comptime stack: []const t
 fn hidden(comptime T: type, comptime what: []const u8, comptime where: []const u8) void {
     if (findRuleType(T)) |R| {
         const reach = if (R == T) @typeName(T) ++ " declares" else @typeName(T) ++ " reaches " ++ @typeName(R) ++ ", which declares";
-        // A type that declares only a non-function validate has neither name.
+        // A type that declares only a misnamed validate has neither name.
         const declared = if (@hasDecl(R, "field_rules") or @hasDecl(R, "validateSelf"))
             " field_rules or validateSelf that would be skipped"
+        else if (@typeInfo(@TypeOf(R.validate)) == .@"fn")
+            " a pub fn validate shaped like validateSelf, which counts as rules that would be skipped; rename it to validateSelf"
         else
             " a non-function validate, which counts as rules that would be skipped; rename it (rules belong in pub const field_rules)";
         @compileError("validator: " ++ where ++ ": " ++ what ++ " are not walked; " ++ reach ++ declared);
@@ -284,12 +296,17 @@ fn hidden(comptime T: type, comptime what: []const u8, comptime where: []const u
 const isAnonymous = core.isAnonymous;
 
 /// The declaration checks of one walked struct, named `label` in errors: a
-/// `validate` that is not a function, field names that would make paths
-/// ambiguous, then `field_rules`.
+/// misnamed `validate`, field names that would make paths ambiguous, then
+/// `field_rules`.
 fn checkStruct(comptime T: type, comptime label: []const u8) void {
     @setEvalBranchQuota(core.eval_quota);
-    if (misnamedRules(T))
-        @compileError("validator: " ++ label ++ ".validate: rules are declared in pub const field_rules; rename validate to field_rules (a pub fn validate is left to confy)");
+    if (misnamedRules(T)) {
+        const fix = if (@typeInfo(@TypeOf(T.validate)) == .@"fn")
+            "returns ?validator.Violation; rename it to validateSelf (a pub fn validate returning !void is left to confy)"
+        else
+            "rules are declared in pub const field_rules; rename validate to field_rules (a pub fn validate is left to confy)";
+        @compileError("validator: " ++ label ++ ".validate: " ++ fix);
+    }
     const info = @typeInfo(T).@"struct";
     for (info.field_names, info.field_attrs) |name, attrs| {
         if (attrs.@"comptime") continue;

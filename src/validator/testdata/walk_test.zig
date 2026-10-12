@@ -556,6 +556,21 @@ test "a pub fn validate (confy's hook) is left alone" {
     try h.expectValid(&ConfyStyle{ .port = 7 });
 }
 
+const CheckWrapper = struct {
+    port: u16,
+    pub const field_rules = .{ .port = v.positive };
+    pub fn validate(self: *const CheckWrapper, path_buf: []u8) ?v.Violation {
+        return v.check(self, path_buf);
+    }
+};
+
+test "a pub fn validate that is not shaped like validateSelf is left alone" {
+    var buf: [64]u8 = undefined;
+    const violation = (CheckWrapper{ .port = 0 }).validate(&buf) orelse return error.TestExpectedViolation;
+    try std.testing.expectEqualStrings("validation.positive", violation.code);
+    try h.expectValid(&CheckWrapper{ .port = 1 });
+}
+
 const EmptyRules = struct {
     n: u32,
     pub const field_rules = .{};

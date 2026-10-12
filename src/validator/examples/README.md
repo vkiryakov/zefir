@@ -315,9 +315,11 @@ field that exists at run time cannot hold one.
 > validator finds them with `@hasDecl`, which sees only public declarations: a
 > private `field_rules` is silently never checked, and neither `v.check` nor
 > `v.assertRules` can tell. Other names are ignored the same way: `rules`,
-> `fieldRules`, `validate_self`, and a `pub fn validate`, which is left to
-> confy. Give every DTO a test with a value that must fail
-> ([Testing a DTO package](#testing-a-dto-package)): it catches all of these.
+> `fieldRules` and `validate_self`. A `pub fn validate` is left to confy,
+> except one shaped like `validateSelf` (one `self` parameter, returning
+> `?v.Violation`): that one is a compile error that tells you to rename it.
+> Give every DTO a test with a value that must fail
+> ([Testing a DTO package](#testing-a-dto-package)): it catches the rest.
 
 ## validateSelf and v.fail
 
@@ -733,8 +735,7 @@ library runs. These errors point at your line and do not start with
 **What is not checked at compile time:**
 
 - `field_rules` and `validateSelf` without `pub`, and rules under another name
-  (`rules`, `fieldRules`, `validate_self`, a `pub fn validate`): they are
-  invisible and do nothing;
+  (`rules`, `fieldRules`, `validate_self`): they are invisible and do nothing;
 - items of containers that hide their item type (`std.HashMapUnmanaged`,
   `std.MultiArrayList`);
 - the result of `validateSelf`: it is checked at run time (a panic in Debug,
