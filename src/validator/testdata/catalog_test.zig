@@ -240,6 +240,24 @@ test "maxItems is a rule constructor with code validation.max_items and message 
     try expectNoViolation([]const u32, v.maxItems(2), &.{1});
 }
 
+test "uniqueItems is a rule value with code validation.unique_items and message \"must not contain duplicates\"" {
+    try testing.expect(@hasDecl(v, "uniqueItems"));
+    try testing.expect(@TypeOf(v.uniqueItems) == v.Rule);
+    try expectRule(v.uniqueItems, "validation.unique_items", "must not contain duplicates", "must not contain duplicates");
+    try expectViolation([]const u32, .{ v.maxItems(10), v.uniqueItems }, &.{ 1, 1 }, "validation.unique_items", "must not contain duplicates", "x");
+    try expectNoViolation([]const u32, .{ v.maxItems(10), v.uniqueItems }, &.{ 1, 2 });
+}
+
+test "uniqueBy is a rule constructor with code validation.unique_items and message \"must not contain duplicate {key} values\"; placeholder {key}" {
+    const Item = struct { id: u32 };
+    try testing.expect(@hasDecl(v, "uniqueBy"));
+    try testing.expect(@typeInfo(@TypeOf(v.uniqueBy)).@"fn".return_type == v.Rule);
+    try expectRule(v.uniqueBy(.id), "validation.unique_items", "must not contain duplicate id values", "must not contain duplicate {key} values");
+    try expectPlaceholder(v.uniqueBy(.id), "{key}", "id");
+    try expectViolation([]const Item, .{ v.maxItems(10), v.uniqueBy(.id) }, &.{ .{ .id = 1 }, .{ .id = 1 } }, "validation.unique_items", "must not contain duplicate id values", "x");
+    try expectNoViolation([]const Item, .{ v.maxItems(10), v.uniqueBy(.id) }, &.{ .{ .id = 1 }, .{ .id = 2 } });
+}
+
 test "each is a rule constructor with no code or message of its own; an item reports the inner rule's code and message at its index" {
     try testing.expect(@hasDecl(v, "each"));
     try testing.expect(@typeInfo(@TypeOf(v.each)).@"fn".return_type == v.Rule);
@@ -382,15 +400,15 @@ test "finite has no precondition: nan, inf and -inf on a float field fail its ow
     }
 }
 
-test "the module exports exactly its 29 public names, and Rule.withMessage" {
-    const names = [_][]const u8{ "Violation", "Rule", "Report", "max_code_bytes", "max_message_bytes", "max_report_violations", "check", "checkAll", "assertRules", "fail", "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "minItems", "maxItems", "each", "custom" };
+test "the module exports exactly its 32 public names, and Rule.withMessage" {
+    const names = [_][]const u8{ "Violation", "Rule", "Report", "max_code_bytes", "max_message_bytes", "max_report_violations", "max_unique_items", "check", "checkAll", "assertRules", "fail", "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "minItems", "maxItems", "uniqueItems", "uniqueBy", "each", "custom" };
     inline for (names) |name| try testing.expect(@hasDecl(v, name));
     try testing.expectEqual(names.len, comptime std.meta.declarations(v).len);
     try testing.expect(@hasDecl(v.Rule, "withMessage"));
 }
 
 test "every rule the module exports has a catalog test" {
-    const tested = [_][]const u8{ "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "minItems", "maxItems", "each", "custom" };
+    const tested = [_][]const u8{ "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "minItems", "maxItems", "uniqueItems", "uniqueBy", "each", "custom" };
     inline for (comptime std.meta.declarations(v)) |name| {
         const T = @TypeOf(@field(v, name));
         if (comptime T == v.Rule or (@typeInfo(T) == .@"fn" and @typeInfo(T).@"fn".return_type == v.Rule)) {
@@ -430,4 +448,6 @@ test "the limits have their catalog values" {
     try testing.expectEqual(512, v.max_message_bytes);
     try testing.expect(@TypeOf(v.max_report_violations) == comptime_int);
     try testing.expectEqual(100, v.max_report_violations);
+    try testing.expect(@TypeOf(v.max_unique_items) == comptime_int);
+    try testing.expectEqual(1000, v.max_unique_items);
 }

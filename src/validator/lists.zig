@@ -1,6 +1,6 @@
-//! List rules: `minItems`, `maxItems` and `each`. A list is a slice whose
-//! items are not `u8`, or an array `[N]T` (`[N]u8` included: it is an array
-//! of numbers).
+//! List rules: `minItems`, `maxItems`, `uniqueItems`, `uniqueBy` and `each`.
+//! A list is a slice whose items are not `u8`, or an array `[N]T` (`[N]u8`
+//! included: it is an array of numbers).
 const std = @import("std");
 const core = @import("core.zig");
 const Rule = core.Rule;
@@ -84,6 +84,330 @@ fn countProblem(comptime rule: *const Rule, comptime n: usize, comptime T: type,
     return core.typeErrorText(rule, T, where, "a slice", core.isListSlice, if (core.isString(T)) strings else null);
 }
 
+// ------------------------------------------------------------------ uniqueItems, uniqueBy
+
+/// No two items are equal: bools, enums and integers by value (exactly, at
+/// every width; a non-exhaustive enum by its integer), strings byte for byte,
+/// without case folding or normalization. Bools and exhaustive enums are
+/// checked with a bitset in O(n), at any length. Integers, strings and
+/// non-exhaustive enums are sorted on the stack in O(n log n), without
+/// allocating: on a slice an earlier `v.maxItems(n)` in the same tuple must
+/// cap the list at `max_unique_items` (1000), and on `[N]T` N must be at most
+/// 1000. Float, optional, struct and other items are compile errors (for
+/// structs use `v.uniqueBy`), and so is `[N]T` with N below 2 (always true)
+/// or with more items than the item type has values (always false).
+pub const uniqueItems: Rule = core.define(.unique_items, .{
+    .message = "must not contain duplicates",
+    .fits = struct {
+        fn fits(comptime rule: *const Rule, comptime T: type, comptime where: []const u8) void {
+            if (uniqueItemsProblem(rule, T, where)) |text| @compileError(text);
+        }
+    }.fits,
+    .check_list = capCheck(null),
+    .eval = uniqueEval(null),
+});
+
+/// No two struct items have equal values of the field `key`, written as a
+/// field name: `v.uniqueBy(.id)`. Only the key is compared, as `uniqueItems`
+/// compares items, with the same cap by the key's type; the key is a bool,
+/// enum, integer or string field that is not comptime. The code is
+/// `validation.unique_items`, as for `uniqueItems`; the message names the
+/// key, which is also the placeholder `{key}`.
+pub fn uniqueBy(comptime key: anytype) Rule {
+    @setEvalBranchQuota(core.eval_quota);
+    if (keyCallProblem(key)) |text| @compileError(text);
+    const name = @tagName(key);
+    return core.define(.unique_by, .{
+        .message = "must not contain duplicate " ++ core.renderValue(key) ++ " values",
+        .args = core.renderArg(key),
+        .params = &.{core.param("key", key)},
+        .fits = struct {
+            fn fits(comptime rule: *const Rule, comptime T: type, comptime where: []const u8) void {
+                if (uniqueByProblem(rule, name, T, where)) |text| @compileError(text);
+            }
+        }.fits,
+        .check_list = capCheck(name),
+        .eval = uniqueEval(name),
+    });
+}
+
+/// The error of the call `uniqueBy(key)`, or null: the key is a field name
+/// written as an enum literal.
+fn keyCallProblem(comptime key: anytype) ?[]const u8 {
+    const K = @TypeOf(key);
+    if (@typeInfo(K) == .enum_literal) return null;
+    return "validator: uniqueBy(" ++ core.renderArg(key) ++ "): the key must be a field name such as .id, got " ++ @typeName(K);
+}
+
+/// The declaration error of `uniqueItems` on the unwrapped field type `T`,
+/// or null: a list of bools, enums, integers or strings, and on `[N]T` a
+/// length the rule can decide at run time.
+fn uniqueItemsProblem(comptime rule: *const Rule, comptime T: type, comptime where: []const u8) ?[]const u8 {
+    @setEvalBranchQuota(core.eval_quota);
+    const Item = core.ListChild(T) orelse return core.typeErrorText(rule, T, where, "a slice or an array", acceptsList, null);
+    const struct_text = "; struct items are not supported; " ++ core.hints.use_unique_by;
+    if (keyTypeProblem(Item, "items are " ++ @typeName(Item), "items", struct_text)) |text| return core.ruleErrorText(rule, where, text);
+    return uniqueArrayProblem(rule, T, Item, where);
+}
+
+/// The declaration error of `uniqueBy(.name)` on the unwrapped field type
+/// `T`, or null: a list of structs whose non-comptime field `name` is a bool,
+/// enum, integer or string, and on `[N]T` a length the rule can decide.
+fn uniqueByProblem(comptime rule: *const Rule, comptime name: []const u8, comptime T: type, comptime where: []const u8) ?[]const u8 {
+    @setEvalBranchQuota(core.eval_quota);
+    const Item = core.ListChild(T) orelse return core.typeErrorText(rule, T, where, "a slice or an array of structs", acceptsList, null);
+    const not_structs = ": items are " ++ @typeName(Item) ++ ", not structs; " ++ core.hints.use_unique_items;
+    switch (@typeInfo(Item)) {
+        .@"struct" => |s| if (s.is_tuple) return core.ruleErrorText(rule, where, not_structs),
+        .optional => return core.ruleErrorText(rule, where, ": items are " ++ @typeName(Item) ++ "; optional items are not supported"),
+        else => return core.ruleErrorText(rule, where, not_structs),
+    }
+    const shown = core.tagIdentifier(name);
+    const info = @typeInfo(Item).@"struct";
+    const index = for (info.field_names, 0..) |field, i| {
+        if (std.mem.eql(u8, field, name)) break i;
+    } else return core.ruleErrorText(rule, where, ": " ++ @typeName(Item) ++ " has no field " ++ shown ++ core.suggestion(Item, name));
+    if (info.field_attrs[index].@"comptime") return core.ruleErrorText(rule, where, ": " ++ shown ++ " is a comptime field");
+    const Key = info.field_types[index];
+    if (keyTypeProblem(Key, "the key " ++ shown ++ " is " ++ @typeName(Key), "keys", null)) |text| return core.ruleErrorText(rule, where, text);
+    return uniqueArrayProblem(rule, T, Key, where);
+}
+
+/// Why the compared values of type `K` (`noun`: "items" or "keys") cannot
+/// be checked for uniqueness, as the text after the rule's label, or null:
+/// they are bools, enums, integers or strings. `what` names them
+/// (`items are f64`); `struct_text` is the text for structs, null for the
+/// general one.
+fn keyTypeProblem(comptime K: type, comptime what: []const u8, comptime noun: []const u8, comptime struct_text: ?[]const u8) ?[]const u8 {
+    if (core.isString(K)) return null;
+    const other = ": " ++ what ++ "; only bool, enum, integer and string " ++ noun ++ " are supported";
+    return switch (@typeInfo(K)) {
+        .bool, .int, .@"enum" => null,
+        .float => ": " ++ what ++ "; float " ++ noun ++ " are not supported (NaN != NaN, -0.0 == 0.0)",
+        .optional => ": " ++ what ++ "; optional " ++ noun ++ " are not supported",
+        .@"struct" => |s| if (s.is_tuple) other else if (struct_text) |text| ": " ++ what ++ text else other,
+        else => other,
+    };
+}
+
+/// The declaration error of a uniqueness rule on `[N]T` with compared values
+/// of type `K`, or null; a slice has none here. N below 2 is always true, N
+/// above the number of values of `K` always false, and a sorted `K` needs N
+/// to be at most `max_unique_items`.
+fn uniqueArrayProblem(comptime rule: *const Rule, comptime T: type, comptime K: type, comptime where: []const u8) ?[]const u8 {
+    const n = switch (@typeInfo(T)) {
+        .array => |a| a.len,
+        else => return null,
+    };
+    if (n <= 1) return core.ruleErrorText(rule, where, " on " ++ @typeName(T) ++ " is always true; remove it");
+    if (n > valueCount(K)) return core.ruleErrorText(rule, where, std.fmt.comptimePrint(" on {s} is always false: {d} items cannot all differ", .{ @typeName(T), n }));
+    if (needsCap(K) and n > core.max_unique_items)
+        return core.ruleErrorText(rule, where, std.fmt.comptimePrint(" on {s}: {d} items is more than max_unique_items ({d})", .{ @typeName(T), n, core.max_unique_items }));
+    return null;
+}
+
+/// How many different values of type `K` a list may hold: 2 for bool, the
+/// number of tags of an exhaustive enum, every value of an integer type;
+/// unbounded otherwise.
+fn valueCount(comptime K: type) comptime_int {
+    if (K == bool) return 2;
+    return switch (@typeInfo(K)) {
+        .@"enum" => |e| if (e.mode == .exhaustive) e.field_names.len else std.math.maxInt(e.tag_type) - std.math.minInt(e.tag_type) + 1,
+        .int => std.math.maxInt(K) - std.math.minInt(K) + 1,
+        else => std.math.maxInt(u128),
+    };
+}
+
+/// Integers, strings and non-exhaustive enums are sorted on the stack, so
+/// their lists are capped; bools and exhaustive enums use a bitset.
+fn needsCap(comptime K: type) bool {
+    return K != bool and !core.isExhaustiveEnum(K);
+}
+
+/// The type a uniqueness rule compares: the item, or its field `key`.
+fn KeyOf(comptime Item: type, comptime key: ?[]const u8) type {
+    return if (key) |name| @FieldType(Item, name) else Item;
+}
+
+/// The list check of `uniqueItems` (`key` null) and `uniqueBy(.key)`: a
+/// slice whose compared values are sorted needs an earlier `maxItems(n)`
+/// with `n <= max_unique_items` in the same tuple; the smallest earlier one
+/// counts.
+fn capCheck(comptime key: ?[]const u8) core.ListCheck {
+    return struct {
+        fn check(comptime rule: *const Rule, comptime rules: []const Rule, comptime index: usize, comptime T: type, comptime where: []const u8) void {
+            if (capProblem(rule, rules[0..index], KeyOf(core.ListChild(T).?, key), T, where)) |text| @compileError(text);
+        }
+    }.check;
+}
+
+/// The cap error of a uniqueness rule that compares values of type `K` on
+/// the unwrapped field type `T`, after the rules `earlier`, or null.
+fn capProblem(comptime rule: *const Rule, comptime earlier: []const Rule, comptime K: type, comptime T: type, comptime where: []const u8) ?[]const u8 {
+    @setEvalBranchQuota(core.eval_quota);
+    if (!core.isListSlice(T) or !needsCap(K)) return null;
+    var cap: ?comptime_int = null;
+    var source: []const u8 = "";
+    for (earlier) |*other| {
+        for (other.bounds) |bound| {
+            if (bound.measure != .items or bound.side != .upper) continue;
+            const n: comptime_int = if (bound.inclusive) bound.value.int else bound.value.int - 1;
+            if (cap == null or n < cap.?) {
+                cap = n;
+                source = other.label();
+            }
+        }
+    }
+    const n = cap orelse return core.ruleErrorText(rule, where, " " ++ core.hints.unique_cap);
+    if (n > core.max_unique_items)
+        return core.ruleErrorText(rule, where, std.fmt.comptimePrint(" after {s}: {d} is more than max_unique_items ({d})", .{ source, n, core.max_unique_items }));
+    return null;
+}
+
+/// The run-time check of `uniqueItems` (`key` null) and `uniqueBy(.key)`.
+fn uniqueEval(comptime key: ?[]const u8) fn (anytype) Outcome {
+    return struct {
+        fn eval(value: anytype) Outcome {
+            const T = @TypeOf(value.*);
+            const Item = core.ListChild(T) orelse @compileError("validator: internal: a uniqueness rule's eval was instantiated for a type its fits rejected");
+            const K = KeyOf(Item, key);
+            const items: []const Item = if (@typeInfo(T) == .array) value else value.*;
+            const length: ?usize = if (@typeInfo(T) == .array) @typeInfo(T).array.len else null;
+            return core.passIf(allUnique(Item, K, keyFn(Item, key), items, length));
+        }
+    }.eval;
+}
+
+/// The function that reads the compared value of an item.
+fn keyFn(comptime Item: type, comptime key: ?[]const u8) fn (*const Item) KeyOf(Item, key) {
+    return struct {
+        fn get(item: *const Item) KeyOf(Item, key) {
+            return if (key) |name| @field(item.*, name) else item.*;
+        }
+    }.get;
+}
+
+/// Lists of up to this many items are sorted in small buffers.
+const short_list = 64;
+
+/// No two of `items` have equal keys. Bools and exhaustive enums: a bitset,
+/// O(n). Other keys are sorted on the stack by `sortedUnique`, which only a
+/// list of 2 or more items reaches: a slice of up to `short_list` items in
+/// buffers of that size, a longer one in buffers of `max_unique_items`, and
+/// `[N]T` (`length` N) in buffers of N. A list longer than
+/// `max_unique_items` fails: the declaration checks keep lists shorter, and
+/// a list that got past them is rejected rather than accepted unchecked.
+fn allUnique(comptime Item: type, comptime K: type, comptime key: fn (*const Item) K, items: []const Item, comptime length: ?usize) bool {
+    if (K == bool) {
+        var seen = [2]bool{ false, false };
+        for (items) |*item| {
+            const i = @intFromBool(key(item));
+            if (seen[i]) return false;
+            seen[i] = true;
+        }
+        return true;
+    }
+    if (comptime core.isExhaustiveEnum(K)) {
+        var seen: std.bit_set.Static(@typeInfo(K).@"enum".field_names.len) = .empty;
+        for (items) |*item| {
+            const i = tagIndex(K, key(item));
+            if (seen.isSet(i)) return false;
+            seen.set(i);
+        }
+        return true;
+    }
+    if (items.len < 2) return true;
+    if (items.len > core.max_unique_items) return false;
+    if (length) |n| return sortedUnique(n, Item, K, key, items);
+    if (items.len <= short_list) return sortedUnique(short_list, Item, K, key, items);
+    return sortedUnique(core.max_unique_items, Item, K, key, items);
+}
+
+/// No two of `items`, 2 to `capacity` of them, have equal keys: their
+/// indexes, sorted on the stack by key, have no two equal neighbours.
+/// Strings are sorted by their 64-bit Wyhash, then by bytes, so only strings
+/// with equal hashes are compared byte for byte; integers and non-exhaustive
+/// enums by value. `noinline`, so that the walk does not keep the buffers'
+/// frame while it visits the items of nested lists.
+noinline fn sortedUnique(comptime capacity: usize, comptime Item: type, comptime K: type, comptime key: fn (*const Item) K, items: []const Item) bool {
+    var index_buf: [capacity]u16 = undefined;
+    const order = index_buf[0..items.len];
+    for (order, 0..) |*slot, i| slot.* = @intCast(i);
+    if (comptime core.isString(K)) {
+        var hash_buf: [capacity]u64 = undefined;
+        const hashes = hash_buf[0..items.len];
+        for (items, hashes) |*item, *hash| hash.* = std.hash.Wyhash.hash(0, key(item));
+        const ByHash = struct { items: []const Item, hashes: []const u64 };
+        std.mem.sortUnstable(u16, order, ByHash{ .items = items, .hashes = hashes }, struct {
+            fn lessThan(by: ByHash, a: u16, b: u16) bool {
+                if (by.hashes[a] != by.hashes[b]) return by.hashes[a] < by.hashes[b];
+                return std.mem.order(u8, key(&by.items[a]), key(&by.items[b])) == .lt;
+            }
+        }.lessThan);
+        for (order[0 .. order.len - 1], order[1..]) |a, b| {
+            if (hashes[a] == hashes[b] and std.mem.eql(u8, key(&items[a]), key(&items[b]))) return false;
+        }
+        return true;
+    }
+    std.mem.sortUnstable(u16, order, items, struct {
+        fn lessThan(list: []const Item, a: u16, b: u16) bool {
+            return ordinal(key(&list[a])) < ordinal(key(&list[b]));
+        }
+    }.lessThan);
+    for (order[0 .. order.len - 1], order[1..]) |a, b| {
+        if (ordinal(key(&items[a])) == ordinal(key(&items[b]))) return false;
+    }
+    return true;
+}
+
+/// An integer as it is, a non-exhaustive enum by its integer value.
+fn ordinal(x: anytype) switch (@typeInfo(@TypeOf(x))) {
+    .@"enum" => |e| e.tag_type,
+    else => @TypeOf(x),
+} {
+    return switch (@typeInfo(@TypeOf(x))) {
+        .@"enum" => @backingInt(x),
+        else => x,
+    };
+}
+
+/// The bit of an exhaustive enum's tag: its rank among the tags by value,
+/// found at compile time for each tag (an `inline else` prong), so sparse
+/// tag values need no larger bitset.
+fn tagIndex(comptime E: type, tag: E) usize {
+    switch (tag) {
+        inline else => |t| return comptime valueRank(E, @backingInt(t)),
+    }
+}
+
+/// The number of tags of `E` whose value is below `value`.
+fn valueRank(comptime E: type, comptime value: comptime_int) usize {
+    const values = sortedTagValues(E);
+    var lo: usize = 0;
+    var hi: usize = values.len;
+    while (lo < hi) {
+        const mid = (lo + hi) / 2;
+        if (values[mid] < value) lo = mid + 1 else hi = mid;
+    }
+    return lo;
+}
+
+/// The values of the tags of `E`, in increasing order.
+fn sortedTagValues(comptime E: type) []const comptime_int {
+    comptime {
+        @setEvalBranchQuota(core.eval_quota);
+        const e = @typeInfo(E).@"enum";
+        var values = e.field_values[0..e.field_names.len].*;
+        std.mem.sortUnstable(comptime_int, &values, {}, struct {
+            fn lessThan(_: void, a: comptime_int, b: comptime_int) bool {
+                return a < b;
+            }
+        }.lessThan);
+        const final = values;
+        return &final;
+    }
+}
+
 // ------------------------------------------------------------------ each
 
 /// The rules for every item of a slice or an array: one rule or a tuple of
@@ -117,7 +441,7 @@ pub fn each(comptime rules: anytype) Rule {
 
 /// The arguments the hints show for an uncalled constructor of this file:
 /// `each must be called, e.g. v.each(v.notEmpty)`.
-pub const call_examples = .{ .minItems = "1", .maxItems = "100", .each = "v.notEmpty" };
+pub const call_examples = .{ .minItems = "1", .maxItems = "100", .uniqueBy = ".id", .each = "v.notEmpty" };
 
 const expectOutcome = core.expectOutcome;
 
@@ -242,4 +566,247 @@ test "minItems and maxItems count the items of a slice, null items included" {
     try expectOutcome(.fail, maxItems(2), @as([]const ?u32, &.{ null, null, null }));
     try expectOutcome(.pass, maxItems(1), @as([]const u32, &.{}));
     try expectOutcome(.pass, maxItems(std.math.maxInt(usize)), @as([]const u32, &.{ 1, 2 }));
+}
+
+/// Types for the uniqueness tests: enums of every kind and a struct item
+/// with keys of every kind.
+const Role = enum { admin, user, guest };
+const Sparse = enum(u32) { high = 1_000_000, low = 1, mid = 500 };
+const Open = enum(u8) { a, b, _ };
+const OpenWide = enum(u16) { a, _ };
+const Line = struct {
+    sku: []const u8,
+    qty: u32 = 1,
+    active: bool = true,
+    role: Role = .user,
+    comptime kind: u8 = 1,
+    price: f64 = 0,
+    ref: ?u32 = null,
+    tags: []const []const u8 = &.{},
+};
+
+/// The declaration error of `uniqueItems` on a field of type `T`, or null.
+fn uniqueItemsText(comptime T: type) ?[]const u8 {
+    return uniqueItemsProblem(&uniqueItems, T, test_where);
+}
+
+/// The declaration error of `uniqueBy(key)` on a field of type `T`, or null.
+fn uniqueByText(comptime key: @EnumLiteral(), comptime T: type) ?[]const u8 {
+    return uniqueByProblem(&uniqueBy(key), @tagName(key), T, test_where);
+}
+
+/// The cap error of the last rule of `rules`, a uniqueness rule, on a field
+/// of type `T`, or null.
+fn capText(comptime rules: []const Rule, comptime T: type) ?[]const u8 {
+    const rule = &rules[rules.len - 1];
+    const Item = core.ListChild(T).?;
+    const K = if (rule.kind == .unique_by) @FieldType(Item, rule.params[0].value.tag) else Item;
+    return capProblem(rule, rules[0 .. rules.len - 1], K, T, test_where);
+}
+
+test "uniqueItems and uniqueBy share the code validation.unique_items; uniqueBy names its key in the message and in {key}" {
+    const t = std.testing;
+    try t.expectEqual(core.Kind.unique_items, uniqueItems.kind);
+    try t.expectEqualStrings("validation.unique_items", uniqueItems.code);
+    try t.expectEqualStrings("must not contain duplicates", uniqueItems.message);
+    try t.expectEqual(null, uniqueItems.args);
+    try t.expectEqual(0, uniqueItems.params.len);
+    try t.expectEqual(null, uniqueItems.precondition);
+    const by_email = uniqueBy(.email);
+    try t.expectEqual(core.Kind.unique_by, by_email.kind);
+    try t.expectEqualStrings("validation.unique_items", by_email.code);
+    try t.expectEqualStrings("must not contain duplicate email values", by_email.message);
+    try t.expectEqualStrings(".email", by_email.args.?);
+    try t.expectEqualStrings("unique_by(.email)", comptime by_email.label());
+    try t.expectEqual(1, by_email.params.len);
+    try t.expectEqualStrings("key", by_email.params[0].name);
+    try t.expectEqualStrings("email", by_email.params[0].text);
+    try t.expect(by_email.params[0].placeholder);
+    try t.expectEqual(null, by_email.precondition);
+    // A key that is no plain identifier: escaped in the message, quoted in the call.
+    try t.expectEqualStrings("must not contain duplicate a\\nb values", uniqueBy(.@"a\nb").message);
+    try t.expectEqualStrings("unique_by(.@\"error\")", comptime uniqueBy(.@"error").label());
+}
+
+test "uniqueBy takes a field name written as an enum literal" {
+    const expect = std.testing.expectEqualStrings;
+    try expect("validator: uniqueBy(\"id\"): the key must be a field name such as .id, got *const [2:0]u8", comptime keyCallProblem("id").?);
+    try expect("validator: uniqueBy(1): the key must be a field name such as .id, got comptime_int", comptime keyCallProblem(1).?);
+    try expect("validator: uniqueBy(.user): the key must be a field name such as .id, got lists.Role", comptime keyCallProblem(Role.user).?);
+    try std.testing.expectEqual(null, comptime keyCallProblem(.id));
+}
+
+test "uniqueItems takes lists of bools, enums, integers and strings" {
+    const expect = std.testing.expectEqualStrings;
+    const head = "validator: Dto.field_rules.x: unique_items";
+    try expect(head ++ " expects a slice or an array, field is []const u8 (a string)", comptime uniqueItemsText([]const u8).?);
+    try expect(head ++ " expects a slice or an array, field is u32", comptime uniqueItemsText(u32).?);
+    try expect(head ++ ": items are f64; float items are not supported (NaN != NaN, -0.0 == 0.0)", comptime uniqueItemsText([]const f64).?);
+    try expect(head ++ ": items are lists.Record; struct items are not supported; use v.uniqueBy(.field)", comptime uniqueItemsText([]const Record).?);
+    try expect(head ++ ": items are ?u32; optional items are not supported", comptime uniqueItemsText([]const ?u32).?);
+    try expect(head ++ ": items are []const u32; only bool, enum, integer and string items are supported", comptime uniqueItemsText([]const []const u32).?);
+    try expect(head ++ ": items are struct { u32, u32 }; only bool, enum, integer and string items are supported", comptime uniqueItemsText([]const struct { u32, u32 }).?);
+    try expect(head ++ ": items are [2]u8; only bool, enum, integer and string items are supported", comptime uniqueItemsText([3][2]u8).?);
+    inline for (.{ []const u32, []i8, [:0]const u64, []const bool, []const Role, []const Sparse, []const Open, []const []const u8, [][:0]u8, []const u128, [4]u8, [2]bool, [3]Role }) |T| {
+        try std.testing.expectEqual(null, comptime uniqueItemsText(T));
+    }
+}
+
+test "uniqueItems on [N]T needs 2 to 1000 items, and no more than the item type has values" {
+    const expect = std.testing.expectEqualStrings;
+    const head = "validator: Dto.field_rules.x: unique_items on ";
+    try expect(head ++ "[1]u32 is always true; remove it", comptime uniqueItemsText([1]u32).?);
+    try expect(head ++ "[0][]const u8 is always true; remove it", comptime uniqueItemsText([0][]const u8).?);
+    try expect(head ++ "[3]bool is always false: 3 items cannot all differ", comptime uniqueItemsText([3]bool).?);
+    try expect(head ++ "[4]lists.Role is always false: 4 items cannot all differ", comptime uniqueItemsText([4]Role).?);
+    try expect(head ++ "[3]u1 is always false: 3 items cannot all differ", comptime uniqueItemsText([3]u1).?);
+    try expect(head ++ "[1001]u32: 1001 items is more than max_unique_items (1000)", comptime uniqueItemsText([1001]u32).?);
+    try expect(head ++ "[1001][]const u8: 1001 items is more than max_unique_items (1000)", comptime uniqueItemsText([1001][]const u8).?);
+    try expect(head ++ "[1001]lists.OpenWide: 1001 items is more than max_unique_items (1000)", comptime uniqueItemsText([1001]OpenWide).?);
+    // A non-exhaustive enum holds every value of its integer type: 256 for u8.
+    try expect(head ++ "[257]lists.Open is always false: 257 items cannot all differ", comptime uniqueItemsText([257]Open).?);
+    // Bitset items need no cap.
+    try std.testing.expectEqual(null, comptime uniqueItemsText([1000]u32));
+    try std.testing.expectEqual(null, comptime uniqueItemsText([2]u1));
+    try std.testing.expectEqual(null, comptime uniqueItemsText([3]Sparse));
+}
+
+test "uniqueBy takes lists of structs whose key is a bool, enum, integer or string field" {
+    const expect = std.testing.expectEqualStrings;
+    const head = "validator: Dto.field_rules.x: unique_by";
+    try expect(head ++ " expects a slice or an array of structs, field is lists.Line", comptime uniqueByText(.sku, Line).?);
+    try expect(head ++ " expects a slice or an array of structs, field is []const u8 (a string)", comptime uniqueByText(.sku, []const u8).?);
+    try expect(head ++ "(.id): items are u32, not structs; use v.uniqueItems", comptime uniqueByText(.id, []const u32).?);
+    try expect(head ++ "(.id): items are struct { u32, u32 }, not structs; use v.uniqueItems", comptime uniqueByText(.id, []const struct { u32, u32 }).?);
+    try expect(head ++ "(.id): items are ?lists.Record; optional items are not supported", comptime uniqueByText(.id, []const ?Record).?);
+    try expect(head ++ "(.skus): lists.Line has no field skus; did you mean \"sku\"?", comptime uniqueByText(.skus, []const Line).?);
+    try expect(head ++ "(.zzz): lists.Line has no field zzz", comptime uniqueByText(.zzz, []const Line).?);
+    try expect(head ++ "(.kind): kind is a comptime field", comptime uniqueByText(.kind, []const Line).?);
+    try expect(head ++ "(.price): the key price is f64; float keys are not supported (NaN != NaN, -0.0 == 0.0)", comptime uniqueByText(.price, []const Line).?);
+    try expect(head ++ "(.ref): the key ref is ?u32; optional keys are not supported", comptime uniqueByText(.ref, []const Line).?);
+    try expect(head ++ "(.tags): the key tags is []const []const u8; only bool, enum, integer and string keys are supported", comptime uniqueByText(.tags, []const Line).?);
+    try expect(head ++ "(.sku) on [1]lists.Line is always true; remove it", comptime uniqueByText(.sku, [1]Line).?);
+    try expect(head ++ "(.active) on [3]lists.Line is always false: 3 items cannot all differ", comptime uniqueByText(.active, [3]Line).?);
+    try expect(head ++ "(.qty) on [1001]lists.Line: 1001 items is more than max_unique_items (1000)", comptime uniqueByText(.qty, [1001]Line).?);
+    inline for (.{ []const Line, [2]Line, []Line }) |T| {
+        try std.testing.expectEqual(null, comptime uniqueByText(.sku, T));
+        try std.testing.expectEqual(null, comptime uniqueByText(.qty, T));
+        try std.testing.expectEqual(null, comptime uniqueByText(.active, T));
+        try std.testing.expectEqual(null, comptime uniqueByText(.role, T));
+    }
+}
+
+test "on a slice, integer, string and non-exhaustive enum items need an earlier maxItems(n) with n <= 1000" {
+    const expect = std.testing.expectEqualStrings;
+    const head = "validator: Dto.field_rules.x: ";
+    const needs = " needs an earlier v.maxItems(n) with n <= 1000 (max_unique_items) in the same tuple";
+    try expect(head ++ "unique_items" ++ needs, comptime capText(&.{uniqueItems}, []const u32).?);
+    try expect(head ++ "unique_items" ++ needs, comptime capText(&.{uniqueItems}, []const []const u8).?);
+    try expect(head ++ "unique_items" ++ needs, comptime capText(&.{uniqueItems}, []const Open).?);
+    try expect(head ++ "unique_items" ++ needs, comptime capText(&.{ minItems(1), uniqueItems }, []const u32).?);
+    try expect(head ++ "unique_by(.sku)" ++ needs, comptime capText(&.{uniqueBy(.sku)}, []const Line).?);
+    try expect(head ++ "unique_items after max_items(1001): 1001 is more than max_unique_items (1000)", comptime capText(&.{ maxItems(1001), uniqueItems }, []const u32).?);
+    try expect(head ++ "unique_by(.qty) after max_items(5000): 5000 is more than max_unique_items (1000)", comptime capText(&.{ maxItems(5000), maxItems(9000), uniqueBy(.qty) }, []const Line).?);
+    // The smallest earlier maxItems counts.
+    try std.testing.expectEqual(null, comptime capText(&.{ maxItems(1000), uniqueItems }, []const u32));
+    try std.testing.expectEqual(null, comptime capText(&.{ maxItems(5000), maxItems(10), uniqueItems }, []const u32));
+    try std.testing.expectEqual(null, comptime capText(&.{ maxItems(50), uniqueBy(.sku) }, []const Line));
+    // Bools and exhaustive enums, and arrays, need no maxItems.
+    try std.testing.expectEqual(null, comptime capText(&.{uniqueItems}, []const bool));
+    try std.testing.expectEqual(null, comptime capText(&.{uniqueItems}, []const Role));
+    try std.testing.expectEqual(null, comptime capText(&.{uniqueBy(.role)}, []const Line));
+    try std.testing.expectEqual(null, comptime capText(&.{uniqueBy(.active)}, []const Line));
+    try std.testing.expectEqual(null, comptime capText(&.{uniqueItems}, [1000]u32));
+}
+
+test "an uncalled uniqueBy gets an example call" {
+    try std.testing.expectEqualStrings("validator: Dto.field_rules.x: uniqueBy must be called, e.g. v.uniqueBy(.id)", comptime uncalledText("uniqueBy", @TypeOf(uniqueBy)));
+}
+
+test "uniqueItems compares integers exactly at every width, by value" {
+    try expectOutcome(.pass, uniqueItems, @as([]const u32, &.{}));
+    try expectOutcome(.pass, uniqueItems, @as([]const u32, &.{7}));
+    try expectOutcome(.pass, uniqueItems, @as([]const u32, &.{ 1, 2, 3 }));
+    try expectOutcome(.fail, uniqueItems, @as([]const u32, &.{ 1, 2, 1 }));
+    try expectOutcome(.fail, uniqueItems, @as([]const i8, &.{ -128, 127, -128 }));
+    try expectOutcome(.pass, uniqueItems, @as([]const u64, &.{ 9007199254740992, 9007199254740993 }));
+    try expectOutcome(.fail, uniqueItems, @as([]const u128, &.{ std.math.maxInt(u128), 0, std.math.maxInt(u128) }));
+    try expectOutcome(.pass, uniqueItems, @as([:0]const u32, &.{ 1, 2 }));
+    try expectOutcome(.pass, uniqueItems, [4]u8{ 1, 2, 3, 4 });
+    try expectOutcome(.fail, uniqueItems, [4]u8{ 1, 2, 3, 1 });
+}
+
+test "uniqueItems compares strings byte for byte, case and normalization included" {
+    try expectOutcome(.pass, uniqueItems, @as([]const []const u8, &.{ "a", "A", "", "a " }));
+    try expectOutcome(.fail, uniqueItems, @as([]const []const u8, &.{ "a", "b", "a" }));
+    try expectOutcome(.fail, uniqueItems, @as([]const []const u8, &.{ "", "" }));
+    // "é" composed and decomposed are different bytes.
+    try expectOutcome(.pass, uniqueItems, @as([]const []const u8, &.{ "\u{e9}", "e\u{301}" }));
+    try expectOutcome(.fail, uniqueItems, @as([]const [:0]const u8, &.{ "x", "y", "x" }));
+    try expectOutcome(.pass, uniqueItems, [2][]const u8{ "x", "y" });
+}
+
+test "uniqueItems compares bools and enums by tag, sparse and non-exhaustive ones too" {
+    try expectOutcome(.pass, uniqueItems, @as([]const bool, &.{ true, false }));
+    try expectOutcome(.fail, uniqueItems, @as([]const bool, &.{ false, true, false }));
+    try expectOutcome(.fail, uniqueItems, @as([]const bool, &.{ true, true }));
+    try expectOutcome(.pass, uniqueItems, @as([]const Role, &.{ .guest, .admin, .user }));
+    try expectOutcome(.fail, uniqueItems, @as([]const Role, &.{ .guest, .admin, .guest }));
+    try expectOutcome(.pass, uniqueItems, @as([]const Sparse, &.{ .high, .low, .mid }));
+    try expectOutcome(.fail, uniqueItems, @as([]const Sparse, &.{ .mid, .high, .mid }));
+    try expectOutcome(.pass, uniqueItems, @as([]const Open, &.{ .a, .b, @fromBackingInt(7) }));
+    try expectOutcome(.fail, uniqueItems, @as([]const Open, &.{ @fromBackingInt(7), .a, @fromBackingInt(7) }));
+    try expectOutcome(.pass, uniqueItems, [3]Role{ .user, .guest, .admin });
+    try expectOutcome(.fail, uniqueItems, [2]bool{ true, true });
+}
+
+test "uniqueBy compares only the key of each item" {
+    const lines: []const Line = &.{ .{ .sku = "A", .qty = 1 }, .{ .sku = "B", .qty = 1 } };
+    try expectOutcome(.pass, uniqueBy(.sku), lines);
+    try expectOutcome(.fail, uniqueBy(.qty), lines);
+    try expectOutcome(.fail, uniqueBy(.active), lines);
+    try expectOutcome(.fail, uniqueBy(.role), lines);
+    try expectOutcome(.fail, uniqueBy(.sku), @as([]const Line, &.{ .{ .sku = "A" }, .{ .sku = "B" }, .{ .sku = "A", .qty = 2 } }));
+    try expectOutcome(.pass, uniqueBy(.role), [3]Line{ .{ .sku = "", .role = .admin }, .{ .sku = "", .role = .user }, .{ .sku = "", .role = .guest } });
+    try expectOutcome(.pass, uniqueBy(.active), [2]Line{ .{ .sku = "", .active = true }, .{ .sku = "", .active = false } });
+    try expectOutcome(.pass, uniqueBy(.id), @as([]const Record, &.{}));
+    try expectOutcome(.pass, uniqueBy(.id), @as([]const Record, &.{.{ .id = 1 }}));
+}
+
+/// `n` different integers, the last one repeated when `duplicate`.
+fn distinctInts(comptime n: usize, comptime duplicate: bool) [n]u64 {
+    var out: [n]u64 = undefined;
+    for (&out, 0..) |*slot, i| slot.* = (n - i) * 7919;
+    if (duplicate) out[n - 1] = out[0];
+    return out;
+}
+
+/// `n` different strings of `len` bytes that differ only in their last
+/// bytes, the last one repeated when `duplicate`.
+fn distinctStrings(comptime n: usize, comptime len: usize, comptime duplicate: bool) [n][]const u8 {
+    comptime {
+        @setEvalBranchQuota(core.eval_quota);
+        var out: [n][]const u8 = undefined;
+        for (&out, 0..) |*slot, i| slot.* = &(@as([len - 4]u8, @splat('s')) ++ std.fmt.comptimePrint("{d:0>4}", .{i}).*);
+        if (duplicate) out[n - 1] = out[(n - 1) / 2];
+        const final = out;
+        return final;
+    }
+}
+
+test "uniqueItems sorts short lists, long lists and arrays up to max_unique_items" {
+    // Short lists (up to 64 items), longer ones and an array of 1000 items.
+    inline for (.{ 2, 64, 65, 1000 }) |n| {
+        const ints = comptime distinctInts(n, false);
+        const ints_dup = comptime distinctInts(n, true);
+        try expectOutcome(.pass, uniqueItems, @as([]const u64, &ints));
+        try expectOutcome(.fail, uniqueItems, @as([]const u64, &ints_dup));
+        try expectOutcome(.pass, uniqueItems, ints);
+        try expectOutcome(.fail, uniqueItems, ints_dup);
+        const strings = comptime distinctStrings(n, 40, false);
+        const strings_dup = comptime distinctStrings(n, 40, true);
+        try expectOutcome(.pass, uniqueItems, @as([]const []const u8, &strings));
+        try expectOutcome(.fail, uniqueItems, @as([]const []const u8, &strings_dup));
+        try expectOutcome(.fail, uniqueItems, strings_dup);
+    }
 }

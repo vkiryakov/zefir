@@ -140,6 +140,17 @@ pub const list = [_]Fixture{
     .{ .file = "src/validator/testdata/compile_errors/min_items_negative.zig", .expect = "type 'usize' cannot represent integer value '-1'", .row = "Z-1" },
     .{ .file = "src/validator/testdata/compile_errors/max_items_fractional.zig", .expect = "fractional component prevents float value '1.5' from coercion to type 'usize'", .row = "Z-2" },
     .{ .file = "src/validator/testdata/compile_errors/min_items_uncalled_with_message.zig", .expect = "no field or member function named 'withMessage' in 'fn (comptime usize) core.Rule'", .row = "variant of Z-5" },
+    // uniqueItems and uniqueBy: one fixture per kind of error; the text of every
+    // catalog row is checked by the tests of lists.zig
+    .{ .file = "src/validator/testdata/compile_errors/unique_items_without_cap.zig", .expect = "validator: unique_items_without_cap.Bad.field_rules.x: unique_items needs an earlier v.maxItems(n) with n <= 1000 (max_unique_items) in the same tuple", .row = "uniqueItems-1" },
+    .{ .file = "src/validator/testdata/compile_errors/unique_items_cap_after_in_each.zig", .expect = "validator: unique_items_cap_after_in_each.Bad.field_rules.x[]: unique_items needs an earlier v.maxItems(n) with n <= 1000 (max_unique_items) in the same tuple", .row = "variant of uniqueItems-1" },
+    .{ .file = "src/validator/testdata/compile_errors/unique_items_cap_too_big.zig", .expect = "validator: unique_items_cap_too_big.Bad.field_rules.x: unique_items after max_items(1001): 1001 is more than max_unique_items (1000)", .row = "uniqueItems-2" },
+    .{ .file = "src/validator/testdata/compile_errors/unique_items_float_items.zig", .expect = "validator: unique_items_float_items.Bad.field_rules.x: unique_items: items are f64; float items are not supported (NaN != NaN, -0.0 == 0.0)", .row = "uniqueItems-6" },
+    .{ .file = "src/validator/testdata/compile_errors/unique_items_on_string.zig", .expect = "validator: unique_items_on_string.Bad.field_rules.x: unique_items expects a slice or an array, field is []const u8 (a string)", .row = "uniqueItems-10" },
+    .{ .file = "src/validator/testdata/compile_errors/unique_items_one_item_array.zig", .expect = "validator: unique_items_one_item_array.Bad.field_rules.x: unique_items on [1]u32 is always true; remove it", .row = "uniqueItems-4" },
+    .{ .file = "src/validator/testdata/compile_errors/unique_by_not_literal.zig", .expect = "validator: uniqueBy(\"id\"): the key must be a field name such as .id, got *const [2:0]u8", .row = "uniqueBy-1" },
+    .{ .file = "src/validator/testdata/compile_errors/unique_by_unknown_key.zig", .expect = "validator: unique_by_unknown_key.Bad.field_rules.x: unique_by(.idd): unique_by_unknown_key.Item has no field idd; did you mean \"id\"?", .row = "uniqueBy-6" },
+    .{ .file = "src/validator/testdata/compile_errors/unique_by_uncalled.zig", .expect = "validator: unique_by_uncalled.Bad.field_rules.x: uniqueBy must be called, e.g. v.uniqueBy(.id)", .row = "uniqueBy-16" },
     // contradictions: two rules whose bounds let no value pass; the texts of
     // every pair are checked by the tests of core.zig
     .{ .file = "src/validator/testdata/compile_errors/contradiction_min_max.zig", .expect = "validator: contradiction_min_max.Bad.field_rules.x: min(10) and max(5) contradict; no value can pass", .row = "min-14" },

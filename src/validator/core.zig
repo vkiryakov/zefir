@@ -18,6 +18,11 @@ pub const max_code_bytes = 128;
 pub const max_message_bytes = 512;
 /// Most violations `checkAll` keeps; `Report.truncated` says when more existed.
 pub const max_report_violations = 100;
+/// Longest list whose uniqueness `uniqueItems` and `uniqueBy` check by
+/// sorting on the stack: integer, string and non-exhaustive enum items or
+/// keys need an earlier `maxItems(n)` with `n` at most this on a slice, and
+/// `N` at most this on `[N]T`.
+pub const max_unique_items = 1000;
 
 /// One failed rule. The library builds `code` and `message` at compile time:
 /// they live as long as the program and never contain the checked value, so
@@ -1637,6 +1642,14 @@ pub fn isFloat(comptime T: type) bool {
     return @typeInfo(T) == .float;
 }
 
+/// An enum without `_`: its values are its named tags.
+pub fn isExhaustiveEnum(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .@"enum" => |e| e.mode == .exhaustive,
+        else => false,
+    };
+}
+
 /// A signed integer or a float type: the field types of the sign rules.
 pub fn isSignedNumber(comptime T: type) bool {
     return switch (@typeInfo(T)) {
@@ -1716,6 +1729,11 @@ pub const hints = struct {
     /// `minItems` and `maxItems` on a string field.
     pub const min_items_on_string = "for strings use v.minLength or v.minBytes";
     pub const max_items_on_string = "for strings use v.maxLength or v.maxBytes";
+    /// `uniqueItems` on struct items, and `uniqueBy` on items that are not structs.
+    pub const use_unique_by = "use v.uniqueBy(.field)";
+    pub const use_unique_items = "use v.uniqueItems";
+    /// `uniqueItems` or `uniqueBy` on a slice that needs a cap and has none before it.
+    pub const unique_cap = std.fmt.comptimePrint("needs an earlier v.maxItems(n) with n <= {d} (max_unique_items) in the same tuple", .{max_unique_items});
 
     /// A rule written on a list whose items it would accept.
     pub fn useEach(comptime rule: Rule) []const u8 {
@@ -1774,8 +1792,6 @@ fn callExample(comptime name: []const u8) ?[]const u8 {
 /// its lines; the list is empty once all 96 rules are exported.
 pub const pending_kinds = [_]Kind{
     // PR 1c
-    .unique_items,
-    .unique_by,
     .contains_all,
     .contains_none,
     // PR 2a

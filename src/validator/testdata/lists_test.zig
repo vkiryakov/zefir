@@ -2,6 +2,8 @@
 //! (`[N]u8` included), optional lists, optional items, nested lists, and one
 //! rule or a tuple of rules per item. `v.minItems` and `v.maxItems` on every
 //! kind of slice, optional slices, and inner lists through `each`.
+//! `v.uniqueItems` and `v.uniqueBy` on slices and arrays of every item and
+//! key type they take, behind their `maxItems` cap and inside `each`.
 const std = @import("std");
 const v = @import("validator");
 const h = @import("vtest");
@@ -12,6 +14,8 @@ const not_empty_code = "validation.not_empty";
 const not_empty_message = "must not be empty";
 const min_items_code = "validation.min_items";
 const max_items_code = "validation.max_items";
+const unique_code = "validation.unique_items";
+const unique_message = "must not contain duplicates";
 
 fn isLower(s: []const u8) bool {
     for (s) |c| {
@@ -186,4 +190,87 @@ test "minItems and maxItems run in tuple order before each; notEmpty and minItem
     try h.expectAt(&Both{ .x = &.{} }, not_empty_code, not_empty_message, "x");
     const Reversed = h.One([]const u32, .{ v.minItems(1), v.notEmpty });
     try h.expectAt(&Reversed{ .x = &.{} }, min_items_code, "must have at least 1 item", "x");
+}
+
+const Role = enum { admin, editor, viewer };
+const Mode = enum(u8) { read, write, _ };
+const Line = struct {
+    sku: []const u8,
+    qty: u32,
+    gift: bool = false,
+    role: Role = .viewer,
+};
+
+test "uniqueItems and uniqueBy share the code validation.unique_items; uniqueBy's message names the key" {
+    try h.expectRule(v.uniqueItems, unique_code, unique_message);
+    try h.expectRule(v.uniqueBy(.sku), unique_code, "must not contain duplicate sku values");
+    try h.expectRule(v.uniqueBy(.sku).withMessage("{key} must differ"), unique_code, "sku must differ");
+}
+
+test "uniqueItems on slices of integers, strings and enums, behind an earlier maxItems" {
+    const capped = .{ v.maxItems(10), v.uniqueItems };
+    try h.expectPass([]const u32, capped, &.{ 3, 1, 2 });
+    try h.expectFail([]const u32, capped, &.{ 3, 1, 3 }, unique_code, unique_message);
+    try h.expectPass([]const i64, capped, &.{ -1, 1 });
+    try h.expectFail([]const i64, capped, &.{ std.math.minInt(i64), 0, std.math.minInt(i64) }, unique_code, unique_message);
+    // Exact at every width: two integers that a double cannot tell apart differ.
+    try h.expectPass([]const u64, capped, &.{ 9007199254740992, 9007199254740993 });
+    try h.expectPass([]const []const u8, capped, &.{ "go", "Go", "zig" });
+    try h.expectFail([]const []const u8, capped, &.{ "go", "zig", "go" }, unique_code, unique_message);
+    var a = "x".*;
+    var b = "x".*;
+    var mutable = [_][]u8{ &a, &b };
+    try h.expectFail([][]u8, capped, &mutable, unique_code, unique_message);
+    try h.expectPass([]const Mode, capped, &.{ .read, .write, @fromBackingInt(9) });
+    try h.expectFail([]const Mode, capped, &.{ @fromBackingInt(9), .read, @fromBackingInt(9) }, unique_code, unique_message);
+    // An empty list and one item are unique.
+    try h.expectPass([]const u32, capped, &.{});
+    try h.expectPass([]const []const u8, capped, &.{""});
+    // The cap runs first: a list longer than it fails with max_items.
+    try h.expectFail([]const u32, .{ v.maxItems(2), v.uniqueItems }, &.{ 1, 1, 1 }, max_items_code, "must have at most 2 items");
+}
+
+test "uniqueItems on bools and exhaustive enums needs no maxItems" {
+    try h.expectPass([]const bool, v.uniqueItems, &.{ true, false });
+    try h.expectFail([]const bool, v.uniqueItems, &.{ true, false, true }, unique_code, unique_message);
+    try h.expectPass([]const Role, v.uniqueItems, &.{ .viewer, .admin });
+    try h.expectFail([]const Role, v.uniqueItems, &.{ .viewer, .admin, .viewer }, unique_code, unique_message);
+    try h.expectPass(?[]const Role, v.uniqueItems, null);
+    try h.expectFail(?[]const Role, v.uniqueItems, @as([]const Role, &.{ .editor, .editor }), unique_code, unique_message);
+}
+
+test "uniqueItems on arrays needs no maxItems" {
+    try h.expectPass([3]u32, v.uniqueItems, .{ 1, 2, 3 });
+    try h.expectFail([3]u32, v.uniqueItems, .{ 1, 2, 1 }, unique_code, unique_message);
+    try h.expectPass([4]u8, v.uniqueItems, .{ 4, 3, 2, 1 });
+    try h.expectFail([2][]const u8, v.uniqueItems, .{ "a", "a" }, unique_code, unique_message);
+    try h.expectPass([3]Role, v.uniqueItems, .{ .editor, .viewer, .admin });
+    try h.expectFail([2]bool, v.uniqueItems, .{ false, false }, unique_code, unique_message);
+}
+
+test "uniqueBy compares one field of struct items" {
+    const by_sku = .{ v.maxItems(50), v.uniqueBy(.sku) };
+    try h.expectPass([]const Line, by_sku, &.{ .{ .sku = "A", .qty = 1 }, .{ .sku = "B", .qty = 1 } });
+    try h.expectFail([]const Line, by_sku, &.{ .{ .sku = "A", .qty = 1 }, .{ .sku = "B", .qty = 2 }, .{ .sku = "A", .qty = 3 } }, unique_code, "must not contain duplicate sku values");
+    const by_qty = .{ v.maxItems(50), v.uniqueBy(.qty) };
+    try h.expectFail([]const Line, by_qty, &.{ .{ .sku = "A", .qty = 1 }, .{ .sku = "B", .qty = 1 } }, unique_code, "must not contain duplicate qty values");
+    // Bool and enum keys need no maxItems.
+    try h.expectFail([]const Line, v.uniqueBy(.gift), &.{ .{ .sku = "A", .qty = 1 }, .{ .sku = "B", .qty = 2 } }, unique_code, "must not contain duplicate gift values");
+    try h.expectPass([]const Line, v.uniqueBy(.role), &.{ .{ .sku = "A", .qty = 1, .role = .admin }, .{ .sku = "A", .qty = 1 } });
+    try h.expectPass([2]Line, v.uniqueBy(.sku), .{ .{ .sku = "A", .qty = 1 }, .{ .sku = "B", .qty = 1 } });
+    try h.expectFail([2]Line, v.uniqueBy(.qty), .{ .{ .sku = "A", .qty = 1 }, .{ .sku = "B", .qty = 1 } }, unique_code, "must not contain duplicate qty values");
+}
+
+test "uniqueItems inside each checks every inner list behind its own cap, at the inner list's path" {
+    const Rows = h.One([]const []const u32, v.each(.{ v.maxItems(3), v.uniqueItems }));
+    try h.expectValid(&Rows{ .x = &.{ &.{ 1, 2 }, &.{ 1, 2, 3 } } });
+    try h.expectAt(&Rows{ .x = &.{ &.{ 1, 2 }, &.{ 3, 3 } } }, unique_code, unique_message, "x[1]");
+    try h.expectAll(&Rows{ .x = &.{ &.{ 1, 1 }, &.{2}, &.{ 3, 3 } } }, &.{
+        .{ .code = unique_code, .field = "x[0]" },
+        .{ .code = unique_code, .field = "x[2]" },
+    });
+    // The list's own uniqueness and its items' rules: the items are walked only when the list passes.
+    const Tags = h.One([]const []const u8, .{ v.maxItems(5), v.uniqueItems, v.each(v.notEmpty) });
+    try h.expectAt(&Tags{ .x = &.{ "", "" } }, unique_code, unique_message, "x");
+    try h.expectAt(&Tags{ .x = &.{ "a", "" } }, not_empty_code, not_empty_message, "x[1]");
 }

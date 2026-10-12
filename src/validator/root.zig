@@ -46,6 +46,7 @@ pub const Report = walk.Report;
 pub const max_code_bytes = core.max_code_bytes;
 pub const max_message_bytes = core.max_message_bytes;
 pub const max_report_violations = core.max_report_violations;
+pub const max_unique_items = core.max_unique_items;
 
 pub const check = walk.check;
 pub const checkAll = walk.checkAll;
@@ -69,6 +70,8 @@ pub const divisibleBy = numbers.divisibleBy;
 pub const finite = numbers.finite;
 pub const minItems = lists.minItems;
 pub const maxItems = lists.maxItems;
+pub const uniqueItems = lists.uniqueItems;
+pub const uniqueBy = lists.uniqueBy;
 pub const each = lists.each;
 pub const custom = custom_rules.custom;
 
@@ -85,10 +88,12 @@ test "limits have their documented values" {
     try std.testing.expectEqual(128, max_code_bytes);
     try std.testing.expectEqual(512, max_message_bytes);
     try std.testing.expectEqual(100, max_report_violations);
+    try std.testing.expectEqual(1000, max_unique_items);
     // comptime_int, so a limit sizes an array or compares with any integer type.
     try std.testing.expect(@TypeOf(max_code_bytes) == comptime_int);
     try std.testing.expect(@TypeOf(max_message_bytes) == comptime_int);
     try std.testing.expect(@TypeOf(max_report_violations) == comptime_int);
+    try std.testing.expect(@TypeOf(max_unique_items) == comptime_int);
 }
 
 test "a violation has no field unless one is given" {

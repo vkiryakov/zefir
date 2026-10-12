@@ -50,6 +50,8 @@ test "every rule has its default code and message, in the singular and the plura
     try h.expectRule(v.finite, finite_code, finite_message);
     try h.expectRule(v.maxItems(1), "validation.max_items", "must have at most 1 item");
     try h.expectRule(v.maxItems(100), "validation.max_items", "must have at most 100 items");
+    try h.expectRule(v.uniqueItems, "validation.unique_items", "must not contain duplicates");
+    try h.expectRule(v.uniqueBy(.email), "validation.unique_items", "must not contain duplicate email values");
     // each reports through its inner rules.
     try h.expectRule(v.each(v.notEmpty), "", "");
 }
