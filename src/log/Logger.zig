@@ -1270,11 +1270,10 @@ fn emergencyThenCheckCancel(logger: Logger, go: *std.atomic.Value(bool)) std.Io.
 }
 
 test "emergency writes its record while a cancel request is pending, and keeps the request" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest; // the test needs POSIX pipes
-    var stderr: StderrPipe = try .open();
+    var stderr: StderrFile = try .open();
     defer stderr.close();
     const logger: Logger = try .init(testing.allocator, testing.io, .{});
-    logger.engine.stderr = stderr.write_end;
+    logger.engine.stderr = stderr.file;
     var go: std.atomic.Value(bool) = .init(false);
     var task = try testing.io.concurrent(emergencyThenCheckCancel, .{ logger, &go });
     go.store(true, .seq_cst);
@@ -1282,7 +1281,7 @@ test "emergency writes its record while a cancel request is pending, and keeps t
     const s = logger.stats();
     logger.deinit();
     var buf: [256]u8 = undefined;
-    try testing.expectStringEndsWith(try stderr.finish(&buf), "\"message\":\"Going down\"}\n");
+    try testing.expectStringEndsWith(try stderr.read(&buf), "\"message\":\"Going down\"}\n");
     try testing.expectError(error.Canceled, result);
     try testing.expectEqual(@as(u64, 1), s.emergency_written);
 }
@@ -1344,6 +1343,74 @@ fn expectFailedFlushTorn(mode: options.Mode) !void {
 test "a writer whose flush fails: the record counts as dropped and its line as torn" {
     try expectFailedFlushTorn(.sync);
     try expectFailedFlushTorn(.{ .queued = .{} });
+}
+
+/// A buffered writer over a slow sink: each drain sends what the buffer
+/// held, then takes as much of the new bytes into the buffer as fits, and
+/// those count as written. Its third drain fails and loses what it held.
+const SlowSink = struct {
+    drains: u32 = 0,
+    sink: std.Io.Writer.Allocating,
+    buffer: [250]u8 = undefined,
+    writer: std.Io.Writer = undefined,
+
+    fn open(s: *SlowSink) void {
+        s.writer = .{ .buffer = &s.buffer, .vtable = &.{ .drain = drain } };
+    }
+
+    fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+        // The logger writes one slice at a time.
+        std.debug.assert(data.len == 1 and splat == 1);
+        const s: *SlowSink = @alignCast(@fieldParentPtr("writer", w));
+        s.drains += 1;
+        if (s.drains == 3) {
+            w.end = 0;
+            return error.WriteFailed;
+        }
+        s.sink.writer.writeAll(w.buffered()) catch return error.WriteFailed;
+        const taken = @min(data[0].len, w.buffer.len);
+        @memcpy(w.buffer[0..taken], data[0][0..taken]);
+        w.end = taken;
+        return taken;
+    }
+};
+
+test "queued: a buffered writer whose write fails mid-batch: the batch counts as dropped and its line as torn" {
+    var slow: SlowSink = .{ .sink = .init(testing.allocator) };
+    defer slow.sink.deinit();
+    slow.open();
+    const logger: Logger = try .init(testing.allocator, testing.io, .{
+        .format = .text,
+        .mode = .{ .queued = .{ .capacity = 64, .batch_size = 64 } },
+        .output = .{ .writer = &slow.writer },
+    });
+    defer logger.deinit();
+    // Seven 100-byte lines in one batch: a slot reserved first holds the
+    // writer thread back until all of them are in.
+    var lines: [7][100]u8 = undefined;
+    for (&lines, 0..) |*line, i| {
+        line.* = @splat('a' + @as(u8, @intCast(i)));
+        line[99] = '\n';
+    }
+    const q = &logger.engine.queue.?;
+    const first = try q.reserve();
+    var published = false;
+    defer if (!published) q.publish(first, &lines[0]);
+    for (lines[1..]) |*line| try q.tryPush(line);
+    q.publish(first, &lines[0]);
+    published = true;
+    try logger.flush(.none); // a, b and half of c reached the sink before the write failed
+    logger.info("after", .{});
+    try logger.flush(.none);
+    const s = logger.stats();
+    try testing.expectEqual(@as(u64, 1), s.written);
+    try testing.expectEqual(@as(u64, 7), s.dropped.write_failed);
+    try testing.expectEqual(@as(u64, 1), s.torn_lines);
+    try testing.expectEqual(@as(u64, 1), s.write_errors);
+    const out = slow.sink.written();
+    try testing.expectStringEndsWith(out, " INFO  after\n");
+    const last_line = if (std.mem.findLast(u8, out[0 .. out.len - 1], "\n")) |at| at + 1 else 0;
+    try testing.expect(std.ascii.isDigit(out[last_line])); // its timestamp, not the rest of c
 }
 
 fn shutdownThenCheckJoined(logger: Logger, joined: *std.atomic.Value(u32)) void {
@@ -1655,10 +1722,10 @@ test "queued: logging, waits for room, the error summary, emergency, flush and s
     try waited;
     try blocking.flush(.none);
 
-    if (builtin.os.tag != .windows) {
-        var stderr: StderrPipe = try .open();
+    {
+        var stderr: StderrFile = try .open();
         defer stderr.close();
-        dropping.engine.stderr = stderr.write_end;
+        dropping.engine.stderr = stderr.file;
         dropping.emergency("Going down", .{ .code = 7 });
     }
     try dropping.shutdown(.none);
@@ -1669,13 +1736,12 @@ test "queued: logging, waits for room, the error summary, emergency, flush and s
 }
 
 test "emergency: a record with no room for the count goes out without it, and the next one tells" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest; // the test needs POSIX pipes
-    var stderr: StderrPipe = try .open();
+    var stderr: StderrFile = try .open();
     defer stderr.close();
     // The smallest record that holds every mandatory part.
     const smallest: u32 = @intCast(encode.mandatoryBytes(.json, 0, scopes.max_name_bytes));
     const logger: Logger = try .init(testing.allocator, testing.io, .{ .max_record_bytes = smallest });
-    logger.engine.stderr = stderr.write_end;
+    logger.engine.stderr = stderr.file;
     const long_scope: [scopes.max_name_bytes]u8 = @splat('s');
     const ctx = core.Context.root.withTrace(try traceContext("4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7"));
     const widest = logger.scoped(&long_scope).withContext(ctx);
@@ -1684,15 +1750,99 @@ test "emergency: a record with no room for the count goes out without it, and th
     logger.emergency("Dropped", .{});
     logger.emergency("Dropped", .{});
     logger.engine.bucket.earned_at = 0; // long ago: the bucket is full again
-    widest.emergency("M", .{});
+    widest.emergency("Message", .{}); // whole, 13 bytes short of the limit: `,"suppressed":2` takes 15
     logger.emergency("Next", .{});
     const s = logger.stats();
     logger.deinit();
     var buf: [2048]u8 = undefined;
-    var lines = std.mem.splitScalar(u8, try stderr.finish(&buf), '\n');
-    try testing.expect(std.mem.find(u8, lines.next().?, "suppressed") == null);
+    var lines = std.mem.splitScalar(u8, try stderr.read(&buf), '\n');
+    const whole = lines.next().?;
+    try testing.expect(std.mem.find(u8, whole, "suppressed") == null);
+    try testing.expect(std.mem.find(u8, whole, "truncated") == null);
     try testing.expectStringEndsWith(lines.next().?, "\"message\":\"Next\",\"suppressed\":2}");
     try testing.expectEqual(@as(u64, 2), s.emergency_written);
+}
+
+test "emergency: a record that fits is never cut to make room for the count" {
+    var stderr: StderrFile = try .open();
+    defer stderr.close();
+    const logger: Logger = try .init(testing.allocator, testing.io, .{ .max_record_bytes = 512 });
+    logger.engine.stderr = stderr.file;
+    const detail: [419]u8 = @splat('d');
+    logger.engine.bucket.refuse(); // a record left out before
+    logger.emergency("Disk full", .{ .detail = @as([]const u8, detail[0..400]) }); // 491 bytes whole: the count fits beside it
+    logger.engine.bucket.refuse();
+    logger.emergency("Disk full", .{ .detail = @as([]const u8, &detail) }); // 510 bytes whole: the count does not fit
+    logger.emergency("Next", .{});
+    const s = logger.stats();
+    logger.deinit();
+    var buf: [2048]u8 = undefined;
+    var lines = std.mem.splitScalar(u8, try stderr.read(&buf), '\n');
+    const told = lines.next().?;
+    try testing.expectEqual(@as(usize, 490 + ",\"suppressed\":1".len), told.len);
+    try testing.expectStringEndsWith(told, "dd\",\"suppressed\":1}");
+    const whole = lines.next().?;
+    try testing.expectEqual(@as(usize, 509), whole.len);
+    try testing.expectStringEndsWith(whole, "dd\"}");
+    try testing.expectStringEndsWith(lines.next().?, "\"message\":\"Next\",\"suppressed\":1}");
+    try testing.expectEqual(@as(u64, 0), s.truncated);
+    try testing.expectEqual(@as(u64, 3), s.emergency_written);
+}
+
+/// The logger's stderr as a file in a temporary directory, which `read`
+/// gives back at any time; unlike a pipe, it works on every OS.
+const StderrFile = struct {
+    tmp: testing.TmpDir,
+    file: std.Io.File,
+
+    fn open() !StderrFile {
+        var tmp = testing.tmpDir(.{});
+        errdefer tmp.cleanup();
+        return .{ .tmp = tmp, .file = try tmp.dir.createFile(testing.io, "stderr", .{}) };
+    }
+
+    /// Everything written to the file so far.
+    fn read(f: *StderrFile, buf: []u8) ![]u8 {
+        return f.tmp.dir.readFile(testing.io, "stderr", buf);
+    }
+
+    /// An empty file next to it, opened read-only: every write to it fails.
+    fn readOnly(f: *StderrFile, name: []const u8) !std.Io.File {
+        try f.tmp.dir.writeFile(testing.io, .{ .sub_path = name, .data = "" });
+        return f.tmp.dir.openFile(testing.io, name, .{});
+    }
+
+    fn close(f: *StderrFile) void {
+        f.file.close(testing.io);
+        f.tmp.cleanup();
+    }
+};
+
+test "a stdout opened read-only: POSIX notes it on stderr once, Windows counts each failed write" {
+    var stderr: StderrFile = try .open();
+    defer stderr.close();
+    const read_only = try stderr.readOnly("stdout");
+    defer read_only.close(testing.io);
+    const logger: Logger = try .init(testing.allocator, testing.io, .{});
+    defer logger.deinit();
+    logger.engine.stdout = read_only;
+    logger.engine.stderr = stderr.file;
+    logger.info("first", .{});
+    logger.info("second", .{});
+    const s = logger.stats();
+    var buf: [512]u8 = undefined;
+    const note = try stderr.read(&buf);
+    try testing.expectEqual(@as(u64, 0), s.written);
+    try testing.expectEqual(@as(u64, 2), s.dropped.write_failed);
+    if (builtin.os.tag == .windows) {
+        // A write without write access fails with AccessDenied, which is
+        // not a closed stdout: each record tries again.
+        try testing.expectEqualStrings("", note);
+        try testing.expectEqual(@as(u64, 2), s.write_errors);
+    } else {
+        try testing.expectEqualStrings("zefir.log: stdout is not open for writing (NotOpenForWriting); dropping the records that follow\n", note);
+        try testing.expectEqual(@as(u64, 1), s.write_errors);
+    }
 }
 
 /// A pipe for the logger's stderr; POSIX only.
@@ -1719,14 +1869,106 @@ const StderrPipe = struct {
     }
 };
 
-test "error records refused after shutdown are counted, and deinit notes them on stderr" {
+/// Reads a pipe at most 512 bytes at a time, with a yield after each read,
+/// so the pipe stays full and a long record goes out in parts: lines
+/// written at once from several threads would mix.
+const SlowReader = struct {
+    file: std.Io.File,
+    buf: []u8,
+    len: usize = 0,
+    /// Bytes read once `buf` was full.
+    lost: usize = 0,
+
+    fn run(r: *SlowReader) void {
+        var spare: [512]u8 = undefined;
+        while (true) {
+            const room = r.buf[r.len..];
+            const into = if (room.len > 0) room[0..@min(512, room.len)] else &spare;
+            // Ends once the write end is closed.
+            const n = r.file.readStreaming(testing.io, &.{into}) catch return;
+            if (room.len > 0) r.len += n else r.lost += n;
+            std.Thread.yield() catch {};
+        }
+    }
+};
+
+/// Calls `emergency` `calls` times with a field of `payload_len` bytes.
+/// With a short field it pauses after every tenth call, so the bucket earns
+/// tokens while calls are left out, and the next records tell of them.
+fn emergencies(logger: Logger, worker: usize, calls: usize, payload_len: usize) void {
+    var payload: [12000]u8 = undefined;
+    @memset(&payload, 'a' + @as(u8, @intCast(worker)));
+    for (0..calls) |i| {
+        logger.emergency("Going down", .{ .worker = worker, .i = i, .payload = @as([]const u8, payload[0..payload_len]) });
+        if (payload_len < 100 and i % 10 == 9) testing.io.sleep(.fromMilliseconds(15), .awake) catch {};
+    }
+}
+
+/// Runs `emergencies` on eight threads at once.
+fn emergenciesAtOnce(logger: Logger, calls: usize, payload_len: usize) !void {
+    var threads: [8]std.Thread = undefined;
+    var started: usize = 0;
+    defer for (threads[0..started]) |thread| thread.join();
+    for (&threads, 0..) |*thread, worker| {
+        thread.* = try std.Thread.spawn(.{}, emergencies, .{ logger, worker, calls, payload_len });
+        started += 1;
+    }
+}
+
+/// What eight threads calling `emergency` at once left in the stats:
+/// first 12 long records each, within the burst, then 50 short ones each.
+const Emergencies = struct { burst: Engine.Stats, all: Engine.Stats, untold: u64 };
+
+fn emergenciesFromThreads(stderr: std.Io.File) !Emergencies {
+    var sink: std.Io.Writer.Discarding = .init(&.{});
+    const logger: Logger = try .init(testing.allocator, testing.io, .{ .max_record_bytes = 16384, .output = .{ .writer = &sink.writer } });
+    defer logger.deinit();
+    logger.engine.stderr = stderr;
+    try emergenciesAtOnce(logger, 12, 12000); // each record longer than PIPE_BUF
+    const burst = logger.stats();
+    try emergenciesAtOnce(logger, 50, 10); // past the burst: most are left out
+    return .{ .burst = burst, .all = logger.stats(), .untold = logger.engine.bucket.refused };
+}
+
+test "emergency lines from several threads at once stay whole, and every call is counted and told" {
     if (builtin.os.tag == .windows) return error.SkipZigTest; // the test needs POSIX pipes
     var stderr: StderrPipe = try .open();
+    defer stderr.close();
+    const buf = try testing.allocator.alloc(u8, 4 << 20);
+    defer testing.allocator.free(buf);
+    var reader: SlowReader = .{ .file = stderr.read_end, .buf = buf };
+    const reading = try std.Thread.spawn(.{}, SlowReader.run, .{&reader});
+    const result = emergenciesFromThreads(stderr.write_end);
+    stderr.write_end.close(testing.io); // the reader meets the end of the pipe
+    stderr.write_open = false;
+    reading.join();
+    const got = try result;
+    try testing.expectEqual(@as(usize, 0), reader.lost);
+    var lines = std.mem.splitScalar(u8, buf[0..reader.len], '\n');
+    var written: u64 = 0;
+    var told: u64 = 0;
+    while (lines.next()) |line| {
+        if (line.len == 0) continue; // the piece after the final '\n'
+        written += 1;
+        try testing.expect(try std.json.validate(testing.allocator, line));
+        const key = "\"suppressed\":";
+        if (std.mem.find(u8, line, key)) |at| told += try std.fmt.parseInt(u64, std.mem.trimEnd(u8, line[at + key.len ..], "}"), 10);
+    }
+    try testing.expectEqual(@as(u64, 8 * 12), got.burst.emergency_written);
+    try testing.expectEqual(@as(u64, 8 * (12 + 50)), got.all.emergency_written + got.all.emergency_suppressed);
+    try testing.expectEqual(got.all.emergency_written, written);
+    // Each call left out is told by a later record, or still waits in the bucket.
+    try testing.expect(told > 0);
+    try testing.expectEqual(got.all.emergency_suppressed, told + got.untold);
+}
+
+test "error records refused after shutdown are counted, and deinit notes them on stderr" {
+    var stderr: StderrFile = try .open();
     defer stderr.close();
     var out: std.Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
     const logger: Logger = try .init(testing.allocator, testing.io, .{ .mode = .{ .queued = .{} }, .output = .{ .writer = &out.writer } });
-    logger.engine.stderr = stderr.write_end;
+    logger.engine.stderr = stderr.file;
     try logger.shutdown(.none);
     logger.err("late", .{});
     logger.err("late", .{});
@@ -1734,44 +1976,106 @@ test "error records refused after shutdown are counted, and deinit notes them on
     const s = logger.stats();
     logger.deinit();
     var buf: [256]u8 = undefined;
-    try testing.expectEqualStrings("zefir.log: error records dropped and not in the log: 2\n", try stderr.finish(&buf));
+    try testing.expectEqualStrings("zefir.log: error records dropped and not in the log: 2\n", try stderr.read(&buf));
     try testing.expectEqual(@as(u64, 2), s.dropped.err);
     try testing.expectEqual(@as(u64, 1), s.dropped.closed);
     try testing.expectEqualStrings("", out.written());
 }
 
+test "sync: an error record too long for .drop counts in dropped.err, and deinit notes it on stderr" {
+    var stderr: StderrFile = try .open();
+    defer stderr.close();
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    const logger: Logger = try .init(testing.allocator, testing.io, .{ .oversize = .drop, .max_record_bytes = 512, .output = .{ .writer = &out.writer } });
+    logger.engine.stderr = stderr.file;
+    const data: [1024]u8 = @splat('d');
+    logger.err("Too long", .{ .data = @as([]const u8, &data) });
+    logger.info("Too long", .{ .data = @as([]const u8, &data) });
+    const s = logger.stats();
+    logger.deinit();
+    var buf: [256]u8 = undefined;
+    try testing.expectEqualStrings("zefir.log: error records dropped and not in the log: 1\n", try stderr.read(&buf));
+    try testing.expectEqual(@as(u64, 1), s.dropped.err);
+    try testing.expectEqual(@as(u64, 1), s.dropped.oversize); // the info record
+    try testing.expectEqualStrings("", out.written());
+}
+
+test "queued: an error record too long for .drop is reported by the summary record" {
+    var c: Capture = undefined;
+    try c.open(.{ .mode = .{ .queued = .{ .capacity = 4 } }, .oversize = .drop, .max_record_bytes = 512 });
+    defer c.close();
+    const data: [1024]u8 = @splat('d');
+    c.logger.err("Too long", .{ .data = @as([]const u8, &data) });
+    c.logger.info("Too long", .{ .data = @as([]const u8, &data) });
+    // A dropped record takes no slot in the queue: flush waits for this
+    // one, and the summary is written before it returns.
+    c.logger.info("After", .{});
+    try c.logger.flush(.none);
+    const s = c.logger.stats();
+    try testing.expectEqual(@as(u64, 1), s.dropped.err);
+    try testing.expectEqual(@as(u64, 1), s.dropped.oversize);
+    // The writer thread may write the summary before "After" or after it.
+    const out = c.out.written();
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, out, "\n"));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, out, "\",\"level\":\"info\",\"message\":\"After\"}\n"));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, out, "\",\"level\":\"error\",\"message\":\"zefir.log: error records dropped\",\"suppressed\":1}\n"));
+}
+
+test "queued: deinit after a timed-out shutdown writes no summary record; it notes the error records on stderr" {
+    var stderr: StderrFile = try .open();
+    defer stderr.close();
+    var lock: Lock = .{ .sink = .init(testing.allocator) };
+    defer lock.sink.deinit();
+    const logger: Logger = try .init(testing.allocator, testing.io, .{ .mode = .{ .queued = .{ .batch_size = 1 } }, .output = .{ .writer = &lock.writer } });
+    var running = true;
+    defer if (running) logger.deinit();
+    defer lock.open.store(true, .seq_cst);
+    logger.engine.stderr = stderr.file;
+    logger.info("held", .{});
+    lock.waitEntered();
+    try testing.expectError(error.Timeout, logger.shutdown(.{ .duration = .{ .raw = .fromMilliseconds(20), .clock = .awake } }));
+    logger.err("late", .{}); // refused: no summary has reported it yet
+    const opener = try std.Thread.spawn(.{}, openOnAbandon, .{ &lock, logger.engine });
+    running = false;
+    logger.deinit(); // waits for the write in progress, and starts no other
+    opener.join();
+    try testing.expectEqual(@as(usize, 1), lock.lines());
+    var buf: [256]u8 = undefined;
+    try testing.expectEqualStrings("zefir.log: error records dropped and not in the log: 1\n", try stderr.read(&buf));
+}
+
 test "emergency writes to stderr at once, past the queue, and after shutdown too" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest; // the test needs POSIX pipes
-    var stderr: StderrPipe = try .open();
+    var stderr: StderrFile = try .open();
     defer stderr.close();
     var lock: Lock = .{ .sink = .init(testing.allocator) };
     defer lock.sink.deinit();
     const logger: Logger = try .init(testing.allocator, testing.io, .{ .mode = .{ .queued = .{} }, .output = .{ .writer = &lock.writer } });
-    logger.engine.stderr = stderr.write_end;
+    defer logger.deinit();
+    defer lock.open.store(true, .seq_cst);
+    logger.engine.stderr = stderr.file;
     logger.info("held", .{});
     lock.waitEntered();
     logger.scoped("disk").emergency("Disk full", .{ .free = 0 });
     var buf: [512]u8 = undefined;
-    const first = buf[0..try stderr.read_end.readStreaming(testing.io, &.{&buf})];
+    const first = try stderr.read(&buf);
     try testing.expectStringEndsWith(first, "\",\"level\":\"error\",\"message\":\"Disk full\",\"scope\":\"disk\",\"free\":0}\n");
     try testing.expect(try std.json.validate(testing.allocator, first[0 .. first.len - 1]));
     lock.open.store(true, .seq_cst);
     try logger.shutdown(.none);
     logger.emergency("After shutdown", .{});
     const s = logger.stats();
-    logger.deinit();
-    try testing.expectStringEndsWith(try stderr.finish(&buf), "\",\"level\":\"error\",\"message\":\"After shutdown\"}\n");
+    try testing.expectStringEndsWith(try stderr.read(&buf), "\",\"level\":\"error\",\"message\":\"After shutdown\"}\n");
     try testing.expectEqual(@as(u64, 2), s.emergency_written);
     try testing.expectEqual(@as(u64, 1), s.accepted);
     try testing.expectEqual(@as(usize, 1), lock.lines());
 }
 
 test "emergency: records past the rate limit are left out and counted; the next one says how many" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest; // the test needs POSIX pipes
-    var stderr: StderrPipe = try .open();
+    var stderr: StderrFile = try .open();
     defer stderr.close();
     const logger: Logger = try .init(testing.allocator, testing.io, .{ .format = .text });
-    logger.engine.stderr = stderr.write_end;
+    logger.engine.stderr = stderr.file;
     logger.engine.bucket.tokens = 0;
     logger.engine.bucket.earned_at = std.math.maxInt(i64); // earns nothing for now
     for (0..3) |_| logger.emergency("Dropped", .{});
@@ -1780,47 +2084,42 @@ test "emergency: records past the rate limit are left out and counted; the next 
     const s = logger.stats();
     logger.deinit();
     var buf: [256]u8 = undefined;
-    try testing.expectStringEndsWith(try stderr.finish(&buf), " ERROR Kept suppressed=3\n");
+    try testing.expectStringEndsWith(try stderr.read(&buf), " ERROR Kept suppressed=3\n");
     try testing.expectEqual(@as(u64, 1), s.emergency_written);
     try testing.expectEqual(@as(u64, 3), s.emergency_suppressed);
 }
 
 test "emergency: a record too long for .drop is left out, and the next one tells of it" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest; // the test needs POSIX pipes
-    var stderr: StderrPipe = try .open();
+    var stderr: StderrFile = try .open();
     defer stderr.close();
     const logger: Logger = try .init(testing.allocator, testing.io, .{ .oversize = .drop, .max_record_bytes = 512 });
-    logger.engine.stderr = stderr.write_end;
+    logger.engine.stderr = stderr.file;
     const data: [1024]u8 = @splat('d');
     logger.emergency("Too long", .{ .data = @as([]const u8, &data) });
     logger.emergency("Next", .{});
     const s = logger.stats();
     logger.deinit();
     var buf: [512]u8 = undefined;
-    try testing.expectStringEndsWith(try stderr.finish(&buf), "\"message\":\"Next\",\"suppressed\":1}\n");
+    try testing.expectStringEndsWith(try stderr.read(&buf), "\"message\":\"Next\",\"suppressed\":1}\n");
     try testing.expectEqual(@as(u64, 1), s.emergency_written);
     try testing.expectEqual(@as(u64, 1), s.emergency_suppressed);
     try testing.expectEqual(@as(u64, 0), s.dropped.oversize);
 }
 
 test "emergency: a failed write to stderr leaves the record out, and the next one tells of it" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest; // the test needs POSIX pipes
-    const io = testing.io;
-    const unread = try std.Io.Threaded.pipe2(.{});
-    pipeEnd(unread[0]).close(io); // nobody reads: writes fail with BrokenPipe
-    const broken = pipeEnd(unread[1]);
-    defer broken.close(io);
-    var stderr: StderrPipe = try .open();
+    var stderr: StderrFile = try .open();
     defer stderr.close();
-    const logger: Logger = try .init(testing.allocator, io, .{});
-    logger.engine.stderr = broken;
+    const read_only = try stderr.readOnly("read-only");
+    defer read_only.close(testing.io);
+    const logger: Logger = try .init(testing.allocator, testing.io, .{});
+    logger.engine.stderr = read_only;
     logger.emergency("Lost", .{});
-    logger.engine.stderr = stderr.write_end;
+    logger.engine.stderr = stderr.file;
     logger.emergency("Next", .{});
     const s = logger.stats();
     logger.deinit();
     var buf: [512]u8 = undefined;
-    try testing.expectStringEndsWith(try stderr.finish(&buf), "\"message\":\"Next\",\"suppressed\":1}\n");
+    try testing.expectStringEndsWith(try stderr.read(&buf), "\"message\":\"Next\",\"suppressed\":1}\n");
     try testing.expectEqual(@as(u64, 1), s.emergency_written);
     try testing.expectEqual(@as(u64, 1), s.emergency_suppressed);
 }
@@ -1841,12 +2140,11 @@ fn countingIo() std.Io {
 }
 
 test "emergency does not use the application's Io, not even its clock" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest; // the test needs POSIX pipes
-    var stderr: StderrPipe = try .open();
+    var stderr: StderrFile = try .open();
     defer stderr.close();
     var sink: std.Io.Writer.Discarding = .init(&.{});
     const logger: Logger = try .init(testing.allocator, countingIo(), .{ .output = .{ .writer = &sink.writer } });
-    logger.engine.stderr = stderr.write_end;
+    logger.engine.stderr = stderr.file;
     const before = app_clock_reads.load(.seq_cst);
     logger.emergency("Going down", .{});
     const by_emergency = app_clock_reads.load(.seq_cst) - before;
@@ -1868,16 +2166,15 @@ const Reentrant = struct {
 };
 
 test "an emergency call made while an emergency record is being written is left out" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest; // the test needs POSIX pipes
-    var stderr: StderrPipe = try .open();
+    var stderr: StderrFile = try .open();
     defer stderr.close();
     const logger: Logger = try .init(testing.allocator, testing.io, .{});
-    logger.engine.stderr = stderr.write_end;
+    logger.engine.stderr = stderr.file;
     logger.emergency("Outer", .{ .value = Reentrant{ .logger = logger } });
     const s = logger.stats();
     logger.deinit();
     var buf: [256]u8 = undefined;
-    const lines = try stderr.finish(&buf);
+    const lines = try stderr.read(&buf);
     try testing.expectStringEndsWith(lines, "\",\"level\":\"error\",\"message\":\"Outer\",\"value\":\"outer value\"}\n");
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, lines, "\n"));
     try testing.expectEqual(@as(u64, 1), s.emergency_written);

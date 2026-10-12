@@ -30,8 +30,11 @@ pub const InitError = error{
     ServiceTooLong,
     /// `max_record_bytes` exceeds 16384.
     RecordLimitTooLarge,
-    /// `max_record_bytes` cannot hold what every record has: the time, the
-    /// level, the service fields and the longest scope.
+    /// `max_record_bytes` cannot hold what every record may need: the time,
+    /// the level, the service fields, a scope of 128 bytes, the trace ids,
+    /// and room to cut the message and mark the record truncated. That is
+    /// 304 bytes in JSON, plus the service fields with their keys, and 250
+    /// in text.
     RecordLimitTooSmall,
     /// More than 64 scope rules.
     TooManyRules,
@@ -97,7 +100,8 @@ pub const Stats = struct {
     filtered: u64,
 
     pub const Dropped = struct {
-        /// Longer than `max_record_bytes` with `.oversize = .drop`.
+        /// Longer than `max_record_bytes` with `.oversize = .drop`; error
+        /// records count in `err` instead.
         oversize: u64,
         /// The write failed, or stdout was already closed.
         write_failed: u64,
@@ -106,10 +110,11 @@ pub const Stats = struct {
         /// Logged after `shutdown`.
         closed: u64,
         /// Records at `.err` refused because the queue was full or the
-        /// logger was shut down; not counted in `queue_full` or `closed`.
-        /// The writer thread reports them in the log with one record,
-        /// "zefir.log: error records dropped" with `"suppressed":N`;
-        /// `shutdown` and `deinit` note on stderr those it could not.
+        /// logger was shut down, or too long for `.oversize = .drop`; not
+        /// counted in `queue_full`, `closed` or `oversize`. The writer
+        /// thread reports them in the log with one record, "zefir.log:
+        /// error records dropped" with `"suppressed":N`; `shutdown` and
+        /// `deinit` note on stderr those it could not (in sync mode, all).
         err: u64,
     };
 };
@@ -618,9 +623,10 @@ fn accept(engine: *Engine, comptime level: Level) bool {
     return false;
 }
 
-/// Counts a record refused because the queue is full or the logger is
-/// shut down: in `counter`, or in `dropped.err` for an error record, which
-/// a summary then reports.
+/// Counts a record refused because the queue is full, the logger is shut
+/// down, or it is too long for `.oversize = .drop`: in `counter`, or in
+/// `dropped.err` for an error record, which the summary record or the note
+/// on stderr then reports.
 fn refuse(engine: *Engine, comptime level: Level, counter: *Counter) void {
     if (level != .err) return bump(counter);
     bump(&engine.counters.dropped_err);
@@ -642,7 +648,7 @@ fn headerFor(engine: *Engine, comptime level: Level, scope: *const scopes.Entry,
 /// Hands the record encoded in `buf[1..]` to the interceptors, then to the
 /// subscribers, then writes or queues it; or counts why it goes nowhere.
 fn finish(engine: *Engine, comptime level: Level, scope: *const scopes.Entry, header: encode.Header, buf: []u8, encoded: ?encode.Encoded, io: Io) void {
-    const done = encoded orelse return bump(&engine.counters.dropped_oversize);
+    const done = encoded orelse return engine.refuse(level, &engine.counters.dropped_oversize);
     if (done.truncated) bump(&engine.counters.truncated);
     const record = buf[1..][0..done.len];
     if (!engine.intercept(level, scope, header, done, record)) return;
@@ -719,15 +725,21 @@ pub fn emergency(engine: *Engine, scope: *const scopes.Entry, trace: ?*const enc
 const Told = struct { len: usize, truncated: bool, told: bool };
 
 /// Encodes an error record that tells, with `"suppressed":N`, of the
-/// `left_out` records before it, when there are any and it has room for
-/// that.
+/// `left_out` records before it. A record that fits whole is never cut for
+/// the count: with no room for both, it goes out without the count, and
+/// the next record tells. One cut anyway is cut shorter to make room.
 fn encodeTelling(comptime f: options.Format, comptime message: []const u8, out: []u8, header: encode.Header, fields: anytype, left_out: u64) ?Told {
-    if (left_out > 0 and out.len > encode.suppressed_max_bytes) {
-        if (encode.record(f, .err, message, out[0 .. out.len - encode.suppressed_max_bytes], header, fields)) |done|
-            return .{ .len = encode.appendSuppressed(f, out, done.len, left_out), .truncated = done.truncated, .told = true };
-    }
     const done = encode.record(f, .err, message, out, header, fields) orelse return null;
-    return .{ .len = done.len, .truncated = done.truncated, .told = left_out == 0 };
+    if (left_out == 0) return .{ .len = done.len, .truncated = done.truncated, .told = true };
+    const count = encode.suppressedBytes(f, left_out);
+    if (done.len + count <= out.len)
+        return .{ .len = encode.appendSuppressed(f, out, done.len, left_out), .truncated = done.truncated, .told = true };
+    if (!done.truncated) return .{ .len = done.len, .truncated = false, .told = false };
+    if (encode.record(f, .err, message, out[0 .. out.len - count], header, fields)) |cut|
+        return .{ .len = encode.appendSuppressed(f, out, cut.len, left_out), .truncated = true, .told = true };
+    // Even a cut record leaves no room: it goes out without the count.
+    const again = encode.record(f, .err, message, out, header, fields) orelse return null;
+    return .{ .len = again.len, .truncated = again.truncated, .told = false };
 }
 
 /// For the writer thread: writes the `n` records the queue copied into
@@ -748,9 +760,11 @@ pub fn writeBatch(engine: *Engine, n: usize) void {
 /// For the writer thread: writes one record in place of the error records
 /// dropped since the last one, "zefir.log: error records dropped" with
 /// `"suppressed":N`. It is the logger's own record, not counted in
-/// `written`. While stdout is dead the count waits for `shutdown`.
+/// `written`. While stdout is dead, and once `deinit` has abandoned the
+/// queue (it waits only for the write in progress), the count waits for
+/// the note on stderr.
 pub fn reportDroppedErrors(engine: *Engine) void {
-    if (engine.errors_unreported.load(.monotonic) == 0 or engine.dead.load(.monotonic)) return;
+    if (engine.errors_unreported.load(.monotonic) == 0 or engine.dead.load(.monotonic) or engine.abandon.load(.acquire)) return;
     const n = engine.errors_unreported.swap(0, .monotonic);
     const out = engine.batch[1..][0..engine.max_record_bytes];
     const header: encode.Header = .{
@@ -780,8 +794,9 @@ pub fn reportDroppedErrors(engine: *Engine) void {
 }
 
 /// Notes on stderr the error records dropped that no summary in the log
-/// reports: those refused once the writer thread was gone, or while stdout
-/// was dead.
+/// reports: in sync mode all of them; in queued mode those dropped once
+/// the writer thread was gone, while stdout was dead, or not yet reported
+/// when `deinit` abandoned the queue.
 fn noteDroppedErrors(engine: *Engine) void {
     const n = engine.errors_unreported.swap(0, .monotonic);
     if (n == 0) return;
@@ -897,10 +912,13 @@ fn writeFile(file: Io.File, io: Io, bytes: []const u8, sent: *usize) Io.File.Wri
 }
 
 /// Writes and flushes `bytes`. A buffered writer does not tell how much
-/// went out when its flush fails: `error.FlushFailed` counts the records as
-/// dropped and the line as torn, so the next record starts on a new line.
+/// went out when a write or its flush fails: what it took may still be in
+/// its buffer. `error.FlushFailed` then counts the records as dropped and
+/// the line as torn, so the next record starts on a new line. A failed
+/// write of an unbuffered writer is counted exactly.
 fn writeWriter(w: *Io.Writer, bytes: []const u8, sent: *usize) (Io.Writer.Error || error{FlushFailed})!void {
-    while (sent.* < bytes.len) sent.* += try w.write(bytes[sent.*..]);
+    while (sent.* < bytes.len) sent.* += w.write(bytes[sent.*..]) catch |e|
+        return if (w.buffer.len != 0) error.FlushFailed else e;
     w.flush() catch return error.FlushFailed;
 }
 
@@ -943,6 +961,23 @@ test "create checks the options" {
     const io = testing.io;
     try testing.expectError(error.RecordLimitTooLarge, create(gpa, io, .{ .max_record_bytes = max_record_limit + 1 }));
     try testing.expectError(error.RecordLimitTooSmall, create(gpa, io, .{ .max_record_bytes = 100 }));
+    // The smallest limit: 304 bytes in JSON, plus the service fields with
+    // their keys; 250 in text, which writes no service fields.
+    const floors = [_]struct { opts: options.Options, smallest: u32 }{
+        .{ .opts = .{}, .smallest = 304 },
+        .{ .opts = .{ .service = .{ .name = "api" } }, .smallest = 304 + ",\"service.name\":\"api\"".len },
+        .{ .opts = .{ .format = .text, .service = .{ .name = "api" } }, .smallest = 250 },
+    };
+    for (floors) |floor| {
+        var opts = floor.opts;
+        opts.max_record_bytes = floor.smallest - 1;
+        if (create(gpa, io, opts)) |engine| {
+            engine.destroy();
+            return error.TestUnexpectedResult;
+        } else |e| try testing.expectEqual(@as(InitError, error.RecordLimitTooSmall), e);
+        opts.max_record_bytes = floor.smallest;
+        (try create(gpa, io, opts)).destroy();
+    }
     try testing.expectError(error.ServiceTooLong, create(gpa, io, .{ .service = .{ .name = &@as([1025]u8, @splat('n')) } }));
     try testing.expectError(error.EmptyPrefix, create(gpa, io, .{ .scopes = &.{.{ .prefix = "", .level = .debug }} }));
     var rules: [scopes.max_rules + 1]options.ScopeRule = undefined;
@@ -959,6 +994,45 @@ test "create checks the options" {
     try testing.expectError(error.BatchSizeZero, create(gpa, io, .{ .mode = .{ .queued = .{ .batch_size = 0 } } }));
     const largest = try create(gpa, io, .{ .max_record_bytes = max_record_limit });
     largest.destroy();
+}
+
+test "an emergency record that fits whole is never cut for its count" {
+    var out: [512]u8 = undefined;
+    const detail: [512]u8 = @splat('d');
+    const header: encode.Header = .{ .timestamp = .{ .nanoseconds = 0 }, .service = "", .scope = "", .oversize = .truncate };
+    inline for (.{ options.Format.json, options.Format.text }) |f| {
+        const count = (if (f == .json) ",\"suppressed\":1" else " suppressed=1").len;
+        for (0..detail.len) |n| {
+            const fields = .{ .detail = @as([]const u8, detail[0..n]) };
+            const alone = encodeTelling(f, "Disk full", &out, header, fields, 0).?;
+            if (alone.truncated) break; // this one and the longer ones do not fit whole
+            const told = encodeTelling(f, "Disk full", &out, header, fields, 1).?;
+            try testing.expect(!told.truncated);
+            // With no room for the count beside it, the next record tells.
+            try testing.expectEqual(alone.len + count <= out.len, told.told);
+            try testing.expectEqual(if (told.told) alone.len + count else alone.len, told.len);
+        }
+    }
+}
+
+test "an emergency record cut anyway carries its count, unless even the cut leaves no room" {
+    const long: [600]u8 = @splat('m');
+    const header: encode.Header = .{ .timestamp = .{ .nanoseconds = 0 }, .service = "", .scope = "", .oversize = .truncate };
+    var out: [512]u8 = undefined;
+    const cut = encodeTelling(.json, &long, &out, header, .{}, std.math.maxInt(u64)).?;
+    try testing.expect(cut.truncated and cut.told);
+    try testing.expectStringEndsWith(out[0..cut.len], "…\",\"truncated\":true,\"suppressed\":18446744073709551615}\n");
+    try testing.expect(try std.json.validate(testing.allocator, out[0 .. cut.len - 1]));
+    // The smallest limit and the widest head: a cut record fills it.
+    const ids: encode.TraceHex = .{ .trace_id = @splat('a'), .span_id = @splat('b') };
+    var widest = header;
+    widest.scope = &@as([scopes.max_name_bytes]u8, @splat('s'));
+    widest.trace = &ids;
+    var smallest: [encode.mandatoryBytes(.json, 0, scopes.max_name_bytes)]u8 = undefined;
+    const untold = encodeTelling(.json, &long, &smallest, widest, .{}, 1).?;
+    try testing.expect(untold.truncated and !untold.told);
+    try testing.expectEqual(smallest.len, untold.len);
+    try testing.expectStringEndsWith(smallest[0..untold.len], "\",\"span_id\":\"bbbbbbbbbbbbbbbb\",\"truncated\":true}\n");
 }
 
 test "the service fragment: OpenTelemetry names, fixed order, empty fields left out" {

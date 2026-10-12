@@ -607,6 +607,11 @@ fn encodeRecord(
 /// The most `appendSuppressed` adds to a record.
 pub const suppressed_max_bytes = ",\"suppressed\":".len + std.fmt.count("{d}", .{std.math.maxInt(u64)});
 
+/// What `appendSuppressed` adds to a record for `n`.
+pub fn suppressedBytes(comptime f: Format, n: u64) usize {
+    return key(f, "suppressed").len + std.fmt.count("{d}", .{n});
+}
+
 /// Adds `"suppressed":n` (` suppressed=n` in text) to the end of the
 /// record in `buf[0..len]`, before its line break and closing brace: how
 /// many records the logger left out before this one. `buf` has room for
