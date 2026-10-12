@@ -374,16 +374,19 @@ fn ordinal(x: anytype) switch (@typeInfo(@TypeOf(x))) {
 
 /// The bit of an exhaustive enum's tag: its rank among the tags by value,
 /// found at compile time for each tag (an `inline else` prong), so sparse
-/// tag values need no larger bitset.
+/// tag values need no larger bitset. The values are sorted once, and each
+/// prong searches them, so an enum of thousands of tags stays within the
+/// comptime branch quota.
 fn tagIndex(comptime E: type, tag: E) usize {
+    @setEvalBranchQuota(core.eval_quota);
+    const values = comptime sortedTagValues(E);
     switch (tag) {
-        inline else => |t| return comptime valueRank(E, @backingInt(t)),
+        inline else => |t| return comptime rankIn(values, @backingInt(t)),
     }
 }
 
-/// The number of tags of `E` whose value is below `value`.
-fn valueRank(comptime E: type, comptime value: comptime_int) usize {
-    const values = sortedTagValues(E);
+/// The number of `values`, sorted in increasing order, that are below `value`.
+fn rankIn(comptime values: []const comptime_int, comptime value: comptime_int) usize {
     var lo: usize = 0;
     var hi: usize = values.len;
     while (lo < hi) {
@@ -1118,4 +1121,34 @@ test "uniqueItems agrees with a pairwise comparison on random lists of integers,
         try std.testing.expectEqual(naiveUnique(Open, modes[0..n]), uniqueItems.eval(&@as([]const Open, modes[0..n])) == .pass);
         try std.testing.expectEqual(naiveUnique([]const u8, strings[0..n]), uniqueItems.eval(&@as([]const []const u8, strings[0..n])) == .pass);
     }
+}
+
+/// An exhaustive enum of `n` tags, `t0` to `t<n - 1>`, whose values are
+/// declared out of order.
+fn ShuffledEnum(comptime n: usize) type {
+    @setEvalBranchQuota(core.eval_quota);
+    var names: [n][]const u8 = undefined;
+    var values: [n]u32 = undefined;
+    // 100003 is prime, so these values differ for every n below it.
+    for (&names, &values, 0..) |*name, *value, i| {
+        name.* = std.fmt.comptimePrint("t{d}", .{i});
+        value.* = @intCast((i * 7919) % 100003);
+    }
+    const final_names = names;
+    const final_values = values;
+    return @Enum(u32, .exhaustive, &final_names, &final_values);
+}
+
+test "uniqueItems and uniqueBy take exhaustive enums of thousands of tags declared out of order" {
+    const Big = ShuffledEnum(2000);
+    try expectOutcome(.pass, uniqueItems, @as([]const Big, &.{ .t0, .t1999, .t17, .t1000, .t3 }));
+    try expectOutcome(.fail, uniqueItems, @as([]const Big, &.{ .t17, .t3, .t1999, .t17 }));
+    try expectOutcome(.fail, uniqueItems, [3]Big{ .t1999, .t0, .t1999 });
+    const Keyed = struct { k: Big };
+    try expectOutcome(.pass, uniqueBy(.k), @as([]const Keyed, &.{ .{ .k = .t1 }, .{ .k = .t2 } }));
+    try expectOutcome(.fail, uniqueBy(.k), @as([]const Keyed, &.{ .{ .k = .t1998 }, .{ .k = .t5 }, .{ .k = .t1998 } }));
+    // Every tag gets its own bit: all 2000 tags are unique, and one more repeats.
+    const all = comptime std.enums.values(Big);
+    try expectOutcome(.pass, uniqueItems, @as([]const Big, all));
+    try expectOutcome(.fail, uniqueItems, @as([]const Big, all ++ &[_]Big{.t1234}));
 }
