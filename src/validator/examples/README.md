@@ -42,7 +42,8 @@ if (v.check(&request, &path_buf)) |violation| {
 - [Compatibility](#compatibility)
 - [All rules](#all-rules)
 
-Rules by category: [Common](common.md) · [Numbers](numbers.md) · [Lists](lists.md) ·
+Rules by category: [Common](common.md) · [Numbers](numbers.md) · [Encodings](encodings.md) ·
+[Dates](dates.md) · [Lists](lists.md) ·
 [Coming from class-validator](class_validator.md)
 
 Examples that `zig build test` compiles and runs:
@@ -731,7 +732,12 @@ NaN, `+inf` and `-inf` fail with `validation.finite` /
 this precondition are `v.equals`, `v.notEquals`, `v.min`, `v.max`, `v.range`,
 `v.positive`, `v.nonNegative`, `v.negative`, `v.nonPositive` and
 `v.divisibleBy`; integers, `bool`, enums and strings have no precondition
-([D16](class_validator.md#deviations-from-validatorjs)).
+([D16](class_validator.md#deviations-from-validatorjs)). `v.minDate` and
+`v.maxDate` need a value of the form of their bound: with a date bound, a value
+that is not a date fails with `validation.date` /
+`must be a valid date in YYYY-MM-DD format`; with a date-time bound, a value
+that is not an RFC 3339 date-time fails with `validation.rfc3339` /
+`must be a valid RFC 3339 date-time` ([Dates](dates.md#vmindatemin)).
 
 - The code and the message of a precondition are fixed: `.withMessage` does not
   change them. `v.positive.withMessage("must be above zero")` reports
@@ -1001,6 +1007,7 @@ library runs. These errors point at your line and do not start with
 | `v.max_code_bytes` | 128 | a code: `v.custom`, `v.fail` and `validateSelf` results |
 | `v.max_message_bytes` | 512 | a message, in bytes |
 | `v.max_report_violations` | 100 | the violations in a `Report` |
+| `v.max_json_depth` | 64 | the nesting of a JSON text that `v.json` and `v.isJson` accept |
 
 The limits are `comptime_int` constants and part of the contract (see below).
 
@@ -1049,6 +1056,26 @@ The limits are `comptime_int` constants and part of the contract (see below).
 | `v.nonPositive` | a number is at most 0 | `validation.non_positive` | [numbers](numbers.md#vnonpositive) |
 | `v.divisibleBy(divisor)` | a number is a multiple of `divisor` | `validation.divisible_by` | [numbers](numbers.md#vdivisiblebydivisor) |
 | `v.finite` | a float is neither NaN nor an infinity | `validation.finite` | [numbers](numbers.md#vfinite) |
+| `v.json` | a string is a JSON object or array, nested at most 64 levels | `validation.json` | [encodings](encodings.md#vjson) |
+| `v.jwt` | a string has the shape of a JWT | `validation.jwt` | [encodings](encodings.md#vjwt) |
+| `v.base32` | a string is canonical padded base32 | `validation.base32` | [encodings](encodings.md#vbase32) |
+| `v.base58` | a string uses the base58 alphabet | `validation.base58` | [encodings](encodings.md#vbase58) |
+| `v.base64` | a string is canonical padded base64 | `validation.base64` | [encodings](encodings.md#vbase64) |
+| `v.base64Url` | a string is canonical base64url without padding | `validation.base64_url` | [encodings](encodings.md#vbase64url) |
+| `v.dataUri` | a string is an RFC 2397 data URL | `validation.data_uri` | [encodings](encodings.md#vdatauri) |
+| `v.magnetUri` | a string is a magnet URI with an exact topic | `validation.magnet_uri` | [encodings](encodings.md#vmagneturi) |
+| `v.mimeType` | a string is a media type with parameters | `validation.mime_type` | [encodings](encodings.md#vmimetype) |
+| `v.locale` | a string is a well-formed BCP 47 language tag | `validation.locale` | [encodings](encodings.md#vlocale) |
+| `v.semVer` | a string is a semantic version | `validation.sem_ver` | [encodings](encodings.md#vsemver) |
+| `v.hexColor` | a string is a CSS hex color | `validation.hex_color` | [encodings](encodings.md#vhexcolor) |
+| `v.rgbColor` | a string is a CSS `rgb()` or `rgba()` color | `validation.rgb_color` | [encodings](encodings.md#vrgbcolor) |
+| `v.hslColor` | a string is a CSS `hsl()` or `hsla()` color | `validation.hsl_color` | [encodings](encodings.md#vhslcolor) |
+| `v.date` | a string is a date `YYYY-MM-DD` | `validation.date` | [dates](dates.md#vdate) |
+| `v.rfc3339` | a string is an RFC 3339 date-time with an offset | `validation.rfc3339` | [dates](dates.md#vrfc3339) |
+| `v.iso8601` | a string is an ISO 8601 date or date-time | `validation.iso8601` | [dates](dates.md#viso8601) |
+| `v.minDate(min)` | a date or a date-time is not before `min` | `validation.min_date` | [dates](dates.md#vmindatemin) |
+| `v.maxDate(max)` | a date or a date-time is not after `max` | `validation.max_date` | [dates](dates.md#vmaxdatemax) |
+| `v.militaryTime` | a string is a time `HH:MM` or `HHMM` | `validation.military_time` | [dates](dates.md#vmilitarytime) |
 | `v.minItems(min)` | a slice has at least `min` items | `validation.min_items` | [lists](lists.md#vminitemsmin) |
 | `v.maxItems(max)` | a slice has at most `max` items | `validation.max_items` | [lists](lists.md#vmaxitemsmax) |
 | `v.each(rules)` | the rules of every item of a slice or an array | the inner rule's code | [lists](lists.md#veachrules) |

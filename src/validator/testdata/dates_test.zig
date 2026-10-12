@@ -142,3 +142,31 @@ test "every predicate and bound rule takes any bytes without a panic, and each r
         }
     }
 }
+
+/// The example at the top of examples/dates.md.
+const Booking = struct {
+    check_in: []const u8,
+    created_at: []const u8,
+    reminder: ?[]const u8 = null,
+    opening_hours: []const []const u8,
+
+    pub const field_rules = .{
+        .check_in = .{ v.date.withMessage("use YYYY-MM-DD"), v.minDate("2024-01-01") },
+        .created_at = v.maxDate("2100-01-01T00:00:00Z"), // a date-time bound: the value needs an offset
+        .reminder = v.rfc3339, // null skips the rule
+        .opening_hours = v.each(v.militaryTime),
+    };
+};
+
+test "the example of the dates page checks a booking" {
+    comptime v.assertRules(Booking);
+    try h.expectValid(&Booking{ .check_in = "2024-02-29", .created_at = "2024-01-01T10:00:00+02:00", .opening_hours = &.{ "09:00", "1800" } });
+    try h.expectAll(&Booking{ .check_in = "29.02.2024", .created_at = "2024-01-01", .reminder = "2024-01-01T10:00", .opening_hours = &.{ "09:00", "24:00" } }, &.{
+        .{ .code = "validation.date", .field = "check_in" },
+        .{ .code = "validation.rfc3339", .field = "created_at" },
+        .{ .code = "validation.rfc3339", .field = "reminder" },
+        .{ .code = "validation.military_time", .field = "opening_hours[1]" },
+    });
+    try h.expectAt(&Booking{ .check_in = "2023-12-31", .created_at = "2024-01-01T10:00:00Z", .opening_hours = &.{} }, "validation.min_date", "must not be before 2024-01-01", "check_in");
+    try h.expectAt(&Booking{ .check_in = "29.02.2024", .created_at = "2024-01-01T10:00:00Z", .opening_hours = &.{} }, "validation.date", "use YYYY-MM-DD", "check_in");
+}

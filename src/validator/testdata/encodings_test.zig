@@ -174,3 +174,32 @@ test "isBase64 and isBase64Url accept exactly what the std.base64 decoders decod
         }
     }
 }
+
+/// The example at the top of examples/encodings.md.
+const Upload = struct {
+    metadata: []const u8,
+    content: []const u8,
+    content_type: []const u8,
+    language: ?[]const u8 = null,
+    tags: []const []const u8,
+
+    pub const field_rules = .{
+        .metadata = v.json,
+        .content = .{ v.notEmpty, v.base64 }, // "" is valid base64: require content first
+        .content_type = v.mimeType,
+        .language = v.locale, // null skips the rule
+        .tags = v.each(v.hexColor),
+    };
+};
+
+test "the example of the encodings page checks an upload" {
+    comptime v.assertRules(Upload);
+    try h.expectValid(&Upload{ .metadata = "{\"size\":3}", .content = "Zm9v", .content_type = "text/plain; charset=utf-8", .tags = &.{ "#fff", "#ff000080" } });
+    try h.expectAll(&Upload{ .metadata = "3", .content = "", .content_type = "text", .language = "en_US", .tags = &.{ "#fff", "fff" } }, &.{
+        .{ .code = "validation.json", .field = "metadata" },
+        .{ .code = "validation.not_empty", .field = "content" },
+        .{ .code = "validation.mime_type", .field = "content_type" },
+        .{ .code = "validation.locale", .field = "language" },
+        .{ .code = "validation.hex_color", .field = "tags[1]" },
+    });
+}
