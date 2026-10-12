@@ -165,7 +165,9 @@ const core_mainnet = [_]S{
     "33GA3ZXbw5o5HeUrBEaqkWXFYYZmdxGRRP",
 };
 
-/// Testnet, signet and regtest addresses of the Bitcoin Core test list that .testnet takes: regtest and signet share the testnet version bytes and signet the tb1 prefix.
+/// Testnet, signet and regtest addresses of the Bitcoin Core test list that
+/// `.testnet` takes: regtest and signet share the testnet version bytes, and
+/// signet the `tb1` prefix.
 const core_testnet = [_]S{
     "mzK2FFDEhxqHcmrJw1ysqFkVyhUULo45hZ",
     "2NC2hEhe28ULKAJkW5MjZ3jtTMJdvXmByvK",
@@ -201,7 +203,8 @@ const core_testnet = [_]S{
     "2My83D67ir7K8PPzeT6mE2oth3ZwNTVRS9F",
 };
 
-/// Regtest segwit addresses of the Bitcoin Core test list: bcrt1 passes no network.
+/// Regtest segwit addresses of the Bitcoin Core test list: `bcrt1` passes no
+/// network.
 const core_regtest = [_]S{
     "bcrt1qdavt4j2sd7dlhqsavtnfxvzppw6k7qy97tmnu9",
     "bcrt1qan8gntac7z7me2ejt4hpru42ad2f759fmy0m3ejvs98656znv7eqga4uhv",
