@@ -465,7 +465,12 @@ pub const Encoded = struct {
     len: usize,
     /// The record was cut and ends with the truncation marker.
     truncated: bool,
+    /// Where the message is in the record: escaped, and cut when the
+    /// record was.
+    message: Span = .{},
 };
+
+pub const Span = struct { start: usize = 0, len: usize = 0 };
 
 const ellipsis = "…";
 
@@ -523,10 +528,11 @@ fn encodeRecord(
     var ids_buf: [idsLen(f)]u8 = undefined;
     const ids: []const u8 = if (header.trace) |trace| idsFragment(f, trace, &ids_buf) else "";
     const parts: Parts = .{ .stamp = &stamp, .source = source, .ids = ids };
-    if (encode(f, level, message, out, header, parts, fields, false)) |len| return .{ .len = len, .truncated = false };
+    var span: Span = .{};
+    if (encode(f, level, message, out, header, parts, fields, false, &span)) |len| return .{ .len = len, .truncated = false, .message = span };
     if (header.oversize == .drop) return null;
-    const len = encode(f, level, message, out, header, parts, fields, true) orelse return null;
-    return .{ .len = len, .truncated = true };
+    const len = encode(f, level, message, out, header, parts, fields, true, &span) orelse return null;
+    return .{ .len = len, .truncated = true, .message = span };
 }
 
 /// The most `appendSuppressed` adds to a record.
@@ -566,11 +572,12 @@ fn encode(
     parts: Parts,
     fields: anytype,
     comptime cut: bool,
+    span: *Span,
 ) ?usize {
     const close = comptime if (cut) closing(f).cut else closing(f).whole;
     if (out.len < close.len) return null;
     var w: Writer = .fixed(out[0 .. out.len - close.len]);
-    const source = writeHead(f, level, message, &w, header, parts, cut) catch return null;
+    const source = writeHead(f, level, message, &w, header, parts, cut, span) catch return null;
     switch (f) {
         .json => writeFields(f, &w, fields, cut) catch return null,
         .text => {
@@ -601,6 +608,7 @@ fn writeHead(
     header: Header,
     parts: Parts,
     comptime cut: bool,
+    span: *Span,
 ) Writer.Error![]const u8 {
     switch (f) {
         .json => {
@@ -609,7 +617,7 @@ fn writeHead(
             try w.writeAll(comptime "\",\"level\":\"" ++ level.asText() ++ "\",\"message\":\"");
             const scope_len = if (header.scope.len > 0) ",\"scope\":\"".len + header.scope.len + 1 else 0;
             const keep = header.service.len + scope_len + parts.ids.len;
-            const source = try writeMessageBeside(w, message, "", "\"", keep, parts.source, cut);
+            const source = try writeMessageBeside(w, message, "", "\"", keep, parts.source, cut, span);
             try w.writeAll(header.service);
             if (header.scope.len > 0) {
                 try w.writeAll(",\"scope\":\"");
@@ -630,7 +638,7 @@ fn writeHead(
             }
             if (comptime @TypeOf(message).empty)
                 return if (!cut or parts.ids.len + parts.source.len <= w.unusedCapacityLen()) parts.source else "";
-            return writeMessageBeside(w, message, " ", "", parts.ids.len, parts.source, cut);
+            return writeMessageBeside(w, message, " ", "", parts.ids.len, parts.source, cut, span);
         },
     }
 }
@@ -646,17 +654,22 @@ fn writeMessageBeside(
     keep: usize,
     source: []const u8,
     comptime cut: bool,
+    span: *Span,
 ) Writer.Error![]const u8 {
+    const start = w.end + open.len;
     if (!cut) {
         try message.write(w, open, close, 0, false);
+        span.* = .{ .start = start, .len = w.end - close.len - start };
         return source;
     }
     // A failed cut write leaves the writer as it was, so it can be retried.
     message.write(w, open, close, keep + source.len, true) catch |e| {
         if (source.len == 0) return e;
         try message.write(w, open, close, keep, true);
+        span.* = .{ .start = start, .len = w.end - close.len - start };
         return "";
     };
+    span.* = .{ .start = start, .len = w.end - close.len - start };
     return source;
 }
 
@@ -1565,6 +1578,28 @@ test "mandatoryBytes holds the worst head: the longest level, the longest scope,
         try testing.expect(got.truncated);
         if (f == .json) try testing.expect(try std.json.validate(testing.allocator, buf[0..got.len]));
     }
+}
+
+/// The message of the record `encoded` in `buf`, checked to lie inside it.
+fn messageOf(buf: []const u8, encoded: Encoded) ![]const u8 {
+    if (encoded.message.start > encoded.len or encoded.message.len > encoded.len - encoded.message.start) return error.TestMessageOutsideRecord;
+    return buf[encoded.message.start..][0..encoded.message.len];
+}
+
+test "a record tells where its message is, as written" {
+    var buf: [512]u8 = undefined;
+    const header: Header = .{ .timestamp = fixed_time, .service = "", .scope = "db", .oversize = .truncate };
+    const json = record(.json, .info, "Query \"slow\"", &buf, header, .{ .ms = 5 }) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("Query \\\"slow\\\"", try messageOf(&buf, json));
+    const text = record(.text, .info, "Query slow", &buf, header, .{ .ms = 5 }) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("Query slow", try messageOf(&buf, text));
+    const empty = record(.text, .info, "", &buf, header, .{ .ms = 5 }) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 0), empty.message.len);
+    const cut = record(.json, .info, "A message far too long for the record it is in, so it is cut", buf[0..130], header, .{}) orelse return error.TestUnexpectedResult;
+    try testing.expect(cut.truncated);
+    try testing.expectStringEndsWith(try messageOf(&buf, cut), "…");
+    const formatted = recordFormatted(.json, .info, "n={d}", .{7}, &buf, header) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("n=7", try messageOf(&buf, formatted));
 }
 
 test "appendSuppressed adds the count at the end of a record" {

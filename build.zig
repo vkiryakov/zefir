@@ -109,7 +109,7 @@ pub fn build(b: *std.Build) void {
     }
 
     // log examples: `zig build test` builds and runs them, like the core ones.
-    for ([_][]const u8{ "service", "config" }) |name| {
+    for ([_][]const u8{ "service", "config", "alerts" }) |name| {
         const example = b.addExecutable(.{
             .name = b.fmt("log-{s}", .{name}),
             .root_module = b.createModule(.{

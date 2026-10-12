@@ -7,6 +7,7 @@ const builtin = @import("builtin");
 const core = @import("core");
 const Engine = @import("Engine.zig");
 const encode = @import("encode.zig");
+const hooks = @import("hooks.zig");
 const std_log = @import("std_log.zig");
 const uninstallStdLog = std_log.uninstall;
 const options = @import("options.zig");
@@ -27,7 +28,8 @@ const Ids = struct { trace_id: core.TraceId, span_id: core.SpanId };
 
 pub const InitError = Engine.InitError;
 
-/// Creates the engine: the only allocations the logger makes. The options
+/// Creates the engine: logging allocates nothing after this, and only
+/// `subscribe` allocates again, for its subscriber's queue. The options
 /// may be freed once `init` returns; the logger copies what it keeps. Call
 /// `deinit` once, after the last record, on any handle of this logger: all
 /// of them become invalid. Use one logger per process for stdout: two
@@ -40,12 +42,13 @@ pub fn init(gpa: std.mem.Allocator, io: std.Io, opts: options.Options) InitError
     return .{ .engine = engine, .scope = &engine.scope_table.root };
 }
 
-/// Frees the logger. In queued mode, without a `shutdown` first, it waits
-/// until everything queued is written, with no time limit; after a
+/// Frees the logger. Without a `shutdown` first it runs one with no time
+/// limit: the queue is written and the subscribers handle theirs. After a
 /// `shutdown` that timed out it drops what is left and waits only for the
-/// write in progress. A write that never returns (stdout stuck for good)
-/// keeps it waiting too: to exit on time, call `shutdown` with a deadline,
-/// and when it times out, let the process exit without `deinit`.
+/// write and the handler calls in progress. A write or a handler that
+/// never returns keeps it waiting too: to exit on time, call `shutdown`
+/// with a deadline, and when it times out, let the process exit without
+/// `deinit`.
 pub fn deinit(self: Logger) void {
     self.engine.destroy();
 }
@@ -61,11 +64,13 @@ pub fn flush(self: Logger, timeout: std.Io.Timeout) error{Timeout}!void {
 
 /// Stops the logger: records logged after it starts are refused and
 /// counted in `stats().dropped.closed` (error records in
-/// `stats().dropped.err`, and noted on stderr). In queued mode it waits
-/// until the queue is written and the writer thread has exited. When
-/// `timeout` passes first it returns `error.Timeout`: `stats().pending`
-/// tells how many records are left, another `shutdown` may wait for them
-/// again, and `deinit` drops them. `core.Deadline.toTimeout()` gives a
+/// `stats().dropped.err`, and noted on stderr); only what the handlers
+/// log while it waits for them still goes out. It waits until the
+/// subscribers have handled their queues, then, in queued mode, until the
+/// queue is written, and stops the logger's threads. When `timeout`
+/// passes first it returns `error.Timeout`: `stats().pending` and
+/// `stats().alert_pending` tell how many records are left, another
+/// `shutdown` may wait for them again, and `deinit` drops them. `core.Deadline.toTimeout()` gives a
 /// timeout. Stop the application's own threads before; a record that
 /// another thread is writing at that moment still goes out. Blocks the OS
 /// thread.
@@ -109,6 +114,36 @@ fn log(self: Logger, comptime level: Level, comptime message: []const u8, fields
     if (!self.enabled(level)) return;
     var hex: encode.TraceHex = undefined;
     self.engine.emit(level, self.scope, self.traceHex(&hex), message, fields);
+}
+
+/// Adds a subscriber: from now on it gets a copy of each record of its
+/// levels (and scope) on a thread of its own, through a queue of its own,
+/// so a slow handler never holds up a caller. A record goes to the
+/// subscribers before the output, so they get an error record even when
+/// the queue refuses it or stdout is closed. A logger takes 8 subscribers
+/// in its life; `unsubscribe` gives no slot back. It gets only records
+/// that pass the level filter. Its queue takes `capacity` slots of
+/// `max_record_bytes` + 112 bytes rounded up to 128 (4224 bytes with
+/// 4 KiB records), until `deinit`.
+pub fn subscribe(self: Logger, subscription: hooks.Subscription) hooks.SubscribeError!hooks.SubscriptionId {
+    return self.engine.subscribe(subscription);
+}
+
+/// Removes a subscriber and waits until its thread has handed the records
+/// in its queue to the handler and exited: once it returns, the handler is
+/// never called again, so its context may go. While the logger runs that
+/// wait has no time limit; once `shutdown` has begun, only the call in
+/// hand is waited for. Blocks the OS thread. Call it before `deinit`; a
+/// second call returns once the first is done. Not from a handler or the
+/// writer thread: that panics in safe builds.
+pub fn unsubscribe(self: Logger, id: hooks.SubscriptionId) void {
+    self.engine.unsubscribe(id);
+}
+
+/// Adds an interceptor; a logger takes 8. It sees every record that
+/// passes the level filter, and drops it by returning false.
+pub fn use(self: Logger, interceptor: hooks.Interceptor) error{TooManyInterceptors}!void {
+    return self.engine.use(interceptor);
 }
 
 /// Writes an error record to stderr before it returns, past the queue:
@@ -1313,7 +1348,7 @@ test "a writer whose flush fails: the record counts as dropped and its line as t
 
 fn shutdownThenCheckJoined(logger: Logger, joined: *std.atomic.Value(u32)) void {
     logger.shutdown(.none) catch return;
-    if (logger.engine.writer_thread == null) _ = joined.fetchAdd(1, .seq_cst);
+    if (logger.engine.writer_thread.thread == null) _ = joined.fetchAdd(1, .seq_cst);
 }
 
 test "queued: two shutdowns at once both return after the writer thread has exited" {

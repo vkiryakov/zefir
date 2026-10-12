@@ -57,6 +57,11 @@ pub fn main(init: std.process.Init) !void {
         try bench.report(.{ .mode = .{ .queued = .{ .batch_size = batch_size, .overflow = .block } }, .producers = 8, .write_ns = slow_write_ns });
     }
 
+    try bench.table("Hooks: queued drop_new, 4 producers (dropped: by the queue and by the subscriber's queue)", .{});
+    for (std.enums.values(Hooks)) |h| {
+        try bench.report(.{ .mode = .{ .queued = .{} }, .producers = 4, .hooks = h });
+    }
+
     try bench.table("A burst: 8 producers x {d} records, queued drop_new, a stuck reader taking {d} ms per write", .{ burst, stuck_write_ns / std.time.ns_per_ms });
     for ([_]u32{ 1024, 4096, 16384 }) |capacity| {
         try bench.report(.{ .mode = .{ .queued = .{ .capacity = capacity } }, .producers = 8, .records = burst, .write_ns = stuck_write_ns });
@@ -90,6 +95,17 @@ const Output = enum {
     pipe,
 };
 
+const Hooks = enum {
+    none,
+    /// A subscriber on `.err`: every other record pays one check.
+    err_subscriber,
+    /// A subscriber on `.info` whose handler does nothing: every record
+    /// is copied to its queue too.
+    info_subscriber,
+    /// An interceptor that keeps every record.
+    interceptor,
+};
+
 const Scenario = struct {
     mode: log.Mode,
     producers: usize,
@@ -98,6 +114,7 @@ const Scenario = struct {
     output: Output = .discard,
     /// What each write of the logger costs the reader.
     write_ns: u64 = 0,
+    hooks: Hooks = .none,
 };
 
 const Result = struct {
@@ -121,21 +138,21 @@ const Bench = struct {
 
     fn table(b: *Bench, comptime title: []const u8, args: anytype) !void {
         try b.out.print("\n" ++ title ++ "\n", args);
-        try b.out.print("{s:<74} {s:>11} {s:>7} {s:>7} {s:>7} {s:>8} {s:>9} {s:>8} {s:>7} {s:>6}\n", .{
+        try b.out.print("{s:<92} {s:>11} {s:>7} {s:>7} {s:>7} {s:>8} {s:>9} {s:>8} {s:>7} {s:>6}\n", .{
             "scenario", "records/s", "p50 ns", "p95 ns", "p99 ns", "p99.9 ns", "max ns", "dropped", "CPU ns", "MiB",
         });
     }
 
     fn report(b: *Bench, s: Scenario) !void {
         const r = try b.run(s);
-        var name_buf: [96]u8 = undefined;
+        var name_buf: [128]u8 = undefined;
         const name = switch (s.mode) {
-            .sync => try std.fmt.bufPrint(&name_buf, "sync, {d} producer(s), {t}, {t}", .{ s.producers, s.record, s.output }),
-            .queued => |q| try std.fmt.bufPrint(&name_buf, "queued {t}, cap {d}, batch {d}, {d} producer(s), {t}, {t}", .{ q.overflow, q.capacity, q.batch_size, s.producers, s.record, s.output }),
+            .sync => try std.fmt.bufPrint(&name_buf, "sync, {d} producer(s), {t}, {t}, {t}", .{ s.producers, s.record, s.output, s.hooks }),
+            .queued => |q| try std.fmt.bufPrint(&name_buf, "queued {t}, cap {d}, batch {d}, {d} producer(s), {t}, {t}, {t}", .{ q.overflow, q.capacity, q.batch_size, s.producers, s.record, s.output, s.hooks }),
         };
         const options: log.Options = .{ .mode = s.mode };
         const mib = @as(f64, @floatFromInt(options.queueBytes())) / (1024 * 1024);
-        try b.out.print("{s:<74} {d:>11.0} {d:>7} {d:>7} {d:>7} {d:>8} {d:>9} {d:>7.2}% {d:>7} {d:>6.1}\n", .{
+        try b.out.print("{s:<92} {d:>11.0} {d:>7} {d:>7} {d:>7} {d:>8} {d:>9} {d:>7.2}% {d:>7} {d:>6.1}\n", .{
             name, r.per_second, r.p50, r.p95, r.p99, r.p999, r.max, r.dropped_percent, r.cpu_ns, mib,
         });
         try b.out.flush();
@@ -153,6 +170,12 @@ const Bench = struct {
         const latencies = try b.gpa.alloc(u64, s.producers * s.records);
         defer b.gpa.free(latencies);
         const handle = if (s.record == .traced) logger.withContext(tracedContext()) else logger;
+        switch (s.hooks) {
+            .none => {},
+            .err_subscriber => _ = try logger.subscribe(.{ .levels = &.{.err}, .handler = ignoreEvent }),
+            .info_subscriber => _ = try logger.subscribe(.{ .levels = &.{.info}, .capacity = 4096, .handler = ignoreEvent }),
+            .interceptor => try logger.use(.{ .filter = keepEvent }),
+        }
         const allocations = b.counting.allocations;
 
         const cpu_start = cpuNanoseconds();
@@ -181,7 +204,7 @@ const Bench = struct {
             .p99 = percentile(latencies, 99, 100),
             .p999 = percentile(latencies, 999, 1000),
             .max = latencies[latencies.len - 1],
-            .dropped_percent = @as(f64, @floatFromInt(stats.dropped.queue_full)) * 100 / total,
+            .dropped_percent = @as(f64, @floatFromInt(stats.dropped.queue_full + stats.alert_dropped)) * 100 / total,
             .cpu_ns = @intFromFloat(@as(f64, @floatFromInt(cpu)) / total),
         };
     }
@@ -304,3 +327,9 @@ const Sink = struct {
         return n;
     }
 };
+
+fn ignoreEvent(_: ?*anyopaque, _: *const log.Event) anyerror!void {}
+
+fn keepEvent(_: ?*anyopaque, _: *const log.Event) bool {
+    return true;
+}

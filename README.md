@@ -4,7 +4,7 @@
 
 <p align="center">
   <strong>A modular framework for enterprise applications in Zig.</strong><br>
-  Web servers, web services and APIs, built from modules you pick: typed configuration and request deadlines, cancellation and tracing today; validation, RPC, logging, an ORM and an HTTP server next.
+  Web servers, web services and APIs, built from modules you pick: typed configuration, request deadlines, cancellation, tracing and structured logging today; validation, RPC, an ORM and an HTTP server next.
 </p>
 
 <p align="center">
@@ -36,7 +36,7 @@ If it fits the way you work, use it, and please join in: bring your ideas and qu
 | **core**           | `zefir-core`      | Execution context: deadlines, cancellation and W3C trace context     | ✅ Done · [docs](src/core/examples/README.md)             |
 | validator          | `zefir-validator` | Declarative validation rules for struct fields                       | 🚧 In progress · [docs](src/validator/examples/README.md) |
 | rpc                | `zefir-rpc`       | RPC                                                                  | 📋 Planned                                                |
-| log                | `zefir-log`       | Structured logging: JSON Lines, scopes, levels changed at run time   | 🚧 In progress                                            |
+| **log**            | `zefir-log`       | Structured logging: JSON Lines, redaction, live levels, alerts       | ✅ Done · [docs](src/log/examples/README.md)              |
 | orm                | `zefir-orm`       | ORM                                                                  | 📋 Planned                                                |
 | http               | —                 | HTTP server                                                          | 📋 Planned                                                |
 | _all of the above_ | `zefir`           | Umbrella module                                                      |                                                           |

@@ -80,9 +80,19 @@
 //! Do not log from a signal handler: a sync record or a queued one in
 //! `.block` mode may wait for a lock or for room that the interrupted
 //! thread holds.
+//!
+//! `subscribe` adds a subscriber for alerts: it gets copies of the records
+//! of its levels (and scope) on a thread and a queue of its own, before
+//! they reach the output, so it gets an error record even when the queue
+//! or stdout refuses it. Records a handler logs never return to the
+//! subscribers. `use` adds an interceptor: it sees each record at the
+//! caller, once encoded, and drops it by returning false. Both get an
+//! `Event`: the level, the time, the scope, the message, the trace ids and
+//! the whole line, valid during the call. More in `examples/README.md`.
 
 const std = @import("std");
 const options = @import("options.zig");
+const hooks = @import("hooks.zig");
 
 pub const Level = @import("level.zig").Level;
 /// Whether a type is marked `pub const zefir_sensitive = true;`: the logger
@@ -109,6 +119,11 @@ pub const Mode = options.Mode;
 pub const Queued = options.Queued;
 pub const OverflowPolicy = options.OverflowPolicy;
 pub const Output = options.Output;
+pub const Event = hooks.Event;
+pub const Subscription = hooks.Subscription;
+pub const SubscriptionId = hooks.SubscriptionId;
+pub const SubscribeError = hooks.SubscribeError;
+pub const Interceptor = hooks.Interceptor;
 
 test "isSensitive is core's check, so one marker serves every module" {
     const Token = struct {
@@ -137,4 +152,6 @@ test {
     _ = @import("writer.zig");
     _ = @import("emergency.zig");
     _ = @import("tests/stress.zig");
+    _ = @import("hooks.zig");
+    _ = @import("tests/hooks.zig");
 }

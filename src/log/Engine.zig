@@ -11,6 +11,7 @@ const std_log = @import("std_log.zig");
 const Queue = @import("Queue.zig");
 const writer = @import("writer.zig");
 const rate_limit = @import("emergency.zig");
+const hooks = @import("hooks.zig");
 const Level = @import("level.zig").Level;
 
 const Io = std.Io;
@@ -81,6 +82,19 @@ pub const Stats = struct {
     /// failed write to stderr. The next one written tells how many with
     /// `"suppressed":N`; emergency records are not counted in `accepted`.
     emergency_suppressed: u64,
+    /// Records in the subscribers' queues, not yet handed to their
+    /// handlers; after a `shutdown` that timed out, the ones `deinit` drops.
+    alert_pending: u64,
+    /// Records a subscriber's full queue dropped; each subscriber counts.
+    alert_dropped: u64,
+    /// Handler calls that returned an error.
+    alert_failures: u64,
+    /// Records dropped because a hook logged them: from an interceptor,
+    /// or, in sync mode under an Io other than `std.Io.Threaded`, from a
+    /// subscriber's handler.
+    hook_errors: u64,
+    /// Records an interceptor dropped on purpose: not a loss.
+    filtered: u64,
 
     pub const Dropped = struct {
         /// Longer than `max_record_bytes` with `.oversize = .drop`.
@@ -136,10 +150,7 @@ queue: ?Queue = null,
 overflow: options.OverflowPolicy = .drop_new,
 batch: []u8 = &.{},
 batch_ends: []usize = &.{},
-writer_thread: ?std.Thread = null,
-/// Held while a call joins the writer thread, so a second call waits for
-/// it; taken through the logger's own Io.
-join_lock: Io.Mutex = .init,
+writer_thread: Joinable = .{},
 /// Records logged once the logger is not running are refused.
 state: std.atomic.Value(State) align(std.atomic.cache_line) = .init(.running),
 /// Queued mode: queue positions the writer thread has written or dropped.
@@ -154,6 +165,8 @@ abandon: std.atomic.Value(bool) = .init(false),
 /// Error records dropped that no summary has reported yet.
 errors_unreported: Counter = .init(0),
 counters: Counters = .{},
+/// Subscribers and interceptors.
+registry: hooks.Registry = .{},
 
 const State = enum(u8) { running, stopping, stopped };
 
@@ -175,6 +188,10 @@ const Counters = struct {
     torn_lines: Counter = .init(0),
     emergency_written: Counter = .init(0),
     emergency_suppressed: Counter = .init(0),
+    alert_dropped: Counter = .init(0),
+    alert_failures: Counter = .init(0),
+    hook_errors: Counter = .init(0),
+    filtered: Counter = .init(0),
 };
 
 /// Set while this thread writes an emergency record: an emergency call
@@ -238,7 +255,7 @@ fn startQueue(engine: *Engine, q: options.Queued, max_record_bytes: u32) InitErr
     engine.batch_ends = try gpa.alloc(usize, q.batch_size);
     errdefer gpa.free(engine.batch_ends);
     engine.overflow = q.overflow;
-    engine.writer_thread = std.Thread.spawn(.{}, writer.run, .{engine}) catch |e| return switch (e) {
+    engine.writer_thread.thread = std.Thread.spawn(.{}, writer.run, .{engine}) catch |e| return switch (e) {
         error.OutOfMemory => error.OutOfMemory,
         else => error.SystemResources,
     };
@@ -247,22 +264,32 @@ fn startQueue(engine: *Engine, q: options.Queued, max_record_bytes: u32) InitErr
 pub fn destroy(engine: *Engine) void {
     std_log.uninstallIf(engine);
     const gpa = engine.gpa;
-    if (engine.queue) |*q| {
-        // Without a shutdown first, everything accepted is written. After
-        // one that timed out, what is left is dropped: only the write in
-        // progress is waited for.
-        if (engine.state.load(.acquire) == .running) {
-            engine.shutdown(.none) catch {};
-        } else {
-            // seq_cst: pairs with the writer's announcement that it sleeps
-            // in `waitForPublish`, so one of the two sees the other.
-            engine.abandon.store(true, .seq_cst);
-            q.wakeConsumer();
+    // Without a shutdown first, everything accepted is written and handed
+    // to the subscribers. After one that timed out, what is left is
+    // dropped: only the write and the handler calls in progress are waited
+    // for.
+    if (engine.state.load(.acquire) == .running) {
+        engine.shutdown(.none) catch {};
+    } else {
+        // seq_cst: pairs with the logger threads' announcement that they
+        // sleep in `waitForPublish`, so one of the two sees the other.
+        engine.abandon.store(true, .seq_cst);
+        for (engine.registry.subscriberSlots()) |*s| {
+            s.stop.store(true, .seq_cst);
+            s.queue.wakeConsumer();
         }
-        engine.joinWriter();
+        // Closed, so a handler waiting for room in `.block` mode gives up.
+        if (engine.queue) |*q| _ = q.close();
+    }
+    engine.joinThreads();
+    if (engine.queue) |*q| {
         q.deinit(gpa);
         gpa.free(engine.batch);
         gpa.free(engine.batch_ends);
+    }
+    for (engine.registry.subscriberSlots()) |*s| {
+        s.queue.deinit(gpa);
+        gpa.free(s.record);
     }
     engine.noteDroppedErrors();
     engine.own.deinit();
@@ -292,6 +319,11 @@ pub fn stats(engine: *Engine) Stats {
         .pending = if (engine.queue) |*q| q.reserved() -| engine.processed.load(.monotonic) else 0,
         .emergency_written = c.emergency_written.load(.monotonic),
         .emergency_suppressed = c.emergency_suppressed.load(.monotonic),
+        .alert_pending = engine.alertPending(),
+        .alert_dropped = c.alert_dropped.load(.monotonic),
+        .alert_failures = c.alert_failures.load(.monotonic),
+        .hook_errors = c.hook_errors.load(.monotonic),
+        .filtered = c.filtered.load(.monotonic),
     };
 }
 
@@ -302,35 +334,50 @@ pub fn flush(engine: *Engine, timeout: Io.Timeout) error{Timeout}!void {
     // threads change.
     const q = if (engine.queue) |*queue| queue else return;
     try engine.refuseOnOwnThread();
-    return engine.waitProcessed(q.reserved(), timeout);
+    return engine.waitFor(q.reserved(), false, timeout);
 }
 
-/// Refuses records from now on; in queued mode waits until the queue is
-/// written and the writer thread has exited. After a call that timed out,
-/// another one waits again.
+/// Refuses records from now on; waits until the queue is written, the
+/// subscribers have handled theirs, and the logger's threads have exited.
+/// After a call that timed out, another one waits again.
 pub fn shutdown(engine: *Engine, timeout: Io.Timeout) error{Timeout}!void {
     try engine.refuseOnOwnThread();
     _ = engine.state.cmpxchgStrong(.running, .stopping, .acq_rel, .monotonic);
-    if (engine.queue) |*q| {
-        try engine.waitProcessed(q.close(), timeout);
-        engine.joinWriter();
-    }
+    const deadline = timeout.toDeadline(engine.own.io());
+    // The subscribers first: records their handlers log meanwhile still go
+    // into the queue.
+    engine.closeSubscribers();
+    try engine.waitFor(0, true, deadline);
+    const final: u64 = if (engine.queue) |*q| q.close() else 0;
+    try engine.waitFor(final, false, deadline);
+    engine.joinThreads();
     engine.state.store(.stopped, .release);
     engine.noteDroppedErrors();
 }
 
-/// `flush` and `shutdown` on the writer thread (an output writer that
-/// calls them) would wait for that thread itself: a panic in safe builds,
-/// `error.Timeout` at once otherwise.
+/// `flush` and `shutdown` on one of the logger's threads (an output writer
+/// or a handler that calls them) could wait for that thread itself: a
+/// panic in safe builds, `error.Timeout` at once otherwise.
 fn refuseOnOwnThread(engine: *const Engine) error{Timeout}!void {
-    if (writer.thread_of != engine) return;
-    if (std.debug.runtime_safety) @panic("zefir.log: flush or shutdown called from the logger's writer thread would wait for itself");
+    if (writer.thread_of != engine and hooks.subscriber_of != engine) return;
+    if (std.debug.runtime_safety) @panic("zefir.log: flush or shutdown called from one of the logger's threads could wait for itself");
     return error.Timeout;
 }
 
+/// Closes every subscriber's queue: their threads hand over what is in it,
+/// then exit. Under the registry's lock, so a `subscribe` at the same time
+/// either finds the logger stopping or is closed here.
+fn closeSubscribers(engine: *Engine) void {
+    const io = engine.own.io();
+    engine.registry.lock.lockUncancelable(io);
+    defer engine.registry.lock.unlock(io);
+    for (engine.registry.subscriberSlots()) |*s| _ = s.queue.close();
+}
+
 /// Waits until the writer thread has processed every queue position before
-/// `target`, or `timeout` passes.
-fn waitProcessed(engine: *Engine, target: u64, timeout: Io.Timeout) error{Timeout}!void {
+/// `target` and, with `subscribers`, every subscriber thread has exited, or
+/// `timeout` passes.
+fn waitFor(engine: *Engine, target: u64, subscribers: bool, timeout: Io.Timeout) error{Timeout}!void {
     const io = engine.own.io();
     // Not a cancelation point: a cancel request for the caller's task stays
     // for the task's own next one.
@@ -343,7 +390,8 @@ fn waitProcessed(engine: *Engine, target: u64, timeout: Io.Timeout) error{Timeou
         // Read the epoch first: a batch done after this read bumps it, so
         // the wait below returns at once instead of missing the wake-up.
         const epoch = engine.progress.load(.seq_cst);
-        if (engine.processed.load(.seq_cst) >= target) return;
+        if (engine.processed.load(.seq_cst) >= target and
+            (!subscribers or engine.registry.live.load(.seq_cst) == 0)) return;
         if (deadline.toDurationFromNow(io)) |left| {
             if (left.raw.nanoseconds <= 0) return error.Timeout;
         }
@@ -355,59 +403,217 @@ fn waitProcessed(engine: *Engine, target: u64, timeout: Io.Timeout) error{Timeou
 /// dropped, and wakes the `flush` and `shutdown` calls waiting for them.
 pub fn markProcessed(engine: *Engine, n: usize) void {
     _ = engine.processed.fetchAdd(n, .seq_cst);
+    engine.notifyProgress();
+}
+
+/// For a subscriber thread that exits.
+pub fn subscriberExited(engine: *Engine) void {
+    _ = engine.registry.live.fetchSub(1, .seq_cst);
+    engine.notifyProgress();
+}
+
+/// Wakes the calls in `waitFor` to look again.
+fn notifyProgress(engine: *Engine) void {
     // Bump before reading the waiter count: a waiter that missed the new
-    // count either sees the new epoch or is seen here.
+    // state either sees the new epoch or is seen here.
     _ = engine.progress.fetchAdd(1, .seq_cst);
     if (engine.progress_waiters.load(.seq_cst) != 0) engine.own.io().futexWake(u32, &engine.progress.raw, std.math.maxInt(u32));
 }
 
-/// Joins the writer thread once; a call that comes second returns after
-/// the first has joined it.
-fn joinWriter(engine: *Engine) void {
+/// Joins the writer thread and the subscriber threads.
+fn joinThreads(engine: *Engine) void {
     const io = engine.own.io();
-    engine.join_lock.lockUncancelable(io);
-    defer engine.join_lock.unlock(io);
-    if (engine.writer_thread) |thread| {
-        thread.join();
-        engine.writer_thread = null;
+    engine.writer_thread.join(io);
+    for (engine.registry.subscriberSlots()) |*s| s.thread.join(io);
+}
+
+/// A thread of the logger, joined once by whichever call comes first; a
+/// call that comes second returns after the first has joined it. Each
+/// thread has its own lock, so waiting for one never waits for another.
+pub const Joinable = struct {
+    thread: ?std.Thread = null,
+    lock: Io.Mutex = .init,
+
+    pub fn join(j: *Joinable, io: Io) void {
+        j.lock.lockUncancelable(io);
+        defer j.lock.unlock(io);
+        if (j.thread) |running| {
+            running.join();
+            j.thread = null;
+        }
     }
+};
+
+fn alertPending(engine: *Engine) u64 {
+    var pending: u64 = 0;
+    for (engine.registry.subscriberSlots()) |*s| pending += s.queue.depth();
+    return pending;
+}
+
+pub fn countAlertDropped(engine: *Engine) void {
+    bump(&engine.counters.alert_dropped);
+}
+
+pub fn countAlertFailure(engine: *Engine) void {
+    bump(&engine.counters.alert_failures);
+}
+
+/// `Logger.subscribe`: sets up the subscriber's queue and starts its
+/// thread.
+pub fn subscribe(engine: *Engine, s: hooks.Subscription) hooks.SubscribeError!hooks.SubscriptionId {
+    if (s.capacity == 0 or !std.math.isPowerOfTwo(s.capacity)) return error.CapacityNotPowerOfTwo;
+    if (s.capacity == 1) return error.CapacityTooSmall;
+    var prefix_buf: [scopes.max_name_bytes]u8 = undefined;
+    const prefix: []const u8 = if (s.scope) |scope| try scopes.prefixKey(scope, &prefix_buf) else "";
+    var levels: u8 = 0;
+    for (s.levels) |level| levels |= hooks.levelBit(level);
+    const registry = &engine.registry;
+    const gpa = engine.gpa;
+    const io = engine.own.io();
+    registry.lock.lockUncancelable(io);
+    defer registry.lock.unlock(io);
+    if (engine.state.load(.acquire) != .running) return error.ShutDown;
+    const index = registry.subscriber_count.load(.monotonic);
+    if (index == hooks.max_subscribers) return error.TooManySubscribers;
+    const slot_bytes = engine.max_record_bytes + hooks.head_bytes;
+    const sub = &registry.subscribers[index];
+    sub.* = .{
+        .engine = engine,
+        .levels = levels,
+        .prefix = undefined,
+        .prefix_len = @intCast(prefix.len),
+        .context = s.context,
+        .handler = s.handler,
+        .queue = try Queue.init(gpa, s.capacity, slot_bytes, io),
+        .record = &.{},
+    };
+    @memcpy(sub.prefix[0..prefix.len], prefix);
+    errdefer sub.queue.deinit(gpa);
+    sub.record = try gpa.alloc(u8, slot_bytes);
+    errdefer gpa.free(sub.record);
+    _ = registry.live.fetchAdd(1, .seq_cst);
+    errdefer _ = registry.live.fetchSub(1, .seq_cst);
+    sub.thread.thread = std.Thread.spawn(.{}, hooks.Subscriber.run, .{sub}) catch |e| return switch (e) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => error.SystemResources,
+    };
+    registry.subscriber_count.store(index + 1, .release);
+    registry.recomputeLevels();
+    return @fromBackingInt(@as(u8, @intCast(index)));
+}
+
+/// `Logger.unsubscribe`: takes the subscriber off the list, then waits
+/// until its thread has handled its queue and exited.
+pub fn unsubscribe(engine: *Engine, id: hooks.SubscriptionId) void {
+    if (hooks.subscriber_of == engine or writer.thread_of == engine) {
+        if (std.debug.runtime_safety) @panic("zefir.log: unsubscribe called from one of the logger's threads could wait for itself");
+        return;
+    }
+    const slots = engine.registry.subscriberSlots();
+    const index = @backingInt(id);
+    if (index >= slots.len) return;
+    const sub = &slots[index];
+    const io = engine.own.io();
+    {
+        engine.registry.lock.lockUncancelable(io);
+        defer engine.registry.lock.unlock(io);
+        // Once `shutdown` has begun, only the call in hand is waited for,
+        // as `deinit` would: the deadline was for the queue.
+        if (engine.state.load(.acquire) != .running) sub.stop.store(true, .seq_cst);
+        if (sub.active.swap(false, .acq_rel)) engine.registry.recomputeLevels();
+    }
+    // Every call closes and joins, so each one returns after the handler's
+    // last call.
+    _ = sub.queue.close();
+    sub.queue.wakeConsumer();
+    sub.thread.join(io);
+}
+
+/// `Logger.use`.
+pub fn use(engine: *Engine, interceptor: hooks.Interceptor) error{TooManyInterceptors}!void {
+    const registry = &engine.registry;
+    const io = engine.own.io();
+    registry.lock.lockUncancelable(io);
+    defer registry.lock.unlock(io);
+    const n = registry.interceptor_count.load(.monotonic);
+    if (n == hooks.max_interceptors) return error.TooManyInterceptors;
+    registry.interceptors[n] = interceptor;
+    registry.interceptor_count.store(n + 1, .release);
 }
 
 /// Encodes and writes one record; the caller has checked the level.
 pub fn emit(engine: *Engine, comptime level: Level, scope: *const scopes.Entry, trace: ?*const encode.TraceHex, comptime message: []const u8, fields: anytype) void {
     if (!engine.accept(level)) return;
+    const io = engine.callerIo();
     // One byte more than the longest record: room for the '\n' that ends a
     // torn line.
     var buf: [1 + max_record_limit]u8 = undefined;
     const out = buf[1..][0..engine.max_record_bytes];
-    const header = engine.headerFor(level, scope, trace, Io.Clock.real.now(engine.io));
+    const header = engine.headerFor(level, scope, trace, Io.Clock.real.now(io));
     const encoded = switch (engine.format) {
         inline else => |format| encode.record(format, level, message, out, header, fields),
     };
-    engine.finish(level, &buf, encoded);
+    engine.finish(level, scope, header, &buf, encoded, io);
 }
 
 /// `emit` for a message formatted at run time: the std.log bridge.
 pub fn emitFormatted(engine: *Engine, comptime level: Level, scope: *const scopes.Entry, comptime format: []const u8, args: anytype) void {
     if (!engine.accept(level)) return;
+    const io = engine.callerIo();
     var buf: [1 + max_record_limit]u8 = undefined;
     const out = buf[1..][0..engine.max_record_bytes];
-    const header = engine.headerFor(level, scope, null, Io.Clock.real.now(engine.io));
+    const header = engine.headerFor(level, scope, null, Io.Clock.real.now(io));
     const encoded = switch (engine.format) {
         inline else => |f| encode.recordFormatted(f, level, format, args, out, header),
     };
-    engine.finish(level, &buf, encoded);
+    engine.finish(level, scope, header, &buf, encoded, io);
 }
 
-/// Counts a record that passed the level filter; false when the logger is
-/// shut down or stdout is closed, and the record is dropped.
+/// The Io a record's clock and sync write go through: the application's,
+/// or the logger's own on a subscriber's thread, which is no task of the
+/// application's Io.
+fn callerIo(engine: *Engine) Io {
+    return if (hooks.subscriber_of == engine) engine.own.io() else engine.io;
+}
+
+/// Whether the logger runs in queued mode. Through a pointer: comparing
+/// the optional queue itself with null copies it, reading the fields other
+/// threads change.
+fn isQueued(engine: *const Engine) bool {
+    if (engine.queue) |*q| {
+        _ = q;
+        return true;
+    }
+    return false;
+}
+
+/// Whether the application's Io is a `std.Io.Threaded`, as the logger's
+/// own is: then both wait on the same OS futexes and can share a lock.
+fn appIoIsThreaded(engine: *Engine) bool {
+    return engine.io.vtable == engine.own.io().vtable;
+}
+
+/// Counts a record that passed the level filter; false when it is dropped:
+/// logged from an interceptor, from a handler that cannot write it, after
+/// `shutdown`, or to a closed stdout with no subscriber to take it.
 fn accept(engine: *Engine, comptime level: Level) bool {
+    const from_handler = hooks.subscriber_of == engine;
+    // A sync write from a handler takes the output lock through the
+    // logger's own Io; an application on another Io (an evented one) waits
+    // for that lock in a way the logger's own Io cannot wake.
+    if (hooks.in_interceptor or (from_handler and !engine.isQueued() and !engine.appIoIsThreaded())) {
+        bump(&engine.counters.hook_errors);
+        return false;
+    }
     bump(&engine.counters.accepted);
-    if (engine.state.load(.monotonic) != .running) {
+    const state = engine.state.load(.monotonic);
+    // While `shutdown` waits for the subscribers, what their handlers log
+    // still goes out.
+    if (state != .running and !(state == .stopping and from_handler)) {
         engine.refuse(level, &engine.counters.dropped_closed);
         return false;
     }
-    if (!engine.dead.load(.monotonic)) return true;
+    if (!engine.dead.load(.monotonic) or engine.registry.wanted(engine, level)) return true;
     bump(&engine.counters.dropped_write_failed);
     return false;
 }
@@ -433,13 +639,37 @@ fn headerFor(engine: *Engine, comptime level: Level, scope: *const scopes.Entry,
     };
 }
 
-/// Writes or queues the record encoded in `buf[1..]`, or counts why there
-/// is none.
-fn finish(engine: *Engine, comptime level: Level, buf: []u8, encoded: ?encode.Encoded) void {
+/// Hands the record encoded in `buf[1..]` to the interceptors, then to the
+/// subscribers, then writes or queues it; or counts why it goes nowhere.
+fn finish(engine: *Engine, comptime level: Level, scope: *const scopes.Entry, header: encode.Header, buf: []u8, encoded: ?encode.Encoded, io: Io) void {
     const done = encoded orelse return bump(&engine.counters.dropped_oversize);
     if (done.truncated) bump(&engine.counters.truncated);
-    if (engine.queue) |*q| return engine.enqueue(level, q, buf[1..][0..done.len]);
-    engine.write(buf, done.len);
+    const record = buf[1..][0..done.len];
+    if (!engine.intercept(level, scope, header, done, record)) return;
+    if (engine.registry.wanted(engine, level)) {
+        for (engine.registry.subscriberSlots()) |*s| {
+            if (s.wants(level, scope.name())) s.offer(level, scope, header, done, record);
+        }
+    }
+    if (engine.dead.load(.monotonic)) return bump(&engine.counters.dropped_write_failed);
+    if (engine.queue) |*q| return engine.enqueue(level, q, record);
+    engine.write(io, buf, done.len);
+}
+
+/// Runs the interceptors on the record; false when one of them dropped it.
+fn intercept(engine: *Engine, level: Level, scope: *const scopes.Entry, header: encode.Header, encoded: encode.Encoded, record: []const u8) bool {
+    const interceptors = engine.registry.activeInterceptors();
+    if (interceptors.len == 0) return true;
+    const event = hooks.eventOf(level, scope, header, encoded, record);
+    hooks.in_interceptor = true;
+    defer hooks.in_interceptor = false;
+    for (interceptors) |interceptor| {
+        if (!interceptor.filter(interceptor.context, &event)) {
+            bump(&engine.counters.filtered);
+            return false;
+        }
+    }
+    return true;
 }
 
 /// Queued mode: copies the record into the queue; the writer thread
@@ -596,10 +826,8 @@ fn writeRetrying(engine: *Engine, bytes: []const u8, sent: *usize) WriteError!vo
 const WriteError = Io.File.Writer.Error || Io.Writer.Error || error{FlushFailed};
 
 /// Writes the record in `buf[1..][0..len]` under the output lock, through
-/// the application's Io. `buf[0]` is free for the '\n' that ends a torn
-/// line.
-fn write(engine: *Engine, buf: []u8, len: usize) void {
-    const io = engine.io;
+/// `io`, the caller's. `buf[0]` is free for the '\n' that ends a torn line.
+fn write(engine: *Engine, io: Io, buf: []u8, len: usize) void {
     // A log call is never a cancelation point: the record goes out whole.
     const protection = io.swapCancelProtection(.blocked);
     defer _ = io.swapCancelProtection(protection);
