@@ -1,10 +1,12 @@
 # log
 
-**Structured logging for Zig services.** Every record is one line of JSON on
-stdout, the format log collectors read: a constant message and typed fields.
-Fields are checked when the program compiles, secrets come out as
-`[REDACTED]`, and levels change while the service runs. In production, a
-lock-free queue and a writer thread keep stdout off your request path.
+**Structured logging for Zig services.** A log is the diary of a running
+program: what it did, for whom, and what went wrong. This module writes that
+diary for a service. Every event becomes one line of JSON on stdout, where a
+log collector (Vector, Fluent Bit, Promtail and the like) picks it up and ships
+it to a log store, and there you search it. The message is a constant and the
+data goes in typed fields; the fields are checked when the program compiles,
+secrets come out as `[REDACTED]`, and levels change while the service runs.
 
 ```zig
 const logger: log.Logger = try .init(init.gpa, init.io, .{
@@ -48,14 +50,15 @@ The record, one line on stdout (formatted here):
 
 ## Contents
 
+- [Why structured logs](#why-structured-logs)
 - [How it works](#how-it-works)
 - [Installation](#installation)
 - [Getting started](#getting-started)
-- [Logging](#logging)
+- [Levels](#levels)
 - [Fields](#fields)
 - [Secrets](#secrets)
 - [Scopes and levels](#scopes-and-levels)
-- [Context and call site](#context-and-call-site)
+- [Tracing a request](#tracing-a-request)
 - [std.log](#stdlog)
 - [Output](#output)
 - [Sync and queued modes](#sync-and-queued-modes)
@@ -70,6 +73,30 @@ The record, one line on stdout (formatted here):
 
 Examples that `zig build test` compiles and runs:
 [a service's main](service.zig) · [nested configuration, std.log and a trace](config.zig) · [queued mode with alerts](alerts.zig)
+
+## Why structured logs
+
+A classic log line is a sentence:
+
+```text
+2026-10-12 09:41:07 INFO User 42 created, email ada@example.com
+```
+
+People read it well, programs badly. To find every record about user 42, you
+write a regular expression and hope nobody changed the wording. To count how
+many users sign up per minute, you parse text.
+
+A structured record keeps the sentence short and constant, and puts the data
+in named fields:
+
+```json
+{"timestamp":"2026-10-12T09:41:07.415Z","level":"info","message":"User created","user_id":42,"email":"ada@example.com"}
+```
+
+A log store (Loki, Elasticsearch, Datadog and others) indexes the fields, so
+`user_id = 42`, or `level = error and scope = payments`, is an exact query, and
+"User created" per minute is a chart. That is why the message here is a
+compile-time constant: everything that changes goes in the fields.
 
 ## How it works
 
@@ -136,8 +163,7 @@ const exe = b.addExecutable(.{
 
 ## Getting started
 
-Create the logger at the start of `main` and log with constant messages and
-named fields:
+A whole program: create the logger at the start of `main`, then log.
 
 **`src/main.zig`**
 
@@ -161,7 +187,23 @@ pub fn main(init: std.process.Init) !void {
 }
 ```
 
-Each record is one line of JSON, ready for a log collector:
+Line by line:
+
+- `Logger.init(init.gpa, init.io, …)` creates the logger. It allocates what it
+  needs here, once; logging never allocates after this line. `init.io` gives
+  it the clock and stdout.
+- `.service` names your program. Every JSON record carries it, so the log
+  store can tell your services apart.
+- `defer logger.deinit()` frees the logger when `main` returns.
+- `logger.info("Application started", .{ .port = 9000 })` writes a record at
+  the `info` level: the constant message, then the fields.
+- `logger.scoped("users")` returns a handle whose records carry
+  `"scope":"users"`: they come from the users part of the program.
+- `.password` comes out as `[REDACTED]`: its name says it is a secret (see
+  [Secrets](#secrets)). An error, such as `error.CardDeclined`, is written by
+  its name.
+
+Run it. Each record is one line of JSON:
 
 ```text
 $ zig build run
@@ -171,7 +213,8 @@ $ zig build run
 {"timestamp":"2026-10-12T09:41:07.416Z","level":"error","message":"Payment failed","service.name":"user-service","service.version":"1.0.0","order_id":1001,"reason":"CardDeclined"}
 ```
 
-One record, through `jq`:
+Lines like these are meant for programs. To read one yourself, pipe the output
+through `jq`:
 
 ```text
 $ zig build run | jq 'select(.message == "User created")'
@@ -188,8 +231,8 @@ $ zig build run | jq 'select(.message == "User created")'
 }
 ```
 
-With `.format = .text`, the same records read well in a terminal (the service
-fields are left out):
+Or switch the logger to text with `.format = .text`, which reads well in a
+terminal (the service fields are left out):
 
 ```text
 $ zig build run
@@ -203,50 +246,64 @@ $ zig build run
 
 The keys always come in this order:
 
-| Key                                                                                     | Comes from                                                            |
-| --------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
-| `timestamp`                                                                             | the clock of your `io`: RFC 3339, in UTC, with milliseconds           |
-| `level`                                                                                 | the method: `trace`, `debug`, `info`, `warn`, or `err` as `"error"`   |
-| `message`                                                                               | the compile-time constant you pass                                    |
-| `service.name`, `service.instance.id`, `service.version`, `deployment.environment.name` | `Options.service`, under OpenTelemetry names; empty ones are left out |
-| `scope`                                                                                 | `logger.scoped("users")`                                              |
-| `source`                                                                                | `.src = @src()` among the fields                                      |
-| `trace_id`, `span_id`                                                                   | `logger.withContext(ctx)`                                             |
-| your fields                                                                             | the fields, in declaration order                                      |
-| `truncated`                                                                             | `true` when the record was cut to `max_record_bytes`                  |
+| Key                                                                                     | Comes from                                                                    |
+| --------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| `timestamp`                                                                             | the clock of your `io`: RFC 3339, in UTC, with milliseconds                   |
+| `level`                                                                                 | the method: `trace`, `debug`, `info`, `warn`, or `err` as `"error"`           |
+| `message`                                                                               | the compile-time constant you pass                                            |
+| `service.name`, `service.instance.id`, `service.version`, `deployment.environment.name` | `Options.service`, under OpenTelemetry names; empty ones are left out         |
+| `scope`                                                                                 | `logger.scoped("users")`, see [Scopes and levels](#scopes-and-levels)         |
+| `source`                                                                                | `.src = @src()` among the fields, see [Tracing a request](#tracing-a-request) |
+| `trace_id`, `span_id`                                                                   | `logger.withContext(ctx)`, see [Tracing a request](#tracing-a-request)        |
+| your fields                                                                             | the fields, in the order you write them                                       |
+| `truncated`                                                                             | `true` when the record was cut to `max_record_bytes`, see [Output](#output)   |
 
-## Logging
+## Levels
+
+Every record has a level, which says how important it is:
+
+| Method  | In JSON   | Use it for                                 | For example                          |
+| ------- | --------- | ------------------------------------------ | ------------------------------------ |
+| `trace` | `"trace"` | the finest detail, while you hunt a bug    | each step of a parser                |
+| `debug` | `"debug"` | what helps a developer follow a flow       | a cache miss, why a retry was chosen |
+| `info`  | `"info"`  | the normal events of the service           | a user created, an order placed      |
+| `warn`  | `"warn"`  | something unusual that the service handled | a slow query, a retry                |
+| `err`   | `"error"` | a failure that someone should look at      | a payment failed                     |
+
+The logger writes a record only when its level reaches the threshold, which
+is `info` by default. In production, `trace` and `debug` records are skipped,
+and when you need them, you lower the threshold for one part of the program
+while it runs (see [Scopes and levels](#scopes-and-levels)).
 
 ```zig
-logger.info("User created", .{ .user_id = id });
+const logger: log.Logger = try .init(init.gpa, init.io, .{ .level = .info }); // the default
+logger.debug("Cache miss", .{ .key = key }); // below the threshold: skipped
 ```
 
-| Method  | JSON      | Text    |
-| ------- | --------- | ------- |
-| `trace` | `"trace"` | `TRACE` |
-| `debug` | `"debug"` | `DEBUG` |
-| `info`  | `"info"`  | `INFO`  |
-| `warn`  | `"warn"`  | `WARN`  |
-| `err`   | `"error"` | `ERROR` |
-
-- The message is a compile-time constant; anything that varies goes in the
-  fields, a struct literal.
-- `Logger.init(gpa, io, options)` creates the logger, and logging allocates
-  nothing after it (only `subscribe` allocates again). `deinit` frees it;
-  call it once, on any handle.
-- A `Logger` is a small handle: copy it, pass it by value and share it between
-  threads. `scoped` and `withContext` derive more of them.
-- Logging never fails and is never a cancelation point: problems are counted
-  in [`stats()`](#failures-and-stats).
-- `logger.enabled(.debug)` tells whether a record at that level would be
-  written; `logger.emergency(...)` writes an error record to stderr at once,
-  see [Emergency records](#emergency-records).
-
 > [!TIP]
-> Field values are computed even when the level is off. Check
-> `logger.enabled(level)` before costly ones.
+> A skipped record costs one check, but its field values are computed before
+> the call, like any arguments. Guard costly ones:
+> `if (logger.enabled(.debug)) logger.debug("Cache state", .{ .entries = cache.count() });`
+
+In text, the levels are written as `TRACE`, `DEBUG`, `INFO`, `WARN` and
+`ERROR`. A few more things about the calls:
+
+- The message must be a compile-time constant; anything that varies goes in
+  the fields.
+- A `Logger` is a small handle: copy it, pass it by value and share it between
+  threads. `scoped` and `withContext` make more handles of the same logger.
+  Call `deinit` once, on any of them.
+- Logging never fails and is never a cancelation point: what goes wrong is
+  counted in [`stats()`](#failures-and-stats).
+- `logger.emergency(...)` writes an error record to stderr at once, for when
+  the regular output is stuck; see [Emergency records](#emergency-records).
 
 ## Fields
+
+Fields carry the data of a record. Write them as a struct literal after the
+message, `.{ .user_id = id, .email = email }`: each field becomes a key of the
+JSON object, in the order you write them. The logger works out at compile time
+how to write each value, from its type:
 
 | Zig type                                             | JSON                                                                 | Text                             |
 | ---------------------------------------------------- | -------------------------------------------------------------------- | -------------------------------- |
@@ -265,7 +322,8 @@ logger.info("User created", .{ .user_id = id });
 | a type with `format` (as `{f}` uses it)              | its text, escaped                                                    | the same                         |
 | a type with `pub fn logValue(self) U`                | the value it returns, logged by these rules                          | the same                         |
 
-A struct is written whole, nested structs included:
+A struct is written whole, nested structs included. Logging the whole
+configuration at start-up is a common way to see what a service runs with:
 
 ```zig
 logger.info("Configuration loaded", .{ .config = config });
@@ -275,6 +333,8 @@ logger.info("Configuration loaded", .{ .config = config });
 {"timestamp":"2026-10-12T09:41:07.415Z","level":"info","message":"Configuration loaded","service.name":"billing","service.version":"2.1.0","config":{"port":9000,"database":{"host":"postgres.internal","password":"[REDACTED]","pool":{"min":2,"max":16}},"vault_key":"[REDACTED]","regions":["eu-west","us-east"]}}
 ```
 
+In text, a struct spreads into dotted keys:
+
 ```text
 2026-10-12T09:41:07.415Z INFO  Configuration loaded config.port=9000 config.database.host=postgres.internal config.database.password=[REDACTED] config.database.pool.min=2 config.database.pool.max=16 config.vault_key=[REDACTED] config.regions=[eu-west,us-east]
 ```
@@ -283,8 +343,9 @@ Nesting deeper than 8 levels is written as `"[MAX_DEPTH]"`, so a cycle through
 pointers ends. A pointer to an opaque type is logged through the type's
 `format` or `logValue`, which take `self: *const @This()`.
 
-What cannot be logged is a compile error at the call, and the error names the
-field:
+The logger checks the fields when the program compiles. A field it cannot
+write, a field without a name or a name that records use themselves stops the
+build, and the error names the field and says what to do:
 
 ```zig
 logger.info("User created", .{user_id}); // a field without a name
@@ -334,7 +395,9 @@ error); other `service.` names, such as `service.namespace`, are free.
 
 ## Secrets
 
-Two rules decide what is hidden, both when the program compiles:
+Logs travel far: to log stores, dashboards, chat alerts, the laptops of
+whoever is on call. A password that reaches a log is a leaked password. The
+logger hides secrets by two rules, both decided when the program compiles:
 
 ```mermaid
 flowchart LR
@@ -401,9 +464,10 @@ marker, so a configuration loaded by confy can be logged as it is.
 > is then written in full. `log.isSensitive(T)` in a `comptime` block, as
 > above, turns that mistake into a build error.
 
-**By name.** A field is redacted at any depth when its name, or one
-dot-separated part of it, ends in one of these names or its plural, in any
-case and with or without `_` and `-`:
+**By name.** This rule is a safety net for secrets that lost their type, such
+as a password read into a plain `[]const u8`. A field is redacted at any depth
+when its name, or one dot-separated part of it, ends in one of these names or
+its plural, in any case and with or without `_` and `-`:
 
 > `password` `passwd` `secret` `client_secret` `secret_key`
 > `secret_access_key` `aws_secret_access_key` `api_key` `apikey`
@@ -426,9 +490,42 @@ struct separates names. Give such values a marked type, such as
 
 ## Scopes and levels
 
-Each record is written when its level reaches the threshold of its scope. The
-longest matching prefix sets the threshold, and scopes without a rule use the
-global one:
+A scope is a name for a part of your program: `db`, `http`, `payments`. Its
+records carry it, so in the log store you can look at one part at a time, and
+each scope can have a threshold of its own. A dot builds a tree: `db.pool` is
+a part of `db`.
+
+Why that matters: production is slow, and you suspect the database pool. You
+want its `debug` records, but not those of the whole service, which would
+flood the log. So you lower the threshold for `db` alone, while the service
+runs, and raise it again when you are done:
+
+```zig
+const logger: log.Logger = try .init(init.gpa, init.io, .{
+    .service = .{ .name = "user-service", .version = "1.0.0" },
+    .level = .info,
+    .scopes = &.{.{ .prefix = "db", .level = .warn }},
+});
+defer logger.deinit();
+
+const pool = logger.scoped("db.pool");
+pool.info("Connection opened", .{ .connections = 1 }); // db logs from warn: not written
+pool.warn("Pool is almost full", .{ .connections = 19, .max = 20 });
+
+try logger.setScopeLevel("db", .debug); // say, from an admin endpoint
+pool.debug("Waiting for a connection", .{ .waiting_ms = 340 });
+
+try logger.setScopeLevel("db", null); // back to the global threshold
+pool.debug("Connection reused", .{ .connections = 19 }); // not written again
+```
+
+```text
+{"timestamp":"2026-10-12T09:41:07.415Z","level":"warn","message":"Pool is almost full","service.name":"user-service","service.version":"1.0.0","scope":"db.pool","connections":19,"max":20}
+{"timestamp":"2026-10-12T09:41:07.416Z","level":"debug","message":"Waiting for a connection","service.name":"user-service","service.version":"1.0.0","scope":"db.pool","waiting_ms":340}
+```
+
+The threshold of a scope comes from the longest rule that matches its name;
+a scope without a rule uses the global threshold:
 
 ```mermaid
 flowchart TD
@@ -439,29 +536,39 @@ flowchart TD
     db --> conn["db.conn: warn, from db"]
 ```
 
-```zig
-const logger: log.Logger = try .init(init.gpa, init.io, .{
-    .level = .info,
-    .scopes = &.{
-        .{ .prefix = "db", .level = .warn },
-        .{ .prefix = "db.pool", .level = .debug },
-    },
-});
-
-const pool = logger.scoped("db.pool"); // records carry "scope":"db.pool"
-logger.setLevel(.debug); // the global threshold
-try logger.setScopeLevel("db", .err); // db and db.*; not dbx
-try logger.setScopeLevel("db", null); // back to the global threshold
-```
+| Call                                 | Does                                             |
+| ------------------------------------ | ------------------------------------------------ |
+| `logger.scoped("db.pool")`           | a handle whose records carry `"scope":"db.pool"` |
+| `logger.setLevel(.debug)`            | changes the global threshold                     |
+| `logger.setScopeLevel("db", .err)`   | a rule for `db` and `db.*` (not `dbx`)           |
+| `logger.setScopeLevel("db", null)`   | removes the rule: back to the global threshold   |
+| `.scopes = &.{ ... }` in the options | the rules the logger starts with                 |
 
 - Every handle sees a change at once, from any thread. A trailing dot in a
   prefix is ignored.
-- The rules can start in the options, which confy can read from the
-  configuration.
+- The starting rules can come from the configuration: confy can read
+  `.scopes` like any other option.
 - `scoped` copies the name, so it need not outlive the handle. A handle holds
   one scope, and `scoped` replaces it.
 
-## Context and call site
+## Tracing a request
+
+A request often crosses several services: a gateway calls the users service,
+which calls billing. When something fails, you want every record of that one
+request, from every service. W3C Trace Context makes that possible: the first
+service picks a trace id, and every service passes it on in the `traceparent`
+header, adding a span id of its own.
+
+```mermaid
+flowchart LR
+    gateway["gateway"] -->|"traceparent:<br/>trace 4bf92f35…"| users["users"]
+    users -->|"traceparent:<br/>trace 4bf92f35…"| billing["billing"]
+```
+
+core reads that header into a `core.Context` (see the
+[core guide](../../core/examples/README.md)). `withContext(ctx)` gives a handle
+whose records carry the ids, and `.src = @src()` among the fields adds where in
+the code the record was logged:
 
 ```zig
 const users = logger.scoped("users").withContext(ctx);
@@ -472,13 +579,15 @@ users.info("User created", .{ .src = @src(), .user_id = 42 });
 {"timestamp":"2026-10-12T09:41:07.416Z","level":"info","message":"User created","service.name":"user-service","service.version":"1.0.0","scope":"users","source":{"file":"users.zig","line":12},"trace_id":"4bf92f3577b34da6a3ce929d0e0e4736","span_id":"00f067aa0ba902b7","user_id":42}
 ```
 
-- `withContext(ctx)` copies the trace and span ids of a `core.Context`; a
-  context without a trace gives a handle without them. Its deadline and
+Now `trace_id = 4bf92f3577b34da6a3ce929d0e0e4736` in the log store finds this
+record together with the gateway's and billing's records of the same request.
+
+- `withContext` copies the trace and span ids of the context; a context
+  without a trace gives a handle without them. The context's deadline and
   cancellation do not affect logging.
 - It is the way to log a context: a `core.Context` among the fields is a
   compile error.
-- `.src = @src()` among the fields adds the call site. `.source` in the
-  options sets how much of it each level writes:
+- `.source` in the options sets how much of the call site each level writes:
 
 | `.source`                  | Writes                                      |
 | -------------------------- | ------------------------------------------- |
@@ -492,6 +601,10 @@ users.info("User created", .{ .src = @src(), .user_id = 42 });
 
 ## std.log
 
+Libraries, and std itself, log through std.log. Route it into the logger, and
+their records land in the same JSON stream, under the same levels and scope
+rules:
+
 ```zig
 pub const std_options: std.Options = .{ .logFn = log.stdLogFn };
 ...
@@ -504,7 +617,7 @@ std.log.scoped(.cache).info("warmed up {d} entries", .{128});
 ```
 
 - std.log's scope becomes the record's scope and its formatted text the
-  message; the logger's levels and scope rules apply.
+  message.
 - `deinit` removes the bridge once the logger's threads have exited, so what
   handlers log through std.log while it waits for them still reaches the
   logger. `log.uninstallStdLog()` removes it earlier.
@@ -529,13 +642,14 @@ std.log.scoped(.cache).info("warmed up {d} entries", .{128});
 A record that does not fit is cut: the message loses its end, between
 characters, the fields that do not fit are left out (the call site too, when
 not even the cut message leaves room for it), and the record ends with
-`"truncated":true`:
+`"truncated":true`. Here a 400-byte body did not fit a limit of 320 bytes:
 
 ```json
 {"timestamp":"2026-10-12T09:41:07.416Z","level":"info","message":"Request received","path":"/v1/users","truncated":true}
 ```
 
-With `.oversize = .drop`, it is not written and is counted instead.
+With `.oversize = .drop`, such a record is not written and is counted
+instead.
 
 - `init` refuses a limit too small for what every record may need: 304 bytes
   in JSON plus the service fields as JSON writes them
@@ -658,14 +772,14 @@ stdout.
 
 ### Side by side
 
-|                  | `.sync` (default)                                    | `.{ .queued = .{} }`                                                                            |
-| ---------------- | ---------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| Who writes       | the calling thread, before the call returns          | a writer thread of the logger, in batches                                                       |
-| The caller waits | for stdout                                           | only for a copy into the queue                                                                  |
-| Through          | the application's `io`, under a lock                 | the logger's own Io; a `.writer` output is called on the writer thread                          |
-| After a crash    | every record that was logged is out                  | the records still in the queue are lost                                                         |
-| Memory           | no queue                                             | `Options.queueBytes()`: 17 MiB with the defaults                                                |
-| Good for         | tests, command-line tools, short programs            | services                                                                                        |
+|                  | `.sync` (default)                           | `.{ .queued = .{} }`                                                   |
+| ---------------- | ------------------------------------------- | ---------------------------------------------------------------------- |
+| Who writes       | the calling thread, before the call returns | a writer thread of the logger, in batches                              |
+| The caller waits | for stdout                                  | only for a copy into the queue                                         |
+| Through          | the application's `io`, under a lock        | the logger's own Io; a `.writer` output is called on the writer thread |
+| After a crash    | every record that was logged is out         | the records still in the queue are lost                                |
+| Memory           | no queue                                    | `Options.queueBytes()`: 17 MiB with the defaults                       |
+| Good for         | tests, command-line tools, short programs   | services                                                               |
 
 The queue is set up by these options:
 
@@ -704,7 +818,10 @@ none is lost.
 
 ## Stopping
 
-Stop in this order:
+A service is stopped all the time: by a deploy, by scaling down, by a restart.
+Kubernetes, for one, sends the process SIGTERM, waits 30 seconds, and then
+kills it. In queued mode, the last records may still sit in the queue when the
+stop comes, so a service stops in this order:
 
 ```mermaid
 flowchart LR
@@ -722,7 +839,7 @@ logger.deinit();
 ```
 
 `shutdown` refuses new records, lets the subscribers finish, writes the queue
-and stops the logger's threads:
+and stops the logger's threads, all within the timeout you give it:
 
 ```mermaid
 sequenceDiagram
@@ -764,8 +881,32 @@ sequenceDiagram
 
 ## Failures and stats
 
-Logging never fails: what goes wrong is counted. `stats()` returns the counters
-since `init`, from any thread:
+Logging never stops your program. When something goes wrong (the queue is
+full, stdout is closed, a write fails), the logger does not return an error to
+the code that logged: it counts what happened. `stats()` returns the counters,
+from any thread; a service usually shows them on its metrics endpoint.
+
+Say a burst of 10 000 records hits a queue of 64 slots:
+
+```zig
+const logger: log.Logger = try .init(init.gpa, init.io, .{
+    .mode = .{ .queued = .{ .capacity = 64 } },
+});
+defer logger.deinit();
+
+for (0..10_000) |i| logger.info("Cache refreshed", .{ .entry = i });
+logger.flush(.{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } }) catch {};
+
+const s = logger.stats();
+std.debug.print("accepted {d}, written {d}, dropped because the queue was full {d}\n", .{ s.accepted, s.written, s.dropped.queue_full });
+```
+
+```text
+accepted 10000, written 9975, dropped because the queue was full 25
+```
+
+The writer thread kept up with all but 25 records; a bigger `.capacity`, or
+`.overflow = .block`, would have kept them too. All the counters:
 
 | Field                                       | Counts                                                                                                              |
 | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
@@ -786,7 +927,8 @@ since `init`, from any thread:
 | `filtered`, `hook_errors`                   | records interceptors dropped on purpose; records dropped because a hook logged them                                 |
 
 Error records are never lost silently. When the queue refuses one, the writer
-thread writes a record in its place that counts them:
+thread writes a record in its place that counts them, so the log itself says
+that errors are missing:
 
 ```json
 {"timestamp":"2026-10-12T09:41:07.416Z","level":"error","message":"Upstream timeout","attempt":0}
@@ -819,7 +961,10 @@ thread writes a record in its place that counts them:
 
 ## Emergency records
 
-For what must be seen when the regular output is stuck:
+Sometimes the regular output itself is the problem: stdout is stuck behind a
+dead log collector, or the process is about to exit and the queue may never be
+written. An emergency record skips everything and goes straight to stderr,
+before the call returns:
 
 ```zig
 logger.emergency("Disk full", .{ .path = "/var/lib/app", .free_bytes = 0 });
@@ -830,9 +975,8 @@ stderr:
 {"timestamp":"2026-10-12T09:41:07.416Z","level":"error","message":"Disk full","path":"/var/lib/app","free_bytes":0}
 ```
 
-- The record goes to stderr before the call returns, past the queue, the
-  interceptors and the subscribers, also after `shutdown`, and through the
-  logger's own Io.
+- The record goes past the queue, the interceptors and the subscribers, also
+  after `shutdown`, through the logger's own Io.
 - At most 100 go out at once and 100 per second after that; the next one
   written tells how many were left out with `"suppressed":N`. A record that
   fits whole is never cut to make room for that count: the next one tells it
@@ -842,49 +986,160 @@ stderr:
 
 ## Subscribers
 
-A subscriber gets the records of its levels on a thread of its own: the place
-for alerts.
+Most records are read later, when somebody searches the log. Some need a
+reaction now: a payment failed, the database is down. A subscriber is your
+function that the logger calls for each record of the levels you choose, and,
+if you like, of one part of the program. It runs on a thread of its own, so
+the code that logged the record does not wait for it. Typical subscribers post
+to Slack or to a pager, count errors for a metrics endpoint, or keep the last
+errors for a debug page.
 
-```mermaid
-flowchart LR
-    record["an error record<br/>in scope payments"] --> queue[["the subscriber's queue,<br/>256 records"]]
-    queue --> handler["sendAlert(),<br/>on the subscriber's thread"]
-    handler --> pager(["your pager or chat"])
-    record --> output(["the output"])
-```
+### Example: payment errors to Slack
+
+The payments part of an orders service logs an error when a charge fails. The
+team wants each such error in a Slack channel. Slack gives a channel an
+incoming webhook: a URL, and whatever JSON is posted to it appears in the
+channel. The whole program:
 
 ```zig
-const id = try logger.subscribe(.{
-    .levels = &.{.err},
-    .scope = "payments", // and its subscopes; null for any
-    .context = &alerter,
-    .handler = sendAlert,
-});
-...
-logger.unsubscribe(id); // before `alerter` goes, and before `deinit`
+const std = @import("std");
+const log = @import("log");
 
-fn sendAlert(context: ?*anyopaque, event: *const log.Event) anyerror!void {
-    const alerter: *Alerter = @ptrCast(@alignCast(context.?));
-    try alerter.post(event.line); // the redacted record, as the output has it
+/// Posts error records to a Slack channel through an incoming webhook.
+const SlackAlerts = struct {
+    gpa: std.mem.Allocator,
+    http: std.http.Client,
+    webhook_url: []const u8,
+
+    /// The handler. The logger calls it on the subscriber's own thread, once
+    /// per record, so a slow post holds up no request.
+    fn send(context: ?*anyopaque, event: *const log.Event) anyerror!void {
+        const slack: *SlackAlerts = @ptrCast(@alignCast(context.?));
+        // event.line is the record as stdout gets it, secrets already redacted.
+        const text = try std.fmt.allocPrint(slack.gpa, ":rotating_light: *{s}* in `{s}`\n```{s}```", .{ event.message, event.scope, event.line });
+        defer slack.gpa.free(text);
+        const body = try std.json.Stringify.valueAlloc(slack.gpa, .{ .text = text }, .{});
+        defer slack.gpa.free(body);
+        const response = try slack.http.fetch(.{
+            .location = .{ .url = slack.webhook_url },
+            .payload = body, // a payload makes it a POST
+            .headers = .{ .content_type = .{ .override = "application/json" } },
+        });
+        if (response.status != .ok) return error.SlackRejected;
+    }
+};
+
+pub fn main(init: std.process.Init) !void {
+    const logger: log.Logger = try .init(init.gpa, init.io, .{
+        .service = .{ .name = "orders", .version = "3.0.0" },
+        .mode = .{ .queued = .{} },
+    });
+    defer logger.deinit();
+
+    var slack: SlackAlerts = .{
+        .gpa = init.gpa,
+        .http = .{ .allocator = init.gpa, .io = init.io },
+        .webhook_url = init.environ_map.get("SLACK_WEBHOOK_URL") orelse return error.MissingWebhookUrl,
+    };
+    defer slack.http.deinit();
+
+    const alerts = try logger.subscribe(.{
+        .levels = &.{.err}, // error records only
+        .scope = "payments", // from payments and its subscopes only
+        .context = &slack,
+        .handler = SlackAlerts.send,
+    });
+    defer logger.unsubscribe(alerts); // runs first: before the client and the logger go
+
+    const payments = logger.scoped("payments");
+    payments.info("Charge started", .{ .order_id = 7, .amount_cents = 4200 });
+    payments.err("Charge declined", .{ .order_id = 7, .reason = "card_expired" });
+    logger.scoped("http").err("Upstream timeout", .{ .path = "/v1/orders" }); // another scope: not sent
 }
 ```
 
+Run it with the webhook URL Slack gave you:
+
+```text
+$ SLACK_WEBHOOK_URL=https://hooks.slack.com/services/T000/B000/XXXX zig build run
+{"timestamp":"2026-10-12T09:41:07.415Z","level":"info","message":"Charge started","service.name":"orders","service.version":"3.0.0","scope":"payments","order_id":7,"amount_cents":4200}
+{"timestamp":"2026-10-12T09:41:07.416Z","level":"error","message":"Charge declined","service.name":"orders","service.version":"3.0.0","scope":"payments","order_id":7,"reason":"card_expired"}
+{"timestamp":"2026-10-12T09:41:07.416Z","level":"error","message":"Upstream timeout","service.name":"orders","service.version":"3.0.0","scope":"http","path":"/v1/orders"}
+```
+
+stdout gets all three records, as always. The webhook gets one post, for the
+error in `payments`:
+
+```json
+{"text":":rotating_light: *Charge declined* in `payments`\n```{\"timestamp\":\"2026-10-12T09:41:07.416Z\",\"level\":\"error\",\"message\":\"Charge declined\",\"service.name\":\"orders\",\"service.version\":\"3.0.0\",\"scope\":\"payments\",\"order_id\":7,\"reason\":\"card_expired\"}```"}
+```
+
+And the channel shows:
+
+```text
+🚨 Charge declined in `payments`
+{"timestamp":"2026-10-12T09:41:07.416Z","level":"error","message":"Charge declined","service.name":"orders","service.version":"3.0.0","scope":"payments","order_id":7,"reason":"card_expired"}
+```
+
+What happens, step by step:
+
+```mermaid
+flowchart LR
+    call["payments.err(...)"] --> out(["stdout,<br/>as always"])
+    call --> queue[["the subscriber's queue,<br/>256 records"]]
+    queue --> handler["SlackAlerts.send,<br/>on the subscriber's thread"]
+    handler --> slack(["the Slack channel"])
+```
+
+1. `subscribe` registers the handler with its filter, `.err` records of
+   `payments` and its subscopes, starts the subscriber's thread and gives it a
+   queue of 256 records.
+2. `payments.err(...)` goes through the level filter and the encoding as
+   usual. The logger sees that this subscriber wants the record and copies it
+   into the subscriber's queue (a copy, no waiting), then writes it to stdout.
+3. The subscriber's thread takes the record from its queue and calls
+   `SlackAlerts.send`. The post takes as long as Slack needs; the code that
+   logged the error has long gone on.
+4. The `http` error reaches no subscriber: its scope is not `payments`.
+5. At the end of `main`, `unsubscribe` waits until the queue is empty, so the
+   last alert is posted, and stops the thread.
+
+The handler gets an `Event`, valid only during the call:
+
+| Field                 | Holds                                                                     |
+| --------------------- | ------------------------------------------------------------------------- |
+| `level`               | the record's level                                                        |
+| `timestamp`           | when the record was logged                                                |
+| `scope`               | the scope, as the record writes it; empty without one                     |
+| `message`             | the message, as the record writes it: escaped, and cut when the record is |
+| `trace_id`, `span_id` | the trace ids, when the record has them                                   |
+| `line`                | the whole record, without its final `'\n'`, redacted as the output is     |
+
+When things go wrong:
+
+- **Slack is down, or answers with an error.** The handler returns the error;
+  the logger counts it in `stats().alert_failures` and goes on with the next
+  record. It does not retry: retry in the handler if you need to.
+- **Errors come faster than Slack takes them.** The subscriber's queue fills
+  up, and the subscriber misses the records that find no room (counted in
+  `stats().alert_dropped`); stdout still gets every one. Raise `.capacity` in
+  the subscription for bursts.
+- **The record is too long for `.oversize = .drop`.** No subscriber gets it:
+  there is no line to give.
+
+The rules:
+
+- A subscriber gets the records of its levels (and scope, with its subscopes)
+  that pass the logger's level filter. It gets them before the output, so an
+  error record reaches it even when the queue refuses it or stdout is closed.
 - Each subscriber has a queue (`capacity`, 256 records by default; a slot is
   `max_record_bytes` + 112 bytes, rounded up to 128) and a thread of its own,
   so a slow handler holds up nobody else.
-- It gets the records of its levels that pass the logger's level filter,
-  before the output: an error record reaches it even when the queue refuses
-  it or stdout is closed. A record too long for `.oversize = .drop` reaches no
-  subscriber.
-- A full subscriber queue drops the record (`alert_dropped`); a handler error
-  is counted (`alert_failures`) and not retried.
-- The `Event` gives the level, the timestamp, the scope and the message as the
-  record writes them (escaped, and cut when the record is), the trace ids and
-  the whole line. It is valid only during the call.
 - `unsubscribe` waits until the subscriber has handled its queue (with no time
   limit while the logger runs; once `shutdown` has begun, only for the call in
   hand). After it returns, the handler is never called again. Call it before
-  `deinit`. A logger takes 8 subscribers in its life.
+  the context goes, and before `deinit`. A logger takes 8 subscribers in its
+  life.
 
 > [!WARNING]
 > A handler may log: what it logs on its own thread goes to the output only,
@@ -896,40 +1151,93 @@ fn sendAlert(context: ?*anyopaque, event: *const log.Event) anyerror!void {
 > handler must not call `unsubscribe`, `flush` or `shutdown`: that panics in
 > safe builds.
 
+> [!NOTE]
+> The handler runs on the subscriber's thread, which is not a task of your
+> `io`. The example uses `init.io`, a `std.Io.Threaded`, which serves any
+> thread. Under an evented `io`, give the notifier a `std.Io.Threaded` of its
+> own; see [Threads and Io](#threads-and-io).
+
 ## Interceptors
 
-An interceptor sees every record before it is written and can drop it:
+An interceptor sees every record before it is written, and decides whether it
+is written at all. Use one to drop noise: health checks, a chatty library, the
+records of a test tenant.
+
+### Example: drop health checks
+
+Kubernetes checks a service by calling `GET /health` every few seconds. If the
+service logs every request, the log fills up with health checks. Drop them:
 
 ```zig
-try logger.use(.{ .filter = dropHealthChecks });
+const std = @import("std");
+const log = @import("log");
 
+/// Kubernetes asks GET /health every few seconds: these records are noise.
 fn dropHealthChecks(_: ?*anyopaque, event: *const log.Event) bool {
-    return !std.mem.eql(u8, event.scope, "http.health");
+    return !std.mem.eql(u8, event.scope, "http.health"); // false drops the record
+}
+
+pub fn main(init: std.process.Init) !void {
+    const logger: log.Logger = try .init(init.gpa, init.io, .{
+        .service = .{ .name = "orders", .version = "3.0.0" },
+    });
+    defer logger.deinit();
+    try logger.use(.{ .filter = dropHealthChecks });
+
+    const health = logger.scoped("http.health");
+    const orders = logger.scoped("orders");
+    health.info("GET /health", .{ .status = 200 });
+    orders.info("Order placed", .{ .order_id = 7, .total_cents = 4200 });
+    health.info("GET /health", .{ .status = 200 });
+
+    std.debug.print("filtered: {d}\n", .{logger.stats().filtered});
 }
 ```
 
-- It runs at the caller for every record that passes the level filter, once
-  the record is encoded (a record too long for `.oversize = .drop` never is),
-  in the order they were added. `false` drops the record everywhere
-  (`filtered`).
-- It must not block or log: a record logged from it is dropped
-  (`hook_errors`).
+```text
+$ zig build run
+{"timestamp":"2026-10-12T09:41:07.415Z","level":"info","message":"Order placed","service.name":"orders","service.version":"3.0.0","scope":"orders","order_id":7,"total_cents":4200}
+filtered: 2
+```
+
+Only the order is written; both health checks were dropped and counted.
+
+- An interceptor runs at the caller, for every record that passes the level
+  filter, once the record is encoded (a record too long for
+  `.oversize = .drop` never is), in the order they were added.
+- `false` drops the record everywhere: no subscriber and no output get it.
+  It is counted in `filtered`.
+- It must be quick and must not block or log: a record logged from it is
+  dropped (`hook_errors`).
 - It stays until `deinit`, as none can be removed: its context, and whatever
   its filter reads, must outlive the logger. A logger takes 8.
 
+Subscribers and interceptors side by side:
+
+|                   | Subscriber                          | Interceptor                               |
+| ----------------- | ----------------------------------- | ----------------------------------------- |
+| Runs              | later, on a thread of its own       | at once, inside the log call              |
+| Sees              | the records of its levels and scope | every record that passes the level filter |
+| Can drop a record | no                                  | yes, everywhere                           |
+| May be slow       | yes                                 | no                                        |
+| Typical use       | Slack, a pager, metrics             | dropping noise                            |
+
 ## Threads and Io
 
-- The application's `io` reads the clock and does the sync writes, so log only
-  from threads or tasks of that `io` (under `std.Io.Threaded`, any thread).
-- The logger's own threads (the writer, the subscribers) and every wait for
-  them run on a `std.Io.Threaded` of the logger's own, and those waits keep a
-  cancel request for the caller's task.
-- A handler that logs writes through that own Io too. In sync mode, under an
-  application `io` that is not a `std.Io.Threaded` (an evented one), it could
-  not share the output lock with the application's tasks, so those records are
-  dropped and counted in `hook_errors`: use queued mode there.
-- Two loggers on one stdout do not coordinate their writes: use one per
-  process.
+The logger works with the `std.Io` you give it, and with threads of its own:
+
+- **Your `io`** reads the clock and, in sync mode, writes stdout. Log from
+  threads or tasks of that `io`; with `std.Io.Threaded`, which
+  `main(init: std.process.Init)` gives you, that is any thread.
+- **The logger's own threads**, the writer thread and one per subscriber, run
+  on a `std.Io.Threaded` the logger creates for itself, and so do its waits
+  for them; those waits keep a cancel request for the caller's task.
+- **A handler that logs** writes through that own Io too. In sync mode, under
+  an application `io` that is not a `std.Io.Threaded` (an evented one), it
+  could not share the output lock with the application's tasks, so those
+  records are dropped and counted in `hook_errors`: use queued mode there.
+- **One logger per process.** Two loggers on one stdout do not coordinate
+  their writes.
 
 > [!IMPORTANT]
 > The logger's threads are not tasks of your `io`: a handler runs on its
