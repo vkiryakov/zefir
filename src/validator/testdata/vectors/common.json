@@ -101,7 +101,8 @@
     "input": null,
     "expect": "pass",
     "reason": "null skips the rules (class-validator arrayNotEmpty(null) is false; with @IsOptional it is skipped)",
-    "source": "catalog/numbers-lists/vectors.json#notEmpty-09"
+    "source": "catalog/numbers-lists/vectors.json#notEmpty-09",
+    "deviation": "D14"
   },
   {
     "id": "notEmpty-010",

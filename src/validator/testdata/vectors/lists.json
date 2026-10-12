@@ -195,7 +195,8 @@
     ],
     "expect": "pass",
     "reason": "a list of null items passes",
-    "source": "errata VE-248"
+    "source": "errata VE-248",
+    "deviation": "D63"
   },
   {
     "id": "each-004",
