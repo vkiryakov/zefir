@@ -1085,3 +1085,37 @@ test "containsNone fails on any listed value among the items" {
     try expectOutcome(.fail, containsNone(.{.a}), @as([]const Open, &.{ @fromBackingInt(9), @fromBackingInt(0) }));
     try expectOutcome(.fail, containsNone(.{false}), @as([]const bool, &.{ true, false }));
 }
+
+/// No two of `items` are equal, by comparing every pair.
+fn naiveUnique(comptime T: type, items: []const T) bool {
+    for (items, 0..) |a, i| {
+        for (items[i + 1 ..]) |b| {
+            const same = if (comptime core.isString(T)) std.mem.eql(u8, a, b) else a == b;
+            if (same) return false;
+        }
+    }
+    return true;
+}
+
+test "uniqueItems agrees with a pairwise comparison on random lists of integers, strings and enums" {
+    var prng = std.Random.DefaultPrng.init(0x5eed);
+    const random = prng.random();
+    var ints: [200]u16 = undefined;
+    var modes: [200]Open = undefined;
+    var bytes: [200][3]u8 = undefined;
+    var strings: [200][]const u8 = undefined;
+    for (0..2000) |_| {
+        const n = random.uintAtMost(usize, ints.len);
+        // Small ranges make duplicates likely, at every length.
+        const range = random.uintAtMost(u16, 400) + 1;
+        for (ints[0..n], modes[0..n], bytes[0..n], strings[0..n]) |*int, *mode, *string_bytes, *string| {
+            int.* = random.uintLessThan(u16, range);
+            mode.* = @fromBackingInt(@truncate(int.*));
+            for (string_bytes) |*b| b.* = 'a' + random.uintLessThan(u8, 3);
+            string.* = string_bytes[0..random.uintAtMost(usize, 3)];
+        }
+        try std.testing.expectEqual(naiveUnique(u16, ints[0..n]), uniqueItems.eval(&@as([]const u16, ints[0..n])) == .pass);
+        try std.testing.expectEqual(naiveUnique(Open, modes[0..n]), uniqueItems.eval(&@as([]const Open, modes[0..n])) == .pass);
+        try std.testing.expectEqual(naiveUnique([]const u8, strings[0..n]), uniqueItems.eval(&@as([]const []const u8, strings[0..n])) == .pass);
+    }
+}
