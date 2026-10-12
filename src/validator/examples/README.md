@@ -525,6 +525,8 @@ if (v.check(&request, &path_buf)) |violation| {
   the next call with the same buffer. A path of exactly `path_buf.len` bytes
   fits; a longer one gives `field = null` with the full `code` and `message`.
   The bytes of `path_buf` outside `field` are undefined after the call.
+- `path_buf` must not overlap the checked value: the walk writes the path into
+  it while it still reads the value. The recommended size is 256 bytes.
 - The violation does not point into the checked value: free the value, and the
   violation stays valid.
 
@@ -553,6 +555,16 @@ if (report.truncated) std.debug.print("more than {d} violations\n", .{v.max_repo
   `violations` and every `field` are gone; `code` and `message` are static
   strings and stay valid.
 - The only run-time error is `error.OutOfMemory`; nothing leaks then.
+
+### Threads
+
+`check` and `checkAll` keep no global state, so several threads can check
+values at once, the same value included, when:
+
+- calls that run at the same time use different `path_buf`s;
+- no thread changes the value during a call;
+- a `gpa` shared by `checkAll` calls on several threads is thread-safe;
+- `v.custom` functions and `validateSelf` are pure, as they must be anyway.
 
 ### Violation
 
@@ -754,7 +766,9 @@ The limits are `comptime_int` constants and part of the contract (see below).
 - A client and a server that check the same value get the same first violation
   only when the types whose width depends on the target — `usize`, `isize`,
   `c_int`, `c_long`, `c_longdouble` and similar — have the same width on both.
-  Fixed-width types such as `u64` avoid the question.
+  Fixed-width types such as `u64` avoid the question. For the same `field`
+  from `check`, both also need a `path_buf` of the same size: a path that fits
+  one buffer may not fit a smaller one.
 
 ## All rules
 
