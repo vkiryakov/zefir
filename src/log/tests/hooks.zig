@@ -259,3 +259,181 @@ fn openOnAbandon(open: *std.atomic.Value(bool), logger: log.Logger) void {
     while (!logger.engine.abandon.load(.seq_cst)) std.Thread.yield() catch {};
     open.store(true, .seq_cst);
 }
+
+/// A writer that holds the writer thread inside its first write until
+/// `open` is set, and throws everything away.
+const Held = struct {
+    entered: std.atomic.Value(bool) = .init(false),
+    open: std.atomic.Value(bool) = .init(false),
+    writer: std.Io.Writer = .{ .buffer = &.{}, .vtable = &.{ .drain = drain } },
+
+    fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+        const held: *Held = @alignCast(@fieldParentPtr("writer", w));
+        held.entered.store(true, .seq_cst);
+        while (!held.open.load(.seq_cst)) std.Thread.yield() catch {};
+        var n: usize = 0;
+        for (data[0 .. data.len - 1]) |bytes| n += bytes.len;
+        return n + data[data.len - 1].len * splat;
+    }
+
+    fn waitEntered(held: *Held) void {
+        while (!held.entered.load(.seq_cst)) std.Thread.yield() catch {};
+    }
+};
+
+test "an error record reaches the subscribers even when the queue refuses it" {
+    var held: Held = .{};
+    var c: Collector = .init();
+    defer c.deinit();
+    const logger: log.Logger = try .init(testing.allocator, testing.io, .{
+        .mode = .{ .queued = .{ .capacity = 2, .batch_size = 1 } },
+        .output = .{ .writer = &held.writer },
+    });
+    defer logger.deinit();
+    const id = try logger.subscribe(.{ .levels = &.{.err}, .context = &c, .handler = Collector.handler });
+    logger.info("held", .{});
+    held.waitEntered();
+    for (0..2) |_| logger.info("queued", .{});
+    logger.err("Database unavailable", .{});
+    held.open.store(true, .seq_cst);
+    logger.unsubscribe(id);
+    try testing.expectEqual(@as(u64, 1), logger.stats().dropped.err);
+    try testing.expectEqual(@as(usize, 1), c.events.items.len);
+    try testing.expectEqualStrings("Database unavailable", (try c.get(0)).message);
+}
+
+test "an error record reaches the subscribers when stdout is closed" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest; // the test needs POSIX pipes
+    const io = testing.io;
+    const stdout_pipe = try std.Io.Threaded.pipe2(.{});
+    const stderr_pipe = try std.Io.Threaded.pipe2(.{});
+    const stdout_write: std.Io.File = .{ .handle = stdout_pipe[1], .flags = .{ .nonblocking = false } };
+    const stderr_read: std.Io.File = .{ .handle = stderr_pipe[0], .flags = .{ .nonblocking = false } };
+    const stderr_write: std.Io.File = .{ .handle = stderr_pipe[1], .flags = .{ .nonblocking = false } };
+    defer stdout_write.close(io);
+    defer stderr_read.close(io);
+    defer stderr_write.close(io);
+    (std.Io.File{ .handle = stdout_pipe[0], .flags = .{ .nonblocking = false } }).close(io); // nobody reads stdout
+    var c: Collector = .init();
+    defer c.deinit();
+    const logger: log.Logger = try .init(testing.allocator, io, .{});
+    defer logger.deinit();
+    logger.engine.stdout = stdout_write;
+    logger.engine.stderr = stderr_write;
+    const id = try logger.subscribe(.{ .levels = &.{.err}, .context = &c, .handler = Collector.handler });
+    logger.err("first", .{}); // finds stdout closed
+    logger.err("second", .{}); // stdout is known dead: only the subscriber takes it
+    logger.info("third", .{}); // nobody takes it
+    logger.unsubscribe(id);
+    try testing.expectEqual(@as(usize, 2), c.events.items.len);
+    try testing.expectEqualStrings("second", (try c.get(1)).message);
+    const s = logger.stats();
+    try testing.expectEqual(@as(u64, 0), s.written);
+    try testing.expectEqual(@as(u64, 3), s.dropped.write_failed);
+}
+
+test "after shutdown nothing reaches the subscribers, and subscribe is refused" {
+    var sink: std.Io.Writer.Discarding = .init(&.{});
+    var c: Collector = .init();
+    defer c.deinit();
+    const logger: log.Logger = try .init(testing.allocator, testing.io, .{ .output = .{ .writer = &sink.writer } });
+    defer logger.deinit();
+    _ = try logger.subscribe(.{ .levels = &.{.err}, .context = &c, .handler = Collector.handler });
+    try logger.shutdown(.none);
+    logger.err("late", .{});
+    try testing.expectEqual(@as(usize, 0), c.events.items.len);
+    try testing.expectError(error.ShutDown, logger.subscribe(.{ .levels = &.{.err}, .handler = ignore }));
+}
+
+/// An interceptor that keeps the messages it sees and drops "drop me".
+const Gatekeeper = struct {
+    seen: [8][]const u8 = undefined,
+    count: usize = 0,
+
+    fn filter(context: ?*anyopaque, event: *const log.Event) bool {
+        const g: *Gatekeeper = @ptrCast(@alignCast(context orelse return true));
+        if (g.count < g.seen.len) {
+            g.seen[g.count] = event.message;
+            g.count += 1;
+        }
+        return !std.mem.eql(u8, event.message, "drop me");
+    }
+};
+
+test "interceptors see each record once encoded, in the order they were added; false drops it everywhere" {
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    var c: Collector = .init();
+    defer c.deinit();
+    var first: Gatekeeper = .{};
+    var second: Gatekeeper = .{};
+    const logger: log.Logger = try .init(testing.allocator, testing.io, .{ .output = .{ .writer = &out.writer } });
+    defer logger.deinit();
+    const id = try logger.subscribe(.{ .levels = &.{.info}, .context = &c, .handler = Collector.handler });
+    try logger.use(.{ .context = &first, .filter = Gatekeeper.filter });
+    try logger.use(.{ .context = &second, .filter = Gatekeeper.filter });
+    logger.info("keep me", .{});
+    logger.info("drop me", .{});
+    logger.unsubscribe(id);
+    try testing.expectEqual(@as(usize, 2), first.count);
+    try testing.expectEqual(@as(usize, 1), second.count); // the first one dropped the second record
+    try testing.expectEqual(@as(usize, 1), c.events.items.len);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, out.written(), "\n"));
+    try testing.expect(std.mem.find(u8, out.written(), "keep me") != null);
+    const s = logger.stats();
+    try testing.expectEqual(@as(u64, 1), s.filtered);
+    try testing.expectEqual(@as(u64, 2), s.accepted);
+}
+
+/// An interceptor that logs, which it must not.
+const Chatty = struct {
+    logger: log.Logger,
+
+    fn filter(context: ?*anyopaque, _: *const log.Event) bool {
+        const chatty: *Chatty = @ptrCast(@alignCast(context orelse return true));
+        chatty.logger.info("from an interceptor", .{});
+        return true;
+    }
+};
+
+test "a record logged from an interceptor is dropped and counted in hook_errors" {
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    const logger: log.Logger = try .init(testing.allocator, testing.io, .{ .output = .{ .writer = &out.writer } });
+    defer logger.deinit();
+    var chatty: Chatty = .{ .logger = logger };
+    try logger.use(.{ .context = &chatty, .filter = Chatty.filter });
+    logger.info("record", .{});
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, out.written(), "\n"));
+    try testing.expectEqual(@as(u64, 1), logger.stats().hook_errors);
+}
+
+fn keepAll(_: ?*anyopaque, _: *const log.Event) bool {
+    return true;
+}
+
+test "use refuses a ninth interceptor" {
+    var sink: std.Io.Writer.Discarding = .init(&.{});
+    const logger: log.Logger = try .init(testing.allocator, testing.io, .{ .output = .{ .writer = &sink.writer } });
+    defer logger.deinit();
+    for (0..8) |_| try logger.use(.{ .filter = keepAll });
+    try testing.expectError(error.TooManyInterceptors, logger.use(.{ .filter = keepAll }));
+}
+
+test "with subscribers and interceptors, logging still never allocates" {
+    var failing: std.testing.FailingAllocator = .init(testing.allocator, .{});
+    var sink: std.Io.Writer.Discarding = .init(&.{});
+    const logger: log.Logger = try .init(failing.allocator(), testing.io, .{ .mode = .{ .queued = .{} }, .output = .{ .writer = &sink.writer } });
+    defer logger.deinit();
+    const id = try logger.subscribe(.{ .levels = &.{ .info, .err }, .scope = "app", .handler = ignore });
+    try logger.use(.{ .filter = keepAll });
+    failing.fail_index = failing.alloc_index; // every allocation from here on fails
+    const before = failing.allocations;
+    const handle = logger.scoped("app.db").withContext(try traced());
+    handle.info("query", .{ .ms = 3 });
+    handle.err("lost", .{ .code = 7 });
+    logger.warn("elsewhere", .{});
+    try logger.flush(.none);
+    logger.unsubscribe(id);
+    try testing.expectEqual(before, failing.allocations);
+}
