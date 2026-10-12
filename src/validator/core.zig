@@ -498,6 +498,352 @@ test "the code, message and name helpers can be called outside a comptime block"
     checkMessage("custom(\"users.ok\", ...)", "must be ok");
 }
 
+// ------------------------------------------------------------------ rendering
+
+/// How the renderer and the rules with parameters treat a comptime value.
+pub const ValueKind = enum { int, float, bool, tag, string, list, other };
+
+/// The kind of a parameter of type `X`. A string is a slice of u8 (of any
+/// constness and sentinel) or a pointer to an array of u8, as string
+/// literals are. A list is a tuple or an array `[N]T` only (`[N]u8`
+/// included: an array of numbers); a pointer to an array and a slice of
+/// other items are `other`, so a list rule can reject them.
+pub fn valueKind(comptime X: type) ValueKind {
+    return switch (@typeInfo(X)) {
+        .comptime_int, .int => .int,
+        .comptime_float, .float => .float,
+        .bool => .bool,
+        .enum_literal, .@"enum" => .tag,
+        .pointer => |p| switch (p.size) {
+            .slice => if (p.child == u8) .string else .other,
+            .one => switch (@typeInfo(p.child)) {
+                .array => |a| if (a.child == u8) .string else .other,
+                else => .other,
+            },
+            else => .other,
+        },
+        .array => .list,
+        .@"struct" => |s| if (s.is_tuple) .list else .other,
+        else => .other,
+    };
+}
+
+/// `x` is not a float NaN or infinity. `std.math.isFinite` does not take a
+/// `comptime_float`, which holds an f128.
+pub fn isFiniteNumber(comptime x: anytype) bool {
+    return switch (@typeInfo(@TypeOf(x))) {
+        .comptime_float => std.math.isFinite(@as(f128, x)),
+        .float => std.math.isFinite(x),
+        else => true,
+    };
+}
+
+/// A parameter as messages and placeholders show it: integers in decimal;
+/// floats as written (`renderFloat`); `true`/`false`; an enum tag by its
+/// name, an unnamed value of a non-exhaustive enum as
+/// `@fromBackingInt(n)`; a string escaped as `escape` does, without
+/// quotes, and the empty string as `""`; a list as its items joined by
+/// `, `, never cut. Evaluate it at comptime; it accepts only the kinds
+/// above.
+pub fn renderValue(comptime x: anytype) []const u8 {
+    @setEvalBranchQuota(eval_quota);
+    return switch (comptime valueKind(@TypeOf(x))) {
+        .int => std.fmt.comptimePrint("{d}", .{x}),
+        .float => renderFloat(x),
+        .bool => if (x) "true" else "false",
+        .tag => tagName(x) orelse unnamedTag(x),
+        .string => if (x.len == 0) "\"\"" else escape(x),
+        .list => blk: {
+            var out: []const u8 = "";
+            for (0..x.len) |i| out = out ++ (if (i == 0) "" else ", ") ++ renderValue(x[i]);
+            break :blk out;
+        },
+        .other => @compileError("validator: internal: cannot render a value of type " ++ @typeName(@TypeOf(x))),
+    };
+}
+
+/// A float as written: the shortest text that gives the value back in its
+/// own type (a `comptime_float` is an f128), so `0.1` stays `0.1` whatever
+/// the field type. Decimal when 1e-6 <= |x| < 1e21, scientific (`1e-7`,
+/// `1e21`) otherwise, both bounds taken in the value's own type; `0` for
+/// both zeros; `nan`, `inf` and `-inf` for the values only compile errors
+/// show.
+fn renderFloat(comptime x: anytype) []const u8 {
+    const F = if (@TypeOf(x) == comptime_float) f128 else @TypeOf(x);
+    const f: F = x;
+    if (std.math.isNan(f)) return "nan";
+    if (std.math.isInf(f)) return if (f > 0) "inf" else "-inf";
+    if (f == 0) return "0";
+    const magnitude = @abs(f);
+    // f16 cannot hold 1e21: every finite f16 is below it.
+    const below_1e21 = std.math.floatMax(F) < 1e21 or magnitude < @as(F, 1e21);
+    return if (magnitude >= @as(F, 1e-6) and below_1e21)
+        std.fmt.comptimePrint("{d}", .{f})
+    else
+        std.fmt.comptimePrint("{e}", .{f});
+}
+
+/// The name of an enum literal or enum value, or null for an unnamed value
+/// of a non-exhaustive enum.
+fn tagName(comptime x: anytype) ?[]const u8 {
+    const X = @TypeOf(x);
+    if (@typeInfo(X) == .enum_literal) return @tagName(x);
+    const e = @typeInfo(X).@"enum";
+    for (e.field_names, e.field_values) |field_name, value| {
+        if (value == @backingInt(x)) return field_name;
+    }
+    return null;
+}
+
+/// An unnamed value of a non-exhaustive enum as Zig source writes it:
+/// `@fromBackingInt(7)`.
+fn unnamedTag(comptime x: anytype) []const u8 {
+    return std.fmt.comptimePrint("@fromBackingInt({d})", .{@backingInt(x)});
+}
+
+/// Compile errors show the items of a list argument while `.{ ` and the
+/// items so far fit in this many bytes.
+const max_args_text = 72;
+
+/// A parameter as compile errors show it in a call, as `zig fmt` writes it
+/// in source: numbers and bools as messages show them; `.admin` for a tag
+/// and `@fromBackingInt(n)` for an unnamed value; a string quoted and
+/// escaped; a list as `.{ "a", "b" }`, one item as `.{"a"}`, none as `.{}`;
+/// anything else (`null`, a struct, a pointer, a slice of other items) as
+/// `...`. A long list keeps its items while `.{ ` and the items so far fit
+/// in `max_args_text` bytes (the first item always) and ends with
+/// `, ... }` after the last one that fits. Evaluate it at comptime.
+pub fn renderArg(comptime x: anytype) []const u8 {
+    @setEvalBranchQuota(eval_quota);
+    return switch (comptime valueKind(@TypeOf(x))) {
+        .int, .float, .bool => renderValue(x),
+        .tag => if (tagName(x)) |name| "." ++ name else unnamedTag(x),
+        .string => "\"" ++ escape(x) ++ "\"",
+        .list => renderArgList(x),
+        .other => "...",
+    };
+}
+
+fn renderArgList(comptime x: anytype) []const u8 {
+    if (x.len == 0) return ".{}";
+    if (x.len == 1) return ".{" ++ renderArg(x[0]) ++ "}";
+    var out: []const u8 = ".{ " ++ renderArg(x[0]);
+    for (1..x.len) |i| {
+        const longer = out ++ ", " ++ renderArg(x[i]);
+        if (longer.len > max_args_text) return out ++ ", ... }";
+        out = longer;
+    }
+    return out ++ " }";
+}
+
+/// `n` and the noun for it: `1 item`, `2 items`, `0 items`.
+pub fn plural(comptime n: comptime_int, comptime one: []const u8, comptime many: []const u8) []const u8 {
+    return std.fmt.comptimePrint("{d} ", .{n}) ++ if (n == 1) one else many;
+}
+
+/// A non-exhaustive enum for the renderer tests: `@fromBackingInt(7)` is a
+/// value without a name.
+const TestOpen = enum(u8) { a, b, _ };
+
+test "a parameter is a number, a bool, a tag, a string or a list; lists are tuples and arrays only" {
+    const expectKind = struct {
+        fn expectKind(expected: ValueKind, comptime types: anytype) !void {
+            inline for (types) |T| {
+                std.testing.expectEqual(expected, comptime valueKind(T)) catch |err| {
+                    std.debug.print("valueKind({s})\n", .{@typeName(T)});
+                    return err;
+                };
+            }
+        }
+    }.expectKind;
+    try expectKind(.int, .{ comptime_int, u8, i128, usize, u0 });
+    try expectKind(.float, .{ comptime_float, f16, f32, f64, f80, f128, c_longdouble });
+    try expectKind(.bool, .{bool});
+    try expectKind(.tag, .{ @TypeOf(.admin), TestOpen, Kind });
+    // A string literal is a pointer to an array of u8; a u8 slice of any
+    // constness and sentinel is a string too.
+    try expectKind(.string, .{ *const [3:0]u8, *const [3]u8, *const [0:0]u8, []const u8, []u8, [:0]const u8 });
+    // [N]u8 is an array of numbers, as on a field.
+    try expectKind(.list, .{ @TypeOf(.{}), @TypeOf(.{ 1, 2 }), @TypeOf(.{"a"}), [2]u8, [3]i64, [2][]const u8, [0]u32 });
+    // A pointer to an array, a slice of other items and anything else is no
+    // list: the list rules reject them.
+    try expectKind(.other, .{ *const [2]u32, []const u32, []const []const u8, *const @TypeOf(.{ 1, 2 }), @TypeOf(null), ?u8, void, type, struct { x: u8 }, [*]const u8 });
+}
+
+test "a number parameter is finite unless it is a float NaN or infinity" {
+    try std.testing.expect(comptime isFiniteNumber(5));
+    try std.testing.expect(comptime isFiniteNumber(std.math.maxInt(u128)));
+    try std.testing.expect(comptime isFiniteNumber(1.5));
+    try std.testing.expect(comptime isFiniteNumber(-0.0));
+    try std.testing.expect(comptime isFiniteNumber(std.math.floatMax(f80)));
+    try std.testing.expect(comptime isFiniteNumber(std.math.floatTrueMin(f16)));
+    try std.testing.expect(!comptime isFiniteNumber(std.math.nan(f64)));
+    try std.testing.expect(!comptime isFiniteNumber(std.math.inf(f32)));
+    try std.testing.expect(!comptime isFiniteNumber(-std.math.inf(f128)));
+    try std.testing.expect(!comptime isFiniteNumber(-std.math.inf(c_longdouble)));
+    try std.testing.expect(!comptime isFiniteNumber(@as(comptime_float, std.math.inf(f64))));
+}
+
+test "messages show integers of every width in decimal" {
+    const expect = std.testing.expectEqualStrings;
+    try expect("5", comptime renderValue(5));
+    try expect("0", comptime renderValue(@as(u8, 0)));
+    try expect("255", comptime renderValue(@as(u8, std.math.maxInt(u8))));
+    try expect("-128", comptime renderValue(@as(i8, std.math.minInt(i8))));
+    try expect("18446744073709551615", comptime renderValue(@as(u64, std.math.maxInt(u64))));
+    try expect("-9223372036854775808", comptime renderValue(@as(i64, std.math.minInt(i64))));
+    try expect("340282366920938463463374607431768211455", comptime renderValue(@as(u128, std.math.maxInt(u128))));
+    try expect("-170141183460469231731687303715884105728", comptime renderValue(@as(i128, std.math.minInt(i128))));
+    try expect("42", comptime renderValue(@as(usize, 42)));
+    try expect("-1", comptime renderValue(-1));
+}
+
+test "messages show floats as written: decimal from 1e-6 to below 1e21, scientific outside, 0 for both zeros" {
+    const expect = std.testing.expectEqualStrings;
+    try expect("0.5", comptime renderValue(0.5));
+    try expect("0.1", comptime renderValue(0.1));
+    try expect("2", comptime renderValue(2.0));
+    try expect("-1.5", comptime renderValue(-1.5));
+    try expect("0.000001", comptime renderValue(1e-6));
+    try expect("-0.000001", comptime renderValue(-1e-6));
+    try expect("9.99e-7", comptime renderValue(9.99e-7));
+    try expect("100000000000000000000", comptime renderValue(1e20));
+    try expect("1e21", comptime renderValue(1e21));
+    try expect("-1e21", comptime renderValue(-1e21));
+    try expect("1e-50", comptime renderValue(1e-50));
+    try expect("-1.7976931348623157e308", comptime renderValue(-std.math.floatMax(f64)));
+    try expect("5e-324", comptime renderValue(std.math.floatTrueMin(f64)));
+    try expect("0", comptime renderValue(0.0));
+    try expect("0", comptime renderValue(-0.0));
+    // A typed value shows the shortest text that gives it back in its own
+    // type: 0.1 in f32, not 0.10000000149011612.
+    inline for (.{ f16, f32, f64, f80, f128, c_longdouble }) |F| {
+        try expect("0.1", comptime renderValue(@as(F, 0.1)));
+        try expect("-2.5", comptime renderValue(@as(F, -2.5)));
+        try expect("0", comptime renderValue(@as(F, -0.0)));
+        // The 1e-6 boundary is taken in the value's own type.
+        try expect("0.000001", comptime renderValue(@as(F, 1e-6)));
+    }
+    try expect("1e-7", comptime renderValue(@as(f32, 1e-7)));
+    try expect("1e21", comptime renderValue(@as(f32, 1e21)));
+    // The largest f16, 65504, reads back from the shorter 65500.
+    try expect("65500", comptime renderValue(std.math.floatMax(f16)));
+    // Only compile errors show non-finite numbers: a non-finite bound is
+    // itself an error.
+    try expect("nan", comptime renderValue(std.math.nan(f64)));
+    try expect("inf", comptime renderValue(std.math.inf(f32)));
+    try expect("-inf", comptime renderValue(-std.math.inf(f128)));
+}
+
+test "messages show bools, tags by name, escaped strings without quotes and lists joined by commas" {
+    const expect = std.testing.expectEqualStrings;
+    try expect("true", comptime renderValue(true));
+    try expect("false", comptime renderValue(false));
+    try expect("admin", comptime renderValue(.admin));
+    try expect("b", comptime renderValue(TestOpen.b));
+    try expect("@fromBackingInt(7)", comptime renderValue(@as(TestOpen, @fromBackingInt(7))));
+    try expect("tab\\there", comptime renderValue("tab\there"));
+    try expect("say \\\"hi\\\"", comptime renderValue("say \"hi\""));
+    try expect("a\\xe2\\x80\\xa8b", comptime renderValue("a\u{2028}b"));
+    try expect("имя", comptime renderValue("имя"));
+    try expect("\\xff", comptime renderValue("\xff"));
+    try expect("\"\"", comptime renderValue(""));
+    try expect("abc", comptime renderValue(@as([]const u8, "abc")));
+    try expect("abc", comptime renderValue(@as(*const [3]u8, "abc")));
+    try expect("a, b, \"\"", comptime renderValue(.{ "a", "b", "" }));
+    try expect("x", comptime renderValue(.{"x"}));
+    try expect("1, 2", comptime renderValue([_]u8{ 1, 2 }));
+    try expect("admin, @fromBackingInt(7)", comptime renderValue(.{ .admin, @as(TestOpen, @fromBackingInt(7)) }));
+    // A message never cuts a list; a default message that would be too long
+    // falls back to a general one instead.
+    const long = .{ "value_000", "value_001", "value_002", "value_003", "value_004", "value_005", "value_006", "value_007" };
+    try expect("value_000, value_001, value_002, value_003, value_004, value_005, value_006, value_007", comptime renderValue(long));
+}
+
+test "compile errors show arguments as zig fmt writes them" {
+    const expect = std.testing.expectEqualStrings;
+    try expect("5", comptime renderArg(5));
+    try expect("-170141183460469231731687303715884105728", comptime renderArg(@as(i128, std.math.minInt(i128))));
+    try expect("340282366920938463463374607431768211455", comptime renderArg(@as(u128, std.math.maxInt(u128))));
+    try expect("0.1", comptime renderArg(@as(f32, 0.1)));
+    try expect("2", comptime renderArg(2.0));
+    try expect("1e-50", comptime renderArg(1e-50));
+    try expect("0", comptime renderArg(-0.0));
+    try expect("nan", comptime renderArg(std.math.nan(f64)));
+    try expect("inf", comptime renderArg(std.math.inf(f64)));
+    try expect("-inf", comptime renderArg(-std.math.inf(f16)));
+    try expect("inf", comptime renderArg(@as(comptime_float, std.math.inf(f64))));
+    try expect("true", comptime renderArg(true));
+    try expect(".admin", comptime renderArg(.admin));
+    try expect(".b", comptime renderArg(TestOpen.b));
+    try expect("@fromBackingInt(7)", comptime renderArg(@as(TestOpen, @fromBackingInt(7))));
+    try expect("\"a\\tb\"", comptime renderArg("a\tb"));
+    try expect("\"\\\"\"", comptime renderArg("\""));
+    try expect("\"\\xe2\\x80\\xa8\"", comptime renderArg("\u{2028}"));
+    try expect("\"имя\"", comptime renderArg("имя"));
+    try expect("\"\"", comptime renderArg(""));
+    try expect("\"abc\"", comptime renderArg(@as([]const u8, "abc")));
+    try expect("\"abc\"", comptime renderArg(@as(*const [3]u8, "abc")));
+}
+
+test "compile errors show lists as zig fmt writes them, one item without spaces" {
+    const expect = std.testing.expectEqualStrings;
+    try expect(".{}", comptime renderArg(.{}));
+    try expect(".{\"a\"}", comptime renderArg(.{"a"}));
+    try expect(".{true}", comptime renderArg(.{true}));
+    try expect(".{.admin}", comptime renderArg(.{.admin}));
+    try expect(".{@fromBackingInt(7)}", comptime renderArg(.{@as(TestOpen, @fromBackingInt(7))}));
+    try expect(".{ \"a\", \"b\" }", comptime renderArg(.{ "a", "b" }));
+    try expect(".{ \"a\", .b, 3 }", comptime renderArg(.{ "a", .b, 3 }));
+    try expect(".{ .a, @fromBackingInt(7) }", comptime renderArg(.{ .a, @as(TestOpen, @fromBackingInt(7)) }));
+    // An array is a list, [N]u8 included.
+    try expect(".{ 1, 2 }", comptime renderArg([_]u8{ 1, 2 }));
+    try expect(".{5}", comptime renderArg([_]i64{5}));
+    try expect(".{ \"x\", \"y\" }", comptime renderArg([_][]const u8{ "x", "y" }));
+}
+
+test "compile errors show ... for what the renderer cannot show" {
+    const expect = std.testing.expectEqualStrings;
+    try expect("...", comptime renderArg(null));
+    try expect("...", comptime renderArg(@as(?u8, 5)));
+    try expect("...", comptime renderArg(.{ .x = 1 }));
+    // A pointer to an array and a slice of non-u8 items are not lists.
+    try expect("...", comptime renderArg(&[_]u32{ 1, 2 }));
+    try expect("...", comptime renderArg(@as([]const u32, &.{ 1, 2 })));
+    try expect(".{...}", comptime renderArg(.{null}));
+    try expect(".{ ..., 1 }", comptime renderArg(.{ null, 1 }));
+}
+
+test "compile errors show the items of a list while they fit in 72 bytes, then , ... }" {
+    const expect = std.testing.expectEqualStrings;
+    const ten = .{ "value_000", "value_001", "value_002", "value_003", "value_004", "value_005", "value_006", "value_007", "value_008", "value_009" };
+    try expect(".{ \"value_000\", \"value_001\", \"value_002\", \"value_003\", \"value_004\", ... }", comptime renderArg(ten));
+    // An item is shown when `.{ ` and the items through it fit in 72 bytes.
+    const a30: [30]u8 = @splat('a');
+    const b33: [33]u8 = @splat('b');
+    const b34: [34]u8 = @splat('b');
+    try std.testing.expectEqual(72, (".{ \"" ++ a30 ++ "\", \"" ++ b33 ++ "\"").len);
+    try expect(".{ \"" ++ a30 ++ "\", \"" ++ b33 ++ "\" }", comptime renderArg(.{ &a30, &b33 }));
+    try expect(".{ \"" ++ a30 ++ "\", ... }", comptime renderArg(.{ &a30, &b34 }));
+    // The first item stays even when it is longer than 72 bytes; a list of
+    // one item has nothing to cut.
+    const a80: [80]u8 = @splat('a');
+    try expect(".{ \"" ++ a80 ++ "\", ... }", comptime renderArg(.{ &a80, "b" }));
+    try expect(".{\"" ++ a80 ++ "\"}", comptime renderArg(.{&a80}));
+    // Integers are cut the same way.
+    const ints = .{ 1000000000, 2000000000, 3000000000, 4000000000, 5000000000, 6000000000, 7000000000 };
+    try expect(".{ 1000000000, 2000000000, 3000000000, 4000000000, 5000000000, ... }", comptime renderArg(ints));
+}
+
+test "plural picks the noun for a count" {
+    const expect = std.testing.expectEqualStrings;
+    try expect("1 item", comptime plural(1, "item", "items"));
+    try expect("2 items", comptime plural(2, "item", "items"));
+    try expect("0 items", comptime plural(0, "item", "items"));
+    try expect("1 byte", comptime plural(@as(usize, 1), "byte", "bytes"));
+    try expect("512 bytes", comptime plural(@as(usize, 512), "byte", "bytes"));
+}
+
 // ------------------------------------------------------------------ the rule
 
 /// What a rule's run-time check returns.
