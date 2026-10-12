@@ -27,7 +27,7 @@ differently from class-validator and validator.js 13.15.35.
 | `skipMissingProperties`, `skipNullProperties`, `skipUndefinedProperties` | not needed: presence is the field type, and `null` in a `?T` skips the field's rules |
 | `whitelist`, `forbidNonWhitelisted`, `forbidUnknownValues` | options of the decoder (`ignore_unknown_fields` in `std.json`) |
 | `ValidationError` | `v.Violation`: `code`, `message` and `field`, the path of the value |
-| `ValidationError.target`, `.value` | none: a violation never contains the value or the object |
+| `ValidationError.target`, `.value` | none: a violation never contains the value or the object, as long as a hand-built `validateSelf` result has static `code` and `message` strings (`v.fail` guarantees them) |
 | the keys of `ValidationError.constraints` (`isNotEmpty`) | `Violation.code` (`validation.not_empty`); the message has no property name, the path is in `field` |
 | groups, `always`, `context` | not in v1 |
 

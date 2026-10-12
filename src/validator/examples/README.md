@@ -54,8 +54,8 @@ flowchart LR
     dto["struct with field_rules<br/>and validateSelf"] --> build{"zig build"}
     build -->|"a declaration is wrong"| err(["compile error<br/>validator: ..."])
     build -->|"every rule fits"| run["v.check or v.checkAll"]
-    run -->|"valid"| ok(["null"])
-    run -->|"invalid"| violation(["Violation:<br/>code, message, field"])
+    run -->|"valid"| ok(["null, or an empty Report"])
+    run -->|"invalid"| violation(["a Violation, or a Report of them:<br/>code, message, field"])
 ```
 
 1. **Declare.** A struct lists the rules of its fields in `pub const field_rules`
@@ -253,10 +253,12 @@ With items `{ "a", 1 }, { "b", 0 }` the violation is `items[1].qty`
 - A rule declared on a struct field (such as `v.custom`) runs before anything
   inside that struct.
 
-Unions, pointers, tuples, error unions and vectors are not walked, and neither
-are slices with `volatile`, `allowzero` or an alignment below that of their
-items. When one of them contains a type with rules, that is a compile error
-naming the field: nothing is skipped silently.
+Unions, enums, opaque types, pointers, tuples, error unions and vectors are not
+walked, and neither are slices with `volatile`, `allowzero` or an alignment
+below that of their items. When one of them contains a type with rules, that is
+a compile error naming the field: nothing is skipped silently. `field_rules` and
+`validateSelf` belong on structs: on an enum, a union or an opaque type that the
+walk reaches, they are a compile error too.
 
 > [!NOTE]
 > Containers that hide their item type — `std.HashMapUnmanaged`,
@@ -309,11 +311,13 @@ return them from functions that take `comptime` parameters. A `var` or a struct
 field that exists at run time cannot hold one.
 
 > [!IMPORTANT]
-> `field_rules` and `validateSelf` must be `pub`. The validator finds them with
-> `@hasDecl`, which sees only public declarations: a private `field_rules` is
-> silently never checked, and neither `v.check` nor `v.assertRules` can tell.
-> Give every DTO a test with a value that must fail
-> ([Testing a DTO package](#testing-a-dto-package)).
+> `field_rules` and `validateSelf` must be `pub`, with exactly these names. The
+> validator finds them with `@hasDecl`, which sees only public declarations: a
+> private `field_rules` is silently never checked, and neither `v.check` nor
+> `v.assertRules` can tell. Other names are ignored the same way: `rules`,
+> `fieldRules`, `validate_self`, and a `pub fn validate`, which is left to
+> confy. Give every DTO a test with a value that must fail
+> ([Testing a DTO package](#testing-a-dto-package)): it catches all of these.
 
 ## validateSelf and v.fail
 
@@ -456,9 +460,11 @@ the item type); the parameter must be a type that `T` converts to without loss:
 | `*const Q` | `T` is accepted for `Q` | `fn (*const Item) bool` on `Item` (a pointer to the field itself); `fn (*const u64) bool` on `u16` (to a converted copy) |
 
 Anything else is a compile error that names what was expected: a narrower
-integer or a signedness change, a pointer or slice with different `volatile` or
-`align` attributes, `*T`, an `anytype` or `comptime` parameter, zero or several
-parameters, a result other than `bool`. An `inline fn` is accepted.
+integer, a signed field with an unsigned parameter, an unsigned field with a
+signed parameter that is not wider, a pointer or slice with different
+`volatile` or `align` attributes, `*T`, an `anytype` or `comptime` parameter,
+zero or several parameters, a result other than `bool`. An `inline fn` is
+accepted.
 
 ```text
 validator: users.Account.field_rules.age: custom("users.ok", ...): f must be fn (P) bool or fn (*const P) bool where u32 coerces to P, got fn (i8) bool
@@ -582,8 +588,10 @@ pub const Violation = struct {
 | `message` | the rule's default message (`must not be empty`) or yours: 1-512 bytes of UTF-8, without the field name or the value |
 | `field` | the path of the value from the root (`email`, `address.city`, `items[2].name`, `[1].email`); `null` for the root itself |
 
-A violation never contains the checked value, so it is safe to log and to send
-to a client as it is.
+A violation from a built-in rule, `v.custom` or `v.fail` never contains the
+checked value, so it is safe to log and to send to a client as it is. A
+hand-built `validateSelf` result is safe only when its `code` and `message` are
+static strings (see the warning in [validateSelf and v.fail](#validateself-and-vfail)).
 
 ### Paths
 
@@ -724,8 +732,9 @@ library runs. These errors point at your line and do not start with
 
 **What is not checked at compile time:**
 
-- `field_rules` and `validateSelf` without `pub`: they are invisible and do
-  nothing;
+- `field_rules` and `validateSelf` without `pub`, and rules under another name
+  (`rules`, `fieldRules`, `validate_self`, a `pub fn validate`): they are
+  invisible and do nothing;
 - items of containers that hide their item type (`std.HashMapUnmanaged`,
   `std.MultiArrayList`);
 - the result of `validateSelf`: it is checked at run time (a panic in Debug,
