@@ -64,12 +64,19 @@ pub const Stats = struct {
     scopes_overflow: u64,
     /// `scoped` calls whose name was cut to 128 bytes.
     scope_names_truncated: u64,
+    /// Queued mode: records in the queue now, and the most it holds.
+    queue_depth: u64,
+    queue_capacity: u64,
 
     pub const Dropped = struct {
         /// Longer than `max_record_bytes` with `.oversize = .drop`.
         oversize: u64,
         /// The write failed, or stdout was already closed.
         write_failed: u64,
+        /// Queued mode, `.drop_new`: the queue was full.
+        queue_full: u64,
+        /// Logged after `shutdown`.
+        closed: u64,
     };
 };
 
@@ -115,6 +122,8 @@ const Counters = struct {
     written: Counter = .init(0),
     dropped_oversize: Counter = .init(0),
     dropped_write_failed: Counter = .init(0),
+    dropped_queue_full: Counter = .init(0),
+    dropped_closed: Counter = .init(0),
     write_errors: Counter = .init(0),
     truncated: Counter = .init(0),
     torn_lines: Counter = .init(0),
@@ -204,12 +213,16 @@ pub fn stats(engine: *Engine) Stats {
         .dropped = .{
             .oversize = c.dropped_oversize.load(.monotonic),
             .write_failed = c.dropped_write_failed.load(.monotonic),
+            .queue_full = c.dropped_queue_full.load(.monotonic),
+            .closed = c.dropped_closed.load(.monotonic),
         },
         .write_errors = c.write_errors.load(.monotonic),
         .truncated = c.truncated.load(.monotonic),
         .torn_lines = c.torn_lines.load(.monotonic),
         .scopes_overflow = engine.scope_table.overflow.load(.monotonic),
         .scope_names_truncated = engine.scope_table.names_truncated.load(.monotonic),
+        .queue_depth = if (engine.queue) |*q| q.depth() else 0,
+        .queue_capacity = if (engine.queue) |*q| q.mask + 1 else 0,
     };
 }
 
@@ -276,7 +289,10 @@ fn enqueue(engine: *Engine, q: *Queue, bytes: []const u8) void {
         .drop_new => q.tryPush(bytes),
         .block => q.pushBlocking(bytes),
     };
-    pushed catch bump(&engine.counters.dropped_write_failed);
+    pushed catch |e| switch (e) {
+        error.Full => bump(&engine.counters.dropped_queue_full),
+        error.Closed => bump(&engine.counters.dropped_closed),
+    };
 }
 
 /// For the writer thread: writes the `n` records the queue copied into

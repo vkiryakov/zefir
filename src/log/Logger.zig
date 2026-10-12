@@ -966,6 +966,84 @@ const ThreadSink = struct {
     }
 };
 
+/// A writer that holds the writer thread inside its first write until
+/// `open` is set, then keeps everything it is given.
+const Lock = struct {
+    entered: std.atomic.Value(bool) = .init(false),
+    open: std.atomic.Value(bool) = .init(false),
+    sink: std.Io.Writer.Allocating,
+    writer: std.Io.Writer = .{ .buffer = &.{}, .vtable = &.{ .drain = drain } },
+
+    fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+        const lock: *Lock = @alignCast(@fieldParentPtr("writer", w));
+        lock.entered.store(true, .seq_cst);
+        while (!lock.open.load(.seq_cst)) std.Thread.yield() catch {};
+        std.debug.assert(splat == 1);
+        for (data) |bytes| lock.sink.writer.writeAll(bytes) catch return error.WriteFailed;
+        var n: usize = 0;
+        for (data) |bytes| n += bytes.len;
+        return n;
+    }
+
+    fn waitEntered(lock: *Lock) void {
+        while (!lock.entered.load(.seq_cst)) std.Thread.yield() catch {};
+    }
+
+    /// Records written so far: one line each.
+    fn lines(lock: *Lock) usize {
+        return std.mem.count(u8, lock.sink.written(), "\n");
+    }
+};
+
+test "queued, drop_new: a full queue drops the record and counts it; the caller never waits" {
+    var lock: Lock = .{ .sink = .init(testing.allocator) };
+    defer lock.sink.deinit();
+    const logger: Logger = try .init(testing.allocator, testing.io, .{
+        .mode = .{ .queued = .{ .capacity = 4, .batch_size = 1 } },
+        .output = .{ .writer = &lock.writer },
+    });
+    logger.info("held", .{}); // the writer takes it and waits inside the write
+    lock.waitEntered();
+    for (0..5) |i| logger.info("queued", .{ .i = i }); // four fit, the fifth does not
+    const s = logger.stats();
+    try testing.expectEqual(@as(u64, 1), s.dropped.queue_full);
+    try testing.expectEqual(@as(u64, 4), s.queue_depth);
+    try testing.expectEqual(@as(u64, 4), s.queue_capacity);
+    lock.open.store(true, .seq_cst);
+    try waitProcessed(logger, 5);
+    logger.deinit();
+    try testing.expectEqual(@as(usize, 5), lock.lines());
+}
+
+fn logBlocking(logger: Logger, done: *std.atomic.Value(bool)) void {
+    logger.info("waited", .{});
+    done.store(true, .seq_cst);
+}
+
+test "queued, block: a full queue makes the caller wait for room; nothing is lost" {
+    var lock: Lock = .{ .sink = .init(testing.allocator) };
+    defer lock.sink.deinit();
+    const logger: Logger = try .init(testing.allocator, testing.io, .{
+        .mode = .{ .queued = .{ .capacity = 4, .batch_size = 1, .overflow = .block } },
+        .output = .{ .writer = &lock.writer },
+    });
+    logger.info("held", .{});
+    lock.waitEntered();
+    for (0..4) |i| logger.info("queued", .{ .i = i });
+    var done: std.atomic.Value(bool) = .init(false);
+    const producer = try std.Thread.spawn(.{}, logBlocking, .{ logger, &done });
+    try testing.io.sleep(.fromMilliseconds(20), .awake);
+    const waited = !done.load(.seq_cst);
+    lock.open.store(true, .seq_cst);
+    producer.join();
+    try waitProcessed(logger, 6);
+    const s = logger.stats();
+    logger.deinit();
+    try testing.expect(waited);
+    try testing.expectEqual(@as(u64, 0), s.dropped.queue_full);
+    try testing.expectEqual(@as(usize, 6), lock.lines());
+}
+
 test "queued: the writer thread writes the records, not the caller" {
     var sink: ThreadSink = .{};
     const logger: Logger = try .init(testing.allocator, testing.io, .{ .mode = .{ .queued = .{} }, .output = .{ .writer = &sink.writer } });
