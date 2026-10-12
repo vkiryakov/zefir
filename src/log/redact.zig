@@ -11,10 +11,11 @@ pub const placeholder = "[REDACTED]";
 /// `api_key`, `apiKey` and `API-KEY` are one name. A bare `token` is left
 /// out on purpose: lexers and pagination use it.
 const names = [_][]const u8{
-    "password",   "passwd",      "secret",        "client_secret",
-    "api_key",    "apikey",      "access_token",  "refresh_token",
-    "id_token",   "auth_token",  "authorization", "cookie",
-    "set_cookie", "private_key",
+    "password",              "passwd",      "secret",        "client_secret",
+    "api_key",               "apikey",      "access_token",  "refresh_token",
+    "id_token",              "auth_token",  "authorization", "cookie",
+    "set_cookie",            "private_key", "secret_key",    "secret_access_key",
+    "aws_secret_access_key",
 };
 
 /// Whether a field called `name` is redacted. Every dot-separated segment
@@ -69,9 +70,20 @@ test "camelCase and SCREAMING_CASE spellings count too" {
     }
 }
 
+test "the names std.crypto and AWS give secret keys count too" {
+    inline for (.{ "secret_key", "secretKey", "SECRET_KEY", "kp.secret_key", "secret_access_key", "SecretAccessKey", "aws_secret_access_key", "AWS_SECRET_ACCESS_KEY" }) |name| {
+        try std.testing.expect(comptime isSensitiveName(name));
+    }
+}
+
 test "similar names are written as they are" {
     try std.testing.expect(comptime !isSensitiveName("token"));
     try std.testing.expect(comptime !isSensitiveName("password_hash"));
     try std.testing.expect(comptime !isSensitiveName("passwords"));
     try std.testing.expect(comptime !isSensitiveName("user_id"));
+    // Only a whole listed name counts, one dot segment at a time.
+    try std.testing.expect(comptime !isSensitiveName("db_password"));
+    try std.testing.expect(comptime !isSensitiveName("new_password"));
+    try std.testing.expect(comptime !isSensitiveName("x_api_key"));
+    try std.testing.expect(comptime !isSensitiveName("api.key"));
 }

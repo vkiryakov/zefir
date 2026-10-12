@@ -233,7 +233,7 @@ fn writeFormatted(comptime f: Format, w: *Writer, value: anytype, comptime neste
     var e: escape.Escaper = undefined;
     e.init(w);
     e.strict = nested;
-    try value.format(&e.writer);
+    if (@TypeOf(value) == std.Uri) try writeUri(&e.writer, &value) else try value.format(&e.writer);
     try e.finish();
     if (f == .json) return w.writeByte('"');
     if (e.plain and e.count > 0) return;
@@ -243,6 +243,18 @@ fn writeFormatted(comptime f: Format, w: *Writer, value: anytype, comptime neste
     w.buffer[start] = '"';
     w.end += 1;
     try w.writeByte('"');
+}
+
+/// A std.Uri as std writes it, but with "[REDACTED]" for the password:
+/// std's `format` writes `user:password@`, and the password is a member
+/// named like a secret. The user, the host and the rest stay.
+fn writeUri(w: *Writer, uri: *const std.Uri) Writer.Error!void {
+    // std writes a password only after a user, and only with a host.
+    if (uri.password == null or uri.user == null or uri.host == null) return uri.format(w);
+    try w.print("{s}://", .{uri.scheme});
+    try uri.user.?.formatUser(w);
+    try w.writeAll(":" ++ redact.placeholder ++ "@");
+    try uri.writeToStream(w, .{ .authority = true, .path = true, .query = true, .fragment = true });
 }
 
 /// The string a string-like value holds. Takes a pointer, so an array
@@ -1067,6 +1079,76 @@ test "text spreads the objects of a field into dotted keys; arrays and optionals
     const got = record(.text, .info, "Config", &buf, header, .{ .config = cfg, .self = &cfg.db }).?;
     try testing.expectEqualStrings("2026-10-10T21:08:00.123Z INFO  Config config.name=svc config.db.host=pg config.db.port=5432 config.db.password=[REDACTED] " ++
         "config.tags=[a] config.state.running=3 config.backup=null self.host=pg self.port=5432 self.password=[REDACTED]\n", buf[0..got.len]);
+}
+
+test "text spreads a union into one dotted key; a tag named like a secret is redacted wherever it spreads" {
+    const Auth = union(enum) { user: []const u8, api_key: []const u8 };
+    const Pin = union(enum) { none, password: u32 }; // plain data: rendered at compile time
+    var auth: Auth = .{ .api_key = "sk-live-123" };
+    _ = &auth;
+    var buf: [512]u8 = undefined;
+    const header: Header = .{ .timestamp = fixed_time, .service = "", .scope = "", .oversize = .truncate };
+    const got = record(.text, .info, "login", &buf, header, .{ .who = Auth{ .user = "ada" }, .auth = auth, .cfg = .{ .mode = auth }, .ptr = &auth, .pin = Pin{ .password = 4321 } }).?;
+    try testing.expectEqualStrings("2026-10-10T21:08:00.123Z INFO  login who.user=ada auth.api_key=[REDACTED] cfg.mode.api_key=[REDACTED] " ++
+        "ptr.api_key=[REDACTED] pin.password=[REDACTED]\n", buf[0..got.len]);
+}
+
+test "every secret name on the list is redacted inside a field, in both formats" {
+    // The list, written out: a name dropped from redact.zig fails here.
+    const names = [_][]const u8{
+        "password",              "passwd",      "secret",        "client_secret",
+        "api_key",               "apikey",      "access_token",  "refresh_token",
+        "id_token",              "auth_token",  "authorization", "cookie",
+        "set_cookie",            "private_key", "secret_key",    "secret_access_key",
+        "aws_secret_access_key",
+    };
+    var cfg: @Struct(.auto, null, &names, &@splat([]const u8), &@splat(.{})) = undefined;
+    inline for (names) |name| @field(cfg, name) = "S3CR3T";
+    comptime var json: []const u8 = "";
+    comptime var text: []const u8 = "";
+    inline for (names, 0..) |name, i| {
+        json = json ++ (if (i == 0) "" else ",") ++ "\"" ++ name ++ "\":\"[REDACTED]\"";
+        text = text ++ " cfg." ++ name ++ "=[REDACTED]";
+    }
+    var buf: [1024]u8 = undefined;
+    const header: Header = .{ .timestamp = fixed_time, .service = "", .scope = "", .oversize = .truncate };
+    var got = record(.json, .info, "m", &buf, header, .{ .cfg = cfg }).?;
+    try testing.expectStringEndsWith(buf[0..got.len], ",\"message\":\"m\",\"cfg\":{" ++ json ++ "}}\n");
+    got = record(.text, .info, "m", &buf, header, .{ .cfg = cfg }).?;
+    try testing.expectStringEndsWith(buf[0..got.len], " m" ++ text ++ "\n");
+}
+
+test "a std.crypto key pair is written without its secret key" {
+    const kp = std.crypto.dh.X25519.KeyPair.generateDeterministic("S3CR3T-x25519-seed-0123456789abc".*);
+    var buf: [1024]u8 = undefined;
+    const header: Header = .{ .timestamp = fixed_time, .service = "", .scope = "", .oversize = .truncate };
+    var got = record(.json, .info, "m", &buf, header, .{ .kp = kp }).?;
+    try testing.expect(std.mem.find(u8, buf[0..got.len], "S3CR3T") == null);
+    try testing.expectStringEndsWith(buf[0..got.len], ",\"secret_key\":\"[REDACTED]\"}}\n");
+    got = record(.text, .info, "m", &buf, header, .{ .kp = kp }).?;
+    try testing.expect(std.mem.find(u8, buf[0..got.len], "S3CR3T") == null);
+    try testing.expectStringEndsWith(buf[0..got.len], " kp.secret_key=[REDACTED]\n");
+}
+
+test "std.Uri: the password of a URL is redacted, the rest is written as std writes it" {
+    const uri = try std.Uri.parse("postgres://app:S3CR3T@db:5432/main?ssl=on#top");
+    const shown = "postgres://app:[REDACTED]@db:5432/main?ssl=on#top";
+    const Db = struct { url: std.Uri, pool: u8 };
+    const maybe: ?std.Uri = uri;
+    const list = [_]std.Uri{ uri, uri };
+    var buf: [1024]u8 = undefined;
+    const header: Header = .{ .timestamp = fixed_time, .service = "", .scope = "", .oversize = .truncate };
+    const fields = .{ .uri = uri, .dsn = &uri, .db = Db{ .url = uri, .pool = 4 }, .maybe = maybe, .list = &list };
+    var got = record(.json, .info, "m", &buf, header, fields).?;
+    try testing.expectStringEndsWith(buf[0..got.len], ",\"message\":\"m\",\"uri\":\"" ++ shown ++ "\",\"dsn\":\"" ++ shown ++ "\",\"db\":{\"url\":\"" ++ shown ++
+        "\",\"pool\":4},\"maybe\":\"" ++ shown ++ "\",\"list\":[\"" ++ shown ++ "\",\"" ++ shown ++ "\"]}\n");
+    got = record(.text, .info, "m", &buf, header, fields).?;
+    try testing.expectStringEndsWith(buf[0..got.len], " m uri=\"" ++ shown ++ "\" dsn=\"" ++ shown ++ "\" db.url=\"" ++ shown ++
+        "\" db.pool=4 maybe=\"" ++ shown ++ "\" list=[\"" ++ shown ++ "\",\"" ++ shown ++ "\"]\n");
+    // A URL without a password is written as std writes it.
+    try expectValue(try std.Uri.parse("https://ada@example.com:8443/a?b=c"), "\"https://ada@example.com:8443/a?b=c\"", "\"https://ada@example.com:8443/a?b=c\"");
+    try expectValue(try std.Uri.parse("postgres://app:@db/main"), "\"postgres://app@db/main\"", "postgres://app@db/main");
+    try expectValue(try std.Uri.parse("mailto:ada@example.com"), "\"mailto:ada@example.com\"", "mailto:ada@example.com");
 }
 
 const Money = struct {
