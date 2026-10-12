@@ -271,9 +271,10 @@ Every record has a level, which says how important it is:
 | `err`   | `"error"` | a failure that someone should look at      | a payment failed                     |
 
 The logger writes a record only when its level reaches the threshold, which
-is `info` by default. In production, `trace` and `debug` records are skipped,
-and when you need them, you lower the threshold for one part of the program
-while it runs (see [Scopes and levels](#scopes-and-levels)).
+is `info` by default. In production, `trace` and `debug` records are skipped.
+The threshold can change while the program runs: for the whole program (see
+[Changing the level while the program runs](#changing-the-level-while-the-program-runs)),
+or for one part of it (see [Scopes and levels](#scopes-and-levels)).
 
 ```zig
 const logger: log.Logger = try .init(init.gpa, init.io, .{ .level = .info }); // the default
@@ -297,6 +298,55 @@ In text, the levels are written as `TRACE`, `DEBUG`, `INFO`, `WARN` and
   counted in [`stats()`](#failures-and-stats).
 - `logger.emergency(...)` writes an error record to stderr at once, for when
   the regular output is stuck; see [Emergency records](#emergency-records).
+
+### Changing the level while the program runs
+
+The threshold is not fixed at start. `logger.setLevel` changes it while the
+program runs, from any thread, and every handle sees the change at once. A
+common pattern: start verbose, at `debug`, to see every step of the start-up,
+then raise the threshold to `info` once the service is up:
+
+```zig
+const std = @import("std");
+const log = @import("log");
+
+pub fn main(init: std.process.Init) !void {
+    const logger: log.Logger = try .init(init.gpa, init.io, .{
+        .service = .{ .name = "user-service", .version = "1.0.0" },
+        .level = .debug, // start verbose: see every step of the start-up
+    });
+    defer logger.deinit();
+
+    logger.debug("Reading configuration", .{ .path = "config.json" });
+    logger.debug("Connecting to the database", .{ .host = "postgres.internal" });
+    logger.info("Application started", .{ .port = 9000 });
+
+    logger.setLevel(.info); // started: from now on, info and above only
+
+    logger.debug("Cache miss", .{ .key = "user:42" }); // below info: not written
+    logger.info("User created", .{ .user_id = 42 });
+}
+```
+
+```text
+$ zig build run
+{"timestamp":"2026-10-12T09:41:07.415Z","level":"debug","message":"Reading configuration","service.name":"user-service","service.version":"1.0.0","path":"config.json"}
+{"timestamp":"2026-10-12T09:41:07.415Z","level":"debug","message":"Connecting to the database","service.name":"user-service","service.version":"1.0.0","host":"postgres.internal"}
+{"timestamp":"2026-10-12T09:41:07.416Z","level":"info","message":"Application started","service.name":"user-service","service.version":"1.0.0","port":9000}
+{"timestamp":"2026-10-12T09:41:07.416Z","level":"info","message":"User created","service.name":"user-service","service.version":"1.0.0","user_id":42}
+```
+
+Both start-up steps are in the log, and `Cache miss` is not: after
+`setLevel(.info)`, debug records are skipped.
+
+- The same call goes the other way: `logger.setLevel(.debug)` turns the
+  details back on while the service runs, for example from an admin endpoint
+  or when the configuration is reloaded. No restart is needed.
+- The starting threshold can come from the configuration. With confy, declare
+  `log_level: log.Level = .info` in the configuration struct and pass
+  `.level = config.log_level`.
+- `setLevel` changes the global threshold only: a scope with a rule of its own
+  keeps it (see [Scopes and levels](#scopes-and-levels)).
 
 ## Fields
 
@@ -536,13 +586,13 @@ flowchart TD
     db --> conn["db.conn: warn, from db"]
 ```
 
-| Call                                 | Does                                             |
-| ------------------------------------ | ------------------------------------------------ |
-| `logger.scoped("db.pool")`           | a handle whose records carry `"scope":"db.pool"` |
-| `logger.setLevel(.debug)`            | changes the global threshold                     |
-| `logger.setScopeLevel("db", .err)`   | a rule for `db` and `db.*` (not `dbx`)           |
-| `logger.setScopeLevel("db", null)`   | removes the rule: back to the global threshold   |
-| `.scopes = &.{ ... }` in the options | the rules the logger starts with                 |
+| Call                                 | Does                                                                                                                      |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------- |
+| `logger.scoped("db.pool")`           | a handle whose records carry `"scope":"db.pool"`                                                                          |
+| `logger.setLevel(.debug)`            | changes the global threshold, see [Changing the level while the program runs](#changing-the-level-while-the-program-runs) |
+| `logger.setScopeLevel("db", .err)`   | a rule for `db` and `db.*` (not `dbx`)                                                                                    |
+| `logger.setScopeLevel("db", null)`   | removes the rule: back to the global threshold                                                                            |
+| `.scopes = &.{ ... }` in the options | the rules the logger starts with                                                                                          |
 
 - Every handle sees a change at once, from any thread. A trailing dot in a
   prefix is ignored.
