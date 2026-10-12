@@ -61,6 +61,13 @@ const Payment = struct {
   (`v.max(0.1)` on an `f32` says `must be at most 0.1`), and
   `.withMessage` can use it as a placeholder
   ([Messages](README.md#placeholders)).
+- Two rules of one entry whose bounds let no value pass are a compile error,
+  inside `v.each(...)` too
+  ([D60](class_validator.md#deviations-from-validatorjs)): `.{ v.min(10),
+  v.max(5) }`, `v.positive` with `v.nonPositive` or `v.max(0)`, `v.nonNegative`
+  with `v.negative`, `v.range(0, 5)` with `v.range(6, 9)`. The bounds are
+  compared in the field type; equal bounds, `.{ v.min(5), v.max(5) }`, and
+  redundant rules, `.{ v.min(1), v.positive }`, are fine.
 - `v.min`, `v.max`, `v.range` and `v.divisibleBy` have no fallback message: a
   bound or a divisor of hundreds of digits makes the field a compile error
   unless `.withMessage` replaces the message
@@ -100,7 +107,8 @@ A number is at least `min`.
   infinities fail with `validation.finite`),
   [D58](class_validator.md#deviations-from-validatorjs) (integers are exact),
   [D61](class_validator.md#deviations-from-validatorjs) (`v.min(minInt(T))` is a
-  compile error).
+  compile error), [D60](class_validator.md#deviations-from-validatorjs)
+  (`v.min(10)` with `v.max(5)` is a compile error).
 
 Compile errors (`<Type>.field_rules.<field>` is the entry of your struct):
 
@@ -112,6 +120,7 @@ validator: <Type>.field_rules.<field>: min(16777217): 16777217 is not exactly re
 validator: <Type>.field_rules.<field>: min(0.1): 0.1 is a float (f32), 0.10000000149011612 in f64; write it as a literal or as f64
 validator: <Type>.field_rules.<field>: min(0) is always true for u8; remove it
 validator: <Type>.field_rules.<field>: min must be called, e.g. v.min(0)
+validator: <Type>.field_rules.<field>: min(10) and max(5) contradict; no value can pass
 ```
 
 Examples:
@@ -153,7 +162,8 @@ A number is at most `max`.
   infinities fail with `validation.finite`),
   [D58](class_validator.md#deviations-from-validatorjs) (integers are exact),
   [D61](class_validator.md#deviations-from-validatorjs) (`v.max(maxInt(T))` is a
-  compile error).
+  compile error), [D60](class_validator.md#deviations-from-validatorjs)
+  (`v.max(0)` with `v.positive` is a compile error).
 
 Compile errors (`<Type>.field_rules.<field>` is the entry of your struct):
 
@@ -163,6 +173,7 @@ validator: <Type>.field_rules.<field>: max(300): 300 is outside u8 (0..255)
 validator: <Type>.field_rules.<field>: max(18446744073709551615) is always true for u64; remove it
 validator: <Type>.field_rules.<field>: max expects a number, field is []const i32; use v.each(v.max(0))
 validator: <Type>.field_rules.<field>: max must be called, e.g. v.max(100)
+validator: <Type>.field_rules.<field>: positive and max(0) contradict; no value can pass
 ```
 
 Examples:
@@ -204,7 +215,9 @@ A number is from `min` to `max`, both included.
   infinities fail with `validation.finite`),
   [D58](class_validator.md#deviations-from-validatorjs) (integers are exact),
   [D61](class_validator.md#deviations-from-validatorjs) (`v.range(minInt(T),
-  maxInt(T))` is a compile error).
+  maxInt(T))` is a compile error),
+  [D60](class_validator.md#deviations-from-validatorjs) (`v.range(10, 20)` with
+  `v.max(5)` is a compile error).
 
 Compile errors (`<Type>.field_rules.<field>` is the entry of your struct):
 
@@ -214,6 +227,7 @@ validator: <Type>.field_rules.<field>: range(-129, 0): -129 is outside i8 (-128.
 validator: <Type>.field_rules.<field>: range(0, 255) is always true for u8; remove it
 validator: <Type>.field_rules.<field>: range expects a number, field is []const i32; use v.each(v.range(0, 100))
 validator: <Type>.field_rules.<field>: range must be called, e.g. v.range(1, 100)
+validator: <Type>.field_rules.<field>: range(10, 20) and max(5) contradict; no value can pass
 ```
 
 Examples:
@@ -248,13 +262,16 @@ A number is greater than 0.
 - **Predicate:** none.
 - **Complexity:** O(1); allocates nothing.
 - **Deviations:** [D16](class_validator.md#deviations-from-validatorjs) (NaN and
-  infinities fail with `validation.finite`).
+  infinities fail with `validation.finite`),
+  [D60](class_validator.md#deviations-from-validatorjs) (`v.positive` with
+  `v.nonPositive` or `v.max(0)` is a compile error).
 
 Compile errors (`<Type>.field_rules.<field>` is the entry of your struct):
 
 ```text
 validator: <Type>.field_rules.<field>: positive expects a number, field is []const u8
 validator: <Type>.field_rules.<field>: positive expects a number, field is []const u32; use v.each(v.positive)
+validator: <Type>.field_rules.<field>: positive and non_positive contradict; no value can pass
 ```
 
 Examples:
@@ -295,7 +312,8 @@ A number is not negative: 0 or greater.
 - **Deviations:** [D16](class_validator.md#deviations-from-validatorjs) (NaN and
   infinities fail with `validation.finite`),
   [D61](class_validator.md#deviations-from-validatorjs) (an unsigned field is a
-  compile error).
+  compile error), [D60](class_validator.md#deviations-from-validatorjs)
+  (`v.nonNegative` with `v.negative` is a compile error).
 
 Compile errors (`<Type>.field_rules.<field>` is the entry of your struct):
 
@@ -303,6 +321,7 @@ Compile errors (`<Type>.field_rules.<field>` is the entry of your struct):
 validator: <Type>.field_rules.<field>: non_negative is always true for u32; remove it
 validator: <Type>.field_rules.<field>: non_negative expects a signed integer or a float, field is []const u8
 validator: <Type>.field_rules.<field>: non_negative expects a signed integer or a float, field is []const i32; use v.each(v.nonNegative)
+validator: <Type>.field_rules.<field>: non_negative and negative contradict; no value can pass
 ```
 
 Examples:
@@ -339,7 +358,8 @@ A number is less than 0.
 - **Deviations:** [D16](class_validator.md#deviations-from-validatorjs) (NaN and
   infinities fail with `validation.finite`),
   [D61](class_validator.md#deviations-from-validatorjs) (an unsigned field is a
-  compile error).
+  compile error), [D60](class_validator.md#deviations-from-validatorjs)
+  (`v.negative` with `v.min(0)` is a compile error).
 
 Compile errors (`<Type>.field_rules.<field>` is the entry of your struct):
 
@@ -347,6 +367,7 @@ Compile errors (`<Type>.field_rules.<field>` is the entry of your struct):
 validator: <Type>.field_rules.<field>: negative is always false for u32 (an unsigned type)
 validator: <Type>.field_rules.<field>: negative expects a signed integer or a float, field is []const u8
 validator: <Type>.field_rules.<field>: negative expects a signed integer or a float, field is []const i32; use v.each(v.negative)
+validator: <Type>.field_rules.<field>: min(0) and negative contradict; no value can pass
 ```
 
 Examples:
@@ -382,7 +403,8 @@ A number is not positive: 0 or less.
 - **Deviations:** [D16](class_validator.md#deviations-from-validatorjs) (NaN and
   infinities fail with `validation.finite`),
   [D61](class_validator.md#deviations-from-validatorjs) (an unsigned field is a
-  compile error).
+  compile error), [D60](class_validator.md#deviations-from-validatorjs)
+  (`v.nonPositive` with `v.positive` is a compile error).
 
 `v.nonPositive` and `v.max(0)` overlap on a signed field; they differ in the code
 (`validation.non_positive`, `validation.max`).
@@ -393,6 +415,7 @@ Compile errors (`<Type>.field_rules.<field>` is the entry of your struct):
 validator: <Type>.field_rules.<field>: non_positive on u8 only accepts 0; use v.equals(0)
 validator: <Type>.field_rules.<field>: non_positive expects a signed integer or a float, field is []const u8
 validator: <Type>.field_rules.<field>: non_positive expects a signed integer or a float, field is []const i32; use v.each(v.nonPositive)
+validator: <Type>.field_rules.<field>: positive and non_positive contradict; no value can pass
 ```
 
 Examples:

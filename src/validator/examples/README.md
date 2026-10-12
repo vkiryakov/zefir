@@ -615,10 +615,11 @@ to the contract of a rule, like its code.
 | --- | --- | --- | --- |
 | `{expected}` | `v.equals` | the value | a value, as below |
 | `{forbidden}` | `v.notEquals` | the value | a value, as below |
-| `{values}` | `v.oneOf`, `v.noneOf` | the listed values | each value as below, joined with `, ` |
+| `{values}` | `v.oneOf`, `v.noneOf`, `v.containsAll`, `v.containsNone` | the listed values | each value as below, joined with `, ` |
 | `{min}` | `v.min`, `v.range`, `v.minItems` | the lower bound; the least number of items | a number as written; a count in decimal |
 | `{max}` | `v.max`, `v.range`, `v.maxItems` | the upper bound; the largest number of items | as `{min}` |
 | `{divisor}` | `v.divisibleBy` | the divisor | an integer in decimal |
+| `{key}` | `v.uniqueBy` | the key | the field name, without the dot |
 
 A rule that is not listed has no placeholders, and the page of each rule names
 its own. A placeholder that the rule does not have is a compile error that lists

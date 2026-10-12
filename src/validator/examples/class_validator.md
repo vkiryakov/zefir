@@ -63,7 +63,7 @@ use a Zig enum or `v.oneOf`, with your own data.
 | `@ValidatePromise` | none: Zig has no promises | not needed | Rules are synchronous and pure. |
 | `@IsDivisibleBy` | `v.divisibleBy(divisor)` | v1 | Integer and float fields; the divisor is a positive integer known at compile time. `v.divisibleBy(1)` on a float field means "a whole number". Deviations D16, D18, D19. |
 | `@IsNegative` | `v.negative` | v1 | Signed integers and floats; on an unsigned field it is a compile error (always false). Deviations D16, D60, D61. |
-| `@IsPositive` | `v.positive` | v1 | Integers and floats. Deviation D16. |
+| `@IsPositive` | `v.positive` | v1 | Integers and floats. Deviations D16, D60. |
 | `@Max` | `v.max(max)` | v1 | The bound is converted to the field type at compile time; a bound outside the type or `v.max(maxInt(T))` is a compile error. zefir also adds `v.range`, `v.nonNegative` and `v.nonPositive`. Deviations D16, D58, D60, D61. |
 | `@Min` | `v.min(min)` | v1 | As `v.max`; `v.min(minInt(T))` is vacuous. Deviations D16, D58, D60, D61. |
 | `@IsInstance` | a static field type | not needed | The type of a field is fixed at compile time. |

@@ -315,9 +315,11 @@ A string has no bytes; a list has no items.
 - **Placeholders:** none.
 - **Predicate:** none.
 - **Complexity:** O(1); allocates nothing.
-- **Deviations:** [D21](class_validator.md#deviations-from-validatorjs) (an empty
-  slice passes), [D61](class_validator.md#deviations-from-validatorjs) (a
-  fixed-length array is a compile error).
+- **Deviations:** [D21](class_validator.md#deviations-from-validatorjs) (an
+  empty slice passes), [D61](class_validator.md#deviations-from-validatorjs) (a
+  fixed-length array is a compile error),
+  [D60](class_validator.md#deviations-from-validatorjs) (`v.empty` with
+  `v.notEmpty` or `v.minItems(1)` is a compile error).
 
 Compile errors (`<Type>.field_rules.<field>` is the entry of your struct):
 
@@ -326,6 +328,7 @@ validator: <Type>.field_rules.<field>: empty on [3]u32 is always false: the leng
 validator: <Type>.field_rules.<field>: empty on [0]u32 is always true: the length of an array is fixed
 validator: <Type>.field_rules.<field>: empty on [4]u8 is always false: the length of an array is fixed; [N]u8 is an array of numbers, not a string: use []const u8
 validator: <Type>.field_rules.<field>: empty expects a string or a slice, field is u32
+validator: <Type>.field_rules.<field>: empty and min_items(1) contradict; no value can pass
 ```
 
 Examples:
@@ -362,7 +365,8 @@ A string has at least one byte; a list has at least one item.
 - **Deviations:** [D14](class_validator.md#deviations-from-validatorjs) (`null`
   skips the rule; one rule for strings and lists),
   [D61](class_validator.md#deviations-from-validatorjs) (a fixed-length array is
-  a compile error).
+  a compile error), [D60](class_validator.md#deviations-from-validatorjs)
+  (`v.notEmpty` with `v.empty` is a compile error).
 
 [v.minItems(1)](lists.md#vminitemsmin) fails an empty list too, with the code
 `validation.min_items`. The two overlap and differ in the code; prefer
@@ -375,6 +379,7 @@ validator: <Type>.field_rules.<field>: not_empty on [3]u32 is always true: the l
 validator: <Type>.field_rules.<field>: not_empty on [0]u32 is always false: the length of an array is fixed
 validator: <Type>.field_rules.<field>: not_empty on [4]u8 is always true: the length of an array is fixed; [N]u8 is an array of numbers, not a string: use []const u8
 validator: <Type>.field_rules.<field>: not_empty expects a string or a slice, field is u32
+validator: <Type>.field_rules.<field>: not_empty and empty contradict; no value can pass
 ```
 
 Examples:

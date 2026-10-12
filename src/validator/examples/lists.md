@@ -158,11 +158,12 @@ No two items of a list are equal.
 - **Field types:** a slice or an array `[N]T` of `bool`, enum, integer or string
   items; `?T` and `??T` of these. Float items (NaN is not equal to itself, and
   `-0.0` equals `0.0`), optional items, structs (use `v.uniqueBy`) and other
-  items are compile errors. On a slice of integers, strings or non-exhaustive
-  enums an earlier `v.maxItems(n)` with `n` at most `v.max_unique_items` (1000)
-  must come in the same tuple; `[N]T` needs `N` from 2 to 1000 (`[0]T` and
-  `[1]T` always pass), and no more items than the item type has values
-  (`[3]bool` always fails).
+  items are compile errors. Integers, strings and non-exhaustive enums are
+  capped: on a slice an earlier `v.maxItems(n)` with `n` at most
+  `v.max_unique_items` (1000) must come in the same tuple, and `[N]T` needs `N`
+  at most 1000. Bools and exhaustive enums need no cap. Any `[N]T` needs `N` of
+  at least 2 (`[0]T` and `[1]T` always pass) and no more items than the item
+  type has values (`[3]bool` always fails).
 - **Parameters:** none.
 - **Passes when:** no two items are equal: integers by value, exactly at every
   width; enums by tag (a non-exhaustive enum by its integer); strings byte for
