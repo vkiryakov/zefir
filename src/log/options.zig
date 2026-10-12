@@ -54,9 +54,15 @@ pub const Mode = union(enum) {
 };
 
 pub const Queued = struct {
-    /// Records the queue holds; a power of two.
+    /// Records the queue holds; a power of two. Each takes a slot of
+    /// `max_record_bytes` + 16 bytes, rounded up to 128: with 4 KiB
+    /// records the default takes 17 MiB (see `Options.queueBytes`). It is
+    /// the burst the logger absorbs while the output is stuck; past it,
+    /// records are dropped or wait, by `overflow`.
     capacity: u32 = 4096,
-    /// Records the writer thread takes for one write.
+    /// Records the writer thread takes for one write. With a slow output
+    /// fewer, larger writes keep up longer; past 128 the benchmark gains
+    /// nothing more.
     batch_size: u32 = 128,
     overflow: OverflowPolicy = .drop_new,
 };

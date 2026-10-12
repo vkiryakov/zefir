@@ -194,6 +194,33 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&bench.step);
     const bench_step = b.step("bench", "Run benchmarks");
     bench_step.dependOn(&b.addRunArtifact(bench).step);
+
+    // log benchmarks, the same way: ReleaseFast copies of log and core.
+    const bench_core = b.createModule(.{
+        .root_source_file = b.path("src/core/root.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
+    const log_bench = b.addExecutable(.{
+        .name = "log-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/log/bench.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{
+                .{ .name = "log", .module = b.createModule(.{
+                    .root_source_file = b.path("src/log/root.zig"),
+                    .target = target,
+                    .optimize = .ReleaseFast,
+                    .imports = &.{
+                        .{ .name = "core", .module = bench_core },
+                    },
+                }) },
+            },
+        }),
+    });
+    test_step.dependOn(&log_bench.step);
+    bench_step.dependOn(&b.addRunArtifact(log_bench).step);
 }
 
 /// Runs `artifact`. Under ThreadSanitizer the first report fails the run at
