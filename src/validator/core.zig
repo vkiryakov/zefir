@@ -1683,10 +1683,6 @@ pub const pending_kinds = [_]Kind{
     .contains,
     .not_contains,
     .strong_password,
-    // PR 3b
-    .email,
-    .http_url,
-    .fqdn,
     // PR 4a
     .date,
     .rfc3339,

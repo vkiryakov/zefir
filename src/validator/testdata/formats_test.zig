@@ -28,6 +28,10 @@ fn isMacAddressDefault(s: []const u8) bool {
     return v.isMacAddress(s, .{});
 }
 
+fn isFqdnDefault(s: []const u8) bool {
+    return v.isFqdn(s, .{});
+}
+
 const cases = [_]Case{
     .{ .rule = v.numberString, .predicate = v.isNumberString, .code = "validation.number_string", .message = "must be a number", .good = "-12.5", .bad = "1e5" },
     .{ .rule = v.decimal(.{}), .predicate = isDecimalDefault, .code = "validation.decimal", .message = "must be a decimal number", .good = "+.5", .bad = "1." },
@@ -38,6 +42,9 @@ const cases = [_]Case{
     .{ .rule = v.latitude, .predicate = v.isLatitude, .code = "validation.latitude", .message = "must be a latitude from -90 to 90", .good = "-90.000", .bad = "90.1" },
     .{ .rule = v.longitude, .predicate = v.isLongitude, .code = "validation.longitude", .message = "must be a longitude from -180 to 180", .good = "180.0", .bad = "-180.5" },
     .{ .rule = v.latLong, .predicate = v.isLatLong, .code = "validation.lat_long", .message = "must be a latitude,longitude pair", .good = "(40.7128, -74.0060)", .bad = "40.7128,\t-74.0060" },
+    .{ .rule = v.email, .predicate = v.isEmail, .code = "validation.email", .message = "must be a valid email address", .good = "user@example.XN--P1AI", .bad = "user@example.c" },
+    .{ .rule = v.httpUrl, .predicate = v.isHttpUrl, .code = "validation.http_url", .message = "must be a valid HTTP or HTTPS URL", .good = "https://example.com:8080/a?b=[1]#c", .bad = "http://user@example.com" },
+    .{ .rule = v.fqdn(.{}), .predicate = isFqdnDefault, .code = "validation.fqdn", .message = "must be a valid domain name", .good = "example.com", .bad = "localhost" },
     .{ .rule = v.ip, .predicate = v.isIp, .code = "validation.ip", .message = "must be a valid IP address", .good = "::ffff:192.0.2.1", .bad = "fe80::1%eth0" },
     .{ .rule = v.ipv4, .predicate = v.isIpv4, .code = "validation.ipv4", .message = "must be a valid IPv4 address", .good = "192.0.2.1", .bad = "192.168.1.01" },
     .{ .rule = v.ipv6, .predicate = v.isIpv6, .code = "validation.ipv6", .message = "must be a valid IPv6 address", .good = "2001:db8::1", .bad = "1::2::3" },
@@ -187,6 +194,95 @@ test "macAddress reports the default message of its options" {
     try h.expectFail([]const u8, v.macAddress(.{}), "00\t00\t5e\t00\t53\t01", code, "must be a valid MAC address");
 }
 
+test "fqdn options: one label, underscores, a trailing dot and a wildcard" {
+    const code = "validation.fqdn";
+    const message = "must be a valid domain name";
+    try h.expectFail([]const u8, v.fqdn(.{}), "localhost", code, message);
+    try h.expectPass([]const u8, v.fqdn(.{ .require_tld = false }), "localhost");
+    try h.expectFail([]const u8, v.fqdn(.{ .require_tld = false }), "a.123", code, message);
+    try h.expectPass([]const u8, v.fqdn(.{ .allow_underscores = true }), "_dmarc.example.com");
+    try h.expectPass([]const u8, v.fqdn(.{ .allow_trailing_dot = true }), "example.com.");
+    try h.expectFail([]const u8, v.fqdn(.{}), "example.com.", code, message);
+    try h.expectPass([]const u8, v.fqdn(.{ .allow_wildcard = true }), "*.example.com");
+    try h.expectFail([]const u8, v.fqdn(.{ .allow_wildcard = true }), "*.com", code, message);
+    try h.expectPass([]const u8, v.fqdn(.{}), "example.xn1a");
+    try h.expectFail([]const u8, v.fqdn(.{}), "example.xn1", code, message);
+}
+
+test "email: the last label of the domain is a top-level domain, xn in any case" {
+    const code = "validation.email";
+    const message = "must be a valid email address";
+    for ([_][]const u8{ "user@example.XN--P1AI", "user@example.xn--p1ai", "user@example.Xn--p1ai", "user@example.xN--P1AI", "user@example.xn", "user@example.xn12" }) |s| {
+        try h.expectPass([]const u8, v.email, s);
+    }
+    for ([_][]const u8{ "user@example.c", "user@example.com1", "user@example.c-m", "user@example.0x1f", "user@example.xn1", "user@localhost", "\"a b\"@example.com", "user@ex\xffample.com" }) |s| {
+        try h.expectFail([]const u8, v.email, s, code, message);
+    }
+}
+
+test "httpUrl: the tail, the port and the host, and what it does not guard against" {
+    const code = "validation.http_url";
+    const message = "must be a valid HTTP or HTTPS URL";
+    for ([_][]const u8{
+        "https://fonts.googleapis.com/css?family=Roboto|Open+Sans",
+        "https://api.example.com/articles?page[number]=2&page[size]=10",
+        "https://example.com/search?ids[]=1&ids[]=2",
+        "http://example.com/a{b}^c",
+        "http://example.com/a|b",
+        "http://example.com/[x]",
+        "https://googlecom",
+        "http://169.254.169.254/latest/meta-data/",
+        "http://127.0.0.1/",
+        "http://[::1]/",
+        "http://localhost:8080",
+        "http://example.com:080/",
+        "https://example.com/%00",
+    }) |s| try h.expectPass([]const u8, v.httpUrl, s);
+    for ([_][]const u8{
+        "http://example.com/a\"b",
+        "http://example.com/a\\b",
+        "http://example.com/a\x7fb",
+        "http://example.com/%zz",
+        "http://example.com/a#b#c",
+        "http://example.com:00000/",
+        "http://example.com:",
+        "http://example.com:000080",
+        "https://user@example.com",
+        "https://example.com@evil.example",
+        "https://m\xc3\xbcnchen.de/",
+        "https://example.com/\xc3\xbcber",
+        "http://[fe80::1%25eth0]/",
+        "ftp://example.com",
+        "example.com",
+    }) |s| try h.expectFail([]const u8, v.httpUrl, s, code, message);
+}
+
+test "the format rules combine with other rules: notEmpty first, withMessage, inside each" {
+    const Server = struct {
+        host: []const u8 = "example.com",
+        port: ?[]const u8 = null,
+        admin: []const u8 = "ops@example.com",
+        mirrors: []const []const u8 = &.{},
+        pub const field_rules = .{
+            .host = .{ v.notEmpty, v.fqdn(.{ .require_tld = false }) },
+            .port = .{ v.notEmpty, v.port },
+            .admin = v.email.withMessage("ungültige E-Mail"),
+            .mirrors = .{ v.maxItems(3), v.each(.{ v.notEmpty, v.httpUrl }) },
+        };
+    };
+    comptime v.assertRules(Server);
+    try h.expectValid(&Server{});
+    try h.expectValid(&Server{ .port = "8080", .mirrors = &.{ "https://a.example", "http://[2001:db8::1]:8443/" } });
+    try h.expectAll(&Server{ .host = "", .port = "", .admin = "ops@localhost", .mirrors = &.{ "", "ftp://x" } }, &.{
+        .{ .code = "validation.not_empty", .field = "host" },
+        .{ .code = "validation.not_empty", .field = "port" },
+        .{ .code = "validation.email", .field = "admin" },
+        .{ .code = "validation.not_empty", .field = "mirrors[0]" },
+        .{ .code = "validation.http_url", .field = "mirrors[1]" },
+    });
+    try h.expectAt(&Server{ .admin = "x" }, "validation.email", "ungültige E-Mail", "admin");
+}
+
 test "port and the numbers in strings: the spec's own examples" {
     try h.expectPass([]const u8, v.port, "0");
     try h.expectFail([]const u8, v.port, "080", "validation.port", "must be a port number from 0 to 65535");
@@ -205,18 +301,22 @@ test "port and the numbers in strings: the spec's own examples" {
 /// The pieces random inputs are built from: the bytes and tokens that matter
 /// to the grammars of this file.
 const tokens = [_][]const u8{
-    "0",     "1",     "5",    "9",    "05",   "12",       "45",       "89", "90", "099", "100", "179",  "180",  "181",  "255",   "256",
-    "65535", "65536", "080",  "+",    "-",    ".",        ".0",       ".5", ",",  ", ",  "(",   ")",    " ",    "\t",   "e",     "E5",
-    "_",     "0x",    "0X",   "0h",   "0o",   "0O",       "x",        "h",  "o",  "g",   "a",   "f",    "F",    "8",    "true",  "false",
-    "TRUE",  "yes",   "\x00", "\x7f", "\xff", "\xc3\xa9", "\xc2\xa0", "#",  ":",  "::",  ":::", "ffff", "FFFF", "1234", "12345", "1.2.3.4",
-    "%eth0", "/64",   "[",    "]",    "0000", "5eef",     "00",       "5e",
+    "0",        "1",       "5",      "9",     "05",     "12",       "45",        "89", "90",      "099",  "100",        "179",              "180",      "181",  "255",   "256",
+    "65535",    "65536",   "080",    "+",     "-",      ".",        ".0",        ".5", ",",       ", ",   "(",          ")",                " ",        "\t",   "e",     "E5",
+    "_",        "0x",      "0X",     "0h",    "0o",     "0O",       "x",         "h",  "o",       "g",    "a",          "f",                "F",        "8",    "true",  "false",
+    "TRUE",     "yes",     "\x00",   "\x7f",  "\xff",   "\xc3\xa9", "\xc2\xa0",  "#",  ":",       "::",   ":::",        "ffff",             "FFFF",     "1234", "12345", "1.2.3.4",
+    "%eth0",    "/64",     "[",      "]",     "0000",   "5eef",     "00",        "5e", "example", "com",  ".com",       "xn--p1ai",         "XN--P1AI", "xn",   "xn1",   "c",
+    "0x1f",     "a-b",     "-a",     "a-",    "_dmarc", "*.",       "localhost", "@",  "@",       "user", "first.last", "!#$%&'*/=?^`{|}~", "..",       "\"",   "\\",    "http://",
+    "https://", "HTTP://", "ftp://", "http:", "//",     "/",        "/a",        "?",  "q=1",     "&",    "%20",        "%",                "%zz",      "|",    "{",     "}",
+    "^",        "`",       "<",      ">",
 };
 
 /// Inputs the rules accept, which random edits turn into near misses.
 const seeds = [_][]const u8{
-    "-12.5",           "+.5",    "0.25",              "true",                    "0",                   "1",                   "0xDEADbeef",   "0h1F",             "0o755",           "017", "65535",       "8080",
-    "-90.000",         "45.5",   "180.0",             "05",                      "(40.7128, -74.0060)", "40.7128,-74.0060",    "90,180",       "192.0.2.1",        "255.255.255.255", "::1", "2001:db8::1", "::ffff:192.0.2.1",
-    "1:2:3:4:5:6:7:8", "fe80::", "00:1A:2B:3C:4D:5E", "00-1a-2b-3c-4d-5e-6f-70", "001a.2b3c.4d5e",      "0000.5eef.1000.0001", "001A2B3C4D5E", "00005eef10000001",
+    "-12.5",            "+.5",              "0.25",              "true",                     "0",                                  "1",                   "0xDEADbeef",           "0h1F",             "0o755",           "017",           "65535",               "8080",
+    "-90.000",          "45.5",             "180.0",             "05",                       "(40.7128, -74.0060)",                "40.7128,-74.0060",    "90,180",               "192.0.2.1",        "255.255.255.255", "::1",           "2001:db8::1",         "::ffff:192.0.2.1",
+    "1:2:3:4:5:6:7:8",  "fe80::",           "00:1A:2B:3C:4D:5E", "00-1a-2b-3c-4d-5e-6f-70",  "001a.2b3c.4d5e",                     "0000.5eef.1000.0001", "001A2B3C4D5E",         "00005eef10000001", "example.com",     "*.example.com", "_dmarc.example.com.", "localhost",
+    "example.XN--P1AI", "user@example.com", "a@b.co",            "first.last@example.co.uk", "https://example.com:8080/a?b=[1]#c", "http://[::1]:65535/", "http://192.0.2.1/%00", "http://localhost",
 };
 
 /// One random input in `buf`: random bytes, a sequence of tokens, or 1-3
@@ -309,6 +409,15 @@ test "random inputs: no predicate panics, each rule passes what its predicate ac
             const valid = comptime options.min_decimal_digits != 0 and (options.max_decimal_digits orelse options.min_decimal_digits) >= options.min_decimal_digits;
             if (valid) try expectAgrees(v.decimal(options), s, ok);
         }
+        inline for (0..16) |bits| {
+            const options: v.FqdnOptions = .{
+                .require_tld = bits & 1 != 0,
+                .allow_underscores = bits & 2 != 0,
+                .allow_trailing_dot = bits & 4 != 0,
+                .allow_wildcard = bits & 8 != 0,
+            };
+            try expectAgrees(v.fqdn(options), s, v.isFqdn(s, options));
+        }
         inline for (.{ .any, .eui48, .eui64 }) |eui| {
             inline for (.{ .separated, .bare }) |format| {
                 const options: v.MacAddressOptions = .{ .eui = eui, .format = format };
@@ -322,6 +431,15 @@ test "random inputs: no predicate panics, each rule passes what its predicate ac
         // ip is the union of ipv4 and ipv6, which share no string.
         try testing.expectEqual(v.isIpv4(s) or v.isIpv6(s), v.isIp(s));
         try testing.expect(!(v.isIpv4(s) and v.isIpv6(s)));
+        // An email address is a local part, '@' and a domain that fqdn accepts.
+        var wrap: [128]u8 = undefined;
+        if (s.len <= 252) try testing.expectEqual(v.isFqdn(s, .{}), v.isEmail(try std.fmt.bufPrint(&wrap, "a@{s}", .{s})));
+        // The hosts of httpUrl include the names fqdn accepts, IPv4
+        // addresses, and IPv6 addresses in brackets.
+        if (v.isFqdn(s, .{})) try testing.expect(v.isHttpUrl(try std.fmt.bufPrint(&wrap, "http://{s}/", .{s})));
+        if (v.isIpv4(s)) try testing.expect(v.isHttpUrl(try std.fmt.bufPrint(&wrap, "https://{s}:443/", .{s})));
+        if (std.mem.findAny(u8, s, "/?#[]@") == null)
+            try testing.expectEqual(v.isIpv6(s), v.isHttpUrl(try std.fmt.bufPrint(&wrap, "http://[{s}]/", .{s})));
         if (s.len <= 40 and std.mem.findAny(u8, s, ",()") == null) {
             var pair_buf: [96]u8 = undefined;
             const pair = try std.fmt.bufPrint(&pair_buf, "{s}, {s}", .{ s, s });

@@ -1,12 +1,13 @@
 //! Format rules: numbers, booleans and coordinates written as strings
 //! (`numberString`, `decimal`, `booleanString`, `hexadecimal`, `octal`,
-//! `port`, `latitude`, `longitude`, `latLong`) and network addresses (`ip`,
-//! `ipv4`, `ipv6`, `macAddress`), each with its predicate
-//! (`isNumberString`, ...). Every grammar is ASCII and is read byte by byte:
-//! nothing is trimmed or decoded, so invalid UTF-8 and any byte >= 0x80 fail
-//! under the rule's own code, and "" fails every rule of this file. A
-//! predicate takes any bytes, never allocates, never backtracks and runs in
-//! O(n); `v.isX(s)` is true exactly when the rule `v.x` passes `s`.
+//! `port`, `latitude`, `longitude`, `latLong`) and network addresses and
+//! names (`email`, `httpUrl`, `fqdn`, `ip`, `ipv4`, `ipv6`, `macAddress`),
+//! each with its predicate (`isNumberString`, ...). Every grammar is ASCII
+//! and is read byte by byte: nothing is trimmed or decoded, so invalid UTF-8
+//! and any byte >= 0x80 fail under the rule's own code, and "" fails every
+//! rule of this file. A predicate takes any bytes, never allocates, never
+//! backtracks and runs in O(n); `v.isX(s)` is true exactly when the rule
+//! `v.x` passes `s`.
 //! `latitude` and `longitude` also take float fields, where they are range
 //! checks behind the finite precondition; their predicates cover strings
 //! only.
@@ -33,6 +34,22 @@ pub const DecimalOptions = struct {
     /// The most digits after the point; null for no limit. When set, at
     /// least `min_decimal_digits` in the rule.
     max_decimal_digits: ?usize = null,
+};
+
+/// The options of `v.fqdn(.{ ... })` and `v.isFqdn`, with the names and
+/// defaults of validator.js `isFQDN`. Every combination is valid.
+pub const FqdnOptions = struct {
+    /// At least two labels, and a last label (the top-level domain) of 2 or
+    /// more ASCII letters, or "xn" in any case followed by 2 or more letters,
+    /// digits or hyphens (an IDN TLD such as "xn--p1ai"). When false, one
+    /// label is enough: "localhost".
+    require_tld: bool = true,
+    /// '_' may appear in labels, as in "_dmarc.example.com".
+    allow_underscores: bool = false,
+    /// One '.' may end the name, the absolute form "example.com.".
+    allow_trailing_dot: bool = false,
+    /// The name may start with "*.", as in "*.example.com".
+    allow_wildcard: bool = false,
 };
 
 /// The options of `v.macAddress(.{ ... })` and `v.isMacAddress`, after
@@ -344,6 +361,206 @@ fn isGrouped(s: []const u8, octets: usize, digits: usize, separators: []const u8
     return true;
 }
 
+// ------------------------------------------------------------------ domain names
+
+/// The longest domain name without the trailing dot, in bytes: 255 octets
+/// on the wire (RFC 1035) less the first length byte and the root's zero.
+const max_domain_bytes = 253;
+
+/// A domain name, as validator.js `isFQDN` reads it with these options, but
+/// ASCII only and at most 253 bytes (254 with an allowed trailing dot):
+/// labels of 1-63 letters, digits and hyphens (and '_' with
+/// `allow_underscores`) joined by '.', without a hyphen at either end of a
+/// label; the last label is not all digits, and with `require_tld` there are
+/// at least two labels and the last one is a top-level domain (see
+/// `FqdnOptions`). "xn--" labels are not checked as Punycode. The options
+/// are applied as given.
+pub fn isFqdn(s: []const u8, options: FqdnOptions) bool {
+    var name = s;
+    if (options.allow_trailing_dot and name.len != 0 and name[name.len - 1] == '.') name = name[0 .. name.len - 1];
+    if (name.len == 0 or name.len > max_domain_bytes) return false;
+    if (options.allow_wildcard and std.mem.startsWith(u8, name, "*.")) name = name[2..];
+    var labels: usize = 0;
+    var last: []const u8 = "";
+    var it = std.mem.splitScalar(u8, name, '.');
+    while (it.next()) |label| {
+        if (!isLabel(label, options.allow_underscores)) return false;
+        labels += 1;
+        last = label;
+    }
+    // `last` passed isLabel, so it is not empty.
+    if (allDigits(last)) return false;
+    if (options.require_tld) return labels >= 2 and isTld(last);
+    return true;
+}
+
+/// A label of a host name: 1-63 letters, digits and hyphens (and '_' when
+/// allowed), not starting or ending with '-'.
+fn isLabel(label: []const u8, allow_underscores: bool) bool {
+    if (label.len == 0 or label.len > 63) return false;
+    if (label[0] == '-' or label[label.len - 1] == '-') return false;
+    for (label) |c| {
+        if (std.ascii.isAlphanumeric(c) or c == '-') continue;
+        if (c == '_' and allow_underscores) continue;
+        return false;
+    }
+    return true;
+}
+
+/// A top-level domain, as the TLD pattern of validator.js `isFQDN`: 2 or
+/// more ASCII letters, or 'x' or 'X', 'n' or 'N' and 2 or more letters,
+/// digits or hyphens. The registry writes IDN TLDs in uppercase
+/// ("XN--P1AI"), so "xn" is matched in any case.
+fn isTld(tld: []const u8) bool {
+    if (tld.len < 2) return false;
+    for (tld) |c| {
+        if (!std.ascii.isAlphabetic(c)) break;
+    } else return true;
+    if (tld.len < 4 or std.ascii.toLower(tld[0]) != 'x' or std.ascii.toLower(tld[1]) != 'n') return false;
+    for (tld[2..]) |c| {
+        if (!std.ascii.isAlphanumeric(c) and c != '-') return false;
+    }
+    return true;
+}
+
+// ------------------------------------------------------------------ email
+
+/// A byte of RFC 5322 `atext`: a letter, a digit or one of
+/// ``!#$%&'*+-/=?^_`{|}~``.
+fn isAtext(c: u8) bool {
+    return switch (c) {
+        'A'...'Z', 'a'...'z', '0'...'9' => true,
+        '!', '#', '$', '%', '&', '\'', '*', '+', '-', '/', '=', '?', '^', '_', '`', '{', '|', '}', '~' => true,
+        else => false,
+    };
+}
+
+/// An email address, ASCII only: at most 254 bytes; before the first '@' a
+/// local part of 1-64 bytes of `atext` and '.', without a '.' at either end
+/// or two in a row; after it a domain that `isFqdn(domain, .{})` accepts, so
+/// at least two labels and a top-level domain. No quoted local part, IP
+/// literal or non-ASCII byte; a second '@' fails in the domain.
+pub fn isEmail(s: []const u8) bool {
+    // The longest path of RFC 5321, 256 bytes, less its "<" and ">".
+    if (s.len > 254) return false;
+    const at = std.mem.findScalar(u8, s, '@') orelse return false;
+    const local = s[0..at];
+    if (local.len == 0 or local.len > 64) return false;
+    if (local[0] == '.' or local[local.len - 1] == '.') return false;
+    var after_dot = false;
+    for (local) |c| {
+        if (c == '.') {
+            if (after_dot) return false;
+            after_dot = true;
+        } else {
+            if (!isAtext(c)) return false;
+            after_dot = false;
+        }
+    }
+    return isFqdn(s[at + 1 ..], .{});
+}
+
+// ------------------------------------------------------------------ HTTP URLs
+
+/// A label that makes a host an IPv4 address in URLs: all digits, or "0x"
+/// or "0X" and hex digits.
+fn endsInNumber(label: []const u8) bool {
+    if (label.len != 0 and allDigits(label)) return true;
+    return label.len >= 2 and label[0] == '0' and (label[1] == 'x' or label[1] == 'X') and allHex(label[2..]);
+}
+
+/// A host name or an IPv4 address in a URL: without one trailing '.', 1-253
+/// bytes of labels of letters, digits and hyphens (one label is enough);
+/// when its last label is a number, the host as written must be an IPv4
+/// address.
+fn isUrlHost(host: []const u8) bool {
+    const name = if (host.len != 0 and host[host.len - 1] == '.') host[0 .. host.len - 1] else host;
+    if (name.len == 0 or name.len > max_domain_bytes) return false;
+    var last: []const u8 = "";
+    var it = std.mem.splitScalar(u8, name, '.');
+    while (it.next()) |label| {
+        if (!isLabel(label, false)) return false;
+        last = label;
+    }
+    if (endsInNumber(last)) return isIpv4(host);
+    return true;
+}
+
+/// A port in a URL: 1-5 ASCII digits, from 1 to 65535, leading zeros
+/// allowed ("080"), unlike `isPort`.
+fn isUrlPort(text: []const u8) bool {
+    if (text.len == 0 or text.len > 5 or !allDigits(text)) return false;
+    var value: u32 = 0;
+    for (text) |c| value = value * 10 + (c - '0');
+    return value >= 1 and value <= 65535;
+}
+
+/// The authority of a URL: `[IPv6]` or a host, then an optional ':' and
+/// port; no userinfo.
+fn isAuthority(authority: []const u8) bool {
+    if (authority.len == 0) return false;
+    if (std.mem.findScalar(u8, authority, '@') != null) return false;
+    var port_text: ?[]const u8 = null;
+    if (authority[0] == '[') {
+        const close = std.mem.findScalar(u8, authority, ']') orelse return false;
+        if (!isIpv6(authority[1..close])) return false;
+        const after = authority[close + 1 ..];
+        if (after.len != 0) {
+            if (after[0] != ':') return false;
+            port_text = after[1..];
+        }
+    } else {
+        var host = authority;
+        if (std.mem.findScalar(u8, authority, ':')) |colon| {
+            host = authority[0..colon];
+            port_text = authority[colon + 1 ..];
+        }
+        if (!isUrlHost(host)) return false;
+    }
+    if (port_text) |text| {
+        if (!isUrlPort(text)) return false;
+    }
+    return true;
+}
+
+/// The path, query and fragment of a URL: bytes from 0x21 to 0x7E except
+/// '"', '<', '>' and '\', '%' followed by 2 hex digits, at most one '#'.
+fn isUrlTail(tail: []const u8) bool {
+    var seen_hash = false;
+    var i: usize = 0;
+    while (i < tail.len) : (i += 1) {
+        const c = tail[i];
+        if (c < 0x21 or c > 0x7E or c == '"' or c == '<' or c == '>' or c == '\\') return false;
+        if (c == '%') {
+            if (tail.len - i < 3 or !std.ascii.isHex(tail[i + 1]) or !std.ascii.isHex(tail[i + 2])) return false;
+            i += 2;
+        } else if (c == '#') {
+            if (seen_hash) return false;
+            seen_hash = true;
+        }
+    }
+    return true;
+}
+
+/// An http or https URL: "http://" or "https://" in any case, then the
+/// authority up to the first '/', '?' or '#': `[IPv6]`, an IPv4 address or
+/// a host name (one label is enough, a trailing dot is allowed, at most 253
+/// bytes without it), an optional port from 1 to 65535 (leading zeros
+/// allowed) and no userinfo; then the path, query and fragment: printable
+/// ASCII without '"', '<', '>' and '\', '%' followed by 2 hex digits, at
+/// most one '#'. The length is not limited. It checks syntax only:
+/// "http://127.0.0.1" and "http://169.254.169.254" pass.
+pub fn isHttpUrl(s: []const u8) bool {
+    const rest = if (std.ascii.startsWithIgnoreCase(s, "https://"))
+        s["https://".len..]
+    else if (std.ascii.startsWithIgnoreCase(s, "http://"))
+        s["http://".len..]
+    else
+        return false;
+    const end = std.mem.findAny(u8, rest, "/?#") orelse rest.len;
+    return isAuthority(rest[0..end]) and isUrlTail(rest[end..]);
+}
+
 // ------------------------------------------------------------------ rules
 
 /// The hint a rule of `kind` gives on the field type `T` that it does not
@@ -578,9 +795,45 @@ fn macAddressMessage(comptime options: MacAddressOptions) []const u8 {
     };
 }
 
+/// An email address as `isEmail` reads it: "user@example.com" passes;
+/// "user@localhost", "user@example.c" and `"a b"@example.com` fail. It
+/// checks the syntax only, not that mail can be delivered. class-validator
+/// `@IsEmail()`.
+pub const email: Rule = stringRule(.email, "must be a valid email address", isEmail);
+
+/// An http or https URL as `isHttpUrl` reads it: "https://example.com/a?b#c"
+/// and "http://localhost:8080" pass; "example.com", "ftp://example.com" and
+/// "https://user@example.com" fail. Not a guard against server-side request
+/// forgery: loopback and private addresses pass. Its length is not limited:
+/// add a length rule. class-validator `@IsUrl()`.
+pub const httpUrl: Rule = stringRule(.http_url, "must be a valid HTTP or HTTPS URL", isHttpUrl);
+
+/// A domain name as `isFqdn` reads it with these options: `v.fqdn(.{})`
+/// takes "example.com" and rejects "localhost", which
+/// `v.fqdn(.{ .require_tld = false })` takes. class-validator `@IsFQDN()`.
+pub fn fqdn(comptime options: FqdnOptions) Rule {
+    @setEvalBranchQuota(core.eval_quota);
+    return core.define(.fqdn, .{
+        .message = "must be a valid domain name",
+        .args = options_args,
+        .params = &.{
+            core.dataParam("require_tld", options.require_tld),
+            core.dataParam("allow_underscores", options.allow_underscores),
+            core.dataParam("allow_trailing_dot", options.allow_trailing_dot),
+            core.dataParam("allow_wildcard", options.allow_wildcard),
+        },
+        .fits = stringFits,
+        .eval = struct {
+            fn eval(value: anytype) Outcome {
+                return core.passIf(isFqdn(value.*, options));
+            }
+        }.eval,
+    });
+}
+
 /// The arguments the hints show for an uncalled constructor of this file:
 /// `decimal must be called, e.g. v.decimal(.{})`.
-pub const call_examples = .{ .decimal = ".{}", .macAddress = ".{}" };
+pub const call_examples = .{ .decimal = ".{}", .fqdn = ".{}", .macAddress = ".{}" };
 
 const expectOutcome = core.expectOutcome;
 const test_where = "Dto.field_rules.x";
@@ -990,4 +1243,139 @@ test "the address rules take strings only, with the [N]u8 and each hints" {
     try expect(head ++ "mac_address expects a string, field is []const []const u8; use v.each(v.macAddress(.{...}))", comptime stringText(macAddress(.{ .eui = .eui48 }), []const []const u8).?);
     try expect("macAddress must be called, e.g. v.macAddress(.{})", comptime core.hints.mustBeCalled("macAddress", @TypeOf(macAddress)));
     try expect("expected a rule, got the predicate isMacAddress; use the rule v.macAddress(.{})", comptime core.hints.predicateAsRule("isMacAddress", "macAddress", @TypeOf(macAddress)));
+}
+
+fn fqdnDefault(s: []const u8) bool {
+    return isFqdn(s, .{});
+}
+
+/// A label of 63 bytes, and a domain name of exactly 253 bytes.
+const label63: [63]u8 = @splat('a');
+const name253 = label63 ++ "." ++ label63 ++ "." ++ label63 ++ "." ++ @as([57]u8, @splat('b')) ++ ".com";
+
+test "fqdn with the default options: LDH labels, at least two, and a top-level domain" {
+    try std.testing.expectEqual(253, name253.len);
+    try expectAll(fqdnDefault, true, &.{
+        "example.com", "a.b.co",       "sub.example.co.uk",  "a-b.com",     "1example.com", "example.XN--P1AI", "example.Xn--p1ai", "example.xN--P1AI",
+        "example.xn",  "example.xn1a", "xn--80ak6aa92e.com", "EXAMPLE.COM", name253,        label63 ++ ".com",
+    });
+    try expectAll(fqdnDefault, false, &.{
+        "",                  "localhost",       "example",      "example.c",    "example.com1", "example.c-m",  "example.0x1f",     "example.xn1",
+        "example.123",       "-example.com",    "example-.com", "exa_mple.com", "example..com", ".example.com", "example.com.",     "*.example.com",
+        "m\xc3\xbcnchen.de", "ex\xffample.com", "example.com ", " example.com", "example .com", "a" ++ name253, label63 ++ "a.com", "1.2.3.4",
+        "example.x-",        "example.xn-",     "example.c_m",
+    });
+}
+
+test "fqdn options: one label, underscores, a trailing dot and a wildcard, each on its own and together" {
+    const t = std.testing;
+    try t.expect(isFqdn("localhost", .{ .require_tld = false }));
+    try t.expect(isFqdn("a.b", .{ .require_tld = false }));
+    try t.expect(isFqdn("a.c1", .{ .require_tld = false }));
+    try t.expect(!isFqdn("a.123", .{ .require_tld = false }));
+    try t.expect(!isFqdn("123", .{ .require_tld = false }));
+    try t.expect(isFqdn("_dmarc.example.com", .{ .allow_underscores = true }));
+    try t.expect(isFqdn("a_b.example.com", .{ .allow_underscores = true }));
+    try t.expect(!isFqdn("_dmarc.example.com", .{}));
+    try t.expect(isFqdn("example.com.", .{ .allow_trailing_dot = true }));
+    try t.expect(!isFqdn("example.com..", .{ .allow_trailing_dot = true }));
+    try t.expect(!isFqdn(".", .{ .allow_trailing_dot = true }));
+    try t.expect(isFqdn("*.example.com", .{ .allow_wildcard = true }));
+    try t.expect(!isFqdn("*.com", .{ .allow_wildcard = true }));
+    try t.expect(!isFqdn("*.*.example.com", .{ .allow_wildcard = true }));
+    try t.expect(!isFqdn("*example.com", .{ .allow_wildcard = true }));
+    try t.expect(!isFqdn("*.", .{ .allow_wildcard = true }));
+    try t.expect(isFqdn("*._svc.", .{ .require_tld = false, .allow_underscores = true, .allow_trailing_dot = true, .allow_wildcard = true }));
+    // 253 bytes pass, 254 fail; an allowed trailing dot is the 254th byte.
+    try t.expect(isFqdn(name253 ++ ".", .{ .allow_trailing_dot = true }));
+    try t.expect(!isFqdn("a" ++ name253 ++ ".", .{ .allow_trailing_dot = true }));
+    try t.expect(!isFqdn(name253 ++ ".", .{}));
+}
+
+test "email: a local part of atext and dots, then a domain that fqdn accepts" {
+    const local64: [64]u8 = @splat('l');
+    // 4 + 250 = 254 bytes in all.
+    const domain250 = label63 ++ "." ++ label63 ++ "." ++ label63 ++ "." ++ @as([54]u8, @splat('d')) ++ ".com";
+    try std.testing.expectEqual(250, domain250.len);
+    try expectAll(isEmail, true, &.{
+        "user@example.com",      "first.last@example.co.uk", "x+tag@example.com",     "!#$%&'*+-/=?^_`{|}~@example.com", "user@example.XN--P1AI",
+        "user@example.xn--p1ai", "user@example.Xn--p1ai",    "user@example.xN--P1AI", "user@example.xn",                 "user@example.xn12",
+        "a@b.co",                local64 ++ "@example.com",  "abc@" ++ domain250,     "USER@EXAMPLE.COM",                "1@2.co",
+    });
+    try expectAll(isEmail, false, &.{
+        "",                                 "user",                 "@example.com",          "user@",                     "user@example.c",         "user@example.com1",
+        "user@example.c-m",                 "user@example.0x1f",    "user@example.xn1",      "user@localhost",            "user@example.com.",      "a@b@example.com",
+        ".user@example.com",                "user.@example.com",    "us..er@example.com",    "\"a b\"@example.com",       "\"quoted\"@example.com", "j\xc3\xb6s\xc3\xa9@example.com",
+        "user@\xe4\xbe\x8b\xe3\x81\x88.jp", "user@ex\xffample.com", "user name@example.com", "user@[192.0.2.1]",          "user@192.0.2.1",         local64 ++ "l@example.com",
+        "abcd@" ++ domain250,               "user@-example.com",    "user@example..com",     "user(comment)@example.com", "user@example.com ",      " user@example.com",
+    });
+}
+
+test "httpUrl: the scheme, a host or [IPv6] with an optional port, and a tail of printable ASCII" {
+    const host253 = name253;
+    try expectAll(isHttpUrl, true, &.{
+        "http://example.com",                                       "https://example.com/",                                          "HTTP://EXAMPLE.COM:080/a{b}^c`d",
+        "https://fonts.googleapis.com/css?family=Roboto|Open+Sans", "https://api.example.com/articles?page[number]=2&page[size]=10", "https://example.com/search?ids[]=1&ids[]=2",
+        "http://example.com/a|b",                                   "http://example.com/[x]",                                        "http://localhost",
+        "http://api:8080",                                          "https://googlecom",                                             "https://example.com./",
+        "http://[::1]",                                             "http://[::1]:65535/",                                           "http://[2001:db8::1]:8443/",
+        "http://[::ffff:1.2.3.4]/",                                 "http://192.0.2.1/%00",                                          "http://127.0.0.1/",
+        "http://169.254.169.254/latest/meta-data/",                 "http://example.com:080/",                                       "https://example.com/%00",
+        "http://example.com#frag?with/slash",                       "https://example.com?q=1",                                       "http://xn--80ak6aa92e.com/",
+        "http://example.com/a%2Fb",                                 "http://1.2.3.4:80/",                                            "http://" ++ host253 ++ "/",
+        "http://" ++ host253 ++ "./",                               "https://example.com:65535",
+    });
+    try expectAll(isHttpUrl, false, &.{
+        "",                                 "http://",                    "https://",                        "http:///path",                "example.com",
+        "ftp://example.com/",               "http:example.com",           "http:/example.com",               "http://example.com/a\"b",     "http://example.com/a\\b",
+        "http://example.com/a<b>",          "http://example.com/a b",     "http://example.com/a\x7fb",       "http://example.com/a\x01b",   "http://example.com/%zz",
+        "http://example.com/%2",            "http://example.com/%",       "http://example.com/#a#b",         "http://example.com:0/",       "http://example.com:65536/",
+        "http://example.com:/",             "http://example.com:000080/", "http://example.com:00000/",       "http://user@example.com/",    "https://example.com@evil.example",
+        "http://1.2.3/",                    "http://0x7f.1/",             "http://[fe80::1%25eth0]/",        "http://exa_mple.com/",        "http://-example.com/",
+        "http://example-.com/",             "https://m\xc3\xbcnchen.de/", "https://example.com/\xc3\xbcber", "http://[::1",                 "http://[::1]x/",
+        "http://[1.2.3.4]/",                "http://1.2.3.4./",           "http://256.1.1.1/",               "http://example.com:8080:90/", "http://exa mple.com/",
+        "http://example..com/",             "http://.example.com/",       "http://example.com../",           "http://a.b.c.0x/",            "http://example.123/",
+        "http://" ++ "a" ++ host253 ++ "/", "http://[::1]:/",             "http://[]/",                      "http://:80/",                 " http://example.com",
+    });
+}
+
+test "email, httpUrl and fqdn have their codes and default messages and no precondition; fqdn keeps its options as data" {
+    const t = std.testing;
+    try t.expectEqual(core.Kind.email, email.kind);
+    try t.expectEqualStrings("validation.email", email.code);
+    try t.expectEqualStrings("must be a valid email address", email.message);
+    try t.expectEqual(null, email.args);
+    try t.expectEqual(null, email.precondition);
+    try t.expectEqual(core.Kind.http_url, httpUrl.kind);
+    try t.expectEqualStrings("validation.http_url", httpUrl.code);
+    try t.expectEqualStrings("must be a valid HTTP or HTTPS URL", httpUrl.message);
+    try t.expectEqual(null, httpUrl.args);
+    try t.expectEqual(null, httpUrl.precondition);
+    const rule = fqdn(.{ .allow_wildcard = true });
+    try t.expectEqual(core.Kind.fqdn, rule.kind);
+    try t.expectEqualStrings("validation.fqdn", rule.code);
+    try t.expectEqualStrings("must be a valid domain name", rule.message);
+    try t.expectEqualStrings("fqdn(.{...})", comptime rule.call());
+    try t.expectEqual(null, rule.precondition);
+    try t.expectEqual(4, rule.params.len);
+    try t.expectEqualStrings("require_tld", rule.params[0].name);
+    try t.expectEqualStrings("true", rule.params[0].text);
+    try t.expectEqualStrings("allow_wildcard", rule.params[3].name);
+    try t.expectEqualStrings("true", rule.params[3].text);
+    try t.expectEqualStrings("", comptime core.placeholderList(rule));
+}
+
+test "email, httpUrl and fqdn take strings only, with the [N]u8 and each hints" {
+    const expect = std.testing.expectEqualStrings;
+    const head = "validator: Dto.field_rules.x: ";
+    try expect(head ++ "email expects a string, field is u64", comptime stringText(email, u64).?);
+    try expect(head ++ "http_url expects a string, field is bool", comptime stringText(httpUrl, bool).?);
+    try expect(head ++ "fqdn expects a string, field is bool", comptime stringText(fqdn(.{}), bool).?);
+    try expect(head ++ "email expects a string, field is [8]u8; [N]u8 is an array of numbers, not a string: use []const u8", comptime stringText(email, [8]u8).?);
+    try expect(head ++ "http_url expects a string, field is []const []const u8; use v.each(v.httpUrl)", comptime stringText(httpUrl, []const []const u8).?);
+    try expect(head ++ "fqdn expects a string, field is []const []const u8; use v.each(v.fqdn(.{...}))", comptime stringText(fqdn(.{}), []const []const u8).?);
+    try expect(head ++ "fqdn expects a string, field is [8:0]u8; [N]u8 is an array of numbers, not a string: use []const u8", comptime stringText(fqdn(.{}), [8:0]u8).?);
+    try expect("fqdn must be called, e.g. v.fqdn(.{})", comptime core.hints.mustBeCalled("fqdn", @TypeOf(fqdn)));
+    try expect("expected a rule, got the predicate isEmail; use the rule v.email", comptime core.hints.predicateAsRule("isEmail", "email", Rule));
+    try expect("expected a rule, got the predicate isFqdn; use the rule v.fqdn(.{})", comptime core.hints.predicateAsRule("isFqdn", "fqdn", @TypeOf(fqdn)));
 }

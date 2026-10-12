@@ -309,6 +309,32 @@ test "latLong is a rule value with code validation.lat_long and message \"must b
     try expectNoViolation([]const u8, v.latLong, "(40.7128, -74.0060)");
 }
 
+test "email is a rule value with code validation.email and message \"must be a valid email address\"" {
+    try testing.expect(@hasDecl(v, "email"));
+    try testing.expect(@TypeOf(v.email) == v.Rule);
+    try expectRule(v.email, "validation.email", "must be a valid email address", "must be a valid email address");
+    try expectViolation([]const u8, v.email, "user@example.c", "validation.email", "must be a valid email address", "x");
+    try expectNoViolation([]const u8, v.email, "user@example.XN--P1AI");
+}
+
+test "httpUrl is a rule value with code validation.http_url and message \"must be a valid HTTP or HTTPS URL\"" {
+    try testing.expect(@hasDecl(v, "httpUrl"));
+    try testing.expect(@TypeOf(v.httpUrl) == v.Rule);
+    try expectRule(v.httpUrl, "validation.http_url", "must be a valid HTTP or HTTPS URL", "must be a valid HTTP or HTTPS URL");
+    try expectViolation([]const u8, v.httpUrl, "http://user@example.com", "validation.http_url", "must be a valid HTTP or HTTPS URL", "x");
+    try expectNoViolation([]const u8, v.httpUrl, "https://example.com:8080/a?b=[1]#c");
+}
+
+test "fqdn is a rule constructor with code validation.fqdn and message \"must be a valid domain name\" whatever the options" {
+    try testing.expect(@hasDecl(v, "fqdn"));
+    try testing.expect(@typeInfo(@TypeOf(v.fqdn)).@"fn".return_type == v.Rule);
+    try expectRule(v.fqdn(.{}), "validation.fqdn", "must be a valid domain name", "must be a valid domain name");
+    try expectRule(v.fqdn(.{ .require_tld = false, .allow_underscores = true, .allow_trailing_dot = true, .allow_wildcard = true }), "validation.fqdn", "must be a valid domain name", "must be a valid domain name");
+    try expectViolation([]const u8, v.fqdn(.{}), "localhost", "validation.fqdn", "must be a valid domain name", "x");
+    try expectNoViolation([]const u8, v.fqdn(.{}), "example.com");
+    try expectNoViolation([]const u8, v.fqdn(.{ .require_tld = false }), "localhost");
+}
+
 test "ip is a rule value with code validation.ip and message \"must be a valid IP address\"" {
     try testing.expect(@hasDecl(v, "ip"));
     try testing.expect(@TypeOf(v.ip) == v.Rule);
@@ -535,16 +561,16 @@ test "finite has no precondition: nan, inf and -inf on a float field fail its ow
     }
 }
 
-test "the module exports exactly its 57 public names, and Rule.withMessage" {
+test "the module exports exactly its 64 public names, and Rule.withMessage" {
     const names = [_][]const u8{
-        "Violation",      "Rule",         "Report",          "max_code_bytes", "max_message_bytes", "max_report_violations", "check",          "checkAll",
-        "assertRules",    "fail",         "equals",          "notEquals",      "oneOf",             "noneOf",                "empty",          "notEmpty",
-        "min",            "max",          "range",           "positive",       "nonNegative",       "negative",              "nonPositive",    "divisibleBy",
-        "finite",         "numberString", "decimal",         "booleanString",  "hexadecimal",       "octal",                 "port",           "latitude",
-        "longitude",      "latLong",      "ip",              "ipv4",           "ipv6",              "macAddress",            "DecimalOptions", "MacAddressOptions",
-        "isNumberString", "isDecimal",    "isBooleanString", "isHexadecimal",  "isOctal",           "isPort",                "isLatitude",     "isLongitude",
-        "isLatLong",      "isIp",         "isIpv4",          "isIpv6",         "isMacAddress",      "minItems",              "maxItems",       "each",
-        "custom",
+        "Violation",   "Rule",           "Report",      "max_code_bytes",    "max_message_bytes", "max_report_violations", "check",           "checkAll",
+        "assertRules", "fail",           "equals",      "notEquals",         "oneOf",             "noneOf",                "empty",           "notEmpty",
+        "min",         "max",            "range",       "positive",          "nonNegative",       "negative",              "nonPositive",     "divisibleBy",
+        "finite",      "numberString",   "decimal",     "booleanString",     "hexadecimal",       "octal",                 "port",            "latitude",
+        "longitude",   "latLong",        "email",       "httpUrl",           "fqdn",              "ip",                    "ipv4",            "ipv6",
+        "macAddress",  "DecimalOptions", "FqdnOptions", "MacAddressOptions", "isNumberString",    "isDecimal",             "isBooleanString", "isHexadecimal",
+        "isOctal",     "isPort",         "isLatitude",  "isLongitude",       "isLatLong",         "isEmail",               "isHttpUrl",       "isFqdn",
+        "isIp",        "isIpv4",         "isIpv6",      "isMacAddress",      "minItems",          "maxItems",              "each",            "custom",
     };
     inline for (names) |name| try testing.expect(@hasDecl(v, name));
     try testing.expectEqual(names.len, comptime std.meta.declarations(v).len);
@@ -556,9 +582,11 @@ test "every rule the module exports has a catalog test" {
     // comptime branches than a test allows by default.
     @setEvalBranchQuota(100_000);
     const tested = [_][]const u8{
-        "equals",      "notEquals",  "oneOf",        "noneOf",   "empty",         "notEmpty",    "min",   "max",  "range",    "positive",  "nonNegative", "negative", "nonPositive",
-        "divisibleBy", "finite",     "numberString", "decimal",  "booleanString", "hexadecimal", "octal", "port", "latitude", "longitude", "latLong",     "ip",       "ipv4",
-        "ipv6",        "macAddress", "minItems",     "maxItems", "each",          "custom",
+        "equals",   "notEquals",     "oneOf",       "noneOf",   "empty",       "notEmpty",    "min",        "max",
+        "range",    "positive",      "nonNegative", "negative", "nonPositive", "divisibleBy", "finite",     "numberString",
+        "decimal",  "booleanString", "hexadecimal", "octal",    "port",        "latitude",    "longitude",  "latLong",
+        "email",    "httpUrl",       "fqdn",        "ip",       "ipv4",        "ipv6",        "macAddress", "minItems",
+        "maxItems", "each",          "custom",
     };
     inline for (comptime std.meta.declarations(v)) |name| {
         const T = @TypeOf(@field(v, name));
@@ -576,7 +604,10 @@ test "every rule the module exports has a catalog test" {
 
 test "the module exports exactly the catalog predicates of the shipped rules" {
     @setEvalBranchQuota(100_000);
-    const predicates = [_][]const u8{ "isNumberString", "isDecimal", "isBooleanString", "isHexadecimal", "isOctal", "isPort", "isLatitude", "isLongitude", "isLatLong", "isIp", "isIpv4", "isIpv6", "isMacAddress" };
+    const predicates = [_][]const u8{
+        "isNumberString", "isDecimal", "isBooleanString", "isHexadecimal", "isOctal", "isPort", "isLatitude", "isLongitude",
+        "isLatLong",      "isEmail",   "isHttpUrl",       "isFqdn",        "isIp",    "isIpv4", "isIpv6",     "isMacAddress",
+    };
     comptime var exported: usize = 0;
     inline for (comptime std.meta.declarations(v)) |name| {
         if (comptime name.len > 2 and std.mem.startsWith(u8, name, "is") and std.ascii.isUpper(name[2])) {
@@ -594,9 +625,13 @@ test "the module exports exactly the catalog predicates of the shipped rules" {
 }
 
 test "the predicates have their catalog signatures: the input first, the options last" {
-    const plain = [_][]const u8{ "isNumberString", "isBooleanString", "isHexadecimal", "isOctal", "isPort", "isLatitude", "isLongitude", "isLatLong", "isIp", "isIpv4", "isIpv6" };
+    const plain = [_][]const u8{
+        "isNumberString", "isBooleanString", "isHexadecimal", "isOctal", "isPort", "isLatitude", "isLongitude", "isLatLong",
+        "isEmail",        "isHttpUrl",       "isIp",          "isIpv4",  "isIpv6",
+    };
     inline for (plain) |name| try testing.expect(@TypeOf(@field(v, name)) == fn ([]const u8) bool);
     try testing.expect(@TypeOf(v.isDecimal) == fn ([]const u8, v.DecimalOptions) bool);
+    try testing.expect(@TypeOf(v.isFqdn) == fn ([]const u8, v.FqdnOptions) bool);
     try testing.expect(@TypeOf(v.isMacAddress) == fn ([]const u8, v.MacAddressOptions) bool);
 }
 
