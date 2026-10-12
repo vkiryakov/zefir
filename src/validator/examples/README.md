@@ -199,7 +199,9 @@ const Order = struct {
 - The first rule that fails is the field's only violation; the rules after it
   do not run.
 - A field without a key has no rules of its own, but the walk still enters it
-  when there are rules inside it. An empty `.{}` is allowed.
+  when there are rules inside it. An empty `pub const field_rules = .{}` is
+  allowed; an entry with an empty tuple, `.x = .{}`, is a compile error
+  (`the list is empty`).
 - Comptime fields are never checked; a key that names one is a compile error.
 
 ### Optional fields

@@ -132,7 +132,7 @@
     "expect": "precondition",
     "code": "validation.finite",
     "message": "must be a finite number",
-    "reason": "+inf fails the finite precondition (validator.js accepts Infinity as positive)",
+    "reason": "+inf fails the finite precondition (class-validator's IsPositive accepts Infinity)",
     "source": "errata VE-109",
     "vjs": true,
     "deviation": "D16"

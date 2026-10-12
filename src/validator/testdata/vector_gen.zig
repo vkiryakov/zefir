@@ -186,8 +186,10 @@ fn checkList(io: std.Io, dir_path: []const u8, names: []const []const u8) !void 
 }
 
 /// Whether `file_name` is a vector file, `<name>.json`, whose name is not
-/// one of `names`.
+/// one of `names`. Hidden files (editor locks, macOS `._` files) are not
+/// vector files.
 fn isUnlisted(file_name: []const u8, names: []const []const u8) bool {
+    if (std.mem.startsWith(u8, file_name, ".")) return false;
     const name = std.mem.cutSuffix(u8, file_name, ".json") orelse return false;
     return !contains(names, name);
 }
@@ -208,8 +210,8 @@ fn checkFile(arena: Allocator, text: []const u8, rules: []const []const u8) Allo
             return .{ .records = &.{}, .problems = problems.items };
         },
     };
-    if (try formatDifference(arena, root, text)) |line| {
-        try problems.append(arena, .{ .where = "", .text = try std.fmt.allocPrint(arena, "not in the canonical format (2-space indent, one item or member per line, LF line ends, a final newline): first difference at line {d}", .{line}) });
+    if (try formatDifference(arena, root, text)) |difference| {
+        try problems.append(arena, .{ .where = "", .text = difference.text });
     }
     if (root != .array) {
         try problems.append(arena, .{ .where = "", .text = "the file must be a JSON array of records" });
@@ -248,14 +250,28 @@ fn checkFile(arena: Allocator, text: []const u8, rules: []const []const u8) Allo
     return .{ .records = records.items, .problems = problems.items };
 }
 
-/// The line on which `text` first differs from the canonical form of `root`
-/// (what std.json writes with a 2-space indent, and a final newline), or
-/// null when it does not differ.
-fn formatDifference(arena: Allocator, root: std.json.Value, text: []const u8) Allocator.Error!?usize {
+/// The first line on which a vector file differs from its canonical form,
+/// and the problem to report.
+const Difference = struct { line: usize, text: []const u8 };
+
+/// Where `text` first differs from the canonical form of `root` (what
+/// std.json writes with a 2-space indent, and a final newline), or null when
+/// it does not differ.
+fn formatDifference(arena: Allocator, root: std.json.Value, text: []const u8) Allocator.Error!?Difference {
     const rendered = try std.json.Stringify.valueAlloc(arena, root, .{ .whitespace = .indent_2 });
     const expected = try std.mem.concat(arena, u8, &.{ rendered, "\n" });
     const index = std.mem.findDiff(u8, text, expected) orelse return null;
-    return 1 + std.mem.count(u8, text[0..index], "\n");
+    const line = 1 + std.mem.count(u8, text[0..@min(index, text.len)], "\n");
+    if (index < text.len and text[index] == '\r')
+        return .{ .line = line, .text = try std.fmt.allocPrint(arena, "line {d} ends in CR LF; save the file with LF line ends", .{line}) };
+    if (index == text.len and index + 1 == expected.len)
+        return .{ .line = line, .text = "the file must end with a newline" };
+    const should_read = if (index >= expected.len) "the end of the file" else blk: {
+        const start = if (std.mem.findScalarLast(u8, expected[0..index], '\n')) |i| i + 1 else 0;
+        const end = std.mem.findScalarPos(u8, expected, index, '\n') orelse expected.len;
+        break :blk try std.fmt.allocPrint(arena, "\"{s}\"", .{expected[start..end]});
+    };
+    return .{ .line = line, .text = try std.fmt.allocPrint(arena, "not in the canonical format (2-space indent, one item or member per line, LF line ends, a final newline): line {d} should read {s}", .{ line, should_read }) };
 }
 
 /// Reads the fields of one record and collects its problems.
@@ -685,7 +701,8 @@ fn expectFormatDifference(text: []const u8, line: ?usize) !void {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     const root = try std.json.parseFromSliceLeaky(std.json.Value, arena, text, .{ .parse_numbers = false });
-    try std.testing.expectEqual(line, try formatDifference(arena, root, text));
+    const difference = try formatDifference(arena, root, text);
+    try std.testing.expectEqual(line, if (difference) |d| d.line else null);
 }
 
 /// `text` rewritten in the canonical format.
@@ -726,7 +743,18 @@ test "a file that is not in the canonical format is rejected at its first differ
         \\]
         \\
     , 4);
-    try expectProblem("[]", "", "not in the canonical format (2-space indent, one item or member per line, LF line ends, a final newline): first difference at line 1");
+    try expectProblem("[]", "", "the file must end with a newline");
+    try expectProblem("[\r\n]\r\n", "", "line 1 ends in CR LF; save the file with LF line ends");
+    try expectProblem(
+        \\[
+        \\  {
+        \\    "id": "positive-001",
+        \\    "input": ["1"]
+        \\  }
+        \\]
+        \\
+    , "", "not in the canonical format (2-space indent, one item or member per line, LF line ends, a final newline): line 4 should read \"    \"input\": [\"");
+    try expectProblem("[]\n\n", "", "not in the canonical format (2-space indent, one item or member per line, LF line ends, a final newline): line 2 should read the end of the file");
 }
 
 test "every rule of the file needs records, and every record a rule of the file" {
@@ -742,6 +770,8 @@ test "a JSON file in vectors/ that vector_files does not list is found" {
     try std.testing.expect(isUnlisted("strings.json", &names));
     try std.testing.expect(!isUnlisted("numbers.json", &names));
     try std.testing.expect(!isUnlisted(".DS_Store", &names));
+    try std.testing.expect(!isUnlisted(".#common.json", &names));
+    try std.testing.expect(!isUnlisted("._strings.json", &names));
     try std.testing.expect(!isUnlisted("numbers.json.orig", &names));
 }
 
@@ -916,6 +946,20 @@ test "a string inside a struct input needs hex like a string in a list" {
         \\  "field_type": "[]const Stock", "input": [{"sku": "ab", "qty": "1"}, {"sku": "\n", "qty": "1"}],
         \\  "expect": "pass", "reason": "r", "source": "s"}]
     , "each-001", "input[1].sku has bytes outside 0x20-0x7E; write it as {\"hex\": \"...\"}");
+    // The generator does not know the field types: every string inside an
+    // input is checked, at any depth.
+    try expectProblem(
+        \\[{"id": "custom-001", "rule": "custom", "params": "\"orders.out_of_stock\", \"must be in stock\", hasStock",
+        \\  "field_type": "Stock", "input": {"sku": ["a\tb"], "qty": "1"}, "expect": "pass", "reason": "r", "source": "s"}]
+    , "custom-001", "input.sku[0] has bytes outside 0x20-0x7E; write it as {\"hex\": \"...\"}");
+    try expectProblem(
+        \\[{"id": "custom-001", "rule": "custom", "params": "\"orders.out_of_stock\", \"must be in stock\", hasStock",
+        \\  "field_type": "Stock", "input": {"sku": {"code": "\n"}, "qty": "1"}, "expect": "pass", "reason": "r", "source": "s"}]
+    , "custom-001", "input.sku.code has bytes outside 0x20-0x7E; write it as {\"hex\": \"...\"}");
+    try expectProblem(
+        \\[{"id": "notEmpty-001", "rule": "notEmpty", "params": "", "field_type": "[]const u8", "input": {"hex": "ff"},
+        \\  "expect": "pass", "reason": "r", "source": "s"}]
+    , "notEmpty-001", "input must be a string, or {\"hex\": \"...\"} in a list or a struct");
 }
 
 test "a passing record has no message, path or violations" {

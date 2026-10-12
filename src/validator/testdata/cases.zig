@@ -8,7 +8,8 @@
 /// "validator: " for the validator's own errors. build.zig matches
 /// `error: <expect>` against the end of each error line, so the tail of a
 /// longer message does not match. `row` names the catalog row the text
-/// comes from ("G-1", or "variant of G-13").
+/// comes from ("G-1", or "variant of G-13"), or is "internal" for an error
+/// that only a misuse of the module's internals can reach.
 pub const Fixture = struct { file: []const u8, expect: []const u8, row: []const u8 };
 
 /// A program that must end in a Debug panic whose stderr contains `stderr`.
