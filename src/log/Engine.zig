@@ -128,7 +128,7 @@ bucket: rate_limit.Bucket = .{},
 /// queued mode.
 torn: bool = false,
 /// stdout is closed for good: records are dropped from now on.
-dead: std.atomic.Value(bool) = .init(false),
+dead: std.atomic.Value(bool) align(std.atomic.cache_line) = .init(false),
 /// Queued mode: the queue, what to do when it is full, and the writer
 /// thread with its batch (a line break that may end a torn line, then the
 /// records) and the records' ends in it.
@@ -141,10 +141,10 @@ writer_thread: ?std.Thread = null,
 /// it; taken through the logger's own Io.
 join_lock: Io.Mutex = .init,
 /// Records logged once the logger is not running are refused.
-state: std.atomic.Value(State) = .init(.running),
+state: std.atomic.Value(State) align(std.atomic.cache_line) = .init(.running),
 /// Queued mode: queue positions the writer thread has written or dropped.
 /// `flush` and `shutdown` wait for it to reach theirs.
-processed: Counter = .init(0),
+processed: Counter align(std.atomic.cache_line) = .init(0),
 /// Bumped after each batch; `flush` and `shutdown` wait on it.
 progress: std.atomic.Value(u32) = .init(0),
 progress_waiters: std.atomic.Value(u32) = .init(0),
@@ -160,8 +160,11 @@ const State = enum(u8) { running, stopping, stopped };
 const Counter = std.atomic.Value(u64);
 
 const Counters = struct {
-    accepted: Counter = .init(0),
-    written: Counter = .init(0),
+    // Every call bumps `accepted` and the writer thread `written` (and
+    // `processed`): each on a cache line of its own, apart from the
+    // fields every call reads, so they do not slow each other down.
+    accepted: Counter align(std.atomic.cache_line) = .init(0),
+    written: Counter align(std.atomic.cache_line) = .init(0),
     dropped_oversize: Counter = .init(0),
     dropped_write_failed: Counter = .init(0),
     dropped_queue_full: Counter = .init(0),

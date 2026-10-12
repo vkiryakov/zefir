@@ -208,6 +208,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = .ReleaseFast,
             .imports = &.{
+                .{ .name = "core", .module = bench_core },
                 .{ .name = "log", .module = b.createModule(.{
                     .root_source_file = b.path("src/log/root.zig"),
                     .target = target,
