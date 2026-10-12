@@ -160,7 +160,7 @@ fn longestConnectJson(options: Options) usize {
 }
 
 /// The client's own copy of the options: servers parsed, strings copied,
-/// the password zeroed when freed. `options.servers` is empty in the copy;
+/// the credentials zeroed when freed. `options.servers` is empty in the copy;
 /// the parsed servers are in `servers`.
 pub const Owned = struct {
     options: Options,
@@ -191,7 +191,7 @@ pub const Owned = struct {
     }
 
     pub fn deinit(owned: *Owned, gpa: Allocator) void {
-        owned.wipePassword();
+        owned.wipeCredentials();
         switch (owned.options.auth) {
             .none => {},
             .user_password => |credentials| {
@@ -204,11 +204,15 @@ pub const Owned = struct {
         owned.* = undefined;
     }
 
-    /// Overwrites the copy of the password, so it does not stay in freed memory.
-    fn wipePassword(owned: *Owned) void {
+    /// Overwrites the copies of the credentials, so they do not stay in
+    /// freed memory.
+    fn wipeCredentials(owned: *Owned) void {
         switch (owned.options.auth) {
             .none => {},
-            .user_password => |credentials| std.crypto.secureZero(u8, @constCast(credentials.password)),
+            .user_password => |credentials| {
+                std.crypto.secureZero(u8, @constCast(credentials.username));
+                std.crypto.secureZero(u8, @constCast(credentials.password));
+            },
         }
     }
 };
@@ -309,12 +313,14 @@ test "Owned copies everything the caller may free" {
     try testing.expectEqual(0, owned.options.servers.len);
 }
 
-test "deinit wipes the copy of the password" {
-    var owned = try Owned.init(testing.allocator, .{ .servers = one_server, .auth = .{ .user_password = .{ .username = "u", .password = "secret" } } });
+test "deinit wipes the copies of the credentials" {
+    var owned = try Owned.init(testing.allocator, .{ .servers = one_server, .auth = .{ .user_password = .{ .username = "user", .password = "secret" } } });
     defer owned.deinit(testing.allocator);
-    // Allocator.free overwrites freed memory in Debug, so check before it.
-    owned.wipePassword();
+    // deinit wipes first; Allocator.free overwrites freed memory in Debug,
+    // so the wipe is checked before it.
+    owned.wipeCredentials();
     try testing.expect(std.mem.allEqual(u8, owned.options.auth.user_password.password, 0));
+    try testing.expect(std.mem.allEqual(u8, owned.options.auth.user_password.username, 0));
 }
 
 fn initAndDeinit(gpa: Allocator, options: Options) !void {
