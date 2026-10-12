@@ -183,6 +183,41 @@ test "checkAll keeps the first max_report_violations violations in walk order an
     }
 }
 
+var rejected_items: usize = 0;
+var later_checks: usize = 0;
+
+fn rejectItem(_: *const Item) bool {
+    rejected_items += 1;
+    return false;
+}
+
+fn countLater(_: u32) bool {
+    later_checks += 1;
+    return true;
+}
+
+const Rejected = struct {
+    items: []const Item,
+    later: u32 = 1,
+    pub const field_rules = .{
+        .items = v.each(v.custom("t.rejected", "item rejected", rejectItem)),
+        .later = v.custom("t.later", "later rejected", countLater),
+    };
+};
+
+test "checkAll stops at the violation beyond the cap: no later item or field is checked" {
+    const items: [150]Item = @splat(.{ .name = "x" });
+    rejected_items = 0;
+    later_checks = 0;
+    const report = try v.checkAll(testing.allocator, &Rejected{ .items = &items });
+    defer report.deinit();
+    try testing.expectEqual(v.max_report_violations, report.violations.len);
+    try testing.expect(report.truncated);
+    // items[0] to items[99] fill the report; items[100] is the violation beyond the cap.
+    try testing.expectEqual(v.max_report_violations + 1, rejected_items);
+    try testing.expectEqual(0, later_checks);
+}
+
 const WithAddress = struct { address: Address };
 
 test "the first violation of checkAll equals check: code and message always, field when the path fits path_buf" {

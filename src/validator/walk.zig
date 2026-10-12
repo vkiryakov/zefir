@@ -25,7 +25,7 @@ pub fn check(value: anytype, path_buf: []u8) ?Violation {
     const T = comptime pointee(@TypeOf(value));
     comptime verify(T);
     var sink: First = .{ .buf = path_buf };
-    _ = walkRoot(T, value, &sink) catch |err| switch (err) {};
+    walkRoot(T, value, &sink) catch |err| switch (err) {};
     return sink.found;
 }
 
@@ -44,7 +44,7 @@ pub fn checkAll(gpa: Allocator, value: anytype) Allocator.Error!Report {
     arena.* = .init(gpa);
     errdefer arena.deinit();
     var sink: All = .{ .arena = arena.allocator() };
-    _ = try walkRoot(T, value, &sink);
+    try walkRoot(T, value, &sink);
     return .{ .violations = sink.list.items, .truncated = sink.truncated, .arena = arena };
 }
 
@@ -472,11 +472,16 @@ const First = struct {
         sink.len = mark;
     }
 
-    /// Returns true: stop walking.
-    fn report(sink: *First, code: []const u8, message: []const u8) Error!bool {
+    /// Keeps the violation; its field is the path only when the whole path
+    /// fits the buffer.
+    fn report(sink: *First, code: []const u8, message: []const u8) Error!void {
         const fits = sink.len != 0 and sink.len <= sink.buf.len;
         sink.found = .{ .code = code, .message = message, .field = if (fits) sink.buf[0..sink.len] else null };
-        return true;
+    }
+
+    /// True after the first violation: the walk stops there.
+    fn stopped(sink: *const First) bool {
+        return sink.found != null;
     }
 
     /// Violations reported so far: 0 or 1.
@@ -512,15 +517,21 @@ const All = struct {
         sink.path.shrinkRetainingCapacity(mark);
     }
 
-    /// Returns true (stop) only when a violation beyond the cap shows up.
-    fn report(sink: *All, code: []const u8, message: []const u8) Error!bool {
+    /// Keeps the violation, or marks the report truncated when the cap is
+    /// already reached.
+    fn report(sink: *All, code: []const u8, message: []const u8) Error!void {
         if (sink.list.items.len == core.max_report_violations) {
             sink.truncated = true;
-            return true;
+            return;
         }
         const field: ?[]const u8 = if (sink.path.items.len == 0) null else try sink.arena.dupe(u8, sink.path.items);
         try sink.list.append(sink.arena, .{ .code = code, .message = message, .field = field });
-        return false;
+    }
+
+    /// True only after a violation beyond the cap showed up: the walk stops
+    /// there.
+    fn stopped(sink: *const All) bool {
+        return sink.truncated;
     }
 
     /// Violations kept so far.
@@ -543,10 +554,10 @@ fn ErrorOf(comptime SinkPtr: type) type {
 /// and a bit pointer to a packed field do not coerce: such a root is walked
 /// through a copy of its value, as walkStruct walks a packed or under-aligned
 /// field, and the copy takes the whole value onto the stack.
-fn walkRoot(comptime T: type, value: anytype, sink: anytype) ErrorOf(@TypeOf(sink))!bool {
+fn walkRoot(comptime T: type, value: anytype, sink: anytype) ErrorOf(@TypeOf(sink))!void {
     // A root without rules is never read: there is nothing to walk, an opaque
     // type has no value to copy, and inPlace would ask for its alignment.
-    if (comptime !containsRules(T)) return false;
+    if (comptime !containsRules(T)) return;
     if (comptime inPlace(@TypeOf(value), T)) return walkValue(T, value, &.{}, sink);
     const copy: T = value.*;
     return walkValue(T, &copy, &.{}, sink);
@@ -567,11 +578,13 @@ fn inPlace(comptime P: type, comptime T: type) bool {
 /// Walks one value: its own rules left to right (the first failure is its
 /// only violation and nothing inside it is visited); then, if all passed,
 /// its items (with the list's `each` rules) or its fields and then its
-/// `validateSelf`. Returns true when the sink wants to stop.
-fn walkValue(comptime T: type, value: *const T, comptime rules: []const Rule, sink: anytype) ErrorOf(@TypeOf(sink))!bool {
+/// `validateSelf`. Whether the walk stops is not returned: the caller asks
+/// `sink.stopped()` afterwards, since every unrolled call in walkStruct
+/// would keep a returned flag in a stack slot of its own.
+fn walkValue(comptime T: type, value: *const T, comptime rules: []const Rule, sink: anytype) ErrorOf(@TypeOf(sink))!void {
     @setEvalBranchQuota(core.eval_quota);
     if (@typeInfo(T) == .optional) {
-        const payload = if (value.*) |*p| p else return false;
+        const payload = if (value.*) |*p| p else return;
         return walkValue(@typeInfo(T).optional.child, payload, rules, sink);
     }
     inline for (comptime core.ownRules(rules)) |rule| {
@@ -583,32 +596,33 @@ fn walkValue(comptime T: type, value: *const T, comptime rules: []const Rule, si
     }
     if (comptime core.ListChild(T)) |Child| {
         const item_rules = comptime core.itemRules(rules);
-        if (comptime (item_rules.len == 0 and !containsRules(Child))) return false;
+        if (comptime (item_rules.len == 0 and !containsRules(Child))) return;
         const items: []const Child = if (@typeInfo(T) == .array) value else value.*;
         for (items, 0..) |*item, i| {
             const mark = sink.pathLen();
             defer sink.pop(mark);
             try sink.push(.{ .index = i });
-            if (try walkValue(Child, item, item_rules, sink)) return true;
+            try walkValue(Child, item, item_rules, sink);
+            if (sink.stopped()) return;
         }
-        return false;
+        return;
     }
     if (comptime isWalkedStruct(T)) return walkStruct(T, value, sink);
-    return false;
 }
 
 /// Walks the fields of a struct in declaration order; comptime fields and
 /// fields with no rules in or below them are skipped. Then, when nothing in
 /// the struct's subtree failed, runs `validateSelf` and reports its result
 /// through `reportSelf`.
-fn walkStruct(comptime T: type, value: *const T, sink: anytype) ErrorOf(@TypeOf(sink))!bool {
+fn walkStruct(comptime T: type, value: *const T, sink: anytype) ErrorOf(@TypeOf(sink))!void {
     @setEvalBranchQuota(core.eval_quota);
     const info = @typeInfo(T).@"struct";
     const before = sink.count();
     // The loop is unrolled, and each unrolled copy gets stack slots of its
     // own, so the frame grows with every unrolled field: fields without rules
     // are not unrolled, the mark is taken once (every field is pushed onto the
-    // same path), and push returns nothing.
+    // same path), and neither push nor walkValue returns a value (whether to
+    // stop is read from the sink).
     const mark = sink.pathLen();
     inline for (comptime walkedFields(T)) |i| {
         const name = info.field_names[i];
@@ -622,17 +636,16 @@ fn walkStruct(comptime T: type, value: *const T, sink: anytype) ErrorOf(@TypeOf(
         // neither coerces to `*const F`, so such a field is walked as a copy,
         // which takes the whole field onto the stack.
         const by_copy = comptime (info.layout == .@"packed" or (attrs.@"align" != null and attrs.@"align".? < @alignOf(F)));
-        const stop = if (by_copy) blk: {
+        if (by_copy) {
             const copy: F = @field(value.*, name);
-            break :blk try walkValue(F, &copy, rules, sink);
+            try walkValue(F, &copy, rules, sink);
         } else try walkValue(F, &@field(value.*, name), rules, sink);
-        if (stop) return true;
+        if (sink.stopped()) return;
     }
     // validateSelf runs only when nothing in this struct's subtree failed.
     if (@hasDecl(T, "validateSelf") and sink.count() == before) {
         if (T.validateSelf(value)) |violation| return reportSelf(T, violation, sink);
     }
-    return false;
 }
 
 /// Checks a `validateSelf` result at run time, because a hand-built result
@@ -643,7 +656,7 @@ fn walkStruct(comptime T: type, value: *const T, sink: anytype) ErrorOf(@TypeOf(
 /// the caller's memory. A malformed result is a programmer error: Debug
 /// builds panic; other modes report `validation.invalid` / "is invalid" at
 /// the struct's path, so the value is rejected, not accepted.
-fn reportSelf(comptime T: type, violation: Violation, sink: anytype) ErrorOf(@TypeOf(sink))!bool {
+fn reportSelf(comptime T: type, violation: Violation, sink: anytype) ErrorOf(@TypeOf(sink))!void {
     if (core.codeProblem(violation.code) != null) {
         if (builtin.mode == .debug)
             std.debug.panic("validator: {s}.validateSelf returned a malformed violation: code \"{f}\" is not a valid custom code", .{ @typeName(T), std.zig.fmtString(violation.code) });
