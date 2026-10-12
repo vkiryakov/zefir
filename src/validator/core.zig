@@ -1715,8 +1715,6 @@ pub const pending_kinds = [_]Kind{
     .btc_address,
     .ethereum_address,
     // encodings and other formats
-    .json,
-    .jwt,
     .data_uri,
     .magnet_uri,
     .mime_type,

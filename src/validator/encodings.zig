@@ -9,6 +9,69 @@ const std = @import("std");
 const core = @import("core.zig");
 const Rule = core.Rule;
 
+// ------------------------------------------------------------------ json, jwt
+
+/// RFC 8259 JSON text whose top-level value is an object or an array (as
+/// validator.js has it by default: `1`, `"text"`, `true` and `null` fail),
+/// nested at most `v.max_json_depth` (64) levels of `[` and `{`, the top
+/// level included: `[]` is 1 level. `std.json.Scanner` decides the grammar:
+/// strings are valid UTF-8 with escaped control characters and paired
+/// `\u` surrogates; whitespace is space, tab, LF and CR only; no BOM; only
+/// whitespace after the value. Numbers are checked by their syntax alone
+/// (`1e400` passes) and duplicate keys pass. Invalid UTF-8 inside a string
+/// fails as `validation.json` too: this is the one rule here that takes
+/// bytes above 0x7f, inside strings only. The nesting stack lives in a
+/// buffer on the stack: no heap, and a document of any depth is rejected at
+/// level 65 without recursion.
+pub const json: Rule = core.predicateRule(.json, "must be a valid JSON object or array", isJson);
+
+/// Bytes of the scanner's nesting stack: what `std.json.Scanner` asks its
+/// allocator for when it reserves `max_json_depth + 1` levels (one bit per
+/// level, rounded up to bytes and grown as std grows every list): 141 on
+/// x86_64 and aarch64.
+const json_stack_bytes = std.array_list.Aligned(u8, null).growCapacity((core.max_json_depth + 1 + 7) / 8);
+
+/// Whether `v.json` passes `s`.
+pub fn isJson(s: []const u8) bool {
+    var buf: [json_stack_bytes]u8 = undefined;
+    var fba: std.heap.FixedBufferAllocator = .init(&buf);
+    var scanner: std.json.Scanner = .initCompleteInput(fba.allocator(), s);
+    // The scanner's only allocation, which fills `buf` exactly (tested
+    // below); if a release of std grew differently, every input would fail.
+    scanner.ensureTotalStackCapacity(core.max_json_depth + 1) catch return false;
+    var first = true;
+    while (true) {
+        const token = scanner.next() catch return false;
+        switch (token) {
+            // The scanner pushes a level before it returns its token, so
+            // level 65 is seen here and rejected: the stack never grows.
+            .object_begin, .array_begin => if (scanner.stackHeight() > core.max_json_depth) return false,
+            .end_of_document => return true,
+            // A top-level number, string, true, false or null.
+            else => if (first) return false,
+        }
+        first = false;
+    }
+}
+
+/// The shape of a JWT in JWS Compact Serialization (RFC 7515 §7.1, RFC
+/// 7519): exactly three segments separated by `.`, each canonical base64url
+/// without padding (`v.isBase64Url`), the header and the payload not empty.
+/// An empty signature passes: an Unsecured JWT (RFC 7519 §6). Only the shape
+/// is checked; nothing is decoded, and the claims and the signature are the
+/// application's to verify. `Bearer <token>` and a JWE (5 segments) fail.
+pub const jwt: Rule = core.predicateRule(.jwt, "must be a valid JWT", isJwt);
+
+/// Whether `v.jwt` passes `s`.
+pub fn isJwt(s: []const u8) bool {
+    var segments = std.mem.splitScalar(u8, s, '.');
+    const header = segments.first();
+    const payload = segments.next() orelse return false;
+    const signature = segments.next() orelse return false;
+    if (segments.next() != null) return false;
+    return header.len > 0 and payload.len > 0 and isBase64Url(header) and isBase64Url(payload) and isBase64Url(signature);
+}
+
 // ------------------------------------------------------------------ base64, base64Url
 
 /// RFC 4648 §4 base64 with padding, in its canonical form: the length is a
@@ -154,10 +217,10 @@ fn fieldText(comptime rule: Rule, comptime T: type) ?[]const u8 {
 
 test "the encoding rules are values with their documented codes and messages, without parameters or precondition" {
     const t = std.testing;
-    const rules = .{ base64, base64Url, base32, base58 };
-    const kinds = [_]core.Kind{ .base64, .base64_url, .base32, .base58 };
-    const codes = [_][]const u8{ "validation.base64", "validation.base64_url", "validation.base32", "validation.base58" };
-    const messages = [_][]const u8{ "must be valid base64", "must be valid base64url", "must be valid base32", "must be valid base58" };
+    const rules = .{ json, jwt, base64, base64Url, base32, base58 };
+    const kinds = [_]core.Kind{ .json, .jwt, .base64, .base64_url, .base32, .base58 };
+    const codes = [_][]const u8{ "validation.json", "validation.jwt", "validation.base64", "validation.base64_url", "validation.base32", "validation.base58" };
+    const messages = [_][]const u8{ "must be a valid JSON object or array", "must be a valid JWT", "must be valid base64", "must be valid base64url", "must be valid base32", "must be valid base58" };
     inline for (rules, kinds, codes, messages) |rule, kind, code, message| {
         try t.expectEqual(kind, rule.kind);
         try t.expectEqualStrings(code, rule.code);
@@ -171,6 +234,10 @@ test "the encoding rules are values with their documented codes and messages, wi
 test "a rule of this file takes strings; [N]u8 and lists of strings get their hints, other types none" {
     const expect = std.testing.expectEqualStrings;
     const head = "validator: Dto.field_rules.x: ";
+    try expect(head ++ "json expects a string, field is u32", comptime fieldText(json, u32).?);
+    try expect(head ++ "json expects a string, field is [64]u8; [N]u8 is an array of numbers, not a string: use []const u8", comptime fieldText(json, [64]u8).?);
+    try expect(head ++ "json expects a string, field is []const []const u8; use v.each(v.json)", comptime fieldText(json, []const []const u8).?);
+    try expect(head ++ "jwt expects a string, field is u64", comptime fieldText(jwt, u64).?);
     try expect(head ++ "base64 expects a string, field is u32", comptime fieldText(base64, u32).?);
     try expect(head ++ "base64_url expects a string, field is [64]u8; [N]u8 is an array of numbers, not a string: use []const u8", comptime fieldText(base64Url, [64]u8).?);
     try expect(head ++ "base32 expects a string, field is [4:0]u8; [N]u8 is an array of numbers, not a string: use []const u8", comptime fieldText(base32, [4:0]u8).?);
@@ -234,4 +301,118 @@ test "base58 accepts the Bitcoin alphabet only, without 0, O, I and l" {
     const t = std.testing;
     for ([_][]const u8{ "", "1", "111", "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa", "z", "9" }) |s| try t.expect(isBase58(s));
     for ([_][]const u8{ "0", "O", "I", "l", "1 1", "+", "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa\n", "\xc3\xa9" }) |s| try t.expect(!isBase58(s));
+}
+
+test "json: the scanner's one reservation fills the stack buffer exactly, and a byte less fails" {
+    const t = std.testing;
+    // 65 bits need 9 bytes; std grows that to 9 + 9 / 2 + cache_line.
+    try t.expectEqual(9 + 4 + std.atomic.cache_line, json_stack_bytes);
+    switch (@import("builtin").cpu.arch) {
+        .x86_64, .aarch64 => try t.expectEqual(141, json_stack_bytes),
+        else => {},
+    }
+    var deep: [2 * core.max_json_depth]u8 = undefined;
+    @memset(deep[0..core.max_json_depth], '[');
+    @memset(deep[core.max_json_depth..], ']');
+    var buf: [json_stack_bytes]u8 = undefined;
+    var fba: std.heap.FixedBufferAllocator = .init(&buf);
+    var scanner: std.json.Scanner = .initCompleteInput(fba.allocator(), &deep);
+    try scanner.ensureTotalStackCapacity(core.max_json_depth + 1);
+    try t.expectEqual(json_stack_bytes, fba.end_index);
+    while (try scanner.next() != .end_of_document) {}
+    // No second allocation on the deepest document that passes.
+    try t.expectEqual(json_stack_bytes, fba.end_index);
+    var small: [json_stack_bytes - 1]u8 = undefined;
+    var fba_small: std.heap.FixedBufferAllocator = .init(&small);
+    var short: std.json.Scanner = .initCompleteInput(fba_small.allocator(), "{}");
+    try t.expectError(error.OutOfMemory, short.ensureTotalStackCapacity(core.max_json_depth + 1));
+}
+
+test "json passes an object or an array at the top level, with whitespace around it" {
+    const t = std.testing;
+    for ([_][]const u8{
+        "{}",                "[]",                               " [1] ",                "\t\r\n{\"a\":1}\n",
+        "{\"a\":1,\"a\":2}", "[1e400,-0.0e+0]",                  "[\"\\uD83D\\uDE00\"]", "[\"\\ud83d\\ude00\"]",
+        "[\"\x7f\"]",        "[\"\u{2028}\"]",                   "[\"caf\xc3\xa9\"]",    "{\"a\":[true,false,null,\"x\"]}",
+        "[[],{}]",           "[\"\\\"\\\\\\/\\b\\f\\n\\r\\t\"]",
+    }) |s| {
+        t.expect(isJson(s)) catch |err| {
+            std.debug.print("isJson rejected \"{f}\"\n", .{std.zig.fmtString(s)});
+            return err;
+        };
+    }
+}
+
+test "json fails top-level scalars, broken syntax, invalid UTF-8 and lone surrogates" {
+    const t = std.testing;
+    for ([_][]const u8{
+        "",               " ",             "1",                    "\"str\"",
+        "true",           "null",          "{\"a\":1,}",           "{'a':1}",
+        "[01]",           "[NaN]",         "[1] [2]",              "\xef\xbb\xbf[]",
+        "[\"\\ud800\"]",  "[\"\\udc00\"]", "[\"\\ud800\\u0041\"]", "[\"\xed\xa0\x80\"]",
+        "[\"\xc0\xaf\"]", "[\"\xff\"]",    "{\"a\":1}\x00",        "[\xc3\xa9]",
+        "[\"a\nb\"]",     "[\"\x01\"]",    "[1,]",                 "{\"a\"}",
+        "[",              "]",             "{\"a\":1",             "[\"\\x41\"]",
+        "\x0b[]",         "\x0c[]",        "[] \xc2\xa0",          "[.5]",
+    }) |s| {
+        t.expect(!isJson(s)) catch |err| {
+            std.debug.print("isJson accepted \"{f}\"\n", .{std.zig.fmtString(s)});
+            return err;
+        };
+    }
+}
+
+test "json counts nesting across arrays and objects: 64 levels pass, 65 fail, 100000 fail without the heap" {
+    const t = std.testing;
+    const depth = core.max_json_depth;
+    var arrays: [2 * (depth + 1)]u8 = undefined;
+    @memset(arrays[0..depth], '[');
+    @memset(arrays[depth .. 2 * depth], ']');
+    try t.expect(isJson(arrays[0 .. 2 * depth]));
+    @memset(arrays[0 .. depth + 1], '[');
+    @memset(arrays[depth + 1 ..], ']');
+    try t.expect(!isJson(&arrays));
+    // 65 unclosed levels fail at level 65, before the end of the input.
+    try t.expect(!isJson(arrays[0 .. depth + 1]));
+    // {"a":[ 32 times is 64 levels; 33 times is 66.
+    const open = "{\"a\":[";
+    const close = "]}";
+    var mixed: [33 * (open.len + close.len)]u8 = undefined;
+    for (0..2) |extra| {
+        const n = 32 + extra;
+        var len: usize = 0;
+        for (0..n) |_| {
+            @memcpy(mixed[len..][0..open.len], open);
+            len += open.len;
+        }
+        for (0..n) |_| {
+            @memcpy(mixed[len..][0..close.len], close);
+            len += close.len;
+        }
+        try t.expectEqual(extra == 0, isJson(mixed[0..len]));
+    }
+    var huge: [100_000]u8 = @splat('[');
+    try t.expect(!isJson(&huge));
+}
+
+test "jwt passes three canonical base64url segments with a header and a payload" {
+    const t = std.testing;
+    for ([_][]const u8{
+        // The example of RFC 7519 §3.1.
+        "eyJ0eXAiOiJKV1QiLA0KICJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJqb2UiLA0KICJleHAiOjEzMDA4MTkzODAsDQogImh0dHA6Ly9leGFtcGxlLmNvbS9pc19yb290Ijp0cnVlfQ.dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+        // An Unsecured JWT: the signature is empty.
+        "eyJhbGciOiJub25lIn0.eyJzdWIiOiIxIn0.",
+        // Nothing is decoded: {} as header and payload is a shape like any other.
+        "e30.e30.e30",
+    }) |s| try t.expect(isJwt(s));
+    for ([_][]const u8{
+        "",          "..",          ".e30.",              "e30..",           "e30.e30",
+        "e30",       "a.b.c",       "e30.e31.e30",        "e30.e30.e30.e30", "e30.e30.e30.e30.e30",
+        "e30=.e30.", "e30.e+0.e30", "Bearer e30.e30.e30", "e30.e30.e30 ",    "e30.e30.e30\n",
+    }) |s| {
+        t.expect(!isJwt(s)) catch |err| {
+            std.debug.print("isJwt accepted \"{f}\"\n", .{std.zig.fmtString(s)});
+            return err;
+        };
+    }
 }

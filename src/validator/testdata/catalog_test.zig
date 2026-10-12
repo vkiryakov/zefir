@@ -218,6 +218,22 @@ test "finite is a rule value with code validation.finite and message \"must be a
     try expectNoViolation(f64, v.finite, 0);
 }
 
+test "json is a rule value with code validation.json and message \"must be a valid JSON object or array\"" {
+    try testing.expect(@hasDecl(v, "json"));
+    try testing.expect(@TypeOf(v.json) == v.Rule);
+    try expectRule(v.json, "validation.json", "must be a valid JSON object or array", "must be a valid JSON object or array");
+    try expectViolation([]const u8, v.json, "1", "validation.json", "must be a valid JSON object or array", "x");
+    try expectNoViolation([]const u8, v.json, "{\"a\":[1]}");
+}
+
+test "jwt is a rule value with code validation.jwt and message \"must be a valid JWT\"" {
+    try testing.expect(@hasDecl(v, "jwt"));
+    try testing.expect(@TypeOf(v.jwt) == v.Rule);
+    try expectRule(v.jwt, "validation.jwt", "must be a valid JWT", "must be a valid JWT");
+    try expectViolation([]const u8, v.jwt, "e30.e30", "validation.jwt", "must be a valid JWT", "x");
+    try expectNoViolation([]const u8, v.jwt, "e30.e30.e30");
+}
+
 test "base32 is a rule value with code validation.base32 and message \"must be valid base32\"" {
     try testing.expect(@hasDecl(v, "base32"));
     try testing.expect(@TypeOf(v.base32) == v.Rule);
@@ -414,15 +430,15 @@ test "finite has no precondition: nan, inf and -inf on a float field fail its ow
     }
 }
 
-test "the module exports exactly its 37 public names, and Rule.withMessage" {
-    const names = [_][]const u8{ "Violation", "Rule", "Report", "max_code_bytes", "max_message_bytes", "max_report_violations", "check", "checkAll", "assertRules", "fail", "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "base32", "isBase32", "base58", "isBase58", "base64", "isBase64", "base64Url", "isBase64Url", "minItems", "maxItems", "each", "custom" };
+test "the module exports exactly its 42 public names, and Rule.withMessage" {
+    const names = [_][]const u8{ "Violation", "Rule", "Report", "max_code_bytes", "max_message_bytes", "max_report_violations", "max_json_depth", "check", "checkAll", "assertRules", "fail", "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "json", "isJson", "jwt", "isJwt", "base32", "isBase32", "base58", "isBase58", "base64", "isBase64", "base64Url", "isBase64Url", "minItems", "maxItems", "each", "custom" };
     inline for (names) |name| try testing.expect(@hasDecl(v, name));
     try testing.expectEqual(names.len, comptime std.meta.declarations(v).len);
     try testing.expect(@hasDecl(v.Rule, "withMessage"));
 }
 
 test "every rule the module exports has a catalog test" {
-    const tested = [_][]const u8{ "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "base32", "base58", "base64", "base64Url", "minItems", "maxItems", "each", "custom" };
+    const tested = [_][]const u8{ "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "json", "jwt", "base32", "base58", "base64", "base64Url", "minItems", "maxItems", "each", "custom" };
     inline for (comptime std.meta.declarations(v)) |name| {
         const T = @TypeOf(@field(v, name));
         if (comptime T == v.Rule or (@typeInfo(T) == .@"fn" and @typeInfo(T).@"fn".return_type == v.Rule)) {
@@ -438,7 +454,7 @@ test "every rule the module exports has a catalog test" {
 }
 
 test "the module exports exactly the catalog predicates of the shipped rules" {
-    const predicates = [_][]const u8{ "isBase32", "isBase58", "isBase64", "isBase64Url" };
+    const predicates = [_][]const u8{ "isJson", "isJwt", "isBase32", "isBase58", "isBase64", "isBase64Url" };
     comptime var exported: usize = 0;
     inline for (comptime std.meta.declarations(v)) |name| {
         if (comptime name.len > 2 and std.mem.startsWith(u8, name, "is") and std.ascii.isUpper(name[2])) {
@@ -462,4 +478,6 @@ test "the limits have their catalog values" {
     try testing.expectEqual(512, v.max_message_bytes);
     try testing.expect(@TypeOf(v.max_report_violations) == comptime_int);
     try testing.expectEqual(100, v.max_report_violations);
+    try testing.expect(@TypeOf(v.max_json_depth) == comptime_int);
+    try testing.expectEqual(64, v.max_json_depth);
 }

@@ -21,6 +21,8 @@ const Case = struct {
 };
 
 const cases = [_]Case{
+    .{ .predicate_name = "isJson", .rule = v.json, .predicate = v.isJson, .code = "validation.json", .message = "must be a valid JSON object or array", .good = "{\"a\":[1,2]}", .bad = "{\"a\":[1,2]" },
+    .{ .predicate_name = "isJwt", .rule = v.jwt, .predicate = v.isJwt, .code = "validation.jwt", .message = "must be a valid JWT", .good = "e30.e30.", .bad = "e30.e30" },
     .{ .predicate_name = "isBase32", .rule = v.base32, .predicate = v.isBase32, .code = "validation.base32", .message = "must be valid base32", .good = "MZXW6===", .bad = "MZXW6YTBOI" },
     .{ .predicate_name = "isBase58", .rule = v.base58, .predicate = v.isBase58, .code = "validation.base58", .message = "must be valid base58", .good = "3yZe7d", .bad = "3yZe7O" },
     .{ .predicate_name = "isBase64", .rule = v.base64, .predicate = v.isBase64, .code = "validation.base64", .message = "must be valid base64", .good = "Zm9vYg==", .bad = "Zm9vYh==" },
@@ -64,6 +66,12 @@ test "the empty string passes the pure encodings: pair them with notEmpty to req
     }
 }
 
+test "the empty string fails every other rule of this group with the rule's own code" {
+    inline for (cases) |c| {
+        if (!c.predicate("")) try h.expectFail([]const u8, c.rule, "", c.code, c.message);
+    }
+}
+
 /// Bytes that the formats of this group give a meaning to, so that random
 /// strings reach past the first byte of each parser.
 const alphabet = "AZaz09+/-_=.:;,%#@!$&'()*?[]{}\"\\ \t\r\n\x0b\x0c\x00\x7f\x80\xc3\xa9\xff2367LOIl" ++
@@ -96,6 +104,35 @@ test "every predicate takes any bytes without a panic, and its rule agrees with 
                 return error.RuleDisagrees;
             }
         }
+    }
+}
+
+test "json takes nested documents of random brackets without a panic and never accepts more than 64 levels" {
+    var prng: std.Random.DefaultPrng = .init(0x7a5_0b1e);
+    const random = prng.random();
+    const tokens = "[]{}[]{}\":,1 ";
+    var buf: [200]u8 = undefined;
+    for (0..20_000) |_| {
+        const len = random.uintLessThan(usize, buf.len + 1);
+        for (buf[0..len]) |*c| c.* = tokens[random.uintLessThan(usize, tokens.len)];
+        const s = buf[0..len];
+        if (!v.isJson(s)) continue;
+        // An accepted document never nests deeper than the limit.
+        var depth: usize = 0;
+        var deepest: usize = 0;
+        var in_string = false;
+        for (s) |c| switch (c) {
+            '"' => in_string = !in_string,
+            '[', '{' => if (!in_string) {
+                depth += 1;
+                deepest = @max(deepest, depth);
+            },
+            ']', '}' => if (!in_string) {
+                depth -= 1;
+            },
+            else => {},
+        };
+        try testing.expect(deepest >= 1 and deepest <= v.max_json_depth);
     }
 }
 

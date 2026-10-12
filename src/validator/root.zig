@@ -47,6 +47,7 @@ pub const Report = walk.Report;
 pub const max_code_bytes = core.max_code_bytes;
 pub const max_message_bytes = core.max_message_bytes;
 pub const max_report_violations = core.max_report_violations;
+pub const max_json_depth = core.max_json_depth;
 
 pub const check = walk.check;
 pub const checkAll = walk.checkAll;
@@ -68,6 +69,10 @@ pub const negative = numbers.negative;
 pub const nonPositive = numbers.nonPositive;
 pub const divisibleBy = numbers.divisibleBy;
 pub const finite = numbers.finite;
+pub const json = encodings.json;
+pub const isJson = encodings.isJson;
+pub const jwt = encodings.jwt;
+pub const isJwt = encodings.isJwt;
 pub const base32 = encodings.base32;
 pub const isBase32 = encodings.isBase32;
 pub const base58 = encodings.base58;
@@ -95,10 +100,12 @@ test "limits have their documented values" {
     try std.testing.expectEqual(128, max_code_bytes);
     try std.testing.expectEqual(512, max_message_bytes);
     try std.testing.expectEqual(100, max_report_violations);
+    try std.testing.expectEqual(64, max_json_depth);
     // comptime_int, so a limit sizes an array or compares with any integer type.
     try std.testing.expect(@TypeOf(max_code_bytes) == comptime_int);
     try std.testing.expect(@TypeOf(max_message_bytes) == comptime_int);
     try std.testing.expect(@TypeOf(max_report_violations) == comptime_int);
+    try std.testing.expect(@TypeOf(max_json_depth) == comptime_int);
 }
 
 test "a violation has no field unless one is given" {
