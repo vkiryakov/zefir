@@ -718,6 +718,15 @@ pub const hints = struct {
     pub const wrap_predicate = "wrap a predicate in v.custom(code, message, f)";
     /// `v.custom` on a list whose items its predicate would take.
     pub const use_each_custom = "use v.each(v.custom(...))";
+    /// A rule on a slice that `isString` and `isListSlice` reject only for
+    /// its attributes, when the rule would take the plain slice.
+    pub const odd_slice = "volatile, allowzero and under-aligned slices are neither strings nor lists";
+    /// A tuple inside the tuple of rules.
+    pub const nested_tuple = "tuples are not flattened: join them with ++, e.g. name_rules ++ .{ v.notEmpty }, or use the tuple as the whole entry";
+    /// `&.{ ... }` where a rule or a tuple of rules belongs.
+    pub const tuple_pointer = "drop the &: write .{ ... }, not &.{ ... }";
+    /// The rules of a struct field's own fields written as a struct literal.
+    pub const struct_literal = "the rules of a nested struct's fields go into that struct's own field_rules";
 
     /// A rule written on a list whose items it would accept.
     pub fn useEach(comptime rule: Rule) []const u8 {
@@ -893,10 +902,12 @@ fn isPending(comptime name: []const u8) bool {
 /// `T`: `validator: <where>: <kind> expects <expects>, field is <T>`, then
 /// one hint after `; `. `accepts` tells which unwrapped types the rule takes
 /// and picks the hint: the `[N]u8` hint when the rule would take a string,
-/// `use v.each(v.<call>)` when it would take the list's unwrapped items,
-/// else `hint`. A string is a slice of bytes but rules treat it as one
-/// value, so when a rule that takes lists (its `accepts` takes `[]const u32`)
-/// rejects a string and no hint follows, ` (a string)` follows the type.
+/// `use v.each(v.<call>)` when it would take the list's unwrapped items, the
+/// `volatile`/`allowzero`/alignment hint when it would take the slice as a
+/// plain `[]const T`, else `hint`. A string is a slice of bytes but rules
+/// treat it as one value, so when a rule that takes lists (its `accepts`
+/// takes `[]const u32`) rejects a string and no hint follows, ` (a string)`
+/// follows the type.
 pub fn typeError(comptime rule: *const Rule, comptime T: type, comptime where: []const u8, comptime expects: []const u8, comptime accepts: fn (comptime type) bool, comptime hint: ?[]const u8) noreturn {
     @compileError(typeErrorText(rule, T, where, expects, accepts, hint));
 }
@@ -909,10 +920,21 @@ fn typeErrorText(comptime rule: *const Rule, comptime T: type, comptime where: [
         extra = hints.u8_array;
     } else if (ListChild(T)) |Item| {
         if (accepts(Unwrap(Item))) extra = hints.useEach(rule.*);
+    } else if (plainSlice(T)) |Plain| {
+        if (accepts(Plain)) extra = hints.odd_slice;
     }
     const note = if (extra == null and isString(T) and accepts([]const u32)) " (a string)" else "";
     return "validator: " ++ where ++ ": " ++ @tagName(rule.kind) ++ " expects " ++ expects ++ ", field is " ++ @typeName(T) ++ note ++
         (if (extra) |h| "; " ++ h else "");
+}
+
+/// `[]const T` for a slice of `T` that its `volatile`, `allowzero` or
+/// alignment keeps from being a string or a list, else null.
+fn plainSlice(comptime T: type) ?type {
+    return switch (@typeInfo(T)) {
+        .pointer => |p| if (p.size == .slice and !isString(T) and !isListSlice(T)) []const p.child else null,
+        else => null,
+    };
 }
 
 /// A declaration error about one rule: `validator: <where>: <label><text>`.
@@ -946,12 +968,15 @@ pub fn toRules(comptime value: anytype, comptime where: []const u8) []const Rule
     notARule(value, where, "expected a rule or a tuple of rules, got ");
 }
 
-/// Raises the error for a value that is not a rule. A function that
-/// `root.zig` exports is named, without the tuple item prefix: a built-in
-/// predicate gets the rule to use instead, a rule constructor (a function
-/// that returns a `Rule`) the call it needs. Any other function, `v.check`
-/// and the other entry points included, gets the hint to wrap it in
-/// `v.custom`.
+/// Raises the error for a value that is not a rule. A built-in predicate or
+/// rule constructor (a function that returns a `Rule`) that `root.zig`
+/// exports is named, without the tuple item prefix: a predicate gets the
+/// rule to use instead, a constructor the call it needs. Any other function,
+/// `v.check` and the other entry points included, gets the prefixed text with
+/// the hint to wrap it in `v.custom`. A tuple, a pointer to a tuple and a
+/// struct literal are named by what they are, with a hint, since their type
+/// names are long or generated; any other value is named by its type
+/// (`core.Rule` for a rule of another copy of the package).
 fn notARule(comptime value: anytype, comptime where: []const u8, comptime prefix: []const u8) noreturn {
     const V = @TypeOf(value);
     if (@typeInfo(V) == .@"fn") {
@@ -963,7 +988,31 @@ fn notARule(comptime value: anytype, comptime where: []const u8, comptime prefix
         }
         @compileError("validator: " ++ where ++ ": " ++ prefix ++ @typeName(V) ++ "; " ++ hints.wrap_predicate);
     }
+    if (isTuple(V)) @compileError("validator: " ++ where ++ ": " ++ prefix ++ "a tuple; " ++ hints.nested_tuple);
+    if (@typeInfo(V) == .pointer and @typeInfo(V).pointer.size == .one and isTuple(@typeInfo(V).pointer.child))
+        @compileError("validator: " ++ where ++ ": " ++ prefix ++ "a pointer to a tuple; " ++ hints.tuple_pointer);
+    if (isAnonymous(V)) @compileError("validator: " ++ where ++ ": " ++ prefix ++ "a struct literal; " ++ hints.struct_literal);
     @compileError("validator: " ++ where ++ ": " ++ prefix ++ @typeName(V));
+}
+
+fn isTuple(comptime T: type) bool {
+    return @typeInfo(T) == .@"struct" and @typeInfo(T).@"struct".is_tuple;
+}
+
+/// A struct declared in place, such as the type of a struct literal
+/// (`.{ .city = v.notEmpty }`), which Zig names after its parent with a
+/// generated suffix: `users.Request.field_rules__struct_1234`. walk.zig's
+/// `isAnonymous` makes the same test; the suffix is a convention of the
+/// compiler, and the fixture `entry_struct_literal` fails if it changes.
+pub fn isAnonymous(comptime T: type) bool {
+    const name = @typeName(T);
+    const at = std.mem.findLast(u8, name, "__struct_") orelse return false;
+    const digits = name[at + "__struct_".len ..];
+    if (digits.len == 0) return false;
+    for (digits) |c| {
+        if (!std.ascii.isDigit(c)) return false;
+    }
+    return true;
 }
 
 /// The rule of a built-in predicate (`isDate` -> `date`, `isBase64Url` ->
@@ -1157,7 +1206,7 @@ test "a slice aligned below the alignment of its items is not a list" {
     }
     const where = "Dto.field_rules.x";
     try std.testing.expectEqualStrings(
-        "validator: Dto.field_rules.x: each expects a slice or an array, field is []align(1) const u32",
+        "validator: Dto.field_rules.x: each expects a slice or an array, field is []align(1) const u32; volatile, allowzero and under-aligned slices are neither strings nor lists",
         comptime typeErrorText(&test_rules.each_positive, []align(1) const u32, where, "a slice or an array", test_rules.acceptsList, null),
     );
     try std.testing.expectEqualStrings(
@@ -1235,21 +1284,22 @@ test "a type error names the rule and the field type, then the one hint that app
         "validator: Dto.field_rules.x: email expects a string, field is [4]u8; [N]u8 is an array of numbers, not a string: use []const u8",
         comptime typeErrorText(&r.email, [4]u8, where, "a string", isString, null),
     );
-    // volatile and allowzero slices are neither strings nor lists.
+    // volatile and allowzero slices are neither strings nor lists, and the hint
+    // says so when the rule would take the plain slice.
     try expect(
-        "validator: Dto.field_rules.x: email expects a string, field is []volatile u8",
+        "validator: Dto.field_rules.x: email expects a string, field is []volatile u8; volatile, allowzero and under-aligned slices are neither strings nor lists",
         comptime typeErrorText(&r.email, []volatile u8, where, "a string", isString, null),
     );
     try expect(
-        "validator: Dto.field_rules.x: email expects a string, field is []allowzero const u8",
+        "validator: Dto.field_rules.x: email expects a string, field is []allowzero const u8; volatile, allowzero and under-aligned slices are neither strings nor lists",
         comptime typeErrorText(&r.email, []allowzero const u8, where, "a string", isString, null),
     );
     try expect(
-        "validator: Dto.field_rules.x: not_empty expects a string or a slice, field is []volatile u8",
+        "validator: Dto.field_rules.x: not_empty expects a string or a slice, field is []volatile u8; volatile, allowzero and under-aligned slices are neither strings nor lists",
         comptime typeErrorText(&r.not_empty, []volatile u8, where, "a string or a slice", r.acceptsStringOrSlice, null),
     );
     try expect(
-        "validator: Dto.field_rules.x: each expects a slice or an array, field is []volatile u32",
+        "validator: Dto.field_rules.x: each expects a slice or an array, field is []volatile u32; volatile, allowzero and under-aligned slices are neither strings nor lists",
         comptime typeErrorText(&r.each_positive, []volatile u32, where, "a slice or an array", r.acceptsList, null),
     );
 }
