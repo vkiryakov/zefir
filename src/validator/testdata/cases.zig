@@ -31,6 +31,7 @@ pub const test_files = [_][]const u8{
     "src/validator/testdata/numbers_test.zig",
     "src/validator/testdata/lists_test.zig",
     "src/validator/testdata/custom_test.zig",
+    "src/validator/testdata/field_types_test.zig",
     "src/validator/testdata/messages_test.zig",
     "src/validator/testdata/catalog_test.zig",
 };
@@ -60,9 +61,9 @@ pub const VectorFile = struct { name: []const u8, rules: []const []const u8 };
 
 /// The golden-vector files, one per documentation page.
 pub const vector_files = [_]VectorFile{
-    .{ .name = "common", .rules = &.{"notEmpty"} },
-    .{ .name = "numbers", .rules = &.{"positive"} },
-    .{ .name = "lists", .rules = &.{ "each", "custom" } },
+    .{ .name = "common", .rules = &.{ "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty" } },
+    .{ .name = "numbers", .rules = &.{ "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite" } },
+    .{ .name = "lists", .rules = &.{ "minItems", "maxItems", "each", "custom" } },
 };
 
 /// A compiled example of src/validator/examples/, by file stem: a program

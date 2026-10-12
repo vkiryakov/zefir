@@ -1,11 +1,13 @@
 //! Catalog conformance of the shipped rules: each rule is exported under its
 //! catalog name in its catalog form (a rule value or a constructor) with the
-//! catalog code and default message, a rule with a precondition reports the
-//! catalog precondition code and message, every rule the module exports has
-//! a test here, the module exports exactly the catalog predicates of the
-//! shipped rules, and the limits have their catalog values.
-//! Placeholders are not checked here yet: messages_test.zig checks them
-//! through `withMessage`.
+//! catalog code and every variant of its catalog default message, which is
+//! also what the catalog's text of the message gives through `withMessage`;
+//! each placeholder shows its parameter through `withMessage`; a rule with a
+//! precondition reports the catalog precondition code and message on every
+//! field type it applies to, also under `withMessage`; the module exports
+//! exactly its public names and the catalog predicates of the shipped rules,
+//! and every rule it exports has a test here; and the limits have their
+//! catalog values.
 //!
 //! In the repository, this file is the source of truth for the contract of
 //! the shipped rules. It is generated from the rule catalog, which the
@@ -46,69 +48,84 @@ fn expectNoViolation(comptime T: type, comptime rules: anytype, value: T) !void 
     }
 }
 
+/// `rule` has this code and default message, and the catalog's `template` of
+/// the message gives the same text through `withMessage`: the default message
+/// is the template with the rule's placeholders filled in.
+fn expectRule(comptime rule: v.Rule, code: []const u8, message: []const u8, comptime template: []const u8) !void {
+    try testing.expectEqualStrings(code, rule.code);
+    try testing.expectEqualStrings(message, rule.message);
+    try testing.expectEqualStrings(message, rule.withMessage(template).message);
+}
+
+/// The placeholder `{name}` of `rule` shows `text` through `withMessage`.
+fn expectPlaceholder(comptime rule: v.Rule, comptime placeholder: []const u8, text: []const u8) !void {
+    try testing.expectEqualStrings(text, rule.withMessage(placeholder).message);
+}
+
+/// A string parameter whose default message would be longer than 512 bytes.
+const long_string = &@as([600]u8, @splat('x'));
+
+/// Listed values whose default message would be longer than 512 bytes.
+const long_values = .{ &@as([300]u8, @splat('a')), &@as([300]u8, @splat('b')) };
+
 fn isEven(n: u32) bool {
     return n % 2 == 0;
 }
 
-test "equals is a rule constructor with code validation.equals and message \"must be equal to {expected}\", or \"must be equal to the expected value\" when that would be longer than 512 bytes" {
+test "equals is a rule constructor with code validation.equals and message \"must be equal to {expected}\", or \"must be equal to the expected value\" when that would be longer than 512 bytes; placeholder {expected}" {
     try testing.expect(@hasDecl(v, "equals"));
     try testing.expect(@typeInfo(@TypeOf(v.equals)).@"fn".return_type == v.Rule);
-    try testing.expectEqualStrings("validation.equals", v.equals(true).code);
-    try testing.expectEqualStrings("must be equal to true", v.equals(true).message);
-    const long = &@as([600]u8, @splat('x'));
-    try testing.expectEqualStrings("validation.equals", v.equals(long).code);
-    try testing.expectEqualStrings("must be equal to the expected value", v.equals(long).message);
+    try expectRule(v.equals(true), "validation.equals", "must be equal to true", "must be equal to {expected}");
+    try expectPlaceholder(v.equals(true), "{expected}", "true");
     try expectViolation(bool, v.equals(true), false, "validation.equals", "must be equal to true", "x");
-    try expectViolation([]const u8, v.equals(long), "x", "validation.equals", "must be equal to the expected value", "x");
+    try expectRule(v.equals(long_string), "validation.equals", "must be equal to the expected value", "must be equal to the expected value");
+    try expectViolation([]const u8, v.equals(long_string), "x", "validation.equals", "must be equal to the expected value", "x");
     try expectNoViolation(bool, v.equals(true), true);
 }
 
-test "notEquals is a rule constructor with code validation.not_equals and message \"must not be equal to {forbidden}\", or \"must not be equal to the forbidden value\" when that would be longer than 512 bytes" {
+test "notEquals is a rule constructor with code validation.not_equals and message \"must not be equal to {forbidden}\", or \"must not be equal to the forbidden value\" when that would be longer than 512 bytes; placeholder {forbidden}" {
     try testing.expect(@hasDecl(v, "notEquals"));
     try testing.expect(@typeInfo(@TypeOf(v.notEquals)).@"fn".return_type == v.Rule);
-    try testing.expectEqualStrings("validation.not_equals", v.notEquals(0).code);
-    try testing.expectEqualStrings("must not be equal to 0", v.notEquals(0).message);
-    const long = &@as([600]u8, @splat('x'));
-    try testing.expectEqualStrings("validation.not_equals", v.notEquals(long).code);
-    try testing.expectEqualStrings("must not be equal to the forbidden value", v.notEquals(long).message);
+    try expectRule(v.notEquals(0), "validation.not_equals", "must not be equal to 0", "must not be equal to {forbidden}");
+    try expectPlaceholder(v.notEquals(0), "{forbidden}", "0");
     try expectViolation(i32, v.notEquals(0), 0, "validation.not_equals", "must not be equal to 0", "x");
-    try expectViolation([]const u8, v.notEquals(long), long, "validation.not_equals", "must not be equal to the forbidden value", "x");
+    try expectRule(v.notEquals(long_string), "validation.not_equals", "must not be equal to the forbidden value", "must not be equal to the forbidden value");
+    try expectViolation([]const u8, v.notEquals(long_string), long_string, "validation.not_equals", "must not be equal to the forbidden value", "x");
     try expectNoViolation(i32, v.notEquals(0), 1);
 }
 
-test "oneOf is a rule constructor with code validation.one_of and message \"must be one of: {values}\", \"must be {values}\" for one value, or \"must be one of the allowed values\" when that would be longer than 512 bytes" {
+test "oneOf is a rule constructor with code validation.one_of and message \"must be one of: {values}\", \"must be {values}\" for one value, or \"must be one of the allowed values\" when that would be longer than 512 bytes; placeholder {values}" {
     try testing.expect(@hasDecl(v, "oneOf"));
     try testing.expect(@typeInfo(@TypeOf(v.oneOf)).@"fn".return_type == v.Rule);
-    try testing.expectEqualStrings("validation.one_of", v.oneOf(.{ "a", "b" }).code);
-    try testing.expectEqualStrings("must be one of: a, b", v.oneOf(.{ "a", "b" }).message);
-    try testing.expectEqualStrings("must be admin", v.oneOf(.{.admin}).message);
-    const long = .{ &@as([300]u8, @splat('a')), &@as([300]u8, @splat('b')) };
-    try testing.expectEqualStrings("validation.one_of", v.oneOf(long).code);
-    try testing.expectEqualStrings("must be one of the allowed values", v.oneOf(long).message);
+    try expectRule(v.oneOf(.{ "a", "b" }), "validation.one_of", "must be one of: a, b", "must be one of: {values}");
+    try expectPlaceholder(v.oneOf(.{ "a", "b" }), "{values}", "a, b");
     try expectViolation([]const u8, v.oneOf(.{ "a", "b" }), "c", "validation.one_of", "must be one of: a, b", "x");
-    try expectViolation([]const u8, v.oneOf(long), "c", "validation.one_of", "must be one of the allowed values", "x");
+    try expectRule(v.oneOf(.{"a"}), "validation.one_of", "must be a", "must be {values}");
+    try expectPlaceholder(v.oneOf(.{"a"}), "{values}", "a");
+    try expectViolation([]const u8, v.oneOf(.{"a"}), "c", "validation.one_of", "must be a", "x");
+    try expectRule(v.oneOf(long_values), "validation.one_of", "must be one of the allowed values", "must be one of the allowed values");
+    try expectViolation([]const u8, v.oneOf(long_values), "c", "validation.one_of", "must be one of the allowed values", "x");
     try expectNoViolation([]const u8, v.oneOf(.{ "a", "b" }), "b");
 }
 
-test "noneOf is a rule constructor with code validation.none_of and message \"must not be one of: {values}\", \"must not be {values}\" for one value, or \"must not be one of the forbidden values\" when that would be longer than 512 bytes" {
+test "noneOf is a rule constructor with code validation.none_of and message \"must not be one of: {values}\", \"must not be {values}\" for one value, or \"must not be one of the forbidden values\" when that would be longer than 512 bytes; placeholder {values}" {
     try testing.expect(@hasDecl(v, "noneOf"));
     try testing.expect(@typeInfo(@TypeOf(v.noneOf)).@"fn".return_type == v.Rule);
-    try testing.expectEqualStrings("validation.none_of", v.noneOf(.{ "a", "b" }).code);
-    try testing.expectEqualStrings("must not be one of: a, b", v.noneOf(.{ "a", "b" }).message);
-    try testing.expectEqualStrings("must not be admin", v.noneOf(.{.admin}).message);
-    const long = .{ &@as([300]u8, @splat('a')), &@as([300]u8, @splat('b')) };
-    try testing.expectEqualStrings("validation.none_of", v.noneOf(long).code);
-    try testing.expectEqualStrings("must not be one of the forbidden values", v.noneOf(long).message);
-    try expectViolation([]const u8, v.noneOf(.{ "a", "b" }), "a", "validation.none_of", "must not be one of: a, b", "x");
-    try expectViolation([]const u8, v.noneOf(long), long[0], "validation.none_of", "must not be one of the forbidden values", "x");
+    try expectRule(v.noneOf(.{ "a", "b" }), "validation.none_of", "must not be one of: a, b", "must not be one of: {values}");
+    try expectPlaceholder(v.noneOf(.{ "a", "b" }), "{values}", "a, b");
+    try expectViolation([]const u8, v.noneOf(.{ "a", "b" }), "b", "validation.none_of", "must not be one of: a, b", "x");
+    try expectRule(v.noneOf(.{"a"}), "validation.none_of", "must not be a", "must not be {values}");
+    try expectPlaceholder(v.noneOf(.{"a"}), "{values}", "a");
+    try expectViolation([]const u8, v.noneOf(.{"a"}), "a", "validation.none_of", "must not be a", "x");
+    try expectRule(v.noneOf(long_values), "validation.none_of", "must not be one of the forbidden values", "must not be one of the forbidden values");
+    try expectViolation([]const u8, v.noneOf(long_values), long_values[0], "validation.none_of", "must not be one of the forbidden values", "x");
     try expectNoViolation([]const u8, v.noneOf(.{ "a", "b" }), "c");
 }
 
 test "empty is a rule value with code validation.empty and message \"must be empty\"" {
     try testing.expect(@hasDecl(v, "empty"));
     try testing.expect(@TypeOf(v.empty) == v.Rule);
-    try testing.expectEqualStrings("validation.empty", v.empty.code);
-    try testing.expectEqualStrings("must be empty", v.empty.message);
+    try expectRule(v.empty, "validation.empty", "must be empty", "must be empty");
     try expectViolation([]const u8, v.empty, "a", "validation.empty", "must be empty", "x");
     try expectNoViolation([]const u8, v.empty, "");
 }
@@ -116,110 +133,111 @@ test "empty is a rule value with code validation.empty and message \"must be emp
 test "notEmpty is a rule value with code validation.not_empty and message \"must not be empty\"" {
     try testing.expect(@hasDecl(v, "notEmpty"));
     try testing.expect(@TypeOf(v.notEmpty) == v.Rule);
-    try testing.expectEqualStrings("validation.not_empty", v.notEmpty.code);
-    try testing.expectEqualStrings("must not be empty", v.notEmpty.message);
+    try expectRule(v.notEmpty, "validation.not_empty", "must not be empty", "must not be empty");
+    try expectViolation([]const u8, v.notEmpty, "", "validation.not_empty", "must not be empty", "x");
+    try expectNoViolation([]const u8, v.notEmpty, "a");
 }
 
-test "min is a rule constructor with code validation.min and message \"must be at least {min}\"" {
+test "min is a rule constructor with code validation.min and message \"must be at least {min}\"; placeholder {min}" {
     try testing.expect(@hasDecl(v, "min"));
     try testing.expect(@typeInfo(@TypeOf(v.min)).@"fn".return_type == v.Rule);
-    try testing.expectEqualStrings("validation.min", v.min(18).code);
-    try testing.expectEqualStrings("must be at least 18", v.min(18).message);
-    try expectViolation(u8, v.min(18), 17, "validation.min", "must be at least 18", "x");
-    try expectNoViolation(u8, v.min(18), 18);
+    try expectRule(v.min(0), "validation.min", "must be at least 0", "must be at least {min}");
+    try expectPlaceholder(v.min(0), "{min}", "0");
+    try expectViolation(i32, v.min(0), -1, "validation.min", "must be at least 0", "x");
+    try expectNoViolation(i32, v.min(0), 0);
 }
 
-test "max is a rule constructor with code validation.max and message \"must be at most {max}\"" {
+test "max is a rule constructor with code validation.max and message \"must be at most {max}\"; placeholder {max}" {
     try testing.expect(@hasDecl(v, "max"));
     try testing.expect(@typeInfo(@TypeOf(v.max)).@"fn".return_type == v.Rule);
-    try testing.expectEqualStrings("validation.max", v.max(100).code);
-    try testing.expectEqualStrings("must be at most 100", v.max(100).message);
-    try expectViolation(u8, v.max(100), 101, "validation.max", "must be at most 100", "x");
-    try expectNoViolation(u8, v.max(100), 100);
+    try expectRule(v.max(100), "validation.max", "must be at most 100", "must be at most {max}");
+    try expectPlaceholder(v.max(100), "{max}", "100");
+    try expectViolation(i32, v.max(100), 101, "validation.max", "must be at most 100", "x");
+    try expectNoViolation(i32, v.max(100), 100);
 }
 
-test "range is a rule constructor with code validation.range and message \"must be from {min} to {max}\", or \"must be {min}\" when min = max" {
+test "range is a rule constructor with code validation.range and message \"must be from {min} to {max}\", or \"must be {min}\" when min = max; placeholders {min}, {max}" {
     try testing.expect(@hasDecl(v, "range"));
     try testing.expect(@typeInfo(@TypeOf(v.range)).@"fn".return_type == v.Rule);
-    try testing.expectEqualStrings("validation.range", v.range(1, 10).code);
-    try testing.expectEqualStrings("must be from 1 to 10", v.range(1, 10).message);
-    try testing.expectEqualStrings("validation.range", v.range(7, 7).code);
-    try testing.expectEqualStrings("must be 7", v.range(7, 7).message);
-    try expectViolation(i32, v.range(1, 10), 11, "validation.range", "must be from 1 to 10", "x");
-    try expectViolation(i32, v.range(7, 7), 6, "validation.range", "must be 7", "x");
-    try expectNoViolation(i32, v.range(1, 10), 1);
+    try expectRule(v.range(1, 100), "validation.range", "must be from 1 to 100", "must be from {min} to {max}");
+    try expectPlaceholder(v.range(1, 100), "{min}", "1");
+    try expectPlaceholder(v.range(1, 100), "{max}", "100");
+    try expectViolation(i32, v.range(1, 100), 0, "validation.range", "must be from 1 to 100", "x");
+    try expectRule(v.range(1, 1), "validation.range", "must be 1", "must be {min}");
+    try expectPlaceholder(v.range(1, 1), "{min}", "1");
+    try expectViolation(i32, v.range(1, 1), 2, "validation.range", "must be 1", "x");
+    try expectNoViolation(i32, v.range(1, 100), 1);
 }
 
 test "positive is a rule value with code validation.positive and message \"must be greater than 0\"" {
     try testing.expect(@hasDecl(v, "positive"));
     try testing.expect(@TypeOf(v.positive) == v.Rule);
-    try testing.expectEqualStrings("validation.positive", v.positive.code);
-    try testing.expectEqualStrings("must be greater than 0", v.positive.message);
+    try expectRule(v.positive, "validation.positive", "must be greater than 0", "must be greater than 0");
+    try expectViolation(i32, v.positive, 0, "validation.positive", "must be greater than 0", "x");
+    try expectNoViolation(i32, v.positive, 1);
 }
 
 test "nonNegative is a rule value with code validation.non_negative and message \"must not be negative\"" {
     try testing.expect(@hasDecl(v, "nonNegative"));
     try testing.expect(@TypeOf(v.nonNegative) == v.Rule);
-    try testing.expectEqualStrings("validation.non_negative", v.nonNegative.code);
-    try testing.expectEqualStrings("must not be negative", v.nonNegative.message);
+    try expectRule(v.nonNegative, "validation.non_negative", "must not be negative", "must not be negative");
+    try expectViolation(i32, v.nonNegative, -1, "validation.non_negative", "must not be negative", "x");
+    try expectNoViolation(i32, v.nonNegative, 0);
 }
 
 test "negative is a rule value with code validation.negative and message \"must be less than 0\"" {
     try testing.expect(@hasDecl(v, "negative"));
     try testing.expect(@TypeOf(v.negative) == v.Rule);
-    try testing.expectEqualStrings("validation.negative", v.negative.code);
-    try testing.expectEqualStrings("must be less than 0", v.negative.message);
+    try expectRule(v.negative, "validation.negative", "must be less than 0", "must be less than 0");
+    try expectViolation(i32, v.negative, 0, "validation.negative", "must be less than 0", "x");
+    try expectNoViolation(i32, v.negative, -1);
 }
 
 test "nonPositive is a rule value with code validation.non_positive and message \"must not be positive\"" {
     try testing.expect(@hasDecl(v, "nonPositive"));
     try testing.expect(@TypeOf(v.nonPositive) == v.Rule);
-    try testing.expectEqualStrings("validation.non_positive", v.nonPositive.code);
-    try testing.expectEqualStrings("must not be positive", v.nonPositive.message);
+    try expectRule(v.nonPositive, "validation.non_positive", "must not be positive", "must not be positive");
+    try expectViolation(i32, v.nonPositive, 1, "validation.non_positive", "must not be positive", "x");
+    try expectNoViolation(i32, v.nonPositive, 0);
 }
 
-test "divisibleBy is a rule constructor with code validation.divisible_by and message \"must be divisible by {divisor}\"" {
+test "divisibleBy is a rule constructor with code validation.divisible_by and message \"must be divisible by {divisor}\"; placeholder {divisor}" {
     try testing.expect(@hasDecl(v, "divisibleBy"));
     try testing.expect(@typeInfo(@TypeOf(v.divisibleBy)).@"fn".return_type == v.Rule);
-    try testing.expectEqualStrings("validation.divisible_by", v.divisibleBy(5).code);
-    try testing.expectEqualStrings("must be divisible by 5", v.divisibleBy(5).message);
-    try expectViolation(u32, v.divisibleBy(5), 7, "validation.divisible_by", "must be divisible by 5", "x");
-    try expectNoViolation(u32, v.divisibleBy(5), 10);
+    try expectRule(v.divisibleBy(2), "validation.divisible_by", "must be divisible by 2", "must be divisible by {divisor}");
+    try expectPlaceholder(v.divisibleBy(2), "{divisor}", "2");
+    try expectViolation(i32, v.divisibleBy(2), 3, "validation.divisible_by", "must be divisible by 2", "x");
+    try expectNoViolation(i32, v.divisibleBy(2), 4);
 }
 
 test "finite is a rule value with code validation.finite and message \"must be a finite number\"" {
     try testing.expect(@hasDecl(v, "finite"));
     try testing.expect(@TypeOf(v.finite) == v.Rule);
-    try testing.expectEqualStrings("validation.finite", v.finite.code);
-    try testing.expectEqualStrings("must be a finite number", v.finite.message);
+    try expectRule(v.finite, "validation.finite", "must be a finite number", "must be a finite number");
+    try expectViolation(f64, v.finite, std.math.inf(f64), "validation.finite", "must be a finite number", "x");
+    try expectNoViolation(f64, v.finite, 0);
 }
 
-test "minItems is a rule constructor with code validation.min_items and message \"must have at least {min} items\", or \"must have at least 1 item\" when min = 1" {
+test "minItems is a rule constructor with code validation.min_items and message \"must have at least {min} items\", or \"must have at least 1 item\" when min = 1; placeholder {min}" {
     try testing.expect(@hasDecl(v, "minItems"));
     try testing.expect(@typeInfo(@TypeOf(v.minItems)).@"fn".return_type == v.Rule);
-    try testing.expectEqualStrings("validation.min_items", v.minItems(2).code);
-    try testing.expectEqualStrings("must have at least 2 items", v.minItems(2).message);
-    try testing.expectEqualStrings("validation.min_items", v.minItems(1).code);
-    try testing.expectEqualStrings("must have at least 1 item", v.minItems(1).message);
+    try expectRule(v.minItems(2), "validation.min_items", "must have at least 2 items", "must have at least {min} items");
+    try expectPlaceholder(v.minItems(2), "{min}", "2");
     try expectViolation([]const u32, v.minItems(2), &.{1}, "validation.min_items", "must have at least 2 items", "x");
+    try expectRule(v.minItems(1), "validation.min_items", "must have at least 1 item", "must have at least 1 item");
     try expectViolation([]const u32, v.minItems(1), &.{}, "validation.min_items", "must have at least 1 item", "x");
     try expectNoViolation([]const u32, v.minItems(2), &.{ 1, 2 });
-    // No precondition: items are counted, never checked.
-    try expectNoViolation([]const f64, v.minItems(1), &.{std.math.nan(f64)});
 }
 
-test "maxItems is a rule constructor with code validation.max_items and message \"must have at most {max} items\", or \"must have at most 1 item\" when max = 1" {
+test "maxItems is a rule constructor with code validation.max_items and message \"must have at most {max} items\", or \"must have at most 1 item\" when max = 1; placeholder {max}" {
     try testing.expect(@hasDecl(v, "maxItems"));
     try testing.expect(@typeInfo(@TypeOf(v.maxItems)).@"fn".return_type == v.Rule);
-    try testing.expectEqualStrings("validation.max_items", v.maxItems(100).code);
-    try testing.expectEqualStrings("must have at most 100 items", v.maxItems(100).message);
-    try testing.expectEqualStrings("validation.max_items", v.maxItems(1).code);
-    try testing.expectEqualStrings("must have at most 1 item", v.maxItems(1).message);
+    try expectRule(v.maxItems(2), "validation.max_items", "must have at most 2 items", "must have at most {max} items");
+    try expectPlaceholder(v.maxItems(2), "{max}", "2");
     try expectViolation([]const u32, v.maxItems(2), &.{ 1, 2, 3 }, "validation.max_items", "must have at most 2 items", "x");
+    try expectRule(v.maxItems(1), "validation.max_items", "must have at most 1 item", "must have at most 1 item");
     try expectViolation([]const u32, v.maxItems(1), &.{ 1, 2 }, "validation.max_items", "must have at most 1 item", "x");
-    try expectNoViolation([]const u32, v.maxItems(2), &.{ 1, 2 });
-    // No precondition: items are counted, never checked.
-    try expectNoViolation([]const f64, v.maxItems(1), &.{std.math.nan(f64)});
+    try expectNoViolation([]const u32, v.maxItems(2), &.{1});
 }
 
 test "each is a rule constructor with no code or message of its own; an item reports the inner rule's code and message at its index" {
@@ -242,44 +260,133 @@ test "custom is a rule constructor whose code and literal message are its argume
     try expectNoViolation(u32, v.custom("acme.even", "must be even", isEven), 4);
 }
 
-test "positive on a float field fails nan, inf and -inf with the finite precondition" {
+test "equals on a float field fails nan, inf and -inf with the finite precondition, also under withMessage" {
+    inline for (.{ f16, f32, f64, f80, f128, c_longdouble }) |F| {
+        try expectViolation(F, v.equals(0), std.math.nan(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.equals(0), std.math.inf(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.equals(0), -std.math.inf(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.equals(0).withMessage("another message"), std.math.nan(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.equals(0).withMessage("another message"), std.math.inf(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.equals(0).withMessage("another message"), -std.math.inf(F), "validation.finite", "must be a finite number", "x");
+    }
+}
+
+test "notEquals on a float field fails nan, inf and -inf with the finite precondition, also under withMessage" {
+    inline for (.{ f16, f32, f64, f80, f128, c_longdouble }) |F| {
+        try expectViolation(F, v.notEquals(0), std.math.nan(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.notEquals(0), std.math.inf(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.notEquals(0), -std.math.inf(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.notEquals(0).withMessage("another message"), std.math.nan(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.notEquals(0).withMessage("another message"), std.math.inf(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.notEquals(0).withMessage("another message"), -std.math.inf(F), "validation.finite", "must be a finite number", "x");
+    }
+}
+
+test "min on a float field fails nan, inf and -inf with the finite precondition, also under withMessage" {
+    inline for (.{ f16, f32, f64, f80, f128, c_longdouble }) |F| {
+        try expectViolation(F, v.min(0), std.math.nan(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.min(0), std.math.inf(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.min(0), -std.math.inf(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.min(0).withMessage("another message"), std.math.nan(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.min(0).withMessage("another message"), std.math.inf(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.min(0).withMessage("another message"), -std.math.inf(F), "validation.finite", "must be a finite number", "x");
+    }
+}
+
+test "max on a float field fails nan, inf and -inf with the finite precondition, also under withMessage" {
+    inline for (.{ f16, f32, f64, f80, f128, c_longdouble }) |F| {
+        try expectViolation(F, v.max(0), std.math.nan(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.max(0), std.math.inf(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.max(0), -std.math.inf(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.max(0).withMessage("another message"), std.math.nan(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.max(0).withMessage("another message"), std.math.inf(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.max(0).withMessage("another message"), -std.math.inf(F), "validation.finite", "must be a finite number", "x");
+    }
+}
+
+test "range on a float field fails nan, inf and -inf with the finite precondition, also under withMessage" {
+    inline for (.{ f16, f32, f64, f80, f128, c_longdouble }) |F| {
+        try expectViolation(F, v.range(0, 1), std.math.nan(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.range(0, 1), std.math.inf(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.range(0, 1), -std.math.inf(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.range(0, 1).withMessage("another message"), std.math.nan(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.range(0, 1).withMessage("another message"), std.math.inf(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.range(0, 1).withMessage("another message"), -std.math.inf(F), "validation.finite", "must be a finite number", "x");
+    }
+}
+
+test "positive on a float field fails nan, inf and -inf with the finite precondition, also under withMessage" {
     inline for (.{ f16, f32, f64, f80, f128, c_longdouble }) |F| {
         try expectViolation(F, v.positive, std.math.nan(F), "validation.finite", "must be a finite number", "x");
         try expectViolation(F, v.positive, std.math.inf(F), "validation.finite", "must be a finite number", "x");
         try expectViolation(F, v.positive, -std.math.inf(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.positive.withMessage("another message"), std.math.nan(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.positive.withMessage("another message"), std.math.inf(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.positive.withMessage("another message"), -std.math.inf(F), "validation.finite", "must be a finite number", "x");
     }
 }
 
-test "min, max, range, nonNegative, negative, nonPositive and divisibleBy on a float field fail nan, inf and -inf with the finite precondition" {
+test "nonNegative on a float field fails nan, inf and -inf with the finite precondition, also under withMessage" {
     inline for (.{ f16, f32, f64, f80, f128, c_longdouble }) |F| {
-        inline for (.{ std.math.nan(F), std.math.inf(F), -std.math.inf(F) }) |bad| {
-            try expectViolation(F, v.min(0), bad, "validation.finite", "must be a finite number", "x");
-            try expectViolation(F, v.max(0), bad, "validation.finite", "must be a finite number", "x");
-            try expectViolation(F, v.range(0, 1), bad, "validation.finite", "must be a finite number", "x");
-            try expectViolation(F, v.nonNegative, bad, "validation.finite", "must be a finite number", "x");
-            try expectViolation(F, v.negative, bad, "validation.finite", "must be a finite number", "x");
-            try expectViolation(F, v.nonPositive, bad, "validation.finite", "must be a finite number", "x");
-            try expectViolation(F, v.divisibleBy(2), bad, "validation.finite", "must be a finite number", "x");
-        }
+        try expectViolation(F, v.nonNegative, std.math.nan(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.nonNegative, std.math.inf(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.nonNegative, -std.math.inf(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.nonNegative.withMessage("another message"), std.math.nan(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.nonNegative.withMessage("another message"), std.math.inf(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.nonNegative.withMessage("another message"), -std.math.inf(F), "validation.finite", "must be a finite number", "x");
     }
 }
 
-test "equals and notEquals on a float field fail nan, inf and -inf with the finite precondition" {
+test "negative on a float field fails nan, inf and -inf with the finite precondition, also under withMessage" {
     inline for (.{ f16, f32, f64, f80, f128, c_longdouble }) |F| {
-        inline for (.{ std.math.nan(F), std.math.inf(F), -std.math.inf(F) }) |bad| {
-            try expectViolation(F, v.equals(0), bad, "validation.finite", "must be a finite number", "x");
-            try expectViolation(F, v.notEquals(0), bad, "validation.finite", "must be a finite number", "x");
-        }
+        try expectViolation(F, v.negative, std.math.nan(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.negative, std.math.inf(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.negative, -std.math.inf(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.negative.withMessage("another message"), std.math.nan(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.negative.withMessage("another message"), std.math.inf(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.negative.withMessage("another message"), -std.math.inf(F), "validation.finite", "must be a finite number", "x");
     }
 }
 
-test "finite has no precondition: nan, inf and -inf fail its own check" {
+test "nonPositive on a float field fails nan, inf and -inf with the finite precondition, also under withMessage" {
     inline for (.{ f16, f32, f64, f80, f128, c_longdouble }) |F| {
-        inline for (.{ std.math.nan(F), std.math.inf(F), -std.math.inf(F) }) |bad| {
-            try expectViolation(F, v.finite, bad, "validation.finite", "must be a finite number", "x");
-        }
+        try expectViolation(F, v.nonPositive, std.math.nan(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.nonPositive, std.math.inf(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.nonPositive, -std.math.inf(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.nonPositive.withMessage("another message"), std.math.nan(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.nonPositive.withMessage("another message"), std.math.inf(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.nonPositive.withMessage("another message"), -std.math.inf(F), "validation.finite", "must be a finite number", "x");
+    }
+}
+
+test "divisibleBy on a float field fails nan, inf and -inf with the finite precondition, also under withMessage" {
+    inline for (.{ f16, f32, f64, f80, f128, c_longdouble }) |F| {
+        try expectViolation(F, v.divisibleBy(2), std.math.nan(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.divisibleBy(2), std.math.inf(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.divisibleBy(2), -std.math.inf(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.divisibleBy(2).withMessage("another message"), std.math.nan(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.divisibleBy(2).withMessage("another message"), std.math.inf(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.divisibleBy(2).withMessage("another message"), -std.math.inf(F), "validation.finite", "must be a finite number", "x");
+    }
+}
+
+test "finite has no precondition: nan, inf and -inf on a float field fail its own check, so withMessage changes their message" {
+    inline for (.{ f16, f32, f64, f80, f128, c_longdouble }) |F| {
+        try expectViolation(F, v.finite, std.math.nan(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.finite.withMessage("another message"), std.math.nan(F), "validation.finite", "another message", "x");
+        try expectViolation(F, v.finite, std.math.inf(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.finite.withMessage("another message"), std.math.inf(F), "validation.finite", "another message", "x");
+        try expectViolation(F, v.finite, -std.math.inf(F), "validation.finite", "must be a finite number", "x");
+        try expectViolation(F, v.finite.withMessage("another message"), -std.math.inf(F), "validation.finite", "another message", "x");
         try expectNoViolation(F, v.finite, std.math.floatMax(F));
     }
+}
+
+test "the module exports exactly its 29 public names, and Rule.withMessage" {
+    const names = [_][]const u8{ "Violation", "Rule", "Report", "max_code_bytes", "max_message_bytes", "max_report_violations", "check", "checkAll", "assertRules", "fail", "equals", "notEquals", "oneOf", "noneOf", "empty", "notEmpty", "min", "max", "range", "positive", "nonNegative", "negative", "nonPositive", "divisibleBy", "finite", "minItems", "maxItems", "each", "custom" };
+    inline for (names) |name| try testing.expect(@hasDecl(v, name));
+    try testing.expectEqual(names.len, comptime std.meta.declarations(v).len);
+    try testing.expect(@hasDecl(v.Rule, "withMessage"));
 }
 
 test "every rule the module exports has a catalog test" {
