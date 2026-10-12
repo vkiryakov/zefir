@@ -1647,6 +1647,78 @@ test "emergency: records past the rate limit are left out and counted; the next 
     try testing.expectEqual(@as(u64, 3), s.emergency_suppressed);
 }
 
+test "emergency: a record too long for .drop is left out, and the next one tells of it" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest; // the test needs POSIX pipes
+    var stderr: StderrPipe = try .open();
+    defer stderr.close();
+    const logger: Logger = try .init(testing.allocator, testing.io, .{ .oversize = .drop, .max_record_bytes = 512 });
+    logger.engine.stderr = stderr.write_end;
+    const data: [1024]u8 = @splat('d');
+    logger.emergency("Too long", .{ .data = @as([]const u8, &data) });
+    logger.emergency("Next", .{});
+    const s = logger.stats();
+    logger.deinit();
+    var buf: [512]u8 = undefined;
+    try testing.expectStringEndsWith(try stderr.finish(&buf), "\"message\":\"Next\",\"suppressed\":1}\n");
+    try testing.expectEqual(@as(u64, 1), s.emergency_written);
+    try testing.expectEqual(@as(u64, 1), s.emergency_suppressed);
+    try testing.expectEqual(@as(u64, 0), s.dropped.oversize);
+}
+
+test "emergency: a failed write to stderr leaves the record out, and the next one tells of it" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest; // the test needs POSIX pipes
+    const io = testing.io;
+    const unread = try std.Io.Threaded.pipe2(.{});
+    pipeEnd(unread[0]).close(io); // nobody reads: writes fail with BrokenPipe
+    const broken = pipeEnd(unread[1]);
+    defer broken.close(io);
+    var stderr: StderrPipe = try .open();
+    defer stderr.close();
+    const logger: Logger = try .init(testing.allocator, io, .{});
+    logger.engine.stderr = broken;
+    logger.emergency("Lost", .{});
+    logger.engine.stderr = stderr.write_end;
+    logger.emergency("Next", .{});
+    const s = logger.stats();
+    logger.deinit();
+    var buf: [512]u8 = undefined;
+    try testing.expectStringEndsWith(try stderr.finish(&buf), "\"message\":\"Next\",\"suppressed\":1}\n");
+    try testing.expectEqual(@as(u64, 1), s.emergency_written);
+    try testing.expectEqual(@as(u64, 1), s.emergency_suppressed);
+}
+
+var app_clock_reads: std.atomic.Value(u32) = .init(0);
+var counting_vtable: std.Io.VTable = undefined;
+
+fn countingNow(userdata: ?*anyopaque, clock: std.Io.Clock) std.Io.Timestamp {
+    _ = app_clock_reads.fetchAdd(1, .seq_cst);
+    return testing.io.vtable.now(userdata, clock);
+}
+
+/// `testing.io`, counting the reads of its clock.
+fn countingIo() std.Io {
+    counting_vtable = testing.io.vtable.*;
+    counting_vtable.now = countingNow;
+    return .{ .userdata = testing.io.userdata, .vtable = &counting_vtable };
+}
+
+test "emergency does not use the application's Io, not even its clock" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest; // the test needs POSIX pipes
+    var stderr: StderrPipe = try .open();
+    defer stderr.close();
+    var sink: std.Io.Writer.Discarding = .init(&.{});
+    const logger: Logger = try .init(testing.allocator, countingIo(), .{ .output = .{ .writer = &sink.writer } });
+    logger.engine.stderr = stderr.write_end;
+    const before = app_clock_reads.load(.seq_cst);
+    logger.emergency("Going down", .{});
+    const by_emergency = app_clock_reads.load(.seq_cst) - before;
+    logger.info("Regular", .{});
+    const by_info = app_clock_reads.load(.seq_cst) - before - by_emergency;
+    logger.deinit();
+    try testing.expectEqual(@as(u32, 0), by_emergency);
+    try testing.expectEqual(@as(u32, 1), by_info);
+}
+
 /// Calls `emergency` from inside the record being written.
 const Reentrant = struct {
     logger: Logger,

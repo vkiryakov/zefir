@@ -76,9 +76,10 @@ pub const Stats = struct {
     /// Records `emergency` wrote to stderr.
     emergency_written: u64,
     /// `emergency` records left out: past the rate limit (100 at once, then
-    /// 100 per second), or logged while an emergency record was being
-    /// written on the same thread. The next one written tells how many
-    /// with `"suppressed":N`.
+    /// 100 per second), logged while an emergency record was being written
+    /// on the same thread, too long for `.oversize = .drop`, or lost by a
+    /// failed write to stderr. The next one written tells how many with
+    /// `"suppressed":N`; emergency records are not counted in `accepted`.
     emergency_suppressed: u64,
 
     pub const Dropped = struct {
@@ -373,7 +374,7 @@ pub fn emit(engine: *Engine, comptime level: Level, scope: *const scopes.Entry, 
     // torn line.
     var buf: [1 + max_record_limit]u8 = undefined;
     const out = buf[1..][0..engine.max_record_bytes];
-    const header = engine.headerFor(level, scope, trace);
+    const header = engine.headerFor(level, scope, trace, Io.Clock.real.now(engine.io));
     const encoded = switch (engine.format) {
         inline else => |format| encode.record(format, level, message, out, header, fields),
     };
@@ -385,7 +386,7 @@ pub fn emitFormatted(engine: *Engine, comptime level: Level, scope: *const scope
     if (!engine.accept(level)) return;
     var buf: [1 + max_record_limit]u8 = undefined;
     const out = buf[1..][0..engine.max_record_bytes];
-    const header = engine.headerFor(level, scope, null);
+    const header = engine.headerFor(level, scope, null, Io.Clock.real.now(engine.io));
     const encoded = switch (engine.format) {
         inline else => |f| encode.recordFormatted(f, level, format, args, out, header),
     };
@@ -414,9 +415,9 @@ fn refuse(engine: *Engine, comptime level: Level, counter: *Counter) void {
     bump(&engine.errors_unreported);
 }
 
-fn headerFor(engine: *Engine, comptime level: Level, scope: *const scopes.Entry, trace: ?*const encode.TraceHex) encode.Header {
+fn headerFor(engine: *Engine, comptime level: Level, scope: *const scopes.Entry, trace: ?*const encode.TraceHex, timestamp: Io.Timestamp) encode.Header {
     return .{
-        .timestamp = Io.Clock.real.now(engine.io),
+        .timestamp = timestamp,
         .service = engine.service,
         .scope = scope.name(),
         .scope_quoted = scope.quoted,
@@ -462,17 +463,21 @@ pub fn emergency(engine: *Engine, scope: *const scopes.Entry, trace: ?*const enc
     defer emergency_active = false;
     var buf: [max_record_limit]u8 = undefined;
     const out = buf[0..engine.max_record_bytes];
-    var header = engine.headerFor(.err, scope, trace);
-    header.timestamp = Io.Clock.real.now(io);
+    const header = engine.headerFor(.err, scope, trace, Io.Clock.real.now(io));
     const done = switch (engine.format) {
         inline else => |f| encodeTelling(f, message, out, header, fields, left_out),
     } orelse {
-        engine.bucket.giveBack(left_out);
-        return bump(&engine.counters.dropped_oversize);
+        // Too long for `.oversize = .drop`: left out like the ones before.
+        bump(&engine.counters.emergency_suppressed);
+        return engine.bucket.giveBack(left_out + 1);
     };
-    if (!done.told) engine.bucket.giveBack(left_out);
     if (done.truncated) bump(&engine.counters.truncated);
-    if (engine.writeStderr(out[0..done.len])) bump(&engine.counters.emergency_written);
+    const written = engine.writeStderr(out[0..done.len]);
+    if (written) bump(&engine.counters.emergency_written) else bump(&engine.counters.emergency_suppressed);
+    // The next record tells of the ones this one did not, and of this one
+    // when it did not go out.
+    const untold: u64 = if (written and done.told) 0 else left_out;
+    engine.bucket.giveBack(untold + @intFromBool(!written));
 }
 
 const Told = struct { len: usize, truncated: bool, told: bool };

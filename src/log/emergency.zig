@@ -49,6 +49,7 @@ pub const Bucket = struct {
     /// Counts `n` more records as left out: those `take` reported for a
     /// record that was not written after all.
     pub fn giveBack(b: *Bucket, n: u64) void {
+        if (n == 0) return;
         b.acquire();
         defer b.lock.unlock();
         b.refused += n;
