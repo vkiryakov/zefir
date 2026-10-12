@@ -1,16 +1,23 @@
 //! vector_gen turns one golden-vector file into a Zig test file:
 //!
-//!     vector_gen <in.json> <out.zig>
+//!     vector_gen <in.json> <out.zig> <rule>...
+//!     vector_gen --check-list <dir> <name>...
 //!
-//! build.zig builds it for the host and runs it on every name in
-//! `vector_files` of cases.zig; the output lives in the build cache, is never
-//! committed, and is compiled against the `validator` and `harness`
-//! (vector_harness.zig) modules, one test per record. A file it rejects fails
-//! the build with one line per problem on stderr:
-//! `vector_gen: <file>: <id>: <problem>`.
+//! build.zig builds it for the host and runs it on every file of
+//! `vector_files` in cases.zig, with the rules that the entry lists; the
+//! output lives in the build cache, is never committed, and is compiled
+//! against the `validator` and `harness` (vector_harness.zig) modules, one
+//! test per record. A file it rejects fails the build with one line per
+//! problem on stderr: `vector_gen: <file>: <id>: <problem>`. With
+//! `--check-list`, it fails the build on a `.json` file in `<dir>` that is
+//! not one of the names, since no step would run its records.
 //!
-//! A vector file is a JSON array of records sorted by `id` (UTF-8, LF,
-//! 2-space indent). The fields of a record:
+//! A vector file is a JSON array of records sorted by `id`, in UTF-8 and in
+//! the canonical format: what std.json writes with a 2-space indent (every
+//! array item and object member on a line of its own, `[]` for an empty
+//! array), with LF line ends and a final newline. Each rule that the file's
+//! entry lists needs at least 10 records, and each record's rule must be
+//! one of them. The fields of a record:
 //!
 //! - `id` (required): `<rule>-<NNN>`, three digits, unique in the file
 //! - `rule` (required): the rule under test, by its public name (`notEmpty`)
@@ -132,8 +139,9 @@ const Checked = struct { records: []const Record, problems: []const Problem };
 pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
     const args = try init.minimal.args.toSlice(arena);
-    if (args.len != 3) {
-        std.debug.print("usage: vector_gen <in.json> <out.zig>\n", .{});
+    if (args.len >= 3 and std.mem.eql(u8, args[1], "--check-list")) return checkList(init.io, args[2], args[3..]);
+    if (args.len < 4) {
+        std.debug.print("usage: vector_gen <in.json> <out.zig> <rule>...\n       vector_gen --check-list <dir> <name>...\n", .{});
         std.process.exit(2);
     }
     const file_name = std.fs.path.basename(args[1]);
@@ -142,7 +150,7 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("vector_gen: {s}: cannot read the file: {s}\n", .{ args[1], @errorName(err) });
         std.process.exit(1);
     };
-    const checked = try checkFile(arena, text);
+    const checked = try checkFile(arena, text, args[3..]);
     if (checked.problems.len > 0) {
         for (checked.problems) |problem| {
             if (problem.where.len == 0) {
@@ -158,18 +166,51 @@ pub fn main(init: std.process.Init) !void {
     try cwd.writeFile(init.io, .{ .sub_path = args[2], .data = out.written() });
 }
 
-/// Parses a vector file and checks every record; `problems` is empty when
-/// the file is accepted.
-fn checkFile(arena: Allocator, text: []const u8) Allocator.Error!Checked {
+/// The `--check-list` mode: fails when `dir_path` holds a `.json` file that
+/// `names` (the `vector_files` of cases.zig) does not list, since no build
+/// step would run its records.
+fn checkList(io: std.Io, dir_path: []const u8, names: []const []const u8) !void {
+    const dir = std.Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true }) catch |err| {
+        std.debug.print("vector_gen: {s}: cannot open the directory: {s}\n", .{ dir_path, @errorName(err) });
+        std.process.exit(1);
+    };
+    defer dir.close(io);
+    var unlisted = false;
+    var entries = dir.iterate();
+    while (try entries.next(io)) |entry| {
+        if (!isUnlisted(entry.name, names)) continue;
+        std.debug.print("vector_gen: {s}: not listed in vector_files of cases.zig, so its records never run\n", .{entry.name});
+        unlisted = true;
+    }
+    if (unlisted) std.process.exit(1);
+}
+
+/// Whether `file_name` is a vector file, `<name>.json`, whose name is not
+/// one of `names`.
+fn isUnlisted(file_name: []const u8, names: []const []const u8) bool {
+    const name = std.mem.cutSuffix(u8, file_name, ".json") orelse return false;
+    return !contains(names, name);
+}
+
+/// Parses a vector file that holds `rules` and checks its format and every
+/// record; `problems` is empty when the file is accepted.
+fn checkFile(arena: Allocator, text: []const u8, rules: []const []const u8) Allocator.Error!Checked {
     var problems: std.ArrayList(Problem) = .empty;
     var records: std.ArrayList(Record) = .empty;
-    const root = std.json.parseFromSliceLeaky(std.json.Value, arena, text, .{}) catch |err| switch (err) {
+    var scanner: std.json.Scanner = .initCompleteInput(arena, text);
+    var diagnostics: std.json.Diagnostics = .{};
+    scanner.enableDiagnostics(&diagnostics);
+    // Numbers stay as written, so the canonical form below keeps them.
+    const root = std.json.parseFromTokenSourceLeaky(std.json.Value, arena, &scanner, .{ .parse_numbers = false }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => {
-            try problems.append(arena, .{ .where = "", .text = try std.fmt.allocPrint(arena, "not valid JSON ({s})", .{@errorName(err)}) });
+            try problems.append(arena, .{ .where = "", .text = try std.fmt.allocPrint(arena, "line {d}, column {d}: not valid JSON ({s})", .{ diagnostics.getLine(), diagnostics.getColumn(), @errorName(err) }) });
             return .{ .records = &.{}, .problems = problems.items };
         },
     };
+    if (try formatDifference(arena, root, text)) |line| {
+        try problems.append(arena, .{ .where = "", .text = try std.fmt.allocPrint(arena, "not in the canonical format (2-space indent, one item or member per line, LF line ends, a final newline): first difference at line {d}", .{line}) });
+    }
     if (root != .array) {
         try problems.append(arena, .{ .where = "", .text = "the file must be a JSON array of records" });
         return .{ .records = &.{}, .problems = problems.items };
@@ -184,15 +225,20 @@ fn checkFile(arena: Allocator, text: []const u8) Allocator.Error!Checked {
         if (id == .string and rule == .string) try keys.append(arena, .{ .id = id.string, .rule = rule.string });
     }
     var ids: std.StringHashMapUnmanaged(void) = .empty;
+    // Every rule of the file starts at 0, so a rule without records fails.
     var counts: std.StringArrayHashMapUnmanaged(usize) = .empty;
+    for (rules) |rule| try counts.put(arena, rule, 0);
     for (keys.items, 0..) |key, i| {
         if ((try ids.getOrPut(arena, key.id)).found_existing) {
             try problems.append(arena, .{ .where = key.id, .text = "id repeats" });
         } else if (i > 0 and std.mem.order(u8, keys.items[i - 1].id, key.id) == .gt) {
             try problems.append(arena, .{ .where = key.id, .text = try std.fmt.allocPrint(arena, "records must be sorted by id; this one comes after \"{s}\"", .{keys.items[i - 1].id}) });
         }
-        const count = try counts.getOrPutValue(arena, key.rule, 0);
-        count.value_ptr.* += 1;
+        if (counts.getPtr(key.rule)) |count| {
+            count.* += 1;
+        } else {
+            try problems.append(arena, .{ .where = key.id, .text = try std.fmt.allocPrint(arena, "rule \"{s}\" is not listed for this file in vector_files of cases.zig", .{key.rule}) });
+        }
     }
     for (counts.keys(), counts.values()) |rule, count| {
         if (count < min_records) {
@@ -200,6 +246,16 @@ fn checkFile(arena: Allocator, text: []const u8) Allocator.Error!Checked {
         }
     }
     return .{ .records = records.items, .problems = problems.items };
+}
+
+/// The line on which `text` first differs from the canonical form of `root`
+/// (what std.json writes with a 2-space indent, and a final newline), or
+/// null when it does not differ.
+fn formatDifference(arena: Allocator, root: std.json.Value, text: []const u8) Allocator.Error!?usize {
+    const rendered = try std.json.Stringify.valueAlloc(arena, root, .{ .whitespace = .indent_2 });
+    const expected = try std.mem.concat(arena, u8, &.{ rendered, "\n" });
+    const index = std.mem.findDiff(u8, text, expected) orelse return null;
+    return 1 + std.mem.count(u8, text[0..index], "\n");
 }
 
 /// Reads the fields of one record and collects its problems.
@@ -585,11 +641,20 @@ fn writeTest(w: *std.Io.Writer, arena: Allocator, record: Record) !void {
     try w.writeAll("    });\n}\n");
 }
 
+/// The rules of the files that the tests check, unless a test names others.
+const test_rules = [_][]const u8{ "notEmpty", "positive", "each", "custom", "uniqueBy", "base64Url" };
+
 /// Fails unless checking `text` reports `problem` at `where`.
 fn expectProblem(text: []const u8, where: []const u8, problem: []const u8) !void {
+    return expectProblemIn(&test_rules, text, where, problem);
+}
+
+/// Fails unless checking `text` as a file of `rules` reports `problem` at
+/// `where`.
+fn expectProblemIn(rules: []const []const u8, text: []const u8, where: []const u8, problem: []const u8) !void {
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_state.deinit();
-    const checked = try checkFile(arena_state.allocator(), text);
+    const checked = try checkFile(arena_state.allocator(), text, rules);
     for (checked.problems) |p| {
         if (std.mem.eql(u8, p.where, where) and std.mem.eql(u8, p.text, problem)) return;
     }
@@ -603,7 +668,7 @@ fn expectProblem(text: []const u8, where: []const u8, problem: []const u8) !void
 fn expectAccepted(text: []const u8, id: []const u8) !void {
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_state.deinit();
-    const checked = try checkFile(arena_state.allocator(), text);
+    const checked = try checkFile(arena_state.allocator(), text, &test_rules);
     for (checked.problems) |p| {
         if (std.mem.eql(u8, p.where, id)) {
             std.debug.print("unexpected problem {s}: {s}\n", .{ p.where, p.text });
@@ -613,10 +678,71 @@ fn expectAccepted(text: []const u8, id: []const u8) !void {
     try std.testing.expectEqual(@as(usize, 1), checked.records.len);
 }
 
-test "a file that is not a JSON array of records is rejected" {
-    try expectProblem("[1,", "", "not valid JSON (UnexpectedEndOfInput)");
+/// Fails unless `text` first differs from the canonical format on `line`
+/// (null: it does not differ).
+fn expectFormatDifference(text: []const u8, line: ?usize) !void {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const root = try std.json.parseFromSliceLeaky(std.json.Value, arena, text, .{ .parse_numbers = false });
+    try std.testing.expectEqual(line, try formatDifference(arena, root, text));
+}
+
+/// `text` rewritten in the canonical format.
+fn canonical(arena: Allocator, text: []const u8) ![]const u8 {
+    const root = try std.json.parseFromSliceLeaky(std.json.Value, arena, text, .{ .parse_numbers = false });
+    return std.mem.concat(arena, u8, &.{ try std.json.Stringify.valueAlloc(arena, root, .{ .whitespace = .indent_2 }), "\n" });
+}
+
+test "a file that is not a JSON array of records is rejected, a JSON error at its line and column" {
+    try expectProblem("[1,", "", "line 1, column 4: not valid JSON (UnexpectedEndOfInput)");
+    try expectProblem("[\n  {\"id\": \"a\",}\n]\n", "", "line 2, column 14: not valid JSON (SyntaxError)");
     try expectProblem("{}", "", "the file must be a JSON array of records");
     try expectProblem("[1]", "[0]", "a record must be a JSON object");
+}
+
+test "a file that is not in the canonical format is rejected at its first difference" {
+    const text =
+        \\[
+        \\  {
+        \\    "id": "positive-001",
+        \\    "input": [
+        \\      "1"
+        \\    ]
+        \\  }
+        \\]
+        \\
+    ;
+    try expectFormatDifference(text, null);
+    try expectFormatDifference(text[0 .. text.len - 1], 8);
+    try expectFormatDifference("[\r\n  {\r\n    \"id\": \"positive-001\",\r\n    \"input\": [\r\n      \"1\"\r\n    ]\r\n  }\r\n]\r\n", 1);
+    try expectFormatDifference("[\n\t{\n\t\t\"id\": \"positive-001\",\n\t\t\"input\": [\n\t\t\t\"1\"\n\t\t]\n\t}\n]\n", 2);
+    try expectFormatDifference(
+        \\[
+        \\  {
+        \\    "id": "positive-001",
+        \\    "input": ["1"]
+        \\  }
+        \\]
+        \\
+    , 4);
+    try expectProblem("[]", "", "not in the canonical format (2-space indent, one item or member per line, LF line ends, a final newline): first difference at line 1");
+}
+
+test "every rule of the file needs records, and every record a rule of the file" {
+    try expectProblemIn(&.{ "notEmpty", "positive" }, "[]\n", "notEmpty", "0 records; every rule needs at least 10");
+    try expectProblemIn(&.{"notEmpty"},
+        \\[{"id": "positive-001", "rule": "positive", "params": "", "field_type": "u8", "input": "0",
+        \\  "expect": "fail", "code": "validation.positive", "reason": "r", "source": "s"}]
+    , "positive-001", "rule \"positive\" is not listed for this file in vector_files of cases.zig");
+}
+
+test "a JSON file in vectors/ that vector_files does not list is found" {
+    const names = [_][]const u8{ "common", "numbers" };
+    try std.testing.expect(isUnlisted("strings.json", &names));
+    try std.testing.expect(!isUnlisted("numbers.json", &names));
+    try std.testing.expect(!isUnlisted(".DS_Store", &names));
+    try std.testing.expect(!isUnlisted("numbers.json.orig", &names));
 }
 
 test "a record with a missing, unknown or mistyped field is rejected" {
@@ -919,7 +1045,8 @@ test "records the checks must accept" {
 test "a file of well-formed records is accepted" {
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_state.deinit();
-    const checked = try checkFile(arena_state.allocator(),
+    const arena = arena_state.allocator();
+    const checked = try checkFile(arena, try canonical(arena,
         \\[
         \\  {"id": "positive-001", "rule": "positive", "params": "", "field_type": "u8", "input": "0", "expect": "fail", "code": "validation.positive", "reason": "r", "source": "s"},
         \\  {"id": "positive-002", "rule": "positive", "params": "", "field_type": "u8", "input": "1", "expect": "pass", "reason": "r", "source": "s"},
@@ -932,7 +1059,7 @@ test "a file of well-formed records is accepted" {
         \\  {"id": "positive-009", "rule": "positive", "params": "", "field_type": "u64", "input": "18446744073709551615", "expect": "pass", "reason": "r", "source": "s"},
         \\  {"id": "positive-010", "rule": "positive", "params": "", "field_type": "??f64", "input": "0", "expect": "fail", "code": "validation.positive", "reason": "r", "source": "s"}
         \\]
-    );
+    ), &.{"positive"});
     try std.testing.expectEqual(@as(usize, 0), checked.problems.len);
     try std.testing.expectEqual(@as(usize, 10), checked.records.len);
 }
@@ -955,7 +1082,7 @@ test "the generated file aliases the fixtures and has one test per record" {
         \\  {"id": "positive-001", "rule": "positive", "params": "", "field_type": "f32", "input": "1e-45",
         \\   "bits": "00000001", "expect": "pass", "reason": "r", "source": "s"}
         \\]
-    );
+    , &test_rules);
     var out: std.Io.Writer.Allocating = .init(arena);
     try writeTests(&out.writer, arena, "lists.json", checked.records);
     try std.testing.expectEqualStrings(

@@ -214,8 +214,9 @@ fn addValidatorTests(
     }
 
     // Golden vectors: vector_gen turns each JSON file of `vector_files` into
-    // a test file in the build cache, one test per record. It is built for
-    // the host, so it also runs when -Dtarget names another system.
+    // a test file in the build cache, one test per record, and checks it
+    // against the rules of its entry. It is built for the host, so it also
+    // runs when -Dtarget names another system.
     const gen_module = b.createModule(.{
         .root_source_file = b.path("src/validator/testdata/vector_gen.zig"),
         .target = b.graph.host,
@@ -232,12 +233,13 @@ fn addValidatorTests(
     });
     const harness_tests = b.addTest(.{ .name = "vector_harness", .root_module = harness });
     test_step.dependOn(&b.addRunArtifact(harness_tests).step);
-    for (validator_cases.vector_files) |name| {
+    for (validator_cases.vector_files) |file| {
         const run_gen = b.addRunArtifact(gen);
-        run_gen.addFileArg(b.path(b.fmt("src/validator/testdata/vectors/{s}.json", .{name})));
-        const generated = run_gen.addOutputFileArg(b.fmt("{s}_vectors_test.zig", .{name}));
+        run_gen.addFileArg(b.path(b.fmt("src/validator/testdata/vectors/{s}.json", .{file.name})));
+        const generated = run_gen.addOutputFileArg(b.fmt("{s}_vectors_test.zig", .{file.name}));
+        for (file.rules) |rule| run_gen.addArg(rule);
         const vector_tests = b.addTest(.{
-            .name = b.fmt("{s}_vectors", .{name}),
+            .name = b.fmt("{s}_vectors", .{file.name}),
             .root_module = b.createModule(.{
                 .root_source_file = generated,
                 .target = target,
@@ -250,6 +252,16 @@ fn addValidatorTests(
         });
         test_step.dependOn(&b.addRunArtifact(vector_tests).step);
     }
+    // A JSON file in vectors/ that `vector_files` does not list would never
+    // run. The build system does not see a file added to a directory
+    // argument, so this check runs on every build.
+    const check_list = b.addRunArtifact(gen);
+    check_list.addArg("--check-list");
+    check_list.addDirectoryArg2(b.path("src/validator/testdata/vectors"), .{});
+    for (validator_cases.vector_files) |file| check_list.addArg(file.name);
+    check_list.has_side_effects = true;
+    check_list.expectExitCode(0);
+    test_step.dependOn(&check_list.step);
 
     // The examples of src/validator/examples/README.md: a program must print
     // exactly its `stdout`, a test must pass, and readme_test.zig checks that

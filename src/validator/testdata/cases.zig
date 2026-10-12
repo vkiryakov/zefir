@@ -45,8 +45,18 @@ pub const panic_runs = [_]PanicRun{
 /// Compile-error fixtures: compiled only, never run.
 pub const compile_errors = @import("compile_errors.zig").list;
 
-/// Golden-vector files in vectors/, by name without ".json".
-pub const vector_files = [_][]const u8{ "common", "numbers", "lists" };
+/// A golden-vector file, `vectors/<name>.json`, and the rules whose records
+/// it holds. The build fails when a listed rule has fewer than 10 records,
+/// when a record's rule is not listed, and when a `.json` file in vectors/
+/// has no entry here.
+pub const VectorFile = struct { name: []const u8, rules: []const []const u8 };
+
+/// The golden-vector files, one per documentation page.
+pub const vector_files = [_]VectorFile{
+    .{ .name = "common", .rules = &.{"notEmpty"} },
+    .{ .name = "numbers", .rules = &.{"positive"} },
+    .{ .name = "lists", .rules = &.{ "each", "custom" } },
+};
 
 /// A compiled example of src/validator/examples/, by file stem: a program
 /// must print exactly `stdout`, a test (`stdout` null) must pass, and
