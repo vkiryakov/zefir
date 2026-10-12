@@ -1,0 +1,384 @@
+[
+  {
+    "id": "custom-001",
+    "rule": "custom",
+    "params": "\"numbers.even\", \"must be even\", isEven",
+    "field_type": "u32",
+    "input": "3",
+    "expect": "fail",
+    "code": "numbers.even",
+    "message": "must be even",
+    "reason": "the predicate returns false for an odd number",
+    "source": "errata VE-258"
+  },
+  {
+    "id": "custom-002",
+    "rule": "custom",
+    "params": "\"numbers.even\", \"must be even\", isEven",
+    "field_type": "u32",
+    "input": "4",
+    "expect": "pass",
+    "reason": "the predicate returns true for an even number",
+    "source": "errata VE-259"
+  },
+  {
+    "id": "custom-003",
+    "rule": "custom",
+    "params": "\"numbers.even\", \"must be even\", isEvenPtr",
+    "field_type": "u32",
+    "input": "3",
+    "expect": "fail",
+    "code": "numbers.even",
+    "message": "must be even",
+    "reason": "a predicate may take the value by *const",
+    "source": "errata VE-260"
+  },
+  {
+    "id": "custom-004",
+    "rule": "custom",
+    "params": "\"numbers.even\", \"must be even\", isEvenPtr",
+    "field_type": "u32",
+    "input": "4",
+    "expect": "pass",
+    "reason": "the *const predicate passes an even number",
+    "source": "errata VE-261"
+  },
+  {
+    "id": "custom-005",
+    "rule": "custom",
+    "params": "\"orders.out_of_stock\", \"must be in stock\", hasStock",
+    "field_type": "Stock",
+    "input": {
+      "sku": "ABCDEFGH",
+      "qty": "0"
+    },
+    "expect": "fail",
+    "code": "orders.out_of_stock",
+    "message": "must be in stock",
+    "reason": "a predicate may take a whole struct",
+    "source": "errata VE-262"
+  },
+  {
+    "id": "custom-006",
+    "rule": "custom",
+    "params": "\"orders.out_of_stock\", \"must be in stock\", hasStock",
+    "field_type": "?Stock",
+    "input": null,
+    "expect": "pass",
+    "reason": "null skips the rule",
+    "source": "errata VE-263"
+  },
+  {
+    "id": "custom-007",
+    "rule": "custom",
+    "params": "\"users.handle\", \"must start with @\", startsWithAt",
+    "field_type": "[]const u8",
+    "input": "bob",
+    "expect": "fail",
+    "code": "users.handle",
+    "message": "must start with @",
+    "reason": "a predicate on a string field",
+    "source": "errata VE-264"
+  },
+  {
+    "id": "custom-008",
+    "rule": "custom",
+    "params": "\"numbers.small\", \"must be small\", lt100",
+    "call": ".{ v.custom(\"numbers.small\", \"must be small\", lt100), v.custom(\"numbers.even\", \"must be even\", isEven) }",
+    "field_type": "u32",
+    "input": "101",
+    "expect": "fail",
+    "code": "numbers.small",
+    "message": "must be small",
+    "reason": "the first failing rule is the only violation",
+    "source": "errata VE-265"
+  },
+  {
+    "id": "custom-009",
+    "rule": "custom",
+    "params": "\"numbers.small\", \"must be small\", lt100",
+    "call": ".{ v.custom(\"numbers.small\", \"must be small\", lt100), v.custom(\"numbers.even\", \"must be even\", isEven) }",
+    "field_type": "u32",
+    "input": "51",
+    "expect": "fail",
+    "code": "numbers.even",
+    "message": "must be even",
+    "reason": "the second rule runs when the first passes",
+    "source": "errata VE-266"
+  },
+  {
+    "id": "custom-010",
+    "rule": "custom",
+    "params": "\"numbers.small\", \"must be small\", lt100",
+    "call": ".{ v.custom(\"numbers.small\", \"must be small\", lt100), v.custom(\"numbers.even\", \"must be even\", isEven) }",
+    "field_type": "u32",
+    "input": "50",
+    "expect": "pass",
+    "reason": "a value that passes both rules",
+    "source": "errata VE-267"
+  },
+  {
+    "id": "custom-011",
+    "rule": "custom",
+    "params": "\"text.non_empty\", \"must not be empty\", isNonEmpty",
+    "field_type": "[:0]const u8",
+    "input": "",
+    "expect": "fail",
+    "code": "text.non_empty",
+    "message": "must not be empty",
+    "reason": "a sentinel-terminated string coerces to the predicate's []const u8",
+    "source": "errata VE-269"
+  },
+  {
+    "id": "custom-012",
+    "rule": "custom",
+    "params": "\"numbers.positive\", \"must be positive\", isPositive64",
+    "field_type": "u32",
+    "input": "0",
+    "expect": "fail",
+    "code": "numbers.positive",
+    "message": "must be positive",
+    "reason": "a u32 field coerces to the predicate's u64",
+    "source": "errata VE-270"
+  },
+  {
+    "id": "custom-013",
+    "rule": "custom",
+    "params": "\"a.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\", \"must be even\", isEven",
+    "field_type": "u32",
+    "input": "1",
+    "expect": "fail",
+    "code": "a.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "message": "must be even",
+    "reason": "a code of exactly 128 bytes is accepted",
+    "source": "errata VE-271"
+  },
+  {
+    "id": "each-001",
+    "rule": "each",
+    "params": "v.positive",
+    "field_type": "[]const u32",
+    "input": [
+      "1",
+      "0"
+    ],
+    "expect": "fail",
+    "code": "validation.positive",
+    "message": "must be greater than 0",
+    "path": "[1]",
+    "reason": "each runs its rule on every item; the path ends in the failing index",
+    "source": "errata VE-246"
+  },
+  {
+    "id": "each-002",
+    "rule": "each",
+    "params": "v.positive",
+    "field_type": "[]const ?u32",
+    "input": [
+      null,
+      "0"
+    ],
+    "expect": "fail",
+    "code": "validation.positive",
+    "message": "must be greater than 0",
+    "path": "[1]",
+    "reason": "null items are skipped and keep their index",
+    "source": "errata VE-247"
+  },
+  {
+    "id": "each-003",
+    "rule": "each",
+    "params": "v.positive",
+    "field_type": "[]const ?u32",
+    "input": [
+      null
+    ],
+    "expect": "pass",
+    "reason": "a list of null items passes",
+    "source": "errata VE-248",
+    "deviation": "D63"
+  },
+  {
+    "id": "each-004",
+    "rule": "each",
+    "params": "v.each(v.positive)",
+    "field_type": "[]const []const u32",
+    "input": [
+      [
+        "1"
+      ],
+      [
+        "0",
+        "1"
+      ]
+    ],
+    "expect": "fail",
+    "code": "validation.positive",
+    "message": "must be greater than 0",
+    "path": "[1][0]",
+    "reason": "each(each(r)) runs r once on every inner item",
+    "source": "errata VE-255"
+  },
+  {
+    "id": "each-005",
+    "rule": "each",
+    "params": "v.positive",
+    "field_type": "[]const u32",
+    "input": [
+      "0",
+      "1",
+      "0"
+    ],
+    "expect": "fail",
+    "code": "validation.positive",
+    "path": "[0]",
+    "mode": "checkAll",
+    "violations": [
+      {
+        "code": "validation.positive",
+        "path": "[0]"
+      },
+      {
+        "code": "validation.positive",
+        "path": "[2]"
+      }
+    ],
+    "reason": "checkAll reports one violation per failing item; check returns the first",
+    "source": "errata VE-257"
+  },
+  {
+    "id": "each-006",
+    "rule": "each",
+    "params": "v.notEmpty",
+    "field_type": "[]const []const u8",
+    "input": [
+      "a",
+      "",
+      "b"
+    ],
+    "expect": "fail",
+    "code": "validation.not_empty",
+    "message": "must not be empty",
+    "path": "[1]",
+    "reason": "notEmpty runs on every string item; the empty item fails at its index",
+    "source": "errata VE-521"
+  },
+  {
+    "id": "each-007",
+    "rule": "each",
+    "params": "v.positive",
+    "field_type": "[3]u32",
+    "input": [
+      "1",
+      "2",
+      "0"
+    ],
+    "expect": "fail",
+    "code": "validation.positive",
+    "message": "must be greater than 0",
+    "path": "[2]",
+    "reason": "an array is walked like a slice: item rules run on every element",
+    "source": "errata VE-522"
+  },
+  {
+    "id": "each-008",
+    "rule": "each",
+    "params": ".{ v.notEmpty, v.custom(\"users.handle\", \"must start with @\", startsWithAt) }",
+    "field_type": "[]const []const u8",
+    "input": [
+      "@a",
+      ""
+    ],
+    "expect": "fail",
+    "code": "validation.not_empty",
+    "message": "must not be empty",
+    "path": "[1]",
+    "reason": "item rules run left to right: notEmpty fails first, so the custom rule does not run",
+    "source": "errata VE-523"
+  },
+  {
+    "id": "each-009",
+    "rule": "each",
+    "params": ".{ v.notEmpty, v.custom(\"users.handle\", \"must start with @\", startsWithAt) }",
+    "field_type": "[]const []const u8",
+    "input": [
+      "@a",
+      "b"
+    ],
+    "expect": "fail",
+    "code": "users.handle",
+    "message": "must start with @",
+    "path": "[1]",
+    "reason": "the second item rule runs when the first passes",
+    "source": "errata VE-524"
+  },
+  {
+    "id": "each-010",
+    "rule": "each",
+    "params": "v.positive",
+    "field_type": "?[]const u32",
+    "input": null,
+    "expect": "pass",
+    "reason": "a null list skips its rules and its items",
+    "source": "errata VE-525"
+  },
+  {
+    "id": "each-011",
+    "rule": "each",
+    "params": "v.each(v.notEmpty)",
+    "field_type": "[]const []const []const u8",
+    "input": [
+      [
+        "a"
+      ],
+      [
+        "b",
+        ""
+      ]
+    ],
+    "expect": "fail",
+    "code": "validation.not_empty",
+    "message": "must not be empty",
+    "path": "[1][1]",
+    "reason": "each(each(r)) reaches the strings of a nested list; the path has both indices",
+    "source": "errata VE-526"
+  },
+  {
+    "id": "each-012",
+    "rule": "each",
+    "params": "v.positive",
+    "field_type": "[]const ?u32",
+    "input": [
+      "0",
+      null,
+      "0",
+      "1"
+    ],
+    "expect": "fail",
+    "code": "validation.positive",
+    "path": "[0]",
+    "mode": "checkAll",
+    "violations": [
+      {
+        "code": "validation.positive",
+        "path": "[0]"
+      },
+      {
+        "code": "validation.positive",
+        "path": "[2]"
+      }
+    ],
+    "reason": "checkAll reports every failing item; null items are skipped and keep their index",
+    "source": "errata VE-527"
+  },
+  {
+    "id": "each-013",
+    "rule": "each",
+    "params": "v.positive",
+    "field_type": "[]const u32",
+    "input": [],
+    "expect": "pass",
+    "reason": "an empty list has no items to check",
+    "source": "errata VE-528"
+  }
+]
