@@ -1,6 +1,7 @@
-//! A logger handle: two pointers, copied by value and shared freely
-//! between threads. `init` creates the engine every handle points to;
-//! `scoped` derives handles that write a scope.
+//! A logger handle: the engine, a scope and the trace ids from
+//! `withContext`, copied by value and shared freely between threads.
+//! `init` creates the engine every handle points to; `scoped` and
+//! `withContext` derive handles.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -35,8 +36,9 @@ pub const InitError = Engine.InitError;
 /// of them become invalid. Use one logger per process for stdout: two
 /// loggers on one stdout do not coordinate their writes.
 ///
-/// Records are read from the clock and written through `io`, so log only
-/// from threads or tasks of that `io` (under `std.Io.Threaded`, any thread).
+/// Records read the clock through `io` and, in sync mode, are written
+/// through it, so log only from threads or tasks of that `io` (under
+/// `std.Io.Threaded`, any thread).
 pub fn init(gpa: std.mem.Allocator, io: std.Io, opts: options.Options) InitError!Logger {
     const engine = try Engine.create(gpa, io, opts);
     return .{ .engine = engine, .scope = &engine.scope_table.root };
@@ -45,10 +47,15 @@ pub fn init(gpa: std.mem.Allocator, io: std.Io, opts: options.Options) InitError
 /// Frees the logger. Without a `shutdown` first it runs one with no time
 /// limit: the queue is written and the subscribers handle theirs. After a
 /// `shutdown` that timed out it drops what is left and waits only for the
-/// write and the handler calls in progress. A write or a handler that
-/// never returns keeps it waiting too: to exit on time, call `shutdown`
-/// with a deadline, and when it times out, let the process exit without
-/// `deinit`.
+/// write and the handler calls in progress; no summary record follows
+/// them. A write or a handler that never returns keeps it waiting too: to
+/// exit on time, call `shutdown` with a deadline, and when it times out,
+/// let the process exit without `deinit`. Either way it notes on stderr
+/// the error records the logger dropped that no summary in the log
+/// reported. The std.log bridge stays until the logger's threads have
+/// exited, so what handlers log through std.log meanwhile still reaches
+/// the logger; while it waits, std.log calls from other threads are
+/// refused, as after `shutdown`.
 pub fn deinit(self: Logger) void {
     self.engine.destroy();
 }
@@ -58,6 +65,8 @@ pub fn deinit(self: Logger) void {
 /// returns `error.Timeout`, and `stats().pending` tells how many records
 /// are not written yet. Sync mode writes each record before the call that
 /// logs it returns: there is nothing to wait for. Blocks the OS thread.
+/// Not from a handler or the writer thread, in either mode: that panics in
+/// safe builds and returns `error.Timeout` otherwise.
 pub fn flush(self: Logger, timeout: std.Io.Timeout) error{Timeout}!void {
     return self.engine.flush(timeout);
 }
@@ -73,7 +82,8 @@ pub fn flush(self: Logger, timeout: std.Io.Timeout) error{Timeout}!void {
 /// `shutdown` may wait for them again, and `deinit` drops them. `core.Deadline.toTimeout()` gives a
 /// timeout. Stop the application's own threads before; a record that
 /// another thread is writing at that moment still goes out. Blocks the OS
-/// thread.
+/// thread. Not from a handler or the writer thread: that panics in safe
+/// builds and returns `error.Timeout` otherwise.
 pub fn shutdown(self: Logger, timeout: std.Io.Timeout) error{Timeout}!void {
     return self.engine.shutdown(timeout);
 }
@@ -120,9 +130,10 @@ fn log(self: Logger, comptime level: Level, comptime message: []const u8, fields
 /// levels (and scope) on a thread of its own, through a queue of its own,
 /// so a slow handler never holds up a caller. A record goes to the
 /// subscribers before the output, so they get an error record even when
-/// the queue refuses it or stdout is closed. A logger takes 8 subscribers
-/// in its life; `unsubscribe` gives no slot back. It gets only records
-/// that pass the level filter. Its queue takes `capacity` slots of
+/// the queue refuses it or stdout is closed; a record too long for
+/// `.oversize = .drop` reaches none. A logger takes 8 subscribers in its
+/// life; `unsubscribe` gives no slot back. It gets only records that pass
+/// the level filter. Its queue takes `capacity` slots of
 /// `max_record_bytes` + 112 bytes rounded up to 128 (4224 bytes with
 /// 4 KiB records), until `deinit`.
 pub fn subscribe(self: Logger, subscription: hooks.Subscription) hooks.SubscribeError!hooks.SubscriptionId {
@@ -140,8 +151,11 @@ pub fn unsubscribe(self: Logger, id: hooks.SubscriptionId) void {
     self.engine.unsubscribe(id);
 }
 
-/// Adds an interceptor; a logger takes 8. It sees every record that
-/// passes the level filter, and drops it by returning false.
+/// Adds an interceptor for the logger's life: none can be removed, so its
+/// context, and whatever its filter reads, must outlive the logger. A
+/// logger takes 8. It sees every record that passes the level filter and
+/// is encoded (not one too long for `.oversize = .drop`), and drops it by
+/// returning false.
 pub fn use(self: Logger, interceptor: hooks.Interceptor) error{TooManyInterceptors}!void {
     return self.engine.use(interceptor);
 }
@@ -154,7 +168,10 @@ pub fn use(self: Logger, interceptor: hooks.Interceptor) error{TooManyIntercepto
 /// that; the rest are left out and counted in
 /// `stats().emergency_suppressed`, and the next one written tells how many
 /// with `"suppressed":N`. So is an emergency record logged while another
-/// one is being written on the same thread (by a field's `format`).
+/// one is being written on the same thread (by a field's `format`). A
+/// record that fits whole is never cut to make room for that count: the
+/// next one tells it then. Not from a signal handler: it takes locks that
+/// the interrupted thread may hold.
 pub fn emergency(self: Logger, comptime message: []const u8, fields: anytype) void {
     comptime field_checks.check(@TypeOf(fields));
     var hex: encode.TraceHex = undefined;
@@ -176,11 +193,11 @@ pub fn enabled(self: Logger, level: Level) bool {
 /// A handle that writes `name` as its records' scope, in place of this
 /// handle's scope. The name is copied, so it need not outlive the handle.
 /// It is kept as records write it, escaped, and cut between characters to
-/// 128 bytes (`stats().scope_names_truncated` counts it): names that agree
-/// in those 128 bytes are one scope. The first call with a new name takes a
-/// short lock; later calls only search. Past 256 names a handle logs
-/// without a scope, at the global level, and `stats().scopes_overflow`
-/// counts it.
+/// 128 bytes (`stats().scope_names_truncated` counts each such call):
+/// names that agree in those 128 bytes are one scope. The first call with
+/// a new name takes a short lock; later calls only search. Past 256 names
+/// a handle logs without a scope, at the global level, and
+/// `stats().scopes_overflow` counts each such call.
 pub fn scoped(self: Logger, name: []const u8) Logger {
     return .{ .engine = self.engine, .scope = self.engine.scope_table.find(name), .ids = self.ids };
 }
@@ -188,7 +205,8 @@ pub fn scoped(self: Logger, name: []const u8) Logger {
 /// A handle whose records carry the trace and span ids of `ctx`, in place
 /// of this handle's; a context without a trace gives a handle without them.
 /// The ids are copied, so the handle may outlive `ctx`. A deadline or a
-/// cancellation in `ctx` does not affect logging.
+/// cancellation in `ctx` does not affect logging. This is the way to log
+/// a context: a `core.Context` among the fields is a compile error.
 pub fn withContext(self: Logger, ctx: core.Context) Logger {
     var handle = self;
     handle.ids = if (ctx.trace) |t| .{ .trace_id = t.trace_id, .span_id = t.span_id } else null;
@@ -216,8 +234,9 @@ pub fn setScopeLevel(self: Logger, prefix: []const u8, level: ?Level) error{ Too
 /// `pub const std_options: std.Options = .{ .logFn = zefir.log.stdLogFn };`.
 /// std.log's scope becomes the record's scope and its text the message;
 /// std's compile-time level filter still runs first. `deinit` removes the
-/// bridge, `zefir.log.uninstallStdLog` does it earlier; both wait for the
-/// std.log calls that may still be inside this logger.
+/// bridge once the logger's threads have exited, `zefir.log.uninstallStdLog`
+/// does it earlier; both wait for the std.log calls that may still be
+/// inside this logger.
 pub fn installStdLog(self: Logger) void {
     std_log.install(self.engine);
 }
@@ -834,7 +853,7 @@ test "after a torn line, a write that sends nothing keeps it open and one that s
     try testing.expectEqual(@as(u64, 1), s.torn_lines);
 }
 
-test "past 256 scope names a handle logs without a scope, at the global level" {
+test "past 256 scope names a handle logs without a scope, at the global level, and each lookup counts" {
     var c: Capture = undefined;
     try c.open(.{ .scopes = &.{.{ .prefix = "late", .level = .debug }} });
     defer c.close();
@@ -843,8 +862,13 @@ test "past 256 scope names a handle logs without a scope, at the global level" {
     const late = c.logger.scoped("late");
     late.debug("hidden: the late handle follows the global level", .{});
     late.info("m", .{});
+    // The table keeps no names past it, so every lookup of one counts:
+    // each `scoped` call, and each std.log record, even one below the level.
+    _ = c.logger.scoped("late");
+    c.logger.installStdLog();
+    std_log.stdLogFn(.debug, .late, "hidden: std.log follows the global level too", .{});
     try c.expect(.json, &.{"\",\"level\":\"info\",\"message\":\"m\"}"});
-    try testing.expectEqual(@as(u64, 1), c.logger.stats().scopes_overflow);
+    try testing.expectEqual(@as(u64, 3), c.logger.stats().scopes_overflow);
 }
 
 test "a text scope that could pass for a field is quoted" {

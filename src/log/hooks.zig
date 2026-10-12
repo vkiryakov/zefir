@@ -15,7 +15,7 @@ const Io = std.Io;
 
 /// Subscribers a logger takes in its life, the unsubscribed ones included.
 pub const max_subscribers = 8;
-/// Interceptors a logger takes.
+/// Interceptors a logger takes in its life; none can be removed.
 pub const max_interceptors = 8;
 
 /// A record as subscribers and interceptors see it. It is valid only
@@ -33,7 +33,9 @@ pub const Event = struct {
     trace_id: ?[]const u8 = null,
     span_id: ?[]const u8 = null,
     /// The whole record in the logger's format, without its final '\n':
-    /// what goes to the output, secrets already redacted.
+    /// what goes to the output, redacted as the output is. Redaction does
+    /// not reach into std.log text or the text a type's `format` writes
+    /// (but for a `std.Uri`'s password).
     line: []const u8,
 };
 
@@ -51,12 +53,20 @@ pub const Subscription = struct {
     /// Passed to `handler` as is.
     context: ?*anyopaque = null,
     /// Runs on the subscriber's own thread, one record at a time, so it
-    /// may take its time: a network call, with its own timeout. An error
-    /// is counted in `stats().alert_failures`; the record is not retried.
-    /// It may log through the logger: those records go to the output only,
-    /// never to subscribers (in sync mode under an application Io that is
-    /// not a `std.Io.Threaded` they are dropped, see `stats().hook_errors`).
-    /// It must not call `unsubscribe`, `flush` or `shutdown`.
+    /// may take its time: a network call, with its own timeout. That thread
+    /// is the logger's, not a task of the application's `io`: under an
+    /// evented `io`, make the handler's calls through an `Io` that serves
+    /// any thread, such as a `std.Io.Threaded` of its own (deinit it after
+    /// `unsubscribe`). An error is counted in `stats().alert_failures`; the
+    /// record is not retried. It may log through the logger: what it logs
+    /// on its own thread goes to the output only, never to subscribers (in
+    /// sync mode under an application Io that is not a `std.Io.Threaded` it
+    /// is dropped, see `stats().hook_errors`). Threads and Io tasks it hands
+    /// work to (`io.async`, `io.concurrent`, a worker of the application's)
+    /// log like any caller, so their error records reach the subscribers
+    /// again and can loop: log such a failure from the handler after
+    /// `await`, or return it. It must not call `unsubscribe`, `flush` or
+    /// `shutdown`: that panics in safe builds.
     handler: Handler,
 };
 
@@ -78,12 +88,14 @@ pub const SubscribeError = error{
 };
 
 pub const Interceptor = struct {
-    /// Passed to `filter` as is.
+    /// Passed to `filter` as is. An interceptor cannot be removed, so this,
+    /// and whatever `filter` reads, must outlive the logger.
     context: ?*anyopaque = null,
     /// Runs at the caller for each record that passes the level filter,
-    /// once it is encoded, in the order the interceptors were added; false
-    /// drops the record, counted in `stats().filtered`. It must not block
-    /// or log: a record logged from it is dropped and counted in
+    /// once it is encoded (a record too long for `.oversize = .drop` never
+    /// is), in the order the interceptors were added; false drops the
+    /// record, counted in `stats().filtered`. It must not block or log: a
+    /// record logged from it is dropped and counted in
     /// `stats().hook_errors`.
     filter: *const fn (context: ?*anyopaque, event: *const Event) bool,
 };

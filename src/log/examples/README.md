@@ -109,7 +109,7 @@ level is off, so check `enabled` before costly ones.
 | wider integers (`u128`…) | `"340282366920938463463374607431768211455"` | the digits |
 | floats | the shortest form; NaN and infinities as `"NaN"`, `"+Inf"`, `"-Inf"` | without quotes |
 | strings (`[]const u8`, `[N]u8`, sentinel-terminated) | escaped; invalid UTF-8 as U+FFFD | bare when safe, else quoted |
-| bytes | `zefir.log.hex(&digest)` gives lowercase hex | the same |
+| bytes | `log.hex(&digest)` gives lowercase hex | the same |
 | optionals | `null` or the value | the same |
 | enums, errors | by name: `"active"`, `"NotFound"` | the same |
 | `union(enum)` | `{"running":3}` | `state.running=3` |
@@ -118,35 +118,60 @@ level is off, so check `enabled` before costly ones.
 | pointers | the value they point to | the same |
 | `type` | its name | the same |
 | a type with `format` (as `{f}` uses it) | its text, escaped | the same |
-| a type with `pub fn logValue(self) T` | the value it returns, logged by these rules | the same |
+| a type with `pub fn logValue(self) U` | the value it returns, logged by these rules | the same |
 
-Nesting deeper than 8 levels is written as `"[MAX_DEPTH]"`, so a cycle
-through pointers ends. What cannot be logged is a compile error at the
-call, naming the field: untagged unions, many-item and C pointers,
-`*anyopaque`, functions, error unions, `void`, positional tuples
-(`.{ id }`), and names outside `[A-Za-z0-9_.-]`.
+A pointer to an opaque type is logged through the type's `format` or
+`logValue`. Nesting deeper than 8 levels is written as `"[MAX_DEPTH]"`, so
+a cycle through pointers ends. What cannot be logged is a compile error at
+the call, naming the field: untagged unions, many-item and C pointers,
+pointers to opaque types without `format` or `logValue` (such as
+`*anyopaque`), functions, error unions, `void`, `undefined`, positional
+tuples (`.{ id }`), names outside `[A-Za-z0-9_.-]`, and a `core.Context`
+as a field or as the fields: it goes in `withContext(ctx)`. So is a
+`format` or `logValue` of another form than these, including a `format`
+that can return an error other than `error.WriteFailed` and a `logValue`
+that returns an error union or its own type: it is refused rather than
+skipped, since it may be there to hide fields. A marked type, or one with
+its own form, passed as the whole fields is refused too: log it as one
+field, `.{ .key = key }`.
 
 Names that records use themselves are reserved, also as a dotted path
 (`.service = .{ .name = … }` is `service.name`): `timestamp`, `level`,
-`message`, `service.*`, `deployment.environment.name`, `scope`, `source`,
-`trace_id`, `span_id`, `truncated`, `request_id`, `correlation_id`,
-`tenant_id`, `pid`, `thread_id`, `labels`, `suppressed`, and `src`, which
-is the call site.
+`message`, `service.name`, `service.instance.id`, `service.version`,
+`deployment.environment.name`, `scope`, `source`, `trace_id`, `span_id`,
+`truncated`, `request_id`, `correlation_id`, `tenant_id`, `pid`,
+`thread_id`, `labels`, `suppressed`, and `src`, which is the call site
+(`.source = @src()` is an error that points to `.src`). The subfields of
+`source`, `labels` and `src` are reserved too (`.@"source.file"` is an
+error); other `service.` names, such as `service.namespace`, are free.
 
 ## Secrets
 
 A type marked `pub const zefir_sensitive = true;` is written as
 `"[REDACTED]"`, also inside an optional, a pointer, a slice or an array, so
 neither its presence nor a count leaks. `confy.Secret` carries the marker.
-`zefir.log.isSensitive(T)` tells whether a type has it.
+`log.isSensitive(T)` tells whether a type has it.
 
-A field named like a secret is redacted too, at any depth and in any
-spelling (`api_key`, `apiKey`, `API_KEY`): `password`, `passwd`, `secret`,
-`client_secret`, `api_key`, `apikey`, `access_token`, `refresh_token`,
-`id_token`, `auth_token`, `authorization`, `cookie`, `set_cookie`,
-`private_key`. A string you take out of a secret yourself cannot be
-protected, and neither can the text a type's `format` writes, or what
-std.log formats.
+A field is redacted too, at any depth, when its name, or one dot-separated
+part of it, is exactly one of these names, in any case and with or
+without `_` and `-` (`api_key`, `apiKey` and `API-KEY` are one name):
+`password`, `passwd`, `secret`, `client_secret`, `secret_key`,
+`secret_access_key`, `aws_secret_access_key`, `api_key`, `apikey`,
+`access_token`, `refresh_token`, `id_token`, `auth_token`,
+`authorization`, `cookie`, `set_cookie`, `private_key`. So `db.password`
+and a nested `.db = .{ .password = … }` are redacted. Other names are
+written as they are, close ones too: `db_password`, `password_hash`,
+`token`, and `api.key` or `.api = .{ .key = … }`, since a dot or a nested
+struct separates names. Give such values a marked type, such as
+`confy.Secret`.
+
+`std.Uri` is written with its password as `[REDACTED]`
+(`postgres://app:[REDACTED]@db:5432/main`), wherever it sits; a URL
+without a password is written as std writes it. The text any other type's
+`format` writes is trusted and not redacted. Neither is what std.log
+formats: std.fmt knows no marker, so `{any}` prints a marked type's
+fields. A string you take out of a secret yourself cannot be protected
+either.
 
 ## Scopes and levels
 
@@ -167,24 +192,32 @@ a handle holds one scope, and `scoped` replaces it.
 
 `withContext(ctx)` copies the trace and span ids of a `core.Context`; a
 context without a trace gives a handle without them. Its deadline and
-cancellation do not affect logging. `.src = @src()` among the fields adds
-the call site: `"source":{"file":"users.zig","line":12}`. How much of it
-each level writes is set by `.source`: `none`, `file_line` (the default)
-or `full`, which adds the column, the function and the module.
+cancellation do not affect logging. It is the way to log a context: a
+`core.Context` among the fields is a compile error. `.src = @src()` among
+the fields adds the call site: `"source":{"file":"users.zig","line":12}`.
+How much of it each level writes is set by `.source`: `none`,
+`file_line` (the default) or `full`, which adds the column, the function
+and the module.
 
 ## std.log
 
 ```zig
-pub const std_options: std.Options = .{ .logFn = zefir.log.stdLogFn };
+pub const std_options: std.Options = .{ .logFn = log.stdLogFn };
 ...
 logger.installStdLog(); // std.log goes to the logger from here on
 ```
 
 std.log's scope becomes the record's scope and its formatted text the
-message; the logger's levels and scope rules apply. `deinit` removes the
-bridge, `zefir.log.uninstallStdLog()` does it earlier, and both wait for
-the calls still inside the logger. std.log's arguments are formatted by
-std.fmt, so redaction does not reach inside them.
+message; the logger's levels and scope rules apply. std's own
+compile-time filter runs first: outside Debug builds `std.log.debug` is
+compiled out unless `std_options` also sets `.log_level = .debug` (or a
+`.log_scope_levels` entry). `deinit` removes the bridge once the logger's
+threads have exited, so what handlers log through std.log while it waits
+for them still reaches the logger; `log.uninstallStdLog()` removes it
+earlier. Both wait for the calls still inside the logger, so
+`uninstallStdLog` must not be called from inside a log call. std.log's
+arguments are formatted by std.fmt, so redaction does not reach inside
+them.
 
 ## Output
 
@@ -202,11 +235,15 @@ in UTC with milliseconds.
 ```
 
 A record is at most `max_record_bytes` (4096 by default, at most 16384),
-`'\n'` included. A longer one is cut (`.oversize = .truncate`: the message
-loses its end, between characters, the fields that do not fit are left
-out, and it ends with `"truncated":true`) or dropped (`.drop`). Every
-record stays one line of valid JSON: quotes, control characters, line and
-paragraph separators and bidi controls are escaped.
+`'\n'` included. `init` refuses a limit too small for what every record
+may need: 304 bytes in JSON plus the service fields as JSON writes them
+(`,"service.name":"api"` adds 21), 250 in text. A longer record is cut
+(`.oversize = .truncate`: the message loses its end, between characters,
+the fields that do not fit are left out, the call site too when not even
+the cut message leaves room for it, and it ends with `"truncated":true`)
+or dropped (`.drop`). Every record stays one line of valid JSON: quotes,
+control characters, line and paragraph separators and bidi controls are
+escaped.
 
 `.output = .stdout` is the default; `.{ .writer = &writer }` sends records
 to a writer you own, as tests do.
@@ -216,7 +253,7 @@ to a writer you own, as tests do.
 | | `.sync` (default) | `.{ .queued = .{} }` |
 |---|---|---|
 | The call | encodes the record and writes it before it returns | encodes the record and copies it into a queue |
-| Output | through the application's `io`, under a lock | a writer thread, in batches, through the logger's own Io |
+| Output | through the application's `io`, under a lock | a writer thread, in batches, through the logger's own Io; a `.writer` is called on that thread |
 | Good for | tests, tools, CLIs: a record is out even if the process dies next | services: a caller never waits for stdout |
 | Memory | none | `Options.queueBytes()`: 17 MiB with the defaults |
 
@@ -229,13 +266,14 @@ to a writer you own, as tests do.
 ```
 
 A queued call takes a slot with one compare-and-swap, copies the record in
-and publishes it: no lock and no system call, unless the writer thread
-sleeps and has to be woken. Only a producer stopped between taking a slot
-and filling it holds back the records after it (they wait; none is lost).
-When the queue is full, `.drop_new` drops the record and counts it, and
-`.block` makes the caller wait for room: that blocks an OS thread, so it is
-not for event loops, zio tasks or RPC workers, and it is not fair among
-waiters.
+and publishes it: no lock and no system call, unless the writer thread (or
+a subscriber's that takes the record) sleeps and has to be woken, which at
+low rates is almost every record. Only a producer stopped between taking a
+slot and filling it holds back the records after it (they wait; none is
+lost). When the queue is full, `.drop_new` drops the record and counts it,
+and `.block` makes the caller wait for room: that blocks an OS thread, so
+it is not for event loops, zio tasks or RPC workers, and it is not fair
+among waiters.
 
 Records of one thread keep their order. Records of different threads are
 ordered as they took their slots, so timestamps can go back a little
@@ -267,12 +305,16 @@ Stop in this order: stop taking work, wait for your own threads, then
   waits only for the write and the handler calls in progress. If stdout
   is stuck for good, exit without `deinit`.
 - In sync mode `flush` returns at once, and `shutdown` waits only for the
-  subscribers.
+  subscribers. Called from a handler or the writer thread, both panic in
+  safe builds, in sync mode too.
 
 Records still queued are lost when the process ends without these steps:
-`std.process.exit`, a panic, a signal. Do not log from a signal handler: a
-sync record, or a queued one in `.block` mode, may wait for a lock or for
-room that the interrupted thread holds.
+`std.process.exit`, a panic, a signal. `emergency` writes what must be
+seen even then, before `std.process.exit` or from a panic handler. Do not
+log from a signal handler, `emergency` included: a sync record, a queued
+one in `.block` mode or an emergency record may wait for a lock or for
+room that the interrupted thread holds. Set a flag there, and log from a
+thread of your own.
 
 ## Failures and stats
 
@@ -282,31 +324,37 @@ room that the interrupted thread holds.
 |---|---|
 | `accepted` | records that passed the level filter |
 | `written` | records that reached the output whole |
-| `dropped.oversize` | too long, with `.oversize = .drop` |
+| `dropped.oversize` | too long, with `.oversize = .drop` (error records count in `dropped.err`) |
 | `dropped.write_failed` | the write failed, or stdout was closed |
 | `dropped.queue_full` | the queue was full, with `.drop_new` |
 | `dropped.closed` | logged after `shutdown` |
-| `dropped.err` | error records refused for a full queue or after `shutdown` |
+| `dropped.err` | error records refused for a full queue or after `shutdown`, or too long for `.oversize = .drop` |
 | `write_errors`, `torn_lines` | failed writes, and lines they cut short |
 | `truncated` | records cut to `max_record_bytes` |
 | `queue_depth`, `queue_capacity`, `pending` | records in the queue, its size, records not yet written |
-| `scopes_overflow`, `scope_names_truncated` | scope names past the table, or cut to 128 bytes |
+| `scopes_overflow`, `scope_names_truncated` | lookups of a scope name past the full table, or cut to 128 bytes: each `scoped` call and each std.log record counts |
 | `emergency_written`, `emergency_suppressed` | emergency records written, and left out |
 | `alert_pending` | records waiting in the subscribers' queues |
 | `alert_dropped`, `alert_failures` | records a subscriber's queue had no room for, handler errors |
 | `filtered`, `hook_errors` | records interceptors dropped on purpose; records dropped because a hook logged them |
 
-A write that fails mid-line costs that line only: the next record starts on
-a new line. If stdout is closed, the logger notes it once on stderr and
-drops the records that follow; that needs SIGPIPE ignored, as
-`main(init: std.process.Init)` does.
+A write that fails mid-line tears that line only: the next record written
+starts on a new line. The records of a failed write that did not go out
+whole are dropped and counted in `dropped.write_failed`: in sync mode that
+record, in queued mode the rest of its batch. A `.writer` with a buffer
+does not tell how much went out when it fails, so then all the records of
+that write count as dropped. If stdout is closed, the logger notes it once
+on stderr and drops the records that follow; that needs SIGPIPE ignored,
+as `main(init: std.process.Init)` does.
 
-Error records are never lost silently. When the queue refuses one, the
-writer thread writes one record in its place,
-`"message":"zefir.log: error records dropped","suppressed":N`, as soon as
-it has room; `shutdown` and `deinit` note on stderr the ones it could not
-report. Apart from these notes, a caller in queued mode never writes to
-stderr.
+Error records are never lost silently. When the queue refuses one, or one
+is too long for `.oversize = .drop`, the writer thread writes one record
+in its place, `"message":"zefir.log: error records dropped","suppressed":N`,
+after its next batch or within a second when it is idle; `shutdown` and
+`deinit` note on stderr the ones it could not report, and in sync mode,
+which has no writer thread, all of them. A record dropped for its size
+reaches no interceptor and no subscriber: there is no line to give them.
+Apart from these notes, a caller in queued mode never writes to stderr.
 
 ## Emergency records
 
@@ -315,7 +363,9 @@ stderr before it returns, past the queue, the interceptors and the
 subscribers, also after `shutdown`, and through the logger's own Io: for
 what must be seen when the regular output is stuck. At most 100 go out at
 once and 100 per second after that; the next one written tells how many
-were left out with `"suppressed":N`.
+were left out with `"suppressed":N`. A record that fits whole is never cut
+to make room for that count: the next one tells it then. Not from a signal
+handler, though: it takes locks that the interrupted thread may hold.
 
 ## Subscribers
 
@@ -329,7 +379,7 @@ const id = try logger.subscribe(.{
 ...
 logger.unsubscribe(id); // before `alerter` goes, and before `deinit`
 
-fn sendAlert(context: ?*anyopaque, event: *const zefir.log.Event) anyerror!void {
+fn sendAlert(context: ?*anyopaque, event: *const log.Event) anyerror!void {
     const alerter: *Alerter = @ptrCast(@alignCast(context.?));
     try alerter.post(event.line); // the redacted record, as the output has it
 }
@@ -339,36 +389,44 @@ Each subscriber has a queue (`capacity`, 256 records by default; a slot
 is `max_record_bytes` + 112 bytes rounded up to 128) and a thread of its
 own, so a slow handler holds up nobody else. It gets the records of its
 levels that pass the logger's level filter, before the output, so it gets
-an error record even when the queue refuses it or stdout is closed. A full
+an error record even when the queue refuses it or stdout is closed; a
+record too long for `.oversize = .drop` reaches no subscriber. A full
 subscriber queue drops the record (`alert_dropped`); a handler error is
 counted (`alert_failures`) and not retried. The `Event` gives the level,
 the timestamp, the scope and the message as the record writes them
 (escaped, and cut when the record is), the trace ids and the whole line;
 it is valid only during the call.
 
-A handler may log: those records go to the output only, never back to the
-subscribers, so an alert cannot trigger itself; while `shutdown` waits for
-the subscribers they still go out. It must not call `unsubscribe`,
-`flush` or `shutdown`. `unsubscribe` waits until the subscriber has
-handled its queue (with no time limit while the logger runs; once
-`shutdown` has begun, only for the call in hand); after it returns, the
-handler is never called again. Call it before `deinit`. A logger takes 8
-subscribers in its life.
+A handler may log: what it logs on its own thread goes to the output only,
+never back to the subscribers, so its own records cannot trigger it
+again; while `shutdown` waits for the subscribers they still go out.
+Threads and Io tasks it hands work to (`io.async`, `io.concurrent`, a
+worker of the application's) log like any caller, so their error records
+do reach the subscribers and can loop: log such a failure from the
+handler after `await`, or return it (`alert_failures`). It must not call
+`unsubscribe`, `flush` or `shutdown`: that panics in safe builds.
+`unsubscribe` waits until the subscriber has handled its queue (with no
+time limit while the logger runs; once `shutdown` has begun, only for the
+call in hand); after it returns, the handler is never called again. Call
+it before `deinit`. A logger takes 8 subscribers in its life.
 
 ## Interceptors
 
 ```zig
 try logger.use(.{ .filter = dropHealthChecks });
 
-fn dropHealthChecks(_: ?*anyopaque, event: *const zefir.log.Event) bool {
+fn dropHealthChecks(_: ?*anyopaque, event: *const log.Event) bool {
     return !std.mem.eql(u8, event.scope, "http.health");
 }
 ```
 
 An interceptor runs at the caller for every record that passes the level
-filter, once it is encoded, in the order they were added; `false` drops
-the record everywhere (`filtered`). It must not block or log: a record
-logged from it is dropped (`hook_errors`). A logger takes 8.
+filter, once it is encoded (a record too long for `.oversize = .drop`
+never is), in the order they were added; `false` drops the record
+everywhere (`filtered`). It must not block or log: a record logged from
+it is dropped (`hook_errors`). An interceptor stays until `deinit`, as
+none can be removed: its context, and whatever its filter reads, must
+outlive the logger. A logger takes 8.
 
 ## Threads and Io
 
@@ -383,17 +441,24 @@ output lock with the application's tasks, so those records are dropped
 and counted in `hook_errors`: use queued mode there. Two loggers on one
 stdout do not coordinate their writes: use one per process.
 
+The logger's threads are not tasks of your `io`: a handler runs on its
+subscriber's thread, and in queued mode the writer thread calls a
+`.writer` output. Under an evented `io`, make their calls through an `Io`
+that serves any thread, such as a `std.Io.Threaded` of their own: a
+handler must not post through the evented `io`, and a `File.Writer` made
+with it must not be the queued output.
+
 ## Limits
 
 | | |
 |---|---|
-| Record | at most 16384 bytes with `'\n'`, 4096 by default |
+| Record | at most 16384 bytes with `'\n'`, 4096 by default; at least 304 in JSON, plus the service fields, and 250 in text |
 | Service fields | 1 KiB together |
 | Scope names | 256 per logger, 128 bytes each (longer ones are cut) |
 | Scope rules | 64 |
 | Nesting | 8 levels |
 | Queue | a power of two, at least 2 records |
-| Subscribers, interceptors | 8 each |
+| Subscribers, interceptors | 8 subscribers and 8 interceptors in the logger's life |
 | Emergency records | 100 at once, then 100 per second |
 | Targets | 64-bit: the counters and queue positions are 64-bit atomics |
 
@@ -403,12 +468,15 @@ stdout do not coordinate their writes: use one per process.
 zig build bench
 ```
 
-builds `src/log/bench.zig` with ReleaseFast and prints the tables below.
-A record goes to a writer that throws it away unless a table says
-otherwise, so the numbers measure the logger rather than a terminal.
-Latency is the time one call takes, two clock reads included. CPU is the
-process's user and system time per record. The typical record is a
-request log of 185 bytes of JSON.
+builds `src/log/bench.zig` with ReleaseFast and prints the tables below;
+it also runs core's benchmarks. A record goes to a writer that throws it
+away unless a table says otherwise, so the numbers measure the logger
+rather than a terminal. Calls/s counts every call, so in the `drop_new`
+rows it includes the dropped ones (see Dropped). Latency is the time one
+call takes, two clock reads included. The command also prints the records
+written per second, the CPU time per call and the memory the logger
+allocated, which the tables leave out. The typical record is a request
+log of 185 bytes of JSON.
 
 Measured on 2026-10-12: Apple M4 (16 CPUs), macOS 26.3, Zig 0.17.0,
 ReleaseFast. The machine was busy while they ran (load average about 15),
@@ -417,7 +485,7 @@ waiting for a CPU, are noisy; run the command on your machine.
 
 **Modes and producers** (typical record, 100 000 records per producer):
 
-| Mode | Producers | Records/s | p50 ns | p99 ns | p99.9 ns | Dropped |
+| Mode | Producers | Calls/s | p50 ns | p99 ns | p99.9 ns | Dropped |
 |---|---:|---:|---:|---:|---:|---:|
 | sync | 1 | 6.5 M | 125 | 167 | 209 | 0 |
 | sync | 4 | 5.9 M | 292 | 5 083 | 10 792 | 0 |
@@ -432,7 +500,7 @@ waiting for a CPU, are noisy; run the command on your machine.
 **Outputs** (typical record, 4 producers, through a 64 KiB buffer; sync
 makes one write call per record):
 
-| Mode | Output | Records/s | p50 ns | p99 ns |
+| Mode | Output | Calls/s | p50 ns | p99 ns |
 |---|---|---:|---:|---:|
 | sync | `/dev/null` | 0.70 M | 1 791 | 37 542 |
 | sync | a pipe | 0.74 M | 1 292 | 51 792 |
@@ -444,16 +512,16 @@ makes one write call per record):
 and a 1200-byte one 2 166 ns.
 
 **Batches** (queued `block`, 8 producers, a reader that takes 20 µs per
-write): 1.1 M records/s with batches of 32, 4.9 M with 128 (the default),
+write): 1.1 M calls/s with batches of 32, 4.9 M with 128 (the default),
 5.3 M with 512.
 
 **Hooks** (queued `drop_new`, 4 producers):
 
-| Hooks | Records/s | p50 ns | p99 ns |
+| Hooks | Calls/s | p50 ns | p99 ns |
 |---|---:|---:|---:|
 | none | 6.1 M | 542 | 1 458 |
 | a subscriber on `.err` (other records pay one check) | 6.2 M | 583 | 1 416 |
-| a subscriber on `.info` (every record copied to it too) | 4.7 M | 750 | 2 000 |
+| a subscriber on `.info` with 4096 slots (every record copied to it too) | 4.7 M | 750 | 2 000 |
 | an interceptor that keeps every record | 6.3 M | 542 | 1 375 |
 
 **Bursts** (8 producers × 2000 records, queued `drop_new`, a reader stuck

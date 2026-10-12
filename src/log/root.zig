@@ -30,19 +30,26 @@
 //! as hex.
 //!
 //! A type logs its own text through the `format` method that `{f}` uses,
-//! or another value through `pub fn logValue(self) U`. Both run when the
-//! record is written, twice when it has to be cut, so they must have no
-//! side effects; `logValue` must not return slices into a by-value `self`.
-//! The text `format` writes is trusted: the logger escapes it, but redacts
-//! nothing inside it.
+//! or another value through `pub fn logValue(self) U` (an opaque type
+//! through a pointer to it). Both run when the record is written and may
+//! run more than once for it (a record that is cut is encoded again), so
+//! they must have no side effects; `logValue` must not return slices into
+//! a by-value `self`. The text `format` writes is trusted: the logger
+//! escapes it, but redacts nothing inside it. `std.Uri` is the exception:
+//! its own `format` writes the URL's password, so the logger writes that
+//! part as "[REDACTED]".
 //!
 //! A type marked `pub const zefir_sensitive = true;` (`confy.Secret` is) is
 //! written as "[REDACTED]", also inside an optional, a pointer, a slice or
-//! an array; so is any field named like a secret (`password`, `api_key`,
-//! `accessToken`, …), at any depth. Names that records use themselves
-//! (`level`, `message`, `scope`, …, also as a dotted path such as
-//! `.service = .{ .name = … }`) and types the logger cannot write are
-//! compile errors at the call.
+//! an array. So is a field, at any depth, whose name, or one dot-separated
+//! part of it, is exactly a secret name, in any case and with or without
+//! `_` and `-` (`password`, `api_key`, `accessToken`, `secret_key`, …; the
+//! full list is in `examples/README.md`). Close names such as `db_password`
+//! or a nested `api.key` are written as they are: give such values a
+//! marked type. Names that records use themselves (`level`, `message`,
+//! `scope`, …, also as a dotted path such as `.service = .{ .name = … }`),
+//! a `core.Context` (bind it with `withContext`) and types the logger
+//! cannot write are compile errors at the call.
 //!
 //! Levels change at run time: `setLevel` for the global threshold and
 //! `setScopeLevel` for a scope and its subscopes; existing handles see the
@@ -52,22 +59,27 @@
 //!
 //! With the std.log bridge, std.log's scope becomes the record's scope and
 //! its formatted text the message. The arguments are formatted by std.fmt,
-//! not walked by the logger, so redaction does not reach inside them.
+//! not walked by the logger, so redaction does not reach inside them:
+//! `{any}` prints a marked type's fields.
 //!
 //! If stdout is closed, the logger notes it once on stderr and drops the
 //! records that follow. That needs SIGPIPE ignored, as `main(init:
 //! std.process.Init)` does; a bare `main()` is killed by SIGPIPE first.
 //!
 //! In queued mode a call encodes its record, then copies it into the queue
-//! with no lock and no system call; only a producer stopped between taking
-//! a slot and filling it holds back the records after it. A full queue
-//! drops the record (`.drop_new`, counted) or makes the caller wait
-//! (`.block`, which blocks the OS thread and wakes all waiters at once,
-//! so it is not fair). Records of one thread keep their order; records of
-//! different threads are ordered as they took their slots, so timestamps
-//! can go back a little between threads. An error record the logger has to
-//! drop is never lost silently: one summary record with `"suppressed":N`
-//! takes its place.
+//! with no lock, and with no system call unless a logger thread that takes
+//! the record (the writer, or a subscriber's) sleeps and has to be woken,
+//! which at low rates is almost every record. Only a producer stopped
+//! between taking a slot and filling it holds back the records after it.
+//! A full queue drops the record (`.drop_new`, counted) or makes the
+//! caller wait (`.block`, which blocks the OS thread and wakes all waiters
+//! at once, so it is not fair). Records of one thread keep their order;
+//! records of different threads are ordered as they took their slots, so
+//! timestamps can go back a little between threads. An error record the
+//! logger has to drop (the queue is full, the logger is shut down, or the
+//! record is too long for `.oversize = .drop`) is never lost silently: one
+//! summary record with `"suppressed":N` takes its place, and `shutdown`
+//! and `deinit` note on stderr the ones no summary reported.
 //!
 //! Stop in this order: stop taking work, wait for the application's own
 //! threads, `shutdown(timeout)` (records still queued are written; later
@@ -75,20 +87,25 @@
 //! for the queue with no time limit. Records still queued are lost when the
 //! process ends without them: `std.process.exit`, a panic, a signal.
 //! `emergency(msg, fields)` writes to stderr at once, for what must be seen
-//! even then.
+//! even then: before `std.process.exit`, or from a panic handler.
 //!
-//! Do not log from a signal handler: a sync record or a queued one in
-//! `.block` mode may wait for a lock or for room that the interrupted
-//! thread holds.
+//! Do not log from a signal handler, `emergency` included: a sync record, a
+//! queued one in `.block` mode or an emergency record may wait for a lock
+//! or for room that the interrupted thread holds. Set a flag there, and log
+//! from a thread of your own.
 //!
 //! `subscribe` adds a subscriber for alerts: it gets copies of the records
 //! of its levels (and scope) on a thread and a queue of its own, before
 //! they reach the output, so it gets an error record even when the queue
-//! or stdout refuses it. Records a handler logs never return to the
-//! subscribers. `use` adds an interceptor: it sees each record at the
-//! caller, once encoded, and drops it by returning false. Both get an
-//! `Event`: the level, the time, the scope, the message, the trace ids and
-//! the whole line, valid during the call. More in `examples/README.md`.
+//! or stdout refuses it; a record too long for `.oversize = .drop` reaches
+//! no subscriber. The handler runs on that thread, which is the logger's,
+//! not a task of the application's `io`. What it logs on its own thread
+//! never returns to the subscribers; threads and Io tasks it hands work to
+//! log like any caller. `use` adds an interceptor for good, so its context
+//! must outlive the logger: it sees each record at the caller, once
+//! encoded, and drops it by returning false. Both get an `Event`: the
+//! level, the time, the scope, the message, the trace ids and the whole
+//! line, valid during the call. More in `examples/README.md`.
 
 const std = @import("std");
 const options = @import("options.zig");
@@ -103,7 +120,8 @@ pub const isSensitive = @import("core").isSensitive;
 pub const hex = @import("hex.zig").hex;
 /// The `logFn` that bridges std.log: see `Logger.installStdLog`.
 pub const stdLogFn = @import("std_log.zig").stdLogFn;
-/// Sends std.log back to `std.log.defaultLog`.
+/// Sends std.log back to `std.log.defaultLog`. It waits for the std.log
+/// calls in progress, so it must not be called from inside a log call.
 pub const uninstallStdLog = @import("std_log.zig").uninstall;
 pub const Logger = @import("Logger.zig");
 pub const Stats = @import("Engine.zig").Stats;

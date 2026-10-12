@@ -16,6 +16,12 @@ const ApiKey = struct {
     pub const zefir_sensitive = true;
 };
 
+// Check the marker, as core advises for every marked type: a missing or
+// private one fails the build here instead of leaking the key.
+comptime {
+    std.debug.assert(log.isSensitive(ApiKey));
+}
+
 /// An amount that logs as "19.99 EUR".
 const Money = struct {
     cents: i64,
@@ -31,7 +37,7 @@ const Config = struct {
         password: []const u8, // redacted by its name
         pool: struct { min: u8, max: u8 },
     },
-    api_key: ApiKey, // redacted by its type
+    vault_key: ApiKey, // redacted by its type: the name is not a secret name
     regions: []const []const u8,
 };
 
@@ -45,7 +51,7 @@ pub fn main(init: std.process.Init) !void {
     const config: Config = .{
         .port = 9000,
         .database = .{ .host = "postgres.internal", .password = "change-me", .pool = .{ .min = 2, .max = 16 } },
-        .api_key = .{ .value = "sk-live-123" },
+        .vault_key = .{ .value = "sk-live-123" },
         .regions = &.{ "eu-west", "us-east" },
     };
     logger.info("Configuration loaded", .{ .src = @src(), .config = config });

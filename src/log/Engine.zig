@@ -65,11 +65,14 @@ pub const Stats = struct {
     /// Records that broke off mid-line because a write failed; the next
     /// record starts on a new line.
     torn_lines: u64,
-    /// New scope names that found the scope table full, from `scoped` and
-    /// from std.log records; those log without a scope, at the global
+    /// Lookups of scope names the full scope table could not add: every
+    /// `scoped` call and every std.log record with such a name counts, even
+    /// a record below the level. Those log without a scope, at the global
     /// level, and each such lookup takes the table's short lock again.
     scopes_overflow: u64,
-    /// `scoped` calls whose name was cut to 128 bytes.
+    /// Lookups of scope names cut to 128 bytes: every `scoped` call and
+    /// every std.log record with such a name counts, even a record below
+    /// the level.
     scope_names_truncated: u64,
     /// Queued mode: records in the queue now, and the most it holds.
     queue_depth: u64,
@@ -133,10 +136,13 @@ scope_table: scopes.Table,
 /// What `.stdout` writes to; tests point it at a pipe.
 stdout: Io.File,
 output_lock: Io.Mutex = .init,
-/// The logger's own Io, for the stderr note about a closed stdout, so the
-/// note never depends on the application's Io.
+/// The logger's own Io. Its threads write and wait through it, and so
+/// does everything that waits for them or wakes them; emergency records
+/// and the logger's stderr notes use it too, so none of them depends on
+/// the application's Io.
 own: Io.Threaded = .init_single_threaded,
-/// Where that note goes; tests point it at a pipe.
+/// Where emergency records and the logger's notes go; tests point it at a
+/// file or a pipe.
 stderr: Io.File,
 /// Keeps the logger's own stderr lines whole; taken through its own Io.
 stderr_lock: Io.Mutex = .init,
@@ -368,7 +374,8 @@ pub fn shutdown(engine: *Engine, timeout: Io.Timeout) error{Timeout}!void {
 
 /// `flush` and `shutdown` on one of the logger's threads (an output writer
 /// or a handler that calls them) could wait for that thread itself: a
-/// panic in safe builds, `error.Timeout` at once otherwise.
+/// panic in safe builds, `error.Timeout` at once otherwise. Refused in sync
+/// mode too, where `flush` waits for nothing, so tests catch it.
 fn refuseOnOwnThread(engine: *const Engine) error{Timeout}!void {
     if (writer.thread_of != engine and hooks.subscriber_of != engine) return;
     if (std.debug.runtime_safety) @panic("zefir.log: flush or shutdown called from one of the logger's threads could wait for itself");
@@ -880,7 +887,7 @@ fn write(engine: *Engine, io: Io, buf: []u8, len: usize) void {
 
 /// Counts a write of the records ending at `ends` that failed after `sent`
 /// bytes, `lead` of them a '\n' that ends a torn line: the records sent
-/// whole are written, the rest dropped. A record cut mid-line costs that
+/// whole are written, the rest dropped. A record cut mid-line tears that
 /// line only: the next record starts with '\n'.
 fn failed(engine: *Engine, e: WriteError, ends: []const usize, sent: usize, lead: usize) void {
     var whole: usize = 0;

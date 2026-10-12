@@ -9,7 +9,8 @@ pub const placeholder = "[REDACTED]";
 
 /// Exact names, compared after lowercasing and dropping '_' and '-', so
 /// `api_key`, `apiKey` and `API-KEY` are one name. A bare `token` is left
-/// out on purpose: lexers and pagination use it.
+/// out on purpose: lexers and pagination use it. examples/README.md lists
+/// these names; keep the two in step.
 const names = [_][]const u8{
     "password",              "passwd",      "secret",        "client_secret",
     "api_key",               "apikey",      "access_token",  "refresh_token",

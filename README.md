@@ -128,6 +128,12 @@ Requires **Zig 0.17.0**. Add the dependency to your `build.zig.zon`; the latest 
 zig fetch --save git+https://github.com/vkiryakov/zefir#v0.2.0
 ```
 
+The log module is on the `dev` branch until the next release:
+
+```sh
+zig fetch --save git+https://github.com/vkiryakov/zefir#dev
+```
+
 Other versions are on the [releases page](https://github.com/vkiryakov/zefir/releases); a commit hash works too.
 
 Then import the modules you need in your `build.zig`:
