@@ -3,6 +3,12 @@
 //! connections, and stopping a client while thousands of tasks wait in it.
 //! `zig build stress` runs them in Debug and in ReleaseSafe, each on zio
 //! with one executor and again with four.
+//!
+//! They need room. The 50,000 requests are 50,000 zio tasks at once: about
+//! 1.7 GB of memory in Debug and 0.8 GB in ReleaseSafe, and stacks carved
+//! from zio's slabs, two memory mappings each, about 100,000 in all. Linux
+//! allows a process 65,530 by default (`vm.max_map_count`); raise it before
+//! a run: `sudo sysctl vm.max_map_count=262144`.
 
 const std = @import("std");
 const Io = std.Io;

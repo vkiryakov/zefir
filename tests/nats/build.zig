@@ -7,7 +7,8 @@
 //!   zig build example-<name>   start the servers, run one example, such as
 //!                              example-pub_sub
 //!   zig build stress           start the servers, run the stress tests in
-//!                              Debug and in ReleaseSafe
+//!                              Debug and in ReleaseSafe; see below for what
+//!                              they need
 //!   zig build bench            start the servers, run the benchmark,
 //!                              built with ReleaseFast unless
 //!                              -Dbench-optimize says otherwise
@@ -200,7 +201,11 @@ pub fn build(b: *std.Build) void {
     e2e_step.dependOn(&fast_bench.step);
 
     // The stress tests, in Debug and then in ReleaseSafe whatever
-    // -Doptimize says: each mode gets zefir and zio built in it.
+    // -Doptimize says: each mode gets zefir and zio built in it. They need
+    // room: 50,000 zio tasks at once take about 1.7 GB of memory in Debug
+    // and 0.8 GB in ReleaseSafe, and their stacks about 100,000 memory
+    // mappings, more than the 65,530 Linux allows a process by default:
+    // raise it first, `sudo sysctl vm.max_map_count=262144`.
     const stress_step = b.step("stress", "Run the stress tests against the NATS servers, in Debug and in ReleaseSafe");
     var after_mode: *std.Build.Step = &up.step;
     for ([_]std.lang.Optimize{ .debug, .safe }) |mode| {
