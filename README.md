@@ -51,7 +51,7 @@ Take any module on its own, or all the finished ones at once through the umbrell
 | `zefir-retry`                      | Retry policies, backoff, jitter, circuit breaker                                                           | 📋 Planned                                         |
 | **Networking & Communication**     |                                                                                                            |                                                   |
 | `zefir-http`                       | HTTP server, REST API, routing, middleware, WebSocket, SSE                                                 | 📋 Planned                                         |
-| `zefir-rpc`                        | Typed RPC over TCP and NATS, later RabbitMQ, HTTP and QUIC; streaming                                      | 📋 Planned                                         |
+| `zefir-rpc`                        | Typed RPC with pluggable transports: NATS now, HTTP (Connect) and TCP later                                | 🚧 In progress                                     |
 | `zefir-graphql`                    | GraphQL queries, mutations, subscriptions, resolvers                                                       | 📋 Planned                                         |
 | `zefir-messaging`                  | Pub/sub, message queues, consumers, backpressure                                                           | 📋 Planned                                         |
 | `zefir-nats`                       | Native async NATS client on `std.Io`: publish/subscribe, request/reply, reconnect                          | 🚧 In progress                                     |

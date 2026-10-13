@@ -24,7 +24,7 @@ imports() {
     # The validator imports nothing, but the examples of its guide log the
     # violations they find.
     validator) echo log ;;
-    rpc) echo confy ;;
+    rpc) echo core validator ;;
     orm) echo log ;;
     zefir) echo core log confy validator rpc orm ;;
     esac

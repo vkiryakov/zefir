@@ -50,7 +50,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .sanitize_thread = tsan,
         .imports = &.{
-            .{ .name = "confy", .module = confy },
+            .{ .name = "core", .module = core },
+            .{ .name = "validator", .module = validator },
         },
     });
 

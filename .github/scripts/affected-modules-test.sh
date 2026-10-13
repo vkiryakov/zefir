@@ -64,13 +64,13 @@ while IFS='|' read -r change modules <&3; do
 done 3<<'EOF'
 edit src/core/Context.zig                       | core log confy validator rpc orm zefir
 edit src/log/Logger.zig                         | log confy validator rpc orm zefir
-edit src/confy/root.zig                         | confy rpc zefir
-edit src/validator/strings.zig                  | validator zefir
+edit src/confy/root.zig                         | confy zefir
+edit src/validator/strings.zig                  | validator rpc zefir
 edit src/rpc/root.zig                           | rpc zefir
 edit src/orm/root.zig                           | orm zefir
 edit src/rpc/root.zig src/orm/root.zig          | rpc orm zefir
-edit src/confy/examples/README.md               | confy rpc zefir
-edit README.md src/validator/root.zig           | validator zefir
+edit src/confy/examples/README.md               | confy zefir
+edit README.md src/validator/root.zig           | validator rpc zefir
 edit README.md                                  |
 edit docs/plan.md docs/notes.txt                |
 edit build.zig                                  | core log confy validator rpc orm zefir
@@ -94,7 +94,7 @@ later=$(git rev-parse HEAD)
 git checkout -q --detach "$base"
 edit src/validator/root.zig
 git commit -q -am "head"
-expect "a later base" "validator zefir" "$(sh "$script" "$later" HEAD)"
+expect "a later base" "validator rpc zefir" "$(sh "$script" "$later" HEAD)"
 
 expect "--all" "core log confy validator rpc orm zefir" "$(sh "$script" --all)"
 
