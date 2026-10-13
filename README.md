@@ -211,6 +211,8 @@ zig build e2e                 # start the servers if needed, then run the tests
 zig build down                # stop the servers
 ```
 
+`zig build down` also resets the servers when a run dies half way, say while a test holds one of them paused.
+
 Branches:
 
 - `dev` — the default branch and the next version in progress: its `.version` in `build.zig.zon` is that version with `-dev`, such as `0.2.0-dev`. Every change lands here first, through a squash-merged pull request.
