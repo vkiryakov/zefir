@@ -1,6 +1,7 @@
 //! The end-to-end tests of zefir-nats against real NATS servers, on zio.
+//! The servers are those of docker-compose.yml at the repository root.
 //!
-//!   zig build e2e    start the servers of docker-compose.yml, run the tests
+//!   zig build e2e    start the servers, run the tests
 //!   zig build up     only start the servers
 //!   zig build down   stop the servers
 
@@ -12,9 +13,10 @@ pub fn build(b: *std.Build) void {
     const zefir = b.dependency("zefir", .{ .target = target, .optimize = optimize });
     const zio = b.dependency("zio", .{ .target = target, .optimize = optimize });
 
-    const up = compose(b, &.{ "up", "--detach", "--wait" });
+    const compose_file = zefir.path("docker-compose.yml");
+    const up = compose(b, compose_file, &.{ "up", "--detach", "--wait" });
     b.step("up", "Start the NATS servers and wait until they are healthy").dependOn(&up.step);
-    const down = compose(b, &.{"down"});
+    const down = compose(b, compose_file, &.{"down"});
     b.step("down", "Stop the NATS servers").dependOn(&down.step);
 
     const e2e = b.addTest(.{
@@ -39,9 +41,9 @@ pub fn build(b: *std.Build) void {
     b.step("e2e", "Run the end-to-end tests against the NATS servers").dependOn(&run.step);
 }
 
-fn compose(b: *std.Build, args: []const []const u8) *std.Build.Step.Run {
+fn compose(b: *std.Build, file: std.Build.LazyPath, args: []const []const u8) *std.Build.Step.Run {
     const run = b.addSystemCommand(&.{ "docker", "compose", "--file" });
-    run.addFileArg(b.path("docker-compose.yml"));
+    run.addFileArg(file);
     run.addArgs(args);
     run.has_side_effects = true;
     return run;

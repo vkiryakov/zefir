@@ -1,24 +1,26 @@
-# The NATS servers of the end-to-end tests. `zig build e2e` starts them and
-# waits until they are healthy; `zig build down` stops them. Every port is
-# published on 127.0.0.1 only:
+# The NATS servers of the end-to-end tests of nats, in tests/nats. From here,
+# `docker compose up -d --wait` starts them and waits until they are
+# healthy, and `docker compose down` stops them; in tests/nats,
+# `zig build e2e` starts them too and `zig build down` stops them. Every
+# port is published on 127.0.0.1 only:
 #
 #   14222  plain, no authentication
-#   14223  users and passwords (conf/auth.conf)
+#   14223  users and passwords (tests/nats/conf/auth.conf)
 #   14224  TLS required
 #   14225  TLS first: no INFO before the TLS handshake
 #   14226  cluster node a, 14227 node b, 14228 node c
 #   14229  plain, for tests that pause it: a server that stops reading
 #
-# certs/ holds a self-signed certificate for the TLS servers, valid for 100
-# years. The client does not do TLS; the servers need it to start.
+# tests/nats/certs holds a self-signed certificate for the TLS servers, valid
+# for 100 years. The client does not do TLS; the servers need it to start.
 
 name: zefir-nats-e2e
 
 x-nats: &nats
   image: nats:2.15.0-alpine
   volumes:
-    - ./conf:/conf:ro
-    - ./certs:/certs:ro
+    - ./tests/nats/conf:/conf:ro
+    - ./tests/nats/certs:/certs:ro
   healthcheck:
     test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8222/healthz"]
     interval: 1s

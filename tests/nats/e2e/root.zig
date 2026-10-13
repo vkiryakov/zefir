@@ -1,4 +1,5 @@
-//! End-to-end tests of zefir-nats against the servers of docker-compose.yml.
+//! End-to-end tests of zefir-nats against the servers of the repository's
+//! docker-compose.yml.
 //! Every scenario runs on zio with one executor and again with four, and
 //! sees only `std.Io`.
 

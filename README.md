@@ -202,12 +202,13 @@ zig build test --summary all                                                    
 zig fmt --check build.zig build.zig.zon src tests --exclude tests/nats/zig-pkg   # check formatting
 ```
 
-The end-to-end tests of nats run against real NATS servers in Docker. They are a package of their own in `tests/nats`, so zio, the runtime they use, never reaches zefir's users:
+The end-to-end tests of nats run against real NATS servers in Docker, described by `docker-compose.yml` at the repository root. The tests are a package of their own in `tests/nats`, so zio, the runtime they use, never reaches zefir's users:
 
 ```sh
+docker compose up -d --wait   # start the servers, from the repository root
 cd tests/nats
-zig build e2e    # start the servers with Docker Compose, then run the tests
-zig build down   # stop the servers
+zig build e2e                 # start the servers if needed, then run the tests
+zig build down                # stop the servers
 ```
 
 Branches:
