@@ -108,8 +108,8 @@ fn fiftyThousand(io: Io) !void {
     const held = counting.current.load(.monotonic) - before;
     const limits: nats.Limits = .{};
     const bound = limits.outbound_bytes + 64 * 1024 + count * bytes_per_request;
-    std.debug.print("  50,000 requests: {d} ms; client heap: peak {d} KiB (bound {d} KiB), {d} KiB held after; process max RSS {d} MiB\n", .{
-        took.toMilliseconds(), peak / 1024, bound / 1024, held / 1024, stress.maxRssKiB() / 1024,
+    std.debug.print("  50,000 requests: {d} ms; client heap: peak {d} KiB (bound {d} KiB), {d} KiB held after; process max RSS {?d} MiB\n", .{
+        took.toMilliseconds(), peak / 1024, bound / 1024, held / 1024, stress.maxRssMiB(),
     });
     if (ok.load(.monotonic) != count) {
         std.debug.print("  {d} ok, {d} failed\n", .{ ok.load(.monotonic), failed.load(.monotonic) });

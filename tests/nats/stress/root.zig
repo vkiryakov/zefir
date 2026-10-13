@@ -87,12 +87,15 @@ pub fn elapsedSince(io: Io, start: Io.Timestamp) Io.Duration {
     return start.durationTo(Io.Clock.awake.now(io));
 }
 
-/// The most memory the process has held so far, in KiB.
-pub fn maxRssKiB() usize {
+/// The most memory the process has held so far, in MiB; null where the
+/// system does not say (Windows).
+pub fn maxRssMiB() ?usize {
+    const os = @import("builtin").os.tag;
+    if (os == .windows) return null;
     const usage = std.posix.getrusage(std.posix.rusage.SELF);
     const max: usize = @intCast(usage.maxrss);
     // macOS reports bytes, Linux KiB.
-    return if (@import("builtin").os.tag.isDarwin()) max / 1024 else max;
+    return if (os.isDarwin()) max / (1024 * 1024) else max / 1024;
 }
 
 test {
