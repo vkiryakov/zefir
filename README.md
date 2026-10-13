@@ -4,7 +4,7 @@
 
 <p align="center">
   <strong>A modular framework for building services in Zig.</strong><br>
-  Web servers, web services and APIs, built from modules you pick: typed configuration, request deadlines, cancellation, tracing, structured logging and validation today; a NATS client, RPC, an async MongoDB driver with an ODM, and an HTTP server next.
+  Web servers, web services and APIs, built from modules you pick: typed configuration, request deadlines, cancellation, tracing, structured logging, validation and a NATS client today; RPC, an async MongoDB driver with an ODM, and an HTTP server next.
 </p>
 
 <p align="center">
@@ -54,7 +54,7 @@ Take any module on its own, or all the finished ones at once through the umbrell
 | `zefir-rpc`                        | Typed RPC over TCP and NATS, later RabbitMQ, HTTP and QUIC; streaming                                      | 📋 Planned                                         |
 | `zefir-graphql`                    | GraphQL queries, mutations, subscriptions, resolvers                                                       | 📋 Planned                                         |
 | `zefir-messaging`                  | Pub/sub, message queues, consumers, backpressure                                                           | 📋 Planned                                         |
-| `zefir-nats`                       | Native async NATS client on `std.Io`: publish/subscribe, request/reply, reconnect                          | 🚧 In progress                                     |
+| `zefir-nats`                       | Native async NATS client on `std.Io`: publish/subscribe, request/reply, reconnect                          | ✅ Done · [docs](src/nats/examples/README.md)      |
 | `zefir-zmq`                        | ZeroMQ / ZMTP integration                                                                                  | 📋 Planned                                         |
 | `zefir-grpc`                       | gRPC interoperability                                                                                      | 📋 Planned                                         |
 | **Database & Persistence**         |                                                                                                            |                                                   |
@@ -180,6 +180,45 @@ pub fn main(init: std.process.Init) !void {
 
 Every record is one line of JSON on stdout, ready for a log collector. The fields are checked when the program compiles, secrets come out as `[REDACTED]`, levels change while the service runs, and a queued mode keeps stdout off the request path. **[Read the log guide →](src/log/examples/README.md)**
 
+## nats in a minute
+
+Connect to a NATS server, subscribe to a subject, publish to it and take the message. The client runs on any `std.Io` with real concurrency; [zio](https://github.com/lalinsky/zio) is the one for services:
+
+```zig
+const std = @import("std");
+const nats = @import("nats");
+const zio = @import("zio");
+
+pub fn main(init: std.process.Init) !void {
+    const rt = try zio.Runtime.init(init.gpa, .{});
+    defer rt.deinit();
+
+    var client: nats.Client = try .init(init.gpa, rt.io(), .{ .servers = &.{"nats://127.0.0.1:4222"} });
+    defer client.deinit();
+    try client.connect();
+
+    const orders = try client.subscribe("orders.>", .{});
+    defer orders.deinit();
+    try client.flush(.{});
+
+    try client.publish("orders.created", "{\"id\":1001}");
+
+    var msg = (try orders.next(.{})) orelse return;
+    defer msg.deinit();
+    std.log.info("{s}: {s}", .{ msg.subject, msg.payload });
+}
+```
+
+```text
+$ docker run --rm -d -p 4222:4222 nats:2.15.0-alpine
+$ zig build run -Doptimize=ReleaseSafe
+info: orders.created: {"id":1001}
+```
+
+A Debug build also shows the client's own `debug(nats)` records: connecting, connected, closing.
+
+`flush` waits until the server has the subscription, and `publish` returns once a copy of the message is in the client's queue. Every queue has a limit, a dropped connection comes back with its subscriptions, all requests share one reply subscription, and `drain()` stops a service without losing the work it took. **[Read the nats guide →](src/nats/examples/README.md)**
+
 ## Installation
 
 Requires **Zig 0.17.0**. Add the dependency to your `build.zig.zon`. This is the `dev` branch, the next version in progress, so the command fetches its latest commit:
@@ -236,7 +275,10 @@ The end-to-end tests of nats run against real NATS servers in Docker, described 
 ```sh
 docker compose up -d --wait   # start the servers, from the repository root
 cd tests/nats
-zig build e2e                 # start the servers if needed, then run the tests
+zig build e2e                 # start the servers if needed, run the tests, then the examples
+zig build example-pub_sub     # run one example of src/nats/examples and show what it prints
+zig build stress              # the stress tests, in Debug and in ReleaseSafe
+zig build bench               # the benchmark, built with ReleaseFast
 zig build down                # stop the servers
 ```
 
