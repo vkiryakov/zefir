@@ -124,6 +124,9 @@ pub fn unsubscribe(sub: *Subscription) UnsubscribeError!void {
     }
     Registry.queueUnsub(&client.outbound, io, sub.sid) catch |err| switch (err) {
         error.Closed => return error.ConnectionClosed,
+        // Never for an UNSUB: without a connection the next one simply
+        // does not subscribe again.
+        error.Disconnected => {},
         else => |e| return e,
     };
 }

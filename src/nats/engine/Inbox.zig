@@ -96,9 +96,11 @@ pub const End = enum {
 /// A request waiting for its one reply; it lives on the requesting task's
 /// stack, and only the inbox's mutex guards it.
 pub const Waiter = struct {
-    /// Set when the reply came or the inbox ended.
+    /// Set when the reply came, the connection was lost or the inbox ended.
     done: Io.Event = .unset,
     reply: ?Message = null,
+    /// Why the request ends without a reply.
+    failure: ?End = null,
     /// In the pending map.
     listed: bool = false,
 };
@@ -277,9 +279,10 @@ pub fn await(inbox: *Inbox, io: Io, id: u64, waiter: *Waiter, deadline: Io.Clock
         return reply;
     }
     if (canceled) return error.Canceled;
-    // Without a reply, only the end of the inbox sets the event.
+    // Without a reply, only a lost connection or the end of the inbox sets
+    // the event.
     if (waiter.done.isSet()) {
-        if (inbox.ended) |how| return how.err();
+        if (waiter.failure) |how| return how.err();
     }
     return error.Timeout;
 }
@@ -412,7 +415,10 @@ pub fn end(inbox: *Inbox, io: Io, how: End) void {
     if (inbox.ended == .closed or (inbox.ended != null and how != .closed)) return;
     inbox.ended = how;
     for (inbox.pending.values()) |entry| switch (entry) {
-        .single => |waiter| waiter.done.set(io),
+        .single => |waiter| {
+            waiter.failure = how;
+            waiter.done.set(io);
+        },
         .many => {},
     };
     // Every stream, those that ended too: after close() their next() is
@@ -429,6 +435,43 @@ pub fn end(inbox: *Inbox, io: Io, how: End) void {
         _ = responses.messages.end(io, stream_end, how == .closed);
     }
     inbox.changed.wake(io);
+}
+
+/// The connection is lost and the client reconnects: every waiting request
+/// fails with Disconnected at once, streams hand out what came and then
+/// say Disconnected, and all of them leave the pending map, so replies
+/// that still come are late. The inbox goes on for the requests to come;
+/// the next connection subscribes it again, with the same subject and SID.
+pub fn disconnect(inbox: *Inbox, io: Io) void {
+    inbox.mutex.lockUncancelable(io);
+    defer inbox.mutex.unlock(io);
+    if (inbox.ended != null) return;
+    for (inbox.pending.values()) |entry| switch (entry) {
+        .single => |waiter| {
+            waiter.listed = false;
+            waiter.failure = .disconnected;
+            waiter.done.set(io);
+        },
+        .many => |responses| {
+            responses.listed = false;
+            _ = responses.messages.end(io, .disconnected, false);
+        },
+    };
+    inbox.pending.clearRetainingCapacity();
+}
+
+/// What a new connection must subscribe to for the inbox: its subject,
+/// written into `subject`, and the SID it returns; null when no request
+/// made the inbox yet, or it ended for good.
+pub fn restoreSub(inbox: *Inbox, io: Io, subject: *[prefix_len + 1]u8) ?u64 {
+    inbox.mutex.lockUncancelable(io);
+    defer inbox.mutex.unlock(io);
+    if (inbox.ended != null) return null;
+    const sid = inbox.sid.load(.acquire);
+    if (sid == 0) return null;
+    @memcpy(subject[0..prefix_len], &inbox.prefix);
+    subject[prefix_len] = '*';
+    return sid;
 }
 
 /// Frees what the inbox holds, the streams of requestMany not freed yet
@@ -1092,4 +1135,43 @@ test "a refusal names the inbox by its SID too" {
     try testing.expect(inbox.deny(io, .{ .operation = .subscribe, .subject = "anything", .sid = 7 }));
     var waiter: Waiter = .{};
     try testing.expectError(error.PermissionDenied, inbox.add(io, testing.allocator, .{ .single = &waiter }, 10));
+}
+
+test "a lost connection fails the waiting requests at once, and the inbox goes on" {
+    const io = testing.io;
+    var inbox = testInbox();
+    defer inbox.deinit(testing.allocator);
+    inbox.sid.store(7, .release);
+    var a = try io.concurrent(addAndAwait, .{ &inbox, io, soon(io) });
+    defer if (a.cancel(io)) |m| release(m) else |_| {};
+    try awaitAwaiting(&inbox, io, 1);
+    const responses = try addStream(&inbox, io, soon(io), .{ .messages = 4, .bytes = 1024 });
+    _ = inbox.deliver(io, responses.id, try testReply("r", null, "came"));
+
+    inbox.disconnect(io);
+    try expectNoReply(a.await(io), error.Disconnected);
+    try expectQueued(responses, "came");
+    try testing.expectError(error.Disconnected, responses.messages.next(io, .none));
+    try testing.expectEqual(0, inbox.pendingCount(io));
+    // A reply to a request of the lost connection is late.
+    try testing.expectEqual(.late, inbox.deliver(io, responses.id, try testReply("r", null, "late")));
+
+    // New requests wait as before, and the next connection subscribes the
+    // inbox again under its SID.
+    var b = try io.concurrent(addAndAwait, .{ &inbox, io, soon(io) });
+    defer if (b.cancel(io)) |m| release(m) else |_| {};
+    try awaitAwaiting(&inbox, io, 1);
+    var subject: [prefix_len + 1]u8 = undefined;
+    try testing.expectEqual(7, inbox.restoreSub(io, &subject).?);
+    try testing.expectEqualStrings("_INBOX.tokentokentokentoken42.*", &subject);
+    inbox.end(io, .closed);
+    try expectNoReply(b.await(io), error.ConnectionClosed);
+    try testing.expect(inbox.restoreSub(io, &subject) == null);
+}
+
+test "an inbox no request made has nothing to restore" {
+    var inbox = testInbox();
+    defer inbox.deinit(testing.allocator);
+    var subject: [prefix_len + 1]u8 = undefined;
+    try testing.expect(inbox.restoreSub(testing.io, &subject) == null);
 }

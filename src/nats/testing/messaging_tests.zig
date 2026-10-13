@@ -713,7 +713,7 @@ test "max_messages counts the messages dropped too, then the subscription ends" 
 
 test "a message cut short by the server is freed" {
     var s: Scripted = undefined;
-    try s.start(testing.allocator, .{ .servers = &.{} }, &.{
+    try s.start(testing.allocator, .{ .servers = &.{}, .reconnect = .{ .enabled = false } }, &.{
         .{ .expect = "SUB foo 1" },
         .{ .send = "MSG foo 1 100\r\nonly a part of it" },
         .hang_up,
@@ -721,8 +721,8 @@ test "a message cut short by the server is freed" {
     defer s.deinit();
     const foo = try s.client.subscribe("foo", .{});
     defer foo.deinit();
-    // The client closes with the connection; testing.allocator reports
-    // the message if it leaks.
+    // With reconnect off the client closes with the connection;
+    // testing.allocator reports the message if it leaks.
     try testing.expectError(error.ConnectionClosed, foo.next(within_five_seconds));
     try s.server.await(testing.io);
 }

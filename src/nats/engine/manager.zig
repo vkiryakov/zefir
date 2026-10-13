@@ -1,9 +1,11 @@
 //! The client's tasks. The manager opens the connection, starts its reader
 //! and writer and sends heartbeat PINGs. When the connection must end, it
-//! takes it down in order: the queues close and wake their waiters, the
+//! takes it down in order: the queues stop and wake their waiters, the
 //! socket is shut down, the reader and writer are canceled and awaited, and
-//! only then does the socket close. In this version the client closes with
-//! its connection.
+//! only then does the socket close. Then it connects again, as the
+//! reconnect options say, going round the pool of servers, and a new
+//! connection first subscribes to everything the old one had; or the client
+//! closes.
 //!
 //! A task blocked on a socket is never left to cancellation alone: code a
 //! task calls may swallow `error.Canceled` (std's stack capture in a Debug
@@ -22,6 +24,8 @@ const server_error = @import("../protocol/server_error.zig");
 const Connection = @import("Connection.zig");
 const Registry = @import("Registry.zig");
 const Pool = @import("Pool.zig");
+const Inbox = @import("Inbox.zig");
+const backoff = @import("backoff.zig");
 const incoming = @import("incoming.zig");
 const dialer = @import("connect.zig");
 const time = @import("time.zig");
@@ -47,19 +51,112 @@ pub const Exit = union(enum) {
 
 /// The manager task: from `connect()` until the client closes.
 pub fn run(client: *Client) void {
+    var next: ?Opened = if (client.options.options.retry_initial_connect)
+        reconnect(client)
+    else
+        openFirst(client) catch |err| {
+            connectFailed(client, err);
+            return;
+        };
+    while (next) |opened| {
+        const server = opened.server;
+        const exit = serve(client, opened) orelse return;
+        next = if (teardown(client, server, exit)) reconnect(client) else null;
+    }
+}
+
+/// Makes `opened` the client's connection and keeps it until it must end;
+/// null when its reader or writer could not start, and the client closed.
+fn serve(client: *Client, opened: Opened) ?Exit {
     const io = client.io;
-    const opened = openFirst(client) catch |err| {
-        connectFailed(client, err);
-        return;
-    };
     client.connection = opened.connection;
     // Before the reader starts: an INFO it reads is newer than this one.
     adopt(client, opened.server, opened.greeting);
-    client.connection_tasks.concurrent(io, readLoop, .{client}) catch |err| return abandon(client, err);
-    client.connection_tasks.concurrent(io, writeLoop, .{client}) catch |err| return abandon(client, err);
+    client.connection_tasks.concurrent(io, readLoop, .{client}) catch |err| {
+        abandon(client, err);
+        return null;
+    };
+    client.connection_tasks.concurrent(io, writeLoop, .{client}) catch |err| {
+        abandon(client, err);
+        return null;
+    };
     log.debug("connected to {f}", .{opened.server});
     connected(client);
-    teardown(client, opened.server, heartbeat(client));
+    return heartbeat(client);
+}
+
+/// Connects again after the connection was lost, or for the first time
+/// with `retry_initial_connect`: the first attempt at once, then after
+/// growing waits, going round the pool. Null when the client closed, or
+/// gave up after `max_attempts` failures in a row and closed.
+fn reconnect(client: *Client) ?Opened {
+    const io = client.io;
+    const options = &client.options.options;
+    if (!beginReconnecting(client)) return null;
+    var failures: u32 = 0;
+    while (true) {
+        if (failures > 0) {
+            const wait = backoff.delay(options.reconnect, failures, randomNumber(io));
+            if (awaitExit(client, time.after(io, wait)) != null) return null;
+        }
+        const server = client.pool.next(io);
+        var state: AttemptState = .{};
+        if (!track(client, &state)) return null;
+        defer untrack(client);
+        log.debug("reconnecting to {f}", .{server});
+        const deadline = time.after(io, options.connect_timeout);
+        const abort: dialer.Abort = .{ .context = &state, .function = AttemptState.abort };
+        if (dialer.race(io, deadline, attempt, .{ client, &server, &state }, Opened.release, abort)) |opened| {
+            if (restored(client, opened)) return opened;
+        } else |err| switch (err) {
+            // close() stops the attempts.
+            error.Canceled => return null,
+            error.ConcurrencyUnavailable => {
+                giveUp(client);
+                return null;
+            },
+            else => log.debug("could not reconnect to {f}: {t}", .{ server, err }),
+        }
+        failures +|= 1;
+        if (options.reconnect.max_attempts) |max| {
+            if (failures >= max) {
+                log.debug("no connection after {d} attempts: closing", .{failures});
+                giveUp(client);
+                return null;
+            }
+        }
+    }
+}
+
+/// The new connection first subscribes to everything the subscriptions
+/// and the inbox had, before any frame that waits; false, and the
+/// connection is dropped, when there is no memory for that or the client
+/// closed.
+fn restored(client: *Client, opened: Opened) bool {
+    client.outbound.restore(client.io, client, restoreFrames) catch |err| {
+        if (err == error.OutOfMemory) log.warn("no memory to subscribe again on {f}: connection dropped", .{opened.server});
+        Opened.release(client.io, opened);
+        return false;
+    };
+    return true;
+}
+
+/// SUB of every subscription that still takes messages and of the inbox,
+/// with the SIDs they had, and `UNSUB sid n` for those that end after a
+/// number of messages. It runs under the outbound queue's mutex.
+fn restoreFrames(client: *Client, gpa: Allocator) Allocator.Error![]u8 {
+    var w: Io.Writer.Allocating = .init(gpa);
+    errdefer w.deinit();
+    var subject: [Inbox.prefix_len + 1]u8 = undefined;
+    const inbox: ?Registry.Resubscribe = if (client.inbox.restoreSub(client.io, &subject)) |sid| .{ .subject = &subject, .sid = sid } else null;
+    client.subscriptions.writeRestore(client.io, &w.writer, inbox) catch return error.OutOfMemory;
+    return w.toOwnedSlice();
+}
+
+fn randomNumber(io: Io) u64 {
+    var bytes: [8]u8 = undefined;
+    io.random(&bytes);
+    return std.mem.readInt(u64, &bytes, .little);
 }
 
 /// A connection that passed the handshake.
@@ -89,7 +186,8 @@ fn openFirst(client: *Client) Client.ConnectError!Opened {
         const deadline = time.after(io, client.options.options.connect_timeout);
         const abort: dialer.Abort = .{ .context = &state, .function = AttemptState.abort };
         if (dialer.race(io, deadline, attempt, .{ client, &server, &state }, Opened.release, abort)) |opened| {
-            return opened;
+            if (restored(client, opened)) return opened;
+            last_error = error.OutOfMemory;
         } else |err| switch (err) {
             // close() stops the attempts, and a server that refuses the
             // credentials ends them.
@@ -169,13 +267,15 @@ fn shutdown(io: Io, stream: Io.net.Stream) void {
     stream.shutdown(io, .both) catch {};
 }
 
-/// The reader or writer could not start: the connection is dropped.
+/// The reader or writer could not start: the connection is dropped, and
+/// the client closes.
 fn abandon(client: *Client, err: Io.ConcurrentError) void {
     const io = client.io;
     shutdown(io, client.connection.stream);
     client.connection_tasks.cancel(io);
     client.connection.stream.close(io);
     connectFailed(client, err);
+    client.inbox.end(io, .closed);
     disconnected(client);
 }
 
@@ -189,16 +289,19 @@ fn heartbeat(client: *Client) Exit {
         if (client.outbound.pingsOut(io) >= options.max_outstanding_pings) return .stale;
         _ = client.outbound.putPing(io, .heartbeat) catch |err| switch (err) {
             error.Closed => return .closed,
+            // The connection is being taken down: the exit comes next.
+            error.Disconnected => {},
             error.OutOfMemory => log.warn("no memory for a heartbeat PING", .{}),
         };
     }
 }
 
-/// Takes the connection down: the queues close and wake their waiters, the
+/// Takes the connection down: the queues stop and wake their waiters, the
 /// socket is shut down so that no read or write blocks any more, the reader
 /// and writer are canceled and awaited, and only then does the socket
-/// close. Nothing here can be canceled.
-fn teardown(client: *Client, server: ServerAddress, exit: Exit) void {
+/// close. True when the client goes on to reconnect; otherwise it is
+/// closed. Nothing here can be canceled.
+fn teardown(client: *Client, server: ServerAddress, exit: Exit) bool {
     const io = client.io;
     switch (exit) {
         .closed => log.debug("connection to {f} closed", .{server}),
@@ -209,13 +312,65 @@ fn teardown(client: *Client, server: ServerAddress, exit: Exit) void {
         .read => |err| log.debug("reading from {f} failed: {t}", .{ server, err }),
         .write => |err| log.debug("writing to {f} failed: {t}", .{ server, err }),
     }
+    const again = lost(client, exit);
     // Before the outbound queue wakes them, requests learn why.
-    client.inbox.end(io, if (exit == .closed) .closed else .disconnected);
-    client.outbound.close(io);
+    if (again) {
+        client.inbox.disconnect(io);
+        client.outbound.halt(io);
+    } else {
+        client.inbox.end(io, if (exit == .closed) .closed else .disconnected);
+        client.outbound.close(io);
+    }
     shutdown(io, client.connection.stream);
     client.connection_tasks.cancel(io);
     client.connection.stream.close(io);
-    disconnected(client);
+    if (!again) {
+        disconnected(client);
+        return false;
+    }
+    // Nothing the connection left is sent again.
+    client.outbound.settle(io);
+    return true;
+}
+
+/// The connection is gone: true when the client reconnects, and it is
+/// reconnecting from now on. Not after `close()`, during drain, or with
+/// reconnect off.
+fn lost(client: *Client, exit: Exit) bool {
+    client.mutex.lockUncancelable(client.io);
+    defer client.mutex.unlock(client.io);
+    client.server = null;
+    if (client.info_json) |json| client.gpa.free(json);
+    client.info_json = null;
+    const again = exit != .closed and client.status == .connected and client.options.options.reconnect.enabled;
+    if (again) client.status = .reconnecting;
+    client.changed.broadcast(client.io);
+    return again;
+}
+
+/// Reconnecting starts: false when the client closed meanwhile.
+fn beginReconnecting(client: *Client) bool {
+    client.mutex.lockUncancelable(client.io);
+    defer client.mutex.unlock(client.io);
+    if (client.status == .closed) return false;
+    client.exit = null;
+    return true;
+}
+
+/// The client gives up reconnecting and closes: every task waiting in it
+/// gets ConnectionClosed.
+fn giveUp(client: *Client) void {
+    const io = client.io;
+    {
+        client.mutex.lockUncancelable(io);
+        defer client.mutex.unlock(io);
+        client.status = .closed;
+        if (client.exit == null) client.exit = .closed;
+        client.changed.broadcast(io);
+    }
+    client.inbox.end(io, .closed);
+    client.outbound.close(io);
+    client.subscriptions.closeAll(io);
 }
 
 /// The reader task of a connection: frames from the server.
@@ -451,7 +606,7 @@ fn maxPayload(announced: i64) u64 {
 fn connected(client: *Client) void {
     client.mutex.lockUncancelable(client.io);
     defer client.mutex.unlock(client.io);
-    if (client.status == .connecting) client.status = .connected;
+    if (client.status == .connecting or client.status == .reconnecting) client.status = .connected;
     client.changed.broadcast(client.io);
 }
 

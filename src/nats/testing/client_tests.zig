@@ -173,6 +173,7 @@ test "a server that stops answering is dropped after max_outstanding_pings PINGs
         .servers = &.{try FakeServer.url(&listener, &url)},
         .ping_interval = .fromMilliseconds(50),
         .max_outstanding_pings = 2,
+        .reconnect = .{ .enabled = false },
     });
     defer client.deinit();
     const start = Io.Clock.awake.now(io);
@@ -195,14 +196,14 @@ fn serveAndHangUp(io: Io, listener: *net.Server) !void {
     try peer.expectLine("PING");
 }
 
-test "a server that hangs up closes the client, and a waiting flush learns it" {
+test "with reconnect off, a server that hangs up closes the client, and a waiting flush learns it" {
     const io = testing.io;
     var listener = try FakeServer.listen(io);
     defer listener.deinit(io);
     var server = try io.concurrent(serveAndHangUp, .{ io, &listener });
     defer server.cancel(io) catch {};
     var url: [64]u8 = undefined;
-    var client: Client = try .init(testing.allocator, io, .{ .servers = &.{try FakeServer.url(&listener, &url)} });
+    var client: Client = try .init(testing.allocator, io, .{ .servers = &.{try FakeServer.url(&listener, &url)}, .reconnect = .{ .enabled = false } });
     defer client.deinit();
     try client.connect();
     try testing.expectError(error.ConnectionClosed, client.flush(quick));
@@ -337,7 +338,7 @@ fn serveFatalError(io: Io, listener: *net.Server) !void {
     _ = try peer.readToEnd();
 }
 
-test "a -ERR that ends the connection closes the client" {
+test "with reconnect off, a -ERR that ends the connection closes the client" {
     // The client logs the server's error as a warning; this test expects it.
     const level = testing.log_level;
     testing.log_level = .err;
@@ -348,7 +349,7 @@ test "a -ERR that ends the connection closes the client" {
     var server = try io.concurrent(serveFatalError, .{ io, &listener });
     defer server.cancel(io) catch {};
     var url: [64]u8 = undefined;
-    var client: Client = try .init(testing.allocator, io, .{ .servers = &.{try FakeServer.url(&listener, &url)} });
+    var client: Client = try .init(testing.allocator, io, .{ .servers = &.{try FakeServer.url(&listener, &url)}, .reconnect = .{ .enabled = false } });
     defer client.deinit();
     try client.connect();
     try testing.expectError(error.ConnectionClosed, client.flush(quick));

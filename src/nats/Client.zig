@@ -15,8 +15,12 @@
 //! `std.Io.Threaded` or zio; without it `connect()` fails with
 //! ConcurrencyUnavailable.
 //!
-//! In this version a lost connection closes the client, ends its
-//! subscriptions and fails its requests with Disconnected.
+//! When the connection is lost, the client reconnects as
+//! `options.reconnect` says, going round its servers and those the cluster
+//! announces, and subscribes again to everything it had; requests waiting
+//! for replies fail with Disconnected at once. Meanwhile `state()` is
+//! `.reconnecting`, publishes and new requests fail with Disconnected,
+//! flushes too, and new subscriptions go out once connected again.
 //!
 //! The fields are internal: use the methods. Tests may ask
 //! `outbound.roomWaiters()` whether a publish waits for room, and
@@ -122,7 +126,8 @@ pub const ConnectError = error{
 } || dialer.DialError || Connection.HandshakeError;
 
 pub const FlushError = error{
-    /// Not connected yet.
+    /// Not connected: not yet, or reconnecting; also when the connection
+    /// is lost while the flush waits.
     Disconnected,
     ConnectionClosed,
     Timeout,
@@ -261,8 +266,10 @@ pub const SubscribeError = error{
 };
 
 /// Subscribes to `subject`, which may hold wildcards. The SUB is queued
-/// before this returns; `flush` makes sure the server has it. The
-/// subscription is the client's: free it with its `deinit()`.
+/// before this returns; `flush` makes sure the server has it. While the
+/// client reconnects, the SUB goes out once it is connected again, as for
+/// every subscription. The subscription is the client's: free it with its
+/// `deinit()`.
 pub fn subscribe(client: *Client, subject: []const u8, options: Subscription.Options) SubscribeError!*Subscription {
     try subjects.validateSubscribe(subject);
     if (options.queue) |queue| {
@@ -309,13 +316,15 @@ fn subscribeLen(subject: []const u8, queue: ?[]const u8, sid: u64, max: ?u64) us
 /// What publishing needs to know about the current connection.
 const ServerFacts = struct { headers: bool, max_payload: u64 };
 
+/// While reconnecting, the facts are those of the last connection; the
+/// outbound queue decides what may wait for the next one.
 fn currentServer(client: *Client) error{ Disconnected, ConnectionClosed }!ServerFacts {
     client.mutex.lockUncancelable(client.io);
     defer client.mutex.unlock(client.io);
     return switch (client.status) {
-        .connected => .{ .headers = client.server_headers, .max_payload = client.max_payload },
+        .connected, .reconnecting => .{ .headers = client.server_headers, .max_payload = client.max_payload },
         .closed => error.ConnectionClosed,
-        .disconnected, .connecting, .reconnecting, .draining => error.Disconnected,
+        .disconnected, .connecting, .draining => error.Disconnected,
     };
 }
 
@@ -503,29 +512,38 @@ pub fn init(gpa: Allocator, io: Io, options: Options) InitError!Client {
         .options = owned,
         .read_buffer = try gpa.alloc(u8, Parser.bufferLen(parser_limits)),
         .parser_limits = parser_limits,
-        .outbound = .init(gpa, owned.options.limits.outbound_bytes),
+        .outbound = .initBuffering(gpa, owned.options.limits.outbound_bytes),
         .pool = pool,
     };
 }
 
-/// Connects to the first of `servers` that takes the connection, one
-/// attempt each, every attempt within `connect_timeout`. A failed connect
+/// Connects to the first server that takes the connection, one attempt
+/// each, every attempt within `connect_timeout`; the servers come in
+/// random order unless `randomize_servers` is false. A failed connect
 /// closes the client: create a new one to try again. A call made while
 /// another one is connecting waits for that outcome; once the client is
 /// connected, another call changes nothing.
+///
+/// With `retry_initial_connect`, it returns at once instead, and the client
+/// keeps trying in the background the way it reconnects, `.reconnecting`
+/// until then.
 pub fn connect(client: *Client) ConnectError!void {
     const io = client.io;
+    const retry = client.options.options.retry_initial_connect;
     {
         client.lifecycle.lockUncancelable(io);
         defer client.lifecycle.unlock(io);
         client.mutex.lockUncancelable(io);
         const status = client.status;
-        if (status == .disconnected) client.status = .connecting;
+        if (status == .disconnected) client.status = if (retry) .reconnecting else .connecting;
         client.mutex.unlock(io);
         switch (status) {
-            .disconnected => client.tasks.concurrent(io, manager.run, .{client}) catch |err| {
-                manager.connectFailed(client, err);
-                return err;
+            .disconnected => {
+                client.tasks.concurrent(io, manager.run, .{client}) catch |err| {
+                    manager.connectFailed(client, err);
+                    return err;
+                };
+                if (retry) return;
             },
             .connecting => {},
             .closed => return error.ConnectionClosed,
@@ -543,8 +561,11 @@ pub fn connect(client: *Client) ConnectError!void {
         };
     }
     defer client.mutex.unlock(io);
-    if (client.status == .connected) return;
-    return client.connect_error orelse error.ConnectionClosed;
+    return switch (client.status) {
+        // The first connection was made; it may be lost again already.
+        .connected, .reconnecting, .draining => {},
+        .disconnected, .connecting, .closed => client.connect_error orelse error.ConnectionClosed,
+    };
 }
 
 /// Waits until the server has processed everything this client sent
@@ -567,12 +588,14 @@ fn ping(client: *Client, timeout: Io.Timeout) FlushError!Io.Duration {
         .disconnected, .connecting, .reconnecting, .draining => return error.Disconnected,
     }
     const start = Io.Clock.awake.now(io);
-    const number = client.outbound.putPing(io, .flush) catch |err| switch (err) {
+    const ping_sent = client.outbound.putPing(io, .flush) catch |err| switch (err) {
         error.Closed => return error.ConnectionClosed,
+        error.Disconnected => return error.Disconnected,
         error.OutOfMemory => return error.OutOfMemory,
     };
-    client.outbound.waitPong(io, number, deadline) catch |err| switch (err) {
+    client.outbound.waitPong(io, ping_sent, deadline) catch |err| switch (err) {
         error.Closed => return error.ConnectionClosed,
+        error.Disconnected => return error.Disconnected,
         error.Timeout => return error.Timeout,
         error.Canceled => return error.Canceled,
     };

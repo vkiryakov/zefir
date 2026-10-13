@@ -10,6 +10,14 @@
 //! the limit but keep their place in the stream, and `putNow` frames skip
 //! the wait but count. PONGs owed to the server go out before the next
 //! batch, outside the queue.
+//!
+//! The queue outlives connections. While there is none, it is `buffering`:
+//! nothing is sent, SUB and UNSUB are not queued (the subscriptions are
+//! restored from the registry), and publishes and requests fail with
+//! Disconnected. When a connection ends, `halt` stops its writer and wakes
+//! every waiter, and once the writer is gone `settle` drops what the
+//! connection left; a new connection begins with `restore`, which puts the
+//! frames that bring the server up to date before everything else.
 
 const std = @import("std");
 const Io = std.Io;
@@ -23,7 +31,8 @@ const Outbound = @This();
 /// A put waiting for room, in line.
 const RoomWaiter = struct {
     node: std.DoublyLinkedList.Node = .{},
-    /// Set when it is this put's turn, or the queue closed.
+    /// Set when it is this put's turn, the queue closed or its connection
+    /// ended.
     turn: Io.Event = .unset,
 };
 
@@ -49,6 +58,13 @@ pub const Frame = struct {
 
 pub const PingKind = enum { flush, heartbeat };
 
+/// A PING to wait for: PONG number `number` of connection `generation`
+/// answers it.
+pub const Ping = struct {
+    number: u64,
+    generation: u64 = 0,
+};
+
 /// What `take` lends the writer.
 pub const Batch = struct {
     slices: []const []const u8,
@@ -56,8 +72,17 @@ pub const Batch = struct {
     len: usize,
 };
 
-pub const PutError = error{ Closed, Canceled, OutOfMemory, ProtocolError };
-pub const WaitError = error{ Closed, Timeout, Canceled };
+pub const Mode = enum {
+    /// A connection is up and its writer sends the frames.
+    live,
+    /// No connection: frames wait for the next one.
+    buffering,
+    /// The client closed.
+    closed,
+};
+
+pub const PutError = error{ Closed, Disconnected, Canceled, OutOfMemory, ProtocolError };
+pub const WaitError = error{ Closed, Disconnected, Timeout, Canceled };
 
 /// The size of a chunk; a larger frame gets a chunk of its own size.
 pub const chunk_size = 64 * 1024;
@@ -84,6 +109,10 @@ gpa: Allocator,
 /// Frames other than PINGs wait while `queued` is at least this.
 limit: usize,
 mutex: Io.Mutex = .init,
+mode: Mode = .live,
+/// Counts the connections that ended: a PING of an older one is never
+/// answered.
+generation: u64 = 0,
 /// The puts waiting for room, first come first; any number of them.
 room_line: std.DoublyLinkedList = .{},
 /// How many wait in `room_line`.
@@ -107,20 +136,26 @@ room_wakeups: u64 = 0,
 pongs_owed: u32 = 0,
 /// PONGs in the batch the writer has.
 pongs_in_flight: u32 = 0,
-/// PINGs queued and PONGs received: PONG number n answers PING number n.
+/// PINGs queued and PONGs received on this connection: PONG number n
+/// answers PING number n.
 pings_queued: u64 = 0,
 pongs_received: u64 = 0,
 /// Heartbeat PINGs since the last PONG.
 pings_out: u32 = 0,
-closed: bool = false,
 
+/// A queue for a connection that is up, as tests use it.
 pub fn init(gpa: Allocator, limit: usize) Outbound {
     return .{ .gpa = gpa, .limit = limit };
 }
 
+/// A queue that waits for the first connection.
+pub fn initBuffering(gpa: Allocator, limit: usize) Outbound {
+    return .{ .gpa = gpa, .limit = limit, .mode = .buffering };
+}
+
 /// Frees whatever is queued. The writer must have stopped.
 pub fn deinit(q: *Outbound) void {
-    while (q.chunks.popFront()) |chunk| q.destroyChunk(chunk);
+    q.freeFrames();
     q.chunks.deinit(q.gpa);
     if (q.spare) |chunk| q.destroyChunk(chunk);
     q.frames.deinit(q.gpa);
@@ -129,7 +164,8 @@ pub fn deinit(q: *Outbound) void {
 
 /// Queues one frame of exactly `len` bytes, written by
 /// `encode(writer, args...)`. Unless it is a PING, it waits while the queue
-/// is full; the wait can be canceled.
+/// is full; the wait can be canceled. Without a connection, SUB and UNSUB
+/// are not queued, and the rest fails with Disconnected.
 pub fn put(q: *Outbound, io: Io, kind: Kind, len: usize, encode: anytype, args: anytype) PutError!void {
     return q.putUntil(io, null, kind, len, encode, args) catch |err| switch (err) {
         error.Timeout => unreachable, // no deadline, no timeout
@@ -144,14 +180,14 @@ pub const PutUntilError = PutError || error{Timeout};
 pub fn putUntil(q: *Outbound, io: Io, deadline: ?Io.Clock.Timestamp, kind: Kind, len: usize, encode: anytype, args: anytype) PutUntilError!void {
     try q.mutex.lock(io);
     defer q.mutex.unlock(io);
-    if (kind == .ping) return q.append(io, kind, len, encode, args);
+    if (kind == .ping) return q.admit(io, kind, len, encode, args);
     try q.awaitRoom(io, deadline);
     // In or not, the next put in line may go if room is left.
     defer q.passRoom(io);
-    return q.append(io, kind, len, encode, args);
+    return q.admit(io, kind, len, encode, args);
 }
 
-pub const PutNowError = error{ Closed, OutOfMemory, ProtocolError };
+pub const PutNowError = error{ Closed, Disconnected, OutOfMemory, ProtocolError };
 
 /// Like `put`, but the frame goes in at once, full queue or not; it still
 /// counts against the limit. For frames that cannot wait and stay few,
@@ -159,11 +195,24 @@ pub const PutNowError = error{ Closed, OutOfMemory, ProtocolError };
 pub fn putNow(q: *Outbound, io: Io, kind: Kind, len: usize, encode: anytype, args: anytype) PutNowError!void {
     q.mutex.lockUncancelable(io);
     defer q.mutex.unlock(io);
-    return q.append(io, kind, len, encode, args);
+    return q.admit(io, kind, len, encode, args);
+}
+
+/// Takes a frame as the mode says.
+fn admit(q: *Outbound, io: Io, kind: Kind, len: usize, encode: anytype, args: anytype) PutNowError!void {
+    switch (q.mode) {
+        .closed => return error.Closed,
+        .live => return q.append(io, kind, len, encode, args),
+        .buffering => switch (kind) {
+            // The registry restores the subscriptions on the next
+            // connection.
+            .service => return,
+            .publish, .request, .ping => return error.Disconnected,
+        },
+    }
 }
 
 fn append(q: *Outbound, io: Io, kind: Kind, len: usize, encode: anytype, args: anytype) PutNowError!void {
-    if (q.closed) return error.Closed;
     const chunk = try q.reserve(len);
     var w: Writer = .fixed(chunk.bytes[chunk.tail..][0..len]);
     // `len` comes from the encoder's *Len twin; a frame of another length
@@ -175,9 +224,9 @@ fn append(q: *Outbound, io: Io, kind: Kind, len: usize, encode: anytype, args: a
 }
 
 /// Waits until there is room and no put ahead of this one in line, or
-/// until `deadline`.
+/// until `deadline`. Only a live queue makes puts wait.
 fn awaitRoom(q: *Outbound, io: Io, deadline: ?Io.Clock.Timestamp) error{ Canceled, Timeout }!void {
-    if (q.closed or (q.queued < q.limit and q.room_line.first == null)) return;
+    if (q.mode != .live or (q.queued < q.limit and q.room_line.first == null)) return;
     var waiter: RoomWaiter = .{};
     // A put that leaves the line early may have been woken for its turn:
     // the next one gets it, once this one is out of the line.
@@ -188,7 +237,7 @@ fn awaitRoom(q: *Outbound, io: Io, deadline: ?Io.Clock.Timestamp) error{ Cancele
         q.room_line.remove(&waiter.node);
         q.room_waiters -= 1;
     }
-    while (!q.closed and !(q.queued < q.limit and q.room_line.first == &waiter.node)) {
+    while (q.mode == .live and !(q.queued < q.limit and q.room_line.first == &waiter.node)) {
         if (deadline) |d| if (time.expired(io, d)) return error.Timeout;
         // Only this put waits on its event, and others set it under the
         // mutex: resetting it here loses no wake.
@@ -207,20 +256,24 @@ fn awaitRoom(q: *Outbound, io: Io, deadline: ?Io.Clock.Timestamp) error{ Cancele
 
 /// Wakes the first put in line when there is room for it.
 fn passRoom(q: *Outbound, io: Io) void {
-    if (q.queued >= q.limit) return;
+    if (q.mode != .live or q.queued >= q.limit) return;
     const first = q.room_line.first orelse return;
     const waiter: *RoomWaiter = @fieldParentPtr("node", first);
     waiter.turn.set(io);
 }
 
-/// Queues a PING and returns its number; PONG number n answers PING number
-/// n. When the last frame queued is a PING the writer has not begun, that
-/// one is returned instead: it marks the same point in the stream. So
-/// PINGs skip the limit, yet there is at most one more than other frames.
-pub fn putPing(q: *Outbound, io: Io, kind: PingKind) error{ Closed, OutOfMemory }!u64 {
+/// Queues a PING and returns it; PONG number n answers PING number n. When
+/// the last frame queued is a PING the writer has not begun, that one is
+/// returned instead: it marks the same point in the stream. So PINGs skip
+/// the limit, yet there is at most one more than other frames.
+pub fn putPing(q: *Outbound, io: Io, kind: PingKind) error{ Closed, Disconnected, OutOfMemory }!Ping {
     q.mutex.lockUncancelable(io);
     defer q.mutex.unlock(io);
-    if (q.closed) return error.Closed;
+    switch (q.mode) {
+        .closed => return error.Closed,
+        .buffering => return error.Disconnected,
+        .live => {},
+    }
     const shared = if (q.frames.back()) |last| last.kind == .ping and last.written == 0 else false;
     if (!shared) {
         const chunk = try q.reserve(encoder.ping.len);
@@ -230,7 +283,7 @@ pub fn putPing(q: *Outbound, io: Io, kind: PingKind) error{ Closed, OutOfMemory 
         q.ready.signal(io);
     }
     if (kind == .heartbeat) q.pings_out +|= 1;
-    return q.pings_queued;
+    return .{ .number = q.pings_queued, .generation = q.generation };
 }
 
 /// A PONG came: it answers the oldest PING still unanswered.
@@ -242,13 +295,15 @@ pub fn pongReceived(q: *Outbound, io: Io) void {
     q.answered.wake(io);
 }
 
-/// Waits until PING number `ping` is answered, `deadline` passes or the
-/// queue closes.
-pub fn waitPong(q: *Outbound, io: Io, ping: u64, deadline: ?Io.Clock.Timestamp) WaitError!void {
+/// Waits until `ping` is answered, `deadline` passes, its connection ends
+/// (Disconnected) or the queue closes.
+pub fn waitPong(q: *Outbound, io: Io, ping: Ping, deadline: ?Io.Clock.Timestamp) WaitError!void {
     try q.mutex.lock(io);
     defer q.mutex.unlock(io);
-    while (q.pongs_received < ping) {
-        if (q.closed) return error.Closed;
+    while (true) {
+        if (q.mode == .closed) return error.Closed;
+        if (q.generation != ping.generation) return error.Disconnected;
+        if (q.pongs_received >= ping.number) return;
         if (deadline) |d| if (time.expired(io, d)) return error.Timeout;
         try q.answered.wait(io, &q.mutex, deadline);
     }
@@ -265,20 +320,20 @@ pub fn pingsOut(q: *Outbound, io: Io) u32 {
 pub fn queuePong(q: *Outbound, io: Io) void {
     q.mutex.lockUncancelable(io);
     defer q.mutex.unlock(io);
-    if (q.closed) return;
+    if (q.mode != .live) return;
     q.pongs_owed +|= 1;
     q.ready.signal(io);
 }
 
 /// For the writer: waits for something to write and lends it out, PONGs
 /// first, then whole frames, at most `slices.len` slices. Null once the
-/// queue is closed: what is left is not sent. Call `written` before the
-/// next `take`.
+/// connection ended or the queue closed: what is left is not sent by this
+/// writer. Call `written` before the next `take`.
 pub fn take(q: *Outbound, io: Io, slices: [][]const u8) Io.Cancelable!?Batch {
     try q.mutex.lock(io);
     defer q.mutex.unlock(io);
-    while (!q.closed and q.pongs_owed == 0 and q.frames.len == 0) try q.ready.wait(io, &q.mutex);
-    if (q.closed) return null;
+    while (q.mode == .live and q.pongs_owed == 0 and q.frames.len == 0) try q.ready.wait(io, &q.mutex);
+    if (q.mode != .live) return null;
     var count: usize = 0;
     var len: usize = 0;
     q.pongs_in_flight = if (slices.len > 0) @min(q.pongs_owed, max_pongs_per_batch) else 0;
@@ -305,23 +360,7 @@ pub fn written(q: *Outbound, io: Io, n: usize) void {
     const pong_bytes = q.pongs_in_flight * encoder.pong.len;
     q.pongs_owed -= @intCast(@min(n, pong_bytes) / encoder.pong.len);
     q.pongs_in_flight = 0;
-    var left = n -| pong_bytes;
-    while (left > 0) {
-        const chunk = q.chunks.front() orelse break;
-        const step = @min(left, chunk.tail - chunk.head);
-        if (step == 0) break;
-        chunk.head += step;
-        left -= step;
-        q.dropWritten(step);
-        if (chunk.head < chunk.tail) break;
-        if (q.chunks.len > 1) {
-            _ = q.chunks.popFront();
-            q.recycle(chunk);
-        } else {
-            chunk.head = 0;
-            chunk.tail = 0;
-        }
-    }
+    q.advance(n -| pong_bytes);
     q.passRoom(io);
 }
 
@@ -336,12 +375,71 @@ pub fn unsent(q: *Outbound, io: Io, out: []Frame) []Frame {
     return out[0..count];
 }
 
+/// The connection ended and another is to come: from now on frames wait
+/// for it (see `put`), the writer stops, puts waiting for room look again,
+/// and PING waiters learn that the connection is gone. Once the writer has
+/// stopped, `settle` deals with what the connection left. A closed queue
+/// stays closed.
+pub fn halt(q: *Outbound, io: Io) void {
+    q.mutex.lockUncancelable(io);
+    defer q.mutex.unlock(io);
+    if (q.mode != .live) return;
+    q.mode = .buffering;
+    q.generation += 1;
+    q.wakeAll(io);
+}
+
+/// After `halt`, once the writer has stopped: the frames the ended
+/// connection left go, none is sent again, and the count of PINGs and
+/// PONGs starts over.
+pub fn settle(q: *Outbound, io: Io) void {
+    q.mutex.lockUncancelable(io);
+    defer q.mutex.unlock(io);
+    q.freeFrames();
+    q.pongs_owed = 0;
+    q.pongs_in_flight = 0;
+    q.pings_queued = 0;
+    q.pongs_received = 0;
+    q.pings_out = 0;
+}
+
+/// A new connection is up: the frames `build(context, gpa)` returns, which
+/// bring the server up to date, go before everything that waits, and the
+/// writer may send. `build` runs under the queue's mutex, so no frame gets
+/// in meanwhile; the bytes it returns are the queue's.
+pub fn restore(q: *Outbound, io: Io, context: anytype, comptime build: fn (@TypeOf(context), Allocator) Allocator.Error![]u8) error{ Closed, OutOfMemory }!void {
+    q.mutex.lockUncancelable(io);
+    defer q.mutex.unlock(io);
+    if (q.mode == .closed) return error.Closed;
+    const bytes = try build(context, q.gpa);
+    if (bytes.len > 0) {
+        errdefer q.gpa.free(bytes);
+        try q.frames.ensureUnusedCapacity(q.gpa, 1);
+        try q.chunks.ensureUnusedCapacity(q.gpa, 1);
+        const chunk = try q.gpa.create(Chunk);
+        chunk.* = .{ .bytes = bytes, .tail = bytes.len };
+        q.chunks.pushFrontAssumeCapacity(chunk);
+        q.frames.pushFrontAssumeCapacity(.{ .kind = .service, .len = bytes.len });
+        q.queued += bytes.len + record_cost;
+    } else {
+        q.gpa.free(bytes);
+    }
+    q.mode = .live;
+    q.ready.signal(io);
+}
+
 /// Refuses new frames and wakes everyone: waiting puts and PING waiters get
 /// Closed, the writer gets null.
 pub fn close(q: *Outbound, io: Io) void {
     q.mutex.lockUncancelable(io);
     defer q.mutex.unlock(io);
-    q.closed = true;
+    if (q.mode == .closed) return;
+    q.mode = .closed;
+    q.generation += 1;
+    q.wakeAll(io);
+}
+
+fn wakeAll(q: *Outbound, io: Io) void {
     var waiting = q.room_line.first;
     while (waiting) |node| : (waiting = node.next) {
         const waiter: *RoomWaiter = @fieldParentPtr("node", node);
@@ -378,6 +476,28 @@ fn commit(q: *Outbound, chunk: *Chunk, kind: Kind, len: usize) void {
     if (kind != .ping) q.queued += len + record_cost;
 }
 
+/// The socket took `n` more bytes of the frames: their chunks give them
+/// up, and the frames the socket took whole are forgotten.
+fn advance(q: *Outbound, n: usize) void {
+    var left = n;
+    while (left > 0) {
+        const chunk = q.chunks.front() orelse break;
+        const step = @min(left, chunk.tail - chunk.head);
+        if (step == 0) break;
+        chunk.head += step;
+        left -= step;
+        q.dropWritten(step);
+        if (chunk.head < chunk.tail) break;
+        if (q.chunks.len > 1) {
+            _ = q.chunks.popFront();
+            q.recycle(chunk);
+        } else {
+            chunk.head = 0;
+            chunk.tail = 0;
+        }
+    }
+}
+
 /// Marks `bytes` more of the oldest frames written and forgets those the
 /// socket took whole.
 fn dropWritten(q: *Outbound, bytes: usize) void {
@@ -393,6 +513,14 @@ fn dropWritten(q: *Outbound, bytes: usize) void {
         if (frame.kind != .ping) q.queued -= frame.len + record_cost;
         _ = q.frames.popFront();
     }
+}
+
+/// Drops every frame and every chunk but the spare.
+fn freeFrames(q: *Outbound) void {
+    while (q.chunks.popFront()) |chunk| q.recycle(chunk);
+    q.frames.head = 0;
+    q.frames.len = 0;
+    q.queued = 0;
 }
 
 fn createChunk(q: *Outbound, len: usize) error{OutOfMemory}!*Chunk {
@@ -468,7 +596,7 @@ test "frames come out whole and in order, PONGs first" {
     defer q.deinit();
     try putPub(&q, io, .publish, "a", "1");
     try putPub(&q, io, .request, "b", "22");
-    try testing.expectEqual(1, try q.putPing(io, .flush));
+    try testing.expectEqual(1, (try q.putPing(io, .flush)).number);
     q.queuePong(io);
     q.queuePong(io);
 
@@ -565,7 +693,7 @@ test "PINGs skip the limit but keep their place" {
     var q: Outbound = .init(testing.allocator, 1);
     defer q.deinit();
     try putPub(&q, io, .publish, "a", "1");
-    try testing.expectEqual(1, try q.putPing(io, .flush));
+    try testing.expectEqual(1, (try q.putPing(io, .flush)).number);
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(testing.allocator);
     try drainOnce(&q, io, &out);
@@ -578,7 +706,7 @@ fn takeOne(q: *Outbound, io: Io) Io.Cancelable!?Batch {
 }
 
 fn waitFirstPong(q: *Outbound, io: Io) WaitError!void {
-    return q.waitPong(io, 1, null);
+    return q.waitPong(io, .{ .number = 1 }, null);
 }
 
 test "close wakes a waiting put, the writer and PING waiters" {
@@ -620,18 +748,18 @@ test "PINGs are numbered and each PONG answers the oldest" {
     const io = testing.io;
     var q: Outbound = .init(testing.allocator, 1024);
     defer q.deinit();
-    try testing.expectEqual(1, try q.putPing(io, .flush));
+    try testing.expectEqual(1, (try q.putPing(io, .flush)).number);
     try putPub(&q, io, .publish, "a", "1");
-    try testing.expectEqual(2, try q.putPing(io, .heartbeat));
+    try testing.expectEqual(2, (try q.putPing(io, .heartbeat)).number);
     try testing.expectEqual(1, q.pingsOut(io));
-    try testing.expectError(error.Timeout, q.waitPong(io, 1, time.after(io, .zero)));
+    try testing.expectError(error.Timeout, q.waitPong(io, .{ .number = 1 }, time.after(io, .zero)));
 
     q.pongReceived(io);
-    try q.waitPong(io, 1, null);
+    try q.waitPong(io, .{ .number = 1 }, null);
     try testing.expectEqual(0, q.pingsOut(io));
-    try testing.expectError(error.Timeout, q.waitPong(io, 2, time.after(io, .fromMilliseconds(10))));
+    try testing.expectError(error.Timeout, q.waitPong(io, .{ .number = 2 }, time.after(io, .fromMilliseconds(10))));
     q.pongReceived(io);
-    try q.waitPong(io, 2, time.after(io, .fromSeconds(5)));
+    try q.waitPong(io, .{ .number = 2 }, time.after(io, .fromSeconds(5)));
 }
 
 test "a partial write marks the frame it stopped in" {
@@ -695,7 +823,7 @@ test "PINGs in a row share one frame, so they stay bounded" {
     // A frame after it needs a PING of its own.
     try putPub(&q, io, .publish, "a", "1");
     const second = try q.putPing(io, .flush);
-    try testing.expectEqual(first + 1, second);
+    try testing.expectEqual(first.number + 1, second.number);
     try testing.expectEqual(3, q.unsent(io, &frames).len);
 
     // A PING the writer has begun is not shared.
@@ -703,7 +831,7 @@ test "PINGs in a row share one frame, so they stay bounded" {
     const batch = (try q.take(io, &slices)) orelse return error.TestClosed;
     q.written(io, batch.len - 3);
     const third = try q.putPing(io, .flush);
-    try testing.expectEqual(second + 1, third);
+    try testing.expectEqual(second.number + 1, third.number);
 
     // Each PONG answers every caller that shared its PING.
     q.pongReceived(io);
@@ -866,4 +994,80 @@ test "close wakes every put in line" {
     q.close(io);
     for (&futures) |*f| try testing.expectError(error.Closed, f.await(io));
     try testing.expectEqual(0, q.roomWaiters(io));
+}
+
+fn waitPing(q: *Outbound, io: Io, ping: Ping) WaitError!void {
+    return q.waitPong(io, ping, null);
+}
+
+test "a connection that ends stops the writer, and PING waiters and puts in line learn it" {
+    const io = testing.io;
+    var q: Outbound = .init(testing.allocator, 16);
+    defer q.deinit();
+    try putPub(&q, io, .publish, "first", "0123456789");
+    const ping = try q.putPing(io, .flush);
+    var waiter = try io.concurrent(waitPing, .{ &q, io, ping });
+    defer waiter.cancel(io) catch {};
+    var putter = try io.concurrent(putLater, .{ &q, io });
+    defer putter.cancel(io) catch {};
+    try awaitRoomWaiter(&q, io);
+
+    q.halt(io);
+    try testing.expectError(error.Disconnected, waiter.await(io));
+    // Without a connection a publish fails at once.
+    try testing.expectError(error.Disconnected, putter.await(io));
+    try testing.expect(try takeOne(&q, io) == null);
+    try testing.expectError(error.Disconnected, q.putPing(io, .flush));
+
+    // What the connection left goes; nothing is sent again.
+    q.settle(io);
+    var frames: [4]Frame = undefined;
+    try testing.expectEqual(0, q.unsent(io, &frames).len);
+    try testing.expectEqual(0, q.queued);
+}
+
+test "without a connection SUB and UNSUB are left to the restore, the rest fails with Disconnected" {
+    const io = testing.io;
+    var q: Outbound = .initBuffering(testing.allocator, 16);
+    defer q.deinit();
+    try q.put(io, .service, encoder.unsubLen(7, null), writeUnsub, .{7});
+    try q.putNow(io, .service, encoder.unsubLen(7, null), writeUnsub, .{7});
+    try testing.expectError(error.Disconnected, putPub(&q, io, .publish, "a", "1"));
+    try testing.expectError(error.Disconnected, putPub(&q, io, .request, "b", "2"));
+    try testing.expectError(error.Disconnected, q.putPing(io, .flush));
+    var frames: [4]Frame = undefined;
+    try testing.expectEqual(0, q.unsent(io, &frames).len);
+}
+
+fn restoreSub(text: []const u8, gpa: Allocator) Allocator.Error![]u8 {
+    return gpa.dupe(u8, text);
+}
+
+test "restore puts its frames first and lets the writer send" {
+    const io = testing.io;
+    var q: Outbound = .initBuffering(testing.allocator, 1024);
+    defer q.deinit();
+    try q.restore(io, @as([]const u8, "SUB a 1\r\n"), restoreSub);
+    try putPub(&q, io, .publish, "a", "1");
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(testing.allocator);
+    try drainOnce(&q, io, &out);
+    try testing.expectEqualStrings("SUB a 1\r\nPUB a 1\r\n1\r\n", out.items);
+
+    // The next connection starts with its own restore and its own PINGs.
+    _ = try q.putPing(io, .flush);
+    q.halt(io);
+    q.settle(io);
+    try q.restore(io, @as([]const u8, ""), restoreSub);
+    try testing.expectEqual(1, (try q.putPing(io, .flush)).number);
+}
+
+test "a closed queue stays closed when its connection ends" {
+    const io = testing.io;
+    var q: Outbound = .init(testing.allocator, 16);
+    defer q.deinit();
+    q.close(io);
+    q.halt(io);
+    try testing.expectError(error.Closed, putPub(&q, io, .publish, "a", "1"));
+    try testing.expectError(error.Closed, q.restore(io, @as([]const u8, "SUB a 1\r\n"), restoreSub));
 }

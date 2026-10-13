@@ -353,7 +353,7 @@ fn requestHangup(client: *Client) Client.RequestError!nats.Message {
 test "the connection lost while a request waits: Disconnected at once, then ConnectionClosed" {
     const io = testing.io;
     var s: Served = undefined;
-    try s.start(.{ .servers = &.{} });
+    try s.start(.{ .servers = &.{}, .reconnect = .{ .enabled = false } });
     defer s.deinit();
     var waiting = try io.concurrent(requestSilent, .{ &s.client, within(30_000) });
     defer releaseReply(waiting.cancel(io));
@@ -364,8 +364,8 @@ test "the connection lost while a request waits: Disconnected at once, then Conn
     try expectNoReply(waiting.await(io), error.Disconnected);
     try testing.expect(elapsedSince(io, start).toSeconds() < 2);
     try testing.expectEqual(0, s.client.inbox.pendingCount(io));
-    // In this version the lost connection closes the client; until it is
-    // closed, a new request fails with Disconnected too.
+    // With reconnect off the lost connection closes the client; until it
+    // is closed, a new request fails with Disconnected too.
     try awaitState(&s.client, .closed);
     try testing.expectError(error.ConnectionClosed, s.client.request("echo.x", "?", five_seconds));
     try s.server.await(io);
@@ -1036,7 +1036,7 @@ test "cancel() after the stream ended drops what waits, and next() is null" {
 
 test "cancel() after a lost connection drops what came, and next() is null; after close() it stays ConnectionClosed" {
     var s: Served = undefined;
-    try s.start(.{ .servers = &.{} });
+    try s.start(.{ .servers = &.{}, .reconnect = .{ .enabled = false } });
     defer s.deinit();
     const lost = try s.client.requestMany("manyhangup.1", "?", many(30_000, 4));
     defer lost.deinit();

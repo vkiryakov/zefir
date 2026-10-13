@@ -111,6 +111,18 @@ pub fn endedHow(q: *MessageQueue, io: Io) ?End {
     return q.ended;
 }
 
+/// What a new connection needs to know about a subscription: null when it
+/// takes no more messages, so it is not subscribed again; otherwise how many
+/// messages it still takes before it finishes (null: no end).
+pub const Resume = struct { remaining: ?u64 };
+
+pub fn resumeState(q: *MessageQueue, io: Io) ?Resume {
+    q.mutex.lockUncancelable(io);
+    defer q.mutex.unlock(io);
+    if (q.ended != null) return null;
+    return .{ .remaining = if (q.last) |last| last -| q.received else null };
+}
+
 /// Ends the queue `how`, unless it has ended already; `.closed` replaces
 /// any other end. With `discard`, the messages it holds are freed; `.closed`
 /// always frees them. True when the queue was open: only one caller ends

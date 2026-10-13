@@ -132,6 +132,28 @@ pub fn closeAll(r: *Registry, io: Io) void {
     for (r.subscriptions.values()) |sub| _ = sub.messages.end(io, .closed, true);
 }
 
+/// A subscription the registry does not route, to subscribe again.
+pub const Resubscribe = struct { subject: []const u8, sid: u64 };
+
+/// Writes what subscribes a new connection to what the subscriptions had:
+/// the SUB of every subscription that still takes messages, with its own
+/// SID, then `extra` (the inbox of requests), then `UNSUB sid n` for each
+/// one that ends after `max_messages`, n being the messages it still
+/// takes: the server counts afresh on a new connection.
+pub fn writeRestore(r: *Registry, io: Io, w: *Io.Writer, extra: ?Resubscribe) Io.Writer.Error!void {
+    r.mutex.lockUncancelable(io);
+    defer r.mutex.unlock(io);
+    for (r.subscriptions.values()) |sub| {
+        if (sub.messages.resumeState(io) == null) continue;
+        try encoder.writeSub(w, sub.subject, sub.queue_group, sub.sid);
+    }
+    if (extra) |e| try encoder.writeSub(w, e.subject, null, e.sid);
+    for (r.subscriptions.values()) |sub| {
+        const state = sub.messages.resumeState(io) orelse continue;
+        if (state.remaining) |n| try encoder.writeUnsub(w, sub.sid, n);
+    }
+}
+
 /// Frees every subscription still registered: the client goes away.
 pub fn deinit(r: *Registry, gpa: Allocator) void {
     for (r.subscriptions.values()) |sub| destroy(gpa, sub);
@@ -334,4 +356,34 @@ test "a burst of subscriptions and long churn after it leave lookups as cheap as
     const after_churn = try timeMissingLookups(&r, io, 20_000);
     // The same work: within four times, plus 2 ms for noise.
     try testing.expect(after_churn <= after_burst * 4 + 2 * std.time.ns_per_ms);
+}
+
+test "a new connection subscribes again what still takes messages, with the same SIDs and what max_messages leaves" {
+    const io = testing.io;
+    const gpa = testing.allocator;
+    var r: Registry = .{};
+    defer r.deinit(gpa);
+    const a = try newSubscription(gpa, "a");
+    try r.register(io, gpa, a, 10);
+    const b = try create(gpa, undefined, "b.*", .{ .queue = "g", .max_messages = 5 }, .{ .messages = 8, .bytes = 1024 });
+    try r.register(io, gpa, b, 10);
+    const c = try newSubscription(gpa, "c");
+    try r.register(io, gpa, c, 10);
+    // Two of b's five came, one of them dropped; c ended.
+    _ = r.deliver(io, b.sid, null);
+    _ = b.messages.push(io, null);
+    _ = c.messages.end(io, .finished, true);
+
+    var w: Io.Writer.Allocating = .init(gpa);
+    defer w.deinit();
+    try r.writeRestore(io, &w.writer, .{ .subject = "_INBOX.t.*", .sid = 9 });
+    try testing.expectEqualStrings("SUB a 1\r\nSUB b.* g 2\r\nSUB _INBOX.t.* 9\r\nUNSUB 2 3\r\n", w.written());
+
+    // Nothing to subscribe: nothing written.
+    var empty: Registry = .{};
+    defer empty.deinit(gpa);
+    var none: Io.Writer.Allocating = .init(gpa);
+    defer none.deinit();
+    try empty.writeRestore(io, &none.writer, null);
+    try testing.expectEqual(0, none.written().len);
 }
