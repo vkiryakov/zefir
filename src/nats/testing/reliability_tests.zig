@@ -1140,4 +1140,161 @@ test "events: publishes still waiting when the client closes are dropped, and an
         }
     }
     _ = try expectEvent(&client, .closed);
+    try testing.expectEqual(3, client.stats().dropped_messages);
+}
+
+/// Serves, and answers requests: `service.x` with "ok", `nobody.x` with
+/// "no responders", `silent.x` never; and two messages for `s` once the
+/// client subscribes to it.
+fn sessionStats(peer: *FakeServer.Peer, record: *Record) anyerror!void {
+    try handshake(peer, golden.info_default);
+    var pending: Pending = .{};
+    while (try peer.nextLine()) |line| {
+        try record.note(peer.io, line);
+        pending.note(line);
+        if (std.mem.eql(u8, line, "PING")) {
+            try peer.send(golden.pong);
+        } else if (std.mem.startsWith(u8, line, "SUB s ")) {
+            try peer.send("MSG s 1 3\r\nabc\r\nMSG s 1 3\r\nabc\r\n");
+        } else if (std.mem.startsWith(u8, line, "PUB ")) {
+            const size = try std.fmt.parseInt(usize, line[std.mem.findScalarLast(u8, line, ' ').? + 1 ..], 10);
+            var body: [64]u8 = undefined;
+            try peer.readExact(body[0 .. size + 2]);
+            if (std.mem.startsWith(u8, line, "PUB service.x ")) try pending.answer(peer);
+            if (std.mem.startsWith(u8, line, "PUB nobody.x ")) {
+                var words = std.mem.splitScalar(u8, line, ' ');
+                _ = words.next();
+                _ = words.next();
+                var frame: [128]u8 = undefined;
+                try peer.send(try std.fmt.bufPrint(&frame, "HMSG {s} {s} 16 16\r\nNATS/1.0 503\r\n\r\n\r\n", .{ words.next().?, pending.inbox_sid[0..pending.inbox_sid_len] }));
+            }
+        }
+    }
+}
+
+test "stats: what came and went, requests, round trip and uptime" {
+    const io = testing.io;
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var record: Record = .{};
+    defer record.deinit();
+    const sessions = [_]Session{sessionStats};
+    var server = try io.concurrent(serveSessions, .{ io, &listener, &sessions, &record });
+    defer server.cancel(io) catch {};
+    var url: [64]u8 = undefined;
+    var client: Client = try .init(testing.allocator, io, .{ .servers = &.{try FakeServer.url(&listener, &url)} });
+    defer client.deinit();
+    const before = client.stats();
+    try testing.expect(before.rtt == null and before.connected_for == null);
+    try client.connect();
+
+    const s = try client.subscribe("s", .{});
+    defer s.deinit();
+    try awaitReceived(s, 2);
+    try client.publish("p", "12345");
+    var reply = try client.request("service.x", "?", .{});
+    reply.deinit();
+    try testing.expectError(error.NoResponders, client.request("nobody.x", "?", .{}));
+    try testing.expectError(error.Timeout, client.request("silent.x", "?", .{ .timeout = .{ .duration = .{ .raw = .fromMilliseconds(50), .clock = .awake } } }));
+    _ = try client.rtt(quick);
+
+    const now = client.stats();
+    // Two messages for `s`, the reply and the 503.
+    try testing.expectEqual(4, now.messages_in);
+    try testing.expectEqual(3 + 3 + 2 + 16, now.bytes_in);
+    try testing.expectEqual(4, now.messages_out);
+    try testing.expectEqual(5 + 1 + 1 + 1, now.bytes_out);
+    try testing.expectEqual(1, now.active_subscriptions);
+    try testing.expectEqual(0, now.pending_requests);
+    // Each message held as subject and payload: "s" and "abc".
+    try testing.expectEqual(2 * 4, now.pending_subscription_bytes);
+    try testing.expectEqual(1, now.request_timeouts);
+    try testing.expectEqual(1, now.no_responders);
+    try testing.expectEqual(0, now.reconnects);
+    try testing.expectEqual(0, now.dropped_messages);
+    try testing.expect(now.rtt != null);
+    try testing.expect(now.connected_for != null);
+    try s.unsubscribe();
+    try testing.expectEqual(0, client.stats().active_subscriptions);
+    try testing.expectEqual(0, client.stats().pending_subscription_bytes);
+    client.close();
+    try testing.expect(client.stats().connected_for == null);
+}
+
+test "stats: reconnects, and late replies" {
+    const io = testing.io;
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var record: Record = .{};
+    defer record.deinit();
+    const sessions = [_]Session{ sessionHangUp, sessionServe };
+    var server = try io.concurrent(serveSessions, .{ io, &listener, &sessions, &record });
+    defer server.cancel(io) catch {};
+    var url: [64]u8 = undefined;
+    var client: Client = try .init(testing.allocator, io, .{ .servers = &.{try FakeServer.url(&listener, &url)} });
+    defer client.deinit();
+    try client.connect();
+    _ = try expectEvent(&client, .connected);
+    _ = try expectEvent(&client, .disconnected);
+    _ = try expectEvent(&client, .reconnecting);
+    _ = try expectEvent(&client, .reconnected);
+    try testing.expectEqual(1, client.stats().reconnects);
+    client.inbox.noteLate(io);
+    try testing.expectEqual(1, client.stats().late_responses);
+}
+
+fn nextMessageLong(sub: *nats.Subscription) nats.Subscription.NextError!?nats.Message {
+    return sub.next(.{});
+}
+
+fn releaseMessage(result: nats.Subscription.NextError!?nats.Message) void {
+    const got = result catch return;
+    if (got) |message| {
+        var m = message;
+        m.deinit();
+    }
+}
+
+test "close() while reconnecting: a request in the buffer, next() and nextEvent() get ConnectionClosed or closed at once" {
+    const io = testing.io;
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var record: Record = .{};
+    defer record.deinit();
+    const sessions = [_]Session{ sessionHangUpAfterSub, sessionAnswerWhenReleased };
+    var server = try io.concurrent(serveSessions, .{ io, &listener, &sessions, &record });
+    defer {
+        record.release.set(io);
+        server.cancel(io) catch {};
+    }
+    var url: [64]u8 = undefined;
+    var client: Client = try .init(testing.allocator, io, .{ .servers = &.{try FakeServer.url(&listener, &url)} });
+    defer client.deinit();
+    try client.connect();
+    const sub = try client.subscribe("sub", .{});
+    defer sub.deinit();
+    try awaitState(&client, .reconnecting);
+    var request = try io.concurrent(requestService, .{&client});
+    defer releaseReply(request.cancel(io));
+    try awaitAwaiting(&client, 1);
+    var reader = try io.concurrent(nextMessageLong, .{sub});
+    defer releaseMessage(reader.cancel(io));
+    while (!sub.messages.isReceiving(io)) try io.sleep(.fromMilliseconds(1), .awake);
+    // Drain the events so far, then wait for the next.
+    while (true) {
+        const event = (try client.nextEvent(.{ .timeout = .{ .duration = .{ .raw = .fromMilliseconds(100), .clock = .awake } } })) orelse break;
+        if (event == .reconnecting) break;
+    }
+    var watcher = try io.concurrent(nextEventLong, .{&client});
+    defer _ = watcher.cancel(io) catch {};
+    while (!client.events.isReceiving(io)) try io.sleep(.fromMilliseconds(1), .awake);
+
+    const start = Io.Clock.awake.now(io);
+    client.close();
+    if (request.await(io)) |_| return error.TestUnexpectedReply else |err| try testing.expectEqual(error.ConnectionClosed, err);
+    try testing.expectError(error.ConnectionClosed, reader.await(io));
+    const last = (try watcher.await(io)).?;
+    // The request's PUB never went out.
+    try testing.expect(last == .message_dropped or last == .closed);
+    try testing.expect(start.durationTo(Io.Clock.awake.now(io)).toSeconds() < 1);
 }

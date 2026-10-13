@@ -725,6 +725,15 @@ fn destroyChunk(q: *Outbound, chunk: *Chunk) void {
     q.gpa.destroy(chunk);
 }
 
+/// What `stats()` reports of the queue.
+pub const Counts = struct { queued: usize, uncertain_frames: u64, dropped_publishes: u64 };
+
+pub fn counts(q: *Outbound, io: Io) Counts {
+    q.mutex.lockUncancelable(io);
+    defer q.mutex.unlock(io);
+    return .{ .queued = q.queued, .uncertain_frames = q.uncertain_frames, .dropped_publishes = q.dropped_publishes };
+}
+
 /// Puts waiting for room; tests use it to know that a put waits.
 pub fn roomWaiters(q: *Outbound, io: Io) u32 {
     q.mutex.lockUncancelable(io);

@@ -3,11 +3,12 @@
 //! meant for production. It speaks plaintext TCP with no auth or with user
 //! and password; TLS and JetStream are not part of this version.
 //!
-//! Work in progress: the client connects, keeps the connection alive with
-//! PINGs, publishes, subscribes, sends requests for one reply or for many
-//! and answers them, flushes and measures the round trip. Reconnect comes
-//! next; until then a lost connection closes the client, ends its
-//! subscriptions and fails the requests waiting for replies.
+//! Work in progress: the client connects to one of a pool of servers,
+//! keeps the connection alive with PINGs, publishes, subscribes, sends
+//! requests for one reply or for many and answers them, flushes and
+//! measures the round trip. When the connection is lost it reconnects and
+//! subscribes again; it drains, reports events and keeps statistics. The
+//! guide and the examples come next.
 
 const std = @import("std");
 
@@ -37,6 +38,7 @@ pub const ReceiveOptions = Subscription.ReceiveOptions;
 pub const PendingCounts = Subscription.PendingCounts;
 const events = @import("events.zig");
 pub const Event = events.Event;
+pub const Stats = @import("Stats.zig");
 pub const SubscriptionStats = Subscription.Stats;
 
 /// Every error the client returns, apart from those of `std.Io` that pass
@@ -102,6 +104,8 @@ test {
     _ = @import("engine/Pool.zig");
     _ = @import("engine/backoff.zig");
     _ = @import("events.zig");
+    _ = @import("Stats.zig");
+    _ = @import("engine/Counters.zig");
     _ = @import("protocol/subject.zig");
     _ = @import("protocol/encoder.zig");
     _ = @import("protocol/Parser.zig");

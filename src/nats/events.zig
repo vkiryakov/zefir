@@ -58,84 +58,84 @@ pub const Event = union(enum) {
     server_error: Text,
     /// The client closed: the last event.
     closed: CloseReason,
-};
 
-pub const Disconnected = struct {
-    server: ServerAddress,
-    reason: Reason,
+    pub const Disconnected = struct {
+        server: ServerAddress,
+        reason: Reason,
 
-    pub const Reason = enum {
-        /// The server closed the connection.
-        closed_by_server,
-        /// The server left PINGs unanswered.
-        stale,
-        /// The server sent an error after which it closes the connection.
-        server_error,
-        /// The server broke the protocol.
-        protocol_error,
-        /// Reading or writing failed.
-        io_error,
-        /// The server is about to go away, and the client left it.
-        lame_duck,
+        pub const Reason = enum {
+            /// The server closed the connection.
+            closed_by_server,
+            /// The server left PINGs unanswered.
+            stale,
+            /// The server sent an error after which it closes the connection.
+            server_error,
+            /// The server broke the protocol.
+            protocol_error,
+            /// Reading or writing failed.
+            io_error,
+            /// The server is about to go away, and the client left it.
+            lame_duck,
+        };
     };
-};
 
-pub const Reconnecting = struct {
-    server: ServerAddress,
-    /// 1 for the first attempt since the connection was lost.
-    attempt: u32,
-};
-
-pub const MessageDropped = struct {
-    reason: Reason,
-    /// How many messages.
-    count: u64,
-    /// The subscription that lost them; null for publishes.
-    sid: ?u64 = null,
-
-    pub const Reason = enum {
-        /// Publishes never written: no room in the reconnect buffer, or the
-        /// client closed.
-        unsent,
-        /// An incoming message over `max_inbound_frame_bytes`,
-        /// `max_header_bytes` or what its subscription holds.
-        too_large,
-        /// No memory for an incoming message.
-        no_memory,
+    pub const Reconnecting = struct {
+        server: ServerAddress,
+        /// 1 for the first attempt since the connection was lost.
+        attempt: u32,
     };
-};
 
-pub const PermissionDenied = struct {
-    operation: Operation,
-    /// The subject as the server wrote it: quotes, backslashes and bytes
-    /// that do not print are escaped the way Go's %q does.
-    subject: Text,
-    /// The subscription the server named, when it named one.
-    sid: ?u64 = null,
+    pub const MessageDropped = struct {
+        reason: Reason,
+        /// How many messages.
+        count: u64,
+        /// The subscription that lost them; null for publishes.
+        sid: ?u64 = null,
 
-    pub const Operation = enum { publish, subscribe, reply };
-};
+        pub const Reason = enum {
+            /// Publishes never written: no room in the reconnect buffer, or the
+            /// client closed.
+            unsent,
+            /// An incoming message over `max_inbound_frame_bytes`,
+            /// `max_header_bytes` or what its subscription holds.
+            too_large,
+            /// No memory for an incoming message.
+            no_memory,
+        };
+    };
 
-/// A text of up to `capacity` bytes, cut when longer.
-pub const Text = struct {
-    buffer: [capacity]u8 = undefined,
-    len: u8 = 0,
-    /// The text was longer.
-    cut: bool = false,
+    pub const PermissionDenied = struct {
+        operation: Operation,
+        /// The subject as the server wrote it: quotes, backslashes and bytes
+        /// that do not print are escaped the way Go's %q does.
+        subject: Text,
+        /// The subscription the server named, when it named one.
+        sid: ?u64 = null,
 
-    pub const capacity = 128;
+        pub const Operation = enum { publish, subscribe, reply };
+    };
 
-    pub fn init(text: []const u8) Text {
-        var t: Text = .{ .cut = text.len > capacity };
-        const n = @min(text.len, capacity);
-        @memcpy(t.buffer[0..n], text[0..n]);
-        t.len = @intCast(n);
-        return t;
-    }
+    /// A text of up to `capacity` bytes, cut when longer.
+    pub const Text = struct {
+        buffer: [capacity]u8 = undefined,
+        len: u8 = 0,
+        /// The text was longer.
+        cut: bool = false,
 
-    pub fn slice(t: *const Text) []const u8 {
-        return t.buffer[0..t.len];
-    }
+        pub const capacity = 128;
+
+        pub fn init(text: []const u8) Text {
+            var t: Text = .{ .cut = text.len > capacity };
+            const n = @min(text.len, capacity);
+            @memcpy(t.buffer[0..n], text[0..n]);
+            t.len = @intCast(n);
+            return t;
+        }
+
+        pub fn slice(t: *const Text) []const u8 {
+            return t.buffer[0..t.len];
+        }
+    };
 };
 
 /// The events waiting for `nextEvent`, oldest first.
@@ -281,11 +281,11 @@ test "one task waits at a time, and closed wakes it" {
 }
 
 test "a text longer than its buffer is cut" {
-    const short: Text = .init("forbidden");
+    const short: Event.Text = .init("forbidden");
     try testing.expectEqualStrings("forbidden", short.slice());
     try testing.expect(!short.cut);
     const long: [300]u8 = @splat('x');
-    const cut: Text = .init(&long);
-    try testing.expectEqual(Text.capacity, cut.slice().len);
+    const cut: Event.Text = .init(&long);
+    try testing.expectEqual(Event.Text.capacity, cut.slice().len);
     try testing.expect(cut.cut);
 }

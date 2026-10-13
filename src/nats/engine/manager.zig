@@ -25,6 +25,7 @@ const Connection = @import("Connection.zig");
 const Registry = @import("Registry.zig");
 const Pool = @import("Pool.zig");
 const Outbound = @import("Outbound.zig");
+const Counters = @import("Counters.zig");
 const Inbox = @import("Inbox.zig");
 const backoff = @import("backoff.zig");
 const events = @import("../events.zig");
@@ -374,7 +375,7 @@ fn teardown(client: *Client, server: ServerAddress, exit: Exit) bool {
 }
 
 /// What the `disconnected` event says of an exit; null for `close()`.
-fn disconnectReason(exit: Exit) ?events.Disconnected.Reason {
+fn disconnectReason(exit: Exit) ?events.Event.Disconnected.Reason {
     return switch (exit) {
         .closed => null,
         .end_of_stream => .closed_by_server,
@@ -410,6 +411,7 @@ fn lost(client: *Client, exit: Exit) bool {
     client.mutex.lockUncancelable(client.io);
     defer client.mutex.unlock(client.io);
     client.server = null;
+    client.connected_at = null;
     if (client.info_json) |json| client.gpa.free(json);
     client.info_json = null;
     const again = exit != .closed and client.status == .connected and client.options.options.reconnect.enabled;
@@ -566,6 +568,8 @@ const Incoming = struct {
     };
 
     fn begin(client: *Client, msg: Parser.Msg) Incoming {
+        Counters.add(&client.counters.messages_in, 1);
+        Counters.add(&client.counters.bytes_in, msg.total_len);
         var in: Incoming = .{ .sid = msg.sid, .total_len = msg.total_len, .assembly = null, .skipped = .no, .request = null };
         const limits = &client.options.options.limits;
         const holds = if (client.inbox.owns(msg.sid)) reply: {
@@ -605,6 +609,7 @@ const Incoming = struct {
         if (in.request) |id| return in.finishReply(client, id);
         const message: ?Message = if (in.assembly) |*assembly| assembly.finish() else null;
         const pushed = client.subscriptions.deliver(client.io, in.sid, message) orelse return;
+        Counters.add(&client.counters.dropped_in, pushed.dropped);
         in.noteDropped(client, in.sid);
         if (pushed.no_memory) {
             log.debug("no memory to queue a message for subscription {d}: dropped", .{in.sid});
@@ -626,7 +631,7 @@ const Incoming = struct {
 
     /// A message read past: its event.
     fn noteDropped(in: *const Incoming, client: *Client, sid: u64) void {
-        const reason: events.MessageDropped.Reason = switch (in.skipped) {
+        const reason: events.Event.MessageDropped.Reason = switch (in.skipped) {
             .no, .unrouted, .late => return,
             .too_large => .too_large,
             .no_memory => .no_memory,
@@ -639,7 +644,7 @@ const Incoming = struct {
     fn finishReply(in: *Incoming, client: *Client, id: u64) void {
         if (in.skipped == .late) return client.inbox.noteLate(client.io);
         const message: ?Message = if (in.assembly) |*assembly| assembly.finish() else null;
-        _ = client.inbox.deliver(client.io, id, message);
+        if (client.inbox.deliver(client.io, id, message) == .dropped) Counters.add(&client.counters.dropped_in, 1);
         in.noteDropped(client, in.sid);
     }
 
@@ -740,10 +745,12 @@ fn connected(client: *Client, server: ServerAddress) void {
         client.mutex.lockUncancelable(client.io);
         defer client.mutex.unlock(client.io);
         if (client.status == .connecting or client.status == .reconnecting) client.status = .connected;
+        client.connected_at = Io.Clock.awake.now(client.io);
         client.changed.broadcast(client.io);
         defer client.ever_connected = true;
         break :first !client.ever_connected;
     };
+    if (!first) Counters.add(&client.counters.reconnects, 1);
     client.events.push(client.io, if (first) .{ .connected = server } else .{ .reconnected = server });
 }
 

@@ -49,6 +49,8 @@ const Inbox = @import("engine/Inbox.zig");
 const Pool = @import("engine/Pool.zig");
 const Event = @import("events.zig").Event;
 const EventQueue = @import("events.zig").Queue;
+const Stats = @import("Stats.zig");
+const Counters = @import("engine/Counters.zig");
 const MessageQueue = @import("engine/MessageQueue.zig");
 const Connection = @import("engine/Connection.zig");
 const dialer = @import("engine/connect.zig");
@@ -74,6 +76,8 @@ inbox: Inbox = .{},
 pool: Pool,
 /// What happened, for `nextEvent`.
 events: EventQueue,
+/// What `stats()` reports, counted as it happens.
+counters: Counters = .{},
 /// The manager task.
 tasks: Io.Group = .init,
 /// The reader and writer of the current connection.
@@ -100,6 +104,8 @@ close_reason: ?CloseReason = null,
 drain_phase: DrainPhase = .subscriptions,
 /// A connection was up once: the next ones are reconnections.
 ever_connected: bool = false,
+/// When the current connection came up.
+connected_at: ?Io.Timestamp = null,
 /// The server of the current connection.
 server: ?ServerAddress = null,
 /// The JSON of the latest INFO of the current connection.
@@ -223,6 +229,12 @@ pub fn publishMessage(client: *Client, message: PublishMessage) PublishError!voi
         error.Closed => return error.ConnectionClosed,
         else => |e| return e,
     };
+    client.countOut(header_len + message.payload.len);
+}
+
+fn countOut(client: *Client, bytes: usize) void {
+    Counters.add(&client.counters.messages_out, 1);
+    Counters.add(&client.counters.bytes_out, bytes);
 }
 
 pub const RespondError = PublishError || error{
@@ -576,6 +588,17 @@ pub fn request(client: *Client, subject: []const u8, payload: []const u8, option
 /// Sends `message`, headers included, the way `request` does. Its
 /// `reply_to` must be null: the reply subject is the client's.
 pub fn requestMessage(client: *Client, message: PublishMessage, options: RequestOptions) RequestError!Message {
+    return client.requestOnce(message, options) catch |err| {
+        switch (err) {
+            error.Timeout => Counters.add(&client.counters.request_timeouts, 1),
+            error.NoResponders => Counters.add(&client.counters.no_responders, 1),
+            else => {},
+        }
+        return err;
+    };
+}
+
+fn requestOnce(client: *Client, message: PublishMessage, options: RequestOptions) RequestError!Message {
     if (message.reply_to != null or options.timeout == .none) return error.InvalidOptions;
     const header_len = try client.prepare(message, .request);
     const io = client.io;
@@ -594,6 +617,7 @@ pub fn requestMessage(client: *Client, message: PublishMessage, options: Request
         error.Closed => return client.inbox.closedError(io),
         else => |e| return e,
     };
+    client.countOut(header_len + message.payload.len);
     return client.inbox.await(io, id, &waiter, deadline);
 }
 
@@ -671,6 +695,7 @@ pub fn requestMany(client: *Client, subject: []const u8, payload: []const u8, op
         error.Closed => return client.inbox.closedError(io),
         else => |e| return e,
     };
+    client.countOut(payload.len);
     return responses;
 }
 
@@ -776,7 +801,42 @@ fn ping(client: *Client, timeout: Io.Timeout) FlushError!Io.Duration {
         error.Timeout => return error.Timeout,
         error.Canceled => return error.Canceled,
     };
-    return start.durationTo(Io.Clock.awake.now(io));
+    const round_trip = start.durationTo(Io.Clock.awake.now(io));
+    client.counters.rtt.store(@intCast(std.math.clamp(round_trip.nanoseconds, 0, Counters.none - 1)), .monotonic);
+    return round_trip;
+}
+
+/// A snapshot of what the client has done so far; see `nats.Stats`.
+pub fn stats(client: *Client) Stats {
+    const io = client.io;
+    const c = &client.counters;
+    const outbound = client.outbound.counts(io);
+    const rtt_ns = Counters.get(&c.rtt);
+    const connected_for: ?Io.Duration = since: {
+        client.mutex.lockUncancelable(io);
+        defer client.mutex.unlock(io);
+        const at = client.connected_at orelse break :since null;
+        break :since at.durationTo(Io.Clock.awake.now(io));
+    };
+    return .{
+        .messages_in = Counters.get(&c.messages_in),
+        .bytes_in = Counters.get(&c.bytes_in),
+        .messages_out = Counters.get(&c.messages_out),
+        .bytes_out = Counters.get(&c.bytes_out),
+        .active_subscriptions = client.subscriptions.openCount(io),
+        .pending_requests = client.inbox.pendingCount(io),
+        .pending_outbound_bytes = outbound.queued,
+        .pending_subscription_bytes = client.subscriptions.pendingBytes(io),
+        .reconnects = Counters.get(&c.reconnects),
+        .request_timeouts = Counters.get(&c.request_timeouts),
+        .no_responders = Counters.get(&c.no_responders) + client.inbox.noRespondersCount(io),
+        .dropped_messages = Counters.get(&c.dropped_in) + outbound.dropped_publishes,
+        .uncertain_outbound_frames = outbound.uncertain_frames,
+        .late_responses = client.inbox.lateResponses(io),
+        .dropped_events = client.events.droppedCount(io),
+        .rtt = if (rtt_ns == Counters.none) null else .fromNanoseconds(rtt_ns),
+        .connected_for = connected_for,
+    };
 }
 
 /// Closes the client at once: nothing still queued is sent, and every task

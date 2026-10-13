@@ -188,6 +188,26 @@ pub fn finishDraining(r: *Registry, io: Io) void {
     for (r.subscriptions.values()) |sub| sub.messages.finishDrain(io);
 }
 
+/// Subscriptions that take messages now.
+pub fn openCount(r: *Registry, io: Io) usize {
+    r.mutex.lockUncancelable(io);
+    defer r.mutex.unlock(io);
+    var open: usize = 0;
+    for (r.subscriptions.values()) |sub| {
+        if (sub.messages.isOpen(io)) open += 1;
+    }
+    return open;
+}
+
+/// The bytes of the messages waiting to be taken, over every subscription.
+pub fn pendingBytes(r: *Registry, io: Io) usize {
+    r.mutex.lockUncancelable(io);
+    defer r.mutex.unlock(io);
+    var total: usize = 0;
+    for (r.subscriptions.values()) |sub| total += sub.messages.pending(io).bytes;
+    return total;
+}
+
 /// Messages waiting to be taken, over every subscription.
 pub fn pendingMessages(r: *Registry, io: Io) usize {
     r.mutex.lockUncancelable(io);

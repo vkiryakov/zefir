@@ -62,6 +62,8 @@ next_id: u64 = 1,
 awaiting: u32 = 0,
 /// Replies that came for no waiting request.
 late: u64 = 0,
+/// Streams of requestMany ended by "no responders".
+no_responders: u64 = 0,
 /// Why the inbox takes no more requests.
 ended: ?End = null,
 
@@ -376,6 +378,7 @@ pub fn deliver(inbox: *Inbox, io: Io, id: u64, message: ?Message) Delivery {
             if (message) |m| if (isNoResponders(m) and responses.messages.stats(io).received == 0) {
                 release(m);
                 _ = responses.messages.end(io, .no_responders, false);
+                inbox.no_responders += 1;
                 return .taken;
             };
             const pushed = responses.messages.push(io, message);
@@ -529,6 +532,13 @@ pub fn awaitingCount(inbox: *Inbox, io: Io) u32 {
     inbox.mutex.lockUncancelable(io);
     defer inbox.mutex.unlock(io);
     return inbox.awaiting;
+}
+
+/// Streams of requestMany that ended with "no responders".
+pub fn noRespondersCount(inbox: *Inbox, io: Io) u64 {
+    inbox.mutex.lockUncancelable(io);
+    defer inbox.mutex.unlock(io);
+    return inbox.no_responders;
 }
 
 /// Replies that came for no waiting request; tests use it.
