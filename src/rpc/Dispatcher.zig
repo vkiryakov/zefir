@@ -29,6 +29,7 @@ const std = @import("std");
 const core = @import("core");
 const model = @import("model.zig");
 const transport = @import("transport.zig");
+const rules = @import("rules.zig");
 const Incoming = @import("Incoming.zig");
 const Reply = @import("Reply.zig");
 
@@ -37,6 +38,8 @@ const Dispatcher = @This();
 ptr: *anyopaque,
 vtable: *const VTable,
 
+/// The engine's functions behind the interface: one constant table per
+/// engine type.
 pub const VTable = struct {
     service: *const fn (ptr: *anyopaque) *const Service,
     admit: *const fn (ptr: *anyopaque, io: std.Io, head: *const transport.RequestHead, body_len: usize) Admission,
@@ -51,8 +54,13 @@ pub const Service = struct {
     /// prefetch from it; a NATS adapter needs a subscription queue at least
     /// this long.
     max_inflight: u32,
+    /// The largest request body the engine admits. A transport may refuse a
+    /// larger one before reading it, or tell the other side the limit.
     max_request_bytes: usize,
+    /// The most metadata entries of a request, repeated keys included.
     max_metadata_entries: u32,
+    /// The largest metadata of a request, as `rpc.transport.metadataBytes`
+    /// counts it.
     max_metadata_bytes: u32,
 };
 
@@ -68,16 +76,39 @@ pub const Admission = union(enum) {
 /// Why the whole transport broke for good.
 pub const FatalError = error{ Unavailable, AccessDenied, Unexpected };
 
-/// The counters of one route, for NATS micro STATS.
+/// The counters of one route, for NATS micro STATS. A value that owns all
+/// it holds: the transport may keep it as long as it needs.
 pub const RouteStats = struct {
     requests: u64,
     errors: u64,
     processing_time: std.Io.Duration,
     last_error: ?LastError = null,
 
-    /// The last failure of the route. The strings are static (codes of the
-    /// framework) or copied by the engine.
-    pub const LastError = struct { code: core.ErrorCode, app_code: []const u8 };
+    /// The last failure of the route. The engine copies the app code into
+    /// the value, so it stays valid as long as the value does.
+    pub const LastError = struct {
+        code: core.ErrorCode,
+        app_code_buffer: [rules.max_app_code_bytes]u8 = undefined,
+        app_code_len: u8 = 0,
+
+        /// A copy of `app_code`. One longer than the 128 bytes a contract
+        /// may declare is cut before the character that does not fit whole.
+        pub fn init(code: core.ErrorCode, app_code: []const u8) LastError {
+            var last: LastError = .{ .code = code };
+            const len = if (app_code.len <= last.app_code_buffer.len)
+                app_code.len
+            else
+                rules.wholeUtf8Prefix(app_code[0..last.app_code_buffer.len]);
+            @memcpy(last.app_code_buffer[0..len], app_code[0..len]);
+            last.app_code_len = @intCast(len);
+            return last;
+        }
+
+        /// The app code, such as "users.not_found".
+        pub fn appCode(last: *const LastError) []const u8 {
+            return last.app_code_buffer[0..last.app_code_len];
+        }
+    };
 };
 
 /// The routes and limits of the server. A NATS transport subscribes by
@@ -163,7 +194,7 @@ const FakeCore = struct {
 
     fn routeStatsFn(ptr: *anyopaque, route_index: usize) RouteStats {
         _ = ptr;
-        return .{ .requests = route_index + 10, .errors = 1, .processing_time = .fromMilliseconds(5), .last_error = .{ .code = .not_found, .app_code = "users.not_found" } };
+        return .{ .requests = route_index + 10, .errors = 1, .processing_time = .fromMilliseconds(5), .last_error = .init(.not_found, "users.not_found") };
     }
 
     fn bodyFn(ptr: *anyopaque) []u8 {
@@ -228,6 +259,21 @@ fn testHead(method: []const u8) transport.RequestHead {
     };
 }
 
+test "the last error of a route keeps its own copy of the app code" {
+    var source = "users.not_found".*;
+    const last: RouteStats.LastError = .init(.not_found, &source);
+    source[0] = 'X';
+    try std.testing.expectEqual(core.ErrorCode.not_found, last.code);
+    try std.testing.expectEqualStrings("users.not_found", last.appCode());
+
+    // Longer than a contract may declare: cut before the character that
+    // does not fit whole.
+    const exact: [128]u8 = @splat('a');
+    try std.testing.expectEqualStrings(&exact, RouteStats.LastError.init(.internal, &exact).appCode());
+    const long = @as([127]u8, @splat('b')) ++ "é".*;
+    try std.testing.expectEqualStrings(long[0..127], RouteStats.LastError.init(.internal, &long).appCode());
+}
+
 test "a transport reaches the engine through the dispatcher and the incoming call" {
     const io = std.testing.io;
     var fake: FakeCore = .{};
@@ -237,7 +283,7 @@ test "a transport reaches the engine through the dispatcher and the incoming cal
     try std.testing.expectEqual(@as(u32, 8), dispatcher.service().max_inflight);
     const stats = dispatcher.routeStats(0);
     try std.testing.expectEqual(@as(u64, 10), stats.requests);
-    try std.testing.expectEqualStrings("users.not_found", stats.last_error.?.app_code);
+    try std.testing.expectEqualStrings("users.not_found", stats.last_error.?.appCode());
 
     // Refused before the body is read.
     const head = testHead("getUser");

@@ -14,6 +14,8 @@ const Incoming = @This();
 ptr: *anyopaque,
 vtable: *const VTable,
 
+/// The engine's functions behind the interface: one constant table per
+/// engine type.
 pub const VTable = struct {
     body: *const fn (ptr: *anyopaque) []u8,
     start: *const fn (ptr: *anyopaque, io: std.Io, reply: Reply) ?model.Failure,
@@ -31,7 +33,9 @@ pub fn body(c: Incoming) []u8 {
 /// with null. `reply.send` and `reply.release` may come from another task
 /// before `start` returns. A `Failure` means the engine could not schedule
 /// the call: the transport answers it like a refusal of `admit` and forgets
-/// it, and no `Reply` call follows.
+/// it, and no `Reply` call follows. Its strings are static, literals of the
+/// engine, as with `admit`: the transport may use them after the engine has
+/// forgotten the call.
 pub fn start(c: Incoming, io: std.Io, reply: Reply) ?model.Failure {
     return c.vtable.start(c.ptr, io, reply);
 }

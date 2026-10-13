@@ -20,7 +20,8 @@
 //! 2. Waiting suspends the task through `io`, never the OS thread. `io` is
 //!    the instance the transport was created with, and the one the library
 //!    under it runs on: otherwise canceling the task would not end a wait
-//!    inside the library.
+//!    inside the library. In Debug the transport checks it by comparing
+//!    `io.vtable` with that of its own instance.
 //! 3. Deadline. With less than 1 ms left until `request.ctx.deadline`,
 //!    `call` returns `error.Timeout` without sending. Otherwise it sends the
 //!    budget left, measured right before sending, and waits for the response
@@ -55,6 +56,8 @@ const ClientTransport = @This();
 ptr: *anyopaque,
 vtable: *const VTable,
 
+/// The transport's functions behind the interface: one constant table per
+/// transport type, built by `init`. Entries added later come with defaults.
 pub const VTable = struct {
     call: *const fn (ptr: *anyopaque, io: std.Io, request: *const transport.Request, options: CallOptions) CallError!model.Response,
     info: *const fn (ptr: *anyopaque) transport.Info,
@@ -67,7 +70,8 @@ pub const CallOptions = struct {
     /// A response body larger than this is `error.ResponseTooLarge`.
     max_response_bytes: usize,
     /// Response metadata beyond these limits is `error.ResponseTooLarge`
-    /// too: a response has the limits of a request.
+    /// too: a response has the limits of a request. Entries count with
+    /// repeated keys; bytes count as `rpc.transport.metadataBytes` does.
     max_response_metadata_entries: u32 = 64,
     max_response_metadata_bytes: u32 = 16 * 1024,
     /// When not null, the transport puts details of an error here.

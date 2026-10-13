@@ -19,6 +19,8 @@ const Reply = @This();
 ptr: *anyopaque,
 vtable: *const VTable,
 
+/// The transport's functions behind the interface: one constant table per
+/// reply type, built by `init`. Entries added later come with defaults.
 pub const VTable = struct {
     send: *const fn (ptr: *anyopaque, io: std.Io, response: *const model.Response) SendError!void,
     release: *const fn (ptr: *anyopaque, io: std.Io, disposition: Disposition) void,
@@ -58,8 +60,9 @@ pub fn send(r: Reply, io: std.Io, response: *const model.Response) SendError!voi
 /// removes the call from its tables here; once `release` returns, it calls
 /// `Incoming.cancel` of this call no more. With no `error.Canceled` to
 /// return, `release` must not swallow a cancelation request of the calling
-/// task: it locks with `lockUncancelable`, or works under
-/// `io.swapCancelProtection(.blocked)`.
+/// task: it locks with `lockUncancelable`, works under
+/// `io.swapCancelProtection(.blocked)`, or calls `io.recancel()` after a
+/// cancelation point returned `error.Canceled`.
 pub fn release(r: Reply, io: std.Io, disposition: Disposition) void {
     r.vtable.release(r.ptr, io, disposition);
 }

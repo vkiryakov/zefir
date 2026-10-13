@@ -4,6 +4,7 @@
 const std = @import("std");
 const core = @import("core");
 const model = @import("model.zig");
+const rules = @import("rules.zig");
 
 /// Where a server transport delivers incoming calls; the engine implements
 /// it.
@@ -15,6 +16,13 @@ pub const Reply = @import("Reply.zig");
 /// Slots for calls that wait for their responses, for transports that
 /// match responses to requests themselves.
 pub const Pending = @import("Pending.zig");
+
+/// The size of metadata as every limit on it counts: 2 + the sum of
+/// (3 + key length + value length) over the entries. A transport checks
+/// `ClientTransport.CallOptions.max_response_metadata_bytes` and
+/// `Dispatcher.Service.max_metadata_bytes` with it, so that all transports
+/// count the same way.
+pub const metadataBytes = rules.metadataBytes;
 
 /// A request that the client engine hands to `rpc.ClientTransport.call`.
 pub const Request = struct {
@@ -33,7 +41,8 @@ pub const Request = struct {
     ctx: core.Context,
     /// With the engine's reserved keys: traceparent, tracestate,
     /// authorization, zefir-correlation-id. The transport carries them as
-    /// ordinary pairs.
+    /// ordinary pairs. Metadata values, `authorization` included, and bodies
+    /// never go into `Diagnostics` or logs.
     metadata: []const model.Metadata.Entry,
     body: []const u8,
 };
@@ -97,7 +106,9 @@ pub const Delivery = enum(u8) { at_most_once, at_least_once, _ };
 
 /// Details of an error, for logs. The transport fills them in when the caller
 /// passes a pointer. Nothing is allocated: the message lives in a fixed
-/// buffer.
+/// buffer. Logs are read by more people than the calls are, so metadata
+/// values (`authorization` included), bodies and credentials never go into
+/// the message.
 pub const Diagnostics = struct {
     /// Where the error happened. Later releases may add values, so a `switch`
     /// over it needs an `else` branch.
@@ -122,26 +133,11 @@ pub const Diagnostics = struct {
         d.cause = cause;
         var w: std.Io.Writer = .fixed(&d.buffer);
         w.print(fmt, args) catch {
-            w.end = wholeUtf8Prefix(d.buffer[0..w.end]);
+            w.end = rules.wholeUtf8Prefix(d.buffer[0..w.end]);
         };
         d.len = @intCast(w.end);
     }
 };
-
-/// The length of `bytes` without a UTF-8 character cut at the end. Bytes that
-/// are not UTF-8 stay as they are.
-fn wholeUtf8Prefix(bytes: []const u8) usize {
-    // The last character starts at most 3 bytes before the end.
-    var start = bytes.len;
-    while (start > 0 and bytes.len - start < 4) {
-        start -= 1;
-        const byte = bytes[start];
-        if (byte & 0xC0 == 0x80) continue; // a continuation byte
-        const len = std.unicode.utf8ByteSequenceLength(byte) catch return bytes.len;
-        return if (bytes.len - start < len) start else bytes.len;
-    }
-    return bytes.len;
-}
 
 test "diagnostics keep the phase, the cause and the message" {
     var d: Diagnostics = .{};
@@ -181,6 +177,11 @@ test "delivery and diagnostics phase are open to new values" {
     inline for (.{ Delivery, Diagnostics.Phase }) |E| {
         try std.testing.expectEqual(std.lang.Type.Enum.Mode.nonexhaustive, @typeInfo(E).@"enum".mode);
     }
+}
+
+test "metadata size: the formula every transport counts limits by" {
+    try std.testing.expectEqual(@as(usize, 2), metadataBytes(&.{}));
+    try std.testing.expectEqual(@as(usize, 2 + 3 + 13 + 10), metadataBytes(&.{.{ .key = "authorization", .value = "Bearer abc" }}));
 }
 
 test "info, request head and peer default to the cautious answers" {

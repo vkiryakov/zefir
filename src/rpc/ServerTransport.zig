@@ -36,6 +36,9 @@ const ServerTransport = @This();
 ptr: *anyopaque,
 vtable: *const VTable,
 
+/// The transport's functions behind the interface: one constant table per
+/// transport type, built by `init`. Entries added later come with defaults,
+/// like `isReady`.
 pub const VTable = struct {
     start: *const fn (ptr: *anyopaque, io: std.Io, dispatcher: transport.Dispatcher) StartError!void,
     drain: *const fn (ptr: *anyopaque, io: std.Io) void,

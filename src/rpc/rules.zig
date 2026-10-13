@@ -11,6 +11,9 @@ pub const max_name_bytes = 64;
 /// The longest `zefir-correlation-id` value, in bytes.
 pub const max_correlation_id_bytes = 128;
 
+/// The longest app code, in bytes of UTF-8.
+pub const max_app_code_bytes = 128;
+
 /// The keys only the engine writes. Each may appear once in a request and
 /// never in a response.
 pub const reserved_keys = [_][]const u8{ "authorization", "traceparent", "tracestate", "zefir-correlation-id" };
@@ -74,6 +77,21 @@ pub fn metadataBytes(entries: []const Entry) usize {
     var total: usize = 2;
     for (entries) |entry| total = total +| 3 +| entry.key.len +| entry.value.len;
     return total;
+}
+
+/// The length of `bytes` without a UTF-8 character cut at its end, for text
+/// cut to fit a buffer. Bytes that are not UTF-8 stay as they are.
+pub fn wholeUtf8Prefix(bytes: []const u8) usize {
+    // The last character starts at most 3 bytes before the end.
+    var start = bytes.len;
+    while (start > 0 and bytes.len - start < 4) {
+        start -= 1;
+        const byte = bytes[start];
+        if (byte & 0xC0 == 0x80) continue; // a continuation byte
+        const len = std.unicode.utf8ByteSequenceLength(byte) catch return bytes.len;
+        return if (bytes.len - start < len) start else bytes.len;
+    }
+    return bytes.len;
 }
 
 /// The limits that metadata must fit in.
@@ -227,6 +245,25 @@ test "request metadata: invalid keys, values and reserved repeats" {
     for (invalid) |entries| {
         try testing.expectEqual(@as(?Problem, .invalid), checkRequestMetadata(entries, default_limits));
     }
+}
+
+test "10 000 metadata entries are too large, whatever they hold" {
+    const entries = try testing.allocator.alloc(Entry, 10_000);
+    defer testing.allocator.free(entries);
+    @memset(entries, .{ .key = "Not A Key", .value = " not a value " });
+    try testing.expectEqual(@as(?Problem, .too_large), checkRequestMetadata(entries, default_limits));
+    try testing.expectEqual(@as(?Problem, .too_large), checkResponseMetadata(entries, default_limits));
+}
+
+test "a cut keeps whole UTF-8 characters and leaves other bytes alone" {
+    const four = "ab\u{1F600}"; // a 4-byte character at the end
+    for (0..four.len + 1) |len| {
+        const whole: usize = if (len < four.len) @min(len, 2) else len;
+        try testing.expectEqual(whole, wholeUtf8Prefix(four[0..len]));
+    }
+    try testing.expectEqual(@as(usize, 3), wholeUtf8Prefix("a\x80\x80"));
+    try testing.expectEqual(@as(usize, 4), wholeUtf8Prefix("\x80\x80\x80\x80"));
+    try testing.expectEqual(@as(usize, 2), wholeUtf8Prefix("a\xff"));
 }
 
 test "request metadata: exactly at the limits passes, one more does not" {
