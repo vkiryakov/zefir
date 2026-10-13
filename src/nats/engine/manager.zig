@@ -16,8 +16,12 @@ const Allocator = std.mem.Allocator;
 const Client = @import("../Client.zig");
 const ServerAddress = @import("../ServerAddress.zig");
 const ServerInfo = @import("../ServerInfo.zig");
+const Message = @import("../Message.zig");
+const Parser = @import("../protocol/Parser.zig");
 const server_error = @import("../protocol/server_error.zig");
 const Connection = @import("Connection.zig");
+const Registry = @import("Registry.zig");
+const incoming = @import("incoming.zig");
 const dialer = @import("connect.zig");
 const time = @import("time.zig");
 const log = std.log.scoped(.nats);
@@ -213,6 +217,9 @@ fn teardown(client: *Client, server: ServerAddress, exit: Exit) void {
 /// The reader task of a connection: frames from the server.
 fn readLoop(client: *Client) void {
     const io = client.io;
+    // The message being read; freed if the reader stops half way.
+    var current: ?Incoming = null;
+    defer if (current) |*c| c.abandon();
     while (true) {
         const frame = client.connection.next() catch |err| {
             switch (err) {
@@ -242,11 +249,74 @@ fn readLoop(client: *Client) void {
                     return;
                 }
             },
-            // Without subscriptions there is no one to deliver a message to.
-            .msg, .body, .msg_end => {},
+            .msg => |msg| current = .begin(client, msg),
+            .body => |bytes| if (current) |*c| c.append(bytes),
+            .msg_end => if (current) |*c| {
+                c.finish(client);
+                current = null;
+            },
         }
     }
 }
+
+/// A message the reader is in the middle of. It is kept only when a
+/// subscription takes it and it is within the limits; otherwise its bytes
+/// are read past without an allocation.
+const Incoming = struct {
+    sid: u64,
+    /// Bytes of the header block and payload, as announced.
+    total_len: u32,
+    assembly: ?incoming.Assembly,
+    skipped: Skipped,
+
+    const Skipped = enum {
+        /// Kept.
+        no,
+        /// No subscription takes it: dropped without a word.
+        unrouted,
+        /// Over `max_inbound_frame_bytes` or `max_header_bytes`.
+        too_large,
+        no_memory,
+    };
+
+    fn begin(client: *Client, msg: Parser.Msg) Incoming {
+        var in: Incoming = .{ .sid = msg.sid, .total_len = msg.total_len, .assembly = null, .skipped = .no };
+        const limits = &client.options.options.limits;
+        if (!client.subscriptions.accepts(client.io, msg.sid)) {
+            in.skipped = .unrouted;
+        } else if (msg.total_len > limits.max_inbound_frame_bytes or msg.header_len > limits.max_header_bytes) {
+            in.skipped = .too_large;
+        } else if (incoming.Assembly.begin(client.gpa, msg)) |assembly| {
+            in.assembly = assembly;
+        } else |_| {
+            in.skipped = .no_memory;
+        }
+        return in;
+    }
+
+    fn append(in: *Incoming, bytes: []const u8) void {
+        if (in.assembly) |*assembly| assembly.append(bytes);
+    }
+
+    /// The message is complete: to its subscription, which counts it even
+    /// when it could not be kept.
+    fn finish(in: *Incoming, client: *Client) void {
+        if (in.skipped == .unrouted) return;
+        const message: ?Message = if (in.assembly) |*assembly| assembly.finish() else null;
+        const pushed = client.subscriptions.deliver(client.io, in.sid, message) orelse return;
+        switch (in.skipped) {
+            .no, .unrouted => {},
+            .too_large => log.warn("a message of {d} bytes for subscription {d} is over the limits: dropped", .{ in.total_len, in.sid }),
+            .no_memory => log.warn("no memory for a message of {d} bytes for subscription {d}: dropped", .{ in.total_len, in.sid }),
+        }
+        if (pushed.no_memory) log.warn("no memory to queue a message for subscription {d}: dropped", .{in.sid});
+        if (pushed.overflow_began) log.warn("subscription {d} is a slow consumer: messages dropped", .{in.sid});
+    }
+
+    fn abandon(in: *Incoming) void {
+        if (in.assembly) |*assembly| assembly.discard();
+    }
+};
 
 /// The writer task of a connection: batches from the outbound queue.
 fn writeLoop(client: *Client) void {

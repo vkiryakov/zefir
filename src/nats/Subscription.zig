@@ -8,7 +8,9 @@
 //! ```
 
 const std = @import("std");
+const Io = std.Io;
 const Client = @import("Client.zig");
+const Message = @import("Message.zig");
 const MessageQueue = @import("engine/MessageQueue.zig");
 const Registry = @import("engine/Registry.zig");
 const log = std.log.scoped(.nats);
@@ -54,6 +56,35 @@ pub const OverflowPolicy = enum {
     /// SlowConsumer.
     close_subscription,
 };
+
+pub const ReceiveOptions = struct {
+    /// How long to wait for a message; by default, as long as it takes.
+    timeout: Io.Timeout = .none,
+};
+
+pub const NextError = error{
+    /// No message came in time.
+    Timeout,
+    /// The task was canceled through `std.Io`.
+    Canceled,
+    /// Another task waits for the next message already.
+    ConcurrentReceive,
+    /// Messages did not fit and the policy is `close_subscription`; the
+    /// ones before them came out first.
+    SlowConsumer,
+    /// The server refused the subscription.
+    PermissionDenied,
+    /// The client is closed.
+    ConnectionClosed,
+};
+
+/// The next message, oldest first; free it with its `deinit()`. Waits for
+/// one until `options.timeout`. Null once the subscription has ended
+/// normally, unsubscribed or after `max_messages`, and nothing is left.
+/// One task at a time may wait.
+pub fn next(sub: *Subscription, options: ReceiveOptions) NextError!?Message {
+    return sub.messages.next(sub.client.io, options.timeout);
+}
 
 /// Ends the subscription and frees it, with the messages it still holds.
 /// No task may wait for its messages meanwhile. The server is told to stop

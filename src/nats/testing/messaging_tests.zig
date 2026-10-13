@@ -396,3 +396,273 @@ test "a SUB line of 4096 argument bytes passes, one more is InvalidSubject" {
     try r.finish();
     try testing.expectEqualStrings("SUB " ++ subject[0..4094] ++ " 1\r\nPING\r\n", r.transcript.items);
 }
+
+/// What a scripted server does after the handshake.
+const Step = union(enum) {
+    /// Waits for this line from the client; PINGs on the way get PONGs.
+    expect: []const u8,
+    send: []const u8,
+    /// Closes the connection at once.
+    hang_up,
+};
+
+/// After the handshake, plays `steps` in order; then answers PINGs until
+/// the client hangs up.
+fn serveScript(io: Io, listener: *net.Server, info: []const u8, steps: []const Step) anyerror!void {
+    var peer: FakeServer.Peer = undefined;
+    try peer.accept(io, listener);
+    defer peer.close();
+    try handshake(&peer, info);
+    for (steps) |step| switch (step) {
+        .expect => |expected| while (true) {
+            const line = try peer.readLine();
+            if (std.mem.eql(u8, line, "PING")) {
+                try peer.send(golden.pong);
+                continue;
+            }
+            try testing.expectEqualStrings(expected, line);
+            break;
+        },
+        .send => |bytes| try peer.send(bytes),
+        .hang_up => return,
+    };
+    while (try peer.nextLine()) |line| {
+        if (std.mem.eql(u8, line, "PING")) try peer.send(golden.pong);
+    }
+}
+
+/// A client connected to a scripted server. Initialize in place.
+const Scripted = struct {
+    listener: net.Server,
+    server: Io.Future(anyerror!void),
+    url: [64]u8 = undefined,
+    client: Client,
+
+    fn start(s: *Scripted, gpa: std.mem.Allocator, options: nats.Options, steps: []const Step) !void {
+        const io = testing.io;
+        s.listener = try FakeServer.listen(io);
+        errdefer s.listener.deinit(io);
+        s.server = try io.concurrent(serveScript, .{ io, &s.listener, golden.info_default, steps });
+        errdefer s.server.cancel(io) catch {};
+        var with_server = options;
+        with_server.servers = &.{try FakeServer.url(&s.listener, &s.url)};
+        s.client = try .init(gpa, io, with_server);
+        errdefer s.client.deinit();
+        try s.client.connect();
+    }
+
+    /// Closes the client and checks that the server played its script.
+    fn finish(s: *Scripted) !void {
+        s.client.close();
+        try s.server.await(testing.io);
+    }
+
+    fn deinit(s: *Scripted) void {
+        const io = testing.io;
+        s.client.deinit();
+        s.server.cancel(io) catch {};
+        s.listener.deinit(io);
+    }
+};
+
+/// An HMSG frame with one header, `X: <value>`: its block takes 17 bytes
+/// more than the value.
+fn hmsgFrame(comptime subject: []const u8, comptime sid: u64, comptime value: []const u8, comptime payload: []const u8) []const u8 {
+    const block = "NATS/1.0\r\nX: " ++ value ++ "\r\n\r\n";
+    return std.fmt.comptimePrint("HMSG {s} {d} {d} {d}\r\n", .{ subject, sid, block.len, block.len + payload.len }) ++ block ++ payload ++ "\r\n";
+}
+
+const within_five_seconds: nats.ReceiveOptions = .{ .timeout = .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } } };
+
+/// Takes the next message of `sub` and checks its subject and payload.
+fn expectMessage(sub: *nats.Subscription, subject: []const u8, payload: []const u8) !void {
+    var msg = (try sub.next(within_five_seconds)) orelse return error.TestNoMessage;
+    defer msg.deinit();
+    try testing.expectEqualStrings(subject, msg.subject);
+    try testing.expectEqualStrings(payload, msg.payload);
+}
+
+test "messages reach their subscriptions whole" {
+    var s: Scripted = undefined;
+    try s.start(testing.allocator, .{ .servers = &.{} }, &.{
+        .{ .expect = "SUB foo 1" },
+        .{ .expect = "SUB h.* 2" },
+        .{ .send = "MSG foo 1 5\r\nhello\r\n" ++
+            "HMSG h.test 2 r.1 53 61\r\nNATS/1.0\r\nX-Multi: one\r\nX-Multi: two\r\nX-Single: v\r\n\r\npayload!\r\n" ++
+            "MSG foo 1 reply.to.me 15\r\n\r\nMSG x 1 1\r\n\x00\xff\r\n" },
+    });
+    defer s.deinit();
+    const foo = try s.client.subscribe("foo", .{});
+    defer foo.deinit();
+    const h = try s.client.subscribe("h.*", .{});
+    defer h.deinit();
+
+    try expectMessage(foo, "foo", "hello");
+    {
+        var msg = (try h.next(within_five_seconds)) orelse return error.TestNoMessage;
+        defer msg.deinit();
+        try testing.expectEqualStrings("h.test", msg.subject);
+        try testing.expectEqualStrings("r.1", msg.reply_to.?);
+        try testing.expectEqualStrings("payload!", msg.payload);
+        var values = msg.headers.getAll("X-Multi");
+        try testing.expectEqualStrings("one", values.next().?);
+        try testing.expectEqualStrings("two", values.next().?);
+        try testing.expectEqualStrings("v", msg.headers.get("X-Single").?);
+    }
+    {
+        // A payload that looks like frames, and binary bytes.
+        var msg = (try foo.next(within_five_seconds)) orelse return error.TestNoMessage;
+        defer msg.deinit();
+        try testing.expectEqualStrings("reply.to.me", msg.reply_to.?);
+        try testing.expectEqualStrings("\r\nMSG x 1 1\r\n\x00\xff", msg.payload);
+    }
+    try s.finish();
+}
+
+test "a message for a SID nobody has is dropped, and the next one arrives" {
+    var s: Scripted = undefined;
+    try s.start(testing.allocator, .{ .servers = &.{} }, &.{
+        .{ .expect = "SUB foo 1" },
+        .{ .send = "MSG foo 99 3\r\nabc\r\nHMSG foo 98 12 12\r\nNATS/1.0\r\n\r\n\r\nMSG foo 1 2\r\nok\r\n" },
+    });
+    defer s.deinit();
+    const foo = try s.client.subscribe("foo", .{});
+    defer foo.deinit();
+    try expectMessage(foo, "foo", "ok");
+    try s.finish();
+}
+
+test "a message at max_inbound_frame_bytes arrives, a byte more is dropped, and the next is whole" {
+    // The client warns about the messages it drops; this test expects it.
+    const level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = level;
+    const at_limit: [1024]u8 = @splat('a');
+    var s: Scripted = undefined;
+    try s.start(testing.allocator, .{ .servers = &.{}, .limits = .{ .max_inbound_frame_bytes = 1024, .max_header_bytes = 512 } }, &.{
+        .{ .expect = "SUB big 1" },
+        .{ .send = "MSG big 1 1024\r\n" ++ at_limit ++ "\r\n" ++
+            "MSG big 1 1025\r\n" ++ at_limit ++ "b\r\n" ++
+            comptime hmsgFrame("big", 1, at_limit[0..997], at_limit[0..11]) ++
+                "MSG big 1 5\r\nafter\r\n" },
+    });
+    defer s.deinit();
+    const big = try s.client.subscribe("big", .{});
+    defer big.deinit();
+    try expectMessage(big, "big", &at_limit);
+    try expectMessage(big, "big", "after");
+    try s.finish();
+}
+
+test "a header block over max_header_bytes is dropped, and the next message is whole" {
+    // The client warns about the messages it drops; this test expects it.
+    const level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = level;
+    const filler: [600]u8 = @splat('h');
+    var s: Scripted = undefined;
+    try s.start(testing.allocator, .{ .servers = &.{}, .limits = .{ .max_inbound_frame_bytes = 4096, .max_header_bytes = 512 } }, &.{
+        .{ .expect = "SUB h 1" },
+        // 512 bytes of headers pass, 513 do not.
+        .{ .send = comptime hmsgFrame("h", 1, filler[0..495], "ok") ++ hmsgFrame("h", 1, filler[0..496], "no") ++ "MSG h 1 5\r\nafter\r\n" },
+    });
+    defer s.deinit();
+    const h = try s.client.subscribe("h", .{});
+    defer h.deinit();
+    try expectMessage(h, "h", "ok");
+    try expectMessage(h, "h", "after");
+    try s.finish();
+}
+
+/// Passes allocations on, except every one of exactly `size` bytes.
+const RefuseOneSize = struct {
+    parent: std.mem.Allocator,
+    size: usize,
+
+    fn allocator(r: *RefuseOneSize) std.mem.Allocator {
+        return .{ .ptr = r, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+
+    fn alloc(context: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const r: *RefuseOneSize = @ptrCast(@alignCast(context));
+        if (len == r.size) return null;
+        return r.parent.rawAlloc(len, alignment, ret_addr);
+    }
+
+    fn resize(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const r: *RefuseOneSize = @ptrCast(@alignCast(context));
+        return r.parent.rawResize(memory, alignment, new_len, ret_addr);
+    }
+
+    fn remap(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const r: *RefuseOneSize = @ptrCast(@alignCast(context));
+        return r.parent.rawRemap(memory, alignment, new_len, ret_addr);
+    }
+
+    fn free(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const r: *RefuseOneSize = @ptrCast(@alignCast(context));
+        r.parent.rawFree(memory, alignment, ret_addr);
+    }
+};
+
+test "a message there is no memory for is dropped, and the next one arrives" {
+    // The client warns about the messages it drops; this test expects it.
+    const level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = level;
+    const payload: [12342]u8 = @splat('m');
+    // "oom" and this payload: one allocation of 12345 bytes, refused.
+    var refuse: RefuseOneSize = .{ .parent = testing.allocator, .size = "oom".len + payload.len };
+    var s: Scripted = undefined;
+    try s.start(refuse.allocator(), .{ .servers = &.{} }, &.{
+        .{ .expect = "SUB oom 1" },
+        .{ .send = "MSG oom 1 12342\r\n" ++ payload ++ "\r\nMSG oom 1 2\r\nok\r\n" },
+    });
+    defer s.deinit();
+    const sub = try s.client.subscribe("oom", .{});
+    defer sub.deinit();
+    try expectMessage(sub, "oom", "ok");
+    try s.finish();
+}
+
+test "max_messages counts the messages dropped too, then the subscription ends" {
+    // The client warns about the messages it drops; this test expects it.
+    const level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = level;
+    var s: Scripted = undefined;
+    try s.start(testing.allocator, .{ .servers = &.{} }, &.{
+        .{ .expect = "SUB once 1" },
+        .{ .expect = "UNSUB 1 3" },
+        .{ .send = "MSG once 1 1\r\na\r\nMSG once 1 1\r\nb\r\nMSG once 1 1\r\nc\r\n" },
+    });
+    defer s.deinit();
+    // One message fits; the other two are dropped, yet they count.
+    const once = try s.client.subscribe("once", .{ .max_messages = 3, .pending = .{ .messages = 1 } });
+    defer once.deinit();
+    try s.client.flush(quick);
+    const give_up = time.after(testing.io, .fromSeconds(5));
+    while (once.messages.isOpen(testing.io)) {
+        if (time.expired(testing.io, give_up)) return error.TestNeverEnded;
+        try testing.io.sleep(.fromMilliseconds(1), .awake);
+    }
+    try expectMessage(once, "once", "a");
+    try testing.expect(try once.next(within_five_seconds) == null);
+    try s.finish();
+}
+
+test "a message cut short by the server is freed" {
+    var s: Scripted = undefined;
+    try s.start(testing.allocator, .{ .servers = &.{} }, &.{
+        .{ .expect = "SUB foo 1" },
+        .{ .send = "MSG foo 1 100\r\nonly a part of it" },
+        .hang_up,
+    });
+    defer s.deinit();
+    const foo = try s.client.subscribe("foo", .{});
+    defer foo.deinit();
+    // The client closes with the connection; testing.allocator reports
+    // the message if it leaks.
+    try testing.expectError(error.ConnectionClosed, foo.next(within_five_seconds));
+    try s.server.await(testing.io);
+}

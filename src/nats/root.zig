@@ -26,6 +26,7 @@ pub const PublishMessage = Message.PublishMessage;
 pub const Subscription = @import("Subscription.zig");
 pub const SubscribeOptions = Subscription.Options;
 pub const OverflowPolicy = Subscription.OverflowPolicy;
+pub const ReceiveOptions = Subscription.ReceiveOptions;
 
 /// Every error the client returns, apart from those of `std.Io` that pass
 /// through unchanged, such as network errors. Each function lists the ones
@@ -118,9 +119,9 @@ fn isIn(comptime Set: type, comptime name: []const u8) bool {
 
 test "every error of the module's functions is in nats.Error or comes from std.Io" {
     inline for (.{
-        Client.InitError,    Client.ConnectError,      Client.FlushError,     Client.ServerInfoError,
-        Options.Error,       ServerAddress.ParseError, ServerInfo.ParseError, Headers.ValidateError,
-        Client.PublishError, Client.SubscribeError,
+        Client.InitError,    Client.ConnectError,      Client.FlushError,      Client.ServerInfoError,
+        Options.Error,       ServerAddress.ParseError, ServerInfo.ParseError,  Headers.ValidateError,
+        Client.PublishError, Client.SubscribeError,    Subscription.NextError,
     }) |Set| {
         inline for (comptime @typeInfo(Set).error_set.error_names.?) |name| {
             if (comptime !isIn(Error, name) and !isIn(IoErrors, name)) {

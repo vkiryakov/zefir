@@ -7,6 +7,7 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const Client = @import("../Client.zig");
 const Subscription = @import("../Subscription.zig");
+const Message = @import("../Message.zig");
 const MessageQueue = @import("MessageQueue.zig");
 const Outbound = @import("Outbound.zig");
 const encoder = @import("../protocol/encoder.zig");
@@ -41,6 +42,31 @@ pub fn unregister(r: *Registry, io: Io, sid: u64) void {
     r.mutex.lockUncancelable(io);
     defer r.mutex.unlock(io);
     _ = r.subscriptions.remove(sid);
+}
+
+/// Subscription `sid` exists and takes messages: the reader allocates a
+/// message only then.
+pub fn accepts(r: *Registry, io: Io, sid: u64) bool {
+    r.mutex.lockUncancelable(io);
+    defer r.mutex.unlock(io);
+    const sub = r.subscriptions.get(sid) orelse return false;
+    return sub.messages.isOpen(io);
+}
+
+/// Hands `message` to subscription `sid`, or tells it that a message came
+/// that could not be kept (null). Null when there is no such subscription
+/// any more: the message is freed.
+pub fn deliver(r: *Registry, io: Io, sid: u64, message: ?Message) ?MessageQueue.Pushed {
+    r.mutex.lockUncancelable(io);
+    defer r.mutex.unlock(io);
+    const sub = r.subscriptions.get(sid) orelse {
+        if (message) |m| {
+            var dropped = m;
+            dropped.deinit();
+        }
+        return null;
+    };
+    return sub.messages.push(io, message);
 }
 
 /// The client closed: every subscription ends with `.closed`, and no new
