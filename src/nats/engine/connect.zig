@@ -45,16 +45,26 @@ fn Result(comptime Function: type) type {
     return @typeInfo(Function).@"fn".return_type.?;
 }
 
+/// How `race` stops a task that ran out of time besides canceling it: the
+/// task may lose the cancellation (code it calls can swallow
+/// `error.Canceled`), so `function(context, io)` must make it return soon,
+/// for instance by shutting its socket down.
+pub const Abort = struct {
+    context: *anyopaque,
+    function: *const fn (context: *anyopaque, io: Io) void,
+};
+
 /// Runs `function(args)` in a task of its own and waits for it until
-/// `deadline`. When the deadline comes first, the task is canceled and
-/// awaited, a value it returned anyway goes to `release`, and the caller
-/// gets Timeout. Canceling the caller cancels the task the same way.
+/// `deadline`. When the deadline comes first, the task is aborted, canceled
+/// and awaited, a value it returned anyway goes to `release`, and the
+/// caller gets Timeout. Canceling the caller stops the task the same way.
 pub fn race(
     io: Io,
     deadline: Io.Clock.Timestamp,
     function: anytype,
     args: std.meta.ArgsTuple(@TypeOf(function)),
     comptime release: fn (Io, Payload(@TypeOf(function))) void,
+    abort: ?Abort,
 ) RaceError(@TypeOf(function))!Payload(@TypeOf(function)) {
     const Race = union(enum) {
         done: Result(@TypeOf(function)),
@@ -68,9 +78,11 @@ pub fn race(
         return err;
     };
     const first = select.await() catch |err| {
+        if (abort) |a| a.function(a.context, io);
         settle(Race, &select, io, release);
         return err;
     };
+    if (first == .timer) if (abort) |a| a.function(a.context, io);
     settle(Race, &select, io, release);
     return switch (first) {
         .done => |result| result,
@@ -144,14 +156,14 @@ fn keep(io: Io, value: u32) void {
 
 test "race returns what comes in time" {
     const io = testing.io;
-    try testing.expectEqual(7, try race(io, time.after(io, .fromSeconds(30)), sleepThenAnswer, .{ io, .fromMilliseconds(1) }, keep));
-    try testing.expectError(error.Broken, race(io, time.after(io, .fromSeconds(30)), fail, .{}, keep));
+    try testing.expectEqual(7, try race(io, time.after(io, .fromSeconds(30)), sleepThenAnswer, .{ io, .fromMilliseconds(1) }, keep, null));
+    try testing.expectError(error.Broken, race(io, time.after(io, .fromSeconds(30)), fail, .{}, keep, null));
 }
 
 test "race gives up at the deadline and cancels the slower task" {
     const io = testing.io;
     const start = Io.Clock.awake.now(io);
-    try testing.expectError(error.Timeout, race(io, time.after(io, .fromMilliseconds(30)), sleepThenAnswer, .{ io, .fromSeconds(30) }, keep));
+    try testing.expectError(error.Timeout, race(io, time.after(io, .fromMilliseconds(30)), sleepThenAnswer, .{ io, .fromSeconds(30) }, keep, null));
     const waited = start.durationTo(Io.Clock.awake.now(io));
     try testing.expect(waited.nanoseconds >= 30 * std.time.ns_per_ms);
     try testing.expect(waited.toSeconds() < 10);
@@ -173,5 +185,35 @@ fn free(io: Io, bytes: []u8) void {
 test "a value that comes after the deadline is released" {
     // testing.allocator reports a leak if `free` is not called.
     const io = testing.io;
-    try testing.expectError(error.Timeout, race(io, time.after(io, .zero), allocateLate, .{ io, testing.allocator }, free));
+    try testing.expectError(error.Timeout, race(io, time.after(io, .zero), allocateLate, .{ io, testing.allocator }, free, null));
+}
+
+/// Waits for `event` and ignores cancellation, like code that swallows
+/// error.Canceled; gives up after 5 s.
+fn waitDeaf(io: Io, event: *Io.Event) error{Abandoned}!u32 {
+    const protection = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(protection);
+    const give_up = time.after(io, .fromSeconds(5));
+    while (!event.isSet()) {
+        event.waitTimeout(io, .{ .deadline = give_up }) catch {};
+        if (time.expired(io, give_up)) return error.Abandoned;
+    }
+    return 1;
+}
+
+fn setEvent(context: *anyopaque, io: Io) void {
+    const event: *Io.Event = @ptrCast(@alignCast(context));
+    event.set(io);
+}
+
+test "a task that ignores cancellation is stopped through the abort hook" {
+    const io = testing.io;
+    var event: Io.Event = .unset;
+    const start = Io.Clock.awake.now(io);
+    try testing.expectError(error.Timeout, race(io, time.after(io, .fromMilliseconds(20)), waitDeaf, .{ io, &event }, keep, .{
+        .context = &event,
+        .function = setEvent,
+    }));
+    try testing.expect(event.isSet());
+    try testing.expect(start.durationTo(Io.Clock.awake.now(io)).toSeconds() < 3);
 }

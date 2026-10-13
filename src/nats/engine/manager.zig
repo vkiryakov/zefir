@@ -1,8 +1,14 @@
 //! The client's tasks. The manager opens the connection, starts its reader
 //! and writer and sends heartbeat PINGs. When the connection must end, it
 //! takes it down in order: the queues close and wake their waiters, the
-//! reader and writer are canceled and awaited, and only then does the
-//! socket close. In this version the client closes with its connection.
+//! socket is shut down, the reader and writer are canceled and awaited, and
+//! only then does the socket close. In this version the client closes with
+//! its connection.
+//!
+//! A task blocked on a socket is never left to cancellation alone: code a
+//! task calls may swallow `error.Canceled` (std's stack capture in a Debug
+//! allocator does), and on `std.Io.Threaded` the task's later syscalls then
+//! cannot be interrupted. A shutdown of the socket wakes it either way.
 
 const std = @import("std");
 const Io = std.Io;
@@ -70,7 +76,9 @@ fn openFirst(client: *Client) Client.ConnectError!Opened {
     for (client.options.servers) |*server| {
         log.debug("connecting to {f}", .{server.*});
         const deadline = time.after(io, client.options.options.connect_timeout);
-        if (dialer.race(io, deadline, attempt, .{ client, server }, Opened.release)) |opened| {
+        var state: AttemptState = .{};
+        const abort: dialer.Abort = .{ .context = &state, .function = AttemptState.abort };
+        if (dialer.race(io, deadline, attempt, .{ client, server, &state }, Opened.release, abort)) |opened| {
             return opened;
         } else |err| switch (err) {
             // close() stops the attempts, and a server that refuses the
@@ -85,19 +93,71 @@ fn openFirst(client: *Client) Client.ConnectError!Opened {
     return last_error;
 }
 
+/// The socket of an attempt in progress, for the manager to shut down when
+/// time runs out: the attempt may have lost its cancellation and would wait
+/// on the socket for good. The mutex keeps shutdown off a closed socket.
+const AttemptState = struct {
+    mutex: Io.Mutex = .init,
+    stream: ?Io.net.Stream = null,
+    aborted: bool = false,
+
+    fn abort(context: *anyopaque, io: Io) void {
+        const state: *AttemptState = @ptrCast(@alignCast(context));
+        state.mutex.lockUncancelable(io);
+        defer state.mutex.unlock(io);
+        state.aborted = true;
+        if (state.stream) |stream| shutdown(io, stream);
+    }
+
+    /// Registers the attempt's stream; false when the attempt was aborted
+    /// already.
+    fn hold(state: *AttemptState, io: Io, stream: Io.net.Stream) bool {
+        state.mutex.lockUncancelable(io);
+        defer state.mutex.unlock(io);
+        if (state.aborted) return false;
+        state.stream = stream;
+        return true;
+    }
+
+    /// From here on the attempt's stream is no longer the manager's to touch.
+    fn release(state: *AttemptState, io: Io) void {
+        state.mutex.lockUncancelable(io);
+        defer state.mutex.unlock(io);
+        state.stream = null;
+    }
+};
+
 /// DNS, TCP and the handshake with one server.
-fn attempt(client: *Client, server: *const ServerAddress) (dialer.DialError || Connection.HandshakeError)!Opened {
+fn attempt(client: *Client, server: *const ServerAddress, state: *AttemptState) (dialer.DialError || Connection.HandshakeError)!Opened {
     const io = client.io;
     const stream = try dialer.dial(io, server);
+    if (!state.hold(io, stream)) {
+        stream.close(io);
+        return error.Timeout;
+    }
     var connection: Connection = .init(stream, io, client.read_buffer, client.parser_limits);
-    errdefer connection.stream.close(io);
-    const greeting = try connection.handshake(io, client.gpa, .init(&client.options.options));
+    const greeting = connection.handshake(io, client.gpa, .init(&client.options.options)) catch |err| {
+        state.release(io);
+        stream.close(io);
+        return err;
+    };
+    state.release(io);
     return .{ .connection = connection, .greeting = greeting, .server = server.*, .gpa = client.gpa };
+}
+
+/// Shuts `stream` down both ways: a read blocked on it returns the end of
+/// the stream and a blocked write fails, whether or not their tasks still
+/// see cancellation. The socket stays open for its owner to close.
+fn shutdown(io: Io, stream: Io.net.Stream) void {
+    const protection = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(protection);
+    stream.shutdown(io, .both) catch {};
 }
 
 /// The reader or writer could not start: the connection is dropped.
 fn abandon(client: *Client, opened: Opened, err: Io.ConcurrentError) void {
     const io = client.io;
+    shutdown(io, client.connection.stream);
     client.connection_tasks.cancel(io);
     client.connection.stream.close(io);
     client.gpa.free(opened.greeting.info_json);
@@ -120,8 +180,9 @@ fn heartbeat(client: *Client) Exit {
 }
 
 /// Takes the connection down: the queues close and wake their waiters, the
-/// reader and writer are canceled and awaited, and only then does the
-/// socket close. Nothing here can be canceled.
+/// socket is shut down so that no read or write blocks any more, the reader
+/// and writer are canceled and awaited, and only then does the socket
+/// close. Nothing here can be canceled.
 fn teardown(client: *Client, server: ServerAddress, exit: Exit) void {
     const io = client.io;
     switch (exit) {
@@ -134,6 +195,7 @@ fn teardown(client: *Client, server: ServerAddress, exit: Exit) void {
         .write => |err| log.debug("writing to {f} failed: {t}", .{ server, err }),
     }
     client.outbound.close(io);
+    shutdown(io, client.connection.stream);
     client.connection_tasks.cancel(io);
     client.connection.stream.close(io);
     disconnected(client);

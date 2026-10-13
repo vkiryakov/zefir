@@ -258,15 +258,15 @@ const TestClient = struct {
     }
 
     fn handshake(client: *TestClient, io: Io, hello: Hello) !Greeting {
-        return connect.race(io, time.after(io, deadline), handshakeTask, .{ &client.conn, io, hello }, freeGreeting);
+        return connect.race(io, time.after(io, deadline), handshakeTask, .{ &client.conn, io, hello }, freeGreeting, null);
     }
 
     fn next(client: *TestClient, io: Io) !Parser.Frame {
-        return connect.race(io, time.after(io, deadline), nextTask, .{&client.conn}, keep(Parser.Frame));
+        return connect.race(io, time.after(io, deadline), nextTask, .{&client.conn}, keep(Parser.Frame), null);
     }
 
     fn writeAll(client: *TestClient, io: Io, slices: []const []const u8, written: *usize) !void {
-        return connect.race(io, time.after(io, deadline), writeAllTask, .{ &client.conn, io, slices, written }, keep(void));
+        return connect.race(io, time.after(io, deadline), writeAllTask, .{ &client.conn, io, slices, written }, keep(void), null);
     }
 
     /// Closes the socket: the server reads the end of the stream.
