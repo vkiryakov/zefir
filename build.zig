@@ -81,12 +81,17 @@ pub fn build(b: *std.Build) void {
     });
 
     const test_step = b.step("test", "Run all tests");
+    // Builds the validator's test binaries without running them, so that
+    // `-Dtarget` may name another system: CI builds them for x86-linux-musl,
+    // where usize has 32 bits.
+    const validator_compile_step = b.step("compile-validator-tests", "Build the validator's test binaries for -Dtarget without running them");
     for ([_]*std.Build.Module{ core, log, confy, validator, rpc, orm, zefir }) |module| {
         const tests = b.addTest(.{ .root_module = module });
         test_step.dependOn(&addRun(b, tests, tsan).step);
+        if (module == validator) validator_compile_step.dependOn(&tests.step);
     }
 
-    addValidatorTests(b, test_step, validator, target, optimize);
+    addValidatorTests(b, test_step, validator_compile_step, validator, target, optimize);
 
     // core examples: `zig build test` builds and runs them; an example that
     // exits with an error fails the step.
@@ -306,10 +311,13 @@ fn addRun(b: *std.Build, artifact: *std.Build.Step.Compile, tsan: bool) *std.Bui
 }
 
 /// The validator tests that use only its public API, compiled as client code
-/// from the lists in src/validator/testdata/cases.zig.
+/// from the lists in src/validator/testdata/cases.zig. `test_step` runs them
+/// and checks the compile-error fixtures; `compile_step` only builds the test
+/// binaries for `target`.
 fn addValidatorTests(
     b: *std.Build,
     test_step: *std.Build.Step,
+    compile_step: *std.Build.Step,
     validator: *std.Build.Module,
     target: std.Build.ResolvedTarget,
     optimize: std.lang.Optimize,
@@ -334,6 +342,7 @@ fn addValidatorTests(
             }),
         });
         test_step.dependOn(&b.addRunArtifact(tests).step);
+        compile_step.dependOn(&tests.step);
     }
 
     // Compile-error fixtures: each one is compiled (never run) and passes only
@@ -373,6 +382,7 @@ fn addValidatorTests(
             }),
         });
         test_step.dependOn(&b.addRunArtifact(t).step);
+        compile_step.dependOn(&t.step);
     }
 
     // In Debug, a malformed validateSelf result panics: each program must
@@ -399,6 +409,7 @@ fn addValidatorTests(
         // with 3, so a program that printed the text and returned fails.
         run.expectExitCode(3);
         test_step.dependOn(&run.step);
+        compile_step.dependOn(&exe.step);
     }
 
     // Golden vectors: vector_gen turns each JSON file of `vector_files` into
@@ -421,6 +432,7 @@ fn addValidatorTests(
     });
     const harness_tests = b.addTest(.{ .name = "vector_harness", .root_module = harness });
     test_step.dependOn(&b.addRunArtifact(harness_tests).step);
+    compile_step.dependOn(&harness_tests.step);
     for (validator_cases.vector_files) |file| {
         const run_gen = b.addRunArtifact(gen);
         run_gen.addFileArg(b.path(b.fmt("src/validator/testdata/vectors/{s}.json", .{file.name})));
@@ -441,6 +453,7 @@ fn addValidatorTests(
             }),
         });
         test_step.dependOn(&b.addRunArtifact(vector_tests).step);
+        compile_step.dependOn(&vector_tests.step);
     }
     // A JSON file in vectors/ that `vector_files` does not list would never
     // run. The build system does not see a file added to a directory
@@ -464,12 +477,15 @@ fn addValidatorTests(
             .imports = &.{.{ .name = "validator", .module = validator }},
         });
         if (example.stdout) |stdout| {
-            const example_run = b.addRunArtifact(b.addExecutable(.{ .name = example.name, .root_module = example_module }));
+            const example_exe = b.addExecutable(.{ .name = example.name, .root_module = example_module });
+            const example_run = b.addRunArtifact(example_exe);
             example_run.expectStdOutEqual(stdout);
             test_step.dependOn(&example_run.step);
+            compile_step.dependOn(&example_exe.step);
         } else {
             const example_test = b.addTest(.{ .name = example.name, .root_module = example_module });
             test_step.dependOn(&b.addRunArtifact(example_test).step);
+            compile_step.dependOn(&example_test.step);
         }
     }
     const readme_test = b.addTest(.{
@@ -486,4 +502,5 @@ fn addValidatorTests(
         }),
     });
     test_step.dependOn(&b.addRunArtifact(readme_test).step);
+    compile_step.dependOn(&readme_test.step);
 }

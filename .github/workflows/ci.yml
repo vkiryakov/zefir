@@ -52,6 +52,17 @@ jobs:
         run: sudo sysctl vm.mmap_rnd_bits=28
       - run: zig build test -Dtsan=true --summary all --test-timeout 5m
 
+  # The validator's tests built, not run, for a 32-bit target, where usize
+  # has 32 bits; the other jobs build for 64-bit targets only.
+  validator-x86:
+    name: validator (x86-linux-musl, compile only)
+    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: mlugg/setup-zig@v2
+      - run: zig build compile-validator-tests -Dtarget=x86-linux-musl --summary all
+
   fmt:
     name: fmt
     timeout-minutes: 10
