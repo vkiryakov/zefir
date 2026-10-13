@@ -6,7 +6,6 @@ pub const confy = @import("confy");
 pub const validator = @import("validator");
 pub const rpc = @import("rpc");
 pub const orm = @import("orm");
-pub const nats = @import("nats");
 
 test {
     @import("std").testing.refAllDecls(@This());
