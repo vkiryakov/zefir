@@ -9,6 +9,8 @@ const Allocator = std.mem.Allocator;
 const Message = @import("../Message.zig");
 const Subscription = @import("../Subscription.zig");
 const OverflowPolicy = Subscription.OverflowPolicy;
+const PendingCounts = Subscription.PendingCounts;
+const Stats = Subscription.Stats;
 const time = @import("time.zig");
 const MessageQueue = @This();
 
@@ -86,14 +88,17 @@ pub fn endedHow(q: *MessageQueue, io: Io) ?End {
 
 /// Ends the queue `how`, unless it has ended already; `.closed` replaces
 /// any other end. With `discard`, the messages it holds are freed; `.closed`
-/// always frees them.
-pub fn end(q: *MessageQueue, io: Io, how: End, discard: bool) void {
+/// always frees them. True when the queue was open: only one caller ends
+/// it.
+pub fn end(q: *MessageQueue, io: Io, how: End, discard: bool) bool {
     q.mutex.lockUncancelable(io);
     defer q.mutex.unlock(io);
-    if (q.ended != null and how != .closed) return;
+    const was_open = q.ended == null;
+    if (!was_open and how != .closed) return false;
     q.ended = how;
     if (discard or how == .closed) q.freeAll();
     q.not_empty.broadcast(io);
+    return was_open;
 }
 
 /// What a push did.
@@ -123,25 +128,57 @@ pub fn push(q: *MessageQueue, io: Io, message: ?Message) Pushed {
     q.received += 1;
     if (message) |m| {
         if (q.fits(m)) {
+            q.overflowing = false;
             q.append(io, m, &pushed);
         } else {
-            release(m);
-            pushed.dropped = 1;
             pushed.overflow_began = !q.overflowing;
             q.overflowing = true;
+            q.handleOverflow(io, m, &pushed);
         }
     } else {
         pushed.dropped = 1;
     }
     q.dropped += pushed.dropped;
     if (q.last) |last| {
-        if (q.received >= last) {
+        if (q.ended == null and q.received >= last) {
             q.ended = .finished;
             pushed.ended = .finished;
             q.not_empty.broadcast(io);
         }
     }
     return pushed;
+}
+
+/// `m` does not fit: the overflow policy decides.
+fn handleOverflow(q: *MessageQueue, io: Io, m: Message, pushed: *Pushed) void {
+    switch (q.overflow) {
+        .drop_newest => {
+            release(m);
+            pushed.dropped += 1;
+        },
+        // A message larger than the byte limit would never fit: it is the
+        // one to go.
+        .drop_oldest => if (m.buffer.len > q.limits.bytes) {
+            release(m);
+            pushed.dropped += 1;
+        } else {
+            while (!q.fits(m)) {
+                // An empty queue fits any message within the byte limit.
+                const oldest = q.messages.popFront().?;
+                q.bytes -= oldest.buffer.len;
+                release(oldest);
+                pushed.dropped += 1;
+            }
+            q.append(io, m, pushed);
+        },
+        .close_subscription => {
+            release(m);
+            pushed.dropped += 1;
+            q.ended = .slow_consumer;
+            pushed.ended = .slow_consumer;
+            q.not_empty.broadcast(io);
+        },
+    }
 }
 
 /// There is room for `m` within both limits.
@@ -157,7 +194,6 @@ fn append(q: *MessageQueue, io: Io, m: Message, pushed: *Pushed) void {
         return;
     };
     q.bytes += m.buffer.len;
-    q.overflowing = false;
     q.not_empty.signal(io);
 }
 
@@ -188,6 +224,19 @@ pub fn next(q: *MessageQueue, io: Io, timeout: Io.Timeout) Subscription.NextErro
     }
 }
 
+/// The messages waiting to be taken, and their bytes.
+pub fn pending(q: *MessageQueue, io: Io) PendingCounts {
+    q.mutex.lockUncancelable(io);
+    defer q.mutex.unlock(io);
+    return .{ .messages = q.messages.len, .bytes = q.bytes };
+}
+
+pub fn stats(q: *MessageQueue, io: Io) Stats {
+    q.mutex.lockUncancelable(io);
+    defer q.mutex.unlock(io);
+    return .{ .received = q.received, .delivered = q.delivered, .dropped = q.dropped };
+}
+
 fn release(message: Message) void {
     var m = message;
     m.deinit();
@@ -205,10 +254,192 @@ test "a queue is open until it ends, and closed wins over any other end" {
     var q: MessageQueue = .init(testing.allocator, .{ .messages = 4, .bytes = 1024 }, .drop_newest, null);
     defer q.deinit();
     try testing.expect(q.isOpen(io));
-    q.end(io, .permission_denied, false);
+    _ = q.end(io, .permission_denied, false);
     try testing.expect(!q.isOpen(io));
-    q.end(io, .finished, false);
+    _ = q.end(io, .finished, false);
     try testing.expectEqual(.permission_denied, q.endedHow(io).?);
-    q.end(io, .closed, false);
+    _ = q.end(io, .closed, false);
     try testing.expectEqual(.closed, q.endedHow(io).?);
+}
+
+/// A message of `size` bytes in all: subject "s" and the rest payload.
+fn testMessage(size: usize, tag: u8) !Message {
+    const buffer = try testing.allocator.alloc(u8, size);
+    @memset(buffer, tag);
+    buffer[0] = 's';
+    return .{
+        .subject = buffer[0..1],
+        .reply_to = null,
+        .headers = .empty,
+        .payload = buffer[1..],
+        .status = null,
+        .description = "",
+        .buffer = buffer,
+        .gpa = testing.allocator,
+    };
+}
+
+/// Takes the next message and checks the tag of its payload.
+fn expectNext(q: *MessageQueue, tag: u8) !void {
+    var m = (try q.next(testing.io, .none)) orelse return error.TestNoMessage;
+    defer m.deinit();
+    try testing.expectEqual(tag, m.payload[0]);
+}
+
+fn pushTagged(q: *MessageQueue, size: usize, tags: []const u8) !void {
+    for (tags) |tag| _ = q.push(testing.io, try testMessage(size, tag));
+}
+
+test "drop_newest keeps the first messages, by count and by bytes" {
+    var by_count: MessageQueue = .init(testing.allocator, .{ .messages = 2, .bytes = 1024 }, .drop_newest, null);
+    defer by_count.deinit();
+    try pushTagged(&by_count, 10, "abcd");
+    try testing.expectEqual(PendingCounts{ .messages = 2, .bytes = 20 }, by_count.pending(testing.io));
+    try expectNext(&by_count, 'a');
+    try expectNext(&by_count, 'b');
+    try testing.expectEqual(Stats{ .received = 4, .delivered = 2, .dropped = 2 }, by_count.stats(testing.io));
+
+    var by_bytes: MessageQueue = .init(testing.allocator, .{ .messages = 100, .bytes = 25 }, .drop_newest, null);
+    defer by_bytes.deinit();
+    try pushTagged(&by_bytes, 10, "abc");
+    try testing.expectEqual(PendingCounts{ .messages = 2, .bytes = 20 }, by_bytes.pending(testing.io));
+    try expectNext(&by_bytes, 'a');
+    // Room again: the next one fits.
+    try pushTagged(&by_bytes, 10, "d");
+    try expectNext(&by_bytes, 'b');
+    try expectNext(&by_bytes, 'd');
+}
+
+test "drop_oldest keeps the last messages, by count and by bytes" {
+    var by_count: MessageQueue = .init(testing.allocator, .{ .messages = 2, .bytes = 1024 }, .drop_oldest, null);
+    defer by_count.deinit();
+    try pushTagged(&by_count, 10, "abcd");
+    try expectNext(&by_count, 'c');
+    try expectNext(&by_count, 'd');
+    try testing.expectEqual(2, by_count.stats(testing.io).dropped);
+
+    // A large message pushes out as many small ones as it needs.
+    var by_bytes: MessageQueue = .init(testing.allocator, .{ .messages = 100, .bytes = 30 }, .drop_oldest, null);
+    defer by_bytes.deinit();
+    try pushTagged(&by_bytes, 10, "abc");
+    try pushTagged(&by_bytes, 25, "D");
+    try testing.expectEqual(PendingCounts{ .messages = 1, .bytes = 25 }, by_bytes.pending(testing.io));
+    try expectNext(&by_bytes, 'D');
+    try testing.expectEqual(3, by_bytes.stats(testing.io).dropped);
+}
+
+test "a message larger than the byte limit never fits: it is the one dropped" {
+    var q: MessageQueue = .init(testing.allocator, .{ .messages = 100, .bytes = 30 }, .drop_oldest, null);
+    defer q.deinit();
+    try pushTagged(&q, 10, "ab");
+    const pushed = q.push(testing.io, try testMessage(31, 'X'));
+    try testing.expectEqual(1, pushed.dropped);
+    try expectNext(&q, 'a');
+    try expectNext(&q, 'b');
+}
+
+test "close_subscription hands out what came first, then SlowConsumer" {
+    var q: MessageQueue = .init(testing.allocator, .{ .messages = 2, .bytes = 1024 }, .close_subscription, null);
+    defer q.deinit();
+    _ = q.push(testing.io, try testMessage(10, 'a'));
+    _ = q.push(testing.io, try testMessage(10, 'b'));
+    const pushed = q.push(testing.io, try testMessage(10, 'c'));
+    try testing.expectEqual(.slow_consumer, pushed.ended.?);
+    try testing.expect(pushed.overflow_began);
+    // Ended: later messages are neither kept nor counted.
+    const late = q.push(testing.io, try testMessage(10, 'd'));
+    try testing.expectEqual(0, late.dropped);
+    try expectNext(&q, 'a');
+    try expectNext(&q, 'b');
+    try testing.expectError(error.SlowConsumer, q.next(testing.io, .none));
+    try testing.expectError(error.SlowConsumer, q.next(testing.io, .none));
+    try testing.expectEqual(Stats{ .received = 3, .delivered = 2, .dropped = 1 }, q.stats(testing.io));
+}
+
+test "a run of drops begins once, and ends when a message fits again" {
+    var q: MessageQueue = .init(testing.allocator, .{ .messages = 1, .bytes = 1024 }, .drop_newest, null);
+    defer q.deinit();
+    try testing.expect(!q.push(testing.io, try testMessage(10, 'a')).overflow_began);
+    try testing.expect(q.push(testing.io, try testMessage(10, 'b')).overflow_began);
+    try testing.expect(!q.push(testing.io, try testMessage(10, 'c')).overflow_began);
+    try expectNext(&q, 'a');
+    try testing.expect(!q.push(testing.io, try testMessage(10, 'd')).overflow_began);
+    try testing.expect(q.push(testing.io, try testMessage(10, 'e')).overflow_began);
+    try expectNext(&q, 'd');
+}
+
+test "how next ends: null, PermissionDenied after what came, ConnectionClosed at once" {
+    var finished: MessageQueue = .init(testing.allocator, .{ .messages = 4, .bytes = 1024 }, .drop_newest, null);
+    defer finished.deinit();
+    try pushTagged(&finished, 10, "a");
+    _ = finished.end(testing.io, .finished, false);
+    try expectNext(&finished, 'a');
+    try testing.expect(try finished.next(testing.io, .none) == null);
+
+    var denied: MessageQueue = .init(testing.allocator, .{ .messages = 4, .bytes = 1024 }, .drop_newest, null);
+    defer denied.deinit();
+    try pushTagged(&denied, 10, "a");
+    _ = denied.end(testing.io, .permission_denied, false);
+    try expectNext(&denied, 'a');
+    try testing.expectError(error.PermissionDenied, denied.next(testing.io, .none));
+
+    var closed: MessageQueue = .init(testing.allocator, .{ .messages = 4, .bytes = 1024 }, .drop_newest, null);
+    defer closed.deinit();
+    try pushTagged(&closed, 10, "ab");
+    _ = closed.end(testing.io, .closed, false);
+    try testing.expectError(error.ConnectionClosed, closed.next(testing.io, .none));
+    try testing.expectEqual(PendingCounts{ .messages = 0, .bytes = 0 }, closed.pending(testing.io));
+}
+
+test "max_messages: the queue finishes with its last message" {
+    var q: MessageQueue = .init(testing.allocator, .{ .messages = 4, .bytes = 1024 }, .drop_newest, 2);
+    defer q.deinit();
+    _ = q.push(testing.io, try testMessage(10, 'a'));
+    const last = q.push(testing.io, null);
+    try testing.expectEqual(.finished, last.ended.?);
+    try expectNext(&q, 'a');
+    try testing.expect(try q.next(testing.io, .none) == null);
+    try testing.expectEqual(Stats{ .received = 2, .delivered = 1, .dropped = 1 }, q.stats(testing.io));
+}
+
+fn receive(q: *MessageQueue) Subscription.NextError!?Message {
+    return q.next(testing.io, .none);
+}
+
+/// Waits until a task waits in `next`, for 5 s at most.
+fn awaitReceiver(q: *MessageQueue) !void {
+    const io = testing.io;
+    const give_up = time.after(io, .fromSeconds(5));
+    while (true) {
+        {
+            q.mutex.lockUncancelable(io);
+            defer q.mutex.unlock(io);
+            if (q.receiving) return;
+        }
+        if (time.expired(io, give_up)) return error.TestReceiverNeverWaited;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+}
+
+test "one task at a time waits; a timeout, a cancel and an end wake it" {
+    const io = testing.io;
+    var q: MessageQueue = .init(testing.allocator, .{ .messages = 4, .bytes = 1024 }, .drop_newest, null);
+    defer q.deinit();
+    try testing.expectError(error.Timeout, q.next(io, .{ .duration = .{ .raw = .fromMilliseconds(10), .clock = .awake } }));
+
+    var receiver = try io.concurrent(receive, .{&q});
+    defer if (receiver.cancel(io)) |m| {
+        if (m) |message| release(message);
+    } else |_| {};
+    try awaitReceiver(&q);
+    try testing.expectError(error.ConcurrentReceive, q.next(io, .none));
+    try testing.expectError(error.Canceled, receiver.cancel(io));
+
+    var waiting = try io.concurrent(receive, .{&q});
+    defer if (waiting.cancel(io)) |m| {
+        if (m) |message| release(message);
+    } else |_| {};
+    try awaitReceiver(&q);
+    _ = q.end(io, .closed, true);
+    try testing.expectError(error.ConnectionClosed, waiting.await(io));
 }

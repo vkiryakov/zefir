@@ -44,13 +44,18 @@ pub const Kind = enum {
     }
 };
 
-/// What a permissions violation refers to.
+/// What a permissions violation refers to. The server quotes the names
+/// with Go's %q, which escapes `"`, `\`, control bytes, invalid UTF-8 and
+/// runes that do not print: compare them with `quotedEql`.
 pub const Permission = struct {
     operation: Operation,
-    /// The subject, or the reply-to subject for `.reply`.
+    /// The subject, or the reply-to subject for `.reply`, as quoted.
     subject: []const u8,
     /// The queue group of a denied subscription, when the text names one.
     queue: ?[]const u8 = null,
+    /// The SID of a subscription the server revoked, when the text names
+    /// one.
+    sid: ?u64 = null,
 
     pub const Operation = enum { publish, subscribe, reply };
 };
@@ -97,8 +102,9 @@ pub fn classify(text: []const u8) Classified {
 }
 
 /// Reads `Publish to "s"`, `Publish with Reply of "r"`,
-/// `Subscription to "s"`, `Subscription to "s" using queue "q"` and
-/// `Subscription to "s", too many tokens`.
+/// `Subscription to "s"`, `Subscription to "s" using queue "q"`,
+/// `Subscription to "s", too many tokens` and, after a reload of the
+/// server's configuration, either subscription form with `(sid "n")`.
 fn permission(rest: []const u8) ?Permission {
     const forms = [_]struct { prefix: []const u8, operation: Permission.Operation }{
         .{ .prefix = "Publish with Reply of \"", .operation = .reply },
@@ -107,17 +113,39 @@ fn permission(rest: []const u8) ?Permission {
     };
     for (forms) |form| {
         if (!std.ascii.startsWithIgnoreCase(rest, form.prefix)) continue;
-        const quoted = rest[form.prefix.len..];
-        const queue_marker = "\" using queue \"";
-        if (form.operation == .subscribe) {
-            if (std.mem.find(u8, quoted, queue_marker)) |end| {
-                const queue = quoted[end + queue_marker.len ..];
-                const queue_end = std.mem.findScalarLast(u8, queue, '"') orelse return null;
-                return .{ .operation = .subscribe, .subject = quoted[0..end], .queue = queue[0..queue_end] };
-            }
+        var tail = rest[form.prefix.len..];
+        var result: Permission = .{ .operation = form.operation, .subject = quotedPrefix(&tail) orelse return null };
+        if (form.operation != .subscribe) return result;
+        const queue_marker = " using queue \"";
+        if (std.ascii.startsWithIgnoreCase(tail, queue_marker)) {
+            tail = tail[queue_marker.len..];
+            result.queue = quotedPrefix(&tail) orelse return null;
         }
-        const end = std.mem.findScalarLast(u8, quoted, '"') orelse return null;
-        return .{ .operation = form.operation, .subject = quoted[0..end] };
+        const sid_marker = " (sid \"";
+        if (std.ascii.startsWithIgnoreCase(tail, sid_marker)) {
+            tail = tail[sid_marker.len..];
+            const sid = quotedPrefix(&tail) orelse return null;
+            result.sid = std.fmt.parseInt(u64, sid, 10) catch null;
+        }
+        return result;
+    }
+    return null;
+}
+
+/// The text up to the quote that ends it, the first `"` no backslash
+/// escapes; `tail` moves past that quote.
+fn quotedPrefix(tail: *[]const u8) ?[]const u8 {
+    const text = tail.*;
+    var i: usize = 0;
+    while (i < text.len) : (i += 1) {
+        switch (text[i]) {
+            '\\' => i += 1,
+            '"' => {
+                tail.* = text[i + 1 ..];
+                return text[0..i];
+            },
+            else => {},
+        }
     }
     return null;
 }
@@ -188,4 +216,107 @@ test "permissions violations name the subject" {
     const unreadable = classify("Permissions Violation for something else");
     try testing.expectEqual(.permissions_violation, unreadable.kind);
     try testing.expect(unreadable.permission == null);
+}
+
+/// Whether `quoted`, the inside of a string that Go's %q quoted, stands for
+/// `raw`. It reads the escapes %q writes: `\"`, `\\`, `\a`, `\b`, `\f`,
+/// `\n`, `\r`, `\t`, `\v`, `\xHH` (a byte), `\uHHHH` and `\UHHHHHHHH` (a
+/// rune, as UTF-8); anything else after a backslash matches nothing.
+pub fn quotedEql(quoted: []const u8, raw: []const u8) bool {
+    var rest = quoted;
+    var expected = raw;
+    while (rest.len > 0) {
+        var buffer: [4]u8 = undefined;
+        const piece = unescapeNext(&rest, &buffer) orelse return false;
+        if (!std.mem.startsWith(u8, expected, piece)) return false;
+        expected = expected[piece.len..];
+    }
+    return expected.len == 0;
+}
+
+/// The bytes the first character or escape of `rest` stands for, in
+/// `buffer` or in `rest`; `rest` moves past it. Null for a broken escape.
+fn unescapeNext(rest: *[]const u8, buffer: *[4]u8) ?[]const u8 {
+    const text = rest.*;
+    if (text[0] != '\\') {
+        rest.* = text[1..];
+        return text[0..1];
+    }
+    if (text.len < 2) return null;
+    const simple: ?u8 = switch (text[1]) {
+        '"' => '"',
+        '\\' => '\\',
+        'a' => 0x07,
+        'b' => 0x08,
+        'f' => 0x0c,
+        'n' => '\n',
+        'r' => '\r',
+        't' => '\t',
+        'v' => 0x0b,
+        else => null,
+    };
+    if (simple) |byte| {
+        buffer[0] = byte;
+        rest.* = text[2..];
+        return buffer[0..1];
+    }
+    const digits: usize = switch (text[1]) {
+        'x' => 2,
+        'u' => 4,
+        'U' => 8,
+        else => return null,
+    };
+    if (text.len < 2 + digits) return null;
+    var value: u32 = 0;
+    for (text[2..][0..digits]) |c| value = value * 16 + (std.fmt.charToDigit(c, 16) catch return null);
+    rest.* = text[2 + digits ..];
+    if (text[1] == 'x') {
+        buffer[0] = @intCast(value);
+        return buffer[0..1];
+    }
+    const rune = std.math.cast(u21, value) orelse return null;
+    const len = std.unicode.utf8Encode(rune, buffer) catch return null;
+    return buffer[0..len];
+}
+
+test "permission texts quote subjects as Go's %q does" {
+    const p = classify("Permissions Violation for Subscription to \"q\\\"uo\\\\te.\\xff.\\u00a0.ü\" using queue \"w\\\"q\"").permission.?;
+    try testing.expectEqual(.subscribe, p.operation);
+    try testing.expectEqualStrings("q\\\"uo\\\\te.\\xff.\\u00a0.ü", p.subject);
+    try testing.expect(quotedEql(p.subject, "q\"uo\\te.\xff.\u{a0}.ü"));
+    try testing.expect(!quotedEql(p.subject, "q\"uo\\te.\xff.\u{a0}.u"));
+    try testing.expect(quotedEql(p.queue.?, "w\"q"));
+    // An escaped quote does not end the subject.
+    const tricky = classify("Permissions Violation for Subscription to \"a\\\" using queue \\\"b\"").permission.?;
+    try testing.expect(tricky.queue == null);
+    try testing.expect(quotedEql(tricky.subject, "a\" using queue \"b"));
+}
+
+test "a subscription revoked by a reload is named by its SID" {
+    const plain = classify("Permissions Violation for Subscription to \"foo\" (sid \"12\")").permission.?;
+    try testing.expectEqual(12, plain.sid.?);
+    try testing.expect(plain.queue == null);
+    const grouped = classify("Permissions Violation for Subscription to \"foo\" using queue \"g\" (sid \"7\")").permission.?;
+    try testing.expectEqual(7, grouped.sid.?);
+    try testing.expect(quotedEql(grouped.queue.?, "g"));
+    try testing.expect(classify("Permissions Violation for Subscription to \"foo\"").permission.?.sid == null);
+}
+
+test "quotedEql reads every escape %q writes, and nothing else" {
+    for ([_][2][]const u8{
+        .{ "plain", "plain" },
+        .{ "", "" },
+        .{ "\\a\\b\\f\\n\\r\\t\\v", "\x07\x08\x0c\n\r\t\x0b" },
+        .{ "\\\"\\\\", "\"\\" },
+        .{ "\\x00\\x7f\\xff", "\x00\x7f\xff" },
+        .{ "\\u00a0\\u2028", "\u{a0}\u{2028}" },
+        .{ "\\U0001f600", "\u{1f600}" },
+        .{ "ü😀", "ü😀" },
+    }) |case| try testing.expect(quotedEql(case[0], case[1]));
+    for ([_][2][]const u8{
+        .{ "abc", "abd" },       .{ "abc", "ab" },     .{ "ab", "abc" },
+        .{ "\\q", "q" },         .{ "\\", "\\" },      .{ "\\x0", "\x00" },
+        .{ "\\xzz", "z" },       .{ "\\u12", "\x12" }, .{ "\\ud800", "\xed\xa0\x80" },
+        .{ "\\U00110000", "?" },
+    }) |case| try testing.expect(!quotedEql(case[0], case[1]));
 }

@@ -243,10 +243,17 @@ fn readLoop(client: *Client) void {
             },
             .err => |text| {
                 log.warn("server error: {s}", .{text});
-                const kind = server_error.classify(text).kind;
-                if (kind.closesConnection()) {
-                    lose(client, .{ .server_error = kind });
+                const classified = server_error.classify(text);
+                if (classified.kind.closesConnection()) {
+                    lose(client, .{ .server_error = classified.kind });
                     return;
+                }
+                // A refused publish only costs that message; a refused
+                // subscription ends.
+                if (classified.permission) |permission| {
+                    if (permission.operation == .subscribe) {
+                        if (client.subscriptions.deny(io, permission)) |sid| log.debug("subscription {d} refused", .{sid});
+                    }
                 }
             },
             .msg => |msg| current = .begin(client, msg),
@@ -310,7 +317,15 @@ const Incoming = struct {
             .no_memory => log.warn("no memory for a message of {d} bytes for subscription {d}: dropped", .{ in.total_len, in.sid }),
         }
         if (pushed.no_memory) log.warn("no memory to queue a message for subscription {d}: dropped", .{in.sid});
-        if (pushed.overflow_began) log.warn("subscription {d} is a slow consumer: messages dropped", .{in.sid});
+        if (pushed.ended == .slow_consumer) {
+            log.warn("subscription {d} is a slow consumer: closed", .{in.sid});
+            // The reader cannot wait for room: the UNSUB goes in at once.
+            Registry.queueUnsub(&client.outbound, client.io, in.sid) catch |err| {
+                log.debug("no UNSUB for subscription {d}: {t}", .{ in.sid, err });
+            };
+        } else if (pushed.overflow_began) {
+            log.warn("subscription {d} is a slow consumer: messages dropped", .{in.sid});
+        }
     }
 
     fn abandon(in: *Incoming) void {

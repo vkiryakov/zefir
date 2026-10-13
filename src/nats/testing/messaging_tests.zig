@@ -666,3 +666,161 @@ test "a message cut short by the server is freed" {
     try testing.expectError(error.ConnectionClosed, foo.next(within_five_seconds));
     try s.server.await(testing.io);
 }
+
+/// Waits until `sub` has received `count` messages, for 5 s at most.
+fn awaitReceived(sub: *nats.Subscription, count: u64) !void {
+    const io = testing.io;
+    const give_up = time.after(io, .fromSeconds(5));
+    while (sub.stats().received < count) {
+        if (time.expired(io, give_up)) return error.TestMessagesNeverCame;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+}
+
+const briefly: nats.ReceiveOptions = .{ .timeout = .{ .duration = .{ .raw = .fromMilliseconds(20), .clock = .awake } } };
+
+test "unsubscribe tells the server, drops what waits, and next returns null" {
+    var s: Scripted = undefined;
+    try s.start(testing.allocator, .{ .servers = &.{} }, &.{
+        .{ .expect = "SUB foo 1" },
+        .{ .send = "MSG foo 1 1\r\na\r\nMSG foo 1 1\r\nb\r\n" },
+        .{ .expect = "UNSUB 1" },
+    });
+    defer s.deinit();
+    const foo = try s.client.subscribe("foo", .{});
+    defer foo.deinit();
+    try awaitReceived(foo, 2);
+    try testing.expectEqual(nats.PendingCounts{ .messages = 2, .bytes = 8 }, foo.pending());
+    try foo.unsubscribe();
+    try testing.expect(try foo.next(within_five_seconds) == null);
+    try testing.expectEqual(nats.PendingCounts{ .messages = 0, .bytes = 0 }, foo.pending());
+    try testing.expectEqual(nats.SubscriptionStats{ .received = 2, .delivered = 0, .dropped = 0 }, foo.stats());
+    // Again: nothing more is sent.
+    try foo.unsubscribe();
+    try s.client.flush(quick);
+    try s.finish();
+}
+
+const five_messages = "MSG slow 1 1\r\n1\r\nMSG slow 1 1\r\n2\r\nMSG slow 1 1\r\n3\r\nMSG slow 1 1\r\n4\r\nMSG slow 1 1\r\n5\r\n";
+
+test "a slow consumer under drop_newest keeps the first messages" {
+    const level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = level;
+    var s: Scripted = undefined;
+    try s.start(testing.allocator, .{ .servers = &.{} }, &.{ .{ .expect = "SUB slow 1" }, .{ .send = five_messages } });
+    defer s.deinit();
+    const slow = try s.client.subscribe("slow", .{ .pending = .{ .messages = 2 } });
+    defer slow.deinit();
+    try awaitReceived(slow, 5);
+    try expectMessage(slow, "slow", "1");
+    try expectMessage(slow, "slow", "2");
+    try testing.expectError(error.Timeout, slow.next(briefly));
+    try testing.expectEqual(nats.SubscriptionStats{ .received = 5, .delivered = 2, .dropped = 3 }, slow.stats());
+    try s.finish();
+}
+
+test "a slow consumer under drop_oldest keeps the last messages" {
+    const level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = level;
+    var s: Scripted = undefined;
+    try s.start(testing.allocator, .{ .servers = &.{} }, &.{ .{ .expect = "SUB slow 1" }, .{ .send = five_messages } });
+    defer s.deinit();
+    const slow = try s.client.subscribe("slow", .{ .pending = .{ .messages = 2 }, .overflow = .drop_oldest });
+    defer slow.deinit();
+    try awaitReceived(slow, 5);
+    try expectMessage(slow, "slow", "4");
+    try expectMessage(slow, "slow", "5");
+    try testing.expectError(error.Timeout, slow.next(briefly));
+    try testing.expectEqual(nats.SubscriptionStats{ .received = 5, .delivered = 2, .dropped = 3 }, slow.stats());
+    try s.finish();
+}
+
+test "a slow consumer under close_subscription: what came first, then SlowConsumer, and the server is told" {
+    const level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = level;
+    var s: Scripted = undefined;
+    try s.start(testing.allocator, .{ .servers = &.{} }, &.{
+        .{ .expect = "SUB slow 1" },
+        .{ .send = five_messages },
+        .{ .expect = "UNSUB 1" },
+    });
+    defer s.deinit();
+    const slow = try s.client.subscribe("slow", .{ .pending = .{ .messages = 2 }, .overflow = .close_subscription });
+    defer slow.deinit();
+    try awaitReceived(slow, 3);
+    try expectMessage(slow, "slow", "1");
+    try expectMessage(slow, "slow", "2");
+    try testing.expectError(error.SlowConsumer, slow.next(within_five_seconds));
+    try testing.expectEqual(nats.SubscriptionStats{ .received = 3, .delivered = 2, .dropped = 1 }, slow.stats());
+    // deinit sends nothing more: the subscription has ended.
+    try s.client.flush(quick);
+    try s.finish();
+}
+
+test "a subscription the server refuses: PermissionDenied, and the others go on" {
+    const level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = level;
+    var s: Scripted = undefined;
+    try s.start(testing.allocator, .{ .servers = &.{} }, &.{
+        .{ .expect = "SUB forbidden 1" },
+        .{ .expect = "SUB ok 2" },
+        .{ .send = "-ERR 'Permissions Violation for Subscription to \"forbidden\"'\r\nMSG ok 2 2\r\nhi\r\n" },
+    });
+    defer s.deinit();
+    const forbidden = try s.client.subscribe("forbidden", .{});
+    defer forbidden.deinit();
+    const ok = try s.client.subscribe("ok", .{});
+    defer ok.deinit();
+    try testing.expectError(error.PermissionDenied, forbidden.next(within_five_seconds));
+    try expectMessage(ok, "ok", "hi");
+    try s.client.flush(quick);
+    try testing.expect(s.client.isConnected());
+    try s.finish();
+}
+
+test "a refusal names the subscription by SID, or by a subject the server escapes" {
+    const level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = level;
+    var s: Scripted = undefined;
+    try s.start(testing.allocator, .{ .servers = &.{} }, &.{
+        .{ .expect = "SUB dup 1" },
+        .{ .expect = "SUB dup 2" },
+        .{ .expect = "SUB odd.q\"uo\\te.ü 3" },
+        .{ .send = "-ERR 'Permissions Violation for Subscription to \"dup\" (sid \"2\")'\r\n" ++
+            "-ERR 'Permissions Violation for Subscription to \"odd.q\\\"uo\\\\te.ü\"'\r\n" ++
+            "MSG dup 1 2\r\nhi\r\n" },
+    });
+    defer s.deinit();
+    const first = try s.client.subscribe("dup", .{});
+    defer first.deinit();
+    const second = try s.client.subscribe("dup", .{});
+    defer second.deinit();
+    const odd = try s.client.subscribe("odd.q\"uo\\te.ü", .{});
+    defer odd.deinit();
+    try testing.expectError(error.PermissionDenied, second.next(within_five_seconds));
+    try testing.expectError(error.PermissionDenied, odd.next(within_five_seconds));
+    try expectMessage(first, "dup", "hi");
+    try s.finish();
+}
+
+test "a publish the server refuses leaves the connection up" {
+    const level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = level;
+    var s: Scripted = undefined;
+    try s.start(testing.allocator, .{ .servers = &.{} }, &.{
+        .{ .expect = "PUB secret.x 1" },
+        .{ .send = "-ERR 'Permissions Violation for Publish to \"secret.x\"'\r\n" },
+    });
+    defer s.deinit();
+    try s.client.publish("secret.x", "x");
+    try s.client.flush(quick);
+    try s.client.flush(quick);
+    try testing.expect(s.client.isConnected());
+    try s.finish();
+}

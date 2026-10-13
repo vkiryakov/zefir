@@ -86,13 +86,65 @@ pub fn next(sub: *Subscription, options: ReceiveOptions) NextError!?Message {
     return sub.messages.next(sub.client.io, options.timeout);
 }
 
+pub const UnsubscribeError = error{
+    /// The client is closed.
+    ConnectionClosed,
+    /// No memory to queue the UNSUB.
+    OutOfMemory,
+    /// A bug in this client: the frame came out of another length.
+    ProtocolError,
+};
+
+/// Ends the subscription now: the messages it holds are dropped, `next()`
+/// returns null, and the server is told to stop sending. Any task may call
+/// it; once the subscription has ended, it does nothing more. The
+/// subscription ends even when the UNSUB cannot be queued: the client then
+/// drops what the server still sends for it.
+pub fn unsubscribe(sub: *Subscription) UnsubscribeError!void {
+    const client = sub.client;
+    const io = client.io;
+    if (!sub.messages.end(io, .finished, true)) {
+        if (sub.messages.endedHow(io) == .closed) return error.ConnectionClosed;
+        return;
+    }
+    Registry.queueUnsub(&client.outbound, io, sub.sid) catch |err| switch (err) {
+        error.Closed => return error.ConnectionClosed,
+        else => |e| return e,
+    };
+}
+
+/// What waits to be taken.
+pub const PendingCounts = struct {
+    messages: usize,
+    /// The bytes of the messages, subjects and headers included.
+    bytes: usize,
+};
+
+pub fn pending(sub: *Subscription) PendingCounts {
+    return sub.messages.pending(sub.client.io);
+}
+
+pub const Stats = struct {
+    /// Messages the server delivered, the dropped ones included.
+    received: u64,
+    /// Messages `next()` handed out.
+    delivered: u64,
+    /// Messages lost: they did not fit, were over the client's limits, or
+    /// found no memory.
+    dropped: u64,
+};
+
+pub fn stats(sub: *Subscription) Stats {
+    return sub.messages.stats(sub.client.io);
+}
+
 /// Ends the subscription and frees it, with the messages it still holds.
 /// No task may wait for its messages meanwhile. The server is told to stop
 /// sending, unless the subscription had ended already.
 pub fn deinit(sub: *Subscription) void {
     const client = sub.client;
     const io = client.io;
-    if (sub.messages.isOpen(io)) {
+    if (sub.messages.end(io, .finished, true)) {
         Registry.queueUnsub(&client.outbound, io, sub.sid) catch |err| {
             log.debug("no UNSUB for subscription {d}: {t}", .{ sub.sid, err });
         };

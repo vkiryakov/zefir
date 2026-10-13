@@ -11,6 +11,7 @@ const Message = @import("../Message.zig");
 const MessageQueue = @import("MessageQueue.zig");
 const Outbound = @import("Outbound.zig");
 const encoder = @import("../protocol/encoder.zig");
+const server_error = @import("../protocol/server_error.zig");
 const Registry = @This();
 
 /// Guards everything below.
@@ -69,6 +70,39 @@ pub fn deliver(r: *Registry, io: Io, sid: u64, message: ?Message) ?MessageQueue.
     return sub.messages.push(io, message);
 }
 
+/// The server refused a subscription: the one it names ends with
+/// `.permission_denied`, and its SID comes back; null when none matches.
+/// A text without a SID names a subject and a queue group, and then it is
+/// the oldest open subscription with both: the server answers SUBs in
+/// order.
+pub fn deny(r: *Registry, io: Io, permission: server_error.Permission) ?u64 {
+    r.mutex.lockUncancelable(io);
+    defer r.mutex.unlock(io);
+    var chosen: ?*Subscription = null;
+    if (permission.sid) |sid| {
+        chosen = r.subscriptions.get(sid);
+    } else {
+        var subscriptions = r.subscriptions.valueIterator();
+        while (subscriptions.next()) |entry| {
+            const sub = entry.*;
+            if (chosen) |earlier| if (earlier.sid < sub.sid) continue;
+            if (!server_error.quotedEql(permission.subject, sub.subject)) continue;
+            if (!sameQueue(permission.queue, sub.queue_group)) continue;
+            if (!sub.messages.isOpen(io)) continue;
+            chosen = sub;
+        }
+    }
+    const sub = chosen orelse return null;
+    if (!sub.messages.end(io, .permission_denied, false)) return null;
+    return sub.sid;
+}
+
+/// The queue group the server quoted, if any, is `queue`.
+fn sameQueue(quoted: ?[]const u8, queue: ?[]const u8) bool {
+    const q = quoted orelse return queue == null;
+    return queue != null and server_error.quotedEql(q, queue.?);
+}
+
 /// The client closed: every subscription ends with `.closed`, and no new
 /// one registers.
 pub fn closeAll(r: *Registry, io: Io) void {
@@ -76,7 +110,7 @@ pub fn closeAll(r: *Registry, io: Io) void {
     defer r.mutex.unlock(io);
     r.closed = true;
     var subscriptions = r.subscriptions.valueIterator();
-    while (subscriptions.next()) |sub| sub.*.messages.end(io, .closed, true);
+    while (subscriptions.next()) |sub| _ = sub.*.messages.end(io, .closed, true);
 }
 
 /// Frees every subscription still registered: the client goes away.
@@ -181,4 +215,39 @@ fn createAndDestroy(gpa: Allocator) !void {
 
 test "nothing leaks when an allocation fails" {
     try testing.checkAllAllocationFailures(testing.allocator, createAndDestroy, .{});
+}
+
+test "deny ends the oldest open subscription with the subject and queue the server names" {
+    const io = testing.io;
+    var r: Registry = .{};
+    defer r.deinit(testing.allocator);
+    const limits: MessageQueue.Limits = .{ .messages = 4, .bytes = 1024 };
+    var subs: [4]*Subscription = undefined;
+    for (&subs, [_][]const u8{ "forbidden", "forbidden", "forbidden", "x.q\"uo\\te.ü" }, [_]?[]const u8{ null, null, "g", null }) |*sub, subject, queue| {
+        sub.* = try create(testing.allocator, undefined, subject, .{ .queue = queue }, limits);
+        try r.register(io, testing.allocator, sub.*, 10);
+    }
+    const forbidden: server_error.Permission = .{ .operation = .subscribe, .subject = "forbidden" };
+    try testing.expectEqual(1, r.deny(io, forbidden).?);
+    try testing.expectEqual(.permission_denied, subs[0].messages.endedHow(io).?);
+    try testing.expectEqual(2, r.deny(io, forbidden).?);
+    // The one in a queue group is not named by a text without the group.
+    try testing.expect(r.deny(io, forbidden) == null);
+    try testing.expectEqual(3, r.deny(io, .{ .operation = .subscribe, .subject = "forbidden", .queue = "g" }).?);
+    // The server escapes the subject; the match does not mind.
+    try testing.expectEqual(4, r.deny(io, .{ .operation = .subscribe, .subject = "x.q\\\"uo\\\\te.ü" }).?);
+}
+
+test "deny takes the SID when the server names it" {
+    const io = testing.io;
+    var r: Registry = .{};
+    defer r.deinit(testing.allocator);
+    const a = try newSubscription(testing.allocator, "dup");
+    try r.register(io, testing.allocator, a, 10);
+    const b = try newSubscription(testing.allocator, "dup");
+    try r.register(io, testing.allocator, b, 10);
+    try testing.expectEqual(2, r.deny(io, .{ .operation = .subscribe, .subject = "dup", .sid = 2 }).?);
+    try testing.expect(a.messages.isOpen(io));
+    try testing.expect(!b.messages.isOpen(io));
+    try testing.expect(r.deny(io, .{ .operation = .subscribe, .subject = "dup", .sid = 99 }) == null);
 }
