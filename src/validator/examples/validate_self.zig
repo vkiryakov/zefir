@@ -6,7 +6,7 @@ const Room = enum { single, double, family };
 
 const Booking = struct {
     room: Room,
-    guests: u8,
+    guests: u16,
     check_in: []const u8,
     check_out: []const u8,
 
@@ -21,7 +21,7 @@ const Booking = struct {
         // they compare as strings.
         if (!std.mem.lessThan(u8, self.check_in, self.check_out))
             return v.fail(@This(), .check_out, "bookings.check_out_too_early", "must be after the check-in date");
-        const beds: u8 = switch (self.room) {
+        const beds: u16 = switch (self.room) {
             .single => 1,
             .double => 2,
             .family => 4,

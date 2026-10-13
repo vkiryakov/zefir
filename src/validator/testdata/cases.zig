@@ -85,8 +85,8 @@ pub const vector_files = [_]VectorFile{
 pub const Example = struct { name: []const u8, records: ?[]const u8 = null };
 
 pub const examples = [_]Example{
-    .{ .name = "overview", .records = "WARN  Invalid sign-up field=roles code=validation.unique_items reason=\"must not contain duplicates\"\n" },
-    .{ .name = "getting_started", .records = "WARN  Invalid sign-up field=address.zip code=validation.length reason=\"must be exactly 5 characters\"\n" },
+    .{ .name = "overview", .records = "WARN  Invalid sign-up field=seats code=validation.range reason=\"must be from 1 to 500\"\n" },
+    .{ .name = "getting_started", .records = "WARN  Invalid order field=items[1].quantity code=validation.range reason=\"must be from 1 to 99\"\n" },
     .{
         .name = "validate_self",
         .records =

@@ -2,51 +2,58 @@ const std = @import("std");
 const log = @import("log");
 const v = @import("validator");
 
-const Role = enum { admin, editor, viewer };
+const Currency = enum { eur, usd, gbp };
 
-const Address = struct {
-    city: []const u8,
-    zip: []const u8,
+const Item = struct {
+    sku: []const u8,
+    quantity: u16,
+    unit_price: f64,
 
     pub const field_rules = .{
-        .city = v.notBlank,
-        .zip = .{ v.length(5, 5), v.digits },
+        .sku = .{ v.length(6, 12), v.alphanumeric },
+        .quantity = v.range(1, 99),
+        .unit_price = v.positive,
     };
 };
 
-const SignUp = struct {
-    email: []const u8,
-    age: u8,
-    roles: []const Role,
-    address: Address, // no entry below: Address declares the rules of its fields
-    referrer_id: ?u64 = null,
+const Order = struct {
+    id: []const u8,
+    customer_id: u64,
+    currency: Currency,
+    items: []const Item, // every item is checked by the rules of Item
+    express: bool = false,
+    note: ?[]const u8 = null,
 
     pub const field_rules = .{
-        .email = v.email, // one rule
-        .age = v.range(18, 120),
-        .roles = .{ v.notEmpty, v.uniqueItems }, // a tuple: its rules run in order
-        .referrer_id = v.positive, // null skips the rule
+        .id = v.uuid, // one rule
+        .customer_id = v.positive,
+        .currency = v.oneOf(.{ .eur, .usd }),
+        .items = .{ v.notEmpty, v.maxItems(50) }, // a tuple: its rules run in order
+        .note = v.maxLength(500), // null skips the rule
     };
 };
 
 pub fn main(init: std.process.Init) !void {
     const logger: log.Logger = try .init(init.gpa, init.io, .{
-        .service = .{ .name = "user-service" },
+        .service = .{ .name = "order-service" },
         .format = .text,
     });
     defer logger.deinit();
 
-    const request: SignUp = .{
-        .email = "ada@example.com",
-        .age = 36,
-        .roles = &.{.editor},
-        .address = .{ .city = "Springfield", .zip = "6270" },
+    const request: Order = .{
+        .id = "3f9c1a2e-8b4d-4c6a-9e1f-5a7b2c8d0e41",
+        .customer_id = 1042,
+        .currency = .eur,
+        .items = &.{
+            .{ .sku = "BOOK0042", .quantity = 2, .unit_price = 12.5 },
+            .{ .sku = "PEN0007", .quantity = 0, .unit_price = 1.9 },
+        },
     };
 
     var path_buf: [256]u8 = undefined;
     if (v.check(&request, &path_buf)) |violation| {
-        logger.warn("Invalid sign-up", .{ .field = violation.field, .code = violation.code, .reason = violation.message });
+        logger.warn("Invalid order", .{ .field = violation.field, .code = violation.code, .reason = violation.message });
     } else {
-        logger.info("Sign-up accepted", .{});
+        logger.info("Order accepted", .{});
     }
 }

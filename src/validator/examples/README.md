@@ -10,21 +10,25 @@ const std = @import("std");
 const log = @import("log");
 const v = @import("validator");
 
-const Role = enum { admin, editor, viewer };
+const Plan = enum { free, pro, team };
 
 const SignUp = struct {
     email: []const u8,
-    age: u8,
-    roles: []const Role,
-    nickname: ?[]const u8 = null,
+    plan: Plan,
+    seats: u32,
+    budget_eur: f64,
+    accepted_terms: bool,
+    referrer_id: ?u64 = null,
 
     // The rules of the fields. The validator finds them by this name, so the
     // struct must declare them as `pub const field_rules`.
     pub const field_rules = .{
         .email = v.email,
-        .age = v.range(18, 120),
-        .roles = .{ v.notEmpty, v.uniqueItems }, // a tuple: its rules run in order
-        .nickname = v.length(3, 32), // null skips the rule
+        .plan = v.oneOf(.{ .pro, .team }), // paid plans only
+        .seats = v.range(1, 500),
+        .budget_eur = v.min(10.0),
+        .accepted_terms = v.equals(true),
+        .referrer_id = v.positive, // null skips the rule
     };
 };
 
@@ -36,10 +40,16 @@ pub fn main(init: std.process.Init) !void {
     defer logger.deinit();
 
     // The value to check, for example a decoded request body.
-    const request: SignUp = .{ .email = "ada@example.com", .age = 36, .roles = &.{ .editor, .editor } };
+    const request: SignUp = .{
+        .email = "ada@example.com",
+        .plan = .team,
+        .seats = 0,
+        .budget_eur = 250.0,
+        .accepted_terms = true,
+    };
 
     // v.check allocates no memory, so it needs room from you to write the path
-    // of the field that failed, such as "roles"; violation.field points into it.
+    // of the field that failed, such as "seats"; violation.field points into it.
     var path_buf: [256]u8 = undefined;
     if (v.check(&request, &path_buf)) |violation| {
         logger.warn("Invalid sign-up", .{ .field = violation.field, .code = violation.code, .reason = violation.message });
@@ -47,15 +57,15 @@ pub fn main(init: std.process.Init) !void {
 }
 ```
 
-It logs the first violation, the repeated role, as a line of text through
+It logs the first violation, the zero seats, as a line of text through
 [zefir-log](../../log/examples/README.md); the timestamp differs in every run:
 
 ```text
 $ zig build run
-2026-10-13T09:41:07.415Z WARN  Invalid sign-up field=roles code=validation.unique_items reason="must not contain duplicates"
+2026-10-13T09:41:07.415Z WARN  Invalid sign-up field=seats code=validation.range reason="must be from 1 to 500"
 ```
 
-`path_buf` is where `v.check` writes the path of the field that failed: `roles`
+`path_buf` is where `v.check` writes the path of the field that failed: `seats`
 here, `address.zip` for a field of a nested struct, `items[2].sku` for a field
 of a list item. `v.check` allocates no memory, so you give it the room: a
 buffer on the stack, whose contents before the call do not matter.
@@ -71,9 +81,9 @@ first problem it found, with three fields:
 
 | Field | Type | What it holds | In the example |
 | --- | --- | --- | --- |
-| `code` | `[]const u8` | a stable code for programs and clients: `validation.<rule>` for a built-in rule, or the code you gave `v.custom` or `v.fail` | `validation.unique_items` |
-| `message` | `[]const u8` | what the value must be, for people, without the field name: a built-in English message or your own | `must not contain duplicates` |
-| `field` | `?[]const u8` | the path of the value from the root; `null` for the root value itself | `roles` |
+| `code` | `[]const u8` | a stable code for programs and clients: `validation.<rule>` for a built-in rule, or the code you gave `v.custom` or `v.fail` | `validation.range` |
+| `message` | `[]const u8` | what the value must be, for people, without the field name: a built-in English message or your own | `must be from 1 to 500` |
+| `field` | `?[]const u8` | the path of the value from the root; `null` for the root value itself | `seats` |
 
 The record logs the message as `reason`, since zefir-log keeps `message` for the
 record's own message, `Invalid sign-up`. `v.checkAll` returns all the violations
@@ -183,72 +193,80 @@ const std = @import("std");
 const log = @import("log");
 const v = @import("validator");
 
-const Role = enum { admin, editor, viewer };
+const Currency = enum { eur, usd, gbp };
 
-const Address = struct {
-    city: []const u8,
-    zip: []const u8,
+const Item = struct {
+    sku: []const u8,
+    quantity: u16,
+    unit_price: f64,
 
     pub const field_rules = .{
-        .city = v.notBlank,
-        .zip = .{ v.length(5, 5), v.digits },
+        .sku = .{ v.length(6, 12), v.alphanumeric },
+        .quantity = v.range(1, 99),
+        .unit_price = v.positive,
     };
 };
 
-const SignUp = struct {
-    email: []const u8,
-    age: u8,
-    roles: []const Role,
-    address: Address, // no entry below: Address declares the rules of its fields
-    referrer_id: ?u64 = null,
+const Order = struct {
+    id: []const u8,
+    customer_id: u64,
+    currency: Currency,
+    items: []const Item, // every item is checked by the rules of Item
+    express: bool = false,
+    note: ?[]const u8 = null,
 
     pub const field_rules = .{
-        .email = v.email, // one rule
-        .age = v.range(18, 120),
-        .roles = .{ v.notEmpty, v.uniqueItems }, // a tuple: its rules run in order
-        .referrer_id = v.positive, // null skips the rule
+        .id = v.uuid, // one rule
+        .customer_id = v.positive,
+        .currency = v.oneOf(.{ .eur, .usd }),
+        .items = .{ v.notEmpty, v.maxItems(50) }, // a tuple: its rules run in order
+        .note = v.maxLength(500), // null skips the rule
     };
 };
 
 pub fn main(init: std.process.Init) !void {
     const logger: log.Logger = try .init(init.gpa, init.io, .{
-        .service = .{ .name = "user-service" },
+        .service = .{ .name = "order-service" },
         .format = .text,
     });
     defer logger.deinit();
 
-    const request: SignUp = .{
-        .email = "ada@example.com",
-        .age = 36,
-        .roles = &.{.editor},
-        .address = .{ .city = "Springfield", .zip = "6270" },
+    const request: Order = .{
+        .id = "3f9c1a2e-8b4d-4c6a-9e1f-5a7b2c8d0e41",
+        .customer_id = 1042,
+        .currency = .eur,
+        .items = &.{
+            .{ .sku = "BOOK0042", .quantity = 2, .unit_price = 12.5 },
+            .{ .sku = "PEN0007", .quantity = 0, .unit_price = 1.9 },
+        },
     };
 
     var path_buf: [256]u8 = undefined;
     if (v.check(&request, &path_buf)) |violation| {
-        logger.warn("Invalid sign-up", .{ .field = violation.field, .code = violation.code, .reason = violation.message });
+        logger.warn("Invalid order", .{ .field = violation.field, .code = violation.code, .reason = violation.message });
     } else {
-        logger.info("Sign-up accepted", .{});
+        logger.info("Order accepted", .{});
     }
 }
 ```
 
-It logs the first violation — the ZIP code has four digits:
+It logs the first violation — the second item has a quantity of 0:
 
 ```text
 $ zig build run
-2026-10-13T09:41:07.415Z WARN  Invalid sign-up field=address.zip code=validation.length reason="must be exactly 5 characters"
+2026-10-13T09:41:07.415Z WARN  Invalid order field=items[1].quantity code=validation.range reason="must be from 1 to 99"
 ```
 
 - `field` is the path of the value: field names joined by `.`, item indexes in
-  brackets. `address` has no entry in `field_rules`, but `Address` declares
-  rules of its own, so the walk enters it and checks its fields.
+  brackets. `Item` declares rules of its own, so the walk enters every item of
+  `items` and checks its fields; `items` itself has rules for the list as a
+  whole.
 - `message`, logged as `reason`, is a fragment without the field name or the
   value, and `code` names the rule, for clients that branch on it or translate
   it.
-- `referrer_id` is `null`, so its rule is skipped; `0` would fail it.
-- Fix the ZIP code and `v.check` returns `null`: the program logs
-  `Sign-up accepted`.
+- `note` is `null`, so its rule is skipped; `express` has no rule at all.
+- Fix the quantity and `v.check` returns `null`: the program logs
+  `Order accepted`.
 
 ## Declaring rules
 
@@ -439,7 +457,7 @@ const Room = enum { single, double, family };
 
 const Booking = struct {
     room: Room,
-    guests: u8,
+    guests: u16,
     check_in: []const u8,
     check_out: []const u8,
 
@@ -454,7 +472,7 @@ const Booking = struct {
         // they compare as strings.
         if (!std.mem.lessThan(u8, self.check_in, self.check_out))
             return v.fail(@This(), .check_out, "bookings.check_out_too_early", "must be after the check-in date");
-        const beds: u8 = switch (self.room) {
+        const beds: u16 = switch (self.room) {
             .single => 1,
             .double => 2,
             .family => 4,
