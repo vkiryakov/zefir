@@ -149,8 +149,11 @@ pub const Queue = struct {
     events: std.Deque(Event) = .empty,
     /// A task waits in `next`.
     receiving: bool = false,
-    /// `closed` came: nothing more does.
-    ended: bool = false,
+    /// Why the client closed, once it did: the last event, kept apart from
+    /// `events` so that no full queue and no lack of memory loses it.
+    closed: ?CloseReason = null,
+    /// `next` handed out `closed`.
+    closed_taken: bool = false,
     /// Events dropped: the queue was full, or there was no memory.
     dropped: u64 = 0,
 
@@ -169,15 +172,16 @@ pub const Queue = struct {
     pub fn push(q: *Queue, io: Io, event: Event) void {
         q.mutex.lockUncancelable(io);
         defer q.mutex.unlock(io);
-        if (q.ended) return;
-        const last = event == .closed;
-        if (last) q.ended = true;
-        if (!last and q.events.len >= q.limit) {
-            q.dropped += 1;
-        } else {
-            q.events.pushBack(q.gpa, event) catch {
+        if (q.closed != null) return;
+        switch (event) {
+            .closed => |reason| q.closed = reason,
+            else => if (q.events.len >= q.limit) {
                 q.dropped += 1;
-            };
+            } else {
+                q.events.pushBack(q.gpa, event) catch {
+                    q.dropped += 1;
+                };
+            },
         }
         q.ready.signal(io);
     }
@@ -202,7 +206,11 @@ pub const Queue = struct {
         defer q.receiving = false;
         while (true) {
             if (q.events.popFront()) |event| return event;
-            if (q.ended) return null;
+            if (q.closed) |reason| {
+                if (q.closed_taken) return null;
+                q.closed_taken = true;
+                return .{ .closed = reason };
+            }
             try q.ready.waitTimeout(io, &q.mutex, time.until(deadline));
         }
     }
@@ -288,4 +296,19 @@ test "a text longer than its buffer is cut" {
     const cut: Event.Text = .init(&long);
     try testing.expectEqual(Event.Text.capacity, cut.slice().len);
     try testing.expect(cut.cut);
+}
+
+fn failingAllocator() std.mem.Allocator {
+    return testing.failing_allocator;
+}
+
+test "closed comes even when there is no memory for any event" {
+    const io = testing.io;
+    var q: Queue = .init(failingAllocator(), 8);
+    defer q.deinit();
+    q.push(io, .{ .slow_consumer = 1 });
+    q.push(io, .{ .closed = .reconnect_failed });
+    try testing.expectEqual(1, q.droppedCount(io));
+    try testing.expectEqual(CloseReason.reconnect_failed, (try q.next(io, .none)).?.closed);
+    try testing.expect(try q.next(io, .none) == null);
 }
