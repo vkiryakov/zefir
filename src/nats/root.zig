@@ -21,6 +21,8 @@ pub const Header = Headers.Header;
 pub const Client = @import("Client.zig");
 pub const State = Client.State;
 pub const FlushOptions = Client.FlushOptions;
+pub const Message = @import("Message.zig");
+pub const PublishMessage = Message.PublishMessage;
 
 /// Every error the client returns, apart from those of `std.Io` that pass
 /// through unchanged, such as network errors. Each function lists the ones
@@ -75,6 +77,8 @@ test {
     _ = @import("ServerAddress.zig");
     _ = @import("ServerInfo.zig");
     _ = @import("Headers.zig");
+    _ = @import("Message.zig");
+    _ = @import("engine/incoming.zig");
     _ = @import("protocol/subject.zig");
     _ = @import("protocol/encoder.zig");
     _ = @import("protocol/Parser.zig");
