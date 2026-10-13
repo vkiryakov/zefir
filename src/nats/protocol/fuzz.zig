@@ -1,7 +1,9 @@
 //! Fuzzing of the parser. `zig build test` runs each corpus entry
 //! once, as a regression test; `zig build test --fuzz=1M` runs the fuzzer.
 //! The property: any input, parsed at once or cut into random pieces, gives
-//! the same frames and ends the same way, and nothing panics.
+//! the same frames and ends the same way, nothing panics, and the parser
+//! never asks for more input while a buffer of `Parser.bufferLen` bytes is
+//! full, which the connection's reader relies on.
 
 const std = @import("std");
 const Parser = @import("Parser.zig");
@@ -17,14 +19,14 @@ const Outcome = struct {
     end: End,
 };
 
-/// Parses `input` through a reader-like window: everything at once when
-/// `smith` is null, otherwise in pieces of 1 to 64 bytes it chooses. Hashes
-/// every frame; body bytes are hashed without separators, so how a body
-/// is cut does not change the digest.
+/// Parses `input` through a window as large as the reader's buffer:
+/// everything that fits at once when `smith` is null, otherwise in pieces
+/// of 1 to 64 bytes it chooses. Hashes every frame; body bytes are hashed
+/// without separators, so how a body is cut does not change the digest.
 fn run(input: []const u8, smith: ?*std.testing.Smith) !Outcome {
     var parser: Parser = .init(limits);
     var hasher: std.hash.Wyhash = .init(0);
-    var window: [4096 + 64]u8 = undefined;
+    var window: [Parser.bufferLen(limits)]u8 = undefined;
     var len: usize = 0;
     var fed: usize = 0;
     while (true) {
@@ -36,13 +38,14 @@ fn run(input: []const u8, smith: ?*std.testing.Smith) !Outcome {
             std.mem.copyForwards(u8, window[0 .. len - step.consumed], window[step.consumed..len]);
             len -= step.consumed;
         }
+        // The reader could not read more into a full buffer.
+        if (len == window.len) return error.NeedMoreWithFullBuffer;
         if (fed == input.len) {
             const complete = len == 0 and parser.state == .line;
             return .{ .digest = hasher.final(), .end = if (complete) .complete else .incomplete };
         }
         const piece: usize = if (smith) |s| s.valueRangeAtMost(u8, 1, 64) else input.len;
         const n = @min(piece, input.len - fed, window.len - len);
-        if (n == 0) return error.WindowFull;
         @memcpy(window[len..][0..n], input[fed..][0..n]);
         len += n;
         fed += n;
@@ -88,13 +91,17 @@ fn sample(comptime raw: []const u8) []const u8 {
     return comptime std.mem.toBytes(std.mem.nativeToLittle(u32, raw.len)) ++ raw;
 }
 
+/// A MSG line longer than the reader's buffer: LineTooLong, never a wait.
+const too_long_line = "MSG " ++ @as([Parser.bufferLen(limits)]u8, @splat('s')) ++ " 1 0\r\n\r\n";
+
 const corpus = make: {
-    var entries: [golden.frames.len + 4][]const u8 = undefined;
+    var entries: [golden.frames.len + 5][]const u8 = undefined;
     for (golden.frames, 0..) |frame, i| entries[i] = sample(frame);
     entries[golden.frames.len] = sample(golden.session[0..1024]);
     entries[golden.frames.len + 1] = sample("MSG a 1 15\r\n\r\nMSG foo 1 5\r\n\r\nPONG\r\n");
     entries[golden.frames.len + 2] = sample("msg\tfoo  1 \t5 \r\nhello\r\nping\n");
     entries[golden.frames.len + 3] = sample("HMSG foo 1 10 5\r\n");
+    entries[golden.frames.len + 4] = sample(too_long_line);
     break :make entries;
 };
 
