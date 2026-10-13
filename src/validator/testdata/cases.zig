@@ -77,9 +77,10 @@ pub const vector_files = [_]VectorFile{
 /// A compiled example of src/validator/examples/, by file stem: a program
 /// must print exactly `stdout`, a test (`stdout` null) must pass, and
 /// README.md shows each file and each output verbatim (readme_test.zig).
-pub const Example = struct { name: []const u8, stdout: ?[]const u8 = null };
+pub const Example = struct { name: []const u8, stdout: ?[]const u8 = null, stderr: ?[]const u8 = null };
 
 pub const examples = [_]Example{
+    .{ .name = "overview", .stderr = "tags[1]: must not be empty (validation.not_empty)\n" },
     .{ .name = "getting_started", .stdout = "tags[1]: must not be empty (validation.not_empty)\n" },
     .{
         .name = "validate_self",

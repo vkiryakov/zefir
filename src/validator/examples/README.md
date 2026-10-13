@@ -14,18 +14,26 @@ const SignUp = struct {
     age: u8,
     tags: []const []const u8 = &.{},
 
+    // The rules of the fields. The validator finds them by this name, so the
+    // struct must declare them as `pub const field_rules`.
     pub const field_rules = .{
         .name = v.notEmpty,
         .age = v.positive,
-        .tags = v.each(v.notEmpty),
+        .tags = v.each(v.notEmpty), // every item of the list
     };
 };
 
-var path_buf: [256]u8 = undefined;
-if (v.check(&request, &path_buf)) |violation| {
-    // violation.field: "tags[1]", violation.code: "validation.not_empty",
-    // violation.message: "must not be empty"
-    std.debug.print("{s}: {s} ({s})\n", .{ violation.field orelse "(root)", violation.message, violation.code });
+pub fn main() void {
+    // The value to check, for example a decoded request body.
+    const request: SignUp = .{ .name = "Ada", .age = 36, .tags = &.{ "admin", "" } };
+
+    // v.check takes a pointer to the value and a buffer where it writes the
+    // path of the field that failed, such as "tags[1]"; it allocates nothing.
+    var path_buf: [256]u8 = undefined;
+    if (v.check(&request, &path_buf)) |violation| {
+        // Prints "tags[1]: must not be empty (validation.not_empty)".
+        std.debug.print("{s}: {s} ({s})\n", .{ violation.field orelse "(root)", violation.message, violation.code });
+    }
 }
 ```
 

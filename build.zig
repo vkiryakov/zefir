@@ -467,8 +467,8 @@ fn addValidatorTests(
     test_step.dependOn(&check_list.step);
 
     // The examples of src/validator/examples/README.md: a program must print
-    // exactly its `stdout`, a test must pass, and readme_test.zig checks that
-    // README.md shows every example and output verbatim.
+    // exactly its `stdout` and `stderr`, a test must pass, and readme_test.zig
+    // checks that README.md shows every example and output verbatim.
     for (validator_cases.examples) |example| {
         const example_module = b.createModule(.{
             .root_source_file = b.path(b.fmt("src/validator/examples/{s}.zig", .{example.name})),
@@ -476,10 +476,11 @@ fn addValidatorTests(
             .optimize = optimize,
             .imports = &.{.{ .name = "validator", .module = validator }},
         });
-        if (example.stdout) |stdout| {
+        if (example.stdout != null or example.stderr != null) {
             const example_exe = b.addExecutable(.{ .name = example.name, .root_module = example_module });
             const example_run = b.addRunArtifact(example_exe);
-            example_run.expectStdOutEqual(stdout);
+            if (example.stdout) |stdout| example_run.expectStdOutEqual(stdout);
+            if (example.stderr) |stderr| example_run.expectStdErrEqual(stderr);
             test_step.dependOn(&example_run.step);
             compile_step.dependOn(&example_exe.step);
         } else {
