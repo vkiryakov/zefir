@@ -1050,3 +1050,59 @@ test "cancel() after a lost connection drops what came, and next() is null; afte
     lost.cancel();
     try testing.expectError(error.ConnectionClosed, lost.next(.{}));
 }
+
+/// After the handshake, refuses the client's inbox subscription as a
+/// server does when the account may not subscribe to `_INBOX.>`; answers
+/// PINGs and nothing else.
+fn serveRefusingInbox(io: Io, listener: *net.Server) anyerror!void {
+    var peer: FakeServer.Peer = undefined;
+    try peer.accept(io, listener);
+    defer peer.close();
+    try handshake(&peer);
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(testing.allocator);
+    while (try peer.nextLine()) |line| {
+        var args = std.mem.tokenizeScalar(u8, line, ' ');
+        const op = args.next() orelse continue;
+        if (std.mem.eql(u8, op, "PING")) {
+            try peer.send(golden.pong);
+        } else if (std.mem.eql(u8, op, "SUB")) {
+            const subject = args.next() orelse return error.TestBadSub;
+            var buffer: [256]u8 = undefined;
+            if (std.mem.startsWith(u8, subject, "_INBOX.")) {
+                try peer.send(try std.fmt.bufPrint(&buffer, "-ERR 'Permissions Violation for Subscription to \"{s}\"'\r\n", .{subject}));
+            }
+        } else if (std.mem.eql(u8, op, "PUB")) {
+            const size = try std.fmt.parseInt(usize, line[std.mem.findScalarLast(u8, line, ' ').? + 1 ..], 10);
+            try body.resize(testing.allocator, size + 2);
+            try peer.readExact(body.items);
+        }
+    }
+}
+
+test "a server that refuses the inbox: requests fail with PermissionDenied at once, the connection stays" {
+    // The client warns about the server's error; this test expects it.
+    const level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = level;
+    const io = testing.io;
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var server = try io.concurrent(serveRefusingInbox, .{ io, &listener });
+    defer server.cancel(io) catch {};
+    var url: [64]u8 = undefined;
+    var client: Client = try .init(testing.allocator, io, .{ .servers = &.{try FakeServer.url(&listener, &url)} });
+    defer client.deinit();
+    try client.connect();
+    const start = Io.Clock.awake.now(io);
+    try testing.expectError(error.PermissionDenied, client.request("x", "?", within(30_000)));
+    try testing.expect(elapsedSince(io, start).toSeconds() < 2);
+    try testing.expectError(error.PermissionDenied, client.request("x", "?", within(30_000)));
+    try testing.expectError(error.PermissionDenied, client.requestMany("x", "?", many(30_000, 4)));
+    try testing.expectEqual(0, client.inbox.pendingCount(io));
+    try client.publish("x", "still up");
+    try client.flush(quick);
+    try testing.expect(client.isConnected());
+    client.close();
+    try server.await(io);
+}

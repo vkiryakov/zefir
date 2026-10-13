@@ -246,10 +246,14 @@ fn readLoop(client: *Client) void {
                     return;
                 }
                 // A refused publish only costs that message; a refused
-                // subscription ends.
+                // subscription ends, and a refused inbox fails the requests.
                 if (classified.permission) |permission| {
                     if (permission.operation == .subscribe) {
-                        if (client.subscriptions.deny(io, permission)) |sid| log.debug("subscription {d} refused", .{sid});
+                        if (client.inbox.deny(io, permission)) {
+                            log.debug("the inbox subscription was refused: requests fail with PermissionDenied", .{});
+                        } else if (client.subscriptions.deny(io, permission)) |sid| {
+                            log.debug("subscription {d} refused", .{sid});
+                        }
                     }
                 }
             },

@@ -53,6 +53,9 @@ pub const NextError = error{
     /// The connection was lost; the responses that came before it come
     /// out first.
     Disconnected,
+    /// The server refused the subscription of the client's inbox: no
+    /// response can come.
+    PermissionDenied,
     /// The client is closed.
     ConnectionClosed,
 };
@@ -76,12 +79,12 @@ pub fn next(r: *Responses, options: Subscription.ReceiveOptions) NextError!?Mess
             },
             error.Canceled, error.ConcurrentReceive => |e| return e,
             // Over: the request no longer waits.
-            error.NoResponders, error.Disconnected, error.ConnectionClosed => |e| {
+            error.NoResponders, error.Disconnected, error.PermissionDenied, error.ConnectionClosed => |e| {
                 r.client.inbox.remove(io, r);
                 return e;
             },
-            // A stream drops the newest when full and is never refused.
-            error.SlowConsumer, error.PermissionDenied => {
+            // A stream drops the newest when full.
+            error.SlowConsumer => {
                 r.client.inbox.remove(io, r);
                 return error.ConnectionClosed;
             },

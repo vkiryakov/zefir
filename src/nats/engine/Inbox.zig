@@ -26,6 +26,7 @@ const Outbound = @import("Outbound.zig");
 const Registry = @import("Registry.zig");
 const Broadcast = @import("Broadcast.zig");
 const encoder = @import("../protocol/encoder.zig");
+const server_error = @import("../protocol/server_error.zig");
 const time = @import("time.zig");
 const Inbox = @This();
 
@@ -77,12 +78,16 @@ const SubscriptionState = enum {
 pub const End = enum {
     /// The connection was lost: requests fail with Disconnected.
     disconnected,
+    /// The server refused the inbox subscription: requests fail with
+    /// PermissionDenied.
+    permission_denied,
     /// The client closed: requests fail with ConnectionClosed.
     closed,
 
-    pub fn err(how: End) error{ Disconnected, ConnectionClosed } {
+    pub fn err(how: End) error{ Disconnected, PermissionDenied, ConnectionClosed } {
         return switch (how) {
             .disconnected => error.Disconnected,
+            .permission_denied => error.PermissionDenied,
             .closed => error.ConnectionClosed,
         };
     }
@@ -106,7 +111,7 @@ pub const Entry = union(enum) {
     many: *Responses,
 };
 
-pub const SubscribeError = error{ Timeout, Canceled, Disconnected, ConnectionClosed, OutOfMemory, ProtocolError } || Io.RandomSecureError;
+pub const SubscribeError = error{ Timeout, Canceled, Disconnected, PermissionDenied, ConnectionClosed, OutOfMemory, ProtocolError } || Io.RandomSecureError;
 
 /// Makes sure the inbox subscription is queued before the caller queues
 /// its request. The first caller queues the SUB; the others wait until it
@@ -166,14 +171,14 @@ fn identity(inbox: *Inbox, io: Io, registry: *Registry) (Io.RandomSecureError ||
 }
 
 /// The outbound queue closed: the reason is the inbox's, which ends first.
-pub fn closedError(inbox: *Inbox, io: Io) error{ Disconnected, ConnectionClosed } {
+pub fn closedError(inbox: *Inbox, io: Io) error{ Disconnected, PermissionDenied, ConnectionClosed } {
     inbox.mutex.lockUncancelable(io);
     defer inbox.mutex.unlock(io);
     const how = inbox.ended orelse return error.ConnectionClosed;
     return how.err();
 }
 
-pub const AddError = error{ TooManyPendingRequests, OutOfMemory, Disconnected, ConnectionClosed };
+pub const AddError = error{ TooManyPendingRequests, OutOfMemory, Disconnected, PermissionDenied, ConnectionClosed };
 
 /// Puts a request in the pending map, before its PUB is queued, and gives
 /// its id. At most `max` requests wait at once.
@@ -231,7 +236,7 @@ pub fn requestId(inbox: *const Inbox, subject: []const u8) ?u64 {
     return id;
 }
 
-pub const AwaitError = error{ Timeout, Canceled, NoResponders, Disconnected, ConnectionClosed };
+pub const AwaitError = error{ Timeout, Canceled, NoResponders, Disconnected, PermissionDenied, ConnectionClosed };
 
 /// Waits for the reply of request `id` until `deadline`, a cancel or the
 /// end of the inbox, and takes the request out of the pending map. A reply
@@ -373,6 +378,24 @@ pub fn deliver(inbox: *Inbox, io: Io, id: u64, message: ?Message) Delivery {
     }
 }
 
+/// The server refused a subscription: when it is the inbox's, by its SID
+/// or by its subject, no reply can come, and every request fails with
+/// PermissionDenied, those waiting and those to come. True when it was.
+pub fn deny(inbox: *Inbox, io: Io, permission: server_error.Permission) bool {
+    if (permission.operation != .subscribe) return false;
+    const sid = inbox.sid.load(.acquire);
+    if (sid == 0) return false;
+    const named = if (permission.sid) |denied| denied == sid else named: {
+        var subject: [prefix_len + 1]u8 = undefined;
+        @memcpy(subject[0..prefix_len], &inbox.prefix);
+        subject[prefix_len] = '*';
+        break :named permission.queue == null and server_error.quotedEql(permission.subject, &subject);
+    };
+    if (!named) return false;
+    inbox.end(io, .permission_denied);
+    return true;
+}
+
 /// Counts a reply that came for no waiting request.
 pub fn noteLate(inbox: *Inbox, io: Io) void {
     inbox.mutex.lockUncancelable(io);
@@ -393,12 +416,17 @@ pub fn end(inbox: *Inbox, io: Io, how: End) void {
         .many => {},
     };
     // Every stream, those that ended too: after close() their next() is
-    // ConnectionClosed, as for subscriptions. What came still comes out
-    // first after a lost connection.
+    // ConnectionClosed, as for subscriptions. Otherwise what came still
+    // comes out first.
+    const stream_end: MessageQueue.End = switch (how) {
+        .disconnected => .disconnected,
+        .permission_denied => .permission_denied,
+        .closed => .closed,
+    };
     var node = inbox.streams.first;
     while (node) |n| : (node = n.next) {
         const responses: *Responses = @alignCast(@fieldParentPtr("node", n));
-        _ = responses.messages.end(io, if (how == .closed) .closed else .disconnected, how == .closed);
+        _ = responses.messages.end(io, stream_end, how == .closed);
     }
     inbox.changed.wake(io);
 }
@@ -685,7 +713,7 @@ test "no responders: a 503 without a body; with a body it is a reply" {
 fn addAndAwait(inbox: *Inbox, io: Io, deadline: Io.Clock.Timestamp) AwaitError!Message {
     var waiter: Waiter = .{};
     const id = inbox.add(io, testing.allocator, .{ .single = &waiter }, 100) catch |err| switch (err) {
-        error.Disconnected, error.ConnectionClosed => |e| return e,
+        error.Disconnected, error.PermissionDenied, error.ConnectionClosed => |e| return e,
         error.TooManyPendingRequests, error.OutOfMemory => return error.Timeout,
     };
     defer inbox.drop(io, id, &waiter);
@@ -1027,4 +1055,41 @@ test "a burst of pending requests and long churn after it leave lookups as cheap
     const after_churn = try timeMissingLookups(&inbox, io, 20_000);
     // The same work: within four times, plus 2 ms for noise.
     try testing.expect(after_churn <= after_burst * 4 + 2 * std.time.ns_per_ms);
+}
+
+test "a refusal of the inbox's subscription fails every request with PermissionDenied" {
+    const io = testing.io;
+    var inbox = testInbox();
+    defer inbox.deinit(testing.allocator);
+    inbox.sid.store(7, .release);
+    // Another subscription's refusal is not the inbox's.
+    try testing.expect(!inbox.deny(io, .{ .operation = .subscribe, .subject = "orders.*" }));
+    try testing.expect(!inbox.deny(io, .{ .operation = .subscribe, .subject = "_INBOX.tokentokentokentoken42.*", .queue = "q" }));
+    try testing.expect(!inbox.deny(io, .{ .operation = .subscribe, .subject = "x", .sid = 8 }));
+    try testing.expect(!inbox.deny(io, .{ .operation = .publish, .subject = "_INBOX.tokentokentokentoken42.*" }));
+
+    var waiting = try io.concurrent(addAndAwait, .{ &inbox, io, soon(io) });
+    defer if (waiting.cancel(io)) |m| release(m) else |_| {};
+    const stream = try addStream(&inbox, io, soon(io), .{ .messages = 4, .bytes = 1024 });
+    try awaitAwaiting(&inbox, io, 1);
+    try testing.expect(inbox.deny(io, .{ .operation = .subscribe, .subject = "_INBOX.tokentokentokentoken42.*" }));
+    try expectNoReply(waiting.await(io), error.PermissionDenied);
+    try testing.expectError(error.PermissionDenied, stream.messages.next(io, .none));
+    var waiter: Waiter = .{};
+    try testing.expectError(error.PermissionDenied, inbox.add(io, testing.allocator, .{ .single = &waiter }, 10));
+    // A close afterwards is ConnectionClosed, as always.
+    inbox.end(io, .closed);
+    try testing.expectError(error.ConnectionClosed, inbox.add(io, testing.allocator, .{ .single = &waiter }, 10));
+}
+
+test "a refusal names the inbox by its SID too" {
+    const io = testing.io;
+    var inbox = testInbox();
+    defer inbox.deinit(testing.allocator);
+    // Not subscribed yet: nothing to refuse.
+    try testing.expect(!inbox.deny(io, .{ .operation = .subscribe, .subject = "_INBOX.tokentokentokentoken42.*" }));
+    inbox.sid.store(7, .release);
+    try testing.expect(inbox.deny(io, .{ .operation = .subscribe, .subject = "anything", .sid = 7 }));
+    var waiter: Waiter = .{};
+    try testing.expectError(error.PermissionDenied, inbox.add(io, testing.allocator, .{ .single = &waiter }, 10));
 }

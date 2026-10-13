@@ -355,6 +355,9 @@ pub const RequestError = error{
     /// Not connected yet, or the connection was lost while the request
     /// waited.
     Disconnected,
+    /// The server refused the subscription of the client's inbox, as for an
+    /// account that may not subscribe to `_INBOX.>`: no reply can come.
+    PermissionDenied,
     ConnectionClosed,
     Canceled,
     OutOfMemory,
@@ -433,6 +436,9 @@ pub const RequestManyError = error{
     Timeout,
     /// Not connected yet.
     Disconnected,
+    /// The server refused the subscription of the client's inbox: no
+    /// response can come.
+    PermissionDenied,
     ConnectionClosed,
     Canceled,
     OutOfMemory,
