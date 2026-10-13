@@ -116,6 +116,12 @@ fn stopWhileWaiting(io: Io, how: Stop) !void {
     }
     try client.flush(.{});
 
+    // Before the group: the publishers still use it until the group is
+    // canceled, which on a failure comes after the errdefers below.
+    const payload = try testing.allocator.alloc(u8, 256 * 1024);
+    defer testing.allocator.free(payload);
+    @memset(payload, 'p');
+
     var outcomes: Outcomes = .{};
     var group: Io.Group = .init;
     // Normally every task is done before this runs.
@@ -130,9 +136,6 @@ fn stopWhileWaiting(io: Io, how: Stop) !void {
     try e2e.docker(&.{ "pause", e2e.servers.stall_container });
     errdefer e2e.unpause(e2e.servers.stall_container) catch {};
     for (0..flushes) |_| try group.concurrent(io, flush, .{ &client, &outcomes });
-    const payload = try testing.allocator.alloc(u8, 256 * 1024);
-    defer testing.allocator.free(payload);
-    @memset(payload, 'p');
     var published: std.atomic.Value(u32) = .init(0);
     for (0..publishers) |_| try group.concurrent(io, publish, .{ &client, payload, &published, &outcomes });
     // Stuck: every publisher waits for room, and none went in for a while.
@@ -163,6 +166,9 @@ fn stopWhileWaiting(io: Io, how: Stop) !void {
         if (stress.elapsedSince(io, stopping).toSeconds() >= 10) {
             // A wait that never ends: cleaning up would wait for it too.
             std.debug.print("  {d} of {d} waits still going 10 s after the stop\n", .{ waiting - outcomes.done.load(.monotonic), waiting });
+            // Exiting skips the errdefers: leave the server running for
+            // what comes next.
+            e2e.unpause(e2e.servers.stall_container) catch {};
             std.process.exit(1);
         }
         try io.sleep(.fromMilliseconds(1), .awake);
