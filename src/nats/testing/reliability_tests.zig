@@ -1631,3 +1631,26 @@ test "a server that drops every connection right after the handshake: the client
         try testing.expect(after * 10 >= before * 15);
     }
 }
+
+test "a requestMany past its deadline that nobody reads does not hold up a drain, nor count as pending" {
+    const io = testing.io;
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var record: Record = .{};
+    defer record.deinit();
+    const sessions = [_]Session{sessionRecordAny};
+    var server = try io.concurrent(serveSessions, .{ io, &listener, &sessions, &record });
+    defer server.cancel(io) catch {};
+    var url: [64]u8 = undefined;
+    var client: Client = try .init(testing.allocator, io, .{ .servers = &.{try FakeServer.url(&listener, &url)} });
+    defer client.deinit();
+    try client.connect();
+    const responses = try client.requestMany("nobody.home", "?", .{ .timeout = .{ .duration = .{ .raw = .fromMilliseconds(50), .clock = .awake } } });
+    defer responses.deinit();
+    try testing.expectEqual(1, client.stats().pending_requests);
+    const deadline = responses.deadline;
+    while (!time.expired(io, deadline)) try io.sleep(.fromMilliseconds(5), .awake);
+    try testing.expectEqual(0, client.stats().pending_requests);
+    try client.drain(.{ .timeout = .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } } });
+    try testing.expectEqual(.drained, client.close_reason.?);
+}

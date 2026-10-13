@@ -484,7 +484,7 @@ fn drainSteps(client: *Client, deadline: ?Io.Clock.Timestamp) error{ Timeout, Co
     // The application reads every subscription to its end and comes back
     // for more, so that it is done with the last message, and every request
     // gets its answer or times out.
-    while (!client.subscriptions.allSettled(io) or client.inbox.pendingCount(io) > 0) {
+    while (!client.subscriptions.allSettled(io) or client.inbox.activeCount(io) > 0) {
         if (client.state() == .closed) return error.ConnectionClosed;
         if (deadline) |d| if (time.expired(io, d)) return error.Timeout;
         try io.sleep(.fromMilliseconds(5), .awake);
@@ -832,7 +832,7 @@ pub fn stats(client: *Client) Stats {
         .messages_out = Counters.get(&c.messages_out),
         .bytes_out = Counters.get(&c.bytes_out),
         .active_subscriptions = client.subscriptions.openCount(io),
-        .pending_requests = client.inbox.pendingCount(io),
+        .pending_requests = client.inbox.activeCount(io),
         .pending_outbound_bytes = outbound.queued,
         .pending_subscription_bytes = client.subscriptions.pendingBytes(io),
         .reconnects = Counters.get(&c.reconnects),

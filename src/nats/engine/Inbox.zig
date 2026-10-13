@@ -571,6 +571,22 @@ pub fn pendingCount(inbox: *Inbox, io: Io) usize {
     return inbox.pending.count();
 }
 
+/// Requests that still wait for replies: a stream of requestMany past its
+/// deadline, or ended, does not, though its owner has not taken it out of
+/// the pending map yet.
+pub fn activeCount(inbox: *Inbox, io: Io) usize {
+    inbox.mutex.lockUncancelable(io);
+    defer inbox.mutex.unlock(io);
+    var active: usize = 0;
+    for (inbox.pending.values()) |entry| switch (entry) {
+        .single => active += 1,
+        .many => |responses| if (takes(io, responses) != null) {
+            active += 1;
+        },
+    };
+    return active;
+}
+
 /// Requests inside `await` now; tests use it to know that one waits.
 pub fn awaitingCount(inbox: *Inbox, io: Io) u32 {
     inbox.mutex.lockUncancelable(io);
