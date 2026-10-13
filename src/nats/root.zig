@@ -30,4 +30,6 @@ test {
     _ = @import("protocol/golden.zig");
     _ = @import("protocol/fuzz.zig");
     _ = @import("engine/OwnedOptions.zig");
+    _ = @import("engine/time.zig");
+    _ = @import("engine/queue.zig");
 }
