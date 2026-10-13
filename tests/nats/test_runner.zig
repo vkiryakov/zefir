@@ -1,6 +1,7 @@
 //! The test runner of the end-to-end tests. It prints one line per test,
-//! and a panic prints its message and exits with code 3 instead of
-//! aborting, so a broken run ends at once and says why.
+//! and the error return trace of a test that fails; a panic prints its
+//! message and exits with code 3 instead of aborting, so a broken run ends
+//! at once and says why.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -37,6 +38,8 @@ pub fn main() void {
             else => {
                 failed += 1;
                 std.debug.print("FAIL {s}: {t}\n", .{ t.name, err });
+                // Where it failed; error return traces are on in Debug.
+                if (@errorReturnTrace()) |trace| std.debug.dumpErrorReturnTrace(trace);
             },
         }
     }
