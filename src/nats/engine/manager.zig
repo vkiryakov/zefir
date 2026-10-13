@@ -76,9 +76,11 @@ fn openFirst(client: *Client) Client.ConnectError!Opened {
     const io = client.io;
     var last_error: Client.ConnectError = error.ConnectionClosed;
     for (client.options.servers) |*server| {
+        var state: AttemptState = .{};
+        if (!track(client, &state)) return error.Canceled;
+        defer untrack(client);
         log.debug("connecting to {f}", .{server.*});
         const deadline = time.after(io, client.options.options.connect_timeout);
-        var state: AttemptState = .{};
         const abort: dialer.Abort = .{ .context = &state, .function = AttemptState.abort };
         if (dialer.race(io, deadline, attempt, .{ client, server, &state }, Opened.release, abort)) |opened| {
             return opened;
@@ -95,20 +97,25 @@ fn openFirst(client: *Client) Client.ConnectError!Opened {
     return last_error;
 }
 
-/// The socket of an attempt in progress, for the manager to shut down when
-/// time runs out: the attempt may have lost its cancellation and would wait
-/// on the socket for good. The mutex keeps shutdown off a closed socket.
-const AttemptState = struct {
+/// The socket of an attempt in progress, for the manager or `close()` to
+/// shut down: the attempt may have lost its cancellation and would wait on
+/// the socket for good. The mutex keeps shutdown off a closed socket.
+pub const AttemptState = struct {
     mutex: Io.Mutex = .init,
     stream: ?Io.net.Stream = null,
     aborted: bool = false,
 
-    fn abort(context: *anyopaque, io: Io) void {
-        const state: *AttemptState = @ptrCast(@alignCast(context));
+    /// Makes the attempt end soon: now, or as soon as it has a socket.
+    pub fn stop(state: *AttemptState, io: Io) void {
         state.mutex.lockUncancelable(io);
         defer state.mutex.unlock(io);
         state.aborted = true;
         if (state.stream) |stream| shutdown(io, stream);
+    }
+
+    fn abort(context: *anyopaque, io: Io) void {
+        const state: *AttemptState = @ptrCast(@alignCast(context));
+        state.stop(io);
     }
 
     /// Registers the attempt's stream; false when the attempt was aborted
@@ -296,6 +303,21 @@ fn disconnected(client: *Client) void {
     if (client.info_json) |json| client.gpa.free(json);
     client.info_json = null;
     client.changed.broadcast(client.io);
+}
+
+/// Lets `close()` stop the attempt; false when the client is closing.
+fn track(client: *Client, state: *AttemptState) bool {
+    client.mutex.lockUncancelable(client.io);
+    defer client.mutex.unlock(client.io);
+    if (client.exit != null) return false;
+    client.attempt = state;
+    return true;
+}
+
+fn untrack(client: *Client) void {
+    client.mutex.lockUncancelable(client.io);
+    defer client.mutex.unlock(client.io);
+    client.attempt = null;
 }
 
 /// Asks the manager to end the connection; the first reason given stays.

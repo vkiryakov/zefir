@@ -56,6 +56,8 @@ changed: Io.Condition = .init,
 status: State = .disconnected,
 /// Why the current connection must end; the manager acts on it.
 exit: ?manager.Exit = null,
+/// The attempt to connect in progress, for `close()` to stop.
+attempt: ?*manager.AttemptState = null,
 /// Why the first connection failed, for `connect()` to return.
 connect_error: ?ConnectError = null,
 /// The server of the current connection.
@@ -203,6 +205,9 @@ pub fn close(client: *Client) void {
     if (client.status != .closed) log.debug("closing the client", .{});
     client.status = .closed;
     if (client.exit == null) client.exit = .closed;
+    // Under the lock: the attempt lives on the manager's stack until it is
+    // untracked.
+    if (client.attempt) |attempt| attempt.stop(io);
     client.changed.broadcast(io);
     client.mutex.unlock(io);
     client.outbound.close(io);

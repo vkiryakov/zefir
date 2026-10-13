@@ -374,3 +374,41 @@ test "connect tries the servers in order" {
     client.close();
     try server.await(io);
 }
+
+/// Accepts a client, says nothing and notes that it got one.
+fn serveMute(io: Io, listener: *net.Server, accepted: *Io.Event) !void {
+    var peer: FakeServer.Peer = undefined;
+    try peer.accept(io, listener);
+    defer peer.close();
+    accepted.set(io);
+    _ = try peer.readToEnd();
+}
+
+fn connectLong(client: *Client) Client.ConnectError!void {
+    return client.connect();
+}
+
+test "close() while another task waits in connect: ConnectionClosed at once" {
+    const io = testing.io;
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var accepted: Io.Event = .unset;
+    var server = try io.concurrent(serveMute, .{ io, &listener, &accepted });
+    defer server.cancel(io) catch {};
+    var url: [64]u8 = undefined;
+    var client: Client = try .init(testing.allocator, io, .{
+        .servers = &.{try FakeServer.url(&listener, &url)},
+        .connect_timeout = .fromSeconds(30),
+    });
+    defer client.deinit();
+
+    var connector = try io.concurrent(connectLong, .{&client});
+    defer connector.cancel(io) catch {};
+    try awaitEvent(io, &accepted);
+    const start = Io.Clock.awake.now(io);
+    client.close();
+    try testing.expectError(error.ConnectionClosed, connector.await(io));
+    try testing.expect(elapsedSince(io, start).toSeconds() < 1);
+    try testing.expectEqual(.closed, client.state());
+    try server.await(io);
+}
