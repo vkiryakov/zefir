@@ -322,6 +322,54 @@ test "close() while a publish waits for room: ConnectionClosed at once" {
     try testing.expect(elapsedSince(io, start).toSeconds() < 1);
 }
 
+fn subscribeOnce(client: *Client) Client.SubscribeError!void {
+    const sub = try client.subscribe("late.sub", .{});
+    sub.deinit();
+}
+
+/// Waits until `count` puts wait for room, for 5 s at most.
+fn awaitRoomWaiters(client: *Client, count: u32) !void {
+    const io = client.io;
+    const give_up = time.after(io, .fromSeconds(5));
+    while (client.outbound.roomWaiters(io) < count) {
+        if (time.expired(io, give_up)) return error.TestNeverWaited;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+}
+
+test "a subscribe waiting for room behind a publish: close() ends both, nothing stays registered" {
+    const io = testing.io;
+    var s: Stalled = undefined;
+    try s.start();
+    defer s.deinit();
+    var publisher = try io.concurrent(publishUntilError, .{ &s.client, s.payload, &s.published });
+    defer publisher.cancel(io) catch {};
+    try awaitStuck(&s.client, &s.published);
+    var subscriber = try io.concurrent(subscribeOnce, .{&s.client});
+    defer subscriber.cancel(io) catch {};
+    try awaitRoomWaiters(&s.client, 2);
+    s.client.close();
+    try testing.expectError(error.ConnectionClosed, publisher.await(io));
+    try testing.expectError(error.ConnectionClosed, subscriber.await(io));
+    try testing.expectEqual(0, s.client.subscriptions.count(io));
+}
+
+test "a subscribe waiting for room can be canceled, and is not registered" {
+    const io = testing.io;
+    var s: Stalled = undefined;
+    try s.start();
+    defer s.deinit();
+    var publisher = try io.concurrent(publishUntilError, .{ &s.client, s.payload, &s.published });
+    defer publisher.cancel(io) catch {};
+    try awaitStuck(&s.client, &s.published);
+    var subscriber = try io.concurrent(subscribeOnce, .{&s.client});
+    defer subscriber.cancel(io) catch {};
+    try awaitRoomWaiters(&s.client, 2);
+    try testing.expectError(error.Canceled, subscriber.cancel(io));
+    try testing.expectEqual(0, s.client.subscriptions.count(io));
+    try testing.expect(s.client.isConnected());
+}
+
 test "subscribe sends SUB; a queue group and max_messages go along" {
     var r: Recorded = undefined;
     try r.start(golden.info_default, .{ .servers = &.{} });

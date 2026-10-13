@@ -38,6 +38,13 @@ pub fn register(r: *Registry, io: Io, gpa: Allocator, sub: *Subscription, max: u
     r.subscriptions.putAssumeCapacityNoClobber(sub.sid, sub);
 }
 
+/// How many subscriptions are registered; tests use it.
+pub fn count(r: *Registry, io: Io) usize {
+    r.mutex.lockUncancelable(io);
+    defer r.mutex.unlock(io);
+    return r.subscriptions.count();
+}
+
 /// Stops routing to `sid`; nothing happens if it is not registered.
 pub fn unregister(r: *Registry, io: Io, sid: u64) void {
     r.mutex.lockUncancelable(io);

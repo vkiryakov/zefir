@@ -3,10 +3,12 @@
 //!
 //! `limits.outbound_bytes` is a soft limit: a frame waits for room while
 //! the queue holds that much or more, and is then taken whole, so a frame
-//! of any size gets in once the queue drains below the limit. PINGs skip
-//! the limit but keep their place in line, and `putNow` frames skip the
-//! wait but count. PONGs owed to the server go out before the next batch,
-//! outside the queue.
+//! of any size gets in once the queue drains below the limit. Frames that
+//! wait for room wait in line, first come first: room wakes only the first,
+//! and once its frame is in it wakes the next if room is left. PINGs skip
+//! the limit but keep their place in the stream, and `putNow` frames skip
+//! the wait but count. PONGs owed to the server go out before the next
+//! batch, outside the queue.
 
 const std = @import("std");
 const Io = std.Io;
@@ -16,6 +18,13 @@ const encoder = @import("../protocol/encoder.zig");
 const time = @import("time.zig");
 const Broadcast = @import("Broadcast.zig");
 const Outbound = @This();
+
+/// A put waiting for room, in line.
+const RoomWaiter = struct {
+    node: std.DoublyLinkedList.Node = .{},
+    /// Set when it is this put's turn, or the queue closed.
+    turn: Io.Event = .unset,
+};
 
 pub const Kind = enum {
     /// PUB or HPUB of a publish or a reply.
@@ -74,9 +83,10 @@ gpa: Allocator,
 /// Frames other than PINGs wait while `queued` is at least this.
 limit: usize,
 mutex: Io.Mutex = .init,
-/// Woken when the queue drops below the limit. Publishers wait here, as
-/// many as there are tasks: a Broadcast has no limit on waiters.
-room: Broadcast = .{},
+/// The puts waiting for room, first come first; any number of them.
+room_line: std.DoublyLinkedList = .{},
+/// How many wait in `room_line`.
+room_waiters: u32 = 0,
 /// Signaled when there is something to write.
 ready: Io.Condition = .init,
 /// Woken when a PONG arrives.
@@ -89,6 +99,9 @@ spare: ?*Chunk = null,
 frames: std.Deque(Frame) = .empty,
 /// What the frames other than PINGs cost: their bytes and their records.
 queued: usize = 0,
+/// Times a put waiting for room woke up; tests check that a wake lets one
+/// frame in.
+room_wakeups: u64 = 0,
 /// PONGs owed to the server.
 pongs_owed: u32 = 0,
 /// PONGs in the batch the writer has.
@@ -119,7 +132,10 @@ pub fn deinit(q: *Outbound) void {
 pub fn put(q: *Outbound, io: Io, kind: Kind, len: usize, encode: anytype, args: anytype) PutError!void {
     try q.mutex.lock(io);
     defer q.mutex.unlock(io);
-    if (kind != .ping) try q.awaitRoom(io);
+    if (kind == .ping) return q.append(io, kind, len, encode, args);
+    try q.awaitRoom(io);
+    // In or not, the next put in line may go if room is left.
+    defer q.passRoom(io);
     return q.append(io, kind, len, encode, args);
 }
 
@@ -146,8 +162,37 @@ fn append(q: *Outbound, io: Io, kind: Kind, len: usize, encode: anytype, args: a
     q.ready.signal(io);
 }
 
+/// Waits until there is room and no put ahead of this one in line.
 fn awaitRoom(q: *Outbound, io: Io) Io.Cancelable!void {
-    while (!q.closed and q.queued >= q.limit) try q.room.wait(io, &q.mutex, null);
+    if (q.closed or (q.queued < q.limit and q.room_line.first == null)) return;
+    var waiter: RoomWaiter = .{};
+    // A put that leaves the line early may have been woken for its turn:
+    // the next one gets it, once this one is out of the line.
+    errdefer q.passRoom(io);
+    q.room_line.append(&waiter.node);
+    q.room_waiters += 1;
+    defer {
+        q.room_line.remove(&waiter.node);
+        q.room_waiters -= 1;
+    }
+    while (!q.closed and !(q.queued < q.limit and q.room_line.first == &waiter.node)) {
+        // Only this put waits on its event, and others set it under the
+        // mutex: resetting it here loses no wake.
+        waiter.turn.reset();
+        q.mutex.unlock(io);
+        const woken = waiter.turn.wait(io);
+        q.mutex.lockUncancelable(io);
+        try woken;
+        q.room_wakeups += 1;
+    }
+}
+
+/// Wakes the first put in line when there is room for it.
+fn passRoom(q: *Outbound, io: Io) void {
+    if (q.queued >= q.limit) return;
+    const first = q.room_line.first orelse return;
+    const waiter: *RoomWaiter = @fieldParentPtr("node", first);
+    waiter.turn.set(io);
 }
 
 /// Queues a PING and returns its number; PONG number n answers PING number
@@ -259,7 +304,7 @@ pub fn written(q: *Outbound, io: Io, n: usize) void {
             chunk.tail = 0;
         }
     }
-    if (q.queued < q.limit) q.room.wake(io);
+    q.passRoom(io);
 }
 
 /// Copies the queued frames, oldest first, into `out` as far as it holds
@@ -279,7 +324,11 @@ pub fn close(q: *Outbound, io: Io) void {
     q.mutex.lockUncancelable(io);
     defer q.mutex.unlock(io);
     q.closed = true;
-    q.room.wake(io);
+    var waiting = q.room_line.first;
+    while (waiting) |node| : (waiting = node.next) {
+        const waiter: *RoomWaiter = @fieldParentPtr("node", node);
+        waiter.turn.set(io);
+    }
     q.ready.broadcast(io);
     q.answered.wake(io);
 }
@@ -361,7 +410,7 @@ fn destroyChunk(q: *Outbound, chunk: *Chunk) void {
 pub fn roomWaiters(q: *Outbound, io: Io) u32 {
     q.mutex.lockUncancelable(io);
     defer q.mutex.unlock(io);
-    return q.room.waiters;
+    return q.room_waiters;
 }
 
 const testing = std.testing;
@@ -642,4 +691,123 @@ test "PINGs in a row share one frame, so they stay bounded" {
     q.pongReceived(io);
     try q.waitPong(io, first, null);
     try testing.expectError(error.Timeout, q.waitPong(io, second, time.after(io, .zero)));
+}
+
+fn roomWakeups(q: *Outbound, io: Io) u64 {
+    q.mutex.lockUncancelable(io);
+    defer q.mutex.unlock(io);
+    return q.room_wakeups;
+}
+
+const hundred: [100]u8 = @splat('x');
+
+/// Puts `count` frames of 100 bytes, each waiting for room as it must. A
+/// failure closes the queue, so the test fails rather than waits.
+fn putMany(q: *Outbound, io: Io, count: usize) Io.Cancelable!void {
+    for (0..count) |_| putPub(q, io, .publish, "s", &hundred) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return q.close(io),
+    };
+}
+
+/// Like a slow socket, takes one frame per batch until `frames` went out.
+fn writeSlowly(q: *Outbound, io: Io, frames: usize) !void {
+    const frame_len = encoder.pubLen("s", null, hundred.len);
+    var slices: [16][]const u8 = undefined;
+    var left = frames * frame_len;
+    while (left > 0) {
+        const batch = (try q.take(io, &slices)) orelse return error.TestClosed;
+        const n = @min(batch.len, frame_len, left);
+        q.written(io, n);
+        left -= n;
+    }
+}
+
+test "room for one frame wakes one waiting put, not all of them" {
+    const io = testing.io;
+    var q: Outbound = .init(testing.allocator, 1);
+    defer q.deinit();
+    const publishers = 16;
+    const each = 50;
+    var group: Io.Group = .init;
+    defer group.cancel(io);
+    for (0..publishers) |_| try group.concurrent(io, putMany, .{ &q, io, each });
+    try writeSlowly(&q, io, publishers * each);
+    try group.await(io);
+    // Waking every waiter for each frame costs several wakeups per frame
+    // with this many publishers; one per frame is the aim.
+    try testing.expect(q.roomWakeups(io) <= publishers * each);
+}
+
+/// Puts one frame with `subject`, waiting for room.
+fn putNamed(q: *Outbound, io: Io, subject: []const u8) PutError!void {
+    return putPub(q, io, .publish, subject, "x");
+}
+
+/// Waits until `count` puts wait for room, for 5 s at most.
+fn awaitRoomWaiters(q: *Outbound, io: Io, count: u32) !void {
+    const give_up = time.after(io, .fromSeconds(5));
+    while (q.roomWaiters(io) < count) {
+        if (time.expired(io, give_up)) return error.TestPutNeverWaited;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+}
+
+test "puts that wait for room go in the order they came" {
+    const io = testing.io;
+    var q: Outbound = .init(testing.allocator, 16);
+    defer q.deinit();
+    try putPub(&q, io, .publish, "first", "0123456789");
+    var futures: [3]Io.Future(PutError!void) = undefined;
+    var started: usize = 0;
+    defer for (futures[0..started]) |*f| f.cancel(io) catch {};
+    for ([_][]const u8{ "a", "b", "c" }, 0..) |subject, i| {
+        futures[i] = try io.concurrent(putNamed, .{ &q, io, subject });
+        started += 1;
+        try awaitRoomWaiters(&q, io, @intCast(i + 1));
+    }
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(testing.allocator);
+    // One frame fits at a time: each drain lets the next in line in.
+    for (0..4) |_| try drainOnce(&q, io, &out);
+    for (&futures) |*f| try f.await(io);
+    try testing.expectEqualStrings("PUB first 10\r\n0123456789\r\nPUB a 1\r\nx\r\nPUB b 1\r\nx\r\nPUB c 1\r\nx\r\n", out.items);
+}
+
+test "a put that leaves the line lets the next one in" {
+    const io = testing.io;
+    var q: Outbound = .init(testing.allocator, 16);
+    defer q.deinit();
+    try putPub(&q, io, .publish, "first", "0123456789");
+    var a = try io.concurrent(putNamed, .{ &q, io, "a" });
+    defer a.cancel(io) catch {};
+    try awaitRoomWaiters(&q, io, 1);
+    var b = try io.concurrent(putNamed, .{ &q, io, "b" });
+    defer b.cancel(io) catch {};
+    try awaitRoomWaiters(&q, io, 2);
+    try testing.expectError(error.Canceled, a.cancel(io));
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(testing.allocator);
+    try drainOnce(&q, io, &out);
+    try b.await(io);
+    try drainOnce(&q, io, &out);
+    try testing.expectEqualStrings("PUB first 10\r\n0123456789\r\nPUB b 1\r\nx\r\n", out.items);
+}
+
+test "close wakes every put in line" {
+    const io = testing.io;
+    var q: Outbound = .init(testing.allocator, 16);
+    defer q.deinit();
+    try putPub(&q, io, .publish, "first", "0123456789");
+    var futures: [3]Io.Future(PutError!void) = undefined;
+    var started: usize = 0;
+    defer for (futures[0..started]) |*f| f.cancel(io) catch {};
+    for (&futures, 0..) |*f, i| {
+        f.* = try io.concurrent(putNamed, .{ &q, io, "w" });
+        started += 1;
+        try awaitRoomWaiters(&q, io, @intCast(i + 1));
+    }
+    q.close(io);
+    for (&futures) |*f| try testing.expectError(error.Closed, f.await(io));
+    try testing.expectEqual(0, q.roomWaiters(io));
 }

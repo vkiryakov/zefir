@@ -1,7 +1,9 @@
 //! Wakes every task that waits on it, however many there are: a condition
-//! for "something changed, look again". `Io.Condition` keeps its count of
-//! waiters in 16 bits and asserts it stays below 65,535, while the tasks
-//! that publish into a full outbound queue, or flush, can be more.
+//! for "something changed, look again", where every waiter must look, such
+//! as the flushes waiting for PONG. `Io.Condition` keeps its count of
+//! waiters in 16 bits and asserts it stays below 65,535; the waiters here
+//! can be more. Where only one waiter can go on, wake one instead, as the
+//! outbound queue's line of puts does.
 //!
 //! Both calls need the caller's mutex held; `wait` releases it while
 //! asleep. A wait may end for no reason, or a little before its deadline,
