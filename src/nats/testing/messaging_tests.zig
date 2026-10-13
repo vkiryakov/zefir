@@ -309,3 +309,90 @@ test "close() while a publish waits for room: ConnectionClosed at once" {
     try testing.expectError(error.ConnectionClosed, publisher.await(io));
     try testing.expect(elapsedSince(io, start).toSeconds() < 1);
 }
+
+test "subscribe sends SUB; a queue group and max_messages go along" {
+    var r: Recorded = undefined;
+    try r.start(golden.info_default, .{ .servers = &.{} });
+    defer r.deinit();
+    const plain = try r.client.subscribe("foo", .{});
+    const grouped = try r.client.subscribe("q.work", .{ .queue = "workers" });
+    defer grouped.deinit();
+    const once = try r.client.subscribe("once.*", .{ .max_messages = 3 });
+    defer once.deinit();
+    try testing.expectEqual(1, plain.sid);
+    try testing.expectEqual(2, grouped.sid);
+    try testing.expectEqual(3, once.sid);
+    try testing.expectEqualStrings("q.work", grouped.subject);
+    try testing.expectEqualStrings("workers", grouped.queue_group.?);
+    // deinit tells the server.
+    plain.deinit();
+    try r.finish();
+    try testing.expectEqualStrings("SUB foo 1\r\n" ++
+        "SUB q.work workers 2\r\n" ++
+        "SUB once.* 3\r\nUNSUB 3 3\r\n" ++
+        "UNSUB 1\r\n" ++
+        "PING\r\n", r.transcript.items);
+}
+
+test "SIDs are never reused" {
+    var r: Recorded = undefined;
+    try r.start(golden.info_default, .{ .servers = &.{} });
+    defer r.deinit();
+    const first = try r.client.subscribe("a", .{});
+    first.deinit();
+    const second = try r.client.subscribe("a", .{});
+    defer second.deinit();
+    try testing.expectEqual(2, second.sid);
+    try r.finish();
+    try testing.expectEqualStrings("SUB a 1\r\nUNSUB 1\r\nSUB a 2\r\nPING\r\n", r.transcript.items);
+}
+
+test "no more subscriptions than limits.max_subscriptions at once" {
+    var r: Recorded = undefined;
+    try r.start(golden.info_default, .{ .servers = &.{}, .limits = .{ .max_subscriptions = 2 } });
+    defer r.deinit();
+    const a = try r.client.subscribe("a", .{});
+    const b = try r.client.subscribe("b", .{});
+    defer b.deinit();
+    try testing.expectError(error.TooManySubscriptions, r.client.subscribe("c", .{}));
+    a.deinit();
+    const c = try r.client.subscribe("c", .{});
+    defer c.deinit();
+    try r.finish();
+    try testing.expectEqualStrings("SUB a 1\r\nSUB b 2\r\nUNSUB 1\r\nSUB c 3\r\nPING\r\n", r.transcript.items);
+}
+
+test "subscribe refuses bad subjects and options before anything is queued" {
+    var r: Recorded = undefined;
+    try r.start(golden.info_default, .{ .servers = &.{} });
+    defer r.deinit();
+    const c = &r.client;
+    for ([_][]const u8{ "", "foo bar", "foo.>.bar", ">.foo", "foo..bar", "foo\r\nPUB x 1" }) |subject| {
+        try testing.expectError(error.InvalidSubject, c.subscribe(subject, .{}));
+    }
+    for ([_]nats.SubscribeOptions{
+        .{ .queue = "two words" },
+        .{ .queue = "" },
+        .{ .max_messages = 0 },
+        .{ .max_messages = 1_000_000_000 },
+        .{ .pending = .{ .messages = 0 } },
+        .{ .pending = .{ .bytes = 0 } },
+    }) |options| {
+        try testing.expectError(error.InvalidOptions, c.subscribe("foo", options));
+    }
+    try r.finish();
+    try testing.expectEqualStrings("PING\r\n", r.transcript.items);
+}
+
+test "a SUB line of 4096 argument bytes passes, one more is InvalidSubject" {
+    var r: Recorded = undefined;
+    try r.start(golden.info_default, .{ .servers = &.{} });
+    defer r.deinit();
+    // SUB <subject> 1: the server counts the subject, a space and the SID.
+    const subject: [4095]u8 = @splat('s');
+    const sub = try r.client.subscribe(subject[0..4094], .{});
+    defer sub.deinit();
+    try testing.expectError(error.InvalidSubject, r.client.subscribe(&subject, .{}));
+    try r.finish();
+    try testing.expectEqualStrings("SUB " ++ subject[0..4094] ++ " 1\r\nPING\r\n", r.transcript.items);
+}

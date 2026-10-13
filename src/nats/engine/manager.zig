@@ -302,15 +302,18 @@ fn connected(client: *Client) void {
     client.changed.broadcast(client.io);
 }
 
-/// The connection is gone, and with it the client.
+/// The connection is gone, and with it the client and its subscriptions.
 fn disconnected(client: *Client) void {
-    client.mutex.lockUncancelable(client.io);
-    defer client.mutex.unlock(client.io);
-    client.status = .closed;
-    client.server = null;
-    if (client.info_json) |json| client.gpa.free(json);
-    client.info_json = null;
-    client.changed.broadcast(client.io);
+    {
+        client.mutex.lockUncancelable(client.io);
+        defer client.mutex.unlock(client.io);
+        client.status = .closed;
+        client.server = null;
+        if (client.info_json) |json| client.gpa.free(json);
+        client.info_json = null;
+        client.changed.broadcast(client.io);
+    }
+    client.subscriptions.closeAll(client.io);
 }
 
 /// Lets `close()` stop the attempt; false when the client is closing.

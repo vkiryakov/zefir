@@ -23,6 +23,9 @@ pub const State = Client.State;
 pub const FlushOptions = Client.FlushOptions;
 pub const Message = @import("Message.zig");
 pub const PublishMessage = Message.PublishMessage;
+pub const Subscription = @import("Subscription.zig");
+pub const SubscribeOptions = Subscription.Options;
+pub const OverflowPolicy = Subscription.OverflowPolicy;
 
 /// Every error the client returns, apart from those of `std.Io` that pass
 /// through unchanged, such as network errors. Each function lists the ones
@@ -79,6 +82,9 @@ test {
     _ = @import("Headers.zig");
     _ = @import("Message.zig");
     _ = @import("engine/incoming.zig");
+    _ = @import("Subscription.zig");
+    _ = @import("engine/MessageQueue.zig");
+    _ = @import("engine/Registry.zig");
     _ = @import("protocol/subject.zig");
     _ = @import("protocol/encoder.zig");
     _ = @import("protocol/Parser.zig");
@@ -114,7 +120,7 @@ test "every error of the module's functions is in nats.Error or comes from std.I
     inline for (.{
         Client.InitError,    Client.ConnectError,      Client.FlushError,     Client.ServerInfoError,
         Options.Error,       ServerAddress.ParseError, ServerInfo.ParseError, Headers.ValidateError,
-        Client.PublishError,
+        Client.PublishError, Client.SubscribeError,
     }) |Set| {
         inline for (comptime @typeInfo(Set).error_set.error_names.?) |name| {
             if (comptime !isIn(Error, name) and !isIn(IoErrors, name)) {

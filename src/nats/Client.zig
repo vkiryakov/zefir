@@ -23,12 +23,15 @@ const Options = @import("Options.zig");
 const ServerAddress = @import("ServerAddress.zig");
 const ServerInfo = @import("ServerInfo.zig");
 const PublishMessage = @import("Message.zig").PublishMessage;
+const Subscription = @import("Subscription.zig");
 const Headers = @import("Headers.zig");
 const Parser = @import("protocol/Parser.zig");
 const encoder = @import("protocol/encoder.zig");
 const subjects = @import("protocol/subject.zig");
 const OwnedOptions = @import("engine/OwnedOptions.zig");
 const Outbound = @import("engine/Outbound.zig");
+const Registry = @import("engine/Registry.zig");
+const MessageQueue = @import("engine/MessageQueue.zig");
 const Connection = @import("engine/Connection.zig");
 const dialer = @import("engine/connect.zig");
 const manager = @import("engine/manager.zig");
@@ -44,6 +47,8 @@ options: OwnedOptions,
 read_buffer: []u8,
 parser_limits: Parser.Limits,
 outbound: Outbound,
+/// The subscriptions by SID.
+subscriptions: Registry = .{},
 /// The manager task.
 tasks: Io.Group = .init,
 /// The reader and writer of the current connection.
@@ -168,6 +173,70 @@ pub fn publishMessage(client: *Client, message: PublishMessage) PublishError!voi
         error.Closed => return error.ConnectionClosed,
         else => |e| return e,
     };
+}
+
+pub const SubscribeError = error{
+    /// The subject cannot be subscribed to, or the SUB line would be
+    /// longer than `limits.max_control_line_bytes`.
+    InvalidSubject,
+    /// A queue group name with whitespace, `max_messages` of 0 or over
+    /// 999 999 999, or a pending limit of 0.
+    InvalidOptions,
+    /// `limits.max_subscriptions` subscriptions exist already.
+    TooManySubscriptions,
+    /// Not connected yet.
+    Disconnected,
+    ConnectionClosed,
+    Canceled,
+    OutOfMemory,
+    /// A bug in this client: the frame came out of another length.
+    ProtocolError,
+};
+
+/// Subscribes to `subject`, which may hold wildcards. The SUB is queued
+/// before this returns; `flush` makes sure the server has it. The
+/// subscription is the client's: free it with its `deinit()`.
+pub fn subscribe(client: *Client, subject: []const u8, options: Subscription.Options) SubscribeError!*Subscription {
+    try subjects.validateSubscribe(subject);
+    if (options.queue) |queue| {
+        if (!subjects.isValidQueue(queue)) return error.InvalidOptions;
+    }
+    if (options.max_messages) |max| {
+        if (max == 0 or max > encoder.max_size) return error.InvalidOptions;
+    }
+    const limits = client.options.options.limits;
+    const pending: MessageQueue.Limits = .{
+        .messages = options.pending.messages orelse limits.subscription_messages,
+        .bytes = options.pending.bytes orelse limits.subscription_bytes,
+    };
+    if (pending.messages == 0 or pending.bytes == 0) return error.InvalidOptions;
+    _ = try client.currentServer();
+
+    const io = client.io;
+    const gpa = client.gpa;
+    const sub = try Registry.create(gpa, client, subject, options, pending);
+    errdefer Registry.destroy(gpa, sub);
+    try client.subscriptions.register(io, gpa, sub, limits.max_subscriptions);
+    errdefer client.subscriptions.unregister(io, sub.sid);
+    // The server closes the connection on a longer line.
+    if (encoder.subArgsLen(sub.subject, sub.queue_group, sub.sid) > limits.max_control_line_bytes) return error.InvalidSubject;
+    const len = subscribeLen(sub.subject, sub.queue_group, sub.sid, options.max_messages);
+    client.outbound.put(io, .service, len, writeSubscribe, .{ sub.subject, sub.queue_group, sub.sid, options.max_messages }) catch |err| switch (err) {
+        error.Closed => return error.ConnectionClosed,
+        else => |e| return e,
+    };
+    return sub;
+}
+
+/// SUB and, with `max`, the UNSUB that ends the subscription after `max`
+/// messages: one frame of the queue, so neither goes without the other.
+fn writeSubscribe(w: *Io.Writer, subject: []const u8, queue: ?[]const u8, sid: u64, max: ?u64) Io.Writer.Error!void {
+    try encoder.writeSub(w, subject, queue, sid);
+    if (max) |m| try encoder.writeUnsub(w, sid, m);
+}
+
+fn subscribeLen(subject: []const u8, queue: ?[]const u8, sid: u64, max: ?u64) usize {
+    return encoder.subLen(subject, queue, sid) + if (max) |m| encoder.unsubLen(sid, m) else 0;
 }
 
 /// What publishing needs to know about the current connection.
@@ -303,13 +372,16 @@ pub fn close(client: *Client) void {
     client.outbound.close(io);
     // The manager closes its connection and returns.
     client.tasks.cancel(io);
+    client.subscriptions.closeAll(io);
 }
 
-/// Closes the client if needed and frees everything. Calling it again does
-/// nothing. No other task may use the client any more.
+/// Closes the client if needed and frees everything, the subscriptions not
+/// freed yet included. Calling it again does nothing. No other task may
+/// use the client, or its subscriptions, any more.
 pub fn deinit(client: *Client) void {
     if (client.freed) return;
     client.close();
+    client.subscriptions.deinit(client.gpa);
     client.outbound.deinit();
     if (client.info_json) |json| client.gpa.free(json);
     client.gpa.free(client.read_buffer);
@@ -390,6 +462,17 @@ test "publish before connect is Disconnected, after close ConnectionClosed" {
     client.close();
     try testing.expectError(error.ConnectionClosed, client.publish("foo", "x"));
     try testing.expectError(error.ConnectionClosed, client.publishMessage(.{ .subject = "foo", .headers = &.{.{ .name = "X", .value = "1" }} }));
+}
+
+test "subscribe before connect is Disconnected, after close ConnectionClosed" {
+    var client: Client = try .init(testing.allocator, testing.io, .{ .servers = one_server });
+    defer client.deinit();
+    try testing.expectError(error.Disconnected, client.subscribe("foo", .{}));
+    // The arguments are checked first, whatever the state.
+    try testing.expectError(error.InvalidSubject, client.subscribe("foo bar", .{}));
+    try testing.expectError(error.InvalidOptions, client.subscribe("foo", .{ .queue = "two words" }));
+    client.close();
+    try testing.expectError(error.ConnectionClosed, client.subscribe("foo", .{}));
 }
 
 test "a message fits when it is within max_payload, or nine digits when that is unknown" {

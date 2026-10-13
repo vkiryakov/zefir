@@ -4,8 +4,9 @@
 //! `limits.outbound_bytes` is a soft limit: a frame waits for room while
 //! the queue holds that much or more, and is then taken whole, so a frame
 //! of any size gets in once the queue drains below the limit. PINGs skip
-//! the limit but keep their place in line. PONGs owed to the server go out
-//! before the next batch, outside the queue.
+//! the limit but keep their place in line, and `putNow` frames skip the
+//! wait but count. PONGs owed to the server go out before the next batch,
+//! outside the queue.
 
 const std = @import("std");
 const Io = std.Io;
@@ -119,6 +120,21 @@ pub fn put(q: *Outbound, io: Io, kind: Kind, len: usize, encode: anytype, args: 
     try q.mutex.lock(io);
     defer q.mutex.unlock(io);
     if (kind != .ping) try q.awaitRoom(io);
+    return q.append(io, kind, len, encode, args);
+}
+
+pub const PutNowError = error{ Closed, OutOfMemory, ProtocolError };
+
+/// Like `put`, but the frame goes in at once, full queue or not; it still
+/// counts against the limit. For frames that cannot wait and stay few,
+/// such as the one UNSUB a subscription sends when it ends.
+pub fn putNow(q: *Outbound, io: Io, kind: Kind, len: usize, encode: anytype, args: anytype) PutNowError!void {
+    q.mutex.lockUncancelable(io);
+    defer q.mutex.unlock(io);
+    return q.append(io, kind, len, encode, args);
+}
+
+fn append(q: *Outbound, io: Io, kind: Kind, len: usize, encode: anytype, args: anytype) PutNowError!void {
     if (q.closed) return error.Closed;
     const chunk = try q.reserve(len);
     var w: Writer = .fixed(chunk.bytes[chunk.tail..][0..len]);
@@ -456,6 +472,25 @@ test "a canceled put queues nothing" {
     try testing.expectError(error.Canceled, putter.cancel(io));
     var frames: [4]Frame = undefined;
     try testing.expectEqual(1, q.unsent(io, &frames).len);
+}
+
+fn writeUnsub(w: *Writer, sid: u64) Writer.Error!void {
+    return encoder.writeUnsub(w, sid, null);
+}
+
+test "putNow skips the wait for room, yet counts against the limit" {
+    const io = testing.io;
+    var q: Outbound = .init(testing.allocator, 16);
+    defer q.deinit();
+    try putPub(&q, io, .publish, "first", "0123456789");
+    try q.putNow(io, .service, encoder.unsubLen(7, null), writeUnsub, .{7});
+    try testing.expect(q.queued >= q.limit);
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(testing.allocator);
+    try drainOnce(&q, io, &out);
+    try testing.expectEqualStrings("PUB first 10\r\n0123456789\r\nUNSUB 7\r\n", out.items);
+    q.close(io);
+    try testing.expectError(error.Closed, q.putNow(io, .service, encoder.unsubLen(7, null), writeUnsub, .{7}));
 }
 
 test "PINGs skip the limit but keep their place" {
