@@ -48,8 +48,8 @@ const Responder = struct {
     sub: *nats.Subscription,
     task: Io.Future(anyerror!void),
 
-    fn start(r: *Responder, io: Io, subject: []const u8, answer: Answer) !void {
-        r.client = try .init(testing.allocator, io, .{ .servers = &.{e2e.servers.plain} });
+    fn start(r: *Responder, io: Io, server: []const u8, subject: []const u8, answer: Answer) !void {
+        r.client = try .init(testing.allocator, io, .{ .servers = &.{server} });
         errdefer r.client.deinit();
         try r.client.connect();
         r.sub = try r.client.subscribe(subject, .{ .pending = .{ .messages = 20_000 } });
@@ -122,7 +122,7 @@ fn requestNumber(client: *nats.Client, subject: []const u8, i: usize, ok: *std.a
 
 fn requestReply(io: Io) !void {
     var responder: Responder = undefined;
-    try responder.start(io, "e2e.rpc.echo", .echo);
+    try responder.start(io, e2e.servers.plain, "e2e.rpc.echo", .echo);
     defer responder.deinit(io);
     var client: nats.Client = try .init(testing.allocator, io, .{ .servers = &.{e2e.servers.plain} });
     defer client.deinit();
@@ -246,7 +246,7 @@ test "a canceled request returns Canceled and leaves nothing behind" {
 
 fn lateReply(io: Io) !void {
     var responder: Responder = undefined;
-    try responder.start(io, "e2e.rpc.slow", .{ .delayed = 300 });
+    try responder.start(io, e2e.servers.plain, "e2e.rpc.slow", .{ .delayed = 300 });
     defer responder.deinit(io);
     var client: nats.Client = try .init(testing.allocator, io, .{ .servers = &.{e2e.servers.plain} });
     defer client.deinit();
@@ -269,7 +269,7 @@ test "a reply after the timeout counts as late" {
 
 fn respondAndRespondMessage(io: Io) !void {
     var responder: Responder = undefined;
-    try responder.start(io, "e2e.rpc.conv", .{ .converse = "e2e.rpc.conv.next" });
+    try responder.start(io, e2e.servers.plain, "e2e.rpc.conv", .{ .converse = "e2e.rpc.conv.next" });
     defer responder.deinit(io);
     var client: nats.Client = try .init(testing.allocator, io, .{ .servers = &.{e2e.servers.plain} });
     defer client.deinit();
@@ -327,7 +327,7 @@ fn requestManyThree(io: Io) !void {
     var started: usize = 0;
     defer for (responders[0..started]) |*r| r.deinit(io);
     for (&responders, names) |*r, name| {
-        try r.start(io, "e2e.rpc.many", .{ .text = name });
+        try r.start(io, e2e.servers.plain, "e2e.rpc.many", .{ .text = name });
         started += 1;
     }
     var client: nats.Client = try .init(testing.allocator, io, .{ .servers = &.{e2e.servers.plain} });
@@ -435,7 +435,7 @@ fn expectOneInboxSubscription(name: []const u8) !void {
 fn tenThousand(io: Io) !void {
     const count = 10_000;
     var responder: Responder = undefined;
-    try responder.start(io, "e2e.rpc.10k", .{ .same_after = count });
+    try responder.start(io, e2e.servers.plain, "e2e.rpc.10k", .{ .same_after = count });
     defer responder.deinit(io);
     var client: nats.Client = try .init(testing.allocator, io, .{ .servers = &.{e2e.servers.plain}, .name = "e2e-rpc-10k" });
     defer client.deinit();
@@ -444,13 +444,9 @@ fn tenThousand(io: Io) !void {
     var failed: std.atomic.Value(u32) = .init(0);
     var group: Io.Group = .init;
     defer group.cancel(io);
+    // The responder answers only once all of them came: until then every
+    // one of them waits, so they are all pending at once.
     for (0..count) |i| try group.concurrent(io, requestNumber, .{ &client, "e2e.rpc.10k", i, &ok, &failed });
-    // The responder answers once all of them came: they all wait at once.
-    const start = Io.Clock.awake.now(io);
-    while (client.inbox.pendingCount(io) < count) {
-        if (elapsedSince(io, start).toSeconds() >= 60) return error.TestRequestsNeverPending;
-        try io.sleep(.fromMilliseconds(5), .awake);
-    }
     try group.await(io);
     if (ok.load(.monotonic) != 10_000) {
         std.debug.print("10k requests: {d} ok, {d} failed\n", .{ ok.load(.monotonic), failed.load(.monotonic) });
@@ -464,4 +460,331 @@ fn tenThousand(io: Io) !void {
 
 test "10,000 requests at once go through one inbox subscription" {
     try e2e.onZio(tenThousand);
+}
+
+/// Waits until a task waits in `responses.next()`, for 5 s at most.
+fn awaitReceiving(io: Io, responses: *nats.Responses) !void {
+    const start = Io.Clock.awake.now(io);
+    while (!responses.messages.isReceiving(io)) {
+        if (elapsedSince(io, start).toSeconds() >= 5) return error.TestReceiverNeverWaited;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+}
+
+fn nextResponse(responses: *nats.Responses) nats.Responses.NextError!?nats.Message {
+    return responses.next(.{});
+}
+
+fn releaseResponse(result: nats.Responses.NextError!?nats.Message) void {
+    const got = result catch return;
+    if (got) |msg| {
+        var m = msg;
+        m.deinit();
+    }
+}
+
+fn closeWhileWaiting(io: Io) !void {
+    var client: nats.Client = try .init(testing.allocator, io, .{ .servers = &.{e2e.servers.plain} });
+    defer client.deinit();
+    try client.connect();
+    const silent = try client.subscribe("e2e.rpc.silent", .{});
+    defer silent.deinit();
+    try client.flush(.{});
+    const responses = try client.requestMany("e2e.rpc.silent", "?", manyWithin(30_000, 32));
+    defer responses.deinit();
+    var receiver = try io.concurrent(nextResponse, .{responses});
+    defer releaseResponse(receiver.cancel(io));
+    var request = try io.concurrent(requestSilent, .{&client});
+    defer releaseReply(request.cancel(io));
+    try awaitAwaiting(io, &client, 1);
+    try awaitReceiving(io, responses);
+
+    const start = Io.Clock.awake.now(io);
+    client.close();
+    if (request.await(io)) |_| return error.TestUnexpectedReply else |err| try testing.expectEqual(error.ConnectionClosed, err);
+    if (receiver.await(io)) |_| return error.TestUnexpectedResponse else |err| try testing.expectEqual(error.ConnectionClosed, err);
+    try testing.expect(elapsedSince(io, start).toSeconds() < 1);
+}
+
+test "close() while request() and Responses.next() wait: ConnectionClosed at once" {
+    try e2e.onZio(closeWhileWaiting);
+}
+
+fn cancelStream(io: Io) !void {
+    const names = [_][]const u8{ "a", "b" };
+    var responders: [names.len]Responder = undefined;
+    var started: usize = 0;
+    defer for (responders[0..started]) |*r| r.deinit(io);
+    for (&responders, names) |*r, name| {
+        try r.start(io, e2e.servers.plain, "e2e.rpc.cancel", .{ .text = name });
+        started += 1;
+    }
+    var client: nats.Client = try .init(testing.allocator, io, .{ .servers = &.{e2e.servers.plain} });
+    defer client.deinit();
+    try client.connect();
+    const silent = try client.subscribe("e2e.rpc.silent", .{});
+    defer silent.deinit();
+    try client.flush(.{});
+
+    // From another task while next() waits: null at once.
+    {
+        const responses = try client.requestMany("e2e.rpc.silent", "?", manyWithin(30_000, 32));
+        defer responses.deinit();
+        var receiver = try io.concurrent(nextResponse, .{responses});
+        defer releaseResponse(receiver.cancel(io));
+        try awaitReceiving(io, responses);
+        const start = Io.Clock.awake.now(io);
+        responses.cancel();
+        try testing.expect(try receiver.await(io) == null);
+        try testing.expect(elapsedSince(io, start).toSeconds() < 1);
+    }
+    // With responses waiting: they are dropped, and next() is null.
+    {
+        const responses = try client.requestMany("e2e.rpc.cancel", "?", manyWithin(30_000, 32));
+        defer responses.deinit();
+        const start = Io.Clock.awake.now(io);
+        while (responses.messages.stats(io).received < names.len) {
+            if (elapsedSince(io, start).toSeconds() >= 5) return error.TestResponsesNeverCame;
+            try io.sleep(.fromMilliseconds(5), .awake);
+        }
+        responses.cancel();
+        try testing.expect(try responses.next(.{}) == null);
+    }
+    try testing.expectEqual(0, client.inbox.pendingCount(io));
+    for (&responders) |*r| try r.stop(io);
+}
+
+test "Responses.cancel() ends the stream at once, and drops what waits" {
+    try e2e.onZio(cancelStream);
+}
+
+fn lostWithResponsesQueued(io: Io) !void {
+    // Responders and requester on the server the test pauses.
+    const names = [_][]const u8{ "a", "b" };
+    var responders: [names.len]Responder = undefined;
+    var started: usize = 0;
+    defer for (responders[0..started]) |*r| r.deinit(io);
+    for (&responders, names) |*r, name| {
+        try r.start(io, e2e.servers.stall, "e2e.rpc.lostmany", .{ .text = name });
+        started += 1;
+    }
+    var client: nats.Client = try .init(testing.allocator, io, .{
+        .servers = &.{e2e.servers.stall},
+        .ping_interval = .fromMilliseconds(100),
+        .max_outstanding_pings = 2,
+    });
+    defer client.deinit();
+    try client.connect();
+    const responses = try client.requestMany("e2e.rpc.lostmany", "?", manyWithin(30_000, 32));
+    defer responses.deinit();
+    const start = Io.Clock.awake.now(io);
+    while (responses.messages.stats(io).received < names.len) {
+        if (elapsedSince(io, start).toSeconds() >= 5) return error.TestResponsesNeverCame;
+        try io.sleep(.fromMilliseconds(5), .awake);
+    }
+
+    // The heartbeat drops the connection; what came still comes out.
+    try e2e.docker(&.{ "pause", e2e.servers.stall_container });
+    errdefer e2e.unpause(e2e.servers.stall_container) catch {};
+    var seen: [names.len]bool = @splat(false);
+    for (0..names.len) |_| {
+        var msg = (try responses.next(.{})) orelse return error.TestNoResponse;
+        defer msg.deinit();
+        for (names, &seen) |name, *flag| {
+            if (std.mem.eql(u8, name, msg.payload)) flag.* = true;
+        }
+    }
+    try testing.expect(seen[0] and seen[1]);
+    try testing.expectError(error.Disconnected, responses.next(.{}));
+    try e2e.unpause(e2e.servers.stall_container);
+    for (&responders) |*r| try r.stop(io);
+}
+
+test "a lost connection: the responses that came come out, then Disconnected" {
+    try e2e.onZio(lostWithResponsesQueued);
+}
+
+/// Publishes large messages until it fails.
+fn publishUntilClosed(client: *nats.Client, payload: []const u8, published: *std.atomic.Value(u32)) nats.Client.PublishError!void {
+    while (true) {
+        try client.publish("e2e.rpc.stall", payload);
+        _ = published.fetchAdd(1, .monotonic);
+    }
+}
+
+fn requestBehindStalledServer(io: Io) !void {
+    var client: nats.Client = try .init(testing.allocator, io, .{ .servers = &.{e2e.servers.stall}, .limits = .{ .outbound_bytes = 1 } });
+    defer client.deinit();
+    try client.connect();
+    // The first request makes the inbox subscription.
+    try testing.expectError(error.NoResponders, client.request("e2e.rpc.nobody", "?", within(5000)));
+    // The server stops reading: the socket fills, then the outbound queue.
+    try e2e.docker(&.{ "pause", e2e.servers.stall_container });
+    errdefer e2e.unpause(e2e.servers.stall_container) catch {};
+    const payload = try testing.allocator.alloc(u8, 512 * 1024);
+    defer testing.allocator.free(payload);
+    @memset(payload, 's');
+    var published: std.atomic.Value(u32) = .init(0);
+    var publisher = try io.concurrent(publishUntilClosed, .{ &client, payload, &published });
+    defer publisher.cancel(io) catch {};
+    const start = Io.Clock.awake.now(io);
+    var last = published.load(.monotonic);
+    var still_since = Io.Clock.awake.now(io);
+    while (true) {
+        try io.sleep(.fromMilliseconds(20), .awake);
+        const now = published.load(.monotonic);
+        if (now != last or client.outbound.roomWaiters(io) == 0) {
+            last = now;
+            still_since = Io.Clock.awake.now(io);
+        } else if (elapsedSince(io, still_since).toMilliseconds() >= 300) {
+            break;
+        }
+        if (elapsedSince(io, start).toSeconds() >= 20) return error.TestPublishNeverWaited;
+    }
+
+    // Its PUB waits for room behind the publish: it ends at its deadline.
+    const asked = Io.Clock.awake.now(io);
+    try testing.expectError(error.Timeout, client.request("e2e.rpc.x", "?", within(200)));
+    const took = elapsedSince(io, asked).toMilliseconds();
+    try testing.expect(took >= 200 and took < 2000);
+    try testing.expectEqual(0, client.inbox.pendingCount(io));
+    client.close();
+    try testing.expectError(error.ConnectionClosed, publisher.await(io));
+    try e2e.unpause(e2e.servers.stall_container);
+}
+
+test "a request whose PUB waits for room behind a server that stopped reading ends with Timeout" {
+    try e2e.onZio(requestBehindStalledServer);
+}
+
+fn tooManyPending(io: Io) !void {
+    var client: nats.Client = try .init(testing.allocator, io, .{ .servers = &.{e2e.servers.plain}, .limits = .{ .max_pending_requests = 2 } });
+    defer client.deinit();
+    try client.connect();
+    const silent = try client.subscribe("e2e.rpc.silent", .{});
+    defer silent.deinit();
+    try client.flush(.{});
+    var first = try io.concurrent(requestSilent, .{&client});
+    defer releaseReply(first.cancel(io));
+    var second = try io.concurrent(requestSilent, .{&client});
+    defer releaseReply(second.cancel(io));
+    try awaitAwaiting(io, &client, 2);
+    try testing.expectError(error.TooManyPendingRequests, client.request("e2e.rpc.silent", "?", within(5000)));
+    try testing.expectError(error.TooManyPendingRequests, client.requestMany("e2e.rpc.silent", "?", manyWithin(5000, 4)));
+    if (first.cancel(io)) |_| return error.TestUnexpectedReply else |err| try testing.expectEqual(error.Canceled, err);
+    // Room for one again.
+    try testing.expectError(error.Timeout, client.request("e2e.rpc.silent", "?", within(50)));
+}
+
+test "no more pending requests than limits.max_pending_requests" {
+    try e2e.onZio(tooManyPending);
+}
+
+const hundred: [100]u8 = @splat('h');
+
+fn maxBytesDrops(io: Io) !void {
+    var responders: [3]Responder = undefined;
+    var started: usize = 0;
+    defer for (responders[0..started]) |*r| r.deinit(io);
+    for (&responders) |*r| {
+        try r.start(io, e2e.servers.plain, "e2e.rpc.bytes", .{ .text = &hundred });
+        started += 1;
+    }
+    var client: nats.Client = try .init(testing.allocator, io, .{ .servers = &.{e2e.servers.plain} });
+    defer client.deinit();
+    try client.connect();
+    // A response takes its subject, _INBOX.<token>.1, and 100 bytes: room
+    // for one.
+    var options = manyWithin(30_000, 3);
+    options.max_bytes = "_INBOX.".len + 22 + ".1".len + hundred.len + 50;
+    const responses = try client.requestMany("e2e.rpc.bytes", "?", options);
+    defer responses.deinit();
+    // All three come before any is taken.
+    const start = Io.Clock.awake.now(io);
+    while (responses.messages.stats(io).received < 3) {
+        if (elapsedSince(io, start).toSeconds() >= 5) return error.TestResponsesNeverCame;
+        try io.sleep(.fromMilliseconds(5), .awake);
+    }
+    var msg = (try responses.next(.{})) orelse return error.TestNoResponse;
+    msg.deinit();
+    try testing.expect(try responses.next(.{}) == null);
+    try testing.expectEqual(nats.SubscriptionStats{ .received = 3, .delivered = 1, .dropped = 2 }, responses.messages.stats(io));
+    for (&responders) |*r| try r.stop(io);
+}
+
+test "requestMany drops the responses that do not fit in max_bytes, and counts them" {
+    try e2e.onZio(maxBytesDrops);
+}
+
+fn controlLineWithReplySubject(io: Io) !void {
+    // PUB <subject> _INBOX.<token>.1 0: the subject, the reply subject of
+    // the first request, a size and two spaces make 4096 bytes.
+    var subject: [4096]u8 = @splat('r');
+    @memcpy(subject[0.."e2e.rpc.".len], "e2e.rpc.");
+    const fits = 4096 - ("_INBOX.".len + 22 + ".1".len) - " ".len - " 0".len;
+    var responder: Responder = undefined;
+    try responder.start(io, e2e.servers.plain, subject[0..fits], .same);
+    defer responder.deinit(io);
+    var client: nats.Client = try .init(testing.allocator, io, .{ .servers = &.{e2e.servers.plain} });
+    defer client.deinit();
+    try client.connect();
+    var reply = try client.request(subject[0..fits], "", .{});
+    reply.deinit();
+    // The second request's id is one digit too: one byte more is refused
+    // before anything goes out.
+    try testing.expectError(error.InvalidSubject, client.request(subject[0 .. fits + 1], "", .{}));
+    try client.flush(.{});
+    try testing.expect(client.isConnected());
+    try responder.stop(io);
+}
+
+test "a request line of 4096 argument bytes with the inbox reply subject passes, one more is InvalidSubject" {
+    try e2e.onZio(controlLineWithReplySubject);
+}
+
+fn replyOverInboundLimit(io: Io) !void {
+    var responder: Responder = undefined;
+    try responder.start(io, e2e.servers.plain, "e2e.rpc.bigecho", .same);
+    defer responder.deinit(io);
+    var client: nats.Client = try .init(testing.allocator, io, .{
+        .servers = &.{e2e.servers.plain},
+        .limits = .{ .max_inbound_frame_bytes = 1024, .max_header_bytes = 512 },
+    });
+    defer client.deinit();
+    try client.connect();
+    const big: [2000]u8 = @splat('x');
+    const start = Io.Clock.awake.now(io);
+    try testing.expectError(error.Timeout, client.request("e2e.rpc.bigecho", &big, within(300)));
+    try testing.expect(elapsedSince(io, start).toMilliseconds() >= 300);
+    try testing.expectEqual(0, client.inbox.pendingCount(io));
+    var reply = try client.request("e2e.rpc.bigecho", "small", .{});
+    defer reply.deinit();
+    try testing.expectEqualStrings("small", reply.payload);
+    try responder.stop(io);
+}
+
+test "a reply over max_inbound_frame_bytes is dropped, and the request ends with Timeout" {
+    try e2e.onZio(replyOverInboundLimit);
+}
+
+fn inboxRefused(io: Io) !void {
+    // "noinbox" may not subscribe to _INBOX.>: the server refuses the
+    // inbox, and no reply could ever come.
+    var client: nats.Client = try .init(testing.allocator, io, .{
+        .servers = &.{e2e.servers.auth},
+        .auth = .{ .user_password = .{ .username = "noinbox", .password = "noinbox" } },
+    });
+    defer client.deinit();
+    try client.connect();
+    const start = Io.Clock.awake.now(io);
+    try testing.expectError(error.PermissionDenied, client.request("e2e.rpc.any", "?", within(30_000)));
+    try testing.expect(elapsedSince(io, start).toSeconds() < 5);
+    try testing.expectError(error.PermissionDenied, client.request("e2e.rpc.any", "?", within(30_000)));
+    try testing.expectError(error.PermissionDenied, client.requestMany("e2e.rpc.any", "?", manyWithin(30_000, 4)));
+    try client.flush(.{});
+    try testing.expect(client.isConnected());
+}
+
+test "an account that may not subscribe to an inbox: requests fail with PermissionDenied at once" {
+    try e2e.onZio(inboxRefused);
 }
