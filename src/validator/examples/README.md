@@ -30,7 +30,7 @@ const SignUp = struct {
 
 pub fn main(init: std.process.Init) !void {
     const logger: log.Logger = try .init(init.gpa, init.io, .{
-        .service = .{ .name = "signup-service" },
+        .service = .{ .name = "user-service" },
         .format = .text,
     });
     defer logger.deinit();
@@ -212,7 +212,7 @@ const SignUp = struct {
 
 pub fn main(init: std.process.Init) !void {
     const logger: log.Logger = try .init(init.gpa, init.io, .{
-        .service = .{ .name = "signup-service" },
+        .service = .{ .name = "user-service" },
         .format = .text,
     });
     defer logger.deinit();
