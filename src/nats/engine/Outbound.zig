@@ -1636,3 +1636,36 @@ test "dead frames are moved out once they hold as much as the living, so the buf
     try testing.expectEqual(0, q.counts(io).queued);
     try testing.expectEqual(0, q.frames.len);
 }
+
+test "a PONG that comes before the writer marks its PING written still confirms what went before" {
+    const io = testing.io;
+    var q: Outbound = .initBuffering(testing.allocator, 1 << 20, 1 << 20);
+    defer q.deinit();
+    try q.restore(io, @as([]const u8, ""), restoreSub, allWaiting);
+    try putPub(&q, io, .publish, "a", "1");
+    const ping = try q.putPing(io, .flush);
+    var slices: [4][]const u8 = undefined;
+    const batch = (try q.take(io, &slices)).?;
+    // The socket took the batch and the server answered; the reader got
+    // the PONG before the writer called written().
+    q.pongReceived(io);
+    q.written(io, batch.len);
+    try q.waitPong(io, ping, null);
+    _ = q.halt(io);
+    try testing.expectEqual(0, q.settle(io).uncertain);
+}
+
+test "close counts a publish written in part as dropped, with those not begun" {
+    const io = testing.io;
+    var q: Outbound = .init(testing.allocator, 1 << 20);
+    defer q.deinit();
+    try putPub(&q, io, .publish, "p", "1");
+    try putPub(&q, io, .publish, "q", "2");
+    var slices: [4][]const u8 = undefined;
+    _ = (try q.take(io, &slices)).?;
+    q.written(io, 5);
+    q.close(io);
+    const settled = q.discard(io);
+    try testing.expectEqual(2, settled.dropped);
+    try testing.expectEqual(0, settled.uncertain);
+}
