@@ -4,8 +4,8 @@
 //! and password; TLS and JetStream are not part of this version.
 //!
 //! Work in progress: the client connects, keeps the connection alive with
-//! PINGs, publishes, subscribes, sends requests, flushes and measures the
-//! round trip. Reconnect comes next; until then a lost
+//! PINGs, publishes, subscribes, sends requests and answers them, flushes
+//! and measures the round trip. Reconnect comes next; until then a lost
 //! connection closes the client, ends its subscriptions and fails the
 //! requests waiting for replies.
 
@@ -25,6 +25,7 @@ pub const FlushOptions = Client.FlushOptions;
 pub const RequestOptions = Client.RequestOptions;
 pub const Message = @import("Message.zig");
 pub const PublishMessage = Message.PublishMessage;
+pub const ResponseMessage = Message.ResponseMessage;
 pub const Subscription = @import("Subscription.zig");
 pub const SubscribeOptions = Subscription.Options;
 pub const OverflowPolicy = Subscription.OverflowPolicy;
@@ -129,7 +130,7 @@ test "every error of the module's functions is in nats.Error or comes from std.I
         Client.InitError,    Client.ConnectError,      Client.FlushError,      Client.ServerInfoError,
         Options.Error,       ServerAddress.ParseError, ServerInfo.ParseError,  Headers.ValidateError,
         Client.PublishError, Client.SubscribeError,    Subscription.NextError, Subscription.UnsubscribeError,
-        Client.RequestError,
+        Client.RequestError, Client.RespondError,
     }) |Set| {
         inline for (comptime @typeInfo(Set).error_set.error_names.?) |name| {
             if (comptime !isIn(Error, name) and !isIn(IoErrors, name)) {

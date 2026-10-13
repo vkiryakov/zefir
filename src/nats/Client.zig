@@ -31,6 +31,7 @@ const ServerAddress = @import("ServerAddress.zig");
 const ServerInfo = @import("ServerInfo.zig");
 const Message = @import("Message.zig");
 const PublishMessage = Message.PublishMessage;
+const ResponseMessage = Message.ResponseMessage;
 const Subscription = @import("Subscription.zig");
 const Headers = @import("Headers.zig");
 const Parser = @import("protocol/Parser.zig");
@@ -171,6 +172,30 @@ pub fn publishMessage(client: *Client, message: PublishMessage) PublishError!voi
         error.Closed => return error.ConnectionClosed,
         else => |e| return e,
     };
+}
+
+pub const RespondError = PublishError || error{
+    /// The message has no reply subject: no one waits for an answer.
+    NoReplySubject,
+};
+
+/// Answers `msg`, a request that came to a subscription: publishes
+/// `payload` to its reply subject, the way `publish` does.
+///
+/// ```zig
+/// var msg = (try sub.next(.{})) orelse return;
+/// defer msg.deinit();
+/// try client.respond(&msg, "done");
+/// ```
+pub fn respond(client: *Client, msg: *const Message, payload: []const u8) RespondError!void {
+    return client.respondMessage(msg, .{ .payload = payload });
+}
+
+/// Answers `msg` with headers, or with a reply subject of its own, the way
+/// `respond` does.
+pub fn respondMessage(client: *Client, msg: *const Message, response: ResponseMessage) RespondError!void {
+    const reply = msg.reply_to orelse return error.NoReplySubject;
+    return client.publishMessage(.{ .subject = reply, .reply_to = response.reply_to, .headers = response.headers, .payload = response.payload });
 }
 
 const PrepareError = error{ InvalidSubject, InvalidHeader, UnsupportedFeature, PayloadTooLarge, Disconnected, ConnectionClosed };

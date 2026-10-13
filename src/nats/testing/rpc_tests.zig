@@ -520,3 +520,72 @@ test "a request that waits for room in the outbound queue ends at its deadline" 
     try testing.expectEqual(0, client.inbox.pendingCount(io));
     try testing.expect(client.isConnected());
 }
+
+/// After the handshake, waits for the SUB of the client, sends `messages`,
+/// and records what the client sends after that, payloads included, until
+/// it hangs up; PINGs get PONGs.
+fn serveCalls(io: Io, listener: *net.Server, messages: []const u8, transcript: *std.ArrayList(u8)) anyerror!void {
+    var peer: FakeServer.Peer = undefined;
+    try peer.accept(io, listener);
+    defer peer.close();
+    try handshake(&peer);
+    while (!std.mem.startsWith(u8, try peer.readLine(), "SUB ")) {}
+    try peer.send(messages);
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(testing.allocator);
+    while (try peer.nextLine()) |line| {
+        try transcript.appendSlice(testing.allocator, line);
+        try transcript.appendSlice(testing.allocator, "\r\n");
+        if (std.mem.eql(u8, line, "PING")) {
+            try peer.send(golden.pong);
+        } else if (std.mem.startsWith(u8, line, "PUB ") or std.mem.startsWith(u8, line, "HPUB ")) {
+            const size = try std.fmt.parseInt(usize, line[std.mem.findScalarLast(u8, line, ' ').? + 1 ..], 10);
+            try body.resize(testing.allocator, size + 2);
+            try peer.readExact(body.items);
+            try transcript.appendSlice(testing.allocator, body.items);
+        }
+    }
+}
+
+test "respond and respondMessage publish to the reply subject of the request" {
+    const io = testing.io;
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var transcript: std.ArrayList(u8) = .empty;
+    defer transcript.deinit(testing.allocator);
+    var server = try io.concurrent(serveCalls, .{ io, &listener, "MSG svc 1 reply.one 3\r\nask\r\nMSG svc 1 2\r\nno\r\nMSG svc 1 bad.* 3\r\nodd\r\n", &transcript });
+    defer server.cancel(io) catch {};
+    var url: [64]u8 = undefined;
+    var client: Client = try .init(testing.allocator, io, .{ .servers = &.{try FakeServer.url(&listener, &url)} });
+    defer client.deinit();
+    try client.connect();
+    const sub = try client.subscribe("svc", .{});
+    defer sub.deinit();
+    const within_five_seconds: nats.ReceiveOptions = .{ .timeout = .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } } };
+
+    var asked = (try sub.next(within_five_seconds)) orelse return error.TestNoMessage;
+    defer asked.deinit();
+    try client.respond(&asked, "answer");
+    try client.respondMessage(&asked, .{ .headers = &.{.{ .name = "X-A", .value = "1" }}, .payload = "p" });
+    try client.respondMessage(&asked, .{ .reply_to = "back.here" });
+
+    // A message without a reply subject has no one to answer.
+    var told = (try sub.next(within_five_seconds)) orelse return error.TestNoMessage;
+    defer told.deinit();
+    try testing.expectError(error.NoReplySubject, client.respond(&told, "nobody asked"));
+    try testing.expectError(error.NoReplySubject, client.respondMessage(&told, .{}));
+    // The server passes on any reply subject; one that cannot be published
+    // to is refused.
+    var odd = (try sub.next(within_five_seconds)) orelse return error.TestNoMessage;
+    defer odd.deinit();
+    try testing.expectError(error.InvalidSubject, client.respond(&odd, "x"));
+
+    try client.flush(quick);
+    client.close();
+    try server.await(io);
+    try testing.expectEqualStrings("PUB reply.one 6\r\nanswer\r\n" ++
+        "HPUB reply.one 20 21\r\nNATS/1.0\r\nX-A: 1\r\n\r\np\r\n" ++
+        "PUB reply.one back.here 0\r\n\r\n" ++
+        "PING\r\n", transcript.items);
+    try testing.expectError(error.ConnectionClosed, client.respond(&asked, "too late"));
+}

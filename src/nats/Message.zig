@@ -48,6 +48,16 @@ pub const PublishMessage = struct {
     payload: []const u8 = "",
 };
 
+/// A response to a request, for `Client.respondMessage`: it goes to the
+/// request's reply subject. Every field is borrowed for the call only.
+pub const ResponseMessage = struct {
+    /// Where the requester may answer this response in turn.
+    reply_to: ?[]const u8 = null,
+    /// Sent with HPUB; a server without headers support refuses them.
+    headers: []const Headers.Header = &.{},
+    payload: []const u8 = "",
+};
+
 const testing = std.testing;
 const Parser = @import("protocol/Parser.zig");
 const golden = @import("protocol/golden.zig");
