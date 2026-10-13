@@ -135,9 +135,12 @@ jobs:
 
   # The end-to-end tests of nats against NATS servers in Docker. Only the
   # Linux runners run Linux containers, so this job is ubuntu only. It is
-  # not a required check yet.
+  # not a required check yet. It runs when nats is among the modules to
+  # test, so on every push to main or dev and on a manual run.
   nats-e2e:
     name: nats-e2e
+    needs: changes
+    if: contains(format(' {0} ', needs.changes.outputs.modules), ' nats ')
     timeout-minutes: 20
     runs-on: ubuntu-latest
     steps:

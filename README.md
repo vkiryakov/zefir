@@ -214,7 +214,7 @@ zig build e2e                 # start the servers if needed, then run the tests
 zig build down                # stop the servers
 ```
 
-`zig build down` also resets the servers when a run dies half way, say while a test holds one of them paused.
+`zig build down` also resets the servers when a run dies half way, say while a test holds one of them paused. CI runs these tests whenever it tests nats; a change to `tests/nats/` or `docker-compose.yml` counts as a change to nats.
 
 Branches:
 
