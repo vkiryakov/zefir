@@ -1,7 +1,9 @@
 //! Built with ReleaseSafe whatever -Doptimize says. A malformed validateSelf
 //! result is a programmer error that fails closed outside Debug: it is
 //! reported as validation.invalid / "is invalid" at the struct's path (a
-//! Debug build panics instead: see panic/).
+//! Debug build panics instead: see panic/). A list longer than
+//! max_unique_items, which the declaration checks keep from uniqueItems and
+//! uniqueBy, fails them rather than overrunning their stack buffers.
 const std = @import("std");
 const builtin = @import("builtin");
 const v = @import("validator");
@@ -121,4 +123,46 @@ test "a well-formed hand-built result is reported as returned" {
     try testing.expectEqualStrings("t.fine", got.code);
     try testing.expectEqualStrings("fine", got.message);
     try testing.expectEqualStrings("fine.n", got.field.?);
+}
+
+const OpenMode = enum(u16) { read, _ };
+const Keyed = struct { id: u32 };
+
+/// One more value than max_unique_items, all different.
+const over_cap = v.max_unique_items + 1;
+
+fn overCapInts() [over_cap]u64 {
+    var out: [over_cap]u64 = undefined;
+    for (&out, 0..) |*slot, i| slot.* = i;
+    return out;
+}
+
+fn overCapStrings() [over_cap][]const u8 {
+    @setEvalBranchQuota(10_000_000);
+    var out: [over_cap][]const u8 = undefined;
+    for (&out, 0..) |*slot, i| slot.* = std.fmt.comptimePrint("item-{d}", .{i});
+    const final = out;
+    return final;
+}
+
+test "a list longer than max_unique_items fails uniqueItems and uniqueBy without a panic" {
+    const ints = overCapInts();
+    const int_items: []const u64 = &ints;
+    try testing.expect(v.uniqueItems.eval(&int_items) == .fail);
+    const strings = comptime overCapStrings();
+    const string_items: []const []const u8 = &strings;
+    try testing.expect(v.uniqueItems.eval(&string_items) == .fail);
+    var modes: [over_cap]OpenMode = undefined;
+    for (&modes, 0..) |*slot, i| slot.* = @fromBackingInt(@intCast(i));
+    const mode_items: []const OpenMode = &modes;
+    try testing.expect(v.uniqueItems.eval(&mode_items) == .fail);
+    var keyed: [over_cap]Keyed = undefined;
+    for (&keyed, 0..) |*slot, i| slot.* = .{ .id = @intCast(i) };
+    const keyed_items: []const Keyed = &keyed;
+    try testing.expect(v.uniqueBy(.id).eval(&keyed_items) == .fail);
+    // At the cap, the same values pass.
+    const at_cap: []const u64 = ints[0..v.max_unique_items];
+    try testing.expect(v.uniqueItems.eval(&at_cap) == .pass);
+    const strings_at_cap: []const []const u8 = strings[0..v.max_unique_items];
+    try testing.expect(v.uniqueItems.eval(&strings_at_cap) == .pass);
 }

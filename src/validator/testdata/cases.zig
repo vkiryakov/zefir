@@ -29,11 +29,17 @@ pub const test_files = [_][]const u8{
     "src/validator/testdata/self_test.zig",
     "src/validator/testdata/common_test.zig",
     "src/validator/testdata/numbers_test.zig",
+    "src/validator/testdata/strings_test.zig",
+    "src/validator/testdata/formats_test.zig",
+    "src/validator/testdata/encodings_test.zig",
+    "src/validator/testdata/identifiers_test.zig",
+    "src/validator/testdata/dates_test.zig",
     "src/validator/testdata/lists_test.zig",
     "src/validator/testdata/custom_test.zig",
     "src/validator/testdata/field_types_test.zig",
     "src/validator/testdata/messages_test.zig",
     "src/validator/testdata/catalog_test.zig",
+    "src/validator/examples/pages_test.zig",
 };
 
 /// Tests built with ReleaseSafe whatever -Doptimize says, for behaviour that

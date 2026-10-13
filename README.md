@@ -38,16 +38,16 @@ Zefir is shaped by my needs first, and it's open to everyone. If it fits the way
 
 ## Modules
 
-| Module             | Import name       | What it does                                                         | Status                                                    |
-| ------------------ | ----------------- | -------------------------------------------------------------------- | --------------------------------------------------------- |
-| **confy**          | `zefir-confy`     | Typed configuration from JSON, INI, `.env` files and the environment | ✅ Done · [docs](src/confy/examples/README.md)            |
-| **core**           | `zefir-core`      | Execution context: deadlines, cancellation and W3C trace context     | ✅ Done · [docs](src/core/examples/README.md)             |
-| **log**            | `zefir-log`       | Structured logging: JSON Lines, redaction, live levels, alerts       | ✅ Done · [docs](src/log/examples/README.md)              |
-| validator          | `zefir-validator` | Declarative validation rules for struct fields                       | 🚧 In progress · [docs](src/validator/examples/README.md) |
-| rpc                | `zefir-rpc`       | RPC                                                                  | 📋 Planned                                                |
-| orm                | `zefir-orm`       | ORM                                                                  | 📋 Planned                                                |
-| http               | —                 | HTTP server                                                          | 📋 Planned                                                |
-| _all of the above_ | `zefir`           | Umbrella module                                                      |                                                           |
+| Module             | Import name       | What it does                                                         | Status                                            |
+| ------------------ | ----------------- | -------------------------------------------------------------------- | ------------------------------------------------- |
+| **confy**          | `zefir-confy`     | Typed configuration from JSON, INI, `.env` files and the environment | ✅ Done · [docs](src/confy/examples/README.md)     |
+| **core**           | `zefir-core`      | Execution context: deadlines, cancellation and W3C trace context     | ✅ Done · [docs](src/core/examples/README.md)      |
+| **log**            | `zefir-log`       | Structured logging: JSON Lines, redaction, live levels, alerts       | ✅ Done · [docs](src/log/examples/README.md)       |
+| **validator**      | `zefir-validator` | Declarative validation rules for struct fields                       | ✅ Done · [docs](src/validator/examples/README.md) |
+| rpc                | `zefir-rpc`       | RPC                                                                  | 📋 Planned                                         |
+| orm                | `zefir-orm`       | ORM                                                                  | 📋 Planned                                         |
+| http               | —                 | HTTP server                                                          | 📋 Planned                                         |
+| _all of the above_ | `zefir`           | Umbrella module                                                      |                                                   |
 
 > [!NOTE]
 > Zefir is in early development. Until 1.0, any minor release may change the API.
@@ -155,10 +155,10 @@ Every record is one line of JSON on stdout, ready for a log collector. The field
 
 ## Installation
 
-Requires **Zig 0.17.0**. Add the dependency to your `build.zig.zon`; the latest release is **v0.3.0**:
+Requires **Zig 0.17.0**. Add the dependency to your `build.zig.zon`; the latest release is **v0.4.0**:
 
 ```sh
-zig fetch --save git+https://github.com/vkiryakov/zefir#v0.3.0
+zig fetch --save git+https://github.com/vkiryakov/zefir#v0.4.0
 ```
 
 Other versions are on the [releases page](https://github.com/vkiryakov/zefir/releases); a commit hash works too.
