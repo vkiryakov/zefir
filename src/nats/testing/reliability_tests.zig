@@ -887,6 +887,8 @@ test "a drain without a connection closes the client, with Disconnected" {
     defer client.deinit();
     try testing.expectError(error.Disconnected, client.drain(.{}));
     try testing.expectEqual(.closed, client.state());
+    // Nothing was lost: it never connected.
+    try testing.expectEqual(.closed, client.close_reason.?);
     try testing.expectError(error.ConnectionClosed, client.drain(.{}));
 }
 
