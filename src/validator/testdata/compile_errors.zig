@@ -230,7 +230,7 @@ pub const list = [_]Fixture{
     .{ .file = "src/validator/testdata/compile_errors/contradiction_min_length.zig", .expect = "validator: contradiction_min_length.Bad.field_rules.x: min_length(10) and max_length(5) contradict; no value can pass", .row = "minLength-13" },
     .{ .file = "src/validator/testdata/compile_errors/contradiction_empty_min_bytes.zig", .expect = "validator: contradiction_empty_min_bytes.Bad.field_rules.x: empty and min_bytes(1) contradict; no value can pass", .row = "minBytes-13" },
     .{ .file = "src/validator/testdata/compile_errors/contradiction_min_date.zig", .expect = "validator: contradiction_min_date.Bad.field_rules.x: min_date(\"2021-01-01\") and max_date(\"2020-12-31\") contradict; no value can pass", .row = "minDate-26" },
-    .{ .file = "src/validator/testdata/compile_errors/contradiction_min_date_time.zig", .expect = "validator: contradiction_min_date_time.Bad.field_rules.x: min_date(\"2020-01-01T00:00:00+01:00\") and max_date(\"2019-12-31T22:59:59Z\") contradict; no value can pass", .row = "variant of minDate-26" },
+    .{ .file = "src/validator/testdata/compile_errors/contradiction_min_date_time.zig", .expect = "validator: contradiction_min_date_time.Bad.field_rules.x: min_date(\"2020-01-01T00:00:00+01:00\") and max_date(\"2019-12-31T22:59:59Z\") contradict; no value can pass", .row = "minDate-26" },
     // each
     .{ .file = "src/validator/testdata/compile_errors/each_not_rule.zig", .expect = "validator: each(...): expected a rule or a tuple of rules, got *const [1:0]u8", .row = "each-1" },
     .{ .file = "src/validator/testdata/compile_errors/each_tuple_item_not_rule.zig", .expect = "validator: each(...): item 1 of the tuple is comptime_int", .row = "each-2" },

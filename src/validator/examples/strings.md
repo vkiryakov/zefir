@@ -200,6 +200,7 @@ Compile errors:
 validator: maxLength(0): max must be at least 1; use v.empty
 validator: <Type>.field_rules.<field>: max_length expects a string, field is []const u32; for the number of items use v.maxItems(64)
 validator: <Type>.field_rules.<field>: maxLength must be called, e.g. v.maxLength(100)
+validator: <Type>.field_rules.<field>: min_length(10) and max_length(5) contradict; no value can pass
 ```
 
 Examples:
@@ -321,6 +322,7 @@ Compile errors:
 validator: maxBytes(0): max must be at least 1; use v.empty
 validator: <Type>.field_rules.<field>: max_bytes expects a string, field is []const []const u8; use v.each(v.maxBytes(255))
 validator: <Type>.field_rules.<field>: maxBytes must be called, e.g. v.maxBytes(100)
+validator: <Type>.field_rules.<field>: min_bytes(10) and max_bytes(5) contradict; no value can pass
 ```
 
 Examples:

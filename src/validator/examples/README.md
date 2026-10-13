@@ -726,7 +726,8 @@ at compile time; the code does not change:
 
 A message of exactly 512 bytes stays; one byte more falls back. `.withMessage`
 replaces a fallback as it replaces any message, and its placeholders still show
-the whole list (the result must still fit in 512 bytes).
+the whole parameter: every listed value, the whole substring or the whole bound
+(the result must still fit in 512 bytes).
 
 `v.min`, `v.max`, `v.range` and `v.divisibleBy` have no fallback. Their default
 message is longer than 512 bytes only for a bound or a divisor of hundreds of

@@ -1039,7 +1039,8 @@ pub const Measure = enum {
 pub const Bound = struct {
     measure: Measure,
     side: Side,
-    /// The bound as written: `.int` or `.float`.
+    /// The bound: `.int` or `.float` as written for numbers and counts; a
+    /// derived integer for dates and date-times (see `scale`).
     value: Value,
     /// The bound is `value / 10^scale`: a date-time bound keeps every digit of
     /// its fraction of a second. An exclusive bound is a whole number.
@@ -3163,6 +3164,9 @@ test "string lengths, byte counts and dates contradict by the largest lower and 
     try expect(head ++ "max_date(\"2019-06-30\") and min_date(\"2020-01-01\")" ++ tail, comptime contradictionText(&.{ r.minDate("2019-07-01"), r.maxDate("2019-06-30"), r.minDate("2020-01-01") }, S, where).?);
     // On ties the earlier rule: minLength(10) before length(10, 20), the first maxLength(5).
     try expect(head ++ "max_length(5) and min_length(10)" ++ tail, comptime contradictionText(&.{ r.maxLength(5), r.minLength(10), r.length(10, 20), r.maxLength(5) }, S, where).?);
+    // Inside each, whose declaration check runs on its rules with the item's path.
+    const each_rule = comptime r.each(.{ r.minLength(10), r.maxLength(5) });
+    try expect("validator: Dto.field_rules.x[]: min_length(10) and max_length(5)" ++ tail, comptime contradictionText(each_rule.inner, S, where ++ "[]").?);
 }
 
 test "equal bounds, every digit of a fraction, and bounds of different measures or forms on strings" {
@@ -3183,6 +3187,10 @@ test "equal bounds, every digit of a fraction, and bounds of different measures 
     try std.testing.expectEqual(null, comptime contradiction(&.{ r.minDate("2016-12-31T23:59:60Z"), r.maxDate("2016-12-31T23:59:60.5Z") }, S));
     try std.testing.expectEqual([2]usize{ 0, 1 }, comptime contradiction(&.{ r.minDate("2016-12-31T23:59:60Z"), r.maxDate("2016-12-31T23:59:59.9Z") }, S).?);
     try std.testing.expectEqual([2]usize{ 0, 1 }, comptime contradiction(&.{ r.minDate("2017-01-01T00:00:00Z"), r.maxDate("2016-12-31T23:59:60Z") }, S).?);
+    // Before 1970 the day count is negative, and fractions still order as after it.
+    try std.testing.expectEqual([2]usize{ 0, 1 }, comptime contradiction(&.{ r.minDate("1969-12-31T23:59:59.5Z"), r.maxDate("1969-12-31T23:59:59.25Z") }, S).?);
+    try std.testing.expectEqual(null, comptime contradiction(&.{ r.minDate("1969-12-31T23:59:59.5Z"), r.maxDate("1969-12-31T23:59:59.50Z") }, S));
+    try std.testing.expectEqual(null, comptime contradiction(&.{ r.minDate("1900-01-01T00:00:00.10Z"), r.maxDate("1900-01-01T00:00:00.9Z") }, S));
     // Different measures and forms are never compared.
     try std.testing.expectEqual(null, comptime contradiction(&.{ r.minLength(10), r.maxBytes(5) }, S));
     try std.testing.expectEqual(null, comptime contradiction(&.{ r.empty, r.minLength(1) }, S));
