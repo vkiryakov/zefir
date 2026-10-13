@@ -74,6 +74,7 @@ pub fn race(
     var select: Io.Select(Race) = .init(io, &results);
     try select.concurrent(.done, function, args);
     select.concurrent(.timer, sleepUntil, .{ io, deadline }) catch |err| {
+        if (abort) |a| a.function(a.context, io);
         settle(Race, &select, io, release);
         return err;
     };
@@ -211,6 +212,21 @@ test "a task that ignores cancellation is stopped through the abort hook" {
     var event: Io.Event = .unset;
     const start = Io.Clock.awake.now(io);
     try testing.expectError(error.Timeout, race(io, time.after(io, .fromMilliseconds(20)), waitDeaf, .{ io, &event }, keep, .{
+        .context = &event,
+        .function = setEvent,
+    }));
+    try testing.expect(event.isSet());
+    try testing.expect(start.durationTo(Io.Clock.awake.now(io)).toSeconds() < 3);
+}
+
+test "a race whose timer cannot start still stops its task through the abort hook" {
+    // One task at most: the timer of the race cannot start.
+    var threaded: Io.Threaded = .init(testing.allocator, .{ .concurrent_limit = .limited(1) });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var event: Io.Event = .unset;
+    const start = Io.Clock.awake.now(io);
+    try testing.expectError(error.ConcurrencyUnavailable, race(io, time.after(io, .fromSeconds(30)), waitDeaf, .{ io, &event }, keep, .{
         .context = &event,
         .function = setEvent,
     }));
