@@ -136,18 +136,23 @@ fn awaitRoom(q: *Outbound, io: Io) Io.Cancelable!void {
     while (!q.closed and q.queued >= q.limit) try q.room.wait(io, &q.mutex);
 }
 
-/// Queues a PING and returns its number. It skips the limit; PONG number n
-/// answers PING number n.
+/// Queues a PING and returns its number; PONG number n answers PING number
+/// n. When the last frame queued is a PING the writer has not begun, that
+/// one is returned instead: it marks the same point in the stream. So
+/// PINGs skip the limit, yet there is at most one more than other frames.
 pub fn putPing(q: *Outbound, io: Io, kind: PingKind) error{ Closed, OutOfMemory }!u64 {
     q.mutex.lockUncancelable(io);
     defer q.mutex.unlock(io);
     if (q.closed) return error.Closed;
-    const chunk = try q.reserve(encoder.ping.len);
-    @memcpy(chunk.bytes[chunk.tail..][0..encoder.ping.len], encoder.ping);
-    q.commit(chunk, .ping, encoder.ping.len);
-    q.pings_queued += 1;
+    const shared = if (q.frames.back()) |last| last.kind == .ping and last.written == 0 else false;
+    if (!shared) {
+        const chunk = try q.reserve(encoder.ping.len);
+        @memcpy(chunk.bytes[chunk.tail..][0..encoder.ping.len], encoder.ping);
+        q.commit(chunk, .ping, encoder.ping.len);
+        q.pings_queued += 1;
+        q.ready.signal(io);
+    }
     if (kind == .heartbeat) q.pings_out +|= 1;
-    q.ready.signal(io);
     return q.pings_queued;
 }
 
@@ -514,6 +519,7 @@ test "PINGs are numbered and each PONG answers the oldest" {
     var q: Outbound = .init(testing.allocator, 1024);
     defer q.deinit();
     try testing.expectEqual(1, try q.putPing(io, .flush));
+    try putPub(&q, io, .publish, "a", "1");
     try testing.expectEqual(2, try q.putPing(io, .heartbeat));
     try testing.expectEqual(1, q.pingsOut(io));
     try testing.expectError(error.Timeout, q.waitPong(io, 1, time.after(io, .zero)));
@@ -568,4 +574,37 @@ fn exercise(gpa: Allocator) !void {
 
 test "nothing leaks when an allocation fails" {
     try testing.checkAllAllocationFailures(testing.allocator, exercise, .{});
+}
+
+test "PINGs in a row share one frame, so they stay bounded" {
+    const io = testing.io;
+    var q: Outbound = .init(testing.allocator, 1024);
+    defer q.deinit();
+    var frames: [8]Frame = undefined;
+
+    // Flushes that time out leave their PING behind; with nothing queued
+    // after it, the next one waits on the same PING.
+    const first = try q.putPing(io, .flush);
+    for (0..1000) |_| try testing.expectEqual(first, try q.putPing(io, .flush));
+    try testing.expectEqual(first, try q.putPing(io, .heartbeat));
+    try testing.expectEqual(1, q.pingsOut(io));
+    try testing.expectEqual(1, q.unsent(io, &frames).len);
+
+    // A frame after it needs a PING of its own.
+    try putPub(&q, io, .publish, "a", "1");
+    const second = try q.putPing(io, .flush);
+    try testing.expectEqual(first + 1, second);
+    try testing.expectEqual(3, q.unsent(io, &frames).len);
+
+    // A PING the writer has begun is not shared.
+    var slices: [4][]const u8 = undefined;
+    const batch = (try q.take(io, &slices)) orelse return error.TestClosed;
+    q.written(io, batch.len - 3);
+    const third = try q.putPing(io, .flush);
+    try testing.expectEqual(second + 1, third);
+
+    // Each PONG answers every caller that shared its PING.
+    q.pongReceived(io);
+    try q.waitPong(io, first, null);
+    try testing.expectError(error.Timeout, q.waitPong(io, second, time.after(io, .zero)));
 }
