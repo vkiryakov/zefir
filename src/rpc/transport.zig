@@ -12,6 +12,9 @@ pub const Dispatcher = @import("Dispatcher.zig");
 pub const Incoming = @import("Incoming.zig");
 /// How the engine answers one call; the transport implements it.
 pub const Reply = @import("Reply.zig");
+/// Slots for calls that wait for their responses, for transports that
+/// match responses to requests themselves.
+pub const Pending = @import("Pending.zig");
 
 /// A request that the client engine hands to `rpc.ClientTransport.call`.
 pub const Request = struct {

@@ -51,9 +51,11 @@ test {
     _ = @import("rules.zig");
     _ = @import("signature.zig");
     _ = @import("transport.zig");
+    _ = @import("wait.zig");
     _ = @import("ClientTransport.zig");
     _ = @import("ServerTransport.zig");
     _ = @import("Dispatcher.zig");
     _ = @import("Incoming.zig");
     _ = @import("Reply.zig");
+    _ = @import("Pending.zig");
 }
