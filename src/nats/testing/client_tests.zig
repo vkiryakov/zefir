@@ -481,3 +481,27 @@ test "a second connect() while the first is under way gets the first one's outco
     try expectSecondConnectWaits(false);
     try expectSecondConnectWaits(true);
 }
+
+test "canceling the task that waits in connect(): Canceled, and the client closes" {
+    const io = testing.io;
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var accepted: Io.Event = .unset;
+    var server = try io.concurrent(serveMute, .{ io, &listener, &accepted });
+    defer server.cancel(io) catch {};
+    var url: [64]u8 = undefined;
+    var client: Client = try .init(testing.allocator, io, .{
+        .servers = &.{try FakeServer.url(&listener, &url)},
+        .connect_timeout = .fromSeconds(30),
+    });
+    defer client.deinit();
+
+    var connector = try io.concurrent(connectLong, .{&client});
+    defer connector.cancel(io) catch {};
+    try awaitEvent(io, &accepted);
+    const start = Io.Clock.awake.now(io);
+    try testing.expectError(error.Canceled, connector.cancel(io));
+    try testing.expect(elapsedSince(io, start).toSeconds() < 1);
+    try testing.expectEqual(.closed, client.state());
+    try server.await(io);
+}
