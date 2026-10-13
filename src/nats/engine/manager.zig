@@ -298,7 +298,8 @@ const Incoming = struct {
     const Skipped = enum {
         /// Kept.
         no,
-        /// No subscription takes it: dropped without a word.
+        /// No subscription takes it, or it came to the inbox under a
+        /// subject that names no request: dropped without a word.
         unrouted,
         /// A reply no request waits for: counted as late.
         late,
