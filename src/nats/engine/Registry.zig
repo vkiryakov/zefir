@@ -16,7 +16,9 @@ const Registry = @This();
 
 /// Guards everything below.
 mutex: Io.Mutex = .init,
-subscriptions: std.AutoHashMapUnmanaged(u64, *Subscription) = .empty,
+/// An array hash map: a removal leaves no mark behind, so lookups stay as
+/// cheap after many subscriptions came and went as before.
+subscriptions: std.AutoArrayHashMapUnmanaged(u64, *Subscription) = .empty,
 /// The SID of the next subscription. SIDs are never reused, so a message
 /// late for an old subscription cannot reach a new one.
 next_sid: u64 = 1,
@@ -60,7 +62,7 @@ pub fn count(r: *Registry, io: Io) usize {
 pub fn unregister(r: *Registry, io: Io, sid: u64) void {
     r.mutex.lockUncancelable(io);
     defer r.mutex.unlock(io);
-    _ = r.subscriptions.remove(sid);
+    _ = r.subscriptions.swapRemove(sid);
 }
 
 /// How many bytes subscription `sid` holds, when it exists and takes
@@ -102,9 +104,7 @@ pub fn deny(r: *Registry, io: Io, permission: server_error.Permission) ?u64 {
     if (permission.sid) |sid| {
         chosen = r.subscriptions.get(sid);
     } else {
-        var subscriptions = r.subscriptions.valueIterator();
-        while (subscriptions.next()) |entry| {
-            const sub = entry.*;
+        for (r.subscriptions.values()) |sub| {
             if (chosen) |earlier| if (earlier.sid < sub.sid) continue;
             if (!server_error.quotedEql(permission.subject, sub.subject)) continue;
             if (!sameQueue(permission.queue, sub.queue_group)) continue;
@@ -129,14 +129,12 @@ pub fn closeAll(r: *Registry, io: Io) void {
     r.mutex.lockUncancelable(io);
     defer r.mutex.unlock(io);
     r.closed = true;
-    var subscriptions = r.subscriptions.valueIterator();
-    while (subscriptions.next()) |sub| _ = sub.*.messages.end(io, .closed, true);
+    for (r.subscriptions.values()) |sub| _ = sub.messages.end(io, .closed, true);
 }
 
 /// Frees every subscription still registered: the client goes away.
 pub fn deinit(r: *Registry, gpa: Allocator) void {
-    var subscriptions = r.subscriptions.valueIterator();
-    while (subscriptions.next()) |sub| destroy(gpa, sub.*);
+    for (r.subscriptions.values()) |sub| destroy(gpa, sub);
     r.subscriptions.deinit(gpa);
     r.* = undefined;
 }
@@ -286,4 +284,54 @@ test "deny takes the SID when the server names it" {
     try testing.expect(a.messages.isOpen(io));
     try testing.expect(!b.messages.isOpen(io));
     try testing.expect(r.deny(io, .{ .operation = .subscribe, .subject = "dup", .sid = 99 }) == null);
+}
+
+/// The time `lookups` lookups of SIDs no subscription has take, as the
+/// reader's lookups of messages for subscriptions that ended: the fastest
+/// of three tries.
+fn timeMissingLookups(r: *Registry, io: Io, lookups: u64) !i96 {
+    var fastest: i96 = std.math.maxInt(i96);
+    for (0..3) |_| {
+        const start = Io.Clock.awake.now(io);
+        for (0..lookups) |i| {
+            if (r.accepts(io, std.math.maxInt(u64) - i) != null) return error.TestFound;
+        }
+        fastest = @min(fastest, start.durationTo(Io.Clock.awake.now(io)).nanoseconds);
+    }
+    return fastest;
+}
+
+test "a burst of subscriptions and long churn after it leave lookups as cheap as they were" {
+    const io = testing.io;
+    var r: Registry = .{};
+    defer r.deinit(testing.allocator);
+    // One object, registered again and again: the registry routes by SID.
+    const sub = try newSubscription(testing.allocator, "s");
+    defer destroy(testing.allocator, sub);
+    // A few stay all along: lookups in an empty map end at once.
+    var kept: [4]u64 = undefined;
+    for (&kept) |*sid| {
+        try r.register(io, testing.allocator, sub, 1_000_000);
+        sid.* = sub.sid;
+    }
+    defer for (kept) |sid| r.unregister(io, sid);
+    const burst = 10_000;
+    const sids = try testing.allocator.alloc(u64, burst);
+    defer testing.allocator.free(sids);
+    for (sids) |*sid| {
+        try r.register(io, testing.allocator, sub, 1_000_000);
+        sid.* = sub.sid;
+    }
+    for (sids) |sid| r.unregister(io, sid);
+    const after_burst = try timeMissingLookups(&r, io, 20_000);
+
+    // A map that leaves a mark for each removal fills with marks under
+    // churn, and then every lookup of a missing SID walks all of them.
+    for (0..150_000) |_| {
+        try r.register(io, testing.allocator, sub, 1_000_000);
+        r.unregister(io, sub.sid);
+    }
+    const after_churn = try timeMissingLookups(&r, io, 20_000);
+    // The same work: within four times, plus 2 ms for noise.
+    try testing.expect(after_churn <= after_burst * 4 + 2 * std.time.ns_per_ms);
 }
