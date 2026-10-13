@@ -13,13 +13,6 @@ const core = @import("core.zig");
 const Rule = core.Rule;
 const Outcome = core.Outcome;
 
-fn allHex(s: []const u8) bool {
-    for (s) |c| {
-        if (!std.ascii.isHex(c)) return false;
-    }
-    return true;
-}
-
 // ------------------------------------------------------------------ uuid, mongoId, firebasePushId
 
 /// A UUID in the string form of RFC 9562: 36 bytes, `-` at indexes 8, 13, 18
@@ -47,7 +40,7 @@ pub const mongoId: Rule = core.predicateRule(.mongo_id, "must be a valid MongoDB
 
 /// `s` passes `v.mongoId`.
 pub fn isMongoId(s: []const u8) bool {
-    return s.len == 24 and allHex(s);
+    return s.len == 24 and core.allHex(s);
 }
 
 /// A Firebase push ID: 20 bytes of the alphabet `-`, `0-9`, `A-Z`, `_`,
@@ -106,7 +99,7 @@ pub fn hash(comptime algorithm: HashAlgorithm) Rule {
 /// `s` passes `v.hash(algorithm)`. The algorithm may be known at run time
 /// only.
 pub fn isHash(s: []const u8, algorithm: HashAlgorithm) bool {
-    return s.len == hexLength(algorithm) and allHex(s);
+    return s.len == hexLength(algorithm) and core.allHex(s);
 }
 
 /// The arguments the hints show for an uncalled constructor of this file:
@@ -114,13 +107,6 @@ pub fn isHash(s: []const u8, algorithm: HashAlgorithm) bool {
 pub const call_examples = .{ .hash = ".sha256", .btcAddress = ".mainnet" };
 
 // ------------------------------------------------------------------ creditCard, isin, bic, iban
-
-fn allDigits(s: []const u8) bool {
-    for (s) |c| {
-        if (!std.ascii.isDigit(c)) return false;
-    }
-    return true;
-}
 
 fn isUpperAlnum(c: u8) bool {
     return std.ascii.isUpper(c) or std.ascii.isDigit(c);
@@ -156,7 +142,7 @@ pub const creditCard: Rule = core.predicateRule(.credit_card, "must be a valid c
 
 /// `s` passes `v.creditCard`.
 pub fn isCreditCard(s: []const u8) bool {
-    return s.len >= 12 and s.len <= 19 and allDigits(s) and luhnOk(s);
+    return s.len >= 12 and s.len <= 19 and core.allDigits(s) and luhnOk(s);
 }
 
 /// An ISIN (ISO 6166): 12 bytes, two upper-case letters, nine upper-case
@@ -287,7 +273,7 @@ pub const isbn13: Rule = core.predicateRule(.isbn13, "must be a valid ISBN-13", 
 
 /// `s` passes `v.isbn13`.
 pub fn isIsbn13(s: []const u8) bool {
-    if (s.len != 13 or !allDigits(s)) return false;
+    if (s.len != 13 or !core.allDigits(s)) return false;
     const prefix_ok = std.mem.startsWith(u8, s, "978") or (std.mem.startsWith(u8, s, "979") and s[3] != '0');
     return prefix_ok and gs1Ok(s);
 }
@@ -317,7 +303,7 @@ pub const ean: Rule = core.predicateRule(.ean, "must be a valid EAN", isEan);
 
 /// `s` passes `v.ean`.
 pub fn isEan(s: []const u8) bool {
-    return (s.len == 8 or s.len == 13 or s.len == 14) and allDigits(s) and gs1Ok(s);
+    return (s.len == 8 or s.len == 13 or s.len == 14) and core.allDigits(s) and gs1Ok(s);
 }
 
 /// An ISRC (ISO 3901) without hyphens: 12 bytes; two upper-case letters for

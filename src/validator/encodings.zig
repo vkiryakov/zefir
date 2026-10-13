@@ -464,7 +464,7 @@ pub fn isLocale(s: []const u8) bool {
             extlangs += 1;
         } else if (at <= @backingInt(Stage.script) and subtag.len == 4 and allAlpha(subtag)) {
             stage = .region;
-        } else if (at <= @backingInt(Stage.region) and ((subtag.len == 2 and allAlpha(subtag)) or (subtag.len == 3 and allDigits(subtag)))) {
+        } else if (at <= @backingInt(Stage.region) and ((subtag.len == 2 and allAlpha(subtag)) or (subtag.len == 3 and core.allDigits(subtag)))) {
             stage = .variant;
         } else if (subtag.len >= 5 or (subtag.len == 4 and std.ascii.isDigit(subtag[0]))) {
             stage = .variant;
@@ -520,7 +520,7 @@ pub fn isSemVer(s: []const u8) bool {
         var pre_release = std.mem.splitScalar(u8, version[d + 1 ..], '.');
         while (pre_release.next()) |identifier| {
             if (!isIdentifier(identifier)) return false;
-            if (allDigits(identifier) and !isNumber(identifier)) return false;
+            if (core.allDigits(identifier) and !isNumber(identifier)) return false;
         }
     }
     var numbers: usize = 0;
@@ -533,7 +533,7 @@ pub fn isSemVer(s: []const u8) bool {
 
 /// A numeric identifier: `0`, or digits that do not start with `0`.
 fn isNumber(s: []const u8) bool {
-    return s.len > 0 and allDigits(s) and (s.len == 1 or s[0] != '0');
+    return s.len > 0 and core.allDigits(s) and (s.len == 1 or s[0] != '0');
 }
 
 /// A non-empty identifier of `0-9 A-Z a-z -`.
@@ -753,13 +753,6 @@ fn cssAlpha(s: []const u8, i: *usize) bool {
 }
 
 // ------------------------------------------------------------------ byte classes
-
-fn allDigits(s: []const u8) bool {
-    for (s) |c| {
-        if (!std.ascii.isDigit(c)) return false;
-    }
-    return true;
-}
 
 fn allAlpha(s: []const u8) bool {
     for (s) |c| {

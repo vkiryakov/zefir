@@ -2025,6 +2025,34 @@ pub fn predicateRuleFits(comptime kind: Kind, comptime message: []const u8, comp
     });
 }
 
+/// Every byte of `s` is an ASCII hex digit: `0-9`, `a-f` or `A-F`. True
+/// for "": a predicate checks the length first.
+pub fn allHex(s: []const u8) bool {
+    for (s) |c| {
+        if (!std.ascii.isHex(c)) return false;
+    }
+    return true;
+}
+
+/// Every byte of `s` is an ASCII digit `0-9`. True for "": a predicate
+/// checks the length first.
+pub fn allDigits(s: []const u8) bool {
+    for (s) |c| {
+        if (!std.ascii.isDigit(c)) return false;
+    }
+    return true;
+}
+
+test "allHex and allDigits take the ASCII digits of their base and nothing else" {
+    const t = std.testing;
+    try t.expect(allHex("0123456789abcdefABCDEF"));
+    try t.expect(allHex(""));
+    inline for (.{ "g", "G", "/", ":", "@", "`", " ", "0x1f", "\xff", "\x00" }) |s| try t.expect(!allHex(s));
+    try t.expect(allDigits("0123456789"));
+    try t.expect(allDigits(""));
+    inline for (.{ "a", "/", ":", " 1", "1.5", "-1", "\xd9\xa1", "\x00" }) |s| try t.expect(!allDigits(s));
+}
+
 // ------------------------------------------------------------------ number parameters
 
 /// The range of an integer type as error texts show it: `0..255` for u8.
