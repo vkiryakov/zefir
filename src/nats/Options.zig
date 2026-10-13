@@ -94,8 +94,8 @@ pub const Limits = struct {
     /// Bytes a subscription holds before its overflow policy drops messages;
     /// a message larger than this on its own is dropped as it comes.
     subscription_bytes: usize = 8 * 1024 * 1024,
-    /// Requests waiting for a reply at once; more fail with
-    /// TooManyPendingRequests.
+    /// Requests waiting for a reply at once, the streams of requestMany
+    /// included until they end; more fail with TooManyPendingRequests.
     max_pending_requests: u32 = 65_536,
     /// Subscriptions at once, each until its `deinit()`; more fail with
     /// TooManySubscriptions.
@@ -107,10 +107,11 @@ pub const Limits = struct {
     /// CONNECT, which the server checks against the same limit.
     max_control_line_bytes: u32 = 4096,
     /// The largest message accepted, headers included; larger ones are
-    /// read past, dropped and counted.
+    /// read past, dropped and counted. A larger reply to a request is
+    /// dropped too, and the request ends with Timeout.
     max_inbound_frame_bytes: u32 = 64 * 1024 * 1024,
     /// The largest header block accepted; messages with a larger one are
-    /// read past, dropped and counted.
+    /// read past, dropped and counted, replies to requests too.
     max_header_bytes: u32 = 64 * 1024,
     /// Events kept for `nextEvent()`; more are dropped and counted.
     max_event_queue: u32 = 1024,

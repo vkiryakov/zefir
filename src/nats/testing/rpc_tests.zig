@@ -1106,3 +1106,143 @@ test "a server that refuses the inbox: requests fail with PermissionDenied at on
     client.close();
     try server.await(io);
 }
+
+test "a reply over max_inbound_frame_bytes is dropped, and the request ends with Timeout" {
+    // The client warns about the reply it drops; this test expects it.
+    const level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = level;
+    const io = testing.io;
+    var s: Served = undefined;
+    try s.start(.{ .servers = &.{}, .limits = .{ .max_inbound_frame_bytes = 1024, .max_header_bytes = 512 } });
+    defer s.deinit();
+    const big: [2000]u8 = @splat('x');
+    const start = Io.Clock.awake.now(io);
+    try testing.expectError(error.Timeout, s.client.request("echo.big", &big, within(300)));
+    try testing.expect(elapsedSince(io, start).toMilliseconds() >= 300);
+    try testing.expectEqual(0, s.client.inbox.pendingCount(io));
+    // Dropped, not late: it came while the request waited.
+    try testing.expectEqual(0, s.client.inbox.lateResponses(io));
+    try expectReply(&s.client, "echo.small", "ok", "ok");
+    try s.finish();
+}
+
+/// Passes allocations on, except every one of exactly `size` bytes.
+const RefuseOneSize = struct {
+    parent: std.mem.Allocator,
+    size: usize,
+
+    fn allocator(r: *RefuseOneSize) std.mem.Allocator {
+        return .{ .ptr = r, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+
+    fn alloc(context: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const r: *RefuseOneSize = @ptrCast(@alignCast(context));
+        if (len == r.size) return null;
+        return r.parent.rawAlloc(len, alignment, ret_addr);
+    }
+
+    fn resize(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const r: *RefuseOneSize = @ptrCast(@alignCast(context));
+        return r.parent.rawResize(memory, alignment, new_len, ret_addr);
+    }
+
+    fn remap(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const r: *RefuseOneSize = @ptrCast(@alignCast(context));
+        return r.parent.rawRemap(memory, alignment, new_len, ret_addr);
+    }
+
+    fn free(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const r: *RefuseOneSize = @ptrCast(@alignCast(context));
+        r.parent.rawFree(memory, alignment, ret_addr);
+    }
+};
+
+test "a reply there is no memory for is dropped, and the request ends with Timeout" {
+    const level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = level;
+    const io = testing.io;
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var record: Record = .{};
+    defer record.deinit();
+    var server = try io.concurrent(serveRequests, .{ io, &listener, &record });
+    defer server.cancel(io) catch {};
+    // The reply to the first request: its subject, _INBOX.<token>.1, and
+    // the payload, in one allocation the allocator refuses.
+    const payload: [12345]u8 = @splat('m');
+    var refuse: RefuseOneSize = .{ .parent = testing.allocator, .size = Inbox.prefix_len + 1 + payload.len };
+    var url: [64]u8 = undefined;
+    var client: Client = try .init(refuse.allocator(), io, .{ .servers = &.{try FakeServer.url(&listener, &url)} });
+    defer client.deinit();
+    try client.connect();
+    try testing.expectError(error.Timeout, client.request("echo.oom", &payload, within(300)));
+    try testing.expectEqual(0, client.inbox.pendingCount(io));
+    try expectReply(&client, "echo.small", "ok", "ok");
+    try client.flush(quick);
+    client.close();
+    try server.await(io);
+}
+
+/// Passes allocations on and counts those of exactly `size` bytes.
+const CountOneSize = struct {
+    parent: std.mem.Allocator,
+    size: usize,
+    count: std.atomic.Value(u32) = .init(0),
+
+    fn allocator(c: *CountOneSize) std.mem.Allocator {
+        return .{ .ptr = c, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+
+    fn alloc(context: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const c: *CountOneSize = @ptrCast(@alignCast(context));
+        if (len == c.size) _ = c.count.fetchAdd(1, .monotonic);
+        return c.parent.rawAlloc(len, alignment, ret_addr);
+    }
+
+    fn resize(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const c: *CountOneSize = @ptrCast(@alignCast(context));
+        return c.parent.rawResize(memory, alignment, new_len, ret_addr);
+    }
+
+    fn remap(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const c: *CountOneSize = @ptrCast(@alignCast(context));
+        return c.parent.rawRemap(memory, alignment, new_len, ret_addr);
+    }
+
+    fn free(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const c: *CountOneSize = @ptrCast(@alignCast(context));
+        c.parent.rawFree(memory, alignment, ret_addr);
+    }
+};
+
+test "a response larger than max_bytes on its own is dropped before it is allocated, and counts" {
+    const level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = level;
+    const io = testing.io;
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var record: Record = .{};
+    defer record.deinit();
+    var server = try io.concurrent(serveRequests, .{ io, &listener, &record });
+    defer server.cancel(io) catch {};
+    const big: [100]u8 = @splat('y');
+    // The response to the first request: _INBOX.<token>.1 and the payload.
+    var counting: CountOneSize = .{ .parent = testing.allocator, .size = Inbox.prefix_len + 1 + big.len };
+    var url: [64]u8 = undefined;
+    var client: Client = try .init(counting.allocator(), io, .{ .servers = &.{try FakeServer.url(&listener, &url)} });
+    defer client.deinit();
+    try client.connect();
+    var options = many(30_000, 2);
+    options.max_bytes = 40;
+    const responses = try client.requestMany("echo.x", &big, options);
+    defer responses.deinit();
+    try awaitResponses(responses, 1);
+    try testing.expectEqual(nats.SubscriptionStats{ .received = 1, .delivered = 0, .dropped = 1 }, responses.messages.stats(io));
+    try testing.expectEqual(0, counting.count.load(.monotonic));
+    try client.flush(quick);
+    client.close();
+    try server.await(io);
+}

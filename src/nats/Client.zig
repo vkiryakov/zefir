@@ -377,10 +377,13 @@ pub const RequestError = error{
 ///
 /// Every request ends: at `options.timeout`, 2 s by default, with
 /// Timeout, which also bounds the wait for room in the outbound queue.
-/// A reply that comes after that is dropped and counted as late. If the
-/// connection is lost meanwhile, the request fails with Disconnected at
-/// once: nothing is sent again. All requests share one inbox subscription,
-/// made by the first; any number may wait at once, up to
+/// A reply that comes after that is dropped and counted as late. A reply
+/// over `limits.max_inbound_frame_bytes` or `limits.max_header_bytes`, or
+/// one there is no memory for, is dropped with a warning: the request then
+/// ends with Timeout, unless another responder's reply comes in time. If
+/// the connection is lost meanwhile, the request fails with Disconnected
+/// at once: nothing is sent again. All requests share one inbox
+/// subscription, made by the first; any number may wait at once, up to
 /// `limits.max_pending_requests`.
 pub fn request(client: *Client, subject: []const u8, payload: []const u8, options: RequestOptions) RequestError!Message {
     return client.requestMessage(.{ .subject = subject, .payload = payload }, options);
