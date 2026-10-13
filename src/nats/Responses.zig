@@ -33,6 +33,8 @@ client: *Client,
 id: u64,
 /// In the inbox's pending map; the inbox's mutex guards it.
 listed: bool = false,
+/// In the inbox's list of streams, until `deinit()`.
+node: std.DoublyLinkedList.Node = .{},
 /// The stream ends here, whatever came.
 deadline: Io.Clock.Timestamp,
 /// The responses that wait to be taken: the client's reader fills it.
@@ -107,6 +109,6 @@ fn stop(r: *Responses, discard: bool) void {
 /// Ends the stream and frees it, with the responses it still holds. No
 /// task may wait in `next()` meanwhile.
 pub fn deinit(r: *Responses) void {
-    r.client.inbox.remove(r.client.io, r);
+    r.client.inbox.forget(r.client.io, r);
     Inbox.destroyResponses(r.client.gpa, r);
 }

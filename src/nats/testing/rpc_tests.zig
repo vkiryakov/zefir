@@ -955,3 +955,61 @@ test "a cancel that comes with the reply, 200 times: the reply or Canceled, neve
     try raceCancels(200, &tally);
     try testing.expectEqual(200, tally.replies + tally.ended);
 }
+
+// The client owns every stream until its deinit(), however the stream
+// ended: testing.allocator reports one the client leaks.
+
+test "a requestMany stream that ended with null, not freed by its owner, is freed with the client" {
+    var s: Served = undefined;
+    try s.start(.{ .servers = &.{} });
+    defer s.deinit();
+    const responses = try s.client.requestMany("many.1", "?", many(30_000, 1));
+    try expectResponse(responses, "r1");
+    try testing.expect(try responses.next(.{}) == null);
+}
+
+test "a requestMany stream ended by cancel(), not freed by its owner, is freed with the client" {
+    var s: Served = undefined;
+    try s.start(.{ .servers = &.{} });
+    defer s.deinit();
+    const responses = try s.client.requestMany("silent.x", "?", many(30_000, 4));
+    responses.cancel();
+}
+
+test "a requestMany stream ended by NoResponders, not freed by its owner, is freed with the client" {
+    var s: Served = undefined;
+    try s.start(.{ .servers = &.{} });
+    defer s.deinit();
+    const responses = try s.client.requestMany("nobody.home", "?", many(30_000, 4));
+    try testing.expectError(error.NoResponders, responses.next(.{}));
+}
+
+test "a requestMany stream ended by a lost connection, not freed by its owner, is freed with the client" {
+    var s: Served = undefined;
+    try s.start(.{ .servers = &.{} });
+    defer s.deinit();
+    const responses = try s.client.requestMany("manyhangup.1", "?", many(30_000, 4));
+    try expectResponse(responses, "r1");
+    try testing.expectError(error.Disconnected, responses.next(.{}));
+}
+
+test "a requestMany stream ended by close(), not freed by its owner, is freed with the client" {
+    var s: Served = undefined;
+    try s.start(.{ .servers = &.{} });
+    defer s.deinit();
+    const responses = try s.client.requestMany("silent.x", "?", many(30_000, 4));
+    s.client.close();
+    try testing.expectError(error.ConnectionClosed, responses.next(.{}));
+}
+
+test "close() after a stream ended normally: its next() is ConnectionClosed, as for a subscription" {
+    var s: Served = undefined;
+    try s.start(.{ .servers = &.{} });
+    defer s.deinit();
+    const responses = try s.client.requestMany("many.1", "?", many(30_000, 1));
+    defer responses.deinit();
+    try expectResponse(responses, "r1");
+    try testing.expect(try responses.next(.{}) == null);
+    s.client.close();
+    try testing.expectError(error.ConnectionClosed, responses.next(.{}));
+}

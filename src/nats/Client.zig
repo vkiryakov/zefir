@@ -465,7 +465,7 @@ pub fn requestMany(client: *Client, subject: []const u8, payload: []const u8, op
     errdefer Inbox.destroyResponses(gpa, responses);
     responses.id = try client.inbox.add(io, gpa, .{ .many = responses }, limits.max_pending_requests);
     // Out of the inbox before it is freed.
-    errdefer client.inbox.remove(io, responses);
+    errdefer client.inbox.forget(io, responses);
     var reply_buffer: [Inbox.max_reply_len]u8 = undefined;
     const message: PublishMessage = .{ .subject = subject, .reply_to = client.inbox.replySubject(&reply_buffer, responses.id), .payload = payload };
     try client.checkLine(message, 0);
@@ -588,9 +588,10 @@ pub fn close(client: *Client) void {
     client.subscriptions.closeAll(io);
 }
 
-/// Closes the client if needed and frees everything, the subscriptions not
-/// freed yet included. Calling it again does nothing. No other task may
-/// use the client, or its subscriptions, any more.
+/// Closes the client if needed and frees everything, the subscriptions and
+/// the streams of requestMany not freed yet included. Calling it again does
+/// nothing. No other task may use the client, its subscriptions or its
+/// streams any more.
 pub fn deinit(client: *Client) void {
     if (client.freed) return;
     client.close();

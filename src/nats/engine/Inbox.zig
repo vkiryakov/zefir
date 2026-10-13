@@ -52,6 +52,9 @@ changed: Broadcast = .{},
 /// leaves no mark behind, so lookups stay as cheap after a burst of
 /// requests as before it.
 pending: std.AutoArrayHashMapUnmanaged(u64, Entry) = .empty,
+/// Every stream of a requestMany until its `deinit()`, ended or not: the
+/// client owns them, and frees in its own `deinit()` those left.
+streams: std.DoublyLinkedList = .{},
 /// The id of the next request; ids are never reused.
 next_id: u64 = 1,
 /// Requests in `await` now.
@@ -185,7 +188,10 @@ pub fn add(inbox: *Inbox, io: Io, gpa: Allocator, entry: Entry, max: u32) AddErr
     inbox.pending.putAssumeCapacityNoClobber(id, entry);
     switch (entry) {
         .single => |waiter| waiter.listed = true,
-        .many => |responses| responses.listed = true,
+        .many => |responses| {
+            responses.listed = true;
+            inbox.streams.append(&responses.node);
+        },
     }
     return id;
 }
@@ -300,11 +306,21 @@ pub fn accepts(inbox: *Inbox, io: Io, id: u64) ?usize {
 }
 
 /// Takes the stream of a requestMany out of the pending map, if it is
-/// still there: replies to it count as late from now on.
+/// still there: replies to it count as late from now on. The inbox still
+/// holds the stream until `forget`.
 pub fn remove(inbox: *Inbox, io: Io, responses: *Responses) void {
     inbox.mutex.lockUncancelable(io);
     defer inbox.mutex.unlock(io);
     inbox.unlist(responses.id, &responses.listed);
+}
+
+/// Lets go of a stream that `add` took: out of the pending map and out of
+/// the inbox's streams, for its owner to free.
+pub fn forget(inbox: *Inbox, io: Io, responses: *Responses) void {
+    inbox.mutex.lockUncancelable(io);
+    defer inbox.mutex.unlock(io);
+    inbox.unlist(responses.id, &responses.listed);
+    inbox.streams.remove(&responses.node);
 }
 
 /// What became of a reply.
@@ -374,19 +390,27 @@ pub fn end(inbox: *Inbox, io: Io, how: End) void {
     inbox.ended = how;
     for (inbox.pending.values()) |entry| switch (entry) {
         .single => |waiter| waiter.done.set(io),
-        // What came still comes out first, unless the client closed.
-        .many => |responses| _ = responses.messages.end(io, if (how == .closed) .closed else .disconnected, how == .closed),
+        .many => {},
     };
+    // Every stream, those that ended too: after close() their next() is
+    // ConnectionClosed, as for subscriptions. What came still comes out
+    // first after a lost connection.
+    var node = inbox.streams.first;
+    while (node) |n| : (node = n.next) {
+        const responses: *Responses = @alignCast(@fieldParentPtr("node", n));
+        _ = responses.messages.end(io, if (how == .closed) .closed else .disconnected, how == .closed);
+    }
     inbox.changed.wake(io);
 }
 
-/// Frees what the inbox holds, the responses of a requestMany not freed
-/// yet included: the client goes away. No request waits any more.
+/// Frees what the inbox holds, the streams of requestMany not freed yet
+/// included, ended or not: the client goes away. No request waits any
+/// more.
 pub fn deinit(inbox: *Inbox, gpa: Allocator) void {
-    for (inbox.pending.values()) |entry| switch (entry) {
-        .single => {},
-        .many => |responses| destroyResponses(gpa, responses),
-    };
+    while (inbox.streams.popFirst()) |node| {
+        const responses: *Responses = @alignCast(@fieldParentPtr("node", node));
+        destroyResponses(gpa, responses);
+    }
     inbox.pending.deinit(gpa);
     inbox.* = undefined;
 }
@@ -405,7 +429,8 @@ pub fn createResponses(gpa: Allocator, client: *Client, deadline: Io.Clock.Times
     return responses;
 }
 
-/// Frees `responses` and what it holds; it must have left the inbox.
+/// Frees `responses` and what it holds; the inbox must not hold it: `add`
+/// failed, or `forget` let it go.
 pub fn destroyResponses(gpa: Allocator, responses: *Responses) void {
     responses.messages.deinit();
     gpa.destroy(responses);
@@ -896,7 +921,7 @@ test "the replies of a requestMany queue up until max_responses, then they are l
     try testing.expect(try responses.messages.next(io, .none) == null);
     try testing.expectEqual(1, inbox.lateResponses(io));
     // Still in the map until its owner takes it out.
-    inbox.remove(io, responses);
+    inbox.forget(io, responses);
     destroyResponses(testing.allocator, responses);
 }
 
@@ -907,7 +932,7 @@ test "after the deadline of a requestMany its replies are late" {
     const deadline = time.after(io, .fromMilliseconds(10));
     const responses = try addStream(&inbox, io, deadline, .{ .messages = 4, .bytes = 1024 });
     defer destroyResponses(testing.allocator, responses);
-    defer inbox.remove(io, responses);
+    defer inbox.forget(io, responses);
     try testing.expectEqual(.taken, inbox.deliver(io, responses.id, try testReply("r", null, "in time")));
     while (!time.expired(io, deadline)) try io.sleep(.fromMilliseconds(1), .awake);
     try testing.expectEqual(.late, inbox.deliver(io, responses.id, try testReply("r", null, "after")));
@@ -921,7 +946,7 @@ test "a first reply of no responders ends a requestMany; later it is a reply lik
     const nobody = try addStream(&inbox, io, soon(io), .{ .messages = 4, .bytes = 1024 });
     _ = inbox.deliver(io, nobody.id, try testReply("r", 503, ""));
     try testing.expectError(error.NoResponders, nobody.messages.next(io, .none));
-    inbox.remove(io, nobody);
+    inbox.forget(io, nobody);
     destroyResponses(testing.allocator, nobody);
 
     const some = try addStream(&inbox, io, soon(io), .{ .messages = 4, .bytes = 1024 });
@@ -931,7 +956,7 @@ test "a first reply of no responders ends a requestMany; later it is a reply lik
     var status = (try some.messages.next(io, .none)).?;
     defer status.deinit();
     try testing.expectEqual(503, status.status.?);
-    inbox.remove(io, some);
+    inbox.forget(io, some);
     destroyResponses(testing.allocator, some);
 }
 
