@@ -76,7 +76,7 @@ fn serve(client: *Client, opened: Opened) ?Exit {
     const io = client.io;
     client.connection = opened.connection;
     // Before the reader starts: an INFO it reads is newer than this one.
-    adopt(client, opened.server, opened.greeting);
+    const lame_duck = adopt(client, opened.server, opened.greeting);
     client.connection_tasks.concurrent(io, readLoop, .{client}) catch |err| {
         abandon(client, err);
         return null;
@@ -87,6 +87,8 @@ fn serve(client: *Client, opened: Opened) ?Exit {
     };
     log.debug("connected to {f}", .{opened.server});
     connected(client, opened.server);
+    // A server already going away when the handshake ended.
+    if (lame_duck) lameDuck(client);
     return heartbeat(client);
 }
 
@@ -686,12 +688,13 @@ pub fn connectFailed(client: *Client, err: Client.ConnectError) void {
 
 /// The connection passed its handshake with `server`; the INFO of
 /// `greeting` is now the client's, and the servers it announces join the
-/// pool.
-fn adopt(client: *Client, server: ServerAddress, greeting: Connection.Greeting) void {
+/// pool. True when that INFO says the server is in lame duck mode.
+fn adopt(client: *Client, server: ServerAddress, greeting: Connection.Greeting) bool {
+    var lame_duck = false;
     if (ServerInfo.parse(client.gpa, greeting.info_json)) |info| {
         defer info.deinit();
         discover(client, info.value);
-        if (info.value.ldm) lameDuck(client);
+        lame_duck = info.value.ldm;
     } else |err| log.debug("the INFO of the handshake is unreadable now: {t}", .{err});
     client.mutex.lockUncancelable(client.io);
     defer client.mutex.unlock(client.io);
@@ -700,6 +703,7 @@ fn adopt(client: *Client, server: ServerAddress, greeting: Connection.Greeting) 
     client.info_json = greeting.info_json;
     client.server_headers = greeting.headers;
     client.max_payload = maxPayload(greeting.max_payload);
+    return lame_duck;
 }
 
 /// The server is about to go away: the client moves to another one at once

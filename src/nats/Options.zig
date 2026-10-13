@@ -77,8 +77,11 @@ pub const ReconnectOptions = struct {
     max_delay: Duration = .fromSeconds(10),
     /// A random part in every delay, so that clients do not reconnect in step.
     jitter: bool = true,
-    /// Publishes kept while reconnecting and sent once connected; with 0
-    /// they fail at once with Disconnected. Nothing is ever sent twice.
+    /// Publishes and requests kept while reconnecting and sent once
+    /// connected, after the subscriptions are restored; a frame record of a
+    /// few bytes each counts too. One that does not fit fails at once with
+    /// BufferFull; with 0 they fail at once with Disconnected. Nothing is
+    /// ever sent twice.
     buffer_bytes: usize = 8 * 1024 * 1024,
     /// Stop after a server rejects the credentials twice in a row.
     abort_on_auth_error: bool = true,

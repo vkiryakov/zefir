@@ -1388,3 +1388,40 @@ fn awaitEventOf(client: *Client, tag: std.meta.Tag(nats.Event)) !nats.Event {
         if (event == tag) return event;
     }
 }
+
+/// A handshake whose INFO says the server is going away already; then it
+/// waits for the client to leave.
+fn serveLameDuckAtOnce(io: Io, listener: *net.Server, other_port: u16) !void {
+    var peer: FakeServer.Peer = undefined;
+    try peer.accept(io, listener);
+    defer peer.close();
+    var info: [256]u8 = undefined;
+    try handshake(&peer, try std.fmt.bufPrint(&info, "INFO {{\"server_id\":\"A\",\"proto\":1,\"headers\":true,\"ldm\":true,\"connect_urls\":[\"127.0.0.1:{d}\"]}} \r\n", .{other_port}));
+    while (try peer.nextLine()) |_| {}
+}
+
+test "lame duck mode announced in the handshake: the client moves on once connected" {
+    const io = testing.io;
+    var going = try FakeServer.listen(io);
+    defer going.deinit(io);
+    var staying = try FakeServer.listen(io);
+    defer staying.deinit(io);
+    var record: Record = .{};
+    defer record.deinit();
+    const sessions = [_]Session{sessionServe};
+    var other = try io.concurrent(serveSessions, .{ io, &staying, &sessions, &record });
+    defer other.cancel(io) catch {};
+    var first = try io.concurrent(serveLameDuckAtOnce, .{ io, &going, staying.socket.address.getPort() });
+    defer first.cancel(io) catch {};
+    var urls: [2][64]u8 = undefined;
+    var client: Client = try .init(testing.allocator, io, .{
+        .servers = &.{ try FakeServer.url(&going, &urls[0]), try FakeServer.url(&staying, &urls[1]) },
+        .randomize_servers = false,
+    });
+    defer client.deinit();
+    try client.connect();
+    try awaitServer(&client, staying.socket.address.getPort());
+    try first.await(io);
+    _ = try awaitEventOf(&client, .lame_duck);
+    client.close();
+}
