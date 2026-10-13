@@ -199,8 +199,11 @@ const zefir = @import("zefir"); // zefir.confy, zefir.core, ...
 
 ```sh
 zig build test --summary all                                                     # run all tests
+zig build test-log --summary all                                                 # run one module's tests: test-core, test-log, …
 zig fmt --check build.zig build.zig.zon src tests --exclude tests/nats/zig-pkg   # check formatting
 ```
+
+CI tests a pull request only on the modules it affects. A change under `src/<module>/` runs the tests of that module, of every module that depends on it and of `zefir`; a change to `build.zig`, `build.zig.zon`, `src/zefir.zig` or `.github/` runs them all, and documentation outside `src/` runs none. Every push to `dev` and `main` tests all modules. The module graph for this is in `.github/scripts/affected-modules.sh`: a new module goes there as well as into `build.zig`.
 
 The end-to-end tests of nats run against real NATS servers in Docker, described by `docker-compose.yml` at the repository root. The tests are a package of their own in `tests/nats`, so zio, the runtime they use, never reaches zefir's users:
 

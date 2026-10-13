@@ -3,3 +3,4 @@ src/validator/testdata/** -text
 *.zig text eol=lf
 *.zon text eol=lf
 *.md text eol=lf
+*.sh text eol=lf

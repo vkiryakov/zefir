@@ -7,27 +7,87 @@ field is a compile error, not a surprise at run time.
 
 ```zig
 const std = @import("std");
+const log = @import("log");
 const v = @import("validator");
 
-const SignUp = struct {
-    name: []const u8,
-    age: u8,
-    tags: []const []const u8 = &.{},
+const Plan = enum { free, pro, team };
 
+const SignUp = struct {
+    email: []const u8,
+    plan: Plan,
+    seats: u32,
+    budget_eur: f64,
+    accepted_terms: bool,
+    referrer_id: ?u64 = null,
+
+    // The rules of the fields. The validator finds them by this name, so the
+    // struct must declare them as `pub const field_rules`.
     pub const field_rules = .{
-        .name = v.notEmpty,
-        .age = v.positive,
-        .tags = v.each(v.notEmpty),
+        .email = v.email,
+        .plan = v.oneOf(.{ .pro, .team }), // paid plans only
+        .seats = v.range(1, 500),
+        .budget_eur = v.min(10.0),
+        .accepted_terms = v.equals(true),
+        .referrer_id = v.positive, // null skips the rule
     };
 };
 
-var path_buf: [256]u8 = undefined;
-if (v.check(&request, &path_buf)) |violation| {
-    // violation.field: "tags[1]", violation.code: "validation.not_empty",
-    // violation.message: "must not be empty"
-    std.debug.print("{s}: {s} ({s})\n", .{ violation.field orelse "(root)", violation.message, violation.code });
+pub fn main(init: std.process.Init) !void {
+    const logger: log.Logger = try .init(init.gpa, init.io, .{
+        .service = .{ .name = "user-service" },
+        .format = .text,
+    });
+    defer logger.deinit();
+
+    // The value to check, for example a decoded request body.
+    const request: SignUp = .{
+        .email = "ada@example.com",
+        .plan = .team,
+        .seats = 0,
+        .budget_eur = 250.0,
+        .accepted_terms = true,
+    };
+
+    // v.check allocates no memory, so it needs room from you to write the path
+    // of the field that failed, such as "seats"; violation.field points into it.
+    var path_buf: [256]u8 = undefined;
+    if (v.check(&request, &path_buf)) |violation| {
+        logger.warn("Invalid sign-up", .{ .field = violation.field, .code = violation.code, .reason = violation.message });
+    }
 }
 ```
+
+It logs the first violation, the zero seats, as a line of text through
+[zefir-log](../../log/examples/README.md); the timestamp differs in every run:
+
+```text
+$ zig build run
+2026-10-13T09:41:07.415Z WARN  Invalid sign-up field=seats code=validation.range reason="must be from 1 to 500"
+```
+
+`path_buf` is where `v.check` writes the path of the field that failed: `seats`
+here, `address.zip` for a field of a nested struct, `items[2].sku` for a field
+of a list item. `v.check` allocates no memory, so you give it the room: a
+buffer on the stack, whose contents before the call do not matter.
+`violation.field` points into this buffer, so it is valid while the buffer
+lives; copy the path if you need it longer. 256 bytes fit almost any path; a
+longer one gives `field = null`, with `code` and `message` still set. To get
+every violation, with paths of any length and no buffer, call
+`v.checkAll(gpa, &request)`: it takes an allocator, and `report.deinit()` frees
+the result.
+
+`v.check` returns `?v.Violation`: `null` when the value is valid, otherwise the
+first problem it found, with three fields:
+
+| Field | Type | What it holds | In the example |
+| --- | --- | --- | --- |
+| `code` | `[]const u8` | a stable code for programs and clients: `validation.<rule>` for a built-in rule, or the code you gave `v.custom` or `v.fail` | `validation.range` |
+| `message` | `[]const u8` | what the value must be, for people, without the field name: a built-in English message or your own | `must be from 1 to 500` |
+| `field` | `?[]const u8` | the path of the value from the root; `null` for the root value itself | `seats` |
+
+The record logs the message as `reason`, since zefir-log keeps `message` for the
+record's own message, `Invalid sign-up`. `v.checkAll` returns all the violations
+at once; see [Checking values](#checking-values).
 
 ## Contents
 
@@ -113,6 +173,11 @@ const exe = b.addExecutable(.{
 });
 ```
 
+The validator works without other modules. The example programs of this guide
+also log what they find with [zefir-log](../../log/examples/README.md), as text,
+one line per record; to run them, import it too:
+`.{ .name = "log", .module = zefir.module("zefir-log") }`.
+
 > [!TIP]
 > validator is also part of the umbrella module: with `zefir.module("zefir")`
 > imported as `zefir`, it is `@import("zefir").validator`. Both are the same module.
@@ -125,50 +190,83 @@ Declare a struct with rules and check a value:
 
 ```zig
 const std = @import("std");
+const log = @import("log");
 const v = @import("validator");
 
-const SignUp = struct {
-    name: []const u8,
-    age: u8,
-    tags: []const []const u8 = &.{},
-    nickname: ?[]const u8 = null,
+const Currency = enum { eur, usd, gbp };
+
+const Item = struct {
+    sku: []const u8,
+    quantity: u16,
+    unit_price: f64,
 
     pub const field_rules = .{
-        .name = v.notEmpty, // one rule
-        .age = v.positive,
-        .tags = .{ v.notEmpty, v.each(v.notEmpty) }, // the list, then each item
-        .nickname = v.notEmpty, // null skips the rule
+        .sku = .{ v.length(6, 12), v.alphanumeric },
+        .quantity = v.range(1, 99),
+        .unit_price = v.positive,
+    };
+};
+
+const Order = struct {
+    id: []const u8,
+    customer_id: u64,
+    currency: Currency,
+    items: []const Item, // every item is checked by the rules of Item
+    express: bool = false,
+    note: ?[]const u8 = null,
+
+    pub const field_rules = .{
+        .id = v.uuid, // one rule
+        .customer_id = v.positive,
+        .currency = v.oneOf(.{ .eur, .usd }),
+        .items = .{ v.notEmpty, v.maxItems(50) }, // a tuple: its rules run in order
+        .note = v.maxLength(500), // null skips the rule
     };
 };
 
 pub fn main(init: std.process.Init) !void {
-    var stdout_buffer: [256]u8 = undefined;
-    var stdout = std.Io.File.stdout().writerStreaming(init.io, &stdout_buffer);
-    const out = &stdout.interface;
-    defer out.flush() catch {};
+    const logger: log.Logger = try .init(init.gpa, init.io, .{
+        .service = .{ .name = "order-service" },
+        .format = .text,
+    });
+    defer logger.deinit();
 
-    const request: SignUp = .{ .name = "Ada", .age = 36, .tags = &.{ "admin", "" } };
+    const request: Order = .{
+        .id = "3f9c1a2e-8b4d-4c6a-9e1f-5a7b2c8d0e41",
+        .customer_id = 1042,
+        .currency = .eur,
+        .items = &.{
+            .{ .sku = "BOOK0042", .quantity = 2, .unit_price = 12.5 },
+            .{ .sku = "PEN0007", .quantity = 0, .unit_price = 1.9 },
+        },
+    };
 
     var path_buf: [256]u8 = undefined;
     if (v.check(&request, &path_buf)) |violation| {
-        try out.print("{s}: {s} ({s})\n", .{ violation.field orelse "(root)", violation.message, violation.code });
+        logger.warn("Invalid order", .{ .field = violation.field, .code = violation.code, .reason = violation.message });
     } else {
-        try out.print("valid\n", .{});
+        logger.info("Order accepted", .{});
     }
 }
 ```
 
-It prints the first violation — the second tag is empty:
+It logs the first violation — the second item has a quantity of 0:
 
 ```text
-tags[1]: must not be empty (validation.not_empty)
+$ zig build run
+2026-10-13T09:41:07.415Z WARN  Invalid order field=items[1].quantity code=validation.range reason="must be from 1 to 99"
 ```
 
 - `field` is the path of the value: field names joined by `.`, item indexes in
-  brackets. `message` is a fragment without the field name or the value, and
-  `code` names the rule, for clients that branch on it or translate it.
-- `nickname` is `null`, so its rule is skipped; `""` would fail it.
-- Fix the tag and `v.check` returns `null`.
+  brackets. `Item` declares rules of its own, so the walk enters every item of
+  `items` and checks its fields; `items` itself has rules for the list as a
+  whole.
+- `message`, logged as `reason`, is a fragment without the field name or the
+  value, and `code` names the rule, for clients that branch on it or translate
+  it.
+- `note` is `null`, so its rule is skipped; `express` has no rule at all.
+- Fix the quantity and `v.check` returns `null`: the program logs
+  `Order accepted`.
 
 ## Declaring rules
 
@@ -178,17 +276,21 @@ tags[1]: must not be empty (validation.not_empty)
 left to right.
 
 ```zig
+const Currency = enum { eur, usd, gbp, jpy };
+
 const Order = struct {
     id: []const u8,
     quantity: u32,
-    tags: []const []const u8,
+    currency: Currency,
+    coupons: []const []const u8,
     note: ?[]const u8 = null,
 
     pub const field_rules = .{
-        .id = v.notEmpty, // one rule
+        .id = v.uuid, // one rule
         .quantity = .{ v.positive, v.max(1000) }, // a tuple
-        .tags = .{ v.notEmpty, v.each(v.notEmpty) },
-        .note = v.notEmpty, // null skips the rule; "" fails it
+        .currency = v.oneOf(.{ .eur, .usd }), // some tags of the enum
+        .coupons = .{ v.maxItems(3), v.uniqueItems, v.each(v.alphanumeric) },
+        .note = v.maxLength(500), // null skips the rule
     };
 };
 ```
@@ -211,6 +313,24 @@ value is checked like a `T`. Presence is the job of the field type: a field that
 must be present is not optional, and there is no `required` rule. `""` is a
 value: `v.notEmpty` fails it.
 
+```zig
+const Checkout = struct {
+    billing: ?Address = null, // the Address of Getting started
+    tip_percent: ?u8 = null,
+    coupon: ?[]const u8 = null,
+
+    pub const field_rules = .{
+        .tip_percent = v.max(30),
+        .coupon = v.notEmpty, // null passes, "" fails
+    };
+};
+```
+
+An empty checkout, `.{}`, passes. With
+`.billing = .{ .city = " ", .zip = "62701" }` the violation is `billing.city`
+(`validation.not_blank`): the walk enters the address, and an optional adds no
+segment to the path.
+
 ### Nested structs and lists
 
 Struct fields, slices and arrays are walked automatically when there are rules
@@ -219,7 +339,7 @@ inside them:
 ```zig
 const Item = struct {
     sku: []const u8,
-    qty: u32,
+    qty: u16,
     pub const field_rules = .{ .sku = v.notEmpty, .qty = v.positive };
 };
 
@@ -231,17 +351,24 @@ const Cart = struct {
     items: []const Item,
     pub const field_rules = .{
         // the list as a whole, then each item; Item's own rules check its fields
-        .items = .{ v.notEmpty, v.each(v.custom("orders.out_of_stock", "must be in stock", inStock)) },
+        .items = .{
+            v.notEmpty,
+            v.maxItems(50),
+            v.uniqueBy(.sku),
+            v.each(v.custom("orders.out_of_stock", "must be in stock", inStock)),
+        },
     };
 };
 ```
 
 With items `{ "a", 1 }, { "b", 0 }` the violation is `items[1].qty`
-(`validation.positive`); with one item `{ "a", 600 }` it is `items[0]`
-(`orders.out_of_stock`).
+(`validation.positive`); with `{ "a", 1 }, { "a", 2 }` it is `items`
+(`validation.unique_items`, `must not contain duplicate sku values`); with one
+item `{ "a", 600 }` it is `items[0]` (`orders.out_of_stock`).
 
-- Rules of the list itself (`v.notEmpty`) come first; the rules of its items go
-  into one `v.each(...)`, the last rule of the tuple.
+- Rules of the list itself (`v.notEmpty`, `v.maxItems`, `v.uniqueBy`) come
+  first; the rules of its items go into one `v.each(...)`, the last rule of the
+  tuple.
 - When a rule of the list fails, no item is checked. When an item's rule fails,
   that item is not entered; the other items are checked.
 - Each item is walked once: first the `v.each` rules, then the rules of the
@@ -286,7 +413,7 @@ const rules = @import("rules.zig");
 
 pub const Line = struct {
     sku: []const u8,
-    qty: u32,
+    qty: u16,
     pack: u32,
     pub const field_rules = .{
         .sku = rules.sku,
@@ -296,7 +423,9 @@ pub const Line = struct {
 };
 ```
 
-A tuple inside a tuple is not flattened: `.pack = .{ rules.quantity, v.divisibleBy(2) }`
+One declaration serves fields of different types, a `u16` and a `u32` here:
+each use is checked against its own field. A tuple inside a tuple is not
+flattened: `.pack = .{ rules.quantity, v.divisibleBy(2) }`
 is a compile error (`item 0 of the tuple is a tuple; tuples are not flattened: join them with ++, e.g. name_rules ++ .{ v.notEmpty }, or use the tuple as the whole entry`).
 Use a tuple as the whole entry, or join tuples with `++`.
 
@@ -321,20 +450,35 @@ A check across fields goes into `pub fn validateSelf(self: *const T) ?v.Violatio
 
 ```zig
 const std = @import("std");
+const log = @import("log");
 const v = @import("validator");
 
-const Booking = struct {
-    start_day: u32,
-    end_day: u32,
-    guests: u8,
+const Room = enum { single, double, family };
 
-    pub const field_rules = .{ .guests = v.positive };
+const Booking = struct {
+    room: Room,
+    guests: u16,
+    check_in: []const u8,
+    check_out: []const u8,
+
+    pub const field_rules = .{
+        .guests = v.positive,
+        .check_in = v.date,
+        .check_out = v.date,
+    };
 
     pub fn validateSelf(self: *const Booking) ?v.Violation {
-        if (self.end_day < self.start_day)
-            return v.fail(@This(), .end_day, "bookings.end_before_start", "must not be before the start day");
-        if (self.end_day - self.start_day > 30)
-            return v.fail(@This(), null, "bookings.too_long", "must not be longer than 30 days");
+        // It runs only when every field passed: both dates are YYYY-MM-DD, so
+        // they compare as strings.
+        if (!std.mem.lessThan(u8, self.check_in, self.check_out))
+            return v.fail(@This(), .check_out, "bookings.check_out_too_early", "must be after the check-in date");
+        const beds: u16 = switch (self.room) {
+            .single => 1,
+            .double => 2,
+            .family => 4,
+        };
+        if (self.guests > beds)
+            return v.fail(@This(), null, "bookings.too_many_guests", "must have a bed for every guest");
         return null;
     }
 };
@@ -342,52 +486,58 @@ const Booking = struct {
 const Trip = struct {
     bookings: []const Booking,
 
-    pub const field_rules = .{ .bookings = v.notEmpty };
+    pub const field_rules = .{ .bookings = .{ v.notEmpty, v.maxItems(10) } };
 };
 
 pub fn main(init: std.process.Init) !void {
-    var stdout_buffer: [512]u8 = undefined;
-    var stdout = std.Io.File.stdout().writerStreaming(init.io, &stdout_buffer);
-    const out = &stdout.interface;
-    defer out.flush() catch {};
+    const logger: log.Logger = try .init(init.gpa, init.io, .{
+        .service = .{ .name = "booking-service" },
+        .format = .text,
+    });
+    defer logger.deinit();
 
     const trip: Trip = .{
         .bookings = &.{
-            .{ .start_day = 1, .end_day = 40, .guests = 2 }, // too long: the booking itself
-            .{ .start_day = 5, .end_day = 3, .guests = 2 }, // ends before it starts: end_day
-            .{ .start_day = 9, .end_day = 7, .guests = 0 }, // guests fails, so validateSelf does not run
+            // three guests, two beds: the booking itself
+            .{ .room = .double, .guests = 3, .check_in = "2026-07-01", .check_out = "2026-07-05" },
+            // checks out before it checks in: check_out
+            .{ .room = .single, .guests = 1, .check_in = "2026-07-05", .check_out = "2026-07-03" },
+            // guests fails, so validateSelf does not run
+            .{ .room = .family, .guests = 0, .check_in = "2026-07-09", .check_out = "2026-07-09" },
         },
     };
 
     const report = try v.checkAll(init.gpa, &trip);
     defer report.deinit();
     for (report.violations) |violation| {
-        try out.print("{s}: {s} ({s})\n", .{ violation.field orelse "(root)", violation.message, violation.code });
+        logger.warn("Invalid trip", .{ .field = violation.field, .code = violation.code, .reason = violation.message });
     }
 }
 ```
 
-It prints:
+It logs:
 
 ```text
-bookings[0]: must not be longer than 30 days (bookings.too_long)
-bookings[1].end_day: must not be before the start day (bookings.end_before_start)
-bookings[2].guests: must be greater than 0 (validation.positive)
+$ zig build run
+2026-10-13T09:41:07.415Z WARN  Invalid trip field=bookings[0] code=bookings.too_many_guests reason="must have a bed for every guest"
+2026-10-13T09:41:07.415Z WARN  Invalid trip field=bookings[1].check_out code=bookings.check_out_too_early reason="must be after the check-in date"
+2026-10-13T09:41:07.416Z WARN  Invalid trip field=bookings[2].guests code=validation.positive reason="must be greater than 0"
 ```
 
 - `validateSelf` runs after all fields of its struct, and only when none of
   them, at any depth, had a violation in this call; nested structs run theirs
-  first. The third booking ends before it starts too, but its `guests` field
-  fails, so its `validateSelf` does not run.
+  first. So it can rely on the rules of the fields: here both dates are valid
+  `YYYY-MM-DD`. The third booking checks out on the day it checks in, but its
+  `guests` field fails, so its `validateSelf` does not run.
 - It returns one violation, or `null` when the value is valid. An `inline fn` is
   accepted; any other signature is a compile error that shows the expected one.
 - `v.fail(@This(), .field, code, message)` builds the violation and checks it at
   compile time: the field must be a non-comptime field of the struct, the code
   follows the [custom code grammar](#vcustom), and the message is 1-512 bytes of
   valid UTF-8. A misspelled field is Zig's own error at your line, such as
-  `enum 'meta.FieldEnum(bookings.Booking)' has no member named 'ned'` for
+  `enum 'meta.FieldEnum(bookings.Booking)' has no member named 'chek_out'` for
   `Booking` in `bookings.zig`.
-- The walk appends the field to the struct's path: `bookings[1].end_day`. A
+- The walk appends the field to the struct's path: `bookings[1].check_out`. A
   `null` field gives the struct's own path, `bookings[0]`, and `field = null`
   for the root.
 - `validateSelf` must be pure: no I/O, no global state, no allocation, the same
@@ -395,7 +545,7 @@ bookings[2].guests: must be greater than 0 (validation.positive)
   times.
 - Conditional rules (class-validator's `@ValidateIf`) are code in `validateSelf`.
 
-A violation built by hand, `.{ .code = ..., .message = ..., .field = "end_day" }`,
+A violation built by hand, `.{ .code = ..., .message = ..., .field = "check_out" }`,
 compiles too, but nothing checks it at compile time. So the walk checks every
 result of `validateSelf` at run time — the code grammar, the message, the field
 name — and a malformed one is a programmer error:
@@ -483,7 +633,7 @@ segment = %x61-7A *(%x61-7A / DIGIT / "_")        ; [a-z][a-z0-9_]*
 | `users.name_taken`, `orders.v2.limit`, `a.b1_`, `validationx.y`, `x.validation` | none: accepted |
 | longer than 128 bytes (checked first) | `is longer than 128 bytes` |
 | `users..taken`, `.users`, `users.` | `has an empty segment` |
-| `users.Taken`, `users.name-taken`, `users.имя` | `has a character outside [a-z0-9_.]` |
+| `users.Taken`, `users.name-taken`, `users.café` | `has a character outside [a-z0-9_.]` |
 | `users.2fa`, `_a.b` | `has a segment that does not start with a letter` |
 | `users` | `needs at least 2 segments` |
 | `validation.mine`, `rpc.mine` (checked last) | `uses a reserved prefix (validation., rpc.)` |
@@ -529,19 +679,22 @@ keeps the result as a static string.
 
 ```zig
 const std = @import("std");
+const log = @import("log");
 const v = @import("validator");
 
 const Role = enum { admin, editor, viewer };
+const Language = enum { en, de, fr, ja };
 
 // A rule with a message is a value: declare it once, use it on any field.
-const filled = v.notEmpty.withMessage("заполните поле");
+const filled = v.notEmpty.withMessage("please fill in this field");
 
 const Profile = struct {
     name: []const u8,
     nickname: []const u8,
     age: u8,
     role: Role,
-    tags: []const []const u8,
+    languages: []const Language,
+    website: ?[]const u8 = null,
     height: f64,
     weight: f64,
 
@@ -550,24 +703,27 @@ const Profile = struct {
         .nickname = filled,
         .age = v.range(18, 120).withMessage("age must be from {min} to {max}"),
         .role = v.oneOf(.{ .admin, .editor }).withMessage("role must be one of: {values}"),
-        .tags = v.maxItems(2).withMessage("не больше {max} тегов"),
+        .languages = v.maxItems(2).withMessage("at most {max} languages"),
+        .website = v.httpUrl.withMessage("website must be a link such as https://example.com"),
         .height = v.positive.withMessage("height must be above zero"), // NaN keeps validation.finite
         .weight = .{ v.finite.withMessage("weight must be a number"), v.positive },
     };
 };
 
 pub fn main(init: std.process.Init) !void {
-    var stdout_buffer: [1024]u8 = undefined;
-    var stdout = std.Io.File.stdout().writerStreaming(init.io, &stdout_buffer);
-    const out = &stdout.interface;
-    defer out.flush() catch {};
+    const logger: log.Logger = try .init(init.gpa, init.io, .{
+        .service = .{ .name = "profile-service" },
+        .format = .text,
+    });
+    defer logger.deinit();
 
     const profile: Profile = .{
         .name = "",
         .nickname = "ada",
         .age = 17,
         .role = .viewer,
-        .tags = &.{ "a", "b", "c" },
+        .languages = &.{ .en, .fr, .de },
+        .website = "example.com",
         .height = std.math.nan(f64),
         .weight = std.math.nan(f64),
     };
@@ -575,22 +731,24 @@ pub fn main(init: std.process.Init) !void {
     const report = try v.checkAll(init.gpa, &profile);
     defer report.deinit();
     for (report.violations) |violation| {
-        try out.print("{s}: {s} ({s})\n", .{ violation.field orelse "(root)", violation.message, violation.code });
+        logger.warn("Invalid profile", .{ .field = violation.field, .code = violation.code, .reason = violation.message });
     }
 }
 ```
 
-It prints the violation of every field that fails (`nickname` passes). The codes
+It logs the violation of every field that fails (`nickname` passes). The codes
 are the rules' own, and the messages come from the templates, except for
 `height`, whose precondition keeps its own:
 
 ```text
-name: заполните поле (validation.not_empty)
-age: age must be from 18 to 120 (validation.range)
-role: role must be one of: admin, editor (validation.one_of)
-tags: не больше 2 тегов (validation.max_items)
-height: must be a finite number (validation.finite)
-weight: weight must be a number (validation.finite)
+$ zig build run
+2026-10-13T09:41:07.415Z WARN  Invalid profile field=name code=validation.not_empty reason="please fill in this field"
+2026-10-13T09:41:07.415Z WARN  Invalid profile field=age code=validation.range reason="age must be from 18 to 120"
+2026-10-13T09:41:07.415Z WARN  Invalid profile field=role code=validation.one_of reason="role must be one of: admin, editor"
+2026-10-13T09:41:07.415Z WARN  Invalid profile field=languages code=validation.max_items reason="at most 2 languages"
+2026-10-13T09:41:07.416Z WARN  Invalid profile field=website code=validation.http_url reason="website must be a link such as https://example.com"
+2026-10-13T09:41:07.416Z WARN  Invalid profile field=height code=validation.finite reason="must be a finite number"
+2026-10-13T09:41:07.416Z WARN  Invalid profile field=weight code=validation.finite reason="weight must be a number"
 ```
 
 - `.withMessage` works on every rule except `v.each`, which has no message of
@@ -782,6 +940,28 @@ never sees a NaN, nor `v.maxLength` invalid UTF-8.
 
 ## Checking values
 
+### v.Violation
+
+```zig
+pub const Violation = struct {
+    code: []const u8,
+    message: []const u8,
+    field: ?[]const u8 = null,
+};
+```
+
+- `code`: `validation.<kind>` for a built-in rule (`validation.not_empty`), a
+  precondition's code (`validation.finite`), `validation.invalid` for a
+  malformed `validateSelf` result outside Debug builds, or the `code` of
+  `v.custom` and `v.fail`. Codes are part of the [compatibility](#compatibility)
+  contract: branch on them, send them to clients, translate by them.
+- `message`: what the value must be, without the field name: a built-in English
+  message such as `must not be empty`, or your own from `.withMessage`,
+  `v.custom` or `v.fail`. Always 1-512 bytes of valid UTF-8.
+- `field`: the path of the value from the root: `email`, `address.city`,
+  `items[2].name`, `[1].email` for a slice root. `null` means the root value
+  itself or, for `check` only, a path that did not fit `path_buf`.
+
 ### v.check
 
 ```zig
@@ -792,7 +972,7 @@ pub fn check(value: anytype, path_buf: []u8) ?v.Violation
 var path_buf: [256]u8 = undefined;
 if (v.check(&request, &path_buf)) |violation| {
     // violation.code, violation.message, violation.field: ?[]const u8
-    std.debug.print("{s}: {s} ({s})\n", .{ violation.field orelse "(root)", violation.message, violation.code });
+    logger.warn("Invalid request", .{ .field = violation.field, .code = violation.code, .reason = violation.message });
 }
 ```
 
@@ -820,9 +1000,9 @@ pub fn checkAll(gpa: std.mem.Allocator, value: anytype) std.mem.Allocator.Error!
 const report = try v.checkAll(gpa, &request);
 defer report.deinit();
 for (report.violations) |violation| {
-    std.debug.print("{s}: {s} ({s})\n", .{ violation.field orelse "(root)", violation.message, violation.code });
+    logger.warn("Invalid request", .{ .field = violation.field, .code = violation.code, .reason = violation.message });
 }
-if (report.truncated) std.debug.print("more than {d} violations\n", .{v.max_report_violations});
+if (report.truncated) logger.warn("More violations not reported", .{ .reported = report.violations.len });
 ```
 
 - `violations` are in walk order, at most one per value and at most 100
@@ -915,16 +1095,18 @@ const v = @import("validator");
 pub const Role = enum { admin, editor, viewer };
 
 pub const CreateUserRequest = struct {
+    email: []const u8,
     name: []const u8,
-    age: u8,
+    birthday: []const u8,
     roles: []const Role,
-    nickname: ?[]const u8 = null,
+    team_id: ?u32 = null,
 
     pub const field_rules = .{
-        .name = v.notEmpty,
-        .age = v.positive,
-        .roles = v.notEmpty,
-        .nickname = v.notEmpty,
+        .email = v.email,
+        .name = .{ v.notBlank, v.maxLength(64) },
+        .birthday = v.minDate("1900-01-01"),
+        .roles = .{ v.notEmpty, v.uniqueItems },
+        .team_id = v.positive,
     };
 };
 
@@ -936,12 +1118,12 @@ test "every DTO of this file passes v.assertRules" {
     }
 }
 
-test "CreateUserRequest rejects an empty name" {
+test "CreateUserRequest rejects an invalid email" {
     var path_buf: [256]u8 = undefined;
-    const bad: CreateUserRequest = .{ .name = "", .age = 30, .roles = &.{.admin} };
+    const bad: CreateUserRequest = .{ .email = "ada.example.com", .name = "Ada", .birthday = "1990-12-10", .roles = &.{.admin} };
     const violation = v.check(&bad, &path_buf) orelse return error.NoViolation;
-    try std.testing.expectEqualStrings("validation.not_empty", violation.code);
-    try std.testing.expectEqualStrings("name", violation.field.?);
+    try std.testing.expectEqualStrings("validation.email", violation.code);
+    try std.testing.expectEqualStrings("email", violation.field.?);
 }
 ```
 
@@ -971,7 +1153,7 @@ error: validator: orders.Order.field_rules.id: positive expects a number, field 
 
 `orders.Order` is the type as Zig names it (the struct `Order` in `orders.zig`),
 `field_rules.id` the entry. Inside `v.each` the path ends with `[]`:
-`orders.Order.field_rules.tags[]`. In hints, rules are written as code you can
+`orders.Order.field_rules.coupons[]`. In hints, rules are written as code you can
 paste: `use v.each(v.positive)`.
 
 Errors come from two places, and Zig points to them differently:
@@ -1001,7 +1183,7 @@ library runs. These errors point at your line and do not start with
 | You wrote | Zig says |
 | --- | --- |
 | `v.notEmpty()`: a rule without parameters called like a function | `type 'core.Rule' not a function` |
-| `v.fail(@This(), .ned, ...)`: a field the struct does not have | `enum 'meta.FieldEnum(bookings.Booking)' has no member named 'ned'` |
+| `v.fail(@This(), .chek_out, ...)`: a field the struct does not have | `enum 'meta.FieldEnum(bookings.Booking)' has no member named 'chek_out'` |
 | `v.custom("users.ok", isFree)`: a missing argument | `expected 3 argument(s), found 2` |
 | `v.minItems.withMessage("...")`: `.withMessage` on a rule that needs a call | `no field or member function named 'withMessage' in 'fn (comptime usize) core.Rule'` |
 | `v.minItems(-1)`: a negative count, or one above `maxInt(usize)` | `type 'usize' cannot represent integer value '-1'` |
@@ -1075,101 +1257,152 @@ The limits are `comptime_int` constants and part of the contract (see below).
 
 ## All rules
 
-| Rule | Checks | Code | Page |
+Every rule by category, with an example of its entry in `field_rules`. Each
+heading links to the page of its category, and each rule to its section on that
+page. [all_rules.zig](all_rules.zig) declares every example, so
+`zig build test` compiles them all.
+
+[Common](#common) · [Numbers](#numbers) · [Lists](#lists) · [Custom](#custom) ·
+[Strings](#strings) · [Formats](#formats) · [Encodings](#encodings) ·
+[Identifiers](#identifiers) · [Dates](#dates)
+
+### [Common](common.md)
+
+| Rule | Example | Checks | Code |
 | --- | --- | --- | --- |
-| `v.equals(expected)` | a value is equal to `expected` | `validation.equals` | [common](common.md#vequalsexpected) |
-| `v.notEquals(forbidden)` | a value is not equal to `forbidden` | `validation.not_equals` | [common](common.md#vnotequalsforbidden) |
-| `v.oneOf(.{ ... })` | a string, an enum tag or an integer is one of the listed values | `validation.one_of` | [common](common.md#voneofvalues) |
-| `v.noneOf(.{ ... })` | a string, an enum tag or an integer is none of the listed values | `validation.none_of` | [common](common.md#vnoneofvalues) |
-| `v.empty` | a string has no bytes, a slice no items | `validation.empty` | [common](common.md#vempty) |
-| `v.notEmpty` | a string has at least 1 byte, a slice at least 1 item | `validation.not_empty` | [common](common.md#vnotempty) |
-| `v.min(min)` | a number is at least `min` | `validation.min` | [numbers](numbers.md#vminmin) |
-| `v.max(max)` | a number is at most `max` | `validation.max` | [numbers](numbers.md#vmaxmax) |
-| `v.range(min, max)` | a number is from `min` to `max` | `validation.range` | [numbers](numbers.md#vrangemin-max) |
-| `v.positive` | a number is greater than 0 | `validation.positive` | [numbers](numbers.md#vpositive) |
-| `v.nonNegative` | a number is at least 0 | `validation.non_negative` | [numbers](numbers.md#vnonnegative) |
-| `v.negative` | a number is less than 0 | `validation.negative` | [numbers](numbers.md#vnegative) |
-| `v.nonPositive` | a number is at most 0 | `validation.non_positive` | [numbers](numbers.md#vnonpositive) |
-| `v.divisibleBy(divisor)` | a number is a multiple of `divisor` | `validation.divisible_by` | [numbers](numbers.md#vdivisiblebydivisor) |
-| `v.finite` | a float is neither NaN nor an infinity | `validation.finite` | [numbers](numbers.md#vfinite) |
-| `v.minLength(min)` | a string has at least `min` code points | `validation.min_length` | [strings](strings.md#vminlengthmin) |
-| `v.maxLength(max)` | a string has at most `max` code points | `validation.max_length` | [strings](strings.md#vmaxlengthmax) |
-| `v.length(min, max)` | a string has from `min` to `max` code points | `validation.length` | [strings](strings.md#vlengthmin-max) |
-| `v.minBytes(min)` | a string has at least `min` bytes | `validation.min_bytes` | [strings](strings.md#vminbytesmin) |
-| `v.maxBytes(max)` | a string has at most `max` bytes | `validation.max_bytes` | [strings](strings.md#vmaxbytesmax) |
-| `v.utf8` | a string is valid UTF-8 | `validation.utf8` | [strings](strings.md#vutf8) |
-| `v.notBlank` | a string has a code point outside Unicode White_Space | `validation.not_blank` | [strings](strings.md#vnotblank) |
-| `v.ascii` | every byte of a string is ASCII | `validation.ascii` | [strings](strings.md#vascii) |
-| `v.printableAscii` | every byte of a string is printable ASCII (0x20-0x7E) | `validation.printable_ascii` | [strings](strings.md#vprintableascii) |
-| `v.alphanumeric` | every byte of a string is an ASCII letter or digit | `validation.alphanumeric` | [strings](strings.md#valphanumeric) |
-| `v.alpha` | every byte of a string is an ASCII letter | `validation.alpha` | [strings](strings.md#valpha) |
-| `v.digits` | every byte of a string is an ASCII digit | `validation.digits` | [strings](strings.md#vdigits) |
-| `v.lowercase` | a string has no ASCII uppercase letter | `validation.lowercase` | [strings](strings.md#vlowercase) |
-| `v.uppercase` | a string has no ASCII lowercase letter | `validation.uppercase` | [strings](strings.md#vuppercase) |
-| `v.multibyte` | a string has a byte outside ASCII | `validation.multibyte` | [strings](strings.md#vmultibyte) |
-| `v.fullWidth` | a string has a character outside validator.js's half-width class | `validation.full_width` | [strings](strings.md#vfullwidth) |
-| `v.halfWidth` | a string has a character in validator.js's half-width class | `validation.half_width` | [strings](strings.md#vhalfwidth) |
-| `v.variableWidth` | a string has characters in and outside that class | `validation.variable_width` | [strings](strings.md#vvariablewidth) |
-| `v.contains(seed)` | a string contains `seed` | `validation.contains` | [strings](strings.md#vcontainsseed) |
-| `v.notContains(seed)` | a string does not contain `seed` | `validation.not_contains` | [strings](strings.md#vnotcontainsseed) |
-| `v.strongPassword(.{ ... })` | a password has the length and the classes of characters that the options ask for | `validation.strong_password` | [strings](strings.md#vstrongpasswordoptions) |
-| `v.numberString` | a string is a number in decimal notation | `validation.number_string` | [formats](formats.md#vnumberstring) |
-| `v.decimal(.{ ... })` | a string is a decimal number with as many digits after the point as the options allow | `validation.decimal` | [formats](formats.md#vdecimaloptions) |
-| `v.booleanString` | a string is `true`, `false`, `1` or `0` | `validation.boolean_string` | [formats](formats.md#vbooleanstring) |
-| `v.hexadecimal` | a string is a hexadecimal number | `validation.hexadecimal` | [formats](formats.md#vhexadecimal) |
-| `v.octal` | a string is an octal number | `validation.octal` | [formats](formats.md#voctal) |
-| `v.port` | a string is a port number from 0 to 65535 | `validation.port` | [formats](formats.md#vport) |
-| `v.latitude` | a string or a float is a latitude from -90 to 90 | `validation.latitude` | [formats](formats.md#vlatitude) |
-| `v.longitude` | a string or a float is a longitude from -180 to 180 | `validation.longitude` | [formats](formats.md#vlongitude) |
-| `v.latLong` | a string is a `latitude,longitude` pair | `validation.lat_long` | [formats](formats.md#vlatlong) |
-| `v.email` | a string is an email address | `validation.email` | [formats](formats.md#vemail) |
-| `v.httpUrl` | a string is an http or https URL | `validation.http_url` | [formats](formats.md#vhttpurl) |
-| `v.fqdn(.{ ... })` | a string is a domain name | `validation.fqdn` | [formats](formats.md#vfqdnoptions) |
-| `v.ip` | a string is an IPv4 or an IPv6 address | `validation.ip` | [formats](formats.md#vip) |
-| `v.ipv4` | a string is an IPv4 address | `validation.ipv4` | [formats](formats.md#vipv4) |
-| `v.ipv6` | a string is an IPv6 address | `validation.ipv6` | [formats](formats.md#vipv6) |
-| `v.macAddress(.{ ... })` | a string is a MAC address | `validation.mac_address` | [formats](formats.md#vmacaddressoptions) |
-| `v.json` | a string is a JSON object or array, nested at most 64 levels | `validation.json` | [encodings](encodings.md#vjson) |
-| `v.jwt` | a string has the shape of a JWT | `validation.jwt` | [encodings](encodings.md#vjwt) |
-| `v.base32` | a string is canonical padded base32 | `validation.base32` | [encodings](encodings.md#vbase32) |
-| `v.base58` | a string uses the base58 alphabet | `validation.base58` | [encodings](encodings.md#vbase58) |
-| `v.base64` | a string is canonical padded base64 | `validation.base64` | [encodings](encodings.md#vbase64) |
-| `v.base64Url` | a string is canonical base64url without padding | `validation.base64_url` | [encodings](encodings.md#vbase64url) |
-| `v.dataUri` | a string is an RFC 2397 data URL | `validation.data_uri` | [encodings](encodings.md#vdatauri) |
-| `v.magnetUri` | a string is a magnet URI with an exact topic | `validation.magnet_uri` | [encodings](encodings.md#vmagneturi) |
-| `v.mimeType` | a string is a media type with parameters | `validation.mime_type` | [encodings](encodings.md#vmimetype) |
-| `v.locale` | a string is a well-formed BCP 47 language tag | `validation.locale` | [encodings](encodings.md#vlocale) |
-| `v.semVer` | a string is a semantic version | `validation.sem_ver` | [encodings](encodings.md#vsemver) |
-| `v.hexColor` | a string is a CSS hex color | `validation.hex_color` | [encodings](encodings.md#vhexcolor) |
-| `v.rgbColor` | a string is a CSS `rgb()` or `rgba()` color | `validation.rgb_color` | [encodings](encodings.md#vrgbcolor) |
-| `v.hslColor` | a string is a CSS `hsl()` or `hsla()` color | `validation.hsl_color` | [encodings](encodings.md#vhslcolor) |
-| `v.uuid` | a string is a UUID: 8-4-4-4-12 hex digits | `validation.uuid` | [identifiers](identifiers.md#vuuid) |
-| `v.mongoId` | a string is a MongoDB ObjectId: 24 hex digits | `validation.mongo_id` | [identifiers](identifiers.md#vmongoid) |
-| `v.firebasePushId` | a string is a Firebase push ID | `validation.firebase_push_id` | [identifiers](identifiers.md#vfirebasepushid) |
-| `v.hash(algorithm)` | a string is a hex digest of `algorithm` | `validation.hash` | [identifiers](identifiers.md#vhashalgorithm) |
-| `v.creditCard` | a string is a card number with a valid Luhn check digit | `validation.credit_card` | [identifiers](identifiers.md#vcreditcard) |
-| `v.isbn` | a string is an ISBN-10 or an ISBN-13 | `validation.isbn` | [identifiers](identifiers.md#visbn) |
-| `v.isbn10` | a string is an ISBN-10 | `validation.isbn10` | [identifiers](identifiers.md#visbn10) |
-| `v.isbn13` | a string is an ISBN-13 | `validation.isbn13` | [identifiers](identifiers.md#visbn13) |
-| `v.issn` | a string is an ISSN, `NNNN-NNNC` | `validation.issn` | [identifiers](identifiers.md#vissn) |
-| `v.ean` | a string is an EAN-8, EAN-13 or GTIN-14 | `validation.ean` | [identifiers](identifiers.md#vean) |
-| `v.isin` | a string is an ISIN | `validation.isin` | [identifiers](identifiers.md#visin) |
-| `v.isrc` | a string is an ISRC | `validation.isrc` | [identifiers](identifiers.md#visrc) |
-| `v.bic` | a string is a BIC | `validation.bic` | [identifiers](identifiers.md#vbic) |
-| `v.iban` | a string is an IBAN | `validation.iban` | [identifiers](identifiers.md#viban) |
-| `v.btcAddress(network)` | a string is a Bitcoin address of `network` | `validation.btc_address` | [identifiers](identifiers.md#vbtcaddressnetwork) |
-| `v.ethereumAddress` | a string is an Ethereum address | `validation.ethereum_address` | [identifiers](identifiers.md#vethereumaddress) |
-| `v.date` | a string is a date `YYYY-MM-DD` | `validation.date` | [dates](dates.md#vdate) |
-| `v.rfc3339` | a string is an RFC 3339 date-time with an offset | `validation.rfc3339` | [dates](dates.md#vrfc3339) |
-| `v.iso8601` | a string is an ISO 8601 date or date-time | `validation.iso8601` | [dates](dates.md#viso8601) |
-| `v.minDate(min)` | a date or a date-time is not before `min` | `validation.min_date` | [dates](dates.md#vmindatemin) |
-| `v.maxDate(max)` | a date or a date-time is not after `max` | `validation.max_date` | [dates](dates.md#vmaxdatemax) |
-| `v.militaryTime` | a string is a time `HH:MM` or `HHMM` | `validation.military_time` | [dates](dates.md#vmilitarytime) |
-| `v.minItems(min)` | a slice has at least `min` items | `validation.min_items` | [lists](lists.md#vminitemsmin) |
-| `v.maxItems(max)` | a slice has at most `max` items | `validation.max_items` | [lists](lists.md#vmaxitemsmax) |
-| `v.uniqueItems` | no two items of a slice or an array are equal | `validation.unique_items` | [lists](lists.md#vuniqueitems) |
-| `v.uniqueBy(.key)` | no two struct items of a slice or an array have equal values of the field `key` | `validation.unique_items` | [lists](lists.md#vuniquebykey) |
-| `v.containsAll(.{ ... })` | every listed value is an item of a slice or an array | `validation.contains_all` | [lists](lists.md#vcontainsallvalues) |
-| `v.containsNone(.{ ... })` | no item of a slice or an array is a listed value | `validation.contains_none` | [lists](lists.md#vcontainsnonevalues) |
-| `v.each(rules)` | the rules of every item of a slice or an array | the inner rule's code | [lists](lists.md#veachrules) |
-| `v.custom(code, message, f)` | your predicate `f` returns `true` | your `code` | [v.custom](#vcustom) |
+| [`v.equals(expected)`](common.md#vequalsexpected) | `.terms_accepted = v.equals(true)` | a value is equal to `expected` | `validation.equals` |
+| [`v.notEquals(forbidden)`](common.md#vnotequalsforbidden) | `.adjustment = v.notEquals(0)` | a value is not equal to `forbidden` | `validation.not_equals` |
+| [`v.oneOf(.{ ... })`](common.md#voneofvalues) | `.currency = v.oneOf(.{ "EUR", "USD" })` | a string, an enum tag or an integer is one of the listed values | `validation.one_of` |
+| [`v.noneOf(.{ ... })`](common.md#vnoneofvalues) | `.username = v.noneOf(.{ "admin", "root" })` | a string, an enum tag or an integer is none of the listed values | `validation.none_of` |
+| [`v.empty`](common.md#vempty) | `.honeypot = v.empty` | a string has no bytes, a slice no items | `validation.empty` |
+| [`v.notEmpty`](common.md#vnotempty) | `.name = v.notEmpty` | a string has at least 1 byte, a slice at least 1 item | `validation.not_empty` |
+
+### [Numbers](numbers.md)
+
+| Rule | Example | Checks | Code |
+| --- | --- | --- | --- |
+| [`v.min(min)`](numbers.md#vminmin) | `.amount_cents = v.min(100)` | a number is at least `min` | `validation.min` |
+| [`v.max(max)`](numbers.md#vmaxmax) | `.discount_percent = v.max(50)` | a number is at most `max` | `validation.max` |
+| [`v.range(min, max)`](numbers.md#vrangemin-max) | `.age = v.range(18, 120)` | a number is from `min` to `max` | `validation.range` |
+| [`v.positive`](numbers.md#vpositive) | `.quantity = v.positive` | a number is greater than 0 | `validation.positive` |
+| [`v.nonNegative`](numbers.md#vnonnegative) | `.balance_cents = v.nonNegative` | a number is at least 0 | `validation.non_negative` |
+| [`v.negative`](numbers.md#vnegative) | `.debit_cents = v.negative` | a number is less than 0 | `validation.negative` |
+| [`v.nonPositive`](numbers.md#vnonpositive) | `.stock_correction = v.nonPositive` | a number is at most 0 | `validation.non_positive` |
+| [`v.divisibleBy(divisor)`](numbers.md#vdivisiblebydivisor) | `.duration_minutes = v.divisibleBy(15)` | a number is a multiple of `divisor` | `validation.divisible_by` |
+| [`v.finite`](numbers.md#vfinite) | `.weight_kg = v.finite` | a float is neither NaN nor an infinity | `validation.finite` |
+
+### [Lists](lists.md)
+
+| Rule | Example | Checks | Code |
+| --- | --- | --- | --- |
+| [`v.minItems(min)`](lists.md#vminitemsmin) | `.options = v.minItems(2)` | a slice has at least `min` items | `validation.min_items` |
+| [`v.maxItems(max)`](lists.md#vmaxitemsmax) | `.attachments = v.maxItems(5)` | a slice has at most `max` items | `validation.max_items` |
+| [`v.uniqueItems`](lists.md#vuniqueitems) | `.tags = .{ v.maxItems(10), v.uniqueItems }` | no two items of a slice or an array are equal | `validation.unique_items` |
+| [`v.uniqueBy(.key)`](lists.md#vuniquebykey) | `.lines = .{ v.maxItems(50), v.uniqueBy(.sku) }` | no two struct items of a slice or an array have equal values of the field `key` | `validation.unique_items` |
+| [`v.containsAll(.{ ... })`](lists.md#vcontainsallvalues) | `.scopes = v.containsAll(.{"openid"})` | every listed value is an item of a slice or an array | `validation.contains_all` |
+| [`v.containsNone(.{ ... })`](lists.md#vcontainsnonevalues) | `.roles = v.containsNone(.{.owner})` | no item of a slice or an array is a listed value | `validation.contains_none` |
+| [`v.each(rules)`](lists.md#veachrules) | `.emails = v.each(v.email)` | the rules of every item of a slice or an array | the inner rule's code |
+
+### [Custom](#vcustom)
+
+| Rule | Example | Checks | Code |
+| --- | --- | --- | --- |
+| [`v.custom(code, message, f)`](#vcustom) | `.handle = v.custom("profiles.handle_format", "must start with @", startsWithAt)` | your predicate `f` returns `true` | your `code` |
+
+### [Strings](strings.md)
+
+| Rule | Example | Checks | Code |
+| --- | --- | --- | --- |
+| [`v.minLength(min)`](strings.md#vminlengthmin) | `.review = v.minLength(20)` | a string has at least `min` code points | `validation.min_length` |
+| [`v.maxLength(max)`](strings.md#vmaxlengthmax) | `.title = v.maxLength(120)` | a string has at most `max` code points | `validation.max_length` |
+| [`v.length(min, max)`](strings.md#vlengthmin-max) | `.nickname = v.length(3, 32)` | a string has from `min` to `max` code points | `validation.length` |
+| [`v.minBytes(min)`](strings.md#vminbytesmin) | `.signing_key = v.minBytes(32)` | a string has at least `min` bytes | `validation.min_bytes` |
+| [`v.maxBytes(max)`](strings.md#vmaxbytesmax) | `.subject = v.maxBytes(255)` | a string has at most `max` bytes | `validation.max_bytes` |
+| [`v.utf8`](strings.md#vutf8) | `.display_name = v.utf8` | a string is valid UTF-8 | `validation.utf8` |
+| [`v.notBlank`](strings.md#vnotblank) | `.comment = v.notBlank` | a string has a code point outside Unicode White_Space | `validation.not_blank` |
+| [`v.ascii`](strings.md#vascii) | `.payment_reference = v.ascii` | every byte of a string is ASCII | `validation.ascii` |
+| [`v.printableAscii`](strings.md#vprintableascii) | `.api_key = v.printableAscii` | every byte of a string is printable ASCII (0x20-0x7E) | `validation.printable_ascii` |
+| [`v.alphanumeric`](strings.md#valphanumeric) | `.coupon_code = v.alphanumeric` | every byte of a string is an ASCII letter or digit | `validation.alphanumeric` |
+| [`v.alpha`](strings.md#valpha) | `.country_code = v.alpha` | every byte of a string is an ASCII letter | `validation.alpha` |
+| [`v.digits`](strings.md#vdigits) | `.pin = .{ v.length(4, 4), v.digits }` | every byte of a string is an ASCII digit | `validation.digits` |
+| [`v.lowercase`](strings.md#vlowercase) | `.slug = v.lowercase` | a string has no ASCII uppercase letter | `validation.lowercase` |
+| [`v.uppercase`](strings.md#vuppercase) | `.ticker = v.uppercase` | a string has no ASCII lowercase letter | `validation.uppercase` |
+| [`v.multibyte`](strings.md#vmultibyte) | `.native_name = v.multibyte` | a string has a byte outside ASCII | `validation.multibyte` |
+| [`v.fullWidth`](strings.md#vfullwidth) | `.name_kana = v.fullWidth` | a string has a character outside validator.js's half-width class | `validation.full_width` |
+| [`v.halfWidth`](strings.md#vhalfwidth) | `.account_holder_kana = v.halfWidth` | a string has a character in validator.js's half-width class | `validation.half_width` |
+| [`v.variableWidth`](strings.md#vvariablewidth) | `.product_name = v.variableWidth` | a string has characters in and outside that class | `validation.variable_width` |
+| [`v.contains(seed)`](strings.md#vcontainsseed) | `.sms_template = v.contains("{code}")` | a string contains `seed` | `validation.contains` |
+| [`v.notContains(seed)`](strings.md#vnotcontainsseed) | `.login = v.notContains(" ")` | a string does not contain `seed` | `validation.not_contains` |
+| [`v.strongPassword(.{ ... })`](strings.md#vstrongpasswordoptions) | `.password = v.strongPassword(.{ .min_length = 12 })` | a password has the length and the classes of characters that the options ask for | `validation.strong_password` |
+
+### [Formats](formats.md)
+
+| Rule | Example | Checks | Code |
+| --- | --- | --- | --- |
+| [`v.numberString`](formats.md#vnumberstring) | `.amount = v.numberString` | a string is a number in decimal notation | `validation.number_string` |
+| [`v.decimal(.{ ... })`](formats.md#vdecimaloptions) | `.price = v.decimal(.{ .max_decimal_digits = 2 })` | a string is a decimal number with as many digits after the point as the options allow | `validation.decimal` |
+| [`v.booleanString`](formats.md#vbooleanstring) | `.newsletter = v.booleanString` | a string is `true`, `false`, `1` or `0` | `validation.boolean_string` |
+| [`v.hexadecimal`](formats.md#vhexadecimal) | `.nonce = v.hexadecimal` | a string is a hexadecimal number | `validation.hexadecimal` |
+| [`v.octal`](formats.md#voctal) | `.file_mode = v.octal` | a string is an octal number | `validation.octal` |
+| [`v.port`](formats.md#vport) | `.port = v.port` | a string is a port number from 0 to 65535 | `validation.port` |
+| [`v.latitude`](formats.md#vlatitude) | `.lat = v.latitude` | a string or a float is a latitude from -90 to 90 | `validation.latitude` |
+| [`v.longitude`](formats.md#vlongitude) | `.lng = v.longitude` | a string or a float is a longitude from -180 to 180 | `validation.longitude` |
+| [`v.latLong`](formats.md#vlatlong) | `.location = v.latLong` | a string is a `latitude,longitude` pair | `validation.lat_long` |
+| [`v.email`](formats.md#vemail) | `.email = v.email` | a string is an email address | `validation.email` |
+| [`v.httpUrl`](formats.md#vhttpurl) | `.website = v.httpUrl` | a string is an http or https URL | `validation.http_url` |
+| [`v.fqdn(.{ ... })`](formats.md#vfqdnoptions) | `.domain = v.fqdn(.{})` | a string is a domain name | `validation.fqdn` |
+| [`v.ip`](formats.md#vip) | `.client_ip = v.ip` | a string is an IPv4 or an IPv6 address | `validation.ip` |
+| [`v.ipv4`](formats.md#vipv4) | `.gateway_v4 = v.ipv4` | a string is an IPv4 address | `validation.ipv4` |
+| [`v.ipv6`](formats.md#vipv6) | `.gateway_v6 = v.ipv6` | a string is an IPv6 address | `validation.ipv6` |
+| [`v.macAddress(.{ ... })`](formats.md#vmacaddressoptions) | `.device_mac = v.macAddress(.{})` | a string is a MAC address | `validation.mac_address` |
+
+### [Encodings](encodings.md)
+
+| Rule | Example | Checks | Code |
+| --- | --- | --- | --- |
+| [`v.json`](encodings.md#vjson) | `.metadata = v.json` | a string is a JSON object or array, nested at most 64 levels | `validation.json` |
+| [`v.jwt`](encodings.md#vjwt) | `.id_token = v.jwt` | a string has the shape of a JWT | `validation.jwt` |
+| [`v.base32`](encodings.md#vbase32) | `.totp_secret = v.base32` | a string is canonical padded base32 | `validation.base32` |
+| [`v.base58`](encodings.md#vbase58) | `.public_key = v.base58` | a string uses the base58 alphabet | `validation.base58` |
+| [`v.base64`](encodings.md#vbase64) | `.signature = v.base64` | a string is canonical padded base64 | `validation.base64` |
+| [`v.base64Url`](encodings.md#vbase64url) | `.code_challenge = v.base64Url` | a string is canonical base64url without padding | `validation.base64_url` |
+| [`v.dataUri`](encodings.md#vdatauri) | `.avatar = v.dataUri` | a string is an RFC 2397 data URL | `validation.data_uri` |
+| [`v.magnetUri`](encodings.md#vmagneturi) | `.magnet_link = v.magnetUri` | a string is a magnet URI with an exact topic | `validation.magnet_uri` |
+| [`v.mimeType`](encodings.md#vmimetype) | `.content_type = v.mimeType` | a string is a media type with parameters | `validation.mime_type` |
+| [`v.locale`](encodings.md#vlocale) | `.language = v.locale` | a string is a well-formed BCP 47 language tag | `validation.locale` |
+| [`v.semVer`](encodings.md#vsemver) | `.version = v.semVer` | a string is a semantic version | `validation.sem_ver` |
+| [`v.hexColor`](encodings.md#vhexcolor) | `.brand_color = v.hexColor` | a string is a CSS hex color | `validation.hex_color` |
+| [`v.rgbColor`](encodings.md#vrgbcolor) | `.background = v.rgbColor` | a string is a CSS `rgb()` or `rgba()` color | `validation.rgb_color` |
+| [`v.hslColor`](encodings.md#vhslcolor) | `.accent = v.hslColor` | a string is a CSS `hsl()` or `hsla()` color | `validation.hsl_color` |
+
+### [Identifiers](identifiers.md)
+
+| Rule | Example | Checks | Code |
+| --- | --- | --- | --- |
+| [`v.uuid`](identifiers.md#vuuid) | `.request_id = v.uuid` | a string is a UUID: 8-4-4-4-12 hex digits | `validation.uuid` |
+| [`v.mongoId`](identifiers.md#vmongoid) | `.user_id = v.mongoId` | a string is a MongoDB ObjectId: 24 hex digits | `validation.mongo_id` |
+| [`v.firebasePushId`](identifiers.md#vfirebasepushid) | `.message_id = v.firebasePushId` | a string is a Firebase push ID | `validation.firebase_push_id` |
+| [`v.hash(algorithm)`](identifiers.md#vhashalgorithm) | `.digest = v.hash(.sha256)` | a string is a hex digest of `algorithm` | `validation.hash` |
+| [`v.creditCard`](identifiers.md#vcreditcard) | `.card_number = v.creditCard` | a string is a card number with a valid Luhn check digit | `validation.credit_card` |
+| [`v.isbn`](identifiers.md#visbn) | `.isbn = v.isbn` | a string is an ISBN-10 or an ISBN-13 | `validation.isbn` |
+| [`v.isbn10`](identifiers.md#visbn10) | `.isbn_10 = v.isbn10` | a string is an ISBN-10 | `validation.isbn10` |
+| [`v.isbn13`](identifiers.md#visbn13) | `.isbn_13 = v.isbn13` | a string is an ISBN-13 | `validation.isbn13` |
+| [`v.issn`](identifiers.md#vissn) | `.issn = v.issn` | a string is an ISSN, `NNNN-NNNC` | `validation.issn` |
+| [`v.ean`](identifiers.md#vean) | `.barcode = v.ean` | a string is an EAN-8, EAN-13 or GTIN-14 | `validation.ean` |
+| [`v.isin`](identifiers.md#visin) | `.isin = v.isin` | a string is an ISIN | `validation.isin` |
+| [`v.isrc`](identifiers.md#visrc) | `.isrc = v.isrc` | a string is an ISRC | `validation.isrc` |
+| [`v.bic`](identifiers.md#vbic) | `.bic = v.bic` | a string is a BIC | `validation.bic` |
+| [`v.iban`](identifiers.md#viban) | `.iban = v.iban` | a string is an IBAN | `validation.iban` |
+| [`v.btcAddress(network)`](identifiers.md#vbtcaddressnetwork) | `.wallet = v.btcAddress(.mainnet)` | a string is a Bitcoin address of `network` | `validation.btc_address` |
+| [`v.ethereumAddress`](identifiers.md#vethereumaddress) | `.eth_address = v.ethereumAddress` | a string is an Ethereum address | `validation.ethereum_address` |
+
+### [Dates](dates.md)
+
+| Rule | Example | Checks | Code |
+| --- | --- | --- | --- |
+| [`v.date`](dates.md#vdate) | `.birthday = v.date` | a string is a date `YYYY-MM-DD` | `validation.date` |
+| [`v.rfc3339`](dates.md#vrfc3339) | `.created_at = v.rfc3339` | a string is an RFC 3339 date-time with an offset | `validation.rfc3339` |
+| [`v.iso8601`](dates.md#viso8601) | `.published_at = v.iso8601` | a string is an ISO 8601 date or date-time | `validation.iso8601` |
+| [`v.minDate(min)`](dates.md#vmindatemin) | `.starts = v.minDate("2020-01-01")` | a date or a date-time is not before `min` | `validation.min_date` |
+| [`v.maxDate(max)`](dates.md#vmaxdatemax) | `.ends = v.maxDate("2030-12-31")` | a date or a date-time is not after `max` | `validation.max_date` |
+| [`v.militaryTime`](dates.md#vmilitarytime) | `.opens_at = v.militaryTime` | a string is a time `HH:MM` or `HHMM` | `validation.military_time` |
