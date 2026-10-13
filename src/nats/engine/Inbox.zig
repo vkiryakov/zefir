@@ -154,7 +154,7 @@ fn identity(inbox: *Inbox, io: Io, registry: *Registry) (Io.RandomSecureError ||
 }
 
 /// The outbound queue closed: the reason is the inbox's, which ends first.
-fn closedError(inbox: *Inbox, io: Io) error{ Disconnected, ConnectionClosed } {
+pub fn closedError(inbox: *Inbox, io: Io) error{ Disconnected, ConnectionClosed } {
     inbox.mutex.lockUncancelable(io);
     defer inbox.mutex.unlock(io);
     const how = inbox.ended orelse return error.ConnectionClosed;
@@ -175,6 +175,11 @@ pub fn add(inbox: *Inbox, io: Io, gpa: Allocator, entry: Entry, max: u32) AddErr
     inbox.next_id += 1;
     inbox.pending.putAssumeCapacityNoClobber(id, entry);
     return id;
+}
+
+/// Messages on `sid` are replies to requests.
+pub fn owns(inbox: *const Inbox, sid: u64) bool {
+    return sid != 0 and sid == inbox.sid.load(.acquire);
 }
 
 /// The reply subject of request `id`, in `buffer`.

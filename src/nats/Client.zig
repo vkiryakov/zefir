@@ -15,11 +15,13 @@
 //! `std.Io.Threaded` or zio; without it `connect()` fails with
 //! ConcurrencyUnavailable.
 //!
-//! In this version a lost connection closes the client and ends its
-//! subscriptions.
+//! In this version a lost connection closes the client, ends its
+//! subscriptions and fails its requests with Disconnected.
 //!
 //! The fields are internal: use the methods. Tests may ask
-//! `outbound.roomWaiters()` whether a publish waits for room.
+//! `outbound.roomWaiters()` whether a publish waits for room, and
+//! `inbox.pendingCount()`, `inbox.awaitingCount()` and
+//! `inbox.lateResponses()` about requests.
 
 const std = @import("std");
 const Io = std.Io;
@@ -27,7 +29,8 @@ const Allocator = std.mem.Allocator;
 const Options = @import("Options.zig");
 const ServerAddress = @import("ServerAddress.zig");
 const ServerInfo = @import("ServerInfo.zig");
-const PublishMessage = @import("Message.zig").PublishMessage;
+const Message = @import("Message.zig");
+const PublishMessage = Message.PublishMessage;
 const Subscription = @import("Subscription.zig");
 const Headers = @import("Headers.zig");
 const Parser = @import("protocol/Parser.zig");
@@ -36,6 +39,7 @@ const subjects = @import("protocol/subject.zig");
 const OwnedOptions = @import("engine/OwnedOptions.zig");
 const Outbound = @import("engine/Outbound.zig");
 const Registry = @import("engine/Registry.zig");
+const Inbox = @import("engine/Inbox.zig");
 const MessageQueue = @import("engine/MessageQueue.zig");
 const Connection = @import("engine/Connection.zig");
 const dialer = @import("engine/connect.zig");
@@ -54,6 +58,8 @@ parser_limits: Parser.Limits,
 outbound: Outbound,
 /// The subscriptions by SID.
 subscriptions: Registry = .{},
+/// The inbox subscription and the requests waiting for replies.
+inbox: Inbox = .{},
 /// The manager task.
 tasks: Io.Group = .init,
 /// The reader and writer of the current connection.
@@ -149,23 +155,10 @@ pub fn publish(client: *Client, subject: []const u8, payload: []const u8) Publis
 /// Publishes `message`, with its reply subject and headers, the way
 /// `publish` does. Headers need a server that supports them.
 pub fn publishMessage(client: *Client, message: PublishMessage) PublishError!void {
-    try subjects.validatePublish(message.subject);
-    if (message.reply_to) |reply| try subjects.validatePublish(reply);
-    try Headers.validate(message.headers);
-    const server = try client.currentServer();
-    const has_headers = message.headers.len > 0;
-    if (has_headers and !server.headers) return error.UnsupportedFeature;
-    const header_len = if (has_headers) encoder.headerBlockLen(message.headers) else 0;
-    const total = std.math.add(usize, header_len, message.payload.len) catch return error.PayloadTooLarge;
-    if (!fitsPayload(total, server.max_payload)) return error.PayloadTooLarge;
-    // The server closes the connection on a longer line.
-    const args_len = if (has_headers)
-        encoder.hpubArgsLen(message.subject, message.reply_to, header_len, message.payload.len)
-    else
-        encoder.pubArgsLen(message.subject, message.reply_to, message.payload.len);
-    if (args_len > client.options.options.limits.max_control_line_bytes) return error.InvalidSubject;
-
+    const header_len = try client.prepare(message);
+    try client.checkLine(message, header_len);
     const io = client.io;
+    const has_headers = message.headers.len > 0;
     const queued = if (has_headers)
         client.outbound.put(io, .publish, encoder.hpubLen(message.subject, message.reply_to, header_len, message.payload.len), encoder.writeHpub, .{
             message.subject, message.reply_to, message.headers, message.payload,
@@ -178,6 +171,45 @@ pub fn publishMessage(client: *Client, message: PublishMessage) PublishError!voi
         error.Closed => return error.ConnectionClosed,
         else => |e| return e,
     };
+}
+
+const PrepareError = error{ InvalidSubject, InvalidHeader, UnsupportedFeature, PayloadTooLarge, Disconnected, ConnectionClosed };
+
+/// Checks `message` against the rules and the current connection, all but
+/// the length of its line; gives the length of its header block.
+fn prepare(client: *Client, message: PublishMessage) PrepareError!usize {
+    try subjects.validatePublish(message.subject);
+    if (message.reply_to) |reply| try subjects.validatePublish(reply);
+    try Headers.validate(message.headers);
+    const server = try client.currentServer();
+    const has_headers = message.headers.len > 0;
+    if (has_headers and !server.headers) return error.UnsupportedFeature;
+    const header_len = if (has_headers) encoder.headerBlockLen(message.headers) else 0;
+    const total = std.math.add(usize, header_len, message.payload.len) catch return error.PayloadTooLarge;
+    if (!fitsPayload(total, server.max_payload)) return error.PayloadTooLarge;
+    return header_len;
+}
+
+/// The server closes the connection on a line with longer arguments.
+fn checkLine(client: *Client, message: PublishMessage, header_len: usize) error{InvalidSubject}!void {
+    const args_len = if (message.headers.len > 0)
+        encoder.hpubArgsLen(message.subject, message.reply_to, header_len, message.payload.len)
+    else
+        encoder.pubArgsLen(message.subject, message.reply_to, message.payload.len);
+    if (args_len > client.options.options.limits.max_control_line_bytes) return error.InvalidSubject;
+}
+
+/// Queues the PUB or HPUB of a request, waiting for room until `deadline`.
+fn queueRequest(client: *Client, message: PublishMessage, header_len: usize, deadline: Io.Clock.Timestamp) Outbound.PutUntilError!void {
+    const io = client.io;
+    if (message.headers.len > 0) {
+        return client.outbound.putUntil(io, deadline, .request, encoder.hpubLen(message.subject, message.reply_to, header_len, message.payload.len), encoder.writeHpub, .{
+            message.subject, message.reply_to, message.headers, message.payload,
+        });
+    }
+    return client.outbound.putUntil(io, deadline, .request, encoder.pubLen(message.subject, message.reply_to, message.payload.len), encoder.writePub, .{
+        message.subject, message.reply_to, message.payload,
+    });
 }
 
 pub const SubscribeError = error{
@@ -269,6 +301,85 @@ pub const FlushOptions = struct {
     /// How long to wait for the server's PONG.
     timeout: Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(10), .clock = .awake } },
 };
+
+pub const RequestOptions = struct {
+    /// How long the request may take in all, the wait for room in the
+    /// outbound queue included. Every request ends: `.none` is refused.
+    timeout: Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(2), .clock = .awake } },
+};
+
+pub const RequestError = error{
+    /// The subject cannot be published to, or the line would be longer
+    /// than `limits.max_control_line_bytes`.
+    InvalidSubject,
+    InvalidHeader,
+    /// The timeout is `.none`, or the message has a reply subject: a
+    /// request uses its own.
+    InvalidOptions,
+    /// Headers and payload together exceed the server's `max_payload`.
+    PayloadTooLarge,
+    /// Headers, and the server cannot take them.
+    UnsupportedFeature,
+    /// `limits.max_pending_requests` requests wait for replies already.
+    TooManyPendingRequests,
+    /// No reply came in time.
+    Timeout,
+    /// No one subscribes to the subject.
+    NoResponders,
+    /// Not connected yet, or the connection was lost while the request
+    /// waited.
+    Disconnected,
+    ConnectionClosed,
+    Canceled,
+    OutOfMemory,
+    /// A bug in this client: the frame came out of another length.
+    ProtocolError,
+    /// The `std.Io` has no secure randomness for the inbox subject.
+    EntropyUnavailable,
+};
+
+/// Sends `payload` to `subject` and waits for one reply, which is the
+/// caller's: free it with its `deinit()`.
+///
+/// ```zig
+/// var reply = try client.request("orders.status", "42", .{});
+/// defer reply.deinit();
+/// ```
+///
+/// Every request ends: at `options.timeout`, 2 s by default, with
+/// Timeout, which also bounds the wait for room in the outbound queue.
+/// A reply that comes after that is dropped and counted as late. If the
+/// connection is lost meanwhile, the request fails with Disconnected at
+/// once: nothing is sent again. All requests share one inbox subscription,
+/// made by the first; any number may wait at once, up to
+/// `limits.max_pending_requests`.
+pub fn request(client: *Client, subject: []const u8, payload: []const u8, options: RequestOptions) RequestError!Message {
+    return client.requestMessage(.{ .subject = subject, .payload = payload }, options);
+}
+
+/// Sends `message`, headers included, the way `request` does. Its
+/// `reply_to` must be null: the reply subject is the client's.
+pub fn requestMessage(client: *Client, message: PublishMessage, options: RequestOptions) RequestError!Message {
+    if (message.reply_to != null or options.timeout == .none) return error.InvalidOptions;
+    const header_len = try client.prepare(message);
+    const io = client.io;
+    const deadline = time.deadline(io, options.timeout).?;
+    try client.inbox.subscribe(io, &client.subscriptions, &client.outbound, deadline);
+
+    var waiter: Inbox.Waiter = .{};
+    const id = try client.inbox.add(io, client.gpa, .{ .single = &waiter }, client.options.options.limits.max_pending_requests);
+    // Whatever happens, the request leaves the pending map.
+    defer client.inbox.drop(io, id, &waiter);
+    var reply_buffer: [Inbox.max_reply_len]u8 = undefined;
+    var with_reply = message;
+    with_reply.reply_to = client.inbox.replySubject(&reply_buffer, id);
+    try client.checkLine(with_reply, header_len);
+    client.queueRequest(with_reply, header_len, deadline) catch |err| switch (err) {
+        error.Closed => return client.inbox.closedError(io),
+        else => |e| return e,
+    };
+    return client.inbox.await(io, id, &waiter, deadline);
+}
 
 /// Checks `options` and copies them, so the caller may free its strings at
 /// once. Nothing touches the network before `connect()`.
@@ -374,6 +485,8 @@ pub fn close(client: *Client) void {
     if (client.attempt) |attempt| attempt.stop(io);
     client.changed.broadcast(io);
     client.mutex.unlock(io);
+    // Before the outbound queue wakes them, requests learn why.
+    client.inbox.end(io, .closed);
     client.outbound.close(io);
     // The manager closes its connection and returns.
     client.tasks.cancel(io);
@@ -387,6 +500,7 @@ pub fn deinit(client: *Client) void {
     if (client.freed) return;
     client.close();
     client.subscriptions.deinit(client.gpa);
+    client.inbox.deinit(client.gpa);
     client.outbound.deinit();
     if (client.info_json) |json| client.gpa.free(json);
     client.gpa.free(client.read_buffer);

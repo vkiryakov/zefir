@@ -4,9 +4,10 @@
 //! and password; TLS and JetStream are not part of this version.
 //!
 //! Work in progress: the client connects, keeps the connection alive with
-//! PINGs, publishes, subscribes, flushes and measures the round trip.
-//! Request/reply and reconnect come next; until then a lost connection
-//! closes the client and ends its subscriptions.
+//! PINGs, publishes, subscribes, sends requests, flushes and measures the
+//! round trip. Reconnect comes next; until then a lost
+//! connection closes the client, ends its subscriptions and fails the
+//! requests waiting for replies.
 
 const std = @import("std");
 
@@ -21,6 +22,7 @@ pub const Header = Headers.Header;
 pub const Client = @import("Client.zig");
 pub const State = Client.State;
 pub const FlushOptions = Client.FlushOptions;
+pub const RequestOptions = Client.RequestOptions;
 pub const Message = @import("Message.zig");
 pub const PublishMessage = Message.PublishMessage;
 pub const Subscription = @import("Subscription.zig");
@@ -106,12 +108,13 @@ test {
     _ = @import("Client.zig");
     _ = @import("testing/client_tests.zig");
     _ = @import("testing/messaging_tests.zig");
+    _ = @import("testing/rpc_tests.zig");
 }
 
 /// The errors of `std.Io` that the client passes through unchanged.
 const IoErrors = std.Io.net.IpAddress.ConnectError || std.Io.net.HostName.ConnectError ||
     std.Io.net.HostName.ValidateError || std.Io.net.Ip6Address.ResolveError ||
-    std.Io.net.Stream.Reader.Error || std.Io.net.Stream.Writer.Error;
+    std.Io.net.Stream.Reader.Error || std.Io.net.Stream.Writer.Error || std.Io.RandomSecureError;
 
 fn isIn(comptime Set: type, comptime name: []const u8) bool {
     @setEvalBranchQuota(100_000);
@@ -126,6 +129,7 @@ test "every error of the module's functions is in nats.Error or comes from std.I
         Client.InitError,    Client.ConnectError,      Client.FlushError,      Client.ServerInfoError,
         Options.Error,       ServerAddress.ParseError, ServerInfo.ParseError,  Headers.ValidateError,
         Client.PublishError, Client.SubscribeError,    Subscription.NextError, Subscription.UnsubscribeError,
+        Client.RequestError,
     }) |Set| {
         inline for (comptime @typeInfo(Set).error_set.error_names.?) |name| {
             if (comptime !isIn(Error, name) and !isIn(IoErrors, name)) {

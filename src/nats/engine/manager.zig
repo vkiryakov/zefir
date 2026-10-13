@@ -207,6 +207,8 @@ fn teardown(client: *Client, server: ServerAddress, exit: Exit) void {
         .read => |err| log.debug("reading from {f} failed: {t}", .{ server, err }),
         .write => |err| log.debug("writing to {f} failed: {t}", .{ server, err }),
     }
+    // Before the outbound queue wakes them, requests learn why.
+    client.inbox.end(io, if (exit == .closed) .closed else .disconnected);
     client.outbound.close(io);
     shutdown(io, client.connection.stream);
     client.connection_tasks.cancel(io);
@@ -281,20 +283,25 @@ fn readExit(err: Connection.ReadError) ?Exit {
 }
 
 /// A message the reader is in the middle of. It is kept only when a
-/// subscription takes it and it is within the limits; otherwise its bytes
-/// are read past without an allocation.
+/// subscription or a waiting request takes it and it is within the limits;
+/// otherwise its bytes are read past without an allocation.
 const Incoming = struct {
     sid: u64,
     /// Bytes of the header block and payload, as announced.
     total_len: u32,
     assembly: ?incoming.Assembly,
     skipped: Skipped,
+    /// The request a reply on the inbox names; null for a subscription's
+    /// message.
+    request: ?u64,
 
     const Skipped = enum {
         /// Kept.
         no,
         /// No subscription takes it: dropped without a word.
         unrouted,
+        /// A reply no request waits for: counted as late.
+        late,
         /// Over `max_inbound_frame_bytes` or `max_header_bytes`, or more
         /// than its subscription holds even when empty.
         too_large,
@@ -302,9 +309,19 @@ const Incoming = struct {
     };
 
     fn begin(client: *Client, msg: Parser.Msg) Incoming {
-        var in: Incoming = .{ .sid = msg.sid, .total_len = msg.total_len, .assembly = null, .skipped = .no };
+        var in: Incoming = .{ .sid = msg.sid, .total_len = msg.total_len, .assembly = null, .skipped = .no, .request = null };
         const limits = &client.options.options.limits;
-        const holds = client.subscriptions.accepts(client.io, msg.sid) orelse {
+        const holds = if (client.inbox.owns(msg.sid)) reply: {
+            const id = client.inbox.requestId(msg.subject) orelse {
+                in.skipped = .unrouted;
+                return in;
+            };
+            in.request = id;
+            break :reply client.inbox.accepts(client.io, id) orelse {
+                in.skipped = .late;
+                return in;
+            };
+        } else client.subscriptions.accepts(client.io, msg.sid) orelse {
             in.skipped = .unrouted;
             return in;
         };
@@ -328,10 +345,11 @@ const Incoming = struct {
     /// when it could not be kept.
     fn finish(in: *Incoming, client: *Client) void {
         if (in.skipped == .unrouted) return;
+        if (in.request) |id| return in.finishReply(client, id);
         const message: ?Message = if (in.assembly) |*assembly| assembly.finish() else null;
         const pushed = client.subscriptions.deliver(client.io, in.sid, message) orelse return;
         switch (in.skipped) {
-            .no, .unrouted => {},
+            .no, .unrouted, .late => {},
             .too_large => log.warn("a message of {d} bytes for subscription {d} is over the limits: dropped", .{ in.total_len, in.sid }),
             .no_memory => log.warn("no memory for a message of {d} bytes for subscription {d}: dropped", .{ in.total_len, in.sid }),
         }
@@ -344,6 +362,18 @@ const Incoming = struct {
             };
         } else if (pushed.overflow_began) {
             log.warn("subscription {d} is a slow consumer: messages dropped", .{in.sid});
+        }
+    }
+
+    /// The reply to request `id` is complete: to the request, or late.
+    fn finishReply(in: *Incoming, client: *Client, id: u64) void {
+        if (in.skipped == .late) return client.inbox.noteLate(client.io);
+        const message: ?Message = if (in.assembly) |*assembly| assembly.finish() else null;
+        _ = client.inbox.deliver(client.io, id, message);
+        switch (in.skipped) {
+            .no, .unrouted, .late => {},
+            .too_large => log.warn("a reply of {d} bytes is over the limits: dropped", .{in.total_len}),
+            .no_memory => log.warn("no memory for a reply of {d} bytes: dropped", .{in.total_len}),
         }
     }
 
