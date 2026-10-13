@@ -638,7 +638,8 @@ test "requestMany: the stream ends at its deadline, and what came before comes o
     var s: Served = undefined;
     try s.start(.{ .servers = &.{} });
     defer s.deinit();
-    const responses = try s.client.requestMany("many.2", "?", many(200, 32));
+    // Ample time for both replies, wherever timers are coarse.
+    const responses = try s.client.requestMany("many.2", "?", many(1000, 32));
     defer responses.deinit();
     const deadline = responses.deadline;
     try expectResponse(responses, "r1");

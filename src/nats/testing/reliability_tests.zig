@@ -339,22 +339,37 @@ test "retry_initial_connect: connect() returns at once, and the client connects 
     try server.await(io);
 }
 
+/// Takes every connection and closes it before INFO, until canceled.
+fn serveRefusing(io: Io, listener: *net.Server, record: *Record) anyerror!void {
+    while (true) {
+        var peer: FakeServer.Peer = undefined;
+        try peer.accept(io, listener);
+        _ = record.accepted.fetchAdd(1, .monotonic);
+        peer.close();
+    }
+}
+
 test "with retry_initial_connect, close() stops the attempts at once" {
     const io = testing.io;
-    // A port nobody listens on.
-    var gone = try FakeServer.listen(io);
+    // Every attempt fails at once; a closed port would not do: Windows
+    // takes seconds to refuse a connection on loopback.
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var record: Record = .{};
+    defer record.deinit();
+    var server = try io.concurrent(serveRefusing, .{ io, &listener, &record });
+    defer server.cancel(io) catch {};
     var url: [64]u8 = undefined;
-    const dead = try FakeServer.url(&gone, &url);
-    gone.deinit(io);
-    var client: Client = try .init(testing.allocator, io, .{ .servers = &.{dead}, .retry_initial_connect = true });
+    var client: Client = try .init(testing.allocator, io, .{ .servers = &.{try FakeServer.url(&listener, &url)}, .retry_initial_connect = true });
     defer client.deinit();
     try client.connect();
     try testing.expectEqual(.reconnecting, client.state());
     try testing.expectError(error.Disconnected, client.flush(quick));
-    // The backoff has grown by now; close() does not wait for it.
-    try io.sleep(.fromMilliseconds(600), .awake);
+    // After a failed attempt the client waits about half a second before
+    // the next; close() does not wait for it.
+    try awaitAccepted(&record, 1);
     const start = Io.Clock.awake.now(io);
     client.close();
     try testing.expectEqual(.closed, client.state());
-    try testing.expect(start.durationTo(Io.Clock.awake.now(io)).toMilliseconds() < 500);
+    try testing.expect(start.durationTo(Io.Clock.awake.now(io)).toMilliseconds() < 300);
 }

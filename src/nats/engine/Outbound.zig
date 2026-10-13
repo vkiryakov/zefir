@@ -963,13 +963,20 @@ test "a put with a deadline goes in when room comes in time, and one that timed 
     defer q.deinit();
     // Room at once: the deadline does not matter.
     try putNamedUntil(&q, io, "a", time.after(io, .zero));
-    var soon = try io.concurrent(putNamedUntil, .{ &q, io, "soon", time.after(io, .fromMilliseconds(30)) });
+    // Its deadline leaves the next put ample time to get in line behind it,
+    // even where sleeps are counted in ticks of ~15.6 ms, as on Windows.
+    const soon_deadline = time.after(io, .fromSeconds(1));
+    var soon = try io.concurrent(putNamedUntil, .{ &q, io, "soon", soon_deadline });
     defer soon.cancel(io) catch {};
     try awaitRoomWaiters(&q, io, 1);
-    var later = try io.concurrent(putNamedUntil, .{ &q, io, "later", time.after(io, .fromSeconds(5)) });
+    var later = try io.concurrent(putNamedUntil, .{ &q, io, "later", time.after(io, .fromSeconds(30)) });
     defer later.cancel(io) catch {};
     try awaitRoomWaiters(&q, io, 2);
     try testing.expectError(error.Timeout, soon.await(io));
+    // Not before its deadline, on the deadline's own clock; the put behind
+    // it still waits.
+    try testing.expect(time.expired(io, soon_deadline));
+    try testing.expectEqual(1, q.roomWaiters(io));
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(testing.allocator);
     try drainOnce(&q, io, &out);

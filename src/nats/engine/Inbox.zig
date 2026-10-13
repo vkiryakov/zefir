@@ -1000,12 +1000,12 @@ test "after the deadline of a requestMany its replies are late" {
     const io = testing.io;
     var inbox = testInbox();
     defer inbox.deinit(testing.allocator);
-    const deadline = time.after(io, .fromMilliseconds(10));
-    const responses = try addStream(&inbox, io, deadline, .{ .messages = 4, .bytes = 1024 });
+    const responses = try addStream(&inbox, io, soon(io), .{ .messages = 4, .bytes = 1024 });
     defer destroyResponses(testing.allocator, responses);
     defer inbox.forget(io, responses);
     try testing.expectEqual(.taken, inbox.deliver(io, responses.id, try testReply("r", null, "in time")));
-    while (!time.expired(io, deadline)) try io.sleep(.fromMilliseconds(1), .awake);
+    // The deadline passes, without a race against a short real one.
+    responses.deadline = time.after(io, .zero);
     try testing.expectEqual(.late, inbox.deliver(io, responses.id, try testReply("r", null, "after")));
     try expectQueued(responses, "in time");
 }
