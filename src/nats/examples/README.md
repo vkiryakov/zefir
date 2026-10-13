@@ -191,6 +191,7 @@ const exe = b.addExecutable(.{
             .{ .name = "zio", .module = zio.module("zio") },
             .{ .name = "confy", .module = zefir.module("zefir-confy") },
             .{ .name = "log", .module = zefir.module("zefir-log") },
+            .{ .name = "core", .module = zefir.module("zefir-core") },
         },
     }),
 });
@@ -447,10 +448,11 @@ in nats.go and the NATS specification: `get("Trace-Id")` does not find
 `next` waits as long as it takes; give it a timeout to wait less:
 
 ```zig
-const msg = sub.next(.{ .timeout = .{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } } }) catch |err| switch (err) {
+var msg = (sub.next(.{ .timeout = .{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } } }) catch |err| switch (err) {
     error.Timeout => return, // nothing came within a second
     else => |e| return e,
-};
+}) orelse return;
+defer msg.deinit();
 ```
 
 `next` returns null once the subscription has ended normally: after
@@ -820,8 +822,8 @@ counts; it never loses a message silently.
 > [!WARNING]
 > **The subscription limits are much smaller than nats.go's.** A
 > subscription holds 1024 messages and 8 MiB waiting for `next()`. nats.go
-> holds 65,536 messages in a synchronous subscription and 500,000 (and
-> 64 MiB) in an asynchronous one: 64 to 500 times more. A burst that
+> holds 65,536 messages in a synchronous subscription and 500,000 in an
+> asynchronous one, 64 MiB in both: 64 to 500 times more messages. A burst that
 > nats.go absorbs can overflow a subscription here and drop messages. If
 > your subscribers fall behind in bursts, raise `.pending` for those
 > subscriptions, or read faster, with more tasks in a queue group.
@@ -985,9 +987,12 @@ barrier: the server handles the connection in order.
 
 ### When it reconnects
 
-The first attempt is immediate. After a failed one the client waits:
+The first attempt is immediate after a connection that lasted at least
+`reconnect.max_delay` (10 s), or that left a server in lame duck mode. After
+a shorter one, and after a failed attempt, the client waits:
 `reconnect.min_delay` (500 ms), then twice that, and so on, up to
-`reconnect.max_delay` (10 s), which it never exceeds. With `jitter` on (the
+`reconnect.max_delay`, which it never exceeds. That is why the restart
+above took about half a second: the connection had lasted only two. With `jitter` on (the
 default), every wait is cut by a random part of up to a fifth, so a
 hundred clients that lost the same server do not come back in the same
 millisecond.
@@ -995,7 +1000,7 @@ millisecond.
 - It goes round the servers: those you listed and those the cluster
   announced, in random order unless `randomize_servers = false`.
 - A connection that lasted less than `max_delay` counts as a failed
-  attempt. A server that accepts and drops every connection is tried again
+  attempt: a server that accepts and drops every connection is tried again
   after growing waits, never in a tight loop.
 - `reconnect.max_attempts` (null: forever) gives up after that many
   failures in a row; the client then closes with reason
@@ -1143,7 +1148,8 @@ fn logEvents(client: *nats.Client, events_log: log.Logger) nats.Client.NextEvent
 One task at a time may wait in `nextEvent`. The client keeps
 `limits.max_event_queue` events (1024); while that many wait, newer ones
 are dropped and counted in `stats().dropped_events`, except `closed`, which
-always comes. After `closed`, `nextEvent` returns null. An event owns no
+always comes. After `close()`, `nextEvent` hands out what waits, then
+`closed`, then null. An event owns no
 memory: a text in it is cut to 128 bytes.
 
 The reasons a client closes, `nats.CloseReason`: `closed` (by `close()` or
@@ -1189,9 +1195,10 @@ std.log.info("in {d}, out {d}, dropped {d}, uncertain {d}, reconnects {d}", .{
 
 ## Errors
 
-Every function lists the errors it returns, a subset of `nats.Error`, plus
-the network errors of `std.Io`, such as `ConnectionRefused`, which pass
-through unchanged. Switch on them by name:
+Every function lists the errors it returns: a subset of `nats.Error`, plus
+errors of `std.Io` that pass through unchanged, the network errors such as
+`ConnectionRefused`, and `EntropyUnavailable` from `request` and
+`requestMany`. Switch on them by name:
 
 | Error                                            | Meaning                                                         |
 | ------------------------------------------------ | --------------------------------------------------------------- |
@@ -1217,6 +1224,7 @@ through unchanged. Switch on them by name:
 | `ProtocolError`                                  | the server broke the protocol, or says the client did           |
 | `ConcurrencyUnavailable`                         | the `std.Io` cannot run the client's tasks                      |
 | `OutOfMemory`                                    | no memory                                                       |
+| `EntropyUnavailable` (from `std.Io`)             | no secure randomness for the inbox name of the first request    |
 
 Errors the server reports later, outside any call, such as a refused
 subscription, come as [events](#events). A subscription the server
@@ -1314,12 +1322,12 @@ The client runs on any `std.Io` that can run tasks at the same time;
 without that, `connect()` fails with `ConcurrencyUnavailable`. Two are
 known to work, both tested:
 
-|                     | `std.Io.Threaded`                              | zio                                                      |
-| ------------------- | ---------------------------------------------- | -------------------------------------------------------- |
-| A waiting task      | an OS thread                                   | a coroutine with a small stack                           |
-| Good for            | tools, tests, a few connections and waiters    | services: thousands of tasks waiting at once             |
-| DNS                 | the system resolver, which may not be canceled | zio's own resolver on Linux                              |
-| Where it comes from | `init.io` in `main`                            | your build: `zio.Runtime.init(gpa, .{})`, then `rt.io()` |
+|                     | `std.Io.Threaded`                                                                                                                                                | zio                                                      |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| A waiting task      | an OS thread                                                                                                                                                     | a coroutine with a small stack                           |
+| Good for            | tools, tests, a few connections and waiters                                                                                                                      | services: thousands of tasks waiting at once             |
+| DNS                 | macOS, and Linux with glibc: the system's blocking `getaddrinfo`, which cancelation may not stop; Linux without glibc: std's own resolver; Windows: `DnsQueryEx` | zio's own resolver on Linux                              |
+| Where it comes from | `init.io` in `main`                                                                                                                                              | your build: `zio.Runtime.init(gpa, .{})`, then `rt.io()` |
 
 With zio, create one runtime for the whole application and give its `io`
 to every component, as [zio_app.zig](zio_app.zig) does:
@@ -1373,9 +1381,9 @@ A few more rules:
   `std.Io`: cancel the task, and the call returns `Canceled`.
 
 > [!NOTE]
-> **DNS on macOS with `std.Io.Threaded`.** There, a host name is resolved
-> by the system's blocking `getaddrinfo`, which cancelation may not
-> interrupt. `connect_timeout` covers DNS, TCP and the handshake of one
+> **DNS with `std.Io.Threaded` on macOS, and on Linux with glibc.** There,
+> a host name is resolved by the system's blocking `getaddrinfo`, which
+> cancelation may not interrupt. `connect_timeout` covers DNS, TCP and the handshake of one
 > attempt, but a slow resolver can stretch an attempt, and a `close()`
 > during it, past that. An IP address, or zio, avoids it.
 
@@ -1414,10 +1422,11 @@ On Windows, after the client shuts its own socket down, the last read
 ends with a status that std does not map to an error, and in Debug builds
 std prints it with a stack trace. The client takes that read as the end of
 the connection, so nothing is wrong; to hide the print, turn the tracing
-off in your root file:
+off in your root file, next to what you set there already, such as the
+examples' `logFn`:
 
 ```zig
-pub const std_options: std.Options = .{ .unexpected_error_tracing = false };
+pub const std_options: std.Options = .{ .logFn = log.stdLogFn, .unexpected_error_tracing = false };
 ```
 
 </details>
@@ -1440,66 +1449,106 @@ cd tests/nats
 zig build bench
 ```
 
-starts the plain server of `docker-compose.yml` and runs
+starts the servers of `docker-compose.yml` and runs, against the plain one,
 `tests/nats/bench/main.zig`, built with ReleaseFast: publishing messages
 of 16 bytes to 16 KiB, publishing to a subscriber of another client, and
 request/reply with 1, 16 and 256 requests at a time, on zio with one
 executor and with four. For each it prints the messages per second and the
 megabytes per second, and for requests the median, 99th percentile and
-slowest round trip.
+slowest round trip, after 100 requests that are not timed: the first one
+also subscribes the inbox.
 
-The numbers below come from a ReleaseSafe build (`zig build bench
--Dbench-optimize=ReleaseSafe`), which keeps every safety check; a
-ReleaseFast build, what `zig build bench` makes, is faster. Machine: Apple
-M4 Max, 16 cores, 48 GB, macOS 26.3, busy with other work at the time (load
-average about 9); server `nats:2.15.0-alpine` in Docker Desktop 28.3.2,
-whose port forwarding sits between the client and the server and caps the
-throughput at about 150 MB/s.
+Two runs of it follow. Their numbers describe two machines and two network
+paths, one run each, and they are no promise for yours: run the benchmark
+where your service runs, against your server.
+
+**GitHub Actions ubuntu-latest (shared runner), ReleaseFast.** The workflow
+`.github/workflows/bench.yml` runs `zig build bench` on a GitHub-hosted
+runner: Ubuntu 24.04, 4 vCPUs of an AMD EPYC 7763, 16 GB, Docker 28.0.4; the
+server runs on the same 4 vCPUs.
+[Run 38456791596](https://github.com/vkiryakov/zefir/actions/runs/38456791596):
+
+```text
+zefir-nats benchmark: fast build, linux x86_64, server nats://127.0.0.1:14222
+
+zio, 1 executor
+  scenario                             messages     messages/s       MB/s
+  publish, 16 B                         1000000        3805239       60.9
+  publish, 128 B                        1000000        2704807      346.2
+  publish, 1024 B                        300000         779759      798.5
+  publish, 16384 B                        30000          53421      875.3
+  publish to a subscriber, 16 B          300000        1268232       20.3
+  publish to a subscriber, 128 B         300000         994780      127.3
+  publish to a subscriber, 1024 B        100000         484034      495.7
+  request/reply, 16 B                  requests     requests/s    p50 µs    p99 µs    max µs
+  1 at a time                             10000           2904        335        603       2286
+  16 at a time                            50000          38714        398        718       1496
+  256 at a time                           49920         200074       1148       3087       4291
+
+zio, 4 executors
+  scenario                             messages     messages/s       MB/s
+  publish, 16 B                         1000000        3955917       63.3
+  publish, 128 B                        1000000        2742428      351.0
+  publish, 1024 B                        300000         779127      797.8
+  publish, 16384 B                        30000          49991      819.0
+  publish to a subscriber, 16 B          300000        1380210       22.1
+  publish to a subscriber, 128 B         300000        1021218      130.7
+  publish to a subscriber, 1024 B        100000         555363      568.7
+  request/reply, 16 B                  requests     requests/s    p50 µs    p99 µs    max µs
+  1 at a time                             10000           2915        332        574       2273
+  16 at a time                            50000          35353        421       1004       2490
+  256 at a time                           49920         178651       1281       3502       5832
+```
+
+**A Mac, ReleaseSafe.** `zig build bench -Dbench-optimize=ReleaseSafe`,
+which keeps every safety check, on an Apple M4 Max, 16 cores, 48 GB, macOS
+26.3, busy with other work at the time (load average about 10); server
+`nats:2.15.0-alpine` in Docker Desktop 28.3.2, whose port forwarding sits
+between the client and the server and caps the throughput at about
+150 MB/s:
 
 ```text
 zefir-nats benchmark: safe build, macos aarch64, server nats://127.0.0.1:14222
 
 zio, 1 executor
   scenario                             messages     messages/s       MB/s
-  publish, 16 B                         1000000        3759142       60.1
-  publish, 128 B                        1000000        1001210      128.2
-  publish, 1024 B                        300000         145768      149.3
-  publish, 16384 B                        30000           9497      155.6
-  publish to a subscriber, 16 B          300000        2742779       43.9
-  publish to a subscriber, 128 B         300000         953189      122.0
-  publish to a subscriber, 1024 B        100000         141525      144.9
+  publish, 16 B                         1000000        3617745       57.9
+  publish, 128 B                        1000000        1011445      129.5
+  publish, 1024 B                        300000         149117      152.7
+  publish, 16384 B                        30000           9529      156.1
+  publish to a subscriber, 16 B          300000        3003785       48.1
+  publish to a subscriber, 128 B         300000         929412      119.0
+  publish to a subscriber, 1024 B        100000         135035      138.3
   request/reply, 16 B                  requests     requests/s    p50 µs    p99 µs    max µs
-  1 at a time                             10000           2408        384       1357       5941
-  16 at a time                            50000          32312        441       1623       3231
-  256 at a time                           49920         198241       1050       3187       5404
+  1 at a time                             10000           2402        384       1424       5500
+  16 at a time                            50000          34631        421       1473       3855
+  256 at a time                           49920         191760       1103       3744       4743
 
 zio, 4 executors
   scenario                             messages     messages/s       MB/s
-  publish, 16 B                         1000000        3762255       60.2
-  publish, 128 B                        1000000        1026675      131.4
-  publish, 1024 B                        300000         146880      150.4
-  publish, 16384 B                        30000           9454      154.9
-  publish to a subscriber, 16 B          300000        2756843       44.1
-  publish to a subscriber, 128 B         300000        1009018      129.2
-  publish to a subscriber, 1024 B        100000         140571      143.9
+  publish, 16 B                         1000000        3541022       56.7
+  publish, 128 B                        1000000        1016999      130.2
+  publish, 1024 B                        300000         146396      149.9
+  publish, 16384 B                        30000           9091      148.9
+  publish to a subscriber, 16 B          300000        3208570       51.3
+  publish to a subscriber, 128 B         300000        1066525      136.5
+  publish to a subscriber, 1024 B        100000         135685      138.9
   request/reply, 16 B                  requests     requests/s    p50 µs    p99 µs    max µs
-  1 at a time                             10000           2390        384       1402       4013
-  16 at a time                            50000          27646        500       1617       4646
-  256 at a time                           49920         164148       1415       3700       4758
+  1 at a time                             10000           2433        384       1318       4139
+  16 at a time                            50000          28357        465       1780       5851
+  256 at a time                           49920         162645       1495       2926       3631
 ```
 
-Publishing runs at the same speed on one executor and on four: one
-connection is one stream of bytes, written by one task. Many requests at a
-time are 15 to 20 percent slower on four executors, as the tasks hop
-between threads; more executors pay off when your own work, not the
-client, needs the cores. These numbers describe one machine and one
-network path, and they are no promise for yours: run the benchmark where
-your service runs, against your server.
+One connection is one stream of bytes, written by one task, so a client
+publishes about as fast on one executor as on four. With many requests at
+a time, these runs were 10 to 20 percent slower on four executors; one run
+each, on shared or busy machines, cannot say whether that holds, or why.
+More executors pay off when your own work, not the client, needs the cores.
 
 The stress tests, `zig build stress`, show what the client holds under
-load: 50,000 requests waiting at once take 4 to 6 MiB of the client's
-heap, and a storm of 40 cut connections leaves every client connected,
-subscribed, and with every lost message counted.
+load: 50,000 requests waiting at once take 3.5 to 7.5 MiB of the client's
+heap, and a storm of 40 rounds that cut about 300 connections leaves every
+client connected, subscribed, and with every lost message counted.
 
 ## Protocol coverage
 
