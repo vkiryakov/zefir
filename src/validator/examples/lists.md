@@ -5,11 +5,6 @@ items, `v.uniqueItems` and `v.uniqueBy` reject repeated items or keys,
 `v.containsAll` and `v.containsNone` require or forbid listed values among the
 items, and `v.each` declares the rules of the items.
 
-> [!NOTE]
-> `v.minItems`, `v.maxItems` and `v.each` ship since v0.3.0; `v.uniqueItems`,
-> `v.uniqueBy`, `v.containsAll` and `v.containsNone` ship in v0.4.0, and until
-> then they are on the `dev` branch ([Installation](README.md#installation)).
-
 ```zig
 const Order = struct {
     tags: []const []const u8,
