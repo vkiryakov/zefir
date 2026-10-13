@@ -29,7 +29,20 @@
 //! same line.
 
 const std = @import("std");
+const model = @import("model.zig");
 
-test "rpc placeholder" {
-    try std.testing.expect(true);
+pub const Route = model.Route;
+pub const Metadata = model.Metadata;
+pub const Response = model.Response;
+pub const Status = model.Status;
+pub const Failure = model.Failure;
+pub const Violation = model.Violation;
+
+/// The types and helpers a transport works with.
+pub const transport = @import("transport.zig");
+
+test {
+    std.testing.refAllDecls(@This());
+    _ = @import("model.zig");
+    _ = @import("transport.zig");
 }
