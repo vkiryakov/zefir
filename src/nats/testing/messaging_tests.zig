@@ -1008,3 +1008,21 @@ test "a message larger than its subscription holds is dropped unallocated, and t
         try s.finish();
     }
 }
+
+test "unsubscribe() from another task while next() waits: null at once" {
+    const io = testing.io;
+    var s: Scripted = undefined;
+    try s.start(testing.allocator, .{ .servers = &.{} }, &.{ .{ .expect = "SUB idle 1" }, .{ .expect = "UNSUB 1" } });
+    defer s.deinit();
+    const idle = try s.client.subscribe("idle", .{});
+    defer idle.deinit();
+    var receiver = try io.concurrent(nextLong, .{idle});
+    defer _ = receiver.cancel(io) catch null;
+    try awaitReceiving(idle);
+    const start = Io.Clock.awake.now(io);
+    try idle.unsubscribe();
+    try testing.expect(try receiver.await(io) == null);
+    try testing.expect(elapsedSince(io, start).toSeconds() < 1);
+    try s.client.flush(quick);
+    try s.finish();
+}

@@ -410,3 +410,127 @@ fn garbageHeaders(io: Io) !void {
 test "a broken header block from another publisher: the message arrives whole" {
     try e2e.onZio(garbageHeaders);
 }
+
+fn maxPayloadBoundary(io: Io) !void {
+    var client: nats.Client = try .init(testing.allocator, io, .{ .servers = &.{e2e.servers.plain} });
+    defer client.deinit();
+    try client.connect();
+    const max: usize = max: {
+        const info = (try client.serverInfo(testing.allocator)) orelse return error.TestNoInfo;
+        defer info.deinit();
+        break :max @intCast(info.value.max_payload);
+    };
+    const sub = try client.subscribe("e2e.max", .{});
+    defer sub.deinit();
+    try client.flush(.{});
+    // A block of 18 bytes; the server counts it with the payload.
+    const headers: []const nats.Header = &.{.{ .name = "A", .value = "b" }};
+    const payload = try testing.allocator.alloc(u8, max - 18 + 1);
+    defer testing.allocator.free(payload);
+    @memset(payload, 'm');
+    try client.publishMessage(.{ .subject = "e2e.max", .headers = headers, .payload = payload[0 .. max - 18] });
+    try testing.expectError(error.PayloadTooLarge, client.publishMessage(.{ .subject = "e2e.max", .headers = headers, .payload = payload }));
+    try client.flush(.{});
+    try testing.expect(client.isConnected());
+    var msg = (try sub.next(within_five_seconds)) orelse return error.TestNoMessage;
+    defer msg.deinit();
+    try testing.expectEqual(max - 18, msg.payload.len);
+    try testing.expectEqualStrings("b", msg.headers.get("A").?);
+}
+
+test "headers and payload exactly at the server's max_payload pass, a byte more is PayloadTooLarge" {
+    try e2e.onZio(maxPayloadBoundary);
+}
+
+fn controlLineBoundary(io: Io) !void {
+    var client: nats.Client = try .init(testing.allocator, io, .{ .servers = &.{e2e.servers.plain} });
+    defer client.deinit();
+    try client.connect();
+    var subject: [4095]u8 = @splat('s');
+    subject[0] = 'p';
+    // SUB <subject> 1 and PUB <subject> 0: 4094 + 1 + 1 = 4096 bytes of
+    // arguments, the server's max_control_line.
+    const sub = try client.subscribe(subject[0..4094], .{});
+    defer sub.deinit();
+    try client.flush(.{});
+    try client.publish(subject[0..4094], "");
+    try client.flush(.{});
+    try testing.expect(client.isConnected());
+    var msg = (try sub.next(within_five_seconds)) orelse return error.TestNoMessage;
+    msg.deinit();
+    // One byte more never goes out: the server would close the connection.
+    try testing.expectError(error.InvalidSubject, client.publish(&subject, ""));
+    try testing.expectError(error.InvalidSubject, client.subscribe(&subject, .{}));
+    try client.flush(.{});
+    try testing.expect(client.isConnected());
+}
+
+test "4096 bytes of arguments pass the server, one more is InvalidSubject" {
+    try e2e.onZio(controlLineBoundary);
+}
+
+fn refusedQueueSubscription(io: Io) !void {
+    var client: nats.Client = try .init(testing.allocator, io, .{
+        .servers = &.{e2e.servers.auth},
+        .auth = .{ .user_password = .{ .username = "limited", .password = "limited" } },
+    });
+    defer client.deinit();
+    try client.connect();
+    // The server names the queue group too, quoted with escapes.
+    const grouped = try client.subscribe("forbidden", .{ .queue = "g\"q" });
+    defer grouped.deinit();
+    const allowed = try client.subscribe("e2e.queue.allowed", .{ .queue = "g\"q" });
+    defer allowed.deinit();
+    try testing.expectError(error.PermissionDenied, grouped.next(within_five_seconds));
+    try client.publish("e2e.queue.allowed", "fine");
+    try client.flush(.{});
+    try expectMessage(allowed, "e2e.queue.allowed", "fine");
+}
+
+test "a refused queue subscription gives PermissionDenied" {
+    try e2e.onZio(refusedQueueSubscription);
+}
+
+fn unsubscribeStopsDelivery(io: Io) !void {
+    var client: nats.Client = try .init(testing.allocator, io, .{ .servers = &.{e2e.servers.plain} });
+    defer client.deinit();
+    try client.connect();
+    const sub = try client.subscribe("e2e.unsub", .{});
+    defer sub.deinit();
+    try client.flush(.{});
+    try client.publish("e2e.unsub", "1");
+    try client.flush(.{});
+    try expectMessage(sub, "e2e.unsub", "1");
+    try sub.unsubscribe();
+    try client.publish("e2e.unsub", "2");
+    try client.flush(.{});
+    try testing.expect(try sub.next(within_five_seconds) == null);
+    try testing.expectEqual(1, sub.stats().received);
+    // Unsubscribing again changes nothing.
+    try sub.unsubscribe();
+}
+
+test "unsubscribe() stops the delivery" {
+    try e2e.onZio(unsubscribeStopsDelivery);
+}
+
+fn unsubscribeDuringNext(io: Io) !void {
+    var client: nats.Client = try .init(testing.allocator, io, .{ .servers = &.{e2e.servers.plain} });
+    defer client.deinit();
+    try client.connect();
+    const idle = try client.subscribe("e2e.unsub.idle", .{});
+    defer idle.deinit();
+    var receiver = try io.concurrent(nextLong, .{idle});
+    defer _ = receiver.cancel(io) catch null;
+    try awaitReceiving(io, idle);
+    const start = Io.Clock.awake.now(io);
+    try idle.unsubscribe();
+    try testing.expect(try receiver.await(io) == null);
+    try testing.expect(elapsedSince(io, start).toSeconds() < 1);
+    try client.flush(.{});
+    try testing.expect(client.isConnected());
+}
+
+test "unsubscribe() from another task while next() waits: null at once" {
+    try e2e.onZio(unsubscribeDuringNext);
+}
