@@ -8,10 +8,6 @@ periodicals, products and recordings; `v.btcAddress` and `v.ethereumAddress`
 for crypto addresses. Each rule has a predicate with the same verdict,
 `v.isUuid` … `v.isEthereumAddress`, for code outside `field_rules`.
 
-> [!NOTE]
-> These rules ship in v0.4.0; until then they are on the `dev` branch
-> ([Installation](README.md#installation)).
-
 ```zig
 const Payout = struct {
     request_id: []const u8,

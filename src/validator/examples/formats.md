@@ -8,10 +8,6 @@ coordinates written as text (`v.numberString`, `v.decimal`, `v.booleanString`,
 predicate with the same grammar, `v.isEmail(s)` and so on, for code outside
 `field_rules`.
 
-> [!NOTE]
-> These rules ship in v0.4.0; until then they are on the `dev` branch
-> ([Installation](README.md#installation)).
-
 ```zig
 const Server = struct {
     host: []const u8,
