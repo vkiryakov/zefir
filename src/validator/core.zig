@@ -1829,7 +1829,8 @@ pub const hints = struct {
     pub const contains_none_on_string = "for a substring use v.notContains";
     /// A `""` listed in `containsNone`.
     pub const reject_empty_items = "use v.each(v.notEmpty) to reject empty items";
-    /// `numberString`, `decimal`, `hexadecimal` and `octal` on a number field.
+    /// `digits`, `numberString`, `decimal`, `hexadecimal` and `octal` on a
+    /// number field.
     pub const already_a_number = "the field is already a number: use v.min, v.max or v.range";
     /// `booleanString` on a bool field.
     pub const bool_needs_no_rule = "a bool field is already a boolean and needs no rule";
@@ -1844,8 +1845,6 @@ pub const hints = struct {
     pub const lat_long_on_number = "use two float fields with v.latitude and v.longitude";
     /// `minLength(0)`, which every valid UTF-8 string passes.
     pub const use_utf8 = "use v.utf8 to require valid UTF-8";
-    /// `digits` on an integer or a float field.
-    pub const number_field = "the field is already a number: use v.min, v.max or v.range";
     /// `contains` and `notContains` on a list of strings, after the `each`
     /// call (`searchItems`).
     pub const search_items = "to search inside each item, or v.containsAll(.{ ... }) to require whole items";

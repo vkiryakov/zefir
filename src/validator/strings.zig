@@ -41,7 +41,7 @@ fn digitsFits(comptime rule: *const Rule, comptime T: type, comptime where: []co
 /// The declaration error of `digits` on the unwrapped field type `T`, or
 /// null: a number field is already a number.
 fn digitsProblem(comptime rule: *const Rule, comptime T: type, comptime where: []const u8) ?[]const u8 {
-    return core.stringProblem(rule, T, where, if (core.isNumber(T)) core.hints.number_field else null);
+    return core.stringProblem(rule, T, where, if (core.isNumber(T)) core.hints.already_a_number else null);
 }
 
 /// The field-type check of `contains` and `notContains`.
