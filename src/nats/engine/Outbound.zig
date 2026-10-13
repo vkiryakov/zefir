@@ -13,6 +13,7 @@ const Allocator = std.mem.Allocator;
 const Writer = Io.Writer;
 const encoder = @import("../protocol/encoder.zig");
 const time = @import("time.zig");
+const Broadcast = @import("Broadcast.zig");
 const Outbound = @This();
 
 pub const Kind = enum {
@@ -72,12 +73,13 @@ gpa: Allocator,
 /// Frames other than PINGs wait while `queued` is at least this.
 limit: usize,
 mutex: Io.Mutex = .init,
-/// Signaled when the queue drops below the limit.
-room: Io.Condition = .init,
+/// Woken when the queue drops below the limit. Publishers wait here, as
+/// many as there are tasks: a Broadcast has no limit on waiters.
+room: Broadcast = .{},
 /// Signaled when there is something to write.
 ready: Io.Condition = .init,
-/// Signaled when a PONG arrives.
-answered: Io.Condition = .init,
+/// Woken when a PONG arrives.
+answered: Broadcast = .{},
 /// The bytes of the frames, oldest first.
 chunks: std.Deque(*Chunk) = .empty,
 /// An empty chunk kept for the next frames.
@@ -86,8 +88,6 @@ spare: ?*Chunk = null,
 frames: std.Deque(Frame) = .empty,
 /// What the frames other than PINGs cost: their bytes and their records.
 queued: usize = 0,
-/// Puts waiting for room.
-room_waiters: u32 = 0,
 /// PONGs owed to the server.
 pongs_owed: u32 = 0,
 /// PONGs in the batch the writer has.
@@ -131,9 +131,7 @@ pub fn put(q: *Outbound, io: Io, kind: Kind, len: usize, encode: anytype, args: 
 }
 
 fn awaitRoom(q: *Outbound, io: Io) Io.Cancelable!void {
-    q.room_waiters += 1;
-    defer q.room_waiters -= 1;
-    while (!q.closed and q.queued >= q.limit) try q.room.wait(io, &q.mutex);
+    while (!q.closed and q.queued >= q.limit) try q.room.wait(io, &q.mutex, null);
 }
 
 /// Queues a PING and returns its number; PONG number n answers PING number
@@ -162,7 +160,7 @@ pub fn pongReceived(q: *Outbound, io: Io) void {
     defer q.mutex.unlock(io);
     q.pongs_received += 1;
     q.pings_out = 0;
-    q.answered.broadcast(io);
+    q.answered.wake(io);
 }
 
 /// Waits until PING number `ping` is answered, `deadline` passes or the
@@ -172,7 +170,8 @@ pub fn waitPong(q: *Outbound, io: Io, ping: u64, deadline: ?Io.Clock.Timestamp) 
     defer q.mutex.unlock(io);
     while (q.pongs_received < ping) {
         if (q.closed) return error.Closed;
-        try q.answered.waitTimeout(io, &q.mutex, time.until(deadline));
+        if (deadline) |d| if (time.expired(io, d)) return error.Timeout;
+        try q.answered.wait(io, &q.mutex, deadline);
     }
 }
 
@@ -244,7 +243,7 @@ pub fn written(q: *Outbound, io: Io, n: usize) void {
             chunk.tail = 0;
         }
     }
-    if (q.queued < q.limit) q.room.broadcast(io);
+    if (q.queued < q.limit) q.room.wake(io);
 }
 
 /// Copies the queued frames, oldest first, into `out` as far as it holds
@@ -264,9 +263,9 @@ pub fn close(q: *Outbound, io: Io) void {
     q.mutex.lockUncancelable(io);
     defer q.mutex.unlock(io);
     q.closed = true;
-    q.room.broadcast(io);
+    q.room.wake(io);
     q.ready.broadcast(io);
-    q.answered.broadcast(io);
+    q.answered.wake(io);
 }
 
 /// A chunk with room for `len` bytes after its tail: the last one, or a
@@ -342,10 +341,11 @@ fn destroyChunk(q: *Outbound, chunk: *Chunk) void {
     q.gpa.destroy(chunk);
 }
 
-fn roomWaiters(q: *Outbound, io: Io) u32 {
+/// Puts waiting for room; tests use it to know that a put waits.
+pub fn roomWaiters(q: *Outbound, io: Io) u32 {
     q.mutex.lockUncancelable(io);
     defer q.mutex.unlock(io);
-    return q.room_waiters;
+    return q.room.waiters;
 }
 
 const testing = std.testing;
