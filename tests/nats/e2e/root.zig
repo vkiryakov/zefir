@@ -11,6 +11,8 @@ const zio = @import("zio");
 /// The servers of docker-compose.yml.
 pub const servers = struct {
     pub const plain = "nats://127.0.0.1:14222";
+    /// The plain server, by its container name.
+    pub const plain_container = "zefir-nats-e2e-plain";
     pub const auth = "nats://127.0.0.1:14223";
     pub const tls = "nats://127.0.0.1:14224";
     pub const tls_first = "nats://127.0.0.1:14225";
@@ -26,9 +28,9 @@ pub fn docker(args: []const []const u8) !void {
 }
 
 /// Runs `docker` with `args` and returns what it printed; the caller frees
-/// it. It runs on the test's own `std.Io`, whatever runtime the client
-/// under test uses.
-fn dockerOutput(args: []const []const u8) ![]u8 {
+/// it with `testing.allocator`. It runs on the test's own `std.Io`,
+/// whatever runtime the client under test uses.
+pub fn dockerOutput(args: []const []const u8) ![]u8 {
     var argv: [8][]const u8 = undefined;
     argv[0] = "docker";
     @memcpy(argv[1..][0..args.len], args);
@@ -73,4 +75,5 @@ pub fn onZio(comptime scenario: fn (Io) anyerror!void) !void {
 test {
     _ = @import("connection.zig");
     _ = @import("messaging.zig");
+    _ = @import("rpc.zig");
 }

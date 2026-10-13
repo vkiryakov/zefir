@@ -30,6 +30,8 @@ x-nats: &nats
 services:
   plain:
     <<: *nats
+    # The tests read its monitoring endpoint by this name.
+    container_name: zefir-nats-e2e-plain
     command: ["--config", "/conf/plain.conf"]
     ports: ["127.0.0.1:14222:4222"]
 
