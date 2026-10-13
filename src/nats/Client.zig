@@ -259,10 +259,7 @@ pub fn serverInfo(client: *Client, gpa: Allocator) ServerInfoError!?std.json.Par
         break :copy try gpa.dupe(u8, json);
     };
     defer gpa.free(json);
-    return ServerInfo.parse(gpa, json) catch |err| switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
-        error.InvalidInfo => error.ProtocolError,
-    };
+    return try ServerInfo.parse(gpa, json);
 }
 
 const testing = std.testing;

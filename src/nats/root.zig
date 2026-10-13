@@ -104,8 +104,11 @@ fn isIn(comptime Set: type, comptime name: []const u8) bool {
     return false;
 }
 
-test "every error of the client is in nats.Error or comes from std.Io" {
-    inline for (.{ Client.InitError, Client.ConnectError, Client.FlushError, Client.ServerInfoError }) |Set| {
+test "every error of the module's functions is in nats.Error or comes from std.Io" {
+    inline for (.{
+        Client.InitError, Client.ConnectError,      Client.FlushError,     Client.ServerInfoError,
+        Options.Error,    ServerAddress.ParseError, ServerInfo.ParseError, Headers.ValidateError,
+    }) |Set| {
         inline for (comptime @typeInfo(Set).error_set.error_names.?) |name| {
             if (comptime !isIn(Error, name) and !isIn(IoErrors, name)) {
                 std.debug.print("{s} is neither in nats.Error nor from std.Io\n", .{name});

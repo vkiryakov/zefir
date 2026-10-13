@@ -154,10 +154,7 @@ fn greet(gpa: Allocator, json: []const u8, hello: ?Hello) HandshakeError!Greetin
 }
 
 fn parseInfo(gpa: Allocator, json: []const u8) HandshakeError!std.json.Parsed(ServerInfo) {
-    return ServerInfo.parse(gpa, json) catch |err| switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
-        error.InvalidInfo => error.ProtocolError,
-    };
+    return ServerInfo.parse(gpa, json);
 }
 
 /// The error a `-ERR` in the handshake ends it with; null for one that

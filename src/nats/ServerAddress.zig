@@ -12,48 +12,49 @@ host_buffer: [max_host_len]u8,
 host_len: u8,
 port: u16,
 
-pub const ParseError = error{InvalidAddress};
+pub const ParseError = error{InvalidOptions};
 
 /// Parses `nats://host:port`, `host:port`, `[::1]:4222` or a bare host; the
 /// port defaults to 4222. The `connect_urls` of INFO use the same forms
 /// without a scheme. Other schemes (`tls://`, `ws://`, `wss://`), user and
-/// password in the URL, paths and whitespace are rejected.
+/// password in the URL, paths and whitespace are InvalidOptions, the error
+/// of such a server in the client's options.
 pub fn parse(text: []const u8) ParseError!ServerAddress {
     var rest = text;
     if (std.mem.find(u8, rest, "://")) |scheme_end| {
-        if (!std.ascii.eqlIgnoreCase(rest[0..scheme_end], "nats")) return error.InvalidAddress;
+        if (!std.ascii.eqlIgnoreCase(rest[0..scheme_end], "nats")) return error.InvalidOptions;
         rest = rest[scheme_end + 3 ..];
     }
-    if (rest.len == 0) return error.InvalidAddress;
+    if (rest.len == 0) return error.InvalidOptions;
     for (rest) |c| switch (c) {
-        '@', '/', '?', '#' => return error.InvalidAddress,
-        else => if (c <= ' ' or c == 0x7f) return error.InvalidAddress,
+        '@', '/', '?', '#' => return error.InvalidOptions,
+        else => if (c <= ' ' or c == 0x7f) return error.InvalidOptions,
     };
 
     var name: []const u8 = rest;
     var port_text: ?[]const u8 = null;
     if (rest[0] == '[') {
-        const close = std.mem.findScalar(u8, rest, ']') orelse return error.InvalidAddress;
+        const close = std.mem.findScalar(u8, rest, ']') orelse return error.InvalidOptions;
         name = rest[1..close];
         // Brackets hold an IPv6 literal, optionally with a zone: `fe80::1%en0`.
-        if (name.len > max_host_len) return error.InvalidAddress;
+        if (name.len > max_host_len) return error.InvalidOptions;
         switch (std.Io.net.Ip6Address.Unresolved.parse(name)) {
             .success => {},
-            else => return error.InvalidAddress,
+            else => return error.InvalidOptions,
         }
         const after = rest[close + 1 ..];
         if (after.len > 0) {
-            if (after[0] != ':') return error.InvalidAddress;
+            if (after[0] != ':') return error.InvalidOptions;
             port_text = after[1..];
         }
     } else if (std.mem.findScalar(u8, rest, ':')) |colon| {
         // A second colon means an IPv6 literal without brackets.
-        if (std.mem.findScalarPos(u8, rest, colon + 1, ':') != null) return error.InvalidAddress;
+        if (std.mem.findScalarPos(u8, rest, colon + 1, ':') != null) return error.InvalidOptions;
         name = rest[0..colon];
         port_text = rest[colon + 1 ..];
     }
-    if (name.len == 0 or name.len > max_host_len) return error.InvalidAddress;
-    if (std.mem.findAny(u8, name, "[]") != null) return error.InvalidAddress;
+    if (name.len == 0 or name.len > max_host_len) return error.InvalidOptions;
+    if (std.mem.findAny(u8, name, "[]") != null) return error.InvalidOptions;
 
     var address: ServerAddress = .{
         .host_buffer = undefined,
@@ -65,13 +66,13 @@ pub fn parse(text: []const u8) ParseError!ServerAddress {
 }
 
 fn parsePort(text: []const u8) ParseError!u16 {
-    if (text.len == 0 or text.len > 5) return error.InvalidAddress;
+    if (text.len == 0 or text.len > 5) return error.InvalidOptions;
     var port: u32 = 0;
     for (text) |c| {
-        if (c < '0' or c > '9') return error.InvalidAddress;
+        if (c < '0' or c > '9') return error.InvalidOptions;
         port = port * 10 + (c - '0');
     }
-    if (port == 0 or port > std.math.maxInt(u16)) return error.InvalidAddress;
+    if (port == 0 or port > std.math.maxInt(u16)) return error.InvalidOptions;
     return @intCast(port);
 }
 
@@ -129,7 +130,7 @@ test "rejected forms" {
         "[:]:4222",            "[zz:zz]:4222",               "[::1::2]",        "[1:2:3:4:5:6:7:8:9]", "[fe80::1%]:4222",
         "[::ffff:1.2.3]:4222", "[localhost:1]",
     }) |text| {
-        try testing.expectError(error.InvalidAddress, parse(text));
+        try testing.expectError(error.InvalidOptions, parse(text));
     }
 }
 

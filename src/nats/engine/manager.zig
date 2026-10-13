@@ -228,7 +228,7 @@ fn readLoop(client: *Client) void {
             .pong => client.outbound.pongReceived(io),
             .ok => {},
             .info => |json| updateInfo(client, json) catch |err| switch (err) {
-                error.InvalidInfo => {
+                error.ProtocolError => {
                     lose(client, .protocol);
                     return;
                 },
@@ -343,7 +343,7 @@ fn awaitExit(client: *Client, deadline: Io.Clock.Timestamp) ?Exit {
 }
 
 /// Keeps the server's latest INFO.
-fn updateInfo(client: *Client, json: []const u8) error{ InvalidInfo, OutOfMemory }!void {
+fn updateInfo(client: *Client, json: []const u8) ServerInfo.ParseError!void {
     const info = try ServerInfo.parse(client.gpa, json);
     info.deinit();
     const copy = try client.gpa.dupe(u8, json);

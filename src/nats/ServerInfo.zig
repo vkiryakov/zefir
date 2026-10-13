@@ -33,10 +33,11 @@ nonce: []const u8 = "",
 cluster: []const u8 = "",
 domain: []const u8 = "",
 
-pub const ParseError = error{ InvalidInfo, OutOfMemory };
+pub const ParseError = error{ ProtocolError, OutOfMemory };
 
 /// Parses the JSON of an INFO line. The result owns copies of every string,
-/// so `json` may be reused at once; free it with `deinit()`.
+/// so `json` may be reused at once; free it with `deinit()`. JSON that is
+/// not an INFO, or has a known field of another type, is ProtocolError.
 pub fn parse(gpa: std.mem.Allocator, json: []const u8) ParseError!std.json.Parsed(ServerInfo) {
     return std.json.parseFromSlice(ServerInfo, gpa, json, .{
         .ignore_unknown_fields = true,
@@ -44,7 +45,7 @@ pub fn parse(gpa: std.mem.Allocator, json: []const u8) ParseError!std.json.Parse
         .allocate = .alloc_always,
     }) catch |err| switch (err) {
         error.OutOfMemory => error.OutOfMemory,
-        else => error.InvalidInfo,
+        else => error.ProtocolError,
     };
 }
 
@@ -103,7 +104,7 @@ test "strings are copied out of the input" {
 
 test "malformed INFO" {
     for ([_][]const u8{ "", "not json", "[1]", "{\"port\":70000}", "{\"port\":-1}", "{\"headers\":1}", "{\"port\":1,\"port\":2}" }) |json| {
-        try testing.expectError(error.InvalidInfo, parse(testing.allocator, json));
+        try testing.expectError(error.ProtocolError, parse(testing.allocator, json));
     }
     const empty = try parse(testing.allocator, "{}");
     defer empty.deinit();
