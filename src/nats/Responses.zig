@@ -71,7 +71,7 @@ pub fn next(r: *Responses, options: Subscription.ReceiveOptions) NextError!?Mess
             error.Timeout => {
                 if (!time.expired(io, r.deadline)) return error.Timeout;
                 // The deadline: what came comes out, then null.
-                r.stop(false);
+                r.stop();
                 continue;
             },
             error.Canceled, error.ConcurrentReceive => |e| return e,
@@ -92,18 +92,21 @@ pub fn next(r: *Responses, options: Subscription.ReceiveOptions) NextError!?Mess
     }
 }
 
-/// Ends the stream now, from any task: what waits is dropped, `next()`
-/// returns null, and responses that still come count as late.
+/// Ends the stream now, from any task, however it ended before: what
+/// waits is dropped, `next()` returns null (ConnectionClosed once the
+/// client is closed), and responses that still come count as late.
 pub fn cancel(r: *Responses) void {
-    r.stop(true);
-}
-
-/// Takes the stream out of the inbox, then ends it, dropping what waits
-/// when `discard`.
-fn stop(r: *Responses, discard: bool) void {
     const io = r.client.io;
     r.client.inbox.remove(io, r);
-    _ = r.messages.end(io, .finished, discard);
+    r.messages.cancel(io);
+}
+
+/// The deadline: the stream leaves the inbox and ends, and what came
+/// still comes out.
+fn stop(r: *Responses) void {
+    const io = r.client.io;
+    r.client.inbox.remove(io, r);
+    _ = r.messages.end(io, .finished, false);
 }
 
 /// Ends the stream and frees it, with the responses it still holds. No

@@ -1013,3 +1013,40 @@ test "close() after a stream ended normally: its next() is ConnectionClosed, as 
     s.client.close();
     try testing.expectError(error.ConnectionClosed, responses.next(.{}));
 }
+
+test "cancel() after the stream ended drops what waits, and next() is null" {
+    var s: Served = undefined;
+    try s.start(.{ .servers = &.{} });
+    defer s.deinit();
+    // Ended by max_responses, both responses waiting.
+    const full = try s.client.requestMany("many.2", "?", many(30_000, 2));
+    defer full.deinit();
+    try awaitResponses(full, 2);
+    full.cancel();
+    try testing.expect(try full.next(.{}) == null);
+    try testing.expectEqual(nats.PendingCounts{ .messages = 0, .bytes = 0 }, full.messages.pending(testing.io));
+    // Ended by no responders.
+    const nobody = try s.client.requestMany("nobody.home", "?", many(30_000, 2));
+    defer nobody.deinit();
+    try testing.expectError(error.NoResponders, nobody.next(.{}));
+    nobody.cancel();
+    try testing.expect(try nobody.next(.{}) == null);
+    try s.finish();
+}
+
+test "cancel() after a lost connection drops what came, and next() is null; after close() it stays ConnectionClosed" {
+    var s: Served = undefined;
+    try s.start(.{ .servers = &.{} });
+    defer s.deinit();
+    const lost = try s.client.requestMany("manyhangup.1", "?", many(30_000, 4));
+    defer lost.deinit();
+    try awaitResponses(lost, 1);
+    try awaitState(&s.client, .closed);
+    lost.cancel();
+    try testing.expect(try lost.next(.{}) == null);
+    try s.server.await(testing.io);
+    // The client is closed now: a stream it ended stays ConnectionClosed.
+    s.client.close();
+    lost.cancel();
+    try testing.expectError(error.ConnectionClosed, lost.next(.{}));
+}

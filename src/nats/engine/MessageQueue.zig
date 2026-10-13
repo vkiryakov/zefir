@@ -126,6 +126,18 @@ pub fn end(q: *MessageQueue, io: Io, how: End, discard: bool) bool {
     return was_open;
 }
 
+/// Ends the queue as finished and frees what it holds, whatever ended it
+/// before, unless the client closed it: `next()` returns null from now on
+/// (ConnectionClosed after a close). For the stream of a requestMany its
+/// owner cancels.
+pub fn cancel(q: *MessageQueue, io: Io) void {
+    q.mutex.lockUncancelable(io);
+    defer q.mutex.unlock(io);
+    if (q.ended != .closed) q.ended = .finished;
+    q.freeAll();
+    q.not_empty.broadcast(io);
+}
+
 /// What a push did.
 pub const Pushed = struct {
     /// Messages dropped: the one that came, or older ones.
@@ -421,6 +433,25 @@ test "the ends of a requestMany: NoResponders, and Disconnected after what came"
     // The client closes after: the error changes, as for any end.
     _ = lost.end(testing.io, .closed, true);
     try testing.expectError(error.ConnectionClosed, lost.next(testing.io, .none));
+}
+
+test "cancel ends any end but closed with null, and frees what waits" {
+    var lost: MessageQueue = .init(testing.allocator, .{ .messages = 4, .bytes = 1024 }, .drop_newest, 4);
+    defer lost.deinit();
+    try pushTagged(&lost, 10, "ab");
+    _ = lost.end(testing.io, .disconnected, false);
+    lost.cancel(testing.io);
+    try testing.expectEqual(PendingCounts{ .messages = 0, .bytes = 0 }, lost.pending(testing.io));
+    try testing.expect(try lost.next(testing.io, .none) == null);
+    // Later messages are not taken.
+    _ = lost.push(testing.io, try testMessage(10, 'c'));
+    try testing.expect(try lost.next(testing.io, .none) == null);
+
+    var closed: MessageQueue = .init(testing.allocator, .{ .messages = 4, .bytes = 1024 }, .drop_newest, 4);
+    defer closed.deinit();
+    _ = closed.end(testing.io, .closed, true);
+    closed.cancel(testing.io);
+    try testing.expectError(error.ConnectionClosed, closed.next(testing.io, .none));
 }
 
 test "max_messages: the queue finishes with its last message" {
