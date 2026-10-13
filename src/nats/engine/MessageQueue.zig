@@ -79,6 +79,13 @@ pub fn isOpen(q: *MessageQueue, io: Io) bool {
     return q.ended == null;
 }
 
+/// A task waits in `next`; tests use it to know that one does.
+pub fn isReceiving(q: *MessageQueue, io: Io) bool {
+    q.mutex.lockUncancelable(io);
+    defer q.mutex.unlock(io);
+    return q.receiving;
+}
+
 /// How the queue ended; null while it is open.
 pub fn endedHow(q: *MessageQueue, io: Io) ?End {
     q.mutex.lockUncancelable(io);
@@ -397,12 +404,7 @@ fn receive(q: *MessageQueue) Subscription.NextError!?Message {
 fn awaitReceiver(q: *MessageQueue) !void {
     const io = testing.io;
     const give_up = time.after(io, .fromSeconds(5));
-    while (true) {
-        {
-            q.mutex.lockUncancelable(io);
-            defer q.mutex.unlock(io);
-            if (q.receiving) return;
-        }
+    while (!q.isReceiving(io)) {
         if (time.expired(io, give_up)) return error.TestReceiverNeverWaited;
         try io.sleep(.fromMilliseconds(1), .awake);
     }

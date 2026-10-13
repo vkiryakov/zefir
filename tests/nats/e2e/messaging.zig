@@ -289,12 +289,7 @@ fn nextLong(sub: *nats.Subscription) nats.Subscription.NextError!?nats.Message {
 /// Waits until a task waits in `sub.next()`, for 5 s at most.
 fn awaitReceiving(io: Io, sub: *nats.Subscription) !void {
     const start = Io.Clock.awake.now(io);
-    while (true) {
-        {
-            sub.messages.mutex.lockUncancelable(io);
-            defer sub.messages.mutex.unlock(io);
-            if (sub.messages.receiving) return;
-        }
+    while (!sub.messages.isReceiving(io)) {
         if (elapsedSince(io, start).toSeconds() >= 5) return error.TestReceiverNeverWaited;
         try io.sleep(.fromMilliseconds(1), .awake);
     }

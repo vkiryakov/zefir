@@ -17,6 +17,9 @@
 //!
 //! In this version a lost connection closes the client and ends its
 //! subscriptions.
+//!
+//! The fields are internal: use the methods. Tests may ask
+//! `outbound.roomWaiters()` whether a publish waits for room.
 
 const std = @import("std");
 const Io = std.Io;

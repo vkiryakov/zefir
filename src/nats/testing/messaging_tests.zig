@@ -878,12 +878,7 @@ fn nextLong(sub: *nats.Subscription) nats.Subscription.NextError!?nats.Message {
 fn awaitReceiving(sub: *nats.Subscription) !void {
     const io = testing.io;
     const give_up = time.after(io, .fromSeconds(5));
-    while (true) {
-        {
-            sub.messages.mutex.lockUncancelable(io);
-            defer sub.messages.mutex.unlock(io);
-            if (sub.messages.receiving) return;
-        }
+    while (!sub.messages.isReceiving(io)) {
         if (time.expired(io, give_up)) return error.TestReceiverNeverWaited;
         try io.sleep(.fromMilliseconds(1), .awake);
     }

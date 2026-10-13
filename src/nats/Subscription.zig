@@ -30,7 +30,9 @@ sid: u64,
 subject: []const u8,
 /// The queue group it joined, if any.
 queue_group: ?[]const u8,
-/// The messages that wait to be taken.
+/// The messages that wait to be taken. Internal: the client's reader fills
+/// it; take messages with `next()`, look at it with `pending()` and
+/// `stats()`. Tests may ask it `isReceiving()`.
 messages: MessageQueue,
 
 pub const Options = struct {
