@@ -44,5 +44,6 @@ pub const transport = @import("transport.zig");
 test {
     std.testing.refAllDecls(@This());
     _ = @import("model.zig");
+    _ = @import("rules.zig");
     _ = @import("transport.zig");
 }
