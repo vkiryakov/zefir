@@ -27,8 +27,8 @@ pub fn main() void {
     // The value to check, for example a decoded request body.
     const request: SignUp = .{ .name = "Ada", .age = 36, .tags = &.{ "admin", "" } };
 
-    // v.check takes a pointer to the value and a buffer where it writes the
-    // path of the field that failed, such as "tags[1]"; it allocates nothing.
+    // v.check allocates no memory, so it needs room from you to write the path
+    // of the field that failed, such as "tags[1]"; violation.field points into it.
     var path_buf: [256]u8 = undefined;
     if (v.check(&request, &path_buf)) |violation| {
         // Prints "tags[1]: must not be empty (validation.not_empty)".
@@ -36,6 +36,15 @@ pub fn main() void {
     }
 }
 ```
+
+`path_buf` is where `v.check` writes the path of the field that failed, such as
+`tags[1]`. `v.check` allocates no memory, so you give it the room: a buffer on
+the stack, whose contents before the call do not matter. `violation.field`
+points into this buffer, so it is valid while the buffer lives; copy the path
+if you need it longer. 256 bytes fit almost any path; a longer one gives
+`field = null`, with `code` and `message` still set. To get every violation,
+with paths of any length and no buffer, call `v.checkAll(gpa, &request)`: it
+takes an allocator, and `report.deinit()` frees the result.
 
 `v.check` returns `?v.Violation`: `null` when the value is valid, otherwise the
 first problem it found, with three fields:

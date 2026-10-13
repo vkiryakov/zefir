@@ -19,8 +19,8 @@ pub fn main() void {
     // The value to check, for example a decoded request body.
     const request: SignUp = .{ .name = "Ada", .age = 36, .tags = &.{ "admin", "" } };
 
-    // v.check takes a pointer to the value and a buffer where it writes the
-    // path of the field that failed, such as "tags[1]"; it allocates nothing.
+    // v.check allocates no memory, so it needs room from you to write the path
+    // of the field that failed, such as "tags[1]"; violation.field points into it.
     var path_buf: [256]u8 = undefined;
     if (v.check(&request, &path_buf)) |violation| {
         // Prints "tags[1]: must not be empty (validation.not_empty)".
