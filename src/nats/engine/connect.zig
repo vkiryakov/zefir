@@ -166,9 +166,12 @@ test "race returns what comes in time" {
 test "race gives up at the deadline and cancels the slower task" {
     const io = testing.io;
     const start = Io.Clock.awake.now(io);
-    try testing.expectError(error.Timeout, race(io, time.after(io, .fromMilliseconds(30)), sleepThenAnswer, .{ io, .fromSeconds(30) }, keep, null));
+    const deadline = time.after(io, .fromMilliseconds(30));
+    try testing.expectError(error.Timeout, race(io, deadline, sleepThenAnswer, .{ io, .fromSeconds(30) }, keep, null));
+    // Not before the deadline, on the clock the deadline is on: Windows
+    // counts sleeps in timer ticks, and they may end a little early.
+    try testing.expect(time.expired(io, deadline));
     const waited = start.durationTo(Io.Clock.awake.now(io));
-    try testing.expect(waited.nanoseconds >= 30 * std.time.ns_per_ms);
     try testing.expect(waited.toSeconds() < 10);
 }
 

@@ -222,12 +222,7 @@ fn readLoop(client: *Client) void {
     defer if (current) |*c| c.abandon();
     while (true) {
         const frame = client.connection.next() catch |err| {
-            switch (err) {
-                error.Canceled => {},
-                error.EndOfStream => lose(client, .end_of_stream),
-                error.LineTooLong, error.UnknownOperation, error.InvalidArguments, error.MissingTerminator => lose(client, .protocol),
-                else => |e| lose(client, .{ .read = e }),
-            }
+            if (readExit(err)) |exit| lose(client, exit);
             return;
         };
         switch (frame) {
@@ -264,6 +259,20 @@ fn readLoop(client: *Client) void {
             },
         }
     }
+}
+
+/// Why a failed read ends the connection; null when the reader was
+/// canceled. A read after this client shut the socket down fails too: on
+/// Windows with Unexpected, which std prints in Debug builds (it does not
+/// map the status PIPE_DISCONNECTED). That is the end of the connection,
+/// logged at debug like any read error, and the reason given first stays.
+fn readExit(err: Connection.ReadError) ?Exit {
+    return switch (err) {
+        error.Canceled => null,
+        error.EndOfStream => .end_of_stream,
+        error.LineTooLong, error.UnknownOperation, error.InvalidArguments, error.MissingTerminator => .protocol,
+        else => |e| .{ .read = e },
+    };
 }
 
 /// A message the reader is in the middle of. It is kept only when a
@@ -450,4 +459,15 @@ fn updateInfo(client: *Client, json: []const u8) ServerInfo.ParseError!void {
     if (client.info_json) |old| client.gpa.free(old);
     client.info_json = copy;
     client.max_payload = maxPayload(info.value.max_payload);
+}
+
+const testing = std.testing;
+
+test "a failed read ends the connection as a read error, not as broken protocol" {
+    // Windows reports a read after our own shutdown so.
+    try testing.expectEqual(Exit{ .read = error.Unexpected }, readExit(error.Unexpected).?);
+    try testing.expectEqual(Exit{ .read = error.ConnectionResetByPeer }, readExit(error.ConnectionResetByPeer).?);
+    try testing.expectEqual(Exit.end_of_stream, readExit(error.EndOfStream).?);
+    try testing.expectEqual(Exit.protocol, readExit(error.MissingTerminator).?);
+    try testing.expect(readExit(error.Canceled) == null);
 }

@@ -101,6 +101,7 @@ test {
     _ = @import("engine/connect.zig");
     _ = @import("engine/Outbound.zig");
     _ = @import("engine/Connection.zig");
+    _ = @import("engine/manager.zig");
     _ = @import("Client.zig");
     _ = @import("testing/client_tests.zig");
     _ = @import("testing/messaging_tests.zig");
