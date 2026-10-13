@@ -70,7 +70,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: mlugg/setup-zig@v2
-      - run: zig fmt --check build.zig build.zig.zon src tests
+      - run: zig fmt --check build.zig build.zig.zon src tests --exclude tests/nats/zig-pkg
 
   # The end-to-end tests of nats against NATS servers in Docker. Only the
   # Linux runners run Linux containers, so this job is ubuntu only. It is
