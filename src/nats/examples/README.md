@@ -364,14 +364,14 @@ zig build e2e               # the end-to-end tests, then the examples
 zig build down              # stop the servers
 ```
 
-| Example                                        | What it shows                                                                       |
-| ---------------------------------------------- | ----------------------------------------------------------------------------------- |
-| [pub_sub.zig](pub_sub.zig)                     | publish, publish with headers, a wildcard subscription, `flush`                     |
-| [queue_group.zig](queue_group.zig)             | three workers share the orders in a queue group, then drain                         |
-| [request_reply.zig](request_reply.zig)         | a pricing service answers requests within a deadline; no responders                 |
-| [scatter_gather.zig](scatter_gather.zig)       | one request, an answer from every warehouse; stopping early                         |
-| [user_password_auth.zig](user_password_auth.zig) | a user and a password from the configuration, the password a `confy.Secret`       |
-| [zio_app.zig](zio_app.zig)                     | a whole service: one runtime, one shared client, events, Ctrl+C and drain, restarts |
+| Example                                          | What it shows                                                                       |
+| ------------------------------------------------ | ----------------------------------------------------------------------------------- |
+| [pub_sub.zig](pub_sub.zig)                       | publish, publish with headers, a wildcard subscription, `flush`                     |
+| [queue_group.zig](queue_group.zig)               | three workers share the orders in a queue group, then drain                         |
+| [request_reply.zig](request_reply.zig)           | a pricing service answers requests within a deadline; no responders                 |
+| [scatter_gather.zig](scatter_gather.zig)         | one request, an answer from every warehouse; stopping early                         |
+| [user_password_auth.zig](user_password_auth.zig) | a user and a password from the configuration, the password a `confy.Secret`         |
+| [zio_app.zig](zio_app.zig)                       | a whole service: one runtime, one shared client, events, Ctrl+C and drain, restarts |
 
 ## Publish and subscribe
 
@@ -406,13 +406,13 @@ try client.publishMessage(.{
 
 Before anything is queued, the client checks:
 
-| Check                                                                               | Error                |
-| ----------------------------------------------------------------------------------- | -------------------- |
-| a subject or reply subject with spaces, control bytes, an empty token, or `*` or `>` as a token | `InvalidSubject` |
-| a header name that is not printable ASCII or has `:`; a value with CR or LF          | `InvalidHeader`      |
-| headers on a server that does not support them                                      | `UnsupportedFeature` |
-| headers and payload together larger than the server's `max_payload` (1 MiB by default) | `PayloadTooLarge` |
-| a protocol line longer than `limits.max_control_line_bytes` (subject, reply and sizes) | `InvalidSubject`  |
+| Check                                                                                           | Error                |
+| ----------------------------------------------------------------------------------------------- | -------------------- |
+| a subject or reply subject with spaces, control bytes, an empty token, or `*` or `>` as a token | `InvalidSubject`     |
+| a header name that is not printable ASCII or has `:`; a value with CR or LF                     | `InvalidHeader`      |
+| headers on a server that does not support them                                                  | `UnsupportedFeature` |
+| headers and payload together larger than the server's `max_payload` (1 MiB by default)          | `PayloadTooLarge`    |
+| a protocol line longer than `limits.max_control_line_bytes` (subject, reply and sizes)          | `InvalidSubject`     |
 
 `a*b` and `a>b` are ordinary subjects: a wildcard is always a whole token.
 Bytes from 0x80 up are allowed, so subjects may be UTF-8.
@@ -431,13 +431,13 @@ while (true) {
 
 A message carries:
 
-| Field         | What it holds                                                             |
-| ------------- | ------------------------------------------------------------------------- |
-| `subject`     | the subject it was published to; with a wildcard, the one that matched    |
-| `payload`     | the bytes                                                                 |
-| `reply_to`    | where the publisher wants a reply, or null                                |
-| `headers`     | the headers: `get(name)` for the first value, `getAll(name)` for every one |
-| `status`, `description` | a status the server set, such as 503 "no responders"            |
+| Field                   | What it holds                                                              |
+| ----------------------- | -------------------------------------------------------------------------- |
+| `subject`               | the subject it was published to; with a wildcard, the one that matched     |
+| `payload`               | the bytes                                                                  |
+| `reply_to`              | where the publisher wants a reply, or null                                 |
+| `headers`               | the headers: `get(name)` for the first value, `getAll(name)` for every one |
+| `status`, `description` | a status the server set, such as 503 "no responders"                       |
 
 All of it lives in one allocation that `msg.deinit()` frees, so keep the
 message as long as you use its slices. Header names are case-sensitive, as
@@ -461,12 +461,12 @@ const msg = sub.next(.{ .timeout = .{ .duration = .{ .raw = .fromSeconds(1), .cl
 
 The subscription options:
 
-| Option          | Default            | What it does                                                        |
-| --------------- | ------------------ | ------------------------------------------------------------------- |
-| `.queue`        | null               | join a [queue group](#queue-groups)                                 |
-| `.max_messages` | null               | end after this many messages; the server stops sending then         |
-| `.pending`      | the client's limits | how many messages and bytes may wait for `next()`                  |
-| `.overflow`     | `.drop_newest`     | what happens to a message that does not fit, see [Memory and limits](#memory-and-limits) |
+| Option          | Default             | What it does                                                                             |
+| --------------- | ------------------- | ---------------------------------------------------------------------------------------- |
+| `.queue`        | null                | join a [queue group](#queue-groups)                                                      |
+| `.max_messages` | null                | end after this many messages; the server stops sending then                              |
+| `.pending`      | the client's limits | how many messages and bytes may wait for `next()`                                        |
+| `.overflow`     | `.drop_newest`      | what happens to a message that does not fit, see [Memory and limits](#memory-and-limits) |
 
 > [!IMPORTANT]
 > Read a subscription with `next()` until it returns null, or `deinit()`
@@ -690,7 +690,7 @@ the whole request, the wait for room in the outbound queue included;
 | the reply, a `Message`   | the first reply came; free it with `deinit()`                                         |
 | `Timeout`                | no reply in time; a reply that comes later is dropped and counted in `late_responses` |
 | `NoResponders`           | no one subscribes to the subject                                                      |
-| `Disconnected`           | the connection dropped while it waited; its message is never sent later              |
+| `Disconnected`           | the connection dropped while it waited; its message is never sent later               |
 | `Canceled`               | its task was canceled through `std.Io`                                                |
 | `TooManyPendingRequests` | `limits.max_pending_requests` (65,536) requests wait already                          |
 | `PermissionDenied`       | the server refused the subscription of the inbox, see below                           |
@@ -826,27 +826,27 @@ counts; it never loses a message silently.
 > your subscribers fall behind in bursts, raise `.pending` for those
 > subscriptions, or read faster, with more tasks in a queue group.
 
-| Limit                                 | Default    | When it is reached                                                         |
-| ------------------------------------- | ---------- | -------------------------------------------------------------------------- |
-| `limits.outbound_bytes`               | 8 MiB      | `publish` and `subscribe` wait for room, in the order they came            |
-| `limits.subscription_messages`        | 1024       | the subscription's overflow policy drops messages                          |
-| `limits.subscription_bytes`           | 8 MiB      | the same; a single message larger than this is dropped as it comes         |
-| `limits.max_pending_requests`         | 65,536     | `request` and `requestMany` fail with `TooManyPendingRequests`             |
-| `limits.max_subscriptions`            | 65,536     | `subscribe` fails with `TooManySubscriptions`                              |
-| `limits.max_inbound_frame_bytes`      | 64 MiB     | a larger incoming message is read past, dropped and counted                |
-| `limits.max_header_bytes`             | 64 KiB     | the same for a larger header block                                         |
-| `limits.max_control_line_bytes`       | 4096       | a longer subject line to send is `InvalidSubject`                          |
-| `limits.max_event_queue`              | 1024       | newer events are dropped and counted in `dropped_events`                   |
-| `reconnect.buffer_bytes`              | 8 MiB      | while reconnecting, `publish` and `request` fail with `BufferFull`         |
+| Limit                            | Default | When it is reached                                                 |
+| -------------------------------- | ------- | ------------------------------------------------------------------ |
+| `limits.outbound_bytes`          | 8 MiB   | `publish` and `subscribe` wait for room, in the order they came    |
+| `limits.subscription_messages`   | 1024    | the subscription's overflow policy drops messages                  |
+| `limits.subscription_bytes`      | 8 MiB   | the same; a single message larger than this is dropped as it comes |
+| `limits.max_pending_requests`    | 65,536  | `request` and `requestMany` fail with `TooManyPendingRequests`     |
+| `limits.max_subscriptions`       | 65,536  | `subscribe` fails with `TooManySubscriptions`                      |
+| `limits.max_inbound_frame_bytes` | 64 MiB  | a larger incoming message is read past, dropped and counted        |
+| `limits.max_header_bytes`        | 64 KiB  | the same for a larger header block                                 |
+| `limits.max_control_line_bytes`  | 4096    | a longer subject line to send is `InvalidSubject`                  |
+| `limits.max_event_queue`         | 1024    | newer events are dropped and counted in `dropped_events`           |
+| `reconnect.buffer_bytes`         | 8 MiB   | while reconnecting, `publish` and `request` fail with `BufferFull` |
 
 What happens to a message that does not fit in a subscription is its
 `.overflow` policy:
 
-| Policy                | What is dropped                                                                   |
-| --------------------- | --------------------------------------------------------------------------------- |
-| `.drop_newest`        | the message that came; what waits stays (the default)                             |
-| `.drop_oldest`        | the oldest messages, until the new one fits                                       |
-| `.close_subscription` | nothing more comes: `next` hands out what waits, then returns `SlowConsumer`      |
+| Policy                | What is dropped                                                              |
+| --------------------- | ---------------------------------------------------------------------------- |
+| `.drop_newest`        | the message that came; what waits stays (the default)                        |
+| `.drop_oldest`        | the oldest messages, until the new one fits                                  |
+| `.close_subscription` | nothing more comes: `next` hands out what waits, then returns `SlowConsumer` |
 
 Every dropped message counts in `sub.stats().dropped` and in the client's
 `stats().dropped_messages`; a run of drops gives one `slow_consumer`
@@ -969,13 +969,13 @@ flowchart TD
 
 While the client reconnects:
 
-| Call                            | What it does                                                                  |
-| ------------------------------- | ----------------------------------------------------------------------------- |
-| `publish`, `request`            | go into the reconnect buffer; `BufferFull` when it has no room, at once       |
-| `publish`, `request` with `buffer_bytes = 0` | fail with `Disconnected` at once                                 |
-| `subscribe`                     | works: the subscription is sent with the restore                              |
-| `flush`, `rtt`                  | fail with `Disconnected`: there is no server to confirm anything              |
-| `sub.next()`                    | keeps waiting; the messages come again after the restore                      |
+| Call                                         | What it does                                                            |
+| -------------------------------------------- | ----------------------------------------------------------------------- |
+| `publish`, `request`                         | go into the reconnect buffer; `BufferFull` when it has no room, at once |
+| `publish`, `request` with `buffer_bytes = 0` | fail with `Disconnected` at once                                        |
+| `subscribe`                                  | works: the subscription is sent with the restore                        |
+| `flush`, `rtt`                               | fail with `Disconnected`: there is no server to confirm anything        |
+| `sub.next()`                                 | keeps waiting; the messages come again after the restore                |
 
 A new connection first brings the server up to date, before anything
 that waited: a SUB for every subscription with the same id as before, the
@@ -1123,22 +1123,22 @@ fn logEvents(client: *nats.Client, events_log: log.Logger) nats.Client.NextEvent
 }
 ```
 
-| Event               | Carries                                     | When                                                      |
-| ------------------- | ------------------------------------------- | --------------------------------------------------------- |
-| `connected`         | the server                                  | the first connection is up                                |
-| `disconnected`      | the server and the reason                   | the connection dropped: by the server, stale, an error, lame duck |
-| `reconnecting`      | the server and the attempt number           | an attempt begins                                         |
-| `reconnected`       | the server                                  | back, with the subscriptions restored                     |
-| `server_discovered` | the server                                  | the cluster announced a server                            |
-| `server_removed`    | the server                                  | the cluster stopped announcing one                        |
-| `lame_duck`         | the server                                  | the server is about to go away                            |
-| `slow_consumer`     | the subscription's id                       | a subscription began dropping messages, once per run      |
-| `message_dropped`   | why, how many, the subscription             | messages were lost: unsent, too large, no memory          |
-| `permission_denied` | the operation, the subject, the subscription | the server refused a subject                             |
-| `auth_error`        | the server                                  | the server refused the credentials                        |
-| `protocol_error`    | the server                                  | the server broke the protocol, or says the client did    |
-| `server_error`      | the server's text                           | an error after which the connection stays                 |
-| `closed`            | the reason                                  | the client closed: always the last event                  |
+| Event               | Carries                                      | When                                                              |
+| ------------------- | -------------------------------------------- | ----------------------------------------------------------------- |
+| `connected`         | the server                                   | the first connection is up                                        |
+| `disconnected`      | the server and the reason                    | the connection dropped: by the server, stale, an error, lame duck |
+| `reconnecting`      | the server and the attempt number            | an attempt begins                                                 |
+| `reconnected`       | the server                                   | back, with the subscriptions restored                             |
+| `server_discovered` | the server                                   | the cluster announced a server                                    |
+| `server_removed`    | the server                                   | the cluster stopped announcing one                                |
+| `lame_duck`         | the server                                   | the server is about to go away                                    |
+| `slow_consumer`     | the subscription's id                        | a subscription began dropping messages, once per run              |
+| `message_dropped`   | why, how many, the subscription              | messages were lost: unsent, too large, no memory                  |
+| `permission_denied` | the operation, the subject, the subscription | the server refused a subject                                      |
+| `auth_error`        | the server                                   | the server refused the credentials                                |
+| `protocol_error`    | the server                                   | the server broke the protocol, or says the client did             |
+| `server_error`      | the server's text                            | an error after which the connection stays                         |
+| `closed`            | the reason                                   | the client closed: always the last event                          |
 
 One task at a time may wait in `nextEvent`. The client keeps
 `limits.max_event_queue` events (1024); while that many wait, newer ones
@@ -1164,22 +1164,22 @@ std.log.info("in {d}, out {d}, dropped {d}, uncertain {d}, reconnects {d}", .{
 });
 ```
 
-| Field                        | Counts                                                                     |
-| ---------------------------- | -------------------------------------------------------------------------- |
-| `messages_in`, `bytes_in`    | messages from the server, dropped ones included; bytes of headers and payload |
-| `messages_out`, `bytes_out`  | publishes, responses and requests the client accepted                     |
-| `active_subscriptions`       | subscriptions that take messages now                                       |
-| `pending_requests`           | requests and requestMany streams waiting                                   |
-| `pending_outbound_bytes`     | what waits to be written, or for the next connection                       |
-| `pending_subscription_bytes` | what the subscriptions hold for `next()`                                   |
-| `reconnects`                 | connections made again after one was lost                                  |
-| `request_timeouts`, `no_responders` | requests that ended so                                              |
-| `dropped_messages`           | incoming messages dropped, and publishes never sent                        |
-| `uncertain_outbound_frames`  | messages written to a connection lost before the server confirmed them     |
-| `late_responses`             | replies that came after their request ended                                |
-| `dropped_events`             | events the full queue dropped                                              |
-| `rtt`                        | the round trip of the last `flush` or `rtt`                                |
-| `connected_for`              | how long the current connection has been up                                |
+| Field                               | Counts                                                                        |
+| ----------------------------------- | ----------------------------------------------------------------------------- |
+| `messages_in`, `bytes_in`           | messages from the server, dropped ones included; bytes of headers and payload |
+| `messages_out`, `bytes_out`         | publishes, responses and requests the client accepted                         |
+| `active_subscriptions`              | subscriptions that take messages now                                          |
+| `pending_requests`                  | requests and requestMany streams waiting                                      |
+| `pending_outbound_bytes`            | what waits to be written, or for the next connection                          |
+| `pending_subscription_bytes`        | what the subscriptions hold for `next()`                                      |
+| `reconnects`                        | connections made again after one was lost                                     |
+| `request_timeouts`, `no_responders` | requests that ended so                                                        |
+| `dropped_messages`                  | incoming messages dropped, and publishes never sent                           |
+| `uncertain_outbound_frames`         | messages written to a connection lost before the server confirmed them        |
+| `late_responses`                    | replies that came after their request ended                                   |
+| `dropped_events`                    | events the full queue dropped                                                 |
+| `rtt`                               | the round trip of the last `flush` or `rtt`                                   |
+| `connected_for`                     | how long the current connection has been up                                   |
 
 > [!NOTE]
 > Each counter is an atomic, read on its own while the client works, so a
@@ -1193,30 +1193,30 @@ Every function lists the errors it returns, a subset of `nats.Error`, plus
 the network errors of `std.Io`, such as `ConnectionRefused`, which pass
 through unchanged. Switch on them by name:
 
-| Error                        | Meaning                                                                      |
-| ---------------------------- | ---------------------------------------------------------------------------- |
-| `InvalidOptions`             | an option breaks a rule; checked before anything connects                    |
-| `InvalidSubject`             | a subject that cannot be used, or a line too long                            |
-| `InvalidHeader`              | a header name or value that cannot be sent                                   |
-| `PayloadTooLarge`            | headers and payload exceed the server's `max_payload`                        |
-| `BufferFull`                 | the reconnect buffer has no room                                             |
-| `SlowConsumer`               | a `.close_subscription` subscription dropped messages and ended              |
-| `PermissionDenied`           | the server refused the subject                                               |
-| `ConcurrentReceive`          | another task already waits in `next` or `nextEvent`                          |
-| `NoReplySubject`             | `respond` to a message without a reply subject                               |
-| `TooManySubscriptions`, `TooManyPendingRequests` | a limit of the client                                    |
-| `Timeout`                    | the time ran out                                                             |
-| `NoResponders`               | no one subscribes to the request's subject                                   |
-| `Canceled`                   | the task was canceled through `std.Io`                                       |
-| `Disconnected`               | no connection at the moment                                                  |
-| `ConnectionClosed`           | the client is closed                                                         |
-| `ConnectionDraining`         | the client drains and takes no new work                                      |
-| `AuthenticationFailed`       | the server refused the user or the password                                  |
-| `UnsupportedSecurityFeature` | the server wants TLS                                                         |
-| `UnsupportedFeature`         | the server cannot do what was asked, such as headers                         |
-| `ProtocolError`              | the server broke the protocol, or says the client did                        |
-| `ConcurrencyUnavailable`     | the `std.Io` cannot run the client's tasks                                   |
-| `OutOfMemory`                | no memory                                                                    |
+| Error                                            | Meaning                                                         |
+| ------------------------------------------------ | --------------------------------------------------------------- |
+| `InvalidOptions`                                 | an option breaks a rule; checked before anything connects       |
+| `InvalidSubject`                                 | a subject that cannot be used, or a line too long               |
+| `InvalidHeader`                                  | a header name or value that cannot be sent                      |
+| `PayloadTooLarge`                                | headers and payload exceed the server's `max_payload`           |
+| `BufferFull`                                     | the reconnect buffer has no room                                |
+| `SlowConsumer`                                   | a `.close_subscription` subscription dropped messages and ended |
+| `PermissionDenied`                               | the server refused the subject                                  |
+| `ConcurrentReceive`                              | another task already waits in `next` or `nextEvent`             |
+| `NoReplySubject`                                 | `respond` to a message without a reply subject                  |
+| `TooManySubscriptions`, `TooManyPendingRequests` | a limit of the client                                           |
+| `Timeout`                                        | the time ran out                                                |
+| `NoResponders`                                   | no one subscribes to the request's subject                      |
+| `Canceled`                                       | the task was canceled through `std.Io`                          |
+| `Disconnected`                                   | no connection at the moment                                     |
+| `ConnectionClosed`                               | the client is closed                                            |
+| `ConnectionDraining`                             | the client drains and takes no new work                         |
+| `AuthenticationFailed`                           | the server refused the user or the password                     |
+| `UnsupportedSecurityFeature`                     | the server wants TLS                                            |
+| `UnsupportedFeature`                             | the server cannot do what was asked, such as headers            |
+| `ProtocolError`                                  | the server broke the protocol, or says the client did           |
+| `ConcurrencyUnavailable`                         | the `std.Io` cannot run the client's tasks                      |
+| `OutOfMemory`                                    | no memory                                                       |
 
 Errors the server reports later, outside any call, such as a refused
 subscription, come as [events](#events). A subscription the server
@@ -1312,12 +1312,12 @@ The client runs on any `std.Io` that can run tasks at the same time;
 without that, `connect()` fails with `ConcurrencyUnavailable`. Two are
 known to work, both tested:
 
-|                    | `std.Io.Threaded`                              | zio                                                  |
-| ------------------ | ---------------------------------------------- | ---------------------------------------------------- |
-| A waiting task     | an OS thread                                   | a coroutine with a small stack                       |
-| Good for           | tools, tests, a few connections and waiters    | services: thousands of tasks waiting at once         |
-| DNS                | the system resolver, which may not be canceled | zio's own resolver on Linux                          |
-| Where it comes from | `init.io` in `main`                           | your build: `zio.Runtime.init(gpa, .{})`, then `rt.io()` |
+|                     | `std.Io.Threaded`                              | zio                                                      |
+| ------------------- | ---------------------------------------------- | -------------------------------------------------------- |
+| A waiting task      | an OS thread                                   | a coroutine with a small stack                           |
+| Good for            | tools, tests, a few connections and waiters    | services: thousands of tasks waiting at once             |
+| DNS                 | the system resolver, which may not be canceled | zio's own resolver on Linux                              |
+| Where it comes from | `init.io` in `main`                            | your build: `zio.Runtime.init(gpa, .{})`, then `rt.io()` |
 
 With zio, create one runtime for the whole application and give its `io`
 to every component, as [zio_app.zig](zio_app.zig) does:
@@ -1501,41 +1501,41 @@ subscribed, and with every lost message counted.
 
 Everything a Core NATS client sends and receives:
 
-| Operation     | Direction | Supported | Notes                                                                 |
-| ------------- | --------- | --------- | --------------------------------------------------------------------- |
-| `INFO`        | received  | ✅        | at connect and any time later; unknown fields ignored; up to 64 KiB   |
-| `CONNECT`     | sent      | ✅        | `verbose`, `pedantic`, `echo`, `name`, `lang`, `version`, `protocol`, `headers`, `no_responders`, `user`, `pass` |
-| `PUB`         | sent      | ✅        | `publish`, `respond`, requests                                        |
-| `HPUB`        | sent      | ✅        | headers                                                               |
-| `SUB`         | sent      | ✅        | with and without a queue group                                        |
-| `UNSUB`       | sent      | ✅        | with and without a message count                                      |
-| `MSG`         | received  | ✅        |                                                                       |
-| `HMSG`        | received  | ✅        | headers, status codes such as 503                                     |
-| `PING`/`PONG` | both      | ✅        | the server's PING is answered ahead of the queue                      |
-| `+OK`         | received  | ✅        | with `verbose`; read and ignored                                      |
-| `-ERR`        | received  | ✅        | fatal ones end the connection; permission errors become events        |
+| Operation     | Direction | Supported | Notes                                                                                                            |
+| ------------- | --------- | --------- | ---------------------------------------------------------------------------------------------------------------- |
+| `INFO`        | received  | ✅         | at connect and any time later; unknown fields ignored; up to 64 KiB                                              |
+| `CONNECT`     | sent      | ✅         | `verbose`, `pedantic`, `echo`, `name`, `lang`, `version`, `protocol`, `headers`, `no_responders`, `user`, `pass` |
+| `PUB`         | sent      | ✅         | `publish`, `respond`, requests                                                                                   |
+| `HPUB`        | sent      | ✅         | headers                                                                                                          |
+| `SUB`         | sent      | ✅         | with and without a queue group                                                                                   |
+| `UNSUB`       | sent      | ✅         | with and without a message count                                                                                 |
+| `MSG`         | received  | ✅         |                                                                                                                  |
+| `HMSG`        | received  | ✅         | headers, status codes such as 503                                                                                |
+| `PING`/`PONG` | both      | ✅         | the server's PING is answered ahead of the queue                                                                 |
+| `+OK`         | received  | ✅         | with `verbose`; read and ignored                                                                                 |
+| `-ERR`        | received  | ✅         | fatal ones end the connection; permission errors become events                                                   |
 
-| Feature                                             | Supported |
-| --------------------------------------------------- | --------- |
-| subjects with `*` and `>` wildcards                 | ✅        |
-| queue groups                                        | ✅        |
-| headers, multi-valued, case kept                    | ✅        |
-| request/reply through one inbox subscription        | ✅        |
-| no responders (status 503)                          | ✅        |
-| scatter and gather (`requestMany`)                  | ✅        |
-| auto-unsubscribe after `max_messages`               | ✅        |
-| `max_payload` checked before sending                | ✅        |
-| no echo of the client's own messages (`no_echo`)    | ✅        |
-| cluster discovery (`connect_urls`)                  | ✅        |
-| reconnect with restored subscriptions and a buffer  | ✅        |
-| lame duck mode                                      | ✅        |
-| drain of the client and of a subscription           | ✅        |
-| no authentication, user and password                | ✅        |
-| TLS, mTLS                                           | ❌ not in this version |
-| token, NKey, JWT and credentials files              | ❌ not in this version |
-| WebSocket                                           | ❌        |
-| JetStream, key-value and object stores              | ❌ not in this version |
-| the services API (`$SRV`)                           | ❌        |
+| Feature                                            | Supported             |
+| -------------------------------------------------- | --------------------- |
+| subjects with `*` and `>` wildcards                | ✅                     |
+| queue groups                                       | ✅                     |
+| headers, multi-valued, case kept                   | ✅                     |
+| request/reply through one inbox subscription       | ✅                     |
+| no responders (status 503)                         | ✅                     |
+| scatter and gather (`requestMany`)                 | ✅                     |
+| auto-unsubscribe after `max_messages`              | ✅                     |
+| `max_payload` checked before sending               | ✅                     |
+| no echo of the client's own messages (`no_echo`)   | ✅                     |
+| cluster discovery (`connect_urls`)                 | ✅                     |
+| reconnect with restored subscriptions and a buffer | ✅                     |
+| lame duck mode                                     | ✅                     |
+| drain of the client and of a subscription          | ✅                     |
+| no authentication, user and password               | ✅                     |
+| TLS, mTLS                                          | ❌ not in this version |
+| token, NKey, JWT and credentials files             | ❌ not in this version |
+| WebSocket                                          | ❌                     |
+| JetStream, key-value and object stores             | ❌ not in this version |
+| the services API (`$SRV`)                          | ❌                     |
 
 <details>
 <summary>How the client is tested</summary>

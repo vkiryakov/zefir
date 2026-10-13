@@ -21,7 +21,8 @@ const std = @import("std");
 const Example = struct {
     /// The file, without `.zig`.
     name: []const u8,
-    /// The step that runs it alone is `example-<run>`.
+    /// The name of the run: `zig build example-<run>` shows it, unless it
+    /// must fail, which only `e2e` and `examples` check.
     run: []const u8,
     /// The settings it reads from the environment.
     env: []const [2][]const u8,
