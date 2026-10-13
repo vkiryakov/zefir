@@ -1,7 +1,8 @@
 //! A TCP proxy between clients and a NATS server that cuts every
 //! connection through it on demand: the client sees the server hang up,
 //! the server sees the client go, and the next connection goes through
-//! again. It runs on a `std.Io` of its own, the test's, whatever runtime
+//! again. It can also stall, forwarding nothing the clients send, so that
+//! their queues fill, and refuse new connections for a while. It runs on a `std.Io` of its own, the test's, whatever runtime
 //! the clients use. Initialize it in place with `start`: it must not move.
 //!
 //! Nothing here waits for cancellation alone: cutting shuts the sockets
@@ -24,6 +25,10 @@ pairs: std.ArrayList(*Pair) = .empty,
 stopping: bool = false,
 /// Connections cut so far.
 cuts: u32 = 0,
+/// What the clients send waits in their sockets.
+stalled: std.atomic.Value(bool) = .init(false),
+/// A new connection is closed at once.
+refusing: std.atomic.Value(bool) = .init(false),
 acceptor: Io.Future(void) = undefined,
 /// The tasks of the pairs.
 group: Io.Group = .init,
@@ -61,6 +66,16 @@ pub fn cutAll(p: *Proxy) usize {
     return p.pairs.items.len;
 }
 
+/// Stops, or starts again, forwarding what the clients send.
+pub fn stall(p: *Proxy, on: bool) void {
+    p.stalled.store(on, .release);
+}
+
+/// Starts, or stops, closing new connections at once.
+pub fn refuse(p: *Proxy, on: bool) void {
+    p.refusing.store(on, .release);
+}
+
 /// Connections through the proxy now.
 pub fn count(p: *Proxy) usize {
     p.mutex.lockUncancelable(p.io);
@@ -76,6 +91,8 @@ pub fn stop(p: *Proxy) void {
         defer p.mutex.unlock(io);
         p.stopping = true;
     }
+    // A stalled pump would not see its connection cut.
+    p.stall(false);
     // Wakes the accept; it sees `stopping` and returns.
     if (p.listener.socket.address.connect(io, .{ .mode = .stream })) |wake| wake.close(io) else |_| {}
     p.acceptor.await(io);
@@ -89,6 +106,14 @@ fn acceptLoop(p: *Proxy) void {
     const io = p.io;
     while (true) {
         const client = p.listener.accept(io) catch return;
+        if (p.refusing.load(.acquire)) {
+            client.close(io);
+            p.mutex.lockUncancelable(io);
+            const stopping = p.stopping;
+            p.mutex.unlock(io);
+            if (stopping) return;
+            continue;
+        }
         const server = p.upstream.connect(io, .{ .mode = .stream }) catch {
             client.close(io);
             continue;
@@ -134,8 +159,8 @@ fn remove(p: *Proxy, pair: *Pair) void {
 /// Forwards both ways until either side ends, then closes both sockets.
 fn runPair(p: *Proxy, pair: *Pair) Io.Cancelable!void {
     const io = p.io;
-    var back = io.concurrent(pump, .{ io, pair.server, pair.client }) catch null;
-    pump(io, pair.client, pair.server);
+    var back = io.concurrent(pump, .{ io, pair.server, pair.client, null }) catch null;
+    pump(io, pair.client, pair.server, &p.stalled);
     if (back) |*b| b.await(io) else shutDown(io, pair);
     p.mutex.lockUncancelable(io);
     defer p.mutex.unlock(io);
@@ -144,13 +169,15 @@ fn runPair(p: *Proxy, pair: *Pair) Io.Cancelable!void {
 }
 
 /// Copies what `from` sends to `to` until one of them ends, then shuts
-/// both down, so that the pump of the other way ends too.
-fn pump(io: Io, from: net.Stream, to: net.Stream) void {
+/// both down, so that the pump of the other way ends too. While `stalled`
+/// is set, it reads nothing.
+fn pump(io: Io, from: net.Stream, to: net.Stream, stalled: ?*std.atomic.Value(bool)) void {
     var read_buffer: [64 * 1024]u8 = undefined;
     var write_buffer: [64 * 1024]u8 = undefined;
     var reader = from.reader(io, &read_buffer);
     var writer = to.writer(io, &write_buffer);
     while (true) {
+        if (stalled) |s| while (s.load(.acquire)) io.sleep(.fromMilliseconds(1), .awake) catch break;
         _ = reader.interface.stream(&writer.interface, .unlimited) catch break;
         writer.interface.flush() catch break;
     }
