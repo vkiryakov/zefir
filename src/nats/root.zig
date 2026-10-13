@@ -34,4 +34,5 @@ test {
     _ = @import("engine/queue.zig");
     _ = @import("engine/connect.zig");
     _ = @import("engine/Outbound.zig");
+    _ = @import("engine/Connection.zig");
 }
