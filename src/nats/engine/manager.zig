@@ -48,10 +48,12 @@ pub fn run(client: *Client) void {
         return;
     };
     client.connection = opened.connection;
-    client.connection_tasks.concurrent(io, readLoop, .{client}) catch |err| return abandon(client, opened, err);
-    client.connection_tasks.concurrent(io, writeLoop, .{client}) catch |err| return abandon(client, opened, err);
+    // Before the reader starts: an INFO it reads is newer than this one.
+    adopt(client, opened.server, opened.greeting.info_json);
+    client.connection_tasks.concurrent(io, readLoop, .{client}) catch |err| return abandon(client, err);
+    client.connection_tasks.concurrent(io, writeLoop, .{client}) catch |err| return abandon(client, err);
     log.debug("connected to {f}", .{opened.server});
-    connected(client, opened.server, opened.greeting.info_json);
+    connected(client);
     teardown(client, opened.server, heartbeat(client));
 }
 
@@ -155,13 +157,13 @@ fn shutdown(io: Io, stream: Io.net.Stream) void {
 }
 
 /// The reader or writer could not start: the connection is dropped.
-fn abandon(client: *Client, opened: Opened, err: Io.ConcurrentError) void {
+fn abandon(client: *Client, err: Io.ConcurrentError) void {
     const io = client.io;
     shutdown(io, client.connection.stream);
     client.connection_tasks.cancel(io);
     client.connection.stream.close(io);
-    client.gpa.free(opened.greeting.info_json);
     connectFailed(client, err);
+    disconnected(client);
 }
 
 /// Sends a PING every `ping_interval` until the connection must end. After
@@ -267,14 +269,21 @@ pub fn connectFailed(client: *Client, err: Client.ConnectError) void {
     client.outbound.close(io);
 }
 
-/// The connection is up; `info_json` is its INFO, now the client's.
-fn connected(client: *Client, server: ServerAddress, info_json: []u8) void {
+/// The connection passed its handshake with `server`; `info_json` is its
+/// INFO, now the client's.
+fn adopt(client: *Client, server: ServerAddress, info_json: []u8) void {
     client.mutex.lockUncancelable(client.io);
     defer client.mutex.unlock(client.io);
-    if (client.status == .connecting) client.status = .connected;
     client.server = server;
     if (client.info_json) |old| client.gpa.free(old);
     client.info_json = info_json;
+}
+
+/// The connection is up, its reader and writer run.
+fn connected(client: *Client) void {
+    client.mutex.lockUncancelable(client.io);
+    defer client.mutex.unlock(client.io);
+    if (client.status == .connecting) client.status = .connected;
     client.changed.broadcast(client.io);
 }
 
