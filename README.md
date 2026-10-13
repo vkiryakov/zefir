@@ -44,6 +44,7 @@ Zefir is shaped by my needs first, and it's open to everyone. If it fits the way
 | **core**           | `zefir-core`      | Execution context: deadlines, cancellation and W3C trace context     | ✅ Done · [docs](src/core/examples/README.md)             |
 | **log**            | `zefir-log`       | Structured logging: JSON Lines, redaction, live levels, alerts       | ✅ Done · [docs](src/log/examples/README.md)              |
 | validator          | `zefir-validator` | Declarative validation rules for struct fields                       | 🚧 In progress · [docs](src/validator/examples/README.md) |
+| nats               | `zefir-nats`      | Core NATS client: publish/subscribe, request/reply, reconnect        | 🚧 In progress                                            |
 | rpc                | `zefir-rpc`       | RPC                                                                  | 📋 Planned                                                |
 | orm                | `zefir-orm`       | ORM                                                                  | 📋 Planned                                                |
 | http               | —                 | HTTP server                                                          | 📋 Planned                                                |

@@ -1,4 +1,5 @@
 const std = @import("std");
+const manifest = @import("build.zig.zon");
 const validator_cases = @import("src/validator/testdata/cases.zig");
 
 pub fn build(b: *std.Build) void {
@@ -64,7 +65,18 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // Umbrella module: @import("zefir").core, .log, .confy, .validator, .rpc, .orm
+    // nats sends the package version in CONNECT; build.zig.zon is its only source.
+    const nats_options = b.addOptions();
+    nats_options.addOption([]const u8, "version", manifest.version);
+    const nats = b.addModule("zefir-nats", .{
+        .root_source_file = b.path("src/nats/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+    });
+    nats.addOptions("build_options", nats_options);
+
+    // Umbrella module: @import("zefir").core, .log, .confy, .validator, .rpc, .orm, .nats
     const zefir = b.addModule("zefir", .{
         .root_source_file = b.path("src/zefir.zig"),
         .target = target,
@@ -77,11 +89,12 @@ pub fn build(b: *std.Build) void {
             .{ .name = "validator", .module = validator },
             .{ .name = "rpc", .module = rpc },
             .{ .name = "orm", .module = orm },
+            .{ .name = "nats", .module = nats },
         },
     });
 
     const test_step = b.step("test", "Run all tests");
-    for ([_]*std.Build.Module{ core, log, confy, validator, rpc, orm, zefir }) |module| {
+    for ([_]*std.Build.Module{ core, log, confy, validator, rpc, orm, nats, zefir }) |module| {
         const tests = b.addTest(.{ .root_module = module });
         test_step.dependOn(&addRun(b, tests, tsan).step);
     }
