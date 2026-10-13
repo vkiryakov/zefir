@@ -20,7 +20,9 @@ pub fn build(b: *std.Build) void {
     // paused, and `up` cannot start a paused container. Unpause it first and
     // wait until its health check passes again, for `up --wait` takes it as
     // unhealthy until then. When it runs, or is not there, `docker unpause`
-    // fails, and that is fine.
+    // fails, and that is fine. A run that died in the middle of the password
+    // test leaves the reload server with the new password: it gets the old
+    // one back.
     const unpause = b.addSystemCommand(&.{
         "sh", "-c",
         \\if docker unpause zefir-nats-e2e-stall >/dev/null 2>&1; then
@@ -30,6 +32,11 @@ pub fn build(b: *std.Build) void {
         \\    i=$((i + 1))
         \\  done
         \\fi
+        \\if [ "$(docker inspect --format '{{.State.Running}}' zefir-nats-e2e-reload 2>/dev/null)" = true ]; then
+        \\  docker exec zefir-nats-e2e-reload cp /conf/reload.conf /tmp/nats.conf
+        \\  docker kill --signal SIGHUP zefir-nats-e2e-reload >/dev/null
+        \\fi
+        \\true
     });
     unpause.has_side_effects = true;
     up.step.dependOn(&unpause.step);

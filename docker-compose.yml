@@ -86,10 +86,10 @@ services:
     command: ["--config", "/conf/plain.conf"]
     ports: ["127.0.0.1:14230:4222"]
 
-  # It runs from a copy of reload.conf that survives a restart; the tests
-  # overwrite the copy and reload it with SIGHUP.
+  # It runs from a copy of reload.conf, made afresh at every start; the
+  # tests overwrite the copy and reload it with SIGHUP.
   reload:
     <<: *nats
     container_name: zefir-nats-e2e-reload
-    entrypoint: ["sh", "-c", "[ -f /tmp/nats.conf ] || cp /conf/reload.conf /tmp/nats.conf; exec nats-server --config /tmp/nats.conf"]
+    entrypoint: ["sh", "-c", "cp /conf/reload.conf /tmp/nats.conf && exec nats-server --config /tmp/nats.conf"]
     ports: ["127.0.0.1:14231:4222"]
