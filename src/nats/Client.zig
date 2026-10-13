@@ -125,8 +125,9 @@ pub fn init(gpa: Allocator, io: Io, options: Options) InitError!Client {
 
 /// Connects to the first of `servers` that takes the connection, one
 /// attempt each, every attempt within `connect_timeout`. A failed connect
-/// closes the client: create a new one to try again. Once the client is
-/// connecting or connected, another call changes nothing.
+/// closes the client: create a new one to try again. A call made while
+/// another one is connecting waits for that outcome; once the client is
+/// connected, another call changes nothing.
 pub fn connect(client: *Client) ConnectError!void {
     const io = client.io;
     {
@@ -137,14 +138,14 @@ pub fn connect(client: *Client) ConnectError!void {
         if (status == .disconnected) client.status = .connecting;
         client.mutex.unlock(io);
         switch (status) {
-            .disconnected => {},
+            .disconnected => client.tasks.concurrent(io, manager.run, .{client}) catch |err| {
+                manager.connectFailed(client, err);
+                return err;
+            },
+            .connecting => {},
             .closed => return error.ConnectionClosed,
-            .connecting, .connected, .reconnecting, .draining => return,
+            .connected, .reconnecting, .draining => return,
         }
-        client.tasks.concurrent(io, manager.run, .{client}) catch |err| {
-            manager.connectFailed(client, err);
-            return err;
-        };
     }
 
     client.mutex.lockUncancelable(io);

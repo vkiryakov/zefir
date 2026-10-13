@@ -412,3 +412,72 @@ test "close() while another task waits in connect: ConnectionClosed at once" {
     try testing.expectEqual(.closed, client.state());
     try server.await(io);
 }
+
+/// A handshake only once `release` is set, then a normal session; or, with
+/// `reject`, a refusal of the credentials.
+fn serveWhenReleased(io: Io, listener: *net.Server, release: *Io.Event, reject: bool) !void {
+    var peer: FakeServer.Peer = undefined;
+    try peer.accept(io, listener);
+    defer peer.close();
+    try awaitEvent(io, release);
+    if (reject) {
+        try peer.send("INFO " ++ golden.info_auth_json ++ " \r\n");
+        _ = try peer.readLine();
+        try peer.expectLine("PING");
+        try peer.send("-ERR 'Authorization Violation'\r\n");
+        _ = try peer.readToEnd();
+        return;
+    }
+    try handshake(&peer);
+    while (try peer.nextLine()) |line| {
+        if (std.mem.eql(u8, line, "PING")) try peer.send(golden.pong);
+    }
+}
+
+/// Connects and notes the state at the moment connect() returned.
+fn connectAndNote(client: *Client, noted: *nats.State) Client.ConnectError!void {
+    try client.connect();
+    noted.* = client.state();
+}
+
+fn expectSecondConnectWaits(reject: bool) !void {
+    const io = testing.io;
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var release: Io.Event = .unset;
+    var server = try io.concurrent(serveWhenReleased, .{ io, &listener, &release, reject });
+    defer server.cancel(io) catch {};
+    var url: [64]u8 = undefined;
+    var client: Client = try .init(testing.allocator, io, .{
+        .servers = &.{try FakeServer.url(&listener, &url)},
+        .auth = if (reject) .{ .user_password = .{ .username = "alice", .password = "wrong" } } else .none,
+    });
+    defer client.deinit();
+
+    var first_noted: nats.State = .disconnected;
+    var first = try io.concurrent(connectAndNote, .{ &client, &first_noted });
+    defer first.cancel(io) catch {};
+    try awaitState(&client, .connecting);
+    var second_noted: nats.State = .disconnected;
+    var second = try io.concurrent(connectAndNote, .{ &client, &second_noted });
+    defer second.cancel(io) catch {};
+    // A second connect() that does not wait has returned by now.
+    try io.sleep(.fromMilliseconds(20), .awake);
+    release.set(io);
+    if (reject) {
+        try testing.expectError(error.AuthenticationFailed, first.await(io));
+        try testing.expectError(error.AuthenticationFailed, second.await(io));
+    } else {
+        try first.await(io);
+        try second.await(io);
+        try testing.expectEqual(.connected, first_noted);
+        try testing.expectEqual(.connected, second_noted);
+    }
+    client.close();
+    try server.await(io);
+}
+
+test "a second connect() while the first is under way gets the first one's outcome" {
+    try expectSecondConnectWaits(false);
+    try expectSecondConnectWaits(true);
+}
