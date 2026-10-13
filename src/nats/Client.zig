@@ -287,15 +287,19 @@ fn checkLine(client: *Client, message: PublishMessage, header_len: usize) error{
     if (args_len > client.options.options.limits.max_control_line_bytes) return error.InvalidSubject;
 }
 
-/// Queues the PUB or HPUB of a request, waiting for room until `deadline`.
-fn queueRequest(client: *Client, message: PublishMessage, header_len: usize, deadline: Io.Clock.Timestamp) Outbound.PutUntilError!void {
+/// Queues the PUB or HPUB of request `id`, waiting for room until
+/// `deadline`. The request and its frame share a fate: a request that
+/// failed already queues nothing, and one whose connection was lost while
+/// it waited for room fails with Disconnected without queueing.
+fn queueRequest(client: *Client, id: u64, message: PublishMessage, header_len: usize, deadline: Io.Clock.Timestamp) Outbound.PutUntilError!void {
     const io = client.io;
+    const ticket = client.inbox.ticket(id);
     if (message.headers.len > 0) {
-        return client.outbound.putUntil(io, deadline, .request, encoder.hpubLen(message.subject, message.reply_to, header_len, message.payload.len), encoder.writeHpub, .{
+        return client.outbound.putRequest(io, deadline, ticket, encoder.hpubLen(message.subject, message.reply_to, header_len, message.payload.len), encoder.writeHpub, .{
             message.subject, message.reply_to, message.headers, message.payload,
         });
     }
-    return client.outbound.putUntil(io, deadline, .request, encoder.pubLen(message.subject, message.reply_to, message.payload.len), encoder.writePub, .{
+    return client.outbound.putRequest(io, deadline, ticket, encoder.pubLen(message.subject, message.reply_to, message.payload.len), encoder.writePub, .{
         message.subject, message.reply_to, message.payload,
     });
 }
@@ -609,13 +613,15 @@ fn requestOnce(client: *Client, message: PublishMessage, options: RequestOptions
 
     var waiter: Inbox.Waiter = .{};
     const id = try client.inbox.add(io, client.gpa, .{ .single = &waiter }, client.options.options.limits.max_pending_requests);
-    // Whatever happens, the request leaves the pending map.
+    // Whatever happens, the request leaves the pending map, and a frame of
+    // it that waits for the next connection is not sent.
+    defer client.outbound.forgetRequest(io, id);
     defer client.inbox.drop(io, id, &waiter);
     var reply_buffer: [Inbox.max_reply_len]u8 = undefined;
     var with_reply = message;
     with_reply.reply_to = client.inbox.replySubject(&reply_buffer, id);
     try client.checkLine(with_reply, header_len);
-    client.queueRequest(with_reply, header_len, deadline) catch |err| switch (err) {
+    client.queueRequest(id, with_reply, header_len, deadline) catch |err| switch (err) {
         error.Closed => return client.inbox.closedError(io),
         else => |e| return e,
     };
@@ -693,7 +699,7 @@ pub fn requestMany(client: *Client, subject: []const u8, payload: []const u8, op
     var reply_buffer: [Inbox.max_reply_len]u8 = undefined;
     const message: PublishMessage = .{ .subject = subject, .reply_to = client.inbox.replySubject(&reply_buffer, responses.id), .payload = payload };
     try client.checkLine(message, 0);
-    client.queueRequest(message, 0, deadline) catch |err| switch (err) {
+    client.queueRequest(responses.id, message, 0, deadline) catch |err| switch (err) {
         error.Closed => return client.inbox.closedError(io),
         else => |e| return e,
     };

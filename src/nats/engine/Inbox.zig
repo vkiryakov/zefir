@@ -105,6 +105,8 @@ pub const Waiter = struct {
     failure: ?End = null,
     /// In the pending map.
     listed: bool = false,
+    /// The connection its frame went to, once queued (Outbound.Ticket).
+    generation: ?u64 = null,
 };
 
 /// A request in the pending map.
@@ -443,27 +445,69 @@ pub fn end(inbox: *Inbox, io: Io, how: End) void {
     inbox.changed.wake(io);
 }
 
-/// The connection is lost and the client reconnects: every waiting request
-/// fails with Disconnected at once, streams hand out what came and then
-/// say Disconnected, and all of them leave the pending map, so replies
-/// that still come are late. The inbox goes on for the requests to come;
-/// the next connection subscribes it again, with the same subject and SID.
-pub fn disconnect(inbox: *Inbox, io: Io) void {
+/// The connection is lost and the client reconnects; `next` is the
+/// connection to come. Every request whose frame went to the lost one, or
+/// has not been queued yet, fails with Disconnected at once: a stream
+/// hands out what came and then says Disconnected. They leave the pending
+/// map, so replies that still come are late, and a frame not queued yet
+/// never will be. Requests whose frames wait for `next` go on. The inbox
+/// goes on too; the next connection subscribes it again, with the same
+/// subject and SID.
+pub fn disconnect(inbox: *Inbox, io: Io, next: u64) void {
     inbox.mutex.lockUncancelable(io);
     defer inbox.mutex.unlock(io);
     if (inbox.ended != null) return;
-    for (inbox.pending.values()) |entry| switch (entry) {
+    // From the end: a removal moves the last entry, seen already.
+    var index = inbox.pending.count();
+    while (index > 0) {
+        index -= 1;
+        switch (inbox.pending.values()[index]) {
+            .single => |waiter| {
+                if (waiter.generation == next) continue;
+                waiter.listed = false;
+                waiter.failure = .disconnected;
+                waiter.done.set(io);
+            },
+            .many => |responses| {
+                if (responses.generation == next) continue;
+                responses.listed = false;
+                _ = responses.messages.end(io, .disconnected, false);
+            },
+        }
+        inbox.pending.swapRemoveAt(index);
+    }
+}
+
+/// The ticket of request `id`'s frame: the frame goes in only while the
+/// request waits, and the request learns which connection it went to.
+pub fn ticket(inbox: *Inbox, id: u64) Outbound.Ticket {
+    return .{ .id = id, .context = inbox, .admit = admitFrame };
+}
+
+fn admitFrame(context: *anyopaque, io: Io, id: u64, generation: u64) bool {
+    const inbox: *Inbox = @ptrCast(@alignCast(context));
+    inbox.mutex.lockUncancelable(io);
+    defer inbox.mutex.unlock(io);
+    const entry = inbox.pending.get(id) orelse return false;
+    switch (entry) {
         .single => |waiter| {
-            waiter.listed = false;
-            waiter.failure = .disconnected;
-            waiter.done.set(io);
+            if (waiter.failure != null) return false;
+            waiter.generation = generation;
         },
-        .many => |responses| {
-            responses.listed = false;
-            _ = responses.messages.end(io, .disconnected, false);
-        },
+        .many => |responses| responses.generation = generation,
+    }
+    return true;
+}
+
+/// Request `id` still waits for its reply: its frame is worth sending.
+pub fn awaitsReply(inbox: *Inbox, io: Io, id: u64) bool {
+    inbox.mutex.lockUncancelable(io);
+    defer inbox.mutex.unlock(io);
+    const entry = inbox.pending.get(id) orelse return false;
+    return switch (entry) {
+        .single => |waiter| waiter.failure == null,
+        .many => |responses| takes(io, responses) != null,
     };
-    inbox.pending.clearRetainingCapacity();
 }
 
 /// What a new connection must subscribe to for the inbox: its subject,
@@ -1161,7 +1205,7 @@ test "a lost connection fails the waiting requests at once, and the inbox goes o
     const responses = try addStream(&inbox, io, soon(io), .{ .messages = 4, .bytes = 1024 });
     _ = inbox.deliver(io, responses.id, try testReply("r", null, "came"));
 
-    inbox.disconnect(io);
+    inbox.disconnect(io, 1);
     try expectNoReply(a.await(io), error.Disconnected);
     try expectQueued(responses, "came");
     try testing.expectError(error.Disconnected, responses.messages.next(io, .none));

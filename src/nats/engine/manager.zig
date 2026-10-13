@@ -156,7 +156,7 @@ fn reconnect(client: *Client) ?Opened {
 /// connection is dropped, when there is no memory for that or the client
 /// closed.
 fn restored(client: *Client, opened: Opened) bool {
-    client.outbound.restore(client.io, client, restoreFrames) catch |err| {
+    client.outbound.restore(client.io, client, restoreFrames, requestWaits) catch |err| {
         if (err == error.OutOfMemory) log.warn("no memory to subscribe again on {f}: connection dropped", .{opened.server});
         Opened.release(client.io, opened);
         return false;
@@ -174,6 +174,12 @@ fn restoreFrames(client: *Client, gpa: Allocator) Allocator.Error![]u8 {
     const inbox: ?Registry.Resubscribe = if (client.inbox.restoreSub(client.io, &subject)) |sid| .{ .subject = &subject, .sid = sid } else null;
     client.subscriptions.writeRestore(client.io, &w.writer, inbox) catch return error.OutOfMemory;
     return w.toOwnedSlice();
+}
+
+/// A request whose frame waited for this connection is still waiting for
+/// its reply; it runs under the outbound queue's mutex.
+fn requestWaits(client: *Client, id: u64) bool {
+    return client.inbox.awaitsReply(client.io, id);
 }
 
 fn randomNumber(io: Io) u64 {
@@ -354,11 +360,14 @@ fn teardown(client: *Client, server: ServerAddress, exit: Exit) bool {
         }
         client.events.push(io, .{ .disconnected = .{ .server = server, .reason = reason } });
     }
-    // Before the outbound queue wakes them, requests learn why.
     if (again) {
-        client.inbox.disconnect(io);
-        client.outbound.halt(io);
+        // No frame goes to the lost connection any more; then its requests
+        // fail at once, and those whose frames wait for the next one go
+        // on. A request and its frame share a fate (Outbound.putRequest).
+        const next = client.outbound.halt(io);
+        client.inbox.disconnect(io, next);
     } else {
+        // Before the outbound queue wakes them, requests learn why.
         client.inbox.end(io, if (exit == .closed) .closed else .disconnected);
         client.outbound.close(io);
     }

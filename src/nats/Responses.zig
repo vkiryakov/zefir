@@ -35,6 +35,8 @@ id: u64,
 listed: bool = false,
 /// In the inbox's list of streams, until `deinit()`.
 node: std.DoublyLinkedList.Node = .{},
+/// The connection its request frame went to, once queued.
+generation: ?u64 = null,
 /// The stream ends here, whatever came.
 deadline: Io.Clock.Timestamp,
 /// The responses that wait to be taken: the client's reader fills it.
@@ -80,17 +82,17 @@ pub fn next(r: *Responses, options: Subscription.ReceiveOptions) NextError!?Mess
             error.Canceled, error.ConcurrentReceive => |e| return e,
             // Over: the request no longer waits.
             error.NoResponders, error.Disconnected, error.PermissionDenied, error.ConnectionClosed => |e| {
-                r.client.inbox.remove(io, r);
+                r.leave();
                 return e;
             },
             // A stream drops the newest when full.
             error.SlowConsumer => {
-                r.client.inbox.remove(io, r);
+                r.leave();
                 return error.ConnectionClosed;
             },
         };
         // Over: responses that still come are late.
-        if (response == null) r.client.inbox.remove(io, r);
+        if (response == null) r.leave();
         return response;
     }
 }
@@ -100,7 +102,7 @@ pub fn next(r: *Responses, options: Subscription.ReceiveOptions) NextError!?Mess
 /// client is closed), and responses that still come count as late.
 pub fn cancel(r: *Responses) void {
     const io = r.client.io;
-    r.client.inbox.remove(io, r);
+    r.leave();
     r.messages.cancel(io);
 }
 
@@ -108,13 +110,22 @@ pub fn cancel(r: *Responses) void {
 /// still comes out.
 fn stop(r: *Responses) void {
     const io = r.client.io;
-    r.client.inbox.remove(io, r);
+    r.leave();
     _ = r.messages.end(io, .finished, false);
+}
+
+/// The request is over: responses that still come are late, and its frame,
+/// if it still waits for the next connection, is not sent.
+fn leave(r: *Responses) void {
+    const io = r.client.io;
+    r.client.inbox.remove(io, r);
+    r.client.outbound.forgetRequest(io, r.id);
 }
 
 /// Ends the stream and frees it, with the responses it still holds. No
 /// task may wait in `next()` meanwhile.
 pub fn deinit(r: *Responses) void {
     r.client.inbox.forget(r.client.io, r);
+    r.client.outbound.forgetRequest(r.client.io, r.id);
     Inbox.destroyResponses(r.client.gpa, r);
 }

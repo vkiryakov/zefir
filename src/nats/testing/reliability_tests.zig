@@ -1425,3 +1425,155 @@ test "lame duck mode announced in the handshake: the client moves on once connec
     _ = try awaitEventOf(&client, .lame_duck);
     client.close();
 }
+
+/// The handshake, then nothing read until released; then a hang-up.
+fn sessionStallThenHangUp(peer: *FakeServer.Peer, record: *Record) anyerror!void {
+    try handshake(peer, golden.info_default);
+    try record.release.wait(peer.io);
+}
+
+/// The handshake; notes every line, skips payloads of any size, answers
+/// PINGs.
+fn sessionRecordAny(peer: *FakeServer.Peer, record: *Record) anyerror!void {
+    try handshake(peer, golden.info_default);
+    while (try peer.nextLine()) |line| {
+        try record.note(peer.io, line);
+        if (std.mem.eql(u8, line, "PING")) {
+            try peer.send(golden.pong);
+        } else if (std.mem.startsWith(u8, line, "PUB ") or std.mem.startsWith(u8, line, "HPUB ")) {
+            const size = try std.fmt.parseInt(usize, line[std.mem.findScalarLast(u8, line, ' ').? + 1 ..], 10);
+            try peer.reader.interface.discardAll(size + 2);
+        }
+    }
+}
+
+fn awaitRoomWaitersOf(client: *Client, count: u32) !void {
+    const io = client.io;
+    const give_up = time.after(io, .fromSeconds(10));
+    while (client.outbound.roomWaiters(io) < count) {
+        if (time.expired(io, give_up)) return error.TestPutNeverWaited;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+}
+
+const megabyte: [1024 * 1024]u8 = @splat('p');
+
+/// Publishes 1 MiB payloads until one fails, counting those that went in;
+/// the server reads none of them.
+fn publishUntilFull(client: *Client, published: *std.atomic.Value(u32)) void {
+    for (0..256) |_| {
+        client.publish("fill", &megabyte) catch return;
+        _ = published.fetchAdd(1, .monotonic);
+    }
+}
+
+/// Waits until a publish is stuck: it waits for room, and none went in for
+/// 200 ms; how much the sockets take first differs by system.
+fn awaitStuck(client: *Client, published: *std.atomic.Value(u32)) !void {
+    const io = client.io;
+    const give_up = time.after(io, .fromSeconds(10));
+    var last = published.load(.monotonic);
+    var still_since = Io.Clock.awake.now(io);
+    while (true) {
+        try io.sleep(.fromMilliseconds(10), .awake);
+        const now = published.load(.monotonic);
+        if (now != last or client.outbound.roomWaiters(io) == 0) {
+            last = now;
+            still_since = Io.Clock.awake.now(io);
+        } else if (still_since.durationTo(Io.Clock.awake.now(io)).toMilliseconds() >= 200) {
+            return;
+        }
+        if (time.expired(io, give_up)) return error.TestPublishNeverWaited;
+    }
+}
+
+fn requestTenSeconds(client: *Client) Client.RequestError!nats.Message {
+    return client.request("service.x", "?", .{ .timeout = .{ .duration = .{ .raw = .fromSeconds(10), .clock = .awake } } });
+}
+
+test "a request waiting for room when the connection is lost fails with Disconnected, and is never sent" {
+    const io = testing.io;
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var record: Record = .{};
+    defer record.deinit();
+    const sessions = [_]Session{ sessionStallThenHangUp, sessionRecordAny };
+    var server = try io.concurrent(serveSessions, .{ io, &listener, &sessions, &record });
+    defer {
+        record.release.set(io);
+        server.cancel(io) catch {};
+    }
+    var url: [64]u8 = undefined;
+    var client: Client = try .init(testing.allocator, io, .{
+        .servers = &.{try FakeServer.url(&listener, &url)},
+        .limits = .{ .outbound_bytes = 1024 },
+        .reconnect = .{ .buffer_bytes = 64 * 1024 * 1024, .min_delay = .fromMilliseconds(1), .max_delay = .fromMilliseconds(5) },
+    });
+    defer client.deinit();
+    try client.connect();
+    // The first request subscribes the inbox; no reply comes.
+    try testing.expectError(error.Timeout, client.request("warmup", "?", .{ .timeout = .{ .duration = .{ .raw = .fromMilliseconds(50), .clock = .awake } } }));
+    // The server reads nothing: the socket fills and publishes wait for room.
+    var published: std.atomic.Value(u32) = .init(0);
+    var publisher = try io.concurrent(publishUntilFull, .{ &client, &published });
+    defer publisher.cancel(io);
+    try awaitStuck(&client, &published);
+    var requester = try io.concurrent(requestTenSeconds, .{&client});
+    var awaited = false;
+    defer if (!awaited) releaseReply(requester.cancel(io));
+    try awaitRoomWaitersOf(&client, 2);
+
+    // The server hangs up: the request fails at once.
+    record.release.set(io);
+    awaited = true;
+    if (requester.await(io)) |reply| {
+        releaseReply(reply);
+        return error.TestUnexpectedReply;
+    } else |err| try testing.expectEqual(error.Disconnected, err);
+    publisher.await(io);
+    try awaitState(&client, .connected);
+    try client.flush(quick);
+    const seen = try record.seen(io);
+    defer testing.allocator.free(seen);
+    try testing.expect(std.mem.find(u8, seen, "PUB service.x") == null);
+    try testing.expectEqual(0, client.stats().pending_requests);
+}
+
+/// Says nothing until the test releases it; then notes every line and
+/// answers PINGs.
+fn sessionRecordWhenReleased(peer: *FakeServer.Peer, record: *Record) anyerror!void {
+    try record.release.wait(peer.io);
+    try sessionRecordAny(peer, record);
+}
+
+test "a request that times out while it waits for the next connection is never sent, and frees its room" {
+    const io = testing.io;
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var record: Record = .{};
+    defer record.deinit();
+    const sessions = [_]Session{ sessionHangUpAfterSub, sessionRecordWhenReleased };
+    var server = try io.concurrent(serveSessions, .{ io, &listener, &sessions, &record });
+    defer {
+        record.release.set(io);
+        server.cancel(io) catch {};
+    }
+    var url: [64]u8 = undefined;
+    var client: Client = try .init(testing.allocator, io, .{ .servers = &.{try FakeServer.url(&listener, &url)} });
+    defer client.deinit();
+    try client.connect();
+    const sub = try client.subscribe("sub", .{});
+    defer sub.deinit();
+    try awaitState(&client, .reconnecting);
+    try awaitAccepted(&record, 2);
+    try testing.expectError(error.Timeout, client.request("service.x", "?", .{ .timeout = .{ .duration = .{ .raw = .fromMilliseconds(100), .clock = .awake } } }));
+    try testing.expectEqual(0, client.stats().pending_outbound_bytes);
+    record.release.set(io);
+    try awaitState(&client, .connected);
+    try client.flush(quick);
+    client.close();
+    try server.await(io);
+    const seen = try record.seen(io);
+    defer testing.allocator.free(seen);
+    try testing.expect(std.mem.find(u8, seen, "PUB service.x") == null);
+}
