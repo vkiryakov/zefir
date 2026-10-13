@@ -266,6 +266,42 @@ pub fn build(b: *std.Build) void {
         test_log.dependOn(&compile.step);
     }
 
+    // rpc compile errors: transports whose methods do not fit the
+    // interfaces. Each test must fail with exactly one error, the message
+    // next to its name, and its note "called at comptime here" that points
+    // at the check in rpc: the check stops the build before Zig reports
+    // anything inside rpc. A type declared in a test is named after the file
+    // and the test.
+    const rpc_compile_errors = b.createModule(.{
+        .root_source_file = b.path("src/rpc/tests/compile_errors.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+        .imports = &.{
+            .{ .name = "rpc", .module = rpc },
+        },
+    });
+    const call_signature = "pub fn call(self: *@This(), io: std.Io, request: *const rpc.transport.Request, options: rpc.ClientTransport.CallOptions) rpc.ClientTransport.CallError!rpc.Response";
+    for ([_][2][]const u8{
+        .{ "client transport without call", "rpc.ClientTransport.init: compile_errors.test.client transport without call.NoCall has no method call; expected " ++ call_signature },
+        .{ "call with another response type", "rpc.ClientTransport.init: compile_errors.test.call with another response type.WrongResponse.call has another signature; expected " ++ call_signature },
+        .{ "client transport without info", "rpc.ClientTransport.init: compile_errors.test.client transport without info.NoInfo has no method info; expected pub fn info(self: *@This()) rpc.transport.Info" },
+        .{ "server transport without drain", "rpc.ServerTransport.init: compile_errors.test.server transport without drain.NoDrain has no method drain; expected pub fn drain(self: *@This(), io: std.Io) void" },
+        .{ "isReady with another signature", "rpc.ServerTransport.init: compile_errors.test.isReady with another signature.ReadyWithIo.isReady has another signature; expected pub fn isReady(self: *@This()) bool" },
+        .{ "release with another signature", "rpc.transport.Reply.init: compile_errors.test.release with another signature.ReleaseWithoutDisposition.release has another signature; expected pub fn release(self: *@This(), io: std.Io, disposition: rpc.transport.Reply.Disposition) void" },
+        .{ "init with a value", "rpc.ClientTransport.init: pass a pointer to the transport, e.g. &transport; got compile_errors.Echo" },
+        .{ "init with a pointer to a constant", "rpc.ClientTransport.init: the transport must be mutable, declared with var; got *const compile_errors.Echo" },
+        .{ "init with a pointer to a number", "rpc.ServerTransport.init: pass a pointer to the transport, e.g. &transport; got *u8" },
+    }, 0..) |case, i| {
+        const compile = b.addTest(.{
+            .name = b.fmt("rpc-compile-error-{d}", .{i}),
+            .root_module = rpc_compile_errors,
+            .filters = &.{case[0]},
+        });
+        compile.expect_errors = .{ .exact = b.allocator.dupe([]const u8, &.{ case[1], "note: called at comptime here" }) catch @panic("OOM") };
+        test_rpc.dependOn(&compile.step);
+    }
+
     // core benchmarks: `zig build test` only compiles them, `zig build bench`
     // runs them. They get their own ReleaseFast copy of core, since the
     // `core` module above is built in the mode the user asked for.

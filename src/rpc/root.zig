@@ -38,6 +38,10 @@ pub const Status = model.Status;
 pub const Failure = model.Failure;
 pub const Violation = model.Violation;
 
+/// The client side of a transport.
+pub const ClientTransport = @import("ClientTransport.zig");
+/// The server side of a transport.
+pub const ServerTransport = @import("ServerTransport.zig");
 /// The types and helpers a transport works with.
 pub const transport = @import("transport.zig");
 
@@ -45,5 +49,11 @@ test {
     std.testing.refAllDecls(@This());
     _ = @import("model.zig");
     _ = @import("rules.zig");
+    _ = @import("signature.zig");
     _ = @import("transport.zig");
+    _ = @import("ClientTransport.zig");
+    _ = @import("ServerTransport.zig");
+    _ = @import("Dispatcher.zig");
+    _ = @import("Incoming.zig");
+    _ = @import("Reply.zig");
 }

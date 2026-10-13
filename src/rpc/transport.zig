@@ -5,6 +5,14 @@ const std = @import("std");
 const core = @import("core");
 const model = @import("model.zig");
 
+/// Where a server transport delivers incoming calls; the engine implements
+/// it.
+pub const Dispatcher = @import("Dispatcher.zig");
+/// One admitted call; the engine implements it.
+pub const Incoming = @import("Incoming.zig");
+/// How the engine answers one call; the transport implements it.
+pub const Reply = @import("Reply.zig");
+
 /// A request that the client engine hands to `rpc.ClientTransport.call`.
 pub const Request = struct {
     route: model.Route,
