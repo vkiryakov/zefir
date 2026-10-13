@@ -610,15 +610,20 @@ pub fn strongPassword(comptime options: StrongPasswordOptions) Rule {
 
 /// The error of the call `strongPassword(options)`, or null: not every
 /// minimum is 0, and `min_length` is at least the sum of the class minima,
-/// so that some string passes.
+/// so that some string passes. When that sum is more than any usize, no
+/// `min_length` can be set, and the error asks to lower the minima instead.
 fn passwordCallProblem(comptime options: StrongPasswordOptions) ?[]const u8 {
     const head = "validator: strongPassword(.{...}): ";
     // In comptime_int, so that huge minima cannot overflow the sum.
     const sum = @as(comptime_int, options.min_lowercase) + @as(comptime_int, options.min_uppercase) +
         @as(comptime_int, options.min_numbers) + @as(comptime_int, options.min_symbols);
     if (options.min_length == 0 and sum == 0) return head ++ "every minimum is 0, so every string passes; set at least one minimum";
-    if (options.min_length < sum)
-        return head ++ std.fmt.comptimePrint("min_length = {d} is less than the {s} the other minima already require; set min_length to at least {d}", .{ options.min_length, core.plural(sum, "character", "characters"), sum });
+    if (options.min_length < sum) {
+        const problem = std.fmt.comptimePrint("min_length = {d} is less than the {s} the other minima already require; ", .{ options.min_length, core.plural(sum, "character", "characters") });
+        const max = std.math.maxInt(usize);
+        if (sum > max) return head ++ problem ++ std.fmt.comptimePrint("no min_length can satisfy them, since a usize holds at most {d}: lower the other minima", .{max});
+        return head ++ problem ++ std.fmt.comptimePrint("set min_length to at least {d}", .{sum});
+    }
     return null;
 }
 
@@ -974,7 +979,19 @@ test "strongPassword needs a minimum that is not 0 and a min_length that holds t
     try expect(head ++ "min_length = 3 is less than the 4 characters the other minima already require; set min_length to at least 4", comptime passwordCallProblem(.{ .min_length = 3 }).?);
     try expect(head ++ "min_length = 0 is less than the 1 character the other minima already require; set min_length to at least 1", comptime passwordCallProblem(.{ .min_length = 0, .min_lowercase = 1, .min_uppercase = 0, .min_numbers = 0, .min_symbols = 0 }).?);
     const max = std.math.maxInt(usize);
-    try std.testing.expect(comptime passwordCallProblem(.{ .min_length = max, .min_lowercase = max, .min_uppercase = max }) != null);
+    try expect(
+        head ++ std.fmt.comptimePrint("min_length = {d} is less than the {d} characters the other minima already require; set min_length to at least {d}", .{ 8, max, max }),
+        comptime passwordCallProblem(.{ .min_length = 8, .min_lowercase = max - 1, .min_uppercase = 1, .min_numbers = 0, .min_symbols = 0 }).?,
+    );
+    // Minima that add up to more than any usize: no min_length can hold them.
+    try expect(
+        head ++ std.fmt.comptimePrint("min_length = {d} is less than the {d} characters the other minima already require; no min_length can satisfy them, since a usize holds at most {d}: lower the other minima", .{ 8, @as(comptime_int, max) + 1, max }),
+        comptime passwordCallProblem(.{ .min_length = 8, .min_lowercase = max, .min_uppercase = 1, .min_numbers = 0, .min_symbols = 0 }).?,
+    );
+    try expect(
+        head ++ std.fmt.comptimePrint("min_length = {d} is less than the {d} characters the other minima already require; no min_length can satisfy them, since a usize holds at most {d}: lower the other minima", .{ max, 2 * @as(comptime_int, max) + 2, max }),
+        comptime passwordCallProblem(.{ .min_length = max, .min_lowercase = max, .min_uppercase = max }).?,
+    );
     try std.testing.expectEqual(null, comptime passwordCallProblem(.{}));
     try std.testing.expectEqual(null, comptime passwordCallProblem(.{ .min_length = 4 }));
     try std.testing.expectEqual(null, comptime passwordCallProblem(.{ .min_length = 1, .min_lowercase = 0, .min_uppercase = 0, .min_numbers = 0, .min_symbols = 0 }));
