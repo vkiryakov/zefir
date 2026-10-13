@@ -458,11 +458,11 @@ pub fn requestMany(client: *Client, subject: []const u8, payload: []const u8, op
     try client.inbox.subscribe(io, &client.subscriptions, &client.outbound, deadline);
 
     const limits = &client.options.options.limits;
-    const responses = try Responses.create(gpa, client, deadline, .{
+    const responses = try Inbox.createResponses(gpa, client, deadline, .{
         .messages = options.max_responses,
         .bytes = options.max_bytes orelse limits.subscription_bytes,
     });
-    errdefer Responses.destroy(gpa, responses);
+    errdefer Inbox.destroyResponses(gpa, responses);
     responses.id = try client.inbox.add(io, gpa, .{ .many = responses }, limits.max_pending_requests);
     // Out of the inbox before it is freed.
     errdefer client.inbox.remove(io, responses.id);

@@ -18,8 +18,10 @@
 const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
+const Client = @import("../Client.zig");
 const Message = @import("../Message.zig");
 const Responses = @import("../Responses.zig");
+const MessageQueue = @import("MessageQueue.zig");
 const Outbound = @import("Outbound.zig");
 const Registry = @import("Registry.zig");
 const Broadcast = @import("Broadcast.zig");
@@ -277,7 +279,7 @@ pub fn accepts(inbox: *Inbox, io: Io, id: u64) ?usize {
     const entry = inbox.pending.get(id) orelse return null;
     return switch (entry) {
         .single => std.math.maxInt(usize),
-        .many => |responses| responses.accepts(io),
+        .many => |responses| takes(io, responses),
     };
 }
 
@@ -322,7 +324,7 @@ pub fn deliver(inbox: *Inbox, io: Io, id: u64, message: ?Message) Delivery {
         .many => |responses| {
             // After its deadline, `max_responses` or `cancel()`, the stream
             // takes nothing more.
-            if (responses.accepts(io) == null) {
+            if (takes(io, responses) == null) {
                 if (message) |m| release(m);
                 inbox.late += 1;
                 return .late;
@@ -369,10 +371,37 @@ pub fn deinit(inbox: *Inbox, gpa: Allocator) void {
     var entries = inbox.pending.valueIterator();
     while (entries.next()) |entry| switch (entry.*) {
         .single => {},
-        .many => |responses| Responses.destroy(gpa, responses),
+        .many => |responses| destroyResponses(gpa, responses),
     };
     inbox.pending.deinit(gpa);
     inbox.* = undefined;
+}
+
+/// The stream of a requestMany of `client` that ends at `deadline`, with
+/// room for `limits` and ending after `limits.messages` responses; it gets
+/// its id when it joins the inbox.
+pub fn createResponses(gpa: Allocator, client: *Client, deadline: Io.Clock.Timestamp, limits: MessageQueue.Limits) Allocator.Error!*Responses {
+    const responses = try gpa.create(Responses);
+    responses.* = .{
+        .client = client,
+        .id = 0,
+        .deadline = deadline,
+        .messages = .init(gpa, limits, .drop_newest, limits.messages),
+    };
+    return responses;
+}
+
+/// Frees `responses` and what it holds; it must have left the inbox.
+pub fn destroyResponses(gpa: Allocator, responses: *Responses) void {
+    responses.messages.deinit();
+    gpa.destroy(responses);
+}
+
+/// How many bytes a response may take; null when the stream takes no
+/// more: after its deadline, `max_responses` or `cancel()`.
+fn takes(io: Io, responses: *Responses) ?usize {
+    if (time.expired(io, responses.deadline) or !responses.messages.isOpen(io)) return null;
+    return responses.messages.limits.bytes;
 }
 
 /// Requests waiting for a reply; tests use it.
@@ -825,9 +854,9 @@ test "a request waiting at the gate gives up at its deadline, and the end of the
 
 /// A requestMany's stream in `inbox`, as `Client.requestMany` makes it;
 /// these tests use only its queue and deadline.
-fn addStream(inbox: *Inbox, io: Io, deadline: Io.Clock.Timestamp, limits: @import("MessageQueue.zig").Limits) !*Responses {
-    const responses = try Responses.create(testing.allocator, undefined, deadline, limits);
-    errdefer Responses.destroy(testing.allocator, responses);
+fn addStream(inbox: *Inbox, io: Io, deadline: Io.Clock.Timestamp, limits: MessageQueue.Limits) !*Responses {
+    const responses = try createResponses(testing.allocator, undefined, deadline, limits);
+    errdefer destroyResponses(testing.allocator, responses);
     responses.id = try inbox.add(io, testing.allocator, .{ .many = responses }, 10);
     return responses;
 }
@@ -854,7 +883,7 @@ test "the replies of a requestMany queue up until max_responses, then they are l
     try testing.expectEqual(1, inbox.lateResponses(io));
     // Still in the map until its owner takes it out.
     inbox.remove(io, responses.id);
-    Responses.destroy(testing.allocator, responses);
+    destroyResponses(testing.allocator, responses);
 }
 
 test "after the deadline of a requestMany its replies are late" {
@@ -863,7 +892,7 @@ test "after the deadline of a requestMany its replies are late" {
     defer inbox.deinit(testing.allocator);
     const deadline = time.after(io, .fromMilliseconds(10));
     const responses = try addStream(&inbox, io, deadline, .{ .messages = 4, .bytes = 1024 });
-    defer Responses.destroy(testing.allocator, responses);
+    defer destroyResponses(testing.allocator, responses);
     defer inbox.remove(io, responses.id);
     try testing.expectEqual(.taken, inbox.deliver(io, responses.id, try testReply("r", null, "in time")));
     while (!time.expired(io, deadline)) try io.sleep(.fromMilliseconds(1), .awake);
@@ -879,7 +908,7 @@ test "a first reply of no responders ends a requestMany; later it is a reply lik
     _ = inbox.deliver(io, nobody.id, try testReply("r", 503, ""));
     try testing.expectError(error.NoResponders, nobody.messages.next(io, .none));
     inbox.remove(io, nobody.id);
-    Responses.destroy(testing.allocator, nobody);
+    destroyResponses(testing.allocator, nobody);
 
     const some = try addStream(&inbox, io, soon(io), .{ .messages = 4, .bytes = 1024 });
     _ = inbox.deliver(io, some.id, try testReply("r", null, "one"));
@@ -889,7 +918,7 @@ test "a first reply of no responders ends a requestMany; later it is a reply lik
     defer status.deinit();
     try testing.expectEqual(503, status.status.?);
     inbox.remove(io, some.id);
-    Responses.destroy(testing.allocator, some);
+    destroyResponses(testing.allocator, some);
 }
 
 test "end: a requestMany hands out what came, then Disconnected; close drops it at once" {

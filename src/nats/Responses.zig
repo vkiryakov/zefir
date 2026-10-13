@@ -15,15 +15,16 @@
 //! }
 //! ```
 //!
-//! One task at a time waits in `next()`; any task may `cancel()`.
+//! One task at a time waits in `next()`; any task may `cancel()`. The
+//! fields are internal: use the methods.
 
 const std = @import("std");
 const Io = std.Io;
-const Allocator = std.mem.Allocator;
 const Client = @import("Client.zig");
 const Message = @import("Message.zig");
 const Subscription = @import("Subscription.zig");
 const MessageQueue = @import("engine/MessageQueue.zig");
+const Inbox = @import("engine/Inbox.zig");
 const time = @import("engine/time.zig");
 const Responses = @This();
 
@@ -32,9 +33,8 @@ client: *Client,
 id: u64,
 /// The stream ends here, whatever came.
 deadline: Io.Clock.Timestamp,
-/// The responses that wait to be taken. Internal: the client's reader
-/// fills it; take responses with `next()`. Tests may ask it
-/// `isReceiving()`.
+/// The responses that wait to be taken: the client's reader fills it.
+/// Tests may ask it `isReceiving()` and `stats()`.
 messages: MessageQueue,
 
 pub const NextError = error{
@@ -106,30 +106,5 @@ fn stop(r: *Responses, discard: bool) void {
 /// task may wait in `next()` meanwhile.
 pub fn deinit(r: *Responses) void {
     r.client.inbox.remove(r.client.io, r.id);
-    destroy(r.client.gpa, r);
-}
-
-/// A stream for a request of `client` that ends at `deadline`, with room
-/// for `limits`; it gets its id when it joins the inbox.
-pub fn create(gpa: Allocator, client: *Client, deadline: Io.Clock.Timestamp, limits: MessageQueue.Limits) Allocator.Error!*Responses {
-    const r = try gpa.create(Responses);
-    r.* = .{
-        .client = client,
-        .id = 0,
-        .deadline = deadline,
-        .messages = .init(gpa, limits, .drop_newest, limits.messages),
-    };
-    return r;
-}
-
-/// Frees `r` and the responses it holds; it must have left the inbox.
-pub fn destroy(gpa: Allocator, r: *Responses) void {
-    r.messages.deinit();
-    gpa.destroy(r);
-}
-
-/// How many bytes a response may take; null when the stream takes no more.
-pub fn accepts(r: *Responses, io: Io) ?usize {
-    if (time.expired(io, r.deadline) or !r.messages.isOpen(io)) return null;
-    return r.messages.limits.bytes;
+    Inbox.destroyResponses(r.client.gpa, r);
 }
