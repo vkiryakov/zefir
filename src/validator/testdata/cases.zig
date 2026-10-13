@@ -39,6 +39,7 @@ pub const test_files = [_][]const u8{
     "src/validator/testdata/field_types_test.zig",
     "src/validator/testdata/messages_test.zig",
     "src/validator/testdata/catalog_test.zig",
+    "src/validator/examples/pages_test.zig",
 };
 
 /// Tests built with ReleaseSafe whatever -Doptimize says, for behaviour that

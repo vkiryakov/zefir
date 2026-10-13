@@ -1,6 +1,7 @@
-//! README.md shows every compiled example of this directory verbatim, and
-//! the output of every example program: an example that changes without its
-//! copy in README.md fails this test.
+//! README.md shows every example of `cases.examples` verbatim, and the
+//! output of every example program: an example that changes without its
+//! copy in README.md fails this test. The examples of the rule pages are
+//! checked by pages_test.zig.
 
 const std = @import("std");
 const cases = @import("cases");

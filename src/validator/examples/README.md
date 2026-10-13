@@ -89,6 +89,20 @@ Add Zefir to your `build.zig.zon`; validator ships since v0.3.0:
 zig fetch --save git+https://github.com/vkiryakov/zefir#v0.3.0
 ```
 
+v0.3.0 has the first 19 rules: the [common](common.md) and
+[number](numbers.md) rules, `v.minItems`, `v.maxItems`, `v.each` and
+`v.custom`. The other 77 rules — the [strings](strings.md),
+[formats](formats.md), [encodings](encodings.md),
+[identifiers](identifiers.md) and [dates](dates.md) pages, `v.uniqueItems`,
+`v.uniqueBy`, `v.containsAll` and `v.containsNone` — ship in v0.4.0, and so
+does the compile error for two rules that no value can pass
+([D60](class_validator.md#deviations-from-validatorjs)). Until then they are
+on the `dev` branch:
+
+```sh
+zig fetch --save git+https://github.com/vkiryakov/zefir#dev
+```
+
 Then import the `zefir-validator` module in `build.zig`:
 
 ```zig
