@@ -3,8 +3,8 @@
 //! meant for production. It speaks plaintext TCP with no auth or with user
 //! and password; TLS and JetStream are not part of this version.
 //!
-//! The client arrives phase by phase. Phase 1 brings the options, server
-//! addresses and INFO, header handling and the protocol layer underneath.
+//! Work in progress: this version has the options, server addresses, INFO,
+//! message headers and the protocol layer underneath; the client comes next.
 
 const std = @import("std");
 
@@ -29,4 +29,5 @@ test {
     _ = @import("protocol/server_error.zig");
     _ = @import("protocol/golden.zig");
     _ = @import("protocol/fuzz.zig");
+    _ = @import("engine/OwnedOptions.zig");
 }

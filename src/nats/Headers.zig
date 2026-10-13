@@ -1,4 +1,4 @@
-//! Message headers: the `NATS/1.0` block of HPUB and HMSG (spec R32).
+//! Message headers: the `NATS/1.0` block of HPUB and HMSG.
 //!
 //! A received message's headers are a view of its header block. Lookups
 //! scan the block and copy nothing; the order, duplicates and case of the
@@ -19,7 +19,6 @@
 //! has no CR or LF.
 
 const std = @import("std");
-const Writer = std.Io.Writer;
 const Headers = @This();
 
 /// One header to send, borrowed for the duration of the call.
@@ -127,25 +126,6 @@ pub fn validate(headers: []const Header) ValidateError!void {
     }
 }
 
-/// The length of the block `writeBlock` writes; HPUB announces it.
-pub fn blockLen(headers: []const Header) usize {
-    var len: usize = version_line.len + 2 + 2;
-    for (headers) |header| len += header.name.len + 2 + header.value.len + 2;
-    return len;
-}
-
-/// Writes `NATS/1.0`, one `Name: value` line per header and the blank line.
-pub fn writeBlock(w: *Writer, headers: []const Header) Writer.Error!void {
-    try w.writeAll(version_line ++ "\r\n");
-    for (headers) |header| {
-        try w.writeAll(header.name);
-        try w.writeAll(": ");
-        try w.writeAll(header.value);
-        try w.writeAll("\r\n");
-    }
-    try w.writeAll("\r\n");
-}
-
 const testing = std.testing;
 
 test "multi-value headers keep order, duplicates and case" {
@@ -217,24 +197,4 @@ test "validate headers to send" {
     }) |header| {
         try testing.expectError(error.InvalidHeader, validate(&.{header}));
     }
-}
-
-test "writeBlock round-trips and matches blockLen" {
-    const headers = [_]Header{ .{ .name = "X-Multi", .value = "one" }, .{ .name = "X-Multi", .value = "two" }, .{ .name = "X-Single", .value = "v" } };
-    var buffer: [128]u8 = undefined;
-    var w: Writer = .fixed(&buffer);
-    try writeBlock(&w, &headers);
-    // The block nats-server 2.15.1 relayed in HMSG h.test 4 53 61.
-    try testing.expectEqualStrings("NATS/1.0\r\nX-Multi: one\r\nX-Multi: two\r\nX-Single: v\r\n\r\n", w.buffered());
-    try testing.expectEqual(53, blockLen(&headers));
-    try testing.expectEqual(w.buffered().len, blockLen(&headers));
-
-    const h: Headers = .{ .block = w.buffered() };
-    var fields = h.iterator();
-    for (headers) |expected| {
-        const field = fields.next().?;
-        try testing.expectEqualStrings(expected.name, field.name);
-        try testing.expectEqualStrings(expected.value, field.value);
-    }
-    try testing.expect(fields.next() == null);
 }

@@ -1,10 +1,12 @@
-//! Incremental parser of what a NATS server sends (spec R23, R24). Pure:
+//! Incremental parser of what a NATS server sends. Pure:
 //! bytes in, frames out; no I/O, no allocation.
 //!
 //! The reader passes the bytes it has buffered to `next`. The slices of a
 //! frame point into those bytes and stay valid until the reader drops the
 //! `consumed` ones. A null frame means "need more": keep
-//! `input[consumed..]`, read more after it and call again.
+//! `input[consumed..]`, read more after it and call again. The reader's
+//! buffer holds `bufferLen(limits)` bytes, the longest line with its CRLF,
+//! so "need more" never comes with a full buffer.
 //!
 //! A message comes as `.msg` (its control line), then its bytes in one or
 //! more `.body` frames (header block first, then payload; none when both
@@ -30,6 +32,12 @@ pub const Limits = struct {
 /// What a MSG or HMSG line adds to the arguments a publisher sent: the
 /// operation and a subscription id of up to 20 digits, with its space.
 pub const msg_line_overhead = "HMSG ".len + 20 + 1;
+
+/// The size of the reader's buffer: the longest line `limits` allow, with
+/// its CRLF.
+pub fn bufferLen(limits: Limits) usize {
+    return @max(limits.max_control_line +| msg_line_overhead, limits.max_info_line) +| 2;
+}
 
 pub const Error = error{
     /// No line end within the limit.
@@ -416,4 +424,29 @@ test "the largest sizes parse, and a message may stop half way" {
     try expectTranscript("MSG s 18446744073709551615 - 0 4294967295\nBODY abc\nINCOMPLETE 0\n", "MSG s 18446744073709551615 4294967295\r\nabc");
     try expectTranscript("MSG s 1 - 0 3\nBODY abc\nINCOMPLETE 1\n", "MSG s 1 3\r\nabc\r");
     try expectTranscript("INCOMPLETE 8\n", "MSG s 1 ");
+}
+
+test "a buffer of bufferLen bytes holds the longest line, and never fills without one" {
+    const limits: Limits = .{ .max_control_line = 16, .max_info_line = 32 };
+    const len = comptime bufferLen(limits);
+    try testing.expectEqual(16 + msg_line_overhead + 2, len);
+    try testing.expectEqual(4096 + msg_line_overhead + 2, bufferLen(.{ .max_control_line = 4096, .max_info_line = 0 }));
+    try testing.expectEqual(64 * 1024 + 2, bufferLen(.{}));
+
+    // The longest MSG line with its CRLF fills the buffer exactly.
+    const name: [16 + msg_line_overhead - "MSG ".len - " 1 0".len]u8 = @splat('b');
+    const line = "MSG " ++ name ++ " 1 0\r\n";
+    try testing.expectEqual(len, line.len);
+    var parser: Parser = .init(limits);
+    const step = try parser.next(line);
+    try testing.expectEqual(line.len, step.consumed);
+    try testing.expect(step.frame.? == .msg);
+
+    // A full buffer without a line end is an error, never "need more".
+    const no_end: [len]u8 = @splat('x');
+    var other: Parser = .init(limits);
+    try testing.expectError(error.LineTooLong, other.next(&no_end));
+    const info_no_end = "INFO " ++ @as([len - "INFO ".len]u8, @splat('x'));
+    var info: Parser = .init(limits);
+    try testing.expectError(error.LineTooLong, info.next(info_no_end));
 }

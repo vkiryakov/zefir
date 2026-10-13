@@ -1,7 +1,7 @@
-//! Frames the client sends (spec R25, R26): CONNECT, PUB, HPUB, SUB, UNSUB,
-//! PING and PONG. Each `write*` has a `*Len` twin that gives the exact
-//! length of the frame before anything is written, so a frame can be
-//! checked against limits and get its room in the outbound queue first.
+//! Frames the client sends: CONNECT, PUB, HPUB, SUB, UNSUB, PING and PONG.
+//! Each `write*` has a `*Len` twin that gives the exact length of the frame
+//! before anything is written, so a frame can be checked against limits and
+//! get its room in the outbound queue first.
 //!
 //! Only formatting happens here: callers check subjects (`subject.zig`) and
 //! headers (`Headers.validate`) before.
@@ -17,7 +17,9 @@ pub const version: []const u8 = @import("build_options").version;
 pub const ping = "PING\r\n";
 pub const pong = "PONG\r\n";
 
-/// What the client tells the server in CONNECT.
+/// What the client tells the server in CONNECT. The strings must be valid
+/// UTF-8: the server replaces invalid bytes, so a password would no longer
+/// match. `Options.validate` checks this for the client's options.
 pub const Connect = struct {
     verbose: bool = false,
     pedantic: bool = false,
@@ -71,7 +73,7 @@ pub fn writeConnect(w: *Writer, c: Connect) Writer.Error!void {
 
 /// The length of the CONNECT JSON alone. The server counts it against its
 /// control-line limit (4096 bytes by default) and closes the connection
-/// when it is longer (R21).
+/// when it is longer.
 pub fn connectJsonLen(c: Connect) usize {
     var counter: Writer.Discarding = .init(&.{});
     std.json.Stringify.value(connectJson(c), json_options, &counter.writer) catch unreachable; // discarding never fails
@@ -92,18 +94,18 @@ pub fn pubLen(subject: []const u8, reply_to: ?[]const u8, payload_len: usize) us
 }
 
 /// `HPUB <subject> [reply-to] <header-size> <total-size>\r\n<headers><payload>\r\n`.
-/// Headers count toward the server's `max_payload` (R31).
+/// Headers count toward the server's `max_payload`.
 pub fn writeHpub(w: *Writer, subject: []const u8, reply_to: ?[]const u8, headers: []const Header, payload: []const u8) Writer.Error!void {
-    const header_len = Headers.blockLen(headers);
+    const header_len = headerBlockLen(headers);
     try w.print("HPUB {s}", .{subject});
     if (reply_to) |reply| try w.print(" {s}", .{reply});
     try w.print(" {d} {d}\r\n", .{ header_len, header_len + payload.len });
-    try Headers.writeBlock(w, headers);
+    try writeHeaderBlock(w, headers);
     try w.writeAll(payload);
     try w.writeAll("\r\n");
 }
 
-/// `header_len` is `Headers.blockLen(headers)`.
+/// `header_len` is `headerBlockLen(headers)`.
 pub fn hpubLen(subject: []const u8, reply_to: ?[]const u8, header_len: usize, payload_len: usize) usize {
     const total = header_len + payload_len;
     return "HPUB ".len + subject.len + replyLen(reply_to) + 1 + digits(header_len) + 1 + digits(total) + 2 + total + 2;
@@ -132,6 +134,25 @@ pub fn unsubLen(sid: u64, max: ?u64) usize {
     return "UNSUB ".len + digits(sid) + (if (max) |m| 1 + digits(m) else 0) + 2;
 }
 
+/// The length of the block `writeHeaderBlock` writes; HPUB announces it.
+pub fn headerBlockLen(headers: []const Header) usize {
+    var len: usize = "NATS/1.0\r\n".len + 2;
+    for (headers) |header| len += header.name.len + 2 + header.value.len + 2;
+    return len;
+}
+
+/// Writes `NATS/1.0`, one `Name: value` line per header and the blank line.
+pub fn writeHeaderBlock(w: *Writer, headers: []const Header) Writer.Error!void {
+    try w.writeAll("NATS/1.0\r\n");
+    for (headers) |header| {
+        try w.writeAll(header.name);
+        try w.writeAll(": ");
+        try w.writeAll(header.value);
+        try w.writeAll("\r\n");
+    }
+    try w.writeAll("\r\n");
+}
+
 fn replyLen(optional: ?[]const u8) usize {
     return if (optional) |s| 1 + s.len else 0;
 }
@@ -152,7 +173,7 @@ fn expectFrame(expected: []const u8, len: usize, frame: anytype) !void {
 }
 
 test "client frames match what nats-server 2.15.1 accepted" {
-    // From docs/nats-research/prototypes/e2e/transcripts/e2e-transcript.txt.
+    // Recorded from nats-server 2.15.1, which accepted every one of them.
     try expectFrame("SUB foo 1\r\n", subLen("foo", null, 1), .{ writeSub, .{ "foo", null, 1 } });
     try expectFrame("SUB foo.* 2\r\n", subLen("foo.*", null, 2), .{ writeSub, .{ "foo.*", null, 2 } });
     try expectFrame("SUB q.work workers 3\r\n", subLen("q.work", "workers", 3), .{ writeSub, .{ "q.work", "workers", 3 } });
@@ -165,13 +186,13 @@ test "client frames match what nats-server 2.15.1 accepted" {
     const multi = [_]Header{ .{ .name = "X-Multi", .value = "one" }, .{ .name = "X-Multi", .value = "two" }, .{ .name = "X-Single", .value = "v" } };
     try expectFrame(
         "HPUB h.test 53 61\r\nNATS/1.0\r\nX-Multi: one\r\nX-Multi: two\r\nX-Single: v\r\n\r\npayload!\r\n",
-        hpubLen("h.test", null, Headers.blockLen(&multi), 8),
+        hpubLen("h.test", null, headerBlockLen(&multi), 8),
         .{ writeHpub, .{ "h.test", null, @as([]const Header, &multi), "payload!" } },
     );
     const only = [_]Header{.{ .name = "X-Only-Header", .value = "yes" }};
     try expectFrame(
         "HPUB h.test reply.h 32 32\r\nNATS/1.0\r\nX-Only-Header: yes\r\n\r\n\r\n",
-        hpubLen("h.test", "reply.h", Headers.blockLen(&only), 0),
+        hpubLen("h.test", "reply.h", headerBlockLen(&only), 0),
         .{ writeHpub, .{ "h.test", "reply.h", @as([]const Header, &only), "" } },
     );
     try testing.expectEqualStrings("PING\r\n", ping);
@@ -189,7 +210,7 @@ test "lengths across digit boundaries" {
         try testing.expectEqual(w.buffered().len, pubLen("s", "r", n));
         w = .fixed(&buffer);
         try writeHpub(&w, "s", null, &headers, payload[0..n]);
-        try testing.expectEqual(w.buffered().len, hpubLen("s", null, Headers.blockLen(&headers), n));
+        try testing.expectEqual(w.buffered().len, hpubLen("s", null, headerBlockLen(&headers), n));
     }
     for ([_]u64{ 0, 9, 10, std.math.maxInt(u64) }) |n| {
         var buffer: [64]u8 = undefined;
@@ -242,4 +263,24 @@ test "CONNECT escapes names and credentials as JSON" {
     try testing.expectEqualStrings(connect.name.?, parsed.value.name);
     try testing.expectEqualStrings(connect.user.?, parsed.value.user);
     try testing.expectEqualStrings(connect.pass.?, parsed.value.pass);
+}
+
+test "the header block round-trips through Headers and matches its length" {
+    const headers = [_]Header{ .{ .name = "X-Multi", .value = "one" }, .{ .name = "X-Multi", .value = "two" }, .{ .name = "X-Single", .value = "v" } };
+    var buffer: [128]u8 = undefined;
+    var w: Writer = .fixed(&buffer);
+    try writeHeaderBlock(&w, &headers);
+    // The block nats-server 2.15.1 relayed in HMSG h.test 4 53 61.
+    try testing.expectEqualStrings("NATS/1.0\r\nX-Multi: one\r\nX-Multi: two\r\nX-Single: v\r\n\r\n", w.buffered());
+    try testing.expectEqual(53, headerBlockLen(&headers));
+    try testing.expectEqual(w.buffered().len, headerBlockLen(&headers));
+
+    const h: Headers = .{ .block = w.buffered() };
+    var fields = h.iterator();
+    for (headers) |expected| {
+        const field = fields.next().?;
+        try testing.expectEqualStrings(expected.name, field.name);
+        try testing.expectEqualStrings(expected.value, field.value);
+    }
+    try testing.expect(fields.next() == null);
 }

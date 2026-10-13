@@ -1,4 +1,4 @@
-//! A server address (spec R14, R22): a host of up to 255 bytes and a port,
+//! A server address: a host of up to 255 bytes and a port,
 //! stored inline, so the value can be copied and returned without an
 //! allocator. An IPv6 host is stored without its brackets.
 
@@ -35,8 +35,12 @@ pub fn parse(text: []const u8) ParseError!ServerAddress {
     if (rest[0] == '[') {
         const close = std.mem.findScalar(u8, rest, ']') orelse return error.InvalidAddress;
         name = rest[1..close];
-        // Brackets are for IPv6 literals only.
-        if (std.mem.findScalar(u8, name, ':') == null) return error.InvalidAddress;
+        // Brackets hold an IPv6 literal, optionally with a zone: `fe80::1%en0`.
+        if (name.len > max_host_len) return error.InvalidAddress;
+        switch (std.Io.net.Ip6Address.Unresolved.parse(name)) {
+            .success => {},
+            else => return error.InvalidAddress,
+        }
         const after = rest[close + 1 ..];
         if (after.len > 0) {
             if (after[0] != ':') return error.InvalidAddress;
@@ -106,6 +110,8 @@ test "accepted forms" {
     try expectAddress("[::1]:4222", "::1", 4222);
     try expectAddress("nats://[::1]", "::1", 4222);
     try expectAddress("[fe80::1%en0]:65535", "fe80::1%en0", 65535);
+    try expectAddress("[::ffff:127.0.0.1]:4222", "::ffff:127.0.0.1", 4222);
+    try expectAddress("[2001:DB8::1]", "2001:DB8::1", 4222);
     try expectAddress("127.0.0.1:1", "127.0.0.1", 1);
     const long_host: [255]u8 = @splat('h');
     try expectAddress(&long_host, &long_host, 4222);
@@ -114,11 +120,14 @@ test "accepted forms" {
 test "rejected forms" {
     const too_long: [256]u8 = @splat('h');
     for ([_][]const u8{
-        "",                   "nats://",                    "tls://host:4222", "ws://host",        "wss://host",
-        "http://host",        "nats://user:pass@host:4222", "user@host",       "host:",            "host:0",
-        "host:65536",         "host:12a",                   "host:-1",         "::1",              "::1:4222",
-        "[::1",               "[::1]x",                     "[::1]:",          "[127.0.0.1]:4222", "host:4222/path",
-        "nats://host:4222?x", "host name",                  "host\r\n",        "[]:4222",          &too_long,
+        "",                    "nats://",                    "tls://host:4222", "ws://host",           "wss://host",
+        "http://host",         "nats://user:pass@host:4222", "user@host",       "host:",               "host:0",
+        "host:65536",          "host:12a",                   "host:-1",         "::1",                 "::1:4222",
+        "[::1",                "[::1]x",                     "[::1]:",          "[127.0.0.1]:4222",    "host:4222/path",
+        "nats://host:4222?x",  "host name",                  "host\r\n",        "[]:4222",             &too_long,
+        // Brackets hold an IPv6 literal and nothing else.
+        "[:]:4222",            "[zz:zz]:4222",               "[::1::2]",        "[1:2:3:4:5:6:7:8:9]", "[fe80::1%]:4222",
+        "[::ffff:1.2.3]:4222", "[localhost:1]",
     }) |text| {
         try testing.expectError(error.InvalidAddress, parse(text));
     }

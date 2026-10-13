@@ -1,6 +1,5 @@
-//! Frames recorded from nats-server 2.15.1 on 2026-10-12 (spec R61): the
-//! research transcripts of the zefir-nats epic. INFO lines keep the space
-//! nats-server writes before CRLF.
+//! Frames recorded from nats-server 2.15.1 on 2026-10-12. INFO lines keep
+//! the space nats-server writes before CRLF.
 
 /// The first INFO of a plain server.
 pub const info_default_json =

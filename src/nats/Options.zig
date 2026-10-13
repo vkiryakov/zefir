@@ -1,4 +1,4 @@
-//! Client options (spec R9, R17–R22). Only `servers` has no default:
+//! Client options. Only `servers` has no default:
 //!
 //! ```zig
 //! const options: nats.Options = .{
@@ -12,7 +12,6 @@
 //! so the strings may be freed once the client is created.
 
 const std = @import("std");
-const Allocator = std.mem.Allocator;
 const Duration = std.Io.Duration;
 const ServerAddress = @import("ServerAddress.zig");
 const encoder = @import("protocol/encoder.zig");
@@ -24,9 +23,12 @@ const Options = @This();
 servers: []const []const u8,
 /// The connection name the server shows in its monitoring.
 name: ?[]const u8 = null,
+/// The credentials sent in CONNECT.
 auth: Auth = .none,
 /// One attempt on one server: DNS, TCP and the INFO, CONNECT, PONG exchange.
 connect_timeout: Duration = .fromSeconds(5),
+/// How often the client PINGs the server to check that the connection is
+/// alive.
 ping_interval: Duration = .fromSeconds(30),
 /// PINGs left unanswered before the connection counts as dead.
 max_outstanding_pings: u8 = 2,
@@ -38,12 +40,15 @@ no_responders: bool = true,
 verbose: bool = false,
 /// The server checks subjects more strictly.
 pedantic: bool = false,
+/// Try the servers in random order, so that clients spread over a cluster.
 randomize_servers: bool = true,
 /// Use only `servers`, not the servers the cluster announces.
 ignore_discovered_servers: bool = false,
 /// `connect()` returns at once and keeps trying in the background.
 retry_initial_connect: bool = false,
+/// What happens after the connection is lost.
 reconnect: ReconnectOptions = .{},
+/// Bounds on what the client holds in memory.
 limits: Limits = .{},
 
 pub const Auth = union(enum) {
@@ -58,6 +63,7 @@ pub const Auth = union(enum) {
 };
 
 pub const ReconnectOptions = struct {
+    /// Reconnect after the connection is lost; when false, the client closes.
     enabled: bool = true,
     /// Failed attempts in a row before the client gives up; null: never.
     max_attempts: ?u32 = null,
@@ -65,6 +71,7 @@ pub const ReconnectOptions = struct {
     /// `min_delay` up to `max_delay`.
     min_delay: Duration = .fromMilliseconds(500),
     max_delay: Duration = .fromSeconds(10),
+    /// A random part in every delay, so that clients do not reconnect in step.
     jitter: bool = true,
     /// Publishes kept while reconnecting and sent once connected; with 0
     /// they fail at once with Disconnected. Nothing is ever sent twice.
@@ -76,20 +83,28 @@ pub const ReconnectOptions = struct {
 pub const Limits = struct {
     /// Bytes waiting to be written; publish waits for room beyond this.
     outbound_bytes: usize = 8 * 1024 * 1024,
-    /// What a subscription holds before its overflow policy drops messages.
+    /// Messages a subscription holds before its overflow policy drops some.
     subscription_messages: u32 = 1024,
+    /// Bytes a subscription holds before its overflow policy drops messages.
     subscription_bytes: usize = 8 * 1024 * 1024,
+    /// Requests waiting for a reply at once; more fail with
+    /// TooManyPendingRequests.
     max_pending_requests: u32 = 65_536,
+    /// Subscriptions at once; more fail with TooManySubscriptions.
     max_subscriptions: u32 = 65_536,
     /// The server's `max_control_line`: the longest arguments of a protocol
     /// line, such as a subject with its reply-to. Messages the server sends
     /// may be a few bytes longer, INFO and -ERR up to 64 KiB. Raise it
-    /// together with the server's setting.
+    /// together with the server's setting. It must hold this client's
+    /// CONNECT, which the server checks against the same limit.
     max_control_line_bytes: u32 = 4096,
     /// The largest message accepted, headers included; larger ones are
     /// read past, dropped and counted.
     max_inbound_frame_bytes: u32 = 64 * 1024 * 1024,
+    /// The largest header block accepted; messages with a larger one are
+    /// read past, dropped and counted.
     max_header_bytes: u32 = 64 * 1024,
+    /// Events kept for `nextEvent()`; more are dropped and counted.
     max_event_queue: u32 = 1024,
 };
 
@@ -136,7 +151,9 @@ pub fn validate(options: Options) Error!void {
     if (limits.max_control_line_bytes == 0 or limits.max_control_line_bytes > max_control_line_limit) return error.InvalidOptions;
     if (limits.max_header_bytes > limits.max_inbound_frame_bytes) return error.InvalidOptions;
 
-    if (longestConnectJson(options) > max_connect_json) return error.InvalidOptions;
+    // The server checks CONNECT against its control line limit too.
+    const connect_len = longestConnectJson(options);
+    if (connect_len > max_connect_json or connect_len > limits.max_control_line_bytes) return error.InvalidOptions;
 }
 
 /// The CONNECT JSON as long as it can get: as if the server supported headers.
@@ -158,64 +175,6 @@ fn longestConnectJson(options: Options) usize {
         },
     });
 }
-
-/// The client's own copy of the options: servers parsed, strings copied,
-/// the credentials zeroed when freed. `options.servers` is empty in the copy;
-/// the parsed servers are in `servers`.
-pub const Owned = struct {
-    options: Options,
-    servers: []ServerAddress,
-
-    pub fn init(gpa: Allocator, options: Options) (Error || Allocator.Error)!Owned {
-        try validate(options);
-        const servers = try gpa.alloc(ServerAddress, options.servers.len);
-        errdefer gpa.free(servers);
-        for (servers, options.servers) |*server, url| {
-            server.* = ServerAddress.parse(url) catch return error.InvalidOptions;
-        }
-
-        var copy = options;
-        copy.servers = &.{};
-        copy.name = if (options.name) |name| try gpa.dupe(u8, name) else null;
-        errdefer if (copy.name) |name| gpa.free(name);
-        switch (options.auth) {
-            .none => {},
-            .user_password => |credentials| {
-                const username = try gpa.dupe(u8, credentials.username);
-                errdefer gpa.free(username);
-                const password = try gpa.dupe(u8, credentials.password);
-                copy.auth = .{ .user_password = .{ .username = username, .password = password } };
-            },
-        }
-        return .{ .options = copy, .servers = servers };
-    }
-
-    pub fn deinit(owned: *Owned, gpa: Allocator) void {
-        owned.wipeCredentials();
-        switch (owned.options.auth) {
-            .none => {},
-            .user_password => |credentials| {
-                gpa.free(credentials.password);
-                gpa.free(credentials.username);
-            },
-        }
-        if (owned.options.name) |name| gpa.free(name);
-        gpa.free(owned.servers);
-        owned.* = undefined;
-    }
-
-    /// Overwrites the copies of the credentials, so they do not stay in
-    /// freed memory.
-    fn wipeCredentials(owned: *Owned) void {
-        switch (owned.options.auth) {
-            .none => {},
-            .user_password => |credentials| {
-                std.crypto.secureZero(u8, @constCast(credentials.username));
-                std.crypto.secureZero(u8, @constCast(credentials.password));
-            },
-        }
-    }
-};
 
 const testing = std.testing;
 const one_server: []const []const u8 = &.{"nats://127.0.0.1:4222"};
@@ -289,49 +248,11 @@ test "CONNECT must fit in 4096 bytes after JSON escaping" {
     try expectInvalid(.{ .servers = one_server, .auth = .{ .user_password = .{ .username = "u", .password = &quotes } } });
 }
 
-test "Owned copies everything the caller may free" {
-    var url = "nats://127.0.0.1:14222".*;
-    var name = "orders".*;
-    var username = "user".*;
-    var password = "secret".*;
-    var owned = try Owned.init(testing.allocator, .{
-        .servers = &.{&url},
-        .name = &name,
-        .auth = .{ .user_password = .{ .username = &username, .password = &password } },
-    });
-    defer owned.deinit(testing.allocator);
-    @memset(&url, 'X');
-    @memset(&name, 'X');
-    @memset(&username, 'X');
-    @memset(&password, 'X');
-    try testing.expectEqual(1, owned.servers.len);
-    try testing.expectEqualStrings("127.0.0.1", owned.servers[0].host());
-    try testing.expectEqual(14222, owned.servers[0].port);
-    try testing.expectEqualStrings("orders", owned.options.name.?);
-    try testing.expectEqualStrings("user", owned.options.auth.user_password.username);
-    try testing.expectEqualStrings("secret", owned.options.auth.user_password.password);
-    try testing.expectEqual(0, owned.options.servers.len);
-}
-
-test "deinit wipes the copies of the credentials" {
-    var owned = try Owned.init(testing.allocator, .{ .servers = one_server, .auth = .{ .user_password = .{ .username = "user", .password = "secret" } } });
-    defer owned.deinit(testing.allocator);
-    // deinit wipes first; Allocator.free overwrites freed memory in Debug,
-    // so the wipe is checked before it.
-    owned.wipeCredentials();
-    try testing.expect(std.mem.allEqual(u8, owned.options.auth.user_password.password, 0));
-    try testing.expect(std.mem.allEqual(u8, owned.options.auth.user_password.username, 0));
-}
-
-fn initAndDeinit(gpa: Allocator, options: Options) !void {
-    var owned = try Owned.init(gpa, options);
-    owned.deinit(gpa);
-}
-
-test "Owned frees everything when an allocation fails" {
-    try testing.checkAllAllocationFailures(testing.allocator, initAndDeinit, .{Options{
-        .servers = &.{ "a:1", "b:2" },
-        .name = "n",
-        .auth = .{ .user_password = .{ .username = "u", .password = "p" } },
-    }});
+test "the control line limit must hold this client's CONNECT" {
+    // The server checks CONNECT against its max_control_line too.
+    const connect_len = longestConnectJson(.{ .servers = one_server, .name = "orders" });
+    const fits: u32 = @intCast(connect_len);
+    try validate(.{ .servers = one_server, .name = "orders", .limits = .{ .max_control_line_bytes = fits } });
+    try expectInvalid(.{ .servers = one_server, .name = "orders", .limits = .{ .max_control_line_bytes = fits - 1 } });
+    try expectInvalid(.{ .servers = one_server, .limits = .{ .max_control_line_bytes = 1 } });
 }

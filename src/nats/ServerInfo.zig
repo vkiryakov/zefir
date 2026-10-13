@@ -1,4 +1,4 @@
-//! What a server says about itself in INFO (spec R24). Servers keep adding
+//! What a server says about itself in INFO. Servers keep adding
 //! fields, so unknown ones are ignored; a missing field keeps its default.
 
 const std = @import("std");

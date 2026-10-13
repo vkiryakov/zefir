@@ -1,4 +1,4 @@
-//! Subject and queue-group checks (spec R33), run before anything is
+//! Subject and queue-group checks, run before anything is
 //! queued. The server checks almost nothing here: a space would shift the
 //! arguments of the protocol line, and a CR or LF would let the caller
 //! inject frames of its own.

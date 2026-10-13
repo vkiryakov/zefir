@@ -1,4 +1,4 @@
-//! What a `-ERR` from the server means (spec R28). The texts are those of
+//! What a `-ERR` from the server means. The texts are those of
 //! nats-server 2.15.1; they are compared without regard to case, since the
 //! server's capitalization is not consistent.
 

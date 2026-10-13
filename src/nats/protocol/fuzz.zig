@@ -1,4 +1,4 @@
-//! Fuzzing of the parser (spec R62). `zig build test` runs each corpus entry
+//! Fuzzing of the parser. `zig build test` runs each corpus entry
 //! once, as a regression test; `zig build test --fuzz=1M` runs the fuzzer.
 //! The property: any input, parsed at once or cut into random pieces, gives
 //! the same frames and ends the same way, and nothing panics.
