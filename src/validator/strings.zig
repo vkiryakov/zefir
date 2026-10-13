@@ -388,7 +388,7 @@ pub fn isVariableWidth(s: []const u8) bool {
 
 /// At least one code point outside the half-width class of validator.js
 /// (printable ASCII U+0020-007E, U+FF61-FFDC, U+FFE8-FFEE). Kept for parity
-/// with validator.js, it is not Unicode East Asian Width: `"привет"`,
+/// with validator.js, it is not Unicode East Asian Width: `"😀"`,
 /// `"café"` and `"\n"` count as full-width. Invalid UTF-8 fails with the
 /// precondition `validation.utf8`; "" fails.
 pub const fullWidth: Rule = widthRule(.full_width, "must contain at least one full-width character", true, false);

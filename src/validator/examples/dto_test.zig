@@ -4,16 +4,18 @@ const v = @import("validator");
 pub const Role = enum { admin, editor, viewer };
 
 pub const CreateUserRequest = struct {
+    email: []const u8,
     name: []const u8,
-    age: u8,
+    birthday: []const u8,
     roles: []const Role,
-    nickname: ?[]const u8 = null,
+    team_id: ?u32 = null,
 
     pub const field_rules = .{
-        .name = v.notEmpty,
-        .age = v.positive,
-        .roles = v.notEmpty,
-        .nickname = v.notEmpty,
+        .email = v.email,
+        .name = .{ v.notBlank, v.maxLength(64) },
+        .birthday = v.minDate("1900-01-01"),
+        .roles = .{ v.notEmpty, v.uniqueItems },
+        .team_id = v.positive,
     };
 };
 
@@ -25,10 +27,10 @@ test "every DTO of this file passes v.assertRules" {
     }
 }
 
-test "CreateUserRequest rejects an empty name" {
+test "CreateUserRequest rejects an invalid email" {
     var path_buf: [256]u8 = undefined;
-    const bad: CreateUserRequest = .{ .name = "", .age = 30, .roles = &.{.admin} };
+    const bad: CreateUserRequest = .{ .email = "ada.example.com", .name = "Ada", .birthday = "1990-12-10", .roles = &.{.admin} };
     const violation = v.check(&bad, &path_buf) orelse return error.NoViolation;
-    try std.testing.expectEqualStrings("validation.not_empty", violation.code);
-    try std.testing.expectEqualStrings("name", violation.field.?);
+    try std.testing.expectEqualStrings("validation.email", violation.code);
+    try std.testing.expectEqualStrings("email", violation.field.?);
 }
