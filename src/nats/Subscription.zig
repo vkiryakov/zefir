@@ -94,7 +94,11 @@ pub const NextError = error{
 /// normally, unsubscribed or after `max_messages`, and nothing is left.
 /// One task at a time may wait.
 pub fn next(sub: *Subscription, options: ReceiveOptions) NextError!?Message {
-    return sub.messages.next(sub.client.io, options.timeout);
+    return sub.messages.next(sub.client.io, options.timeout) catch |err| switch (err) {
+        // Only the responses of a requestMany end so.
+        error.NoResponders, error.Disconnected => error.ConnectionClosed,
+        else => |e| e,
+    };
 }
 
 pub const UnsubscribeError = error{

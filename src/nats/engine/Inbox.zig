@@ -19,6 +19,7 @@ const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const Message = @import("../Message.zig");
+const Responses = @import("../Responses.zig");
 const Outbound = @import("Outbound.zig");
 const Registry = @import("Registry.zig");
 const Broadcast = @import("Broadcast.zig");
@@ -92,6 +93,8 @@ pub const Waiter = struct {
 pub const Entry = union(enum) {
     /// `request`: one reply.
     single: *Waiter,
+    /// `requestMany`: every reply until its stream ends.
+    many: *Responses,
 };
 
 pub const SubscribeError = error{ Timeout, Canceled, Disconnected, ConnectionClosed, OutOfMemory, ProtocolError } || Io.RandomSecureError;
@@ -274,7 +277,16 @@ pub fn accepts(inbox: *Inbox, io: Io, id: u64) ?usize {
     const entry = inbox.pending.get(id) orelse return null;
     return switch (entry) {
         .single => std.math.maxInt(usize),
+        .many => |responses| responses.accepts(io),
     };
+}
+
+/// Takes the requestMany `id` out of the pending map, if it is still there:
+/// replies to it count as late from now on.
+pub fn remove(inbox: *Inbox, io: Io, id: u64) void {
+    inbox.mutex.lockUncancelable(io);
+    defer inbox.mutex.unlock(io);
+    _ = inbox.pending.remove(id);
 }
 
 /// What became of a reply.
@@ -307,6 +319,23 @@ pub fn deliver(inbox: *Inbox, io: Io, id: u64, message: ?Message) Delivery {
             waiter.done.set(io);
             return .taken;
         },
+        .many => |responses| {
+            // After its deadline, `max_responses` or `cancel()`, the stream
+            // takes nothing more.
+            if (responses.accepts(io) == null) {
+                if (message) |m| release(m);
+                inbox.late += 1;
+                return .late;
+            }
+            // A "no responders" first ends the stream.
+            if (message) |m| if (isNoResponders(m) and responses.messages.stats(io).received == 0) {
+                release(m);
+                _ = responses.messages.end(io, .no_responders, false);
+                return .taken;
+            };
+            const pushed = responses.messages.push(io, message);
+            return if (pushed.dropped > 0) .dropped else .taken;
+        },
     }
 }
 
@@ -328,13 +357,20 @@ pub fn end(inbox: *Inbox, io: Io, how: End) void {
     var entries = inbox.pending.valueIterator();
     while (entries.next()) |entry| switch (entry.*) {
         .single => |waiter| waiter.done.set(io),
+        // What came still comes out first, unless the client closed.
+        .many => |responses| _ = responses.messages.end(io, if (how == .closed) .closed else .disconnected, how == .closed),
     };
     inbox.changed.wake(io);
 }
 
-/// Frees what the inbox holds: the client goes away. No request waits any
-/// more.
+/// Frees what the inbox holds, the responses of a requestMany not freed
+/// yet included: the client goes away. No request waits any more.
 pub fn deinit(inbox: *Inbox, gpa: Allocator) void {
+    var entries = inbox.pending.valueIterator();
+    while (entries.next()) |entry| switch (entry.*) {
+        .single => {},
+        .many => |responses| Responses.destroy(gpa, responses),
+    };
     inbox.pending.deinit(gpa);
     inbox.* = undefined;
 }
@@ -785,4 +821,87 @@ test "a request waiting at the gate gives up at its deadline, and the end of the
     // The first one learns why the queue closed.
     outbound.close(io);
     try testing.expectError(error.Disconnected, first.await(io));
+}
+
+/// A requestMany's stream in `inbox`, as `Client.requestMany` makes it;
+/// these tests use only its queue and deadline.
+fn addStream(inbox: *Inbox, io: Io, deadline: Io.Clock.Timestamp, limits: @import("MessageQueue.zig").Limits) !*Responses {
+    const responses = try Responses.create(testing.allocator, undefined, deadline, limits);
+    errdefer Responses.destroy(testing.allocator, responses);
+    responses.id = try inbox.add(io, testing.allocator, .{ .many = responses }, 10);
+    return responses;
+}
+
+fn expectQueued(responses: *Responses, payload: []const u8) !void {
+    var m = (try responses.messages.next(testing.io, .none)) orelse return error.TestNoMessage;
+    defer m.deinit();
+    try testing.expectEqualStrings(payload, m.payload);
+}
+
+test "the replies of a requestMany queue up until max_responses, then they are late" {
+    const io = testing.io;
+    var inbox = testInbox();
+    defer inbox.deinit(testing.allocator);
+    const responses = try addStream(&inbox, io, soon(io), .{ .messages = 2, .bytes = 1024 });
+    try testing.expectEqual(1024, inbox.accepts(io, responses.id).?);
+    try testing.expectEqual(.taken, inbox.deliver(io, responses.id, try testReply("r", null, "one")));
+    try testing.expectEqual(.taken, inbox.deliver(io, responses.id, try testReply("r", null, "two")));
+    try testing.expect(inbox.accepts(io, responses.id) == null);
+    try testing.expectEqual(.late, inbox.deliver(io, responses.id, try testReply("r", null, "three")));
+    try expectQueued(responses, "one");
+    try expectQueued(responses, "two");
+    try testing.expect(try responses.messages.next(io, .none) == null);
+    try testing.expectEqual(1, inbox.lateResponses(io));
+    // Still in the map until its owner takes it out.
+    inbox.remove(io, responses.id);
+    Responses.destroy(testing.allocator, responses);
+}
+
+test "after the deadline of a requestMany its replies are late" {
+    const io = testing.io;
+    var inbox = testInbox();
+    defer inbox.deinit(testing.allocator);
+    const deadline = time.after(io, .fromMilliseconds(10));
+    const responses = try addStream(&inbox, io, deadline, .{ .messages = 4, .bytes = 1024 });
+    defer Responses.destroy(testing.allocator, responses);
+    defer inbox.remove(io, responses.id);
+    try testing.expectEqual(.taken, inbox.deliver(io, responses.id, try testReply("r", null, "in time")));
+    while (!time.expired(io, deadline)) try io.sleep(.fromMilliseconds(1), .awake);
+    try testing.expectEqual(.late, inbox.deliver(io, responses.id, try testReply("r", null, "after")));
+    try expectQueued(responses, "in time");
+}
+
+test "a first reply of no responders ends a requestMany; later it is a reply like any other" {
+    const io = testing.io;
+    var inbox = testInbox();
+    defer inbox.deinit(testing.allocator);
+    const nobody = try addStream(&inbox, io, soon(io), .{ .messages = 4, .bytes = 1024 });
+    _ = inbox.deliver(io, nobody.id, try testReply("r", 503, ""));
+    try testing.expectError(error.NoResponders, nobody.messages.next(io, .none));
+    inbox.remove(io, nobody.id);
+    Responses.destroy(testing.allocator, nobody);
+
+    const some = try addStream(&inbox, io, soon(io), .{ .messages = 4, .bytes = 1024 });
+    _ = inbox.deliver(io, some.id, try testReply("r", null, "one"));
+    _ = inbox.deliver(io, some.id, try testReply("r", 503, ""));
+    try expectQueued(some, "one");
+    var status = (try some.messages.next(io, .none)).?;
+    defer status.deinit();
+    try testing.expectEqual(503, status.status.?);
+    inbox.remove(io, some.id);
+    Responses.destroy(testing.allocator, some);
+}
+
+test "end: a requestMany hands out what came, then Disconnected; close drops it at once" {
+    const io = testing.io;
+    var inbox = testInbox();
+    defer inbox.deinit(testing.allocator);
+    const responses = try addStream(&inbox, io, soon(io), .{ .messages = 4, .bytes = 1024 });
+    _ = inbox.deliver(io, responses.id, try testReply("r", null, "came"));
+    inbox.end(io, .disconnected);
+    try expectQueued(responses, "came");
+    try testing.expectError(error.Disconnected, responses.messages.next(io, .none));
+    inbox.end(io, .closed);
+    try testing.expectError(error.ConnectionClosed, responses.messages.next(io, .none));
+    // The inbox frees what its owner did not.
 }

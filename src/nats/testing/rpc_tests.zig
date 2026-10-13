@@ -73,6 +73,8 @@ const Request = struct {
 ///   silent.*    nothing
 ///   slow.<ms>   the payload back after <ms> milliseconds
 ///   hangup.*    the connection closes
+///   many.<n>    n replies: "r1", "r2", ...
+///   manyhangup.<n>  n replies, then the connection closes
 fn serveRequests(io: Io, listener: *net.Server, record: *Record) anyerror!void {
     var peer: FakeServer.Peer = undefined;
     try peer.accept(io, listener);
@@ -144,6 +146,14 @@ fn answer(io: Io, peer: *FakeServer.Peer, sid: u64, request: Request) !bool {
         try peer.send("\r\n");
     } else if (std.mem.eql(u8, kind, "hangup")) {
         return false;
+    } else if (std.mem.eql(u8, kind, "many") or std.mem.eql(u8, kind, "manyhangup")) {
+        const count = try std.fmt.parseInt(u32, request.subject[kind.len + 1 ..], 10);
+        for (1..count + 1) |i| {
+            var payload: [16]u8 = undefined;
+            const text = try std.fmt.bufPrint(&payload, "r{d}", .{i});
+            try peer.send(try std.fmt.bufPrint(&buffer, "MSG {s} {d} {d}\r\n{s}\r\n", .{ request.reply, sid, text.len, text }));
+        }
+        return std.mem.eql(u8, kind, "many");
     }
     return true;
 }
@@ -588,4 +598,193 @@ test "respond and respondMessage publish to the reply subject of the request" {
         "PUB reply.one back.here 0\r\n\r\n" ++
         "PING\r\n", transcript.items);
     try testing.expectError(error.ConnectionClosed, client.respond(&asked, "too late"));
+}
+
+fn many(milliseconds: i64, max_responses: u32) nats.RequestManyOptions {
+    return .{ .timeout = .{ .duration = .{ .raw = .fromMilliseconds(milliseconds), .clock = .awake } }, .max_responses = max_responses };
+}
+
+/// Takes the next response and checks its payload.
+fn expectResponse(responses: *nats.Responses, payload: []const u8) !void {
+    var msg = (try responses.next(.{})) orelse return error.TestNoResponse;
+    defer msg.deinit();
+    try testing.expectEqualStrings(payload, msg.payload);
+}
+
+test "requestMany: the responses in order, and the stream ends after max_responses" {
+    const io = testing.io;
+    var s: Served = undefined;
+    try s.start(.{ .servers = &.{} });
+    defer s.deinit();
+    const start = Io.Clock.awake.now(io);
+    const responses = try s.client.requestMany("many.5", "?", many(30_000, 3));
+    defer responses.deinit();
+    try expectResponse(responses, "r1");
+    try expectResponse(responses, "r2");
+    try expectResponse(responses, "r3");
+    try testing.expect(try responses.next(.{}) == null);
+    try testing.expect(try responses.next(.{}) == null);
+    try testing.expect(elapsedSince(io, start).toSeconds() < 5);
+    try testing.expectEqual(0, s.client.inbox.pendingCount(io));
+    // The two responses after the third are late.
+    try s.client.flush(quick);
+    try testing.expectEqual(2, s.client.inbox.lateResponses(io));
+    try s.finish();
+    try testing.expectEqual(1, s.record.count("PUB many.5 _INBOX."));
+}
+
+test "requestMany: the stream ends at its deadline, and what came before comes out first" {
+    const io = testing.io;
+    var s: Served = undefined;
+    try s.start(.{ .servers = &.{} });
+    defer s.deinit();
+    const responses = try s.client.requestMany("many.2", "?", many(200, 32));
+    defer responses.deinit();
+    const deadline = responses.deadline;
+    try expectResponse(responses, "r1");
+    try expectResponse(responses, "r2");
+    try testing.expect(try responses.next(.{}) == null);
+    try testing.expect(time.expired(io, deadline));
+    try testing.expectEqual(0, s.client.inbox.pendingCount(io));
+    try s.finish();
+}
+
+test "requestMany: a reply after the deadline is late" {
+    const io = testing.io;
+    var s: Served = undefined;
+    try s.start(.{ .servers = &.{} });
+    defer s.deinit();
+    const responses = try s.client.requestMany("slow.300", "x", many(50, 32));
+    defer responses.deinit();
+    try testing.expect(try responses.next(.{}) == null);
+    try s.client.flush(quick);
+    try testing.expectEqual(1, s.client.inbox.lateResponses(io));
+    try s.finish();
+}
+
+test "requestMany: no responders first is NoResponders" {
+    var s: Served = undefined;
+    try s.start(.{ .servers = &.{} });
+    defer s.deinit();
+    const responses = try s.client.requestMany("nobody.home", "?", many(5000, 32));
+    defer responses.deinit();
+    try testing.expectError(error.NoResponders, responses.next(.{}));
+    try testing.expectError(error.NoResponders, responses.next(.{}));
+    try s.finish();
+}
+
+fn nextResponse(responses: *nats.Responses) nats.Responses.NextError!?nats.Message {
+    return responses.next(.{});
+}
+
+fn releaseResponse(result: nats.Responses.NextError!?nats.Message) void {
+    const got = result catch return;
+    if (got) |msg| {
+        var m = msg;
+        m.deinit();
+    }
+}
+
+/// Waits until a task waits in `responses.next()`, for 5 s at most.
+fn awaitReceiving(responses: *nats.Responses) !void {
+    const io = testing.io;
+    const give_up = time.after(io, .fromSeconds(5));
+    while (!responses.messages.isReceiving(io)) {
+        if (time.expired(io, give_up)) return error.TestReceiverNeverWaited;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+}
+
+test "requestMany: cancel() from another task ends the stream at once" {
+    const io = testing.io;
+    var s: Served = undefined;
+    try s.start(.{ .servers = &.{} });
+    defer s.deinit();
+    const responses = try s.client.requestMany("silent.x", "?", many(30_000, 32));
+    defer responses.deinit();
+    // A wait of the caller's own ends with Timeout; the stream goes on.
+    try testing.expectError(error.Timeout, responses.next(.{ .timeout = .{ .duration = .{ .raw = .fromMilliseconds(20), .clock = .awake } } }));
+    var receiver = try io.concurrent(nextResponse, .{responses});
+    defer releaseResponse(receiver.cancel(io));
+    try awaitReceiving(responses);
+    const start = Io.Clock.awake.now(io);
+    responses.cancel();
+    try testing.expect(try receiver.await(io) == null);
+    try testing.expect(elapsedSince(io, start).toSeconds() < 1);
+    try testing.expect(try responses.next(.{}) == null);
+    try testing.expectEqual(0, s.client.inbox.pendingCount(io));
+    try s.finish();
+}
+
+/// Waits until `responses` has received `count`, for 5 s at most.
+fn awaitResponses(responses: *nats.Responses, count: u64) !void {
+    const io = testing.io;
+    const give_up = time.after(io, .fromSeconds(5));
+    while (responses.messages.stats(io).received < count) {
+        if (time.expired(io, give_up)) return error.TestResponsesNeverCame;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+}
+
+test "requestMany: the connection lost hands out what came, then Disconnected" {
+    var s: Served = undefined;
+    try s.start(.{ .servers = &.{} });
+    defer s.deinit();
+    const responses = try s.client.requestMany("manyhangup.2", "?", many(30_000, 32));
+    defer responses.deinit();
+    try expectResponse(responses, "r1");
+    try expectResponse(responses, "r2");
+    try testing.expectError(error.Disconnected, responses.next(.{}));
+    try s.server.await(testing.io);
+}
+
+test "requestMany: close() ends the stream at once, with ConnectionClosed" {
+    const io = testing.io;
+    var s: Served = undefined;
+    try s.start(.{ .servers = &.{} });
+    defer s.deinit();
+    const responses = try s.client.requestMany("many.2", "?", many(30_000, 32));
+    defer responses.deinit();
+    try awaitResponses(responses, 2);
+    s.client.close();
+    try testing.expectError(error.ConnectionClosed, responses.next(.{}));
+    try testing.expectError(error.ConnectionClosed, s.client.requestMany("many.1", "?", many(5000, 32)));
+    try s.server.await(io);
+}
+
+test "requestMany: responses that do not fit in max_bytes are dropped, and count" {
+    var s: Served = undefined;
+    try s.start(.{ .servers = &.{} });
+    defer s.deinit();
+    // Each response takes its reply subject and two bytes: room for two.
+    const one = Inbox.prefix_len + 1 + 2;
+    var options = many(30_000, 3);
+    options.max_bytes = 2 * one + 1;
+    const responses = try s.client.requestMany("many.3", "?", options);
+    defer responses.deinit();
+    // Taking one would make room: all three come first.
+    try awaitResponses(responses, 3);
+    try expectResponse(responses, "r1");
+    try expectResponse(responses, "r2");
+    try testing.expect(try responses.next(.{}) == null);
+    try testing.expectEqual(nats.SubscriptionStats{ .received = 3, .delivered = 2, .dropped = 1 }, responses.messages.stats(testing.io));
+    try s.finish();
+}
+
+test "requestMany refuses a timeout of .none, and max_responses or max_bytes of 0" {
+    var client: Client = try .init(testing.allocator, testing.io, .{ .servers = &.{"nats://127.0.0.1:4222"} });
+    defer client.deinit();
+    try testing.expectError(error.InvalidOptions, client.requestMany("x", "?", .{ .timeout = .none }));
+    try testing.expectError(error.InvalidOptions, client.requestMany("x", "?", .{ .max_responses = 0 }));
+    try testing.expectError(error.InvalidOptions, client.requestMany("x", "?", .{ .max_bytes = 0 }));
+    try testing.expectError(error.InvalidSubject, client.requestMany("x.*", "?", .{}));
+    try testing.expectError(error.Disconnected, client.requestMany("x", "?", .{}));
+}
+
+test "a requestMany not freed by its owner is freed with the client" {
+    var s: Served = undefined;
+    try s.start(.{ .servers = &.{} });
+    defer s.deinit();
+    _ = try s.client.requestMany("many.1", "?", many(30_000, 32));
+    // testing.allocator reports the stream if the client leaks it.
 }

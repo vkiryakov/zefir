@@ -4,10 +4,10 @@
 //! and password; TLS and JetStream are not part of this version.
 //!
 //! Work in progress: the client connects, keeps the connection alive with
-//! PINGs, publishes, subscribes, sends requests and answers them, flushes
-//! and measures the round trip. Reconnect comes next; until then a lost
-//! connection closes the client, ends its subscriptions and fails the
-//! requests waiting for replies.
+//! PINGs, publishes, subscribes, sends requests for one reply or for many
+//! and answers them, flushes and measures the round trip. Reconnect comes
+//! next; until then a lost connection closes the client, ends its
+//! subscriptions and fails the requests waiting for replies.
 
 const std = @import("std");
 
@@ -23,6 +23,8 @@ pub const Client = @import("Client.zig");
 pub const State = Client.State;
 pub const FlushOptions = Client.FlushOptions;
 pub const RequestOptions = Client.RequestOptions;
+pub const RequestManyOptions = Client.RequestManyOptions;
+pub const Responses = @import("Responses.zig");
 pub const Message = @import("Message.zig");
 pub const PublishMessage = Message.PublishMessage;
 pub const ResponseMessage = Message.ResponseMessage;
@@ -89,6 +91,7 @@ test {
     _ = @import("Message.zig");
     _ = @import("engine/incoming.zig");
     _ = @import("Subscription.zig");
+    _ = @import("Responses.zig");
     _ = @import("engine/MessageQueue.zig");
     _ = @import("engine/Registry.zig");
     _ = @import("engine/Inbox.zig");
@@ -127,10 +130,10 @@ fn isIn(comptime Set: type, comptime name: []const u8) bool {
 
 test "every error of the module's functions is in nats.Error or comes from std.Io" {
     inline for (.{
-        Client.InitError,    Client.ConnectError,      Client.FlushError,      Client.ServerInfoError,
-        Options.Error,       ServerAddress.ParseError, ServerInfo.ParseError,  Headers.ValidateError,
-        Client.PublishError, Client.SubscribeError,    Subscription.NextError, Subscription.UnsubscribeError,
-        Client.RequestError, Client.RespondError,
+        Client.InitError,    Client.ConnectError,      Client.FlushError,       Client.ServerInfoError,
+        Options.Error,       ServerAddress.ParseError, ServerInfo.ParseError,   Headers.ValidateError,
+        Client.PublishError, Client.SubscribeError,    Subscription.NextError,  Subscription.UnsubscribeError,
+        Client.RequestError, Client.RespondError,      Client.RequestManyError, Responses.NextError,
     }) |Set| {
         inline for (comptime @typeInfo(Set).error_set.error_names.?) |name| {
             if (comptime !isIn(Error, name) and !isIn(IoErrors, name)) {

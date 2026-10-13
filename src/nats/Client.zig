@@ -33,6 +33,7 @@ const Message = @import("Message.zig");
 const PublishMessage = Message.PublishMessage;
 const ResponseMessage = Message.ResponseMessage;
 const Subscription = @import("Subscription.zig");
+const Responses = @import("Responses.zig");
 const Headers = @import("Headers.zig");
 const Parser = @import("protocol/Parser.zig");
 const encoder = @import("protocol/encoder.zig");
@@ -172,6 +173,75 @@ pub fn publishMessage(client: *Client, message: PublishMessage) PublishError!voi
         error.Closed => return error.ConnectionClosed,
         else => |e| return e,
     };
+}
+
+pub const RequestManyOptions = struct {
+    /// How long the whole exchange may take: the stream of responses ends
+    /// then. Every request ends: `.none` is refused.
+    timeout: Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(2), .clock = .awake } },
+    /// The stream ends after this many responses, the dropped ones counted.
+    max_responses: u32 = 32,
+    /// The bytes of the responses waiting to be taken, subjects and headers
+    /// included; a response that does not fit is dropped. Null:
+    /// `limits.subscription_bytes`.
+    max_bytes: ?usize = null,
+};
+
+pub const RequestManyError = error{
+    /// The subject cannot be published to, or the line would be longer
+    /// than `limits.max_control_line_bytes`.
+    InvalidSubject,
+    /// The timeout is `.none`, or `max_responses` or `max_bytes` is 0.
+    InvalidOptions,
+    /// The payload exceeds the server's `max_payload`.
+    PayloadTooLarge,
+    /// `limits.max_pending_requests` requests wait for replies already.
+    TooManyPendingRequests,
+    /// The request could not be queued in time.
+    Timeout,
+    /// Not connected yet.
+    Disconnected,
+    ConnectionClosed,
+    Canceled,
+    OutOfMemory,
+    /// A bug in this client: the frame came out of another length.
+    ProtocolError,
+    /// The `std.Io` has no secure randomness for the inbox subject.
+    EntropyUnavailable,
+};
+
+/// Sends `payload` to `subject` and returns the stream of the responses,
+/// from any number of responders: scatter and gather. The stream ends at
+/// `options.timeout`, 2 s by default, or after `max_responses`; see
+/// `Responses`. It is the client's: free it with its `deinit()`.
+pub fn requestMany(client: *Client, subject: []const u8, payload: []const u8, options: RequestManyOptions) RequestManyError!*Responses {
+    if (options.timeout == .none or options.max_responses == 0) return error.InvalidOptions;
+    if (options.max_bytes) |bytes| if (bytes == 0) return error.InvalidOptions;
+    try subjects.validatePublish(subject);
+    const server = try client.currentServer();
+    if (!fitsPayload(payload.len, server.max_payload)) return error.PayloadTooLarge;
+    const io = client.io;
+    const gpa = client.gpa;
+    const deadline = time.deadline(io, options.timeout).?;
+    try client.inbox.subscribe(io, &client.subscriptions, &client.outbound, deadline);
+
+    const limits = &client.options.options.limits;
+    const responses = try Responses.create(gpa, client, deadline, .{
+        .messages = options.max_responses,
+        .bytes = options.max_bytes orelse limits.subscription_bytes,
+    });
+    errdefer Responses.destroy(gpa, responses);
+    responses.id = try client.inbox.add(io, gpa, .{ .many = responses }, limits.max_pending_requests);
+    // Out of the inbox before it is freed.
+    errdefer client.inbox.remove(io, responses.id);
+    var reply_buffer: [Inbox.max_reply_len]u8 = undefined;
+    const message: PublishMessage = .{ .subject = subject, .reply_to = client.inbox.replySubject(&reply_buffer, responses.id), .payload = payload };
+    try client.checkLine(message, 0);
+    client.queueRequest(message, 0, deadline) catch |err| switch (err) {
+        error.Closed => return client.inbox.closedError(io),
+        else => |e| return e,
+    };
+    return responses;
 }
 
 pub const RespondError = PublishError || error{

@@ -29,9 +29,27 @@ pub const End = enum {
     slow_consumer,
     /// The server refused the subscription.
     permission_denied,
+    /// The responses of a requestMany: the first said that no one
+    /// subscribes to the subject.
+    no_responders,
+    /// The responses of a requestMany: the connection was lost.
+    disconnected,
     /// The client closed: `next()` fails at once, and the messages are
     /// gone.
     closed,
+};
+
+/// What `next` fails with: the errors of a subscription and those of a
+/// requestMany's responses.
+pub const NextError = error{
+    Timeout,
+    Canceled,
+    ConcurrentReceive,
+    SlowConsumer,
+    PermissionDenied,
+    NoResponders,
+    Disconnected,
+    ConnectionClosed,
 };
 
 gpa: Allocator,
@@ -204,7 +222,7 @@ fn append(q: *MessageQueue, io: Io, m: Message, pushed: *Pushed) void {
 /// Takes the oldest message, waiting for one until `timeout`. After the
 /// queue ends, the messages it holds come out first, then null or the
 /// error of its end; `.closed` fails at once.
-pub fn next(q: *MessageQueue, io: Io, timeout: Io.Timeout) Subscription.NextError!?Message {
+pub fn next(q: *MessageQueue, io: Io, timeout: Io.Timeout) NextError!?Message {
     const deadline = time.deadline(io, timeout);
     try q.mutex.lock(io);
     defer q.mutex.unlock(io);
@@ -222,6 +240,8 @@ pub fn next(q: *MessageQueue, io: Io, timeout: Io.Timeout) Subscription.NextErro
             .finished => null,
             .slow_consumer => error.SlowConsumer,
             .permission_denied => error.PermissionDenied,
+            .no_responders => error.NoResponders,
+            .disconnected => error.Disconnected,
             .closed => unreachable,
         };
         try q.not_empty.waitTimeout(io, &q.mutex, time.until(deadline));
@@ -385,6 +405,24 @@ test "how next ends: null, PermissionDenied after what came, ConnectionClosed at
     try testing.expectEqual(PendingCounts{ .messages = 0, .bytes = 0 }, closed.pending(testing.io));
 }
 
+test "the ends of a requestMany: NoResponders, and Disconnected after what came" {
+    var nobody: MessageQueue = .init(testing.allocator, .{ .messages = 4, .bytes = 1024 }, .drop_newest, 4);
+    defer nobody.deinit();
+    _ = nobody.end(testing.io, .no_responders, false);
+    try testing.expectError(error.NoResponders, nobody.next(testing.io, .none));
+    try testing.expectError(error.NoResponders, nobody.next(testing.io, .none));
+
+    var lost: MessageQueue = .init(testing.allocator, .{ .messages = 4, .bytes = 1024 }, .drop_newest, 4);
+    defer lost.deinit();
+    try pushTagged(&lost, 10, "a");
+    _ = lost.end(testing.io, .disconnected, false);
+    try expectNext(&lost, 'a');
+    try testing.expectError(error.Disconnected, lost.next(testing.io, .none));
+    // The client closes after: the error changes, as for any end.
+    _ = lost.end(testing.io, .closed, true);
+    try testing.expectError(error.ConnectionClosed, lost.next(testing.io, .none));
+}
+
 test "max_messages: the queue finishes with its last message" {
     var q: MessageQueue = .init(testing.allocator, .{ .messages = 4, .bytes = 1024 }, .drop_newest, 2);
     defer q.deinit();
@@ -396,7 +434,7 @@ test "max_messages: the queue finishes with its last message" {
     try testing.expectEqual(Stats{ .received = 2, .delivered = 1, .dropped = 1 }, q.stats(testing.io));
 }
 
-fn receive(q: *MessageQueue) Subscription.NextError!?Message {
+fn receive(q: *MessageQueue) NextError!?Message {
     return q.next(testing.io, .none);
 }
 
