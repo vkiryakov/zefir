@@ -1,8 +1,9 @@
 //! The benchmark of zefir-nats: publishing, publishing to a subscriber,
 //! and request/reply at several concurrencies, against the plain server
 //! of the repository's docker-compose.yml, on zio with one executor and
-//! with four. `zig build bench` in tests/nats starts the server and runs
-//! it, built with ReleaseFast unless `-Dbench-optimize` says otherwise.
+//! with four. `zig build bench` in tests/nats starts the servers and runs
+//! it, built with ReleaseFast unless `-Dbench-optimize` says otherwise;
+//! the workflow `bench.yml` runs it so on a GitHub-hosted Linux runner.
 //!
 //! The numbers depend on the machine, the network path to the server (on
 //! macOS, Docker Desktop forwards the port through its VM) and the
@@ -143,7 +144,7 @@ fn requestLoop(io: Io, client: *nats.Client, latencies: []u64) anyerror!void {
 }
 
 /// `total` requests from `concurrency` tasks of one client to one
-/// responder, a client of its own.
+/// responder, a client of its own, after 100 that are not timed.
 fn requestReply(io: Io, out: *Io.Writer, concurrency: usize, total: usize) !void {
     var responder: nats.Client = undefined;
     try connect(&responder, io, "bench-responder");
@@ -156,6 +157,9 @@ fn requestReply(io: Io, out: *Io.Writer, concurrency: usize, total: usize) !void
     var requester: nats.Client = undefined;
     try connect(&requester, io, "bench-requester");
     defer requester.deinit();
+    // Not timed: the first request also subscribes the inbox.
+    var warm_up: [100]u64 = undefined;
+    try requestLoop(io, &requester, &warm_up);
 
     const latencies = try gpa.alloc(u64, total);
     defer gpa.free(latencies);

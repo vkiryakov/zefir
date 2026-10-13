@@ -1,0 +1,37 @@
+name: Bench
+
+# The benchmark of nats (tests/nats/bench), built with ReleaseFast, against
+# the NATS servers of docker-compose.yml on a GitHub-hosted Linux runner.
+# Run it by hand: `gh workflow run bench.yml --ref <branch>`. It is not part
+# of CI, and no check depends on it. The runners are shared machines, so
+# the numbers vary from run to run.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    name: bench (ubuntu-latest, ReleaseFast)
+    timeout-minutes: 20
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: mlugg/setup-zig@v2
+      - name: Describe the runner
+        run: |
+          nproc
+          grep -m1 'model name' /proc/cpuinfo
+          free -h
+          docker version --format 'Docker {{.Server.Version}}'
+      - name: Start the NATS servers
+        run: docker compose up --detach --wait
+      - name: Run the benchmark
+        working-directory: tests/nats
+        timeout-minutes: 10
+        run: zig build bench
+      - name: Stop the NATS servers
+        if: always()
+        run: docker compose down
