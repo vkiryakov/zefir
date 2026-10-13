@@ -43,7 +43,7 @@ Zefir is shaped by my needs first, and it's open to everyone. If it fits the way
 | **confy**          | `zefir-confy`     | Typed configuration from JSON, INI, `.env` files and the environment | ✅ Done · [docs](src/confy/examples/README.md)            |
 | **core**           | `zefir-core`      | Execution context: deadlines, cancellation and W3C trace context     | ✅ Done · [docs](src/core/examples/README.md)             |
 | **log**            | `zefir-log`       | Structured logging: JSON Lines, redaction, live levels, alerts       | ✅ Done · [docs](src/log/examples/README.md)              |
-| validator          | `zefir-validator` | Declarative validation rules for struct fields                       | 🚧 In progress · [docs](src/validator/examples/README.md) |
+| **validator**      | `zefir-validator` | Declarative validation rules for struct fields                       | ✅ Done · [docs](src/validator/examples/README.md)        |
 | rpc                | `zefir-rpc`       | RPC                                                                  | 📋 Planned                                                |
 | orm                | `zefir-orm`       | ORM                                                                  | 📋 Planned                                                |
 | http               | —                 | HTTP server                                                          | 📋 Planned                                                |

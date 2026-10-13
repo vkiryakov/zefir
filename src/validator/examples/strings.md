@@ -6,6 +6,10 @@ and `v.notBlank` check the text itself, seven ASCII classes and `v.multibyte`
 check the bytes, three rules check the widths of validator.js, `v.contains` and
 `v.notContains` look for a substring, and `v.strongPassword` checks a password.
 
+> [!NOTE]
+> These rules ship in v0.4.0; until then they are on the `dev` branch
+> ([Installation](README.md#installation)).
+
 ```zig
 const SignUp = struct {
     name: []const u8,
