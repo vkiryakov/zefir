@@ -15,7 +15,10 @@ pub const Kind = enum {
     stale_connection,
     /// `maximum connections exceeded`, for the server or the account.
     max_connections,
-    /// `Secure Connection - TLS Required`, `Connection throttling is active`.
+    /// `Secure Connection - TLS Required`: the server wants TLS, which this
+    /// client does not do.
+    tls_required,
+    /// `Connection throttling is active`.
     refused,
     /// This client sent something the server rejects; a bug here:
     /// `Unknown Protocol Operation`, `Maximum Payload Violation`,
@@ -35,7 +38,7 @@ pub const Kind = enum {
     /// the connection stays, and an unknown text leaves it alone.
     pub fn closesConnection(kind: Kind) bool {
         return switch (kind) {
-            .authentication_failed, .authentication_timeout, .stale_connection, .max_connections, .refused, .protocol => true,
+            .authentication_failed, .authentication_timeout, .stale_connection, .max_connections, .tls_required, .refused, .protocol => true,
             .permissions_violation, .max_subscriptions, .invalid_subject, .unknown => false,
         };
     }
@@ -70,7 +73,7 @@ const rules = [_]Rule{
     .{ .prefix = "Stale Connection", .kind = .stale_connection },
     .{ .prefix = "maximum connections exceeded", .kind = .max_connections },
     .{ .prefix = "maximum account active connections exceeded", .kind = .max_connections },
-    .{ .prefix = "Secure Connection - TLS Required", .kind = .refused },
+    .{ .prefix = "Secure Connection - TLS Required", .kind = .tls_required },
     .{ .prefix = "Connection throttling is active", .kind = .refused },
     .{ .prefix = "Unknown Protocol Operation", .kind = .protocol },
     .{ .prefix = "Maximum Payload Violation", .kind = .protocol },
@@ -132,7 +135,7 @@ test "fatal errors close the connection" {
         .{ "Stale Connection", .stale_connection },
         .{ "maximum connections exceeded", .max_connections },
         .{ "maximum account active connections exceeded", .max_connections },
-        .{ "Secure Connection - TLS Required", .refused },
+        .{ "Secure Connection - TLS Required", .tls_required },
         .{ "Connection throttling is active. Please try again later.", .refused },
         .{ "Unknown Protocol Operation", .protocol },
         .{ "Maximum Payload Violation", .protocol },

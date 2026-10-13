@@ -164,6 +164,7 @@ fn refusal(text: []const u8) ?HandshakeError {
         .authentication_failed => error.AuthenticationFailed,
         .authentication_timeout => error.Timeout,
         .stale_connection => error.Disconnected,
+        .tls_required => error.UnsupportedSecurityFeature,
         .max_connections, .refused => error.ConnectionRefused,
         .protocol => error.ProtocolError,
         .permissions_violation, .max_subscriptions, .invalid_subject, .unknown => {
@@ -509,6 +510,7 @@ fn expectRejection(expected: anyerror, rejection: []const u8) !void {
 test "the server's answer to CONNECT decides the handshake" {
     try expectRejection(error.AuthenticationFailed, "-ERR 'Authorization Violation'\r\n");
     try expectRejection(error.ConnectionRefused, "-ERR 'maximum connections exceeded'\r\n");
+    try expectRejection(error.UnsupportedSecurityFeature, "-ERR 'Secure Connection - TLS Required'\r\n");
     try expectRejection(error.ProtocolError, "-ERR 'Unknown Protocol Operation'\r\n");
     // The server closes the connection without a word.
     try expectRejection(error.Disconnected, "");
