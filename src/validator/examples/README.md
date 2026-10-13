@@ -37,6 +37,18 @@ pub fn main() void {
 }
 ```
 
+`v.check` returns `?v.Violation`: `null` when the value is valid, otherwise the
+first problem it found, with three fields:
+
+| Field | Type | What it holds | In the example |
+| --- | --- | --- | --- |
+| `code` | `[]const u8` | a stable code for programs and clients: `validation.<rule>` for a built-in rule, or the code you gave `v.custom` or `v.fail` | `validation.not_empty` |
+| `message` | `[]const u8` | what the value must be, for people, without the field name: a built-in English message or your own | `must not be empty` |
+| `field` | `?[]const u8` | the path of the value from the root; `null` for the root value itself | `tags[1]` |
+
+`v.checkAll` returns all the violations at once; see
+[Checking values](#checking-values).
+
 ## Contents
 
 - [How it works](#how-it-works)
@@ -789,6 +801,28 @@ the first rule that fails is the only violation of the field, and `v.positive`
 never sees a NaN, nor `v.maxLength` invalid UTF-8.
 
 ## Checking values
+
+### v.Violation
+
+```zig
+pub const Violation = struct {
+    code: []const u8,
+    message: []const u8,
+    field: ?[]const u8 = null,
+};
+```
+
+- `code`: `validation.<kind>` for a built-in rule (`validation.not_empty`), a
+  precondition's code (`validation.finite`), `validation.invalid` for a
+  malformed `validateSelf` result outside Debug builds, or the `code` of
+  `v.custom` and `v.fail`. Codes are part of the [compatibility](#compatibility)
+  contract: branch on them, send them to clients, translate by them.
+- `message`: what the value must be, without the field name: a built-in English
+  message such as `must not be empty`, or your own from `.withMessage`,
+  `v.custom` or `v.fail`. Always 1-512 bytes of valid UTF-8.
+- `field`: the path of the value from the root: `email`, `address.city`,
+  `items[2].name`, `[1].email` for a slice root. `null` means the root value
+  itself or, for `check` only, a path that did not fit `path_buf`.
 
 ### v.check
 
