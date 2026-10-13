@@ -10,6 +10,7 @@
 //! connection of its own.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Io = std.Io;
 const net = Io.net;
 const Proxy = @This();
@@ -106,6 +107,7 @@ fn acceptLoop(p: *Proxy) void {
     const io = p.io;
     while (true) {
         const client = p.listener.accept(io) catch return;
+        fixReceiveBuffer(client);
         if (p.refusing.load(.acquire)) {
             client.close(io);
             p.mutex.lockUncancelable(io);
@@ -140,6 +142,18 @@ fn acceptLoop(p: *Proxy) void {
             closePair(p, pair);
         };
     }
+}
+
+/// The receive buffer of a client's socket in the proxy.
+const receive_buffer: c_int = 32 * 1024;
+
+/// Gives the socket a receive buffer of a fixed size. macOS grows one as
+/// data comes, even while no one reads it, so a stalled proxy would go on
+/// taking in what its client writes, up to megabytes, and the client's
+/// queue would empty again. Windows keeps the system's.
+fn fixReceiveBuffer(stream: net.Stream) void {
+    if (builtin.os.tag == .windows) return;
+    std.posix.setsockopt(stream.socket.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVBUF, std.mem.asBytes(&receive_buffer)) catch {};
 }
 
 fn add(p: *Proxy, pair: *Pair) bool {

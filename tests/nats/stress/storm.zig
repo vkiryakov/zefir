@@ -1,8 +1,9 @@
 //! A storm of cut connections. Eight clients reach the server through a
 //! proxy that cuts every connection through it again and again, while the
 //! clients publish, take messages and send requests; twice the proxy first
-//! stalls until the clients' queues are full, and refuses them for a
-//! while after the cut, so that their reconnect buffers overflow.
+//! stalls until the clients' queues are full, while their readers still
+//! hand out what the server sends, and refuses them for a while after the
+//! cut, so that their reconnect buffers overflow.
 //! Afterwards every client is connected again with its subscription and
 //! its inbox; no publish arrived twice; every publish that did not arrive
 //! was published while a connection was lost, between two confirmations
@@ -226,6 +227,27 @@ fn answer(client: *nats.Client, sub: *nats.Subscription) Io.Cancelable!void {
     }
 }
 
+/// Waits until every member is connected and the server answered a flush
+/// on that connection, so on one made after the last cut.
+fn awaitBack(io: Io, members: []Member) !void {
+    for (members) |*m| {
+        const since = Io.Clock.awake.now(io);
+        while (true) {
+            if (m.client.state() == .connected) {
+                if (m.client.flush(.{ .timeout = .{ .duration = .{ .raw = .fromMilliseconds(500), .clock = .awake } } })) {
+                    break;
+                } else |err| switch (err) {
+                    // Lost again before the server answered.
+                    error.Disconnected, error.Timeout => {},
+                    else => return err,
+                }
+            }
+            if (stress.elapsedSince(io, since).toSeconds() >= 15) return error.TestNeverReconnected;
+            try io.sleep(.fromMilliseconds(5), .awake);
+        }
+    }
+}
+
 /// What reached the server: the sequence numbers of every member, and
 /// how many came twice.
 const Arrivals = struct {
@@ -316,8 +338,10 @@ fn storm(io: Io) !void {
         errdefer m.client.deinit();
         try m.client.connect();
         m.feed = try m.client.subscribe("stress.storm.feed", .{});
-        joined += 1;
+        errdefer m.feed.deinit();
         try m.client.flush(.{});
+        // From here on the defer above frees it.
+        joined += 1;
     }
 
     var stop: std.atomic.Value(bool) = .init(false);
@@ -341,6 +365,7 @@ fn storm(io: Io) !void {
     defer testing.allocator.free(fill_payload);
     @memset(fill_payload, 'f');
     var cut_connections: usize = 0;
+    var read_while_stuck: u64 = 0;
     const began = Io.Clock.awake.now(io);
     for (0..cuts) |round| {
         try io.sleep(.fromMilliseconds(random.intRangeAtMost(i64, 20, 150)), .awake);
@@ -348,6 +373,10 @@ fn storm(io: Io) !void {
             cut_connections += proxy.cutAll();
             continue;
         }
+        // A client still reconnecting could not finish its handshake
+        // through a stalled proxy, nor fill its queue: every client is
+        // back first.
+        try awaitBack(io, &members);
         // The proxy stops forwarding; large publishes fill the sockets, then
         // every client's queue. The cut leaves more unsent than the
         // reconnect buffer holds, and while the proxy refuses the clients,
@@ -362,6 +391,20 @@ fn storm(io: Io) !void {
                 if (stress.elapsedSince(io, since).toSeconds() >= 30) return error.TestQueueNeverFull;
                 try io.sleep(.fromMilliseconds(5), .awake);
             }
+        }
+        // The writers are stuck and publishes wait for room, while the
+        // server still sends: the readers go on handing out its messages.
+        for (&members) |*m| {
+            const before = m.counts.feed_received.load(.monotonic);
+            const since = Io.Clock.awake.now(io);
+            while (m.counts.feed_received.load(.monotonic) < before + 3) {
+                if (stress.elapsedSince(io, since).toSeconds() >= 10) return error.TestReaderWaitsForWriter;
+                try io.sleep(.fromMilliseconds(5), .awake);
+            }
+            // Still stuck: the queue is about full, and a publish waits.
+            try testing.expect(m.client.stats().pending_outbound_bytes + fill_payload.len >= member_limits.outbound_bytes);
+            try testing.expect(m.client.outbound.roomWaiters(io) > 0);
+            read_while_stuck += m.counts.feed_received.load(.monotonic) - before;
         }
         proxy.refuse(true);
         cut_connections += proxy.cutAll();
@@ -471,12 +514,12 @@ fn storm(io: Io) !void {
         try testing.expect(accepted - arrived <= stats.uncertain_outbound_frames + stats.dropped_messages);
         try testing.expect(stats.reconnects >= 5);
     }
-    std.debug.print("  storm: {d} rounds ({d} stalled) over {d} ms, {d} connections cut, {d} reconnects; publishes {d} taken, {d} arrived, {d} missing, all within {d} windows of a lost connection that counted {d} as uncertain or dropped; {d} uncertain, {d} dropped, {d} found the buffer full; requests {d} ok, {d} lost; client heap peak {d} KiB (bound {d} KiB)\n", .{
-        cuts,         stall_rounds.len, storm_took.toMilliseconds(), cut_connections,
-        reconnects,   accepted_all,     arrived_all,                 missing_all,
-        windows,      accounted_all,    uncertain,                   dropped,
-        buffer_full,  requests_ok,      requests_lost,               peak / 1024,
-        bound / 1024,
+    std.debug.print("  storm: {d} rounds ({d} stalled) over {d} ms, {d} connections cut, {d} reconnects; publishes {d} taken, {d} arrived, {d} missing, all within {d} windows of a lost connection that counted {d} as uncertain or dropped; {d} uncertain, {d} dropped, {d} found the buffer full; requests {d} ok, {d} lost; {d} messages read while the writers were stuck; client heap peak {d} KiB (bound {d} KiB)\n", .{
+        cuts,        stall_rounds.len, storm_took.toMilliseconds(), cut_connections,
+        reconnects,  accepted_all,     arrived_all,                 missing_all,
+        windows,     accounted_all,    uncertain,                   dropped,
+        buffer_full, requests_ok,      requests_lost,               read_while_stuck,
+        peak / 1024, bound / 1024,
     });
     try testing.expectEqual(0, arrivals.duplicates.load(.monotonic));
     try testing.expectEqual(0, arrivals.malformed.load(.monotonic));
