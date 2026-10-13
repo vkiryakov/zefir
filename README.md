@@ -198,8 +198,16 @@ const zefir = @import("zefir"); // zefir.confy, zefir.core, ...
 ## Development
 
 ```sh
-zig build test --summary all                  # run all tests
-zig fmt --check build.zig build.zig.zon src   # check formatting
+zig build test --summary all                        # run all tests
+zig fmt --check build.zig build.zig.zon src tests   # check formatting
+```
+
+The end-to-end tests of nats run against real NATS servers in Docker. They are a package of their own in `tests/nats`, so zio, the runtime they use, never reaches zefir's users:
+
+```sh
+cd tests/nats
+zig build e2e    # start the servers with Docker Compose, then run the tests
+zig build down   # stop the servers
 ```
 
 Branches:
