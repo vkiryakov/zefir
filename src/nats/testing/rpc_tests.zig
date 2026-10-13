@@ -788,3 +788,168 @@ test "a requestMany not freed by its owner is freed with the client" {
     _ = try s.client.requestMany("many.1", "?", many(30_000, 32));
     // testing.allocator reports the stream if the client leaks it.
 }
+
+/// After the handshake, answers every request at a moment its payload
+/// names, "<awake ns> <shift ns>": the request's own deadline and a shift
+/// from it. PINGs get PONGs; `sent` is set before each reply goes out.
+fn serveAtMoment(io: Io, listener: *net.Server, sent: ?*std.atomic.Value(u32)) anyerror!void {
+    var peer: FakeServer.Peer = undefined;
+    try peer.accept(io, listener);
+    defer peer.close();
+    try handshake(&peer);
+    var sid: u64 = 0;
+    var body: [128]u8 = undefined;
+    while (try peer.nextLine()) |line| {
+        var args = std.mem.tokenizeScalar(u8, line, ' ');
+        const op = args.next() orelse continue;
+        if (std.mem.eql(u8, op, "PING")) {
+            try peer.send(golden.pong);
+        } else if (std.mem.eql(u8, op, "SUB")) {
+            _ = args.next();
+            sid = try std.fmt.parseInt(u64, args.rest(), 10);
+        } else if (std.mem.eql(u8, op, "PUB")) {
+            _ = args.next();
+            const reply = args.next() orelse return error.TestBadPub;
+            const size = try std.fmt.parseInt(usize, args.rest(), 10);
+            if (size + 2 > body.len) return error.TestBadPub;
+            try peer.readExact(body[0 .. size + 2]);
+            const payload = body[0..size];
+            var numbers = std.mem.tokenizeScalar(u8, payload, ' ');
+            const moment = try std.fmt.parseInt(i96, numbers.next() orelse return error.TestBadPayload, 10) +
+                try std.fmt.parseInt(i96, numbers.next() orelse return error.TestBadPayload, 10);
+            const left = moment - Io.Clock.awake.now(io).nanoseconds;
+            if (left > 0) try io.sleep(.fromNanoseconds(@intCast(left)), .awake);
+            if (sent) |counter| _ = counter.fetchAdd(1, .release);
+            var head: [128]u8 = undefined;
+            try peer.send(try std.fmt.bufPrint(&head, "MSG {s} {d} {d}\r\n", .{ reply, sid, payload.len }));
+            try peer.send(payload);
+            try peer.send("\r\n");
+        }
+    }
+}
+
+/// How the requests of a race ended.
+const Tally = struct {
+    replies: u32 = 0,
+    ended: u32 = 0,
+};
+
+/// One client and its server: `rounds` requests one after another, each
+/// answered at its own deadline shifted by -2 to +1 ms. Every request must
+/// end with its reply or with Timeout, and every reply that a request did
+/// not take must count as late.
+fn raceTimeouts(rounds: u32, tally: *Tally) !void {
+    const io = testing.io;
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var server = try io.concurrent(serveAtMoment, .{ io, &listener, null });
+    defer server.cancel(io) catch {};
+    var url: [64]u8 = undefined;
+    var client: Client = try .init(testing.allocator, io, .{ .servers = &.{try FakeServer.url(&listener, &url)} });
+    defer client.deinit();
+    try client.connect();
+    for (0..rounds) |i| {
+        const deadline = time.after(io, .fromMilliseconds(4));
+        const shift: i96 = (@as(i96, @intCast(i % 13)) - 8) * 250 * std.time.ns_per_us;
+        var buffer: [64]u8 = undefined;
+        const payload = try std.fmt.bufPrint(&buffer, "{d} {d}", .{ deadline.raw.nanoseconds, shift });
+        if (client.request("race", payload, .{ .timeout = .{ .deadline = deadline } })) |reply| {
+            var m = reply;
+            defer m.deinit();
+            try testing.expectEqualStrings(payload, m.payload);
+            tally.replies += 1;
+        } else |err| switch (err) {
+            error.Timeout => tally.ended += 1,
+            else => return err,
+        }
+    }
+    // The server answers this PING after every reply: they are all in.
+    try client.flush(quick);
+    try testing.expectEqual(rounds, tally.replies + tally.ended);
+    try testing.expectEqual(@as(u64, tally.ended), client.inbox.lateResponses(io));
+    try testing.expectEqual(0, client.inbox.pendingCount(io));
+    client.close();
+    try server.await(io);
+}
+
+fn raceTimeoutsTask(rounds: u32, tally: *Tally, failure: *?anyerror) void {
+    raceTimeouts(rounds, tally) catch |err| {
+        failure.* = err;
+    };
+}
+
+test "a reply that comes at the moment of the timeout, 1000 times: the reply or Timeout, never both" {
+    const io = testing.io;
+    const pairs = 10;
+    var tallies: [pairs]Tally = @splat(.{});
+    var failures: [pairs]?anyerror = @splat(null);
+    var group: Io.Group = .init;
+    defer group.cancel(io);
+    for (&tallies, &failures) |*tally, *failure| try group.concurrent(io, raceTimeoutsTask, .{ 100, tally, failure });
+    try group.await(io);
+    for (failures) |failure| if (failure) |err| return err;
+    var total: Tally = .{};
+    for (tallies) |tally| {
+        total.replies += tally.replies;
+        total.ended += tally.ended;
+    }
+    try testing.expectEqual(1000, total.replies + total.ended);
+}
+
+fn requestRace(client: *Client, payload: []const u8) Client.RequestError!nats.Message {
+    return client.request("race", payload, five_seconds);
+}
+
+/// One client and its server: `rounds` requests, each canceled from
+/// another task as its reply comes: 0 to 300 µs after the server sent it.
+/// Every request must end with its reply or with Canceled, and every reply
+/// that a request did not take must count as late.
+fn raceCancels(rounds: u32, tally: *Tally) !void {
+    const io = testing.io;
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var sent: std.atomic.Value(u32) = .init(0);
+    var server = try io.concurrent(serveAtMoment, .{ io, &listener, &sent });
+    defer server.cancel(io) catch {};
+    var url: [64]u8 = undefined;
+    var client: Client = try .init(testing.allocator, io, .{ .servers = &.{try FakeServer.url(&listener, &url)} });
+    defer client.deinit();
+    try client.connect();
+    for (0..rounds) |i| {
+        // At once: the moment has passed when the server reads it.
+        var buffer: [64]u8 = undefined;
+        const payload = try std.fmt.bufPrint(&buffer, "0 {d}", .{i});
+        var request = try io.concurrent(requestRace, .{ &client, payload });
+        const give_up = time.after(io, .fromSeconds(5));
+        while (sent.load(.acquire) <= i) {
+            if (time.expired(io, give_up)) {
+                releaseReply(request.cancel(io));
+                return error.TestNeverAnswered;
+            }
+            std.atomic.spinLoopHint();
+        }
+        // The reply is on its way through the socket and the reader.
+        const cancel_at = time.after(io, .fromMicroseconds(@intCast(i % 16 * 20)));
+        while (!time.expired(io, cancel_at)) std.atomic.spinLoopHint();
+        if (request.cancel(io)) |reply| {
+            var m = reply;
+            m.deinit();
+            tally.replies += 1;
+        } else |err| switch (err) {
+            error.Canceled => tally.ended += 1,
+            else => return err,
+        }
+    }
+    try client.flush(quick);
+    try testing.expectEqual(rounds, tally.replies + tally.ended);
+    try testing.expectEqual(@as(u64, tally.ended), client.inbox.lateResponses(io));
+    try testing.expectEqual(0, client.inbox.pendingCount(io));
+    client.close();
+    try server.await(io);
+}
+
+test "a cancel that comes with the reply, 200 times: the reply or Canceled, never both" {
+    var tally: Tally = .{};
+    try raceCancels(200, &tally);
+    try testing.expectEqual(200, tally.replies + tally.ended);
+}
