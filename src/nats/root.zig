@@ -35,6 +35,8 @@ pub const SubscribeOptions = Subscription.Options;
 pub const OverflowPolicy = Subscription.OverflowPolicy;
 pub const ReceiveOptions = Subscription.ReceiveOptions;
 pub const PendingCounts = Subscription.PendingCounts;
+const events = @import("events.zig");
+pub const Event = events.Event;
 pub const SubscriptionStats = Subscription.Stats;
 
 /// Every error the client returns, apart from those of `std.Io` that pass
@@ -99,6 +101,7 @@ test {
     _ = @import("engine/Inbox.zig");
     _ = @import("engine/Pool.zig");
     _ = @import("engine/backoff.zig");
+    _ = @import("events.zig");
     _ = @import("protocol/subject.zig");
     _ = @import("protocol/encoder.zig");
     _ = @import("protocol/Parser.zig");
@@ -139,7 +142,7 @@ test "every error of the module's functions is in nats.Error or comes from std.I
         Options.Error,       ServerAddress.ParseError, ServerInfo.ParseError,   Headers.ValidateError,
         Client.PublishError, Client.SubscribeError,    Subscription.NextError,  Subscription.UnsubscribeError,
         Client.RequestError, Client.RespondError,      Client.RequestManyError, Responses.NextError,
-        Client.DrainError,   Subscription.DrainError,
+        Client.DrainError,   Subscription.DrainError,  Client.NextEventError,
     }) |Set| {
         inline for (comptime @typeInfo(Set).error_set.error_names.?) |name| {
             if (comptime !isIn(Error, name) and !isIn(IoErrors, name)) {

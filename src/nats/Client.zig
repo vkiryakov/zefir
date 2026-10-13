@@ -47,6 +47,8 @@ const Outbound = @import("engine/Outbound.zig");
 const Registry = @import("engine/Registry.zig");
 const Inbox = @import("engine/Inbox.zig");
 const Pool = @import("engine/Pool.zig");
+const Event = @import("events.zig").Event;
+const EventQueue = @import("events.zig").Queue;
 const MessageQueue = @import("engine/MessageQueue.zig");
 const Connection = @import("engine/Connection.zig");
 const dialer = @import("engine/connect.zig");
@@ -70,6 +72,8 @@ inbox: Inbox = .{},
 /// The servers to connect to: those of the options and those the cluster
 /// announces.
 pool: Pool,
+/// What happened, for `nextEvent`.
+events: EventQueue,
 /// The manager task.
 tasks: Io.Group = .init,
 /// The reader and writer of the current connection.
@@ -94,6 +98,8 @@ connect_error: ?ConnectError = null,
 close_reason: ?CloseReason = null,
 /// What a drain lets through, while `status` is `.draining`.
 drain_phase: DrainPhase = .subscriptions,
+/// A connection was up once: the next ones are reconnections.
+ever_connected: bool = false,
 /// The server of the current connection.
 server: ?ServerAddress = null,
 /// The JSON of the latest INFO of the current connection.
@@ -684,6 +690,7 @@ pub fn init(gpa: Allocator, io: Io, options: Options) InitError!Client {
         .parser_limits = parser_limits,
         .outbound = .initBuffering(gpa, owned.options.limits.outbound_bytes, owned.options.reconnect.buffer_bytes),
         .pool = pool,
+        .events = .init(gpa, owned.options.limits.max_event_queue),
     };
 }
 
@@ -801,7 +808,8 @@ fn closeWith(client: *Client, reason: CloseReason) void {
     client.tasks.cancel(io);
     client.subscriptions.closeAll(io);
     // What never went out is dropped and counted.
-    _ = client.outbound.discard(io);
+    manager.noteDropped(client, client.outbound.discard(io));
+    manager.announceClosed(client);
 }
 
 /// Closes the client if needed and frees everything, the subscriptions and
@@ -815,6 +823,7 @@ pub fn deinit(client: *Client) void {
     client.inbox.deinit(client.gpa);
     client.outbound.deinit();
     client.pool.deinit(client.gpa);
+    client.events.deinit();
     if (client.info_json) |json| client.gpa.free(json);
     client.gpa.free(client.read_buffer);
     client.options.deinit(client.gpa);
@@ -838,6 +847,15 @@ pub fn connectedServer(client: *Client) ?ServerAddress {
     client.mutex.lockUncancelable(client.io);
     defer client.mutex.unlock(client.io);
     return if (client.status == .connected) client.server else null;
+}
+
+pub const NextEventError = EventQueue.NextError;
+
+/// The next event, oldest first, waiting for one until `options.timeout`;
+/// null once the client closed and its `closed` event was taken. One task
+/// at a time may wait. See `nats.Event`.
+pub fn nextEvent(client: *Client, options: Subscription.ReceiveOptions) NextEventError!?Event {
+    return client.events.next(client.io, options.timeout);
 }
 
 /// Copies the servers the cluster announced, as many as `buffer` holds,

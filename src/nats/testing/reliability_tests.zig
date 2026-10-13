@@ -931,3 +931,213 @@ test "a subscription drains: what is on its way comes, then null, and the client
     try work.drain(.{});
     try client.flush(quick);
 }
+
+/// The next event, which must be a `tag` one, within 5 s.
+fn expectEvent(client: *Client, tag: std.meta.Tag(nats.Event)) !nats.Event {
+    const event = (try client.nextEvent(within_five_seconds)) orelse return error.TestNoEvent;
+    if (event != tag) {
+        std.debug.print("expected {t}, got {t}\n", .{ tag, event });
+        return error.TestUnexpectedEvent;
+    }
+    return event;
+}
+
+test "events: connected, disconnected, reconnecting, reconnected and closed, in order" {
+    const io = testing.io;
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var record: Record = .{};
+    defer record.deinit();
+    const sessions = [_]Session{ sessionHangUp, sessionServe };
+    var server = try io.concurrent(serveSessions, .{ io, &listener, &sessions, &record });
+    defer server.cancel(io) catch {};
+    var url: [64]u8 = undefined;
+    var client: Client = try .init(testing.allocator, io, .{ .servers = &.{try FakeServer.url(&listener, &url)} });
+    defer client.deinit();
+    try client.connect();
+    const port = listener.socket.address.getPort();
+    try testing.expectEqual(port, (try expectEvent(&client, .connected)).connected.port);
+    const lost = (try expectEvent(&client, .disconnected)).disconnected;
+    try testing.expectEqual(port, lost.server.port);
+    try testing.expectEqual(.closed_by_server, lost.reason);
+    try testing.expectEqual(1, (try expectEvent(&client, .reconnecting)).reconnecting.attempt);
+    try testing.expectEqual(port, (try expectEvent(&client, .reconnected)).reconnected.port);
+    client.close();
+    try testing.expectEqual(.closed, (try expectEvent(&client, .closed)).closed);
+    try testing.expect(try client.nextEvent(.{}) == null);
+}
+
+test "events: servers the cluster announces and stops announcing" {
+    const io = testing.io;
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var server = try io.concurrent(serveCluster, .{ io, &listener });
+    defer server.cancel(io) catch {};
+    var url: [64]u8 = undefined;
+    var client: Client = try .init(testing.allocator, io, .{ .servers = &.{try FakeServer.url(&listener, &url)} });
+    defer client.deinit();
+    try client.connect();
+    try client.flush(quick);
+    try testing.expectEqual(14234, (try expectEvent(&client, .server_discovered)).server_discovered.port);
+    try testing.expectEqual(14235, (try expectEvent(&client, .server_discovered)).server_discovered.port);
+    _ = try expectEvent(&client, .connected);
+    try testing.expectEqual(14235, (try expectEvent(&client, .server_removed)).server_removed.port);
+    client.close();
+    try server.await(io);
+}
+
+const forty_bytes: [40]u8 = @splat('x');
+
+/// Once the client subscribed to `slow` and `forbidden`: five messages for
+/// `slow`, one too large, a refusal of `forbidden` and an error the server
+/// keeps the connection after; then serves.
+fn sessionTrouble(peer: *FakeServer.Peer, record: *Record) anyerror!void {
+    try handshake(peer, golden.info_default);
+    if (!try readUntil(peer, record, "SUB forbidden 2")) return error.TestNoSub;
+    try peer.send("MSG slow 1 1\r\n1\r\nMSG slow 1 1\r\n2\r\nMSG slow 1 1\r\n3\r\nMSG slow 1 1\r\n4\r\nMSG slow 1 1\r\n5\r\n");
+    try peer.send("MSG slow 1 40\r\n" ++ forty_bytes ++ "\r\n");
+    try peer.send("-ERR 'Permissions Violation for Subscription to \"forbidden\"'\r\n-ERR 'maximum subscriptions exceeded'\r\n");
+    while (try nextFrame(peer, record)) |frame| {
+        if (std.mem.eql(u8, frame, "PING")) try peer.send(golden.pong);
+    }
+}
+
+fn trouble() anyerror!void {
+    const io = testing.io;
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var record: Record = .{};
+    defer record.deinit();
+    const sessions = [_]Session{sessionTrouble};
+    var server = try io.concurrent(serveSessions, .{ io, &listener, &sessions, &record });
+    defer server.cancel(io) catch {};
+    var url: [64]u8 = undefined;
+    var client: Client = try .init(testing.allocator, io, .{
+        .servers = &.{try FakeServer.url(&listener, &url)},
+        .limits = .{ .max_inbound_frame_bytes = 32, .max_header_bytes = 32 },
+    });
+    defer client.deinit();
+    try client.connect();
+    _ = try expectEvent(&client, .connected);
+    const slow = try client.subscribe("slow", .{ .pending = .{ .messages = 2 } });
+    defer slow.deinit();
+    const forbidden = try client.subscribe("forbidden", .{});
+    defer forbidden.deinit();
+    // Three dropped in one run: one event.
+    try testing.expectEqual(slow.sid, (try expectEvent(&client, .slow_consumer)).slow_consumer);
+    const dropped = (try expectEvent(&client, .message_dropped)).message_dropped;
+    try testing.expectEqual(.too_large, dropped.reason);
+    try testing.expectEqual(slow.sid, dropped.sid.?);
+    const denied = (try expectEvent(&client, .permission_denied)).permission_denied;
+    try testing.expectEqual(.subscribe, denied.operation);
+    try testing.expectEqualStrings("forbidden", denied.subject.slice());
+    try testing.expectEqual(forbidden.sid, denied.sid.?);
+    try testing.expectEqualStrings("maximum subscriptions exceeded", (try expectEvent(&client, .server_error)).server_error.slice());
+    try testing.expect(client.isConnected());
+    client.close();
+}
+
+test "events: one slow_consumer per run of drops, dropped messages, refusals and server errors" {
+    try quietly(trouble);
+}
+
+fn nextEventLong(client: *Client) Client.NextEventError!?nats.Event {
+    return client.nextEvent(.{});
+}
+
+test "close() wakes a task waiting in nextEvent, which gets closed, then null; one task waits at a time" {
+    const io = testing.io;
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var record: Record = .{};
+    defer record.deinit();
+    const sessions = [_]Session{sessionServe};
+    var server = try io.concurrent(serveSessions, .{ io, &listener, &sessions, &record });
+    defer server.cancel(io) catch {};
+    var url: [64]u8 = undefined;
+    var client: Client = try .init(testing.allocator, io, .{ .servers = &.{try FakeServer.url(&listener, &url)} });
+    defer client.deinit();
+    try client.connect();
+    _ = try expectEvent(&client, .connected);
+    var waiter = try io.concurrent(nextEventLong, .{&client});
+    defer _ = waiter.cancel(io) catch {};
+    const give_up = time.after(io, .fromSeconds(5));
+    while (!client.events.isReceiving(io)) {
+        if (time.expired(io, give_up)) return error.TestNeverWaited;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+    try testing.expectError(error.ConcurrentReceive, client.nextEvent(.{}));
+    const start = Io.Clock.awake.now(io);
+    client.close();
+    try testing.expectEqual(.closed, (try waiter.await(io)).?.closed);
+    try testing.expect(start.durationTo(Io.Clock.awake.now(io)).toSeconds() < 1);
+    try testing.expect(try client.nextEvent(.{}) == null);
+}
+
+test "events: refused credentials, then closed for auth_failed" {
+    try quietly(refusedEvents);
+}
+
+fn refusedEvents() anyerror!void {
+    const io = testing.io;
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var record: Record = .{};
+    defer record.deinit();
+    const sessions = [_]Session{ sessionRevoke, sessionRefuseViolation };
+    var server = try io.concurrent(serveSessions, .{ io, &listener, &sessions, &record });
+    defer server.cancel(io) catch {};
+    var url: [64]u8 = undefined;
+    var client: Client = try .init(testing.allocator, io, .{
+        .servers = &.{try FakeServer.url(&listener, &url)},
+        .auth = .{ .user_password = .{ .username = "alice", .password = "old" } },
+        .reconnect = fast_reconnect,
+    });
+    defer client.deinit();
+    try client.connect();
+    _ = try expectEvent(&client, .connected);
+    _ = try expectEvent(&client, .auth_error);
+    try testing.expectEqual(.server_error, (try expectEvent(&client, .disconnected)).disconnected.reason);
+    _ = try expectEvent(&client, .reconnecting);
+    _ = try expectEvent(&client, .auth_error);
+    try testing.expectEqual(.auth_failed, (try expectEvent(&client, .closed)).closed);
+    try testing.expect(try client.nextEvent(.{}) == null);
+}
+
+test "events: publishes still waiting when the client closes are dropped, and an event counts them" {
+    const io = testing.io;
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var record: Record = .{};
+    defer record.deinit();
+    const sessions = [_]Session{ sessionHangUpAfterSub, sessionAnswerWhenReleased };
+    var server = try io.concurrent(serveSessions, .{ io, &listener, &sessions, &record });
+    defer {
+        record.release.set(io);
+        server.cancel(io) catch {};
+    }
+    var url: [64]u8 = undefined;
+    var client: Client = try .init(testing.allocator, io, .{ .servers = &.{try FakeServer.url(&listener, &url)} });
+    defer client.deinit();
+    try client.connect();
+    const sub = try client.subscribe("sub", .{});
+    defer sub.deinit();
+    try awaitState(&client, .reconnecting);
+    for (0..3) |_| try client.publish("buffered", "x");
+    client.close();
+    _ = try expectEvent(&client, .connected);
+    _ = try expectEvent(&client, .disconnected);
+    while (true) {
+        const event = (try client.nextEvent(within_five_seconds)) orelse return error.TestNoEvent;
+        switch (event) {
+            .reconnecting => continue,
+            .message_dropped => |dropped| {
+                try testing.expectEqual(.unsent, dropped.reason);
+                try testing.expectEqual(3, dropped.count);
+                break;
+            },
+            else => return error.TestUnexpectedEvent,
+        }
+    }
+    _ = try expectEvent(&client, .closed);
+}

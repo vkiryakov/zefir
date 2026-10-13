@@ -24,8 +24,10 @@ const server_error = @import("../protocol/server_error.zig");
 const Connection = @import("Connection.zig");
 const Registry = @import("Registry.zig");
 const Pool = @import("Pool.zig");
+const Outbound = @import("Outbound.zig");
 const Inbox = @import("Inbox.zig");
 const backoff = @import("backoff.zig");
+const events = @import("../events.zig");
 const incoming = @import("incoming.zig");
 const dialer = @import("connect.zig");
 const time = @import("time.zig");
@@ -83,7 +85,7 @@ fn serve(client: *Client, opened: Opened) ?Exit {
         return null;
     };
     log.debug("connected to {f}", .{opened.server});
-    connected(client);
+    connected(client, opened.server);
     return heartbeat(client);
 }
 
@@ -106,6 +108,7 @@ fn reconnect(client: *Client) ?Opened {
         if (!track(client, &state)) return null;
         defer untrack(client);
         log.debug("reconnecting to {f}", .{server});
+        client.events.push(io, .{ .reconnecting = .{ .server = server, .attempt = failures +| 1 } });
         const deadline = time.after(io, options.connect_timeout);
         const abort: dialer.Abort = .{ .context = &state, .function = AttemptState.abort };
         if (dialer.race(io, deadline, attempt, .{ client, &server, &state }, Opened.release, abort)) |opened| {
@@ -122,6 +125,7 @@ fn reconnect(client: *Client) ?Opened {
             // a row does not change its mind: the client stops.
             error.AuthenticationFailed => {
                 log.debug("{f} refused the credentials", .{server});
+                client.events.push(io, .{ .auth_error = server });
                 if (client.pool.noteAttempt(io, state.refused) and options.reconnect.abort_on_auth_error) {
                     log.debug("{f} refused the credentials twice: closing", .{server});
                     giveUp(client, .auth_failed);
@@ -333,6 +337,18 @@ fn teardown(client: *Client, server: ServerAddress, exit: Exit) bool {
         .write => |err| log.debug("writing to {f} failed: {t}", .{ server, err }),
         .lame_duck => log.debug("{f} goes away: moving to another server", .{server}),
     }
+    if (disconnectReason(exit)) |reason| {
+        switch (exit) {
+            .protocol => client.events.push(io, .{ .protocol_error = server }),
+            .server_error => |kind| switch (kind) {
+                .authentication_failed => client.events.push(io, .{ .auth_error = server }),
+                .protocol => client.events.push(io, .{ .protocol_error = server }),
+                else => {},
+            },
+            else => {},
+        }
+        client.events.push(io, .{ .disconnected = .{ .server = server, .reason = reason } });
+    }
     const again = lost(client, exit);
     // Before the outbound queue wakes them, requests learn why.
     if (again) {
@@ -347,13 +363,44 @@ fn teardown(client: *Client, server: ServerAddress, exit: Exit) bool {
     client.connection.stream.close(io);
     if (!again) {
         disconnected(client);
-        _ = client.outbound.discard(io);
+        noteDropped(client, client.outbound.discard(io));
+        announceClosed(client);
         return false;
     }
     // Nothing the connection left is sent again: publishes it never wrote
     // wait in the reconnect buffer.
-    _ = client.outbound.settle(io);
+    noteDropped(client, client.outbound.settle(io));
     return true;
+}
+
+/// What the `disconnected` event says of an exit; null for `close()`.
+fn disconnectReason(exit: Exit) ?events.Disconnected.Reason {
+    return switch (exit) {
+        .closed => null,
+        .end_of_stream => .closed_by_server,
+        .stale => .stale,
+        .server_error => .server_error,
+        .protocol => .protocol_error,
+        .read, .write => .io_error,
+        .lame_duck => .lame_duck,
+    };
+}
+
+/// Publishes that never went out are dropped: an event says how many.
+pub fn noteDropped(client: *Client, settled: Outbound.Settled) void {
+    if (settled.dropped == 0) return;
+    log.debug("{d} publishes never sent: dropped", .{settled.dropped});
+    client.events.push(client.io, .{ .message_dropped = .{ .reason = .unsent, .count = settled.dropped } });
+}
+
+/// The client closed: the last event says why.
+pub fn announceClosed(client: *Client) void {
+    const reason = reason: {
+        client.mutex.lockUncancelable(client.io);
+        defer client.mutex.unlock(client.io);
+        break :reason client.close_reason orelse .closed;
+    };
+    client.events.push(client.io, .{ .closed = reason });
 }
 
 /// The connection is gone: true when the client reconnects, and it is
@@ -401,7 +448,8 @@ fn giveUp(client: *Client, reason: Client.CloseReason) void {
     client.inbox.end(io, .closed);
     client.outbound.close(io);
     client.subscriptions.closeAll(io);
-    _ = client.outbound.discard(io);
+    noteDropped(client, client.outbound.discard(io));
+    announceClosed(client);
 }
 
 /// The reader task of a connection: frames from the server.
@@ -438,13 +486,27 @@ fn readLoop(client: *Client) void {
                 // A refused publish only costs that message; a refused
                 // subscription ends, and a refused inbox fails the requests.
                 if (classified.permission) |permission| {
+                    var sid = permission.sid;
                     if (permission.operation == .subscribe) {
                         if (client.inbox.deny(io, permission)) {
                             log.debug("the inbox subscription was refused: requests fail with PermissionDenied", .{});
-                        } else if (client.subscriptions.deny(io, permission)) |sid| {
-                            log.debug("subscription {d} refused", .{sid});
+                            sid = client.inbox.sid.load(.acquire);
+                        } else if (client.subscriptions.deny(io, permission)) |denied| {
+                            log.debug("subscription {d} refused", .{denied});
+                            sid = denied;
                         }
                     }
+                    client.events.push(io, .{ .permission_denied = .{
+                        .operation = switch (permission.operation) {
+                            .publish => .publish,
+                            .subscribe => .subscribe,
+                            .reply => .reply,
+                        },
+                        .subject = .init(permission.subject),
+                        .sid = sid,
+                    } });
+                } else {
+                    client.events.push(io, .{ .server_error = .init(text) });
                 }
             },
             .msg => |msg| {
@@ -543,21 +605,34 @@ const Incoming = struct {
         if (in.request) |id| return in.finishReply(client, id);
         const message: ?Message = if (in.assembly) |*assembly| assembly.finish() else null;
         const pushed = client.subscriptions.deliver(client.io, in.sid, message) orelse return;
-        switch (in.skipped) {
-            .no, .unrouted, .late => {},
-            .too_large => log.warn("a message of {d} bytes for subscription {d} is over the limits: dropped", .{ in.total_len, in.sid }),
-            .no_memory => log.warn("no memory for a message of {d} bytes for subscription {d}: dropped", .{ in.total_len, in.sid }),
+        in.noteDropped(client, in.sid);
+        if (pushed.no_memory) {
+            log.debug("no memory to queue a message for subscription {d}: dropped", .{in.sid});
+            client.events.push(client.io, .{ .message_dropped = .{ .reason = .no_memory, .count = 1, .sid = in.sid } });
         }
-        if (pushed.no_memory) log.warn("no memory to queue a message for subscription {d}: dropped", .{in.sid});
+        // One event per run of drops.
+        if (pushed.overflow_began) {
+            log.debug("subscription {d} is a slow consumer: messages dropped", .{in.sid});
+            client.events.push(client.io, .{ .slow_consumer = in.sid });
+        }
         if (pushed.ended == .slow_consumer) {
-            log.warn("subscription {d} is a slow consumer: closed", .{in.sid});
+            log.debug("subscription {d} is a slow consumer: closed", .{in.sid});
             // The reader cannot wait for room: the UNSUB goes in at once.
             Registry.queueUnsub(&client.outbound, client.io, in.sid) catch |err| {
                 log.debug("no UNSUB for subscription {d}: {t}", .{ in.sid, err });
             };
-        } else if (pushed.overflow_began) {
-            log.warn("subscription {d} is a slow consumer: messages dropped", .{in.sid});
         }
+    }
+
+    /// A message read past: its event.
+    fn noteDropped(in: *const Incoming, client: *Client, sid: u64) void {
+        const reason: events.MessageDropped.Reason = switch (in.skipped) {
+            .no, .unrouted, .late => return,
+            .too_large => .too_large,
+            .no_memory => .no_memory,
+        };
+        log.debug("a message of {d} bytes for subscription {d} dropped: {t}", .{ in.total_len, sid, reason });
+        client.events.push(client.io, .{ .message_dropped = .{ .reason = reason, .count = 1, .sid = sid } });
     }
 
     /// The reply to request `id` is complete: to the request, or late.
@@ -565,11 +640,7 @@ const Incoming = struct {
         if (in.skipped == .late) return client.inbox.noteLate(client.io);
         const message: ?Message = if (in.assembly) |*assembly| assembly.finish() else null;
         _ = client.inbox.deliver(client.io, id, message);
-        switch (in.skipped) {
-            .no, .unrouted, .late => {},
-            .too_large => log.warn("a reply of {d} bytes is over the limits: dropped", .{in.total_len}),
-            .no_memory => log.warn("no memory for a reply of {d} bytes: dropped", .{in.total_len}),
-        }
+        in.noteDropped(client, in.sid);
     }
 
     fn abandon(in: *Incoming) void {
@@ -604,6 +675,7 @@ pub fn connectFailed(client: *Client, err: Client.ConnectError) void {
     client.changed.broadcast(io);
     client.mutex.unlock(io);
     client.outbound.close(io);
+    announceClosed(client);
 }
 
 /// The connection passed its handshake with `server`; the INFO of
@@ -629,6 +701,7 @@ fn adopt(client: *Client, server: ServerAddress, greeting: Connection.Greeting) 
 /// the server closes the connection.
 fn lameDuck(client: *Client) void {
     log.debug("the server is entering lame duck mode", .{});
+    if (client.pool.currentServer(client.io)) |server| client.events.push(client.io, .{ .lame_duck = server });
     if (!client.options.options.reconnect.enabled or client.pool.count(client.io) < 2) return;
     // A drain finishes on this server.
     if (client.state() != .connected) return;
@@ -639,8 +712,21 @@ fn lameDuck(client: *Client) void {
 /// no longer names leave it.
 fn discover(client: *Client, info: ServerInfo) void {
     if (client.options.options.ignore_discovered_servers) return;
-    client.pool.update(client.io, info.connect_urls, &Pool.ignore_changes);
+    client.pool.update(client.io, info.connect_urls, PoolEvents{ .client = client });
 }
+
+/// Turns the changes of the pool into events.
+const PoolEvents = struct {
+    client: *Client,
+
+    pub fn discovered(e: PoolEvents, server: ServerAddress) void {
+        e.client.events.push(e.client.io, .{ .server_discovered = server });
+    }
+
+    pub fn removed(e: PoolEvents, server: ServerAddress) void {
+        e.client.events.push(e.client.io, .{ .server_removed = server });
+    }
+};
 
 /// The `max_payload` of an INFO; 0 when the server gave none, or one that
 /// cannot be a size.
@@ -648,12 +734,17 @@ fn maxPayload(announced: i64) u64 {
     return if (announced > 0) @intCast(announced) else 0;
 }
 
-/// The connection is up, its reader and writer run.
-fn connected(client: *Client) void {
-    client.mutex.lockUncancelable(client.io);
-    defer client.mutex.unlock(client.io);
-    if (client.status == .connecting or client.status == .reconnecting) client.status = .connected;
-    client.changed.broadcast(client.io);
+/// The connection to `server` is up, its reader and writer run.
+fn connected(client: *Client, server: ServerAddress) void {
+    const first = first: {
+        client.mutex.lockUncancelable(client.io);
+        defer client.mutex.unlock(client.io);
+        if (client.status == .connecting or client.status == .reconnecting) client.status = .connected;
+        client.changed.broadcast(client.io);
+        defer client.ever_connected = true;
+        break :first !client.ever_connected;
+    };
+    client.events.push(client.io, if (first) .{ .connected = server } else .{ .reconnected = server });
 }
 
 /// The connection is gone, and with it the client and its subscriptions.
