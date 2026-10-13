@@ -198,8 +198,11 @@ const zefir = @import("zefir"); // zefir.confy, zefir.core, ...
 
 ```sh
 zig build test --summary all                  # run all tests
+zig build test-log --summary all              # run one module's tests: test-core, test-log, …
 zig fmt --check build.zig build.zig.zon src   # check formatting
 ```
+
+CI tests a pull request only on the modules it affects. A change under `src/<module>/` runs the tests of that module, of every module that depends on it and of `zefir`; a change to `build.zig`, `build.zig.zon`, `src/zefir.zig` or `.github/` runs them all, and documentation outside `src/` runs none. Every push to `dev` and `main` tests all modules. The module graph for this is in `.github/scripts/affected-modules.sh`: a new module goes there as well as into `build.zig`.
 
 Branches:
 
