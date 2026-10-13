@@ -3,8 +3,8 @@
 </h1>
 
 <p align="center">
-  <strong>A modular framework for enterprise applications in Zig.</strong><br>
-  Web servers, web services and APIs, built from modules you pick: typed configuration, request deadlines, cancellation, tracing and structured logging today; validation, RPC, an ORM and an HTTP server next.
+  <strong>A modular framework for building services in Zig.</strong><br>
+  Web servers, web services and APIs, built from modules you pick: typed configuration, request deadlines, cancellation, tracing, structured logging and validation today; RPC, an ORM and an HTTP server next.
 </p>
 
 <p align="center">
@@ -16,9 +16,17 @@
 
 ## Why Zefir exists
 
-I'm building Zefir to cover everything I need for enterprise applications: web servers, web services, APIs. It's made to be convenient for me first, and I'll be really glad if it helps you too. It brings together the building blocks such software needs, each a module you can take on its own, with your own types as the schema and errors that say exactly what's wrong and where.
+I'm writing a large application in Zig, and I'm building it on Zefir, the framework I make for it along the way. Every module is here because that application needed it, and some of them already run in its production code.
 
-If it fits the way you work, use it, and please join in: bring your ideas and questions to [Discussions](https://github.com/vkiryakov/zefir/discussions), and pull requests are welcome too.
+Life is too short to write in a boring language, and I think Zig is a really cool one.
+
+Zig is still young. Each release reshapes the language and its standard library, and many Zig projects don't survive that: they start with enthusiasm and are abandoned a release or two later. It's not that I think I'm smarter than their authors; in fact, I borrowed plenty of ideas from existing projects. I just don't want my production code to depend on code that may be abandoned, or that catches up with a new Zig months late. So I'm building the whole stack myself and keeping it on the current Zig.
+
+Maybe that's a bad idea. But building it gives me more joy than I can put into words: I write this code for myself, and I'm having a lot of fun doing it. Zefir is in active development, and new modules arrive as the application needs them.
+
+Every module stands on its own: take only the ones you need, with your own types as the schema and errors that say exactly what's wrong and where.
+
+Zefir is shaped by my needs first, and it's open to everyone. If it fits the way you work, use it. Found a bug? Open an [issue](https://github.com/vkiryakov/zefir/issues). Ideas and questions are welcome in [Discussions](https://github.com/vkiryakov/zefir/discussions), and so are pull requests.
 
 ## Highlights
 
@@ -34,10 +42,10 @@ If it fits the way you work, use it, and please join in: bring your ideas and qu
 | ------------------ | ----------------- | -------------------------------------------------------------------- | --------------------------------------------------------- |
 | **confy**          | `zefir-confy`     | Typed configuration from JSON, INI, `.env` files and the environment | ✅ Done · [docs](src/confy/examples/README.md)            |
 | **core**           | `zefir-core`      | Execution context: deadlines, cancellation and W3C trace context     | ✅ Done · [docs](src/core/examples/README.md)             |
-| validator          | `zefir-validator` | Declarative validation rules for struct fields                       | 🚧 In progress · [docs](src/validator/examples/README.md) |
-| rpc                | `zefir-rpc`       | RPC                                                                  | 📋 Planned                                                |
 | **log**            | `zefir-log`       | Structured logging: JSON Lines, redaction, live levels, alerts       | ✅ Done · [docs](src/log/examples/README.md)              |
+| validator          | `zefir-validator` | Declarative validation rules for struct fields                       | 🚧 In progress · [docs](src/validator/examples/README.md) |
 | nats               | `zefir-nats`      | Core NATS client: publish/subscribe, request/reply, reconnect        | 🚧 In progress                                            |
+| rpc                | `zefir-rpc`       | RPC                                                                  | 📋 Planned                                                |
 | orm                | `zefir-orm`       | ORM                                                                  | 📋 Planned                                                |
 | http               | —                 | HTTP server                                                          | 📋 Planned                                                |
 | _all of the above_ | `zefir`           | Umbrella module                                                      |                                                           |
@@ -121,18 +129,37 @@ fn findUser(ctx: core.Context, io: std.Io, id: u64) ![]const u8 {
 
 Cancel the token when the client goes away, and every check below fails with `error.Cancelled`; once the deadline passes, they fail with `error.DeadlineExceeded`. `core.w3c` reads and writes the W3C `traceparent` and `tracestate` headers, and nothing in core allocates, reads a clock or does I/O. **[Read the core guide →](src/core/examples/README.md)**
 
-## Installation
+## log in a minute
 
-Requires **Zig 0.17.0**. Add the dependency to your `build.zig.zon`; the latest release is **v0.2.0**:
+Create the logger at the start of `main`, then log constant messages with named fields:
 
-```sh
-zig fetch --save git+https://github.com/vkiryakov/zefir#v0.2.0
+```zig
+const std = @import("std");
+const log = @import("log");
+
+pub fn main(init: std.process.Init) !void {
+    const logger: log.Logger = try .init(init.gpa, init.io, .{
+        .service = .{ .name = "user-service", .version = "1.0.0" },
+    });
+    defer logger.deinit();
+
+    const users = logger.scoped("users");
+    users.info("User created", .{ .user_id = 42, .email = "ada@example.com", .password = "hunter2" });
+}
 ```
 
-The log module is on the `dev` branch until the next release:
+```json
+{"timestamp":"2026-10-12T09:41:07.415Z","level":"info","message":"User created","service.name":"user-service","service.version":"1.0.0","scope":"users","user_id":42,"email":"ada@example.com","password":"[REDACTED]"}
+```
+
+Every record is one line of JSON on stdout, ready for a log collector. The fields are checked when the program compiles, secrets come out as `[REDACTED]`, levels change while the service runs, and a queued mode keeps stdout off the request path. **[Read the log guide →](src/log/examples/README.md)**
+
+## Installation
+
+Requires **Zig 0.17.0**. Add the dependency to your `build.zig.zon`; the latest release is **v0.3.0**:
 
 ```sh
-zig fetch --save git+https://github.com/vkiryakov/zefir#dev
+zig fetch --save git+https://github.com/vkiryakov/zefir#v0.3.0
 ```
 
 Other versions are on the [releases page](https://github.com/vkiryakov/zefir/releases); a commit hash works too.

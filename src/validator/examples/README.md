@@ -42,7 +42,9 @@ if (v.check(&request, &path_buf)) |violation| {
 - [Compatibility](#compatibility)
 - [All rules](#all-rules)
 
-Rules by category: [Common](common.md) · [Numbers](numbers.md) · [Lists](lists.md) ·
+Rules by category: [Common](common.md) · [Numbers](numbers.md) · [Strings](strings.md) ·
+[Formats](formats.md) · [Encodings](encodings.md) · [Identifiers](identifiers.md) ·
+[Dates](dates.md) · [Lists](lists.md) ·
 [Coming from class-validator](class_validator.md)
 
 Examples that `zig build test` compiles and runs:
@@ -81,13 +83,11 @@ that fails is its violation, and nothing inside it is checked after that.
 
 ## Installation
 
-> [!IMPORTANT]
-> **Unreleased: ships in v0.3.0.** zefir-validator is on the `dev` branch only.
-> Until the release, pin a commit of `dev`:
->
-> ```sh
-> zig fetch --save git+https://github.com/vkiryakov/zefir#<dev commit>
-> ```
+Add Zefir to your `build.zig.zon`; validator ships since v0.3.0:
+
+```sh
+zig fetch --save git+https://github.com/vkiryakov/zefir#v0.3.0
+```
 
 Then import the `zefir-validator` module in `build.zig`:
 
@@ -615,10 +615,16 @@ to the contract of a rule, like its code.
 | --- | --- | --- | --- |
 | `{expected}` | `v.equals` | the value | a value, as below |
 | `{forbidden}` | `v.notEquals` | the value | a value, as below |
-| `{values}` | `v.oneOf`, `v.noneOf` | the listed values | each value as below, joined with `, ` |
-| `{min}` | `v.min`, `v.range`, `v.minItems` | the lower bound; the least number of items | a number as written; a count in decimal |
-| `{max}` | `v.max`, `v.range`, `v.maxItems` | the upper bound; the largest number of items | as `{min}` |
+| `{values}` | `v.oneOf`, `v.noneOf`, `v.containsAll`, `v.containsNone` | the listed values | each value as below, joined with `, ` |
+| `{min}` | `v.min`, `v.range`, `v.minLength`, `v.length`, `v.minBytes`, `v.minDate`, `v.minItems` | the lower bound; the least number of characters, bytes or items; the earliest date | a number as written; a count in decimal; a date bound as written |
+| `{max}` | `v.max`, `v.range`, `v.maxLength`, `v.length`, `v.maxBytes`, `v.maxDate`, `v.maxItems` | the upper bound; the largest number of characters, bytes or items; the latest date | as `{min}` |
 | `{divisor}` | `v.divisibleBy` | the divisor | an integer in decimal |
+| `{seed}` | `v.contains`, `v.notContains` | the substring | a string as below |
+| `{min_length}`, `{min_lowercase}`, `{min_uppercase}`, `{min_numbers}`, `{min_symbols}` | `v.strongPassword` | the options of the same names, all five also when 0 | an integer in decimal |
+| `{min_decimal_digits}`, `{max_decimal_digits}` | `v.decimal` | the options of the same names; `{max_decimal_digits}` only when the option is set | an integer in decimal |
+| `{algorithm}` | `v.hash` | the algorithm | its tag name, without the dot: `sha256` |
+| `{network}` | `v.btcAddress` | the network | its tag name, without the dot: `mainnet`, `testnet` or `any` |
+| `{key}` | `v.uniqueBy` | the key | the field name, without the dot |
 
 A rule that is not listed has no placeholders, and the page of each rule names
 its own. A placeholder that the rule does not have is a compile error that lists
@@ -698,9 +704,10 @@ or not known at compile time) are listed under [Compile errors](#compile-errors)
 ### Fallback messages
 
 A default message that shows a list, a string or a number of hundreds of digits
-can grow beyond 512 bytes. The rules `v.equals`, `v.notEquals`, `v.oneOf` and
-`v.noneOf` then use a general message instead, chosen at compile time; the code
-does not change:
+can grow beyond 512 bytes. The rules `v.equals`, `v.notEquals`, `v.oneOf`,
+`v.noneOf`, `v.contains`, `v.notContains`, `v.minDate`, `v.maxDate`,
+`v.containsAll` and `v.containsNone` then use a general message instead, chosen
+at compile time; the code does not change:
 
 | Rule | Fallback message |
 | --- | --- |
@@ -708,10 +715,17 @@ does not change:
 | `v.notEquals` | `must not be equal to the forbidden value` |
 | `v.oneOf` | `must be one of the allowed values` |
 | `v.noneOf` | `must not be one of the forbidden values` |
+| `v.contains` | `must contain the required text` |
+| `v.notContains` | `must not contain the forbidden text` |
+| `v.minDate` | `must not be before the minimum date` |
+| `v.maxDate` | `must not be after the maximum date` |
+| `v.containsAll` | `must contain all of the required values` |
+| `v.containsNone` | `must not contain any of the forbidden values` |
 
 A message of exactly 512 bytes stays; one byte more falls back. `.withMessage`
 replaces a fallback as it replaces any message, and its placeholders still show
-the whole list (the result must still fit in 512 bytes).
+the whole parameter: every listed value, the whole substring or the whole bound
+(the result must still fit in 512 bytes).
 
 `v.min`, `v.max`, `v.range` and `v.divisibleBy` have no fallback. Their default
 message is longer than 512 bytes only for a bound or a divisor of hundreds of
@@ -729,9 +743,18 @@ anything. The rules that compare a number need a finite one on a float field:
 NaN, `+inf` and `-inf` fail with `validation.finite` /
 `must be a finite number`, before the check of the rule runs. The rules with
 this precondition are `v.equals`, `v.notEquals`, `v.min`, `v.max`, `v.range`,
-`v.positive`, `v.nonNegative`, `v.negative`, `v.nonPositive` and
-`v.divisibleBy`; integers, `bool`, enums and strings have no precondition
-([D16](class_validator.md#deviations-from-validatorjs)).
+`v.positive`, `v.nonNegative`, `v.negative`, `v.nonPositive`, `v.divisibleBy`,
+`v.latitude` and `v.longitude`; on integers, `bool`, enums and strings they have
+none ([D16](class_validator.md#deviations-from-validatorjs)). The string rules
+that read code points need valid UTF-8: invalid UTF-8 fails `v.minLength`,
+`v.maxLength`, `v.length`, `v.notBlank`, `v.fullWidth`, `v.halfWidth`,
+`v.variableWidth` and `v.strongPassword` with `validation.utf8` /
+`must be valid UTF-8` ([D13](class_validator.md#deviations-from-validatorjs)).
+`v.minDate` and `v.maxDate` need a value of the form of their bound: with a
+date bound, a value that is not a date fails with `validation.date` /
+`must be a valid date in YYYY-MM-DD format`; with a date-time bound, a value
+that is not an RFC 3339 date-time fails with `validation.rfc3339` /
+`must be a valid RFC 3339 date-time` ([Dates](dates.md#vmindatemin)).
 
 - The code and the message of a precondition are fixed: `.withMessage` does not
   change them. `v.positive.withMessage("must be above zero")` reports
@@ -746,11 +769,13 @@ same condition first in the tuple, with your message:
 
 ```zig
 .price = .{ v.finite.withMessage("price must be a number"), v.positive },
+.name = .{ v.utf8.withMessage("the name must be UTF-8"), v.maxLength(64) },
 ```
 
-`v.finite` is an ordinary rule: its own check reports the same code as the
-precondition, so `.withMessage` applies to it. It stands first, the first rule
-that fails is the only violation of the field, and `v.positive` never sees a NaN.
+`v.finite` and `v.utf8` are ordinary rules: their own check reports the same
+code as the precondition, so `.withMessage` applies to them. Each stands first,
+the first rule that fails is the only violation of the field, and `v.positive`
+never sees a NaN, nor `v.maxLength` invalid UTF-8.
 
 ## Checking values
 
@@ -978,9 +1003,22 @@ library runs. These errors point at your line and do not start with
 | `v.minItems.withMessage("...")`: `.withMessage` on a rule that needs a call | `no field or member function named 'withMessage' in 'fn (comptime usize) core.Rule'` |
 | `v.minItems(-1)`: a negative count, or one above `maxInt(usize)` | `type 'usize' cannot represent integer value '-1'` |
 | `v.maxItems(1.5)`: a fractional count (`3.0` is accepted) | `fractional component prevents float value '1.5' from coercion to type 'usize'` |
+| `v.strongPassword(.{ .minLength = 12 })`: an option the struct does not have | `no field named 'minLength' in struct 'strings.StrongPasswordOptions'` |
+| `v.decimal(.{ .decimal_digits = "1,2" })`: an option the rule does not have, such as validator.js's `decimal_digits` | `no field named 'decimal_digits' in struct 'formats.DecimalOptions'` |
+| `v.macAddress(.{ .no_separators = true })`: the same for `isMACAddress`'s `no_separators`; write `.format = .bare` | `no field named 'no_separators' in struct 'formats.MacAddressOptions'` |
+| `v.macAddress(.{ .eui = .eui32 })`: a tag the option does not have | `enum 'formats.MacAddressOptions.Eui' has no member named 'eui32'` |
+| `v.macAddress(.{ .eui = "48" })`: validator.js's string instead of a tag | `expected type 'formats.MacAddressOptions.Eui', found '*const [2:0]u8'` |
+| `v.decimal(.{ .max_decimal_digits = -1 })`: an option value of another type, such as a negative count, a string, or `1` for a bool | `expected type '?usize', found 'comptime_int'` |
+| `v.fqdn(true)`, `v.decimal(2)`: a value instead of the options struct | `expected type 'formats.FqdnOptions', found 'bool'` |
+| `v.macAddress(.eui48)`: a tag instead of the options struct; write `v.macAddress(.{ .eui = .eui48 })` | `struct 'formats.MacAddressOptions' has no member named 'eui48'` |
+| `v.fqdn()`: the options left out; write `v.fqdn(.{})` | `expected 1 argument(s), found 0` |
+| `v.decimal.withMessage("...")`: `.withMessage` on a rule that needs its options | `no field or member function named 'withMessage' in 'fn (comptime formats.DecimalOptions) core.Rule'` |
+| `v.hash(.sha3_256)`, `v.btcAddress(.regtest)`: a tag the selector's enum does not have (tags are lower case: `.sha256`, not `.SHA256`) | `enum 'identifiers.HashAlgorithm' has no member named 'sha3_256'` |
+| `v.hash("sha256")`: a string instead of a tag, as in class-validator | `expected type 'identifiers.HashAlgorithm', found '*const [6:0]u8'` |
+| `v.hash(@fromBackingInt(14))`: a number that is no tag of the selector's enum | `enum 'identifiers.HashAlgorithm' has no tag with value '14'` |
 | `v.notEmpty.withMessage()`: no template, or two | `member function expected 1 argument(s), found 0` |
 | `v.notEmpty.withMessage(5)`: a template that is not a string | `expected type '[]const u8', found 'comptime_int'` |
-| `v.maxItems(limit)`, `.withMessage(text)`: a parameter or a template known only at run time | `unable to resolve comptime value` (note: `argument to comptime parameter must be comptime-known`) |
+| `v.maxItems(limit)`, `v.hash(alg)`, `.withMessage(text)`: a parameter or a template known only at run time; for an algorithm or a network chosen at run time, call the predicate in `validateSelf`: `v.isHash(s, alg)`, `v.isBtcAddress(s, network)` | `unable to resolve comptime value` (note: `argument to comptime parameter must be comptime-known`) |
 
 **What is not checked at compile time:**
 
@@ -1001,6 +1039,8 @@ library runs. These errors point at your line and do not start with
 | `v.max_code_bytes` | 128 | a code: `v.custom`, `v.fail` and `validateSelf` results |
 | `v.max_message_bytes` | 512 | a message, in bytes |
 | `v.max_report_violations` | 100 | the violations in a `Report` |
+| `v.max_unique_items` | 1000 | the items of a list whose integers, strings or non-exhaustive enum tags `v.uniqueItems` and `v.uniqueBy` compare: a slice needs an earlier `v.maxItems(n)` with `n` at most this, `[N]T` an `N` at most this |
+| `v.max_json_depth` | 64 | the nesting of a JSON text that `v.json` and `v.isJson` accept |
 
 The limits are `comptime_int` constants and part of the contract (see below).
 
@@ -1049,7 +1089,84 @@ The limits are `comptime_int` constants and part of the contract (see below).
 | `v.nonPositive` | a number is at most 0 | `validation.non_positive` | [numbers](numbers.md#vnonpositive) |
 | `v.divisibleBy(divisor)` | a number is a multiple of `divisor` | `validation.divisible_by` | [numbers](numbers.md#vdivisiblebydivisor) |
 | `v.finite` | a float is neither NaN nor an infinity | `validation.finite` | [numbers](numbers.md#vfinite) |
+| `v.minLength(min)` | a string has at least `min` code points | `validation.min_length` | [strings](strings.md#vminlengthmin) |
+| `v.maxLength(max)` | a string has at most `max` code points | `validation.max_length` | [strings](strings.md#vmaxlengthmax) |
+| `v.length(min, max)` | a string has from `min` to `max` code points | `validation.length` | [strings](strings.md#vlengthmin-max) |
+| `v.minBytes(min)` | a string has at least `min` bytes | `validation.min_bytes` | [strings](strings.md#vminbytesmin) |
+| `v.maxBytes(max)` | a string has at most `max` bytes | `validation.max_bytes` | [strings](strings.md#vmaxbytesmax) |
+| `v.utf8` | a string is valid UTF-8 | `validation.utf8` | [strings](strings.md#vutf8) |
+| `v.notBlank` | a string has a code point outside Unicode White_Space | `validation.not_blank` | [strings](strings.md#vnotblank) |
+| `v.ascii` | every byte of a string is ASCII | `validation.ascii` | [strings](strings.md#vascii) |
+| `v.printableAscii` | every byte of a string is printable ASCII (0x20-0x7E) | `validation.printable_ascii` | [strings](strings.md#vprintableascii) |
+| `v.alphanumeric` | every byte of a string is an ASCII letter or digit | `validation.alphanumeric` | [strings](strings.md#valphanumeric) |
+| `v.alpha` | every byte of a string is an ASCII letter | `validation.alpha` | [strings](strings.md#valpha) |
+| `v.digits` | every byte of a string is an ASCII digit | `validation.digits` | [strings](strings.md#vdigits) |
+| `v.lowercase` | a string has no ASCII uppercase letter | `validation.lowercase` | [strings](strings.md#vlowercase) |
+| `v.uppercase` | a string has no ASCII lowercase letter | `validation.uppercase` | [strings](strings.md#vuppercase) |
+| `v.multibyte` | a string has a byte outside ASCII | `validation.multibyte` | [strings](strings.md#vmultibyte) |
+| `v.fullWidth` | a string has a character outside validator.js's half-width class | `validation.full_width` | [strings](strings.md#vfullwidth) |
+| `v.halfWidth` | a string has a character in validator.js's half-width class | `validation.half_width` | [strings](strings.md#vhalfwidth) |
+| `v.variableWidth` | a string has characters in and outside that class | `validation.variable_width` | [strings](strings.md#vvariablewidth) |
+| `v.contains(seed)` | a string contains `seed` | `validation.contains` | [strings](strings.md#vcontainsseed) |
+| `v.notContains(seed)` | a string does not contain `seed` | `validation.not_contains` | [strings](strings.md#vnotcontainsseed) |
+| `v.strongPassword(.{ ... })` | a password has the length and the classes of characters that the options ask for | `validation.strong_password` | [strings](strings.md#vstrongpasswordoptions) |
+| `v.numberString` | a string is a number in decimal notation | `validation.number_string` | [formats](formats.md#vnumberstring) |
+| `v.decimal(.{ ... })` | a string is a decimal number with as many digits after the point as the options allow | `validation.decimal` | [formats](formats.md#vdecimaloptions) |
+| `v.booleanString` | a string is `true`, `false`, `1` or `0` | `validation.boolean_string` | [formats](formats.md#vbooleanstring) |
+| `v.hexadecimal` | a string is a hexadecimal number | `validation.hexadecimal` | [formats](formats.md#vhexadecimal) |
+| `v.octal` | a string is an octal number | `validation.octal` | [formats](formats.md#voctal) |
+| `v.port` | a string is a port number from 0 to 65535 | `validation.port` | [formats](formats.md#vport) |
+| `v.latitude` | a string or a float is a latitude from -90 to 90 | `validation.latitude` | [formats](formats.md#vlatitude) |
+| `v.longitude` | a string or a float is a longitude from -180 to 180 | `validation.longitude` | [formats](formats.md#vlongitude) |
+| `v.latLong` | a string is a `latitude,longitude` pair | `validation.lat_long` | [formats](formats.md#vlatlong) |
+| `v.email` | a string is an email address | `validation.email` | [formats](formats.md#vemail) |
+| `v.httpUrl` | a string is an http or https URL | `validation.http_url` | [formats](formats.md#vhttpurl) |
+| `v.fqdn(.{ ... })` | a string is a domain name | `validation.fqdn` | [formats](formats.md#vfqdnoptions) |
+| `v.ip` | a string is an IPv4 or an IPv6 address | `validation.ip` | [formats](formats.md#vip) |
+| `v.ipv4` | a string is an IPv4 address | `validation.ipv4` | [formats](formats.md#vipv4) |
+| `v.ipv6` | a string is an IPv6 address | `validation.ipv6` | [formats](formats.md#vipv6) |
+| `v.macAddress(.{ ... })` | a string is a MAC address | `validation.mac_address` | [formats](formats.md#vmacaddressoptions) |
+| `v.json` | a string is a JSON object or array, nested at most 64 levels | `validation.json` | [encodings](encodings.md#vjson) |
+| `v.jwt` | a string has the shape of a JWT | `validation.jwt` | [encodings](encodings.md#vjwt) |
+| `v.base32` | a string is canonical padded base32 | `validation.base32` | [encodings](encodings.md#vbase32) |
+| `v.base58` | a string uses the base58 alphabet | `validation.base58` | [encodings](encodings.md#vbase58) |
+| `v.base64` | a string is canonical padded base64 | `validation.base64` | [encodings](encodings.md#vbase64) |
+| `v.base64Url` | a string is canonical base64url without padding | `validation.base64_url` | [encodings](encodings.md#vbase64url) |
+| `v.dataUri` | a string is an RFC 2397 data URL | `validation.data_uri` | [encodings](encodings.md#vdatauri) |
+| `v.magnetUri` | a string is a magnet URI with an exact topic | `validation.magnet_uri` | [encodings](encodings.md#vmagneturi) |
+| `v.mimeType` | a string is a media type with parameters | `validation.mime_type` | [encodings](encodings.md#vmimetype) |
+| `v.locale` | a string is a well-formed BCP 47 language tag | `validation.locale` | [encodings](encodings.md#vlocale) |
+| `v.semVer` | a string is a semantic version | `validation.sem_ver` | [encodings](encodings.md#vsemver) |
+| `v.hexColor` | a string is a CSS hex color | `validation.hex_color` | [encodings](encodings.md#vhexcolor) |
+| `v.rgbColor` | a string is a CSS `rgb()` or `rgba()` color | `validation.rgb_color` | [encodings](encodings.md#vrgbcolor) |
+| `v.hslColor` | a string is a CSS `hsl()` or `hsla()` color | `validation.hsl_color` | [encodings](encodings.md#vhslcolor) |
+| `v.uuid` | a string is a UUID: 8-4-4-4-12 hex digits | `validation.uuid` | [identifiers](identifiers.md#vuuid) |
+| `v.mongoId` | a string is a MongoDB ObjectId: 24 hex digits | `validation.mongo_id` | [identifiers](identifiers.md#vmongoid) |
+| `v.firebasePushId` | a string is a Firebase push ID | `validation.firebase_push_id` | [identifiers](identifiers.md#vfirebasepushid) |
+| `v.hash(algorithm)` | a string is a hex digest of `algorithm` | `validation.hash` | [identifiers](identifiers.md#vhashalgorithm) |
+| `v.creditCard` | a string is a card number with a valid Luhn check digit | `validation.credit_card` | [identifiers](identifiers.md#vcreditcard) |
+| `v.isbn` | a string is an ISBN-10 or an ISBN-13 | `validation.isbn` | [identifiers](identifiers.md#visbn) |
+| `v.isbn10` | a string is an ISBN-10 | `validation.isbn10` | [identifiers](identifiers.md#visbn10) |
+| `v.isbn13` | a string is an ISBN-13 | `validation.isbn13` | [identifiers](identifiers.md#visbn13) |
+| `v.issn` | a string is an ISSN, `NNNN-NNNC` | `validation.issn` | [identifiers](identifiers.md#vissn) |
+| `v.ean` | a string is an EAN-8, EAN-13 or GTIN-14 | `validation.ean` | [identifiers](identifiers.md#vean) |
+| `v.isin` | a string is an ISIN | `validation.isin` | [identifiers](identifiers.md#visin) |
+| `v.isrc` | a string is an ISRC | `validation.isrc` | [identifiers](identifiers.md#visrc) |
+| `v.bic` | a string is a BIC | `validation.bic` | [identifiers](identifiers.md#vbic) |
+| `v.iban` | a string is an IBAN | `validation.iban` | [identifiers](identifiers.md#viban) |
+| `v.btcAddress(network)` | a string is a Bitcoin address of `network` | `validation.btc_address` | [identifiers](identifiers.md#vbtcaddressnetwork) |
+| `v.ethereumAddress` | a string is an Ethereum address | `validation.ethereum_address` | [identifiers](identifiers.md#vethereumaddress) |
+| `v.date` | a string is a date `YYYY-MM-DD` | `validation.date` | [dates](dates.md#vdate) |
+| `v.rfc3339` | a string is an RFC 3339 date-time with an offset | `validation.rfc3339` | [dates](dates.md#vrfc3339) |
+| `v.iso8601` | a string is an ISO 8601 date or date-time | `validation.iso8601` | [dates](dates.md#viso8601) |
+| `v.minDate(min)` | a date or a date-time is not before `min` | `validation.min_date` | [dates](dates.md#vmindatemin) |
+| `v.maxDate(max)` | a date or a date-time is not after `max` | `validation.max_date` | [dates](dates.md#vmaxdatemax) |
+| `v.militaryTime` | a string is a time `HH:MM` or `HHMM` | `validation.military_time` | [dates](dates.md#vmilitarytime) |
 | `v.minItems(min)` | a slice has at least `min` items | `validation.min_items` | [lists](lists.md#vminitemsmin) |
 | `v.maxItems(max)` | a slice has at most `max` items | `validation.max_items` | [lists](lists.md#vmaxitemsmax) |
+| `v.uniqueItems` | no two items of a slice or an array are equal | `validation.unique_items` | [lists](lists.md#vuniqueitems) |
+| `v.uniqueBy(.key)` | no two struct items of a slice or an array have equal values of the field `key` | `validation.unique_items` | [lists](lists.md#vuniquebykey) |
+| `v.containsAll(.{ ... })` | every listed value is an item of a slice or an array | `validation.contains_all` | [lists](lists.md#vcontainsallvalues) |
+| `v.containsNone(.{ ... })` | no item of a slice or an array is a listed value | `validation.contains_none` | [lists](lists.md#vcontainsnonevalues) |
 | `v.each(rules)` | the rules of every item of a slice or an array | the inner rule's code | [lists](lists.md#veachrules) |
 | `v.custom(code, message, f)` | your predicate `f` returns `true` | your `code` | [v.custom](#vcustom) |
