@@ -20,13 +20,17 @@ set -eu
 modules="core log confy validator rpc orm nats zefir"
 imports() {
     case $1 in
-    core | nats) ;;
+    core) ;;
     log) echo core ;;
     confy) echo log ;;
     # The validator imports nothing, but the examples of its guide log the
     # violations they find.
     validator) echo log ;;
     rpc) echo confy ;;
+    # nats imports nothing, but the examples of its guide read their
+    # settings with confy, log with log and take deadlines from core, and
+    # its end-to-end tests build and run them. confy brings log.
+    nats) echo core confy ;;
     orm) echo log ;;
     zefir) echo core log confy validator rpc orm nats ;;
     esac

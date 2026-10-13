@@ -62,9 +62,9 @@ while IFS='|' read -r change modules <&3; do
     git commit -q -m "$change"
     expect "$(echo $change)" "$(echo $modules)" "$(sh "$script" "$base" HEAD)"
 done 3<<'EOF'
-edit src/core/Context.zig                       | core log confy validator rpc orm zefir
-edit src/log/Logger.zig                         | log confy validator rpc orm zefir
-edit src/confy/root.zig                         | confy rpc zefir
+edit src/core/Context.zig                       | core log confy validator rpc orm nats zefir
+edit src/log/Logger.zig                         | log confy validator rpc orm nats zefir
+edit src/confy/root.zig                         | confy rpc nats zefir
 edit src/validator/strings.zig                  | validator zefir
 edit src/rpc/root.zig                           | rpc zefir
 edit src/orm/root.zig                           | orm zefir
@@ -74,7 +74,7 @@ edit tests/nats/e2e/pubsub.zig                  | nats zefir
 edit tests/nats/README.md                       | nats zefir
 edit docker-compose.yml                         | nats zefir
 edit src/core/root.zig src/nats/root.zig        | core log confy validator rpc orm nats zefir
-edit src/confy/examples/README.md               | confy rpc zefir
+edit src/confy/examples/README.md               | confy rpc nats zefir
 edit README.md src/validator/root.zig           | validator zefir
 edit README.md                                  |
 edit docs/plan.md docs/notes.txt                |
@@ -87,7 +87,7 @@ edit src/helpers.zig                            | core log confy validator rpc o
 edit src/notes.md                               | core log confy validator rpc orm nats zefir
 edit tests/other/main.zig                       | core log confy validator rpc orm nats zefir
 edit LICENSE                                    | core log confy validator rpc orm nats zefir
-git rm -q src/log/root.zig                      | log confy validator rpc orm zefir
+git rm -q src/log/root.zig                      | log confy validator rpc orm nats zefir
 git mv src/orm/root.zig src/rpc/orm.zig         | rpc orm zefir
 EOF
 
