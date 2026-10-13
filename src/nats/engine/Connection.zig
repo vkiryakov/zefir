@@ -19,6 +19,9 @@ const Connection = @This();
 stream: net.Stream,
 reader: net.Stream.Reader,
 parser: Parser,
+/// How the server refused the credentials, when the handshake failed with
+/// AuthenticationFailed.
+refused: ?server_error.Refusal = null,
 
 /// `buffer` holds at least `Parser.bufferLen(limits)` bytes and outlives
 /// the connection.
@@ -110,7 +113,10 @@ pub fn handshake(conn: *Connection, io: Io, gpa: Allocator, hello: Hello) Handsh
             gpa.free(greeting.info_json);
             greeting = newer;
         },
-        .err => |text| if (refusal(text)) |err| return err,
+        .err => |text| if (refusal(text)) |err| {
+            if (err == error.AuthenticationFailed) conn.refused = server_error.refusal(text);
+            return err;
+        },
         .msg, .body, .msg_end => return error.ProtocolError,
     };
 }

@@ -10,6 +10,7 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const Options = @import("../Options.zig");
 const ServerAddress = @import("../ServerAddress.zig");
+const server_error = @import("../protocol/server_error.zig");
 const log = std.log.scoped(.nats);
 const Pool = @This();
 
@@ -17,6 +18,9 @@ pub const Entry = struct {
     address: ServerAddress,
     /// From the options: it stays whatever INFO says.
     explicit: bool,
+    /// How the server refused the credentials the last time; null when the
+    /// last attempt on it ended otherwise.
+    refused: ?server_error.Refusal = null,
 };
 
 /// Guards everything below.
@@ -62,6 +66,19 @@ pub fn currentServer(pool: *Pool, io: Io) ?ServerAddress {
     defer pool.mutex.unlock(io);
     const index = pool.current orelse return null;
     return pool.entries[index].address;
+}
+
+/// The attempt on the server of the last attempt ended: refused the way
+/// `refused` says, or otherwise (null). True when the server refused the
+/// credentials the same way the time before too.
+pub fn noteAttempt(pool: *Pool, io: Io, refused: ?server_error.Refusal) bool {
+    pool.mutex.lockUncancelable(io);
+    defer pool.mutex.unlock(io);
+    const index = pool.current orelse return false;
+    const entry = &pool.entries[index];
+    const again = refused != null and entry.refused == refused;
+    entry.refused = refused;
+    return again;
 }
 
 /// How many servers the pool holds.
@@ -357,4 +374,23 @@ test "with randomize_servers new servers join anywhere, and the current one stay
     pool.update(io, &urls, &ignore_changes);
     try testing.expectEqual(42, pool.count(io));
     try testing.expect(same(&pool.currentServer(io).?, &first));
+}
+
+test "a server that refuses the credentials the same way twice in a row is noted so" {
+    const io = testing.io;
+    const servers = parsedAll(&.{ "a:1", "b:2" });
+    var pool: Pool = try .init(testing.allocator, io, &servers, false);
+    defer pool.deinit(testing.allocator);
+    try testing.expect(!pool.noteAttempt(io, .authorization_violation));
+    _ = pool.next(io);
+    try testing.expect(!pool.noteAttempt(io, .authorization_violation));
+    // Another server between two attempts on this one changes nothing.
+    _ = pool.next(io);
+    try testing.expect(!pool.noteAttempt(io, null));
+    _ = pool.next(io);
+    try testing.expect(pool.noteAttempt(io, .authorization_violation));
+    // Another refusal, or an attempt that ended otherwise, starts over.
+    try testing.expect(!pool.noteAttempt(io, .user_authentication_expired));
+    try testing.expect(!pool.noteAttempt(io, null));
+    try testing.expect(!pool.noteAttempt(io, .user_authentication_expired));
 }

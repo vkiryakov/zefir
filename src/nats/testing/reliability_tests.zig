@@ -275,6 +275,18 @@ test "a lost connection: the client reconnects and subscribes again with the sam
     try testing.expect(std.mem.find(u8, seen[0 .. seen.len - second.len], inbox_sub) != null);
 }
 
+/// Waits until the client is connected to the server on `port`, for 5 s
+/// at most.
+fn awaitServer(client: *Client, port: u16) !void {
+    const io = client.io;
+    const give_up = time.after(io, .fromSeconds(5));
+    while (true) {
+        if (client.connectedServer()) |server| if (server.port == port) return;
+        if (time.expired(io, give_up)) return error.TestNeverMoved;
+        try io.sleep(.fromMilliseconds(2), .awake);
+    }
+}
+
 /// Waits until the server accepted `count` connections, for 5 s at most.
 fn awaitAccepted(record: *Record, count: u32) !void {
     const give_up = time.after(testing.io, .fromSeconds(5));
@@ -513,4 +525,172 @@ test "with reconnect.buffer_bytes 0, publishes and requests fail with Disconnect
     defer testing.allocator.free(seen);
     try testing.expect(std.mem.find(u8, seen, "--\nSUB sub 1\nSUB later 2\n") != null);
     try testing.expect(std.mem.find(u8, seen, "PUB buffered") == null);
+}
+
+/// A connection the server refuses with `-ERR` and `text`, after INFO and
+/// the client's CONNECT and PING.
+fn refuseWith(peer: *FakeServer.Peer, comptime text: []const u8) !void {
+    try peer.send(golden.info_default);
+    _ = try peer.readLine();
+    try peer.expectLine("PING");
+    try peer.send("-ERR '" ++ text ++ "'\r\n");
+}
+
+fn sessionRefuseViolation(peer: *FakeServer.Peer, record: *Record) anyerror!void {
+    _ = record;
+    try refuseWith(peer, "Authorization Violation");
+}
+
+fn sessionRefuseExpired(peer: *FakeServer.Peer, record: *Record) anyerror!void {
+    _ = record;
+    try refuseWith(peer, "User Authentication Expired");
+}
+
+/// The handshake, then, as when the password changes on the server, the
+/// credentials no longer pass: `-ERR 'Authorization Violation'` and a
+/// hang-up.
+fn sessionRevoke(peer: *FakeServer.Peer, record: *Record) anyerror!void {
+    _ = record;
+    try handshake(peer, golden.info_default);
+    try peer.send(golden.err_authorization);
+}
+
+fn quietly(comptime body: fn () anyerror!void) anyerror!void {
+    // The client logs every -ERR as a warning; these tests expect them.
+    const level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = level;
+    return body();
+}
+
+fn twoRefusals() anyerror!void {
+    const io = testing.io;
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var record: Record = .{};
+    defer record.deinit();
+    const sessions = [_]Session{ sessionRevoke, sessionRefuseViolation, sessionServe };
+    var server = try io.concurrent(serveSessions, .{ io, &listener, &sessions, &record });
+    defer server.cancel(io) catch {};
+    var url: [64]u8 = undefined;
+    var client: Client = try .init(testing.allocator, io, .{
+        .servers = &.{try FakeServer.url(&listener, &url)},
+        .auth = .{ .user_password = .{ .username = "alice", .password = "old" } },
+        .reconnect = fast_reconnect,
+    });
+    defer client.deinit();
+    try client.connect();
+    // Refused on the connection, then again by the first attempt: closed.
+    try awaitState(&client, .closed);
+    try testing.expectEqual(2, record.accepted.load(.monotonic));
+}
+
+test "a server that refuses the credentials twice the same way in a row closes the client" {
+    try quietly(twoRefusals);
+}
+
+fn refusalsGoOn() anyerror!void {
+    const io = testing.io;
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var record: Record = .{};
+    defer record.deinit();
+    const sessions = [_]Session{ sessionRevoke, sessionRefuseViolation, sessionRefuseViolation, sessionServe };
+    var server = try io.concurrent(serveSessions, .{ io, &listener, &sessions, &record });
+    defer server.cancel(io) catch {};
+    var url: [64]u8 = undefined;
+    var reconnect = fast_reconnect;
+    reconnect.abort_on_auth_error = false;
+    var client: Client = try .init(testing.allocator, io, .{
+        .servers = &.{try FakeServer.url(&listener, &url)},
+        .auth = .{ .user_password = .{ .username = "alice", .password = "secret" } },
+        .reconnect = reconnect,
+    });
+    defer client.deinit();
+    try client.connect();
+    try awaitAccepted(&record, 4);
+    try awaitState(&client, .connected);
+    try client.flush(quick);
+}
+
+test "with abort_on_auth_error false, refused attempts go on until one passes" {
+    try quietly(refusalsGoOn);
+}
+
+fn differentRefusals() anyerror!void {
+    const io = testing.io;
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var record: Record = .{};
+    defer record.deinit();
+    const sessions = [_]Session{ sessionRevoke, sessionRefuseExpired, sessionRefuse, sessionRefuseViolation, sessionServe };
+    var server = try io.concurrent(serveSessions, .{ io, &listener, &sessions, &record });
+    defer server.cancel(io) catch {};
+    var url: [64]u8 = undefined;
+    var client: Client = try .init(testing.allocator, io, .{
+        .servers = &.{try FakeServer.url(&listener, &url)},
+        .auth = .{ .user_password = .{ .username = "alice", .password = "secret" } },
+        .reconnect = fast_reconnect,
+    });
+    defer client.deinit();
+    try client.connect();
+    // Violation, then Expired, then a failure of another kind, then
+    // Violation: never the same twice in a row.
+    try awaitAccepted(&record, 5);
+    try awaitState(&client, .connected);
+    try client.flush(quick);
+}
+
+test "refusals of another kind, or a failure between them, do not stop the attempts" {
+    try quietly(differentRefusals);
+}
+
+/// The handshake; once the client subscribed, INFO says the server is
+/// about to go away and names the other server; then it waits for the
+/// client to leave.
+fn serveLameDuck(io: Io, listener: *net.Server, other_port: u16) !void {
+    var peer: FakeServer.Peer = undefined;
+    try peer.accept(io, listener);
+    defer peer.close();
+    try handshake(&peer, golden.info_default);
+    var record: Record = .{};
+    defer record.deinit();
+    if (!try readUntil(&peer, &record, "SUB sub 1")) return error.TestNoSub;
+    var info: [256]u8 = undefined;
+    try peer.send(try std.fmt.bufPrint(&info, "INFO {{\"server_id\":\"A\",\"proto\":1,\"headers\":true,\"ldm\":true,\"connect_urls\":[\"127.0.0.1:{d}\"]}} \r\n", .{other_port}));
+    // The client leaves at once, without waiting for the server to close.
+    while (try peer.nextLine()) |_| {}
+}
+
+test "lame duck mode: the client moves to another server at once, and subscribes there again" {
+    const io = testing.io;
+    var going = try FakeServer.listen(io);
+    defer going.deinit(io);
+    var staying = try FakeServer.listen(io);
+    defer staying.deinit(io);
+    var record: Record = .{};
+    defer record.deinit();
+    const sessions = [_]Session{sessionServe};
+    var other = try io.concurrent(serveSessions, .{ io, &staying, &sessions, &record });
+    defer other.cancel(io) catch {};
+    var first = try io.concurrent(serveLameDuck, .{ io, &going, staying.socket.address.getPort() });
+    defer first.cancel(io) catch {};
+    var urls: [2][64]u8 = undefined;
+    var client: Client = try .init(testing.allocator, io, .{
+        .servers = &.{ try FakeServer.url(&going, &urls[0]), try FakeServer.url(&staying, &urls[1]) },
+        .randomize_servers = false,
+    });
+    defer client.deinit();
+    try client.connect();
+    const sub = try client.subscribe("sub", .{});
+    defer sub.deinit();
+    try awaitServer(&client, staying.socket.address.getPort());
+    // The server going away ends once the client left it.
+    try first.await(io);
+    try client.flush(quick);
+    client.close();
+    try other.await(io);
+    const seen = try record.seen(io);
+    defer testing.allocator.free(seen);
+    try testing.expect(std.mem.startsWith(u8, seen, "SUB sub 1\n"));
 }

@@ -47,6 +47,8 @@ pub const Exit = union(enum) {
     read: Connection.ReadError,
     /// Writing to the socket failed.
     write: Connection.WriteError,
+    /// The server is about to go away, and another one is in the pool.
+    lame_duck,
 };
 
 /// The manager task: from `connect()` until the client closes.
@@ -107,6 +109,7 @@ fn reconnect(client: *Client) ?Opened {
         const deadline = time.after(io, options.connect_timeout);
         const abort: dialer.Abort = .{ .context = &state, .function = AttemptState.abort };
         if (dialer.race(io, deadline, attempt, .{ client, &server, &state }, Opened.release, abort)) |opened| {
+            _ = client.pool.noteAttempt(io, null);
             if (restored(client, opened)) return opened;
         } else |err| switch (err) {
             // close() stops the attempts.
@@ -115,7 +118,20 @@ fn reconnect(client: *Client) ?Opened {
                 giveUp(client);
                 return null;
             },
-            else => log.debug("could not reconnect to {f}: {t}", .{ server, err }),
+            // A server that refuses the credentials twice the same way in
+            // a row does not change its mind: the client stops.
+            error.AuthenticationFailed => {
+                log.debug("{f} refused the credentials", .{server});
+                if (client.pool.noteAttempt(io, state.refused) and options.reconnect.abort_on_auth_error) {
+                    log.debug("{f} refused the credentials twice: closing", .{server});
+                    giveUp(client);
+                    return null;
+                }
+            },
+            else => {
+                log.debug("could not reconnect to {f}: {t}", .{ server, err });
+                _ = client.pool.noteAttempt(io, null);
+            },
         }
         failures +|= 1;
         if (options.reconnect.max_attempts) |max| {
@@ -186,6 +202,7 @@ fn openFirst(client: *Client) Client.ConnectError!Opened {
         const deadline = time.after(io, client.options.options.connect_timeout);
         const abort: dialer.Abort = .{ .context = &state, .function = AttemptState.abort };
         if (dialer.race(io, deadline, attempt, .{ client, &server, &state }, Opened.release, abort)) |opened| {
+            _ = client.pool.noteAttempt(io, null);
             if (restored(client, opened)) return opened;
             last_error = error.OutOfMemory;
         } else |err| switch (err) {
@@ -208,6 +225,8 @@ pub const AttemptState = struct {
     mutex: Io.Mutex = .init,
     stream: ?Io.net.Stream = null,
     aborted: bool = false,
+    /// How the server refused the credentials, when it did.
+    refused: ?server_error.Refusal = null,
 
     /// Makes the attempt end soon: now, or as soon as it has a socket.
     pub fn stop(state: *AttemptState, io: Io) void {
@@ -250,6 +269,7 @@ fn attempt(client: *Client, server: *const ServerAddress, state: *AttemptState) 
     }
     var connection: Connection = .init(stream, io, client.read_buffer, client.parser_limits);
     const greeting = connection.handshake(io, client.gpa, .init(&client.options.options)) catch |err| {
+        state.refused = connection.refused;
         state.release(io);
         stream.close(io);
         return err;
@@ -311,6 +331,7 @@ fn teardown(client: *Client, server: ServerAddress, exit: Exit) bool {
         .protocol => log.warn("{f} broke the protocol: connection dropped", .{server}),
         .read => |err| log.debug("reading from {f} failed: {t}", .{ server, err }),
         .write => |err| log.debug("writing to {f} failed: {t}", .{ server, err }),
+        .lame_duck => log.debug("{f} goes away: moving to another server", .{server}),
     }
     const again = lost(client, exit);
     // Before the outbound queue wakes them, requests learn why.
@@ -401,6 +422,8 @@ fn readLoop(client: *Client) void {
             .err => |text| {
                 log.warn("server error: {s}", .{text});
                 const classified = server_error.classify(text);
+                // It counts as the server's first refusal for reconnecting.
+                if (classified.kind == .authentication_failed) _ = client.pool.noteAttempt(io, server_error.refusal(text));
                 if (classified.kind.closesConnection()) {
                     lose(client, .{ .server_error = classified.kind });
                     return;
@@ -582,6 +605,7 @@ fn adopt(client: *Client, server: ServerAddress, greeting: Connection.Greeting) 
     if (ServerInfo.parse(client.gpa, greeting.info_json)) |info| {
         defer info.deinit();
         discover(client, info.value);
+        if (info.value.ldm) lameDuck(client);
     } else |err| log.debug("the INFO of the handshake is unreadable now: {t}", .{err});
     client.mutex.lockUncancelable(client.io);
     defer client.mutex.unlock(client.io);
@@ -590,6 +614,17 @@ fn adopt(client: *Client, server: ServerAddress, greeting: Connection.Greeting) 
     client.info_json = greeting.info_json;
     client.server_headers = greeting.headers;
     client.max_payload = maxPayload(greeting.max_payload);
+}
+
+/// The server is about to go away: the client moves to another one at once
+/// when the pool has one and reconnecting is on; otherwise it stays until
+/// the server closes the connection.
+fn lameDuck(client: *Client) void {
+    log.debug("the server is entering lame duck mode", .{});
+    if (!client.options.options.reconnect.enabled or client.pool.count(client.io) < 2) return;
+    // A drain finishes on this server.
+    if (client.state() != .connected) return;
+    lose(client, .lame_duck);
 }
 
 /// The servers an INFO announces join the pool, and the discovered ones it
@@ -671,6 +706,7 @@ fn updateInfo(client: *Client, json: []const u8) ServerInfo.ParseError!void {
     const info = try ServerInfo.parse(client.gpa, json);
     defer info.deinit();
     discover(client, info.value);
+    if (info.value.ldm) lameDuck(client);
     const copy = try client.gpa.dupe(u8, json);
     client.mutex.lockUncancelable(client.io);
     defer client.mutex.unlock(client.io);

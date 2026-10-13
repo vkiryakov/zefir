@@ -101,6 +101,29 @@ pub fn classify(text: []const u8) Classified {
     return .{ .kind = .unknown };
 }
 
+/// Which refusal of the credentials a text is: a server that refuses them
+/// twice the same way in a row is not tried again.
+pub const Refusal = enum {
+    authorization_violation,
+    user_authentication_expired,
+    account_authentication_expired,
+    user_authentication_revoked,
+};
+
+/// The refusal a `-ERR` text is; null for any other text.
+pub fn refusal(text: []const u8) ?Refusal {
+    const texts = [_]struct { prefix: []const u8, refusal: Refusal }{
+        .{ .prefix = "Authorization Violation", .refusal = .authorization_violation },
+        .{ .prefix = "User Authentication Expired", .refusal = .user_authentication_expired },
+        .{ .prefix = "Account Authentication Expired", .refusal = .account_authentication_expired },
+        .{ .prefix = "User Authentication Revoked", .refusal = .user_authentication_revoked },
+    };
+    for (texts) |t| {
+        if (std.ascii.startsWithIgnoreCase(text, t.prefix)) return t.refusal;
+    }
+    return null;
+}
+
 /// Reads `Publish to "s"`, `Publish with Reply of "r"`,
 /// `Subscription to "s"`, `Subscription to "s" using queue "q"`,
 /// `Subscription to "s", too many tokens` and, after a reload of the
@@ -319,4 +342,17 @@ test "quotedEql reads every escape %q writes, and nothing else" {
         .{ "\\xzz", "z" },       .{ "\\u12", "\x12" }, .{ "\\ud800", "\xed\xa0\x80" },
         .{ "\\U00110000", "?" },
     }) |case| try testing.expect(!quotedEql(case[0], case[1]));
+}
+
+test "refusals of the credentials are told apart" {
+    try testing.expectEqual(Refusal.authorization_violation, refusal("Authorization Violation").?);
+    try testing.expectEqual(Refusal.authorization_violation, refusal("authorization violation").?);
+    try testing.expectEqual(Refusal.user_authentication_expired, refusal("User Authentication Expired").?);
+    try testing.expectEqual(Refusal.account_authentication_expired, refusal("Account Authentication Expired").?);
+    try testing.expectEqual(Refusal.user_authentication_revoked, refusal("User Authentication Revoked").?);
+    try testing.expect(refusal("Stale Connection") == null);
+    // Every refusal is an authentication failure.
+    for ([_][]const u8{ "Authorization Violation", "User Authentication Expired", "Account Authentication Expired", "User Authentication Revoked" }) |text| {
+        try testing.expectEqual(Kind.authentication_failed, classify(text).kind);
+    }
 }
