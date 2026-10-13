@@ -121,17 +121,17 @@ server_headers: bool = false,
 max_payload: u64 = 0,
 /// `deinit` has run.
 freed: bool = false,
-/// Where `connect()` ran, in safe builds: a method called on a copy of the
-/// client somewhere else panics.
-home: if (std.debug.runtime_safety) ?*const Client else void = if (std.debug.runtime_safety) null else {},
+/// The address where `connect()` ran, 0 before, in safe builds: a method
+/// called on a copy of the client somewhere else panics. Atomic: any task
+/// may call a method while another one connects.
+home: if (std.debug.runtime_safety) std.atomic.Value(usize) else void = if (std.debug.runtime_safety) .init(0) else {},
 
 /// In safe builds, a client used somewhere else than where `connect()` ran
 /// panics: its tasks still point to the old place.
 inline fn checkHome(client: *const Client) void {
     if (std.debug.runtime_safety) {
-        if (client.home) |home| {
-            if (home != client) @panic("nats.Client moved after connect(): keep it where connect() ran (see the guide)");
-        }
+        const home = client.home.load(.monotonic);
+        if (home != 0 and home != @intFromPtr(client)) @panic("nats.Client moved after connect(): keep it where connect() ran (see the guide)");
     }
 }
 
@@ -792,7 +792,7 @@ pub fn connect(client: *Client) ConnectError!void {
         const status = client.status;
         if (status == .disconnected) {
             client.status = if (retry) .reconnecting else .connecting;
-            if (std.debug.runtime_safety) client.home = client;
+            if (std.debug.runtime_safety) client.home.store(@intFromPtr(client), .monotonic);
         }
         client.mutex.unlock(io);
         switch (status) {
