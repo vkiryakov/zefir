@@ -95,17 +95,6 @@ const Payout = struct {
   or a Base58 decoding into 25 bytes and two SHA-256 hashes) and
   `v.ethereumAddress` (a Keccak-256 hash of 40 bytes, for mixed case only).
 
-Compile errors (`<Type>.field_rules.<field>` is the entry of your struct; the
-rule is named in snake case):
-
-```text
-validator: <Type>.field_rules.<field>: credit_card expects a string, field is u64
-validator: <Type>.field_rules.<field>: hash expects a string, field is [32]u8; [N]u8 is an array of numbers, not a string: use []const u8
-validator: <Type>.field_rules.<field>: btc_address expects a string, field is []const []const u8; use v.each(v.btcAddress(.mainnet))
-validator: <Type>.field_rules.<field>: hash must be called, e.g. v.hash(.sha256)
-validator: <Type>.field_rules.<field>: expected a rule, got the predicate isHash; use the rule v.hash(.sha256)
-```
-
 ## Predicates
 
 Each rule has a predicate that gives the same verdict, for `validateSelf`, a
@@ -136,19 +125,31 @@ const Withdrawal = struct {
 
 A UUID in the string form of RFC 9562.
 
-- **Field types:** a string; `""` fails; no precondition
-  ([common to all rules](#common-to-all-rules-on-this-page)).
+- **Field types:** a string; `?T` and `??T` of these.
 - **Parameters:** none.
 - **Passes when:** the string has 36 bytes, `-` at indexes 8, 13, 18 and 23,
   and hex digits (`0-9`, `a-f`, `A-F`, in any mix of case) elsewhere. The
   version and the variant are not checked, so the Nil (all `0`) and Max (all
   `f`) UUIDs pass. No braces, no `urn:uuid:` prefix, no 32-digit form.
+- **`""`:** fails.
+- **Precondition:** none.
 - **Code:** `validation.uuid`.
 - **Default message:** `must be a valid UUID`.
 - **Placeholders:** none.
 - **Predicate:** `v.isUuid(s)`.
+- **Complexity:** O(1): at most 36 bytes are read; allocates nothing.
 - **Deviations:** [D5](class_validator.md#deviations-from-validatorjs) (the
   version and the variant are not checked).
+
+Compile errors (`<Type>.field_rules.<field>` is the entry of your struct):
+
+```text
+validator: <Type>.field_rules.<field>: uuid expects a string, field is u128
+validator: <Type>.field_rules.<field>: uuid expects a string, field is [16]u8; [N]u8 is an array of numbers, not a string: use []const u8
+validator: <Type>.field_rules.<field>: uuid expects a string, field is []const []const u8; use v.each(v.uuid)
+```
+
+Examples:
 
 | Value | Result |
 | --- | --- |
@@ -164,17 +165,29 @@ A UUID in the string form of RFC 9562.
 
 A MongoDB ObjectId as text.
 
-- **Field types:** a string; `""` fails; no precondition
-  ([common to all rules](#common-to-all-rules-on-this-page)).
+- **Field types:** a string; `?T` and `??T` of these.
 - **Parameters:** none.
 - **Passes when:** the string is 24 hex digits of any case, as bson's
   `ObjectId.isValid` takes a string. No `0x` or `0h` prefix.
+- **`""`:** fails.
+- **Precondition:** none.
 - **Code:** `validation.mongo_id`.
 - **Default message:** `must be a valid MongoDB ObjectId`.
 - **Placeholders:** none.
 - **Predicate:** `v.isMongoId(s)`.
+- **Complexity:** O(1): at most 24 bytes are read; allocates nothing.
 - **Deviations:** [D35](class_validator.md#deviations-from-validatorjs) (a `0x`
   or `0h` prefix fails).
+
+Compile errors (`<Type>.field_rules.<field>` is the entry of your struct):
+
+```text
+validator: <Type>.field_rules.<field>: mongo_id expects a string, field is u96
+validator: <Type>.field_rules.<field>: mongo_id expects a string, field is [12]u8; [N]u8 is an array of numbers, not a string: use []const u8
+validator: <Type>.field_rules.<field>: mongo_id expects a string, field is []const []const u8; use v.each(v.mongoId)
+```
+
+Examples:
 
 | Value | Result |
 | --- | --- |
@@ -187,16 +200,28 @@ A MongoDB ObjectId as text.
 
 A Firebase push ID, the key that Firebase's `push()` generates.
 
-- **Field types:** a string; `""` fails; no precondition
-  ([common to all rules](#common-to-all-rules-on-this-page)).
+- **Field types:** a string; `?T` and `??T` of these.
 - **Parameters:** none.
 - **Passes when:** the string is 20 bytes of `-`, `0-9`, `A-Z`, `_` and `a-z`.
   The timestamp in its first 8 characters is not decoded.
+- **`""`:** fails.
+- **Precondition:** none.
 - **Code:** `validation.firebase_push_id`.
 - **Default message:** `must be a valid Firebase push ID`.
 - **Placeholders:** none.
 - **Predicate:** `v.isFirebasePushId(s)`.
+- **Complexity:** O(1): at most 20 bytes are read; allocates nothing.
 - **Deviations:** none.
+
+Compile errors (`<Type>.field_rules.<field>` is the entry of your struct):
+
+```text
+validator: <Type>.field_rules.<field>: firebase_push_id expects a string, field is u64
+validator: <Type>.field_rules.<field>: firebase_push_id expects a string, field is [20]u8; [N]u8 is an array of numbers, not a string: use []const u8
+validator: <Type>.field_rules.<field>: firebase_push_id expects a string, field is []const []const u8; use v.each(v.firebasePushId)
+```
+
+Examples:
 
 | Value | Result |
 | --- | --- |
@@ -209,8 +234,7 @@ A Firebase push ID, the key that Firebase's `push()` generates.
 
 A hex digest of a hash algorithm.
 
-- **Field types:** a string; `""` fails; no precondition
-  ([common to all rules](#common-to-all-rules-on-this-page)).
+- **Field types:** a string; `?T` and `??T` of these.
 - **Parameters:** `algorithm`, a tag of `v.HashAlgorithm` known at compile
   time: `.md4`, `.md5`, `.sha1`, `.sha256`, `.sha384`, `.sha512`, `.ripemd128`,
   `.ripemd160`, `.tiger128`, `.tiger160`, `.tiger192`, `.crc32` or `.crc32b`.
@@ -220,19 +244,35 @@ A hex digest of a hash algorithm.
   48 for `tiger192`; 64 for `sha256`; 96 for `sha384`; 128 for `sha512`. No `0x`
   prefix. Nothing is hashed: digests of the same length, such as md4 and md5,
   look alike.
+- **`""`:** fails.
+- **Precondition:** none.
 - **Code:** `validation.hash`.
 - **Default message:** `must be a valid {algorithm} hash`.
 - **Placeholders:** `{algorithm}`: the tag's name, such as `sha256`.
 - **Predicate:** `v.isHash(s, algorithm)`; the algorithm may be known at run
   time only.
+- **Complexity:** O(1): at most 128 bytes are read, for `.sha512`; allocates
+  nothing.
 - **Deviations:** none. The 13 algorithms and their lengths are those of
   validator.js; a later release may add tags, which breaks an exhaustive
   `switch` on `v.HashAlgorithm`.
+
+Compile errors (`<Type>.field_rules.<field>` is the entry of your struct):
+
+```text
+validator: <Type>.field_rules.<field>: hash expects a string, field is u256
+validator: <Type>.field_rules.<field>: hash expects a string, field is [32]u8; [N]u8 is an array of numbers, not a string: use []const u8
+validator: <Type>.field_rules.<field>: hash expects a string, field is []const []const u8; use v.each(v.hash(.sha256))
+validator: <Type>.field_rules.<field>: hash must be called, e.g. v.hash(.sha256)
+validator: <Type>.field_rules.<field>: expected a rule, got the predicate isHash; use the rule v.hash(.sha256)
+```
 
 Errors from Zig itself: `v.hash(.sha3_256)` gives
 `enum 'identifiers.HashAlgorithm' has no member named 'sha3_256'`, and
 `v.hash("sha256")`, a string as in class-validator, gives
 `expected type 'identifiers.HashAlgorithm', found '*const [6:0]u8'`.
+
+Examples:
 
 | Rule | Value | Result |
 | --- | --- | --- |
@@ -246,18 +286,30 @@ Errors from Zig itself: `v.hash(.sha3_256)` gives
 
 A payment card number.
 
-- **Field types:** a string; `""` fails; no precondition
-  ([common to all rules](#common-to-all-rules-on-this-page)).
+- **Field types:** a string; `?T` and `??T` of these.
 - **Parameters:** none.
 - **Passes when:** the string is 12 to 19 ASCII digits and its Luhn check digit
   (ISO/IEC 7812-1) holds. There is no table of issuers, so any prefix passes, a
   leading 0 included. Spaces and hyphens fail.
+- **`""`:** fails.
+- **Precondition:** none.
 - **Code:** `validation.credit_card`.
 - **Default message:** `must be a valid credit card number`.
 - **Placeholders:** none.
 - **Predicate:** `v.isCreditCard(s)`.
+- **Complexity:** O(1): at most 19 bytes are read; allocates nothing.
 - **Deviations:** [D46](class_validator.md#deviations-from-validatorjs) (no
   issuer table, 12-19 digits, no separators).
+
+Compile errors (`<Type>.field_rules.<field>` is the entry of your struct):
+
+```text
+validator: <Type>.field_rules.<field>: credit_card expects a string, field is u64
+validator: <Type>.field_rules.<field>: credit_card expects a string, field is [16]u8; [N]u8 is an array of numbers, not a string: use []const u8
+validator: <Type>.field_rules.<field>: credit_card expects a string, field is []const []const u8; use v.each(v.creditCard)
+```
+
+Examples:
 
 | Value | Result |
 | --- | --- |
@@ -272,17 +324,29 @@ A payment card number.
 
 An ISBN-10 or an ISBN-13, as `v.isbn10` and `v.isbn13` define them.
 
-- **Field types:** a string; `""` fails; no precondition
-  ([common to all rules](#common-to-all-rules-on-this-page)).
+- **Field types:** a string; `?T` and `??T` of these.
 - **Parameters:** none.
 - **Passes when:** `v.isbn10` or `v.isbn13` passes the string.
+- **`""`:** fails.
+- **Precondition:** none.
 - **Code:** `validation.isbn`.
 - **Default message:** `must be a valid ISBN`.
 - **Placeholders:** none.
 - **Predicate:** `v.isIsbn(s)`.
+- **Complexity:** O(1): at most 13 bytes are read; allocates nothing.
 - **Deviations:** [D47](class_validator.md#deviations-from-validatorjs) (no
   hyphens or spaces), [D48](class_validator.md#deviations-from-validatorjs)
   (the ISBN-13 prefix).
+
+Compile errors (`<Type>.field_rules.<field>` is the entry of your struct):
+
+```text
+validator: <Type>.field_rules.<field>: isbn expects a string, field is u64
+validator: <Type>.field_rules.<field>: isbn expects a string, field is [13]u8; [N]u8 is an array of numbers, not a string: use []const u8
+validator: <Type>.field_rules.<field>: isbn expects a string, field is []const []const u8; use v.each(v.isbn)
+```
+
+Examples:
 
 | Value | Result |
 | --- | --- |
@@ -295,18 +359,30 @@ An ISBN-10 or an ISBN-13, as `v.isbn10` and `v.isbn13` define them.
 
 An ISBN-10.
 
-- **Field types:** a string; `""` fails; no precondition
-  ([common to all rules](#common-to-all-rules-on-this-page)).
+- **Field types:** a string; `?T` and `??T` of these.
 - **Parameters:** none.
 - **Passes when:** the string is nine digits and a check character, a digit or
   an upper-case `X` for 10, and the sum of each value times its position (1 to
   10) is a multiple of 11. `X` anywhere else fails; no hyphens or spaces.
+- **`""`:** fails.
+- **Precondition:** none.
 - **Code:** `validation.isbn10`.
 - **Default message:** `must be a valid ISBN-10`.
 - **Placeholders:** none.
 - **Predicate:** `v.isIsbn10(s)`.
+- **Complexity:** O(1): at most 10 bytes are read; allocates nothing.
 - **Deviations:** [D47](class_validator.md#deviations-from-validatorjs) (no
   hyphens or spaces, an upper-case `X`).
+
+Compile errors (`<Type>.field_rules.<field>` is the entry of your struct):
+
+```text
+validator: <Type>.field_rules.<field>: isbn10 expects a string, field is u64
+validator: <Type>.field_rules.<field>: isbn10 expects a string, field is [10]u8; [N]u8 is an array of numbers, not a string: use []const u8
+validator: <Type>.field_rules.<field>: isbn10 expects a string, field is []const []const u8; use v.each(v.isbn10)
+```
+
+Examples:
 
 | Value | Result |
 | --- | --- |
@@ -319,20 +395,32 @@ An ISBN-10.
 
 An ISBN-13.
 
-- **Field types:** a string; `""` fails; no precondition
-  ([common to all rules](#common-to-all-rules-on-this-page)).
+- **Field types:** a string; `?T` and `??T` of these.
 - **Parameters:** none.
 - **Passes when:** the string is 13 digits with the GS1 check digit (weights 1
   and 3, alternating from the left), starting with 978, or with 979 and a digit
   other than 0 (979-0 is the range of ISMN, the numbers of printed music). No
   hyphens or spaces.
+- **`""`:** fails.
+- **Precondition:** none.
 - **Code:** `validation.isbn13`.
 - **Default message:** `must be a valid ISBN-13`.
 - **Placeholders:** none.
 - **Predicate:** `v.isIsbn13(s)`.
+- **Complexity:** O(1): at most 13 bytes are read; allocates nothing.
 - **Deviations:** [D47](class_validator.md#deviations-from-validatorjs) (no
   hyphens or spaces), [D48](class_validator.md#deviations-from-validatorjs)
   (the prefix).
+
+Compile errors (`<Type>.field_rules.<field>` is the entry of your struct):
+
+```text
+validator: <Type>.field_rules.<field>: isbn13 expects a string, field is u64
+validator: <Type>.field_rules.<field>: isbn13 expects a string, field is [13]u8; [N]u8 is an array of numbers, not a string: use []const u8
+validator: <Type>.field_rules.<field>: isbn13 expects a string, field is []const []const u8; use v.each(v.isbn13)
+```
+
+Examples:
 
 | Value | Result |
 | --- | --- |
@@ -345,19 +433,31 @@ An ISBN-13.
 
 An ISSN in its printed form `NNNN-NNNC` (ISO 3297).
 
-- **Field types:** a string; `""` fails; no precondition
-  ([common to all rules](#common-to-all-rules-on-this-page)).
+- **Field types:** a string; `?T` and `??T` of these.
 - **Parameters:** none.
 - **Passes when:** the string has 9 bytes: four digits, a hyphen, three digits
   and a check character, a digit or an upper-case `X` for 10; the eight values,
   weighted 8 down to 1, sum to a multiple of 11.
+- **`""`:** fails.
+- **Precondition:** none.
 - **Code:** `validation.issn`.
 - **Default message:** `must be a valid ISSN`.
 - **Placeholders:** none.
 - **Predicate:** `v.isIssn(s)`.
+- **Complexity:** O(1): at most 9 bytes are read; allocates nothing.
 - **Deviations:** [D47](class_validator.md#deviations-from-validatorjs),
   [D49](class_validator.md#deviations-from-validatorjs) (the hyphen is required,
   the `X` is upper case).
+
+Compile errors (`<Type>.field_rules.<field>` is the entry of your struct):
+
+```text
+validator: <Type>.field_rules.<field>: issn expects a string, field is u32
+validator: <Type>.field_rules.<field>: issn expects a string, field is [9]u8; [N]u8 is an array of numbers, not a string: use []const u8
+validator: <Type>.field_rules.<field>: issn expects a string, field is []const []const u8; use v.each(v.issn)
+```
+
+Examples:
 
 | Value | Result |
 | --- | --- |
@@ -370,18 +470,30 @@ An ISSN in its printed form `NNNN-NNNC` (ISO 3297).
 
 An EAN-8, EAN-13 or GTIN-14 barcode number.
 
-- **Field types:** a string; `""` fails; no precondition
-  ([common to all rules](#common-to-all-rules-on-this-page)).
+- **Field types:** a string; `?T` and `??T` of these.
 - **Parameters:** none.
 - **Passes when:** the string is 8, 13 or 14 digits with the GS1 check digit:
   from the right, the check digit has weight 1, then 3, 1, 3, …, and the sum is
   a multiple of 10. A 12-digit UPC-A (GTIN-12) fails, as in validator.js: write
   it as an EAN-13 with a leading 0.
+- **`""`:** fails.
+- **Precondition:** none.
 - **Code:** `validation.ean`.
 - **Default message:** `must be a valid EAN`.
 - **Placeholders:** none.
 - **Predicate:** `v.isEan(s)`.
+- **Complexity:** O(1): at most 14 bytes are read; allocates nothing.
 - **Deviations:** none.
+
+Compile errors (`<Type>.field_rules.<field>` is the entry of your struct):
+
+```text
+validator: <Type>.field_rules.<field>: ean expects a string, field is u64
+validator: <Type>.field_rules.<field>: ean expects a string, field is [13]u8; [N]u8 is an array of numbers, not a string: use []const u8
+validator: <Type>.field_rules.<field>: ean expects a string, field is []const []const u8; use v.each(v.ean)
+```
+
+Examples:
 
 | Value | Result |
 | --- | --- |
@@ -395,18 +507,30 @@ An EAN-8, EAN-13 or GTIN-14 barcode number.
 
 An ISIN, the identifier of a security (ISO 6166).
 
-- **Field types:** a string; `""` fails; no precondition
-  ([common to all rules](#common-to-all-rules-on-this-page)).
+- **Field types:** a string; `?T` and `??T` of these.
 - **Parameters:** none.
 - **Passes when:** the string has 12 bytes: two upper-case letters, nine
   upper-case letters or digits and a check digit. With each letter written as
   its two-digit value (`A` = 10 … `Z` = 35), the digits pass the Luhn check. The
   prefix is not looked up: `XS` passes.
+- **`""`:** fails.
+- **Precondition:** none.
 - **Code:** `validation.isin`.
 - **Default message:** `must be a valid ISIN`.
 - **Placeholders:** none.
 - **Predicate:** `v.isIsin(s)`.
+- **Complexity:** O(1): at most 12 bytes are read; allocates nothing.
 - **Deviations:** none.
+
+Compile errors (`<Type>.field_rules.<field>` is the entry of your struct):
+
+```text
+validator: <Type>.field_rules.<field>: isin expects a string, field is u64
+validator: <Type>.field_rules.<field>: isin expects a string, field is [12]u8; [N]u8 is an array of numbers, not a string: use []const u8
+validator: <Type>.field_rules.<field>: isin expects a string, field is []const []const u8; use v.each(v.isin)
+```
+
+Examples:
 
 | Value | Result |
 | --- | --- |
@@ -419,18 +543,30 @@ An ISIN, the identifier of a security (ISO 6166).
 
 An ISRC, the code of a sound or video recording (ISO 3901).
 
-- **Field types:** a string; `""` fails; no precondition
-  ([common to all rules](#common-to-all-rules-on-this-page)).
+- **Field types:** a string; `?T` and `??T` of these.
 - **Parameters:** none.
 - **Passes when:** the string has 12 bytes: two upper-case letters for the
   country, three upper-case letters or digits for the registrant, then seven
   digits for the year and the recording. The country is not looked up (`QM`
   passes); an ISRC has no check digit. The printed form with hyphens fails.
+- **`""`:** fails.
+- **Precondition:** none.
 - **Code:** `validation.isrc`.
 - **Default message:** `must be a valid ISRC`.
 - **Placeholders:** none.
 - **Predicate:** `v.isIsrc(s)`.
+- **Complexity:** O(1): at most 12 bytes are read; allocates nothing.
 - **Deviations:** none.
+
+Compile errors (`<Type>.field_rules.<field>` is the entry of your struct):
+
+```text
+validator: <Type>.field_rules.<field>: isrc expects a string, field is u64
+validator: <Type>.field_rules.<field>: isrc expects a string, field is [12]u8; [N]u8 is an array of numbers, not a string: use []const u8
+validator: <Type>.field_rules.<field>: isrc expects a string, field is []const []const u8; use v.each(v.isrc)
+```
+
+Examples:
 
 | Value | Result |
 | --- | --- |
@@ -443,20 +579,32 @@ An ISRC, the code of a sound or video recording (ISO 3901).
 
 A BIC, the code of a bank (ISO 9362).
 
-- **Field types:** a string; `""` fails; no precondition
-  ([common to all rules](#common-to-all-rules-on-this-page)).
+- **Field types:** a string; `?T` and `??T` of these.
 - **Parameters:** none.
 - **Passes when:** the string has 8 or 11 bytes: four upper-case letters for the
   institution, two for the country, two upper-case letters or digits for the
   location and, in 11 bytes, three more for the branch. The country is not looked
   up. Upper case only, no separators.
+- **`""`:** fails.
+- **Precondition:** none.
 - **Code:** `validation.bic`.
 - **Default message:** `must be a valid BIC`.
 - **Placeholders:** none.
 - **Predicate:** `v.isBic(s)`.
+- **Complexity:** O(1): at most 11 bytes are read; allocates nothing.
 - **Deviations:** [D47](class_validator.md#deviations-from-validatorjs) (upper
   case only), [D50](class_validator.md#deviations-from-validatorjs) (the country
   is not looked up).
+
+Compile errors (`<Type>.field_rules.<field>` is the entry of your struct):
+
+```text
+validator: <Type>.field_rules.<field>: bic expects a string, field is u64
+validator: <Type>.field_rules.<field>: bic expects a string, field is [11]u8; [N]u8 is an array of numbers, not a string: use []const u8
+validator: <Type>.field_rules.<field>: bic expects a string, field is []const []const u8; use v.each(v.bic)
+```
+
+Examples:
 
 | Value | Result |
 | --- | --- |
@@ -471,8 +619,7 @@ A BIC, the code of a bank (ISO 9362).
 
 An IBAN in its electronic form (ISO 13616).
 
-- **Field types:** a string; `""` fails; no precondition
-  ([common to all rules](#common-to-all-rules-on-this-page)).
+- **Field types:** a string; `?T` and `??T` of these.
 - **Parameters:** none.
 - **Passes when:** the string has 15 to 34 bytes: two upper-case letters for the
   country, two check digits from 02 to 98, then upper-case letters and digits;
@@ -481,13 +628,26 @@ An IBAN in its electronic form (ISO 13616).
   97-10). Check digits 00, 01 and 99 fail: they equal 97, 98 and 02 and would
   give an account a second spelling. The country is not looked up and the length
   is not checked per country. Upper case only, no spaces.
+- **`""`:** fails.
+- **Precondition:** none.
 - **Code:** `validation.iban`.
 - **Default message:** `must be a valid IBAN`.
 - **Placeholders:** none.
 - **Predicate:** `v.isIban(s)`.
+- **Complexity:** O(1): at most 34 bytes are read; allocates nothing.
 - **Deviations:** [D47](class_validator.md#deviations-from-validatorjs) (upper
   case, no spaces), [D51](class_validator.md#deviations-from-validatorjs) (no
   country table, check digits 02-98).
+
+Compile errors (`<Type>.field_rules.<field>` is the entry of your struct):
+
+```text
+validator: <Type>.field_rules.<field>: iban expects a string, field is u128
+validator: <Type>.field_rules.<field>: iban expects a string, field is [34]u8; [N]u8 is an array of numbers, not a string: use []const u8
+validator: <Type>.field_rules.<field>: iban expects a string, field is []const []const u8; use v.each(v.iban)
+```
+
+Examples:
 
 | Value | Result |
 | --- | --- |
@@ -502,8 +662,7 @@ An IBAN in its electronic form (ISO 13616).
 
 A Bitcoin address of a network, with its checksum verified.
 
-- **Field types:** a string; `""` fails; no precondition
-  ([common to all rules](#common-to-all-rules-on-this-page)).
+- **Field types:** a string; `?T` and `??T` of these.
 - **Parameters:** `network`, a tag of `v.BtcNetwork` known at compile time:
   `.mainnet`, `.testnet` or `.any` (mainnet or testnet). `.testnet` also takes
   the Base58 addresses of signet and regtest, which share its version bytes, and
@@ -519,17 +678,34 @@ A Bitcoin address of a network, with its checksum verified.
     that decode to exactly 25 bytes, whose last 4 bytes are the first 4 of
     SHA-256(SHA-256(the first 21)), and whose first byte, the version, is 0x00
     or 0x05 on mainnet and 0x6f or 0xc4 on testnet.
+- **`""`:** fails.
+- **Precondition:** none.
 - **Code:** `validation.btc_address`.
 - **Default message:** `must be a valid Bitcoin address`; for `.testnet`
   `must be a valid Bitcoin testnet address`.
 - **Placeholders:** `{network}`: the tag's name, `mainnet`, `testnet` or `any`.
 - **Predicate:** `v.isBtcAddress(s, network)`; the network may be known at run
   time only.
+- **Complexity:** O(1): a segwit address, at most 90 bytes, takes one Bech32
+  checksum; a Base58 address, at most 35 bytes, is decoded into 25 bytes and
+  hashed twice with SHA-256. Allocates nothing.
 - **Deviations:** [D52](class_validator.md#deviations-from-validatorjs)
   (checksums are verified, the network is a parameter).
 
+Compile errors (`<Type>.field_rules.<field>` is the entry of your struct):
+
+```text
+validator: <Type>.field_rules.<field>: btc_address expects a string, field is u160
+validator: <Type>.field_rules.<field>: btc_address expects a string, field is [25]u8; [N]u8 is an array of numbers, not a string: use []const u8
+validator: <Type>.field_rules.<field>: btc_address expects a string, field is []const []const u8; use v.each(v.btcAddress(.mainnet))
+validator: <Type>.field_rules.<field>: btcAddress must be called, e.g. v.btcAddress(.mainnet)
+validator: <Type>.field_rules.<field>: expected a rule, got the predicate isBtcAddress; use the rule v.btcAddress(.mainnet)
+```
+
 Errors from Zig itself: `v.btcAddress(.regtest)` gives
 `enum 'identifiers.BtcNetwork' has no member named 'regtest'`.
+
+Examples:
 
 | Rule | Value | Result |
 | --- | --- | --- |
@@ -546,20 +722,34 @@ Errors from Zig itself: `v.btcAddress(.regtest)` gives
 
 An Ethereum address.
 
-- **Field types:** a string; `""` fails; no precondition
-  ([common to all rules](#common-to-all-rules-on-this-page)).
+- **Field types:** a string; `?T` and `??T` of these.
 - **Parameters:** none.
 - **Passes when:** the string is `0x` (with a lower-case `x`) and 40 hex digits.
   Digits whose letters are all lower case or all upper case carry no checksum
   and pass. In mixed case they follow the EIP-55 checksum: a letter is upper
   case exactly when the matching hex digit of the Keccak-256 hash of the 40
   digits in lower case is 8 or more.
+- **`""`:** fails.
+- **Precondition:** none.
 - **Code:** `validation.ethereum_address`.
 - **Default message:** `must be a valid Ethereum address`.
 - **Placeholders:** none.
 - **Predicate:** `v.isEthereumAddress(s)`.
+- **Complexity:** O(1): at most 42 bytes are read, and the 40 digits are
+  hashed with Keccak-256 when their letters mix upper and lower case.
+  Allocates nothing.
 - **Deviations:** [D53](class_validator.md#deviations-from-validatorjs) (the
   checksum is verified, `0X` fails).
+
+Compile errors (`<Type>.field_rules.<field>` is the entry of your struct):
+
+```text
+validator: <Type>.field_rules.<field>: ethereum_address expects a string, field is u160
+validator: <Type>.field_rules.<field>: ethereum_address expects a string, field is [20]u8; [N]u8 is an array of numbers, not a string: use []const u8
+validator: <Type>.field_rules.<field>: ethereum_address expects a string, field is []const []const u8; use v.each(v.ethereumAddress)
+```
+
+Examples:
 
 | Value | Result |
 | --- | --- |
