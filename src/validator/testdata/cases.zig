@@ -40,6 +40,8 @@ pub const test_files = [_][]const u8{
     "src/validator/testdata/messages_test.zig",
     "src/validator/testdata/catalog_test.zig",
     "src/validator/examples/pages_test.zig",
+    "src/validator/examples/all_rules.zig",
+    "src/validator/examples/all_rules_test.zig",
 };
 
 /// Tests built with ReleaseSafe whatever -Doptimize says, for behaviour that
@@ -72,31 +74,38 @@ pub const vector_files = [_]VectorFile{
     .{ .name = "lists", .rules = &.{ "minItems", "maxItems", "each", "custom" } },
 };
 
-/// A compiled example of src/validator/examples/, by file stem: a program
-/// must print exactly `stdout`, a test (`stdout` null) must pass, and
-/// README.md shows each file and each output verbatim (readme_test.zig).
-pub const Example = struct { name: []const u8, stdout: ?[]const u8 = null };
+/// A compiled example of src/validator/examples/, by file stem: a test
+/// (`records` null) must pass, and a program must log `records`. A program
+/// logs with zefir-log as text, one line per record, and each line starts
+/// with a timestamp, the only part that changes from run to run: `records`
+/// holds the lines without it. build.zig checks that stdout has each line of
+/// `records` after a timestamp, and README.md must show each file verbatim
+/// and a run of each program, `$ zig build run` and its records with sample
+/// timestamps (readme_test.zig).
+pub const Example = struct { name: []const u8, records: ?[]const u8 = null };
 
 pub const examples = [_]Example{
-    .{ .name = "getting_started", .stdout = "tags[1]: must not be empty (validation.not_empty)\n" },
+    .{ .name = "overview", .records = "WARN  Invalid sign-up field=seats code=validation.range reason=\"must be from 1 to 500\"\n" },
+    .{ .name = "getting_started", .records = "WARN  Invalid order field=items[1].quantity code=validation.range reason=\"must be from 1 to 99\"\n" },
     .{
         .name = "validate_self",
-        .stdout =
-        \\bookings[0]: must not be longer than 30 days (bookings.too_long)
-        \\bookings[1].end_day: must not be before the start day (bookings.end_before_start)
-        \\bookings[2].guests: must be greater than 0 (validation.positive)
+        .records =
+        \\WARN  Invalid trip field=bookings[0] code=bookings.too_many_guests reason="must have a bed for every guest"
+        \\WARN  Invalid trip field=bookings[1].check_out code=bookings.check_out_too_early reason="must be after the check-in date"
+        \\WARN  Invalid trip field=bookings[2].guests code=validation.positive reason="must be greater than 0"
         \\
         ,
     },
     .{
         .name = "with_message",
-        .stdout =
-        \\name: заполните поле (validation.not_empty)
-        \\age: age must be from 18 to 120 (validation.range)
-        \\role: role must be one of: admin, editor (validation.one_of)
-        \\tags: не больше 2 тегов (validation.max_items)
-        \\height: must be a finite number (validation.finite)
-        \\weight: weight must be a number (validation.finite)
+        .records =
+        \\WARN  Invalid profile field=name code=validation.not_empty reason="please fill in this field"
+        \\WARN  Invalid profile field=age code=validation.range reason="age must be from 18 to 120"
+        \\WARN  Invalid profile field=role code=validation.one_of reason="role must be one of: admin, editor"
+        \\WARN  Invalid profile field=languages code=validation.max_items reason="at most 2 languages"
+        \\WARN  Invalid profile field=website code=validation.http_url reason="website must be a link such as https://example.com"
+        \\WARN  Invalid profile field=height code=validation.finite reason="must be a finite number"
+        \\WARN  Invalid profile field=weight code=validation.finite reason="weight must be a number"
         \\
         ,
     },
