@@ -1246,3 +1246,72 @@ test "a response larger than max_bytes on its own is dropped before it is alloca
     client.close();
     try server.await(io);
 }
+
+/// After the handshake, answers the first request with "no responders",
+/// then reads nothing until `release` is set: the client's writes back up.
+fn serveOneThenStall(io: Io, listener: *net.Server, release: *Io.Event) anyerror!void {
+    var peer: FakeServer.Peer = undefined;
+    try peer.accept(io, listener);
+    defer peer.close();
+    try handshake(&peer);
+    var sid: u64 = 0;
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(testing.allocator);
+    while (try peer.nextLine()) |line| {
+        var args = std.mem.tokenizeScalar(u8, line, ' ');
+        const op = args.next() orelse continue;
+        if (std.mem.eql(u8, op, "SUB")) {
+            _ = args.next();
+            sid = try std.fmt.parseInt(u64, args.rest(), 10);
+        } else if (std.mem.eql(u8, op, "PUB")) {
+            const subject = args.next() orelse return error.TestBadPub;
+            const reply = args.next() orelse return error.TestBadPub;
+            const size = try std.fmt.parseInt(usize, args.rest(), 10);
+            try body.resize(testing.allocator, size + 2);
+            try peer.readExact(body.items);
+            var buffer: [256]u8 = undefined;
+            const block_len = 32 + subject.len;
+            try peer.send(try std.fmt.bufPrint(&buffer, "HMSG {s} {d} {d} {d}\r\nNATS/1.0 503\r\nNats-Subject: {s}\r\n\r\n\r\n", .{ reply, sid, block_len, block_len, subject }));
+            break;
+        }
+    }
+    try awaitEvent(io, release);
+    _ = try peer.readToEnd();
+}
+
+test "a request whose PUB waits for room in the outbound queue ends at its deadline" {
+    const io = testing.io;
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var release: Io.Event = .unset;
+    var server = try io.concurrent(serveOneThenStall, .{ io, &listener, &release });
+    defer {
+        release.set(io);
+        server.cancel(io) catch {};
+    }
+    var url: [64]u8 = undefined;
+    var client: Client = try .init(testing.allocator, io, .{
+        .servers = &.{try FakeServer.url(&listener, &url)},
+        .limits = .{ .outbound_bytes = 1 },
+    });
+    defer client.deinit();
+    try client.connect();
+    // The first request makes the inbox subscription; then the server
+    // stops reading.
+    try testing.expectError(error.NoResponders, client.request("nobody.home", "?", five_seconds));
+    const payload = try testing.allocator.alloc(u8, 1024 * 1024);
+    defer testing.allocator.free(payload);
+    @memset(payload, 'b');
+    var published: std.atomic.Value(u32) = .init(0);
+    var publisher = try io.concurrent(publishUntilError, .{ &client, payload, &published });
+    defer publisher.cancel(io) catch {};
+    try awaitStuck(&client, &published);
+
+    // The inbox is in place: this request waits for room with its PUB.
+    const start = Io.Clock.awake.now(io);
+    try testing.expectError(error.Timeout, client.request("echo.x", "?", within(100)));
+    const took = elapsedSince(io, start).toMilliseconds();
+    try testing.expect(took >= 100 and took < 2000);
+    try testing.expectEqual(0, client.inbox.pendingCount(io));
+    try testing.expect(client.isConnected());
+}
