@@ -16,9 +16,6 @@ const closed_bit: u64 = 1 << 63;
 /// A slot starts with its sequence number (u64) and the record's length
 /// (u32); the record follows.
 const header_bytes = 16;
-/// How long a blocked producer or the sleeping consumer waits before it
-/// looks again by itself: a safety net, wake-ups do not rely on it.
-const recheck: std.Io.Timeout = .{ .duration = .{ .raw = .fromMilliseconds(100), .clock = .awake } };
 
 slots: []align(std.atomic.cache_line) u8,
 slot_size: usize,
@@ -37,6 +34,10 @@ consumer_sleeping: std.atomic.Value(u32) align(std.atomic.cache_line) = .init(0)
 /// Bumped each time the consumer frees slots; blocked producers wait on it.
 space_epoch: std.atomic.Value(u32) align(std.atomic.cache_line) = .init(0),
 space_waiters: std.atomic.Value(u32) = .init(0),
+/// How long a blocked producer waits before it looks again by itself: a
+/// safety net, wake-ups do not rely on it. The lost wake-up detector sets
+/// it long, so that a missed wake-up stands out from a slow thread.
+recheck: std.Io.Timeout = .{ .duration = .{ .raw = .fromMilliseconds(100), .clock = .awake } },
 
 /// A queue of `capacity` slots, each for a record of up to
 /// `max_record_bytes`. `capacity` is a power of two and at least 2: with
@@ -136,7 +137,7 @@ pub fn pushBlocking(q: *Queue, bytes: []const u8) error{Closed}!void {
     _ = q.space_waiters.fetchAdd(1, .seq_cst);
     defer _ = q.space_waiters.fetchSub(1, .seq_cst);
     // `pop` and `close` bump `space_epoch`.
-    return waitUntil(q.io, &q.space_epoch, recheck, Room{ .q = q, .bytes = bytes });
+    return waitUntil(q.io, &q.space_epoch, q.recheck, Room{ .q = q, .bytes = bytes });
 }
 
 /// What `pushBlocking` waits for: a slot that takes its record, or the
@@ -568,8 +569,10 @@ test "a producer stopped between reserving and publishing holds back the records
     try testing.expectEqualStrings("a\nb\nc\n", out.written());
 }
 
-/// How long a woken thread may take before its wake-up counts as lost.
-const patience_ms = 500;
+/// How long a detector waits before it calls a wake-up lost: far longer
+/// than a thread of a busy CI runner stands still under TSan, so only a
+/// wake-up that never came lasts that long.
+const patience_ms = 5000;
 
 /// Takes `rounds` records one at a time, sleeping whenever none is there,
 /// and counts the sleeps that ran out with a record waiting: lost
@@ -629,8 +632,9 @@ const Pusher = struct {
     rounds: usize,
     /// Pushes done so far.
     pushed: std.atomic.Value(usize) = .init(0),
-    /// Pushes that waited as long as the 100 ms recheck: the room made for
-    /// them did not wake them. The pusher stops at the first.
+    /// Pushes that waited nearly the whole recheck, which the test sets to
+    /// `patience_ms`: the room made for them did not wake them. The pusher
+    /// stops at the first.
     lost: std.atomic.Value(u32) = .init(0),
     done: std.atomic.Value(bool) = .init(false),
 
@@ -640,7 +644,7 @@ const Pusher = struct {
             const start = std.Io.Clock.awake.now(p.q.io);
             p.q.pushBlocking("x") catch return;
             const waited = start.durationTo(std.Io.Clock.awake.now(p.q.io));
-            if (waited.nanoseconds >= 90 * std.time.ns_per_ms) {
+            if (waited.nanoseconds >= patience_ms * 9 / 10 * std.time.ns_per_ms) {
                 _ = p.lost.fetchAdd(1, .seq_cst);
                 return;
             }
@@ -653,6 +657,7 @@ test "lost wake-up detector: a producer that waits for room is woken as soon as 
     var threaded: std.Io.Threaded = .init_single_threaded;
     var q = try Queue.init(testing.allocator, 2, 64, threaded.io());
     defer q.deinit(testing.allocator);
+    q.recheck = .{ .duration = .{ .raw = .fromMilliseconds(patience_ms), .clock = .awake } };
     try q.tryPush("x");
     try q.tryPush("x"); // full: every push below waits for room
     var pusher: Pusher = .{ .q = &q, .rounds = 500 };
