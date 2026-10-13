@@ -29,8 +29,8 @@ std.log.info("{s}: {s}", .{ msg.subject, msg.payload });
   wildcards and queue groups, request/reply through one shared inbox,
   scatter and gather, drain, events and statistics.
 - **Bounded memory.** Every queue has a limit: what does not fit is dropped
-  and counted, or waits for room. Nothing grows without bound, and
-  nothing is lost without a count.
+  and counted, or waits for room. Nothing grows without bound, and while
+  the client runs, nothing is lost without a count.
 - **Survives the network.** When the connection drops, the client
   reconnects to the same server or another one of the cluster, subscribes
   again, and sends what waited. Nothing is ever sent twice.
@@ -456,9 +456,10 @@ defer msg.deinit();
 ```
 
 `next` returns null once the subscription has ended normally: after
-`unsubscribe()`, after `max_messages`, or at the end of a drain. After
-`close()` it returns `ConnectionClosed`. One task at a time may wait in
-`next`; a second one gets `ConcurrentReceive`. Any task may call
+`unsubscribe()`, after `max_messages`, or at the end of a drain. Once the
+client has closed, it returns `ConnectionClosed` at once, and the messages
+still waiting in the subscription are freed unread. One task at a time may
+wait in `next`; a second one gets `ConcurrentReceive`. Any task may call
 `unsubscribe()`.
 
 The subscription options:
@@ -817,7 +818,9 @@ stream going. The first response being a "no responders" status gives
 Every queue in the client has a limit, so a burst, a slow reader or a
 server that stops reading never makes the client grow without bound. When
 something does not fit, the client either waits for room or drops and
-counts; it never loses a message silently.
+counts; while it runs, it never loses a message silently. When it closes,
+what its subscriptions still hold goes with it, see
+[What happens to the data](#what-happens-to-the-data).
 
 > [!WARNING]
 > **The subscription limits are much smaller than nats.go's.** A
@@ -900,14 +903,15 @@ message in flight is counted, never guessed.
 stateDiagram-v2
     [*] --> disconnected: init()
     disconnected --> connecting: connect()
+    disconnected --> reconnecting: connect() with retry_initial_connect
     connecting --> connected: a server took it
     connecting --> closed: none did
     connected --> reconnecting: connection lost
     reconnecting --> connected: back, subscriptions restored
-    reconnecting --> closed: gave up, or close()
+    reconnecting --> closed: gave up, close() or drain()
     connected --> draining: drain()
-    draining --> closed: done, or out of time
-    connected --> closed: close()
+    draining --> closed: done, out of time, or connection lost
+    connected --> closed: close(), or connection lost with reconnect off
     closed --> [*]: deinit()
 ```
 
@@ -968,6 +972,15 @@ flowchart TD
 - **Requests.** Every request waiting for a reply fails with
   `Disconnected` at once, and its message is not sent later: otherwise a
   service could act on a request whose caller was already told it failed.
+- **Received, not read yet.** Messages waiting in a subscription stay
+  there while the client reconnects, and `next()` hands them out. When
+  the client closes instead, whether by `close()`, with
+  `reconnect.enabled = false`, after `max_attempts`, after refused
+  credentials, or because the connection was lost during a drain, `next()`
+  returns `ConnectionClosed` at once, and what the subscription still held
+  is freed unread. No counter or event counts these messages: to keep
+  them, read every subscription to its end before the client closes, as
+  [drain](#drain) does.
 
 While the client reconnects:
 
@@ -999,12 +1012,15 @@ millisecond.
 
 - It goes round the servers: those you listed and those the cluster
   announced, in random order unless `randomize_servers = false`.
-- A connection that lasted less than `max_delay` counts as a failed
-  attempt: a server that accepts and drops every connection is tried again
-  after growing waits, never in a tight loop.
+- A connection that lasted less than `max_delay` sets the pace as a
+  failed attempt does: a server that accepts and drops every connection
+  is tried again after growing waits, never in a tight loop.
 - `reconnect.max_attempts` (null: forever) gives up after that many
-  failures in a row; the client then closes with reason
-  `reconnect_failed`.
+  attempts in a row that did not connect; the client then closes with
+  reason `reconnect_failed`. Every connection that gets through the
+  handshake starts the count again, however short it was, so a server
+  that keeps dropping the client right after the handshake is tried
+  forever, with waits that grow up to `max_delay`.
 - A server going away gracefully (lame duck mode, `ldm` in its INFO) is
   left at once for another server of the pool, with a `lame_duck` event.
 - `reconnect.enabled = false` closes the client when the connection drops.
@@ -1034,7 +1050,8 @@ millisecond.
   server whole: it counts as dropped.
 - `close()` counts what never went out in `dropped_messages`, and what was
   written but not confirmed in `uncertain_outbound_frames`, as a lost
-  connection does.
+  connection does. What the subscriptions still hold is freed unread, and
+  not counted.
 - The servers announced by a cluster (`connect_urls` in INFO) join the
   pool, up to 64 servers in all; they leave it when the cluster stops
   announcing them, the current one aside. `ignore_discovered_servers`
@@ -1077,7 +1094,8 @@ sequenceDiagram
 
 `drain(.{})` gives it 30 seconds; at the deadline it closes anyway and
 returns `Timeout`. A connection lost during a drain closes the client too,
-with `Disconnected`. From [zio_app.zig](zio_app.zig):
+with `Disconnected`, and what the subscriptions still held is freed unread,
+as with `close()`. From [zio_app.zig](zio_app.zig):
 
 ```zig
 app_log.info("Stopping", .{});
@@ -1180,7 +1198,7 @@ std.log.info("in {d}, out {d}, dropped {d}, uncertain {d}, reconnects {d}", .{
 | `pending_subscription_bytes`        | what the subscriptions hold for `next()`                                      |
 | `reconnects`                        | connections made again after one was lost                                     |
 | `request_timeouts`, `no_responders` | requests that ended so                                                        |
-| `dropped_messages`                  | incoming messages dropped, and publishes never sent                           |
+| `dropped_messages`                  | incoming messages dropped, and publishes never sent; not those freed at close |
 | `uncertain_outbound_frames`         | messages written to a connection lost before the server confirmed them        |
 | `late_responses`                    | replies that came after their request ended                                   |
 | `dropped_events`                    | events the full queue dropped                                                 |
