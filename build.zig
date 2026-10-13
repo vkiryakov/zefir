@@ -208,6 +208,34 @@ pub fn build(b: *std.Build) void {
         test_log.dependOn(&run.step);
     }
 
+    // nats panic program: a client copied after connect() panics in safe
+    // builds. The program must print the panic message and end in its own
+    // panic handler, which exits with code 3 instead of aborting. It gets
+    // its own Debug copy of nats, whatever -Doptimize says.
+    const panic_nats = b.createModule(.{
+        .root_source_file = b.path("src/nats/root.zig"),
+        .target = target,
+        .optimize = .Debug,
+    });
+    panic_nats.addOptions("build_options", nats_options);
+    const moved_client = b.addExecutable(.{
+        .name = "nats-panic-moved-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/nats/testdata/panic/moved_client.zig"),
+            .target = target,
+            .optimize = .Debug,
+            .imports = &.{
+                .{ .name = "nats", .module = panic_nats },
+            },
+        }),
+    });
+    const run_moved_client = b.addRunArtifact(moved_client);
+    run_moved_client.expectStdErrMatch("panic: nats.Client moved after connect(): keep it where connect() ran (see the guide)");
+    // expectStdErrMatch accepts any exit: only the panic handler exits
+    // with 3, so a program that printed the text and returned fails.
+    run_moved_client.expectExitCode(3);
+    test_nats.dependOn(&run_moved_client.step);
+
     // log compile errors: each test of the file must fail to compile with
     // the message next to its name. The filter compiles one test at a time;
     // the message must be the end of an error line.

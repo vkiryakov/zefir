@@ -9,7 +9,9 @@
 //! ```
 //!
 //! `connect()` starts the client's tasks, which keep a pointer to it: from
-//! then on the client must stay where it is, so do not move or copy it.
+//! then on the client must stay where it is, so do not move or copy it. In
+//! safe builds (Debug, ReleaseSafe) a method called on a moved client
+//! panics and says so.
 //! Every method may be called from any task at the same time. The
 //! allocator must be thread-safe. The `io` needs real concurrency, such as
 //! `std.Io.Threaded` or zio; without it `connect()` fails with
@@ -119,6 +121,19 @@ server_headers: bool = false,
 max_payload: u64 = 0,
 /// `deinit` has run.
 freed: bool = false,
+/// Where `connect()` ran, in safe builds: a method called on a copy of the
+/// client somewhere else panics.
+home: if (std.debug.runtime_safety) ?*const Client else void = if (std.debug.runtime_safety) null else {},
+
+/// In safe builds, a client used somewhere else than where `connect()` ran
+/// panics: its tasks still point to the old place.
+inline fn checkHome(client: *const Client) void {
+    if (std.debug.runtime_safety) {
+        if (client.home) |home| {
+            if (home != client) @panic("nats.Client moved after connect(): keep it where connect() ran (see the guide)");
+        }
+    }
+}
 
 /// Where the client is in its life.
 pub const State = enum {
@@ -210,12 +225,14 @@ pub const PublishError = error{
 /// buffer for the next connection instead, or fails with BufferFull when
 /// the buffer is full; it is never sent twice.
 pub fn publish(client: *Client, subject: []const u8, payload: []const u8) PublishError!void {
+    client.checkHome();
     return client.publishMessage(.{ .subject = subject, .payload = payload });
 }
 
 /// Publishes `message`, with its reply subject and headers, the way
 /// `publish` does. Headers need a server that supports them.
 pub fn publishMessage(client: *Client, message: PublishMessage) PublishError!void {
+    client.checkHome();
     const header_len = try client.prepare(message, .publish);
     try client.checkLine(message, header_len);
     const io = client.io;
@@ -254,12 +271,14 @@ pub const RespondError = PublishError || error{
 /// try client.respond(&msg, "done");
 /// ```
 pub fn respond(client: *Client, msg: *const Message, payload: []const u8) RespondError!void {
+    client.checkHome();
     return client.respondMessage(msg, .{ .payload = payload });
 }
 
 /// Answers `msg` with headers, or with a reply subject of its own, the way
 /// `respond` does.
 pub fn respondMessage(client: *Client, msg: *const Message, response: ResponseMessage) RespondError!void {
+    client.checkHome();
     const reply = msg.reply_to orelse return error.NoReplySubject;
     return client.publishMessage(.{ .subject = reply, .reply_to = response.reply_to, .headers = response.headers, .payload = response.payload });
 }
@@ -333,6 +352,7 @@ pub const SubscribeError = error{
 /// every subscription. The subscription is the client's: free it with its
 /// `deinit()`.
 pub fn subscribe(client: *Client, subject: []const u8, options: Subscription.Options) SubscribeError!*Subscription {
+    client.checkHome();
     try subjects.validateSubscribe(subject);
     if (options.queue) |queue| {
         if (!subjects.isValidQueue(queue)) return error.InvalidOptions;
@@ -442,6 +462,7 @@ pub const DrainError = error{
 /// until its timeout, as in nats.go. At `options.timeout`, 30 s by default, it closes anyway and
 /// returns Timeout; a lost connection closes it too, with Disconnected.
 pub fn drain(client: *Client, options: DrainOptions) DrainError!void {
+    client.checkHome();
     const io = client.io;
     const deadline = time.deadline(io, options.timeout);
     const status = begin: {
@@ -597,12 +618,14 @@ pub const RequestError = error{
 /// subscription, made by the first; any number may wait at once, up to
 /// `limits.max_pending_requests`.
 pub fn request(client: *Client, subject: []const u8, payload: []const u8, options: RequestOptions) RequestError!Message {
+    client.checkHome();
     return client.requestMessage(.{ .subject = subject, .payload = payload }, options);
 }
 
 /// Sends `message`, headers included, the way `request` does. Its
 /// `reply_to` must be null: the reply subject is the client's.
 pub fn requestMessage(client: *Client, message: PublishMessage, options: RequestOptions) RequestError!Message {
+    client.checkHome();
     return client.requestOnce(message, options) catch |err| {
         switch (err) {
             error.Timeout => Counters.add(&client.counters.request_timeouts, 1),
@@ -689,6 +712,7 @@ pub const RequestManyError = error{
 /// `options.timeout`, 2 s by default, or after `max_responses`; see
 /// `Responses`. It is the client's: free it with its `deinit()`.
 pub fn requestMany(client: *Client, subject: []const u8, payload: []const u8, options: RequestManyOptions) RequestManyError!*Responses {
+    client.checkHome();
     if (options.timeout == .none or options.max_responses == 0) return error.InvalidOptions;
     if (options.max_bytes) |bytes| if (bytes == 0) return error.InvalidOptions;
     try subjects.validatePublish(subject);
@@ -758,6 +782,7 @@ pub fn init(gpa: Allocator, io: Io, options: Options) InitError!Client {
 /// keeps trying in the background the way it reconnects, `.reconnecting`
 /// until then.
 pub fn connect(client: *Client) ConnectError!void {
+    client.checkHome();
     const io = client.io;
     const retry = client.options.options.retry_initial_connect;
     {
@@ -765,7 +790,10 @@ pub fn connect(client: *Client) ConnectError!void {
         defer client.lifecycle.unlock(io);
         client.mutex.lockUncancelable(io);
         const status = client.status;
-        if (status == .disconnected) client.status = if (retry) .reconnecting else .connecting;
+        if (status == .disconnected) {
+            client.status = if (retry) .reconnecting else .connecting;
+            if (std.debug.runtime_safety) client.home = client;
+        }
         client.mutex.unlock(io);
         switch (status) {
             .disconnected => {
@@ -801,11 +829,13 @@ pub fn connect(client: *Client) ConnectError!void {
 /// Waits until the server has processed everything this client sent
 /// before: a PING goes out after it, and the server answers with PONG.
 pub fn flush(client: *Client, options: FlushOptions) FlushError!void {
+    client.checkHome();
     _ = try client.ping(options.timeout);
 }
 
 /// How long a PING takes to come back as PONG.
 pub fn rtt(client: *Client, options: FlushOptions) FlushError!Io.Duration {
+    client.checkHome();
     return client.ping(options.timeout);
 }
 
@@ -839,6 +869,7 @@ fn ping(client: *Client, timeout: Io.Timeout) FlushError!Io.Duration {
 /// a moment apart: a message counted in `messages_in` may not show in
 /// `pending_subscription_bytes` yet.
 pub fn stats(client: *Client) Stats {
+    client.checkHome();
     const io = client.io;
     const c = &client.counters;
     const outbound = client.outbound.counts(io);
@@ -874,6 +905,7 @@ pub fn stats(client: *Client) Stats {
 /// waiting in the client gets ConnectionClosed. For a careful stop, use
 /// `drain`, or flush first. Calling it again does nothing.
 pub fn close(client: *Client) void {
+    client.checkHome();
     client.closeWith(.closed);
 }
 
@@ -909,6 +941,7 @@ fn closeWith(client: *Client, reason: CloseReason) void {
 /// streams any more.
 pub fn deinit(client: *Client) void {
     if (client.freed) return;
+    client.checkHome();
     client.close();
     client.subscriptions.deinit(client.gpa);
     client.inbox.deinit(client.gpa);
@@ -922,12 +955,14 @@ pub fn deinit(client: *Client) void {
 }
 
 pub fn state(client: *Client) State {
+    client.checkHome();
     client.mutex.lockUncancelable(client.io);
     defer client.mutex.unlock(client.io);
     return client.status;
 }
 
 pub fn isConnected(client: *Client) bool {
+    client.checkHome();
     return client.state() == .connected;
 }
 
@@ -935,6 +970,7 @@ pub fn isConnected(client: *Client) bool {
 /// result is a copy: its `host()` points into it, so keep the copy while
 /// you use the host.
 pub fn connectedServer(client: *Client) ?ServerAddress {
+    client.checkHome();
     client.mutex.lockUncancelable(client.io);
     defer client.mutex.unlock(client.io);
     return if (client.status == .connected) client.server else null;
@@ -946,6 +982,7 @@ pub const NextEventError = EventQueue.NextError;
 /// null once the client closed and its `closed` event was taken. One task
 /// at a time may wait. See `nats.Event`.
 pub fn nextEvent(client: *Client, options: Subscription.ReceiveOptions) NextEventError!?Event {
+    client.checkHome();
     return client.events.next(client.io, options.timeout);
 }
 
@@ -953,6 +990,7 @@ pub fn nextEvent(client: *Client, options: Subscription.ReceiveOptions) NextEven
 /// and returns the part of `buffer` they fill. They join the servers of
 /// the options for reconnecting, unless `ignore_discovered_servers` is set.
 pub fn discoveredServers(client: *Client, buffer: []ServerAddress) []ServerAddress {
+    client.checkHome();
     return client.pool.discovered(client.io, buffer);
 }
 
@@ -960,6 +998,7 @@ pub fn discoveredServers(client: *Client, buffer: []ServerAddress) []ServerAddre
 /// latest INFO, parsed into memory from `gpa`: free it with `deinit()`.
 /// Null when not connected.
 pub fn serverInfo(client: *Client, gpa: Allocator) ServerInfoError!?std.json.Parsed(ServerInfo) {
+    client.checkHome();
     const json = copy: {
         client.mutex.lockUncancelable(client.io);
         defer client.mutex.unlock(client.io);

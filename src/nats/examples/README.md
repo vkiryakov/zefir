@@ -1336,9 +1336,11 @@ const io = rt.io();
 > **A connected client must not move.** `connect()` starts tasks that keep
 > a pointer to the client. Do not copy it, and do not return it from a
 > function by value after `connect()`: the tasks would go on using the old
-> place, and the program would crash or hang. Initialize it where it will
-> live, `var client: nats.Client = try .init(…)` in the function that uses
-> it, or through a pointer:
+> place, and the program would crash or hang. In Debug and ReleaseSafe
+> builds, a method called on a moved client panics with
+> `nats.Client moved after connect(): keep it where connect() ran (see the guide)`.
+> Initialize it where it will live, `var client: nats.Client = try .init(…)`
+> in the function that uses it, or through a pointer:
 >
 > ```zig
 > /// Connects `client` where it will stay: once connected, a client must not move.
