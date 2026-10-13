@@ -81,7 +81,8 @@ pub const ReconnectOptions = struct {
 };
 
 pub const Limits = struct {
-    /// Bytes waiting to be written; publish waits for room beyond this.
+    /// Frames waiting to be written: publish waits while the queue holds
+    /// this many bytes or more, then queues its frame whole.
     outbound_bytes: usize = 8 * 1024 * 1024,
     /// Messages a subscription holds before its overflow policy drops some.
     subscription_messages: u32 = 1024,
