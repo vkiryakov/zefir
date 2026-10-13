@@ -42,6 +42,7 @@ const OwnedOptions = @import("engine/OwnedOptions.zig");
 const Outbound = @import("engine/Outbound.zig");
 const Registry = @import("engine/Registry.zig");
 const Inbox = @import("engine/Inbox.zig");
+const Pool = @import("engine/Pool.zig");
 const MessageQueue = @import("engine/MessageQueue.zig");
 const Connection = @import("engine/Connection.zig");
 const dialer = @import("engine/connect.zig");
@@ -62,6 +63,9 @@ outbound: Outbound,
 subscriptions: Registry = .{},
 /// The inbox subscription and the requests waiting for replies.
 inbox: Inbox = .{},
+/// The servers to connect to: those of the options and those the cluster
+/// announces.
+pool: Pool,
 /// The manager task.
 tasks: Io.Group = .init,
 /// The reader and writer of the current connection.
@@ -490,6 +494,8 @@ pub fn requestMany(client: *Client, subject: []const u8, payload: []const u8, op
 pub fn init(gpa: Allocator, io: Io, options: Options) InitError!Client {
     var owned: OwnedOptions = try .init(gpa, options);
     errdefer owned.deinit(gpa);
+    var pool: Pool = try .init(gpa, io, owned.servers, owned.options.randomize_servers);
+    errdefer pool.deinit(gpa);
     const parser_limits: Parser.Limits = .{ .max_control_line = owned.options.limits.max_control_line_bytes };
     return .{
         .gpa = gpa,
@@ -498,6 +504,7 @@ pub fn init(gpa: Allocator, io: Io, options: Options) InitError!Client {
         .read_buffer = try gpa.alloc(u8, Parser.bufferLen(parser_limits)),
         .parser_limits = parser_limits,
         .outbound = .init(gpa, owned.options.limits.outbound_bytes),
+        .pool = pool,
     };
 }
 
@@ -607,6 +614,7 @@ pub fn deinit(client: *Client) void {
     client.subscriptions.deinit(client.gpa);
     client.inbox.deinit(client.gpa);
     client.outbound.deinit();
+    client.pool.deinit(client.gpa);
     if (client.info_json) |json| client.gpa.free(json);
     client.gpa.free(client.read_buffer);
     client.options.deinit(client.gpa);
@@ -630,6 +638,13 @@ pub fn connectedServer(client: *Client) ?ServerAddress {
     client.mutex.lockUncancelable(client.io);
     defer client.mutex.unlock(client.io);
     return if (client.status == .connected) client.server else null;
+}
+
+/// Copies the servers the cluster announced, as many as `buffer` holds,
+/// and returns the part of `buffer` they fill. They join the servers of
+/// the options for reconnecting, unless `ignore_discovered_servers` is set.
+pub fn discoveredServers(client: *Client, buffer: []ServerAddress) []ServerAddress {
+    return client.pool.discovered(client.io, buffer);
 }
 
 /// What the server of the current connection said about itself in its

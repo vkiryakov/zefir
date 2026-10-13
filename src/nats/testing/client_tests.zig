@@ -369,7 +369,7 @@ test "connect tries the servers in order" {
     var server = try io.concurrent(serveNormally, .{ io, &listener });
     defer server.cancel(io) catch {};
     var url: [64]u8 = undefined;
-    var client: Client = try .init(testing.allocator, io, .{ .servers = &.{ dead, try FakeServer.url(&listener, &url) } });
+    var client: Client = try .init(testing.allocator, io, .{ .servers = &.{ dead, try FakeServer.url(&listener, &url) }, .randomize_servers = false });
     defer client.deinit();
     try client.connect();
     const server_address = client.connectedServer() orelse return error.TestNotConnected;

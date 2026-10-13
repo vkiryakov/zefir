@@ -43,11 +43,10 @@ no_responders: bool = true,
 verbose: bool = false,
 /// The server checks subjects more strictly.
 pedantic: bool = false,
-/// Try the servers in random order, so that clients spread over a cluster.
-/// Not yet: this version tries them in the given order, and random order
-/// comes with the pool of servers.
+/// Try the servers in random order, so that clients spread over a cluster;
+/// the servers the cluster announces join in random places too.
 randomize_servers: bool = true,
-/// Use only `servers`, not the servers the cluster announces.
+/// Use only `servers`, not the servers the cluster announces in INFO.
 ignore_discovered_servers: bool = false,
 /// `connect()` returns at once and keeps trying in the background.
 retry_initial_connect: bool = false,

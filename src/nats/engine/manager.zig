@@ -21,6 +21,7 @@ const Parser = @import("../protocol/Parser.zig");
 const server_error = @import("../protocol/server_error.zig");
 const Connection = @import("Connection.zig");
 const Registry = @import("Registry.zig");
+const Pool = @import("Pool.zig");
 const incoming = @import("incoming.zig");
 const dialer = @import("connect.zig");
 const time = @import("time.zig");
@@ -74,26 +75,27 @@ const Opened = struct {
     }
 };
 
-/// Tries the servers in order, one attempt each; the first that takes the
-/// connection wins.
+/// Tries the servers of the pool in its order, one attempt each; the first
+/// that takes the connection wins.
 fn openFirst(client: *Client) Client.ConnectError!Opened {
     const io = client.io;
     var last_error: Client.ConnectError = error.ConnectionClosed;
-    for (client.options.servers) |*server| {
+    for (0..client.pool.count(io)) |_| {
+        const server = client.pool.next(io);
         var state: AttemptState = .{};
         if (!track(client, &state)) return error.Canceled;
         defer untrack(client);
-        log.debug("connecting to {f}", .{server.*});
+        log.debug("connecting to {f}", .{server});
         const deadline = time.after(io, client.options.options.connect_timeout);
         const abort: dialer.Abort = .{ .context = &state, .function = AttemptState.abort };
-        if (dialer.race(io, deadline, attempt, .{ client, server, &state }, Opened.release, abort)) |opened| {
+        if (dialer.race(io, deadline, attempt, .{ client, &server, &state }, Opened.release, abort)) |opened| {
             return opened;
         } else |err| switch (err) {
             // close() stops the attempts, and a server that refuses the
             // credentials ends them.
             error.Canceled, error.ConcurrencyUnavailable, error.AuthenticationFailed => return err,
             else => {
-                log.debug("could not connect to {f}: {t}", .{ server.*, err });
+                log.debug("could not connect to {f}: {t}", .{ server, err });
                 last_error = err;
             },
         }
@@ -416,8 +418,13 @@ pub fn connectFailed(client: *Client, err: Client.ConnectError) void {
 }
 
 /// The connection passed its handshake with `server`; the INFO of
-/// `greeting` is now the client's.
+/// `greeting` is now the client's, and the servers it announces join the
+/// pool.
 fn adopt(client: *Client, server: ServerAddress, greeting: Connection.Greeting) void {
+    if (ServerInfo.parse(client.gpa, greeting.info_json)) |info| {
+        defer info.deinit();
+        discover(client, info.value);
+    } else |err| log.debug("the INFO of the handshake is unreadable now: {t}", .{err});
     client.mutex.lockUncancelable(client.io);
     defer client.mutex.unlock(client.io);
     client.server = server;
@@ -425,6 +432,13 @@ fn adopt(client: *Client, server: ServerAddress, greeting: Connection.Greeting) 
     client.info_json = greeting.info_json;
     client.server_headers = greeting.headers;
     client.max_payload = maxPayload(greeting.max_payload);
+}
+
+/// The servers an INFO announces join the pool, and the discovered ones it
+/// no longer names leave it.
+fn discover(client: *Client, info: ServerInfo) void {
+    if (client.options.options.ignore_discovered_servers) return;
+    client.pool.update(client.io, info.connect_urls, &Pool.ignore_changes);
 }
 
 /// The `max_payload` of an INFO; 0 when the server gave none, or one that
@@ -498,6 +512,7 @@ fn awaitExit(client: *Client, deadline: Io.Clock.Timestamp) ?Exit {
 fn updateInfo(client: *Client, json: []const u8) ServerInfo.ParseError!void {
     const info = try ServerInfo.parse(client.gpa, json);
     defer info.deinit();
+    discover(client, info.value);
     const copy = try client.gpa.dupe(u8, json);
     client.mutex.lockUncancelable(client.io);
     defer client.mutex.unlock(client.io);

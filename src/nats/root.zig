@@ -95,6 +95,7 @@ test {
     _ = @import("engine/MessageQueue.zig");
     _ = @import("engine/Registry.zig");
     _ = @import("engine/Inbox.zig");
+    _ = @import("engine/Pool.zig");
     _ = @import("protocol/subject.zig");
     _ = @import("protocol/encoder.zig");
     _ = @import("protocol/Parser.zig");
@@ -113,6 +114,7 @@ test {
     _ = @import("testing/client_tests.zig");
     _ = @import("testing/messaging_tests.zig");
     _ = @import("testing/rpc_tests.zig");
+    _ = @import("testing/reliability_tests.zig");
 }
 
 /// The errors of `std.Io` that the client passes through unchanged.
