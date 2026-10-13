@@ -934,6 +934,291 @@ test "a subscription drains: what is on its way comes, then null, and the client
     try client.flush(quick);
 }
 
+/// At every PING after an UNSUB, a message for that SID that was on its
+/// way, then the PONG; notes every frame.
+fn sessionDrainEach(peer: *FakeServer.Peer, record: *Record) anyerror!void {
+    try handshake(peer, golden.info_default);
+    var sid: [20]u8 = undefined;
+    var sid_len: usize = 0;
+    while (try nextFrame(peer, record)) |frame| {
+        if (std.mem.startsWith(u8, frame, "UNSUB ")) {
+            const unsubscribed = frame["UNSUB ".len..];
+            @memcpy(sid[0..unsubscribed.len], unsubscribed);
+            sid_len = unsubscribed.len;
+        } else if (std.mem.eql(u8, frame, "PING")) {
+            if (sid_len > 0) {
+                var msg: [64]u8 = undefined;
+                try peer.send(try std.fmt.bufPrint(&msg, "MSG work {s} 1\r\nx\r\n", .{sid[0..sid_len]}));
+                sid_len = 0;
+            }
+            try peer.send(golden.pong);
+        }
+    }
+}
+
+/// Reads the subscription to its end, the way its own doc shows: the
+/// subscription is freed once next() returns null.
+fn readThenFree(sub: *nats.Subscription, got: *u32) nats.Subscription.NextError!void {
+    defer sub.deinit();
+    while (try sub.next(within_five_seconds)) |message| {
+        var msg = message;
+        msg.deinit();
+        got.* += 1;
+    }
+}
+
+/// One subscription drained by this task while another reads it and frees
+/// it at null.
+fn drainWhileReaderFrees(client: *Client) !void {
+    const io = client.io;
+    const sub = try client.subscribe("work", .{});
+    var got: u32 = 0;
+    var reader = try io.concurrent(readThenFree, .{ sub, &got });
+    defer reader.cancel(io) catch {};
+    try drainSubscription(sub);
+    try reader.await(io);
+    try testing.expectEqual(1, got);
+}
+
+test "a reader may free its subscription at null while another task drains it" {
+    const io = testing.io;
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var record: Record = .{};
+    defer record.deinit();
+    const sessions = [_]Session{sessionDrainEach};
+    var server = try io.concurrent(serveSessions, .{ io, &listener, &sessions, &record });
+    defer server.cancel(io) catch {};
+    var url: [64]u8 = undefined;
+    var client: Client = try .init(testing.allocator, io, .{ .servers = &.{try FakeServer.url(&listener, &url)} });
+    defer client.deinit();
+    try client.connect();
+    // deinit() waits for the drain, which must not touch the subscription
+    // once it is freed; the testing allocator finds what is left behind.
+    for (0..20) |_| try drainWhileReaderFrees(&client);
+    try client.flush(quick);
+}
+
+/// Notes `line`: the session reached it.
+fn awaitSeen(record: *Record, text: []const u8) !void {
+    const give_up = time.after(testing.io, .fromSeconds(5));
+    while (true) {
+        const seen = try record.seen(testing.io);
+        defer testing.allocator.free(seen);
+        if (std.mem.find(u8, seen, text) != null) return;
+        if (time.expired(testing.io, give_up)) return error.TestNeverSeen;
+        try testing.io.sleep(.fromMilliseconds(1), .awake);
+    }
+}
+
+/// Waits until `count` drain() calls are inside the subscription.
+fn awaitDrainers(sub: *nats.Subscription, count: u32) !void {
+    const give_up = time.after(testing.io, .fromSeconds(5));
+    while (sub.messages.drainers.load(.acquire) < count) {
+        if (time.expired(testing.io, give_up)) return error.TestNoDrainer;
+        try testing.io.sleep(.fromMilliseconds(1), .awake);
+    }
+}
+
+/// Holds the PONG of the first PING after `UNSUB 1` until the test releases
+/// it; then a message that was on its way, the PONG, and serves.
+fn sessionHoldDrainPong(peer: *FakeServer.Peer, record: *Record) anyerror!void {
+    try handshake(peer, golden.info_default);
+    if (!try readUntil(peer, record, "UNSUB 1")) return error.TestNoUnsub;
+    if (!try readUntil(peer, record, "PING")) return error.TestNoPing;
+    try record.note(peer.io, "held");
+    try record.release.wait(peer.io);
+    try peer.send("MSG work 1 1\r\nx\r\n" ++ golden.pong);
+    while (try nextFrame(peer, record)) |frame| {
+        if (std.mem.eql(u8, frame, "PING")) try peer.send(golden.pong);
+    }
+}
+
+fn drainClientLong(client: *Client) Client.DrainError!void {
+    return drainClient(client, .fromSeconds(5));
+}
+
+test "a second drain of a draining subscription waits for the first: what is on its way is kept" {
+    const io = testing.io;
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var record: Record = .{};
+    defer record.deinit();
+    const sessions = [_]Session{sessionHoldDrainPong};
+    var server = try io.concurrent(serveSessions, .{ io, &listener, &sessions, &record });
+    defer {
+        record.release.set(io);
+        server.cancel(io) catch {};
+    }
+    var url: [64]u8 = undefined;
+    var client: Client = try .init(testing.allocator, io, .{ .servers = &.{try FakeServer.url(&listener, &url)} });
+    defer client.deinit();
+    try client.connect();
+    const work = try client.subscribe("work", .{});
+    defer work.deinit();
+    var first = try io.concurrent(drainSubscription, .{work});
+    defer first.cancel(io) catch {};
+    try awaitSeen(&record, "held");
+    var second = try io.concurrent(drainSubscription, .{work});
+    defer second.cancel(io) catch {};
+    try awaitDrainers(work, 2);
+    record.release.set(io);
+    try expectMessage(work, "x");
+    try testing.expect(try work.next(within_five_seconds) == null);
+    try first.await(io);
+    try second.await(io);
+    try testing.expectEqual(nats.SubscriptionStats{ .received = 1, .delivered = 1, .dropped = 0 }, work.stats());
+}
+
+test "a subscription drained during the client's drain keeps what is on its way" {
+    const io = testing.io;
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var record: Record = .{};
+    defer record.deinit();
+    const sessions = [_]Session{sessionHoldDrainPong};
+    var server = try io.concurrent(serveSessions, .{ io, &listener, &sessions, &record });
+    defer {
+        record.release.set(io);
+        server.cancel(io) catch {};
+    }
+    var url: [64]u8 = undefined;
+    var client: Client = try .init(testing.allocator, io, .{ .servers = &.{try FakeServer.url(&listener, &url)} });
+    defer client.deinit();
+    try client.connect();
+    const work = try client.subscribe("work", .{});
+    defer work.deinit();
+    var whole = try io.concurrent(drainClientLong, .{&client});
+    defer whole.cancel(io) catch {};
+    try awaitSeen(&record, "held");
+    var one = try io.concurrent(drainSubscription, .{work});
+    defer one.cancel(io) catch {};
+    try awaitDrainers(work, 1);
+    record.release.set(io);
+    try expectMessage(work, "x");
+    try testing.expect(try work.next(within_five_seconds) == null);
+    try one.await(io);
+    try whole.await(io);
+    try testing.expectEqual(.drained, client.close_reason.?);
+    try testing.expectEqual(nats.SubscriptionStats{ .received = 1, .delivered = 1, .dropped = 0 }, work.stats());
+}
+
+/// Never answers the PING after `UNSUB 1`; reads on until released.
+fn sessionNoDrainPong(peer: *FakeServer.Peer, record: *Record) anyerror!void {
+    try handshake(peer, golden.info_default);
+    if (!try readUntil(peer, record, "UNSUB 1")) return error.TestNoUnsub;
+    if (!try readUntil(peer, record, "PING")) return error.TestNoPing;
+    try record.note(peer.io, "held");
+    try record.release.wait(peer.io);
+}
+
+test "a subscription drain that runs out of time returns Timeout, and the subscription has ended" {
+    const io = testing.io;
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var record: Record = .{};
+    defer record.deinit();
+    const sessions = [_]Session{sessionNoDrainPong};
+    var server = try io.concurrent(serveSessions, .{ io, &listener, &sessions, &record });
+    defer {
+        record.release.set(io);
+        server.cancel(io) catch {};
+    }
+    var url: [64]u8 = undefined;
+    var client: Client = try .init(testing.allocator, io, .{ .servers = &.{try FakeServer.url(&listener, &url)} });
+    defer client.deinit();
+    try client.connect();
+    const work = try client.subscribe("work", .{});
+    defer work.deinit();
+    try testing.expectError(error.Timeout, work.drain(.{ .timeout = .{ .duration = .{ .raw = .fromMilliseconds(200), .clock = .awake } } }));
+    try testing.expect(try work.next(.{}) == null);
+    // Ended and read: nothing more to wait for.
+    try work.drain(.{});
+    try testing.expect(client.isConnected());
+}
+
+fn drainSubscriptionResult(sub: *nats.Subscription) nats.Subscription.DrainError!void {
+    return drainSubscription(sub);
+}
+
+test "close() during a subscription drain: ConnectionClosed; a canceled drain: Canceled, and it has ended" {
+    const io = testing.io;
+    for ([_]bool{ true, false }) |by_close| {
+        var listener = try FakeServer.listen(io);
+        defer listener.deinit(io);
+        var record: Record = .{};
+        defer record.deinit();
+        const sessions = [_]Session{sessionNoDrainPong};
+        var server = try io.concurrent(serveSessions, .{ io, &listener, &sessions, &record });
+        defer {
+            record.release.set(io);
+            server.cancel(io) catch {};
+        }
+        var url: [64]u8 = undefined;
+        var client: Client = try .init(testing.allocator, io, .{ .servers = &.{try FakeServer.url(&listener, &url)} });
+        defer client.deinit();
+        try client.connect();
+        const work = try client.subscribe("work", .{});
+        defer work.deinit();
+        var drainer = try io.concurrent(drainSubscriptionResult, .{work});
+        defer drainer.cancel(io) catch {};
+        try awaitSeen(&record, "held");
+        if (by_close) {
+            client.close();
+            try testing.expectError(error.ConnectionClosed, drainer.await(io));
+        } else {
+            try testing.expectError(error.Canceled, drainer.cancel(io));
+            try testing.expect(try work.next(.{}) == null);
+            try testing.expect(client.isConnected());
+        }
+    }
+}
+
+/// Subscribes `work`, then hangs up.
+fn sessionHangUpAfterWork(peer: *FakeServer.Peer, record: *Record) anyerror!void {
+    try handshake(peer, golden.info_default);
+    if (!try readUntil(peer, record, "SUB work ")) return error.TestNoSub;
+}
+
+test "a subscription drained while reconnecting ends at once, and the next connection does not subscribe it" {
+    const io = testing.io;
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var record: Record = .{};
+    defer record.deinit();
+    const sessions = [_]Session{ sessionHangUpAfterWork, sessionRecordWhenReleased };
+    var server = try io.concurrent(serveSessions, .{ io, &listener, &sessions, &record });
+    defer {
+        record.release.set(io);
+        server.cancel(io) catch {};
+    }
+    var url: [64]u8 = undefined;
+    var client: Client = try .init(testing.allocator, io, .{
+        .servers = &.{try FakeServer.url(&listener, &url)},
+        .reconnect = .{ .min_delay = .fromMilliseconds(1), .max_delay = .fromMilliseconds(5) },
+    });
+    defer client.deinit();
+    try client.connect();
+    const work = try client.subscribe("work", .{});
+    defer work.deinit();
+    const other = try client.subscribe("other", .{});
+    defer other.deinit();
+    try awaitState(&client, .reconnecting);
+    try awaitAccepted(&record, 2);
+    try work.drain(.{ .timeout = .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } } });
+    try testing.expect(try work.next(.{}) == null);
+    record.release.set(io);
+    try awaitState(&client, .connected);
+    try client.flush(quick);
+    client.close();
+    try server.await(io);
+    const seen = try record.seen(io);
+    defer testing.allocator.free(seen);
+    const second = seen[std.mem.find(u8, seen, "--\n").? + 3 ..];
+    try testing.expect(std.mem.find(u8, second, "SUB work") == null);
+    try testing.expect(std.mem.find(u8, second, "SUB other 2") != null);
+}
+
 /// The next event, which must be a `tag` one, within 5 s.
 fn expectEvent(client: *Client, tag: std.meta.Tag(nats.Event)) !nats.Event {
     const event = (try client.nextEvent(within_five_seconds)) orelse return error.TestNoEvent;

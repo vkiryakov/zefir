@@ -161,10 +161,12 @@ pub fn writeRestore(r: *Registry, io: Io, w: *Io.Writer, extra: ?Resubscribe) Io
     }
 }
 
-/// The client drains: every subscription that still takes messages stops
-/// being subscribed again on a new connection, and its UNSUB is queued.
-/// The UNSUBs are queued outside the registry's mutex, a batch at a time,
-/// so the outbound queue's mutex is never taken under it.
+/// The client drains: every subscription that has not ended stops being
+/// subscribed again on a new connection, and its UNSUB is queued, also for
+/// one whose own `drain()` sent one already: the client's PING barrier
+/// then follows an UNSUB of every subscription `finishDraining` ends. The
+/// UNSUBs are queued outside the registry's mutex, a batch at a time, so
+/// the outbound queue's mutex is never taken under it.
 pub fn drainAll(r: *Registry, io: Io, outbound: *Outbound) void {
     while (true) {
         var batch: [64]u64 = undefined;
@@ -174,7 +176,7 @@ pub fn drainAll(r: *Registry, io: Io, outbound: *Outbound) void {
             defer r.mutex.unlock(io);
             for (r.subscriptions.values()) |sub| {
                 if (taken == batch.len) break;
-                if (!sub.messages.beginDrain(io)) continue;
+                if (!sub.messages.drainForClient(io)) continue;
                 batch[taken] = sub.sid;
                 taken += 1;
             }

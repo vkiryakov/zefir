@@ -85,6 +85,12 @@ draining: bool = false,
 /// `next` handed out a message, and the owner has not asked for the next
 /// one since: it may still be working on it.
 in_hand: bool = false,
+/// The client's drain queued an UNSUB for it.
+client_unsub: bool = false,
+/// `drain()` calls of its subscription that are inside now: each still
+/// uses the subscription, so its `deinit` waits for them. Atomic, outside
+/// the mutex: leaving is the very last thing a drain does with it.
+drainers: std.atomic.Value(u32) = .init(0),
 
 pub fn init(gpa: Allocator, limits: Limits, overflow: OverflowPolicy, last: ?u64) MessageQueue {
     return .{ .gpa = gpa, .limits = limits, .overflow = overflow, .last = last };
@@ -130,14 +136,59 @@ pub fn resumeState(q: *MessageQueue, io: Io) ?Resume {
     return .{ .remaining = if (q.last) |last| last -| q.received else null };
 }
 
-/// Drain begins: true when this call began it, the queue being open and not
-/// draining yet; its owner then tells the server to stop sending.
-pub fn beginDrain(q: *MessageQueue, io: Io) bool {
+/// A `drain()` of the subscription enters; until it calls `leaveDrain`,
+/// `awaitNoDrains` waits for it. True when this call begins the drain, the
+/// queue being open and not draining yet: it then tells the server to stop
+/// sending, and it alone ends the queue.
+pub fn enterDrain(q: *MessageQueue, io: Io) bool {
+    _ = q.drainers.fetchAdd(1, .acquire);
     q.mutex.lockUncancelable(io);
     defer q.mutex.unlock(io);
     if (q.ended != null or q.draining) return false;
     q.draining = true;
     return true;
+}
+
+/// The `drain()` is done with the queue: the last thing it does with it.
+pub fn leaveDrain(q: *MessageQueue) void {
+    _ = q.drainers.fetchSub(1, .release);
+}
+
+/// Waits until no `drain()` of the subscription is inside, with no
+/// cancellation point: the subscription is freed after.
+pub fn awaitNoDrains(q: *MessageQueue, io: Io) void {
+    if (q.drainers.load(.acquire) == 0) return;
+    const protection = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(protection);
+    while (q.drainers.load(.acquire) > 0) io.sleep(.fromMilliseconds(1), .awake) catch {};
+}
+
+/// The client drains: true when its UNSUB must go out, once for each queue
+/// that has not ended, a queue that a `drain()` of its subscription began
+/// included, so that the client's PING barrier always follows an UNSUB of
+/// every queue it ends.
+pub fn drainForClient(q: *MessageQueue, io: Io) bool {
+    q.mutex.lockUncancelable(io);
+    defer q.mutex.unlock(io);
+    if (q.ended != null or q.client_unsub) return false;
+    q.draining = true;
+    q.client_unsub = true;
+    return true;
+}
+
+/// Waits until the queue has ended and is settled, polling every 5 ms,
+/// until `deadline`; ConnectionClosed once the client closed it.
+pub fn awaitDrained(q: *MessageQueue, io: Io, deadline: ?Io.Clock.Timestamp) error{ Timeout, Canceled, ConnectionClosed }!void {
+    while (true) {
+        {
+            q.mutex.lockUncancelable(io);
+            defer q.mutex.unlock(io);
+            if (q.ended == .closed) return error.ConnectionClosed;
+            if (q.ended != null and q.isSettled()) return;
+        }
+        if (deadline) |d| if (time.expired(io, d)) return error.Timeout;
+        try io.sleep(.fromMilliseconds(5), .awake);
+    }
 }
 
 /// A draining queue ends as finished: what it holds still comes out.
@@ -166,6 +217,33 @@ pub fn end(q: *MessageQueue, io: Io, how: End, discard: bool) bool {
     }
     q.not_empty.broadcast(io);
     return was_open;
+}
+
+/// Ends the open queue `how`, freeing what it holds with `discard`, and
+/// returns null; a queue that has ended already stays as it is, and how it
+/// ended comes back. One lock: once the queue ends, a reader waiting in
+/// `next()` may free it at once.
+pub fn endOpen(q: *MessageQueue, io: Io, how: End, discard: bool) ?End {
+    q.mutex.lockUncancelable(io);
+    defer q.mutex.unlock(io);
+    if (q.ended) |earlier| return earlier;
+    q.ended = how;
+    if (discard) {
+        q.freeAll();
+        q.in_hand = false;
+    }
+    q.not_empty.broadcast(io);
+    return null;
+}
+
+/// Frees what the queue holds, however it ended: its owner is done with
+/// it, so it is settled.
+pub fn dropAll(q: *MessageQueue, io: Io) void {
+    q.mutex.lockUncancelable(io);
+    defer q.mutex.unlock(io);
+    q.freeAll();
+    q.in_hand = false;
+    q.not_empty.broadcast(io);
 }
 
 /// Ends the queue as finished and frees what it holds, whatever ended it
@@ -313,6 +391,10 @@ pub fn next(q: *MessageQueue, io: Io, timeout: Io.Timeout) NextError!?Message {
 pub fn settled(q: *MessageQueue, io: Io) bool {
     q.mutex.lockUncancelable(io);
     defer q.mutex.unlock(io);
+    return q.isSettled();
+}
+
+fn isSettled(q: *const MessageQueue) bool {
     return q.messages.len == 0 and !q.in_hand and !(q.receiving and q.ended != null);
 }
 
@@ -607,4 +689,55 @@ test "a reader still inside next() when the queue ends is waited for" {
     q.mutex.unlock(io);
     try testing.expect(try reader.await(io) == null);
     try testing.expect(q.settled(io));
+}
+
+fn waitForDrains(q: *MessageQueue, io: Io, done: *std.atomic.Value(bool)) void {
+    q.awaitNoDrains(io);
+    done.store(true, .release);
+}
+
+test "drains: the first begins it, the client's drain adds its UNSUB once, and the queue's owner waits for every drain to leave" {
+    const io = testing.io;
+    var q: MessageQueue = .init(testing.allocator, .{ .messages = 4, .bytes = 1024 }, .drop_newest, null);
+    defer q.deinit();
+    try testing.expect(q.enterDrain(io));
+    try testing.expect(!q.enterDrain(io));
+    // The client's drain queues its own UNSUB of a queue a drain began.
+    try testing.expect(q.drainForClient(io));
+    try testing.expect(!q.drainForClient(io));
+
+    var done: std.atomic.Value(bool) = .init(false);
+    var waiter = try io.concurrent(waitForDrains, .{ &q, io, &done });
+    defer waiter.cancel(io);
+    q.leaveDrain();
+    try io.sleep(.fromMilliseconds(20), .awake);
+    try testing.expect(!done.load(.acquire));
+    q.leaveDrain();
+    waiter.await(io);
+    try testing.expect(done.load(.acquire));
+
+    // Ended: a drain begins nothing, nor does the client's.
+    try testing.expectEqual(@as(?End, null), q.endOpen(io, .finished, true));
+    try testing.expectEqual(End.finished, q.endOpen(io, .finished, true).?);
+    try testing.expect(!q.enterDrain(io));
+    q.leaveDrain();
+}
+
+test "awaitDrained waits for the end and for the reader, and gives up at its deadline" {
+    const io = testing.io;
+    var q: MessageQueue = .init(testing.allocator, .{ .messages = 4, .bytes = 1024 }, .drop_newest, null);
+    defer q.deinit();
+    _ = q.push(io, try testMessage(8, 'a'));
+    // Not ended yet.
+    try testing.expectError(error.Timeout, q.awaitDrained(io, time.after(io, .fromMilliseconds(10))));
+    try testing.expect(q.enterDrain(io));
+    q.finishDrain(io);
+    q.leaveDrain();
+    // Ended, but its message waits.
+    try testing.expectError(error.Timeout, q.awaitDrained(io, time.after(io, .fromMilliseconds(10))));
+    // Its owner is done with it.
+    q.dropAll(io);
+    try q.awaitDrained(io, time.after(io, .fromSeconds(5)));
+    _ = q.end(io, .closed, true);
+    try testing.expectError(error.ConnectionClosed, q.awaitDrained(io, null));
 }

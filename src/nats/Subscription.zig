@@ -12,10 +12,12 @@
 //! }
 //! ```
 //!
-//! One task at a time waits in `next()`; any task may `unsubscribe()`.
-//! Read with `next()` until it returns null, or `deinit()` the
+//! One task at a time waits in `next()`; any task may `unsubscribe()` or
+//! `drain()`. Read with `next()` until it returns null, or `deinit()` the
 //! subscription: a message counts as handled once its reader asks for the
-//! next one, and a drain waits for that.
+//! next one, and a drain waits for that. The reader may `deinit()` it as
+//! soon as `next()` returns null, as above, even while another task's
+//! `drain()` returns: `deinit()` waits for that.
 
 const std = @import("std");
 const Io = std.Io;
@@ -122,11 +124,14 @@ pub const UnsubscribeError = error{
 pub fn unsubscribe(sub: *Subscription) UnsubscribeError!void {
     const client = sub.client;
     const io = client.io;
-    if (!sub.messages.end(io, .finished, true)) {
-        if (sub.messages.endedHow(io) == .closed) return error.ConnectionClosed;
+    const sid = sub.sid;
+    // Once it ends, a reader waiting in next() may free it: nothing below
+    // touches it.
+    if (sub.messages.endOpen(io, .finished, true)) |how| {
+        if (how == .closed) return error.ConnectionClosed;
         return;
     }
-    Registry.queueUnsub(&client.outbound, io, sub.sid) catch |err| switch (err) {
+    Registry.queueUnsub(&client.outbound, io, sid) catch |err| switch (err) {
         error.Closed => return error.ConnectionClosed,
         // Never for an UNSUB: without a connection the next one simply
         // does not subscribe again.
@@ -151,42 +156,50 @@ pub const DrainError = error{
 /// messages that still come before it has that are kept, and `next()`
 /// hands out all of them and then null. It returns once they are all
 /// taken and the reader came back to `next()`, done with the last one, so
-/// another task must be reading `next()`; at `options.timeout`,
-/// 30 s by default, it returns Timeout, and the subscription has ended
-/// anyway. Without a connection nothing more can come, and it ends at once.
+/// another task must be reading `next()`. At `options.timeout`, 30 s by
+/// default, it returns Timeout, and the subscription has ended anyway.
+/// Without a connection nothing more can come, and it ends at once. A
+/// second call while one runs, or one during the client's `drain()`, adds
+/// nothing: it waits until that drain ends the subscription and its
+/// messages are taken.
 pub fn drain(sub: *Subscription, options: DrainOptions) DrainError!void {
     const client = sub.client;
     const io = client.io;
+    const sid = sub.sid;
+    const queue = &sub.messages;
     const deadline = time.deadline(io, options.timeout);
-    defer sub.messages.finishDrain(io);
-    if (sub.messages.beginDrain(io)) {
-        Registry.queueUnsub(&client.outbound, io, sub.sid) catch |err| switch (err) {
-            error.Closed => return error.ConnectionClosed,
-            error.OutOfMemory => return error.OutOfMemory,
-            // Without a connection nothing more comes.
-            error.Disconnected, error.BufferFull, error.ProtocolError => {},
-        };
-        // Once the server answers this PING, no message comes for it.
-        if (client.outbound.putPing(io, .flush)) |ping| {
-            client.outbound.waitPong(io, ping, deadline) catch |err| switch (err) {
-                error.Closed => return error.ConnectionClosed,
-                error.Disconnected => {},
-                error.Timeout => return error.Timeout,
-                error.Canceled => return error.Canceled,
-            };
-        } else |err| switch (err) {
-            error.Closed => return error.ConnectionClosed,
-            error.Disconnected => {},
-            error.OutOfMemory => return error.OutOfMemory,
-        }
+    // From here until it leaves, deinit() waits for this call.
+    const began = queue.enterDrain(io);
+    defer queue.leaveDrain();
+    if (began) {
+        // This call ends the subscription, whatever comes: what the server
+        // sent before it had the UNSUB is kept.
+        defer queue.finishDrain(io);
+        try stopSending(client, sid, deadline);
     }
-    sub.messages.finishDrain(io);
-    while (!sub.messages.settled(io)) {
-        if (sub.messages.endedHow(io) == .closed) return error.ConnectionClosed;
-        if (deadline) |d| if (time.expired(io, d)) return error.Timeout;
-        try io.sleep(.fromMilliseconds(5), .awake);
-    }
-    if (sub.messages.endedHow(io) == .closed) return error.ConnectionClosed;
+    return queue.awaitDrained(io, deadline);
+}
+
+/// UNSUB, and a PING whose PONG says that the server has it; without a
+/// connection nothing more comes, and there is nothing to wait for.
+fn stopSending(client: *Client, sid: u64, deadline: ?Io.Clock.Timestamp) DrainError!void {
+    const io = client.io;
+    Registry.queueUnsub(&client.outbound, io, sid) catch |err| switch (err) {
+        error.Closed => return error.ConnectionClosed,
+        error.OutOfMemory => return error.OutOfMemory,
+        error.Disconnected, error.BufferFull, error.ProtocolError => {},
+    };
+    const ping = client.outbound.putPing(io, .flush) catch |err| switch (err) {
+        error.Closed => return error.ConnectionClosed,
+        error.Disconnected => return,
+        error.OutOfMemory => return error.OutOfMemory,
+    };
+    client.outbound.waitPong(io, ping, deadline) catch |err| switch (err) {
+        error.Closed => return error.ConnectionClosed,
+        error.Disconnected => {},
+        error.Timeout => return error.Timeout,
+        error.Canceled => return error.Canceled,
+    };
 }
 
 /// What waits to be taken.
@@ -217,16 +230,24 @@ pub fn stats(sub: *Subscription) Stats {
 }
 
 /// Ends the subscription and frees it, with the messages it still holds.
-/// No task may wait for its messages meanwhile. The server is told to stop
-/// sending, unless the subscription had ended already.
+/// No task may wait in its `next()` meanwhile. The server is told to stop
+/// sending, unless the subscription had ended already. A `drain()` of it
+/// that another task runs returns first: `deinit()` waits for it, so call
+/// it from the reader once `next()` returned null, not while the drain
+/// still waits for the server.
 pub fn deinit(sub: *Subscription) void {
     const client = sub.client;
     const io = client.io;
+    const sid = sub.sid;
     if (sub.messages.end(io, .finished, true)) {
-        Registry.queueUnsub(&client.outbound, io, sub.sid) catch |err| {
-            log.debug("no UNSUB for subscription {d}: {t}", .{ sub.sid, err });
+        Registry.queueUnsub(&client.outbound, io, sid) catch |err| {
+            log.debug("no UNSUB for subscription {d}: {t}", .{ sid, err });
         };
     }
-    client.subscriptions.unregister(io, sub.sid);
+    // Done with what it holds: a drain() in another task finds it settled
+    // and returns, and only then is it freed.
+    sub.messages.dropAll(io);
+    client.subscriptions.unregister(io, sid);
+    sub.messages.awaitNoDrains(io);
     Registry.destroy(client.gpa, sub);
 }
