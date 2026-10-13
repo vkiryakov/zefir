@@ -207,7 +207,21 @@ pub fn build(b: *std.Build) void {
     // mappings, more than the 65,530 Linux allows a process by default:
     // raise it first, `sudo sysctl vm.max_map_count=262144`.
     const stress_step = b.step("stress", "Run the stress tests against the NATS servers, in Debug and in ReleaseSafe");
-    var after_mode: *std.Build.Step = &up.step;
+    // One mode after the other, as they share the servers and the CPU, and
+    // ReleaseSafe runs even when Debug fails.
+    const run_stress = b.addSystemCommand(&.{
+        "sh",
+        "-c",
+        \\"$1"; debug=$?
+        \\"$2"; safe=$?
+        \\[ $debug -eq 0 ] && [ $safe -eq 0 ]
+        ,
+        "stress",
+    });
+    run_stress.stdio = .inherit;
+    run_stress.has_side_effects = true;
+    run_stress.step.dependOn(&up.step);
+    stress_step.dependOn(&run_stress.step);
     for ([_]std.lang.Optimize{ .debug, .safe }) |mode| {
         const mode_zefir = b.dependency("zefir", .{ .target = target, .optimize = mode });
         const mode_zio = b.dependency("zio", .{ .target = target, .optimize = mode });
@@ -235,12 +249,7 @@ pub fn build(b: *std.Build) void {
             }),
             .test_runner = .{ .path = b.path("test_runner.zig"), .mode = .simple },
         });
-        const run_stress = b.addRunArtifact(stress);
-        run_stress.stdio = .inherit;
-        // One mode after the other: they share the servers and the CPU.
-        run_stress.step.dependOn(after_mode);
-        after_mode = &run_stress.step;
-        stress_step.dependOn(&run_stress.step);
+        run_stress.addArtifactArg(stress);
     }
 }
 
