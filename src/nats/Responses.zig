@@ -70,9 +70,17 @@ pub fn next(r: *Responses, options: Subscription.ReceiveOptions) NextError!?Mess
                 r.stop(false);
                 continue;
             },
+            error.Canceled, error.ConcurrentReceive => |e| return e,
+            // Over: the request no longer waits.
+            error.NoResponders, error.Disconnected, error.ConnectionClosed => |e| {
+                r.client.inbox.remove(io, r.id);
+                return e;
+            },
             // A stream drops the newest when full and is never refused.
-            error.SlowConsumer, error.PermissionDenied => return error.ConnectionClosed,
-            else => |e| return e,
+            error.SlowConsumer, error.PermissionDenied => {
+                r.client.inbox.remove(io, r.id);
+                return error.ConnectionClosed;
+            },
         };
         // Over: responses that still come are late.
         if (response == null) r.client.inbox.remove(io, r.id);

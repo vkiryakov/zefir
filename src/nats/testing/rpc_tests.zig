@@ -670,6 +670,8 @@ test "requestMany: no responders first is NoResponders" {
     defer responses.deinit();
     try testing.expectError(error.NoResponders, responses.next(.{}));
     try testing.expectError(error.NoResponders, responses.next(.{}));
+    // Over: it no longer counts among the pending requests.
+    try testing.expectEqual(0, s.client.inbox.pendingCount(testing.io));
     try s.finish();
 }
 
