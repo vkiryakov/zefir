@@ -91,7 +91,7 @@ pub fn build(b: *std.Build) void {
         if (module == validator) validator_compile_step.dependOn(&tests.step);
     }
 
-    addValidatorTests(b, test_step, validator_compile_step, validator, target, optimize);
+    addValidatorTests(b, test_step, validator_compile_step, validator, log, target, optimize, tsan);
 
     // core examples: `zig build test` builds and runs them; an example that
     // exits with an error fails the step.
@@ -313,14 +313,17 @@ fn addRun(b: *std.Build, artifact: *std.Build.Step.Compile, tsan: bool) *std.Bui
 /// The validator tests that use only its public API, compiled as client code
 /// from the lists in src/validator/testdata/cases.zig. `test_step` runs them
 /// and checks the compile-error fixtures; `compile_step` only builds the test
-/// binaries for `target`.
+/// binaries for `target`. `log` is for the examples of the guide, which log
+/// the violations they find; the validator itself imports nothing.
 fn addValidatorTests(
     b: *std.Build,
     test_step: *std.Build.Step,
     compile_step: *std.Build.Step,
     validator: *std.Build.Module,
+    log: *std.Build.Module,
     target: std.Build.ResolvedTarget,
     optimize: std.lang.Optimize,
+    tsan: bool,
 ) void {
     const vtest = b.createModule(.{
         .root_source_file = b.path("src/validator/testdata/helpers.zig"),
@@ -466,23 +469,32 @@ fn addValidatorTests(
     check_list.expectExitCode(0);
     test_step.dependOn(&check_list.step);
 
-    // The examples of src/validator/examples/README.md: a program must print
-    // exactly its `stdout` and `stderr`, a test must pass, and readme_test.zig
-    // checks that README.md shows every example and output verbatim.
+    // The examples of src/validator/examples/README.md: a test must pass, and
+    // a program must exit with 0 and log each line of its `records`. Each
+    // record starts with a timestamp, the only part that changes from run to
+    // run, so a line must follow the "Z" that ends a timestamp. readme_test.zig
+    // checks that README.md shows every example and a run of every program.
+    // The programs are not part of `compile_step`: zefir-log uses 64-bit
+    // atomics, which Zig does not support on x86-linux-musl, the 32-bit
+    // target of CI.
     for (validator_cases.examples) |example| {
         const example_module = b.createModule(.{
             .root_source_file = b.path(b.fmt("src/validator/examples/{s}.zig", .{example.name})),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "validator", .module = validator }},
+            .imports = &.{
+                .{ .name = "validator", .module = validator },
+                .{ .name = "log", .module = log },
+            },
         });
-        if (example.stdout != null or example.stderr != null) {
+        if (example.records) |records| {
             const example_exe = b.addExecutable(.{ .name = example.name, .root_module = example_module });
-            const example_run = b.addRunArtifact(example_exe);
-            if (example.stdout) |stdout| example_run.expectStdOutEqual(stdout);
-            if (example.stderr) |stderr| example_run.expectStdErrEqual(stderr);
+            const example_run = addRun(b, example_exe, tsan);
+            var lines = std.mem.splitScalar(u8, records, '\n');
+            while (lines.next()) |line| {
+                if (line.len > 0) example_run.expectStdOutMatch(b.fmt("Z {s}\n", .{line}));
+            }
             test_step.dependOn(&example_run.step);
-            compile_step.dependOn(&example_exe.step);
         } else {
             const example_test = b.addTest(.{ .name = example.name, .root_module = example_module });
             test_step.dependOn(&b.addRunArtifact(example_test).step);

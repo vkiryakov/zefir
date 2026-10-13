@@ -7,56 +7,77 @@ field is a compile error, not a surprise at run time.
 
 ```zig
 const std = @import("std");
+const log = @import("log");
 const v = @import("validator");
 
+const Role = enum { admin, editor, viewer };
+
 const SignUp = struct {
-    name: []const u8,
+    email: []const u8,
     age: u8,
-    tags: []const []const u8 = &.{},
+    roles: []const Role,
+    nickname: ?[]const u8 = null,
 
     // The rules of the fields. The validator finds them by this name, so the
     // struct must declare them as `pub const field_rules`.
     pub const field_rules = .{
-        .name = v.notEmpty,
-        .age = v.positive,
-        .tags = v.each(v.notEmpty), // every item of the list
+        .email = v.email,
+        .age = v.range(18, 120),
+        .roles = .{ v.notEmpty, v.uniqueItems }, // a tuple: its rules run in order
+        .nickname = v.length(3, 32), // null skips the rule
     };
 };
 
-pub fn main() void {
+pub fn main(init: std.process.Init) !void {
+    const logger: log.Logger = try .init(init.gpa, init.io, .{
+        .service = .{ .name = "signup-service" },
+        .format = .text,
+    });
+    defer logger.deinit();
+
     // The value to check, for example a decoded request body.
-    const request: SignUp = .{ .name = "Ada", .age = 36, .tags = &.{ "admin", "" } };
+    const request: SignUp = .{ .email = "ada@example.com", .age = 36, .roles = &.{ .editor, .editor } };
 
     // v.check allocates no memory, so it needs room from you to write the path
-    // of the field that failed, such as "tags[1]"; violation.field points into it.
+    // of the field that failed, such as "roles"; violation.field points into it.
     var path_buf: [256]u8 = undefined;
     if (v.check(&request, &path_buf)) |violation| {
-        // Prints "tags[1]: must not be empty (validation.not_empty)".
-        std.debug.print("{s}: {s} ({s})\n", .{ violation.field orelse "(root)", violation.message, violation.code });
+        logger.warn("Invalid sign-up", .{ .field = violation.field, .code = violation.code, .reason = violation.message });
     }
 }
 ```
 
-`path_buf` is where `v.check` writes the path of the field that failed, such as
-`tags[1]`. `v.check` allocates no memory, so you give it the room: a buffer on
-the stack, whose contents before the call do not matter. `violation.field`
-points into this buffer, so it is valid while the buffer lives; copy the path
-if you need it longer. 256 bytes fit almost any path; a longer one gives
-`field = null`, with `code` and `message` still set. To get every violation,
-with paths of any length and no buffer, call `v.checkAll(gpa, &request)`: it
-takes an allocator, and `report.deinit()` frees the result.
+It logs the first violation, the repeated role, as a line of text through
+[zefir-log](../../log/examples/README.md); the timestamp differs in every run:
+
+```text
+$ zig build run
+2026-10-13T09:41:07.415Z WARN  Invalid sign-up field=roles code=validation.unique_items reason="must not contain duplicates"
+```
+
+`path_buf` is where `v.check` writes the path of the field that failed: `roles`
+here, `address.zip` for a field of a nested struct, `items[2].sku` for a field
+of a list item. `v.check` allocates no memory, so you give it the room: a
+buffer on the stack, whose contents before the call do not matter.
+`violation.field` points into this buffer, so it is valid while the buffer
+lives; copy the path if you need it longer. 256 bytes fit almost any path; a
+longer one gives `field = null`, with `code` and `message` still set. To get
+every violation, with paths of any length and no buffer, call
+`v.checkAll(gpa, &request)`: it takes an allocator, and `report.deinit()` frees
+the result.
 
 `v.check` returns `?v.Violation`: `null` when the value is valid, otherwise the
 first problem it found, with three fields:
 
 | Field | Type | What it holds | In the example |
 | --- | --- | --- | --- |
-| `code` | `[]const u8` | a stable code for programs and clients: `validation.<rule>` for a built-in rule, or the code you gave `v.custom` or `v.fail` | `validation.not_empty` |
-| `message` | `[]const u8` | what the value must be, for people, without the field name: a built-in English message or your own | `must not be empty` |
-| `field` | `?[]const u8` | the path of the value from the root; `null` for the root value itself | `tags[1]` |
+| `code` | `[]const u8` | a stable code for programs and clients: `validation.<rule>` for a built-in rule, or the code you gave `v.custom` or `v.fail` | `validation.unique_items` |
+| `message` | `[]const u8` | what the value must be, for people, without the field name: a built-in English message or your own | `must not contain duplicates` |
+| `field` | `?[]const u8` | the path of the value from the root; `null` for the root value itself | `roles` |
 
-`v.checkAll` returns all the violations at once; see
-[Checking values](#checking-values).
+The record logs the message as `reason`, since zefir-log keeps `message` for the
+record's own message, `Invalid sign-up`. `v.checkAll` returns all the violations
+at once; see [Checking values](#checking-values).
 
 ## Contents
 
@@ -142,6 +163,11 @@ const exe = b.addExecutable(.{
 });
 ```
 
+The validator works without other modules. The example programs of this guide
+also log what they find with [zefir-log](../../log/examples/README.md), as text,
+one line per record; to run them, import it too:
+`.{ .name = "log", .module = zefir.module("zefir-log") }`.
+
 > [!TIP]
 > validator is also part of the umbrella module: with `zefir.module("zefir")`
 > imported as `zefir`, it is `@import("zefir").validator`. Both are the same module.
@@ -154,50 +180,75 @@ Declare a struct with rules and check a value:
 
 ```zig
 const std = @import("std");
+const log = @import("log");
 const v = @import("validator");
 
-const SignUp = struct {
-    name: []const u8,
-    age: u8,
-    tags: []const []const u8 = &.{},
-    nickname: ?[]const u8 = null,
+const Role = enum { admin, editor, viewer };
+
+const Address = struct {
+    city: []const u8,
+    zip: []const u8,
 
     pub const field_rules = .{
-        .name = v.notEmpty, // one rule
-        .age = v.positive,
-        .tags = .{ v.notEmpty, v.each(v.notEmpty) }, // the list, then each item
-        .nickname = v.notEmpty, // null skips the rule
+        .city = v.notBlank,
+        .zip = .{ v.length(5, 5), v.digits },
+    };
+};
+
+const SignUp = struct {
+    email: []const u8,
+    age: u8,
+    roles: []const Role,
+    address: Address, // no entry below: Address declares the rules of its fields
+    referrer_id: ?u64 = null,
+
+    pub const field_rules = .{
+        .email = v.email, // one rule
+        .age = v.range(18, 120),
+        .roles = .{ v.notEmpty, v.uniqueItems }, // a tuple: its rules run in order
+        .referrer_id = v.positive, // null skips the rule
     };
 };
 
 pub fn main(init: std.process.Init) !void {
-    var stdout_buffer: [256]u8 = undefined;
-    var stdout = std.Io.File.stdout().writerStreaming(init.io, &stdout_buffer);
-    const out = &stdout.interface;
-    defer out.flush() catch {};
+    const logger: log.Logger = try .init(init.gpa, init.io, .{
+        .service = .{ .name = "signup-service" },
+        .format = .text,
+    });
+    defer logger.deinit();
 
-    const request: SignUp = .{ .name = "Ada", .age = 36, .tags = &.{ "admin", "" } };
+    const request: SignUp = .{
+        .email = "ada@example.com",
+        .age = 36,
+        .roles = &.{.editor},
+        .address = .{ .city = "Springfield", .zip = "6270" },
+    };
 
     var path_buf: [256]u8 = undefined;
     if (v.check(&request, &path_buf)) |violation| {
-        try out.print("{s}: {s} ({s})\n", .{ violation.field orelse "(root)", violation.message, violation.code });
+        logger.warn("Invalid sign-up", .{ .field = violation.field, .code = violation.code, .reason = violation.message });
     } else {
-        try out.print("valid\n", .{});
+        logger.info("Sign-up accepted", .{});
     }
 }
 ```
 
-It prints the first violation — the second tag is empty:
+It logs the first violation — the ZIP code has four digits:
 
 ```text
-tags[1]: must not be empty (validation.not_empty)
+$ zig build run
+2026-10-13T09:41:07.415Z WARN  Invalid sign-up field=address.zip code=validation.length reason="must be exactly 5 characters"
 ```
 
 - `field` is the path of the value: field names joined by `.`, item indexes in
-  brackets. `message` is a fragment without the field name or the value, and
-  `code` names the rule, for clients that branch on it or translate it.
-- `nickname` is `null`, so its rule is skipped; `""` would fail it.
-- Fix the tag and `v.check` returns `null`.
+  brackets. `address` has no entry in `field_rules`, but `Address` declares
+  rules of its own, so the walk enters it and checks its fields.
+- `message`, logged as `reason`, is a fragment without the field name or the
+  value, and `code` names the rule, for clients that branch on it or translate
+  it.
+- `referrer_id` is `null`, so its rule is skipped; `0` would fail it.
+- Fix the ZIP code and `v.check` returns `null`: the program logs
+  `Sign-up accepted`.
 
 ## Declaring rules
 
@@ -207,17 +258,21 @@ tags[1]: must not be empty (validation.not_empty)
 left to right.
 
 ```zig
+const Currency = enum { eur, usd, gbp, jpy };
+
 const Order = struct {
     id: []const u8,
     quantity: u32,
-    tags: []const []const u8,
+    currency: Currency,
+    coupons: []const []const u8,
     note: ?[]const u8 = null,
 
     pub const field_rules = .{
-        .id = v.notEmpty, // one rule
+        .id = v.uuid, // one rule
         .quantity = .{ v.positive, v.max(1000) }, // a tuple
-        .tags = .{ v.notEmpty, v.each(v.notEmpty) },
-        .note = v.notEmpty, // null skips the rule; "" fails it
+        .currency = v.oneOf(.{ .eur, .usd }), // some tags of the enum
+        .coupons = .{ v.maxItems(3), v.uniqueItems, v.each(v.alphanumeric) },
+        .note = v.maxLength(500), // null skips the rule
     };
 };
 ```
@@ -240,6 +295,24 @@ value is checked like a `T`. Presence is the job of the field type: a field that
 must be present is not optional, and there is no `required` rule. `""` is a
 value: `v.notEmpty` fails it.
 
+```zig
+const Checkout = struct {
+    billing: ?Address = null, // the Address of Getting started
+    tip_percent: ?u8 = null,
+    coupon: ?[]const u8 = null,
+
+    pub const field_rules = .{
+        .tip_percent = v.max(30),
+        .coupon = v.notEmpty, // null passes, "" fails
+    };
+};
+```
+
+An empty checkout, `.{}`, passes. With
+`.billing = .{ .city = " ", .zip = "62701" }` the violation is `billing.city`
+(`validation.not_blank`): the walk enters the address, and an optional adds no
+segment to the path.
+
 ### Nested structs and lists
 
 Struct fields, slices and arrays are walked automatically when there are rules
@@ -248,7 +321,7 @@ inside them:
 ```zig
 const Item = struct {
     sku: []const u8,
-    qty: u32,
+    qty: u16,
     pub const field_rules = .{ .sku = v.notEmpty, .qty = v.positive };
 };
 
@@ -260,17 +333,24 @@ const Cart = struct {
     items: []const Item,
     pub const field_rules = .{
         // the list as a whole, then each item; Item's own rules check its fields
-        .items = .{ v.notEmpty, v.each(v.custom("orders.out_of_stock", "must be in stock", inStock)) },
+        .items = .{
+            v.notEmpty,
+            v.maxItems(50),
+            v.uniqueBy(.sku),
+            v.each(v.custom("orders.out_of_stock", "must be in stock", inStock)),
+        },
     };
 };
 ```
 
 With items `{ "a", 1 }, { "b", 0 }` the violation is `items[1].qty`
-(`validation.positive`); with one item `{ "a", 600 }` it is `items[0]`
-(`orders.out_of_stock`).
+(`validation.positive`); with `{ "a", 1 }, { "a", 2 }` it is `items`
+(`validation.unique_items`, `must not contain duplicate sku values`); with one
+item `{ "a", 600 }` it is `items[0]` (`orders.out_of_stock`).
 
-- Rules of the list itself (`v.notEmpty`) come first; the rules of its items go
-  into one `v.each(...)`, the last rule of the tuple.
+- Rules of the list itself (`v.notEmpty`, `v.maxItems`, `v.uniqueBy`) come
+  first; the rules of its items go into one `v.each(...)`, the last rule of the
+  tuple.
 - When a rule of the list fails, no item is checked. When an item's rule fails,
   that item is not entered; the other items are checked.
 - Each item is walked once: first the `v.each` rules, then the rules of the
@@ -315,7 +395,7 @@ const rules = @import("rules.zig");
 
 pub const Line = struct {
     sku: []const u8,
-    qty: u32,
+    qty: u16,
     pack: u32,
     pub const field_rules = .{
         .sku = rules.sku,
@@ -325,7 +405,9 @@ pub const Line = struct {
 };
 ```
 
-A tuple inside a tuple is not flattened: `.pack = .{ rules.quantity, v.divisibleBy(2) }`
+One declaration serves fields of different types, a `u16` and a `u32` here:
+each use is checked against its own field. A tuple inside a tuple is not
+flattened: `.pack = .{ rules.quantity, v.divisibleBy(2) }`
 is a compile error (`item 0 of the tuple is a tuple; tuples are not flattened: join them with ++, e.g. name_rules ++ .{ v.notEmpty }, or use the tuple as the whole entry`).
 Use a tuple as the whole entry, or join tuples with `++`.
 
@@ -350,20 +432,35 @@ A check across fields goes into `pub fn validateSelf(self: *const T) ?v.Violatio
 
 ```zig
 const std = @import("std");
+const log = @import("log");
 const v = @import("validator");
 
-const Booking = struct {
-    start_day: u32,
-    end_day: u32,
-    guests: u8,
+const Room = enum { single, double, family };
 
-    pub const field_rules = .{ .guests = v.positive };
+const Booking = struct {
+    room: Room,
+    guests: u8,
+    check_in: []const u8,
+    check_out: []const u8,
+
+    pub const field_rules = .{
+        .guests = v.positive,
+        .check_in = v.date,
+        .check_out = v.date,
+    };
 
     pub fn validateSelf(self: *const Booking) ?v.Violation {
-        if (self.end_day < self.start_day)
-            return v.fail(@This(), .end_day, "bookings.end_before_start", "must not be before the start day");
-        if (self.end_day - self.start_day > 30)
-            return v.fail(@This(), null, "bookings.too_long", "must not be longer than 30 days");
+        // It runs only when every field passed: both dates are YYYY-MM-DD, so
+        // they compare as strings.
+        if (!std.mem.lessThan(u8, self.check_in, self.check_out))
+            return v.fail(@This(), .check_out, "bookings.check_out_too_early", "must be after the check-in date");
+        const beds: u8 = switch (self.room) {
+            .single => 1,
+            .double => 2,
+            .family => 4,
+        };
+        if (self.guests > beds)
+            return v.fail(@This(), null, "bookings.too_many_guests", "must have a bed for every guest");
         return null;
     }
 };
@@ -371,52 +468,58 @@ const Booking = struct {
 const Trip = struct {
     bookings: []const Booking,
 
-    pub const field_rules = .{ .bookings = v.notEmpty };
+    pub const field_rules = .{ .bookings = .{ v.notEmpty, v.maxItems(10) } };
 };
 
 pub fn main(init: std.process.Init) !void {
-    var stdout_buffer: [512]u8 = undefined;
-    var stdout = std.Io.File.stdout().writerStreaming(init.io, &stdout_buffer);
-    const out = &stdout.interface;
-    defer out.flush() catch {};
+    const logger: log.Logger = try .init(init.gpa, init.io, .{
+        .service = .{ .name = "booking-service" },
+        .format = .text,
+    });
+    defer logger.deinit();
 
     const trip: Trip = .{
         .bookings = &.{
-            .{ .start_day = 1, .end_day = 40, .guests = 2 }, // too long: the booking itself
-            .{ .start_day = 5, .end_day = 3, .guests = 2 }, // ends before it starts: end_day
-            .{ .start_day = 9, .end_day = 7, .guests = 0 }, // guests fails, so validateSelf does not run
+            // three guests, two beds: the booking itself
+            .{ .room = .double, .guests = 3, .check_in = "2026-07-01", .check_out = "2026-07-05" },
+            // checks out before it checks in: check_out
+            .{ .room = .single, .guests = 1, .check_in = "2026-07-05", .check_out = "2026-07-03" },
+            // guests fails, so validateSelf does not run
+            .{ .room = .family, .guests = 0, .check_in = "2026-07-09", .check_out = "2026-07-09" },
         },
     };
 
     const report = try v.checkAll(init.gpa, &trip);
     defer report.deinit();
     for (report.violations) |violation| {
-        try out.print("{s}: {s} ({s})\n", .{ violation.field orelse "(root)", violation.message, violation.code });
+        logger.warn("Invalid trip", .{ .field = violation.field, .code = violation.code, .reason = violation.message });
     }
 }
 ```
 
-It prints:
+It logs:
 
 ```text
-bookings[0]: must not be longer than 30 days (bookings.too_long)
-bookings[1].end_day: must not be before the start day (bookings.end_before_start)
-bookings[2].guests: must be greater than 0 (validation.positive)
+$ zig build run
+2026-10-13T09:41:07.415Z WARN  Invalid trip field=bookings[0] code=bookings.too_many_guests reason="must have a bed for every guest"
+2026-10-13T09:41:07.415Z WARN  Invalid trip field=bookings[1].check_out code=bookings.check_out_too_early reason="must be after the check-in date"
+2026-10-13T09:41:07.416Z WARN  Invalid trip field=bookings[2].guests code=validation.positive reason="must be greater than 0"
 ```
 
 - `validateSelf` runs after all fields of its struct, and only when none of
   them, at any depth, had a violation in this call; nested structs run theirs
-  first. The third booking ends before it starts too, but its `guests` field
-  fails, so its `validateSelf` does not run.
+  first. So it can rely on the rules of the fields: here both dates are valid
+  `YYYY-MM-DD`. The third booking checks out on the day it checks in, but its
+  `guests` field fails, so its `validateSelf` does not run.
 - It returns one violation, or `null` when the value is valid. An `inline fn` is
   accepted; any other signature is a compile error that shows the expected one.
 - `v.fail(@This(), .field, code, message)` builds the violation and checks it at
   compile time: the field must be a non-comptime field of the struct, the code
   follows the [custom code grammar](#vcustom), and the message is 1-512 bytes of
   valid UTF-8. A misspelled field is Zig's own error at your line, such as
-  `enum 'meta.FieldEnum(bookings.Booking)' has no member named 'ned'` for
+  `enum 'meta.FieldEnum(bookings.Booking)' has no member named 'chek_out'` for
   `Booking` in `bookings.zig`.
-- The walk appends the field to the struct's path: `bookings[1].end_day`. A
+- The walk appends the field to the struct's path: `bookings[1].check_out`. A
   `null` field gives the struct's own path, `bookings[0]`, and `field = null`
   for the root.
 - `validateSelf` must be pure: no I/O, no global state, no allocation, the same
@@ -424,7 +527,7 @@ bookings[2].guests: must be greater than 0 (validation.positive)
   times.
 - Conditional rules (class-validator's `@ValidateIf`) are code in `validateSelf`.
 
-A violation built by hand, `.{ .code = ..., .message = ..., .field = "end_day" }`,
+A violation built by hand, `.{ .code = ..., .message = ..., .field = "check_out" }`,
 compiles too, but nothing checks it at compile time. So the walk checks every
 result of `validateSelf` at run time — the code grammar, the message, the field
 name — and a malformed one is a programmer error:
@@ -558,9 +661,11 @@ keeps the result as a static string.
 
 ```zig
 const std = @import("std");
+const log = @import("log");
 const v = @import("validator");
 
 const Role = enum { admin, editor, viewer };
+const Language = enum { en, de, fr, ja };
 
 // A rule with a message is a value: declare it once, use it on any field.
 const filled = v.notEmpty.withMessage("please fill in this field");
@@ -570,7 +675,8 @@ const Profile = struct {
     nickname: []const u8,
     age: u8,
     role: Role,
-    tags: []const []const u8,
+    languages: []const Language,
+    website: ?[]const u8 = null,
     height: f64,
     weight: f64,
 
@@ -579,24 +685,27 @@ const Profile = struct {
         .nickname = filled,
         .age = v.range(18, 120).withMessage("age must be from {min} to {max}"),
         .role = v.oneOf(.{ .admin, .editor }).withMessage("role must be one of: {values}"),
-        .tags = v.maxItems(2).withMessage("at most {max} tags"),
+        .languages = v.maxItems(2).withMessage("at most {max} languages"),
+        .website = v.httpUrl.withMessage("website must be a link such as https://example.com"),
         .height = v.positive.withMessage("height must be above zero"), // NaN keeps validation.finite
         .weight = .{ v.finite.withMessage("weight must be a number"), v.positive },
     };
 };
 
 pub fn main(init: std.process.Init) !void {
-    var stdout_buffer: [1024]u8 = undefined;
-    var stdout = std.Io.File.stdout().writerStreaming(init.io, &stdout_buffer);
-    const out = &stdout.interface;
-    defer out.flush() catch {};
+    const logger: log.Logger = try .init(init.gpa, init.io, .{
+        .service = .{ .name = "profile-service" },
+        .format = .text,
+    });
+    defer logger.deinit();
 
     const profile: Profile = .{
         .name = "",
         .nickname = "ada",
         .age = 17,
         .role = .viewer,
-        .tags = &.{ "a", "b", "c" },
+        .languages = &.{ .en, .fr, .de },
+        .website = "example.com",
         .height = std.math.nan(f64),
         .weight = std.math.nan(f64),
     };
@@ -604,22 +713,24 @@ pub fn main(init: std.process.Init) !void {
     const report = try v.checkAll(init.gpa, &profile);
     defer report.deinit();
     for (report.violations) |violation| {
-        try out.print("{s}: {s} ({s})\n", .{ violation.field orelse "(root)", violation.message, violation.code });
+        logger.warn("Invalid profile", .{ .field = violation.field, .code = violation.code, .reason = violation.message });
     }
 }
 ```
 
-It prints the violation of every field that fails (`nickname` passes). The codes
+It logs the violation of every field that fails (`nickname` passes). The codes
 are the rules' own, and the messages come from the templates, except for
 `height`, whose precondition keeps its own:
 
 ```text
-name: please fill in this field (validation.not_empty)
-age: age must be from 18 to 120 (validation.range)
-role: role must be one of: admin, editor (validation.one_of)
-tags: at most 2 tags (validation.max_items)
-height: must be a finite number (validation.finite)
-weight: weight must be a number (validation.finite)
+$ zig build run
+2026-10-13T09:41:07.415Z WARN  Invalid profile field=name code=validation.not_empty reason="please fill in this field"
+2026-10-13T09:41:07.415Z WARN  Invalid profile field=age code=validation.range reason="age must be from 18 to 120"
+2026-10-13T09:41:07.415Z WARN  Invalid profile field=role code=validation.one_of reason="role must be one of: admin, editor"
+2026-10-13T09:41:07.415Z WARN  Invalid profile field=languages code=validation.max_items reason="at most 2 languages"
+2026-10-13T09:41:07.416Z WARN  Invalid profile field=website code=validation.http_url reason="website must be a link such as https://example.com"
+2026-10-13T09:41:07.416Z WARN  Invalid profile field=height code=validation.finite reason="must be a finite number"
+2026-10-13T09:41:07.416Z WARN  Invalid profile field=weight code=validation.finite reason="weight must be a number"
 ```
 
 - `.withMessage` works on every rule except `v.each`, which has no message of
@@ -843,7 +954,7 @@ pub fn check(value: anytype, path_buf: []u8) ?v.Violation
 var path_buf: [256]u8 = undefined;
 if (v.check(&request, &path_buf)) |violation| {
     // violation.code, violation.message, violation.field: ?[]const u8
-    std.debug.print("{s}: {s} ({s})\n", .{ violation.field orelse "(root)", violation.message, violation.code });
+    logger.warn("Invalid request", .{ .field = violation.field, .code = violation.code, .reason = violation.message });
 }
 ```
 
@@ -871,9 +982,9 @@ pub fn checkAll(gpa: std.mem.Allocator, value: anytype) std.mem.Allocator.Error!
 const report = try v.checkAll(gpa, &request);
 defer report.deinit();
 for (report.violations) |violation| {
-    std.debug.print("{s}: {s} ({s})\n", .{ violation.field orelse "(root)", violation.message, violation.code });
+    logger.warn("Invalid request", .{ .field = violation.field, .code = violation.code, .reason = violation.message });
 }
-if (report.truncated) std.debug.print("more than {d} violations\n", .{v.max_report_violations});
+if (report.truncated) logger.warn("More violations not reported", .{ .reported = report.violations.len });
 ```
 
 - `violations` are in walk order, at most one per value and at most 100
@@ -966,16 +1077,18 @@ const v = @import("validator");
 pub const Role = enum { admin, editor, viewer };
 
 pub const CreateUserRequest = struct {
+    email: []const u8,
     name: []const u8,
-    age: u8,
+    birthday: []const u8,
     roles: []const Role,
-    nickname: ?[]const u8 = null,
+    team_id: ?u32 = null,
 
     pub const field_rules = .{
-        .name = v.notEmpty,
-        .age = v.positive,
-        .roles = v.notEmpty,
-        .nickname = v.notEmpty,
+        .email = v.email,
+        .name = .{ v.notBlank, v.maxLength(64) },
+        .birthday = v.minDate("1900-01-01"),
+        .roles = .{ v.notEmpty, v.uniqueItems },
+        .team_id = v.positive,
     };
 };
 
@@ -987,12 +1100,12 @@ test "every DTO of this file passes v.assertRules" {
     }
 }
 
-test "CreateUserRequest rejects an empty name" {
+test "CreateUserRequest rejects an invalid email" {
     var path_buf: [256]u8 = undefined;
-    const bad: CreateUserRequest = .{ .name = "", .age = 30, .roles = &.{.admin} };
+    const bad: CreateUserRequest = .{ .email = "ada.example.com", .name = "Ada", .birthday = "1990-12-10", .roles = &.{.admin} };
     const violation = v.check(&bad, &path_buf) orelse return error.NoViolation;
-    try std.testing.expectEqualStrings("validation.not_empty", violation.code);
-    try std.testing.expectEqualStrings("name", violation.field.?);
+    try std.testing.expectEqualStrings("validation.email", violation.code);
+    try std.testing.expectEqualStrings("email", violation.field.?);
 }
 ```
 
@@ -1022,7 +1135,7 @@ error: validator: orders.Order.field_rules.id: positive expects a number, field 
 
 `orders.Order` is the type as Zig names it (the struct `Order` in `orders.zig`),
 `field_rules.id` the entry. Inside `v.each` the path ends with `[]`:
-`orders.Order.field_rules.tags[]`. In hints, rules are written as code you can
+`orders.Order.field_rules.coupons[]`. In hints, rules are written as code you can
 paste: `use v.each(v.positive)`.
 
 Errors come from two places, and Zig points to them differently:
@@ -1052,7 +1165,7 @@ library runs. These errors point at your line and do not start with
 | You wrote | Zig says |
 | --- | --- |
 | `v.notEmpty()`: a rule without parameters called like a function | `type 'core.Rule' not a function` |
-| `v.fail(@This(), .ned, ...)`: a field the struct does not have | `enum 'meta.FieldEnum(bookings.Booking)' has no member named 'ned'` |
+| `v.fail(@This(), .chek_out, ...)`: a field the struct does not have | `enum 'meta.FieldEnum(bookings.Booking)' has no member named 'chek_out'` |
 | `v.custom("users.ok", isFree)`: a missing argument | `expected 3 argument(s), found 2` |
 | `v.minItems.withMessage("...")`: `.withMessage` on a rule that needs a call | `no field or member function named 'withMessage' in 'fn (comptime usize) core.Rule'` |
 | `v.minItems(-1)`: a negative count, or one above `maxInt(usize)` | `type 'usize' cannot represent integer value '-1'` |

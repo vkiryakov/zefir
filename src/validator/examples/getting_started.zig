@@ -1,32 +1,52 @@
 const std = @import("std");
+const log = @import("log");
 const v = @import("validator");
 
-const SignUp = struct {
-    name: []const u8,
-    age: u8,
-    tags: []const []const u8 = &.{},
-    nickname: ?[]const u8 = null,
+const Role = enum { admin, editor, viewer };
+
+const Address = struct {
+    city: []const u8,
+    zip: []const u8,
 
     pub const field_rules = .{
-        .name = v.notEmpty, // one rule
-        .age = v.positive,
-        .tags = .{ v.notEmpty, v.each(v.notEmpty) }, // the list, then each item
-        .nickname = v.notEmpty, // null skips the rule
+        .city = v.notBlank,
+        .zip = .{ v.length(5, 5), v.digits },
+    };
+};
+
+const SignUp = struct {
+    email: []const u8,
+    age: u8,
+    roles: []const Role,
+    address: Address, // no entry below: Address declares the rules of its fields
+    referrer_id: ?u64 = null,
+
+    pub const field_rules = .{
+        .email = v.email, // one rule
+        .age = v.range(18, 120),
+        .roles = .{ v.notEmpty, v.uniqueItems }, // a tuple: its rules run in order
+        .referrer_id = v.positive, // null skips the rule
     };
 };
 
 pub fn main(init: std.process.Init) !void {
-    var stdout_buffer: [256]u8 = undefined;
-    var stdout = std.Io.File.stdout().writerStreaming(init.io, &stdout_buffer);
-    const out = &stdout.interface;
-    defer out.flush() catch {};
+    const logger: log.Logger = try .init(init.gpa, init.io, .{
+        .service = .{ .name = "signup-service" },
+        .format = .text,
+    });
+    defer logger.deinit();
 
-    const request: SignUp = .{ .name = "Ada", .age = 36, .tags = &.{ "admin", "" } };
+    const request: SignUp = .{
+        .email = "ada@example.com",
+        .age = 36,
+        .roles = &.{.editor},
+        .address = .{ .city = "Springfield", .zip = "6270" },
+    };
 
     var path_buf: [256]u8 = undefined;
     if (v.check(&request, &path_buf)) |violation| {
-        try out.print("{s}: {s} ({s})\n", .{ violation.field orelse "(root)", violation.message, violation.code });
+        logger.warn("Invalid sign-up", .{ .field = violation.field, .code = violation.code, .reason = violation.message });
     } else {
-        try out.print("valid\n", .{});
+        logger.info("Sign-up accepted", .{});
     }
 }
