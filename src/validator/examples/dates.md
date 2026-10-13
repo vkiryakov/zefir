@@ -5,10 +5,6 @@ carries a date as the string it arrived as. `v.date`, `v.rfc3339`, `v.iso8601`
 and `v.militaryTime` check a format; `v.minDate` and `v.maxDate` bound a date
 or a date-time.
 
-> [!NOTE]
-> These rules ship in v0.4.0; until then they are on the `dev` branch
-> ([Installation](README.md#installation)).
-
 ```zig
 const Booking = struct {
     check_in: []const u8,
