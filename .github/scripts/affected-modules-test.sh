@@ -62,8 +62,8 @@ while IFS='|' read -r change modules <&3; do
     git commit -q -m "$change"
     expect "$(echo $change)" "$(echo $modules)" "$(sh "$script" "$base" HEAD)"
 done 3<<'EOF'
-edit src/core/Context.zig                       | core log confy rpc orm zefir
-edit src/log/Logger.zig                         | log confy rpc orm zefir
+edit src/core/Context.zig                       | core log confy validator rpc orm zefir
+edit src/log/Logger.zig                         | log confy validator rpc orm zefir
 edit src/confy/root.zig                         | confy rpc zefir
 edit src/validator/strings.zig                  | validator zefir
 edit src/rpc/root.zig                           | rpc zefir
@@ -81,7 +81,7 @@ edit src/nats/root.zig                          | core log confy validator rpc o
 edit src/helpers.zig                            | core log confy validator rpc orm zefir
 edit src/notes.md                               | core log confy validator rpc orm zefir
 edit LICENSE                                    | core log confy validator rpc orm zefir
-git rm -q src/log/root.zig                      | log confy rpc orm zefir
+git rm -q src/log/root.zig                      | log confy validator rpc orm zefir
 git mv src/orm/root.zig src/rpc/orm.zig         | rpc orm zefir
 EOF
 

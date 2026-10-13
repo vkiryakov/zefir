@@ -5,22 +5,25 @@
 #   affected-modules.sh BASE HEAD   the changes of `git diff BASE...HEAD`
 #   affected-modules.sh --all       every module
 #
-# A file under src/<module>/ affects that module and every module that
-# imports it, directly or through other modules; zefir imports them all.
-# build.zig, build.zig.zon, src/zefir.zig, .github/ and any other path the
-# script does not know affect every module. Documentation outside src/
+# A file under src/<module>/ affects that module and every module whose
+# tests import it, directly or through other modules; zefir imports them
+# all. build.zig, build.zig.zon, src/zefir.zig, .github/ and any other path
+# the script does not know affect every module. Documentation outside src/
 # (*.md files and docs/) affects none.
 set -eu
 
-# The modules and what each one imports. Keep this in sync with the
-# `.imports` of the modules in build.zig: CI tests only the modules listed
-# here.
+# The modules and what the tests of each one import. Keep this in sync with
+# build.zig: the `.imports` of each module and of the programs that its
+# test-<module> step builds. CI tests only the modules listed here.
 modules="core log confy validator rpc orm zefir"
 imports() {
     case $1 in
-    core | validator) ;;
+    core) ;;
     log) echo core ;;
     confy) echo log ;;
+    # The validator imports nothing, but the examples of its guide log the
+    # violations they find.
+    validator) echo log ;;
     rpc) echo confy ;;
     orm) echo log ;;
     zefir) echo core log confy validator rpc orm ;;
