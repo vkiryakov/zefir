@@ -307,11 +307,13 @@ pub fn next(q: *MessageQueue, io: Io, timeout: Io.Timeout) NextError!?Message {
 }
 
 /// Every message was taken, and its owner came back for the next one, or
-/// ended the queue: nothing it received is still being worked on.
+/// ended the queue: nothing it received is still being worked on. A reader
+/// still inside `next()` when the queue has ended is about to get its end,
+/// and is waited for.
 pub fn settled(q: *MessageQueue, io: Io) bool {
     q.mutex.lockUncancelable(io);
     defer q.mutex.unlock(io);
-    return q.messages.len == 0 and !q.in_hand;
+    return q.messages.len == 0 and !q.in_hand and !(q.receiving and q.ended != null);
 }
 
 /// The messages waiting to be taken, and their bytes.
@@ -575,5 +577,34 @@ test "a queue is settled once its messages were taken and its owner came back fo
     n.deinit();
     // Its owner ends it: done with what it took.
     _ = q.end(io, .finished, true);
+    try testing.expect(q.settled(io));
+}
+
+fn nextLong(q: *MessageQueue, io: Io) NextError!?Message {
+    return q.next(io, .none);
+}
+
+test "a reader still inside next() when the queue ends is waited for" {
+    const io = testing.io;
+    var q: MessageQueue = .init(testing.allocator, .{ .messages = 4, .bytes = 1024 }, .drop_newest, null);
+    defer q.deinit();
+    var reader = try io.concurrent(nextLong, .{ &q, io });
+    defer _ = reader.cancel(io) catch null;
+    const give_up = time.after(io, .fromSeconds(5));
+    while (!q.isReceiving(io)) {
+        if (time.expired(io, give_up)) return error.TestNeverWaited;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+    // Waiting for a message: nothing is worked on.
+    try testing.expect(q.settled(io));
+    // Ended under the reader, which has not returned yet.
+    q.mutex.lockUncancelable(io);
+    q.ended = .finished;
+    q.mutex.unlock(io);
+    try testing.expect(!q.settled(io));
+    q.mutex.lockUncancelable(io);
+    q.not_empty.broadcast(io);
+    q.mutex.unlock(io);
+    try testing.expect(try reader.await(io) == null);
     try testing.expect(q.settled(io));
 }
