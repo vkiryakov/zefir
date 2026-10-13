@@ -135,6 +135,15 @@ Add Zefir to your `build.zig.zon`; log ships since v0.3.0:
 zig fetch --save git+https://github.com/vkiryakov/zefir#v0.4.0
 ```
 
+> [!IMPORTANT]
+> log builds for 64-bit targets only, such as x86_64 and aarch64. Its
+> counters and the positions of the queued mode are 64-bit atomics
+> (`std.atomic.Value(u64)`), so they never wrap in practice: a 32-bit counter
+> would wrap after about 71 minutes at a million records a second. On a 32-bit
+> target, such as x86 or 32-bit ARM, Zig 0.17 allows atomic read-modify-write
+> operations only on integers of up to 32 bits, so the build stops with
+> `expected 32-bit integer type or smaller; found 64-bit integer type`.
+
 Then import the `zefir-log` module in `build.zig`:
 
 ```zig
