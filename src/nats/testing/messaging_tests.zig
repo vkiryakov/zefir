@@ -218,34 +218,48 @@ fn awaitEvent(io: Io, event: *Io.Event) !void {
     }
 }
 
-/// Waits until a publish waits for room in the outbound queue, for 5 s at
-/// most.
-fn awaitRoomWaiter(client: *Client) !void {
-    const io = client.io;
-    const give_up = time.after(io, .fromSeconds(5));
-    while (client.outbound.roomWaiters(io) == 0) {
-        if (time.expired(io, give_up)) return error.TestPublishNeverWaited;
-        try io.sleep(.fromMilliseconds(1), .awake);
-    }
-}
-
 fn elapsedSince(io: Io, start: Io.Timestamp) Io.Duration {
     return start.durationTo(Io.Clock.awake.now(io));
 }
 
-fn publishLate(client: *Client) Client.PublishError!void {
-    return client.publish("late", "x");
+/// Publishes `payload` until a publish fails; counts the ones that went in.
+fn publishUntilError(client: *Client, payload: []const u8, published: *std.atomic.Value(u32)) Client.PublishError!void {
+    while (true) {
+        try client.publish("stalled", payload);
+        _ = published.fetchAdd(1, .monotonic);
+    }
 }
 
-/// A client whose outbound queue is full: the server does not read, and a
-/// frame of 16 MiB fills the socket. The next publish waits for room.
+/// Waits until a publish is stuck: it waits for room, and none went in for
+/// 200 ms. How much the sockets take first differs by system; 10 s at most.
+fn awaitStuck(client: *Client, published: *std.atomic.Value(u32)) !void {
+    const io = client.io;
+    const give_up = time.after(io, .fromSeconds(10));
+    var last = published.load(.monotonic);
+    var still_since = Io.Clock.awake.now(io);
+    while (true) {
+        try io.sleep(.fromMilliseconds(10), .awake);
+        const now = published.load(.monotonic);
+        if (now != last or client.outbound.roomWaiters(io) == 0) {
+            last = now;
+            still_since = Io.Clock.awake.now(io);
+        } else if (elapsedSince(io, still_since).toMilliseconds() >= 200) {
+            return;
+        }
+        if (time.expired(io, give_up)) return error.TestPublishNeverWaited;
+    }
+}
+
+/// A client whose server does not read: frames of 1 MiB back up in the
+/// sockets until a publish waits for room in the outbound queue.
 const Stalled = struct {
     listener: net.Server,
     release: Io.Event = .unset,
     server: Io.Future(anyerror!void),
     url: [64]u8 = undefined,
     client: Client,
-    big: []u8,
+    payload: []u8,
+    published: std.atomic.Value(u32) = .init(0),
 
     fn start(s: *Stalled) !void {
         const io = testing.io;
@@ -263,11 +277,9 @@ const Stalled = struct {
         });
         errdefer s.client.deinit();
         try s.client.connect();
-        s.big = try testing.allocator.alloc(u8, 16 * 1024 * 1024);
-        errdefer testing.allocator.free(s.big);
-        @memset(s.big, 'b');
-        // The queue was empty, so this one goes in at once.
-        try s.client.publish("big", s.big);
+        s.payload = try testing.allocator.alloc(u8, 1024 * 1024);
+        @memset(s.payload, 'b');
+        s.published = .init(0);
     }
 
     fn deinit(s: *Stalled) void {
@@ -276,7 +288,7 @@ const Stalled = struct {
         s.client.deinit();
         s.server.cancel(io) catch {};
         s.listener.deinit(io);
-        testing.allocator.free(s.big);
+        testing.allocator.free(s.payload);
     }
 };
 
@@ -289,9 +301,9 @@ test "a publish that waits for room in the outbound queue can be canceled" {
     var s: Stalled = undefined;
     try s.start();
     defer s.deinit();
-    var publisher = try io.concurrent(publishLate, .{&s.client});
+    var publisher = try io.concurrent(publishUntilError, .{ &s.client, s.payload, &s.published });
     defer publisher.cancel(io) catch {};
-    try awaitRoomWaiter(&s.client);
+    try awaitStuck(&s.client, &s.published);
     try testing.expectError(error.Canceled, publisher.cancel(io));
     try testing.expect(s.client.isConnected());
 }
@@ -301,9 +313,9 @@ test "close() while a publish waits for room: ConnectionClosed at once" {
     var s: Stalled = undefined;
     try s.start();
     defer s.deinit();
-    var publisher = try io.concurrent(publishLate, .{&s.client});
+    var publisher = try io.concurrent(publishUntilError, .{ &s.client, s.payload, &s.published });
     defer publisher.cancel(io) catch {};
-    try awaitRoomWaiter(&s.client);
+    try awaitStuck(&s.client, &s.published);
     const start = Io.Clock.awake.now(io);
     s.client.close();
     try testing.expectError(error.ConnectionClosed, publisher.await(io));
