@@ -530,7 +530,7 @@ Examples:
 | `v.finite` | `f64` | `+inf` or `-inf` | `validation.finite` |
 | `v.finite` | `f64` | `1.7976931348623157e308`, the largest `f64` | passes |
 | `v.finite` | `f64` | `5e-324`, the smallest subnormal | passes |
-| `v.finite.withMessage("цена должна быть числом")` | `f64` | NaN | `validation.finite` / `цена должна быть числом` |
+| `v.finite.withMessage("price must be a number")` | `f64` | NaN | `validation.finite` / `price must be a number` |
 | `v.finite` | `?f64` | `null` | passes: `null` skips the rule |
 
 See also: [the overview](README.md) · [Coming from class-validator](class_validator.md)
