@@ -109,10 +109,12 @@ pub const Limits = struct {
     /// TooManySubscriptions.
     max_subscriptions: u32 = 65_536,
     /// The server's `max_control_line`: the longest arguments of a protocol
-    /// line, such as a subject with its reply-to. Messages the server sends
-    /// may be a few bytes longer, INFO and -ERR up to 64 KiB. Raise it
-    /// together with the server's setting. It must hold this client's
-    /// CONNECT, which the server checks against the same limit.
+    /// line this client sends, such as a subject with its reply-to. Raise
+    /// it together with the server's setting. It must hold this client's
+    /// CONNECT, which the server checks against the same limit. Lines from
+    /// the server may be longer: the client reads any line up to 64 KiB, or
+    /// up to four times this limit when that is more, since a -ERR quotes a
+    /// refused subject with every byte that does not print escaped.
     max_control_line_bytes: u32 = 4096,
     /// The largest message accepted, headers included; larger ones are
     /// read past, dropped and counted. A larger reply to a request is
@@ -131,8 +133,9 @@ pub const Error = error{InvalidOptions};
 pub const max_connect_json = 4096;
 /// Servers given and discovered, together.
 pub const max_servers = 64;
-/// The largest `limits.max_control_line_bytes`: the read buffer holds the
-/// longest line the server may send.
+/// The largest `limits.max_control_line_bytes`. The read buffer holds the
+/// longest line the server may send: 64 KiB, or four times the limit when
+/// that is more.
 pub const max_control_line_limit = 64 * 1024;
 
 /// Checks every option; nothing touches the network.

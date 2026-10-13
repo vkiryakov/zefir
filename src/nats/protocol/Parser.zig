@@ -21,16 +21,30 @@ const Parser = @This();
 
 pub const Limits = struct {
     /// The server's `max_control_line`: the longest arguments it takes on a
-    /// line from a client. The lines it sends back may be longer by
-    /// `msg_line_overhead`. CRLF is not counted.
+    /// line from a client. A MSG or HMSG line it sends back is longer by
+    /// `msg_line_overhead` at least. CRLF is not counted.
     max_control_line: usize = 4096,
     /// The longest INFO or -ERR line, CRLF not counted: INFO lists the
     /// cluster, and -ERR quotes the subject it refused.
     max_info_line: usize = 64 * 1024,
 };
 
+/// The limits for a server whose `max_control_line` is `max_control_line`.
+/// A -ERR that refuses a subscription quotes its subject and queue group,
+/// up to `max_control_line` bytes, the way Go's %q does, where a byte that
+/// does not print takes four (`\xff`); INFO gets 64 KiB at least.
+pub fn limitsFor(max_control_line: usize) Limits {
+    return .{
+        .max_control_line = max_control_line,
+        .max_info_line = @max(64 * 1024, 4 *| max_control_line +| 128),
+    };
+}
+
 /// What a MSG or HMSG line adds to the arguments a publisher sent: the
-/// operation and a subscription id of up to 20 digits, with its space.
+/// operation and a subscription id of up to 20 digits, with its space. The
+/// server may make a line longer still: an MQTT topic, a subject mapping or
+/// the reply of a JetStream delivery is not bound by the publisher's
+/// control line. So a MSG or HMSG line may take the whole read buffer.
 pub const msg_line_overhead = "HMSG ".len + 20 + 1;
 
 /// The size of the reader's buffer: the longest line `limits` allow, with
@@ -122,10 +136,11 @@ pub fn next(p: *Parser, input: []const u8) Error!Step {
 fn nextLine(p: *Parser, input: []const u8) Error!Step {
     // INFO and -ERR have a limit of their own; the first four bytes tell
     // which applies. Any line may take more than four bytes, so a shorter
-    // input never meets a limit before they are known.
+    // input never meets a limit before they are known. The other lines may
+    // fill the buffer, which holds the longer of the two.
     const is_long = input.len >= 4 and
         (std.ascii.eqlIgnoreCase(input[0..4], "INFO") or std.ascii.eqlIgnoreCase(input[0..4], "-ERR"));
-    const limit = if (is_long) p.limits.max_info_line else p.limits.max_control_line +| msg_line_overhead;
+    const limit = if (is_long) p.limits.max_info_line else @max(p.limits.max_control_line +| msg_line_overhead, p.limits.max_info_line);
     // A line may take `limit` bytes, then CR and LF.
     const window = input[0..@min(input.len, limit +| 2)];
     const lf = std.mem.findScalar(u8, window, '\n') orelse {
@@ -342,11 +357,18 @@ test "payload bytes that look like frames are payload" {
 }
 
 test "line limits: exactly at the limit passes, one byte more fails" {
-    // A line may take the server's limit plus msg_line_overhead.
+    // A line may take the server's limit plus msg_line_overhead, when that
+    // is longer than INFO's limit.
+    const narrow_info: Limits = .{ .max_control_line = 4096, .max_info_line = 1024 };
     const subject: [4096 + msg_line_overhead - "MSG ".len - " 1 0".len]u8 = @splat('a');
-    try expectTranscript("MSG " ++ subject ++ " 1 - 0 0\nEND\n", "MSG " ++ subject ++ " 1 0\r\n\r\n");
-    try expectTranscript("ERROR LineTooLong\n", "MSG " ++ subject ++ "a 1 0\r\n\r\n");
-    try expectTranscript("ERROR LineTooLong\n", "MSG " ++ subject ++ "a 1 0\n\r\n");
+    try expectTranscriptWith("MSG " ++ subject ++ " 1 - 0 0\nEND\n", "MSG " ++ subject ++ " 1 0\r\n\r\n", narrow_info);
+    try expectTranscriptWith("ERROR LineTooLong\n", "MSG " ++ subject ++ "a 1 0\r\n\r\n", narrow_info);
+    try expectTranscriptWith("ERROR LineTooLong\n", "MSG " ++ subject ++ "a 1 0\n\r\n", narrow_info);
+    // Otherwise as long as INFO may be: the buffer holds it anyway.
+    const wide_info: Limits = .{ .max_control_line = 16, .max_info_line = 64 };
+    const wide: [64 - "MSG ".len - " 1 0".len]u8 = @splat('w');
+    try expectTranscriptWith("MSG " ++ wide ++ " 1 - 0 0\nEND\n", "MSG " ++ wide ++ " 1 0\r\n\r\n", wide_info);
+    try expectTranscriptWith("ERROR LineTooLong\n", "MSG " ++ wide ++ "w 1 0\r\n\r\n", wide_info);
 
     const small: Limits = .{ .max_control_line = 16, .max_info_line = 32 };
     const name: [16 + msg_line_overhead - "MSG ".len - " 1 0".len]u8 = @splat('b');
@@ -424,6 +446,62 @@ test "the largest sizes parse, and a message may stop half way" {
     try expectTranscript("MSG s 18446744073709551615 - 0 4294967295\nBODY abc\nINCOMPLETE 0\n", "MSG s 18446744073709551615 4294967295\r\nabc");
     try expectTranscript("MSG s 1 - 0 3\nBODY abc\nINCOMPLETE 1\n", "MSG s 1 3\r\nabc\r");
     try expectTranscript("INCOMPLETE 8\n", "MSG s 1 ");
+}
+
+/// What `parseLong` found: no slices, since its line is freed.
+const LongLine = struct {
+    tag: std.meta.Tag(Frame),
+    subject_len: usize = 0,
+    has_reply: bool = false,
+};
+
+/// Parses one line of `len` bytes, CRLF included: `head`, then 'a' up to
+/// `tail`.
+fn parseLong(limits: Limits, len: usize, head: []const u8, tail: []const u8) !LongLine {
+    const line = try testing.allocator.alloc(u8, len);
+    defer testing.allocator.free(line);
+    @memcpy(line[0..head.len], head);
+    @memset(line[head.len .. len - tail.len - 2], 'a');
+    @memcpy(line[len - tail.len - 2 ..][0..tail.len], tail);
+    line[len - 2] = '\r';
+    line[len - 1] = '\n';
+    var parser: Parser = .init(limits);
+    const step = try parser.next(line);
+    if (step.consumed != len) return error.TestLineNotWhole;
+    const frame = step.frame orelse return error.TestNeedMore;
+    return switch (frame) {
+        .msg => |m| .{ .tag = .msg, .subject_len = m.subject.len, .has_reply = m.reply_to != null },
+        else => .{ .tag = frame },
+    };
+}
+
+test "a MSG line may fill the whole read buffer: subjects the server made longer" {
+    // An MQTT topic, a subject mapping or a JetStream reply can make a MSG
+    // line longer than any publisher's control line.
+    const defaults: Limits = .{};
+    const lengthened = try parseLong(defaults, 5008, "MSG ", " 1 0");
+    try testing.expectEqual(5008 - "MSG ".len - " 1 0\r\n".len, lengthened.subject_len);
+    const with_reply = try parseLong(defaults, 4000 + 160, "MSG ", " 1 $JS.ACK.stream.consumer.1.2.3.1700000000000000000.0 0");
+    try testing.expect(with_reply.has_reply);
+    // Up to the longest line the buffer holds, and not a byte more.
+    const longest = bufferLen(defaults);
+    try testing.expectEqual(.msg, (try parseLong(defaults, longest, "MSG ", " 1 0")).tag);
+    try testing.expectError(error.LineTooLong, parseLong(defaults, longest + 1, "MSG ", " 1 0"));
+}
+
+test "a -ERR that quotes the longest subscription a client may send fits" {
+    // The server quotes the refused subject the way Go's %q does: a byte
+    // that is not UTF-8 takes four, `\xff`.
+    for ([_]usize{ 4096, 16 * 1024, 64 * 1024 }) |control_line| {
+        const limits = limitsFor(control_line);
+        const subject_len = control_line - " 1".len;
+        const head = "-ERR 'Permissions Violation for Subscription to \"";
+        const tail = "\"'";
+        const line = try parseLong(limits, head.len + 4 * subject_len + tail.len + 2, head, tail);
+        try testing.expectEqual(.err, line.tag);
+    }
+    try testing.expectEqual(64 * 1024, limitsFor(4096).max_info_line);
+    try testing.expectEqual(4096, limitsFor(4096).max_control_line);
 }
 
 test "a buffer of bufferLen bytes holds the longest line, and never fills without one" {

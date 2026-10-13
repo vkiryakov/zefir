@@ -757,7 +757,7 @@ pub fn init(gpa: Allocator, io: Io, options: Options) InitError!Client {
     var pool: Pool = try .init(gpa, io, owned.servers, owned.options.randomize_servers);
     errdefer pool.deinit(gpa);
     const subscriptions: Registry = .{ .max_line = owned.options.limits.max_control_line_bytes };
-    const parser_limits: Parser.Limits = .{ .max_control_line = owned.options.limits.max_control_line_bytes };
+    const parser_limits = Parser.limitsFor(owned.options.limits.max_control_line_bytes);
     return .{
         .gpa = gpa,
         .io = io,
@@ -1070,6 +1070,15 @@ test "a message fits when it is within max_payload, or nine digits when that is 
     try testing.expect(fitsPayload(999_999_999, 0));
     try testing.expect(!fitsPayload(1_000_000_000, 0));
     try testing.expect(!fitsPayload(1_000_000_000, 2_000_000_000));
+}
+
+test "the read buffer holds the -ERR that quotes the longest subscription the limits allow" {
+    for ([_]u32{ 4096, 16 * 1024, Options.max_control_line_limit }) |control_line| {
+        var client: Client = try .init(testing.allocator, testing.io, .{ .servers = one_server, .limits = .{ .max_control_line_bytes = control_line } });
+        defer client.deinit();
+        try testing.expectEqual(Parser.limitsFor(control_line), client.parser_limits);
+        try testing.expectEqual(Parser.bufferLen(Parser.limitsFor(control_line)), client.read_buffer.len);
+    }
 }
 
 test "connect needs an io with concurrency" {
