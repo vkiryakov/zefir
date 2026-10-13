@@ -15,6 +15,6 @@ fn exitOnPanic(message: []const u8, _: ?usize) noreturn {
     std.process.exit(3);
 }
 
-pub fn main(init: std.process.Init) !void {
+pub fn main(init: std.process.Init) @typeInfo(@TypeOf(example.main)).@"fn".return_type.? {
     return example.main(init);
 }

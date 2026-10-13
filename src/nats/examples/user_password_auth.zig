@@ -34,7 +34,7 @@ const Config = struct {
     },
 };
 
-pub fn main(init: std.process.Init) !void {
+pub fn main(init: std.process.Init) !u8 {
     var config: Config = undefined;
     // A missing user or password stops the program here, and says which.
     confy.loadOrExit(init.arena.allocator(), &config, .{
@@ -67,9 +67,11 @@ pub fn main(init: std.process.Init) !void {
     defer client.deinit();
     client.connect() catch |err| switch (err) {
         // A wrong user or password. Not worth retrying with the same ones.
+        // Returning, rather than exiting, lets `deinit` wipe the client's
+        // copy of the credentials.
         error.AuthenticationFailed => {
             logger.err("The server refused the user or the password", .{ .user = config.nats.user });
-            std.process.exit(1);
+            return 1;
         },
         else => return err,
     };
@@ -78,4 +80,5 @@ pub fn main(init: std.process.Init) !void {
     const round_trip = try client.rtt(.{});
     logger.info("Server reached", .{ .rtt_us = round_trip.toMicroseconds() });
     try client.drain(.{});
+    return 0;
 }
