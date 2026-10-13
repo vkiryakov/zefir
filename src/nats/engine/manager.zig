@@ -330,15 +330,25 @@ fn shutdown(io: Io, stream: Io.net.Stream) void {
 }
 
 /// The reader or writer could not start: the connection is dropped, and
-/// the client closes.
+/// the client closes, the way it does when it gives up.
 fn abandon(client: *Client, err: Io.ConcurrentError) void {
     const io = client.io;
     shutdown(io, client.connection.stream);
     client.connection_tasks.cancel(io);
     client.connection.stream.close(io);
-    connectFailed(client, err);
+    {
+        client.mutex.lockUncancelable(io);
+        defer client.mutex.unlock(io);
+        if (client.status == .connecting) client.connect_error = err;
+        client.status = .closed;
+        if (client.close_reason == null) client.close_reason = if (client.ever_connected) .reconnect_failed else .connect_failed;
+        client.changed.broadcast(io);
+    }
     client.inbox.end(io, .closed);
+    client.outbound.close(io);
     disconnected(client);
+    noteDropped(client, client.outbound.discard(io));
+    announceClosed(client);
 }
 
 /// Sends a PING every `ping_interval` until the connection must end. After
@@ -431,7 +441,7 @@ fn disconnectReason(exit: Exit) ?events.Event.Disconnected.Reason {
 /// Publishes that never went out are dropped: an event says how many.
 pub fn noteDropped(client: *Client, settled: Outbound.Settled) void {
     if (settled.dropped == 0) return;
-    log.debug("{d} publishes never sent: dropped", .{settled.dropped});
+    log.warn("{d} publishes never sent: dropped", .{settled.dropped});
     client.events.push(client.io, .{ .message_dropped = .{ .reason = .unsent, .count = settled.dropped } });
 }
 
@@ -656,9 +666,9 @@ const Incoming = struct {
             log.debug("no memory to queue a message for subscription {d}: dropped", .{in.sid});
             client.events.push(client.io, .{ .message_dropped = .{ .reason = .no_memory, .count = 1, .sid = in.sid } });
         }
-        // One event per run of drops.
+        // One warning and one event per run of drops.
         if (pushed.overflow_began) {
-            log.debug("subscription {d} is a slow consumer: messages dropped", .{in.sid});
+            log.warn("subscription {d} is a slow consumer: messages dropped", .{in.sid});
             client.events.push(client.io, .{ .slow_consumer = in.sid });
         }
         if (pushed.ended == .slow_consumer) {

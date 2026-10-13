@@ -25,16 +25,22 @@ subscriptions: std.AutoArrayHashMapUnmanaged(u64, *Subscription) = .empty,
 next_sid: u64 = 1,
 /// The client closed: no new subscriptions.
 closed: bool = false,
+/// The longest arguments of a SUB line the server takes
+/// (`limits.max_control_line_bytes`).
+max_line: u32 = std.math.maxInt(u32),
 
-pub const RegisterError = error{ TooManySubscriptions, ConnectionClosed, OutOfMemory };
+pub const RegisterError = error{ TooManySubscriptions, ConnectionClosed, OutOfMemory, InvalidSubject };
 
 /// Gives `sub` the next SID and routes messages for it to it. At most
-/// `max` subscriptions are registered at once.
+/// `max` subscriptions are registered at once. A subscription whose SUB
+/// line would be longer than `max_line` is InvalidSubject and never
+/// registered, so no reconnect sends it either.
 pub fn register(r: *Registry, io: Io, gpa: Allocator, sub: *Subscription, max: u32) RegisterError!void {
     r.mutex.lockUncancelable(io);
     defer r.mutex.unlock(io);
     if (r.closed) return error.ConnectionClosed;
     if (r.subscriptions.count() >= max) return error.TooManySubscriptions;
+    if (encoder.subArgsLen(sub.subject, sub.queue_group, r.next_sid) > r.max_line) return error.InvalidSubject;
     try r.subscriptions.ensureUnusedCapacity(gpa, 1);
     sub.sid = r.next_sid;
     r.next_sid += 1;
@@ -451,4 +457,17 @@ test "a new connection subscribes again what still takes messages, with the same
     defer none.deinit();
     try empty.writeRestore(io, &none.writer, null);
     try testing.expectEqual(0, none.written().len);
+}
+
+test "a subscription whose SUB line is too long is never registered" {
+    const io = testing.io;
+    var r: Registry = .{ .max_line = 12 };
+    defer r.deinit(testing.allocator);
+    // "abcdefghi 1" is 11 bytes, "abcdefghijk 1" 13.
+    const fits = try newSubscription(testing.allocator, "abcdefghi");
+    try r.register(io, testing.allocator, fits, 10);
+    const long = try newSubscription(testing.allocator, "abcdefghijk");
+    defer destroy(testing.allocator, long);
+    try testing.expectError(error.InvalidSubject, r.register(io, testing.allocator, long, 10));
+    try testing.expectEqual(1, r.count(io));
 }

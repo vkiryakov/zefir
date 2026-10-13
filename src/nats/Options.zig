@@ -86,7 +86,10 @@ pub const ReconnectOptions = struct {
     /// BufferFull; with 0 they fail at once with Disconnected. Nothing is
     /// ever sent twice.
     buffer_bytes: usize = 8 * 1024 * 1024,
-    /// Stop after a server rejects the credentials twice in a row.
+    /// Stop after a server rejects the credentials twice the same way in a
+    /// row. A refusal on a live connection, as when the password changes on
+    /// the server, counts as the first: with one server the client stops at
+    /// the first refused reconnect, as nats.go does.
     abort_on_auth_error: bool = true,
 };
 

@@ -18,9 +18,12 @@
 //! When the connection is lost, the client reconnects as
 //! `options.reconnect` says, going round its servers and those the cluster
 //! announces, and subscribes again to everything it had; requests waiting
-//! for replies fail with Disconnected at once. Meanwhile `state()` is
-//! `.reconnecting`, publishes and new requests fail with Disconnected,
-//! flushes too, and new subscriptions go out once connected again.
+//! for replies fail with Disconnected at once, and nothing of them is sent
+//! later. Meanwhile `state()` is `.reconnecting`: publishes and new
+//! requests wait in the reconnect buffer for the next connection
+//! (`reconnect.buffer_bytes`, 8 MiB by default; BufferFull when it is
+//! full, Disconnected when it is 0), flushes fail with Disconnected, and
+//! new subscriptions go out once connected again.
 //!
 //! The fields are internal: use the methods. Tests may ask
 //! `outbound.roomWaiters()` whether a publish waits for room, and
@@ -349,10 +352,10 @@ pub fn subscribe(client: *Client, subject: []const u8, options: Subscription.Opt
     const gpa = client.gpa;
     const sub = try Registry.create(gpa, client, subject, options, pending);
     errdefer Registry.destroy(gpa, sub);
+    // The server closes the connection on a longer SUB line: the registry
+    // takes no such subscription, so no reconnect sends it either.
     try client.subscriptions.register(io, gpa, sub, limits.max_subscriptions);
     errdefer client.subscriptions.unregister(io, sub.sid);
-    // The server closes the connection on a longer line.
-    if (encoder.subArgsLen(sub.subject, sub.queue_group, sub.sid) > limits.max_control_line_bytes) return error.InvalidSubject;
     const len = subscribeLen(sub.subject, sub.queue_group, sub.sid, options.max_messages);
     client.outbound.put(io, .service, len, writeSubscribe, .{ sub.subject, sub.queue_group, sub.sid, options.max_messages }) catch |err| switch (err) {
         error.Closed => return error.ConnectionClosed,
@@ -434,7 +437,9 @@ pub const DrainError = error{
 /// subscription is read to its end, its reader came back to `next()` after
 /// the last message (or ended the subscription), and every request got its
 /// answer, publishes stop too, what was published is flushed, and the
-/// client closes. At `options.timeout`, 30 s by default, it closes anyway and
+/// client closes. So read each subscription with `next()` until it returns
+/// null, or `deinit()` it: a subscription nobody reads holds the drain
+/// until its timeout, as in nats.go. At `options.timeout`, 30 s by default, it closes anyway and
 /// returns Timeout; a lost connection closes it too, with Disconnected.
 pub fn drain(client: *Client, options: DrainOptions) DrainError!void {
     const io = client.io;
@@ -457,8 +462,12 @@ pub fn drain(client: *Client, options: DrainOptions) DrainError!void {
         .connected => {},
         .draining => return error.ConnectionDraining,
         .closed => return error.ConnectionClosed,
-        .disconnected, .connecting, .reconnecting => {
-            // Nothing can be drained without a connection.
+        // Nothing can be drained without a connection.
+        .disconnected, .connecting => {
+            client.closeWith(.closed);
+            return error.Disconnected;
+        },
+        .reconnecting => {
             client.closeWith(.connection_lost);
             return error.Disconnected;
         },
@@ -714,6 +723,7 @@ pub fn init(gpa: Allocator, io: Io, options: Options) InitError!Client {
     errdefer owned.deinit(gpa);
     var pool: Pool = try .init(gpa, io, owned.servers, owned.options.randomize_servers);
     errdefer pool.deinit(gpa);
+    const subscriptions: Registry = .{ .max_line = owned.options.limits.max_control_line_bytes };
     const parser_limits: Parser.Limits = .{ .max_control_line = owned.options.limits.max_control_line_bytes };
     return .{
         .gpa = gpa,
@@ -723,6 +733,7 @@ pub fn init(gpa: Allocator, io: Io, options: Options) InitError!Client {
         .parser_limits = parser_limits,
         .outbound = .initBuffering(gpa, owned.options.limits.outbound_bytes, owned.options.reconnect.buffer_bytes),
         .pool = pool,
+        .subscriptions = subscriptions,
         .events = .init(gpa, owned.options.limits.max_event_queue),
     };
 }
@@ -814,7 +825,10 @@ fn ping(client: *Client, timeout: Io.Timeout) FlushError!Io.Duration {
     return round_trip;
 }
 
-/// A snapshot of what the client has done so far; see `nats.Stats`.
+/// A snapshot of what the client has done so far; see `nats.Stats`. Each
+/// count is read on its own while the client works, so two of them may be
+/// a moment apart: a message counted in `messages_in` may not show in
+/// `pending_subscription_bytes` yet.
 pub fn stats(client: *Client) Stats {
     const io = client.io;
     const c = &client.counters;

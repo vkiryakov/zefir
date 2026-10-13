@@ -13,6 +13,9 @@
 //! ```
 //!
 //! One task at a time waits in `next()`; any task may `unsubscribe()`.
+//! Read with `next()` until it returns null, or `deinit()` the
+//! subscription: a message counts as handled once its reader asks for the
+//! next one, and a drain waits for that.
 
 const std = @import("std");
 const Io = std.Io;
