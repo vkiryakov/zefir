@@ -32,4 +32,5 @@ test {
     _ = @import("engine/OwnedOptions.zig");
     _ = @import("engine/time.zig");
     _ = @import("engine/queue.zig");
+    _ = @import("engine/connect.zig");
 }
