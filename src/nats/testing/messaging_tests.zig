@@ -824,3 +824,74 @@ test "a publish the server refuses leaves the connection up" {
     try testing.expect(s.client.isConnected());
     try s.finish();
 }
+
+/// An HMSG frame with `block` as its header block.
+fn hmsgWithBlock(comptime subject: []const u8, comptime sid: u64, comptime block: []const u8, comptime payload: []const u8) []const u8 {
+    return std.fmt.comptimePrint("HMSG {s} {d} {d} {d}\r\n", .{ subject, sid, block.len, block.len + payload.len }) ++ block ++ payload ++ "\r\n";
+}
+
+test "a broken header block from another publisher: the message arrives whole" {
+    var s: Scripted = undefined;
+    try s.start(testing.allocator, .{ .servers = &.{} }, &.{
+        .{ .expect = "SUB g 1" },
+        .{ .send = comptime hmsgWithBlock("g", 1, "garbage line\r\n: no name\r\nX-Id: 1\r\nno colon\r\n\r\n", "first") ++
+            hmsgWithBlock("g", 1, "NATS/1.0 abc\r\nX: y\r\n\r\n", "second") },
+    });
+    defer s.deinit();
+    const g = try s.client.subscribe("g", .{});
+    defer g.deinit();
+    {
+        var msg = (try g.next(within_five_seconds)) orelse return error.TestNoMessage;
+        defer msg.deinit();
+        try testing.expectEqualStrings("first", msg.payload);
+        try testing.expectEqualStrings("1", msg.headers.get("X-Id").?);
+        try testing.expect(msg.status == null);
+    }
+    {
+        var msg = (try g.next(within_five_seconds)) orelse return error.TestNoMessage;
+        defer msg.deinit();
+        try testing.expectEqualStrings("second", msg.payload);
+        try testing.expectEqualStrings("y", msg.headers.get("X").?);
+        try testing.expect(msg.status == null);
+    }
+    try s.client.flush(quick);
+    try s.finish();
+}
+
+fn nextLong(sub: *nats.Subscription) nats.Subscription.NextError!?nats.Message {
+    return sub.next(.{ .timeout = .{ .duration = .{ .raw = .fromSeconds(30), .clock = .awake } } });
+}
+
+/// Waits until a task waits in `sub.next()`, for 5 s at most.
+fn awaitReceiving(sub: *nats.Subscription) !void {
+    const io = testing.io;
+    const give_up = time.after(io, .fromSeconds(5));
+    while (true) {
+        {
+            sub.messages.mutex.lockUncancelable(io);
+            defer sub.messages.mutex.unlock(io);
+            if (sub.messages.receiving) return;
+        }
+        if (time.expired(io, give_up)) return error.TestReceiverNeverWaited;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+}
+
+test "close() while a task waits in next(): ConnectionClosed at once" {
+    const io = testing.io;
+    var s: Scripted = undefined;
+    try s.start(testing.allocator, .{ .servers = &.{} }, &.{.{ .expect = "SUB idle 1" }});
+    defer s.deinit();
+    const idle = try s.client.subscribe("idle", .{});
+    defer idle.deinit();
+    var receiver = try io.concurrent(nextLong, .{idle});
+    defer _ = receiver.cancel(io) catch null;
+    try awaitReceiving(idle);
+    const start = Io.Clock.awake.now(io);
+    s.client.close();
+    try testing.expectError(error.ConnectionClosed, receiver.await(io));
+    try testing.expect(elapsedSince(io, start).toSeconds() < 1);
+    try testing.expectError(error.ConnectionClosed, idle.next(.{}));
+    try testing.expectError(error.ConnectionClosed, idle.unsubscribe());
+    try s.server.await(io);
+}

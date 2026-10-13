@@ -7,6 +7,7 @@
 #   14224  TLS required
 #   14225  TLS first: no INFO before the TLS handshake
 #   14226  cluster node a, 14227 node b, 14228 node c
+#   14229  plain, for tests that pause it: a server that stops reading
 #
 # certs/ holds a self-signed certificate for the TLS servers, valid for 100
 # years. The client does not do TLS; the servers need it to start.
@@ -59,3 +60,10 @@ services:
     <<: *nats
     command: ["--config", "/conf/cluster-c.conf"]
     ports: ["127.0.0.1:14228:4222"]
+
+  # The tests pause and unpause it by this name.
+  stall:
+    <<: *nats
+    container_name: zefir-nats-e2e-stall
+    command: ["--config", "/conf/plain.conf"]
+    ports: ["127.0.0.1:14229:4222"]
