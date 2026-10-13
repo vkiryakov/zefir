@@ -185,11 +185,24 @@ pub fn build(b: *std.Build) void {
         b.step(b.fmt("example-{s}", .{example.run}), b.fmt("Run the {s} example against the NATS servers", .{example.run})).dependOn(&one.step);
     }
 
+    // The benchmark: `bench` runs it, built with ReleaseFast unless
+    // -Dbench-optimize says otherwise; `e2e` builds it with ReleaseFast
+    // without running it, so that CI knows it compiles.
+    const bench_optimize = b.option(std.lang.Optimize, "bench-optimize", "The mode of the benchmark (default: ReleaseFast)") orelse .fast;
+    const run_bench = b.addRunArtifact(addBench(b, target, bench_optimize));
+    run_bench.stdio = .inherit;
+    run_bench.step.dependOn(&up.step);
+    b.step("bench", "Run the benchmark against the NATS servers").dependOn(&run_bench.step);
+    const fast_bench = addBench(b, target, .fast);
+    // Code generation too, not only analysis: the binary is asked for.
+    _ = fast_bench.getEmittedBin();
+    e2e_step.dependOn(&fast_bench.step);
+
     // The stress tests, in Debug and then in ReleaseSafe whatever
     // -Doptimize says: each mode gets zefir and zio built in it.
     const stress_step = b.step("stress", "Run the stress tests against the NATS servers, in Debug and in ReleaseSafe");
     var after_mode: *std.Build.Step = &up.step;
-    for ([_]std.lang.Optimize{ .Debug, .ReleaseSafe }) |mode| {
+    for ([_]std.lang.Optimize{ .debug, .safe }) |mode| {
         const mode_zefir = b.dependency("zefir", .{ .target = target, .optimize = mode });
         const mode_zio = b.dependency("zio", .{ .target = target, .optimize = mode });
         const imports: []const std.Build.Module.Import = &.{
@@ -223,6 +236,24 @@ pub fn build(b: *std.Build) void {
         after_mode = &run_stress.step;
         stress_step.dependOn(&run_stress.step);
     }
+}
+
+/// The benchmark, with zefir and zio built in `mode` too.
+fn addBench(b: *std.Build, target: std.Build.ResolvedTarget, mode: std.lang.Optimize) *std.Build.Step.Compile {
+    const zefir = b.dependency("zefir", .{ .target = target, .optimize = mode });
+    const zio = b.dependency("zio", .{ .target = target, .optimize = mode });
+    return b.addExecutable(.{
+        .name = b.fmt("bench-{t}", .{mode}),
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/main.zig"),
+            .target = target,
+            .optimize = mode,
+            .imports = &.{
+                .{ .name = "nats", .module = zefir.module("zefir-nats") },
+                .{ .name = "zio", .module = zio.module("zio") },
+            },
+        }),
+    });
 }
 
 /// The example `name` of src/nats/examples, built with a root that exits
