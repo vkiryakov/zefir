@@ -12,6 +12,7 @@ const MessageQueue = @import("MessageQueue.zig");
 const Outbound = @import("Outbound.zig");
 const encoder = @import("../protocol/encoder.zig");
 const server_error = @import("../protocol/server_error.zig");
+const log = std.log.scoped(.nats);
 const Registry = @This();
 
 /// Guards everything below.
@@ -152,6 +153,48 @@ pub fn writeRestore(r: *Registry, io: Io, w: *Io.Writer, extra: ?Resubscribe) Io
         const state = sub.messages.resumeState(io) orelse continue;
         if (state.remaining) |n| try encoder.writeUnsub(w, sub.sid, n);
     }
+}
+
+/// The client drains: every subscription that still takes messages stops
+/// being subscribed again on a new connection, and its UNSUB is queued.
+/// The UNSUBs are queued outside the registry's mutex, a batch at a time,
+/// so the outbound queue's mutex is never taken under it.
+pub fn drainAll(r: *Registry, io: Io, outbound: *Outbound) void {
+    while (true) {
+        var batch: [64]u64 = undefined;
+        var taken: usize = 0;
+        {
+            r.mutex.lockUncancelable(io);
+            defer r.mutex.unlock(io);
+            for (r.subscriptions.values()) |sub| {
+                if (taken == batch.len) break;
+                if (!sub.messages.beginDrain(io)) continue;
+                batch[taken] = sub.sid;
+                taken += 1;
+            }
+        }
+        if (taken == 0) return;
+        for (batch[0..taken]) |sid| queueUnsub(outbound, io, sid) catch |err| {
+            log.debug("no UNSUB for subscription {d}: {t}", .{ sid, err });
+        };
+    }
+}
+
+/// The server has the UNSUBs of the drain: the draining subscriptions end,
+/// and what they hold still comes out.
+pub fn finishDraining(r: *Registry, io: Io) void {
+    r.mutex.lockUncancelable(io);
+    defer r.mutex.unlock(io);
+    for (r.subscriptions.values()) |sub| sub.messages.finishDrain(io);
+}
+
+/// Messages waiting to be taken, over every subscription.
+pub fn pendingMessages(r: *Registry, io: Io) usize {
+    r.mutex.lockUncancelable(io);
+    defer r.mutex.unlock(io);
+    var total: usize = 0;
+    for (r.subscriptions.values()) |sub| total += sub.messages.pending(io).messages;
+    return total;
 }
 
 /// Frees every subscription still registered: the client goes away.

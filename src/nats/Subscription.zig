@@ -20,6 +20,7 @@ const Client = @import("Client.zig");
 const Message = @import("Message.zig");
 const MessageQueue = @import("engine/MessageQueue.zig");
 const Registry = @import("engine/Registry.zig");
+const time = @import("engine/time.zig");
 const log = std.log.scoped(.nats);
 const Subscription = @This();
 
@@ -129,6 +130,59 @@ pub fn unsubscribe(sub: *Subscription) UnsubscribeError!void {
         error.Disconnected, error.BufferFull => {},
         else => |e| return e,
     };
+}
+
+pub const DrainOptions = Client.DrainOptions;
+
+pub const DrainError = error{
+    /// The messages that came were not all taken in time.
+    Timeout,
+    Canceled,
+    /// The client is closed.
+    ConnectionClosed,
+    /// No memory for the PING that tells when the server has the UNSUB.
+    OutOfMemory,
+};
+
+/// Stops the subscription gently: the server is told to stop sending, the
+/// messages that still come before it has that are kept, and `next()`
+/// hands out all of them and then null. It returns once they are all
+/// taken, so another task must be reading `next()`; at `options.timeout`,
+/// 30 s by default, it returns Timeout, and the subscription has ended
+/// anyway. Without a connection nothing more can come, and it ends at once.
+pub fn drain(sub: *Subscription, options: DrainOptions) DrainError!void {
+    const client = sub.client;
+    const io = client.io;
+    const deadline = time.deadline(io, options.timeout);
+    defer sub.messages.finishDrain(io);
+    if (sub.messages.beginDrain(io)) {
+        Registry.queueUnsub(&client.outbound, io, sub.sid) catch |err| switch (err) {
+            error.Closed => return error.ConnectionClosed,
+            error.OutOfMemory => return error.OutOfMemory,
+            // Without a connection nothing more comes.
+            error.Disconnected, error.BufferFull, error.ProtocolError => {},
+        };
+        // Once the server answers this PING, no message comes for it.
+        if (client.outbound.putPing(io, .flush)) |ping| {
+            client.outbound.waitPong(io, ping, deadline) catch |err| switch (err) {
+                error.Closed => return error.ConnectionClosed,
+                error.Disconnected => {},
+                error.Timeout => return error.Timeout,
+                error.Canceled => return error.Canceled,
+            };
+        } else |err| switch (err) {
+            error.Closed => return error.ConnectionClosed,
+            error.Disconnected => {},
+            error.OutOfMemory => return error.OutOfMemory,
+        }
+    }
+    sub.messages.finishDrain(io);
+    while (sub.messages.pending(io).messages > 0) {
+        if (sub.messages.endedHow(io) == .closed) return error.ConnectionClosed;
+        if (deadline) |d| if (time.expired(io, d)) return error.Timeout;
+        try io.sleep(.fromMilliseconds(5), .awake);
+    }
+    if (sub.messages.endedHow(io) == .closed) return error.ConnectionClosed;
 }
 
 /// What waits to be taken.

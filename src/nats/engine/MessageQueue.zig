@@ -78,6 +78,10 @@ dropped: u64 = 0,
 /// The last message that came did not fit: a slow consumer, warned about
 /// once per run of drops.
 overflowing: bool = false,
+/// Its subscription drains: the server was told to stop sending, it takes
+/// what still comes until it ends, and a new connection does not subscribe
+/// it again.
+draining: bool = false,
 
 pub fn init(gpa: Allocator, limits: Limits, overflow: OverflowPolicy, last: ?u64) MessageQueue {
     return .{ .gpa = gpa, .limits = limits, .overflow = overflow, .last = last };
@@ -119,8 +123,27 @@ pub const Resume = struct { remaining: ?u64 };
 pub fn resumeState(q: *MessageQueue, io: Io) ?Resume {
     q.mutex.lockUncancelable(io);
     defer q.mutex.unlock(io);
-    if (q.ended != null) return null;
+    if (q.ended != null or q.draining) return null;
     return .{ .remaining = if (q.last) |last| last -| q.received else null };
+}
+
+/// Drain begins: true when this call began it, the queue being open and not
+/// draining yet; its owner then tells the server to stop sending.
+pub fn beginDrain(q: *MessageQueue, io: Io) bool {
+    q.mutex.lockUncancelable(io);
+    defer q.mutex.unlock(io);
+    if (q.ended != null or q.draining) return false;
+    q.draining = true;
+    return true;
+}
+
+/// A draining queue ends as finished: what it holds still comes out.
+pub fn finishDrain(q: *MessageQueue, io: Io) void {
+    q.mutex.lockUncancelable(io);
+    defer q.mutex.unlock(io);
+    if (!q.draining or q.ended != null) return;
+    q.ended = .finished;
+    q.not_empty.broadcast(io);
 }
 
 /// Ends the queue `how`, unless it has ended already; `.closed` replaces

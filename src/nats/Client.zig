@@ -90,6 +90,10 @@ exit: ?manager.Exit = null,
 attempt: ?*manager.AttemptState = null,
 /// Why the first connection failed, for `connect()` to return.
 connect_error: ?ConnectError = null,
+/// Why the client closed; the first reason stays.
+close_reason: ?CloseReason = null,
+/// What a drain lets through, while `status` is `.draining`.
+drain_phase: DrainPhase = .subscriptions,
 /// The server of the current connection.
 server: ?ServerAddress = null,
 /// The JSON of the latest INFO of the current connection.
@@ -116,6 +120,29 @@ pub const State = enum {
     closed,
 };
 
+/// Why a client closed.
+pub const CloseReason = enum {
+    /// `close()` or `deinit()`.
+    closed,
+    /// `drain()` finished.
+    drained,
+    /// `drain()` ran out of time, or its task was canceled.
+    drain_failed,
+    /// The first connect failed.
+    connect_failed,
+    /// The connection was lost and the client did not reconnect: reconnect
+    /// is off, or it was draining.
+    connection_lost,
+    /// A server refused the credentials twice the same way in a row.
+    auth_failed,
+    /// `reconnect.max_attempts` attempts in a row failed.
+    reconnect_failed,
+};
+
+/// The two phases of a drain: first the subscriptions stop while publishes
+/// still go out, so handlers can answer; then publishes stop too.
+const DrainPhase = enum { subscriptions, publishes };
+
 pub const InitError = Options.Error || Allocator.Error;
 
 pub const ConnectError = error{
@@ -141,6 +168,9 @@ pub const PublishError = error{
     /// The subject or reply subject cannot be published to, or the line
     /// would be longer than `limits.max_control_line_bytes`.
     InvalidSubject,
+    /// The client drains, and its subscriptions have stopped: no publish
+    /// any more.
+    ConnectionDraining,
     InvalidHeader,
     /// Headers and payload together exceed the server's `max_payload`.
     PayloadTooLarge,
@@ -171,7 +201,7 @@ pub fn publish(client: *Client, subject: []const u8, payload: []const u8) Publis
 /// Publishes `message`, with its reply subject and headers, the way
 /// `publish` does. Headers need a server that supports them.
 pub fn publishMessage(client: *Client, message: PublishMessage) PublishError!void {
-    const header_len = try client.prepare(message);
+    const header_len = try client.prepare(message, .publish);
     try client.checkLine(message, header_len);
     const io = client.io;
     const has_headers = message.headers.len > 0;
@@ -213,15 +243,15 @@ pub fn respondMessage(client: *Client, msg: *const Message, response: ResponseMe
     return client.publishMessage(.{ .subject = reply, .reply_to = response.reply_to, .headers = response.headers, .payload = response.payload });
 }
 
-const PrepareError = error{ InvalidSubject, InvalidHeader, UnsupportedFeature, PayloadTooLarge, Disconnected, ConnectionClosed };
+const PrepareError = error{ InvalidSubject, InvalidHeader, UnsupportedFeature, PayloadTooLarge, Disconnected, ConnectionClosed, ConnectionDraining };
 
 /// Checks `message` against the rules and the current connection, all but
 /// the length of its line; gives the length of its header block.
-fn prepare(client: *Client, message: PublishMessage) PrepareError!usize {
+fn prepare(client: *Client, message: PublishMessage, use: Use) PrepareError!usize {
     try subjects.validatePublish(message.subject);
     if (message.reply_to) |reply| try subjects.validatePublish(reply);
     try Headers.validate(message.headers);
-    const server = try client.currentServer(.publish);
+    const server = try client.currentServer(use);
     const has_headers = message.headers.len > 0;
     if (has_headers and !server.headers) return error.UnsupportedFeature;
     const header_len = if (has_headers) encoder.headerBlockLen(message.headers) else 0;
@@ -259,6 +289,8 @@ pub const SubscribeError = error{
     /// A queue group name with whitespace, `max_messages` of 0 or over
     /// 999 999 999, or a pending limit of 0.
     InvalidOptions,
+    /// The client drains.
+    ConnectionDraining,
     /// `limits.max_subscriptions` subscriptions exist already.
     TooManySubscriptions,
     /// Not connected yet.
@@ -323,20 +355,22 @@ fn subscribeLen(subject: []const u8, queue: ?[]const u8, sid: u64, max: ?u64) us
 /// What publishing needs to know about the current connection.
 const ServerFacts = struct { headers: bool, max_payload: u64 };
 
-/// What a call is about to queue: a publish (or a request) may wait in the
-/// reconnect buffer, a subscription goes out with the next connection.
-const Use = enum { publish, subscribe };
+/// What a call is about to queue. A publish or a request may wait in the
+/// reconnect buffer, a subscription goes out with the next connection; a
+/// drain lets publishes through until its second phase, the others not.
+const Use = enum { publish, request, subscribe };
 
 /// While reconnecting, the facts are those of the last connection.
-fn currentServer(client: *Client, use: Use) error{ Disconnected, ConnectionClosed }!ServerFacts {
+fn currentServer(client: *Client, use: Use) error{ Disconnected, ConnectionClosed, ConnectionDraining }!ServerFacts {
     client.mutex.lockUncancelable(client.io);
     defer client.mutex.unlock(client.io);
     const facts: ServerFacts = .{ .headers = client.server_headers, .max_payload = client.max_payload };
     return switch (client.status) {
         .connected => facts,
-        .reconnecting => if (use == .publish and client.options.options.reconnect.buffer_bytes == 0) error.Disconnected else facts,
+        .reconnecting => if (use != .subscribe and client.options.options.reconnect.buffer_bytes == 0) error.Disconnected else facts,
+        .draining => if (use == .publish and client.drain_phase == .subscriptions) facts else error.ConnectionDraining,
         .closed => error.ConnectionClosed,
-        .disconnected, .connecting, .draining => error.Disconnected,
+        .disconnected, .connecting => error.Disconnected,
     };
 }
 
@@ -346,6 +380,119 @@ fn currentServer(client: *Client, use: Use) error{ Disconnected, ConnectionClose
 fn fitsPayload(total: usize, max_payload: u64) bool {
     if (total > encoder.max_size) return false;
     return max_payload == 0 or total <= max_payload;
+}
+
+pub const DrainOptions = struct {
+    /// How long the whole drain may take; after it the client closes
+    /// anyway.
+    timeout: Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(30), .clock = .awake } },
+};
+
+pub const DrainError = error{
+    /// The drain did not finish in time: the client closed anyway.
+    Timeout,
+    /// The client was not connected, or the connection was lost during the
+    /// drain: the client closed.
+    Disconnected,
+    /// The client was closed, or closed meanwhile.
+    ConnectionClosed,
+    /// Another drain runs.
+    ConnectionDraining,
+    /// The task was canceled: the client closed.
+    Canceled,
+    /// No memory for the PING that confirms the drain: the client closed.
+    OutOfMemory,
+};
+
+/// Stops the client gently, then closes it. First the subscriptions stop:
+/// their UNSUBs go out, and once the server has them the messages that came
+/// still come out of `next()` and then null; meanwhile `subscribe` and
+/// `request` fail with ConnectionDraining while publishes and responds
+/// still go out, so that handlers can answer what they took. When every
+/// subscription is read to its end and every request got its answer,
+/// publishes stop too, what was published is flushed, and the client
+/// closes. At `options.timeout`, 30 s by default, it closes anyway and
+/// returns Timeout; a lost connection closes it too, with Disconnected.
+pub fn drain(client: *Client, options: DrainOptions) DrainError!void {
+    const io = client.io;
+    const deadline = time.deadline(io, options.timeout);
+    const status = begin: {
+        client.lifecycle.lockUncancelable(io);
+        defer client.lifecycle.unlock(io);
+        client.mutex.lockUncancelable(io);
+        defer client.mutex.unlock(io);
+        const status = client.status;
+        if (status == .connected) {
+            log.debug("draining the client", .{});
+            client.status = .draining;
+            client.drain_phase = .subscriptions;
+            client.changed.broadcast(io);
+        }
+        break :begin status;
+    };
+    switch (status) {
+        .connected => {},
+        .draining => return error.ConnectionDraining,
+        .closed => return error.ConnectionClosed,
+        .disconnected, .connecting, .reconnecting => {
+            // Nothing can be drained without a connection.
+            client.closeWith(.connection_lost);
+            return error.Disconnected;
+        },
+    }
+    client.drainSteps(deadline) catch |err| switch (err) {
+        // Closed meanwhile: by the user, or by the manager when the
+        // connection was lost.
+        error.ConnectionClosed => return if (client.closedFor() == .connection_lost) error.Disconnected else error.ConnectionClosed,
+        error.Timeout, error.Canceled, error.OutOfMemory => |e| {
+            client.closeWith(.drain_failed);
+            return e;
+        },
+    };
+    client.closeWith(.drained);
+}
+
+fn drainSteps(client: *Client, deadline: ?Io.Clock.Timestamp) error{ Timeout, ConnectionClosed, Canceled, OutOfMemory }!void {
+    const io = client.io;
+    // Once the server has every UNSUB, no message comes for them.
+    client.subscriptions.drainAll(io, &client.outbound);
+    try client.barrier(deadline);
+    client.subscriptions.finishDraining(io);
+    // The application reads every subscription to its end, and every
+    // request gets its answer, or times out.
+    while (client.subscriptions.pendingMessages(io) > 0 or client.inbox.pendingCount(io) > 0) {
+        if (client.state() == .closed) return error.ConnectionClosed;
+        if (deadline) |d| if (time.expired(io, d)) return error.Timeout;
+        try io.sleep(.fromMilliseconds(5), .awake);
+    }
+    {
+        client.mutex.lockUncancelable(io);
+        defer client.mutex.unlock(io);
+        client.drain_phase = .publishes;
+    }
+    // What the handlers published goes out.
+    try client.barrier(deadline);
+}
+
+/// A PING and its PONG: the server has everything sent before.
+fn barrier(client: *Client, deadline: ?Io.Clock.Timestamp) error{ Timeout, ConnectionClosed, Canceled, OutOfMemory }!void {
+    const io = client.io;
+    const ping_sent = client.outbound.putPing(io, .flush) catch |err| switch (err) {
+        error.Closed, error.Disconnected => return error.ConnectionClosed,
+        error.OutOfMemory => return error.OutOfMemory,
+    };
+    client.outbound.waitPong(io, ping_sent, deadline) catch |err| switch (err) {
+        error.Closed, error.Disconnected => return error.ConnectionClosed,
+        error.Timeout => return error.Timeout,
+        error.Canceled => return error.Canceled,
+    };
+}
+
+/// Why the client closed; null while it is open.
+fn closedFor(client: *Client) ?CloseReason {
+    client.mutex.lockUncancelable(client.io);
+    defer client.mutex.unlock(client.io);
+    return if (client.status == .closed) client.close_reason else null;
 }
 
 pub const FlushOptions = struct {
@@ -367,6 +514,8 @@ pub const RequestError = error{
     /// The timeout is `.none`, or the message has a reply subject: a
     /// request uses its own.
     InvalidOptions,
+    /// The client drains.
+    ConnectionDraining,
     /// Headers and payload together exceed the server's `max_payload`.
     PayloadTooLarge,
     /// Headers, and the server cannot take them.
@@ -422,7 +571,7 @@ pub fn request(client: *Client, subject: []const u8, payload: []const u8, option
 /// `reply_to` must be null: the reply subject is the client's.
 pub fn requestMessage(client: *Client, message: PublishMessage, options: RequestOptions) RequestError!Message {
     if (message.reply_to != null or options.timeout == .none) return error.InvalidOptions;
-    const header_len = try client.prepare(message);
+    const header_len = try client.prepare(message, .request);
     const io = client.io;
     const deadline = time.deadline(io, options.timeout).?;
     try client.inbox.subscribe(io, &client.subscriptions, &client.outbound, deadline);
@@ -460,6 +609,8 @@ pub const RequestManyError = error{
     InvalidSubject,
     /// The timeout is `.none`, or `max_responses` or `max_bytes` is 0.
     InvalidOptions,
+    /// The client drains.
+    ConnectionDraining,
     /// The payload exceeds the server's `max_payload`.
     PayloadTooLarge,
     /// `limits.max_pending_requests` requests wait for replies already.
@@ -491,7 +642,7 @@ pub fn requestMany(client: *Client, subject: []const u8, payload: []const u8, op
     if (options.timeout == .none or options.max_responses == 0) return error.InvalidOptions;
     if (options.max_bytes) |bytes| if (bytes == 0) return error.InvalidOptions;
     try subjects.validatePublish(subject);
-    const server = try client.currentServer(.publish);
+    const server = try client.currentServer(.request);
     if (!fitsPayload(payload.len, server.max_payload)) return error.PayloadTooLarge;
     const io = client.io;
     const gpa = client.gpa;
@@ -602,9 +753,9 @@ fn ping(client: *Client, timeout: Io.Timeout) FlushError!Io.Duration {
     const io = client.io;
     const deadline = time.deadline(io, timeout);
     switch (client.state()) {
-        .connected => {},
+        .connected, .draining => {},
         .closed => return error.ConnectionClosed,
-        .disconnected, .connecting, .reconnecting, .draining => return error.Disconnected,
+        .disconnected, .connecting, .reconnecting => return error.Disconnected,
     }
     const start = Io.Clock.awake.now(io);
     const ping_sent = client.outbound.putPing(io, .flush) catch |err| switch (err) {
@@ -622,9 +773,13 @@ fn ping(client: *Client, timeout: Io.Timeout) FlushError!Io.Duration {
 }
 
 /// Closes the client at once: nothing still queued is sent, and every task
-/// waiting in the client gets ConnectionClosed. For a careful stop, flush
-/// first. Calling it again does nothing.
+/// waiting in the client gets ConnectionClosed. For a careful stop, use
+/// `drain`, or flush first. Calling it again does nothing.
 pub fn close(client: *Client) void {
+    client.closeWith(.closed);
+}
+
+fn closeWith(client: *Client, reason: CloseReason) void {
     if (client.freed) return;
     const io = client.io;
     client.lifecycle.lockUncancelable(io);
@@ -632,6 +787,7 @@ pub fn close(client: *Client) void {
     client.mutex.lockUncancelable(io);
     if (client.status != .closed) log.debug("closing the client", .{});
     client.status = .closed;
+    if (client.close_reason == null) client.close_reason = reason;
     if (client.exit == null) client.exit = .closed;
     // Under the lock: the attempt lives on the manager's stack until it is
     // untracked.

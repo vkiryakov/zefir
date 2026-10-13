@@ -22,6 +22,8 @@ pub const Header = Headers.Header;
 pub const Client = @import("Client.zig");
 pub const State = Client.State;
 pub const FlushOptions = Client.FlushOptions;
+pub const DrainOptions = Client.DrainOptions;
+pub const CloseReason = Client.CloseReason;
 pub const RequestOptions = Client.RequestOptions;
 pub const RequestManyOptions = Client.RequestManyOptions;
 pub const Responses = @import("Responses.zig");
@@ -137,6 +139,7 @@ test "every error of the module's functions is in nats.Error or comes from std.I
         Options.Error,       ServerAddress.ParseError, ServerInfo.ParseError,   Headers.ValidateError,
         Client.PublishError, Client.SubscribeError,    Subscription.NextError,  Subscription.UnsubscribeError,
         Client.RequestError, Client.RespondError,      Client.RequestManyError, Responses.NextError,
+        Client.DrainError,   Subscription.DrainError,
     }) |Set| {
         inline for (comptime @typeInfo(Set).error_set.error_names.?) |name| {
             if (comptime !isIn(Error, name) and !isIn(IoErrors, name)) {

@@ -115,7 +115,7 @@ fn reconnect(client: *Client) ?Opened {
             // close() stops the attempts.
             error.Canceled => return null,
             error.ConcurrencyUnavailable => {
-                giveUp(client);
+                giveUp(client, .reconnect_failed);
                 return null;
             },
             // A server that refuses the credentials twice the same way in
@@ -124,7 +124,7 @@ fn reconnect(client: *Client) ?Opened {
                 log.debug("{f} refused the credentials", .{server});
                 if (client.pool.noteAttempt(io, state.refused) and options.reconnect.abort_on_auth_error) {
                     log.debug("{f} refused the credentials twice: closing", .{server});
-                    giveUp(client);
+                    giveUp(client, .auth_failed);
                     return null;
                 }
             },
@@ -137,7 +137,7 @@ fn reconnect(client: *Client) ?Opened {
         if (options.reconnect.max_attempts) |max| {
             if (failures >= max) {
                 log.debug("no connection after {d} attempts: closing", .{failures});
-                giveUp(client);
+                giveUp(client, .reconnect_failed);
                 return null;
             }
         }
@@ -366,7 +366,13 @@ fn lost(client: *Client, exit: Exit) bool {
     if (client.info_json) |json| client.gpa.free(json);
     client.info_json = null;
     const again = exit != .closed and client.status == .connected and client.options.options.reconnect.enabled;
-    if (again) client.status = .reconnecting;
+    if (again) {
+        client.status = .reconnecting;
+    } else {
+        // Closed before the queues wake their waiters: a drain learns why.
+        client.status = .closed;
+        if (client.close_reason == null) client.close_reason = .connection_lost;
+    }
     client.changed.broadcast(client.io);
     return again;
 }
@@ -382,12 +388,13 @@ fn beginReconnecting(client: *Client) bool {
 
 /// The client gives up reconnecting and closes: every task waiting in it
 /// gets ConnectionClosed.
-fn giveUp(client: *Client) void {
+fn giveUp(client: *Client, reason: Client.CloseReason) void {
     const io = client.io;
     {
         client.mutex.lockUncancelable(io);
         defer client.mutex.unlock(io);
         client.status = .closed;
+        if (client.close_reason == null) client.close_reason = reason;
         if (client.exit == null) client.exit = .closed;
         client.changed.broadcast(io);
     }
@@ -593,6 +600,7 @@ pub fn connectFailed(client: *Client, err: Client.ConnectError) void {
     client.mutex.lockUncancelable(io);
     if (client.status == .connecting) client.connect_error = err;
     client.status = .closed;
+    if (client.close_reason == null) client.close_reason = .connect_failed;
     client.changed.broadcast(io);
     client.mutex.unlock(io);
     client.outbound.close(io);
@@ -654,6 +662,7 @@ fn disconnected(client: *Client) void {
         client.mutex.lockUncancelable(client.io);
         defer client.mutex.unlock(client.io);
         client.status = .closed;
+        if (client.close_reason == null) client.close_reason = .connection_lost;
         client.server = null;
         if (client.info_json) |json| client.gpa.free(json);
         client.info_json = null;
