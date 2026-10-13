@@ -211,7 +211,7 @@ Examples:
 | `v.maxLength(1)` | `"😀"` | passes: one code point, four bytes |
 | `v.maxLength(1)` | `"❤\u{FE0F}"` | `validation.max_length`: a variation selector counts |
 | `v.maxLength(64)` | `""` | passes |
-| `v.maxLength(64).withMessage("at most {max} characters, please")` | 65 × `я` | `validation.max_length` / `at most 64 characters, please` |
+| `v.maxLength(64).withMessage("at most {max} characters, please")` | 65 × `é` | `validation.max_length` / `at most 64 characters, please` |
 
 ## v.length(min, max)
 
@@ -524,7 +524,7 @@ A string has no uppercase ASCII letter.
 
 - **Field types:** a string; `?T` and `??T` of it.
 - **Passes when:** no byte is `A-Z`. Only ASCII letters are inspected: the
-  standard library has no case tables, so `"Émile"` and `"ПРИВЕТ"` pass. Digits,
+  standard library has no case tables, so `"Émile"` and `"ÆØÅ"` pass. Digits,
   punctuation and other bytes pass.
 - **`""`:** passes.
 - **Precondition:** none.
@@ -582,7 +582,7 @@ The three width rules keep the character classes of validator.js for parity;
 they are not Unicode East Asian Width. "Half-width" is the class H: printable
 ASCII U+0020-007E and the half-width forms U+FF61-FFDC and U+FFE8-FFEE (226
 code points). "Full-width" is every other code point, so control characters,
-Latin-1 (`é`), Cyrillic and emoji count as full-width: `"привет"` and `"café"`
+Latin-1 (`é`), Cyrillic and emoji count as full-width: `"😀"` and `"café"`
 pass `v.fullWidth`, and `"abc\n"` passes `v.variableWidth`.
 
 - **Field types:** a string; `?T` and `??T` of it.

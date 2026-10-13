@@ -91,10 +91,10 @@ pub const examples = [_]Example{
     .{
         .name = "with_message",
         .stdout =
-        \\name: заполните поле (validation.not_empty)
+        \\name: please fill in this field (validation.not_empty)
         \\age: age must be from 18 to 120 (validation.range)
         \\role: role must be one of: admin, editor (validation.one_of)
-        \\tags: не больше 2 тегов (validation.max_items)
+        \\tags: at most 2 tags (validation.max_items)
         \\height: must be a finite number (validation.finite)
         \\weight: weight must be a number (validation.finite)
         \\

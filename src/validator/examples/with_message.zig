@@ -4,7 +4,7 @@ const v = @import("validator");
 const Role = enum { admin, editor, viewer };
 
 // A rule with a message is a value: declare it once, use it on any field.
-const filled = v.notEmpty.withMessage("заполните поле");
+const filled = v.notEmpty.withMessage("please fill in this field");
 
 const Profile = struct {
     name: []const u8,
@@ -20,7 +20,7 @@ const Profile = struct {
         .nickname = filled,
         .age = v.range(18, 120).withMessage("age must be from {min} to {max}"),
         .role = v.oneOf(.{ .admin, .editor }).withMessage("role must be one of: {values}"),
-        .tags = v.maxItems(2).withMessage("не больше {max} тегов"),
+        .tags = v.maxItems(2).withMessage("at most {max} tags"),
         .height = v.positive.withMessage("height must be above zero"), // NaN keeps validation.finite
         .weight = .{ v.finite.withMessage("weight must be a number"), v.positive },
     };

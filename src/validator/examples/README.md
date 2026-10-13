@@ -483,7 +483,7 @@ segment = %x61-7A *(%x61-7A / DIGIT / "_")        ; [a-z][a-z0-9_]*
 | `users.name_taken`, `orders.v2.limit`, `a.b1_`, `validationx.y`, `x.validation` | none: accepted |
 | longer than 128 bytes (checked first) | `is longer than 128 bytes` |
 | `users..taken`, `.users`, `users.` | `has an empty segment` |
-| `users.Taken`, `users.name-taken`, `users.имя` | `has a character outside [a-z0-9_.]` |
+| `users.Taken`, `users.name-taken`, `users.café` | `has a character outside [a-z0-9_.]` |
 | `users.2fa`, `_a.b` | `has a segment that does not start with a letter` |
 | `users` | `needs at least 2 segments` |
 | `validation.mine`, `rpc.mine` (checked last) | `uses a reserved prefix (validation., rpc.)` |
@@ -534,7 +534,7 @@ const v = @import("validator");
 const Role = enum { admin, editor, viewer };
 
 // A rule with a message is a value: declare it once, use it on any field.
-const filled = v.notEmpty.withMessage("заполните поле");
+const filled = v.notEmpty.withMessage("please fill in this field");
 
 const Profile = struct {
     name: []const u8,
@@ -550,7 +550,7 @@ const Profile = struct {
         .nickname = filled,
         .age = v.range(18, 120).withMessage("age must be from {min} to {max}"),
         .role = v.oneOf(.{ .admin, .editor }).withMessage("role must be one of: {values}"),
-        .tags = v.maxItems(2).withMessage("не больше {max} тегов"),
+        .tags = v.maxItems(2).withMessage("at most {max} tags"),
         .height = v.positive.withMessage("height must be above zero"), // NaN keeps validation.finite
         .weight = .{ v.finite.withMessage("weight must be a number"), v.positive },
     };
@@ -585,10 +585,10 @@ are the rules' own, and the messages come from the templates, except for
 `height`, whose precondition keeps its own:
 
 ```text
-name: заполните поле (validation.not_empty)
+name: please fill in this field (validation.not_empty)
 age: age must be from 18 to 120 (validation.range)
 role: role must be one of: admin, editor (validation.one_of)
-tags: не больше 2 тегов (validation.max_items)
+tags: at most 2 tags (validation.max_items)
 height: must be a finite number (validation.finite)
 weight: weight must be a number (validation.finite)
 ```
