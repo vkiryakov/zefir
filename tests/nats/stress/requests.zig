@@ -1,6 +1,6 @@
-//! 50,000 requests at once from one client: all of them wait for their
-//! replies together, through one inbox subscription, and the client's
-//! memory stays within a bound.
+//! 50,000 requests at once from one client, twice: all of them wait for
+//! their replies together, through one inbox subscription, and the
+//! client's memory stays within a bound, at the peak and after each round.
 
 const std = @import("std");
 const Io = std.Io;
@@ -16,8 +16,13 @@ const count = 50_000;
 /// reply, and the growth of both.
 const bytes_per_request = 256;
 
-/// A client of its own that answers every request to `stress.50k`, once
-/// all of them came: until then they all wait.
+/// What the client may keep after a round, per request of the round: the
+/// capacity its pending map grew to. Its queues also keep the capacity
+/// they grew to, at most the records of a full outbound queue.
+const kept_per_request = 64;
+
+/// A client of its own that answers the requests to `stress.50k` a round
+/// at a time, once all of the round came: until then they all wait.
 const Responder = struct {
     client: nats.Client,
     sub: *nats.Subscription,
@@ -40,15 +45,19 @@ const Responder = struct {
     }
 
     fn serve(io: Io, client: *nats.Client, sub: *nats.Subscription) anyerror!void {
-        const began = Io.Clock.awake.now(io);
-        while (sub.stats().received < count) {
-            if (stress.elapsedSince(io, began).toSeconds() >= 120) return error.TestRequestsNeverCame;
-            try io.sleep(.fromMilliseconds(5), .awake);
-        }
+        var answered: u64 = 0;
         while (true) {
-            var msg = (try sub.next(.{})) orelse return;
-            defer msg.deinit();
-            try client.respond(&msg, msg.payload);
+            const began = Io.Clock.awake.now(io);
+            while (sub.stats().received < answered + count) {
+                if (stress.elapsedSince(io, began).toSeconds() >= 120) return error.TestRequestsNeverCame;
+                try io.sleep(.fromMilliseconds(5), .awake);
+            }
+            for (0..count) |_| {
+                var msg = (try sub.next(.{})) orelse return;
+                defer msg.deinit();
+                try client.respond(&msg, msg.payload);
+            }
+            answered += count;
         }
     }
 };
@@ -92,37 +101,40 @@ fn fiftyThousand(io: Io) !void {
     var client: nats.Client = try .init(counting.allocator(), io, .{ .servers = &.{e2e.servers.plain}, .name = "stress-50k" });
     defer client.deinit();
     try client.connect();
-    const before = counting.resetPeak();
-
-    var ok: std.atomic.Value(u32) = .init(0);
-    var failed: std.atomic.Value(u32) = .init(0);
-    const began = Io.Clock.awake.now(io);
-    {
-        var group: Io.Group = .init;
-        defer group.cancel(io);
-        for (0..count) |i| try group.concurrent(io, requestNumber, .{ &client, i, &ok, &failed });
-        try group.await(io);
-    }
-    const took = stress.elapsedSince(io, began);
-    const peak = counting.peak.load(.monotonic) - before;
-    const held = counting.current.load(.monotonic) - before;
+    const before = counting.current.load(.monotonic);
     const limits: nats.Limits = .{};
     const bound = limits.outbound_bytes + 64 * 1024 + count * bytes_per_request;
-    std.debug.print("  50,000 requests: {d} ms; client heap: peak {d} KiB (bound {d} KiB), {d} KiB held after; process max RSS {?d} MiB\n", .{
-        took.toMilliseconds(), peak / 1024, bound / 1024, held / 1024, stress.maxRssMiB(),
-    });
-    if (ok.load(.monotonic) != count) {
-        std.debug.print("  {d} ok, {d} failed\n", .{ ok.load(.monotonic), failed.load(.monotonic) });
-        return error.TestRequestsFailed;
+    const kept_bound = limits.outbound_bytes + count * kept_per_request;
+
+    for (1..3) |round| {
+        _ = counting.resetPeak();
+        var ok: std.atomic.Value(u32) = .init(0);
+        var failed: std.atomic.Value(u32) = .init(0);
+        const began = Io.Clock.awake.now(io);
+        {
+            var group: Io.Group = .init;
+            defer group.cancel(io);
+            for (0..count) |i| try group.concurrent(io, requestNumber, .{ &client, i, &ok, &failed });
+            try group.await(io);
+        }
+        const took = stress.elapsedSince(io, began);
+        const peak = counting.peak.load(.monotonic) - before;
+        const held = counting.current.load(.monotonic) - before;
+        std.debug.print("  50,000 requests, round {d}: {d} ms; client heap: peak {d} KiB (bound {d} KiB), {d} KiB held after (bound {d} KiB); process max RSS {?d} MiB\n", .{
+            round, took.toMilliseconds(), peak / 1024, bound / 1024, held / 1024, kept_bound / 1024, stress.maxRssMiB(),
+        });
+        if (ok.load(.monotonic) != count) {
+            std.debug.print("  {d} ok, {d} failed\n", .{ ok.load(.monotonic), failed.load(.monotonic) });
+            return error.TestRequestsFailed;
+        }
+        try testing.expect(peak <= bound);
+        try testing.expect(held <= kept_bound);
+        try testing.expectEqual(0, client.inbox.pendingCount(io));
     }
-    try testing.expect(peak <= bound);
-    // What stays is the capacity the pending map grew to, no more.
-    try testing.expect(held <= peak);
-    try testing.expectEqual(0, client.inbox.pendingCount(io));
     try testing.expectEqual(0, client.stats().late_responses);
     try expectOneSubscription("stress-50k");
 }
 
-test "50,000 requests at once: one inbox subscription, the client's memory within its bound" {
+test "50,000 requests at once, twice: one inbox subscription, the client's memory within its bounds" {
     try stress.onZio(fiftyThousand);
 }
