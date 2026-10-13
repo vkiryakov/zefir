@@ -81,17 +81,31 @@ pub fn build(b: *std.Build) void {
     });
 
     const test_step = b.step("test", "Run all tests");
+    // `zig build test-<name>` runs the part of `zig build test` that checks
+    // one module: its tests and, further down, its examples, panic programs,
+    // compile-error checks and benchmark builds. CI runs only the steps of
+    // the modules a change affects; see .github/scripts/affected-modules.sh.
+    const test_core = addModuleTestStep(b, test_step, "core");
+    const test_log = addModuleTestStep(b, test_step, "log");
+    const test_confy = addModuleTestStep(b, test_step, "confy");
+    const test_validator = addModuleTestStep(b, test_step, "validator");
+    const test_rpc = addModuleTestStep(b, test_step, "rpc");
+    const test_orm = addModuleTestStep(b, test_step, "orm");
+    const test_zefir = addModuleTestStep(b, test_step, "zefir");
     // Builds the validator's test binaries without running them, so that
     // `-Dtarget` may name another system: CI builds them for x86-linux-musl,
     // where usize has 32 bits.
     const validator_compile_step = b.step("compile-validator-tests", "Build the validator's test binaries for -Dtarget without running them");
-    for ([_]*std.Build.Module{ core, log, confy, validator, rpc, orm, zefir }) |module| {
+    for (
+        [_]*std.Build.Module{ core, log, confy, validator, rpc, orm, zefir },
+        [_]*std.Build.Step{ test_core, test_log, test_confy, test_validator, test_rpc, test_orm, test_zefir },
+    ) |module, module_test_step| {
         const tests = b.addTest(.{ .root_module = module });
-        test_step.dependOn(&addRun(b, tests, tsan).step);
+        module_test_step.dependOn(&addRun(b, tests, tsan).step);
         if (module == validator) validator_compile_step.dependOn(&tests.step);
     }
 
-    addValidatorTests(b, test_step, validator_compile_step, validator, target, optimize);
+    addValidatorTests(b, test_validator, validator_compile_step, validator, target, optimize);
 
     // core examples: `zig build test` builds and runs them; an example that
     // exits with an error fails the step.
@@ -110,7 +124,7 @@ pub fn build(b: *std.Build) void {
         });
         const run = addRun(b, example, tsan);
         run.expectExitCode(0);
-        test_step.dependOn(&run.step);
+        test_core.dependOn(&run.step);
     }
 
     // log examples: `zig build test` builds and runs them, like the core ones.
@@ -130,7 +144,7 @@ pub fn build(b: *std.Build) void {
         });
         const run = addRun(b, example, tsan);
         run.expectExitCode(0);
-        test_step.dependOn(&run.step);
+        test_log.dependOn(&run.step);
     }
 
     // log panic programs: `flush`, `shutdown` or `unsubscribe` called from a
@@ -177,7 +191,7 @@ pub fn build(b: *std.Build) void {
         // expectStdErrMatch accepts any exit: only the panic handler exits
         // with 3, so a program that printed the text and returned fails.
         run.expectExitCode(3);
-        test_step.dependOn(&run.step);
+        test_log.dependOn(&run.step);
     }
 
     // log compile errors: each test of the file must fail to compile with
@@ -248,7 +262,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{case[0]},
         });
         compile.expect_errors = .{ .contains = case[1] };
-        test_step.dependOn(&compile.step);
+        test_log.dependOn(&compile.step);
     }
 
     // core benchmarks: `zig build test` only compiles them, `zig build bench`
@@ -269,7 +283,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    test_step.dependOn(&bench.step);
+    test_core.dependOn(&bench.step);
     const bench_step = b.step("bench", "Run benchmarks");
     bench_step.dependOn(&b.addRunArtifact(bench).step);
 
@@ -298,8 +312,16 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    test_step.dependOn(&log_bench.step);
+    test_log.dependOn(&log_bench.step);
     bench_step.dependOn(&b.addRunArtifact(log_bench).step);
+}
+
+/// Adds the step `test-<name>` for the checks of one module and makes
+/// `test_step` depend on it.
+fn addModuleTestStep(b: *std.Build, test_step: *std.Build.Step, name: []const u8) *std.Build.Step {
+    const step = b.step(b.fmt("test-{s}", .{name}), b.fmt("Run the tests of the {s} module", .{name}));
+    test_step.dependOn(step);
+    return step;
 }
 
 /// Runs `artifact`. Under ThreadSanitizer the first report fails the run at
