@@ -86,11 +86,10 @@ that fails is its violation, and nothing inside it is checked after that.
 
 ## Installation
 
-> **Unreleased: ships in v0.4.0.** Until then zefir-validator is on the `dev`
-> branch; add Zefir from it to your `build.zig.zon`:
+Add Zefir to your `build.zig.zon`; validator ships since v0.4.0:
 
 ```sh
-zig fetch --save git+https://github.com/vkiryakov/zefir#dev
+zig fetch --save git+https://github.com/vkiryakov/zefir#v0.4.0
 ```
 
 Then import the `zefir-validator` module in `build.zig`:
