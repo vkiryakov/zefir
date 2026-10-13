@@ -147,7 +147,8 @@ pub const DrainError = error{
 /// Stops the subscription gently: the server is told to stop sending, the
 /// messages that still come before it has that are kept, and `next()`
 /// hands out all of them and then null. It returns once they are all
-/// taken, so another task must be reading `next()`; at `options.timeout`,
+/// taken and the reader came back to `next()`, done with the last one, so
+/// another task must be reading `next()`; at `options.timeout`,
 /// 30 s by default, it returns Timeout, and the subscription has ended
 /// anyway. Without a connection nothing more can come, and it ends at once.
 pub fn drain(sub: *Subscription, options: DrainOptions) DrainError!void {
@@ -177,7 +178,7 @@ pub fn drain(sub: *Subscription, options: DrainOptions) DrainError!void {
         }
     }
     sub.messages.finishDrain(io);
-    while (sub.messages.pending(io).messages > 0) {
+    while (!sub.messages.settled(io)) {
         if (sub.messages.endedHow(io) == .closed) return error.ConnectionClosed;
         if (deadline) |d| if (time.expired(io, d)) return error.Timeout;
         try io.sleep(.fromMilliseconds(5), .awake);

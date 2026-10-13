@@ -427,9 +427,10 @@ pub const DrainError = error{
 /// still come out of `next()` and then null; meanwhile `subscribe` and
 /// `request` fail with ConnectionDraining while publishes and responds
 /// still go out, so that handlers can answer what they took. When every
-/// subscription is read to its end and every request got its answer,
-/// publishes stop too, what was published is flushed, and the client
-/// closes. At `options.timeout`, 30 s by default, it closes anyway and
+/// subscription is read to its end, its reader came back to `next()` after
+/// the last message (or ended the subscription), and every request got its
+/// answer, publishes stop too, what was published is flushed, and the
+/// client closes. At `options.timeout`, 30 s by default, it closes anyway and
 /// returns Timeout; a lost connection closes it too, with Disconnected.
 pub fn drain(client: *Client, options: DrainOptions) DrainError!void {
     const io = client.io;
@@ -476,9 +477,10 @@ fn drainSteps(client: *Client, deadline: ?Io.Clock.Timestamp) error{ Timeout, Co
     client.subscriptions.drainAll(io, &client.outbound);
     try client.barrier(deadline);
     client.subscriptions.finishDraining(io);
-    // The application reads every subscription to its end, and every
-    // request gets its answer, or times out.
-    while (client.subscriptions.pendingMessages(io) > 0 or client.inbox.pendingCount(io) > 0) {
+    // The application reads every subscription to its end and comes back
+    // for more, so that it is done with the last message, and every request
+    // gets its answer or times out.
+    while (!client.subscriptions.allSettled(io) or client.inbox.pendingCount(io) > 0) {
         if (client.state() == .closed) return error.ConnectionClosed;
         if (deadline) |d| if (time.expired(io, d)) return error.Timeout;
         try io.sleep(.fromMilliseconds(5), .awake);

@@ -208,13 +208,15 @@ pub fn pendingBytes(r: *Registry, io: Io) usize {
     return total;
 }
 
-/// Messages waiting to be taken, over every subscription.
-pub fn pendingMessages(r: *Registry, io: Io) usize {
+/// Every subscription is settled: its messages were taken, and the last
+/// one is no longer worked on.
+pub fn allSettled(r: *Registry, io: Io) bool {
     r.mutex.lockUncancelable(io);
     defer r.mutex.unlock(io);
-    var total: usize = 0;
-    for (r.subscriptions.values()) |sub| total += sub.messages.pending(io).messages;
-    return total;
+    for (r.subscriptions.values()) |sub| {
+        if (!sub.messages.settled(io)) return false;
+    }
+    return true;
 }
 
 /// Frees every subscription still registered: the client goes away.

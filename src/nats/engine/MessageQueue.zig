@@ -82,6 +82,9 @@ overflowing: bool = false,
 /// what still comes until it ends, and a new connection does not subscribe
 /// it again.
 draining: bool = false,
+/// `next` handed out a message, and the owner has not asked for the next
+/// one since: it may still be working on it.
+in_hand: bool = false,
 
 pub fn init(gpa: Allocator, limits: Limits, overflow: OverflowPolicy, last: ?u64) MessageQueue {
     return .{ .gpa = gpa, .limits = limits, .overflow = overflow, .last = last };
@@ -156,7 +159,11 @@ pub fn end(q: *MessageQueue, io: Io, how: End, discard: bool) bool {
     const was_open = q.ended == null;
     if (!was_open and how != .closed) return false;
     q.ended = how;
-    if (discard or how == .closed) q.freeAll();
+    if (discard or how == .closed) {
+        q.freeAll();
+        // Its owner ended it, or the client closed: no message is worked on.
+        q.in_hand = false;
+    }
     q.not_empty.broadcast(io);
     return was_open;
 }
@@ -170,6 +177,7 @@ pub fn cancel(q: *MessageQueue, io: Io) void {
     defer q.mutex.unlock(io);
     if (q.ended != .closed) q.ended = .finished;
     q.freeAll();
+    q.in_hand = false;
     q.not_empty.broadcast(io);
 }
 
@@ -276,11 +284,14 @@ pub fn next(q: *MessageQueue, io: Io, timeout: Io.Timeout) NextError!?Message {
     if (q.receiving) return error.ConcurrentReceive;
     q.receiving = true;
     defer q.receiving = false;
+    // The owner is done with the message it took before.
+    q.in_hand = false;
     while (true) {
         if (q.ended == .closed) return error.ConnectionClosed;
         if (q.messages.popFront()) |m| {
             q.bytes -= m.buffer.len;
             q.delivered += 1;
+            q.in_hand = true;
             return m;
         }
         if (q.ended) |how| return switch (how) {
@@ -293,6 +304,14 @@ pub fn next(q: *MessageQueue, io: Io, timeout: Io.Timeout) NextError!?Message {
         };
         try q.not_empty.waitTimeout(io, &q.mutex, time.until(deadline));
     }
+}
+
+/// Every message was taken, and its owner came back for the next one, or
+/// ended the queue: nothing it received is still being worked on.
+pub fn settled(q: *MessageQueue, io: Io) bool {
+    q.mutex.lockUncancelable(io);
+    defer q.mutex.unlock(io);
+    return q.messages.len == 0 and !q.in_hand;
 }
 
 /// The messages waiting to be taken, and their bytes.
@@ -535,4 +554,26 @@ test "one task at a time waits; a timeout, a cancel and an end wake it" {
     try awaitReceiver(&q);
     _ = q.end(io, .closed, true);
     try testing.expectError(error.ConnectionClosed, waiting.await(io));
+}
+
+test "a queue is settled once its messages were taken and its owner came back for more" {
+    const io = testing.io;
+    var q: MessageQueue = .init(testing.allocator, .{ .messages = 4, .bytes = 1024 }, .drop_newest, null);
+    defer q.deinit();
+    try testing.expect(q.settled(io));
+    _ = q.push(io, try testMessage(8, 'a'));
+    try testing.expect(!q.settled(io));
+    var m = (try q.next(io, .none)).?;
+    m.deinit();
+    // Taken, but its owner may still be working on it.
+    try testing.expect(!q.settled(io));
+    try testing.expectError(error.Timeout, q.next(io, .{ .duration = .{ .raw = .fromMilliseconds(1), .clock = .awake } }));
+    try testing.expect(q.settled(io));
+
+    _ = q.push(io, try testMessage(8, 'b'));
+    var n = (try q.next(io, .none)).?;
+    n.deinit();
+    // Its owner ends it: done with what it took.
+    _ = q.end(io, .finished, true);
+    try testing.expect(q.settled(io));
 }
