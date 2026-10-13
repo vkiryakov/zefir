@@ -54,7 +54,7 @@ Take any module on its own, or all the finished ones at once through the umbrell
 | `zefir-rpc`                        | Typed RPC over TCP and NATS, later RabbitMQ, HTTP and QUIC; streaming                                      | 📋 Planned                                         |
 | `zefir-graphql`                    | GraphQL queries, mutations, subscriptions, resolvers                                                       | 📋 Planned                                         |
 | `zefir-messaging`                  | Pub/sub, message queues, consumers, backpressure                                                           | 📋 Planned                                         |
-| `zefir-nats`                       | Native NATS client: publish/subscribe, request/reply, reconnect                                            | 🚧 In progress                                     |
+| `zefir-nats`                       | Native async NATS client on `std.Io`: publish/subscribe, request/reply, reconnect                          | 🚧 In progress                                     |
 | `zefir-zmq`                        | ZeroMQ / ZMTP integration                                                                                  | 📋 Planned                                         |
 | `zefir-grpc`                       | gRPC interoperability                                                                                      | 📋 Planned                                         |
 | **Database & Persistence**         |                                                                                                            |                                                   |
