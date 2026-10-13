@@ -150,6 +150,9 @@ pub fn subscribe(inbox: *Inbox, io: Io, registry: *Registry, outbound: *Outbound
     subject[prefix_len] = '*';
     outbound.putUntil(io, deadline, .service, encoder.subLen(&subject, null, sid), encoder.writeSub, .{ @as([]const u8, &subject), @as(?[]const u8, null), sid }) catch |err| switch (err) {
         error.Closed => return inbox.closedError(io),
+        // Never for a SUB: without a connection the next one subscribes
+        // the inbox.
+        error.Disconnected, error.BufferFull => {},
         else => |e| return e,
     };
     queued = true;

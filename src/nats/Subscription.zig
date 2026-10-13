@@ -126,7 +126,7 @@ pub fn unsubscribe(sub: *Subscription) UnsubscribeError!void {
         error.Closed => return error.ConnectionClosed,
         // Never for an UNSUB: without a connection the next one simply
         // does not subscribe again.
-        error.Disconnected => {},
+        error.Disconnected, error.BufferFull => {},
         else => |e| return e,
     };
 }

@@ -146,7 +146,10 @@ pub const PublishError = error{
     PayloadTooLarge,
     /// Headers, and the server cannot take them.
     UnsupportedFeature,
-    /// Not connected yet.
+    /// The client reconnects, and the reconnect buffer has no room for it.
+    BufferFull,
+    /// Not connected yet, or reconnecting with `reconnect.buffer_bytes`
+    /// of 0.
     Disconnected,
     ConnectionClosed,
     Canceled,
@@ -158,7 +161,9 @@ pub const PublishError = error{
 /// Publishes `payload` to `subject`. It returns once a copy is in the
 /// outbound queue, which is not delivery: `flush` waits until the server
 /// has it. While the queue is full, it waits for room; cancel the task to
-/// give up.
+/// give up. While the client reconnects, the copy waits in the reconnect
+/// buffer for the next connection instead, or fails with BufferFull when
+/// the buffer is full; it is never sent twice.
 pub fn publish(client: *Client, subject: []const u8, payload: []const u8) PublishError!void {
     return client.publishMessage(.{ .subject = subject, .payload = payload });
 }
@@ -216,7 +221,7 @@ fn prepare(client: *Client, message: PublishMessage) PrepareError!usize {
     try subjects.validatePublish(message.subject);
     if (message.reply_to) |reply| try subjects.validatePublish(reply);
     try Headers.validate(message.headers);
-    const server = try client.currentServer();
+    const server = try client.currentServer(.publish);
     const has_headers = message.headers.len > 0;
     if (has_headers and !server.headers) return error.UnsupportedFeature;
     const header_len = if (has_headers) encoder.headerBlockLen(message.headers) else 0;
@@ -284,7 +289,7 @@ pub fn subscribe(client: *Client, subject: []const u8, options: Subscription.Opt
         .bytes = options.pending.bytes orelse limits.subscription_bytes,
     };
     if (pending.messages == 0 or pending.bytes == 0) return error.InvalidOptions;
-    _ = try client.currentServer();
+    _ = try client.currentServer(.subscribe);
 
     const io = client.io;
     const gpa = client.gpa;
@@ -297,6 +302,8 @@ pub fn subscribe(client: *Client, subject: []const u8, options: Subscription.Opt
     const len = subscribeLen(sub.subject, sub.queue_group, sub.sid, options.max_messages);
     client.outbound.put(io, .service, len, writeSubscribe, .{ sub.subject, sub.queue_group, sub.sid, options.max_messages }) catch |err| switch (err) {
         error.Closed => return error.ConnectionClosed,
+        // Never for a SUB: without a connection the next one subscribes.
+        error.Disconnected, error.BufferFull => {},
         else => |e| return e,
     };
     return sub;
@@ -316,13 +323,18 @@ fn subscribeLen(subject: []const u8, queue: ?[]const u8, sid: u64, max: ?u64) us
 /// What publishing needs to know about the current connection.
 const ServerFacts = struct { headers: bool, max_payload: u64 };
 
-/// While reconnecting, the facts are those of the last connection; the
-/// outbound queue decides what may wait for the next one.
-fn currentServer(client: *Client) error{ Disconnected, ConnectionClosed }!ServerFacts {
+/// What a call is about to queue: a publish (or a request) may wait in the
+/// reconnect buffer, a subscription goes out with the next connection.
+const Use = enum { publish, subscribe };
+
+/// While reconnecting, the facts are those of the last connection.
+fn currentServer(client: *Client, use: Use) error{ Disconnected, ConnectionClosed }!ServerFacts {
     client.mutex.lockUncancelable(client.io);
     defer client.mutex.unlock(client.io);
+    const facts: ServerFacts = .{ .headers = client.server_headers, .max_payload = client.max_payload };
     return switch (client.status) {
-        .connected, .reconnecting => .{ .headers = client.server_headers, .max_payload = client.max_payload },
+        .connected => facts,
+        .reconnecting => if (use == .publish and client.options.options.reconnect.buffer_bytes == 0) error.Disconnected else facts,
         .closed => error.ConnectionClosed,
         .disconnected, .connecting, .draining => error.Disconnected,
     };
@@ -365,8 +377,10 @@ pub const RequestError = error{
     Timeout,
     /// No one subscribes to the subject.
     NoResponders,
+    /// The client reconnects, and the reconnect buffer has no room for it.
+    BufferFull,
     /// Not connected yet, or the connection was lost while the request
-    /// waited.
+    /// waited, or reconnecting with `reconnect.buffer_bytes` of 0.
     Disconnected,
     /// The server refused the subscription of the client's inbox, as for an
     /// account that may not subscribe to `_INBOX.>`: no reply can come.
@@ -395,7 +409,9 @@ pub const RequestError = error{
 /// one there is no memory for, is dropped with a warning: the request then
 /// ends with Timeout, unless another responder's reply comes in time. If
 /// the connection is lost meanwhile, the request fails with Disconnected
-/// at once: nothing is sent again. All requests share one inbox
+/// at once: nothing is sent again. A request made while the client
+/// reconnects waits in the reconnect buffer and goes out with the next
+/// connection, and its timeout runs meanwhile. All requests share one inbox
 /// subscription, made by the first; any number may wait at once, up to
 /// `limits.max_pending_requests`.
 pub fn request(client: *Client, subject: []const u8, payload: []const u8, options: RequestOptions) RequestError!Message {
@@ -450,7 +466,10 @@ pub const RequestManyError = error{
     TooManyPendingRequests,
     /// The request could not be queued in time.
     Timeout,
-    /// Not connected yet.
+    /// The client reconnects, and the reconnect buffer has no room for it.
+    BufferFull,
+    /// Not connected yet, or reconnecting with `reconnect.buffer_bytes`
+    /// of 0.
     Disconnected,
     /// The server refused the subscription of the client's inbox: no
     /// response can come.
@@ -472,7 +491,7 @@ pub fn requestMany(client: *Client, subject: []const u8, payload: []const u8, op
     if (options.timeout == .none or options.max_responses == 0) return error.InvalidOptions;
     if (options.max_bytes) |bytes| if (bytes == 0) return error.InvalidOptions;
     try subjects.validatePublish(subject);
-    const server = try client.currentServer();
+    const server = try client.currentServer(.publish);
     if (!fitsPayload(payload.len, server.max_payload)) return error.PayloadTooLarge;
     const io = client.io;
     const gpa = client.gpa;
@@ -512,7 +531,7 @@ pub fn init(gpa: Allocator, io: Io, options: Options) InitError!Client {
         .options = owned,
         .read_buffer = try gpa.alloc(u8, Parser.bufferLen(parser_limits)),
         .parser_limits = parser_limits,
-        .outbound = .initBuffering(gpa, owned.options.limits.outbound_bytes),
+        .outbound = .initBuffering(gpa, owned.options.limits.outbound_bytes, owned.options.reconnect.buffer_bytes),
         .pool = pool,
     };
 }
@@ -625,6 +644,8 @@ pub fn close(client: *Client) void {
     // The manager closes its connection and returns.
     client.tasks.cancel(io);
     client.subscriptions.closeAll(io);
+    // What never went out is dropped and counted.
+    _ = client.outbound.discard(io);
 }
 
 /// Closes the client if needed and frees everything, the subscriptions and

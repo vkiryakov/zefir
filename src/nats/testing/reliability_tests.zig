@@ -93,6 +93,8 @@ const Record = struct {
     text: std.ArrayList(u8) = .empty,
     /// Connections accepted.
     accepted: std.atomic.Value(u32) = .init(0),
+    /// Set by the test when a session that waits for it may go on.
+    release: Io.Event = .unset,
 
     fn note(r: *Record, io: Io, line: []const u8) !void {
         r.mutex.lockUncancelable(io);
@@ -372,4 +374,143 @@ test "with retry_initial_connect, close() stops the attempts at once" {
     client.close();
     try testing.expectEqual(.closed, client.state());
     try testing.expect(start.durationTo(Io.Clock.awake.now(io)).toMilliseconds() < 300);
+}
+
+/// Hangs up as soon as the client subscribed to `sub`.
+fn sessionHangUpAfterSub(peer: *FakeServer.Peer, record: *Record) anyerror!void {
+    try handshake(peer, golden.info_default);
+    if (!try readUntil(peer, record, "SUB sub ")) return error.TestNoSub;
+}
+
+/// Says nothing until the test releases it, then serves: notes every
+/// frame, answers PINGs, and answers each request to `service.x` with
+/// "ok" on the inbox the client subscribed.
+fn sessionAnswerWhenReleased(peer: *FakeServer.Peer, record: *Record) anyerror!void {
+    try record.release.wait(peer.io);
+    try handshake(peer, golden.info_default);
+    var inbox_sid: [20]u8 = undefined;
+    var inbox_sid_len: usize = 0;
+    while (try peer.nextLine()) |line| {
+        try record.note(peer.io, line);
+        if (std.mem.eql(u8, line, "PING")) {
+            try peer.send(golden.pong);
+        } else if (std.mem.startsWith(u8, line, "SUB _INBOX.")) {
+            const sid = line[std.mem.findScalarLast(u8, line, ' ').? + 1 ..];
+            @memcpy(inbox_sid[0..sid.len], sid);
+            inbox_sid_len = sid.len;
+        } else if (std.mem.startsWith(u8, line, "PUB ")) {
+            var words = std.mem.splitScalar(u8, line, ' ');
+            _ = words.next();
+            const subject = words.next().?;
+            const third = words.next().?;
+            const reply = if (words.next()) |_| third else null;
+            const size = try std.fmt.parseInt(usize, line[std.mem.findScalarLast(u8, line, ' ').? + 1 ..], 10);
+            var body: [64]u8 = undefined;
+            try peer.readExact(body[0 .. size + 2]);
+            try record.note(peer.io, body[0..size]);
+            if (std.mem.eql(u8, subject, "service.x")) {
+                var frame: [128]u8 = undefined;
+                try peer.send(try std.fmt.bufPrint(&frame, "MSG {s} {s} 2\r\nok\r\n", .{ reply.?, inbox_sid[0..inbox_sid_len] }));
+            }
+        }
+    }
+}
+
+fn requestService(client: *Client) Client.RequestError!nats.Message {
+    return client.request("service.x", "?", .{ .timeout = .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } } });
+}
+
+test "while reconnecting, publishes and a request wait in the reconnect buffer and go out after the subscriptions" {
+    const io = testing.io;
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var record: Record = .{};
+    defer record.deinit();
+    const sessions = [_]Session{ sessionHangUpAfterSub, sessionAnswerWhenReleased };
+    var server = try io.concurrent(serveSessions, .{ io, &listener, &sessions, &record });
+    defer {
+        record.release.set(io);
+        server.cancel(io) catch {};
+    }
+    var url: [64]u8 = undefined;
+    var client: Client = try .init(testing.allocator, io, .{
+        .servers = &.{try FakeServer.url(&listener, &url)},
+        .reconnect = .{ .buffer_bytes = 1024 },
+    });
+    defer client.deinit();
+    try client.connect();
+    const sub = try client.subscribe("sub", .{});
+    defer sub.deinit();
+
+    // The server hung up; the next one says nothing until released.
+    try awaitState(&client, .reconnecting);
+    try awaitAccepted(&record, 2);
+    try client.publish("buffered", "1");
+    try client.publish("buffered", "2");
+    const too_big: [2000]u8 = @splat('x');
+    try testing.expectError(error.BufferFull, client.publish("buffered", &too_big));
+    try testing.expectError(error.Disconnected, client.flush(quick));
+    var request = try io.concurrent(requestService, .{&client});
+    var awaited = false;
+    defer if (!awaited) releaseReply(request.cancel(io));
+    try awaitAwaiting(&client, 1);
+
+    record.release.set(io);
+    awaited = true;
+    var reply = try request.await(io);
+    defer reply.deinit();
+    try testing.expectEqualStrings("ok", reply.payload);
+    try client.flush(quick);
+    try testing.expectEqual(.connected, client.state());
+    client.close();
+    try server.await(io);
+
+    const seen = try record.seen(io);
+    defer testing.allocator.free(seen);
+    const second = seen[std.mem.find(u8, seen, "--\n").? + 3 ..];
+    var lines = std.mem.splitScalar(u8, second, '\n');
+    try testing.expectEqualStrings("SUB sub 1", lines.next().?);
+    const inbox_sub = lines.next().?;
+    try testing.expect(std.mem.startsWith(u8, inbox_sub, "SUB _INBOX.") and std.mem.endsWith(u8, inbox_sub, ".* 2"));
+    for ([_][]const u8{ "PUB buffered 1", "1", "PUB buffered 1", "2" }) |expected| try testing.expectEqualStrings(expected, lines.next().?);
+    try testing.expect(std.mem.startsWith(u8, lines.next().?, "PUB service.x _INBOX."));
+}
+
+test "with reconnect.buffer_bytes 0, publishes and requests fail with Disconnected while reconnecting" {
+    const io = testing.io;
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var record: Record = .{};
+    defer record.deinit();
+    const sessions = [_]Session{ sessionHangUpAfterSub, sessionAnswerWhenReleased };
+    var server = try io.concurrent(serveSessions, .{ io, &listener, &sessions, &record });
+    defer {
+        record.release.set(io);
+        server.cancel(io) catch {};
+    }
+    var url: [64]u8 = undefined;
+    var client: Client = try .init(testing.allocator, io, .{
+        .servers = &.{try FakeServer.url(&listener, &url)},
+        .reconnect = .{ .buffer_bytes = 0 },
+    });
+    defer client.deinit();
+    try client.connect();
+    const sub = try client.subscribe("sub", .{});
+    defer sub.deinit();
+    try awaitState(&client, .reconnecting);
+    try testing.expectError(error.Disconnected, client.publish("buffered", "1"));
+    try testing.expectError(error.Disconnected, client.request("service.x", "?", .{}));
+    try testing.expectError(error.Disconnected, client.flush(quick));
+    // A subscription goes out once connected again, buffer or not.
+    const later = try client.subscribe("later", .{});
+    defer later.deinit();
+    record.release.set(io);
+    try awaitState(&client, .connected);
+    try client.flush(quick);
+    client.close();
+    try server.await(io);
+    const seen = try record.seen(io);
+    defer testing.allocator.free(seen);
+    try testing.expect(std.mem.find(u8, seen, "--\nSUB sub 1\nSUB later 2\n") != null);
+    try testing.expect(std.mem.find(u8, seen, "PUB buffered") == null);
 }

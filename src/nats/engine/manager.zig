@@ -326,10 +326,12 @@ fn teardown(client: *Client, server: ServerAddress, exit: Exit) bool {
     client.connection.stream.close(io);
     if (!again) {
         disconnected(client);
+        _ = client.outbound.discard(io);
         return false;
     }
-    // Nothing the connection left is sent again.
-    client.outbound.settle(io);
+    // Nothing the connection left is sent again: publishes it never wrote
+    // wait in the reconnect buffer.
+    _ = client.outbound.settle(io);
     return true;
 }
 
@@ -371,6 +373,7 @@ fn giveUp(client: *Client) void {
     client.inbox.end(io, .closed);
     client.outbound.close(io);
     client.subscriptions.closeAll(io);
+    _ = client.outbound.discard(io);
 }
 
 /// The reader task of a connection: frames from the server.
