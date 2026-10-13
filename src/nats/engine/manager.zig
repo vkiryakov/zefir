@@ -338,6 +338,8 @@ fn teardown(client: *Client, server: ServerAddress, exit: Exit) bool {
         .write => |err| log.debug("writing to {f} failed: {t}", .{ server, err }),
         .lame_duck => log.debug("{f} goes away: moving to another server", .{server}),
     }
+    const again = lost(client, exit);
+    // After the state changed: who takes the event sees the new state.
     if (disconnectReason(exit)) |reason| {
         switch (exit) {
             .protocol => client.events.push(io, .{ .protocol_error = server }),
@@ -350,7 +352,6 @@ fn teardown(client: *Client, server: ServerAddress, exit: Exit) bool {
         }
         client.events.push(io, .{ .disconnected = .{ .server = server, .reason = reason } });
     }
-    const again = lost(client, exit);
     // Before the outbound queue wakes them, requests learn why.
     if (again) {
         client.inbox.disconnect(io);
