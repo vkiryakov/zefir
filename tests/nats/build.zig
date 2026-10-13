@@ -12,6 +12,9 @@
 //!   zig build bench            start the servers, run the benchmark,
 //!                              built with ReleaseFast unless
 //!                              -Dbench-optimize says otherwise
+//!   zig build check            build the tests, the examples and the
+//!                              benchmark without running them; no servers
+//!                              needed, so CI runs it on every system
 //!   zig build up               only start the servers
 //!   zig build down             stop the servers; it also resets them after a run
 //!                              that died while a test held one paused
@@ -222,7 +225,8 @@ pub fn build(b: *std.Build) void {
     run_stress.has_side_effects = true;
     run_stress.step.dependOn(&up.step);
     stress_step.dependOn(&run_stress.step);
-    for ([_]std.lang.Optimize{ .debug, .safe }) |mode| {
+    var stress_builds: [2]*std.Build.Step.Compile = undefined;
+    for ([_]std.lang.Optimize{ .debug, .safe }, &stress_builds) |mode, *build_of_mode| {
         const mode_zefir = b.dependency("zefir", .{ .target = target, .optimize = mode });
         const mode_zio = b.dependency("zio", .{ .target = target, .optimize = mode });
         const imports: []const std.Build.Module.Import = &.{
@@ -250,7 +254,16 @@ pub fn build(b: *std.Build) void {
             .test_runner = .{ .path = b.path("test_runner.zig"), .mode = .simple },
         });
         run_stress.addArtifactArg(stress);
+        build_of_mode.* = stress;
     }
+
+    // Everything above built and nothing run: no servers needed.
+    const check_step = b.step("check", "Build the tests, the examples and the benchmark without running them");
+    check_step.dependOn(&e2e.step);
+    var built_examples = built.valueIterator();
+    while (built_examples.next()) |exe| check_step.dependOn(&exe.*.step);
+    for (stress_builds) |stress| check_step.dependOn(&stress.step);
+    check_step.dependOn(&fast_bench.step);
 }
 
 /// The benchmark, with zefir and zio built in `mode` too.

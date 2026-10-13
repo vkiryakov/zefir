@@ -78,6 +78,14 @@ jobs:
       - if: env.MODULES != ''
         shell: bash
         run: zig build $(printf 'test-%s ' $MODULES) --summary all --test-timeout 5m
+      # The package in tests/nats, built and not run: the end-to-end and
+      # stress tests, the examples of the nats guide and the benchmark. Only
+      # nats-e2e runs them, on Linux, as they need the servers in Docker;
+      # this keeps them compiling on every system, in a required check.
+      - if: contains(format(' {0} ', env.MODULES), ' nats ')
+        shell: bash
+        working-directory: tests/nats
+        run: zig build check --summary all
 
   # The tests again under ThreadSanitizer; it does not build for Windows.
   tsan:

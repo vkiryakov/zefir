@@ -279,10 +279,11 @@ zig build e2e                 # start the servers if needed, run the tests, then
 zig build example-pub_sub     # run one example of src/nats/examples and show what it prints
 zig build stress              # the stress tests, in Debug and in ReleaseSafe
 zig build bench               # the benchmark, built with ReleaseFast
+zig build check               # build all of the above without running it; no servers needed
 zig build down                # stop the servers
 ```
 
-`zig build down` also resets the servers when a run dies half way, say while a test holds one of them paused. CI runs these tests whenever it tests nats; a change to `tests/nats/` or `docker-compose.yml` counts as a change to nats.
+`zig build down` also resets the servers when a run dies half way, say while a test holds one of them paused. Whenever CI tests nats, it builds this package on Linux, macOS and Windows and runs the end-to-end tests on Linux; a change to `tests/nats/` or `docker-compose.yml` counts as a change to nats.
 
 Branches:
 
