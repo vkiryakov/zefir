@@ -15,47 +15,108 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # The modules to test: on a pull request, the ones its changes affect
+  # (see .github/scripts/affected-modules.sh); on a push to main or dev and
+  # on a manual run, all of them, so that every merge is tested in full.
+  changes:
+    name: changes
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    outputs:
+      modules: ${{ steps.affected.outputs.modules }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The whole history, so that git diff finds the pull request's base.
+          fetch-depth: 0
+      - run: sh .github/scripts/affected-modules-test.sh
+      - id: affected
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "$EVENT" = pull_request ]; then
+            modules=$(sh .github/scripts/affected-modules.sh "$BASE" HEAD)
+          else
+            modules=$(sh .github/scripts/affected-modules.sh --all)
+          fi
+          echo "Modules to test: ${modules:-none}"
+          echo "modules=$modules" >> "$GITHUB_OUTPUT"
+
   # The names of `test`, `tsan` and `fmt` are required status checks on
-  # main and dev; keep them in sync.
+  # main and dev; keep them in sync. `test` and `tsan` run on every change,
+  # so that the checks always report: with no module to test, their steps
+  # are skipped and the job passes. A skipped matrix job would never report
+  # its checks, and the pull request would wait for them forever.
   test:
     name: test (${{ matrix.os }})
+    needs: changes
+    # Also when `changes` fails, to fail below rather than be skipped.
+    if: ${{ !cancelled() }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    env:
+      MODULES: ${{ needs.changes.outputs.modules }}
     steps:
-      - uses: actions/checkout@v7
+      - if: needs.changes.result != 'success'
+        shell: bash
+        run: |
+          echo "::error::The changes job failed, so the modules to test are unknown."
+          exit 1
+      - if: env.MODULES != ''
+        uses: actions/checkout@v7
       # Zig version is taken from minimum_zig_version in build.zig.zon.
-      - uses: mlugg/setup-zig@v2
+      - if: env.MODULES != ''
+        uses: mlugg/setup-zig@v2
       # A test that hangs fails after 5 minutes, by name and with its
       # stderr, and the other tests still run. Without the flag the job
       # would hit its timeout and print nothing about the test.
-      - run: zig build test --summary all --test-timeout 5m
+      - if: env.MODULES != ''
+        shell: bash
+        run: zig build $(printf 'test-%s ' $MODULES) --summary all --test-timeout 5m
 
   # The tests again under ThreadSanitizer; it does not build for Windows.
   tsan:
     name: tsan (${{ matrix.os }})
+    needs: changes
+    if: ${{ !cancelled() }}
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    env:
+      MODULES: ${{ needs.changes.outputs.modules }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: mlugg/setup-zig@v2
+      - if: needs.changes.result != 'success'
+        shell: bash
+        run: |
+          echo "::error::The changes job failed, so the modules to test are unknown."
+          exit 1
+      - if: env.MODULES != ''
+        uses: actions/checkout@v7
+      - if: env.MODULES != ''
+        uses: mlugg/setup-zig@v2
       # TSan maps its shadow memory at fixed addresses, which the mmap
       # randomness of recent Ubuntu kernels can take.
-      - if: runner.os == 'Linux'
+      - if: env.MODULES != '' && runner.os == 'Linux'
         run: sudo sysctl vm.mmap_rnd_bits=28
-      - run: zig build test -Dtsan=true --summary all --test-timeout 5m
+      - if: env.MODULES != ''
+        shell: bash
+        run: zig build $(printf 'test-%s ' $MODULES) -Dtsan=true --summary all --test-timeout 5m
 
   # The validator's tests built, not run, for a 32-bit target, where usize
-  # has 32 bits; the other jobs build for 64-bit targets only.
+  # has 32 bits; the other jobs build for 64-bit targets only. It runs when
+  # the validator is among the modules to test.
   validator-x86:
     name: validator (x86-linux-musl, compile only)
+    needs: changes
+    if: contains(format(' {0} ', needs.changes.outputs.modules), ' validator ')
     timeout-minutes: 30
     runs-on: ubuntu-latest
     steps:
