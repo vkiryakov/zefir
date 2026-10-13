@@ -302,6 +302,50 @@ pub fn build(b: *std.Build) void {
         test_rpc.dependOn(&compile.step);
     }
 
+    // rpc panic programs: a transport that breaks the rules of
+    // rpc.transport.Pending gets a panic that names the rule. The program
+    // runs once per case and, like the log ones, ends in its own panic
+    // handler with code 3; it gets Debug copies of rpc and its imports.
+    const panic_rpc = b.createModule(.{
+        .root_source_file = b.path("src/rpc/root.zig"),
+        .target = target,
+        .optimize = .Debug,
+        .imports = &.{
+            .{ .name = "core", .module = panic_core },
+            .{ .name = "validator", .module = b.createModule(.{
+                .root_source_file = b.path("src/validator/root.zig"),
+                .target = target,
+                .optimize = .Debug,
+            }) },
+        },
+    });
+    const pending_panics = b.addExecutable(.{
+        .name = "rpc-panic-pending",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/rpc/tests/panic/pending.zig"),
+            .target = target,
+            .optimize = .Debug,
+            .imports = &.{
+                .{ .name = "core", .module = panic_core },
+                .{ .name = "rpc", .module = panic_rpc },
+            },
+        }),
+    });
+    for ([_][2][]const u8{
+        .{ "release_twice", "rpc.transport.Pending: release of a slot that is not acquired; release each slot once" },
+        .{ "wait_after_release", "rpc.transport.Pending: wait on a slot that is not acquired; wait before release" },
+        .{ "wait_twice", "rpc.transport.Pending: wait called twice for one slot" },
+        .{ "deinit_in_use", "rpc.transport.Pending: deinit with slots still acquired; release every slot first" },
+    }) |case| {
+        const run = b.addRunArtifact(pending_panics);
+        run.addArg(case[0]);
+        run.expectStdErrMatch(case[1]);
+        // expectStdErrMatch accepts any exit: only the panic handler exits
+        // with 3, so a program that printed the text and returned fails.
+        run.expectExitCode(3);
+        test_rpc.dependOn(&run.step);
+    }
+
     // core benchmarks: `zig build test` only compiles them, `zig build bench`
     // runs them. They get their own ReleaseFast copy of core, since the
     // `core` module above is built in the mode the user asked for.

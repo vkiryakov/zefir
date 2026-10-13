@@ -6,10 +6,16 @@
 //!
 //! ```zig
 //! // In `call`, in the caller's task:
+//! const deadline = request.ctx.deadline.?;
+//! if (deadline.remaining(std.Io.Clock.awake.now(io)).nanoseconds < std.time.ns_per_ms)
+//!     return error.Timeout; // less than 1 ms left: not sent
 //! const slot = try pending.acquire(io); // error.TooManyPendingRequests
 //! defer pending.release(io, slot); // exactly once
+//! // `failAll(error.Closed)` wakes only the calls that already wait: a call
+//! // that acquires its slot later checks the transport's own flag.
+//! if (transport.closed.load(.acquire)) return error.Closed;
 //! try sendRequest(io, request, slot.id); // the id goes on the wire
-//! const delivery = try pending.wait(io, slot, request.ctx.deadline.?);
+//! const delivery = try pending.wait(io, slot, deadline);
 //! defer delivery.release(delivery.context);
 //! return copyResponse(options.allocator, delivery.response);
 //!
@@ -20,7 +26,8 @@
 //!
 //! `call` copies the response into `options.allocator` in the caller's task
 //! and then releases the transport's message, so the caller's allocator is
-//! never used from another task.
+//! never used from another task. A transport that closes sets its flag
+//! first and then calls `failAll(error.Closed)`.
 //!
 //! `init` takes the memory for `max_pending` slots; nothing is allocated
 //! after it. All functions are thread-safe, and only `wait` waits for long.
@@ -45,7 +52,10 @@ free_len: usize,
 next_id: u64 = 1,
 
 /// A response handed to a slot as the transport received it. Its memory
-/// stays the transport's until `release(context)`.
+/// stays the transport's until `release(context)`. That callback may run
+/// inside `Pending.release`, which cannot return `error.Canceled`: it must
+/// not wait on cancelable primitives or swallow a cancelation request, and
+/// must not call back into the same `Pending`.
 pub const Delivery = struct {
     response: model.Response,
     context: *anyopaque,
@@ -61,6 +71,8 @@ pub const Options = struct {
     max_pending: u32,
 };
 
+/// The errors of `wait`: the task was canceled, the deadline passed, or
+/// `failAll` came first.
 pub const WaitError = std.Io.Cancelable || std.Io.Timeout.Error || FailError;
 
 /// What `failAll` tells the waiting calls: the link broke, or the
@@ -84,6 +96,8 @@ const Waiter = struct {
     };
 };
 
+/// Takes the memory for `options.max_pending` slots from `gpa`; `deinit`
+/// gives it back.
 pub fn init(gpa: std.mem.Allocator, options: Options) error{OutOfMemory}!Pending {
     const waiters = try gpa.alloc(Waiter, options.max_pending);
     errdefer gpa.free(waiters);
@@ -92,13 +106,16 @@ pub fn init(gpa: std.mem.Allocator, options: Options) error{OutOfMemory}!Pending
     errdefer gpa.free(free);
     for (free, 0..) |*index, i| index.* = @intCast(free.len - 1 - i);
     var table: std.AutoArrayHashMapUnmanaged(u64, u32) = .empty;
+    // The entries and the index are two allocations.
+    errdefer table.deinit(gpa);
     try table.ensureTotalCapacity(gpa, options.max_pending);
     return .{ .gpa = gpa, .table = table, .waiters = waiters, .free = free, .free_len = free.len };
 }
 
-/// Frees the slots. Every acquired slot must have been released.
+/// Frees the slots. Panics if a slot is still acquired: a call may still
+/// wait on it.
 pub fn deinit(p: *Pending) void {
-    std.debug.assert(p.table.count() == 0);
+    if (p.table.count() != 0) @panic("rpc.transport.Pending: deinit with slots still acquired; release every slot first");
     p.table.deinit(p.gpa);
     p.gpa.free(p.free);
     p.gpa.free(p.waiters);
@@ -155,16 +172,17 @@ pub fn wait(p: *Pending, io: std.Io, slot: Slot, deadline: core.Deadline) WaitEr
             return delivery;
         },
         .failed => |err| return err,
-        // The event is set only together with a response or an error, and
-        // a slot is waited for once.
-        .free, .waiting, .taken => unreachable,
+        .taken => @panic("rpc.transport.Pending: wait called twice for one slot"),
+        // The event is set only together with a response or an error.
+        .free, .waiting => unreachable,
     }
 }
 
 fn waiterOf(p: *Pending, io: std.Io, slot: Slot) *Waiter {
     p.mutex.lockUncancelable(io);
     defer p.mutex.unlock(io);
-    const index = p.table.get(slot.id) orelse unreachable; // waited for after release
+    const index = p.table.get(slot.id) orelse
+        @panic("rpc.transport.Pending: wait on a slot that is not acquired; wait before release");
     return &p.waiters[index];
 }
 
@@ -175,9 +193,9 @@ pub fn release(p: *Pending, io: std.Io, slot: Slot) void {
     const untaken: ?Delivery = untaken: {
         p.mutex.lockUncancelable(io);
         defer p.mutex.unlock(io);
-        const entry = p.table.fetchSwapRemove(slot.id);
-        std.debug.assert(entry != null); // a slot is released exactly once
-        const index = (entry orelse return).value;
+        const entry = p.table.fetchSwapRemove(slot.id) orelse
+            @panic("rpc.transport.Pending: release of a slot that is not acquired; release each slot once");
+        const index = entry.value;
         const waiter = &p.waiters[index];
         const found: ?Delivery = switch (waiter.state) {
             .delivered => |delivery| delivery,
@@ -193,8 +211,9 @@ pub fn release(p: *Pending, io: std.Io, slot: Slot) void {
 }
 
 /// The link broke or the transport was closed: every slot still waiting
-/// for a response gets `err`, its `wait` wakes up. Slots acquired later are
-/// not affected.
+/// for a response gets `err`, its `wait` wakes up. Nothing is remembered:
+/// slots acquired later wait as usual, so a closed transport checks its own
+/// flag after `acquire`.
 pub fn failAll(p: *Pending, io: std.Io, err: FailError) void {
     p.mutex.lockUncancelable(io);
     defer p.mutex.unlock(io);
@@ -243,6 +262,18 @@ fn waitFor(p: *Pending, io: std.Io, slot: Slot) WaitError!Delivery {
     return p.wait(io, slot, inSeconds(io, 10));
 }
 
+fn initDeinit(gpa: std.mem.Allocator, max_pending: u32) !void {
+    var p: Pending = try .init(gpa, .{ .max_pending = max_pending });
+    p.deinit();
+}
+
+test "init frees what it took when an allocation fails" {
+    // 64 slots need the index of the table as well, a third allocation.
+    for ([_]u32{ 0, 4, 64 }) |max_pending| {
+        try testing.checkAllAllocationFailures(testing.allocator, initDeinit, .{max_pending});
+    }
+}
+
 test "a response completed before the wait is there at once" {
     const io = testing.io;
     var p: Pending = try .init(testing.allocator, .{ .max_pending = 4 });
@@ -268,8 +299,8 @@ test "a response from another task wakes a wait with a far deadline" {
     defer p.release(io, slot);
     var completer = try io.concurrent(completeLater, .{ &p, io, slot.id, messages.delivery("two") });
     defer _ = completer.cancel(io) catch false;
-    // About 35 000 years: past what one wait of std.Io.Threaded on Windows
-    // can take.
+    // About 35 000 years: one wait that long overflows on some targets, so
+    // `wait` waits in steps.
     const delivery = try p.wait(io, slot, inSeconds(io, 1 << 40));
     try testing.expectEqualStrings("two", delivery.response.body);
     delivery.release(delivery.context);
@@ -392,6 +423,115 @@ test "a second response for one call is refused" {
     try testing.expectEqualStrings("first", delivery.response.body);
     delivery.release(delivery.context);
     p.release(io, slot);
+}
+
+/// Callers wait with short deadlines while a responder answers on time,
+/// late, twice or never, and now and then fails every waiting call.
+const Load = struct {
+    const callers = 4;
+    const calls = 250;
+
+    p: *Pending,
+    /// The id each caller waits on; 0 between calls.
+    current: [callers]std.atomic.Value(u64) = @splat(.init(0)),
+    done: std.atomic.Value(bool) = .init(false),
+    created: std.atomic.Value(u64) = .init(0),
+    freed: std.atomic.Value(u64) = .init(0),
+    answered: std.atomic.Value(u64) = .init(0),
+    timeouts: std.atomic.Value(u64) = .init(0),
+    early_timeouts: std.atomic.Value(u64) = .init(0),
+    failed: std.atomic.Value(u64) = .init(0),
+
+    fn delivery(load: *Load) Delivery {
+        _ = load.created.fetchAdd(1, .monotonic);
+        return .{ .response = .{ .status = .ok, .body = "x" }, .context = load, .release = free };
+    }
+
+    fn free(context: *anyopaque) void {
+        const load: *Load = @ptrCast(@alignCast(context));
+        _ = load.freed.fetchAdd(1, .monotonic);
+    }
+
+    fn caller(load: *Load, io: std.Io, index: usize, seed: u64) std.Io.Cancelable!void {
+        var prng: std.Random.DefaultPrng = .init(seed);
+        const random = prng.random();
+        for (0..calls) |_| {
+            const slot = while (true) {
+                break load.p.acquire(io) catch {
+                    try io.sleep(.fromMicroseconds(50), .awake);
+                    continue;
+                };
+            };
+            load.current[index].store(slot.id, .release);
+            const deadline: core.Deadline = .after(now(io), .fromMicroseconds(random.intRangeAtMost(i64, 0, 2000)));
+            if (load.p.wait(io, slot, deadline)) |delivery_| {
+                _ = load.answered.fetchAdd(1, .monotonic);
+                delivery_.release(delivery_.context);
+            } else |err| switch (err) {
+                error.Timeout => {
+                    _ = load.timeouts.fetchAdd(1, .monotonic);
+                    if (!deadline.isExpired(now(io))) _ = load.early_timeouts.fetchAdd(1, .monotonic);
+                },
+                error.ConnectionLost, error.Closed => _ = load.failed.fetchAdd(1, .monotonic),
+                error.Canceled => return error.Canceled,
+            }
+            // Sometimes the id stays out until after the release: late
+            // responses.
+            if (random.boolean()) load.current[index].store(0, .release);
+            load.p.release(io, slot);
+            load.current[index].store(0, .release);
+        }
+    }
+
+    fn responder(load: *Load, io: std.Io, seed: u64) std.Io.Cancelable!void {
+        var prng: std.Random.DefaultPrng = .init(seed);
+        const random = prng.random();
+        var last: [callers]u64 = @splat(0);
+        while (!load.done.load(.acquire)) {
+            for (&load.current, &last) |*current, *previous| {
+                const id = current.load(.acquire);
+                const target = switch (random.uintLessThan(u8, 10)) {
+                    0 => previous.*, // late, or a second response
+                    1, 2, 3 => 0, // no response: the call times out
+                    else => id,
+                };
+                if (id != 0) previous.* = id;
+                if (target == 0) continue;
+                const message = load.delivery();
+                if (!load.p.complete(io, target, message)) message.release(message.context);
+            }
+            if (random.uintLessThan(u16, 300) == 0) load.p.failAll(io, if (random.boolean()) error.ConnectionLost else error.Closed);
+            try io.sleep(.fromMicroseconds(random.intRangeAtMost(i64, 0, 200)), .awake);
+        }
+    }
+};
+
+test "under load every message is freed once and no Timeout comes early" {
+    const io = testing.io;
+    var p: Pending = try .init(testing.allocator, .{ .max_pending = 3 });
+    defer p.deinit();
+    var load: Load = .{ .p = &p };
+
+    var responder = try io.concurrent(Load.responder, .{ &load, io, 99 });
+    defer {
+        load.done.store(true, .release);
+        responder.cancel(io) catch {};
+    }
+    var callers: [Load.callers]std.Io.Future(std.Io.Cancelable!void) = undefined;
+    var started: usize = 0;
+    defer for (callers[0..started]) |*caller| caller.cancel(io) catch {};
+    for (&callers, 0..) |*caller, i| {
+        caller.* = try io.concurrent(Load.caller, .{ &load, io, i, i + 1 });
+        started += 1;
+    }
+    for (&callers) |*caller| try caller.await(io);
+    load.done.store(true, .release);
+    try responder.await(io);
+
+    try testing.expectEqual(load.created.load(.monotonic), load.freed.load(.monotonic));
+    try testing.expectEqual(@as(u64, 0), load.early_timeouts.load(.monotonic));
+    const ended = load.answered.load(.monotonic) + load.timeouts.load(.monotonic) + load.failed.load(.monotonic);
+    try testing.expectEqual(@as(u64, Load.callers * Load.calls), ended);
 }
 
 test "50 000 calls through a full window keep the table's size and speed" {

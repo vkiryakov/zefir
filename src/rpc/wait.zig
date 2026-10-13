@@ -5,9 +5,10 @@ const std = @import("std");
 const core = @import("core");
 
 /// The longest single wait handed to `std.Io`. Implementations convert a
-/// timeout to units of their own: `std.Io.Threaded` on Windows overflows an
-/// i64 of 100 ns past about 29 000 years. A farther deadline is waited for
-/// in steps.
+/// timeout to units of their own, and some overflow on a far deadline:
+/// `std.Io.Threaded` panics in a futex wait past about 68 years on 32-bit
+/// Linux (`timespec.sec` is 32 bits) and in `sleep` past about 29 000 years
+/// on Windows. A farther deadline is waited for in steps.
 pub const max_step: std.Io.Duration = .fromSeconds(60 * 60);
 
 /// Waits until `event` is set or the awake clock reaches `deadline`.
@@ -33,8 +34,8 @@ pub fn untilSet(event: *std.Io.Event, io: std.Io, deadline: core.Deadline) (std.
 const testing = std.testing;
 
 fn far(io: std.Io) core.Deadline {
-    // About 35 000 years: past what one wait of std.Io.Threaded on Windows
-    // can take.
+    // About 35 000 years: one wait that long overflows on some targets (see
+    // `max_step`).
     return .after(std.Io.Clock.awake.now(io), .fromSeconds(1 << 40));
 }
 
