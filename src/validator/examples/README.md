@@ -1075,101 +1075,152 @@ The limits are `comptime_int` constants and part of the contract (see below).
 
 ## All rules
 
-| Rule | Checks | Code | Page |
+Every rule by category, with an example of its entry in `field_rules`. Each
+heading links to the page of its category, and each rule to its section on that
+page. [all_rules.zig](all_rules.zig) declares every example, so
+`zig build test` compiles them all.
+
+[Common](#common) · [Numbers](#numbers) · [Lists](#lists) · [Custom](#custom) ·
+[Strings](#strings) · [Formats](#formats) · [Encodings](#encodings) ·
+[Identifiers](#identifiers) · [Dates](#dates)
+
+### [Common](common.md)
+
+| Rule | Example | Checks | Code |
 | --- | --- | --- | --- |
-| `v.equals(expected)` | a value is equal to `expected` | `validation.equals` | [common](common.md#vequalsexpected) |
-| `v.notEquals(forbidden)` | a value is not equal to `forbidden` | `validation.not_equals` | [common](common.md#vnotequalsforbidden) |
-| `v.oneOf(.{ ... })` | a string, an enum tag or an integer is one of the listed values | `validation.one_of` | [common](common.md#voneofvalues) |
-| `v.noneOf(.{ ... })` | a string, an enum tag or an integer is none of the listed values | `validation.none_of` | [common](common.md#vnoneofvalues) |
-| `v.empty` | a string has no bytes, a slice no items | `validation.empty` | [common](common.md#vempty) |
-| `v.notEmpty` | a string has at least 1 byte, a slice at least 1 item | `validation.not_empty` | [common](common.md#vnotempty) |
-| `v.min(min)` | a number is at least `min` | `validation.min` | [numbers](numbers.md#vminmin) |
-| `v.max(max)` | a number is at most `max` | `validation.max` | [numbers](numbers.md#vmaxmax) |
-| `v.range(min, max)` | a number is from `min` to `max` | `validation.range` | [numbers](numbers.md#vrangemin-max) |
-| `v.positive` | a number is greater than 0 | `validation.positive` | [numbers](numbers.md#vpositive) |
-| `v.nonNegative` | a number is at least 0 | `validation.non_negative` | [numbers](numbers.md#vnonnegative) |
-| `v.negative` | a number is less than 0 | `validation.negative` | [numbers](numbers.md#vnegative) |
-| `v.nonPositive` | a number is at most 0 | `validation.non_positive` | [numbers](numbers.md#vnonpositive) |
-| `v.divisibleBy(divisor)` | a number is a multiple of `divisor` | `validation.divisible_by` | [numbers](numbers.md#vdivisiblebydivisor) |
-| `v.finite` | a float is neither NaN nor an infinity | `validation.finite` | [numbers](numbers.md#vfinite) |
-| `v.minLength(min)` | a string has at least `min` code points | `validation.min_length` | [strings](strings.md#vminlengthmin) |
-| `v.maxLength(max)` | a string has at most `max` code points | `validation.max_length` | [strings](strings.md#vmaxlengthmax) |
-| `v.length(min, max)` | a string has from `min` to `max` code points | `validation.length` | [strings](strings.md#vlengthmin-max) |
-| `v.minBytes(min)` | a string has at least `min` bytes | `validation.min_bytes` | [strings](strings.md#vminbytesmin) |
-| `v.maxBytes(max)` | a string has at most `max` bytes | `validation.max_bytes` | [strings](strings.md#vmaxbytesmax) |
-| `v.utf8` | a string is valid UTF-8 | `validation.utf8` | [strings](strings.md#vutf8) |
-| `v.notBlank` | a string has a code point outside Unicode White_Space | `validation.not_blank` | [strings](strings.md#vnotblank) |
-| `v.ascii` | every byte of a string is ASCII | `validation.ascii` | [strings](strings.md#vascii) |
-| `v.printableAscii` | every byte of a string is printable ASCII (0x20-0x7E) | `validation.printable_ascii` | [strings](strings.md#vprintableascii) |
-| `v.alphanumeric` | every byte of a string is an ASCII letter or digit | `validation.alphanumeric` | [strings](strings.md#valphanumeric) |
-| `v.alpha` | every byte of a string is an ASCII letter | `validation.alpha` | [strings](strings.md#valpha) |
-| `v.digits` | every byte of a string is an ASCII digit | `validation.digits` | [strings](strings.md#vdigits) |
-| `v.lowercase` | a string has no ASCII uppercase letter | `validation.lowercase` | [strings](strings.md#vlowercase) |
-| `v.uppercase` | a string has no ASCII lowercase letter | `validation.uppercase` | [strings](strings.md#vuppercase) |
-| `v.multibyte` | a string has a byte outside ASCII | `validation.multibyte` | [strings](strings.md#vmultibyte) |
-| `v.fullWidth` | a string has a character outside validator.js's half-width class | `validation.full_width` | [strings](strings.md#vfullwidth) |
-| `v.halfWidth` | a string has a character in validator.js's half-width class | `validation.half_width` | [strings](strings.md#vhalfwidth) |
-| `v.variableWidth` | a string has characters in and outside that class | `validation.variable_width` | [strings](strings.md#vvariablewidth) |
-| `v.contains(seed)` | a string contains `seed` | `validation.contains` | [strings](strings.md#vcontainsseed) |
-| `v.notContains(seed)` | a string does not contain `seed` | `validation.not_contains` | [strings](strings.md#vnotcontainsseed) |
-| `v.strongPassword(.{ ... })` | a password has the length and the classes of characters that the options ask for | `validation.strong_password` | [strings](strings.md#vstrongpasswordoptions) |
-| `v.numberString` | a string is a number in decimal notation | `validation.number_string` | [formats](formats.md#vnumberstring) |
-| `v.decimal(.{ ... })` | a string is a decimal number with as many digits after the point as the options allow | `validation.decimal` | [formats](formats.md#vdecimaloptions) |
-| `v.booleanString` | a string is `true`, `false`, `1` or `0` | `validation.boolean_string` | [formats](formats.md#vbooleanstring) |
-| `v.hexadecimal` | a string is a hexadecimal number | `validation.hexadecimal` | [formats](formats.md#vhexadecimal) |
-| `v.octal` | a string is an octal number | `validation.octal` | [formats](formats.md#voctal) |
-| `v.port` | a string is a port number from 0 to 65535 | `validation.port` | [formats](formats.md#vport) |
-| `v.latitude` | a string or a float is a latitude from -90 to 90 | `validation.latitude` | [formats](formats.md#vlatitude) |
-| `v.longitude` | a string or a float is a longitude from -180 to 180 | `validation.longitude` | [formats](formats.md#vlongitude) |
-| `v.latLong` | a string is a `latitude,longitude` pair | `validation.lat_long` | [formats](formats.md#vlatlong) |
-| `v.email` | a string is an email address | `validation.email` | [formats](formats.md#vemail) |
-| `v.httpUrl` | a string is an http or https URL | `validation.http_url` | [formats](formats.md#vhttpurl) |
-| `v.fqdn(.{ ... })` | a string is a domain name | `validation.fqdn` | [formats](formats.md#vfqdnoptions) |
-| `v.ip` | a string is an IPv4 or an IPv6 address | `validation.ip` | [formats](formats.md#vip) |
-| `v.ipv4` | a string is an IPv4 address | `validation.ipv4` | [formats](formats.md#vipv4) |
-| `v.ipv6` | a string is an IPv6 address | `validation.ipv6` | [formats](formats.md#vipv6) |
-| `v.macAddress(.{ ... })` | a string is a MAC address | `validation.mac_address` | [formats](formats.md#vmacaddressoptions) |
-| `v.json` | a string is a JSON object or array, nested at most 64 levels | `validation.json` | [encodings](encodings.md#vjson) |
-| `v.jwt` | a string has the shape of a JWT | `validation.jwt` | [encodings](encodings.md#vjwt) |
-| `v.base32` | a string is canonical padded base32 | `validation.base32` | [encodings](encodings.md#vbase32) |
-| `v.base58` | a string uses the base58 alphabet | `validation.base58` | [encodings](encodings.md#vbase58) |
-| `v.base64` | a string is canonical padded base64 | `validation.base64` | [encodings](encodings.md#vbase64) |
-| `v.base64Url` | a string is canonical base64url without padding | `validation.base64_url` | [encodings](encodings.md#vbase64url) |
-| `v.dataUri` | a string is an RFC 2397 data URL | `validation.data_uri` | [encodings](encodings.md#vdatauri) |
-| `v.magnetUri` | a string is a magnet URI with an exact topic | `validation.magnet_uri` | [encodings](encodings.md#vmagneturi) |
-| `v.mimeType` | a string is a media type with parameters | `validation.mime_type` | [encodings](encodings.md#vmimetype) |
-| `v.locale` | a string is a well-formed BCP 47 language tag | `validation.locale` | [encodings](encodings.md#vlocale) |
-| `v.semVer` | a string is a semantic version | `validation.sem_ver` | [encodings](encodings.md#vsemver) |
-| `v.hexColor` | a string is a CSS hex color | `validation.hex_color` | [encodings](encodings.md#vhexcolor) |
-| `v.rgbColor` | a string is a CSS `rgb()` or `rgba()` color | `validation.rgb_color` | [encodings](encodings.md#vrgbcolor) |
-| `v.hslColor` | a string is a CSS `hsl()` or `hsla()` color | `validation.hsl_color` | [encodings](encodings.md#vhslcolor) |
-| `v.uuid` | a string is a UUID: 8-4-4-4-12 hex digits | `validation.uuid` | [identifiers](identifiers.md#vuuid) |
-| `v.mongoId` | a string is a MongoDB ObjectId: 24 hex digits | `validation.mongo_id` | [identifiers](identifiers.md#vmongoid) |
-| `v.firebasePushId` | a string is a Firebase push ID | `validation.firebase_push_id` | [identifiers](identifiers.md#vfirebasepushid) |
-| `v.hash(algorithm)` | a string is a hex digest of `algorithm` | `validation.hash` | [identifiers](identifiers.md#vhashalgorithm) |
-| `v.creditCard` | a string is a card number with a valid Luhn check digit | `validation.credit_card` | [identifiers](identifiers.md#vcreditcard) |
-| `v.isbn` | a string is an ISBN-10 or an ISBN-13 | `validation.isbn` | [identifiers](identifiers.md#visbn) |
-| `v.isbn10` | a string is an ISBN-10 | `validation.isbn10` | [identifiers](identifiers.md#visbn10) |
-| `v.isbn13` | a string is an ISBN-13 | `validation.isbn13` | [identifiers](identifiers.md#visbn13) |
-| `v.issn` | a string is an ISSN, `NNNN-NNNC` | `validation.issn` | [identifiers](identifiers.md#vissn) |
-| `v.ean` | a string is an EAN-8, EAN-13 or GTIN-14 | `validation.ean` | [identifiers](identifiers.md#vean) |
-| `v.isin` | a string is an ISIN | `validation.isin` | [identifiers](identifiers.md#visin) |
-| `v.isrc` | a string is an ISRC | `validation.isrc` | [identifiers](identifiers.md#visrc) |
-| `v.bic` | a string is a BIC | `validation.bic` | [identifiers](identifiers.md#vbic) |
-| `v.iban` | a string is an IBAN | `validation.iban` | [identifiers](identifiers.md#viban) |
-| `v.btcAddress(network)` | a string is a Bitcoin address of `network` | `validation.btc_address` | [identifiers](identifiers.md#vbtcaddressnetwork) |
-| `v.ethereumAddress` | a string is an Ethereum address | `validation.ethereum_address` | [identifiers](identifiers.md#vethereumaddress) |
-| `v.date` | a string is a date `YYYY-MM-DD` | `validation.date` | [dates](dates.md#vdate) |
-| `v.rfc3339` | a string is an RFC 3339 date-time with an offset | `validation.rfc3339` | [dates](dates.md#vrfc3339) |
-| `v.iso8601` | a string is an ISO 8601 date or date-time | `validation.iso8601` | [dates](dates.md#viso8601) |
-| `v.minDate(min)` | a date or a date-time is not before `min` | `validation.min_date` | [dates](dates.md#vmindatemin) |
-| `v.maxDate(max)` | a date or a date-time is not after `max` | `validation.max_date` | [dates](dates.md#vmaxdatemax) |
-| `v.militaryTime` | a string is a time `HH:MM` or `HHMM` | `validation.military_time` | [dates](dates.md#vmilitarytime) |
-| `v.minItems(min)` | a slice has at least `min` items | `validation.min_items` | [lists](lists.md#vminitemsmin) |
-| `v.maxItems(max)` | a slice has at most `max` items | `validation.max_items` | [lists](lists.md#vmaxitemsmax) |
-| `v.uniqueItems` | no two items of a slice or an array are equal | `validation.unique_items` | [lists](lists.md#vuniqueitems) |
-| `v.uniqueBy(.key)` | no two struct items of a slice or an array have equal values of the field `key` | `validation.unique_items` | [lists](lists.md#vuniquebykey) |
-| `v.containsAll(.{ ... })` | every listed value is an item of a slice or an array | `validation.contains_all` | [lists](lists.md#vcontainsallvalues) |
-| `v.containsNone(.{ ... })` | no item of a slice or an array is a listed value | `validation.contains_none` | [lists](lists.md#vcontainsnonevalues) |
-| `v.each(rules)` | the rules of every item of a slice or an array | the inner rule's code | [lists](lists.md#veachrules) |
-| `v.custom(code, message, f)` | your predicate `f` returns `true` | your `code` | [v.custom](#vcustom) |
+| [`v.equals(expected)`](common.md#vequalsexpected) | `.terms_accepted = v.equals(true)` | a value is equal to `expected` | `validation.equals` |
+| [`v.notEquals(forbidden)`](common.md#vnotequalsforbidden) | `.adjustment = v.notEquals(0)` | a value is not equal to `forbidden` | `validation.not_equals` |
+| [`v.oneOf(.{ ... })`](common.md#voneofvalues) | `.currency = v.oneOf(.{ "EUR", "USD" })` | a string, an enum tag or an integer is one of the listed values | `validation.one_of` |
+| [`v.noneOf(.{ ... })`](common.md#vnoneofvalues) | `.username = v.noneOf(.{ "admin", "root" })` | a string, an enum tag or an integer is none of the listed values | `validation.none_of` |
+| [`v.empty`](common.md#vempty) | `.honeypot = v.empty` | a string has no bytes, a slice no items | `validation.empty` |
+| [`v.notEmpty`](common.md#vnotempty) | `.name = v.notEmpty` | a string has at least 1 byte, a slice at least 1 item | `validation.not_empty` |
+
+### [Numbers](numbers.md)
+
+| Rule | Example | Checks | Code |
+| --- | --- | --- | --- |
+| [`v.min(min)`](numbers.md#vminmin) | `.amount_cents = v.min(100)` | a number is at least `min` | `validation.min` |
+| [`v.max(max)`](numbers.md#vmaxmax) | `.discount_percent = v.max(50)` | a number is at most `max` | `validation.max` |
+| [`v.range(min, max)`](numbers.md#vrangemin-max) | `.age = v.range(18, 120)` | a number is from `min` to `max` | `validation.range` |
+| [`v.positive`](numbers.md#vpositive) | `.quantity = v.positive` | a number is greater than 0 | `validation.positive` |
+| [`v.nonNegative`](numbers.md#vnonnegative) | `.balance_cents = v.nonNegative` | a number is at least 0 | `validation.non_negative` |
+| [`v.negative`](numbers.md#vnegative) | `.debit_cents = v.negative` | a number is less than 0 | `validation.negative` |
+| [`v.nonPositive`](numbers.md#vnonpositive) | `.stock_correction = v.nonPositive` | a number is at most 0 | `validation.non_positive` |
+| [`v.divisibleBy(divisor)`](numbers.md#vdivisiblebydivisor) | `.duration_minutes = v.divisibleBy(15)` | a number is a multiple of `divisor` | `validation.divisible_by` |
+| [`v.finite`](numbers.md#vfinite) | `.weight_kg = v.finite` | a float is neither NaN nor an infinity | `validation.finite` |
+
+### [Lists](lists.md)
+
+| Rule | Example | Checks | Code |
+| --- | --- | --- | --- |
+| [`v.minItems(min)`](lists.md#vminitemsmin) | `.options = v.minItems(2)` | a slice has at least `min` items | `validation.min_items` |
+| [`v.maxItems(max)`](lists.md#vmaxitemsmax) | `.attachments = v.maxItems(5)` | a slice has at most `max` items | `validation.max_items` |
+| [`v.uniqueItems`](lists.md#vuniqueitems) | `.tags = .{ v.maxItems(10), v.uniqueItems }` | no two items of a slice or an array are equal | `validation.unique_items` |
+| [`v.uniqueBy(.key)`](lists.md#vuniquebykey) | `.lines = .{ v.maxItems(50), v.uniqueBy(.sku) }` | no two struct items of a slice or an array have equal values of the field `key` | `validation.unique_items` |
+| [`v.containsAll(.{ ... })`](lists.md#vcontainsallvalues) | `.scopes = v.containsAll(.{"openid"})` | every listed value is an item of a slice or an array | `validation.contains_all` |
+| [`v.containsNone(.{ ... })`](lists.md#vcontainsnonevalues) | `.roles = v.containsNone(.{.owner})` | no item of a slice or an array is a listed value | `validation.contains_none` |
+| [`v.each(rules)`](lists.md#veachrules) | `.emails = v.each(v.email)` | the rules of every item of a slice or an array | the inner rule's code |
+
+### [Custom](#vcustom)
+
+| Rule | Example | Checks | Code |
+| --- | --- | --- | --- |
+| [`v.custom(code, message, f)`](#vcustom) | `.handle = v.custom("profiles.handle_format", "must start with @", startsWithAt)` | your predicate `f` returns `true` | your `code` |
+
+### [Strings](strings.md)
+
+| Rule | Example | Checks | Code |
+| --- | --- | --- | --- |
+| [`v.minLength(min)`](strings.md#vminlengthmin) | `.review = v.minLength(20)` | a string has at least `min` code points | `validation.min_length` |
+| [`v.maxLength(max)`](strings.md#vmaxlengthmax) | `.title = v.maxLength(120)` | a string has at most `max` code points | `validation.max_length` |
+| [`v.length(min, max)`](strings.md#vlengthmin-max) | `.nickname = v.length(3, 32)` | a string has from `min` to `max` code points | `validation.length` |
+| [`v.minBytes(min)`](strings.md#vminbytesmin) | `.signing_key = v.minBytes(32)` | a string has at least `min` bytes | `validation.min_bytes` |
+| [`v.maxBytes(max)`](strings.md#vmaxbytesmax) | `.subject = v.maxBytes(255)` | a string has at most `max` bytes | `validation.max_bytes` |
+| [`v.utf8`](strings.md#vutf8) | `.display_name = v.utf8` | a string is valid UTF-8 | `validation.utf8` |
+| [`v.notBlank`](strings.md#vnotblank) | `.comment = v.notBlank` | a string has a code point outside Unicode White_Space | `validation.not_blank` |
+| [`v.ascii`](strings.md#vascii) | `.payment_reference = v.ascii` | every byte of a string is ASCII | `validation.ascii` |
+| [`v.printableAscii`](strings.md#vprintableascii) | `.api_key = v.printableAscii` | every byte of a string is printable ASCII (0x20-0x7E) | `validation.printable_ascii` |
+| [`v.alphanumeric`](strings.md#valphanumeric) | `.coupon_code = v.alphanumeric` | every byte of a string is an ASCII letter or digit | `validation.alphanumeric` |
+| [`v.alpha`](strings.md#valpha) | `.country_code = v.alpha` | every byte of a string is an ASCII letter | `validation.alpha` |
+| [`v.digits`](strings.md#vdigits) | `.pin = .{ v.length(4, 4), v.digits }` | every byte of a string is an ASCII digit | `validation.digits` |
+| [`v.lowercase`](strings.md#vlowercase) | `.slug = v.lowercase` | a string has no ASCII uppercase letter | `validation.lowercase` |
+| [`v.uppercase`](strings.md#vuppercase) | `.ticker = v.uppercase` | a string has no ASCII lowercase letter | `validation.uppercase` |
+| [`v.multibyte`](strings.md#vmultibyte) | `.native_name = v.multibyte` | a string has a byte outside ASCII | `validation.multibyte` |
+| [`v.fullWidth`](strings.md#vfullwidth) | `.name_kana = v.fullWidth` | a string has a character outside validator.js's half-width class | `validation.full_width` |
+| [`v.halfWidth`](strings.md#vhalfwidth) | `.account_holder_kana = v.halfWidth` | a string has a character in validator.js's half-width class | `validation.half_width` |
+| [`v.variableWidth`](strings.md#vvariablewidth) | `.product_name = v.variableWidth` | a string has characters in and outside that class | `validation.variable_width` |
+| [`v.contains(seed)`](strings.md#vcontainsseed) | `.sms_template = v.contains("{code}")` | a string contains `seed` | `validation.contains` |
+| [`v.notContains(seed)`](strings.md#vnotcontainsseed) | `.login = v.notContains(" ")` | a string does not contain `seed` | `validation.not_contains` |
+| [`v.strongPassword(.{ ... })`](strings.md#vstrongpasswordoptions) | `.password = v.strongPassword(.{ .min_length = 12 })` | a password has the length and the classes of characters that the options ask for | `validation.strong_password` |
+
+### [Formats](formats.md)
+
+| Rule | Example | Checks | Code |
+| --- | --- | --- | --- |
+| [`v.numberString`](formats.md#vnumberstring) | `.amount = v.numberString` | a string is a number in decimal notation | `validation.number_string` |
+| [`v.decimal(.{ ... })`](formats.md#vdecimaloptions) | `.price = v.decimal(.{ .max_decimal_digits = 2 })` | a string is a decimal number with as many digits after the point as the options allow | `validation.decimal` |
+| [`v.booleanString`](formats.md#vbooleanstring) | `.newsletter = v.booleanString` | a string is `true`, `false`, `1` or `0` | `validation.boolean_string` |
+| [`v.hexadecimal`](formats.md#vhexadecimal) | `.nonce = v.hexadecimal` | a string is a hexadecimal number | `validation.hexadecimal` |
+| [`v.octal`](formats.md#voctal) | `.file_mode = v.octal` | a string is an octal number | `validation.octal` |
+| [`v.port`](formats.md#vport) | `.port = v.port` | a string is a port number from 0 to 65535 | `validation.port` |
+| [`v.latitude`](formats.md#vlatitude) | `.lat = v.latitude` | a string or a float is a latitude from -90 to 90 | `validation.latitude` |
+| [`v.longitude`](formats.md#vlongitude) | `.lng = v.longitude` | a string or a float is a longitude from -180 to 180 | `validation.longitude` |
+| [`v.latLong`](formats.md#vlatlong) | `.location = v.latLong` | a string is a `latitude,longitude` pair | `validation.lat_long` |
+| [`v.email`](formats.md#vemail) | `.email = v.email` | a string is an email address | `validation.email` |
+| [`v.httpUrl`](formats.md#vhttpurl) | `.website = v.httpUrl` | a string is an http or https URL | `validation.http_url` |
+| [`v.fqdn(.{ ... })`](formats.md#vfqdnoptions) | `.domain = v.fqdn(.{})` | a string is a domain name | `validation.fqdn` |
+| [`v.ip`](formats.md#vip) | `.client_ip = v.ip` | a string is an IPv4 or an IPv6 address | `validation.ip` |
+| [`v.ipv4`](formats.md#vipv4) | `.gateway_v4 = v.ipv4` | a string is an IPv4 address | `validation.ipv4` |
+| [`v.ipv6`](formats.md#vipv6) | `.gateway_v6 = v.ipv6` | a string is an IPv6 address | `validation.ipv6` |
+| [`v.macAddress(.{ ... })`](formats.md#vmacaddressoptions) | `.device_mac = v.macAddress(.{})` | a string is a MAC address | `validation.mac_address` |
+
+### [Encodings](encodings.md)
+
+| Rule | Example | Checks | Code |
+| --- | --- | --- | --- |
+| [`v.json`](encodings.md#vjson) | `.metadata = v.json` | a string is a JSON object or array, nested at most 64 levels | `validation.json` |
+| [`v.jwt`](encodings.md#vjwt) | `.id_token = v.jwt` | a string has the shape of a JWT | `validation.jwt` |
+| [`v.base32`](encodings.md#vbase32) | `.totp_secret = v.base32` | a string is canonical padded base32 | `validation.base32` |
+| [`v.base58`](encodings.md#vbase58) | `.public_key = v.base58` | a string uses the base58 alphabet | `validation.base58` |
+| [`v.base64`](encodings.md#vbase64) | `.signature = v.base64` | a string is canonical padded base64 | `validation.base64` |
+| [`v.base64Url`](encodings.md#vbase64url) | `.code_challenge = v.base64Url` | a string is canonical base64url without padding | `validation.base64_url` |
+| [`v.dataUri`](encodings.md#vdatauri) | `.avatar = v.dataUri` | a string is an RFC 2397 data URL | `validation.data_uri` |
+| [`v.magnetUri`](encodings.md#vmagneturi) | `.magnet_link = v.magnetUri` | a string is a magnet URI with an exact topic | `validation.magnet_uri` |
+| [`v.mimeType`](encodings.md#vmimetype) | `.content_type = v.mimeType` | a string is a media type with parameters | `validation.mime_type` |
+| [`v.locale`](encodings.md#vlocale) | `.language = v.locale` | a string is a well-formed BCP 47 language tag | `validation.locale` |
+| [`v.semVer`](encodings.md#vsemver) | `.version = v.semVer` | a string is a semantic version | `validation.sem_ver` |
+| [`v.hexColor`](encodings.md#vhexcolor) | `.brand_color = v.hexColor` | a string is a CSS hex color | `validation.hex_color` |
+| [`v.rgbColor`](encodings.md#vrgbcolor) | `.background = v.rgbColor` | a string is a CSS `rgb()` or `rgba()` color | `validation.rgb_color` |
+| [`v.hslColor`](encodings.md#vhslcolor) | `.accent = v.hslColor` | a string is a CSS `hsl()` or `hsla()` color | `validation.hsl_color` |
+
+### [Identifiers](identifiers.md)
+
+| Rule | Example | Checks | Code |
+| --- | --- | --- | --- |
+| [`v.uuid`](identifiers.md#vuuid) | `.request_id = v.uuid` | a string is a UUID: 8-4-4-4-12 hex digits | `validation.uuid` |
+| [`v.mongoId`](identifiers.md#vmongoid) | `.user_id = v.mongoId` | a string is a MongoDB ObjectId: 24 hex digits | `validation.mongo_id` |
+| [`v.firebasePushId`](identifiers.md#vfirebasepushid) | `.message_id = v.firebasePushId` | a string is a Firebase push ID | `validation.firebase_push_id` |
+| [`v.hash(algorithm)`](identifiers.md#vhashalgorithm) | `.digest = v.hash(.sha256)` | a string is a hex digest of `algorithm` | `validation.hash` |
+| [`v.creditCard`](identifiers.md#vcreditcard) | `.card_number = v.creditCard` | a string is a card number with a valid Luhn check digit | `validation.credit_card` |
+| [`v.isbn`](identifiers.md#visbn) | `.isbn = v.isbn` | a string is an ISBN-10 or an ISBN-13 | `validation.isbn` |
+| [`v.isbn10`](identifiers.md#visbn10) | `.isbn_10 = v.isbn10` | a string is an ISBN-10 | `validation.isbn10` |
+| [`v.isbn13`](identifiers.md#visbn13) | `.isbn_13 = v.isbn13` | a string is an ISBN-13 | `validation.isbn13` |
+| [`v.issn`](identifiers.md#vissn) | `.issn = v.issn` | a string is an ISSN, `NNNN-NNNC` | `validation.issn` |
+| [`v.ean`](identifiers.md#vean) | `.barcode = v.ean` | a string is an EAN-8, EAN-13 or GTIN-14 | `validation.ean` |
+| [`v.isin`](identifiers.md#visin) | `.isin = v.isin` | a string is an ISIN | `validation.isin` |
+| [`v.isrc`](identifiers.md#visrc) | `.isrc = v.isrc` | a string is an ISRC | `validation.isrc` |
+| [`v.bic`](identifiers.md#vbic) | `.bic = v.bic` | a string is a BIC | `validation.bic` |
+| [`v.iban`](identifiers.md#viban) | `.iban = v.iban` | a string is an IBAN | `validation.iban` |
+| [`v.btcAddress(network)`](identifiers.md#vbtcaddressnetwork) | `.wallet = v.btcAddress(.mainnet)` | a string is a Bitcoin address of `network` | `validation.btc_address` |
+| [`v.ethereumAddress`](identifiers.md#vethereumaddress) | `.eth_address = v.ethereumAddress` | a string is an Ethereum address | `validation.ethereum_address` |
+
+### [Dates](dates.md)
+
+| Rule | Example | Checks | Code |
+| --- | --- | --- | --- |
+| [`v.date`](dates.md#vdate) | `.birthday = v.date` | a string is a date `YYYY-MM-DD` | `validation.date` |
+| [`v.rfc3339`](dates.md#vrfc3339) | `.created_at = v.rfc3339` | a string is an RFC 3339 date-time with an offset | `validation.rfc3339` |
+| [`v.iso8601`](dates.md#viso8601) | `.published_at = v.iso8601` | a string is an ISO 8601 date or date-time | `validation.iso8601` |
+| [`v.minDate(min)`](dates.md#vmindatemin) | `.starts = v.minDate("2020-01-01")` | a date or a date-time is not before `min` | `validation.min_date` |
+| [`v.maxDate(max)`](dates.md#vmaxdatemax) | `.ends = v.maxDate("2030-12-31")` | a date or a date-time is not after `max` | `validation.max_date` |
+| [`v.militaryTime`](dates.md#vmilitarytime) | `.opens_at = v.militaryTime` | a string is a time `HH:MM` or `HHMM` | `validation.military_time` |
