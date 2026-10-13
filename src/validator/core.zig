@@ -18,6 +18,14 @@ pub const max_code_bytes = 128;
 pub const max_message_bytes = 512;
 /// Most violations `checkAll` keeps; `Report.truncated` says when more existed.
 pub const max_report_violations = 100;
+/// Longest list whose uniqueness `uniqueItems` and `uniqueBy` check by
+/// sorting on the stack: integer, string and non-exhaustive enum items or
+/// keys need an earlier `maxItems(n)` with `n` at most this on a slice, and
+/// `N` at most this on `[N]T`.
+pub const max_unique_items = 1000;
+/// Deepest nesting of `[` and `{` that `v.json` and `v.isJson` accept, the
+/// top level included (`[]` is 1); a deeper document fails.
+pub const max_json_depth = 64;
 
 /// One failed rule. The library builds `code` and `message` at compile time:
 /// they live as long as the program and never contain the checked value, so
@@ -987,6 +995,208 @@ test "define gives a rule the parameters of its spec" {
     try std.testing.expectEqual(0, test_rules.positive.params.len);
 }
 
+// ------------------------------------------------------------------ bounds
+
+/// What a bound limits. A measure applies to some field types only: the
+/// contradiction check compares bounds of one measure on a field type it
+/// applies to, and bounds of different measures never.
+pub const Measure = enum {
+    /// The value of an integer or float field.
+    value,
+    /// The number of items of a slice, `null` items included.
+    items,
+    /// The number of bytes of a string.
+    bytes,
+    /// The number of code points of a string.
+    code_points,
+    /// The date of a string that is a full-date (`minDate` and `maxDate`
+    /// with a date bound).
+    date,
+    /// The instant of a string that is a date-time (`minDate` and `maxDate`
+    /// with a date-time bound).
+    date_time,
+
+    /// Bounds on this measure limit the values of the unwrapped field type `T`.
+    pub fn applies(comptime measure: Measure, comptime T: type) bool {
+        return switch (measure) {
+            .value => isNumber(T),
+            .items => isListSlice(T),
+            .bytes, .code_points, .date, .date_time => isString(T),
+        };
+    }
+
+    /// Which two rules a contradiction on this measure names: the first
+    /// pair in tuple order for numbers and items; for strings and dates the
+    /// rule with the largest lower bound and the rule with the smallest
+    /// upper bound, the earlier one on ties.
+    fn namesFirstPair(comptime measure: Measure) bool {
+        return measure == .value or measure == .items;
+    }
+};
+
+/// One side of the values a rule accepts on one measure: `min(5)` is
+/// `value >= 5`, `positive` is `value > 0`, `maxItems(3)` is `items <= 3`.
+pub const Bound = struct {
+    measure: Measure,
+    side: Side,
+    /// The bound: `.int` or `.float` as written for numbers and counts; a
+    /// derived integer for dates and date-times (see `scale`).
+    value: Value,
+    /// The bound is `value / 10^scale`: a date-time bound keeps every digit of
+    /// its fraction of a second. An exclusive bound is a whole number.
+    scale: comptime_int = 0,
+    /// The bound itself passes (`>=`, `<=`) rather than not (`>`, `<`).
+    inclusive: bool = true,
+
+    pub const Side = enum { lower, upper };
+
+    /// `measure >= x`.
+    pub fn atLeast(comptime measure: Measure, comptime x: anytype) Bound {
+        return .{ .measure = measure, .side = .lower, .value = valueOf(x) };
+    }
+
+    /// `measure <= x`.
+    pub fn atMost(comptime measure: Measure, comptime x: anytype) Bound {
+        return .{ .measure = measure, .side = .upper, .value = valueOf(x) };
+    }
+
+    /// `measure > x`.
+    pub fn above(comptime measure: Measure, comptime x: anytype) Bound {
+        return .{ .measure = measure, .side = .lower, .value = valueOf(x), .inclusive = false };
+    }
+
+    /// `measure < x`.
+    pub fn below(comptime measure: Measure, comptime x: anytype) Bound {
+        return .{ .measure = measure, .side = .upper, .value = valueOf(x), .inclusive = false };
+    }
+};
+
+/// The indexes, in tuple order, of two rules whose bounds on one measure let
+/// no value of the unwrapped field type `T` pass, or null. The measures are
+/// checked in their order, and `Measure.namesFirstPair` tells which pair a
+/// contradiction names. Comparing pairs is enough: a set of lower and upper
+/// bounds leaves a value exactly when every lower bound fits under every
+/// upper bound, that is, when the largest lower bound fits under the
+/// smallest upper bound.
+pub fn contradiction(comptime rules: []const Rule, comptime T: type) ?[2]usize {
+    @setEvalBranchQuota(eval_quota);
+    inline for (comptime std.enums.values(Measure)) |measure| {
+        if (!comptime measure.applies(T)) continue;
+        const pair = if (measure.namesFirstPair()) firstContradiction(rules, measure, T) else extremeContradiction(rules, measure, T);
+        if (pair != null) return pair;
+    }
+    return null;
+}
+
+/// The first two rules, in tuple order, whose bounds on `measure` let no
+/// value of `T` pass, or null.
+fn firstContradiction(comptime rules: []const Rule, comptime measure: Measure, comptime T: type) ?[2]usize {
+    for (rules, 0..) |a, i| {
+        for (rules[i + 1 ..], i + 1..) |b, j| {
+            for (a.bounds) |x| {
+                if (x.measure != measure) continue;
+                for (b.bounds) |y| {
+                    if (y.measure != measure or x.side == y.side) continue;
+                    const lower = if (x.side == .lower) x else y;
+                    const upper = if (x.side == .lower) y else x;
+                    if (!satisfiable(lower, upper, T)) return .{ i, j };
+                }
+            }
+        }
+    }
+    return null;
+}
+
+/// The rule with the largest lower bound on `measure` and the rule with the
+/// smallest upper bound, each the earlier one on ties, in tuple order, when
+/// the two bounds let no value of `T` pass; else null.
+fn extremeContradiction(comptime rules: []const Rule, comptime measure: Measure, comptime T: type) ?[2]usize {
+    comptime {
+        const Extreme = struct { index: usize, bound: Bound };
+        var lower: ?Extreme = null;
+        var upper: ?Extreme = null;
+        for (rules, 0..) |rule, i| {
+            for (rule.bounds) |b| {
+                if (b.measure != measure) continue;
+                switch (b.side) {
+                    .lower => if (lower == null or edgeOrder(b, lower.?.bound) == .gt) {
+                        lower = .{ .index = i, .bound = b };
+                    },
+                    .upper => if (upper == null or edgeOrder(b, upper.?.bound) == .lt) {
+                        upper = .{ .index = i, .bound = b };
+                    },
+                }
+            }
+        }
+        const lo = lower orelse return null;
+        const hi = upper orelse return null;
+        if (satisfiable(lo.bound, hi.bound, T)) return null;
+        return if (lo.index < hi.index) .{ lo.index, hi.index } else .{ hi.index, lo.index };
+    }
+}
+
+/// Some value of the measure lies between `lower` and `upper`. A float field
+/// compares the bounds in its own type, as its rules do; counts and integer
+/// fields move an exclusive bound by one; other bounds compare exactly.
+fn satisfiable(comptime lower: Bound, comptime upper: Bound, comptime T: type) bool {
+    if (lower.measure == .value and isFloat(T)) {
+        const lo = boundAs(T, lower.value);
+        const hi = boundAs(T, upper.value);
+        return lo < hi or (lo == hi and lower.inclusive and upper.inclusive);
+    }
+    return edgeOrder(lower, upper) != .gt;
+}
+
+/// The order of the least (lower bound) or largest (upper bound) values that
+/// the whole-number or decimal bounds `a` and `b` let pass: an exclusive
+/// bound moves by one.
+fn edgeOrder(comptime a: Bound, comptime b: Bound) std.math.Order {
+    return std.math.order(edge(a) * pow10(b.scale), edge(b) * pow10(a.scale));
+}
+
+/// The least (lower bound) or largest (upper bound) value that `bound` lets
+/// pass, times `10^bound.scale`.
+fn edge(comptime bound: Bound) comptime_int {
+    const x = boundInt(bound.value);
+    if (bound.inclusive) return x;
+    if (bound.scale != 0) @compileError("validator: internal: an exclusive bound is a whole number");
+    return if (bound.side == .lower) x + 1 else x - 1;
+}
+
+/// `10^n`.
+fn pow10(comptime n: comptime_int) comptime_int {
+    comptime {
+        var result: comptime_int = 1;
+        for (0..n) |_| result *= 10;
+        return result;
+    }
+}
+
+/// A bound as a value of the float field type `T`, as `numberAs` converts it.
+fn boundAs(comptime T: type, comptime value: Value) T {
+    return switch (value) {
+        .int => |x| numberAs(T, x),
+        .float => |x| numberAs(T, x),
+        else => @compileError("validator: internal: a bound is a number"),
+    };
+}
+
+/// A bound of an integer field or a count: the declaration checks accept
+/// only integers there.
+fn boundInt(comptime value: Value) comptime_int {
+    return switch (value) {
+        .int => |x| x,
+        else => @compileError("validator: internal: a bound on an integer measure is an integer"),
+    };
+}
+
+/// The declaration error of the rule list `rules` on the unwrapped field type
+/// `T` for its first contradiction, or null.
+pub fn contradictionText(comptime rules: []const Rule, comptime T: type, comptime where: []const u8) ?[]const u8 {
+    const pair = contradiction(rules, T) orelse return null;
+    return "validator: " ++ where ++ ": " ++ rules[pair[0]].label() ++ " and " ++ rules[pair[1]].label() ++ " contradict; no value can pass";
+}
+
 // ------------------------------------------------------------------ the rule
 
 /// What a rule's run-time check returns.
@@ -1016,7 +1226,8 @@ pub const preconditions = struct {
     /// `length`, `notBlank`, the width rules and `strongPassword`), on a
     /// string that is not valid UTF-8.
     pub const utf8: Precondition = .{ .code = "validation.utf8", .message = "must be valid UTF-8" };
-    /// Every number rule on a float field whose value is NaN, +inf or -inf.
+    /// Every number rule, `latitude` and `longitude` on a float field whose
+    /// value is NaN, +inf or -inf.
     pub const finite: Precondition = .{ .code = "validation.finite", .message = "must be a finite number" };
     /// `minDate` and `maxDate` with a date bound, on a value that is not a
     /// date.
@@ -1060,11 +1271,20 @@ pub const Rule = struct {
     precondition: ?Precondition = null,
     /// `each` only: the rules applied to every item.
     inner: []const Rule = &.{},
+    /// The sides of the values the rule accepts (`min(5)`: value >= 5), for
+    /// the contradiction check of the rule list.
+    bounds: []const Bound = &.{},
     /// Compile-time check against the unwrapped field type (or the unwrapped
     /// item type inside `each`). `where` is `<Type>.field_rules.<field>`,
     /// with `[]` appended per `each` level. Reports problems with
     /// `@compileError`, usually through `typeError` or `ruleError`.
     fits: fn (comptime rule: *const Rule, comptime T: type, comptime where: []const u8) void,
+    /// The declaration check that also sees the other rules of the value,
+    /// run after every rule's `fits`: `rules` is the value's tuple (a
+    /// trailing `each` included) and `rules[index]` this rule; null for most
+    /// rules. `uniqueItems` and `uniqueBy` find the `maxItems` before them
+    /// with it, `minDate` and `maxDate` the date forms their neighbours need.
+    check_list: ?ListCheck = null,
     /// Run-time check; receives `*const T`, with `T` unwrapped.
     eval: fn (value: anytype) Outcome,
 
@@ -1125,9 +1345,14 @@ pub const Spec = struct {
     args: ?[]const u8 = null,
     params: []const Param = &.{},
     precondition: ?Precondition = null,
+    bounds: []const Bound = &.{},
     fits: fn (comptime rule: *const Rule, comptime T: type, comptime where: []const u8) void,
+    check_list: ?ListCheck = null,
     eval: fn (value: anytype) Outcome,
 };
+
+/// The type of `Rule.check_list`.
+pub const ListCheck = fn (comptime rule: *const Rule, comptime rules: []const Rule, comptime index: usize, comptime T: type, comptime where: []const u8) void;
 
 /// Builds a rule of `kind`: the code of its kind (or `spec.code`), the
 /// default message (or `spec.fallback` when the default message is longer
@@ -1149,7 +1374,9 @@ pub fn define(comptime kind: Kind, comptime spec: Spec) Rule {
         .args = spec.args,
         .params = spec.params,
         .precondition = spec.precondition,
+        .bounds = spec.bounds,
         .fits = spec.fits,
+        .check_list = spec.check_list,
         .eval = spec.eval,
     };
 }
@@ -1505,6 +1732,14 @@ pub fn isFloat(comptime T: type) bool {
     return @typeInfo(T) == .float;
 }
 
+/// An enum without `_`: its values are its named tags.
+pub fn isExhaustiveEnum(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .@"enum" => |e| e.mode == .exhaustive,
+        else => false,
+    };
+}
+
 /// A signed integer or a float type: the field types of the sign rules.
 pub fn isSignedNumber(comptime T: type) bool {
     return switch (@typeInfo(T)) {
@@ -1584,10 +1819,75 @@ pub const hints = struct {
     /// `minItems` and `maxItems` on a string field.
     pub const min_items_on_string = "for strings use v.minLength or v.minBytes";
     pub const max_items_on_string = "for strings use v.maxLength or v.maxBytes";
+    /// `uniqueItems` on struct items, and `uniqueBy` on items that are not structs.
+    pub const use_unique_by = "use v.uniqueBy(.field)";
+    pub const use_unique_items = "use v.uniqueItems";
+    /// `uniqueItems` or `uniqueBy` on a slice that needs a cap and has none before it.
+    pub const unique_cap = std.fmt.comptimePrint("needs an earlier v.maxItems(n) with n <= {d} (max_unique_items) in the same tuple", .{max_unique_items});
+    /// `containsAll` and `containsNone` on a string field: the substring rules.
+    pub const contains_all_on_string = "for a substring use v.contains";
+    pub const contains_none_on_string = "for a substring use v.notContains";
+    /// A `""` listed in `containsNone`.
+    pub const reject_empty_items = "use v.each(v.notEmpty) to reject empty items";
+    /// `numberString`, `decimal`, `hexadecimal` and `octal` on a number field.
+    pub const already_a_number = "the field is already a number: use v.min, v.max or v.range";
+    /// `booleanString` on a bool field.
+    pub const bool_needs_no_rule = "a bool field is already a boolean and needs no rule";
+    /// `booleanString` on a number field.
+    pub const use_bool_field = "use a bool field";
+    /// `port` on a number field.
+    pub const port_on_number = "a u16 field already holds 0-65535: add v.min(1) to exclude 0, or use v.range(0, 65535) on a wider type";
+    /// `latitude` and `longitude` on an integer field.
+    pub const latitude_on_int = "integer coordinates are usually scaled (E6, E7): use v.range in your unit, e.g. v.range(-90_000_000, 90_000_000) for E6";
+    pub const longitude_on_int = "integer coordinates are usually scaled (E6, E7): use v.range in your unit, e.g. v.range(-180_000_000, 180_000_000) for E6";
+    /// `latLong` on a number field.
+    pub const lat_long_on_number = "use two float fields with v.latitude and v.longitude";
+    /// `minLength(0)`, which every valid UTF-8 string passes.
+    pub const use_utf8 = "use v.utf8 to require valid UTF-8";
+    /// `digits` on an integer or a float field.
+    pub const number_field = "the field is already a number: use v.min, v.max or v.range";
+    /// `contains` and `notContains` on a list of strings, after the `each`
+    /// call (`searchItems`).
+    pub const search_items = "to search inside each item, or v.containsAll(.{ ... }) to require whole items";
+    pub const search_items_not = "to search inside each item, or v.containsNone(.{ ... }) to forbid whole items";
+    /// `contains` and `notContains` on a list of other items.
+    pub const require_items = "use v.containsAll(.{ ... }) to require list items";
+    pub const forbid_items = "use v.containsNone(.{ ... }) to forbid list items";
+    /// `minDate` and `maxDate` on a number field.
+    pub const timestamp_min = "for a numeric timestamp use v.min";
+    pub const timestamp_max = "for a numeric timestamp use v.max";
+    /// A `minDate` or `maxDate` bound that every value of its form passes.
+    pub const use_date = "use v.date";
+    pub const use_rfc3339 = "use v.rfc3339";
+    /// `iso8601` beside a `minDate` or `maxDate`, whose bound fixes the form.
+    pub const iso8601_with_date = "use v.date instead of v.iso8601";
+    pub const iso8601_with_date_time = "use v.rfc3339 instead of v.iso8601";
 
     /// A rule written on a list whose items it would accept.
     pub fn useEach(comptime rule: Rule) []const u8 {
         return "use v.each(v." ++ rule.call() ++ ")";
+    }
+
+    /// `contains` or `notContains` on a list of strings: the search inside
+    /// each item, or the list rule for whole items.
+    pub fn searchItems(comptime rule: Rule) []const u8 {
+        return useEach(rule) ++ " " ++ if (rule.kind == .contains) search_items else search_items_not;
+    }
+
+    /// `minLength`, `maxLength` or `length` on a slice of other items: the
+    /// list rules with the same counts.
+    pub fn itemCount(comptime rule: Rule) []const u8 {
+        return "for the number of items use " ++ switch (rule.kind) {
+            .min_length => "v.minItems(" ++ rule.params[0].text ++ ")",
+            .max_length => "v.maxItems(" ++ rule.params[0].text ++ ")",
+            .length => "v.minItems(" ++ rule.params[0].text ++ ") and v.maxItems(" ++ rule.params[1].text ++ ")",
+            else => @compileError("validator: internal: " ++ @tagName(rule.kind) ++ " counts no characters"),
+        };
+    }
+
+    /// `length(0, max)`: the rule without a lower bound.
+    pub fn useMaxLength(comptime max: usize) []const u8 {
+        return "use v.maxLength(" ++ renderArg(max) ++ ")";
     }
 
     /// A rule constructor used without a call (`.tags = v.each`): its call
@@ -1610,7 +1910,7 @@ pub const hints = struct {
 
 /// The files that define rules. Each rule pull request adds its file here, so
 /// that its `call_examples` reach the hints.
-const rule_files = [_]type{ @import("common.zig"), @import("numbers.zig"), @import("lists.zig"), @import("custom.zig") };
+const rule_files = [_]type{ @import("common.zig"), @import("numbers.zig"), @import("strings.zig"), @import("formats.zig"), @import("encodings.zig"), @import("identifiers.zig"), @import("dates.zig"), @import("lists.zig"), @import("custom.zig") };
 
 /// The arguments the hints show in a call of the constructor `name` of type
 /// `F`: its `call_examples` entry, else `.{}` for an options struct, the
@@ -1634,109 +1934,6 @@ fn callExample(comptime name: []const u8) ?[]const u8 {
         if (@hasDecl(file, "call_examples") and @hasField(@TypeOf(file.call_examples), name)) return @field(file.call_examples, name);
     }
     return null;
-}
-
-/// The kinds whose rules `root.zig` does not export yet, by the pull request
-/// that ships them. Hints may name these rules, and the self-tests compare
-/// only the other kinds with the public names. Each rule pull request deletes
-/// its lines; the list is empty once all 96 rules are exported.
-pub const pending_kinds = [_]Kind{
-    // PR 1c
-    .unique_items,
-    .unique_by,
-    .contains_all,
-    .contains_none,
-    // PR 2a
-    .utf8,
-    .not_blank,
-    .ascii,
-    .printable_ascii,
-    .alphanumeric,
-    .alpha,
-    .digits,
-    .lowercase,
-    .uppercase,
-    .multibyte,
-    .full_width,
-    .half_width,
-    .variable_width,
-    // PR 2b
-    .min_length,
-    .max_length,
-    .length,
-    .min_bytes,
-    .max_bytes,
-    .contains,
-    .not_contains,
-    .strong_password,
-    // PR 3a
-    .number_string,
-    .decimal,
-    .boolean_string,
-    .hexadecimal,
-    .octal,
-    .port,
-    .latitude,
-    .longitude,
-    .lat_long,
-    // PR 3b
-    .email,
-    .http_url,
-    .fqdn,
-    .ip,
-    .ipv4,
-    .ipv6,
-    .mac_address,
-    // PR 4a
-    .date,
-    .rfc3339,
-    .iso8601,
-    .military_time,
-    // PR 4b
-    .min_date,
-    .max_date,
-    // PR 5a
-    .credit_card,
-    .isbn,
-    .isbn10,
-    .isbn13,
-    .issn,
-    .ean,
-    .isin,
-    .isrc,
-    .bic,
-    .iban,
-    // PR 5b
-    .uuid,
-    .mongo_id,
-    .firebase_push_id,
-    .hash,
-    .btc_address,
-    .ethereum_address,
-    // PR 6a
-    .json,
-    .jwt,
-    .base32,
-    .base58,
-    .base64,
-    .base64_url,
-    // PR 6b
-    .data_uri,
-    .magnet_uri,
-    .mime_type,
-    .locale,
-    .sem_ver,
-    .hex_color,
-    .rgb_color,
-    .hsl_color,
-};
-
-/// `name` is the public name of a pending kind.
-fn isPending(comptime name: []const u8) bool {
-    for (pending_kinds) |kind| {
-        if (std.mem.eql(u8, info(kind).name, name)) return true;
-    }
-    return false;
 }
 
 /// Stops compilation because `rule` does not take the unwrapped field type
@@ -1789,6 +1986,44 @@ pub fn ruleError(comptime rule: *const Rule, comptime where: []const u8, comptim
 /// The text of `ruleError`, separate so that tests can read it.
 pub fn ruleErrorText(comptime rule: *const Rule, comptime where: []const u8, comptime text: []const u8) []const u8 {
     return "validator: " ++ where ++ ": " ++ rule.label() ++ text;
+}
+
+// ------------------------------------------------------------------ string rules
+
+/// The field-type check of a rule that takes strings only.
+pub fn fitsString(comptime rule: *const Rule, comptime T: type, comptime where: []const u8) void {
+    if (stringProblem(rule, T, where, null)) |text| @compileError(text);
+}
+
+/// The declaration error of a rule that takes strings only on the unwrapped
+/// field type `T`, or null: the field is a string. The error is
+/// `<kind> expects a string, field is <T>` with the hints of `typeError`;
+/// `hint` follows when none of those applies.
+pub fn stringProblem(comptime rule: *const Rule, comptime T: type, comptime where: []const u8, comptime hint: ?[]const u8) ?[]const u8 {
+    if (isString(T)) return null;
+    return typeErrorText(rule, T, where, "a string", isString, hint);
+}
+
+/// A rule value for string fields that passes when `predicate` accepts the
+/// value, as `v.json` passes when `v.isJson` does: no parameters, no
+/// precondition, and the rule and its predicate always agree.
+pub fn predicateRule(comptime kind: Kind, comptime message: []const u8, comptime predicate: fn ([]const u8) bool) Rule {
+    return predicateRuleFits(kind, message, predicate, fitsString);
+}
+
+/// `predicateRule` with the field-type check `fits` instead of `fitsString`,
+/// for a rule whose error adds a hint of its own (`v.digits` on a number
+/// field: the field is already a number).
+pub fn predicateRuleFits(comptime kind: Kind, comptime message: []const u8, comptime predicate: fn ([]const u8) bool, comptime fits: fn (comptime rule: *const Rule, comptime T: type, comptime where: []const u8) void) Rule {
+    return define(kind, .{
+        .message = message,
+        .fits = fits,
+        .eval = struct {
+            fn eval(value: anytype) Outcome {
+                return passIf(predicate(value.*));
+            }
+        }.eval,
+    });
 }
 
 // ------------------------------------------------------------------ number parameters
@@ -1913,10 +2148,21 @@ pub fn tagList(comptime E: type) []const u8 {
 /// text lists the tags `E` has. Names are written as `tagIdentifier` writes
 /// them. Constructors reject unnamed values first.
 pub fn tagProblem(comptime x: anytype, comptime E: type) ?[]const u8 {
+    return tagProblemOf(x, E, "the field is ");
+}
+
+/// `tagProblem` for a tag listed against the items of a list, whose item
+/// type is the enum `E`: a value of another enum type says `the items are`.
+pub fn itemTagProblem(comptime x: anytype, comptime E: type) ?[]const u8 {
+    return tagProblemOf(x, E, "the items are ");
+}
+
+/// `tagProblem` with `holder` naming what has the type `E`.
+fn tagProblemOf(comptime x: anytype, comptime E: type, comptime holder: []const u8) ?[]const u8 {
     @setEvalBranchQuota(eval_quota);
     const X = @TypeOf(x);
     if (@typeInfo(X) == .@"enum" and X != E)
-        return ": " ++ renderArg(x) ++ " is a tag of " ++ @typeName(X) ++ ", the field is " ++ @typeName(E);
+        return ": " ++ renderArg(x) ++ " is a tag of " ++ @typeName(X) ++ ", " ++ holder ++ @typeName(E);
     const name = tagName(x) orelse @compileError("validator: internal: " ++ unnamedTag(x) ++ " has no tag name");
     if (@hasField(E, name)) return null;
     const tags = tagList(E);
@@ -1952,6 +2198,10 @@ test "a tag parameter names a tag of the field's enum; a value of another enum i
     // Names are written as Zig source writes them.
     try expect(": core.TestQuoted has no tag @\"a b\"; tags: @\"error\", @\"a\\nb\", plain", comptime tagProblem(.@"a b", TestQuoted).?);
     try std.testing.expectEqual(null, comptime tagProblem(.@"error", TestQuoted));
+    // Against the items of a list, a value of another enum names the items' type.
+    try expect(": .red is a tag of core.TestColor, the items are core.TestRole", comptime itemTagProblem(TestColor.red, TestRole).?);
+    try expect(": core.TestRole has no tag root; tags: admin, user, guest", comptime itemTagProblem(.root, TestRole).?);
+    try std.testing.expectEqual(null, comptime itemTagProblem(.admin, TestRole));
 }
 
 test "a checked parameter converts to the field type: numbers as numberAs does, bools as they are, tags by name" {
@@ -2365,7 +2615,9 @@ pub fn itemRules(comptime rules: []const Rule) []const Rule {
 
 /// The declaration check of one value's rules: at most one `each`, placed
 /// last; then, in tuple order, each rule's `fits` against `T`, the unwrapped
-/// field or item type, and the size of its default message.
+/// field or item type, and the size of its default message; then the
+/// `check_list` of each rule that has one; then no two rules whose bounds on
+/// one measure let no value pass.
 pub fn checkRuleList(comptime rules: []const Rule, comptime T: type, comptime where: []const u8) void {
     @setEvalBranchQuota(eval_quota);
     var each_count: usize = 0;
@@ -2378,6 +2630,10 @@ pub fn checkRuleList(comptime rules: []const Rule, comptime T: type, comptime wh
         rule.fits(rule, T, where);
         if (defaultMessageProblem(rule, where)) |text| @compileError(text);
     }
+    for (rules, 0..) |*rule, i| {
+        if (rule.check_list) |check| check(rule, rules, i, T, where);
+    }
+    if (contradictionText(rules, T, where)) |text| @compileError(text);
 }
 
 /// Stand-in rules for the self-tests below; the real rules live in the rule
@@ -2827,6 +3083,121 @@ test "a rule list with at most one each, placed last, passes the declaration che
     comptime checkRuleList(&.{}, u32, where);
 }
 
+test "two rules whose bounds on one measure let no value pass contradict, named in tuple order" {
+    const expect = std.testing.expectEqualStrings;
+    const where = "Dto.field_rules.x";
+    const r = root;
+    const head = "validator: Dto.field_rules.x: ";
+    const tail = " contradict; no value can pass";
+    // The value of a number.
+    try expect(head ++ "min(10) and max(5)" ++ tail, comptime contradictionText(&.{ r.min(10), r.max(5) }, i32, where).?);
+    try expect(head ++ "max(5) and min(10)" ++ tail, comptime contradictionText(&.{ r.max(5), r.min(10) }, u8, where).?);
+    try expect(head ++ "positive and max(0)" ++ tail, comptime contradictionText(&.{ r.positive, r.max(0) }, i32, where).?);
+    try expect(head ++ "positive and max(0)" ++ tail, comptime contradictionText(&.{ r.positive, r.max(0) }, f64, where).?);
+    try expect(head ++ "range(10, 20) and max(5)" ++ tail, comptime contradictionText(&.{ r.range(10, 20), r.max(5) }, i32, where).?);
+    try expect(head ++ "range(0, 5) and range(6, 9)" ++ tail, comptime contradictionText(&.{ r.range(0, 5), r.range(6, 9) }, u8, where).?);
+    try expect(head ++ "positive and non_positive" ++ tail, comptime contradictionText(&.{ r.positive, r.nonPositive }, f64, where).?);
+    try expect(head ++ "non_negative and negative" ++ tail, comptime contradictionText(&.{ r.nonNegative, r.negative }, i32, where).?);
+    try expect(head ++ "min(0) and negative" ++ tail, comptime contradictionText(&.{ r.min(0), r.negative }, f32, where).?);
+    try expect(head ++ "positive and negative" ++ tail, comptime contradictionText(&.{ r.positive, r.negative }, i8, where).?);
+    try expect(head ++ "min(0.5) and max(0.25)" ++ tail, comptime contradictionText(&.{ r.min(0.5), r.max(0.25) }, f16, where).?);
+    // The items of a slice and the bytes of a string: empty and notEmpty share both.
+    try expect(head ++ "min_items(5) and max_items(3)" ++ tail, comptime contradictionText(&.{ r.minItems(5), r.maxItems(3) }, []const u32, where).?);
+    try expect(head ++ "empty and min_items(1)" ++ tail, comptime contradictionText(&.{ r.empty, r.minItems(1) }, []const u32, where).?);
+    try expect(head ++ "not_empty and empty" ++ tail, comptime contradictionText(&.{ r.notEmpty, r.empty }, []const u8, where).?);
+    try expect(head ++ "not_empty and empty" ++ tail, comptime contradictionText(&.{ r.notEmpty, r.empty }, []const []const u8, where).?);
+    // The first pair wins: (0, 2) comes before (1, 2).
+    try expect(head ++ "min(10) and max(1)" ++ tail, comptime contradictionText(&.{ r.min(10), r.min(5), r.max(1) }, i64, where).?);
+    // A rule with its own message keeps its bounds.
+    try expect(head ++ "min(3) and max(2)" ++ tail, comptime contradictionText(&.{ r.min(3).withMessage("too small"), r.max(2) }, u8, where).?);
+}
+
+test "equal bounds, redundant rules and bounds on different measures do not contradict" {
+    const r = root;
+    inline for (.{ i32, u8, f64, f16 }) |T| {
+        try std.testing.expectEqual(null, comptime contradiction(&.{ r.min(5), r.max(5) }, T));
+        try std.testing.expectEqual(null, comptime contradiction(&.{ r.min(1), r.positive }, T));
+        try std.testing.expectEqual(null, comptime contradiction(&.{ r.min(1), r.min(5), r.max(10) }, T));
+        try std.testing.expectEqual(null, comptime contradiction(&.{ r.range(1, 5), r.range(5, 9) }, T));
+    }
+    try std.testing.expectEqual(null, comptime contradiction(&.{ r.nonNegative, r.nonPositive }, i32));
+    try std.testing.expectEqual(null, comptime contradiction(&.{ r.nonNegative, r.nonPositive }, f64));
+    try std.testing.expectEqual(null, comptime contradiction(&.{ r.min(-0.0), r.max(0) }, f32));
+    try std.testing.expectEqual(null, comptime contradiction(&.{ r.positive, r.max(1) }, i32));
+    try std.testing.expectEqual(null, comptime contradiction(&.{ r.minItems(3), r.maxItems(3) }, []const u32));
+    try std.testing.expectEqual(null, comptime contradiction(&.{ r.notEmpty, r.minItems(2), r.maxItems(3) }, []const u32));
+    // Floats compare in the field type: 1.00000001 is 1 in f32, but not in f64.
+    try std.testing.expectEqual(null, comptime contradiction(&.{ r.min(1.00000001), r.max(1) }, f32));
+    try std.testing.expectEqual([2]usize{ 0, 1 }, comptime contradiction(&.{ r.min(1.00000001), r.max(1) }, f64).?);
+    // The smallest positive f32 passes both.
+    try std.testing.expectEqual(null, comptime contradiction(&.{ r.positive, r.max(1e-45) }, f32));
+    // Bounds of different measures are never compared.
+    try std.testing.expectEqual(null, comptime contradiction(&.{ r.minItems(5), r.max(3) }, []const u32));
+    try std.testing.expectEqual(null, comptime contradiction(&.{ r.min(5), r.maxItems(3) }, u32));
+    comptime checkRuleList(&.{ r.min(5), r.max(5) }, i32, "Dto.field_rules.x");
+    comptime checkRuleList(&.{ r.notEmpty, r.maxItems(3), r.each(r.positive) }, []const u32, "Dto.field_rules.x");
+}
+
+test "string lengths, byte counts and dates contradict by the largest lower and the smallest upper bound, named in tuple order" {
+    const expect = std.testing.expectEqualStrings;
+    const where = "Dto.field_rules.x";
+    const r = root;
+    const S = []const u8;
+    const head = "validator: Dto.field_rules.x: ";
+    const tail = " contradict; no value can pass";
+    // Code points: minLength, maxLength, length and strongPassword's min_length.
+    try expect(head ++ "min_length(10) and max_length(5)" ++ tail, comptime contradictionText(&.{ r.minLength(10), r.maxLength(5) }, S, where).?);
+    try expect(head ++ "min_length(10) and length(1, 5)" ++ tail, comptime contradictionText(&.{ r.minLength(10), r.length(1, 5) }, S, where).?);
+    try expect(head ++ "length(6, 10) and max_length(5)" ++ tail, comptime contradictionText(&.{ r.length(6, 10), r.maxLength(5) }, S, where).?);
+    try expect(head ++ "length(1, 3) and length(5, 8)" ++ tail, comptime contradictionText(&.{ r.length(1, 3), r.length(5, 8) }, S, where).?);
+    try expect(head ++ "max_length(8) and strong_password(.{...})" ++ tail, comptime contradictionText(&.{ r.maxLength(8), r.strongPassword(.{ .min_length = 12 }) }, S, where).?);
+    try expect(head ++ "length(4, 10) and strong_password(.{...})" ++ tail, comptime contradictionText(&.{ r.length(4, 10), r.strongPassword(.{ .min_length = 12 }) }, S, where).?);
+    // Bytes: minBytes and maxBytes, and empty and notEmpty on a string.
+    try expect(head ++ "min_bytes(10) and max_bytes(5)" ++ tail, comptime contradictionText(&.{ r.minBytes(10), r.maxBytes(5) }, S, where).?);
+    try expect(head ++ "empty and min_bytes(1)" ++ tail, comptime contradictionText(&.{ r.empty, r.minBytes(1) }, S, where).?);
+    try expect(head ++ "min_bytes(1) and empty" ++ tail, comptime contradictionText(&.{ r.minBytes(1), r.empty }, S, where).?);
+    // Dates byte-wise, date-times as UTC instants.
+    try expect(head ++ "min_date(\"2021-01-01\") and max_date(\"2020-12-31\")" ++ tail, comptime contradictionText(&.{ r.minDate("2021-01-01"), r.maxDate("2020-12-31") }, S, where).?);
+    try expect(head ++ "min_date(\"2020-01-01T00:00:00+01:00\") and max_date(\"2019-12-31T22:59:59Z\")" ++ tail, comptime contradictionText(&.{ r.minDate("2020-01-01T00:00:00+01:00"), r.maxDate("2019-12-31T22:59:59Z") }, S, where).?);
+    // The largest lower bound and the smallest upper bound, not the first pair.
+    try expect(head ++ "min_length(10) and max_length(2)" ++ tail, comptime contradictionText(&.{ r.minLength(6), r.maxLength(5), r.minLength(10), r.maxLength(2) }, S, where).?);
+    try expect(head ++ "max_date(\"2019-06-30\") and min_date(\"2020-01-01\")" ++ tail, comptime contradictionText(&.{ r.minDate("2019-07-01"), r.maxDate("2019-06-30"), r.minDate("2020-01-01") }, S, where).?);
+    // On ties the earlier rule: minLength(10) before length(10, 20), the first maxLength(5).
+    try expect(head ++ "max_length(5) and min_length(10)" ++ tail, comptime contradictionText(&.{ r.maxLength(5), r.minLength(10), r.length(10, 20), r.maxLength(5) }, S, where).?);
+    // Inside each, whose declaration check runs on its rules with the item's path.
+    const each_rule = comptime r.each(.{ r.minLength(10), r.maxLength(5) });
+    try expect("validator: Dto.field_rules.x[]: min_length(10) and max_length(5)" ++ tail, comptime contradictionText(each_rule.inner, S, where ++ "[]").?);
+}
+
+test "equal bounds, every digit of a fraction, and bounds of different measures or forms on strings" {
+    const r = root;
+    const S = []const u8;
+    try std.testing.expectEqual(null, comptime contradiction(&.{ r.minLength(5), r.maxLength(5) }, S));
+    try std.testing.expectEqual(null, comptime contradiction(&.{ r.length(1, 5), r.length(5, 8) }, S));
+    try std.testing.expectEqual(null, comptime contradiction(&.{ r.maxLength(128), r.strongPassword(.{ .min_length = 12 }) }, S));
+    try std.testing.expectEqual(null, comptime contradiction(&.{ r.notEmpty, r.minBytes(5), r.maxBytes(5) }, S));
+    try std.testing.expectEqual(null, comptime contradiction(&.{ r.minDate("2020-01-01"), r.maxDate("2020-01-01") }, S));
+    // Equal instants: .5 is .50, and 01:00+01:00 is 00:00Z.
+    try std.testing.expectEqual(null, comptime contradiction(&.{ r.minDate("2020-01-01T00:00:00.5Z"), r.maxDate("2020-01-01T00:00:00.50Z") }, S));
+    try std.testing.expectEqual(null, comptime contradiction(&.{ r.minDate("2020-01-01T01:00:00+01:00"), r.maxDate("2020-01-01T00:00:00Z") }, S));
+    // Every digit of the fraction counts, the tenth too.
+    try std.testing.expectEqual([2]usize{ 0, 1 }, comptime contradiction(&.{ r.minDate("2020-01-01T00:00:00.0000000001Z"), r.maxDate("2020-01-01T00:00:00Z") }, S).?);
+    try std.testing.expectEqual(null, comptime contradiction(&.{ r.minDate("2020-01-01T00:00:00.0000000001Z"), r.maxDate("2020-01-01T00:00:00.00000000010Z") }, S));
+    // The leap second 23:59:60 comes after 23:59:59 and before the next day.
+    try std.testing.expectEqual(null, comptime contradiction(&.{ r.minDate("2016-12-31T23:59:60Z"), r.maxDate("2016-12-31T23:59:60.5Z") }, S));
+    try std.testing.expectEqual([2]usize{ 0, 1 }, comptime contradiction(&.{ r.minDate("2016-12-31T23:59:60Z"), r.maxDate("2016-12-31T23:59:59.9Z") }, S).?);
+    try std.testing.expectEqual([2]usize{ 0, 1 }, comptime contradiction(&.{ r.minDate("2017-01-01T00:00:00Z"), r.maxDate("2016-12-31T23:59:60Z") }, S).?);
+    // Before 1970 the day count is negative, and fractions still order as after it.
+    try std.testing.expectEqual([2]usize{ 0, 1 }, comptime contradiction(&.{ r.minDate("1969-12-31T23:59:59.5Z"), r.maxDate("1969-12-31T23:59:59.25Z") }, S).?);
+    try std.testing.expectEqual(null, comptime contradiction(&.{ r.minDate("1969-12-31T23:59:59.5Z"), r.maxDate("1969-12-31T23:59:59.50Z") }, S));
+    try std.testing.expectEqual(null, comptime contradiction(&.{ r.minDate("1900-01-01T00:00:00.10Z"), r.maxDate("1900-01-01T00:00:00.9Z") }, S));
+    // Different measures and forms are never compared.
+    try std.testing.expectEqual(null, comptime contradiction(&.{ r.minLength(10), r.maxBytes(5) }, S));
+    try std.testing.expectEqual(null, comptime contradiction(&.{ r.empty, r.minLength(1) }, S));
+    try std.testing.expectEqual(null, comptime contradiction(&.{ r.minDate("2021-01-01"), r.maxDate("2020-12-31T00:00:00Z") }, S));
+    comptime checkRuleList(&.{ r.minLength(5), r.maxLength(5), r.maxBytes(20) }, S, "Dto.field_rules.x");
+}
+
 test "coerces accepts the conversions v.custom documents and nothing else" {
     const accepted = [_][2]type{
         .{ u32, u32 },           .{ u8, u32 },              .{ u32, u64 },         .{ i8, i64 },
@@ -2939,22 +3310,13 @@ test "editDistance counts edits ignoring ASCII case and gives up over 64 bytes" 
 }
 
 /// The first problem of the public names of `ns` (`root.zig` in the library)
-/// against the kind table, or null: every kind that is not pending is
-/// exported under its public name, as a `Rule` of that kind or as a function
-/// that returns a `Rule`; no pending kind is exported or listed twice.
-fn exportProblem(comptime ns: type, comptime pending: []const Kind) ?[]const u8 {
+/// against the kind table rows `rows`, or null: each kind is exported under
+/// its public name, as a `Rule` of that kind or as a function that returns a
+/// `Rule`.
+fn exportProblem(comptime ns: type, comptime rows: []const KindInfo) ?[]const u8 {
     @setEvalBranchQuota(eval_quota);
-    for (kinds) |row| {
-        var listed: usize = 0;
-        for (pending) |kind| {
-            if (kind == row.kind) listed += 1;
-        }
-        if (listed > 1) return "pending_kinds lists ." ++ @tagName(row.kind) ++ " twice";
-        if (listed == 1) {
-            if (@hasDecl(ns, row.name)) return "v." ++ row.name ++ " is exported; delete ." ++ @tagName(row.kind) ++ " from pending_kinds";
-            continue;
-        }
-        if (!@hasDecl(ns, row.name)) return "v." ++ row.name ++ " is not exported and ." ++ @tagName(row.kind) ++ " is not in pending_kinds";
+    for (rows) |row| {
+        if (!@hasDecl(ns, row.name)) return "v." ++ row.name ++ " is not exported";
         const decl = @field(ns, row.name);
         const D = @TypeOf(decl);
         if (D == Rule) {
@@ -2984,8 +3346,7 @@ fn hintTexts() []const []const u8 {
     }
 }
 
-/// The first `v.<name>` in `texts` that `root.zig` does not export and that
-/// is not a pending rule, or null.
+/// The first `v.<name>` in `texts` that `root.zig` does not export, or null.
 fn unknownHintName(comptime texts: []const []const u8) ?[]const u8 {
     @setEvalBranchQuota(eval_quota);
     for (texts) |text| {
@@ -2996,49 +3357,45 @@ fn unknownHintName(comptime texts: []const []const u8) ?[]const u8 {
             i = end;
             if (at > 0 and std.ascii.isAlphanumeric(text[at - 1])) continue;
             const name = text[at + 2 .. end];
-            if (name.len == 0 or @hasDecl(root, name) or isPending(name)) continue;
+            if (name.len == 0 or @hasDecl(root, name)) continue;
             return name;
         }
     }
     return null;
 }
 
-/// Every kind except `exported`, as a pending list for the self-test below.
-fn kindsExcept(comptime exported: []const Kind) []const Kind {
+/// The kind table rows of `list`, for the self-test below.
+fn rowsOf(comptime list: []const Kind) []const KindInfo {
     comptime {
-        var out: []const Kind = &.{};
-        for (kinds) |row| {
-            if (std.mem.findScalar(Kind, exported, row.kind) == null) out = out ++ &[_]Kind{row.kind};
-        }
+        var out: []const KindInfo = &.{};
+        for (list) |kind| out = out ++ &[_]KindInfo{info(kind)};
         return out;
     }
 }
 
-test "every kind is exported under its public name unless it is pending, and no pending kind is exported" {
-    try std.testing.expectEqualStrings("", comptime exportProblem(root, &pending_kinds) orelse "");
+test "every kind is exported under its public name as a rule of that kind" {
+    try std.testing.expectEqualStrings("", comptime exportProblem(root, &kinds) orelse "");
 
     // The check itself, on a namespace that exports two rules.
     const Two = struct {
         pub const notEmpty = root.notEmpty;
         pub const positive = root.positive;
     };
-    try std.testing.expectEqual(null, comptime exportProblem(Two, kindsExcept(&.{ .not_empty, .positive })));
-    try std.testing.expectEqualStrings("v.each is not exported and .each is not in pending_kinds", comptime exportProblem(Two, kindsExcept(&.{ .not_empty, .positive, .each })).?);
-    try std.testing.expectEqualStrings("v.positive is exported; delete .positive from pending_kinds", comptime exportProblem(Two, kindsExcept(&.{.not_empty})).?);
-    try std.testing.expectEqualStrings("pending_kinds lists .equals twice", comptime exportProblem(Two, kindsExcept(&.{ .not_empty, .positive }) ++ &[_]Kind{.equals}).?);
+    try std.testing.expectEqual(null, comptime exportProblem(Two, rowsOf(&.{ .not_empty, .positive })));
+    try std.testing.expectEqualStrings("v.each is not exported", comptime exportProblem(Two, rowsOf(&.{ .not_empty, .positive, .each })).?);
     const OtherKind = struct {
         pub const notEmpty = root.positive;
         pub const positive = root.positive;
     };
-    try std.testing.expectEqualStrings("v.notEmpty is a rule of another kind", comptime exportProblem(OtherKind, kindsExcept(&.{ .not_empty, .positive })).?);
+    try std.testing.expectEqualStrings("v.notEmpty is a rule of another kind", comptime exportProblem(OtherKind, rowsOf(&.{ .not_empty, .positive })).?);
     const NotARule = struct {
         pub const notEmpty = root.notEmpty;
         pub const positive = root.check;
     };
-    try std.testing.expectEqualStrings("v.positive is not a rule", comptime exportProblem(NotARule, kindsExcept(&.{ .not_empty, .positive })).?);
+    try std.testing.expectEqualStrings("v.positive is not a rule", comptime exportProblem(NotARule, rowsOf(&.{ .not_empty, .positive })).?);
 }
 
-test "every rule name a hint mentions is exported or pending" {
+test "every rule name a hint mentions is exported" {
     try std.testing.expectEqualStrings("", comptime unknownHintName(hintTexts()) orelse "");
     // The texts come from both sources: the hints and the rule files' call_examples.
     const collected = comptime hintTexts();

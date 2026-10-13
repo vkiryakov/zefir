@@ -300,3 +300,46 @@ test "a value reachable on two paths is checked on each path" {
         .{ .code = "validation.not_empty", .field = "list[1].city" },
     });
 }
+
+const OrderItem = struct {
+    sku: []const u8,
+    qty: u32,
+    pub const field_rules = .{ .sku = v.notEmpty, .qty = v.range(1, 100) };
+};
+
+const CreateOrder = struct {
+    items: []const OrderItem,
+    currency: []const u8,
+    note: ?[]const u8 = null,
+    pub const field_rules = .{
+        .items = .{ v.minItems(1), v.maxItems(50), v.uniqueBy(.sku) },
+        .currency = v.oneOf(.{ "EUR", "USD" }),
+        .note = v.notEmpty.withMessage("комментарий не может быть пустым"),
+    };
+};
+
+test "an order with a wrong item, currency and note: check gives the first violation, checkAll all five in walk order" {
+    comptime v.assertRules(CreateOrder);
+    const order: CreateOrder = .{
+        .items = &.{ .{ .sku = "", .qty = 0 }, .{ .sku = "B", .qty = 101 } },
+        .currency = "RUB",
+        .note = "",
+    };
+    const expected = [_]v.Violation{
+        .{ .code = "validation.not_empty", .message = "must not be empty", .field = "items[0].sku" },
+        .{ .code = "validation.range", .message = "must be from 1 to 100", .field = "items[0].qty" },
+        .{ .code = "validation.range", .message = "must be from 1 to 100", .field = "items[1].qty" },
+        .{ .code = "validation.one_of", .message = "must be one of: EUR, USD", .field = "currency" },
+        .{ .code = "validation.not_empty", .message = "комментарий не может быть пустым", .field = "note" },
+    };
+    var path_buf: [256]u8 = undefined;
+    try h.expectSame(expected[0], v.check(&order, &path_buf) orelse return error.NoViolation);
+    const report = try v.checkAll(testing.allocator, &order);
+    defer report.deinit();
+    try testing.expectEqual(expected.len, report.violations.len);
+    for (expected, report.violations) |want, got| try h.expectSame(want, got);
+    // A repeated sku fails a rule of the list itself, so its items are not visited.
+    const repeated: CreateOrder = .{ .items = &.{ .{ .sku = "A", .qty = 1 }, .{ .sku = "A", .qty = 2 } }, .currency = "EUR" };
+    try h.expectAt(&repeated, "validation.unique_items", "must not contain duplicate sku values", "items");
+    try h.expectValid(&CreateOrder{ .items = &.{ .{ .sku = "A", .qty = 1 }, .{ .sku = "B", .qty = 100 } }, .currency = "USD" });
+}
