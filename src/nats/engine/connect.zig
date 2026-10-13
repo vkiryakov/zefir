@@ -92,7 +92,9 @@ pub fn race(
 }
 
 fn sleepUntil(io: Io, deadline: Io.Clock.Timestamp) Io.Cancelable!void {
-    return deadline.wait(io);
+    // A sleep may end a little early: Io.Threaded on Windows turns the
+    // deadline into an interval, and the system counts it in timer ticks.
+    while (!time.expired(io, deadline)) try deadline.wait(io);
 }
 
 /// Cancels and awaits what is still running; a value that arrives anyway
