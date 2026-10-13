@@ -251,7 +251,12 @@ fn readLoop(client: *Client) void {
                     }
                 }
             },
-            .msg => |msg| current = .begin(client, msg),
+            .msg => |msg| {
+                // The parser ends every message before the next; even so,
+                // nothing half read may leak.
+                if (current) |*c| c.abandon();
+                current = .begin(client, msg);
+            },
             .body => |bytes| if (current) |*c| c.append(bytes),
             .msg_end => if (current) |*c| {
                 c.finish(client);

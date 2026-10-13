@@ -5,7 +5,14 @@
 //! ```zig
 //! const sub = try client.subscribe("orders.*", .{ .queue = "workers" });
 //! defer sub.deinit();
+//! while (true) {
+//!     var msg = (try sub.next(.{})) orelse break;
+//!     defer msg.deinit();
+//!     handle(msg.subject, msg.payload);
+//! }
 //! ```
+//!
+//! One task at a time waits in `next()`; any task may `unsubscribe()`.
 
 const std = @import("std");
 const Io = std.Io;
@@ -120,6 +127,7 @@ pub const PendingCounts = struct {
     bytes: usize,
 };
 
+/// What waits in the subscription now.
 pub fn pending(sub: *Subscription) PendingCounts {
     return sub.messages.pending(sub.client.io);
 }
@@ -134,6 +142,7 @@ pub const Stats = struct {
     dropped: u64,
 };
 
+/// What the subscription has seen so far.
 pub fn stats(sub: *Subscription) Stats {
     return sub.messages.stats(sub.client.io);
 }

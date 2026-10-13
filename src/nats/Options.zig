@@ -96,7 +96,8 @@ pub const Limits = struct {
     /// Requests waiting for a reply at once; more fail with
     /// TooManyPendingRequests.
     max_pending_requests: u32 = 65_536,
-    /// Subscriptions at once; more fail with TooManySubscriptions.
+    /// Subscriptions at once, each until its `deinit()`; more fail with
+    /// TooManySubscriptions.
     max_subscriptions: u32 = 65_536,
     /// The server's `max_control_line`: the longest arguments of a protocol
     /// line, such as a subject with its reply-to. Messages the server sends

@@ -4,9 +4,9 @@
 //! and password; TLS and JetStream are not part of this version.
 //!
 //! Work in progress: the client connects, keeps the connection alive with
-//! PINGs, flushes and measures the round trip. Publishing, subscriptions,
-//! request/reply and reconnect come next; until then a lost connection
-//! closes the client.
+//! PINGs, publishes, subscribes, flushes and measures the round trip.
+//! Request/reply and reconnect come next; until then a lost connection
+//! closes the client and ends its subscriptions.
 
 const std = @import("std");
 

@@ -4,6 +4,7 @@
 //! var client: nats.Client = try .init(gpa, io, .{ .servers = &.{"nats://127.0.0.1:4222"} });
 //! defer client.deinit();
 //! try client.connect();
+//! try client.publish("orders.new", "{\"id\":42}");
 //! try client.flush(.{});
 //! ```
 //!
@@ -14,7 +15,8 @@
 //! `std.Io.Threaded` or zio; without it `connect()` fails with
 //! ConcurrencyUnavailable.
 //!
-//! In this version a lost connection closes the client.
+//! In this version a lost connection closes the client and ends its
+//! subscriptions.
 
 const std = @import("std");
 const Io = std.Io;
