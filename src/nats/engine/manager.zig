@@ -103,16 +103,18 @@ fn serve(client: *Client, opened: Opened) ?Exit {
     client.connection = opened.connection;
     // Before the reader starts: an INFO it reads is newer than this one.
     const lame_duck = adopt(client, opened.server, opened.greeting);
+    // Connected before the reader starts: who gets a reply from this
+    // connection finds the client connected.
+    const first = connected(client, opened.server);
     client.connection_tasks.concurrent(io, readLoop, .{client}) catch |err| {
-        abandon(client, err);
+        abandon(client, err, first);
         return null;
     };
     client.connection_tasks.concurrent(io, writeLoop, .{client}) catch |err| {
-        abandon(client, err);
+        abandon(client, err, first);
         return null;
     };
     log.debug("connected to {f}", .{opened.server});
-    connected(client, opened.server);
     // A server already going away when the handshake ended.
     if (lame_duck) lameDuck(client);
     return heartbeat(client);
@@ -330,8 +332,9 @@ fn shutdown(io: Io, stream: Io.net.Stream) void {
 }
 
 /// The reader or writer could not start: the connection is dropped, and
-/// the client closes, the way it does when it gives up.
-fn abandon(client: *Client, err: Io.ConcurrentError) void {
+/// the client closes, the way it does when it gives up. `first`: it was the
+/// first connection.
+fn abandon(client: *Client, err: Io.ConcurrentError, first: bool) void {
     const io = client.io;
     shutdown(io, client.connection.stream);
     client.connection_tasks.cancel(io);
@@ -339,9 +342,9 @@ fn abandon(client: *Client, err: Io.ConcurrentError) void {
     {
         client.mutex.lockUncancelable(io);
         defer client.mutex.unlock(io);
-        if (client.status == .connecting) client.connect_error = err;
+        if (first) client.connect_error = err;
         client.status = .closed;
-        if (client.close_reason == null) client.close_reason = if (client.ever_connected) .reconnect_failed else .connect_failed;
+        if (client.close_reason == null) client.close_reason = if (first) .connect_failed else .reconnect_failed;
         client.changed.broadcast(io);
     }
     client.inbox.end(io, .closed);
@@ -792,8 +795,8 @@ fn maxPayload(announced: i64) u64 {
     return if (announced > 0) @intCast(announced) else 0;
 }
 
-/// The connection to `server` is up, its reader and writer run.
-fn connected(client: *Client, server: ServerAddress) void {
+/// The connection to `server` is up; true when it is the first.
+fn connected(client: *Client, server: ServerAddress) bool {
     const first = first: {
         client.mutex.lockUncancelable(client.io);
         defer client.mutex.unlock(client.io);
@@ -805,6 +808,7 @@ fn connected(client: *Client, server: ServerAddress) void {
     };
     if (!first) Counters.add(&client.counters.reconnects, 1);
     client.events.push(client.io, if (first) .{ .connected = server } else .{ .reconnected = server });
+    return first;
 }
 
 /// The connection is gone, and with it the client and its subscriptions.
