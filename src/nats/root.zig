@@ -3,12 +3,12 @@
 //! meant for production. It speaks plaintext TCP with no auth or with user
 //! and password; TLS and JetStream are not part of this version.
 //!
-//! Work in progress: the client connects to one of a pool of servers,
-//! keeps the connection alive with PINGs, publishes, subscribes, sends
-//! requests for one reply or for many and answers them, flushes and
-//! measures the round trip. When the connection is lost it reconnects and
-//! subscribes again; it drains, reports events and keeps statistics. The
-//! guide and the examples come next.
+//! The client connects to one of a pool of servers, keeps the connection
+//! alive with PINGs, publishes, subscribes, sends requests for one reply or
+//! for many and answers them, flushes and measures the round trip. When the
+//! connection is lost it reconnects and subscribes again; it drains,
+//! reports events and keeps statistics. Every queue is bounded. The guide,
+//! with runnable examples, is `examples/README.md`.
 
 const std = @import("std");
 
