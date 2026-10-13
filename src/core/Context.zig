@@ -59,11 +59,13 @@ pub fn withCancellation(ctx: Context, token: *const CancellationToken) Context {
     return derived;
 }
 
+/// Whether the token is cancelled; false without a token.
 pub fn isCancelled(ctx: Context) bool {
     const token = ctx.cancellation orelse return false;
     return token.isCancelled();
 }
 
+/// Whether the deadline has passed at `now`; false without a deadline.
 pub fn isExpired(ctx: Context, now: std.Io.Timestamp) bool {
     const deadline = ctx.deadline orelse return false;
     return deadline.isExpired(now);

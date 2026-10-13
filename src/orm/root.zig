@@ -1,7 +1,7 @@
 //! zefir-orm — ORM.
 
 const std = @import("std");
-const logger = @import("logger");
+const log = @import("log");
 
 test "orm placeholder" {
     try std.testing.expect(true);

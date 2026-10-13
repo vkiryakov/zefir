@@ -415,7 +415,7 @@ test "secrets load from any source and never print" {
     defer testing.allocator.free(printed);
     try testing.expect(std.mem.find(u8, printed, "tok-123") == null);
     try testing.expect(std.mem.find(u8, printed, "pa55") == null);
-    try testing.expect(std.mem.endsWith(u8, printed, "[redacted]"));
+    try testing.expect(std.mem.endsWith(u8, printed, "[REDACTED]"));
 }
 
 test "a secret must be a string" {

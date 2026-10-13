@@ -69,7 +69,7 @@ pub fn main(init: std.process.Init) !void {
 | `APP_HTTP_PORT=9090 ./app`                                   | `http.port = 9090`                              |
 | `APP_LOG_LEVEL=warn APP_DEBUG=1 ./app`                       | `log_level = .warn`, `debug = true`             |
 | `APP_HTTP_ALLOWED_ORIGINS=https://a.com,https://b.com ./app` | two origins; the default list is replaced       |
-| `APP_DB_PASSWORD=change-me ./app`                            | `db.password` is set; it prints as `[redacted]` |
+| `APP_DB_PASSWORD=change-me ./app`                            | `db.password` is set; it prints as `[REDACTED]` |
 | `APP_DB_POOL_SIZE=16 ./app`                                  | `db.pool.size = 16`, `max_idle` stays 2         |
 
 ## Options

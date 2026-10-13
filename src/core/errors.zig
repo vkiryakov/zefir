@@ -16,6 +16,7 @@ const std = @import("std");
 /// return by calling `Context.check` with a fresh time.
 pub const ContextError = error{ Cancelled, DeadlineExceeded };
 
+/// The class of a failure, for a transport to map to its own status.
 pub const ErrorCode = enum {
     /// The caller cancelled the operation.
     cancelled,
@@ -50,6 +51,7 @@ pub const ErrorCode = enum {
     /// The request has no valid credentials.
     unauthenticated,
 
+    /// The code for an error returned by `Context.check`.
     pub fn fromContextError(err: ContextError) ErrorCode {
         return switch (err) {
             error.Cancelled => .cancelled,
