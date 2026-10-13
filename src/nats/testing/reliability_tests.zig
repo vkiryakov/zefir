@@ -1298,3 +1298,93 @@ test "close() while reconnecting: a request in the buffer, next() and nextEvent(
     try testing.expect(last == .message_dropped or last == .closed);
     try testing.expect(start.durationTo(Io.Clock.awake.now(io)).toSeconds() < 1);
 }
+
+test "a server down for good: 200 failed attempts in a row, then the client gives up, and nothing leaks" {
+    const io = testing.io;
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var record: Record = .{};
+    defer record.deinit();
+    var server = try io.concurrent(serveRefusing, .{ io, &listener, &record });
+    defer server.cancel(io) catch {};
+    var url: [64]u8 = undefined;
+    var client: Client = try .init(testing.allocator, io, .{
+        .servers = &.{try FakeServer.url(&listener, &url)},
+        .retry_initial_connect = true,
+        .reconnect = .{ .min_delay = .fromNanoseconds(1), .max_delay = .fromMilliseconds(1), .max_attempts = 200 },
+    });
+    defer client.deinit();
+    try client.connect();
+    // Publishes wait in the buffer meanwhile, within its bounds.
+    for (0..10) |_| try client.publish("waiting", "x");
+    const give_up = time.after(io, .fromSeconds(30));
+    while (client.state() != .closed) {
+        if (time.expired(io, give_up)) return error.TestNeverGaveUp;
+        try io.sleep(.fromMilliseconds(5), .awake);
+    }
+    try testing.expectEqual(200, record.accepted.load(.monotonic));
+    try testing.expectEqual(.reconnect_failed, client.close_reason.?);
+    try testing.expectEqual(10, client.stats().dropped_messages);
+    var attempts: u32 = 0;
+    while (try client.nextEvent(.{})) |event| switch (event) {
+        .reconnecting => |r| {
+            attempts += 1;
+            try testing.expectEqual(attempts, r.attempt);
+        },
+        .closed => |reason| try testing.expectEqual(.reconnect_failed, reason),
+        .message_dropped => |dropped| try testing.expectEqual(10, dropped.count),
+        else => return error.TestUnexpectedEvent,
+    };
+    try testing.expectEqual(200, attempts);
+}
+
+/// Confirms the client's first publish with a PONG, takes two more, and
+/// hangs up before the PONG of the next PING.
+fn sessionUnconfirmed(peer: *FakeServer.Peer, record: *Record) anyerror!void {
+    try handshake(peer, golden.info_default);
+    // `nextFrame` names every publish "PUB": they come as a, b, c.
+    if (!try readUntil(peer, record, "PUB")) return error.TestNoPub;
+    if (!try readUntil(peer, record, "PING")) return error.TestNoPing;
+    try peer.send(golden.pong);
+    if (!try readUntil(peer, record, "PUB")) return error.TestNoPub;
+    if (!try readUntil(peer, record, "PUB")) return error.TestNoPub;
+}
+
+test "a lost connection: publishes written after the last confirmed PING count as uncertain, and are not sent again" {
+    const io = testing.io;
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var record: Record = .{};
+    defer record.deinit();
+    const sessions = [_]Session{ sessionUnconfirmed, sessionServe };
+    var server = try io.concurrent(serveSessions, .{ io, &listener, &sessions, &record });
+    defer server.cancel(io) catch {};
+    var url: [64]u8 = undefined;
+    var client: Client = try .init(testing.allocator, io, .{ .servers = &.{try FakeServer.url(&listener, &url)} });
+    defer client.deinit();
+    try client.connect();
+    try client.publish("a", "1");
+    try client.flush(quick);
+    try client.publish("b", "2");
+    try client.publish("c", "3");
+    _ = try awaitEventOf(&client, .reconnected);
+    try client.flush(quick);
+    const stats = client.stats();
+    try testing.expectEqual(2, stats.uncertain_outbound_frames);
+    try testing.expectEqual(0, stats.dropped_messages);
+    client.close();
+    try server.await(io);
+    const seen = try record.seen(io);
+    defer testing.allocator.free(seen);
+    // Nothing was sent again on the second connection.
+    const second = seen[std.mem.find(u8, seen, "--\n").? + 3 ..];
+    try testing.expect(std.mem.find(u8, second, "PUB") == null);
+}
+
+/// Takes events until a `tag` one, for 5 s at most.
+fn awaitEventOf(client: *Client, tag: std.meta.Tag(nats.Event)) !nats.Event {
+    while (true) {
+        const event = (try client.nextEvent(within_five_seconds)) orelse return error.TestNoEvent;
+        if (event == tag) return event;
+    }
+}
