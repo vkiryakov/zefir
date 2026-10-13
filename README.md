@@ -4,7 +4,7 @@
 
 <p align="center">
   <strong>A modular framework for building services in Zig.</strong><br>
-  Web servers, web services and APIs, built from modules you pick: typed configuration, request deadlines, cancellation, tracing, structured logging and validation today; RPC, an ORM and an HTTP server next.
+  Web servers, web services and APIs, built from modules you pick: typed configuration, request deadlines, cancellation, tracing, structured logging and validation today; a NATS client, RPC, an async MongoDB driver with an ODM, and an HTTP server next.
 </p>
 
 <p align="center">
@@ -38,17 +38,43 @@ Zefir is shaped by my needs first, and it's open to everyone. If it fits the way
 
 ## Modules
 
-| Module             | Import name       | What it does                                                         | Status                                            |
-| ------------------ | ----------------- | -------------------------------------------------------------------- | ------------------------------------------------- |
-| **confy**          | `zefir-confy`     | Typed configuration from JSON, INI, `.env` files and the environment | ✅ Done · [docs](src/confy/examples/README.md)     |
-| **core**           | `zefir-core`      | Execution context: deadlines, cancellation and W3C trace context     | ✅ Done · [docs](src/core/examples/README.md)      |
-| **log**            | `zefir-log`       | Structured logging: JSON Lines, redaction, live levels, alerts       | ✅ Done · [docs](src/log/examples/README.md)       |
-| **validator**      | `zefir-validator` | Declarative validation rules for struct fields                       | ✅ Done · [docs](src/validator/examples/README.md) |
-| nats               | `zefir-nats`      | Core NATS client: publish/subscribe, request/reply, reconnect        | 🚧 In progress                                     |
-| rpc                | `zefir-rpc`       | RPC                                                                  | 📋 Planned                                         |
-| orm                | `zefir-orm`       | ORM                                                                  | 📋 Planned                                         |
-| http               | —                 | HTTP server                                                          | 📋 Planned                                         |
-| _all of the above_ | `zefir`           | Umbrella module                                                      |                                                   |
+Take any module on its own, or all the finished ones at once through the umbrella module `zefir`.
+
+| Module                             | What it does                                                                                               | Status                                            |
+| ---------------------------------- | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
+| **Core & Foundation**              |                                                                                                            |                                                   |
+| `zefir-core`                       | Execution context: deadlines, cancellation, W3C trace context; application container and lifecycle planned | ✅ Done · [docs](src/core/examples/README.md)      |
+| `zefir-confy`                      | Typed configuration: JSON, INI, `.env` files, environment variables, secrets                               | ✅ Done · [docs](src/confy/examples/README.md)     |
+| `zefir-log`                        | Structured logging: JSON Lines, levels, context, redaction                                                 | ✅ Done · [docs](src/log/examples/README.md)       |
+| `zefir-validator`                  | Typed schemas, validation rules, error reporting                                                           | ✅ Done · [docs](src/validator/examples/README.md) |
+| `zefir-events`                     | Typed in-process event bus                                                                                 | 📋 Planned                                         |
+| `zefir-retry`                      | Retry policies, backoff, jitter, circuit breaker                                                           | 📋 Planned                                         |
+| **Networking & Communication**     |                                                                                                            |                                                   |
+| `zefir-http`                       | HTTP server, REST API, routing, middleware, WebSocket, SSE                                                 | 📋 Planned                                         |
+| `zefir-rpc`                        | Typed RPC over TCP and NATS, later RabbitMQ, HTTP and QUIC; streaming                                      | 📋 Planned                                         |
+| `zefir-graphql`                    | GraphQL queries, mutations, subscriptions, resolvers                                                       | 📋 Planned                                         |
+| `zefir-messaging`                  | Pub/sub, message queues, consumers, backpressure                                                           | 📋 Planned                                         |
+| `zefir-nats`                       | Native NATS client: publish/subscribe, request/reply, reconnect                                            | 🚧 In progress                                     |
+| `zefir-zmq`                        | ZeroMQ / ZMTP integration                                                                                  | 📋 Planned                                         |
+| `zefir-grpc`                       | gRPC interoperability                                                                                      | 📋 Planned                                         |
+| **Database & Persistence**         |                                                                                                            |                                                   |
+| `zefir-mongo`                      | Async MongoDB driver: BSON, connection pooling, transactions                                               | 📋 Planned                                         |
+| `zefir-odm`                        | MongoDB ODM (Object Data Mapper): typed schemas, models, CRUD, aggregation                                 | 📋 Planned                                         |
+| `zefir-cache`                      | L1/L2 caching, TTL, Redis, invalidation, synchronization                                                   | 📋 Planned                                         |
+| **Security**                       |                                                                                                            |                                                   |
+| `zefir-security`                   | Authentication, authorization, JWT, MFA/TOTP, WebAuthn, TLS integration, CORS, rate limiting               | 📋 Planned                                         |
+| **Observability & Diagnostics**    |                                                                                                            |                                                   |
+| `zefir-observability`              | Metrics, distributed tracing, OpenTelemetry integration                                                    | 📋 Planned                                         |
+| `zefir-diagnostics`                | Runtime diagnostics: tasks, threads, IO, memory, stack monitoring where supported                          | 📋 Planned                                         |
+| `zefir-console`                    | Live terminal UI for runtime diagnostics, inspired by Tokio Console                                        | 📋 Planned                                         |
+| `zefir-otel`                       | OpenTelemetry exporters                                                                                    | 📋 Planned                                         |
+| `zefir-health`                     | Liveness, readiness, startup health checks                                                                 | 📋 Planned                                         |
+| **Background Processing**          |                                                                                                            |                                                   |
+| `zefir-scheduler`                  | Scheduled jobs, cron expressions, timers                                                                   | 📋 Planned                                         |
+| **Developer Experience & Tooling** |                                                                                                            |                                                   |
+| `zefir-openapi`                    | OpenAPI generation from Zig types                                                                          | 📋 Planned                                         |
+| `zefir-cli`                        | Project scaffolding, code generation                                                                       | 📋 Planned                                         |
+| `zefir-test`                       | Testing helpers, mocks, fixtures                                                                           | 📋 Planned                                         |
 
 > [!NOTE]
 > Zefir is in early development. Until 1.0, any minor release may change the API.
@@ -156,13 +182,13 @@ Every record is one line of JSON on stdout, ready for a log collector. The field
 
 ## Installation
 
-Requires **Zig 0.17.0**. Add the dependency to your `build.zig.zon`; the latest release is **v0.4.0**:
+Requires **Zig 0.17.0**. Add the dependency to your `build.zig.zon`. This is the `dev` branch, the next version in progress, so the command fetches its latest commit:
 
 ```sh
-zig fetch --save git+https://github.com/vkiryakov/zefir#v0.4.0
+zig fetch --save git+https://github.com/vkiryakov/zefir#dev
 ```
 
-Other versions are on the [releases page](https://github.com/vkiryakov/zefir/releases); a commit hash works too.
+`--save` pins the commit it fetched, so your build doesn't change when `dev` moves on. For the latest release, **v0.4.0**, fetch `#v0.4.0` instead; other versions are on the [releases page](https://github.com/vkiryakov/zefir/releases), and a commit hash works too.
 
 Then import the modules you need in your `build.zig`:
 
