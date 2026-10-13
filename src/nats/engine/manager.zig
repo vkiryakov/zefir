@@ -56,8 +56,9 @@ pub const Exit = union(enum) {
 
 /// The manager task: from `connect()` until the client closes.
 pub fn run(client: *Client) void {
+    var pacing: Pacing = .{};
     var next: ?Opened = if (client.options.options.retry_initial_connect)
-        reconnect(client)
+        reconnect(client, &pacing, false)
     else
         openFirst(client) catch |err| {
             connectFailed(client, err);
@@ -65,10 +66,35 @@ pub fn run(client: *Client) void {
         };
     while (next) |opened| {
         const server = opened.server;
+        pacing.up_since = Io.Clock.awake.now(client.io);
         const exit = serve(client, opened) orelse return;
-        next = if (teardown(client, server, exit)) reconnect(client) else null;
+        next = if (teardown(client, server, exit)) reconnect(client, &pacing, exit == .lame_duck) else null;
     }
 }
+
+/// How fast the client reconnects. A connection that lasted at least
+/// `reconnect.max_delay` was a good one: the next reconnect starts at once.
+/// One that did not counts as a failed attempt, so a server that drops
+/// every connection right after the handshake is tried again only after
+/// growing waits, never in a tight loop.
+const Pacing = struct {
+    /// Failed attempts and short connections in a row.
+    level: u32 = 0,
+    /// When the last connection came up.
+    up_since: ?Io.Timestamp = null,
+
+    /// The connection is lost: was it a good one? Leaving a server in lame
+    /// duck mode is no failure: the move to the next one is immediate.
+    fn lost(p: *Pacing, io: Io, stable: Io.Duration, lame_duck: bool) void {
+        const since = p.up_since orelse return;
+        p.up_since = null;
+        if (lame_duck or since.durationTo(Io.Clock.awake.now(io)).nanoseconds >= stable.nanoseconds) {
+            p.level = 0;
+        } else {
+            p.level +|= 1;
+        }
+    }
+};
 
 /// Makes `opened` the client's connection and keeps it until it must end;
 /// null when its reader or writer could not start, and the client closed.
@@ -96,14 +122,16 @@ fn serve(client: *Client, opened: Opened) ?Exit {
 /// with `retry_initial_connect`: the first attempt at once, then after
 /// growing waits, going round the pool. Null when the client closed, or
 /// gave up after `max_attempts` failures in a row and closed.
-fn reconnect(client: *Client) ?Opened {
+fn reconnect(client: *Client, pacing: *Pacing, lame_duck: bool) ?Opened {
     const io = client.io;
     const options = &client.options.options;
     if (!beginReconnecting(client)) return null;
+    pacing.lost(io, options.reconnect.max_delay, lame_duck);
+    // Failed attempts in a row, for `max_attempts`; a connection resets it.
     var failures: u32 = 0;
     while (true) {
-        if (failures > 0) {
-            const wait = backoff.delay(options.reconnect, failures, randomNumber(io));
+        if (pacing.level > 0) {
+            const wait = backoff.delay(options.reconnect, pacing.level, randomNumber(io));
             if (awaitExit(client, time.after(io, wait)) != null) return null;
         }
         const server = client.pool.next(io);
@@ -141,6 +169,7 @@ fn reconnect(client: *Client) ?Opened {
             },
         }
         failures +|= 1;
+        pacing.level +|= 1;
         if (options.reconnect.max_attempts) |max| {
             if (failures >= max) {
                 log.debug("no connection after {d} attempts: closing", .{failures});

@@ -72,10 +72,13 @@ pub const ReconnectOptions = struct {
     /// Failed attempts in a row before the client gives up; null: never.
     max_attempts: ?u32 = null,
     /// The first attempt is immediate; then the delay doubles from
-    /// `min_delay` up to `max_delay`.
+    /// `min_delay` up to `max_delay`, which is the longest. A connection
+    /// that lasts less than `max_delay` counts as a failed attempt, so a
+    /// server that drops every connection at once is not hammered.
     min_delay: Duration = .fromMilliseconds(500),
     max_delay: Duration = .fromSeconds(10),
-    /// A random part in every delay, so that clients do not reconnect in step.
+    /// Every delay is cut by a random part of up to a fifth, so that
+    /// clients do not reconnect in step.
     jitter: bool = true,
     /// Publishes and requests kept while reconnecting and sent once
     /// connected, after the subscriptions are restored; a frame record of a

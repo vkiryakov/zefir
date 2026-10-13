@@ -415,3 +415,28 @@ fn retryInitialConnect(io: Io) !void {
 test "retry_initial_connect: the client starts while its server is down, and connects once it is up" {
     try e2e.onZio(retryInitialConnect);
 }
+
+fn overlongSubscription(io: Io) !void {
+    // This client allows longer lines than the server's 4096 bytes: the
+    // server drops the connection at the SUB, every time the client
+    // subscribes again after reconnecting.
+    var client: nats.Client = try .init(testing.allocator, io, .{
+        .servers = &.{e2e.servers.plain},
+        .limits = .{ .max_control_line_bytes = 8192 },
+        .reconnect = .{ .min_delay = .fromMilliseconds(100), .max_delay = .fromSeconds(5) },
+    });
+    defer client.deinit();
+    try client.connect();
+    const long: [5000]u8 = @splat('a');
+    const sub = try client.subscribe(&long, .{});
+    defer sub.deinit();
+    // Waits of 80-100, 160-200, 320-400, 640-800 ms: a handful of
+    // reconnects in two seconds, where a tight loop makes hundreds.
+    try io.sleep(.fromSeconds(2), .awake);
+    const reconnects = client.stats().reconnects;
+    try testing.expect(reconnects >= 2 and reconnects <= 6);
+}
+
+test "a server that drops the connection at every restored SUB: the client backs off" {
+    try e2e.onZio(overlongSubscription);
+}

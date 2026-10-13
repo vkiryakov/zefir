@@ -1280,11 +1280,8 @@ test "close() while reconnecting: a request in the buffer, next() and nextEvent(
     var reader = try io.concurrent(nextMessageLong, .{sub});
     defer releaseMessage(reader.cancel(io));
     while (!sub.messages.isReceiving(io)) try io.sleep(.fromMilliseconds(1), .awake);
-    // Drain the events so far, then wait for the next.
-    while (true) {
-        const event = (try client.nextEvent(.{ .timeout = .{ .duration = .{ .raw = .fromMilliseconds(100), .clock = .awake } } })) orelse break;
-        if (event == .reconnecting) break;
-    }
+    // The events so far, up to the first attempt to reconnect.
+    _ = try awaitEventOf(&client, .reconnecting);
     var watcher = try io.concurrent(nextEventLong, .{&client});
     defer _ = watcher.cancel(io) catch {};
     while (!client.events.isReceiving(io)) try io.sleep(.fromMilliseconds(1), .awake);
@@ -1576,4 +1573,61 @@ test "a request that times out while it waits for the next connection is never s
     const seen = try record.seen(io);
     defer testing.allocator.free(seen);
     try testing.expect(std.mem.find(u8, seen, "PUB service.x") == null);
+}
+
+/// Every connection: the handshake, then a hang-up at once; notes when each
+/// came.
+const Flapping = struct {
+    mutex: Io.Mutex = .init,
+    times: [64]Io.Timestamp = undefined,
+    count: usize = 0,
+
+    fn serve(f: *Flapping, io: Io, listener: *net.Server) anyerror!void {
+        while (true) {
+            var peer: FakeServer.Peer = undefined;
+            try peer.accept(io, listener);
+            defer peer.close();
+            {
+                f.mutex.lockUncancelable(io);
+                defer f.mutex.unlock(io);
+                if (f.count < f.times.len) f.times[f.count] = Io.Clock.awake.now(io);
+                f.count += 1;
+            }
+            handshake(&peer, golden.info_default) catch {};
+        }
+    }
+
+    fn taken(f: *Flapping, io: Io) usize {
+        f.mutex.lockUncancelable(io);
+        defer f.mutex.unlock(io);
+        return f.count;
+    }
+};
+
+test "a server that drops every connection right after the handshake: the client backs off, never a tight loop" {
+    const io = testing.io;
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var flapping: Flapping = .{};
+    var server = try io.concurrent(Flapping.serve, .{ &flapping, io, &listener });
+    defer server.cancel(io) catch {};
+    var url: [64]u8 = undefined;
+    var client: Client = try .init(testing.allocator, io, .{
+        .servers = &.{try FakeServer.url(&listener, &url)},
+        .reconnect = .{ .min_delay = .fromMilliseconds(50), .max_delay = .fromSeconds(5) },
+    });
+    defer client.deinit();
+    try client.connect();
+    try io.sleep(.fromMilliseconds(1000), .awake);
+    client.close();
+    // Waits of 40-50, 80-100, 160-200, 320-400 ms: five connections in a
+    // second at most, where a loop with no wait makes hundreds.
+    const count = flapping.taken(io);
+    try testing.expect(count >= 3 and count <= 6);
+    // Every wait at least as long as most of the one before: they grow.
+    for (2..@min(count, flapping.times.len)) |i| {
+        const before = flapping.times[i - 2].durationTo(flapping.times[i - 1]).nanoseconds;
+        const after = flapping.times[i - 1].durationTo(flapping.times[i]).nanoseconds;
+        try testing.expect(after * 10 >= before * 15);
+    }
 }
