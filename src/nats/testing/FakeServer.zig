@@ -71,6 +71,18 @@ pub const Peer = struct {
         return std.mem.trimEnd(u8, line, "\r\n");
     }
 
+    /// Like `readLine`, but null when the client has hung up.
+    pub fn nextLine(peer: *Peer) !?[]const u8 {
+        return peer.readLine() catch |err| switch (err) {
+            error.EndOfStream => null,
+            error.ReadFailed => switch (peer.reader.err orelse error.Unexpected) {
+                error.ConnectionResetByPeer => null,
+                else => |e| e,
+            },
+            else => |e| e,
+        };
+    }
+
     pub fn expectLine(peer: *Peer, expected: []const u8) !void {
         try std.testing.expectEqualStrings(expected, try peer.readLine());
     }
