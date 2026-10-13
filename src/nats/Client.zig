@@ -632,6 +632,9 @@ fn requestOnce(client: *Client, message: PublishMessage, options: RequestOptions
     try client.checkLine(with_reply, header_len);
     client.queueRequest(id, with_reply, header_len, deadline) catch |err| switch (err) {
         error.Closed => return client.inbox.closedError(io),
+        // Its frame was refused: the request failed meanwhile, and says
+        // why.
+        error.Disconnected => return client.inbox.failureOf(io, &waiter),
         else => |e| return e,
     };
     client.countOut(header_len + message.payload.len);
@@ -710,6 +713,12 @@ pub fn requestMany(client: *Client, subject: []const u8, payload: []const u8, op
     try client.checkLine(message, 0);
     client.queueRequest(responses.id, message, 0, deadline) catch |err| switch (err) {
         error.Closed => return client.inbox.closedError(io),
+        // Its frame was refused: the stream ended meanwhile, and says why.
+        error.Disconnected => return switch (responses.messages.endedHow(io) orelse .disconnected) {
+            .permission_denied => error.PermissionDenied,
+            .closed => error.ConnectionClosed,
+            else => error.Disconnected,
+        },
         else => |e| return e,
     };
     client.countOut(payload.len);

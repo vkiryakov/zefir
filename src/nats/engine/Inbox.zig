@@ -499,6 +499,15 @@ fn admitFrame(context: *anyopaque, io: Io, id: u64, generation: u64) bool {
     return true;
 }
 
+/// Why a request failed before its frame could be queued: the end of the
+/// inbox, a refused inbox, or the connection lost.
+pub fn failureOf(inbox: *Inbox, io: Io, waiter: *const Waiter) error{ Disconnected, PermissionDenied, ConnectionClosed } {
+    inbox.mutex.lockUncancelable(io);
+    defer inbox.mutex.unlock(io);
+    const how = waiter.failure orelse inbox.ended orelse return error.Disconnected;
+    return how.err();
+}
+
 /// Request `id` still waits for its reply: its frame is worth sending.
 pub fn awaitsReply(inbox: *Inbox, io: Io, id: u64) bool {
     inbox.mutex.lockUncancelable(io);
@@ -1247,4 +1256,17 @@ test "an inbox no request made has nothing to restore" {
     defer inbox.deinit(testing.allocator);
     var subject: [prefix_len + 1]u8 = undefined;
     try testing.expect(inbox.restoreSub(testing.io, &subject) == null);
+}
+
+test "a request that failed before its frame was queued says why" {
+    const io = testing.io;
+    var inbox = testInbox();
+    defer inbox.deinit(testing.allocator);
+    var waiter: Waiter = .{};
+    const id = try inbox.add(io, testing.allocator, .{ .single = &waiter }, 10);
+    defer inbox.drop(io, id, &waiter);
+    inbox.end(io, .permission_denied);
+    // Its frame is refused: the request failed meanwhile.
+    try testing.expect(!admitFrame(&inbox, io, id, 0));
+    try testing.expectEqual(error.PermissionDenied, inbox.failureOf(io, &waiter));
 }
