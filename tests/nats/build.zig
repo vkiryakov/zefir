@@ -184,6 +184,45 @@ pub fn build(b: *std.Build) void {
         one.step.dependOn(&up.step);
         b.step(b.fmt("example-{s}", .{example.run}), b.fmt("Run the {s} example against the NATS servers", .{example.run})).dependOn(&one.step);
     }
+
+    // The stress tests, in Debug and then in ReleaseSafe whatever
+    // -Doptimize says: each mode gets zefir and zio built in it.
+    const stress_step = b.step("stress", "Run the stress tests against the NATS servers, in Debug and in ReleaseSafe");
+    var after_mode: *std.Build.Step = &up.step;
+    for ([_]std.lang.Optimize{ .Debug, .ReleaseSafe }) |mode| {
+        const mode_zefir = b.dependency("zefir", .{ .target = target, .optimize = mode });
+        const mode_zio = b.dependency("zio", .{ .target = target, .optimize = mode });
+        const imports: []const std.Build.Module.Import = &.{
+            .{ .name = "nats", .module = mode_zefir.module("zefir-nats") },
+            .{ .name = "zio", .module = mode_zio.module("zio") },
+        };
+        const helpers = b.createModule(.{
+            .root_source_file = b.path("e2e/root.zig"),
+            .target = target,
+            .optimize = mode,
+            .imports = imports,
+        });
+        const stress = b.addTest(.{
+            .name = b.fmt("stress-{t}", .{mode}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("stress/root.zig"),
+                .target = target,
+                .optimize = mode,
+                .imports = &.{
+                    imports[0],
+                    imports[1],
+                    .{ .name = "e2e", .module = helpers },
+                },
+            }),
+            .test_runner = .{ .path = b.path("test_runner.zig"), .mode = .simple },
+        });
+        const run_stress = b.addRunArtifact(stress);
+        run_stress.stdio = .inherit;
+        // One mode after the other: they share the servers and the CPU.
+        run_stress.step.dependOn(after_mode);
+        after_mode = &run_stress.step;
+        stress_step.dependOn(&run_stress.step);
+    }
 }
 
 /// The example `name` of src/nats/examples, built with a root that exits
