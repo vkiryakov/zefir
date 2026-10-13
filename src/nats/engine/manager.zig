@@ -49,7 +49,7 @@ pub fn run(client: *Client) void {
     };
     client.connection = opened.connection;
     // Before the reader starts: an INFO it reads is newer than this one.
-    adopt(client, opened.server, opened.greeting.info_json);
+    adopt(client, opened.server, opened.greeting);
     client.connection_tasks.concurrent(io, readLoop, .{client}) catch |err| return abandon(client, err);
     client.connection_tasks.concurrent(io, writeLoop, .{client}) catch |err| return abandon(client, err);
     log.debug("connected to {f}", .{opened.server});
@@ -276,14 +276,22 @@ pub fn connectFailed(client: *Client, err: Client.ConnectError) void {
     client.outbound.close(io);
 }
 
-/// The connection passed its handshake with `server`; `info_json` is its
-/// INFO, now the client's.
-fn adopt(client: *Client, server: ServerAddress, info_json: []u8) void {
+/// The connection passed its handshake with `server`; the INFO of
+/// `greeting` is now the client's.
+fn adopt(client: *Client, server: ServerAddress, greeting: Connection.Greeting) void {
     client.mutex.lockUncancelable(client.io);
     defer client.mutex.unlock(client.io);
     client.server = server;
     if (client.info_json) |old| client.gpa.free(old);
-    client.info_json = info_json;
+    client.info_json = greeting.info_json;
+    client.server_headers = greeting.headers;
+    client.max_payload = maxPayload(greeting.max_payload);
+}
+
+/// The `max_payload` of an INFO; 0 when the server gave none, or one that
+/// cannot be a size.
+fn maxPayload(announced: i64) u64 {
+    return if (announced > 0) @intCast(announced) else 0;
 }
 
 /// The connection is up, its reader and writer run.
@@ -342,13 +350,16 @@ fn awaitExit(client: *Client, deadline: Io.Clock.Timestamp) ?Exit {
     }
 }
 
-/// Keeps the server's latest INFO.
+/// Keeps the server's latest INFO. Its `max_payload` applies from now on,
+/// such as the limit of the user's account in the INFO after CONNECT.
+/// Headers stay as CONNECT settled them.
 fn updateInfo(client: *Client, json: []const u8) ServerInfo.ParseError!void {
     const info = try ServerInfo.parse(client.gpa, json);
-    info.deinit();
+    defer info.deinit();
     const copy = try client.gpa.dupe(u8, json);
     client.mutex.lockUncancelable(client.io);
     defer client.mutex.unlock(client.io);
     if (client.info_json) |old| client.gpa.free(old);
     client.info_json = copy;
+    client.max_payload = maxPayload(info.value.max_payload);
 }

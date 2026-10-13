@@ -22,7 +22,11 @@ const Allocator = std.mem.Allocator;
 const Options = @import("Options.zig");
 const ServerAddress = @import("ServerAddress.zig");
 const ServerInfo = @import("ServerInfo.zig");
+const PublishMessage = @import("Message.zig").PublishMessage;
+const Headers = @import("Headers.zig");
 const Parser = @import("protocol/Parser.zig");
+const encoder = @import("protocol/encoder.zig");
+const subjects = @import("protocol/subject.zig");
 const OwnedOptions = @import("engine/OwnedOptions.zig");
 const Outbound = @import("engine/Outbound.zig");
 const Connection = @import("engine/Connection.zig");
@@ -64,6 +68,10 @@ connect_error: ?ConnectError = null,
 server: ?ServerAddress = null,
 /// The JSON of the latest INFO of the current connection.
 info_json: ?[]u8 = null,
+/// The current connection takes headers: CONNECT asked for them.
+server_headers: bool = false,
+/// The `max_payload` of the latest INFO; 0 when the server gave none.
+max_payload: u64 = 0,
 /// `deinit` has run.
 freed: bool = false,
 
@@ -101,6 +109,87 @@ pub const FlushError = error{
 };
 
 pub const ServerInfoError = error{ OutOfMemory, ProtocolError };
+
+pub const PublishError = error{
+    /// The subject or reply subject cannot be published to, or the line
+    /// would be longer than `limits.max_control_line_bytes`.
+    InvalidSubject,
+    InvalidHeader,
+    /// Headers and payload together exceed the server's `max_payload`.
+    PayloadTooLarge,
+    /// Headers, and the server cannot take them.
+    UnsupportedFeature,
+    /// Not connected yet.
+    Disconnected,
+    ConnectionClosed,
+    Canceled,
+    OutOfMemory,
+    /// A bug in this client: the frame came out of another length.
+    ProtocolError,
+};
+
+/// Publishes `payload` to `subject`. It returns once a copy is in the
+/// outbound queue, which is not delivery: `flush` waits until the server
+/// has it. While the queue is full, it waits for room; cancel the task to
+/// give up.
+pub fn publish(client: *Client, subject: []const u8, payload: []const u8) PublishError!void {
+    return client.publishMessage(.{ .subject = subject, .payload = payload });
+}
+
+/// Publishes `message`, with its reply subject and headers, the way
+/// `publish` does. Headers need a server that supports them.
+pub fn publishMessage(client: *Client, message: PublishMessage) PublishError!void {
+    try subjects.validatePublish(message.subject);
+    if (message.reply_to) |reply| try subjects.validatePublish(reply);
+    try Headers.validate(message.headers);
+    const server = try client.currentServer();
+    const has_headers = message.headers.len > 0;
+    if (has_headers and !server.headers) return error.UnsupportedFeature;
+    const header_len = if (has_headers) encoder.headerBlockLen(message.headers) else 0;
+    const total = std.math.add(usize, header_len, message.payload.len) catch return error.PayloadTooLarge;
+    if (!fitsPayload(total, server.max_payload)) return error.PayloadTooLarge;
+    // The server closes the connection on a longer line.
+    const args_len = if (has_headers)
+        encoder.hpubArgsLen(message.subject, message.reply_to, header_len, message.payload.len)
+    else
+        encoder.pubArgsLen(message.subject, message.reply_to, message.payload.len);
+    if (args_len > client.options.options.limits.max_control_line_bytes) return error.InvalidSubject;
+
+    const io = client.io;
+    const queued = if (has_headers)
+        client.outbound.put(io, .publish, encoder.hpubLen(message.subject, message.reply_to, header_len, message.payload.len), encoder.writeHpub, .{
+            message.subject, message.reply_to, message.headers, message.payload,
+        })
+    else
+        client.outbound.put(io, .publish, encoder.pubLen(message.subject, message.reply_to, message.payload.len), encoder.writePub, .{
+            message.subject, message.reply_to, message.payload,
+        });
+    queued catch |err| switch (err) {
+        error.Closed => return error.ConnectionClosed,
+        else => |e| return e,
+    };
+}
+
+/// What publishing needs to know about the current connection.
+const ServerFacts = struct { headers: bool, max_payload: u64 };
+
+fn currentServer(client: *Client) error{ Disconnected, ConnectionClosed }!ServerFacts {
+    client.mutex.lockUncancelable(client.io);
+    defer client.mutex.unlock(client.io);
+    return switch (client.status) {
+        .connected => .{ .headers = client.server_headers, .max_payload = client.max_payload },
+        .closed => error.ConnectionClosed,
+        .disconnected, .connecting, .reconnecting, .draining => error.Disconnected,
+    };
+}
+
+/// A message of `total` bytes, headers included, that the server takes:
+/// within its `max_payload` when it gave one (0 when not), and never more
+/// than its parser reads.
+fn fitsPayload(total: usize, max_payload: u64) bool {
+    if (total > encoder.max_size) return false;
+    return max_payload == 0 or total <= max_payload;
+}
 
 pub const FlushOptions = struct {
     /// How long to wait for the server's PONG.
@@ -290,6 +379,27 @@ test "close before connect, connect after close, deinit twice" {
     client.close();
     client.deinit();
     client.deinit();
+}
+
+test "publish before connect is Disconnected, after close ConnectionClosed" {
+    var client: Client = try .init(testing.allocator, testing.io, .{ .servers = one_server });
+    defer client.deinit();
+    try testing.expectError(error.Disconnected, client.publish("foo", "x"));
+    // The arguments are checked first, whatever the state.
+    try testing.expectError(error.InvalidSubject, client.publish("foo bar", "x"));
+    client.close();
+    try testing.expectError(error.ConnectionClosed, client.publish("foo", "x"));
+    try testing.expectError(error.ConnectionClosed, client.publishMessage(.{ .subject = "foo", .headers = &.{.{ .name = "X", .value = "1" }} }));
+}
+
+test "a message fits when it is within max_payload, or nine digits when that is unknown" {
+    try testing.expect(fitsPayload(1024, 1024));
+    try testing.expect(!fitsPayload(1025, 1024));
+    try testing.expect(fitsPayload(0, 1024));
+    // 0: the server did not say.
+    try testing.expect(fitsPayload(999_999_999, 0));
+    try testing.expect(!fitsPayload(1_000_000_000, 0));
+    try testing.expect(!fitsPayload(1_000_000_000, 2_000_000_000));
 }
 
 test "connect needs an io with concurrency" {

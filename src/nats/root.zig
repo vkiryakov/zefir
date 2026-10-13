@@ -94,6 +94,7 @@ test {
     _ = @import("engine/Connection.zig");
     _ = @import("Client.zig");
     _ = @import("testing/client_tests.zig");
+    _ = @import("testing/messaging_tests.zig");
 }
 
 /// The errors of `std.Io` that the client passes through unchanged.
@@ -111,8 +112,9 @@ fn isIn(comptime Set: type, comptime name: []const u8) bool {
 
 test "every error of the module's functions is in nats.Error or comes from std.Io" {
     inline for (.{
-        Client.InitError, Client.ConnectError,      Client.FlushError,     Client.ServerInfoError,
-        Options.Error,    ServerAddress.ParseError, ServerInfo.ParseError, Headers.ValidateError,
+        Client.InitError,    Client.ConnectError,      Client.FlushError,     Client.ServerInfoError,
+        Options.Error,       ServerAddress.ParseError, ServerInfo.ParseError, Headers.ValidateError,
+        Client.PublishError,
     }) |Set| {
         inline for (comptime @typeInfo(Set).error_set.error_names.?) |name| {
             if (comptime !isIn(Error, name) and !isIn(IoErrors, name)) {

@@ -59,7 +59,8 @@ pub const Hello = struct {
 pub const Greeting = struct {
     /// The JSON of the latest INFO; the caller frees it.
     info_json: []u8,
-    /// HPUB and HMSG work: headers and no-responders are available.
+    /// CONNECT asked for headers, so HPUB and HMSG work, and so do
+    /// no-responders; a later INFO does not change it.
     headers: bool,
     /// The largest message the server takes, headers included; 0 when it
     /// did not say.
@@ -104,7 +105,8 @@ pub fn handshake(conn: *Connection, io: Io, gpa: Allocator, hello: Hello) Handsh
         },
         .ok => {},
         .info => |json| {
-            const newer = try greet(gpa, json, null);
+            var newer = try greet(gpa, json, null);
+            newer.headers = greeting.headers;
             gpa.free(greeting.info_json);
             greeting = newer;
         },
@@ -439,6 +441,33 @@ test "CONNECT asks for headers only when INFO offers them, and carries the crede
     defer testing.allocator.free(greeting.info_json);
     try testing.expect(!greeting.headers);
     try testing.expectEqual(1024, greeting.max_payload);
+    client.hangUp(io);
+    try server.await(io);
+}
+
+fn serveInfoWithoutHeadersLater(io: Io, listener: *net.Server) !void {
+    var peer: FakeServer.Peer = undefined;
+    try peer.accept(io, listener);
+    defer peer.close();
+    try peer.send(golden.info_default);
+    _ = try peer.readLine();
+    try peer.expectLine("PING");
+    try peer.send(info_without_headers ++ golden.pong);
+}
+
+test "headers stay as CONNECT asked for them; a later INFO brings its max_payload" {
+    const io = testing.io;
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var server = try io.concurrent(serveInfoWithoutHeadersLater, .{ io, &listener });
+    defer server.cancel(io) catch {};
+    var client = try TestClient.dial(io, &listener);
+    defer client.deinit(io);
+    const greeting = try client.handshake(io, .{});
+    defer testing.allocator.free(greeting.info_json);
+    try testing.expect(greeting.headers);
+    try testing.expectEqual(1024, greeting.max_payload);
+    try testing.expectEqualStrings(info_without_headers["INFO ".len .. info_without_headers.len - " \r\n".len], greeting.info_json);
     client.hangUp(io);
     try server.await(io);
 }

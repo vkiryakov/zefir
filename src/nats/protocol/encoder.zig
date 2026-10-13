@@ -134,6 +134,26 @@ pub fn unsubLen(sid: u64, max: ?u64) usize {
     return "UNSUB ".len + digits(sid) + (if (max) |m| 1 + digits(m) else 0) + 2;
 }
 
+/// The largest size the server reads in a PUB, HPUB or UNSUB line: it
+/// takes nine digits at most.
+pub const max_size = 999_999_999;
+
+/// The arguments of a PUB line: what the server counts against its
+/// `max_control_line`, the line without `PUB ` and CRLF.
+pub fn pubArgsLen(subject: []const u8, reply_to: ?[]const u8, payload_len: usize) usize {
+    return subject.len + replyLen(reply_to) + 1 + digits(payload_len);
+}
+
+/// The arguments of an HPUB line, as `pubArgsLen` counts them.
+pub fn hpubArgsLen(subject: []const u8, reply_to: ?[]const u8, header_len: usize, payload_len: usize) usize {
+    return subject.len + replyLen(reply_to) + 1 + digits(header_len) + 1 + digits(header_len + payload_len);
+}
+
+/// The arguments of a SUB line, as `pubArgsLen` counts them.
+pub fn subArgsLen(subject: []const u8, queue: ?[]const u8, sid: u64) usize {
+    return subject.len + replyLen(queue) + 1 + digits(sid);
+}
+
 /// The length of the block `writeHeaderBlock` writes; HPUB announces it.
 pub fn headerBlockLen(headers: []const Header) usize {
     var len: usize = "NATS/1.0\r\n".len + 2;
@@ -220,6 +240,37 @@ test "lengths across digit boundaries" {
         w = .fixed(&buffer);
         try writeUnsub(&w, n, n);
         try testing.expectEqual(w.buffered().len, unsubLen(n, n));
+    }
+}
+
+/// The arguments of the line `frame` starts with: after `op` and its
+/// space, up to CRLF.
+fn argsOf(frame: []const u8, op: []const u8) usize {
+    const line_end = std.mem.find(u8, frame, "\r\n").?;
+    return line_end - op.len - 1;
+}
+
+test "the arguments of a line, as the server counts them" {
+    const headers = [_]Header{.{ .name = "A", .value = "b" }};
+    const payload: [1000]u8 = @splat('x');
+    for ([_]usize{ 0, 9, 10, 1000 }) |n| {
+        var buffer: [1200]u8 = undefined;
+        for ([_]?[]const u8{ null, "reply.to" }) |reply| {
+            var w: Writer = .fixed(&buffer);
+            try writePub(&w, "s.t", reply, payload[0..n]);
+            try testing.expectEqual(argsOf(w.buffered(), "PUB"), pubArgsLen("s.t", reply, n));
+            w = .fixed(&buffer);
+            try writeHpub(&w, "s.t", reply, &headers, payload[0..n]);
+            try testing.expectEqual(argsOf(w.buffered(), "HPUB"), hpubArgsLen("s.t", reply, headerBlockLen(&headers), n));
+        }
+    }
+    for ([_]?[]const u8{ null, "workers" }) |queue| {
+        for ([_]u64{ 1, 10, std.math.maxInt(u64) }) |sid| {
+            var buffer: [64]u8 = undefined;
+            var w: Writer = .fixed(&buffer);
+            try writeSub(&w, "s.*", queue, sid);
+            try testing.expectEqual(argsOf(w.buffered(), "SUB"), subArgsLen("s.*", queue, sid));
+        }
     }
 }
 
