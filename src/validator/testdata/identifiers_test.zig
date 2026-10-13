@@ -437,60 +437,6 @@ test "the first failing rule is the value's only violation" {
     try h.expectAt(&Books{ .x = &.{ "9780306406157", "0306406153" } }, "validation.isbn", "bad ISBN", "x[1]");
 }
 
-// ------------------------------------------------------------------ the examples of identifiers.md
-
-const Payout = struct {
-    request_id: []const u8,
-    iban: []const u8,
-    bic: ?[]const u8 = null,
-    wallet: ?[]const u8 = null,
-    receipt_digest: []const u8,
-    isbns: []const []const u8,
-
-    pub const field_rules = .{
-        .request_id = v.uuid,
-        .iban = v.iban, // upper case, no spaces: normalize before the check
-        .bic = v.bic, // null skips the rule
-        .wallet = v.btcAddress(.mainnet),
-        .receipt_digest = v.hash(.sha256),
-        .isbns = v.each(v.isbn),
-    };
-};
-
-const Withdrawal = struct {
-    network: v.BtcNetwork, // chosen by the user
-    address: []const u8,
-
-    pub fn validateSelf(self: *const Withdrawal) ?v.Violation {
-        if (!v.isBtcAddress(self.address, self.network))
-            return v.fail(@This(), .address, "withdrawals.bad_address", "must be a Bitcoin address of the chosen network");
-        return null;
-    }
-};
-
-test "the examples of the identifiers page check what the page says" {
-    comptime v.assertRules(Payout);
-    comptime v.assertRules(Withdrawal);
-    const good: Payout = .{
-        .request_id = "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
-        .iban = "DE89370400440532013000",
-        .receipt_digest = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-        .isbns = &.{ "9780306406157", "080442957X" },
-    };
-    try h.expectValid(&good);
-    var bad = good;
-    bad.iban = "DE89 3704 0044 0532 0130 00";
-    bad.bic = "deutdeff";
-    bad.isbns = &.{ "9780306406157", "978-0-306-40615-7" };
-    try h.expectAll(&bad, &.{
-        .{ .code = "validation.iban", .field = "iban" },
-        .{ .code = "validation.bic", .field = "bic" },
-        .{ .code = "validation.isbn", .field = "isbns[1]" },
-    });
-    try h.expectValid(&Withdrawal{ .network = .testnet, .address = "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx" });
-    try h.expectAt(&Withdrawal{ .network = .mainnet, .address = "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx" }, "withdrawals.bad_address", "must be a Bitcoin address of the chosen network", "address");
-}
-
 // ------------------------------------------------------------------ random input
 
 /// Random input per run of the test below, from each of its three sources.

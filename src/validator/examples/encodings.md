@@ -7,6 +7,10 @@ language tags, `v.semVer` versions, and `v.hexColor`, `v.rgbColor` and
 `v.hslColor` CSS colors. Each rule has a predicate with the same answer for
 code outside `field_rules`: `v.isJson(s)`, `v.isBase64(s)`, …
 
+> [!NOTE]
+> These rules ship in v0.4.0; until then they are on the `dev` branch
+> ([Installation](README.md#installation)).
+
 ```zig
 const Upload = struct {
     metadata: []const u8,

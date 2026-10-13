@@ -80,10 +80,6 @@ fn digitRun(s: []const u8) usize {
     return i;
 }
 
-fn allDigits(s: []const u8) bool {
-    return digitRun(s) == s.len;
-}
-
 /// `s` without one leading '+' or '-'.
 fn skipSign(s: []const u8) []const u8 {
     return if (s.len != 0 and (s[0] == '+' or s[0] == '-')) s[1..] else s;
@@ -107,7 +103,7 @@ pub fn isNumberString(s: []const u8) bool {
     if (whole == r.len) return whole != 0;
     if (r[whole] != '.') return false;
     const fraction = r[whole + 1 ..];
-    return fraction.len != 0 and allDigits(fraction);
+    return fraction.len != 0 and core.allDigits(fraction);
 }
 
 /// A decimal number, as validator.js `isDecimal` reads it with these
@@ -125,7 +121,7 @@ pub fn isDecimal(s: []const u8, options: DecimalOptions) bool {
     if (whole == r.len) return !options.force_decimal and whole != 0;
     if (r[whole] != '.') return false;
     const fraction = r[whole + 1 ..];
-    if (!allDigits(fraction)) return false;
+    if (!core.allDigits(fraction)) return false;
     if (fraction.len < options.min_decimal_digits) return false;
     if (options.max_decimal_digits) |most| {
         if (fraction.len > most) return false;
@@ -252,13 +248,6 @@ pub fn isLatLong(s: []const u8) bool {
 
 // ------------------------------------------------------------------ IP addresses
 
-fn allHex(s: []const u8) bool {
-    for (s) |c| {
-        if (!std.ascii.isHex(c)) return false;
-    }
-    return true;
-}
-
 /// An IPv4 address in dotted decimal, as RFC 3986 `IPv4address` and
 /// validator.js `isIP(s, 4)`: four numbers from 0 to 255 joined by '.', each
 /// without leading zeros ("0" itself is fine). No shorthand ("127.1"),
@@ -280,7 +269,7 @@ pub fn isIpv4(s: []const u8) bool {
 fn isDecOctet(part: []const u8) bool {
     if (part.len == 0 or part.len > 3) return false;
     if (part.len > 1 and part[0] == '0') return false;
-    return allDigits(part) and smallValue(part) <= 255;
+    return core.allDigits(part) and smallValue(part) <= 255;
 }
 
 /// An IPv6 address in the text forms of RFC 4291 (RFC 3986 `IPv6address`):
@@ -311,7 +300,7 @@ fn ipv6Groups(s: []const u8, allow_ipv4: bool) ?usize {
             if (!isIpv4(group)) return null;
             groups += 2;
         } else {
-            if (group.len == 0 or group.len > 4 or !allHex(group)) return null;
+            if (group.len == 0 or group.len > 4 or !core.allHex(group)) return null;
             groups += 1;
         }
     }
@@ -338,7 +327,7 @@ pub fn isMacAddress(s: []const u8, options: MacAddressOptions) bool {
     };
     for (sizes) |octets| {
         const matches = switch (options.format) {
-            .bare => s.len == 2 * octets and allHex(s),
+            .bare => s.len == 2 * octets and core.allHex(s),
             .separated => isGrouped(s, octets, 2, ":- ") or isGrouped(s, octets, 4, "."),
         };
         if (matches) return true;
@@ -389,7 +378,7 @@ pub fn isFqdn(s: []const u8, options: FqdnOptions) bool {
         last = label;
     }
     // `last` passed isLabel, so it is not empty.
-    if (allDigits(last)) return false;
+    if (core.allDigits(last)) return false;
     if (options.require_tld) return labels >= 2 and isTld(last);
     return true;
 }
@@ -465,8 +454,8 @@ pub fn isEmail(s: []const u8) bool {
 /// A label that makes a host an IPv4 address in URLs: all digits, or "0x"
 /// or "0X" and hex digits.
 fn endsInNumber(label: []const u8) bool {
-    if (label.len != 0 and allDigits(label)) return true;
-    return label.len >= 2 and label[0] == '0' and (label[1] == 'x' or label[1] == 'X') and allHex(label[2..]);
+    if (label.len != 0 and core.allDigits(label)) return true;
+    return label.len >= 2 and label[0] == '0' and (label[1] == 'x' or label[1] == 'X') and core.allHex(label[2..]);
 }
 
 /// A host name or an IPv4 address in a URL: without one trailing '.', 1-253
@@ -489,7 +478,7 @@ fn isUrlHost(host: []const u8) bool {
 /// A port in a URL: 1-5 ASCII digits, from 1 to 65535, leading zeros
 /// allowed ("080"), unlike `isPort`.
 fn isUrlPort(text: []const u8) bool {
-    if (text.len == 0 or text.len > 5 or !allDigits(text)) return false;
+    if (text.len == 0 or text.len > 5 or !core.allDigits(text)) return false;
     var value: u32 = 0;
     for (text) |c| value = value * 10 + (c - '0');
     return value >= 1 and value <= 65535;
