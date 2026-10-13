@@ -295,7 +295,8 @@ const Incoming = struct {
         no,
         /// No subscription takes it: dropped without a word.
         unrouted,
-        /// Over `max_inbound_frame_bytes` or `max_header_bytes`.
+        /// Over `max_inbound_frame_bytes` or `max_header_bytes`, or more
+        /// than its subscription holds even when empty.
         too_large,
         no_memory,
     };
@@ -303,9 +304,13 @@ const Incoming = struct {
     fn begin(client: *Client, msg: Parser.Msg) Incoming {
         var in: Incoming = .{ .sid = msg.sid, .total_len = msg.total_len, .assembly = null, .skipped = .no };
         const limits = &client.options.options.limits;
-        if (!client.subscriptions.accepts(client.io, msg.sid)) {
+        const holds = client.subscriptions.accepts(client.io, msg.sid) orelse {
             in.skipped = .unrouted;
-        } else if (msg.total_len > limits.max_inbound_frame_bytes or msg.header_len > limits.max_header_bytes) {
+            return in;
+        };
+        if (msg.total_len > limits.max_inbound_frame_bytes or msg.header_len > limits.max_header_bytes or
+            incoming.Assembly.size(msg) > holds)
+        {
             in.skipped = .too_large;
         } else if (incoming.Assembly.begin(client.gpa, msg)) |assembly| {
             in.assembly = assembly;

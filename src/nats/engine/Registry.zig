@@ -45,13 +45,15 @@ pub fn unregister(r: *Registry, io: Io, sid: u64) void {
     _ = r.subscriptions.remove(sid);
 }
 
-/// Subscription `sid` exists and takes messages: the reader allocates a
-/// message only then.
-pub fn accepts(r: *Registry, io: Io, sid: u64) bool {
+/// How many bytes subscription `sid` holds, when it exists and takes
+/// messages; null otherwise. The reader allocates a message only for such
+/// a subscription, and only one that fits in it.
+pub fn accepts(r: *Registry, io: Io, sid: u64) ?usize {
     r.mutex.lockUncancelable(io);
     defer r.mutex.unlock(io);
-    const sub = r.subscriptions.get(sid) orelse return false;
-    return sub.messages.isOpen(io);
+    const sub = r.subscriptions.get(sid) orelse return null;
+    if (!sub.messages.isOpen(io)) return null;
+    return sub.messages.limits.bytes;
 }
 
 /// Hands `message` to subscription `sid`, or tells it that a message came

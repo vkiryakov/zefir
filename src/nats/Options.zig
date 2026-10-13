@@ -91,7 +91,8 @@ pub const Limits = struct {
     outbound_bytes: usize = 8 * 1024 * 1024,
     /// Messages a subscription holds before its overflow policy drops some.
     subscription_messages: u32 = 1024,
-    /// Bytes a subscription holds before its overflow policy drops messages.
+    /// Bytes a subscription holds before its overflow policy drops messages;
+    /// a message larger than this on its own is dropped as it comes.
     subscription_bytes: usize = 8 * 1024 * 1024,
     /// Requests waiting for a reply at once; more fail with
     /// TooManyPendingRequests.

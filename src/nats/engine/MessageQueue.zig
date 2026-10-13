@@ -115,8 +115,10 @@ pub const Pushed = struct {
 };
 
 /// Queues a message that came for the subscription, or counts one that
-/// came but could not be kept (null: too large, no memory). A queue that
-/// has ended takes nothing and counts nothing.
+/// came but could not be kept (null: too large, no memory). A message is
+/// never larger than `limits.bytes`: the reader drops such a message
+/// before it allocates it. A queue that has ended takes nothing and counts
+/// nothing.
 pub fn push(q: *MessageQueue, io: Io, message: ?Message) Pushed {
     q.mutex.lockUncancelable(io);
     defer q.mutex.unlock(io);
@@ -156,12 +158,7 @@ fn handleOverflow(q: *MessageQueue, io: Io, m: Message, pushed: *Pushed) void {
             release(m);
             pushed.dropped += 1;
         },
-        // A message larger than the byte limit would never fit: it is the
-        // one to go.
-        .drop_oldest => if (m.buffer.len > q.limits.bytes) {
-            release(m);
-            pushed.dropped += 1;
-        } else {
+        .drop_oldest => {
             while (!q.fits(m)) {
                 // An empty queue fits any message within the byte limit.
                 const oldest = q.messages.popFront().?;
@@ -326,16 +323,6 @@ test "drop_oldest keeps the last messages, by count and by bytes" {
     try testing.expectEqual(PendingCounts{ .messages = 1, .bytes = 25 }, by_bytes.pending(testing.io));
     try expectNext(&by_bytes, 'D');
     try testing.expectEqual(3, by_bytes.stats(testing.io).dropped);
-}
-
-test "a message larger than the byte limit never fits: it is the one dropped" {
-    var q: MessageQueue = .init(testing.allocator, .{ .messages = 100, .bytes = 30 }, .drop_oldest, null);
-    defer q.deinit();
-    try pushTagged(&q, 10, "ab");
-    const pushed = q.push(testing.io, try testMessage(31, 'X'));
-    try testing.expectEqual(1, pushed.dropped);
-    try expectNext(&q, 'a');
-    try expectNext(&q, 'b');
 }
 
 test "close_subscription hands out what came first, then SlowConsumer" {

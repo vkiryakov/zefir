@@ -17,12 +17,19 @@ pub const Assembly = struct {
     /// Bytes of the header block and payload copied so far.
     filled: usize = 0,
 
+    /// The bytes of the one allocation of the message `msg` announces: its
+    /// subject, reply subject, headers and payload.
+    pub fn size(msg: Parser.Msg) usize {
+        const reply_len = if (msg.reply_to) |reply| reply.len else 0;
+        return msg.subject.len +| reply_len +| msg.total_len;
+    }
+
     /// Allocates the message the control line `msg` announces and copies
     /// its subject and reply subject.
     pub fn begin(gpa: Allocator, msg: Parser.Msg) Allocator.Error!Assembly {
         const reply_len = if (msg.reply_to) |reply| reply.len else 0;
         const body_start = msg.subject.len + reply_len;
-        const buffer = try gpa.alloc(u8, body_start + msg.total_len);
+        const buffer = try gpa.alloc(u8, size(msg));
         @memcpy(buffer[0..msg.subject.len], msg.subject);
         if (msg.reply_to) |reply| @memcpy(buffer[msg.subject.len..body_start], reply);
         const body = buffer[body_start..];

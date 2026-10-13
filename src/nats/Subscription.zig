@@ -48,7 +48,9 @@ pub const Options = struct {
         /// Null: `limits.subscription_messages` of the client's options.
         messages: ?u32 = null,
         /// The bytes of the messages, subject and headers included; null:
-        /// `limits.subscription_bytes` of the client's options.
+        /// `limits.subscription_bytes` of the client's options. A message
+        /// larger than this on its own is dropped as it comes, whatever
+        /// `overflow` says.
         bytes: ?usize = null,
     };
 };

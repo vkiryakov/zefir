@@ -907,3 +907,61 @@ test "close() while a task waits in next(): ConnectionClosed at once" {
     try testing.expectError(error.ConnectionClosed, idle.unsubscribe());
     try s.server.await(io);
 }
+
+/// Passes allocations on and counts those of exactly `size` bytes.
+const CountOneSize = struct {
+    parent: std.mem.Allocator,
+    size: usize,
+    count: std.atomic.Value(u32) = .init(0),
+
+    fn allocator(c: *CountOneSize) std.mem.Allocator {
+        return .{ .ptr = c, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+
+    fn alloc(context: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const c: *CountOneSize = @ptrCast(@alignCast(context));
+        if (len == c.size) _ = c.count.fetchAdd(1, .monotonic);
+        return c.parent.rawAlloc(len, alignment, ret_addr);
+    }
+
+    fn resize(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const c: *CountOneSize = @ptrCast(@alignCast(context));
+        return c.parent.rawResize(memory, alignment, new_len, ret_addr);
+    }
+
+    fn remap(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const c: *CountOneSize = @ptrCast(@alignCast(context));
+        return c.parent.rawRemap(memory, alignment, new_len, ret_addr);
+    }
+
+    fn free(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const c: *CountOneSize = @ptrCast(@alignCast(context));
+        c.parent.rawFree(memory, alignment, ret_addr);
+    }
+};
+
+test "a message larger than its subscription holds is dropped unallocated, and the subscription goes on" {
+    // The client warns about the message it drops; this test expects it.
+    const level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = level;
+    const payload: [5000]u8 = @splat('p');
+    for ([_]nats.OverflowPolicy{ .drop_newest, .drop_oldest, .close_subscription }) |overflow| {
+        // "big" and the payload: one allocation of 5003 bytes, over the 100
+        // the subscription holds, though far within max_inbound_frame_bytes.
+        var counting: CountOneSize = .{ .parent = testing.allocator, .size = "big".len + payload.len };
+        var s: Scripted = undefined;
+        try s.start(counting.allocator(), .{ .servers = &.{} }, &.{
+            .{ .expect = "SUB big 1" },
+            .{ .send = "MSG big 1 1\r\na\r\nMSG big 1 5000\r\n" ++ payload ++ "\r\nMSG big 1 2\r\nok\r\n" },
+        });
+        defer s.deinit();
+        const big = try s.client.subscribe("big", .{ .pending = .{ .bytes = 100 }, .overflow = overflow });
+        defer big.deinit();
+        try expectMessage(big, "big", "a");
+        try expectMessage(big, "big", "ok");
+        try testing.expectEqual(nats.SubscriptionStats{ .received = 3, .delivered = 2, .dropped = 1 }, big.stats());
+        try testing.expectEqual(0, counting.count.load(.monotonic));
+        try s.finish();
+    }
+}
