@@ -5,7 +5,8 @@
 //! the queue holds that much or more, and is then taken whole, so a frame
 //! of any size gets in once the queue drains below the limit. Frames that
 //! wait for room wait in line, first come first: room wakes only the first,
-//! and once its frame is in it wakes the next if room is left. PINGs skip
+//! and once its frame is in it wakes the next if room is left; a put that
+//! gives up (canceled, or at its deadline) passes its turn on. PINGs skip
 //! the limit but keep their place in the stream, and `putNow` frames skip
 //! the wait but count. PONGs owed to the server go out before the next
 //! batch, outside the queue.
@@ -130,10 +131,21 @@ pub fn deinit(q: *Outbound) void {
 /// `encode(writer, args...)`. Unless it is a PING, it waits while the queue
 /// is full; the wait can be canceled.
 pub fn put(q: *Outbound, io: Io, kind: Kind, len: usize, encode: anytype, args: anytype) PutError!void {
+    return q.putUntil(io, null, kind, len, encode, args) catch |err| switch (err) {
+        error.Timeout => unreachable, // no deadline, no timeout
+        else => |e| e,
+    };
+}
+
+pub const PutUntilError = PutError || error{Timeout};
+
+/// Like `put`, but the wait for room ends at `deadline` with Timeout, and
+/// the frame is not queued; null waits as long as it takes.
+pub fn putUntil(q: *Outbound, io: Io, deadline: ?Io.Clock.Timestamp, kind: Kind, len: usize, encode: anytype, args: anytype) PutUntilError!void {
     try q.mutex.lock(io);
     defer q.mutex.unlock(io);
     if (kind == .ping) return q.append(io, kind, len, encode, args);
-    try q.awaitRoom(io);
+    try q.awaitRoom(io, deadline);
     // In or not, the next put in line may go if room is left.
     defer q.passRoom(io);
     return q.append(io, kind, len, encode, args);
@@ -162,8 +174,9 @@ fn append(q: *Outbound, io: Io, kind: Kind, len: usize, encode: anytype, args: a
     q.ready.signal(io);
 }
 
-/// Waits until there is room and no put ahead of this one in line.
-fn awaitRoom(q: *Outbound, io: Io) Io.Cancelable!void {
+/// Waits until there is room and no put ahead of this one in line, or
+/// until `deadline`.
+fn awaitRoom(q: *Outbound, io: Io, deadline: ?Io.Clock.Timestamp) error{ Canceled, Timeout }!void {
     if (q.closed or (q.queued < q.limit and q.room_line.first == null)) return;
     var waiter: RoomWaiter = .{};
     // A put that leaves the line early may have been woken for its turn:
@@ -176,13 +189,18 @@ fn awaitRoom(q: *Outbound, io: Io) Io.Cancelable!void {
         q.room_waiters -= 1;
     }
     while (!q.closed and !(q.queued < q.limit and q.room_line.first == &waiter.node)) {
+        if (deadline) |d| if (time.expired(io, d)) return error.Timeout;
         // Only this put waits on its event, and others set it under the
         // mutex: resetting it here loses no wake.
         waiter.turn.reset();
         q.mutex.unlock(io);
-        const woken = waiter.turn.wait(io);
+        const woken = waiter.turn.waitTimeout(io, time.until(deadline));
         q.mutex.lockUncancelable(io);
-        try woken;
+        woken catch |err| switch (err) {
+            // The deadline, or a spurious wakeup: the loop looks again.
+            error.Timeout => continue,
+            error.Canceled => return error.Canceled,
+        };
         q.room_wakeups += 1;
     }
 }
@@ -792,6 +810,44 @@ test "a put that leaves the line lets the next one in" {
     try b.await(io);
     try drainOnce(&q, io, &out);
     try testing.expectEqualStrings("PUB first 10\r\n0123456789\r\nPUB b 1\r\nx\r\n", out.items);
+}
+
+fn putNamedUntil(q: *Outbound, io: Io, subject: []const u8, deadline: Io.Clock.Timestamp) PutUntilError!void {
+    return q.putUntil(io, deadline, .request, encoder.pubLen(subject, null, 1), writePub, .{ subject, "x" });
+}
+
+test "a put with a deadline gives up waiting for room at it, and leaves the line" {
+    const io = testing.io;
+    var q: Outbound = .init(testing.allocator, 16);
+    defer q.deinit();
+    try putPub(&q, io, .publish, "first", "0123456789");
+    const deadline = time.after(io, .fromMilliseconds(20));
+    try testing.expectError(error.Timeout, putNamedUntil(&q, io, "late", deadline));
+    try testing.expect(time.expired(io, deadline));
+    try testing.expectEqual(0, q.roomWaiters(io));
+    var frames: [4]Frame = undefined;
+    try testing.expectEqual(1, q.unsent(io, &frames).len);
+}
+
+test "a put with a deadline goes in when room comes in time, and one that timed out lets the next in" {
+    const io = testing.io;
+    var q: Outbound = .init(testing.allocator, 16);
+    defer q.deinit();
+    // Room at once: the deadline does not matter.
+    try putNamedUntil(&q, io, "a", time.after(io, .zero));
+    var soon = try io.concurrent(putNamedUntil, .{ &q, io, "soon", time.after(io, .fromMilliseconds(30)) });
+    defer soon.cancel(io) catch {};
+    try awaitRoomWaiters(&q, io, 1);
+    var later = try io.concurrent(putNamedUntil, .{ &q, io, "later", time.after(io, .fromSeconds(5)) });
+    defer later.cancel(io) catch {};
+    try awaitRoomWaiters(&q, io, 2);
+    try testing.expectError(error.Timeout, soon.await(io));
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(testing.allocator);
+    try drainOnce(&q, io, &out);
+    try later.await(io);
+    try drainOnce(&q, io, &out);
+    try testing.expectEqualStrings("PUB a 1\r\nx\r\nPUB later 1\r\nx\r\n", out.items);
 }
 
 test "close wakes every put in line" {

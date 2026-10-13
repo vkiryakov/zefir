@@ -38,6 +38,17 @@ pub fn register(r: *Registry, io: Io, gpa: Allocator, sub: *Subscription, max: u
     r.subscriptions.putAssumeCapacityNoClobber(sub.sid, sub);
 }
 
+/// A SID for a subscription the registry does not route, such as the inbox
+/// of requests. Every SID comes from one counter, so none is used twice.
+pub fn reserveSid(r: *Registry, io: Io) error{ConnectionClosed}!u64 {
+    r.mutex.lockUncancelable(io);
+    defer r.mutex.unlock(io);
+    if (r.closed) return error.ConnectionClosed;
+    const sid = r.next_sid;
+    r.next_sid += 1;
+    return sid;
+}
+
 /// How many subscriptions are registered; tests use it.
 pub fn count(r: *Registry, io: Io) usize {
     r.mutex.lockUncancelable(io);
@@ -185,6 +196,22 @@ test "SIDs start at 1, grow, and are never reused" {
     const c = try newSubscription(testing.allocator, "c");
     try r.register(io, testing.allocator, c, 10);
     try testing.expectEqual(3, c.sid);
+}
+
+test "a reserved SID is never given to a subscription, and none is reserved once closed" {
+    const io = testing.io;
+    var r: Registry = .{};
+    defer r.deinit(testing.allocator);
+    const a = try newSubscription(testing.allocator, "a");
+    try r.register(io, testing.allocator, a, 10);
+    try testing.expectEqual(2, try r.reserveSid(io));
+    const b = try newSubscription(testing.allocator, "b");
+    try r.register(io, testing.allocator, b, 10);
+    try testing.expectEqual(3, b.sid);
+    // A reserved SID routes nothing.
+    try testing.expect(r.accepts(io, 2) == null);
+    r.closeAll(io);
+    try testing.expectError(error.ConnectionClosed, r.reserveSid(io));
 }
 
 test "no more than the limit at once, and none once closed" {

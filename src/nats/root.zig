@@ -88,6 +88,7 @@ test {
     _ = @import("Subscription.zig");
     _ = @import("engine/MessageQueue.zig");
     _ = @import("engine/Registry.zig");
+    _ = @import("engine/Inbox.zig");
     _ = @import("protocol/subject.zig");
     _ = @import("protocol/encoder.zig");
     _ = @import("protocol/Parser.zig");
