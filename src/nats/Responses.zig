@@ -31,6 +31,8 @@ const Responses = @This();
 client: *Client,
 /// Its id in the client's inbox.
 id: u64,
+/// In the inbox's pending map; the inbox's mutex guards it.
+listed: bool = false,
 /// The stream ends here, whatever came.
 deadline: Io.Clock.Timestamp,
 /// The responses that wait to be taken: the client's reader fills it.
@@ -73,17 +75,17 @@ pub fn next(r: *Responses, options: Subscription.ReceiveOptions) NextError!?Mess
             error.Canceled, error.ConcurrentReceive => |e| return e,
             // Over: the request no longer waits.
             error.NoResponders, error.Disconnected, error.ConnectionClosed => |e| {
-                r.client.inbox.remove(io, r.id);
+                r.client.inbox.remove(io, r);
                 return e;
             },
             // A stream drops the newest when full and is never refused.
             error.SlowConsumer, error.PermissionDenied => {
-                r.client.inbox.remove(io, r.id);
+                r.client.inbox.remove(io, r);
                 return error.ConnectionClosed;
             },
         };
         // Over: responses that still come are late.
-        if (response == null) r.client.inbox.remove(io, r.id);
+        if (response == null) r.client.inbox.remove(io, r);
         return response;
     }
 }
@@ -98,13 +100,13 @@ pub fn cancel(r: *Responses) void {
 /// when `discard`.
 fn stop(r: *Responses, discard: bool) void {
     const io = r.client.io;
-    r.client.inbox.remove(io, r.id);
+    r.client.inbox.remove(io, r);
     _ = r.messages.end(io, .finished, discard);
 }
 
 /// Ends the stream and frees it, with the responses it still holds. No
 /// task may wait in `next()` meanwhile.
 pub fn deinit(r: *Responses) void {
-    r.client.inbox.remove(r.client.io, r.id);
+    r.client.inbox.remove(r.client.io, r);
     Inbox.destroyResponses(r.client.gpa, r);
 }

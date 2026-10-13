@@ -465,7 +465,7 @@ pub fn requestMany(client: *Client, subject: []const u8, payload: []const u8, op
     errdefer Inbox.destroyResponses(gpa, responses);
     responses.id = try client.inbox.add(io, gpa, .{ .many = responses }, limits.max_pending_requests);
     // Out of the inbox before it is freed.
-    errdefer client.inbox.remove(io, responses.id);
+    errdefer client.inbox.remove(io, responses);
     var reply_buffer: [Inbox.max_reply_len]u8 = undefined;
     const message: PublishMessage = .{ .subject = subject, .reply_to = client.inbox.replySubject(&reply_buffer, responses.id), .payload = payload };
     try client.checkLine(message, 0);

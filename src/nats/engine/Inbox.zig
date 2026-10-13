@@ -48,8 +48,10 @@ subscription: SubscriptionState = .none,
 /// Woken when `subscription` or `ended` changes: requests wait on it while
 /// another one queues the SUB.
 changed: Broadcast = .{},
-/// The requests waiting for replies, by id.
-pending: std.AutoHashMapUnmanaged(u64, Entry) = .empty,
+/// The requests waiting for replies, by id. An array hash map: a removal
+/// leaves no mark behind, so lookups stay as cheap after a burst of
+/// requests as before it.
+pending: std.AutoArrayHashMapUnmanaged(u64, Entry) = .empty,
 /// The id of the next request; ids are never reused.
 next_id: u64 = 1,
 /// Requests in `await` now.
@@ -89,6 +91,8 @@ pub const Waiter = struct {
     /// Set when the reply came or the inbox ended.
     done: Io.Event = .unset,
     reply: ?Message = null,
+    /// In the pending map.
+    listed: bool = false,
 };
 
 /// A request in the pending map.
@@ -179,7 +183,19 @@ pub fn add(inbox: *Inbox, io: Io, gpa: Allocator, entry: Entry, max: u32) AddErr
     const id = inbox.next_id;
     inbox.next_id += 1;
     inbox.pending.putAssumeCapacityNoClobber(id, entry);
+    switch (entry) {
+        .single => |waiter| waiter.listed = true,
+        .many => |responses| responses.listed = true,
+    }
     return id;
+}
+
+/// Takes request `id` out of the pending map, unless it is out already:
+/// a request looks itself up once.
+fn unlist(inbox: *Inbox, id: u64, listed: *bool) void {
+    if (!listed.*) return;
+    _ = inbox.pending.swapRemove(id);
+    listed.* = false;
 }
 
 /// Messages on `sid` are replies to requests.
@@ -235,7 +251,7 @@ pub fn await(inbox: *Inbox, io: Io, id: u64, waiter: *Waiter, deadline: Io.Clock
     inbox.mutex.lockUncancelable(io);
     defer inbox.mutex.unlock(io);
     inbox.awaiting -= 1;
-    _ = inbox.pending.remove(id);
+    inbox.unlist(id, &waiter.listed);
     if (waiter.reply) |reply| {
         waiter.reply = null;
         if (canceled) {
@@ -263,7 +279,7 @@ pub fn await(inbox: *Inbox, io: Io, id: u64, waiter: *Waiter, deadline: Io.Clock
 pub fn drop(inbox: *Inbox, io: Io, id: u64, waiter: *Waiter) void {
     inbox.mutex.lockUncancelable(io);
     defer inbox.mutex.unlock(io);
-    _ = inbox.pending.remove(id);
+    inbox.unlist(id, &waiter.listed);
     if (waiter.reply) |reply| {
         waiter.reply = null;
         release(reply);
@@ -283,12 +299,12 @@ pub fn accepts(inbox: *Inbox, io: Io, id: u64) ?usize {
     };
 }
 
-/// Takes the requestMany `id` out of the pending map, if it is still there:
-/// replies to it count as late from now on.
-pub fn remove(inbox: *Inbox, io: Io, id: u64) void {
+/// Takes the stream of a requestMany out of the pending map, if it is
+/// still there: replies to it count as late from now on.
+pub fn remove(inbox: *Inbox, io: Io, responses: *Responses) void {
     inbox.mutex.lockUncancelable(io);
     defer inbox.mutex.unlock(io);
-    _ = inbox.pending.remove(id);
+    inbox.unlist(responses.id, &responses.listed);
 }
 
 /// What became of a reply.
@@ -316,7 +332,7 @@ pub fn deliver(inbox: *Inbox, io: Io, id: u64, message: ?Message) Delivery {
             // The request waits on, until its deadline.
             const m = message orelse return .dropped;
             // The first reply is the request's; a later one finds no entry.
-            _ = inbox.pending.remove(id);
+            inbox.unlist(id, &waiter.listed);
             waiter.reply = m;
             waiter.done.set(io);
             return .taken;
@@ -356,8 +372,7 @@ pub fn end(inbox: *Inbox, io: Io, how: End) void {
     defer inbox.mutex.unlock(io);
     if (inbox.ended == .closed or (inbox.ended != null and how != .closed)) return;
     inbox.ended = how;
-    var entries = inbox.pending.valueIterator();
-    while (entries.next()) |entry| switch (entry.*) {
+    for (inbox.pending.values()) |entry| switch (entry) {
         .single => |waiter| waiter.done.set(io),
         // What came still comes out first, unless the client closed.
         .many => |responses| _ = responses.messages.end(io, if (how == .closed) .closed else .disconnected, how == .closed),
@@ -368,8 +383,7 @@ pub fn end(inbox: *Inbox, io: Io, how: End) void {
 /// Frees what the inbox holds, the responses of a requestMany not freed
 /// yet included: the client goes away. No request waits any more.
 pub fn deinit(inbox: *Inbox, gpa: Allocator) void {
-    var entries = inbox.pending.valueIterator();
-    while (entries.next()) |entry| switch (entry.*) {
+    for (inbox.pending.values()) |entry| switch (entry) {
         .single => {},
         .many => |responses| destroyResponses(gpa, responses),
     };
@@ -882,7 +896,7 @@ test "the replies of a requestMany queue up until max_responses, then they are l
     try testing.expect(try responses.messages.next(io, .none) == null);
     try testing.expectEqual(1, inbox.lateResponses(io));
     // Still in the map until its owner takes it out.
-    inbox.remove(io, responses.id);
+    inbox.remove(io, responses);
     destroyResponses(testing.allocator, responses);
 }
 
@@ -893,7 +907,7 @@ test "after the deadline of a requestMany its replies are late" {
     const deadline = time.after(io, .fromMilliseconds(10));
     const responses = try addStream(&inbox, io, deadline, .{ .messages = 4, .bytes = 1024 });
     defer destroyResponses(testing.allocator, responses);
-    defer inbox.remove(io, responses.id);
+    defer inbox.remove(io, responses);
     try testing.expectEqual(.taken, inbox.deliver(io, responses.id, try testReply("r", null, "in time")));
     while (!time.expired(io, deadline)) try io.sleep(.fromMilliseconds(1), .awake);
     try testing.expectEqual(.late, inbox.deliver(io, responses.id, try testReply("r", null, "after")));
@@ -907,7 +921,7 @@ test "a first reply of no responders ends a requestMany; later it is a reply lik
     const nobody = try addStream(&inbox, io, soon(io), .{ .messages = 4, .bytes = 1024 });
     _ = inbox.deliver(io, nobody.id, try testReply("r", 503, ""));
     try testing.expectError(error.NoResponders, nobody.messages.next(io, .none));
-    inbox.remove(io, nobody.id);
+    inbox.remove(io, nobody);
     destroyResponses(testing.allocator, nobody);
 
     const some = try addStream(&inbox, io, soon(io), .{ .messages = 4, .bytes = 1024 });
@@ -917,7 +931,7 @@ test "a first reply of no responders ends a requestMany; later it is a reply lik
     var status = (try some.messages.next(io, .none)).?;
     defer status.deinit();
     try testing.expectEqual(503, status.status.?);
-    inbox.remove(io, some.id);
+    inbox.remove(io, some);
     destroyResponses(testing.allocator, some);
 }
 
@@ -933,4 +947,59 @@ test "end: a requestMany hands out what came, then Disconnected; close drops it 
     inbox.end(io, .closed);
     try testing.expectError(error.ConnectionClosed, responses.messages.next(io, .none));
     // The inbox frees what its owner did not.
+}
+
+/// Takes `rounds` requests through the pending map one at a time, in and
+/// out, as requests do.
+fn churnRequests(inbox: *Inbox, io: Io, rounds: usize) !void {
+    for (0..rounds) |_| {
+        var waiter: Waiter = .{};
+        const id = try inbox.add(io, testing.allocator, .{ .single = &waiter }, 1_000_000);
+        inbox.drop(io, id, &waiter);
+    }
+}
+
+/// The time `count` lookups of ids no request waits under take, as the
+/// reader's lookups of late replies: the fastest of three tries.
+fn timeMissingLookups(inbox: *Inbox, io: Io, count: u64) !i96 {
+    var fastest: i96 = std.math.maxInt(i96);
+    for (0..3) |_| {
+        const start = Io.Clock.awake.now(io);
+        for (0..count) |i| {
+            if (inbox.accepts(io, std.math.maxInt(u64) - i) != null) return error.TestFound;
+        }
+        fastest = @min(fastest, start.durationTo(Io.Clock.awake.now(io)).nanoseconds);
+    }
+    return fastest;
+}
+
+test "a burst of pending requests and long churn after it leave lookups as cheap as they were" {
+    const io = testing.io;
+    var inbox = testInbox();
+    defer inbox.deinit(testing.allocator);
+    // A few stay pending all along.
+    var kept: [4]Waiter = @splat(.{});
+    var kept_ids: [4]u64 = undefined;
+    for (&kept, &kept_ids) |*waiter, *id| id.* = try inbox.add(io, testing.allocator, .{ .single = waiter }, 1_000_000);
+    defer for (&kept, kept_ids) |*waiter, id| inbox.drop(io, id, waiter);
+
+    // A burst grows the map; then every one of them leaves.
+    const burst = 10_000;
+    const waiters = try testing.allocator.alloc(Waiter, burst);
+    defer testing.allocator.free(waiters);
+    const ids = try testing.allocator.alloc(u64, burst);
+    defer testing.allocator.free(ids);
+    for (waiters, ids) |*waiter, *id| {
+        waiter.* = .{};
+        id.* = try inbox.add(io, testing.allocator, .{ .single = waiter }, 1_000_000);
+    }
+    for (waiters, ids) |*waiter, id| inbox.drop(io, id, waiter);
+    const after_burst = try timeMissingLookups(&inbox, io, 20_000);
+
+    // A map that leaves a mark for each removal fills with marks under
+    // churn, and then every lookup of a missing id walks all of them.
+    try churnRequests(&inbox, io, 150_000);
+    const after_churn = try timeMissingLookups(&inbox, io, 20_000);
+    // The same work: within four times, plus 2 ms for noise.
+    try testing.expect(after_churn <= after_burst * 4 + 2 * std.time.ns_per_ms);
 }
