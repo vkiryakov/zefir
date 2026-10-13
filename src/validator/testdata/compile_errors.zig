@@ -163,6 +163,10 @@ pub const list = [_]Fixture{
     .{ .file = "src/validator/testdata/compile_errors/ip_on_int.zig", .expect = "validator: ip_on_int.Bad.field_rules.x: ip expects a string, field is u32", .row = "ip-3" },
     .{ .file = "src/validator/testdata/compile_errors/mac_address_on_list.zig", .expect = "validator: mac_address_on_list.Bad.field_rules.x: mac_address expects a string, field is []const []const u8; use v.each(v.macAddress(.{...}))", .row = "macAddress-2" },
     .{ .file = "src/validator/testdata/compile_errors/decimal_unknown_option.zig", .expect = "no field named 'decimal_digits' in struct 'formats.DecimalOptions'", .row = "Z-16" },
+    .{ .file = "src/validator/testdata/compile_errors/decimal_negative_max_digits.zig", .expect = "expected type '?usize', found 'comptime_int'", .row = "Z-17" },
+    .{ .file = "src/validator/testdata/compile_errors/fqdn_bool_for_options.zig", .expect = "expected type 'formats.FqdnOptions', found 'bool'", .row = "Z-24" },
+    .{ .file = "src/validator/testdata/compile_errors/mac_address_unknown_eui.zig", .expect = "enum 'formats.MacAddressOptions.Eui' has no member named 'eui32'", .row = "Z-27" },
+    .{ .file = "src/validator/testdata/compile_errors/mac_address_tag_for_options.zig", .expect = "struct 'formats.MacAddressOptions' has no member named 'eui48'", .row = "Z-30" },
     .{ .file = "src/validator/testdata/compile_errors/predicate_as_rule.zig", .expect = "validator: predicate_as_rule.Bad.field_rules.x: expected a rule, got the predicate isDecimal; use the rule v.decimal(.{})", .row = "variant of G-25" },
     // encodings and other formats: one fixture per kind of error; the text of
     // every catalog row is checked by the tests of encodings.zig
