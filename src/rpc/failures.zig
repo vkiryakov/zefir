@@ -69,6 +69,9 @@ pub const stopped: Failure = .{ .code = .cancelled, .app_code = "rpc.cancelled",
 /// A response body over `max_response_bytes`, or over what the transport
 /// carries.
 pub const response_too_large: Failure = .{ .code = .resource_exhausted, .app_code = "rpc.resource_exhausted", .message = "Response too large" };
+/// The transport lost a successful response (`Reply.send` failed): never
+/// sent, only counted for the route.
+pub const response_lost: Failure = .{ .code = .unavailable, .app_code = "rpc.unavailable", .message = "Response lost" };
 
 const testing = std.testing;
 

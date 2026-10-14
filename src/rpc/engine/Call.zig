@@ -24,6 +24,8 @@ const Reply = transport.Reply;
 
 const Call = @This();
 
+const log = std.log.scoped(.rpc);
+
 server: *RawServer,
 route_index: u32,
 /// In the server's queue or among its running calls; under the server's
@@ -243,14 +245,14 @@ pub fn supervise(call: *Call, io: std.Io) void {
     };
     // A failure of the engine goes out before the handler is canceled: the
     // client does not wait while the handler unwinds.
-    const failure: ?model.Failure = switch (outcome) {
-        .deadline => failures.deadline_exceeded,
-        .shutdown => failures.stopped,
+    var failure: ?model.Failure = switch (outcome) {
+        .deadline => call.sendFailure(io, failures.deadline_exceeded, false),
+        .shutdown => call.sendFailure(io, failures.stopped, false),
+        // The client gave up: nothing goes out.
         .canceled => failures.cancelled,
         .finished => null,
         .pending, .no_task => unreachable,
     };
-    if (outcome == .deadline or outcome == .shutdown) call.sendFailure(io, failure.?, false);
 
     var disposition: Reply.Disposition = .completed;
     if (result == null) {
@@ -262,8 +264,8 @@ pub fn supervise(call: *Call, io: std.Io) void {
             disposition = .canceled;
         }
     }
-    const sent = failure orelse call.sendResult(io, result.?);
-    call.record(io, sent);
+    if (outcome == .finished) failure = call.sendResult(io, result.?);
+    call.record(io, failure);
     call.reply.release(io, disposition);
 }
 
@@ -289,8 +291,7 @@ pub fn endUnstarted(call: *Call, io: std.Io, outcome: Outcome) void {
         .no_task => failures.no_task,
         .pending, .finished => unreachable,
     };
-    if (outcome != .canceled) call.sendFailure(io, failure, true);
-    call.record(io, failure);
+    call.record(io, if (outcome == .canceled) failure else call.sendFailure(io, failure, true));
     call.reply.release(io, .not_started);
 }
 
@@ -309,17 +310,19 @@ fn contextPtr(call: *Call) *Context {
     return @ptrCast(&call.context);
 }
 
-/// Sends what the handler returned; returns the failure it sent, if any.
+/// Sends what the handler returned. Returns the failure the call ends
+/// with, if any: the handler's, or what the transport made of a success
+/// (`Response too large`, `Response lost`).
 fn sendResult(call: *Call, io: std.Io, result: anyerror![]const u8) ?model.Failure {
     const context = &call.context;
     const max = call.server.limits.max_response_bytes;
     if (result) |body| {
-        if (body.len > max) {
-            call.sendFailure(io, failures.response_too_large, false);
-            return failures.response_too_large;
-        }
-        call.send(io, &.{ .status = .ok, .metadata = context.response_metadata.items, .body = body });
-        return null;
+        if (body.len > max) return call.sendFailure(io, failures.response_too_large, false);
+        return switch (call.send(io, &.{ .status = .ok, .metadata = context.response_metadata.items, .body = body })) {
+            .delivered => null,
+            .replaced => failures.response_too_large,
+            .lost => failures.response_lost,
+        };
     } else |err| {
         var failure = failures.fromError(err, context.recorded, context.map_error);
         // Violations travel in the body; the engine and transports never
@@ -327,37 +330,59 @@ fn sendResult(call: *Call, io: std.Io, result: anyerror![]const u8) ?model.Failu
         failure.violations = &.{};
         failure.violations_truncated = false;
         const body = if (err == error.RpcFailure and context.recorded != null) context.failure_body else "";
-        if (body.len > max) {
-            call.sendFailure(io, failures.response_too_large, false);
-            return failures.response_too_large;
-        }
-        call.send(io, &.{ .status = .{ .failure = failure }, .metadata = context.response_metadata.items, .body = body });
-        return failure;
+        if (body.len > max) return call.sendFailure(io, failures.response_too_large, false);
+        return switch (call.send(io, &.{ .status = .{ .failure = failure }, .metadata = context.response_metadata.items, .body = body })) {
+            .delivered, .lost => failure,
+            .replaced => failures.response_too_large,
+        };
     }
 }
 
-/// Sends a failure of the engine, without metadata or body.
-fn sendFailure(call: *Call, io: std.Io, failure: model.Failure, refused: bool) void {
-    call.send(io, &.{ .status = .{ .failure = failure }, .refused = refused });
-}
-
-fn send(call: *Call, io: std.Io, response: *const model.Response) void {
-    call.reply.send(io, response) catch |err| switch (err) {
-        // The transport cannot carry it: one small failure in its place.
-        error.ResponseTooLarge => call.reply.send(io, &.{
-            .status = .{ .failure = failures.response_too_large },
-            .refused = response.refused,
-        }) catch {},
-        // The link is gone, and the response with it.
-        error.Closed, error.OutOfMemory, error.Unexpected => {},
-        // The supervisor blocks cancelation.
-        error.Canceled => unreachable,
+/// Sends a failure of the engine, without metadata or body. Returns the
+/// failure the call ends with: this one, or `Response too large` when the
+/// transport could not carry it.
+fn sendFailure(call: *Call, io: std.Io, failure: model.Failure, refused: bool) model.Failure {
+    return switch (call.send(io, &.{ .status = .{ .failure = failure }, .refused = refused })) {
+        .delivered, .lost => failure,
+        .replaced => failures.response_too_large,
     };
 }
 
+/// What became of a response.
+const Sent = enum {
+    /// The transport took it.
+    delivered,
+    /// The transport could not carry it: a small `resource_exhausted`
+    /// failure went in its place.
+    replaced,
+    /// The link is gone, and the response with it.
+    lost,
+};
+
+fn send(call: *Call, io: std.Io, response: *const model.Response) Sent {
+    call.reply.send(io, response) catch |err| switch (err) {
+        error.ResponseTooLarge => {
+            call.reply.send(io, &.{
+                .status = .{ .failure = failures.response_too_large },
+                .refused = response.refused,
+            }) catch {};
+            return .replaced;
+        },
+        error.Closed, error.OutOfMemory, error.Unexpected => return .lost,
+        error.Canceled => {
+            // The supervisor blocks cancelation, so a transport that keeps
+            // the contract never returns it.
+            const route = call.context.route;
+            log.warn("the server transport returned Canceled from Reply.send while cancelation was blocked; the response of {s}.v{d}.{s} is lost", .{ route.service, route.version, route.method });
+            return .lost;
+        },
+    };
+    return .delivered;
+}
+
 /// Counts the end of the call for its route: the time, and the failure it
-/// ended with, if any. Before `release`: the failure may point into the
-/// arena.
+/// ended with, if any, a response the transport lost included. Before
+/// `release`: the failure may point into the arena.
 fn record(call: *Call, io: std.Io, failure: ?model.Failure) void {
     const stats = &call.server.stats[call.route_index];
     stats.addTime(call.received_at.durationTo(now(io)));

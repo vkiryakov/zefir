@@ -158,6 +158,8 @@ const TestCall = struct {
     /// test take it, so no cancel comes after `release`.
     mutex: std.Io.Mutex = .init,
     cancel_sent: bool = false,
+    /// The first `send` records the response, then fails with this error.
+    send_error: ?Reply.SendError = null,
 
     pub fn send(c: *TestCall, io: std.Io, response: *const model.Response) Reply.SendError!void {
         _ = io;
@@ -175,6 +177,7 @@ const TestCall = struct {
                 @memcpy(c.message[0..c.message_len], failure.message[0..c.message_len]);
             },
         }
+        if (c.send_error) |err| return err;
     }
 
     pub fn release(c: *TestCall, io: std.Io, disposition: Reply.Disposition) void {
@@ -554,7 +557,58 @@ test "a response over max_response_bytes becomes resource_exhausted; one the tra
     defer second.deinit(io);
     try second.start(io);
     try expectFailureResponse(try client.call(io, &requestOf(io, "overTransport", "{}", .fromSeconds(5)), options), failures.response_too_large);
+    // The handler succeeded, but its client got a failure: an error.
+    try waitRetired(io, &second);
+    const stats = second.stats[0].snapshot(io);
+    try testing.expectEqual(@as(u64, 1), stats.errors);
+    try testing.expectEqual(core.ErrorCode.resource_exhausted, stats.last_error.?.code);
     try second.shutdown(io);
+}
+
+test "a response the transport loses counts as an error of its route, a contract breach too" {
+    const io = testing.io;
+    // A transport that returns Canceled from send is logged as a warning,
+    // expected here.
+    const log_level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = log_level;
+    var test_transport: TestTransport = .{};
+    var echo: Echo = .{};
+    var denied: Failer = .{ .err = error.PermissionDenied };
+    var server: RawServer = try .init(testing.allocator, .{
+        .transport = .init(&test_transport),
+        .methods = &.{
+            .{ .route = routeOf("echo"), .handler = handlerOf(&echo) },
+            .{ .route = routeOf("denied"), .handler = handlerOf(&denied) },
+        },
+    });
+    defer server.deinit(io);
+    try server.start(io);
+    const d = test_transport.dispatcher.?;
+
+    // Canceled breaks the contract: the engine blocks cancelation while it
+    // sends.
+    for ([_]Reply.SendError{ error.Closed, error.OutOfMemory, error.Unexpected, error.Canceled }, 1..) |err, i| {
+        var call: TestCall = .{ .send_error = err };
+        try deliver(io, d, &headOf(io, "echo", .fromSeconds(5)), "x", &call);
+        try call.waitReleased(io);
+        try testing.expectEqual(@as(u32, 1), call.sends.load(.acquire));
+        try testing.expectEqual(Reply.Disposition.completed, call.disposition);
+        try waitRetired(io, &server);
+        const stats = d.routeStats(0);
+        try testing.expectEqual(@as(u64, i), stats.errors);
+        try testing.expectEqualStrings(failures.response_lost.app_code, stats.last_error.?.appCode());
+    }
+
+    // A failure that is lost counts as itself.
+    var call: TestCall = .{ .send_error = error.Closed };
+    try deliver(io, d, &headOf(io, "denied", .fromSeconds(5)), "x", &call);
+    try call.waitReleased(io);
+    try waitRetired(io, &server);
+    const stats = d.routeStats(1);
+    try testing.expectEqual(@as(u64, 1), stats.errors);
+    try testing.expectEqualStrings(failures.permission_denied.app_code, stats.last_error.?.appCode());
+    try server.shutdown(io);
 }
 
 test "no task: start refuses a call when no supervisor can start; a call whose handler gets no task is refused" {
