@@ -11,6 +11,17 @@ against `std.Io` only, so it runs on any `std.Io` that has real
 concurrency; [zio](https://github.com/lalinsky/zio) is the one meant for
 production.
 
+> [!IMPORTANT]
+> **Not implemented yet (TODO):**
+>
+> - **JetStream**: streams, consumers, the key-value and object stores.
+> - **Authentication other than a user and a password**: no token, NKey,
+>   JWT or credentials files. Without authentication, or with a user and a
+>   password, it works.
+> - **TLS and mTLS**: the client speaks plaintext TCP only, so passwords
+>   and messages travel unencrypted. Use it on a network you trust.
+> - **WebSocket** and the **services API** (`$SRV`).
+
 ```zig
 var client: nats.Client = try .init(gpa, io, .{ .servers = &.{"nats://127.0.0.1:4222"} });
 defer client.deinit();
@@ -39,11 +50,6 @@ std.log.info("{s}: {s}", .{ msg.subject, msg.payload });
   fails at once instead of hanging.
 - **No dependencies.** Only the standard library; zio comes from your
   build, not from Zefir.
-
-> [!IMPORTANT]
-> This version speaks plaintext TCP only, with no authentication or with a
-> user and a password. There is no TLS, and no token, NKey or JWT
-> authentication; there is no JetStream. Use it on a network you trust.
 
 ## Contents
 
@@ -197,14 +203,11 @@ say. With it, an instance hears the others, not itself.
 
 ## Installation
 
-Add Zefir to your `build.zig.zon`. nats is on the `dev` branch until the
-next release:
+Add Zefir to your `build.zig.zon`; nats ships since v0.5.0:
 
 ```sh
-zig fetch --save git+https://github.com/vkiryakov/zefir#dev
+zig fetch --save git+https://github.com/vkiryakov/zefir#v0.5.0
 ```
-
-This guide is on the `dev` branch, so the command fetches its latest commit; `--save` pins that commit. The latest release, v0.4.0, does not have nats yet.
 
 The client needs an `std.Io` with real concurrency. For services, add zio
 too. zio has no release for Zig 0.17 yet, so pin the commit Zefir is tested
@@ -251,12 +254,81 @@ docker run --rm -p 4222:4222 nats:2.15.0-alpine
 
 ## Quick start
 
-A whole program: [pub_sub.zig](pub_sub.zig). The shop publishes an event
-for every order a customer places; the mailer subscribes to every order
-event and sends an email for each. They are two services, so they are two
-clients, as they would be two programs in production.
+Two programs, as two services would be. The **receiver** is the mailer: it
+subscribes to every order event and sends an email for each. The
+**sender** is the shop: it publishes an event for every order a customer
+places. ([pub_sub.zig](pub_sub.zig) runs both in one process; the tests
+run it.)
 
-**`src/main.zig`**
+**`src/receiver.zig`**
+
+```zig
+const std = @import("std");
+const confy = @import("confy");
+const log = @import("log");
+const nats = @import("nats");
+const zio = @import("zio");
+
+/// The client logs through std.log; this sends its records to the logger.
+pub const std_options: std.Options = .{ .logFn = log.stdLogFn };
+
+const Config = struct {
+    nats: struct {
+        url: []const u8 = "nats://127.0.0.1:4222",
+    } = .{},
+};
+
+/// An order event, in JSON on the wire. A cancellation carries the id only.
+const Order = struct { id: u32, customer: ?[]const u8 = null, total: ?[]const u8 = null };
+
+pub fn main(init: std.process.Init) !void {
+    var config: Config = undefined;
+    confy.loadOrExit(init.arena.allocator(), &config, .{
+        .io = init.io,
+        .environ = init.environ_map,
+        .env_prefix = "APP_",
+        .sources = &.{.osEnv()},
+    });
+
+    // The logger outlives the runtime, so it takes `init.io`, through which
+    // any thread may log: the tasks of the runtime too.
+    const logger: log.Logger = try .init(init.gpa, init.io, .{ .format = .text });
+    defer logger.deinit();
+    logger.installStdLog();
+
+    // One runtime for the whole program: the client runs its tasks on it.
+    const rt = try zio.Runtime.init(init.gpa, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    var mailer: nats.Client = try .init(init.gpa, io, .{ .servers = &.{config.nats.url}, .name = "mailer" });
+    defer mailer.deinit();
+    try mailer.connect();
+    // `>` matches one token or more: orders.created, orders.cancelled, ...
+    const order_events = try mailer.subscribe("orders.>", .{});
+    defer order_events.deinit();
+    // Once flush returns, the server has the subscription.
+    try mailer.flush(.{});
+
+    const mailer_log = logger.scoped("mailer");
+    mailer_log.info("Waiting for orders", .{ .subject = "orders.>" });
+    // Until Ctrl+C: `next` waits for the next message as long as it takes.
+    while (true) {
+        var msg = (try order_events.next(.{})) orelse break;
+        defer msg.deinit();
+        const event = try std.json.parseFromSlice(Order, init.gpa, msg.payload, .{});
+        defer event.deinit();
+        // The subject says what happened; a wildcard subscription gets them all.
+        if (std.mem.eql(u8, msg.subject, "orders.created")) {
+            mailer_log.info("Confirmation sent", .{ .order_id = event.value.id, .to = event.value.customer, .total = event.value.total });
+        } else {
+            mailer_log.info("Cancellation sent", .{ .order_id = event.value.id, .reason = msg.headers.get("Reason") });
+        }
+    }
+}
+```
+
+**`src/sender.zig`**
 
 ```zig
 const std = @import("std");
@@ -298,21 +370,10 @@ pub fn main(init: std.process.Init) !void {
     defer logger.deinit();
     logger.installStdLog();
 
-    // One runtime for the whole program: the clients run their tasks on it.
+    // One runtime for the whole program: the client runs its tasks on it.
     const rt = try zio.Runtime.init(init.gpa, .{});
     defer rt.deinit();
     const io = rt.io();
-
-    // The mailer subscribes first: NATS keeps no message for a subscriber
-    // that comes later.
-    var mailer: nats.Client = try .init(init.gpa, io, .{ .servers = &.{config.nats.url}, .name = "mailer" });
-    defer mailer.deinit();
-    try mailer.connect();
-    // `>` matches one token or more: orders.created, orders.cancelled, ...
-    const order_events = try mailer.subscribe("orders.>", .{});
-    defer order_events.deinit();
-    // Once flush returns, the server has the subscription.
-    try mailer.flush(.{});
 
     var shop: nats.Client = try .init(init.gpa, io, .{ .servers = &.{config.nats.url}, .name = "shop" });
     defer shop.deinit();
@@ -334,24 +395,34 @@ pub fn main(init: std.process.Init) !void {
     shop_log.info("Order cancelled", .{ .order_id = 1002 });
     // publish only queued the events; flush returns once the server has them.
     try shop.flush(.{});
-
-    const mailer_log = logger.scoped("mailer");
-    for (0..orders.len + 1) |_| {
-        var msg = (try order_events.next(.{ .timeout = seconds(5) })) orelse break;
-        defer msg.deinit();
-        const event = try std.json.parseFromSlice(Order, init.gpa, msg.payload, .{});
-        defer event.deinit();
-        // The subject says what happened; a wildcard subscription gets them all.
-        if (std.mem.eql(u8, msg.subject, "orders.created")) {
-            mailer_log.info("Confirmation sent", .{ .order_id = event.value.id, .to = event.value.customer, .total = event.value.total });
-        } else {
-            mailer_log.info("Cancellation sent", .{ .order_id = event.value.id, .reason = msg.headers.get("Reason") });
-        }
-    }
 }
+```
 
-fn seconds(n: i64) std.Io.Timeout {
-    return .{ .duration = .{ .raw = .fromSeconds(n), .clock = .awake } };
+In `build.zig`, one executable for each, with the imports from
+[Installation](#installation):
+
+```zig
+// Two programs, each with the imports from Installation and a step that
+// runs it: `zig build run-receiver` and `zig build run-sender`.
+for ([_][]const u8{ "receiver", "sender" }) |name| {
+    const exe = b.addExecutable(.{
+        .name = name,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(b.fmt("src/{s}.zig", .{name})),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "nats", .module = zefir.module("zefir-nats") },
+                .{ .name = "zio", .module = zio.module("zio") },
+                .{ .name = "confy", .module = zefir.module("zefir-confy") },
+                .{ .name = "log", .module = zefir.module("zefir-log") },
+                .{ .name = "core", .module = zefir.module("zefir-core") },
+            },
+        }),
+    });
+    b.installArtifact(exe);
+    const run = b.addRunArtifact(exe);
+    b.step(b.fmt("run-{s}", .{name}), b.fmt("Run the {s}", .{name})).dependOn(&run.step);
 }
 ```
 
@@ -363,33 +434,50 @@ Line by line:
 - The logger writes one line per record; `installStdLog` sends the
   client's own records, which go through std.log, to it as well.
 - `zio.Runtime.init` starts the runtime that runs every task of the
-  program, the clients' tasks included. `rt.io()` is its `std.Io`.
+  program, the client's tasks included. `rt.io()` is its `std.Io`.
 - `nats.Client.init` checks the options and copies them; nothing touches
   the network yet. `connect()` connects, and from then on the client must
   stay where it is: see [Threaded or zio](#threaded-or-zio).
-- `subscribe("orders.>", .{})` returns a subscription that the client
-  owns; `deinit()` ends it.
-- `flush` waits until the server has processed everything sent before it:
-  here, the subscription. Without it the shop could publish before the
-  server knows anyone listens, and those messages would be gone.
-- `publish` returns once a copy of the message is in the client's queue.
-  `flush` on the shop waits until the server has them all.
-- `next` waits for the next message, here 5 seconds at most. The message
-  is yours: `deinit()` frees it.
+- In the receiver, `subscribe("orders.>", .{})` returns a subscription
+  that the client owns; `deinit()` ends it.
+- `flush` waits until the server has processed everything sent before it.
+  In the receiver that is the subscription: from then on the server sends
+  it every order event, so only then does it say it waits.
+- `next` waits for the next message, here as long as it takes. The
+  message is yours: `deinit()` frees it.
+- In the sender, `publish` returns once a copy of the message is in the
+  client's queue, and `flush` waits until the server has them all.
+  Without it the program could end with events still in the queue.
 
-Run it against the server from [Installation](#installation):
+Start the receiver first, against the server from
+[Installation](#installation): NATS keeps no message for a subscriber that
+comes later.
 
 ```text
-$ zig build run
-2026-10-13T18:02:39.166Z INFO  [shop] Order placed order_id=1001
-2026-10-13T18:02:39.167Z INFO  [shop] Order placed order_id=1002
-2026-10-13T18:02:39.167Z INFO  [shop] Order placed order_id=1003
-2026-10-13T18:02:39.167Z INFO  [shop] Order cancelled order_id=1002
-2026-10-13T18:02:39.168Z INFO  [mailer] Confirmation sent order_id=1001 to=ada@example.com total=42.50
-2026-10-13T18:02:39.168Z INFO  [mailer] Confirmation sent order_id=1002 to=alan@example.com total=7.99
-2026-10-13T18:02:39.169Z INFO  [mailer] Confirmation sent order_id=1003 to=grace@example.com total=120.00
-2026-10-13T18:02:39.169Z INFO  [mailer] Cancellation sent order_id=1002 reason=out-of-stock
+$ zig build run-receiver
+2026-10-14T13:57:52.103Z INFO  [mailer] Waiting for orders subject=orders.>
 ```
+
+Then, in another terminal, the sender:
+
+```text
+$ zig build run-sender
+2026-10-14T13:57:52.539Z INFO  [shop] Order placed order_id=1001
+2026-10-14T13:57:52.539Z INFO  [shop] Order placed order_id=1002
+2026-10-14T13:57:52.539Z INFO  [shop] Order placed order_id=1003
+2026-10-14T13:57:52.539Z INFO  [shop] Order cancelled order_id=1002
+```
+
+The receiver gets every event:
+
+```text
+2026-10-14T13:57:52.540Z INFO  [mailer] Confirmation sent order_id=1001 to=ada@example.com total=42.50
+2026-10-14T13:57:52.540Z INFO  [mailer] Confirmation sent order_id=1002 to=alan@example.com total=7.99
+2026-10-14T13:57:52.540Z INFO  [mailer] Confirmation sent order_id=1003 to=grace@example.com total=120.00
+2026-10-14T13:57:52.540Z INFO  [mailer] Cancellation sent order_id=1002 reason=out-of-stock
+```
+
+It goes on waiting for more; Ctrl+C stops it.
 
 ## The examples
 
@@ -490,9 +578,8 @@ A message carries:
 | `status`, `description` | a status the server set, such as 503 "no responders"                       |
 
 All of it lives in one allocation that `msg.deinit()` frees, so keep the
-message as long as you use its slices. Header names are case-sensitive, as
-in nats.go and the NATS specification: `get("Trace-Id")` does not find
-`trace-id`.
+message as long as you use its slices. Header names are case-sensitive:
+`get("Trace-Id")` does not find `trace-id`.
 
 `next` waits as long as it takes; give it a timeout to wait less:
 
@@ -895,13 +982,8 @@ what its subscriptions still hold goes with it, see
 [What happens to the data](#what-happens-to-the-data).
 
 > [!WARNING]
-> **The subscription limits are much smaller than nats.go's.** A
-> subscription holds 1024 messages and 8 MiB waiting for `next()`. nats.go
-> holds 65,536 messages in a synchronous subscription and 500,000 in an
-> asynchronous one, 64 MiB in both: 64 to 500 times more messages. A burst that
-> nats.go absorbs can overflow a subscription here and drop messages. If
-> your subscribers fall behind in bursts, raise `.pending` for those
-> subscriptions, or read faster, with more tasks in a queue group.
+> **A burst can overflow a subscription.** What does not fit in its queue
+> is dropped: see [A subscriber that falls behind](#a-subscriber-that-falls-behind).
 
 | Limit                            | Default | When it is reached                                                 |
 | -------------------------------- | ------- | ------------------------------------------------------------------ |
@@ -938,6 +1020,86 @@ const audit = try client.subscribe("audit.>", .{
 });
 defer audit.deinit();
 ```
+
+### A subscriber that falls behind
+
+A subscription is a queue in your program's memory. The client's reader
+takes each message for it off the connection and puts it in that queue;
+your code takes the messages out with `next()`, one at a time. By
+default the queue holds 1024 messages or 8 MiB, whichever fills first.
+
+The server does not wait for a slow reader. Core NATS has no way to tell
+the server to slow down for one subscriber: it sends every message the
+moment it is published. The client cannot stop reading either: the same
+connection carries every subscription and every reply, and a server that
+cannot write to a client for long enough cuts it off as a slow consumer.
+So when a subscription's queue is full, the client drops what does not
+fit, counts it, and goes on reading.
+
+An example. The mailer takes 10 ms to send an email, so it handles 100
+order events a second. At a sale, the shop publishes 10,000 orders within
+a second. In that second the mailer handles about 100 of them, 1024 wait
+in its queue, and the other 8,900 or so are dropped: those customers get
+no email.
+
+Here is the extreme case, in one program with a mailer and a shop client
+set up as in the [quick start](#quick-start): the mailer reads none of the
+burst.
+
+```zig
+// The default limits: 1024 messages and 8 MiB.
+const order_events = try mailer.subscribe("orders.>", .{});
+defer order_events.deinit();
+try mailer.flush(.{});
+
+// A sale: the shop publishes 10,000 orders at once, and the mailer is
+// busy with something else and reads none of them yet.
+for (0..10_000) |i| {
+    var buffer: [32]u8 = undefined;
+    try shop.publish("orders.created", try std.fmt.bufPrint(&buffer, "{{\"id\":{d}}}", .{i}));
+}
+try shop.flush(.{});
+// The server answers this flush after every order it sent the mailer,
+// so when it returns, the client has taken all of them in.
+try mailer.flush(.{});
+
+const stats = order_events.stats();
+mailer_log.info("Burst over", .{
+    .received = stats.received,
+    .waiting = order_events.pending().messages,
+    .dropped = stats.dropped,
+});
+```
+
+```text
+2026-10-14T15:33:39.622Z WARN  [nats] subscription 1 is a slow consumer: messages dropped
+2026-10-14T15:33:40.060Z INFO  [mailer] Burst over received=10000 waiting=1024 dropped=8976
+```
+
+10,000 orders came, 1024 wait for the mailer, and 8,976 are gone. While
+the program runs, a drop shows in three places:
+
+- the log: one warning for each run of drops, as above;
+- the events: a `slow_consumer` event, see [Events](#events);
+- the counts: `sub.stats().dropped` for the subscription and
+  `client.stats().dropped_messages` for the whole client, see
+  [Statistics](#statistics).
+
+What to do depends on the subscription:
+
+- **Make room for the burst.** Raise `.pending` for that subscription, as
+  in the example above. Memory pays for it: 100,000 waiting messages of
+  1 KiB take about 100 MiB.
+- **Read faster.** Several readers in a queue group share the messages:
+  the server hands each message to one of them, so four readers keep up
+  with about four times as many. See [Queue groups](#queue-groups).
+- **Choose what is lost.** With `.overflow = .drop_oldest` the newest
+  messages stay. With `.close_subscription` the subscription stops at the
+  first message that does not fit, and `next()` tells your code with
+  `SlowConsumer`. See the policies above.
+- **Lose nothing.** Core NATS keeps no message: one that finds no room, or
+  no subscriber, is gone. Keeping every message until it is read is
+  JetStream, which this client does not have yet.
 
 <details>
 <summary>How the limits count</summary>
@@ -1129,7 +1291,7 @@ millisecond.
 > `reconnect.abort_on_auth_error = false`. A refusal on a live connection,
 > as when the password changes on the server and its configuration is
 > reloaded, counts as the first: with a single server, the client stops at
-> the first refused reconnect, as nats.go does.
+> the first refused reconnect.
 
 <details>
 <summary>The fine print of the reconnect buffer and the counts</summary>
@@ -1226,8 +1388,8 @@ while (true) {
 > A message counts as handled once its reader comes back to `next()` for
 > the next one, so a handler that loops on `next()` answers its last
 > message before publishing stops. A subscription that nobody reads holds
-> the drain until its timeout, as in nats.go: read every subscription
-> until null, or `deinit()` it.
+> the drain until its timeout: read every subscription until null, or
+> `deinit()` it.
 
 `sub.drain(.{})` does the same for one subscription: the server stops
 sending, what came is handed out, and it returns once the reader came back
@@ -1604,97 +1766,59 @@ megabytes per second, and for requests the median, 99th percentile and
 slowest round trip, after 100 requests that are not timed: the first one
 also subscribes the inbox.
 
-Two runs of it follow. Their numbers describe two machines and two network
-paths, one run each, and they are no promise for yours: run the benchmark
-where your service runs, against your server.
+A run of it follows. Its numbers describe one shared machine and are no
+promise for yours: run the benchmark where your service runs, against
+your server.
 
 **GitHub Actions ubuntu-latest (shared runner), ReleaseFast.** The workflow
 `.github/workflows/bench.yml` runs `zig build bench` on a GitHub-hosted
 runner: Ubuntu 24.04, 4 vCPUs of an AMD EPYC 7763, 16 GB, Docker 28.0.4; the
 server runs on the same 4 vCPUs.
-[Run 38456791596](https://github.com/vkiryakov/zefir/actions/runs/38456791596):
+[Run 38567461016](https://github.com/vkiryakov/zefir/actions/runs/38567461016),
+with commas added to the numbers for reading:
 
 ```text
 zefir-nats benchmark: fast build, linux x86_64, server nats://127.0.0.1:14222
 
 zio, 1 executor
-  scenario                             messages     messages/s       MB/s
-  publish, 16 B                         1000000        3805239       60.9
-  publish, 128 B                        1000000        2704807      346.2
-  publish, 1024 B                        300000         779759      798.5
-  publish, 16384 B                        30000          53421      875.3
-  publish to a subscriber, 16 B          300000        1268232       20.3
-  publish to a subscriber, 128 B         300000         994780      127.3
-  publish to a subscriber, 1024 B        100000         484034      495.7
-  request/reply, 16 B                  requests     requests/s    p50 µs    p99 µs    max µs
-  1 at a time                             10000           2904        335        603       2286
-  16 at a time                            50000          38714        398        718       1496
-  256 at a time                           49920         200074       1148       3087       4291
+  scenario                           messages  messages/s        MB/s
+  publish, 16 B                     1,000,000   3,737,354        59.8
+  publish, 128 B                    1,000,000   2,472,614       316.5
+  publish, 1024 B                     300,000     827,963       847.8
+  publish, 16384 B                     30,000      49,086       804.2
+  publish to a subscriber, 16 B       300,000   1,453,245        23.3
+  publish to a subscriber, 128 B      300,000   1,188,980       152.2
+  publish to a subscriber, 1024 B     100,000     436,045       446.5
+  request/reply, 16 B                requests  requests/s      p50 µs      p99 µs      max µs
+  1 at a time                          10,000       2,852         339         611       2,551
+  16 at a time                         50,000      37,841         406         758       3,163
+  256 at a time                        49,920     209,165       1,151       2,174       3,024
 
 zio, 4 executors
-  scenario                             messages     messages/s       MB/s
-  publish, 16 B                         1000000        3955917       63.3
-  publish, 128 B                        1000000        2742428      351.0
-  publish, 1024 B                        300000         779127      797.8
-  publish, 16384 B                        30000          49991      819.0
-  publish to a subscriber, 16 B          300000        1380210       22.1
-  publish to a subscriber, 128 B         300000        1021218      130.7
-  publish to a subscriber, 1024 B        100000         555363      568.7
-  request/reply, 16 B                  requests     requests/s    p50 µs    p99 µs    max µs
-  1 at a time                             10000           2915        332        574       2273
-  16 at a time                            50000          35353        421       1004       2490
-  256 at a time                           49920         178651       1281       3502       5832
+  scenario                           messages  messages/s        MB/s
+  publish, 16 B                     1,000,000   3,425,807        54.8
+  publish, 128 B                    1,000,000   2,765,288       354.0
+  publish, 1024 B                     300,000     798,326       817.5
+  publish, 16384 B                     30,000      44,849       734.8
+  publish to a subscriber, 16 B       300,000   1,570,656        25.1
+  publish to a subscriber, 128 B      300,000   1,051,854       134.6
+  publish to a subscriber, 1024 B     100,000     392,203       401.6
+  request/reply, 16 B                requests  requests/s      p50 µs      p99 µs      max µs
+  1 at a time                          10,000       2,825         342         657       2,371
+  16 at a time                         50,000      34,436         434         889       2,586
+  256 at a time                        49,920     156,147       1,487       3,273       5,469
 ```
 
-**A Mac, ReleaseSafe.** `zig build bench -Dbench-optimize=ReleaseSafe`,
-which keeps every safety check, on an Apple M4 Max, 16 cores, 48 GB, macOS
-26.3, busy with other work at the time (load average about 10); server
-`nats:2.15.0-alpine` in Docker Desktop 28.3.2, whose port forwarding sits
-between the client and the server and caps the throughput at about
-150 MB/s:
-
-```text
-zefir-nats benchmark: safe build, macos aarch64, server nats://127.0.0.1:14222
-
-zio, 1 executor
-  scenario                             messages     messages/s       MB/s
-  publish, 16 B                         1000000        3617745       57.9
-  publish, 128 B                        1000000        1011445      129.5
-  publish, 1024 B                        300000         149117      152.7
-  publish, 16384 B                        30000           9529      156.1
-  publish to a subscriber, 16 B          300000        3003785       48.1
-  publish to a subscriber, 128 B         300000         929412      119.0
-  publish to a subscriber, 1024 B        100000         135035      138.3
-  request/reply, 16 B                  requests     requests/s    p50 µs    p99 µs    max µs
-  1 at a time                             10000           2402        384       1424       5500
-  16 at a time                            50000          34631        421       1473       3855
-  256 at a time                           49920         191760       1103       3744       4743
-
-zio, 4 executors
-  scenario                             messages     messages/s       MB/s
-  publish, 16 B                         1000000        3541022       56.7
-  publish, 128 B                        1000000        1016999      130.2
-  publish, 1024 B                        300000         146396      149.9
-  publish, 16384 B                        30000           9091      148.9
-  publish to a subscriber, 16 B          300000        3208570       51.3
-  publish to a subscriber, 128 B         300000        1066525      136.5
-  publish to a subscriber, 1024 B        100000         135685      138.9
-  request/reply, 16 B                  requests     requests/s    p50 µs    p99 µs    max µs
-  1 at a time                             10000           2433        384       1318       4139
-  16 at a time                            50000          28357        465       1780       5851
-  256 at a time                           49920         162645       1495       2926       3631
-```
+A shared runner is not the same machine twice. Two more runs of the same
+commit, [38569109348](https://github.com/vkiryakov/zefir/actions/runs/38569109348)
+and [38569121532](https://github.com/vkiryakov/zefir/actions/runs/38569121532),
+gave from 2,771 to 5,350 requests per second one at a time.
 
 One connection is one stream of bytes, written by one task, so a client
-publishes about as fast on one executor as on four. With many requests at
-a time, these runs were 10 to 20 percent slower on four executors; one run
-each, on shared or busy machines, cannot say whether that holds, or why.
-More executors pay off when your own work, not the client, needs the cores.
-
-The stress tests, `zig build stress`, show what the client holds under
-load: 50,000 requests waiting at once take 3.5 to 7.5 MiB of the client's
-heap, and a storm of 40 rounds that cut about 300 connections leaves every
-client connected, subscribed, and with every lost message counted.
+publishes about as fast on one executor as on four. With 256 requests at
+a time, the three runs were 20 to 40 percent slower on four executors.
+More executors pay off when your own work, not the client, needs the
+cores.
 
 ## Protocol coverage
 
@@ -1730,11 +1854,11 @@ Everything a Core NATS client sends and receives:
 | lame duck mode                                     | ✅                     |
 | drain of the client and of a subscription          | ✅                     |
 | no authentication, user and password               | ✅                     |
-| TLS, mTLS                                          | ❌ not in this version |
-| token, NKey, JWT and credentials files             | ❌ not in this version |
-| WebSocket                                          | ❌                     |
-| JetStream, key-value and object stores             | ❌ not in this version |
-| the services API (`$SRV`)                          | ❌                     |
+| TLS, mTLS                                          | ❌ TODO                |
+| token, NKey, JWT and credentials files             | ❌ TODO                |
+| WebSocket                                          | ❌ TODO                |
+| JetStream, key-value and object stores             | ❌ TODO                |
+| the services API (`$SRV`)                          | ❌ TODO                |
 
 <details>
 <summary>How the client is tested</summary>
