@@ -985,12 +985,8 @@ what its subscriptions still hold goes with it, see
 [What happens to the data](#what-happens-to-the-data).
 
 > [!WARNING]
-> **A burst can overflow a subscription.** A subscription holds at most
-> 1024 messages and 8 MiB waiting for `next()`, and the server does not
-> wait for a slow reader: when a burst comes faster than your code reads
-> it, the messages that do not fit are dropped and counted. If your
-> subscribers fall behind in bursts, raise `.pending` for those
-> subscriptions, or read faster, with more tasks in a queue group.
+> **A burst can overflow a subscription.** What does not fit in its queue
+> is dropped: see [A subscriber that falls behind](#a-subscriber-that-falls-behind).
 
 | Limit                            | Default | When it is reached                                                 |
 | -------------------------------- | ------- | ------------------------------------------------------------------ |
@@ -1027,6 +1023,86 @@ const audit = try client.subscribe("audit.>", .{
 });
 defer audit.deinit();
 ```
+
+### A subscriber that falls behind
+
+A subscription is a queue in your program's memory. The client's reader
+takes each message for it off the connection and puts it in that queue;
+your code takes the messages out with `next()`, one at a time. By
+default the queue holds 1024 messages or 8 MiB, whichever fills first.
+
+The server does not wait for a slow reader. Core NATS has no way to tell
+the server to slow down for one subscriber: it sends every message the
+moment it is published. The client cannot stop reading either: the same
+connection carries every subscription and every reply, and a server that
+cannot write to a client for long enough cuts it off as a slow consumer.
+So when a subscription's queue is full, the client drops what does not
+fit, counts it, and goes on reading.
+
+An example. The mailer takes 10 ms to send an email, so it handles 100
+order events a second. At a sale, the shop publishes 10,000 orders within
+a second. In that second the mailer handles about 100 of them, 1024 wait
+in its queue, and the other 8,900 or so are dropped: those customers get
+no email.
+
+Here is the extreme case, in one program with a mailer and a shop client
+set up as in the [quick start](#quick-start): the mailer reads none of the
+burst.
+
+```zig
+// The default limits: 1024 messages and 8 MiB.
+const order_events = try mailer.subscribe("orders.>", .{});
+defer order_events.deinit();
+try mailer.flush(.{});
+
+// A sale: the shop publishes 10,000 orders at once, and the mailer is
+// busy with something else and reads none of them yet.
+for (0..10_000) |i| {
+    var buffer: [32]u8 = undefined;
+    try shop.publish("orders.created", try std.fmt.bufPrint(&buffer, "{{\"id\":{d}}}", .{i}));
+}
+try shop.flush(.{});
+// The server answers this flush after every order it sent the mailer,
+// so when it returns, the client has taken all of them in.
+try mailer.flush(.{});
+
+const stats = order_events.stats();
+mailer_log.info("Burst over", .{
+    .received = stats.received,
+    .waiting = order_events.pending().messages,
+    .dropped = stats.dropped,
+});
+```
+
+```text
+2026-10-14T15:33:39.622Z WARN  [nats] subscription 1 is a slow consumer: messages dropped
+2026-10-14T15:33:40.060Z INFO  [mailer] Burst over received=10000 waiting=1024 dropped=8976
+```
+
+10,000 orders came, 1024 wait for the mailer, and 8,976 are gone. While
+the program runs, a drop shows in three places:
+
+- the log: one warning for each run of drops, as above;
+- the events: a `slow_consumer` event, see [Events](#events);
+- the counts: `sub.stats().dropped` for the subscription and
+  `client.stats().dropped_messages` for the whole client, see
+  [Statistics](#statistics).
+
+What to do depends on the subscription:
+
+- **Make room for the burst.** Raise `.pending` for that subscription, as
+  in the example above. Memory pays for it: 100,000 waiting messages of
+  1 KiB take about 100 MiB.
+- **Read faster.** Several readers in a queue group share the messages:
+  the server hands each message to one of them, so four readers keep up
+  with about four times as many. See [Queue groups](#queue-groups).
+- **Choose what is lost.** With `.overflow = .drop_oldest` the newest
+  messages stay. With `.close_subscription` the subscription stops at the
+  first message that does not fit, and `next()` tells your code with
+  `SlowConsumer`. See the policies above.
+- **Lose nothing.** Core NATS keeps no message: one that finds no room, or
+  no subscriber, is gone. Keeping every message until it is read is
+  JetStream, which this client does not have yet.
 
 <details>
 <summary>How the limits count</summary>
@@ -1701,38 +1777,39 @@ your server.
 `.github/workflows/bench.yml` runs `zig build bench` on a GitHub-hosted
 runner: Ubuntu 24.04, 4 vCPUs of an AMD EPYC 7763, 16 GB, Docker 28.0.4; the
 server runs on the same 4 vCPUs.
-[Run 38567461016](https://github.com/vkiryakov/zefir/actions/runs/38567461016):
+[Run 38567461016](https://github.com/vkiryakov/zefir/actions/runs/38567461016),
+with commas added to the numbers for reading:
 
 ```text
 zefir-nats benchmark: fast build, linux x86_64, server nats://127.0.0.1:14222
 
 zio, 1 executor
-  scenario                             messages     messages/s       MB/s
-  publish, 16 B                         1000000        3737354       59.8
-  publish, 128 B                        1000000        2472614      316.5
-  publish, 1024 B                        300000         827963      847.8
-  publish, 16384 B                        30000          49086      804.2
-  publish to a subscriber, 16 B          300000        1453245       23.3
-  publish to a subscriber, 128 B         300000        1188980      152.2
-  publish to a subscriber, 1024 B        100000         436045      446.5
-  request/reply, 16 B                  requests     requests/s    p50 µs    p99 µs    max µs
-  1 at a time                             10000           2852        339        611       2551
-  16 at a time                            50000          37841        406        758       3163
-  256 at a time                           49920         209165       1151       2174       3024
+  scenario                           messages  messages/s        MB/s
+  publish, 16 B                     1,000,000   3,737,354        59.8
+  publish, 128 B                    1,000,000   2,472,614       316.5
+  publish, 1024 B                     300,000     827,963       847.8
+  publish, 16384 B                     30,000      49,086       804.2
+  publish to a subscriber, 16 B       300,000   1,453,245        23.3
+  publish to a subscriber, 128 B      300,000   1,188,980       152.2
+  publish to a subscriber, 1024 B     100,000     436,045       446.5
+  request/reply, 16 B                requests  requests/s      p50 µs      p99 µs      max µs
+  1 at a time                          10,000       2,852         339         611       2,551
+  16 at a time                         50,000      37,841         406         758       3,163
+  256 at a time                        49,920     209,165       1,151       2,174       3,024
 
 zio, 4 executors
-  scenario                             messages     messages/s       MB/s
-  publish, 16 B                         1000000        3425807       54.8
-  publish, 128 B                        1000000        2765288      354.0
-  publish, 1024 B                        300000         798326      817.5
-  publish, 16384 B                        30000          44849      734.8
-  publish to a subscriber, 16 B          300000        1570656       25.1
-  publish to a subscriber, 128 B         300000        1051854      134.6
-  publish to a subscriber, 1024 B        100000         392203      401.6
-  request/reply, 16 B                  requests     requests/s    p50 µs    p99 µs    max µs
-  1 at a time                             10000           2825        342        657       2371
-  16 at a time                            50000          34436        434        889       2586
-  256 at a time                           49920         156147       1487       3273       5469
+  scenario                           messages  messages/s        MB/s
+  publish, 16 B                     1,000,000   3,425,807        54.8
+  publish, 128 B                    1,000,000   2,765,288       354.0
+  publish, 1024 B                     300,000     798,326       817.5
+  publish, 16384 B                     30,000      44,849       734.8
+  publish to a subscriber, 16 B       300,000   1,570,656        25.1
+  publish to a subscriber, 128 B      300,000   1,051,854       134.6
+  publish to a subscriber, 1024 B     100,000     392,203       401.6
+  request/reply, 16 B                requests  requests/s      p50 µs      p99 µs      max µs
+  1 at a time                          10,000       2,825         342         657       2,371
+  16 at a time                         50,000      34,436         434         889       2,586
+  256 at a time                        49,920     156,147       1,487       3,273       5,469
 ```
 
 A shared runner is not the same machine twice. Two more runs of the same
