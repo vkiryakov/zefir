@@ -44,6 +44,8 @@
 //!   suite has stopped the server side and every call has returned.
 //! - optional `breakLink(h, io, pair) void`: breaks the link between the
 //!   sides in the middle of calls, as a dropped connection does (T12, T18).
+//!   It stays broken until `tearDown`: calls after the break get
+//!   `error.Unavailable`, also from a transport that would reconnect.
 //! - optional `restartPeer(h, io, pair) !void`: restarts the other side,
 //!   such as the broker, and returns once it serves again (T17).
 //! - optional `sameAddress(h, io, pair) !rpc.ServerTransport`: one more
@@ -53,10 +55,11 @@
 //! `run` returns a report instead of failing through `std.testing`, so any
 //! test runner can call it, also one that turns a panic into an exit code.
 //! Each check runs in a task of its own on a fresh pair, and ends with
-//! `tearDown`. Checks are chosen by `info()` of the client side: one the
-//! transport cannot take is skipped, with the reason in the report; a part
-//! of a check that cannot run is a note. Times are generous for CI;
-//! `Options.time_scale` stretches them further.
+//! `tearDown`. Checks are chosen by `info()`, the delivery of the server
+//! side and the rest of the client side: one the transport cannot take is
+//! skipped, with the reason in the report; a part of a check that cannot
+//! run is a note. Times are generous for CI; `Options.time_scale` stretches
+//! them further.
 
 const std = @import("std");
 const core = @import("core");
@@ -87,12 +90,16 @@ pub const Options = struct {
     live_broker: bool = false,
     /// Runs only these checks; null runs all of them.
     only: ?[]const Check = null,
-    /// Stretches every time of the suite: deadlines, waits and tolerances.
-    /// Raise it for a slow machine or a remote broker.
+    /// Stretches the deadlines, holds and tolerances the checks rely on:
+    /// raise it for a slow machine or a remote broker. Limits that a sound
+    /// transport never comes near stay as they are: 10 s for a call to
+    /// reach the recording dispatcher and for a call that is answered at
+    /// once, 60 s for a handler of the engine.
     time_scale: u32 = 1,
 };
 
-/// The checks, T1–T22 of the specification.
+/// The checks, T1–T22 of the specification. Later releases may add checks,
+/// so a `switch` over it needs an `else` branch.
 pub const Check = enum {
     t1,
     t2,
