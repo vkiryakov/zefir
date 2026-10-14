@@ -790,6 +790,39 @@ test "one server serves two versions of a contract, each on its own routes" {
     try expectFailure(&unknown, failures.unknown_method, "");
 }
 
+fn runServer(server: *Server, io: std.Io) (Server.StartError || Server.WaitError)!void {
+    return server.run(io);
+}
+
+test "rpc.Server has the lifecycle of the engine" {
+    const io = testing.io;
+    var memory: MemoryTransport = try .init(testing.allocator, .{});
+    defer memory.deinit(io);
+    var users: UserHandler = .{};
+    var server: Server = try .init(testing.allocator, .{ .transport = memory.serverTransport(), .handlers = .{&users} });
+    defer server.deinit(io);
+    try testing.expectEqual(Server.State.configured, server.state());
+    try testing.expect(!server.isReady());
+    try testing.expectError(error.InvalidState, server.wait(io));
+
+    var runner = try io.concurrent(runServer, .{ &server, io });
+    // Canceling the wait leaves the server running; deinit stops it.
+    defer runner.cancel(io) catch {};
+    const deadline: core.Deadline = .after(std.Io.Clock.awake.now(io), .fromSeconds(10));
+    while (server.state() != .running) {
+        if (deadline.isExpired(std.Io.Clock.awake.now(io))) return error.TestTimeout;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+    try testing.expect(server.isReady());
+    try testing.expectError(error.InvalidState, server.start(io));
+    server.requestStop(io);
+    try runner.await(io);
+    try testing.expectEqual(Server.State.stopped, server.state());
+    try testing.expect(!server.isReady());
+    try server.shutdown(io);
+    try server.wait(io);
+}
+
 test "init refuses limits that cannot work, and frees what it took when memory runs out" {
     const io = testing.io;
     var memory: MemoryTransport = try .init(testing.allocator, .{});

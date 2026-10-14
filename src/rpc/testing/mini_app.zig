@@ -1,16 +1,18 @@
 //! A minimal application container, only in tests. It shows that an App can
-//! run `rpc.RawServer` later through its public lifecycle alone, with no
-//! change to the server's API, as the specification's acceptance criteria
-//! ask. A component is any type with `start`, `wait` and `shutdown`:
-//! `rpc.RawServer` now, `rpc.Server` later. Their `requestStop` is for a
-//! signal handler of an App; this one stops its components with `shutdown`
-//! alone, one after another.
+//! run `rpc.RawServer` and `rpc.Server` later through their public
+//! lifecycle alone, with no change to the servers' API, as the
+//! specification's acceptance criteria ask. A component is any type with
+//! `start`, `wait` and `shutdown`. Their `requestStop` is for a signal
+//! handler of an App; this one stops its components with `shutdown` alone,
+//! one after another.
 
 const std = @import("std");
 const core = @import("core");
 const RawServer = @import("../engine/RawServer.zig");
 const RawClient = @import("../engine/RawClient.zig");
 const Context = @import("../engine/Context.zig").Context;
+const Server = @import("../app/Server.zig");
+const contract = @import("../app/contract.zig");
 const MemoryTransport = @import("MemoryTransport.zig");
 
 pub const MiniApp = struct {
@@ -441,4 +443,139 @@ test "the App stops its components last first, each before the next begins" {
         .{ .name = 'a', .what = .stop_ended },
     };
     try testing.expectEqualSlices(Logged.Log.Entry, &expected, log.written());
+}
+
+// The same App runs servers of the application, `rpc.Server`.
+
+const EchoRequest = struct { text: []const u8 };
+
+const EchoApi = contract.Contract(.{
+    .name = "app",
+    .version = 1,
+    .methods = .{ .echo = contract.method(EchoRequest, EchoRequest) },
+});
+
+const AppEcho = struct {
+    pub const rpc_handler = contract.implement(EchoApi, .{});
+
+    pub fn echo(self: *AppEcho, ctx: *Context, req: EchoRequest) !EchoRequest {
+        _ = self;
+        _ = ctx;
+        return req;
+    }
+};
+
+/// An echo deaf to cancelation: it ends only once its gate opens.
+const DeafEcho = struct {
+    entered: std.atomic.Value(bool) = .init(false),
+    gate: std.Io.Event = .unset,
+
+    pub const rpc_handler = contract.implement(EchoApi, .{ .defaults = .{ .timeout_ms = 30_000 } });
+
+    pub fn echo(self: *DeafEcho, ctx: *Context, req: EchoRequest) !EchoRequest {
+        self.entered.store(true, .release);
+        self.gate.waitUncancelable(ctx.io());
+        return req;
+    }
+};
+
+fn runServers(app: *MiniApp, io: std.Io, first: *Server, second: *Server) anyerror!void {
+    return app.run(io, .{ first, second });
+}
+
+/// Waits until both servers run, ten seconds at most.
+fn waitServing(io: std.Io, servers: []const *Server) !void {
+    const deadline: core.Deadline = .after(std.Io.Clock.awake.now(io), .fromSeconds(10));
+    for (servers) |server| {
+        while (server.state() != .running) {
+            if (deadline.isExpired(std.Io.Clock.awake.now(io))) return error.TestTimeout;
+            try io.sleep(.fromMilliseconds(1), .awake);
+        }
+    }
+}
+
+test "an App starts two rpc.Server, serves through both, and stops them on request" {
+    const io = testing.io;
+    var first_memory: MemoryTransport = try .init(testing.allocator, .{});
+    defer first_memory.deinit(io);
+    var second_memory: MemoryTransport = try .init(testing.allocator, .{});
+    defer second_memory.deinit(io);
+    var echo: AppEcho = .{};
+    var first: Server = try .init(testing.allocator, .{ .transport = first_memory.serverTransport(), .handlers = .{&echo} });
+    defer first.deinit(io);
+    var second: Server = try .init(testing.allocator, .{ .transport = second_memory.serverTransport(), .handlers = .{&echo} });
+    defer second.deinit(io);
+
+    var app: MiniApp = .{};
+    var running = try io.concurrent(runServers, .{ &app, io, &first, &second });
+    defer running.cancel(io) catch {};
+    try waitServing(io, &.{ &first, &second });
+    try expectEcho(io, &first_memory, "{\"text\":\"first\"}");
+    try expectEcho(io, &second_memory, "{\"text\":\"second\"}");
+    app.requestStop(io);
+    try running.await(io);
+    try testing.expectEqual(Server.State.stopped, first.state());
+    try testing.expectEqual(Server.State.stopped, second.state());
+}
+
+test "when the second rpc.Server does not start, the App stops the first and returns the error" {
+    const io = testing.io;
+    var memory: MemoryTransport = try .init(testing.allocator, .{});
+    defer memory.deinit(io);
+    var echo: AppEcho = .{};
+    var first: Server = try .init(testing.allocator, .{ .transport = memory.serverTransport(), .handlers = .{&echo} });
+    defer first.deinit(io);
+    // The same address: its transport is taken by the first.
+    var second: Server = try .init(testing.allocator, .{ .transport = memory.serverTransport(), .handlers = .{&echo} });
+    defer second.deinit(io);
+
+    var app: MiniApp = .{};
+    try testing.expectError(error.AddressInUse, app.run(io, .{ &first, &second }));
+    try testing.expectEqual(Server.State.stopped, first.state());
+    try testing.expectEqual(Server.State.stopped, second.state());
+}
+
+fn callDeafEcho(io: std.Io, memory: *MemoryTransport) void {
+    var client: RawClient = RawClient.init(testing.allocator, .{ .transport = memory.clientTransport() }) catch return;
+    defer client.deinit();
+    var result = client.call(io, .root, echo_route, "{\"text\":\"deaf\"}", .{ .timeout = .fromSeconds(30) }) catch return;
+    result.deinit();
+}
+
+test "an rpc.Server whose shutdown runs out of time: the App reports it and leaves the servers to their owner" {
+    const io = testing.io;
+    var memory: MemoryTransport = try .init(testing.allocator, .{});
+    defer memory.deinit(io);
+    var other_memory: MemoryTransport = try .init(testing.allocator, .{});
+    defer other_memory.deinit(io);
+    var deaf: DeafEcho = .{};
+    var echo: AppEcho = .{};
+    var server: Server = try .init(testing.allocator, .{
+        .transport = memory.serverTransport(),
+        .handlers = .{&deaf},
+        .shutdown_grace = std.Io.Duration.fromMilliseconds(50),
+    });
+    defer server.deinit(io);
+    var other: Server = try .init(testing.allocator, .{ .transport = other_memory.serverTransport(), .handlers = .{&echo} });
+    defer other.deinit(io);
+    // Whatever happens, the handler ends before the server's deinit.
+    defer deaf.gate.set(io);
+
+    var app: MiniApp = .{};
+    var running = try io.concurrent(runServers, .{ &app, io, &server, &other });
+    defer running.cancel(io) catch {};
+    try waitServing(io, &.{ &server, &other });
+    var caller = try io.concurrent(callDeafEcho, .{ io, &memory });
+    defer caller.cancel(io);
+    const deadline: core.Deadline = .after(std.Io.Clock.awake.now(io), .fromSeconds(10));
+    while (!deaf.entered.load(.acquire)) {
+        if (deadline.isExpired(std.Io.Clock.awake.now(io))) return error.TestTimeout;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+    app.requestStop(io);
+    try testing.expectError(error.ShutdownTimeout, running.await(io));
+    try testing.expectEqual(Server.State.draining, server.state());
+    try testing.expectEqual(Server.State.stopped, other.state());
+    deaf.gate.set(io);
+    caller.await(io);
 }
