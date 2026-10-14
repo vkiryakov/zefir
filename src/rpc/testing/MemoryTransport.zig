@@ -752,7 +752,7 @@ test "a call reaches the server's dispatcher and its response comes back byte fo
     defer if (caller.cancel(io)) |_| {} else |_| {};
 
     try f.recorder.waitStarted(io, 1);
-    const view = f.recorder.call(io, 0);
+    const view = try f.recorder.call(io, 0);
     try testing.expectEqualStrings(body, view.body.?);
     try testing.expectEqualStrings("getUser", view.head.route.method);
     try testing.expectEqual(request.request_id, view.head.request_id);
@@ -770,7 +770,7 @@ test "a call reaches the server's dispatcher and its response comes back byte fo
 
     const response_metadata = [_]model.Metadata.Entry{ .{ .key = "x-r", .value = "v" }, .{ .key = "x-r", .value = "" } };
     try f.recorder.respond(io, 0, &.{ .status = .ok, .body = body, .metadata = &response_metadata });
-    f.recorder.releaseCall(io, 0, .completed);
+    try f.recorder.releaseCall(io, 0, .completed);
     const response = try caller.await(io);
     try testing.expect(response.status == .ok);
     try testing.expect(!response.refused);
@@ -784,9 +784,9 @@ test "a call reaches the server's dispatcher and its response comes back byte fo
     var second = try io.concurrent(callTask, .{ client, io, &empty, optionsOf(&arena) });
     defer if (second.cancel(io)) |_| {} else |_| {};
     try f.recorder.waitStarted(io, 2);
-    try testing.expectEqualStrings("", f.recorder.call(io, 1).body.?);
+    try testing.expectEqualStrings("", (try f.recorder.call(io, 1)).body.?);
     try f.recorder.respond(io, 1, &.{ .status = .ok });
-    f.recorder.releaseCall(io, 1, .completed);
+    try f.recorder.releaseCall(io, 1, .completed);
     try testing.expectEqualStrings("", (try second.await(io)).body);
     try f.expectClean(io);
 }
@@ -812,7 +812,7 @@ test "a refusal at admission or at start comes as a failure with refused" {
     const refused_at_start = try f.memory.call(io, &request, optionsOf(&arena));
     try expectFailure(refused_at_start, "rpc.resource_exhausted");
     try testing.expect(refused_at_start.refused);
-    try testing.expectEqual(RecordingDispatcher.State.start_failed, f.recorder.call(io, 1).state);
+    try testing.expectEqual(RecordingDispatcher.State.start_failed, (try f.recorder.call(io, 1)).state);
 
     f.recorder.setStart(io, .run);
     var unknown = request;
@@ -834,10 +834,10 @@ test "the deadline gives Timeout and cancels the call on the server; a late resp
     const request = requestOf(io, "{}", .fromMilliseconds(50));
     try testing.expectError(error.Timeout, f.memory.call(io, &request, optionsOf(&arena)));
     try testing.expect(request.ctx.deadline.?.isExpired(now(io)));
-    try testing.expectEqual(@as(u32, 1), f.recorder.call(io, 0).cancels);
+    try testing.expectEqual(@as(u32, 1), (try f.recorder.call(io, 0)).cancels);
     // The handler answers late: the response goes nowhere.
     try f.recorder.respond(io, 0, &.{ .status = .ok, .body = "late" });
-    f.recorder.releaseCall(io, 0, .canceled);
+    try f.recorder.releaseCall(io, 0, .canceled);
 
     // Less than 1 ms left: not sent at all.
     const expired = requestOf(io, "{}", .fromMicroseconds(500));
@@ -858,8 +858,8 @@ test "canceling the client's task gives Canceled once and cancels the call on th
     var caller = try io.concurrent(callTask, .{ f.memory.clientTransport(), io, &request, optionsOf(&arena) });
     try f.recorder.waitStarted(io, 1);
     try testing.expectError(error.Canceled, caller.cancel(io));
-    try testing.expectEqual(@as(u32, 1), f.recorder.call(io, 0).cancels);
-    f.recorder.releaseCall(io, 0, .canceled);
+    try testing.expectEqual(@as(u32, 1), (try f.recorder.call(io, 0)).cancels);
+    try f.recorder.releaseCall(io, 0, .canceled);
     try f.expectClean(io);
 }
 
@@ -888,7 +888,7 @@ test "a response over the caller's limits gives ResponseTooLarge" {
         defer if (caller.cancel(io)) |_| {} else |_| {};
         try f.recorder.waitStarted(io, i + 1);
         try f.recorder.respond(io, i, &case[0]);
-        f.recorder.releaseCall(io, i, .completed);
+        try f.recorder.releaseCall(io, i, .completed);
         try testing.expectError(error.ResponseTooLarge, caller.await(io));
         try testing.expectEqualStrings(case[1], diagnostics.message());
         try testing.expectEqual(transport.Diagnostics.Phase.receive, diagnostics.phase.?);
@@ -919,10 +919,10 @@ test "max_body_bytes: a larger request is not sent, a larger response is refused
     var caller = try io.concurrent(callTask, .{ f.memory.clientTransport(), io, &at_limit, optionsOf(&arena) });
     defer if (caller.cancel(io)) |_| {} else |_| {};
     try f.recorder.waitStarted(io, 1);
-    try testing.expectEqualStrings("abcd", f.recorder.call(io, 0).body.?);
+    try testing.expectEqualStrings("abcd", (try f.recorder.call(io, 0)).body.?);
     try testing.expectError(error.ResponseTooLarge, f.recorder.respond(io, 0, &.{ .status = .ok, .body = "12345" }));
     try f.recorder.respond(io, 0, &.{ .status = .{ .failure = .{ .code = .resource_exhausted, .app_code = "rpc.resource_exhausted", .message = "Response too large" } } });
-    f.recorder.releaseCall(io, 0, .completed);
+    try f.recorder.releaseCall(io, 0, .completed);
     try expectFailure(try caller.await(io), "rpc.resource_exhausted");
     try f.expectClean(io);
 }
@@ -951,7 +951,7 @@ test "no server, a draining server and a closed one give Unavailable" {
     try testing.expect(!memory.isReady());
     try testing.expectError(error.Unavailable, memory.call(io, &request, optionsOf(&arena)));
     try recorder.respond(io, 0, &.{ .status = .ok, .body = "done" });
-    recorder.releaseCall(io, 0, .completed);
+    try recorder.releaseCall(io, 0, .completed);
     try testing.expectEqualStrings("done", (try caller.await(io)).body);
 
     recorder.close(io);
@@ -975,7 +975,7 @@ test "close: a waiting client gets ConnectionLost, a late send gets Closed" {
     try testing.expectError(error.ConnectionLost, caller.await(io));
     // The engine still answers and releases the call after close.
     try testing.expectError(error.Closed, f.recorder.respond(io, 0, &.{ .status = .ok }));
-    f.recorder.releaseCall(io, 0, .canceled);
+    try f.recorder.releaseCall(io, 0, .canceled);
     try f.expectClean(io);
 }
 
@@ -1018,7 +1018,7 @@ test "max_pending calls wait at once; one more gets TooManyPendingRequests" {
     try f.recorder.waitStarted(io, 1);
     try testing.expectError(error.TooManyPendingRequests, f.memory.call(io, &request, optionsOf(&arena)));
     try f.recorder.respond(io, 0, &.{ .status = .ok });
-    f.recorder.releaseCall(io, 0, .completed);
+    try f.recorder.releaseCall(io, 0, .completed);
     _ = try caller.await(io);
     try testing.expectEqual(@as(u64, 1), f.recorder.dispatcher().routeStats(0).requests);
     try f.expectClean(io);
@@ -1070,9 +1070,9 @@ test "setDelay holds a call before admit; the deadline still comes on time" {
     var caller = try io.concurrent(callTask, .{ f.memory.clientTransport(), io, &request, optionsOf(&arena) });
     defer if (caller.cancel(io)) |_| {} else |_| {};
     try f.recorder.waitStarted(io, 1);
-    try testing.expect(sent.durationTo(f.recorder.call(io, 0).head.received_at).nanoseconds >= 50 * std.time.ns_per_ms);
+    try testing.expect(sent.durationTo((try f.recorder.call(io, 0)).head.received_at).nanoseconds >= 50 * std.time.ns_per_ms);
     try f.recorder.respond(io, 0, &.{ .status = .ok });
-    f.recorder.releaseCall(io, 0, .completed);
+    try f.recorder.releaseCall(io, 0, .completed);
     _ = try caller.await(io);
 
     // A delay past the deadline: Timeout at the deadline, nothing sent.
@@ -1107,7 +1107,7 @@ test "loseNextResponse: the send succeeds and the client gets Timeout" {
     defer if (caller.cancel(io)) |_| {} else |_| {};
     try f.recorder.waitStarted(io, 1);
     try f.recorder.respond(io, 0, &.{ .status = .ok, .body = "lost" });
-    f.recorder.releaseCall(io, 0, .completed);
+    try f.recorder.releaseCall(io, 0, .completed);
     try testing.expectError(error.Timeout, caller.await(io));
 
     // Only the next response is lost.
@@ -1116,7 +1116,7 @@ test "loseNextResponse: the send succeeds and the client gets Timeout" {
     defer if (second.cancel(io)) |_| {} else |_| {};
     try f.recorder.waitStarted(io, 2);
     try f.recorder.respond(io, 1, &.{ .status = .ok, .body = "found" });
-    f.recorder.releaseCall(io, 1, .completed);
+    try f.recorder.releaseCall(io, 1, .completed);
     try testing.expectEqualStrings("found", (try second.await(io)).body);
     try f.expectClean(io);
 }
@@ -1173,12 +1173,12 @@ test "breakLink: waiting clients get ConnectionLost and the server cancels their
     f.memory.breakLink(io);
     try testing.expectError(error.ConnectionLost, first.await(io));
     try testing.expectError(error.ConnectionLost, second.await(io));
-    try testing.expectEqual(@as(u32, 1), f.recorder.call(io, 0).cancels);
-    try testing.expectEqual(@as(u32, 1), f.recorder.call(io, 1).cancels);
+    try testing.expectEqual(@as(u32, 1), (try f.recorder.call(io, 0)).cancels);
+    try testing.expectEqual(@as(u32, 1), (try f.recorder.call(io, 1)).cancels);
     try testing.expect(!f.memory.isReady());
     // The handlers finish into a broken link; new calls are not sent.
     try testing.expectError(error.Closed, f.recorder.respond(io, 0, &.{ .status = .ok }));
-    f.recorder.releaseCall(io, 0, .canceled);
+    try f.recorder.releaseCall(io, 0, .canceled);
     try testing.expectError(error.Unavailable, f.memory.call(io, &request, optionsOf(&arena)));
 
     f.memory.restoreLink();
@@ -1187,11 +1187,11 @@ test "breakLink: waiting clients get ConnectionLost and the server cancels their
     defer if (third.cancel(io)) |_| {} else |_| {};
     try f.recorder.waitStarted(io, 3);
     try f.recorder.respond(io, 2, &.{ .status = .ok, .body = "back" });
-    f.recorder.releaseCall(io, 2, .completed);
+    try f.recorder.releaseCall(io, 2, .completed);
     try testing.expectEqualStrings("back", (try third.await(io)).body);
     // A call from before the break stays cut.
     try testing.expectError(error.Closed, f.recorder.respond(io, 1, &.{ .status = .ok }));
-    f.recorder.releaseCall(io, 1, .canceled);
+    try f.recorder.releaseCall(io, 1, .canceled);
     try f.expectClean(io);
 }
 
@@ -1365,8 +1365,8 @@ test "64 calls at once with random delays: each gets its own response, and the j
     for (&order, 0..) |*index, i| index.* = i;
     random.shuffle(usize, &order);
     for (order) |index| {
-        try f.recorder.respond(io, index, &.{ .status = .ok, .body = f.recorder.call(io, index).body.? });
-        f.recorder.releaseCall(io, index, .completed);
+        try f.recorder.respond(io, index, &.{ .status = .ok, .body = (try f.recorder.call(io, index)).body.? });
+        try f.recorder.releaseCall(io, index, .completed);
         if (random.boolean()) try io.sleep(.fromMicroseconds(random.intRangeAtMost(i64, 0, 500)), .awake);
     }
     for (&callers, &bodies) |*caller, *body| {
@@ -1395,9 +1395,9 @@ test "a call without a deadline sends no budget and waits for its response" {
     var caller = try io.concurrent(callTask, .{ f.memory.clientTransport(), io, &request, optionsOf(&arena) });
     defer if (caller.cancel(io)) |_| {} else |_| {};
     try f.recorder.waitStarted(io, 1);
-    try testing.expectEqual(@as(?std.Io.Duration, null), f.recorder.call(io, 0).head.timeout);
+    try testing.expectEqual(@as(?std.Io.Duration, null), (try f.recorder.call(io, 0)).head.timeout);
     try f.recorder.respond(io, 0, &.{ .status = .ok, .body = "late but fine" });
-    f.recorder.releaseCall(io, 0, .completed);
+    try f.recorder.releaseCall(io, 0, .completed);
     try testing.expectEqualStrings("late but fine", (try caller.await(io)).body);
     try f.expectClean(io);
 }
@@ -1410,7 +1410,7 @@ fn keepsCancelation(f: *Fixture, io: std.Io) !void {
     never.wait(io) catch |err| switch (err) {
         error.Canceled => io.recancel(),
     };
-    f.recorder.releaseCall(io, 0, .canceled);
+    try f.recorder.releaseCall(io, 0, .canceled);
     f.memory.breakLink(io);
     f.memory.restoreLink();
     f.memory.drain(io);
@@ -1513,8 +1513,8 @@ test "a call its client gave up on and then cut by breakLink is canceled once" {
     try f.recorder.waitStarted(io, 1);
     try testing.expectError(error.Timeout, caller.await(io));
     f.memory.breakLink(io);
-    try testing.expectEqual(@as(u32, 1), f.recorder.call(io, 0).cancels);
-    f.recorder.releaseCall(io, 0, .canceled);
+    try testing.expectEqual(@as(u32, 1), (try f.recorder.call(io, 0)).cancels);
+    try f.recorder.releaseCall(io, 0, .canceled);
     f.memory.restoreLink();
     try f.expectClean(io);
 }

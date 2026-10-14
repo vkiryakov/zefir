@@ -10,9 +10,9 @@
 //! try recorder.start(io, my_transport.serverTransport());
 //! // A client task sends a call through the transport...
 //! try recorder.waitStarted(io, 1);
-//! const call = recorder.call(io, 0);
+//! const call = try recorder.call(io, 0);
 //! try recorder.respond(io, 0, &.{ .status = .ok, .body = call.body.? });
-//! recorder.releaseCall(io, 0, .completed);
+//! try recorder.releaseCall(io, 0, .completed);
 //! recorder.close(io);
 //! try std.testing.expectEqual(0, recorder.violations().len);
 //! ```
@@ -31,8 +31,11 @@
 //! - before `start` the transport asks for a body that is not empty
 //!   (`Incoming.body`), and after `start` it does not write to it;
 //! - `cancel` comes only from the moment `start` is entered until
-//!   `Reply.release` returns: never for a call that did not start, never
-//!   after `start` returned a failure;
+//!   `Reply.release` returns: never for a call that is abandoned or left
+//!   undecided by `close`, never after `start` returned a failure. A cancel
+//!   that reaches the recorder just before `start` does counts for the
+//!   call, since the transport may cancel a call another task is
+//!   starting;
 //! - once `close` has returned, the transport calls neither the dispatcher
 //!   nor a call.
 //!
@@ -111,8 +114,9 @@ pub const StartMode = union(enum) {
     fail: model.Failure,
 };
 
-/// Where a call is.
-pub const State = enum {
+/// Where a call is. Later releases may add values, so a `switch` over it
+/// needs an `else` branch.
+pub const State = enum(u8) {
     /// `admit` refused it.
     refused,
     /// Admitted, neither started nor abandoned.
@@ -124,6 +128,7 @@ pub const State = enum {
     abandoned,
     /// Started and released by the test.
     released,
+    _,
 };
 
 /// A call as the recorder saw it. The slices live until `deinit`.
@@ -147,6 +152,7 @@ pub const Event = struct {
     call: ?u32,
     kind: Kind,
 
+    /// Later releases may add kinds.
     pub const Kind = union(enum) {
         admit: enum { accepted, refused },
         start: enum { running, failed },
@@ -166,7 +172,9 @@ pub const Violation = struct {
     rule: Rule,
 };
 
-pub const Rule = enum {
+/// Later releases may add rules, so a `switch` over it needs an `else`
+/// branch.
+pub const Rule = enum(u8) {
     /// `close` returned with an accepted call neither started nor
     /// abandoned.
     unresolved_at_close,
@@ -176,8 +184,8 @@ pub const Rule = enum {
     body_not_filled,
     /// The transport wrote to the body after `start`.
     body_changed_after_start,
-    /// `cancel` of a call that did not start: before `start`, or after
-    /// `abandon`.
+    /// `cancel` of a call that never started: it was abandoned, or still
+    /// undecided when `close` returned.
     cancel_without_start,
     /// `cancel` after `Reply.release` returned, or after `start` returned a
     /// failure.
@@ -192,6 +200,7 @@ pub const Rule = enum {
     second_send,
     /// The test answered or released a call it had released. Not done.
     reply_after_release,
+    _,
 };
 
 /// The first `Dispatcher.fail` of the transport.
@@ -228,6 +237,8 @@ const Call = struct {
     sends: u8 = 0,
     retry_allowed: bool = false,
     cancels: u32 = 0,
+    /// Cancels that came before `start`: they count once `start` comes.
+    early_cancels: u32 = 0,
     disposition: ?Reply.Disposition = null,
 };
 
@@ -324,7 +335,10 @@ pub fn close(r: *RecordingDispatcher, io: std.Io) void {
     if (r.closed) return;
     r.closed = true;
     for (r.calls.items) |c| {
-        if (c.state == .accepted) r.addViolation(c.index, .unresolved_at_close);
+        if (c.state == .accepted) {
+            r.addViolation(c.index, .unresolved_at_close);
+            if (c.early_cancels > 0) r.addViolation(c.index, .cancel_without_start);
+        }
         r.checkBody(c);
     }
 }
@@ -358,10 +372,10 @@ pub fn waitStarted(r: *RecordingDispatcher, io: std.Io, n: usize) (std.Io.Cancel
 }
 
 /// Call `index` as the recorder saw it so far.
-pub fn call(r: *RecordingDispatcher, io: std.Io, index: usize) CallView {
+pub fn call(r: *RecordingDispatcher, io: std.Io, index: usize) error{NoSuchCall}!CallView {
     r.mutex.lockUncancelable(io);
     defer r.mutex.unlock(io);
-    const c = r.callAt(index);
+    const c = try r.callAt(index);
     return .{
         .head = c.head,
         .body_len = c.body_len,
@@ -377,13 +391,13 @@ pub fn call(r: *RecordingDispatcher, io: std.Io, index: usize) CallView {
 /// as a handler's answer, and returns what the transport returned. A call
 /// that is not running, or a second response, is a violation and is not
 /// sent; one more response is allowed after `ResponseTooLarge`.
-pub fn respond(r: *RecordingDispatcher, io: std.Io, index: usize, response: *const model.Response) Reply.SendError!void {
+pub fn respond(r: *RecordingDispatcher, io: std.Io, index: usize, response: *const model.Response) (Reply.SendError || error{NoSuchCall})!void {
     const c = c: {
         const protection = io.swapCancelProtection(.blocked);
         defer _ = io.swapCancelProtection(protection);
         r.mutex.lockUncancelable(io);
         defer r.mutex.unlock(io);
-        const c = r.callAt(index);
+        const c = try r.callAt(index);
         if (misuse(c)) |rule| {
             r.addViolation(c.index, rule);
             return;
@@ -410,13 +424,13 @@ pub fn respond(r: *RecordingDispatcher, io: std.Io, index: usize, response: *con
 /// Ends the running call `index` with `Reply.release`, as the engine does
 /// once the handler is over. A call that is not running is a violation and
 /// is not released.
-pub fn releaseCall(r: *RecordingDispatcher, io: std.Io, index: usize, disposition: Reply.Disposition) void {
+pub fn releaseCall(r: *RecordingDispatcher, io: std.Io, index: usize, disposition: Reply.Disposition) error{NoSuchCall}!void {
     const c = c: {
         const protection = io.swapCancelProtection(.blocked);
         defer _ = io.swapCancelProtection(protection);
         r.mutex.lockUncancelable(io);
         defer r.mutex.unlock(io);
-        const c = r.callAt(index);
+        const c = try r.callAt(index);
         if (misuse(c)) |rule| {
             r.addViolation(c.index, rule);
             return;
@@ -456,8 +470,10 @@ pub fn fatal(r: *RecordingDispatcher, io: std.Io) ?Fatal {
     return r.fatal_value;
 }
 
-fn callAt(r: *RecordingDispatcher, index: usize) *Call {
-    if (index >= r.calls.items.len) @panic("rpc.testing.RecordingDispatcher: no call with this index; calls are numbered in the order of admit");
+/// `error.NoSuchCall` for an index `admit` has not given yet; calls are
+/// numbered in the order of `admit`.
+fn callAt(r: *RecordingDispatcher, index: usize) error{NoSuchCall}!*Call {
+    if (index >= r.calls.items.len) return error.NoSuchCall;
     return r.calls.items[index];
 }
 
@@ -467,6 +483,7 @@ fn misuse(c: *const Call) ?Rule {
         .running => if (c.releasing) .reply_after_release else null,
         .released => .reply_after_release,
         .refused, .accepted, .start_failed, .abandoned => .reply_without_start,
+        _ => unreachable,
     };
 }
 
@@ -622,6 +639,9 @@ fn startFn(ptr: *anyopaque, io: std.Io, reply: Reply) ?model.Failure {
         return started_twice;
     }
     if (c.body_len > 0 and !c.body_taken.load(.acquire)) r.addViolation(c.index, .body_not_filled);
+    // The cancels that came as start was entered belong to the call.
+    c.cancels += c.early_cancels;
+    c.early_cancels = 0;
     @memcpy(c.snapshot, c.buffer);
     c.has_snapshot = true;
     switch (r.start_mode) {
@@ -649,7 +669,12 @@ fn abandonFn(ptr: *anyopaque, io: std.Io) void {
     r.mutex.lockUncancelable(io);
     defer r.mutex.unlock(io);
     if (r.closed) r.addViolation(c.index, .call_after_close);
-    if (c.state == .accepted) c.state = .abandoned else r.addViolation(c.index, .start_or_abandon_twice);
+    if (c.state == .accepted) {
+        c.state = .abandoned;
+        if (c.early_cancels > 0) r.addViolation(c.index, .cancel_without_start);
+    } else {
+        r.addViolation(c.index, .start_or_abandon_twice);
+    }
     r.logEvent(c.index, .abandon);
 }
 
@@ -663,8 +688,11 @@ fn cancelFn(ptr: *anyopaque, io: std.Io) void {
     if (r.closed) r.addViolation(c.index, .call_after_close);
     switch (c.state) {
         .running => c.cancels += 1,
-        .refused, .accepted, .abandoned => r.addViolation(c.index, .cancel_without_start),
+        // Legal if start follows: checked at abandon and close.
+        .accepted => c.early_cancels += 1,
+        .refused, .abandoned => r.addViolation(c.index, .cancel_without_start),
         .start_failed, .released => r.addViolation(c.index, .cancel_after_end),
+        _ => unreachable,
     }
     r.logEvent(c.index, .cancel);
 }
@@ -756,7 +784,7 @@ test "a transport that keeps the rules leaves no violations, and the test sees w
     try recorder.waitStarted(io, 1);
     incoming.cancel(io);
 
-    const view = recorder.call(io, 0);
+    const view = try recorder.call(io, 0);
     try testing.expectEqualStrings("getUser", view.head.route.method);
     try testing.expectEqual(@as(usize, 3), view.head.metadata.len);
     try testing.expectEqualStrings("2", view.head.metadata[1].value);
@@ -768,9 +796,9 @@ test "a transport that keeps the rules leaves no violations, and the test sees w
 
     try recorder.respond(io, 0, &.{ .status = .ok, .body = "abc" });
     try testing.expectEqualStrings("abc", reply.body[0..reply.len]);
-    recorder.releaseCall(io, 0, .completed);
+    try recorder.releaseCall(io, 0, .completed);
     try testing.expectEqual(Reply.Disposition.completed, reply.released.?);
-    try testing.expectEqual(State.released, recorder.call(io, 0).state);
+    try testing.expectEqual(State.released, (try recorder.call(io, 0)).state);
 
     recorder.close(io);
     try expectViolations(&recorder, &.{});
@@ -798,9 +826,9 @@ test "it refuses as the engine does and counts by route" {
     recorder.setAdmit(io, .accept);
     (try accepted(d.admit(io, &head, 0))).abandon(io);
 
-    try testing.expectEqual(State.refused, recorder.call(io, 0).state);
-    try testing.expectEqualStrings("test.busy", recorder.call(io, 2).refusal.?.app_code);
-    try testing.expectEqual(State.abandoned, recorder.call(io, 3).state);
+    try testing.expectEqual(State.refused, (try recorder.call(io, 0)).state);
+    try testing.expectEqualStrings("test.busy", (try recorder.call(io, 2)).refusal.?.app_code);
+    try testing.expectEqual(State.abandoned, (try recorder.call(io, 3)).state);
     const stats = d.routeStats(0);
     try testing.expectEqual(@as(u64, 3), stats.requests);
     try testing.expectEqual(@as(u64, 2), stats.errors);
@@ -820,7 +848,7 @@ test "start mode fail: start returns the failure and no reply follows" {
     const incoming = try accepted(recorder.dispatcher().admit(io, &head, 0));
     var reply: FakeReply = .{};
     try testing.expectEqualStrings("No task", incoming.start(io, .init(&reply)).?.message);
-    try testing.expectEqual(State.start_failed, recorder.call(io, 0).state);
+    try testing.expectEqual(State.start_failed, (try recorder.call(io, 0)).state);
     recorder.close(io);
     try expectViolations(&recorder, &.{});
     try testing.expectEqual(@as(u32, 0), reply.sends);
@@ -847,7 +875,7 @@ test "a second start, or an abandon after start, is caught" {
     // to release.
     try testing.expect(incoming.start(io, .init(&reply)) != null);
     incoming.abandon(io);
-    recorder.releaseCall(io, 0, .completed);
+    try recorder.releaseCall(io, 0, .completed);
     recorder.close(io);
     try expectViolations(&recorder, &.{
         .{ .call = 0, .rule = .start_or_abandon_twice },
@@ -866,8 +894,8 @@ test "a start before the transport asked for the body is caught" {
     // An empty body needs no filling.
     const empty = try accepted(recorder.dispatcher().admit(io, &head, 0));
     try testing.expectEqual(@as(?model.Failure, null), empty.start(io, .init(&reply)));
-    recorder.releaseCall(io, 0, .completed);
-    recorder.releaseCall(io, 1, .completed);
+    try recorder.releaseCall(io, 0, .completed);
+    try recorder.releaseCall(io, 1, .completed);
     recorder.close(io);
     try expectViolations(&recorder, &.{.{ .call = 0, .rule = .body_not_filled }});
 }
@@ -879,10 +907,10 @@ test "a write to the body after start is caught" {
     var reply: FakeReply = .{};
     const incoming = try startOne(&recorder, io, &reply);
     incoming.body()[1] = 'X';
-    recorder.releaseCall(io, 0, .completed);
+    try recorder.releaseCall(io, 0, .completed);
     recorder.close(io);
     try expectViolations(&recorder, &.{.{ .call = 0, .rule = .body_changed_after_start }});
-    try testing.expectEqualStrings("abc", recorder.call(io, 0).body.?);
+    try testing.expectEqualStrings("abc", (try recorder.call(io, 0)).body.?);
 }
 
 test "a cancel of a call that did not start is caught" {
@@ -890,15 +918,47 @@ test "a cancel of a call that did not start is caught" {
     var recorder: RecordingDispatcher = try .init(testing.allocator, .{ .routes = &.{get_user} });
     defer recorder.deinit(io);
     const head = headOf(get_user);
-    const before = try accepted(recorder.dispatcher().admit(io, &head, 0));
-    before.cancel(io);
-    before.abandon(io);
-    before.cancel(io);
+    // Canceled, then abandoned; then canceled again.
+    const abandoned = try accepted(recorder.dispatcher().admit(io, &head, 0));
+    abandoned.cancel(io);
+    abandoned.abandon(io);
+    abandoned.cancel(io);
+    // Canceled, and still undecided when close returns.
+    const undecided = try accepted(recorder.dispatcher().admit(io, &head, 0));
+    undecided.cancel(io);
     recorder.close(io);
     try expectViolations(&recorder, &.{
         .{ .call = 0, .rule = .cancel_without_start },
         .{ .call = 0, .rule = .cancel_without_start },
+        .{ .call = 1, .rule = .unresolved_at_close },
+        .{ .call = 1, .rule = .cancel_without_start },
     });
+}
+
+test "a cancel that comes as start is entered counts for the call" {
+    const io = testing.io;
+    var recorder: RecordingDispatcher = try .init(testing.allocator, .{ .routes = &.{get_user} });
+    defer recorder.deinit(io);
+    const head = headOf(get_user);
+    // A reading task of the transport cancels the call another task is
+    // starting; the cancel reached the recorder first.
+    const incoming = try accepted(recorder.dispatcher().admit(io, &head, 0));
+    incoming.cancel(io);
+    var reply: FakeReply = .{};
+    try testing.expectEqual(@as(?model.Failure, null), incoming.start(io, .init(&reply)));
+    try testing.expectEqual(@as(u32, 1), (try recorder.call(io, 0)).cancels);
+    try recorder.releaseCall(io, 0, .canceled);
+    recorder.close(io);
+    try expectViolations(&recorder, &.{});
+}
+
+test "a call index the recorder has not seen is an error, not a panic" {
+    const io = testing.io;
+    var recorder: RecordingDispatcher = try .init(testing.allocator, .{ .routes = &.{get_user} });
+    defer recorder.deinit(io);
+    try testing.expectError(error.NoSuchCall, recorder.call(io, 0));
+    try testing.expectError(error.NoSuchCall, recorder.respond(io, 0, &.{ .status = .ok }));
+    try testing.expectError(error.NoSuchCall, recorder.releaseCall(io, 0, .completed));
 }
 
 test "a cancel after release, or after a failed start, is caught" {
@@ -907,7 +967,7 @@ test "a cancel after release, or after a failed start, is caught" {
     defer recorder.deinit(io);
     var reply: FakeReply = .{};
     const released = try startOne(&recorder, io, &reply);
-    recorder.releaseCall(io, 0, .completed);
+    try recorder.releaseCall(io, 0, .completed);
     released.cancel(io);
 
     recorder.setStart(io, .{ .fail = .{ .code = .resource_exhausted, .app_code = "rpc.resource_exhausted", .message = "No task" } });
@@ -935,7 +995,7 @@ test "a call of the transport after close is caught" {
     recorder.dispatcher().fail(io, error.Unavailable, null);
     // The engine still answers and releases a call after close.
     try recorder.respond(io, 0, &.{ .status = .ok });
-    recorder.releaseCall(io, 0, .canceled);
+    try recorder.releaseCall(io, 0, .canceled);
     try expectViolations(&recorder, &.{
         .{ .call = 0, .rule = .call_after_close },
         .{ .call = 1, .rule = .call_after_close },
@@ -952,8 +1012,8 @@ test "the recorder sends one response, one more only after ResponseTooLarge, and
     try recorder.respond(io, 0, &.{ .status = .ok, .body = "one" });
     try recorder.respond(io, 0, &.{ .status = .ok, .body = "two" });
     try testing.expectEqual(@as(u32, 1), first.sends);
-    recorder.releaseCall(io, 0, .completed);
-    recorder.releaseCall(io, 0, .completed);
+    try recorder.releaseCall(io, 0, .completed);
+    try recorder.releaseCall(io, 0, .completed);
     try recorder.respond(io, 0, &.{ .status = .ok });
 
     var too_large_first: FakeReply = .{ .first_send = error.ResponseTooLarge };
@@ -962,7 +1022,7 @@ test "the recorder sends one response, one more only after ResponseTooLarge, and
     try recorder.respond(io, 1, &.{ .status = .{ .failure = too_large } });
     try recorder.respond(io, 1, &.{ .status = .ok });
     try testing.expectEqual(@as(u32, 2), too_large_first.sends);
-    recorder.releaseCall(io, 1, .completed);
+    try recorder.releaseCall(io, 1, .completed);
 
     const unknown = headOf(list_users);
     _ = try refused(recorder.dispatcher().admit(io, &unknown, 0));
@@ -1007,7 +1067,7 @@ test "waitStarted waits for a call that another task starts" {
     try recorder.waitStarted(io, 1);
     try starter.await(io);
     try recorder.waitStarted(io, 1);
-    recorder.releaseCall(io, 0, .completed);
+    try recorder.releaseCall(io, 0, .completed);
 }
 
 /// A server transport that records the recorder's commands.
