@@ -558,6 +558,83 @@ test "the caller's task canceled during the transport's call: Cancelled once, an
     try server.shutdown(io);
 }
 
+/// A handler that calls another service with its own context.
+const Nested = struct {
+    client: *RawClient,
+    /// Waits for its token before calling, deaf to the task's cancelation.
+    wait_for_token: bool = false,
+    deadline: ?core.Deadline = null,
+    span: ?core.SpanId = null,
+    trace_id: ?core.TraceId = null,
+    nested: RawClient.CallError!void = {},
+
+    fn handle(n: *Nested, ctx: *Context, request: []const u8) anyerror![]const u8 {
+        const operation = ctx.operation();
+        n.deadline = operation.deadline;
+        n.span = operation.trace.?.span_id;
+        n.trace_id = operation.trace.?.trace_id;
+        if (n.wait_for_token) {
+            const protection = ctx.io().swapCancelProtection(.blocked);
+            defer _ = ctx.io().swapCancelProtection(protection);
+            while (!operation.isCancelled()) ctx.io().sleep(.fromMilliseconds(1), .awake) catch unreachable;
+            n.nested = callOnce(n.client, ctx.io(), operation);
+            return request;
+        }
+        n.nested = callOnce(n.client, ctx.io(), operation);
+        return request;
+    }
+
+    fn callOnce(client: *RawClient, io: std.Io, operation: core.Context) RawClient.CallError!void {
+        var result = try client.call(io, operation, echo_route, "nested", .{ .timeout = .fromSeconds(60) });
+        result.deinit();
+    }
+};
+
+test "a nested call: the handler's context shortens the deadline, goes on in the server's span, and a canceled token sends nothing" {
+    const io = testing.io;
+    var recorder: Recorder = .init(io);
+    defer recorder.deinit();
+    var downstream: RawClient = try .init(testing.allocator, .{ .transport = .init(&recorder) });
+    defer downstream.deinit();
+    var memory: MemoryTransport = try .init(testing.allocator, .{});
+    defer memory.deinit(io);
+    var nested: Nested = .{ .client = &downstream };
+    var server: RawServer = try .init(testing.allocator, .{
+        .transport = memory.serverTransport(),
+        .methods = &.{.{ .route = echo_route, .handler = handlerOf(&nested) }},
+    });
+    defer server.deinit(io);
+    try server.start(io);
+    var client: RawClient = try .init(testing.allocator, .{ .transport = memory.clientTransport() });
+    defer client.deinit();
+
+    const caller = try core.w3c.parseTraceparent("00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01");
+    var result = try client.call(io, core.Context.root.withTrace(caller), echo_route, "outer", .{ .timeout = .fromSeconds(2) });
+    result.deinit();
+    try nested.nested;
+    // The nested call keeps the server's deadline, not its own 60 s.
+    try testing.expectEqual(nested.deadline.?.expires.nanoseconds, recorder.deadline.?.expires.nanoseconds);
+    // Its span is a new child in the same trace: neither the caller's nor
+    // the server's.
+    const sent = try core.w3c.parseTraceparent(recorder.get("traceparent").?);
+    try testing.expectEqual(caller.trace_id, sent.trace_id);
+    try testing.expectEqual(nested.trace_id.?, sent.trace_id);
+    try testing.expect(!std.meta.eql(nested.span.?, sent.span_id));
+    try testing.expect(!std.meta.eql(caller.span_id, sent.span_id));
+    const calls = recorder.calls;
+
+    // The server's deadline cancels the token; a nested call then stays home.
+    nested.wait_for_token = true;
+    if (client.call(io, core.Context.root.withTrace(caller), echo_route, "outer", .{ .timeout = .fromMilliseconds(30) })) |late| {
+        var r = late;
+        r.deinit();
+    } else |err| try testing.expect(err == error.DeadlineExceeded);
+    // The handler ends before the server lets the call go.
+    try server.shutdown(io);
+    try testing.expectError(error.Cancelled, nested.nested);
+    try testing.expectEqual(calls, recorder.calls);
+}
+
 /// An allocator over `testing.allocator` that looks for `needle` in every
 /// block given back through it.
 const Spotter = struct {

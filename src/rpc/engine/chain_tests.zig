@@ -831,3 +831,154 @@ test "the rules of the client's next.run(): a breaker, no success without it, fo
     }
     trail.count = 0;
 }
+
+/// Waits on a gate in the handler; canceling the call ends the wait.
+const Gate = struct {
+    io: std.Io,
+    open: std.Io.Event = .unset,
+    entered: std.atomic.Value(u32) = .init(0),
+
+    fn handle(g: *Gate, _: *Context, request: []const u8) anyerror![]const u8 {
+        _ = g.entered.fetchAdd(1, .acq_rel);
+        try g.open.wait(g.io);
+        return request;
+    }
+};
+
+/// Waits until `counter` reaches `n`, ten seconds at most.
+fn waitFor(io: std.Io, counter: *const std.atomic.Value(u32), n: u32) !void {
+    const deadline: core.Deadline = .after(now(io), .fromSeconds(10));
+    while (counter.load(.acquire) < n) {
+        if (deadline.isExpired(now(io))) return error.TestTimeout;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+}
+
+const Observed = struct { result: RawClient.CallError!void, still_canceled: bool, failure: ?core.ErrorCode = null };
+
+/// Calls, then looks whether a cancelation of its task is still there.
+fn callAndLook(client: *RawClient, io: std.Io, method: []const u8, options: RawClient.CallOptions) Observed {
+    var observed: Observed = .{ .result = {}, .still_canceled = false };
+    if (client.call(io, .root, routeOf(method), "", options)) |result| {
+        var r = result;
+        defer r.deinit();
+        switch (r.response.status) {
+            .ok => {},
+            .failure => |failure| observed.failure = failure.code,
+        }
+    } else |err| observed.result = err;
+    io.checkCancel() catch {
+        observed.still_canceled = true;
+    };
+    return observed;
+}
+
+/// A client link that waits ten seconds before `next.run()`.
+const Napper = struct {
+    entered: std.atomic.Value(u32) = .init(0),
+
+    pub fn run(n: *Napper, ctx: *ClientContext, next: *ClientNext) anyerror!void {
+        _ = n.entered.fetchAdd(1, .acq_rel);
+        try ctx.io().sleep(.fromSeconds(10), .awake);
+        return next.run();
+    }
+};
+
+/// A client link that breaks the rule: after `next.run()` it waits, and
+/// swallows the cancelation it meets there.
+const Swallower = struct {
+    pub fn run(_: *Swallower, ctx: *ClientContext, next: *ClientNext) anyerror!void {
+        const outcome = next.run();
+        ctx.io().sleep(.fromSeconds(10), .awake) catch {};
+        return outcome;
+    }
+};
+
+/// A provider that waits ten seconds for its token.
+const SlowProvider = struct {
+    entered: std.atomic.Value(u32) = .init(0),
+
+    fn credentials(p: *SlowProvider) Credentials {
+        return .{ .provider = .{ .ptr = p, .get = get } };
+    }
+
+    fn get(ptr: *anyopaque, io: std.Io, _: core.Context, _: std.mem.Allocator) (error{ Unavailable, OutOfMemory } || std.Io.Cancelable)!Credentials {
+        const p: *SlowProvider = @ptrCast(@alignCast(ptr));
+        _ = p.entered.fetchAdd(1, .acq_rel);
+        try io.sleep(.fromSeconds(10), .awake);
+        return .{ .bearer = "late" };
+    }
+};
+
+test "Review Focus 3: the caller's task canceled in client middleware or in a provider: Cancelled once, nothing sent, the cancelation stays" {
+    const io = testing.io;
+    var who: Who = .{};
+    var napper: Napper = .{};
+    var f: Fixture = undefined;
+    try f.start(io, testing.allocator, .{
+        .transport = undefined,
+        .methods = &.{.{ .route = routeOf("who"), .handler = handlerOf(&who) }},
+    }, .{ .transport = undefined, .middleware = &.{.of(&napper)} });
+    defer f.stop(io);
+
+    var in_middleware = try io.concurrent(callAndLook, .{ &f.client, io, "who", RawClient.CallOptions{} });
+    try waitFor(io, &napper.entered, 1);
+    const first = in_middleware.cancel(io);
+    try testing.expectError(error.Cancelled, first.result);
+    try testing.expect(first.still_canceled);
+
+    // The provider is asked inside the chain, after the link's nap: a
+    // client without middleware asks it at once.
+    var plain: RawClient = try .init(testing.allocator, .{ .transport = f.memory.clientTransport() });
+    defer plain.deinit();
+    var provider: SlowProvider = .{};
+    var in_provider = try io.concurrent(callAndLook, .{ &plain, io, "who", RawClient.CallOptions{ .credentials = provider.credentials() } });
+    try waitFor(io, &provider.entered, 1);
+    const second = in_provider.cancel(io);
+    try testing.expectError(error.Cancelled, second.result);
+    try testing.expect(second.still_canceled);
+    try testing.expectEqual(@as(u32, 0), who.calls.load(.acquire));
+}
+
+test "Review Focus 3: a link that swallows the cancelation after next.run() does not lose it for the caller" {
+    const io = testing.io;
+    var gate: Gate = .{ .io = io };
+    var swallower: Swallower = .{};
+    var f: Fixture = undefined;
+    try f.start(io, testing.allocator, .{
+        .transport = undefined,
+        .methods = &.{.{ .route = routeOf("gate"), .handler = handlerOf(&gate) }},
+    }, .{ .transport = undefined, .middleware = &.{.of(&swallower)} });
+    defer f.stop(io);
+    defer gate.open.set(io);
+
+    var caller = try io.concurrent(callAndLook, .{ &f.client, io, "gate", RawClient.CallOptions{} });
+    try waitFor(io, &gate.entered, 1);
+    const observed = caller.cancel(io);
+    try testing.expectError(error.Cancelled, observed.result);
+    try testing.expect(observed.still_canceled);
+}
+
+test "Review Focus 3: a stop on the server side never gives the client Cancelled" {
+    const io = testing.io;
+    var gate: Gate = .{ .io = io };
+    var f: Fixture = undefined;
+    try f.start(io, testing.allocator, .{
+        .transport = undefined,
+        .shutdown_grace = .zero,
+        .methods = &.{.{ .route = routeOf("gate"), .handler = handlerOf(&gate) }},
+    }, .{ .transport = undefined });
+    defer f.stop(io);
+    defer gate.open.set(io);
+
+    var caller = try io.concurrent(callAndLook, .{ &f.client, io, "gate", RawClient.CallOptions{} });
+    try waitFor(io, &gate.entered, 1);
+    f.server.requestStop(io);
+    const observed = caller.await(io);
+    // The server's "Server stopped the call", or the link closed under it.
+    if (observed.result) |_| {
+        try testing.expectEqual(@as(?core.ErrorCode, .cancelled), observed.failure);
+    } else |err| try testing.expect(err == error.ConnectionLost);
+    try testing.expect(!observed.still_canceled);
+    try f.server.wait(io);
+}
