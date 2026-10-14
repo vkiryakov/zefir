@@ -308,13 +308,39 @@ test "a repeated key among 100 000 unknown ones is found" {
     try expectRefusal(run(Top, &arena, repeated), "k12345", "duplicate key");
 }
 
-test "a decode out of memory says so, not that the body is invalid" {
-    var failing: std.testing.FailingAllocator = .init(testing.allocator, .{ .fail_index = 0 });
-    var arena: std.heap.ArenaAllocator = .init(failing.allocator());
-    defer arena.deinit();
-    var problem: json.Problem = .{};
-    const Body = struct { a: []const u32 };
-    try testing.expectError(error.OutOfMemory, json.decode(Body, arena.allocator(), "{\"a\":[1,2,3]}", .{}, &problem));
+test "a decode out of memory says so at every allocation, never that the body is invalid" {
+    const Item = struct { name: []const u8, tags: []const []const u8 = &.{}, n: u64 = 0 };
+    const Body = struct { items: []const Item, note: ?[]const u8 = null };
+    // Escapes, slices, a skipped subtree and more than 16 unknown keys in
+    // one object: every kind of allocation a decode makes.
+    const body =
+        \\{"x":{"a":[1,{"b":"c\n"}],"d":{}},"items":[{"name":"a\tb","tags":["t\"","u"],"n":"5","zz":[[[]]]},
+        \\{"name":"q","k1":1,"k2":2,"k3":3,"k4":4,"k5":5,"k6":6,"k7":7,"k8":8,"k9":9,"k10":10,"k11":11,"k12":12,
+        \\"k13":13,"k14":14,"k15":15,"k16":16,"k17":17}],"note":"\"x\""}
+    ;
+    var backing: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer backing.deinit();
+    var sites: usize = 0;
+    while (true) : (sites += 1) {
+        try testing.expect(sites < 1000);
+        var failing: std.testing.FailingAllocator = .init(backing.allocator(), .{ .fail_index = sites });
+        var problem: json.Problem = .{};
+        if (json.decode(Body, failing.allocator(), body, .{}, &problem)) |value| {
+            try testing.expectEqual(@as(usize, 2), value.items.len);
+            try testing.expectEqualStrings("a\tb", value.items[0].name);
+            try testing.expectEqualStrings("t\"", value.items[0].tags[0]);
+            try testing.expectEqual(@as(u64, 5), value.items[0].n);
+            try testing.expectEqualStrings("\"x\"", value.note.?);
+            break;
+        } else |err| {
+            testing.expectEqual(error.OutOfMemory, err) catch |failure| {
+                std.debug.print("allocation {d} failed: {s} at {?s}\n", .{ sites, problem.message, problem.field });
+                return failure;
+            };
+        }
+    }
+    // Each of these allocations failed once, in a decode of its own.
+    try testing.expect(sites >= 8);
 }
 
 test "a long string with escapes is decoded into one buffer" {
