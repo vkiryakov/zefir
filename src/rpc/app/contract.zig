@@ -79,9 +79,9 @@ pub const ErrorMapping = struct {
 ///   wire;
 /// - `.errors` (optional): Zig error → `.{ .code, .app_code, .message }`.
 ///   `.code` is one of the 16 codes of `core.ErrorCode`; `.app_code` is a
-///   stable code of 1 to 128 bytes of UTF-8, unique in the contract, that
-///   does not start with "rpc."; `.message` is a safe text for people, at
-///   most 512 bytes. The errors that rpc maps by itself (`Canceled`,
+///   stable code of 1 to 128 bytes of UTF-8 without control characters,
+///   unique in the contract, that does not start with "rpc."; `.message`
+///   is a safe text for people, at most 512 bytes. The errors that rpc maps by itself (`Canceled`,
 ///   `Cancelled`, `DeadlineExceeded`, `InvalidArgument`,
 ///   `Unauthenticated`, `PermissionDenied`, `ResourceExhausted`,
 ///   `Unavailable`, `OutOfMemory`, `Internal`, `RpcFailure`) cannot be
@@ -333,6 +333,11 @@ fn entryProblem(comptime here: []const u8, comptime entry: anytype) ?[]const u8 
     if (app_code.len > rules.max_app_code_bytes)
         return std.fmt.comptimePrint("{s}.app_code is {d} bytes; the limit is {d}", .{ here, app_code.len, rules.max_app_code_bytes });
     if (!std.unicode.utf8ValidateSlice(app_code)) return here ++ ".app_code is not valid UTF-8";
+    // Transports carry the app code in headers, where these bytes break.
+    for (app_code, 0..) |c, i| {
+        if (c < 0x20 or c == 0x7f)
+            return std.fmt.comptimePrint("{s}.app_code has a control character at byte {d}; write printable text such as \"users.not_found\"", .{ here, i });
+    }
     if (std.mem.startsWith(u8, app_code, "rpc."))
         return here ++ ".app_code \"" ++ app_code ++ "\" starts with \"rpc.\", which belongs to the framework";
 
@@ -683,6 +688,10 @@ test "the app code and the message of an error" {
     try expectSpecProblem(withErrors(.{ .UserNotFound = .{ .code = .not_found, .app_code = "", .message = "x" } }), "rpc: users.v1: .errors.UserNotFound.app_code is empty; write a stable code such as \"users.not_found\"");
     try expectSpecProblem(withErrors(.{ .UserNotFound = .{ .code = .not_found, .app_code = &long_code, .message = "x" } }), "rpc: users.v1: .errors.UserNotFound.app_code is 129 bytes; the limit is 128");
     try expectSpecProblem(withErrors(.{ .UserNotFound = .{ .code = .not_found, .app_code = "users.\xff", .message = "x" } }), "rpc: users.v1: .errors.UserNotFound.app_code is not valid UTF-8");
+    // Transports carry the app code in headers, where these bytes break.
+    try expectSpecProblem(withErrors(.{ .UserNotFound = .{ .code = .not_found, .app_code = "users.not\nfound", .message = "x" } }), "rpc: users.v1: .errors.UserNotFound.app_code has a control character at byte 9; write printable text such as \"users.not_found\"");
+    try expectSpecProblem(withErrors(.{ .UserNotFound = .{ .code = .not_found, .app_code = "\x00users", .message = "x" } }), "rpc: users.v1: .errors.UserNotFound.app_code has a control character at byte 0; write printable text such as \"users.not_found\"");
+    try expectSpecProblem(withErrors(.{ .UserNotFound = .{ .code = .not_found, .app_code = "users.\x7f", .message = "x" } }), "rpc: users.v1: .errors.UserNotFound.app_code has a control character at byte 6; write printable text such as \"users.not_found\"");
     try expectSpecProblem(withErrors(.{ .UserNotFound = .{ .code = .not_found, .app_code = "rpc.not_found", .message = "x" } }), "rpc: users.v1: .errors.UserNotFound.app_code \"rpc.not_found\" starts with \"rpc.\", which belongs to the framework");
     try expectSpecProblem(withErrors(.{ .UserNotFound = .{ .code = .not_found, .app_code = "users.not_found", .message = 1 } }), "rpc: users.v1: .errors.UserNotFound.message must be a string such as \"User not found\", got comptime_int");
     try expectSpecProblem(withErrors(.{ .UserNotFound = .{ .code = .not_found, .app_code = "users.not_found", .message = &long_message } }), "rpc: users.v1: .errors.UserNotFound.message is 513 bytes; the limit is 512");
