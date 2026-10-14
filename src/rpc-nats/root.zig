@@ -40,4 +40,5 @@ test {
     _ = @import("testing.zig");
     _ = @import("server_tests.zig");
     _ = @import("client_tests.zig");
+    _ = @import("conformance_tests.zig");
 }
