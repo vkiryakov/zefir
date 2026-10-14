@@ -221,3 +221,16 @@ test "middleware run with an inferred error set" {
     var link: Inferred = .{};
     _ = rpc.Middleware.of(&link);
 }
+
+test "client middleware with the server's signature" {
+    const ServerSide = struct {
+        runs: u32 = 0,
+        pub fn run(self: *@This(), ctx: *rpc.Context, next: *rpc.Next) anyerror!void {
+            _ = ctx;
+            self.runs += 1;
+            return next.run();
+        }
+    };
+    var link: ServerSide = .{};
+    _ = rpc.ClientMiddleware.of(&link);
+}

@@ -34,13 +34,19 @@ const failures = @import("../failures.zig");
 const credentials = @import("../credentials.zig");
 const ClientTransport = @import("../ClientTransport.zig");
 const Credentials = credentials.Credentials;
+const ClientMiddleware = @import("../middleware.zig").ClientMiddleware;
+const ClientNext = @import("../middleware.zig").ClientNext;
 
 const RawClient = @This();
+
+const log = std.log.scoped(.rpc);
 
 gpa: std.mem.Allocator,
 client_transport: ClientTransport,
 /// The client's own copy of `Options.credentials`; `deinit` wipes it.
 default_credentials: Credentials,
+/// The client's own copy of `Options.middleware`.
+middleware: []const ClientMiddleware,
 default_timeout: std.Io.Duration,
 max_pending: u32,
 max_response_bytes: usize,
@@ -54,6 +60,9 @@ pub const Options = struct {
     /// The credentials of every call that brings none of its own. `init`
     /// copies them, `deinit` wipes the copy.
     credentials: Credentials = .none,
+    /// The links around every call, outermost first. `init` copies the
+    /// list; the objects are borrowed and must outlive the client.
+    middleware: []const ClientMiddleware = &.{},
     /// The deadline of a call without a timeout of its own: now plus this,
     /// unless the caller's context ends earlier.
     default_timeout: std.Io.Duration = .fromSeconds(3),
@@ -64,23 +73,111 @@ pub const Options = struct {
     max_response_bytes: usize = 1 << 20,
 };
 
-/// No I/O; allocates only the copy of the credentials.
+/// No I/O; allocates only the copies of the credentials and of the list of
+/// middleware.
 pub fn init(gpa: std.mem.Allocator, options: Options) error{OutOfMemory}!RawClient {
+    const default_credentials = try credentials.dupe(gpa, options.credentials);
+    errdefer credentials.wipe(gpa, default_credentials);
     return .{
         .gpa = gpa,
         .client_transport = options.transport,
-        .default_credentials = try credentials.dupe(gpa, options.credentials),
+        .default_credentials = default_credentials,
+        .middleware = try gpa.dupe(ClientMiddleware, options.middleware),
         .default_timeout = options.default_timeout,
         .max_pending = options.max_pending,
         .max_response_bytes = options.max_response_bytes,
     };
 }
 
-/// Wipes the copy of the credentials and frees it. No call may be in
-/// flight.
+/// Wipes the copy of the credentials and frees what `init` took. No call
+/// may be in flight.
 pub fn deinit(client: *RawClient) void {
     credentials.wipe(client.gpa, client.default_credentials);
+    client.gpa.free(client.middleware);
     client.* = undefined;
+}
+
+/// What middleware of the client sees of one outgoing call. The engine
+/// creates it for each call; a link gets a borrowed pointer and must not
+/// keep it after it returns.
+///
+/// ```zig
+/// fn tagCalls(ctx: *rpc.ClientContext, next: *rpc.ClientNext) anyerror!void {
+///     try ctx.addMetadata("x-caller", "billing");
+///     const started = std.Io.Clock.awake.now(ctx.io());
+///     defer {
+///         const took = started.durationTo(std.Io.Clock.awake.now(ctx.io()));
+///         const failed = if (ctx.response()) |response| response.status == .failure else true;
+///         std.log.info("{s} took {d} ms, failed: {}", .{ ctx.route().method, took.toMilliseconds(), failed });
+///     }
+///     return next.run();
+/// }
+/// ```
+pub const ClientContext = opaque {
+    /// The service, version and method of the call.
+    pub fn route(ctx: *ClientContext) model.Route {
+        return outgoingOf(ctx).route;
+    }
+
+    /// The caller's context with the deadline of the call and its span.
+    pub fn operation(ctx: *ClientContext) core.Context {
+        return outgoingOf(ctx).operation;
+    }
+
+    /// The caller's `std.Io`: every wait of a link goes through it.
+    pub fn io(ctx: *ClientContext) std.Io {
+        return outgoingOf(ctx).io;
+    }
+
+    /// The arena of the call: freed with its `Result`, or when the call
+    /// fails.
+    pub fn allocator(ctx: *ClientContext) std.mem.Allocator {
+        return outgoingOf(ctx).arena;
+    }
+
+    /// The id the request goes out with, for logs.
+    pub fn requestId(ctx: *ClientContext) [16]u8 {
+        return outgoingOf(ctx).request_id;
+    }
+
+    /// Before `next.run()`: adds a pair to the request's metadata, after
+    /// the application's; copied into the arena. Reserved and `zefir-*`
+    /// keys are the engine's: `error.InvalidMetadata`, as are a key or a
+    /// value against the rules.
+    pub fn addMetadata(ctx: *ClientContext, key: []const u8, value: []const u8) error{ InvalidMetadata, OutOfMemory }!void {
+        const o = outgoingOf(ctx);
+        if (rules.checkUserMetadata(&.{.{ .key = key, .value = value }}) != null) return error.InvalidMetadata;
+        // A Debug allocator may take a cancelable lock.
+        const protection = o.io.swapCancelProtection(.blocked);
+        defer _ = o.io.swapCancelProtection(protection);
+        const entry: model.Metadata.Entry = .{ .key = try o.arena.dupe(u8, key), .value = try o.arena.dupe(u8, value) };
+        try o.added.append(o.arena, entry);
+    }
+
+    /// Before `next.run()`: the credentials of this call instead of those it
+    /// had, such as a fresh token. Borrowed until `next.run()` returns; a
+    /// provider is asked right before sending.
+    pub fn setCredentials(ctx: *ClientContext, chosen: Credentials) void {
+        outgoingOf(ctx).credentials = chosen;
+    }
+
+    /// After `next.run()` of this link has returned success: the server's
+    /// response, a failure included. Null before it, and when it failed.
+    pub fn response(ctx: *ClientContext) ?*const model.Response {
+        const o = outgoingOf(ctx);
+        if (!o.response_visible) return null;
+        return if (o.response) |*r| r else null;
+    }
+};
+
+fn outgoingOf(ctx: *ClientContext) *Outgoing {
+    return @ptrCast(@alignCast(ctx));
+}
+
+/// `ClientNext.run`. Internal to the module.
+pub fn runNext(next: *ClientNext) CallError!void {
+    const link: *Outgoing.Link = @ptrCast(@alignCast(next));
+    return link.runNext();
 }
 
 pub const CallOptions = struct {
@@ -193,7 +290,9 @@ pub fn call(client: *RawClient, io: std.Io, ctx: core.Context, route: model.Rout
         .credentials = options.credentials orelse client.default_credentials,
         .diagnostics = options.diagnostics,
     };
-    try outgoing.send();
+    const outcome = outgoing.runLayer(0);
+    if (outgoing.canceled_seen) outgoing.keepCancelation();
+    try outcome;
     return .{ .response = outgoing.response.?, .request_id = request_id, .sent = outgoing.sent, .arena = arena };
 }
 
@@ -223,10 +322,91 @@ const Outgoing = struct {
     request: []const u8,
     /// The application's metadata, checked.
     metadata: []const model.Metadata.Entry,
+    /// What middleware added, in the arena.
+    added: std.ArrayList(model.Metadata.Entry) = .empty,
     credentials: Credentials,
     diagnostics: ?*transport.Diagnostics,
     response: ?model.Response = null,
     sent: bool = false,
+    /// `response` is what the running link's `next.run()` returned.
+    response_visible: bool = false,
+    /// A link called `next.run()` twice: the call fails with
+    /// `MiddlewareFailed`.
+    violation: bool = false,
+    /// A `Canceled` of the caller's task was turned into `Cancelled` or
+    /// `DeadlineExceeded`, and the cancelation re-armed.
+    canceled_seen: bool = false,
+
+    /// Runs link `index` and all inside it; the transport's call past the
+    /// last link. Errors come in the names of `CallError`.
+    fn runLayer(o: *Outgoing, index: usize) CallError!void {
+        const links = o.client.middleware;
+        if (index == links.len) return o.send();
+        var link: Link = .{ .outgoing = o, .index = index };
+        const result = links[index].run(links[index].ptr, @ptrCast(o), @ptrCast(&link));
+        // A second next.run() decides, whatever the links did with it.
+        if (o.violation) return error.MiddlewareFailed;
+        // An error the link returns is the outcome.
+        result catch |err| return o.linkError(err);
+        if (!link.called) {
+            o.warn("returned success without calling next.run()");
+            return error.MiddlewareFailed;
+        }
+        // An error from inside that the link swallowed stays the outcome.
+        if (link.inner) |err| return err;
+    }
+
+    const Link = struct {
+        outgoing: *Outgoing,
+        index: usize,
+        called: bool = false,
+        /// What `next.run()` returned, when it failed.
+        inner: ?CallError = null,
+
+        fn runNext(link: *Link) CallError!void {
+            const o = link.outgoing;
+            if (link.called) {
+                o.violation = true;
+                o.warn("called next.run() twice");
+                return error.MiddlewareFailed;
+            }
+            link.called = true;
+            o.response_visible = false;
+            o.runLayer(link.index + 1) catch |err| {
+                link.inner = err;
+                o.response_visible = false;
+                return err;
+            };
+            o.response_visible = true;
+        }
+    };
+
+    /// An error a link returned, in the names of `CallError`: a cancelation
+    /// of the caller's task is re-armed, an error outside the set is
+    /// `MiddlewareFailed`.
+    fn linkError(o: *Outgoing, err: anyerror) CallError {
+        if (err == error.Canceled) return o.canceled();
+        inline for (@typeInfo(CallError).error_set.error_names.?) |name| {
+            if (err == @field(CallError, name)) return @field(CallError, name);
+        }
+        return error.MiddlewareFailed;
+    }
+
+    fn warn(o: *Outgoing, comptime what: []const u8) void {
+        // The log may take a cancelable lock; a cancelation of the caller stays.
+        const protection = o.io.swapCancelProtection(.blocked);
+        defer _ = o.io.swapCancelProtection(protection);
+        log.warn("client middleware of {s}.v{d}.{s} " ++ what ++ "; the call fails with MiddlewareFailed", .{ o.route.service, o.route.version, o.route.method });
+    }
+
+    /// The call saw the caller's task canceled and re-armed the cancelation;
+    /// a link may have met it again at a cancelation point of its own and
+    /// swallowed it. Re-arms it once more, so that the caller's next
+    /// cancelation point sees it whatever the links did.
+    fn keepCancelation(o: *Outgoing) void {
+        o.io.checkCancel() catch {};
+        o.io.recancel();
+    }
 
     /// Asks a provider for the credentials, encodes them, sends the request
     /// and takes the response. The credentials of the call live in an arena
@@ -281,11 +461,11 @@ const Outgoing = struct {
     }
 
     /// The engine's keys first (the span of the call, the credentials), then
-    /// the application's; in the arena of the call.
+    /// the application's, then those of middleware; in the arena of the call.
     fn requestMetadata(o: *Outgoing, authorization: ?[]const u8) error{OutOfMemory}![]const model.Metadata.Entry {
         const protection = o.io.swapCancelProtection(.blocked);
         defer _ = o.io.swapCancelProtection(protection);
-        var list: std.ArrayList(model.Metadata.Entry) = try .initCapacity(o.arena, 3 + o.metadata.len);
+        var list: std.ArrayList(model.Metadata.Entry) = try .initCapacity(o.arena, 3 + o.metadata.len + o.added.items.len);
         if (o.operation.trace) |trace| {
             const buffer = try o.arena.create([core.w3c.traceparent_len]u8);
             list.appendAssumeCapacity(.{ .key = core.w3c.traceparent_header, .value = core.w3c.formatTraceparent(trace, buffer) });
@@ -296,6 +476,7 @@ const Outgoing = struct {
         }
         if (authorization) |value| list.appendAssumeCapacity(.{ .key = "authorization", .value = value });
         list.appendSliceAssumeCapacity(o.metadata);
+        list.appendSliceAssumeCapacity(o.added.items);
         return list.items;
     }
 
@@ -324,6 +505,7 @@ const Outgoing = struct {
     /// `Cancelled`.
     fn canceled(o: *Outgoing) CallError {
         o.io.recancel();
+        o.canceled_seen = true;
         o.operation.check(now(o.io)) catch |err| return err;
         return error.Cancelled;
     }

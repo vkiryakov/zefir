@@ -626,3 +626,208 @@ test "a permission check in middleware sees the identity of the authenticator" {
     try expectFailure(&anonymous, failures.unauthenticated);
     try testing.expectEqual(@as(u32, 1), who.calls.load(.acquire));
 }
+
+const ClientMiddleware = middleware.ClientMiddleware;
+const ClientMiddlewareFn = middleware.ClientMiddlewareFn;
+const ClientNext = middleware.ClientNext;
+const ClientContext = RawClient.ClientContext;
+
+/// Answers with the values of `x-from` in the request, each followed by ';'.
+const Header = struct {
+    fn handle(_: *Header, ctx: *Context, _: []const u8) anyerror![]const u8 {
+        var values = ctx.metadata().getAll("x-from");
+        var list: std.ArrayList(u8) = .empty;
+        while (values.next()) |value| {
+            try list.appendSlice(ctx.allocator(), value);
+            try list.append(ctx.allocator(), ';');
+        }
+        return list.items;
+    }
+};
+
+/// A client function link with a name: it adds `x-from: <name>`.
+fn clientTraced(comptime name: []const u8) ClientMiddlewareFn {
+    return struct {
+        fn run(ctx: *ClientContext, next: *ClientNext) anyerror!void {
+            trail.add("{s}>", name);
+            defer trail.add("<{s}", name);
+            try ctx.addMetadata("x-from", name);
+            return next.run();
+        }
+    }.run;
+}
+
+/// A client link the test steers, and what it saw.
+const ClientProbe = struct {
+    name: []const u8,
+    mode: Mode = .pass,
+    /// Set with `ctx.setCredentials` before `next.run()`.
+    credentials: ?Credentials = null,
+    inner: ?anyerror = null,
+    response_before: bool = false,
+    response_status: ?enum { ok, failure } = null,
+    request_id: [16]u8 = undefined,
+    has_deadline: bool = false,
+    reserved_key: ?anyerror = null,
+
+    const Mode = enum {
+        /// `next.run()` and its outcome.
+        pass,
+        /// `error.Unavailable` without `next.run()`: an open circuit breaker.
+        breaker,
+        /// Success without `next.run()`.
+        stop,
+        /// An error outside `CallError` before `next.run()`.
+        foreign_before,
+        /// `next.run()`, then an error outside `CallError`.
+        foreign_after,
+        /// `next.run()` twice; the second's outcome.
+        twice,
+        /// `next.run()` twice, errors swallowed, success.
+        twice_swallow,
+        /// `next.run()`, its error swallowed, success.
+        swallow,
+        /// `next.run()`, then `error.ResponseTooLarge` whatever it returned.
+        replace,
+    };
+
+    fn reset(p: *ClientProbe, mode: Mode) void {
+        p.* = .{ .name = p.name, .mode = mode, .credentials = p.credentials };
+    }
+
+    pub fn run(p: *ClientProbe, ctx: *ClientContext, next: *ClientNext) anyerror!void {
+        trail.add("{s}>", p.name);
+        defer trail.add("<{s}", p.name);
+        p.response_before = ctx.response() != null;
+        p.request_id = ctx.requestId();
+        p.has_deadline = ctx.operation().deadline != null;
+        if (ctx.addMetadata("authorization", "Bearer x")) |_| {} else |err| p.reserved_key = err;
+        try ctx.addMetadata("x-from", p.name);
+        if (p.credentials) |chosen| ctx.setCredentials(chosen);
+        switch (p.mode) {
+            .breaker => return error.Unavailable,
+            .stop => return,
+            .foreign_before => return error.RedisDown,
+            else => {},
+        }
+        const result = next.run();
+        if (result) |_| {} else |err| p.inner = err;
+        p.response_status = if (ctx.response()) |response| switch (response.status) {
+            .ok => .ok,
+            .failure => .failure,
+        } else null;
+        return switch (p.mode) {
+            .pass => result,
+            .foreign_after => error.RedisDown,
+            .twice => next.run(),
+            .twice_swallow => next.run() catch {},
+            .swallow => {},
+            .replace => error.ResponseTooLarge,
+            .breaker, .stop, .foreign_before => unreachable,
+        };
+    }
+};
+
+test "client middleware: in order around the transport; its metadata and credentials reach the server; response() after next.run()" {
+    const io = testing.io;
+    trail = .{};
+    var tokens: Tokens = .{};
+    var who: Who = .{};
+    var header: Header = .{};
+    var probe: ClientProbe = .{ .name = "c2", .credentials = .{ .bearer = "alice" } };
+    var f: Fixture = undefined;
+    try f.start(io, testing.allocator, .{
+        .transport = undefined,
+        .authenticator = .init(&tokens),
+        .methods = &.{
+            .{ .route = routeOf("who"), .handler = handlerOf(&who) },
+            .{ .route = routeOf("header"), .handler = handlerOf(&header) },
+        },
+    }, .{ .transport = undefined, .middleware = &.{ .of(clientTraced("c1")), .of(&probe) } });
+    defer f.stop(io);
+
+    // The client has no credentials; the link sets them.
+    var result = try f.call(io, "who", .{ .metadata = &.{.{ .key = "x-from", .value = "app" }} });
+    const request_id = result.request_id;
+    try expectBody(&result, "alice@t-1");
+    try trail.expect(&.{ "c1>", "c2>", "<c2", "<c1" });
+    try testing.expect(!probe.response_before);
+    try testing.expectEqual(@as(@TypeOf(probe.response_status), .ok), probe.response_status);
+    try testing.expectEqualSlices(u8, &request_id, &probe.request_id);
+    try testing.expect(probe.has_deadline);
+    try testing.expectEqual(@as(?anyerror, error.InvalidMetadata), probe.reserved_key);
+
+    // The application's metadata first, then that of the links in order.
+    var echoed = try f.call(io, "header", .{ .metadata = &.{.{ .key = "x-from", .value = "app" }} });
+    try expectBody(&echoed, "app;c1;c2;");
+    // A failure of the server is a response too.
+    var refused = try f.call(io, "nothing", .{});
+    try expectFailure(&refused, failures.unknown_method);
+    try testing.expectEqual(@as(@TypeOf(probe.response_status), .failure), probe.response_status);
+    trail.count = 0;
+}
+
+test "the rules of the client's next.run(): a breaker, no success without it, foreign errors, once, swallowed errors stay" {
+    const io = testing.io;
+    // Links that break the rules are logged as warnings, expected here.
+    const log_level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = log_level;
+    trail = .{};
+    var who: Who = .{};
+    var outer: ClientProbe = .{ .name = "outer" };
+    var inner: ClientProbe = .{ .name = "inner" };
+    var f: Fixture = undefined;
+    try f.start(io, testing.allocator, .{
+        .transport = undefined,
+        .methods = &.{.{ .route = routeOf("who"), .handler = handlerOf(&who) }},
+    }, .{ .transport = undefined, .middleware = &.{ .of(&outer), .of(&inner) } });
+    defer f.stop(io);
+
+    const Case = struct {
+        outer: ClientProbe.Mode = .pass,
+        inner: ClientProbe.Mode = .pass,
+        /// What the transport's next call fails with.
+        transport: ?MemoryTransport.InjectedError = null,
+        /// Null: success.
+        expected: ?RawClient.CallError,
+        sent: bool,
+        /// What the outer link's next.run() returned.
+        outer_saw: ?anyerror,
+    };
+    const cases = [_]Case{
+        .{ .expected = null, .sent = true, .outer_saw = null },
+        .{ .inner = .breaker, .expected = error.Unavailable, .sent = false, .outer_saw = error.Unavailable },
+        .{ .inner = .stop, .expected = error.MiddlewareFailed, .sent = false, .outer_saw = error.MiddlewareFailed },
+        .{ .inner = .foreign_before, .expected = error.MiddlewareFailed, .sent = false, .outer_saw = error.MiddlewareFailed },
+        .{ .inner = .foreign_after, .expected = error.MiddlewareFailed, .sent = true, .outer_saw = error.MiddlewareFailed },
+        .{ .inner = .twice, .expected = error.MiddlewareFailed, .sent = true, .outer_saw = error.MiddlewareFailed },
+        .{ .inner = .twice_swallow, .outer = .swallow, .expected = error.MiddlewareFailed, .sent = true, .outer_saw = error.MiddlewareFailed },
+        .{ .inner = .replace, .expected = error.ResponseTooLarge, .sent = true, .outer_saw = error.ResponseTooLarge },
+        // Errors of the transport reach the links in the client's names.
+        .{ .transport = error.Timeout, .expected = error.DeadlineExceeded, .sent = false, .outer_saw = error.DeadlineExceeded },
+        .{ .transport = error.Unexpected, .expected = error.TransportFailed, .sent = false, .outer_saw = error.TransportFailed },
+        // A swallowed error stays the outcome.
+        .{ .transport = error.Closed, .inner = .swallow, .expected = error.ClientClosed, .sent = false, .outer_saw = error.ClientClosed },
+        .{ .transport = error.Closed, .outer = .swallow, .expected = error.ClientClosed, .sent = false, .outer_saw = error.ClientClosed },
+    };
+    for (cases, 0..) |case, i| {
+        errdefer std.debug.print("case {d}\n", .{i});
+        outer.reset(case.outer);
+        inner.reset(case.inner);
+        if (case.transport) |err| f.memory.failNext(err);
+        const before = who.calls.load(.acquire);
+        if (f.call(io, "who", .{})) |result| {
+            var r = result;
+            try testing.expectEqual(@as(?RawClient.CallError, null), case.expected);
+            try expectBody(&r, "anonymous");
+        } else |err| {
+            errdefer std.debug.print("expected {?t}, got {t}\n", .{ case.expected, err });
+            try testing.expect(case.expected != null and case.expected.? == err);
+        }
+        try testing.expectEqual(case.sent, who.calls.load(.acquire) > before);
+        try testing.expectEqual(case.outer_saw, outer.inner);
+        if (case.outer_saw != null) try testing.expect(outer.response_status == null);
+    }
+    trail.count = 0;
+}

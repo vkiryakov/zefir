@@ -74,6 +74,14 @@ pub const Middleware = middleware.Middleware;
 pub const MiddlewareFn = middleware.MiddlewareFn;
 /// The rest of the server's chain behind one link.
 pub const Next = middleware.Next;
+/// One link of the client's middleware: a function or an object.
+pub const ClientMiddleware = middleware.ClientMiddleware;
+/// A middleware function of the client, without state.
+pub const ClientMiddlewareFn = middleware.ClientMiddlewareFn;
+/// The rest of the client's chain behind one link.
+pub const ClientNext = middleware.ClientNext;
+/// What middleware of the client sees of one outgoing call.
+pub const ClientContext = RawClient.ClientContext;
 
 /// The client side of a transport.
 pub const ClientTransport = @import("ClientTransport.zig");

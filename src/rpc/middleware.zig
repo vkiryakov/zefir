@@ -52,6 +52,8 @@ const std = @import("std");
 const engine_context = @import("engine/Context.zig");
 const Context = engine_context.Context;
 const Handler = @import("engine/RawServer.zig").Handler;
+const RawClient = @import("engine/RawClient.zig");
+const ClientContext = RawClient.ClientContext;
 
 const log = std.log.scoped(.rpc);
 
@@ -81,6 +83,43 @@ pub const Next = opaque {
     pub fn run(next: *Next) anyerror!void {
         const link: *Chain.Link = @ptrCast(@alignCast(next));
         return link.runNext();
+    }
+};
+
+/// One link of the client's chain, around the transport's call in the
+/// caller's task. `ptr` is null for a function without state, the object
+/// for middleware with state. Build it with `of`.
+///
+/// The rules are those of the server: `next.run()` exactly once, a second
+/// call fails the call with `MiddlewareFailed` whatever the links do next,
+/// and an error swallowed by a link stays the outcome. Returning an error
+/// without `next.run()` is fine, as a circuit breaker does; success without
+/// it is `MiddlewareFailed`. `next.run()` returns errors in the names of
+/// `rpc.RawClient.CallError`; a link may replace the outcome with one of
+/// them, and any other error becomes `MiddlewareFailed`.
+pub const ClientMiddleware = struct {
+    ptr: ?*anyopaque = null,
+    run: *const fn (ptr: ?*anyopaque, ctx: *ClientContext, next: *ClientNext) anyerror!void,
+
+    /// The link of `item`: a function of type `rpc.ClientMiddlewareFn`, or
+    /// a pointer to an object with
+    /// `pub fn run(self: *@This(), ctx: *rpc.ClientContext, next: *rpc.ClientNext) anyerror!void`.
+    /// The object is borrowed: it must outlive the client. Anything else
+    /// stops the build with a message that names what to write.
+    pub fn of(item: anytype) ClientMiddleware {
+        return linkOf(ClientMiddleware, ClientContext, ClientNext, "rpc.ClientMiddleware.of", "fn (ctx: *rpc.ClientContext, next: *rpc.ClientNext) anyerror!void", item);
+    }
+};
+
+/// A middleware function of the client, without state.
+pub const ClientMiddlewareFn = fn (ctx: *ClientContext, next: *ClientNext) anyerror!void;
+
+/// The rest of the client's chain behind one link.
+pub const ClientNext = opaque {
+    /// Runs the links after this one, then the transport's call, and
+    /// returns their outcome. Exactly once per link.
+    pub fn run(next: *ClientNext) anyerror!void {
+        return RawClient.runNext(next);
     }
 };
 

@@ -299,6 +299,7 @@ pub fn build(b: *std.Build) void {
         .{ "middleware object without run", "rpc.Middleware.of: compile_errors.test.middleware object without run.NoRun has no method run; expected " ++ run_signature },
         .{ "middleware object by value", "rpc.Middleware.of: expected fn (ctx: *rpc.Context, next: *rpc.Next) anyerror!void, or a pointer to a type with " ++ run_signature ++ "; got compile_errors.Counter" },
         .{ "middleware run with an inferred error set", "rpc.Middleware.of: compile_errors.test.middleware run with an inferred error set.Inferred.run has another signature; expected " ++ run_signature },
+        .{ "client middleware with the server's signature", "rpc.ClientMiddleware.of: compile_errors.test.client middleware with the server's signature.ServerSide.run has another signature; expected pub fn run(self: *@This(), ctx: *rpc.ClientContext, next: *rpc.ClientNext) anyerror!void" },
     }, 0..) |case, i| {
         const compile = b.addTest(.{
             .name = b.fmt("rpc-compile-error-{d}", .{i}),
