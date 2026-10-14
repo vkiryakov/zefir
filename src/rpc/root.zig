@@ -48,6 +48,9 @@ pub const implement = contract.implement;
 /// The server of an application: the handlers of its contracts on a
 /// transport, with JSON, validation and middleware.
 pub const Server = @import("app/Server.zig");
+/// The client of an application: it calls the methods of contracts with
+/// JSON and validation; `client.call(io, ctx, UserApi.getUser, request, .{})`.
+pub const Client = @import("app/Client.zig");
 
 pub const Route = model.Route;
 pub const Metadata = model.Metadata;
@@ -141,4 +144,5 @@ test {
     _ = @import("app/violations.zig");
     _ = @import("app/Server.zig");
     _ = @import("app/server_tests.zig");
+    _ = @import("app/Client.zig");
 }

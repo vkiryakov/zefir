@@ -12,6 +12,8 @@ const Context = @import("../engine/Context.zig").Context;
 const middleware = @import("../middleware.zig");
 const MiddlewareFn = middleware.MiddlewareFn;
 const Next = middleware.Next;
+const ClientContext = @import("../engine/RawClient.zig").ClientContext;
+const ClientNext = middleware.ClientNext;
 
 /// The backward branches the build of a server may take, the checks
 /// included: a service may have hundreds of methods and links, and the
@@ -181,10 +183,10 @@ fn methodProblem(comptime T: type, comptime label: []const u8, comptime method_n
 }
 
 /// `F` as a message shows it: a function as it is written, with
-/// `*rpc.Context` and `*rpc.Next` and `!` for an inferred error set, where
-/// `@typeName` names the module's own types and spells out how to get the
-/// set from the function.
-fn typeName(comptime F: type) []const u8 {
+/// `*rpc.Context`, `*rpc.Next`, `*rpc.ClientContext`, `*rpc.ClientNext`
+/// and `!` for an inferred error set, where `@typeName` names the module's
+/// own types and spells out how to get the set from the function.
+pub fn typeName(comptime F: type) []const u8 {
     const info = switch (@typeInfo(F)) {
         .@"fn" => |info| info,
         else => return @typeName(F),
@@ -206,6 +208,8 @@ fn typeName(comptime F: type) []const u8 {
 fn publicName(comptime T: type) []const u8 {
     if (T == *Context) return "*rpc.Context";
     if (T == *Next) return "*rpc.Next";
+    if (T == *ClientContext) return "*rpc.ClientContext";
+    if (T == *ClientNext) return "*rpc.ClientNext";
     return @typeName(T);
 }
 

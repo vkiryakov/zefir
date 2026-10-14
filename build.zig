@@ -365,10 +365,13 @@ pub fn build(b: *std.Build) void {
     // message next to its name (the whole text after "error: "), and the
     // notes that lead to the user's code: those of a contract lead through
     // the return type of rpc.Contract, that of rpc.implement straight to the
-    // call. A type declared in a file is named after the file.
+    // call, that of rpc.Client.call through the type of its request. A type
+    // declared in a file is named after the file.
     const contract_notes: []const []const u8 = &.{ "note: called at comptime here", "note: generic function instantiated here" };
     const implement_notes: []const []const u8 = &.{"note: called at comptime here"};
     const server_notes: []const []const u8 = &.{"note: called at comptime here"};
+    const client_notes: []const []const u8 = &.{"note: called at comptime here"};
+    const call_notes: []const []const u8 = &.{ "note: called at comptime here", "note: called at comptime here", "note: generic function instantiated here" };
     for ([_]struct { []const u8, []const u8, []const []const u8 }{
         .{ "contract_name", "rpc: contract \"user service\": the name must be 1 to 64 characters from [A-Za-z0-9_-]", contract_notes },
         .{ "contract_version", "rpc: contract \"users\": .version must be 1 to 65535, got 0", contract_notes },
@@ -399,6 +402,9 @@ pub fn build(b: *std.Build) void {
         .{ "server_same_route", "rpc.Server.init: server_same_route.UserHandler and server_same_route.OtherUserHandler both serve users.v1", server_notes },
         .{ "server_auth_without_authenticator", "rpc.Server.init: server_auth_without_authenticator.UserHandler.getUser requires auth, but .authenticator is not set", server_notes },
         .{ "server_middleware", "rpc.Server.init: .middleware[1] must be fn (*rpc.Context, *rpc.Next) anyerror!void or a pointer to a type with pub fn run(self, *rpc.Context, *rpc.Next) anyerror!void", server_notes },
+        .{ "client_unknown_option", "rpc.Client.init: unknown option .timeout; the options are .transport, .credentials, .middleware, .default_timeout, .max_pending and .max_response_bytes", client_notes },
+        .{ "client_credentials_literal", "rpc.Client.init: .credentials = .bearer needs a value, such as .{ .bearer = token }; only .none stands alone", client_notes },
+        .{ "client_not_a_method", "rpc.Client.call: the method must be a method of a contract, such as UserApi.getUser; got the contract users.v1 itself", call_notes },
     }) |case| {
         const compile = b.addTest(.{
             .name = b.fmt("rpc-compile-error-{s}", .{case[0]}),
