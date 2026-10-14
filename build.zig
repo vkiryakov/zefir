@@ -302,6 +302,8 @@ pub fn build(b: *std.Build) void {
         .{ "middleware function with an inferred error set", "rpc.Middleware.of: a middleware function is fn (ctx: *rpc.Context, next: *rpc.Next) anyerror!void, with anyerror written out, not inferred; got fn (*engine.Context.Context, *middleware.Next) @typeInfo(@typeInfo(@TypeOf(compile_errors.inferredLink)).@\"fn\".return_type.?).error_union.error_set!void" },
         .{ "middleware object behind a const pointer", "rpc.Middleware.of: the middleware must be mutable, declared with var; got *const compile_errors.Counter" },
         .{ "client middleware with the server's signature", "rpc.ClientMiddleware.of: compile_errors.test.client middleware with the server's signature.ServerSide.run has another signature; expected pub fn run(self: *@This(), ctx: *rpc.ClientContext, next: *rpc.ClientNext) anyerror!void" },
+        .{ "conformance harness by value", "rpc.testing.conformance.run: pass a pointer to the harness, e.g. &harness; got compile_errors.Harness" },
+        .{ "conformance harness without tearDown", "rpc.testing.conformance.run: compile_errors.test.conformance harness without tearDown.NoTearDown has no method tearDown; expected pub fn tearDown(self: *@This(), io: std.Io, pair: rpc.testing.conformance.Pair) void" },
     }, 0..) |case, i| {
         const compile = b.addTest(.{
             .name = b.fmt("rpc-compile-error-{d}", .{i}),

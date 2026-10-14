@@ -248,3 +248,39 @@ test "client middleware with the server's signature" {
     var link: ServerSide = .{};
     _ = rpc.ClientMiddleware.of(&link);
 }
+
+/// A conformance harness with both methods.
+const Harness = struct {
+    memory: rpc.testing.MemoryTransport = undefined,
+
+    pub fn setUp(h: *Harness, io: std.Io, gpa: std.mem.Allocator) !rpc.testing.conformance.Pair {
+        _ = io;
+        h.memory = try .init(gpa, .{});
+        return .{ .client = h.memory.clientTransport(), .server = h.memory.serverTransport() };
+    }
+
+    pub fn tearDown(h: *Harness, io: std.Io, pair: rpc.testing.conformance.Pair) void {
+        _ = pair;
+        h.memory.deinit(io);
+    }
+};
+
+test "conformance harness by value" {
+    const harness: Harness = .{};
+    var report = try rpc.testing.conformance.run(std.testing.io, std.testing.allocator, harness, .{});
+    report.deinit();
+}
+
+test "conformance harness without tearDown" {
+    const NoTearDown = struct {
+        memory: rpc.testing.MemoryTransport = undefined,
+        pub fn setUp(h: *@This(), io: std.Io, gpa: std.mem.Allocator) !rpc.testing.conformance.Pair {
+            _ = io;
+            h.memory = try .init(gpa, .{});
+            return .{ .client = h.memory.clientTransport(), .server = h.memory.serverTransport() };
+        }
+    };
+    var harness: NoTearDown = .{};
+    var report = try rpc.testing.conformance.run(std.testing.io, std.testing.allocator, &harness, .{});
+    report.deinit();
+}
