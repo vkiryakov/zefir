@@ -38,16 +38,19 @@ test "connect, flush, rtt and close" {
 }
 
 fn heartbeat(io: Io) !void {
+    // A PONG may come 300 ms late before the connection counts as gone:
+    // on a busy machine, 100 ms was not always enough.
     var client: nats.Client = try .init(testing.allocator, io, .{
         .servers = &.{e2e.servers.plain},
         .ping_interval = .fromMilliseconds(50),
-        .max_outstanding_pings = 2,
+        .max_outstanding_pings = 6,
     });
     defer client.deinit();
     try client.connect();
-    // Eight heartbeat PINGs, each answered in time.
-    try io.sleep(.fromMilliseconds(400), .awake);
+    // Twenty heartbeat PINGs, each answered: the connection never dropped.
+    try io.sleep(.fromMilliseconds(1000), .awake);
     try testing.expect(client.isConnected());
+    try testing.expectEqual(0, client.stats().reconnects);
     try client.flush(.{});
 }
 
