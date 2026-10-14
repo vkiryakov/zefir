@@ -29,6 +29,9 @@ const Engine = struct {
     len: usize = 0,
     reply: rpc.transport.Reply = undefined,
     started: std.Io.Event = .unset,
+    /// `start` keeps the reply but refuses the call, as an engine without
+    /// a free task would.
+    fail_start: bool = false,
 
     const vtable: rpc.transport.Dispatcher.VTable = .{ .service = service, .admit = admit, .fail = fail, .routeStats = routeStats };
     const incoming_vtable: rpc.transport.Incoming.VTable = .{ .body = body, .start = start, .abandon = abandon, .cancel = cancel };
@@ -67,6 +70,7 @@ const Engine = struct {
         const e: *Engine = @ptrCast(@alignCast(ptr));
         e.reply = reply;
         e.started.set(io);
+        if (e.fail_start) return .{ .code = .resource_exhausted, .app_code = "rpc.resource_exhausted", .message = "No task" };
         return null;
     }
 
@@ -106,12 +110,37 @@ pub fn main(init: std.process.Init) !void {
     try memory.serverTransport().start(io, engine.dispatcher());
 
     if (std.mem.eql(u8, case, "release_twice")) {
-        // The client still waits, so the call is alive for the second release.
+        // The client still waits.
         var client = try io.concurrent(callOnce, .{ memory.clientTransport(), io, init.gpa, .fromSeconds(5) });
         _ = &client;
         try engine.started.wait(io);
         engine.reply.release(io, .completed);
         engine.reply.release(io, .completed);
+    } else if (std.mem.eql(u8, case, "release_twice_after_return")) {
+        // The client has its response and is gone: the call stays until
+        // the transport's deinit, so the second release is still caught.
+        var client = try io.concurrent(callOnce, .{ memory.clientTransport(), io, init.gpa, .fromSeconds(5) });
+        try engine.started.wait(io);
+        try engine.reply.send(io, &.{ .status = .ok });
+        try client.await(io);
+        engine.reply.release(io, .completed);
+        engine.reply.release(io, .completed);
+    } else if (std.mem.eql(u8, case, "send_after_release")) {
+        var client = try io.concurrent(callOnce, .{ memory.clientTransport(), io, init.gpa, .fromSeconds(5) });
+        _ = &client;
+        try engine.started.wait(io);
+        engine.reply.release(io, .completed);
+        try engine.reply.send(io, &.{ .status = .ok });
+    } else if (std.mem.eql(u8, case, "release_after_failed_start")) {
+        // The client gets the refusal at once and is gone.
+        engine.fail_start = true;
+        try callOnce(memory.clientTransport(), io, init.gpa, .fromSeconds(5));
+        engine.reply.release(io, .completed);
+    } else if (std.mem.eql(u8, case, "another_io")) {
+        // The same functions behind another table: not the server's io.
+        var vtable = io.vtable.*;
+        const other: std.Io = .{ .userdata = io.userdata, .vtable = &vtable };
+        callOnce(memory.clientTransport(), other, init.gpa, .fromSeconds(1)) catch {};
     } else if (std.mem.eql(u8, case, "send_twice")) {
         var client = try io.concurrent(callOnce, .{ memory.clientTransport(), io, init.gpa, .fromSeconds(5) });
         try engine.started.wait(io);

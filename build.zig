@@ -362,7 +362,11 @@ pub fn build(b: *std.Build) void {
     });
     for ([_][2][]const u8{
         .{ "release_twice", "rpc.testing.MemoryTransport: release called twice for one call; release each call once" },
+        .{ "release_twice_after_return", "rpc.testing.MemoryTransport: release called twice for one call; release each call once" },
         .{ "send_twice", "rpc.testing.MemoryTransport: send called again for one call; send at most once, or once more after ResponseTooLarge" },
+        .{ "send_after_release", "rpc.testing.MemoryTransport: send called after release; release is the last call of a Reply" },
+        .{ "release_after_failed_start", "rpc.testing.MemoryTransport: Reply called after start returned a failure; no Reply call follows a failed start" },
+        .{ "another_io", "rpc.testing.MemoryTransport: call with another std.Io than the server's; pass the io the server started on" },
         .{ "deinit_in_use", "rpc.testing.MemoryTransport: deinit with calls not released; deinit the server and let every call return first" },
     }) |case| {
         const run = b.addRunArtifact(memory_panics);

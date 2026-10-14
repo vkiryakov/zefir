@@ -33,6 +33,13 @@
 //! `failNext` makes the next call fail, `breakLink` and `restoreLink`
 //! break the link in the middle of calls and bring it back.
 //!
+//! Every call keeps about 100 bytes until `deinit`, so that an engine that
+//! breaks the rules of `Reply` gets a panic that names the rule, never a
+//! use of freed memory: a second `send` (one more only after
+//! `ResponseTooLarge`), `send` after `release`, a second `release`, any
+//! `Reply` call after `start` returned a failure, a call not released by
+//! `deinit`.
+//!
 //! The allocator given to `init` must be thread-safe: calls and responses
 //! are allocated and freed from the tasks of clients and handlers. The
 //! transport stays at one address from `clientTransport` or
@@ -63,8 +70,11 @@ dispatcher: ?transport.Dispatcher = null,
 /// The `std.Io` the server started on: `call` checks in Debug that it gets
 /// the same.
 server_io: ?*const std.Io.VTable = null,
-/// Every call from its registration until it is released or refused.
+/// Every call from its registration until the server side is done with it:
+/// released, refused, abandoned or not started.
 calls: std.DoublyLinkedList = .{},
+/// The calls the server side is done with; `deinit` frees them.
+ended: std.DoublyLinkedList = .{},
 /// Calls in `admit` or `start`; `close` waits until there are none.
 settling: usize = 0,
 /// The hooks; the link is written under `mutex` by `breakLink`.
@@ -108,13 +118,12 @@ pub const Options = struct {
 
 const State = enum(u8) { idle, running, draining, closed };
 
-/// One call between the client's task and the engine. The client holds one
-/// reference until `call` returns, the server side the other until
-/// `Reply.release` (or until admission ends without a start).
+/// One call between the client's task and the engine; it lives until the
+/// transport's `deinit`.
 const Call = struct {
     transport: *MemoryTransport,
+    /// In `calls`, then in `ended`.
     node: std.DoublyLinkedList.Node = .{},
-    refs: std.atomic.Value(u8) = .init(2),
     slot: Pending.Slot,
     dispatcher: transport.Dispatcher,
     server_io: *const std.Io.VTable,
@@ -130,7 +139,15 @@ const Call = struct {
     sends: u8 = 0,
     retry_allowed: bool = false,
 
-    const Phase = enum { admitting, starting, running, released };
+    const Phase = enum {
+        admitting,
+        starting,
+        running,
+        released,
+        /// Refused at admission, abandoned, or its `start` returned a
+        /// failure: no `Reply` call may come.
+        not_started,
+    };
 
     /// Hands the response to the waiting client: a copy, since `response`
     /// is borrowed. A response for a client that has given up is dropped.
@@ -141,6 +158,11 @@ const Call = struct {
         {
             t.mutex.lockUncancelable(io);
             defer t.mutex.unlock(io);
+            switch (c.phase) {
+                .released => @panic("rpc.testing.MemoryTransport: send called after release; release is the last call of a Reply"),
+                .not_started => @panic(failed_start),
+                .admitting, .starting, .running => {},
+            }
             if (c.sends > 0 and !c.retry_allowed)
                 @panic("rpc.testing.MemoryTransport: send called again for one call; send at most once, or once more after ResponseTooLarge");
             c.sends += 1;
@@ -162,21 +184,23 @@ const Call = struct {
         if (closed) return error.Closed;
     }
 
-    /// The engine is done with the call: forget it, and free it once the
-    /// client is done too.
+    /// The engine is done with the call: it leaves the calls in flight.
     pub fn release(c: *Call, io: std.Io, disposition: Reply.Disposition) void {
         _ = disposition;
         const t = c.transport;
-        {
-            t.mutex.lockUncancelable(io);
-            defer t.mutex.unlock(io);
-            if (c.phase == .released) @panic("rpc.testing.MemoryTransport: release called twice for one call; release each call once");
-            c.phase = .released;
-            t.calls.remove(&c.node);
+        t.mutex.lockUncancelable(io);
+        defer t.mutex.unlock(io);
+        switch (c.phase) {
+            .released => @panic("rpc.testing.MemoryTransport: release called twice for one call; release each call once"),
+            .not_started => @panic(failed_start),
+            .admitting, .starting, .running => {},
         }
-        t.unref(io, c);
+        c.phase = .released;
+        t.end(c);
     }
 };
+
+const failed_start = "rpc.testing.MemoryTransport: Reply called after start returned a failure; no Reply call follows a failed start";
 
 /// A response on its way from `Reply.send` to the client, in memory of the
 /// transport's allocator.
@@ -217,10 +241,14 @@ pub fn init(gpa: std.mem.Allocator, options: Options) error{OutOfMemory}!MemoryT
 /// `call` has returned. Panics while a call is not released: the server
 /// still holds its `Reply`.
 pub fn deinit(t: *MemoryTransport, io: std.Io) void {
-    {
-        t.mutex.lockUncancelable(io);
-        defer t.mutex.unlock(io);
-        if (t.calls.first != null) @panic("rpc.testing.MemoryTransport: deinit with calls not released; deinit the server and let every call return first");
+    t.mutex.lockUncancelable(io);
+    if (t.calls.first != null) @panic("rpc.testing.MemoryTransport: deinit with calls not released; deinit the server and let every call return first");
+    t.mutex.unlock(io);
+    const protection = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(protection);
+    while (t.ended.popFirst()) |node| {
+        const c: *Call = @fieldParentPtr("node", node);
+        t.gpa.destroy(c);
     }
     t.pending.deinit();
     t.* = undefined;
@@ -273,7 +301,6 @@ pub fn call(t: *MemoryTransport, io: std.Io, request: *const transport.Request, 
     }
 
     const c = try t.register(io);
-    defer t.unref(io, c);
     defer t.releaseSlot(io, c.slot);
     if (std.debug.runtime_safety and c.server_io != io.vtable)
         @panic("rpc.testing.MemoryTransport: call with another std.Io than the server's; pass the io the server started on");
@@ -410,8 +437,8 @@ pub fn breakLink(t: *MemoryTransport, io: std.Io) void {
             .admitting => {},
             .starting => c.cancel_pending = true,
             .running => c.incoming.cancel(io),
-            // Released calls leave the list.
-            .released => unreachable,
+            // Calls the server side is done with leave the list.
+            .released, .not_started => unreachable,
         }
     }
     t.pending.failAll(io, error.ConnectionLost);
@@ -454,16 +481,22 @@ fn register(t: *MemoryTransport, io: std.Io) ClientTransport.CallError!*Call {
     return c;
 }
 
-/// The call leaves `admit` or `start` without running: the server side
-/// lets it go.
+/// The call leaves `admit` or `start` without running: refused,
+/// abandoned, or its `start` returned a failure.
 fn forget(t: *MemoryTransport, io: std.Io, c: *Call) void {
-    {
-        t.mutex.lockUncancelable(io);
-        defer t.mutex.unlock(io);
-        t.calls.remove(&c.node);
-        t.settle(io);
-    }
-    t.unref(io, c);
+    t.mutex.lockUncancelable(io);
+    defer t.mutex.unlock(io);
+    // The engine released a call whose start then returned a failure.
+    if (c.phase == .released) @panic(failed_start);
+    c.phase = .not_started;
+    t.end(c);
+    t.settle(io);
+}
+
+/// The server side is done with `c`; under `mutex`.
+fn end(t: *MemoryTransport, c: *Call) void {
+    t.calls.remove(&c.node);
+    t.ended.append(&c.node);
 }
 
 /// False when the server closed or the link broke while the call was in
@@ -499,13 +532,6 @@ fn cancelCall(t: *MemoryTransport, io: std.Io, c: *Call) void {
 fn settle(t: *MemoryTransport, io: std.Io) void {
     t.settling -= 1;
     if (t.settling == 0) t.settled.broadcast(io);
-}
-
-fn unref(t: *MemoryTransport, io: std.Io, c: *Call) void {
-    if (c.refs.fetchSub(1, .acq_rel) != 1) return;
-    const protection = io.swapCancelProtection(.blocked);
-    defer _ = io.swapCancelProtection(protection);
-    t.gpa.destroy(c);
 }
 
 /// `Pending.release`, which may free a response that came too late.
