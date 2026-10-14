@@ -3,7 +3,8 @@
 //! engine, and the `Reply` of every call, which publishes the response to
 //! the reply subject of the request.
 //!
-//! A receiving task waits only in `Conn.next`: everything it does with a
+//! A receiving task waits only in `Conn.next`, and before its first one
+//! until `start` has started every task: everything it does with a
 //! request runs with cancelation blocked, so `close` stops it there and
 //! never in the middle of a call. It does no I/O between `admit` and
 //! `start` but the copy of the body: a request is admitted, filled and
@@ -33,6 +34,9 @@ pub const State = struct {
     routes: []Route = &.{},
     /// The receiving tasks; `close` alone awaits and cancels them.
     group: std.Io.Group = .init,
+    /// Set once `start` has started every receiving task; they take no
+    /// request before, so a start that fails leaves no call behind.
+    started: std.Io.Event = .unset,
     /// Calls whose `Reply` the engine holds.
     live_calls: std.atomic.Value(usize) = .init(0),
 };
@@ -99,6 +103,8 @@ pub fn start(t: *Transport, io: std.Io, dispatcher: rpc.transport.Dispatcher) rp
     t.conn.flush(io, timeout) catch |err| return startError(null, err);
     s.dispatcher = dispatcher;
     s.routes = routes;
+    // No task waits on it: the group is empty.
+    s.started.reset();
     s.phase.store(.running, .release);
     for (routes) |*r| {
         s.group.concurrent(io, receive, .{ r, io }) catch |err| {
@@ -109,6 +115,7 @@ pub fn start(t: *Transport, io: std.Io, dispatcher: rpc.transport.Dispatcher) rp
             return err;
         };
     }
+    s.started.set(io);
 }
 
 fn startError(route: ?*const Route, err: Conn.Error) rpc.ServerTransport.StartError {
@@ -215,6 +222,8 @@ pub fn close(t: *Transport, io: std.Io) void {
 /// The receiving task of one route.
 fn receive(r: *Route, io: std.Io) void {
     const t = r.transport;
+    // A start that fails cancels the task here.
+    t.server.started.wait(io) catch return;
     while (true) {
         const message = t.conn.next(io, r.sub, .none) catch |err| switch (err) {
             error.Canceled => return,

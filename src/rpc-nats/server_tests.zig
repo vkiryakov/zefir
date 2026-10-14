@@ -310,6 +310,87 @@ test "start fails cleanly: denied subjects, no link, no answer to the flush" {
     }
 }
 
+/// `testing.io` whose `Group.concurrent` fails from call number `fail_at`
+/// on, after a pause in which the tasks started so far could take
+/// requests.
+const FailingSpawn = struct {
+    var vtable: std.Io.VTable = undefined;
+    var spawned: u32 = 0;
+    var fail_at: u32 = std.math.maxInt(u32);
+
+    fn io(fail_at_call: u32) std.Io {
+        vtable = testing.io.vtable.*;
+        vtable.groupConcurrent = groupConcurrent;
+        spawned = 0;
+        fail_at = fail_at_call;
+        return .{ .userdata = testing.io.userdata, .vtable = &vtable };
+    }
+
+    fn groupConcurrent(userdata: ?*anyopaque, group: *std.Io.Group, context: []const u8, context_alignment: std.mem.Alignment, start: *const fn (context: *const anyopaque) void) std.Io.ConcurrentError!void {
+        spawned += 1;
+        if (spawned >= fail_at) {
+            testing.io.sleep(.fromMilliseconds(50), .awake) catch {};
+            return error.ConcurrencyUnavailable;
+        }
+        return testing.io.vtable.groupConcurrent(userdata, group, context, context_alignment, start);
+    }
+};
+
+/// An adapter on `FakeConn` whose `flush`, when armed, also brings a request
+/// to `users.v1.getUser`: one that comes while the server starts.
+const RequestOnFlush = struct {
+    fake: *FakeConn,
+    armed: bool = false,
+
+    pub fn publish(a: *RequestOnFlush, io: std.Io, msg: Conn.OutMsg, timeout: std.Io.Timeout) Conn.Error!void {
+        return a.fake.publish(io, msg, timeout);
+    }
+    pub fn subscribe(a: *RequestOnFlush, io: std.Io, name: []const u8, queue: ?[]const u8, timeout: std.Io.Timeout) Conn.Error!Conn.Sub {
+        return a.fake.subscribe(io, name, queue, timeout);
+    }
+    pub fn next(a: *RequestOnFlush, io: std.Io, sub: Conn.Sub, timeout: std.Io.Timeout) Conn.Error!?Conn.InMsg {
+        return a.fake.next(io, sub, timeout);
+    }
+    pub fn drain(a: *RequestOnFlush, io: std.Io, sub: Conn.Sub) Conn.Error!void {
+        return a.fake.drain(io, sub);
+    }
+    pub fn unsubscribe(a: *RequestOnFlush, io: std.Io, sub: Conn.Sub) void {
+        a.fake.unsubscribe(io, sub);
+    }
+    pub fn flush(a: *RequestOnFlush, io: std.Io, timeout: std.Io.Timeout) Conn.Error!void {
+        try a.fake.flush(io, timeout);
+        if (!a.armed) return;
+        a.armed = false;
+        try a.fake.publish(io, .{ .subject = "users.v1.getUser", .reply_to = "_INBOX.test.1", .payload = "{}" }, .none);
+    }
+};
+
+test "a start that cannot start every receiving task takes no request with those it started" {
+    const io = FailingSpawn.io(3);
+    var fake: FakeConn = .init(testing.allocator, .{});
+    defer fake.deinit(io);
+    var adapter: RequestOnFlush = .{ .fake = &fake, .armed = true };
+    var bus: Transport = try .init(testing.allocator, .init(&adapter), .{});
+    defer bus.deinit(io);
+    const three = [_]rpc.Route{ get_user, list_users, .{ .service = "users", .version = 1, .method = "deleteUser" } };
+    var recorder: RecordingDispatcher = try .init(testing.allocator, .{ .routes = &three });
+    defer recorder.deinit(io);
+    try testing.expectError(error.ConcurrencyUnavailable, recorder.start(io, bus.serverTransport()));
+    // The task of getUser had its request for 50 ms and left it.
+    try testing.expectError(error.NoSuchCall, recorder.call(io, 0));
+    try testing.expectEqual(@as(usize, 0), fake.subscriptionCount(io));
+
+    // The next start works.
+    FailingSpawn.fail_at = std.math.maxInt(u32);
+    adapter.armed = true;
+    try recorder.start(io, bus.serverTransport());
+    try recorder.waitStarted(io, 1);
+    try recorder.respond(io, 0, &.{ .status = .ok });
+    try recorder.releaseCall(io, 0, .completed);
+    recorder.close(io);
+    try testing.expectEqual(@as(usize, 0), recorder.violations().len);
+}
+
 test "a route without a NATS subject is a configuration error" {
     const io = testing.io;
     var fake: FakeConn = .init(testing.allocator, .{});
