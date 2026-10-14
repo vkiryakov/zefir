@@ -57,12 +57,13 @@ pub fn send(r: Reply, io: std.Io, response: *const model.Response) SendError!voi
 
 /// The call is over: exactly once and last, after the handler has really
 /// ended, so the slot of the call stays taken until then. The transport
-/// removes the call from its tables here; once `release` returns, it calls
-/// `Incoming.cancel` of this call no more. With no `error.Canceled` to
-/// return, `release` must not swallow a cancelation request of the calling
-/// task: it locks with `lockUncancelable`, works under
-/// `io.swapCancelProtection(.blocked)`, or calls `io.recancel()` after a
-/// cancelation point returned `error.Canceled`.
+/// removes the call from its tables here; once `release` returns, no
+/// `Incoming.cancel` of this call runs any more: the engine frees the call.
+/// With no `error.Canceled` to return, `release` must not swallow a
+/// cancelation request of the calling task: it locks with
+/// `lockUncancelable`, works under `io.swapCancelProtection(.blocked)`, or
+/// calls `io.recancel()` after a cancelation point returned
+/// `error.Canceled`.
 pub fn release(r: Reply, io: std.Io, disposition: Disposition) void {
     r.vtable.release(r.ptr, io, disposition);
 }

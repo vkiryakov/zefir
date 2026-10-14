@@ -379,7 +379,9 @@ pub fn state(server: *const RawServer) State {
 }
 
 /// Frees the server. A server that has not stopped is stopped first, and
-/// `deinit` waits for it without a limit.
+/// `deinit` waits for it without a limit. No other task may still be in
+/// `wait`, `run` or `shutdown`: woken by the stop, such a task still reads
+/// the server.
 pub fn deinit(server: *RawServer, io: std.Io) void {
     // No cancelation point: a cancelation request of the caller stays.
     const protection = io.swapCancelProtection(.blocked);
@@ -640,7 +642,8 @@ fn leave(server: *RawServer, io: std.Io) void {
     if (server.inflight.fetchSub(1, .acq_rel) == 1) server.idle.set(io);
 }
 
-/// Frees a call that has ended and frees its place.
+/// Frees a call that has ended and frees its place. Internal to the module,
+/// for `Call`.
 pub fn retire(server: *RawServer, io: std.Io, call: *Call) void {
     // A Debug allocator may take a cancelable lock to capture a stack
     // trace, and would swallow a cancelation of the calling task.
@@ -652,7 +655,8 @@ pub fn retire(server: *RawServer, io: std.Io, call: *Call) void {
 
 /// `Incoming.start`: gives the call a supervisor, or puts it in the queue
 /// when `max_active_tasks` supervisors are at work. A failure only when no
-/// task could be started; the call is gone then.
+/// task could be started; the call is gone then. Internal to the module,
+/// for `Call`.
 pub fn schedule(server: *RawServer, io: std.Io, call: *Call) ?model.Failure {
     {
         server.mutex.lockUncancelable(io);

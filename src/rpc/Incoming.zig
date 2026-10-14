@@ -50,15 +50,15 @@ pub fn abandon(c: Incoming, io: std.Io) void {
 }
 
 /// The client gave up: a CANCEL frame came, or the connection of a direct
-/// transport broke (NATS has no such signal). Allowed from the moment
-/// `start` is entered until `reply.release` returns, also while `start`
-/// runs, but never past a `start` that returns a `Failure`: the call is
-/// gone then. A transport that cancels from another task than the one in
-/// `start` holds such a cancel until `start` returns, and drops it after a
-/// `Failure`, as `rpc.testing.MemoryTransport` does. It cancels the call
+/// transport broke (NATS has no such signal). Allowed once `start` has
+/// returned null, until `reply.release` returns, and every cancel must
+/// return before `release` does: the engine frees the call then. So the
+/// transport calls it under the lock that its `release` takes. A cancel
+/// that comes while `start` runs waits until `start` returns, and is
+/// dropped when `start` returned a `Failure` (the engine has freed the
+/// call), as `rpc.testing.MemoryTransport` does. `cancel` cancels the call
 /// and wakes its supervisor without locks: it never waits and never calls
-/// `Reply`, so the transport may call it under its own lock. A second call
-/// does nothing.
+/// `Reply`. A second call does nothing.
 pub fn cancel(c: Incoming, io: std.Io) void {
     c.vtable.cancel(c.ptr, io);
 }
