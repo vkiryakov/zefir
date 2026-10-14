@@ -2207,6 +2207,109 @@ test "servers that announce lame duck mode at every handshake are not hit in a t
     try testing.expect(count >= 3 and count <= 6);
 }
 
+/// The handshake, then a hang-up at once; then serves every connection
+/// after; counts them.
+fn serveHangUpThenServe(io: Io, listener: *net.Server, accepted: *std.atomic.Value(u32)) anyerror!void {
+    var first = true;
+    while (true) {
+        var peer: FakeServer.Peer = undefined;
+        try peer.accept(io, listener);
+        defer peer.close();
+        _ = accepted.fetchAdd(1, .monotonic);
+        handshake(&peer, golden.info_default) catch continue;
+        if (first) {
+            first = false;
+            continue;
+        }
+        answerPings(&peer) catch {};
+    }
+}
+
+fn holdSlot(io: Io, release: *Io.Event) void {
+    release.waitUncancelable(io);
+}
+
+test "an io out of concurrency during a reconnect is one more failed attempt: the client tries again" {
+    const tio = testing.io;
+    var listener = try FakeServer.listen(tio);
+    defer listener.deinit(tio);
+    var accepted: std.atomic.Value(u32) = .init(0);
+    var server = try tio.concurrent(serveHangUpThenServe, .{ tio, &listener, &accepted });
+    defer server.cancel(tio) catch {};
+    // The manager, the reader and the writer.
+    var threaded: Io.Threaded = .init(testing.allocator, .{ .concurrent_limit = .limited(3) });
+    defer threaded.deinit();
+    const cio = threaded.io();
+    var url: [64]u8 = undefined;
+    var client: Client = try .init(testing.allocator, cio, .{
+        .servers = &.{try FakeServer.url(&listener, &url)},
+        .reconnect = .{ .min_delay = .fromMilliseconds(300), .max_delay = .fromSeconds(1), .jitter = false },
+    });
+    defer client.deinit();
+    try client.connect();
+    try awaitState(&client, .reconnecting);
+    // The application takes the slots the reader and writer left, so the
+    // next attempt cannot start.
+    var release: Io.Event = .unset;
+    var slots: [2]?Io.Future(void) = .{ null, null };
+    defer {
+        release.set(cio);
+        for (&slots) |*slot| if (slot.*) |*f| f.await(cio);
+    }
+    const give_up = time.after(tio, .fromSeconds(5));
+    for (&slots) |*slot| {
+        while (slot.* == null) {
+            slot.* = cio.concurrent(holdSlot, .{ cio, &release }) catch null;
+            if (slot.* != null) break;
+            if (time.expired(tio, give_up)) return error.TestNoSlot;
+            try tio.sleep(.fromMilliseconds(1), .awake);
+        }
+    }
+    // Two waits pass without an attempt; the client stays.
+    try tio.sleep(.fromMilliseconds(800), .awake);
+    try testing.expectEqual(.reconnecting, client.state());
+    try testing.expectEqual(1, accepted.load(.monotonic));
+    release.set(cio);
+    for (&slots) |*slot| if (slot.*) |*f| {
+        f.await(cio);
+        slot.* = null;
+    };
+    try awaitState(&client, .connected);
+    try client.flush(quick);
+}
+
+test "a client closed after a lost connection reports no uptime" {
+    const io = testing.io;
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var record: Record = .{};
+    defer record.deinit();
+    const sessions = [_]Session{sessionHangUp};
+    var server = try io.concurrent(serveSessions, .{ io, &listener, &sessions, &record });
+    defer server.cancel(io) catch {};
+    var url: [64]u8 = undefined;
+    var client: Client = try .init(testing.allocator, io, .{ .servers = &.{try FakeServer.url(&listener, &url)}, .reconnect = .{ .enabled = false } });
+    defer client.deinit();
+    try client.connect();
+    try awaitState(&client, .closed);
+    try testing.expectEqual(.connection_lost, client.close_reason.?);
+    try testing.expect(client.stats().connected_for == null);
+}
+
+test "a client closed while its first connection fails to start ends what was made meanwhile" {
+    var client: Client = try .init(testing.allocator, testing.io, .{ .servers = &.{"nats://127.0.0.1:4222"}, .retry_initial_connect = true });
+    defer client.deinit();
+    // As connect() leaves it before it starts the manager.
+    client.status = .reconnecting;
+    const sub = try client.subscribe("early", .{});
+    defer sub.deinit();
+    try client.publish("early", "x");
+    @import("../engine/manager.zig").connectFailed(&client, error.ConcurrencyUnavailable);
+    try testing.expectError(error.ConnectionClosed, sub.next(.{ .timeout = .{ .duration = .{ .raw = .fromMilliseconds(100), .clock = .awake } } }));
+    // The publish that waited for a connection is counted as dropped.
+    try testing.expectEqual(1, client.stats().dropped_messages);
+}
+
 test "a requestMany past its deadline that nobody reads does not hold up a drain, nor count as pending" {
     const io = testing.io;
     var listener = try FakeServer.listen(io);

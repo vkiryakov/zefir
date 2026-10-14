@@ -53,6 +53,8 @@ pub const Exit = union(enum) {
     write: Connection.WriteError,
     /// The server is about to go away, and another one is in the pool.
     lame_duck,
+    /// The reader or writer could not start: the `io` had no room for it.
+    no_tasks,
 };
 
 /// The manager task: from `connect()` until the client closes.
@@ -68,7 +70,7 @@ pub fn run(client: *Client) void {
     while (next) |opened| {
         const server = opened.server;
         pacing.up_since = Io.Clock.awake.now(client.io);
-        const exit = serve(client, opened) orelse return;
+        const exit = serve(client, opened);
         next = if (teardown(client, server, exit)) reconnect(client, &pacing, exit == .lame_duck) else null;
     }
 }
@@ -101,23 +103,19 @@ const Pacing = struct {
 };
 
 /// Makes `opened` the client's connection and keeps it until it must end;
-/// null when its reader or writer could not start, and the client closed.
-fn serve(client: *Client, opened: Opened) ?Exit {
+/// then says why. A reader or writer that cannot start ends it like a
+/// loss, and the client reconnects as for any.
+fn serve(client: *Client, opened: Opened) Exit {
     const io = client.io;
     client.connection = opened.connection;
     // Before the reader starts: an INFO it reads is newer than this one.
     const lame_duck = adopt(client, opened.server, opened.greeting);
     // Connected before the reader starts: who gets a reply from this
-    // connection finds the client connected.
-    const first = connected(client, opened.server);
-    client.connection_tasks.concurrent(io, readLoop, .{client}) catch |err| {
-        abandon(client, err, first);
-        return null;
-    };
-    client.connection_tasks.concurrent(io, writeLoop, .{client}) catch |err| {
-        abandon(client, err, first);
-        return null;
-    };
+    // connection finds the client connected. A client that closed
+    // meanwhile takes the connection down at once.
+    _ = connected(client, opened.server) orelse return .closed;
+    client.connection_tasks.concurrent(io, readLoop, .{client}) catch return .no_tasks;
+    client.connection_tasks.concurrent(io, writeLoop, .{client}) catch return .no_tasks;
     log.debug("connected to {f}", .{opened.server});
     // A server already going away when the handshake ended.
     if (lame_duck) lameDuck(client);
@@ -154,10 +152,6 @@ fn reconnect(client: *Client, pacing: *Pacing, lame_duck: bool) ?Opened {
         } else |err| switch (err) {
             // close() stops the attempts.
             error.Canceled => return null,
-            error.ConcurrencyUnavailable => {
-                giveUp(client, .reconnect_failed);
-                return null;
-            },
             // A server that refuses the credentials twice the same way in
             // a row does not change its mind: the client stops.
             error.AuthenticationFailed => {
@@ -169,6 +163,8 @@ fn reconnect(client: *Client, pacing: *Pacing, lame_duck: bool) ?Opened {
                     return null;
                 }
             },
+            // An io out of room for the attempt's tasks fails this attempt
+            // like any other: the next one may find room.
             else => {
                 log.debug("could not reconnect to {f}: {t}", .{ server, err });
                 _ = client.pool.noteAttempt(io, null);
@@ -335,29 +331,6 @@ fn shutdown(io: Io, stream: Io.net.Stream) void {
     stream.shutdown(io, .both) catch {};
 }
 
-/// The reader or writer could not start: the connection is dropped, and
-/// the client closes, the way it does when it gives up. `first`: it was the
-/// first connection.
-fn abandon(client: *Client, err: Io.ConcurrentError, first: bool) void {
-    const io = client.io;
-    shutdown(io, client.connection.stream);
-    client.connection_tasks.cancel(io);
-    client.connection.stream.close(io);
-    {
-        client.mutex.lockUncancelable(io);
-        defer client.mutex.unlock(io);
-        if (first) client.connect_error = err;
-        client.status = .closed;
-        if (client.close_reason == null) client.close_reason = if (first) .connect_failed else .reconnect_failed;
-        client.changed.broadcast(io);
-    }
-    client.inbox.end(io, .closed);
-    client.outbound.close(io);
-    disconnected(client);
-    noteDropped(client, client.outbound.discard(io));
-    announceClosed(client);
-}
-
 /// Sends a PING every `ping_interval` until the connection must end. After
 /// `max_outstanding_pings` PINGs written without a PONG the connection is
 /// dead; a PING still waiting behind a slow link's backlog does not count,
@@ -402,6 +375,7 @@ fn teardown(client: *Client, server: ServerAddress, exit: Exit) bool {
         .read => |err| log.debug("reading from {f} failed: {t}", .{ server, err }),
         .write => |err| log.debug("writing to {f} failed: {t}", .{ server, err }),
         .lame_duck => log.debug("{f} goes away: moving to another server", .{server}),
+        .no_tasks => log.warn("no room in the io for the reader and writer of {f}: connection dropped", .{server}),
     }
     const again = lost(client, exit);
     // After the state changed: who takes the event sees the new state.
@@ -451,7 +425,7 @@ fn disconnectReason(exit: Exit) ?events.Event.Disconnected.Reason {
         .stale => .stale,
         .server_error => .server_error,
         .protocol => .protocol_error,
-        .read, .write => .io_error,
+        .read, .write, .no_tasks => .io_error,
         .lame_duck => .lame_duck,
     };
 }
@@ -517,6 +491,14 @@ fn giveUp(client: *Client, reason: Client.CloseReason) void {
         if (client.exit == null) client.exit = .closed;
         client.changed.broadcast(io);
     }
+    endAll(client);
+}
+
+/// The client closed without a connection: requests, the outbound queue
+/// and the subscriptions end, what never went out is counted, and the last
+/// event says why.
+fn endAll(client: *Client) void {
+    const io = client.io;
     client.inbox.end(io, .closed);
     client.outbound.close(io);
     client.subscriptions.closeAll(io);
@@ -740,17 +722,20 @@ fn writeLoop(client: *Client) void {
 }
 
 /// The first connection failed, or the manager could not start: the
-/// client closes.
+/// client closes, and with it what was made meanwhile, as subscriptions
+/// and publishes are while `retry_initial_connect` waits.
 pub fn connectFailed(client: *Client, err: Client.ConnectError) void {
     const io = client.io;
-    client.mutex.lockUncancelable(io);
-    if (client.status == .connecting) client.connect_error = err;
-    client.status = .closed;
-    if (client.close_reason == null) client.close_reason = .connect_failed;
-    client.changed.broadcast(io);
-    client.mutex.unlock(io);
-    client.outbound.close(io);
-    announceClosed(client);
+    {
+        client.mutex.lockUncancelable(io);
+        defer client.mutex.unlock(io);
+        if (client.status == .connecting) client.connect_error = err;
+        client.status = .closed;
+        if (client.close_reason == null) client.close_reason = .connect_failed;
+        if (client.exit == null) client.exit = .closed;
+        client.changed.broadcast(io);
+    }
+    endAll(client);
 }
 
 /// The connection passed its handshake with `server`; the INFO of
@@ -815,12 +800,14 @@ fn maxPayload(announced: i64) u64 {
     return if (announced > 0) @intCast(announced) else 0;
 }
 
-/// The connection to `server` is up; true when it is the first.
-fn connected(client: *Client, server: ServerAddress) bool {
+/// The connection to `server` is up; true when it is the first, null when
+/// the client closed meanwhile: no event then, and nothing counted.
+fn connected(client: *Client, server: ServerAddress) ?bool {
     const first = first: {
         client.mutex.lockUncancelable(client.io);
         defer client.mutex.unlock(client.io);
-        if (client.status == .connecting or client.status == .reconnecting) client.status = .connected;
+        if (client.status != .connecting and client.status != .reconnecting) return null;
+        client.status = .connected;
         client.connected_at = Io.Clock.awake.now(client.io);
         client.changed.broadcast(client.io);
         defer client.ever_connected = true;
@@ -839,6 +826,7 @@ fn disconnected(client: *Client) void {
         client.status = .closed;
         if (client.close_reason == null) client.close_reason = .connection_lost;
         client.server = null;
+        client.connected_at = null;
         if (client.info_json) |json| client.gpa.free(json);
         client.info_json = null;
         client.changed.broadcast(client.io);
@@ -911,4 +899,15 @@ test "a failed read ends the connection as a read error, not as broken protocol"
     try testing.expectEqual(Exit.end_of_stream, readExit(error.EndOfStream).?);
     try testing.expectEqual(Exit.protocol, readExit(error.MissingTerminator).?);
     try testing.expect(readExit(error.Canceled) == null);
+}
+
+test "a connection made after the client closed changes nothing: no event, no reconnect counted" {
+    var client: Client = try .init(testing.allocator, testing.io, .{ .servers = &.{"nats://127.0.0.1:4222"} });
+    defer client.deinit();
+    client.close();
+    _ = try client.nextEvent(.{});
+    client.ever_connected = true;
+    try testing.expect(connected(&client, client.options.servers[0]) == null);
+    try testing.expectEqual(0, client.stats().reconnects);
+    try testing.expect(client.stats().connected_for == null);
 }

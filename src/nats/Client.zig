@@ -806,9 +806,10 @@ pub fn init(gpa: Allocator, io: Io, options: Options) InitError!Client {
 /// Connects to the first server that takes the connection, one attempt
 /// each, every attempt within `connect_timeout`; the servers come in
 /// random order unless `randomize_servers` is false. A failed connect
-/// closes the client: create a new one to try again. A call made while
-/// another one is connecting waits for that outcome; once the client is
-/// connected, another call changes nothing.
+/// closes the client: create a new one to try again; so does canceling
+/// the task of this call. A call made while another one is connecting
+/// waits for that outcome, and canceling it leaves the attempt going; once
+/// the client is connected, another call changes nothing.
 ///
 /// With `retry_initial_connect`, it returns at once instead, and the client
 /// keeps trying in the background the way it reconnects, `.reconnecting`
@@ -817,6 +818,8 @@ pub fn connect(client: *Client) ConnectError!void {
     client.checkHome();
     const io = client.io;
     const retry = client.options.options.retry_initial_connect;
+    // This call started the manager: the attempt does not outlive it.
+    var started = false;
     {
         client.lifecycle.lockUncancelable(io);
         defer client.lifecycle.unlock(io);
@@ -834,6 +837,7 @@ pub fn connect(client: *Client) ConnectError!void {
                     return err;
                 };
                 if (retry) return;
+                started = true;
             },
             .connecting => {},
             .closed => return error.ConnectionClosed,
@@ -844,9 +848,10 @@ pub fn connect(client: *Client) ConnectError!void {
     client.mutex.lockUncancelable(io);
     while (client.status == .connecting) {
         client.changed.wait(io, &client.mutex) catch |err| {
-            // The caller gave up: the attempt stops and the client closes.
+            // The caller gave up. The attempt stops with the call that
+            // started it, and the client closes; another call only leaves.
             client.mutex.unlock(io);
-            client.close();
+            if (started) client.close();
             return err;
         };
     }
@@ -1044,6 +1049,8 @@ pub fn serverInfo(client: *Client, gpa: Allocator) ServerInfoError!?std.json.Par
 }
 
 const testing = std.testing;
+const FakeServer = @import("testing/FakeServer.zig");
+const golden = @import("protocol/golden.zig");
 const one_server: []const []const u8 = &.{"nats://127.0.0.1:4222"};
 
 test "init refuses bad options" {
@@ -1112,6 +1119,50 @@ test "the read buffer holds the -ERR that quotes the longest subscription the li
         try testing.expectEqual(Parser.limitsFor(control_line), client.parser_limits);
         try testing.expectEqual(Parser.bufferLen(Parser.limitsFor(control_line)), client.read_buffer.len);
     }
+}
+
+fn connectLong(client: *Client) ConnectError!void {
+    return client.connect();
+}
+
+/// Accepts and stays silent until released; then the handshake and serves.
+fn silentUntilReleased(io: Io, listener: *Io.net.Server, release: *Io.Event) !void {
+    var peer: FakeServer.Peer = undefined;
+    try peer.accept(io, listener);
+    defer peer.close();
+    try release.wait(io);
+    try peer.send(golden.info_default);
+    _ = try peer.readLine();
+    try peer.expectLine("PING");
+    try peer.send(golden.pong);
+    while (try peer.nextLine()) |line| {
+        if (std.mem.eql(u8, line, "PING")) try peer.send(golden.pong);
+    }
+}
+
+test "a second connect() that gives up returns Canceled; the first one goes on" {
+    const io = testing.io;
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var release: Io.Event = .unset;
+    var server = try io.concurrent(silentUntilReleased, .{ io, &listener, &release });
+    defer {
+        release.set(io);
+        server.cancel(io) catch {};
+    }
+    var url: [64]u8 = undefined;
+    var client: Client = try .init(testing.allocator, io, .{ .servers = &.{try FakeServer.url(&listener, &url)} });
+    defer client.deinit();
+    var first = try io.concurrent(connectLong, .{&client});
+    defer first.cancel(io) catch {};
+    while (client.state() != .connecting) try io.sleep(.fromMilliseconds(1), .awake);
+    var second = try io.concurrent(connectLong, .{&client});
+    try io.sleep(.fromMilliseconds(20), .awake);
+    try testing.expectError(error.Canceled, second.cancel(io));
+    try testing.expectEqual(.connecting, client.state());
+    release.set(io);
+    try first.await(io);
+    try testing.expectEqual(.connected, client.state());
 }
 
 test "connect needs an io with concurrency" {
