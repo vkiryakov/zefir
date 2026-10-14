@@ -8,6 +8,7 @@
 //!     .transport = bus.serverTransport(),  // rpc_nats.Transport; in tests the memory transport
 //!     .handlers = .{ &users, &orders },     // pointers to handlers, at least one
 //!     // .authenticator = &auth,            // checks the credentials of calls
+//!     // .middleware = .{ mw.logCalls, &limiter }, // around every call
 //!     // .limits = .{ .max_active_tasks = 1024 },
 //!     // .shutdown_grace = std.Io.Duration.fromSeconds(10),
 //! });
@@ -41,6 +42,8 @@
 const std = @import("std");
 const RawServer = @import("../engine/RawServer.zig");
 const Authenticator = @import("../auth.zig").Authenticator;
+const Middleware = @import("../middleware.zig").Middleware;
+const MiddlewareFn = @import("../middleware.zig").MiddlewareFn;
 const handlers = @import("handlers.zig");
 const method = @import("method.zig");
 
@@ -65,6 +68,14 @@ pub const ShutdownError = RawServer.ShutdownError;
 /// - `.handlers`: a tuple of pointers to handlers, at least one: `.{ &users, &orders }`;
 /// - `.authenticator` (optional): a pointer to an object with
 ///   `pub fn authenticate(self: *@This(), ctx: *const rpc.AuthContext) rpc.AuthError!?rpc.IdentityView`;
+/// - `.middleware` (optional): the links of the server's level, around
+///   every call, in order: middleware functions and pointers to objects
+///   with `run`, such as `.{ mw.logCalls, &limiter }`. The links of a
+///   handler and of a method come from its `rpc_handler`: functions, and
+///   names of the handler's fields that hold an object or point to one
+///   (`.fraud` is `self.fraud`, read here once). A call runs the server's
+///   links, then the handler's, then the method's, each level left to
+///   right, and unwinds them in reverse;
 /// - `.limits` (optional): `rpc.Limits`, or a struct literal of the
 ///   limits to change, such as `.{ .max_active_tasks = 1024 }`;
 /// - `.shutdown_grace` (optional): how long calls in flight may run after
@@ -80,9 +91,13 @@ pub fn init(gpa: std.mem.Allocator, options: anytype) InitError!Server {
     const O = @TypeOf(options);
     comptime check(O);
     const Handlers = @FieldType(O, "handlers");
+    // The engine copies these lists; they live only until it has.
     const methods = try gpa.alloc(RawServer.Method, comptime methodCount(Handlers));
     defer gpa.free(methods);
-    var next: usize = 0;
+    const links = try gpa.alloc(Middleware, comptime linkCount(Handlers));
+    defer gpa.free(links);
+    var next_method: usize = 0;
+    var next_link: usize = 0;
     inline for (@typeInfo(Handlers).@"struct".field_names) |field| {
         const handler = @field(options.handlers, field);
         const T = @typeInfo(@TypeOf(handler)).pointer.child;
@@ -91,21 +106,46 @@ pub fn init(gpa: std.mem.Allocator, options: anytype) InitError!Server {
         inline for (@typeInfo(C).@"struct".field_names) |name| {
             const M = @FieldType(C, name);
             const settings = comptime Impl.settingsOf(name);
-            methods[next] = .{
+            // The handler's links, then the method's.
+            const first = next_link;
+            inline for (.{ Impl.middleware, comptime handlers.methodLinks(Impl, name) }) |level| {
+                inline for (@typeInfo(@TypeOf(level)).@"struct".field_names) |item| {
+                    links[next_link] = handlerLink(T, handler, @field(level, item));
+                    next_link += 1;
+                }
+            }
+            methods[next_method] = .{
                 .route = M.route,
                 .handler = .{ .ptr = handler, .handle = method.Wrapper(T, M).handle },
+                .middleware = links[first..next_link],
                 .auth = settings.auth,
                 .timeout = .fromMilliseconds(settings.timeout_ms),
                 .map_error = &M.contract.mapError,
             };
-            next += 1;
+            next_method += 1;
         }
     }
-    var engine_options: RawServer.Options = .{ .transport = options.transport, .methods = methods };
+    const ServerLinks = if (@hasField(O, "middleware")) @FieldType(O, "middleware") else @TypeOf(.{});
+    var server_links: [@typeInfo(ServerLinks).@"struct".field_names.len]Middleware = undefined;
+    if (@hasField(O, "middleware")) {
+        inline for (@typeInfo(ServerLinks).@"struct".field_names, &server_links) |item, *link| link.* = .of(@field(options.middleware, item));
+    }
+    var engine_options: RawServer.Options = .{ .transport = options.transport, .methods = methods, .middleware = &server_links };
     if (comptime handlers.hasAuthenticator(O)) engine_options.authenticator = Authenticator.init(options.authenticator);
     if (@hasField(O, "limits")) engine_options.limits = limitsOf(options.limits);
     if (@hasField(O, "shutdown_grace")) engine_options.shutdown_grace = options.shutdown_grace;
     return .{ .engine = try .init(gpa, engine_options) };
+}
+
+/// The link of `item` on the level of a handler or of one method: a
+/// middleware function, or `.name` of a field of the handler that holds an
+/// object (`&handler.name`) or points to one (`handler.name`). The field is
+/// read once, here.
+fn handlerLink(comptime T: type, handler: *T, comptime item: anytype) Middleware {
+    if (@TypeOf(item) == MiddlewareFn) return .of(item);
+    const name = @tagName(item);
+    if (@typeInfo(@FieldType(T, name)) == .pointer) return .of(@field(handler, name));
+    return .of(&@field(handler, name));
 }
 
 /// `given`, `rpc.Limits` or a struct literal of some of its fields, over
@@ -128,6 +168,20 @@ fn methodCount(comptime Handlers: type) usize {
     for (@typeInfo(Handlers).@"struct".field_types) |Pointer| {
         const T = @typeInfo(Pointer).pointer.child;
         count += @typeInfo(@TypeOf(T.rpc_handler.api)).@"struct".field_names.len;
+    }
+    return count;
+}
+
+/// The links of all methods of the handlers of type `Handlers`: each
+/// method has those of its handler and its own.
+fn linkCount(comptime Handlers: type) usize {
+    var count: usize = 0;
+    for (@typeInfo(Handlers).@"struct".field_types) |Pointer| {
+        const Impl = @typeInfo(Pointer).pointer.child.rpc_handler;
+        const handler_links = @typeInfo(@TypeOf(Impl.middleware)).@"struct".field_names.len;
+        for (@typeInfo(@TypeOf(Impl.api)).@"struct".field_names) |name| {
+            count += handler_links + @typeInfo(@TypeOf(handlers.methodLinks(Impl, name))).@"struct".field_names.len;
+        }
     }
     return count;
 }

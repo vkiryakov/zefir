@@ -41,6 +41,9 @@ pub fn optionsProblem(comptime O: type) ?[]const u8 {
     }
     if (!@hasField(O, "handlers")) return at ++ ".handlers is missing; pass pointers to the handlers, such as .{&users}";
     if (handlersProblem(@FieldType(O, "handlers"), hasAuthenticator(O))) |found| return found;
+    if (@hasField(O, "middleware")) {
+        if (serverLinksProblem(@FieldType(O, "middleware"))) |found| return found;
+    }
     if (@hasField(O, "limits")) {
         if (limitsProblem(@FieldType(O, "limits"))) |found| return found;
     }
@@ -140,9 +143,11 @@ fn handlerProblem(comptime index: usize, comptime Pointer: type, comptime has_au
     for (@typeInfo(@TypeOf(Impl.methods)).@"struct".field_names) |method_name| {
         if (!@hasField(C, method_name)) return "rpc: " ++ name ++ ".rpc_handler: " ++ method_name ++ " is not a method of " ++ label;
     }
+    if (linksProblem(T, name ++ ".rpc_handler", Impl.middleware)) |found| return found;
     inline for (@typeInfo(C).@"struct".field_names) |method_name| {
         const M = @FieldType(C, method_name);
         if (methodProblem(T, label, method_name, M.Request, M.Response)) |found| return found;
+        if (linksProblem(T, name ++ "." ++ method_name, methodLinks(Impl, method_name))) |found| return found;
         if (Impl.settingsOf(method_name).auth == .required and !has_authenticator)
             return at ++ name ++ "." ++ method_name ++ " requires auth, but .authenticator is not set";
     }
@@ -182,6 +187,22 @@ fn isMethod(comptime F: type, comptime T: type, comptime Req: type, comptime Res
         .error_union => |error_union| error_union.payload == Resp,
         else => false,
     };
+}
+
+/// The links that `Impl`, an `rpc_handler`, sets for the method
+/// `method_name` alone: its `.methods.<name>.middleware`, or none.
+pub fn methodLinks(comptime Impl: type, comptime method_name: []const u8) MethodLinks(Impl, method_name) {
+    if (!@hasField(@TypeOf(Impl.methods), method_name)) return .{};
+    const entry = @field(Impl.methods, method_name);
+    if (!@hasField(@TypeOf(entry), "middleware")) return .{};
+    return entry.middleware;
+}
+
+fn MethodLinks(comptime Impl: type, comptime method_name: []const u8) type {
+    if (!@hasField(@TypeOf(Impl.methods), method_name)) return @TypeOf(.{});
+    const Entry = @TypeOf(@field(Impl.methods, method_name));
+    if (!@hasField(Entry, "middleware")) return @TypeOf(.{});
+    return @FieldType(Entry, "middleware");
 }
 
 /// The problem of the links of `T` at the level of the handler or of one
@@ -552,3 +573,88 @@ const OtherUsers = struct {
         return &.{};
     }
 };
+
+fn audit(ctx: *Context, next: *Next) anyerror!void {
+    _ = ctx;
+    return next.run();
+}
+
+fn inferred(ctx: *Context, next: *Next) !void {
+    _ = ctx;
+    return next.run();
+}
+
+const Limiter = struct {
+    pub fn run(self: *Limiter, ctx: *Context, next: *Next) anyerror!void {
+        _ = self;
+        _ = ctx;
+        return next.run();
+    }
+};
+
+const NoRun = struct { count: u32 = 0 };
+
+/// A handler of `UserApi` with these links on the level of the handler and
+/// on `deleteUser`, and fields that hold objects.
+fn Linked(comptime handler_links: anytype, comptime method_links: anytype) type {
+    return struct {
+        limiter: *Limiter,
+        embedded: Limiter,
+        frozen: *const Limiter,
+        plain: *NoRun,
+        count: u32,
+
+        pub const rpc_handler = contract.implement(UserApi, .{
+            .middleware = handler_links,
+            .methods = .{ .deleteUser = .{ .middleware = method_links } },
+        });
+        pub const getUser = MethodsOf(@This()).getUser;
+        pub const deleteUser = MethodsOf(@This()).deleteUser;
+    };
+}
+
+/// The message of a link of `Linked(...)`, where `where` is "rpc_handler"
+/// or "deleteUser".
+fn linkMessage(comptime T: type, comptime where: []const u8, comptime index: usize) []const u8 {
+    return std.fmt.comptimePrint("rpc: {s}.{s}: middleware[{d}] must be fn (*rpc.Context, *rpc.Next) anyerror!void, or a field of {s} whose type has pub fn run(self, *rpc.Context, *rpc.Next) anyerror!void", .{ @typeName(T), where, index, @typeName(T) });
+}
+
+test "the links of a handler and of a method are functions or fields that hold an object" {
+    try expectNoProblem(Options(struct { *Linked(.{ audit, .limiter, .embedded }, .{ audit, .limiter, .embedded, audit }) }));
+    try expectNoProblem(Options(struct { *Linked(.{}, .{}) }));
+    inline for (.{
+        .{ .{5}, .{}, "rpc_handler", 0 },
+        .{ .{ audit, .missing }, .{}, "rpc_handler", 1 },
+        .{ .{.count}, .{}, "rpc_handler", 0 },
+        .{ .{.plain}, .{}, "rpc_handler", 0 },
+        .{ .{.frozen}, .{}, "rpc_handler", 0 },
+        .{ .{inferred}, .{}, "rpc_handler", 0 },
+        .{ .{"audit"}, .{}, "rpc_handler", 0 },
+        .{ .{}, .{ audit, .limiter, Limiter }, "deleteUser", 2 },
+        .{ .{}, .{&audit}, "deleteUser", 0 },
+    }) |case| {
+        const T = Linked(case[0], case[1]);
+        try expectProblem(Options(struct { *T }), comptime linkMessage(T, case[2], case[3]));
+    }
+}
+
+test "the links of the server are functions or pointers to objects" {
+    const Handlers = struct { *Users };
+    const With = struct {
+        fn Links(comptime L: type) type {
+            return struct { transport: ServerTransport, handlers: Handlers, middleware: L };
+        }
+    };
+    try expectNoProblem(With.Links(struct { @TypeOf(audit), *Limiter }));
+    try expectNoProblem(With.Links(@TypeOf(.{})));
+    const message = "rpc.Server.init: .middleware[1] must be fn (*rpc.Context, *rpc.Next) anyerror!void or a pointer to a type with pub fn run(self, *rpc.Context, *rpc.Next) anyerror!void";
+    try expectProblem(With.Links(struct { @TypeOf(audit), Limiter }), message);
+    try expectProblem(With.Links(struct { @TypeOf(audit), *const Limiter }), message);
+    try expectProblem(With.Links(struct { @TypeOf(audit), *NoRun }), message);
+    try expectProblem(With.Links(struct { @TypeOf(audit), @TypeOf(inferred) }), message);
+    try expectProblem(With.Links(struct { @TypeOf(audit), []Limiter }), message);
+    try expectProblem(With.Links(*Limiter), "rpc.Server.init: .middleware must be a tuple such as .{ mw.logCalls, &limiter }; got *app.handlers.Limiter");
+    try expectProblem(struct { transport: ServerTransport, handlers: Handlers, middleware: NamedLinks }, "rpc.Server.init: .middleware must be a tuple such as .{ mw.logCalls, &limiter }; got app.handlers.NamedLinks");
+}
+
+const NamedLinks = struct { first: *Limiter };

@@ -13,6 +13,8 @@ const Server = @import("Server.zig");
 const RawServer = @import("../engine/RawServer.zig");
 const RawClient = @import("../engine/RawClient.zig");
 const Context = @import("../engine/Context.zig").Context;
+const Next = @import("../middleware.zig").Next;
+const MiddlewareFn = @import("../middleware.zig").MiddlewareFn;
 const MemoryTransport = @import("../testing/MemoryTransport.zig");
 const ServerTransport = @import("../ServerTransport.zig");
 
@@ -451,6 +453,306 @@ test "a request whose value outgrows the memory of a call is refused with resour
     var small = try f.call(io, accountsRoute("bulk"), "{\"items\":[null,null]}");
     try expectBody(&small, "{}");
     try testing.expectEqual(@as(u32, 1), accounts.runs.load(.acquire));
+}
+
+/// What links and methods did, in order. A call ends before its client
+/// has the response, so the test reads it after the call.
+const Trail = struct {
+    entries: [32][]const u8 = undefined,
+    len: std.atomic.Value(usize) = .init(0),
+
+    fn add(t: *Trail, entry: []const u8) void {
+        const i = t.len.fetchAdd(1, .acq_rel);
+        if (i < t.entries.len) t.entries[i] = entry;
+    }
+
+    fn clear(t: *Trail) void {
+        t.len.store(0, .release);
+    }
+
+    fn expect(t: *const Trail, expected: []const []const u8) !void {
+        const written = t.entries[0..@min(t.len.load(.acquire), t.entries.len)];
+        errdefer for (written) |entry| std.debug.print("  {s}\n", .{entry});
+        try testing.expectEqual(expected.len, written.len);
+        for (expected, written) |e, w| try testing.expectEqualStrings(e, w);
+    }
+};
+
+/// Shared by the middleware functions of the tests, which have no state.
+var trail: Trail = .{};
+
+/// A middleware function that marks the trail around the rest of the
+/// chain: one per name, built at compile time.
+fn marker(comptime name: []const u8) MiddlewareFn {
+    return struct {
+        fn run(ctx: *Context, next: *Next) anyerror!void {
+            _ = ctx;
+            trail.add(name ++ ">");
+            defer trail.add("<" ++ name);
+            return next.run();
+        }
+    }.run;
+}
+
+/// The same as an object with state of its own.
+const Marker = struct {
+    before: []const u8,
+    after: []const u8,
+
+    pub fn run(self: *Marker, ctx: *Context, next: *Next) anyerror!void {
+        _ = ctx;
+        trail.add(self.before);
+        defer trail.add(self.after);
+        return next.run();
+    }
+};
+
+const PlaceOrder = struct { item: []const u8 };
+const Receipt = struct { item: []const u8 };
+
+const ShopApi = contract.Contract(.{
+    .name = "shop",
+    .version = 1,
+    .methods = .{
+        .place = contract.method(PlaceOrder, Receipt),
+        .cancel = contract.method(PlaceOrder, void),
+    },
+});
+
+const Shop = struct {
+    /// Points to an object: the handler's level.
+    audit: *Marker,
+    /// Holds an object: the level of `place`.
+    fraud: Marker,
+
+    pub const rpc_handler = contract.implement(ShopApi, .{
+        .middleware = .{ marker("handler-fn"), .audit },
+        .methods = .{ .place = .{ .middleware = .{ marker("method-fn"), .fraud } } },
+    });
+
+    pub fn place(self: *Shop, ctx: *Context, req: PlaceOrder) !Receipt {
+        _ = self;
+        _ = ctx;
+        trail.add("place");
+        return .{ .item = req.item };
+    }
+
+    pub fn cancel(self: *Shop, ctx: *Context, req: PlaceOrder) !void {
+        _ = self;
+        _ = ctx;
+        _ = req;
+        trail.add("cancel");
+    }
+};
+
+fn shopRoute(name: []const u8) model.Route {
+    return .{ .service = "shop", .version = 1, .method = name };
+}
+
+test "middleware runs server, handler, method, each level left to right, and unwinds in reverse" {
+    const io = testing.io;
+    var f: Fixture = undefined;
+    try f.open();
+    defer f.close(io);
+    var audit: Marker = .{ .before = "audit>", .after = "<audit" };
+    var shop: Shop = .{ .audit = &audit, .fraud = .{ .before = "fraud>", .after = "<fraud" } };
+    var limiter: Marker = .{ .before = "server-object>", .after = "<server-object" };
+    var server: Server = try .init(testing.allocator, .{
+        .transport = f.memory.serverTransport(),
+        .handlers = .{&shop},
+        .middleware = .{ marker("server-fn"), &limiter },
+    });
+    defer server.deinit(io);
+    try server.start(io);
+
+    trail.clear();
+    var placed = try f.call(io, shopRoute("place"), "{\"item\":\"tea\"}");
+    try expectBody(&placed, "{\"item\":\"tea\"}");
+    try trail.expect(&.{
+        "server-fn>", "server-object>", "handler-fn>", "audit>", "method-fn>",  "fraud>",
+        "place",      "<fraud",         "<method-fn",  "<audit", "<handler-fn", "<server-object",
+        "<server-fn",
+    });
+    // The links of one method do not run for another.
+    trail.clear();
+    var canceled = try f.call(io, shopRoute("cancel"), "{\"item\":\"tea\"}");
+    try expectBody(&canceled, "{}");
+    try trail.expect(&.{ "server-fn>", "server-object>", "handler-fn>", "audit>", "cancel", "<audit", "<handler-fn", "<server-object", "<server-fn" });
+    // A field that holds an object is the handler's own: the server sees
+    // what the handler has now.
+    shop.fraud.before = "fraud again>";
+    trail.clear();
+    var again = try f.call(io, shopRoute("place"), "{\"item\":\"tea\"}");
+    try expectBody(&again, "{\"item\":\"tea\"}");
+    try testing.expectEqualStrings("fraud again>", trail.entries[5]);
+}
+
+/// Copies what middleware sees of the bodies of the last call.
+const Peek = struct {
+    request: [64]u8 = undefined,
+    request_len: usize = 0,
+    response: [64]u8 = undefined,
+    response_len: ?usize = null,
+    failure: ?model.Failure = null,
+    violations: usize = 0,
+
+    pub fn run(self: *Peek, ctx: *Context, next: *Next) anyerror!void {
+        const request = ctx.requestBody();
+        self.request_len = @min(request.len, self.request.len);
+        @memcpy(self.request[0..self.request_len], request[0..self.request_len]);
+        self.response_len = null;
+        self.failure = null;
+        next.run() catch |err| {
+            // Static strings of the framework; the field is not kept.
+            if (ctx.failure()) |failure| {
+                self.failure = .{ .code = failure.code, .app_code = failure.app_code, .message = failure.message };
+                self.violations = failure.violations.len;
+            }
+            return err;
+        };
+        if (ctx.responseBody()) |response| {
+            const len = @min(response.len, self.response.len);
+            @memcpy(self.response[0..len], response[0..len]);
+            self.response_len = len;
+        }
+    }
+};
+
+test "middleware sees the request as the client encoded it, the encoded response, and the failure of a stage" {
+    const io = testing.io;
+    var f: Fixture = undefined;
+    try f.open();
+    defer f.close(io);
+    var accounts: Accounts = .{};
+    var peek: Peek = .{};
+    var server: Server = try .init(testing.allocator, .{
+        .transport = f.memory.serverTransport(),
+        .handlers = .{&accounts},
+        .middleware = .{&peek},
+    });
+    defer server.deinit(io);
+    try server.start(io);
+
+    const request = "{ \"email\" : \"ann@example.com\", \"name\":\"Ann\" }";
+    var created = try f.call(io, accountsRoute("create"), request);
+    try expectBody(&created, "{\"id\":\"1\",\"name\":\"Ann\"}");
+    try testing.expectEqualStrings(request, peek.request[0..peek.request_len]);
+    try testing.expectEqualStrings("{\"id\":\"1\",\"name\":\"Ann\"}", peek.response[0..peek.response_len.?]);
+
+    var refused = try f.call(io, accountsRoute("create"), "{\"name\":\"\",\"email\":\"x\"}");
+    refused.deinit();
+    try testing.expectEqual(@as(?usize, null), peek.response_len);
+    try testing.expectEqualStrings("rpc.invalid_request", peek.failure.?.app_code);
+    try testing.expectEqual(@as(usize, 2), peek.violations);
+}
+
+const RulesApi = contract.Contract(.{
+    .name = "rules",
+    .version = 1,
+    .methods = .{
+        .twice = contract.method(Empty, Empty),
+        .skip = contract.method(Empty, Empty),
+        .refuse = contract.method(Empty, Empty),
+        .swallow = contract.method(Empty, Empty),
+    },
+});
+
+fn callNextTwice(ctx: *Context, next: *Next) anyerror!void {
+    _ = ctx;
+    next.run() catch {};
+    return next.run();
+}
+
+fn skipNext(ctx: *Context, next: *Next) anyerror!void {
+    _ = ctx;
+    _ = next;
+}
+
+fn refuseWithoutNext(ctx: *Context, next: *Next) anyerror!void {
+    _ = ctx;
+    _ = next;
+    return error.PermissionDenied;
+}
+
+fn swallowError(ctx: *Context, next: *Next) anyerror!void {
+    _ = ctx;
+    next.run() catch {};
+}
+
+const Rules = struct {
+    runs: std.atomic.Value(u32) = .init(0),
+
+    pub const rpc_handler = contract.implement(RulesApi, .{ .methods = .{
+        .twice = .{ .middleware = .{callNextTwice} },
+        .skip = .{ .middleware = .{skipNext} },
+        .refuse = .{ .middleware = .{refuseWithoutNext} },
+        .swallow = .{ .middleware = .{swallowError} },
+    } });
+
+    fn ran(self: *Rules) void {
+        _ = self.runs.fetchAdd(1, .acq_rel);
+    }
+
+    pub fn twice(self: *Rules, ctx: *Context, req: Empty) !Empty {
+        _ = ctx;
+        self.ran();
+        return req;
+    }
+
+    pub fn skip(self: *Rules, ctx: *Context, req: Empty) !Empty {
+        _ = ctx;
+        self.ran();
+        return req;
+    }
+
+    pub fn refuse(self: *Rules, ctx: *Context, req: Empty) !Empty {
+        _ = ctx;
+        self.ran();
+        return req;
+    }
+
+    pub fn swallow(self: *Rules, ctx: *Context, req: Empty) !Empty {
+        _ = ctx;
+        _ = req;
+        self.ran();
+        return error.Unavailable;
+    }
+};
+
+test "the rules of next.run() hold for the links of handlers and methods" {
+    const io = testing.io;
+    var f: Fixture = undefined;
+    try f.open();
+    defer f.close(io);
+    var rules_handler: Rules = .{};
+    var server: Server = try .init(testing.allocator, .{ .transport = f.memory.serverTransport(), .handlers = .{&rules_handler} });
+    defer server.deinit(io);
+    try server.start(io);
+    // The engine warns about links that break the rules.
+    const log_level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = log_level;
+
+    // A second next.run() fails the call, whatever the link does with it;
+    // the method ran once.
+    var twice = try f.call(io, rulesRoute("twice"), "{}");
+    try expectFailure(&twice, failures.internal, "");
+    try testing.expectEqual(@as(u32, 1), rules_handler.runs.swap(0, .acq_rel));
+    // Success without next.run() is a bug of the link.
+    var skip = try f.call(io, rulesRoute("skip"), "{}");
+    try expectFailure(&skip, failures.internal, "");
+    // An error without next.run() is the outcome.
+    var refused = try f.call(io, rulesRoute("refuse"), "{}");
+    try expectFailure(&refused, failures.permission_denied, "");
+    try testing.expectEqual(@as(u32, 0), rules_handler.runs.load(.acquire));
+    // An error the link swallows stays the outcome.
+    var swallowed = try f.call(io, rulesRoute("swallow"), "{}");
+    try expectFailure(&swallowed, failures.unavailable, "");
+    try testing.expectEqual(@as(u32, 1), rules_handler.runs.load(.acquire));
+}
+
+fn rulesRoute(name: []const u8) model.Route {
+    return .{ .service = "rules", .version = 1, .method = name };
 }
 
 const UserApiV2 = contract.Contract(.{
