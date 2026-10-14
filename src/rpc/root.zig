@@ -117,4 +117,5 @@ test {
     _ = @import("engine/RouteStats.zig");
     _ = @import("engine/server_tests.zig");
     _ = @import("engine/RawClient.zig");
+    _ = @import("app/dto.zig");
 }
