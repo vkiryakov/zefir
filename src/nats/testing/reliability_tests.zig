@@ -2296,7 +2296,8 @@ test "a client closed after a lost connection reports no uptime" {
     var url: [64]u8 = undefined;
     var client: Client = try .init(testing.allocator, io, .{ .servers = &.{try FakeServer.url(&listener, &url)}, .reconnect = .{ .enabled = false } });
     defer client.deinit();
-    try client.connect();
+    // The server hangs up at once: connect() may find the client closed.
+    client.connect() catch |err| try testing.expectEqual(error.ConnectionClosed, err);
     try awaitState(&client, .closed);
     try testing.expectEqual(.connection_lost, client.close_reason.?);
     try testing.expect(client.stats().connected_for == null);
