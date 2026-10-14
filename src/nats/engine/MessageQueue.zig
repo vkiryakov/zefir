@@ -87,6 +87,9 @@ draining: bool = false,
 in_hand: bool = false,
 /// The client's drain queued an UNSUB for it.
 client_unsub: bool = false,
+/// The client closed it after it had finished and everything in it was
+/// taken: a drain of it had nothing left to wait for.
+drained_when_closed: bool = false,
 /// `drain()` calls of its subscription that are inside now: each still
 /// uses the subscription, so its `deinit` waits for them. Atomic, outside
 /// the mutex: leaving is the very last thing a drain does with it.
@@ -190,7 +193,7 @@ pub fn awaitDrained(q: *MessageQueue, io: Io, deadline: ?Io.Clock.Timestamp) err
         {
             q.mutex.lockUncancelable(io);
             defer q.mutex.unlock(io);
-            if (q.ended == .closed) return error.ConnectionClosed;
+            if (q.ended == .closed) return if (q.drained_when_closed) {} else error.ConnectionClosed;
             if (q.ended != null and q.isSettled()) return;
         }
         if (deadline) |d| if (time.expired(io, d)) return error.Timeout;
@@ -216,6 +219,7 @@ pub fn end(q: *MessageQueue, io: Io, how: End, discard: bool) bool {
     defer q.mutex.unlock(io);
     const was_open = q.ended == null;
     if (!was_open and how != .closed) return false;
+    if (how == .closed and q.ended == .finished and q.isSettled()) q.drained_when_closed = true;
     q.ended = how;
     if (discard or how == .closed) {
         q.freeAll();
@@ -745,6 +749,28 @@ test "awaitDrained waits for the end and for the reader, and gives up at its dea
     // Its owner is done with it.
     q.dropAll(io);
     try q.awaitDrained(io, time.after(io, .fromSeconds(5)));
-    _ = q.end(io, .closed, true);
-    try testing.expectError(error.ConnectionClosed, q.awaitDrained(io, null));
+}
+
+test "a drain that sees the client closed after its queue ended and was read reports success" {
+    const io = testing.io;
+    var drained: MessageQueue = .init(testing.allocator, .{ .messages = 4, .bytes = 1024 }, .drop_newest, null);
+    defer drained.deinit();
+    _ = drained.push(io, try testMessage(8, 'a'));
+    try testing.expect(drained.drainForClient(io));
+    drained.finishDrain(io);
+    var m = (try drained.next(io, .none)).?;
+    m.deinit();
+    try testing.expect(try drained.next(io, .none) == null);
+    // The client's drain is done and closes before this drain looks.
+    _ = drained.end(io, .closed, true);
+    try drained.awaitDrained(io, null);
+
+    // Closed with a message nobody took: that drain did not finish.
+    var cut: MessageQueue = .init(testing.allocator, .{ .messages = 4, .bytes = 1024 }, .drop_newest, null);
+    defer cut.deinit();
+    _ = cut.push(io, try testMessage(8, 'b'));
+    try testing.expect(cut.drainForClient(io));
+    cut.finishDrain(io);
+    _ = cut.end(io, .closed, true);
+    try testing.expectError(error.ConnectionClosed, cut.awaitDrained(io, null));
 }
