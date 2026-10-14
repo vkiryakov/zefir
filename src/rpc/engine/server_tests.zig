@@ -393,8 +393,10 @@ test "a client that gives up: no response, the handler is canceled, release afte
     var call: TestCall = .{ .handler_ends = &sleeper.ended };
     try deliver(io, test_transport.dispatcher.?, &headOf(io, "sleep", .fromSeconds(5)), "{}", &call);
     try sleeper.waitStarted(io, 1);
-    call.incoming.cancel(io);
-    call.incoming.cancel(io);
+    // The second cancel does nothing. Each comes under the lock `release`
+    // takes: the engine frees the call once `release` returns.
+    call.cancelUnlessReleased(io);
+    call.cancelUnlessReleased(io);
     try call.waitReleased(io);
     try testing.expectEqual(@as(u32, 0), call.sends.load(.acquire));
     try testing.expectEqual(@as(u32, 1), call.releases.load(.acquire));
@@ -499,7 +501,7 @@ test "a call whose deadline passes in the queue never starts: deadline_exceeded,
     try deliver(io, d, &headOf(io, "gate", .fromMilliseconds(30)), "b", &expiring);
     var canceled: TestCall = .{};
     try deliver(io, d, &headOf(io, "gate", .fromSeconds(10)), "c", &canceled);
-    canceled.incoming.cancel(io);
+    canceled.cancelUnlessReleased(io);
     try io.sleep(.fromMilliseconds(60), .awake);
     gate.open.set(io);
 
@@ -881,7 +883,7 @@ test "the token of a call is canceled by its deadline, by its client and by the 
     var by_client: TestCall = .{};
     try deliver(io, d, &headOf(io, "long", null), "", &by_client);
     try waitFor(io, &watcher.started, 2);
-    by_client.incoming.cancel(io);
+    by_client.cancelUnlessReleased(io);
     try by_client.waitReleased(io);
     try testing.expectEqual(@as(u32, 0), by_client.sends.load(.acquire));
     try testing.expect(std.mem.findScalar(Reply.Disposition, done, by_client.disposition) != null);
