@@ -29,15 +29,15 @@ const Pending = rpc.transport.Pending;
 
 /// The client side's part of `Transport`.
 pub const State = struct {
-    /// Guards the changes of `phase`, `sub` and `task`; never held across
-    /// I/O.
+    /// Guards the changes of `phase` and `live`; never held across I/O.
     mutex: std.Io.Mutex = .init,
     /// Changed under `mutex`; calls read it without.
     phase: std.atomic.Value(Phase) = .init(.idle),
-    sub: Conn.Sub = undefined,
-    /// The inbox task. Only the call that moves the phase from `broken` to
-    /// `starting`, and `deinit`, await it.
-    task: std.Io.Future(void) = undefined,
+    /// The subscription and the task of the inbox while the phase is
+    /// `running` or `broken`; null while it is `idle` or `starting`. The
+    /// call that moves the phase from `broken` to `starting`, and `deinit`,
+    /// take them out under `mutex` and end them, so each is ended once.
+    live: ?Handles = null,
     /// `<inbox_prefix>.<token>`, written once, by the first start, before
     /// the phase is first `running`; a restarted inbox keeps its name.
     inbox_buffer: [subject.max_subject_bytes]u8 = undefined,
@@ -159,8 +159,8 @@ pub fn call(t: *Transport, io: std.Io, request: *const rpc.transport.Request, op
 /// again.
 const start_poll: std.Io.Duration = .fromMilliseconds(1);
 
-/// The subscription and the task of an inbox, to end.
-const Old = struct { sub: Conn.Sub, task: std.Io.Future(void) };
+/// The subscription and the task of an inbox.
+const Handles = struct { sub: Conn.Sub, task: std.Io.Future(void) };
 
 /// Starts the inbox, unless it runs: a subscription to `<inbox>.*`
 /// confirmed by a flush, and its task, on the `io` of this call. While
@@ -168,7 +168,7 @@ const Old = struct { sub: Conn.Sub, task: std.Io.Future(void) };
 fn startInbox(t: *Transport, io: std.Io, deadline: core.Deadline, diagnostics: ?*Diagnostics) CallError!void {
     const s = &t.client;
     while (s.phase.load(.acquire) != .running) {
-        var old: ?Old = null;
+        var old: ?Handles = null;
         const mine = mine: {
             s.mutex.lockUncancelable(io);
             defer s.mutex.unlock(io);
@@ -176,7 +176,10 @@ fn startInbox(t: *Transport, io: std.Io, deadline: core.Deadline, diagnostics: ?
                 .running => return,
                 .starting => break :mine false,
                 .idle => {},
-                .broken => old = .{ .sub = s.sub, .task = s.task },
+                .broken => {
+                    old = s.live;
+                    s.live = null;
+                },
             }
             s.phase.store(.starting, .release);
             break :mine true;
@@ -190,7 +193,7 @@ fn startInbox(t: *Transport, io: std.Io, deadline: core.Deadline, diagnostics: ?
 
 /// The start, by the one call that moved the phase to `starting`; after an
 /// error the phase is `idle` again. `old` is a broken inbox to end first.
-fn startAs(t: *Transport, io: std.Io, deadline: core.Deadline, diagnostics: ?*Diagnostics, old: ?Old) CallError!void {
+fn startAs(t: *Transport, io: std.Io, deadline: core.Deadline, diagnostics: ?*Diagnostics, old: ?Handles) CallError!void {
     const s = &t.client;
     errdefer setPhase(t, io, .idle);
     if (old) |o| end(t, io, o);
@@ -216,17 +219,18 @@ fn startAs(t: *Transport, io: std.Io, deadline: core.Deadline, diagnostics: ?*Di
     }
     // The broker confirms the subscription and its permissions here.
     t.conn.flush(io, deadline.toTimeout()) catch |err| return inboxError(diagnostics, err);
+    // Held from the start of the task until its handles are in place, which
+    // is no I/O: a task that ends at once waits for it in `broken`, so the
+    // inbox turns broken only with the handles of this task to end.
+    s.mutex.lockUncancelable(io);
+    defer s.mutex.unlock(io);
     // A task of the transport: canceling this call does not stop it.
     const task = io.concurrent(readInbox, .{ t, io, sub }) catch |err| {
         note(diagnostics, .connect, err, "no task for the inbox", .{});
         return error.Unavailable;
     };
-    s.mutex.lockUncancelable(io);
-    defer s.mutex.unlock(io);
-    s.sub = sub;
-    s.task = task;
-    // A task that ended at once has made the inbox broken already.
-    if (s.phase.load(.acquire) == .starting) s.phase.store(.running, .release);
+    s.live = .{ .sub = sub, .task = task };
+    s.phase.store(.running, .release);
 }
 
 fn setPhase(t: *Transport, io: std.Io, phase: Phase) void {
@@ -236,13 +240,13 @@ fn setPhase(t: *Transport, io: std.Io, phase: Phase) void {
 }
 
 /// Ends the task of an inbox, which waits in `next` or has returned, and
-/// then its subscription.
-fn end(t: *Transport, io: std.Io, old: Old) void {
+/// then its subscription; the caller has taken them out of `State.live`.
+fn end(t: *Transport, io: std.Io, handles: Handles) void {
     const protection = io.swapCancelProtection(.blocked);
     defer _ = io.swapCancelProtection(protection);
-    var task = old.task;
+    var task = handles.task;
     task.cancel(io);
-    t.conn.unsubscribe(io, old.sub);
+    t.conn.unsubscribe(io, handles.sub);
 }
 
 fn inboxError(diagnostics: ?*Diagnostics, err: Conn.Error) CallError {
@@ -259,7 +263,7 @@ fn inboxError(diagnostics: ?*Diagnostics, err: Conn.Error) CallError {
 /// Stops the inbox, for the transport's `deinit`, when no call runs.
 pub fn stop(t: *Transport, io: std.Io) void {
     const s = &t.client;
-    const old: ?Old = old: {
+    const old: ?Handles = old: {
         s.mutex.lockUncancelable(io);
         defer s.mutex.unlock(io);
         switch (s.phase.load(.acquire)) {
@@ -268,7 +272,9 @@ pub fn stop(t: *Transport, io: std.Io) void {
             .running, .broken => {},
         }
         s.phase.store(.idle, .release);
-        break :old .{ .sub = s.sub, .task = s.task };
+        const live = s.live;
+        s.live = null;
+        break :old live;
     };
     if (old) |o| end(t, io, o);
 }

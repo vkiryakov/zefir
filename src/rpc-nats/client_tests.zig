@@ -537,6 +537,86 @@ test "an inbox that broke: the waiting call gets ConnectionLost, the next call s
     try testing.expectEqual(@as(usize, 2), fake.subscriptionCount(io));
 }
 
+/// An adapter on `FakeConn` whose inbox ends as soon as it starts: `next`
+/// returns `ending`, or null when it is null (a subscription that ended).
+/// Its `flush` waits until the test opens `gate`, so that another call
+/// comes while the first one starts the inbox.
+const EndingInbox = struct {
+    fake: *FakeConn,
+    ending: ?Conn.Error,
+    gate: std.Io.Event = .unset,
+    flushes: std.atomic.Value(u32) = .init(0),
+
+    pub fn publish(a: *EndingInbox, io: std.Io, msg: Conn.OutMsg, timeout: std.Io.Timeout) Conn.Error!void {
+        return a.fake.publish(io, msg, timeout);
+    }
+    pub fn subscribe(a: *EndingInbox, io: std.Io, name: []const u8, queue: ?[]const u8, timeout: std.Io.Timeout) Conn.Error!Conn.Sub {
+        return a.fake.subscribe(io, name, queue, timeout);
+    }
+    pub fn next(a: *EndingInbox, io: std.Io, sub: Conn.Sub, timeout: std.Io.Timeout) Conn.Error!?Conn.InMsg {
+        _ = io;
+        _ = sub;
+        _ = timeout;
+        const err = a.ending orelse return null;
+        return err;
+    }
+    pub fn drain(a: *EndingInbox, io: std.Io, sub: Conn.Sub) Conn.Error!void {
+        return a.fake.drain(io, sub);
+    }
+    pub fn unsubscribe(a: *EndingInbox, io: std.Io, sub: Conn.Sub) void {
+        a.fake.unsubscribe(io, sub);
+    }
+    pub fn flush(a: *EndingInbox, io: std.Io, timeout: std.Io.Timeout) Conn.Error!void {
+        _ = a.flushes.fetchAdd(1, .monotonic);
+        try a.gate.wait(io);
+        return a.fake.flush(io, timeout);
+    }
+    pub fn isConnected(a: *EndingInbox) bool {
+        return a.fake.isConnected();
+    }
+};
+
+test "an inbox that ends as it starts, while another call waits for the start: both calls end, nothing is left" {
+    const io = testing.io;
+    const log_level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = log_level;
+    for ([_]?Conn.Error{ error.ConnectionClosed, error.PermissionDenied, null }) |ending| {
+        for (0..20) |_| {
+            var fake: FakeConn = .init(testing.allocator, .{});
+            defer fake.deinit(io);
+            var adapter: EndingInbox = .{ .fake = &fake, .ending = ending };
+            {
+                var bus: Transport = try .init(testing.allocator, .init(&adapter), .{});
+                defer bus.deinit(io);
+                var first: Caller = .init(&bus, .{ .timeout = .fromSeconds(5) });
+                defer first.deinit();
+                try first.begin();
+                // The first call is in the flush of the inbox.
+                while (adapter.flushes.load(.monotonic) == 0) try io.sleep(.fromMilliseconds(1), .awake);
+                var second: Caller = .init(&bus, .{ .timeout = .fromSeconds(5) });
+                defer second.deinit();
+                try second.begin();
+                // The second waits for the start.
+                try io.sleep(.fromMilliseconds(2), .awake);
+                adapter.gate.set(io);
+                first.join();
+                second.join();
+                for ([_]*const Caller{ &first, &second }) |c| {
+                    // Ended by the inbox, not by the deadline.
+                    if (c.result) |_| return error.TestUnexpectedResult else |err| switch (err) {
+                        error.Unavailable, error.ConnectionLost => {},
+                        else => return err,
+                    }
+                    try testing.expect(c.began.durationTo(c.ended).nanoseconds < 4 * std.time.ns_per_s);
+                }
+            }
+            // Every subscription of an inbox was ended, each once.
+            try testing.expectEqual(@as(usize, 0), fake.subscriptionCount(io));
+        }
+    }
+}
+
 test "a request lost when the link drops ends at its deadline with Timeout" {
     const io = testing.io;
     var fake: FakeConn = .init(testing.allocator, .{});
