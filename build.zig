@@ -1,4 +1,5 @@
 const std = @import("std");
+const manifest = @import("build.zig.zon");
 const validator_cases = @import("src/validator/testdata/cases.zig");
 
 pub fn build(b: *std.Build) void {
@@ -64,7 +65,18 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // Umbrella module: @import("zefir").core, .log, .confy, .validator, .rpc, .orm
+    // nats sends the package version in CONNECT; build.zig.zon is its only source.
+    const nats_options = b.addOptions();
+    nats_options.addOption([]const u8, "version", manifest.version);
+    const nats = b.addModule("zefir-nats", .{
+        .root_source_file = b.path("src/nats/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+    });
+    nats.addOptions("build_options", nats_options);
+
+    // Umbrella module: @import("zefir").core, .log, .confy, .validator, .rpc, .orm, .nats
     const zefir = b.addModule("zefir", .{
         .root_source_file = b.path("src/zefir.zig"),
         .target = target,
@@ -77,21 +89,37 @@ pub fn build(b: *std.Build) void {
             .{ .name = "validator", .module = validator },
             .{ .name = "rpc", .module = rpc },
             .{ .name = "orm", .module = orm },
+            .{ .name = "nats", .module = nats },
         },
     });
 
     const test_step = b.step("test", "Run all tests");
+    // `zig build test-<name>` runs the part of `zig build test` that checks
+    // one module: its tests and, further down, its examples, panic programs,
+    // compile-error checks and benchmark builds. CI runs only the steps of
+    // the modules a change affects; see .github/scripts/affected-modules.sh.
+    const test_core = addModuleTestStep(b, test_step, "core");
+    const test_log = addModuleTestStep(b, test_step, "log");
+    const test_confy = addModuleTestStep(b, test_step, "confy");
+    const test_validator = addModuleTestStep(b, test_step, "validator");
+    const test_rpc = addModuleTestStep(b, test_step, "rpc");
+    const test_orm = addModuleTestStep(b, test_step, "orm");
+    const test_nats = addModuleTestStep(b, test_step, "nats");
+    const test_zefir = addModuleTestStep(b, test_step, "zefir");
     // Builds the validator's test binaries without running them, so that
     // `-Dtarget` may name another system: CI builds them for x86-linux-musl,
     // where usize has 32 bits.
     const validator_compile_step = b.step("compile-validator-tests", "Build the validator's test binaries for -Dtarget without running them");
-    for ([_]*std.Build.Module{ core, log, confy, validator, rpc, orm, zefir }) |module| {
+    for (
+        [_]*std.Build.Module{ core, log, confy, validator, rpc, orm, nats, zefir },
+        [_]*std.Build.Step{ test_core, test_log, test_confy, test_validator, test_rpc, test_orm, test_nats, test_zefir },
+    ) |module, module_test_step| {
         const tests = b.addTest(.{ .root_module = module });
-        test_step.dependOn(&addRun(b, tests, tsan).step);
+        module_test_step.dependOn(&addRun(b, tests, tsan).step);
         if (module == validator) validator_compile_step.dependOn(&tests.step);
     }
 
-    addValidatorTests(b, test_step, validator_compile_step, validator, log, target, optimize, tsan);
+    addValidatorTests(b, test_validator, validator_compile_step, validator, log, target, optimize, tsan);
 
     // core examples: `zig build test` builds and runs them; an example that
     // exits with an error fails the step.
@@ -110,7 +138,7 @@ pub fn build(b: *std.Build) void {
         });
         const run = addRun(b, example, tsan);
         run.expectExitCode(0);
-        test_step.dependOn(&run.step);
+        test_core.dependOn(&run.step);
     }
 
     // log examples: `zig build test` builds and runs them, like the core ones.
@@ -130,7 +158,7 @@ pub fn build(b: *std.Build) void {
         });
         const run = addRun(b, example, tsan);
         run.expectExitCode(0);
-        test_step.dependOn(&run.step);
+        test_log.dependOn(&run.step);
     }
 
     // log panic programs: `flush`, `shutdown` or `unsubscribe` called from a
@@ -177,8 +205,36 @@ pub fn build(b: *std.Build) void {
         // expectStdErrMatch accepts any exit: only the panic handler exits
         // with 3, so a program that printed the text and returned fails.
         run.expectExitCode(3);
-        test_step.dependOn(&run.step);
+        test_log.dependOn(&run.step);
     }
+
+    // nats panic program: a client copied after connect() panics in safe
+    // builds. The program must print the panic message and end in its own
+    // panic handler, which exits with code 3 instead of aborting. It gets
+    // its own Debug copy of nats, whatever -Doptimize says.
+    const panic_nats = b.createModule(.{
+        .root_source_file = b.path("src/nats/root.zig"),
+        .target = target,
+        .optimize = .Debug,
+    });
+    panic_nats.addOptions("build_options", nats_options);
+    const moved_client = b.addExecutable(.{
+        .name = "nats-panic-moved-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/nats/testdata/panic/moved_client.zig"),
+            .target = target,
+            .optimize = .Debug,
+            .imports = &.{
+                .{ .name = "nats", .module = panic_nats },
+            },
+        }),
+    });
+    const run_moved_client = b.addRunArtifact(moved_client);
+    run_moved_client.expectStdErrMatch("panic: nats.Client moved after connect(): keep it where connect() ran (see the guide)");
+    // expectStdErrMatch accepts any exit: only the panic handler exits
+    // with 3, so a program that printed the text and returned fails.
+    run_moved_client.expectExitCode(3);
+    test_nats.dependOn(&run_moved_client.step);
 
     // log compile errors: each test of the file must fail to compile with
     // the message next to its name. The filter compiles one test at a time;
@@ -248,7 +304,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{case[0]},
         });
         compile.expect_errors = .{ .contains = case[1] };
-        test_step.dependOn(&compile.step);
+        test_log.dependOn(&compile.step);
     }
 
     // core benchmarks: `zig build test` only compiles them, `zig build bench`
@@ -269,7 +325,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    test_step.dependOn(&bench.step);
+    test_core.dependOn(&bench.step);
     const bench_step = b.step("bench", "Run benchmarks");
     bench_step.dependOn(&b.addRunArtifact(bench).step);
 
@@ -298,8 +354,16 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    test_step.dependOn(&log_bench.step);
+    test_log.dependOn(&log_bench.step);
     bench_step.dependOn(&b.addRunArtifact(log_bench).step);
+}
+
+/// Adds the step `test-<name>` for the checks of one module and makes
+/// `test_step` depend on it.
+fn addModuleTestStep(b: *std.Build, test_step: *std.Build.Step, name: []const u8) *std.Build.Step {
+    const step = b.step(b.fmt("test-{s}", .{name}), b.fmt("Run the tests of the {s} module", .{name}));
+    test_step.dependOn(step);
+    return step;
 }
 
 /// Runs `artifact`. Under ThreadSanitizer the first report fails the run at

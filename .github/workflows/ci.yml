@@ -15,47 +15,116 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # The modules to test: on a pull request, the ones its changes affect
+  # (see .github/scripts/affected-modules.sh); on a push to main or dev and
+  # on a manual run, all of them, so that every merge is tested in full.
+  changes:
+    name: changes
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    outputs:
+      modules: ${{ steps.affected.outputs.modules }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The whole history, so that git diff finds the pull request's base.
+          fetch-depth: 0
+      - run: sh .github/scripts/affected-modules-test.sh
+      - id: affected
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "$EVENT" = pull_request ]; then
+            modules=$(sh .github/scripts/affected-modules.sh "$BASE" HEAD)
+          else
+            modules=$(sh .github/scripts/affected-modules.sh --all)
+          fi
+          echo "Modules to test: ${modules:-none}"
+          echo "modules=$modules" >> "$GITHUB_OUTPUT"
+
   # The names of `test`, `tsan` and `fmt` are required status checks on
-  # main and dev; keep them in sync.
+  # main and dev; keep them in sync. `test` and `tsan` run on every change,
+  # so that the checks always report: with no module to test, their steps
+  # are skipped and the job passes. A skipped matrix job would never report
+  # its checks, and the pull request would wait for them forever.
   test:
     name: test (${{ matrix.os }})
+    needs: changes
+    # Also when `changes` fails, to fail below rather than be skipped.
+    if: ${{ !cancelled() }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    env:
+      MODULES: ${{ needs.changes.outputs.modules }}
     steps:
-      - uses: actions/checkout@v7
+      - if: needs.changes.result != 'success'
+        shell: bash
+        run: |
+          echo "::error::The changes job failed, so the modules to test are unknown."
+          exit 1
+      - if: env.MODULES != ''
+        uses: actions/checkout@v7
       # Zig version is taken from minimum_zig_version in build.zig.zon.
-      - uses: mlugg/setup-zig@v2
+      - if: env.MODULES != ''
+        uses: mlugg/setup-zig@v2
       # A test that hangs fails after 5 minutes, by name and with its
       # stderr, and the other tests still run. Without the flag the job
       # would hit its timeout and print nothing about the test.
-      - run: zig build test --summary all --test-timeout 5m
+      - if: env.MODULES != ''
+        shell: bash
+        run: zig build $(printf 'test-%s ' $MODULES) --summary all --test-timeout 5m
+      # The package in tests/nats, built and not run: the end-to-end and
+      # stress tests, the examples of the nats guide and the benchmark. Only
+      # nats-e2e runs them, on Linux, as they need the servers in Docker;
+      # this keeps them compiling on every system, in a required check.
+      - if: contains(format(' {0} ', env.MODULES), ' nats ')
+        shell: bash
+        working-directory: tests/nats
+        run: zig build check --summary all
 
   # The tests again under ThreadSanitizer; it does not build for Windows.
   tsan:
     name: tsan (${{ matrix.os }})
+    needs: changes
+    if: ${{ !cancelled() }}
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    env:
+      MODULES: ${{ needs.changes.outputs.modules }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: mlugg/setup-zig@v2
+      - if: needs.changes.result != 'success'
+        shell: bash
+        run: |
+          echo "::error::The changes job failed, so the modules to test are unknown."
+          exit 1
+      - if: env.MODULES != ''
+        uses: actions/checkout@v7
+      - if: env.MODULES != ''
+        uses: mlugg/setup-zig@v2
       # TSan maps its shadow memory at fixed addresses, which the mmap
       # randomness of recent Ubuntu kernels can take.
-      - if: runner.os == 'Linux'
+      - if: env.MODULES != '' && runner.os == 'Linux'
         run: sudo sysctl vm.mmap_rnd_bits=28
-      - run: zig build test -Dtsan=true --summary all --test-timeout 5m
+      - if: env.MODULES != ''
+        shell: bash
+        run: zig build $(printf 'test-%s ' $MODULES) -Dtsan=true --summary all --test-timeout 5m
 
   # The validator's tests built, not run, for a 32-bit target, where usize
-  # has 32 bits; the other jobs build for 64-bit targets only.
+  # has 32 bits; the other jobs build for 64-bit targets only. It runs when
+  # the validator is among the modules to test.
   validator-x86:
     name: validator (x86-linux-musl, compile only)
+    needs: changes
+    if: contains(format(' {0} ', needs.changes.outputs.modules), ' validator ')
     timeout-minutes: 30
     runs-on: ubuntu-latest
     steps:
@@ -70,4 +139,27 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: mlugg/setup-zig@v2
-      - run: zig fmt --check build.zig build.zig.zon src
+      - run: zig fmt --check build.zig build.zig.zon src tests --exclude tests/nats/zig-pkg
+
+  # The end-to-end tests of nats against NATS servers in Docker. Only the
+  # Linux runners run Linux containers, so this job is ubuntu only. It is
+  # not a required check yet. It runs when nats is among the modules to
+  # test, so on every push to main or dev and on a manual run.
+  nats-e2e:
+    name: nats-e2e
+    needs: changes
+    if: contains(format(' {0} ', needs.changes.outputs.modules), ' nats ')
+    timeout-minutes: 20
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: mlugg/setup-zig@v2
+      - name: Start the NATS servers
+        run: docker compose up --detach --wait
+      - name: Run the end-to-end tests
+        working-directory: tests/nats
+        timeout-minutes: 10
+        run: zig build e2e --summary all
+      - name: Stop the NATS servers
+        if: always()
+        run: docker compose down
