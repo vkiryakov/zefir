@@ -99,6 +99,8 @@ changed: Io.Condition = .init,
 status: State = .disconnected,
 /// Why the current connection must end; the manager acts on it.
 exit: ?manager.Exit = null,
+/// The manager took `exit` and is taking the connection down.
+exit_taken: bool = false,
 /// The attempt to connect in progress, for `close()` to stop.
 attempt: ?*manager.AttemptState = null,
 /// Why the first connection failed, for `connect()` to return.
@@ -485,6 +487,11 @@ pub fn drain(client: *Client, options: DrainOptions) DrainError!void {
         defer client.mutex.unlock(io);
         const status = client.status;
         if (status == .connected) {
+            // A drain finishes on this server: a move off a server in lame
+            // duck mode that the manager has not begun yet is called off.
+            if (client.exit) |exit| if (exit == .lame_duck and !client.exit_taken) {
+                client.exit = null;
+            };
             log.debug("draining the client", .{});
             client.status = .draining;
             client.drain_phase = .subscriptions;

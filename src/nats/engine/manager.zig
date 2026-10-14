@@ -486,6 +486,7 @@ fn beginReconnecting(client: *Client) bool {
     defer client.mutex.unlock(client.io);
     if (client.status == .closed) return false;
     client.exit = null;
+    client.exit_taken = false;
     return true;
 }
 
@@ -764,9 +765,13 @@ fn lameDuck(client: *Client) void {
     log.debug("the server is entering lame duck mode", .{});
     if (client.pool.currentServer(client.io)) |server| client.events.push(client.io, .{ .lame_duck = server });
     if (!client.options.options.reconnect.enabled or client.pool.count(client.io) < 2) return;
-    // A drain finishes on this server.
-    if (client.state() != .connected) return;
-    lose(client, .lame_duck);
+    // A drain finishes on this server: only a connected client moves, and
+    // the check and the move are one step against drain().
+    client.mutex.lockUncancelable(client.io);
+    defer client.mutex.unlock(client.io);
+    if (client.status != .connected) return;
+    if (client.exit == null) client.exit = .lame_duck;
+    client.changed.broadcast(client.io);
 }
 
 /// The servers an INFO announces join the pool, and the discovered ones it
@@ -854,7 +859,10 @@ fn awaitExit(client: *Client, deadline: Io.Clock.Timestamp) ?Exit {
     client.mutex.lockUncancelable(client.io);
     defer client.mutex.unlock(client.io);
     while (true) {
-        if (client.exit) |exit| return exit;
+        if (client.exit) |exit| {
+            client.exit_taken = true;
+            return exit;
+        }
         client.changed.waitTimeout(client.io, &client.mutex, .{ .deadline = deadline }) catch |err| switch (err) {
             error.Timeout => return null,
             // Only close() and deinit() cancel the manager.

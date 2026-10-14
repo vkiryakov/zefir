@@ -1431,6 +1431,32 @@ test "a drain keeps what the streams of requestMany received for their owners to
     try testing.expectEqual(0, client.stats().dropped_messages);
 }
 
+test "a drain that begins while a lame duck move is decided but not begun finishes on that server" {
+    const io = testing.io;
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var record: Record = .{};
+    defer record.deinit();
+    const sessions = [_]Session{sessionServe};
+    var server = try io.concurrent(serveSessions, .{ io, &listener, &sessions, &record });
+    defer server.cancel(io) catch {};
+    var url: [64]u8 = undefined;
+    var client: Client = try .init(testing.allocator, io, .{ .servers = &.{try FakeServer.url(&listener, &url)} });
+    defer client.deinit();
+    try client.connect();
+    try client.flush(quick);
+    {
+        // The reader saw the server's lame duck INFO; the manager has not
+        // woken for it yet.
+        client.mutex.lockUncancelable(io);
+        defer client.mutex.unlock(io);
+        client.exit = .lame_duck;
+    }
+    try drainClient(&client, .fromSeconds(5));
+    try testing.expectEqual(.drained, client.close_reason.?);
+    try testing.expectEqual(1, record.accepted.load(.monotonic));
+}
+
 /// The next event, which must be a `tag` one, within 5 s.
 fn expectEvent(client: *Client, tag: std.meta.Tag(nats.Event)) !nats.Event {
     const event = (try client.nextEvent(within_five_seconds)) orelse return error.TestNoEvent;
