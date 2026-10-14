@@ -30,6 +30,7 @@
 
 const std = @import("std");
 const model = @import("model.zig");
+const credentials = @import("credentials.zig");
 
 pub const Route = model.Route;
 pub const Metadata = model.Metadata;
@@ -49,6 +50,11 @@ pub const Handler = RawServer.Handler;
 pub const Limits = RawServer.Limits;
 /// The context of one call on the server.
 pub const Context = @import("engine/Context.zig").Context;
+
+/// What a call carries in `authorization`, as a type.
+pub const Credentials = credentials.Credentials;
+/// Credentials that the client engine asks for before every call.
+pub const CredentialsProvider = credentials.CredentialsProvider;
 
 /// The client side of a transport.
 pub const ClientTransport = @import("ClientTransport.zig");
@@ -74,6 +80,7 @@ test {
     _ = @import("Pending.zig");
     _ = @import("testing.zig");
     _ = @import("failures.zig");
+    _ = @import("credentials.zig");
     _ = @import("engine/RawServer.zig");
     _ = @import("engine/Call.zig");
     _ = @import("engine/Context.zig");
