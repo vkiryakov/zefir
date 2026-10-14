@@ -475,7 +475,7 @@ fn lost(client: *Client, exit: Exit) bool {
         client.status = .closed;
         if (client.close_reason == null) client.close_reason = .connection_lost;
     }
-    client.changed.broadcast(client.io);
+    client.changed.wake(client.io);
     return again;
 }
 
@@ -499,7 +499,7 @@ fn giveUp(client: *Client, reason: Client.CloseReason) void {
         client.status = .closed;
         if (client.close_reason == null) client.close_reason = reason;
         if (client.exit == null) client.exit = .closed;
-        client.changed.broadcast(io);
+        client.changed.wake(io);
     }
     endAll(client);
 }
@@ -763,7 +763,7 @@ pub fn connectFailed(client: *Client, err: Client.ConnectError) void {
         client.status = .closed;
         if (client.close_reason == null) client.close_reason = .connect_failed;
         if (client.exit == null) client.exit = .closed;
-        client.changed.broadcast(io);
+        client.changed.wake(io);
     }
     endAll(client);
 }
@@ -801,7 +801,7 @@ fn lameDuck(client: *Client) void {
     defer client.mutex.unlock(client.io);
     if (client.status != .connected) return;
     if (client.exit == null) client.exit = .lame_duck;
-    client.changed.broadcast(client.io);
+    client.changed.wake(client.io);
 }
 
 /// The servers an INFO announces join the pool, and the discovered ones it
@@ -839,7 +839,7 @@ fn connected(client: *Client, server: ServerAddress) ?bool {
         if (client.status != .connecting and client.status != .reconnecting) return null;
         client.status = .connected;
         client.connected_at = Io.Clock.awake.now(client.io);
-        client.changed.broadcast(client.io);
+        client.changed.wake(client.io);
         defer client.ever_connected = true;
         break :first !client.ever_connected;
     };
@@ -859,7 +859,7 @@ fn disconnected(client: *Client) void {
         client.connected_at = null;
         if (client.info_json) |json| client.gpa.free(json);
         client.info_json = null;
-        client.changed.broadcast(client.io);
+        client.changed.wake(client.io);
     }
     client.subscriptions.closeAll(client.io);
 }
@@ -884,7 +884,7 @@ fn lose(client: *Client, exit: Exit) void {
     client.mutex.lockUncancelable(client.io);
     defer client.mutex.unlock(client.io);
     if (client.exit == null) client.exit = exit;
-    client.changed.broadcast(client.io);
+    client.changed.wake(client.io);
 }
 
 /// Waits until the connection must end, or until `deadline`: null then.
@@ -896,11 +896,10 @@ fn awaitExit(client: *Client, deadline: Io.Clock.Timestamp) ?Exit {
             client.exit_taken = true;
             return exit;
         }
-        client.changed.waitTimeout(client.io, &client.mutex, .{ .deadline = deadline }) catch |err| switch (err) {
-            error.Timeout => return null,
-            // Only close() and deinit() cancel the manager.
-            error.Canceled => return .closed,
-        };
+        // A wait may end early: the deadline decides.
+        if (time.expired(client.io, deadline)) return null;
+        // Only close() and deinit() cancel the manager.
+        client.changed.wait(client.io, &client.mutex, deadline) catch return .closed;
     }
 }
 

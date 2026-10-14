@@ -61,6 +61,7 @@ const Connection = @import("engine/Connection.zig");
 const dialer = @import("engine/connect.zig");
 const manager = @import("engine/manager.zig");
 const time = @import("engine/time.zig");
+const Broadcast = @import("engine/Broadcast.zig");
 const log = std.log.scoped(.nats);
 const Client = @This();
 
@@ -94,8 +95,9 @@ connection: Connection = undefined,
 lifecycle: Io.Mutex = .init,
 /// Guards the fields below.
 mutex: Io.Mutex = .init,
-/// Broadcast on every change of the fields below.
-changed: Io.Condition = .init,
+/// Woken on every change of the fields below. Any number of tasks may
+/// wait on it, as callers of `connect()` do while it connects.
+changed: Broadcast = .{},
 status: State = .disconnected,
 /// Why the current connection must end; the manager acts on it.
 exit: ?manager.Exit = null,
@@ -528,7 +530,7 @@ pub fn drain(client: *Client, options: DrainOptions) DrainError!void {
             log.debug("draining the client", .{});
             client.status = .draining;
             client.drain_phase = .subscriptions;
-            client.changed.broadcast(io);
+            client.changed.wake(io);
         }
         break :begin status;
     };
@@ -882,7 +884,7 @@ pub fn connect(client: *Client) ConnectError!void {
 
     client.mutex.lockUncancelable(io);
     while (client.status == .connecting) {
-        client.changed.wait(io, &client.mutex) catch |err| {
+        client.changed.wait(io, &client.mutex, null) catch |err| {
             // The caller gave up. The attempt stops with the call that
             // started it, and the client closes; another call only leaves.
             client.mutex.unlock(io);
@@ -994,7 +996,7 @@ fn closeWith(client: *Client, reason: CloseReason) void {
     // Under the lock: the attempt lives on the manager's stack until it is
     // untracked.
     if (client.attempt) |attempt| attempt.stop(io);
-    client.changed.broadcast(io);
+    client.changed.wake(io);
     client.mutex.unlock(io);
     // Before the outbound queue wakes them, requests learn why. After a
     // drain, the streams of requestMany keep what they received.
@@ -1197,6 +1199,32 @@ test "a second connect() that gives up returns Canceled; the first one goes on" 
     try testing.expectEqual(.connecting, client.state());
     release.set(io);
     try first.await(io);
+    try testing.expectEqual(.connected, client.state());
+}
+
+test "many tasks may wait in connect() for the one connection" {
+    const io = testing.io;
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var release: Io.Event = .unset;
+    var server = try io.concurrent(silentUntilReleased, .{ io, &listener, &release });
+    defer {
+        release.set(io);
+        server.cancel(io) catch {};
+    }
+    var url: [64]u8 = undefined;
+    var client: Client = try .init(testing.allocator, io, .{ .servers = &.{try FakeServer.url(&listener, &url)} });
+    defer client.deinit();
+    var callers: [64]Io.Future(ConnectError!void) = undefined;
+    var started: usize = 0;
+    defer for (callers[0..started]) |*f| f.cancel(io) catch {};
+    for (&callers) |*f| {
+        f.* = try io.concurrent(connectLong, .{&client});
+        started += 1;
+    }
+    while (client.state() != .connecting) try io.sleep(.fromMilliseconds(1), .awake);
+    release.set(io);
+    for (&callers) |*f| try f.await(io);
     try testing.expectEqual(.connected, client.state());
 }
 
