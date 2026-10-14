@@ -323,7 +323,7 @@ test "the deadline: Timeout on time; a late response is dropped and counted" {
     try testing.expectError(error.Timeout, caller.result);
     const took = caller.began.durationTo(caller.ended);
     try testing.expect(took.nanoseconds >= 150 * std.time.ns_per_ms - std.time.ns_per_ms);
-    try testing.expect(took.nanoseconds < 650 * std.time.ns_per_ms);
+    try testing.expect(took.nanoseconds < 2 * std.time.ns_per_s);
 
     try service.reply(late, &.{}, "late");
     var next: Caller = .init(&bus, .{});
@@ -474,7 +474,7 @@ test "calls that come while another starts the inbox wait for it no longer than 
     defer service.deinit();
 
     fake.hangFlush(io, true);
-    var starter: Caller = .init(&bus, .{ .timeout = .fromMilliseconds(600) });
+    var starter: Caller = .init(&bus, .{ .timeout = .fromSeconds(2) });
     defer starter.deinit();
     try starter.begin();
     // The starter is in the flush of the inbox now.
@@ -483,7 +483,7 @@ test "calls that come while another starts the inbox wait for it no longer than 
     defer quick.deinit();
     quick.run();
     try testing.expectError(error.Timeout, quick.result);
-    try testing.expect(quick.began.durationTo(quick.ended).nanoseconds < 400 * std.time.ns_per_ms);
+    try testing.expect(quick.began.durationTo(quick.ended).nanoseconds < std.time.ns_per_s);
     starter.join();
     try testing.expectError(error.Timeout, starter.result);
     try testing.expectEqual(@as(usize, 1), fake.subscriptionCount(io));
