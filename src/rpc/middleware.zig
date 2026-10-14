@@ -66,8 +66,10 @@ pub const Middleware = struct {
     /// The link of `item`: a function of type `rpc.MiddlewareFn`, or a
     /// pointer to an object with
     /// `pub fn run(self: *@This(), ctx: *rpc.Context, next: *rpc.Next) anyerror!void`.
-    /// The object is borrowed: it must outlive the server. Anything else
-    /// stops the build with a message that names what to write.
+    /// The object is borrowed: it must outlive the server, and it serves
+    /// all calls at once, so its state is guarded with `std.Io` primitives.
+    /// Anything else stops the build with a message that names what to
+    /// write.
     pub fn of(item: anytype) Middleware {
         return linkOf(Middleware, Context, Next, "rpc.Middleware.of", "fn (ctx: *rpc.Context, next: *rpc.Next) anyerror!void", item);
     }
@@ -96,10 +98,19 @@ pub const Next = opaque {
 /// without `next.run()` is fine, as a circuit breaker does; success without
 /// it is `MiddlewareFailed`. `next.run()` returns errors in the names of
 /// `rpc.RawClient.CallError`; a link may replace the outcome with one of
-/// them, and any other error becomes `MiddlewareFailed`. A link returns
-/// `error.Canceled` as a cancelation point of `std.Io` gave it, only when
-/// the caller's task was canceled: the engine re-arms the cancelation for
-/// the caller and ends the call with `Cancelled` or `DeadlineExceeded`.
+/// them, and any other error becomes `MiddlewareFailed`.
+///
+/// A link runs in the caller's task, and `std.Io`'s rules for cancelation
+/// hold for it. `error.Canceled` from a cancelation point of the link's I/O
+/// is returned as it is: the engine re-arms it for the caller and ends the
+/// call with `Cancelled` or `DeadlineExceeded`. A link that swallows it
+/// calls `ctx.io().recancel()` itself, or the caller never sees it. The
+/// `error.Canceled` of a task of the link's own, such as an attempt it
+/// cancels at a time limit of its own, is not the caller's: never return
+/// it (the engine's `recancel` would panic).
+///
+/// The objects are shared by all calls at once: guard their state with
+/// `std.Io` primitives.
 pub const ClientMiddleware = struct {
     ptr: ?*anyopaque = null,
     run: *const fn (ptr: ?*anyopaque, ctx: *ClientContext, next: *ClientNext) anyerror!void,
@@ -118,13 +129,7 @@ pub const ClientMiddleware = struct {
 pub const ClientMiddlewareFn = fn (ctx: *ClientContext, next: *ClientNext) anyerror!void;
 
 /// The rest of the client's chain behind one link.
-pub const ClientNext = opaque {
-    /// Runs the links after this one, then the transport's call, and
-    /// returns their outcome. Exactly once per link.
-    pub fn run(next: *ClientNext) anyerror!void {
-        return RawClient.runNext(next);
-    }
-};
+pub const ClientNext = RawClient.ClientNext;
 
 /// The link of a function or an object; `where` and `function` name them in
 /// the messages of the build. Internal to the module.
@@ -158,7 +163,8 @@ fn checkItem(comptime Ctx: type, comptime NextT: type, comptime where: []const u
     const method = "pub fn run(self: *@This(), " ++ function["fn (".len..];
     const expected = where ++ ": expected " ++ function ++ ", or a pointer to a type with " ++ method ++ "; got " ++ @typeName(Item);
     switch (@typeInfo(Item)) {
-        .@"fn" => if (Item != fn (*Ctx, *NextT) anyerror!void) @compileError(expected),
+        .@"fn" => if (Item != fn (*Ctx, *NextT) anyerror!void)
+            @compileError(where ++ ": a middleware function is " ++ function ++ ", with anyerror written out, not inferred; got " ++ @typeName(Item)),
         .pointer => |pointer| {
             if (pointer.size != .one) @compileError(expected);
             const T = pointer.child;

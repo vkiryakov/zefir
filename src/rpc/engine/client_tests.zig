@@ -38,6 +38,8 @@ const Recorder = struct {
     answer: Answer = .{ .ok = "pong" },
     /// Canceled right before the answer, when set.
     cancel_token: ?*core.CancellationToken = null,
+    /// Calls that reached the answer.
+    entered: std.atomic.Value(u32) = .init(0),
 
     const Answer = union(enum) {
         ok: []const u8,
@@ -46,6 +48,12 @@ const Recorder = struct {
         /// Answers "late" after sleeping this long, deadline or not: a
         /// response at the deadline.
         late: std.Io.Duration,
+        /// A refusal at admission, after sleeping this long: a refusal at
+        /// the deadline.
+        late_refusal: std.Io.Duration,
+        /// Sleeps this long deaf to cancelation, then meets a cancelation
+        /// of the caller at its next cancelation point.
+        deaf: std.Io.Duration,
     };
 
     fn init(io: std.Io) Recorder {
@@ -76,6 +84,7 @@ const Recorder = struct {
         r.deadline = request.ctx.deadline;
         r.trace = request.ctx.trace;
         if (r.cancel_token) |token| token.cancel();
+        _ = r.entered.fetchAdd(1, .acq_rel);
         const body = switch (r.answer) {
             .ok => |body| body,
             .failure => |failure| return .{ .status = .{ .failure = failure } },
@@ -86,6 +95,19 @@ const Recorder = struct {
             .late => |pause| late: {
                 try io.sleep(pause, .awake);
                 break :late "late";
+            },
+            .late_refusal => |pause| {
+                try io.sleep(pause, .awake);
+                return .{ .status = .{ .failure = failures.unavailable }, .refused = true };
+            },
+            .deaf => |pause| deaf: {
+                {
+                    const protection = io.swapCancelProtection(.blocked);
+                    defer _ = io.swapCancelProtection(protection);
+                    io.sleep(pause, .awake) catch unreachable;
+                }
+                try io.checkCancel();
+                break :deaf "deaf";
             },
         };
         const protection = io.swapCancelProtection(.blocked);
@@ -250,6 +272,13 @@ test "invalid metadata, routes and credentials are not sent: a failure with sent
         .{ .bearer = "" },
         .{ .custom = " lead" },
         .{ .custom = "ünicode" },
+        // The server would read these as something else: a token with a
+        // space as custom, a user with ':' as another user, a password
+        // that is not UTF-8 as custom.
+        .{ .bearer = "a b" },
+        .{ .basic = .{ .user = "a:b", .password = "c" } },
+        .{ .basic = .{ .user = "u", .password = "\xff" } },
+        .{ .basic = .{ .user = "\xfe", .password = "p" } },
     }) |credentials| {
         var result = try client.call(io, .root, echo_route, "", .{ .credentials = credentials });
         defer result.deinit();
@@ -390,6 +419,51 @@ test "a response at the deadline, or after the context was canceled, is not a su
     recorder.answer = .{ .ok = "pong" };
     recorder.cancel_token = &token;
     try testing.expectError(error.Cancelled, client.call(io, core.Context.root.withCancellation(&token), echo_route, "", .{}));
+}
+
+test "a failure at the deadline stays a failure: a refusal keeps its promise that the call did not run" {
+    const io = testing.io;
+    var recorder: Recorder = .init(io);
+    defer recorder.deinit();
+    var client: RawClient = try .init(testing.allocator, .{ .transport = .init(&recorder) });
+    defer client.deinit();
+
+    recorder.answer = .{ .late_refusal = .fromMilliseconds(60) };
+    var refused = try client.call(io, .root, echo_route, "", .{ .timeout = .fromMilliseconds(20) });
+    defer refused.deinit();
+    try expectFailure(refused, failures.unavailable);
+    try testing.expect(refused.response.refused and refused.sent);
+
+    var token: core.CancellationToken = .init;
+    recorder.answer = .{ .failure = failures.permission_denied };
+    recorder.cancel_token = &token;
+    var failed = try client.call(io, core.Context.root.withCancellation(&token), echo_route, "", .{});
+    defer failed.deinit();
+    try expectFailure(failed, failures.permission_denied);
+}
+
+/// Waits until `counter` reaches `n`, ten seconds at most.
+fn waitFor(io: std.Io, counter: *const std.atomic.Value(u32), n: u32) !void {
+    const deadline: core.Deadline = .after(now(io), .fromSeconds(10));
+    while (counter.load(.acquire) < n) {
+        if (deadline.isExpired(now(io))) return error.TestTimeout;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+}
+
+test "the caller's task canceled after the deadline has passed: DeadlineExceeded, and the cancelation stays" {
+    const io = testing.io;
+    var recorder: Recorder = .init(io);
+    defer recorder.deinit();
+    recorder.answer = .{ .deaf = .fromMilliseconds(100) };
+    var client: RawClient = try .init(testing.allocator, .{ .transport = .init(&recorder) });
+    defer client.deinit();
+
+    var caller = try io.concurrent(callAndLook, .{ &client, io, echo_route, std.Io.Duration.fromMilliseconds(20) });
+    try waitFor(io, &recorder.entered, 1);
+    const observed = caller.cancel(io);
+    try testing.expectError(error.DeadlineExceeded, observed.result);
+    try testing.expect(observed.still_canceled);
 }
 
 /// Waits on a gate in the handler; canceling the call ends the wait.

@@ -35,7 +35,6 @@ const credentials = @import("../credentials.zig");
 const ClientTransport = @import("../ClientTransport.zig");
 const Credentials = credentials.Credentials;
 const ClientMiddleware = @import("../middleware.zig").ClientMiddleware;
-const ClientNext = @import("../middleware.zig").ClientNext;
 
 const RawClient = @This();
 
@@ -58,7 +57,9 @@ pub const Options = struct {
     /// client and frees it after the client's `deinit`.
     transport: ClientTransport,
     /// The credentials of every call that brings none of its own. `init`
-    /// copies them, `deinit` wipes the copy.
+    /// copies them, `deinit` wipes the copy. A `.provider` is borrowed, not
+    /// copied: its object must outlive the client, and it serves all calls
+    /// at once.
     credentials: Credentials = .none,
     /// The links around every call, outermost first. `init` copies the
     /// list; the objects are borrowed and must outlive the client.
@@ -156,7 +157,9 @@ pub const ClientContext = opaque {
 
     /// Before `next.run()`: the credentials of this call instead of those it
     /// had, such as a fresh token. Borrowed until `next.run()` returns; a
-    /// provider is asked right before sending.
+    /// provider is asked right before sending. A secret the link copies into
+    /// `allocator()` for this is freed with the call, not wiped: a provider
+    /// is the way to credentials the engine wipes.
     pub fn setCredentials(ctx: *ClientContext, chosen: Credentials) void {
         outgoingOf(ctx).credentials = chosen;
     }
@@ -174,11 +177,18 @@ fn outgoingOf(ctx: *ClientContext) *Outgoing {
     return @ptrCast(@alignCast(ctx));
 }
 
-/// `ClientNext.run`. Internal to the module.
-pub fn runNext(next: *ClientNext) CallError!void {
-    const link: *Outgoing.Link = @ptrCast(@alignCast(next));
-    return link.runNext();
-}
+/// The rest of the client's chain behind one link: `rpc.ClientNext`.
+pub const ClientNext = opaque {
+    /// Runs the links after this one, then the transport's call, and
+    /// returns their outcome in the names of `CallError`. Exactly once per
+    /// link. It may run in a task of the link's own, such as one the link
+    /// cancels at a time limit of its own: canceling that task ends the
+    /// attempt with `Cancelled`, and the link decides what to return.
+    pub fn run(next: *ClientNext) anyerror!void {
+        const link: *Outgoing.Link = @ptrCast(@alignCast(next));
+        return link.runNext();
+    }
+};
 
 pub const CallOptions = struct {
     /// The deadline is the earlier of the caller's and now plus this. Null:
@@ -290,9 +300,7 @@ pub fn call(client: *RawClient, io: std.Io, ctx: core.Context, route: model.Rout
         .credentials = options.credentials orelse client.default_credentials,
         .diagnostics = options.diagnostics,
     };
-    const outcome = outgoing.runLayer(0);
-    if (outgoing.canceled_seen) outgoing.keepCancelation();
-    try outcome;
+    try outgoing.runLayer(0);
     return .{ .response = outgoing.response.?, .request_id = request_id, .sent = outgoing.sent, .arena = arena };
 }
 
@@ -333,9 +341,6 @@ const Outgoing = struct {
     /// A link called `next.run()` twice: the call fails with
     /// `MiddlewareFailed`.
     violation: bool = false,
-    /// A `Canceled` of the caller's task was turned into `Cancelled` or
-    /// `DeadlineExceeded`, and the cancelation re-armed.
-    canceled_seen: bool = false,
 
     /// Runs link `index` and all inside it; the transport's call past the
     /// last link. Errors come in the names of `CallError`.
@@ -381,9 +386,9 @@ const Outgoing = struct {
         }
     };
 
-    /// An error a link returned, in the names of `CallError`: a cancelation
-    /// of the caller's task is re-armed, an error outside the set is
-    /// `MiddlewareFailed`.
+    /// An error a link returned, in the names of `CallError`: a `Canceled`
+    /// the link met at a cancelation point of its task is re-armed, an
+    /// error outside the set is `MiddlewareFailed`.
     fn linkError(o: *Outgoing, err: anyerror) CallError {
         if (err == error.Canceled) return o.canceled();
         inline for (@typeInfo(CallError).error_set.error_names.?) |name| {
@@ -399,33 +404,26 @@ const Outgoing = struct {
         log.warn("client middleware of {s}.v{d}.{s} " ++ what ++ "; the call fails with MiddlewareFailed", .{ o.route.service, o.route.version, o.route.method });
     }
 
-    /// The call saw the caller's task canceled and re-armed the cancelation;
-    /// a link may have met it again at a cancelation point of its own and
-    /// swallowed it. Re-arms it once more, so that the caller's next
-    /// cancelation point sees it whatever the links did.
-    fn keepCancelation(o: *Outgoing) void {
-        o.io.checkCancel() catch {};
-        o.io.recancel();
-    }
-
     /// Asks a provider for the credentials, encodes them, sends the request
     /// and takes the response. The credentials of the call live in an arena
     /// that is wiped once the transport is done with the request.
     fn send(o: *Outgoing) CallError!void {
         const io = o.io;
+        // A context canceled or expired while the links ran: nothing goes
+        // out, and no provider is asked.
+        try o.operation.check(now(io));
         var wiping: credentials.Wiping = .{ .gpa = o.client.gpa };
         var secrets: std.heap.ArenaAllocator = .init(wiping.allocator());
         defer freeArena(io, &secrets);
         const chosen = try o.askProvider(secrets.allocator());
+        // Credentials the server would read as something else stay here.
+        if (!credentials.readsBack(chosen)) return o.refuseAuthorization();
         const authorization = authorization: {
             const protection = io.swapCancelProtection(.blocked);
             defer _ = io.swapCancelProtection(protection);
             break :authorization try credentials.encode(secrets.allocator(), chosen);
         };
-        if (authorization) |value| if (!rules.isValidValue(value)) {
-            o.response = .{ .status = .{ .failure = failures.invalid_authorization } };
-            return;
-        };
+        if (authorization) |value| if (!rules.isValidValue(value)) return o.refuseAuthorization();
         const request: transport.Request = .{
             .route = o.route,
             .request_id = o.request_id,
@@ -434,15 +432,25 @@ const Outgoing = struct {
             .metadata = try o.requestMetadata(authorization),
             .body = o.request,
         };
+        // Once more right before sending: the provider may have taken a
+        // while.
+        try o.operation.check(now(io));
         const response = o.client.client_transport.call(io, &request, .{
             .allocator = o.arena,
             .max_response_bytes = o.client.max_response_bytes,
             .diagnostics = o.diagnostics,
         }) catch |err| return o.transportError(err);
-        // A response at the deadline is not a success after the fact.
-        try o.operation.check(now(io));
+        // A success at the deadline is not a success after the fact. A
+        // failure of the server stays what it is: a refusal still promises
+        // that the call did not run.
+        if (response.status == .ok) try o.operation.check(now(io));
         o.response = response;
         o.sent = true;
+    }
+
+    /// Ends the call without sending it: its credentials cannot travel.
+    fn refuseAuthorization(o: *Outgoing) void {
+        o.response = .{ .status = .{ .failure = failures.invalid_authorization } };
     }
 
     /// The credentials of the call; a provider is asked now.
@@ -505,7 +513,6 @@ const Outgoing = struct {
     /// `Cancelled`.
     fn canceled(o: *Outgoing) CallError {
         o.io.recancel();
-        o.canceled_seen = true;
         o.operation.check(now(o.io)) catch |err| return err;
         return error.Cancelled;
     }

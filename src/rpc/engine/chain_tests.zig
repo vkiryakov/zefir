@@ -702,7 +702,8 @@ const ClientProbe = struct {
         p.request_id = ctx.requestId();
         p.has_deadline = ctx.operation().deadline != null;
         if (ctx.addMetadata("authorization", "Bearer x")) |_| {} else |err| p.reserved_key = err;
-        try ctx.addMetadata("x-from", p.name);
+        // A value the link builds lives in the call's arena.
+        try ctx.addMetadata("x-from", try std.fmt.allocPrint(ctx.allocator(), "{s}", .{p.name}));
         if (p.credentials) |chosen| ctx.setCredentials(chosen);
         switch (p.mode) {
             .breaker => return error.Unavailable,
@@ -925,15 +926,107 @@ const Napper = struct {
     }
 };
 
-/// A client link that breaks the rule: after `next.run()` it waits, and
-/// swallows the cancelation it meets there.
+/// A client link that waits after `next.run()` and swallows the cancelation
+/// it meets there; by std's rule it re-arms what it swallows.
 const Swallower = struct {
     pub fn run(_: *Swallower, ctx: *ClientContext, next: *ClientNext) anyerror!void {
         const outcome = next.run();
-        ctx.io().sleep(.fromSeconds(10), .awake) catch {};
+        ctx.io().sleep(.fromSeconds(10), .awake) catch |err| switch (err) {
+            error.Canceled => ctx.io().recancel(),
+        };
         return outcome;
     }
 };
+
+/// A client link that bounds an attempt by its own time: `next.run()` in a
+/// task of its own, canceled after `limit`. The canceled attempt's
+/// `Cancelled` becomes `DeadlineExceeded` when `as_deadline` is set.
+const Bounded = struct {
+    limit: std.Io.Duration,
+    as_deadline: bool = false,
+
+    fn attempt(next: *ClientNext) anyerror!void {
+        return next.run();
+    }
+
+    pub fn run(b: *Bounded, ctx: *ClientContext, next: *ClientNext) anyerror!void {
+        const io = ctx.io();
+        var task = try io.concurrent(attempt, .{next});
+        io.sleep(b.limit, .awake) catch |err| {
+            // The caller's own cancelation: end the attempt, pass it on.
+            task.cancel(io) catch {};
+            return err;
+        };
+        task.cancel(io) catch |err| {
+            if (b.as_deadline and err == error.Cancelled) return error.DeadlineExceeded;
+            return err;
+        };
+    }
+};
+
+/// Cancels the caller's token before `next.run()`, as the caller's owner
+/// may do at any moment.
+const Canceler = struct {
+    token: *core.CancellationToken,
+
+    pub fn run(c: *Canceler, _: *ClientContext, next: *ClientNext) anyerror!void {
+        c.token.cancel();
+        return next.run();
+    }
+};
+
+/// Hands out a bearer token and counts how often it was asked.
+const CountingProvider = struct {
+    asked: std.atomic.Value(u32) = .init(0),
+
+    fn credentials(p: *CountingProvider) Credentials {
+        return .{ .provider = .{ .ptr = p, .get = get } };
+    }
+
+    fn get(ptr: *anyopaque, _: std.Io, _: core.Context, _: std.mem.Allocator) (error{ Unavailable, OutOfMemory } || std.Io.Cancelable)!Credentials {
+        const p: *CountingProvider = @ptrCast(@alignCast(ptr));
+        _ = p.asked.fetchAdd(1, .acq_rel);
+        return .{ .bearer = "token" };
+    }
+};
+
+test "a client link that bounds an attempt with a task of its own: the attempt's outcome, the caller's task not canceled" {
+    const io = testing.io;
+    var gate: Gate = .{ .io = io };
+    var bounded: Bounded = .{ .limit = .fromMilliseconds(30) };
+    var f: Fixture = undefined;
+    try f.start(io, testing.allocator, .{
+        .transport = undefined,
+        .methods = &.{.{ .route = routeOf("gate"), .handler = handlerOf(&gate) }},
+    }, .{ .transport = undefined, .middleware = &.{.of(&bounded)} });
+    defer f.stop(io);
+    defer gate.open.set(io);
+
+    const first = callAndLook(&f.client, io, "gate", .{});
+    try testing.expectError(error.Cancelled, first.result);
+    try testing.expect(!first.still_canceled);
+    bounded.as_deadline = true;
+    const second = callAndLook(&f.client, io, "gate", .{});
+    try testing.expectError(error.DeadlineExceeded, second.result);
+    try testing.expect(!second.still_canceled);
+}
+
+test "a token canceled while client middleware runs: the call is not sent, the provider is not asked" {
+    const io = testing.io;
+    var who: Who = .{};
+    var token: core.CancellationToken = .init;
+    var canceler: Canceler = .{ .token = &token };
+    var provider: CountingProvider = .{};
+    var f: Fixture = undefined;
+    try f.start(io, testing.allocator, .{
+        .transport = undefined,
+        .methods = &.{.{ .route = routeOf("who"), .handler = handlerOf(&who) }},
+    }, .{ .transport = undefined, .middleware = &.{.of(&canceler)}, .credentials = provider.credentials() });
+    defer f.stop(io);
+    try testing.expectError(error.Cancelled, f.client.call(io, core.Context.root.withCancellation(&token), routeOf("who"), "", .{}));
+    try testing.expectEqual(@as(u32, 0), who.calls.load(.acquire));
+    try testing.expectEqual(@as(u32, 0), provider.asked.load(.acquire));
+}
 
 /// A provider that waits ten seconds for its token.
 const SlowProvider = struct {
@@ -981,7 +1074,7 @@ test "Review Focus 3: the caller's task canceled in client middleware or in a pr
     try testing.expectEqual(@as(u32, 0), who.calls.load(.acquire));
 }
 
-test "Review Focus 3: a link that swallows the cancelation after next.run() does not lose it for the caller" {
+test "Review Focus 3: a link that swallows a cancelation after next.run() re-arms it, and the caller still sees it" {
     const io = testing.io;
     var gate: Gate = .{ .io = io };
     var swallower: Swallower = .{};

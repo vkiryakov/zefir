@@ -76,6 +76,21 @@ pub fn encode(arena: std.mem.Allocator, credentials: Credentials) error{OutOfMem
 
 const basic_prefix = "Basic ";
 
+/// Whether the server's `parse` gives `credentials` back as they were
+/// encoded: a bearer token that is not empty and has no space; a basic user
+/// without ':', the user and the password in UTF-8. A custom value goes as
+/// it is. The client engine does not send credentials the server would read
+/// as something else. Internal to the module.
+pub fn readsBack(credentials: Credentials) bool {
+    return switch (credentials) {
+        .none, .custom => true,
+        .bearer => |token| token.len > 0 and std.mem.findScalar(u8, token, ' ') == null,
+        .basic => |basic| std.mem.findScalar(u8, basic.user, ':') == null and
+            std.unicode.utf8ValidateSlice(basic.user) and std.unicode.utf8ValidateSlice(basic.password),
+        .provider => false,
+    };
+}
+
 /// The credentials of an `authorization` value, as RFC 7235 writes them:
 /// the scheme in any case, exactly one space, then the credentials without
 /// spaces. No value is `.none`; "Bearer <token>" is `.bearer`; "Basic
@@ -133,7 +148,7 @@ pub fn dupe(gpa: std.mem.Allocator, credentials: Credentials) error{OutOfMemory}
         .custom => |value| .{ .custom = try gpa.dupe(u8, value) },
         .basic => |basic| {
             const user = try gpa.dupe(u8, basic.user);
-            errdefer gpa.free(user);
+            errdefer wipeAndFree(gpa, user);
             return .{ .basic = .{ .user = user, .password = try gpa.dupe(u8, basic.password) } };
         },
     };
@@ -152,9 +167,12 @@ pub fn wipe(gpa: std.mem.Allocator, credentials: Credentials) void {
 }
 
 fn wipeAndFree(gpa: std.mem.Allocator, value: []const u8) void {
+    if (value.len == 0) return;
     const bytes = @constCast(value);
     std.crypto.secureZero(u8, bytes);
-    gpa.free(bytes);
+    // Not `free`: in Debug it fills the block with 0xAA before the
+    // allocator sees it, and a test could not tell a wiped block.
+    gpa.rawFree(bytes, .of(u8), @returnAddress());
 }
 
 /// An allocator over `gpa` that zeroes every block before it gives the
@@ -266,10 +284,13 @@ test "encode: what parse reads back" {
 }
 
 /// An allocator over `testing.allocator` that looks for `needle` in every
-/// block given back through it.
+/// block given back through it, and notes a block that is not all zero.
+/// `Allocator.free` fills a block with 0xAA in Debug before the allocator
+/// sees it, so only `rawFree` shows what the caller left in it.
 const Spotter = struct {
     needle: []const u8,
     spotted: bool = false,
+    unwiped: bool = false,
 
     fn allocator(s: *Spotter) std.mem.Allocator {
         return .{ .ptr = s, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
@@ -292,6 +313,7 @@ const Spotter = struct {
     fn free(ptr: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
         const s: *Spotter = @ptrCast(@alignCast(ptr));
         if (std.mem.find(u8, memory, s.needle) != null) s.spotted = true;
+        if (!std.mem.allEqual(u8, memory, 0)) s.unwiped = true;
         testing.allocator.rawFree(memory, alignment, ret_addr);
     }
 };
@@ -318,7 +340,7 @@ test "dupe makes a copy of its own; wipe zeroes it before freeing" {
         }
         wipe(gpa, copy);
     }
-    try testing.expect(!spotter.spotted);
+    try testing.expect(!spotter.spotted and !spotter.unwiped);
 
     // A provider is copied as it is: nothing to allocate.
     var state: u8 = 0;
@@ -329,11 +351,33 @@ test "dupe makes a copy of its own; wipe zeroes it before freeing" {
 }
 
 fn dupeAndWipe(gpa: std.mem.Allocator) !void {
-    wipe(gpa, try dupe(gpa, .{ .basic = .{ .user = "svc", .password = "pw" } }));
+    wipe(gpa, try dupe(gpa, .{ .basic = .{ .user = "s3cr3t-user", .password = "pw" } }));
 }
 
-test "dupe frees what it took when an allocation fails" {
-    try testing.checkAllAllocationFailures(testing.allocator, dupeAndWipe, .{});
+test "dupe frees what it took when an allocation fails, and wipes it first" {
+    var spotter: Spotter = .{ .needle = "s3cr3t" };
+    try testing.checkAllAllocationFailures(spotter.allocator(), dupeAndWipe, .{});
+    try testing.expect(!spotter.spotted and !spotter.unwiped);
+}
+
+test "readsBack: what the server's parse gives back as it was encoded" {
+    for ([_]Credentials{
+        .none,
+        .{ .bearer = "t0k.en-_~+/=" },
+        .{ .basic = .{ .user = "u", .password = "p:q ü" } },
+        .{ .basic = .{ .user = "", .password = "" } },
+        .{ .custom = "ApiKey k-1" },
+    }) |credentials| {
+        try testing.expect(readsBack(credentials));
+        try roundTrip(credentials);
+    }
+    for ([_]Credentials{
+        .{ .bearer = "" },
+        .{ .bearer = "a b" },
+        .{ .basic = .{ .user = "a:b", .password = "c" } },
+        .{ .basic = .{ .user = "u", .password = "\xff" } },
+        .{ .basic = .{ .user = "\xfe", .password = "p" } },
+    }) |credentials| try testing.expect(!readsBack(credentials));
 }
 
 test "the decoded user and password are wiped by wipeParsed; a failed decode leaves nothing behind" {
