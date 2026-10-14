@@ -839,13 +839,15 @@ const Tally = struct {
 
 /// One client and its server: `rounds` requests one after another, each
 /// answered at its own deadline shifted by -2 to +1 ms. Every request must
-/// end with its reply or with Timeout, and every reply that a request did
-/// not take must count as late.
+/// end with its reply or with Timeout, and every reply the server sent
+/// that a request did not take must count as late. A request already past
+/// its deadline when its frame would go in sends nothing.
 fn raceTimeouts(rounds: u32, tally: *Tally) !void {
     const io = testing.io;
     var listener = try FakeServer.listen(io);
     defer listener.deinit(io);
-    var server = try io.concurrent(serveAtMoment, .{ io, &listener, null });
+    var sent: std.atomic.Value(u32) = .init(0);
+    var server = try io.concurrent(serveAtMoment, .{ io, &listener, &sent });
     defer server.cancel(io) catch {};
     var url: [64]u8 = undefined;
     var client: Client = try .init(testing.allocator, io, .{ .servers = &.{try FakeServer.url(&listener, &url)} });
@@ -869,7 +871,7 @@ fn raceTimeouts(rounds: u32, tally: *Tally) !void {
     // The server answers this PING after every reply: they are all in.
     try client.flush(quick);
     try testing.expectEqual(rounds, tally.replies + tally.ended);
-    try testing.expectEqual(@as(u64, tally.ended), client.inbox.lateResponses(io));
+    try testing.expectEqual(@as(u64, sent.load(.acquire) - tally.replies), client.inbox.lateResponses(io));
     try testing.expectEqual(0, client.inbox.pendingCount(io));
     client.close();
     try server.await(io);
