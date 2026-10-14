@@ -235,7 +235,7 @@ const SlowLink = struct {
     pongs: std.atomic.Value(u32) = .init(0),
     done: Io.Event = .unset,
 
-    /// Reads about 16 MB/s, a 64 KiB piece at a time, and answers every
+    /// Reads about 8 MB/s, a 64 KiB piece at a time, and answers every
     /// PING it reads, until the test is done.
     fn serve(link: *SlowLink, io: Io, listener: *net.Server) !void {
         var peer: FakeServer.Peer = undefined;
@@ -253,7 +253,7 @@ const SlowLink = struct {
                     const piece = @min(left, 64 * 1024);
                     try peer.reader.interface.discardAll(piece);
                     left -= piece;
-                    try io.sleep(.fromMilliseconds(4), .awake);
+                    try io.sleep(.fromMilliseconds(8), .awake);
                 }
             }
         }
@@ -273,9 +273,12 @@ test "a live server behind a long backlog on a slow link is not dropped: PINGs t
     var url: [64]u8 = undefined;
     var client: Client = try .init(testing.allocator, io, .{
         .servers = &.{try FakeServer.url(&listener, &url)},
-        .ping_interval = .fromMilliseconds(500),
+        // Two seconds for a PING the socket's buffers hold, a few MiB.
+        .ping_interval = .fromSeconds(1),
         .max_outstanding_pings = 2,
-        // Twice what the server reads in two PING intervals.
+        // About twice what the server reads in two PING intervals; one
+        // batch of 16 frames takes it two seconds, written a part at a
+        // time.
         .limits = .{ .outbound_bytes = 32 * 1024 * 1024 },
         .reconnect = .{ .enabled = false },
     });
@@ -285,7 +288,7 @@ test "a live server behind a long backlog on a slow link is not dropped: PINGs t
     defer publisher.cancel(io);
     // Three intervals: a PING counted while it waits behind the backlog
     // would drop the connection after two.
-    try io.sleep(.fromMilliseconds(1600), .awake);
+    try io.sleep(.fromMilliseconds(3200), .awake);
     try testing.expectEqual(.connected, client.state());
     client.close();
     publisher.await(io);

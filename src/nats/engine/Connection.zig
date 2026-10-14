@@ -235,6 +235,11 @@ pub fn next(conn: *Connection) ReadError!Parser.Frame {
     }
 }
 
+/// The most one write asks of the socket. A blocking write of a large
+/// batch may take long on a slow link, and `sent` grows only when it
+/// returns: the heartbeat must see the writer get somewhere.
+pub const max_write = 256 * 1024;
+
 /// Writes all of `slices`, adding to `written` what the socket took, also
 /// when it fails half way.
 pub fn writeAll(conn: *Connection, io: Io, slices: []const []const u8, written: *usize) WriteError!void {
@@ -250,7 +255,18 @@ pub fn writeAll(conn: *Connection, io: Io, slices: []const []const u8, written: 
                 rest = rest[1..];
                 continue;
             }
-            const result = try io.operate(.{ .net_write = .{ .socket_handle = conn.stream.socket.handle, .data = rest } });
+            // At most `max_write` bytes in one call.
+            var part: [16][]const u8 = undefined;
+            var parts: usize = 0;
+            var total: usize = 0;
+            for (rest) |slice| {
+                if (total == max_write) break;
+                const take = @min(slice.len, max_write - total);
+                part[parts] = slice[0..take];
+                parts += 1;
+                total += take;
+            }
+            const result = try io.operate(.{ .net_write = .{ .socket_handle = conn.stream.socket.handle, .data = part[0..parts] } });
             var n = try result.net_write;
             // A blocking socket takes at least one byte or fails.
             if (n == 0) return error.Unexpected;
