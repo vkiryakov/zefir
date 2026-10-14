@@ -90,6 +90,8 @@ pub const ShutdownError = RawServer.ShutdownError;
 ///
 /// No I/O and no tasks; memory only for the tables of the engine.
 pub fn init(gpa: std.mem.Allocator, options: anytype) InitError!Server {
+    // The loops below unroll once per method and link.
+    @setEvalBranchQuota(handlers.eval_quota);
     const O = @TypeOf(options);
     comptime check(O);
     const Handlers = @FieldType(O, "handlers");
@@ -166,6 +168,7 @@ fn check(comptime O: type) void {
 
 /// The methods of all contracts of the handlers of type `Handlers`.
 fn methodCount(comptime Handlers: type) usize {
+    @setEvalBranchQuota(handlers.eval_quota);
     var count: usize = 0;
     for (@typeInfo(Handlers).@"struct".field_types) |Pointer| {
         const T = @typeInfo(Pointer).pointer.child;
@@ -177,6 +180,7 @@ fn methodCount(comptime Handlers: type) usize {
 /// The links of all methods of the handlers of type `Handlers`: each
 /// method has those of its handler and its own.
 fn linkCount(comptime Handlers: type) usize {
+    @setEvalBranchQuota(handlers.eval_quota);
     var count: usize = 0;
     for (@typeInfo(Handlers).@"struct".field_types) |Pointer| {
         const Impl = @typeInfo(Pointer).pointer.child.rpc_handler;

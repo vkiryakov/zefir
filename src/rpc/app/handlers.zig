@@ -13,6 +13,11 @@ const middleware = @import("../middleware.zig");
 const MiddlewareFn = middleware.MiddlewareFn;
 const Next = middleware.Next;
 
+/// The backward branches the build of a server may take, the checks
+/// included: a service may have hundreds of methods and links, and the
+/// compiler stops at a thousand by default.
+pub const eval_quota = 10_000_000;
+
 const at = "rpc.Server.init: ";
 const options_list = ".transport, .handlers, .authenticator, .middleware, .limits and .shutdown_grace";
 const link_function = "fn (*rpc.Context, *rpc.Next) anyerror!void";
@@ -22,7 +27,7 @@ const link_method = "pub fn run(self, *rpc.Context, *rpc.Next) anyerror!void";
 /// null. Checks the shape of the options, the transport, the
 /// authenticator, every handler and the links of the server's level.
 pub fn optionsProblem(comptime O: type) ?[]const u8 {
-    @setEvalBranchQuota(100_000);
+    @setEvalBranchQuota(eval_quota);
     const shape = "options must be a struct literal such as .{ .transport = memory.serverTransport(), .handlers = .{&users} }, got ";
     const info = switch (@typeInfo(O)) {
         .@"struct" => |info| info,

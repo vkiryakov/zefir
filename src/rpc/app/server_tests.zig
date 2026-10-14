@@ -1044,6 +1044,64 @@ test "the authenticator of rpc.Server and the auth of each method" {
     try expectFailure(&wrong, failures.invalid_credentials, "");
 }
 
+fn passThrough(ctx: *Context, next: *Next) anyerror!void {
+    _ = ctx;
+    return next.run();
+}
+
+fn ManyLinks(comptime n: usize) type {
+    return @Tuple(&@as([n]type, @splat(MiddlewareFn)));
+}
+
+/// `n` links of `passThrough`.
+fn manyLinks(comptime n: usize) ManyLinks(n) {
+    @setEvalBranchQuota(10 * n);
+    var links: ManyLinks(n) = undefined;
+    inline for (0..n) |i| links[i] = passThrough;
+    return links;
+}
+
+const BusyApi = contract.Contract(.{
+    .name = "busy",
+    .version = 1,
+    .methods = .{
+        .first = contract.method(Empty, Empty),
+        .second = contract.method(Empty, Empty),
+    },
+});
+
+/// Two methods with 1100 links each: more than a thousand steps for the
+/// compiler, with its default quota of a thousand.
+const Busy = struct {
+    pub const rpc_handler = contract.implement(BusyApi, .{ .middleware = manyLinks(1100) });
+
+    pub fn first(self: *Busy, ctx: *Context, req: Empty) !Empty {
+        _ = self;
+        _ = ctx;
+        return req;
+    }
+
+    pub fn second(self: *Busy, ctx: *Context, req: Empty) !Empty {
+        _ = self;
+        _ = ctx;
+        return req;
+    }
+};
+
+test "a server with more than a thousand links builds without a quota of the application's" {
+    const io = testing.io;
+    var f: Fixture = undefined;
+    try f.open();
+    defer f.close(io);
+    var busy: Busy = .{};
+    var server: Server = try .init(testing.allocator, .{ .transport = f.memory.serverTransport(), .handlers = .{&busy} });
+    defer server.deinit(io);
+    try server.start(io);
+    try testing.expectEqual(@as(usize, 1100), server.engine.methods[1].middleware.len);
+    var result = try f.call(io, .{ .service = "busy", .version = 1, .method = "second" }, "{}");
+    try expectBody(&result, "{}");
+}
+
 fn runServer(server: *Server, io: std.Io) (Server.StartError || Server.WaitError)!void {
     return server.run(io);
 }
