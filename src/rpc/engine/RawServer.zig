@@ -445,7 +445,7 @@ fn endGrace(server: *RawServer, io: std.Io) void {
         var node = server.running.first;
         while (node) |n| : (node = n.next) {
             const call: *Call = @alignCast(@fieldParentPtr("node", n));
-            call.stop(io, .shutdown);
+            _ = call.stop(io, .shutdown);
         }
     }
     server.refuseQueued(io);

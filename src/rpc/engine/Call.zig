@@ -204,12 +204,16 @@ pub fn choose(call: *Call, outcome: Outcome) Outcome {
     return call.outcome.cmpxchgStrong(.pending, outcome, .acq_rel, .acquire) orelse outcome;
 }
 
-/// Ends the call with `outcome` unless it has one already: sets its token
-/// and wakes its supervisor. Lock-free and never waits.
-pub fn stop(call: *Call, io: std.Io, outcome: Outcome) void {
-    if (call.choose(outcome) != outcome) return;
-    call.token.cancel();
-    call.wake.set(io);
+/// Ends the call with `outcome` unless it has one already: cancels its
+/// token and wakes its supervisor. Returns the outcome in effect.
+/// Lock-free and never waits.
+pub fn stop(call: *Call, io: std.Io, outcome: Outcome) Outcome {
+    const chosen = call.choose(outcome);
+    if (chosen == outcome) {
+        call.token.cancel();
+        call.wake.set(io);
+    }
+    return chosen;
 }
 
 /// Runs the call from its start to `reply.release`, in a supervisor's
@@ -225,7 +229,7 @@ pub fn supervise(call: *Call, io: std.Io) void {
     var result: ?(anyerror![]const u8) = null;
     const outcome: Outcome = outcome: {
         waiting.untilSet(&call.wake, io, call.deadline) catch |err| switch (err) {
-            error.Timeout => break :outcome call.choose(.deadline),
+            error.Timeout => break :outcome call.stop(io, .deadline),
             // The supervisor blocks cancelation.
             error.Canceled => unreachable,
         };
@@ -383,7 +387,7 @@ fn abandonFn(ptr: *anyopaque, io: std.Io) void {
 
 fn cancelFn(ptr: *anyopaque, io: std.Io) void {
     const call: *Call = @ptrCast(@alignCast(ptr));
-    call.stop(io, .canceled);
+    _ = call.stop(io, .canceled);
 }
 
 /// An allocator that counts what one call takes, against the call's limit

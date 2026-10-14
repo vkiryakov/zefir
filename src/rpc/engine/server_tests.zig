@@ -561,3 +561,292 @@ test "no task: start refuses a call when no supervisor can start; a call whose h
         try server.shutdown(io);
     }
 }
+
+/// Looks at everything `rpc.Context` gives a handler and keeps copies.
+const Inspector = struct {
+    same_io: bool = false,
+    deadline: ?core.Deadline = null,
+    has_token: bool = false,
+    token_canceled: bool = true,
+    trace: ?core.TraceContext = null,
+    tracestate: [64]u8 = undefined,
+    tracestate_len: usize = 0,
+    route: [32]u8 = undefined,
+    route_len: usize = 0,
+    request_id: [16]u8 = undefined,
+    first_a: [8]u8 = undefined,
+    all_a: [8]u8 = undefined,
+    all_a_len: usize = 0,
+    entries: usize = 0,
+    reserved_visible: bool = true,
+    peer_name: [16]u8 = undefined,
+    peer_name_len: usize = 0,
+    transport_name: [16]u8 = undefined,
+    transport_name_len: usize = 0,
+    metadata_errors: [4]?Context.SetMetadataError = @splat(null),
+
+    fn handle(s: *Inspector, ctx: *Context, request: []const u8) anyerror![]const u8 {
+        s.same_io = ctx.io().vtable == testing.io.vtable;
+        const op = ctx.operation();
+        s.deadline = op.deadline;
+        s.has_token = op.cancellation != null;
+        s.token_canceled = op.isCancelled();
+        if (op.trace) |trace| {
+            s.trace = trace;
+            s.tracestate_len = trace.state.header.len;
+            @memcpy(s.tracestate[0..s.tracestate_len], trace.state.header);
+            s.trace.?.state = .empty;
+        }
+        const route = ctx.route();
+        s.route_len = (try std.fmt.bufPrint(&s.route, "{s}.v{d}.{s}", .{ route.service, route.version, route.method })).len;
+        s.request_id = ctx.requestId();
+
+        const metadata = ctx.metadata();
+        s.first_a[0] = metadata.get("x-a").?[0];
+        var values = metadata.getAll("x-a");
+        while (values.next()) |value| : (s.all_a_len += 1) s.all_a[s.all_a_len] = value[0];
+        var it = metadata.iterator();
+        while (it.next()) |_| s.entries += 1;
+        s.reserved_visible = metadata.get("traceparent") != null or metadata.get("tracestate") != null or
+            metadata.get("authorization") != null or metadata.get("zefir-correlation-id") != null;
+
+        s.peer_name_len = ctx.peer().name.len;
+        @memcpy(s.peer_name[0..s.peer_name_len], ctx.peer().name);
+        const info = ctx.transport();
+        s.transport_name_len = info.name.len;
+        @memcpy(s.transport_name[0..s.transport_name_len], info.name);
+
+        try ctx.setResponseMetadata("x-r", "v1");
+        try ctx.setResponseMetadata("x-r", "");
+        for ([_][2][]const u8{ .{ "X-R", "v" }, .{ "traceparent", "v" }, .{ "zefir-hop", "v" }, .{ "x-r", " padded" } }, 0..) |pair, i| {
+            ctx.setResponseMetadata(pair[0], pair[1]) catch |err| {
+                s.metadata_errors[i] = err;
+            };
+        }
+        return std.fmt.allocPrint(ctx.allocator(), "got {s}", .{request});
+    }
+};
+
+test "rpc.Context gives a handler its call: io, operation, allocator, route, request id, metadata, peer, transport" {
+    const io = testing.io;
+    var memory: MemoryTransport = try .init(testing.allocator, .{ .peer_name = "client-7" });
+    defer memory.deinit(io);
+    var inspector: Inspector = .{};
+    var server: RawServer = try .init(testing.allocator, .{
+        .transport = memory.serverTransport(),
+        .methods = &.{.{ .route = routeOf("inspect"), .handler = handlerOf(&inspector) }},
+    });
+    defer server.deinit(io);
+    try server.start(io);
+
+    const metadata = [_]model.Metadata.Entry{
+        .{ .key = "x-a", .value = "1" },
+        .{ .key = "traceparent", .value = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01" },
+        .{ .key = "x-b", .value = "2" },
+        .{ .key = "authorization", .value = "Bearer secret" },
+        .{ .key = "tracestate", .value = "vendor=v" },
+        .{ .key = "x-a", .value = "3" },
+        .{ .key = "zefir-correlation-id", .value = "c-1" },
+    };
+    var request = requestOf(io, "inspect", "ping", .fromSeconds(5));
+    request.metadata = &metadata;
+    request.request_id = @splat(0xab);
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const sent_at = now(io);
+    const response = try memory.clientTransport().call(io, &request, .{ .allocator = arena.allocator(), .max_response_bytes = 1024 });
+
+    try testing.expect(response.status == .ok);
+    try testing.expectEqualStrings("got ping", response.body);
+    try testing.expectEqual(@as(usize, 2), response.metadata.len);
+    try testing.expectEqualStrings("x-r", response.metadata[0].key);
+    try testing.expectEqualStrings("v1", response.metadata[0].value);
+    try testing.expectEqualStrings("", response.metadata[1].value);
+
+    try testing.expect(inspector.same_io);
+    const deadline = inspector.deadline.?;
+    try testing.expect(deadline.expires.nanoseconds <= sent_at.addDuration(.fromSeconds(5)).nanoseconds);
+    try testing.expect(!deadline.isExpired(sent_at));
+    try testing.expect(inspector.has_token and !inspector.token_canceled);
+    const trace = inspector.trace.?;
+    try testing.expectEqualStrings("4bf92f3577b34da6a3ce929d0e0e4736", &trace.trace_id.toHex());
+    try testing.expect(!std.mem.eql(u8, "00f067aa0ba902b7", &trace.span_id.toHex()));
+    try testing.expect(trace.span_id.isValid() and trace.flags.sampled and !trace.is_remote);
+    try testing.expectEqualStrings("vendor=v", inspector.tracestate[0..inspector.tracestate_len]);
+    try testing.expectEqualStrings("test.v1.inspect", inspector.route[0..inspector.route_len]);
+    try testing.expectEqual(request.request_id, inspector.request_id);
+    try testing.expectEqual(@as(u8, '1'), inspector.first_a[0]);
+    try testing.expectEqualStrings("13", inspector.all_a[0..inspector.all_a_len]);
+    try testing.expectEqual(@as(usize, 3), inspector.entries);
+    try testing.expect(!inspector.reserved_visible);
+    try testing.expectEqualStrings("client-7", inspector.peer_name[0..inspector.peer_name_len]);
+    try testing.expectEqualStrings("memory", inspector.transport_name[0..inspector.transport_name_len]);
+    for (inspector.metadata_errors) |err| try testing.expectEqual(@as(?Context.SetMetadataError, error.InvalidMetadata), err);
+    try server.shutdown(io);
+}
+
+/// Adds response metadata until the limits refuse.
+const MetadataFiller = struct {
+    refused_entry: ?Context.SetMetadataError = null,
+    refused_bytes: ?Context.SetMetadataError = null,
+
+    fn handle(s: *MetadataFiller, ctx: *Context, _: []const u8) anyerror![]const u8 {
+        try ctx.setResponseMetadata("x-1", "a");
+        // 2 + (3 + 3 + 1) so far; a value that would pass 1024 bytes.
+        const long: [1024 - 2 - 7 - 3 - 3 + 1]u8 = @splat('v');
+        ctx.setResponseMetadata("x-2", &long) catch |err| {
+            s.refused_bytes = err;
+        };
+        try ctx.setResponseMetadata("x-2", long[0 .. long.len - 1]);
+        ctx.setResponseMetadata("x-3", "") catch |err| {
+            s.refused_entry = err;
+        };
+        return "";
+    }
+};
+
+test "setResponseMetadata keeps the server's limits on entries and bytes" {
+    const io = testing.io;
+    var memory: MemoryTransport = try .init(testing.allocator, .{});
+    defer memory.deinit(io);
+    var filler: MetadataFiller = .{};
+    var server: RawServer = try .init(testing.allocator, .{
+        .transport = memory.serverTransport(),
+        .methods = &.{.{ .route = routeOf("fill"), .handler = handlerOf(&filler) }},
+        .limits = .{ .max_metadata_entries = 2, .max_metadata_bytes = 1024 },
+    });
+    defer server.deinit(io);
+    try server.start(io);
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const response = try memory.clientTransport().call(io, &requestOf(io, "fill", "", .fromSeconds(5)), .{ .allocator = arena.allocator(), .max_response_bytes = 1024 });
+    try testing.expect(response.status == .ok);
+    try testing.expectEqual(@as(usize, 2), response.metadata.len);
+    try testing.expectEqual(@as(usize, 1024), transport.metadataBytes(response.metadata));
+    try testing.expectEqual(@as(?Context.SetMetadataError, error.ResourceExhausted), filler.refused_bytes);
+    try testing.expectEqual(@as(?Context.SetMetadataError, error.ResourceExhausted), filler.refused_entry);
+    try server.shutdown(io);
+}
+
+/// Fails in the ways `rpc.Context` offers.
+const Failing = struct {
+    mode: enum { exact, with_body, replaced },
+    seen: ?model.Failure = null,
+    mapped_recorded: ?model.Failure = null,
+    mapped_unavailable: ?model.Failure = null,
+
+    fn handle(s: *Failing, ctx: *Context, _: []const u8) anyerror![]const u8 {
+        try ctx.setResponseMetadata("x-retry", "later");
+        const locked: model.Failure = .{ .code = .failed_precondition, .app_code = "users.locked", .message = "Locked", .field = "id" };
+        switch (s.mode) {
+            .exact => {
+                const err = ctx.fail(locked);
+                s.seen = ctx.failure();
+                s.mapped_recorded = ctx.mapError(err);
+                s.mapped_unavailable = ctx.mapError(error.Unavailable);
+                return err;
+            },
+            .with_body => return @import("Context.zig").failWithBody(ctx, locked, "{\"violations\":[]}"),
+            // A failure recorded, then another error returned: the error
+            // that comes out decides.
+            .replaced => {
+                const recorded = ctx.fail(locked);
+                std.debug.assert(recorded == error.RpcFailure);
+                return error.PermissionDenied;
+            },
+        }
+    }
+};
+
+test "ctx.fail sends exactly its failure, with the response metadata; another error returned instead decides" {
+    const io = testing.io;
+    var memory: MemoryTransport = try .init(testing.allocator, .{});
+    defer memory.deinit(io);
+    var exact: Failing = .{ .mode = .exact };
+    var with_body: Failing = .{ .mode = .with_body };
+    var replaced: Failing = .{ .mode = .replaced };
+    var server: RawServer = try .init(testing.allocator, .{
+        .transport = memory.serverTransport(),
+        .methods = &.{
+            .{ .route = routeOf("exact"), .handler = handlerOf(&exact) },
+            .{ .route = routeOf("withBody"), .handler = handlerOf(&with_body) },
+            .{ .route = routeOf("replaced"), .handler = handlerOf(&replaced) },
+        },
+    });
+    defer server.deinit(io);
+    try server.start(io);
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const client = memory.clientTransport();
+    const options: ClientTransport.CallOptions = .{ .allocator = arena.allocator(), .max_response_bytes = 1024 };
+
+    const first = try client.call(io, &requestOf(io, "exact", "", .fromSeconds(5)), options);
+    const failure = first.status.failure;
+    try testing.expectEqual(core.ErrorCode.failed_precondition, failure.code);
+    try testing.expectEqualStrings("users.locked", failure.app_code);
+    try testing.expectEqualStrings("id", failure.field.?);
+    try testing.expectEqualStrings("", first.body);
+    try testing.expectEqualStrings("later", first.metadata[0].value);
+    try testing.expectEqualStrings("users.locked", exact.seen.?.app_code);
+    try testing.expectEqualStrings("users.locked", exact.mapped_recorded.?.app_code);
+    try testing.expectEqualStrings("rpc.unavailable", exact.mapped_unavailable.?.app_code);
+
+    const second = try client.call(io, &requestOf(io, "withBody", "", .fromSeconds(5)), options);
+    try testing.expectEqualStrings("users.locked", second.status.failure.app_code);
+    try testing.expectEqualStrings("{\"violations\":[]}", second.body);
+
+    const third = try client.call(io, &requestOf(io, "replaced", "", .fromSeconds(5)), options);
+    try expectFailureResponse(third, failures.permission_denied);
+    try server.shutdown(io);
+}
+
+/// Stops only when the token of its call is canceled, ignoring
+/// cancelation of its task: a handler that checks `ctx.operation()`.
+const TokenWatcher = struct {
+    started: std.atomic.Value(u32) = .init(0),
+    saw_token: std.atomic.Value(u32) = .init(0),
+
+    fn handle(s: *TokenWatcher, ctx: *Context, _: []const u8) anyerror![]const u8 {
+        _ = s.started.fetchAdd(1, .acq_rel);
+        const op = ctx.operation();
+        while (!op.isCancelled()) ctx.io().sleep(.fromMilliseconds(1), .awake) catch {};
+        _ = s.saw_token.fetchAdd(1, .acq_rel);
+        return error.Cancelled;
+    }
+};
+
+test "the token of a call is canceled by its deadline, by its client and by the stop" {
+    const io = testing.io;
+    var test_transport: TestTransport = .{};
+    var watcher: TokenWatcher = .{};
+    var server: RawServer = try .init(testing.allocator, .{
+        .transport = .init(&test_transport),
+        .methods = &.{
+            .{ .route = routeOf("short"), .handler = handlerOf(&watcher), .timeout = .fromMilliseconds(30) },
+            .{ .route = routeOf("long"), .handler = handlerOf(&watcher) },
+        },
+        .shutdown_grace = .zero,
+    });
+    defer server.deinit(io);
+    try server.start(io);
+    const d = test_transport.dispatcher.?;
+
+    var by_deadline: TestCall = .{};
+    try deliver(io, d, &headOf(io, "short", null), "", &by_deadline);
+    try by_deadline.waitReleased(io);
+    try by_deadline.expectFailure(failures.deadline_exceeded, false, .canceled);
+
+    var by_client: TestCall = .{};
+    try deliver(io, d, &headOf(io, "long", null), "", &by_client);
+    try waitFor(io, &watcher.started, 2);
+    by_client.incoming.cancel(io);
+    try by_client.waitReleased(io);
+    try testing.expectEqual(@as(u32, 0), by_client.sends.load(.acquire));
+
+    var by_stop: TestCall = .{};
+    try deliver(io, d, &headOf(io, "long", null), "", &by_stop);
+    try waitFor(io, &watcher.started, 3);
+    try server.shutdown(io);
+    try by_stop.expectFailure(failures.stopped, false, .canceled);
+    try testing.expectEqual(@as(u32, 3), watcher.saw_token.load(.acquire));
+}
