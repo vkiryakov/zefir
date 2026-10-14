@@ -131,8 +131,13 @@ pub const DecodeError = error{
 /// escapes, so `bytes` must outlive the result. A buffer that would grow in
 /// the arena (the items of a slice, the unknown keys of an object, a string
 /// with escapes) is sized once from the raw bytes, since each copy that a
-/// growing buffer leaves behind stays in the arena until the end. On
-/// `error.Invalid`, `problem` says what is wrong.
+/// growing buffer leaves behind stays in the arena until the end.
+///
+/// The memory of the result follows the types, not the size of the body:
+/// a `null` costs 8 KB as an item of `[]const ?[1000]u64`, so a body of
+/// 500 KB may ask for a gigabyte. Only the allocator under the arena
+/// bounds it: give that allocator a budget, as the server's budget of a
+/// call does. On `error.Invalid`, `problem` says what is wrong.
 pub fn decode(comptime T: type, arena: std.mem.Allocator, bytes: []const u8, limits: Limits, problem: *Problem) DecodeError!T {
     if (comptime dto.problem(T, .response)) |found| @compileError("rpc: json.decode: " ++ found);
     problem.* = .{};
