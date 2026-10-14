@@ -237,6 +237,7 @@ pub fn supervise(call: *Call, io: std.Io) void {
         if (chosen != .pending) break :outcome chosen;
         // Nothing else wakes the supervisor: the handler has ended. Its
         // success still has to beat the deadline and the others.
+        std.debug.assert(call.handler_done.load(.acquire));
         result = handler.await(io);
         break :outcome call.choose(if (call.deadline.isExpired(now(io))) .deadline else .finished);
     };
@@ -376,6 +377,10 @@ fn bodyFn(ptr: *anyopaque) []u8 {
 
 fn startFn(ptr: *anyopaque, io: std.Io, reply: Reply) ?model.Failure {
     const call: *Call = @ptrCast(@alignCast(ptr));
+    // Starting a task allocates: a cancelation request of the transport's
+    // task stays for its next cancelation point.
+    const protection = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(protection);
     call.reply = reply;
     return call.server.schedule(io, call);
 }

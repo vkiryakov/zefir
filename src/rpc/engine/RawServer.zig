@@ -1,18 +1,40 @@
 //! `rpc.RawServer`: the server engine. It takes calls from a server
 //! transport, checks them against its routes and limits, runs each handler
 //! in a task of its own with a deadline, answers through the transport and
-//! stops gracefully, the same way on every transport. Bodies are bytes here;
+//! stops gracefully, the same way on every transport. Bodies are bytes here:
 //! `rpc.Server` builds the methods from the handlers of an application and
-//! adds JSON and validation on top.
+//! adds JSON and validation on top, so applications use `rpc.Server`, and
+//! tests of transports use the engine.
+//!
+//! The path of a call: admission checks the route, the codec, the
+//! metadata, the budget, a place and the memory before the body is read;
+//! the call gets a supervisor task, or waits in the queue while
+//! `max_active_tasks` handlers run; its handler runs in a task of its own;
+//! the first of the handler's end, the deadline, the client's cancel and
+//! the stop decides the outcome, so at most one response goes out; the
+//! transport's `release` comes once the handler has really ended.
 //!
 //! ```zig
+//! const Greeter = struct {
+//!     greeting: []const u8,
+//!
+//!     fn handle(ptr: *anyopaque, ctx: *rpc.Context, name: []const u8) anyerror![]const u8 {
+//!         const greeter: *Greeter = @ptrCast(@alignCast(ptr));
+//!         return std.fmt.allocPrint(ctx.allocator(), "{s}, {s}!", .{ greeter.greeting, name });
+//!     }
+//! };
+//!
+//! var greeter: Greeter = .{ .greeting = "Hello" };
 //! var server: rpc.RawServer = try .init(gpa, .{
 //!     .transport = memory.serverTransport(),
-//!     .methods = &.{.{ .route = .{ .service = "echo", .version = 1, .method = "say" }, .handler = echo.handler() }},
+//!     .methods = &.{.{
+//!         .route = .{ .service = "greeter", .version = 1, .method = "greet" },
+//!         .handler = .{ .ptr = &greeter, .handle = Greeter.handle },
+//!     }},
 //! });
 //! defer server.deinit(io);
-//! try server.start(io);
-//! // ... later, from any task:
+//! try server.start(io); // from here on the server stays where it is
+//! // Later, from any task:
 //! server.requestStop(io);
 //! try server.wait(io);
 //! ```
@@ -263,10 +285,15 @@ pub fn start(server: *RawServer, io: std.Io) StartError!void {
     }
     // The stop runs in a task of its own: `requestStop` only wakes it, and
     // `wait` may be canceled. It starts first, so that a stop requested
-    // while the transport starts is not lost.
-    server.lifecycle = io.concurrent(runLifecycle, .{ server, io }) catch |err| {
-        server.markStopped(io);
-        return err;
+    // while the transport starts is not lost. Starting a task allocates,
+    // which must not swallow a cancelation of the caller.
+    server.lifecycle = lifecycle: {
+        const protection = io.swapCancelProtection(.blocked);
+        defer _ = io.swapCancelProtection(protection);
+        break :lifecycle io.concurrent(runLifecycle, .{ server, io }) catch |err| {
+            server.markStopped(io);
+            return err;
+        };
     };
     server.server_transport.start(io, server.dispatcher()) catch |err| {
         {
@@ -345,6 +372,9 @@ pub fn state(server: *const RawServer) State {
 /// Frees the server. A server that has not stopped is stopped first, and
 /// `deinit` waits for it without a limit.
 pub fn deinit(server: *RawServer, io: std.Io) void {
+    // No cancelation point: a cancelation request of the caller stays.
+    const protection = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(protection);
     server.requestStop(io);
     server.joinLifecycle(io);
     server.arena.deinit();
@@ -398,8 +428,9 @@ fn runLifecycle(server: *RawServer, io: std.Io) void {
     server.start_done.waitUncancelable(io);
     if (server.rollback) return;
 
+    const grace_end: core.Deadline = .after(now(io), server.shutdown_grace);
     server.server_transport.drain(io);
-    _ = server.waitIdle(io, .after(now(io), server.shutdown_grace));
+    _ = server.waitIdle(io, grace_end);
     server.endGrace(io);
     server.server_transport.close(io);
     // Calls queued after the grace ended, before the transport closed.
@@ -519,6 +550,10 @@ fn serviceFn(ptr: *anyopaque) *const transport.Dispatcher.Service {
 
 fn admitFn(ptr: *anyopaque, io: std.Io, head: *const transport.RequestHead, body_len: usize) transport.Dispatcher.Admission {
     const server: *RawServer = @ptrCast(@alignCast(ptr));
+    // A cancelation request of the transport's task stays for its next
+    // cancelation point: a Debug allocator may take a cancelable lock.
+    const protection = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(protection);
     return server.admit(io, head, body_len);
 }
 
@@ -639,6 +674,9 @@ pub fn schedule(server: *RawServer, io: std.Io, call: *Call) ?model.Failure {
 
 fn failFn(ptr: *anyopaque, io: std.Io, err: transport.Dispatcher.FatalError, diagnostics: ?*const transport.Diagnostics) void {
     const server: *RawServer = @ptrCast(@alignCast(ptr));
+    // The log may take a cancelable lock; the transport's cancelation stays.
+    const protection = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(protection);
     {
         server.mutex.lockUncancelable(io);
         defer server.mutex.unlock(io);

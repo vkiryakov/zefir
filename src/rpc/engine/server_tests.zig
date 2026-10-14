@@ -148,8 +148,11 @@ const TestCall = struct {
     /// When set, `release` reads it: how many handlers had ended by then.
     handler_ends: ?*const std.atomic.Value(u32) = null,
     ends_at_release: u32 = 0,
-    /// When set, `release` reads it: whether this call's handler had ended.
+    /// When set, `release` reads them: whether this call's handler had
+    /// started and ended by then.
+    handler_started: ?*const std.atomic.Value(bool) = null,
     handler_ended: ?*const std.atomic.Value(bool) = null,
+    started_at_release: bool = false,
     released_after_end: bool = false,
     /// The transport's lock of the call: `release` and a cancel by the
     /// test take it, so no cancel comes after `release`.
@@ -179,6 +182,7 @@ const TestCall = struct {
         defer c.mutex.unlock(io);
         if (c.releases.fetchAdd(1, .acq_rel) != 0) c.late.store(true, .release);
         if (c.handler_ends) |ends| c.ends_at_release = ends.load(.acquire);
+        if (c.handler_started) |started| c.started_at_release = started.load(.acquire);
         if (c.handler_ended) |ended| c.released_after_end = ended.load(.acquire);
         c.disposition = disposition;
         c.released.set(io);
@@ -364,8 +368,14 @@ test "the deadline: deadline_exceeded goes out first, then the handler is cancel
     try call.waitReleased(io);
     const elapsed = started_at.durationTo(now(io));
     try testing.expect(elapsed.toMilliseconds() >= 50 and elapsed.toSeconds() < 10);
-    try call.expectFailure(failures.deadline_exceeded, false, .canceled);
-    try testing.expectEqual(@as(u32, 1), call.ends_at_release);
+    if (sleeper.started.load(.acquire) == 1) {
+        try call.expectFailure(failures.deadline_exceeded, false, .canceled);
+        try testing.expectEqual(@as(u32, 1), call.ends_at_release);
+    } else {
+        // A machine so busy that the handler did not start within 50 ms:
+        // the deadline still comes, once.
+        try call.expectFailure(failures.deadline_exceeded, call.disposition == .not_started, call.disposition);
+    }
     try server.shutdown(io);
 }
 
@@ -849,7 +859,7 @@ test "the token of a call is canceled by its deadline, by its client and by the 
     var server: RawServer = try .init(testing.allocator, .{
         .transport = .init(&test_transport),
         .methods = &.{
-            .{ .route = routeOf("short"), .handler = handlerOf(&watcher), .timeout = .fromMilliseconds(30) },
+            .{ .route = routeOf("short"), .handler = handlerOf(&watcher), .timeout = .fromMilliseconds(300) },
             .{ .route = routeOf("long"), .handler = handlerOf(&watcher) },
         },
         .shutdown_grace = .zero,
@@ -857,11 +867,16 @@ test "the token of a call is canceled by its deadline, by its client and by the 
     defer server.deinit(io);
     try server.start(io);
     const d = test_transport.dispatcher.?;
+    // A handler that sees its token ends at once, maybe before the engine
+    // cancels its task: canceled or completed, both right.
+    const done: []const Reply.Disposition = &.{ .canceled, .completed };
 
     var by_deadline: TestCall = .{};
     try deliver(io, d, &headOf(io, "short", null), "", &by_deadline);
+    try waitFor(io, &watcher.started, 1);
     try by_deadline.waitReleased(io);
-    try by_deadline.expectFailure(failures.deadline_exceeded, false, .canceled);
+    try by_deadline.expectFailure(failures.deadline_exceeded, false, by_deadline.disposition);
+    try testing.expect(std.mem.findScalar(Reply.Disposition, done, by_deadline.disposition) != null);
 
     var by_client: TestCall = .{};
     try deliver(io, d, &headOf(io, "long", null), "", &by_client);
@@ -869,12 +884,14 @@ test "the token of a call is canceled by its deadline, by its client and by the 
     by_client.incoming.cancel(io);
     try by_client.waitReleased(io);
     try testing.expectEqual(@as(u32, 0), by_client.sends.load(.acquire));
+    try testing.expect(std.mem.findScalar(Reply.Disposition, done, by_client.disposition) != null);
 
     var by_stop: TestCall = .{};
     try deliver(io, d, &headOf(io, "long", null), "", &by_stop);
     try waitFor(io, &watcher.started, 3);
     try server.shutdown(io);
-    try by_stop.expectFailure(failures.stopped, false, .canceled);
+    try by_stop.expectFailure(failures.stopped, false, by_stop.disposition);
+    try testing.expect(std.mem.findScalar(Reply.Disposition, done, by_stop.disposition) != null);
     try testing.expectEqual(@as(u32, 3), watcher.saw_token.load(.acquire));
 }
 
@@ -884,10 +901,12 @@ const RaceHandler = struct {
     io: std.Io,
     budget: std.Io.Duration,
     delays: []const i64,
+    started: []std.atomic.Value(bool),
     ended: []std.atomic.Value(bool),
 
     fn handle(s: *RaceHandler, _: *Context, request: []const u8) anyerror![]const u8 {
         const i = std.mem.readInt(u32, request[0..4], .little);
+        s.started[i].store(true, .release);
         defer s.ended[i].store(true, .release);
         try s.io.sleep(.fromNanoseconds(s.budget.nanoseconds + s.delays[i]), .awake);
         return "done";
@@ -914,13 +933,16 @@ test "Review Focus 1: the deadline, the client's cancel and the handler's end ra
         h.* = random.intRangeAtMost(i64, -std.time.ns_per_ms, std.time.ns_per_ms);
         c.* = random.intRangeAtMost(i64, -std.time.ns_per_ms, std.time.ns_per_ms);
     }
+    const started = try testing.allocator.alloc(std.atomic.Value(bool), n);
+    defer testing.allocator.free(started);
+    @memset(started, .init(false));
     const ended = try testing.allocator.alloc(std.atomic.Value(bool), n);
     defer testing.allocator.free(ended);
     @memset(ended, .init(false));
     const calls = try testing.allocator.alloc(TestCall, n);
     defer testing.allocator.free(calls);
 
-    var handler: RaceHandler = .{ .io = io, .budget = budget, .delays = handler_delays, .ended = ended };
+    var handler: RaceHandler = .{ .io = io, .budget = budget, .delays = handler_delays, .started = started, .ended = ended };
     var test_transport: TestTransport = .{};
     var server: RawServer = try .init(testing.allocator, .{
         .transport = .init(&test_transport),
@@ -935,7 +957,7 @@ test "Review Focus 1: the deadline, the client's cancel and the handler's end ra
         var cancelers: [batch]?std.Io.Future(std.Io.Cancelable!void) = @splat(null);
         defer for (&cancelers) |*slot| if (slot.*) |*future| future.cancel(io) catch {};
         for (first..first + batch, &cancelers) |i, *slot| {
-            calls[i] = .{ .handler_ended = &ended[i] };
+            calls[i] = .{ .handler_started = &started[i], .handler_ended = &ended[i] };
             var body: [4]u8 = undefined;
             std.mem.writeInt(u32, &body, @intCast(i), .little);
             try deliver(io, d, &headOf(io, "race", .fromSeconds(5)), &body, &calls[i]);
@@ -951,12 +973,21 @@ test "Review Focus 1: the deadline, the client's cancel and the handler's end ra
     var ok: u64 = 0;
     var deadline: u64 = 0;
     var canceled: u64 = 0;
-    for (calls) |*call| {
-        // Exactly one release, last, after the handler really ended.
+    for (calls, started, 0..) |*call, *handler_started, i| {
+        errdefer std.debug.print("call {d}: sends {d} releases {d} late {} started {} after_end {} disposition {t} ok {} code {t} refused {} cancel_sent {}\n", .{
+            i,                       call.sends.load(.acquire), call.releases.load(.acquire), call.late.load(.acquire),
+            call.started_at_release, call.released_after_end,   call.disposition,             call.ok,
+            call.code,               call.refused,              call.cancel_sent,
+        });
+        // Exactly one release, last, after the handler really ended; a
+        // handler that had not started by then never starts.
         try testing.expectEqual(@as(u32, 1), call.releases.load(.acquire));
         try testing.expect(!call.late.load(.acquire));
-        try testing.expect(call.released_after_end);
-        try testing.expect(call.disposition == .completed or call.disposition == .canceled);
+        try testing.expectEqual(call.started_at_release, handler_started.load(.acquire));
+        if (call.started_at_release) try testing.expect(call.released_after_end);
+        // Under load a call may start after its budget: then its handler
+        // never runs, and the call is released as not started.
+        if (call.disposition == .not_started) try testing.expect(!call.started_at_release);
         // One response, or none when the client's cancel won.
         switch (call.sends.load(.acquire)) {
             0 => {
@@ -964,10 +995,12 @@ test "Review Focus 1: the deadline, the client's cancel and the handler's end ra
                 canceled += 1;
             },
             1 => if (call.ok) {
+                try testing.expect(call.started_at_release and call.disposition == .completed);
                 ok += 1;
             } else {
                 try testing.expectEqual(core.ErrorCode.deadline_exceeded, call.code);
-                try testing.expect(!call.refused);
+                // Refused exactly when the call never started.
+                try testing.expectEqual(call.disposition == .not_started, call.refused);
                 deadline += 1;
             },
             else => return error.TestUnexpectedResult,
@@ -1193,4 +1226,121 @@ test "refusals at admission reach the client with their codes, marked refused; r
     try testing.expectEqual(@as(u64, 2), failing_route.errors);
     try testing.expectEqualStrings("rpc.unavailable", failing_route.last_error.?.appCode());
     try server.shutdown(io);
+}
+
+/// What a transport's task does with the dispatcher while a cancelation of
+/// the task is pending; the cancelation must survive all of it.
+fn keepsCancelation(d: transport.Dispatcher, io: std.Io, calls: *[2]TestCall) !void {
+    var never: std.Io.Event = .unset;
+    never.wait(io) catch |err| switch (err) {
+        error.Canceled => io.recancel(),
+    };
+    // Admitted and started: a supervisor starts, the handler answers.
+    try deliver(io, d, &headOf(io, "echo", .fromSeconds(5)), "x", &calls[0]);
+    // Admitted and abandoned.
+    switch (d.admit(io, &headOf(io, "echo", .fromSeconds(5)), 16)) {
+        .accepted => |incoming| incoming.abandon(io),
+        .rejected => return error.TestUnexpectedResult,
+    }
+    // Refused, counted for its route.
+    var refused = headOf(io, "echo", .fromSeconds(5));
+    refused.codec = "msgpack";
+    if (d.admit(io, &refused, 0) == .accepted) return error.TestUnexpectedResult;
+    _ = d.service();
+    _ = d.routeStats(0);
+    // Started and canceled by its client.
+    try deliver(io, d, &headOf(io, "sleep", .fromSeconds(5)), "", &calls[1]);
+    calls[1].cancelUnlessReleased(io);
+    d.fail(io, error.Unavailable, null);
+    return io.checkCancel();
+}
+
+test "admit, start, abandon, cancel and fail keep a cancelation of the transport's task" {
+    const io = testing.io;
+    const log_level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = log_level;
+    var test_transport: TestTransport = .{};
+    var echo: Echo = .{};
+    var sleeper: Sleeper = .{ .io = io, .duration = .fromSeconds(30) };
+    var server: RawServer = try .init(testing.allocator, .{
+        .transport = .init(&test_transport),
+        .methods = &.{
+            .{ .route = routeOf("echo"), .handler = handlerOf(&echo) },
+            .{ .route = routeOf("sleep"), .handler = handlerOf(&sleeper) },
+        },
+    });
+    defer server.deinit(io);
+    try server.start(io);
+
+    var calls: [2]TestCall = @splat(.{});
+    var task = try io.concurrent(keepsCancelation, .{ test_transport.dispatcher.?, io, &calls });
+    try io.sleep(.fromMilliseconds(10), .awake);
+    try testing.expectError(error.Canceled, task.cancel(io));
+    try calls[0].waitReleased(io);
+    try calls[0].expectOk(1);
+    try calls[1].waitReleased(io);
+    // Canceled before or after its handler started.
+    try testing.expect(calls[1].disposition == .canceled or calls[1].disposition == .not_started);
+    try testing.expectEqual(@as(u32, 0), calls[1].sends.load(.acquire));
+    // The broken transport stopped the server.
+    try testing.expectError(error.Unavailable, server.wait(io));
+}
+
+// The examples in the doc comments of `rpc.RawServer` and `rpc.Context`.
+
+const Greeter = struct {
+    greeting: []const u8,
+
+    fn handle(ptr: *anyopaque, ctx: *Context, name: []const u8) anyerror![]const u8 {
+        const greeter: *Greeter = @ptrCast(@alignCast(ptr));
+        return std.fmt.allocPrint(ctx.allocator(), "{s}, {s}!", .{ greeter.greeting, name });
+    }
+};
+
+fn getUser(ctx: *Context) anyerror![]const u8 {
+    const op = ctx.operation();
+    try op.check(std.Io.Clock.awake.now(ctx.io()));
+    const tenant = ctx.metadata().get("x-tenant") orelse
+        return ctx.fail(.{ .code = .invalid_argument, .app_code = "users.no_tenant", .message = "No tenant" });
+    try ctx.setResponseMetadata("x-cache", "miss");
+    return std.fmt.allocPrint(ctx.allocator(), "{{\"tenant\":\"{s}\"}}", .{tenant});
+}
+
+fn getUserHandler(_: *anyopaque, ctx: *Context, _: []const u8) anyerror![]const u8 {
+    return getUser(ctx);
+}
+
+test "the examples of the doc comments work" {
+    const io = testing.io;
+    var memory: MemoryTransport = try .init(testing.allocator, .{});
+    defer memory.deinit(io);
+    var greeter: Greeter = .{ .greeting = "Hello" };
+    var server: RawServer = try .init(testing.allocator, .{
+        .transport = memory.serverTransport(),
+        .methods = &.{
+            .{ .route = .{ .service = "greeter", .version = 1, .method = "greet" }, .handler = .{ .ptr = &greeter, .handle = Greeter.handle } },
+            .{ .route = .{ .service = "greeter", .version = 1, .method = "getUser" }, .handler = .{ .ptr = &greeter, .handle = getUserHandler } },
+        },
+    });
+    defer server.deinit(io);
+    try server.start(io);
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const client = memory.clientTransport();
+    const options: ClientTransport.CallOptions = .{ .allocator = arena.allocator(), .max_response_bytes = 1024 };
+
+    var greet = requestOf(io, "greet", "Ada", .fromSeconds(5));
+    greet.route.service = "greeter";
+    try testing.expectEqualStrings("Hello, Ada!", (try client.call(io, &greet, options)).body);
+
+    var user = requestOf(io, "getUser", "{}", .fromSeconds(5));
+    user.route.service = "greeter";
+    try testing.expectEqualStrings("users.no_tenant", (try client.call(io, &user, options)).status.failure.app_code);
+    user.metadata = &.{.{ .key = "x-tenant", .value = "acme" }};
+    const found = try client.call(io, &user, options);
+    try testing.expectEqualStrings("{\"tenant\":\"acme\"}", found.body);
+    try testing.expectEqualStrings("miss", found.metadata[0].value);
+    server.requestStop(io);
+    try server.wait(io);
 }

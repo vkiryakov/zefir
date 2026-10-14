@@ -14,7 +14,7 @@ const ServerTransport = @import("../ServerTransport.zig");
 /// after they return or hand it to background tasks.
 ///
 /// ```zig
-/// fn getUser(ctx: *rpc.Context, request: []const u8) anyerror![]const u8 {
+/// fn getUser(ctx: *rpc.Context) anyerror![]const u8 {
 ///     const op = ctx.operation(); // the deadline, the token and the trace
 ///     try op.check(std.Io.Clock.awake.now(ctx.io()));
 ///     const tenant = ctx.metadata().get("x-tenant") orelse
