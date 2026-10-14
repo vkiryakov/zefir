@@ -284,3 +284,45 @@ test "conformance harness without tearDown" {
     var report = try rpc.testing.conformance.run(std.testing.io, std.testing.allocator, &harness, .{});
     report.deinit();
 }
+
+test "conformance harness behind a const pointer" {
+    const harness: Harness = .{};
+    var report = try rpc.testing.conformance.run(std.testing.io, std.testing.allocator, &harness, .{});
+    report.deinit();
+}
+
+test "conformance harness without setUp" {
+    const NoSetUp = struct {
+        memory: rpc.testing.MemoryTransport = undefined,
+        pub fn tearDown(h: *@This(), io: std.Io, pair: rpc.testing.conformance.Pair) void {
+            _ = pair;
+            h.memory.deinit(io);
+        }
+    };
+    var harness: NoSetUp = .{};
+    var report = try rpc.testing.conformance.run(std.testing.io, std.testing.allocator, &harness, .{});
+    report.deinit();
+}
+
+test "conformance hook with another signature" {
+    const FailingBreak = struct {
+        memory: rpc.testing.MemoryTransport = undefined,
+        pub fn setUp(h: *@This(), io: std.Io, gpa: std.mem.Allocator) !rpc.testing.conformance.Pair {
+            _ = io;
+            h.memory = try .init(gpa, .{});
+            return .{ .client = h.memory.clientTransport(), .server = h.memory.serverTransport() };
+        }
+        pub fn tearDown(h: *@This(), io: std.Io, pair: rpc.testing.conformance.Pair) void {
+            _ = pair;
+            h.memory.deinit(io);
+        }
+        /// Returns an error union: the suite expects void.
+        pub fn breakLink(h: *@This(), io: std.Io, pair: rpc.testing.conformance.Pair) !void {
+            _ = pair;
+            h.memory.breakLink(io);
+        }
+    };
+    var harness: FailingBreak = .{};
+    var report = try rpc.testing.conformance.run(std.testing.io, std.testing.allocator, &harness, .{});
+    report.deinit();
+}

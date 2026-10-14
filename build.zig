@@ -304,6 +304,9 @@ pub fn build(b: *std.Build) void {
         .{ "client middleware with the server's signature", "rpc.ClientMiddleware.of: compile_errors.test.client middleware with the server's signature.ServerSide.run has another signature; expected pub fn run(self: *@This(), ctx: *rpc.ClientContext, next: *rpc.ClientNext) anyerror!void" },
         .{ "conformance harness by value", "rpc.testing.conformance.run: pass a pointer to the harness, e.g. &harness; got compile_errors.Harness" },
         .{ "conformance harness without tearDown", "rpc.testing.conformance.run: compile_errors.test.conformance harness without tearDown.NoTearDown has no method tearDown; expected pub fn tearDown(self: *@This(), io: std.Io, pair: rpc.testing.conformance.Pair) void" },
+        .{ "conformance harness behind a const pointer", "rpc.testing.conformance.run: the harness must be mutable, declared with var; got *const compile_errors.Harness" },
+        .{ "conformance harness without setUp", "rpc.testing.conformance.run: compile_errors.test.conformance harness without setUp.NoSetUp has no method setUp; expected pub fn setUp(self: *@This(), io: std.Io, gpa: std.mem.Allocator) !rpc.testing.conformance.Pair" },
+        .{ "conformance hook with another signature", "rpc.testing.conformance.run: compile_errors.test.conformance hook with another signature.FailingBreak.breakLink has another signature; expected pub fn breakLink(self: *@This(), io: std.Io, pair: rpc.testing.conformance.Pair) void" },
     }, 0..) |case, i| {
         const compile = b.addTest(.{
             .name = b.fmt("rpc-compile-error-{d}", .{i}),

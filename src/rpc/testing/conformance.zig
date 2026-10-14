@@ -353,7 +353,8 @@ const Harness = struct {
     const where = "rpc.testing.conformance.run: ";
 
     /// The type `Ptr` points to. Stops the build unless it is a pointer to
-    /// one mutable struct with `setUp` and `tearDown`, with a message that
+    /// one mutable struct with `setUp` and `tearDown`, and every method of
+    /// a harness it has takes the form the suite calls, with a message that
     /// names what to write.
     fn expectHarness(comptime Ptr: type) type {
         const not_a_pointer = where ++ "pass a pointer to the harness, e.g. &harness; got " ++ @typeName(Ptr);
@@ -364,11 +365,52 @@ const Harness = struct {
         if (pointer.size != .one or @typeInfo(pointer.child) != .@"struct") @compileError(not_a_pointer);
         if (pointer.attrs.@"const") @compileError(where ++ "the harness must be mutable, declared with var; got " ++ @typeName(Ptr));
         const H = pointer.child;
-        if (!@hasDecl(H, "setUp"))
-            @compileError(where ++ @typeName(H) ++ " has no method setUp; expected pub fn setUp(self: *@This(), io: std.Io, gpa: std.mem.Allocator) !rpc.testing.conformance.Pair");
-        if (!@hasDecl(H, "tearDown"))
-            @compileError(where ++ @typeName(H) ++ " has no method tearDown; expected pub fn tearDown(self: *@This(), io: std.Io, pair: rpc.testing.conformance.Pair) void");
+        inline for (hooks) |hook| {
+            if (@hasDecl(H, hook.name)) {
+                if (!hookFits(H, hook))
+                    @compileError(where ++ @typeName(H) ++ "." ++ hook.name ++ " has another signature; expected " ++ hook.signature);
+            } else if (hook.required) {
+                @compileError(where ++ @typeName(H) ++ " has no method " ++ hook.name ++ "; expected " ++ hook.signature);
+            }
+        }
         return H;
+    }
+
+    /// A method of a harness: `fn (self: *H, io: std.Io, last: Last)`
+    /// returning `Payload`, or an error union of it when `may_fail`.
+    const Hook = struct {
+        name: []const u8,
+        required: bool,
+        Last: type,
+        Payload: type,
+        may_fail: bool,
+        signature: []const u8,
+    };
+
+    const pair_param = "pair: rpc.testing.conformance.Pair";
+    const hooks = [_]Hook{
+        .{ .name = "setUp", .required = true, .Last = std.mem.Allocator, .Payload = Pair, .may_fail = true, .signature = "pub fn setUp(self: *@This(), io: std.Io, gpa: std.mem.Allocator) !rpc.testing.conformance.Pair" },
+        .{ .name = "tearDown", .required = true, .Last = Pair, .Payload = void, .may_fail = false, .signature = "pub fn tearDown(self: *@This(), io: std.Io, " ++ pair_param ++ ") void" },
+        .{ .name = "breakLink", .required = false, .Last = Pair, .Payload = void, .may_fail = false, .signature = "pub fn breakLink(self: *@This(), io: std.Io, " ++ pair_param ++ ") void" },
+        .{ .name = "restartPeer", .required = false, .Last = Pair, .Payload = void, .may_fail = true, .signature = "pub fn restartPeer(self: *@This(), io: std.Io, " ++ pair_param ++ ") !void" },
+        .{ .name = "sameAddress", .required = false, .Last = Pair, .Payload = ServerTransport, .may_fail = true, .signature = "pub fn sameAddress(self: *@This(), io: std.Io, " ++ pair_param ++ ") !rpc.ServerTransport" },
+    };
+
+    /// Whether `H` declares `hook` in the form the suite calls.
+    fn hookFits(comptime H: type, comptime hook: Hook) bool {
+        const function = switch (@typeInfo(@TypeOf(@field(H, hook.name)))) {
+            .@"fn" => |function| function,
+            else => return false,
+        };
+        const params = function.param_types;
+        if (params.len != 3 or params[0] != *H or params[1] != std.Io or params[2] != hook.Last) return false;
+        const Return = function.return_type orelse return false;
+        if (Return == hook.Payload) return true;
+        if (!hook.may_fail) return false;
+        return switch (@typeInfo(Return)) {
+            .error_union => |error_union| error_union.payload == hook.Payload,
+            else => false,
+        };
     }
 
     fn of(harness: anytype) Harness {
