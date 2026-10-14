@@ -74,7 +74,9 @@ pub fn client(t: *Server, options: anytype) error{OutOfMemory}!AppClient {
 }
 
 /// Stops the server, waits for the calls it runs, and frees the server and
-/// the transport. The clients' calls have returned by then.
+/// the transport. No client call may be in flight: it would meet a freed
+/// transport. The wait has no limit: a handler deaf to cancelation keeps
+/// `deinit` waiting past `shutdown_grace`, 10 seconds by default.
 pub fn deinit(t: *Server) void {
     t.server.deinit(t.io);
     t.gpa.destroy(t.server);
@@ -226,6 +228,60 @@ test "the hooks of the memory transport reach the clients of a test server" {
     var r = try plain.call(testing.io, .root, GreeterApi.greet, .{ .name = "Ann" }, .{});
     defer r.deinit();
     try testing.expectEqualStrings("Hello, Ann!", r.outcome.ok.text);
+}
+
+/// Marks every response, so that the client sees that the server's function
+/// link ran.
+fn markResponse(ctx: *rpc.Context, next: *rpc.Next) anyerror!void {
+    try ctx.setResponseMetadata("x-server-link", "fn");
+    return next.run();
+}
+
+/// Counts the requests that the client's function link tagged.
+const SeesTag = struct {
+    tagged: std.atomic.Value(u32) = .init(0),
+
+    pub fn run(self: *SeesTag, ctx: *rpc.Context, next: *rpc.Next) anyerror!void {
+        if (ctx.metadata().get("x-client-link") != null) _ = self.tagged.fetchAdd(1, .monotonic);
+        return next.run();
+    }
+};
+
+fn tagRequest(ctx: *rpc.ClientContext, next: *rpc.ClientNext) anyerror!void {
+    try ctx.addMetadata("x-client-link", "fn");
+    return next.run();
+}
+
+/// Counts the successes that a link of the client sees.
+const CountsSuccess = struct {
+    ok: u32 = 0,
+
+    pub fn run(self: *CountsSuccess, ctx: *rpc.ClientContext, next: *rpc.ClientNext) anyerror!void {
+        try next.run();
+        if (ctx.response().?.status == .ok) self.ok += 1;
+    }
+};
+
+test "middleware of the server and of its clients, functions and objects, passes through a test server" {
+    var greeter: Greeter = .{};
+    var auth: rpc.testing.StaticAuthenticator = .{};
+    var sees: SeesTag = .{};
+    var t = try Server.init(testing.allocator, testing.io, .{
+        .handlers = .{&greeter},
+        .authenticator = &auth,
+        .middleware = .{ markResponse, &sees },
+    });
+    defer t.deinit();
+    var counts: CountsSuccess = .{};
+    var linked = try t.client(.{ .middleware = .{ tagRequest, &counts }, .credentials = .none });
+    defer linked.deinit();
+
+    var r = try linked.call(testing.io, .root, GreeterApi.greet, .{ .name = "Ann" }, .{});
+    defer r.deinit();
+    try testing.expectEqualStrings("Hello, Ann!", r.outcome.ok.text);
+    try testing.expectEqualStrings("fn", r.metadata().get("x-server-link").?);
+    try testing.expectEqual(@as(u32, 1), sees.tagged.load(.monotonic));
+    try testing.expectEqual(@as(u32, 1), counts.ok);
 }
 
 test "a server that does not start leaves nothing behind" {

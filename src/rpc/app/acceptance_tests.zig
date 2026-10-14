@@ -386,6 +386,9 @@ const FrontApi = rpc.Contract(.{
 const Backend = struct {
     deadline: ?core.Deadline = null,
     trace: ?core.TraceContext = null,
+    /// `slowUser` started.
+    entered: std.atomic.Value(bool) = .init(false),
+    /// `slowUser` saw its call end.
     canceled: std.atomic.Value(bool) = .init(false),
 
     pub const rpc_handler = rpc.implement(BackendApi, .{});
@@ -399,6 +402,7 @@ const Backend = struct {
 
     /// Waits until the call ends.
     pub fn slowUser(self: *Backend, ctx: *rpc.Context, req: LookupRequest) !Person {
+        self.entered.store(true, .release);
         ctx.io().sleep(.fromSeconds(10), .awake) catch |err| {
             self.canceled.store(true, .release);
             return err;
@@ -476,7 +480,9 @@ test "A7: a nested call with ctx.operation() keeps the caller's deadline and con
     try testing.expect(took.nanoseconds < std.Io.Duration.fromSeconds(5).nanoseconds);
     try front.server.shutdown(io);
     try users.server.shutdown(io);
-    try testing.expect(backend.canceled.load(.acquire));
+    // Under load the backend may refuse the call at admission, past its
+    // deadline, without running the handler.
+    if (backend.entered.load(.acquire)) try testing.expect(backend.canceled.load(.acquire));
 }
 
 // A8: versions of a contract (section 5.10).
