@@ -283,6 +283,7 @@ pub fn build(b: *std.Build) void {
     });
     const call_signature = "pub fn call(self: *@This(), io: std.Io, request: *const rpc.transport.Request, options: rpc.ClientTransport.CallOptions) rpc.ClientTransport.CallError!rpc.Response";
     const authenticate_signature = "pub fn authenticate(self: *@This(), ctx: *const rpc.AuthContext) rpc.AuthError!?rpc.IdentityView";
+    const run_signature = "pub fn run(self: *@This(), ctx: *rpc.Context, next: *rpc.Next) anyerror!void";
     for ([_][2][]const u8{
         .{ "client transport without call", "rpc.ClientTransport.init: compile_errors.test.client transport without call.NoCall has no method call; expected " ++ call_signature },
         .{ "call with another response type", "rpc.ClientTransport.init: compile_errors.test.call with another response type.WrongResponse.call has another signature; expected " ++ call_signature },
@@ -295,6 +296,9 @@ pub fn build(b: *std.Build) void {
         .{ "init with a pointer to a number", "rpc.ServerTransport.init: pass a pointer to the transport, e.g. &transport; got *u8" },
         .{ "authenticator without authenticate", "rpc.Authenticator.init: compile_errors.test.authenticator without authenticate.NoAuthenticate has no method authenticate; expected " ++ authenticate_signature },
         .{ "authenticate with an inferred error set", "rpc.Authenticator.init: compile_errors.test.authenticate with an inferred error set.Inferred.authenticate has another signature; expected " ++ authenticate_signature },
+        .{ "middleware object without run", "rpc.Middleware.of: compile_errors.test.middleware object without run.NoRun has no method run; expected " ++ run_signature },
+        .{ "middleware object by value", "rpc.Middleware.of: expected fn (ctx: *rpc.Context, next: *rpc.Next) anyerror!void, or a pointer to a type with " ++ run_signature ++ "; got compile_errors.Counter" },
+        .{ "middleware run with an inferred error set", "rpc.Middleware.of: compile_errors.test.middleware run with an inferred error set.Inferred.run has another signature; expected " ++ run_signature },
     }, 0..) |case, i| {
         const compile = b.addTest(.{
             .name = b.fmt("rpc-compile-error-{d}", .{i}),

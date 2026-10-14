@@ -82,6 +82,20 @@ pub const Context = opaque {
         return state(ctx).identity;
     }
 
+    /// The request's body in bytes, as the client encoded it: for
+    /// middleware that checks or logs it before anything decodes it. Never
+    /// change it.
+    pub fn requestBody(ctx: *Context) []const u8 {
+        return state(ctx).request_body;
+    }
+
+    /// For middleware, after its `next.run()`: the body of the successful
+    /// response in bytes. Null before `next.run()` and when it failed.
+    /// Never change it.
+    pub fn responseBody(ctx: *Context) ?[]const u8 {
+        return state(ctx).response_body;
+    }
+
     pub const SetMetadataError = error{
         /// A key or value against the metadata rules, or a reserved or
         /// `zefir-*` key: those are the engine's.
@@ -173,6 +187,11 @@ pub const CallContext = struct {
     credentials: Credentials = .none,
     /// Set once the authenticator returned an identity.
     identity: ?IdentityView = null,
+    /// The body the transport filled in.
+    request_body: []const u8 = "",
+    /// The handler's body, while the middleware that looks at it has seen
+    /// its `next.run()` succeed.
+    response_body: ?[]const u8 = null,
     /// The metadata of the response, in the arena.
     response_metadata: std.ArrayList(model.Metadata.Entry) = .empty,
     /// Its size, as `rpc.transport.metadataBytes` counts it.

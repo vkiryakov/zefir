@@ -178,3 +178,46 @@ test "authenticate with an inferred error set" {
     var authenticator: Inferred = .{};
     _ = rpc.Authenticator.init(&authenticator);
 }
+
+/// A middleware object with `run` right.
+const Counter = struct {
+    runs: u32 = 0,
+
+    pub fn run(self: *Counter, ctx: *rpc.Context, next: *rpc.Next) anyerror!void {
+        _ = ctx;
+        self.runs += 1;
+        return next.run();
+    }
+};
+
+test "middleware object without run" {
+    const NoRun = struct {
+        runs: u32 = 0,
+        pub fn handle(self: *@This(), ctx: *rpc.Context, next: *rpc.Next) anyerror!void {
+            _ = ctx;
+            self.runs += 1;
+            return next.run();
+        }
+    };
+    var link: NoRun = .{};
+    _ = rpc.Middleware.of(&link);
+}
+
+test "middleware object by value" {
+    var counter: Counter = .{};
+    _ = rpc.Middleware.of(counter);
+    counter.runs += 1;
+}
+
+test "middleware run with an inferred error set" {
+    const Inferred = struct {
+        runs: u32 = 0,
+        pub fn run(self: *@This(), ctx: *rpc.Context, next: *rpc.Next) !void {
+            _ = ctx;
+            self.runs += 1;
+            return next.run();
+        }
+    };
+    var link: Inferred = .{};
+    _ = rpc.Middleware.of(&link);
+}

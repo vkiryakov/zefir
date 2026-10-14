@@ -48,6 +48,7 @@ const waiting = @import("../wait.zig");
 const failures = @import("../failures.zig");
 const ServerTransport = @import("../ServerTransport.zig");
 const Authenticator = @import("../auth.zig").Authenticator;
+const Middleware = @import("../middleware.zig").Middleware;
 const Context = @import("Context.zig").Context;
 const Call = @import("Call.zig");
 const RouteStats = @import("RouteStats.zig");
@@ -59,6 +60,8 @@ gpa: std.mem.Allocator,
 arena: std.heap.ArenaAllocator,
 server_transport: ServerTransport,
 authenticator: ?Authenticator,
+/// The links of the server's level, before those of each method.
+middleware: []const Middleware,
 methods: []const Method,
 /// The key of a route, "service.v<version>.method", to its index in
 /// `methods`.
@@ -138,6 +141,9 @@ pub const Options = struct {
     /// refused with `unauthenticated`, and no method may require an
     /// identity.
     authenticator: ?Authenticator = null,
+    /// The links of every call, in order, before those of its method; after
+    /// authentication. `init` copies the list; the objects are borrowed.
+    middleware: []const Middleware = &.{},
     limits: Limits = .{},
     /// How long the calls in flight may run after `requestStop` before the
     /// server cancels them.
@@ -148,6 +154,10 @@ pub const Options = struct {
 pub const Method = struct {
     route: model.Route,
     handler: Handler,
+    /// The links of this method after those of the server: `rpc.Server`
+    /// puts those of the handler first, then those of the method. `init`
+    /// copies the list; the objects are borrowed.
+    middleware: []const Middleware = &.{},
     /// `.required`: a call without an identity is refused with
     /// `unauthenticated`. `rpc.Server` sets it from the contract's
     /// settings, `.optional` by default.
@@ -250,18 +260,21 @@ pub fn init(gpa: std.mem.Allocator, options: Options) InitError!RawServer {
         copy.* = method;
         copy.route.service = try a.dupe(u8, method.route.service);
         copy.route.method = try a.dupe(u8, method.route.method);
+        copy.middleware = try a.dupe(Middleware, method.middleware);
         route.* = copy.route;
         const key = try std.fmt.allocPrint(a, "{s}.v{d}.{s}", .{ route.service, route.version, route.method });
         const entry = table.getOrPutAssumeCapacity(key);
         if (entry.found_existing) return error.InvalidConfiguration;
         entry.value_ptr.* = @intCast(i);
     }
+    const server_middleware = try a.dupe(Middleware, options.middleware);
     const max_inflight = options.limits.max_inflight orelse options.limits.max_active_tasks +| options.limits.queue_capacity;
     return .{
         .gpa = gpa,
         .arena = arena,
         .server_transport = options.transport,
         .authenticator = options.authenticator,
+        .middleware = server_middleware,
         .methods = methods,
         .table = table,
         .stats = stats,

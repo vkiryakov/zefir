@@ -32,6 +32,7 @@ const std = @import("std");
 const model = @import("model.zig");
 const credentials = @import("credentials.zig");
 const auth = @import("auth.zig");
+const middleware = @import("middleware.zig");
 
 pub const Route = model.Route;
 pub const Metadata = model.Metadata;
@@ -67,6 +68,12 @@ pub const AuthContext = auth.AuthContext;
 pub const AuthError = auth.AuthError;
 /// The identity of a caller.
 pub const IdentityView = auth.IdentityView;
+/// One link of the server's middleware: a function or an object.
+pub const Middleware = middleware.Middleware;
+/// A middleware function of the server, without state.
+pub const MiddlewareFn = middleware.MiddlewareFn;
+/// The rest of the server's chain behind one link.
+pub const Next = middleware.Next;
 
 /// The client side of a transport.
 pub const ClientTransport = @import("ClientTransport.zig");
@@ -94,6 +101,7 @@ test {
     _ = @import("failures.zig");
     _ = @import("credentials.zig");
     _ = @import("auth.zig");
+    _ = @import("middleware.zig");
     _ = @import("engine/chain_tests.zig");
     _ = @import("engine/RawServer.zig");
     _ = @import("engine/Call.zig");

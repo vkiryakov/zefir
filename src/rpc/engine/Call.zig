@@ -17,6 +17,7 @@ const rules = @import("../rules.zig");
 const failures = @import("../failures.zig");
 const waiting = @import("../wait.zig");
 const auth = @import("../auth.zig");
+const middleware = @import("../middleware.zig");
 const credentials = @import("../credentials.zig");
 const RawServer = @import("RawServer.zig");
 const Context = @import("Context.zig").Context;
@@ -127,6 +128,7 @@ pub fn create(
     call.context.operation = call.context.operation.withCancellation(&call.token);
     errdefer call.destroy();
     call.body = try call.budget.allocator().alloc(u8, body_len);
+    call.context.request_body = call.body;
     try call.copyHead(io, head);
     return call;
 }
@@ -324,7 +326,14 @@ fn runHandler(call: *Call, io: std.Io) anyerror![]const u8 {
     if (!call.enter(io)) return error.NotEntered;
     const method = &call.server.methods[call.route_index];
     try auth.authenticate(call.contextPtr(), call.server.authenticator, method.auth == .required);
-    return method.handler.handle(method.handler.ptr, call.contextPtr(), call.body);
+    var chain: middleware.Chain = .{
+        .context = call.contextPtr(),
+        .server_links = call.server.middleware,
+        .method_links = method.middleware,
+        .handler = method.handler,
+        .request = call.body,
+    };
+    return chain.run();
 }
 
 /// Lets the handler in, unless the call has an outcome already or its
