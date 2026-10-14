@@ -75,10 +75,8 @@ flowchart LR
 Add Zefir to your `build.zig.zon`:
 
 ```sh
-zig fetch --save git+https://github.com/vkiryakov/zefir#dev
+zig fetch --save git+https://github.com/vkiryakov/zefir#v0.5.0
 ```
-
-This guide is on the `dev` branch, so the command fetches its latest commit; `--save` pins that commit. For the latest release, v0.4.0, fetch `#v0.4.0` instead.
 
 Then import the `zefir-confy` module in `build.zig`:
 
