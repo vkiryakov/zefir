@@ -76,8 +76,9 @@ pub const Context = opaque {
     }
 
     /// Who calls, as the server's authenticator found; null for an
-    /// anonymous call. Its strings live in the arena of the call or are
-    /// constant.
+    /// anonymous call. Its strings and its arrays of roles and permissions
+    /// live in the arena of the call or are constant: copy what must
+    /// outlive the call.
     pub fn identity(ctx: *Context) ?IdentityView {
         return state(ctx).identity;
     }

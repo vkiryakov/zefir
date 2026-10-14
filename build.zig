@@ -299,6 +299,8 @@ pub fn build(b: *std.Build) void {
         .{ "middleware object without run", "rpc.Middleware.of: compile_errors.test.middleware object without run.NoRun has no method run; expected " ++ run_signature },
         .{ "middleware object by value", "rpc.Middleware.of: expected fn (ctx: *rpc.Context, next: *rpc.Next) anyerror!void, or a pointer to a type with " ++ run_signature ++ "; got compile_errors.Counter" },
         .{ "middleware run with an inferred error set", "rpc.Middleware.of: compile_errors.test.middleware run with an inferred error set.Inferred.run has another signature; expected " ++ run_signature },
+        .{ "middleware function with an inferred error set", "rpc.Middleware.of: a middleware function is fn (ctx: *rpc.Context, next: *rpc.Next) anyerror!void, with anyerror written out, not inferred; got fn (*engine.Context.Context, *middleware.Next) @typeInfo(@typeInfo(@TypeOf(compile_errors.inferredLink)).@\"fn\".return_type.?).error_union.error_set!void" },
+        .{ "middleware object behind a const pointer", "rpc.Middleware.of: the middleware must be mutable, declared with var; got *const compile_errors.Counter" },
         .{ "client middleware with the server's signature", "rpc.ClientMiddleware.of: compile_errors.test.client middleware with the server's signature.ServerSide.run has another signature; expected pub fn run(self: *@This(), ctx: *rpc.ClientContext, next: *rpc.ClientNext) anyerror!void" },
     }, 0..) |case, i| {
         const compile = b.addTest(.{
@@ -378,6 +380,29 @@ pub fn build(b: *std.Build) void {
         .{ "deinit_in_use", "rpc.testing.MemoryTransport: deinit with calls not released; deinit the server and let every call return first" },
     }) |case| {
         const run = b.addRunArtifact(memory_panics);
+        run.addArg(case[0]);
+        run.expectStdErrMatch(case[1]);
+        run.expectExitCode(3);
+        test_rpc.dependOn(&run.step);
+    }
+
+    // The same for an application that breaks the rules of rpc.RawClient.
+    const client_panics = b.addExecutable(.{
+        .name = "rpc-panic-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/rpc/tests/panic/client.zig"),
+            .target = target,
+            .optimize = .Debug,
+            .imports = &.{
+                .{ .name = "core", .module = panic_core },
+                .{ .name = "rpc", .module = panic_rpc },
+            },
+        }),
+    });
+    for ([_][2][]const u8{
+        .{ "provider_returns_provider", "rpc.RawClient: a CredentialsProvider returned .provider; return the credentials of the call" },
+    }) |case| {
+        const run = b.addRunArtifact(client_panics);
         run.addArg(case[0]);
         run.expectStdErrMatch(case[1]);
         run.expectExitCode(3);

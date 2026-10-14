@@ -27,7 +27,8 @@ const log = std.log.scoped(.rpc);
 /// credentials). Wrong credentials are `error.InvalidCredentials`, also on a
 /// method where authentication is optional: they never pass as anonymous.
 /// It runs in the handler's task under its deadline: wait only through
-/// `ctx.io()`, and return `error.Canceled` as it is.
+/// `ctx.io()`, and return `error.Canceled` as it is. One authenticator
+/// serves all calls at once: guard its state with `std.Io` primitives.
 pub const Authenticator = struct {
     ptr: *anyopaque,
     authenticate: *const fn (ptr: *anyopaque, ctx: *const AuthContext) AuthError!?IdentityView,
@@ -64,39 +65,46 @@ pub const AuthContext = struct {
     /// `.none` without the key, `.bearer`, `.basic`, or `.custom` with the
     /// value as it is. Never `.provider`.
     credentials: Credentials,
-    /// The call; read it through the methods below.
-    call: *Context,
+    /// Internal to the engine: the call the methods below read.
+    call: *anyopaque,
 
     /// The `std.Io` of the server: every wait goes through it.
     pub fn io(ctx: *const AuthContext) std.Io {
-        return ctx.call.io();
+        return callOf(ctx).io();
     }
 
     /// The deadline, the token and the trace of the call.
     pub fn operation(ctx: *const AuthContext) core.Context {
-        return ctx.call.operation();
+        return callOf(ctx).operation();
     }
 
-    /// The arena of the call: the strings of the identity may live here.
+    /// The arena of the call: the identity's strings and its arrays of
+    /// roles and permissions may live here.
     pub fn allocator(ctx: *const AuthContext) std.mem.Allocator {
-        return ctx.call.allocator();
+        return callOf(ctx).allocator();
     }
 
     /// The request's metadata without the reserved keys.
     pub fn metadata(ctx: *const AuthContext) model.Metadata.View {
-        return ctx.call.metadata();
+        return callOf(ctx).metadata();
     }
 
     /// The service, version and method of the call.
     pub fn route(ctx: *const AuthContext) model.Route {
-        return ctx.call.route();
+        return callOf(ctx).route();
+    }
+
+    fn callOf(ctx: *const AuthContext) *Context {
+        return @ptrCast(ctx.call);
     }
 };
 
-/// The identity of a caller. Its strings live in the arena of the call
-/// (`AuthContext.allocator()`) or are constant. The engine checks it before
-/// anyone sees it: over the limits below → `resource_exhausted`; an empty
-/// or non-UTF-8 string → `internal`, a bug of the authenticator.
+/// The identity of a caller. Its strings and its arrays of roles and
+/// permissions live in the arena of the call (`AuthContext.allocator()`)
+/// or are constant: an array on the authenticator's stack is gone when it
+/// returns. The engine checks it before anyone sees it: over the limits
+/// below → `resource_exhausted`; an empty or non-UTF-8 string → `internal`,
+/// a bug of the authenticator.
 pub const IdentityView = struct {
     /// Who calls: a user, a service.
     subject: []const u8,
@@ -184,6 +192,9 @@ pub fn authenticate(ctx: *Context, authenticator: ?Authenticator, required: bool
     if (checkIdentity(identity)) |problem| switch (problem) {
         .too_large => return refuse(ctx, failures.identity_too_large),
         .malformed => {
+            // The log may take a cancelable lock; a cancelation of the task stays.
+            const protection = call.io.swapCancelProtection(.blocked);
+            defer _ = call.io.swapCancelProtection(protection);
             const r = call.route;
             log.warn("the authenticator returned an identity with an empty or non-UTF-8 string for {s}.v{d}.{s}", .{ r.service, r.version, r.method });
             return refuse(ctx, failures.internal);

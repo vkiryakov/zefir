@@ -209,6 +209,20 @@ test "middleware object by value" {
     counter.runs += 1;
 }
 
+fn inferredLink(ctx: *rpc.Context, next: *rpc.Next) !void {
+    _ = ctx;
+    return next.run();
+}
+
+test "middleware function with an inferred error set" {
+    _ = rpc.Middleware.of(inferredLink);
+}
+
+test "middleware object behind a const pointer" {
+    const counter: Counter = .{};
+    _ = rpc.Middleware.of(&counter);
+}
+
 test "middleware run with an inferred error set" {
     const Inferred = struct {
         runs: u32 = 0,
