@@ -28,8 +28,12 @@
 //!
 //! NATS has no signal that a client gave up, so a handler runs until its
 //! own deadline, and `info().propagates_cancellation` is false. `close`
-//! returns within `flush_timeout`, the bound of its flush, plus the time a
-//! receiving task needs to hand over the request it holds.
+//! returns within `publish_timeout` plus `flush_timeout`: a receiving task
+//! first hands over or refuses the request it holds, and a refusal waits
+//! for room to publish no longer than `publish_timeout`; then the flush of
+//! the responses sent so far waits no longer than `flush_timeout`. A
+//! `close` straight from running, without `drain` before it, drains the
+//! subscriptions too, and that takes as long as the adapter's `drain`.
 //!
 //! The client publishes a request only while the link is up: a request
 //! buffered in the library during a reconnect would reach the server with
@@ -63,13 +67,16 @@
 //!
 //! The transport never closes the connection, and its `deinit` comes
 //! before the connection's. The allocator must be thread-safe: calls are
-//! allocated and freed from the tasks of the engine.
+//! allocated and freed from the tasks of the engine. `serverTransport()`
+//! and `clientTransport()` point at the transport, and so do its tasks:
+//! from the first of them to `deinit` it stays where it is, never copied
+//! or moved.
 
 const std = @import("std");
-const core = @import("core");
 const rpc = @import("rpc");
 const Conn = @import("Conn.zig");
 const subject = @import("subject.zig");
+const shared = @import("shared.zig");
 const server_side = @import("server.zig");
 const client_side = @import("client.zig");
 
@@ -86,7 +93,7 @@ pending: rpc.transport.Pending,
 /// The `std.Io` the transport was first used with; Debug checks that every
 /// call brings the same.
 io_vtable: std.atomic.Value(?*const std.Io.VTable) = .init(null),
-counts: std.EnumArray(Counter, std.atomic.Value(u64)) = .initFill(.init(0)),
+counts: std.EnumArray(shared.Counter, std.atomic.Value(u64)) = .initFill(.init(0)),
 server: server_side.State = .{},
 client: client_side.State = .{},
 
@@ -146,13 +153,6 @@ pub const Counters = struct {
     slow_consumer_errors: u64,
 };
 
-pub const Counter = enum {
-    requests_without_reply_to,
-    requests_with_foreign_reply_to,
-    late_responses,
-    slow_consumer_errors,
-};
-
 /// A transport on `conn`, which must outlive it. Copies the strings of
 /// `options` and takes the memory for `max_pending` waiting calls.
 pub fn init(gpa: std.mem.Allocator, conn: Conn, options: Options) InitError!Transport {
@@ -206,6 +206,10 @@ fn check(options: Options) error{InvalidConfiguration}!void {
 /// while the engine holds the `Reply` of a call, or a call waits: deinit
 /// the server and let every call return first.
 pub fn deinit(t: *Transport, io: std.Io) void {
+    // An allocator may take a cancelable lock; a cancelation of the caller
+    // stays for later.
+    const protection = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(protection);
     server_side.close(t, io);
     client_side.stop(t, io);
     if (t.server.live_calls.load(.acquire) != 0)
@@ -216,12 +220,14 @@ pub fn deinit(t: *Transport, io: std.Io) void {
     t.* = undefined;
 }
 
-/// The server side, for the engine of the server.
+/// The server side, for the engine of the server. It points at `t`, which
+/// stays where it is until `deinit`.
 pub fn serverTransport(t: *Transport) rpc.ServerTransport {
     return .init(t);
 }
 
-/// The client side, for the engine of the client.
+/// The client side, for the engine of the client. It points at `t`, which
+/// stays where it is until `deinit`.
 pub fn clientTransport(t: *Transport) rpc.ClientTransport {
     return .init(t);
 }
@@ -275,31 +281,10 @@ pub fn isReady(t: *Transport) bool {
 /// What the transport has dropped or lost so far.
 pub fn counters(t: *const Transport) Counters {
     var result: Counters = undefined;
-    inline for (comptime std.enums.values(Counter)) |counter| {
+    inline for (comptime std.enums.values(shared.Counter)) |counter| {
         @field(result, @tagName(counter)) = t.counts.getPtrConst(counter).load(.monotonic);
     }
     return result;
-}
-
-/// One more of `counter`. Internal to the module.
-pub fn count(t: *Transport, counter: Counter) void {
-    _ = t.counts.getPtr(counter).fetchAdd(1, .monotonic);
-}
-
-/// In Debug, panics when `io` is another `std.Io` than the transport's
-/// first one: canceling a task would not end a wait inside the library.
-/// Internal to the module.
-pub fn checkIo(t: *Transport, io: std.Io) void {
-    if (!std.debug.runtime_safety) return;
-    const first = t.io_vtable.cmpxchgStrong(null, io.vtable, .acq_rel, .acquire) orelse return;
-    if (first != io.vtable) @panic("rpc_nats.Transport: called with another std.Io than before; pass the one the NATS connection runs on");
-}
-
-/// A timeout that ends `duration` from now; saturates. Internal to the
-/// module.
-pub fn timeoutAfter(io: std.Io, duration: std.Io.Duration) std.Io.Timeout {
-    const deadline: core.Deadline = .after(std.Io.Clock.awake.now(io), duration);
-    return deadline.toTimeout();
 }
 
 test {

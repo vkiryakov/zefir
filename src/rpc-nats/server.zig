@@ -14,6 +14,7 @@ const std = @import("std");
 const rpc = @import("rpc");
 const Conn = @import("Conn.zig");
 const Transport = @import("Transport.zig");
+const shared = @import("shared.zig");
 const subject = @import("subject.zig");
 const wire = @import("wire.zig");
 
@@ -84,7 +85,7 @@ pub fn start(t: *Transport, io: std.Io, dispatcher: rpc.transport.Dispatcher) rp
         .idle, .closed => {},
         .running, .draining, .closing => return error.AddressInUse,
     }
-    t.checkIo(io);
+    shared.checkIo(t, io);
     const routes = try makeRoutes(t, io, dispatcher.service());
     errdefer freeRoutes(t, io, routes);
     var subscribed: usize = 0;
@@ -93,7 +94,7 @@ pub fn start(t: *Transport, io: std.Io, dispatcher: rpc.transport.Dispatcher) rp
         defer _ = io.swapCancelProtection(protection);
         for (routes[0..subscribed]) |*r| t.conn.unsubscribe(io, r.sub);
     }
-    const timeout = Transport.timeoutAfter(io, t.options.flush_timeout);
+    const timeout = shared.timeoutAfter(io, t.options.flush_timeout);
     for (routes) |*r| {
         r.sub = t.conn.subscribe(io, r.subjectOf(), t.options.queue_group, timeout) catch |err| return startError(r, err);
         subscribed += 1;
@@ -212,7 +213,7 @@ pub fn close(t: *Transport, io: std.Io) void {
     // hands it over or refuses it first.
     s.group.cancel(io);
     // The responses published so far reach the server.
-    t.conn.flush(io, Transport.timeoutAfter(io, t.options.flush_timeout)) catch |err| log.debug("the flush of close failed: {t}", .{err});
+    t.conn.flush(io, shared.timeoutAfter(io, t.options.flush_timeout)) catch |err| log.debug("the flush of close failed: {t}", .{err});
     for (s.routes) |*r| t.conn.unsubscribe(io, r.sub);
     freeRoutes(t, io, s.routes);
     s.routes = &.{};
@@ -234,7 +235,7 @@ fn receive(r: *Route, io: std.Io) void {
                 continue;
             },
             error.SlowConsumer => {
-                t.count(.slow_consumer_errors);
+                shared.count(t, .slow_consumer_errors);
                 log.warn("the subscription to {s} lost requests as a slow consumer; its pending limits must hold the server's max_inflight", .{r.subjectOf()});
                 continue;
             },
@@ -270,11 +271,11 @@ fn handle(t: *Transport, io: std.Io, r: *Route, message: Conn.InMsg) void {
     defer message.release();
     const received_at = std.Io.Clock.awake.now(io);
     const reply_to = message.reply_to orelse {
-        t.count(.requests_without_reply_to);
+        shared.count(t, .requests_without_reply_to);
         return;
     };
     if (!subject.isAllowedReplyTo(reply_to, t.reply_prefixes)) {
-        t.count(.requests_with_foreign_reply_to);
+        shared.count(t, .requests_with_foreign_reply_to);
         return;
     }
     if (closing(t)) return refuse(t, io, reply_to, stopping);
@@ -346,7 +347,7 @@ fn publishResponse(t: *Transport, io: std.Io, reply_to: []const u8, response: *c
         defer _ = io.swapCancelProtection(protection);
         headers.deinit(a);
     }
-    try t.conn.publish(io, .{ .subject = reply_to, .headers = headers.headers, .payload = response.body }, Transport.timeoutAfter(io, t.options.publish_timeout));
+    try t.conn.publish(io, .{ .subject = reply_to, .headers = headers.headers, .payload = response.body }, shared.timeoutAfter(io, t.options.publish_timeout));
 }
 
 /// A call the engine runs: its `Reply`.

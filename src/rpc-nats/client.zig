@@ -17,6 +17,7 @@ const core = @import("core");
 const rpc = @import("rpc");
 const Conn = @import("Conn.zig");
 const Transport = @import("Transport.zig");
+const shared = @import("shared.zig");
 const subject = @import("subject.zig");
 const wire = @import("wire.zig");
 
@@ -76,7 +77,7 @@ const Received = struct {
 pub fn call(t: *Transport, io: std.Io, request: *const rpc.transport.Request, options: CallOptions) CallError!rpc.Response {
     // A cancelation pending on entry comes before any other error.
     try io.checkCancel();
-    t.checkIo(io);
+    shared.checkIo(t, io);
     const diagnostics = options.diagnostics;
     if (!t.conn.isConnected()) {
         note(diagnostics, .connect, null, "no link to the NATS server", .{});
@@ -292,7 +293,7 @@ fn readInbox(t: *Transport, io: std.Io, sub: Conn.Sub) void {
                 continue;
             },
             error.SlowConsumer => {
-                t.count(.slow_consumer_errors);
+                shared.count(t, .slow_consumer_errors);
                 log.warn("the inbox of the client lost responses as a slow consumer", .{});
                 continue;
             },
@@ -320,7 +321,7 @@ fn broken(t: *Transport, io: std.Io, cause: ?anyerror) void {
 fn deliver(t: *Transport, io: std.Io, message: Conn.InMsg) void {
     const id = subject.replyId(message.subject) orelse {
         message.release();
-        t.count(.late_responses);
+        shared.count(t, .late_responses);
         return;
     };
     const received = t.gpa.create(Received) catch {
@@ -334,7 +335,7 @@ fn deliver(t: *Transport, io: std.Io, message: Conn.InMsg) void {
     if (!t.pending.complete(io, id, delivery)) {
         // Late: the call returned with Timeout or Canceled.
         Received.free(received);
-        t.count(.late_responses);
+        shared.count(t, .late_responses);
     }
 }
 

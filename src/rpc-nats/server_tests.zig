@@ -7,6 +7,7 @@ const std = @import("std");
 const rpc = @import("rpc");
 const Conn = @import("Conn.zig");
 const Transport = @import("Transport.zig");
+const shared = @import("shared.zig");
 const FakeConn = @import("testing/FakeConn.zig");
 const wire = @import("wire.zig");
 
@@ -96,7 +97,7 @@ fn eventually(condition: anytype) !void {
 
 const CounterIs = struct {
     bus: *const Transport,
-    counter: Transport.Counter,
+    counter: shared.Counter,
     n: u64,
 
     fn holds(c: CounterIs) bool {
