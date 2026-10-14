@@ -9,7 +9,7 @@
 //!   `[]const u8` is a string of UTF-8; other slices and arrays, `[N]u8`
 //!   too, are JSON arrays.
 //! - A struct is an object with its fields in the order of declaration; a
-//!   `void` response is `{}`.
+//!   `void` response is `{}`, and an empty body decodes as one too.
 //!
 //! `std.json` alone does not keep these rules: it writes big integers as
 //! numbers and refuses unknown fields by default, for example.
@@ -123,7 +123,8 @@ pub const DecodeError = error{
 /// - a key that repeats in an object is refused, an unknown one too, at
 ///   any depth;
 /// - `[N]T` takes exactly N items; an enum only the name of one of its
-///   tags; strings must be UTF-8.
+///   tags; strings must be UTF-8;
+/// - `void` takes any object, or an empty body.
 ///
 /// Memory comes from `arena`, which the caller frees as a whole, also after
 /// an error. Strings of the result point into `bytes` when they have no
@@ -135,6 +136,9 @@ pub const DecodeError = error{
 pub fn decode(comptime T: type, arena: std.mem.Allocator, bytes: []const u8, limits: Limits, problem: *Problem) DecodeError!T {
     if (comptime dto.problem(T, .response)) |found| @compileError("rpc: json.decode: " ++ found);
     problem.* = .{};
+    // Nothing to read in a void response: a service that is not zefir may
+    // answer with an empty body.
+    if (T == void and bytes.len == 0) return;
     var decoder: Decoder = .{
         .scanner = .initCompleteInput(arena, bytes),
         .arena = arena,
@@ -825,7 +829,11 @@ test "null only for optionals, strings only for strings, a known tag for enums" 
     try expectRefused([]const u32, "{}", null, "wrong type");
     try expectRefused(Point, "[]", null, "wrong type");
     try expectRefused(void, "null", null, "wrong type");
-    try expectRefused(void, "", null, "invalid JSON");
+    // A void response is {}, or a body with nothing in it, as a service
+    // that is not zefir may send; spaces alone are not JSON.
+    try expectDecoded(void, "", {});
+    try expectRefused(void, " ", null, "invalid JSON");
+    try expectRefused(struct {}, "", null, "invalid JSON");
 }
 
 test "arrays take exactly their length" {
