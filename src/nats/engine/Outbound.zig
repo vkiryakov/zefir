@@ -112,7 +112,7 @@ pub const Mode = enum {
     closed,
 };
 
-pub const PutError = error{ Closed, Disconnected, BufferFull, Canceled, OutOfMemory, ProtocolError };
+pub const PutError = error{ Closed, Disconnected, BufferFull, Canceled, OutOfMemory, ProtocolError, ConnectionDraining };
 pub const WaitError = error{ Closed, Disconnected, Timeout, Canceled };
 
 /// The size of a chunk; a larger frame gets a chunk of its own size.
@@ -191,6 +191,9 @@ marks: [ping_marks]PingMark = @splat(.{}),
 /// PUB and HPUB of ended connections that may or may not have reached the
 /// server.
 uncertain_frames: u64 = 0,
+/// The client's drain sent its last PING: publishes and requests are
+/// refused from then on (`stopPublishes`).
+publishes_stopped: bool = false,
 /// Publishes that never reached the socket and were dropped: no room in
 /// the reconnect buffer, or the client closed.
 dropped_publishes: u64 = 0,
@@ -230,6 +233,16 @@ pub fn put(q: *Outbound, io: Io, kind: Kind, len: usize, encode: anytype, args: 
 
 pub const PutUntilError = PutError || error{Timeout};
 
+/// Like `put`, but the frame goes in only when `ticket` agrees, under the
+/// queue's mutex, as for a SUB that its subscription's drain must not
+/// follow.
+pub fn putTicket(q: *Outbound, io: Io, kind: Kind, ticket: Ticket, len: usize, encode: anytype, args: anytype) PutError!void {
+    return q.putTicketed(io, null, kind, ticket, len, encode, args) catch |err| switch (err) {
+        error.Timeout => unreachable, // no deadline, no timeout
+        else => |e| e,
+    };
+}
+
 /// Like `put`, but the wait for room ends at `deadline` with Timeout, and
 /// the frame is not queued; null waits as long as it takes.
 pub fn putUntil(q: *Outbound, io: Io, deadline: ?Io.Clock.Timestamp, kind: Kind, len: usize, encode: anytype, args: anytype) PutUntilError!void {
@@ -249,11 +262,14 @@ fn putTicketed(q: *Outbound, io: Io, deadline: ?Io.Clock.Timestamp, kind: Kind, 
     try q.mutex.lock(io);
     defer q.mutex.unlock(io);
     if (kind == .ping) return q.admit(io, kind, null, len, encode, args);
+    if (q.stopped(kind)) return error.ConnectionDraining;
     const generation = q.generation;
     try q.awaitRoom(io, deadline);
     // In or not, the next put in line may go if room is left.
     defer q.passRoom(io);
     if (kind == .request and q.generation != generation and q.mode != .closed) return error.Disconnected;
+    // Publishes stopped while it waited: the drain's last PING went first.
+    if (q.stopped(kind)) return error.ConnectionDraining;
     return q.admit(io, kind, ticket, len, encode, args);
 }
 
@@ -350,6 +366,22 @@ fn passRoom(q: *Outbound, io: Io) void {
     waiter.turn.set(io);
 }
 
+/// A publish or request frame that the drain's last PING refuses.
+fn stopped(q: *const Outbound, kind: Kind) bool {
+    return q.publishes_stopped and q.mode != .closed and (kind == .publish or kind == .request);
+}
+
+/// The last PING of the client's drain: from it on, publishes and requests
+/// fail with ConnectionDraining, also those waiting for room, so its PONG
+/// confirms every frame published before. One step under the mutex.
+pub fn stopPublishes(q: *Outbound, io: Io) error{ Closed, Disconnected, OutOfMemory }!Ping {
+    q.mutex.lockUncancelable(io);
+    defer q.mutex.unlock(io);
+    const ping = try q.queuePing(io, .flush);
+    q.publishes_stopped = true;
+    return ping;
+}
+
 /// Queues a PING and returns it; PONG number n answers PING number n. When
 /// the last frame queued is a PING the writer has not begun, that one is
 /// returned instead: it marks the same point in the stream. So PINGs skip
@@ -357,6 +389,10 @@ fn passRoom(q: *Outbound, io: Io) void {
 pub fn putPing(q: *Outbound, io: Io, kind: PingKind) error{ Closed, Disconnected, OutOfMemory }!Ping {
     q.mutex.lockUncancelable(io);
     defer q.mutex.unlock(io);
+    return q.queuePing(io, kind);
+}
+
+fn queuePing(q: *Outbound, io: Io, kind: PingKind) error{ Closed, Disconnected, OutOfMemory }!Ping {
     switch (q.mode) {
         .closed => return error.Closed,
         .buffering => return error.Disconnected,
@@ -985,6 +1021,29 @@ test "a canceled put queues nothing" {
 
 fn writeUnsub(w: *Writer, sid: u64) Writer.Error!void {
     return encoder.writeUnsub(w, sid, null);
+}
+
+test "after the drain's last PING, publishes and requests are refused, those waiting for room too" {
+    const io = testing.io;
+    var q: Outbound = .init(testing.allocator, 16);
+    defer q.deinit();
+    try putPub(&q, io, .publish, "first", "0123456789");
+    var putter = try io.concurrent(putLater, .{ &q, io });
+    defer putter.cancel(io) catch {};
+    try awaitRoomWaiter(&q, io);
+    _ = try q.stopPublishes(io);
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(testing.allocator);
+    try drainOnce(&q, io, &out);
+    // Room came after the PING: the waiting publish did not go in.
+    try testing.expectError(error.ConnectionDraining, putter.await(io));
+    try testing.expectEqualStrings("PUB first 10\r\n0123456789\r\nPING\r\n", out.items);
+    try testing.expectError(error.ConnectionDraining, putPub(&q, io, .publish, "p", "1"));
+    try testing.expectError(error.ConnectionDraining, putPub(&q, io, .request, "r", "1"));
+    // An UNSUB still goes, and a closed queue says so.
+    try q.putNow(io, .service, encoder.unsubLen(7, null), writeUnsub, .{7});
+    q.close(io);
+    try testing.expectError(error.Closed, putPub(&q, io, .publish, "p", "1"));
 }
 
 test "putNow skips the wait for room, yet counts against the limit" {

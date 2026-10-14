@@ -1219,6 +1219,157 @@ test "a subscription drained while reconnecting ends at once, and the next conne
     try testing.expect(std.mem.find(u8, second, "SUB other 2") != null);
 }
 
+/// A message with a reply subject once the client subscribes to `work`;
+/// holds the PONG of the second PING after `UNSUB 1`, the drain's last
+/// barrier, until the test releases it.
+fn sessionHoldLastBarrier(peer: *FakeServer.Peer, record: *Record) anyerror!void {
+    try handshake(peer, golden.info_default);
+    var unsubscribed = false;
+    var pings: u32 = 0;
+    while (try nextFrame(peer, record)) |frame| {
+        if (std.mem.startsWith(u8, frame, "SUB work ")) {
+            try peer.send("MSG work 1 reply.me 1\r\n1\r\n");
+        } else if (std.mem.eql(u8, frame, "UNSUB 1")) {
+            unsubscribed = true;
+        } else if (std.mem.eql(u8, frame, "PING")) {
+            if (unsubscribed) pings += 1;
+            if (pings == 2) {
+                try record.note(peer.io, "held");
+                try record.release.wait(peer.io);
+            }
+            try peer.send(golden.pong);
+        }
+    }
+}
+
+test "drain, second phase: publishes and responds fail with ConnectionDraining until the client closes" {
+    const io = testing.io;
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var record: Record = .{};
+    defer record.deinit();
+    const sessions = [_]Session{sessionHoldLastBarrier};
+    var server = try io.concurrent(serveSessions, .{ io, &listener, &sessions, &record });
+    defer {
+        record.release.set(io);
+        server.cancel(io) catch {};
+    }
+    var url: [64]u8 = undefined;
+    var client: Client = try .init(testing.allocator, io, .{ .servers = &.{try FakeServer.url(&listener, &url)} });
+    defer client.deinit();
+    try client.connect();
+    const work = try client.subscribe("work", .{});
+    defer work.deinit();
+    var request = (try work.next(within_five_seconds)) orelse return error.TestNoMessage;
+    defer request.deinit();
+    var drainer = try io.concurrent(drainClientLong, .{&client});
+    defer drainer.cancel(io) catch {};
+    try awaitState(&client, .draining);
+    // First phase: the handler answers what it took.
+    try client.respond(&request, "early");
+    try testing.expect(try work.next(within_five_seconds) == null);
+    // Second phase: the last PING is out, and nothing more goes in.
+    try awaitSeen(&record, "held");
+    try testing.expectError(error.ConnectionDraining, client.publish("late", "x"));
+    try testing.expectError(error.ConnectionDraining, client.publishMessage(.{ .subject = "late", .headers = &.{.{ .name = "X", .value = "1" }}, .payload = "x" }));
+    try testing.expectError(error.ConnectionDraining, client.respond(&request, "late"));
+    try testing.expectError(error.ConnectionDraining, client.subscribe("more", .{}));
+    try testing.expectError(error.ConnectionDraining, client.request("service.x", "?", .{}));
+    record.release.set(io);
+    try drainer.await(io);
+    try testing.expectEqual(.drained, client.close_reason.?);
+    try server.await(io);
+    const seen = try record.seen(io);
+    defer testing.allocator.free(seen);
+    try testing.expect(std.mem.find(u8, seen, "PUB reply.me 5\nearly\n") != null);
+    try testing.expect(std.mem.find(u8, seen, "late") == null);
+}
+
+/// What a slow server saw of a drain under load.
+const SlowDrain = struct {
+    /// The test lets the server read.
+    go: std.atomic.Value(bool) = .init(false),
+    pings: std.atomic.Value(u32) = .init(0),
+    /// PUBs read before the second PING after `go`: the drain's last one.
+    before_last: std.atomic.Value(u32) = .init(0),
+    total: std.atomic.Value(u32) = .init(0),
+
+    /// Reads nothing until `go`; at the first PING after it, holds its
+    /// PONG and then stops reading for a while, so the queue is full when
+    /// the drain sends its last PING.
+    fn serve(d: *SlowDrain, io: Io, listener: *net.Server) !void {
+        var peer: FakeServer.Peer = undefined;
+        try peer.accept(io, listener);
+        defer peer.close();
+        try handshake(&peer, golden.info_default);
+        while (!d.go.load(.acquire)) try io.sleep(.fromMilliseconds(5), .awake);
+        var pubs: u32 = 0;
+        while (try peer.nextLine()) |line| {
+            if (std.mem.startsWith(u8, line, "PUB ")) {
+                const size = try std.fmt.parseInt(usize, line[std.mem.findScalarLast(u8, line, ' ').? + 1 ..], 10);
+                try peer.reader.interface.discardAll(size + 2);
+                pubs += 1;
+            } else if (std.mem.eql(u8, line, "PING")) {
+                const n = d.pings.fetchAdd(1, .monotonic) + 1;
+                if (n == 2) d.before_last.store(pubs, .monotonic);
+                if (n == 1) try io.sleep(.fromMilliseconds(300), .awake);
+                try peer.send(golden.pong);
+                if (n == 1) try io.sleep(.fromMilliseconds(300), .awake);
+            }
+        }
+        d.total.store(pubs, .monotonic);
+    }
+};
+
+/// Publishes 32 KiB payloads until one fails; counts those that went in.
+fn publishUntilRefused(client: *Client, payload: []const u8, published: *std.atomic.Value(u32)) void {
+    while (true) {
+        client.publish("load", payload) catch return;
+        _ = published.fetchAdd(1, .monotonic);
+    }
+}
+
+test "drain: a publish that waits for room as publishes stop fails, and every publish that went in is confirmed" {
+    const io = testing.io;
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var slow: SlowDrain = .{};
+    var server = try io.concurrent(SlowDrain.serve, .{ &slow, io, &listener });
+    defer {
+        slow.go.store(true, .release);
+        server.cancel(io) catch {};
+    }
+    var url: [64]u8 = undefined;
+    var client: Client = try .init(testing.allocator, io, .{
+        .servers = &.{try FakeServer.url(&listener, &url)},
+        .limits = .{ .outbound_bytes = 64 * 1024 },
+    });
+    defer client.deinit();
+    try client.connect();
+    const payload = try testing.allocator.alloc(u8, 32 * 1024);
+    defer testing.allocator.free(payload);
+    @memset(payload, 'p');
+    var published: std.atomic.Value(u32) = .init(0);
+    var publisher = try io.concurrent(publishUntilRefused, .{ &client, payload, &published });
+    defer publisher.cancel(io);
+    try awaitRoomWaitersOf(&client, 1);
+    var drainer = try io.concurrent(drainClient, .{ &client, Io.Duration.fromSeconds(10) });
+    defer drainer.cancel(io) catch {};
+    try awaitState(&client, .draining);
+    slow.go.store(true, .release);
+    try drainer.await(io);
+    publisher.await(io);
+    try server.await(io);
+    // Whatever publish() accepted came before the last PING, and its PONG
+    // confirmed it: nothing uncertain, nothing dropped.
+    try testing.expectEqual(published.load(.monotonic), slow.before_last.load(.monotonic));
+    try testing.expectEqual(published.load(.monotonic), slow.total.load(.monotonic));
+    const stats = client.stats();
+    try testing.expectEqual(0, stats.uncertain_outbound_frames);
+    try testing.expectEqual(0, stats.dropped_messages);
+    try testing.expectEqual(.drained, client.close_reason.?);
+}
+
 /// The next event, which must be a `tag` one, within 5 s.
 fn expectEvent(client: *Client, tag: std.meta.Tag(nats.Event)) !nats.Event {
     const event = (try client.nextEvent(within_five_seconds)) orelse return error.TestNoEvent;

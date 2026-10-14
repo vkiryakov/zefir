@@ -373,14 +373,22 @@ pub fn subscribe(client: *Client, subject: []const u8, options: Subscription.Opt
     const sub = try Registry.create(gpa, client, subject, options, pending);
     errdefer Registry.destroy(gpa, sub);
     // The server closes the connection on a longer SUB line: the registry
-    // takes no such subscription, so no reconnect sends it either.
+    // takes no such subscription, so no reconnect sends it either. Once a
+    // drain began, it takes none at all.
     try client.subscriptions.register(io, gpa, sub, limits.max_subscriptions);
-    errdefer client.subscriptions.unregister(io, sub.sid);
+    errdefer {
+        // A reconnect may have sent its SUB meanwhile: the server forgets it.
+        Registry.queueUnsub(&client.outbound, io, sub.sid) catch {};
+        client.subscriptions.unregister(io, sub.sid);
+    }
     const len = subscribeLen(sub.subject, sub.queue_group, sub.sid, options.max_messages);
-    client.outbound.put(io, .service, len, writeSubscribe, .{ sub.subject, sub.queue_group, sub.sid, options.max_messages }) catch |err| switch (err) {
+    client.outbound.putTicket(io, .service, Registry.subscribeTicket(sub), len, writeSubscribe, .{ sub.subject, sub.queue_group, sub.sid, options.max_messages }) catch |err| switch (err) {
         error.Closed => return error.ConnectionClosed,
+        // Refused: a drain that began meanwhile took the subscription, and
+        // its SUB never goes after the drain's UNSUB.
+        error.Disconnected => return if (sub.messages.endedHow(io) == .closed) error.ConnectionClosed else error.ConnectionDraining,
         // Never for a SUB: without a connection the next one subscribes.
-        error.Disconnected, error.BufferFull => {},
+        error.BufferFull => {},
         else => |e| return e,
     };
     return sub;
@@ -457,7 +465,9 @@ pub const DrainError = error{
 /// subscription is read to its end, its reader came back to `next()` after
 /// the last message (or ended the subscription), and every request got its
 /// answer, publishes stop too, what was published is flushed, and the
-/// client closes. So read each subscription with `next()` until it returns
+/// client closes: a publish still waiting for room in the outbound queue
+/// then fails with ConnectionDraining, and every one that returned before
+/// reached the server. So read each subscription with `next()` until it returns
 /// null, or `deinit()` it: a subscription nobody reads holds the drain
 /// until its timeout, as in nats.go. At `options.timeout`, 30 s by default, it closes anyway and
 /// returns Timeout; a lost connection closes it too, with Disconnected.
@@ -509,7 +519,7 @@ fn drainSteps(client: *Client, deadline: ?Io.Clock.Timestamp) error{ Timeout, Co
     const io = client.io;
     // Once the server has every UNSUB, no message comes for them.
     client.subscriptions.drainAll(io, &client.outbound);
-    try client.barrier(deadline);
+    try client.barrier(deadline, .first);
     client.subscriptions.finishDraining(io);
     // The application reads every subscription to its end and comes back
     // for more, so that it is done with the last message, and every request
@@ -524,14 +534,22 @@ fn drainSteps(client: *Client, deadline: ?Io.Clock.Timestamp) error{ Timeout, Co
         defer client.mutex.unlock(io);
         client.drain_phase = .publishes;
     }
-    // What the handlers published goes out.
-    try client.barrier(deadline);
+    // What the handlers published goes out; a publish that waited for room
+    // until after this PING fails with ConnectionDraining.
+    try client.barrier(deadline, .last);
 }
 
-/// A PING and its PONG: the server has everything sent before.
-fn barrier(client: *Client, deadline: ?Io.Clock.Timestamp) error{ Timeout, ConnectionClosed, Canceled, OutOfMemory }!void {
+const Barrier = enum { first, last };
+
+/// A PING and its PONG: the server has everything sent before. After the
+/// last one no publish goes in.
+fn barrier(client: *Client, deadline: ?Io.Clock.Timestamp, which: Barrier) error{ Timeout, ConnectionClosed, Canceled, OutOfMemory }!void {
     const io = client.io;
-    const ping_sent = client.outbound.putPing(io, .flush) catch |err| switch (err) {
+    const sent = switch (which) {
+        .first => client.outbound.putPing(io, .flush),
+        .last => client.outbound.stopPublishes(io),
+    };
+    const ping_sent = sent catch |err| switch (err) {
         error.Closed, error.Disconnected => return error.ConnectionClosed,
         error.OutOfMemory => return error.OutOfMemory,
     };

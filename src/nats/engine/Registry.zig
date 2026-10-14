@@ -25,11 +25,13 @@ subscriptions: std.AutoArrayHashMapUnmanaged(u64, *Subscription) = .empty,
 next_sid: u64 = 1,
 /// The client closed: no new subscriptions.
 closed: bool = false,
+/// The client drains: no new subscriptions either.
+draining: bool = false,
 /// The longest arguments of a SUB line the server takes
 /// (`limits.max_control_line_bytes`).
 max_line: u32 = std.math.maxInt(u32),
 
-pub const RegisterError = error{ TooManySubscriptions, ConnectionClosed, OutOfMemory, InvalidSubject };
+pub const RegisterError = error{ TooManySubscriptions, ConnectionClosed, ConnectionDraining, OutOfMemory, InvalidSubject };
 
 /// Gives `sub` the next SID and routes messages for it to it. At most
 /// `max` subscriptions are registered at once. A subscription whose SUB
@@ -39,6 +41,7 @@ pub fn register(r: *Registry, io: Io, gpa: Allocator, sub: *Subscription, max: u
     r.mutex.lockUncancelable(io);
     defer r.mutex.unlock(io);
     if (r.closed) return error.ConnectionClosed;
+    if (r.draining) return error.ConnectionDraining;
     if (r.subscriptions.count() >= max) return error.TooManySubscriptions;
     if (encoder.subArgsLen(sub.subject, sub.queue_group, r.next_sid) > r.max_line) return error.InvalidSubject;
     try r.subscriptions.ensureUnusedCapacity(gpa, 1);
@@ -168,6 +171,13 @@ pub fn writeRestore(r: *Registry, io: Io, w: *Io.Writer, extra: ?Resubscribe) Io
 /// UNSUBs are queued outside the registry's mutex, a batch at a time, so
 /// the outbound queue's mutex is never taken under it.
 pub fn drainAll(r: *Registry, io: Io, outbound: *Outbound) void {
+    {
+        // From now on no subscription registers: each one registered
+        // before is drained here.
+        r.mutex.lockUncancelable(io);
+        defer r.mutex.unlock(io);
+        r.draining = true;
+    }
     while (true) {
         var batch: [64]u64 = undefined;
         var taken: usize = 0;
@@ -258,6 +268,18 @@ pub fn destroy(gpa: Allocator, sub: *Subscription) void {
     if (sub.queue_group) |queue| gpa.free(queue);
     gpa.free(sub.subject);
     gpa.destroy(sub);
+}
+
+/// The ticket of `sub`'s SUB: it goes in only while the subscription is
+/// open and not draining, so it never follows the UNSUB of a drain that
+/// began meanwhile.
+pub fn subscribeTicket(sub: *Subscription) Outbound.Ticket {
+    return .{ .id = 0, .context = &sub.messages, .admit = admitSubscribe };
+}
+
+fn admitSubscribe(context: *anyopaque, io: Io, _: u64, _: u64) bool {
+    const queue: *MessageQueue = @ptrCast(@alignCast(context));
+    return queue.takesSubscribe(io);
 }
 
 /// Queues `UNSUB sid` at once: no wait for room, so the reader and
@@ -472,4 +494,29 @@ test "a subscription whose SUB line is too long is never registered" {
     defer destroy(testing.allocator, long);
     try testing.expectError(error.InvalidSubject, r.register(io, testing.allocator, long, 10));
     try testing.expectEqual(1, r.count(io));
+}
+
+fn writeSubFrame(w: *Io.Writer, subject: []const u8, sid: u64) Io.Writer.Error!void {
+    return encoder.writeSub(w, subject, null, sid);
+}
+
+test "a drain takes every subscription registered before it, whose SUB then never follows its UNSUB, and refuses new ones" {
+    const io = testing.io;
+    const gpa = testing.allocator;
+    var r: Registry = .{};
+    defer r.deinit(gpa);
+    var outbound: Outbound = .init(gpa, 1 << 20);
+    defer outbound.deinit();
+    // Registered, its SUB not queued yet: the drain comes first.
+    const late = try newSubscription(gpa, "late");
+    try r.register(io, gpa, late, 10);
+    r.drainAll(io, &outbound);
+    try testing.expectError(error.Disconnected, outbound.putTicket(io, .service, subscribeTicket(late), encoder.subLen("late", null, late.sid), writeSubFrame, .{ "late", late.sid }));
+    var frames: [4]Outbound.Frame = undefined;
+    const queued = outbound.unsent(io, &frames);
+    try testing.expectEqual(1, queued.len);
+    try testing.expectEqual(encoder.unsubLen(late.sid, null), queued[0].len);
+    const after = try newSubscription(gpa, "after");
+    defer destroy(gpa, after);
+    try testing.expectError(error.ConnectionDraining, r.register(io, gpa, after, 10));
 }

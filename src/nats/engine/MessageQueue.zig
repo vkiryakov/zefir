@@ -163,6 +163,13 @@ pub fn awaitNoDrains(q: *MessageQueue, io: Io) void {
     while (q.drainers.load(.acquire) > 0) io.sleep(.fromMilliseconds(1), .awake) catch {};
 }
 
+/// Its SUB may go out: the queue is open and not draining.
+pub fn takesSubscribe(q: *MessageQueue, io: Io) bool {
+    q.mutex.lockUncancelable(io);
+    defer q.mutex.unlock(io);
+    return q.ended == null and !q.draining;
+}
+
 /// The client drains: true when its UNSUB must go out, once for each queue
 /// that has not ended, a queue that a `drain()` of its subscription began
 /// included, so that the client's PING barrier always follows an UNSUB of
