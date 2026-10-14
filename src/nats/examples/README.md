@@ -154,6 +154,44 @@ All of it runs on the `std.Io` you give the client: with zio, the tasks are
 coroutines on zio's executors; with `std.Io.Threaded`, each task is a
 thread.
 
+### Connection options
+
+`nats.Options` describes the connection. Only `servers` has no default. A
+service usually names its connection too, so that the server's monitoring
+shows who is who:
+
+```zig
+var client: nats.Client = try .init(gpa, io, .{
+    .servers = &.{ "nats://10.0.0.1:4222", "nats://10.0.0.2:4222" },
+    .name = "orders-service",
+    .connect_timeout = .fromSeconds(2),
+    .no_echo = true,
+});
+defer client.deinit();
+```
+
+| Option                      | Default        | What it does                                                                                      |
+| --------------------------- | -------------- | ------------------------------------------------------------------------------------------------- |
+| `servers`                   | none, required | `nats://host:port`, `host:port` or `[::1]:4222`, port 4222 if left out; up to 64, for failover    |
+| `name`                      | null           | the connection's name in the server's monitoring and logs                                         |
+| `auth`                      | `.none`        | a user and a password, see [Security](#security)                                                  |
+| `connect_timeout`           | 5 s            | one attempt on one server: DNS, TCP and the handshake                                             |
+| `ping_interval`             | 30 s           | how often the client PINGs the server to check the connection                                     |
+| `max_outstanding_pings`     | 2              | PINGs left unanswered before the connection counts as gone                                        |
+| `no_echo`                   | false          | true: the server does not send the client's own messages back to its subscriptions                |
+| `no_responders`             | true           | a request no one subscribes to fails at once with `NoResponders`; false: it waits for its timeout |
+| `verbose`                   | false          | the server confirms every operation with `+OK`; for debugging only                                |
+| `pedantic`                  | false          | the server checks subjects and the protocol more strictly                                         |
+| `randomize_servers`         | true           | try the servers in random order, so that clients spread over a cluster                            |
+| `ignore_discovered_servers` | false          | use only `servers`, not the servers the cluster announces                                         |
+| `retry_initial_connect`     | false          | `connect()` returns at once and keeps trying in the background                                    |
+| `reconnect`                 | `.{}`          | see [When it reconnects](#when-it-reconnects)                                                     |
+| `limits`                    | `.{}`          | see [Memory and limits](#memory-and-limits)                                                       |
+
+`no_echo` is for a service that publishes to a subject it also subscribes
+to: price updates that every instance sends and every instance listens to,
+say. With it, an instance hears the others, not itself.
+
 ## Installation
 
 Add Zefir to your `build.zig.zon`. nats is on the `dev` branch until the
