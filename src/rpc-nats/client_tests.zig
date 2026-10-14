@@ -463,3 +463,109 @@ test "end to end: rpc.RawClient and rpc.RawServer on one connection, an inbox of
     // A stopped server: no responders.
     try testing.expectError(error.Unavailable, client.call(io, .root, get_user, "{}", .{}));
 }
+
+test "calls that come while another starts the inbox wait for it no longer than their own deadlines" {
+    const io = testing.io;
+    var fake: FakeConn = .init(testing.allocator, .{});
+    defer fake.deinit(io);
+    var bus: Transport = try .init(testing.allocator, fake.conn(), .{});
+    defer bus.deinit(io);
+    var service: Service = try .init(&fake, "users.v1.getUser");
+    defer service.deinit();
+
+    fake.hangFlush(io, true);
+    var starter: Caller = .init(&bus, .{ .timeout = .fromMilliseconds(600) });
+    defer starter.deinit();
+    try starter.begin();
+    // The starter is in the flush of the inbox now.
+    try io.sleep(.fromMilliseconds(50), .awake);
+    var quick: Caller = .init(&bus, .{ .timeout = .fromMilliseconds(100) });
+    defer quick.deinit();
+    quick.run();
+    try testing.expectError(error.Timeout, quick.result);
+    try testing.expect(quick.began.durationTo(quick.ended).nanoseconds < 400 * std.time.ns_per_ms);
+    starter.join();
+    try testing.expectError(error.Timeout, starter.result);
+    try testing.expectEqual(@as(usize, 1), fake.subscriptionCount(io));
+
+    fake.hangFlush(io, false);
+    var caller: Caller = .init(&bus, .{});
+    defer caller.deinit();
+    try caller.begin();
+    const msg = try service.request();
+    defer msg.release();
+    try service.reply(msg, &.{}, "ok");
+    caller.join();
+    try testing.expectEqualStrings("ok", (try caller.result).body);
+}
+
+test "an inbox that broke: the waiting call gets ConnectionLost, the next call starts it again" {
+    const io = testing.io;
+    const log_level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = log_level;
+    var fake: FakeConn = .init(testing.allocator, .{});
+    defer fake.deinit(io);
+    var bus: Transport = try .init(testing.allocator, fake.conn(), .{});
+    defer bus.deinit(io);
+    var service: Service = try .init(&fake, "users.v1.getUser");
+    defer service.deinit();
+
+    var waiting: Caller = .init(&bus, .{});
+    defer waiting.deinit();
+    try waiting.begin();
+    const msg = try service.request();
+    defer msg.release();
+    // `_INBOX.<token>.<id>` → `_INBOX.<token>.*`.
+    const reply_to = msg.reply_to.?;
+    var pattern: [64]u8 = undefined;
+    const inbox = try std.fmt.bufPrint(&pattern, "{s}.*", .{reply_to[0..std.mem.findScalarLast(u8, reply_to, '.').?]});
+    try testing.expect(fake.failNext(io, inbox, error.PermissionDenied));
+    waiting.join();
+    try testing.expectError(error.ConnectionLost, waiting.result);
+
+    var again: Caller = .init(&bus, .{});
+    defer again.deinit();
+    try again.begin();
+    const second = try service.request();
+    defer second.release();
+    // The inbox keeps its name.
+    try testing.expect(std.mem.startsWith(u8, second.reply_to.?, inbox[0 .. inbox.len - 1]));
+    try service.reply(second, &.{}, "again");
+    again.join();
+    try testing.expectEqualStrings("again", (try again.result).body);
+    try testing.expectEqual(@as(usize, 2), fake.subscriptionCount(io));
+}
+
+test "a request lost when the link drops ends at its deadline with Timeout" {
+    const io = testing.io;
+    var fake: FakeConn = .init(testing.allocator, .{});
+    defer fake.deinit(io);
+    var bus: Transport = try .init(testing.allocator, fake.conn(), .{});
+    defer bus.deinit(io);
+    var service: Service = try .init(&fake, "users.v1.getUser");
+    defer service.deinit();
+    // The inbox runs before the request goes out.
+    {
+        var first: Caller = .init(&bus, .{});
+        defer first.deinit();
+        try first.begin();
+        const msg = try service.request();
+        defer msg.release();
+        try service.reply(msg, &.{}, "");
+        first.join();
+        _ = try first.result;
+    }
+    fake.setDelay(io, .fromMilliseconds(200));
+    var caller: Caller = .init(&bus, .{ .timeout = .fromMilliseconds(400) });
+    defer caller.deinit();
+    try caller.begin();
+    try io.sleep(.fromMilliseconds(50), .awake);
+    // The request is on its way: the drop loses it.
+    fake.disconnect(io);
+    fake.reconnect(io);
+    fake.setDelay(io, .zero);
+    caller.join();
+    try testing.expectError(error.Timeout, caller.result);
+    try testing.expect(caller.began.durationTo(caller.ended).nanoseconds >= 399 * std.time.ns_per_ms);
+}
