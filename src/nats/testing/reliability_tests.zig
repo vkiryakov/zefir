@@ -2511,6 +2511,32 @@ test "a lower max_payload in an INFO applies even when there is no memory to kee
     try testing.expectError(error.PayloadTooLarge, client.publish("big", &thousand));
 }
 
+test "a request whose deadline passed before its frame goes in sends nothing" {
+    const io = testing.io;
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var record: Record = .{};
+    defer record.deinit();
+    const sessions = [_]Session{sessionRecordAny};
+    var server = try io.concurrent(serveSessions, .{ io, &listener, &sessions, &record });
+    defer server.cancel(io) catch {};
+    var url: [64]u8 = undefined;
+    var client: Client = try .init(testing.allocator, io, .{ .servers = &.{try FakeServer.url(&listener, &url)} });
+    defer client.deinit();
+    try client.connect();
+    // The first request subscribes the inbox; nobody answers.
+    try testing.expectError(error.Timeout, client.request("warmup", "?", .{ .timeout = .{ .duration = .{ .raw = .fromMilliseconds(20), .clock = .awake } } }));
+    try testing.expectError(error.Timeout, client.request("late.x", "?", .{ .timeout = .{ .duration = .{ .raw = .zero, .clock = .awake } } }));
+    try testing.expectError(error.Timeout, client.requestMany("late.many", "?", .{ .timeout = .{ .duration = .{ .raw = .zero, .clock = .awake } } }));
+    try client.flush(quick);
+    client.close();
+    try server.await(io);
+    const seen = try record.seen(io);
+    defer testing.allocator.free(seen);
+    try testing.expect(std.mem.find(u8, seen, "PUB warmup") != null);
+    try testing.expect(std.mem.find(u8, seen, "PUB late") == null);
+}
+
 test "a requestMany past its deadline that nobody reads does not hold up a drain, nor count as pending" {
     const io = testing.io;
     var listener = try FakeServer.listen(io);

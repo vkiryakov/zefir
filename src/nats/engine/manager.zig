@@ -522,6 +522,9 @@ fn readLoop(client: *Client) void {
     // The message being read; freed if the reader stops half way.
     var current: ?Incoming = null;
     defer if (current) |*c| c.abandon();
+    // Messages are being dropped (too large, no memory) since the last one
+    // kept: one warning per run of drops, the others at debug.
+    var losing = false;
     while (true) {
         const frame = client.connection.next() catch |err| {
             if (readExit(err)) |exit| lose(client, exit);
@@ -581,7 +584,7 @@ fn readLoop(client: *Client) void {
             },
             .body => |bytes| if (current) |*c| c.append(bytes),
             .msg_end => if (current) |*c| {
-                c.finish(client);
+                c.finish(client, &losing);
                 current = null;
             },
         }
@@ -666,13 +669,14 @@ const Incoming = struct {
 
     /// The message is complete: to its subscription, which counts it even
     /// when it could not be kept.
-    fn finish(in: *Incoming, client: *Client) void {
+    fn finish(in: *Incoming, client: *Client, losing: *bool) void {
         if (in.skipped == .unrouted) return;
-        if (in.request) |id| return in.finishReply(client, id);
+        if (in.request) |id| return in.finishReply(client, id, losing);
         const message: ?Message = if (in.assembly) |*assembly| assembly.finish() else null;
         const pushed = client.subscriptions.deliver(client.io, in.sid, message) orelse return;
         Counters.add(&client.counters.dropped_in, pushed.dropped);
-        in.noteDropped(client, in.sid);
+        in.noteDropped(client, in.sid, losing);
+        if (in.skipped == .no and pushed.dropped == 0) losing.* = false;
         if (pushed.no_memory) {
             log.debug("no memory to queue a message for subscription {d}: dropped", .{in.sid});
             client.events.push(client.io, .{ .message_dropped = .{ .reason = .no_memory, .count = 1, .sid = in.sid } });
@@ -691,23 +695,39 @@ const Incoming = struct {
         }
     }
 
-    /// A message read past: its event.
-    fn noteDropped(in: *const Incoming, client: *Client, sid: u64) void {
+    /// A message read past: its event, and a warning for the first of a
+    /// run of drops. `sid` is null for a reply to a request.
+    fn noteDropped(in: *const Incoming, client: *Client, sid: ?u64, losing: *bool) void {
         const reason: events.Event.MessageDropped.Reason = switch (in.skipped) {
             .no, .unrouted, .late => return,
             .too_large => .too_large,
             .no_memory => .no_memory,
         };
-        log.debug("a message of {d} bytes for subscription {d} dropped: {t}", .{ in.total_len, sid, reason });
+        if (losing.*) {
+            if (sid) |s| {
+                log.debug("a message of {d} bytes for subscription {d} dropped: {t}", .{ in.total_len, s, reason });
+            } else {
+                log.debug("a reply of {d} bytes dropped: {t}", .{ in.total_len, reason });
+            }
+        } else {
+            if (sid) |s| {
+                log.warn("a message of {d} bytes for subscription {d} dropped: {t}; more drops before a message is kept go to debug", .{ in.total_len, s, reason });
+            } else {
+                log.warn("a reply of {d} bytes dropped: {t}; more drops before a message is kept go to debug", .{ in.total_len, reason });
+            }
+        }
+        losing.* = true;
         client.events.push(client.io, .{ .message_dropped = .{ .reason = reason, .count = 1, .sid = sid } });
     }
 
     /// The reply to request `id` is complete: to the request, or late.
-    fn finishReply(in: *Incoming, client: *Client, id: u64) void {
+    fn finishReply(in: *Incoming, client: *Client, id: u64, losing: *bool) void {
         if (in.skipped == .late) return client.inbox.noteLate(client.io);
         const message: ?Message = if (in.assembly) |*assembly| assembly.finish() else null;
-        if (client.inbox.deliver(client.io, id, message) == .dropped) Counters.add(&client.counters.dropped_in, 1);
-        in.noteDropped(client, in.sid);
+        const delivery = client.inbox.deliver(client.io, id, message);
+        if (delivery == .dropped) Counters.add(&client.counters.dropped_in, 1);
+        in.noteDropped(client, null, losing);
+        if (in.skipped == .no and delivery == .taken) losing.* = false;
     }
 
     fn abandon(in: *Incoming) void {

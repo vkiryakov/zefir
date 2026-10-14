@@ -673,8 +673,10 @@ pub const RequestError = error{
 /// Timeout, which also bounds the wait for room in the outbound queue.
 /// A reply that comes after that is dropped and counted as late. A reply
 /// over `limits.max_inbound_frame_bytes` or `limits.max_header_bytes`, or
-/// one there is no memory for, is dropped with a warning: the request then
-/// ends with Timeout, unless another responder's reply comes in time. If
+/// one there is no memory for, is dropped and counted, with a
+/// `message_dropped` event and a warning (one per run of drops): the
+/// request then ends with Timeout, unless another responder's reply comes
+/// in time. If
 /// the connection is lost meanwhile, the request fails with Disconnected
 /// at once: nothing is sent again. A request made while the client
 /// reconnects waits in the reconnect buffer and goes out with the next

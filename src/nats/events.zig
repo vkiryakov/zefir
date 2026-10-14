@@ -89,7 +89,8 @@ pub const Event = union(enum) {
         reason: Reason,
         /// How many messages.
         count: u64,
-        /// The subscription that lost them; null for publishes.
+        /// The subscription that lost them; null for publishes and for
+        /// replies to requests.
         sid: ?u64 = null,
 
         pub const Reason = enum {

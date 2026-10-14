@@ -1125,6 +1125,14 @@ test "a reply over max_inbound_frame_bytes is dropped, and the request ends with
     // Dropped, not late: it came while the request waited.
     try testing.expectEqual(0, s.client.inbox.lateResponses(io));
     try expectReply(&s.client, "echo.small", "ok", "ok");
+    // Its event names no subscription: the user has none for replies.
+    while (true) {
+        const event = (try s.client.nextEvent(.{ .timeout = .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } } })) orelse return error.TestNoEvent;
+        if (event != .message_dropped) continue;
+        try testing.expectEqual(.too_large, event.message_dropped.reason);
+        try testing.expect(event.message_dropped.sid == null);
+        break;
+    }
     try s.finish();
 }
 

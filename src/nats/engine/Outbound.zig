@@ -259,7 +259,8 @@ pub fn putTicket(q: *Outbound, io: Io, kind: Kind, ticket: Ticket, len: usize, e
 }
 
 /// Like `put`, but the wait for room ends at `deadline` with Timeout, and
-/// the frame is not queued; null waits as long as it takes.
+/// the frame is not queued, nor when `deadline` has passed already; null
+/// waits as long as it takes.
 pub fn putUntil(q: *Outbound, io: Io, deadline: ?Io.Clock.Timestamp, kind: Kind, len: usize, encode: anytype, args: anytype) PutUntilError!void {
     return q.putTicketed(io, deadline, kind, null, len, encode, args);
 }
@@ -278,6 +279,8 @@ fn putTicketed(q: *Outbound, io: Io, deadline: ?Io.Clock.Timestamp, kind: Kind, 
     defer q.mutex.unlock(io);
     if (kind == .ping) return q.admit(io, kind, null, len, encode, args);
     if (q.stopped(kind)) return error.ConnectionDraining;
+    // A request that ran out of time while it got here sends nothing.
+    if (deadline) |d| if (time.expired(io, d)) return error.Timeout;
     const generation = q.generation;
     try q.awaitRoom(io, deadline);
     // In or not, the next put in line may go if room is left.
@@ -1555,8 +1558,10 @@ test "a put with a deadline goes in when room comes in time, and one that timed 
     const io = testing.io;
     var q: Outbound = .init(testing.allocator, 16);
     defer q.deinit();
-    // Room at once: the deadline does not matter.
-    try putNamedUntil(&q, io, "a", time.after(io, .zero));
+    // Past its deadline it goes nowhere, room or not; with room it goes in
+    // at once.
+    try testing.expectError(error.Timeout, putNamedUntil(&q, io, "gone", time.after(io, .zero)));
+    try putNamedUntil(&q, io, "a", time.after(io, .fromSeconds(5)));
     // Its deadline leaves the next put ample time to get in line behind it,
     // even where sleeps are counted in ticks of ~15.6 ms, as on Windows.
     const soon_deadline = time.after(io, .fromSeconds(1));
