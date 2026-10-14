@@ -467,9 +467,12 @@ pub const DrainError = error{
 /// answer, publishes stop too, what was published is flushed, and the
 /// client closes: a publish still waiting for room in the outbound queue
 /// then fails with ConnectionDraining, and every one that returned before
-/// reached the server. So read each subscription with `next()` until it returns
-/// null, or `deinit()` it: a subscription nobody reads holds the drain
-/// until its timeout, as in nats.go. At `options.timeout`, 30 s by default, it closes anyway and
+/// reached the server. So read each subscription with `next()` until it
+/// returns null, or `deinit()` it: a subscription nobody reads holds the
+/// drain until its timeout, as in nats.go. A stream of `requestMany` that
+/// took all it takes (its `max_responses`, or its deadline passed) does
+/// not hold it: what it received stays readable after the drain, then
+/// null. At `options.timeout`, 30 s by default, it closes anyway and
 /// returns Timeout; a lost connection closes it too, with Disconnected.
 pub fn drain(client: *Client, options: DrainOptions) DrainError!void {
     client.checkHome();
@@ -942,8 +945,9 @@ fn closeWith(client: *Client, reason: CloseReason) void {
     if (client.attempt) |attempt| attempt.stop(io);
     client.changed.broadcast(io);
     client.mutex.unlock(io);
-    // Before the outbound queue wakes them, requests learn why.
-    client.inbox.end(io, .closed);
+    // Before the outbound queue wakes them, requests learn why. After a
+    // drain, the streams of requestMany keep what they received.
+    if (reason == .drained) client.inbox.endDrained(io) else client.inbox.end(io, .closed);
     client.outbound.close(io);
     // The manager closes its connection and returns.
     client.tasks.cancel(io);

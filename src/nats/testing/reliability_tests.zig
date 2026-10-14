@@ -1370,6 +1370,67 @@ test "drain: a publish that waits for room as publishes stop fails, and every pu
     try testing.expectEqual(.drained, client.close_reason.?);
 }
 
+/// Answers a request to `many.x` with three responses; serves PINGs.
+fn sessionThreeResponses(peer: *FakeServer.Peer, record: *Record) anyerror!void {
+    try handshake(peer, golden.info_default);
+    var inbox_sid: [20]u8 = undefined;
+    var inbox_sid_len: usize = 0;
+    while (try peer.nextLine()) |line| {
+        try record.note(peer.io, line);
+        if (std.mem.eql(u8, line, "PING")) {
+            try peer.send(golden.pong);
+        } else if (std.mem.startsWith(u8, line, "SUB _INBOX.")) {
+            const sid = line[std.mem.findScalarLast(u8, line, ' ').? + 1 ..];
+            @memcpy(inbox_sid[0..sid.len], sid);
+            inbox_sid_len = sid.len;
+        } else if (std.mem.startsWith(u8, line, "PUB many.x ")) {
+            var words = std.mem.splitScalar(u8, line, ' ');
+            _ = words.next();
+            _ = words.next();
+            const reply = words.next().?;
+            try peer.reader.interface.discardAll(1 + 2);
+            for ([_][]const u8{ "1", "2", "3" }) |n| {
+                var frame: [128]u8 = undefined;
+                try peer.send(try std.fmt.bufPrint(&frame, "MSG {s} {s} 1\r\n{s}\r\n", .{ reply, inbox_sid[0..inbox_sid_len], n }));
+            }
+        }
+    }
+}
+
+test "a drain keeps what the streams of requestMany received for their owners to read" {
+    const io = testing.io;
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var record: Record = .{};
+    defer record.deinit();
+    const sessions = [_]Session{sessionThreeResponses};
+    var server = try io.concurrent(serveSessions, .{ io, &listener, &sessions, &record });
+    defer server.cancel(io) catch {};
+    var url: [64]u8 = undefined;
+    var client: Client = try .init(testing.allocator, io, .{ .servers = &.{try FakeServer.url(&listener, &url)} });
+    defer client.deinit();
+    try client.connect();
+    const responses = try client.requestMany("many.x", "?", .{ .max_responses = 3, .timeout = .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } } });
+    defer responses.deinit();
+    var first = (try responses.next(.{})) orelse return error.TestNoResponse;
+    first.deinit();
+    const give_up = time.after(io, .fromSeconds(5));
+    while (responses.messages.stats(io).received < 3) {
+        if (time.expired(io, give_up)) return error.TestNoResponse;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+    // The stream has all it takes: it does not hold the drain.
+    try drainClient(&client, .fromSeconds(5));
+    try testing.expectEqual(.drained, client.close_reason.?);
+    for ([_][]const u8{ "2", "3" }) |payload| {
+        var msg = (try responses.next(.{})) orelse return error.TestResponseLost;
+        defer msg.deinit();
+        try testing.expectEqualStrings(payload, msg.payload);
+    }
+    try testing.expect(try responses.next(.{}) == null);
+    try testing.expectEqual(0, client.stats().dropped_messages);
+}
+
 /// The next event, which must be a `tag` one, within 5 s.
 fn expectEvent(client: *Client, tag: std.meta.Tag(nats.Event)) !nats.Event {
     const event = (try client.nextEvent(within_five_seconds)) orelse return error.TestNoEvent;

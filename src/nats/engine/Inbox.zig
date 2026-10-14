@@ -445,6 +445,31 @@ pub fn end(inbox: *Inbox, io: Io, how: End) void {
     inbox.changed.wake(io);
 }
 
+/// The client drained and closes: no new requests, and every request
+/// waiting fails with ConnectionClosed, but a stream of requestMany keeps
+/// the responses it received for its owner, then ends with null. A drain
+/// waits for every request that still takes replies, so the streams here
+/// took all they take.
+pub fn endDrained(inbox: *Inbox, io: Io) void {
+    inbox.mutex.lockUncancelable(io);
+    defer inbox.mutex.unlock(io);
+    if (inbox.ended == .closed) return;
+    inbox.ended = .closed;
+    for (inbox.pending.values()) |entry| switch (entry) {
+        .single => |waiter| {
+            waiter.failure = .closed;
+            waiter.done.set(io);
+        },
+        .many => {},
+    };
+    var node = inbox.streams.first;
+    while (node) |n| : (node = n.next) {
+        const responses: *Responses = @alignCast(@fieldParentPtr("node", n));
+        _ = responses.messages.end(io, .finished, false);
+    }
+    inbox.changed.wake(io);
+}
+
 /// The connection is lost and the client reconnects; `next` is the
 /// connection to come. Every request whose frame went to the lost one, or
 /// has not been queued yet, fails with Disconnected at once: a stream
