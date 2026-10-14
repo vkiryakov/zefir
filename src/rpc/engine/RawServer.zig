@@ -22,6 +22,7 @@ const core = @import("core");
 const model = @import("../model.zig");
 const transport = @import("../transport.zig");
 const rules = @import("../rules.zig");
+const waiting = @import("../wait.zig");
 const ServerTransport = @import("../ServerTransport.zig");
 const Context = @import("Context.zig").Context;
 
@@ -39,6 +40,44 @@ limits: Limits,
 shutdown_grace: std.Io.Duration,
 /// What `Dispatcher.service` returns.
 service_info: transport.Dispatcher.Service,
+
+/// Guards the lifecycle fields below that are not atomic. Every section
+/// under it is short and takes it with `lockUncancelable`.
+mutex: std.Io.Mutex = .init,
+/// Written under `mutex`; `state` reads it without.
+state_value: std.atomic.Value(State) = .init(.configured),
+/// `requestStop` or `Dispatcher.fail` came.
+stop_requested: bool = false,
+/// The transport did not start: the lifecycle task ends without a stop.
+rollback: bool = false,
+/// The first `Dispatcher.fail`.
+fatal: ?transport.Dispatcher.FatalError = null,
+/// The `std.Io` of `start`, for `Dispatcher.routeStats`, which gets none.
+io: ?std.Io = null,
+/// The task that leads the stop; `start` starts it, `deinit` joins it.
+lifecycle: ?std.Io.Future(void) = null,
+/// Set by `requestStop` and `Dispatcher.fail`: the lifecycle task begins
+/// the stop.
+stop_event: std.Io.Event = .unset,
+/// Set once `start` has the transport's answer.
+start_done: std.Io.Event = .unset,
+/// Set when the server has stopped or the transport broke: `wait` returns.
+wait_event: std.Io.Event = .unset,
+/// Set when the server has stopped or the stop ran out of time: `shutdown`
+/// returns.
+shutdown_event: std.Io.Event = .unset,
+
+/// Calls from admission until their end.
+inflight: std.atomic.Value(u32) = .init(0),
+/// Set when `inflight` drops to zero. Only the lifecycle task waits on it,
+/// and resets it before it looks at `inflight`.
+idle: std.Io.Event = .unset,
+/// The shutdown grace is over: admission refuses calls, and calls that
+/// have not started are refused.
+grace_over: std.atomic.Value(bool) = .init(false),
+/// The supervisors of the calls. Only the lifecycle task awaits it, once
+/// the transport has closed and no call is left.
+supervisors: std.Io.Group = .init,
 
 pub const Options = struct {
     /// The server side of a transport. The server drives it through
@@ -170,11 +209,259 @@ pub fn init(gpa: std.mem.Allocator, options: Options) InitError!RawServer {
     };
 }
 
-/// Frees the server.
+/// The states of a server, in order. Later releases may not add values:
+/// a `switch` over it needs no `else`.
+pub const State = enum(u8) { configured, starting, running, draining, stopped };
+
+/// The transport's errors from its `start`, a task that could not be
+/// started, and a second `start`.
+pub const StartError = ServerTransport.StartError || error{InvalidState};
+/// The transport broke (`Dispatcher.fail`), the wait was canceled, or the
+/// server never started (`InvalidState`).
+pub const WaitError = transport.Dispatcher.FatalError || std.Io.Cancelable || error{InvalidState};
+pub const ShutdownError = error{ShutdownTimeout} || WaitError;
+
+/// How long the stop waits, once the transport has closed, for the calls it
+/// canceled to end.
+const cancel_budget: std.Io.Duration = .fromSeconds(1);
+
+const log = std.log.scoped(.rpc);
+
+/// Starts the transport. Returns once the server takes calls, or with the
+/// transport's error (`AddressInUse`, the broker is unreachable), leaving
+/// nothing running and the server `stopped`. A second `start` is
+/// `error.InvalidState`. From here on the server stays at its address: the
+/// transport holds a pointer to it.
+pub fn start(server: *RawServer, io: std.Io) StartError!void {
+    {
+        server.mutex.lockUncancelable(io);
+        defer server.mutex.unlock(io);
+        if (server.state_value.load(.monotonic) != .configured) return error.InvalidState;
+        server.state_value.store(.starting, .release);
+        server.io = io;
+    }
+    // The stop runs in a task of its own: `requestStop` only wakes it, and
+    // `wait` may be canceled. It starts first, so that a stop requested
+    // while the transport starts is not lost.
+    server.lifecycle = io.concurrent(runLifecycle, .{ server, io }) catch |err| {
+        server.markStopped(io);
+        return err;
+    };
+    server.server_transport.start(io, server.dispatcher()) catch |err| {
+        {
+            server.mutex.lockUncancelable(io);
+            defer server.mutex.unlock(io);
+            server.rollback = true;
+        }
+        server.start_done.set(io);
+        server.stop_event.set(io);
+        server.joinLifecycle(io);
+        server.markStopped(io);
+        return err;
+    };
+    {
+        server.mutex.lockUncancelable(io);
+        defer server.mutex.unlock(io);
+        // A stop requested while the transport started: straight to draining.
+        server.state_value.store(if (server.stop_requested) .draining else .running, .release);
+    }
+    server.start_done.set(io);
+}
+
+/// Waits until the server has stopped. Returns at once with the error when
+/// the transport broke (`Dispatcher.fail`): the server then stops by
+/// itself. `error.InvalidState` before `start`. Canceling the wait does not
+/// stop the server.
+pub fn wait(server: *RawServer, io: std.Io) WaitError!void {
+    if (server.state_value.load(.acquire) == .configured) return error.InvalidState;
+    try server.wait_event.wait(io);
+    server.mutex.lockUncancelable(io);
+    defer server.mutex.unlock(io);
+    if (server.fatal) |err| return err;
+}
+
+/// `start` and `wait`: for a service that runs one server until it stops.
+pub fn run(server: *RawServer, io: std.Io) (StartError || WaitError)!void {
+    try server.start(io);
+    return server.wait(io);
+}
+
+/// Begins a graceful stop. From any task, also from a handler; never
+/// waits; a second call does nothing. The server drains its transport,
+/// lets the calls in flight run for `shutdown_grace`, cancels the rest,
+/// closes the transport and stops.
+pub fn requestStop(server: *RawServer, io: std.Io) void {
+    server.mutex.lockUncancelable(io);
+    defer server.mutex.unlock(io);
+    server.stopLocked(io);
+}
+
+/// `requestStop` and a wait for the stop. `error.ShutdownTimeout` when
+/// handlers did not end within `shutdown_grace` and one second more after
+/// they were canceled: the server stays in `draining`. Treat it as fatal
+/// and end the process; `deinit` would wait for such handlers without a
+/// limit.
+pub fn shutdown(server: *RawServer, io: std.Io) ShutdownError!void {
+    server.requestStop(io);
+    try server.shutdown_event.wait(io);
+    server.mutex.lockUncancelable(io);
+    defer server.mutex.unlock(io);
+    if (server.state_value.load(.monotonic) != .stopped) return error.ShutdownTimeout;
+    if (server.fatal) |err| return err;
+}
+
+/// Running and the transport's own condition holds. Thread-safe; for
+/// health checks.
+pub fn isReady(server: *const RawServer) bool {
+    return server.state() == .running and server.server_transport.isReady();
+}
+
+/// The state now. Thread-safe; for health checks.
+pub fn state(server: *const RawServer) State {
+    return server.state_value.load(.acquire);
+}
+
+/// Frees the server. A server that has not stopped is stopped first, and
+/// `deinit` waits for it without a limit.
 pub fn deinit(server: *RawServer, io: std.Io) void {
-    _ = io;
+    server.requestStop(io);
+    server.joinLifecycle(io);
     server.arena.deinit();
     server.* = undefined;
+}
+
+/// Under `mutex`.
+fn stopLocked(server: *RawServer, io: std.Io) void {
+    switch (server.state_value.load(.monotonic)) {
+        .configured => {
+            server.state_value.store(.stopped, .release);
+            server.wait_event.set(io);
+            server.shutdown_event.set(io);
+        },
+        .starting, .running => |current| {
+            // While starting, `start` moves on to draining itself.
+            if (current == .running) server.state_value.store(.draining, .release);
+            server.stop_requested = true;
+            server.stop_event.set(io);
+        },
+        .draining, .stopped => {},
+    }
+}
+
+fn markStopped(server: *RawServer, io: std.Io) void {
+    {
+        server.mutex.lockUncancelable(io);
+        defer server.mutex.unlock(io);
+        server.state_value.store(.stopped, .release);
+    }
+    server.wait_event.set(io);
+    server.shutdown_event.set(io);
+}
+
+fn joinLifecycle(server: *RawServer, io: std.Io) void {
+    const future = if (server.lifecycle) |*future| future else return;
+    // Waiting for the stop is no cancelation point here: a cancelation
+    // request stays for the caller's next one.
+    const protection = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(protection);
+    future.await(io);
+    server.lifecycle = null;
+}
+
+/// The lifecycle task: waits for a stop and leads it.
+fn runLifecycle(server: *RawServer, io: std.Io) void {
+    // Nothing cancels this task, and its waits are no cancelation points.
+    const protection = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(protection);
+    server.stop_event.waitUncancelable(io);
+    server.start_done.waitUncancelable(io);
+    if (server.rollback) return;
+
+    server.server_transport.drain(io);
+    _ = server.waitIdle(io, .after(now(io), server.shutdown_grace));
+    server.endGrace();
+    server.server_transport.close(io);
+    if (!server.waitIdle(io, .after(now(io), cancel_budget))) {
+        // Handlers that ignore cancelation: `shutdown` returns
+        // `ShutdownTimeout` while the server stays in draining, and the
+        // stop goes on without a limit.
+        server.shutdown_event.set(io);
+        _ = server.waitIdle(io, null);
+    }
+    // No call is left and the transport has closed, so no supervisor
+    // starts any more.
+    server.supervisors.cancel(io);
+    server.markStopped(io);
+}
+
+/// Waits until no call is in flight or `deadline` passes; true when no call
+/// is. Only the lifecycle task calls it.
+fn waitIdle(server: *RawServer, io: std.Io, deadline: ?core.Deadline) bool {
+    while (true) {
+        server.idle.reset();
+        if (server.inflight.load(.acquire) == 0) return true;
+        if (deadline) |d| {
+            waiting.untilSet(&server.idle, io, d) catch |err| switch (err) {
+                error.Timeout => return server.inflight.load(.acquire) == 0,
+                // The lifecycle task waits with cancelation blocked.
+                error.Canceled => unreachable,
+            };
+        } else server.idle.waitUncancelable(io);
+    }
+}
+
+/// The grace is over: admission refuses new calls.
+fn endGrace(server: *RawServer) void {
+    server.grace_over.store(true, .release);
+}
+
+fn dispatcher(server: *RawServer) transport.Dispatcher {
+    return .{ .ptr = server, .vtable = &dispatcher_vtable };
+}
+
+const dispatcher_vtable: transport.Dispatcher.VTable = .{
+    .service = serviceFn,
+    .admit = admitFn,
+    .fail = failFn,
+    .routeStats = routeStatsFn,
+};
+
+fn serviceFn(ptr: *anyopaque) *const transport.Dispatcher.Service {
+    const server: *RawServer = @ptrCast(@alignCast(ptr));
+    return &server.service_info;
+}
+
+fn admitFn(ptr: *anyopaque, io: std.Io, head: *const transport.RequestHead, body_len: usize) transport.Dispatcher.Admission {
+    _ = ptr;
+    _ = io;
+    _ = head;
+    _ = body_len;
+    return .{ .rejected = .{ .code = .unavailable, .app_code = "rpc.unavailable", .message = "Server is stopping" } };
+}
+
+fn failFn(ptr: *anyopaque, io: std.Io, err: transport.Dispatcher.FatalError, diagnostics: ?*const transport.Diagnostics) void {
+    const server: *RawServer = @ptrCast(@alignCast(ptr));
+    {
+        server.mutex.lockUncancelable(io);
+        defer server.mutex.unlock(io);
+        if (server.fatal != null) return;
+        server.fatal = err;
+        server.stopLocked(io);
+    }
+    server.wait_event.set(io);
+    // Diagnostics hold no metadata values, bodies or credentials.
+    const message = if (diagnostics) |d| d.message() else "";
+    log.warn("the server transport broke: {t}{s}{s}", .{ err, if (message.len > 0) ": " else "", message });
+}
+
+fn routeStatsFn(ptr: *anyopaque, route_index: usize) transport.Dispatcher.RouteStats {
+    _ = ptr;
+    _ = route_index;
+    return .{ .requests = 0, .errors = 0, .processing_time = .zero };
+}
+
+fn now(io: std.Io) std.Io.Timestamp {
+    return std.Io.Clock.awake.now(io);
 }
 
 /// The index of the method that serves `route`; null when none does.
@@ -362,4 +649,214 @@ test "init frees what it took when an allocation fails" {
     var memory: MemoryTransport = try .init(testing.allocator, .{});
     defer memory.deinit(io);
     try testing.checkAllAllocationFailures(testing.allocator, initAndDeinit, .{memory.serverTransport()});
+}
+
+/// A server transport that records what the engine calls, for the tests of
+/// the lifecycle.
+const FakeTransport = struct {
+    /// The error of the next `start`.
+    start_error: ?ServerTransport.StartError = null,
+    /// `start` waits until `release_start` is set.
+    hold_start: bool = false,
+    start_entered: std.Io.Event = .unset,
+    release_start: std.Io.Event = .unset,
+    ready: std.atomic.Value(bool) = .init(true),
+    dispatcher_value: ?transport.Dispatcher = null,
+    calls: [8]Call = undefined,
+    count: std.atomic.Value(usize) = .init(0),
+
+    const Call = enum { start, drain, close };
+
+    fn record(t: *FakeTransport, call: Call) void {
+        const i = t.count.fetchAdd(1, .acq_rel);
+        if (i < t.calls.len) t.calls[i] = call;
+    }
+
+    fn recorded(t: *FakeTransport) []const Call {
+        return t.calls[0..@min(t.count.load(.acquire), t.calls.len)];
+    }
+
+    pub fn start(t: *FakeTransport, io: std.Io, d: transport.Dispatcher) ServerTransport.StartError!void {
+        t.record(.start);
+        if (t.hold_start) {
+            t.start_entered.set(io);
+            t.release_start.waitUncancelable(io);
+        }
+        if (t.start_error) |err| return err;
+        t.dispatcher_value = d;
+    }
+
+    pub fn drain(t: *FakeTransport, io: std.Io) void {
+        _ = io;
+        t.record(.drain);
+    }
+
+    pub fn close(t: *FakeTransport, io: std.Io) void {
+        _ = io;
+        t.record(.close);
+    }
+
+    pub fn info(t: *FakeTransport) transport.Info {
+        _ = t;
+        return .{ .name = "fake" };
+    }
+
+    pub fn isReady(t: *FakeTransport) bool {
+        return t.ready.load(.acquire);
+    }
+};
+
+const one_method = [_]Method{methodOf("users", 1, "getUser")};
+
+fn fakeServer(fake: *FakeTransport) !RawServer {
+    return .init(testing.allocator, .{ .transport = .init(fake), .methods = &one_method, .shutdown_grace = .fromMilliseconds(50) });
+}
+
+test "lifecycle: a server that never starts" {
+    const io = testing.io;
+    var fake: FakeTransport = .{};
+    var server = try fakeServer(&fake);
+    defer server.deinit(io);
+    try testing.expectEqual(State.configured, server.state());
+    try testing.expect(!server.isReady());
+    try testing.expectError(error.InvalidState, server.wait(io));
+
+    // requestStop before start: stopped for good.
+    server.requestStop(io);
+    try testing.expectEqual(State.stopped, server.state());
+    try testing.expectError(error.InvalidState, server.start(io));
+    try server.wait(io);
+    try server.shutdown(io);
+    server.requestStop(io);
+    try testing.expectEqualSlices(FakeTransport.Call, &.{}, fake.recorded());
+}
+
+test "lifecycle: start, requestStop and wait drain the transport, then close it" {
+    const io = testing.io;
+    var fake: FakeTransport = .{};
+    var server = try fakeServer(&fake);
+    defer server.deinit(io);
+    try server.start(io);
+    try testing.expectEqual(State.running, server.state());
+    try testing.expect(server.isReady());
+    fake.ready.store(false, .release);
+    try testing.expect(!server.isReady());
+    fake.ready.store(true, .release);
+    try testing.expectError(error.InvalidState, server.start(io));
+    try testing.expectEqualStrings("users", fake.dispatcher_value.?.service().routes[0].service);
+
+    server.requestStop(io);
+    try testing.expect(server.state() == .draining or server.state() == .stopped);
+    try testing.expect(!server.isReady());
+    try server.wait(io);
+    try testing.expectEqual(State.stopped, server.state());
+    try testing.expectEqualSlices(FakeTransport.Call, &.{ .start, .drain, .close }, fake.recorded());
+    try testing.expectError(error.InvalidState, server.start(io));
+    server.requestStop(io);
+    try server.wait(io);
+    try server.shutdown(io);
+}
+
+test "lifecycle: a transport that does not start leaves the server stopped" {
+    const io = testing.io;
+    var fake: FakeTransport = .{ .start_error = error.AddressInUse };
+    var server = try fakeServer(&fake);
+    defer server.deinit(io);
+    try testing.expectError(error.AddressInUse, server.start(io));
+    try testing.expectEqual(State.stopped, server.state());
+    try server.wait(io);
+    try testing.expectError(error.InvalidState, server.start(io));
+    // Neither drain nor close: the transport left nothing running.
+    try testing.expectEqualSlices(FakeTransport.Call, &.{.start}, fake.recorded());
+}
+
+fn startTask(server: *RawServer, io: std.Io) StartError!void {
+    return server.start(io);
+}
+
+test "lifecycle: requestStop while the transport starts: start ends, the server drains at once" {
+    const io = testing.io;
+    var fake: FakeTransport = .{ .hold_start = true };
+    var server = try fakeServer(&fake);
+    defer server.deinit(io);
+    var starter = try io.concurrent(startTask, .{ &server, io });
+    // A failed check below must not leave the start waiting.
+    defer fake.release_start.set(io);
+    fake.start_entered.waitUncancelable(io);
+    try testing.expectEqual(State.starting, server.state());
+    server.requestStop(io);
+    try testing.expectEqual(State.starting, server.state());
+    fake.release_start.set(io);
+    try starter.await(io);
+    try testing.expect(server.state() != .running);
+    try server.wait(io);
+    try testing.expectEqual(State.stopped, server.state());
+    try testing.expectEqualSlices(FakeTransport.Call, &.{ .start, .drain, .close }, fake.recorded());
+}
+
+test "lifecycle: a broken transport wakes wait with its error, and the server stops by itself" {
+    const io = testing.io;
+    // The engine logs the broken transport as a warning, expected here.
+    const log_level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = log_level;
+    var fake: FakeTransport = .{};
+    var server = try fakeServer(&fake);
+    defer server.deinit(io);
+    try server.start(io);
+    var diagnostics: transport.Diagnostics = .{};
+    diagnostics.set(.connect, error.ConnectionRefused, "port 4222 gone", .{});
+    fake.dispatcher_value.?.fail(io, error.Unavailable, &diagnostics);
+    // A second fail does nothing.
+    fake.dispatcher_value.?.fail(io, error.AccessDenied, null);
+    try testing.expectError(error.Unavailable, server.wait(io));
+    try testing.expect(server.state() == .draining or server.state() == .stopped);
+    try testing.expectError(error.Unavailable, server.shutdown(io));
+    try testing.expectEqual(State.stopped, server.state());
+    try testing.expectError(error.Unavailable, server.wait(io));
+    try testing.expectEqualSlices(FakeTransport.Call, &.{ .start, .drain, .close }, fake.recorded());
+}
+
+fn runTask(server: *RawServer, io: std.Io) (StartError || WaitError)!void {
+    return server.run(io);
+}
+
+fn waitTask(server: *RawServer, io: std.Io) WaitError!void {
+    return server.wait(io);
+}
+
+test "lifecycle: run returns after requestStop from another task" {
+    const io = testing.io;
+    var fake: FakeTransport = .{};
+    var server = try fakeServer(&fake);
+    defer server.deinit(io);
+    var runner = try io.concurrent(runTask, .{ &server, io });
+    defer server.requestStop(io);
+    while (server.state() != .running) try io.sleep(.fromMilliseconds(1), .awake);
+    server.requestStop(io);
+    try runner.await(io);
+    try testing.expectEqual(State.stopped, server.state());
+}
+
+test "lifecycle: canceling wait does not stop the server" {
+    const io = testing.io;
+    var fake: FakeTransport = .{};
+    var server = try fakeServer(&fake);
+    defer server.deinit(io);
+    try server.start(io);
+    var waiter = try io.concurrent(waitTask, .{ &server, io });
+    try io.sleep(.fromMilliseconds(10), .awake);
+    try testing.expectError(error.Canceled, waiter.cancel(io));
+    try testing.expectEqual(State.running, server.state());
+    try server.shutdown(io);
+    try testing.expectEqual(State.stopped, server.state());
+}
+
+test "lifecycle: deinit stops a running server" {
+    const io = testing.io;
+    var fake: FakeTransport = .{};
+    var server = try fakeServer(&fake);
+    try server.start(io);
+    server.deinit(io);
+    try testing.expectEqualSlices(FakeTransport.Call, &.{ .start, .drain, .close }, fake.recorded());
 }
