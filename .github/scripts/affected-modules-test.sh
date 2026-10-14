@@ -62,26 +62,32 @@ while IFS='|' read -r change modules <&3; do
     git commit -q -m "$change"
     expect "$(echo $change)" "$(echo $modules)" "$(sh "$script" "$base" HEAD)"
 done 3<<'EOF'
-edit src/core/Context.zig                       | core log confy validator rpc orm zefir
-edit src/log/Logger.zig                         | log confy validator rpc orm zefir
-edit src/confy/root.zig                         | confy zefir
+edit src/core/Context.zig                       | core log confy validator rpc orm nats zefir
+edit src/log/Logger.zig                         | log confy validator rpc orm nats zefir
+edit src/confy/root.zig                         | confy nats zefir
 edit src/validator/strings.zig                  | validator rpc zefir
 edit src/rpc/root.zig                           | rpc zefir
 edit src/orm/root.zig                           | orm zefir
 edit src/rpc/root.zig src/orm/root.zig          | rpc orm zefir
-edit src/confy/examples/README.md               | confy zefir
+edit src/nats/Client.zig                        | nats zefir
+edit tests/nats/e2e/pubsub.zig                  | nats zefir
+edit tests/nats/README.md                       | nats zefir
+edit docker-compose.yml                         | nats zefir
+edit src/core/root.zig src/nats/root.zig        | core log confy validator rpc orm nats zefir
+edit src/confy/examples/README.md               | confy nats zefir
 edit README.md src/validator/root.zig           | validator rpc zefir
 edit README.md                                  |
 edit docs/plan.md docs/notes.txt                |
-edit build.zig                                  | core log confy validator rpc orm zefir
-edit build.zig.zon                              | core log confy validator rpc orm zefir
-edit src/zefir.zig                              | core log confy validator rpc orm zefir
-edit .github/workflows/ci.yml                   | core log confy validator rpc orm zefir
-edit src/nats/root.zig                          | core log confy validator rpc orm zefir
-edit src/helpers.zig                            | core log confy validator rpc orm zefir
-edit src/notes.md                               | core log confy validator rpc orm zefir
-edit LICENSE                                    | core log confy validator rpc orm zefir
-git rm -q src/log/root.zig                      | log confy validator rpc orm zefir
+edit build.zig                                  | core log confy validator rpc orm nats zefir
+edit build.zig.zon                              | core log confy validator rpc orm nats zefir
+edit src/zefir.zig                              | core log confy validator rpc orm nats zefir
+edit .github/workflows/ci.yml                   | core log confy validator rpc orm nats zefir
+edit src/http/root.zig                          | core log confy validator rpc orm nats zefir
+edit src/helpers.zig                            | core log confy validator rpc orm nats zefir
+edit src/notes.md                               | core log confy validator rpc orm nats zefir
+edit tests/other/main.zig                       | core log confy validator rpc orm nats zefir
+edit LICENSE                                    | core log confy validator rpc orm nats zefir
+git rm -q src/log/root.zig                      | log confy validator rpc orm nats zefir
 git mv src/orm/root.zig src/rpc/orm.zig         | rpc orm zefir
 EOF
 
@@ -96,7 +102,7 @@ edit src/validator/root.zig
 git commit -q -am "head"
 expect "a later base" "validator rpc zefir" "$(sh "$script" "$later" HEAD)"
 
-expect "--all" "core log confy validator rpc orm zefir" "$(sh "$script" --all)"
+expect "--all" "core log confy validator rpc orm nats zefir" "$(sh "$script" --all)"
 
 if [ "$failures" -ne 0 ]; then
     echo "$failures failed"

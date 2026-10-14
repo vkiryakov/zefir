@@ -1,4 +1,5 @@
 const std = @import("std");
+const manifest = @import("build.zig.zon");
 const validator_cases = @import("src/validator/testdata/cases.zig");
 
 pub fn build(b: *std.Build) void {
@@ -65,7 +66,18 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // Umbrella module: @import("zefir").core, .log, .confy, .validator, .rpc, .orm
+    // nats sends the package version in CONNECT; build.zig.zon is its only source.
+    const nats_options = b.addOptions();
+    nats_options.addOption([]const u8, "version", manifest.version);
+    const nats = b.addModule("zefir-nats", .{
+        .root_source_file = b.path("src/nats/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+    });
+    nats.addOptions("build_options", nats_options);
+
+    // Umbrella module: @import("zefir").core, .log, .confy, .validator, .rpc, .orm, .nats
     const zefir = b.addModule("zefir", .{
         .root_source_file = b.path("src/zefir.zig"),
         .target = target,
@@ -78,6 +90,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "validator", .module = validator },
             .{ .name = "rpc", .module = rpc },
             .{ .name = "orm", .module = orm },
+            .{ .name = "nats", .module = nats },
         },
     });
 
@@ -92,14 +105,15 @@ pub fn build(b: *std.Build) void {
     const test_validator = addModuleTestStep(b, test_step, "validator");
     const test_rpc = addModuleTestStep(b, test_step, "rpc");
     const test_orm = addModuleTestStep(b, test_step, "orm");
+    const test_nats = addModuleTestStep(b, test_step, "nats");
     const test_zefir = addModuleTestStep(b, test_step, "zefir");
     // Builds the validator's test binaries without running them, so that
     // `-Dtarget` may name another system: CI builds them for x86-linux-musl,
     // where usize has 32 bits.
     const validator_compile_step = b.step("compile-validator-tests", "Build the validator's test binaries for -Dtarget without running them");
     for (
-        [_]*std.Build.Module{ core, log, confy, validator, rpc, orm, zefir },
-        [_]*std.Build.Step{ test_core, test_log, test_confy, test_validator, test_rpc, test_orm, test_zefir },
+        [_]*std.Build.Module{ core, log, confy, validator, rpc, orm, nats, zefir },
+        [_]*std.Build.Step{ test_core, test_log, test_confy, test_validator, test_rpc, test_orm, test_nats, test_zefir },
     ) |module, module_test_step| {
         const tests = b.addTest(.{ .root_module = module });
         module_test_step.dependOn(&addRun(b, tests, tsan).step);
@@ -194,6 +208,34 @@ pub fn build(b: *std.Build) void {
         run.expectExitCode(3);
         test_log.dependOn(&run.step);
     }
+
+    // nats panic program: a client copied after connect() panics in safe
+    // builds. The program must print the panic message and end in its own
+    // panic handler, which exits with code 3 instead of aborting. It gets
+    // its own Debug copy of nats, whatever -Doptimize says.
+    const panic_nats = b.createModule(.{
+        .root_source_file = b.path("src/nats/root.zig"),
+        .target = target,
+        .optimize = .Debug,
+    });
+    panic_nats.addOptions("build_options", nats_options);
+    const moved_client = b.addExecutable(.{
+        .name = "nats-panic-moved-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/nats/testdata/panic/moved_client.zig"),
+            .target = target,
+            .optimize = .Debug,
+            .imports = &.{
+                .{ .name = "nats", .module = panic_nats },
+            },
+        }),
+    });
+    const run_moved_client = b.addRunArtifact(moved_client);
+    run_moved_client.expectStdErrMatch("panic: nats.Client moved after connect(): keep it where connect() ran (see the guide)");
+    // expectStdErrMatch accepts any exit: only the panic handler exits
+    // with 3, so a program that printed the text and returned fails.
+    run_moved_client.expectExitCode(3);
+    test_nats.dependOn(&run_moved_client.step);
 
     // log compile errors: each test of the file must fail to compile with
     // the message next to its name. The filter compiles one test at a time;

@@ -7,15 +7,17 @@
 #
 # A file under src/<module>/ affects that module and every module whose
 # tests import it, directly or through other modules; zefir imports them
-# all. build.zig, build.zig.zon, src/zefir.zig, .github/ and any other path
-# the script does not know affect every module. Documentation outside src/
-# (*.md files and docs/) affects none.
+# all. tests/nats/ and docker-compose.yml, which hold the end-to-end tests
+# of nats and their servers, count as nats. build.zig, build.zig.zon,
+# src/zefir.zig, .github/ and any other path the script does not know
+# affect every module. Documentation outside src/ (*.md files and docs/)
+# affects none.
 set -eu
 
 # The modules and what the tests of each one import. Keep this in sync with
 # build.zig: the `.imports` of each module and of the programs that its
 # test-<module> step builds. CI tests only the modules listed here.
-modules="core log confy validator rpc orm zefir"
+modules="core log confy validator rpc orm nats zefir"
 imports() {
     case $1 in
     core) ;;
@@ -25,8 +27,12 @@ imports() {
     # violations they find.
     validator) echo log ;;
     rpc) echo core validator ;;
+    # nats imports nothing, but the examples of its guide read their
+    # settings with confy, log with log and take deadlines from core, and
+    # its end-to-end tests build and run them. confy brings log.
+    nats) echo core confy ;;
     orm) echo log ;;
-    zefir) echo core log confy validator rpc orm ;;
+    zefir) echo core log confy validator rpc orm nats ;;
     esac
 }
 
@@ -66,6 +72,7 @@ elif [ $# -eq 2 ] && [ -n "$1" ] && [ -n "$2" ]; then
             esac
             ;;
         src/*) all=true ;;
+        tests/nats/* | docker-compose.yml) changed="$changed nats" ;;
         docs/* | *.md) ;;
         *) all=true ;;
         esac
