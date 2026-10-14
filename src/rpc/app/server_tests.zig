@@ -46,6 +46,8 @@ const UserHandler = struct {
     deleted: std.atomic.Value(u64) = .init(0),
     /// What `stats` answers.
     ratio: f64 = 0.5,
+    /// The byte `blob` repeats.
+    fill: u8 = 'a',
 
     pub const rpc_handler = contract.implement(UserApi, .{
         .methods = .{ .stats = .{ .timeout_ms = 1500 } },
@@ -72,9 +74,8 @@ const UserHandler = struct {
     }
 
     pub fn blob(self: *UserHandler, ctx: *Context, req: BlobRequest) ![]const u8 {
-        _ = self;
         const bytes = try ctx.allocator().alloc(u8, req.size);
-        @memset(bytes, 'a');
+        @memset(bytes, self.fill);
         return bytes;
     }
 };
@@ -268,6 +269,10 @@ test "a response that JSON cannot carry or that is too large is refused by its s
     users.ratio = std.math.inf(f64);
     var inf = try f.call(io, usersRoute("stats"), "{}");
     try expectFailure(&inf, method.invalid_response, "");
+    users.fill = 0xff;
+    var not_utf8 = try f.call(io, usersRoute("blob"), "{\"size\":3}");
+    try expectFailure(&not_utf8, method.invalid_response, "");
+    users.fill = 'a';
 
     // A string of 1022 bytes and its quotes fit exactly; one more does not.
     var fits = try f.call(io, usersRoute("blob"), "{\"size\":1022}");
@@ -1164,4 +1169,100 @@ test "init refuses limits that cannot work, and frees what it took when memory r
         break;
     }
     try testing.expect(fail_index > 1);
+}
+
+const NapApi = contract.Contract(.{
+    .name = "naps",
+    .version = 1,
+    .methods = .{
+        .nap = contract.method(Empty, Empty),
+        .late = contract.method(Empty, Empty),
+    },
+});
+
+/// Sleeps past the deadline of `late` with cancelation blocked, then goes
+/// on: by then the deadline has ended the call.
+fn sleepPastDeadline(ctx: *Context, next: *Next) anyerror!void {
+    const io = ctx.io();
+    const protection = io.swapCancelProtection(.blocked);
+    io.sleep(.fromMilliseconds(600), .awake) catch {};
+    _ = io.swapCancelProtection(protection);
+    return next.run();
+}
+
+const Naps = struct {
+    naps: std.atomic.Value(u32) = .init(0),
+    /// `nap` saw the cancelation of its sleep.
+    canceled: std.atomic.Value(bool) = .init(false),
+    late_runs: std.atomic.Value(u32) = .init(0),
+
+    pub const rpc_handler = contract.implement(NapApi, .{ .methods = .{
+        .nap = .{ .timeout_ms = 300 },
+        .late = .{ .timeout_ms = 200, .middleware = .{sleepPastDeadline} },
+    } });
+
+    /// Sleeps for 10 seconds, unless the call is canceled.
+    pub fn nap(self: *Naps, ctx: *Context, req: Empty) !Empty {
+        _ = self.naps.fetchAdd(1, .acq_rel);
+        ctx.io().sleep(.fromSeconds(10), .awake) catch |err| {
+            self.canceled.store(true, .release);
+            return err;
+        };
+        return req;
+    }
+
+    pub fn late(self: *Naps, ctx: *Context, req: Empty) !Empty {
+        _ = ctx;
+        _ = self.late_runs.fetchAdd(1, .acq_rel);
+        return req;
+    }
+};
+
+fn napsRoute(name: []const u8) model.Route {
+    return .{ .service = "naps", .version = 1, .method = name };
+}
+
+test "the deadline cancels a method that waits, and the server does not wait out its sleep" {
+    const io = testing.io;
+    var f: Fixture = undefined;
+    try f.open();
+    defer f.close(io);
+    var naps: Naps = .{};
+    const started = std.Io.Clock.awake.now(io);
+    var replied: std.Io.Timestamp = undefined;
+    var stopped: std.Io.Timestamp = undefined;
+    {
+        var server: Server = try .init(testing.allocator, .{ .transport = f.memory.serverTransport(), .handlers = .{&naps} });
+        defer {
+            // deinit waits for the end of the method.
+            server.deinit(io);
+            stopped = std.Io.Clock.awake.now(io);
+        }
+        try server.start(io);
+        var result = try f.call(io, napsRoute("nap"), "{}");
+        replied = std.Io.Clock.awake.now(io);
+        try expectFailure(&result, failures.deadline_exceeded, "");
+    }
+    try testing.expectEqual(@as(u32, 1), naps.naps.load(.acquire));
+    try testing.expect(naps.canceled.load(.acquire));
+    // Far from the 10 seconds of the nap, with room for slow machines.
+    try testing.expect(started.durationTo(replied).toMilliseconds() < 5000);
+    try testing.expect(replied.durationTo(stopped).toMilliseconds() < 5000);
+}
+
+test "a call that ended while its middleware ran does not run the method" {
+    const io = testing.io;
+    var f: Fixture = undefined;
+    try f.open();
+    defer f.close(io);
+    var naps: Naps = .{};
+    {
+        var server: Server = try .init(testing.allocator, .{ .transport = f.memory.serverTransport(), .handlers = .{&naps} });
+        defer server.deinit(io);
+        try server.start(io);
+        var result = try f.call(io, napsRoute("late"), "{}");
+        try expectFailure(&result, failures.deadline_exceeded, "");
+    }
+    // deinit waited for the handler's task: a method that ran has counted.
+    try testing.expectEqual(@as(u32, 0), naps.late_runs.load(.acquire));
 }
