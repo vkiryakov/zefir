@@ -1061,6 +1061,18 @@ const CancelSeen = struct {
     }
 };
 
+/// The `start` of call `index` runs now.
+const Starting = struct {
+    recorder: *RecordingDispatcher,
+    io: std.Io,
+    index: usize,
+
+    fn holds(c: Starting) bool {
+        const seen = c.recorder.call(c.io, c.index) catch return false;
+        return seen.starting;
+    }
+};
+
 /// The `start` of call `index` has returned.
 const StartReturned = struct {
     recorder: *RecordingDispatcher,
@@ -1899,24 +1911,53 @@ fn t18(job: *Job) CheckError!void {
         defer sent.deinit();
         try job.refusal(&sent, no_task, "a call whose start was refused");
     }
-    recorder.setStart(io, .{ .hold = hold });
-    // The link breaks while start runs: the cancel waits until it returns.
     if (job.harness.break_link != null and job.info.reports_connection_loss) {
-        var caller: Caller = .init(job, pair.client, .{ .body = "link breaks" });
-        defer caller.deinit();
-        try caller.begin();
-        try job.waitStarted(&recorder, 3);
-        job.harness.break_link.?(job.harness.ptr, io, pair);
-        caller.join();
-        try job.expectError(&caller.sent, error.ConnectionLost, "a call whose link broke while its start ran");
-        _ = job.eventually(job.ms(2300), StartReturned{ .recorder = &recorder, .io = io, .index = 3 });
-        try job.expect(job.eventually(job.ms(2000), CancelSeen{ .recorder = &recorder, .io = io, .index = 3 }), "the server got no Incoming.cancel of a call whose link broke while its start ran", .{});
-        try job.release(&recorder, 3, .canceled);
+        try brokenDuringStart(job, &recorder, pair);
     } else {
         try job.note("a broken link during start was not checked: it needs harness.breakLink and info().reports_connection_loss", .{});
     }
     recorder.close(io);
     try job.noViolations(&recorder);
+}
+
+/// The link breaks while three calls are in start (calls 3–5 of T18): one
+/// runs on after its start, one is answered and released before its start
+/// returns, and the start of one is refused. The cancel a transport holds
+/// back during start goes only to the first, once its start has returned:
+/// the engine has freed the other two by then.
+fn brokenDuringStart(job: *Job, recorder: *RecordingDispatcher, pair: Pair) CheckError!void {
+    const io = job.io;
+    const hold = job.ms(600);
+    recorder.setStart(io, .{ .hold = hold });
+    var kept: Caller = .init(job, pair.client, .{ .body = "kept" });
+    defer kept.deinit();
+    var released: Caller = .init(job, pair.client, .{ .body = "released" });
+    defer released.deinit();
+    try kept.begin();
+    try released.begin();
+    // Two calls of T18 have started before these.
+    try job.waitStarted(recorder, 4);
+    recorder.setStart(io, .{ .fail_after = .{ .hold = hold, .failure = no_task } });
+    var refused: Caller = .init(job, pair.client, .{ .body = "refused" });
+    defer refused.deinit();
+    try refused.begin();
+    try job.expect(job.eventually(job.ms(5000), Starting{ .recorder = recorder, .io = io, .index = 5 }), "the start of call 5 did not begin", .{});
+    const kept_index: usize = if (std.mem.eql(u8, (try job.view(recorder, 3)).body orelse "", "kept")) 3 else 4;
+    const released_index = 7 - kept_index;
+
+    job.harness.break_link.?(job.harness.ptr, io, pair);
+    // The link is gone: the response may be lost, and the call ends anyway.
+    recorder.respond(io, released_index, &.{ .status = .ok, .body = "released" }) catch {};
+    try job.release(recorder, released_index, .completed);
+    kept.join();
+    released.join();
+    refused.join();
+    try job.expectError(&kept.sent, error.ConnectionLost, "a call whose link broke while its start ran");
+    for ([_]usize{ 3, 4, 5 }) |index| _ = job.eventually(job.ms(2600), StartReturned{ .recorder = recorder, .io = io, .index = index });
+    try job.expect(job.eventually(job.ms(2000), CancelSeen{ .recorder = recorder, .io = io, .index = kept_index }), "the server got no Incoming.cancel of a call whose link broke while its start ran", .{});
+    // A cancel of the other two would come about now: cancel_after_end.
+    job.pause(job.ms(50));
+    try job.release(recorder, kept_index, .canceled);
 }
 
 /// Releases, drains and closes in a task with a cancelation pending, and

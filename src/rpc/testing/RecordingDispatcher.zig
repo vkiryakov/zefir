@@ -128,6 +128,10 @@ pub const StartMode = union(enum) {
     /// a handler in another task may answer before `start` returns.
     /// `waitStarted` sees the call as soon as `start` is entered.
     hold: std.Io.Duration,
+    /// `start` returns `failure` after `hold`, as `fail` does at once: the
+    /// test may break the link meanwhile. The call does not count for
+    /// `waitStarted`; `CallView.starting` shows the hold.
+    fail_after: struct { hold: std.Io.Duration, failure: model.Failure },
 };
 
 /// Where a call is. Later releases may add values, so a `switch` over it
@@ -689,7 +693,7 @@ fn startFn(ptr: *anyopaque, io: std.Io, reply: Reply) ?model.Failure {
     const r = c.recorder;
     const protection = io.swapCancelProtection(.blocked);
     defer _ = io.swapCancelProtection(protection);
-    const hold: std.Io.Duration = hold: {
+    const hold: std.Io.Duration, const refusal: ?model.Failure = hold: {
         r.mutex.lockUncancelable(io);
         defer r.mutex.unlock(io);
         if (r.closed) r.addViolation(c.index, .call_after_close);
@@ -700,30 +704,39 @@ fn startFn(ptr: *anyopaque, io: std.Io, reply: Reply) ?model.Failure {
         if (c.body_len > 0 and !c.body_taken.load(.acquire)) r.addViolation(c.index, .body_not_filled);
         @memcpy(c.snapshot, c.buffer);
         c.has_snapshot = true;
-        const hold: std.Io.Duration = switch (r.start_mode) {
-            .run => .zero,
-            .hold => |hold| hold,
+        const hold: std.Io.Duration, const refusal: ?model.Failure = switch (r.start_mode) {
+            .run => .{ .zero, null },
+            .hold => |hold| .{ hold, null },
             .fail => |failure| {
                 c.state = .start_failed;
                 r.logEvent(c.index, .{ .start = .failed });
                 return failure;
             },
+            // The call stays accepted while start holds it.
+            .fail_after => |after| .{ after.hold, after.failure },
         };
-        c.state = .running;
-        c.reply = reply;
-        r.started += 1;
-        r.changed.broadcast(io);
-        r.logEvent(c.index, .{ .start = .running });
-        if (hold.nanoseconds <= 0) return null;
+        if (refusal == null) {
+            c.state = .running;
+            c.reply = reply;
+            r.started += 1;
+            r.changed.broadcast(io);
+            r.logEvent(c.index, .{ .start = .running });
+            if (hold.nanoseconds <= 0) return null;
+        }
         c.starting = true;
-        break :hold hold;
+        break :hold .{ hold, refusal };
     };
     // Blocked: the hold cannot be canceled, and it is bounded. The test may
-    // answer and release the call meanwhile.
+    // answer and release the call, or break the link, meanwhile.
     io.sleep(hold, .awake) catch {};
     r.mutex.lockUncancelable(io);
     defer r.mutex.unlock(io);
     c.starting = false;
+    if (refusal) |failure| {
+        c.state = .start_failed;
+        r.logEvent(c.index, .{ .start = .failed });
+        return failure;
+    }
     return null;
 }
 
@@ -1055,6 +1068,37 @@ test "start hold: the test answers and releases the call before start returns; a
     try expectViolations(&recorder, &.{.{ .call = 0, .rule = .cancel_before_start }});
 }
 
+test "start fail_after: start refuses after the hold; a cancel during the hold and one after it are caught" {
+    const io = testing.io;
+    var recorder: RecordingDispatcher = try .init(testing.allocator, .{
+        .routes = &.{get_user},
+        .start = .{ .fail_after = .{ .hold = .fromMilliseconds(100), .failure = too_large } },
+    });
+    defer recorder.deinit(io);
+    const head = headOf(get_user);
+    var reply: FakeReply = .{};
+    const incoming = try accepted(recorder.dispatcher().admit(io, &head, 0));
+    var starter = try io.concurrent(startHeld, .{ incoming, io, &reply });
+    defer _ = starter.cancel(io);
+    const deadline: core.Deadline = .after(std.Io.Clock.awake.now(io), wait_limit);
+    while (!(try recorder.call(io, 0)).starting) {
+        if (deadline.isExpired(std.Io.Clock.awake.now(io))) return error.TestTimeout;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+    try testing.expectEqual(State.accepted, (try recorder.call(io, 0)).state);
+    incoming.cancel(io);
+    try testing.expectEqualStrings("Request too large", starter.await(io).?.message);
+    try testing.expectEqual(State.start_failed, (try recorder.call(io, 0)).state);
+    incoming.cancel(io);
+    recorder.close(io);
+    try expectViolations(&recorder, &.{
+        .{ .call = 0, .rule = .cancel_before_start },
+        .{ .call = 0, .rule = .cancel_after_end },
+    });
+    try testing.expectEqual(@as(u32, 0), reply.sends);
+    try testing.expectEqual(@as(?Reply.Disposition, null), reply.released);
+}
+
 fn admitHeld(d: Dispatcher, io: std.Io, admission: *?Dispatcher.Admission) void {
     const head = headOf(get_user);
     admission.* = d.admit(io, &head, 0);
@@ -1071,7 +1115,8 @@ test "admit hold: admit returns after the hold, and waitAdmitted sees the call m
     try recorder.waitAdmitted(io, 1);
     try testing.expectEqual(State.accepted, (try recorder.call(io, 0)).state);
     admitter.await(io);
-    try testing.expect(begun.durationTo(std.Io.Clock.awake.now(io)).nanoseconds >= std.Io.Duration.fromMilliseconds(100).nanoseconds);
+    // A sleep may wake a little early on Windows.
+    try testing.expect(begun.durationTo(std.Io.Clock.awake.now(io)).nanoseconds >= std.Io.Duration.fromMilliseconds(90).nanoseconds);
     (try accepted(admission.?)).abandon(io);
     // A refusal does not hold.
     const unknown = headOf(list_users);

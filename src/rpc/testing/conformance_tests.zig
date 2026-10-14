@@ -77,6 +77,11 @@ const Flaw = enum {
     ignores_drain,
     /// `setUp` takes memory that `tearDown` does not give back.
     leaks,
+    /// When the link breaks while `start` runs, the server side cancels
+    /// the call once `start` returns, even when the call has ended by then:
+    /// released during `start`, or refused by it. The engine has freed such
+    /// a call.
+    cancels_ended_calls,
 };
 
 /// The memory transport with one flaw: the harness, the client side and
@@ -88,10 +93,20 @@ const Flawed = struct {
     /// allocator under the suite's.
     leaked: [4][]u8 = undefined,
     leaks: usize = 0,
+    /// For `cancels_ended_calls`: the engine's dispatcher behind the one
+    /// memory gets, and the calls between them.
+    engine: transport.Dispatcher = undefined,
+    gpa: std.mem.Allocator = undefined,
+    link_broken: std.atomic.Value(bool) = .init(false),
+    mutex: std.Io.Mutex = .init,
+    held: std.ArrayList(*Held) = .empty,
 
     pub fn setUp(f: *Flawed, io: std.Io, gpa: std.mem.Allocator) !conformance.Pair {
         _ = io;
         f.memory = try .init(gpa, .{ .max_body_bytes = 64 * 1024 });
+        f.gpa = gpa;
+        f.link_broken = .init(false);
+        f.held = .empty;
         if (f.flaw == .leaks and f.leaks < f.leaked.len) {
             f.leaked[f.leaks] = try gpa.alloc(u8, 16);
             f.leaks += 1;
@@ -102,6 +117,14 @@ const Flawed = struct {
     pub fn tearDown(f: *Flawed, io: std.Io, pair: conformance.Pair) void {
         _ = pair;
         f.memory.deinit(io);
+        for (f.held.items) |held| f.gpa.destroy(held);
+        f.held.deinit(f.gpa);
+    }
+
+    pub fn breakLink(f: *Flawed, io: std.Io, pair: conformance.Pair) void {
+        _ = pair;
+        f.link_broken.store(true, .release);
+        f.memory.breakLink(io);
     }
 
     pub fn call(f: *Flawed, io: std.Io, request: *const transport.Request, options: ClientTransport.CallOptions) ClientTransport.CallError!model.Response {
@@ -138,7 +161,9 @@ const Flawed = struct {
     }
 
     pub fn start(f: *Flawed, io: std.Io, dispatcher: transport.Dispatcher) ServerTransport.StartError!void {
-        return f.memory.start(io, dispatcher);
+        if (f.flaw != .cancels_ended_calls) return f.memory.start(io, dispatcher);
+        f.engine = dispatcher;
+        return f.memory.start(io, .{ .ptr = f, .vtable = &between });
     }
 
     pub fn drain(f: *Flawed, io: std.Io) void {
@@ -152,6 +177,83 @@ const Flawed = struct {
     pub fn isReady(f: *Flawed) bool {
         return f.memory.isReady();
     }
+
+    /// The dispatcher memory gets with `cancels_ended_calls`: the engine's,
+    /// with each admitted call wrapped.
+    const between: transport.Dispatcher.VTable = .{ .service = service, .admit = admit, .fail = fail, .routeStats = routeStats };
+
+    fn of(ptr: *anyopaque) *Flawed {
+        return @ptrCast(@alignCast(ptr));
+    }
+
+    fn service(ptr: *anyopaque) *const transport.Dispatcher.Service {
+        return of(ptr).engine.service();
+    }
+
+    fn admit(ptr: *anyopaque, io: std.Io, head: *const transport.RequestHead, body_len: usize) transport.Dispatcher.Admission {
+        const f = of(ptr);
+        const incoming = switch (f.engine.admit(io, head, body_len)) {
+            .accepted => |incoming| incoming,
+            .rejected => |failure| return .{ .rejected = failure },
+        };
+        const protection = io.swapCancelProtection(.blocked);
+        defer _ = io.swapCancelProtection(protection);
+        f.mutex.lockUncancelable(io);
+        defer f.mutex.unlock(io);
+        const held = f.gpa.create(Held) catch {
+            incoming.abandon(io);
+            return .{ .rejected = .{ .code = .resource_exhausted, .app_code = "rpc.resource_exhausted", .message = "Out of memory" } };
+        };
+        held.* = .{ .flawed = f, .inner = incoming };
+        f.held.append(f.gpa, held) catch {
+            f.gpa.destroy(held);
+            incoming.abandon(io);
+            return .{ .rejected = .{ .code = .resource_exhausted, .app_code = "rpc.resource_exhausted", .message = "Out of memory" } };
+        };
+        return .{ .accepted = .{ .ptr = held, .vtable = &Held.vtable } };
+    }
+
+    fn fail(ptr: *anyopaque, io: std.Io, err: transport.Dispatcher.FatalError, diagnostics: ?*const transport.Diagnostics) void {
+        of(ptr).engine.fail(io, err, diagnostics);
+    }
+
+    fn routeStats(ptr: *anyopaque, route_index: usize) transport.Dispatcher.RouteStats {
+        return of(ptr).engine.routeStats(route_index);
+    }
+};
+
+/// One call between memory and the engine, for `cancels_ended_calls`.
+const Held = struct {
+    flawed: *Flawed,
+    inner: transport.Incoming,
+
+    const vtable: transport.Incoming.VTable = .{ .body = body, .start = start, .abandon = abandon, .cancel = cancel };
+
+    fn of(ptr: *anyopaque) *Held {
+        return @ptrCast(@alignCast(ptr));
+    }
+
+    fn body(ptr: *anyopaque) []u8 {
+        return of(ptr).inner.body();
+    }
+
+    fn start(ptr: *anyopaque, io: std.Io, reply: transport.Reply) ?model.Failure {
+        const held = of(ptr);
+        const broken_before = held.flawed.link_broken.load(.acquire);
+        const failure = held.inner.start(io, reply);
+        // The flaw: the cancel held back during start goes out whatever
+        // became of the call meanwhile.
+        if (!broken_before and held.flawed.link_broken.load(.acquire)) held.inner.cancel(io);
+        return failure;
+    }
+
+    fn abandon(ptr: *anyopaque, io: std.Io) void {
+        of(ptr).inner.abandon(io);
+    }
+
+    fn cancel(ptr: *anyopaque, io: std.Io) void {
+        of(ptr).inner.cancel(io);
+    }
 };
 
 test "a transport that breaks a rule fails the check of that rule" {
@@ -163,6 +265,7 @@ test "a transport that breaks a rule fails the check of that rule" {
         .{ .reports_cancel_twice, .t7, "the transport re-armed the one it reported" },
         .{ .ignores_drain, .t11, "a call after drain got a success" },
         .{ .leaks, .t1, "16 bytes in 1 allocation(s) were still held after harness.tearDown" },
+        .{ .cancels_ended_calls, .t18, "cancel_after_end" },
     };
     for (cases) |case| {
         const flaw, const check, const message = case;
