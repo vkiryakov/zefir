@@ -831,8 +831,12 @@ test "the deadline gives Timeout and cancels the call on the server; a late resp
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
 
-    const request = requestOf(io, "{}", .fromMilliseconds(50));
-    try testing.expectError(error.Timeout, f.memory.call(io, &request, optionsOf(&arena)));
+    // Enough budget to reach the server on a slow machine.
+    const request = requestOf(io, "{}", .fromMilliseconds(300));
+    var caller = try io.concurrent(callTask, .{ f.memory.clientTransport(), io, &request, optionsOf(&arena) });
+    defer if (caller.cancel(io)) |_| {} else |_| {};
+    try f.recorder.waitStarted(io, 1);
+    try testing.expectError(error.Timeout, caller.await(io));
     try testing.expect(request.ctx.deadline.?.isExpired(now(io)));
     try testing.expectEqual(@as(u32, 1), (try f.recorder.call(io, 0)).cancels);
     // The handler answers late: the response goes nowhere.
@@ -1102,7 +1106,7 @@ test "loseNextResponse: the send succeeds and the client gets Timeout" {
     defer arena.deinit();
 
     f.memory.loseNextResponse();
-    const request = requestOf(io, "{}", .fromMilliseconds(100));
+    const request = requestOf(io, "{}", .fromMilliseconds(300));
     var caller = try io.concurrent(callTask, .{ f.memory.clientTransport(), io, &request, optionsOf(&arena) });
     defer if (caller.cancel(io)) |_| {} else |_| {};
     try f.recorder.waitStarted(io, 1);
@@ -1291,13 +1295,87 @@ test "breakLink while a call is in start: its cancel comes once start has return
     // Also when a check fails: the call waits at the gate uncancelably.
     defer gate.open.set(io);
     try gate.entered.wait(io);
+    // The engine's part, also when a check fails: memory.deinit needs it.
+    defer gate.reply.?.release(io, .canceled);
     memory.breakLink(io);
     try testing.expectEqual(@as(u32, 0), gate.cancels.load(.monotonic));
     gate.open.set(io);
     try testing.expectError(error.ConnectionLost, caller.await(io));
     try testing.expectEqual(@as(u32, 1), gate.cancels.load(.monotonic));
     try testing.expectEqual(@as(u32, 0), gate.cancels_inside_start.load(.monotonic));
+}
+
+test "re-entry: the response and the release come before start returns" {
+    const io = testing.io;
+    var memory: MemoryTransport = try .init(testing.allocator, .{});
+    defer memory.deinit(io);
+    var gate: Gate = .{ .hold = .start };
+    try memory.start(io, gate.dispatcher());
+    defer memory.close(io);
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+
+    const request = requestOf(io, "{}", .fromSeconds(30));
+    var caller = try io.concurrent(callTask, .{ memory.clientTransport(), io, &request, optionsOf(&arena) });
+    defer if (caller.cancel(io)) |_| {} else |_| {};
+    defer gate.open.set(io);
+    try gate.entered.wait(io);
+    // The handler, in another task, answers and ends while start is held.
+    try gate.reply.?.send(io, &.{ .status = .ok, .body = "early" });
+    gate.reply.?.release(io, .completed);
+    gate.open.set(io);
+    try testing.expectEqualStrings("early", (try caller.await(io)).body);
+    try testing.expectEqual(@as(u32, 0), gate.cancels.load(.monotonic));
+}
+
+test "re-entry: a call released before start returns is not canceled when its client gives up" {
+    const io = testing.io;
+    var memory: MemoryTransport = try .init(testing.allocator, .{});
+    defer memory.deinit(io);
+    var gate: Gate = .{ .hold = .start };
+    try memory.start(io, gate.dispatcher());
+    defer memory.close(io);
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+
+    const request = requestOf(io, "{}", .fromMilliseconds(300));
+    var caller = try io.concurrent(callTask, .{ memory.clientTransport(), io, &request, optionsOf(&arena) });
+    defer if (caller.cancel(io)) |_| {} else |_| {};
+    defer gate.open.set(io);
+    try gate.entered.wait(io);
+    // The handler ends without an answer while start is held.
     gate.reply.?.release(io, .canceled);
+    gate.open.set(io);
+    try testing.expectError(error.Timeout, caller.await(io));
+    // Once release has returned, the transport cancels the call no more.
+    try testing.expectEqual(@as(u32, 0), gate.cancels.load(.monotonic));
+}
+
+test "close while a call is in start waits until start returns" {
+    const io = testing.io;
+    var memory: MemoryTransport = try .init(testing.allocator, .{});
+    defer memory.deinit(io);
+    var gate: Gate = .{ .hold = .start };
+    try memory.start(io, gate.dispatcher());
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+
+    const request = requestOf(io, "{}", .fromSeconds(30));
+    var caller = try io.concurrent(callTask, .{ memory.clientTransport(), io, &request, optionsOf(&arena) });
+    defer if (caller.cancel(io)) |_| {} else |_| {};
+    defer gate.open.set(io);
+    try gate.entered.wait(io);
+    defer gate.reply.?.release(io, .canceled);
+    var closer = try io.concurrent(closeAndRead, .{ &memory, io, &gate.start_returned });
+    defer _ = closer.cancel(io);
+    defer gate.open.set(io);
+    try io.sleep(.fromMilliseconds(20), .awake);
+    gate.open.set(io);
+    // When close returned, start had returned.
+    try testing.expect(closer.await(io));
+    try testing.expectError(error.ConnectionLost, caller.await(io));
+    // The engine still answers into the closed transport.
+    try testing.expectError(error.Closed, gate.reply.?.send(io, &.{ .status = .ok }));
 }
 
 test "breakLink while a call is in admit: the call is abandoned and the client gets Unavailable" {
@@ -1487,9 +1565,9 @@ test "a second close waits for the calls the first one waits for" {
     defer if (caller.cancel(io)) |_| {} else |_| {};
     defer gate.open.set(io);
     try gate.entered.wait(io);
-    var first = try io.concurrent(closeAndCheck, .{ &memory, io, &gate });
+    var first = try io.concurrent(closeAndRead, .{ &memory, io, &gate.abandoned });
     defer _ = first.cancel(io);
-    var second = try io.concurrent(closeAndCheck, .{ &memory, io, &gate });
+    var second = try io.concurrent(closeAndRead, .{ &memory, io, &gate.abandoned });
     defer _ = second.cancel(io);
     defer gate.open.set(io);
     try io.sleep(.fromMilliseconds(20), .awake);
@@ -1537,9 +1615,11 @@ test "failServer tells the running server that the transport broke; after close 
     try f.expectClean(io);
 }
 
-fn closeAndCheck(memory: *MemoryTransport, io: std.Io, gate: *const Gate) bool {
+/// Closes `memory`, then reads `flag`: what had happened by the time close
+/// returned.
+fn closeAndRead(memory: *MemoryTransport, io: std.Io, flag: *const std.atomic.Value(bool)) bool {
     memory.close(io);
-    return gate.abandoned.load(.acquire);
+    return flag.load(.acquire);
 }
 
 test "close waits for a call in admit, which is abandoned before close returns" {
@@ -1557,7 +1637,7 @@ test "close waits for a call in admit, which is abandoned before close returns" 
     // Also when a check fails: the call waits at the gate uncancelably.
     defer gate.open.set(io);
     try gate.entered.wait(io);
-    var closer = try io.concurrent(closeAndCheck, .{ &memory, io, &gate });
+    var closer = try io.concurrent(closeAndRead, .{ &memory, io, &gate.abandoned });
     defer _ = closer.cancel(io);
     defer gate.open.set(io);
     try io.sleep(.fromMilliseconds(20), .awake);
