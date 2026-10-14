@@ -1,0 +1,181 @@
+//! `rpc.Server`: the server of an application. It serves the handlers of
+//! one or more contracts on a transport; requests and responses are the
+//! contracts' types, sent as JSON.
+//!
+//! ```zig
+//! var users: UserHandler = .init(&repo);
+//! var server = try rpc.Server.init(gpa, .{
+//!     .transport = bus.serverTransport(),  // rpc_nats.Transport; in tests the memory transport
+//!     .handlers = .{ &users, &orders },     // pointers to handlers, at least one
+//!     // .authenticator = &auth,            // checks the credentials of calls
+//!     // .limits = .{ .max_active_tasks = 1024 },
+//!     // .shutdown_grace = std.Io.Duration.fromSeconds(10),
+//! });
+//! defer server.deinit(io);
+//! try server.run(io); // start and wait; server.requestStop(io) from any task stops it
+//! ```
+//!
+//! The compiler checks every handler where it is passed to `init`: that it
+//! declares `pub const rpc_handler = rpc.implement(Api, ...)`, that it has
+//! a `pub fn` of the contract's signature for each method of the contract,
+//! that no two handlers serve one route, and that a method which requires
+//! an identity has an authenticator. A mistake stops the build with a
+//! message that names the handler and what to write. Zig checks only what
+//! is used, so a service keeps a test that builds its server with the
+//! memory transport: then `zig build test` runs the checks too.
+//!
+//! The path of a call through a method: the engine authenticates it and
+//! runs the middleware; the body is decoded as the method's request and
+//! checked against its `field_rules`; the method runs; its response is
+//! checked against its rules and encoded. A body that does not decode or a
+//! request against its rules ends the call with `invalid_argument` and
+//! `rpc.invalid_request`; a response against the server's own contract
+//! with `internal` and `rpc.invalid_response`. The errors of the method go
+//! on as they are: the contract's `.errors`, then the framework's names
+//! (`error.Unavailable` → `unavailable`, ...), else `internal`.
+//!
+//! The handlers and the authenticator are borrowed: their owner keeps them
+//! alive until `deinit`. Under `rpc.Server` works the engine,
+//! `rpc.RawServer`, with the same lifecycle and the same guarantees.
+
+const std = @import("std");
+const RawServer = @import("../engine/RawServer.zig");
+const Authenticator = @import("../auth.zig").Authenticator;
+const handlers = @import("handlers.zig");
+const method = @import("method.zig");
+
+const Server = @This();
+
+/// The engine that runs the calls. `init` builds its methods from the
+/// handlers.
+engine: RawServer,
+
+/// `InvalidConfiguration`: limits that are zero or contradict each other,
+/// or a negative shutdown grace (see `rpc.RawServer.InitError`); the
+/// handlers are checked when the server is built.
+pub const InitError = RawServer.InitError;
+pub const State = RawServer.State;
+pub const StartError = RawServer.StartError;
+pub const WaitError = RawServer.WaitError;
+pub const ShutdownError = RawServer.ShutdownError;
+
+/// Builds a server from `options`, a struct literal:
+///
+/// - `.transport`: the server side of a transport, `rpc.ServerTransport`;
+/// - `.handlers`: a tuple of pointers to handlers, at least one: `.{ &users, &orders }`;
+/// - `.authenticator` (optional): a pointer to an object with
+///   `pub fn authenticate(self: *@This(), ctx: *const rpc.AuthContext) rpc.AuthError!?rpc.IdentityView`;
+/// - `.limits` (optional): `rpc.Limits`, or a struct literal of the
+///   limits to change, such as `.{ .max_active_tasks = 1024 }`;
+/// - `.shutdown_grace` (optional): how long calls in flight may run after
+///   `requestStop`, 10 seconds by default.
+///
+/// Options are `anytype`, so a value inside them has no type to take a
+/// declaration literal from: write `std.Io.Duration.fromSeconds(10)`, not
+/// `.fromSeconds(10)`, and `rpc.Limits{ .default_timeout = .fromSeconds(5) }`
+/// for limits that are durations.
+///
+/// No I/O and no tasks; memory only for the tables of the engine.
+pub fn init(gpa: std.mem.Allocator, options: anytype) InitError!Server {
+    const O = @TypeOf(options);
+    comptime check(O);
+    const Handlers = @FieldType(O, "handlers");
+    const methods = try gpa.alloc(RawServer.Method, comptime methodCount(Handlers));
+    defer gpa.free(methods);
+    var next: usize = 0;
+    inline for (@typeInfo(Handlers).@"struct".field_names) |field| {
+        const handler = @field(options.handlers, field);
+        const T = @typeInfo(@TypeOf(handler)).pointer.child;
+        const Impl = T.rpc_handler;
+        const C = @TypeOf(Impl.api);
+        inline for (@typeInfo(C).@"struct".field_names) |name| {
+            const M = @FieldType(C, name);
+            const settings = comptime Impl.settingsOf(name);
+            methods[next] = .{
+                .route = M.route,
+                .handler = .{ .ptr = handler, .handle = method.Wrapper(T, M).handle },
+                .auth = settings.auth,
+                .timeout = .fromMilliseconds(settings.timeout_ms),
+                .map_error = &M.contract.mapError,
+            };
+            next += 1;
+        }
+    }
+    var engine_options: RawServer.Options = .{ .transport = options.transport, .methods = methods };
+    if (comptime handlers.hasAuthenticator(O)) engine_options.authenticator = Authenticator.init(options.authenticator);
+    if (@hasField(O, "limits")) engine_options.limits = limitsOf(options.limits);
+    if (@hasField(O, "shutdown_grace")) engine_options.shutdown_grace = options.shutdown_grace;
+    return .{ .engine = try .init(gpa, engine_options) };
+}
+
+/// `given`, `rpc.Limits` or a struct literal of some of its fields, over
+/// the defaults: options are `anytype`, so a literal keeps a type of its
+/// own.
+fn limitsOf(given: anytype) RawServer.Limits {
+    if (@TypeOf(given) == RawServer.Limits) return given;
+    var limits: RawServer.Limits = .{};
+    inline for (@typeInfo(@TypeOf(given)).@"struct".field_names) |name| @field(limits, name) = @field(given, name);
+    return limits;
+}
+
+fn check(comptime O: type) void {
+    if (handlers.optionsProblem(O)) |message| @compileError(message);
+}
+
+/// The methods of all contracts of the handlers of type `Handlers`.
+fn methodCount(comptime Handlers: type) usize {
+    var count: usize = 0;
+    for (@typeInfo(Handlers).@"struct".field_types) |Pointer| {
+        const T = @typeInfo(Pointer).pointer.child;
+        count += @typeInfo(@TypeOf(T.rpc_handler.api)).@"struct".field_names.len;
+    }
+    return count;
+}
+
+/// Starts the transport. Returns once the server takes calls, or with the
+/// transport's error, leaving the server `stopped`. From here on the
+/// server stays at its address.
+pub fn start(server: *Server, io: std.Io) StartError!void {
+    return server.engine.start(io);
+}
+
+/// Waits until the server has stopped; at once with the error when the
+/// transport broke. Canceling the wait does not stop the server.
+pub fn wait(server: *Server, io: std.Io) WaitError!void {
+    return server.engine.wait(io);
+}
+
+/// `start` and `wait`: for a service that runs one server until it stops.
+pub fn run(server: *Server, io: std.Io) (StartError || WaitError)!void {
+    return server.engine.run(io);
+}
+
+/// Begins a graceful stop. From any task, also from a handler; never
+/// waits.
+pub fn requestStop(server: *Server, io: std.Io) void {
+    server.engine.requestStop(io);
+}
+
+/// `requestStop` and a wait for the stop. `error.ShutdownTimeout` when
+/// handlers did not end in time: treat it as fatal and end the process.
+pub fn shutdown(server: *Server, io: std.Io) ShutdownError!void {
+    return server.engine.shutdown(io);
+}
+
+/// Running and the transport's own condition holds. Thread-safe; for
+/// health checks.
+pub fn isReady(server: *const Server) bool {
+    return server.engine.isReady();
+}
+
+/// The state now. Thread-safe; for health checks.
+pub fn state(server: *const Server) State {
+    return server.engine.state();
+}
+
+/// Stops the server if it runs, waits for the stop and frees the tables.
+/// No other task may still be in `wait`, `run` or `shutdown`.
+pub fn deinit(server: *Server, io: std.Io) void {
+    server.engine.deinit(io);
+    server.* = undefined;
+}

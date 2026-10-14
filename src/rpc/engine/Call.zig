@@ -120,6 +120,7 @@ pub fn create(
             .server_transport = server.server_transport,
             .map_error = method.map_error,
             .metadata_limits = .{ .max_entries = limits.max_metadata_entries, .max_bytes = limits.max_metadata_bytes },
+            .limits = &server.limits,
         },
     };
     // The allocators point into the call: set them once it has its address.

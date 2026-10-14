@@ -10,6 +10,7 @@ const Info = @import("../transport.zig").Info;
 const ServerTransport = @import("../ServerTransport.zig");
 const IdentityView = @import("../auth.zig").IdentityView;
 const Credentials = @import("../credentials.zig").Credentials;
+const Limits = @import("RawServer.zig").Limits;
 
 /// The context of one call on the server. The engine creates it for each
 /// call; handlers and middleware get a borrowed pointer and must not keep it
@@ -179,6 +180,9 @@ pub const CallContext = struct {
     map_error: ?*const fn (err: anyerror) ?model.Failure,
     /// The limits of the response's metadata: those of a request.
     metadata_limits: rules.MetadataLimits,
+    /// The server's limits: `rpc.Server` decodes and encodes JSON within
+    /// them.
+    limits: *const Limits,
     /// The reserved values of the request, for the engine. The call wipes
     /// `authorization` before it frees it.
     authorization: ?[]u8 = null,

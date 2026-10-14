@@ -45,6 +45,9 @@ pub const method = contract.method;
 /// The declaration `pub const rpc_handler` of a handler: the contract it
 /// implements, with its timeouts, auth and middleware.
 pub const implement = contract.implement;
+/// The server of an application: the handlers of its contracts on a
+/// transport, with JSON, validation and middleware.
+pub const Server = @import("app/Server.zig");
 
 pub const Route = model.Route;
 pub const Metadata = model.Metadata;
@@ -133,4 +136,8 @@ test {
     _ = @import("app/contract.zig");
     _ = @import("app/json.zig");
     _ = @import("app/json_tests.zig");
+    _ = @import("app/handlers.zig");
+    _ = @import("app/method.zig");
+    _ = @import("app/Server.zig");
+    _ = @import("app/server_tests.zig");
 }
