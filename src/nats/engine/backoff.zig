@@ -1,9 +1,10 @@
-//! How long the client waits before its next attempt to reconnect. The
-//! first attempt after a lost connection is immediate; then the wait
-//! doubles from `min_delay` up to `max_delay`, and with `jitter` each wait
-//! is cut by up to a fifth, so that clients do not reconnect in step. Any
-//! attempt, the ten-thousandth too, waits `max_delay` at most: the
-//! arithmetic saturates instead of overflowing.
+//! How long the client waits before its next attempt to reconnect, after
+//! `failures` failed attempts and short connections in a row (the manager
+//! counts them): none at first, then the wait doubles from `min_delay` up
+//! to `max_delay`, and with `jitter` each wait is cut by up to a fifth, so
+//! that clients do not reconnect in step. Any attempt, the ten-thousandth
+//! too, waits `max_delay` at most: the arithmetic saturates instead of
+//! overflowing.
 
 const std = @import("std");
 const Io = std.Io;

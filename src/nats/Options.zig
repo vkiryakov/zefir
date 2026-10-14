@@ -72,12 +72,16 @@ pub const Auth = union(enum) {
 pub const ReconnectOptions = struct {
     /// Reconnect after the connection is lost; when false, the client closes.
     enabled: bool = true,
-    /// Failed attempts in a row before the client gives up; null: never.
+    /// Attempts in a row that fail to connect before the client gives up;
+    /// any connection made starts the count over. Null: never.
     max_attempts: ?u32 = null,
-    /// The first attempt is immediate; then the delay doubles from
-    /// `min_delay` up to `max_delay`, which is the longest. A connection
-    /// that lasts less than `max_delay` counts as a failed attempt, so a
-    /// server that drops every connection at once is not hammered.
+    /// The first attempt is immediate after a connection that lasted at
+    /// least `max_delay`; then the delay doubles from `min_delay` up to
+    /// `max_delay`, which is the longest. A shorter connection counts as a
+    /// failed attempt for the delays, though not for `max_attempts`, so a
+    /// server that drops every connection at once is not hammered. Leaving
+    /// a server in lame duck mode is immediate once the connection lasted
+    /// `min_delay`.
     min_delay: Duration = .fromMilliseconds(500),
     max_delay: Duration = .fromSeconds(10),
     /// Every delay is cut by a random part of up to a fifth, so that

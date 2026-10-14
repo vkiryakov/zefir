@@ -17,6 +17,7 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const Client = @import("../Client.zig");
 const ServerAddress = @import("../ServerAddress.zig");
+const Options = @import("../Options.zig");
 const ServerInfo = @import("../ServerInfo.zig");
 const Message = @import("../Message.zig");
 const Parser = @import("../protocol/Parser.zig");
@@ -74,9 +75,9 @@ pub fn run(client: *Client) void {
 
 /// How fast the client reconnects. A connection that lasted at least
 /// `reconnect.max_delay` was a good one: the next reconnect starts at once.
-/// One that did not counts as a failed attempt, so a server that drops
-/// every connection right after the handshake is tried again only after
-/// growing waits, never in a tight loop.
+/// One that did not counts as a failed attempt for the waits, so a server
+/// that drops every connection right after the handshake is tried again
+/// only after growing waits, never in a tight loop.
 const Pacing = struct {
     /// Failed attempts and short connections in a row.
     level: u32 = 0,
@@ -84,11 +85,14 @@ const Pacing = struct {
     up_since: ?Io.Timestamp = null,
 
     /// The connection is lost: was it a good one? Leaving a server in lame
-    /// duck mode is no failure: the move to the next one is immediate.
-    fn lost(p: *Pacing, io: Io, stable: Io.Duration, lame_duck: bool) void {
+    /// duck mode is no failure, and the move is immediate, once the
+    /// connection lasted `min_delay`: servers that announce lame duck mode
+    /// as soon as a client connects are paced like any that drop it.
+    fn lost(p: *Pacing, io: Io, options: Options.ReconnectOptions, lame_duck: bool) void {
         const since = p.up_since orelse return;
         p.up_since = null;
-        if (lame_duck or since.durationTo(Io.Clock.awake.now(io)).nanoseconds >= stable.nanoseconds) {
+        const stable = if (lame_duck) options.min_delay else options.max_delay;
+        if (since.durationTo(Io.Clock.awake.now(io)).nanoseconds >= stable.nanoseconds) {
             p.level = 0;
         } else {
             p.level +|= 1;
@@ -128,7 +132,7 @@ fn reconnect(client: *Client, pacing: *Pacing, lame_duck: bool) ?Opened {
     const io = client.io;
     const options = &client.options.options;
     if (!beginReconnecting(client)) return null;
-    pacing.lost(io, options.reconnect.max_delay, lame_duck);
+    pacing.lost(io, options.reconnect, lame_duck);
     // Failed attempts in a row, for `max_attempts`; a connection resets it.
     var failures: u32 = 0;
     while (true) {

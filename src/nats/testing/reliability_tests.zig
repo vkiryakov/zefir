@@ -2157,6 +2157,52 @@ test "a server that drops every connection right after the handshake: the client
     }
 }
 
+/// A server that announces lame duck mode in every handshake and names
+/// another one; counts the connections it takes.
+const LameDuckEveryTime = struct {
+    accepted: std.atomic.Value(u32) = .init(0),
+
+    fn serve(d: *LameDuckEveryTime, io: Io, listener: *net.Server, other_port: u16) anyerror!void {
+        while (true) {
+            var peer: FakeServer.Peer = undefined;
+            try peer.accept(io, listener);
+            defer peer.close();
+            _ = d.accepted.fetchAdd(1, .monotonic);
+            var info: [256]u8 = undefined;
+            handshake(&peer, try std.fmt.bufPrint(&info, "INFO {{\"server_id\":\"A\",\"proto\":1,\"headers\":true,\"ldm\":true,\"connect_urls\":[\"127.0.0.1:{d}\"]}} \r\n", .{other_port})) catch continue;
+            while (peer.nextLine() catch null) |_| {}
+        }
+    }
+};
+
+test "servers that announce lame duck mode at every handshake are not hit in a tight loop" {
+    const io = testing.io;
+    var a = try FakeServer.listen(io);
+    defer a.deinit(io);
+    var b = try FakeServer.listen(io);
+    defer b.deinit(io);
+    var first: LameDuckEveryTime = .{};
+    var second: LameDuckEveryTime = .{};
+    var server_a = try io.concurrent(LameDuckEveryTime.serve, .{ &first, io, &a, b.socket.address.getPort() });
+    defer server_a.cancel(io) catch {};
+    var server_b = try io.concurrent(LameDuckEveryTime.serve, .{ &second, io, &b, a.socket.address.getPort() });
+    defer server_b.cancel(io) catch {};
+    var urls: [2][64]u8 = undefined;
+    var client: Client = try .init(testing.allocator, io, .{
+        .servers = &.{ try FakeServer.url(&a, &urls[0]), try FakeServer.url(&b, &urls[1]) },
+        .randomize_servers = false,
+        .reconnect = .{ .min_delay = .fromMilliseconds(50), .max_delay = .fromSeconds(5) },
+    });
+    defer client.deinit();
+    try client.connect();
+    try io.sleep(.fromMilliseconds(1000), .awake);
+    client.close();
+    // Waits of 40-50, 80-100, 160-200, 320-400 ms: five connections in a
+    // second at most, where moving at once makes a thousand.
+    const count = first.accepted.load(.monotonic) + second.accepted.load(.monotonic);
+    try testing.expect(count >= 3 and count <= 6);
+}
+
 test "a requestMany past its deadline that nobody reads does not hold up a drain, nor count as pending" {
     const io = testing.io;
     var listener = try FakeServer.listen(io);
