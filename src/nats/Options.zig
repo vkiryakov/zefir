@@ -26,9 +26,9 @@ name: ?[]const u8 = null,
 /// The credentials sent in CONNECT.
 auth: Auth = .none,
 /// One attempt on one server: DNS, TCP and the INFO, CONNECT, PONG exchange.
-/// On `std.Io.Threaded` under macOS, DNS is a blocking `getaddrinfo` that
-/// cancellation may not stop: then an attempt, and a `close()` during it,
-/// can take as long as the resolver.
+/// On `std.Io.Threaded` under macOS, and Linux with glibc, DNS is a
+/// blocking `getaddrinfo` that cancellation may not stop: then an attempt,
+/// and a `close()` during it, can take as long as the resolver.
 connect_timeout: Duration = .fromSeconds(5),
 /// How often the client PINGs the server to check that the connection is
 /// alive.

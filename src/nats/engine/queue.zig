@@ -1,8 +1,9 @@
 //! A bounded queue whose one consumer waits for an item, a deadline, the
 //! cancellation of its task or `close()`. Producers never wait: a full
-//! queue is theirs to handle. It suits a stream of fixed-size items, such
-//! as events; a subscription's messages go through `MessageQueue`, which
-//! also bounds their bytes.
+//! queue is theirs to handle. Nothing in the client uses it now: events go
+//! through `events.Queue`, which keeps `closed` apart and grows on demand,
+//! and a subscription's messages through `MessageQueue`, which also bounds
+//! their bytes.
 
 const std = @import("std");
 const Io = std.Io;

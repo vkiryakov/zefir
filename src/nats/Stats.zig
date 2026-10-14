@@ -30,12 +30,14 @@ no_responders: u64,
 /// their subscription) and publishes never sent.
 dropped_messages: u64,
 /// Publishes, responses and requests written to a connection that was
-/// lost before the server confirmed them: they may or may not have
-/// arrived, and are never sent again.
+/// lost, or closed by `close()` or by giving up, before the server
+/// confirmed them: they may or may not have arrived, and are never sent
+/// again.
 uncertain_outbound_frames: u64,
 /// Replies that came after their request ended.
 late_responses: u64,
-/// Events dropped because the queue of events was full.
+/// Events dropped because the queue of events was full, or there was no
+/// memory for one.
 dropped_events: u64,
 /// The round trip of the last `flush` or `rtt`; null before the first.
 rtt: ?Io.Duration,
