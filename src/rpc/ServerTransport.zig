@@ -89,8 +89,9 @@ pub fn drain(t: ServerTransport, io: std.Io) void {
 }
 
 /// Closes the transport. The engine calls it when the shutdown grace is
-/// over, when it rolls back a failed start and in `deinit`, whether calls
-/// remain or not. It includes `drain`; abandons every accepted call that
+/// over, also when `deinit` stops the server, whether calls remain or not;
+/// never after a failed `start`, which leaves nothing to close. A second
+/// call is safe. It includes `drain`; abandons every accepted call that
 /// did not start; closes connections and subscriptions, so a late
 /// `reply.send` gets `Closed`; cancels and joins its tasks; and returns
 /// within a limit the transport documents (NATS: the `flush` timeout). The
