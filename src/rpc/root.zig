@@ -50,6 +50,9 @@ pub const Handler = RawServer.Handler;
 pub const Limits = RawServer.Limits;
 /// The context of one call on the server.
 pub const Context = @import("engine/Context.zig").Context;
+/// The client engine: deadlines, credentials and the errors of transports,
+/// the same on every transport.
+pub const RawClient = @import("engine/RawClient.zig");
 
 /// What a call carries in `authorization`, as a type.
 pub const Credentials = credentials.Credentials;
@@ -86,4 +89,5 @@ test {
     _ = @import("engine/Context.zig");
     _ = @import("engine/RouteStats.zig");
     _ = @import("engine/server_tests.zig");
+    _ = @import("engine/RawClient.zig");
 }

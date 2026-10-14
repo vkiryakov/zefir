@@ -73,6 +73,13 @@ pub const response_too_large: Failure = .{ .code = .resource_exhausted, .app_cod
 /// sent, only counted for the route.
 pub const response_lost: Failure = .{ .code = .unavailable, .app_code = "rpc.unavailable", .message = "Response lost" };
 
+/// The client engine does not send a call to a route against the naming
+/// rules.
+pub const invalid_route: Failure = .{ .code = .invalid_argument, .app_code = "rpc.invalid_route", .message = "Invalid route" };
+/// The client engine does not send credentials whose `authorization` value
+/// metadata cannot carry, such as a token with a line break.
+pub const invalid_credentials: Failure = .{ .code = .invalid_argument, .app_code = "rpc.invalid_metadata", .message = "Invalid credentials" };
+
 const testing = std.testing;
 
 fn expectFailure(expected: Failure, actual: Failure) !void {
