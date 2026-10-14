@@ -291,6 +291,34 @@ test "a live server behind a long backlog on a slow link is not dropped: PINGs t
     publisher.await(io);
 }
 
+/// For every client: a handshake, then the PONG of its first PING and a
+/// hang-up at once.
+fn answerThenHangUp(io: Io, listener: *net.Server) !void {
+    while (true) {
+        var peer: FakeServer.Peer = undefined;
+        try peer.accept(io, listener);
+        defer peer.close();
+        handshake(&peer) catch continue;
+        const line = (peer.nextLine() catch null) orelse continue;
+        if (std.mem.eql(u8, line, "PING")) peer.send(golden.pong) catch {};
+    }
+}
+
+test "a flush whose PONG came succeeds, though the server hangs up right after" {
+    const io = testing.io;
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var server = try io.concurrent(answerThenHangUp, .{ io, &listener });
+    defer server.cancel(io) catch {};
+    var url: [64]u8 = undefined;
+    for (0..50) |_| {
+        var client: Client = try .init(testing.allocator, io, .{ .servers = &.{try FakeServer.url(&listener, &url)}, .reconnect = .{ .enabled = false } });
+        defer client.deinit();
+        try client.connect();
+        try client.flush(quick);
+    }
+}
+
 /// A handshake; at the client's first PING the server hangs up instead.
 fn serveAndHangUp(io: Io, listener: *net.Server) !void {
     var peer: FakeServer.Peer = undefined;

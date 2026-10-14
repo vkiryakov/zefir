@@ -186,8 +186,11 @@ pub const ConnectError = error{
 
 pub const FlushError = error{
     /// Not connected: not yet, or reconnecting; also when the connection
-    /// is lost while the flush waits.
+    /// is lost while the flush waits and the client reconnects. A PONG
+    /// that came before the loss still counts: the flush succeeds.
     Disconnected,
+    /// The client is closed, or closes while the flush waits, as after a
+    /// lost connection with reconnect off.
     ConnectionClosed,
     Timeout,
     Canceled,

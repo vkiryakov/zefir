@@ -174,6 +174,9 @@ pongs_in_flight: u32 = 0,
 /// answers PING number n.
 pings_queued: u64 = 0,
 pongs_received: u64 = 0,
+/// The PONGs the last connection that ended received: a PING of it they
+/// answered stays answered for the task that looks only later.
+ended_pongs: u64 = 0,
 /// Heartbeat PINGs written since the last PONG: a PING still waiting
 /// behind other frames cannot have been answered yet, and does not count.
 pings_out: u32 = 0,
@@ -421,6 +424,8 @@ pub fn pongReceived(q: *Outbound, io: Io) void {
     q.mutex.lockUncancelable(io);
     defer q.mutex.unlock(io);
     q.pongs_received += 1;
+    // Read after its connection ended, before the reader stopped.
+    if (q.mode != .live) q.ended_pongs = q.pongs_received;
     q.pings_out = 0;
     // PONG n answers the n-th PING written: what was written before it
     // reached the server.
@@ -430,14 +435,20 @@ pub fn pongReceived(q: *Outbound, io: Io) void {
 }
 
 /// Waits until `ping` is answered, `deadline` passes, its connection ends
-/// (Disconnected) or the queue closes.
+/// (Disconnected) or the queue closes. A PONG that came before its
+/// connection ended answers it, however late the waiter looks.
 pub fn waitPong(q: *Outbound, io: Io, ping: Ping, deadline: ?Io.Clock.Timestamp) WaitError!void {
     try q.mutex.lock(io);
     defer q.mutex.unlock(io);
     while (true) {
+        if (q.generation == ping.generation) {
+            if (q.pongs_received >= ping.number) return;
+        } else if (q.generation == ping.generation + 1 and q.ended_pongs >= ping.number) {
+            // Answered before its connection ended.
+            return;
+        }
         if (q.mode == .closed) return error.Closed;
         if (q.generation != ping.generation) return error.Disconnected;
-        if (q.pongs_received >= ping.number) return;
         if (deadline) |d| if (time.expired(io, d)) return error.Timeout;
         try q.answered.wait(io, &q.mutex, deadline);
     }
@@ -532,6 +543,7 @@ pub fn halt(q: *Outbound, io: Io) u64 {
     q.mutex.lockUncancelable(io);
     defer q.mutex.unlock(io);
     if (q.mode == .live) {
+        q.ended_pongs = q.pongs_received;
         q.mode = .buffering;
         q.generation += 1;
         q.stale_frames = q.frames.len;
@@ -784,6 +796,7 @@ pub fn close(q: *Outbound, io: Io) void {
     q.mutex.lockUncancelable(io);
     defer q.mutex.unlock(io);
     if (q.mode == .closed) return;
+    q.ended_pongs = if (q.mode == .live) q.pongs_received else 0;
     q.mode = .closed;
     q.generation += 1;
     q.wakeAll(io);
@@ -1227,6 +1240,45 @@ fn exercise(gpa: Allocator) !void {
 
 test "nothing leaks when an allocation fails" {
     try testing.checkAllAllocationFailures(testing.allocator, exercise, .{});
+}
+
+test "a PING answered before its connection ended is answered, whenever its waiter looks" {
+    const io = testing.io;
+    var q: Outbound = .initBuffering(testing.allocator, 1024, 1024);
+    defer q.deinit();
+    try q.restore(io, @as([]const u8, ""), restoreSub, allWaiting);
+    const answered = try q.putPing(io, .flush);
+    const unanswered = try q.putPing(io, .heartbeat);
+    try testing.expectEqual(answered, unanswered);
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(testing.allocator);
+    try drainOnce(&q, io, &out);
+    q.pongReceived(io);
+    _ = q.halt(io);
+    try q.waitPong(io, answered, null);
+    // The next PING of that connection was never answered.
+    try putPub(&q, io, .publish, "p", "1");
+    _ = q.settle(io);
+    try q.restore(io, @as([]const u8, ""), restoreSub, allWaiting);
+    const second = try q.putPing(io, .flush);
+    try drainOnce(&q, io, &out);
+    _ = q.halt(io);
+    // The reader still read its PONG before it stopped.
+    q.pongReceived(io);
+    try q.waitPong(io, second, null);
+    _ = q.settle(io);
+    try q.restore(io, @as([]const u8, ""), restoreSub, allWaiting);
+    const third = try q.putPing(io, .flush);
+    _ = q.halt(io);
+    try testing.expectError(error.Disconnected, q.waitPong(io, third, null));
+    // A close after the PONG too.
+    _ = q.settle(io);
+    try q.restore(io, @as([]const u8, ""), restoreSub, allWaiting);
+    const last = try q.putPing(io, .flush);
+    try drainOnce(&q, io, &out);
+    q.pongReceived(io);
+    q.close(io);
+    try q.waitPong(io, last, null);
 }
 
 test "PINGs in a row share one frame, so they stay bounded" {
