@@ -2,8 +2,13 @@
 //!
 //! Security first: zefir-nats has no TLS yet, so the link to the broker is
 //! plain text, tokens from `authorization` and the data of calls included.
-//! Until it has, run rpc over NATS only in a closed network, and give every
-//! service NATS permissions of its own (the guide has a recipe).
+//! Until it has, run rpc over NATS only in a closed network. Give every
+//! service NATS credentials and permissions of its own: it subscribes only
+//! to its routes and to its inbox (`Transport.Options.inbox_prefix`), and
+//! publishes only to the routes it calls and to the reply subjects of its
+//! requests (`allow_responses`). Without them, anyone who can subscribe to
+//! `users.v1.>` or `_INBOX.>` sees the requests, responses and tokens of
+//! others.
 //!
 //! A request is published to the subject of its method,
 //! `[subject_prefix.]service.v<version>.method`, with a reply subject in
