@@ -1084,7 +1084,9 @@ test "setDelay holds a call before admit; the deadline still comes on time" {
     const short = requestOf(io, "{}", .fromMilliseconds(60));
     const started = now(io);
     try testing.expectError(error.Timeout, f.memory.call(io, &short, optionsOf(&arena)));
-    try testing.expect(short.ctx.deadline.?.isExpired(now(io)));
+    // Less than 1 ms left, as rule 3 of `rpc.ClientTransport` says: a sleep
+    // may wake a little early (Windows), so not always past the deadline.
+    try testing.expect(short.ctx.deadline.?.remaining(now(io)).nanoseconds < std.time.ns_per_ms);
     try testing.expect(started.durationTo(now(io)).nanoseconds < std.time.ns_per_s * 4);
 
     // The delay is a cancelation point.
