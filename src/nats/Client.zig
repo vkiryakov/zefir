@@ -534,7 +534,8 @@ fn drainSteps(client: *Client, deadline: ?Io.Clock.Timestamp) error{ Timeout, Co
     // The application reads every subscription to its end and comes back
     // for more, so that it is done with the last message, and every request
     // gets its answer or times out.
-    while (!client.subscriptions.allSettled(io) or client.inbox.activeCount(io) > 0) {
+    var cursor: usize = 0;
+    while (!client.subscriptions.allSettled(io, &cursor) or client.inbox.activeCount(io) > 0) {
         if (client.state() == .closed) return error.ConnectionClosed;
         if (deadline) |d| if (time.expired(io, d)) return error.Timeout;
         try io.sleep(.fromMilliseconds(5), .awake);

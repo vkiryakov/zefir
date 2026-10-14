@@ -178,20 +178,33 @@ pub fn drainAll(r: *Registry, io: Io, outbound: *Outbound) void {
         defer r.mutex.unlock(io);
         r.draining = true;
     }
+    // Each batch resumes where the last one stopped. A subscription freed
+    // meanwhile moves the last one into its place, which may lie behind;
+    // so passes start over from the first until one, under a single lock,
+    // finds nothing left.
+    var index: usize = 0;
+    var from_first = false;
+    var found = false;
     while (true) {
         var batch: [64]u64 = undefined;
         var taken: usize = 0;
         {
             r.mutex.lockUncancelable(io);
             defer r.mutex.unlock(io);
-            for (r.subscriptions.values()) |sub| {
-                if (taken == batch.len) break;
-                if (!sub.messages.drainForClient(io)) continue;
-                batch[taken] = sub.sid;
+            const values = r.subscriptions.values();
+            if (index >= values.len) {
+                if (from_first and !found) return;
+                index = 0;
+                from_first = true;
+                found = false;
+            }
+            while (index < values.len and taken < batch.len) : (index += 1) {
+                if (!values[index].messages.drainForClient(io)) continue;
+                batch[taken] = values[index].sid;
                 taken += 1;
+                found = true;
             }
         }
-        if (taken == 0) return;
         for (batch[0..taken]) |sid| queueUnsub(outbound, io, sid) catch |err| {
             log.debug("no UNSUB for subscription {d}: {t}", .{ sid, err });
         };
@@ -227,12 +240,24 @@ pub fn pendingBytes(r: *Registry, io: Io) usize {
 }
 
 /// Every subscription is settled: its messages were taken, and the last
-/// one is no longer worked on.
-pub fn allSettled(r: *Registry, io: Io) bool {
+/// one is no longer worked on. A drain polls it: it looks from `cursor`,
+/// where the last call found one that was not settled, and checks the
+/// ones before only once it reaches the end, so a poll costs little while
+/// the drain waits for one subscription.
+pub fn allSettled(r: *Registry, io: Io, cursor: *usize) bool {
     r.mutex.lockUncancelable(io);
     defer r.mutex.unlock(io);
-    for (r.subscriptions.values()) |sub| {
-        if (!sub.messages.settled(io)) return false;
+    const values = r.subscriptions.values();
+    const from = @min(cursor.*, values.len);
+    for (values[from..], from..) |sub, index| {
+        if (sub.messages.settled(io)) continue;
+        cursor.* = index;
+        return false;
+    }
+    for (values[0..from], 0..) |sub, index| {
+        if (sub.messages.settled(io)) continue;
+        cursor.* = index;
+        return false;
     }
     return true;
 }
@@ -519,4 +544,45 @@ test "a drain takes every subscription registered before it, whose SUB then neve
     const after = try newSubscription(gpa, "after");
     defer destroy(gpa, after);
     try testing.expectError(error.ConnectionDraining, r.register(io, gpa, after, 10));
+}
+
+test "a drain queues one UNSUB for each subscription, however many, and polls for settled ones from where it stopped" {
+    const io = testing.io;
+    const gpa = testing.allocator;
+    var r: Registry = .{};
+    defer r.deinit(gpa);
+    var outbound: Outbound = .init(gpa, 1 << 20);
+    defer outbound.deinit();
+    var subs: [200]*Subscription = undefined;
+    for (&subs) |*sub| {
+        sub.* = try newSubscription(gpa, "s");
+        try r.register(io, gpa, sub.*, 1000);
+    }
+    r.drainAll(io, &outbound);
+    r.drainAll(io, &outbound);
+    var frames: [256]Outbound.Frame = undefined;
+    try testing.expectEqual(subs.len, outbound.unsent(io, &frames).len);
+    // Two hold messages when the server confirms the UNSUBs.
+    _ = subs[20].messages.push(io, try testMessage(gpa));
+    _ = subs[150].messages.push(io, try testMessage(gpa));
+    r.finishDraining(io);
+
+    // The last poll stopped at 100: this one goes on from there.
+    var cursor: usize = 100;
+    try testing.expect(!r.allSettled(io, &cursor));
+    try testing.expectEqual(150, cursor);
+    try testing.expect(!r.allSettled(io, &cursor));
+    try testing.expectEqual(150, cursor);
+    subs[150].messages.dropAll(io);
+    // Past the end, the ones before are looked at again.
+    try testing.expect(!r.allSettled(io, &cursor));
+    try testing.expectEqual(20, cursor);
+    subs[20].messages.dropAll(io);
+    try testing.expect(r.allSettled(io, &cursor));
+}
+
+fn testMessage(gpa: Allocator) !Message {
+    const buffer = try gpa.alloc(u8, 2);
+    @memcpy(buffer, "sx");
+    return .{ .subject = buffer[0..1], .reply_to = null, .headers = .empty, .payload = buffer[1..], .status = null, .description = "", .buffer = buffer, .gpa = gpa };
 }
