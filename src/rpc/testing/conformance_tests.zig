@@ -71,6 +71,9 @@ const Flaw = enum {
     stretches_budget,
     /// The client side returns `Timeout` for a canceled call.
     swallows_cancel,
+    /// The client side returns `Canceled` though nothing canceled the
+    /// caller's task.
+    cancels_falsely,
     /// The client side re-arms the cancelation it reports.
     reports_cancel_twice,
     /// The server side keeps taking calls after `drain`.
@@ -128,6 +131,7 @@ const Flawed = struct {
     }
 
     pub fn call(f: *Flawed, io: std.Io, request: *const transport.Request, options: ClientTransport.CallOptions) ClientTransport.CallError!model.Response {
+        if (f.flaw == .cancels_falsely) return error.Canceled;
         var changed = request.*;
         var reversed: [16]model.Metadata.Entry = undefined;
         switch (f.flaw) {
@@ -266,6 +270,8 @@ test "a transport that breaks a rule fails the check of that rule" {
         .{ .ignores_drain, .t11, "a call after drain got a success" },
         .{ .leaks, .t1, "16 bytes in 1 allocation(s) were still held after harness.tearDown" },
         .{ .cancels_ended_calls, .t18, "cancel_after_end" },
+        .{ .cancels_falsely, .t1, "returned error.Canceled" },
+        .{ .cancels_falsely, .t22, "returned error.Canceled though nothing canceled its task" },
     };
     for (cases) |case| {
         const flaw, const check, const message = case;

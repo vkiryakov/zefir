@@ -999,6 +999,29 @@ fn clientLink(ctx: *RawClient.ClientContext, next: *RawClient.ClientNext) anyerr
     return next.run();
 }
 
+/// The client side under `rpc.RawClient` in T22. Nothing cancels the
+/// check's task, so a `Canceled` of the transport is false; the engine
+/// would re-arm it with `io.recancel()`, which panics on a false one. The
+/// guard turns it into `Unexpected` and remembers it, and the check fails.
+const NoFalseCancel = struct {
+    inner: ClientTransport,
+    false_cancel: std.atomic.Value(bool) = .init(false),
+
+    pub fn call(g: *NoFalseCancel, io: std.Io, request: *const transport.Request, options: ClientTransport.CallOptions) CallError!Response {
+        return g.inner.call(io, request, options) catch |err| switch (err) {
+            error.Canceled => {
+                g.false_cancel.store(true, .release);
+                return error.Unexpected;
+            },
+            else => return err,
+        };
+    }
+
+    pub fn info(g: *NoFalseCancel) transport.Info {
+        return g.inner.info();
+    }
+};
+
 /// A server side between the engine and the transport that tells the
 /// check when the engine's `drain` has returned.
 const Spy = struct {
@@ -2086,9 +2109,13 @@ fn t22(job: *Job) CheckError!void {
     var server = try job.engine(pair.server, &samples, .{ .middleware = &.{.of(serverLink)} });
     defer server.deinit(io);
     try job.startEngine(&server);
-    var client = try job.need(RawClient.init(job.gpa, .{ .transport = pair.client, .middleware = &.{.of(clientLink)} }), "rpc.RawClient.init");
+    var guard: NoFalseCancel = .{ .inner = pair.client };
+    var client = try job.need(RawClient.init(job.gpa, .{ .transport = .init(&guard), .middleware = &.{.of(clientLink)} }), "rpc.RawClient.init");
     defer client.deinit();
-    var result = try job.need(client.call(io, .root, meta_route, "", .{ .timeout = job.ms(5000) }), "rpc.RawClient.call");
+    var result = client.call(io, .root, meta_route, "", .{ .timeout = job.ms(5000) }) catch |err| {
+        if (guard.false_cancel.load(.acquire)) return job.fail("the client side returned error.Canceled though nothing canceled its task", .{});
+        return job.fail("rpc.RawClient.call returned error.{t}", .{err});
+    };
     defer result.deinit();
     switch (result.response.status) {
         .ok => {},
