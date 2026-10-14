@@ -11,6 +11,17 @@ against `std.Io` only, so it runs on any `std.Io` that has real
 concurrency; [zio](https://github.com/lalinsky/zio) is the one meant for
 production.
 
+> [!IMPORTANT]
+> **Not implemented yet (TODO):**
+>
+> - **JetStream**: streams, consumers, the key-value and object stores.
+> - **Authentication other than a user and a password**: no token, NKey,
+>   JWT or credentials files. Without authentication, or with a user and a
+>   password, it works.
+> - **TLS and mTLS**: the client speaks plaintext TCP only, so passwords
+>   and messages travel unencrypted. Use it on a network you trust.
+> - **WebSocket** and the **services API** (`$SRV`).
+
 ```zig
 var client: nats.Client = try .init(gpa, io, .{ .servers = &.{"nats://127.0.0.1:4222"} });
 defer client.deinit();
@@ -39,11 +50,6 @@ std.log.info("{s}: {s}", .{ msg.subject, msg.payload });
   fails at once instead of hanging.
 - **No dependencies.** Only the standard library; zio comes from your
   build, not from Zefir.
-
-> [!IMPORTANT]
-> This version speaks plaintext TCP only, with no authentication or with a
-> user and a password. There is no TLS, and no token, NKey or JWT
-> authentication; there is no JetStream. Use it on a network you trust.
 
 ## Contents
 
@@ -1774,11 +1780,11 @@ Everything a Core NATS client sends and receives:
 | lame duck mode                                     | ✅                     |
 | drain of the client and of a subscription          | ✅                     |
 | no authentication, user and password               | ✅                     |
-| TLS, mTLS                                          | ❌ not in this version |
-| token, NKey, JWT and credentials files             | ❌ not in this version |
-| WebSocket                                          | ❌                     |
-| JetStream, key-value and object stores             | ❌ not in this version |
-| the services API (`$SRV`)                          | ❌                     |
+| TLS, mTLS                                          | ❌ TODO                |
+| token, NKey, JWT and credentials files             | ❌ TODO                |
+| WebSocket                                          | ❌ TODO                |
+| JetStream, key-value and object stores             | ❌ TODO                |
+| the services API (`$SRV`)                          | ❌ TODO                |
 
 <details>
 <summary>How the client is tested</summary>
