@@ -33,6 +33,18 @@ const model = @import("model.zig");
 const credentials = @import("credentials.zig");
 const auth = @import("auth.zig");
 const middleware = @import("middleware.zig");
+const contract = @import("app/contract.zig");
+
+/// A contract: the name, the major version, the methods and the errors of
+/// a service, shared by its server and its clients. A value whose fields
+/// are the methods: `UserApi.getUser`.
+pub const Contract = contract.Contract;
+/// The request and response types of one method of a contract:
+/// `.getUser = rpc.method(GetUserRequest, User)`.
+pub const method = contract.method;
+/// The declaration `pub const rpc_handler` of a handler: the contract it
+/// implements, with its timeouts, auth and middleware.
+pub const implement = contract.implement;
 
 pub const Route = model.Route;
 pub const Metadata = model.Metadata;
@@ -118,4 +130,5 @@ test {
     _ = @import("engine/server_tests.zig");
     _ = @import("engine/RawClient.zig");
     _ = @import("app/dto.zig");
+    _ = @import("app/contract.zig");
 }
