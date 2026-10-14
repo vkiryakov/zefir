@@ -159,6 +159,35 @@ test "a server restart: subscriptions, the inbox and the publishes made meanwhil
     try e2e.onZio(serverRestart);
 }
 
+fn accountLimitAfterRestart(io: Io) !void {
+    var client: nats.Client = try .init(testing.allocator, io, .{
+        .servers = &.{e2e.servers.limits},
+        .auth = .{ .user_password = .{ .username = "small", .password = "small" } },
+        .connect_timeout = .fromSeconds(1),
+        .reconnect = quick_reconnect,
+    });
+    defer client.deinit();
+    try client.connect();
+    const sub = try client.subscribe("e2e.account.restart", .{});
+    defer sub.deinit();
+    try client.flush(.{});
+
+    // The server restarts. The new connection's first INFO gives the
+    // server's limit; the account's comes after the handshake's PONG.
+    try e2e.docker(&.{ "stop", e2e.servers.limits_container });
+    errdefer e2e.start(e2e.servers.limits_container) catch {};
+    _ = try awaitEvent(&client, .disconnected, 10);
+    try e2e.start(e2e.servers.limits_container);
+    _ = try awaitEvent(&client, .reconnected, 10);
+    // The account's INFO is in before this PONG.
+    try client.flush(.{});
+    try e2e.expectAccountLimit(&client, sub);
+}
+
+test "a server restart: the new connection keeps to the account's lower max_payload" {
+    try e2e.onZio(accountLimitAfterRestart);
+}
+
 fn clusterFailover(io: Io) !void {
     var client: nats.Client = try .init(testing.allocator, io, .{
         // Only node a: the others come from its INFO.

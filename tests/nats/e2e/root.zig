@@ -6,6 +6,7 @@
 const std = @import("std");
 const Io = std.Io;
 const testing = std.testing;
+const nats = @import("nats");
 const zio = @import("zio");
 
 /// The servers of docker-compose.yml.
@@ -29,7 +30,43 @@ pub const servers = struct {
     /// reloads it: "first", then "second".
     pub const reload = "nats://127.0.0.1:14231";
     pub const reload_container = "zefir-nats-e2e-reload";
+    /// A server whose user `small`, password "small", is in an account
+    /// that takes messages of `account_max_payload` bytes at most, where
+    /// the server takes 1 MiB; tests stop and start it by its container
+    /// name.
+    pub const limits = "nats://127.0.0.1:14232";
+    pub const limits_container = "zefir-nats-e2e-limits";
 };
+
+/// The most a message of user `small` on the limits server may hold,
+/// headers included: the limit of its account.
+pub const account_max_payload = 1024;
+
+/// Checks that `client`, connected to the limits server as `small`, keeps
+/// to its account's limit and not to the server's: its latest INFO gives
+/// that limit, headers and payload of exactly `account_max_payload` bytes
+/// go out and arrive at `sub`, a byte more is PayloadTooLarge, and the
+/// client stays connected. Call it after a flush: that INFO comes after
+/// the handshake's PONG, maybe after connect() returns.
+pub fn expectAccountLimit(client: *nats.Client, sub: *nats.Subscription) !void {
+    {
+        const info = (try client.serverInfo(testing.allocator)) orelse return error.TestNoInfo;
+        defer info.deinit();
+        try testing.expectEqual(account_max_payload, info.value.max_payload);
+    }
+    // A block of 18 bytes; the server counts it with the payload.
+    const headers: []const nats.Header = &.{.{ .name = "A", .value = "b" }};
+    const over: [account_max_payload - 18 + 1]u8 = @splat('m');
+    const at_limit = over[0 .. over.len - 1];
+    try client.publishMessage(.{ .subject = sub.subject, .headers = headers, .payload = at_limit });
+    try testing.expectError(error.PayloadTooLarge, client.publishMessage(.{ .subject = sub.subject, .headers = headers, .payload = &over }));
+    try client.flush(.{});
+    try testing.expect(client.isConnected());
+    var msg = (try sub.next(.{ .timeout = .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } } })) orelse return error.TestNoMessage;
+    defer msg.deinit();
+    try testing.expectEqual(at_limit.len, msg.payload.len);
+    try testing.expectEqualStrings("b", msg.headers.get("A").?);
+}
 
 /// Runs `docker` with `args` and fails unless it succeeds.
 pub fn docker(args: []const []const u8) !void {

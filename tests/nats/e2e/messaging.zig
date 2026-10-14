@@ -442,6 +442,25 @@ test "headers and payload exactly at the server's max_payload pass, a byte more 
     try e2e.onZio(maxPayloadBoundary);
 }
 
+fn accountMaxPayload(io: Io) !void {
+    var client: nats.Client = try .init(testing.allocator, io, .{
+        .servers = &.{e2e.servers.limits},
+        .auth = .{ .user_password = .{ .username = "small", .password = "small" } },
+    });
+    defer client.deinit();
+    try client.connect();
+    const sub = try client.subscribe("e2e.account", .{});
+    defer sub.deinit();
+    // The server sends the INFO of the account's limit right after the
+    // handshake's PONG: it is in before this PONG.
+    try client.flush(.{});
+    try e2e.expectAccountLimit(&client, sub);
+}
+
+test "headers and payload exactly at an account's lower max_payload pass, a byte more is PayloadTooLarge" {
+    try e2e.onZio(accountMaxPayload);
+}
+
 fn controlLineBoundary(io: Io) !void {
     var client: nats.Client = try .init(testing.allocator, io, .{ .servers = &.{e2e.servers.plain} });
     defer client.deinit();

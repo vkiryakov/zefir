@@ -12,6 +12,7 @@
 #   14229  plain, for tests that pause it: a server that stops reading
 #   14230  plain, for tests that stop and start it
 #   14231  a user whose password tests change and reload
+#   14232  a user whose account has a lower max_payload than the server's
 #
 # tests/nats/certs holds a self-signed certificate for the TLS servers, valid
 # for 100 years. The client does not do TLS; the servers need it to start.
@@ -93,3 +94,10 @@ services:
     container_name: zefir-nats-e2e-reload
     entrypoint: ["sh", "-c", "cp /conf/reload.conf /tmp/nats.conf && exec nats-server --config /tmp/nats.conf"]
     ports: ["127.0.0.1:14231:4222"]
+
+  # The tests stop and start it by this name.
+  limits:
+    <<: *nats
+    container_name: zefir-nats-e2e-limits
+    command: ["--config", "/conf/limits.conf"]
+    ports: ["127.0.0.1:14232:4222"]
