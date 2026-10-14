@@ -38,8 +38,8 @@ pub const Disposition = enum(u8) {
     /// The handler ran; its response was sent, or sending was tried.
     completed,
     /// The handler never started: it was taken off the queue at shutdown,
-    /// or its deadline passed in the queue. Running the call on another
-    /// replica is safe.
+    /// or the stop, the deadline or the client ended the call before its
+    /// handler ran. Running the call on another replica is safe.
     not_started,
     /// The handler started and was canceled: whether it did its work is
     /// unknown.

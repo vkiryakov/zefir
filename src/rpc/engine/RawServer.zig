@@ -508,7 +508,7 @@ fn refuseQueued(server: *RawServer, io: std.Io) void {
     };
     while (taken.popFirst()) |node| {
         const call: *Call = @alignCast(@fieldParentPtr("node", node));
-        call.endUnstarted(io, call.choose(.shutdown));
+        call.endUnstarted(io, call.choose(.shutdown), null);
         server.retire(io, call);
     }
 }

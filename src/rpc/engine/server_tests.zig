@@ -893,6 +893,110 @@ test "ctx.fail sends exactly its failure, with the response metadata; another er
     try server.shutdown(io);
 }
 
+/// A `std.Io` that starts the tasks of `io.concurrent` only once `gate` is
+/// set, as a busy scheduler starts a handler's task late; everything else
+/// goes to `testing.io`. A supervisor starts through the server's group, so
+/// only the handler's task waits.
+const LateStart = struct {
+    var gate: std.Io.Event = .unset;
+    var vtable: std.Io.VTable = undefined;
+
+    fn io() std.Io {
+        vtable = testing.io.vtable.*;
+        vtable.concurrent = concurrent;
+        return .{ .userdata = testing.io.userdata, .vtable = &vtable };
+    }
+
+    /// The task's own start and a copy of its arguments.
+    const Late = struct {
+        start: *const fn (context: *const anyopaque, result: *anyopaque) void,
+        context: [64]u8 align(16),
+    };
+
+    fn concurrent(
+        userdata: ?*anyopaque,
+        result_len: usize,
+        result_alignment: std.mem.Alignment,
+        context: []const u8,
+        context_alignment: std.mem.Alignment,
+        start: *const fn (context: *const anyopaque, result: *anyopaque) void,
+    ) std.Io.ConcurrentError!*std.Io.AnyFuture {
+        if (context.len > 64 or context_alignment.toByteUnits() > 16) return error.ConcurrencyUnavailable;
+        var late: Late = .{ .start = start, .context = undefined };
+        @memcpy(late.context[0..context.len], context);
+        return testing.io.vtable.concurrent(userdata, result_len, result_alignment, std.mem.asBytes(&late), .of(Late), lateStart);
+    }
+
+    fn lateStart(context: *const anyopaque, result: *anyopaque) void {
+        const late: *const Late = @ptrCast(@alignCast(context));
+        gate.waitUncancelable(testing.io);
+        late.start(&late.context, result);
+    }
+};
+
+/// Counts the handlers that entered.
+const Entering = struct {
+    entered: std.atomic.Value(u32) = .init(0),
+
+    fn handle(s: *Entering, _: *Context, request: []const u8) anyerror![]const u8 {
+        _ = s.entered.fetchAdd(1, .acq_rel);
+        return request;
+    }
+};
+
+test "an outcome before the handler's task enters keeps the handler out: the call did not start" {
+    const io = testing.io;
+    const late_io = LateStart.io();
+    LateStart.gate = .unset;
+    // No task stays at the gate.
+    defer LateStart.gate.set(io);
+    var entering: Entering = .{};
+    var test_transport: TestTransport = .{};
+    var server: RawServer = try .init(testing.allocator, .{
+        .transport = .init(&test_transport),
+        .methods = &.{
+            .{ .route = routeOf("short"), .handler = handlerOf(&entering), .timeout = .fromMilliseconds(50) },
+            .{ .route = routeOf("long"), .handler = handlerOf(&entering) },
+        },
+        .shutdown_grace = .zero,
+    });
+    defer server.deinit(io);
+    try server.start(io);
+    const d = test_transport.dispatcher.?;
+
+    // The deadline passes while the handler's task waits to start: the
+    // refusal goes out at once.
+    var by_deadline: TestCall = .{};
+    try deliver(late_io, d, &headOf(io, "short", .fromSeconds(5)), "", &by_deadline);
+    try waitFor(io, &by_deadline.sends, 1);
+    LateStart.gate.set(io);
+    try by_deadline.waitReleased(io);
+    try by_deadline.expectFailure(failures.deadline_exceeded, true, .not_started);
+
+    // The client gives up before the task starts.
+    LateStart.gate.reset();
+    var by_client: TestCall = .{};
+    try deliver(late_io, d, &headOf(io, "long", .fromSeconds(5)), "", &by_client);
+    by_client.cancelUnlessReleased(io);
+    LateStart.gate.set(io);
+    try by_client.waitReleased(io);
+    try testing.expectEqual(@as(u32, 0), by_client.sends.load(.acquire));
+    try testing.expectEqual(Reply.Disposition.not_started, by_client.disposition);
+
+    // The stop cancels a call whose handler has not entered: another
+    // replica may run it (AMQP requeues it).
+    LateStart.gate.reset();
+    var by_stop: TestCall = .{};
+    try deliver(late_io, d, &headOf(io, "long", .fromSeconds(5)), "", &by_stop);
+    server.requestStop(io);
+    try waitFor(io, &by_stop.sends, 1);
+    LateStart.gate.set(io);
+    try by_stop.waitReleased(io);
+    try by_stop.expectFailure(failures.stopping, true, .not_started);
+    try server.wait(io);
+    try testing.expectEqual(@as(u32, 0), entering.entered.load(.acquire));
+}
+
 /// Stops only when the token of its call is canceled, ignoring
 /// cancelation of its task: a handler that checks `ctx.operation()`.
 const TokenWatcher = struct {

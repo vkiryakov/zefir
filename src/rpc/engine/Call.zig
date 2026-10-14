@@ -48,6 +48,8 @@ token: core.CancellationToken = .init,
 wake: std.Io.Event = .unset,
 /// The handler's task has ended; set before `wake`.
 handler_done: std.atomic.Value(bool) = .init(false),
+/// Whether the handler entered: see `enter` and `closeEntry`.
+entry: std.atomic.Value(Entry) = .init(.open),
 context: CallContext,
 
 /// How a call ends; the first to choose wins.
@@ -65,6 +67,10 @@ pub const Outcome = enum(u8) {
     /// No task for the handler: `resource_exhausted`.
     no_task,
 };
+
+/// The handler's task enters the handler, or the supervisor closes the
+/// entry first; whichever comes first decides, once.
+const Entry = enum(u8) { open, entered, closed };
 
 /// A call for `head` with a buffer of `body_len` bytes for its body.
 /// `error.OutOfMemory` when it does not fit the memory of one call or of
@@ -223,10 +229,12 @@ pub fn stop(call: *Call, io: std.Io, outcome: Outcome) Outcome {
 /// whose `Future` only the supervisor touches. The deadline, the client's
 /// cancel and the stop each choose the outcome once; at most one response
 /// goes out, and `release` comes last, once the handler has really ended.
+/// An outcome that comes before the handler entered keeps it out: the call
+/// ends as one that never started.
 pub fn supervise(call: *Call, io: std.Io) void {
-    if (call.outcomeBeforeStart(io)) |outcome| return call.endUnstarted(io, outcome);
+    if (call.outcomeBeforeStart(io)) |outcome| return call.endUnstarted(io, outcome, null);
     var handler = io.concurrent(runHandler, .{ call, io }) catch
-        return call.endUnstarted(io, call.choose(.no_task));
+        return call.endUnstarted(io, call.choose(.no_task), null);
 
     var result: ?(anyerror![]const u8) = null;
     const outcome: Outcome = outcome: {
@@ -243,6 +251,10 @@ pub fn supervise(call: *Call, io: std.Io) void {
         result = handler.await(io);
         break :outcome call.choose(if (call.deadline.isExpired(now(io))) .deadline else .finished);
     };
+    // Any outcome but the handler's own end closes the entry: a handler
+    // that has not entered never runs.
+    if (outcome != .finished and !call.closeEntry())
+        return call.endUnstarted(io, outcome, if (result == null) &handler else null);
     // A failure of the engine goes out before the handler is canceled: the
     // client does not wait while the handler unwinds.
     var failure: ?model.Failure = switch (outcome) {
@@ -282,8 +294,9 @@ fn outcomeBeforeStart(call: *Call, io: std.Io) ?Outcome {
 
 /// Ends a call whose handler never started: a refusal, except for a client
 /// that gave up, and `release(.not_started)`: running it elsewhere is
-/// safe.
-pub fn endUnstarted(call: *Call, io: std.Io, outcome: Outcome) void {
+/// safe. `handler`: the task that was to run the handler, if it was
+/// started; it ends at once, and `release` waits for it.
+pub fn endUnstarted(call: *Call, io: std.Io, outcome: Outcome, handler: ?*std.Io.Future(anyerror![]const u8)) void {
     const failure: model.Failure = switch (outcome) {
         .canceled => failures.cancelled,
         .shutdown => failures.stopping,
@@ -291,7 +304,9 @@ pub fn endUnstarted(call: *Call, io: std.Io, outcome: Outcome) void {
         .no_task => failures.no_task,
         .pending, .finished => unreachable,
     };
-    call.record(io, if (outcome == .canceled) failure else call.sendFailure(io, failure, true));
+    const ended = if (outcome == .canceled) failure else call.sendFailure(io, failure, true);
+    if (handler) |task| _ = task.await(io) catch "";
+    call.record(io, ended);
     call.reply.release(io, .not_started);
 }
 
@@ -301,9 +316,26 @@ fn runHandler(call: *Call, io: std.Io) anyerror![]const u8 {
         call.handler_done.store(true, .release);
         call.wake.set(io);
     }
-    try call.context.operation.check(now(io));
+    if (!call.enter(io)) return error.NotEntered;
     const method = &call.server.methods[call.route_index];
     return method.handler.handle(method.handler.ptr, call.contextPtr(), call.body);
+}
+
+/// Lets the handler in, unless the call has an outcome already or its
+/// deadline has passed: a task that started late leaves the handler alone,
+/// and the supervisor ends the call as one that never started.
+fn enter(call: *Call, io: std.Io) bool {
+    if (call.deadline.isExpired(now(io))) _ = call.stop(io, .deadline);
+    if (call.outcome.load(.acquire) != .pending) return false;
+    return call.entry.cmpxchgStrong(.open, .entered, .acq_rel, .monotonic) == null;
+}
+
+/// Closes the entry to a handler that has not entered; true when it had.
+/// The supervisor calls it once it has an outcome other than the handler's
+/// own end.
+fn closeEntry(call: *Call) bool {
+    const seen = call.entry.cmpxchgStrong(.open, .closed, .acq_rel, .acquire) orelse return false;
+    return seen == .entered;
 }
 
 fn contextPtr(call: *Call) *Context {
