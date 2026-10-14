@@ -31,6 +31,32 @@
 //! returns within `flush_timeout`, the bound of its flush, plus the time a
 //! receiving task needs to hand over the request it holds.
 //!
+//! The client publishes a request only while the link is up: a request
+//! buffered in the library during a reconnect would reach the server with
+//! a stale budget. The budget left goes in `Zefir-Rpc-Timeout-Ms`, measured
+//! right before publish. All calls share one inbox subscription, started by
+//! the first call; a call that waits through a reconnect may still get its
+//! response before its deadline.
+//!
+//! | On the wire | `call` returns |
+//! |---|---|
+//! | a reply without `Nats-Service-Error` and without a status line | `.ok` |
+//! | a reply with the error headers of ADR-32 | `.failure`; the code from `Zefir-Rpc-Code`, else by the number; `refused` from `Zefir-Rpc-Refused` |
+//! | `NATS/1.0 503` without a payload: no responders | `error.Unavailable`: no server took it, or none serves the route (a typo, another version) |
+//! | any other status line | `error.ProtocolViolation` |
+//! | no reply by the deadline | `error.Timeout` |
+//! | the caller's task canceled | `error.Canceled`; the server is not told |
+//!
+//! And the errors of the connection:
+//!
+//! | Where | Error | `call` returns |
+//! |---|---|---|
+//! | before sending | no link (`isConnected`) | `error.Unavailable` |
+//! | publish | PayloadTooLarge / PermissionDenied / Disconnected, ConnectionClosed / Timeout | RequestTooLarge / AccessDenied / Unavailable / Timeout |
+//! | the inbox | PermissionDenied on its subscription | `error.AccessDenied`; the next call tries again |
+//! | the inbox | ConnectionClosed | ConnectionLost to the calls that wait, Unavailable to new ones |
+//! | the inbox | Disconnected | the calls wait on until their deadlines |
+//!
 //! The transport never closes the connection, and its `deinit` comes
 //! before the connection's. The allocator must be thread-safe: calls are
 //! allocated and freed from the tasks of the engine.
@@ -41,6 +67,7 @@ const rpc = @import("rpc");
 const Conn = @import("Conn.zig");
 const subject = @import("subject.zig");
 const server_side = @import("server.zig");
+const client_side = @import("client.zig");
 
 const Transport = @This();
 
@@ -57,6 +84,7 @@ pending: rpc.transport.Pending,
 io_vtable: std.atomic.Value(?*const std.Io.VTable) = .init(null),
 counts: std.EnumArray(Counter, std.atomic.Value(u64)) = .initFill(.init(0)),
 server: server_side.State = .{},
+client: client_side.State = .{},
 
 pub const Options = struct {
     /// The first tokens of every subject, such as "shop": then a method
@@ -175,6 +203,7 @@ fn check(options: Options) error{InvalidConfiguration}!void {
 /// the server and let every call return first.
 pub fn deinit(t: *Transport, io: std.Io) void {
     server_side.close(t, io);
+    client_side.stop(t, io);
     if (t.server.live_calls.load(.acquire) != 0)
         @panic("rpc_nats.Transport: deinit with calls not released; deinit the server and let every call return first");
     t.pending.deinit();
@@ -185,6 +214,11 @@ pub fn deinit(t: *Transport, io: std.Io) void {
 
 /// The server side, for the engine of the server.
 pub fn serverTransport(t: *Transport) rpc.ServerTransport {
+    return .init(t);
+}
+
+/// The client side, for the engine of the client.
+pub fn clientTransport(t: *Transport) rpc.ClientTransport {
     return .init(t);
 }
 
@@ -203,6 +237,12 @@ pub fn info(t: *Transport) rpc.transport.Info {
         .delivery = .at_most_once,
         .max_body_bytes = null,
     };
+}
+
+/// Publishes `request` to the subject of its route and waits for the
+/// response in the inbox, by the rules of `rpc.ClientTransport.call`.
+pub fn call(t: *Transport, io: std.Io, request: *const rpc.transport.Request, options: rpc.ClientTransport.CallOptions) rpc.ClientTransport.CallError!rpc.Response {
+    return client_side.call(t, io, request, options);
 }
 
 /// Subscribes to the routes of `dispatcher` and starts taking requests; see
@@ -260,6 +300,7 @@ pub fn timeoutAfter(io: std.Io, duration: std.Io.Duration) std.Io.Timeout {
 
 test {
     _ = server_side;
+    _ = client_side;
 }
 
 const testing = std.testing;
