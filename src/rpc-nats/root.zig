@@ -23,4 +23,6 @@ pub const Conn = @import("Conn.zig");
 test {
     std.testing.refAllDecls(@This());
     _ = @import("Conn.zig");
+    _ = @import("subject.zig");
+    _ = @import("wire.zig");
 }
