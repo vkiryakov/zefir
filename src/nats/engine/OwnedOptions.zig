@@ -27,7 +27,10 @@ pub fn init(gpa: Allocator, options: Options) (Options.Error || Allocator.Error)
         .none => {},
         .user_password => |credentials| {
             const username = try gpa.dupe(u8, credentials.username);
-            errdefer gpa.free(username);
+            errdefer {
+                std.crypto.secureZero(u8, username);
+                gpa.free(username);
+            }
             const password = try gpa.dupe(u8, credentials.password);
             copy.auth = .{ .user_password = .{ .username = username, .password = password } };
         },
