@@ -518,6 +518,54 @@ test "receiving: a revoked permission stops the server with AccessDenied" {
     try testing.expectEqual(error.AccessDenied, recorder.fatal(io).?.err);
 }
 
+const Failed = struct {
+    recorder: *RecordingDispatcher,
+
+    fn holds(c: Failed) bool {
+        return c.recorder.fatal(testing.io) != null;
+    }
+};
+
+test "receiving: a subscription that ends while the server runs stops it with Unavailable" {
+    const io = testing.io;
+    var fake: FakeConn = .init(testing.allocator, .{});
+    defer fake.deinit(io);
+    var bus: Transport = try .init(testing.allocator, fake.conn(), .{});
+    defer bus.deinit(io);
+    var recorder: RecordingDispatcher = try .init(testing.allocator, .{ .routes = &routes });
+    defer recorder.deinit(io);
+    try recorder.start(io, bus.serverTransport());
+    // Ended by someone else, not by `drain` of the transport: `next` hands
+    // out null.
+    try fake.drain(io, bus.server.routes[1].sub);
+    try eventually(Failed{ .recorder = &recorder });
+    const fatal = recorder.fatal(io).?;
+    try testing.expectEqual(error.Unavailable, fatal.err);
+    try testing.expectEqual(@as(?anyerror, null), fatal.diagnostics.?.cause);
+    try testing.expectEqualStrings("the subscription to users.v1.listUsers ended while the server runs", fatal.diagnostics.?.message());
+}
+
+test "Reply.send without a link to the broker: Closed" {
+    const io = testing.io;
+    var fake: FakeConn = .init(testing.allocator, .{});
+    defer fake.deinit(io);
+    var bus: Transport = try .init(testing.allocator, fake.conn(), .{});
+    defer bus.deinit(io);
+    var recorder: RecordingDispatcher = try .init(testing.allocator, .{ .routes = &routes });
+    defer recorder.deinit(io);
+    try recorder.start(io, bus.serverTransport());
+    var raw: Raw = try .init(&fake);
+    defer raw.deinit();
+    try raw.call("users.v1.getUser", 1, &.{}, "{}");
+    try recorder.waitStarted(io, 1);
+    fake.disconnect(io);
+    try testing.expectError(error.Closed, recorder.respond(io, 0, &.{ .status = .ok }));
+    fake.reconnect(io);
+    try recorder.releaseCall(io, 0, .completed);
+    recorder.close(io);
+    try testing.expectEqual(@as(usize, 0), recorder.violations().len);
+}
+
 test "Reply.send: over max_payload is ResponseTooLarge, a small failure goes after it; after close, Closed" {
     const io = testing.io;
     var fake: FakeConn = .init(testing.allocator, .{ .max_payload = 512 });

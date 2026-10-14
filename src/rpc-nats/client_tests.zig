@@ -11,6 +11,7 @@ const Transport = @import("Transport.zig");
 const FakeConn = @import("testing/FakeConn.zig");
 const wire = @import("wire.zig");
 const subject = @import("subject.zig");
+const client_side = @import("client.zig");
 
 const testing = std.testing;
 const Entry = rpc.Metadata.Entry;
@@ -62,6 +63,8 @@ const Call = struct {
     body: []const u8 = "{}",
     metadata: []const Entry = &.{},
     timeout: std.Io.Duration = .fromSeconds(10),
+    /// A context without a deadline; `timeout` is not used.
+    no_deadline: bool = false,
     codec: []const u8 = "json",
 };
 
@@ -86,7 +89,7 @@ const Caller = struct {
             .route = c.call.route,
             .request_id = @splat(9),
             .codec = c.call.codec,
-            .ctx = core.Context.root.withDeadline(.after(c.began, c.call.timeout)),
+            .ctx = if (c.call.no_deadline) core.Context.root else core.Context.root.withDeadline(.after(c.began, c.call.timeout)),
             .metadata = c.call.metadata,
             .body = c.call.body,
         };
@@ -535,6 +538,96 @@ test "an inbox that broke: the waiting call gets ConnectionLost, the next call s
     again.join();
     try testing.expectEqualStrings("again", (try again.result).body);
     try testing.expectEqual(@as(usize, 2), fake.subscriptionCount(io));
+}
+
+test "a call canceled while it starts the inbox leaves it idle; the next call starts it" {
+    const io = testing.io;
+    var fake: FakeConn = .init(testing.allocator, .{});
+    defer fake.deinit(io);
+    var bus: Transport = try .init(testing.allocator, fake.conn(), .{});
+    defer bus.deinit(io);
+    var service: Service = try .init(&fake, "users.v1.getUser");
+    defer service.deinit();
+
+    fake.hangFlush(io, true);
+    var starter: Caller = .init(&bus, .{});
+    defer starter.deinit();
+    try starter.begin();
+    while (bus.client.phase.load(.acquire) != .starting) try io.sleep(.fromMilliseconds(1), .awake);
+    // The starter is in the flush of the inbox now.
+    try io.sleep(.fromMilliseconds(20), .awake);
+    starter.cancel();
+    try testing.expectError(error.Canceled, starter.result);
+    try testing.expectEqual(client_side.Phase.idle, bus.client.phase.load(.acquire));
+    // Only the service's subscription is left.
+    try testing.expectEqual(@as(usize, 1), fake.subscriptionCount(io));
+
+    fake.hangFlush(io, false);
+    var caller: Caller = .init(&bus, .{});
+    defer caller.deinit();
+    try caller.begin();
+    const msg = try service.request();
+    defer msg.release();
+    try service.reply(msg, &.{}, "ok");
+    caller.join();
+    try testing.expectEqualStrings("ok", (try caller.result).body);
+}
+
+test "a request without a deadline goes out with the largest budget and waits for its response" {
+    const io = testing.io;
+    var fake: FakeConn = .init(testing.allocator, .{});
+    defer fake.deinit(io);
+    var bus: Transport = try .init(testing.allocator, fake.conn(), .{});
+    defer bus.deinit(io);
+    var service: Service = try .init(&fake, "users.v1.getUser");
+    defer service.deinit();
+
+    var caller: Caller = .init(&bus, .{ .no_deadline = true });
+    defer caller.deinit();
+    try caller.begin();
+    const msg = try service.request();
+    defer msg.release();
+    var fields = (wire.Block{ .bytes = msg.header_block }).fields();
+    const budget = while (fields.next()) |field| {
+        if (std.mem.eql(u8, field.name, "Zefir-Rpc-Timeout-Ms")) break field.value;
+    } else return error.TestUnexpectedResult;
+    try testing.expectEqual(std.math.maxInt(u64), try std.fmt.parseUnsigned(u64, budget, 10));
+    try io.sleep(.fromMilliseconds(20), .awake);
+    try service.reply(msg, &.{}, "whenever");
+    caller.join();
+    try testing.expectEqualStrings("whenever", (try caller.result).body);
+}
+
+test "the inbox as a slow consumer: counted, and the calls go on" {
+    const io = testing.io;
+    const log_level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = log_level;
+    var fake: FakeConn = .init(testing.allocator, .{});
+    defer fake.deinit(io);
+    var bus: Transport = try .init(testing.allocator, fake.conn(), .{});
+    defer bus.deinit(io);
+    var service: Service = try .init(&fake, "users.v1.getUser");
+    defer service.deinit();
+
+    var caller: Caller = .init(&bus, .{});
+    defer caller.deinit();
+    try caller.begin();
+    const msg = try service.request();
+    defer msg.release();
+    const reply_to = msg.reply_to.?;
+    var pattern: [64]u8 = undefined;
+    const inbox = try std.fmt.bufPrint(&pattern, "{s}.*", .{reply_to[0..std.mem.findScalarLast(u8, reply_to, '.').?]});
+    try testing.expect(fake.failNext(io, inbox, error.SlowConsumer));
+    const deadline = now().addDuration(.fromSeconds(5));
+    while (bus.counters().slow_consumer_errors == 0) {
+        if (now().nanoseconds > deadline.nanoseconds) return error.TestTimedOut;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+    try service.reply(msg, &.{}, "after slow");
+    caller.join();
+    try testing.expectEqualStrings("after slow", (try caller.result).body);
+    try testing.expectEqual(@as(u64, 1), bus.counters().slow_consumer_errors);
 }
 
 /// An adapter on `FakeConn` whose inbox ends as soon as it starts: `next`
