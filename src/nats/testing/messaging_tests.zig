@@ -939,6 +939,9 @@ test "close() while a task waits in next(): ConnectionClosed at once" {
     defer s.deinit();
     const idle = try s.client.subscribe("idle", .{});
     defer idle.deinit();
+    // The server has the SUB its script waits for: close() would drop it
+    // while still queued.
+    try s.client.flush(quick);
     var receiver = try io.concurrent(nextLong, .{idle});
     defer _ = receiver.cancel(io) catch null;
     try awaitReceiving(idle);
