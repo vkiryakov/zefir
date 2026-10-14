@@ -73,6 +73,8 @@ test {
     _ = @import("Reply.zig");
     _ = @import("Pending.zig");
     _ = @import("testing.zig");
+    _ = @import("failures.zig");
     _ = @import("engine/RawServer.zig");
+    _ = @import("engine/Call.zig");
     _ = @import("engine/Context.zig");
 }

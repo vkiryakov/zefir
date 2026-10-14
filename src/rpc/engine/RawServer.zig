@@ -23,8 +23,10 @@ const model = @import("../model.zig");
 const transport = @import("../transport.zig");
 const rules = @import("../rules.zig");
 const waiting = @import("../wait.zig");
+const failures = @import("../failures.zig");
 const ServerTransport = @import("../ServerTransport.zig");
 const Context = @import("Context.zig").Context;
+const Call = @import("Call.zig");
 
 const RawServer = @This();
 
@@ -69,6 +71,8 @@ shutdown_event: std.Io.Event = .unset,
 
 /// Calls from admission until their end.
 inflight: std.atomic.Value(u32) = .init(0),
+/// The memory all calls take now.
+live_bytes: std.atomic.Value(usize) = .init(0),
 /// Set when `inflight` drops to zero. Only the lifecycle task waits on it,
 /// and resets it before it looks at `inflight`.
 idle: std.Io.Event = .unset,
@@ -432,11 +436,81 @@ fn serviceFn(ptr: *anyopaque) *const transport.Dispatcher.Service {
 }
 
 fn admitFn(ptr: *anyopaque, io: std.Io, head: *const transport.RequestHead, body_len: usize) transport.Dispatcher.Admission {
-    _ = ptr;
-    _ = io;
-    _ = head;
-    _ = body_len;
-    return .{ .rejected = .{ .code = .unavailable, .app_code = "rpc.unavailable", .message = "Server is stopping" } };
+    const server: *RawServer = @ptrCast(@alignCast(ptr));
+    return server.admit(io, head, body_len);
+}
+
+/// Decides on a call before its body is read, in this order: the stop, the
+/// route and codec, the metadata, the budget, a place, the memory. Never
+/// waits and does no I/O.
+fn admit(server: *RawServer, io: std.Io, head: *const transport.RequestHead, body_len: usize) transport.Dispatcher.Admission {
+    if (server.grace_over.load(.acquire)) return .{ .rejected = failures.stopping };
+    const index = server.lookup(head.route) orelse return .{ .rejected = failures.unknown_method };
+    if (!std.mem.eql(u8, head.codec, "json")) return .{ .rejected = failures.unsupported_codec };
+    const limits = server.limits;
+    if (rules.checkRequestMetadata(head.metadata, .{ .max_entries = limits.max_metadata_entries, .max_bytes = limits.max_metadata_bytes })) |problem| {
+        return .{ .rejected = switch (problem) {
+            .invalid => failures.invalid_metadata,
+            .too_large => failures.metadata_too_large,
+        } };
+    }
+    const deadline = callDeadline(server.methods[index], limits, head) orelse return .{ .rejected = failures.invalid_timeout };
+    if (deadline.remaining(now(io)).nanoseconds < std.time.ns_per_ms) return .{ .rejected = failures.deadline_exceeded };
+    if (!server.takePlace()) return .{ .rejected = failures.overloaded };
+    if (body_len > limits.max_request_bytes) {
+        server.leave(io);
+        return .{ .rejected = failures.request_too_large };
+    }
+    const call = Call.create(server, io, index, head, body_len, deadline) catch {
+        server.leave(io);
+        return .{ .rejected = failures.out_of_memory };
+    };
+    return .{ .accepted = call.incoming() };
+}
+
+/// The deadline of a call: from the moment the transport read its head, the
+/// client's budget, but no more than the method's limit and `max_timeout`.
+/// Null for a negative budget.
+fn callDeadline(method: Method, limits: Limits, head: *const transport.RequestHead) ?core.Deadline {
+    var budget = method.timeout orelse limits.default_timeout;
+    if (head.timeout) |client| {
+        if (client.nanoseconds < 0) return null;
+        budget.nanoseconds = @min(budget.nanoseconds, client.nanoseconds);
+    }
+    budget.nanoseconds = @min(budget.nanoseconds, limits.max_timeout.nanoseconds);
+    return .after(head.received_at, budget);
+}
+
+/// Takes a place for one more call, unless `max_inflight` calls are in
+/// flight. Every admitted call holds a task or a place in the queue, so
+/// `Incoming.start` always finds room.
+fn takePlace(server: *RawServer) bool {
+    var current = server.inflight.load(.monotonic);
+    while (true) {
+        if (current >= server.limits.max_inflight) return false;
+        current = server.inflight.cmpxchgWeak(current, current + 1, .acq_rel, .monotonic) orelse return true;
+    }
+}
+
+/// A call has left: its place is free.
+fn leave(server: *RawServer, io: std.Io) void {
+    if (server.inflight.fetchSub(1, .acq_rel) == 1) server.idle.set(io);
+}
+
+/// Frees a call that has ended and frees its place.
+pub fn retire(server: *RawServer, io: std.Io, call: *Call) void {
+    // A Debug allocator may take a cancelable lock to capture a stack
+    // trace, and would swallow a cancelation of the calling task.
+    const protection = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(protection);
+    call.destroy();
+    server.leave(io);
+}
+
+/// `Incoming.start`: runs the call or puts it in the queue.
+pub fn schedule(server: *RawServer, io: std.Io, call: *Call) ?model.Failure {
+    server.retire(io, call);
+    return failures.no_task;
 }
 
 fn failFn(ptr: *anyopaque, io: std.Io, err: transport.Dispatcher.FatalError, diagnostics: ?*const transport.Diagnostics) void {
@@ -662,18 +736,18 @@ const FakeTransport = struct {
     release_start: std.Io.Event = .unset,
     ready: std.atomic.Value(bool) = .init(true),
     dispatcher_value: ?transport.Dispatcher = null,
-    calls: [8]Call = undefined,
+    steps: [8]Step = undefined,
     count: std.atomic.Value(usize) = .init(0),
 
-    const Call = enum { start, drain, close };
+    const Step = enum { start, drain, close };
 
-    fn record(t: *FakeTransport, call: Call) void {
+    fn record(t: *FakeTransport, step: Step) void {
         const i = t.count.fetchAdd(1, .acq_rel);
-        if (i < t.calls.len) t.calls[i] = call;
+        if (i < t.steps.len) t.steps[i] = step;
     }
 
-    fn recorded(t: *FakeTransport) []const Call {
-        return t.calls[0..@min(t.count.load(.acquire), t.calls.len)];
+    fn recorded(t: *FakeTransport) []const Step {
+        return t.steps[0..@min(t.count.load(.acquire), t.steps.len)];
     }
 
     pub fn start(t: *FakeTransport, io: std.Io, d: transport.Dispatcher) ServerTransport.StartError!void {
@@ -728,7 +802,7 @@ test "lifecycle: a server that never starts" {
     try server.wait(io);
     try server.shutdown(io);
     server.requestStop(io);
-    try testing.expectEqualSlices(FakeTransport.Call, &.{}, fake.recorded());
+    try testing.expectEqualSlices(FakeTransport.Step, &.{}, fake.recorded());
 }
 
 test "lifecycle: start, requestStop and wait drain the transport, then close it" {
@@ -750,7 +824,7 @@ test "lifecycle: start, requestStop and wait drain the transport, then close it"
     try testing.expect(!server.isReady());
     try server.wait(io);
     try testing.expectEqual(State.stopped, server.state());
-    try testing.expectEqualSlices(FakeTransport.Call, &.{ .start, .drain, .close }, fake.recorded());
+    try testing.expectEqualSlices(FakeTransport.Step, &.{ .start, .drain, .close }, fake.recorded());
     try testing.expectError(error.InvalidState, server.start(io));
     server.requestStop(io);
     try server.wait(io);
@@ -767,7 +841,7 @@ test "lifecycle: a transport that does not start leaves the server stopped" {
     try server.wait(io);
     try testing.expectError(error.InvalidState, server.start(io));
     // Neither drain nor close: the transport left nothing running.
-    try testing.expectEqualSlices(FakeTransport.Call, &.{.start}, fake.recorded());
+    try testing.expectEqualSlices(FakeTransport.Step, &.{.start}, fake.recorded());
 }
 
 fn startTask(server: *RawServer, io: std.Io) StartError!void {
@@ -791,7 +865,7 @@ test "lifecycle: requestStop while the transport starts: start ends, the server 
     try testing.expect(server.state() != .running);
     try server.wait(io);
     try testing.expectEqual(State.stopped, server.state());
-    try testing.expectEqualSlices(FakeTransport.Call, &.{ .start, .drain, .close }, fake.recorded());
+    try testing.expectEqualSlices(FakeTransport.Step, &.{ .start, .drain, .close }, fake.recorded());
 }
 
 test "lifecycle: a broken transport wakes wait with its error, and the server stops by itself" {
@@ -814,7 +888,7 @@ test "lifecycle: a broken transport wakes wait with its error, and the server st
     try testing.expectError(error.Unavailable, server.shutdown(io));
     try testing.expectEqual(State.stopped, server.state());
     try testing.expectError(error.Unavailable, server.wait(io));
-    try testing.expectEqualSlices(FakeTransport.Call, &.{ .start, .drain, .close }, fake.recorded());
+    try testing.expectEqualSlices(FakeTransport.Step, &.{ .start, .drain, .close }, fake.recorded());
 }
 
 fn runTask(server: *RawServer, io: std.Io) (StartError || WaitError)!void {
@@ -858,5 +932,325 @@ test "lifecycle: deinit stops a running server" {
     var server = try fakeServer(&fake);
     try server.start(io);
     server.deinit(io);
-    try testing.expectEqualSlices(FakeTransport.Call, &.{ .start, .drain, .close }, fake.recorded());
+    try testing.expectEqualSlices(FakeTransport.Step, &.{ .start, .drain, .close }, fake.recorded());
+}
+
+const admission_methods = [_]Method{
+    .{ .route = .{ .service = "users", .version = 1, .method = "getUser" }, .handler = no_handler, .timeout = .fromSeconds(2) },
+    methodOf("users", 1, "listUsers"),
+};
+
+/// A server to start where it stays: once started, it must not move.
+fn admissionServer(gpa: std.mem.Allocator, fake: *FakeTransport, limits: Limits) !RawServer {
+    return .init(gpa, .{ .transport = .init(fake), .methods = &admission_methods, .limits = limits });
+}
+
+fn headOf(io: std.Io, method: []const u8) transport.RequestHead {
+    return .{
+        .route = .{ .service = "users", .version = 1, .method = method },
+        .request_id = @splat(7),
+        .codec = "json",
+        .timeout = .fromSeconds(5),
+        .received_at = now(io),
+        .metadata = &.{},
+    };
+}
+
+fn expectRefused(admission: transport.Dispatcher.Admission, expected: model.Failure) !void {
+    switch (admission) {
+        .accepted => |incoming| {
+            incoming.abandon(testing.io);
+            return error.TestUnexpectedResult;
+        },
+        .rejected => |failure| {
+            try testing.expectEqual(expected.code, failure.code);
+            try testing.expectEqualStrings(expected.app_code, failure.app_code);
+            try testing.expectEqualStrings(expected.message, failure.message);
+        },
+    }
+}
+
+fn expectAdmitted(admission: transport.Dispatcher.Admission) !transport.Incoming {
+    return switch (admission) {
+        .accepted => |incoming| incoming,
+        .rejected => error.TestUnexpectedResult,
+    };
+}
+
+test "admission refuses by the route, the codec, the metadata and the budget, in this order" {
+    const io = testing.io;
+    var fake: FakeTransport = .{};
+    var server = try admissionServer(testing.allocator, &fake, .{});
+    defer server.deinit(io);
+    try server.start(io);
+    const d = fake.dispatcher_value.?;
+
+    var head = headOf(io, "deleteUser");
+    try expectRefused(d.admit(io, &head, 2), failures.unknown_method);
+    head.codec = "msgpack";
+    try expectRefused(d.admit(io, &head, 2), failures.unknown_method);
+    head = headOf(io, "get.User");
+    try expectRefused(d.admit(io, &head, 2), failures.unknown_method);
+    head = headOf(io, "getUser");
+    head.route.version = 2;
+    try expectRefused(d.admit(io, &head, 2), failures.unknown_method);
+
+    head = headOf(io, "getUser");
+    head.codec = "msgpack";
+    head.metadata = &.{.{ .key = "X-Bad", .value = "1" }};
+    try expectRefused(d.admit(io, &head, 2), failures.unsupported_codec);
+
+    head = headOf(io, "getUser");
+    const invalid = [_][]const model.Metadata.Entry{
+        &.{.{ .key = "X-Bad", .value = "1" }},
+        &.{.{ .key = "x-ok", .value = " padded" }},
+        &.{.{ .key = "zefir-unknown", .value = "1" }},
+        &.{ .{ .key = "authorization", .value = "Bearer a" }, .{ .key = "authorization", .value = "Bearer a" } },
+        &.{.{ .key = "zefir-correlation-id", .value = &@as([129]u8, @splat('c')) }},
+    };
+    for (invalid) |metadata| {
+        head.metadata = metadata;
+        try expectRefused(d.admit(io, &head, 2), failures.invalid_metadata);
+    }
+
+    // Hostile sizes are refused before anything is allocated.
+    const many = try testing.allocator.alloc(model.Metadata.Entry, 10_000);
+    defer testing.allocator.free(many);
+    @memset(many, .{ .key = "x-a", .value = "1" });
+    const huge_value: [16 * 1024]u8 = @splat('v');
+    const too_large = [_][]const model.Metadata.Entry{
+        many[0..65],
+        many,
+        &.{.{ .key = "x-a", .value = &huge_value }},
+        // Both too large and invalid: too large.
+        &.{ .{ .key = "X-Bad", .value = "1" }, .{ .key = "x-a", .value = &huge_value } },
+    };
+    for (too_large) |metadata| {
+        head.metadata = metadata;
+        try expectRefused(d.admit(io, &head, 1 << 30), failures.metadata_too_large);
+    }
+    // Exactly at the limits: admitted.
+    head.metadata = many[0..64];
+    (try expectAdmitted(d.admit(io, &head, 0))).abandon(io);
+
+    head = headOf(io, "getUser");
+    head.timeout = .fromNanoseconds(-1);
+    try expectRefused(d.admit(io, &head, 2), failures.invalid_timeout);
+    head.timeout = .fromMicroseconds(500);
+    try expectRefused(d.admit(io, &head, 2), failures.deadline_exceeded);
+    head.timeout = .fromSeconds(5);
+    head.received_at = now(io).subDuration(.fromSeconds(10));
+    try expectRefused(d.admit(io, &head, 2), failures.deadline_exceeded);
+    head.metadata = &.{.{ .key = "X-Bad", .value = "1" }};
+    try expectRefused(d.admit(io, &head, 2), failures.invalid_metadata);
+
+    try testing.expectEqual(@as(u32, 0), server.inflight.load(.acquire));
+    try testing.expectEqual(@as(usize, 0), server.live_bytes.load(.acquire));
+}
+
+test "admission holds a place per call and refuses one more" {
+    const io = testing.io;
+    var fake: FakeTransport = .{};
+    var server = try admissionServer(testing.allocator, &fake, .{ .max_active_tasks = 1, .queue_capacity = 1, .max_inflight = 2 });
+    defer server.deinit(io);
+    try server.start(io);
+    const d = fake.dispatcher_value.?;
+    const head = headOf(io, "getUser");
+    // Calls left over by a failed check would hold the stop forever.
+    var calls: [3]?transport.Incoming = @splat(null);
+    defer for (calls) |call| if (call) |incoming| incoming.abandon(io);
+
+    calls[0] = try expectAdmitted(d.admit(io, &head, 100));
+    try testing.expectEqual(@as(usize, 100), calls[0].?.body().len);
+    calls[1] = try expectAdmitted(d.admit(io, &head, 0));
+    try testing.expectEqual(@as(usize, 0), calls[1].?.body().len);
+    try testing.expectEqual(@as(u32, 2), server.inflight.load(.acquire));
+    try expectRefused(d.admit(io, &head, 0), failures.overloaded);
+    calls[0].?.abandon(io);
+    calls[0] = null;
+    calls[2] = try expectAdmitted(d.admit(io, &head, 0));
+    for (&calls) |*call| if (call.*) |incoming| {
+        incoming.abandon(io);
+        call.* = null;
+    };
+    try testing.expectEqual(@as(u32, 0), server.inflight.load(.acquire));
+    try testing.expectEqual(@as(usize, 0), server.live_bytes.load(.acquire));
+}
+
+test "admission reserves the memory of a call before its body is read" {
+    const io = testing.io;
+    var fake: FakeTransport = .{};
+    var server = try admissionServer(testing.allocator, &fake, .{
+        .max_request_bytes = 4096,
+        .max_request_memory_bytes = 4096,
+        .max_live_request_memory_bytes = 16 * 1024,
+    });
+    defer server.deinit(io);
+    try server.start(io);
+    const d = fake.dispatcher_value.?;
+    const head = headOf(io, "getUser");
+
+    // A claimed gigabyte costs nothing.
+    try expectRefused(d.admit(io, &head, 1 << 30), failures.request_too_large);
+    try testing.expectEqual(@as(usize, 0), server.live_bytes.load(.acquire));
+    // The body fits max_request_bytes, but with the call's own memory not
+    // max_request_memory_bytes.
+    try expectRefused(d.admit(io, &head, 4096), failures.out_of_memory);
+
+    // Calls until the memory of all calls runs out.
+    var admitted: std.ArrayList(transport.Incoming) = .empty;
+    defer admitted.deinit(testing.allocator);
+    defer for (admitted.items) |incoming| incoming.abandon(io);
+    while (true) {
+        switch (d.admit(io, &head, 2048)) {
+            .accepted => |incoming| try admitted.append(testing.allocator, incoming),
+            .rejected => |failure| {
+                try testing.expectEqualStrings(failures.out_of_memory.message, failure.message);
+                break;
+            },
+        }
+        try testing.expect(admitted.items.len < 16);
+    }
+    try testing.expect(admitted.items.len >= 2);
+    try testing.expect(server.live_bytes.load(.acquire) <= 16 * 1024);
+    try testing.expectEqual(@as(u32, @intCast(admitted.items.len)), server.inflight.load(.acquire));
+    // A call that ends makes room for the next one.
+    admitted.pop().?.abandon(io);
+    try admitted.append(testing.allocator, try expectAdmitted(d.admit(io, &head, 2048)));
+}
+
+test "admission: a call the allocator cannot hold is refused, and nothing leaks" {
+    const io = testing.io;
+    var fake: FakeTransport = .{};
+    var failing: std.testing.FailingAllocator = .init(testing.allocator, .{});
+    var server = try admissionServer(failing.allocator(), &fake, .{});
+    defer server.deinit(io);
+    try server.start(io);
+    const d = fake.dispatcher_value.?;
+    var head = headOf(io, "getUser");
+    head.metadata = &.{ .{ .key = "x-a", .value = "1" }, .{ .key = "traceparent", .value = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01" } };
+    head.peer = .{ .name = "client" };
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        failing.fail_index = failing.alloc_index + fail_index;
+        switch (d.admit(io, &head, 16)) {
+            .accepted => |incoming| {
+                incoming.abandon(io);
+                break;
+            },
+            .rejected => |failure| try testing.expectEqualStrings(failures.out_of_memory.message, failure.message),
+        }
+    }
+    try testing.expect(fail_index > 0);
+    try testing.expectEqual(@as(u32, 0), server.inflight.load(.acquire));
+    try testing.expectEqual(@as(usize, 0), server.live_bytes.load(.acquire));
+}
+
+test "admission copies the head: metadata without reserved keys, the peer, the deadline, the server's span" {
+    const io = testing.io;
+    var fake: FakeTransport = .{};
+    var server = try admissionServer(testing.allocator, &fake, .{ .default_timeout = .fromSeconds(4), .max_timeout = .fromSeconds(30) });
+    defer server.deinit(io);
+    try server.start(io);
+    const d = fake.dispatcher_value.?;
+
+    var traceparent = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01".*;
+    var peer_name = "client-1".*;
+    var metadata = [_]model.Metadata.Entry{
+        .{ .key = "x-a", .value = "1" },
+        .{ .key = "authorization", .value = "Bearer t" },
+        .{ .key = "x-a", .value = "2" },
+        .{ .key = "traceparent", .value = &traceparent },
+        .{ .key = "tracestate", .value = "vendor=value" },
+        .{ .key = "zefir-correlation-id", .value = "corr-1" },
+    };
+    var head = headOf(io, "getUser");
+    head.metadata = &metadata;
+    head.peer = .{ .name = &peer_name };
+    const incoming = try expectAdmitted(d.admit(io, &head, 3));
+    defer incoming.abandon(io);
+    // The head is borrowed only during admit.
+    traceparent[3] = 'f';
+    peer_name[0] = 'X';
+    metadata[0].value = "changed";
+
+    const call: *Call = @ptrCast(@alignCast(incoming.ptr));
+    const context = &call.context;
+    try testing.expectEqualStrings("getUser", context.route.method);
+    try testing.expectEqual(head.request_id, context.request_id);
+    try testing.expectEqual(@as(usize, 2), context.metadata.len);
+    try testing.expectEqualStrings("1", context.metadata[0].value);
+    try testing.expectEqualStrings("2", context.metadata[1].value);
+    try testing.expectEqualStrings("Bearer t", context.authorization.?);
+    try testing.expectEqualStrings("corr-1", context.correlation_id.?);
+    try testing.expectEqualStrings("client-1", context.peer.name);
+    // The method's 2 s limit is shorter than the client's 5 s budget.
+    try testing.expectEqual(head.received_at.addDuration(.fromSeconds(2)).nanoseconds, call.deadline.expires.nanoseconds);
+    try testing.expectEqual(call.deadline, context.operation.deadline.?);
+    try testing.expect(context.operation.cancellation == &call.token);
+
+    const trace = context.operation.trace.?;
+    try testing.expectEqualStrings("0af7651916cd43dd8448eb211c80319c", &trace.trace_id.toHex());
+    try testing.expect(!std.mem.eql(u8, "b7ad6b7169203331", &trace.span_id.toHex()));
+    try testing.expect(!trace.is_remote and trace.flags.sampled);
+    try testing.expectEqualStrings("value", trace.state.get("vendor").?);
+
+    // A broken tracestate is dropped, the trace stays; a broken traceparent
+    // leaves no trace.
+    var second_metadata = [_]model.Metadata.Entry{
+        .{ .key = "traceparent", .value = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01" },
+        .{ .key = "tracestate", .value = "=broken" },
+    };
+    head.metadata = &second_metadata;
+    const second = try expectAdmitted(d.admit(io, &head, 0));
+    defer second.abandon(io);
+    const second_call: *Call = @ptrCast(@alignCast(second.ptr));
+    try testing.expect(second_call.context.operation.trace.?.state.isEmpty());
+    second_metadata[0].value = "00-00000000000000000000000000000000-b7ad6b7169203331-01";
+    const third = try expectAdmitted(d.admit(io, &head, 0));
+    defer third.abandon(io);
+    try testing.expectEqual(@as(?core.TraceContext, null), @as(*Call, @ptrCast(@alignCast(third.ptr))).context.operation.trace);
+
+    // Deadlines: the client's budget when shorter, the default without a
+    // method limit, never past max_timeout.
+    head = headOf(io, "getUser");
+    head.timeout = .fromSeconds(1);
+    try expectDeadline(d, &head, .fromSeconds(1));
+    head.timeout = null;
+    try expectDeadline(d, &head, .fromSeconds(2));
+    head = headOf(io, "listUsers");
+    head.timeout = null;
+    try expectDeadline(d, &head, .fromSeconds(4));
+    head.timeout = .fromSeconds(60);
+    try expectDeadline(d, &head, .fromSeconds(4));
+}
+
+fn expectDeadline(d: transport.Dispatcher, head: *const transport.RequestHead, budget: std.Io.Duration) !void {
+    const incoming = try expectAdmitted(d.admit(testing.io, head, 0));
+    defer incoming.abandon(testing.io);
+    const call: *Call = @ptrCast(@alignCast(incoming.ptr));
+    try testing.expectEqual(head.received_at.addDuration(budget).nanoseconds, call.deadline.expires.nanoseconds);
+}
+
+test "admission caps a method limit at max_timeout" {
+    const io = testing.io;
+    var fake: FakeTransport = .{};
+    const long = [_]Method{.{ .route = .{ .service = "users", .version = 1, .method = "getUser" }, .handler = no_handler, .timeout = .fromSeconds(60) }};
+    var server: RawServer = try .init(testing.allocator, .{ .transport = .init(&fake), .methods = &long, .limits = .{ .max_timeout = .fromSeconds(10) } });
+    defer server.deinit(io);
+    try server.start(io);
+    var head = headOf(io, "getUser");
+    head.timeout = null;
+    try expectDeadline(fake.dispatcher_value.?, &head, .fromSeconds(10));
+}
+
+test "admission refuses every call once the grace of a stop is over" {
+    const io = testing.io;
+    var fake: FakeTransport = .{};
+    var server = try admissionServer(testing.allocator, &fake, .{});
+    defer server.deinit(io);
+    try server.start(io);
+    server.endGrace();
+    const head = headOf(io, "getUser");
+    try expectRefused(fake.dispatcher_value.?.admit(io, &head, 0), failures.stopping);
 }
