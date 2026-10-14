@@ -64,6 +64,8 @@ table: std.StringArrayHashMapUnmanaged(u32),
 /// The counters of each route, by its index in `methods`.
 stats: []RouteStats,
 limits: Limits,
+/// `limits.max_inflight`, or the sum it stands for when null.
+max_inflight: u32,
 shutdown_grace: std.Io.Duration,
 /// What `Dispatcher.service` returns.
 service_info: transport.Dispatcher.Service,
@@ -169,16 +171,17 @@ pub const Limits = struct {
     queue_capacity: u32 = 256,
     /// Calls the server holds at once, from admission until their end; at
     /// most `max_active_tasks + queue_capacity`: every admitted call holds
-    /// a task or a place in the queue.
-    max_inflight: u32 = 4352,
+    /// a task or a place in the queue. Null: that sum, 4352 by default.
+    max_inflight: ?u32 = null,
     /// The largest request body.
     max_request_bytes: usize = 1 << 20,
     /// The largest response body; at least 1024 bytes, so that a failure
     /// always fits.
     max_response_bytes: usize = 1 << 20,
     /// The memory of one call: its body, the copy of its head and all its
-    /// handler allocates with `ctx.allocator()`. At least
-    /// `max_request_bytes`.
+    /// handler allocates with `ctx.allocator()`. More than
+    /// `max_request_bytes`: the call itself and the copy of its head take
+    /// their share, so with both equal the largest body never fits.
     max_request_memory_bytes: usize = 8 << 20,
     /// The memory of all calls at once. At least
     /// `max_request_memory_bytes`.
@@ -201,7 +204,11 @@ pub const Limits = struct {
 /// `InvalidConfiguration`: no methods, a route name against the rules
 /// (`[A-Za-z0-9_-]`, 1 to 64 characters, a version above 0), the same route
 /// twice, a method timeout that is not positive, limits that are zero or
-/// contradict each other, a negative shutdown grace.
+/// contradict each other (`max_inflight` over `max_active_tasks +
+/// queue_capacity`, `max_request_bytes` over `max_request_memory_bytes`,
+/// that over `max_live_request_memory_bytes`, `default_timeout` over
+/// `max_timeout`, a response or metadata budget under 1024 bytes), a
+/// negative shutdown grace.
 pub const InitError = error{ InvalidConfiguration, OutOfMemory };
 
 /// Checks the options and builds the route table. No I/O and no tasks.
@@ -233,6 +240,7 @@ pub fn init(gpa: std.mem.Allocator, options: Options) InitError!RawServer {
         if (entry.found_existing) return error.InvalidConfiguration;
         entry.value_ptr.* = @intCast(i);
     }
+    const max_inflight = options.limits.max_inflight orelse options.limits.max_active_tasks +| options.limits.queue_capacity;
     return .{
         .gpa = gpa,
         .arena = arena,
@@ -241,10 +249,11 @@ pub fn init(gpa: std.mem.Allocator, options: Options) InitError!RawServer {
         .table = table,
         .stats = stats,
         .limits = options.limits,
+        .max_inflight = max_inflight,
         .shutdown_grace = options.shutdown_grace,
         .service_info = .{
             .routes = routes,
-            .max_inflight = options.limits.max_inflight,
+            .max_inflight = max_inflight,
             .max_request_bytes = options.limits.max_request_bytes,
             .max_metadata_entries = options.limits.max_metadata_entries,
             .max_metadata_bytes = options.limits.max_metadata_bytes,
@@ -621,7 +630,7 @@ fn callDeadline(method: Method, limits: Limits, head: *const transport.RequestHe
 fn takePlace(server: *RawServer) bool {
     var current = server.inflight.load(.monotonic);
     while (true) {
-        if (current >= server.limits.max_inflight) return false;
+        if (current >= server.max_inflight) return false;
         current = server.inflight.cmpxchgWeak(current, current + 1, .acq_rel, .monotonic) orelse return true;
     }
 }
@@ -719,8 +728,10 @@ fn lookup(server: *const RawServer, route: model.Route) ?u32 {
 const min_budget_bytes = 1024;
 
 fn validLimits(limits: Limits) bool {
-    if (limits.max_active_tasks == 0 or limits.queue_capacity == 0 or limits.max_inflight == 0) return false;
-    if (@as(u64, limits.max_inflight) > @as(u64, limits.max_active_tasks) + limits.queue_capacity) return false;
+    if (limits.max_active_tasks == 0 or limits.queue_capacity == 0) return false;
+    if (limits.max_inflight) |max_inflight| {
+        if (max_inflight == 0 or @as(u64, max_inflight) > @as(u64, limits.max_active_tasks) + limits.queue_capacity) return false;
+    }
     if (limits.max_request_bytes == 0 or limits.max_request_bytes > limits.max_request_memory_bytes) return false;
     if (limits.max_request_memory_bytes > limits.max_live_request_memory_bytes) return false;
     if (limits.max_response_bytes < min_budget_bytes) return false;
@@ -793,7 +804,6 @@ test "the default limits are those of rpc 1.6" {
     try testing.expect(validLimits(limits));
     try testing.expectEqual(@as(u32, 4096), limits.max_active_tasks);
     try testing.expectEqual(@as(u32, 256), limits.queue_capacity);
-    try testing.expectEqual(@as(u32, 4352), limits.max_inflight);
     try testing.expectEqual(@as(usize, 1 << 20), limits.max_request_bytes);
     try testing.expectEqual(@as(usize, 1 << 20), limits.max_response_bytes);
     try testing.expectEqual(@as(usize, 8 << 20), limits.max_request_memory_bytes);
@@ -806,6 +816,30 @@ test "the default limits are those of rpc 1.6" {
     try testing.expectEqual(@as(i64, 300), limits.max_timeout.toSeconds());
     const options: Options = .{ .transport = undefined, .methods = &.{} };
     try testing.expectEqual(@as(i64, 10), options.shutdown_grace.toSeconds());
+    // max_inflight follows the tasks and the queue: 4096 + 256.
+    try testing.expectEqual(@as(?u32, null), limits.max_inflight);
+    try testing.expectEqual(@as(u32, 4352), try maxInflightOf(limits));
+}
+
+/// The `max_inflight` a server with these limits tells its transport.
+fn maxInflightOf(limits: Limits) !u32 {
+    var memory: MemoryTransport = try .init(testing.allocator, .{});
+    defer memory.deinit(testing.io);
+    var server: RawServer = try .init(testing.allocator, .{ .transport = memory.serverTransport(), .methods = &.{methodOf("users", 1, "getUser")}, .limits = limits });
+    defer server.deinit(testing.io);
+    try testing.expectEqual(server.service_info.max_inflight, server.max_inflight);
+    return server.max_inflight;
+}
+
+test "max_active_tasks and queue_capacity change alone; max_inflight follows them unless set" {
+    try testing.expectEqual(@as(u32, 64 + 256), try maxInflightOf(.{ .max_active_tasks = 64 }));
+    try testing.expectEqual(@as(u32, 4096 + 16), try maxInflightOf(.{ .queue_capacity = 16 }));
+    try testing.expectEqual(@as(u32, 100), try maxInflightOf(.{ .max_inflight = 100 }));
+    // The sum saturates.
+    try testing.expectEqual(@as(u32, std.math.maxInt(u32)), try maxInflightOf(.{
+        .max_active_tasks = std.math.maxInt(u32),
+        .queue_capacity = std.math.maxInt(u32),
+    }));
 }
 
 test "init refuses options that cannot work" {
