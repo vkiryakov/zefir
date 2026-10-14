@@ -85,6 +85,17 @@ grace_over: std.atomic.Value(bool) = .init(false),
 /// The supervisors of the calls. Only the lifecycle task awaits it, once
 /// the transport has closed and no call is left.
 supervisors: std.Io.Group = .init,
+/// Serializes `supervisors.concurrent`: std does not promise that calls
+/// from several tasks at once are safe.
+spawn_mutex: std.Io.Mutex = .init,
+/// Under `mutex`: the supervisors at work, one call each.
+active: u32 = 0,
+/// Under `mutex`: the calls of the supervisors at work.
+running: std.DoublyLinkedList = .{},
+/// Under `mutex`: started calls that wait for a supervisor, first in first
+/// out.
+queue: std.DoublyLinkedList = .{},
+queued: u32 = 0,
 
 pub const Options = struct {
     /// The server side of a transport. The server drives it through
@@ -389,8 +400,10 @@ fn runLifecycle(server: *RawServer, io: std.Io) void {
 
     server.server_transport.drain(io);
     _ = server.waitIdle(io, .after(now(io), server.shutdown_grace));
-    server.endGrace();
+    server.endGrace(io);
     server.server_transport.close(io);
+    // Calls queued after the grace ended, before the transport closed.
+    server.refuseQueued(io);
     if (!server.waitIdle(io, .after(now(io), cancel_budget))) {
         // Handlers that ignore cancelation: `shutdown` returns
         // `ShutdownTimeout` while the server stays in draining, and the
@@ -420,9 +433,72 @@ fn waitIdle(server: *RawServer, io: std.Io, deadline: ?core.Deadline) bool {
     }
 }
 
-/// The grace is over: admission refuses new calls.
-fn endGrace(server: *RawServer) void {
-    server.grace_over.store(true, .release);
+/// The grace is over: admission refuses new calls, the calls that run are
+/// canceled, those in the queue are refused.
+fn endGrace(server: *RawServer, io: std.Io) void {
+    {
+        server.mutex.lockUncancelable(io);
+        defer server.mutex.unlock(io);
+        // Under the mutex: a supervisor checks the flag when it takes a
+        // call, so every call either is in `running` now or sees the flag.
+        server.grace_over.store(true, .release);
+        var node = server.running.first;
+        while (node) |n| : (node = n.next) {
+            const call: *Call = @alignCast(@fieldParentPtr("node", n));
+            call.stop(io, .shutdown);
+        }
+    }
+    server.refuseQueued(io);
+}
+
+/// Refuses every call in the queue with `unavailable`: none has started.
+fn refuseQueued(server: *RawServer, io: std.Io) void {
+    var taken = taken: {
+        server.mutex.lockUncancelable(io);
+        defer server.mutex.unlock(io);
+        const taken = server.queue;
+        server.queue = .{};
+        server.queued = 0;
+        break :taken taken;
+    };
+    while (taken.popFirst()) |node| {
+        const call: *Call = @alignCast(@fieldParentPtr("node", node));
+        call.endUnstarted(io, call.choose(.shutdown));
+        server.retire(io, call);
+    }
+}
+
+/// The task of a supervisor: runs its call, then the calls it takes from
+/// the queue, until the queue is empty.
+fn superviseCalls(server: *RawServer, first: *Call, io: std.Io) void {
+    // Nothing cancels a supervisor: the outcome of a call decides, and
+    // the handler's task is canceled through its own future.
+    const protection = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(protection);
+    var call = first;
+    while (true) {
+        call.supervise(io);
+        call = server.next(io, call) orelse return;
+    }
+}
+
+/// Retires a call that ended and hands its supervisor the next call of the
+/// queue, if there is one.
+fn next(server: *RawServer, io: std.Io, done: *Call) ?*Call {
+    const following: ?*Call = following: {
+        server.mutex.lockUncancelable(io);
+        defer server.mutex.unlock(io);
+        server.running.remove(&done.node);
+        if (server.queue.popFirst()) |node| {
+            server.queued -= 1;
+            server.running.append(node);
+            break :following @alignCast(@fieldParentPtr("node", node));
+        }
+        server.active -= 1;
+        break :following null;
+    };
+    server.retire(io, done);
+    return following;
 }
 
 fn dispatcher(server: *RawServer) transport.Dispatcher {
@@ -525,10 +601,40 @@ pub fn retire(server: *RawServer, io: std.Io, call: *Call) void {
     server.leave(io);
 }
 
-/// `Incoming.start`: runs the call or puts it in the queue.
+/// `Incoming.start`: gives the call a supervisor, or puts it in the queue
+/// when `max_active_tasks` supervisors are at work. A failure only when no
+/// task could be started; the call is gone then.
 pub fn schedule(server: *RawServer, io: std.Io, call: *Call) ?model.Failure {
-    server.retire(io, call);
-    return failures.no_task;
+    {
+        server.mutex.lockUncancelable(io);
+        defer server.mutex.unlock(io);
+        if (server.active == server.limits.max_active_tasks) {
+            // Every admitted call holds a place, so the queue has room.
+            std.debug.assert(server.queued < server.limits.queue_capacity);
+            server.queue.append(&call.node);
+            server.queued += 1;
+            return null;
+        }
+        server.active += 1;
+        server.running.append(&call.node);
+    }
+    const spawned = spawned: {
+        server.spawn_mutex.lockUncancelable(io);
+        defer server.spawn_mutex.unlock(io);
+        break :spawned server.supervisors.concurrent(io, superviseCalls, .{ server, call, io });
+    };
+    spawned catch {
+        {
+            server.mutex.lockUncancelable(io);
+            defer server.mutex.unlock(io);
+            server.running.remove(&call.node);
+            server.active -= 1;
+        }
+        server.stats[call.route_index].countFailure(io, failures.no_task);
+        server.retire(io, call);
+        return failures.no_task;
+    };
+    return null;
 }
 
 fn failFn(ptr: *anyopaque, io: std.Io, err: transport.Dispatcher.FatalError, diagnostics: ?*const transport.Diagnostics) void {
@@ -1268,7 +1374,7 @@ test "admission refuses every call once the grace of a stop is over" {
     var server = try admissionServer(testing.allocator, &fake, .{});
     defer server.deinit(io);
     try server.start(io);
-    server.endGrace();
+    server.endGrace(io);
     const head = headOf(io, "getUser");
     try expectRefused(fake.dispatcher_value.?.admit(io, &head, 0), failures.stopping);
 }

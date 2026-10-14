@@ -32,10 +32,12 @@ pub fn body(c: Incoming) []u8 {
 /// Hands the call to the engine, which schedules it and returns at once
 /// with null. `reply.send` and `reply.release` may come from another task
 /// before `start` returns. A `Failure` means the engine could not schedule
-/// the call: the transport answers it like a refusal of `admit` and forgets
-/// it, and no `Reply` call follows. Its strings are static, literals of the
-/// engine, as with `admit`: the transport may use them after the engine has
-/// forgotten the call.
+/// the call (no task for it): the transport answers it like a refusal of
+/// `admit` and forgets it, and no `Reply` call follows. The engine has
+/// freed the call by then, so no `cancel` of it may run after `start`
+/// returns a `Failure`. The strings of the failure are static, literals of
+/// the engine, as with `admit`: the transport may use them after the engine
+/// has forgotten the call.
 pub fn start(c: Incoming, io: std.Io, reply: Reply) ?model.Failure {
     return c.vtable.start(c.ptr, io, reply);
 }
@@ -50,9 +52,13 @@ pub fn abandon(c: Incoming, io: std.Io) void {
 /// The client gave up: a CANCEL frame came, or the connection of a direct
 /// transport broke (NATS has no such signal). Allowed from the moment
 /// `start` is entered until `reply.release` returns, also while `start`
-/// runs. It cancels the call and wakes its supervisor without locks: it
-/// never waits and never calls `Reply`, so the transport may call it under
-/// its own lock. A second call does nothing.
+/// runs, but never past a `start` that returns a `Failure`: the call is
+/// gone then. A transport that cancels from another task than the one in
+/// `start` holds such a cancel until `start` returns, and drops it after a
+/// `Failure`, as `rpc.testing.MemoryTransport` does. It cancels the call
+/// and wakes its supervisor without locks: it never waits and never calls
+/// `Reply`, so the transport may call it under its own lock. A second call
+/// does nothing.
 pub fn cancel(c: Incoming, io: std.Io) void {
     c.vtable.cancel(c.ptr, io);
 }

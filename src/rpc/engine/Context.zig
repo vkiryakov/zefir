@@ -32,4 +32,10 @@ pub const CallContext = struct {
     /// The reserved values of the request, for the engine.
     authorization: ?[]const u8 = null,
     correlation_id: ?[]const u8 = null,
+    /// The metadata of the response, in the arena.
+    response_metadata: std.ArrayList(model.Metadata.Entry) = .empty,
+    /// The failure set with `fail`.
+    recorded: ?model.Failure = null,
+    /// The body of the recorded failure (the violations of `rpc.Server`).
+    failure_body: []const u8 = "",
 };

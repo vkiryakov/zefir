@@ -14,7 +14,10 @@ const core = @import("core");
 const model = @import("../model.zig");
 const transport = @import("../transport.zig");
 const rules = @import("../rules.zig");
+const failures = @import("../failures.zig");
+const waiting = @import("../wait.zig");
 const RawServer = @import("RawServer.zig");
+const Context = @import("Context.zig").Context;
 const CallContext = @import("Context.zig").CallContext;
 const Incoming = transport.Incoming;
 const Reply = transport.Reply;
@@ -41,6 +44,8 @@ outcome: std.atomic.Value(Outcome) = .init(.pending),
 token: core.CancellationToken = .init,
 /// Wakes the supervisor: the handler ended, or an outcome was chosen.
 wake: std.Io.Event = .unset,
+/// The handler's task has ended; set before `wake`.
+handler_done: std.atomic.Value(bool) = .init(false),
 context: CallContext,
 
 /// How a call ends; the first to choose wins.
@@ -205,6 +210,157 @@ pub fn stop(call: *Call, io: std.Io, outcome: Outcome) void {
     if (call.choose(outcome) != outcome) return;
     call.token.cancel();
     call.wake.set(io);
+}
+
+/// Runs the call from its start to `reply.release`, in a supervisor's
+/// task with cancelation blocked. The handler runs in a task of its own,
+/// whose `Future` only the supervisor touches. The deadline, the client's
+/// cancel and the stop each choose the outcome once; at most one response
+/// goes out, and `release` comes last, once the handler has really ended.
+pub fn supervise(call: *Call, io: std.Io) void {
+    if (call.outcomeBeforeStart(io)) |outcome| return call.endUnstarted(io, outcome);
+    var handler = io.concurrent(runHandler, .{ call, io }) catch
+        return call.endUnstarted(io, call.choose(.no_task));
+
+    var result: ?(anyerror![]const u8) = null;
+    const outcome: Outcome = outcome: {
+        waiting.untilSet(&call.wake, io, call.deadline) catch |err| switch (err) {
+            error.Timeout => break :outcome call.choose(.deadline),
+            // The supervisor blocks cancelation.
+            error.Canceled => unreachable,
+        };
+        const chosen = call.outcome.load(.acquire);
+        if (chosen != .pending) break :outcome chosen;
+        // Nothing else wakes the supervisor: the handler has ended. Its
+        // success still has to beat the deadline and the others.
+        result = handler.await(io);
+        break :outcome call.choose(if (call.deadline.isExpired(now(io))) .deadline else .finished);
+    };
+    // A failure of the engine goes out before the handler is canceled: the
+    // client does not wait while the handler unwinds.
+    const failure: ?model.Failure = switch (outcome) {
+        .deadline => failures.deadline_exceeded,
+        .shutdown => failures.stopped,
+        .canceled => failures.cancelled,
+        .finished => null,
+        .pending, .no_task => unreachable,
+    };
+    if (outcome == .deadline or outcome == .shutdown) call.sendFailure(io, failure.?, false);
+
+    var disposition: Reply.Disposition = .completed;
+    if (result == null) {
+        if (call.handler_done.load(.acquire)) {
+            result = handler.await(io);
+        } else {
+            // Waits until the handler has ended.
+            result = handler.cancel(io);
+            disposition = .canceled;
+        }
+    }
+    const sent = failure orelse call.sendResult(io, result.?);
+    call.record(io, sent);
+    call.reply.release(io, disposition);
+}
+
+/// Why the call must not start, if it must not: canceled or stopped while
+/// it waited in the queue, the grace of a stop is over, or no budget is
+/// left.
+fn outcomeBeforeStart(call: *Call, io: std.Io) ?Outcome {
+    const chosen = call.outcome.load(.acquire);
+    if (chosen != .pending) return chosen;
+    if (call.server.grace_over.load(.acquire)) return call.choose(.shutdown);
+    if (call.deadline.remaining(now(io)).nanoseconds < std.time.ns_per_ms) return call.choose(.deadline);
+    return null;
+}
+
+/// Ends a call whose handler never started: a refusal, except for a client
+/// that gave up, and `release(.not_started)`: running it elsewhere is
+/// safe.
+pub fn endUnstarted(call: *Call, io: std.Io, outcome: Outcome) void {
+    const failure: model.Failure = switch (outcome) {
+        .canceled => failures.cancelled,
+        .shutdown => failures.stopping,
+        .deadline => failures.deadline_exceeded,
+        .no_task => failures.no_task,
+        .pending, .finished => unreachable,
+    };
+    if (outcome != .canceled) call.sendFailure(io, failure, true);
+    call.record(io, failure);
+    call.reply.release(io, .not_started);
+}
+
+/// The handler's task.
+fn runHandler(call: *Call, io: std.Io) anyerror![]const u8 {
+    defer {
+        call.handler_done.store(true, .release);
+        call.wake.set(io);
+    }
+    try call.context.operation.check(now(io));
+    const method = &call.server.methods[call.route_index];
+    return method.handler.handle(method.handler.ptr, call.contextPtr(), call.body);
+}
+
+fn contextPtr(call: *Call) *Context {
+    return @ptrCast(&call.context);
+}
+
+/// Sends what the handler returned; returns the failure it sent, if any.
+fn sendResult(call: *Call, io: std.Io, result: anyerror![]const u8) ?model.Failure {
+    const context = &call.context;
+    const max = call.server.limits.max_response_bytes;
+    if (result) |body| {
+        if (body.len > max) {
+            call.sendFailure(io, failures.response_too_large, false);
+            return failures.response_too_large;
+        }
+        call.send(io, &.{ .status = .ok, .metadata = context.response_metadata.items, .body = body });
+        return null;
+    } else |err| {
+        var failure = failures.fromError(err, context.recorded, context.map_error);
+        // Violations travel in the body; the engine and transports never
+        // carry them in the failure.
+        failure.violations = &.{};
+        failure.violations_truncated = false;
+        const body = if (err == error.RpcFailure and context.recorded != null) context.failure_body else "";
+        if (body.len > max) {
+            call.sendFailure(io, failures.response_too_large, false);
+            return failures.response_too_large;
+        }
+        call.send(io, &.{ .status = .{ .failure = failure }, .metadata = context.response_metadata.items, .body = body });
+        return failure;
+    }
+}
+
+/// Sends a failure of the engine, without metadata or body.
+fn sendFailure(call: *Call, io: std.Io, failure: model.Failure, refused: bool) void {
+    call.send(io, &.{ .status = .{ .failure = failure }, .refused = refused });
+}
+
+fn send(call: *Call, io: std.Io, response: *const model.Response) void {
+    call.reply.send(io, response) catch |err| switch (err) {
+        // The transport cannot carry it: one small failure in its place.
+        error.ResponseTooLarge => call.reply.send(io, &.{
+            .status = .{ .failure = failures.response_too_large },
+            .refused = response.refused,
+        }) catch {},
+        // The link is gone, and the response with it.
+        error.Closed, error.OutOfMemory, error.Unexpected => {},
+        // The supervisor blocks cancelation.
+        error.Canceled => unreachable,
+    };
+}
+
+/// Counts the end of the call for its route: the time, and the failure it
+/// ended with, if any. Before `release`: the failure may point into the
+/// arena.
+fn record(call: *Call, io: std.Io, failure: ?model.Failure) void {
+    const stats = &call.server.stats[call.route_index];
+    stats.addTime(call.received_at.durationTo(now(io)));
+    if (failure) |f| stats.countFailure(io, f);
+}
+
+fn now(io: std.Io) std.Io.Timestamp {
+    return std.Io.Clock.awake.now(io);
 }
 
 const incoming_vtable: Incoming.VTable = .{ .body = bodyFn, .start = startFn, .abandon = abandonFn, .cancel = cancelFn };
