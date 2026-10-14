@@ -197,6 +197,27 @@ fn fill(member: *Member, payload: []const u8) Io.Cancelable!void {
     }
 }
 
+/// Waits until `client`'s writer is stuck: a publish waits for room, and
+/// none went in for 100 ms. A queue at its limit alone is not enough: the
+/// sockets may still take a batch, and the queue drain until the next
+/// publish fills it.
+fn awaitStuck(io: Io, client: *nats.Client) !void {
+    const since = Io.Clock.awake.now(io);
+    var last = client.stats().messages_out;
+    var quiet_since = Io.Clock.awake.now(io);
+    while (true) {
+        try io.sleep(.fromMilliseconds(5), .awake);
+        const out = client.stats().messages_out;
+        if (out != last or client.outbound.roomWaiters(io) == 0) {
+            last = out;
+            quiet_since = Io.Clock.awake.now(io);
+        } else if (stress.elapsedSince(io, quiet_since).toMilliseconds() >= 100) {
+            return;
+        }
+        if (stress.elapsedSince(io, since).toSeconds() >= 30) return error.TestQueueNeverFull;
+    }
+}
+
 /// Publishes to the members' subscriptions every 10 ms until `stop`.
 fn feedLoop(client: *nats.Client, stop: *std.atomic.Value(bool), failures: *std.atomic.Value(u32)) Io.Cancelable!void {
     const io = client.io;
@@ -385,13 +406,7 @@ fn storm(io: Io) !void {
         var fills: Io.Group = .init;
         defer fills.cancel(io);
         for (&members) |*m| try fills.concurrent(io, fill, .{ m, fill_payload });
-        for (&members) |*m| {
-            const since = Io.Clock.awake.now(io);
-            while (m.client.stats().pending_outbound_bytes < member_limits.outbound_bytes) {
-                if (stress.elapsedSince(io, since).toSeconds() >= 30) return error.TestQueueNeverFull;
-                try io.sleep(.fromMilliseconds(5), .awake);
-            }
-        }
+        for (&members) |*m| try awaitStuck(io, &m.client);
         // The writers are stuck and publishes wait for room, while the
         // server still sends: the readers go on handing out its messages.
         for (&members) |*m| {
