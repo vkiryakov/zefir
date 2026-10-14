@@ -94,6 +94,9 @@ pub const HandshakeError = error{
 
 /// INFO, then CONNECT and PING in one write, then frames until PONG. A
 /// PING from the server is answered at once; INFO replaces the one before.
+/// nats-server answers the first PING with an INFO of this client's own
+/// limits, such as its account's lower `max_payload`, right after the
+/// PONG: when that INFO came with the PONG, it applies too.
 pub fn handshake(conn: *Connection, io: Io, gpa: Allocator, hello: Hello) HandshakeError!Greeting {
     const first = switch (try conn.handshakeFrame()) {
         .info => |json| json,
@@ -104,7 +107,15 @@ pub fn handshake(conn: *Connection, io: Io, gpa: Allocator, hello: Hello) Handsh
 
     try conn.sendConnect(io, hello, greeting.headers);
     while (true) switch (try conn.handshakeFrame()) {
-        .pong => return greeting,
+        .pong => {
+            while (try conn.bufferedInfo()) |json| {
+                var newer = try greet(gpa, json, null);
+                newer.headers = greeting.headers;
+                gpa.free(greeting.info_json);
+                greeting = newer;
+            }
+            return greeting;
+        },
         .ping => {
             var sent: usize = 0;
             try conn.writeAll(io, &.{encoder.pong}, &sent);
@@ -183,6 +194,20 @@ fn refusal(text: []const u8) ?HandshakeError {
             return null;
         },
     };
+}
+
+/// The JSON of an INFO the reader holds already, without reading more;
+/// null when the next frame is something else, or not all here: that is
+/// the reader's.
+fn bufferedInfo(conn: *Connection) HandshakeError!?[]const u8 {
+    const r = &conn.reader.interface;
+    var peek = conn.parser;
+    const step = peek.next(r.buffered()) catch return null;
+    const frame = step.frame orelse return null;
+    if (frame != .info) return null;
+    conn.parser = peek;
+    r.toss(step.consumed);
+    return frame.info;
 }
 
 fn handshakeFrame(conn: *Connection) HandshakeError!Parser.Frame {
@@ -363,7 +388,7 @@ fn serveHandshake(io: Io, listener: *net.Server) !void {
     try peer.expectLine("PONG");
 }
 
-test "the handshake ends at PONG and leaves later frames for the reader" {
+test "the handshake ends at PONG, takes an INFO that came with it, and leaves later frames for the reader" {
     const io = testing.io;
     var listener = try FakeServer.listen(io);
     defer listener.deinit(io);
@@ -374,11 +399,14 @@ test "the handshake ends at PONG and leaves later frames for the reader" {
 
     const greeting = try client.handshake(io, .{});
     defer testing.allocator.free(greeting.info_json);
-    try testing.expectEqualStrings(golden.info_default_json, greeting.info_json);
     try testing.expect(greeting.headers);
     try testing.expectEqual(1_048_576, greeting.max_payload);
-
-    try expectInfo(try client.next(io), golden.info_connected_json);
+    // One write holds PONG, INFO and PING; should the socket split it, the
+    // INFO is the reader's.
+    if (!std.mem.eql(u8, golden.info_connected_json, greeting.info_json)) {
+        try testing.expectEqualStrings(golden.info_default_json, greeting.info_json);
+        try expectInfo(try client.next(io), golden.info_connected_json);
+    }
     try testing.expect(try client.next(io) == .ping);
     var sent: usize = 0;
     try client.writeAll(io, &.{encoder.pong}, &sent);

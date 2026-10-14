@@ -885,19 +885,21 @@ fn awaitExit(client: *Client, deadline: Io.Clock.Timestamp) ?Exit {
 }
 
 /// Keeps the server's latest INFO. Its `max_payload` applies from now on,
-/// such as the limit of the user's account in the INFO after CONNECT.
-/// Headers stay as CONNECT settled them.
+/// such as the limit of the user's account in the INFO after CONNECT, even
+/// when there is no memory to keep the INFO itself. Headers stay as CONNECT
+/// settled them.
 fn updateInfo(client: *Client, json: []const u8) ServerInfo.ParseError!void {
     const info = try ServerInfo.parse(client.gpa, json);
     defer info.deinit();
     discover(client, info.value);
     if (info.value.ldm) lameDuck(client);
-    const copy = try client.gpa.dupe(u8, json);
+    const copy = client.gpa.dupe(u8, json) catch null;
     client.mutex.lockUncancelable(client.io);
     defer client.mutex.unlock(client.io);
-    if (client.info_json) |old| client.gpa.free(old);
-    client.info_json = copy;
     client.max_payload = maxPayload(info.value.max_payload);
+    const kept = copy orelse return error.OutOfMemory;
+    if (client.info_json) |old| client.gpa.free(old);
+    client.info_json = kept;
 }
 
 const testing = std.testing;

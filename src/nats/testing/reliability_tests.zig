@@ -2413,6 +2413,104 @@ test "an unread requestMany past its deadline gives its room in the reconnect bu
     try testing.expect(std.mem.find(u8, seen, "PUB many.x") == null);
 }
 
+/// The INFO that comes with the handshake's PONG: this client's own
+/// max_payload, lower than the server's, as an account limit gives.
+const info_account = "INFO {\"server_id\":\"S\",\"proto\":1,\"headers\":true,\"max_payload\":100} \r\n";
+
+/// A handshake whose PONG comes in one write with the INFO of the
+/// client's own limits; then serves PINGs.
+fn sessionInfoWithPong(peer: *FakeServer.Peer, record: *Record) anyerror!void {
+    _ = record;
+    try peer.send(golden.info_default);
+    _ = try peer.readLine();
+    try peer.expectLine("PING");
+    try peer.send(golden.pong ++ info_account);
+    try answerPings(peer);
+}
+
+const thousand: [1000]u8 = @splat('k');
+
+test "the INFO that comes with the handshake's PONG applies before connect() returns" {
+    const io = testing.io;
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var record: Record = .{};
+    defer record.deinit();
+    const sessions = [_]Session{sessionInfoWithPong};
+    var server = try io.concurrent(serveSessions, .{ io, &listener, &sessions, &record });
+    defer server.cancel(io) catch {};
+    var url: [64]u8 = undefined;
+    var client: Client = try .init(testing.allocator, io, .{ .servers = &.{try FakeServer.url(&listener, &url)} });
+    defer client.deinit();
+    try client.connect();
+    try testing.expectError(error.PayloadTooLarge, client.publish("big", &thousand));
+    var info = (try client.serverInfo(testing.allocator)) orelse return error.TestNoInfo;
+    defer info.deinit();
+    try testing.expectEqual(100, info.value.max_payload);
+}
+
+/// An allocator that fails every allocation of one size: the copy of an
+/// INFO of that length.
+const FailSize = struct {
+    parent: std.mem.Allocator,
+    size: std.atomic.Value(usize) = .init(0),
+
+    fn allocator(f: *FailSize) std.mem.Allocator {
+        return .{ .ptr = f, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+
+    fn alloc(context: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const f: *FailSize = @ptrCast(@alignCast(context));
+        if (len == f.size.load(.monotonic)) return null;
+        return f.parent.rawAlloc(len, alignment, ret_addr);
+    }
+
+    fn resize(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const f: *FailSize = @ptrCast(@alignCast(context));
+        return f.parent.rawResize(memory, alignment, new_len, ret_addr);
+    }
+
+    fn remap(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const f: *FailSize = @ptrCast(@alignCast(context));
+        return f.parent.rawRemap(memory, alignment, new_len, ret_addr);
+    }
+
+    fn free(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const f: *FailSize = @ptrCast(@alignCast(context));
+        f.parent.rawFree(memory, alignment, ret_addr);
+    }
+};
+
+/// The INFO of the client's own limits comes at its first PING after the
+/// handshake, before the PONG; then serves PINGs.
+fn sessionInfoAtFirstPing(peer: *FakeServer.Peer, record: *Record) anyerror!void {
+    try handshake(peer, golden.info_default);
+    if (!try readUntil(peer, record, "PING")) return error.TestNoPing;
+    try peer.send(info_account ++ golden.pong);
+    try answerPings(peer);
+}
+
+test "a lower max_payload in an INFO applies even when there is no memory to keep that INFO" {
+    const io = testing.io;
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var record: Record = .{};
+    defer record.deinit();
+    const sessions = [_]Session{sessionInfoAtFirstPing};
+    var server = try io.concurrent(serveSessions, .{ io, &listener, &sessions, &record });
+    defer server.cancel(io) catch {};
+    var fail: FailSize = .{ .parent = testing.allocator };
+    var url: [64]u8 = undefined;
+    var client: Client = try .init(fail.allocator(), io, .{ .servers = &.{try FakeServer.url(&listener, &url)} });
+    defer client.deinit();
+    try client.connect();
+    // The JSON of the INFO, without "INFO " and the line's end.
+    fail.size.store(info_account.len - "INFO ".len - " \r\n".len, .monotonic);
+    try client.flush(quick);
+    fail.size.store(0, .monotonic);
+    try testing.expectError(error.PayloadTooLarge, client.publish("big", &thousand));
+}
+
 test "a requestMany past its deadline that nobody reads does not hold up a drain, nor count as pending" {
     const io = testing.io;
     var listener = try FakeServer.listen(io);

@@ -207,7 +207,11 @@ pub const PublishError = error{
     /// any more.
     ConnectionDraining,
     InvalidHeader,
-    /// Headers and payload together exceed the server's `max_payload`.
+    /// Headers and payload together exceed the server's `max_payload`: the
+    /// one in its latest INFO, which nats-server sends with this client's
+    /// own limits, such as an account's, right after the handshake. When
+    /// that INFO comes in a write of its own, a publish made in the moment
+    /// before it is checked against the server's limit only.
     PayloadTooLarge,
     /// Headers, and the server cannot take them.
     UnsupportedFeature,

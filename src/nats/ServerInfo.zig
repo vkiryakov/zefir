@@ -14,7 +14,9 @@ port: u16 = 0,
 proto: i32 = 0,
 /// HPUB and HMSG are available: needed for headers and for no-responders.
 headers: bool = false,
-/// The largest message, headers included, the server takes from this client.
+/// The largest message, headers included, the server takes from this
+/// client. 0 when the server did not say: the client then caps a message
+/// only at 999 999 999 bytes, the most its protocol line can carry.
 max_payload: i64 = 0,
 client_id: u64 = 0,
 client_ip: []const u8 = "",
