@@ -268,21 +268,42 @@ fn errorsProblem(comptime label: []const u8, comptime errors: anytype) ?[]const 
         else => return at ++ errors_shape ++ @typeName(E),
     };
     if (info.is_tuple and info.field_names.len > 0) return at ++ errors_shape ++ "a tuple";
-    inline for (info.field_names) |name| {
+    const names = info.field_names;
+    // Each error costs about the same to check: let a contract list
+    // hundreds of them.
+    @setEvalBranchQuota(100_000 + 10_000 * names.len);
+    inline for (names) |name| {
         const here = at ++ ".errors." ++ name;
         if (isOneOf(name, &reserved_errors))
             return here ++ ": rpc maps " ++ name ++ " by itself, so a contract cannot list it; give the error another name";
         if (entryProblem(here, @field(errors, name))) |found| return found;
     }
-    inline for (info.field_names, 0..) |first, i| {
-        inline for (info.field_names[i + 1 ..]) |second| {
-            const code = stringOf(@field(errors, first).app_code).?;
-            if (std.mem.eql(u8, code, stringOf(@field(errors, second).app_code).?))
-                return at ++ ".errors." ++ first ++ " and .errors." ++ second ++ " share .app_code \"" ++ code ++ "\"; each error needs its own";
-        }
+    if (names.len < 2) return null;
+    // Sorted by code, a repeated app code sits next to the one it repeats,
+    // and of two errors the one listed first comes first.
+    var codes: [names.len]Coded = undefined;
+    inline for (names, &codes, 0..) |name, *code, i| code.* = .{ .app_code = stringOf(@field(errors, name).app_code).?, .index = i };
+    std.mem.sortUnstable(Coded, &codes, {}, Coded.before);
+    for (codes[0 .. codes.len - 1], codes[1..]) |first, second| {
+        if (std.mem.eql(u8, first.app_code, second.app_code))
+            return at ++ ".errors." ++ names[first.index] ++ " and .errors." ++ names[second.index] ++ " share .app_code \"" ++ first.app_code ++ "\"; each error needs its own";
     }
     return null;
 }
+
+/// The app code of an error and the place of the error in `.errors`.
+const Coded = struct {
+    app_code: []const u8,
+    index: usize,
+
+    fn before(_: void, a: Coded, b: Coded) bool {
+        return switch (std.mem.order(u8, a.app_code, b.app_code)) {
+            .lt => true,
+            .gt => false,
+            .eq => a.index < b.index,
+        };
+    }
+};
 
 fn entryProblem(comptime here: []const u8, comptime entry: anytype) ?[]const u8 {
     const T = @TypeOf(entry);
@@ -677,6 +698,94 @@ test "the app code and the message of an error" {
         .Unicode = .{ .code = .aborted, .app_code = "users.é", .message = "Ошибка" },
     })) == null);
     comptime std.debug.assert(specProblem(withErrors(.{})) == null);
+}
+
+const ManyEntry = struct { code: core.ErrorCode, app_code: []const u8, message: []const u8 };
+
+/// The type of an `.errors` table of `n` errors E0, E1, ….
+fn ManyErrors(comptime n: usize) type {
+    @setEvalBranchQuota(1_000_000);
+    var names: [n][:0]const u8 = undefined;
+    for (&names, 0..) |*name, i| name.* = std.fmt.comptimePrint("E{d}", .{i});
+    return @Struct(.auto, null, &names, &@splat(ManyEntry), &@splat(.{}));
+}
+
+/// An `.errors` table of `n` errors with app codes "app.e0", "app.e1", …;
+/// the error at `repeat` takes the code of E0.
+fn manyErrors(comptime n: usize, comptime repeat: ?usize) ManyErrors(n) {
+    @setEvalBranchQuota(1_000_000);
+    var errors: ManyErrors(n) = undefined;
+    for (0..n) |i| {
+        const app_code = if (repeat == i) "app.e0" else std.fmt.comptimePrint("app.e{d}", .{i});
+        @field(errors, std.fmt.comptimePrint("E{d}", .{i})) = .{ .code = .not_found, .app_code = app_code, .message = "Not found" };
+    }
+    return errors;
+}
+
+// Declarations of their own, so that the contract is checked with the
+// default quota of branches, as in an application.
+const many_errors = manyErrors(300, null);
+const repeated_errors = manyErrors(300, 250);
+const ManyErrorsApi = Contract(.{ .name = "big", .version = 1, .methods = .{ .getUser = get_user }, .errors = many_errors });
+
+const Address = struct { street: []const u8, city: []const u8, zip: ?[]const u8 = null, country: [2]u8 };
+const Profile = struct {
+    id: u64,
+    name: []const u8,
+    email: ?[]const u8 = null,
+    age: ?u8 = null,
+    score: f64 = 0,
+    roles: []const []const u8 = &.{},
+    home: ?Address = null,
+    offices: []const Address = &.{},
+    flags: [4]bool = @splat(false),
+    level: enum { basic, pro, admin } = .basic,
+};
+/// A request or response of its own for method `i`: distinct types are
+/// checked one by one, as in a real service.
+fn ProfileOf(comptime i: usize) type {
+    return struct {
+        pub const method_index = i;
+        profile: Profile,
+        note: ?[]const u8 = null,
+    };
+}
+
+/// The `rpc.method` of each of `n` methods.
+fn manyMethodTypes(comptime n: usize) [n]type {
+    @setEvalBranchQuota(1_000_000);
+    var types: [n]type = undefined;
+    for (&types, 0..) |*T, i| T.* = method(ProfileOf(i), ProfileOf(i));
+    return types;
+}
+
+const many_method_types = manyMethodTypes(300);
+
+/// The type of a `.methods` table of `n` methods m0, m1, … with requests
+/// and responses of their own.
+fn ManyMethods(comptime n: usize) type {
+    @setEvalBranchQuota(1_000_000);
+    var names: [n][:0]const u8 = undefined;
+    var attrs: [n]std.lang.Type.Struct.FieldAttributes = undefined;
+    for (&names, &attrs, 0..) |*name, *attr, i| {
+        name.* = std.fmt.comptimePrint("m{d}", .{i});
+        attr.* = .{ .@"comptime" = true, .default_value_ptr = &many_method_types[i] };
+    }
+    return @Struct(.auto, null, &names, &@splat(type), &attrs);
+}
+
+const ManyMethodsApi = Contract(.{ .name = "wide", .version = 1, .methods = ManyMethods(300){}, .errors = many_errors });
+
+test "a contract may have hundreds of methods" {
+    try testing.expectEqual(@as(usize, 300), @typeInfo(@TypeOf(ManyMethodsApi)).@"struct".field_names.len);
+    try testing.expectEqualStrings("m299", @TypeOf(ManyMethodsApi.m299).route.method);
+}
+
+test "a contract may list hundreds of errors" {
+    const About = InfoOf(@TypeOf(ManyErrorsApi));
+    try testing.expectEqual(@as(usize, 300), About.errors.len);
+    try testing.expectEqualStrings("app.e299", About.mapError(error.E299).?.app_code);
+    try expectSpecProblem(withErrors(repeated_errors), "rpc: users.v1: .errors.E0 and .errors.E250 share .app_code \"app.e0\"; each error needs its own");
 }
 
 fn audit() void {}
