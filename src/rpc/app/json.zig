@@ -125,8 +125,11 @@ pub const DecodeError = error{
 ///
 /// Memory comes from `arena`, which the caller frees as a whole, also after
 /// an error. Strings of the result point into `bytes` when they have no
-/// escapes, so `bytes` must outlive the result. On `error.Invalid`,
-/// `problem` says what is wrong.
+/// escapes, so `bytes` must outlive the result. A buffer that would grow in
+/// the arena (the items of a slice, the unknown keys of an object, a string
+/// with escapes) is sized once from the raw bytes, since each copy that a
+/// growing buffer leaves behind stays in the arena until the end. On
+/// `error.Invalid`, `problem` says what is wrong.
 pub fn decode(comptime T: type, arena: std.mem.Allocator, bytes: []const u8, limits: Limits, problem: *Problem) DecodeError!T {
     if (comptime dto.problem(T, .response)) |found| @compileError("rpc: json.decode: " ++ found);
     problem.* = .{};
@@ -236,6 +239,9 @@ const Decoder = struct {
     fn slice(d: *Decoder, comptime Item: type) DecodeError![]const Item {
         try d.open(.array);
         var items: std.ArrayList(Item) = .empty;
+        // Room for every item at once: a list that grows in an arena leaves
+        // each smaller copy behind, several times the items in all.
+        try items.ensureTotalCapacityPrecise(d.arena, @min(countItems(d.bytes, d.scanner.cursor), d.limits.max_items));
         try d.path.append(d.arena, .{ .index = 0 });
         while (try d.peek() != .array_end) {
             if (items.items.len == d.limits.max_items) return d.failOutside(too_many_items);
@@ -283,7 +289,10 @@ const Decoder = struct {
             if (members == d.limits.max_items) return d.fail(too_many_items);
             members += 1;
             try d.path.append(d.arena, .{ .key = key });
-            if (try d.field(T, &result, &seen, key)) {} else {
+            if (!try d.field(T, &result, &seen, key)) {
+                // The first unknown key makes room for the rest of the
+                // members, which may all be unknown.
+                if (d.keys.items.len == keys_start) try d.reserveKeys();
                 try d.keys.append(d.arena, key);
                 try d.skip();
             }
@@ -369,8 +378,20 @@ const Decoder = struct {
             else => return,
         };
         try d.deeper();
+        // Every key of a skipped object is kept until it ends.
+        if (is_object) try d.reserveKeys();
         try d.frames.append(d.arena, .{ .object = is_object, .items = 0, .keys_start = d.keys.items.len });
         try d.path.append(d.arena, .{ .index = 0 });
+    }
+
+    /// Makes room on the stack of unknown keys for the members of the
+    /// object from the scanner on, at most `max_items`: grown key by key in
+    /// an arena, the stack would leave each smaller copy behind.
+    fn reserveKeys(d: *Decoder) DecodeError!void {
+        const needed = d.keys.items.len + @min(countItems(d.bytes, d.scanner.cursor), d.limits.max_items);
+        if (needed <= d.keys.capacity) return;
+        // Exactly what is needed the first time, by half again after that.
+        try d.keys.ensureTotalCapacityPrecise(d.arena, @max(needed, d.keys.capacity + d.keys.capacity / 2));
     }
 
     /// Fails when the keys from `start` on repeat one another.
@@ -411,11 +432,30 @@ const Decoder = struct {
         d.depth -= 1;
     }
 
+    /// The next whole token. A string without escapes is a slice of
+    /// `bytes`; one with escapes is decoded into the arena, in a buffer
+    /// sized once from its raw length, which escapes only shorten.
     fn next(d: *Decoder) DecodeError!std.json.Token {
-        return d.scanner.nextAllocMax(d.arena, .alloc_if_needed, d.bytes.len) catch |err| switch (err) {
-            error.OutOfMemory => error.OutOfMemory,
-            error.SyntaxError, error.UnexpectedEndOfInput, error.ValueTooLong => d.syntaxError(),
+        if (try d.peek() != .string) {
+            // With the whole input at hand, numbers come whole too.
+            return d.scanner.next() catch |err| switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                error.SyntaxError, error.UnexpectedEndOfInput, error.BufferUnderrun => d.syntaxError(),
+            };
+        }
+        // The scanner stands on the opening quote.
+        const quote = d.scanner.cursor;
+        const end = closingQuote(d.bytes, quote);
+        var decoded: std.array_list.Managed(u8) = .init(d.arena);
+        if (std.mem.indexOfScalar(u8, d.bytes[quote + 1 .. end], '\\') != null) {
+            try decoded.ensureTotalCapacityPrecise(end - quote - 1);
+        }
+        const whole = d.scanner.allocNextIntoArrayListMax(&decoded, .alloc_if_needed, d.bytes.len) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.SyntaxError, error.UnexpectedEndOfInput, error.BufferUnderrun, error.ValueTooLong => return d.syntaxError(),
         };
+        if (whole) |text| return .{ .string = text };
+        return .{ .allocated_string = decoded.items };
     }
 
     fn peek(d: *Decoder) DecodeError!std.json.TokenType {
@@ -455,6 +495,54 @@ const Decoder = struct {
         return out.written();
     }
 };
+
+/// The items of the array, or the members of the object, that starts right
+/// before `start`, from `start` to its end: the commas at its own level,
+/// plus one unless nothing is left. It reads raw bytes and checks nothing;
+/// the scanner refuses what is not JSON, and a count on such input only
+/// sizes a buffer.
+fn countItems(bytes: []const u8, start: usize) usize {
+    var depth: usize = 0;
+    var commas: usize = 0;
+    var empty = true;
+    var i = start;
+    while (i < bytes.len) : (i += 1) {
+        switch (bytes[i]) {
+            ' ', '\t', '\n', '\r' => {},
+            '"' => {
+                i = closingQuote(bytes, i);
+                empty = false;
+            },
+            '[', '{' => {
+                depth += 1;
+                empty = false;
+            },
+            ']', '}' => {
+                if (depth == 0) break;
+                depth -= 1;
+            },
+            ',' => {
+                if (depth == 0) commas += 1;
+            },
+            else => empty = false,
+        }
+    }
+    return if (empty) 0 else commas + 1;
+}
+
+/// Where the string that opens at `open` ends: its closing quote, or the
+/// end of `bytes`.
+fn closingQuote(bytes: []const u8, open: usize) usize {
+    var i = open + 1;
+    while (i < bytes.len) : (i += 1) {
+        switch (bytes[i]) {
+            '\\' => i += 1,
+            '"' => return i,
+            else => {},
+        }
+    }
+    return bytes.len;
+}
 
 /// Digits with an optional "-" in front; no "+", no leading zeros, no "-0".
 fn isCanonicalInteger(text: []const u8) bool {
@@ -769,6 +857,25 @@ test "broken JSON and bytes that are not UTF-8 are refused" {
     // Broken JSON first, bytes that are not UTF-8 later: the first fault wins.
     try expectRefused(struct { s: []const u8 }, "{\"s\":,\"\xff\"}", "s", "invalid JSON");
     try expectRefused(struct { s: []const u8 }, "{\"s\":\"\\ud800\"}", "s", "invalid JSON");
+}
+
+test "the items of a container are counted from the raw bytes, strings and nesting skipped" {
+    // `start` is right after the opening bracket, where the scanner leaves it.
+    try testing.expectEqual(@as(usize, 0), countItems("[]", 1));
+    try testing.expectEqual(@as(usize, 0), countItems("[ \n\t]", 1));
+    try testing.expectEqual(@as(usize, 1), countItems("[0]", 1));
+    try testing.expectEqual(@as(usize, 3), countItems("[1, [2, 3], {\"a\": [4, 5]}]", 1));
+    try testing.expectEqual(@as(usize, 2), countItems("[\"a,b]\", \"c\\\",d\"]", 1));
+    try testing.expectEqual(@as(usize, 2), countItems("{\"a,\": 1, \"b\": {\"c\": 2, \"d\": 3}}", 1));
+    // A count stops at the end of its own container.
+    try testing.expectEqual(@as(usize, 3), countItems("[[1,2,3],4]", 2));
+    // Right after a key: that member and the rest.
+    try testing.expectEqual(@as(usize, 2), countItems("{\"a\":1,\"b\":2,\"c\":3}", 10));
+    // Input that is not JSON only sizes a buffer.
+    try testing.expectEqual(@as(usize, 2), countItems("[1,2", 1));
+    try testing.expectEqual(@as(usize, 1), countItems("[\"open", 1));
+    try testing.expectEqual(@as(usize, 5), closingQuote("\"a\\\"b\" x", 0));
+    try testing.expectEqual(@as(usize, 4), closingQuote("\"ab\\", 0));
 }
 
 test "depth and items have limits, in skipped values too" {

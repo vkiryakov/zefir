@@ -132,4 +132,5 @@ test {
     _ = @import("app/dto.zig");
     _ = @import("app/contract.zig");
     _ = @import("app/json.zig");
+    _ = @import("app/json_tests.zig");
 }
