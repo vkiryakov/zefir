@@ -145,4 +145,5 @@ test {
     _ = @import("app/Server.zig");
     _ = @import("app/server_tests.zig");
     _ = @import("app/Client.zig");
+    _ = @import("app/acceptance_tests.zig");
 }
