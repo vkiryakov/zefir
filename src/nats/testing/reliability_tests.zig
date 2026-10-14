@@ -1437,6 +1437,53 @@ test "a drain keeps what the streams of requestMany received for their owners to
     try testing.expectEqual(0, client.stats().dropped_messages);
 }
 
+test "a drained close keeps what the streams of requestMany received when the manager ends the inbox first" {
+    const io = testing.io;
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var record: Record = .{};
+    defer record.deinit();
+    const sessions = [_]Session{sessionThreeResponses};
+    var server = try io.concurrent(serveSessions, .{ io, &listener, &sessions, &record });
+    defer server.cancel(io) catch {};
+    var url: [64]u8 = undefined;
+    var client: Client = try .init(testing.allocator, io, .{ .servers = &.{try FakeServer.url(&listener, &url)} });
+    defer client.deinit();
+    try client.connect();
+    const responses = try client.requestMany("many.x", "?", .{ .max_responses = 3, .timeout = .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } } });
+    defer responses.deinit();
+    var first = (try responses.next(.{})) orelse return error.TestNoResponse;
+    first.deinit();
+    const give_up = time.after(io, .fromSeconds(5));
+    while (responses.messages.stats(io).received < 3) {
+        if (time.expired(io, give_up)) return error.TestNoResponse;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+    {
+        // What the close of a finished drain does under the mutex. It wakes
+        // the manager, which may take the connection down before that close
+        // goes on to end the inbox.
+        client.mutex.lockUncancelable(io);
+        defer client.mutex.unlock(io);
+        client.status = .closed;
+        client.close_reason = .drained;
+        client.exit = .closed;
+        client.changed.wake(io);
+    }
+    _ = try expectEvent(&client, .connected);
+    // The closed event is the manager's last act: the connection is down,
+    // and the inbox has ended.
+    try testing.expectEqual(.drained, (try expectEvent(&client, .closed)).closed);
+    // Only now does that close end the inbox.
+    client.inbox.endDrained(io);
+    for ([_][]const u8{ "2", "3" }) |payload| {
+        var msg = (try responses.next(.{})) orelse return error.TestResponseLost;
+        defer msg.deinit();
+        try testing.expectEqualStrings(payload, msg.payload);
+    }
+    try testing.expect(try responses.next(.{}) == null);
+}
+
 test "a drain that begins while a lame duck move is decided but not begun finishes on that server" {
     const io = testing.io;
     var listener = try FakeServer.listen(io);

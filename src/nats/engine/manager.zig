@@ -408,8 +408,10 @@ fn teardown(client: *Client, server: ServerAddress, exit: Exit) bool {
         const next = client.outbound.halt(io);
         client.inbox.disconnect(io, next);
     } else {
-        // Before the outbound queue wakes them, requests learn why.
-        client.inbox.end(io, if (exit == .closed) .closed else .disconnected);
+        // Before the outbound queue wakes them, requests learn why. After a
+        // drain, the streams of requestMany keep what they received, whether
+        // this or the drain's close ends the inbox first.
+        if (closeReason(client) == .drained) client.inbox.endDrained(io) else client.inbox.end(io, if (exit == .closed) .closed else .disconnected);
         client.outbound.close(io);
     }
     shutdown(io, client.connection.stream);
@@ -477,6 +479,13 @@ fn lost(client: *Client, exit: Exit) bool {
     }
     client.changed.wake(client.io);
     return again;
+}
+
+/// Why the client closed; null while it is open.
+fn closeReason(client: *Client) ?Client.CloseReason {
+    client.mutex.lockUncancelable(client.io);
+    defer client.mutex.unlock(client.io);
+    return client.close_reason;
 }
 
 /// Reconnecting starts: false when the client closed meanwhile.
