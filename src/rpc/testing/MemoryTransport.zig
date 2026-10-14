@@ -1257,6 +1257,119 @@ test "breakLink while a call is in admit: the call is abandoned and the client g
     try testing.expectEqual(@as(u32, 0), gate.cancels.load(.monotonic));
 }
 
+/// One of many clients: waits a random moment, then calls with its own
+/// body.
+fn callAfterPause(client: ClientTransport, io: std.Io, request: *const transport.Request, options: ClientTransport.CallOptions, pause: std.Io.Duration) ClientTransport.CallError!model.Response {
+    try io.sleep(pause, .awake);
+    return client.call(io, request, options);
+}
+
+test "64 calls at once with random delays: each gets its own response, and the journal is clean" {
+    const io = testing.io;
+    const n = 64;
+    var f: Fixture = undefined;
+    try f.init(io, .{}, .{ .routes = &.{get_user} });
+    defer f.deinit(io);
+    var prng: std.Random.DefaultPrng = .init(64);
+    const random = prng.random();
+
+    var bodies: [n][7]u8 = undefined;
+    var requests: [n]transport.Request = undefined;
+    var arenas: [n]std.heap.ArenaAllocator = undefined;
+    var callers: [n]std.Io.Future(ClientTransport.CallError!model.Response) = undefined;
+    var started: usize = 0;
+    defer for (callers[0..started], arenas[0..started]) |*caller, *arena| {
+        if (caller.cancel(io)) |_| {} else |_| {}
+        arena.deinit();
+    };
+    for (0..n) |i| {
+        _ = std.fmt.bufPrint(&bodies[i], "call-{d:0>2}", .{i}) catch unreachable;
+        requests[i] = requestOf(io, &bodies[i], .fromSeconds(30));
+        arenas[i] = .init(testing.allocator);
+        const pause: std.Io.Duration = .fromMicroseconds(random.intRangeAtMost(i64, 0, 3000));
+        callers[i] = try io.concurrent(callAfterPause, .{ f.memory.clientTransport(), io, &requests[i], optionsOf(&arenas[i]), pause });
+        started += 1;
+    }
+    try f.recorder.waitStarted(io, n);
+
+    // The server answers in random order, with pauses: each call gets the
+    // body it sent.
+    var order: [n]usize = undefined;
+    for (&order, 0..) |*index, i| index.* = i;
+    random.shuffle(usize, &order);
+    for (order) |index| {
+        try f.recorder.respond(io, index, &.{ .status = .ok, .body = f.recorder.call(io, index).body.? });
+        f.recorder.releaseCall(io, index, .completed);
+        if (random.boolean()) try io.sleep(.fromMicroseconds(random.intRangeAtMost(i64, 0, 500)), .awake);
+    }
+    for (&callers, &bodies) |*caller, *body| {
+        try testing.expectEqualStrings(body, (try caller.await(io)).body);
+    }
+
+    try f.expectClean(io);
+    var counts: std.EnumArray(std.meta.Tag(RecordingDispatcher.Event.Kind), usize) = .initFill(0);
+    for (f.recorder.events()) |event| counts.getPtr(std.meta.activeTag(event.kind)).* += 1;
+    for ([_]std.meta.Tag(RecordingDispatcher.Event.Kind){ .admit, .start, .send, .release }) |kind| {
+        try testing.expectEqual(@as(usize, n), counts.get(kind));
+    }
+    try testing.expectEqual(@as(usize, 0), counts.get(.cancel) + counts.get(.abandon));
+}
+
+test "a call without a deadline sends no budget and waits for its response" {
+    const io = testing.io;
+    var f: Fixture = undefined;
+    try f.init(io, .{}, .{ .routes = &.{get_user} });
+    defer f.deinit(io);
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+
+    var request = requestOf(io, "{}", .fromSeconds(5));
+    request.ctx = core.Context.root;
+    var caller = try io.concurrent(callTask, .{ f.memory.clientTransport(), io, &request, optionsOf(&arena) });
+    defer if (caller.cancel(io)) |_| {} else |_| {};
+    try f.recorder.waitStarted(io, 1);
+    try testing.expectEqual(@as(?std.Io.Duration, null), f.recorder.call(io, 0).head.timeout);
+    try f.recorder.respond(io, 0, &.{ .status = .ok, .body = "late but fine" });
+    f.recorder.releaseCall(io, 0, .completed);
+    try testing.expectEqualStrings("late but fine", (try caller.await(io)).body);
+    try f.expectClean(io);
+}
+
+/// Waits to be canceled, keeps the cancelation, then calls the functions
+/// that have no `error.Canceled` to return: the next cancelation point must
+/// still see it.
+fn keepsCancelation(f: *Fixture, io: std.Io) !void {
+    var never: std.Io.Event = .unset;
+    never.wait(io) catch |err| switch (err) {
+        error.Canceled => io.recancel(),
+    };
+    f.recorder.releaseCall(io, 0, .canceled);
+    f.memory.breakLink(io);
+    f.memory.restoreLink();
+    f.memory.drain(io);
+    f.memory.close(io);
+    return io.checkCancel();
+}
+
+test "release, breakLink, drain and close keep a cancelation of the calling task" {
+    const io = testing.io;
+    var f: Fixture = undefined;
+    try f.init(io, .{}, .{ .routes = &.{get_user} });
+    defer f.deinit(io);
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+
+    const request = requestOf(io, "{}", .fromSeconds(30));
+    var caller = try io.concurrent(callTask, .{ f.memory.clientTransport(), io, &request, optionsOf(&arena) });
+    defer if (caller.cancel(io)) |_| {} else |_| {};
+    try f.recorder.waitStarted(io, 1);
+    var task = try io.concurrent(keepsCancelation, .{ &f, io });
+    try io.sleep(.fromMilliseconds(10), .awake);
+    try testing.expectError(error.Canceled, task.cancel(io));
+    try testing.expectError(error.ConnectionLost, caller.await(io));
+    try f.expectClean(io);
+}
+
 fn closeAndCheck(memory: *MemoryTransport, io: std.Io, gate: *const Gate) bool {
     memory.close(io);
     return gate.abandoned.load(.acquire);
