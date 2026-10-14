@@ -22,6 +22,9 @@ parser: Parser,
 /// How the server refused the credentials, when the handshake failed with
 /// AuthenticationFailed.
 refused: ?server_error.Refusal = null,
+/// Bytes the socket took so far, counted at each write: the heartbeat sees
+/// whether a writer in the middle of a long batch gets anywhere.
+sent: std.atomic.Value(u64) = .init(0),
 
 /// `buffer` holds at least `Parser.bufferLen(limits)` bytes and outlives
 /// the connection.
@@ -227,6 +230,7 @@ pub fn writeAll(conn: *Connection, io: Io, slices: []const []const u8, written: 
             // A blocking socket takes at least one byte or fails.
             if (n == 0) return error.Unexpected;
             written.* += n;
+            _ = conn.sent.fetchAdd(n, .monotonic);
             while (n > 0) {
                 if (n < rest[0].len) {
                     rest[0] = rest[0][n..];

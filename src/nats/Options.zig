@@ -33,7 +33,10 @@ connect_timeout: Duration = .fromSeconds(5),
 /// How often the client PINGs the server to check that the connection is
 /// alive.
 ping_interval: Duration = .fromSeconds(30),
-/// PINGs left unanswered before the connection counts as dead.
+/// PINGs the server got and left unanswered before the connection counts
+/// as dead. A PING still waiting behind what a slow link has not sent yet
+/// does not count; a server that takes nothing at all for this many
+/// intervals while frames wait counts as dead too.
 max_outstanding_pings: u8 = 2,
 /// Do not deliver this client's own messages to its subscriptions.
 no_echo: bool = false,

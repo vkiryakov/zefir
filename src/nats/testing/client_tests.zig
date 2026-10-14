@@ -187,6 +187,110 @@ test "a server that stops answering is dropped after max_outstanding_pings PINGs
     try testing.expect(pings >= 1 and pings <= 2);
 }
 
+/// A handshake, then nothing read until the test is done: the socket fills.
+fn serveNotReading(io: Io, listener: *net.Server, done: *Io.Event) !void {
+    var peer: FakeServer.Peer = undefined;
+    try peer.accept(io, listener);
+    defer peer.close();
+    try handshake(&peer);
+    try done.wait(io);
+}
+
+const megabyte: [1024 * 1024]u8 = @splat('p');
+
+/// Publishes 1 MiB payloads until one fails.
+fn publishMegabytes(client: *Client) void {
+    while (true) client.publish("fill", &megabyte) catch return;
+}
+
+test "a server that stops reading while frames wait is dropped as stale, though no PING reached it" {
+    const io = testing.io;
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var done: Io.Event = .unset;
+    var server = try io.concurrent(serveNotReading, .{ io, &listener, &done });
+    defer {
+        done.set(io);
+        server.cancel(io) catch {};
+    }
+    var url: [64]u8 = undefined;
+    var client: Client = try .init(testing.allocator, io, .{
+        .servers = &.{try FakeServer.url(&listener, &url)},
+        .ping_interval = .fromMilliseconds(50),
+        .max_outstanding_pings = 2,
+        .limits = .{ .outbound_bytes = 1024 * 1024 },
+        .reconnect = .{ .enabled = false },
+    });
+    defer client.deinit();
+    try client.connect();
+    var publisher = try io.concurrent(publishMegabytes, .{&client});
+    defer publisher.cancel(io);
+    try awaitState(&client, .closed);
+    try testing.expectEqual(.connection_lost, client.close_reason.?);
+    publisher.await(io);
+}
+
+/// What a slow server saw: the PINGs it answered.
+const SlowLink = struct {
+    pongs: std.atomic.Value(u32) = .init(0),
+    done: Io.Event = .unset,
+
+    /// Reads about 16 MB/s, a 64 KiB piece at a time, and answers every
+    /// PING it reads, until the test is done.
+    fn serve(link: *SlowLink, io: Io, listener: *net.Server) !void {
+        var peer: FakeServer.Peer = undefined;
+        try peer.accept(io, listener);
+        defer peer.close();
+        try handshake(&peer);
+        while (!link.done.isSet()) {
+            const line = (try peer.nextLine()) orelse return;
+            if (std.mem.eql(u8, line, "PING")) {
+                try peer.send(golden.pong);
+                _ = link.pongs.fetchAdd(1, .monotonic);
+            } else if (std.mem.startsWith(u8, line, "PUB ")) {
+                var left = try std.fmt.parseInt(usize, line[std.mem.findScalarLast(u8, line, ' ').? + 1 ..], 10) + 2;
+                while (left > 0) {
+                    const piece = @min(left, 64 * 1024);
+                    try peer.reader.interface.discardAll(piece);
+                    left -= piece;
+                    try io.sleep(.fromMilliseconds(4), .awake);
+                }
+            }
+        }
+    }
+};
+
+test "a live server behind a long backlog on a slow link is not dropped: PINGs that wait behind it do not count" {
+    const io = testing.io;
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var link: SlowLink = .{};
+    var server = try io.concurrent(SlowLink.serve, .{ &link, io, &listener });
+    defer {
+        link.done.set(io);
+        server.cancel(io) catch {};
+    }
+    var url: [64]u8 = undefined;
+    var client: Client = try .init(testing.allocator, io, .{
+        .servers = &.{try FakeServer.url(&listener, &url)},
+        .ping_interval = .fromMilliseconds(500),
+        .max_outstanding_pings = 2,
+        // Twice what the server reads in two PING intervals.
+        .limits = .{ .outbound_bytes = 32 * 1024 * 1024 },
+        .reconnect = .{ .enabled = false },
+    });
+    defer client.deinit();
+    try client.connect();
+    var publisher = try io.concurrent(publishMegabytes, .{&client});
+    defer publisher.cancel(io);
+    // Three intervals: a PING counted while it waits behind the backlog
+    // would drop the connection after two.
+    try io.sleep(.fromMilliseconds(1600), .awake);
+    try testing.expectEqual(.connected, client.state());
+    client.close();
+    publisher.await(io);
+}
+
 /// A handshake; at the client's first PING the server hangs up instead.
 fn serveAndHangUp(io: Io, listener: *net.Server) !void {
     var peer: FakeServer.Peer = undefined;

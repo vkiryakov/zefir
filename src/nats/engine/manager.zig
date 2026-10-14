@@ -355,13 +355,24 @@ fn abandon(client: *Client, err: Io.ConcurrentError, first: bool) void {
 }
 
 /// Sends a PING every `ping_interval` until the connection must end. After
-/// `max_outstanding_pings` PINGs without a PONG the connection is dead.
+/// `max_outstanding_pings` PINGs written without a PONG the connection is
+/// dead; a PING still waiting behind a slow link's backlog does not count,
+/// since the server cannot have seen it. A server that stops reading never
+/// sees the PINGs at all: when the writer sent nothing for as many
+/// intervals while frames waited, the connection is dead too.
 fn heartbeat(client: *Client) Exit {
     const io = client.io;
     const options = &client.options.options;
+    var last_sent: u64 = 0;
+    var stuck: u32 = 0;
     while (true) {
         if (awaitExit(client, time.after(io, options.ping_interval))) |exit| return exit;
-        if (client.outbound.pingsOut(io) >= options.max_outstanding_pings) return .stale;
+        const health = client.outbound.health(io);
+        if (health.pings_out >= options.max_outstanding_pings) return .stale;
+        const sent = client.connection.sent.load(.monotonic);
+        stuck = if (health.waiting and sent == last_sent) stuck + 1 else 0;
+        if (stuck >= options.max_outstanding_pings) return .stale;
+        last_sent = sent;
         _ = client.outbound.putPing(io, .heartbeat) catch |err| switch (err) {
             error.Closed => return .closed,
             // The connection is being taken down: the exit comes next.

@@ -66,6 +66,9 @@ pub const Frame = struct {
     /// Its request ended while the frame waited for a connection: it is
     /// never sent.
     dead: bool = false,
+    /// A PING the heartbeat asked for: once written, it is outstanding
+    /// until a PONG comes.
+    heartbeat: bool = false,
 };
 
 /// The request a request frame carries. The frame goes in only when
@@ -171,7 +174,8 @@ pongs_in_flight: u32 = 0,
 /// answers PING number n.
 pings_queued: u64 = 0,
 pongs_received: u64 = 0,
-/// Heartbeat PINGs since the last PONG.
+/// Heartbeat PINGs written since the last PONG: a PING still waiting
+/// behind other frames cannot have been answered yet, and does not count.
 pings_out: u32 = 0,
 /// What the frames may cost while there is no connection.
 buffer_limit: usize = 0,
@@ -398,15 +402,17 @@ fn queuePing(q: *Outbound, io: Io, kind: PingKind) error{ Closed, Disconnected, 
         .buffering => return error.Disconnected,
         .live => {},
     }
-    const shared = if (q.frames.back()) |last| last.kind == .ping and last.written == 0 else false;
-    if (!shared) {
+    const heartbeat = kind == .heartbeat;
+    const last = q.frames.backPtr();
+    if (last != null and last.?.kind == .ping and last.?.written == 0) {
+        if (heartbeat) last.?.heartbeat = true;
+    } else {
         const chunk = try q.reserve(encoder.ping.len);
         @memcpy(chunk.bytes[chunk.tail..][0..encoder.ping.len], encoder.ping);
-        q.commit(chunk, .{ .kind = .ping, .len = encoder.ping.len });
+        q.commit(chunk, .{ .kind = .ping, .len = encoder.ping.len, .heartbeat = heartbeat });
         q.pings_queued += 1;
         q.ready.signal(io);
     }
-    if (kind == .heartbeat) q.pings_out +|= 1;
     return .{ .number = q.pings_queued, .generation = q.generation };
 }
 
@@ -437,11 +443,25 @@ pub fn waitPong(q: *Outbound, io: Io, ping: Ping, deadline: ?Io.Clock.Timestamp)
     }
 }
 
-/// Heartbeat PINGs sent since the last PONG.
+/// Heartbeat PINGs written since the last PONG.
 pub fn pingsOut(q: *Outbound, io: Io) u32 {
     q.mutex.lockUncancelable(io);
     defer q.mutex.unlock(io);
     return q.pings_out;
+}
+
+/// What the heartbeat looks at.
+pub const Health = struct {
+    /// Heartbeat PINGs written since the last PONG.
+    pings_out: u32,
+    /// Frames or PONGs wait for the writer, or are being written.
+    waiting: bool,
+};
+
+pub fn health(q: *Outbound, io: Io) Health {
+    q.mutex.lockUncancelable(io);
+    defer q.mutex.unlock(io);
+    return .{ .pings_out = q.pings_out, .waiting = q.frames.len > 0 or q.pongs_owed > 0 };
 }
 
 /// The server sent PING: a PONG goes out before the next batch.
@@ -847,6 +867,8 @@ fn dropWritten(q: *Outbound, bytes: usize) void {
                 q.marks[q.pings_written % ping_marks] = .{ .number = q.pings_written, .data_frames = q.data_written };
                 // Its PONG came before the writer said it was written.
                 if (q.pongs_received >= q.pings_written) q.data_confirmed = q.data_written;
+                // The server may see it now: unanswered, it is outstanding.
+                if (frame.heartbeat and q.pongs_received < q.pings_written) q.pings_out +|= 1;
             },
             .service => {},
         }
@@ -1124,6 +1146,9 @@ test "PINGs are numbered and each PONG answers the oldest" {
     try testing.expectEqual(1, (try q.putPing(io, .flush)).number);
     try putPub(&q, io, .publish, "a", "1");
     try testing.expectEqual(2, (try q.putPing(io, .heartbeat)).number);
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(testing.allocator);
+    try drainOnce(&q, io, &out);
     try testing.expectEqual(1, q.pingsOut(io));
     try testing.expectError(error.Timeout, q.waitPong(io, .{ .number = 1 }, time.after(io, .zero)));
 
@@ -1133,6 +1158,31 @@ test "PINGs are numbered and each PONG answers the oldest" {
     try testing.expectError(error.Timeout, q.waitPong(io, .{ .number = 2 }, time.after(io, .fromMilliseconds(10))));
     q.pongReceived(io);
     try q.waitPong(io, .{ .number = 2 }, time.after(io, .fromSeconds(5)));
+}
+
+test "a heartbeat PING counts as outstanding once it is written, not while it waits behind other frames" {
+    const io = testing.io;
+    var q: Outbound = .init(testing.allocator, 1 << 20);
+    defer q.deinit();
+    try putPub(&q, io, .publish, "a", "1"); // 12 bytes
+    _ = try q.putPing(io, .heartbeat);
+    // Still behind the publish: the server cannot have seen it.
+    try testing.expectEqual(0, q.pingsOut(io));
+    var slices: [4][]const u8 = undefined;
+    const batch = (try q.take(io, &slices)).?;
+    q.written(io, 12);
+    try testing.expectEqual(0, q.pingsOut(io));
+    q.written(io, batch.len - 12);
+    try testing.expectEqual(1, q.pingsOut(io));
+    q.pongReceived(io);
+    try testing.expectEqual(0, q.pingsOut(io));
+
+    // Its PONG came before the writer said it was written: not outstanding.
+    _ = try q.putPing(io, .heartbeat);
+    const next = (try q.take(io, &slices)).?;
+    q.pongReceived(io);
+    q.written(io, next.len);
+    try testing.expectEqual(0, q.pingsOut(io));
 }
 
 test "a partial write marks the frame it stopped in" {
@@ -1150,7 +1200,7 @@ test "a partial write marks the frame it stopped in" {
     var frames: [4]Frame = undefined;
     const left = q.unsent(io, &frames);
     try testing.expectEqual(2, left.len);
-    try testing.expectEqual(Frame{ .kind = .ping, .len = 6, .written = 2 }, left[0]);
+    try testing.expectEqual(Frame{ .kind = .ping, .len = 6, .written = 2, .heartbeat = true }, left[0]);
     try testing.expectEqual(Frame{ .kind = .request, .len = 12, .written = 0 }, left[1]);
 
     var out: std.ArrayList(u8) = .empty;
@@ -1190,7 +1240,8 @@ test "PINGs in a row share one frame, so they stay bounded" {
     const first = try q.putPing(io, .flush);
     for (0..1000) |_| try testing.expectEqual(first, try q.putPing(io, .flush));
     try testing.expectEqual(first, try q.putPing(io, .heartbeat));
-    try testing.expectEqual(1, q.pingsOut(io));
+    // The shared PING carries the heartbeat's: outstanding once written.
+    try testing.expect(q.unsent(io, &frames)[0].heartbeat);
     try testing.expectEqual(1, q.unsent(io, &frames).len);
 
     // A frame after it needs a PING of its own.
