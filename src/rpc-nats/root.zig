@@ -33,6 +33,8 @@ const std = @import("std");
 pub const Conn = @import("Conn.zig");
 /// The NATS transport: both sides of rpc on one NATS connection.
 pub const Transport = @import("Transport.zig");
+/// The adapter of zefir-nats: a `Conn` on a `nats.Client`.
+pub const ZefirNats = @import("ZefirNats.zig");
 /// Helpers for tests of services on NATS.
 pub const testing = @import("testing.zig");
 
@@ -42,6 +44,7 @@ test {
     _ = @import("subject.zig");
     _ = @import("wire.zig");
     _ = @import("Transport.zig");
+    _ = @import("ZefirNats.zig");
     _ = @import("testing.zig");
     _ = @import("server_tests.zig");
     _ = @import("client_tests.zig");

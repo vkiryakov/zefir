@@ -27,7 +27,8 @@ imports() {
     # violations they find.
     validator) echo log ;;
     rpc) echo core validator ;;
-    rpc-nats) echo rpc core ;;
+    # rpc-nats imports nats for its adapter of zefir-nats.
+    rpc-nats) echo rpc core nats ;;
     # nats imports nothing, but the examples of its guide read their
     # settings with confy, log with log and take deadlines from core, and
     # its end-to-end tests build and run them. confy brings log.

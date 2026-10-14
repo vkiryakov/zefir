@@ -64,18 +64,18 @@ while IFS='|' read -r change modules <&3; do
 done 3<<'EOF'
 edit src/core/Context.zig                       | core log confy validator rpc rpc-nats orm nats zefir
 edit src/log/Logger.zig                         | log confy validator rpc rpc-nats orm nats zefir
-edit src/confy/root.zig                         | confy nats zefir
+edit src/confy/root.zig                         | confy rpc-nats nats zefir
 edit src/validator/strings.zig                  | validator rpc rpc-nats zefir
 edit src/rpc/root.zig                           | rpc rpc-nats zefir
 edit src/orm/root.zig                           | orm zefir
 edit src/rpc/root.zig src/orm/root.zig          | rpc rpc-nats orm zefir
 edit src/rpc-nats/Transport.zig                 | rpc-nats zefir
-edit src/nats/Client.zig                        | nats zefir
-edit tests/nats/e2e/pubsub.zig                  | nats zefir
-edit tests/nats/README.md                       | nats zefir
-edit docker-compose.yml                         | nats zefir
+edit src/nats/Client.zig                        | rpc-nats nats zefir
+edit tests/nats/e2e/pubsub.zig                  | rpc-nats nats zefir
+edit tests/nats/README.md                       | rpc-nats nats zefir
+edit docker-compose.yml                         | rpc-nats nats zefir
 edit src/core/root.zig src/nats/root.zig        | core log confy validator rpc rpc-nats orm nats zefir
-edit src/confy/examples/README.md               | confy nats zefir
+edit src/confy/examples/README.md               | confy rpc-nats nats zefir
 edit README.md src/validator/root.zig           | validator rpc rpc-nats zefir
 edit README.md                                  |
 edit docs/plan.md docs/notes.txt                |

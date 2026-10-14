@@ -56,6 +56,19 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    // nats sends the package version in CONNECT; build.zig.zon is its only source.
+    const nats_options = b.addOptions();
+    nats_options.addOption([]const u8, "version", manifest.version);
+    const nats = b.addModule("zefir-nats", .{
+        .root_source_file = b.path("src/nats/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+    });
+    nats.addOptions("build_options", nats_options);
+
+    // nats only for its adapter, rpc_nats.ZefirNats: Zig compiles that file
+    // only for an application that uses it.
     const rpc_nats = b.addModule("zefir-rpc-nats", .{
         .root_source_file = b.path("src/rpc-nats/root.zig"),
         .target = target,
@@ -64,6 +77,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "rpc", .module = rpc },
             .{ .name = "core", .module = core },
+            .{ .name = "nats", .module = nats },
         },
     });
 
@@ -76,17 +90,6 @@ pub fn build(b: *std.Build) void {
             .{ .name = "log", .module = log },
         },
     });
-
-    // nats sends the package version in CONNECT; build.zig.zon is its only source.
-    const nats_options = b.addOptions();
-    nats_options.addOption([]const u8, "version", manifest.version);
-    const nats = b.addModule("zefir-nats", .{
-        .root_source_file = b.path("src/nats/root.zig"),
-        .target = target,
-        .optimize = optimize,
-        .sanitize_thread = tsan,
-    });
-    nats.addOptions("build_options", nats_options);
 
     // Umbrella module: @import("zefir").core, .log, .confy, .validator, .rpc, .rpc_nats, .orm, .nats
     const zefir = b.addModule("zefir", .{
