@@ -832,6 +832,47 @@ test "the rules of the client's next.run(): a breaker, no success without it, fo
     trail.count = 0;
 }
 
+/// The example of `rpc.ClientContext`.
+fn tagCalls(ctx: *ClientContext, next: *ClientNext) anyerror!void {
+    try ctx.addMetadata("x-caller", "billing");
+    const started = std.Io.Clock.awake.now(ctx.io());
+    defer {
+        const took = started.durationTo(std.Io.Clock.awake.now(ctx.io()));
+        const failed = if (ctx.response()) |response| response.status == .failure else true;
+        std.log.info("{s} took {d} ms, failed: {}", .{ ctx.route().method, took.toMilliseconds(), failed });
+    }
+    return next.run();
+}
+
+/// Greets the caller named in `x-caller`.
+const Greeter = struct {
+    fn handle(_: *Greeter, ctx: *Context, name: []const u8) anyerror![]const u8 {
+        return std.fmt.allocPrint(ctx.allocator(), "{s}, {s}!", .{ ctx.metadata().get("x-caller") orelse "?", name });
+    }
+};
+
+test "the examples of the doc comments of the client work" {
+    const io = testing.io;
+    const ctx: core.Context = .root;
+    var greeter: Greeter = .{};
+    var f: Fixture = undefined;
+    try f.start(io, testing.allocator, .{
+        .transport = undefined,
+        .methods = &.{.{ .route = .{ .service = "greeter", .version = 1, .method = "greet" }, .handler = handlerOf(&greeter) }},
+    }, .{ .transport = undefined, .middleware = &.{.of(tagCalls)} });
+    defer f.stop(io);
+    const client = &f.client;
+
+    const route: model.Route = .{ .service = "greeter", .version = 1, .method = "greet" };
+    var result = try client.call(io, ctx, route, "world", .{ .timeout = .fromMilliseconds(500) });
+    defer result.deinit();
+    switch (result.response.status) {
+        .ok => std.log.info("{s}", .{result.response.body}),
+        .failure => |failure| std.log.err("{s}: {s}", .{ failure.app_code, failure.message }),
+    }
+    try testing.expectEqualStrings("billing, world!", result.response.body);
+}
+
 /// Waits on a gate in the handler; canceling the call ends the wait.
 const Gate = struct {
     io: std.Io,

@@ -9,7 +9,8 @@
 //! The path of a call: admission checks the route, the codec, the
 //! metadata, the budget, a place and the memory before the body is read;
 //! the call gets a supervisor task, or waits in the queue while
-//! `max_active_tasks` handlers run; its handler runs in a task of its own;
+//! `max_active_tasks` handlers run; its handler runs in a task of its own,
+//! after the authenticator and the middleware of the server and the method;
 //! the first of the handler's end, the deadline, the client's cancel and
 //! the stop decides the outcome, so at most one response goes out; the
 //! transport's `release` comes once the handler has really ended.

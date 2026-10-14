@@ -96,7 +96,10 @@ pub const Next = opaque {
 /// without `next.run()` is fine, as a circuit breaker does; success without
 /// it is `MiddlewareFailed`. `next.run()` returns errors in the names of
 /// `rpc.RawClient.CallError`; a link may replace the outcome with one of
-/// them, and any other error becomes `MiddlewareFailed`.
+/// them, and any other error becomes `MiddlewareFailed`. A link returns
+/// `error.Canceled` as a cancelation point of `std.Io` gave it, only when
+/// the caller's task was canceled: the engine re-arms the cancelation for
+/// the caller and ends the call with `Cancelled` or `DeadlineExceeded`.
 pub const ClientMiddleware = struct {
     ptr: ?*anyopaque = null,
     run: *const fn (ptr: ?*anyopaque, ctx: *ClientContext, next: *ClientNext) anyerror!void,

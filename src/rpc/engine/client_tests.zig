@@ -529,10 +529,17 @@ test "the caller's task canceled during the transport's call: Cancelled once, an
     const io = testing.io;
     var memory: MemoryTransport = try .init(testing.allocator, .{});
     defer memory.deinit(io);
+    // A gate per call: the server cancels a handler after the client has
+    // returned, and an event must not be reset under a pending wait.
     var gate: Gate = .{ .io = io };
+    var second_gate: Gate = .{ .io = io };
+    const second_route: model.Route = .{ .service = "test", .version = 1, .method = "second" };
     var server: RawServer = try .init(testing.allocator, .{
         .transport = memory.serverTransport(),
-        .methods = &.{.{ .route = echo_route, .handler = handlerOf(&gate) }},
+        .methods = &.{
+            .{ .route = echo_route, .handler = handlerOf(&gate) },
+            .{ .route = second_route, .handler = handlerOf(&second_gate) },
+        },
     });
     defer server.deinit(io);
     try server.start(io);
@@ -541,6 +548,7 @@ test "the caller's task canceled during the transport's call: Cancelled once, an
 
     var caller = try io.concurrent(callAndLook, .{ &client, io, echo_route, std.Io.Duration.fromSeconds(10) });
     defer gate.open.set(io);
+    defer second_gate.open.set(io);
     try gate.waitEntered(1);
     const observed = caller.cancel(io);
     try testing.expectError(error.Cancelled, observed.result);
@@ -549,12 +557,10 @@ test "the caller's task canceled during the transport's call: Cancelled once, an
     // The deadline is never Cancelled. The server's own deadline_exceeded
     // could come a moment before the client's deadline: it is lost here, so
     // the transport's Timeout decides.
-    gate.open.reset();
     memory.loseNextResponse();
-    const timed_out = callAndLook(&client, io, echo_route, .fromMilliseconds(30));
+    const timed_out = callAndLook(&client, io, second_route, .fromMilliseconds(30));
     try testing.expectError(error.DeadlineExceeded, timed_out.result);
     try testing.expect(!timed_out.still_canceled);
-    gate.open.set(io);
     try server.shutdown(io);
 }
 
