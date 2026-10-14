@@ -290,15 +290,13 @@ const Decoder = struct {
             members += 1;
             try d.path.append(d.arena, .{ .key = key });
             if (!try d.field(T, &result, &seen, key)) {
-                // The first unknown key makes room for the rest of the
-                // members, which may all be unknown.
-                if (d.keys.items.len == keys_start) try d.reserveKeys();
-                try d.keys.append(d.arena, key);
+                try d.pushKey(key);
                 try d.skip();
             }
             d.path.items.len -= 1;
         }
         try d.checkKeys(keys_start);
+        d.keys.items.len = keys_start;
         inline for (info.field_names, info.field_types, info.field_attrs, 0..) |name, Field, attrs, i| {
             if (!seen[i]) {
                 if (attrs.defaultValue(Field)) |default| {
@@ -358,7 +356,7 @@ const Decoder = struct {
                             else => return d.fail(invalid_json),
                         };
                         d.path.items[d.path.items.len - 1] = .{ .key = key };
-                        try d.keys.append(d.arena, key);
+                        try d.pushKey(key);
                         try d.enterSkipped(try d.next());
                     } else {
                         d.path.items[d.path.items.len - 1] = .{ .index = index };
@@ -378,20 +376,25 @@ const Decoder = struct {
             else => return,
         };
         try d.deeper();
-        // Every key of a skipped object is kept until it ends.
-        if (is_object) try d.reserveKeys();
         try d.frames.append(d.arena, .{ .object = is_object, .items = 0, .keys_start = d.keys.items.len });
         try d.path.append(d.arena, .{ .index = 0 });
     }
 
-    /// Makes room on the stack of unknown keys for the members of the
-    /// object from the scanner on, at most `max_items`: grown key by key in
-    /// an arena, the stack would leave each smaller copy behind.
-    fn reserveKeys(d: *Decoder) DecodeError!void {
-        const needed = d.keys.items.len + @min(countItems(d.bytes, d.scanner.cursor), d.limits.max_items);
-        if (needed <= d.keys.capacity) return;
-        // Exactly what is needed the first time, by half again after that.
-        try d.keys.ensureTotalCapacityPrecise(d.arena, @max(needed, d.keys.capacity + d.keys.capacity / 2));
+    /// Keeps an unknown key of an open object until the object ends, to
+    /// look for its repeats. The stack of keys grows rarely and by a lot:
+    /// grown key by key in an arena, it would leave each smaller copy
+    /// behind. When it is full, it makes room for the rest of the members
+    /// of the object (they may all be unknown; at most `max_items`), at
+    /// least twice its size, and at least 16 keys. So the bytes of an
+    /// object are counted only when the stack runs out of room.
+    fn pushKey(d: *Decoder, key: []const u8) DecodeError!void {
+        if (d.keys.items.len == d.keys.capacity) {
+            // The scanner stands right after the key: this member and the
+            // rest.
+            const rest = @min(countItems(d.bytes, d.scanner.cursor), d.limits.max_items);
+            try d.keys.ensureTotalCapacityPrecise(d.arena, @max(d.keys.items.len + @max(rest, 1), 2 * d.keys.capacity, 16));
+        }
+        d.keys.appendAssumeCapacity(key);
     }
 
     /// Fails when the keys from `start` on repeat one another.

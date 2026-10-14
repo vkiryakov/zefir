@@ -280,6 +280,22 @@ test "100 000 items decode, 100 001 do not, in arrays and objects, typed or skip
     try expectRefusal(run(Top, &arena, object_over), null, "too many items");
 }
 
+test "the unknown keys of an object are dropped when it ends" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(testing.allocator);
+    try body.append(testing.allocator, '[');
+    for (0..100_000) |i| try body.appendSlice(testing.allocator, if (i == 0) "{\"x\":1,\"y\":2,\"z\":3}" else ",{\"x\":1,\"y\":2,\"z\":3}");
+    try body.append(testing.allocator, ']');
+    const Point = struct { x: i32, y: i32 };
+    const outcome = run([]const Point, &arena, body.items);
+    try expectAccepted(outcome);
+    // The points themselves and the arena's half again; no key of the
+    // objects before.
+    try expectMemoryBelow(outcome, 2 * 100_000 * @sizeOf(Point));
+}
+
 test "a repeated key among 100 000 unknown ones is found" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
