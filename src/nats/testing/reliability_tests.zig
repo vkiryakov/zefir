@@ -2149,11 +2149,15 @@ test "a server that drops every connection right after the handshake: the client
     // second at most, where a loop with no wait makes hundreds.
     const count = flapping.taken(io);
     try testing.expect(count >= 3 and count <= 6);
-    // Every wait at least as long as most of the one before: they grow.
-    for (2..@min(count, flapping.times.len)) |i| {
-        const before = flapping.times[i - 2].durationTo(flapping.times[i - 1]).nanoseconds;
-        const after = flapping.times[i - 1].durationTo(flapping.times[i]).nanoseconds;
-        try testing.expect(after * 10 >= before * 15);
+    // Every wait at least the least of its level, a fifth under its delay:
+    // they grow. A timer tick that ends a wait late, as Windows' ~15.6 ms
+    // ones do, only makes it longer; 10 ms allow for the server noting a
+    // connection late.
+    var least: i96 = 40 * std.time.ns_per_ms;
+    for (1..@min(count, flapping.times.len)) |i| {
+        const gap = flapping.times[i - 1].durationTo(flapping.times[i]).nanoseconds;
+        try testing.expect(gap >= least - 10 * std.time.ns_per_ms);
+        least *= 2;
     }
 }
 
