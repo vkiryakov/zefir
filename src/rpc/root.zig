@@ -131,4 +131,5 @@ test {
     _ = @import("engine/RawClient.zig");
     _ = @import("app/dto.zig");
     _ = @import("app/contract.zig");
+    _ = @import("app/json.zig");
 }
