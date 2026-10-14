@@ -948,8 +948,6 @@ test "an outcome before the handler's task enters keeps the handler out: the cal
     const io = testing.io;
     const late_io = LateStart.io();
     LateStart.gate = .unset;
-    // No task stays at the gate.
-    defer LateStart.gate.set(io);
     var entering: Entering = .{};
     var test_transport: TestTransport = .{};
     var server: RawServer = try .init(testing.allocator, .{
@@ -961,6 +959,8 @@ test "an outcome before the handler's task enters keeps the handler out: the cal
         .shutdown_grace = .zero,
     });
     defer server.deinit(io);
+    // A failed check leaves no task at the gate: deinit waits for them.
+    defer LateStart.gate.set(io);
     try server.start(io);
     const d = test_transport.dispatcher.?;
 
