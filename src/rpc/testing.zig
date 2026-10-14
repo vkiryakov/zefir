@@ -18,4 +18,5 @@ test {
     _ = RecordingDispatcher;
     _ = conformance;
     _ = @import("testing/conformance_tests.zig");
+    _ = @import("testing/mini_app.zig");
 }
