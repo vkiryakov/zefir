@@ -121,10 +121,11 @@ const Call = struct {
     // Guarded by the transport's mutex:
     phase: Phase = .admitting,
     incoming: Incoming = undefined,
-    /// The server closed: a send gets `Closed`, and nobody cancels the call.
+    /// The server closed or the link broke: a late send gets `Closed`, and
+    /// the client no longer cancels the call.
     cut: bool = false,
-    /// A cancel came while `start` ran: the client sends it once `start`
-    /// has returned.
+    /// The link broke while `start` ran: the client cancels the call once
+    /// `start` has returned.
     cancel_pending: bool = false,
     sends: u8 = 0,
     retry_allowed: bool = false,
@@ -465,7 +466,8 @@ fn forget(t: *MemoryTransport, io: std.Io, c: *Call) void {
     t.unref(io, c);
 }
 
-/// False when the server closed while the call was in `admit`.
+/// False when the server closed or the link broke while the call was in
+/// `admit`.
 fn beginStart(t: *MemoryTransport, io: std.Io, c: *Call, incoming: Incoming) bool {
     t.mutex.lockUncancelable(io);
     defer t.mutex.unlock(io);
