@@ -1063,6 +1063,7 @@ test "lifecycle: requestStop while the transport starts: start ends, the server 
     defer fake.release_start.set(io);
     fake.start_entered.waitUncancelable(io);
     try testing.expectEqual(State.starting, server.state());
+    try testing.expectError(error.InvalidState, server.start(io));
     server.requestStop(io);
     try testing.expectEqual(State.starting, server.state());
     fake.release_start.set(io);
