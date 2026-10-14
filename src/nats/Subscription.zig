@@ -202,6 +202,15 @@ fn stopSending(client: *Client, sid: u64, deadline: ?Io.Clock.Timestamp) DrainEr
     };
 }
 
+/// Whether the server refused the subscription, as for an account that
+/// may not subscribe to its subject: no message comes, and `next()` fails
+/// with PermissionDenied. The server answers a SUB before the PONG of a
+/// later PING, so once a `flush()` made after `subscribe` returns, the
+/// answer is known.
+pub fn isDenied(sub: *Subscription) bool {
+    return sub.messages.endedHow(sub.client.io) == .permission_denied;
+}
+
 /// What waits to be taken.
 pub const PendingCounts = struct {
     messages: usize,

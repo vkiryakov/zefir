@@ -322,6 +322,64 @@ test "close() while a publish waits for room: ConnectionClosed at once" {
     try testing.expect(elapsedSince(io, start).toSeconds() < 1);
 }
 
+fn waitFor(duration: Io.Duration) Io.Timeout {
+    return .{ .duration = .{ .raw = duration, .clock = .awake } };
+}
+
+test "publishMessageTimeout gives up waiting for room at its timeout, and the client goes on" {
+    const io = testing.io;
+    var s: Stalled = undefined;
+    try s.start();
+    defer s.deinit();
+    var publisher = try io.concurrent(publishUntilError, .{ &s.client, s.payload, &s.published });
+    defer publisher.cancel(io) catch {};
+    try awaitStuck(&s.client, &s.published);
+    const out = s.client.stats().messages_out;
+    const start = Io.Clock.awake.now(io);
+    try testing.expectError(error.Timeout, s.client.publishMessageTimeout(.{ .subject = "stalled", .payload = "late" }, waitFor(.fromMilliseconds(100))));
+    const took = elapsedSince(io, start);
+    try testing.expect(took.toMilliseconds() >= 100);
+    try testing.expect(took.toSeconds() < 5);
+    // Nothing went in, and only the stuck publish waits for room.
+    try testing.expectEqual(out, s.client.stats().messages_out);
+    try testing.expectEqual(1, s.client.outbound.roomWaiters(io));
+    try testing.expect(s.client.isConnected());
+}
+
+fn publishWithin(client: *Client, timeout: Io.Timeout) Client.PublishTimeoutError!void {
+    return client.publishMessageTimeout(.{ .subject = "stalled", .payload = "x" }, timeout);
+}
+
+test "publishMessageTimeout waiting for room can be canceled" {
+    const io = testing.io;
+    var s: Stalled = undefined;
+    try s.start();
+    defer s.deinit();
+    var publisher = try io.concurrent(publishUntilError, .{ &s.client, s.payload, &s.published });
+    defer publisher.cancel(io) catch {};
+    try awaitStuck(&s.client, &s.published);
+    var timed = try io.concurrent(publishWithin, .{ &s.client, waitFor(.fromSeconds(60)) });
+    defer timed.cancel(io) catch {};
+    try awaitRoomWaiters(&s.client, 2);
+    try testing.expectError(error.Canceled, timed.cancel(io));
+    try testing.expect(s.client.isConnected());
+}
+
+test "publishMessageTimeout sends what publishMessage sends; a timeout already over sends nothing" {
+    var r: Recorded = undefined;
+    try r.start(golden.info_default, .{ .servers = &.{} });
+    defer r.deinit();
+    try r.client.publishMessageTimeout(.{ .subject = "foo", .reply_to = "reply.to", .payload = "x" }, waitFor(.fromSeconds(5)));
+    try r.client.publishMessageTimeout(.{ .subject = "h", .headers = &.{.{ .name = "K", .value = "v" }}, .payload = "p" }, .none);
+    try testing.expectError(error.Timeout, r.client.publishMessageTimeout(.{ .subject = "foo", .payload = "never" }, waitFor(.zero)));
+    // The arguments are checked first, as by publishMessage.
+    try testing.expectError(error.InvalidSubject, r.client.publishMessageTimeout(.{ .subject = "foo bar" }, waitFor(.zero)));
+    try r.finish();
+    try testing.expectEqualStrings("PUB foo reply.to 1\r\nx\r\n" ++
+        "HPUB h 18 19\r\nNATS/1.0\r\nK: v\r\n\r\np\r\n" ++
+        "PING\r\n", r.transcript.items);
+}
+
 fn subscribeOnce(client: *Client) Client.SubscribeError!void {
     const sub = try client.subscribe("late.sub", .{});
     sub.deinit();
@@ -839,6 +897,34 @@ test "a subscription the server refuses: PermissionDenied, and the others go on"
     try expectMessage(ok, "ok", "hi");
     try s.client.flush(quick);
     try testing.expect(s.client.isConnected());
+    try s.finish();
+}
+
+test "a refused subscription is known once a flush after it returns" {
+    const level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = level;
+    var s: Scripted = undefined;
+    try s.start(testing.allocator, .{ .servers = &.{} }, &.{
+        .{ .expect = "SUB forbidden 1" },
+        .{ .expect = "SUB ok 2" },
+        // Before the PONG of the flush that follows.
+        .{ .send = "-ERR 'Permissions Violation for Subscription to \"forbidden\"'\r\n" },
+    });
+    defer s.deinit();
+    const forbidden = try s.client.subscribe("forbidden", .{});
+    defer forbidden.deinit();
+    const ok = try s.client.subscribe("ok", .{});
+    defer ok.deinit();
+    try s.client.flush(quick);
+    try testing.expect(forbidden.isDenied());
+    try testing.expect(!ok.isDenied());
+    // Nothing is taken from the subscription to tell.
+    try testing.expectError(error.PermissionDenied, forbidden.next(within_five_seconds));
+    try testing.expect(forbidden.isDenied());
+    // Ended otherwise, it was not refused.
+    try ok.unsubscribe();
+    try testing.expect(!ok.isDenied());
     try s.finish();
 }
 
