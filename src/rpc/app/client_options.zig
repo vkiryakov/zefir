@@ -45,13 +45,45 @@ pub fn optionsProblem(comptime O: type) ?[]const u8 {
     if (@hasField(O, "middleware")) {
         if (linksProblem(@FieldType(O, "middleware"))) |found| return found;
     }
-    if (@hasField(O, "default_timeout") and @FieldType(O, "default_timeout") != std.Io.Duration)
-        return at ++ ".default_timeout must be a std.Io.Duration, such as std.Io.Duration.fromSeconds(3); got " ++ @typeName(@FieldType(O, "default_timeout"));
-    if (@hasField(O, "max_pending") and !coercesTo(@FieldType(O, "max_pending"), u32))
-        return at ++ ".max_pending must be a u32, such as 1024; got " ++ @typeName(@FieldType(O, "max_pending"));
-    if (@hasField(O, "max_response_bytes") and !coercesTo(@FieldType(O, "max_response_bytes"), usize))
-        return at ++ ".max_response_bytes must be a usize, such as 1 << 20; got " ++ @typeName(@FieldType(O, "max_response_bytes"));
+    if (@hasField(O, "default_timeout")) {
+        if (@FieldType(O, "default_timeout") != std.Io.Duration)
+            return at ++ ".default_timeout must be a std.Io.Duration, such as std.Io.Duration.fromSeconds(3); got " ++ @typeName(@FieldType(O, "default_timeout"));
+        if (comptimeValue(O, "default_timeout")) |timeout| {
+            if (timeout.nanoseconds <= 0) return at ++ ".default_timeout must be above zero, such as std.Io.Duration.fromSeconds(3)";
+        }
+    }
+    if (@hasField(O, "max_pending")) {
+        if (!coercesTo(@FieldType(O, "max_pending"), u32))
+            return at ++ ".max_pending must be a u32, such as 1024; got " ++ @typeName(@FieldType(O, "max_pending"));
+        if (rangeProblem(O, "max_pending", u32)) |found| return found;
+    }
+    if (@hasField(O, "max_response_bytes")) {
+        if (!coercesTo(@FieldType(O, "max_response_bytes"), usize))
+            return at ++ ".max_response_bytes must be a usize, such as 1 << 20; got " ++ @typeName(@FieldType(O, "max_response_bytes"));
+        if (rangeProblem(O, "max_response_bytes", usize)) |found| return found;
+    }
     return null;
+}
+
+/// The value of the field `name` of `O` when it is known at compile time,
+/// as a literal makes it; null for a value known only at run time.
+fn comptimeValue(comptime O: type, comptime name: []const u8) ?@FieldType(O, name) {
+    const info = @typeInfo(O).@"struct";
+    for (info.field_names, info.field_attrs) |field, attrs| {
+        if (!std.mem.eql(u8, field, name)) continue;
+        if (!attrs.@"comptime") return null;
+        return attrs.defaultValue(@FieldType(O, name));
+    }
+    return null;
+}
+
+/// The problem of a limit known at compile time that is not 1 to the
+/// largest `Target`: zero would refuse every call, and a larger literal
+/// would not fit.
+fn rangeProblem(comptime O: type, comptime name: []const u8, comptime Target: type) ?[]const u8 {
+    const value = comptimeValue(O, name) orelse return null;
+    if (value >= 1 and value <= std.math.maxInt(Target)) return null;
+    return std.fmt.comptimePrint("{s}.{s} must be 1 to {d}; got {d}", .{ at, name, std.math.maxInt(Target), value });
 }
 
 /// `.credentials` is `rpc.Credentials`, a literal such as `.none`, or a
@@ -273,6 +305,31 @@ test "the shape of the options" {
 
 const TwoKinds = struct { bearer: []const u8, custom: []const u8 };
 const UserOnly = struct { user: []const u8 };
+
+/// The options of a client with one more field besides the transport,
+/// `name`, known at compile time: `value`, as a literal makes it.
+fn WithValue(comptime name: [:0]const u8, comptime value: anytype) type {
+    const T = @TypeOf(value);
+    const stored: T = value;
+    return @Struct(.auto, null, &.{ "transport", name }, &.{ ClientTransport, T }, &.{ .{}, .{ .@"comptime" = true, .default_value_ptr = &stored } });
+}
+
+test "limits known at compile time are above zero and fit their types" {
+    const zero_timeout: std.Io.Duration = .zero;
+    try expectNoProblem(WithValue("max_pending", 1));
+    try expectNoProblem(WithValue("max_pending", std.math.maxInt(u32)));
+    try expectNoProblem(WithValue("max_response_bytes", 1));
+    try expectNoProblem(WithValue("default_timeout", std.Io.Duration.fromMilliseconds(1)));
+    try expectProblem(WithValue("max_pending", 0), "rpc.Client.init: .max_pending must be 1 to 4294967295; got 0");
+    try expectProblem(WithValue("max_pending", -1), "rpc.Client.init: .max_pending must be 1 to 4294967295; got -1");
+    try expectProblem(WithValue("max_pending", 1 << 32), "rpc.Client.init: .max_pending must be 1 to 4294967295; got 4294967296");
+    try expectProblem(WithValue("max_pending", @as(u32, 0)), "rpc.Client.init: .max_pending must be 1 to 4294967295; got 0");
+    const bytes_range = std.fmt.comptimePrint("1 to {d}", .{std.math.maxInt(usize)});
+    try expectProblem(WithValue("max_response_bytes", 0), "rpc.Client.init: .max_response_bytes must be " ++ bytes_range ++ "; got 0");
+    try expectProblem(WithValue("max_response_bytes", std.math.maxInt(usize) + 1), std.fmt.comptimePrint("rpc.Client.init: .max_response_bytes must be {s}; got {d}", .{ bytes_range, std.math.maxInt(usize) + 1 }));
+    try expectProblem(WithValue("default_timeout", zero_timeout), "rpc.Client.init: .default_timeout must be above zero, such as std.Io.Duration.fromSeconds(3)");
+    try expectProblem(WithValue("default_timeout", std.Io.Duration.fromMilliseconds(-5)), "rpc.Client.init: .default_timeout must be above zero, such as std.Io.Duration.fromSeconds(3)");
+}
 
 test "credentials are rpc.Credentials or a literal of one kind" {
     try expectNoProblem(With("credentials", Credentials));
