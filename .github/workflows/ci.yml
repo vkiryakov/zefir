@@ -78,6 +78,14 @@ jobs:
       - if: env.MODULES != ''
         shell: bash
         run: zig build $(printf 'test-%s ' $MODULES) --summary all --test-timeout 5m
+      # The package in tests/nats, built and not run: the end-to-end and
+      # stress tests, the examples of the nats guide and the benchmark. Only
+      # nats-e2e runs them, on Linux, as they need the servers in Docker;
+      # this keeps them compiling on every system, in a required check.
+      - if: contains(format(' {0} ', env.MODULES), ' nats ')
+        shell: bash
+        working-directory: tests/nats
+        run: zig build check --summary all
 
   # The tests again under ThreadSanitizer; it does not build for Windows.
   tsan:
@@ -131,4 +139,27 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: mlugg/setup-zig@v2
-      - run: zig fmt --check build.zig build.zig.zon src
+      - run: zig fmt --check build.zig build.zig.zon src tests --exclude tests/nats/zig-pkg
+
+  # The end-to-end tests of nats against NATS servers in Docker. Only the
+  # Linux runners run Linux containers, so this job is ubuntu only. It is
+  # not a required check yet. It runs when nats is among the modules to
+  # test, so on every push to main or dev and on a manual run.
+  nats-e2e:
+    name: nats-e2e
+    needs: changes
+    if: contains(format(' {0} ', needs.changes.outputs.modules), ' nats ')
+    timeout-minutes: 20
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: mlugg/setup-zig@v2
+      - name: Start the NATS servers
+        run: docker compose up --detach --wait
+      - name: Run the end-to-end tests
+        working-directory: tests/nats
+        timeout-minutes: 10
+        run: zig build e2e --summary all
+      - name: Stop the NATS servers
+        if: always()
+        run: docker compose down

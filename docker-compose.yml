@@ -1,0 +1,103 @@
+# The NATS servers of the end-to-end tests of nats, in tests/nats. From here,
+# `docker compose up -d --wait` starts them and waits until they are
+# healthy, and `docker compose down` stops them; in tests/nats,
+# `zig build e2e` starts them too and `zig build down` stops them. Every
+# port is published on 127.0.0.1 only:
+#
+#   14222  plain, no authentication
+#   14223  users and passwords (tests/nats/conf/auth.conf)
+#   14224  TLS required
+#   14225  TLS first: no INFO before the TLS handshake
+#   14226  cluster node a, 14227 node b, 14228 node c
+#   14229  plain, for tests that pause it: a server that stops reading
+#   14230  plain, for tests that stop and start it
+#   14231  a user whose password tests change and reload
+#   14232  a user whose account has a lower max_payload than the server's
+#
+# tests/nats/certs holds a self-signed certificate for the TLS servers, valid
+# for 100 years. The client does not do TLS; the servers need it to start.
+
+name: zefir-nats-e2e
+
+x-nats: &nats
+  image: nats:2.15.0-alpine
+  volumes:
+    - ./tests/nats/conf:/conf:ro
+    - ./tests/nats/certs:/certs:ro
+  healthcheck:
+    test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8222/healthz"]
+    interval: 1s
+    timeout: 2s
+    retries: 30
+
+services:
+  plain:
+    <<: *nats
+    # The tests read its monitoring endpoint by this name.
+    container_name: zefir-nats-e2e-plain
+    command: ["--config", "/conf/plain.conf"]
+    ports: ["127.0.0.1:14222:4222"]
+
+  auth:
+    <<: *nats
+    command: ["--config", "/conf/auth.conf"]
+    ports: ["127.0.0.1:14223:4222"]
+
+  tls:
+    <<: *nats
+    command: ["--config", "/conf/tls.conf"]
+    ports: ["127.0.0.1:14224:4222"]
+
+  tls-first:
+    <<: *nats
+    command: ["--config", "/conf/tls-first.conf"]
+    ports: ["127.0.0.1:14225:4222"]
+
+  # The tests stop nodes, and send them into lame duck mode, by these
+  # names.
+  cluster-a:
+    <<: *nats
+    container_name: zefir-nats-e2e-cluster-a
+    command: ["--config", "/conf/cluster-a.conf"]
+    ports: ["127.0.0.1:14226:4222"]
+
+  cluster-b:
+    <<: *nats
+    container_name: zefir-nats-e2e-cluster-b
+    command: ["--config", "/conf/cluster-b.conf"]
+    ports: ["127.0.0.1:14227:4222"]
+
+  cluster-c:
+    <<: *nats
+    container_name: zefir-nats-e2e-cluster-c
+    command: ["--config", "/conf/cluster-c.conf"]
+    ports: ["127.0.0.1:14228:4222"]
+
+  # The tests pause and unpause it by this name.
+  stall:
+    <<: *nats
+    container_name: zefir-nats-e2e-stall
+    command: ["--config", "/conf/plain.conf"]
+    ports: ["127.0.0.1:14229:4222"]
+
+  # The tests stop and start it by this name.
+  restart:
+    <<: *nats
+    container_name: zefir-nats-e2e-restart
+    command: ["--config", "/conf/plain.conf"]
+    ports: ["127.0.0.1:14230:4222"]
+
+  # It runs from a copy of reload.conf, made afresh at every start; the
+  # tests overwrite the copy and reload it with SIGHUP.
+  reload:
+    <<: *nats
+    container_name: zefir-nats-e2e-reload
+    entrypoint: ["sh", "-c", "cp /conf/reload.conf /tmp/nats.conf && exec nats-server --config /tmp/nats.conf"]
+    ports: ["127.0.0.1:14231:4222"]
+
+  # The tests stop and start it by this name.
+  limits:
+    <<: *nats
+    container_name: zefir-nats-e2e-limits
+    command: ["--config", "/conf/limits.conf"]
+    ports: ["127.0.0.1:14232:4222"]
