@@ -116,7 +116,9 @@ pub const Event = union(enum) {
         pub const Operation = enum { publish, subscribe, reply };
     };
 
-    /// A text of up to `capacity` bytes, cut when longer.
+    /// A text of up to `capacity` bytes, cut when longer. The texts of
+    /// `server_error` and `permission_denied` are the server's bytes as it
+    /// sent them: escape them before you print them.
     pub const Text = struct {
         buffer: [capacity]u8 = undefined,
         len: u8 = 0,
@@ -125,6 +127,7 @@ pub const Event = union(enum) {
 
         pub const capacity = 128;
 
+        /// A copy of `text`, cut to `capacity` bytes.
         pub fn init(text: []const u8) Text {
             var t: Text = .{ .cut = text.len > capacity };
             const n = @min(text.len, capacity);
@@ -133,6 +136,7 @@ pub const Event = union(enum) {
             return t;
         }
 
+        /// The text kept.
         pub fn slice(t: *const Text) []const u8 {
             return t.buffer[0..t.len];
         }

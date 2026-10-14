@@ -542,7 +542,7 @@ fn readLoop(client: *Client) void {
                 error.OutOfMemory => log.warn("no memory to keep the server's INFO", .{}),
             },
             .err => |text| {
-                log.warn("server error: {s}", .{text});
+                log.warn("server error: {f}", .{server_error.printable(text)});
                 const classified = server_error.classify(text);
                 // It counts as the server's first refusal for reconnecting.
                 if (classified.kind == .authentication_failed) _ = client.pool.noteAttempt(io, server_error.refusal(text));

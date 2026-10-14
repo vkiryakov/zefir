@@ -190,7 +190,7 @@ fn refusal(text: []const u8) ?HandshakeError {
         .max_connections, .refused => error.ConnectionRefused,
         .protocol => error.ProtocolError,
         .permissions_violation, .max_subscriptions, .invalid_subject, .unknown => {
-            log.warn("server error during the handshake: {s}", .{text});
+            log.warn("server error during the handshake: {f}", .{server_error.printable(text)});
             return null;
         },
     };

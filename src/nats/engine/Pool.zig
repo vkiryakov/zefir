@@ -117,7 +117,7 @@ pub fn update(pool: *Pool, io: Io, urls: []const []const u8, sink: anytype) void
     var added = false;
     for (urls) |url| {
         const address = ServerAddress.parse(url) catch {
-            log.debug("ignoring a server the cluster announced that is no address: {s}", .{url});
+            log.debug("ignoring a server the cluster announced that is no address: {f}", .{server_error.printable(url)});
             continue;
         };
         if (pool.find(&address) != null) continue;

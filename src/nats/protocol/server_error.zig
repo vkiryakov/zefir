@@ -173,6 +173,29 @@ fn quotedPrefix(tail: *[]const u8) ?[]const u8 {
     return null;
 }
 
+/// Text from the server, for a log line: `log.warn("{f}", .{printable(text)})`.
+/// Bytes that do not print, CR, LF, ESC and every byte from 0x80 among
+/// them, are written as `\xNN`, so a server cannot start a line of its own
+/// or a terminal sequence in the application's log; the text is cut after
+/// `max_len` bytes.
+pub fn printable(text: []const u8) Printable {
+    return .{ .text = text };
+}
+
+pub const Printable = struct {
+    text: []const u8,
+
+    pub const max_len = 256;
+
+    pub fn format(p: Printable, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        for (p.text[0..@min(p.text.len, max_len)]) |c| switch (c) {
+            ' '...'~' => try w.writeByte(c),
+            else => try w.print("\\x{x:0>2}", .{c}),
+        };
+        if (p.text.len > max_len) try w.print("... ({d} bytes)", .{p.text.len});
+    }
+};
+
 const testing = std.testing;
 
 test "fatal errors close the connection" {
@@ -355,4 +378,18 @@ test "refusals of the credentials are told apart" {
     for ([_][]const u8{ "Authorization Violation", "User Authentication Expired", "Account Authentication Expired", "User Authentication Revoked" }) |text| {
         try testing.expectEqual(Kind.authentication_failed, classify(text).kind);
     }
+}
+
+test "server text in a log line cannot start a line of its own or a terminal sequence" {
+    var buffer: [512]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buffer);
+    try w.print("{f}", .{printable("x\nerror(nats): FORGED \x1b[31mred\r\xc3\xbc")});
+    try testing.expectEqualStrings("x\\x0aerror(nats): FORGED \\x1b[31mred\\x0d\\xc3\\xbc", w.buffered());
+
+    var long: [300]u8 = undefined;
+    @memset(&long, 'a');
+    var cut: std.Io.Writer = .fixed(&buffer);
+    try cut.print("{f}", .{printable(&long)});
+    try testing.expect(std.mem.endsWith(u8, cut.buffered(), "a... (300 bytes)"));
+    try testing.expectEqual(Printable.max_len + "... (300 bytes)".len, cut.buffered().len);
 }
