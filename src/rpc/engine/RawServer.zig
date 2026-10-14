@@ -453,7 +453,12 @@ fn runLifecycle(server: *RawServer, io: std.Io) void {
 fn waitIdle(server: *RawServer, io: std.Io, deadline: ?core.Deadline) bool {
     while (true) {
         server.idle.reset();
-        if (server.inflight.load(.acquire) == 0) return true;
+        // A read-modify-write, not a load: it orders the reset before the
+        // `set` of the call that leaves last. A plain load may read the
+        // count from before that call left while the reset lands after its
+        // `set` (store-load reordering, also on x86), and the stop would
+        // sleep through the end of the last call.
+        if (server.inflight.fetchAdd(0, .acq_rel) == 0) return true;
         if (deadline) |d| {
             waiting.untilSet(&server.idle, io, d) catch |err| switch (err) {
                 error.Timeout => return server.inflight.load(.acquire) == 0,
