@@ -1,8 +1,10 @@
 //! A minimal application container, only in tests. It shows that an App can
 //! run `rpc.RawServer` later through its public lifecycle alone, with no
 //! change to the server's API, as the specification's acceptance criteria
-//! ask. A component is any type with `start`, `wait`, `requestStop` and
-//! `shutdown`: `rpc.RawServer` now, `rpc.Server` later.
+//! ask. A component is any type with `start`, `wait` and `shutdown`:
+//! `rpc.RawServer` now, `rpc.Server` later. Their `requestStop` is for a
+//! signal handler of an App; this one stops its components with `shutdown`
+//! alone, one after another.
 
 const std = @import("std");
 const core = @import("core");
@@ -24,19 +26,25 @@ pub const MiniApp = struct {
     }
 
     /// Starts `components`, a tuple of pointers, in order; when one does not
-    /// start, shuts down those already started, last first, and returns its
-    /// error. Then waits for `requestStop` or for the first component that
-    /// stops by itself, and shuts every component down: all begin to stop
-    /// at once, and the App waits for them last first. Returns the error of
-    /// the component that broke, else the first error of a shutdown.
-    /// `error.ShutdownTimeout` is fatal: a handler still runs, so the owner
-    /// ends the process instead of freeing the components. The App never
-    /// frees them: their owner does, once `run` has returned.
+    /// start, shuts down those already started. Then waits for
+    /// `requestStop` or for the first component that stops by itself, and
+    /// shuts every component down. Shutdowns go last first, each to its
+    /// end before the next. The App never frees the components: their
+    /// owner does, once `run` has returned. The error, the first of these
+    /// that holds:
+    ///
+    /// - `error.ShutdownTimeout` of a shutdown: a handler still runs, so
+    ///   the owner ends the process instead of freeing the components;
+    /// - `error.Canceled` of a shutdown: the App's task was canceled while a
+    ///   component stopped, and the component goes on stopping;
+    /// - `error.Canceled`: the App's task was canceled while it waited;
+    /// - the error of the start that failed, or of the component that broke;
+    /// - the first other error of a shutdown.
     pub fn run(app: *MiniApp, io: std.Io, components: anytype) anyerror!void {
         const n = components.len;
         inline for (0..n) |i| {
             components[i].start(io) catch |err| {
-                _ = stopFirst(io, components, i);
+                if (stopFirst(io, components, i)) |stop_err| if (weight(stop_err) > 0) return stop_err;
                 return err;
             };
         }
@@ -52,6 +60,7 @@ pub const MiniApp = struct {
         // Nothing may still wait on a component once its owner frees it;
         // and once no watcher runs, `breakdown` stays as it is.
         for (&watchers) |*watcher| if (watcher.*) |*future| future.cancel(io);
+        if (failed) |err| if (weight(err) > 0) return err;
         if (canceled) return error.Canceled;
         if (app.breakdown) |err| return err;
         if (failed) |err| return err;
@@ -64,23 +73,28 @@ pub const MiniApp = struct {
         app.stop.set(io);
     }
 
-    /// Stops the first `count` components: all begin to stop at once, then
-    /// each is waited for, last first. The first error of a shutdown.
+    /// Shuts down the first `count` components, last first, each to its end
+    /// before the next. The weightiest error of a shutdown, the first of
+    /// equal ones.
     fn stopFirst(io: std.Io, components: anytype, comptime count: usize) ?anyerror {
+        var worst: ?anyerror = null;
         comptime var i = count;
         inline while (i > 0) {
             i -= 1;
-            components[i].requestStop(io);
-        }
-        var first: ?anyerror = null;
-        comptime var j = count;
-        inline while (j > 0) {
-            j -= 1;
-            components[j].shutdown(io) catch |err| {
-                if (first == null) first = err;
+            components[i].shutdown(io) catch |err| {
+                if (worst == null or weight(err) > weight(worst.?)) worst = err;
             };
         }
-        return first;
+        return worst;
+    }
+
+    /// How much an error of a shutdown weighs for the owner: a handler
+    /// still runs, a stop cut short, or nothing that stops it freeing the
+    /// components.
+    fn weight(err: anyerror) u2 {
+        if (err == error.ShutdownTimeout) return 2;
+        if (err == error.Canceled) return 1;
+        return 0;
     }
 
     /// Waits until a component stops by itself; the App cancels the wait
@@ -88,9 +102,10 @@ pub const MiniApp = struct {
     fn Watcher(comptime Component: type) type {
         return struct {
             fn watch(app: *MiniApp, io: std.Io, component: Component) void {
-                component.wait(io) catch |err| switch (err) {
-                    error.Canceled => return,
-                    else => return app.broke(io, err),
+                component.wait(io) catch |err| {
+                    const failure: anyerror = err;
+                    if (failure == error.Canceled) return;
+                    return app.broke(io, failure);
                 };
                 app.stop.set(io);
             }
@@ -259,4 +274,171 @@ test "a shutdown that runs out of time is fatal: the App reports it and leaves t
     // A process would end here. The test lets the handler end, then frees.
     deaf.gate.set(io);
     caller.await(io);
+}
+
+fn waitEntered(io: std.Io, deaf: *const Deaf) !void {
+    const deadline: core.Deadline = .after(std.Io.Clock.awake.now(io), .fromSeconds(10));
+    while (!deaf.entered.load(.acquire)) {
+        if (deadline.isExpired(std.Io.Clock.awake.now(io))) return error.TestTimeout;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+}
+
+test "a breakdown of one server does not hide a shutdown of another that runs out of time" {
+    const io = testing.io;
+    var broken_memory: MemoryTransport = try .init(testing.allocator, .{});
+    defer broken_memory.deinit(io);
+    var deaf_memory: MemoryTransport = try .init(testing.allocator, .{});
+    defer deaf_memory.deinit(io);
+    var deaf: Deaf = .{};
+    var broken: RawServer = try .init(testing.allocator, .{ .transport = broken_memory.serverTransport(), .methods = &echo_methods });
+    defer broken.deinit(io);
+    var deaf_server: RawServer = try .init(testing.allocator, .{
+        .transport = deaf_memory.serverTransport(),
+        .methods = &.{.{ .route = echo_route, .handler = .{ .ptr = &deaf, .handle = Deaf.handle } }},
+        .shutdown_grace = .fromMilliseconds(50),
+    });
+    defer deaf_server.deinit(io);
+    defer deaf.gate.set(io);
+    // The engine warns that the transport broke.
+    const log_level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = log_level;
+
+    var app: MiniApp = .{};
+    var running = try io.concurrent(runApp, .{ &app, io, &broken, &deaf_server });
+    defer running.cancel(io) catch {};
+    try waitRunning(io, &.{ &broken, &deaf_server });
+    var caller = try io.concurrent(callDeaf, .{ io, &deaf_memory });
+    defer caller.cancel(io);
+    try waitEntered(io, &deaf);
+    broken_memory.failServer(io, error.Unavailable);
+    // The owner must not free the deaf server: that wins over the breakdown.
+    try testing.expectError(error.ShutdownTimeout, running.await(io));
+    try testing.expectEqual(RawServer.State.draining, deaf_server.state());
+    try testing.expectEqual(RawServer.State.stopped, broken.state());
+    deaf.gate.set(io);
+    caller.await(io);
+}
+
+/// A component whose start fails once its gate opens.
+const FailsToStart = struct {
+    gate: std.Io.Event = .unset,
+
+    pub fn start(f: *FailsToStart, io: std.Io) !void {
+        try f.gate.wait(io);
+        return error.AddressInUse;
+    }
+
+    pub fn wait(f: *FailsToStart, io: std.Io) !void {
+        _ = f;
+        _ = io;
+    }
+
+    pub fn requestStop(f: *FailsToStart, io: std.Io) void {
+        _ = f;
+        _ = io;
+    }
+
+    pub fn shutdown(f: *FailsToStart, io: std.Io) !void {
+        _ = f;
+        _ = io;
+    }
+};
+
+fn runWithFailing(app: *MiniApp, io: std.Io, first: *RawServer, second: *FailsToStart) anyerror!void {
+    return app.run(io, .{ first, second });
+}
+
+test "when the stop of the started ones runs out of time after a failed start, that wins over the start error" {
+    const io = testing.io;
+    var memory: MemoryTransport = try .init(testing.allocator, .{});
+    defer memory.deinit(io);
+    var deaf: Deaf = .{};
+    var first: RawServer = try .init(testing.allocator, .{
+        .transport = memory.serverTransport(),
+        .methods = &.{.{ .route = echo_route, .handler = .{ .ptr = &deaf, .handle = Deaf.handle } }},
+        .shutdown_grace = .fromMilliseconds(50),
+    });
+    defer first.deinit(io);
+    defer deaf.gate.set(io);
+    var second: FailsToStart = .{};
+
+    var app: MiniApp = .{};
+    var running = try io.concurrent(runWithFailing, .{ &app, io, &first, &second });
+    defer running.cancel(io) catch {};
+    defer second.gate.set(io);
+    try waitRunning(io, &.{&first});
+    var caller = try io.concurrent(callDeaf, .{ io, &memory });
+    defer caller.cancel(io);
+    try waitEntered(io, &deaf);
+    second.gate.set(io);
+    try testing.expectError(error.ShutdownTimeout, running.await(io));
+    try testing.expectEqual(RawServer.State.draining, first.state());
+    deaf.gate.set(io);
+    caller.await(io);
+}
+
+/// A component that writes when it starts, begins to stop and has stopped.
+const Logged = struct {
+    name: u8,
+    log: *Log,
+    stopped: std.Io.Event = .unset,
+
+    const Log = struct {
+        entries: [8]Entry = undefined,
+        len: std.atomic.Value(usize) = .init(0),
+
+        const Entry = struct { name: u8, what: enum { start, stop_begun, stop_ended } };
+
+        fn add(log: *Log, entry: Entry) void {
+            const i = log.len.fetchAdd(1, .acq_rel);
+            if (i < log.entries.len) log.entries[i] = entry;
+        }
+
+        fn written(log: *const Log) []const Entry {
+            return log.entries[0..@min(log.len.load(.acquire), log.entries.len)];
+        }
+    };
+
+    pub fn start(l: *Logged, io: std.Io) !void {
+        _ = io;
+        l.log.add(.{ .name = l.name, .what = .start });
+    }
+
+    pub fn wait(l: *Logged, io: std.Io) !void {
+        try l.stopped.wait(io);
+    }
+
+    pub fn requestStop(l: *Logged, io: std.Io) void {
+        _ = io;
+        l.log.add(.{ .name = l.name, .what = .stop_begun });
+    }
+
+    pub fn shutdown(l: *Logged, io: std.Io) !void {
+        l.log.add(.{ .name = l.name, .what = .stop_begun });
+        // A component that takes a while to stop.
+        try io.sleep(.fromMilliseconds(20), .awake);
+        l.log.add(.{ .name = l.name, .what = .stop_ended });
+        l.stopped.set(io);
+    }
+};
+
+test "the App stops its components last first, each before the next begins" {
+    const io = testing.io;
+    var log: Logged.Log = .{};
+    var a: Logged = .{ .name = 'a', .log = &log };
+    var b: Logged = .{ .name = 'b', .log = &log };
+    var app: MiniApp = .{};
+    app.requestStop(io);
+    try app.run(io, .{ &a, &b });
+    const expected = [_]Logged.Log.Entry{
+        .{ .name = 'a', .what = .start },
+        .{ .name = 'b', .what = .start },
+        .{ .name = 'b', .what = .stop_begun },
+        .{ .name = 'b', .what = .stop_ended },
+        .{ .name = 'a', .what = .stop_begun },
+        .{ .name = 'a', .what = .stop_ended },
+    };
+    try testing.expectEqualSlices(Logged.Log.Entry, &expected, log.written());
 }
