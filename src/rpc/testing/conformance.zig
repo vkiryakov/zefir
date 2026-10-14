@@ -1836,14 +1836,15 @@ fn t18(job: *Job) CheckError!void {
     }
     // The client gives up while start runs: a cancel waits until start
     // returns.
+    recorder.setStart(io, .{ .hold = job.ms(600) });
     {
-        var caller: Caller = .init(job, pair.client, .{ .body = "gives up", .timeout = job.ms(100) });
+        var caller: Caller = .init(job, pair.client, .{ .body = "gives up", .timeout = job.ms(200) });
         defer caller.deinit();
         try caller.begin();
         try job.waitStarted(&recorder, 2);
         caller.join();
         try job.expectError(&caller.sent, error.Timeout, "a call whose deadline passed while its start ran");
-        _ = job.eventually(job.ms(2300), StartReturned{ .recorder = &recorder, .io = io, .index = 1 });
+        _ = job.eventually(job.ms(2600), StartReturned{ .recorder = &recorder, .io = io, .index = 1 });
         if (job.info.propagates_cancellation) _ = job.eventually(job.ms(500), CancelSeen{ .recorder = &recorder, .io = io, .index = 1 });
         try job.release(&recorder, 1, .canceled);
     }
