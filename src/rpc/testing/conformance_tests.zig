@@ -295,6 +295,64 @@ test "a transport that breaks a rule fails the check of that rule" {
     }
 }
 
+/// Memory that says it delivers at least once, and restarts its peer by
+/// breaking the link and bringing it back: the bodies of T16 and T17 run,
+/// which memory itself skips.
+const Restartable = struct {
+    memory: MemoryTransport = undefined,
+
+    pub fn setUp(r: *Restartable, io: std.Io, gpa: std.mem.Allocator) !conformance.Pair {
+        _ = io;
+        r.memory = try .init(gpa, .{ .max_body_bytes = 64 * 1024 });
+        return .{ .client = .init(r), .server = .init(r) };
+    }
+
+    pub fn tearDown(r: *Restartable, io: std.Io, pair: conformance.Pair) void {
+        _ = pair;
+        r.memory.deinit(io);
+    }
+
+    pub fn restartPeer(r: *Restartable, io: std.Io, pair: conformance.Pair) !void {
+        _ = pair;
+        r.memory.breakLink(io);
+        r.memory.restoreLink();
+    }
+
+    pub fn call(r: *Restartable, io: std.Io, request: *const transport.Request, options: ClientTransport.CallOptions) ClientTransport.CallError!model.Response {
+        return r.memory.call(io, request, options);
+    }
+
+    pub fn info(r: *Restartable) transport.Info {
+        var info_value = r.memory.info();
+        info_value.delivery = .at_least_once;
+        return info_value;
+    }
+
+    pub fn start(r: *Restartable, io: std.Io, dispatcher: transport.Dispatcher) ServerTransport.StartError!void {
+        return r.memory.start(io, dispatcher);
+    }
+
+    pub fn drain(r: *Restartable, io: std.Io) void {
+        r.memory.drain(io);
+    }
+
+    pub fn close(r: *Restartable, io: std.Io) void {
+        r.memory.close(io);
+    }
+
+    pub fn isReady(r: *Restartable) bool {
+        return r.memory.isReady();
+    }
+};
+
+test "the checks of at-least-once delivery and of a restart run when the transport claims them" {
+    var harness: Restartable = .{};
+    var report = try conformance.run(testing.io, testing.allocator, &harness, .{ .only = &.{ .t16, .t17 }, .live_broker = true });
+    defer report.deinit();
+    try expectNoFailures(&report);
+    try testing.expectEqual(@as(usize, 2), report.passedCount());
+}
+
 /// The memory transport whose server side keeps the default `isReady`,
 /// with no hooks: the harness and the server side in one object.
 const Bare = struct {
