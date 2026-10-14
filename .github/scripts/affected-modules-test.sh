@@ -74,6 +74,8 @@ edit src/nats/Client.zig                        | rpc-nats nats zefir
 edit tests/nats/e2e/pubsub.zig                  | rpc-nats nats zefir
 edit tests/nats/README.md                       | rpc-nats nats zefir
 edit docker-compose.yml                         | rpc-nats nats zefir
+edit tests/rpc-nats/e2e/root.zig                | rpc-nats zefir
+edit tests/rpc-nats/conf/acl.conf               | rpc-nats zefir
 edit src/core/root.zig src/nats/root.zig        | core log confy validator rpc rpc-nats orm nats zefir
 edit src/confy/examples/README.md               | confy rpc-nats nats zefir
 edit README.md src/validator/root.zig           | validator rpc rpc-nats zefir

@@ -7,11 +7,11 @@
 #
 # A file under src/<module>/ affects that module and every module whose
 # tests import it, directly or through other modules; zefir imports them
-# all. tests/nats/ and docker-compose.yml, which hold the end-to-end tests
-# of nats and their servers, count as nats. build.zig, build.zig.zon,
-# src/zefir.zig, .github/ and any other path the script does not know
-# affect every module. Documentation outside src/ (*.md files and docs/)
-# affects none.
+# all. tests/nats/ and tests/rpc-nats/, the end-to-end tests of nats and
+# of rpc-nats, count as their modules, and docker-compose.yml, their
+# servers, as both. build.zig, build.zig.zon, src/zefir.zig, .github/ and
+# any other path the script does not know affect every module.
+# Documentation outside src/ (*.md files and docs/) affects none.
 set -eu
 
 # The modules and what the tests of each one import. Keep this in sync with
@@ -74,7 +74,9 @@ elif [ $# -eq 2 ] && [ -n "$1" ] && [ -n "$2" ]; then
             esac
             ;;
         src/*) all=true ;;
-        tests/nats/* | docker-compose.yml) changed="$changed nats" ;;
+        tests/nats/*) changed="$changed nats" ;;
+        tests/rpc-nats/*) changed="$changed rpc-nats" ;;
+        docker-compose.yml) changed="$changed nats rpc-nats" ;;
         docs/* | *.md) ;;
         *) all=true ;;
         esac

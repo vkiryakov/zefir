@@ -1,8 +1,9 @@
-# The NATS servers of the end-to-end tests of nats, in tests/nats. From here,
-# `docker compose up -d --wait` starts them and waits until they are
-# healthy, and `docker compose down` stops them; in tests/nats,
-# `zig build e2e` starts them too and `zig build down` stops them. Every
-# port is published on 127.0.0.1 only:
+# The NATS servers of the end-to-end tests of nats, in tests/nats, and of
+# rpc-nats, in tests/rpc-nats. From here, `docker compose up -d --wait`
+# starts them and waits until they are healthy, and `docker compose down`
+# stops them; in tests/nats and tests/rpc-nats, `zig build e2e` starts them
+# too and `zig build down` stops them. Every port is published on
+# 127.0.0.1 only:
 #
 #   14222  plain, no authentication
 #   14223  users and passwords (tests/nats/conf/auth.conf)
@@ -13,9 +14,14 @@
 #   14230  plain, for tests that stop and start it
 #   14231  a user whose password tests change and reload
 #   14232  a user whose account has a lower max_payload than the server's
+#   14233  the NATS permissions of rpc services (tests/rpc-nats/conf/acl.conf)
 #
 # tests/nats/certs holds a self-signed certificate for the TLS servers, valid
 # for 100 years. The client does not do TLS; the servers need it to start.
+#
+# nats-box, in the profile `tools`, is the NATS CLI that the tests of
+# rpc-nats run against the servers, by their service names:
+# `docker compose run --rm nats-box nats -s nats://plain:4222 micro ls`.
 
 name: zefir-nats-e2e
 
@@ -101,3 +107,16 @@ services:
     container_name: zefir-nats-e2e-limits
     command: ["--config", "/conf/limits.conf"]
     ports: ["127.0.0.1:14232:4222"]
+
+  # The permissions of the guide of rpc-nats: each service its own user.
+  rpc-acl:
+    <<: *nats
+    volumes:
+      - ./tests/rpc-nats/conf:/conf:ro
+    command: ["--config", "/conf/acl.conf"]
+    ports: ["127.0.0.1:14233:4222"]
+
+  # The NATS CLI, run on demand: `docker compose run --rm nats-box nats ...`.
+  nats-box:
+    image: natsio/nats-box:0.20.0
+    profiles: ["tools"]
