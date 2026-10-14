@@ -1275,8 +1275,14 @@ test "drain, second phase: publishes and responds fail with ConnectionDraining u
     try testing.expectError(error.ConnectionDraining, client.respond(&request, "late"));
     try testing.expectError(error.ConnectionDraining, client.subscribe("more", .{}));
     try testing.expectError(error.ConnectionDraining, client.request("service.x", "?", .{}));
+    // The connection is up all the while.
+    try testing.expect(client.isConnected());
+    try testing.expect(client.connectedServer() != null);
+    var info = (try client.serverInfo(testing.allocator)) orelse return error.TestNoInfo;
+    info.deinit();
     record.release.set(io);
     try drainer.await(io);
+    try testing.expect(!client.isConnected());
     try testing.expectEqual(.drained, client.close_reason.?);
     try server.await(io);
     const seen = try record.seen(io);

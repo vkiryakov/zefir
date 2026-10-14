@@ -156,7 +156,8 @@ pub const State = enum {
 
 /// Why a client closed.
 pub const CloseReason = enum {
-    /// `close()` or `deinit()`.
+    /// `close()` or `deinit()`; also `drain()` before the first connection
+    /// was made, and a `connect()` whose task was canceled.
     closed,
     /// `drain()` finished.
     drained,
@@ -976,8 +977,10 @@ pub fn stats(client: *Client) Stats {
 }
 
 /// Closes the client at once: nothing still queued is sent, and every task
-/// waiting in the client gets ConnectionClosed. For a careful stop, use
-/// `drain`, or flush first. Calling it again does nothing.
+/// waiting in the client gets ConnectionClosed, except one in
+/// `nextEvent()`, which gets the `closed` event and then null. For a
+/// careful stop, use `drain`, or flush first. Calling it again does
+/// nothing.
 pub fn close(client: *Client) void {
     client.checkHome();
     client.closeWith(.closed);
@@ -1029,6 +1032,8 @@ pub fn deinit(client: *Client) void {
     client.freed = true;
 }
 
+/// Where the client is in its life now; see `State`. Another task may
+/// change it the moment after.
 pub fn state(client: *Client) State {
     client.checkHome();
     client.mutex.lockUncancelable(client.io);
@@ -1036,19 +1041,29 @@ pub fn state(client: *Client) State {
     return client.status;
 }
 
+/// A connection is up: the state is `.connected` or `.draining`. False
+/// before `connect()`, while it connects or reconnects, and once closed.
 pub fn isConnected(client: *Client) bool {
     client.checkHome();
-    return client.state() == .connected;
+    return switch (client.state()) {
+        .connected, .draining => true,
+        .disconnected, .connecting, .reconnecting, .closed => false,
+    };
 }
 
-/// The server of the current connection; null when not connected. The
-/// result is a copy: its `host()` points into it, so keep the copy while
-/// you use the host.
+/// The server of the current connection, a draining one included; null
+/// without one. The result is a copy: its `host()` points into it, so keep
+/// the copy while you use the host.
 pub fn connectedServer(client: *Client) ?ServerAddress {
     client.checkHome();
     client.mutex.lockUncancelable(client.io);
     defer client.mutex.unlock(client.io);
-    return if (client.status == .connected) client.server else null;
+    return if (client.hasConnection()) client.server else null;
+}
+
+/// Under `mutex`: a connection is up.
+fn hasConnection(client: *const Client) bool {
+    return client.status == .connected or client.status == .draining;
 }
 
 pub const NextEventError = EventQueue.NextError;
@@ -1071,13 +1086,13 @@ pub fn discoveredServers(client: *Client, buffer: []ServerAddress) []ServerAddre
 
 /// What the server of the current connection said about itself in its
 /// latest INFO, parsed into memory from `gpa`: free it with `deinit()`.
-/// Null when not connected.
+/// Null without a connection; a draining one has one.
 pub fn serverInfo(client: *Client, gpa: Allocator) ServerInfoError!?std.json.Parsed(ServerInfo) {
     client.checkHome();
     const json = copy: {
         client.mutex.lockUncancelable(client.io);
         defer client.mutex.unlock(client.io);
-        if (client.status != .connected) return null;
+        if (!client.hasConnection()) return null;
         const json = client.info_json orelse return null;
         break :copy try gpa.dupe(u8, json);
     };
