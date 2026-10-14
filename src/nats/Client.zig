@@ -757,7 +757,8 @@ pub const RequestManyError = error{
     /// The client reconnects, and the reconnect buffer has no room for it.
     BufferFull,
     /// Not connected yet, or reconnecting with `reconnect.buffer_bytes`
-    /// of 0.
+    /// of 0, or the connection was lost while the request waited to be
+    /// queued, or the server of the next connection would refuse it.
     Disconnected,
     /// The server refused the subscription of the client's inbox: no
     /// response can come.

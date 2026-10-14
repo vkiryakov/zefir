@@ -109,8 +109,10 @@ pub const Limits = struct {
     /// Bytes a subscription holds before its overflow policy drops messages;
     /// a message larger than this on its own is dropped as it comes.
     subscription_bytes: usize = 8 * 1024 * 1024,
-    /// Requests waiting for a reply at once, the streams of requestMany
-    /// included until they end; more fail with TooManyPendingRequests.
+    /// Requests waiting for a reply at once; more fail with
+    /// TooManyPendingRequests. A stream of requestMany counts until its
+    /// last response came, or until its owner's `next()` returned null or
+    /// an error after the deadline, or its `deinit()`.
     max_pending_requests: u32 = 65_536,
     /// Subscriptions at once, each until its `deinit()`; more fail with
     /// TooManySubscriptions.

@@ -381,9 +381,12 @@ pub fn deliver(inbox: *Inbox, io: Io, id: u64, message: ?Message) Delivery {
                 release(m);
                 _ = responses.messages.end(io, .no_responders, false);
                 inbox.no_responders += 1;
+                inbox.unlist(id, &responses.listed);
                 return .taken;
             };
             const pushed = responses.messages.push(io, message);
+            // Ended by its last response: no place among the pending.
+            if (pushed.ended != null) inbox.unlist(id, &responses.listed);
             return if (pushed.dropped > 0) .dropped else .taken;
         },
     }
@@ -440,9 +443,17 @@ pub fn end(inbox: *Inbox, io: Io, how: End) void {
     var node = inbox.streams.first;
     while (node) |n| : (node = n.next) {
         const responses: *Responses = @alignCast(@fieldParentPtr("node", n));
-        _ = responses.messages.end(io, stream_end, how == .closed);
+        _ = responses.messages.end(io, lostEnd(io, responses, stream_end), how == .closed);
     }
     inbox.changed.wake(io);
+}
+
+/// How a stream ends when the connection is lost or the inbox refused:
+/// with `how`, but one past its deadline had ended already, and its owner
+/// gets what came, then null. A close ends every stream.
+fn lostEnd(io: Io, responses: *Responses, how: MessageQueue.End) MessageQueue.End {
+    if (how == .closed) return how;
+    return if (time.expired(io, responses.deadline)) .finished else how;
 }
 
 /// The client drained and closes: no new requests, and every request
@@ -496,7 +507,7 @@ pub fn disconnect(inbox: *Inbox, io: Io, next: u64) void {
             .many => |responses| {
                 if (responses.generation == next) continue;
                 responses.listed = false;
-                _ = responses.messages.end(io, .disconnected, false);
+                _ = responses.messages.end(io, lostEnd(io, responses, .disconnected), false);
             },
         }
         inbox.pending.swapRemoveAt(index);
@@ -540,7 +551,11 @@ fn admitFrame(context: *anyopaque, io: Io, id: u64, generation: u64) bool {
             if (waiter.failure != null) return false;
             waiter.generation = generation;
         },
-        .many => |responses| responses.generation = generation,
+        .many => |responses| {
+            // Ended meanwhile, as by a refused inbox: nothing is sent.
+            if (takes(io, responses) == null) return false;
+            responses.generation = generation;
+        },
     }
     return true;
 }
@@ -1315,4 +1330,53 @@ test "a request that failed before its frame was queued says why" {
     // Its frame is refused: the request failed meanwhile.
     try testing.expect(!admitFrame(&inbox, io, id, 0));
     try testing.expectEqual(error.PermissionDenied, inbox.failureOf(io, &waiter));
+}
+
+test "a requestMany past its deadline ends with null when the connection drops or the inbox is refused, not with an error" {
+    const io = testing.io;
+    for ([_]enum { lost, end_lost, refused }{ .lost, .end_lost, .refused }) |how| {
+        var inbox = testInbox();
+        defer inbox.deinit(testing.allocator);
+        const responses = try addStream(&inbox, io, soon(io), .{ .messages = 4, .bytes = 1024 });
+        defer destroyResponses(testing.allocator, responses);
+        defer inbox.forget(io, responses);
+        try testing.expectEqual(.taken, inbox.deliver(io, responses.id, try testReply("r", null, "came")));
+        // Its owner reads later; the deadline passes first.
+        responses.deadline = time.after(io, .zero);
+        switch (how) {
+            .lost => inbox.disconnect(io, 1),
+            .end_lost => inbox.end(io, .disconnected),
+            .refused => inbox.end(io, .permission_denied),
+        }
+        try expectQueued(responses, "came");
+        try testing.expect(try responses.messages.next(io, .none) == null);
+    }
+}
+
+test "after the inbox is refused, a requestMany's frame is refused too" {
+    const io = testing.io;
+    var inbox = testInbox();
+    defer inbox.deinit(testing.allocator);
+    inbox.sid.store(5, .release);
+    const responses = try addStream(&inbox, io, soon(io), .{ .messages = 4, .bytes = 1024 });
+    defer destroyResponses(testing.allocator, responses);
+    defer inbox.forget(io, responses);
+    try testing.expect(inbox.deny(io, .{ .operation = .subscribe, .subject = "x", .sid = 5 }));
+    const frame_ticket = inbox.ticket(responses.id);
+    try testing.expect(!frame_ticket.admit(frame_ticket.context, io, frame_ticket.id, 0));
+}
+
+test "a requestMany that ended by max_responses no longer holds a place among the pending requests" {
+    const io = testing.io;
+    var inbox = testInbox();
+    defer inbox.deinit(testing.allocator);
+    const responses = try createResponses(testing.allocator, undefined, soon(io), .{ .messages = 1, .bytes = 1024 });
+    defer destroyResponses(testing.allocator, responses);
+    responses.id = try inbox.add(io, testing.allocator, .{ .many = responses }, 1);
+    defer inbox.forget(io, responses);
+    try testing.expectEqual(.taken, inbox.deliver(io, responses.id, try testReply("r", null, "only")));
+    var waiter: Waiter = .{};
+    const id = try inbox.add(io, testing.allocator, .{ .single = &waiter }, 1);
+    inbox.drop(io, id, &waiter);
+    try expectQueued(responses, "only");
 }
