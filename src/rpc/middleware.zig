@@ -109,6 +109,12 @@ pub const Next = opaque {
 /// cancels at a time limit of its own, is not the caller's: never return
 /// it (the engine's `recancel` would panic).
 ///
+/// Under `rpc.Client` the chain sees the response as bytes, before the
+/// client decodes it: a success a link sees may still end the call with
+/// `InvalidResponse` or `ResponseTooLarge`. A request the client does not
+/// send (against its rules, one that JSON cannot carry, invalid metadata
+/// or route) never passes through the chain at all.
+///
 /// The objects are shared by all calls at once: guard their state with
 /// `std.Io` primitives.
 pub const ClientMiddleware = struct {

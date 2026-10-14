@@ -41,6 +41,11 @@
 //!    contract. A failure of the server comes as `.failure`, with the
 //!    violations from its body.
 //!
+//! The client's middleware runs inside step 3, so it sees the response
+//! before step 4: a success a link sees may still end the call with
+//! `InvalidResponse` or `ResponseTooLarge`. A request refused in steps 1
+//! and 2 never passes through the middleware.
+//!
 //! A failure of the server is a value, not an error. The errors of `call`
 //! are local; `CallError` says which of them are safe to retry.
 
@@ -63,11 +68,14 @@ const Client = @This();
 /// The engine that sends the calls; `init` builds it from the options.
 engine: RawClient,
 
-/// A decoded response may take this many times `max_response_bytes` of
-/// memory: the memory of a value follows its type, not the size of its
-/// JSON, so a small body may ask for much more.
+/// What decoding a response may ask for, in times `max_response_bytes`:
+/// the memory of a value follows its type, not the size of its JSON, so a
+/// small body may ask for much more. The budget counts what the decoding
+/// asks for; a result keeps that, the body itself and the spare room of
+/// its arena. The violations of a failure are decoded aside, and a result
+/// keeps only the hundred it carries.
 pub const decode_budget_factor = 8;
-/// The least memory a decoded response may take, whatever
+/// The least that decoding a response may ask for, whatever
 /// `max_response_bytes` is.
 pub const min_decode_budget = 64 * 1024;
 
@@ -122,7 +130,8 @@ pub fn Result(comptime Resp: type) type {
         /// The response, or a failure: the server's, or the client's own
         /// for a request it did not send (`sent` is false then).
         outcome: Outcome,
-        /// The id the request went out with, for logs.
+        /// The id of the call, for logs: the one the request went out with;
+        /// a random one that went nowhere when `sent` is false.
         request_id: [16]u8,
         /// Whether the request went to the transport. False when the client
         /// refused to send it: a request against its rules or one JSON
@@ -180,7 +189,11 @@ pub fn Result(comptime Resp: type) type {
 ///
 /// Options are `anytype`, so a value inside them has no type to take a
 /// declaration literal from: write `std.Io.Duration.fromSeconds(3)`, not
-/// `.fromSeconds(3)`.
+/// `.fromSeconds(3)`. The limits are above zero; the compiler checks those
+/// written as literals.
+///
+/// `gpa` is thread-safe: calls from many tasks at once encode their
+/// requests and take the arenas of their results from it.
 ///
 /// No I/O: memory only for the copies of the credentials and of the list of
 /// middleware.
@@ -251,14 +264,16 @@ pub fn call(
         .diagnostics = options.diagnostics,
     });
     errdefer freeArena(io, &raw.arena);
-    // What the response decodes into lives with it, in the arena of the
-    // call, within the client's budget.
-    var budget: Budget = .{ .child = raw.arena.allocator(), .limit = client.decodeBudget() };
     const outcome: Result(Resp).Outcome = switch (raw.response.status) {
-        .ok => .{ .ok = try decodeResponse(M, io, &budget, raw.response.body, options.diagnostics) },
+        .ok => ok: {
+            // What the response decodes into lives with it, in the arena of
+            // the call, within the client's budget.
+            var budget: Budget = .{ .child = raw.arena.allocator(), .limit = client.decodeBudget() };
+            break :ok .{ .ok = try decodeResponse(M, io, &budget, raw.response.body, options.diagnostics) };
+        },
         .failure => |reason| failure: {
             var failure = reason;
-            if (raw.response.body.len > 0) try readViolations(io, &budget, raw.response.body, &failure);
+            if (raw.response.body.len > 0) try client.readViolations(io, raw.arena.allocator(), raw.response.body, &failure);
             break :failure .{ .failure = failure };
         },
     };
@@ -405,22 +420,41 @@ const ViolationsBody = struct {
 };
 
 /// The violations in `body`, the body of `failure`, into `failure`: at most
-/// 100, with paths as a failure carries them. A body that is not a list of
-/// violations, such as the text of a service that is not zefir, is left
-/// aside: the failure stays what it is.
-fn readViolations(io: std.Io, budget: *Budget, body: []const u8, failure: *model.Failure) error{ OutOfMemory, ResponseTooLarge }!void {
+/// 100, with paths as a failure carries them. They are decoded in an arena
+/// of their own within the client's budget, and only those kept go to
+/// `arena`, the result's: a body of thousands of violations leaves a
+/// hundred behind. A body that is not a list of violations, such as the
+/// text of a service that is not zefir, is left aside: the failure stays
+/// what it is.
+fn readViolations(client: *Client, io: std.Io, arena: std.mem.Allocator, body: []const u8, failure: *model.Failure) error{ OutOfMemory, ResponseTooLarge }!void {
     const protection = io.swapCancelProtection(.blocked);
     defer _ = io.swapCancelProtection(protection);
+    var scratch: std.heap.ArenaAllocator = .init(client.engine.gpa);
+    defer scratch.deinit();
+    var budget: Budget = .{ .child = scratch.allocator(), .limit = client.decodeBudget() };
     var problem: json.Problem = .{};
     const parsed = json.decode(ViolationsBody, budget.allocator(), body, .{}, &problem) catch |err| switch (err) {
         error.Invalid => return,
         error.OutOfMemory => return budget.outOfMemory(),
     };
     const kept = parsed.violations[0..@min(parsed.violations.len, violations.max_violations)];
-    const list = budget.allocator().alloc(model.Violation, kept.len) catch return budget.outOfMemory();
-    for (kept, list) |item, *violation| violation.* = .{ .field = violations.fieldOf(item.field), .code = item.code, .message = item.message };
+    const list = try arena.alloc(model.Violation, kept.len);
+    for (kept, list) |item, *violation| violation.* = .{
+        .field = if (violations.fieldOf(item.field)) |field| try keep(arena, body, field) else null,
+        .code = try keep(arena, body, item.code),
+        .message = try keep(arena, body, item.message),
+    };
     failure.violations = list;
     failure.violations_truncated = parsed.truncated or parsed.violations.len > kept.len;
+}
+
+/// `text` where a result keeps it: as it is when it points into `body`,
+/// which the result holds anyway, else a copy in `arena`.
+fn keep(arena: std.mem.Allocator, body: []const u8, text: []const u8) error{OutOfMemory}![]const u8 {
+    const start = @intFromPtr(body.ptr);
+    const at = @intFromPtr(text.ptr);
+    if (at >= start and at + text.len <= start + body.len) return text;
+    return arena.dupe(u8, text);
 }
 
 /// An allocator that passes allocations on to `child`, the arena of a

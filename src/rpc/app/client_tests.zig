@@ -341,6 +341,38 @@ test "a body of more than 100 violations gives the first 100, truncated" {
     try testing.expect(failure.violations_truncated);
 }
 
+test "a failure body as large as max_response_bytes leaves only the kept violations behind" {
+    var body: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer body.deinit();
+    try body.writer.writeAll("{\"violations\":[");
+    // The first has escapes: its strings are decoded, not borrowed from the
+    // body.
+    try body.writer.writeAll("{\"field\":\"n\\u0061me\",\"code\":\"c\\u0021\",\"message\":\"m\\u0021\"}");
+    for (1..41_000) |_| try body.writer.writeAll(",{\"code\":\"\",\"message\":\"\"}");
+    try body.writer.writeAll("]}");
+    try testing.expect(body.written().len <= 1 << 20);
+    var script: Scripted = .{ .answer = .{ .failure = .{
+        .failure = .{ .code = .invalid_argument, .app_code = "rpc.invalid_request", .message = "Invalid request" },
+        .body = body.written(),
+    } } };
+    defer script.deinit();
+    var client = try scriptedClient(&script);
+    defer client.deinit();
+
+    var r = try client.call(testing.io, .root, UserApi.getUser, .{ .id = 1 }, .{});
+    defer r.deinit();
+    const failure = r.outcome.failure;
+    try testing.expectEqual(@as(usize, 100), failure.violations.len);
+    try testing.expect(failure.violations_truncated);
+    try testing.expectEqualStrings("name", failure.violations[0].field.?);
+    try testing.expectEqualStrings("c!", failure.violations[0].code);
+    try testing.expectEqualStrings("m!", failure.violations[0].message);
+    try testing.expectEqual(@as(?[]const u8, null), failure.violations[99].field);
+    // The result keeps the body and a hundred violations, not the whole
+    // list of 41 000 that the decoding took.
+    try testing.expect(r.arena.queryCapacity() < 3 * body.written().len);
+}
+
 test "a failure body that is not a list of violations is left aside" {
     var script: Scripted = .{};
     defer script.deinit();

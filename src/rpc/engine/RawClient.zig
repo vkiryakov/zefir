@@ -166,6 +166,9 @@ pub const ClientContext = opaque {
 
     /// After `next.run()` of this link has returned success: the server's
     /// response, a failure included. Null before it, and when it failed.
+    /// Under `rpc.Client` it is the response before the client decodes it:
+    /// a success here may still end the call with `InvalidResponse` or
+    /// `ResponseTooLarge`.
     pub fn response(ctx: *ClientContext) ?*const model.Response {
         const o = outgoingOf(ctx);
         if (!o.response_visible) return null;
