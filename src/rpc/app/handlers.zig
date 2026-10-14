@@ -141,7 +141,10 @@ fn handlerProblem(comptime index: usize, comptime Pointer: type, comptime has_au
     // From another file, @hasDecl sees only pub declarations.
     if (!@hasDecl(T, "rpc_handler"))
         return at ++ name ++ " has no `pub const rpc_handler = rpc.implement(Api, ...)`; every handler must declare it (and it must be pub)";
-    if (!isImplementation(T.rpc_handler)) return at ++ name ++ ".rpc_handler must be built with rpc.implement(Api, ...)";
+    // Only the type of a declaration first: a `var` has no value at compile
+    // time.
+    if (@TypeOf(T.rpc_handler) != type or !isImplementation(T.rpc_handler))
+        return at ++ name ++ ".rpc_handler must be built with rpc.implement(Api, ...)";
     const Impl = T.rpc_handler;
     const C = @TypeOf(Impl.api);
     const label = contract.InfoOf(C).label;
@@ -161,9 +164,8 @@ fn handlerProblem(comptime index: usize, comptime Pointer: type, comptime has_au
 
 /// Whether `D`, the declaration `rpc_handler` of a handler, is what
 /// `rpc.implement` returns.
-fn isImplementation(comptime D: anytype) bool {
-    if (@TypeOf(D) != type or !isContainer(D)) return false;
-    return @hasDecl(D, "is_rpc_implementation");
+fn isImplementation(comptime D: type) bool {
+    return isContainer(D) and @hasDecl(D, "is_rpc_implementation");
 }
 
 /// The problem of the method of `T` that implements `method_name` of the
@@ -437,6 +439,12 @@ const WrongDecl = struct {
 const TypeDecl = struct {
     pub const rpc_handler = u32;
 };
+const VarDecl = struct {
+    pub var rpc_handler: u32 = 0;
+};
+const FnDecl = struct {
+    pub fn rpc_handler() void {}
+};
 
 test "a handler is a pointer to a struct that declares rpc_handler with rpc.implement" {
     try expectProblem(Options(struct { Users }), "rpc.Server.init: .handlers[0] is app.handlers.Users; pass a pointer to a handler, e.g. &users");
@@ -446,6 +454,8 @@ test "a handler is a pointer to a struct that declares rpc_handler with rpc.impl
     try expectProblem(Options(struct { *NoDecl }), "rpc.Server.init: app.handlers.NoDecl has no `pub const rpc_handler = rpc.implement(Api, ...)`; every handler must declare it (and it must be pub)");
     try expectProblem(Options(struct { *WrongDecl }), "rpc.Server.init: app.handlers.WrongDecl.rpc_handler must be built with rpc.implement(Api, ...)");
     try expectProblem(Options(struct { *TypeDecl }), "rpc.Server.init: app.handlers.TypeDecl.rpc_handler must be built with rpc.implement(Api, ...)");
+    try expectProblem(Options(struct { *VarDecl }), "rpc.Server.init: app.handlers.VarDecl.rpc_handler must be built with rpc.implement(Api, ...)");
+    try expectProblem(Options(struct { *FnDecl }), "rpc.Server.init: app.handlers.FnDecl.rpc_handler must be built with rpc.implement(Api, ...)");
 }
 
 const MissingMethod = struct {
