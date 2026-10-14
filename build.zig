@@ -56,6 +56,17 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    const rpc_nats = b.addModule("zefir-rpc-nats", .{
+        .root_source_file = b.path("src/rpc-nats/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+        .imports = &.{
+            .{ .name = "rpc", .module = rpc },
+            .{ .name = "core", .module = core },
+        },
+    });
+
     const orm = b.addModule("zefir-orm", .{
         .root_source_file = b.path("src/orm/root.zig"),
         .target = target,
@@ -77,7 +88,7 @@ pub fn build(b: *std.Build) void {
     });
     nats.addOptions("build_options", nats_options);
 
-    // Umbrella module: @import("zefir").core, .log, .confy, .validator, .rpc, .orm, .nats
+    // Umbrella module: @import("zefir").core, .log, .confy, .validator, .rpc, .rpc_nats, .orm, .nats
     const zefir = b.addModule("zefir", .{
         .root_source_file = b.path("src/zefir.zig"),
         .target = target,
@@ -89,6 +100,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "confy", .module = confy },
             .{ .name = "validator", .module = validator },
             .{ .name = "rpc", .module = rpc },
+            .{ .name = "rpc-nats", .module = rpc_nats },
             .{ .name = "orm", .module = orm },
             .{ .name = "nats", .module = nats },
         },
@@ -104,6 +116,7 @@ pub fn build(b: *std.Build) void {
     const test_confy = addModuleTestStep(b, test_step, "confy");
     const test_validator = addModuleTestStep(b, test_step, "validator");
     const test_rpc = addModuleTestStep(b, test_step, "rpc");
+    const test_rpc_nats = addModuleTestStep(b, test_step, "rpc-nats");
     const test_orm = addModuleTestStep(b, test_step, "orm");
     const test_nats = addModuleTestStep(b, test_step, "nats");
     const test_zefir = addModuleTestStep(b, test_step, "zefir");
@@ -112,8 +125,8 @@ pub fn build(b: *std.Build) void {
     // where usize has 32 bits.
     const validator_compile_step = b.step("compile-validator-tests", "Build the validator's test binaries for -Dtarget without running them");
     for (
-        [_]*std.Build.Module{ core, log, confy, validator, rpc, orm, nats, zefir },
-        [_]*std.Build.Step{ test_core, test_log, test_confy, test_validator, test_rpc, test_orm, test_nats, test_zefir },
+        [_]*std.Build.Module{ core, log, confy, validator, rpc, rpc_nats, orm, nats, zefir },
+        [_]*std.Build.Step{ test_core, test_log, test_confy, test_validator, test_rpc, test_rpc_nats, test_orm, test_nats, test_zefir },
     ) |module, module_test_step| {
         const tests = b.addTest(.{ .root_module = module });
         module_test_step.dependOn(&addRun(b, tests, tsan).step);
@@ -516,6 +529,34 @@ pub fn build(b: *std.Build) void {
         run.expectStdErrMatch(case[1]);
         run.expectExitCode(3);
         test_rpc.dependOn(&run.step);
+    }
+
+    // rpc-nats compile errors: adapters whose methods do not fit
+    // rpc_nats.Conn, in the manner of the rpc ones above.
+    const rpc_nats_compile_errors = b.createModule(.{
+        .root_source_file = b.path("src/rpc-nats/tests/compile_errors.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+        .imports = &.{
+            .{ .name = "rpc-nats", .module = rpc_nats },
+        },
+    });
+    const next_signature = "pub fn next(self: *@This(), io: std.Io, sub: rpc_nats.Conn.Sub, timeout: std.Io.Timeout) rpc_nats.Conn.Error!?rpc_nats.Conn.InMsg";
+    for ([_][2][]const u8{
+        .{ "adapter without next", "rpc_nats.Conn.init: compile_errors.test.adapter without next.NoNext has no method next; expected " ++ next_signature },
+        .{ "next with another signature", "rpc_nats.Conn.init: compile_errors.test.next with another signature.NextWithoutTimeout.next has another signature; expected " ++ next_signature },
+        .{ "isConnected with another signature", "rpc_nats.Conn.init: compile_errors.test.isConnected with another signature.ConnectedWithIo.isConnected has another signature; expected pub fn isConnected(self: *@This()) bool" },
+        .{ "init with a value", "rpc_nats.Conn.init: pass a pointer to the adapter, e.g. &adapter; got compile_errors.Adapter" },
+        .{ "init with a pointer to a constant", "rpc_nats.Conn.init: the adapter must be mutable, declared with var; got *const compile_errors.Adapter" },
+    }, 0..) |case, i| {
+        const compile = b.addTest(.{
+            .name = b.fmt("rpc-nats-compile-error-{d}", .{i}),
+            .root_module = rpc_nats_compile_errors,
+            .filters = &.{case[0]},
+        });
+        compile.expect_errors = .{ .exact = b.allocator.dupe([]const u8, &.{ case[1], "note: called at comptime here" }) catch @panic("OOM") };
+        test_rpc_nats.dependOn(&compile.step);
     }
 
     // core benchmarks: `zig build test` only compiles them, `zig build bench`
