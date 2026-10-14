@@ -27,6 +27,15 @@ fn now() std.Io.Timestamp {
     return std.Io.Clock.awake.now(testing.io);
 }
 
+/// Waits until `condition(context)` holds, for at most 5 s.
+fn eventually(context: anytype, comptime condition: fn (@TypeOf(context)) bool) !void {
+    const deadline = now().addDuration(.fromSeconds(5));
+    while (!condition(context)) {
+        if (now().nanoseconds > deadline.nanoseconds) return error.TestTimedOut;
+        try testing.io.sleep(.fromMilliseconds(1), .awake);
+    }
+}
+
 /// A NATS service that is not zefir: the test takes its requests and writes
 /// its replies.
 const Service = struct {
@@ -553,7 +562,11 @@ test "a call canceled while it starts the inbox leaves it idle; the next call st
     var starter: Caller = .init(&bus, .{});
     defer starter.deinit();
     try starter.begin();
-    while (bus.client.phase.load(.acquire) != .starting) try io.sleep(.fromMilliseconds(1), .awake);
+    try eventually(&bus, struct {
+        fn starting(b: *Transport) bool {
+            return b.client.phase.load(.acquire) == .starting;
+        }
+    }.starting);
     // The starter is in the flush of the inbox now.
     try io.sleep(.fromMilliseconds(20), .awake);
     starter.cancel();
@@ -619,11 +632,11 @@ test "the inbox as a slow consumer: counted, and the calls go on" {
     var pattern: [64]u8 = undefined;
     const inbox = try std.fmt.bufPrint(&pattern, "{s}.*", .{reply_to[0..std.mem.findScalarLast(u8, reply_to, '.').?]});
     try testing.expect(fake.failNext(io, inbox, error.SlowConsumer));
-    const deadline = now().addDuration(.fromSeconds(5));
-    while (bus.counters().slow_consumer_errors == 0) {
-        if (now().nanoseconds > deadline.nanoseconds) return error.TestTimedOut;
-        try io.sleep(.fromMilliseconds(1), .awake);
-    }
+    try eventually(&bus, struct {
+        fn counted(b: *Transport) bool {
+            return b.counters().slow_consumer_errors != 0;
+        }
+    }.counted);
     try service.reply(msg, &.{}, "after slow");
     caller.join();
     try testing.expectEqualStrings("after slow", (try caller.result).body);
@@ -686,7 +699,11 @@ test "an inbox that ends as it starts, while another call waits for the start: b
                 defer first.deinit();
                 try first.begin();
                 // The first call is in the flush of the inbox.
-                while (adapter.flushes.load(.monotonic) == 0) try io.sleep(.fromMilliseconds(1), .awake);
+                try eventually(&adapter, struct {
+                    fn flushing(a: *EndingInbox) bool {
+                        return a.flushes.load(.monotonic) != 0;
+                    }
+                }.flushing);
                 var second: Caller = .init(&bus, .{ .timeout = .fromSeconds(5) });
                 defer second.deinit();
                 try second.begin();
