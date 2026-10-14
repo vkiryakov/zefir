@@ -27,6 +27,7 @@ const failures = @import("../failures.zig");
 const ServerTransport = @import("../ServerTransport.zig");
 const Context = @import("Context.zig").Context;
 const Call = @import("Call.zig");
+const RouteStats = @import("RouteStats.zig");
 
 const RawServer = @This();
 
@@ -38,6 +39,8 @@ methods: []const Method,
 /// The key of a route, "service.v<version>.method", to its index in
 /// `methods`.
 table: std.StringArrayHashMapUnmanaged(u32),
+/// The counters of each route, by its index in `methods`.
+stats: []RouteStats,
 limits: Limits,
 shutdown_grace: std.Io.Duration,
 /// What `Dispatcher.service` returns.
@@ -183,6 +186,8 @@ pub fn init(gpa: std.mem.Allocator, options: Options) InitError!RawServer {
     const a = arena.allocator();
     const methods = try a.alloc(Method, options.methods.len);
     const routes = try a.alloc(model.Route, options.methods.len);
+    const stats = try a.alloc(RouteStats, options.methods.len);
+    @memset(stats, .{});
     var table: std.StringArrayHashMapUnmanaged(u32) = .empty;
     try table.ensureTotalCapacity(a, options.methods.len);
     for (options.methods, methods, routes, 0..) |method, *copy, *route, i| {
@@ -201,6 +206,7 @@ pub fn init(gpa: std.mem.Allocator, options: Options) InitError!RawServer {
         .server_transport = options.transport,
         .methods = methods,
         .table = table,
+        .stats = stats,
         .limits = options.limits,
         .shutdown_grace = options.shutdown_grace,
         .service_info = .{
@@ -446,6 +452,18 @@ fn admitFn(ptr: *anyopaque, io: std.Io, head: *const transport.RequestHead, body
 fn admit(server: *RawServer, io: std.Io, head: *const transport.RequestHead, body_len: usize) transport.Dispatcher.Admission {
     if (server.grace_over.load(.acquire)) return .{ .rejected = failures.stopping };
     const index = server.lookup(head.route) orelse return .{ .rejected = failures.unknown_method };
+    const stats = &server.stats[index];
+    stats.countRequest();
+    const admission = server.admitTo(io, index, head, body_len);
+    switch (admission) {
+        .accepted => {},
+        .rejected => |failure| stats.countFailure(io, failure),
+    }
+    return admission;
+}
+
+/// The checks after the route.
+fn admitTo(server: *RawServer, io: std.Io, index: u32, head: *const transport.RequestHead, body_len: usize) transport.Dispatcher.Admission {
     if (!std.mem.eql(u8, head.codec, "json")) return .{ .rejected = failures.unsupported_codec };
     const limits = server.limits;
     if (rules.checkRequestMetadata(head.metadata, .{ .max_entries = limits.max_metadata_entries, .max_bytes = limits.max_metadata_bytes })) |problem| {
@@ -529,9 +547,9 @@ fn failFn(ptr: *anyopaque, io: std.Io, err: transport.Dispatcher.FatalError, dia
 }
 
 fn routeStatsFn(ptr: *anyopaque, route_index: usize) transport.Dispatcher.RouteStats {
-    _ = ptr;
-    _ = route_index;
-    return .{ .requests = 0, .errors = 0, .processing_time = .zero };
+    const server: *RawServer = @ptrCast(@alignCast(ptr));
+    // The transport has the dispatcher only after `start` set `io`.
+    return server.stats[route_index].snapshot(server.io.?);
 }
 
 fn now(io: std.Io) std.Io.Timestamp {
@@ -1253,4 +1271,32 @@ test "admission refuses every call once the grace of a stop is over" {
     server.endGrace();
     const head = headOf(io, "getUser");
     try expectRefused(fake.dispatcher_value.?.admit(io, &head, 0), failures.stopping);
+}
+
+test "admission counts every call of a route and every refusal, with the last one" {
+    const io = testing.io;
+    var fake: FakeTransport = .{};
+    var server = try admissionServer(testing.allocator, &fake, .{});
+    defer server.deinit(io);
+    try server.start(io);
+    const d = fake.dispatcher_value.?;
+
+    var head = headOf(io, "getUser");
+    (try expectAdmitted(d.admit(io, &head, 0))).abandon(io);
+    head.codec = "msgpack";
+    try expectRefused(d.admit(io, &head, 0), failures.unsupported_codec);
+    head.codec = "json";
+    head.timeout = .fromMicroseconds(10);
+    try expectRefused(d.admit(io, &head, 0), failures.deadline_exceeded);
+    // Unknown routes count for no route.
+    try expectRefused(d.admit(io, &headOf(io, "deleteUser"), 0), failures.unknown_method);
+
+    const stats = d.routeStats(0);
+    try testing.expectEqual(@as(u64, 3), stats.requests);
+    try testing.expectEqual(@as(u64, 2), stats.errors);
+    try testing.expectEqual(core.ErrorCode.deadline_exceeded, stats.last_error.?.code);
+    try testing.expectEqualStrings("rpc.deadline_exceeded", stats.last_error.?.appCode());
+    const other = d.routeStats(1);
+    try testing.expectEqual(@as(u64, 0), other.requests);
+    try testing.expectEqual(@as(?transport.Dispatcher.RouteStats.LastError, null), other.last_error);
 }

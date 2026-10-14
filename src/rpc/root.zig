@@ -77,4 +77,5 @@ test {
     _ = @import("engine/RawServer.zig");
     _ = @import("engine/Call.zig");
     _ = @import("engine/Context.zig");
+    _ = @import("engine/RouteStats.zig");
 }
