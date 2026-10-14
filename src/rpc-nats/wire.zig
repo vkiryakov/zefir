@@ -521,7 +521,9 @@ pub const ParseResponseError = error{
 
 /// The response of a call, from the block and the payload of its reply, in
 /// memory from `a` (two blocks: the metadata entries, and all the text).
-/// The limits are checked before anything is allocated.
+/// The limits are checked before anything is allocated; the message, the
+/// app code and the field of a failure count toward `max_metadata_bytes`
+/// by their length on the wire.
 pub fn parseResponse(
     a: Allocator,
     block_bytes: []const u8,
@@ -558,16 +560,17 @@ pub fn parseResponse(
         metadata_bytes += 3 + field.name.len + field.value.len;
         text_len += field.name.len + field.value.len;
     }
-    if (entries > limits.max_metadata_entries or metadata_bytes > limits.max_metadata_bytes) {
-        if (diagnostics) |d| d.set(.receive, null, "response metadata of {d} entries and {d} bytes is over the limits of {d} and {d}", .{
-            entries, metadata_bytes, limits.max_metadata_entries, limits.max_metadata_bytes,
+    const is_failure = found.service_error != null or found.service_error_code != null;
+    // The strings of a failure are copied too, so they count with the
+    // metadata: else a foreign reply could take up to max_payload.
+    const strings_len = if (is_failure) lengthOf(found.service_error) + lengthOf(found.app_code) + lengthOf(found.field) else 0;
+    if (entries > limits.max_metadata_entries or metadata_bytes + strings_len > limits.max_metadata_bytes) {
+        if (diagnostics) |d| d.set(.receive, null, "response metadata of {d} entries and {d} bytes, {d} of them the strings of a failure, is over the limits of {d} and {d}", .{
+            entries, metadata_bytes + strings_len, strings_len, limits.max_metadata_entries, limits.max_metadata_bytes,
         });
         return error.ResponseTooLarge;
     }
-    const is_failure = found.service_error != null or found.service_error_code != null;
-    if (is_failure) {
-        text_len += lengthOf(found.service_error) + lengthOf(found.app_code) + lengthOf(found.field);
-    }
+    text_len += strings_len;
 
     const metadata = try a.alloc(Entry, entries);
     errdefer a.free(metadata);
@@ -1075,8 +1078,43 @@ test "a response over the caller's limits is refused before anything is allocate
     try testing.expectError(error.ResponseTooLarge, parseResponse(a, "", "12345", small, null));
     try testing.expectError(error.ResponseTooLarge, parseResponse(a, "x-1: a\r\nx-2: b\r\nx-3: c\r\n", "", small, null));
     try testing.expectError(error.ResponseTooLarge, parseResponse(a, "x-1: 12345\r\nx-2: 123456\r\n", "", small, null));
-    // Transport headers do not count.
-    try testing.expectError(error.OutOfMemory, parseResponse(a, "x-1: 12345\r\nx-2: 12345\r\nNats-Service-Error: x\r\nZefir-Rpc-Code: internal\r\n", "1234", small, null));
+    // The strings of a failure count with the metadata: they are copied too.
+    try testing.expectError(error.ResponseTooLarge, parseResponse(a, "x-1: 12345\r\nx-2: 12345\r\nNats-Service-Error: x\r\nZefir-Rpc-Code: internal\r\n", "1234", small, null));
+    // The other transport headers do not.
+    try testing.expectError(error.OutOfMemory, parseResponse(a, "x-1: 12345\r\nx-2: 12345\r\nNats-Service-Error-Code: 500\r\nZefir-Rpc-Code: internal\r\nZefir-Rpc-Refused: 1\r\n", "1234", small, null));
+    try testing.expectEqual(@as(usize, 0), failing.allocations);
+}
+
+test "the strings of a foreign failure are bounded by the caller's metadata limit, not by max_payload" {
+    var block: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer block.deinit();
+    try block.writer.writeAll("NATS/1.0\r\nNats-Service-Error: ");
+    try block.writer.splatByteAll('m', 512 * 1024);
+    try block.writer.writeAll("\r\nNats-Service-Error-Code: 500\r\nZefir-Rpc-App-Code: ");
+    try block.writer.splatByteAll('a', 256 * 1024);
+    try block.writer.writeAll("\r\nZefir-Rpc-Field: ");
+    try block.writer.splatByteAll('f', 1024);
+    try block.writer.writeAll("\r\n\r\n");
+    const kib: ResponseLimits = .{ .max_body_bytes = 1024, .max_metadata_entries = 8, .max_metadata_bytes = 1024 };
+    var failing: std.testing.FailingAllocator = .init(testing.allocator, .{ .fail_index = 0 });
+    var d: Diagnostics = .{};
+    try testing.expectError(error.ResponseTooLarge, parseResponse(failing.allocator(), block.written(), "", kib, &d));
+    try testing.expectEqual(@as(usize, 0), failing.allocations);
+    try testing.expectEqual(Diagnostics.Phase.receive, d.phase.?);
+
+    // At the limit, a failure fits: 2 + (3 + 3 + 1) for "x-a: 1", then the
+    // message, the app code and the field as they came.
+    const fits = "NATS/1.0\r\nX-A: 1\r\nNats-Service-Error: 100% done\r\nNats-Service-Error-Code: 409\r\nZefir-Rpc-App-Code: a.b\r\nZefir-Rpc-Field: id\r\n\r\n";
+    const exact: ResponseLimits = .{ .max_body_bytes = 0, .max_metadata_entries = 1, .max_metadata_bytes = 2 + 7 + "100% done".len + "a.b".len + "id".len };
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const f = (try parseResponse(arena.allocator(), fits, "", exact, null)).status.failure;
+    try testing.expectEqualStrings("100% done", f.message);
+    try testing.expectEqualStrings("a.b", f.app_code);
+    try testing.expectEqualStrings("id", f.field.?);
+    var one_less = exact;
+    one_less.max_metadata_bytes -= 1;
+    try testing.expectError(error.ResponseTooLarge, parseResponse(failing.allocator(), fits, "", one_less, null));
     try testing.expectEqual(@as(usize, 0), failing.allocations);
 }
 

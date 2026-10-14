@@ -47,6 +47,10 @@
 //! | no reply by the deadline | `error.Timeout` |
 //! | the caller's task canceled | `error.Canceled`; the server is not told |
 //!
+//! The message, the app code and the field of a failure travel as headers:
+//! they count toward `max_response_metadata_bytes` with the metadata, so a
+//! reply takes no more of the caller's memory than its limits.
+//!
 //! And the errors of the connection:
 //!
 //! | Where | Error | `call` returns |
