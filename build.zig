@@ -359,6 +359,49 @@ pub fn build(b: *std.Build) void {
         test_rpc.dependOn(&compile.step);
     }
 
+    // rpc compile errors of contracts, of rpc.implement and of the types of
+    // requests and responses: one file each in src/rpc/tests/compile_errors/,
+    // compiled as client code. Each must fail with exactly one error, the
+    // message next to its name (the whole text after "error: "), and the
+    // notes that lead to the user's code: those of a contract lead through
+    // the return type of rpc.Contract, that of rpc.implement straight to the
+    // call. A type declared in a file is named after the file.
+    const contract_notes: []const []const u8 = &.{ "note: called at comptime here", "note: generic function instantiated here" };
+    const implement_notes: []const []const u8 = &.{"note: called at comptime here"};
+    for ([_]struct { []const u8, []const u8, []const []const u8 }{
+        .{ "contract_name", "rpc: contract \"user service\": the name must be 1 to 64 characters from [A-Za-z0-9_-]", contract_notes },
+        .{ "contract_version", "rpc: contract \"users\": .version must be 1 to 65535, got 0", contract_notes },
+        .{ "contract_no_methods", "rpc: users.v1: .methods is empty; a contract has at least one method", contract_notes },
+        .{ "contract_plain_type", "rpc: users.v1.getUser: write rpc.method(Request, Response), got the type contract_plain_type.GetUserRequest", contract_notes },
+        .{ "contract_request_not_struct", "rpc: users.v1.getUser: request must be a struct, got u64", contract_notes },
+        .{ "contract_reserved_error", "rpc: users.v1: .errors.Unavailable: rpc maps Unavailable by itself, so a contract cannot list it; give the error another name", contract_notes },
+        .{ "contract_unknown_code", "rpc: users.v1: .errors.UserNotFound.code must be one of core.ErrorCode, such as .not_found, got .notfound", contract_notes },
+        .{ "contract_rpc_app_code", "rpc: users.v1: .errors.UserNotFound.app_code \"rpc.not_found\" starts with \"rpc.\", which belongs to the framework", contract_notes },
+        .{ "contract_repeated_app_code", "rpc: users.v1: .errors.UserNotFound and .errors.NoUser share .app_code \"users.not_found\"; each error needs its own", contract_notes },
+        .{ "dto_pointer", "rpc: users.v1.getUser: response dto_pointer.User.avatar has unsupported type *dto_pointer.File", contract_notes },
+        .{ "dto_usize", "rpc: users.v1.listUsers: request dto_usize.ListUsersRequest.limit has unsupported type usize; its size depends on the target: use u64 or i64", contract_notes },
+        .{ "dto_recursive", "rpc: tree.v1.get: response dto_recursive.Node.children[]: recursive types are not supported; dto_recursive.Node contains itself", contract_notes },
+        .{ "dto_union", "rpc: canvas.v2.draw: request dto_union.DrawRequest.shape has unsupported type dto_union.Shape; unions are not supported", contract_notes },
+        .{ "implement_not_contract", "rpc.implement: the first argument must be a contract made by rpc.Contract(...), got type", implement_notes },
+        .{ "implement_timeout", "rpc.implement(users.v1): .defaults.timeout_ms must be 1 to 300000 ms, got 0", implement_notes },
+        .{ "implement_auth", "rpc.implement(users.v1): .methods.getUser.auth must be .required or .optional, got .maybe", implement_notes },
+        .{ "implement_unknown_setting", "rpc.implement(users.v1): unknown setting .default; the settings are .defaults, .middleware and .methods", implement_notes },
+    }) |case| {
+        const compile = b.addTest(.{
+            .name = b.fmt("rpc-compile-error-{s}", .{case[0]}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(b.fmt("src/rpc/tests/compile_errors/{s}.zig", .{case[0]})),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+                .imports = &.{.{ .name = "rpc", .module = rpc }},
+            }),
+        });
+        const lines = std.mem.concat(b.allocator, []const u8, &.{ &.{b.fmt("error: {s}", .{case[1]})}, case[2] }) catch @panic("OOM");
+        compile.expect_errors = .{ .exact = lines };
+        test_rpc.dependOn(&compile.step);
+    }
+
     // rpc panic programs: a transport that breaks the rules of
     // rpc.transport.Pending gets a panic that names the rule. The program
     // runs once per case and, like the log ones, ends in its own panic
