@@ -84,7 +84,11 @@ pub fn start(t: *Transport, io: std.Io, dispatcher: rpc.transport.Dispatcher) rp
     const routes = try makeRoutes(t, io, dispatcher.service());
     errdefer freeRoutes(t, io, routes);
     var subscribed: usize = 0;
-    errdefer for (routes[0..subscribed]) |*r| t.conn.unsubscribe(io, r.sub);
+    errdefer {
+        const protection = io.swapCancelProtection(.blocked);
+        defer _ = io.swapCancelProtection(protection);
+        for (routes[0..subscribed]) |*r| t.conn.unsubscribe(io, r.sub);
+    }
     const timeout = Transport.timeoutAfter(io, t.options.flush_timeout);
     for (routes) |*r| {
         r.sub = t.conn.subscribe(io, r.subjectOf(), t.options.queue_group, timeout) catch |err| return startError(r, err);
