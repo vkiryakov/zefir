@@ -227,8 +227,11 @@ pub const PublishError = error{
 /// outbound queue, which is not delivery: `flush` waits until the server
 /// has it. While the queue is full, it waits for room; cancel the task to
 /// give up. While the client reconnects, the copy waits in the reconnect
-/// buffer for the next connection instead, or fails with BufferFull when
-/// the buffer is full; it is never sent twice.
+/// buffer for the next connection instead, after the publishes the lost
+/// connection never sent, or fails with BufferFull when the buffer is full;
+/// it is never sent twice. One the next server would refuse, over its
+/// `max_payload` or with headers it does not take, is dropped and counted
+/// when that server connects.
 pub fn publish(client: *Client, subject: []const u8, payload: []const u8) PublishError!void {
     client.checkHome();
     return client.publishMessage(.{ .subject = subject, .payload = payload });
@@ -240,21 +243,32 @@ pub fn publishMessage(client: *Client, message: PublishMessage) PublishError!voi
     client.checkHome();
     const header_len = try client.prepare(message, .publish);
     try client.checkLine(message, header_len);
-    const io = client.io;
-    const has_headers = message.headers.len > 0;
-    const queued = if (has_headers)
-        client.outbound.put(io, .publish, encoder.hpubLen(message.subject, message.reply_to, header_len, message.payload.len), encoder.writeHpub, .{
-            message.subject, message.reply_to, message.headers, message.payload,
-        })
-    else
-        client.outbound.put(io, .publish, encoder.pubLen(message.subject, message.reply_to, message.payload.len), encoder.writePub, .{
-            message.subject, message.reply_to, message.payload,
-        });
-    queued catch |err| switch (err) {
+    client.putPublish(message, header_len) catch |err| switch (err) {
         error.Closed => return error.ConnectionClosed,
+        // A stream of requestMany that nobody reads may hold room in the
+        // reconnect buffer that it no longer needs.
+        error.BufferFull => {
+            if (!client.outbound.pruneRequests(client.io, client, manager.requestWaits)) return error.BufferFull;
+            client.putPublish(message, header_len) catch |again| switch (again) {
+                error.Closed => return error.ConnectionClosed,
+                else => |e| return e,
+            };
+        },
         else => |e| return e,
     };
     client.countOut(header_len + message.payload.len);
+}
+
+fn putPublish(client: *Client, message: PublishMessage, header_len: usize) Outbound.PutError!void {
+    const io = client.io;
+    if (message.headers.len > 0) {
+        return client.outbound.put(io, .publish, encoder.hpubLen(message.subject, message.reply_to, header_len, message.payload.len), encoder.writeHpub, .{
+            message.subject, message.reply_to, message.headers, message.payload,
+        });
+    }
+    return client.outbound.put(io, .publish, encoder.pubLen(message.subject, message.reply_to, message.payload.len), encoder.writePub, .{
+        message.subject, message.reply_to, message.payload,
+    });
 }
 
 fn countOut(client: *Client, bytes: usize) void {
@@ -319,6 +333,18 @@ fn checkLine(client: *Client, message: PublishMessage, header_len: usize) error{
 /// failed already queues nothing, and one whose connection was lost while
 /// it waited for room fails with Disconnected without queueing.
 fn queueRequest(client: *Client, id: u64, message: PublishMessage, header_len: usize, deadline: Io.Clock.Timestamp) Outbound.PutUntilError!void {
+    return client.putRequestFrame(id, message, header_len, deadline) catch |err| switch (err) {
+        // A stream of requestMany that nobody reads may hold room in the
+        // reconnect buffer that it no longer needs.
+        error.BufferFull => {
+            if (!client.outbound.pruneRequests(client.io, client, manager.requestWaits)) return error.BufferFull;
+            return client.putRequestFrame(id, message, header_len, deadline);
+        },
+        else => |e| return e,
+    };
+}
+
+fn putRequestFrame(client: *Client, id: u64, message: PublishMessage, header_len: usize, deadline: Io.Clock.Timestamp) Outbound.PutUntilError!void {
     const io = client.io;
     const ticket = client.inbox.ticket(id);
     if (message.headers.len > 0) {
@@ -615,7 +641,9 @@ pub const RequestError = error{
     /// The client reconnects, and the reconnect buffer has no room for it.
     BufferFull,
     /// Not connected yet, or the connection was lost while the request
-    /// waited, or reconnecting with `reconnect.buffer_bytes` of 0.
+    /// waited, or reconnecting with `reconnect.buffer_bytes` of 0, or the
+    /// server of the next connection would refuse the request waiting for
+    /// it (over its `max_payload`, or headers it does not take).
     Disconnected,
     /// The server refused the subscription of the client's inbox, as for an
     /// account that may not subscribe to `_INBOX.>`: no reply can come.

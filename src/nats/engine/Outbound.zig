@@ -21,10 +21,12 @@
 //! sorts out what the connection left: PUB and HPUB written after the PING
 //! the last PONG answered may or may not have reached the server, and are
 //! counted as uncertain; publishes never written move to the buffer while
-//! it has room, and the rest are dropped and counted; requests, SUB, UNSUB
-//! and PING go. Nothing is ever sent twice. A new connection begins with
-//! `restore`, which puts the frames that bring the server up to date before
-//! everything that waits.
+//! it has room, ahead of those made after the loss, and the rest are
+//! dropped and counted; requests, SUB, UNSUB and PING go. Nothing is ever
+//! sent twice. A new connection begins with `restore`, which drops what
+//! the new server would refuse and puts the frames that bring the server
+//! up to date before everything that waits. Frames are moved only inside
+//! the chunks they are in, so none is ever lost for lack of memory.
 
 const std = @import("std");
 const Io = std.Io;
@@ -69,6 +71,9 @@ pub const Frame = struct {
     /// A PING the heartbeat asked for: once written, it is outstanding
     /// until a PONG comes.
     heartbeat: bool = false,
+    /// A publish the ended connection never began: it holds its room in
+    /// the reconnect buffer until `settle`.
+    reserved: bool = false,
 };
 
 /// The request a request frame carries. The frame goes in only when
@@ -184,6 +189,9 @@ pings_out: u32 = 0,
 buffer_limit: usize = 0,
 /// What the frames that wait for the next connection cost.
 buffered: usize = 0,
+/// Room the publishes the ended connection never began hold in the
+/// buffer until `settle`, ahead of the publishes made since.
+reserved: usize = 0,
 /// What dead frames still hold until they are dropped.
 dead_bytes: usize = 0,
 /// Frames at the front that the ended connection left, until `settle`.
@@ -307,7 +315,7 @@ fn admit(q: *Outbound, io: Io, kind: Kind, ticket: ?Ticket, len: usize, encode: 
             .publish, .request => {
                 if (q.buffer_limit == 0) return error.Disconnected;
                 const cost = len +| record_cost;
-                if (cost > q.buffer_limit - q.buffered) return error.BufferFull;
+                if (cost > q.buffer_limit -| q.buffered -| q.reserved) return error.BufferFull;
                 try q.agree(io, ticket);
                 try q.append(io, kind, ticket, len, encode, args);
                 q.buffered += cost;
@@ -549,15 +557,32 @@ pub fn halt(q: *Outbound, io: Io) u64 {
         q.stale_frames = q.frames.len;
         q.buffered = 0;
         q.dead_bytes = 0;
+        q.reserveUnsent();
         q.wakeAll(io);
     }
     return q.generation;
 }
 
+/// The publishes the ended connection never began take their room in the
+/// buffer first, in order while it has room, as `settle` keeps them:
+/// publishes made after the loss find what is left, or BufferFull.
+fn reserveUnsent(q: *Outbound) void {
+    q.reserved = 0;
+    for (0..q.frames.len) |index| {
+        const frame = q.frames.atPtr(index);
+        if (frame.kind != .publish or frame.written > 0) continue;
+        const cost = frame.len + record_cost;
+        if (cost > q.buffer_limit - q.reserved) break;
+        frame.reserved = true;
+        q.reserved += cost;
+    }
+}
+
 /// A request ended: while there is no connection, its frame waiting for
 /// the next one is dropped, so a request that ended is never sent and its
-/// room goes to others. The frames are moved once the dead ones hold as
-/// much as the living, so memory stays within twice the buffer.
+/// room goes to others. The frames are compacted in place once the dead
+/// ones hold as much as the living, so memory stays within twice the
+/// buffer and a compaction allocates nothing.
 pub fn forgetRequest(q: *Outbound, io: Io, id: u64) void {
     q.mutex.lockUncancelable(io);
     defer q.mutex.unlock(io);
@@ -567,15 +592,47 @@ pub fn forgetRequest(q: *Outbound, io: Io, id: u64) void {
     while (index < q.frames.len) : (index += 1) {
         const frame = q.frames.atPtr(index);
         if (frame.request != id or frame.dead) continue;
-        frame.dead = true;
-        const cost = frame.len + record_cost;
-        q.buffered -|= cost;
-        q.queued -|= cost;
-        q.dead_bytes += cost;
+        q.markDead(frame);
         break;
     }
-    // With a writer still on the stale frames, nothing moves yet.
-    if (q.stale_frames == 0 and q.dead_bytes > 0 and q.dead_bytes >= q.buffered) q.rebuild(KeepLiving{});
+    q.compactDead();
+}
+
+/// While there is no connection, the request frames waiting for it whose
+/// request no longer waits (`waiting(context, id)` false, as a stream of
+/// requestMany past its deadline that nobody reads) give their room back,
+/// as a request that ends does; true when some did. A publish that finds
+/// the buffer full asks it before it gives up.
+pub fn pruneRequests(q: *Outbound, io: Io, context: anytype, comptime waiting: fn (@TypeOf(context), u64) bool) bool {
+    q.mutex.lockUncancelable(io);
+    defer q.mutex.unlock(io);
+    if (q.mode != .buffering) return false;
+    var pruned = false;
+    var index = q.stale_frames;
+    while (index < q.frames.len) : (index += 1) {
+        const frame = q.frames.atPtr(index);
+        if (frame.kind != .request or frame.dead or waiting(context, frame.request)) continue;
+        q.markDead(frame);
+        pruned = true;
+    }
+    q.compactDead();
+    return pruned;
+}
+
+/// A frame waiting for the next connection that is never to be sent: its
+/// room goes back at once, its bytes when the queue is compacted.
+fn markDead(q: *Outbound, frame: *Frame) void {
+    frame.dead = true;
+    const cost = frame.len + record_cost;
+    q.buffered -|= cost;
+    q.queued -|= cost;
+    q.dead_bytes += cost;
+}
+
+/// Compacts once the dead frames hold as much as the living; with a
+/// writer still on the stale frames, nothing moves yet.
+fn compactDead(q: *Outbound) void {
+    if (q.stale_frames == 0 and q.dead_bytes > 0 and q.dead_bytes >= q.buffered) q.compact(&KeepLiving{});
 }
 
 /// What `settle` and `discard` found.
@@ -648,13 +705,13 @@ fn startOver(q: *Outbound) void {
 
 /// Keeps the publishes the ended connection never wrote, in order, while
 /// the buffer has room after the frames that came since; drops the other
-/// frames it left, and the dead ones. The kept frames move to new chunks.
+/// frames it left, and the dead ones.
 fn keepBuffered(q: *Outbound, settled: *Settled) void {
     var keeper: KeepBuffered = .{ .stale = q.stale_frames, .room = q.buffer_limit -| q.buffered, .settled = settled };
-    q.rebuild(&keeper);
+    q.compact(&keeper);
 }
 
-/// For `rebuild` in `settle`: the stale frames are those of the ended
+/// For `compact` in `settle`: the stale frames are those of the ended
 /// connection.
 const KeepBuffered = struct {
     stale: usize,
@@ -662,7 +719,7 @@ const KeepBuffered = struct {
     full: bool = false,
     settled: *Settled,
 
-    fn keep(k: *KeepBuffered, index: usize, frame: Frame) bool {
+    fn keep(k: *KeepBuffered, index: usize, frame: Frame, _: []const u8) bool {
         if (frame.dead) return false;
         if (index >= k.stale) return true;
         if (frame.kind != .publish) return false;
@@ -677,110 +734,167 @@ const KeepBuffered = struct {
         k.room -= cost;
         return true;
     }
-
-    fn lost(k: *KeepBuffered, frame: Frame) void {
-        if (frame.kind == .publish) k.settled.dropped += 1;
-    }
 };
 
-/// For `rebuild`: every frame but the dead.
+/// For `compact`: every frame but the dead.
 const KeepLiving = struct {
-    fn keep(_: KeepLiving, _: usize, frame: Frame) bool {
+    fn keep(_: *const KeepLiving, _: usize, frame: Frame, _: []const u8) bool {
         return !frame.dead;
     }
-
-    fn lost(_: KeepLiving, _: Frame) void {}
 };
 
-/// For `rebuild` in `restore`: the living frames, requests only while their
-/// request still waits.
-fn KeepWaiting(comptime Context: type, comptime waiting: fn (Context, u64) bool) type {
+/// What a new server takes: `restore` drops the frames waiting for it that
+/// it would refuse, and close the connection for.
+pub const ServerLimits = struct {
+    /// Headers and payload together; 0 when the server did not say.
+    max_payload: u64 = 0,
+    /// HPUB.
+    headers: bool = true,
+};
+
+/// For `compact` in `restore`: the living frames, requests only while
+/// their request still waits, and publishes and requests only when the new
+/// server takes them; a request it would not take is refused.
+fn KeepWaiting(
+    comptime Context: type,
+    comptime waiting: fn (Context, u64) bool,
+    comptime refused: fn (Context, u64) void,
+) type {
     return struct {
         context: Context,
+        server: ServerLimits,
+        /// Publishes the server would refuse.
+        dropped: u64 = 0,
 
-        fn keep(k: @This(), _: usize, frame: Frame) bool {
+        fn keep(k: *@This(), _: usize, frame: Frame, bytes: []const u8) bool {
             if (frame.dead) return false;
-            return frame.kind != .request or waiting(k.context, frame.request);
+            switch (frame.kind) {
+                .request => {
+                    if (!waiting(k.context, frame.request)) return false;
+                    if (takes(k.server, bytes)) return true;
+                    refused(k.context, frame.request);
+                    return false;
+                },
+                .publish => {
+                    if (takes(k.server, bytes)) return true;
+                    k.dropped += 1;
+                    return false;
+                },
+                .service, .ping => return true,
+            }
         }
-
-        fn lost(_: @This(), _: Frame) void {}
     };
 }
 
-/// Moves the frames `keeper.keep(index, frame)` keeps to new chunks, in
-/// order, and frees the rest; a frame there is no memory for goes to
-/// `keeper.lost`. Only when no writer has a batch: in buffering mode after
-/// `settle`, or in `settle` itself.
-fn rebuild(q: *Outbound, keeper: anytype) void {
-    var old_chunks = q.chunks;
-    var old_frames = q.frames;
-    q.chunks = .empty;
-    q.frames = .empty;
+/// The server takes the PUB or HPUB in `bytes`: within its `max_payload`,
+/// and with headers only when it has them. The frame was encoded here, so
+/// its line is well formed: the last argument is the size of headers and
+/// payload together.
+fn takes(server: ServerLimits, bytes: []const u8) bool {
+    const line_end = std.mem.findScalar(u8, bytes, '\r') orelse return true;
+    const line = bytes[0..line_end];
+    if (std.mem.startsWith(u8, line, "HPUB ") and !server.headers) return false;
+    if (server.max_payload == 0) return true;
+    const size_at = (std.mem.findScalarLast(u8, line, ' ') orelse return true) + 1;
+    const size = std.fmt.parseInt(u64, line[size_at..], 10) catch return true;
+    return size <= server.max_payload;
+}
+
+/// Keeps the frames `keeper.keep(index, frame, bytes)` keeps, in order,
+/// and drops the rest. The kept bytes move forward inside the chunks they
+/// lie in, never past where they were, so nothing is allocated, no kept
+/// frame can be lost, and memory never grows; chunks left empty go. Only
+/// when no writer has a batch: in buffering mode after `settle`, or in
+/// `settle` itself.
+fn compact(q: *Outbound, keeper: anytype) void {
     q.queued = 0;
     q.buffered = 0;
     q.dead_bytes = 0;
-    defer {
-        while (old_chunks.popFront()) |chunk| q.recycle(chunk);
-        old_chunks.deinit(q.gpa);
-        old_frames.deinit(q.gpa);
-    }
-    // Every frame lies in one chunk; the first may be written in part.
-    var chunk_index: usize = 0;
-    var position: usize = if (old_chunks.front()) |first| first.head - (if (old_frames.front()) |f| f.written else 0) else 0;
-    for (0..old_frames.len) |index| {
-        const frame = old_frames.at(index);
-        var chunk = old_chunks.at(chunk_index);
-        if (position + frame.len > chunk.tail) {
-            chunk_index += 1;
-            chunk = old_chunks.at(chunk_index);
-            position = 0;
+    q.reserved = 0;
+    // Where the frames are read: every frame lies in one chunk, and the
+    // first may be written in part.
+    var read_chunk: usize = 0;
+    var read_at: usize = if (q.chunks.front()) |first| first.head - (if (q.frames.front()) |f| f.written else 0) else 0;
+    // Where the kept ones go.
+    var write_chunk: usize = 0;
+    var write_at: usize = 0;
+    var kept: usize = 0;
+    for (0..q.frames.len) |index| {
+        var frame = q.frames.at(index);
+        if (read_at + frame.len > q.chunks.at(read_chunk).tail) {
+            read_chunk += 1;
+            read_at = 0;
         }
-        const bytes = chunk.bytes[position..][0..frame.len];
-        position += frame.len;
-        if (!keeper.keep(index, frame)) continue;
-        if (!q.copyIn(frame, bytes)) {
-            keeper.lost(frame);
-            continue;
+        const bytes = q.chunks.at(read_chunk).bytes[read_at..][0..frame.len];
+        read_at += frame.len;
+        if (!keeper.keep(index, frame, bytes)) continue;
+        // The chunk it is read from has room at the latest: a chunk passed
+        // over is read to its end already.
+        while (q.chunks.at(write_chunk).bytes.len - write_at < frame.len) {
+            q.chunks.at(write_chunk).tail = write_at;
+            write_chunk += 1;
+            write_at = 0;
         }
-        if (frame.kind != .ping) q.buffered += frame.len + record_cost;
+        std.mem.copyForwards(u8, q.chunks.at(write_chunk).bytes[write_at..][0..frame.len], bytes);
+        write_at += frame.len;
+        frame.written = 0;
+        frame.reserved = false;
+        q.frames.atPtr(kept).* = frame;
+        kept += 1;
+        if (frame.kind != .ping) {
+            q.queued += frame.len + record_cost;
+            q.buffered += frame.len + record_cost;
+        }
     }
-}
-
-/// Queues a copy of a frame's bytes, as unwritten; false when there is no
-/// memory for it.
-fn copyIn(q: *Outbound, frame: Frame, bytes: []const u8) bool {
-    const chunk = q.reserve(bytes.len) catch return false;
-    @memcpy(chunk.bytes[chunk.tail..][0..bytes.len], bytes);
-    q.commit(chunk, .{ .kind = frame.kind, .len = frame.len, .request = frame.request });
-    return true;
+    if (kept > 0) q.chunks.at(write_chunk).tail = write_at;
+    var chunks_kept: usize = 0;
+    for (0..q.chunks.len) |index| {
+        const chunk = q.chunks.at(index);
+        if (kept > 0 and index <= write_chunk and chunk.tail > 0) {
+            chunk.head = 0;
+            q.chunks.atPtr(chunks_kept).* = chunk;
+            chunks_kept += 1;
+        } else {
+            q.recycle(chunk);
+        }
+    }
+    q.chunks.len = chunks_kept;
+    q.frames.len = kept;
 }
 
 /// A new connection is up: the frames `build(context, gpa)` returns, which
 /// bring the server up to date, go before everything that waits, and the
-/// writer may send. Request frames whose request no longer waits
-/// (`waiting(context, id)` false) are dropped first. Both run under the
-/// queue's mutex, so no frame gets in meanwhile; the bytes `build` returns
-/// are the queue's.
+/// writer may send. What waits is checked first: a request frame whose
+/// request no longer waits (`waiting(context, id)` false) is dropped, and
+/// so is a publish or request the new server would refuse (`server`): the
+/// publishes are counted as dropped and their number returned, and such a
+/// request fails (`refused(context, id)`). All of it runs under the queue's
+/// mutex, so no frame gets in meanwhile; the bytes `build` returns are the
+/// queue's. Out of memory, nothing changes.
 pub fn restore(
     q: *Outbound,
     io: Io,
     context: anytype,
     comptime build: fn (@TypeOf(context), Allocator) Allocator.Error![]u8,
     comptime waiting: fn (@TypeOf(context), u64) bool,
-) error{ Closed, OutOfMemory }!void {
+    comptime refused: fn (@TypeOf(context), u64) void,
+    server: ServerLimits,
+) error{ Closed, OutOfMemory }!u64 {
     q.mutex.lockUncancelable(io);
     defer q.mutex.unlock(io);
     if (q.mode == .closed) return error.Closed;
-    // Requests that ended while their frames waited are not sent.
-    q.rebuild(KeepWaiting(@TypeOf(context), waiting){ .context = context });
+    // Whatever may fail comes first: the frames change once nothing can.
     const bytes = try build(context, q.gpa);
-    if (bytes.len > 0) {
-        errdefer q.gpa.free(bytes);
-        try q.frames.ensureUnusedCapacity(q.gpa, 1);
-        try q.chunks.ensureUnusedCapacity(q.gpa, 1);
-        const chunk = try q.gpa.create(Chunk);
-        chunk.* = .{ .bytes = bytes, .tail = bytes.len };
-        q.chunks.pushFrontAssumeCapacity(chunk);
+    errdefer q.gpa.free(bytes);
+    try q.frames.ensureUnusedCapacity(q.gpa, 1);
+    try q.chunks.ensureUnusedCapacity(q.gpa, 1);
+    const chunk: ?*Chunk = if (bytes.len > 0) try q.gpa.create(Chunk) else null;
+    var keeper: KeepWaiting(@TypeOf(context), waiting, refused) = .{ .context = context, .server = server };
+    q.compact(&keeper);
+    q.dropped_publishes += keeper.dropped;
+    if (chunk) |c| {
+        c.* = .{ .bytes = bytes, .tail = bytes.len };
+        q.chunks.pushFrontAssumeCapacity(c);
         q.frames.pushFrontAssumeCapacity(.{ .kind = .service, .len = bytes.len });
         q.queued += bytes.len + record_cost;
     } else {
@@ -788,6 +902,7 @@ pub fn restore(
     }
     q.mode = .live;
     q.ready.signal(io);
+    return keeper.dropped;
 }
 
 /// Refuses new frames and wakes everyone: waiting puts and PING waiters get
@@ -886,6 +1001,8 @@ fn dropWritten(q: *Outbound, bytes: usize) void {
             .service => {},
         }
         if (frame.kind != .ping) q.queued -= frame.len + record_cost;
+        // The writer of the ended connection finished it after all.
+        if (frame.reserved) q.reserved -= frame.len + record_cost;
         q.stale_frames -|= 1;
         _ = q.frames.popFront();
     }
@@ -897,6 +1014,7 @@ fn freeFrames(q: *Outbound) void {
     q.frames.head = 0;
     q.frames.len = 0;
     q.queued = 0;
+    q.reserved = 0;
 }
 
 fn createChunk(q: *Outbound, len: usize) error{OutOfMemory}!*Chunk {
@@ -1246,7 +1364,7 @@ test "a PING answered before its connection ended is answered, whenever its wait
     const io = testing.io;
     var q: Outbound = .initBuffering(testing.allocator, 1024, 1024);
     defer q.deinit();
-    try q.restore(io, @as([]const u8, ""), restoreSub, allWaiting);
+    _ = try q.restore(io, @as([]const u8, ""), restoreSub, allWaiting, refuseNone, .{});
     const answered = try q.putPing(io, .flush);
     const unanswered = try q.putPing(io, .heartbeat);
     try testing.expectEqual(answered, unanswered);
@@ -1259,7 +1377,7 @@ test "a PING answered before its connection ended is answered, whenever its wait
     // The next PING of that connection was never answered.
     try putPub(&q, io, .publish, "p", "1");
     _ = q.settle(io);
-    try q.restore(io, @as([]const u8, ""), restoreSub, allWaiting);
+    _ = try q.restore(io, @as([]const u8, ""), restoreSub, allWaiting, refuseNone, .{});
     const second = try q.putPing(io, .flush);
     try drainOnce(&q, io, &out);
     _ = q.halt(io);
@@ -1267,13 +1385,13 @@ test "a PING answered before its connection ended is answered, whenever its wait
     q.pongReceived(io);
     try q.waitPong(io, second, null);
     _ = q.settle(io);
-    try q.restore(io, @as([]const u8, ""), restoreSub, allWaiting);
+    _ = try q.restore(io, @as([]const u8, ""), restoreSub, allWaiting, refuseNone, .{});
     const third = try q.putPing(io, .flush);
     _ = q.halt(io);
     try testing.expectError(error.Disconnected, q.waitPong(io, third, null));
     // A close after the PONG too.
     _ = q.settle(io);
-    try q.restore(io, @as([]const u8, ""), restoreSub, allWaiting);
+    _ = try q.restore(io, @as([]const u8, ""), restoreSub, allWaiting, refuseNone, .{});
     const last = try q.putPing(io, .flush);
     try drainOnce(&q, io, &out);
     q.pongReceived(io);
@@ -1530,11 +1648,13 @@ fn allWaiting(_: []const u8, _: u64) bool {
     return true;
 }
 
+fn refuseNone(_: []const u8, _: u64) void {}
+
 test "restore puts its frames first and lets the writer send" {
     const io = testing.io;
     var q: Outbound = .initBuffering(testing.allocator, 1024, 0);
     defer q.deinit();
-    try q.restore(io, @as([]const u8, "SUB a 1\r\n"), restoreSub, allWaiting);
+    _ = try q.restore(io, @as([]const u8, "SUB a 1\r\n"), restoreSub, allWaiting, refuseNone, .{});
     try putPub(&q, io, .publish, "a", "1");
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(testing.allocator);
@@ -1545,7 +1665,7 @@ test "restore puts its frames first and lets the writer send" {
     _ = try q.putPing(io, .flush);
     _ = q.halt(io);
     _ = q.settle(io);
-    try q.restore(io, @as([]const u8, ""), restoreSub, allWaiting);
+    _ = try q.restore(io, @as([]const u8, ""), restoreSub, allWaiting, refuseNone, .{});
     try testing.expectEqual(1, (try q.putPing(io, .flush)).number);
 }
 
@@ -1556,7 +1676,7 @@ test "a closed queue stays closed when its connection ends" {
     q.close(io);
     _ = q.halt(io);
     try testing.expectError(error.Closed, putPub(&q, io, .publish, "a", "1"));
-    try testing.expectError(error.Closed, q.restore(io, @as([]const u8, "SUB a 1\r\n"), restoreSub, allWaiting));
+    try testing.expectError(error.Closed, q.restore(io, @as([]const u8, "SUB a 1\r\n"), restoreSub, allWaiting, refuseNone, .{}));
 }
 
 fn frameCost(subject: []const u8, payload: []const u8) usize {
@@ -1567,7 +1687,7 @@ test "a lost connection: PUB and HPUB written after the last confirmed PING are 
     const io = testing.io;
     var q: Outbound = .initBuffering(testing.allocator, 1 << 20, 1 << 20);
     defer q.deinit();
-    try q.restore(io, @as([]const u8, ""), restoreSub, allWaiting);
+    _ = try q.restore(io, @as([]const u8, ""), restoreSub, allWaiting, refuseNone, .{});
     try putPub(&q, io, .publish, "a", "1");
     const first = try q.putPing(io, .flush);
     try putPub(&q, io, .publish, "b", "2");
@@ -1594,7 +1714,7 @@ test "a lost connection: PUB and HPUB written after the last confirmed PING are 
 
     // The next connection: its restore, then what waited, in order; the
     // request is gone.
-    try q.restore(io, @as([]const u8, "SUB x 1\r\n"), restoreSub, allWaiting);
+    _ = try q.restore(io, @as([]const u8, "SUB x 1\r\n"), restoreSub, allWaiting, refuseNone, .{});
     out.clearRetainingCapacity();
     try drainOnce(&q, io, &out);
     try testing.expectEqualStrings("SUB x 1\r\nPUB e 1\r\n5\r\nPUB g 1\r\n7\r\n", out.items);
@@ -1604,7 +1724,7 @@ test "unsent publishes keep their order in the buffer while it has room; the res
     const io = testing.io;
     var q: Outbound = .initBuffering(testing.allocator, 1 << 20, 2 * frameCost("p", "1"));
     defer q.deinit();
-    try q.restore(io, @as([]const u8, ""), restoreSub, allWaiting);
+    _ = try q.restore(io, @as([]const u8, ""), restoreSub, allWaiting, refuseNone, .{});
     try putPub(&q, io, .publish, "p", "1");
     try putPub(&q, io, .publish, "p", "2");
     try putPub(&q, io, .publish, "p", "3");
@@ -1617,7 +1737,7 @@ test "unsent publishes keep their order in the buffer while it has room; the res
     try testing.expectEqual(1, q.dropped_publishes);
     // The buffer is full: a publish now does not fit.
     try testing.expectError(error.BufferFull, putPub(&q, io, .publish, "p", "5"));
-    try q.restore(io, @as([]const u8, ""), restoreSub, allWaiting);
+    _ = try q.restore(io, @as([]const u8, ""), restoreSub, allWaiting, refuseNone, .{});
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(testing.allocator);
     try drainOnce(&q, io, &out);
@@ -1647,7 +1767,7 @@ test "a frame written in part is dropped, never sent again" {
     const io = testing.io;
     var q: Outbound = .initBuffering(testing.allocator, 1 << 20, 1 << 20);
     defer q.deinit();
-    try q.restore(io, @as([]const u8, ""), restoreSub, allWaiting);
+    _ = try q.restore(io, @as([]const u8, ""), restoreSub, allWaiting, refuseNone, .{});
     try putPub(&q, io, .publish, "p", "1");
     try putPub(&q, io, .publish, "q", "2");
     var slices: [4][]const u8 = undefined;
@@ -1657,7 +1777,7 @@ test "a frame written in part is dropped, never sent again" {
     const settled = q.settle(io);
     try testing.expectEqual(1, settled.dropped);
     try testing.expectEqual(0, settled.uncertain);
-    try q.restore(io, @as([]const u8, ""), restoreSub, allWaiting);
+    _ = try q.restore(io, @as([]const u8, ""), restoreSub, allWaiting, refuseNone, .{});
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(testing.allocator);
     try drainOnce(&q, io, &out);
@@ -1681,14 +1801,14 @@ fn exerciseSettle(gpa: Allocator) !void {
     const io = testing.io;
     var q: Outbound = .initBuffering(gpa, 1 << 20, 1 << 20);
     defer q.deinit();
-    try q.restore(io, @as([]const u8, "SUB a 1\r\n"), restoreSub, allWaiting);
+    _ = try q.restore(io, @as([]const u8, "SUB a 1\r\n"), restoreSub, allWaiting, refuseNone, .{});
     const big = try gpa.alloc(u8, chunk_size + 1);
     defer gpa.free(big);
     @memset(big, 'y');
     for (0..10) |i| try putPub(&q, io, if (i % 3 == 0) .request else .publish, "s", if (i == 5) big else "p");
     _ = q.halt(io);
     _ = q.settle(io);
-    try q.restore(io, @as([]const u8, "SUB a 1\r\n"), restoreSub, allWaiting);
+    _ = try q.restore(io, @as([]const u8, "SUB a 1\r\n"), restoreSub, allWaiting, refuseNone, .{});
 }
 
 test "nothing leaks when an allocation fails while settling and restoring" {
@@ -1738,7 +1858,7 @@ test "a request waiting for room when its connection ends goes nowhere: Disconne
     const io = testing.io;
     var q: Outbound = .initBuffering(testing.allocator, 16, 1 << 20);
     defer q.deinit();
-    try q.restore(io, @as([]const u8, ""), restoreSub, allWaiting);
+    _ = try q.restore(io, @as([]const u8, ""), restoreSub, allWaiting, refuseNone, .{});
     try putPub(&q, io, .publish, "first", "0123456789");
     var ticket: TestTicket = .{};
     var requester = try io.concurrent(putRequestLater, .{ &q, io, ticket.of(7) });
@@ -1778,7 +1898,7 @@ test "a request that ends while its frame waits for the next connection is never
     try testing.expect(q.counts(io).queued < before);
     q.forgetRequest(io, 1);
     // Request 3 ended too, without a word: the restore asks.
-    try q.restore(io, @as([]const u8, &.{3}), buildNothing, waitingBut);
+    _ = try q.restore(io, @as([]const u8, &.{3}), buildNothing, waitingBut, refuseNone, .{});
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(testing.allocator);
     try drainOnce(&q, io, &out);
@@ -1803,7 +1923,7 @@ test "a PONG that comes before the writer marks its PING written still confirms 
     const io = testing.io;
     var q: Outbound = .initBuffering(testing.allocator, 1 << 20, 1 << 20);
     defer q.deinit();
-    try q.restore(io, @as([]const u8, ""), restoreSub, allWaiting);
+    _ = try q.restore(io, @as([]const u8, ""), restoreSub, allWaiting, refuseNone, .{});
     try putPub(&q, io, .publish, "a", "1");
     const ping = try q.putPing(io, .flush);
     var slices: [4][]const u8 = undefined;
@@ -1830,4 +1950,133 @@ test "close counts a publish written in part as dropped, with those not begun" {
     const settled = q.discard(io);
     try testing.expectEqual(2, settled.dropped);
     try testing.expectEqual(0, settled.uncertain);
+}
+
+fn putRequestSized(q: *Outbound, io: Io, ticket: Ticket, payload: []const u8) PutUntilError!void {
+    return q.putRequest(io, null, ticket, encoder.pubLen("r", null, payload.len), writePub, .{ "r", payload });
+}
+
+test "a restore or a compaction finds no memory: nothing waiting is lost, and nothing is allocated to compact" {
+    const io = testing.io;
+    var failing: std.testing.FailingAllocator = .init(testing.allocator, .{});
+    var q: Outbound = .initBuffering(failing.allocator(), 1 << 20, 1 << 20);
+    defer q.deinit();
+    try putPub(&q, io, .publish, "p", "1");
+    var ticket: TestTicket = .{};
+    try putRequestSized(&q, io, ticket.of(7), &hundred);
+    try putPub(&q, io, .publish, "p", "2");
+    // From here on every allocation fails.
+    failing.fail_index = failing.alloc_index;
+    // The dead request holds more than the living: the frames are
+    // compacted, with no allocation.
+    q.forgetRequest(io, 7);
+    var frames: [4]Frame = undefined;
+    try testing.expectEqual(2, q.unsent(io, &frames).len);
+    try testing.expectEqual(2 * frameCost("p", "1"), q.counts(io).queued);
+    // A restore with no memory changes nothing; the connection is dropped.
+    try testing.expectError(error.OutOfMemory, q.restore(io, @as([]const u8, "SUB a 1\r\n"), restoreSub, allWaiting, refuseNone, .{}));
+    try testing.expectEqual(2, q.unsent(io, &frames).len);
+    try testing.expectEqual(0, q.dropped_publishes);
+    failing.fail_index = std.math.maxInt(usize);
+    _ = try q.restore(io, @as([]const u8, "SUB a 1\r\n"), restoreSub, allWaiting, refuseNone, .{});
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(testing.allocator);
+    try drainOnce(&q, io, &out);
+    try testing.expectEqualStrings("SUB a 1\r\nPUB p 1\r\n1\r\nPUB p 1\r\n2\r\n", out.items);
+}
+
+test "the publishes a lost connection never began keep their room ahead of those made after the loss" {
+    const io = testing.io;
+    var q: Outbound = .initBuffering(testing.allocator, 1 << 20, 2 * frameCost("p", "1"));
+    defer q.deinit();
+    _ = try q.restore(io, @as([]const u8, ""), restoreSub, allWaiting, refuseNone, .{});
+    try putPub(&q, io, .publish, "p", "1");
+    try putPub(&q, io, .publish, "p", "2");
+    _ = q.halt(io);
+    // Made after the loss: the buffer is the unsent ones'.
+    try testing.expectError(error.BufferFull, putPub(&q, io, .publish, "p", "3"));
+    try testing.expectEqual(0, q.settle(io).dropped);
+    _ = try q.restore(io, @as([]const u8, ""), restoreSub, allWaiting, refuseNone, .{});
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(testing.allocator);
+    try drainOnce(&q, io, &out);
+    try testing.expectEqualStrings("PUB p 1\r\n1\r\nPUB p 1\r\n2\r\n", out.items);
+}
+
+test "a publish waiting for room when the connection is lost finds the buffer taken by those before it" {
+    const io = testing.io;
+    const two = frameCost("first", "0123456789") + frameCost("secnd", "0123456789");
+    var q: Outbound = .initBuffering(testing.allocator, two, two);
+    defer q.deinit();
+    _ = try q.restore(io, @as([]const u8, ""), restoreSub, allWaiting, refuseNone, .{});
+    try putPub(&q, io, .publish, "first", "0123456789");
+    try putPub(&q, io, .publish, "secnd", "0123456789");
+    var putter = try io.concurrent(putLater, .{ &q, io });
+    defer putter.cancel(io) catch {};
+    try awaitRoomWaiter(&q, io);
+    _ = q.halt(io);
+    try testing.expectError(error.BufferFull, putter.await(io));
+    try testing.expectEqual(0, q.settle(io).dropped);
+    _ = try q.restore(io, @as([]const u8, ""), restoreSub, allWaiting, refuseNone, .{});
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(testing.allocator);
+    try drainOnce(&q, io, &out);
+    try testing.expectEqualStrings("PUB first 10\r\n0123456789\r\nPUB secnd 10\r\n0123456789\r\n", out.items);
+}
+
+fn writeHpubTest(w: *Writer, subject: []const u8, payload: []const u8) Writer.Error!void {
+    return encoder.writeHpub(w, subject, null, &.{.{ .name = "X", .value = "1" }}, payload);
+}
+
+/// Notes the requests `restore` refused.
+fn noteRefused(refused: *std.ArrayList(u64), id: u64) void {
+    refused.append(testing.allocator, id) catch {};
+}
+
+fn buildFor(_: *std.ArrayList(u64), gpa: Allocator) Allocator.Error![]u8 {
+    return gpa.alloc(u8, 0);
+}
+
+fn waitingFor(_: *std.ArrayList(u64), _: u64) bool {
+    return true;
+}
+
+test "a restore drops what the new server would refuse: over its max_payload, or headers it has not" {
+    const io = testing.io;
+    var q: Outbound = .initBuffering(testing.allocator, 1 << 20, 1 << 20);
+    defer q.deinit();
+    try putPub(&q, io, .publish, "small", "12345");
+    try putPub(&q, io, .publish, "big", &hundred);
+    const header_block = encoder.headerBlockLen(&.{.{ .name = "X", .value = "1" }});
+    try q.put(io, .publish, encoder.hpubLen("headers", null, header_block, 1), writeHpubTest, .{ "headers", "h" });
+    var ticket: TestTicket = .{};
+    try putRequestSized(&q, io, ticket.of(9), &hundred);
+    var refused: std.ArrayList(u64) = .empty;
+    defer refused.deinit(testing.allocator);
+    const dropped = try q.restore(io, &refused, buildFor, waitingFor, noteRefused, .{ .max_payload = 50, .headers = false });
+    try testing.expectEqual(2, dropped);
+    try testing.expectEqual(2, q.dropped_publishes);
+    try testing.expectEqualSlices(u64, &.{9}, refused.items);
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(testing.allocator);
+    try drainOnce(&q, io, &out);
+    try testing.expectEqualStrings("PUB small 5\r\n12345\r\n", out.items);
+}
+
+fn requestWaitsBut(gone: []const u8, id: u64) bool {
+    return std.mem.findScalar(u8, gone, @intCast(id)) == null;
+}
+
+test "while reconnecting, request frames whose request no longer waits give their room back when asked" {
+    const io = testing.io;
+    var q: Outbound = .initBuffering(testing.allocator, 1 << 20, frameCost("r", &hundred) + frameCost("p", "1"));
+    defer q.deinit();
+    var ticket: TestTicket = .{};
+    try putRequestSized(&q, io, ticket.of(4), &hundred);
+    try putPub(&q, io, .publish, "p", "1");
+    try testing.expectError(error.BufferFull, putPub(&q, io, .publish, "p", "2"));
+    // Request 4 still waits: nothing to give back.
+    try testing.expect(!q.pruneRequests(io, @as([]const u8, &.{}), requestWaitsBut));
+    try testing.expect(q.pruneRequests(io, @as([]const u8, &.{4}), requestWaitsBut));
+    try putPub(&q, io, .publish, "p", "2");
 }

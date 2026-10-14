@@ -187,11 +187,15 @@ fn reconnect(client: *Client, pacing: *Pacing, lame_duck: bool) ?Opened {
 /// connection is dropped, when there is no memory for that or the client
 /// closed.
 fn restored(client: *Client, opened: Opened) bool {
-    client.outbound.restore(client.io, client, restoreFrames, requestWaits) catch |err| {
+    // What waited for this connection is checked against this server.
+    const server: Outbound.ServerLimits = .{ .max_payload = maxPayload(opened.greeting.max_payload), .headers = opened.greeting.headers };
+    const dropped = client.outbound.restore(client.io, client, restoreFrames, requestWaits, requestRefused, server) catch |err| {
         if (err == error.OutOfMemory) log.warn("no memory to subscribe again on {f}: connection dropped", .{opened.server});
         Opened.release(client.io, opened);
         return false;
     };
+    if (dropped > 0) log.debug("{d} publishes waiting for {f} are more than it takes", .{ dropped, opened.server });
+    noteDropped(client, .{ .dropped = dropped });
     return true;
 }
 
@@ -209,8 +213,14 @@ fn restoreFrames(client: *Client, gpa: Allocator) Allocator.Error![]u8 {
 
 /// A request whose frame waited for this connection is still waiting for
 /// its reply; it runs under the outbound queue's mutex.
-fn requestWaits(client: *Client, id: u64) bool {
+pub fn requestWaits(client: *Client, id: u64) bool {
     return client.inbox.awaitsReply(client.io, id);
+}
+
+/// The new server would refuse the frame of request `id`: the request
+/// fails with Disconnected. It runs under the outbound queue's mutex.
+fn requestRefused(client: *Client, id: u64) void {
+    client.inbox.refuse(client.io, id);
 }
 
 fn randomNumber(io: Io) u64 {

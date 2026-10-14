@@ -2310,6 +2310,109 @@ test "a client closed while its first connection fails to start ends what was ma
     try testing.expectEqual(1, client.stats().dropped_messages);
 }
 
+/// Says nothing until released; then a handshake whose INFO takes at most
+/// 100 bytes, and notes every line, skipping payloads, answering PINGs.
+fn sessionSmallPayloadWhenReleased(peer: *FakeServer.Peer, record: *Record) anyerror!void {
+    try record.release.wait(peer.io);
+    try handshake(peer, "INFO {\"server_id\":\"S\",\"proto\":1,\"headers\":true,\"max_payload\":100} \r\n");
+    while (try peer.nextLine()) |line| {
+        try record.note(peer.io, line);
+        if (std.mem.eql(u8, line, "PING")) {
+            try peer.send(golden.pong);
+        } else if (std.mem.startsWith(u8, line, "PUB ") or std.mem.startsWith(u8, line, "HPUB ")) {
+            const size = try std.fmt.parseInt(usize, line[std.mem.findScalarLast(u8, line, ' ').? + 1 ..], 10);
+            try peer.reader.interface.discardAll(size + 2);
+        }
+    }
+}
+
+const two_hundred: [200]u8 = @splat('b');
+
+fn requestBig(client: *Client) Client.RequestError!nats.Message {
+    return client.request("service.big", &two_hundred, .{ .timeout = .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } } });
+}
+
+test "what waits for the first connection and is more than its server takes is dropped and counted, never sent" {
+    const io = testing.io;
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var record: Record = .{};
+    defer record.deinit();
+    const sessions = [_]Session{sessionSmallPayloadWhenReleased};
+    var server = try io.concurrent(serveSessions, .{ io, &listener, &sessions, &record });
+    defer {
+        record.release.set(io);
+        server.cancel(io) catch {};
+    }
+    var url: [64]u8 = undefined;
+    var client: Client = try .init(testing.allocator, io, .{ .servers = &.{try FakeServer.url(&listener, &url)}, .retry_initial_connect = true });
+    defer client.deinit();
+    try client.connect();
+    // No server yet: no max_payload to check against.
+    try client.publish("big", &two_hundred);
+    try client.publish("small", "x");
+    var request = try io.concurrent(requestBig, .{&client});
+    var awaited = false;
+    defer if (!awaited) releaseReply(request.cancel(io));
+    try awaitAwaiting(&client, 1);
+    record.release.set(io);
+    try awaitState(&client, .connected);
+    awaited = true;
+    // The new server would refuse its frame: the request fails at once.
+    if (request.await(io)) |reply| {
+        releaseReply(reply);
+        return error.TestUnexpectedReply;
+    } else |err| try testing.expectEqual(error.Disconnected, err);
+    try client.flush(quick);
+    try testing.expectEqual(1, client.stats().dropped_messages);
+    const dropped = try awaitEventOf(&client, .message_dropped);
+    try testing.expectEqual(1, dropped.message_dropped.count);
+    // Now the limit is known, and checked at once.
+    try testing.expectError(error.PayloadTooLarge, client.publish("big", &two_hundred));
+    client.close();
+    try server.await(io);
+    const seen = try record.seen(io);
+    defer testing.allocator.free(seen);
+    try testing.expect(std.mem.find(u8, seen, "PUB big") == null);
+    try testing.expect(std.mem.find(u8, seen, "PUB service.big") == null);
+    try testing.expect(std.mem.find(u8, seen, "PUB small 1") != null);
+}
+
+test "an unread requestMany past its deadline gives its room in the reconnect buffer to a publish" {
+    const io = testing.io;
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var record: Record = .{};
+    defer record.deinit();
+    const sessions = [_]Session{sessionRecordWhenReleased};
+    var server = try io.concurrent(serveSessions, .{ io, &listener, &sessions, &record });
+    defer {
+        record.release.set(io);
+        server.cancel(io) catch {};
+    }
+    var url: [64]u8 = undefined;
+    var client: Client = try .init(testing.allocator, io, .{
+        .servers = &.{try FakeServer.url(&listener, &url)},
+        .retry_initial_connect = true,
+        .reconnect = .{ .buffer_bytes = 400 },
+    });
+    defer client.deinit();
+    try client.connect();
+    const responses = try client.requestMany("many.x", &two_hundred, .{ .timeout = .{ .duration = .{ .raw = .fromMilliseconds(50), .clock = .awake } } });
+    defer responses.deinit();
+    const deadline = responses.deadline;
+    while (!time.expired(io, deadline)) try io.sleep(.fromMilliseconds(5), .awake);
+    // Nobody read the stream; its frame will never be sent.
+    try client.publish("after", &two_hundred);
+    record.release.set(io);
+    try awaitState(&client, .connected);
+    try client.flush(quick);
+    const seen = try record.seen(io);
+    defer testing.allocator.free(seen);
+    try testing.expect(std.mem.find(u8, seen, "PUB after 200") != null);
+    try testing.expect(std.mem.find(u8, seen, "PUB many.x") == null);
+}
+
 test "a requestMany past its deadline that nobody reads does not hold up a drain, nor count as pending" {
     const io = testing.io;
     var listener = try FakeServer.listen(io);

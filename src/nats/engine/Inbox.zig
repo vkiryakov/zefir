@@ -503,6 +503,27 @@ pub fn disconnect(inbox: *Inbox, io: Io, next: u64) void {
     }
 }
 
+/// The frame of request `id`, which waited for a new connection, is more
+/// than the new server takes: the request fails with Disconnected at once,
+/// a stream after what came, and replies that still come are late.
+pub fn refuse(inbox: *Inbox, io: Io, id: u64) void {
+    inbox.mutex.lockUncancelable(io);
+    defer inbox.mutex.unlock(io);
+    const entry = inbox.pending.get(id) orelse return;
+    switch (entry) {
+        .single => |waiter| {
+            waiter.listed = false;
+            waiter.failure = .disconnected;
+            waiter.done.set(io);
+        },
+        .many => |responses| {
+            responses.listed = false;
+            _ = responses.messages.end(io, .disconnected, false);
+        },
+    }
+    _ = inbox.pending.swapRemove(id);
+}
+
 /// The ticket of request `id`'s frame: the frame goes in only while the
 /// request waits, and the request learns which connection it went to.
 pub fn ticket(inbox: *Inbox, id: u64) Outbound.Ticket {
