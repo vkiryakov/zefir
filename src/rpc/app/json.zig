@@ -16,6 +16,7 @@
 
 const std = @import("std");
 const dto = @import("dto.zig");
+const rules = @import("../rules.zig");
 
 const Writer = std.Io.Writer;
 
@@ -95,8 +96,9 @@ pub const Limits = struct {
 
 /// What is wrong with a body that `decode` refused.
 pub const Problem = struct {
-    /// Where: "items[2].name", in the arena of the decode; null for the
-    /// body as a whole.
+    /// Where: "items[2].name", in the arena of the decode. Null for the
+    /// body as a whole, and for a path longer than 256 bytes or with a
+    /// control character, which a client's keys may bring.
     field: ?[]const u8 = null,
     /// What, one of a few static texts such as "missing required field".
     message: []const u8 = "",
@@ -483,19 +485,26 @@ const Decoder = struct {
         return error.Invalid;
     }
 
-    /// The path in the arena, such as "items[2].name"; null at the top, or
-    /// when the arena has no room for it.
+    /// The path in the arena, such as "items[2].name". Null at the top,
+    /// for a path longer than `rules.max_field_bytes` or with a control
+    /// character (both only from a client's keys, and a failure carries the
+    /// path to the client, in headers too), and when the arena has no room.
     fn renderPath(d: *Decoder) ?[]const u8 {
         if (d.path.items.len == 0) return null;
-        var out: Writer.Allocating = .init(d.arena);
+        var buffer: [rules.max_field_bytes]u8 = undefined;
+        var out: Writer = .fixed(&buffer);
         for (d.path.items, 0..) |step, i| switch (step) {
             .key => |key| {
-                if (i > 0) out.writer.writeByte('.') catch return null;
-                out.writer.writeAll(key) catch return null;
+                if (i > 0) out.writeByte('.') catch return null;
+                out.writeAll(key) catch return null;
             },
-            .index => |index| out.writer.print("[{d}]", .{index}) catch return null,
+            .index => |index| out.print("[{d}]", .{index}) catch return null,
         };
-        return out.written();
+        const path = out.buffered();
+        for (path) |c| {
+            if (c < 0x20 or c == 0x7f) return null;
+        }
+        return d.arena.dupe(u8, path) catch null;
     }
 };
 
@@ -844,6 +853,33 @@ test "the problem names the path of the value" {
     try expectRefused(Order, "{\"items\":[{\"name\":\"a\",\"count\":1},{\"count\":2}]}", "items[1].name", "missing required field");
     try expectRefused([]const Point, "[{\"x\":1,\"y\":2},{\"x\":true,\"y\":2}]", "[1].x", "wrong type");
     try expectRefused(Point, "{\"x\":1,\"y\":2,\"z\":[1,{\"a\":01}]}", "z[1].a", "invalid JSON");
+}
+
+test "a path longer than 256 bytes or with a control character is left out" {
+    // A path of exactly 256 bytes is kept, one of 257 is not.
+    const fits: [256]u8 = @splat('k');
+    const body_fits = "{\"x\":1,\"y\":2,\"" ++ fits ++ "\":1,\"" ++ fits ++ "\":2}";
+    try expectRefused(Point, body_fits, &fits, "duplicate key");
+    const over: [257]u8 = @splat('k');
+    const body_over = "{\"x\":1,\"y\":2,\"" ++ over ++ "\":1,\"" ++ over ++ "\":2}";
+    try expectRefused(Point, body_over, null, "duplicate key");
+
+    // A key of 200 000 bytes, repeated or above a subtree that is too deep.
+    const key = try testing.allocator.alloc(u8, 200_000);
+    defer testing.allocator.free(key);
+    @memset(key, 'k');
+    const repeated = try std.mem.concat(testing.allocator, u8, &.{ "{\"x\":1,\"y\":2,\"", key, "\":1,\"", key, "\":2}" });
+    defer testing.allocator.free(repeated);
+    try expectRefused(Point, repeated, null, "duplicate key");
+    const deep = try std.mem.concat(testing.allocator, u8, &.{ "{\"x\":1,\"y\":2,\"", key, "\":" ++ @as([40]u8, @splat('[')) ++ "}" });
+    defer testing.allocator.free(deep);
+    try expectRefused(Point, deep, null, "too deep");
+
+    // Control characters of a key, written as escapes.
+    try expectRefused(Point, "{\"x\":1,\"y\":2,\"a\\nb\":1,\"a\\nb\":2}", null, "duplicate key");
+    try expectRefused(Point, "{\"x\":1,\"y\":2,\"a\\u007fb\":1,\"a\\u007fb\":2}", null, "duplicate key");
+    // Other UTF-8 stays.
+    try expectRefused(Point, "{\"x\":1,\"y\":2,\"имя\":1,\"имя\":2}", "имя", "duplicate key");
 }
 
 test "broken JSON and bytes that are not UTF-8 are refused" {

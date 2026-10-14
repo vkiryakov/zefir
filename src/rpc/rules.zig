@@ -14,6 +14,11 @@ pub const max_correlation_id_bytes = 128;
 /// The longest app code, in bytes of UTF-8.
 pub const max_app_code_bytes = 128;
 
+/// The longest path of a field in a failure ("items[2].name"), in bytes,
+/// as in rpc 1.6: a longer path is left out, and so is one with a control
+/// character, which only a client's key can bring.
+pub const max_field_bytes = 256;
+
 /// The keys only the engine writes. Each may appear once in a request and
 /// never in a response.
 pub const reserved_keys = [_][]const u8{ "authorization", "traceparent", "tracestate", "zefir-correlation-id" };
