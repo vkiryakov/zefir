@@ -224,13 +224,13 @@ A Debug build also shows the client's own `debug(nats)` records: connecting, con
 
 ## Installation
 
-Requires **Zig 0.17.0**. Add the dependency to your `build.zig.zon`; the latest release is **v0.5.0**:
+Requires **Zig 0.17.0**. Add the dependency to your `build.zig.zon`. This is the `dev` branch, the next version in progress, so the command fetches its latest commit:
 
 ```sh
-zig fetch --save git+https://github.com/vkiryakov/zefir#v0.5.0
+zig fetch --save git+https://github.com/vkiryakov/zefir#dev
 ```
 
-Other versions are on the [releases page](https://github.com/vkiryakov/zefir/releases); a commit hash works too.
+`--save` pins the commit it fetched, so your build doesn't change when `dev` moves on. For the latest release, **v0.5.0**, fetch `#v0.5.0` instead; other versions are on the [releases page](https://github.com/vkiryakov/zefir/releases), and a commit hash works too.
 
 Then import the modules you need in your `build.zig`:
 
