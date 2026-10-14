@@ -7,6 +7,7 @@ const core = @import("core");
 const v = @import("validator");
 const model = @import("../model.zig");
 const failures = @import("../failures.zig");
+const auth = @import("../auth.zig");
 const contract = @import("contract.zig");
 const method = @import("method.zig");
 const Server = @import("Server.zig");
@@ -788,6 +789,259 @@ test "one server serves two versions of a contract, each on its own routes" {
     try expectBody(&new, "{\"id\":\"1\",\"display_name\":\"Ann\"}");
     var unknown = try f.call(io, .{ .service = "users", .version = 2, .method = "deleteUser" }, "{\"id\":\"1\"}");
     try expectFailure(&unknown, failures.unknown_method, "");
+}
+
+const Ticket = struct { id: u32 };
+
+const TicketApi = contract.Contract(.{
+    .name = "tickets",
+    .version = 1,
+    .methods = .{
+        .get = contract.method(Ticket, Ticket),
+        .reserved = contract.method(Ticket, Ticket),
+        .open = contract.method(CreateAccountRequest, Ticket),
+    },
+    .errors = .{
+        .TicketClosed = .{ .code = .failed_precondition, .app_code = "tickets.closed", .message = "Ticket is closed" },
+    },
+});
+
+/// The framework's names that `reserved` returns, by the ticket's id.
+const reserved_names = [_]struct { anyerror, model.Failure }{
+    .{ error.InvalidArgument, failures.invalid_argument },
+    .{ error.Unauthenticated, failures.unauthenticated },
+    .{ error.PermissionDenied, failures.permission_denied },
+    .{ error.ResourceExhausted, failures.resource_exhausted },
+    .{ error.OutOfMemory, failures.resource_exhausted },
+    .{ error.Unavailable, failures.unavailable },
+    .{ error.DeadlineExceeded, failures.deadline_exceeded },
+    .{ error.Cancelled, failures.cancelled },
+    .{ error.Internal, failures.internal },
+};
+
+const Tickets = struct {
+    pub const rpc_handler = contract.implement(TicketApi, .{});
+
+    pub fn get(self: *Tickets, ctx: *Context, req: Ticket) !Ticket {
+        _ = self;
+        return switch (req.id) {
+            1 => error.TicketClosed,
+            // An exact failure, field included.
+            2 => ctx.fail(.{ .code = .out_of_range, .app_code = "tickets.too_old", .message = "Ticket is too old", .field = "id" }),
+            // RpcFailure without ctx.fail is the handler's bug.
+            3 => error.RpcFailure,
+            else => req,
+        };
+    }
+
+    pub fn reserved(self: *Tickets, ctx: *Context, req: Ticket) !Ticket {
+        _ = self;
+        _ = ctx;
+        if (req.id >= reserved_names.len) return req;
+        return reserved_names[req.id][0];
+    }
+
+    pub fn open(self: *Tickets, ctx: *Context, req: CreateAccountRequest) !Ticket {
+        _ = self;
+        _ = ctx;
+        _ = req;
+        return .{ .id = 1 };
+    }
+};
+
+fn ticketsRoute(name: []const u8) model.Route {
+    return .{ .service = "tickets", .version = 1, .method = name };
+}
+
+test "a handler's errors: ctx.fail exactly, the contract's table, the framework's names, else internal" {
+    const io = testing.io;
+    var f: Fixture = undefined;
+    try f.open();
+    defer f.close(io);
+    var tickets: Tickets = .{};
+    var server: Server = try .init(testing.allocator, .{ .transport = f.memory.serverTransport(), .handlers = .{&tickets} });
+    defer server.deinit(io);
+    try server.start(io);
+
+    var closed = try f.call(io, ticketsRoute("get"), "{\"id\":1}");
+    try expectFailure(&closed, .{ .code = .failed_precondition, .app_code = "tickets.closed", .message = "Ticket is closed" }, "");
+    var old = try f.call(io, ticketsRoute("get"), "{\"id\":2}");
+    try expectFailure(&old, .{ .code = .out_of_range, .app_code = "tickets.too_old", .message = "Ticket is too old", .field = "id" }, "");
+    var bare = try f.call(io, ticketsRoute("get"), "{\"id\":3}");
+    try expectFailure(&bare, failures.internal, "");
+    for (reserved_names, 0..) |case, i| {
+        errdefer std.debug.print("error.{t}\n", .{case[0]});
+        var body: [16]u8 = undefined;
+        var result = try f.call(io, ticketsRoute("reserved"), try std.fmt.bufPrint(&body, "{{\"id\":{d}}}", .{i}));
+        try expectFailure(&result, case[1], "");
+    }
+}
+
+/// Fails every call before the rest of the chain, exactly.
+fn closedForMaintenance(ctx: *Context, next: *Next) anyerror!void {
+    _ = next;
+    return ctx.fail(.{ .code = .unavailable, .app_code = "tickets.maintenance", .message = "Down for maintenance" });
+}
+
+/// Turns any failure of the rest of the chain into success: the failure
+/// stays the outcome.
+fn swallowAll(ctx: *Context, next: *Next) anyerror!void {
+    _ = ctx;
+    next.run() catch {};
+}
+
+/// Replaces any failure of the rest of the chain with an error of its
+/// own: the outcome is that error, and a body of the failure is dropped.
+fn replaceWithDenied(ctx: *Context, next: *Next) anyerror!void {
+    _ = ctx;
+    next.run() catch return error.PermissionDenied;
+}
+
+/// Replaces any failure with an exact failure of its own.
+fn replaceWithExact(ctx: *Context, next: *Next) anyerror!void {
+    next.run() catch return ctx.fail(.{ .code = .aborted, .app_code = "tickets.retry", .message = "Try again" });
+}
+
+const all_violations = "{\"violations\":[{\"field\":\"name\",\"code\":\"validation.not_empty\",\"message\":\"must not be empty\"}]}";
+const bad_account = "{\"name\":\"\",\"email\":\"ann@example.com\"}";
+
+test "middleware fails a call exactly with ctx.fail" {
+    const io = testing.io;
+    var f: Fixture = undefined;
+    try f.open();
+    defer f.close(io);
+    var tickets: Tickets = .{};
+    var server: Server = try .init(testing.allocator, .{
+        .transport = f.memory.serverTransport(),
+        .handlers = .{&tickets},
+        .middleware = .{closedForMaintenance},
+    });
+    defer server.deinit(io);
+    try server.start(io);
+    var result = try f.call(io, ticketsRoute("get"), "{\"id\":7}");
+    try expectFailure(&result, .{ .code = .unavailable, .app_code = "tickets.maintenance", .message = "Down for maintenance" }, "");
+}
+
+test "a failure of a stage that middleware swallows stays the outcome, with its body" {
+    const io = testing.io;
+    var f: Fixture = undefined;
+    try f.open();
+    defer f.close(io);
+    var tickets: Tickets = .{};
+    var server: Server = try .init(testing.allocator, .{
+        .transport = f.memory.serverTransport(),
+        .handlers = .{&tickets},
+        .middleware = .{swallowAll},
+    });
+    defer server.deinit(io);
+    try server.start(io);
+    var refused = try f.call(io, ticketsRoute("open"), bad_account);
+    var expected = invalid_request;
+    expected.field = "name";
+    try expectFailure(&refused, expected, all_violations);
+    var undecoded = try f.call(io, ticketsRoute("get"), "{}");
+    try expectFailure(&undecoded, .{ .code = .invalid_argument, .app_code = "rpc.invalid_request", .message = "missing required field", .field = "id" }, "");
+}
+
+test "a failure of a stage that middleware replaces: the outcome is its error, and the body is dropped" {
+    const io = testing.io;
+    var f: Fixture = undefined;
+    try f.open();
+    defer f.close(io);
+    var tickets: Tickets = .{};
+    var denied_server: Server = try .init(testing.allocator, .{
+        .transport = f.memory.serverTransport(),
+        .handlers = .{&tickets},
+        .middleware = .{replaceWithDenied},
+    });
+    defer denied_server.deinit(io);
+    try denied_server.start(io);
+    var denied = try f.call(io, ticketsRoute("open"), bad_account);
+    try expectFailure(&denied, failures.permission_denied, "");
+    // The contract's errors are replaced the same way.
+    var closed = try f.call(io, ticketsRoute("get"), "{\"id\":1}");
+    try expectFailure(&closed, failures.permission_denied, "");
+    denied_server.requestStop(io);
+    try denied_server.wait(io);
+
+    var exact_memory: MemoryTransport = try .init(testing.allocator, .{});
+    defer exact_memory.deinit(io);
+    var exact_server: Server = try .init(testing.allocator, .{
+        .transport = exact_memory.serverTransport(),
+        .handlers = .{&tickets},
+        .middleware = .{replaceWithExact},
+    });
+    defer exact_server.deinit(io);
+    try exact_server.start(io);
+    var client: RawClient = try .init(testing.allocator, .{ .transport = exact_memory.clientTransport() });
+    defer client.deinit();
+    var retried = try client.call(io, .root, ticketsRoute("open"), bad_account, .{ .timeout = .fromSeconds(10) });
+    try expectFailure(&retried, .{ .code = .aborted, .app_code = "tickets.retry", .message = "Try again" }, "");
+}
+
+const Who = struct {
+    pub const rpc_handler = contract.implement(TicketApi, .{
+        .defaults = .{ .auth = .required },
+        .methods = .{ .get = .{ .auth = .optional } },
+    });
+
+    /// Answers with the id of the ticket, or 0 for an anonymous caller.
+    pub fn get(self: *Who, ctx: *Context, req: Ticket) !Ticket {
+        _ = self;
+        return .{ .id = if (ctx.identity() == null) 0 else req.id };
+    }
+
+    pub fn reserved(self: *Who, ctx: *Context, req: Ticket) !Ticket {
+        _ = self;
+        const identity = ctx.identity() orelse return error.Internal;
+        return .{ .id = if (std.mem.eql(u8, identity.subject, "alice")) req.id else 0 };
+    }
+
+    pub fn open(self: *Who, ctx: *Context, req: CreateAccountRequest) !Ticket {
+        _ = self;
+        _ = ctx;
+        _ = req;
+        return .{ .id = 1 };
+    }
+};
+
+/// Knows the bearer token "alice".
+const Alice = struct {
+    pub fn authenticate(self: *Alice, ctx: *const auth.AuthContext) auth.AuthError!?auth.IdentityView {
+        _ = self;
+        return switch (ctx.credentials) {
+            .none => null,
+            .bearer => |token| if (std.mem.eql(u8, token, "alice")) .{ .subject = "alice" } else error.InvalidCredentials,
+            else => error.InvalidCredentials,
+        };
+    }
+};
+
+test "the authenticator of rpc.Server and the auth of each method" {
+    const io = testing.io;
+    var f: Fixture = undefined;
+    try f.open();
+    defer f.close(io);
+    var who: Who = .{};
+    var alice: Alice = .{};
+    var server: Server = try .init(testing.allocator, .{
+        .transport = f.memory.serverTransport(),
+        .handlers = .{&who},
+        .authenticator = &alice,
+    });
+    defer server.deinit(io);
+    try server.start(io);
+    try testing.expectEqual(RawServer.Method.Auth.optional, server.engine.methods[0].auth);
+    try testing.expectEqual(RawServer.Method.Auth.required, server.engine.methods[1].auth);
+
+    var anonymous = try f.call(io, ticketsRoute("get"), "{\"id\":5}");
+    try expectBody(&anonymous, "{\"id\":0}");
+    var required = try f.call(io, ticketsRoute("reserved"), "{\"id\":5}");
+    try expectFailure(&required, failures.authentication_required, "");
+    var known = try f.client.call(io, .root, ticketsRoute("reserved"), "{\"id\":5}", .{ .credentials = .{ .bearer = "alice" } });
+    try expectBody(&known, "{\"id\":5}");
+    var wrong = try f.client.call(io, .root, ticketsRoute("get"), "{\"id\":5}", .{ .credentials = .{ .bearer = "mallory" } });
+    try expectFailure(&wrong, failures.invalid_credentials, "");
 }
 
 fn runServer(server: *Server, io: std.Io) (Server.StartError || Server.WaitError)!void {

@@ -368,6 +368,7 @@ pub fn build(b: *std.Build) void {
     // call. A type declared in a file is named after the file.
     const contract_notes: []const []const u8 = &.{ "note: called at comptime here", "note: generic function instantiated here" };
     const implement_notes: []const []const u8 = &.{"note: called at comptime here"};
+    const server_notes: []const []const u8 = &.{"note: called at comptime here"};
     for ([_]struct { []const u8, []const u8, []const []const u8 }{
         .{ "contract_name", "rpc: contract \"user service\": the name must be 1 to 64 characters from [A-Za-z0-9_-]", contract_notes },
         .{ "contract_version", "rpc: contract \"users\": .version must be 1 to 65535, got 0", contract_notes },
@@ -386,6 +387,18 @@ pub fn build(b: *std.Build) void {
         .{ "implement_timeout", "rpc.implement(users.v1): .defaults.timeout_ms must be 1 to 300000 ms, got 0", implement_notes },
         .{ "implement_auth", "rpc.implement(users.v1): .methods.getUser.auth must be .required or .optional, got .maybe", implement_notes },
         .{ "implement_unknown_setting", "rpc.implement(users.v1): unknown setting .default; the settings are .defaults, .middleware and .methods", implement_notes },
+        .{ "server_no_rpc_handler", "rpc.Server.init: server_no_rpc_handler.UserHandler has no `pub const rpc_handler = rpc.implement(Api, ...)`; every handler must declare it (and it must be pub)", server_notes },
+        .{ "server_rpc_handler_not_pub", "rpc.Server.init: server_rpc_handler_not_pub.UserHandler has no `pub const rpc_handler = rpc.implement(Api, ...)`; every handler must declare it (and it must be pub)", server_notes },
+        .{ "server_rpc_handler_not_implement", "rpc.Server.init: server_rpc_handler_not_implement.UserHandler.rpc_handler must be built with rpc.implement(Api, ...)", server_notes },
+        .{ "server_handler_by_value", "rpc.Server.init: .handlers[0] is server_handler_by_value.UserHandler; pass a pointer to a handler, e.g. &users", server_notes },
+        .{ "server_method_missing", "rpc: server_method_missing.UserHandler implements users.v1 but has no pub fn deleteUser(self: *server_method_missing.UserHandler, ctx: *rpc.Context, req: server_method_missing.DeleteUserRequest) !void", server_notes },
+        .{ "server_method_not_pub", "rpc: server_method_not_pub.UserHandler implements users.v1 but has no pub fn getUser(self: *server_method_not_pub.UserHandler, ctx: *rpc.Context, req: server_method_not_pub.GetUserRequest) !server_method_not_pub.User", server_notes },
+        .{ "server_method_signature", "rpc: server_method_signature.UserHandler.getUser: expected fn (*server_method_signature.UserHandler, *rpc.Context, server_method_signature.GetUserRequest) !server_method_signature.User, found fn (*server_method_signature.UserHandler, server_method_signature.GetUserRequest) error{UserNotFound}!server_method_signature.User", server_notes },
+        .{ "server_unknown_method", "rpc: server_unknown_method.UserHandler.rpc_handler: getUsers is not a method of users.v1", server_notes },
+        .{ "server_middleware_item", "rpc: server_middleware_item.UserHandler.getUser: middleware[1] must be fn (*rpc.Context, *rpc.Next) anyerror!void, or a field of server_middleware_item.UserHandler whose type has pub fn run(self, *rpc.Context, *rpc.Next) anyerror!void", server_notes },
+        .{ "server_same_route", "rpc.Server.init: server_same_route.UserHandler and server_same_route.OtherUserHandler both serve users.v1", server_notes },
+        .{ "server_auth_without_authenticator", "rpc.Server.init: server_auth_without_authenticator.UserHandler.getUser requires auth, but .authenticator is not set", server_notes },
+        .{ "server_middleware", "rpc.Server.init: .middleware[1] must be fn (*rpc.Context, *rpc.Next) anyerror!void or a pointer to a type with pub fn run(self, *rpc.Context, *rpc.Next) anyerror!void", server_notes },
     }) |case| {
         const compile = b.addTest(.{
             .name = b.fmt("rpc-compile-error-{s}", .{case[0]}),
