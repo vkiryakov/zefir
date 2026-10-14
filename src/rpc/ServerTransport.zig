@@ -94,7 +94,8 @@ pub fn drain(t: ServerTransport, io: std.Io) void {
 /// call is safe. It includes `drain`; abandons every accepted call that
 /// did not start; closes connections and subscriptions, so a late
 /// `reply.send` gets `Closed`; cancels and joins its tasks; and returns
-/// within a limit the transport documents (NATS: the `flush` timeout). The
+/// within a limit the transport documents (NATS: its publish and flush
+/// timeouts). The
 /// `Reply` of each call not yet released lives until its `release`: the
 /// transport frees it only then, and its own `deinit` comes after the
 /// server's. It cannot be canceled.
