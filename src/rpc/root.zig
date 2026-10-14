@@ -44,6 +44,8 @@ pub const ClientTransport = @import("ClientTransport.zig");
 pub const ServerTransport = @import("ServerTransport.zig");
 /// The types and helpers a transport works with.
 pub const transport = @import("transport.zig");
+/// Helpers for tests of transports and services.
+pub const testing = @import("testing.zig");
 
 test {
     std.testing.refAllDecls(@This());
@@ -58,4 +60,5 @@ test {
     _ = @import("Incoming.zig");
     _ = @import("Reply.zig");
     _ = @import("Pending.zig");
+    _ = @import("testing.zig");
 }
