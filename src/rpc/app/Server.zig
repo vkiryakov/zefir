@@ -35,9 +35,11 @@
 //! on as they are: the contract's `.errors`, then the framework's names
 //! (`error.Unavailable` → `unavailable`, ...), else `internal`.
 //!
-//! The handlers and the authenticator are borrowed: their owner keeps them
-//! alive until `deinit`. Under `rpc.Server` works the engine,
-//! `rpc.RawServer`, with the same lifecycle and the same guarantees.
+//! The handlers, the authenticator and the objects of middleware are
+//! borrowed: their owner keeps them alive until `deinit`. Each serves all
+//! calls at once, so its state is guarded with `std.Io` primitives. Under
+//! `rpc.Server` works the engine, `rpc.RawServer`, with the same lifecycle
+//! and the same guarantees.
 
 const std = @import("std");
 const RawServer = @import("../engine/RawServer.zig");
