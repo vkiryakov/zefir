@@ -45,6 +45,8 @@ test {
     _ = @import("wire.zig");
     _ = @import("Transport.zig");
     _ = @import("ZefirNats.zig");
+    _ = @import("micro.zig");
+    _ = @import("micro_tests.zig");
     _ = @import("testing.zig");
     _ = @import("server_tests.zig");
     _ = @import("client_tests.zig");

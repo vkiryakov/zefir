@@ -1,7 +1,9 @@
 //! The server side of the NATS transport: a subscription per route in the
 //! queue group, a task per subscription that hands its requests to the
 //! engine, and the `Reply` of every call, which publishes the response to
-//! the reply subject of the request.
+//! the reply subject of the request. With discovery on, the subscriptions
+//! of NATS micro (`micro.zig`) start, drain and close with those of the
+//! routes.
 //!
 //! A receiving task waits only in `Conn.next`, and before its first one
 //! until `start` has started every task: everything it does with a
@@ -17,6 +19,7 @@ const Transport = @import("Transport.zig");
 const shared = @import("shared.zig");
 const subject = @import("subject.zig");
 const wire = @import("wire.zig");
+const micro = @import("micro.zig");
 
 const log = std.log.scoped(.rpc_nats);
 
@@ -33,6 +36,9 @@ pub const State = struct {
     /// Set by `start`, before the receiving tasks.
     dispatcher: rpc.transport.Dispatcher = undefined,
     routes: []Route = &.{},
+    /// The NATS micro services while the server side runs; empty with
+    /// discovery off.
+    services: micro.Services = .empty,
     /// The receiving tasks; `close` alone awaits and cancels them.
     group: std.Io.Group = .init,
     /// Set once `start` has started every receiving task; they take no
@@ -62,7 +68,7 @@ const Route = struct {
     sub: Conn.Sub,
     scratch: wire.Scratch,
 
-    fn subjectOf(r: *const Route) []const u8 {
+    pub fn subjectOf(r: *const Route) []const u8 {
         return r.subject_buffer[0..r.subject_len];
     }
 };
@@ -88,42 +94,62 @@ pub fn start(t: *Transport, io: std.Io, dispatcher: rpc.transport.Dispatcher) rp
     shared.checkIo(t, io);
     const routes = try makeRoutes(t, io, dispatcher.service());
     errdefer freeRoutes(t, io, routes);
+    const services: micro.Services = if (t.options.discovery.enabled) try micro.make(t, io, dispatcher.service().routes) else .empty;
+    errdefer micro.free(t, io, services);
     var subscribed: usize = 0;
+    var listening: usize = 0;
     errdefer {
         const protection = io.swapCancelProtection(.blocked);
         defer _ = io.swapCancelProtection(protection);
         for (routes[0..subscribed]) |*r| t.conn.unsubscribe(io, r.sub);
+        for (services.listeners[0..listening]) |*l| t.conn.unsubscribe(io, l.sub);
     }
     const timeout = shared.timeoutAfter(io, t.options.flush_timeout);
     for (routes) |*r| {
-        r.sub = t.conn.subscribe(io, r.subjectOf(), t.options.queue_group, timeout) catch |err| return startError(r, err);
+        r.sub = t.conn.subscribe(io, r.subjectOf(), t.options.queue_group, timeout) catch |err| return startError(r.subjectOf(), err);
         subscribed += 1;
+    }
+    // Every replica answers discovery: no queue group.
+    for (services.listeners) |*l| {
+        l.sub = t.conn.subscribe(io, l.subjectOf(), null, timeout) catch |err| return startError(l.subjectOf(), err);
+        listening += 1;
     }
     // The broker confirms the subscriptions and their permissions here;
     // without it, a denied subject would show only as no responders.
     t.conn.flush(io, timeout) catch |err| return startError(null, err);
     s.dispatcher = dispatcher;
     s.routes = routes;
+    s.services = services;
     // No task waits on it: the group is empty.
     s.started.reset();
     s.phase.store(.running, .release);
     for (routes) |*r| {
-        s.group.concurrent(io, receive, .{ r, io }) catch |err| {
-            s.phase.store(.closing, .release);
-            s.group.cancel(io);
-            s.phase.store(before, .release);
-            s.routes = &.{};
-            return err;
-        };
+        s.group.concurrent(io, receive, .{ r, io }) catch |err| return abortStart(t, io, before, err);
+    }
+    for (services.listeners) |*l| {
+        s.group.concurrent(io, listen, .{ l, io }) catch |err| return abortStart(t, io, before, err);
     }
     s.started.set(io);
 }
 
-fn startError(route: ?*const Route, err: Conn.Error) rpc.ServerTransport.StartError {
-    const what = if (route) |r| r.subjectOf() else "the flush";
+/// A receiving task could not start: the ones that did end before their
+/// first request, and the errdefers of `start` undo the rest.
+fn abortStart(t: *Transport, io: std.Io, before: Phase, err: std.Io.ConcurrentError) std.Io.ConcurrentError {
+    const s = &t.server;
+    s.phase.store(.closing, .release);
+    s.group.cancel(io);
+    s.phase.store(before, .release);
+    s.routes = &.{};
+    s.services = .empty;
+    return err;
+}
+
+/// `name`: the subject the connection refused; null for the flush.
+fn startError(name: ?[]const u8, err: Conn.Error) rpc.ServerTransport.StartError {
+    const what = name orelse "the flush";
     return switch (err) {
         error.PermissionDenied => {
-            log.warn("the NATS permissions deny the server {s}", .{if (route) |r| r.subjectOf() else "one of its subjects"});
+            log.warn("the NATS permissions deny the server {s}", .{name orelse "one of its subjects"});
             return error.AccessDenied;
         },
         error.Disconnected, error.ConnectionClosed, error.Timeout => error.Unavailable,
@@ -185,10 +211,14 @@ pub fn drain(t: *Transport, io: std.Io) void {
     drainRoutes(t, io);
 }
 
-/// What is on its way still comes out of `next`, then null.
+/// What is on its way still comes out of `next`, then null. NATS micro
+/// stops answering too: a stopping replica leaves the lists.
 fn drainRoutes(t: *Transport, io: std.Io) void {
     for (t.server.routes) |*r| {
         t.conn.drain(io, r.sub) catch |err| log.debug("the drain of {s} failed: {t}", .{ r.subjectOf(), err });
+    }
+    for (t.server.services.listeners) |*l| {
+        t.conn.drain(io, l.sub) catch |err| log.debug("the drain of {s} failed: {t}", .{ l.subjectOf(), err });
     }
 }
 
@@ -215,8 +245,11 @@ pub fn close(t: *Transport, io: std.Io) void {
     // The responses published so far reach the server.
     t.conn.flush(io, shared.timeoutAfter(io, t.options.flush_timeout)) catch |err| log.debug("the flush of close failed: {t}", .{err});
     for (s.routes) |*r| t.conn.unsubscribe(io, r.sub);
+    for (s.services.listeners) |*l| t.conn.unsubscribe(io, l.sub);
     freeRoutes(t, io, s.routes);
+    micro.free(t, io, s.services);
     s.routes = &.{};
+    s.services = .empty;
     s.phase.store(.closed, .release);
 }
 
@@ -225,42 +258,68 @@ fn receive(r: *Route, io: std.Io) void {
     const t = r.transport;
     // A start that fails cancels the task here.
     t.server.started.wait(io) catch return;
-    while (true) {
-        const message = t.conn.next(io, r.sub, .none) catch |err| switch (err) {
-            error.Canceled => return,
-            error.Timeout => continue,
-            // The library reconnects; `isReady` is false meanwhile.
-            error.Disconnected, error.OutOfMemory => {
-                io.sleep(retry_pause, .awake) catch return;
-                continue;
-            },
-            error.SlowConsumer => {
-                shared.count(t, .slow_consumer_errors);
-                log.warn("the subscription to {s} lost requests as a slow consumer; its pending limits must hold the server's max_inflight", .{r.subjectOf()});
-                continue;
-            },
-            error.PermissionDenied => return fail(t, io, r, error.AccessDenied, err),
-            error.ConnectionClosed, error.InvalidSubject, error.PayloadTooLarge => return fail(t, io, r, if (err == error.ConnectionClosed) error.Unavailable else error.Unexpected, err),
-        } orelse {
-            // Drained, or ended by someone else while the server runs.
-            if (t.server.phase.load(.acquire) == .running) fail(t, io, r, error.Unavailable, null);
-            return;
-        };
+    while (nextMessage(t, io, r.sub, r.subjectOf())) |message| {
         const protection = io.swapCancelProtection(.blocked);
         defer _ = io.swapCancelProtection(protection);
         handle(t, io, r, message);
     }
 }
 
+/// The receiving task of one subscription of NATS micro.
+fn listen(l: *micro.Listener, io: std.Io) void {
+    const t = l.transport;
+    t.server.started.wait(io) catch return;
+    while (nextMessage(t, io, l.sub, l.subjectOf())) |message| {
+        const protection = io.swapCancelProtection(.blocked);
+        defer _ = io.swapCancelProtection(protection);
+        micro.answer(t, io, l, message);
+    }
+}
+
+/// The next message of a subscription of the server side; null when its
+/// task ends: canceled, the subscription ended, or the transport broke,
+/// and then the engine has been told.
+fn nextMessage(t: *Transport, io: std.Io, sub: Conn.Sub, name: []const u8) ?Conn.InMsg {
+    while (true) {
+        const message = t.conn.next(io, sub, .none) catch |err| switch (err) {
+            error.Canceled => return null,
+            error.Timeout => continue,
+            // The library reconnects; `isReady` is false meanwhile.
+            error.Disconnected, error.OutOfMemory => {
+                io.sleep(retry_pause, .awake) catch return null;
+                continue;
+            },
+            error.SlowConsumer => {
+                shared.count(t, .slow_consumer_errors);
+                log.warn("the subscription to {s} lost requests as a slow consumer; its pending limits must hold the server's max_inflight", .{name});
+                continue;
+            },
+            error.PermissionDenied => {
+                fail(t, io, name, error.AccessDenied, err);
+                return null;
+            },
+            error.ConnectionClosed, error.InvalidSubject, error.PayloadTooLarge => {
+                fail(t, io, name, if (err == error.ConnectionClosed) error.Unavailable else error.Unexpected, err);
+                return null;
+            },
+        };
+        return message orelse {
+            // Drained, or ended by someone else while the server runs.
+            if (t.server.phase.load(.acquire) == .running) fail(t, io, name, error.Unavailable, null);
+            return null;
+        };
+    }
+}
+
 /// The whole transport broke: the engine stops the server.
-fn fail(t: *Transport, io: std.Io, r: *const Route, err: rpc.transport.Dispatcher.FatalError, cause: ?anyerror) void {
+fn fail(t: *Transport, io: std.Io, name: []const u8, err: rpc.transport.Dispatcher.FatalError, cause: ?anyerror) void {
     const protection = io.swapCancelProtection(.blocked);
     defer _ = io.swapCancelProtection(protection);
     var diagnostics: rpc.transport.Diagnostics = .{};
     if (cause) |c| {
-        diagnostics.set(.receive, c, "the subscription to {s} failed: {t}", .{ r.subjectOf(), c });
+        diagnostics.set(.receive, c, "the subscription to {s} failed: {t}", .{ name, c });
     } else {
-        diagnostics.set(.receive, null, "the subscription to {s} ended while the server runs", .{r.subjectOf()});
+        diagnostics.set(.receive, null, "the subscription to {s} ended while the server runs", .{name});
     }
     t.server.dispatcher.fail(io, err, &diagnostics);
 }

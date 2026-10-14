@@ -306,7 +306,8 @@ test "start fails cleanly: denied subjects, no link, no answer to the flush" {
         // Once the broker answers, the same transport starts.
         fake.hangFlush(io, false);
         try recorder.start(io, quick.serverTransport());
-        try testing.expectEqual(@as(usize, 2), fake.subscriptionCount(io));
+        // Two routes, and the nine subjects of NATS micro of users v1.
+        try testing.expectEqual(@as(usize, 2 + 9), fake.subscriptionCount(io));
         recorder.close(io);
     }
 }

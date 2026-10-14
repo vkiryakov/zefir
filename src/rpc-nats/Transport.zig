@@ -13,7 +13,10 @@
 //! confirms the subscriptions with a flush: a subject the NATS permissions
 //! deny fails `start` with AccessDenied. It answers only to a reply subject
 //! under `reply_prefixes`, and only to a request with one. A request from
-//! `nats req`, without the headers of zefir, is served too.
+//! `nats req`, without the headers of zefir, is served too. Every contract
+//! of the server is a NATS micro service, unless `discovery` says no: the
+//! subscriptions of `$SRV.PING`, `$SRV.INFO` and `$SRV.STATS` start, drain
+//! and close with those of the routes.
 //!
 //! What the server side does with the errors of the connection:
 //!
@@ -126,6 +129,17 @@ pub const Options = struct {
     /// The client's calls that wait for their responses at once; one more
     /// gets `error.TooManyPendingRequests`.
     max_pending: u32 = 1024,
+    /// NATS micro discovery (ADR-32), on by default: every contract of the
+    /// server is a NATS micro service, so `nats micro ls`, `nats micro info
+    /// users` and `nats micro stats users` see its replicas, its methods
+    /// and their counters. It subscribes to subjects under `$SRV.`, which
+    /// the NATS permissions of the service must allow.
+    discovery: Discovery = .{},
+
+    pub const Discovery = struct {
+        /// False: no NATS micro subscriptions at all.
+        enabled: bool = true,
+    };
 };
 
 pub const InitError = error{
