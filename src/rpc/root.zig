@@ -31,6 +31,7 @@
 const std = @import("std");
 const model = @import("model.zig");
 const credentials = @import("credentials.zig");
+const auth = @import("auth.zig");
 
 pub const Route = model.Route;
 pub const Metadata = model.Metadata;
@@ -58,6 +59,14 @@ pub const RawClient = @import("engine/RawClient.zig");
 pub const Credentials = credentials.Credentials;
 /// Credentials that the client engine asks for before every call.
 pub const CredentialsProvider = credentials.CredentialsProvider;
+/// Checks the credentials of calls on a server.
+pub const Authenticator = auth.Authenticator;
+/// What an authenticator sees of a call.
+pub const AuthContext = auth.AuthContext;
+/// What an authenticator may return besides an identity.
+pub const AuthError = auth.AuthError;
+/// The identity of a caller.
+pub const IdentityView = auth.IdentityView;
 
 /// The client side of a transport.
 pub const ClientTransport = @import("ClientTransport.zig");
@@ -84,6 +93,8 @@ test {
     _ = @import("testing.zig");
     _ = @import("failures.zig");
     _ = @import("credentials.zig");
+    _ = @import("auth.zig");
+    _ = @import("engine/chain_tests.zig");
     _ = @import("engine/RawServer.zig");
     _ = @import("engine/Call.zig");
     _ = @import("engine/Context.zig");

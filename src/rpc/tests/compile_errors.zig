@@ -151,3 +151,30 @@ test "init with a pointer to a number" {
     var number: u8 = 0;
     _ = rpc.ServerTransport.init(&number);
 }
+
+test "authenticator without authenticate" {
+    const NoAuthenticate = struct {
+        calls: u32 = 0,
+        pub fn check(self: *@This(), ctx: *const rpc.AuthContext) rpc.AuthError!?rpc.IdentityView {
+            _ = ctx;
+            self.calls += 1;
+            return null;
+        }
+    };
+    var authenticator: NoAuthenticate = .{};
+    _ = rpc.Authenticator.init(&authenticator);
+}
+
+test "authenticate with an inferred error set" {
+    const Inferred = struct {
+        calls: u32 = 0,
+        pub fn authenticate(self: *@This(), ctx: *const rpc.AuthContext) !?rpc.IdentityView {
+            _ = ctx;
+            self.calls += 1;
+            if (self.calls > 1) return error.InvalidCredentials;
+            return null;
+        }
+    };
+    var authenticator: Inferred = .{};
+    _ = rpc.Authenticator.init(&authenticator);
+}

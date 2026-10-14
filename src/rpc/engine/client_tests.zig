@@ -254,7 +254,7 @@ test "invalid metadata, routes and credentials are not sent: a failure with sent
         var result = try client.call(io, .root, echo_route, "", .{ .credentials = credentials });
         defer result.deinit();
         try testing.expect(!result.sent);
-        try expectFailure(result, failures.invalid_credentials);
+        try expectFailure(result, failures.invalid_authorization);
     }
     try testing.expectEqual(@as(u32, 0), recorder.calls);
 }

@@ -47,6 +47,7 @@ const rules = @import("../rules.zig");
 const waiting = @import("../wait.zig");
 const failures = @import("../failures.zig");
 const ServerTransport = @import("../ServerTransport.zig");
+const Authenticator = @import("../auth.zig").Authenticator;
 const Context = @import("Context.zig").Context;
 const Call = @import("Call.zig");
 const RouteStats = @import("RouteStats.zig");
@@ -57,6 +58,7 @@ gpa: std.mem.Allocator,
 /// What `init` builds: the methods, their routes and the route table.
 arena: std.heap.ArenaAllocator,
 server_transport: ServerTransport,
+authenticator: ?Authenticator,
 methods: []const Method,
 /// The key of a route, "service.v<version>.method", to its index in
 /// `methods`.
@@ -131,6 +133,11 @@ pub const Options = struct {
     /// the list and the route names; the handlers are borrowed and must
     /// outlive the server.
     methods: []const Method,
+    /// Checks the credentials of every call before its middleware; borrowed,
+    /// like the handlers. Without one, a call that brings credentials is
+    /// refused with `unauthenticated`, and no method may require an
+    /// identity.
+    authenticator: ?Authenticator = null,
     limits: Limits = .{},
     /// How long the calls in flight may run after `requestStop` before the
     /// server cancels them.
@@ -141,6 +148,10 @@ pub const Options = struct {
 pub const Method = struct {
     route: model.Route,
     handler: Handler,
+    /// `.required`: a call without an identity is refused with
+    /// `unauthenticated`. `rpc.Server` sets it from the contract's
+    /// settings, `.optional` by default.
+    auth: Auth = .optional,
     /// The server's limit for a call of this method (`timeout_ms` of a
     /// contract method); null: `limits.default_timeout`. Never more than
     /// `limits.max_timeout`.
@@ -149,6 +160,9 @@ pub const Method = struct {
     /// middleware has unwound; `rpc.Server` builds it from the `.errors`
     /// table of the contract. Null: only the framework's own names map.
     map_error: ?*const fn (err: anyerror) ?model.Failure = null,
+
+    /// Whether a method requires an identity.
+    pub const Auth = enum { required, optional };
 };
 
 /// A handler on bytes.
@@ -203,7 +217,8 @@ pub const Limits = struct {
 
 /// `InvalidConfiguration`: no methods, a route name against the rules
 /// (`[A-Za-z0-9_-]`, 1 to 64 characters, a version above 0), the same route
-/// twice, a method timeout that is not positive, limits that are zero or
+/// twice, a method timeout that is not positive, a method that requires an
+/// identity on a server without an authenticator, limits that are zero or
 /// contradict each other (`max_inflight` over `max_active_tasks +
 /// queue_capacity`, `max_request_bytes` over `max_request_memory_bytes`,
 /// that over `max_live_request_memory_bytes`, `default_timeout` over
@@ -219,6 +234,7 @@ pub fn init(gpa: std.mem.Allocator, options: Options) InitError!RawServer {
     for (options.methods) |method| {
         rules.validateRoute(method.route) catch return error.InvalidConfiguration;
         if (method.timeout) |timeout| if (timeout.nanoseconds <= 0) return error.InvalidConfiguration;
+        if (method.auth == .required and options.authenticator == null) return error.InvalidConfiguration;
     }
 
     var arena: std.heap.ArenaAllocator = .init(gpa);
@@ -245,6 +261,7 @@ pub fn init(gpa: std.mem.Allocator, options: Options) InitError!RawServer {
         .gpa = gpa,
         .arena = arena,
         .server_transport = options.transport,
+        .authenticator = options.authenticator,
         .methods = methods,
         .table = table,
         .stats = stats,

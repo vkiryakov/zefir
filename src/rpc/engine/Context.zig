@@ -8,6 +8,8 @@ const failures = @import("../failures.zig");
 const Peer = @import("../transport.zig").Peer;
 const Info = @import("../transport.zig").Info;
 const ServerTransport = @import("../ServerTransport.zig");
+const IdentityView = @import("../auth.zig").IdentityView;
+const Credentials = @import("../credentials.zig").Credentials;
 
 /// The context of one call on the server. The engine creates it for each
 /// call; handlers and middleware get a borrowed pointer and must not keep it
@@ -73,6 +75,13 @@ pub const Context = opaque {
         return state(ctx).server_transport.info();
     }
 
+    /// Who calls, as the server's authenticator found; null for an
+    /// anonymous call. Its strings live in the arena of the call or are
+    /// constant.
+    pub fn identity(ctx: *Context) ?IdentityView {
+        return state(ctx).identity;
+    }
+
     pub const SetMetadataError = error{
         /// A key or value against the metadata rules, or a reserved or
         /// `zefir-*` key: those are the engine's.
@@ -133,6 +142,11 @@ fn state(ctx: *Context) *CallContext {
     return @ptrCast(@alignCast(ctx));
 }
 
+/// The call behind `ctx`. Internal to the module.
+pub fn callOf(ctx: *Context) *CallContext {
+    return state(ctx);
+}
+
 /// What `rpc.Context` reads and writes: one per call, inside the engine's
 /// call. Internal to the module.
 pub const CallContext = struct {
@@ -154,6 +168,11 @@ pub const CallContext = struct {
     /// `authorization` before it frees it.
     authorization: ?[]u8 = null,
     correlation_id: ?[]const u8 = null,
+    /// `authorization` parsed for the authenticator; the call wipes what
+    /// was decoded into the arena.
+    credentials: Credentials = .none,
+    /// Set once the authenticator returned an identity.
+    identity: ?IdentityView = null,
     /// The metadata of the response, in the arena.
     response_metadata: std.ArrayList(model.Metadata.Entry) = .empty,
     /// Its size, as `rpc.transport.metadataBytes` counts it.

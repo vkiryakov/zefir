@@ -13,6 +13,7 @@ const Context = @import("Context.zig").Context;
 const ServerTransport = @import("../ServerTransport.zig");
 const ClientTransport = @import("../ClientTransport.zig");
 const MemoryTransport = @import("../testing/MemoryTransport.zig");
+const auth = @import("../auth.zig");
 
 const testing = std.testing;
 const Reply = transport.Reply;
@@ -720,14 +721,25 @@ const Inspector = struct {
     }
 };
 
+/// Takes any credentials as an anonymous call.
+const Anyone = struct {
+    pub fn authenticate(_: *Anyone, _: *const auth.AuthContext) auth.AuthError!?auth.IdentityView {
+        return null;
+    }
+};
+
 test "rpc.Context gives a handler its call: io, operation, allocator, route, request id, metadata, peer, transport" {
     const io = testing.io;
     var memory: MemoryTransport = try .init(testing.allocator, .{ .peer_name = "client-7" });
     defer memory.deinit(io);
     var inspector: Inspector = .{};
+    // The request carries credentials: without an authenticator the server
+    // would refuse them.
+    var anyone: Anyone = .{};
     var server: RawServer = try .init(testing.allocator, .{
         .transport = memory.serverTransport(),
         .methods = &.{.{ .route = routeOf("inspect"), .handler = handlerOf(&inspector) }},
+        .authenticator = .init(&anyone),
     });
     defer server.deinit(io);
     try server.start(io);

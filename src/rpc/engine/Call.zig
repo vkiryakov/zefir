@@ -16,6 +16,8 @@ const transport = @import("../transport.zig");
 const rules = @import("../rules.zig");
 const failures = @import("../failures.zig");
 const waiting = @import("../wait.zig");
+const auth = @import("../auth.zig");
+const credentials = @import("../credentials.zig");
 const RawServer = @import("RawServer.zig");
 const Context = @import("Context.zig").Context;
 const CallContext = @import("Context.zig").CallContext;
@@ -130,9 +132,10 @@ pub fn create(
 }
 
 /// Frees the call and gives its memory back to the server's budget. The
-/// copy of the credentials is wiped first.
+/// copies of the credentials are wiped first.
 pub fn destroy(call: *Call) void {
     if (call.context.authorization) |value| std.crypto.secureZero(u8, value);
+    credentials.wipeParsed(call.context.credentials);
     call.arena.deinit();
     call.budget.allocator().free(call.body);
     var budget = call.budget;
@@ -320,6 +323,7 @@ fn runHandler(call: *Call, io: std.Io) anyerror![]const u8 {
     }
     if (!call.enter(io)) return error.NotEntered;
     const method = &call.server.methods[call.route_index];
+    try auth.authenticate(call.contextPtr(), call.server.authenticator, method.auth == .required);
     return method.handler.handle(method.handler.ptr, call.contextPtr(), call.body);
 }
 

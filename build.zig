@@ -282,6 +282,7 @@ pub fn build(b: *std.Build) void {
         },
     });
     const call_signature = "pub fn call(self: *@This(), io: std.Io, request: *const rpc.transport.Request, options: rpc.ClientTransport.CallOptions) rpc.ClientTransport.CallError!rpc.Response";
+    const authenticate_signature = "pub fn authenticate(self: *@This(), ctx: *const rpc.AuthContext) rpc.AuthError!?rpc.IdentityView";
     for ([_][2][]const u8{
         .{ "client transport without call", "rpc.ClientTransport.init: compile_errors.test.client transport without call.NoCall has no method call; expected " ++ call_signature },
         .{ "call with another response type", "rpc.ClientTransport.init: compile_errors.test.call with another response type.WrongResponse.call has another signature; expected " ++ call_signature },
@@ -292,6 +293,8 @@ pub fn build(b: *std.Build) void {
         .{ "init with a value", "rpc.ClientTransport.init: pass a pointer to the transport, e.g. &transport; got compile_errors.Echo" },
         .{ "init with a pointer to a constant", "rpc.ClientTransport.init: the transport must be mutable, declared with var; got *const compile_errors.Echo" },
         .{ "init with a pointer to a number", "rpc.ServerTransport.init: pass a pointer to the transport, e.g. &transport; got *u8" },
+        .{ "authenticator without authenticate", "rpc.Authenticator.init: compile_errors.test.authenticator without authenticate.NoAuthenticate has no method authenticate; expected " ++ authenticate_signature },
+        .{ "authenticate with an inferred error set", "rpc.Authenticator.init: compile_errors.test.authenticate with an inferred error set.Inferred.authenticate has another signature; expected " ++ authenticate_signature },
     }, 0..) |case, i| {
         const compile = b.addTest(.{
             .name = b.fmt("rpc-compile-error-{d}", .{i}),

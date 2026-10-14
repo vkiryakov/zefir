@@ -243,7 +243,7 @@ const Outgoing = struct {
             break :authorization try credentials.encode(secrets.allocator(), chosen);
         };
         if (authorization) |value| if (!rules.isValidValue(value)) {
-            o.response = .{ .status = .{ .failure = failures.invalid_credentials } };
+            o.response = .{ .status = .{ .failure = failures.invalid_authorization } };
             return;
         };
         const request: transport.Request = .{

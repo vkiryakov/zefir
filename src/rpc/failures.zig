@@ -78,7 +78,16 @@ pub const response_lost: Failure = .{ .code = .unavailable, .app_code = "rpc.una
 pub const invalid_route: Failure = .{ .code = .invalid_argument, .app_code = "rpc.invalid_route", .message = "Invalid route" };
 /// The client engine does not send credentials whose `authorization` value
 /// metadata cannot carry, such as a token with a line break.
-pub const invalid_credentials: Failure = .{ .code = .invalid_argument, .app_code = "rpc.invalid_metadata", .message = "Invalid credentials" };
+pub const invalid_authorization: Failure = .{ .code = .invalid_argument, .app_code = "rpc.invalid_metadata", .message = "Invalid authorization value" };
+
+/// The authenticator refused the credentials of the call, or the server has
+/// no authenticator and the call brought credentials.
+pub const invalid_credentials: Failure = .{ .code = .unauthenticated, .app_code = "rpc.unauthenticated", .message = "Invalid credentials" };
+/// An anonymous call to a method that requires an identity.
+pub const authentication_required: Failure = .{ .code = .unauthenticated, .app_code = "rpc.unauthenticated", .message = "Authentication required" };
+/// The authenticator returned an identity over the limits of
+/// `rpc.IdentityView`.
+pub const identity_too_large: Failure = .{ .code = .resource_exhausted, .app_code = "rpc.resource_exhausted", .message = "Identity too large" };
 
 const testing = std.testing;
 
