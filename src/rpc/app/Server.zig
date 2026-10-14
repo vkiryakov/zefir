@@ -46,6 +46,8 @@ const RawServer = @import("../engine/RawServer.zig");
 const Authenticator = @import("../auth.zig").Authenticator;
 const Middleware = @import("../middleware.zig").Middleware;
 const MiddlewareFn = @import("../middleware.zig").MiddlewareFn;
+const Next = @import("../middleware.zig").Next;
+const Context = @import("../engine/Context.zig").Context;
 const handlers = @import("handlers.zig");
 const method = @import("method.zig");
 
@@ -75,18 +77,22 @@ pub const ShutdownError = RawServer.ShutdownError;
 ///   with `run`, such as `.{ mw.logCalls, &limiter }`. The links of a
 ///   handler and of a method come from its `rpc_handler`: functions, and
 ///   names of the handler's fields that hold an object or point to one
-///   (`.fraud` is `self.fraud`, read here once). A call runs the server's
-///   links, then the handler's, then the method's, each level left to
-///   right, and unwinds them in reverse;
-/// - `.limits` (optional): `rpc.Limits`, or a struct literal of the
-///   limits to change, such as `.{ .max_active_tasks = 1024 }`;
+///   (`.fraud` is `self.fraud`, read on every call). A call runs the
+///   server's links, then the handler's, then the method's, each level
+///   left to right, and unwinds them in reverse;
+/// - `.limits` (optional): a struct literal of the limits to change, such
+///   as `.{ .max_active_tasks = 1024 }`, or a whole `rpc.Limits`. The limit
+///   of a call is the `timeout_ms` of its method (3 seconds by default),
+///   cut to `max_timeout`. `default_timeout` is for methods of the engine
+///   without a limit of their own and does not apply here; a literal
+///   without it lowers it to a lower `max_timeout`;
 /// - `.shutdown_grace` (optional): how long calls in flight may run after
 ///   `requestStop`, 10 seconds by default.
 ///
 /// Options are `anytype`, so a value inside them has no type to take a
 /// declaration literal from: write `std.Io.Duration.fromSeconds(10)`, not
-/// `.fromSeconds(10)`, and `rpc.Limits{ .default_timeout = .fromSeconds(5) }`
-/// for limits that are durations.
+/// `.fromSeconds(10)`, also among the limits:
+/// `.limits = .{ .max_timeout = std.Io.Duration.fromSeconds(60) }`.
 ///
 /// No I/O and no tasks; memory only for the tables of the engine.
 pub fn init(gpa: std.mem.Allocator, options: anytype) InitError!Server {
@@ -143,22 +149,30 @@ pub fn init(gpa: std.mem.Allocator, options: anytype) InitError!Server {
 
 /// The link of `item` on the level of a handler or of one method: a
 /// middleware function, or `.name` of a field of the handler that holds an
-/// object (`&handler.name`) or points to one (`handler.name`). The field is
-/// read once, here.
+/// object or points to one. The link reads the field on every call, so the
+/// handler may set it after `init`.
 fn handlerLink(comptime T: type, handler: *T, comptime item: anytype) Middleware {
     if (@TypeOf(item) == MiddlewareFn) return .of(item);
-    const name = @tagName(item);
-    if (@typeInfo(@FieldType(T, name)) == .pointer) return .of(@field(handler, name));
-    return .of(&@field(handler, name));
+    return .{ .ptr = handler, .run = struct {
+        fn run(ptr: ?*anyopaque, ctx: *Context, next: *Next) anyerror!void {
+            const self: *T = @ptrCast(@alignCast(ptr.?));
+            return @field(self, @tagName(item)).run(ctx, next);
+        }
+    }.run };
 }
 
 /// `given`, `rpc.Limits` or a struct literal of some of its fields, over
 /// the defaults: options are `anytype`, so a literal keeps a type of its
-/// own.
+/// own. A literal without `default_timeout` lowers it to a lower
+/// `max_timeout`: no method of `rpc.Server` uses it, and the engine
+/// refuses a default over the maximum.
 fn limitsOf(given: anytype) RawServer.Limits {
-    if (@TypeOf(given) == RawServer.Limits) return given;
+    const Given = @TypeOf(given);
+    if (Given == RawServer.Limits) return given;
     var limits: RawServer.Limits = .{};
-    inline for (@typeInfo(@TypeOf(given)).@"struct".field_names) |name| @field(limits, name) = @field(given, name);
+    inline for (@typeInfo(Given).@"struct".field_names) |name| @field(limits, name) = @field(given, name);
+    if (!@hasField(Given, "default_timeout"))
+        limits.default_timeout.nanoseconds = @min(limits.default_timeout.nanoseconds, limits.max_timeout.nanoseconds);
     return limits;
 }
 
@@ -217,7 +231,10 @@ pub fn requestStop(server: *Server, io: std.Io) void {
 }
 
 /// `requestStop` and a wait for the stop. `error.ShutdownTimeout` when
-/// handlers did not end in time: treat it as fatal and end the process.
+/// handlers did not end within `shutdown_grace` and one second more after
+/// they were canceled: the server stays in `draining`. Treat it as fatal
+/// and end the process; `deinit` would wait for such handlers without a
+/// limit.
 pub fn shutdown(server: *Server, io: std.Io) ShutdownError!void {
     return server.engine.shutdown(io);
 }
@@ -234,7 +251,9 @@ pub fn state(server: *const Server) State {
 }
 
 /// Stops the server if it runs, waits for the stop and frees the tables.
-/// No other task may still be in `wait`, `run` or `shutdown`.
+/// The wait has no limit: a handler that ignores cancelation keeps
+/// `deinit` waiting, so after `error.ShutdownTimeout` end the process
+/// instead. No other task may still be in `wait`, `run` or `shutdown`.
 pub fn deinit(server: *Server, io: std.Io) void {
     server.engine.deinit(io);
     server.* = undefined;

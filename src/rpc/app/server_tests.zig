@@ -181,6 +181,27 @@ test "the methods of the engine carry the routes, the settings and the contract'
     try testing.expectEqual(@as(i64, 1500), methods[2].timeout.?.toMilliseconds());
 }
 
+test "a lower max_timeout lowers the default_timeout that a literal of limits leaves out" {
+    const io = testing.io;
+    var memory: MemoryTransport = try .init(testing.allocator, .{});
+    defer memory.deinit(io);
+    var users: UserHandler = .{};
+    var server: Server = try .init(testing.allocator, .{
+        .transport = memory.serverTransport(),
+        .handlers = .{&users},
+        .limits = .{ .max_timeout = std.Io.Duration.fromSeconds(1) },
+    });
+    defer server.deinit(io);
+    try testing.expectEqual(@as(i64, 1000), server.engine.limits.default_timeout.toMilliseconds());
+    try testing.expectEqual(@as(i64, 1000), server.engine.limits.max_timeout.toMilliseconds());
+    // Set both, they must agree.
+    try testing.expectError(error.InvalidConfiguration, Server.init(testing.allocator, .{
+        .transport = memory.serverTransport(),
+        .handlers = .{&users},
+        .limits = .{ .default_timeout = std.Io.Duration.fromSeconds(5), .max_timeout = std.Io.Duration.fromSeconds(1) },
+    }));
+}
+
 test "a body that does not decode is refused with what is wrong and where" {
     const io = testing.io;
     var f: Fixture = undefined;
@@ -637,6 +658,14 @@ test "middleware runs server, handler, method, each level left to right, and unw
     var again = try f.call(io, shopRoute("place"), "{\"item\":\"tea\"}");
     try expectBody(&again, "{\"item\":\"tea\"}");
     try testing.expectEqualStrings("fraud again>", trail.entries[5]);
+    // A field that points to an object is read on every call: the handler
+    // may point it elsewhere after init.
+    var other: Marker = .{ .before = "other audit>", .after = "<other audit" };
+    shop.audit = &other;
+    trail.clear();
+    var audited = try f.call(io, shopRoute("cancel"), "{\"item\":\"tea\"}");
+    try expectBody(&audited, "{}");
+    try trail.expect(&.{ "server-fn>", "server-object>", "handler-fn>", "other audit>", "cancel", "<other audit", "<handler-fn", "<server-object", "<server-fn" });
 }
 
 /// Copies what middleware sees of the bodies of the last call.
