@@ -69,6 +69,9 @@ changed: std.Io.Condition = .init,
 admit_mode: AdmitMode,
 start_mode: StartMode,
 server: ?ServerTransport = null,
+/// `close` was called; the transport is closed once.
+closing: bool = false,
+/// `close` has returned: the transport may call nothing any more.
 closed: bool = false,
 calls: std.ArrayList(*Call) = .empty,
 started: usize = 0,
@@ -341,15 +344,20 @@ pub fn drain(r: *RecordingDispatcher, io: std.Io) void {
 
 /// Closes the transport given to `start`, then checks that every accepted
 /// call was started or abandoned. From here on, a call of the transport
-/// into the recorder is a violation. A second call only closes the
-/// transport again.
+/// into the recorder is a violation. A second call does nothing: a test of
+/// a second `close` calls the transport itself.
 pub fn close(r: *RecordingDispatcher, io: std.Io) void {
+    {
+        r.mutex.lockUncancelable(io);
+        defer r.mutex.unlock(io);
+        if (r.closing) return;
+        r.closing = true;
+    }
     if (r.server) |server| server.close(io);
     const protection = io.swapCancelProtection(.blocked);
     defer _ = io.swapCancelProtection(protection);
     r.mutex.lockUncancelable(io);
     defer r.mutex.unlock(io);
-    if (r.closed) return;
     r.closed = true;
     for (r.calls.items) |c| {
         if (c.state == .accepted) r.addViolation(c.index, .unresolved_at_close);
@@ -1231,4 +1239,18 @@ test "start, drain and close drive the transport; deinit ends the calls left run
     // deinit closed the transport, then released the running call.
     try testing.expectEqual(@as(u32, 1), lifecycle.closes);
     try testing.expectEqual(Reply.Disposition.canceled, reply.released.?);
+}
+
+test "the recorder closes the transport once: a second close and deinit leave it alone" {
+    const io = testing.io;
+    var lifecycle: Lifecycle = .{};
+    {
+        var recorder: RecordingDispatcher = try .init(testing.allocator, .{ .routes = &.{get_user} });
+        defer recorder.deinit(io);
+        try recorder.start(io, .init(&lifecycle));
+        recorder.close(io);
+        recorder.close(io);
+        try testing.expectEqual(@as(u32, 1), lifecycle.closes);
+    }
+    try testing.expectEqual(@as(u32, 1), lifecycle.closes);
 }
