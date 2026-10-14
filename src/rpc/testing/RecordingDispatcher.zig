@@ -299,10 +299,11 @@ pub fn dispatcher(r: *RecordingDispatcher) Dispatcher {
 }
 
 /// Starts `server` with this recorder as its dispatcher, as
-/// `rpc.RawServer.start` does. `drain`, `close` and `deinit` then drive it.
+/// `rpc.RawServer.start` does. `drain`, `close` and `deinit` then drive it;
+/// after an error nothing runs, and they leave the transport alone.
 pub fn start(r: *RecordingDispatcher, io: std.Io, server: ServerTransport) ServerTransport.StartError!void {
+    try server.start(io, r.dispatcher());
     r.server = server;
-    return server.start(io, r.dispatcher());
 }
 
 /// Drains the transport given to `start`.

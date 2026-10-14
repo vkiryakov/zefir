@@ -346,6 +346,32 @@ pub fn build(b: *std.Build) void {
         test_rpc.dependOn(&run.step);
     }
 
+    // The same for an engine that breaks the rules of rpc.transport.Reply
+    // on rpc.testing.MemoryTransport.
+    const memory_panics = b.addExecutable(.{
+        .name = "rpc-panic-memory",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/rpc/tests/panic/memory.zig"),
+            .target = target,
+            .optimize = .Debug,
+            .imports = &.{
+                .{ .name = "core", .module = panic_core },
+                .{ .name = "rpc", .module = panic_rpc },
+            },
+        }),
+    });
+    for ([_][2][]const u8{
+        .{ "release_twice", "rpc.testing.MemoryTransport: release called twice for one call; release each call once" },
+        .{ "send_twice", "rpc.testing.MemoryTransport: send called again for one call; send at most once, or once more after ResponseTooLarge" },
+        .{ "deinit_in_use", "rpc.testing.MemoryTransport: deinit with calls not released; deinit the server and let every call return first" },
+    }) |case| {
+        const run = b.addRunArtifact(memory_panics);
+        run.addArg(case[0]);
+        run.expectStdErrMatch(case[1]);
+        run.expectExitCode(3);
+        test_rpc.dependOn(&run.step);
+    }
+
     // core benchmarks: `zig build test` only compiles them, `zig build bench`
     // runs them. They get their own ReleaseFast copy of core, since the
     // `core` module above is built in the mode the user asked for.
