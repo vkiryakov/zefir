@@ -138,6 +138,7 @@ test {
     _ = @import("app/json_tests.zig");
     _ = @import("app/handlers.zig");
     _ = @import("app/method.zig");
+    _ = @import("app/violations.zig");
     _ = @import("app/Server.zig");
     _ = @import("app/server_tests.zig");
 }

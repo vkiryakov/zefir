@@ -1,6 +1,7 @@
 //! The engine's handler of one method of a contract: it turns the bytes of
-//! a request into the method's request type, calls the method of the
-//! application's handler and turns its response back into bytes. Internal
+//! a request into the method's request type, checks it against its
+//! `field_rules`, calls the method of the application's handler, checks
+//! the response against its rules and turns it back into bytes. Internal
 //! to the module; `rpc.Server` builds one for each method it serves.
 //!
 //! A stage that fails ends the call with an exact failure, named by the
@@ -8,8 +9,12 @@
 //!
 //! - a body that does not decode: `invalid_argument` / `rpc.invalid_request`,
 //!   with what is wrong and where;
-//! - a response that does not encode: `internal` / `rpc.invalid_response`,
-//!   the details only in the server's log;
+//! - a request against its rules: `invalid_argument` /
+//!   `rpc.invalid_request`, with every violation, also in the body of the
+//!   failure;
+//! - a response against its rules, or one that does not encode:
+//!   `internal` / `rpc.invalid_response`, the details only in the server's
+//!   log;
 //! - memory or size over the limits: `resource_exhausted` /
 //!   `rpc.resource_exhausted`.
 //!
@@ -18,9 +23,12 @@
 //! unwound.
 
 const std = @import("std");
+const v = @import("validator");
 const model = @import("../model.zig");
+const rules = @import("../rules.zig");
 const failures = @import("../failures.zig");
 const json = @import("json.zig");
+const violations = @import("violations.zig");
 const engine_context = @import("../engine/Context.zig");
 const Context = engine_context.Context;
 
@@ -36,22 +44,36 @@ pub fn Wrapper(comptime T: type, comptime M: type) type {
     return struct {
         pub fn handle(ptr: *anyopaque, ctx: *Context, body: []const u8) anyerror![]const u8 {
             const handler: *T = @ptrCast(@alignCast(ptr));
-            const request = try decodeRequest(M.Request, ctx, body);
+            const io = ctx.io();
+            const request = request: {
+                // The stages allocate in the call's arena, and a Debug
+                // allocator may take a cancelable lock: it would swallow a
+                // cancelation of the handler's task.
+                const protection = io.swapCancelProtection(.blocked);
+                defer _ = io.swapCancelProtection(protection);
+                break :request try decodeRequest(M.Request, ctx, body);
+            };
+            // The deadline, the client or the stop may have ended the call
+            // meanwhile: then the method does not run.
+            try io.checkCancel();
             const response = try @field(T, M.name)(handler, ctx, request);
+            const protection = io.swapCancelProtection(.blocked);
+            defer _ = io.swapCancelProtection(protection);
             return encodeResponse(M.Response, ctx, &response);
         }
     };
 }
 
 /// The request in `body`, decoded in the call's arena within the server's
-/// limits. Its strings may point into `body`.
+/// limits and checked against its rules. Its strings may point into
+/// `body`.
 fn decodeRequest(comptime Req: type, ctx: *Context, body: []const u8) error{RpcFailure}!Req {
     const limits = engine_context.callOf(ctx).limits;
     var problem: json.Problem = .{};
-    return json.decode(Req, ctx.allocator(), body, .{
+    const request = json.decode(Req, ctx.allocator(), body, .{
         .max_depth = limits.max_json_depth,
         .max_items = limits.max_container_items,
-    }, &problem) catch |err| switch (err) {
+    }, &problem) catch |err| return switch (err) {
         error.Invalid => ctx.fail(.{
             .code = .invalid_argument,
             .app_code = "rpc.invalid_request",
@@ -60,12 +82,54 @@ fn decodeRequest(comptime Req: type, ctx: *Context, body: []const u8) error{RpcF
         }),
         error.OutOfMemory => ctx.fail(failures.out_of_memory),
     };
+    try checkRequest(Req, ctx, &request);
+    return request;
 }
 
-/// `response` as JSON in the call's arena. The size is counted first, so
-/// that the bytes are allocated once and a response over
-/// `max_response_bytes` is refused before it takes any memory.
+/// Fails the call with every violation of `request`, if it has any: in the
+/// failure for middleware, and as the body of the failure for the client.
+fn checkRequest(comptime Req: type, ctx: *Context, request: *const Req) error{RpcFailure}!void {
+    // The first violation costs no memory; a request that keeps its rules
+    // allocates nothing here.
+    var path_buf: [rules.max_field_bytes]u8 = undefined;
+    if (v.check(request, &path_buf) == null) return;
+    // The report and the body live in the call's arena, freed with it.
+    const arena = ctx.allocator();
+    const report = v.checkAll(arena, request) catch return ctx.fail(failures.out_of_memory);
+    const list = violations.fromReport(arena, report) catch return ctx.fail(failures.out_of_memory);
+    const body = violations.encode(arena, list, report.truncated) catch return ctx.fail(failures.out_of_memory);
+    return engine_context.failWithBody(ctx, .{
+        .code = .invalid_argument,
+        .app_code = "rpc.invalid_request",
+        .message = "Invalid request",
+        .field = if (list.len > 0) list[0].field else null,
+        .violations = list,
+        .violations_truncated = report.truncated,
+    }, body);
+}
+
+/// `response`, checked against its rules, as JSON in the call's arena. The
+/// size is counted first, so that the bytes are allocated once and a
+/// response over `max_response_bytes` is refused before it takes any
+/// memory.
 fn encodeResponse(comptime Resp: type, ctx: *Context, response: *const Resp) error{RpcFailure}![]const u8 {
+    if (Resp != void) {
+        var path_buf: [rules.max_field_bytes]u8 = undefined;
+        if (v.check(response, &path_buf)) |violation| {
+            const route = ctx.route();
+            // The violation holds no value: the path, a code and a static
+            // message.
+            log.warn("{s}.v{d}.{s} returned a response against its rules: {s}: {s} ({s})", .{
+                route.service,
+                route.version,
+                route.method,
+                violation.field orelse "the response",
+                violation.message,
+                violation.code,
+            });
+            return ctx.fail(invalid_response);
+        }
+    }
     const limits = engine_context.callOf(ctx).limits;
     var buffer: [256]u8 = undefined;
     var counter: Counter = .init(&buffer, limits.max_response_bytes);

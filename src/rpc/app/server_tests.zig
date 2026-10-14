@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const core = @import("core");
+const v = @import("validator");
 const model = @import("../model.zig");
 const failures = @import("../failures.zig");
 const contract = @import("contract.zig");
@@ -273,6 +274,183 @@ test "a response that JSON cannot carry or that is too large is refused by its s
     try expectFailure(&large, failures.response_too_large, "");
     var huge = try f.call(io, usersRoute("blob"), "{\"size\":1000000}");
     try expectFailure(&huge, failures.response_too_large, "");
+}
+
+const CreateAccountRequest = struct {
+    name: []const u8,
+    email: []const u8,
+    tags: []const []const u8 = &.{},
+
+    pub const field_rules = .{
+        .name = v.notEmpty,
+        .email = v.email,
+        .tags = v.each(v.notEmpty),
+    };
+};
+
+const Account = struct {
+    id: u64,
+    name: []const u8,
+
+    pub const field_rules = .{ .name = v.notEmpty };
+};
+
+const Period = struct {
+    start: u32,
+    end: u32,
+
+    pub fn validateSelf(period: *const Period) ?v.Violation {
+        if (period.end < period.start) return v.fail(Period, null, "accounts.end_before_start", "must not end before it starts");
+        return null;
+    }
+};
+
+/// A small body whose value takes a lot of memory: each null is 808 bytes.
+const Bulk = struct { items: []const ?[100]u64 };
+
+const AccountApi = contract.Contract(.{
+    .name = "accounts",
+    .version = 1,
+    .methods = .{
+        .create = contract.method(CreateAccountRequest, Account),
+        .report = contract.method(Period, void),
+        .bulk = contract.method(Bulk, void),
+    },
+});
+
+const Accounts = struct {
+    runs: std.atomic.Value(u32) = .init(0),
+
+    pub const rpc_handler = contract.implement(AccountApi, .{});
+
+    pub fn create(self: *Accounts, ctx: *Context, req: CreateAccountRequest) !Account {
+        _ = ctx;
+        _ = self.runs.fetchAdd(1, .acq_rel);
+        // The server's own mistake: a name its contract does not allow.
+        return .{ .id = 1, .name = if (std.mem.eql(u8, req.name, "nameless")) "" else req.name };
+    }
+
+    pub fn report(self: *Accounts, ctx: *Context, req: Period) !void {
+        _ = ctx;
+        _ = req;
+        _ = self.runs.fetchAdd(1, .acq_rel);
+    }
+
+    pub fn bulk(self: *Accounts, ctx: *Context, req: Bulk) !void {
+        _ = ctx;
+        _ = req;
+        _ = self.runs.fetchAdd(1, .acq_rel);
+    }
+};
+
+fn accountsRoute(name: []const u8) model.Route {
+    return .{ .service = "accounts", .version = 1, .method = name };
+}
+
+const invalid_request: model.Failure = .{ .code = .invalid_argument, .app_code = "rpc.invalid_request", .message = "Invalid request" };
+
+test "a request against its rules is refused with every violation, and the method does not run" {
+    const io = testing.io;
+    var f: Fixture = undefined;
+    try f.open();
+    defer f.close(io);
+    var accounts: Accounts = .{};
+    var server: Server = try .init(testing.allocator, .{ .transport = f.memory.serverTransport(), .handlers = .{&accounts} });
+    defer server.deinit(io);
+    try server.start(io);
+
+    var refused = try f.call(io, accountsRoute("create"), "{\"name\":\"\",\"email\":\"not an email\",\"tags\":[\"a\",\"\"]}");
+    var expected = invalid_request;
+    expected.field = "name";
+    try expectFailure(&refused, expected, "{\"violations\":[" ++
+        "{\"field\":\"name\",\"code\":\"validation.not_empty\",\"message\":\"must not be empty\"}," ++
+        "{\"field\":\"email\",\"code\":\"validation.email\",\"message\":\"must be a valid email address\"}," ++
+        "{\"field\":\"tags[1]\",\"code\":\"validation.not_empty\",\"message\":\"must not be empty\"}]}");
+    // A rule of the whole request has no field.
+    var backwards = try f.call(io, accountsRoute("report"), "{\"start\":5,\"end\":1}");
+    try expectFailure(&backwards, invalid_request, "{\"violations\":[{\"field\":null,\"code\":\"accounts.end_before_start\",\"message\":\"must not end before it starts\"}]}");
+    try testing.expectEqual(@as(u32, 0), accounts.runs.load(.acquire));
+
+    var good = try f.call(io, accountsRoute("create"), "{\"name\":\"Ann\",\"email\":\"ann@example.com\"}");
+    try expectBody(&good, "{\"id\":\"1\",\"name\":\"Ann\"}");
+    var forward = try f.call(io, accountsRoute("report"), "{\"start\":1,\"end\":5}");
+    try expectBody(&forward, "{}");
+    try testing.expectEqual(@as(u32, 2), accounts.runs.load(.acquire));
+}
+
+test "more than 100 violations: the first 100 and truncated" {
+    const io = testing.io;
+    var f: Fixture = undefined;
+    try f.open();
+    defer f.close(io);
+    var accounts: Accounts = .{};
+    var server: Server = try .init(testing.allocator, .{ .transport = f.memory.serverTransport(), .handlers = .{&accounts} });
+    defer server.deinit(io);
+    try server.start(io);
+
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(testing.allocator);
+    try body.appendSlice(testing.allocator, "{\"name\":\"Ann\",\"email\":\"ann@example.com\",\"tags\":[\"\"");
+    for (0..149) |_| try body.appendSlice(testing.allocator, ",\"\"");
+    try body.appendSlice(testing.allocator, "]}");
+    var result = try f.call(io, accountsRoute("create"), body.items);
+    defer result.deinit();
+    const failure = result.response.status.failure;
+    try testing.expectEqualStrings("rpc.invalid_request", failure.app_code);
+    try testing.expectEqualStrings("tags[0]", failure.field.?);
+    // Transports carry no violations in the failure: they are in the body.
+    try testing.expectEqual(@as(usize, 0), failure.violations.len);
+    const sent = result.response.body;
+    try testing.expectEqual(@as(usize, 100), std.mem.count(u8, sent, "\"code\":\"validation.not_empty\""));
+    try testing.expect(std.mem.indexOf(u8, sent, "{\"field\":\"tags[99]\",") != null);
+    try testing.expect(std.mem.indexOf(u8, sent, "tags[100]") == null);
+    try testing.expect(std.mem.endsWith(u8, sent, "}],\"truncated\":true}"));
+    try testing.expectEqual(@as(u32, 0), accounts.runs.load(.acquire));
+}
+
+test "a response against the server's own rules is internal, with the details only in the server's log" {
+    const io = testing.io;
+    var f: Fixture = undefined;
+    try f.open();
+    defer f.close(io);
+    var accounts: Accounts = .{};
+    var server: Server = try .init(testing.allocator, .{ .transport = f.memory.serverTransport(), .handlers = .{&accounts} });
+    defer server.deinit(io);
+    try server.start(io);
+    const log_level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = log_level;
+
+    var result = try f.call(io, accountsRoute("create"), "{\"name\":\"nameless\",\"email\":\"ann@example.com\"}");
+    try expectFailure(&result, method.invalid_response, "");
+    try testing.expectEqual(@as(u32, 1), accounts.runs.load(.acquire));
+}
+
+test "a request whose value outgrows the memory of a call is refused with resource_exhausted" {
+    const io = testing.io;
+    var f: Fixture = undefined;
+    try f.open();
+    defer f.close(io);
+    var accounts: Accounts = .{};
+    var server: Server = try .init(testing.allocator, .{
+        .transport = f.memory.serverTransport(),
+        .handlers = .{&accounts},
+        .limits = .{ .max_request_bytes = 16 * 1024, .max_request_memory_bytes = 64 * 1024 },
+    });
+    defer server.deinit(io);
+    try server.start(io);
+
+    // 2000 nulls: 10 KB of JSON, 1.6 MB of memory.
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(testing.allocator);
+    try body.appendSlice(testing.allocator, "{\"items\":[null");
+    for (0..1999) |_| try body.appendSlice(testing.allocator, ",null");
+    try body.appendSlice(testing.allocator, "]}");
+    var result = try f.call(io, accountsRoute("bulk"), body.items);
+    try expectFailure(&result, failures.out_of_memory, "");
+    var small = try f.call(io, accountsRoute("bulk"), "{\"items\":[null,null]}");
+    try expectBody(&small, "{}");
+    try testing.expectEqual(@as(u32, 1), accounts.runs.load(.acquire));
 }
 
 const UserApiV2 = contract.Contract(.{
