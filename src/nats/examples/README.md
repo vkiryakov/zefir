@@ -575,9 +575,8 @@ A message carries:
 | `status`, `description` | a status the server set, such as 503 "no responders"                       |
 
 All of it lives in one allocation that `msg.deinit()` frees, so keep the
-message as long as you use its slices. Header names are case-sensitive, as
-in nats.go and the NATS specification: `get("Trace-Id")` does not find
-`trace-id`.
+message as long as you use its slices. Header names are case-sensitive:
+`get("Trace-Id")` does not find `trace-id`.
 
 `next` waits as long as it takes; give it a timeout to wait less:
 
@@ -980,12 +979,11 @@ what its subscriptions still hold goes with it, see
 [What happens to the data](#what-happens-to-the-data).
 
 > [!WARNING]
-> **The subscription limits are much smaller than nats.go's.** A
-> subscription holds 1024 messages and 8 MiB waiting for `next()`. nats.go
-> holds 65,536 messages in a synchronous subscription and 500,000 in an
-> asynchronous one, 64 MiB in both: 64 to 500 times more messages. A burst that
-> nats.go absorbs can overflow a subscription here and drop messages. If
-> your subscribers fall behind in bursts, raise `.pending` for those
+> **A burst can overflow a subscription.** A subscription holds at most
+> 1024 messages and 8 MiB waiting for `next()`, and the server does not
+> wait for a slow reader: when a burst comes faster than your code reads
+> it, the messages that do not fit are dropped and counted. If your
+> subscribers fall behind in bursts, raise `.pending` for those
 > subscriptions, or read faster, with more tasks in a queue group.
 
 | Limit                            | Default | When it is reached                                                 |
@@ -1214,7 +1212,7 @@ millisecond.
 > `reconnect.abort_on_auth_error = false`. A refusal on a live connection,
 > as when the password changes on the server and its configuration is
 > reloaded, counts as the first: with a single server, the client stops at
-> the first refused reconnect, as nats.go does.
+> the first refused reconnect.
 
 <details>
 <summary>The fine print of the reconnect buffer and the counts</summary>
@@ -1311,8 +1309,8 @@ while (true) {
 > A message counts as handled once its reader comes back to `next()` for
 > the next one, so a handler that loops on `next()` answers its last
 > message before publishing stops. A subscription that nobody reads holds
-> the drain until its timeout, as in nats.go: read every subscription
-> until null, or `deinit()` it.
+> the drain until its timeout: read every subscription until null, or
+> `deinit()` it.
 
 `sub.drain(.{})` does the same for one subscription: the server stops
 sending, what came is handed out, and it returns once the reader came back

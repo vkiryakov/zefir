@@ -507,7 +507,7 @@ pub const DrainError = error{
 /// then fails with ConnectionDraining, and every one that returned before
 /// reached the server. So read each subscription with `next()` until it
 /// returns null, or `deinit()` it: a subscription nobody reads holds the
-/// drain until its timeout, as in nats.go. A stream of `requestMany` that
+/// drain until its timeout. A stream of `requestMany` that
 /// took all it takes (its `max_responses`, or its deadline passed) does
 /// not hold it: what it received stays readable after the drain, then
 /// null. At `options.timeout`, 30 s by default, it closes anyway and
