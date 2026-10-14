@@ -31,7 +31,8 @@
 //! Hooks for tests of failures, safe to call from any task: `setDelay`
 //! holds every call before `admit`, `loseNextResponse` drops a response,
 //! `failNext` makes the next call fail, `breakLink` and `restoreLink`
-//! break the link in the middle of calls and bring it back.
+//! break the link in the middle of calls and bring it back, `failServer`
+//! tells the server that the whole transport broke.
 //!
 //! Every call keeps about 100 bytes until `deinit`, so that an engine that
 //! breaks the rules of `Reply` gets a panic that names the rule, never a
@@ -136,6 +137,9 @@ const Call = struct {
     /// The link broke while `start` ran: the client cancels the call once
     /// `start` has returned.
     cancel_pending: bool = false,
+    /// The transport has canceled the call on the server, and does not
+    /// again.
+    canceled: bool = false,
     sends: u8 = 0,
     retry_allowed: bool = false,
 
@@ -278,6 +282,8 @@ pub fn info(t: *MemoryTransport) transport.Info {
 /// Sends `request` to the server's dispatcher and waits for the response,
 /// by the rules of `rpc.ClientTransport.call`.
 pub fn call(t: *MemoryTransport, io: std.Io, request: *const transport.Request, options: ClientTransport.CallOptions) ClientTransport.CallError!model.Response {
+    // A cancelation pending on entry comes before any other error.
+    try io.checkCancel();
     if (t.takeInjected()) |err| {
         if (options.diagnostics) |d| d.set(.send, err, "error injected with failNext", .{});
         return err;
@@ -296,8 +302,6 @@ pub fn call(t: *MemoryTransport, io: std.Io, request: *const transport.Request, 
         if (deadline) |d| pause.nanoseconds = @min(pause.nanoseconds, d.remaining(now(io)).nanoseconds);
         try io.sleep(pause, .awake);
         if (deadline) |d| if (d.remaining(now(io)).nanoseconds < std.time.ns_per_ms) return error.Timeout;
-    } else {
-        try io.checkCancel();
     }
 
     const c = try t.register(io);
@@ -374,23 +378,26 @@ pub fn drain(t: *MemoryTransport, io: std.Io) void {
 /// Stops the server side: new calls get `error.Unavailable`, waiting
 /// clients `error.ConnectionLost`, a late `Reply.send` `error.Closed`.
 /// Waits for the calls in `admit` or `start`: a call the server accepted
-/// is started or abandoned before `close` returns. Calls already started
-/// stay with the engine until their `Reply.release`.
+/// is started or abandoned before `close` returns, a second `close` too.
+/// Calls already started stay with the engine until their `Reply.release`.
 pub fn close(t: *MemoryTransport, io: std.Io) void {
     t.mutex.lockUncancelable(io);
     defer t.mutex.unlock(io);
     switch (t.state.load(.monotonic)) {
-        .idle, .closed => return,
-        .running, .draining => {},
+        .idle => return,
+        // A second close waits too, for the calls the first one waits for.
+        .closed => {},
+        .running, .draining => {
+            t.state.store(.closed, .release);
+            t.dispatcher = null;
+            var node = t.calls.first;
+            while (node) |n| : (node = n.next) {
+                const c: *Call = @fieldParentPtr("node", n);
+                c.cut = true;
+            }
+            t.pending.failAll(io, error.ConnectionLost);
+        },
     }
-    t.state.store(.closed, .release);
-    t.dispatcher = null;
-    var node = t.calls.first;
-    while (node) |n| : (node = n.next) {
-        const c: *Call = @fieldParentPtr("node", n);
-        c.cut = true;
-    }
-    t.pending.failAll(io, error.ConnectionLost);
     while (t.settling > 0) t.settled.waitUncancelable(io, &t.mutex);
 }
 
@@ -436,7 +443,7 @@ pub fn breakLink(t: *MemoryTransport, io: std.Io) void {
             // Its client sees the cut after admit and abandons it.
             .admitting => {},
             .starting => c.cancel_pending = true,
-            .running => c.incoming.cancel(io),
+            .running => cancelOnServer(c, io),
             // Calls the server side is done with leave the list.
             .released, .not_started => unreachable,
         }
@@ -448,6 +455,31 @@ pub fn breakLink(t: *MemoryTransport, io: std.Io) void {
 /// late responses get `error.Closed`.
 pub fn restoreLink(t: *MemoryTransport) void {
     t.link_up.store(true, .release);
+}
+
+/// Tells the running server that the transport broke for good, as a
+/// transport whose port died would: `Dispatcher.fail(err)` with a message
+/// in its `Diagnostics`. Nothing else changes; the engine drains and
+/// closes. Without a running or draining server it does nothing.
+pub fn failServer(t: *MemoryTransport, io: std.Io, err: transport.Dispatcher.FatalError) void {
+    const dispatcher = dispatcher: {
+        t.mutex.lockUncancelable(io);
+        defer t.mutex.unlock(io);
+        switch (t.state.load(.monotonic)) {
+            .running, .draining => {},
+            .idle, .closed => return,
+        }
+        // `close` waits for it, as for a call in admit.
+        t.settling += 1;
+        break :dispatcher t.dispatcher.?;
+    };
+    var diagnostics: transport.Diagnostics = .{};
+    diagnostics.set(.connect, err, "failure injected with failServer", .{});
+    // Outside the lock: the engine may drain the transport right away.
+    dispatcher.fail(io, err, &diagnostics);
+    t.mutex.lockUncancelable(io);
+    defer t.mutex.unlock(io);
+    t.settle(io);
 }
 
 /// A server runs, does not drain, and the link is up.
@@ -517,7 +549,7 @@ fn endStart(t: *MemoryTransport, io: std.Io, c: *Call) void {
     t.settle(io);
     if (c.phase == .released) return;
     c.phase = .running;
-    if (c.cancel_pending) c.incoming.cancel(io);
+    if (c.cancel_pending) cancelOnServer(c, io);
 }
 
 /// The client gave up on a running call: cancel it on the server, unless
@@ -525,7 +557,14 @@ fn endStart(t: *MemoryTransport, io: std.Io, c: *Call) void {
 fn cancelCall(t: *MemoryTransport, io: std.Io, c: *Call) void {
     t.mutex.lockUncancelable(io);
     defer t.mutex.unlock(io);
-    if (c.phase == .running and !c.cut) c.incoming.cancel(io);
+    if (c.phase == .running and !c.cut) cancelOnServer(c, io);
+}
+
+/// `Incoming.cancel`, once a call; under `mutex`.
+fn cancelOnServer(c: *Call, io: std.Io) void {
+    if (c.canceled) return;
+    c.canceled = true;
+    c.incoming.cancel(io);
 }
 
 /// One call fewer in `admit` or `start`; under `mutex`.
@@ -1395,6 +1434,106 @@ test "release, breakLink, drain and close keep a cancelation of the calling task
     try io.sleep(.fromMilliseconds(10), .awake);
     try testing.expectError(error.Canceled, task.cancel(io));
     try testing.expectError(error.ConnectionLost, caller.await(io));
+    try f.expectClean(io);
+}
+
+/// Waits to be canceled, then makes calls that would fail for other reasons
+/// too, each with the cancelation pending on entry.
+fn callsWhileCanceled(memory: *MemoryTransport, io: std.Io, requests: []const transport.Request, arena: *std.heap.ArenaAllocator) !void {
+    var never: std.Io.Event = .unset;
+    never.wait(io) catch |err| switch (err) {
+        error.Canceled => {},
+    };
+    for (requests) |*request| {
+        io.recancel();
+        if (memory.call(io, request, optionsOf(arena))) |_| {
+            return error.TestUnexpectedResult;
+        } else |err| if (err != error.Canceled) return err;
+    }
+    io.recancel();
+    return io.checkCancel();
+}
+
+test "a cancelation pending on entry gives Canceled before any other error" {
+    const io = testing.io;
+    var memory: MemoryTransport = try .init(testing.allocator, .{ .max_body_bytes = 1 });
+    defer memory.deinit(io);
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    // No server, an injected error, a body over max_body_bytes, a deadline
+    // that has passed.
+    memory.failNext(error.Unexpected);
+    const requests = [_]transport.Request{
+        requestOf(io, "", .fromSeconds(5)),
+        requestOf(io, "{}", .fromSeconds(5)),
+        requestOf(io, "", .zero),
+    };
+    var task = try io.concurrent(callsWhileCanceled, .{ &memory, io, &requests, &arena });
+    try io.sleep(.fromMilliseconds(10), .awake);
+    try testing.expectError(error.Canceled, task.cancel(io));
+}
+
+test "a second close waits for the calls the first one waits for" {
+    const io = testing.io;
+    var memory: MemoryTransport = try .init(testing.allocator, .{});
+    defer memory.deinit(io);
+    var gate: Gate = .{ .hold = .admit };
+    try memory.start(io, gate.dispatcher());
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+
+    const request = requestOf(io, "{}", .fromSeconds(30));
+    var caller = try io.concurrent(callTask, .{ memory.clientTransport(), io, &request, optionsOf(&arena) });
+    defer if (caller.cancel(io)) |_| {} else |_| {};
+    defer gate.open.set(io);
+    try gate.entered.wait(io);
+    var first = try io.concurrent(closeAndCheck, .{ &memory, io, &gate });
+    defer _ = first.cancel(io);
+    var second = try io.concurrent(closeAndCheck, .{ &memory, io, &gate });
+    defer _ = second.cancel(io);
+    defer gate.open.set(io);
+    try io.sleep(.fromMilliseconds(20), .awake);
+    gate.open.set(io);
+    try testing.expect(first.await(io));
+    try testing.expect(second.await(io));
+    try testing.expectError(error.Unavailable, caller.await(io));
+}
+
+test "a call its client gave up on and then cut by breakLink is canceled once" {
+    const io = testing.io;
+    var f: Fixture = undefined;
+    try f.init(io, .{}, .{ .routes = &.{get_user} });
+    defer f.deinit(io);
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+
+    const request = requestOf(io, "{}", .fromMilliseconds(300));
+    var caller = try io.concurrent(callTask, .{ f.memory.clientTransport(), io, &request, optionsOf(&arena) });
+    defer if (caller.cancel(io)) |_| {} else |_| {};
+    try f.recorder.waitStarted(io, 1);
+    try testing.expectError(error.Timeout, caller.await(io));
+    f.memory.breakLink(io);
+    try testing.expectEqual(@as(u32, 1), f.recorder.call(io, 0).cancels);
+    f.recorder.releaseCall(io, 0, .canceled);
+    f.memory.restoreLink();
+    try f.expectClean(io);
+}
+
+test "failServer tells the running server that the transport broke; after close it does nothing" {
+    const io = testing.io;
+    var f: Fixture = undefined;
+    try f.init(io, .{}, .{ .routes = &.{get_user} });
+    defer f.deinit(io);
+
+    f.memory.failServer(io, error.AccessDenied);
+    const fatal = f.recorder.fatal(io).?;
+    try testing.expectEqual(error.AccessDenied, fatal.err);
+    try testing.expectEqualStrings("failure injected with failServer", fatal.diagnostics.?.message());
+    try testing.expectEqual(error.AccessDenied, fatal.diagnostics.?.cause.?);
+
+    f.recorder.close(io);
+    f.memory.failServer(io, error.Unexpected);
+    try testing.expectEqual(error.AccessDenied, f.recorder.fatal(io).?.err);
     try f.expectClean(io);
 }
 
