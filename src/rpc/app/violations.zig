@@ -1,6 +1,7 @@
 //! The body of a failure with validation violations: the framework's own
 //! JSON, which `rpc.Server` writes and `rpc.Client` reads. At most 100
-//! violations; `"truncated":true` says that there were more:
+//! violations, and no more than the server's `max_response_bytes` holds;
+//! `"truncated":true` says that there were more:
 //!
 //! ```json
 //! {"violations":[{"field":"name","code":"validation.not_empty","message":"must not be empty"}],"truncated":true}
@@ -42,6 +43,53 @@ pub fn fromReport(arena: std.mem.Allocator, report: v.Report) error{OutOfMemory}
     return list;
 }
 
+/// The first `max_violations` of `given`, violations that a method set with
+/// `ctx.fail`, as a body carries them, in `arena`: paths as `fieldOf`
+/// keeps them. `error.InvalidUtf8` for a code or a message that is not
+/// UTF-8, which JSON cannot carry.
+pub fn fromFailure(arena: std.mem.Allocator, given: []const model.Violation) error{ OutOfMemory, InvalidUtf8 }![]model.Violation {
+    const kept = given[0..@min(given.len, max_violations)];
+    for (kept) |violation| {
+        if (!std.unicode.utf8ValidateSlice(violation.code) or !std.unicode.utf8ValidateSlice(violation.message)) return error.InvalidUtf8;
+    }
+    const list = try arena.alloc(model.Violation, kept.len);
+    for (kept, list) |found, *violation| {
+        violation.* = .{ .field = fieldOf(found.field), .code = found.code, .message = found.message };
+    }
+    return list;
+}
+
+/// What a body keeps of a list of violations: the first `count`, and
+/// whether it says `"truncated":true`.
+pub const Fit = struct { count: usize, truncated: bool };
+
+/// The smallest body: no violation fits, and it says so.
+pub const smallest = "{\"violations\":[],\"truncated\":true}";
+
+const frame = "{\"violations\":[]}";
+const truncated_mark = ",\"truncated\":true";
+
+/// How many of `violations`, from the first, a body of at most `max_bytes`
+/// holds: no more than `max_violations`. The body says `"truncated":true`
+/// when `truncated` does or when it leaves some out. `max_bytes` is at
+/// least the size of `smallest`, which always fits.
+pub fn fit(violations: []const model.Violation, truncated: bool, max_bytes: usize) Fit {
+    std.debug.assert(max_bytes >= smallest.len);
+    const list = violations[0..@min(violations.len, max_violations)];
+    const more = truncated or violations.len > list.len;
+    var size: usize = frame.len;
+    var count: usize = 0;
+    for (list) |violation| {
+        const next = size + itemSize(violation) + @intFromBool(count > 0);
+        // A body that leaves some out needs room for the mark.
+        const left_out = more or count + 1 < list.len;
+        if (next + (if (left_out) truncated_mark.len else 0) > max_bytes) break;
+        size = next;
+        count += 1;
+    }
+    return .{ .count = count, .truncated = more or count < list.len };
+}
+
 /// The body for `violations`, at most `max_violations` of them, in
 /// `arena`; `truncated` adds `"truncated":true`. Its size is counted
 /// first, so the bytes are allocated once.
@@ -60,17 +108,29 @@ fn write(w: *Writer, violations: []const model.Violation, truncated: bool) Write
     try w.writeAll("{\"violations\":[");
     for (violations, 0..) |violation, i| {
         if (i > 0) try w.writeByte(',');
-        try w.writeAll("{\"field\":");
-        if (violation.field) |field| try writeString(field, w) else try w.writeAll("null");
-        try w.writeAll(",\"code\":");
-        try writeString(violation.code, w);
-        try w.writeAll(",\"message\":");
-        try writeString(violation.message, w);
-        try w.writeByte('}');
+        try writeItem(w, violation);
     }
     try w.writeByte(']');
-    if (truncated) try w.writeAll(",\"truncated\":true");
+    if (truncated) try w.writeAll(truncated_mark);
     try w.writeByte('}');
+}
+
+fn writeItem(w: *Writer, violation: model.Violation) Writer.Error!void {
+    try w.writeAll("{\"field\":");
+    if (violation.field) |field| try writeString(field, w) else try w.writeAll("null");
+    try w.writeAll(",\"code\":");
+    try writeString(violation.code, w);
+    try w.writeAll(",\"message\":");
+    try writeString(violation.message, w);
+    try w.writeByte('}');
+}
+
+/// The size of one violation in a body, without the comma before it.
+fn itemSize(violation: model.Violation) usize {
+    var buffer: [256]u8 = undefined;
+    var counter: Writer.Discarding = .init(&buffer);
+    writeItem(&counter.writer, violation) catch unreachable; // A discarding writer never fails.
+    return @intCast(counter.fullCount());
 }
 
 fn writeString(text: []const u8, w: *Writer) Writer.Error!void {
@@ -113,6 +173,44 @@ test "a body of the most violations is allocated once, exactly" {
     defer failing.allocator().free(body);
     try testing.expectEqual(@as(usize, 1), failing.allocations);
     try testing.expect(std.mem.endsWith(u8, body, "}],\"truncated\":true}"));
+}
+
+test "a body keeps the first violations that fit its budget, and says that it left some out" {
+    const list = [_]model.Violation{
+        .{ .field = "tags[0]", .code = "validation.not_empty", .message = "must not be empty" },
+        .{ .field = "tags[1]", .code = "validation.not_empty", .message = "must not be empty" },
+        .{ .field = null, .code = "c", .message = "m" },
+    };
+    const whole = try encode(testing.allocator, &list, false);
+    defer testing.allocator.free(whole);
+    try testing.expectEqual(Fit{ .count = 3, .truncated = false }, fit(&list, false, whole.len));
+    // For every budget: the body fits it, and one more violation would not.
+    for (smallest.len..whole.len + 1) |max_bytes| {
+        const kept = fit(&list, false, max_bytes);
+        const body = try encode(testing.allocator, list[0..kept.count], kept.truncated);
+        defer testing.allocator.free(body);
+        try testing.expect(body.len <= max_bytes);
+        try testing.expectEqual(kept.count < list.len, kept.truncated);
+        if (kept.count < list.len) {
+            const more = try encode(testing.allocator, list[0 .. kept.count + 1], kept.count + 1 < list.len);
+            defer testing.allocator.free(more);
+            try testing.expect(more.len > max_bytes);
+        }
+    }
+    // The smallest budget holds the smallest body.
+    try testing.expectEqual(Fit{ .count = 0, .truncated = true }, fit(&list, false, smallest.len));
+    const empty = try encode(testing.allocator, &.{}, true);
+    defer testing.allocator.free(empty);
+    try testing.expectEqualStrings(smallest, empty);
+    // A list that was cut before stays truncated.
+    try testing.expectEqual(Fit{ .count = 3, .truncated = true }, fit(&list, true, 1024));
+}
+
+test "a body keeps at most 100 violations" {
+    var list: [150]model.Violation = undefined;
+    for (&list) |*violation| violation.* = .{ .field = "a", .code = "c", .message = "m" };
+    try testing.expectEqual(Fit{ .count = 100, .truncated = true }, fit(&list, false, 1 << 20));
+    try testing.expectEqual(Fit{ .count = 100, .truncated = false }, fit(list[0..100], false, 1 << 20));
 }
 
 test "a path longer than 256 bytes, with a control character or not UTF-8 is left out" {

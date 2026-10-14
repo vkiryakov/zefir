@@ -127,6 +127,11 @@ pub const Context = opaque {
     /// .app_code, .message })`. Middleware sees `error.RpcFailure` and the
     /// failure in `failure()`. Its strings may point into the arena, the
     /// request or literals.
+    ///
+    /// `.violations` go out only from a method of `rpc.Server`, in the body
+    /// of the failure, as those of a request against its rules: at most
+    /// 100, and as many as `max_response_bytes` holds. Those of middleware
+    /// and of handlers of `rpc.RawServer` are not sent.
     pub fn fail(ctx: *Context, reason: model.Failure) error{RpcFailure} {
         return failWithBody(ctx, reason, "");
     }

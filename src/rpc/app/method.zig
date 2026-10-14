@@ -10,8 +10,8 @@
 //! - a body that does not decode: `invalid_argument` / `rpc.invalid_request`,
 //!   with what is wrong and where;
 //! - a request against its rules: `invalid_argument` /
-//!   `rpc.invalid_request`, with every violation, also in the body of the
-//!   failure;
+//!   `rpc.invalid_request`, with its violations, also in the body of the
+//!   failure: at most 100, and as many as `max_response_bytes` holds;
 //! - a response against its rules, or one that does not encode:
 //!   `internal` / `rpc.invalid_response`, the details only in the server's
 //!   log;
@@ -20,7 +20,8 @@
 //!
 //! The errors of the method itself go on as they are: the contract's table
 //! and the framework's names map them once the chain of middleware has
-//! unwound.
+//! unwound. The violations of a failure that the method sets with
+//! `ctx.fail` go out in the body of the failure, as those of a request.
 
 const std = @import("std");
 const v = @import("validator");
@@ -56,12 +57,41 @@ pub fn Wrapper(comptime T: type, comptime M: type) type {
             // The deadline, the client or the stop may have ended the call
             // meanwhile: then the method does not run.
             try io.checkCancel();
-            const response = try @field(T, M.name)(handler, ctx, request);
+            const response = @field(T, M.name)(handler, ctx, request) catch |err| {
+                const failed: anyerror = err;
+                if (failed != error.RpcFailure) return err;
+                const protection = io.swapCancelProtection(.blocked);
+                defer _ = io.swapCancelProtection(protection);
+                return failWithOwnViolations(ctx);
+            };
             const protection = io.swapCancelProtection(.blocked);
             defer _ = io.swapCancelProtection(protection);
             return encodeResponse(M.Response, ctx, &response);
         }
     };
+}
+
+/// After a method returned `error.RpcFailure`: the violations of the
+/// failure it set with `ctx.fail` go out as the body of the failure, like
+/// those of a request against its rules. A code or a message that JSON
+/// cannot carry fails the call with `internal` / `rpc.invalid_response`.
+fn failWithOwnViolations(ctx: *Context) error{RpcFailure} {
+    const call = engine_context.callOf(ctx);
+    // Without ctx.fail the call fails with internal.
+    const reason = call.recorded orelse return error.RpcFailure;
+    if (reason.violations.len == 0 or call.failure_body.len > 0) return error.RpcFailure;
+    const list = violations.fromFailure(ctx.allocator(), reason.violations) catch |err| switch (err) {
+        error.OutOfMemory => return ctx.fail(failures.out_of_memory),
+        error.InvalidUtf8 => {
+            const route = ctx.route();
+            log.warn("{s}.v{d}.{s} failed with a violation whose code or message is not UTF-8", .{ route.service, route.version, route.method });
+            return ctx.fail(invalid_response);
+        },
+    };
+    var failure = reason;
+    failure.violations = list;
+    failure.violations_truncated = reason.violations_truncated or reason.violations.len > list.len;
+    return failWithViolations(ctx, failure);
 }
 
 /// The request in `body`, decoded in the call's arena within the server's
@@ -97,15 +127,28 @@ fn checkRequest(comptime Req: type, ctx: *Context, request: *const Req) error{Rp
     const arena = ctx.allocator();
     const report = v.checkAll(arena, request) catch return ctx.fail(failures.out_of_memory);
     const list = violations.fromReport(arena, report) catch return ctx.fail(failures.out_of_memory);
-    const body = violations.encode(arena, list, report.truncated) catch return ctx.fail(failures.out_of_memory);
-    return engine_context.failWithBody(ctx, .{
+    return failWithViolations(ctx, .{
         .code = .invalid_argument,
         .app_code = "rpc.invalid_request",
         .message = "Invalid request",
         .field = if (list.len > 0) list[0].field else null,
         .violations = list,
         .violations_truncated = report.truncated,
-    }, body);
+    });
+}
+
+/// Fails the call with `reason`, its violations as the body of the
+/// failure: the first that fit `max_response_bytes`, at most 100, with
+/// `"truncated":true` when some are left out. Middleware sees the
+/// violations that were sent; the failure itself always fits.
+fn failWithViolations(ctx: *Context, reason: model.Failure) error{RpcFailure} {
+    const max_bytes = engine_context.callOf(ctx).limits.max_response_bytes;
+    const kept = violations.fit(reason.violations, reason.violations_truncated, max_bytes);
+    var failure = reason;
+    failure.violations = reason.violations[0..kept.count];
+    failure.violations_truncated = kept.truncated;
+    const body = violations.encode(ctx.allocator(), failure.violations, failure.violations_truncated) catch return ctx.fail(failures.out_of_memory);
+    return engine_context.failWithBody(ctx, failure, body);
 }
 
 /// `response`, checked against its rules, as JSON in the call's arena. The

@@ -106,12 +106,13 @@ pub const Failure = struct {
     /// The path of the first validation violation, such as "items[2].name",
     /// for clients that show one field.
     field: ?[]const u8 = null,
-    /// All validation violations; empty for other failures. On the wire they
-    /// are the body of the failure: `rpc.Server` encodes them and
-    /// `rpc.Client` decodes them, so in the engine and in transports this is
-    /// always empty.
+    /// The validation violations, at most 100; empty for other failures. On
+    /// the wire they are the body of the failure: `rpc.Server` encodes them
+    /// and `rpc.Client` decodes them, so in the engine and in transports
+    /// this is always empty.
     violations: []const Violation = &.{},
-    /// There were more than 100 violations; the rest were dropped.
+    /// Some violations were dropped: there were more than 100, or more than
+    /// the body of a response holds (`max_response_bytes`).
     violations_truncated: bool = false,
 };
 

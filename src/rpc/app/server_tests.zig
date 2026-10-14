@@ -416,6 +416,52 @@ test "more than 100 violations: the first 100 and truncated" {
     try testing.expectEqual(@as(u32, 0), accounts.runs.load(.acquire));
 }
 
+/// The failure of `result`; an error for a success.
+fn failureOf(result: *const RawClient.Result) !model.Failure {
+    return switch (result.response.status) {
+        .ok => error.TestUnexpectedResult,
+        .failure => |failure| failure,
+    };
+}
+
+test "violations over max_response_bytes: the first that fit and truncated, and the failure stays" {
+    const io = testing.io;
+    var f: Fixture = undefined;
+    try f.open();
+    defer f.close(io);
+    var accounts: Accounts = .{};
+    var peek: Peek = .{};
+    var server: Server = try .init(testing.allocator, .{
+        .transport = f.memory.serverTransport(),
+        .handlers = .{&accounts},
+        .middleware = .{&peek},
+        .limits = .{ .max_response_bytes = 1024 },
+    });
+    defer server.deinit(io);
+    try server.start(io);
+
+    // 30 empty tags: 30 violations of about 80 bytes, 2.4 KB of body.
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(testing.allocator);
+    try body.appendSlice(testing.allocator, "{\"name\":\"Ann\",\"email\":\"ann@example.com\",\"tags\":[\"\"");
+    for (0..29) |_| try body.appendSlice(testing.allocator, ",\"\"");
+    try body.appendSlice(testing.allocator, "]}");
+    var result = try f.call(io, accountsRoute("create"), body.items);
+    defer result.deinit();
+    const failure = try failureOf(&result);
+    try testing.expectEqualStrings("rpc.invalid_request", failure.app_code);
+    try testing.expectEqualStrings("tags[0]", failure.field.?);
+    // 12 violations and the frame take 995 bytes; a 13th would pass 1024.
+    const sent = result.response.body;
+    try testing.expectEqual(@as(usize, 995), sent.len);
+    try testing.expectEqual(@as(usize, 12), std.mem.count(u8, sent, "\"code\":\"validation.not_empty\""));
+    try testing.expect(std.mem.indexOf(u8, sent, "{\"field\":\"tags[11]\",") != null);
+    try testing.expect(std.mem.endsWith(u8, sent, "}],\"truncated\":true}"));
+    // Middleware sees the violations that were sent.
+    try testing.expectEqual(@as(usize, 12), peek.violations);
+    try testing.expect(peek.truncated);
+}
+
 test "a response against the server's own rules is internal, with the details only in the server's log" {
     const io = testing.io;
     var f: Fixture = undefined;
@@ -601,6 +647,7 @@ const Peek = struct {
     response_len: ?usize = null,
     failure: ?model.Failure = null,
     violations: usize = 0,
+    truncated: bool = false,
 
     pub fn run(self: *Peek, ctx: *Context, next: *Next) anyerror!void {
         const request = ctx.requestBody();
@@ -613,6 +660,7 @@ const Peek = struct {
             if (ctx.failure()) |failure| {
                 self.failure = .{ .code = failure.code, .app_code = failure.app_code, .message = failure.message };
                 self.violations = failure.violations.len;
+                self.truncated = failure.violations_truncated;
             }
             return err;
         };
@@ -835,6 +883,15 @@ const Tickets = struct {
             2 => ctx.fail(.{ .code = .out_of_range, .app_code = "tickets.too_old", .message = "Ticket is too old", .field = "id" }),
             // RpcFailure without ctx.fail is the handler's bug.
             3 => error.RpcFailure,
+            // Violations the handler found itself, as a check in a
+            // database does: the body of the failure.
+            4 => ctx.fail(.{
+                .code = .invalid_argument,
+                .app_code = "tickets.taken",
+                .message = "Ticket is taken",
+                .field = "id",
+                .violations = &.{.{ .field = "id", .code = "tickets.taken", .message = "is taken" }},
+            }),
             else => req,
         };
     }
@@ -874,6 +931,8 @@ test "a handler's errors: ctx.fail exactly, the contract's table, the framework'
     try expectFailure(&old, .{ .code = .out_of_range, .app_code = "tickets.too_old", .message = "Ticket is too old", .field = "id" }, "");
     var bare = try f.call(io, ticketsRoute("get"), "{\"id\":3}");
     try expectFailure(&bare, failures.internal, "");
+    var taken = try f.call(io, ticketsRoute("get"), "{\"id\":4}");
+    try expectFailure(&taken, .{ .code = .invalid_argument, .app_code = "tickets.taken", .message = "Ticket is taken", .field = "id" }, "{\"violations\":[{\"field\":\"id\",\"code\":\"tickets.taken\",\"message\":\"is taken\"}]}");
     for (reserved_names, 0..) |case, i| {
         errdefer std.debug.print("error.{t}\n", .{case[0]});
         var body: [16]u8 = undefined;
@@ -882,10 +941,92 @@ test "a handler's errors: ctx.fail exactly, the contract's table, the framework'
     }
 }
 
-/// Fails every call before the rest of the chain, exactly.
+const Seat = struct { row: u32 };
+
+const SeatApi = contract.Contract(.{
+    .name = "seats",
+    .version = 1,
+    .methods = .{ .book = contract.method(Seat, Seat) },
+});
+
+/// Fails `book` with violations it found itself; the row says which.
+const Seats = struct {
+    pub const rpc_handler = contract.implement(SeatApi, .{});
+
+    pub fn book(self: *Seats, ctx: *Context, req: Seat) !Seat {
+        _ = self;
+        var failure: model.Failure = .{ .code = .already_exists, .app_code = "seats.taken", .message = "Seat is taken", .field = "row" };
+        switch (req.row) {
+            // 150 violations: the first 100 go out.
+            1 => {
+                const list = try ctx.allocator().alloc(model.Violation, 150);
+                for (list, 0..) |*violation, i| {
+                    violation.* = .{ .field = try std.fmt.allocPrint(ctx.allocator(), "seats[{d}]", .{i}), .code = "seats.taken", .message = "is taken" };
+                }
+                failure.violations = list;
+            },
+            // The handler says there were more.
+            2 => {
+                failure.violations = &.{.{ .field = "row", .code = "seats.taken", .message = "is taken" }};
+                failure.violations_truncated = true;
+            },
+            // A path with a line break goes out as null, like a path of
+            // validation.
+            3 => failure.violations = &.{.{ .field = "row\n", .code = "seats.taken", .message = "is taken" }},
+            // JSON cannot carry a message that is not UTF-8.
+            4 => failure.violations = &.{.{ .field = "row", .code = "seats.taken", .message = "\xff" }},
+            else => return req,
+        }
+        return ctx.fail(failure);
+    }
+};
+
+fn seatsRoute() model.Route {
+    return .{ .service = "seats", .version = 1, .method = "book" };
+}
+
+test "the violations of ctx.fail in a method: at most 100, paths as in validation, and only what JSON carries" {
+    const io = testing.io;
+    var f: Fixture = undefined;
+    try f.open();
+    defer f.close(io);
+    var seats: Seats = .{};
+    var server: Server = try .init(testing.allocator, .{ .transport = f.memory.serverTransport(), .handlers = .{&seats} });
+    defer server.deinit(io);
+    try server.start(io);
+    const taken: model.Failure = .{ .code = .already_exists, .app_code = "seats.taken", .message = "Seat is taken", .field = "row" };
+
+    var many = try f.call(io, seatsRoute(), "{\"row\":1}");
+    defer many.deinit();
+    const failure = try failureOf(&many);
+    try testing.expectEqualStrings("seats.taken", failure.app_code);
+    try testing.expectEqualStrings("row", failure.field.?);
+    const sent = many.response.body;
+    try testing.expectEqual(@as(usize, 100), std.mem.count(u8, sent, "\"code\":\"seats.taken\""));
+    try testing.expect(std.mem.indexOf(u8, sent, "{\"field\":\"seats[99]\",") != null);
+    try testing.expect(std.mem.endsWith(u8, sent, "}],\"truncated\":true}"));
+
+    var more = try f.call(io, seatsRoute(), "{\"row\":2}");
+    try expectFailure(&more, taken, "{\"violations\":[{\"field\":\"row\",\"code\":\"seats.taken\",\"message\":\"is taken\"}],\"truncated\":true}");
+    var bad_path = try f.call(io, seatsRoute(), "{\"row\":3}");
+    try expectFailure(&bad_path, taken, "{\"violations\":[{\"field\":null,\"code\":\"seats.taken\",\"message\":\"is taken\"}]}");
+    const log_level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = log_level;
+    var not_utf8 = try f.call(io, seatsRoute(), "{\"row\":4}");
+    try expectFailure(&not_utf8, method.invalid_response, "");
+}
+
+/// Fails every call before the rest of the chain, exactly. The violations
+/// of middleware are not sent: only a method's go out, in the body.
 fn closedForMaintenance(ctx: *Context, next: *Next) anyerror!void {
     _ = next;
-    return ctx.fail(.{ .code = .unavailable, .app_code = "tickets.maintenance", .message = "Down for maintenance" });
+    return ctx.fail(.{
+        .code = .unavailable,
+        .app_code = "tickets.maintenance",
+        .message = "Down for maintenance",
+        .violations = &.{.{ .field = null, .code = "tickets.maintenance", .message = "is closed" }},
+    });
 }
 
 /// Turns any failure of the rest of the chain into success: the failure
