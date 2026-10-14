@@ -1347,6 +1347,51 @@ test "admission: a call the allocator cannot hold is refused, and nothing leaks"
     try testing.expectEqual(@as(usize, 0), server.live_bytes.load(.acquire));
 }
 
+/// An allocator over `testing.allocator` that looks for `needle` in every
+/// block freed through it.
+const Spotter = struct {
+    needle: []const u8,
+    spotted: bool = false,
+
+    fn allocator(s: *Spotter) std.mem.Allocator {
+        return .{ .ptr = s, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+
+    fn alloc(_: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        return testing.allocator.rawAlloc(len, alignment, ret_addr);
+    }
+
+    fn resize(_: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        return testing.allocator.rawResize(memory, alignment, new_len, ret_addr);
+    }
+
+    fn remap(_: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        return testing.allocator.rawRemap(memory, alignment, new_len, ret_addr);
+    }
+
+    fn free(ptr: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const s: *Spotter = @ptrCast(@alignCast(ptr));
+        if (std.mem.find(u8, memory, s.needle) != null) s.spotted = true;
+        testing.allocator.rawFree(memory, alignment, ret_addr);
+    }
+};
+
+test "a call wipes its copy of the authorization value before it frees it" {
+    const io = testing.io;
+    var fake: FakeTransport = .{};
+    var spotter: Spotter = .{ .needle = "s3cr3t-t0ken" };
+    var server = try admissionServer(spotter.allocator(), &fake, .{});
+    defer server.deinit(io);
+    try server.start(io);
+    var head = headOf(io, "getUser");
+    head.metadata = &.{.{ .key = "authorization", .value = "Bearer s3cr3t-t0ken" }};
+    const incoming = try expectAdmitted(fake.dispatcher_value.?.admit(io, &head, 0));
+    const call: *Call = @ptrCast(@alignCast(incoming.ptr));
+    try testing.expectEqualStrings("Bearer s3cr3t-t0ken", call.context.authorization.?);
+    incoming.abandon(io);
+    try testing.expect(!spotter.spotted);
+}
+
 test "admission copies the head: metadata without reserved keys, the peer, the deadline, the server's span" {
     const io = testing.io;
     var fake: FakeTransport = .{};

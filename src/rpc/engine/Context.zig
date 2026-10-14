@@ -150,8 +150,9 @@ pub const CallContext = struct {
     map_error: ?*const fn (err: anyerror) ?model.Failure,
     /// The limits of the response's metadata: those of a request.
     metadata_limits: rules.MetadataLimits,
-    /// The reserved values of the request, for the engine.
-    authorization: ?[]const u8 = null,
+    /// The reserved values of the request, for the engine. The call wipes
+    /// `authorization` before it frees it.
+    authorization: ?[]u8 = null,
     correlation_id: ?[]const u8 = null,
     /// The metadata of the response, in the arena.
     response_metadata: std.ArrayList(model.Metadata.Entry) = .empty,

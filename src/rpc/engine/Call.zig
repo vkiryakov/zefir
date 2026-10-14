@@ -129,8 +129,10 @@ pub fn create(
     return call;
 }
 
-/// Frees the call and gives its memory back to the server's budget.
+/// Frees the call and gives its memory back to the server's budget. The
+/// copy of the credentials is wiped first.
 pub fn destroy(call: *Call) void {
+    if (call.context.authorization) |value| std.crypto.secureZero(u8, value);
     call.arena.deinit();
     call.budget.allocator().free(call.body);
     var budget = call.budget;
