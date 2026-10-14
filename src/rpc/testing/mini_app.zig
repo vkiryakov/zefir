@@ -41,18 +41,17 @@ pub const MiniApp = struct {
             };
         }
         var watchers: [n]?std.Io.Future(void) = @splat(null);
-        // Nothing may still wait on a component once its owner frees it.
-        defer for (&watchers) |*watcher| if (watcher.*) |*future| future.cancel(io);
         inline for (0..n) |i| {
-            if (app.breakdown == null) {
-                watchers[i] = io.concurrent(Watcher(@TypeOf(components[i])).watch, .{ app, io, components[i] }) catch |err| none: {
-                    app.broke(io, err);
-                    break :none null;
-                };
-            }
+            watchers[i] = io.concurrent(Watcher(@TypeOf(components[i])).watch, .{ app, io, components[i] }) catch |err| none: {
+                app.broke(io, err);
+                break :none null;
+            };
         }
         const canceled = if (app.stop.wait(io)) |_| false else |_| true;
         const failed = stopFirst(io, components, n);
+        // Nothing may still wait on a component once its owner frees it;
+        // and once no watcher runs, `breakdown` stays as it is.
+        for (&watchers) |*watcher| if (watcher.*) |*future| future.cancel(io);
         if (canceled) return error.Canceled;
         if (app.breakdown) |err| return err;
         if (failed) |err| return err;
