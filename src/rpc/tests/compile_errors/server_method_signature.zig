@@ -14,7 +14,7 @@ const UserHandler = struct {
     pub const rpc_handler = rpc.implement(UserApi, .{});
 
     // No ctx.
-    pub fn getUser(self: *UserHandler, req: GetUserRequest) error{UserNotFound}!User {
+    pub fn getUser(self: *UserHandler, req: GetUserRequest) !User {
         _ = self;
         return .{ .id = req.id, .name = "Ann" };
     }

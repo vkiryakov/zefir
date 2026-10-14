@@ -176,8 +176,44 @@ fn methodProblem(comptime T: type, comptime label: []const u8, comptime method_n
         return "rpc: " ++ name ++ " implements " ++ label ++ " but has no pub fn " ++ method_name ++ "(self: *" ++ name ++ ", ctx: *rpc.Context, req: " ++ @typeName(Req) ++ ") !" ++ @typeName(Resp);
     const F = @TypeOf(@field(T, method_name));
     if (!isMethod(F, T, Req, Resp))
-        return "rpc: " ++ name ++ "." ++ method_name ++ ": expected fn (*" ++ name ++ ", *rpc.Context, " ++ @typeName(Req) ++ ") !" ++ @typeName(Resp) ++ ", found " ++ @typeName(F);
+        return "rpc: " ++ name ++ "." ++ method_name ++ ": expected fn (*" ++ name ++ ", *rpc.Context, " ++ @typeName(Req) ++ ") !" ++ @typeName(Resp) ++ ", found " ++ typeName(F);
     return null;
+}
+
+/// `F` as a message shows it: a function as it is written, with
+/// `*rpc.Context` and `*rpc.Next` and `!` for an inferred error set, where
+/// `@typeName` names the module's own types and spells out how to get the
+/// set from the function.
+fn typeName(comptime F: type) []const u8 {
+    const info = switch (@typeInfo(F)) {
+        .@"fn" => |info| info,
+        else => return @typeName(F),
+    };
+    if (info.attrs.varargs or info.attrs.@"callconv" != .auto) return @typeName(F);
+    var name: []const u8 = "fn (";
+    for (info.param_types, 0..) |Param, i| {
+        if (i > 0) name = name ++ ", ";
+        name = name ++ if (Param) |P| publicName(P) else "anytype";
+    }
+    name = name ++ ") ";
+    const Return = info.return_type orelse return name ++ "anytype";
+    return name ++ switch (@typeInfo(Return)) {
+        .error_union => |error_union| errorSetName(error_union.error_set) ++ "!" ++ publicName(error_union.payload),
+        else => publicName(Return),
+    };
+}
+
+fn publicName(comptime T: type) []const u8 {
+    if (T == *Context) return "*rpc.Context";
+    if (T == *Next) return "*rpc.Next";
+    return @typeName(T);
+}
+
+/// The name of an error set, or nothing for one inferred from the body of a
+/// function: `@typeName` names that as an expression of `@typeInfo`.
+fn errorSetName(comptime E: type) []const u8 {
+    const name = @typeName(E);
+    return if (std.mem.startsWith(u8, name, "@typeInfo(")) "" else name;
 }
 
 /// Whether `F` is `fn (*T, *rpc.Context, Req) E!Resp` for some error set
@@ -262,6 +298,8 @@ pub fn serverLinksProblem(comptime L: type) ?[]const u8 {
     };
     if (!info.is_tuple and info.field_names.len > 0) return at ++ shape ++ @typeName(L);
     inline for (info.field_types, 0..) |Item, i| {
+        if (@typeInfo(Item) == .@"fn" and Item != MiddlewareFn)
+            return std.fmt.comptimePrint("{s}.middleware[{d}] must be " ++ link_function ++ ", with anyerror written out, not inferred; got {s}", .{ at, i, typeName(Item) });
         const fits = Item == MiddlewareFn or switch (@typeInfo(Item)) {
             .pointer => |pointer| pointer.size == .one and !pointer.attrs.@"const" and hasRun(pointer.child),
             else => false,
@@ -510,11 +548,12 @@ const NotAFunction = struct {
 
 test "a handler has a pub fn of the contract's signature for each method" {
     try expectProblem(Options(struct { *MissingMethod }), "rpc: app.handlers.MissingMethod implements users.v1 but has no pub fn deleteUser(self: *app.handlers.MissingMethod, ctx: *rpc.Context, req: app.handlers.DeleteUserRequest) !void");
-    try expectProblem(Options(struct { *NoContext }), "rpc: app.handlers.NoContext.getUser: expected fn (*app.handlers.NoContext, *rpc.Context, app.handlers.GetUserRequest) !app.handlers.User, found fn (*app.handlers.NoContext, app.handlers.GetUserRequest) @typeInfo(@typeInfo(@TypeOf(app.handlers.NoContext.getUser)).@\"fn\".return_type.?).error_union.error_set!app.handlers.User");
-    try expectProblem(Options(struct { *NoErrors }), "rpc: app.handlers.NoErrors.getUser: expected fn (*app.handlers.NoErrors, *rpc.Context, app.handlers.GetUserRequest) !app.handlers.User, found fn (*app.handlers.NoErrors, *engine.Context.Context, app.handlers.GetUserRequest) app.handlers.User");
-    try expectProblem(Options(struct { *ConstSelf }), "rpc: app.handlers.ConstSelf.getUser: expected fn (*app.handlers.ConstSelf, *rpc.Context, app.handlers.GetUserRequest) !app.handlers.User, found fn (*const app.handlers.ConstSelf, *engine.Context.Context, app.handlers.GetUserRequest) error{X}!app.handlers.User");
-    try expectProblem(Options(struct { *OtherResponse }), "rpc: app.handlers.OtherResponse.getUser: expected fn (*app.handlers.OtherResponse, *rpc.Context, app.handlers.GetUserRequest) !app.handlers.User, found fn (*app.handlers.OtherResponse, *engine.Context.Context, app.handlers.GetUserRequest) error{X}![]const u8");
-    try expectProblem(Options(struct { *Generic }), "rpc: app.handlers.Generic.getUser: expected fn (*app.handlers.Generic, *rpc.Context, app.handlers.GetUserRequest) !app.handlers.User, found fn (*app.handlers.Generic, *engine.Context.Context, anytype) error{X}!app.handlers.User");
+    // A function is shown as it is written: `!` for an inferred error set.
+    try expectProblem(Options(struct { *NoContext }), "rpc: app.handlers.NoContext.getUser: expected fn (*app.handlers.NoContext, *rpc.Context, app.handlers.GetUserRequest) !app.handlers.User, found fn (*app.handlers.NoContext, app.handlers.GetUserRequest) !app.handlers.User");
+    try expectProblem(Options(struct { *NoErrors }), "rpc: app.handlers.NoErrors.getUser: expected fn (*app.handlers.NoErrors, *rpc.Context, app.handlers.GetUserRequest) !app.handlers.User, found fn (*app.handlers.NoErrors, *rpc.Context, app.handlers.GetUserRequest) app.handlers.User");
+    try expectProblem(Options(struct { *ConstSelf }), "rpc: app.handlers.ConstSelf.getUser: expected fn (*app.handlers.ConstSelf, *rpc.Context, app.handlers.GetUserRequest) !app.handlers.User, found fn (*const app.handlers.ConstSelf, *rpc.Context, app.handlers.GetUserRequest) error{X}!app.handlers.User");
+    try expectProblem(Options(struct { *OtherResponse }), "rpc: app.handlers.OtherResponse.getUser: expected fn (*app.handlers.OtherResponse, *rpc.Context, app.handlers.GetUserRequest) !app.handlers.User, found fn (*app.handlers.OtherResponse, *rpc.Context, app.handlers.GetUserRequest) error{X}![]const u8");
+    try expectProblem(Options(struct { *Generic }), "rpc: app.handlers.Generic.getUser: expected fn (*app.handlers.Generic, *rpc.Context, app.handlers.GetUserRequest) !app.handlers.User, found fn (*app.handlers.Generic, *rpc.Context, anytype) error{X}!app.handlers.User");
     try expectProblem(Options(struct { *NotAFunction }), "rpc: app.handlers.NotAFunction.getUser: expected fn (*app.handlers.NotAFunction, *rpc.Context, app.handlers.GetUserRequest) !app.handlers.User, found comptime_int");
 }
 
@@ -599,6 +638,10 @@ fn inferred(ctx: *Context, next: *Next) !void {
     return next.run();
 }
 
+fn noNext(ctx: *Context) anyerror!void {
+    _ = ctx;
+}
+
 const Limiter = struct {
     pub fn run(self: *Limiter, ctx: *Context, next: *Next) anyerror!void {
         _ = self;
@@ -666,8 +709,10 @@ test "the links of the server are functions or pointers to objects" {
     try expectProblem(With.Links(struct { @TypeOf(audit), Limiter }), message);
     try expectProblem(With.Links(struct { @TypeOf(audit), *const Limiter }), message);
     try expectProblem(With.Links(struct { @TypeOf(audit), *NoRun }), message);
-    try expectProblem(With.Links(struct { @TypeOf(audit), @TypeOf(inferred) }), message);
     try expectProblem(With.Links(struct { @TypeOf(audit), []Limiter }), message);
+    // A function of another type: what to write, and what was written.
+    try expectProblem(With.Links(struct { @TypeOf(audit), @TypeOf(inferred) }), "rpc.Server.init: .middleware[1] must be fn (*rpc.Context, *rpc.Next) anyerror!void, with anyerror written out, not inferred; got fn (*rpc.Context, *rpc.Next) !void");
+    try expectProblem(With.Links(struct { @TypeOf(noNext) }), "rpc.Server.init: .middleware[0] must be fn (*rpc.Context, *rpc.Next) anyerror!void, with anyerror written out, not inferred; got fn (*rpc.Context) anyerror!void");
     try expectProblem(With.Links(*Limiter), "rpc.Server.init: .middleware must be a tuple such as .{ mw.logCalls, &limiter }; got *app.handlers.Limiter");
     try expectProblem(struct { transport: ServerTransport, handlers: Handlers, middleware: NamedLinks }, "rpc.Server.init: .middleware must be a tuple such as .{ mw.logCalls, &limiter }; got app.handlers.NamedLinks");
 }
