@@ -190,14 +190,17 @@ pub fn close(t: *Transport, io: std.Io) void {
     const s = &t.server;
     s.lifecycle.lockUncancelable(io);
     defer s.lifecycle.unlock(io);
-    switch (s.phase.load(.acquire)) {
+    const before = s.phase.load(.acquire);
+    switch (before) {
         .idle, .closed => return,
-        .running => drainRoutes(t, io),
-        .draining => {},
+        .running, .draining => {},
         // Under `lifecycle`, a close finishes before another looks.
         .closing => unreachable,
     }
+    // Before the drain: a receiving task that gets null from it must not
+    // take it for a subscription that ended while the server runs.
     s.phase.store(.closing, .release);
+    if (before == .running) drainRoutes(t, io);
     // A task in `next` gets the cancelation at once; one with a request
     // hands it over or refuses it first.
     s.group.cancel(io);

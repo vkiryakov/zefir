@@ -470,6 +470,30 @@ test "Reply.send: over max_payload is ResponseTooLarge, a small failure goes aft
     try testing.expectEqual(@as(usize, 0), recorder.violations().len);
 }
 
+const many_routes = many: {
+    var list: [24]rpc.Route = undefined;
+    for (&list, 0..) |*route, i| route.* = .{ .service = "users", .version = 1, .method = std.fmt.comptimePrint("m{d}", .{i}) };
+    break :many list;
+};
+
+test "close straight from running: the subscriptions it drains do not stop the server as broken" {
+    const io = testing.io;
+    var fake: FakeConn = .init(testing.allocator, .{});
+    defer fake.deinit(io);
+    var bus: Transport = try .init(testing.allocator, fake.conn(), .{});
+    defer bus.deinit(io);
+    for (0..20) |_| {
+        var recorder: RecordingDispatcher = try .init(testing.allocator, .{ .routes = &many_routes });
+        defer recorder.deinit(io);
+        try recorder.start(io, bus.serverTransport());
+        // The receiving tasks reach `next`.
+        try io.sleep(.fromMilliseconds(2), .awake);
+        recorder.close(io);
+        try testing.expectEqual(@as(?RecordingDispatcher.Fatal, null), recorder.fatal(io));
+        try testing.expectEqual(@as(usize, 0), fake.subscriptionCount(io));
+    }
+}
+
 test "close while a request is in admission: the call is abandoned and refused" {
     const io = testing.io;
     var fake: FakeConn = .init(testing.allocator, .{});
