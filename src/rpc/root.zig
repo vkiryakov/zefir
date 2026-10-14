@@ -38,6 +38,18 @@ pub const Status = model.Status;
 pub const Failure = model.Failure;
 pub const Violation = model.Violation;
 
+/// The server engine: routes, limits, deadlines, handlers in tasks of their
+/// own, graceful stop.
+pub const RawServer = @import("engine/RawServer.zig");
+/// A route and its handler on bytes, for `rpc.RawServer`.
+pub const Method = RawServer.Method;
+/// A handler on bytes.
+pub const Handler = RawServer.Handler;
+/// The limits of a server.
+pub const Limits = RawServer.Limits;
+/// The context of one call on the server.
+pub const Context = @import("engine/Context.zig").Context;
+
 /// The client side of a transport.
 pub const ClientTransport = @import("ClientTransport.zig");
 /// The server side of a transport.
@@ -61,4 +73,6 @@ test {
     _ = @import("Reply.zig");
     _ = @import("Pending.zig");
     _ = @import("testing.zig");
+    _ = @import("engine/RawServer.zig");
+    _ = @import("engine/Context.zig");
 }
