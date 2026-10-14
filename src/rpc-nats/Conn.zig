@@ -120,26 +120,35 @@ pub fn alwaysConnected(ptr: *anyopaque) bool {
     return true;
 }
 
+/// PUB or HPUB of `msg`, by the rules of `VTable.publish`.
 pub fn publish(c: Conn, io: std.Io, msg: OutMsg, timeout: std.Io.Timeout) Error!void {
     return c.vtable.publish(c.ptr, io, msg, timeout);
 }
 
+/// SUB to `subject`, in the queue group `queue` when it is not null, by
+/// the rules of `VTable.subscribe`.
 pub fn subscribe(c: Conn, io: std.Io, subject: []const u8, queue: ?[]const u8, timeout: std.Io.Timeout) Error!Sub {
     return c.vtable.subscribe(c.ptr, io, subject, queue, timeout);
 }
 
+/// The next message of `sub`, or null once it has ended, by the rules of
+/// `VTable.next`.
 pub fn next(c: Conn, io: std.Io, sub: Sub, timeout: std.Io.Timeout) Error!?InMsg {
     return c.vtable.next(c.ptr, io, sub, timeout);
 }
 
+/// UNSUB that keeps what is on its way, by the rules of `VTable.drain`.
 pub fn drain(c: Conn, io: std.Io, sub: Sub) Error!void {
     return c.vtable.drain(c.ptr, io, sub);
 }
 
+/// Ends `sub` now and frees it, by the rules of `VTable.unsubscribe`.
 pub fn unsubscribe(c: Conn, io: std.Io, sub: Sub) void {
     c.vtable.unsubscribe(c.ptr, io, sub);
 }
 
+/// Waits until the server has processed everything sent before, by the
+/// rules of `VTable.flush`.
 pub fn flush(c: Conn, io: std.Io, timeout: std.Io.Timeout) Error!void {
     return c.vtable.flush(c.ptr, io, timeout);
 }

@@ -181,6 +181,8 @@ pub fn conn(f: *FakeConn) Conn {
     return .init(f);
 }
 
+/// `rpc_nats.Conn.publish`: the copies reach the subscriptions at once, or
+/// `setDelay` later; it never waits for room.
 pub fn publish(f: *FakeConn, io: std.Io, msg: Conn.OutMsg, timeout: std.Io.Timeout) Conn.Error!void {
     _ = timeout;
     // It never waits; blocked, a Debug allocator cannot swallow a
@@ -210,6 +212,8 @@ pub fn publish(f: *FakeConn, io: std.Io, msg: Conn.OutMsg, timeout: std.Io.Timeo
     try f.deliverLocked(io, msg.subject, msg.reply_to, block, msg.payload);
 }
 
+/// `rpc_nats.Conn.subscribe`: a denied subject fails the next `flush` and
+/// every `next` of the subscription.
 pub fn subscribe(f: *FakeConn, io: std.Io, subject: []const u8, queue: ?[]const u8, timeout: std.Io.Timeout) Conn.Error!Conn.Sub {
     _ = timeout;
     const protection = io.swapCancelProtection(.blocked);
@@ -239,6 +243,8 @@ pub fn subscribe(f: *FakeConn, io: std.Io, subject: []const u8, queue: ?[]const 
     return sub;
 }
 
+/// `rpc_nats.Conn.next`: one task at a time per subscription, as the
+/// interface says.
 pub fn next(f: *FakeConn, io: std.Io, handle: Conn.Sub, timeout: std.Io.Timeout) Conn.Error!?Conn.InMsg {
     const sub: *Sub = @ptrCast(@alignCast(handle));
     const deadline = awakeDeadline(io, timeout);
@@ -286,6 +292,7 @@ pub fn next(f: *FakeConn, io: std.Io, handle: Conn.Sub, timeout: std.Io.Timeout)
     }
 }
 
+/// `rpc_nats.Conn.drain`: `next` hands out what is queued, then null.
 pub fn drain(f: *FakeConn, io: std.Io, handle: Conn.Sub) Conn.Error!void {
     const sub: *Sub = @ptrCast(@alignCast(handle));
     f.mutex.lockUncancelable(io);
@@ -295,6 +302,7 @@ pub fn drain(f: *FakeConn, io: std.Io, handle: Conn.Sub) Conn.Error!void {
     sub.cond.signal(io);
 }
 
+/// `rpc_nats.Conn.unsubscribe`: the queued messages are dropped.
 pub fn unsubscribe(f: *FakeConn, io: std.Io, handle: Conn.Sub) void {
     const sub: *Sub = @ptrCast(@alignCast(handle));
     const protection = io.swapCancelProtection(.blocked);
@@ -306,6 +314,8 @@ pub fn unsubscribe(f: *FakeConn, io: std.Io, handle: Conn.Sub) void {
     f.destroySub(sub);
 }
 
+/// `rpc_nats.Conn.flush`: PermissionDenied once after a denied
+/// subscription; with `hangFlush`, it waits out its timeout.
 pub fn flush(f: *FakeConn, io: std.Io, timeout: std.Io.Timeout) Conn.Error!void {
     const hang = hang: {
         f.mutex.lockUncancelable(io);
