@@ -147,8 +147,11 @@ flowchart LR
    goes into the queue of its subscription, or to the request that waits
    for it. `sub.next()` takes the oldest one.
 4. **Watch.** The manager task PINGs the server every `ping_interval`. A
-   server that leaves two PINGs unanswered counts as gone: the manager
-   takes the connection down and connects again.
+   server that got two PINGs and answered neither counts as gone: the
+   manager takes the connection down and connects again. A PING still
+   waiting behind what a slow link has not sent yet does not count, since
+   the server has not seen it; a server that takes nothing at all for two
+   intervals while data waits counts as gone too.
 
 All of it runs on the `std.Io` you give the client: with zio, the tasks are
 coroutines on zio's executors; with `std.Io.Threaded`, each task is a
@@ -177,7 +180,7 @@ defer client.deinit();
 | `auth`                      | `.none`        | a user and a password, see [Security](#security)                                                  |
 | `connect_timeout`           | 5 s            | one attempt on one server: DNS, TCP and the handshake                                             |
 | `ping_interval`             | 30 s           | how often the client PINGs the server to check the connection                                     |
-| `max_outstanding_pings`     | 2              | PINGs left unanswered before the connection counts as gone                                        |
+| `max_outstanding_pings`     | 2              | PINGs the server got and left unanswered before the connection counts as gone                     |
 | `no_echo`                   | false          | true: the server does not send the client's own messages back to its subscriptions                |
 | `no_responders`             | true           | a request no one subscribes to fails at once with `NoResponders`; false: it waits for its timeout |
 | `verbose`                   | false          | the server confirms every operation with `+OK`; for debugging only                                |
@@ -456,6 +459,14 @@ Before anything is queued, the client checks:
 `a*b` and `a>b` are ordinary subjects: a wildcard is always a whole token.
 Bytes from 0x80 up are allowed, so subjects may be UTF-8.
 
+The `max_payload` checked is the one the server gave this client. A
+server with accounts may give a lower one than its own: nats-server sends
+it in an INFO right after the handshake, and when that INFO comes with the
+handshake's last reply, as it usually does, it applies before `connect()`
+returns. Only a publish made in the instant before a later INFO is
+checked against the server's own limit, and the server closes the
+connection if it is over the account's.
+
 ### Subscribing
 
 ```zig
@@ -498,7 +509,7 @@ defer msg.deinit();
 client has closed, it returns `ConnectionClosed` at once, and the messages
 still waiting in the subscription are freed unread. One task at a time may
 wait in `next`; a second one gets `ConcurrentReceive`. Any task may call
-`unsubscribe()`.
+`unsubscribe()` or `drain()`.
 
 The subscription options:
 
@@ -512,7 +523,9 @@ The subscription options:
 > [!IMPORTANT]
 > Read a subscription with `next()` until it returns null, or `deinit()`
 > it. A message counts as handled once its reader asks for the next one,
-> and a [drain](#drain) waits for that.
+> and a [drain](#drain) waits for that. The reader may `deinit()` the
+> subscription as soon as `next()` returns null, as above, even while
+> another task's `sub.drain()` is about to return: `deinit()` waits for it.
 
 <details>
 <summary>How the client reads what other publishers send</summary>
@@ -547,7 +560,10 @@ flowchart LR
 - **`flush` is a barrier.** It sends a PING behind everything queued and
   returns when the server answers with PONG. The server handles one
   connection in order, so by then it has processed every message before
-  the PING. It does not mean any subscriber got them.
+  the PING. It does not mean any subscriber got them. A PONG that came
+  counts even when the connection drops right after it: the flush
+  succeeds, and a `Disconnected` from `flush` means the server did not
+  confirm.
 - **No subscriber, no message.** A message nobody subscribes to is gone,
   and that is not an error.
 - **Nothing is sent twice.** When a connection drops, a message written
@@ -744,9 +760,15 @@ the whole request, the wait for room in the outbound queue included;
   the reply subject is the client's, and one of yours is refused with
   `InvalidOptions` rather than replaced without a word.
 - A reply larger than `limits.max_inbound_frame_bytes`, or with a header
-  block larger than `limits.max_header_bytes`, is dropped with a warning,
-  and so is one there is no memory for. The request then waits on: it
-  ends with `Timeout`, unless another responder's reply comes in time.
+  block larger than `limits.max_header_bytes`, is dropped and counted,
+  and so is one there is no memory for: a `message_dropped` event with no
+  `sid` says so, and a warning, one per run of drops. The request then
+  waits on: it ends with `Timeout`, unless another responder's reply
+  comes in time.
+- A request whose timeout has passed by the time its message would go
+  into the outbound queue, such as one with a zero timeout, sends nothing
+  and ends with `Timeout`: no responder works on an answer nobody waits
+  for.
 - An account that sends requests needs permission to subscribe to
   `_INBOX.>`. When the server refuses the inbox subscription, every
   waiting request and every new one fails with `PermissionDenied` at once,
@@ -757,7 +779,9 @@ the whole request, the wait for room in the outbound queue included;
   requests may share it.
 - A request made while the client reconnects waits in the reconnect buffer
   and goes out with the next connection; its timeout runs meanwhile. With
-  `reconnect.buffer_bytes = 0` it fails at once with `Disconnected`.
+  `reconnect.buffer_bytes = 0` it fails at once with `Disconnected`, and so
+  it does when the next server would refuse it: larger than that server's
+  `max_payload`, or with headers it does not take.
 - There is no PING barrier before the first request or after a reconnect:
   the server handles a connection in order, so the inbox subscription,
   sent first, is in place before the request.
@@ -834,8 +858,9 @@ first; then `next` hands out what came and returns null. `next` takes its
 own timeout too, for "no answer for a while": a `Timeout` there leaves the
 stream going. The first response being a "no responders" status gives
 `NoResponders`; a dropped connection gives what came, then
-`Disconnected`. Any task may call `cancel()`: what waits is dropped, and
-`next` returns null.
+`Disconnected`, unless the stream's deadline had passed already: then it
+had ended, and gives what came, then null. Any task may call `cancel()`:
+what waits is dropped, and `next` returns null.
 
 <details>
 <summary>The fine print of requestMany</summary>
@@ -845,9 +870,18 @@ stream going. The first response being a "no responders" status gives
   response that does not fit is dropped.
 - `max_responses` counts every response that came, the dropped ones
   included, as the server counts for its own limits.
-- Once the stream has ended (null, `NoResponders`, `Disconnected`), it no
-  longer counts against `max_pending_requests`, but it still needs its
-  `deinit()`, which frees it. `Client.deinit` frees the streams you forgot.
+- A stream stops counting against `max_pending_requests` once its last
+  response came (`max_responses`, or a "no responders" first), or once
+  `next` returned null or an error after its deadline. A stream past its
+  deadline that nobody reads keeps its place until its `deinit()`, though
+  `stats().pending_requests` no longer counts it and a drain does not wait
+  for it. Every stream needs its `deinit()`, which frees it;
+  `Client.deinit` frees the streams you forgot.
+- After a [drain](#drain), the responses a stream received and its owner
+  has not read stay readable: `next` hands them out, then null.
+- When the server refuses the inbox while `requestMany` waits for room to
+  send, it sends nothing and fails with `PermissionDenied`, as `request`
+  does.
 
 </details>
 
@@ -918,12 +952,20 @@ defer audit.deinit();
 - Each message takes one allocation, freed by its `deinit()`; nothing
   points into the client's read buffer.
 - A message over `max_inbound_frame_bytes` or `max_header_bytes` is read
-  past without allocating; the connection stays.
+  past without allocating; the connection stays. Each such drop, and each
+  message there is no memory for, gives a `message_dropped` event; the
+  first of a run of drops also gives a warning in the log, the others
+  stay at debug until a message is kept.
 - `max_control_line_bytes` is the server's `max_control_line`: the longest
   arguments of a line the client sends, such as a subject with its reply
   subject. If your server allows longer lines, raise both together. It
   must hold the client's CONNECT line too, which the server checks
-  against the same limit.
+  against the same limit. Lines from the server may be longer than any
+  client's: an MQTT topic, a subject mapping or a JetStream reply makes a
+  message line longer than its publisher's. The client reads any line of
+  up to 64 KiB, or four times `max_control_line_bytes` when that is more,
+  since a `-ERR` quotes a refused subject with every byte that does not
+  print escaped as four; the read buffer is that size.
 - The server takes at most nine digits for a size, so a message of
   1,000,000,000 bytes or more is `PayloadTooLarge` even when the server
   gave no `max_payload`.
@@ -1006,7 +1048,12 @@ flowchart TD
   MiB by default, as long as it has room: it goes out once the new
   connection has subscribed again, in the order it was published. One
   that does not fit is dropped, counted in `dropped_messages` and reported
-  by a `message_dropped` event.
+  by a `message_dropped` event. The publishes the lost connection never
+  sent keep their room ahead of those published after the loss: a later
+  publish gets `BufferFull` rather than push an earlier one out. When the
+  new connection is up, a buffered publish its server would refuse, over
+  its `max_payload` or with headers it does not take, is dropped and
+  counted the same way instead of closing that connection.
 - **Requests.** Every request waiting for a reply fails with
   `Disconnected` at once, and its message is not sent later: otherwise a
   service could act on a request whose caller was already told it failed.
@@ -1039,8 +1086,9 @@ barrier: the server handles the connection in order.
 ### When it reconnects
 
 The first attempt is immediate after a connection that lasted at least
-`reconnect.max_delay` (10 s), or that left a server in lame duck mode. After
-a shorter one, and after a failed attempt, the client waits:
+`reconnect.max_delay` (10 s), or that left a server in lame duck mode
+after at least `reconnect.min_delay`. After a shorter one, and after a
+failed attempt, the client waits:
 `reconnect.min_delay` (500 ms), then twice that, and so on, up to
 `reconnect.max_delay`, which it never exceeds. That is why the restart
 above took about half a second: the connection had lasted only two. With `jitter` on (the
@@ -1060,7 +1108,14 @@ millisecond.
   that keeps dropping the client right after the handshake is tried
   forever, with waits that grow up to `max_delay`.
 - A server going away gracefully (lame duck mode, `ldm` in its INFO) is
-  left at once for another server of the pool, with a `lame_duck` event.
+  left at once for another server of the pool, with a `lame_duck` event,
+  once the connection lasted `min_delay`. A server that says so as soon
+  as the client connects, on every connection, is paced like any that
+  drops it. A [drain](#drain) under way finishes on the server it is on.
+- An attempt the `io` has no room for, as on `std.Io.Threaded` with a
+  `concurrent_limit` that the application's tasks fill, fails like any
+  other: the client tries again after the next wait, and a reader or
+  writer that cannot start ends the new connection the same way.
 - `reconnect.enabled = false` closes the client when the connection drops.
 - `retry_initial_connect = true` makes `connect()` return at once and keep
   trying in the background, as if reconnecting: publishes and
@@ -1083,7 +1138,11 @@ millisecond.
   as the outbound queue does. A message larger than the whole
   buffer fails with `BufferFull` at once.
 - A buffered request still has its own timeout; a request that ends while
-  buffered gives its room back, and its message is not sent.
+  buffered gives its room back, and its message is not sent. So does a
+  `requestMany` stream past its deadline that nobody reads, as soon as a
+  publish needs the room.
+- Moving the buffered messages, when requests end or a connection comes
+  back, allocates nothing: no message is lost for lack of memory there.
 - A message written in part when the connection dropped never reached the
   server whole: it counts as dropped.
 - `close()` counts what never went out in `dropped_messages`, and what was
@@ -1123,12 +1182,22 @@ sequenceDiagram
 
 1. The subscriptions stop. The server gets an `UNSUB` for each, and once
    it confirms them, no new message comes. Messages already on their way
-   still come out of `next()`, then null.
+   still come out of `next()`, then null. A `subscribe` that has not got
+   its subscription in when the drain begins fails with
+   `ConnectionDraining`, and so does every later one.
 2. The client waits until every subscription is read to its end and every
    request it sent got its answer. Publishes and responds still work, so a
    handler can answer the request it took.
 3. Publishes stop too. What was published goes out and is confirmed, and
-   the client closes, with reason `drained`.
+   the client closes, with reason `drained`. A publish still waiting for
+   room in the outbound queue at that moment fails with
+   `ConnectionDraining`: every publish that returned was confirmed.
+
+Throughout, the connection is up: `isConnected()` is true and
+`connectedServer()` names the server. Responses that a `requestMany`
+stream received and its owner has not read stay readable after the
+drain. A drain that begins while the client is about to leave a server in
+lame duck mode stays and finishes on that server.
 
 `drain(.{})` gives it 30 seconds; at the deadline it closes anyway and
 returns `Timeout`. A connection lost during a drain closes the client too,
@@ -1162,7 +1231,13 @@ while (true) {
 
 `sub.drain(.{})` does the same for one subscription: the server stops
 sending, what came is handed out, and it returns once the reader came back
-for more. Another task must be reading.
+for more. Another task must be reading, and it may `deinit()` the
+subscription as soon as `next()` returns null: `deinit()` waits until the
+drain has returned. At its timeout the drain returns `Timeout`, and the
+subscription has ended anyway; without a connection it ends at once. A
+second `sub.drain()` while one runs, or one during the client's
+`drain()`, adds nothing: it waits until that drain ends the subscription,
+so nothing on its way is lost.
 
 ## Events
 
@@ -1194,7 +1269,7 @@ fn logEvents(client: *nats.Client, events_log: log.Logger) nats.Client.NextEvent
 | `server_removed`    | the server                                   | the cluster stopped announcing one                                |
 | `lame_duck`         | the server                                   | the server is about to go away                                    |
 | `slow_consumer`     | the subscription's id                        | a subscription began dropping messages, once per run              |
-| `message_dropped`   | why, how many, the subscription              | messages were lost: unsent, too large, no memory                  |
+| `message_dropped`   | why, how many, the subscription, if any      | messages were lost: unsent, too large, no memory                  |
 | `permission_denied` | the operation, the subject, the subscription | the server refused a subject                                      |
 | `auth_error`        | the server                                   | the server refused the credentials                                |
 | `protocol_error`    | the server                                   | the server broke the protocol, or says the client did             |
@@ -1204,12 +1279,17 @@ fn logEvents(client: *nats.Client, events_log: log.Logger) nats.Client.NextEvent
 One task at a time may wait in `nextEvent`. The client keeps
 `limits.max_event_queue` events (1024); while that many wait, newer ones
 are dropped and counted in `stats().dropped_events`, except `closed`, which
-always comes. After `close()`, `nextEvent` hands out what waits, then
-`closed`, then null. An event owns no
-memory: a text in it is cut to 128 bytes.
+always comes, and so are events there is no memory for. After `close()`,
+`nextEvent` hands out what waits, then `closed`, then null. An event owns
+no memory: a text in it is cut to 128 bytes. The texts of `server_error`
+and `permission_denied` are the server's bytes as it sent them: escape
+them before you print them, as the client does in its own log. A
+`message_dropped` names a subscription only for messages of one: none for
+publishes, nor for replies to requests.
 
 The reasons a client closes, `nats.CloseReason`: `closed` (by `close()` or
-`deinit()`), `drained`, `drain_failed`, `connect_failed`,
+`deinit()`, by `drain()` before the first connection, or by canceling the
+`connect()` that started it), `drained`, `drain_failed`, `connect_failed`,
 `connection_lost` (reconnect off, or lost while draining), `auth_failed`
 and `reconnect_failed`.
 
@@ -1237,9 +1317,9 @@ std.log.info("in {d}, out {d}, dropped {d}, uncertain {d}, reconnects {d}", .{
 | `reconnects`                        | connections made again after one was lost                                     |
 | `request_timeouts`, `no_responders` | requests that ended so                                                        |
 | `dropped_messages`                  | incoming messages dropped, and publishes never sent; not those freed at close |
-| `uncertain_outbound_frames`         | messages written to a connection lost before the server confirmed them        |
+| `uncertain_outbound_frames`         | messages written to a connection lost or closed before the server confirmed them |
 | `late_responses`                    | replies that came after their request ended                                   |
-| `dropped_events`                    | events the full queue dropped                                                 |
+| `dropped_events`                    | events the full queue dropped, or there was no memory for                     |
 | `rtt`                               | the round trip of the last `flush` or `rtt`                                   |
 | `connected_for`                     | how long the current connection has been up                                   |
 
@@ -1318,6 +1398,12 @@ This version is for a network you trust.
 - **The password stays secret.** It never appears in logs, events or
   errors. The client keeps its own copy of the credentials and wipes it
   with `std.crypto.secureZero` when it is freed.
+- **The server cannot write your log.** Text from the server that the
+  client logs, a `-ERR` or a server address it cannot use, has every byte
+  that does not print (CR, LF, ESC, bytes from 0x80) written as `\xNN`,
+  and is cut after 256 bytes, so neither the server nor anyone on the
+  plaintext connection can forge a log line or send your terminal a
+  sequence.
 
 From [user_password_auth.zig](user_password_auth.zig), where the password
 comes from the configuration as a `confy.Secret`:
@@ -1430,11 +1516,14 @@ A few more rules:
   allocator must be thread-safe: `init.gpa`, `std.heap.smp_allocator`.
 - **Free in order.** `sub.deinit()` only while no task waits in its
   `next()`, and every subscription and stream before `client.deinit()`.
-  `client.deinit()` closes the client first if needed; calling it twice
+  A `sub.deinit()` waits for a `sub.drain()` of it in another task to
+  return. `client.deinit()` closes the client first if needed; calling it twice
   is fine. After `close()`, `connect()` returns `ConnectionClosed`: make a
   new client to connect again.
 - **Canceling works.** Every wait in the client is a cancelation point of
-  `std.Io`: cancel the task, and the call returns `Canceled`.
+  `std.Io`: cancel the task, and the call returns `Canceled`. Canceling
+  the `connect()` that started connecting closes the client; another
+  `connect()` that waited for it just returns.
 
 > [!NOTE]
 > **DNS with `std.Io.Threaded` on macOS, and on Linux with glibc.** There,
@@ -1449,7 +1538,8 @@ The client logs through `std.log`, under the scope `nats`: routine steps
 (connecting, reconnecting, closing) at `debug`, and at `warn` what you
 should know about: an error the server reported, a broken protocol, data
 lost (one warning per run of drops, not one per message). Payloads,
-headers and credentials are never logged. The examples send these records
+headers and credentials are never logged, and text from the server is
+escaped (see [Security](#security)). The examples send these records
 to zefir-log:
 
 ```zig
@@ -1612,7 +1702,7 @@ Everything a Core NATS client sends and receives:
 
 | Operation     | Direction | Supported | Notes                                                                                                            |
 | ------------- | --------- | --------- | ---------------------------------------------------------------------------------------------------------------- |
-| `INFO`        | received  | ✅         | at connect and any time later; unknown fields ignored; up to 64 KiB                                              |
+| `INFO`        | received  | ✅         | at connect and any time later; unknown fields ignored; up to 64 KiB, more with a longer control line             |
 | `CONNECT`     | sent      | ✅         | `verbose`, `pedantic`, `echo`, `name`, `lang`, `version`, `protocol`, `headers`, `no_responders`, `user`, `pass` |
 | `PUB`         | sent      | ✅         | `publish`, `respond`, requests                                                                                   |
 | `HPUB`        | sent      | ✅         | headers                                                                                                          |
