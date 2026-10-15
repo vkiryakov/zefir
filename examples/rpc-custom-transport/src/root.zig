@@ -553,7 +553,9 @@ pub const Client = struct {
         };
 
         const delivery = try c.pending.wait(io, slot, deadline);
-        defer freeMessage(io, @ptrCast(@alignCast(delivery.context)));
+        // The response is the transport's message until this release: it
+        // is copied into the caller's allocator first.
+        defer freeDelivery(io, delivery);
         return take(io, delivery.response, options);
     }
 
@@ -636,6 +638,12 @@ fn freeMessage(io: std.Io, message: *Message) void {
     const protection = io.swapCancelProtection(.blocked);
     defer _ = io.swapCancelProtection(protection);
     message.destroy();
+}
+
+fn freeDelivery(io: std.Io, delivery: Pending.Delivery) void {
+    const protection = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(protection);
+    delivery.release(delivery.context);
 }
 
 fn infoOf(broker: *const Broker) rpc.transport.Info {

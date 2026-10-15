@@ -14,23 +14,23 @@
 //! code it amounts to, the way gRPC names failures that happen on the
 //! client:
 //!
-//! | error                                                              | code                 |
-//! | ------------------------------------------------------------------ | -------------------- |
-//! | `Unavailable`, `ConnectionLost`, `ClientClosed`, `TransportFailed` | `unavailable`        |
-//! | `DeadlineExceeded`                                                 | `deadline_exceeded`  |
-//! | `Cancelled`                                                        | `cancelled`          |
-//! | `AccessDenied`                                                     | `permission_denied`  |
+//! | error                                                                          | code                 |
+//! | ------------------------------------------------------------------------------ | -------------------- |
+//! | `Unavailable`, `ConnectionLost`, `ClientClosed`, `TransportFailed`             | `unavailable`        |
+//! | `DeadlineExceeded`                                                             | `deadline_exceeded`  |
+//! | `Cancelled`                                                                    | `cancelled`          |
+//! | `AccessDenied`                                                                 | `permission_denied`  |
 //! | `TooManyPendingRequests`, `RequestTooLarge`, `ResponseTooLarge`, `OutOfMemory` | `resource_exhausted` |
-//! | `UnsupportedProtocol`                                              | `unimplemented`      |
-//! | `ProtocolViolation`, `MiddlewareFailed`                            | `internal`           |
+//! | `UnsupportedProtocol`                                                          | `unimplemented`      |
+//! | `ProtocolViolation`, `MiddlewareFailed`                                        | `internal`           |
 //!
 //! Under `rpc.Client` the chain sees the response before the client
 //! decodes it, so the log tells what the server sent:
 //!
 //! - A success that does not decode as the client's contract (contracts
 //!   that diverged) is logged as `ok`, and the call ends with
-//!   `error.InvalidResponse`; a body over the client's limit ends with
-//!   `error.ResponseTooLarge` after the same `ok`.
+//!   `error.InvalidResponse`; one whose decoding needs more memory than the
+//!   client allows ends with `error.ResponseTooLarge` after the same `ok`.
 //! - A request the client does not send never reaches the chain and has
 //!   no record: one against its rules or that JSON cannot carry, invalid
 //!   metadata, route or credentials. The `rpc.Client` result says so with
