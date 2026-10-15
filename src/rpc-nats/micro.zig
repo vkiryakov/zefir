@@ -272,10 +272,13 @@ const last_error_bytes = "503:".len + @typeInfo(@FieldType(LastError, "app_code_
 
 /// The last failure as nats.go writes `last_error`, "<code>:<description>":
 /// the number of `Nats-Service-Error-Code` and the app code, or the name of
-/// the code without one, such as "404:users.not_found".
+/// the code without one, such as "404:users.not_found". An app code that is
+/// not UTF-8 goes by the name of the code too: JSON would carry it as an
+/// array of numbers, which the NATS tools cannot read.
 fn lastError(buffer: *[last_error_bytes]u8, last: *const LastError) []const u8 {
     const app_code = last.appCode();
-    return std.fmt.bufPrint(buffer, "{d}:{s}", .{ wire.statusOf(last.code), if (app_code.len > 0) app_code else @tagName(last.code) }) catch unreachable;
+    const description = if (app_code.len > 0 and std.unicode.utf8ValidateSlice(app_code)) app_code else @tagName(last.code);
+    return std.fmt.bufPrint(buffer, "{d}:{s}", .{ wire.statusOf(last.code), description }) catch unreachable;
 }
 
 /// Opens the object of an endpoint with its name, subject and queue group.

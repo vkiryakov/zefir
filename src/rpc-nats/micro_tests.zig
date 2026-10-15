@@ -18,14 +18,40 @@ const get_user_v2: rpc.Route = .{ .service = "users", .version = 2, .method = "g
 const place_order: rpc.Route = .{ .service = "orders", .version = 1, .method = "place" };
 
 /// A method on bytes that echoes the request, and fails when it is
-/// "missing".
+/// "missing", or "garbled", with an app code that is not UTF-8.
 const Echo = struct {
     fn handle(ptr: *anyopaque, ctx: *rpc.Context, request: []const u8) anyerror![]const u8 {
         _ = ptr;
         if (std.mem.eql(u8, request, "missing")) return ctx.fail(.{ .code = .not_found, .app_code = "users.not_found", .message = "User not found" });
+        if (std.mem.eql(u8, request, "garbled")) return ctx.fail(.{ .code = .not_found, .app_code = "users.\xff", .message = "User not found" });
         return request;
     }
 };
+
+/// How long a test waits for what it expects: the answers, the counters.
+const due_within: std.Io.Duration = .fromSeconds(5);
+/// How long it waits after the answers it expects for one too many.
+const extra_window: std.Io.Duration = .fromMilliseconds(100);
+
+fn waitFor(duration: std.Io.Duration) std.Io.Timeout {
+    return .{ .duration = .{ .raw = duration, .clock = .awake } };
+}
+
+/// Waits until `condition(context)` holds, `due_within` at most.
+fn eventually(context: anytype, comptime condition: fn (@TypeOf(context)) bool) !void {
+    const io = testing.io;
+    const due = std.Io.Clock.awake.now(io).addDuration(due_within);
+    while (!condition(context)) {
+        if (std.Io.Clock.awake.now(io).nanoseconds > due.nanoseconds) return error.TestTimedOut;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+}
+
+/// The engine has recorded a failure of users v1 getUser, the first
+/// method: it records a call after its response.
+fn getUserFailed(bus: *Transport) bool {
+    return bus.server.dispatcher.routeStats(0).errors != 0;
+}
 
 /// The PING response: the identity of a service.
 const Ping = struct {
@@ -123,36 +149,46 @@ const Stage = struct {
         s.fake.deinit(io);
     }
 
-    /// The payloads of the answers to a request on `subject`: all that come
-    /// before 200 ms pass without one.
-    fn ask(s: *Stage, subject: []const u8) ![]const []const u8 {
+    /// The payloads of the `expected` answers to a request on `subject`: it
+    /// waits for them `due_within` at most, then `extra_window` for one too
+    /// many.
+    fn ask(s: *Stage, subject: []const u8, expected: usize) ![]const []const u8 {
         const io = testing.io;
         s.asked += 1;
         var reply: [64]u8 = undefined;
         const reply_to = try std.fmt.bufPrint(&reply, "_INBOX.probe.{d}", .{s.asked});
         try s.fake.publish(io, .{ .subject = subject, .reply_to = reply_to }, .none);
         var answers: std.ArrayList([]const u8) = .empty;
-        const a = s.arena.allocator();
-        while (true) {
-            const msg = s.fake.next(io, s.inbox, .{ .duration = .{ .raw = .fromMilliseconds(200), .clock = .awake } }) catch |err| switch (err) {
-                error.Timeout => break,
-                else => return err,
-            } orelse break;
-            defer msg.release();
-            try testing.expectEqualStrings(reply_to, msg.subject);
-            // No one took the request: the broker's 503, no answer.
-            if (std.mem.startsWith(u8, msg.header_block, "NATS/1.0 503")) continue;
-            // An answer of NATS micro has no headers.
-            try testing.expectEqualStrings("", msg.header_block);
-            try answers.append(a, try a.dupe(u8, msg.payload));
+        const due = std.Io.Clock.awake.now(io).addDuration(due_within);
+        while (answers.items.len < expected) {
+            if (!try s.take(&answers, reply_to, .{ .deadline = due.withClock(.awake) })) break;
         }
+        while (try s.take(&answers, reply_to, waitFor(extra_window))) {}
+        try testing.expectEqual(expected, answers.items.len);
         return answers.items;
+    }
+
+    /// Takes the next message of the probe's inbox into `answers`; false
+    /// when none came within `timeout`.
+    fn take(s: *Stage, answers: *std.ArrayList([]const u8), reply_to: []const u8, timeout: std.Io.Timeout) !bool {
+        const msg = s.fake.next(testing.io, s.inbox, timeout) catch |err| switch (err) {
+            error.Timeout => return false,
+            else => return err,
+        } orelse return false;
+        defer msg.release();
+        try testing.expectEqualStrings(reply_to, msg.subject);
+        // No one took the request: the broker's 503, no answer.
+        if (std.mem.startsWith(u8, msg.header_block, "NATS/1.0 503")) return true;
+        // An answer of NATS micro has no headers.
+        try testing.expectEqualStrings("", msg.header_block);
+        const a = s.arena.allocator();
+        try answers.append(a, try a.dupe(u8, msg.payload));
+        return true;
     }
 
     /// The one answer to `subject`, parsed strictly as `T`.
     fn askOne(s: *Stage, comptime T: type, subject: []const u8) !T {
-        const answers = try s.ask(subject);
-        try testing.expectEqual(@as(usize, 1), answers.len);
+        const answers = try s.ask(subject, 1);
         return std.json.parseFromSliceLeaky(T, s.arena.allocator(), answers[0], .{});
     }
 
@@ -178,8 +214,7 @@ test "every contract answers PING in the three forms of subject, with an id of i
     defer stage.deinit();
     const a = stage.arena.allocator();
 
-    const all = try stage.ask("$SRV.PING");
-    try testing.expectEqual(@as(usize, 3), all.len);
+    const all = try stage.ask("$SRV.PING", 3);
     var pings: [3]Ping = undefined;
     for (all, &pings) |bytes, *p| p.* = try std.json.parseFromSliceLeaky(Ping, a, bytes, .{});
     const users = try find(&pings, "users", "1.0.0");
@@ -199,15 +234,14 @@ test "every contract answers PING in the three forms of subject, with an id of i
     try testing.expect(exact);
 
     // By name: both versions of users.
-    const named = try stage.ask("$SRV.PING.users");
-    try testing.expectEqual(@as(usize, 2), named.len);
+    const named = try stage.ask("$SRV.PING.users", 2);
     for (named) |bytes| try testing.expectEqualStrings("users", (try std.json.parseFromSliceLeaky(Ping, a, bytes, .{})).name);
     // By id: one.
     const one = try stage.askOne(Ping, try std.fmt.allocPrint(a, "$SRV.PING.users.{s}", .{users_v2.id}));
     try testing.expectEqualStrings("2.0.0", one.version);
     // Another name or id: nobody.
-    try testing.expectEqual(@as(usize, 0), (try stage.ask("$SRV.PING.billing")).len);
-    try testing.expectEqual(@as(usize, 0), (try stage.ask("$SRV.PING.users.AAAAAAAAAAAAAAAAAAAAAA")).len);
+    _ = try stage.ask("$SRV.PING.billing", 0);
+    _ = try stage.ask("$SRV.PING.users.AAAAAAAAAAAAAAAAAAAAAA", 0);
 }
 
 test "INFO lists the methods of a contract with their subjects and queue group" {
@@ -215,8 +249,7 @@ test "INFO lists the methods of a contract with their subjects and queue group" 
     try stage.init(.{ .subject_prefix = "shop", .queue_group = "users-workers" });
     defer stage.deinit();
     const a = stage.arena.allocator();
-    const answers = try stage.ask("$SRV.INFO.users");
-    try testing.expectEqual(@as(usize, 2), answers.len);
+    const answers = try stage.ask("$SRV.INFO.users", 2);
     for (answers) |bytes| {
         const info = try std.json.parseFromSliceLeaky(Info, a, bytes, .{});
         try testing.expectEqualStrings("io.nats.micro.v1.info_response", info.type);
@@ -238,7 +271,7 @@ test "INFO lists the methods of a contract with their subjects and queue group" 
             try testing.expectEqualStrings("shop.users.v2.getUser", info.endpoints[0].subject);
         }
     }
-    try testing.expectEqual(@as(usize, 3), (try stage.ask("$SRV.INFO")).len);
+    _ = try stage.ask("$SRV.INFO", 3);
     const ping = try stage.askOne(Ping, "$SRV.PING.orders");
     const orders = try stage.askOne(Info, try std.fmt.allocPrint(a, "$SRV.INFO.orders.{s}", .{ping.id}));
     try testing.expectEqualStrings("shop.orders.v1.place", orders.endpoints[0].subject);
@@ -254,9 +287,10 @@ test "STATS counts the calls of every method, its failures and its time" {
     try stage.call(get_user, "2");
     try stage.call(get_user, "missing");
     try stage.call(create_user, "x");
+    try eventually(&stage.bus, getUserFailed);
 
     var stats: ?Stats = null;
-    for (try stage.ask("$SRV.STATS.users")) |bytes| {
+    for (try stage.ask("$SRV.STATS.users", 2)) |bytes| {
         const s = try std.json.parseFromSliceLeaky(Stats, a, bytes, .{});
         if (std.mem.eql(u8, s.version, "1.0.0")) stats = s;
     }
@@ -283,12 +317,49 @@ test "STATS counts the calls of every method, its failures and its time" {
     try testing.expectEqual(@as(u64, 0), create.num_errors);
     try testing.expectEqualStrings("", create.last_error);
 
+    // The same service in the other two forms of subject.
+    var seen = false;
+    for (try stage.ask("$SRV.STATS", 3)) |bytes| {
+        const any = try std.json.parseFromSliceLeaky(Stats, a, bytes, .{});
+        try testing.expectEqualStrings("io.nats.micro.v1.stats_response", any.type);
+        if (!std.mem.eql(u8, any.id, s.id)) continue;
+        seen = true;
+        try testing.expectEqual(@as(u64, 3), any.endpoints[0].num_requests);
+        try testing.expectEqualStrings("404:users.not_found", any.endpoints[0].last_error);
+    }
+    try testing.expect(seen);
+    const by_id = try stage.askOne(Stats, try std.fmt.allocPrint(a, "$SRV.STATS.users.{s}", .{s.id}));
+    try testing.expectEqualStrings("1.0.0", by_id.version);
+    try testing.expectEqualStrings(s.started, by_id.started);
+    try testing.expectEqual(@as(u64, 3), by_id.endpoints[0].num_requests);
+    try testing.expectEqual(@as(u64, 1), by_id.endpoints[0].num_errors);
+    try testing.expectEqual(@as(u64, 1), by_id.endpoints[1].num_requests);
+
     // Nothing called yet: zeros.
-    for (try stage.ask("$SRV.STATS.orders")) |bytes| {
+    for (try stage.ask("$SRV.STATS.orders", 1)) |bytes| {
         const orders = try std.json.parseFromSliceLeaky(Stats, a, bytes, .{});
         try testing.expectEqual(@as(u64, 0), orders.endpoints[0].num_requests);
         try testing.expectEqual(@as(i64, 0), orders.endpoints[0].average_processing_time);
     }
+}
+
+test "a last error with an app code that is not UTF-8 goes by the name of its code" {
+    var stage: Stage = undefined;
+    try stage.init(.{});
+    defer stage.deinit();
+    const a = stage.arena.allocator();
+    try stage.call(get_user, "garbled");
+    try eventually(&stage.bus, getUserFailed);
+    var seen = false;
+    for (try stage.ask("$SRV.STATS.users", 2)) |bytes| {
+        const s = try std.json.parseFromSliceLeaky(Stats, a, bytes, .{});
+        if (!std.mem.eql(u8, s.version, "1.0.0")) continue;
+        seen = true;
+        try testing.expectEqualStrings("404:not_found", s.endpoints[0].last_error);
+        // A JSON string, which every NATS tool reads, not an array of bytes.
+        try testing.expect(std.mem.find(u8, bytes, "\"last_error\":\"404:not_found\"") != null);
+    }
+    try testing.expect(seen);
 }
 
 test "the answers go only to a reply subject under reply_prefixes" {
@@ -300,8 +371,14 @@ test "the answers go only to a reply subject under reply_prefixes" {
     defer stage.fake.unsubscribe(io, foreign);
     try stage.fake.publish(io, .{ .subject = "$SRV.PING", .reply_to = "elsewhere.1" }, .none);
     try stage.fake.publish(io, .{ .subject = "$SRV.INFO" }, .none);
-    try testing.expectError(error.Timeout, stage.fake.next(io, foreign, .{ .duration = .{ .raw = .fromMilliseconds(200), .clock = .awake } }));
     // Three services each dropped both.
+    try eventually(&stage.bus, struct {
+        fn dropped(bus: *Transport) bool {
+            const counters = bus.counters();
+            return counters.requests_with_foreign_reply_to >= 3 and counters.requests_without_reply_to >= 3;
+        }
+    }.dropped);
+    try testing.expectError(error.Timeout, stage.fake.next(io, foreign, waitFor(extra_window)));
     const counters = stage.bus.counters();
     try testing.expectEqual(@as(u64, 3), counters.requests_with_foreign_reply_to);
     try testing.expectEqual(@as(u64, 3), counters.requests_without_reply_to);
@@ -315,7 +392,7 @@ test "with discovery off there are no subscriptions of NATS micro" {
     // The four routes and the probe's inbox.
     try testing.expectEqual(@as(usize, 5), stage.fake.subscriptionCount(io));
     try testing.expect(!stage.fake.hasSubscription(io, "$SRV.PING", null));
-    try testing.expectEqual(@as(usize, 0), (try stage.ask("$SRV.PING")).len);
+    _ = try stage.ask("$SRV.PING", 0);
 }
 
 test "discovery subscribes nine subjects per contract without a queue group, and close ends them" {
@@ -335,7 +412,7 @@ test "discovery subscribes nine subjects per contract without a queue group, and
     // A stopping replica leaves the lists: its subscriptions end.
     try stage.server.shutdown(io);
     try testing.expectEqual(@as(usize, 1), stage.fake.subscriptionCount(io));
-    try testing.expectEqual(@as(usize, 0), (try stage.ask("$SRV.PING")).len);
+    _ = try stage.ask("$SRV.PING", 0);
 }
 
 test "a server started again on the transport is a new instance: new ids, a later start" {
