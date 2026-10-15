@@ -27,12 +27,19 @@
 //!   inbox one at a time, so the refusal reaches the side that made it.
 //!   Two transports on one client take an adapter each.
 //!
-//! Every subscription of the transport, a route or the client's inbox,
-//! holds `pending` messages: NATS drops what does not fit as a slow
-//! consumer, and the adapter tells the transport, which counts and logs
-//! the drops. `drain` of a subscription returns at once: the server
-//! confirms its UNSUB in a task of the adapter, and then the transport
-//! reads the rest and the end.
+//! Every subscription of the transport holds `pending` messages: a route,
+//! the client's inbox, and each of the nine subscriptions of NATS micro of
+//! every contract (`$SRV.PING`, `$SRV.INFO` and `$SRV.STATS` in three
+//! forms). NATS drops what does not fit as a slow consumer, and the
+//! adapter tells the transport, which counts and logs the drops. For an
+//! estimate of memory: every one of these queues may fill up to
+//! `pending.bytes`, by default the client's `limits.subscription_bytes`,
+//! 8 MiB, so a server of R routes in C contracts with its client's inbox
+//! has R + 9 * C + 1 of them.
+//!
+//! `drain` of a subscription returns at once: the server confirms its
+//! UNSUB in a task of the adapter, and then the transport reads the rest
+//! and the end.
 //!
 //! What zefir-nats does otherwise than the transport could wish: the
 //! server drops a publish its permissions deny and reports it with a
@@ -53,10 +60,10 @@ const log = std.log.scoped(.rpc_nats);
 /// The NATS client; it outlives the adapter.
 client: *nats.Client,
 /// The queue of each subscription the transport makes: the requests of a
-/// route, or the responses of the client's inbox, that wait for the
-/// transport to take them. NATS drops what does not fit, so it holds at
-/// least the server's `max_inflight` messages (`rpc.Limits`), 4352 by
-/// default. Null bytes: the client's `limits.subscription_bytes`.
+/// route or of NATS micro, or the responses of the client's inbox, that
+/// wait for the transport to take them. NATS drops what does not fit, so
+/// it holds at least the server's `max_inflight` messages (`rpc.Limits`),
+/// 4352 by default. Null bytes: the client's `limits.subscription_bytes`.
 pending: nats.SubscribeOptions.Pending = .{ .messages = default_pending_messages },
 /// Internal: guards `unconfirmed` and `next_order`.
 mutex: std.Io.Mutex = .init,

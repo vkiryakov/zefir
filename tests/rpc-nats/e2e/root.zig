@@ -1,8 +1,10 @@
 //! End-to-end tests of zefir-rpc-nats against the servers of the
 //! repository's docker-compose.yml. Every scenario runs on zio with one
 //! executor and again with four; the NATS clients, the transports and the
-//! engines see only `std.Io`. Docker and the NATS CLI run on the test's own
-//! `std.Io`.
+//! engines see only `std.Io`. A scenario runs Docker and the NATS CLI on
+//! its own `std.Io`, zio's: with one executor zio runs its tasks in the
+//! thread that waits for them, so a wait on another `std.Io` would stop
+//! the services meanwhile.
 
 const std = @import("std");
 const Io = std.Io;

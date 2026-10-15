@@ -271,7 +271,7 @@ fn receive(r: *Route, io: std.Io) void {
     const t = r.transport;
     // A start that fails cancels the task here.
     t.server.started.wait(io) catch return;
-    while (nextMessage(t, io, r.sub, r.subjectOf())) |message| {
+    while (nextMessage(t, io, r.sub, r.subjectOf(), .route)) |message| {
         const protection = io.swapCancelProtection(.blocked);
         defer _ = io.swapCancelProtection(protection);
         handle(t, io, r, message);
@@ -282,17 +282,21 @@ fn receive(r: *Route, io: std.Io) void {
 fn listen(l: *micro.Listener, io: std.Io) void {
     const t = l.transport;
     t.server.started.wait(io) catch return;
-    while (nextMessage(t, io, l.sub, l.subjectOf())) |message| {
+    while (nextMessage(t, io, l.sub, l.subjectOf(), .discovery)) |message| {
         const protection = io.swapCancelProtection(.blocked);
         defer _ = io.swapCancelProtection(protection);
         micro.answer(t, io, l, message);
     }
 }
 
+/// What a subscription of the server side takes: the calls of a route, or
+/// the requests of NATS micro.
+const Kind = enum { route, discovery };
+
 /// The next message of a subscription of the server side; null when its
 /// task ends: canceled, the subscription ended, or the transport broke,
 /// and then the engine has been told.
-fn nextMessage(t: *Transport, io: std.Io, sub: Conn.Sub, name: []const u8) ?Conn.InMsg {
+fn nextMessage(t: *Transport, io: std.Io, sub: Conn.Sub, name: []const u8, kind: Kind) ?Conn.InMsg {
     while (true) {
         const message = t.conn.next(io, sub, .none) catch |err| switch (err) {
             error.Canceled => return null,
@@ -304,7 +308,11 @@ fn nextMessage(t: *Transport, io: std.Io, sub: Conn.Sub, name: []const u8) ?Conn
             },
             error.SlowConsumer => {
                 shared.count(t, .slow_consumer_errors);
-                log.warn("the subscription to {s} lost requests as a slow consumer; its pending limits must hold the server's max_inflight", .{name});
+                switch (kind) {
+                    .route => log.warn("the subscription to {s} lost requests as a slow consumer; its pending limits must hold the server's max_inflight", .{name}),
+                    // A burst of discovery requests: no call was lost.
+                    .discovery => log.warn("the subscription to {s} lost NATS micro requests as a slow consumer", .{name}),
+                }
                 continue;
             },
             error.PermissionDenied => {
