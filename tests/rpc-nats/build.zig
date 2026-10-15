@@ -19,7 +19,8 @@ pub fn build(b: *std.Build) void {
     const zio = b.dependency("zio", .{ .target = target, .optimize = optimize });
 
     const compose_file = zefir.path("docker-compose.yml");
-    const up = compose(b, compose_file, &.{ "up", "--detach", "--wait" });
+    // Only the servers these tests use.
+    const up = compose(b, compose_file, &.{ "up", "--detach", "--wait", "plain", "restart", "rpc-acl" });
     b.step("up", "Start the NATS servers and wait until they are healthy").dependOn(&up.step);
     const down = compose(b, compose_file, &.{"down"});
     b.step("down", "Stop the NATS servers").dependOn(&down.step);
