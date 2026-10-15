@@ -536,7 +536,7 @@ test "a drain takes every subscription registered before it, whose SUB then neve
     const late = try newSubscription(gpa, "late");
     try r.register(io, gpa, late, 10);
     r.drainAll(io, &outbound);
-    try testing.expectError(error.Disconnected, outbound.putTicket(io, .service, subscribeTicket(late), encoder.subLen("late", null, late.sid), writeSubFrame, .{ "late", late.sid }));
+    try testing.expectError(error.Disconnected, outbound.putTicket(io, null, .service, subscribeTicket(late), encoder.subLen("late", null, late.sid), writeSubFrame, .{ "late", late.sid }));
     var frames: [4]Outbound.Frame = undefined;
     const queued = outbound.unsent(io, &frames);
     try testing.expectEqual(1, queued.len);

@@ -51,6 +51,11 @@ pub const Options = struct {
     /// How much may wait to be taken; more goes by `overflow`.
     pending: Pending = .{},
     overflow: OverflowPolicy = .drop_newest,
+    /// How long `subscribe` waits for room in the outbound queue for its
+    /// SUB, as when the server stops reading; by default, as long as it
+    /// takes. When it runs out, `subscribe` fails with Timeout and nothing
+    /// is subscribed, as when it is over before `subscribe` begins.
+    timeout: Io.Timeout = .none,
 
     pub const Pending = struct {
         /// Null: `limits.subscription_messages` of the client's options.

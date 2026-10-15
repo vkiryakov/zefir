@@ -428,12 +428,32 @@ test "a subscribe waiting for room can be canceled, and is not registered" {
     try testing.expect(s.client.isConnected());
 }
 
+test "a subscribe with a timeout gives up waiting for room at it, and is not registered" {
+    const io = testing.io;
+    var s: Stalled = undefined;
+    try s.start();
+    defer s.deinit();
+    var publisher = try io.concurrent(publishUntilError, .{ &s.client, s.payload, &s.published });
+    defer publisher.cancel(io) catch {};
+    try awaitStuck(&s.client, &s.published);
+    const start = Io.Clock.awake.now(io);
+    try testing.expectError(error.Timeout, s.client.subscribe("late.sub", .{ .timeout = waitFor(.fromMilliseconds(100)) }));
+    const took = elapsedSince(io, start);
+    try testing.expect(took.toMilliseconds() >= 100);
+    try testing.expect(took.toSeconds() < 5);
+    // Nothing stays, and only the stuck publish waits for room.
+    try testing.expectEqual(0, s.client.subscriptions.count(io));
+    try testing.expectEqual(1, s.client.outbound.roomWaiters(io));
+    try testing.expect(s.client.isConnected());
+}
+
 test "subscribe sends SUB; a queue group and max_messages go along" {
     var r: Recorded = undefined;
     try r.start(golden.info_default, .{ .servers = &.{} });
     defer r.deinit();
     const plain = try r.client.subscribe("foo", .{});
-    const grouped = try r.client.subscribe("q.work", .{ .queue = "workers" });
+    // A timeout changes nothing while there is room.
+    const grouped = try r.client.subscribe("q.work", .{ .queue = "workers", .timeout = waitFor(.fromSeconds(5)) });
     defer grouped.deinit();
     const once = try r.client.subscribe("once.*", .{ .max_messages = 3 });
     defer once.deinit();

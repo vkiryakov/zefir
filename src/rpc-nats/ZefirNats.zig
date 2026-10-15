@@ -34,16 +34,12 @@
 //! confirms its UNSUB in a task of the adapter, and then the transport
 //! reads the rest and the end.
 //!
-//! What zefir-nats does otherwise than the transport could wish:
-//!
-//! - The server drops a publish its permissions deny and reports it with
-//!   a `-ERR`, which the client turns into an event: a call to a route the
-//!   client may not publish to ends with Timeout, not AccessDenied. A
-//!   subscription the permissions deny fails the next flush, so the server
-//!   side's `start` and the client's first call see it as AccessDenied.
-//! - `subscribe` queues its SUB without a timeout: while the client's
-//!   outbound queue is full, it waits for room, and its task may be
-//!   canceled meanwhile.
+//! What zefir-nats does otherwise than the transport could wish: the
+//! server drops a publish its permissions deny and reports it with a
+//! `-ERR`, which the client turns into an event, so a call to a route the
+//! client may not publish to ends with Timeout, not AccessDenied. A
+//! subscription the permissions deny fails the next flush, so the server
+//! side's `start` and the client's first call see it as AccessDenied.
 
 const std = @import("std");
 const nats = @import("nats");
@@ -134,8 +130,6 @@ pub fn publish(z: *ZefirNats, io: std.Io, msg: Conn.OutMsg, timeout: std.Io.Time
 
 /// `rpc_nats.Conn.subscribe`: `nats.Client.subscribe` with `pending`.
 pub fn subscribe(z: *ZefirNats, io: std.Io, subject: []const u8, queue: ?[]const u8, timeout: std.Io.Timeout) Conn.Error!Conn.Sub {
-    // zefir-nats queues a SUB without a timeout.
-    _ = timeout;
     z.checkIo(io);
     const gpa = z.client.gpa;
     const box = box: {
@@ -149,9 +143,11 @@ pub fn subscribe(z: *ZefirNats, io: std.Io, subject: []const u8, queue: ?[]const
         defer _ = io.swapCancelProtection(protection);
         gpa.destroy(box);
     }
-    const sub = z.client.subscribe(subject, .{ .queue = queue, .pending = z.pending }) catch |err| return switch (err) {
+    const sub = z.client.subscribe(subject, .{ .queue = queue, .pending = z.pending, .timeout = timeout }) catch |err| return switch (err) {
         error.Disconnected => error.Disconnected,
         error.ConnectionDraining, error.ConnectionClosed => error.ConnectionClosed,
+        // No room in the client's outbound queue for the SUB in time.
+        error.Timeout => error.Timeout,
         error.Canceled => error.Canceled,
         error.OutOfMemory => error.OutOfMemory,
         error.InvalidSubject, error.InvalidOptions, error.TooManySubscriptions, error.ProtocolError => refused("a subscription to", subject, err),
@@ -367,6 +363,10 @@ test "while the client reconnects: subscriptions wait, drain ends them, unsubscr
     // answers for nothing meanwhile.
     const routes = try c.subscribe(io, "users.v1.getUser", "q", .none);
     const inbox = try c.subscribe(io, "_INBOX.token.*", null, .none);
+    try testing.expectEqual(@as(usize, 2), adapter.unconfirmed.len());
+    // The timeout of a subscription is the client's too: one already over
+    // subscribes nothing.
+    try testing.expectError(error.Timeout, c.subscribe(io, "orders.v1.place", "q", within(.zero)));
     try testing.expectEqual(@as(usize, 2), adapter.unconfirmed.len());
     try testing.expectError(error.Disconnected, c.flush(io, within(.fromSeconds(1))));
     try testing.expectEqual(@as(usize, 2), adapter.unconfirmed.len());

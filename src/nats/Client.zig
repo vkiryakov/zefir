@@ -407,6 +407,9 @@ pub const SubscribeError = error{
     OutOfMemory,
     /// A bug in this client: the frame came out of another length.
     ProtocolError,
+    /// The outbound queue had no room for the SUB within `options.timeout`:
+    /// nothing is subscribed.
+    Timeout,
 };
 
 /// Subscribes to `subject`, which may hold wildcards. The SUB is queued
@@ -416,6 +419,7 @@ pub const SubscribeError = error{
 /// `deinit()`.
 pub fn subscribe(client: *Client, subject: []const u8, options: Subscription.Options) SubscribeError!*Subscription {
     client.checkHome();
+    const deadline = time.deadline(client.io, options.timeout);
     try subjects.validateSubscribe(subject);
     if (options.queue) |queue| {
         if (!subjects.isValidQueue(queue)) return error.InvalidOptions;
@@ -445,7 +449,7 @@ pub fn subscribe(client: *Client, subject: []const u8, options: Subscription.Opt
         client.subscriptions.unregister(io, sub.sid);
     }
     const len = subscribeLen(sub.subject, sub.queue_group, sub.sid, options.max_messages);
-    client.outbound.putTicket(io, .service, Registry.subscribeTicket(sub), len, writeSubscribe, .{ sub.subject, sub.queue_group, sub.sid, options.max_messages }) catch |err| switch (err) {
+    client.outbound.putTicket(io, deadline, .service, Registry.subscribeTicket(sub), len, writeSubscribe, .{ sub.subject, sub.queue_group, sub.sid, options.max_messages }) catch |err| switch (err) {
         error.Closed => return error.ConnectionClosed,
         // Refused: a drain that began meanwhile took the subscription, and
         // its SUB never goes after the drain's UNSUB.
