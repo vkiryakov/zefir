@@ -24,6 +24,16 @@ declared=$(sed -n 's/.*b\.addModule("\([a-z-]*\)".*/\1/p' "$here/../../build.zig
 known=$(sh "$script" --all | tr ' ' '\n' | sort)
 expect "the script knows the modules of build.zig" "$(echo $declared)" "$(echo $known)"
 
+# An acceptance criterion of zefir-rpc: it depends on no application
+# container and no optional module, so build.zig gives it only core and
+# validator.
+rpc_imports=$(awk '
+    /b\.addModule\("zefir-rpc",/ { inside = 1; next }
+    inside && /^    }\);/ { exit }
+    inside && match($0, /\.name = "[^"]*"/) { print substr($0, RSTART + 9, RLENGTH - 10) }
+' "$here/../../build.zig" | sort)
+expect "zefir-rpc imports only core and validator" "core validator" "$(echo $rpc_imports)"
+
 repo=$(mktemp -d)
 trap 'rm -rf "$repo"' EXIT
 cd "$repo"
