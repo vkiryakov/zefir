@@ -21,6 +21,11 @@
 //! - The client outlives the transport: deinit the transport first. The
 //!   adapter takes its memory from the client's allocator, and stays where
 //!   it is once `conn()` has handed it out.
+//! - One adapter serves one transport. A flush tells of a subscription the
+//!   server refused that was made before it, whoever made it; the
+//!   transport confirms the subscriptions of its server side and of its
+//!   inbox one at a time, so the refusal reaches the side that made it.
+//!   Two transports on one client take an adapter each.
 //!
 //! Every subscription of the transport, a route or the client's inbox,
 //! holds `pending` messages: NATS drops what does not fit as a slow

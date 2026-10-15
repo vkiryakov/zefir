@@ -97,6 +97,11 @@ pending: rpc.transport.Pending,
 /// call brings the same.
 io_vtable: std.atomic.Value(?*const std.Io.VTable) = .init(null),
 counts: std.EnumArray(shared.Counter, std.atomic.Value(u64)) = .initFill(.init(0)),
+/// Held by the server side's `start` from its first SUB to the flush that
+/// confirms them, by the client from the SUB of its inbox to its flush,
+/// and by the flush of `close`: a connection tells of a refused SUB at the
+/// first flush after it, which must be the flush of the side that made it.
+confirming: std.Io.Mutex = .init,
 server: server_side.State = .{},
 client: client_side.State = .{},
 

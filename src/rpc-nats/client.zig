@@ -212,14 +212,12 @@ fn startAs(t: *Transport, io: std.Io, deadline: core.Deadline, diagnostics: ?*Di
     }
     var pattern_buffer: [subject.max_subject_bytes]u8 = undefined;
     const pattern = std.fmt.bufPrint(&pattern_buffer, "{s}.*", .{s.inbox()}) catch unreachable;
-    const sub = t.conn.subscribe(io, pattern, null, deadline.toTimeout()) catch |err| return inboxError(diagnostics, err);
+    const sub = try subscribeInbox(t, io, pattern, deadline, diagnostics);
     errdefer {
         const protection = io.swapCancelProtection(.blocked);
         defer _ = io.swapCancelProtection(protection);
         t.conn.unsubscribe(io, sub);
     }
-    // The broker confirms the subscription and its permissions here.
-    t.conn.flush(io, deadline.toTimeout()) catch |err| return inboxError(diagnostics, err);
     // Held from the start of the task until its handles are in place, which
     // is no I/O: a task that ends at once waits for it in `broken`, so the
     // inbox turns broken only with the handles of this task to end.
@@ -232,6 +230,26 @@ fn startAs(t: *Transport, io: std.Io, deadline: core.Deadline, diagnostics: ?*Di
     };
     s.live = .{ .sub = sub, .task = task };
     s.phase.store(.running, .release);
+}
+
+/// The subscription of the inbox to `pattern`, confirmed by a flush. Not
+/// while the server side's `start` or `close` waits for its flush: that
+/// flush would answer for this subscription.
+fn subscribeInbox(t: *Transport, io: std.Io, pattern: []const u8, deadline: core.Deadline, diagnostics: ?*Diagnostics) CallError!Conn.Sub {
+    shared.lockConfirming(t, io, deadline) catch |err| {
+        note(diagnostics, .connect, err, "the inbox waited for the flush of the server side", .{});
+        return err;
+    };
+    defer t.confirming.unlock(io);
+    const sub = t.conn.subscribe(io, pattern, null, deadline.toTimeout()) catch |err| return inboxError(diagnostics, err);
+    errdefer {
+        const protection = io.swapCancelProtection(.blocked);
+        defer _ = io.swapCancelProtection(protection);
+        t.conn.unsubscribe(io, sub);
+    }
+    // The broker confirms the subscription and its permissions here.
+    t.conn.flush(io, deadline.toTimeout()) catch |err| return inboxError(diagnostics, err);
+    return sub;
 }
 
 fn setPhase(t: *Transport, io: std.Io, phase: Phase) void {

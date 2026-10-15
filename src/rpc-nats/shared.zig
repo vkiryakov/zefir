@@ -26,3 +26,15 @@ pub fn timeoutAfter(io: std.Io, duration: std.Io.Duration) std.Io.Timeout {
     const deadline: core.Deadline = .after(std.Io.Clock.awake.now(io), duration);
     return deadline.toTimeout();
 }
+
+/// How often a side that waits for `Transport.confirming` looks again: the
+/// other side holds it for a flush, one round trip to the broker.
+const confirm_poll: std.Io.Duration = .fromMilliseconds(1);
+
+/// Takes `t.confirming`, waiting no longer than `deadline`.
+pub fn lockConfirming(t: *Transport, io: std.Io, deadline: core.Deadline) error{ Timeout, Canceled }!void {
+    while (!t.confirming.tryLock()) {
+        if (deadline.isExpired(std.Io.Clock.awake.now(io))) return error.Timeout;
+        try io.sleep(confirm_poll, .awake);
+    }
+}

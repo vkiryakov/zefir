@@ -759,3 +759,169 @@ test "a request lost when the link drops ends at its deadline with Timeout" {
     try testing.expectError(error.Timeout, caller.result);
     try testing.expect(caller.began.durationTo(caller.ended).nanoseconds >= 399 * std.time.ns_per_ms);
 }
+
+/// An adapter on `FakeConn` that makes the first flush after `arm` overlap
+/// another: it waits, `hold` at most, until a second flush begins, and goes
+/// first; the second waits until the first is done. By then the side of the
+/// second flush has made its subscriptions, unless the transport keeps it
+/// out while the first side confirms its own.
+const Overlap = struct {
+    fake: *FakeConn,
+    armed: std.atomic.Value(bool) = .init(false),
+    /// Flushes since `arm`.
+    flushes: std.atomic.Value(u32) = .init(0),
+    second: std.Io.Event = .unset,
+    first_done: std.Io.Event = .unset,
+
+    const hold: std.Io.Duration = .fromMilliseconds(200);
+
+    fn arm(a: *Overlap) void {
+        a.flushes.store(0, .monotonic);
+        a.armed.store(true, .release);
+    }
+
+    fn flushing(a: *Overlap) bool {
+        return a.flushes.load(.monotonic) != 0;
+    }
+
+    pub fn publish(a: *Overlap, io: std.Io, msg: Conn.OutMsg, timeout: std.Io.Timeout) Conn.Error!void {
+        return a.fake.publish(io, msg, timeout);
+    }
+    pub fn subscribe(a: *Overlap, io: std.Io, name: []const u8, queue: ?[]const u8, timeout: std.Io.Timeout) Conn.Error!Conn.Sub {
+        return a.fake.subscribe(io, name, queue, timeout);
+    }
+    pub fn next(a: *Overlap, io: std.Io, sub: Conn.Sub, timeout: std.Io.Timeout) Conn.Error!?Conn.InMsg {
+        return a.fake.next(io, sub, timeout);
+    }
+    pub fn drain(a: *Overlap, io: std.Io, sub: Conn.Sub) Conn.Error!void {
+        return a.fake.drain(io, sub);
+    }
+    pub fn unsubscribe(a: *Overlap, io: std.Io, sub: Conn.Sub) void {
+        a.fake.unsubscribe(io, sub);
+    }
+    pub fn flush(a: *Overlap, io: std.Io, timeout: std.Io.Timeout) Conn.Error!void {
+        if (a.armed.load(.acquire)) switch (a.flushes.fetchAdd(1, .acq_rel)) {
+            0 => {
+                defer a.first_done.set(io);
+                const until = std.Io.Clock.awake.now(io).addDuration(hold);
+                while (!a.second.isSet() and std.Io.Clock.awake.now(io).nanoseconds < until.nanoseconds) {
+                    a.second.waitTimeout(io, .{ .deadline = until.withClock(.awake) }) catch |err| switch (err) {
+                        error.Timeout => {},
+                        error.Canceled => return error.Canceled,
+                    };
+                }
+                return a.fake.flush(io, timeout);
+            },
+            1 => {
+                a.second.set(io);
+                try a.first_done.wait(io);
+            },
+            else => {},
+        };
+        return a.fake.flush(io, timeout);
+    }
+    pub fn isConnected(a: *Overlap) bool {
+        return a.fake.isConnected();
+    }
+};
+
+/// A transport on `Overlap`, with a server of `get_user` that has not
+/// started.
+const OverlapStage = struct {
+    fake: FakeConn,
+    adapter: Overlap,
+    bus: Transport,
+    server: rpc.RawServer,
+    state: u8 = 0,
+
+    fn init(s: *OverlapStage, deny_subscribe: []const []const u8) !void {
+        const io = testing.io;
+        s.fake = .init(testing.allocator, .{ .deny_subscribe = deny_subscribe });
+        errdefer s.fake.deinit(io);
+        s.adapter = .{ .fake = &s.fake };
+        s.bus = try .init(testing.allocator, .init(&s.adapter), .{});
+        errdefer s.bus.deinit(io);
+        s.state = 0;
+        const methods = [_]rpc.Method{.{ .route = get_user, .handler = .{ .ptr = &s.state, .handle = Methods.echo } }};
+        s.server = try .init(testing.allocator, .{ .transport = s.bus.serverTransport(), .methods = &methods });
+    }
+
+    fn deinit(s: *OverlapStage) void {
+        const io = testing.io;
+        s.server.deinit(io);
+        s.bus.deinit(io);
+        s.fake.deinit(io);
+    }
+};
+
+test "a denied inbox fails the first call, not the start of a server that overlaps it" {
+    const io = testing.io;
+    const log_level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = log_level;
+    var stage: OverlapStage = undefined;
+    try stage.init(&.{"_INBOX.>"});
+    defer stage.deinit();
+    var caller: Caller = .init(&stage.bus, .{ .timeout = .fromSeconds(5) });
+    defer caller.deinit();
+
+    stage.adapter.arm();
+    // The server subscribes and waits in its flush; the first call starts
+    // the inbox meanwhile.
+    var starting = try io.concurrent(rpc.RawServer.start, .{ &stage.server, io });
+    const overlapped = eventually(&stage.adapter, Overlap.flushing);
+    if (overlapped) |_| caller.run() else |_| {}
+    const started = starting.await(io);
+    try overlapped;
+    try started;
+    try testing.expectError(error.AccessDenied, caller.result);
+    try stage.server.shutdown(io);
+}
+
+test "a denied route fails the start of the server, not a first call that overlaps it" {
+    const io = testing.io;
+    const log_level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = log_level;
+    var stage: OverlapStage = undefined;
+    try stage.init(&.{"users.v1.getUser"});
+    defer stage.deinit();
+    var caller: Caller = .init(&stage.bus, .{ .timeout = .fromSeconds(5) });
+    defer caller.deinit();
+
+    stage.adapter.arm();
+    // The first call subscribes its inbox and waits in its flush; the server
+    // starts meanwhile.
+    try caller.begin();
+    const overlapped = eventually(&stage.adapter, Overlap.flushing);
+    const started = if (overlapped) |_| stage.server.start(io) else |_| {};
+    caller.join();
+    try overlapped;
+    try testing.expectError(error.AccessDenied, started);
+    // The request went out once the inbox ran: no one serves the route.
+    try testing.expectError(error.Unavailable, caller.result);
+}
+
+test "a denied inbox fails the first call, not the close of a server that overlaps it" {
+    const io = testing.io;
+    const log_level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = log_level;
+    var stage: OverlapStage = undefined;
+    try stage.init(&.{"_INBOX.>"});
+    defer stage.deinit();
+    var caller: Caller = .init(&stage.bus, .{ .timeout = .fromSeconds(5) });
+    defer caller.deinit();
+    try stage.server.start(io);
+
+    stage.adapter.arm();
+    // The server stops: its close flushes the responses sent so far, and the
+    // first call starts the inbox meanwhile.
+    stage.server.requestStop(io);
+    const overlapped = eventually(&stage.adapter, Overlap.flushing);
+    if (overlapped) |_| caller.run() else |_| {}
+    const stopped = stage.server.shutdown(io);
+    try overlapped;
+    try stopped;
+    try testing.expectError(error.AccessDenied, caller.result);
+}

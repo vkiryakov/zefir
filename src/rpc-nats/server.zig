@@ -13,6 +13,7 @@
 //! started, or refused, before the task takes the next one.
 
 const std = @import("std");
+const core = @import("core");
 const rpc = @import("rpc");
 const Conn = @import("Conn.zig");
 const Transport = @import("Transport.zig");
@@ -104,19 +105,26 @@ pub fn start(t: *Transport, io: std.Io, dispatcher: rpc.transport.Dispatcher) rp
         for (routes[0..subscribed]) |*r| t.conn.unsubscribe(io, r.sub);
         for (services.listeners[0..listening]) |*l| t.conn.unsubscribe(io, l.sub);
     }
-    const timeout = shared.timeoutAfter(io, t.options.flush_timeout);
-    for (routes) |*r| {
-        r.sub = t.conn.subscribe(io, r.subjectOf(), t.options.queue_group, timeout) catch |err| return startError(r.subjectOf(), err);
-        subscribed += 1;
+    const deadline: core.Deadline = .after(std.Io.Clock.awake.now(io), t.options.flush_timeout);
+    const timeout = deadline.toTimeout();
+    {
+        // Not while the client's inbox waits for its flush: that flush
+        // would answer for these subscriptions.
+        shared.lockConfirming(t, io, deadline) catch |err| return startError(null, err);
+        defer t.confirming.unlock(io);
+        for (routes) |*r| {
+            r.sub = t.conn.subscribe(io, r.subjectOf(), t.options.queue_group, timeout) catch |err| return startError(r.subjectOf(), err);
+            subscribed += 1;
+        }
+        // Every replica answers discovery: no queue group.
+        for (services.listeners) |*l| {
+            l.sub = t.conn.subscribe(io, l.subjectOf(), null, timeout) catch |err| return startError(l.subjectOf(), err);
+            listening += 1;
+        }
+        // The broker confirms the subscriptions and their permissions here;
+        // without it, a denied subject would show only as no responders.
+        t.conn.flush(io, timeout) catch |err| return startError(null, err);
     }
-    // Every replica answers discovery: no queue group.
-    for (services.listeners) |*l| {
-        l.sub = t.conn.subscribe(io, l.subjectOf(), null, timeout) catch |err| return startError(l.subjectOf(), err);
-        listening += 1;
-    }
-    // The broker confirms the subscriptions and their permissions here;
-    // without it, a denied subject would show only as no responders.
-    t.conn.flush(io, timeout) catch |err| return startError(null, err);
     s.dispatcher = dispatcher;
     s.routes = routes;
     s.services = services;
@@ -242,8 +250,13 @@ pub fn close(t: *Transport, io: std.Io) void {
     // A task in `next` gets the cancelation at once; one with a request
     // hands it over or refuses it first.
     s.group.cancel(io);
-    // The responses published so far reach the server.
-    t.conn.flush(io, shared.timeoutAfter(io, t.options.flush_timeout)) catch |err| log.debug("the flush of close failed: {t}", .{err});
+    // The responses published so far reach the server. Not while the
+    // client's inbox waits for its flush: this one would answer for it.
+    const deadline: core.Deadline = .after(std.Io.Clock.awake.now(io), t.options.flush_timeout);
+    if (shared.lockConfirming(t, io, deadline)) |_| {
+        defer t.confirming.unlock(io);
+        t.conn.flush(io, deadline.toTimeout()) catch |err| log.debug("the flush of close failed: {t}", .{err});
+    } else |err| log.debug("the flush of close did not begin: {t}", .{err});
     for (s.routes) |*r| t.conn.unsubscribe(io, r.sub);
     for (s.services.listeners) |*l| t.conn.unsubscribe(io, l.sub);
     freeRoutes(t, io, s.routes);

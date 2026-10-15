@@ -106,7 +106,10 @@ pub const VTable = struct {
     /// `next`.
     unsubscribe: *const fn (ptr: *anyopaque, io: std.Io, sub: Sub) void,
     /// Waits until the server has processed everything sent before (PING
-    /// and PONG); the server's verdict on a SUB comes here.
+    /// and PONG); the server's verdict on a SUB comes here: PermissionDenied
+    /// for a SUB made before it and refused. The transport confirms the
+    /// SUBs of one side at a time, so an adapter may report a refusal to
+    /// the first flush after it only.
     flush: *const fn (ptr: *anyopaque, io: std.Io, timeout: std.Io.Timeout) Error!void,
     /// Optional: whether the link to the server is up now. By default it
     /// always is: an adapter of a library that cannot tell loses the fast
