@@ -62,36 +62,37 @@ while IFS='|' read -r change modules <&3; do
     git commit -q -m "$change"
     expect "$(echo $change)" "$(echo $modules)" "$(sh "$script" "$base" HEAD)"
 done 3<<'EOF'
-edit src/core/Context.zig                       | core log confy validator rpc rpc-nats orm nats zefir
-edit src/log/Logger.zig                         | log confy validator rpc rpc-nats orm nats zefir
+edit src/core/Context.zig                       | core log confy validator rpc rpc-nats rpc-log orm nats zefir
+edit src/log/Logger.zig                         | log confy validator rpc rpc-nats rpc-log orm nats zefir
 edit src/confy/root.zig                         | confy rpc-nats nats zefir
-edit src/validator/strings.zig                  | validator rpc rpc-nats zefir
-edit src/rpc/root.zig                           | rpc rpc-nats zefir
+edit src/validator/strings.zig                  | validator rpc rpc-nats rpc-log zefir
+edit src/rpc/root.zig                           | rpc rpc-nats rpc-log zefir
 edit src/orm/root.zig                           | orm zefir
-edit src/rpc/root.zig src/orm/root.zig          | rpc rpc-nats orm zefir
+edit src/rpc/root.zig src/orm/root.zig          | rpc rpc-nats rpc-log orm zefir
 edit src/rpc-nats/Transport.zig                 | rpc-nats zefir
+edit src/rpc-log/AccessLog.zig                  | rpc-log zefir
 edit src/nats/Client.zig                        | rpc-nats nats zefir
 edit tests/nats/e2e/pubsub.zig                  | rpc-nats nats zefir
 edit tests/nats/README.md                       | rpc-nats nats zefir
 edit docker-compose.yml                         | rpc-nats nats zefir
 edit tests/rpc-nats/e2e/root.zig                | rpc-nats zefir
 edit tests/rpc-nats/conf/acl.conf               | rpc-nats zefir
-edit src/core/root.zig src/nats/root.zig        | core log confy validator rpc rpc-nats orm nats zefir
+edit src/core/root.zig src/nats/root.zig        | core log confy validator rpc rpc-nats rpc-log orm nats zefir
 edit src/confy/examples/README.md               | confy rpc-nats nats zefir
-edit README.md src/validator/root.zig           | validator rpc rpc-nats zefir
+edit README.md src/validator/root.zig           | validator rpc rpc-nats rpc-log zefir
 edit README.md                                  |
 edit docs/plan.md docs/notes.txt                |
-edit build.zig                                  | core log confy validator rpc rpc-nats orm nats zefir
-edit build.zig.zon                              | core log confy validator rpc rpc-nats orm nats zefir
-edit src/zefir.zig                              | core log confy validator rpc rpc-nats orm nats zefir
-edit .github/workflows/ci.yml                   | core log confy validator rpc rpc-nats orm nats zefir
-edit src/http/root.zig                          | core log confy validator rpc rpc-nats orm nats zefir
-edit src/helpers.zig                            | core log confy validator rpc rpc-nats orm nats zefir
-edit src/notes.md                               | core log confy validator rpc rpc-nats orm nats zefir
-edit tests/other/main.zig                       | core log confy validator rpc rpc-nats orm nats zefir
-edit LICENSE                                    | core log confy validator rpc rpc-nats orm nats zefir
-git rm -q src/log/root.zig                      | log confy validator rpc rpc-nats orm nats zefir
-git mv src/orm/root.zig src/rpc/orm.zig         | rpc rpc-nats orm zefir
+edit build.zig                                  | core log confy validator rpc rpc-nats rpc-log orm nats zefir
+edit build.zig.zon                              | core log confy validator rpc rpc-nats rpc-log orm nats zefir
+edit src/zefir.zig                              | core log confy validator rpc rpc-nats rpc-log orm nats zefir
+edit .github/workflows/ci.yml                   | core log confy validator rpc rpc-nats rpc-log orm nats zefir
+edit src/http/root.zig                          | core log confy validator rpc rpc-nats rpc-log orm nats zefir
+edit src/helpers.zig                            | core log confy validator rpc rpc-nats rpc-log orm nats zefir
+edit src/notes.md                               | core log confy validator rpc rpc-nats rpc-log orm nats zefir
+edit tests/other/main.zig                       | core log confy validator rpc rpc-nats rpc-log orm nats zefir
+edit LICENSE                                    | core log confy validator rpc rpc-nats rpc-log orm nats zefir
+git rm -q src/log/root.zig                      | log confy validator rpc rpc-nats rpc-log orm nats zefir
+git mv src/orm/root.zig src/rpc/orm.zig         | rpc rpc-nats rpc-log orm zefir
 EOF
 
 # Only the changes on HEAD's side count: here the base moved on with a
@@ -103,9 +104,9 @@ later=$(git rev-parse HEAD)
 git checkout -q --detach "$base"
 edit src/validator/root.zig
 git commit -q -am "head"
-expect "a later base" "validator rpc rpc-nats zefir" "$(sh "$script" "$later" HEAD)"
+expect "a later base" "validator rpc rpc-nats rpc-log zefir" "$(sh "$script" "$later" HEAD)"
 
-expect "--all" "core log confy validator rpc rpc-nats orm nats zefir" "$(sh "$script" --all)"
+expect "--all" "core log confy validator rpc rpc-nats rpc-log orm nats zefir" "$(sh "$script" --all)"
 
 if [ "$failures" -ne 0 ]; then
     echo "$failures failed"

@@ -81,6 +81,20 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    // The access logs of rpc on zefir-log: a module of their own, so that
+    // zefir-rpc does not depend on log.
+    const rpc_log = b.addModule("zefir-rpc-log", .{
+        .root_source_file = b.path("src/rpc-log/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+        .imports = &.{
+            .{ .name = "rpc", .module = rpc },
+            .{ .name = "core", .module = core },
+            .{ .name = "log", .module = log },
+        },
+    });
+
     const orm = b.addModule("zefir-orm", .{
         .root_source_file = b.path("src/orm/root.zig"),
         .target = target,
@@ -91,7 +105,7 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // Umbrella module: @import("zefir").core, .log, .confy, .validator, .rpc, .rpc_nats, .orm, .nats
+    // Umbrella module: @import("zefir").core, .log, .confy, .validator, .rpc, .rpc_nats, .rpc_log, .orm, .nats
     const zefir = b.addModule("zefir", .{
         .root_source_file = b.path("src/zefir.zig"),
         .target = target,
@@ -104,6 +118,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "validator", .module = validator },
             .{ .name = "rpc", .module = rpc },
             .{ .name = "rpc-nats", .module = rpc_nats },
+            .{ .name = "rpc-log", .module = rpc_log },
             .{ .name = "orm", .module = orm },
             .{ .name = "nats", .module = nats },
         },
@@ -120,6 +135,7 @@ pub fn build(b: *std.Build) void {
     const test_validator = addModuleTestStep(b, test_step, "validator");
     const test_rpc = addModuleTestStep(b, test_step, "rpc");
     const test_rpc_nats = addModuleTestStep(b, test_step, "rpc-nats");
+    const test_rpc_log = addModuleTestStep(b, test_step, "rpc-log");
     const test_orm = addModuleTestStep(b, test_step, "orm");
     const test_nats = addModuleTestStep(b, test_step, "nats");
     const test_zefir = addModuleTestStep(b, test_step, "zefir");
@@ -128,8 +144,8 @@ pub fn build(b: *std.Build) void {
     // where usize has 32 bits.
     const validator_compile_step = b.step("compile-validator-tests", "Build the validator's test binaries for -Dtarget without running them");
     for (
-        [_]*std.Build.Module{ core, log, confy, validator, rpc, rpc_nats, orm, nats, zefir },
-        [_]*std.Build.Step{ test_core, test_log, test_confy, test_validator, test_rpc, test_rpc_nats, test_orm, test_nats, test_zefir },
+        [_]*std.Build.Module{ core, log, confy, validator, rpc, rpc_nats, rpc_log, orm, nats, zefir },
+        [_]*std.Build.Step{ test_core, test_log, test_confy, test_validator, test_rpc, test_rpc_nats, test_rpc_log, test_orm, test_nats, test_zefir },
     ) |module, module_test_step| {
         const tests = b.addTest(.{ .root_module = module });
         module_test_step.dependOn(&addRun(b, tests, tsan).step);

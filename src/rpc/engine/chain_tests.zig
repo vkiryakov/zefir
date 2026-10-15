@@ -667,6 +667,7 @@ const ClientProbe = struct {
     response_before: bool = false,
     response_status: ?enum { ok, failure } = null,
     request_id: [16]u8 = undefined,
+    transport_name: []const u8 = "",
     has_deadline: bool = false,
     reserved_key: ?anyerror = null,
 
@@ -700,6 +701,7 @@ const ClientProbe = struct {
         defer trail.add("<{s}", p.name);
         p.response_before = ctx.response() != null;
         p.request_id = ctx.requestId();
+        p.transport_name = ctx.transport().name;
         p.has_deadline = ctx.operation().deadline != null;
         if (ctx.addMetadata("authorization", "Bearer x")) |_| {} else |err| p.reserved_key = err;
         // A value the link builds lives in the call's arena.
@@ -755,6 +757,7 @@ test "client middleware: in order around the transport; its metadata and credent
     try testing.expect(!probe.response_before);
     try testing.expectEqual(@as(@TypeOf(probe.response_status), .ok), probe.response_status);
     try testing.expectEqualSlices(u8, &request_id, &probe.request_id);
+    try testing.expectEqualStrings("memory", probe.transport_name);
     try testing.expect(probe.has_deadline);
     try testing.expectEqual(@as(?anyerror, error.InvalidMetadata), probe.reserved_key);
 

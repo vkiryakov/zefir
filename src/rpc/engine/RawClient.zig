@@ -34,6 +34,7 @@ const failures = @import("../failures.zig");
 const credentials = @import("../credentials.zig");
 const ClientTransport = @import("../ClientTransport.zig");
 const Credentials = credentials.Credentials;
+const Info = transport.Info;
 const ClientMiddleware = @import("../middleware.zig").ClientMiddleware;
 
 const RawClient = @This();
@@ -139,6 +140,11 @@ pub const ClientContext = opaque {
     /// The id the request goes out with, for logs.
     pub fn requestId(ctx: *ClientContext) [16]u8 {
         return outgoingOf(ctx).request_id;
+    }
+
+    /// What the client's transport can do: for logs.
+    pub fn transport(ctx: *ClientContext) Info {
+        return outgoingOf(ctx).client.client_transport.info();
     }
 
     /// Before `next.run()`: adds a pair to the request's metadata, after

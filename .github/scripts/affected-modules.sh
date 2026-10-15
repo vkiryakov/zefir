@@ -17,7 +17,7 @@ set -eu
 # The modules and what the tests of each one import. Keep this in sync with
 # build.zig: the `.imports` of each module and of the programs that its
 # test-<module> step builds. CI tests only the modules listed here.
-modules="core log confy validator rpc rpc-nats orm nats zefir"
+modules="core log confy validator rpc rpc-nats rpc-log orm nats zefir"
 imports() {
     case $1 in
     core) ;;
@@ -29,12 +29,13 @@ imports() {
     rpc) echo core validator ;;
     # rpc-nats imports nats for its adapter of zefir-nats.
     rpc-nats) echo rpc core nats ;;
+    rpc-log) echo rpc core log ;;
     # nats imports nothing, but the examples of its guide read their
     # settings with confy, log with log and take deadlines from core, and
     # its end-to-end tests build and run them. confy brings log.
     nats) echo core confy ;;
     orm) echo log ;;
-    zefir) echo core log confy validator rpc rpc-nats orm nats ;;
+    zefir) echo core log confy validator rpc rpc-nats rpc-log orm nats ;;
     esac
 }
 
