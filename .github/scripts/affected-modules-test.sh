@@ -77,6 +77,10 @@ edit tests/nats/README.md                       | rpc-nats nats zefir
 edit docker-compose.yml                         | rpc-nats nats zefir
 edit tests/rpc-nats/e2e/root.zig                | rpc-nats zefir
 edit tests/rpc-nats/conf/acl.conf               | rpc-nats zefir
+edit examples/rpc-custom-transport/src/root.zig | rpc rpc-nats rpc-log zefir
+edit examples/rpc-custom-transport/consumer/build.zig | rpc rpc-nats rpc-log zefir
+edit examples/rpc-custom-transport/README.md    | rpc rpc-nats rpc-log zefir
+edit examples/other/main.zig                    | core log confy validator rpc rpc-nats rpc-log orm nats zefir
 edit src/core/root.zig src/nats/root.zig        | core log confy validator rpc rpc-nats rpc-log orm nats zefir
 edit src/confy/examples/README.md               | confy rpc-nats nats zefir
 edit README.md src/validator/root.zig           | validator rpc rpc-nats rpc-log zefir

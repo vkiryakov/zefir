@@ -9,8 +9,10 @@
 # tests import it, directly or through other modules; zefir imports them
 # all. tests/nats/ and tests/rpc-nats/, the end-to-end tests of nats and
 # of rpc-nats, count as their modules, and docker-compose.yml, their
-# servers, as both. build.zig, build.zig.zon, src/zefir.zig, .github/ and
-# any other path the script does not know affect every module.
+# servers, as both. examples/rpc-custom-transport/, a transport outside
+# zefir that CI runs against rpc, counts as rpc. build.zig, build.zig.zon,
+# src/zefir.zig, .github/ and any other path the script does not know
+# affect every module.
 # Documentation outside src/ (*.md files and docs/) affects none.
 set -eu
 
@@ -77,6 +79,7 @@ elif [ $# -eq 2 ] && [ -n "$1" ] && [ -n "$2" ]; then
         src/*) all=true ;;
         tests/nats/*) changed="$changed nats" ;;
         tests/rpc-nats/*) changed="$changed rpc-nats" ;;
+        examples/rpc-custom-transport/*) changed="$changed rpc" ;;
         docker-compose.yml) changed="$changed nats rpc-nats" ;;
         docs/* | *.md) ;;
         *) all=true ;;
