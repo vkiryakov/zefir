@@ -14,18 +14,24 @@
 //! `[subject_prefix.]service.v<version>.method`, with a reply subject in
 //! the client's own inbox; the response comes back there. Errors travel in
 //! the headers of the NATS Service API (ADR-32), so `nats req` and NATS
-//! clients in other languages can call a zefir service.
+//! clients in other languages can call a zefir service, and every contract
+//! of a server is a NATS micro service that `nats micro ls` lists.
 //!
 //! ```zig
+//! var nc: nats.Client = try .init(gpa, io, .{ .servers = &.{"nats://127.0.0.1:4222"} });
+//! defer nc.deinit();
+//! try nc.connect();
+//! var adapter: rpc_nats.ZefirNats = .{ .client = &nc };
 //! var bus: rpc_nats.Transport = try .init(gpa, adapter.conn(), .{});
 //! defer bus.deinit(io);
 //! var server: rpc.Server = try .init(gpa, .{ .transport = bus.serverTransport(), .handlers = .{&users} });
-//! defer server.deinit();
+//! defer server.deinit(io);
 //! ```
 //!
 //! The transport needs six operations from a NATS connection,
 //! `rpc_nats.Conn`; an adapter of a NATS library fills them in, and every
-//! library then puts the same bytes on the wire.
+//! library then puts the same bytes on the wire. `rpc_nats.ZefirNats` is the
+//! adapter of zefir-nats.
 
 const std = @import("std");
 
