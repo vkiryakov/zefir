@@ -148,6 +148,7 @@ pub fn build(b: *std.Build) void {
     check_step.dependOn(&e2e.step);
     var previous: *std.Build.Step = &run.step;
     for (examples) |example| {
+        const source = zefir.path(b.fmt("src/rpc-nats/examples/{s}.zig", .{example.name}));
         const exe = b.addExecutable(.{
             .name = example.name,
             .root_module = b.createModule(.{
@@ -155,7 +156,7 @@ pub fn build(b: *std.Build) void {
                 .target = target,
                 .optimize = optimize,
                 .imports = &.{.{ .name = "example", .module = b.createModule(.{
-                    .root_source_file = zefir.path(b.fmt("src/rpc-nats/examples/{s}.zig", .{example.name})),
+                    .root_source_file = source,
                     .target = target,
                     .optimize = optimize,
                     .imports = &.{
@@ -184,6 +185,7 @@ pub fn build(b: *std.Build) void {
         checked.step.dependOn(previous);
         previous = &checked.step;
         guide.root_module.addAnonymousImport(b.fmt("{s}.out", .{example.name}), .{ .root_source_file = checked.captureStdOut(.{}) });
+        guide.root_module.addAnonymousImport(b.fmt("{s}.zig", .{example.name}), .{ .root_source_file = source });
 
         const shown = b.addRunArtifact(exe);
         shown.has_side_effects = true;

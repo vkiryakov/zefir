@@ -1,10 +1,11 @@
 //! README.md shows every file of the examples as it is, a run of every
-//! program as it printed, and no Zig code that is not a part of these
-//! files: a file that changes without its copy in README.md, or a program
-//! that prints something else, fails this test. build.zig compiles it
-//! twice: for the programs of `zig build test-rpc` and for those of `zig
-//! build test-rpc-log`. It embeds what each program printed in this build
-//! as `<name>.out`, and README.md of the repository as `root_readme`.
+//! program as it printed, after the program, and no Zig code that is not a
+//! part of these files: a file that changes without its copy in README.md,
+//! or a program that prints something else, fails this test. build.zig
+//! compiles it twice: for the programs of `zig build test-rpc` and for
+//! those of `zig build test-rpc-log`. It embeds what each program printed
+//! in this build as `<name>.out`, and README.md of the repository as
+//! `root_readme`.
 
 const std = @import("std");
 const cases = @import("cases");
@@ -30,8 +31,10 @@ test "README.md shows every file of the examples as it is" {
     }
 }
 
-test "README.md shows a run of every program as it printed" {
-    inline for (programs) |program| try check.expectRun("README.md", guide, cases.command(program), @embedFile(program.name ++ ".out"));
+test "README.md shows a run of every program as it printed, after the program" {
+    inline for (programs) |program| {
+        try check.expectRun("README.md", guide, @embedFile(program.name ++ ".zig"), cases.command(program), @embedFile(program.name ++ ".out"));
+    }
 }
 
 test "every Zig block of README.md but those of build.zig is a part of an example" {
@@ -47,7 +50,7 @@ test "README.md of the repository shows its examples of rpc and their runs" {
         const program = comptime for (cases.programs) |program| {
             if (std.mem.eql(u8, program.name, name)) break program;
         } else unreachable;
-        try check.expectRun("README.md of the repository", root, cases.command(program), @embedFile(name ++ ".out"));
+        try check.expectRun("README.md of the repository", root, @embedFile(name ++ ".zig"), cases.command(program), @embedFile(name ++ ".out"));
     }
 }
 

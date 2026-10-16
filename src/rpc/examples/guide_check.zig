@@ -1,8 +1,8 @@
 //! Checks of a guide against its examples, for the tests of the guides of
 //! rpc and rpc-nats: that the guide shows a file as it is, a run of a
-//! program as it printed, and no Zig code that is not a part of its
-//! examples. Every function compares texts with "\r\n" turned into "\n",
-//! since Git may check files out with CRLF on Windows.
+//! program as it printed, after the program, and no Zig code that is not a
+//! part of its examples. Every function compares texts with "\r\n" turned
+//! into "\n", since Git may check files out with CRLF on Windows.
 
 const std = @import("std");
 
@@ -38,40 +38,45 @@ pub fn expectFile(name: []const u8, doc: []const u8, language: []const u8, file:
     return expectBlock(name, doc, block);
 }
 
-/// Fails unless the document `name`, `doc`, shows a run of `command` that
-/// printed `output`: a ```text block of `command` and then the lines of
-/// `output`. The parts that change from run to run may have other values
-/// there (see `mask`).
-pub fn expectRun(name: []const u8, doc: []const u8, command: []const u8, output: []const u8) !void {
-    if (try showsRun(doc, command, output)) return;
+/// Fails unless the document `name`, `doc`, shows a run of the program
+/// `file` that printed `output`: the first ```text block of `command`
+/// after the ```zig block of the whole `file`, with the lines of `output`.
+/// So the run stands next to its program, and programs with the same
+/// command cannot swap their runs. The parts that change from run to run
+/// may have other values there (see `mask`).
+pub fn expectRun(name: []const u8, doc: []const u8, file: []const u8, command: []const u8, output: []const u8) !void {
+    if (try showsRun(doc, file, command, output)) return;
     const printed = try unixLines(output);
     defer testing.allocator.free(printed);
     const expected = try mask(printed);
     defer testing.allocator.free(expected);
-    std.debug.print("{s} shows no run like this one; the parts in <> may vary:\n```text\n{s}\n{s}```\n", .{ name, command, expected });
+    std.debug.print("{s} shows no run like this one after its program; the parts in <> may vary:\n```text\n{s}\n{s}```\n", .{ name, command, expected });
     return error.TestRunNotInGuide;
 }
 
-/// Whether `doc` shows a run of `command` that printed `output`.
-fn showsRun(doc: []const u8, command: []const u8, output: []const u8) !bool {
+/// Whether the first run of `command` that `doc` shows after the program
+/// `file` printed `output`.
+fn showsRun(doc: []const u8, file: []const u8, command: []const u8, output: []const u8) !bool {
     const text = try unixLines(doc);
     defer testing.allocator.free(text);
+    const program = try unixLines(file);
+    defer testing.allocator.free(program);
     const printed = try unixLines(output);
     defer testing.allocator.free(printed);
     const expected = try mask(printed);
     defer testing.allocator.free(expected);
+    const shown_file = try std.mem.concat(testing.allocator, u8, &.{ "```zig\n", program, "```\n" });
+    defer testing.allocator.free(shown_file);
+    const file_at = std.mem.find(u8, text, shown_file) orelse return false;
+    const after = text[file_at + shown_file.len ..];
     const start = try std.mem.concat(testing.allocator, u8, &.{ "```text\n", command, "\n" });
     defer testing.allocator.free(start);
-    var rest: []const u8 = text;
-    while (std.mem.find(u8, rest, start)) |at| {
-        const body = rest[at + start.len ..];
-        const end = std.mem.find(u8, body, "```\n") orelse break;
-        const shown = try mask(body[0..end]);
-        defer testing.allocator.free(shown);
-        if (std.mem.eql(u8, shown, expected)) return true;
-        rest = body[end..];
-    }
-    return false;
+    const at = std.mem.find(u8, after, start) orelse return false;
+    const body = after[at + start.len ..];
+    const end = std.mem.find(u8, body, "```\n") orelse return false;
+    const shown = try mask(body[0..end]);
+    defer testing.allocator.free(shown);
+    return std.mem.eql(u8, shown, expected);
 }
 
 /// Fails unless every ```zig block of the document `name`, `doc`, is a part
@@ -262,15 +267,29 @@ test "a block is a part of a file at any indentation, and nothing else is" {
     try testing.expect(!try isPartOf(file, file ++ "extra\n"));
 }
 
+test "a run is the first one after its program, so two programs of one command cannot swap their runs" {
+    const a = "const a = 1;\n";
+    const b = "const b = 2;\n";
+    const swapped = "```zig\n" ++ a ++ "```\n\n```text\n$ zig build run\nB\n```\n\n```zig\n" ++ b ++ "```\n\n```text\n$ zig build run\nA\n```\n";
+    try testing.expect(!try showsRun(swapped, a, "$ zig build run", "A\n"));
+    try testing.expect(!try showsRun(swapped, b, "$ zig build run", "B\n"));
+    const in_place = "```zig\n" ++ a ++ "```\n\n```text\n$ zig build run\nA\n```\n\n```zig\n" ++ b ++ "```\n\n```text\n$ zig build run\nB\n```\n";
+    try testing.expect(try showsRun(in_place, a, "$ zig build run", "A\n"));
+    try testing.expect(try showsRun(in_place, b, "$ zig build run", "B\n"));
+    // A run before its program, or a program the guide does not show.
+    try testing.expect(!try showsRun("```text\n$ zig build run\nA\n```\n\n```zig\n" ++ a ++ "```\n", a, "$ zig build run", "A\n"));
+    try testing.expect(!try showsRun(in_place, "const c = 3;\n", "$ zig build run", "A\n"));
+}
+
 test "a guide passes when it shows the file, the run and only parts of the file" {
     const file = "const x = 1;\nconst y = 2;\n";
     const doc = "Text.\n\n```zig\nconst x = 1;\nconst y = 2;\n```\n\n```zig\nconst y = 2;\n```\n\n```zig\n// build.zig\nb.foo();\n```\n\n```text\n$ zig build run\n2026-10-16T09:41:07.415Z INFO  Done\n```\n";
     try expectFile("doc", doc, "zig", file);
-    try expectRun("doc", doc, "$ zig build run", "2026-10-16T10:00:00.000Z INFO  Done\n");
+    try expectRun("doc", doc, file, "$ zig build run", "2026-10-16T10:00:00.000Z INFO  Done\n");
     try expectZigFromExamples("doc", doc, &.{file});
     // Another output, another command, code from elsewhere.
-    try testing.expect(!try showsRun(doc, "$ zig build run", "2026-10-16T10:00:00.000Z INFO  Other\n"));
-    try testing.expect(!try showsRun(doc, "$ zig build run-other", "2026-10-16T10:00:00.000Z INFO  Done\n"));
+    try testing.expect(!try showsRun(doc, file, "$ zig build run", "2026-10-16T10:00:00.000Z INFO  Other\n"));
+    try testing.expect(!try showsRun(doc, file, "$ zig build run-other", "2026-10-16T10:00:00.000Z INFO  Done\n"));
     const foreign = (try foreignZig(doc, &.{"const z = 3;\n"})).?;
     defer testing.allocator.free(foreign);
     try testing.expectEqualStrings("const x = 1;\nconst y = 2;\n", foreign);
