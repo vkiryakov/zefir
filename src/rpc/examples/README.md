@@ -734,7 +734,11 @@ that answers with success alone. They travel as JSON:
 So `User{ .id = 1, .name = "Ada Lovelace", .email = "ada@example.com" }` is
 `{"id":"1","name":"Ada Lovelace","email":"ada@example.com"}` on the wire.
 Pointers, unions, maps, recursive types and `usize` are not request or
-response types: the build stops and names the field.
+response types: the build stops and names the field. So is a type of more
+than 16 KiB, a whole request or response too: they live on the stack of
+the call, which is small in a coroutine. An image as `[256 * 256]u32`
+stops the build with a hint to take a slice, `[]const u32`, whose items
+live in the memory of the call.
 
 Decoding is strict where it must be, and lenient where versions differ:
 

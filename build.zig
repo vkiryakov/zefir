@@ -419,6 +419,7 @@ pub fn build(b: *std.Build) void {
         .{ "dto_usize", "rpc: users.v1.listUsers: request dto_usize.ListUsersRequest.limit has unsupported type usize; its size depends on the target: use u64 or i64", contract_notes },
         .{ "dto_recursive", "rpc: tree.v1.get: response dto_recursive.Node.children[]: recursive types are not supported; dto_recursive.Node contains itself", contract_notes },
         .{ "dto_union", "rpc: canvas.v2.draw: request dto_union.DrawRequest.shape has unsupported type dto_union.Shape; unions are not supported", contract_notes },
+        .{ "dto_too_large", "rpc: images.v1.getImage: response dto_too_large.Image.pixels takes 262144 bytes; a type in a DTO takes at most 16384 (16 KiB), since requests and responses live on the stack of a call: use a slice, []const u32", contract_notes },
         .{ "implement_not_contract", "rpc.implement: the first argument must be a contract made by rpc.Contract(...), got type", implement_notes },
         .{ "implement_timeout", "rpc.implement(users.v1): .defaults.timeout_ms must be 1 to 300000 ms, got 0", implement_notes },
         .{ "implement_auth", "rpc.implement(users.v1): .methods.getUser.auth must be .required or .optional, got .maybe", implement_notes },

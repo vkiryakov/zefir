@@ -8,8 +8,18 @@
 //! is a struct; a response is any DTO type or `void`. Everything else
 //! stops the build with the path of the field: pointers, unions, maps,
 //! types that contain themselves, `usize` and `isize`.
+//!
+//! Each type in a DTO, the whole request or response included, takes at
+//! most `max_type_bytes` (16 KiB): requests and responses, with their
+//! copies while they are decoded and encoded, live on the stack of the
+//! call's task, and the stack of a coroutine is small. Many items go in a
+//! slice, `[]const T`, whose items live in the call's arena.
 
 const std = @import("std");
+
+/// The most bytes one type in a DTO may take, `@sizeOf` of the whole
+/// request or response included.
+pub const max_type_bytes = 16 * 1024;
 
 /// Which side of a method a type is: only a response may be `void`, and a
 /// request is always a struct.
@@ -71,7 +81,8 @@ fn walk(comptime T: type, comptime path: ?[]const u8, comptime Root: type, compt
         },
         .array => |info| {
             if (info.sentinel_ptr != null) return unsupported ++ "; an array with a sentinel is not supported";
-            return walk(info.child, here ++ "[]", Root, outer);
+            if (walk(info.child, here ++ "[]", Root, outer)) |found| return found;
+            return tooLarge(T, here, "use a slice, []const " ++ @typeName(info.child));
         },
         .@"struct" => |info| {
             if (info.is_tuple) return unsupported ++ "; a tuple has no field names: use a struct";
@@ -86,12 +97,20 @@ fn walk(comptime T: type, comptime path: ?[]const u8, comptime Root: type, compt
                 if (Field == void) return " " ++ field_path ++ " has unsupported type void; void is only a whole response";
                 if (walk(Field, field_path, Root, inner)) |found| return found;
             }
-            return null;
+            return tooLarge(T, here, "keep large parts in slices, []const T");
         },
         .void => return unsupported ++ "; void is only a whole response",
         .@"union" => return unsupported ++ "; unions are not supported",
         else => return unsupported,
     }
+}
+
+/// The problem of `T` at `here` if it takes more than `max_type_bytes`.
+/// Only for arrays and structs whose parts passed: the other types are
+/// small, and an unsupported part may have no size.
+fn tooLarge(comptime T: type, comptime here: []const u8, comptime hint: []const u8) ?[]const u8 {
+    if (@sizeOf(T) <= max_type_bytes) return null;
+    return std.fmt.comptimePrint(" {s} takes {d} bytes; a type in a DTO takes at most {d} (16 KiB), since requests and responses live on the stack of a call: {s}", .{ here, @sizeOf(T), max_type_bytes, hint });
 }
 
 const testing = std.testing;
@@ -234,6 +253,29 @@ test "nested optionals, void fields, comptime fields and other types are not DTO
     try expectProblem(Callback, .request, "request app.dto.Callback.f has unsupported type *const fn () void");
     try expectProblem(Failing, .request, "request app.dto.Failing.r has unsupported type anyerror!u32");
     try expectProblem(?void, .response, "response has unsupported type void; void is only a whole response");
+}
+
+const Blob = struct { id: u64, data: [20_000]u8 };
+const Crowded = struct { a: [8192]u8, b: [8192]u8, c: u8 };
+const AtLimit = struct { data: [16_384]u8 };
+const Rows = struct { rows: []const [16_000]u8 };
+const BigRows = struct { rows: []const [20_000]u8 };
+const MaybeBlob = struct { data: ?[20_000]u8 };
+const Grid = struct { cells: [4][8192]u8 };
+const Huge = struct { items: [100_001]u8 };
+
+test "a type in a DTO takes at most 16 KiB: the root, a field, an item, the payload of an optional" {
+    try expectProblem(AtLimit, .request, null);
+    try expectProblem(Rows, .response, null);
+    try expectProblem(?[1000]u64, .response, null);
+    try expectProblem(Blob, .request, "request app.dto.Blob.data takes 20000 bytes; a type in a DTO takes at most 16384 (16 KiB), since requests and responses live on the stack of a call: use a slice, []const u8");
+    try expectProblem(Crowded, .response, "response app.dto.Crowded takes 16385 bytes; a type in a DTO takes at most 16384 (16 KiB), since requests and responses live on the stack of a call: keep large parts in slices, []const T");
+    try expectProblem(BigRows, .response, "response app.dto.BigRows.rows[] takes 20000 bytes; a type in a DTO takes at most 16384 (16 KiB), since requests and responses live on the stack of a call: use a slice, []const u8");
+    try expectProblem(MaybeBlob, .request, "request app.dto.MaybeBlob.data takes 20000 bytes; a type in a DTO takes at most 16384 (16 KiB), since requests and responses live on the stack of a call: use a slice, []const u8");
+    try expectProblem(Grid, .request, "request app.dto.Grid.cells takes 32768 bytes; a type in a DTO takes at most 16384 (16 KiB), since requests and responses live on the stack of a call: use a slice, []const [8192]u8");
+    try expectProblem([20_000]u8, .response, "response [20000]u8 takes 20000 bytes; a type in a DTO takes at most 16384 (16 KiB), since requests and responses live on the stack of a call: use a slice, []const u8");
+    // An array that JSON could never fill: more items than a body may hold.
+    try expectProblem(Huge, .request, "request app.dto.Huge.items takes 100001 bytes; a type in a DTO takes at most 16384 (16 KiB), since requests and responses live on the stack of a call: use a slice, []const u8");
 }
 
 const Node = struct { name: []const u8, children: []const Node };
