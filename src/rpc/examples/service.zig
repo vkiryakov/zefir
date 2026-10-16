@@ -2,10 +2,12 @@
 //! levels: the server's (a rate limit on a store), the handler's (an audit
 //! of every call that succeeded) and the methods' (the permissions to
 //! change users). A client calls it as an anonymous caller, as the
-//! reporting job and as the admin console.
+//! reporting job and as the admin console, whose token comes from a
+//! provider.
 
 const std = @import("std");
 const confy = @import("confy");
+const core = @import("core");
 const log = @import("log");
 const rpc = @import("rpc");
 const api = @import("users-api");
@@ -59,6 +61,28 @@ const UserHandler = struct {
     }
 };
 
+/// The tokens of the admin console, which change: a real console gets them
+/// from an OAuth server and a new one before the old one expires. The
+/// client asks for the credentials of a call right before sending it.
+const AdminTokens = struct {
+    token: confy.Secret,
+    /// How many times the client asked.
+    asked: std.atomic.Value(u32) = .init(0),
+
+    fn provider(self: *AdminTokens) rpc.CredentialsProvider {
+        return .{ .ptr = self, .get = get };
+    }
+
+    /// The credentials of one call. `ctx` carries the call's deadline;
+    /// strings made for it come from `arena`, which lives until the call is
+    /// sent; `error.Unavailable` ends the call unsent.
+    fn get(ptr: *anyopaque, _: std.Io, _: core.Context, _: std.mem.Allocator) (error{ Unavailable, OutOfMemory } || std.Io.Cancelable)!rpc.Credentials {
+        const self: *AdminTokens = @ptrCast(@alignCast(ptr));
+        _ = self.asked.fetchAdd(1, .monotonic);
+        return .{ .bearer = self.token.expose() };
+    }
+};
+
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
@@ -100,10 +124,11 @@ pub fn main(init: std.process.Init) !void {
     // One client; every call brings the credentials of its caller.
     var client = try rpc.Client.init(gpa, .{ .transport = memory.clientTransport() });
     defer client.deinit();
+    var admin_tokens: AdminTokens = .{ .token = config.auth.admin_token };
     const anonymous: rpc.Credentials = .none;
     const forged: rpc.Credentials = .{ .bearer = "guessed-token" };
     const reporting: rpc.Credentials = .{ .bearer = config.auth.reporting_token.expose() };
-    const admin: rpc.Credentials = .{ .bearer = config.auth.admin_token.expose() };
+    const admin: rpc.Credentials = .{ .provider = admin_tokens.provider() };
 
     try call(&client, io, app, "anonymous", anonymous, api.UserApi.getUser, .{ .id = 1 });
     try call(&client, io, app, "anonymous", anonymous, api.UserApi.listUsers, .{});
@@ -112,6 +137,7 @@ pub fn main(init: std.process.Init) !void {
     try call(&client, io, app, "reporting", reporting, api.UserApi.deleteUser, .{ .id = 1 });
     try call(&client, io, app, "admin", admin, api.UserApi.createUser, .{ .name = "Alan Turing", .email = "alan@example.com" });
     try call(&client, io, app, "admin", admin, api.UserApi.deleteUser, .{ .id = 1 });
+    app.info("Admin tokens given", .{ .count = admin_tokens.asked.load(.monotonic) });
     // The third and the fourth call of the reporting job within a minute.
     try call(&client, io, app, "reporting", reporting, api.UserApi.getUser, .{ .id = 2 });
     try call(&client, io, app, "reporting", reporting, api.UserApi.getUser, .{ .id = 2 });
@@ -135,8 +161,10 @@ fn call(
     var result = try client.call(io, .root, method, request, .{ .credentials = credentials });
     defer result.deinit();
     const name = @TypeOf(method).name;
+    // Null when the rate limit did not count the call.
+    const remaining = result.metadata().get("ratelimit-remaining");
     switch (result.outcome) {
-        .ok => app.info("Call succeeded", .{ .caller = caller, .method = name }),
-        .failure => |failure| app.warn("Call failed", .{ .caller = caller, .method = name, .code = failure.code, .app_code = failure.app_code, .reason = failure.message }),
+        .ok => app.info("Call succeeded", .{ .caller = caller, .method = name, .remaining = remaining }),
+        .failure => |failure| app.warn("Call failed", .{ .caller = caller, .method = name, .code = failure.code, .app_code = failure.app_code, .reason = failure.message, .remaining = remaining }),
     }
 }

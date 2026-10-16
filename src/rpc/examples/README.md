@@ -834,7 +834,7 @@ a task that outlives the call.
 | `metadata()` | the request's metadata to read: `get(key)`, `getAll(key)`, `iterator()`, without the reserved keys |
 | `identity()` | `?rpc.IdentityView`: whom the authenticator found, or null for an anonymous call |
 | `peer()`, `transport()` | who sent the call and over what, as the transport knows it: for logs, never for authorization |
-| `setResponseMetadata(key, value)` | metadata of the response, copied into the arena; the client reads it with `result.metadata()` |
+| `setResponseMetadata(key, value)` | metadata of the response, copied into the arena, also of a failure; the client reads it with `result.metadata()`, as the rate limit of [Middleware](#middleware) shows |
 | `fail(failure)` | ends the call with exactly this failure: `return ctx.fail(.{ .code, .app_code, .message })` |
 | `requestBody()`, `responseBody()`, `failure()`, `mapError(err)` | for middleware: the bodies as bytes, the failure set with `fail`, the failure an error becomes |
 
@@ -914,9 +914,13 @@ middleware.
 | `.max_pending` | calls in flight at once | 1024 |
 | `.max_response_bytes` | the largest response body | 1 MiB |
 
-`init` copies the credentials, and `deinit` wipes the copy. A
-`.provider` gives the credentials of each call when it is made, for tokens
-that change, such as those of OAuth.
+`init` copies the credentials, and `deinit` wipes the copy. A `.provider`
+is for tokens that change, such as those of OAuth: an
+`rpc.CredentialsProvider`, a pointer and the function
+`get(ptr, io, ctx, arena)`, which the client calls right before it sends a
+call, for that call's credentials. `error.Unavailable` from it ends the
+call unsent. `AdminTokens` in [Authentication](#authentication) is one; the
+client borrows a provider, so it outlives the client.
 
 `client.call(io, ctx, method, request, options)` takes the caller's
 `core.Context`: `.root` in `main`, `ctx.operation()` in a handler. Its
@@ -1274,6 +1278,20 @@ from the I/O of a link goes back as it is; a link that swallows it calls
 
 ## Errors and failures
 
+A client learns what went wrong on the server from a failure: a code of
+`core.ErrorCode`, an app code and a message. The failures in the runs of
+this guide, and where each came from:
+
+| Run | Failure | Where it came from |
+| --- | --- | --- |
+| [Getting started](#getting-started): `getUser` of an unknown id | `not_found`, `users.not_found` | `error.UserNotFound` of the repository, which `.errors` of UserApi lists: rule 2 below |
+| [A service that calls another](#a-service-that-calls-another): the price of the old shop | `invalid_argument`, `rpc.invalid_request`, a violation of `items[0].price_cents` | the server's check of the request against its rules: rule 1 |
+| [Authentication](#authentication): `deleteUser` of the reporting job | `permission_denied`, `rpc.permission_denied` | `error.PermissionDenied` of `requirePermission`, a name of the framework: rule 3 |
+| [Authentication](#authentication): the fourth call within a minute | `resource_exhausted`, `rate.limited` | `ctx.fail` in `RateLimiter`: rule 1 |
+| [Authentication](#authentication): `listUsers` without a token | `unauthenticated`, `rpc.unauthenticated` | the server, before the chain: the method requires an identity |
+| [Lifecycle and stopping](#lifecycle-and-stopping): the monthly report | `resource_exhausted`, "Server overloaded", with `refused` | the server, at admission: two calls ran already |
+| [Lifecycle and stopping](#lifecycle-and-stopping): the yearly report | `cancelled`, "Server stopped the call" | the server, when the grace of the stop ran out |
+
 An error a handler or middleware returns becomes a failure once, when the
 chain of middleware has unwound, by the first rule that fits:
 
@@ -1385,6 +1403,10 @@ pub const RateLimiter = struct {
             // The store is down: let the call through (fail-open).
             else => return next.run(),
         };
+        // The calls left this minute, in the metadata of the response, which
+        // a failure carries too; the client reads it with result.metadata().
+        const remaining = try std.fmt.allocPrint(ctx.allocator(), "{d}", .{self.per_minute -| count});
+        try ctx.setResponseMetadata("ratelimit-remaining", remaining);
         if (count > self.per_minute) {
             return ctx.fail(.{ .code = .resource_exhausted, .app_code = "rate.limited", .message = "Too many requests" });
         }
@@ -1407,10 +1429,13 @@ pub const Audit = struct {
 };
 ```
 
-`RateLimiter` counts the calls in a store. A real service keeps such counts
-in Redis, shared by all its replicas, through a client of Redis that runs on
-`std.Io`; the examples take a stand-in with the same calls, which
-[Authentication](#authentication) uses:
+`RateLimiter` counts the calls in a store, and tells each caller how many
+it has left this minute in the metadata of the response,
+`ratelimit-remaining`: `ctx.setResponseMetadata` on the server,
+`result.metadata().get("ratelimit-remaining")` on the client. A real
+service keeps such counts in Redis, shared by all its replicas, through a
+client of Redis that runs on `std.Io`; the examples take a stand-in with
+the same calls, which [Authentication](#authentication) uses:
 
 <details>
 <summary><code>Store.zig</code>: a key-value store in memory with the calls of Redis</summary>
@@ -1602,17 +1627,20 @@ fn sameToken(given: []const u8, expected: []const u8) bool {
   a request is what the client says; compare it with `identity.tenant_id`.
 
 The whole service, with the authenticator, the store and the middleware on
-three levels; one client calls it as three callers:
+three levels; one client calls it as three callers, and the admin console
+takes its token from a provider:
 
 ```zig
 //! The users service with authentication and middleware on all three
 //! levels: the server's (a rate limit on a store), the handler's (an audit
 //! of every call that succeeded) and the methods' (the permissions to
 //! change users). A client calls it as an anonymous caller, as the
-//! reporting job and as the admin console.
+//! reporting job and as the admin console, whose token comes from a
+//! provider.
 
 const std = @import("std");
 const confy = @import("confy");
+const core = @import("core");
 const log = @import("log");
 const rpc = @import("rpc");
 const api = @import("users-api");
@@ -1666,6 +1694,28 @@ const UserHandler = struct {
     }
 };
 
+/// The tokens of the admin console, which change: a real console gets them
+/// from an OAuth server and a new one before the old one expires. The
+/// client asks for the credentials of a call right before sending it.
+const AdminTokens = struct {
+    token: confy.Secret,
+    /// How many times the client asked.
+    asked: std.atomic.Value(u32) = .init(0),
+
+    fn provider(self: *AdminTokens) rpc.CredentialsProvider {
+        return .{ .ptr = self, .get = get };
+    }
+
+    /// The credentials of one call. `ctx` carries the call's deadline;
+    /// strings made for it come from `arena`, which lives until the call is
+    /// sent; `error.Unavailable` ends the call unsent.
+    fn get(ptr: *anyopaque, _: std.Io, _: core.Context, _: std.mem.Allocator) (error{ Unavailable, OutOfMemory } || std.Io.Cancelable)!rpc.Credentials {
+        const self: *AdminTokens = @ptrCast(@alignCast(ptr));
+        _ = self.asked.fetchAdd(1, .monotonic);
+        return .{ .bearer = self.token.expose() };
+    }
+};
+
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
@@ -1707,10 +1757,11 @@ pub fn main(init: std.process.Init) !void {
     // One client; every call brings the credentials of its caller.
     var client = try rpc.Client.init(gpa, .{ .transport = memory.clientTransport() });
     defer client.deinit();
+    var admin_tokens: AdminTokens = .{ .token = config.auth.admin_token };
     const anonymous: rpc.Credentials = .none;
     const forged: rpc.Credentials = .{ .bearer = "guessed-token" };
     const reporting: rpc.Credentials = .{ .bearer = config.auth.reporting_token.expose() };
-    const admin: rpc.Credentials = .{ .bearer = config.auth.admin_token.expose() };
+    const admin: rpc.Credentials = .{ .provider = admin_tokens.provider() };
 
     try call(&client, io, app, "anonymous", anonymous, api.UserApi.getUser, .{ .id = 1 });
     try call(&client, io, app, "anonymous", anonymous, api.UserApi.listUsers, .{});
@@ -1719,6 +1770,7 @@ pub fn main(init: std.process.Init) !void {
     try call(&client, io, app, "reporting", reporting, api.UserApi.deleteUser, .{ .id = 1 });
     try call(&client, io, app, "admin", admin, api.UserApi.createUser, .{ .name = "Alan Turing", .email = "alan@example.com" });
     try call(&client, io, app, "admin", admin, api.UserApi.deleteUser, .{ .id = 1 });
+    app.info("Admin tokens given", .{ .count = admin_tokens.asked.load(.monotonic) });
     // The third and the fourth call of the reporting job within a minute.
     try call(&client, io, app, "reporting", reporting, api.UserApi.getUser, .{ .id = 2 });
     try call(&client, io, app, "reporting", reporting, api.UserApi.getUser, .{ .id = 2 });
@@ -1742,9 +1794,11 @@ fn call(
     var result = try client.call(io, .root, method, request, .{ .credentials = credentials });
     defer result.deinit();
     const name = @TypeOf(method).name;
+    // Null when the rate limit did not count the call.
+    const remaining = result.metadata().get("ratelimit-remaining");
     switch (result.outcome) {
-        .ok => app.info("Call succeeded", .{ .caller = caller, .method = name }),
-        .failure => |failure| app.warn("Call failed", .{ .caller = caller, .method = name, .code = failure.code, .app_code = failure.app_code, .reason = failure.message }),
+        .ok => app.info("Call succeeded", .{ .caller = caller, .method = name, .remaining = remaining }),
+        .failure => |failure| app.warn("Call failed", .{ .caller = caller, .method = name, .code = failure.code, .app_code = failure.app_code, .reason = failure.message, .remaining = remaining }),
     }
 }
 ```
@@ -1754,34 +1808,41 @@ environment here, and they come out as `[REDACTED]` if logged:
 
 ```text
 $ APP_AUTH_ADMIN_TOKEN=admin-secret APP_AUTH_REPORTING_TOKEN=reporting-secret zig build run
-2026-10-16T09:42:54.978Z INFO  [audit] Call audited method=getUser by=anonymous
-2026-10-16T09:42:54.979Z INFO  [app] Call succeeded caller=anonymous method=getUser
-2026-10-16T09:42:54.979Z WARN  [app] Call failed caller=anonymous method=listUsers code=unauthenticated app_code=rpc.unauthenticated reason="Authentication required"
-2026-10-16T09:42:54.980Z WARN  [app] Call failed caller=forged method=getUser code=unauthenticated app_code=rpc.unauthenticated reason="Invalid credentials"
-2026-10-16T09:42:54.980Z INFO  [audit] Call audited method=listUsers by=reporting
-2026-10-16T09:42:54.981Z INFO  [app] Call succeeded caller=reporting method=listUsers
-2026-10-16T09:42:54.981Z WARN  [app] Call failed caller=reporting method=deleteUser code=permission_denied app_code=rpc.permission_denied reason="Permission denied"
-2026-10-16T09:42:54.982Z INFO  [audit] Call audited method=createUser by=admin
-2026-10-16T09:42:54.982Z INFO  [app] Call succeeded caller=admin method=createUser
-2026-10-16T09:42:54.983Z INFO  [audit] Call audited method=deleteUser by=admin
-2026-10-16T09:42:54.983Z INFO  [app] Call succeeded caller=admin method=deleteUser
-2026-10-16T09:42:54.983Z INFO  [audit] Call audited method=getUser by=reporting
-2026-10-16T09:42:54.984Z INFO  [app] Call succeeded caller=reporting method=getUser
-2026-10-16T09:42:54.984Z WARN  [app] Call failed caller=reporting method=getUser code=resource_exhausted app_code=rate.limited reason="Too many requests"
-2026-10-16T09:42:54.984Z INFO  [app] Store down
-2026-10-16T09:42:54.985Z INFO  [audit] Call audited method=getUser by=reporting
-2026-10-16T09:42:54.985Z INFO  [app] Call succeeded caller=reporting method=getUser
+2026-10-16T11:25:56.439Z INFO  [audit] Call audited method=getUser by=anonymous
+2026-10-16T11:25:56.439Z INFO  [app] Call succeeded caller=anonymous method=getUser remaining=2
+2026-10-16T11:25:56.440Z WARN  [app] Call failed caller=anonymous method=listUsers code=unauthenticated app_code=rpc.unauthenticated reason="Authentication required" remaining=null
+2026-10-16T11:25:56.440Z WARN  [app] Call failed caller=forged method=getUser code=unauthenticated app_code=rpc.unauthenticated reason="Invalid credentials" remaining=null
+2026-10-16T11:25:56.441Z INFO  [audit] Call audited method=listUsers by=reporting
+2026-10-16T11:25:56.441Z INFO  [app] Call succeeded caller=reporting method=listUsers remaining=2
+2026-10-16T11:25:56.442Z WARN  [app] Call failed caller=reporting method=deleteUser code=permission_denied app_code=rpc.permission_denied reason="Permission denied" remaining=1
+2026-10-16T11:25:56.442Z INFO  [audit] Call audited method=createUser by=admin
+2026-10-16T11:25:56.443Z INFO  [app] Call succeeded caller=admin method=createUser remaining=2
+2026-10-16T11:25:56.443Z INFO  [audit] Call audited method=deleteUser by=admin
+2026-10-16T11:25:56.443Z INFO  [app] Call succeeded caller=admin method=deleteUser remaining=1
+2026-10-16T11:25:56.444Z INFO  [app] Admin tokens given count=2
+2026-10-16T11:25:56.444Z INFO  [audit] Call audited method=getUser by=reporting
+2026-10-16T11:25:56.444Z INFO  [app] Call succeeded caller=reporting method=getUser remaining=0
+2026-10-16T11:25:56.445Z WARN  [app] Call failed caller=reporting method=getUser code=resource_exhausted app_code=rate.limited reason="Too many requests" remaining=0
+2026-10-16T11:25:56.445Z INFO  [app] Store down
+2026-10-16T11:25:56.445Z INFO  [audit] Call audited method=getUser by=reporting
+2026-10-16T11:25:56.446Z INFO  [app] Call succeeded caller=reporting method=getUser remaining=null
 ```
 
 1. An anonymous `getUser` runs: the method allows anonymous calls. The
-   audit, on the handler's level, records it.
+   audit, on the handler's level, records it, and the rate limit counts it:
+   the anonymous callers have two calls left this minute.
 2. An anonymous `listUsers` is refused before any middleware: the method
-   requires an identity. A guessed token is refused even on `getUser`.
+   requires an identity. A guessed token is refused even on `getUser`. The
+   rate limit never saw these calls, so their responses have no
+   `ratelimit-remaining`: `remaining=null`.
 3. The reporting job may read, but `deleteUser` needs `users.delete`, which
-   only the admin console holds.
-4. The fourth call of the reporting job within a minute is over the rate
+   only the admin console holds. The failure carries the metadata that the
+   rate limit set before it.
+4. The client asked `AdminTokens` for the token of each call of the admin
+   console: two calls, two tokens.
+5. The fourth call of the reporting job within a minute is over the rate
    limit, on the server's level: `rate.limited` from `ctx.fail`.
-5. With the store down, the rate limit lets the call through.
+6. With the store down, the rate limit lets the call through, uncounted.
 
 ## Tests
 
@@ -2248,7 +2309,8 @@ What a stop does:
 //! A graceful stop. Two calls run when the server is asked to stop: a
 //! short one ends within the grace and gets its response; a long one is
 //! canceled when the grace runs out, and its client gets `cancelled`. A
-//! call that comes after the stop is refused at once.
+//! call that comes after the stop is refused at once. So is a third call
+//! while the two run: the server holds two calls at most.
 
 const std = @import("std");
 const confy = @import("confy");
@@ -2314,6 +2376,8 @@ pub fn main(init: std.process.Init) !void {
         // A value in the options of init is written in full:
         // std.Io.Duration.fromMilliseconds, not .fromMilliseconds.
         .shutdown_grace = std.Io.Duration.fromMilliseconds(config.shutdown.grace_ms),
+        // Two calls at once; one more is refused at admission.
+        .limits = .{ .max_inflight = 2 },
     });
     defer server.deinit(io);
     try server.start(io);
@@ -2323,9 +2387,13 @@ pub fn main(init: std.process.Init) !void {
     defer client.deinit();
 
     // Two calls in tasks of their own; the stop begins while both run.
-    var daily = try io.concurrent(buildReport, .{ &client, io, "daily", 100 });
+    var daily = try io.concurrent(buildReport, .{ &client, io, "daily", 500 });
     var yearly = try io.concurrent(buildReport, .{ &client, io, "yearly", 10_000 });
     try reports.both_running.wait(io);
+
+    // The server holds two calls already: a third is refused at once, and
+    // its client knows that it did not run.
+    logOutcome(app, "monthly", buildReport(&client, io, "monthly", 100));
 
     app.info("Stopping", .{ .grace_ms = config.shutdown.grace_ms });
     // requestStop and a wait until the server has stopped.
@@ -2346,25 +2414,30 @@ fn logOutcome(app: log.Logger, name: []const u8, built: rpc.Client.CallError!rpc
     defer result.deinit();
     switch (result.outcome) {
         .ok => |report| app.info("Report built", .{ .name = report.name, .rows = report.rows }),
-        .failure => |failure| app.warn("Report failed", .{ .name = name, .code = failure.code, .reason = failure.message }),
+        .failure => |failure| app.warn("Report failed", .{ .name = name, .code = failure.code, .reason = failure.message, .refused = result.refused }),
     }
 }
 ```
 
 ```text
 $ zig build run
-2026-10-16T09:42:54.343Z INFO  [app] Serving state=running ready=true
-2026-10-16T09:42:54.344Z INFO  [app] Stopping grace_ms=1000
-2026-10-16T09:42:55.346Z INFO  [app] Stopped state=stopped
-2026-10-16T09:42:55.346Z INFO  [app] Report built name=daily rows=1200
-2026-10-16T09:42:55.346Z WARN  [app] Report failed name=yearly code=cancelled reason="Server stopped the call"
-2026-10-16T09:42:55.347Z WARN  [app] Report not sent name=weekly reason=Unavailable
+2026-10-16T11:25:56.217Z INFO  [app] Serving state=running ready=true
+2026-10-16T11:25:56.218Z WARN  [app] Report failed name=monthly code=resource_exhausted reason="Server overloaded" refused=true
+2026-10-16T11:25:56.218Z INFO  [app] Stopping grace_ms=1000
+2026-10-16T11:25:57.221Z INFO  [app] Stopped state=stopped
+2026-10-16T11:25:57.221Z INFO  [app] Report built name=daily rows=1200
+2026-10-16T11:25:57.221Z WARN  [app] Report failed name=yearly code=cancelled reason="Server stopped the call" refused=false
+2026-10-16T11:25:57.221Z WARN  [app] Report not sent name=weekly reason=Unavailable
 ```
 
-The daily report was done in 100 ms and got its response; the yearly one
-was canceled when the grace ran out, a second after the stop began; the
-weekly one came after the stop and was not sent at all. Its client knows
-for sure that it did not run, so it may retry it elsewhere.
+The monthly report was asked for while the other two ran, and the server,
+which holds two calls at most, refused it at once (see [Limits](#limits)).
+The daily report was done in half a second and got its response; the
+yearly one was canceled when the grace ran out, a second after the stop
+began: it ran, so its failure is not `refused`. The weekly one came after
+the stop and was not sent at all. The clients of the monthly and the
+weekly reports know for sure that they did not run, so they may retry them
+elsewhere.
 
 - A method that never waits through `std.Io` cannot be canceled. When a
   handler is still running a second after it was canceled, `shutdown`
@@ -2379,7 +2452,19 @@ for sure that it did not run, so it may retry it elsewhere.
 
 ## Limits
 
-The server's limits, `.limits` of `rpc.Server.init`:
+A server takes as many calls as its limits let it hold, and refuses the
+others at once, before it reads their bodies, so that a burst of calls, or
+one huge body, cannot take its memory. The server of
+[Lifecycle and stopping](#lifecycle-and-stopping) holds two calls at most:
+
+```zig
+.limits = .{ .max_inflight = 2 },
+```
+
+So its monthly report, asked for while two others ran, failed at once with
+`resource_exhausted`, "Server overloaded", and `refused=true`: the server
+did not run it, and the client may send it again later, or to another
+replica. The limits of a server, `.limits` of `rpc.Server.init`:
 
 | Limit | Default | What |
 | --- | --- | --- |

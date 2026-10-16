@@ -1,7 +1,8 @@
 //! A graceful stop. Two calls run when the server is asked to stop: a
 //! short one ends within the grace and gets its response; a long one is
 //! canceled when the grace runs out, and its client gets `cancelled`. A
-//! call that comes after the stop is refused at once.
+//! call that comes after the stop is refused at once. So is a third call
+//! while the two run: the server holds two calls at most.
 
 const std = @import("std");
 const confy = @import("confy");
@@ -67,6 +68,8 @@ pub fn main(init: std.process.Init) !void {
         // A value in the options of init is written in full:
         // std.Io.Duration.fromMilliseconds, not .fromMilliseconds.
         .shutdown_grace = std.Io.Duration.fromMilliseconds(config.shutdown.grace_ms),
+        // Two calls at once; one more is refused at admission.
+        .limits = .{ .max_inflight = 2 },
     });
     defer server.deinit(io);
     try server.start(io);
@@ -76,9 +79,13 @@ pub fn main(init: std.process.Init) !void {
     defer client.deinit();
 
     // Two calls in tasks of their own; the stop begins while both run.
-    var daily = try io.concurrent(buildReport, .{ &client, io, "daily", 100 });
+    var daily = try io.concurrent(buildReport, .{ &client, io, "daily", 500 });
     var yearly = try io.concurrent(buildReport, .{ &client, io, "yearly", 10_000 });
     try reports.both_running.wait(io);
+
+    // The server holds two calls already: a third is refused at once, and
+    // its client knows that it did not run.
+    logOutcome(app, "monthly", buildReport(&client, io, "monthly", 100));
 
     app.info("Stopping", .{ .grace_ms = config.shutdown.grace_ms });
     // requestStop and a wait until the server has stopped.
@@ -99,6 +106,6 @@ fn logOutcome(app: log.Logger, name: []const u8, built: rpc.Client.CallError!rpc
     defer result.deinit();
     switch (result.outcome) {
         .ok => |report| app.info("Report built", .{ .name = report.name, .rows = report.rows }),
-        .failure => |failure| app.warn("Report failed", .{ .name = name, .code = failure.code, .reason = failure.message }),
+        .failure => |failure| app.warn("Report failed", .{ .name = name, .code = failure.code, .reason = failure.message, .refused = result.refused }),
     }
 }

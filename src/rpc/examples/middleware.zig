@@ -35,6 +35,10 @@ pub const RateLimiter = struct {
             // The store is down: let the call through (fail-open).
             else => return next.run(),
         };
+        // The calls left this minute, in the metadata of the response, which
+        // a failure carries too; the client reads it with result.metadata().
+        const remaining = try std.fmt.allocPrint(ctx.allocator(), "{d}", .{self.per_minute -| count});
+        try ctx.setResponseMetadata("ratelimit-remaining", remaining);
         if (count > self.per_minute) {
             return ctx.fail(.{ .code = .resource_exhausted, .app_code = "rate.limited", .message = "Too many requests" });
         }
