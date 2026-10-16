@@ -489,8 +489,13 @@ fn runLifecycle(server: *RawServer, io: std.Io) void {
     // not hold this up: its failure goes out before it is canceled.
     _ = waitZero(io, &server.owed, &server.all_answered, .after(now(io), cancel_budget));
     server.server_transport.close(io);
-    // Calls queued after the grace ended, before the transport closed.
-    server.refuseQueued(io);
+    {
+        // Since the grace ended, `start` refuses a call at once and no
+        // supervisor takes one from the queue: `endGrace` emptied it.
+        server.mutex.lockUncancelable(io);
+        defer server.mutex.unlock(io);
+        std.debug.assert(server.queued == 0 and server.queue.first == null);
+    }
     if (!server.waitIdle(io, .after(now(io), cancel_budget))) {
         // Handlers that ignore cancelation: `shutdown` returns
         // `ShutdownTimeout` while the server stays in draining, and the
@@ -532,8 +537,8 @@ fn waitZero(io: std.Io, count: *std.atomic.Value(u32), event: *std.Io.Event, dea
     }
 }
 
-/// The grace is over: admission refuses new calls, the calls that run are
-/// canceled, those in the queue are refused.
+/// The grace is over: admission and `start` refuse new calls, the calls
+/// that run are canceled, those in the queue are refused.
 fn endGrace(server: *RawServer, io: std.Io) void {
     {
         server.mutex.lockUncancelable(io);
@@ -582,16 +587,20 @@ fn superviseCalls(server: *RawServer, first: *Call, io: std.Io) void {
 }
 
 /// Retires a call that ended and hands its supervisor the next call of the
-/// queue, if there is one.
+/// queue, if there is one and the grace of a stop is not over.
 fn next(server: *RawServer, io: std.Io, done: *Call) ?*Call {
     const following: ?*Call = following: {
         server.mutex.lockUncancelable(io);
         defer server.mutex.unlock(io);
         server.running.remove(&done.node);
-        if (server.queue.popFirst()) |node| {
-            server.queued -= 1;
-            server.running.append(node);
-            break :following @alignCast(@fieldParentPtr("node", node));
+        // Once the grace is over, the stop refuses the queue itself, before
+        // the transport closes; a call taken here could answer after that.
+        if (!server.grace_over.load(.acquire)) {
+            if (server.queue.popFirst()) |node| {
+                server.queued -= 1;
+                server.running.append(node);
+                break :following @alignCast(@fieldParentPtr("node", node));
+            }
         }
         server.active -= 1;
         break :following null;
@@ -718,13 +727,17 @@ pub fn retire(server: *RawServer, io: std.Io, call: *Call) void {
 }
 
 /// `Incoming.start`: gives the call a supervisor, or puts it in the queue
-/// when `max_active_tasks` supervisors are at work. A failure only when no
-/// task could be started; the call is gone then. Internal to the module,
-/// for `Call`.
+/// when `max_active_tasks` supervisors are at work. A failure when the
+/// grace of a stop is over (`Server is stopping`: the transport answers it
+/// before its `close` returns) or when no task could be started; the call
+/// is gone then. Internal to the module, for `Call`.
 pub fn schedule(server: *RawServer, io: std.Io, call: *Call) ?model.Failure {
-    {
+    const stopping = stopping: {
         server.mutex.lockUncancelable(io);
         defer server.mutex.unlock(io);
+        // Under the mutex, as `endGrace` sets the flag: a call either is in
+        // the queue or `running` when the grace ends, or sees the flag.
+        if (server.grace_over.load(.acquire)) break :stopping true;
         if (server.active == server.limits.max_active_tasks) {
             // Every admitted call holds a place, so the queue has room.
             std.debug.assert(server.queued < server.limits.queue_capacity);
@@ -734,6 +747,12 @@ pub fn schedule(server: *RawServer, io: std.Io, call: *Call) ?model.Failure {
         }
         server.active += 1;
         server.running.append(&call.node);
+        break :stopping false;
+    };
+    if (stopping) {
+        server.stats[call.route_index].countFailure(io, failures.stopping);
+        server.retire(io, call);
+        return failures.stopping;
     }
     const spawned = spawned: {
         server.spawn_mutex.lockUncancelable(io);

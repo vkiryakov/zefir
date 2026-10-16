@@ -31,9 +31,10 @@ pub fn body(c: Incoming) []u8 {
 
 /// Hands the call to the engine, which schedules it and returns at once
 /// with null. `reply.send` and `reply.release` may come from another task
-/// before `start` returns. A `Failure` means the engine could not schedule
-/// the call (no task for it): the transport answers it like a refusal of
-/// `admit` and forgets it, and no `Reply` call follows. The engine has
+/// before `start` returns. A `Failure` means the engine did not schedule
+/// the call: no task for it, or the server is stopping (the grace of its
+/// stop is over). The transport answers it like a refusal of `admit`, before
+/// its `close` returns, and forgets it, and no `Reply` call follows. The engine has
 /// freed the call by then, so no `cancel` of it may run after `start`
 /// returns a `Failure`. The strings of the failure are static, literals of
 /// the engine, as with `admit`: the transport may use them after the engine

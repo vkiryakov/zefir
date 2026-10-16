@@ -1218,7 +1218,7 @@ test "Review Focus 1 with the stop: the deadline, the client's cancel, the stop 
     defer testing.allocator.free(calls);
     var handler: RaceHandler = .{ .io = io, .budget = budget, .delays = handler_delays, .started = started, .ended = ended };
 
-    var counts: struct { ok: u64 = 0, deadline: u64 = 0, canceled: u64 = 0, stopped: u64 = 0, stopping: u64 = 0, refused_at_admission: u64 = 0 } = .{};
+    var counts: struct { ok: u64 = 0, deadline: u64 = 0, canceled: u64 = 0, stopped: u64 = 0, stopping: u64 = 0, refused_at_admission: u64 = 0, refused_at_start: u64 = 0 } = .{};
     for (0..rounds) |round| {
         var test_transport: TestTransport = .{};
         var server: RawServer = try .init(testing.allocator, .{
@@ -1238,20 +1238,32 @@ test "Review Focus 1 with the stop: the deadline, the client's cancel, the stop 
         var cancelers: [per_round]?std.Io.Future(std.Io.Cancelable!void) = @splat(null);
         defer for (&cancelers) |*slot| if (slot.*) |*future| future.cancel(io) catch {};
         var admitted: [per_round]bool = @splat(false);
+        var round_refused_at_start: u64 = 0;
         const first = round * per_round;
         for (first..first + per_round, &cancelers, &admitted) |i, *slot, *ok| {
             calls[i] = .{ .handler_started = &started[i], .handler_ended = &ended[i] };
             var body: [4]u8 = undefined;
             std.mem.writeInt(u32, &body, @intCast(i), .little);
-            deliver(io, d, &headOf(io, "race", .fromSeconds(5)), &body, &calls[i]) catch |err| switch (err) {
+            switch (d.admit(io, &headOf(io, "race", .fromSeconds(5)), body.len)) {
                 // The grace of the stop is over: refused at admission,
                 // never counted for the route.
-                error.Refused => {
+                .rejected => {
                     counts.refused_at_admission += 1;
                     continue;
                 },
-                error.NotStarted => return err,
-            };
+                .accepted => |incoming| {
+                    @memcpy(incoming.body(), &body);
+                    calls[i].incoming = incoming;
+                    if (incoming.start(io, .init(&calls[i]))) |failure| {
+                        // The grace ended between admit and start: refused
+                        // by start, counted for the route.
+                        try testing.expectEqualStrings(failures.stopping.message, failure.message);
+                        counts.refused_at_start += 1;
+                        round_refused_at_start += 1;
+                        continue;
+                    }
+                },
+            }
             ok.* = true;
             slot.* = try io.concurrent(cancelLater, .{ &calls[i], io, .fromNanoseconds(budget.nanoseconds + cancel_delays[i]) });
         }
@@ -1311,12 +1323,12 @@ test "Review Focus 1 with the stop: the deadline, the client's cancel, the stop 
             }
         }
         const stats = server.stats[0].snapshot(io);
-        try testing.expectEqual(round_admitted, stats.requests);
-        try testing.expectEqual(round_errors, stats.errors);
+        try testing.expectEqual(round_admitted + round_refused_at_start, stats.requests);
+        try testing.expectEqual(round_errors + round_refused_at_start, stats.errors);
     }
     // How many calls the stop meets depends on the timers of the machine;
     // the checks above hold for any mix.
-    try testing.expectEqual(@as(u64, n), counts.ok + counts.deadline + counts.canceled + counts.stopped + counts.stopping + counts.refused_at_admission);
+    try testing.expectEqual(@as(u64, n), counts.ok + counts.deadline + counts.canceled + counts.stopped + counts.stopping + counts.refused_at_admission + counts.refused_at_start);
 }
 
 /// Ignores cancelation: waits until `release` is set, whatever happens.
@@ -1462,6 +1474,119 @@ test "Review Focus 4 through the memory transport: the cancelled of the stop rea
     }
     deaf.release.set(io);
     try server.wait(io);
+}
+
+/// A server transport whose `close` waits until the test lets it go on, as
+/// the memory transport waits for a call in `start`. A response sent after
+/// `close` returned is lost.
+const ClosingTransport = struct {
+    dispatcher: ?transport.Dispatcher = null,
+    closing: std.Io.Event = .unset,
+    allow_close: std.Io.Event = .unset,
+    closed: std.atomic.Value(bool) = .init(false),
+
+    pub fn start(t: *ClosingTransport, io: std.Io, d: transport.Dispatcher) ServerTransport.StartError!void {
+        _ = io;
+        t.dispatcher = d;
+    }
+
+    pub fn drain(t: *ClosingTransport, io: std.Io) void {
+        _ = t;
+        _ = io;
+    }
+
+    pub fn close(t: *ClosingTransport, io: std.Io) void {
+        t.closing.set(io);
+        t.allow_close.waitUncancelable(io);
+        t.closed.store(true, .release);
+    }
+
+    pub fn info(t: *ClosingTransport) transport.Info {
+        _ = t;
+        return .{ .name = "closing" };
+    }
+};
+
+/// The `Reply` of a call on `ClosingTransport`: whether a response came
+/// after the transport closed.
+const ClosingCall = struct {
+    closing: *ClosingTransport,
+    sends: std.atomic.Value(u32) = .init(0),
+    after_close: std.atomic.Value(bool) = .init(false),
+    released: std.Io.Event = .unset,
+
+    pub fn send(c: *ClosingCall, io: std.Io, response: *const model.Response) Reply.SendError!void {
+        _ = io;
+        _ = response;
+        _ = c.sends.fetchAdd(1, .acq_rel);
+        if (c.closing.closed.load(.acquire)) {
+            c.after_close.store(true, .release);
+            return error.Closed;
+        }
+    }
+
+    pub fn release(c: *ClosingCall, io: std.Io, disposition: Reply.Disposition) void {
+        _ = disposition;
+        c.released.set(io);
+    }
+};
+
+test "a call the transport starts after the grace, with every task busy, is refused by start before the transport closes" {
+    const io = testing.io;
+    var closing: ClosingTransport = .{};
+    var deaf: Deaf = .{ .io = io };
+    var server: RawServer = try .init(testing.allocator, .{
+        .transport = .init(&closing),
+        .methods = &.{.{ .route = routeOf("deaf"), .handler = handlerOf(&deaf) }},
+        // The deaf handler holds the only task: a call that starts would
+        // wait in the queue.
+        .limits = .{ .max_active_tasks = 1, .queue_capacity = 1 },
+        .shutdown_grace = .zero,
+    });
+    defer server.deinit(io);
+    // A failed check must not leave the deaf handler or the close waiting
+    // for good.
+    defer deaf.release.set(io);
+    defer closing.allow_close.set(io);
+    try server.start(io);
+    const d = closing.dispatcher.?;
+
+    var busy: TestCall = .{};
+    try deliver(io, d, &headOf(io, "deaf", .fromSeconds(30)), "", &busy);
+    try waitFor(io, &deaf.entered, 1);
+    // Admitted before the stop, started by the transport only while its
+    // close runs: the grace is over by then.
+    const incoming = switch (d.admit(io, &headOf(io, "deaf", .fromSeconds(30)), 0)) {
+        .accepted => |accepted| accepted,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    server.requestStop(io);
+    try waiting.untilSet(&closing.closing, io, .after(now(io), .fromSeconds(10)));
+    var late: ClosingCall = .{ .closing = &closing };
+    const failure = incoming.start(io, .init(&late)) orelse {
+        // The engine queued it, and would answer it only after the close.
+        // It holds `late` until then.
+        closing.allow_close.set(io);
+        try waiting.untilSet(&late.released, io, .after(now(io), .fromSeconds(10)));
+        std.debug.print("the failure went out after the close: {}\n", .{late.after_close.load(.acquire)});
+        return error.TestUnexpectedResult;
+    };
+    // The transport answers it itself, before its close returns; the
+    // engine has freed the call, and no `Reply` call follows.
+    try testing.expectEqual(failures.stopping.code, failure.code);
+    try testing.expectEqualStrings(failures.stopping.app_code, failure.app_code);
+    try testing.expectEqualStrings(failures.stopping.message, failure.message);
+    closing.allow_close.set(io);
+    deaf.release.set(io);
+    try busy.waitReleased(io);
+    try busy.expectFailure(failures.stopped, false, .canceled);
+    try server.wait(io);
+    try testing.expectEqual(@as(u32, 0), late.sends.load(.acquire));
+    try testing.expect(!late.released.isSet());
+    // Both calls count for the route, the refused one too.
+    const stats = server.stats[0].snapshot(io);
+    try testing.expectEqual(@as(u64, 2), stats.requests);
+    try testing.expectEqual(@as(u64, 2), stats.errors);
 }
 
 test "a call delivered while the server drains still runs within the grace" {
