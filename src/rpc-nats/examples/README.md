@@ -102,16 +102,38 @@ zig fetch --save git+https://github.com/lalinsky/zio#d15034f1a4d9ddaa42829aae8f7
 
 Then import the modules in `build.zig`: rpc and rpc-nats, nats for the
 connection, zio, and confy, log and core, which the examples use too. The
-examples serve the users service of the [guide of rpc](../../rpc/examples/README.md)
-and take it as two packages: its contract, `users-api`, and its handler and
-repository, `users-service`. In a service of your own, the contract is such
-a package, as [Installation](../../rpc/examples/README.md#installation) of
-the guide of rpc shows, and the handler is a file of the service.
+examples serve the users service of the [guide of rpc](../../rpc/examples/README.md),
+whose files come with zefir, as two modules: its contract, `users-api`, and
+its handler and repository, `users-service`. In a service of your own, the
+contract is a package of its own, as
+[Installation](../../rpc/examples/README.md#installation) of the guide of
+rpc shows, and the handler is a file of the service.
 
 ```zig
 // build.zig of the users service
 const zefir = b.dependency("zefir", .{ .target = target, .optimize = optimize });
 const zio = b.dependency("zio", .{ .target = target, .optimize = optimize });
+
+// The users service of the guide of rpc, from the files of zefir.
+const users_api = b.createModule(.{
+    .root_source_file = zefir.path("src/rpc/examples/users_api.zig"),
+    .target = target,
+    .optimize = optimize,
+    .imports = &.{
+        .{ .name = "rpc", .module = zefir.module("zefir-rpc") },
+        .{ .name = "validator", .module = zefir.module("zefir-validator") },
+    },
+});
+const users_service = b.createModule(.{
+    .root_source_file = zefir.path("src/rpc/examples/users_service.zig"),
+    .target = target,
+    .optimize = optimize,
+    .imports = &.{
+        .{ .name = "rpc", .module = zefir.module("zefir-rpc") },
+        .{ .name = "core", .module = zefir.module("zefir-core") },
+        .{ .name = "users-api", .module = users_api },
+    },
+});
 
 const exe = b.addExecutable(.{
     .name = "user-service",
@@ -418,8 +440,9 @@ Two services on such a server, each as its own NATS user:
 //! Two services on a NATS server with the permissions of the guide: users,
 //! and orders, which calls it. Each connects as a NATS user of its own,
 //! with a password from its settings, and receives its responses in an
-//! inbox of its own. A transport of orders without that inbox gets no
-//! response at all: the broker does not let it subscribe.
+//! inbox of its own. A transport of orders without that inbox cannot
+//! subscribe to its responses: the broker refuses, and its first call fails
+//! with `AccessDenied`.
 //!
 //! Settings, from the environment:
 //!
@@ -570,8 +593,8 @@ is `"1"`:
 
 ```text
 $ nats req users.v1.getUser '{"id":"1"}'
-10:08:12 Sending request on "users.v1.getUser"
-10:08:12 Received with rtt 3.074125ms
+11:31:32 Sending request on "users.v1.getUser"
+11:31:32 Received with rtt 1.757417ms
 {"id":"1","name":"Ada Lovelace","email":"ada@example.com"}
 ```
 
@@ -581,13 +604,13 @@ its code and app code:
 
 ```text
 $ nats req users.v1.getUser '{"id":"42"}'
-10:08:22 Sending request on "users.v1.getUser"
-10:08:22 Received with rtt 1.3485ms
-10:08:22 Zefir-Rpc-Code: not_found
-10:08:22 Zefir-Rpc-App-Code: users.not_found
-10:08:22 Nats-Service-Error: User not found
-10:08:22 Nats-Service-Error-Code: 404
-10:08:22
+11:31:14 Sending request on "users.v1.getUser"
+11:31:14 Received with rtt 1.073042ms
+11:31:14 Nats-Service-Error: User not found
+11:31:14 Nats-Service-Error-Code: 404
+11:31:14 Zefir-Rpc-Code: not_found
+11:31:14 Zefir-Rpc-App-Code: users.not_found
+11:31:14
 nil body
 ```
 
@@ -595,15 +618,15 @@ The violations of a request against its rules come as the body:
 
 ```text
 $ nats req users.v1.createUser '{"name":"","email":"ada-at-example.com"}'
-10:08:27 Sending request on "users.v1.createUser"
-10:08:27 Received with rtt 1.220667ms
-10:08:27 Content-Type: application/json
-10:08:27 Nats-Service-Error: Invalid request
-10:08:27 Nats-Service-Error-Code: 400
-10:08:27 Zefir-Rpc-Code: invalid_argument
-10:08:27 Zefir-Rpc-App-Code: rpc.invalid_request
-10:08:27 Zefir-Rpc-Field: name
-10:08:27
+11:31:31 Sending request on "users.v1.createUser"
+11:31:31 Received with rtt 2.496083ms
+11:31:31 Zefir-Rpc-Code: invalid_argument
+11:31:31 Zefir-Rpc-App-Code: rpc.invalid_request
+11:31:31 Zefir-Rpc-Field: name
+11:31:31 Content-Type: application/json
+11:31:31 Nats-Service-Error: Invalid request
+11:31:31 Nats-Service-Error-Code: 400
+11:31:31
 {"violations":[{"field":"name","code":"validation.not_empty","message":"must not be empty"},{"field":"email","code":"validation.email","message":"must be a valid email address"}]}
 ```
 
@@ -619,7 +642,7 @@ $ nats micro ls
 ├───────┬─────────┬────────────────────────┬─────────────┤
 │ Name  │ Version │ ID                     │ Description │
 ├───────┼─────────┼────────────────────────┼─────────────┤
-│ users │ 1.0.0   │ PwARsS1cIusc1RoOQi4LV8 │             │
+│ users │ 1.0.0   │ p9ftnia1xOq3y9p4KLNHaR │             │
 ╰───────┴─────────┴────────────────────────┴─────────────╯
 ```
 
@@ -630,12 +653,12 @@ $ nats micro stats users
 ├────────────────────────┬────────────┬──────────┬─────────────┬────────┬─────────────────┬──────────────┤
 │ ID                     │ Endpoint   │ Requests │ Queue Group │ Errors │ Processing Time │ Average Time │
 ├────────────────────────┼────────────┼──────────┼─────────────┼────────┼─────────────────┼──────────────┤
-│ PwARsS1cIusc1RoOQi4LV8 │ createUser │ 1        │ q           │ 0      │ 496µs           │ 496µs        │
-│                        │ getUser    │ 1        │ q           │ 1      │ 322µs           │ 322µs        │
+│ p9ftnia1xOq3y9p4KLNHaR │ createUser │ 1        │ q           │ 0      │ 901µs           │ 901µs        │
+│                        │ getUser    │ 1        │ q           │ 1      │ 252µs           │ 252µs        │
 │                        │ listUsers  │ 0        │ q           │ 0      │ 0s              │ 0s           │
 │                        │ deleteUser │ 0        │ q           │ 0      │ 0s              │ 0s           │
 ├────────────────────────┼────────────┼──────────┼─────────────┼────────┼─────────────────┼──────────────┤
-│                        │            │ 2        │             │ 1      │ 817µs           │ 272µs        │
+│                        │            │ 2        │             │ 1      │ 1ms             │ 384µs        │
 ╰────────────────────────┴────────────┴──────────┴─────────────┴────────┴─────────────────┴──────────────╯
 ```
 
@@ -646,7 +669,7 @@ $ nats micro stats users
 $ nats micro info users
 Service Information
 
-          Service: users (PwARsS1cIusc1RoOQi4LV8)
+          Service: users (p9ftnia1xOq3y9p4KLNHaR)
       Description:
           Version: 1.0.0
 
@@ -673,13 +696,15 @@ Statistics for 4 Endpoint(s):
   createUser Endpoint Statistics:
 
            Requests: 1 in group "q"
-    Processing Time: 496µs (average 496µs)
+    Processing Time: 901µs (average 901µs)
+            Started: 2026-10-16 11:30:20 (17.17s ago)
              Errors: 0
 
   getUser Endpoint Statistics:
 
            Requests: 1 in group "q"
-    Processing Time: 322µs (average 322µs)
+    Processing Time: 252µs (average 252µs)
+            Started: 2026-10-16 11:30:20 (17.17s ago)
              Errors: 1
          Last Error: 404:users.not_found
 
@@ -687,12 +712,14 @@ Statistics for 4 Endpoint(s):
 
            Requests: 0 in group "q"
     Processing Time: 0s (average 0s)
+            Started: 2026-10-16 11:30:20 (17.17s ago)
              Errors: 0
 
   deleteUser Endpoint Statistics:
 
            Requests: 0 in group "q"
     Processing Time: 0s (average 0s)
+            Started: 2026-10-16 11:30:20 (17.17s ago)
              Errors: 0
 ```
 
@@ -701,6 +728,8 @@ Statistics for 4 Endpoint(s):
 - The version is the major version of the contract, as `<version>.0.0`;
   the id is new for every contract of every start of a server, so two
   replicas are two lines.
+- `Started` is when the server side of the transport started, in UTC:
+  the counters count from then, and every endpoint shows the same time.
 - `Last Error` is `<number>:<app code>`: the server keeps no messages.
 - `Requests` counts every call of the method from its admission, those the
   server refused included, and `Errors` every call that ended without a

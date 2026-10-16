@@ -11,7 +11,9 @@
 //!   zig build example-<name>   start the servers, run one example and show
 //!                              what it prints, such as
 //!                              example-getting_started
-//!   zig build check            build all of the above without running it; no
+//!   zig build check            build the tests and the examples without
+//!                              running them (not the check of the guide,
+//!                              which embeds what the examples print); no
 //!                              servers needed, so CI runs it on every system
 //!   zig build up               only start the servers
 //!   zig build down             stop the servers

@@ -1,8 +1,9 @@
 //! Two services on a NATS server with the permissions of the guide: users,
 //! and orders, which calls it. Each connects as a NATS user of its own,
 //! with a password from its settings, and receives its responses in an
-//! inbox of its own. A transport of orders without that inbox gets no
-//! response at all: the broker does not let it subscribe.
+//! inbox of its own. A transport of orders without that inbox cannot
+//! subscribe to its responses: the broker refuses, and its first call fails
+//! with `AccessDenied`.
 //!
 //! Settings, from the environment:
 //!
