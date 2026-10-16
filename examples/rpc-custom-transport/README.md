@@ -1,14 +1,16 @@
 # rpc-mailbox: your own transport for zefir-rpc
 
-The minimal skeleton of a transport of your own; the reference transport is [zefir-rpc-nats](../../src/rpc-nats/examples/README.md), built step by step in [Writing a transport](../../src/rpc-nats/examples/writing-a-transport.md).
+The minimal skeleton of a transport of your own; the reference transport
+is [zefir-rpc-nats](../../src/rpc-nats/examples/README.md), built step by
+step in [Writing a transport](../../src/rpc-nats/examples/writing-a-transport.md).
 
-zefir-rpc does not care how the bytes of a call travel. NATS is built in,
-and any other way — AMQP, a protocol of your own over TCP, shared memory —
-is a transport you can write outside zefir, in a package of your own, with
-only the public API of `zefir-rpc`. This directory is such a package. Its
-transport, `mailbox`, carries calls through a message broker the way
-RabbitMQ carries RPC, and it passes the conformance suite that every
-transport of zefir passes.
+zefir-rpc does not care how the bytes of a call travel. NATS ships with
+zefir, as rpc-nats, and any other way — AMQP, a protocol of your own over
+TCP, shared memory — is a transport you can write outside zefir, in a
+package of your own, with only the public API of `zefir-rpc`. This
+directory is such a package. Its transport, `mailbox`, carries calls
+through a message broker the way RabbitMQ carries RPC, and it passes the
+conformance suite that every transport of zefir passes.
 
 Use it as a template: copy the directory, replace the broker in memory
 with the client library of your broker, and keep the rest.
