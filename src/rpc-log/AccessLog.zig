@@ -29,8 +29,9 @@
 //! - A success the engine still turns into a failure after the chain is
 //!   logged as a success: a response over `max_response_bytes`, or one the
 //!   transport cannot carry, goes out as `resource_exhausted`; one that
-//!   ends within about a tenth of a millisecond before the deadline goes
-//!   out as `deadline_exceeded` when the engine reads the clock past it.
+//!   ends a fraction of a millisecond before the deadline (the record and
+//!   the unwinding take that long) goes out as `deadline_exceeded` when
+//!   the engine reads the clock past it.
 //! - A handler that ignores the client's cancel or the stop and outlives
 //!   the deadline is logged as `deadline_exceeded`, though its client got
 //!   `cancelled` from the stop, or nothing after giving up.
