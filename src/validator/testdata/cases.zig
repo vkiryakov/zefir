@@ -110,4 +110,13 @@ pub const examples = [_]Example{
         ,
     },
     .{ .name = "dto_test" },
+    .{
+        .name = "names_and_transforms",
+        .records =
+        \\INFO  Normalized field=title before="  Comptime for the rest of us " after="Comptime for the rest of us"
+        \\WARN  Invalid proposal field=speakers[1].displayName code=validation.not_blank reason="must not be blank"
+        \\
+        ,
+    },
+    .{ .name = "codec_test" },
 };

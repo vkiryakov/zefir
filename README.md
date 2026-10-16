@@ -47,7 +47,7 @@ Take any module on its own, or all the finished ones at once through the umbrell
 | `zefir-core`                       | Execution context: deadlines, cancellation, W3C trace context; application container and lifecycle planned | ✅ Done · [docs](src/core/examples/README.md)            |
 | `zefir-confy`                      | Typed configuration: JSON, INI, `.env` files, environment variables, secrets                               | ✅ Done · [docs](src/confy/examples/README.md)           |
 | `zefir-log`                        | Structured logging: JSON Lines, levels, context, redaction                                                 | ✅ Done · [docs](src/log/examples/README.md)             |
-| `zefir-validator`                  | Typed schemas, validation rules, error reporting                                                           | ✅ Done · [docs](src/validator/examples/README.md)       |
+| `zefir-validator`                  | Typed schemas, validation rules, outside names and transforms, error reporting                             | ✅ Done · [docs](src/validator/examples/README.md)       |
 | `zefir-events`                     | Typed in-process event bus                                                                                 | 📋 Planned                                               |
 | `zefir-retry`                      | Retry policies, backoff, jitter, circuit breaker                                                           | 📋 Planned                                               |
 | **Networking & Communication**     |                                                                                                            |                                                         |
