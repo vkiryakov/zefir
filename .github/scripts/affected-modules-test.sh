@@ -81,7 +81,7 @@ while IFS='|' read -r change modules <&3; do
 done 3<<'EOF'
 edit src/core/Context.zig                       | core log confy validator rpc rpc-nats rpc-log orm nats zefir
 edit src/log/Logger.zig                         | log confy validator rpc rpc-nats rpc-log orm nats zefir
-edit src/confy/root.zig                         | confy rpc-nats nats zefir
+edit src/confy/root.zig                         | confy rpc rpc-nats rpc-log nats zefir
 edit src/validator/strings.zig                  | validator rpc rpc-nats rpc-log zefir
 edit src/rpc/root.zig                           | rpc rpc-nats rpc-log zefir
 edit src/orm/root.zig                           | orm zefir
@@ -99,9 +99,9 @@ edit examples/rpc-custom-transport/consumer/build.zig | rpc rpc-nats rpc-log zef
 edit examples/rpc-custom-transport/README.md    | rpc rpc-nats rpc-log zefir
 edit examples/other/main.zig                    | core log confy validator rpc rpc-nats rpc-log orm nats zefir
 edit src/core/root.zig src/nats/root.zig        | core log confy validator rpc rpc-nats rpc-log orm nats zefir
-edit src/confy/examples/README.md               | confy rpc-nats nats zefir
+edit src/confy/examples/README.md               | confy rpc rpc-nats rpc-log nats zefir
 edit README.md src/validator/root.zig           | validator rpc rpc-nats rpc-log zefir
-edit README.md                                  |
+edit README.md                                  | rpc rpc-nats rpc-log zefir
 edit docs/plan.md docs/notes.txt                |
 edit build.zig                                  | core log confy validator rpc rpc-nats rpc-log orm nats zefir
 edit build.zig.zon                              | core log confy validator rpc rpc-nats rpc-log orm nats zefir

@@ -13,7 +13,9 @@
 # zefir that CI runs against rpc, counts as rpc. build.zig, build.zig.zon,
 # src/zefir.zig, .github/ and any other path the script does not know
 # affect every module.
-# Documentation outside src/ (*.md files and docs/) affects none.
+# Documentation outside src/ (*.md files and docs/) affects none, but
+# README.md at the root: its "rpc in a minute" is a program of the guide of
+# rpc, which the tests of rpc check, so it counts as rpc.
 set -eu
 
 # The modules and what the tests of each one import. Keep this in sync with
@@ -28,7 +30,9 @@ imports() {
     # The validator imports nothing, but the examples of its guide log the
     # violations they find.
     validator) echo log ;;
-    rpc) echo core validator ;;
+    # rpc imports core and validator, and the examples of its guide read
+    # their settings with confy and log with log.
+    rpc) echo core validator confy log ;;
     # rpc-nats imports nats for its adapter of zefir-nats.
     rpc-nats) echo rpc core nats ;;
     rpc-log) echo rpc core log ;;
@@ -81,6 +85,7 @@ elif [ $# -eq 2 ] && [ -n "$1" ] && [ -n "$2" ]; then
         tests/rpc-nats/*) changed="$changed rpc-nats" ;;
         examples/rpc-custom-transport/*) changed="$changed rpc" ;;
         docker-compose.yml) changed="$changed nats rpc-nats" ;;
+        README.md) changed="$changed rpc" ;;
         docs/* | *.md) ;;
         *) all=true ;;
         esac
