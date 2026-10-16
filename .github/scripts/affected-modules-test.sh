@@ -33,6 +33,13 @@ rpc_imports=$(awk '
     inside && match($0, /\.name = "[^"]*"/) { print substr($0, RSTART + 9, RLENGTH - 10) }
 ' "$here/../../build.zig" | sort)
 expect "zefir-rpc imports only core and validator" "core validator" "$(echo $rpc_imports)"
+# The same in its code, which an addImport elsewhere in build.zig would
+# also reach: only std, builtin, those two and the module's own files.
+# src/rpc/tests/ and src/rpc/examples/ hold programs with imports of their
+# own.
+rpc_foreign=$(grep -rhoE '@import\("[^"]*"\)' "$here/../../src/rpc" --include='*.zig' --exclude-dir=tests --exclude-dir=examples |
+    sed 's/@import("\(.*\)")/\1/' | grep -vE '^(std|builtin|core|validator)$|\.zig$' | sort -u)
+expect "the code of zefir-rpc imports only std, builtin, core and validator" "" "$(echo $rpc_foreign)"
 
 repo=$(mktemp -d)
 trap 'rm -rf "$repo"' EXIT

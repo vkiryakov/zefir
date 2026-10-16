@@ -187,9 +187,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: mlugg/setup-zig@v2
+      # A test that hangs fails after 5 minutes, by name, as in the test
+      # job.
       - name: Run the tests of the transport
         working-directory: examples/rpc-custom-transport/consumer
-        run: zig build test --summary all
+        run: zig build test --summary all --test-timeout 5m
 
   # The end-to-end tests of rpc-nats against the same NATS servers, with the
   # NATS CLI of nats-box; ubuntu only, as nats-e2e. It runs when rpc-nats is
