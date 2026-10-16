@@ -25,6 +25,7 @@ const api = struct {
             .crash = rpc.method(GetUserRequest, void),
             .wait = rpc.method(WaitRequest, void),
             .overstay = rpc.method(WaitRequest, void),
+            .finishLate = rpc.method(WaitRequest, void),
         },
         .errors = .{
             .UserNotFound = .{ .code = .not_found, .app_code = "users.not_found", .message = "User not found" },
@@ -71,6 +72,15 @@ const UserHandler = struct {
         const protection = io.swapCancelProtection(.blocked);
         defer _ = io.swapCancelProtection(protection);
         io.sleep(.fromMilliseconds(req.ms), .awake) catch {};
+    }
+
+    /// Succeeds a microsecond after the deadline, with no cancelation point
+    /// on the way: usually before the engine has canceled the call's token,
+    /// though the client gets deadline_exceeded.
+    pub fn finishLate(_: *UserHandler, ctx: *rpc.Context, _: api.WaitRequest) error{}!void {
+        const io = ctx.io();
+        const past = ctx.operation().deadline.?.expires.nanoseconds + std.time.ns_per_us;
+        while (std.Io.Clock.awake.now(io).nanoseconds < past) std.atomic.spinLoopHint();
     }
 };
 
@@ -315,6 +325,38 @@ test "A10: at the deadline the record names the failure the client got, also for
         try expectString("deadline_exceeded", call(record, "code"));
         try expectString("rpc.deadline_exceeded", call(record, "app_code"));
         try expectString("info", member(record, "level"));
+    }
+}
+
+test "A10: a success that ends just after the deadline is logged as the deadline_exceeded the client got" {
+    const io = testing.io;
+    var capture: Capture = undefined;
+    try capture.open(.info);
+    defer capture.close();
+    var access_log: rpc_log.AccessLog = .init(capture.logger.scoped("rpc"), .{});
+    var users: UserHandler = .{};
+    const rounds = 3;
+    {
+        var t = try rpc.testing.Server.init(testing.allocator, io, .{ .handlers = .{&users}, .middleware = .{&access_log} });
+        defer t.deinit();
+        var client = try t.client(.{});
+        defer client.deinit();
+        for (0..rounds) |_| {
+            if (client.call(io, .root, api.UserApi.finishLate, .{ .ms = 0 }, .{ .timeout = .fromMilliseconds(100) })) |result| {
+                var r = result;
+                defer r.deinit();
+                try testing.expectEqual(core.ErrorCode.deadline_exceeded, r.outcome.failure.code);
+            } else |err| try testing.expectEqual(error.DeadlineExceeded, err);
+        }
+    }
+
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const records = try capture.records(arena.allocator());
+    try testing.expectEqual(@as(usize, rounds), records.len);
+    for (records) |record| {
+        try expectString("finishLate", call(record, "method"));
+        try expectString("deadline_exceeded", call(record, "code"));
     }
 }
 

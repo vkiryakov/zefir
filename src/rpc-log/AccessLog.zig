@@ -14,10 +14,12 @@
 //! `rpc.RawServer`: `.middleware = &.{.of(&access_log)}`.
 //!
 //! The record names the failure the client got: the engine's mapping of
-//! the error (`ctx.mapError`), and `deadline_exceeded` or `cancelled` for
-//! a call the engine ended itself at its deadline, at the client's cancel
-//! or at the stop, even when the handler returned success afterwards. What
-//! middleware cannot see, it does not log:
+//! the error (`ctx.mapError`); `deadline_exceeded` once the deadline has
+//! passed, whatever the chain returned, as the engine then sends it; and
+//! `cancelled` for a call the engine ended at the client's cancel or at
+//! the stop, even when the handler returned success afterwards. Only the
+//! engine knows the outcome for sure; what middleware cannot see, it does
+//! not log as it went out:
 //!
 //! - Calls the engine ends before the chain have no record: refused at
 //!   admission (an unknown method, the limits, a full queue), refused by
@@ -26,7 +28,12 @@
 //!   micro shows them), count those of a known route.
 //! - A success the engine still turns into a failure after the chain is
 //!   logged as a success: a response over `max_response_bytes`, or one the
-//!   transport cannot carry, goes out as `resource_exhausted`.
+//!   transport cannot carry, goes out as `resource_exhausted`; one that
+//!   ends within about a tenth of a millisecond before the deadline goes
+//!   out as `deadline_exceeded` when the engine reads the clock past it.
+//! - A handler that ignores the client's cancel or the stop and outlives
+//!   the deadline is logged as `deadline_exceeded`, though its client got
+//!   `cancelled` from the stop, or nothing after giving up.
 //!
 //! The record never holds the body of a request or a response,
 //! credentials, metadata outside `metadata_keys`, or the identity beyond
@@ -120,10 +127,13 @@ fn write(self: *const AccessLog, ctx: *rpc.Context, started: std.Io.Timestamp, r
 /// The failure the client got, as far as the chain can tell; null for a
 /// success.
 fn outcome(ctx: *rpc.Context, operation: core.Context, ended: std.Io.Timestamp, result: anyerror!void) ?rpc.Failure {
+    // Past the deadline the engine sends deadline_exceeded, whatever the
+    // chain returned: it decides after the handler's task has ended, so
+    // later than this, even when it has not canceled the token yet.
+    if (operation.isExpired(ended)) return ctx.mapError(error.DeadlineExceeded);
     // The engine cancels the call's token when it ends the call itself: at
-    // the deadline, at the client's cancel, at the stop. Its failure went
-    // out then, whatever the chain returned after it.
-    if (operation.isCancelled()) return ctx.mapError(if (operation.isExpired(ended)) error.DeadlineExceeded else error.Cancelled);
+    // the client's cancel, at the stop. Its failure went out then.
+    if (operation.isCancelled()) return ctx.mapError(error.Cancelled);
     result catch |err| return ctx.mapError(err);
     return null;
 }
