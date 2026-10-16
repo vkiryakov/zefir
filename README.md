@@ -32,6 +32,7 @@ Zefir is shaped by my needs first, and it's open to everyone. If it fits the way
 
 - **Built for services.** Zefir is growing into the layers every web service needs: configuration, deadlines and tracing, validation, RPC, logging, database access and HTTP.
 - **Take only what you use.** Every module is its own import, and the umbrella `zefir` module brings them all together.
+- **Not limited to what ships.** Where a module meets the outside world, it goes through an interface of function pointers, a vtable, as `std.Io` does, and an implementation of your own takes the place of zefir's: a transport of rpc (`rpc.ClientTransport` and `rpc.ServerTransport`: NATS by default, [your own](src/rpc-nats/examples/writing-a-transport.md) in a package of its own), `rpc_nats.Conn` for another NATS library, the middleware, authenticators and credentials providers of rpc, and the `std.Io.Writer` that zefir-log writes to (`.output = .{ .writer = … }`).
 - **Your types are the contract.** Declare a struct, and confy fills it and checks every value against its field's type. It reports every problem at once, each pointing at the file and line, or the variable, it came from.
 - **No dependencies.** Pure Zig on top of the standard library; nothing else to fetch or audit.
 - **Tested on Linux, macOS and Windows.** CI runs the tests of every module on all three.
