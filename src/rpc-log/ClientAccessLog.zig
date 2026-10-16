@@ -9,7 +9,9 @@
 //!
 //! Put it first in the client's chain, so that its time covers the other
 //! links. A response makes the record's `code`: "ok", or the code and
-//! `app_code` of the server's failure. An error without a response
+//! `app_code` of the failure. A failure the engine made itself, when it
+//! refused to send the call, also has `sent` set to false; a failure of the
+//! server has no `sent` field. An error without a response
 //! (`rpc.RawClient.CallError`) is written by name in `error`, with the
 //! code it amounts to, the way gRPC names failures that happen on the
 //! client:
@@ -31,10 +33,16 @@
 //!   that diverged) is logged as `ok`, and the call ends with
 //!   `error.InvalidResponse`; one whose decoding needs more memory than the
 //!   client allows ends with `error.ResponseTooLarge` after the same `ok`.
-//! - A request the client does not send never reaches the chain and has
-//!   no record: one against its rules or that JSON cannot carry, invalid
-//!   metadata, route or credentials. The `rpc.Client` result says so with
-//!   `sent = false`.
+//! - A call the client refuses before the chain has no record: a request
+//!   against its rules or that JSON cannot carry, invalid metadata or
+//!   route (the `rpc.Client` result says so with `sent = false`), a
+//!   caller's context that has expired or is canceled
+//!   (`error.DeadlineExceeded`, `error.Cancelled`), and a call over the
+//!   client's `max_pending` (`error.TooManyPendingRequests`).
+//! - Credentials that cannot travel, such as a token with a line break, are
+//!   refused at the end of the chain, where the engine sends: the record
+//!   has the refusal, `invalid_argument` and `rpc.invalid_metadata`, with
+//!   `"sent": false`.
 //!
 //! The record never holds a body, credentials or metadata. One
 //! `ClientAccessLog` serves all calls at once and keeps no state between
@@ -75,11 +83,15 @@ fn write(self: *const ClientAccessLog, ctx: *rpc.ClientContext, started: std.Io.
     const ended = std.Io.Clock.awake.now(ctx.io());
     var failure: ?rpc.Failure = null;
     var failed: ?anyerror = null;
+    var unsent = false;
     if (result) |_| {
-        if (ctx.response()) |response| switch (response.status) {
-            .ok => {},
-            .failure => |f| failure = f,
-        };
+        if (ctx.response()) |response| {
+            switch (response.status) {
+                .ok => {},
+                .failure => |f| failure = f,
+            }
+            unsent = !ctx.sent();
+        }
     } else |err| failed = err;
     const code: ?core.ErrorCode = if (failure) |f| f.code else if (failed) |err| codeOf(err) else null;
     const level = self.options.levels.of(code);
@@ -95,15 +107,17 @@ fn write(self: *const ClientAccessLog, ctx: *rpc.ClientContext, started: std.Io.
         .code = if (code) |c| @tagName(c) else "ok",
         .app_code = if (failure) |f| f.app_code else "",
         .@"error" = if (failed) |err| @errorName(err) else "",
+        .sent = !unsent,
         .duration_ms = record.milliseconds(started.durationTo(ended)),
         .transport = ctx.transport().name,
     };
-    const shape: u2 = @as(u2, @intFromBool(failure != null)) | (@as(u2, @intFromBool(failed != null)) << 1);
+    const shape: u3 = @as(u3, @intFromBool(failure != null)) | (@as(u3, @intFromBool(failed != null)) << 1) | (@as(u3, @intFromBool(unsent)) << 2);
     const logger = self.logger.withContext(ctx.operation());
     switch (shape) {
         inline else => |bits| record.emit(logger, level, "RPC call made", .{
             .app_code = bits & 1 != 0,
             .@"error" = bits & 2 != 0,
+            .sent = bits & 4 != 0,
         }, fields),
     }
 }

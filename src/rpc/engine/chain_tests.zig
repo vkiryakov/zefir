@@ -666,6 +666,8 @@ const ClientProbe = struct {
     inner: ?anyerror = null,
     response_before: bool = false,
     response_status: ?enum { ok, failure } = null,
+    sent_before: bool = false,
+    sent: bool = false,
     request_id: [16]u8 = undefined,
     transport_name: []const u8 = "",
     has_deadline: bool = false,
@@ -700,6 +702,7 @@ const ClientProbe = struct {
         trail.add("{s}>", p.name);
         defer trail.add("<{s}", p.name);
         p.response_before = ctx.response() != null;
+        p.sent_before = ctx.sent();
         p.request_id = ctx.requestId();
         p.transport_name = ctx.transport().name;
         p.has_deadline = ctx.operation().deadline != null;
@@ -719,6 +722,7 @@ const ClientProbe = struct {
             .ok => .ok,
             .failure => .failure,
         } else null;
+        p.sent = ctx.sent();
         return switch (p.mode) {
             .pass => result,
             .foreign_after => error.RedisDown,
@@ -756,6 +760,7 @@ test "client middleware: in order around the transport; its metadata and credent
     try trail.expect(&.{ "c1>", "c2>", "<c2", "<c1" });
     try testing.expect(!probe.response_before);
     try testing.expectEqual(@as(@TypeOf(probe.response_status), .ok), probe.response_status);
+    try testing.expect(!probe.sent_before and probe.sent);
     try testing.expectEqualSlices(u8, &request_id, &probe.request_id);
     try testing.expectEqualStrings("memory", probe.transport_name);
     try testing.expect(probe.has_deadline);
@@ -768,6 +773,16 @@ test "client middleware: in order around the transport; its metadata and credent
     var refused = try f.call(io, "nothing", .{});
     try expectFailure(&refused, failures.unknown_method);
     try testing.expectEqual(@as(@TypeOf(probe.response_status), .failure), probe.response_status);
+    try testing.expect(probe.sent);
+    // Credentials that cannot travel: the engine refuses at the end of the
+    // chain, and the links see its refusal, not sent.
+    probe.credentials = .{ .bearer = "bad\ntoken" };
+    var unsent = try f.call(io, "who", .{});
+    const went_out = unsent.sent;
+    try expectFailure(&unsent, failures.invalid_authorization);
+    try testing.expect(!went_out);
+    try testing.expectEqual(@as(@TypeOf(probe.response_status), .failure), probe.response_status);
+    try testing.expect(!probe.sent);
     trail.count = 0;
 }
 

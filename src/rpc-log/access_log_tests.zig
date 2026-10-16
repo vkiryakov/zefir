@@ -26,6 +26,7 @@ const api = struct {
             .wait = rpc.method(WaitRequest, void),
             .overstay = rpc.method(WaitRequest, void),
             .finishLate = rpc.method(WaitRequest, void),
+            .hold = rpc.method(WaitRequest, void),
         },
         .errors = .{
             .UserNotFound = .{ .code = .not_found, .app_code = "users.not_found", .message = "User not found" },
@@ -49,6 +50,10 @@ const stricter = struct {
 
 const UserHandler = struct {
     pub const rpc_handler = rpc.implement(api.UserApi, .{ .defaults = .{ .auth = .optional } });
+
+    /// For `hold`: set once a call is in it, and what lets the call end.
+    entered: std.Io.Event = .unset,
+    open: std.Io.Event = .unset,
 
     pub fn getUser(_: *UserHandler, _: *rpc.Context, req: api.GetUserRequest) error{UserNotFound}!api.User {
         if (req.id != 1) return error.UserNotFound;
@@ -81,6 +86,12 @@ const UserHandler = struct {
         const io = ctx.io();
         const past = ctx.operation().deadline.?.expires.nanoseconds + std.time.ns_per_us;
         while (std.Io.Clock.awake.now(io).nanoseconds < past) std.atomic.spinLoopHint();
+    }
+
+    /// Keeps the call in flight until the test opens `open`.
+    pub fn hold(self: *UserHandler, ctx: *rpc.Context, _: api.WaitRequest) std.Io.Cancelable!void {
+        self.entered.set(ctx.io());
+        try self.open.wait(ctx.io());
     }
 };
 
@@ -422,7 +433,7 @@ test "A10: the client writes one record per call: a success, a failure of the se
     try capture.expectAbsent(&.{ "body-sentinel", "Ada Lovelace", "s3cret-token", "Bearer", "x-private", "hidden-value" });
 }
 
-test "A10: the client's log sees the response before rpc.Client decodes it, and never a request the client did not send" {
+test "A10: the client's log sees the response before rpc.Client decodes it, and never a request the client refused before its chain" {
     const io = testing.io;
     var capture: Capture = undefined;
     try capture.open(.info);
@@ -449,6 +460,91 @@ test "A10: the client's log sees the response before rpc.Client decodes it, and 
     defer arena.deinit();
     const records = try capture.records(arena.allocator());
     try testing.expectEqual(@as(usize, 1), records.len);
+    try expectString("ok", call(records[0], "code"));
+}
+
+test "A10: credentials that cannot travel are refused at the end of the client's chain: a record of the refusal, with sent false" {
+    const io = testing.io;
+    var capture: Capture = undefined;
+    try capture.open(.info);
+    defer capture.close();
+    var client_log: rpc_log.ClientAccessLog = .init(capture.logger.scoped("rpc.client"), .{});
+    var users: UserHandler = .{};
+    var t = try rpc.testing.Server.init(testing.allocator, io, .{ .handlers = .{&users} });
+    defer t.deinit();
+    var client = try t.client(.{ .middleware = .{&client_log} });
+    defer client.deinit();
+
+    // A line break cannot travel in a metadata value: the engine refuses
+    // to send the call, at the end of the chain.
+    var unsent = try client.call(io, .root, api.UserApi.getUser, .{ .id = 1 }, .{ .credentials = .{ .bearer = "s3cret\ntoken" } });
+    defer unsent.deinit();
+    try testing.expect(!unsent.sent);
+    try testing.expectEqualStrings("rpc.invalid_metadata", unsent.outcome.failure.app_code);
+    // A failure of the server went out.
+    var missing = try client.call(io, .root, api.UserApi.getUser, .{ .id = 2 }, .{});
+    defer missing.deinit();
+
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const records = try capture.records(arena.allocator());
+    try testing.expectEqual(@as(usize, 2), records.len);
+    try expectString(&hexOf(unsent.request_id), call(records[0], "request_id"));
+    try expectString("invalid_argument", call(records[0], "code"));
+    try expectString("rpc.invalid_metadata", call(records[0], "app_code"));
+    // What tells the client's refusal from the server's.
+    try testing.expectEqual(false, (call(records[0], "sent") orelse return error.TestExpectedField).bool);
+    try testing.expect(call(records[0], "error") == null);
+    try expectString("not_found", call(records[1], "code"));
+    try testing.expect(call(records[1], "sent") == null);
+    try capture.expectAbsent(&.{"s3cret"});
+}
+
+fn holdOnce(client: *rpc.Client, io: std.Io) rpc.Client.CallError!void {
+    var result = try client.call(io, .root, api.UserApi.hold, .{ .ms = 0 }, .{});
+    result.deinit();
+}
+
+test "A10: a call the client refuses before its chain has no record: an expired or canceled context, max_pending in flight" {
+    const io = testing.io;
+    var capture: Capture = undefined;
+    try capture.open(.info);
+    defer capture.close();
+    var client_log: rpc_log.ClientAccessLog = .init(capture.logger.scoped("rpc.client"), .{});
+    var users: UserHandler = .{};
+    var t = try rpc.testing.Server.init(testing.allocator, io, .{ .handlers = .{&users} });
+    defer t.deinit();
+    var client = try t.client(.{ .max_pending = 1, .middleware = .{&client_log} });
+    defer client.deinit();
+
+    const expired = core.Context.root.withDeadline(.at(std.Io.Clock.awake.now(io)));
+    try testing.expectError(error.DeadlineExceeded, client.call(io, expired, api.UserApi.getUser, .{ .id = 1 }, .{}));
+    var token: core.CancellationToken = .init;
+    token.cancel();
+    try testing.expectError(error.Cancelled, client.call(io, core.Context.root.withCancellation(&token), api.UserApi.getUser, .{ .id = 1 }, .{}));
+    // One call in flight takes the only place.
+    var held: ?std.Io.Future(rpc.Client.CallError!void) = try io.concurrent(holdOnce, .{ &client, io });
+    defer if (held) |*future| {
+        users.open.set(io);
+        future.cancel(io) catch {};
+    };
+    const deadline: core.Deadline = .after(std.Io.Clock.awake.now(io), .fromSeconds(10));
+    while (!users.entered.isSet()) {
+        if (deadline.isExpired(std.Io.Clock.awake.now(io))) return error.TestTimeout;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+    try testing.expectError(error.TooManyPendingRequests, client.call(io, .root, api.UserApi.getUser, .{ .id = 1 }, .{}));
+    users.open.set(io);
+    const outcome = held.?.await(io);
+    held = null;
+    try outcome;
+
+    // Only the call that went out has a record.
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const records = try capture.records(arena.allocator());
+    try testing.expectEqual(@as(usize, 1), records.len);
+    try expectString("hold", call(records[0], "method"));
     try expectString("ok", call(records[0], "code"));
 }
 

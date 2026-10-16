@@ -172,13 +172,24 @@ pub const ClientContext = opaque {
 
     /// After `next.run()` of this link has returned success: the server's
     /// response, a failure included. Null before it, and when it failed.
-    /// Under `rpc.Client` it is the response before the client decodes it:
-    /// a success here may still end the call with `InvalidResponse` or
-    /// `ResponseTooLarge`.
+    /// Credentials that cannot travel, such as a token with a line break,
+    /// are refused at the end of the chain, where the engine sends: the
+    /// response is then the engine's `invalid_argument` ("Invalid
+    /// authorization value"), and `sent()` is false. Under `rpc.Client` it
+    /// is the response before the client decodes it: a success here may
+    /// still end the call with `InvalidResponse` or `ResponseTooLarge`.
     pub fn response(ctx: *ClientContext) ?*const model.Response {
         const o = outgoingOf(ctx);
         if (!o.response_visible) return null;
         return if (o.response) |*r| r else null;
+    }
+
+    /// After `next.run()` of this link has returned success: whether the
+    /// request went out, so that `response()` is the server's. False when
+    /// the engine refused to send it, and while `response()` is null.
+    pub fn sent(ctx: *ClientContext) bool {
+        const o = outgoingOf(ctx);
+        return o.response_visible and o.sent;
     }
 };
 

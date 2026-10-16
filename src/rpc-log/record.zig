@@ -21,6 +21,9 @@ pub const Fields = struct {
     app_code: []const u8 = "",
     /// The client's error, when the call ended without a response.
     @"error": []const u8 = "",
+    /// False on the client when the engine refused to send the call: the
+    /// failure is its own, not the server's.
+    sent: bool = true,
     duration_ms: f64,
     transport: []const u8,
     peer: Peer = .{ .peer = .none },
@@ -34,6 +37,7 @@ pub const Fields = struct {
 pub const Shape = struct {
     app_code: bool = false,
     @"error": bool = false,
+    sent: bool = false,
     peer: bool = false,
     subject: bool = false,
     metadata: bool = false,

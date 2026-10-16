@@ -111,9 +111,13 @@ pub const Next = opaque {
 ///
 /// Under `rpc.Client` the chain sees the response as bytes, before the
 /// client decodes it: a success a link sees may still end the call with
-/// `InvalidResponse` or `ResponseTooLarge`. A request the client does not
-/// send (against its rules, one that JSON cannot carry, invalid metadata
-/// or route) never passes through the chain at all.
+/// `InvalidResponse` or `ResponseTooLarge`. A call the client refuses
+/// before the chain never passes through it at all: a request against its
+/// rules, one that JSON cannot carry, invalid metadata or route, a
+/// caller's context that has expired or is canceled, and a call over the
+/// client's `max_pending`. Credentials that cannot travel are refused at
+/// the end of the chain, where the engine sends: a link sees that refusal
+/// as the response, with `ctx.sent()` false.
 ///
 /// The objects are shared by all calls at once: guard their state with
 /// `std.Io` primitives.
