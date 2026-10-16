@@ -631,7 +631,7 @@ pub fn build(b: *std.Build) void {
     // The tutorial of the guide, writing-a-transport.md, shows parts of the
     // files of src/rpc-nats/. A test embeds no file outside the directory
     // of its module, so the files come to it as anonymous imports, under
-    // their names.
+    // their names. A new file of src/rpc-nats/ goes into this list too.
     const rpc_nats_sources = [_][]const u8{ "Conn.zig", "Transport.zig", "ZefirNats.zig", "client.zig", "client_tests.zig", "conformance_tests.zig", "micro.zig", "micro_tests.zig", "root.zig", "server.zig", "server_tests.zig", "shared.zig", "subject.zig", "testing.zig", "wire.zig" };
     const rpc_nats_guide_options = b.addOptions();
     rpc_nats_guide_options.addOption([]const []const u8, "sources", &rpc_nats_sources);
