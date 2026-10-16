@@ -25,7 +25,8 @@
 //!   server refused that was made before it, whoever made it; the
 //!   transport confirms the subscriptions of its server side and of its
 //!   inbox one at a time, so the refusal reaches the side that made it.
-//!   Two transports on one client take an adapter each.
+//!   Two transports on one client take an adapter each: in safe builds a
+//!   second `conn()` of one adapter panics.
 //!
 //! Every subscription of the transport holds `pending` messages: a route,
 //! the client's inbox, and each of the nine subscriptions of NATS micro of
@@ -72,14 +73,21 @@ mutex: std.Io.Mutex = .init,
 unconfirmed: std.DoublyLinkedList = .{},
 /// Internal: the order of the next subscription.
 next_order: u64 = 0,
+/// Internal: `conn()` has handed out the interface, to one transport.
+handed_out: bool = false,
 
 const default_limits: rpc.Limits = .{};
 
 /// The `max_inflight` of a server with the default `rpc.Limits`.
 pub const default_pending_messages: u32 = default_limits.max_active_tasks + default_limits.queue_capacity;
 
-/// The interface, for `rpc_nats.Transport.init`.
+/// The interface, for `rpc_nats.Transport.init`: once per adapter, as one
+/// adapter serves one transport. In safe builds a second call panics.
 pub fn conn(z: *ZefirNats) Conn {
+    if (std.debug.runtime_safety) {
+        if (z.handed_out) @panic("rpc_nats.ZefirNats: conn() called twice; one adapter serves one transport: give each transport an adapter of its own");
+        z.handed_out = true;
+    }
     return .init(z);
 }
 

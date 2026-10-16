@@ -580,6 +580,37 @@ pub fn build(b: *std.Build) void {
         test_rpc_nats.dependOn(&compile.step);
     }
 
+    // rpc-nats panic program: a second conn() of one ZefirNats panics in
+    // safe builds, since one adapter serves one transport. Like the rpc
+    // ones above, it ends in its own panic handler with code 3 and gets
+    // Debug copies of rpc-nats and its imports.
+    const panic_rpc_nats = b.createModule(.{
+        .root_source_file = b.path("src/rpc-nats/root.zig"),
+        .target = target,
+        .optimize = .Debug,
+        .imports = &.{
+            .{ .name = "rpc", .module = panic_rpc },
+            .{ .name = "core", .module = panic_core },
+            .{ .name = "nats", .module = panic_nats },
+        },
+    });
+    const second_conn = b.addExecutable(.{
+        .name = "rpc-nats-panic-second-conn",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/rpc-nats/tests/panic/second_conn.zig"),
+            .target = target,
+            .optimize = .Debug,
+            .imports = &.{
+                .{ .name = "nats", .module = panic_nats },
+                .{ .name = "rpc-nats", .module = panic_rpc_nats },
+            },
+        }),
+    });
+    const run_second_conn = b.addRunArtifact(second_conn);
+    run_second_conn.expectStdErrMatch("panic: rpc_nats.ZefirNats: conn() called twice; one adapter serves one transport: give each transport an adapter of its own");
+    run_second_conn.expectExitCode(3);
+    test_rpc_nats.dependOn(&run_second_conn.step);
+
     // The guide of rpc-nats shows its examples as they are. The examples
     // need NATS servers and zio: tests/rpc-nats builds and runs them.
     const rpc_nats_guide = b.addTest(.{

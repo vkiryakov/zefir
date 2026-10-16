@@ -297,7 +297,9 @@ What is new, next to the memory transport of the guide of rpc:
   servers, reconnects, limits.
 - **The adapter.** `rpc_nats.ZefirNats` gives the transport the six
   operations it needs of a connection (publish, subscribe, next message,
-  flush, drain, unsubscribe). One adapter serves one transport.
+  flush, drain, unsubscribe). One adapter serves one transport: a second
+  `adapter.conn()` panics in safe builds, and a second transport on the
+  same connection takes an adapter of its own.
 - **The transport.** `rpc_nats.Transport` is both sides of rpc on that
   connection: `serverTransport()` for `rpc.Server`, `clientTransport()` for
   `rpc.Client`. Its `deinit` comes after the server's and before the
