@@ -129,6 +129,9 @@ flowchart LR
 1. **Declare.** A struct lists the rules of its fields in `pub const field_rules`
    and checks across fields in `pub fn validateSelf`. Rules are values the
    compiler builds: `v.notEmpty`, `v.positive`, `v.each(...)`, `v.custom(...)`.
+   The same entries can give a field its outside name and transforms that
+   `v.transform` runs before the check
+   ([Names and transforms](#names-and-transforms)).
 2. **Compile.** When a program calls `v.check` or `v.checkAll` for a type, or a
    test calls `comptime v.assertRules(T)`, the compiler checks the declarations
    of that type and of every type below it: each rule against its field's type,
@@ -457,12 +460,13 @@ field that exists at run time cannot hold one.
 > Names and transforms are on the `dev` branch until the next release: v0.6.0
 > does not have them.
 
-Values that come from outside are rarely clean. People type a space after
-their name, write their email as `Ann@Example.COM`, and tag a post `" Zig "`,
-`zig` and `ZIG`, which are one tag. A rule is right to reject `" Ann"`, and it
-cannot see that three spellings are one tag: a value must be brought to its
-normal form before the rules check it. The names differ too: the JSON of a web
-form calls a field `userName`, while the Zig struct calls it `user_name`.
+Values that come from outside are rarely clean. People type their email as
+`" Ann@Example.COM "`, with spaces around it, and tag a post `" Zig "`, `zig`
+and `ZIG`, which are one tag. `v.email` is right to reject the email with its
+spaces, and `v.uniqueItems` cannot see that three spellings are one tag: a
+value must be brought to its normal form before the rules check it. The names
+differ too: the JSON of a web form calls a field `userName`, while the Zig
+struct calls it `user_name`.
 
 Both describe a field, like its rules, so they go into the same entry of
 `field_rules`, in this order:
@@ -608,7 +612,14 @@ It logs what the transforms changed, then what the rules still find:
 
 ```text
 $ zig build run
-<!-- OUTPUT: names_and_transforms -->
+2026-10-16T23:39:20.555Z INFO  Normalized field=title before="  Comptime for the rest of us " after="Comptime for the rest of us"
+2026-10-16T23:39:20.555Z INFO  Normalized field=tags before=[" Zig ",comptime,ZIG] after=[zig,comptime,zig]
+2026-10-16T23:39:20.555Z INFO  Normalized field=speakers[0].email before=" Ada@Example.COM " after=ada@example.com
+2026-10-16T23:39:20.555Z INFO  Normalized field=speakers[0].country before=gb after=GB
+2026-10-16T23:39:20.555Z INFO  Normalized field=speakers[0].phone before="+44 (20) 7946-0958" after=+442079460958
+2026-10-16T23:39:20.556Z WARN  Invalid proposal field=durationMinutes code=validation.one_of reason="must be one of: 25, 50"
+2026-10-16T23:39:20.556Z WARN  Invalid proposal field=tags code=validation.unique_items reason="must not contain duplicates"
+2026-10-16T23:39:20.556Z WARN  Invalid proposal field=speakers[1].displayName code=validation.not_blank reason="must not be blank"
 ```
 
 - **The rules check the normal form.** The email passes `v.email` only
@@ -635,7 +646,7 @@ $ zig build run
 this order:
 
 1. decode the request, finding the fields by their outside names;
-2. `try v.transform(arena, &request)`: the transforms;
+2. `try v.transform(arena.allocator(), &request)`: the transforms;
 3. `v.check` or `v.checkAll`: the rules, on the normalized value;
 4. your code.
 
@@ -937,14 +948,45 @@ and it may share its name with another field. `v.nameOf` gives its Zig name.
 ### Compile errors of names and transforms
 
 A mistake in a name or a transform is a compile error, like a rule that does
-not fit its field. For example, the build prints (file and line numbers
-shortened):
+not fit its field. Say a file `talks.zig` declares three DTOs, each with a
+mistake, and a program calls `v.transform` on each:
 
-```text
-<!-- OUTPUT: compile errors -->
+```zig
+// Speaker: a transform after a rule
+.email = .{ v.email, v.trim },
+// TalkProposal: a string transform on a u16
+.duration_minutes = .{ v.rename("durationMinutes"), v.trim },
+// Reviewer: two fields with one outside name
+.display_name = v.rename("displayName"),
+.login = v.rename("displayName"),
 ```
 
-As in the errors of rules, a transform is named by its label: `trim`,
+The build stops at the first mistake (paths and line numbers shortened, the
+library's lines of source left out):
+
+```text
+…/validator/walk.zig:…: error: validator: talks.Speaker.field_rules.email: email is a rule; transforms (trim) must come before the rules
+…/validator/walk.zig:…: note: called at comptime here
+…/validator/walk.zig:…: note: called at comptime here
+…/validator/walk.zig:…: note: called at comptime here
+…/validator/walk.zig:…: note: called at comptime here
+talks.zig:38:20: note: generic function instantiated here
+    try v.transform(arena.allocator(), &speaker);
+        ~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+```
+
+Fix it, and the next two builds stop at the other two:
+
+```text
+…/validator/transforms.zig:…: error: validator: talks.TalkProposal.field_rules.duration_minutes: trim expects a string, field is u16
+…/validator/walk.zig:…: error: validator: talks.Reviewer.field_rules: display_name and login are both named "displayName" outside
+```
+
+The text says where the mistake is: the type, `field_rules` and the field.
+Zig points into the library, and its last note, `generic function instantiated
+here`, is your call of `v.transform`. A `v.check`, a `v.checkAll` or a
+`comptime v.assertRules(T)` that reaches the type reports the same mistake. As
+in the errors of rules, a transform is named by its label: `trim`,
 `trim_start`, `to_lower`, `transform_with(...)`.
 
 | You wrote | The error ends with |
@@ -956,10 +998,13 @@ As in the errors of rules, a transform is named by its label: `trim`,
 | `.duration_minutes = v.trim` on a `u16` | `trim expects a string, field is u16` |
 | `.tags = v.trim` on a list of strings | `trim expects a string, field is []const []const u8; use v.each(v.trim)` |
 | `.code = v.trim` on a `[:0]const u8` | `trim expects []const u8, field is [:0]const u8; transforms take and return []const u8` |
-| `.login = v.rename("displayName")` next to `.display_name = v.rename("displayName")` | `display_name and login are both named "displayName" outside` |
+| `.display_name = v.rename("displayName")` and `.login = v.rename("displayName")` | `display_name and login are both named "displayName" outside` |
 | `v.rename("display name")` | `rename("display name"): an outside name is 1 to 64 characters from A-Z, a-z, 0-9, '_' and '-'` |
+| `.id = v.rename`, without the call | `rename must be called, e.g. v.rename("userName")` |
+| `.phone = v.transformWith`, without the call | `transformWith must be called, e.g. v.transformWith(normalizePhone)` |
 | `v.transformWith(f)` with `fn ([]const u8) []const u8` | `transform_with(...) is fn ([]const u8) []const u8; write fn (allocator: std.mem.Allocator, value: []const u8) E![]const u8` |
-| `v.transform(arena, &request)` on a `const request` | `transform changes the value: pass a pointer to a var (&value), got *const ...` |
+| `.phones = v.transformWith(normalizePhone)` on a list of strings | `...; write fn (allocator: std.mem.Allocator, value: []const []const u8) E![]const []const u8; use v.each(v.transformWith(...))` |
+| `v.transform(arena, &request)` on a `const request` | `transform changes the value: pass a pointer to a var (&value), got *const talks.TalkProposal` |
 
 ## validateSelf and v.fail
 

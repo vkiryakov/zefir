@@ -19,7 +19,7 @@ differently from class-validator and validator.js 13.15.35.
 | `@ValidateNested()` and `@Type()` | not needed: struct, slice, array and optional fields are walked automatically |
 | class-transformer's `@Expose({ name: "userName" })` | `v.rename("userName")`, first in the entry: `.user_name = .{ v.rename("userName"), v.notBlank }`; the paths of violations use the name too ([Names and transforms](README.md#names-and-transforms)) |
 | class-transformer's `@Transform(({ value }) => value.trim())` | a transform before the rules of the entry: `v.trim`, `v.trimStart`, `v.trimEnd`, `v.toLower`, `v.toUpper`, or `v.transformWith(f)` with a function of your own; for the items of a list, inside `v.each`: `v.each(.{ v.trim, v.notEmpty })` |
-| `plainToInstance()`, then `validate()` | a decoder that reads the outside names, then `v.transform(arena, &value)`, then `v.check` or `v.checkAll` |
+| `plainToInstance()`, then `validate()` | a decoder that reads the outside names, then `v.transform(arena.allocator(), &value)`, then `v.check` or `v.checkAll` |
 | `@IsOptional()` | `?T`: `null` skips the field's rules |
 | `@IsDefined()` | a non-optional field type |
 | `@ValidateIf()` | `validateSelf` |
