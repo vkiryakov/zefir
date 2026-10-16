@@ -26,8 +26,8 @@
 //! try server.start(io);
 //!
 //! var client_side: mailbox.Client = try .init(&broker, .{});
+//! defer client_side.deinit(io); // also after a connect that failed
 //! try client_side.connect(io);
-//! defer client_side.deinit(io);
 //! var client = try rpc.Client.init(gpa, .{ .transport = client_side.clientTransport() });
 //! defer client.deinit();
 //! ```
@@ -183,6 +183,11 @@ const Message = struct {
         codec: []const u8,
         /// The time the client had left when it published.
         timeout: std.Io.Duration,
+        /// When the client published, on the awake clock: the broker runs
+        /// in this process, so both sides read the same clock. The server's
+        /// deadline counts from here, so the time in the queue comes off
+        /// `timeout`.
+        published_at: std.Io.Timestamp,
         metadata: []const Entry,
         body: []const u8,
     };
@@ -361,7 +366,6 @@ pub const Server = struct {
     /// its head has been to `admit` and its body copied.
     fn handle(s: *Server, io: std.Io, message: *Message) void {
         defer message.destroy();
-        const received_at = std.Io.Clock.awake.now(io);
         const request = message.content.request;
         if (s.closing()) return s.refuse(io, message, stopping);
         const head: rpc.transport.RequestHead = .{
@@ -369,10 +373,14 @@ pub const Server = struct {
             .request_id = request.request_id,
             .codec = request.codec,
             .timeout = request.timeout,
-            .received_at = received_at,
+            // Not the moment it left the queue: the client's budget runs
+            // from the publish.
+            .received_at = request.published_at,
             .metadata = request.metadata,
-            // The reply queue names the client.
-            .peer = .{ .name = request.reply_to },
+            // Not the reply queue: with its name and a correlation id
+            // anyone who may publish to it could answer for the server,
+            // and logs show the peer.
+            .peer = .none,
         };
         const incoming = switch (s.dispatcher.admit(io, &head, request.body.len)) {
             .accepted => |incoming| incoming,
@@ -468,6 +476,9 @@ pub const Client = struct {
     /// The reply queue and the task that reads it, once `connect` has run.
     replies: ?*Queue = null,
     task: std.Io.Future(void) = undefined,
+    /// The `std.Io` of `connect`: in Debug, `call` checks that it gets the
+    /// same.
+    io_vtable: ?*const std.Io.VTable = null,
 
     pub const Options = struct {
         /// The most calls that wait for their responses at once; one more
@@ -484,14 +495,18 @@ pub const Client = struct {
         };
     }
 
-    pub const ConnectError = Broker.DeclareError || std.Io.ConcurrentError;
+    pub const ConnectError = Broker.DeclareError || std.Io.ConcurrentError || std.Io.RandomSecureError;
 
     /// Declares the client's reply queue, `reply.<16 hex digits>`, and
-    /// starts the task that reads it. From now on the client stays at its
-    /// address until `deinit`.
+    /// starts the task that reads it; a second `connect` does nothing. From
+    /// now on the client stays at its address until `deinit`, and its calls
+    /// run on this `io`. The name comes from `io.randomSecure`: whoever
+    /// knows it may publish a response that the client takes as the
+    /// server's.
     pub fn connect(c: *Client, io: std.Io) ConnectError!void {
+        if (c.replies != null) return;
         var token: [8]u8 = undefined;
-        io.random(&token);
+        try io.randomSecure(&token);
         var buffer: [max_queue_name]u8 = undefined;
         const name = std.fmt.bufPrint(&buffer, "reply.{s}", .{&std.fmt.bytesToHex(token, .lower)}) catch unreachable;
         // Room for a response to every call that may wait.
@@ -503,6 +518,7 @@ pub const Client = struct {
         // A task of the transport: canceling a call does not stop it.
         c.task = try io.concurrent(receive, .{ c, queue, io });
         c.replies = queue;
+        c.io_vtable = io.vtable;
     }
 
     /// No call may be in flight.
@@ -530,6 +546,10 @@ pub const Client = struct {
         // A cancelation pending on entry comes before any other outcome.
         try io.checkCancel();
         const replies = c.replies orelse return error.Unavailable;
+        // Rule 2 of rpc.ClientTransport: a wait on another `io` would not
+        // end when the task of the call is canceled.
+        if (std.debug.runtime_safety and c.io_vtable != io.vtable)
+            @panic("rpc-mailbox: Client.call with another std.Io than connect's; pass the io the client connected on");
         if (request.body.len > c.broker.options.max_body_bytes) return error.RequestTooLarge;
         var buffer: [max_queue_name]u8 = undefined;
         const queue_name = queueName(&buffer, request.route) orelse return error.Unexpected;
@@ -539,9 +559,10 @@ pub const Client = struct {
         const slot = try c.pending.acquire(io);
         defer releaseSlot(c, io, slot);
         // The time left, right before publishing.
-        const left = deadline.remaining(now(io));
+        const published_at = now(io);
+        const left = deadline.remaining(published_at);
         if (left.nanoseconds < std.time.ns_per_ms) return error.Timeout;
-        const message = try requestMessage(c.broker.gpa, io, request, replies.name, slot.id, left);
+        const message = try requestMessage(c.broker.gpa, io, request, replies.name, slot.id, left, published_at);
         c.broker.publish(io, queue_name, message) catch |err| {
             freeMessage(io, message);
             // No queue: no server serves the contract, or its server
@@ -573,7 +594,15 @@ pub const Client = struct {
 };
 
 /// The request as a message, with a copy of every byte.
-fn requestMessage(gpa: std.mem.Allocator, io: std.Io, request: *const rpc.transport.Request, reply_to: []const u8, correlation_id: u64, timeout: std.Io.Duration) error{OutOfMemory}!*Message {
+fn requestMessage(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    request: *const rpc.transport.Request,
+    reply_to: []const u8,
+    correlation_id: u64,
+    timeout: std.Io.Duration,
+    published_at: std.Io.Timestamp,
+) error{OutOfMemory}!*Message {
     // A Debug allocator may take a cancelable lock.
     const protection = io.swapCancelProtection(.blocked);
     defer _ = io.swapCancelProtection(protection);
@@ -586,6 +615,7 @@ fn requestMessage(gpa: std.mem.Allocator, io: std.Io, request: *const rpc.transp
         .request_id = request.request_id,
         .codec = try a.dupe(u8, request.codec),
         .timeout = timeout,
+        .published_at = published_at,
         .metadata = try copyEntries(a, request.metadata),
         .body = try a.dupe(u8, request.body),
     } };

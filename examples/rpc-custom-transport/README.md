@@ -78,8 +78,9 @@ cd consumer && zig build test   # as an application builds it, with zefir of thi
 ```
 
 `consumer/` is the application side: its `build.zig` wires the modules as
-above, and its tests run the conformance suite on the transport and a
-contract through `rpc.Server` and `rpc.Client` over it. CI runs it on every
+above, and its tests run the conformance suite on the transport, checks of
+its own (the deadline, the peer, the `std.Io` of a call), and a contract
+through `rpc.Server` and `rpc.Client` over it. CI runs it on every
 change to rpc, against the commit it checks, not the one the package pins:
 that the package builds there shows it does not force its own zefir.
 
@@ -99,13 +100,31 @@ the broker with `.live_broker = true`.
 
 ## From the sample to a real broker
 
-| In the sample                     | With an AMQP library                                    |
-| --------------------------------- | ------------------------------------------------------- |
-| `Broker.declare`                  | queue.declare; an exclusive reply queue for the client  |
-| `Broker.publish`, `Broker.reply`  | basic.publish with `reply_to` and `correlation_id`      |
-| the tasks on `std.Io.Queue`       | basic.consume, read in a task on the application's `io` |
-| `Call.release`                    | basic.ack, or basic.nack with requeue for `not_started` |
-| `error.NoRoute` → `Unavailable`   | the mandatory flag and basic.return                     |
+| In the sample                             | With an AMQP library                                         |
+| ----------------------------------------- | ------------------------------------------------------------ |
+| `Broker.declare`                          | queue.declare; an exclusive reply queue for the client       |
+| `Broker.publish`, `Broker.reply`          | basic.publish with `reply_to` and `correlation_id`           |
+| the tasks on `std.Io.Queue`               | basic.consume, read in a task on the application's `io`      |
+| a server takes what its queue holds       | basic.qos, prefetch = `dispatcher.service().max_inflight`    |
+| `timeout` and `published_at` of a request | `expiration` = the timeout; the server counts from delivery  |
+| `.peer = .none`                           | the user the broker checked, `user_id`; never `reply_to`     |
+| `Call.release`                            | basic.ack, or basic.nack with requeue for `not_started`      |
+| `error.NoRoute` → `Unavailable`           | the mandatory flag and basic.return                          |
+
+With prefetch at `max_inflight`, the server holds no more deliveries than
+the engine takes at once, and the broker keeps the rest in the queue
+instead of the engine refusing them. The broker of the sample shares the
+client's clock, so the server counts a request's budget from the moment
+it was published; another host does not, so a real server counts it from
+the delivery, and `expiration` has the broker drop a request that waited
+out its budget.
+
+`reply_to` and the correlation ids are secrets of a call. With the name of
+a reply queue, anyone who may publish to it can answer for the server, and
+the ids of `rpc.transport.Pending` are easy to guess: 1, 2, 3… The sample
+draws the name from `io.randomSecure` and gives the engine no peer, so the
+access log never shows it. With RabbitMQ, take an exclusive reply queue or
+direct reply-to (`amq.rabbitmq.reply-to`), and keep both values out of logs.
 
 The rules every transport keeps are in the doc comments of
 `rpc.ClientTransport`, `rpc.ServerTransport` and `rpc.transport.Reply`:
