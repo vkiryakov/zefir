@@ -628,6 +628,17 @@ pub fn build(b: *std.Build) void {
             }) }},
         }),
     });
+    // The tutorial of the guide, writing-a-transport.md, shows parts of the
+    // files of src/rpc-nats/. A test embeds no file outside the directory
+    // of its module, so the files come to it as anonymous imports, under
+    // their names.
+    const rpc_nats_sources = [_][]const u8{ "Conn.zig", "Transport.zig", "ZefirNats.zig", "client.zig", "client_tests.zig", "conformance_tests.zig", "micro.zig", "micro_tests.zig", "root.zig", "server.zig", "server_tests.zig", "shared.zig", "subject.zig", "testing.zig", "wire.zig" };
+    const rpc_nats_guide_options = b.addOptions();
+    rpc_nats_guide_options.addOption([]const []const u8, "sources", &rpc_nats_sources);
+    rpc_nats_guide.root_module.addOptions("readme_options", rpc_nats_guide_options);
+    for (rpc_nats_sources) |name| {
+        rpc_nats_guide.root_module.addAnonymousImport(name, .{ .root_source_file = b.path(b.fmt("src/rpc-nats/{s}", .{name})) });
+    }
     test_rpc_nats.dependOn(&addRun(b, rpc_nats_guide, tsan).step);
 
     addRpcGuide(b, test_rpc, test_rpc_log, .{
