@@ -248,15 +248,40 @@ pub fn publish(client: *Client, subject: []const u8, payload: []const u8) Publis
 /// `publish` does. Headers need a server that supports them.
 pub fn publishMessage(client: *Client, message: PublishMessage) PublishError!void {
     client.checkHome();
+    return client.publishUntil(message, null) catch |err| switch (err) {
+        error.Timeout => unreachable, // no deadline, no timeout
+        else => |e| e,
+    };
+}
+
+pub const PublishTimeoutError = PublishError || error{
+    /// The outbound queue had no room for it within the timeout: it is not
+    /// queued and never sent.
+    Timeout,
+};
+
+/// Publishes `message` the way `publishMessage` does, but waits for room
+/// in the outbound queue no longer than `timeout`: then it fails with
+/// Timeout and queues nothing, as it does when the timeout is over before
+/// it begins. For a caller with a deadline, such as an RPC call, whose
+/// publish must not outlast it. `.none` waits as long as it takes.
+pub fn publishMessageTimeout(client: *Client, message: PublishMessage, timeout: Io.Timeout) PublishTimeoutError!void {
+    client.checkHome();
+    return client.publishUntil(message, time.deadline(client.io, timeout));
+}
+
+/// The publish of `publishMessage`, waiting for room until `deadline`; null
+/// waits as long as it takes.
+fn publishUntil(client: *Client, message: PublishMessage, deadline: ?Io.Clock.Timestamp) PublishTimeoutError!void {
     const header_len = try client.prepare(message, .publish);
     try client.checkLine(message, header_len);
-    client.putPublish(message, header_len) catch |err| switch (err) {
+    client.putPublish(message, header_len, deadline) catch |err| switch (err) {
         error.Closed => return error.ConnectionClosed,
         // A stream of requestMany that nobody reads may hold room in the
         // reconnect buffer that it no longer needs.
         error.BufferFull => {
             if (!client.outbound.pruneRequests(client.io, client, manager.requestWaits)) return error.BufferFull;
-            client.putPublish(message, header_len) catch |again| switch (again) {
+            client.putPublish(message, header_len, deadline) catch |again| switch (again) {
                 error.Closed => return error.ConnectionClosed,
                 else => |e| return e,
             };
@@ -266,14 +291,14 @@ pub fn publishMessage(client: *Client, message: PublishMessage) PublishError!voi
     client.countOut(header_len + message.payload.len);
 }
 
-fn putPublish(client: *Client, message: PublishMessage, header_len: usize) Outbound.PutError!void {
+fn putPublish(client: *Client, message: PublishMessage, header_len: usize, deadline: ?Io.Clock.Timestamp) Outbound.PutUntilError!void {
     const io = client.io;
     if (message.headers.len > 0) {
-        return client.outbound.put(io, .publish, encoder.hpubLen(message.subject, message.reply_to, header_len, message.payload.len), encoder.writeHpub, .{
+        return client.outbound.putUntil(io, deadline, .publish, encoder.hpubLen(message.subject, message.reply_to, header_len, message.payload.len), encoder.writeHpub, .{
             message.subject, message.reply_to, message.headers, message.payload,
         });
     }
-    return client.outbound.put(io, .publish, encoder.pubLen(message.subject, message.reply_to, message.payload.len), encoder.writePub, .{
+    return client.outbound.putUntil(io, deadline, .publish, encoder.pubLen(message.subject, message.reply_to, message.payload.len), encoder.writePub, .{
         message.subject, message.reply_to, message.payload,
     });
 }
@@ -382,6 +407,9 @@ pub const SubscribeError = error{
     OutOfMemory,
     /// A bug in this client: the frame came out of another length.
     ProtocolError,
+    /// The outbound queue had no room for the SUB within `options.timeout`:
+    /// nothing is subscribed.
+    Timeout,
 };
 
 /// Subscribes to `subject`, which may hold wildcards. The SUB is queued
@@ -391,6 +419,7 @@ pub const SubscribeError = error{
 /// `deinit()`.
 pub fn subscribe(client: *Client, subject: []const u8, options: Subscription.Options) SubscribeError!*Subscription {
     client.checkHome();
+    const deadline = time.deadline(client.io, options.timeout);
     try subjects.validateSubscribe(subject);
     if (options.queue) |queue| {
         if (!subjects.isValidQueue(queue)) return error.InvalidOptions;
@@ -420,7 +449,7 @@ pub fn subscribe(client: *Client, subject: []const u8, options: Subscription.Opt
         client.subscriptions.unregister(io, sub.sid);
     }
     const len = subscribeLen(sub.subject, sub.queue_group, sub.sid, options.max_messages);
-    client.outbound.putTicket(io, .service, Registry.subscribeTicket(sub), len, writeSubscribe, .{ sub.subject, sub.queue_group, sub.sid, options.max_messages }) catch |err| switch (err) {
+    client.outbound.putTicket(io, deadline, .service, Registry.subscribeTicket(sub), len, writeSubscribe, .{ sub.subject, sub.queue_group, sub.sid, options.max_messages }) catch |err| switch (err) {
         error.Closed => return error.ConnectionClosed,
         // Refused: a drain that began meanwhile took the subscription, and
         // its SUB never goes after the drain's UNSUB.

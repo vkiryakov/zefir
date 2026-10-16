@@ -4,7 +4,7 @@
 
 <p align="center">
   <strong>A modular framework for building services in Zig.</strong><br>
-  Web servers, web services and APIs, built from modules you pick: typed configuration, request deadlines, cancellation, tracing, structured logging, validation and a NATS client today; RPC, an async MongoDB driver with an ODM, and an HTTP server next.
+  Web servers, web services and APIs, built from modules you pick: typed configuration, request deadlines, cancellation, tracing, structured logging, validation, a NATS client and RPC today; an async MongoDB driver with an ODM, and an HTTP server next.
 </p>
 
 <p align="center">
@@ -40,41 +40,43 @@ Zefir is shaped by my needs first, and it's open to everyone. If it fits the way
 
 Take any module on its own, or all the finished ones at once through the umbrella module `zefir`.
 
-| Module                             | What it does                                                                                               | Status                                            |
-| ---------------------------------- | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
-| **Core & Foundation**              |                                                                                                            |                                                   |
-| `zefir-core`                       | Execution context: deadlines, cancellation, W3C trace context; application container and lifecycle planned | ✅ Done · [docs](src/core/examples/README.md)      |
-| `zefir-confy`                      | Typed configuration: JSON, INI, `.env` files, environment variables, secrets                               | ✅ Done · [docs](src/confy/examples/README.md)     |
-| `zefir-log`                        | Structured logging: JSON Lines, levels, context, redaction                                                 | ✅ Done · [docs](src/log/examples/README.md)       |
-| `zefir-validator`                  | Typed schemas, validation rules, error reporting                                                           | ✅ Done · [docs](src/validator/examples/README.md) |
-| `zefir-events`                     | Typed in-process event bus                                                                                 | 📋 Planned                                         |
-| `zefir-retry`                      | Retry policies, backoff, jitter, circuit breaker                                                           | 📋 Planned                                         |
-| **Networking & Communication**     |                                                                                                            |                                                   |
-| `zefir-http`                       | HTTP server, REST API, routing, middleware, WebSocket, SSE                                                 | 📋 Planned                                         |
-| `zefir-rpc`                        | Typed RPC over TCP and NATS, later RabbitMQ, HTTP and QUIC; streaming                                      | 📋 Planned                                         |
-| `zefir-graphql`                    | GraphQL queries, mutations, subscriptions, resolvers                                                       | 📋 Planned                                         |
-| `zefir-messaging`                  | Pub/sub, message queues, consumers, backpressure                                                           | 📋 Planned                                         |
-| `zefir-nats`                       | Native async NATS client on `std.Io`: publish/subscribe, request/reply, reconnect                          | ✅ Done · [docs](src/nats/examples/README.md)      |
-| `zefir-zmq`                        | ZeroMQ / ZMTP integration                                                                                  | 📋 Planned                                         |
-| `zefir-grpc`                       | gRPC interoperability                                                                                      | 📋 Planned                                         |
-| **Database & Persistence**         |                                                                                                            |                                                   |
-| `zefir-mongo`                      | Async MongoDB driver: BSON, connection pooling, transactions                                               | 📋 Planned                                         |
-| `zefir-odm`                        | MongoDB ODM (Object Data Mapper): typed schemas, models, CRUD, aggregation                                 | 📋 Planned                                         |
-| `zefir-cache`                      | L1/L2 caching, TTL, Redis, invalidation, synchronization                                                   | 📋 Planned                                         |
-| **Security**                       |                                                                                                            |                                                   |
-| `zefir-security`                   | Authentication, authorization, JWT, MFA/TOTP, WebAuthn, TLS integration, CORS, rate limiting               | 📋 Planned                                         |
-| **Observability & Diagnostics**    |                                                                                                            |                                                   |
-| `zefir-observability`              | Metrics, distributed tracing, OpenTelemetry integration                                                    | 📋 Planned                                         |
-| `zefir-diagnostics`                | Runtime diagnostics: tasks, threads, IO, memory, stack monitoring where supported                          | 📋 Planned                                         |
-| `zefir-console`                    | Live terminal UI for runtime diagnostics, inspired by Tokio Console                                        | 📋 Planned                                         |
-| `zefir-otel`                       | OpenTelemetry exporters                                                                                    | 📋 Planned                                         |
-| `zefir-health`                     | Liveness, readiness, startup health checks                                                                 | 📋 Planned                                         |
-| **Background Processing**          |                                                                                                            |                                                   |
-| `zefir-scheduler`                  | Scheduled jobs, cron expressions, timers                                                                   | 📋 Planned                                         |
-| **Developer Experience & Tooling** |                                                                                                            |                                                   |
-| `zefir-openapi`                    | OpenAPI generation from Zig types                                                                          | 📋 Planned                                         |
-| `zefir-cli`                        | Project scaffolding, code generation                                                                       | 📋 Planned                                         |
-| `zefir-test`                       | Testing helpers, mocks, fixtures                                                                           | 📋 Planned                                         |
+| Module                             | What it does                                                                                               | Status                                                  |
+| ---------------------------------- | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
+| **Core & Foundation**              |                                                                                                            |                                                         |
+| `zefir-core`                       | Execution context: deadlines, cancellation, W3C trace context; application container and lifecycle planned | ✅ Done · [docs](src/core/examples/README.md)            |
+| `zefir-confy`                      | Typed configuration: JSON, INI, `.env` files, environment variables, secrets                               | ✅ Done · [docs](src/confy/examples/README.md)           |
+| `zefir-log`                        | Structured logging: JSON Lines, levels, context, redaction                                                 | ✅ Done · [docs](src/log/examples/README.md)             |
+| `zefir-validator`                  | Typed schemas, validation rules, error reporting                                                           | ✅ Done · [docs](src/validator/examples/README.md)       |
+| `zefir-events`                     | Typed in-process event bus                                                                                 | 📋 Planned                                               |
+| `zefir-retry`                      | Retry policies, backoff, jitter, circuit breaker                                                           | 📋 Planned                                               |
+| **Networking & Communication**     |                                                                                                            |                                                         |
+| `zefir-http`                       | HTTP server, REST API, routing, middleware, WebSocket, SSE                                                 | 📋 Planned                                               |
+| `zefir-rpc`                        | Typed RPC with pluggable transports: NATS now, HTTP (Connect) and TCP later                                | ✅ Done · [docs](src/rpc/examples/README.md)             |
+| `zefir-rpc-nats`                   | NATS transport for `zefir-rpc`: request-reply, ADR-32 errors, NATS micro discovery                         | ✅ Done · [docs](src/rpc-nats/examples/README.md)        |
+| `zefir-rpc-log`                    | Access logs of `zefir-rpc` calls on `zefir-log`: one record per call, never bodies or credentials          | ✅ Done · [docs](src/rpc/examples/README.md#access-logs) |
+| `zefir-graphql`                    | GraphQL queries, mutations, subscriptions, resolvers                                                       | 📋 Planned                                               |
+| `zefir-messaging`                  | Pub/sub, message queues, consumers, backpressure                                                           | 📋 Planned                                               |
+| `zefir-nats`                       | Native async NATS client on `std.Io`: publish/subscribe, request/reply, reconnect                          | ✅ Done · [docs](src/nats/examples/README.md)            |
+| `zefir-zmq`                        | ZeroMQ / ZMTP integration                                                                                  | 📋 Planned                                               |
+| `zefir-grpc`                       | gRPC interoperability                                                                                      | 📋 Planned                                               |
+| **Database & Persistence**         |                                                                                                            |                                                         |
+| `zefir-mongo`                      | Async MongoDB driver: BSON, connection pooling, transactions                                               | 📋 Planned                                               |
+| `zefir-odm`                        | MongoDB ODM (Object Data Mapper): typed schemas, models, CRUD, aggregation                                 | 📋 Planned                                               |
+| `zefir-cache`                      | L1/L2 caching, TTL, Redis, invalidation, synchronization                                                   | 📋 Planned                                               |
+| **Security**                       |                                                                                                            |                                                         |
+| `zefir-security`                   | Authentication, authorization, JWT, MFA/TOTP, WebAuthn, TLS integration, CORS, rate limiting               | 📋 Planned                                               |
+| **Observability & Diagnostics**    |                                                                                                            |                                                         |
+| `zefir-observability`              | Metrics, distributed tracing, OpenTelemetry integration                                                    | 📋 Planned                                               |
+| `zefir-diagnostics`                | Runtime diagnostics: tasks, threads, IO, memory, stack monitoring where supported                          | 📋 Planned                                               |
+| `zefir-console`                    | Live terminal UI for runtime diagnostics, inspired by Tokio Console                                        | 📋 Planned                                               |
+| `zefir-otel`                       | OpenTelemetry exporters                                                                                    | 📋 Planned                                               |
+| `zefir-health`                     | Liveness, readiness, startup health checks                                                                 | 📋 Planned                                               |
+| **Background Processing**          |                                                                                                            |                                                         |
+| `zefir-scheduler`                  | Scheduled jobs, cron expressions, timers                                                                   | 📋 Planned                                               |
+| **Developer Experience & Tooling** |                                                                                                            |                                                         |
+| `zefir-openapi`                    | OpenAPI generation from Zig types                                                                          | 📋 Planned                                               |
+| `zefir-cli`                        | Project scaffolding, code generation                                                                       | 📋 Planned                                               |
+| `zefir-test`                       | Testing helpers, mocks, fixtures                                                                           | 📋 Planned                                               |
 
 > [!NOTE]
 > Zefir is in early development. Until 1.0, any minor release may change the API.
@@ -222,6 +224,72 @@ A Debug build also shows the client's own `debug(nats)` records: connecting, con
 
 `flush` waits until the server has the subscription, and `publish` returns once a copy of the message is in the client's queue. Every queue has a limit, a dropped connection comes back with its subscriptions, all requests share one reply subscription, and `drain()` stops a service without losing the work it took. **[Read the nats guide →](src/nats/examples/README.md)**
 
+## rpc in a minute
+
+Describe a service as a contract, implement it in a handler, serve it and call it. Here both sides run in one program, over the memory transport:
+
+```zig
+const std = @import("std");
+const log = @import("log");
+const rpc = @import("rpc");
+
+// The contract: shared by the server and its clients, usually in a package of its own.
+const User = struct { id: u64, name: []const u8 };
+const GetUserRequest = struct { id: u64 };
+const UserApi = rpc.Contract(.{
+    .name = "users",
+    .version = 1,
+    .methods = .{ .getUser = rpc.method(GetUserRequest, User) },
+    .errors = .{
+        .UserNotFound = .{ .code = .not_found, .app_code = "users.not_found", .message = "User not found" },
+    },
+});
+
+// The handler: a method for each method of the contract.
+const Users = struct {
+    pub const rpc_handler = rpc.implement(UserApi, .{});
+
+    pub fn getUser(_: *Users, _: *rpc.Context, req: GetUserRequest) error{UserNotFound}!User {
+        if (req.id != 42) return error.UserNotFound;
+        return .{ .id = 42, .name = "Ada" };
+    }
+};
+
+pub fn main(init: std.process.Init) !void {
+    const gpa = init.gpa;
+    const io = init.io;
+    const logger: log.Logger = try .init(gpa, io, .{ .format = .text });
+    defer logger.deinit();
+
+    // The memory transport keeps both sides in this process; on NATS, rpc_nats.Transport.
+    var memory: rpc.testing.MemoryTransport = try .init(gpa, .{});
+    defer memory.deinit(io);
+    var users: Users = .{};
+    var server = try rpc.Server.init(gpa, .{ .transport = memory.serverTransport(), .handlers = .{&users} });
+    defer server.deinit(io);
+    try server.start(io);
+
+    var client = try rpc.Client.init(gpa, .{ .transport = memory.clientTransport() });
+    defer client.deinit();
+    for ([_]u64{ 42, 7 }) |id| {
+        var result = try client.call(io, .root, UserApi.getUser, .{ .id = id }, .{});
+        defer result.deinit();
+        switch (result.outcome) {
+            .ok => |user| logger.info("User found", .{ .id = user.id, .name = user.name }),
+            .failure => |failure| logger.warn("No user", .{ .id = id, .app_code = failure.app_code }),
+        }
+    }
+}
+```
+
+```text
+$ zig build run
+2026-10-16T09:51:59.484Z INFO  User found id=42 name=Ada
+2026-10-16T09:51:59.485Z WARN  No user id=7 app_code=users.not_found
+```
+
+The compiler checks the handler against the contract and the request of every call against the method's type, and a failure of the service, such as `users.not_found`, comes as a value, not an error. On NATS, `rpc_nats.Transport` on a connection to the broker takes the place of the memory transport, and the contract, the handler and the calls stay the same. Validation with zefir-validator on both sides, middleware, authentication, deadlines that travel into nested calls, access logs and a graceful stop are in the guide. **[Read the rpc guide →](src/rpc/examples/README.md)**
+
 ## Installation
 
 Requires **Zig 0.17.0**. Add the dependency to your `build.zig.zon`. This is the `dev` branch, the next version in progress, so the command fetches its latest commit:
@@ -268,10 +336,13 @@ const zefir = @import("zefir"); // zefir.confy, zefir.core, ...
 ```sh
 zig build test --summary all                                                     # run all tests
 zig build test-log --summary all                                                 # run one module's tests: test-core, test-log, …
-zig fmt --check build.zig build.zig.zon src tests --exclude tests/nats/zig-pkg   # check formatting
+# check formatting, as CI does
+zig fmt --check build.zig build.zig.zon src tests examples \
+  --exclude tests/nats/zig-pkg --exclude tests/rpc-nats/zig-pkg \
+  --exclude examples/rpc-custom-transport/zig-pkg --exclude examples/rpc-custom-transport/consumer/zig-pkg
 ```
 
-CI tests a pull request only on the modules it affects. A change under `src/<module>/` runs the tests of that module, of every module that depends on it and of `zefir`; a change to `build.zig`, `build.zig.zon`, `src/zefir.zig` or `.github/` runs them all, and documentation outside `src/` runs none. Every push to `dev` and `main` tests all modules. The module graph for this is in `.github/scripts/affected-modules.sh`: a new module goes there as well as into `build.zig`.
+CI tests a pull request only on the modules it affects. A change under `src/<module>/` runs the tests of that module, of every module that depends on it and of `zefir`; a change to `build.zig`, `build.zig.zon`, `src/zefir.zig` or `.github/` runs them all, and documentation outside `src/` runs none, except this README: its "rpc in a minute" is a program that the tests of rpc check. Every push to `dev` and `main` tests all modules. The module graph for this is in `.github/scripts/affected-modules.sh`: a new module goes there as well as into `build.zig`.
 
 The end-to-end tests of nats run against real NATS servers in Docker, described by `docker-compose.yml` at the repository root. The tests are a package of their own in `tests/nats`, so zio, the runtime they use, never reaches zefir's users:
 
@@ -286,7 +357,25 @@ zig build check               # build all of the above without running it; no se
 zig build down                # stop the servers
 ```
 
-`zig build down` also resets the servers when a run dies half way, say while a test holds one of them paused. Whenever CI tests nats, it builds this package on Linux, macOS and Windows and runs the end-to-end tests on Linux; a change to `tests/nats/` or `docker-compose.yml` counts as a change to nats.
+`zig build down` also resets the servers when a run dies half way, say while a test holds one of them paused. Whenever CI tests nats, it builds this package on Linux, macOS and Windows and runs the end-to-end tests on Linux; a change to `tests/nats/` counts as a change to nats.
+
+The end-to-end tests of rpc-nats, with the examples of its guide, are a package of the same kind in `tests/rpc-nats`, against servers of the same `docker-compose.yml`:
+
+```sh
+cd tests/rpc-nats
+zig build e2e      # start the servers if needed, run the tests, then the examples, checking what they print against the guide
+zig build check    # build the tests and the examples without running them; no servers needed
+zig build down     # stop the servers
+```
+
+CI treats it as nats: whenever it tests rpc-nats, it builds the package on the three systems and runs it on Linux; a change to `tests/rpc-nats/` counts as a change to rpc-nats, and one to `docker-compose.yml` as a change to both.
+
+`examples/rpc-custom-transport` is a transport of rpc in a package of its own, the proof that one can be written outside zefir. Its `consumer/` builds it as an application does, against the zefir of this checkout, and CI runs it whenever it tests rpc; a change to the package counts as a change to rpc:
+
+```sh
+cd examples/rpc-custom-transport/consumer
+zig build test     # the conformance suite of rpc on the transport, its own tests, rpc.Server and rpc.Client over it
+```
 
 Branches:
 

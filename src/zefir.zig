@@ -5,6 +5,8 @@ pub const log = @import("log");
 pub const confy = @import("confy");
 pub const validator = @import("validator");
 pub const rpc = @import("rpc");
+pub const rpc_nats = @import("rpc-nats");
+pub const rpc_log = @import("rpc-log");
 pub const orm = @import("orm");
 pub const nats = @import("nats");
 

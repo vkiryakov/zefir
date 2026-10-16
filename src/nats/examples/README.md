@@ -608,6 +608,7 @@ The subscription options:
 | `.max_messages` | null                | end after this many messages; the server stops sending then                              |
 | `.pending`      | the client's limits | how many messages and bytes may wait for `next()`                                        |
 | `.overflow`     | `.drop_newest`      | what happens to a message that does not fit, see [Memory and limits](#memory-and-limits) |
+| `.timeout`      | `.none`             | how long `subscribe` waits for room, see [Memory and limits](#memory-and-limits)         |
 
 > [!IMPORTANT]
 > Read a subscription with `next()` until it returns null, or `deinit()`
@@ -999,6 +1000,26 @@ what its subscriptions still hold goes with it, see
 | `limits.max_control_line_bytes`  | 4096    | a longer subject line to send is `InvalidSubject`                  |
 | `limits.max_event_queue`         | 1024    | newer events are dropped and counted in `dropped_events`           |
 | `reconnect.buffer_bytes`         | 8 MiB   | while reconnecting, `publish` and `request` fail with `BufferFull` |
+
+The wait for room in the outbound queue has no limit of its own: while
+the server does not read, a `publish` or a `subscribe` waits until it
+does, until the client closes, or until its task is canceled. A caller
+with a deadline of its own, such as an RPC call, bounds the wait.
+`publishMessageTimeout` publishes the way `publishMessage` does, but waits
+no longer than its timeout, and a subscription takes a `.timeout`. When
+the time is up, either fails with `Timeout` and queues nothing: no
+message goes out later, and no subscription is left behind.
+
+```zig
+const two_seconds: std.Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(2), .clock = .awake } };
+client.publishMessageTimeout(.{ .subject = "orders.created", .payload = "{\"id\":1003}" }, two_seconds) catch |err| switch (err) {
+    // The queue stayed full for two seconds: nothing was queued.
+    error.Timeout => std.log.warn("orders.created was not published", .{}),
+    else => |e| return e,
+};
+const refunds = try client.subscribe("refunds.>", .{ .timeout = two_seconds });
+defer refunds.deinit();
+```
 
 What happens to a message that does not fit in a subscription is its
 `.overflow` policy:
@@ -1528,7 +1549,18 @@ errors of `std.Io` that pass through unchanged, the network errors such as
 
 Errors the server reports later, outside any call, such as a refused
 subscription, come as [events](#events). A subscription the server
-refuses ends: its `next()` returns `PermissionDenied`.
+refuses ends: its `next()` returns `PermissionDenied`. To know it before
+any message is due, flush after subscribing and ask the subscription. The
+server answers a SUB before the PONG of a later PING, so once `flush()`
+has returned, `isDenied()` tells, without taking a message:
+
+```zig
+const payments = try client.subscribe("payments.>", .{});
+defer payments.deinit();
+try client.flush(.{});
+// The permissions of this user do not let it read payments.
+if (payments.isDenied()) return error.PaymentsNotAllowed;
+```
 
 <details>
 <summary>What InvalidOptions catches</summary>

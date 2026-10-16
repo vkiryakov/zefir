@@ -86,6 +86,11 @@ jobs:
         shell: bash
         working-directory: tests/nats
         run: zig build check --summary all
+      # The same for tests/rpc-nats, which only rpc-nats-e2e runs.
+      - if: contains(format(' {0} ', env.MODULES), ' rpc-nats ')
+        shell: bash
+        working-directory: tests/rpc-nats
+        run: zig build check --summary all
 
   # The tests again under ThreadSanitizer; it does not build for Windows.
   tsan:
@@ -139,7 +144,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: mlugg/setup-zig@v2
-      - run: zig fmt --check build.zig build.zig.zon src tests --exclude tests/nats/zig-pkg
+      - run: >-
+          zig fmt --check build.zig build.zig.zon src tests examples
+          --exclude tests/nats/zig-pkg --exclude tests/rpc-nats/zig-pkg
+          --exclude examples/rpc-custom-transport/zig-pkg
+          --exclude examples/rpc-custom-transport/consumer/zig-pkg
 
   # The end-to-end tests of nats against NATS servers in Docker. Only the
   # Linux runners run Linux containers, so this job is ubuntu only. It is
@@ -158,6 +167,48 @@ jobs:
         run: docker compose up --detach --wait
       - name: Run the end-to-end tests
         working-directory: tests/nats
+        timeout-minutes: 10
+        run: zig build e2e --summary all
+      - name: Stop the NATS servers
+        if: always()
+        run: docker compose down
+
+  # The package of examples/rpc-custom-transport: a transport outside zefir,
+  # on the public API of rpc only, built the way an application builds it
+  # (zefir's modules come from the application, here this commit, not the
+  # one the package pins) and run through the conformance suite of rpc. It
+  # runs when rpc is among the modules to test.
+  custom-transport:
+    name: custom-transport
+    needs: changes
+    if: contains(format(' {0} ', needs.changes.outputs.modules), ' rpc ')
+    timeout-minutes: 20
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: mlugg/setup-zig@v2
+      # A test that hangs fails after 5 minutes, by name, as in the test
+      # job.
+      - name: Run the tests of the transport
+        working-directory: examples/rpc-custom-transport/consumer
+        run: zig build test --summary all --test-timeout 5m
+
+  # The end-to-end tests of rpc-nats against the same NATS servers, with the
+  # NATS CLI of nats-box; ubuntu only, as nats-e2e. It runs when rpc-nats is
+  # among the modules to test.
+  rpc-nats-e2e:
+    name: rpc-nats-e2e
+    needs: changes
+    if: contains(format(' {0} ', needs.changes.outputs.modules), ' rpc-nats ')
+    timeout-minutes: 20
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: mlugg/setup-zig@v2
+      - name: Start the NATS servers
+        run: docker compose up --detach --wait plain restart rpc-acl
+      - name: Run the end-to-end tests
+        working-directory: tests/rpc-nats
         timeout-minutes: 10
         run: zig build e2e --summary all
       - name: Stop the NATS servers

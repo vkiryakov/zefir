@@ -1,0 +1,23 @@
+.{
+    .name = .rpc_mailbox,
+    .version = "0.1.0",
+    .fingerprint = 0xe99bbe38ed3552f6,
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{
+        // Only for the package's own tests. Lazy: an application that
+        // depends on this package never fetches it, and gives the transport
+        // its own zefir modules instead (README.md). A release of the
+        // package pins a release of zefir here.
+        .zefir = .{
+            .url = "git+https://github.com/vkiryakov/zefir#0264a2f915fc8f37334832a31b8980e738c79b6e",
+            .hash = "zefir-0.6.0-dev-533VDYz5TgBG6SHiVjMhG_Gd5Ys_w32sY7t-DJ5sjeEu",
+            .lazy = true,
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "README.md",
+    },
+}

@@ -248,14 +248,11 @@ pub fn put(q: *Outbound, io: Io, kind: Kind, len: usize, encode: anytype, args: 
 
 pub const PutUntilError = PutError || error{Timeout};
 
-/// Like `put`, but the frame goes in only when `ticket` agrees, under the
-/// queue's mutex, as for a SUB that its subscription's drain must not
+/// Like `putUntil`, but the frame goes in only when `ticket` agrees, under
+/// the queue's mutex, as for a SUB that its subscription's drain must not
 /// follow.
-pub fn putTicket(q: *Outbound, io: Io, kind: Kind, ticket: Ticket, len: usize, encode: anytype, args: anytype) PutError!void {
-    return q.putTicketed(io, null, kind, ticket, len, encode, args) catch |err| switch (err) {
-        error.Timeout => unreachable, // no deadline, no timeout
-        else => |e| e,
-    };
+pub fn putTicket(q: *Outbound, io: Io, deadline: ?Io.Clock.Timestamp, kind: Kind, ticket: Ticket, len: usize, encode: anytype, args: anytype) PutUntilError!void {
+    return q.putTicketed(io, deadline, kind, ticket, len, encode, args);
 }
 
 /// Like `put`, but the wait for room ends at `deadline` with Timeout, and

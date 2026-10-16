@@ -1,0 +1,60 @@
+//! zefir-rpc-nats — the calls of zefir-rpc over NATS request-reply.
+//!
+//! Security first: zefir-nats has no TLS yet, so the link to the broker is
+//! plain text, tokens from `authorization` and the data of calls included.
+//! Until it has, run rpc over NATS only in a closed network. Give every
+//! service NATS credentials and permissions of its own: it subscribes only
+//! to its routes and to its inbox (`Transport.Options.inbox_prefix`), and
+//! publishes only to the routes it calls and to the reply subjects of its
+//! requests (`allow_responses`). Without them, anyone who can subscribe to
+//! `users.v1.>` or `_INBOX.>` sees the requests, responses and tokens of
+//! others.
+//!
+//! A request is published to the subject of its method,
+//! `[subject_prefix.]service.v<version>.method`, with a reply subject in
+//! the client's own inbox; the response comes back there. Errors travel in
+//! the headers of the NATS Service API (ADR-32), so `nats req` and NATS
+//! clients in other languages can call a zefir service, and every contract
+//! of a server is a NATS micro service that `nats micro ls` lists.
+//!
+//! ```zig
+//! var nc: nats.Client = try .init(gpa, io, .{ .servers = &.{"nats://127.0.0.1:4222"} });
+//! defer nc.deinit();
+//! try nc.connect();
+//! var adapter: rpc_nats.ZefirNats = .{ .client = &nc };
+//! var bus: rpc_nats.Transport = try .init(gpa, adapter.conn(), .{});
+//! defer bus.deinit(io);
+//! var server: rpc.Server = try .init(gpa, .{ .transport = bus.serverTransport(), .handlers = .{&users} });
+//! defer server.deinit(io);
+//! ```
+//!
+//! The transport needs six operations from a NATS connection,
+//! `rpc_nats.Conn`; an adapter of a NATS library fills them in, and every
+//! library then puts the same bytes on the wire. `rpc_nats.ZefirNats` is the
+//! adapter of zefir-nats.
+
+const std = @import("std");
+
+/// What the transport needs from a NATS connection.
+pub const Conn = @import("Conn.zig");
+/// The NATS transport: both sides of rpc on one NATS connection.
+pub const Transport = @import("Transport.zig");
+/// The adapter of zefir-nats: a `Conn` on a `nats.Client`.
+pub const ZefirNats = @import("ZefirNats.zig");
+/// Helpers for tests of services on NATS.
+pub const testing = @import("testing.zig");
+
+test {
+    std.testing.refAllDecls(@This());
+    _ = @import("Conn.zig");
+    _ = @import("subject.zig");
+    _ = @import("wire.zig");
+    _ = @import("Transport.zig");
+    _ = @import("ZefirNats.zig");
+    _ = @import("micro.zig");
+    _ = @import("micro_tests.zig");
+    _ = @import("testing.zig");
+    _ = @import("server_tests.zig");
+    _ = @import("client_tests.zig");
+    _ = @import("conformance_tests.zig");
+}
