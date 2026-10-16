@@ -215,16 +215,22 @@ pub fn incoming(call: *Call) Incoming {
 }
 
 /// Chooses `outcome` unless another was chosen first; returns the one in
-/// effect.
-pub fn choose(call: *Call, outcome: Outcome) Outcome {
-    return call.outcome.cmpxchgStrong(.pending, outcome, .acq_rel, .acquire) orelse outcome;
+/// effect. The response a chosen outcome owes is counted before the choice
+/// (`RawServer.owe`), so the stop never finds nothing owed while a call
+/// still has to answer; the supervisor takes it back once it has answered.
+pub fn choose(call: *Call, io: std.Io, outcome: Outcome) Outcome {
+    call.server.owe();
+    const chosen = call.outcome.cmpxchgStrong(.pending, outcome, .acq_rel, .acquire) orelse return outcome;
+    // Another came first and counted its own.
+    call.server.answered(io);
+    return chosen;
 }
 
 /// Ends the call with `outcome` unless it has one already: cancels its
 /// token and wakes its supervisor. Returns the outcome in effect.
 /// Lock-free and never waits.
 pub fn stop(call: *Call, io: std.Io, outcome: Outcome) Outcome {
-    const chosen = call.choose(outcome);
+    const chosen = call.choose(io, outcome);
     if (chosen == outcome) {
         call.token.cancel();
         call.wake.set(io);
@@ -242,7 +248,7 @@ pub fn stop(call: *Call, io: std.Io, outcome: Outcome) Outcome {
 pub fn supervise(call: *Call, io: std.Io) void {
     if (call.outcomeBeforeStart(io)) |outcome| return call.endUnstarted(io, outcome, null);
     var handler = io.concurrent(runHandler, .{ call, io }) catch
-        return call.endUnstarted(io, call.choose(.no_task), null);
+        return call.endUnstarted(io, call.choose(io, .no_task), null);
 
     var result: ?(anyerror![]const u8) = null;
     const outcome: Outcome = outcome: {
@@ -257,7 +263,7 @@ pub fn supervise(call: *Call, io: std.Io) void {
         // success still has to beat the deadline and the others.
         std.debug.assert(call.handler_done.load(.acquire));
         result = handler.await(io);
-        break :outcome call.choose(if (call.deadline.isExpired(now(io))) .deadline else .finished);
+        break :outcome call.choose(io, if (call.deadline.isExpired(now(io))) .deadline else .finished);
     };
     // Any outcome but the handler's own end closes the entry: a handler
     // that has not entered never runs.
@@ -273,6 +279,7 @@ pub fn supervise(call: *Call, io: std.Io) void {
         .finished => null,
         .pending, .no_task => unreachable,
     };
+    if (outcome != .finished) call.server.answered(io);
 
     var disposition: Reply.Disposition = .completed;
     if (result == null) {
@@ -284,7 +291,10 @@ pub fn supervise(call: *Call, io: std.Io) void {
             disposition = .canceled;
         }
     }
-    if (outcome == .finished) failure = call.sendResult(io, result.?);
+    if (outcome == .finished) {
+        failure = call.sendResult(io, result.?);
+        call.server.answered(io);
+    }
     call.record(io, failure);
     call.reply.release(io, disposition);
 }
@@ -295,8 +305,8 @@ pub fn supervise(call: *Call, io: std.Io) void {
 fn outcomeBeforeStart(call: *Call, io: std.Io) ?Outcome {
     const chosen = call.outcome.load(.acquire);
     if (chosen != .pending) return chosen;
-    if (call.server.grace_over.load(.acquire)) return call.choose(.shutdown);
-    if (call.deadline.remaining(now(io)).nanoseconds < std.time.ns_per_ms) return call.choose(.deadline);
+    if (call.server.grace_over.load(.acquire)) return call.choose(io, .shutdown);
+    if (call.deadline.remaining(now(io)).nanoseconds < std.time.ns_per_ms) return call.choose(io, .deadline);
     return null;
 }
 
@@ -313,6 +323,7 @@ pub fn endUnstarted(call: *Call, io: std.Io, outcome: Outcome, handler: ?*std.Io
         .pending, .finished => unreachable,
     };
     const ended = if (outcome == .canceled) failure else call.sendFailure(io, failure, true);
+    call.server.answered(io);
     if (handler) |task| _ = task.await(io) catch "";
     call.record(io, ended);
     call.reply.release(io, .not_started);

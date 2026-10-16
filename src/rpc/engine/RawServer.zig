@@ -109,6 +109,12 @@ live_bytes: std.atomic.Value(usize) = .init(0),
 /// Set when `inflight` drops to zero. Only the lifecycle task waits on it,
 /// and resets it before it looks at `inflight`.
 idle: std.Io.Event = .unset,
+/// Calls whose outcome is chosen and whose response has not gone out yet
+/// (a client that gave up gets none): `owe` and `answered`. The stop waits
+/// for them before it closes the transport.
+owed: std.atomic.Value(u32) = .init(0),
+/// Set when `owed` drops to zero; waited on and reset as `idle` is.
+all_answered: std.Io.Event = .unset,
 /// The shutdown grace is over: admission refuses calls, and calls that
 /// have not started are refused.
 grace_over: std.atomic.Value(bool) = .init(false),
@@ -304,8 +310,9 @@ pub const StartError = ServerTransport.StartError || error{InvalidState};
 pub const WaitError = transport.Dispatcher.FatalError || std.Io.Cancelable || error{InvalidState};
 pub const ShutdownError = error{ShutdownTimeout} || WaitError;
 
-/// How long the stop waits, once the transport has closed, for the calls it
-/// canceled to end.
+/// How long the stop waits for the calls it ended to answer before it
+/// closes the transport, and, once the transport has closed, for the calls
+/// it canceled to end.
 const cancel_budget: std.Io.Duration = .fromSeconds(1);
 
 const log = std.log.scoped(.rpc);
@@ -377,7 +384,8 @@ pub fn run(server: *RawServer, io: std.Io) (StartError || WaitError)!void {
 /// Begins a graceful stop. From any task, also from a handler; never
 /// waits; a second call does nothing. The server drains its transport,
 /// lets the calls in flight run for `shutdown_grace`, cancels the rest,
-/// closes the transport and stops.
+/// closes the transport once their failures have gone out (one second at
+/// most) and stops.
 pub fn requestStop(server: *RawServer, io: std.Io) void {
     server.mutex.lockUncancelable(io);
     defer server.mutex.unlock(io);
@@ -419,6 +427,8 @@ pub fn deinit(server: *RawServer, io: std.Io) void {
     defer _ = io.swapCancelProtection(protection);
     server.requestStop(io);
     server.joinLifecycle(io);
+    // Every call has answered: each took back what it owed before its end.
+    std.debug.assert(server.owed.load(.acquire) == 0);
     server.arena.deinit();
     server.* = undefined;
 }
@@ -474,6 +484,10 @@ fn runLifecycle(server: *RawServer, io: std.Io) void {
     server.server_transport.drain(io);
     _ = server.waitIdle(io, grace_end);
     server.endGrace(io);
+    // The calls it ended send their failures before the transport closes:
+    // after the close, their clients would lose them. A deaf handler does
+    // not hold this up: its failure goes out before it is canceled.
+    _ = waitZero(io, &server.owed, &server.all_answered, .after(now(io), cancel_budget));
     server.server_transport.close(io);
     // Calls queued after the grace ended, before the transport closed.
     server.refuseQueued(io);
@@ -493,21 +507,28 @@ fn runLifecycle(server: *RawServer, io: std.Io) void {
 /// Waits until no call is in flight or `deadline` passes; true when no call
 /// is. Only the lifecycle task calls it.
 fn waitIdle(server: *RawServer, io: std.Io, deadline: ?core.Deadline) bool {
+    return waitZero(io, &server.inflight, &server.idle, deadline);
+}
+
+/// Waits until `count` is zero or `deadline` passes; true when it is zero.
+/// `event` is set each time `count` drops to zero. Only the lifecycle task
+/// waits on such an event.
+fn waitZero(io: std.Io, count: *std.atomic.Value(u32), event: *std.Io.Event, deadline: ?core.Deadline) bool {
     while (true) {
-        server.idle.reset();
+        event.reset();
         // A read-modify-write, not a load: it orders the reset before the
-        // `set` of the call that leaves last. A plain load may read the
-        // count from before that call left while the reset lands after its
-        // `set` (store-load reordering, also on x86), and the stop would
-        // sleep through the end of the last call.
-        if (server.inflight.fetchAdd(0, .acq_rel) == 0) return true;
+        // `set` of the one that drops the count last. A plain load may read
+        // the count from before that while the reset lands after its `set`
+        // (store-load reordering, also on x86), and the stop would sleep
+        // through it.
+        if (count.fetchAdd(0, .acq_rel) == 0) return true;
         if (deadline) |d| {
-            waiting.untilSet(&server.idle, io, d) catch |err| switch (err) {
-                error.Timeout => return server.inflight.load(.acquire) == 0,
+            waiting.untilSet(event, io, d) catch |err| switch (err) {
+                error.Timeout => return count.load(.acquire) == 0,
                 // The lifecycle task waits with cancelation blocked.
                 error.Canceled => unreachable,
             };
-        } else server.idle.waitUncancelable(io);
+        } else event.waitUncancelable(io);
     }
 }
 
@@ -541,7 +562,7 @@ fn refuseQueued(server: *RawServer, io: std.Io) void {
     };
     while (taken.popFirst()) |node| {
         const call: *Call = @alignCast(@fieldParentPtr("node", node));
-        call.endUnstarted(io, call.choose(.shutdown), null);
+        call.endUnstarted(io, call.choose(io, .shutdown), null);
         server.retire(io, call);
     }
 }
@@ -671,6 +692,18 @@ fn takePlace(server: *RawServer) bool {
 /// A call has left: its place is free.
 fn leave(server: *RawServer, io: std.Io) void {
     if (server.inflight.fetchSub(1, .acq_rel) == 1) server.idle.set(io);
+}
+
+/// Counts the response a call owes once its outcome is chosen; `answered`
+/// takes it back. Internal to the module, for `Call`.
+pub fn owe(server: *RawServer) void {
+    _ = server.owed.fetchAdd(1, .acq_rel);
+}
+
+/// A call whose outcome is chosen has sent its response, or has none to
+/// send. Internal to the module, for `Call`.
+pub fn answered(server: *RawServer, io: std.Io) void {
+    if (server.owed.fetchSub(1, .acq_rel) == 1) server.all_answered.set(io);
 }
 
 /// Frees a call that has ended and frees its place. Internal to the module,

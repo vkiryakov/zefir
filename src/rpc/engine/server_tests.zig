@@ -1410,6 +1410,60 @@ test "Review Focus 4: a stop with calls in every state and a deaf handler: Shutd
     try testing.expectEqual(@as(u32, 3), gate.entered.load(.acquire));
 }
 
+/// One call of `method` through the memory transport, from a task of its
+/// own; the response lands in `arena`.
+fn callMemory(memory: *MemoryTransport, io: std.Io, method: []const u8, arena: *std.heap.ArenaAllocator) ClientTransport.CallError!model.Response {
+    const request = requestOf(io, method, "{}", .fromSeconds(30));
+    return memory.clientTransport().call(io, &request, .{ .allocator = arena.allocator(), .max_response_bytes = 1024 });
+}
+
+test "Review Focus 4 through the memory transport: the cancelled of the stop reaches every client before the transport closes" {
+    const io = testing.io;
+    var memory: MemoryTransport = try .init(testing.allocator, .{});
+    defer memory.deinit(io);
+    var gate: Gate = .{ .io = io };
+    var deaf: Deaf = .{ .io = io };
+    var server: RawServer = try .init(testing.allocator, .{
+        .transport = memory.serverTransport(),
+        .methods = &.{
+            .{ .route = routeOf("gate"), .handler = handlerOf(&gate) },
+            .{ .route = routeOf("deaf"), .handler = handlerOf(&deaf) },
+        },
+        // The transport closes right after the grace.
+        .shutdown_grace = .zero,
+    });
+    defer server.deinit(io);
+    // A failed check must not leave a handler waiting for good.
+    defer deaf.release.set(io);
+    defer gate.open.set(io);
+    try server.start(io);
+
+    const methods = [_][]const u8{ "gate", "gate", "gate", "deaf" };
+    var arenas: [methods.len]std.heap.ArenaAllocator = undefined;
+    for (&arenas) |*arena| arena.* = .init(testing.allocator);
+    defer for (&arenas) |*arena| arena.deinit();
+    var callers: [methods.len]?std.Io.Future(ClientTransport.CallError!model.Response) = @splat(null);
+    defer for (&callers) |*slot| if (slot.*) |*future| {
+        if (future.cancel(io)) |_| {} else |_| {}
+    };
+    for (methods, &arenas, &callers) |method, *arena, *slot| slot.* = try io.concurrent(callMemory, .{ &memory, io, method, arena });
+    try waitFor(io, &gate.entered, 3);
+    try waitFor(io, &deaf.entered, 1);
+
+    // The deaf handler keeps its call past the second the stop gives.
+    try testing.expectError(error.ShutdownTimeout, server.shutdown(io));
+    // Every client got the failure of the stop, the deaf handler's too,
+    // not a connection lost to the close of the transport.
+    for (&callers) |*slot| {
+        const response = try slot.*.?.await(io);
+        slot.* = null;
+        try expectFailureResponse(response, failures.stopped);
+        try testing.expect(!response.refused);
+    }
+    deaf.release.set(io);
+    try server.wait(io);
+}
+
 test "a call delivered while the server drains still runs within the grace" {
     const io = testing.io;
     var test_transport: TestTransport = .{};
