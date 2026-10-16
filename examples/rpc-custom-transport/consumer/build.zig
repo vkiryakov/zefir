@@ -3,7 +3,8 @@
 //! zefir-core from the application's zefir. CI runs it.
 //!
 //!   zig build test   the conformance suite on the transport, its own
-//!                    checks, and rpc.Server and rpc.Client over it
+//!                    checks, rpc.Server and rpc.Client over it, and the
+//!                    tests of the transport's package itself
 
 const std = @import("std");
 
@@ -33,6 +34,10 @@ pub fn build(b: *std.Build) void {
         }),
     });
     test_step.dependOn(&b.addRunArtifact(tests).step);
+    // The tests in the transport's own files, against this zefir: those of
+    // another module do not run with the tests above.
+    const package_tests = b.addTest(.{ .name = "rpc-mailbox", .root_module = mailbox_module });
+    test_step.dependOn(&b.addRunArtifact(package_tests).step);
 
     // A safe build checks that a call comes on the std.Io of connect: on
     // another, it panics. The program ends in its own panic handler, which

@@ -79,10 +79,12 @@ cd consumer && zig build test   # as an application builds it, with zefir of thi
 
 `consumer/` is the application side: its `build.zig` wires the modules as
 above, and its tests run the conformance suite on the transport, checks of
-its own (the deadline, the peer, the `std.Io` of a call), and a contract
-through `rpc.Server` and `rpc.Client` over it. CI runs it on every
-change to rpc, against the commit it checks, not the one the package pins:
-that the package builds there shows it does not force its own zefir.
+its own (the deadline, the peer, the `std.Io` of a call), a contract
+through `rpc.Server` and `rpc.Client` over it, and the tests in
+`src/root.zig` (where a reply goes, a message of the wrong kind). CI runs
+it on every change to rpc, against the commit it checks, not the one the
+package pins: that the package builds there shows it does not force its
+own zefir.
 
 The suite reports, for the mailbox:
 
@@ -108,6 +110,7 @@ the broker with `.live_broker = true`.
 | a server takes what its queue holds       | basic.qos, prefetch = `dispatcher.service().max_inflight`    |
 | `timeout` and `published_at` of a request | `expiration` = the timeout; the server counts from delivery  |
 | `.peer = .none`                           | the user the broker checked, `user_id`; never `reply_to`     |
+| `answerable`: only `reply.…` gets answers | answer only `amq.rabbitmq.reply-to.*` or your own prefix     |
 | `Call.release`                            | basic.ack, or basic.nack with requeue for `not_started`      |
 | `error.NoRoute` → `Unavailable`           | the mandatory flag and basic.return                          |
 
@@ -125,6 +128,13 @@ the ids of `rpc.transport.Pending` are easy to guess: 1, 2, 3… The sample
 draws the name from `io.randomSecure` and gives the engine no peer, so the
 access log never shows it. With RabbitMQ, take an exclusive reply queue or
 direct reply-to (`amq.rabbitmq.reply-to`), and keep both values out of logs.
+
+A server answers only in reply queues, and drops a request whose
+`reply_to` names any other queue: a client that may publish requests
+could name the request queue of another service there, and the answers
+would land in it. Each task also drops a message of the kind it does not
+read, a response in a request queue or a request in a reply queue,
+instead of taking it for its own kind.
 
 The rules every transport keeps are in the doc comments of
 `rpc.ClientTransport`, `rpc.ServerTransport` and `rpc.transport.Reply`:

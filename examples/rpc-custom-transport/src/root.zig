@@ -14,7 +14,8 @@
 //!    `rpc.transport.Pending` (`Client`).
 //! 3. The server publishes the response to `reply_to` with the same
 //!    `correlation_id`; the client's task hands it to the call that waits
-//!    in that slot.
+//!    in that slot. The server answers only in reply queues (`reply.…`),
+//!    and each task drops a message of the kind it does not read.
 //!
 //! ```zig
 //! var broker: mailbox.Broker = .init(gpa, .{});
@@ -363,10 +364,11 @@ pub const Server = struct {
     }
 
     /// One request: to the engine, or refused. The message is freed once
-    /// its head has been to `admit` and its body copied.
+    /// its head has been to `admit` and its body copied. Anything the
+    /// server may not answer is dropped unanswered (`answerable`).
     fn handle(s: *Server, io: std.Io, message: *Message) void {
         defer message.destroy();
-        const request = message.content.request;
+        const request = answerable(message) orelse return;
         if (s.closing()) return s.refuse(io, message, stopping);
         const head: rpc.transport.RequestHead = .{
             .route = request.route,
@@ -413,7 +415,7 @@ pub const Server = struct {
 
     /// Answers a request that did not run, marked as refused.
     fn refuse(s: *Server, io: std.Io, message: *const Message, failure: rpc.Failure) void {
-        const request = message.content.request;
+        const request = answerable(message) orelse return;
         const response: rpc.Response = .{ .status = .{ .failure = failure }, .refused = true };
         // A client that is gone takes nothing.
         s.broker.reply(io, request.reply_to, message.correlation_id, &response) catch {};
@@ -422,6 +424,27 @@ pub const Server = struct {
 
 const stopping: rpc.Failure = .{ .code = .unavailable, .app_code = "rpc.unavailable", .message = "Server is stopping" };
 const out_of_memory: rpc.Failure = .{ .code = .resource_exhausted, .app_code = "rpc.resource_exhausted", .message = "Out of memory" };
+
+/// The names of the clients' reply queues begin with it, and the server
+/// answers nowhere else.
+const reply_prefix = "reply.";
+
+/// The request in `message` if the server may answer it: a request whose
+/// `reply_to` is a reply queue. Null for anything else, which the server
+/// drops unanswered: a response, such as one another server published
+/// here, and a `reply_to` that names another queue. A client that may
+/// publish requests could name in it the request queue of another
+/// service, and the answers of this server would land there.
+fn answerable(message: *const Message) ?*const Message.Request {
+    return switch (message.content) {
+        .request => |*request| if (isReplyQueue(request.reply_to)) request else null,
+        .response => null,
+    };
+}
+
+fn isReplyQueue(name: []const u8) bool {
+    return name.len > reply_prefix.len and std.mem.startsWith(u8, name, reply_prefix);
+}
 
 /// A call the engine runs: its `rpc.transport.Reply`.
 const Call = struct {
@@ -508,7 +531,7 @@ pub const Client = struct {
         var token: [8]u8 = undefined;
         try io.randomSecure(&token);
         var buffer: [max_queue_name]u8 = undefined;
-        const name = std.fmt.bufPrint(&buffer, "reply.{s}", .{&std.fmt.bytesToHex(token, .lower)}) catch unreachable;
+        const name = std.fmt.bufPrint(&buffer, reply_prefix ++ "{s}", .{&std.fmt.bytesToHex(token, .lower)}) catch unreachable;
         // Room for a response to every call that may wait.
         const queue = try c.broker.declare(io, name, c.max_pending);
         errdefer {
@@ -581,12 +604,19 @@ pub const Client = struct {
     }
 
     /// The task that reads the reply queue: hands each response to the
-    /// call in its slot.
+    /// call in its slot, and drops anything else.
     fn receive(c: *Client, queue: *Queue, io: std.Io) void {
         while (queue.messages.getOne(io)) |message| {
             const protection = io.swapCancelProtection(.blocked);
             defer _ = io.swapCancelProtection(protection);
-            const delivery: Pending.Delivery = .{ .response = message.content.response, .context = message, .release = Message.free };
+            const response = switch (message.content) {
+                .response => |response| response,
+                .request => {
+                    message.destroy();
+                    continue;
+                },
+            };
+            const delivery: Pending.Delivery = .{ .response = response, .context = message, .release = Message.free };
             // Late: its call returned with Timeout or Canceled.
             if (!c.pending.complete(io, message.correlation_id, delivery)) message.destroy();
         } else |_| {}
@@ -746,4 +776,120 @@ test "the mailbox keeps the rules of rpc transports" {
         std.debug.print("{f}", .{&report});
         return error.TestUnexpectedResult;
     }
+}
+
+/// Answers every request with its own body.
+const Echo = struct {
+    fn handle(_: *anyopaque, _: *rpc.Context, request: []const u8) anyerror![]const u8 {
+        return request;
+    }
+};
+
+const users_route: rpc.Route = .{ .service = "users", .version = 1, .method = "echo" };
+
+/// One call of `users_route` through the client side; the body of its
+/// success.
+fn echoOnce(client: *Client, io: std.Io, arena: std.mem.Allocator, body: []const u8) ![]const u8 {
+    const request: rpc.transport.Request = .{
+        .route = users_route,
+        .request_id = @splat(1),
+        .codec = "json",
+        .ctx = core.Context.root.withDeadline(.after(now(io), .fromSeconds(10))),
+        .metadata = &.{},
+        .body = body,
+    };
+    const response = try client.clientTransport().call(io, &request, .{ .allocator = arena, .max_response_bytes = 1024 });
+    if (response.status != .ok) return error.TestUnexpectedResult;
+    return response.body;
+}
+
+test "the server answers only in reply queues: a reply_to that names another queue gets nothing" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var broker: Broker = .init(gpa, .{});
+    defer broker.deinit();
+    // The request queue of another service, as a client that may publish
+    // requests could name it in reply_to.
+    const orders = try broker.declare(io, "rpc.orders.v1", 16);
+    defer {
+        broker.unbind(io, orders);
+        orders.destroy(io);
+    }
+    var server_side: Server = .init(&broker);
+    var echo: Echo = .{};
+    var server: rpc.RawServer = try .init(gpa, .{
+        .transport = server_side.serverTransport(),
+        .methods = &.{.{ .route = users_route, .handler = .{ .ptr = &echo, .handle = Echo.handle } }},
+    });
+    defer server.deinit(io);
+    try server.start(io);
+    var client: Client = try .init(&broker, .{});
+    defer client.deinit(io);
+    try client.connect(io);
+
+    const forged: rpc.transport.Request = .{
+        .route = users_route,
+        .request_id = @splat(2),
+        .codec = "json",
+        .ctx = .root,
+        .metadata = &.{},
+        .body = "\"forged\"",
+    };
+    const message = try requestMessage(gpa, io, &forged, "rpc.orders.v1", 1, .fromSeconds(10), now(io));
+    broker.publish(io, "rpc.users.v1", message) catch |err| {
+        message.destroy();
+        return err;
+    };
+    // A call of the client's own still goes through.
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    try std.testing.expectEqualStrings("\"own\"", try echoOnce(&client, io, arena.allocator(), "\"own\""));
+    // Once the server has stopped, every call it took has ended: nothing
+    // went into the queue of orders.
+    try server.shutdown(io);
+    if (orders.takeLeft(io)) |landed| {
+        landed.destroy();
+        return error.TestUnexpectedResult;
+    }
+}
+
+test "a task drops a message of the other kind: a response in a request queue, a request in a reply queue" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var broker: Broker = .init(gpa, .{});
+    defer broker.deinit();
+    var server_side: Server = .init(&broker);
+    var echo: Echo = .{};
+    var server: rpc.RawServer = try .init(gpa, .{
+        .transport = server_side.serverTransport(),
+        .methods = &.{.{ .route = users_route, .handler = .{ .ptr = &echo, .handle = Echo.handle } }},
+    });
+    defer server.deinit(io);
+    try server.start(io);
+    var client: Client = try .init(&broker, .{});
+    defer client.deinit(io);
+    try client.connect(io);
+
+    // A response where the server reads requests, as another server would
+    // publish it, answering a reply_to that named this queue.
+    try broker.reply(io, "rpc.users.v1", 1, &.{ .status = .ok, .body = "{}" });
+    // A request where the client reads responses.
+    const stray: rpc.transport.Request = .{
+        .route = users_route,
+        .request_id = @splat(3),
+        .codec = "json",
+        .ctx = .root,
+        .metadata = &.{},
+        .body = "{}",
+    };
+    const message = try requestMessage(gpa, io, &stray, client.replies.?.name, 1, .fromSeconds(10), now(io));
+    broker.publish(io, client.replies.?.name, message) catch |err| {
+        message.destroy();
+        return err;
+    };
+    // Both tasks dropped them and go on.
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    try std.testing.expectEqualStrings("\"after\"", try echoOnce(&client, io, arena.allocator(), "\"after\""));
+    try server.shutdown(io);
 }
