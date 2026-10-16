@@ -1465,6 +1465,12 @@ const Spotter = struct {
 };
 
 test "a call wipes its copy of the authorization value before it frees it" {
+    // The spotter sees what a freed block held only because the arena of
+    // the call gives its chunks back with `rawFree` (`ArenaAllocator.deinit`,
+    // and `Budget.free` under it): in safe builds `Allocator.free` fills a
+    // block with 0xAA before any allocator sees it. Should the copy ever be
+    // freed with `Allocator.free`, this test passes with or without the
+    // wipe.
     const io = testing.io;
     var fake: FakeTransport = .{};
     var spotter: Spotter = .{ .needle = "s3cr3t-t0ken" };
