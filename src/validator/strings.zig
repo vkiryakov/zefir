@@ -209,8 +209,9 @@ pub fn isUtf8(s: []const u8) bool {
 /// `.{ v.utf8.withMessage("..."), v.maxLength(64) }`.
 pub const utf8: Rule = core.predicateRule(.utf8, "must be valid UTF-8", isUtf8);
 
-/// Unicode White_Space (PropList.txt): 25 code points.
-fn isWhiteSpace(cp: u21) bool {
+/// Unicode White_Space (PropList.txt): 25 code points. The trims of
+/// transforms.zig strip these too.
+pub fn isWhiteSpace(cp: u21) bool {
     return switch (cp) {
         0x09...0x0D, 0x20, 0x85, 0xA0, 0x1680, 0x2000...0x200A, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000 => true,
         else => false,
