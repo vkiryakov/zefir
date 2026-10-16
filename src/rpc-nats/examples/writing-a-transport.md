@@ -3,9 +3,9 @@
 **A transport carries the calls of rpc, and this page shows how to write
 one.** zefir-rpc moves no bytes itself: a *transport* takes a call from the
 client engine to the server engine, over a network or a broker, and brings
-the response back. zefir-rpc-nats is the transport that zefir ships for
-rpc, the default choice of a service, and the reference implementation of a
-transport. When the calls of your services must travel another way, over
+the response back. zefir-rpc-nats is the network transport that zefir
+ships for rpc, the default choice of a service, and the reference
+implementation of a transport. When the calls of your services must travel another way, over
 another broker or a protocol of your own, write the transport the way
 rpc-nats is written. This page builds it up step by step, on its real code;
 the [guide of rpc-nats](README.md) shows how to use it.
@@ -215,59 +215,92 @@ pub fn info(t: *Transport) rpc.transport.Info {
 - `max_body_bytes`: null, only the limits of rpc apply; `publish` checks
   the broker's `max_payload`.
 
-<details>
-<summary>The rules of the client side, from the doc of <code>rpc.ClientTransport</code></summary>
+### The rules of the client side
+
+These come from the doc of `rpc.ClientTransport`, and the conformance
+suite checks them:
 
 1. **Concurrency.** Any number of tasks and threads call `call` at once.
    Shared state is guarded with `std.Io` primitives (`Io.Mutex`,
    `Io.Condition`, `Io.Event`, `Io.Queue`): a lock of the OS or of a C
-   library would stop a whole thread of zio.
+   library would stop a whole thread of zio. `info` is thread-safe too,
+   and its values may change, such as `max_body_bytes` after a reconnect.
 2. **Waiting** suspends the task through `io`, never the OS thread, and
    `io` is the instance that the library under the transport runs on:
    otherwise canceling the task would not end a wait inside the library.
-3. **Deadline.** With less than 1 ms left, `call` returns `error.Timeout`
-   without sending. Otherwise it sends the budget left, measured right
-   before sending, and waits for the response no longer than the deadline.
-   A response that comes after `Timeout` is dropped.
+3. **Deadline.** With less than 1 ms left until `request.ctx.deadline`,
+   `call` returns `error.Timeout` without sending. Otherwise it sends the
+   budget left, measured right before sending, and waits for the response
+   no longer than the deadline. A response that comes after `Timeout` is
+   dropped.
 4. **Cancelation.** `call` returns `error.Canceled` if and only if the
-   caller's task was canceled, and never swallows a cancelation. After any
-   return, the transport keeps no reference to the caller's memory.
-5. **Memory.** `request` is borrowed until `call` returns. Everything the
-   response points to comes from `options.allocator`, during the call only.
-6. **A failure of the server is a value**, not an error: a response with
+   caller's task was canceled, before the call or during it, and never
+   swallows a cancelation. When the request has already left and
+   `info().propagates_cancellation` is set, the transport tells the server
+   that the client gave up, after `Canceled` and after `Timeout` alike.
+5. **Memory.** `request` and its slices are borrowed until `call` returns.
+   Everything the response points to comes from `options.allocator`,
+   allocated during the call only. After any return, `Canceled` and
+   `Timeout` included, the transport keeps no reference to the caller's
+   memory, and none of its tasks touches it.
+6. **Limits.** A response body over `options.max_response_bytes`, or
+   metadata over `max_response_metadata_entries` or
+   `max_response_metadata_bytes`, is `error.ResponseTooLarge`; metadata
+   counts as `rpc.transport.metadataBytes` counts it.
+7. **A failure of the server is a value**, not an error: a response with
    `status = .failure`, with `refused = true` when the call was refused at
-   admission.
+   admission and did not run.
 
-</details>
+### The rules of the server side
 
-<details>
-<summary>The rules of the server side, from the docs of <code>rpc.ServerTransport</code>, <code>Dispatcher</code>, <code>Incoming</code> and <code>Reply</code></summary>
+These come from the docs of `rpc.ServerTransport`, `Dispatcher`,
+`Incoming` and `Reply`:
 
-- The engine calls `start` once. The transport starts its tasks with
-  `io.concurrent` or `std.Io.Group.concurrent`, not `io.async`, returns
-  when it is ready, and on an error leaves nothing running.
-- For every request: `admit(io, &head, body_len)` before the body is read.
-  `.rejected`: answer the failure in your own format, marked as not run,
-  and skip the body. `.accepted`: fill `incoming.body()`, record the call,
-  then `incoming.start(io, reply)`; a `Failure` from `start` is answered as
-  a refusal too.
+- The engine calls `start` once, with the `io` that the transport runs its
+  tasks on until `close`. The transport opens and confirms what it needs,
+  starts its tasks with `io.concurrent` or `std.Io.Group.concurrent`, not
+  `io.async`, and returns when it is ready; on an error it leaves nothing
+  running.
+- `service()` holds the routes and the limits of the server, which do not
+  change while it lives. `max_inflight` is how many calls the engine holds
+  at once: a broker that delivers messages ahead sets its prefetch from it,
+  and on NATS the queue of a subscription holds at least that many
+  messages.
+- Every request starts with its head, `rpc.transport.RequestHead`. Its
+  `peer` says who sent the request, for logs only, never for
+  authorization: the address of the other side for a direct transport, a
+  name the transport knows, or `.none`.
+- `admit(io, &head, body_len)` comes before the body is read. `.rejected`:
+  answer the failure in your own format, marked as not run, and skip the
+  body. `.accepted`: fill all of `incoming.body()`, record the call, then
+  `incoming.start(io, reply)`, and leave the body alone after it. A
+  `Failure` from `start` is answered as a refusal too, and no `Reply` call
+  follows.
 - Every accepted call gets exactly one of `incoming.start` and
-  `incoming.abandon`.
-- The engine calls `reply.send` at most once and `reply.release` exactly
+  `incoming.abandon`: whenever an accepted call will not start, such as
+  when the link broke before the whole body came, the transport abandons
+  it, not only in `close`.
+- The engine calls `reply.send` at most once, but after `ResponseTooLarge`
+  it may send a small failure in its place, and `reply.release` exactly
   once, last. Both may come from another task before `start` returns, so
-  the transport holds no lock across `start` or `abandon` that `send` or
-  `release` take.
+  the transport records the call before `start`, and holds no lock across
+  `start` or `abandon` that `send` or `release` take.
 - `admit` is thread-safe and never waits. `Dispatcher.fail` is for the
   whole transport, broken for good; the errors of one call or of one
-  connection do not go there.
+  connection do not go there, and a second `fail` does nothing.
+- `drain` stops taking new calls and returns after a bounded wait; a second
+  `drain` does nothing. `close` includes `drain`, abandons every accepted
+  call that did not start, closes the connections or subscriptions so that
+  a late `reply.send` gets `Closed`, cancels and joins its tasks, and
+  returns within a limit the transport documents; a second `close` is
+  safe.
 - `drain`, `close` and `release` have no `error.Canceled` to return, and
   never swallow a cancelation of their task: they lock with
   `lockUncancelable`, work under `io.swapCancelProtection(.blocked)`, or
   call `io.recancel()`.
 - Once `close` has returned, the transport calls neither the dispatcher
-  nor a call.
-
-</details>
+  nor an `Incoming`. The `Reply` of a call lives until its `release`, and
+  the transport's `deinit` comes after the server's.
 
 ## The server side
 
@@ -545,7 +578,8 @@ transport refuses itself (see [On the wire](#on-the-wire)). A request from
 `nats req` has no headers of zefir: it gets a request id made up here, and
 no budget, so the method's own deadline applies. `received_at` is when the
 request came, on the clock `std.Io.Clock.awake`: the deadline on the
-server counts from it.
+server counts from it. The head sets no `peer`, so it stays `.none`: a
+message of `rpc_nats.Conn` does not say who sent it.
 
 Then the engine decides, and the call starts:
 
@@ -649,8 +683,10 @@ again.
 NATS has no signal that a client gave up, so rpc-nats never cancels a call
 on the server: the handler runs until its own deadline. A transport that
 has such a signal, a CANCEL frame of its protocol or the broken connection
-of a direct transport, calls `incoming.cancel(io)`, and the engine cancels
-the handler.
+of a direct transport, sets `info().propagates_cancellation`: its client
+side tells the server when a call that has left ends with `Canceled` or
+`Timeout`, and its server side calls `incoming.cancel(io)`, and the engine
+cancels the handler.
 
 <details>
 <summary>When <code>Incoming.cancel</code> may come</summary>
@@ -973,14 +1009,19 @@ The server side of rpc-nats goes through these phases:
 stateDiagram-v2
     [*] --> idle: init
     idle --> running: start
+    idle --> idle: a start that fails
     running --> draining: drain
     draining --> closing: close
     running --> closing: close
     closing --> closed
     closed --> running: start
+    closed --> closed: a start that fails
     idle --> [*]: deinit
     closed --> [*]: deinit
 ```
+
+A `start` that fails leaves the phase as it was: it fails before the phase
+is `running`, or `abortStart` puts back the phase from before.
 
 `drain` drains the subscriptions: the broker sends new requests to other
 replicas, and the requests already on their way still come out of `next`,
@@ -1146,17 +1187,34 @@ test "the NATS transport on FakeConn passes the conformance suite of rpc" {
   every call has returned.
 - `run` returns a report instead of failing through `std.testing`, and
   `{f}` prints it, a line per check.
-- A check that the transport cannot take is skipped, with the reason in the
-  report. For NATS: T12, a broken link seen at once, since NATS sees one
-  only at the deadline; T16, at-least-once delivery; T17, a restart of the
-  broker, which needs a live one.
 - `report.defaults` names the entries of the tables that the transport
   left at their defaults, such as `rpc.ServerTransport.isReady`: rpc-nats
   has its own, so the list is empty.
 
+A harness may have more hooks, and `run` takes options. A check that needs
+what the transport or the harness lacks is skipped, with the reason in the
+report; when only a part of a check needs it, that part is left out, with a
+note.
+
+| Hook or option | What it does | Checks | In rpc-nats |
+| --- | --- | --- | --- |
+| `breakLink(h, io, pair)` | breaks the link between the sides in the middle of calls, as a dropped connection does; it stays broken until `tearDown` | T12, which also needs `info().reports_connection_loss`; the broken link during `start` in T18 | no |
+| `restartPeer(h, io, pair)` | restarts the other side, such as the broker, and returns once it serves again | T17 | the live harness |
+| `sameAddress(h, io, pair)` | one more server side at the address that `pair.server` holds, whose `start` must fail while `pair.server` runs | the busy address in T14 | no |
+| `Options.live_broker` | runs T17, through `restartPeer` | T17 | `true` in the live harness |
+| `Options.time_scale` | stretches the deadlines, holds and tolerances of the checks, for a slow machine or a remote broker | all | `2` in the live harness |
+| `Options.only` | runs only the checks listed | all | not used |
+
+So the report of rpc-nats on `FakeConn` skips three checks. T12: the
+harness has no `breakLink`, and with one T12 would still be skipped, since
+`info().reports_connection_loss` is false: NATS sees a broken link only at
+the deadline. T16: the delivery is at most once. T17: it needs a live
+broker. T14 runs without its busy address, and T18 without its broken link
+during `start`: the report notes both.
+
 Against a live broker, `tests/rpc-nats/e2e/conformance.zig` runs the same
-suite on zefir-nats, with `.live_broker = true` and a `restartPeer` that
-stops and starts the NATS server, so T17 runs too.
+suite on zefir-nats with `.live_broker = true` and `.time_scale = 2`, and a
+harness whose `restartPeer` stops and starts the NATS server: T17 runs too.
 
 <details>
 <summary>The checks of the suite, T1–T22</summary>
@@ -1248,30 +1306,58 @@ A service on NATS with another NATS library needs no transport of its own
 at all: an adapter of that library to `rpc_nats.Conn` is enough, see
 [Another NATS library](README.md#tests-and-other-nats-libraries).
 
-What a transport of your own does, as rpc-nats does:
+The checklist of a transport of your own, the rules of
+[The interfaces](#the-interfaces) in short:
 
-1. One type with `start`, `drain`, `close`, `info`, and `isReady` if it has
-   a condition of its own, handed out by `rpc.ServerTransport.init`; with
-   `call` and `info`, by `rpc.ClientTransport.init`.
-2. `info` tells the truth: cancelation, unprocessed calls, a broken link,
-   delivery, the largest body.
-3. `start` confirms what it opened, starts its tasks with `io.concurrent`
-   or `std.Io.Group.concurrent`, and leaves nothing behind when it fails.
-4. Every request: its head, `admit` before the body, the body into
-   `incoming.body()`, the call recorded, then `incoming.start`. A refusal
-   is answered in the transport's own format, marked as not run.
-5. A `Reply` per call: `send` at most once, `release` exactly once and
-   last, and no lock across `start` that they take.
-6. `call`: with less than 1 ms left, `Timeout` and nothing sent; the budget
-   measured right before sending; no wait past the deadline; `Canceled`
-   only for a caller's task that was canceled; the response in
-   `options.allocator`.
-7. Every wait through `std.Io`, shared state under `std.Io` primitives, and
-   no cancelation swallowed.
-8. `drain` and `close` end within a limit the transport documents; `close`
-   abandons every accepted call that did not start, and a late `send` gets
-   `Closed`.
-9. The errors of the network or the library turned into those of rpc, with
-   details in `Diagnostics`, never metadata values, bodies or credentials.
-10. `rpc.testing.conformance.run` passes, and for a real broker the harness
-    has `breakLink` and `restartPeer`, with `.live_broker = true`.
+1. **The type.** One type with `start`, `drain`, `close`, `info`, and
+   `isReady` if it has a condition of its own, handed out by
+   `rpc.ServerTransport.init`; with `call` and `info`, by
+   `rpc.ClientTransport.init`.
+2. **`info`** tells the truth about cancelation, unprocessed calls, a
+   broken link, delivery and the largest body. It is thread-safe, and its
+   values may change.
+3. **`start`** confirms what it opened, starts its tasks with
+   `io.concurrent` or `std.Io.Group.concurrent`, and leaves nothing behind
+   when it fails.
+4. **What the transport takes ahead**, such as the prefetch of a broker or
+   the queue of a subscription, is sized by `service().max_inflight`.
+5. **Every request**: its head, with `peer` for logs only, or `.none`;
+   `admit` before the body; all of `incoming.body()` filled, the call
+   recorded, then `incoming.start`, and the body left alone after it. A
+   refusal, by `admit` or by `start`, is answered in the transport's own
+   format, marked as not run.
+6. **`abandon`** for every accepted call that will not start, whenever that
+   happens, not only in `close`.
+7. **A `Reply` per call**: `send` at most once, or a second time with a
+   small failure after `ResponseTooLarge`; `release` exactly once and last;
+   no lock across `start` that they take.
+8. **`Dispatcher.fail`** only when the whole transport broke for good,
+   never for one call or one connection.
+9. **A signal that the client gave up**, if the protocol has one:
+   `Incoming.cancel` under the lock that `release` takes,
+   `info().propagates_cancellation = true`, and the client side tells the
+   server after `Canceled` and after `Timeout`.
+10. **`call`**: with less than 1 ms left, `Timeout` and nothing sent; the
+    budget measured right before sending; no wait past the deadline;
+    `Canceled` only when the caller's task was canceled.
+11. **The caller's memory**: the response in `options.allocator`, during
+    the call only; no reference to the caller's memory after any return; a
+    response over the limits of `CallOptions` is `ResponseTooLarge`; a
+    failure of the server, refused or not, comes back as a value.
+12. **Waits** only through `std.Io`, shared state under `std.Io`
+    primitives, and no cancelation swallowed.
+13. **`drain` and `close`** end within a limit the transport documents.
+    `close` includes `drain`, abandons every accepted call that did not
+    start, cancels and joins its tasks, and a late `send` gets `Closed`. A
+    second `drain` does nothing, and a second `close` is safe.
+14. **`deinit`** of the transport comes after the server's: the `Reply` of
+    a call lives until its `release`.
+15. **Errors** of the network or the library are turned into those of rpc,
+    with details in `Diagnostics`, never metadata values, bodies or
+    credentials.
+16. **Tests**: `rpc.testing.conformance.run` passes, on a harness with
+    `setUp` and `tearDown` and the hooks the transport can offer:
+    `breakLink` for a link it can break (T12, T18), `sameAddress` for an
+    address that a second server side cannot take (T14), `restartPeer` with
+    `.live_broker = true` for a broker it can restart (T17). Of these,
+    rpc-nats has `restartPeer`, in its live harness.
