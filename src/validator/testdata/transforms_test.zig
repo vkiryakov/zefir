@@ -349,11 +349,32 @@ test "an error of a transformWith function stops the walk and comes back as it i
     try testing.expectEqualStrings("t", fine.trimmed[0]);
 }
 
+/// A transform whose error set the compiler infers.
+fn canonicalCount(allocator: Allocator, text: []const u8) ![]const u8 {
+    const count = try std.fmt.parseInt(u32, text, 10);
+    return std.fmt.allocPrint(allocator, "{d}", .{count});
+}
+
+const Counted = struct {
+    count: []const u8,
+    nested: ?Tagged = null,
+    pub const field_rules = .{ .count = v.transformWith(canonicalCount) };
+};
+
 test "TransformError is exactly OutOfMemory and the errors of the transformWith functions reachable from the type" {
     try expectErrorNames(v.TransformError(Tagged), &.{ "OutOfMemory", "TagTooLong" });
     try expectErrorNames(v.TransformError([]const ?Tagged), &.{ "OutOfMemory", "TagTooLong" });
     try expectErrorNames(v.TransformError(CreateUserRequest), &.{"OutOfMemory"});
     try expectErrorNames(v.TransformError(u32), &.{"OutOfMemory"});
+    // An inferred error set, and the errors of a nested struct.
+    try expectErrorNames(v.TransformError(Counted), &.{ "OutOfMemory", "Overflow", "InvalidCharacter", "TagTooLong" });
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var counted: Counted = .{ .count = "007" };
+    try v.transform(arena.allocator(), &counted);
+    try testing.expectEqualStrings("7", counted.count);
+    counted.count = "seven";
+    try testing.expectError(error.InvalidCharacter, v.transform(arena.allocator(), &counted));
     // It is the error set of transform.
     try testing.expect(@typeInfo(@TypeOf(v.transform(testing.allocator, @as(*Tagged, undefined)))).error_union.error_set == v.TransformError(Tagged));
 }

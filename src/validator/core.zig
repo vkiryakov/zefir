@@ -42,9 +42,13 @@ pub const Violation = struct {
     /// message such as `must not be empty`, or the message given to
     /// `v.custom` or `v.fail`. Always 1-512 bytes of valid UTF-8.
     message: []const u8,
-    /// The path of the value from the root: `email`, `address.city`,
-    /// `items[2].name`, `[1].email`. Null means the root value itself or, for
-    /// `check` only, a path that did not fit `path_buf`.
+    /// The path of the value from the root, with each field under its
+    /// outside name (`v.rename`, else its Zig name): `email`,
+    /// `address.city`, `items[2].displayName`, `[1].email`. Null means the
+    /// root value itself or, for `check` only, a path that did not fit
+    /// `path_buf`. In the result of `v.fail` or a hand-built `validateSelf`
+    /// result, it is the Zig name of a field of that struct instead, which
+    /// the walk turns into the field's path.
     field: ?[]const u8 = null,
 };
 
