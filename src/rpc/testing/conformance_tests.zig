@@ -85,6 +85,9 @@ const Flaw = enum {
     /// released during `start`, or refused by it. The engine has freed such
     /// a call.
     cancels_ended_calls,
+    /// The server side drops the cancel of a call whose client gave up
+    /// while its `start` ran, though it claims to propagate cancelation.
+    drops_cancel_during_start,
 };
 
 /// The memory transport with one flaw: the harness, the client side and
@@ -96,8 +99,9 @@ const Flawed = struct {
     /// allocator under the suite's.
     leaked: [4][]u8 = undefined,
     leaks: usize = 0,
-    /// For `cancels_ended_calls`: the engine's dispatcher behind the one
-    /// memory gets, and the calls between them.
+    /// For `cancels_ended_calls` and `drops_cancel_during_start`: the
+    /// engine's dispatcher behind the one memory gets, and the calls
+    /// between them.
     engine: transport.Dispatcher = undefined,
     gpa: std.mem.Allocator = undefined,
     link_broken: std.atomic.Value(bool) = .init(false),
@@ -165,7 +169,10 @@ const Flawed = struct {
     }
 
     pub fn start(f: *Flawed, io: std.Io, dispatcher: transport.Dispatcher) ServerTransport.StartError!void {
-        if (f.flaw != .cancels_ended_calls) return f.memory.start(io, dispatcher);
+        switch (f.flaw) {
+            .cancels_ended_calls, .drops_cancel_during_start => {},
+            else => return f.memory.start(io, dispatcher),
+        }
         f.engine = dispatcher;
         return f.memory.start(io, .{ .ptr = f, .vtable = &between });
     }
@@ -182,8 +189,9 @@ const Flawed = struct {
         return f.memory.isReady();
     }
 
-    /// The dispatcher memory gets with `cancels_ended_calls`: the engine's,
-    /// with each admitted call wrapped.
+    /// The dispatcher memory gets with `cancels_ended_calls` and
+    /// `drops_cancel_during_start`: the engine's, with each admitted call
+    /// wrapped.
     const between: transport.Dispatcher.VTable = .{ .service = service, .admit = admit, .fail = fail, .routeStats = routeStats };
 
     fn of(ptr: *anyopaque) *Flawed {
@@ -208,7 +216,11 @@ const Flawed = struct {
             incoming.abandon(io);
             return .{ .rejected = .{ .code = .resource_exhausted, .app_code = "rpc.resource_exhausted", .message = "Out of memory" } };
         };
-        held.* = .{ .flawed = f, .inner = incoming };
+        held.* = .{
+            .flawed = f,
+            .inner = incoming,
+            .expires = if (head.timeout) |budget| head.received_at.addDuration(budget) else null,
+        };
         f.held.append(f.gpa, held) catch {
             f.gpa.destroy(held);
             incoming.abandon(io);
@@ -226,10 +238,16 @@ const Flawed = struct {
     }
 };
 
-/// One call between memory and the engine, for `cancels_ended_calls`.
+/// One call between memory and the engine, for `cancels_ended_calls` and
+/// `drops_cancel_during_start`.
 const Held = struct {
     flawed: *Flawed,
     inner: transport.Incoming,
+    /// When the client's budget runs out; null without one.
+    expires: ?std.Io.Timestamp,
+    /// The client's budget ran out while `start` ran: the client gave up
+    /// meanwhile.
+    given_up_in_start: bool = false,
 
     const vtable: transport.Incoming.VTable = .{ .body = body, .start = start, .abandon = abandon, .cancel = cancel };
 
@@ -245,9 +263,15 @@ const Held = struct {
         const held = of(ptr);
         const broken_before = held.flawed.link_broken.load(.acquire);
         const failure = held.inner.start(io, reply);
-        // The flaw: the cancel held back during start goes out whatever
-        // became of the call meanwhile.
-        if (!broken_before and held.flawed.link_broken.load(.acquire)) held.inner.cancel(io);
+        switch (held.flawed.flaw) {
+            // The flaw: the cancel held back during start goes out whatever
+            // became of the call meanwhile.
+            .cancels_ended_calls => if (!broken_before and held.flawed.link_broken.load(.acquire)) held.inner.cancel(io),
+            .drops_cancel_during_start => if (held.expires) |expires| {
+                held.given_up_in_start = expires.durationTo(std.Io.Clock.awake.now(io)).nanoseconds >= 0;
+            },
+            else => {},
+        }
         return failure;
     }
 
@@ -256,7 +280,10 @@ const Held = struct {
     }
 
     fn cancel(ptr: *anyopaque, io: std.Io) void {
-        of(ptr).inner.cancel(io);
+        const held = of(ptr);
+        // The flaw: a client that gave up while start ran is forgotten.
+        if (held.flawed.flaw == .drops_cancel_during_start and held.given_up_in_start) return;
+        held.inner.cancel(io);
     }
 };
 
@@ -270,6 +297,7 @@ test "a transport that breaks a rule fails the check of that rule" {
         .{ .ignores_drain, .t11, "a call after drain got a success" },
         .{ .leaks, .t1, "16 bytes in 1 allocation(s) were still held after harness.tearDown" },
         .{ .cancels_ended_calls, .t18, "cancel_after_end" },
+        .{ .drops_cancel_during_start, .t18, "no Incoming.cancel of a call whose client gave up while its start ran" },
         .{ .cancels_falsely, .t1, "returned error.Canceled" },
         .{ .cancels_falsely, .t22, "returned error.Canceled though nothing canceled its task" },
     };

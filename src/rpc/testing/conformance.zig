@@ -1929,7 +1929,8 @@ fn t18(job: *Job) CheckError!void {
         caller.join();
         try job.expectError(&caller.sent, error.Timeout, "a call whose deadline passed while its start ran");
         _ = job.eventually(job.ms(2600), StartReturned{ .recorder = &recorder, .io = io, .index = 1 });
-        if (job.info.propagates_cancellation) _ = job.eventually(job.ms(500), CancelSeen{ .recorder = &recorder, .io = io, .index = 1 });
+        if (job.info.propagates_cancellation)
+            try job.expect(job.eventually(job.ms(2000), CancelSeen{ .recorder = &recorder, .io = io, .index = 1 }), "info().propagates_cancellation is set, and the server got no Incoming.cancel of a call whose client gave up while its start ran", .{});
         try job.release(&recorder, 1, .canceled);
     }
     // The engine has no task for the call: the transport answers with a
