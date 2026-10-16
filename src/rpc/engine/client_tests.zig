@@ -703,7 +703,8 @@ test "a nested call: the handler's context shortens the deadline, goes on in the
     try testing.expect(!std.meta.eql(caller.span_id, sent.span_id));
     const calls = recorder.calls;
 
-    // The server's deadline cancels the token; a nested call then stays home.
+    // The server's deadline cancels the token; a nested call then stays
+    // home, and ends with DeadlineExceeded: a deadline is no cancelation.
     nested.wait_for_token = true;
     if (client.call(io, core.Context.root.withTrace(caller), echo_route, "outer", .{ .timeout = .fromMilliseconds(30) })) |late| {
         var r = late;
@@ -711,7 +712,7 @@ test "a nested call: the handler's context shortens the deadline, goes on in the
     } else |err| try testing.expect(err == error.DeadlineExceeded);
     // The handler ends before the server lets the call go.
     try server.shutdown(io);
-    try testing.expectError(error.Cancelled, nested.nested);
+    try testing.expectError(error.DeadlineExceeded, nested.nested);
     try testing.expectEqual(calls, recorder.calls);
 }
 

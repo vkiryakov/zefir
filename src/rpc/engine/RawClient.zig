@@ -277,13 +277,16 @@ pub const CallError = error{
 /// has expired is not sent. `request` and the slices of `options` are
 /// borrowed until `call` returns.
 ///
-/// `error.Cancelled` also comes when the caller's task is canceled during
-/// the call: the cancelation stays for the task's next cancelation point,
-/// so `io.checkCancel()` still sees it.
+/// A deadline that has passed ends the call with `error.DeadlineExceeded`,
+/// even when the token is canceled too: a server cancels the token of a
+/// call at its deadline, and a nested call made with that context then
+/// ends as one that ran out of time. `error.Cancelled` also comes when the
+/// caller's task is canceled during the call: the cancelation stays for
+/// the task's next cancelation point, so `io.checkCancel()` still sees it.
 pub fn call(client: *RawClient, io: std.Io, ctx: core.Context, route: model.Route, request: []const u8, options: CallOptions) CallError!Result {
     const started = now(io);
     var operation = ctx.withDeadline(.after(started, options.timeout orelse client.default_timeout));
-    try operation.check(started);
+    try checkContext(operation, started);
     if (!client.takePending()) return error.TooManyPendingRequests;
     defer _ = client.pending.fetchSub(1, .release);
 
@@ -311,6 +314,15 @@ pub fn call(client: *RawClient, io: std.Io, ctx: core.Context, route: model.Rout
     };
     try outgoing.runLayer(0);
     return .{ .response = outgoing.response.?, .request_id = request_id, .sent = outgoing.sent, .arena = arena };
+}
+
+/// The caller's context at `at`: `DeadlineExceeded` once its deadline has
+/// passed, else `Cancelled` when its token is canceled. Unlike
+/// `core.Context.check`, the deadline comes first: a timeout is a
+/// deadline, not a cancelation.
+fn checkContext(operation: core.Context, at: std.Io.Timestamp) CallError!void {
+    if (operation.isExpired(at)) return error.DeadlineExceeded;
+    if (operation.isCancelled()) return error.Cancelled;
 }
 
 /// A call the engine refused to send.
@@ -420,7 +432,7 @@ const Outgoing = struct {
         const io = o.io;
         // A context canceled or expired while the links ran: nothing goes
         // out, and no provider is asked.
-        try o.operation.check(now(io));
+        try checkContext(o.operation, now(io));
         var wiping: credentials.Wiping = .{ .gpa = o.client.gpa };
         var secrets: std.heap.ArenaAllocator = .init(wiping.allocator());
         defer freeArena(io, &secrets);
@@ -443,7 +455,7 @@ const Outgoing = struct {
         };
         // Once more right before sending: the provider may have taken a
         // while.
-        try o.operation.check(now(io));
+        try checkContext(o.operation, now(io));
         const response = o.client.client_transport.call(io, &request, .{
             .allocator = o.arena,
             .max_response_bytes = o.client.max_response_bytes,
@@ -452,7 +464,7 @@ const Outgoing = struct {
         // A success at the deadline is not a success after the fact. A
         // failure of the server stays what it is: a refusal still promises
         // that the call did not run.
-        if (response.status == .ok) try o.operation.check(now(io));
+        if (response.status == .ok) try checkContext(o.operation, now(io));
         o.response = response;
         o.sent = true;
     }
@@ -522,7 +534,7 @@ const Outgoing = struct {
     /// `Cancelled`.
     fn canceled(o: *Outgoing) CallError {
         o.io.recancel();
-        o.operation.check(now(o.io)) catch |err| return err;
+        checkContext(o.operation, now(o.io)) catch |err| return err;
         return error.Cancelled;
     }
 };
