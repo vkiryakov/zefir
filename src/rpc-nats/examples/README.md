@@ -75,6 +75,7 @@ sequenceDiagram
 - [On the wire](#on-the-wire)
 - [Errors of the connection](#errors-of-the-connection)
 - [Memory](#memory)
+- [Tests and other NATS libraries](#tests-and-other-nats-libraries)
 
 Examples that `zig build e2e` in `tests/rpc-nats` builds and runs against
 the NATS servers of the repository's `docker-compose.yml`, checking what
@@ -780,9 +781,12 @@ What a call returns:
 | a reply with the headers of a failure | `.failure`, with its code and app code |
 | no responders: no server took the request | `error.Unavailable`: no server serves the route, or none runs |
 | no reply by the deadline | `error.DeadlineExceeded` |
+| the link drops while the call waits, and the client reconnects | `error.DeadlineExceeded` at the deadline: the request or its reply may be lost, and the call may have run |
+| the connection closes for good while the call waits | `error.ConnectionLost`; the calls after it get `error.Unavailable` |
 | no link to the broker before sending | `error.Unavailable` |
 | the inbox's subscription is denied | `error.AccessDenied`; the next call tries again |
 | a payload over the broker's `max_payload` | `error.RequestTooLarge` |
+| a reply with another NATS status | `error.ProtocolViolation` |
 
 What the server side does with them:
 
@@ -799,9 +803,41 @@ What the server side does with them:
 Every subscription of the transport has a queue in zefir-nats: one per
 route, one for the client's inbox, and nine of NATS micro per contract
 (`$SRV.PING`, `$SRV.INFO` and `$SRV.STATS` in three forms). A message that
-does not fit is dropped as a slow consumer, counted and logged. By default
-each queue holds as many messages as the server holds calls at once
-(`max_inflight` of `rpc.Limits`, 4352) and up to `limits.subscription_bytes`
-of the connection, 8 MiB: a server of R routes in C contracts, with its
-client's inbox, has R + 9 × C + 1 of them. `pending` of `rpc_nats.ZefirNats`
-sets other numbers.
+does not fit is dropped as a slow consumer, logged, and counted in
+`bus.counters().slow_consumer_errors`. By default each queue holds as many
+messages as the server holds calls at once (`max_inflight` of
+`rpc.Limits`, 4352) and up to `limits.subscription_bytes` of the
+connection, 8 MiB: a server of R routes in C contracts, with its client's
+inbox, has R + 9 × C + 1 of them. `pending` of `rpc_nats.ZefirNats` sets
+other numbers.
+
+## Tests and other NATS libraries
+
+**Tests without a broker.** `rpc_nats.testing.FakeConn` is a NATS server
+in memory with one connection to it: its `fake.conn()` goes where
+`adapter.conn()` goes, so a test runs the transport and the services on it
+without a network or Docker. Its options deny subjects to publish to or
+subscribe to (`.deny_publish`, `.deny_subscribe`), and its hooks drop the
+link and bring it back (`disconnect`, `reconnect`), close it for good
+(`close`) and delay every message (`setDelay`): the doc of
+[`testing/FakeConn.zig`](../testing/FakeConn.zig) lists them all. A test of
+the handlers alone needs no NATS at all: `rpc.testing.Server` of the
+[rpc guide](../../rpc/examples/README.md#tests) runs them on the memory
+transport.
+
+**Another NATS library.** The transport sees NATS only through
+`rpc_nats.Conn`: six operations (`publish`, `subscribe`, `next`, `drain`,
+`unsubscribe`, `flush`) and `isConnected`, which an adapter of the library
+fills in and hands out with `rpc_nats.Conn.init(&adapter)`.
+`rpc_nats.ZefirNats` is the one for zefir-nats; the doc of
+[`Conn.zig`](../Conn.zig) lists the rules that an adapter of another
+library keeps. Subjects, headers, statuses and the budget stay in the
+transport, so every library puts the same bytes on the wire. The
+conformance suite of rpc checks the result:
+[`conformance_tests.zig`](../conformance_tests.zig) runs it on `FakeConn`,
+and `tests/rpc-nats/e2e/conformance.zig` against a live server.
+
+**Counters.** `bus.counters()` returns what the transport dropped or lost
+so far, for metrics and tests: requests without a reply subject or with one
+outside `reply_prefixes`, responses that found no call waiting (late, or
+not ours), and the losses of its subscriptions as a slow consumer.
