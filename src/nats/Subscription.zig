@@ -51,6 +51,11 @@ pub const Options = struct {
     /// How much may wait to be taken; more goes by `overflow`.
     pending: Pending = .{},
     overflow: OverflowPolicy = .drop_newest,
+    /// How long `subscribe` waits for room in the outbound queue for its
+    /// SUB, as when the server stops reading; by default, as long as it
+    /// takes. When it runs out, `subscribe` fails with Timeout and nothing
+    /// is subscribed, as when it is over before `subscribe` begins.
+    timeout: Io.Timeout = .none,
 
     pub const Pending = struct {
         /// Null: `limits.subscription_messages` of the client's options.
@@ -200,6 +205,15 @@ fn stopSending(client: *Client, sid: u64, deadline: ?Io.Clock.Timestamp) DrainEr
         error.Timeout => return error.Timeout,
         error.Canceled => return error.Canceled,
     };
+}
+
+/// Whether the server refused the subscription, as for an account that
+/// may not subscribe to its subject: no message comes, and `next()` fails
+/// with PermissionDenied. The server answers a SUB before the PONG of a
+/// later PING, so once a `flush()` made after `subscribe` returns, the
+/// answer is known.
+pub fn isDenied(sub: *Subscription) bool {
+    return sub.messages.endedHow(sub.client.io) == .permission_denied;
 }
 
 /// What waits to be taken.

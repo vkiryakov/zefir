@@ -1,6 +1,7 @@
 const std = @import("std");
 const manifest = @import("build.zig.zon");
 const validator_cases = @import("src/validator/testdata/cases.zig");
+const rpc_guide = @import("src/rpc/examples/cases.zig");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -51,17 +52,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .sanitize_thread = tsan,
         .imports = &.{
-            .{ .name = "confy", .module = confy },
-        },
-    });
-
-    const orm = b.addModule("zefir-orm", .{
-        .root_source_file = b.path("src/orm/root.zig"),
-        .target = target,
-        .optimize = optimize,
-        .sanitize_thread = tsan,
-        .imports = &.{
-            .{ .name = "log", .module = log },
+            .{ .name = "core", .module = core },
+            .{ .name = "validator", .module = validator },
         },
     });
 
@@ -76,7 +68,45 @@ pub fn build(b: *std.Build) void {
     });
     nats.addOptions("build_options", nats_options);
 
-    // Umbrella module: @import("zefir").core, .log, .confy, .validator, .rpc, .orm, .nats
+    // nats only for its adapter, rpc_nats.ZefirNats: Zig compiles that file
+    // only for an application that uses it.
+    const rpc_nats = b.addModule("zefir-rpc-nats", .{
+        .root_source_file = b.path("src/rpc-nats/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+        .imports = &.{
+            .{ .name = "rpc", .module = rpc },
+            .{ .name = "core", .module = core },
+            .{ .name = "nats", .module = nats },
+        },
+    });
+
+    // The access logs of rpc on zefir-log: a module of their own, so that
+    // zefir-rpc does not depend on log.
+    const rpc_log = b.addModule("zefir-rpc-log", .{
+        .root_source_file = b.path("src/rpc-log/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+        .imports = &.{
+            .{ .name = "rpc", .module = rpc },
+            .{ .name = "core", .module = core },
+            .{ .name = "log", .module = log },
+        },
+    });
+
+    const orm = b.addModule("zefir-orm", .{
+        .root_source_file = b.path("src/orm/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+        .imports = &.{
+            .{ .name = "log", .module = log },
+        },
+    });
+
+    // Umbrella module: @import("zefir").core, .log, .confy, .validator, .rpc, .rpc_nats, .rpc_log, .orm, .nats
     const zefir = b.addModule("zefir", .{
         .root_source_file = b.path("src/zefir.zig"),
         .target = target,
@@ -88,6 +118,8 @@ pub fn build(b: *std.Build) void {
             .{ .name = "confy", .module = confy },
             .{ .name = "validator", .module = validator },
             .{ .name = "rpc", .module = rpc },
+            .{ .name = "rpc-nats", .module = rpc_nats },
+            .{ .name = "rpc-log", .module = rpc_log },
             .{ .name = "orm", .module = orm },
             .{ .name = "nats", .module = nats },
         },
@@ -103,6 +135,8 @@ pub fn build(b: *std.Build) void {
     const test_confy = addModuleTestStep(b, test_step, "confy");
     const test_validator = addModuleTestStep(b, test_step, "validator");
     const test_rpc = addModuleTestStep(b, test_step, "rpc");
+    const test_rpc_nats = addModuleTestStep(b, test_step, "rpc-nats");
+    const test_rpc_log = addModuleTestStep(b, test_step, "rpc-log");
     const test_orm = addModuleTestStep(b, test_step, "orm");
     const test_nats = addModuleTestStep(b, test_step, "nats");
     const test_zefir = addModuleTestStep(b, test_step, "zefir");
@@ -111,8 +145,8 @@ pub fn build(b: *std.Build) void {
     // where usize has 32 bits.
     const validator_compile_step = b.step("compile-validator-tests", "Build the validator's test binaries for -Dtarget without running them");
     for (
-        [_]*std.Build.Module{ core, log, confy, validator, rpc, orm, nats, zefir },
-        [_]*std.Build.Step{ test_core, test_log, test_confy, test_validator, test_rpc, test_orm, test_nats, test_zefir },
+        [_]*std.Build.Module{ core, log, confy, validator, rpc, rpc_nats, rpc_log, orm, nats, zefir },
+        [_]*std.Build.Step{ test_core, test_log, test_confy, test_validator, test_rpc, test_rpc_nats, test_rpc_log, test_orm, test_nats, test_zefir },
     ) |module, module_test_step| {
         const tests = b.addTest(.{ .root_module = module });
         module_test_step.dependOn(&addRun(b, tests, tsan).step);
@@ -307,6 +341,304 @@ pub fn build(b: *std.Build) void {
         test_log.dependOn(&compile.step);
     }
 
+    // rpc compile errors: transports whose methods do not fit the
+    // interfaces. Each test must fail with exactly one error, the message
+    // next to its name, and its note "called at comptime here" that points
+    // at the check in rpc: the check stops the build before Zig reports
+    // anything inside rpc. A type declared in a test is named after the file
+    // and the test.
+    const rpc_compile_errors = b.createModule(.{
+        .root_source_file = b.path("src/rpc/tests/compile_errors.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+        .imports = &.{
+            .{ .name = "rpc", .module = rpc },
+        },
+    });
+    const call_signature = "pub fn call(self: *@This(), io: std.Io, request: *const rpc.transport.Request, options: rpc.ClientTransport.CallOptions) rpc.ClientTransport.CallError!rpc.Response";
+    const authenticate_signature = "pub fn authenticate(self: *@This(), ctx: *const rpc.AuthContext) rpc.AuthError!?rpc.IdentityView";
+    const run_signature = "pub fn run(self: *@This(), ctx: *rpc.Context, next: *rpc.Next) anyerror!void";
+    for ([_][2][]const u8{
+        .{ "client transport without call", "rpc.ClientTransport.init: compile_errors.test.client transport without call.NoCall has no method call; expected " ++ call_signature },
+        .{ "call with another response type", "rpc.ClientTransport.init: compile_errors.test.call with another response type.WrongResponse.call has another signature; expected " ++ call_signature },
+        .{ "client transport without info", "rpc.ClientTransport.init: compile_errors.test.client transport without info.NoInfo has no method info; expected pub fn info(self: *@This()) rpc.transport.Info" },
+        .{ "server transport without drain", "rpc.ServerTransport.init: compile_errors.test.server transport without drain.NoDrain has no method drain; expected pub fn drain(self: *@This(), io: std.Io) void" },
+        .{ "isReady with another signature", "rpc.ServerTransport.init: compile_errors.test.isReady with another signature.ReadyWithIo.isReady has another signature; expected pub fn isReady(self: *@This()) bool" },
+        .{ "release with another signature", "rpc.transport.Reply.init: compile_errors.test.release with another signature.ReleaseWithoutDisposition.release has another signature; expected pub fn release(self: *@This(), io: std.Io, disposition: rpc.transport.Reply.Disposition) void" },
+        .{ "init with a value", "rpc.ClientTransport.init: pass a pointer to the transport, e.g. &transport; got compile_errors.Echo" },
+        .{ "init with a pointer to a constant", "rpc.ClientTransport.init: the transport must be mutable, declared with var; got *const compile_errors.Echo" },
+        .{ "init with a pointer to a number", "rpc.ServerTransport.init: pass a pointer to the transport, e.g. &transport; got *u8" },
+        .{ "authenticator without authenticate", "rpc.Authenticator.init: compile_errors.test.authenticator without authenticate.NoAuthenticate has no method authenticate; expected " ++ authenticate_signature },
+        .{ "authenticate with an inferred error set", "rpc.Authenticator.init: compile_errors.test.authenticate with an inferred error set.Inferred.authenticate has another signature; expected " ++ authenticate_signature },
+        .{ "middleware object without run", "rpc.Middleware.of: compile_errors.test.middleware object without run.NoRun has no method run; expected " ++ run_signature },
+        .{ "middleware object by value", "rpc.Middleware.of: expected fn (ctx: *rpc.Context, next: *rpc.Next) anyerror!void, or a pointer to a type with " ++ run_signature ++ "; got compile_errors.Counter" },
+        .{ "middleware run with an inferred error set", "rpc.Middleware.of: compile_errors.test.middleware run with an inferred error set.Inferred.run has another signature; expected " ++ run_signature },
+        .{ "middleware function with an inferred error set", "rpc.Middleware.of: a middleware function is fn (ctx: *rpc.Context, next: *rpc.Next) anyerror!void, with anyerror written out, not inferred; got fn (*engine.Context.Context, *middleware.Next) @typeInfo(@typeInfo(@TypeOf(compile_errors.inferredLink)).@\"fn\".return_type.?).error_union.error_set!void" },
+        .{ "middleware object behind a const pointer", "rpc.Middleware.of: the middleware must be mutable, declared with var; got *const compile_errors.Counter" },
+        .{ "client middleware with the server's signature", "rpc.ClientMiddleware.of: compile_errors.test.client middleware with the server's signature.ServerSide.run has another signature; expected pub fn run(self: *@This(), ctx: *rpc.ClientContext, next: *rpc.ClientNext) anyerror!void" },
+        .{ "conformance harness by value", "rpc.testing.conformance.run: pass a pointer to the harness, e.g. &harness; got compile_errors.Harness" },
+        .{ "conformance harness without tearDown", "rpc.testing.conformance.run: compile_errors.test.conformance harness without tearDown.NoTearDown has no method tearDown; expected pub fn tearDown(self: *@This(), io: std.Io, pair: rpc.testing.conformance.Pair) void" },
+        .{ "conformance harness behind a const pointer", "rpc.testing.conformance.run: the harness must be mutable, declared with var; got *const compile_errors.Harness" },
+        .{ "conformance harness without setUp", "rpc.testing.conformance.run: compile_errors.test.conformance harness without setUp.NoSetUp has no method setUp; expected pub fn setUp(self: *@This(), io: std.Io, gpa: std.mem.Allocator) !rpc.testing.conformance.Pair" },
+        .{ "conformance hook with another signature", "rpc.testing.conformance.run: compile_errors.test.conformance hook with another signature.FailingBreak.breakLink has another signature; expected pub fn breakLink(self: *@This(), io: std.Io, pair: rpc.testing.conformance.Pair) void" },
+    }, 0..) |case, i| {
+        const compile = b.addTest(.{
+            .name = b.fmt("rpc-compile-error-{d}", .{i}),
+            .root_module = rpc_compile_errors,
+            .filters = &.{case[0]},
+        });
+        compile.expect_errors = .{ .exact = b.allocator.dupe([]const u8, &.{ case[1], "note: called at comptime here" }) catch @panic("OOM") };
+        test_rpc.dependOn(&compile.step);
+    }
+
+    // rpc compile errors of contracts, of rpc.implement and of the types of
+    // requests and responses: one file each in src/rpc/tests/compile_errors/,
+    // compiled as client code. Each must fail with exactly one error, the
+    // message next to its name (the whole text after "error: "), and the
+    // notes that lead to the user's code: those of a contract lead through
+    // the return type of rpc.Contract, that of rpc.implement straight to the
+    // call, that of rpc.Client.call through the type of its request. A type
+    // declared in a file is named after the file.
+    const contract_notes: []const []const u8 = &.{ "note: called at comptime here", "note: generic function instantiated here" };
+    const implement_notes: []const []const u8 = &.{"note: called at comptime here"};
+    const server_notes: []const []const u8 = &.{"note: called at comptime here"};
+    const client_notes: []const []const u8 = &.{"note: called at comptime here"};
+    const call_notes: []const []const u8 = &.{ "note: called at comptime here", "note: called at comptime here", "note: generic function instantiated here" };
+    for ([_]struct { []const u8, []const u8, []const []const u8 }{
+        .{ "contract_name", "rpc: contract \"user service\": the name must be 1 to 64 characters from [A-Za-z0-9_-]", contract_notes },
+        .{ "contract_version", "rpc: contract \"users\": .version must be 1 to 65535, got 0", contract_notes },
+        .{ "contract_no_methods", "rpc: users.v1: .methods is empty; a contract has at least one method", contract_notes },
+        .{ "contract_plain_type", "rpc: users.v1.getUser: write rpc.method(Request, Response), got the type contract_plain_type.GetUserRequest", contract_notes },
+        .{ "contract_request_not_struct", "rpc: users.v1.getUser: request must be a struct, got u64", contract_notes },
+        .{ "contract_reserved_error", "rpc: users.v1: .errors.Unavailable: rpc maps Unavailable by itself, so a contract cannot list it; give the error another name", contract_notes },
+        .{ "contract_unknown_code", "rpc: users.v1: .errors.UserNotFound.code must be one of core.ErrorCode, such as .not_found, got .notfound", contract_notes },
+        .{ "contract_rpc_app_code", "rpc: users.v1: .errors.UserNotFound.app_code \"rpc.not_found\" starts with \"rpc.\", which belongs to the framework", contract_notes },
+        .{ "contract_repeated_app_code", "rpc: users.v1: .errors.UserNotFound and .errors.NoUser share .app_code \"users.not_found\"; each error needs its own", contract_notes },
+        .{ "dto_pointer", "rpc: users.v1.getUser: response dto_pointer.User.avatar has unsupported type *dto_pointer.File", contract_notes },
+        .{ "dto_usize", "rpc: users.v1.listUsers: request dto_usize.ListUsersRequest.limit has unsupported type usize; its size depends on the target: use u64 or i64", contract_notes },
+        .{ "dto_recursive", "rpc: tree.v1.get: response dto_recursive.Node.children[]: recursive types are not supported; dto_recursive.Node contains itself", contract_notes },
+        .{ "dto_union", "rpc: canvas.v2.draw: request dto_union.DrawRequest.shape has unsupported type dto_union.Shape; unions are not supported", contract_notes },
+        .{ "dto_too_large", "rpc: images.v1.getImage: response dto_too_large.Image.pixels takes 262144 bytes; a type in a DTO takes at most 16384 (16 KiB), since requests and responses live on the stack of a call: use a slice, []const u32", contract_notes },
+        .{ "implement_not_contract", "rpc.implement: the first argument must be a contract made by rpc.Contract(...), got type", implement_notes },
+        .{ "implement_timeout", "rpc.implement(users.v1): .defaults.timeout_ms must be 1 to 300000 ms, got 0", implement_notes },
+        .{ "implement_auth", "rpc.implement(users.v1): .methods.getUser.auth must be .required or .optional, got .maybe", implement_notes },
+        .{ "implement_unknown_setting", "rpc.implement(users.v1): unknown setting .default; the settings are .defaults, .middleware and .methods", implement_notes },
+        .{ "server_no_rpc_handler", "rpc.Server.init: server_no_rpc_handler.UserHandler has no `pub const rpc_handler = rpc.implement(Api, ...)`; every handler must declare it (and it must be pub)", server_notes },
+        .{ "server_rpc_handler_not_pub", "rpc.Server.init: server_rpc_handler_not_pub.UserHandler has no `pub const rpc_handler = rpc.implement(Api, ...)`; every handler must declare it (and it must be pub)", server_notes },
+        .{ "server_rpc_handler_not_implement", "rpc.Server.init: server_rpc_handler_not_implement.UserHandler.rpc_handler must be built with rpc.implement(Api, ...)", server_notes },
+        .{ "server_handler_by_value", "rpc.Server.init: .handlers[0] is server_handler_by_value.UserHandler; pass a pointer to a handler, e.g. &users", server_notes },
+        .{ "server_method_missing", "rpc: server_method_missing.UserHandler implements users.v1 but has no pub fn deleteUser(self: *server_method_missing.UserHandler, ctx: *rpc.Context, req: server_method_missing.DeleteUserRequest) !void", server_notes },
+        .{ "server_method_not_pub", "rpc: server_method_not_pub.UserHandler implements users.v1 but has no pub fn getUser(self: *server_method_not_pub.UserHandler, ctx: *rpc.Context, req: server_method_not_pub.GetUserRequest) !server_method_not_pub.User", server_notes },
+        .{ "server_method_signature", "rpc: server_method_signature.UserHandler.getUser: expected fn (*server_method_signature.UserHandler, *rpc.Context, server_method_signature.GetUserRequest) !server_method_signature.User, found fn (*server_method_signature.UserHandler, server_method_signature.GetUserRequest) !server_method_signature.User", server_notes },
+        .{ "server_unknown_method", "rpc: server_unknown_method.UserHandler.rpc_handler: getUsers is not a method of users.v1", server_notes },
+        .{ "server_middleware_item", "rpc: server_middleware_item.UserHandler.getUser: middleware[1] must be fn (*rpc.Context, *rpc.Next) anyerror!void, or a field of server_middleware_item.UserHandler whose type has pub fn run(self, *rpc.Context, *rpc.Next) anyerror!void", server_notes },
+        .{ "server_same_route", "rpc.Server.init: server_same_route.UserHandler and server_same_route.OtherUserHandler both serve users.v1", server_notes },
+        .{ "server_auth_without_authenticator", "rpc.Server.init: server_auth_without_authenticator.UserHandler.getUser requires auth, but .authenticator is not set", server_notes },
+        .{ "server_middleware", "rpc.Server.init: .middleware[1] must be fn (*rpc.Context, *rpc.Next) anyerror!void or a pointer to a type with pub fn run(self, *rpc.Context, *rpc.Next) anyerror!void", server_notes },
+        .{ "client_unknown_option", "rpc.Client.init: unknown option .timeout; the options are .transport, .credentials, .middleware, .default_timeout, .max_pending and .max_response_bytes", client_notes },
+        .{ "client_credentials_literal", "rpc.Client.init: .credentials = .bearer needs a value, such as .{ .bearer = token }; only .none stands alone", client_notes },
+        .{ "client_not_a_method", "rpc.Client.call: the method must be a method of a contract, such as UserApi.getUser; got the contract users.v1 itself", call_notes },
+    }) |case| {
+        const compile = b.addTest(.{
+            .name = b.fmt("rpc-compile-error-{s}", .{case[0]}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(b.fmt("src/rpc/tests/compile_errors/{s}.zig", .{case[0]})),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+                .imports = &.{.{ .name = "rpc", .module = rpc }},
+            }),
+        });
+        const lines = std.mem.concat(b.allocator, []const u8, &.{ &.{b.fmt("error: {s}", .{case[1]})}, case[2] }) catch @panic("OOM");
+        compile.expect_errors = .{ .exact = lines };
+        test_rpc.dependOn(&compile.step);
+    }
+
+    // rpc panic programs: a transport that breaks the rules of
+    // rpc.transport.Pending gets a panic that names the rule. The program
+    // runs once per case and, like the log ones, ends in its own panic
+    // handler with code 3; it gets Debug copies of rpc and its imports.
+    const panic_rpc = b.createModule(.{
+        .root_source_file = b.path("src/rpc/root.zig"),
+        .target = target,
+        .optimize = .Debug,
+        .imports = &.{
+            .{ .name = "core", .module = panic_core },
+            .{ .name = "validator", .module = b.createModule(.{
+                .root_source_file = b.path("src/validator/root.zig"),
+                .target = target,
+                .optimize = .Debug,
+            }) },
+        },
+    });
+    const pending_panics = b.addExecutable(.{
+        .name = "rpc-panic-pending",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/rpc/tests/panic/pending.zig"),
+            .target = target,
+            .optimize = .Debug,
+            .imports = &.{
+                .{ .name = "core", .module = panic_core },
+                .{ .name = "rpc", .module = panic_rpc },
+            },
+        }),
+    });
+    for ([_][2][]const u8{
+        .{ "release_twice", "rpc.transport.Pending: release of a slot that is not acquired; release each slot once" },
+        .{ "wait_after_release", "rpc.transport.Pending: wait on a slot that is not acquired; wait before release" },
+        .{ "wait_twice", "rpc.transport.Pending: wait called twice for one slot" },
+        .{ "deinit_in_use", "rpc.transport.Pending: deinit with slots still acquired; release every slot first" },
+    }) |case| {
+        const run = b.addRunArtifact(pending_panics);
+        run.addArg(case[0]);
+        run.expectStdErrMatch(case[1]);
+        // expectStdErrMatch accepts any exit: only the panic handler exits
+        // with 3, so a program that printed the text and returned fails.
+        run.expectExitCode(3);
+        test_rpc.dependOn(&run.step);
+    }
+
+    // The same for an engine that breaks the rules of rpc.transport.Reply
+    // on rpc.testing.MemoryTransport.
+    const memory_panics = b.addExecutable(.{
+        .name = "rpc-panic-memory",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/rpc/tests/panic/memory.zig"),
+            .target = target,
+            .optimize = .Debug,
+            .imports = &.{
+                .{ .name = "core", .module = panic_core },
+                .{ .name = "rpc", .module = panic_rpc },
+            },
+        }),
+    });
+    for ([_][2][]const u8{
+        .{ "release_twice", "rpc.testing.MemoryTransport: release called twice for one call; release each call once" },
+        .{ "release_twice_after_return", "rpc.testing.MemoryTransport: release called twice for one call; release each call once" },
+        .{ "send_twice", "rpc.testing.MemoryTransport: send called again for one call; send at most once, or once more after ResponseTooLarge" },
+        .{ "send_after_release", "rpc.testing.MemoryTransport: send called after release; release is the last call of a Reply" },
+        .{ "release_after_failed_start", "rpc.testing.MemoryTransport: Reply called after start returned a failure; no Reply call follows a failed start" },
+        .{ "another_io", "rpc.testing.MemoryTransport: call with another std.Io than the server's; pass the io the server started on" },
+        .{ "deinit_in_use", "rpc.testing.MemoryTransport: deinit with calls not released; deinit the server and let every call return first" },
+    }) |case| {
+        const run = b.addRunArtifact(memory_panics);
+        run.addArg(case[0]);
+        run.expectStdErrMatch(case[1]);
+        run.expectExitCode(3);
+        test_rpc.dependOn(&run.step);
+    }
+
+    // The same for an application that breaks the rules of rpc.RawClient.
+    const client_panics = b.addExecutable(.{
+        .name = "rpc-panic-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/rpc/tests/panic/client.zig"),
+            .target = target,
+            .optimize = .Debug,
+            .imports = &.{
+                .{ .name = "core", .module = panic_core },
+                .{ .name = "rpc", .module = panic_rpc },
+            },
+        }),
+    });
+    for ([_][2][]const u8{
+        .{ "provider_returns_provider", "rpc.RawClient: a CredentialsProvider returned .provider; return the credentials of the call" },
+    }) |case| {
+        const run = b.addRunArtifact(client_panics);
+        run.addArg(case[0]);
+        run.expectStdErrMatch(case[1]);
+        run.expectExitCode(3);
+        test_rpc.dependOn(&run.step);
+    }
+
+    // rpc-nats compile errors: adapters whose methods do not fit
+    // rpc_nats.Conn, in the manner of the rpc ones above.
+    const rpc_nats_compile_errors = b.createModule(.{
+        .root_source_file = b.path("src/rpc-nats/tests/compile_errors.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+        .imports = &.{
+            .{ .name = "rpc-nats", .module = rpc_nats },
+        },
+    });
+    const next_signature = "pub fn next(self: *@This(), io: std.Io, sub: rpc_nats.Conn.Sub, timeout: std.Io.Timeout) rpc_nats.Conn.Error!?rpc_nats.Conn.InMsg";
+    for ([_][2][]const u8{
+        .{ "adapter without next", "rpc_nats.Conn.init: compile_errors.test.adapter without next.NoNext has no method next; expected " ++ next_signature },
+        .{ "next with another signature", "rpc_nats.Conn.init: compile_errors.test.next with another signature.NextWithoutTimeout.next has another signature; expected " ++ next_signature },
+        .{ "isConnected with another signature", "rpc_nats.Conn.init: compile_errors.test.isConnected with another signature.ConnectedWithIo.isConnected has another signature; expected pub fn isConnected(self: *@This()) bool" },
+        .{ "init with a value", "rpc_nats.Conn.init: pass a pointer to the adapter, e.g. &adapter; got compile_errors.Adapter" },
+        .{ "init with a pointer to a constant", "rpc_nats.Conn.init: the adapter must be mutable, declared with var; got *const compile_errors.Adapter" },
+    }, 0..) |case, i| {
+        const compile = b.addTest(.{
+            .name = b.fmt("rpc-nats-compile-error-{d}", .{i}),
+            .root_module = rpc_nats_compile_errors,
+            .filters = &.{case[0]},
+        });
+        compile.expect_errors = .{ .exact = b.allocator.dupe([]const u8, &.{ case[1], "note: called at comptime here" }) catch @panic("OOM") };
+        test_rpc_nats.dependOn(&compile.step);
+    }
+
+    // rpc-nats panic program: a second conn() of one ZefirNats panics in
+    // safe builds, since one adapter serves one transport. Like the rpc
+    // ones above, it ends in its own panic handler with code 3 and gets
+    // Debug copies of rpc-nats and its imports.
+    const panic_rpc_nats = b.createModule(.{
+        .root_source_file = b.path("src/rpc-nats/root.zig"),
+        .target = target,
+        .optimize = .Debug,
+        .imports = &.{
+            .{ .name = "rpc", .module = panic_rpc },
+            .{ .name = "core", .module = panic_core },
+            .{ .name = "nats", .module = panic_nats },
+        },
+    });
+    const second_conn = b.addExecutable(.{
+        .name = "rpc-nats-panic-second-conn",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/rpc-nats/tests/panic/second_conn.zig"),
+            .target = target,
+            .optimize = .Debug,
+            .imports = &.{
+                .{ .name = "nats", .module = panic_nats },
+                .{ .name = "rpc-nats", .module = panic_rpc_nats },
+            },
+        }),
+    });
+    const run_second_conn = b.addRunArtifact(second_conn);
+    run_second_conn.expectStdErrMatch("panic: rpc_nats.ZefirNats: conn() called twice; one adapter serves one transport: give each transport an adapter of its own");
+    run_second_conn.expectExitCode(3);
+    test_rpc_nats.dependOn(&run_second_conn.step);
+
+    // The guide of rpc-nats shows its examples as they are. The examples
+    // need NATS servers and zio: tests/rpc-nats builds and runs them.
+    const rpc_nats_guide = b.addTest(.{
+        .name = "rpc-nats-guide",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/rpc-nats/examples/readme_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .sanitize_thread = tsan,
+            .imports = &.{.{ .name = "guide-check", .module = b.createModule(.{
+                .root_source_file = b.path("src/rpc/examples/guide_check.zig"),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+            }) }},
+        }),
+    });
+    test_rpc_nats.dependOn(&addRun(b, rpc_nats_guide, tsan).step);
+
+    addRpcGuide(b, test_rpc, test_rpc_log, .{
+        .core = core,
+        .validator = validator,
+        .confy = confy,
+        .log = log,
+        .rpc = rpc,
+        .rpc_log = rpc_log,
+    }, target, optimize, tsan);
+
     // core benchmarks: `zig build test` only compiles them, `zig build bench`
     // runs them. They get their own ReleaseFast copy of core, since the
     // `core` module above is built in the mode the user asked for.
@@ -372,6 +704,147 @@ fn addRun(b: *std.Build, artifact: *std.Build.Step.Compile, tsan: bool) *std.Bui
     const run = b.addRunArtifact(artifact);
     if (tsan) run.setEnvironmentVariable("TSAN_OPTIONS", "halt_on_error=1:abort_on_error=0");
     return run;
+}
+
+/// The modules that the examples of the rpc guide import.
+const GuideModules = struct {
+    core: *std.Build.Module,
+    validator: *std.Build.Module,
+    confy: *std.Build.Module,
+    log: *std.Build.Module,
+    rpc: *std.Build.Module,
+    rpc_log: *std.Build.Module,
+};
+
+/// The examples of src/rpc/examples/README.md, the guide of rpc and
+/// rpc-log, as cases.zig there lists them. Every program runs through
+/// example_main.zig, which exits with code 3 on a panic instead of
+/// aborting and with code 4 when the run takes longer than its time limit
+/// (testdata/hang.zig checks that), and must exit with 0; readme_test.zig
+/// then checks that README.md shows every file as it is and every run as
+/// it printed. The programs of the access logs and their check belong to
+/// `test_rpc_log`, the rest to `test_rpc`, so that the programs of
+/// `test_rpc` never import zefir-rpc-log, which imports rpc.
+fn addRpcGuide(
+    b: *std.Build,
+    test_rpc: *std.Build.Step,
+    test_rpc_log: *std.Build.Step,
+    m: GuideModules,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+    tsan: bool,
+) void {
+    const dir = "src/rpc/examples/";
+    // The packages of the contracts, which real services would fetch, with
+    // the tests of their rules.
+    var contracts: [2]*std.Build.Module = undefined;
+    for ([_][]const u8{ "users_api", "orders_api" }, &contracts) |name, *contract| {
+        contract.* = b.createModule(.{
+            .root_source_file = b.path(b.fmt(dir ++ "{s}.zig", .{name})),
+            .target = target,
+            .optimize = optimize,
+            .sanitize_thread = tsan,
+            .imports = &.{
+                .{ .name = "rpc", .module = m.rpc },
+                .{ .name = "validator", .module = m.validator },
+            },
+        });
+        test_rpc.dependOn(&addRun(b, b.addTest(.{ .name = name, .root_module = contract.* }), tsan).step);
+    }
+    const imports: []const std.Build.Module.Import = &.{
+        .{ .name = "core", .module = m.core },
+        .{ .name = "confy", .module = m.confy },
+        .{ .name = "log", .module = m.log },
+        .{ .name = "rpc", .module = m.rpc },
+        .{ .name = "users-api", .module = contracts[0] },
+        .{ .name = "orders-api", .module = contracts[1] },
+    };
+    const access_log_imports = std.mem.concat(b.allocator, std.Build.Module.Import, &.{ imports, &.{.{ .name = "rpc-log", .module = m.rpc_log }} }) catch @panic("OOM");
+
+    for (rpc_guide.tests) |name| {
+        const tests = b.addTest(.{
+            .name = name,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(b.fmt(dir ++ "{s}.zig", .{name})),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+                .imports = imports,
+            }),
+        });
+        test_rpc.dependOn(&addRun(b, tests, tsan).step);
+    }
+
+    // A program that hangs: the time limit of example_main.zig ends it.
+    const hang = b.addExecutable(.{
+        .name = "rpc-guide-hang",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(dir ++ "example_main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .sanitize_thread = tsan,
+            .imports = &.{.{ .name = "example", .module = b.createModule(.{
+                .root_source_file = b.path(dir ++ "testdata/hang.zig"),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+            }) }},
+        }),
+    });
+    const run_hang = addRun(b, hang, tsan);
+    run_hang.expectStdErrMatch("the run did not end within 1 s");
+    run_hang.expectExitCode(4);
+    test_rpc.dependOn(&run_hang.step);
+
+    const cases = b.createModule(.{
+        .root_source_file = b.path(dir ++ "cases.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    for (
+        [_]bool{ false, true },
+        [_][]const rpc_guide.Program{ &rpc_guide.programs, &rpc_guide.access_log_programs },
+        [_]*std.Build.Step{ test_rpc, test_rpc_log },
+    ) |access_log, programs, step| {
+        const options = b.addOptions();
+        options.addOption(bool, "access_log", access_log);
+        const readme = b.createModule(.{
+            .root_source_file = b.path(dir ++ "readme_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .sanitize_thread = tsan,
+            .imports = &.{
+                .{ .name = "cases", .module = cases },
+                .{ .name = "readme_options", .module = options.createModule() },
+            },
+        });
+        // "rpc in a minute" of the repository's README.md is a program of
+        // the guide too.
+        readme.addAnonymousImport("root_readme", .{ .root_source_file = b.path("README.md") });
+        for (programs) |program| {
+            const exe = b.addExecutable(.{
+                .name = b.fmt("rpc-guide-{s}", .{program.name}),
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path(dir ++ "example_main.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                    .sanitize_thread = tsan,
+                    .imports = &.{.{ .name = "example", .module = b.createModule(.{
+                        .root_source_file = b.path(b.fmt(dir ++ "{s}.zig", .{program.name})),
+                        .target = target,
+                        .optimize = optimize,
+                        .sanitize_thread = tsan,
+                        .imports = if (access_log) access_log_imports else imports,
+                    }) }},
+                }),
+            });
+            const run = addRun(b, exe, tsan);
+            for (program.env) |pair| run.setEnvironmentVariable(pair[0], pair[1]);
+            run.expectExitCode(0);
+            readme.addAnonymousImport(b.fmt("{s}.out", .{program.name}), .{ .root_source_file = run.captureStdOut(.{}) });
+        }
+        step.dependOn(&addRun(b, b.addTest(.{ .name = "rpc-guide-readme", .root_module = readme }), tsan).step);
+    }
 }
 
 /// The validator tests that use only its public API, compiled as client code

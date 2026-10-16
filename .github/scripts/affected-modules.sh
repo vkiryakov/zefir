@@ -7,17 +7,21 @@
 #
 # A file under src/<module>/ affects that module and every module whose
 # tests import it, directly or through other modules; zefir imports them
-# all. tests/nats/ and docker-compose.yml, which hold the end-to-end tests
-# of nats and their servers, count as nats. build.zig, build.zig.zon,
+# all. tests/nats/ and tests/rpc-nats/, the end-to-end tests of nats and
+# of rpc-nats, count as their modules, and docker-compose.yml, their
+# servers, as both. examples/rpc-custom-transport/, a transport outside
+# zefir that CI runs against rpc, counts as rpc. build.zig, build.zig.zon,
 # src/zefir.zig, .github/ and any other path the script does not know
-# affect every module. Documentation outside src/ (*.md files and docs/)
-# affects none.
+# affect every module.
+# Documentation outside src/ (*.md files and docs/) affects none, but
+# README.md at the root: its "rpc in a minute" is a program of the guide of
+# rpc, which the tests of rpc check, so it counts as rpc.
 set -eu
 
 # The modules and what the tests of each one import. Keep this in sync with
 # build.zig: the `.imports` of each module and of the programs that its
 # test-<module> step builds. CI tests only the modules listed here.
-modules="core log confy validator rpc orm nats zefir"
+modules="core log confy validator rpc rpc-nats rpc-log orm nats zefir"
 imports() {
     case $1 in
     core) ;;
@@ -26,13 +30,20 @@ imports() {
     # The validator imports nothing, but the examples of its guide log the
     # violations they find.
     validator) echo log ;;
-    rpc) echo confy ;;
+    # rpc imports core and validator, and the examples of its guide read
+    # their settings with confy and log with log.
+    rpc) echo core validator confy log ;;
+    # rpc-nats imports nats for its adapter of zefir-nats, and the examples
+    # of its guide, which its end-to-end tests run, read their settings
+    # with confy and log with log.
+    rpc-nats) echo rpc core nats confy log ;;
+    rpc-log) echo rpc core log ;;
     # nats imports nothing, but the examples of its guide read their
     # settings with confy, log with log and take deadlines from core, and
     # its end-to-end tests build and run them. confy brings log.
     nats) echo core confy ;;
     orm) echo log ;;
-    zefir) echo core log confy validator rpc orm nats ;;
+    zefir) echo core log confy validator rpc rpc-nats rpc-log orm nats ;;
     esac
 }
 
@@ -72,7 +83,11 @@ elif [ $# -eq 2 ] && [ -n "$1" ] && [ -n "$2" ]; then
             esac
             ;;
         src/*) all=true ;;
-        tests/nats/* | docker-compose.yml) changed="$changed nats" ;;
+        tests/nats/*) changed="$changed nats" ;;
+        tests/rpc-nats/*) changed="$changed rpc-nats" ;;
+        examples/rpc-custom-transport/*) changed="$changed rpc" ;;
+        docker-compose.yml) changed="$changed nats rpc-nats" ;;
+        README.md) changed="$changed rpc" ;;
         docs/* | *.md) ;;
         *) all=true ;;
         esac

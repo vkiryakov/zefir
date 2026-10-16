@@ -1,0 +1,13 @@
+.{
+    .name = .rpc_mailbox_consumer,
+    .version = "0.0.0",
+    .fingerprint = 0xd48abc94f74774da,
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{
+        // zefir of this checkout: CI builds the transport against the commit
+        // it checks, not the one the transport's package pins.
+        .zefir = .{ .path = "../../.." },
+        .rpc_mailbox = .{ .path = ".." },
+    },
+    .paths = .{""},
+}

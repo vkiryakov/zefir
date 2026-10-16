@@ -1,8 +1,149 @@
-//! zefir-rpc — RPC.
+//! zefir-rpc — typed RPC with pluggable transports.
+//!
+//! A call is one request and one response between two services. zefir-rpc
+//! has two layers:
+//!
+//! - The application layer: a contract written in Zig and shared by the
+//!   server and its clients, handlers that implement it, `rpc.Server` and
+//!   `rpc.Client`. Requests and responses are your own structs, sent as
+//!   JSON and checked with zefir-validator.
+//! - The engine under it: `rpc.RawServer` and `rpc.RawClient` route calls,
+//!   run handlers, keep limits, deadlines and cancellation, authenticate
+//!   callers, run middleware and shut down gracefully, the same way on every
+//!   transport. The engine sees bodies as bytes.
+//!
+//! A transport only delivers the bytes of each call. The engine talks to it
+//! through small interfaces, a pointer and a table of functions like
+//! `std.mem.Allocator`: `rpc.ClientTransport` on the client side and
+//! `rpc.ServerTransport` on the server side, where calls come in through
+//! `rpc.transport.Dispatcher` and `rpc.transport.Incoming` and go out through
+//! `rpc.transport.Reply`. Zefir ships a memory transport for tests and NATS
+//! request-reply in the module `zefir-rpc-nats`. A transport of your own is
+//! a type with the methods these interfaces list; `rpc.transport` holds the
+//! types and helpers it needs.
+//!
+//! The transport interfaces are experimental until zefir 1.0: a minor
+//! release may change them and says how in its release notes. New entries
+//! of the function tables and new fields of `rpc.transport.Info` always come
+//! with defaults, so a transport keeps compiling with later releases of the
+//! same line.
 
 const std = @import("std");
-const confy = @import("confy");
+const model = @import("model.zig");
+const credentials = @import("credentials.zig");
+const auth = @import("auth.zig");
+const middleware = @import("middleware.zig");
+const contract = @import("app/contract.zig");
 
-test "rpc placeholder" {
-    try std.testing.expect(true);
+/// A contract: the name, the major version, the methods and the errors of
+/// a service, shared by its server and its clients. A value whose fields
+/// are the methods: `UserApi.getUser`.
+pub const Contract = contract.Contract;
+/// The request and response types of one method of a contract:
+/// `.getUser = rpc.method(GetUserRequest, User)`.
+pub const method = contract.method;
+/// The declaration `pub const rpc_handler` of a handler: the contract it
+/// implements, with its timeouts, auth and middleware.
+pub const implement = contract.implement;
+/// The server of an application: the handlers of its contracts on a
+/// transport, with JSON, validation and middleware.
+pub const Server = @import("app/Server.zig");
+/// The client of an application: it calls the methods of contracts with
+/// JSON and validation; `client.call(io, ctx, UserApi.getUser, request, .{})`.
+pub const Client = @import("app/Client.zig");
+
+pub const Route = model.Route;
+pub const Metadata = model.Metadata;
+pub const Response = model.Response;
+pub const Status = model.Status;
+pub const Failure = model.Failure;
+pub const Violation = model.Violation;
+
+/// The server engine: routes, limits, deadlines, handlers in tasks of their
+/// own, graceful stop.
+pub const RawServer = @import("engine/RawServer.zig");
+/// A route and its handler on bytes, for `rpc.RawServer`.
+pub const Method = RawServer.Method;
+/// A handler on bytes.
+pub const Handler = RawServer.Handler;
+/// The limits of a server.
+pub const Limits = RawServer.Limits;
+/// The context of one call on the server.
+pub const Context = @import("engine/Context.zig").Context;
+/// The client engine: deadlines, credentials and the errors of transports,
+/// the same on every transport.
+pub const RawClient = @import("engine/RawClient.zig");
+
+/// What a call carries in `authorization`, as a type.
+pub const Credentials = credentials.Credentials;
+/// Credentials that the client engine asks for before every call.
+pub const CredentialsProvider = credentials.CredentialsProvider;
+/// Checks the credentials of calls on a server.
+pub const Authenticator = auth.Authenticator;
+/// What an authenticator sees of a call.
+pub const AuthContext = auth.AuthContext;
+/// What an authenticator may return besides an identity.
+pub const AuthError = auth.AuthError;
+/// The identity of a caller.
+pub const IdentityView = auth.IdentityView;
+/// One link of the server's middleware: a function or an object.
+pub const Middleware = middleware.Middleware;
+/// A middleware function of the server, without state.
+pub const MiddlewareFn = middleware.MiddlewareFn;
+/// The rest of the server's chain behind one link.
+pub const Next = middleware.Next;
+/// One link of the client's middleware: a function or an object.
+pub const ClientMiddleware = middleware.ClientMiddleware;
+/// A middleware function of the client, without state.
+pub const ClientMiddlewareFn = middleware.ClientMiddlewareFn;
+/// The rest of the client's chain behind one link.
+pub const ClientNext = middleware.ClientNext;
+/// What middleware of the client sees of one outgoing call.
+pub const ClientContext = RawClient.ClientContext;
+
+/// The client side of a transport.
+pub const ClientTransport = @import("ClientTransport.zig");
+/// The server side of a transport.
+pub const ServerTransport = @import("ServerTransport.zig");
+/// The types and helpers a transport works with.
+pub const transport = @import("transport.zig");
+/// Helpers for tests of transports and services.
+pub const testing = @import("testing.zig");
+
+test {
+    std.testing.refAllDecls(@This());
+    _ = @import("model.zig");
+    _ = @import("rules.zig");
+    _ = @import("signature.zig");
+    _ = @import("transport.zig");
+    _ = @import("wait.zig");
+    _ = @import("ClientTransport.zig");
+    _ = @import("ServerTransport.zig");
+    _ = @import("Dispatcher.zig");
+    _ = @import("Incoming.zig");
+    _ = @import("Reply.zig");
+    _ = @import("Pending.zig");
+    _ = @import("testing.zig");
+    _ = @import("failures.zig");
+    _ = @import("credentials.zig");
+    _ = @import("auth.zig");
+    _ = @import("middleware.zig");
+    _ = @import("engine/chain_tests.zig");
+    _ = @import("engine/RawServer.zig");
+    _ = @import("engine/Call.zig");
+    _ = @import("engine/Context.zig");
+    _ = @import("engine/RouteStats.zig");
+    _ = @import("engine/server_tests.zig");
+    _ = @import("engine/RawClient.zig");
+    _ = @import("app/dto.zig");
+    _ = @import("app/contract.zig");
+    _ = @import("app/json.zig");
+    _ = @import("app/json_tests.zig");
+    _ = @import("app/handlers.zig");
+    _ = @import("app/method.zig");
+    _ = @import("app/violations.zig");
+    _ = @import("app/Server.zig");
+    _ = @import("app/server_tests.zig");
+    _ = @import("app/Client.zig");
+    _ = @import("app/acceptance_tests.zig");
 }
