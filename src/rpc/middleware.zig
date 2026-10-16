@@ -43,8 +43,11 @@
 //!    failure of `ctx.fail`, then the contract's table, then the
 //!    framework's names, else `internal`. A link sees the real Zig error.
 //! 5. A success a link sees is not final: the deadline, the client's cancel
-//!    or the stop may still win, and a response over the limits becomes
-//!    `resource_exhausted`.
+//!    or the stop may still win, and a response the transport cannot carry
+//!    (over its own limit, such as the NATS max payload) becomes
+//!    `resource_exhausted`, as does, under `rpc.RawServer`, a body over
+//!    `max_response_bytes`. Under `rpc.Server` the method's encoding
+//!    refuses such a body inside the chain: a link sees that failure.
 //! 6. Middleware waits only through `std.Io`, and returns `error.Canceled`
 //!    as it is: the deadline cancels it like the handler.
 

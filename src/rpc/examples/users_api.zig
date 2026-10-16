@@ -53,7 +53,8 @@ pub const UserApi = rpc.Contract(.{
         .deleteUser = rpc.method(DeleteUserRequest, void),
     },
     // An error a handler returns by one of these names reaches the client
-    // as this failure; any other error as `internal`.
+    // as this failure; the framework's names (Canceled, DeadlineExceeded,
+    // OutOfMemory, …) as their own codes; any other error as `internal`.
     .errors = .{
         .UserNotFound = .{ .code = .not_found, .app_code = "users.not_found", .message = "User not found" },
         .EmailTaken = .{ .code = .already_exists, .app_code = "users.email_taken", .message = "Email already taken" },

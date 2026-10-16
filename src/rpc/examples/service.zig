@@ -161,7 +161,8 @@ fn call(
     var result = try client.call(io, .root, method, request, .{ .credentials = credentials });
     defer result.deinit();
     const name = @TypeOf(method).name;
-    // Null when the rate limit did not count the call.
+    // Null when the rate limit did not count the call, and after a failure
+    // of the engine itself, such as the deadline: it carries no metadata.
     const remaining = result.metadata().get("ratelimit-remaining");
     switch (result.outcome) {
         .ok => app.info("Call succeeded", .{ .caller = caller, .method = name, .remaining = remaining }),

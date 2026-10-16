@@ -339,7 +339,8 @@ pub const UserApi = rpc.Contract(.{
         .deleteUser = rpc.method(DeleteUserRequest, void),
     },
     // An error a handler returns by one of these names reaches the client
-    // as this failure; any other error as `internal`.
+    // as this failure; the framework's names (Canceled, DeadlineExceeded,
+    // OutOfMemory, …) as their own codes; any other error as `internal`.
     .errors = .{
         .UserNotFound = .{ .code = .not_found, .app_code = "users.not_found", .message = "User not found" },
         .EmailTaken = .{ .code = .already_exists, .app_code = "users.email_taken", .message = "Email already taken" },
@@ -686,7 +687,9 @@ name, not a surprise in production.
 `api.UserApi.getUser`, which a client passes to `call`. The type of a method
 holds what rpc knows about it: `@TypeOf(api.UserApi.getUser).Request` is
 `GetUserRequest`, `.Response` is `User`, `.name` is "getUser", and
-`.route` is `users.v1.getUser`.
+`.route` is the route
+`.{ .service = "users", .version = 1, .method = "getUser" }`,
+`users.v1.getUser` on the wire.
 
 | Field | What | Rules |
 | --- | --- | --- |
@@ -765,7 +768,7 @@ and `validateSelf`, are checked on both sides:
 
 `field_rules` and `validateSelf` must be `pub`: from another file, Zig sees
 no other declaration, and a type whose rules are not `pub` is never checked,
-without an error. The test at the end of `users_api.zig`,
+without an error. The test at the end of the contract's `src/root.zig`,
 `comptime v.assertRules(CreateUserRequest)`, checks that the rules of a
 type are valid.
 
@@ -839,7 +842,7 @@ a task that outlives the call.
 | `metadata()` | the request's metadata to read: `get(key)`, `getAll(key)`, `iterator()`, without the reserved keys |
 | `identity()` | `?rpc.IdentityView`: whom the authenticator found, or null for an anonymous call |
 | `peer()`, `transport()` | who sent the call and over what, as the transport knows it: for logs, never for authorization |
-| `setResponseMetadata(key, value)` | metadata of the response, copied into the arena, also of a failure; the client reads it with `result.metadata()`, as the rate limit of [Middleware](#middleware) shows |
+| `setResponseMetadata(key, value)` | metadata of the response, copied into the arena, also of a failure the chain returns (a failure of the engine itself, such as the deadline, carries none); the client reads it with `result.metadata()`, as the rate limit of [Middleware](#middleware) shows |
 | `fail(failure)` | ends the call with exactly this failure: `return ctx.fail(.{ .code, .app_code, .message })` |
 | `requestBody()`, `responseBody()`, `failure()`, `mapError(err)` | for middleware: the bodies as bytes, the failure set with `fail`, the failure an error becomes |
 
@@ -959,7 +962,7 @@ are what went wrong locally, and each says whether a retry is safe:
 | `ResponseTooLarge` | the response is over the client's limits and was dropped, though the server ran the call | only an idempotent call |
 | `InvalidResponse` | the response does not decode as the method's type, or breaks its rules: the two sides have different versions of the contract | no |
 | `ProtocolViolation`, `UnsupportedProtocol`, `TransportFailed` | the protocol or the transport failed; details in `.diagnostics` | only an idempotent call |
-| `MiddlewareFailed` | the client's middleware returned an error outside this list; if the request went out, the outcome is unknown | only an idempotent call |
+| `MiddlewareFailed` | the client's middleware returned an error outside this list, or `InvalidResponse`, which only the client itself returns; if the request went out, the outcome is unknown | only an idempotent call |
 | `ClientClosed`, `OutOfMemory` | — | — |
 
 A failure with `refused = true` is safe to retry too: the server did not
@@ -1270,9 +1273,9 @@ It runs in the caller's task, around the transport's call:
 - after it: the outcome, for metrics and logs, and `ctx.response()`, the
   server's response, a failure too, or null after an error;
   `ctx.sent()` is false when that response is the client's own refusal;
-- it may replace the outcome with an error of the client's list, and
-  return such an error without calling `next.run()`; success without
-  `next.run()` is `MiddlewareFailed`.
+- it may replace the outcome with an error of the client's list but
+  `InvalidResponse`, and return such an error without calling
+  `next.run()`; success without `next.run()` is `MiddlewareFailed`.
 
 It sees the response before the client decodes it: a success it sees may
 still end the call with `InvalidResponse`. A call that the client refuses
@@ -1281,8 +1284,9 @@ metadata, a caller's context that has expired or is canceled, a call over
 `max_pending`. Credentials that cannot travel, such as a token with a line
 break, are refused at the end of the chain, where the engine sends: the
 link sees that refusal as the response, with `ctx.sent()` false.
-`error.Canceled` from the I/O of a link goes back as it is; a link that
-swallows it calls `ctx.io().recancel()`.
+`error.Canceled` from the I/O of a link: the link returns it as it is, and
+the call ends with `Cancelled` (or `DeadlineExceeded`, once the deadline
+has passed); a link that swallows it calls `ctx.io().recancel()`.
 
 </details>
 
@@ -1536,8 +1540,11 @@ fn live(store: *Store, io: std.Io, key: []const u8, ttl: std.Io.Duration) Error!
    Zig error: `error.UserNotFound`, or `error.RpcFailure` with the failure
    in `ctx.failure()`.
 5. A success a link sees is not final: the deadline, the client's cancel
-   or the stop may still win, and a response over the limits becomes
-   `resource_exhausted`.
+   or the stop may still win, and a response the transport cannot carry
+   (over its own limit, such as the NATS max payload) becomes
+   `resource_exhausted`. One over `max_response_bytes` never gets that far:
+   the method's encoding refuses it inside the chain, and a link sees the
+   failure.
 6. A link reads the route, the metadata, the identity, the context and the
    body of the request in bytes, and adds metadata to the response; it
    never changes the bodies.
@@ -1807,7 +1814,8 @@ fn call(
     var result = try client.call(io, .root, method, request, .{ .credentials = credentials });
     defer result.deinit();
     const name = @TypeOf(method).name;
-    // Null when the rate limit did not count the call.
+    // Null when the rate limit did not count the call, and after a failure
+    // of the engine itself, such as the deadline: it carries no metadata.
     const remaining = result.metadata().get("ratelimit-remaining");
     switch (result.outcome) {
         .ok => app.info("Call succeeded", .{ .caller = caller, .method = name, .remaining = remaining }),
@@ -2130,11 +2138,14 @@ What a middleware cannot see, the log does not show as it went out:
 
 - Calls the server ends before the chain have no record: refused at
   admission (an unknown method, the limits, a full queue), refused by the
-  authenticator, or out of time before their task began. The counters of
-  each route count them; NATS micro shows those counters.
+  authenticator, or out of time before their task began. Those that name
+  a known route are counted in its counters, which NATS micro shows.
 - A success the server still turns into a failure after the chain is
-  logged as a success: a response over `max_response_bytes`, or one that
-  ends a fraction of a millisecond before the deadline.
+  logged as a success: a response the transport cannot carry (over its
+  own limit, such as the NATS max payload), or one that ends a fraction of
+  a millisecond before the deadline. A response over `max_response_bytes`
+  is refused inside the chain, by the method's encoding, and its record
+  has the `resource_exhausted`.
 - On the client, the chain sees the response before it is decoded: a
   success that does not decode is logged `ok`, and the call ends with
   `InvalidResponse`. A call the client refuses before the chain has no
@@ -2276,7 +2287,7 @@ $ zig build run
 The first call created Ada, but its response was lost: the client cannot
 know, and retries. The retry brings the same key, so the middleware refuses
 it before the handler runs, and there is one user. `already_exists` with
-`idem.duplicate_request` tells the client that the operation was done
+`idem.duplicate_request` tells the client that a call with this key came
 before.
 
 - The key names the operation, not the call: the id of the sign-up form,
@@ -2314,14 +2325,14 @@ stateDiagram-v2
 
 What a stop does:
 
-1. The transport stops taking new calls: they get `unavailable`, and know
-   that they did not run.
+1. The transport stops taking new calls: they get `error.Unavailable`, and
+   know that they did not run.
 2. The calls in flight run on for `shutdown_grace`, counted from the stop's
    request.
-3. When the grace is over, calls still waiting in the queue get
-   `unavailable` with `refused`, and the running ones are canceled: their
-   clients get `cancelled` ("Server stopped the call") before the
-   transport closes.
+3. When the grace is over, calls still waiting in the queue, and those the
+   transport hands over from then on, get `unavailable` with `refused`, and
+   the running ones are canceled: their clients get `cancelled` ("Server
+   stopped the call") before the transport closes.
 4. The transport closes, and the server is `stopped`.
 
 ```zig
@@ -2509,6 +2520,12 @@ replica. The limits of a server, `.limits` of `rpc.Server.init`:
 | `max_container_items` | 100,000 | items of one array or object |
 | `max_timeout` | 300 s | no call runs longer, whatever its client or its method asks |
 
+Limits that are zero or contradict each other make `rpc.Server.init` fail
+with `error.InvalidConfiguration` when the program runs: a `max_inflight`
+over `max_active_tasks + queue_capacity`, a `max_request_bytes` over
+`max_request_memory_bytes` or that over `max_live_request_memory_bytes`,
+a `max_response_bytes` or `max_metadata_bytes` under 1024 bytes.
+
 A call over a limit is refused before its body is read, so a body that
 claims a gigabyte costs nothing. The client has its own limits:
 `max_pending` (1024) and `max_response_bytes` (1 MiB); decoding a
@@ -2552,9 +2569,11 @@ wires it in, and a table from the sample to a real broker. Start from it.
 - The server side gets an `rpc.transport.Dispatcher` in `start`: for every
   call, `admit` decides on it by its head before the body is read, and
   `Incoming.start` hands it to the engine with an `rpc.transport.Reply`,
-  through which the engine answers exactly once and releases the call.
-- The client side waits for responses in `rpc.transport.Pending`, a table
-  of slots by the id of a call, with deadlines.
+  through which the engine answers at most once and releases the call
+  exactly once, last.
+- The client side can wait for responses in `rpc.transport.Pending`, a
+  table of slots by the id of a call, with deadlines: a helper for a
+  transport that matches responses to requests itself.
 - `Incoming.cancel`, when the client gives up, may come only after `start`
   has returned null and before `Reply.release` returns, under the lock
   that `release` takes; a cancel during `start` waits for it, and is

@@ -27,11 +27,15 @@
 //!   The counters of a route, `rpc.transport.Dispatcher.routeStats` (NATS
 //!   micro shows them), count those of a known route.
 //! - A success the engine still turns into a failure after the chain is
-//!   logged as a success: a response over `max_response_bytes`, or one the
-//!   transport cannot carry, goes out as `resource_exhausted`; one that
-//!   ends a fraction of a millisecond before the deadline (the record and
-//!   the unwinding take that long) goes out as `deadline_exceeded` when
-//!   the engine reads the clock past it.
+//!   logged as a success: a response the transport cannot carry (over its
+//!   own limit, such as the NATS max payload) goes out as
+//!   `resource_exhausted`, and so does, under `rpc.RawServer`, one over
+//!   `max_response_bytes`; one that ends a fraction of a millisecond
+//!   before the deadline (the record and the unwinding take that long)
+//!   goes out as `deadline_exceeded` when the engine reads the clock past
+//!   it. Under `rpc.Server` a response over `max_response_bytes` is
+//!   refused inside the chain, by the method's encoding, and its record
+//!   has the `resource_exhausted`.
 //! - A handler that ignores the client's cancel or the stop and outlives
 //!   the deadline is logged as `deadline_exceeded`, though its client got
 //!   `cancelled` from the stop, or nothing after giving up.
