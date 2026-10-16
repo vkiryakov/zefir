@@ -2603,32 +2603,6 @@ test "a checked list converts to an array of the field type: strings, tags by na
     try t.expectEqual(@as(u16, 9), from_array[1]);
 }
 
-// ------------------------------------------------------------------ rule lists
-
-/// One rule or a tuple of rules -> a slice of rules. Anything else stops
-/// compilation; `where` (`<Type>.field_rules.<field>` or `each(...)`) starts
-/// the error. A nested tuple is not flattened: it is an item that is not a
-/// rule.
-pub fn toRules(comptime value: anytype, comptime where: []const u8) []const Rule {
-    @setEvalBranchQuota(eval_quota);
-    const V = @TypeOf(value);
-    if (V == Rule) return &.{value};
-    switch (@typeInfo(V)) {
-        .@"struct" => |s| if (s.is_tuple) {
-            var out: [value.len]Rule = undefined;
-            for (&out, 0..) |*slot, i| {
-                const E = @TypeOf(value[i]);
-                if (E != Rule) notARule(value[i], where, std.fmt.comptimePrint("item {d} of the tuple is ", .{i}));
-                slot.* = value[i];
-            }
-            const final = out;
-            return &final;
-        },
-        else => {},
-    }
-    notARule(value, where, "expected a rule or a tuple of rules, got ");
-}
-
 // ------------------------------------------------------------------ entries
 
 /// An entry of `field_rules`, or the argument of `each`, taken apart: its
@@ -3266,14 +3240,14 @@ test "a type error names the rule and the field type, then the one hint that app
 
 test "one rule or a tuple of rules becomes a list of rules" {
     const where = "Dto.field_rules.x";
-    const one = comptime toRules(test_rules.positive, where);
+    const one = comptime entryParts(test_rules.positive, where, false).rules;
     try std.testing.expectEqual(1, one.len);
     try std.testing.expectEqual(Kind.positive, one[0].kind);
-    const two = comptime toRules(.{ test_rules.positive, test_rules.custom }, where);
+    const two = comptime entryParts(.{ test_rules.positive, test_rules.custom }, where, false).rules;
     try std.testing.expectEqual(2, two.len);
     try std.testing.expectEqual(Kind.positive, two[0].kind);
     try std.testing.expectEqual(Kind.custom, two[1].kind);
-    const none = comptime toRules(.{}, where);
+    const none = comptime entryParts(.{}, where, false).rules;
     try std.testing.expectEqual(0, none.len);
 }
 
@@ -3366,7 +3340,7 @@ test "a field_rules table is a struct literal or .{}, not an element" {
 
 test "a trailing each holds the item rules and the others apply to the value itself" {
     const where = "Dto.field_rules.x";
-    const with_each = comptime toRules(.{ test_rules.min_items, test_rules.each_positive }, where);
+    const with_each = comptime entryParts(.{ test_rules.min_items, test_rules.each_positive }, where, false).rules;
     const own = comptime ownRules(with_each);
     try std.testing.expectEqual(1, own.len);
     try std.testing.expectEqual(Kind.min_items, own[0].kind);
@@ -3374,11 +3348,11 @@ test "a trailing each holds the item rules and the others apply to the value its
     try std.testing.expectEqual(1, items.len);
     try std.testing.expectEqual(Kind.positive, items[0].kind);
 
-    const only_each = comptime toRules(test_rules.each_positive, where);
+    const only_each = comptime entryParts(test_rules.each_positive, where, false).rules;
     try std.testing.expectEqual(0, (comptime ownRules(only_each)).len);
     try std.testing.expectEqual(1, (comptime itemRules(only_each)).len);
 
-    const without_each = comptime toRules(.{ test_rules.positive, test_rules.custom }, where);
+    const without_each = comptime entryParts(.{ test_rules.positive, test_rules.custom }, where, false).rules;
     try std.testing.expectEqual(2, (comptime ownRules(without_each)).len);
     try std.testing.expectEqual(0, (comptime itemRules(without_each)).len);
 }

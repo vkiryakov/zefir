@@ -626,7 +626,7 @@ fn expectAll(comptime name: []const u8, predicate: fn ([]const u8) bool, expecte
 
 /// The error of the list check of the bound rule at `rules[index]`, or null.
 fn listText(comptime rules: anytype, comptime index: usize) ?[]const u8 {
-    const list = core.toRules(rules, test_where);
+    const list = core.entryParts(rules, test_where, false).rules;
     return boundListProblem(&list[index], list, index, test_where);
 }
 
