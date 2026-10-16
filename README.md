@@ -336,7 +336,10 @@ const zefir = @import("zefir"); // zefir.confy, zefir.core, ...
 ```sh
 zig build test --summary all                                                     # run all tests
 zig build test-log --summary all                                                 # run one module's tests: test-core, test-log, …
-zig fmt --check build.zig build.zig.zon src tests --exclude tests/nats/zig-pkg   # check formatting
+# check formatting, as CI does
+zig fmt --check build.zig build.zig.zon src tests examples \
+  --exclude tests/nats/zig-pkg --exclude tests/rpc-nats/zig-pkg \
+  --exclude examples/rpc-custom-transport/zig-pkg --exclude examples/rpc-custom-transport/consumer/zig-pkg
 ```
 
 CI tests a pull request only on the modules it affects. A change under `src/<module>/` runs the tests of that module, of every module that depends on it and of `zefir`; a change to `build.zig`, `build.zig.zon`, `src/zefir.zig` or `.github/` runs them all, and documentation outside `src/` runs none, except this README: its "rpc in a minute" is a program that the tests of rpc check. Every push to `dev` and `main` tests all modules. The module graph for this is in `.github/scripts/affected-modules.sh`: a new module goes there as well as into `build.zig`.
@@ -354,7 +357,25 @@ zig build check               # build all of the above without running it; no se
 zig build down                # stop the servers
 ```
 
-`zig build down` also resets the servers when a run dies half way, say while a test holds one of them paused. Whenever CI tests nats, it builds this package on Linux, macOS and Windows and runs the end-to-end tests on Linux; a change to `tests/nats/` or `docker-compose.yml` counts as a change to nats.
+`zig build down` also resets the servers when a run dies half way, say while a test holds one of them paused. Whenever CI tests nats, it builds this package on Linux, macOS and Windows and runs the end-to-end tests on Linux; a change to `tests/nats/` counts as a change to nats.
+
+The end-to-end tests of rpc-nats, with the examples of its guide, are a package of the same kind in `tests/rpc-nats`, against servers of the same `docker-compose.yml`:
+
+```sh
+cd tests/rpc-nats
+zig build e2e      # start the servers if needed, run the tests, then the examples, checking what they print against the guide
+zig build check    # build the tests and the examples without running them; no servers needed
+zig build down     # stop the servers
+```
+
+CI treats it as nats: whenever it tests rpc-nats, it builds the package on the three systems and runs it on Linux; a change to `tests/rpc-nats/` counts as a change to rpc-nats, and one to `docker-compose.yml` as a change to both.
+
+`examples/rpc-custom-transport` is a transport of rpc in a package of its own, the proof that one can be written outside zefir. Its `consumer/` builds it as an application does, against the zefir of this checkout, and CI runs it whenever it tests rpc; a change to the package counts as a change to rpc:
+
+```sh
+cd examples/rpc-custom-transport/consumer
+zig build test     # the conformance suite of rpc on the transport, its own tests, rpc.Server and rpc.Client over it
+```
 
 Branches:
 
