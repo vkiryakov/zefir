@@ -152,7 +152,9 @@ pub fn build(b: *std.Build) void {
         const exe = b.addExecutable(.{
             .name = example.name,
             .root_module = b.createModule(.{
-                .root_source_file = b.path("example_main.zig"),
+                // The root of the programs of the guide of rpc: a panic
+                // exits with code 3, a run past two minutes with code 4.
+                .root_source_file = zefir.path("src/rpc/examples/example_main.zig"),
                 .target = target,
                 .optimize = optimize,
                 .imports = &.{.{ .name = "example", .module = b.createModule(.{
