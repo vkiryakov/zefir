@@ -631,7 +631,8 @@ What each part does:
   which checks it before the work, as code on a real database does.
 - `rpc.testing.MemoryTransport` carries the calls inside the process, so
   the server and the client run in one program here. A service on NATS
-  gets `rpc_nats.Transport` instead, and nothing else changes; see the
+  gets `rpc_nats.Transport` instead, on a connection to the broker, and
+  its contract, handlers and calls stay the same; see the
   [guide of rpc-nats](../../rpc-nats/examples/README.md).
 - `rpc.Server.init` builds the server from its options and checks every
   handler when it compiles. `start` starts taking calls; `deinit`, in the
@@ -1445,7 +1446,10 @@ the same calls, which [Authentication](#authentication) uses:
 //! need: it stands in for a Redis client on `std.Io`, which a service
 //! connects in `main` and hands to its middleware. Like such a client, it
 //! waits only through `std.Io`, and every call fails with
-//! `error.Unavailable` while the store is down.
+//! `error.Unavailable` while the store is down. Unlike Redis, it never
+//! removes an expired key, only reuses it when the key comes again, so it
+//! grows with every new key until `deinit`: enough for the examples, not
+//! for a service.
 
 const std = @import("std");
 
@@ -2386,9 +2390,13 @@ pub fn main(init: std.process.Init) !void {
     var client = try rpc.Client.init(gpa, .{ .transport = memory.clientTransport() });
     defer client.deinit();
 
-    // Two calls in tasks of their own; the stop begins while both run.
+    // Two calls in tasks of their own; the stop begins while both run. On an
+    // error before their awaits, the calls are canceled and their results
+    // freed.
     var daily = try io.concurrent(buildReport, .{ &client, io, "daily", 500 });
+    errdefer discard(daily.cancel(io));
     var yearly = try io.concurrent(buildReport, .{ &client, io, "yearly", 10_000 });
+    errdefer discard(yearly.cancel(io));
     try reports.both_running.wait(io);
 
     // The server holds two calls already: a third is refused at once, and
@@ -2407,6 +2415,11 @@ pub fn main(init: std.process.Init) !void {
 
 fn buildReport(client: *rpc.Client, io: std.Io, name: []const u8, ms: u32) rpc.Client.CallError!rpc.Client.Result(Report) {
     return client.call(io, .root, ReportApi.build, .{ .name = name, .ms = ms }, .{});
+}
+
+fn discard(built: rpc.Client.CallError!rpc.Client.Result(Report)) void {
+    var result = built catch return;
+    result.deinit();
 }
 
 fn logOutcome(app: log.Logger, name: []const u8, built: rpc.Client.CallError!rpc.Client.Result(Report)) void {

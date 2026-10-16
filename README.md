@@ -40,43 +40,43 @@ Zefir is shaped by my needs first, and it's open to everyone. If it fits the way
 
 Take any module on its own, or all the finished ones at once through the umbrella module `zefir`.
 
-| Module                             | What it does                                                                                               | Status                                            |
-| ---------------------------------- | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
-| **Core & Foundation**              |                                                                                                            |                                                   |
-| `zefir-core`                       | Execution context: deadlines, cancellation, W3C trace context; application container and lifecycle planned | ✅ Done · [docs](src/core/examples/README.md)      |
-| `zefir-confy`                      | Typed configuration: JSON, INI, `.env` files, environment variables, secrets                               | ✅ Done · [docs](src/confy/examples/README.md)     |
-| `zefir-log`                        | Structured logging: JSON Lines, levels, context, redaction                                                 | ✅ Done · [docs](src/log/examples/README.md)       |
-| `zefir-validator`                  | Typed schemas, validation rules, error reporting                                                           | ✅ Done · [docs](src/validator/examples/README.md) |
-| `zefir-events`                     | Typed in-process event bus                                                                                 | 📋 Planned                                         |
-| `zefir-retry`                      | Retry policies, backoff, jitter, circuit breaker                                                           | 📋 Planned                                         |
-| **Networking & Communication**     |                                                                                                            |                                                   |
-| `zefir-http`                       | HTTP server, REST API, routing, middleware, WebSocket, SSE                                                 | 📋 Planned                                         |
-| `zefir-rpc`                        | Typed RPC with pluggable transports: NATS now, HTTP (Connect) and TCP later                                | ✅ Done · [docs](src/rpc/examples/README.md)       |
-| `zefir-rpc-nats`                   | NATS transport for `zefir-rpc`: request-reply, ADR-32 errors, NATS micro discovery                         | ✅ Done · [docs](src/rpc-nats/examples/README.md)  |
-| `zefir-rpc-log`                    | Access logs of `zefir-rpc` calls on `zefir-log`: one record per call, never bodies or credentials          | ✅ Done · [docs](src/rpc/examples/README.md)       |
-| `zefir-graphql`                    | GraphQL queries, mutations, subscriptions, resolvers                                                       | 📋 Planned                                         |
-| `zefir-messaging`                  | Pub/sub, message queues, consumers, backpressure                                                           | 📋 Planned                                         |
-| `zefir-nats`                       | Native async NATS client on `std.Io`: publish/subscribe, request/reply, reconnect                          | ✅ Done · [docs](src/nats/examples/README.md)      |
-| `zefir-zmq`                        | ZeroMQ / ZMTP integration                                                                                  | 📋 Planned                                         |
-| `zefir-grpc`                       | gRPC interoperability                                                                                      | 📋 Planned                                         |
-| **Database & Persistence**         |                                                                                                            |                                                   |
-| `zefir-mongo`                      | Async MongoDB driver: BSON, connection pooling, transactions                                               | 📋 Planned                                         |
-| `zefir-odm`                        | MongoDB ODM (Object Data Mapper): typed schemas, models, CRUD, aggregation                                 | 📋 Planned                                         |
-| `zefir-cache`                      | L1/L2 caching, TTL, Redis, invalidation, synchronization                                                   | 📋 Planned                                         |
-| **Security**                       |                                                                                                            |                                                   |
-| `zefir-security`                   | Authentication, authorization, JWT, MFA/TOTP, WebAuthn, TLS integration, CORS, rate limiting               | 📋 Planned                                         |
-| **Observability & Diagnostics**    |                                                                                                            |                                                   |
-| `zefir-observability`              | Metrics, distributed tracing, OpenTelemetry integration                                                    | 📋 Planned                                         |
-| `zefir-diagnostics`                | Runtime diagnostics: tasks, threads, IO, memory, stack monitoring where supported                          | 📋 Planned                                         |
-| `zefir-console`                    | Live terminal UI for runtime diagnostics, inspired by Tokio Console                                        | 📋 Planned                                         |
-| `zefir-otel`                       | OpenTelemetry exporters                                                                                    | 📋 Planned                                         |
-| `zefir-health`                     | Liveness, readiness, startup health checks                                                                 | 📋 Planned                                         |
-| **Background Processing**          |                                                                                                            |                                                   |
-| `zefir-scheduler`                  | Scheduled jobs, cron expressions, timers                                                                   | 📋 Planned                                         |
-| **Developer Experience & Tooling** |                                                                                                            |                                                   |
-| `zefir-openapi`                    | OpenAPI generation from Zig types                                                                          | 📋 Planned                                         |
-| `zefir-cli`                        | Project scaffolding, code generation                                                                       | 📋 Planned                                         |
-| `zefir-test`                       | Testing helpers, mocks, fixtures                                                                           | 📋 Planned                                         |
+| Module                             | What it does                                                                                               | Status                                                  |
+| ---------------------------------- | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
+| **Core & Foundation**              |                                                                                                            |                                                         |
+| `zefir-core`                       | Execution context: deadlines, cancellation, W3C trace context; application container and lifecycle planned | ✅ Done · [docs](src/core/examples/README.md)            |
+| `zefir-confy`                      | Typed configuration: JSON, INI, `.env` files, environment variables, secrets                               | ✅ Done · [docs](src/confy/examples/README.md)           |
+| `zefir-log`                        | Structured logging: JSON Lines, levels, context, redaction                                                 | ✅ Done · [docs](src/log/examples/README.md)             |
+| `zefir-validator`                  | Typed schemas, validation rules, error reporting                                                           | ✅ Done · [docs](src/validator/examples/README.md)       |
+| `zefir-events`                     | Typed in-process event bus                                                                                 | 📋 Planned                                               |
+| `zefir-retry`                      | Retry policies, backoff, jitter, circuit breaker                                                           | 📋 Planned                                               |
+| **Networking & Communication**     |                                                                                                            |                                                         |
+| `zefir-http`                       | HTTP server, REST API, routing, middleware, WebSocket, SSE                                                 | 📋 Planned                                               |
+| `zefir-rpc`                        | Typed RPC with pluggable transports: NATS now, HTTP (Connect) and TCP later                                | ✅ Done · [docs](src/rpc/examples/README.md)             |
+| `zefir-rpc-nats`                   | NATS transport for `zefir-rpc`: request-reply, ADR-32 errors, NATS micro discovery                         | ✅ Done · [docs](src/rpc-nats/examples/README.md)        |
+| `zefir-rpc-log`                    | Access logs of `zefir-rpc` calls on `zefir-log`: one record per call, never bodies or credentials          | ✅ Done · [docs](src/rpc/examples/README.md#access-logs) |
+| `zefir-graphql`                    | GraphQL queries, mutations, subscriptions, resolvers                                                       | 📋 Planned                                               |
+| `zefir-messaging`                  | Pub/sub, message queues, consumers, backpressure                                                           | 📋 Planned                                               |
+| `zefir-nats`                       | Native async NATS client on `std.Io`: publish/subscribe, request/reply, reconnect                          | ✅ Done · [docs](src/nats/examples/README.md)            |
+| `zefir-zmq`                        | ZeroMQ / ZMTP integration                                                                                  | 📋 Planned                                               |
+| `zefir-grpc`                       | gRPC interoperability                                                                                      | 📋 Planned                                               |
+| **Database & Persistence**         |                                                                                                            |                                                         |
+| `zefir-mongo`                      | Async MongoDB driver: BSON, connection pooling, transactions                                               | 📋 Planned                                               |
+| `zefir-odm`                        | MongoDB ODM (Object Data Mapper): typed schemas, models, CRUD, aggregation                                 | 📋 Planned                                               |
+| `zefir-cache`                      | L1/L2 caching, TTL, Redis, invalidation, synchronization                                                   | 📋 Planned                                               |
+| **Security**                       |                                                                                                            |                                                         |
+| `zefir-security`                   | Authentication, authorization, JWT, MFA/TOTP, WebAuthn, TLS integration, CORS, rate limiting               | 📋 Planned                                               |
+| **Observability & Diagnostics**    |                                                                                                            |                                                         |
+| `zefir-observability`              | Metrics, distributed tracing, OpenTelemetry integration                                                    | 📋 Planned                                               |
+| `zefir-diagnostics`                | Runtime diagnostics: tasks, threads, IO, memory, stack monitoring where supported                          | 📋 Planned                                               |
+| `zefir-console`                    | Live terminal UI for runtime diagnostics, inspired by Tokio Console                                        | 📋 Planned                                               |
+| `zefir-otel`                       | OpenTelemetry exporters                                                                                    | 📋 Planned                                               |
+| `zefir-health`                     | Liveness, readiness, startup health checks                                                                 | 📋 Planned                                               |
+| **Background Processing**          |                                                                                                            |                                                         |
+| `zefir-scheduler`                  | Scheduled jobs, cron expressions, timers                                                                   | 📋 Planned                                               |
+| **Developer Experience & Tooling** |                                                                                                            |                                                         |
+| `zefir-openapi`                    | OpenAPI generation from Zig types                                                                          | 📋 Planned                                               |
+| `zefir-cli`                        | Project scaffolding, code generation                                                                       | 📋 Planned                                               |
+| `zefir-test`                       | Testing helpers, mocks, fixtures                                                                           | 📋 Planned                                               |
 
 > [!NOTE]
 > Zefir is in early development. Until 1.0, any minor release may change the API.
@@ -288,7 +288,7 @@ $ zig build run
 2026-10-16T09:51:59.485Z WARN  No user id=7 app_code=users.not_found
 ```
 
-The compiler checks the handler against the contract and the request of every call against the method's type, and a failure of the service, such as `users.not_found`, comes as a value, not an error. On NATS, `rpc_nats.Transport` takes the place of the memory transport, and nothing else changes. Validation with zefir-validator on both sides, middleware, authentication, deadlines that travel into nested calls, access logs and a graceful stop are in the guide. **[Read the rpc guide →](src/rpc/examples/README.md)**
+The compiler checks the handler against the contract and the request of every call against the method's type, and a failure of the service, such as `users.not_found`, comes as a value, not an error. On NATS, `rpc_nats.Transport` on a connection to the broker takes the place of the memory transport, and the contract, the handler and the calls stay the same. Validation with zefir-validator on both sides, middleware, authentication, deadlines that travel into nested calls, access logs and a graceful stop are in the guide. **[Read the rpc guide →](src/rpc/examples/README.md)**
 
 ## Installation
 

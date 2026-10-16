@@ -78,9 +78,13 @@ pub fn main(init: std.process.Init) !void {
     var client = try rpc.Client.init(gpa, .{ .transport = memory.clientTransport() });
     defer client.deinit();
 
-    // Two calls in tasks of their own; the stop begins while both run.
+    // Two calls in tasks of their own; the stop begins while both run. On an
+    // error before their awaits, the calls are canceled and their results
+    // freed.
     var daily = try io.concurrent(buildReport, .{ &client, io, "daily", 500 });
+    errdefer discard(daily.cancel(io));
     var yearly = try io.concurrent(buildReport, .{ &client, io, "yearly", 10_000 });
+    errdefer discard(yearly.cancel(io));
     try reports.both_running.wait(io);
 
     // The server holds two calls already: a third is refused at once, and
@@ -99,6 +103,11 @@ pub fn main(init: std.process.Init) !void {
 
 fn buildReport(client: *rpc.Client, io: std.Io, name: []const u8, ms: u32) rpc.Client.CallError!rpc.Client.Result(Report) {
     return client.call(io, .root, ReportApi.build, .{ .name = name, .ms = ms }, .{});
+}
+
+fn discard(built: rpc.Client.CallError!rpc.Client.Result(Report)) void {
+    var result = built catch return;
+    result.deinit();
 }
 
 fn logOutcome(app: log.Logger, name: []const u8, built: rpc.Client.CallError!rpc.Client.Result(Report)) void {

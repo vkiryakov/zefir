@@ -2,7 +2,10 @@
 //! need: it stands in for a Redis client on `std.Io`, which a service
 //! connects in `main` and hands to its middleware. Like such a client, it
 //! waits only through `std.Io`, and every call fails with
-//! `error.Unavailable` while the store is down.
+//! `error.Unavailable` while the store is down. Unlike Redis, it never
+//! removes an expired key, only reuses it when the key comes again, so it
+//! grows with every new key until `deinit`: enough for the examples, not
+//! for a service.
 
 const std = @import("std");
 
