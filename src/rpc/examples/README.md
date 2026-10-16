@@ -1265,15 +1265,20 @@ It runs in the caller's task, around the transport's call:
   replaces the credentials;
 - after it: the outcome, for metrics and logs, and `ctx.response()`, the
   server's response, a failure too, or null after an error;
+  `ctx.sent()` is false when that response is the client's own refusal;
 - it may replace the outcome with an error of the client's list, and
   return such an error without calling `next.run()`; success without
   `next.run()` is `MiddlewareFailed`.
 
 It sees the response before the client decodes it: a success it sees may
-still end the call with `InvalidResponse`. A request that the client does
-not send, such as one against its rules, never reaches it. `error.Canceled`
-from the I/O of a link goes back as it is; a link that swallows it calls
-`ctx.io().recancel()`.
+still end the call with `InvalidResponse`. A call that the client refuses
+before the chain never reaches it: a request against its rules, invalid
+metadata, a caller's context that has expired or is canceled, a call over
+`max_pending`. Credentials that cannot travel, such as a token with a line
+break, are refused at the end of the chain, where the engine sends: the
+link sees that refusal as the response, with `ctx.sent()` false.
+`error.Canceled` from the I/O of a link goes back as it is; a link that
+swallows it calls `ctx.io().recancel()`.
 
 </details>
 
@@ -2097,14 +2102,19 @@ failure, how long the call took in milliseconds, and the name of the
 transport. The server's record adds the `peer` when the transport knows
 one, the listed `metadata`, and, with `.log_subject = true`, the `subject`
 of the caller. The client's record adds `error`, the name of the error that
-ended a call without a response, next to the code it amounts to. The trace
+ended a call without a response, next to the code it amounts to, and
+`sent` set to false when the failure is the client's own refusal, not the
+server's. The trace
 id comes from the call's context: here the gateway's, on both sides; each
 side has a span of its own. In JSON, the format a log store reads, the
 fields sit in the object `rpc`: `"rpc":{"service":"users","version":1,…}`.
 
-- **Levels.** A success and the failures of the application are `info`;
-  `internal`, `unavailable` and `resource_exhausted`, the failures of the
-  service itself and of its limits, are `warn`. `.levels = .{ .ok = .debug }`
+- **Levels.** The failures of the service itself are `error`: `unknown`,
+  `unimplemented`, `internal`, `data_loss`. What an operator watches is
+  `warn`: `deadline_exceeded`, `permission_denied`, `resource_exhausted`,
+  `failed_precondition`, `aborted`, `out_of_range`, `unavailable`. A
+  success and the answers a caller's own request earns (`not_found`,
+  `invalid_argument`, …) are `info`. `.levels = .{ .ok = .debug }`
   changes any of them.
 - **Never in a record:** a body, credentials (`authorization` never reaches
   middleware as metadata), metadata outside `.metadata_keys`, the identity
@@ -2123,8 +2133,9 @@ What a middleware cannot see, the log does not show as it went out:
   ends a fraction of a millisecond before the deadline.
 - On the client, the chain sees the response before it is decoded: a
   success that does not decode is logged `ok`, and the call ends with
-  `InvalidResponse`. A request the client does not send has no record, as
-  the invalid `createUser` above shows.
+  `InvalidResponse`. A call the client refuses before the chain has no
+  record, as the invalid `createUser` above shows; so do a caller's
+  context that has expired or is canceled and a call over `max_pending`.
 
 ## Idempotency
 

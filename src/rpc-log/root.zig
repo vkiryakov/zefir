@@ -31,10 +31,11 @@
 //!
 //! A record never holds a body, credentials (`authorization` never
 //! reaches middleware as metadata), metadata outside the listed keys, or
-//! the identity beyond its subject. A success and the failures of the
-//! application are logged at `info`; `internal`, `unavailable` and
-//! `resource_exhausted`, the failures of the service itself and of its
-//! limits, at `warn`; `Levels` changes any of them.
+//! the identity beyond its subject. The failures of the service itself
+//! (`unknown`, `unimplemented`, `internal`, `data_loss`) are logged at
+//! `err`; deadlines, refusals of permission and state, limits and a link
+//! that is down at `warn`; a success and the other answers to a caller's
+//! request at `info`. `Levels` changes any of them.
 
 const std = @import("std");
 

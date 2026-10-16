@@ -282,8 +282,8 @@ test "A10: a failure carries its code and app code; the level follows the outcom
     try expectString("info", member(records[0], "level"));
     try expectString("not_found", call(records[0], "code"));
     try expectString("users.not_found", call(records[0], "app_code"));
-    // A failure of the service itself: warn.
-    try expectString("warn", member(records[1], "level"));
+    // A failure of the service itself: error.
+    try expectString("error", member(records[1], "level"));
     try expectString("internal", call(records[1], "code"));
     try expectString("rpc.internal", call(records[1], "app_code"));
     // Without the options, no subject and no metadata; no trace without one.
@@ -335,7 +335,7 @@ test "A10: at the deadline the record names the failure the client got, also for
         try expectString(method, call(record, "method"));
         try expectString("deadline_exceeded", call(record, "code"));
         try expectString("rpc.deadline_exceeded", call(record, "app_code"));
-        try expectString("info", member(record, "level"));
+        try expectString("warn", member(record, "level"));
     }
 }
 
