@@ -35,6 +35,11 @@
 //! on as they are: the contract's `.errors`, then the framework's names
 //! (`error.Unavailable` → `unavailable`, ...), else `internal`.
 //!
+//! The strings and slices of a decoded request point into the memory of
+//! its call, the body and the call's arena, and live only until the call
+//! ends with its response. A handler that keeps one longer, such as a key
+//! in a map of its own, copies it first: `gpa.dupe(u8, req.name)`.
+//!
 //! The handlers, the authenticator and the objects of middleware are
 //! borrowed: their owner keeps them alive until `deinit`. Each serves all
 //! calls at once, so its state is guarded with `std.Io` primitives. Under
