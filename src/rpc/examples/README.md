@@ -953,7 +953,7 @@ are what went wrong locally, and each says whether a retry is safe:
 | `Unavailable` | not sent, or surely not run: no link, the server drains, no server at all (on NATS: no responders), an open circuit breaker | safe |
 | `DeadlineExceeded`, `Cancelled` | the deadline or a cancelation; if the request went out, the outcome is unknown | only an idempotent call |
 | `ConnectionLost` | the link broke after sending; the outcome is unknown | only an idempotent call |
-| `AccessDenied` | the broker did not let the call out (NATS permissions) | after a change of the settings |
+| `AccessDenied` | the transport or the broker refused before sending; on NATS, the permissions deny the client's inbox, while a denied publish ends with `DeadlineExceeded` ([permissions in the rpc-nats guide](../../rpc-nats/examples/README.md#permissions)) | after a change of the settings |
 | `TooManyPendingRequests` | `max_pending` calls in flight; not sent | later |
 | `RequestTooLarge` | larger than the transport carries; not sent | no |
 | `ResponseTooLarge` | the response is over the client's limits and was dropped, though the server ran the call | only an idempotent call |
