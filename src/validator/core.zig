@@ -1271,6 +1271,11 @@ pub const Rule = struct {
     precondition: ?Precondition = null,
     /// `each` only: the rules applied to every item.
     inner: []const Rule = &.{},
+    /// `each` only: the transforms of every item, which `v.transform` runs.
+    item_transforms: []const Transform = &.{},
+    /// `each` only: an element of its argument out of its place, reported
+    /// by the declaration check of its field, where the path is known.
+    item_problem: ?EntryProblem = null,
     /// The sides of the values the rule accepts (`min(5)`: value >= 5), for
     /// the contradiction check of the rule list.
     bounds: []const Bound = &.{},
@@ -1386,6 +1391,69 @@ pub fn define(comptime kind: Kind, comptime spec: Spec) Rule {
 pub fn expectOutcome(expected: Outcome, comptime rule: Rule, value: anytype) !void {
     try std.testing.expectEqual(expected, rule.eval(&value));
 }
+
+// ------------------------------------------------------------------ names and transforms
+
+/// The outside name of a field, built by `v.rename(name)`: the first
+/// element of the field's entry in `field_rules`.
+pub const Rename = struct {
+    /// 1 to 64 bytes from `A-Z`, `a-z`, `0-9`, `_` and `-`, checked by
+    /// `v.rename`.
+    name: []const u8,
+};
+
+/// Every transform of the validator. The tag is the snake_case name that
+/// declaration errors use.
+pub const TransformKind = enum { trim, trim_start, trim_end, to_lower, to_upper, transform_with };
+
+/// The public name of the transform of `kind`: `trimStart`.
+pub fn transformName(comptime kind: TransformKind) []const u8 {
+    return switch (kind) {
+        .trim => "trim",
+        .trim_start => "trimStart",
+        .trim_end => "trimEnd",
+        .to_lower => "toLower",
+        .to_upper => "toUpper",
+        .transform_with => "transformWith",
+    };
+}
+
+/// A transform of `field_rules`: a value such as `v.trim`, or one built by
+/// `v.transformWith(f)`. `v.transform` runs it on its field's value, and
+/// `v.check` and `v.checkAll` skip it. It holds a type and a function, so it
+/// is a comptime-only value, as a `Rule` is. Internal to the module.
+pub const Transform = struct {
+    kind: TransformKind,
+    /// A namespace whose `call` is the function the transform runs:
+    /// `fn (std.mem.Allocator, U) U` or `fn (std.mem.Allocator, U) E!U`,
+    /// where `U` is the unwrapped field type (the unwrapped item type inside
+    /// `each`).
+    run: type,
+    /// Compile-time check against the unwrapped field type (or the unwrapped
+    /// item type inside `each`); `where` as for `Rule.fits`.
+    fits: fn (comptime transform: *const Transform, comptime T: type, comptime where: []const u8) void,
+
+    /// The public name: `trimStart`.
+    pub fn name(comptime t: Transform) []const u8 {
+        return transformName(t.kind);
+    }
+
+    /// The snake_case form that declaration errors use: `trim_start`, and
+    /// `transform_with(...)`, since Zig cannot name a function value.
+    pub fn label(comptime t: Transform) []const u8 {
+        return comptime @tagName(t.kind) ++ if (t.kind == .transform_with) "(...)" else "";
+    }
+
+    /// The errors of its function, without `error.OutOfMemory` unless the
+    /// function returns it: `error{}` for a function without an error union.
+    pub fn Error(comptime t: Transform) type {
+        const R = @typeInfo(@TypeOf(t.run.call)).@"fn".return_type.?;
+        return switch (@typeInfo(R)) {
+            .error_union => |e| e.error_set,
+            else => error{},
+        };
+    }
+};
 
 // ------------------------------------------------------------------ message templates
 
@@ -1861,10 +1929,17 @@ pub const hints = struct {
     /// `iso8601` beside a `minDate` or `maxDate`, whose bound fixes the form.
     pub const iso8601_with_date = "use v.date instead of v.iso8601";
     pub const iso8601_with_date_time = "use v.rfc3339 instead of v.iso8601";
+    /// `transformWith` on a list whose items its function would take.
+    pub const use_each_transform_with = "use v.each(v.transformWith(...))";
 
     /// A rule written on a list whose items it would accept.
     pub fn useEach(comptime rule: Rule) []const u8 {
         return "use v.each(v." ++ rule.call() ++ ")";
+    }
+
+    /// A built-in transform written on a list of strings.
+    pub fn useEachTransform(comptime transform: Transform) []const u8 {
+        return "use v.each(v." ++ transform.name() ++ ")";
     }
 
     /// `contains` or `notContains` on a list of strings: the search inside
@@ -1907,9 +1982,10 @@ pub const hints = struct {
     }
 };
 
-/// The files that define rules. Each rule pull request adds its file here, so
-/// that its `call_examples` reach the hints.
-const rule_files = [_]type{ @import("common.zig"), @import("numbers.zig"), @import("strings.zig"), @import("formats.zig"), @import("encodings.zig"), @import("identifiers.zig"), @import("dates.zig"), @import("lists.zig"), @import("custom.zig") };
+/// The files that define rules, and those of the other elements of
+/// `field_rules`. Each rule pull request adds its file here, so that its
+/// `call_examples` reach the hints.
+const rule_files = [_]type{ @import("common.zig"), @import("numbers.zig"), @import("strings.zig"), @import("formats.zig"), @import("encodings.zig"), @import("identifiers.zig"), @import("dates.zig"), @import("lists.zig"), @import("custom.zig"), @import("transforms.zig"), @import("names.zig") };
 
 /// The arguments the hints show in a call of the constructor `name` of type
 /// `F`: its `call_examples` entry, else `.{}` for an options struct, the
@@ -2549,22 +2625,119 @@ pub fn toRules(comptime value: anytype, comptime where: []const u8) []const Rule
     notARule(value, where, "expected a rule or a tuple of rules, got ");
 }
 
-/// Raises the error for a value that is not a rule. A built-in predicate or
-/// rule constructor (a function that returns a `Rule`) that `root.zig`
-/// exports is named, without the tuple item prefix: a predicate gets the
-/// rule to use instead, a constructor the call it needs. Any other function,
-/// `v.check` and the other entry points included, gets the prefixed text with
-/// the hint to wrap it in `v.custom`. A tuple, a pointer to a tuple and a
-/// struct literal are named by what they are, with a hint, since their type
-/// names are long or generated; any other value is named by its type
-/// (`core.Rule` for a rule of another copy of the package).
+// ------------------------------------------------------------------ entries
+
+/// An entry of `field_rules`, or the argument of `each`, taken apart: its
+/// outside name, its transforms and its rules, each in the order written.
+pub const EntryParts = struct {
+    name: ?[]const u8 = null,
+    transforms: []const Transform = &.{},
+    rules: []const Rule = &.{},
+    /// The first element out of its place: the declaration check of the
+    /// field reports it with the field's path.
+    problem: ?EntryProblem = null,
+};
+
+/// An element out of its place. The order is at most one name, then the
+/// transforms, then the rules (`each` among them, last).
+pub const EntryProblem = union(enum) {
+    /// A name after a transform or a rule.
+    name_not_first,
+    /// A second name.
+    name_twice,
+    /// A name in the argument of `each`: list items have none.
+    name_in_each,
+    /// A transform after a rule: the labels of both.
+    transform_after_rule: struct { rule: []const u8, transform: []const u8 },
+};
+
+/// The error of `problem` in the entry at `where`.
+pub fn entryProblemText(comptime problem: EntryProblem, comptime where: []const u8) []const u8 {
+    return "validator: " ++ where ++ ": " ++ switch (problem) {
+        .name_not_first => "rename comes first: name, then transforms, then rules",
+        .name_twice => "rename appears twice; a field has one outside name",
+        .name_in_each => "rename inside each: list items have no name",
+        .transform_after_rule => |p| p.rule ++ " is a rule; transforms (" ++ p.transform ++ ") must come before the rules",
+    };
+}
+
+/// One element, or a tuple of elements, taken apart; `in_each` for the
+/// argument of `each`, where any name is a problem. An element is a name
+/// (`v.rename`), a transform or a rule; anything else stops compilation,
+/// and `where` (`<Type>.field_rules.<field>` or `each(...)`) starts the
+/// error. A nested tuple is not flattened: it is an item that is not an
+/// element. A problem of the order is kept in `problem`, not raised.
+pub fn entryParts(comptime value: anytype, comptime where: []const u8, comptime in_each: bool) EntryParts {
+    comptime {
+        @setEvalBranchQuota(eval_quota);
+        var entry: EntryParts = .{};
+        const V = @TypeOf(value);
+        if (isElement(V)) {
+            addElement(&entry, value, in_each);
+            return entry;
+        }
+        if (isTuple(V)) {
+            for (0..value.len) |i| {
+                if (!isElement(@TypeOf(value[i]))) notARule(value[i], where, std.fmt.comptimePrint("item {d} of the tuple is ", .{i}));
+                addElement(&entry, value[i], in_each);
+            }
+            return entry;
+        }
+        notARule(value, where, "expected a rule or a tuple of rules, got ");
+    }
+}
+
+/// A name, a transform or a rule.
+fn isElement(comptime E: type) bool {
+    return E == Rename or E == Transform or E == Rule;
+}
+
+/// Adds `element` to `entry`, and its problem when it is the first one.
+fn addElement(comptime entry: *EntryParts, comptime element: anytype, comptime in_each: bool) void {
+    const E = @TypeOf(element);
+    if (E == Rename) {
+        if (entry.problem == null) {
+            entry.problem = if (in_each) .name_in_each else if (entry.name != null) .name_twice else if (entry.transforms.len + entry.rules.len > 0) .name_not_first else null;
+        }
+        if (entry.name == null) entry.name = element.name;
+    } else if (E == Transform) {
+        if (entry.problem == null and entry.rules.len > 0)
+            entry.problem = .{ .transform_after_rule = .{ .rule = entry.rules[entry.rules.len - 1].label(), .transform = element.label() } };
+        entry.transforms = entry.transforms ++ &[_]Transform{element};
+    } else {
+        entry.rules = entry.rules ++ &[_]Rule{element};
+    }
+}
+
+/// The type of a `field_rules` declaration that the walker reads: a struct
+/// literal, or `.{}`. A rule, a transform or a name given as the whole
+/// declaration is not one.
+pub fn isFieldRulesTable(comptime R: type) bool {
+    if (R == Rule or R == Transform or R == Rename) return false;
+    return switch (@typeInfo(R)) {
+        .@"struct" => |s| !s.is_tuple or s.field_names.len == 0,
+        else => false,
+    };
+}
+
+/// Raises the error for a value that is not an element. A built-in
+/// predicate or constructor (a function that returns a `Rule`, a `Transform`
+/// or a name) that `root.zig` exports is named, without the tuple item
+/// prefix: a predicate gets the rule to use instead, a constructor the call
+/// it needs. Any other function, `v.check` and the other entry points
+/// included, gets the prefixed text with the hint to wrap it in `v.custom`.
+/// A tuple, a pointer to a tuple and a struct literal are named by what they
+/// are, with a hint, since their type names are long or generated; any other
+/// value is named by its type (`core.Rule` for a rule of another copy of the
+/// package).
 fn notARule(comptime value: anytype, comptime where: []const u8, comptime prefix: []const u8) noreturn {
     const V = @TypeOf(value);
     if (@typeInfo(V) == .@"fn") {
         if (constructorName(value)) |name| {
             if (exportedPredicateRule(root, name)) |rule|
                 @compileError("validator: " ++ where ++ ": " ++ hints.predicateAsRule(name, rule, @TypeOf(@field(root, rule))));
-            if ((@typeInfo(V).@"fn".return_type orelse void) == Rule)
+            const R = @typeInfo(V).@"fn".return_type orelse void;
+            if (R == Rule or R == Transform or R == Rename)
                 @compileError("validator: " ++ where ++ ": " ++ hints.mustBeCalled(name, V));
         }
         @compileError("validator: " ++ where ++ ": " ++ prefix ++ @typeName(V) ++ "; " ++ hints.wrap_predicate);
@@ -2638,6 +2811,23 @@ pub fn ownRules(comptime rules: []const Rule) []const Rule {
 pub fn itemRules(comptime rules: []const Rule) []const Rule {
     if (rules.len > 0 and rules[rules.len - 1].kind == .each) return rules[rules.len - 1].inner;
     return &.{};
+}
+
+/// The item transforms of a trailing `each`, or none.
+pub fn itemTransforms(comptime rules: []const Rule) []const Transform {
+    if (rules.len > 0 and rules[rules.len - 1].kind == .each) return rules[rules.len - 1].item_transforms;
+    return &.{};
+}
+
+/// A trailing `each`, or one nested in it, declares item transforms.
+pub fn hasItemTransforms(comptime rules: []const Rule) bool {
+    return itemTransforms(rules).len > 0 or (itemRules(rules).len > 0 and hasItemTransforms(itemRules(rules)));
+}
+
+/// The declaration check of one value's transforms: each one's `fits`
+/// against `T`, the unwrapped field or item type, in tuple order.
+pub fn checkTransforms(comptime transforms: []const Transform, comptime T: type, comptime where: []const u8) void {
+    for (transforms) |*t| t.fits(t, T, where);
 }
 
 /// The declaration check of one value's rules: at most one `each`, placed
@@ -3083,6 +3273,93 @@ test "one rule or a tuple of rules becomes a list of rules" {
     try std.testing.expectEqual(0, none.len);
 }
 
+test "an entry takes apart its outside name, transforms and rules, each in the order written" {
+    const t = std.testing;
+    const where = "Dto.field_rules.x";
+    const r = root;
+    const all = comptime entryParts(.{ r.rename("userName"), r.trim, r.toLower, r.notBlank, r.maxLength(10) }, where, false);
+    try t.expectEqualStrings("userName", all.name.?);
+    try t.expectEqual(2, all.transforms.len);
+    try t.expectEqual(TransformKind.trim, all.transforms[0].kind);
+    try t.expectEqual(TransformKind.to_lower, all.transforms[1].kind);
+    try t.expectEqual(2, all.rules.len);
+    try t.expectEqual(Kind.not_blank, all.rules[0].kind);
+    try t.expectEqual(Kind.max_length, all.rules[1].kind);
+    try t.expect(all.problem == null);
+    // One element alone, of each kind.
+    const name_only = comptime entryParts(r.rename("ID"), where, false);
+    try t.expectEqualStrings("ID", name_only.name.?);
+    try t.expectEqual(0, name_only.transforms.len + name_only.rules.len);
+    const transform_only = comptime entryParts(r.trimEnd, where, false);
+    try t.expectEqual(null, transform_only.name);
+    try t.expectEqual(TransformKind.trim_end, transform_only.transforms[0].kind);
+    try t.expectEqual(0, transform_only.rules.len);
+    const rule_only = comptime entryParts(test_rules.positive, where, false);
+    try t.expectEqual(1, rule_only.rules.len);
+    try t.expectEqual(0, rule_only.transforms.len);
+    // each is a rule; its argument is an entry of its own.
+    const with_each = comptime entryParts(.{ r.trim, r.each(.{ r.trim, r.notBlank }) }, where, false);
+    try t.expectEqual(1, with_each.transforms.len);
+    try t.expectEqual(Kind.each, with_each.rules[0].kind);
+    try t.expectEqual(TransformKind.trim, (comptime itemTransforms(with_each.rules))[0].kind);
+    try t.expectEqual(Kind.not_blank, (comptime itemRules(with_each.rules))[0].kind);
+    try t.expect(comptime hasItemTransforms(with_each.rules));
+    try t.expect(!comptime hasItemTransforms(&.{test_rules.each_positive}));
+    try t.expect(comptime hasItemTransforms(&.{r.each(r.each(r.trim))}));
+    try t.expect(!comptime hasItemTransforms(&.{test_rules.positive}));
+}
+
+/// The text of the problem of `value` as an entry of `field_rules` or, with
+/// `in_each`, as the argument of `each`; "" when it has none.
+fn entryProblemOf(comptime value: anytype, comptime in_each: bool) []const u8 {
+    const where = "Dto.field_rules.x";
+    const parts = comptime entryParts(value, where, in_each);
+    return if (parts.problem) |problem| comptime entryProblemText(problem, where) else "";
+}
+
+test "the first element out of its place is the problem of the entry" {
+    const expect = std.testing.expectEqualStrings;
+    const r = root;
+    const head = "validator: Dto.field_rules.x: ";
+    try expect(head ++ "rename comes first: name, then transforms, then rules", entryProblemOf(.{ r.trim, r.rename("a") }, false));
+    try expect(head ++ "rename comes first: name, then transforms, then rules", entryProblemOf(.{ r.notBlank, r.rename("a") }, false));
+    try expect(head ++ "rename appears twice; a field has one outside name", entryProblemOf(.{ r.rename("a"), r.rename("b") }, false));
+    try expect(head ++ "rename appears twice; a field has one outside name", entryProblemOf(.{ r.rename("a"), r.trim, r.rename("a") }, false));
+    // The rule right before the transform is named, with its arguments.
+    try expect(head ++ "not_blank is a rule; transforms (trim) must come before the rules", entryProblemOf(.{ r.rename("a"), r.notBlank, r.trim }, false));
+    try expect(head ++ "max_length(100) is a rule; transforms (to_lower) must come before the rules", entryProblemOf(.{ r.trim, r.notBlank, r.maxLength(100), r.toLower }, false));
+    try expect(head ++ "each(...) is a rule; transforms (transform_with(...)) must come before the rules", entryProblemOf(.{ r.each(r.trim), r.transformWith(test_transforms.same) }, false));
+    // Left to right, the first one wins.
+    try expect(head ++ "not_blank is a rule; transforms (trim) must come before the rules", entryProblemOf(.{ r.notBlank, r.trim, r.rename("a") }, false));
+    // In the argument of each, any name is out of its place.
+    try expect(head ++ "rename inside each: list items have no name", entryProblemOf(r.rename("a"), true));
+    try expect(head ++ "rename inside each: list items have no name", entryProblemOf(.{ r.trim, r.rename("a") }, true));
+    try expect(head ++ "not_blank is a rule; transforms (trim_start) must come before the rules", entryProblemOf(.{ r.notBlank, r.trimStart }, true));
+    // In their order, no problem.
+    try expect("", entryProblemOf(.{ r.rename("a"), r.trim, r.notBlank }, false));
+    try expect("", entryProblemOf(.{ r.trim, r.toUpper }, true));
+    // each keeps the problem of its argument for the declaration check of its field.
+    try std.testing.expect((comptime r.each(.{ r.notBlank, r.trim }).item_problem) != null);
+    try std.testing.expect((comptime r.each(.{ r.trim, r.notBlank }).item_problem) == null);
+}
+
+/// Stand-in functions for `transformWith` in the self-tests.
+const test_transforms = struct {
+    fn same(_: std.mem.Allocator, value: []const u8) []const u8 {
+        return value;
+    }
+};
+
+test "a field_rules table is a struct literal or .{}, not an element" {
+    try std.testing.expect(isFieldRulesTable(@TypeOf(.{ .x = test_rules.positive })));
+    try std.testing.expect(isFieldRulesTable(@TypeOf(.{})));
+    try std.testing.expect(!isFieldRulesTable(Rule));
+    try std.testing.expect(!isFieldRulesTable(Transform));
+    try std.testing.expect(!isFieldRulesTable(Rename));
+    try std.testing.expect(!isFieldRulesTable(@TypeOf(.{ test_rules.positive, test_rules.custom })));
+    try std.testing.expect(!isFieldRulesTable(comptime_int));
+}
+
 test "a trailing each holds the item rules and the others apply to the value itself" {
     const where = "Dto.field_rules.x";
     const with_each = comptime toRules(.{ test_rules.min_items, test_rules.each_positive }, where);
@@ -3462,23 +3739,43 @@ test "hint for a constructor used without a call" {
     );
     try std.testing.expectEqualStrings("each", comptime constructorName(root.each).?);
     try std.testing.expectEqualStrings("custom", comptime constructorName(root.custom).?);
+    // The constructors of a transform and of a name.
+    try std.testing.expectEqualStrings("transformWith must be called, e.g. v.transformWith(normalizePhone)", comptime hints.mustBeCalled("transformWith", @TypeOf(root.transformWith)));
+    try std.testing.expectEqualStrings("rename must be called, e.g. v.rename(\"userName\")", comptime hints.mustBeCalled("rename", @TypeOf(root.rename)));
+    try std.testing.expectEqualStrings("rename", comptime constructorName(root.rename).?);
     // Every exported function is named, not only constructors: a built-in
     // predicate used as a rule is recognized by its name.
     try std.testing.expectEqualStrings("check", comptime constructorName(root.check).?);
     try std.testing.expectEqual(null, comptime constructorName(S.plain));
 }
 
-test "every exported rule constructor shows a real call in its must-be-called hint" {
+test "every exported constructor of a rule, a transform or a name shows a real call in its must-be-called hint" {
     const missing = comptime blk: {
         var out: []const u8 = "";
         for (@typeInfo(root).@"struct".decl_names) |decl| {
             const D = @TypeOf(@field(root, decl));
-            if (@typeInfo(D) == .@"fn" and (@typeInfo(D).@"fn".return_type orelse void) == Rule and std.mem.eql(u8, exampleArgs(decl, D), "..."))
+            if (@typeInfo(D) != .@"fn") continue;
+            const R = @typeInfo(D).@"fn".return_type orelse void;
+            if ((R == Rule or R == Transform or R == Rename) and std.mem.eql(u8, exampleArgs(decl, D), "..."))
                 out = out ++ decl ++ " needs a call_examples entry\n";
         }
         break :blk out;
     };
     try std.testing.expectEqualStrings("", missing);
+}
+
+test "every transform is exported under its public name, the camelCase of its kind" {
+    inline for (@typeInfo(TransformKind).@"enum".field_names) |tag| {
+        const kind = @field(TransformKind, tag);
+        const name = comptime transformName(kind);
+        try std.testing.expectEqualStrings(tag, comptime snakeCase(name));
+        const exported = @field(root, name);
+        if (kind == .transform_with) {
+            try std.testing.expectEqual(kind, (comptime exported(test_transforms.same)).kind);
+        } else {
+            try std.testing.expectEqual(kind, exported.kind);
+        }
+    }
 }
 
 test "hint for a predicate used as a rule" {

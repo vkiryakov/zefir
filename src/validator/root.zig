@@ -30,10 +30,20 @@
 //! violation into a `Report`, `validateSelf` with `v.fail` checks across
 //! fields, and `v.custom` turns a predicate of your own into a rule. The guide
 //! is src/validator/examples/README.md.
+//!
+//! The entry of a field may also give it an outside name and transforms,
+//! in this order before its rules:
+//! `.user_name = .{ v.rename("userName"), v.trim, v.notBlank }`. The name is
+//! what JSON and the paths of violations call the field (`v.nameOf` and
+//! `v.fieldNamed` read it); `v.transform` runs the transforms (`v.trim`,
+//! `v.toLower`, `v.transformWith(f)`, ...), and then `v.check` checks the
+//! transformed value.
 
 const std = @import("std");
 const core = @import("core.zig");
 const walk = @import("walk.zig");
+const names = @import("names.zig");
+const transforms = @import("transforms.zig");
 const common = @import("common.zig");
 const numbers = @import("numbers.zig");
 const strings = @import("strings.zig");
@@ -58,6 +68,18 @@ pub const check = walk.check;
 pub const checkAll = walk.checkAll;
 pub const assertRules = walk.assertRules;
 pub const fail = walk.fail;
+pub const transform = walk.transform;
+pub const TransformError = walk.TransformError;
+
+pub const rename = names.rename;
+pub const nameOf = names.nameOf;
+pub const fieldNamed = names.fieldNamed;
+pub const trim = transforms.trim;
+pub const trimStart = transforms.trimStart;
+pub const trimEnd = transforms.trimEnd;
+pub const toLower = transforms.toLower;
+pub const toUpper = transforms.toUpper;
+pub const transformWith = transforms.transformWith;
 
 pub const equals = common.equals;
 pub const notEquals = common.notEquals;
@@ -229,6 +251,8 @@ pub const custom = custom_rules.custom;
 test {
     _ = core;
     _ = walk;
+    _ = names;
+    _ = transforms;
     _ = common;
     _ = numbers;
     _ = strings;

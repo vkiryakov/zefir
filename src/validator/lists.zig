@@ -550,23 +550,32 @@ fn itemsProblem(comptime rule: *const Rule, comptime values: anytype, comptime l
 
 // ------------------------------------------------------------------ each
 
-/// The rules for every item of a slice or an array: one rule or a tuple of
-/// rules. It declares item rules rather than checking the list: it must be
-/// the last rule of its tuple and appear once, and it has no code or message
-/// of its own. Null items are skipped; item paths are `tags[3]`.
-pub fn each(comptime rules: anytype) Rule {
+/// The transforms and the rules for every item of a slice or an array: one
+/// of them or a tuple, transforms first (`v.each(.{ v.trim, v.notBlank })`;
+/// `v.each(v.trim)` alone is valid too). It declares what applies to the
+/// items rather than checking the list: it must be the last rule of its
+/// tuple and appear once, and it has no code or message of its own. Items
+/// have no name, so `v.rename` does not go inside it. Null items are
+/// skipped; item paths are `tags[3]`.
+pub fn each(comptime items: anytype) Rule {
     @setEvalBranchQuota(core.eval_quota);
-    const inner = core.toRules(rules, "each(...)");
-    if (inner.len == 0) @compileError("validator: each(.{}): the list is empty");
+    const parts = core.entryParts(items, "each(...)", true);
+    if (parts.name == null and parts.transforms.len == 0 and parts.rules.len == 0) @compileError("validator: each(.{}): the list is empty");
     return .{
         .kind = .each,
         .code = "",
         .message = "",
         .args = "...",
-        .inner = inner,
+        .inner = parts.rules,
+        .item_transforms = parts.transforms,
+        .item_problem = parts.problem,
         .fits = struct {
             fn fits(comptime rule: *const Rule, comptime T: type, comptime where: []const u8) void {
+                // A name is about each itself; the order, about its items.
+                if (rule.item_problem) |problem|
+                    @compileError(core.entryProblemText(problem, if (problem == .name_in_each) where else where ++ "[]"));
                 const Item = core.ListChild(T) orelse core.typeError(rule, T, where, "a slice or an array", acceptsList, null);
+                core.checkTransforms(rule.item_transforms, core.Unwrap(Item), where ++ "[]");
                 core.checkRuleList(rule.inner, core.Unwrap(Item), where ++ "[]");
             }
         }.fits,
