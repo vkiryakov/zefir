@@ -74,8 +74,11 @@ const OrderHandler = struct {
             .ok => |user| user,
             .failure => |failure| return if (failure.code == .not_found) error.UnknownUser else error.UsersUnavailable,
         };
+        // The rules of Item keep the total within a u64. The arithmetic is
+        // checked all the same: an overflow is then the failure `internal`,
+        // while an unchecked one would stop the whole service.
         var total: u64 = 0;
-        for (req.items) |item| total += item.price_cents * item.quantity;
+        for (req.items) |item| total = try std.math.add(u64, total, try std.math.mul(u64, item.price_cents, item.quantity));
         return .{
             .id = self.next_id.fetchAdd(1, .monotonic),
             // The name lives in `found`, which deinit frees on return: the
@@ -132,25 +135,52 @@ pub fn main(init: std.process.Init) !void {
     // The shop, a client of orders.
     var client = try rpc.Client.init(gpa, .{ .transport = orders_link.clientTransport() });
     defer client.deinit();
+
+    // A shop built against an older orders-api, whose Item had no rule for
+    // price_cents, sends a price no item has. The server checks the rules
+    // of the request again and refuses it before the handler runs.
+    try placeOrder(&client, io, shop, OldOrderApi.placeOrder, .{ .user_id = 1, .items = &.{
+        .{ .sku = "grinder", .quantity = 2, .price_cents = 9_223_372_036_854_775_808 },
+    } });
+
+    // The service goes on.
     const items: []const orders_api.Item = &.{
         .{ .sku = "coffee-beans", .quantity = 2, .price_cents = 1450 },
         .{ .sku = "grinder", .quantity = 1, .price_cents = 4900 },
     };
-    for ([_]u64{ 1, 7 }) |user_id| try placeOrder(&client, io, shop, user_id, items);
+    for ([_]u64{ 1, 7 }) |user_id| {
+        try placeOrder(&client, io, shop, orders_api.OrderApi.placeOrder, .{ .user_id = user_id, .items = items });
+    }
 
     // Without the users service, orders fails its calls on its own terms.
     try users_server.shutdown(io);
     shop.info("Users service stopped", .{});
-    try placeOrder(&client, io, shop, 1, items);
-    try placeOrder(&client, io, shop, 1, items);
+    try placeOrder(&client, io, shop, orders_api.OrderApi.placeOrder, .{ .user_id = 1, .items = items });
+    try placeOrder(&client, io, shop, orders_api.OrderApi.placeOrder, .{ .user_id = 1, .items = items });
 }
 
-fn placeOrder(client: *rpc.Client, io: std.Io, shop: log.Logger, user_id: u64, items: []const orders_api.Item) !void {
+/// OrderApi as an older orders-api had it, before Item had a rule for
+/// price_cents. Its route is the same, so its calls reach the orders
+/// service.
+const OldOrderApi = rpc.Contract(.{
+    .name = "orders",
+    .version = 1,
+    .methods = .{ .placeOrder = rpc.method(OldPlaceOrderRequest, orders_api.Order) },
+});
+const OldPlaceOrderRequest = struct { user_id: u64, items: []const OldItem };
+const OldItem = struct { sku: []const u8, quantity: u32, price_cents: u64 };
+
+fn placeOrder(client: *rpc.Client, io: std.Io, shop: log.Logger, comptime method: anytype, request: @TypeOf(method).Request) !void {
     const ctx: core.Context = .root;
-    var placed = try client.call(io, ctx, orders_api.OrderApi.placeOrder, .{ .user_id = user_id, .items = items }, .{});
+    var placed = try client.call(io, ctx, method, request, .{});
     defer placed.deinit();
     switch (placed.outcome) {
         .ok => |order| shop.info("Order placed", .{ .order_id = order.id, .customer = order.customer, .total_cents = order.total_cents }),
-        .failure => |failure| shop.warn("Order refused", .{ .user_id = user_id, .code = failure.code, .app_code = failure.app_code, .reason = failure.message }),
+        .failure => |failure| {
+            shop.warn("Order refused", .{ .user_id = request.user_id, .code = failure.code, .app_code = failure.app_code, .reason = failure.message });
+            for (failure.violations) |violation| {
+                shop.warn("Violation", .{ .field = violation.field, .code = violation.code, .reason = violation.message });
+            }
+        },
     }
 }

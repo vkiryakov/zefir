@@ -11,6 +11,9 @@ pub const Item = struct {
     pub const field_rules = .{
         .sku = .{ v.notEmpty, v.maxLength(64) },
         .quantity = v.range(1, 99),
+        // A number from a client has no bound but its type: at most
+        // $1,000,000 keeps the total of 50 items, 99 of each, within a u64.
+        .price_cents = v.range(1, 100_000_000),
     };
 };
 

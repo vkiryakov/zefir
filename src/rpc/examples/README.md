@@ -975,6 +975,9 @@ pub const Item = struct {
     pub const field_rules = .{
         .sku = .{ v.notEmpty, v.maxLength(64) },
         .quantity = v.range(1, 99),
+        // A number from a client has no bound but its type: at most
+        // $1,000,000 keeps the total of 50 items, 99 of each, within a u64.
+        .price_cents = v.range(1, 100_000_000),
     };
 };
 
@@ -1089,8 +1092,11 @@ const OrderHandler = struct {
             .ok => |user| user,
             .failure => |failure| return if (failure.code == .not_found) error.UnknownUser else error.UsersUnavailable,
         };
+        // The rules of Item keep the total within a u64. The arithmetic is
+        // checked all the same: an overflow is then the failure `internal`,
+        // while an unchecked one would stop the whole service.
         var total: u64 = 0;
-        for (req.items) |item| total += item.price_cents * item.quantity;
+        for (req.items) |item| total = try std.math.add(u64, total, try std.math.mul(u64, item.price_cents, item.quantity));
         return .{
             .id = self.next_id.fetchAdd(1, .monotonic),
             // The name lives in `found`, which deinit frees on return: the
@@ -1147,41 +1153,81 @@ pub fn main(init: std.process.Init) !void {
     // The shop, a client of orders.
     var client = try rpc.Client.init(gpa, .{ .transport = orders_link.clientTransport() });
     defer client.deinit();
+
+    // A shop built against an older orders-api, whose Item had no rule for
+    // price_cents, sends a price no item has. The server checks the rules
+    // of the request again and refuses it before the handler runs.
+    try placeOrder(&client, io, shop, OldOrderApi.placeOrder, .{ .user_id = 1, .items = &.{
+        .{ .sku = "grinder", .quantity = 2, .price_cents = 9_223_372_036_854_775_808 },
+    } });
+
+    // The service goes on.
     const items: []const orders_api.Item = &.{
         .{ .sku = "coffee-beans", .quantity = 2, .price_cents = 1450 },
         .{ .sku = "grinder", .quantity = 1, .price_cents = 4900 },
     };
-    for ([_]u64{ 1, 7 }) |user_id| try placeOrder(&client, io, shop, user_id, items);
+    for ([_]u64{ 1, 7 }) |user_id| {
+        try placeOrder(&client, io, shop, orders_api.OrderApi.placeOrder, .{ .user_id = user_id, .items = items });
+    }
 
     // Without the users service, orders fails its calls on its own terms.
     try users_server.shutdown(io);
     shop.info("Users service stopped", .{});
-    try placeOrder(&client, io, shop, 1, items);
-    try placeOrder(&client, io, shop, 1, items);
+    try placeOrder(&client, io, shop, orders_api.OrderApi.placeOrder, .{ .user_id = 1, .items = items });
+    try placeOrder(&client, io, shop, orders_api.OrderApi.placeOrder, .{ .user_id = 1, .items = items });
 }
 
-fn placeOrder(client: *rpc.Client, io: std.Io, shop: log.Logger, user_id: u64, items: []const orders_api.Item) !void {
+/// OrderApi as an older orders-api had it, before Item had a rule for
+/// price_cents. Its route is the same, so its calls reach the orders
+/// service.
+const OldOrderApi = rpc.Contract(.{
+    .name = "orders",
+    .version = 1,
+    .methods = .{ .placeOrder = rpc.method(OldPlaceOrderRequest, orders_api.Order) },
+});
+const OldPlaceOrderRequest = struct { user_id: u64, items: []const OldItem };
+const OldItem = struct { sku: []const u8, quantity: u32, price_cents: u64 };
+
+fn placeOrder(client: *rpc.Client, io: std.Io, shop: log.Logger, comptime method: anytype, request: @TypeOf(method).Request) !void {
     const ctx: core.Context = .root;
-    var placed = try client.call(io, ctx, orders_api.OrderApi.placeOrder, .{ .user_id = user_id, .items = items }, .{});
+    var placed = try client.call(io, ctx, method, request, .{});
     defer placed.deinit();
     switch (placed.outcome) {
         .ok => |order| shop.info("Order placed", .{ .order_id = order.id, .customer = order.customer, .total_cents = order.total_cents }),
-        .failure => |failure| shop.warn("Order refused", .{ .user_id = user_id, .code = failure.code, .app_code = failure.app_code, .reason = failure.message }),
+        .failure => |failure| {
+            shop.warn("Order refused", .{ .user_id = request.user_id, .code = failure.code, .app_code = failure.app_code, .reason = failure.message });
+            for (failure.violations) |violation| {
+                shop.warn("Violation", .{ .field = violation.field, .code = violation.code, .reason = violation.message });
+            }
+        },
     }
 }
 ```
 
 ```text
 $ zig build run
-2026-10-16T09:44:07.120Z INFO  [shop] Order placed order_id=1001 customer="Ada Lovelace" total_cents=7800
-2026-10-16T09:44:07.122Z WARN  [shop] Order refused user_id=7 code=failed_precondition app_code=orders.unknown_user reason="No such user"
-2026-10-16T09:44:07.122Z INFO  [shop] Users service stopped
-2026-10-16T09:44:07.122Z WARN  [breaker] Breaker opened service=users
-2026-10-16T09:44:07.123Z WARN  [shop] Order refused user_id=1 code=unavailable app_code=orders.users_unavailable reason="Try again later"
-2026-10-16T09:44:07.123Z INFO  [breaker] Call not sent method=getUser
-2026-10-16T09:44:07.123Z WARN  [shop] Order refused user_id=1 code=unavailable app_code=orders.users_unavailable reason="Try again later"
+2026-10-16T11:15:04.733Z WARN  [shop] Order refused user_id=1 code=invalid_argument app_code=rpc.invalid_request reason="Invalid request"
+2026-10-16T11:15:04.733Z WARN  [shop] Violation field=items[0].price_cents code=validation.range reason="must be from 1 to 100000000"
+2026-10-16T11:15:04.734Z INFO  [shop] Order placed order_id=1001 customer="Ada Lovelace" total_cents=7800
+2026-10-16T11:15:04.736Z WARN  [shop] Order refused user_id=7 code=failed_precondition app_code=orders.unknown_user reason="No such user"
+2026-10-16T11:15:04.736Z INFO  [shop] Users service stopped
+2026-10-16T11:15:04.736Z WARN  [breaker] Breaker opened service=users
+2026-10-16T11:15:04.737Z WARN  [shop] Order refused user_id=1 code=unavailable app_code=orders.users_unavailable reason="Try again later"
+2026-10-16T11:15:04.737Z INFO  [breaker] Call not sent method=getUser
+2026-10-16T11:15:04.737Z WARN  [shop] Order refused user_id=1 code=unavailable app_code=orders.users_unavailable reason="Try again later"
 ```
 
+- **Numbers from a client.** The first order comes from a shop built
+  against an older orders-api, whose `Item` had no rule for `price_cents`:
+  its client sent the price as it was. The server checks every request
+  against the rules of its own types, so it refused the order before the
+  handler ran, with the path of the field, and served the next one. Without
+  the rule, `price_cents * quantity` overflows a u64, and in Debug and
+  ReleaseSafe an overflow is a panic, which ends the whole process and
+  every call in it. So give the numbers a client sends a range, and
+  compute with them through `std.math.mul` and `std.math.add`, which return
+  `error.Overflow`: the call then fails with `internal`, and the service
+  goes on.
 - **The deadline goes on.** `placeOrder` passes `ctx.operation()` to the
   call of users, which then gets what is left of the deadline of
   `placeOrder` (2 seconds from its start), or 500 ms, whichever is less.
