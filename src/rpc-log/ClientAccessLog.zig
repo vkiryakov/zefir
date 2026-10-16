@@ -138,8 +138,17 @@ test "every error of the client engine amounts to a code" {
         .{ error.MiddlewareFailed, .internal },
         .{ error.OutOfMemory, .resource_exhausted },
     };
-    // Every name of the engine's set is in the table.
+    // Every name of the engine's set is in the table, and nothing else: a
+    // name left out would fall to `internal` unseen.
     const names = @typeInfo(rpc.RawClient.CallError).error_set.error_names.?;
     try std.testing.expectEqual(names.len, expected.len);
+    for (names) |name| {
+        for (expected) |entry| {
+            if (std.mem.eql(u8, @errorName(entry[0]), name)) break;
+        } else {
+            std.debug.print("error.{s} of rpc.RawClient.CallError is not in the table\n", .{name});
+            return error.TestUnexpectedResult;
+        }
+    }
     for (expected) |entry| try std.testing.expectEqual(entry[1], codeOf(entry[0]));
 }
