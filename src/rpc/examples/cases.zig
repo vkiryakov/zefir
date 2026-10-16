@@ -59,8 +59,3 @@ pub fn command(comptime program: Program) []const u8 {
     inline for (program.env) |pair| line = line ++ pair[0] ++ "=" ++ pair[1] ++ " ";
     return line ++ "zig build run";
 }
-
-/// The parts of a record that change from run to run, and that a run in
-/// README.md may show with values of its own: the timestamp at the start
-/// of every line, and the values of these fields.
-pub const varying_fields = [_][]const u8{ "rpc.request_id", "rpc.duration_ms", "span_id" };

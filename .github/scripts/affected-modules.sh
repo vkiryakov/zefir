@@ -33,8 +33,10 @@ imports() {
     # rpc imports core and validator, and the examples of its guide read
     # their settings with confy and log with log.
     rpc) echo core validator confy log ;;
-    # rpc-nats imports nats for its adapter of zefir-nats.
-    rpc-nats) echo rpc core nats ;;
+    # rpc-nats imports nats for its adapter of zefir-nats, and the examples
+    # of its guide, which its end-to-end tests run, read their settings
+    # with confy and log with log.
+    rpc-nats) echo rpc core nats confy log ;;
     rpc-log) echo rpc core log ;;
     # nats imports nothing, but the examples of its guide read their
     # settings with confy, log with log and take deadlines from core, and

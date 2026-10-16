@@ -579,6 +579,25 @@ pub fn build(b: *std.Build) void {
         test_rpc_nats.dependOn(&compile.step);
     }
 
+    // The guide of rpc-nats shows its examples as they are. The examples
+    // need NATS servers and zio: tests/rpc-nats builds and runs them.
+    const rpc_nats_guide = b.addTest(.{
+        .name = "rpc-nats-guide",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/rpc-nats/examples/readme_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .sanitize_thread = tsan,
+            .imports = &.{.{ .name = "guide-check", .module = b.createModule(.{
+                .root_source_file = b.path("src/rpc/examples/guide_check.zig"),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+            }) }},
+        }),
+    });
+    test_rpc_nats.dependOn(&addRun(b, rpc_nats_guide, tsan).step);
+
     addRpcGuide(b, test_rpc, test_rpc_log, .{
         .core = core,
         .validator = validator,
