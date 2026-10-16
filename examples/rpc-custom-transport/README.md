@@ -1,5 +1,7 @@
 # rpc-mailbox: your own transport for zefir-rpc
 
+The minimal skeleton of a transport of your own; the reference transport is [zefir-rpc-nats](../../src/rpc-nats/examples/README.md), built step by step in [Writing a transport](../../src/rpc-nats/examples/writing-a-transport.md).
+
 zefir-rpc does not care how the bytes of a call travel. NATS is built in,
 and any other way — AMQP, a protocol of your own over TCP, shared memory —
 is a transport you can write outside zefir, in a package of your own, with
