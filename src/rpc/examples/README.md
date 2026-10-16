@@ -211,15 +211,11 @@ sequenceDiagram
 
 ## Installation
 
-Add Zefir to your `build.zig.zon`. rpc is on the `dev` branch until the next
-release:
+Add Zefir to your `build.zig.zon`; rpc ships since v0.6.0:
 
 ```sh
-zig fetch --save git+https://github.com/vkiryakov/zefir#dev
+zig fetch --save git+https://github.com/vkiryakov/zefir#v0.6.0
 ```
-
-The command fetches the latest commit of `dev`; `--save` pins that commit.
-The latest release, v0.5.0, came before rpc, so `#v0.5.0` does not have it.
 
 Then import the modules in `build.zig`. The examples also read their
 settings with confy, log with log, and take contexts from core. The package

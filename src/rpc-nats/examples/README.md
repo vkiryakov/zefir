@@ -84,15 +84,11 @@ they print against this guide:
 
 ## Installation
 
-Add Zefir to your `build.zig.zon`. rpc-nats is on the `dev` branch until the
-next release:
+Add Zefir to your `build.zig.zon`; rpc-nats ships since v0.6.0:
 
 ```sh
-zig fetch --save git+https://github.com/vkiryakov/zefir#dev
+zig fetch --save git+https://github.com/vkiryakov/zefir#v0.6.0
 ```
-
-The command fetches the latest commit of `dev`; `--save` pins that commit.
-The latest release, v0.5.0, came before rpc, so `#v0.5.0` does not have it.
 
 A service runs on [zio](https://github.com/lalinsky/zio). zio has no release
 for Zig 0.17 yet, so pin the commit Zefir is tested with:

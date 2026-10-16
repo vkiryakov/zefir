@@ -292,13 +292,13 @@ The compiler checks the handler against the contract and the request of every ca
 
 ## Installation
 
-Requires **Zig 0.17.0**. Add the dependency to your `build.zig.zon`. This is the `dev` branch, the next version in progress, so the command fetches its latest commit:
+Requires **Zig 0.17.0**. Add the dependency to your `build.zig.zon`; the latest release is **v0.6.0**:
 
 ```sh
-zig fetch --save git+https://github.com/vkiryakov/zefir#dev
+zig fetch --save git+https://github.com/vkiryakov/zefir#v0.6.0
 ```
 
-`--save` pins the commit it fetched, so your build doesn't change when `dev` moves on. For the latest release, **v0.5.0**, fetch `#v0.5.0` instead; other versions are on the [releases page](https://github.com/vkiryakov/zefir/releases), and a commit hash works too.
+Other versions are on the [releases page](https://github.com/vkiryakov/zefir/releases); a commit hash works too.
 
 Then import the modules you need in your `build.zig`:
 

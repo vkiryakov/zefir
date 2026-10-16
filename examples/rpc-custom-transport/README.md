@@ -67,7 +67,7 @@ from the application, there is one zefir, whatever version the
 application picks.
 
 The package still names zefir in its `build.zig.zon`, pinned to one
-commit and marked lazy: only its own tests use it. An application that
+release and marked lazy: only its own tests use it. An application that
 depends on the package never fetches it.
 
 ## Running the tests
