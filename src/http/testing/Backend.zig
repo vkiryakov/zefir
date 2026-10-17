@@ -152,7 +152,7 @@ pub const Stream = struct {
                     s.taken += 1;
                     return rec.chunks.items[s.taken - 1];
                 }
-                if (rec.state == .finished or rec.state == .aborted or s.call.done.isSet()) return null;
+                if (rec.state == .finished or rec.state == .aborted or s.call.served.load(.acquire)) return null;
             }
             waiting.untilSet(&s.call.changed, io, deadline) catch |err| return switch (err) {
                 error.Timeout => error.Timeout,
@@ -266,7 +266,7 @@ pub fn open(b: *Backend, io: std.Io, req: Request) OpenError!*Stream {
             s.call.mutex.lockUncancelable(io);
             defer s.call.mutex.unlock(io);
             const rec = &s.call.recorder;
-            if (rec.state != .head or s.call.done.isSet()) {
+            if (rec.state != .head or s.call.served.load(.acquire)) {
                 s.status = rec.status;
                 s.headers = rec.headers.items;
                 break;
@@ -305,12 +305,15 @@ fn spawn(b: *Backend, io: std.Io, call: *Call) OpenError!void {
 
 const log = std.log.scoped(.http);
 
+/// Serves `call`. Once `done` is set its caller may free it, `request` by
+/// returning, `Stream.deinit` by destroying the stream: so setting `done`
+/// is the last thing this does with it. A `Stream` that waits for a write
+/// learns of the end from `served` and `changed` before that.
 fn serveTask(handler: Interface.Handler, io: std.Io, call: *Call) void {
-    defer {
-        call.done.set(io);
-        call.changed.set(io);
-    }
     handler.serve(handler.ptr, io, &call.exchange);
+    call.served.store(true, .release);
+    call.changed.set(io);
+    call.done.set(io);
 }
 
 const vtable: Interface.VTable = .{
@@ -379,7 +382,11 @@ const Call = struct {
     changed: std.Io.Event = .unset,
     /// The recorder ran out of memory: `request` returns `OutOfMemory`.
     out_of_memory: bool = false,
-    /// Set when `serve` has returned.
+    /// `serve` has returned: what a `Stream` that waits on `changed` looks
+    /// at. Not `done`, which comes after the last `changed`.
+    served: std.atomic.Value(bool) = .init(false),
+    /// Set when `serve` has returned, as the last touch of the task: from
+    /// then on the caller may free the call.
     done: std.Io.Event = .unset,
 
     /// A call for `req`; its fields in `arena`. Its exchange points to it
@@ -703,4 +710,63 @@ test "request returns once the request has ended, with the body and the client's
     try testing.expectEqualStrings("13", res.header("content-length").?);
     try testing.expectEqualStrings("127.0.0.1:40000", res.header("x-client").?);
     try testing.expect(!res.aborted);
+}
+
+const PingController = struct {
+    pub const http_routes = routes.routes(.{ .methods = .{ .ping = routes.get("/ping", .{}) } });
+
+    pub fn ping(_: *PingController, ctx: *Context) !void {
+        try ctx.response.text("pong");
+    }
+};
+
+/// Requests and streams one after another, each one's memory written over
+/// as soon as the caller has it back: the frame of `request` by the next
+/// call, the stream of `open` by the allocator, which fills freed memory.
+fn requestMany(b: *Backend, io: std.Io, rounds: usize) anyerror!void {
+    for (0..rounds) |i| {
+        if (i % 8 == 7) {
+            const s = try b.open(io, .{ .method = .GET, .target = "/ping" });
+            while (try s.next(io, .fromSeconds(5))) |_| {}
+            s.deinit(io);
+        } else {
+            var res = try b.request(io, .{ .method = .GET, .target = "/ping" });
+            const status = res.status;
+            res.deinit();
+            if (status != 200) return error.TestUnexpectedStatus;
+        }
+        scribble();
+    }
+}
+
+/// Writes over the stack below the caller's frame, where the frame of the
+/// `request` that has just returned was.
+noinline fn scribble() void {
+    var junk: [16 << 10]u8 = undefined;
+    @memset(&junk, 0xaa);
+    std.mem.doNotOptimizeAway(&junk);
+}
+
+test "the task of a request never touches it once its caller has it back: 16 clients, 800 requests and streams" {
+    const io = testing.io;
+    var ping: PingController = .{};
+    var b: Backend = .init(testing.allocator);
+    defer b.deinit();
+    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&ping} });
+    defer server.deinit(io);
+    try server.start(io);
+
+    var clients: [16]std.Io.Future(anyerror!void) = undefined;
+    var started: usize = 0;
+    errdefer for (clients[0..started]) |*client| client.cancel(io) catch {};
+    for (&clients) |*client| {
+        client.* = try io.concurrent(requestMany, .{ &b, io, 50 });
+        started += 1;
+    }
+    var first: ?anyerror = null;
+    for (&clients) |*client| client.await(io) catch |err| {
+        if (first == null) first = err;
+    };
+    started = 0;
+    if (first) |err| return err;
 }
