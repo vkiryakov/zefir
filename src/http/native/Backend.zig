@@ -17,7 +17,16 @@
 //! the backend stops listening; a connection that waits for a request
 //! closes at once, a busy one after its response, which says
 //! `Connection: close`. A backend serves one server, once.
+//!
+//! A port taken by another server: on Windows the server's `start` is
+//! `error.AddressInUse`. On Linux and macOS it starts, and the two share
+//! the connections of the port, or the new one takes them all: the backend
+//! listens with SO_REUSEADDR, so that a server that restarts does not wait
+//! out the connections of its last run in TIME_WAIT, and std.Io sets it
+//! only together with SO_REUSEPORT there. One instance per port is the
+//! business of the process manager (systemd, Kubernetes).
 const std = @import("std");
+const builtin = @import("builtin");
 const Interface = @import("../Backend.zig");
 const Connection = @import("Connection.zig");
 
@@ -152,7 +161,10 @@ fn capabilities(_: *anyopaque) Interface.Capabilities {
 fn start(ptr: *anyopaque, io: std.Io, handler: Interface.Handler) Interface.StartError!void {
     const b = of(ptr);
     b.handler = handler;
-    var listener = b.address.listen(io, .{ .reuse_address = true }) catch |err| return switch (err) {
+    // SO_REUSEADDR alone, as std.Io sets it on Windows, would let a second
+    // server take the port there: off. Elsewhere it comes with SO_REUSEPORT
+    // (see the top of this file).
+    var listener = b.address.listen(io, .{ .reuse_address = builtin.os.tag != .windows }) catch |err| return switch (err) {
         error.AddressInUse, error.AccessDenied, error.SystemResources, error.Canceled => |e| e,
         error.ProcessFdQuotaExceeded, error.SystemFdQuotaExceeded => error.SystemResources,
         else => |e| {

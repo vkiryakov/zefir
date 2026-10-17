@@ -6,6 +6,7 @@
 //! its helpers.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const http = @import("http");
 const runtime = @import("runtime");
 const raw = @import("client.zig");
@@ -300,6 +301,33 @@ fn stopClosesIdleThenBusy(io: Io) !void {
     try busy.expectEnd(io, .fromSeconds(2));
     try f.server.wait(io);
     try testing.expectEqual(http.Server.State.stopped, f.server.state());
+}
+
+test "a second server on a taken port: AddressInUse on Windows; on Linux and macOS it starts beside the first" {
+    try runtime.forEachRuntime(gpa, takenPort);
+}
+
+fn takenPort(io: Io) !void {
+    var dog = try Watchdog.start(io, "a second server on a taken port");
+    defer dog.stop(io);
+    var first: Fixture = undefined;
+    try first.start(io, .{});
+    defer first.deinit(io);
+    var app: App = .{};
+    var native = try http.native.Backend.init(gpa, .{ .address = "127.0.0.1", .port = first.native.port() });
+    defer native.deinit();
+    var second = try http.Server.init(gpa, .{ .backend = native.backend(), .controllers = .{&app}, .strict_errors = false });
+    defer second.deinit(io);
+    if (builtin.os.tag == .windows) {
+        try testing.expectError(error.AddressInUse, second.start(io));
+        try testing.expectEqual(http.Server.State.stopped, second.state());
+    } else {
+        // std.Io sets SO_REUSEADDR only with SO_REUSEPORT here, so the
+        // second listens too, as the documentation of http.native.Backend
+        // says: one instance per port is the process manager's business.
+        try second.start(io);
+        try testing.expect(second.isReady());
+    }
 }
 
 test "connection slots come back after resets" {
