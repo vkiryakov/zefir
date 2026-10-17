@@ -15,10 +15,11 @@
 //! `.strict_errors = false` turns the check off.
 //!
 //! The check reads a list of entries, each a place and its error set:
-//! plan.zig gives one for the handler of each route and one for the
-//! transforms of the JSON value it answers with. Each error is checked
-//! once, under the first place that can return it, so the work grows with
-//! the errors of the application, not with the routes.
+//! plan.zig gives one for the handler of each route, one for the
+//! transforms of the JSON value it answers with, and one for the `run` of
+//! each element of its middleware. Each error is checked once, under the
+//! first place that can return it, so the work grows with the errors of
+//! the application, not with the routes.
 const std = @import("std");
 const core = @import("core");
 const errors = @import("errors.zig");

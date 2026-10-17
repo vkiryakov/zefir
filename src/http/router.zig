@@ -254,10 +254,8 @@ pub const Match = union(enum) {
 
 pub const Found = struct {
     /// The route: its index in the list given to `build`, the server's
-    /// table.
+    /// table; for HEAD, the path's GET route, unless it has a HEAD route.
     route: u32,
-    /// A HEAD request that the path's GET route serves, without a body.
-    head: bool,
     /// The values of the route's parameters, in the order of its pattern:
     /// slices of the path's segments (`{*rest}`: of several, joined by '/').
     params: []const []const u8,
@@ -340,9 +338,9 @@ const Search = struct {
 
     fn ends(s: *const Search, node: *const Node, p: usize) ?Found {
         const own = node.routes[s.method];
-        if (own != none) return .{ .route = own, .head = false, .params = s.values[0..p] };
+        if (own != none) return .{ .route = own, .params = s.values[0..p] };
         const get = node.routes[get_index];
-        if (s.method == head_index and get != none and !node.sse_get) return .{ .route = get, .head = true, .params = s.values[0..p] };
+        if (s.method == head_index and get != none and !node.sse_get) return .{ .route = get, .params = s.values[0..p] };
         return null;
     }
 };
@@ -396,10 +394,9 @@ const Probe = struct {
     }
 };
 
-fn expectFound(m: Match, route: u32, head: bool, params: []const []const u8) !void {
+fn expectFound(m: Match, route: u32, params: []const []const u8) !void {
     try testing.expect(m == .found);
     try testing.expectEqual(route, m.found.route);
-    try testing.expectEqual(head, m.found.head);
     try testing.expectEqual(params.len, m.found.params.len);
     for (params, m.found.params) |want, got| try testing.expectEqualStrings(want, got);
 }
@@ -414,21 +411,21 @@ test "router: literal beats parameter beats catch-all, with backtracking" {
     }, "");
     var probe: Probe = .{ .arena = .init(testing.allocator) };
     defer probe.arena.deinit();
-    try expectFound(try probe.match(&r, .GET, "/a/b/c"), 0, false, &.{});
-    try expectFound(try probe.match(&r, .GET, "/a/b/d"), 1, false, &.{"b"});
-    try expectFound(try probe.match(&r, .GET, "/a/b/e/f"), 2, false, &.{"b/e/f"});
-    try expectFound(try probe.match(&r, .GET, "/a/b"), 2, false, &.{"b"});
-    try expectFound(try probe.match(&r, .GET, "/export.csv"), 3, false, &.{});
-    try expectFound(try probe.match(&r, .GET, "/42"), 4, false, &.{"42"});
+    try expectFound(try probe.match(&r, .GET, "/a/b/c"), 0, &.{});
+    try expectFound(try probe.match(&r, .GET, "/a/b/d"), 1, &.{"b"});
+    try expectFound(try probe.match(&r, .GET, "/a/b/e/f"), 2, &.{"b/e/f"});
+    try expectFound(try probe.match(&r, .GET, "/a/b"), 2, &.{"b"});
+    try expectFound(try probe.match(&r, .GET, "/export.csv"), 3, &.{});
+    try expectFound(try probe.match(&r, .GET, "/42"), 4, &.{"42"});
     // A catch-all takes one segment or more, never none.
-    try expectFound(try probe.match(&r, .GET, "/a"), 4, false, &.{"a"});
+    try expectFound(try probe.match(&r, .GET, "/a"), 4, &.{"a"});
     try testing.expectEqual(Match.not_found, try probe.match(&r, .GET, "/"));
     // %2F inside a parameter stays a slash in its value.
-    try expectFound(try probe.match(&r, .GET, "/a%2Fb"), 4, false, &.{"a/b"});
-    try expectFound(try probe.match(&r, .GET, "/a/x%2Fy/d"), 1, false, &.{"x/y"});
+    try expectFound(try probe.match(&r, .GET, "/a%2Fb"), 4, &.{"a/b"});
+    try expectFound(try probe.match(&r, .GET, "/a/x%2Fy/d"), 1, &.{"x/y"});
     // Case matters, a trailing slash does not, // matches nothing.
     try testing.expectEqual(Match.not_found, try probe.match(&r, .GET, "/A/b/c/d"));
-    try expectFound(try probe.match(&r, .GET, "/a/b/c/"), 0, false, &.{});
+    try expectFound(try probe.match(&r, .GET, "/a/b/c/"), 0, &.{});
     try testing.expectEqual(Match.not_found, try probe.match(&r, .GET, "/a//b/c"));
 }
 
@@ -439,8 +436,8 @@ test "router: a branch gives way when the method is not there" {
     }, "");
     var probe: Probe = .{ .arena = .init(testing.allocator) };
     defer probe.arena.deinit();
-    try expectFound(try probe.match(&r, .DELETE, "/users/me"), 1, false, &.{"me"});
-    try expectFound(try probe.match(&r, .GET, "/users/me"), 0, false, &.{});
+    try expectFound(try probe.match(&r, .DELETE, "/users/me"), 1, &.{"me"});
+    try expectFound(try probe.match(&r, .GET, "/users/me"), 0, &.{});
     const m = try probe.match(&r, .GET, "/users/7");
     try testing.expectEqualStrings("DELETE, OPTIONS", m.method_not_allowed.header());
 }
@@ -474,10 +471,10 @@ test "router: 405 with Allow; HEAD with GET but not with SSE; OPTIONS lists Allo
 
     // HEAD: served by GET without a body, unless the GET is SSE or the
     // path has a HEAD route of its own.
-    try expectFound(try probe.match(&r, .HEAD, "/users"), 0, true, &.{});
-    try expectFound(try probe.match(&r, .HEAD, "/items/9"), 3, true, &.{"9"});
-    try expectFound(try probe.match(&r, .HEAD, "/files"), 7, false, &.{});
-    try expectFound(try probe.match(&r, .GET, "/events"), 2, false, &.{});
+    try expectFound(try probe.match(&r, .HEAD, "/users"), 0, &.{});
+    try expectFound(try probe.match(&r, .HEAD, "/items/9"), 3, &.{"9"});
+    try expectFound(try probe.match(&r, .HEAD, "/files"), 7, &.{});
+    try expectFound(try probe.match(&r, .GET, "/events"), 2, &.{});
     m = try probe.match(&r, .HEAD, "/events");
     try testing.expectEqualStrings("GET, OPTIONS", m.method_not_allowed.header());
     try testing.expect(!m.method_not_allowed.has(.HEAD));
@@ -488,7 +485,7 @@ test "router: 405 with Allow; HEAD with GET but not with SSE; OPTIONS lists Allo
     try testing.expectEqualStrings("GET, HEAD, POST, OPTIONS", m.options.header());
     m = try probe.match(&r, .OPTIONS, "/events");
     try testing.expectEqualStrings("GET, OPTIONS", m.options.header());
-    try expectFound(try probe.match(&r, .OPTIONS, "/items/9"), 5, false, &.{"9"});
+    try expectFound(try probe.match(&r, .OPTIONS, "/items/9"), 5, &.{"9"});
     m = try probe.match(&r, .POST, "/items/9");
     try testing.expectEqualStrings("GET, HEAD, DELETE, OPTIONS", m.method_not_allowed.header());
 
@@ -513,10 +510,10 @@ test "router: the server prefix is given at run time" {
     for ([_][]const u8{ "/api", "/api/v2", "" }) |prefix| {
         const r = routerOf(&rows, prefix);
         var buf: [64]u8 = undefined;
-        try expectFound(try probe.match(&r, .GET, try std.fmt.bufPrint(&buf, "{s}/", .{prefix})), 0, false, &.{});
-        try expectFound(try probe.match(&r, .GET, try std.fmt.bufPrint(&buf, "{s}/v1/todos/7", .{prefix})), 1, false, &.{"7"});
+        try expectFound(try probe.match(&r, .GET, try std.fmt.bufPrint(&buf, "{s}/", .{prefix})), 0, &.{});
+        try expectFound(try probe.match(&r, .GET, try std.fmt.bufPrint(&buf, "{s}/v1/todos/7", .{prefix})), 1, &.{"7"});
         if (prefix.len > 0) {
-            try expectFound(try probe.match(&r, .GET, prefix), 0, false, &.{});
+            try expectFound(try probe.match(&r, .GET, prefix), 0, &.{});
             try testing.expectEqual(Match.not_found, try probe.match(&r, .GET, "/v1/todos/7"));
             try testing.expectEqual(Match.not_found, try probe.match(&r, .GET, "/API/v1/todos/7"));
         }
@@ -524,7 +521,7 @@ test "router: the server prefix is given at run time" {
     const r = routerOf(&rows, "/api");
     try testing.expectEqual(Match.not_found, try probe.match(&r, .GET, "/apiv1/todos/7"));
     // The prefix is matched on decoded segments.
-    try expectFound(try probe.match(&r, .GET, "/%61pi/v1/todos/7"), 1, false, &.{"7"});
+    try expectFound(try probe.match(&r, .GET, "/%61pi/v1/todos/7"), 1, &.{"7"});
 }
 
 test "router: the segments of a pattern" {

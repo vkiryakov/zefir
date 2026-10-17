@@ -626,8 +626,9 @@ fn respond(ctx: *Context, exchange: *Exchange, result: anyerror!void) void {
 /// The error handler of a server, its type erased: the object of
 /// `.error_handler`, or the default handler, and the error path of its
 /// type. Every error that answers a request goes through it: those of the
-/// handlers and of the transforms of their values, and those of the
-/// framework (`RouteNotFound`, `Overloaded`, `RequestTimeout`, ...).
+/// handlers and of the transforms of their values, those of the `run` of
+/// middleware, and those of the framework (`RouteNotFound`, `Overloaded`,
+/// `RequestTimeout`, ...).
 pub const ErrorHandler = struct {
     object: *anyopaque,
     answer: *const fn (object: *anyopaque, ctx: *Context, err: anyerror) Next,
@@ -674,7 +675,8 @@ fn answerError(ctx: *Context, exchange: *Exchange, err: anyerror) void {
 /// `Allow`, those of the application). `H.mapError(err)` gives the status
 /// and the body; `handle`, if `H` has one, may change them, add fields or
 /// write a response of its own and return `.handled`. A `handle` that
-/// fails is logged, and the response is what `mapError` gave.
+/// fails, or returns `.handled` without a response, is logged, and the
+/// response is the one of `mapError`, as `handle` left it.
 fn ErrorPathOf(comptime H: type) type {
     return struct {
         const name = plan.shortName(@typeName(H));
@@ -687,7 +689,7 @@ fn ErrorPathOf(comptime H: type) type {
                 const self: *H = @ptrCast(@alignCast(object));
                 const result = H.handle(self, ctx, err, &reply);
                 const action: errors.ErrorAction = if (@typeInfo(@TypeOf(result)) == .error_union) result catch |failure| failed: {
-                    log.warn("{s}.handle failed with error.{t} on error.{t}; the response is what mapError gave (request {s})", .{ name, failure, err, ctx.requestId() });
+                    log.warn("{s}.handle failed with error.{t} on error.{t}; the response is mapError's, as handle left it (request {s})", .{ name, failure, err, ctx.requestId() });
                     break :failed .respond;
                 } else result;
                 if (res.state != .uncommitted) {
@@ -697,7 +699,7 @@ fn ErrorPathOf(comptime H: type) type {
                 }
                 if (action == .handled) {
                     if (res.written()) return .send;
-                    log.warn("{s}.handle returned .handled for error.{t} without a response; the response is what mapError gave (request {s})", .{ name, err, ctx.requestId() });
+                    log.warn("{s}.handle returned .handled for error.{t} without a response; the response is mapError's, as handle left it (request {s})", .{ name, err, ctx.requestId() });
                 }
             }
             setReply(ctx, err, reply);
@@ -1086,9 +1088,11 @@ const AppErrors = struct {
                 try ctx.response.status(404).html("<h1>Not here</h1>");
                 return .handled;
             },
-            // .handled without a response: what mapError gave goes out.
+            // .handled without a response: mapError's response goes out, as
+            // handle left it.
             error.PermissionDenied => return .handled,
-            // A handle that fails: what mapError gave goes out, as it is.
+            // A handle that fails: mapError's response goes out, as handle
+            // left it.
             error.Unauthenticated => try ctx.response.setHeader("www-authenticate", "Bearer\r\nx-split: 1"),
             else => {},
         }

@@ -29,7 +29,6 @@
 //! application on three levels, static files, server-sent events, tests on
 //! `http.testing`, limits and timeouts, and a graceful stop on zio.
 
-const std = @import("std");
 const route_decls = @import("routes.zig");
 
 const errors = @import("errors.zig");
@@ -84,11 +83,6 @@ pub const patch = route_decls.patch;
 pub const delete = route_decls.delete;
 pub const head = route_decls.head;
 pub const options = route_decls.options;
-
-test "zefir-http is wired into the build" {
-    try std.testing.expect(true);
-    try std.testing.expect(ResponseState == Context.Response.State);
-}
 
 test {
     _ = @import("h1/head.zig");
