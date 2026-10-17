@@ -7,21 +7,23 @@
 #
 # A file under src/<module>/ affects that module and every module whose
 # tests import it, directly or through other modules; zefir imports them
-# all. tests/nats/ and tests/rpc-nats/, the end-to-end tests of nats and
-# of rpc-nats, count as their modules, and docker-compose.yml, their
-# servers, as both. examples/rpc-custom-transport/, a transport outside
-# zefir that CI runs against rpc, counts as rpc. build.zig, build.zig.zon,
-# src/zefir.zig, .github/ and any other path the script does not know
-# affect every module.
+# all. tests/nats/, tests/rpc-nats/ and tests/http/, the end-to-end tests
+# of nats, of rpc-nats and of http, count as their modules, and
+# docker-compose.yml, the servers of the first two, as both of them.
+# examples/rpc-custom-transport/, a transport outside zefir that CI runs
+# against rpc, counts as rpc. build.zig, build.zig.zon, src/zefir.zig,
+# .github/ and any other path the script does not know affect every
+# module.
 # Documentation outside src/ (*.md files and docs/) affects none, but
-# README.md at the root: its "rpc in a minute" is a program of the guide of
-# rpc, which the tests of rpc check, so it counts as rpc.
+# README.md at the root: its "rpc in a minute" and "http in a minute" are
+# programs of the guides of rpc and of http, which their tests check, so it
+# counts as both.
 set -eu
 
 # The modules and what the tests of each one import. Keep this in sync with
 # build.zig: the `.imports` of each module and of the programs that its
 # test-<module> step builds. CI tests only the modules listed here.
-modules="core log confy validator rpc rpc-nats rpc-log orm nats zefir"
+modules="core log confy validator rpc rpc-nats rpc-log orm nats http zefir"
 imports() {
     case $1 in
     core) ;;
@@ -43,7 +45,10 @@ imports() {
     # its end-to-end tests build and run them. confy brings log.
     nats) echo core confy ;;
     orm) echo log ;;
-    zefir) echo core log confy validator rpc rpc-nats rpc-log orm nats ;;
+    # http imports core and validator; the examples of its guide read
+    # their settings with confy and log with log.
+    http) echo core validator confy log ;;
+    zefir) echo core log confy validator rpc rpc-nats rpc-log orm nats http ;;
     esac
 }
 
@@ -85,9 +90,10 @@ elif [ $# -eq 2 ] && [ -n "$1" ] && [ -n "$2" ]; then
         src/*) all=true ;;
         tests/nats/*) changed="$changed nats" ;;
         tests/rpc-nats/*) changed="$changed rpc-nats" ;;
+        tests/http/*) changed="$changed http" ;;
         examples/rpc-custom-transport/*) changed="$changed rpc" ;;
         docker-compose.yml) changed="$changed nats rpc-nats" ;;
-        README.md) changed="$changed rpc" ;;
+        README.md) changed="$changed rpc http" ;;
         docs/* | *.md) ;;
         *) all=true ;;
         esac
