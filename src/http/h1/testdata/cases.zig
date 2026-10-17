@@ -128,6 +128,11 @@ pub const field_rules = [_]Case{
     fails("Host with a space inside", "GET / HTTP/1.1\r\nHost: exa mple.com\r\n\r\n", error.BadRequest),
     fails("Host with a path", "GET / HTTP/1.1\r\nHost: example.com/a\r\n\r\n", error.BadRequest),
     fails("Host with user info", "GET / HTTP/1.1\r\nHost: user@example.com\r\n\r\n", error.BadRequest),
+    // Found by the HTTP Garden: nginx and Apache httpd refuse it too.
+    fails("an absolute target with user info", "GET http://user:pass@example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n", error.BadRequest),
+    ok("an absolute target with '@' in its path", "GET http://example.com/a@b HTTP/1.1\r\nHost: example.com\r\n\r\n", .{
+        .target = "http://example.com/a@b",
+    }),
     fails("Host with a byte over 0x7F", "GET / HTTP/1.1\r\nHost: \xc3\xbc.example\r\n\r\n", error.BadRequest),
     ok("HTTP/1.0 without Host", "GET / HTTP/1.0\r\n\r\n", .{ .version = .http10, .keep_alive = false, .fields = &.{} }),
     fails("HTTP/1.0 with two Host fields", "GET / HTTP/1.0\r\nHost: a\r\nHost: a\r\n\r\n", error.BadRequest),

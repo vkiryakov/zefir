@@ -239,7 +239,8 @@ fn expectLf(w: []const u8, pos: usize) ScanError!void {
 }
 
 /// Origin form, absolute form with http or https and an authority, or `*`
-/// for OPTIONS. The authority form of CONNECT is refused.
+/// for OPTIONS. The authority form of CONNECT is refused, and so is user
+/// info in an authority, as in `Host` (RFC 9110 §4.2.4).
 fn checkTarget(method: std.http.Method, target: []const u8) Error!void {
     if (target.len == 0) return error.BadRequest;
     if (target[0] == '/') return;
@@ -251,6 +252,8 @@ fn checkTarget(method: std.http.Method, target: []const u8) Error!void {
         if (std.ascii.startsWithIgnoreCase(target, scheme)) {
             const rest = target[scheme.len..];
             if (rest.len == 0 or rest[0] == '/' or rest[0] == '?' or rest[0] == '#') return error.BadRequest;
+            const authority = rest[0 .. std.mem.findAny(u8, rest, "/?#") orelse rest.len];
+            if (std.mem.findScalar(u8, authority, '@') != null) return error.BadRequest;
             return;
         }
     }

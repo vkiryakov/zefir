@@ -311,14 +311,14 @@ pub const rows = [_]Row{
             "\r\n",
         .expect = .{ .end = .{ .head = error.BadRequest } },
     },
+    // stricter than llhttp: user info in an absolute target is refused, as
+    // in Host (RFC 9110 §4.2.4): 400.
     .{
         .name = "uri.md:222 `host:port` and basic auth",
         .raw = "GET http://a%12:b!&*$@hypnotoad.org:1234/toto HTTP/1.1\r\n" ++
             "\r\n",
         .host_at = &.{56},
-        .expect = .{ .end = .complete, .messages = &.{
-            .{ .method = .GET, .target = "http://a%12:b!&*$@hypnotoad.org:1234/toto" },
-        } },
+        .expect = .{ .end = .{ .head = error.BadRequest } },
     },
     .{
         .name = "uri.md:245 Space in URI",
