@@ -112,6 +112,7 @@ pub fn serve(server: *Server, io: std.Io, exchange: *Exchange) void {
             .arena = arena,
             .sink = .{ .exchange = exchange, .io = io, .streaming = server.backend.capabilities().streaming_response },
         } },
+        .locals = .init(arena),
         .internal = .{
             .io = io,
             .operation = core.Context.root.withTrace(trace).withCancellation(&token),
@@ -158,6 +159,8 @@ pub fn serve(server: *Server, io: std.Io, exchange: *Exchange) void {
         .deadline => respond(&ctx, exchange, error.RequestTimeout),
         .client_gone, .shutdown => cut(&ctx, exchange),
     }
+    // The request has ended: the values of its locals go.
+    ctx.locals.internal.deinitValues();
     // The backend sees the stop's cancelation at its next cancelation point.
     if (canceled) io.recancel();
 }
@@ -1161,6 +1164,7 @@ const CountingExchange = struct {
         return .{
             .request = .{ .method = .GET, .path = "/", .internal = .{ .exchange = &c.exchange, .io = testing.io } },
             .response = .{ .internal = .{ .arena = arena, .sink = .{ .exchange = &c.exchange, .io = testing.io, .streaming = true } } },
+            .locals = .init(arena),
             .internal = .{
                 .io = testing.io,
                 .operation = core.Context.root,

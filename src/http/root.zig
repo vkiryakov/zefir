@@ -107,6 +107,7 @@ test {
     _ = @import("ids.zig");
     _ = @import("Request.zig");
     _ = @import("Context.zig");
+    _ = @import("Locals.zig");
     _ = @import("proxies.zig");
     _ = @import("input/strings.zig");
     _ = @import("input/urlencoded.zig");

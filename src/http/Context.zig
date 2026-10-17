@@ -23,17 +23,23 @@ const urlencoded = @import("input/urlencoded.zig");
 const cookie_input = @import("input/cookies.zig");
 const json_in = @import("input/json_in.zig");
 const collect = @import("input/violations.zig");
+const plan = @import("plan.zig");
 
 const Context = @This();
 const Violation = v.Violation;
+const log = std.log.scoped(.http);
 
 /// The route a request matched.
 pub const RouteInfo = routes.RouteInfo;
 pub const Request = @import("Request.zig");
 pub const Response = @import("Response.zig");
+pub const Locals = @import("Locals.zig");
 
 request: Request,
 response: Response,
+/// Values that a middleware puts for the middleware after it and for the
+/// handler, one per type: `ctx.locals.put(T, value)`, `ctx.locals.get(T)`.
+locals: Locals,
 /// Internal to the server.
 internal: Internal,
 
@@ -145,6 +151,22 @@ pub fn traceId(ctx: *const Context) []const u8 {
 /// handler; null before the route is chosen.
 pub fn route(ctx: *const Context) ?RouteInfo {
     return ctx.internal.route;
+}
+
+/// The value of type `T` that a middleware put into `ctx.locals`.
+/// `error.LocalMissing` (500, logged) when none did: a handler that needs
+/// the plan of `PlanLookup` sits behind it. For a value that may be
+/// missing, such as the user of an anonymous request, `ctx.locals.get(T)`
+/// gives null instead.
+///
+/// ```zig
+/// const plan = try ctx.local(mw.Plan); // put there by PlanLookup
+/// ```
+pub fn local(ctx: *const Context, comptime T: type) error{LocalMissing}!T {
+    return ctx.locals.get(T) orelse {
+        log.warn("ctx.local({s}): no middleware put a value of this type; the response is 500 (request {s})", .{ comptime plan.shortName(@typeName(T)), ctx.requestId() });
+        return error.LocalMissing;
+    };
 }
 
 /// The raw bytes of the request's body, such as for the signature of a
@@ -446,6 +468,7 @@ const FakeBody = struct {
         return .{
             .request = .{ .method = .POST, .path = "/", .internal = .{ .exchange = &f.exchange, .io = testing.io, .body_done = done } },
             .response = .{ .internal = .{ .arena = arena } },
+            .locals = .init(arena),
             .internal = .{
                 .io = testing.io,
                 .operation = core.Context.root,
