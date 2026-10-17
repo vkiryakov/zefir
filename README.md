@@ -32,6 +32,7 @@ Zefir is shaped by my needs first, and it's open to everyone. If it fits the way
 
 - **Built for services.** Zefir is growing into the layers every web service needs: configuration, deadlines and tracing, validation, RPC, logging, database access and HTTP.
 - **Take only what you use.** Every module is its own import, and the umbrella `zefir` module brings them all together.
+- **Not limited to what ships.** Where a module meets the outside world, it goes through an interface, a pointer to your object and its function pointers, as `std.Io` does, and an implementation of your own takes the place of zefir's: a transport of rpc (`rpc.ClientTransport` and `rpc.ServerTransport`, which every `rpc.Server` and `rpc.Client` is given: zefir ships NATS, and [your own](src/rpc-nats/examples/writing-a-transport.md) lives in a package of its own), `rpc_nats.Conn` for another NATS library, and the `std.Io.Writer` that zefir-log writes to (`.output = .{ .writer = … }`). Middleware, authenticators and credentials providers of your own join the calls of rpc the same way.
 - **Your types are the contract.** Declare a struct, and confy fills it and checks every value against its field's type. It reports every problem at once, each pointing at the file and line, or the variable, it came from.
 - **No dependencies.** Pure Zig on top of the standard library; nothing else to fetch or audit.
 - **Tested on Linux, macOS and Windows.** CI runs the tests of every module on all three.
@@ -46,7 +47,7 @@ Take any module on its own, or all the finished ones at once through the umbrell
 | `zefir-core`                       | Execution context: deadlines, cancellation, W3C trace context; application container and lifecycle planned | ✅ Done · [docs](src/core/examples/README.md)            |
 | `zefir-confy`                      | Typed configuration: JSON, INI, `.env` files, environment variables, secrets                               | ✅ Done · [docs](src/confy/examples/README.md)           |
 | `zefir-log`                        | Structured logging: JSON Lines, levels, context, redaction                                                 | ✅ Done · [docs](src/log/examples/README.md)             |
-| `zefir-validator`                  | Typed schemas, validation rules, error reporting                                                           | ✅ Done · [docs](src/validator/examples/README.md)       |
+| `zefir-validator`                  | Typed schemas, validation rules, API field names, input normalization (trim, case), error reporting        | ✅ Done · [docs](src/validator/examples/README.md)       |
 | `zefir-events`                     | Typed in-process event bus                                                                                 | 📋 Planned                                               |
 | `zefir-retry`                      | Retry policies, backoff, jitter, circuit breaker                                                           | 📋 Planned                                               |
 | **Networking & Communication**     |                                                                                                            |                                                         |
@@ -292,10 +293,10 @@ The compiler checks the handler against the contract and the request of every ca
 
 ## Installation
 
-Requires **Zig 0.17.0**. Add the dependency to your `build.zig.zon`; the latest release is **v0.6.0**:
+Requires **Zig 0.17.0**. Add the dependency to your `build.zig.zon`; the latest release is **v0.7.0**:
 
 ```sh
-zig fetch --save git+https://github.com/vkiryakov/zefir#v0.6.0
+zig fetch --save git+https://github.com/vkiryakov/zefir#v0.7.0
 ```
 
 Other versions are on the [releases page](https://github.com/vkiryakov/zefir/releases); a commit hash works too.

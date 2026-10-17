@@ -20,6 +20,17 @@ module is the transport of [rpc](../../rpc/examples/README.md) on NATS:
 everything else, the contract, the handlers, middleware, the stop, is the
 same as on any transport.
 
+**The default transport of rpc, and the reference one.** zefir-rpc-nats is
+the network transport that zefir ships for rpc, and the reference
+implementation of a transport: one of your own is built the way it is. It
+is a module of its own so that rpc does not depend on NATS: zefir-rpc knows
+only the interfaces of a transport, `rpc.ClientTransport` and
+`rpc.ServerTransport`, and `rpc.Server` and `rpc.Client` run on whichever
+transport `.transport` gives them. Any other transport plugs in the same
+way, from a package of its own.
+[Writing a transport](writing-a-transport.md) shows step by step, on the
+code of this module, how a transport is built and tested.
+
 > [!IMPORTANT]
 > **Not implemented yet (TODO):**
 >
@@ -87,7 +98,7 @@ they print against this guide:
 Add Zefir to your `build.zig.zon`; rpc-nats ships since v0.6.0:
 
 ```sh
-zig fetch --save git+https://github.com/vkiryakov/zefir#v0.6.0
+zig fetch --save git+https://github.com/vkiryakov/zefir#v0.7.0
 ```
 
 A service runs on [zio](https://github.com/lalinsky/zio). zio has no release

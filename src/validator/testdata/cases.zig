@@ -27,6 +27,8 @@ pub const test_files = [_][]const u8{
     "src/validator/testdata/guarantees_test.zig",
     "src/validator/testdata/assert_rules_test.zig",
     "src/validator/testdata/self_test.zig",
+    "src/validator/testdata/names_test.zig",
+    "src/validator/testdata/transforms_test.zig",
     "src/validator/testdata/common_test.zig",
     "src/validator/testdata/numbers_test.zig",
     "src/validator/testdata/strings_test.zig",
@@ -110,4 +112,19 @@ pub const examples = [_]Example{
         ,
     },
     .{ .name = "dto_test" },
+    .{
+        .name = "names_and_transforms",
+        .records =
+        \\INFO  Normalized field=title before="  Comptime for the rest of us " after="Comptime for the rest of us"
+        \\INFO  Normalized field=tags before=[" Zig ",comptime,ZIG] after=[zig,comptime,zig]
+        \\INFO  Normalized field=speakers[0].email before=" Ada@Example.COM " after=ada@example.com
+        \\INFO  Normalized field=speakers[0].country before=gb after=GB
+        \\INFO  Normalized field=speakers[0].phone before="+44 (20) 7946-0958" after=+442079460958
+        \\WARN  Invalid proposal field=durationMinutes code=validation.one_of reason="must be one of: 25, 50"
+        \\WARN  Invalid proposal field=tags code=validation.unique_items reason="must not contain duplicates"
+        \\WARN  Invalid proposal field=speakers[1].displayName code=validation.not_blank reason="must not be blank"
+        \\
+        ,
+    },
+    .{ .name = "codec_test" },
 };

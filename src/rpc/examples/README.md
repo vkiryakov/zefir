@@ -214,7 +214,7 @@ sequenceDiagram
 Add Zefir to your `build.zig.zon`; rpc ships since v0.6.0:
 
 ```sh
-zig fetch --save git+https://github.com/vkiryakov/zefir#v0.6.0
+zig fetch --save git+https://github.com/vkiryakov/zefir#v0.7.0
 ```
 
 Then import the modules in `build.zig`. The examples also read their
@@ -2549,6 +2549,14 @@ and more is `ResponseTooLarge`.
 </details>
 
 ## Your own transport
+
+NATS is the default transport of rpc, and the reference one:
+[zefir-rpc-nats](../../rpc-nats/examples/README.md) is the network
+transport that zefir ships, and a transport of your own is built the way it
+is. [Writing a transport](../../rpc-nats/examples/writing-a-transport.md)
+builds one step by step on the code of rpc-nats, from the interfaces to the
+tests. For a package of your own, the mailbox of
+`examples/rpc-custom-transport` below is the minimal skeleton.
 
 rpc does not care how the bytes of a call travel. A transport is a type
 with the methods of two small interfaces, `rpc.ClientTransport` and

@@ -83,9 +83,15 @@ fn showsRun(doc: []const u8, file: []const u8, command: []const u8, output: []co
 /// of one of `files` (see `isPartOf`), but a block that starts with the
 /// comment `// build.zig`: the build scripts of the guide.
 pub fn expectZigFromExamples(name: []const u8, doc: []const u8, files: []const []const u8) !void {
+    return expectZigFrom(name, doc, files, "an example");
+}
+
+/// `expectZigFromExamples` for `files` that `what` names in the message of
+/// a failure, such as "a file of src/rpc-nats/".
+pub fn expectZigFrom(name: []const u8, doc: []const u8, files: []const []const u8, what: []const u8) !void {
     if (try foreignZig(doc, files)) |block| {
         defer testing.allocator.free(block);
-        std.debug.print("{s} shows Zig code that is not a part of an example:\n{s}\n", .{ name, block });
+        std.debug.print("{s} shows Zig code that is not a part of {s}:\n{s}\n", .{ name, what, block });
         return error.TestBlockNotFromExamples;
     }
 }
