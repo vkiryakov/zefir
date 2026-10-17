@@ -235,8 +235,9 @@ fn slowClient(io: Io) !void {
     }
     try testing.expectEqual(1, http.testing.openStreams(&f.server));
     // ...but only until a write sends nothing for the write timeout: then
-    // the stream is cut.
+    // the stream is cut. The writes before the one that waits may still
+    // send a little, on Windows for a while.
     try e2e.waitCount(io, &f.app.closes, 1, 10_000);
-    try e2e.expectWithin("close(key) held by a client that reads nothing", e2e.sinceMs(io, closed_at), 200, 3500);
+    try e2e.expectWithin("close(key) held by a client that reads nothing", e2e.sinceMs(io, closed_at), 200, 3000 + 2000);
     try waitNoStreams(io, &f.server);
 }

@@ -535,7 +535,8 @@ fn staticAndStreams(io: Io) !void {
     try group.await(io);
     try failures.expectNone();
     try waitNoStreams(io, &f.server);
-    try testing.expectEqual(0, http.testing.inFlight(&f.server));
+    // A response is out before the server lets go of its place.
+    try e2e.waitIdle(io, &f.server);
 }
 
 fn subscriber(io: Io, port: u16, failures: *Failures) void {
@@ -717,7 +718,7 @@ fn streamSlots(io: Io) !void {
     try workers.await(io);
     try failures.expectNone();
     try waitNoStreams(io, &f.server);
-    try testing.expectEqual(0, http.testing.inFlight(&f.server));
+    try e2e.waitIdle(io, &f.server);
     try testing.expectEqual(4 * stream_workers * stream_rounds, f.app.closedInAll());
 
     // Every place is free: eight new streams open, a ninth gets 503.
