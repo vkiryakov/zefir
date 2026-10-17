@@ -50,6 +50,10 @@ pub const RouteInfo = struct {
 /// - `.methods`: `.name = http.get(...)` for each `pub fn name` of the
 ///   controller that serves a route.
 pub fn routes(comptime spec: anytype) type {
+    // A controller declares its routes in one constant, and the compiler
+    // counts the work of all of them, and of each `http.get` and the
+    // others, against one quota: it is raised here, not by the application.
+    @setEvalBranchQuota(route_quota);
     const S = @TypeOf(spec);
     if (@typeInfo(S) != .@"struct") @compileError("zefir.http: http.routes takes a struct literal, such as .{ .prefix = \"/v1/todos\", .methods = .{ ... } }");
     expectOptions(S, &.{ "prefix", "middleware", "methods" }, "http.routes");
@@ -119,6 +123,7 @@ pub fn options(comptime path: []const u8, comptime opts: anytype) type {
 /// of an SSE route: `.middleware`, `.heartbeat` (a `std.Io.Duration`) and
 /// `.on_close` (the name of a method of the controller, `.eventsClosed`).
 pub fn Route(comptime method: std.http.Method, comptime kind: Kind, comptime path: []const u8, comptime opts: anytype) type {
+    @setEvalBranchQuota(route_quota);
     const O = @TypeOf(opts);
     const where = switch (kind) {
         .rest => "http." ++ lowerName(method) ++ "(\"" ++ path ++ "\")",
@@ -152,6 +157,10 @@ pub fn Route(comptime method: std.http.Method, comptime kind: Kind, comptime pat
         pub const on_close: ?[]const u8 = if (@hasField(O, "on_close")) @tagName(opts.on_close) else null;
     };
 }
+
+/// The eval branch quota of a controller's declaration of its routes: a few
+/// hundred branches a route, so some hundreds of routes a controller.
+const route_quota = 200_000;
 
 /// Whether `T` is a container with the declaration `marker`, such as the
 /// `zefir_http_route` of a route.
