@@ -304,7 +304,12 @@ pub fn query(ctx: *Context, comptime T: type) InputError(T, .query)!T {
 /// as `application/merge-patch+json`, else `error.UnsupportedMediaType`
 /// (415) before the body is read. JSON that is broken, a key given twice in
 /// one object and nesting deeper than `.json.max_depth` are
-/// `error.InvalidRequest` (400). Then come the steps of every input call:
+/// `error.InvalidRequest` (400). The items of its lists, all together, may
+/// take 4 × `.max_body_bytes` of memory, each as `@sizeOf` its type; past it
+/// the body is `error.PayloadTooLarge` (413), since a short body of small
+/// items such as `[{},{},…]` would take many times its size. The rules of
+/// `field_rules`, such as `v.maxItems`, run after the lists are built.
+/// Then come the steps of every input call:
 /// what does not fit is `ValidationFailed` with every violation at once, in
 /// the order of the body (`http.invalid_type`, `http.missing_field`,
 /// `http.unknown_field`, at paths such as `items[2].displayName`), then the
@@ -318,7 +323,11 @@ pub fn json(ctx: *Context, comptime T: type) JsonError(T)!T {
     const bytes = try ctx.body();
     const arena = ctx.internal.arena;
     var sink: collect.Collector = .init(arena);
-    const value = (try json_in.parse(T, arena, bytes, .{ .max_depth = ctx.internal.json.max_depth, .unknown = ctx.internal.unknown_fields.body }, &sink)) orelse {
+    const value = (try json_in.parse(T, arena, bytes, .{
+        .max_depth = ctx.internal.json.max_depth,
+        .unknown = ctx.internal.unknown_fields.body,
+        .max_list_bytes = ctx.internal.max_body_bytes *| 4,
+    }, &sink)) orelse {
         ctx.internal.violations = sink.items();
         return error.ValidationFailed;
     };
@@ -1407,6 +1416,32 @@ test "json: outside names in and out" {
     defer untagged.deinit();
     try testing.expectEqual(500, untagged.status);
     try testing.expectEqualStrings("internal", (try problemOf(&untagged)).code);
+}
+
+test "json: the items of a body's lists take at most 4 × .max_body_bytes, else 413" {
+    var todos: JsonController = .{};
+    var b: TestingBackend = .init(testing.allocator);
+    defer b.deinit();
+    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&todos}, .max_body_bytes = 256, .strict_errors = false });
+    defer server.deinit(testing.io);
+    try server.start(testing.io);
+    // A tag is a []const u8: 4 × 256 bytes hold this many of them.
+    const most = 4 * 256 / @sizeOf([]const u8);
+    for ([_]struct { usize, u16 }{ .{ most, 201 }, .{ most + 1, 413 } }) |case| {
+        var payload: std.ArrayList(u8) = .empty;
+        defer payload.deinit(testing.allocator);
+        try payload.appendSlice(testing.allocator, "{\"title\":\"a\",\"userName\":\"b\",\"tags\":[");
+        for (0..case[0]) |i| try payload.appendSlice(testing.allocator, if (i == 0) "\"\"" else ",\"\"");
+        try payload.appendSlice(testing.allocator, "]}");
+        try testing.expect(payload.items.len <= 256);
+        var res = try post(&b, "/todos", "application/json", payload.items);
+        defer res.deinit();
+        testing.expectEqual(case[1], res.status) catch |err| {
+            std.debug.print("{d} tags: {s}\n", .{ case[0], res.body });
+            return err;
+        };
+        if (case[1] == 413) try testing.expectEqualStrings("payload_too_large", (try problemOf(&res)).code);
+    }
 }
 
 test "json: broken JSON, a repeated key and nesting past .json.max_depth are 400" {

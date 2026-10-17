@@ -17,7 +17,10 @@
 //!
 //! A field with a default value keeps it when it is absent. What is not
 //! JSON, a key given twice in an object and nesting deeper than
-//! `.json.max_depth` are `error.InvalidRequest` (400). A value of the
+//! `.json.max_depth` are `error.InvalidRequest` (400); lists whose items
+//! take more memory than `Options.max_list_bytes`, all lists together, are
+//! `error.PayloadTooLarge` (413), so that a body of small items, such as
+//! `[{},{},…]`, costs no more than a few times its size. A value of the
 //! wrong type (`http.invalid_type`), a field that is missing
 //! (`http.missing_field`) and a key the struct does not have
 //! (`http.unknown_field`, unless its policy ignores it) are violations, all
@@ -37,7 +40,9 @@ const messages = violations.messages;
 
 /// `InvalidRequest`: the body is not JSON, a key of an object comes twice,
 /// or objects and arrays nest deeper than `Options.max_depth`.
-pub const Error = error{InvalidRequest} || Allocator.Error;
+/// `PayloadTooLarge`: the items of the lists take more than
+/// `Options.max_list_bytes`.
+pub const Error = error{ InvalidRequest, PayloadTooLarge } || Allocator.Error;
 
 pub const Options = struct {
     /// The deepest nesting of objects and arrays, the top level included:
@@ -46,6 +51,10 @@ pub const Options = struct {
     /// What happens to the unknown keys of a struct that does not say it
     /// itself with `pub const unknown_fields`.
     unknown: dto.UnknownFields = .reject,
+    /// The most bytes the items of the lists of the value take, all lists
+    /// together, each item as `@sizeOf` its type: `ctx.json` gives 4 ×
+    /// `.max_body_bytes`.
+    max_list_bytes: usize = std.math.maxInt(usize),
 };
 
 /// The compile-time check of a DTO of `ctx.json`: every type in it is one
@@ -78,6 +87,8 @@ const Parser = struct {
     /// The path of the value being read, such as `items[2].displayName`;
     /// empty at the top.
     path: std.ArrayList(u8) = .empty,
+    /// The bytes the items of the lists kept so far take.
+    list_bytes: usize = 0,
 
     /// The next token, a string or a number whole.
     fn next(p: *Parser) Error!Token {
@@ -196,6 +207,10 @@ const Parser = struct {
             const mark = p.path.items.len;
             defer p.path.shrinkRetainingCapacity(mark);
             try p.path.print(p.arena, "[{d}]", .{index});
+            if (ok) {
+                p.list_bytes +|= @sizeOf(Item);
+                if (p.list_bytes > p.options.max_list_bytes) return error.PayloadTooLarge;
+            }
             const slot = if (ok) try items.addOne(p.arena) else &scratch;
             if (!try p.read(Item, slot)) ok = false;
         }
@@ -548,6 +563,26 @@ test "json: depth 64 passes, 65 is 400" {
     const Strict = struct { n: u32 = 0 };
     try testing.expectError(error.InvalidRequest, parseInto(Strict, arena, "{\"n\":[[[]]]}", .{ .max_depth = 3 }));
     _ = try parseInto(Strict, arena, "{\"n\":[[]]}", .{ .max_depth = 3 });
+}
+
+test "json: the items of lists past max_list_bytes are PayloadTooLarge" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // Four u64 take 32 bytes.
+    _ = try parseInto([]const u64, arena, "[1,2,3,4]", .{ .max_list_bytes = 32 });
+    try testing.expectError(error.PayloadTooLarge, parseInto([]const u64, arena, "[1,2,3,4]", .{ .max_list_bytes = 31 }));
+    // Every list of the value counts, nested ones too.
+    const Todo = struct { tags: []const []const u8 = &.{} };
+    const body = "[{\"tags\":[\"a\",\"b\"]},{\"tags\":[\"c\"]},{}]";
+    const all = 3 * @sizeOf(Todo) + 3 * @sizeOf([]const u8);
+    const fits = try parseInto([]const Todo, arena, body, .{ .max_list_bytes = all });
+    try testing.expectEqual(3, (fits.value orelse return error.TestUnexpectedResult).len);
+    try testing.expectError(error.PayloadTooLarge, parseInto([]const Todo, arena, body, .{ .max_list_bytes = all - 1 }));
+    // The items after one that failed are not kept, and take nothing.
+    const failed = try parseInto([]const u64, arena, "[\"x\",1,2,3,4,5,6,7,8]", .{ .max_list_bytes = @sizeOf(u64) });
+    try testing.expectEqual(null, failed.value);
+    try expectViolations(&failed.sink, &.{.{ violations.invalid_type, "[0]", messages.integer }});
 }
 
 test "json: a repeated key is 400" {
