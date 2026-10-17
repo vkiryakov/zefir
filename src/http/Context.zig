@@ -207,6 +207,9 @@ pub fn body(ctx: *Context) BodyError![]const u8 {
     return result;
 }
 
+/// What `body` reserves first of a body by its length.
+const first_body_part = 64 << 10;
+
 fn readWhole(ctx: *Context) BodyError![]const u8 {
     const exchange = ctx.request.internal.exchange;
     if (!identityOnly(exchange.fields)) return error.UnsupportedMediaType;
@@ -216,8 +219,15 @@ fn readWhole(ctx: *Context) BodyError![]const u8 {
     const arena = ctx.internal.arena;
     var bytes: std.ArrayList(u8) = .empty;
     if (length) |n| {
-        try bytes.ensureTotalCapacityPrecise(arena, @intCast(n));
-        while (bytes.items.len < n) {
+        // Reserved as it comes, doubling up to its length: a head that
+        // announces a body and sends none of it costs no more than the
+        // first part.
+        const total: usize = @intCast(n);
+        while (bytes.items.len < total) {
+            if (bytes.items.len == bytes.capacity) {
+                const grown = @min(total, @max(first_body_part, bytes.capacity *| 2));
+                try bytes.ensureTotalCapacityPrecise(arena, grown);
+            }
             const got = try exchange.readBody(ctx.internal.io, bytes.unusedCapacitySlice());
             // The backend ended the body before its length.
             if (got == 0) return error.ReadFailed;
@@ -577,6 +587,30 @@ test "body: over the limit by Content-Length is 413 before reading; chunked over
         if (case[2] == 200) try testing.expectEqualStrings(case[1], res.body);
         if (case[2] == 413) try expectCode(&res, "payload_too_large");
     }
+}
+
+test "body: a Content-Length is reserved as the body comes, not before its first byte" {
+    // A head that announces a body of the limit and sends three bytes of
+    // it: the request holds no more than the first part of the body.
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    var short: FakeBody = .init(&.{}, 1 << 20, "abc");
+    var short_done: std.Io.Event = .unset;
+    var short_ctx = short.context(arena_state.allocator(), 1 << 20, &short_done);
+    try testing.expectError(error.ReadFailed, short_ctx.body());
+    try testing.expect(arena_state.queryCapacity() < 256 << 10);
+    try testing.expect(!short_done.isSet());
+
+    // A whole body past the first part grows to its length.
+    var whole_arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer whole_arena.deinit();
+    const payload = try whole_arena.allocator().alloc(u8, 200 << 10);
+    for (payload, 0..) |*b, i| b.* = @truncate(i *% 7);
+    var whole: FakeBody = .init(&.{}, payload.len, payload);
+    var whole_done: std.Io.Event = .unset;
+    var whole_ctx = whole.context(whole_arena.allocator(), 1 << 20, &whole_done);
+    try testing.expectEqualSlices(u8, payload, try whole_ctx.body());
+    try testing.expect(whole_done.isSet());
 }
 
 test "body: gzip is 415" {
