@@ -109,8 +109,10 @@ fn measure(io: Io, count: usize) !void {
         probes.report("{d} requests: resident memory {d:.1} MiB at the peak, {d:.1} MiB more than before, {d:.1} KiB per request; process peak {d:.1} MiB", .{ count, mib(peak.resident.?), mib(grown), grown_per_request, mib(peak.peak_resident orelse 0) });
     }
     if (peak.mappings) |at_peak| {
+        // Stacks freed by an earlier measurement stay mapped for reuse, so
+        // the mappings at the peak, not the ones added, give the cost.
         const added = at_peak -| (before.mappings orelse 0);
-        const per_coroutine = @as(f64, @floatFromInt(added)) / @as(f64, @floatFromInt(coroutines));
+        const per_coroutine = @as(f64, @floatFromInt(at_peak)) / @as(f64, @floatFromInt(coroutines));
         probes.report("{d} requests: {d} memory mappings at the peak, {d} more than before, {d:.2} per coroutine; vm.max_map_count {d}", .{ count, at_peak, added, per_coroutine, peak.max_map_count orelse 0 });
     }
 }

@@ -9,8 +9,10 @@ const zio = @import("zio");
 pub var executors: u8 = 0;
 
 /// Runs `scenario` on zio with one executor, then with four, and names the
-/// one that failed.
+/// one that failed. Both run even when the first fails, so that a run
+/// shows how each behaves; the first error is returned.
 pub fn forEachRuntime(gpa: std.mem.Allocator, comptime scenario: fn (io: std.Io) anyerror!void) !void {
+    var first: ?anyerror = null;
     for ([_]u8{ 1, 4 }) |count| {
         const runtime = try zio.Runtime.init(gpa, .{ .executors = .exact(count) });
         defer runtime.deinit();
@@ -18,7 +20,8 @@ pub fn forEachRuntime(gpa: std.mem.Allocator, comptime scenario: fn (io: std.Io)
         defer executors = 0;
         scenario(runtime.io()) catch |err| {
             std.debug.print("with {d} executor(s): {t}\n", .{ count, err });
-            return err;
+            if (first == null) first = err;
         };
     }
+    if (first) |err| return err;
 }
