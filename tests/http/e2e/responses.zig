@@ -27,6 +27,10 @@ const App = struct {
     file_path: []const u8 = "",
     /// Opens the second part of `live`.
     gate: Io.Event = .unset,
+    /// How far `live` got: 1 flushed, 2 through the gate, 3 finished; and
+    /// the error that ended it, for the message of a failure.
+    live_stage: std.atomic.Value(u8) = .init(0),
+    live_error: ?anyerror = null,
     /// `flood` has ended, with this error; when its last write that went
     /// well ended and when the one that failed did, in nanoseconds of the
     /// awake clock.
@@ -55,12 +59,21 @@ const App = struct {
     }
     /// A line that `flush` sends at once; the next one once the gate opens.
     pub fn live(self: *App, ctx: *http.Context) !void {
+        self.liveStream(ctx) catch |err| {
+            self.live_error = err;
+            return err;
+        };
+    }
+    fn liveStream(self: *App, ctx: *http.Context) !void {
         var out = try ctx.response.stream(.{ .content_type = "text/plain" });
         try out.writeAll("first\n");
         try out.flush();
+        self.live_stage.store(1, .release);
         try self.gate.wait(ctx.io());
+        self.live_stage.store(2, .release);
         try out.writeAll("second\n");
         try out.finish();
+        self.live_stage.store(3, .release);
     }
     pub fn download(self: *App, ctx: *http.Context) !void {
         try ctx.response.file(self.file_path, .{ .download_as = "data.bin" });
@@ -205,7 +218,23 @@ fn liveStream(io: Io) !void {
     try testing.expect(try c.readUntil(io, "first\n", .fromSeconds(5)));
     try testing.expect(std.mem.find(u8, c.kept(), "Transfer-Encoding: chunked\r\n") != null);
     f.app.gate.set(io);
-    const res = try c.readResponse(io, a, .{});
+    const opened = Io.Clock.awake.now(io);
+    const res = c.readResponse(io, a, .{}) catch |err| {
+        // Where the handler stopped, what the client holds, and whether the
+        // rest comes late or never.
+        std.debug.print("live: {t} after {d} ms; the handler at stage {d}, error {?}; the client holds {d} bytes: {s}\n", .{
+            err,          e2e.sinceMs(io, opened), f.app.live_stage.load(.acquire), f.app.live_error,
+            c.kept().len, c.kept(),
+        });
+        const late = c.waitData(io, .fromSeconds(10)) catch |wait_err| {
+            std.debug.print("live: then {t} after {d} ms; the handler at stage {d}\n", .{ wait_err, e2e.sinceMs(io, opened), f.app.live_stage.load(.acquire) });
+            return err;
+        };
+        std.debug.print("live: then {s} after {d} ms; the handler at stage {d}; the client holds {d} bytes: {s}\n", .{
+            if (late) "bytes" else "nothing", e2e.sinceMs(io, opened), f.app.live_stage.load(.acquire), c.kept().len, c.kept(),
+        });
+        return err;
+    };
     try testing.expectEqual(200, res.status);
     try testing.expectEqualStrings("text/plain", res.header("content-type").?);
     try testing.expectEqualStrings("first\nsecond\n", res.body);
