@@ -1,0 +1,58 @@
+name: Fuzz
+
+# The fuzzer of Zig on zefir-http's HTTP/1.1 parser: the fuzz test of
+# src/http/h1/fuzz.zig, which reads every input in one piece and in pieces
+# of 1 to 64 bytes and expects the same requests, starting from the corpus
+# of src/http/h1/testdata/. Zig's fuzzer runs on Linux only.
+#
+# It runs on a pull request into dev that changes the parser, and by hand:
+# `gh workflow run fuzz.yml --ref <branch> -f runs=100M`; GitHub dispatches
+# only workflows that are on the default branch too. It is not a required
+# check. When it finds a failing input, the run fails and uploads the
+# fuzzer's state: the files `in<hex>` of .zig-cache/f/ hold the inputs it
+# was working on, and .zig-cache/tmp/libfuzzer.log what it printed. A
+# failing input becomes a case of src/http/h1/testdata/cases.zig, with the
+# fix.
+
+on:
+  pull_request:
+    branches: [dev]
+    paths:
+      - src/http/h1/**
+      - .github/workflows/fuzz.yml
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: "How many inputs to try: a number, optionally with K, M or G"
+        default: 10M
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fuzz:
+    name: fuzz
+    timeout-minutes: 45
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: mlugg/setup-zig@v2
+      # ReleaseSafe: fast enough for millions of inputs, and every safety
+      # check still panics.
+      - name: Fuzz the parser
+        env:
+          RUNS: ${{ inputs.runs || '10M' }}
+        run: zig build fuzz-http --fuzz="$RUNS" -Doptimize=ReleaseSafe
+      - name: Upload the fuzzer's state
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-http
+          path: |
+            .zig-cache/f/
+            .zig-cache/tmp/libfuzzer.log
+          if-no-files-found: ignore
