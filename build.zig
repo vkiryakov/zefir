@@ -169,6 +169,26 @@ pub fn build(b: *std.Build) void {
 
     addValidatorTests(b, test_validator, validator_compile_step, validator, log, target, optimize, tsan);
     addHttpCompileChecks(b, test_http, http, validator, target, optimize);
+    // The examples of the zefir-http guide: the middleware of an
+    // application (authentication, CORS) and their tests. Like an
+    // application, they may read settings with confy and log with log.
+    const http_examples = b.addTest(.{
+        .name = "http-examples",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/http/examples/middleware_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .sanitize_thread = tsan,
+            .imports = &.{
+                .{ .name = "core", .module = core },
+                .{ .name = "validator", .module = validator },
+                .{ .name = "confy", .module = confy },
+                .{ .name = "log", .module = log },
+                .{ .name = "http", .module = http },
+            },
+        }),
+    });
+    test_http.dependOn(&addRun(b, http_examples, tsan).step);
 
     // `zig build fuzz-http` runs the fuzz test of zefir-http's HTTP/1.1
     // parser on its corpus, once, like `zig build test-http` does; with
