@@ -24,6 +24,7 @@ const cookie_input = @import("input/cookies.zig");
 const json_in = @import("input/json_in.zig");
 const collect = @import("input/violations.zig");
 const plan = @import("plan.zig");
+const mw = @import("middleware.zig");
 
 const Context = @This();
 const Violation = v.Violation;
@@ -73,6 +74,9 @@ pub const Internal = struct {
     body: ?(BodyError![]const u8) = null,
     /// The server's error handler.
     error_handler: flow.ErrorHandler = .default,
+    /// The middleware of the request: the server's, the route's once it
+    /// is applied, and those the request reached.
+    middleware: mw.Reached = .{},
 };
 
 /// The errors of `body`. `PayloadTooLarge` (413): over the limit.

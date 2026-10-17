@@ -38,16 +38,21 @@
 //! `ctx.response.json`), the states of a response, cookies, redirects,
 //! files and streamed responses (`ctx.response.setCookie`, `redirect`,
 //! `file`, `stream`, and the buffer of 16 KiB that bodies written as they
-//! go pass through), the client behind trusted proxies, and the error
+//! go pass through), the client behind trusted proxies, the error
 //! handler with the strict error check at compile time (`mapError`,
-//! `.fallback`, `handle`; `http.ErrorResponse`, `http.Problem`); the rest
-//! of the API comes with the next commits.
+//! `.fallback`, `handle`; `http.ErrorResponse`, `http.Problem`), the
+//! mechanism of the application's middleware on three levels (functions,
+//! types, objects, sets; the phases `run`, `onResponse` and `onFinish`;
+//! `http.onResponse`, `http.onFinish`, `http.MiddlewareResult`,
+//! `http.Outcome`) and the typed locals of a request (`ctx.locals`,
+//! `ctx.local`); the rest of the API comes with the next commits.
 
 const std = @import("std");
 const route_decls = @import("routes.zig");
 
 const errors = @import("errors.zig");
 const dto = @import("dto.zig");
+const middleware = @import("middleware.zig");
 
 pub const Server = @import("Server.zig");
 pub const Backend = @import("Backend.zig");
@@ -76,6 +81,12 @@ pub const Problem = errors.Problem;
 pub const defaultStatus = errors.defaultStatus;
 pub const defaultCode = errors.defaultCode;
 pub const defaultTitle = errors.defaultTitle;
+
+// Middleware: the mechanism; the middleware are the application's.
+pub const MiddlewareResult = middleware.MiddlewareResult;
+pub const Outcome = middleware.Outcome;
+pub const onResponse = middleware.onResponse;
+pub const onFinish = middleware.onFinish;
 
 pub const routes = route_decls.routes;
 pub const get = route_decls.get;
@@ -108,6 +119,7 @@ test {
     _ = @import("Request.zig");
     _ = @import("Context.zig");
     _ = @import("Locals.zig");
+    _ = @import("middleware.zig");
     _ = @import("proxies.zig");
     _ = @import("input/strings.zig");
     _ = @import("input/urlencoded.zig");

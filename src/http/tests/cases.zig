@@ -67,6 +67,17 @@ pub const compile_errors = [_]Fixture{
     .{ .file = dir ++ "error_handler_handle_signature.zig", .expect = "; write pub fn handle(self: *AppErrors, ctx: *http.Context, err: anyerror, res: *http.ErrorResponse(ApiError)) !http.ErrorAction", .whole = false },
     .{ .file = dir ++ "error_handler_map_signature.zig", .expect = "; write pub fn mapError(err: anyerror) http.ErrorResponse(Body) (no ctx: the strict error check calls it at compile time)", .whole = false },
     .{ .file = dir ++ "error_handler_by_value.zig", .expect = "zefir.http: Server.init .error_handler is AppErrors; pass a pointer to the error handler, e.g. &app_errors" },
+    // Middleware.
+    .{ .file = dir ++ "mw_pointer_in_controller.zig", .expect = "zefir.http: UsersV1Controller.http_routes.middleware[0]: a pointer to an object goes into the server's middleware; in a controller, make it a field and name it: .field" },
+    .{ .file = dir ++ "mw_unknown_element.zig", .expect = "zefir.http: Server.init .middleware[1]: an element of type 'comptime_int' is not middleware; write a function fn (ctx: *http.Context) !http.MiddlewareResult, " ++
+        "a type with pub fn run, a pointer to an object with run, onResponse or onFinish, http.onResponse(f), http.onFinish(f), a tuple of them, or in a controller .field" },
+    .{ .file = dir ++ "mw_object_no_phase.zig", .expect = "zefir.http: Server.init .middleware[0]: mw_object_no_phase.Empty has none of pub fn run(self: *@This(), ctx: *http.Context) !http.MiddlewareResult, " ++
+        "pub fn onResponse(self: *@This(), ctx: *http.Context) !void, pub fn onFinish(self: *@This(), ctx: *http.Context, outcome: http.Outcome) !void" },
+    .{ .file = dir ++ "mw_field_missing.zig", .expect = "zefir.http: UsersV1Controller.http_routes.methods.delete.middleware[1]: .audt is not a field of UsersV1Controller" },
+    .{ .file = dir ++ "mw_field_not_pointer.zig", .expect = "zefir.http: UsersV1Controller.http_routes.methods.delete.middleware[1]: field 'audit' of UsersV1Controller is 'mw_field_not_pointer.Audit'; it must point to a middleware object" },
+    .{ .file = dir ++ "mw_run_anyerror.zig", .expect = "zefir.http: requireUser.run (middleware of UsersV1Controller.get) returns anyerror; the strict error check needs the errors it can return: give it an error set" ++ strict_hint },
+    .{ .file = dir ++ "strict_middleware_error.zig", .expect = "requirePermission(users:delete).run (middleware of UsersV1Controller.delete) can return error.NoSuchTenant; AppErrors.mapError gives it 500 through .fallback" ++ strict_hint },
+    .{ .file = dir ++ "mw_phase_signature.zig", .expect = "zefir.http: Server.init .middleware[0]: Timing.run is fn (*http.Context) !http.MiddlewareResult; write pub fn run(self: *@This(), ctx: *http.Context) !http.MiddlewareResult" },
 };
 
 const strict_hint = " (strict error check; .strict_errors = false turns it off)";

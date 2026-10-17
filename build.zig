@@ -1143,4 +1143,28 @@ fn addHttpCompileChecks(
         });
         test_step.dependOn(&t.step);
     }
+    // A large application, which gen_big_app writes into the build cache:
+    // ten controllers of thirty routes, middleware on every level and forty
+    // errors of its own. It must compile without an eval branch quota of
+    // its own. The generator is built for the host, so it also runs when
+    // -Dtarget names another system.
+    const gen_big_app = b.addExecutable(.{
+        .name = "gen_big_app",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/http/tests/gen_big_app.zig"),
+            .target = b.graph.host,
+            .optimize = .Debug,
+        }),
+    });
+    const run_gen = b.addRunArtifact(gen_big_app);
+    const big_app = b.addTest(.{
+        .name = "big_app",
+        .root_module = b.createModule(.{
+            .root_source_file = run_gen.addOutputFileArg("big_app.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = imports,
+        }),
+    });
+    test_step.dependOn(&big_app.step);
 }

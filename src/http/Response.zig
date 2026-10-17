@@ -52,6 +52,13 @@ pub const Internal = struct {
     sink: ?Sink = null,
     /// The buffer of a body written as it goes.
     out: Out = .{},
+    /// Runs once, right before the head goes out: the `onResponse` phases
+    /// of the middleware. The server sets it for each request.
+    before_head: ?BeforeHead = null,
+    /// The status the head went out with; null before.
+    status_sent: ?u16 = null,
+    /// The server cut the response, or ended the request without one.
+    aborted: bool = false,
 
     /// Whether the handler wrote a response: a status or a body. A `!void`
     /// handler that wrote none answers 204.
@@ -85,6 +92,9 @@ pub const Internal = struct {
     /// held whole with its length, the value of an `http.Json(T)` through
     /// the buffer, or what a stream left in the buffer.
     pub fn send(i: *Internal) Exchange.WriteError!void {
+        // First, as the head is not taken apart yet: its status and fields
+        // may still change.
+        i.runBeforeHead();
         const sink = i.sink.?;
         switch (i.body) {
             .none, .bytes => {
@@ -127,6 +137,7 @@ pub const Internal = struct {
     /// and the body's `length`, or chunked for null. From here on the
     /// response is committed. Every head of a response goes out here.
     fn commit(i: *Internal, length: ?u64) Exchange.WriteError!void {
+        i.runBeforeHead();
         const sink = i.sink.?;
         const code = i.statusCode();
         if (code < 200 or code > 599) {
@@ -137,7 +148,15 @@ pub const Internal = struct {
         }
         const head_fields = i.fields() catch return outOfMemory();
         i.state = .committed;
+        i.status_sent = code;
         sink.exchange.writeHead(sink.io, code, head_fields, kindOf(code, length)) catch |err| return i.fail(err);
+    }
+
+    /// The hook before the head, once.
+    fn runBeforeHead(i: *Internal) void {
+        const hook = i.before_head orelse return;
+        i.before_head = null;
+        hook.call(hook.ptr);
     }
 
     /// Sends what the buffer holds, the head first if it has not gone:
@@ -239,6 +258,12 @@ fn ValueOf(comptime T: type) type {
         }
     };
 }
+
+/// What runs right before the head of a response goes out.
+pub const BeforeHead = struct {
+    ptr: *anyopaque,
+    call: *const fn (ptr: *anyopaque) void,
+};
 
 /// The request's exchange, for the bodies that go out as they are written.
 pub const Sink = struct {

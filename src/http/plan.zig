@@ -10,10 +10,16 @@
 //!   `.on_close` that names no method of its form;
 //! - a pattern that does not parse, two routes of one method on one shape
 //!   of path (router.zig);
+//! - an element of a `.middleware` list of no kind the server takes, or a
+//!   phase of another form (middleware.zig);
 //! - an `.error_handler` that is not a pointer to a mutable error handler
 //!   with `pub fn mapError(err: anyerror) http.ErrorResponse(Body)` and,
 //!   optionally, a `handle` of its form;
 //! - the strict error check (strict.zig), unless `.strict_errors = false`.
+//!
+//! The chain of each route is built here: the server's middleware, then
+//! the controller's, then the method's, sets unfolded; nothing is looked up
+//! while a request runs.
 const std = @import("std");
 const v = @import("validator");
 const routes = @import("routes.zig");
@@ -22,6 +28,7 @@ const Context = @import("Context.zig");
 const sse = @import("sse.zig");
 const errors = @import("errors.zig");
 const strict = @import("strict.zig");
+const mw = @import("middleware.zig");
 
 /// One route of the server, at compile time.
 pub const RoutePlan = struct {
@@ -46,6 +53,11 @@ pub const RoutePlan = struct {
     timeout: routes.Timeout,
     heartbeat: ?std.Io.Duration,
     on_close: ?[]const u8,
+    /// The route's own middleware, after the server's: the controller's
+    /// elements, then the method's, each list in its order, sets unfolded.
+    chain: []const mw.Elem,
+    /// How many elements of `chain` are the controller's.
+    controller_elems: usize,
 };
 
 pub const Plan = struct {
@@ -57,6 +69,9 @@ pub const Plan = struct {
     max_params: usize,
     /// The type of `.error_handler`'s object, else `errors.DefaultErrors`.
     Handler: type,
+    /// The server's middleware, sets unfolded: every request runs it,
+    /// before its route is applied.
+    global: []const mw.Elem,
 };
 
 const known_options = [_][]const u8{
@@ -78,6 +93,11 @@ pub fn of(comptime O: type) Plan {
     const cinfo = @typeInfo(@FieldType(O, "controllers"));
     if (cinfo != .@"struct" or !cinfo.@"struct".is_tuple or cinfo.@"struct".field_names.len == 0) @compileError(controllers_form);
 
+    const Global = if (@hasField(O, "middleware")) @FieldType(O, "middleware") else @TypeOf(.{});
+    quota += elem_quota * elemsIn(Global);
+    @setEvalBranchQuota(quota);
+    const global = mw.unfold(Global, .{ .level = .global }, &.{});
+
     var table: []const RoutePlan = &.{};
     var specs: []const router.Spec = &.{};
     var max_params: usize = 0;
@@ -89,17 +109,22 @@ pub fn of(comptime O: type) Plan {
         if (!@hasDecl(C, "http_routes")) @compileError("zefir.http: " ++ cname ++ " has no pub const http_routes = http.routes(.{ ... })");
         const R = C.http_routes;
         if (@TypeOf(R) != type or !routes.isMarked(R, "zefir_http_routes")) @compileError("zefir.http: " ++ cname ++ ".http_routes must be http.routes(.{ ... })");
+        quota += elem_quota * elemsIn(@TypeOf(R.middleware));
+        @setEvalBranchQuota(quota);
+        const controller_chain = mw.unfold(@TypeOf(R.middleware), .{ .level = .controller, .Controller = C }, &.{});
         for (@typeInfo(@TypeOf(R.methods)).@"struct".field_names) |name| {
             const Route = @field(R.methods, name);
             const where = cname ++ "." ++ name;
             const pattern = R.prefix ++ Route.route_path;
-            quota += 20_000 + 500 * @as(u32, @intCast(pattern.len));
+            quota += 20_000 + 500 * @as(u32, @intCast(pattern.len)) + elem_quota * elemsIn(@TypeOf(Route.middleware)) +
+                chain_quota * @as(u32, @intCast(controller_chain.len));
             @setEvalBranchQuota(quota);
             checkHandler(C, name, Route.route_kind, where);
             if (Route.on_close) |on_close| checkOnClose(C, on_close, where);
             const segments = router.parse(pattern, where);
             const params = router.paramNames(segments);
             max_params = @max(max_params, params.len);
+            const method_chain = mw.unfold(@TypeOf(Route.middleware), .{ .level = .method, .Controller = C, .method = name }, &.{});
             table = table ++ [_]RoutePlan{.{
                 .method = Route.http_method,
                 .kind = Route.route_kind,
@@ -114,6 +139,8 @@ pub fn of(comptime O: type) Plan {
                 .timeout = Route.timeout,
                 .heartbeat = Route.heartbeat,
                 .on_close = Route.on_close,
+                .chain = controller_chain ++ method_chain,
+                .controller_elems = controller_chain.len,
             }};
             specs = specs ++ [_]router.Spec{.{
                 .method = Route.http_method,
@@ -126,8 +153,22 @@ pub fn of(comptime O: type) Plan {
     }
     const nodes = router.build(specs);
     const Handler = errorHandlerOf(O);
-    if (strictOf(O)) strict.check(Handler, shortName(@typeName(Handler)), strictEntries(table));
-    return .{ .routes = table, .nodes = nodes, .max_params = max_params, .Handler = Handler };
+    if (strictOf(O)) strict.check(Handler, shortName(@typeName(Handler)), strictEntries(table, global));
+    return .{ .routes = table, .nodes = nodes, .max_params = max_params, .Handler = Handler, .global = global };
+}
+
+/// The quota of describing one element of a `.middleware` list, and of
+/// taking one element of a controller's chain into a route's.
+const elem_quota = 6_000;
+const chain_quota = 200;
+
+/// How many elements a `.middleware` tuple holds, sets counted through.
+fn elemsIn(comptime List: type) u32 {
+    const info = @typeInfo(List);
+    if (info != .@"struct" or !info.@"struct".is_tuple) return 1;
+    var count: u32 = 1;
+    for (info.@"struct".field_types) |Item| count += elemsIn(Item);
+    return count;
 }
 
 /// The error handler of `O`: the type of the object `.error_handler`
@@ -186,11 +227,15 @@ fn strictOf(comptime O: type) bool {
 }
 
 /// The places whose errors the strict error check reads: the handler of
-/// every route, and the transforms of the JSON value it answers with,
-/// which run before the response goes out.
-fn strictEntries(comptime table: []const RoutePlan) []const strict.Entry {
+/// every route, the transforms of the JSON value it answers with, which
+/// run before the response goes out, and the `run` of each element of its
+/// chain. The errors of `onResponse` and `onFinish` are only logged. Each
+/// `run` is read once, under the first route that has it: the server's
+/// elements under the first route, a controller's under its first.
+fn strictEntries(comptime table: []const RoutePlan, comptime global: []const mw.Elem) []const strict.Entry {
     var out: []const strict.Entry = &.{};
-    for (table) |r| {
+    var visited: []const type = &.{};
+    for (table, 0..) |r, ri| {
         const where = r.controller_name ++ "." ++ r.handler;
         const R = @typeInfo(@TypeOf(@field(r.Controller, r.handler))).@"fn".return_type.?;
         const E = if (@typeInfo(R) == .error_union) @typeInfo(R).error_union.error_set else error{};
@@ -198,8 +243,23 @@ fn strictEntries(comptime table: []const RoutePlan) []const strict.Entry {
         const Payload = payloadOf(R);
         if (Payload != void)
             out = out ++ [_]strict.Entry{.{ .where = where ++ " (writing its response)", .Errors = v.TransformError(Payload.Value) }};
+        const first_of_controller = ri == 0 or table[ri - 1].controller_index != r.controller_index;
+        const server_elems: []const mw.Elem = if (ri == 0) global else &.{};
+        const own = if (first_of_controller) r.chain else r.chain[r.controller_elems..];
+        for (server_elems ++ own) |e| {
+            if (!@hasDecl(e.Impl, "run") or containsType(visited, e.Impl)) continue;
+            visited = visited ++ [_]type{e.Impl};
+            out = out ++ [_]strict.Entry{.{ .where = e.name ++ ".run (middleware of " ++ where ++ ")", .Errors = mw.ErrorSetOf(@TypeOf(e.Impl.run)) }};
+        }
     }
     return out;
+}
+
+fn containsType(comptime list: []const type, comptime T: type) bool {
+    for (list) |item| {
+        if (item == T) return true;
+    }
+    return false;
 }
 
 /// The controller of the element `Ptr` of `.controllers`: a pointer to a
@@ -265,6 +325,8 @@ pub fn typeName(comptime T: type) []const u8 {
     if (T == Context) return "http.Context";
     if (T == sse.Context) return "http.sse.Context";
     if (T == errors.Problem) return "http.Problem";
+    if (T == mw.MiddlewareResult) return "http.MiddlewareResult";
+    if (T == mw.Outcome) return "http.Outcome";
     const info = @typeInfo(T);
     if (info == .pointer and info.pointer.size == .one)
         return "*" ++ (if (info.pointer.attrs.@"const") "const " else "") ++ typeName(info.pointer.child);
@@ -302,8 +364,22 @@ const testing = std.testing;
 const Backend = @import("Backend.zig");
 const Json = @import("dto.zig").Json;
 
+// Application code of the tests below: zefir-http ships no middleware.
+const Audit = struct {
+    pub fn onFinish(_: *Audit, _: *Context, _: mw.Outcome) !void {}
+};
+const PlanLookup = struct {
+    pub fn run(_: *PlanLookup, _: *Context) !mw.MiddlewareResult {
+        return .next;
+    }
+};
+var audit_object: Audit = .{};
+var plans_object: PlanLookup = .{};
+
 const UsersV1Controller = struct {
     calls: u32 = 0,
+    audit: *Audit = &audit_object,
+    plans: *PlanLookup = &plans_object,
 
     pub const http_routes = routes.routes(.{
         .prefix = "/v1/users",
@@ -377,6 +453,14 @@ test "routes: patterns are the controller prefix plus the path; options are kept
     try testing.expect(p.routes[2].Route.middleware[0] == .plans);
     try testing.expect(p.routes[2].Controller.http_routes.middleware[0] == .audit);
     try testing.expectEqual(0, p.routes[0].Route.middleware.len);
+    // The chains: the controller's element, then the method's.
+    try testing.expectEqual(0, p.global.len);
+    try testing.expectEqual(1, p.routes[0].chain.len);
+    try testing.expectEqualStrings(".audit (Audit)", p.routes[0].chain[0].name);
+    try testing.expectEqual(2, p.routes[2].chain.len);
+    try testing.expectEqual(1, p.routes[2].controller_elems);
+    try testing.expectEqualStrings(".plans (PlanLookup)", p.routes[2].chain[1].name);
+    try testing.expectEqual(0, p.routes[5].chain.len);
 
     // The parameters of each pattern, in order.
     try testing.expectEqual(0, p.routes[0].params.len);

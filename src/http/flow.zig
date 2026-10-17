@@ -30,6 +30,13 @@
 //! (`error.ConcurrencyUnavailable`). The other task is canceled and waited
 //! for before the response goes out, so one request gets exactly one
 //! outcome, written once.
+//!
+//! In the request's task, the `run` phases of the server's middleware come
+//! first, before the route is applied, then those of the route's own
+//! middleware, then the handler (middleware.zig). The `onResponse` phases
+//! run right before the head goes out, whichever task sends it. Once the
+//! request has ended, the `onFinish` phases run, once, on a task of their
+//! own within `.finish_timeout`; then the values of `ctx.locals` go.
 const std = @import("std");
 const core = @import("core");
 const Backend = @import("Backend.zig");
@@ -46,6 +53,7 @@ const h1 = @import("h1/head.zig");
 const response = @import("h1/response.zig");
 const json_out = @import("output/json_out.zig");
 const plan = @import("plan.zig");
+const mw = @import("middleware.zig");
 const waiting = @import("wait.zig");
 
 const log = std.log.scoped(.http);
@@ -87,6 +95,8 @@ const Reason = union(enum) {
 
 /// Serves `exchange` to its end: the response sent, or aborted.
 pub fn serve(server: *Server, io: std.Io, exchange: *Exchange) void {
+    // The head has just been parsed: the request's duration counts from here.
+    const started = std.Io.Clock.awake.now(io);
     const arena = exchange.arena;
     // Out of memory for the tracestate: a trace of its own.
     const trace = ids.traceOf(io, arena, exchange.fields) catch ids.newTrace(io);
@@ -126,8 +136,11 @@ pub fn serve(server: *Server, io: std.Io, exchange: *Exchange) void {
             .unknown_fields = server.settings.unknown_fields,
             .json = server.settings.json,
             .error_handler = server.error_handler,
+            .middleware = .{ .global = server.middleware },
         },
     };
+    ctx.response.internal.before_head = mw.beforeHead(&ctx);
+    // A request refused here has run no middleware: none has after phases.
     if (!takeSlot(server)) return respond(&ctx, exchange, error.Overloaded);
     defer releaseSlot(server, io);
 
@@ -154,15 +167,74 @@ pub fn serve(server: *Server, io: std.Io, exchange: *Exchange) void {
     // Cancels the other task and waits for both: from here on, only this
     // task touches the context.
     tasks.cancel(io);
+    var failure: ?anyerror = switch (reason) {
+        .done => |result| if (result) |_| null else |err| err,
+        .deadline => error.RequestTimeout,
+        .client_gone, .shutdown => error.Canceled,
+    };
     switch (reason) {
         .done => |result| respond(&ctx, exchange, result),
         .deadline => respond(&ctx, exchange, error.RequestTimeout),
         .client_gone, .shutdown => cut(&ctx, exchange),
     }
+    const res = &ctx.response.internal;
+    // A response cut without an error before: the error of its write.
+    if (failure == null and res.aborted) failure = res.out.failure orelse error.WriteFailed;
+    finishPhases(server, &ctx, .{
+        .status = res.status_sent orelse 0,
+        .duration = started.durationTo(std.Io.Clock.awake.now(io)),
+        .aborted = res.aborted,
+        .err = failure,
+    });
     // The request has ended: the values of its locals go.
     ctx.locals.internal.deinitValues();
     // The backend sees the stop's cancelation at its next cancelation point.
     if (canceled) io.recancel();
+}
+
+/// The `onFinish` phases of the middleware the request reached, once it
+/// has ended (design sections 9 and 17): on a task of their own, which
+/// `.finish_timeout` cancels, with a context of their own: the request's
+/// trace, no token of the request, the deadline `.finish_timeout` away. A
+/// stop of the server does not cut them short: this task waits for them
+/// with its cancelation blocked, so they get their time.
+fn finishPhases(server: *Server, ctx: *Context, outcome: mw.Outcome) void {
+    if (!mw.finishes(ctx)) return;
+    const io = ctx.internal.io;
+    const protection = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(protection);
+    const deadline: core.Deadline = .after(std.Io.Clock.awake.now(io), server.settings.finish_timeout);
+    var operation: core.Context = .root;
+    if (ctx.internal.operation.trace) |trace| operation = operation.withTrace(trace);
+    ctx.internal.operation = operation.withDeadline(deadline);
+    var state: Finish = .{};
+    var task: std.Io.Group = .init;
+    task.concurrent(io, finishTask, .{ ctx, outcome, &state }) catch {
+        // No task from the runtime: here, without the timer; the deadline of
+        // the context still holds for what the phases call.
+        mw.onFinishPhases(ctx, outcome, &state.over);
+        return;
+    };
+    waiting.untilSet(&state.done, io, deadline) catch {
+        // Past the deadline: the phase at work is canceled, the rest are
+        // left out.
+        state.over.store(true, .release);
+        log.warn("the onFinish phases ran past .finish_timeout and are canceled (request {s})", .{ctx.requestId()});
+    };
+    task.cancel(io);
+}
+
+/// The `onFinish` phases on their task, and how they end.
+const Finish = struct {
+    /// Set when the phases have ended.
+    done: std.Io.Event = .unset,
+    /// Set when `.finish_timeout` has passed.
+    over: std.atomic.Value(bool) = .init(false),
+};
+
+fn finishTask(ctx: *Context, outcome: mw.Outcome, state: *Finish) void {
+    mw.onFinishPhases(ctx, outcome, &state.over);
+    state.done.set(ctx.internal.io);
 }
 
 /// Takes one of the `.max_in_flight` places, unless all are taken.
@@ -268,8 +340,13 @@ fn requestTask(server: *Server, ctx: *Context, found: Found, race: *Race) void {
     }
 }
 
-/// The route and its handler, or the error that answers the request.
+/// The server's middleware, then the route, its own middleware and its
+/// handler, or the error that answers the request. A middleware that
+/// answers `.handled` ends it with its response.
 fn runRequest(server: *Server, ctx: *Context, found: Found) anyerror!void {
+    // Before the route is applied: a preflight, an unknown path and a
+    // method the path does not take reach the server's middleware too.
+    if (try mw.runPhases(ctx, server.middleware)) return;
     const match = switch (found) {
         .match => |match| match,
         .failed => |err| return err,
@@ -281,6 +358,8 @@ fn runRequest(server: *Server, ctx: *Context, found: Found) anyerror!void {
             ctx.internal.param_names = route.params;
             ctx.internal.params = f.params;
             ctx.internal.max_body_bytes = route.max_body_bytes orelse server.settings.max_body_bytes;
+            ctx.internal.middleware.route = route.links;
+            if (try mw.runPhases(ctx, route.links)) return;
             return route.handle(route.controller, ctx);
         },
         .method_not_allowed => |allow| {
@@ -516,6 +595,7 @@ fn send(ctx: *Context, exchange: *Exchange) void {
 /// Ends the response broken, or without one: the client sees it cut.
 fn cut(ctx: *Context, exchange: *Exchange) void {
     ctx.response.internal.state = .finished;
+    ctx.response.internal.aborted = true;
     exchange.abort(ctx.internal.io);
 }
 
@@ -1865,7 +1945,8 @@ test "shutdown gives up on a request that ignores its cancelation; the stop ends
     var stops: StopController = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&stops}, .shutdown_grace = std.Io.Duration.fromMilliseconds(50) });
+    // No onFinish to wait for: the budget after the grace is one second.
+    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&stops}, .shutdown_grace = std.Io.Duration.fromMilliseconds(50), .finish_timeout = std.Io.Duration.zero });
     defer server.deinit(io);
     try server.start(io);
 

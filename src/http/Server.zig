@@ -30,6 +30,7 @@ const Backend = @import("Backend.zig");
 const Context = @import("Context.zig");
 const dto = @import("dto.zig");
 const flow = @import("flow.zig");
+const mw = @import("middleware.zig");
 const plan = @import("plan.zig");
 const proxies = @import("proxies.zig");
 const route_decls = @import("routes.zig");
@@ -49,6 +50,13 @@ prefix: []const u8,
 /// the order of its `.methods`; `router` gives indices into it.
 routes: []Route,
 router: routing.Router,
+/// The links of every chain: the server's middleware, then the own
+/// middleware of each route, in the order of `routes`. `middleware` and
+/// the `links` of each route are parts of it.
+links: []mw.Link,
+/// The server's middleware: every request runs it before its route is
+/// applied.
+middleware: []const mw.Link,
 /// The options of `init` with their defaults.
 settings: Settings,
 /// `.trusted_proxies`, its list parsed.
@@ -165,6 +173,9 @@ pub const Route = struct {
     max_body_bytes: ?usize,
     timeout: route_decls.Timeout,
     heartbeat: ?std.Io.Duration,
+    /// The route's own middleware, after the server's: the controller's,
+    /// then the method's.
+    links: []const mw.Link,
 };
 
 /// What the routes need of the backend, known at compile time.
@@ -178,12 +189,19 @@ pub const Needs = struct {
 /// Builds a server from `options`, a struct literal (design section 4):
 /// `.backend` and `.controllers` (a tuple of pointers to controllers, at
 /// least one), and optionally `.prefix` (before the routes of the
-/// controllers, such as "/api"), `.error_handler`, `.strict_errors`,
-/// `.unknown_fields`, `.json`, `.max_body_bytes`, `.max_query_params`,
-/// `.max_in_flight`, `.max_streams`, `.request_timeout`, `.shutdown_grace`,
-/// `.finish_timeout` and `.trusted_proxies`, as `Settings` describes them.
-/// The options are `anytype`, so a duration among them is written in
-/// full: `std.Io.Duration.fromSeconds(10)`, not `.fromSeconds(10)`.
+/// controllers, such as "/api"), `.middleware`, `.error_handler`,
+/// `.strict_errors`, `.unknown_fields`, `.json`, `.max_body_bytes`,
+/// `.max_query_params`, `.max_in_flight`, `.max_streams`,
+/// `.request_timeout`, `.shutdown_grace`, `.finish_timeout` and
+/// `.trusted_proxies`, as `Settings` describes them. The options are
+/// `anytype`, so a duration among them is written in full:
+/// `std.Io.Duration.fromSeconds(10)`, not `.fromSeconds(10)`.
+///
+/// `.middleware` is the server's middleware (middleware.zig): every
+/// request runs it, in order, before its route is applied, then the
+/// middleware of its controller and of its method. The chain of each
+/// route is built here, at compile time, and the compiler checks every
+/// element; the objects it points to are borrowed.
 ///
 /// `.error_handler = &app_errors` turns every error into its response
 /// (`mapError`, then `handle`; design section 11); without it errors go
@@ -193,9 +211,9 @@ pub const Needs = struct {
 /// handler that returns `anyerror`. `.strict_errors = false`, known at
 /// compile time, turns the check off.
 ///
-/// The controllers and the error handler are borrowed and live as long as
-/// the server; the prefix and the list of trusted proxies are copied. No
-/// I/O.
+/// The controllers, the error handler and the objects of the middleware
+/// are borrowed and live as long as the server; the prefix and the list of
+/// trusted proxies are copied. No I/O.
 pub fn init(gpa: std.mem.Allocator, options: anytype) InitError!Server {
     const O = @TypeOf(options);
     const p = comptime plan.of(O);
@@ -220,10 +238,15 @@ pub fn init(gpa: std.mem.Allocator, options: anytype) InitError!Server {
     const trust = try proxies.Trust.init(gpa, settings.trusted_proxies);
     errdefer trust.deinit(gpa);
 
+    const links = try linksOf(gpa, p, options);
+    errdefer gpa.free(links);
+
     const table = try gpa.alloc(Route, p.routes.len);
     errdefer gpa.free(table);
     var filled: usize = 0;
     errdefer for (table[0..filled]) |r| gpa.free(r.info.pattern);
+    // Where the links of each route begin in `links`.
+    comptime var offset: usize = p.global.len;
     inline for (p.routes, 0..) |r, i| {
         const pattern = if (prefix.len + r.pattern.len == 0)
             try gpa.dupe(u8, "/")
@@ -239,7 +262,9 @@ pub fn init(gpa: std.mem.Allocator, options: anytype) InitError!Server {
             .max_body_bytes = r.max_body_bytes,
             .timeout = r.timeout,
             .heartbeat = r.heartbeat,
+            .links = links[offset..][0..r.chain.len],
         };
+        offset += r.chain.len;
         filled += 1;
     }
 
@@ -249,11 +274,54 @@ pub fn init(gpa: std.mem.Allocator, options: anytype) InitError!Server {
         .prefix = prefix,
         .routes = table,
         .router = .{ .nodes = p.nodes, .prefix = prefix, .max_params = p.max_params },
+        .links = links,
+        .middleware = links[0..p.global.len],
         .settings = settings,
         .trust = trust,
         .needs = comptime needsOf(O, p),
         .error_handler = if (@hasField(O, "error_handler")) .of(p.Handler, options.error_handler) else .default,
     };
+}
+
+/// The links of every chain of `p`, in one allocation: the server's
+/// middleware, each with the object `options.middleware` points to, then
+/// the own middleware of each route, a field of a controller with that
+/// controller.
+fn linksOf(gpa: std.mem.Allocator, comptime p: plan.Plan, options: anytype) error{OutOfMemory}![]mw.Link {
+    const own = comptime routeLinks(p);
+    const links = try gpa.alloc(mw.Link, p.global.len + own.len);
+    inline for (p.global, 0..) |e, i| {
+        links[i] = comptime mw.linkOf(e);
+        if (e.binding == .pointer) links[i].ptr = mw.objectAt(options.middleware, e.path);
+    }
+    const count = @typeInfo(@TypeOf(options.controllers)).@"struct".field_names.len;
+    var controllers: [count]*anyopaque = undefined;
+    inline for (&controllers, 0..) |*slot, i| slot.* = options.controllers[i];
+    for (own, links[p.global.len..]) |l, *link| {
+        link.* = l.link;
+        if (l.controller) |ci| link.ptr = controllers[ci];
+    }
+    return links;
+}
+
+/// A link of a route's own chain, known at compile time, and the
+/// controller its object hangs on, for a field.
+const RouteLink = struct { link: mw.Link, controller: ?usize };
+
+fn routeLinks(comptime p: plan.Plan) []const RouteLink {
+    var count: usize = 0;
+    for (p.routes) |r| count += r.chain.len;
+    @setEvalBranchQuota(1000 + 200 * count);
+    var out: [count]RouteLink = undefined;
+    var at: usize = 0;
+    for (p.routes) |r| {
+        for (r.chain) |e| {
+            out[at] = .{ .link = mw.linkOf(e), .controller = if (e.binding == .field) r.controller_index else null };
+            at += 1;
+        }
+    }
+    const final = out;
+    return &final;
 }
 
 fn needsOf(comptime O: type, comptime p: plan.Plan) Needs {
@@ -485,21 +553,24 @@ pub fn requestStop(server: *Server, io: std.Io) void {
 }
 
 /// `requestStop` and a wait for the stop. `error.ShutdownTimeout` when
-/// requests did not end within `.shutdown_grace` and one second more
-/// after they were canceled (a handler that ignores its cancelation): the
-/// server stays in `draining` until they end. Treat it as fatal and end
-/// the process; `deinit` would wait for such requests without a limit.
+/// requests did not end within `.shutdown_grace` and, after they were
+/// canceled, `.finish_timeout` for their `onFinish` phases and one second
+/// more (a handler that ignores its cancelation): the server stays in
+/// `draining` until they end. Treat it as fatal and end the process;
+/// `deinit` would wait for such requests without a limit.
 pub fn shutdown(server: *Server, io: std.Io) ShutdownError!void {
     server.requestStop(io);
     try server.grace_over.wait(io);
-    waiting.untilSet(&server.shutdown_event, io, .after(std.Io.Clock.awake.now(io), cancel_budget)) catch |err| switch (err) {
+    const budget: Duration = .{ .nanoseconds = cancel_budget.nanoseconds +| server.settings.finish_timeout.nanoseconds };
+    waiting.untilSet(&server.shutdown_event, io, .after(std.Io.Clock.awake.now(io), budget)) catch |err| switch (err) {
         error.Timeout => return error.ShutdownTimeout,
         error.Canceled => |e| return e,
     };
 }
 
 /// How long the requests canceled at the end of a stop's grace have to
-/// end before `shutdown` gives up on them.
+/// end, past the time of their `onFinish` phases, before `shutdown` gives
+/// up on them.
 const cancel_budget: Duration = .fromSeconds(1);
 
 /// Running, and the backend takes requests. Thread-safe; for health
@@ -525,6 +596,7 @@ pub fn deinit(server: *Server, io: std.Io) void {
     server.trust.deinit(server.gpa);
     for (server.routes) |r| server.gpa.free(r.info.pattern);
     server.gpa.free(server.routes);
+    server.gpa.free(server.links);
     server.gpa.free(server.prefix);
     server.* = undefined;
 }
