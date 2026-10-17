@@ -36,6 +36,7 @@ const Context = @import("Context.zig");
 const errors = @import("errors.zig");
 const ids = @import("ids.zig");
 const path = @import("path.zig");
+const proxies = @import("proxies.zig");
 const routing = @import("router.zig");
 const Allow = routing.Allow;
 const h1 = @import("h1/head.zig");
@@ -78,11 +79,19 @@ pub fn serve(server: *Server, io: std.Io, exchange: *Exchange) void {
     // Both live on this task until the request has ended.
     var token: core.CancellationToken = .init;
     var body_done: std.Io.Event = .unset;
+    // A trusted peer names the client and may give the request's id.
+    const trusted_peer = server.trust.trusts(exchange.client);
     var ctx: Context = .{
         .request = .{
             .method = exchange.method,
             .path = target.path,
-            .internal = .{ .exchange = exchange, .io = io, .query = target.query, .body_done = &body_done },
+            .internal = .{
+                .exchange = exchange,
+                .io = io,
+                .query = target.query,
+                .body_done = &body_done,
+                .client = proxies.clientAddress(&server.trust, exchange.client, exchange.fields),
+            },
         },
         .response = .{ .internal = .{ .arena = arena } },
         .internal = .{
@@ -91,6 +100,7 @@ pub fn serve(server: *Server, io: std.Io, exchange: *Exchange) void {
             .arena = arena,
             .gpa = server.gpa,
             .request_id = ids.newRequestId(io),
+            .given_request_id = if (trusted_peer) proxies.requestIdOf(exchange.fields) else null,
             .trace_id = trace.trace_id.toHex(),
             .max_body_bytes = server.settings.max_body_bytes,
             .max_query_params = server.settings.max_query_params,

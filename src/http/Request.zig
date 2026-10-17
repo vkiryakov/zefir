@@ -25,6 +25,8 @@ pub const Internal = struct {
     body_done: ?*std.Io.Event = null,
     /// `ctx.body()` has taken the body: no reader any more.
     bytes_taken: bool = false,
+    /// The client, through the trusted proxies.
+    client: ?std.Io.net.IpAddress = null,
 };
 
 /// The value of the first header field `name`, which is case-insensitive.
@@ -109,9 +111,12 @@ fn qPositive(params: *std.mem.SplitIterator(u8, .scalar)) bool {
     return true;
 }
 
-/// The address of the client; null when the backend has none.
+/// The address of the client: the connection's peer, or, when the peer is
+/// a trusted proxy (`.trusted_proxies`), the client it names in
+/// `X-Forwarded-For` or `Forwarded`, with the port it gives or 0. Null when
+/// the backend has no address.
 pub fn clientAddress(r: *const Request) ?std.Io.net.IpAddress {
-    return r.internal.exchange.client;
+    return r.internal.client;
 }
 
 /// The body as a stream, read as the handler takes it, without the limit

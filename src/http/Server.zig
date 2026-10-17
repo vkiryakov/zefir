@@ -31,6 +31,7 @@ const Context = @import("Context.zig");
 const dto = @import("dto.zig");
 const flow = @import("flow.zig");
 const plan = @import("plan.zig");
+const proxies = @import("proxies.zig");
 const route_decls = @import("routes.zig");
 const routing = @import("router.zig");
 const sse = @import("sse.zig");
@@ -50,6 +51,8 @@ routes: []Route,
 router: routing.Router,
 /// The options of `init` with their defaults.
 settings: Settings,
+/// `.trusted_proxies`, its list parsed.
+trust: proxies.Trust,
 /// What the routes need of the backend; `start` checks it.
 needs: Needs,
 
@@ -89,7 +92,8 @@ pub const State = enum(u8) { configured, starting, running, draining, stopped };
 /// "/api" or "/api/v2" (segments of visible ASCII, without `%`, `?`, `#`,
 /// `{` and `}`, no empty or dot segments, no trailing slash); a
 /// `.max_in_flight`, `.max_streams` or `.json.max_depth` of 0; a negative
-/// duration, or a `.request_timeout` of 0.
+/// duration, or a `.request_timeout` of 0; an entry of a `.trusted_proxies`
+/// list that is neither a CIDR block nor an address.
 pub const InitError = error{ InvalidConfiguration, OutOfMemory };
 /// The backend's errors from its `start`, a task the runtime did not give,
 /// a second `start` (`InvalidState`), and a route that needs what the
@@ -103,13 +107,8 @@ pub const ShutdownError = error{ShutdownTimeout} || WaitError;
 /// From whom to believe `X-Forwarded-For` and `Forwarded` (design section
 /// 16): everybody, loopback and private networks, nobody, or a list of
 /// CIDR blocks, such as `.{ .list = &.{"10.1.0.0/16"} }`, which `init`
-/// copies.
-pub const TrustedProxies = union(enum) {
-    all,
-    private,
-    none,
-    list: []const []const u8,
-};
+/// copies and checks.
+pub const TrustedProxies = proxies.TrustedProxies;
 
 /// Unknown fields of the input: those of a JSON or form body are refused,
 /// those of a query ignored; a DTO may say otherwise.
@@ -207,6 +206,8 @@ pub fn init(gpa: std.mem.Allocator, options: anytype) InitError!Server {
 
     if (@hasField(O, "trusted_proxies")) settings.trusted_proxies = try trustedProxiesOf(gpa, options.trusted_proxies);
     errdefer freeSettings(gpa, settings);
+    const trust = try proxies.Trust.init(gpa, settings.trusted_proxies);
+    errdefer trust.deinit(gpa);
 
     const table = try gpa.alloc(Route, p.routes.len);
     errdefer gpa.free(table);
@@ -238,6 +239,7 @@ pub fn init(gpa: std.mem.Allocator, options: anytype) InitError!Server {
         .routes = table,
         .router = .{ .nodes = p.nodes, .prefix = prefix, .max_params = p.max_params },
         .settings = settings,
+        .trust = trust,
         .needs = comptime needsOf(O, p),
     };
 }
@@ -507,6 +509,7 @@ pub fn deinit(server: *Server, io: std.Io) void {
     server.requestStop(io);
     server.joinLifecycle(io);
     freeSettings(server.gpa, server.settings);
+    server.trust.deinit(server.gpa);
     for (server.routes) |r| server.gpa.free(r.info.pattern);
     server.gpa.free(server.routes);
     server.gpa.free(server.prefix);
@@ -770,6 +773,7 @@ test "init reads every option of section 4 with its default" {
     try testing.expectError(error.InvalidConfiguration, init(testing.allocator, .{ .backend = backend_value, .controllers = controllers, .request_timeout = Duration.zero }));
     try testing.expectError(error.InvalidConfiguration, init(testing.allocator, .{ .backend = backend_value, .controllers = controllers, .shutdown_grace = Duration.fromSeconds(-1) }));
     try testing.expectError(error.InvalidConfiguration, init(testing.allocator, .{ .backend = backend_value, .controllers = controllers, .finish_timeout = Duration.fromSeconds(-1) }));
+    try testing.expectError(error.InvalidConfiguration, init(testing.allocator, .{ .backend = backend_value, .controllers = controllers, .trusted_proxies = .{ .list = &.{ "10.0.0.0/8", "10.0.0.0/33" } } }));
 }
 
 fn initAndDeinit(gpa: std.mem.Allocator) !void {

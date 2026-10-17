@@ -33,8 +33,9 @@
 //! (connections, heads, request bodies, responses, keep-alive and the
 //! watcher), `ctx.body()`, the input from strings (`ctx.path`,
 //! `ctx.query`, `ctx.form`, `ctx.headers`, `ctx.cookies`: mapped by
-//! outside names, transformed and checked by the validator); the rest of
-//! the API comes with the next commits.
+//! outside names, transformed and checked by the validator) and the client
+//! behind trusted proxies; the rest of the API comes with the next
+//! commits.
 
 const std = @import("std");
 const route_decls = @import("routes.zig");
@@ -93,6 +94,7 @@ test {
     _ = @import("ids.zig");
     _ = @import("Request.zig");
     _ = @import("Context.zig");
+    _ = @import("proxies.zig");
     _ = @import("input/strings.zig");
     _ = @import("input/urlencoded.zig");
     _ = @import("input/cookies.zig");

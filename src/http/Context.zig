@@ -42,7 +42,10 @@ pub const Internal = struct {
     /// The server's allocator: the reports of `v.checkAll` come from it and
     /// are freed at once.
     gpa: std.mem.Allocator,
+    /// The server's own id of the request.
     request_id: [32]u8,
+    /// The `X-Request-Id` of a trusted peer: `requestId` gives it instead.
+    given_request_id: ?[]const u8 = null,
     trace_id: [32]u8,
     route: ?RouteInfo = null,
     /// The names of the route's parameters and their values, in the order
@@ -112,9 +115,11 @@ pub fn now(ctx: *const Context) std.Io.Timestamp {
     return std.Io.Clock.awake.now(ctx.internal.io);
 }
 
-/// The id of the request: 32 lowercase hex digits.
+/// The id of the request: the `X-Request-Id` that a trusted proxy sent
+/// (`.trusted_proxies`; 1 to 128 visible ASCII characters), else a new one
+/// of 32 lowercase hex digits.
 pub fn requestId(ctx: *const Context) []const u8 {
-    return &ctx.internal.request_id;
+    return ctx.internal.given_request_id orelse &ctx.internal.request_id;
 }
 
 /// The id of the request's trace: 32 lowercase hex digits, the client's
