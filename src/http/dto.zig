@@ -16,6 +16,10 @@ pub fn Json(comptime T: type) type {
     };
 }
 
+/// What happens to a field of the input that the DTO does not have: the
+/// request is refused (422, `http.unknown_field`) or the field ignored.
+pub const UnknownFields = enum { reject, ignore };
+
 test "Json: 200 unless the handler gives a status" {
     const Todo = struct { id: u64 };
     const ok: Json(Todo) = .{ .value = .{ .id = 1 } };

@@ -24,20 +24,35 @@
 //! ```
 //!
 //! Status: in progress. So far the module holds its HTTP/1.1 parser
-//! (h1/, internal) and the routes of controllers: their declarations, the
+//! (h1/, internal), the routes of controllers (their declarations, the
 //! checks the compiler makes of them, the router and the normalization of
-//! paths; the rest of the API comes with the next commits.
+//! paths), the server with its lifecycle and the path of a request, and
+//! the backend in memory of `http.testing`; the rest of the API comes with
+//! the next commits.
 
 const std = @import("std");
 const route_decls = @import("routes.zig");
+
+const errors = @import("errors.zig");
+const dto = @import("dto.zig");
 
 pub const Server = @import("Server.zig");
 pub const Backend = @import("Backend.zig");
 pub const Context = @import("Context.zig");
 pub const sse = @import("sse.zig");
+pub const testing = @import("testing.zig");
 
-pub const Json = @import("dto.zig").Json;
+pub const Json = dto.Json;
+pub const UnknownFields = dto.UnknownFields;
 pub const RouteInfo = route_decls.RouteInfo;
+pub const TrustedProxies = Server.TrustedProxies;
+
+// Errors.
+pub const Error = errors.Error;
+pub const Problem = errors.Problem;
+pub const defaultStatus = errors.defaultStatus;
+pub const defaultCode = errors.defaultCode;
+pub const defaultTitle = errors.defaultTitle;
 
 pub const routes = route_decls.routes;
 pub const get = route_decls.get;
@@ -61,4 +76,10 @@ test {
     _ = @import("router.zig");
     _ = @import("plan.zig");
     _ = @import("Server.zig");
+    _ = @import("errors.zig");
+    _ = @import("ids.zig");
+    _ = @import("Request.zig");
+    _ = @import("Response.zig");
+    _ = @import("flow.zig");
+    _ = @import("testing.zig");
 }

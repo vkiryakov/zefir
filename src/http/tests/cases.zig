@@ -46,6 +46,8 @@ pub const compile_errors = [_]Fixture{
     .{ .file = dir ++ "routes_unknown_option.zig", .expect = "zefir.http: http.routes: unknown option .prefx; the options are .prefix, .middleware and .methods" },
     .{ .file = dir ++ "methods_not_route.zig", .expect = "zefir.http: http.routes: .methods.get must be a route, such as http.get(\"/{id}\", .{})" },
     .{ .file = dir ++ "server_unknown_option.zig", .expect = "zefir.http: Server.init: unknown option .contollers" },
+    .{ .file = dir ++ "server_unknown_nested_option.zig", .expect = "zefir.http: Server.init: UnknownFieldsOptions has no option .bdy" },
+    .{ .file = dir ++ "server_trusted_proxies.zig", .expect = "zefir.http: Server.init: .trusted_proxies is .all, .private, .none or .{ .list = &.{\"10.1.0.0/16\"} }" },
 };
 
 const dir = "src/http/tests/compile_errors/";
