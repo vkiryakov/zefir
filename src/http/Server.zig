@@ -55,6 +55,8 @@ settings: Settings,
 trust: proxies.Trust,
 /// What the routes need of the backend; `start` checks it.
 needs: Needs,
+/// `.error_handler`, borrowed, or the default one.
+error_handler: flow.ErrorHandler,
 
 /// Guards the lifecycle fields below that are not atomic; every section
 /// under it is short.
@@ -176,15 +178,24 @@ pub const Needs = struct {
 /// Builds a server from `options`, a struct literal (design section 4):
 /// `.backend` and `.controllers` (a tuple of pointers to controllers, at
 /// least one), and optionally `.prefix` (before the routes of the
-/// controllers, such as "/api"), `.unknown_fields`, `.json`,
-/// `.max_body_bytes`, `.max_query_params`, `.max_in_flight`,
-/// `.max_streams`, `.request_timeout`, `.shutdown_grace`,
+/// controllers, such as "/api"), `.error_handler`, `.strict_errors`,
+/// `.unknown_fields`, `.json`, `.max_body_bytes`, `.max_query_params`,
+/// `.max_in_flight`, `.max_streams`, `.request_timeout`, `.shutdown_grace`,
 /// `.finish_timeout` and `.trusted_proxies`, as `Settings` describes them.
 /// The options are `anytype`, so a duration among them is written in
 /// full: `std.Io.Duration.fromSeconds(10)`, not `.fromSeconds(10)`.
 ///
-/// The controllers are borrowed and live as long as the server; the
-/// prefix and the list of trusted proxies are copied. No I/O.
+/// `.error_handler = &app_errors` turns every error into its response
+/// (`mapError`, then `handle`; design section 11); without it errors go
+/// out as problem+json. The strict error check runs here, at compile time:
+/// an error of the application that the error handler gives 500 through
+/// `.fallback`, or that no error handler maps, fails the build, as does a
+/// handler that returns `anyerror`. `.strict_errors = false`, known at
+/// compile time, turns the check off.
+///
+/// The controllers and the error handler are borrowed and live as long as
+/// the server; the prefix and the list of trusted proxies are copied. No
+/// I/O.
 pub fn init(gpa: std.mem.Allocator, options: anytype) InitError!Server {
     const O = @TypeOf(options);
     const p = comptime plan.of(O);
@@ -241,6 +252,7 @@ pub fn init(gpa: std.mem.Allocator, options: anytype) InitError!Server {
         .settings = settings,
         .trust = trust,
         .needs = comptime needsOf(O, p),
+        .error_handler = if (@hasField(O, "error_handler")) .of(p.Handler, options.error_handler) else .default,
     };
 }
 

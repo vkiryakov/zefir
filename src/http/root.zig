@@ -38,8 +38,10 @@
 //! `ctx.response.json`), the states of a response, cookies, redirects,
 //! files and streamed responses (`ctx.response.setCookie`, `redirect`,
 //! `file`, `stream`, and the buffer of 16 KiB that bodies written as they
-//! go pass through) and the client behind trusted proxies; the rest of the
-//! API comes with the next commits.
+//! go pass through), the client behind trusted proxies, and the error
+//! handler with the strict error check at compile time (`mapError`,
+//! `.fallback`, `handle`; `http.ErrorResponse`, `http.Problem`); the rest
+//! of the API comes with the next commits.
 
 const std = @import("std");
 const route_decls = @import("routes.zig");
@@ -68,6 +70,8 @@ pub const TrustedProxies = Server.TrustedProxies;
 
 // Errors.
 pub const Error = errors.Error;
+pub const ErrorResponse = errors.ErrorResponse;
+pub const ErrorAction = errors.ErrorAction;
 pub const Problem = errors.Problem;
 pub const defaultStatus = errors.defaultStatus;
 pub const defaultCode = errors.defaultCode;
@@ -99,6 +103,7 @@ test {
     _ = @import("plan.zig");
     _ = @import("Server.zig");
     _ = @import("errors.zig");
+    _ = @import("strict.zig");
     _ = @import("ids.zig");
     _ = @import("Request.zig");
     _ = @import("Context.zig");

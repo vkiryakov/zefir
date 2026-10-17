@@ -21,7 +21,9 @@ const Todo = struct { id: u64, title: []const u8 };
 /// What `flood` writes at a time.
 const piece: [64 << 10]u8 = @splat('f');
 
-/// The application of the scenarios.
+/// The application of the scenarios. Its server turns the strict error
+/// check off: `download` leaves `FileNotFound` unmapped, and `broken` fails
+/// with an error of its own after its head.
 const App = struct {
     /// The file `download` sends, relative to the working directory.
     file_path: []const u8 = "",
@@ -115,7 +117,7 @@ const Fixture = struct {
         f.app = .{};
         f.native = try .init(gpa, .{ .address = "127.0.0.1", .port = 0, .timeouts = timeouts });
         errdefer f.native.deinit();
-        f.server = try http.Server.init(gpa, .{ .backend = f.native.backend(), .controllers = .{&f.app} });
+        f.server = try http.Server.init(gpa, .{ .backend = f.native.backend(), .controllers = .{&f.app}, .strict_errors = false });
         errdefer f.server.deinit(io);
         try f.server.start(io);
     }

@@ -974,7 +974,8 @@ const Todo = struct { id: u64, title: []const u8 };
 const filler: [20 << 10]u8 = @splat('x');
 
 /// Handlers of files, streams and `http.Json` values larger than the
-/// buffer; what they see goes into the controller for the test.
+/// buffer; what they see goes into the controller for the test. Its server
+/// turns the strict error check off: `FileNotFound` stays unmapped, a 500.
 const ExportsV1Controller = struct {
     /// Relative to the working directory: a file of 40 000 bytes, a small
     /// one, and the directory that holds them.
@@ -1095,7 +1096,7 @@ const Fixture = struct {
 
     fn start(f: *Fixture, io: std.Io) !void {
         f.backend = .init(testing.allocator);
-        f.server = try .init(testing.allocator, .{ .backend = f.backend.backend(), .controllers = .{&f.exports} });
+        f.server = try .init(testing.allocator, .{ .backend = f.backend.backend(), .controllers = .{&f.exports}, .strict_errors = false });
         f.server.start(io) catch |err| {
             f.server.deinit(io);
             return err;

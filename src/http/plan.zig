@@ -9,12 +9,19 @@
 //! - a route without its handler, a handler of another form, an
 //!   `.on_close` that names no method of its form;
 //! - a pattern that does not parse, two routes of one method on one shape
-//!   of path (router.zig).
+//!   of path (router.zig);
+//! - an `.error_handler` that is not a pointer to a mutable error handler
+//!   with `pub fn mapError(err: anyerror) http.ErrorResponse(Body)` and,
+//!   optionally, a `handle` of its form;
+//! - the strict error check (strict.zig), unless `.strict_errors = false`.
 const std = @import("std");
+const v = @import("validator");
 const routes = @import("routes.zig");
 const router = @import("router.zig");
 const Context = @import("Context.zig");
 const sse = @import("sse.zig");
+const errors = @import("errors.zig");
+const strict = @import("strict.zig");
 
 /// One route of the server, at compile time.
 pub const RoutePlan = struct {
@@ -48,6 +55,8 @@ pub const Plan = struct {
     nodes: []const router.Node,
     /// The most parameters a route has.
     max_params: usize,
+    /// The type of `.error_handler`'s object, else `errors.DefaultErrors`.
+    Handler: type,
 };
 
 const known_options = [_][]const u8{
@@ -115,7 +124,82 @@ pub fn of(comptime O: type) Plan {
             }};
         }
     }
-    return .{ .routes = table, .nodes = router.build(specs), .max_params = max_params };
+    const nodes = router.build(specs);
+    const Handler = errorHandlerOf(O);
+    if (strictOf(O)) strict.check(Handler, shortName(@typeName(Handler)), strictEntries(table));
+    return .{ .routes = table, .nodes = nodes, .max_params = max_params, .Handler = Handler };
+}
+
+/// The error handler of `O`: the type of the object `.error_handler`
+/// points to, checked, or the default one.
+fn errorHandlerOf(comptime O: type) type {
+    if (!@hasField(O, "error_handler")) return errors.DefaultErrors;
+    const P = @FieldType(O, "error_handler");
+    const info = @typeInfo(P);
+    const at = "zefir.http: Server.init .error_handler is ";
+    if (info != .pointer or info.pointer.size != .one or @typeInfo(info.pointer.child) != .@"struct")
+        @compileError(at ++ typeName(P) ++ "; pass a pointer to the error handler, e.g. &app_errors");
+    if (info.pointer.attrs.@"const")
+        @compileError(at ++ typeName(P) ++ "; the error handler must be mutable, declared with var");
+    const H = info.pointer.child;
+    checkErrorHandler(H);
+    return H;
+}
+
+/// `pub fn mapError(err: anyerror) http.ErrorResponse(Body)`, and an
+/// optional `pub fn handle(self: *H, ctx: *http.Context, err: anyerror,
+/// res: *http.ErrorResponse(Body)) !http.ErrorAction`.
+fn checkErrorHandler(comptime H: type) void {
+    const name = shortName(@typeName(H));
+    const map_form = "pub fn mapError(err: anyerror) http.ErrorResponse(Body)";
+    if (!@hasDecl(H, "mapError")) @compileError("zefir.http: the error handler " ++ name ++ " has no " ++ map_form);
+    const M = @TypeOf(H.mapError);
+    const bad_map = "zefir.http: " ++ name ++ ".mapError is " ++ fnForm(M) ++ "; write " ++ map_form ++
+        " (no ctx: the strict error check calls it at compile time)";
+    if (@typeInfo(M) != .@"fn") @compileError(bad_map);
+    const minfo = @typeInfo(M).@"fn";
+    if (minfo.is_generic or minfo.param_types.len != 1 or minfo.param_types[0].? != anyerror) @compileError(bad_map);
+    const Res = minfo.return_type.?;
+    if (!routes.isMarked(Res, "zefir_http_error_response")) @compileError(bad_map);
+    if (!@hasDecl(H, "handle")) return;
+    const handle_form = "pub fn handle(self: *" ++ name ++ ", ctx: *http.Context, err: anyerror, res: *http.ErrorResponse(" ++
+        typeName(Res.Body) ++ ")) !http.ErrorAction";
+    const F = @TypeOf(H.handle);
+    const bad = "zefir.http: " ++ name ++ ".handle is " ++ fnForm(F) ++ "; write " ++ handle_form;
+    if (@typeInfo(F) != .@"fn") @compileError(bad);
+    const info = @typeInfo(F).@"fn";
+    if (info.is_generic or info.param_types.len != 4 or info.param_types[0].? != *H or info.param_types[1].? != *Context or
+        info.param_types[2].? != anyerror or info.param_types[3].? != *Res) @compileError(bad);
+    if (payloadOf(info.return_type.?) != errors.ErrorAction) @compileError(bad);
+}
+
+/// `.strict_errors`, known at compile time; true without it.
+fn strictOf(comptime O: type) bool {
+    const info = @typeInfo(O).@"struct";
+    for (info.field_names, info.field_types, info.field_attrs) |name, T, attrs| {
+        if (!std.mem.eql(u8, name, "strict_errors")) continue;
+        if (T != bool) @compileError("zefir.http: Server.init .strict_errors is true or false, got " ++ typeName(T));
+        if (!attrs.@"comptime") @compileError("zefir.http: Server.init .strict_errors must be known at compile time: true or false");
+        return attrs.defaultValue(bool).?;
+    }
+    return true;
+}
+
+/// The places whose errors the strict error check reads: the handler of
+/// every route, and the transforms of the JSON value it answers with,
+/// which run before the response goes out.
+fn strictEntries(comptime table: []const RoutePlan) []const strict.Entry {
+    var out: []const strict.Entry = &.{};
+    for (table) |r| {
+        const where = r.controller_name ++ "." ++ r.handler;
+        const R = @typeInfo(@TypeOf(@field(r.Controller, r.handler))).@"fn".return_type.?;
+        const E = if (@typeInfo(R) == .error_union) @typeInfo(R).error_union.error_set else error{};
+        out = out ++ [_]strict.Entry{.{ .where = where, .Errors = E }};
+        const Payload = payloadOf(R);
+        if (Payload != void)
+            out = out ++ [_]strict.Entry{.{ .where = where ++ " (writing its response)", .Errors = v.TransformError(Payload.Value) }};
+    }
+    return out;
 }
 
 /// The controller of the element `Ptr` of `.controllers`: a pointer to a
@@ -180,6 +264,7 @@ fn contains(comptime list: []const []const u8, comptime name: []const u8) bool {
 pub fn typeName(comptime T: type) []const u8 {
     if (T == Context) return "http.Context";
     if (T == sse.Context) return "http.sse.Context";
+    if (T == errors.Problem) return "http.Problem";
     const info = @typeInfo(T);
     if (info == .pointer and info.pointer.size == .one)
         return "*" ++ (if (info.pointer.attrs.@"const") "const " else "") ++ typeName(info.pointer.child);
@@ -254,7 +339,9 @@ test "routes: patterns are the controller prefix plus the path; options are kept
     var users: UsersV1Controller = .{};
     var health: HealthController = .{};
     const backend: Backend = undefined;
-    const p = comptime of(@TypeOf(.{ .backend = backend, .prefix = "/api", .controllers = .{ &users, &health } }));
+    // UsersV1Controller.create returns an error of its own, which only an
+    // error handler maps.
+    const p = comptime of(@TypeOf(.{ .backend = backend, .prefix = "/api", .controllers = .{ &users, &health }, .strict_errors = false }));
     try testing.expectEqual(6, p.routes.len);
     try testing.expectEqual(2, p.max_params);
 

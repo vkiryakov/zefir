@@ -19,7 +19,8 @@ const Todo = struct { id: u64, title: []const u8 };
 /// A body larger than the buffers of a loopback socket.
 const big_body: [256 << 10]u8 = @splat('b');
 
-/// The application of the scenarios.
+/// The application of the scenarios. Its servers turn the strict error
+/// check off: `fail` answers 500 with an error that no error handler maps.
 const App = struct {
     /// Requests that entered `sleep` or `gated`.
     entered: std.atomic.Value(u32) = .init(0),
@@ -157,7 +158,7 @@ const Fixture = struct {
         f.app = .{};
         f.native = try .init(gpa, .{ .address = "127.0.0.1", .port = 0, .limits = settings.limits, .timeouts = settings.timeouts });
         errdefer f.native.deinit();
-        f.server = try http.Server.init(gpa, .{ .backend = f.native.backend(), .controllers = .{&f.app} });
+        f.server = try http.Server.init(gpa, .{ .backend = f.native.backend(), .controllers = .{&f.app}, .strict_errors = false });
         errdefer f.server.deinit(io);
         try f.server.start(io);
     }
@@ -658,7 +659,7 @@ fn sameOnBoth(io: Io) !void {
     var app: App = .{};
     var memory: http.testing.Backend = .init(gpa);
     defer memory.deinit();
-    var server = try http.Server.init(gpa, .{ .backend = memory.backend(), .controllers = .{&app} });
+    var server = try http.Server.init(gpa, .{ .backend = memory.backend(), .controllers = .{&app}, .strict_errors = false });
     defer server.deinit(io);
     try server.start(io);
 

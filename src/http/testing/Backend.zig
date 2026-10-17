@@ -449,6 +449,8 @@ const Server = @import("../Server.zig");
 const Context = @import("../Context.zig");
 const routes = @import("../routes.zig");
 
+/// Its server turns the strict error check off: `echo` reads the body
+/// whole, and `StreamTooLong` stays unmapped.
 const EchoController = struct {
     /// Set by the handler just before it returns.
     finished: bool = false,
@@ -472,7 +474,7 @@ test "request returns once the request has ended, with the body and the client's
     var echo: EchoController = .{};
     var b: Backend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&echo} });
+    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&echo}, .strict_errors = false });
     defer server.deinit(io);
     try server.start(io);
 

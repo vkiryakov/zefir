@@ -1,5 +1,7 @@
 //! Must compile: every kind of route and each of its options, declared by
-//! client code and passed to Server.init with a prefix from the config.
+//! client code and passed to Server.init with a prefix from the config, and
+//! the error handler of design section 11, which maps the error of
+//! `create`.
 const std = @import("std");
 const http = @import("http");
 
@@ -44,6 +46,30 @@ const TodosV1Controller = struct {
     pub fn eventsClosed(_: *TodosV1Controller, _: *http.sse.Context) void {}
 };
 
+const ApiError = struct {
+    code: []const u8,
+    message: []const u8,
+    details: []const http.Violation = &.{},
+    trace_id: []const u8 = "",
+};
+
+const AppErrors = struct {
+    pub fn mapError(err: anyerror) http.ErrorResponse(ApiError) {
+        return switch (err) {
+            error.TodoLimitReached => .{ .status = 409, .body = .{ .code = "todos.limit_reached", .message = "Too many todos" } },
+            error.ValidationFailed => .{ .status = 422, .body = .{ .code = "validation_failed", .message = "Invalid request" } },
+            else => .fallback(err, .{ .code = http.defaultCode(err), .message = http.defaultTitle(err) }),
+        };
+    }
+
+    pub fn handle(_: *AppErrors, ctx: *http.Context, err: anyerror, res: *http.ErrorResponse(ApiError)) !http.ErrorAction {
+        res.body.trace_id = ctx.traceId();
+        if (err == error.ValidationFailed) res.body.details = ctx.violations();
+        if (err == error.Unauthenticated) try ctx.response.setHeader("www-authenticate", "Bearer");
+        return .respond;
+    }
+};
+
 const HealthController = struct {
     pub const http_routes = http.routes(.{ .methods = .{ .check = http.get("/health", .{}) } });
 
@@ -53,8 +79,9 @@ const HealthController = struct {
 fn serve(gpa: std.mem.Allocator, prefix: []const u8) http.Server.InitError!void {
     var todos_v1: TodosV1Controller = .{};
     var health: HealthController = .{};
+    var app_errors: AppErrors = .{};
     const backend: http.Backend = undefined;
-    var server = try http.Server.init(gpa, .{ .backend = backend, .prefix = prefix, .controllers = .{ &todos_v1, &health } });
+    var server = try http.Server.init(gpa, .{ .backend = backend, .prefix = prefix, .controllers = .{ &todos_v1, &health }, .error_handler = &app_errors });
     defer server.deinit(std.testing.io);
     const info: http.RouteInfo = server.routes[0].info;
     _ = info;

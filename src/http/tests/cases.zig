@@ -54,11 +54,27 @@ pub const compile_errors = [_]Fixture{
     .{ .file = dir ++ "dto_not_struct.zig", .expect = "zefir.http: ctx.query takes a struct, got u32" },
     .{ .file = dir ++ "dto_bad_rule.zig", .expect = "validator: dto_bad_rule.IdPath.field_rules.id: max_length expects a string, field is u64" },
     .{ .file = dir ++ "json_unsupported_field.zig", .expect = "zefir.http: json_unsupported_field.Item.codes: [3]u8 does not come from JSON; ctx.json reads integers, floats, bool, enums, []const u8 and structs, alone, as ?T or as []const T" },
+    // The strict error check.
+    .{ .file = dir ++ "strict_app_error.zig", .expect = "UsersV1Controller.create can return error.UserLimitReached; AppErrors.mapError gives it 500 through .fallback" ++ strict_hint },
+    .{ .file = dir ++ "strict_default_handler.zig", .expect = "UsersV1Controller.create can return error.UserLimitReached; the default error handler gives it 500; set .error_handler and map it" ++ strict_hint },
+    .{ .file = dir ++ "strict_framework_error.zig", .expect = "AppErrors.mapError gives error.RouteNotFound 500, while its status is 404; map it or keep .fallback in else" ++ strict_hint },
+    .{ .file = dir ++ "strict_anyerror_handler.zig", .expect = "zefir.http: UsersV1Controller.get returns anyerror; the strict error check needs the errors it can return: give it an error set" ++ strict_hint },
+    .{ .file = dir ++ "strict_input_transform_error.zig", .expect = "UsersV1Controller.search can return error.TooManyTags; AppErrors.mapError gives it 500 through .fallback" ++ strict_hint },
+    .{ .file = dir ++ "strict_response_transform_error.zig", .expect = "UsersV1Controller.get (writing its response) can return error.BadDisplayName; AppErrors.mapError gives it 500 through .fallback" ++ strict_hint },
+    .{ .file = dir ++ "strict_errors_runtime.zig", .expect = "zefir.http: Server.init .strict_errors must be known at compile time: true or false" },
+    // The error handler.
+    .{ .file = dir ++ "error_handler_no_map.zig", .expect = "zefir.http: the error handler AppErrors has no pub fn mapError(err: anyerror) http.ErrorResponse(Body)" },
+    .{ .file = dir ++ "error_handler_handle_signature.zig", .expect = "; write pub fn handle(self: *AppErrors, ctx: *http.Context, err: anyerror, res: *http.ErrorResponse(ApiError)) !http.ErrorAction", .whole = false },
+    .{ .file = dir ++ "error_handler_map_signature.zig", .expect = "; write pub fn mapError(err: anyerror) http.ErrorResponse(Body) (no ctx: the strict error check calls it at compile time)", .whole = false },
+    .{ .file = dir ++ "error_handler_by_value.zig", .expect = "zefir.http: Server.init .error_handler is AppErrors; pass a pointer to the error handler, e.g. &app_errors" },
 };
+
+const strict_hint = " (strict error check; .strict_errors = false turns it off)";
 
 const dir = "src/http/tests/compile_errors/";
 
 /// Files in src/http/tests/compile_ok/ that must compile.
 pub const must_compile = [_][]const u8{
     "src/http/tests/compile_ok/routes.zig",
+    "src/http/tests/compile_ok/strict_off.zig",
 };

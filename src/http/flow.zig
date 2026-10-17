@@ -9,8 +9,10 @@
 //! reason itself, since a canceled task sees only `error.Canceled`:
 //!
 //! - the request ended: its response. A handler that wrote nothing
-//!   answers 204, an `http.Json(T)` its value, an error
-//!   `application/problem+json` with the status of `http.defaultStatus`;
+//!   answers 204, an `http.Json(T)` its value, an error what the server's
+//!   error handler makes of it (`mapError`, then `handle`; without
+//!   `.error_handler`, `application/problem+json` with the status of
+//!   `http.defaultStatus`);
 //! - the deadline passed: the request is canceled and the answer is 504
 //!   (`error.RequestTimeout`). The deadline does not cancel the token, so
 //!   `ctx.operation().check(now)` reports `DeadlineExceeded`;
@@ -42,6 +44,7 @@ const Allow = routing.Allow;
 const h1 = @import("h1/head.zig");
 const response = @import("h1/response.zig");
 const json_out = @import("output/json_out.zig");
+const plan = @import("plan.zig");
 const waiting = @import("wait.zig");
 
 const log = std.log.scoped(.http);
@@ -110,6 +113,7 @@ pub fn serve(server: *Server, io: std.Io, exchange: *Exchange) void {
             .max_query_params = server.settings.max_query_params,
             .unknown_fields = server.settings.unknown_fields,
             .json = server.settings.json,
+            .error_handler = server.error_handler,
         },
     };
     if (!takeSlot(server)) return respond(&ctx, exchange, error.Overloaded);
@@ -274,13 +278,131 @@ fn respond(ctx: *Context, exchange: *Exchange, result: anyerror!void) void {
     } else |err| {
         if (errors.isCancellation(err)) return cut(ctx, exchange);
         if (err == error.ReadFailed) if (exchange.bodyFailure()) |failure| return answerBodyFailure(ctx, exchange, failure);
-        if (errors.defaultStatus(err) == 500)
-            log.warn("{s} failed with error.{t}; the response is 500 (request {s})", .{ routeName(ctx), err, ctx.requestId() });
-        var problem = errors.DefaultErrors.problem(err);
-        if (err == error.ValidationFailed) problem.errors = ctx.violations();
-        setProblem(ctx, problem);
+        return answerError(ctx, exchange, err);
     }
     send(ctx, exchange);
+}
+
+/// The error handler of a server, its type erased: the object of
+/// `.error_handler`, or the default handler, and the error path of its
+/// type. Every error that answers a request goes through it: those of the
+/// handlers and of the transforms of their values, and those of the
+/// framework (`RouteNotFound`, `Overloaded`, `RequestTimeout`, ...).
+pub const ErrorHandler = struct {
+    object: *anyopaque,
+    answer: *const fn (object: *anyopaque, ctx: *Context, err: anyerror) Next,
+
+    /// What the error path leaves to `respond`: send the response it set;
+    /// finish the body that `handle` began and returned `.handled` for; or
+    /// cut the response that `handle` began and did not finish.
+    pub const Next = enum { send, finish, cut };
+
+    /// The handler of a server without `.error_handler` (decision 23).
+    pub const default: ErrorHandler = .of(errors.DefaultErrors, &default_errors);
+
+    /// `object`, an error handler of type `H` that `plan.zig` checked.
+    pub fn of(comptime H: type, object: *H) ErrorHandler {
+        return .{ .object = object, .answer = ErrorPathOf(H).answer };
+    }
+};
+
+var default_errors: errors.DefaultErrors = .{};
+
+/// The line the server logs for an error answered with 500: the route,
+/// the error and the id of the request, never the body or the path.
+const internal_line = "{s} failed with error.{t}; the response is 500 (request {s})";
+
+/// The answer to `err`: what the error handler makes of it, in place of
+/// what the handler wrote (design section 11).
+fn answerError(ctx: *Context, exchange: *Exchange, err: anyerror) void {
+    const errors_of = ctx.internal.error_handler;
+    switch (errors_of.answer(errors_of.object, ctx, err)) {
+        .send => {
+            if (ctx.response.internal.code == 500) log.warn(internal_line, .{ routeName(ctx), err, ctx.requestId() });
+            send(ctx, exchange);
+        },
+        .finish => if (ctx.response.internal.state == .committed) {
+            ctx.response.internal.finishBody() catch cut(ctx, exchange);
+        },
+        .cut => cut(ctx, exchange),
+    }
+}
+
+/// The error path of an error handler of type `H`. The response the
+/// handler left uncommitted is replaced: its status, its body and the
+/// fields of its content go, the others stay (`X-Request-Id`, CORS,
+/// `Allow`, those of the application). `H.mapError(err)` gives the status
+/// and the body; `handle`, if `H` has one, may change them, add fields or
+/// write a response of its own and return `.handled`. A `handle` that
+/// fails is logged, and the response is what `mapError` gave.
+fn ErrorPathOf(comptime H: type) type {
+    return struct {
+        const name = plan.shortName(@typeName(H));
+
+        fn answer(object: *anyopaque, ctx: *Context, err: anyerror) ErrorHandler.Next {
+            const res = &ctx.response.internal;
+            clearResponse(res);
+            var reply = H.mapError(err);
+            if (@hasDecl(H, "handle")) {
+                const self: *H = @ptrCast(@alignCast(object));
+                const result = H.handle(self, ctx, err, &reply);
+                const action: errors.ErrorAction = if (@typeInfo(@TypeOf(result)) == .error_union) result catch |failure| failed: {
+                    log.warn("{s}.handle failed with error.{t} on error.{t}; the response is what mapError gave (request {s})", .{ name, failure, err, ctx.requestId() });
+                    break :failed .respond;
+                } else result;
+                if (res.state != .uncommitted) {
+                    if (action == .handled) return .finish;
+                    log.warn("{s}.handle began a response for error.{t} and did not finish it; the response is cut (request {s})", .{ name, err, ctx.requestId() });
+                    return .cut;
+                }
+                if (action == .handled) {
+                    if (res.written()) return .send;
+                    log.warn("{s}.handle returned .handled for error.{t} without a response; the response is what mapError gave (request {s})", .{ name, err, ctx.requestId() });
+                }
+            }
+            setReply(ctx, err, reply);
+            return .send;
+        }
+    };
+}
+
+/// The response of an error before its handler: no status, no body and
+/// none of the fields of the content.
+fn clearResponse(res: *Context.Response.Internal) void {
+    dropContentFields(res);
+    res.code = null;
+    res.body = .none;
+    res.content_type = null;
+    res.out.writer.end = 0;
+}
+
+/// `reply` as the response: its status, and its body as JSON through the
+/// transforms and with the outside names of its `field_rules` (design
+/// section 8), as `application/problem+json` for `http.Problem`, else as
+/// `application/json`. A body that does not transform, or a status that is
+/// not final, is logged, and the answer is the framework's problem+json
+/// 500.
+fn setReply(ctx: *Context, err: anyerror, reply: anytype) void {
+    const Body = @TypeOf(reply.body);
+    const problem = Body == errors.Problem;
+    const res = &ctx.response.internal;
+    dropContentFields(res);
+    if (reply.status < 200 or reply.status > 599) {
+        log.warn("the error handler gave error.{t} the status {d}, which is not a final status; the response is 500 (request {s})", .{ err, reply.status, ctx.requestId() });
+        return setInternal(res);
+    }
+    const bytes = json_out.encode(res.arena, reply.body, .{ .omit_null_fields = problem }) catch |failure| {
+        log.warn("the body of the response to error.{t} failed with error.{t}; the response is the framework's 500 (request {s})", .{ err, failure, ctx.requestId() });
+        return setInternal(res);
+    };
+    res.code = reply.status;
+    res.replaceBody(if (problem) "application/problem+json" else "application/json", bytes);
+}
+
+/// The framework's own 500, known at compile time.
+fn setInternal(res: *Context.Response.Internal) void {
+    res.code = 500;
+    res.replaceBody("application/problem+json", internal_problem);
 }
 
 /// OPTIONS without a route of its own: 204 with `Allow`.
@@ -369,6 +491,8 @@ const Json = @import("dto.zig").Json;
 
 const Todo = struct { id: u64, title: []const u8 };
 
+/// Its server turns the strict error check off: `fail` answers 500 with
+/// an error that no error handler maps.
 const TodosV1Controller = struct {
     seen_route: ?routes.RouteInfo = null,
     seen_now: ?std.Io.Timestamp = null,
@@ -439,7 +563,7 @@ const Fixture = struct {
 
     fn start(f: *Fixture, io: std.Io) !void {
         f.backend = .init(testing.allocator);
-        f.server = try .init(testing.allocator, .{ .backend = f.backend.backend(), .prefix = "/api", .controllers = .{&f.todos} });
+        f.server = try .init(testing.allocator, .{ .backend = f.backend.backend(), .prefix = "/api", .controllers = .{&f.todos}, .strict_errors = false });
         f.server.start(io) catch |err| {
             f.server.deinit(io);
             return err;
@@ -582,6 +706,382 @@ test "an error is problem+json: the fields of the content go, the others stay" {
     defer canceled.deinit();
     try testing.expect(canceled.aborted);
     try testing.expectEqual(0, canceled.status);
+}
+
+const v = @import("validator");
+
+/// The body of the errors of `AppErrors`: the format of an application.
+const ApiError = struct {
+    code: []const u8,
+    message: []const u8,
+    details: []const v.Violation = &.{},
+    trace_id: []const u8 = "",
+};
+
+/// An error handler of the application: its own format; `handle` adds the
+/// trace and the violations, a header, or a page of its own.
+const AppErrors = struct {
+    /// Calls of `handle`.
+    handled: u32 = 0,
+
+    pub fn mapError(err: anyerror) errors.ErrorResponse(ApiError) {
+        return switch (err) {
+            error.TodoNotFound => .{ .status = 404, .body = .{ .code = "todos.not_found", .message = "Todo not found" } },
+            error.BadTitle => .{ .status = 400, .body = .{ .code = "todos.bad_title", .message = "The title does not fit" } },
+            // 500 meant: the strict check takes it.
+            error.Corrupted => .{ .status = 500, .body = .{ .code = "todos.corrupted", .message = "Something broke" } },
+            error.ValidationFailed => .{ .status = 422, .body = .{ .code = "validation_failed", .message = "Invalid request" } },
+            else => .fallback(err, .{ .code = errors.defaultCode(err), .message = errors.defaultTitle(err) }),
+        };
+    }
+
+    pub fn handle(self: *AppErrors, ctx: *Context, err: anyerror, res: *errors.ErrorResponse(ApiError)) !errors.ErrorAction {
+        self.handled += 1;
+        res.body.trace_id = ctx.traceId();
+        switch (err) {
+            error.ValidationFailed => res.body.details = ctx.violations(),
+            error.Unavailable => try ctx.response.setHeader("retry-after", "5"),
+            error.RouteNotFound => if (ctx.request.accepts("text/html")) {
+                try ctx.response.status(404).html("<h1>Not here</h1>");
+                return .handled;
+            },
+            // .handled without a response: what mapError gave goes out.
+            error.PermissionDenied => return .handled,
+            // A handle that fails: what mapError gave goes out, as it is.
+            error.Unauthenticated => try ctx.response.setHeader("www-authenticate", "Bearer\r\nx-split: 1"),
+            else => {},
+        }
+        return .respond;
+    }
+};
+
+/// RFC 9457 problem details as the format, without `handle`.
+const ProblemErrors = struct {
+    pub fn mapError(err: anyerror) errors.ErrorResponse(errors.Problem) {
+        return switch (err) {
+            error.TodoNotFound => .{ .status = 404, .body = .{ .title = "Not Found", .status = 404, .code = "todos.not_found", .detail = "No todo has this id" } },
+            error.BadTitle, error.Corrupted => .{ .status = 500, .body = errors.DefaultErrors.problem(error.Unexpected) },
+            else => .fallback(err, errors.DefaultErrors.problem(err)),
+        };
+    }
+};
+
+/// A body whose transform refuses the code "refused".
+const RefusingBody = struct {
+    code: []const u8,
+    pub const field_rules = .{ .code = v.transformWith(refuseCode) };
+};
+
+fn refuseCode(_: std.mem.Allocator, code: []const u8) error{Refused}![]const u8 {
+    if (std.mem.eql(u8, code, "refused")) return error.Refused;
+    return code;
+}
+
+/// An error handler whose body fails its transform for `TodoNotFound`.
+const RefusingErrors = struct {
+    pub fn mapError(err: anyerror) errors.ErrorResponse(RefusingBody) {
+        return switch (err) {
+            error.TodoNotFound => .{ .status = 404, .body = .{ .code = "refused" } },
+            error.BadTitle, error.Corrupted => .{ .status = 500, .body = .{ .code = "internal" } },
+            else => .fallback(err, .{ .code = errors.defaultCode(err) }),
+        };
+    }
+};
+
+/// A response value whose transform refuses an empty title.
+const TodoView = struct {
+    title: []const u8,
+    pub const field_rules = .{ .title = v.transformWith(checkTitle) };
+};
+
+fn checkTitle(_: std.mem.Allocator, title: []const u8) error{BadTitle}![]const u8 {
+    if (title.len == 0) return error.BadTitle;
+    return title;
+}
+
+/// Handlers that fail in each way an error reaches the error handler.
+const FailingV1Controller = struct {
+    pub const http_routes = routes.routes(.{
+        .prefix = "/v1/todos",
+        .methods = .{
+            .get = routes.get("/{id}", .{}),
+            .search = routes.get("", .{}),
+            .busy = routes.get("/busy", .{}),
+            .corrupt = routes.get("/corrupt", .{}),
+            .create = routes.post("", .{}),
+            .denied = routes.get("/denied", .{}),
+            .anonymous = routes.get("/anonymous", .{}),
+            .partial = routes.get("/partial", .{}),
+        },
+    });
+
+    /// Fields of every kind first, then the error.
+    pub fn get(_: *FailingV1Controller, ctx: *Context) !void {
+        try ctx.response.setHeader("x-request-id", "req-1");
+        try ctx.response.setHeader("access-control-allow-origin", "*");
+        try ctx.response.setHeader("content-disposition", "attachment; filename=\"todo.txt\"");
+        try ctx.response.status(202).text("half a body");
+        return error.TodoNotFound;
+    }
+    pub fn search(_: *FailingV1Controller, ctx: *Context) !void {
+        _ = try ctx.query(struct { page: u32 });
+    }
+    pub fn busy(_: *FailingV1Controller, _: *Context) !void {
+        return error.Unavailable;
+    }
+    pub fn corrupt(_: *FailingV1Controller, _: *Context) !void {
+        return error.Corrupted;
+    }
+    pub fn create(_: *FailingV1Controller, _: *Context) !Json(TodoView) {
+        return .{ .value = .{ .title = "" }, .status = 201 };
+    }
+    pub fn denied(_: *FailingV1Controller, _: *Context) !void {
+        return error.PermissionDenied;
+    }
+    pub fn anonymous(_: *FailingV1Controller, _: *Context) !void {
+        return error.Unauthenticated;
+    }
+    /// A part of a stream sent, then an error.
+    pub fn partial(_: *FailingV1Controller, ctx: *Context) !void {
+        var out = try ctx.response.stream(.{ .content_type = "text/csv" });
+        try out.writeAll("id,title\n");
+        try out.flush();
+        return error.Corrupted;
+    }
+};
+
+/// A server of `FailingV1Controller` with the error handler `H`.
+fn ErrorFixture(comptime H: type) type {
+    return struct {
+        todos: FailingV1Controller = .{},
+        handler: H = .{},
+        backend: TestingBackend = undefined,
+        server: Server = undefined,
+
+        const Self = @This();
+
+        fn start(f: *Self) !void {
+            f.backend = .init(testing.allocator);
+            errdefer f.backend.deinit();
+            f.server = try .init(testing.allocator, .{ .backend = f.backend.backend(), .controllers = .{&f.todos}, .error_handler = &f.handler });
+            f.server.start(testing.io) catch |err| {
+                f.server.deinit(testing.io);
+                return err;
+            };
+        }
+
+        fn stop(f: *Self) void {
+            f.server.deinit(testing.io);
+            f.backend.deinit();
+        }
+
+        fn request(f: *Self, req: TestingBackend.Request) !TestingBackend.Response {
+            return f.backend.request(testing.io, req);
+        }
+    };
+}
+
+fn apiErrorOf(res: *TestingBackend.Response) !ApiError {
+    try testing.expectEqualStrings("application/json", res.header("content-type").?);
+    return std.json.parseFromSliceLeaky(ApiError, res.arena.allocator(), res.body, .{});
+}
+
+test "own body format: a struct as application/json; http.Problem as application/problem+json; no handler → problem+json" {
+    var app: ErrorFixture(AppErrors) = .{};
+    try app.start();
+    defer app.stop();
+    var mine = try app.request(.{ .method = .GET, .target = "/v1/todos/7" });
+    defer mine.deinit();
+    try testing.expectEqual(404, mine.status);
+    const body = try apiErrorOf(&mine);
+    try testing.expectEqualStrings("todos.not_found", body.code);
+    try testing.expectEqualStrings("Todo not found", body.message);
+    try testing.expectEqual(32, body.trace_id.len);
+
+    var problems: ErrorFixture(ProblemErrors) = .{};
+    try problems.start();
+    defer problems.stop();
+    var problem = try problems.request(.{ .method = .GET, .target = "/v1/todos/7" });
+    defer problem.deinit();
+    try testing.expectEqual(404, problem.status);
+    try testing.expectEqualStrings("application/problem+json", problem.header("content-type").?);
+    // A member left null is left out.
+    try testing.expectEqualStrings("{\"type\":\"about:blank\",\"title\":\"Not Found\",\"status\":404,\"detail\":\"No todo has this id\",\"code\":\"todos.not_found\",\"errors\":[]}", problem.body);
+
+    // No error handler: problem+json, and an error of the application is
+    // 500 (the strict check is off for it).
+    var todos: FailingV1Controller = .{};
+    var b: TestingBackend = .init(testing.allocator);
+    defer b.deinit();
+    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&todos}, .strict_errors = false });
+    defer server.deinit(testing.io);
+    try server.start(testing.io);
+    const level = testing.log_level;
+    testing.log_level = .err; // the 500 is logged as a warning
+    defer testing.log_level = level;
+    var plain = try b.request(testing.io, .{ .method = .GET, .target = "/v1/todos/7" });
+    defer plain.deinit();
+    try testing.expectEqual(500, plain.status);
+    try expectProblemCode(&plain, "internal");
+}
+
+test ".fallback: the framework's status, our body" {
+    var f: ErrorFixture(AppErrors) = .{};
+    try f.start();
+    defer f.stop();
+    var missing = try f.request(.{ .method = .GET, .target = "/v2/nothing", .headers = &.{.{ "accept", "application/json" }} });
+    defer missing.deinit();
+    try testing.expectEqual(404, missing.status);
+    const not_found = try apiErrorOf(&missing);
+    try testing.expectEqualStrings("not_found", not_found.code);
+    try testing.expectEqualStrings("Not Found", not_found.message);
+
+    var wrong = try f.request(.{ .method = .PUT, .target = "/v1/todos/7" });
+    defer wrong.deinit();
+    try testing.expectEqual(405, wrong.status);
+    try testing.expectEqualStrings("GET, HEAD, OPTIONS", wrong.header("allow").?);
+    try testing.expectEqualStrings("method_not_allowed", (try apiErrorOf(&wrong)).code);
+    try testing.expectEqual(2, f.handler.handled);
+}
+
+test "handle: adds trace_id and details, writes its own HTML with .handled; a failing handle logs and sends res" {
+    var f: ErrorFixture(AppErrors) = .{};
+    try f.start();
+    defer f.stop();
+    const level = testing.log_level;
+    testing.log_level = .err; // the failing handle and the empty .handled are logged as warnings
+    defer testing.log_level = level;
+
+    var traced = try f.request(.{ .method = .GET, .target = "/v1/todos/7", .headers = &.{.{ "traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01" }} });
+    defer traced.deinit();
+    try testing.expectEqualStrings("4bf92f3577b34da6a3ce929d0e0e4736", (try apiErrorOf(&traced)).trace_id);
+
+    var invalid = try f.request(.{ .method = .GET, .target = "/v1/todos?page=many" });
+    defer invalid.deinit();
+    try testing.expectEqual(422, invalid.status);
+    const report = try apiErrorOf(&invalid);
+    try testing.expectEqualStrings("validation_failed", report.code);
+    try testing.expectEqual(1, report.details.len);
+    try testing.expectEqualStrings("http.invalid_type", report.details[0].code);
+    try testing.expectEqualStrings("page", report.details[0].field.?);
+
+    // A browser gets the page of handle; another client the JSON.
+    var page = try f.request(.{ .method = .GET, .target = "/v2/nothing", .headers = &.{.{ "accept", "text/html" }} });
+    defer page.deinit();
+    try testing.expectEqual(404, page.status);
+    try testing.expectEqualStrings("text/html; charset=utf-8", page.header("content-type").?);
+    try testing.expectEqualStrings("<h1>Not here</h1>", page.body);
+
+    // .handled without a response, and a handle that fails: what mapError
+    // gave, as it is.
+    var denied = try f.request(.{ .method = .GET, .target = "/v1/todos/denied" });
+    defer denied.deinit();
+    try testing.expectEqual(403, denied.status);
+    try testing.expectEqualStrings("permission_denied", (try apiErrorOf(&denied)).code);
+    var anonymous = try f.request(.{ .method = .GET, .target = "/v1/todos/anonymous" });
+    defer anonymous.deinit();
+    try testing.expectEqual(401, anonymous.status);
+    const unauthenticated = try apiErrorOf(&anonymous);
+    try testing.expectEqualStrings("unauthenticated", unauthenticated.code);
+    try testing.expectEqual(32, unauthenticated.trace_id.len);
+    try testing.expectEqual(null, anonymous.header("www-authenticate"));
+    try testing.expectEqual(null, anonymous.header("x-split"));
+}
+
+test "replacing a response keeps X-Request-Id, CORS and Retry-After and drops the content headers" {
+    var f: ErrorFixture(AppErrors) = .{};
+    try f.start();
+    defer f.stop();
+    var replaced = try f.request(.{ .method = .GET, .target = "/v1/todos/7" });
+    defer replaced.deinit();
+    // The status, the body and the fields of the content of the handler go.
+    try testing.expectEqual(404, replaced.status);
+    try testing.expectEqualStrings("todos.not_found", (try apiErrorOf(&replaced)).code);
+    try testing.expectEqual(null, replaced.header("content-disposition"));
+    try testing.expectEqualStrings(try std.fmt.allocPrint(replaced.arena.allocator(), "{d}", .{replaced.body.len}), replaced.header("content-length").?);
+    // The other fields stay.
+    try testing.expectEqualStrings("req-1", replaced.header("x-request-id").?);
+    try testing.expectEqualStrings("*", replaced.header("access-control-allow-origin").?);
+
+    // A field of handle stays too.
+    var busy = try f.request(.{ .method = .GET, .target = "/v1/todos/busy" });
+    defer busy.deinit();
+    try testing.expectEqual(503, busy.status);
+    try testing.expectEqualStrings("5", busy.header("retry-after").?);
+    try testing.expectEqualStrings("unavailable", (try apiErrorOf(&busy)).code);
+}
+
+test "a 500 shows no details and logs the error with the request id" {
+    var f: ErrorFixture(AppErrors) = .{};
+    try f.start();
+    defer f.stop();
+    const level = testing.log_level;
+    testing.log_level = .err; // the 500 is logged as a warning
+    defer testing.log_level = level;
+    var broken = try f.request(.{ .method = .GET, .target = "/v1/todos/corrupt" });
+    defer broken.deinit();
+    try testing.expectEqual(500, broken.status);
+    const body = try apiErrorOf(&broken);
+    try testing.expectEqualStrings("todos.corrupted", body.code);
+    // What mapError gave, nothing of the error itself.
+    try testing.expect(std.mem.find(u8, broken.body, "Corrupted") == null);
+
+    // The line of the log: the route, the error and the request's id; not
+    // the path the client sent, nor the body.
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var exchange: CountingExchange = .init();
+    var ctx = exchange.context(arena);
+    ctx.internal.route = .{ .method = .GET, .pattern = "/v1/todos/corrupt", .controller = "FailingV1Controller", .handler = "corrupt" };
+    const line = try std.fmt.allocPrint(arena, internal_line, .{ routeName(&ctx), error.Corrupted, ctx.requestId() });
+    try testing.expectEqualStrings("FailingV1Controller.corrupt (GET /v1/todos/corrupt) failed with error.Corrupted; the response is 500 (request 00000000000000000000000000000000)", line);
+}
+
+test "a response value whose transform fails goes to the error handler like the handler's own error" {
+    var f: ErrorFixture(AppErrors) = .{};
+    try f.start();
+    defer f.stop();
+    var created = try f.request(.{ .method = .POST, .target = "/v1/todos" });
+    defer created.deinit();
+    try testing.expectEqual(400, created.status);
+    try testing.expectEqualStrings("todos.bad_title", (try apiErrorOf(&created)).code);
+    try testing.expectEqual(1, f.handler.handled);
+}
+
+test "an error body that fails its transform gives the framework's problem+json 500" {
+    var f: ErrorFixture(RefusingErrors) = .{};
+    try f.start();
+    defer f.stop();
+    const level = testing.log_level;
+    testing.log_level = .err; // the body and the 500 are logged as warnings
+    defer testing.log_level = level;
+    var refused = try f.request(.{ .method = .GET, .target = "/v1/todos/7" });
+    defer refused.deinit();
+    try testing.expectEqual(500, refused.status);
+    try testing.expectEqualStrings("application/problem+json", refused.header("content-type").?);
+    try testing.expectEqualStrings(internal_problem, refused.body);
+    // A body that transforms goes out.
+    var missing = try f.request(.{ .method = .GET, .target = "/v2/nothing" });
+    defer missing.deinit();
+    try testing.expectEqual(404, missing.status);
+    try testing.expectEqualStrings("{\"code\":\"not_found\"}", missing.body);
+}
+
+test "an error after commit cuts the response" {
+    var f: ErrorFixture(AppErrors) = .{};
+    try f.start();
+    defer f.stop();
+    const level = testing.log_level;
+    testing.log_level = .err; // the error after commit is logged as a warning
+    defer testing.log_level = level;
+    var cut_short = try f.request(.{ .method = .GET, .target = "/v1/todos/partial" });
+    defer cut_short.deinit();
+    try testing.expect(cut_short.aborted);
+    try testing.expectEqual(200, cut_short.status);
+    try testing.expectEqualStrings("id,title\n", cut_short.body);
+    // The head had gone: no answer to the error, and handle never ran.
+    try testing.expectEqual(0, f.handler.handled);
 }
 
 /// An exchange without a client that counts what the server writes.
@@ -830,7 +1330,8 @@ const Watchdog = struct {
 };
 
 /// Handlers that wait: for deadlines, clients that leave and the limit of
-/// requests at work.
+/// requests at work. Its servers turn the strict error check off: `fail`
+/// answers 500 with an error that no error handler maps.
 const WaitController = struct {
     /// Requests that have entered `gated`.
     entered: std.atomic.Value(u32) = .init(0),
@@ -951,7 +1452,7 @@ test "when the runtime gives no task, the request gets 503" {
     var waits: WaitController = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&waits} });
+    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&waits}, .strict_errors = false });
     defer server.deinit(io);
     try server.start(io);
     const level = testing.log_level;
@@ -988,7 +1489,7 @@ test "a handler past its deadline gets 504, and its I/O returns Canceled" {
     var waits: WaitController = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&waits} });
+    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&waits}, .strict_errors = false });
     defer server.deinit(io);
     try server.start(io);
 
@@ -1012,7 +1513,7 @@ test "a client that leaves cancels the request: no response, the handler sees Ca
     var waits: WaitController = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&waits} });
+    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&waits}, .strict_errors = false });
     defer server.deinit(io);
     try server.start(io);
 
@@ -1040,7 +1541,7 @@ test "after a deadline the operation reports DeadlineExceeded, never Cancelled" 
     var waits: WaitController = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&waits} });
+    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&waits}, .strict_errors = false });
     defer server.deinit(io);
     try server.start(io);
 
@@ -1059,7 +1560,7 @@ test "the request over max_in_flight gets 503" {
     var waits: WaitController = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&waits}, .max_in_flight = 2 });
+    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&waits}, .strict_errors = false, .max_in_flight = 2 });
     defer server.deinit(io);
     try server.start(io);
 
@@ -1124,7 +1625,7 @@ test "in-flight slots come back after every outcome" {
     var waits: WaitController = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&waits}, .max_in_flight = 4 });
+    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&waits}, .strict_errors = false, .max_in_flight = 4 });
     defer server.deinit(io);
     try server.start(io);
     const level = testing.log_level;
@@ -1184,7 +1685,7 @@ test "a handler that ends at its deadline gets exactly one outcome" {
     var waits: WaitController = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&waits} });
+    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&waits}, .strict_errors = false });
     defer server.deinit(io);
     try server.start(io);
 

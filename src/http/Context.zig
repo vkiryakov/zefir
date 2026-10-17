@@ -17,6 +17,7 @@ const routes = @import("routes.zig");
 const h1 = @import("h1/head.zig");
 const dto = @import("dto.zig");
 const Server = @import("Server.zig");
+const flow = @import("flow.zig");
 const strings = @import("input/strings.zig");
 const urlencoded = @import("input/urlencoded.zig");
 const cookie_input = @import("input/cookies.zig");
@@ -64,6 +65,8 @@ pub const Internal = struct {
     violations: []const Violation = &.{},
     /// What `body` returned, for the next calls.
     body: ?(BodyError![]const u8) = null,
+    /// The server's error handler.
+    error_handler: flow.ErrorHandler = .default,
 };
 
 /// The errors of `body`. `PayloadTooLarge` (413): over the limit.
@@ -519,7 +522,7 @@ test "body: over the limit by Content-Length is 413 before reading; chunked over
     var bodies: BodyController = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&bodies}, .max_body_bytes = 4 });
+    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&bodies}, .strict_errors = false, .max_body_bytes = 4 });
     defer server.deinit(test_io);
     try server.start(test_io);
     for ([_]struct { []const u8, []const u8, u16 }{
@@ -552,7 +555,7 @@ test "body: gzip is 415" {
     var bodies: BodyController = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&bodies} });
+    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&bodies}, .strict_errors = false });
     defer server.deinit(test_io);
     try server.start(test_io);
     for ([_]struct { []const u8, u16 }{
@@ -577,7 +580,7 @@ test "body: a second call returns the same bytes; bodyReader after body is BodyC
     var bodies: BodyController = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&bodies} });
+    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&bodies}, .strict_errors = false });
     defer server.deinit(test_io);
     try server.start(test_io);
     const level = testing.log_level;
@@ -597,6 +600,8 @@ test "body: a second call returns the same bytes; bodyReader after body is BodyC
     try testing.expectEqual(error.BodyConsumed, bodies.seen.?);
 }
 
+/// Its servers turn the strict error check off: `twice` fails the test
+/// with an error of its own, which no error handler maps.
 const BodyController = struct {
     /// What `reader_first` got from `ctx.body()`.
     seen: ?anyerror = null,
@@ -757,6 +762,8 @@ const DayRange = struct {
     }
 };
 
+/// Its servers turn the strict error check off: the transform of
+/// `search` returns `error.TooManyTags`, which no error handler maps.
 const InputController = struct {
     /// The error `search` got from `ctx.query`.
     seen: ?anyerror = null,
@@ -831,7 +838,7 @@ test "query: max_query_params plus one is 400" {
     var input: InputController = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&input} });
+    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&input}, .strict_errors = false });
     defer server.deinit(test_io);
     try server.start(test_io);
 
@@ -855,7 +862,7 @@ test "query: bad percent-encoding and invalid UTF-8 are 400" {
     var input: InputController = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&input} });
+    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&input}, .strict_errors = false });
     defer server.deinit(test_io);
     try server.start(test_io);
     // In an unknown parameter too: the query is taken apart as a whole.
@@ -877,7 +884,7 @@ test "query: + is a space, in the path it is not" {
     var input: InputController = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&input} });
+    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&input}, .strict_errors = false });
     defer server.deinit(test_io);
     try server.start(test_io);
     var plus = try get(&b, "/names/a+b?q=a+b", &.{});
@@ -893,7 +900,7 @@ test "query: 150 unknown parameters are 422 with the first 100 violations" {
     var input: InputController = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&input}, .max_query_params = 200 });
+    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&input}, .strict_errors = false, .max_query_params = 200 });
     defer server.deinit(test_io);
     try server.start(test_io);
     var target: std.ArrayList(u8) = .empty;
@@ -917,7 +924,7 @@ test "form: urlencoded only; unknown fields rejected unless the DTO ignores them
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
     {
-        var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&input} });
+        var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&input}, .strict_errors = false });
         defer server.deinit(test_io);
         try server.start(test_io);
         var ok = try post(&b, "/signup", form_type, "email=+Ann%40Example.COM+&displayName=Ann");
@@ -950,7 +957,7 @@ test "form: urlencoded only; unknown fields rejected unless the DTO ignores them
     }
     {
         // The server's policies: bodies ignore, queries refuse.
-        var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&input}, .unknown_fields = .{ .body = .ignore, .query = .reject } });
+        var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&input}, .strict_errors = false, .unknown_fields = .{ .body = .ignore, .query = .reject } });
         defer server.deinit(test_io);
         try server.start(test_io);
         var extra = try post(&b, "/signup", form_type, "email=a@b.example&displayName=A&role=admin");
@@ -974,7 +981,7 @@ test "form: a DTO's unknown_fields works untyped and typed" {
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
     // The DTO's word wins over the server's, both ways.
-    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&input}, .unknown_fields = .{ .body = .reject, .query = .ignore } });
+    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&input}, .strict_errors = false, .unknown_fields = .{ .body = .reject, .query = .ignore } });
     defer server.deinit(test_io);
     try server.start(test_io);
     for ([_][]const u8{ "/loose", "/typed" }) |target| {
@@ -996,7 +1003,7 @@ test "path: parameters fill fields by outside names" {
     var input: InputController = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .prefix = "/api", .controllers = .{&input} });
+    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .prefix = "/api", .controllers = .{&input}, .strict_errors = false });
     defer server.deinit(test_io);
     try server.start(test_io);
     var ok = try get(&b, "/api/users/7/todos/3", &.{});
@@ -1019,7 +1026,7 @@ test "headers: any case; repeats fill a slice" {
     var input: InputController = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&input} });
+    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&input}, .strict_errors = false });
     defer server.deinit(test_io);
     try server.start(test_io);
     var ok = try get(&b, "/headers", &.{ .{ "IDEMPOTENCY-KEY", "  k-1 " }, .{ "x-tag", "a" }, .{ "Accept", "*/*" }, .{ "X-Tag", "b, c" } });
@@ -1045,7 +1052,7 @@ test "cookies: outside names; the first of two equal names wins" {
     var input: InputController = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&input} });
+    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&input}, .strict_errors = false });
     defer server.deinit(test_io);
     try server.start(test_io);
     var ok = try get(&b, "/cookies", &.{ .{ "Cookie", "sid=first; theme=\"dark\"; session=zig-name" }, .{ "cookie", "sid=second" } });
@@ -1061,7 +1068,7 @@ test "transforms run after mapping and before rules" {
     var input: InputController = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&input} });
+    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&input}, .strict_errors = false });
     defer server.deinit(test_io);
     try server.start(test_io);
     var milk = try get(&b, "/search?q=++Milk+&tags=home,shop", &.{});
@@ -1089,7 +1096,7 @@ test "a custom transform's error reaches the caller as it is" {
     var input: InputController = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&input} });
+    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&input}, .strict_errors = false });
     defer server.deinit(test_io);
     try server.start(test_io);
     const level = testing.log_level;
@@ -1107,7 +1114,7 @@ test "validateSelf violations use outside names" {
     var input: InputController = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&input} });
+    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&input}, .strict_errors = false });
     defer server.deinit(test_io);
     try server.start(test_io);
     var ok = try get(&b, "/range?from=3&to=5", &.{});
@@ -1133,7 +1140,7 @@ test "the checkAll report is freed" {
     var input: InputController = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(counted.allocator(), .{ .backend = b.backend(), .controllers = .{&input} });
+    var server = try Server.init(counted.allocator(), .{ .backend = b.backend(), .controllers = .{&input}, .strict_errors = false });
     defer server.deinit(test_io);
     try server.start(test_io);
     const live = counted.allocations - counted.deallocations;
@@ -1183,6 +1190,8 @@ fn refuseNoTags(_: std.mem.Allocator, tags: []const []const u8) error{NoTags}![]
     return tags;
 }
 
+/// Its servers turn the strict error check off: the transform of the
+/// value of `untagged` returns `error.NoTags`, which no error handler maps.
 const JsonController = struct {
     pub const http_routes = routes.routes(.{ .methods = .{
         .create = routes.post("/todos", .{}),
@@ -1207,7 +1216,7 @@ const JsonController = struct {
 
 /// Starts `server` in place: once started, the backend points at it.
 fn startJson(server: *Server, b: *TestingBackend, controller: *JsonController, max_depth: u16) !void {
-    server.* = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{controller}, .json = .{ .max_depth = max_depth } });
+    server.* = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{controller}, .json = .{ .max_depth = max_depth }, .strict_errors = false });
     errdefer server.deinit(testing.io);
     try server.start(testing.io);
 }
