@@ -160,10 +160,8 @@ that fails is its violation, and nothing inside it is checked after that.
 Add Zefir to your `build.zig.zon`; validator ships since v0.4.0:
 
 ```sh
-zig fetch --save git+https://github.com/vkiryakov/zefir#dev
+zig fetch --save git+https://github.com/vkiryakov/zefir#v0.7.0
 ```
-
-This guide is on the `dev` branch, so the command fetches its latest commit; `--save` pins that commit. For the latest release, v0.6.0, fetch `#v0.6.0` instead.
 
 Then import the `zefir-validator` module in `build.zig`:
 
@@ -463,8 +461,7 @@ field that exists at run time cannot hold one.
 ## Names and transforms
 
 > [!NOTE]
-> Names and transforms are on the `dev` branch until the next release: the
-> latest release, v0.6.0, does not have them.
+> Names and transforms ship since v0.7.0.
 
 Values that come from outside are rarely clean. People type their email as
 `" Ann@Example.COM "`, with spaces around it, and tag a post `" Zig "`, `zig`
