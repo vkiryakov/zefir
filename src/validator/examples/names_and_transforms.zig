@@ -34,6 +34,8 @@ const Speaker = struct {
     phone: ?[]const u8 = null,
 
     // Per field, in this order: the outside name, the transforms, the rules.
+    // One-word names are the same in camelCase: email, country and phone need
+    // no v.rename.
     pub const field_rules = .{
         .display_name = .{ v.rename("displayName"), v.trim, v.notBlank, v.maxLength(60) },
         .email = .{ v.trim, v.toLower, v.email },
@@ -66,8 +68,15 @@ pub fn main(init: std.process.Init) !void {
     });
     defer logger.deinit();
 
-    // A proposal as a decoder read it from the form: found by the outside
-    // names (durationMinutes, displayName), with the values as people typed them.
+    // The form sent this JSON, with the outside names and the values as people
+    // typed them:
+    //   {"title": "  Comptime for the rest of us ", "durationMinutes": 30,
+    //    "tags": [" Zig ", "comptime", "ZIG"],
+    //    "speakers": [{"displayName": " Ada Lovelace", "email": " Ada@Example.COM ",
+    //                  "country": "gb", "phone": "+44 (20) 7946-0958"},
+    //                 {"displayName": " \t", "email": "grace@example.org", "country": "US "}]}
+    // A codec that finds the fields by their outside names, at every level,
+    // turns it into this value:
     var proposal: TalkProposal = .{
         .title = "  Comptime for the rest of us ",
         .duration_minutes = 30,
@@ -77,9 +86,12 @@ pub fn main(init: std.process.Init) !void {
             .{ .display_name = " \t", .email = "grace@example.org", .country = "US " },
         },
     };
-    const before = proposal; // the strings and lists it points to stay as they are
+    // A shallow copy: it shares the strings and lists, and v.transform never
+    // writes into them, so `before` keeps the raw values.
+    const before = proposal;
 
-    // What the transforms allocate lives in an arena, freed with the request.
+    // One arena for this proposal (in a server: one per request): the
+    // transforms allocate from it, and arena.deinit() frees it all at once.
     var arena: std.heap.ArenaAllocator = .init(init.gpa);
     defer arena.deinit();
     try v.transform(arena.allocator(), &proposal); // 1. the transforms

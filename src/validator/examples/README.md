@@ -121,7 +121,8 @@ Examples that `zig build test` compiles and runs:
 flowchart LR
     dto["struct with field_rules<br/>and validateSelf"] --> build{"zig build"}
     build -->|"a declaration is wrong"| err(["compile error<br/>validator: ..."])
-    build -->|"every rule fits"| run["v.check or v.checkAll"]
+    build -->|"every rule fits"| tr["v.transform<br/>(when the DTO has transforms)"]
+    tr --> run["v.check or v.checkAll"]
     run -->|"valid"| ok(["null, or an empty Report"])
     run -->|"invalid"| violation(["a Violation, or a Report of them:<br/>code, message, field"])
 ```
@@ -132,12 +133,17 @@ flowchart LR
    The same entries can give a field its outside name and transforms that
    `v.transform` runs before the check
    ([Names and transforms](#names-and-transforms)).
-2. **Compile.** When a program calls `v.check` or `v.checkAll` for a type, or a
-   test calls `comptime v.assertRules(T)`, the compiler checks the declarations
-   of that type and of every type below it: each rule against its field's type,
-   the keys of `field_rules`, the signature of `validateSelf`, field types the
-   walk cannot enter. A mistake is a compile error that starts with `validator: `.
-3. **Check.** `v.check(&value, &path_buf)` walks the value depth-first — fields
+2. **Compile.** When a program calls `v.transform`, `v.check` or `v.checkAll`
+   for a type, or a test calls `comptime v.assertRules(T)`, the compiler checks
+   the declarations of that type and of every type below it: each rule against
+   its field's type, the keys of `field_rules`, the signature of `validateSelf`,
+   field types the walk cannot enter. A mistake is a compile error that starts
+   with `validator: `.
+3. **Transform**, when the DTO has transforms.
+   `v.transform(arena.allocator(), &value)` brings the values to their normal
+   form, trimmed and in one case, before the check
+   ([Names and transforms](#names-and-transforms)).
+4. **Check.** `v.check(&value, &path_buf)` walks the value depth-first — fields
    in declaration order, items by index — and returns the first violation or
    `null`, allocating nothing. `v.checkAll(gpa, &value)` collects every
    violation, at most 100.
@@ -394,10 +400,10 @@ item `{ "a", 600 }` it is `items[0]` (`orders.out_of_stock`).
 
 Unions, enums, opaque types, pointers, tuples, error unions and vectors are not
 walked, and neither are slices with `volatile`, `allowzero` or an alignment
-below that of their items. When one of them contains a type with rules, that is
-a compile error naming the field: nothing is skipped silently. `field_rules` and
-`validateSelf` belong on structs: on an enum, a union or an opaque type that the
-walk reaches, they are a compile error too.
+below that of their items. When one of them contains a type with rules or
+transforms, that is a compile error naming the field: nothing is skipped
+silently. `field_rules` and `validateSelf` belong on structs: on an enum, a
+union or an opaque type that the walk reaches, they are a compile error too.
 
 > [!NOTE]
 > Containers that hide their item type — `std.HashMapUnmanaged`,
@@ -457,8 +463,8 @@ field that exists at run time cannot hold one.
 ## Names and transforms
 
 > [!NOTE]
-> Names and transforms are on the `dev` branch until the next release: v0.6.0
-> does not have them.
+> Names and transforms are on the `dev` branch until the next release: the
+> latest release, v0.6.0, does not have them.
 
 Values that come from outside are rarely clean. People type their email as
 `" Ann@Example.COM "`, with spaces around it, and tag a post `" Zig "`, `zig`
@@ -476,8 +482,9 @@ Both describe a field, like its rules, so they go into the same entry of
 ```
 
 1. **The outside name**, `v.rename("userName")`: what the field is called
-   outside the program, in JSON both ways and in the paths of violations. At
-   most one, and always first.
+   outside the program. Violations use it in their paths by themselves; JSON
+   keys use it only when your codec asks `v.fieldNamed` and `v.nameOf`
+   (`std.json` does not). At most one, and always first.
 2. **Transforms**, such as `v.trim` and `v.toLower`: they bring the value to
    its normal form. They never reject it.
 3. **Rules**, as in [Declaring rules](#declaring-rules): they check the value
@@ -486,13 +493,29 @@ Both describe a field, like its rules, so they go into the same entry of
 Each part is optional: `.id = v.rename("ID")` and `.email = v.trim` are whole
 entries.
 
-The validator itself reads no JSON. A decoder fills the struct, finding each
-field by its outside name; `v.transform` runs the transforms; `v.checkAll` runs
-the rules on the result; and only then does your code get the value:
+> [!IMPORTANT]
+> The validator itself uses the outside name only in the paths of violations.
+> A JSON key takes it only when a codec asks for it with `v.fieldNamed` and
+> `v.nameOf`: `std.json` does not know it, so `std.json.parseFromSlice` still
+> looks for `user_name`. Transforms run only where `v.transform` is called.
+> No zefir module does either yet: your own codec and handler do, or
+> zefir-http's when it comes.
+
+What this means for your code:
+
+- **Transforms and rules** work on any struct, however it was filled: decode
+  with `std.json` as usual, then call `v.transform` and `v.checkAll`.
+- **Outside names** reach JSON only through a codec that asks the validator
+  for them:
+  [Reading and writing JSON by outside names](#reading-and-writing-json-by-outside-names)
+  shows one in 20 lines.
+
+With such a codec, a request goes through these steps, and only then does your
+code get the value:
 
 ```mermaid
 flowchart LR
-    json["JSON from outside<br/>userName: ' Ann '"] --> decode["a decoder finds each field<br/>by its outside name"]
+    json["JSON from outside<br/>userName: ' Ann '"] --> decode["your codec finds each field<br/>by its outside name (v.fieldNamed)"]
     decode --> transform["v.transform<br/>user_name: ' Ann ' → 'Ann'"]
     transform --> check{"v.checkAll"}
     check -->|"valid"| code(["your code"])
@@ -544,6 +567,8 @@ const Speaker = struct {
     phone: ?[]const u8 = null,
 
     // Per field, in this order: the outside name, the transforms, the rules.
+    // One-word names are the same in camelCase: email, country and phone need
+    // no v.rename.
     pub const field_rules = .{
         .display_name = .{ v.rename("displayName"), v.trim, v.notBlank, v.maxLength(60) },
         .email = .{ v.trim, v.toLower, v.email },
@@ -576,8 +601,15 @@ pub fn main(init: std.process.Init) !void {
     });
     defer logger.deinit();
 
-    // A proposal as a decoder read it from the form: found by the outside
-    // names (durationMinutes, displayName), with the values as people typed them.
+    // The form sent this JSON, with the outside names and the values as people
+    // typed them:
+    //   {"title": "  Comptime for the rest of us ", "durationMinutes": 30,
+    //    "tags": [" Zig ", "comptime", "ZIG"],
+    //    "speakers": [{"displayName": " Ada Lovelace", "email": " Ada@Example.COM ",
+    //                  "country": "gb", "phone": "+44 (20) 7946-0958"},
+    //                 {"displayName": " \t", "email": "grace@example.org", "country": "US "}]}
+    // A codec that finds the fields by their outside names, at every level,
+    // turns it into this value:
     var proposal: TalkProposal = .{
         .title = "  Comptime for the rest of us ",
         .duration_minutes = 30,
@@ -587,9 +619,12 @@ pub fn main(init: std.process.Init) !void {
             .{ .display_name = " \t", .email = "grace@example.org", .country = "US " },
         },
     };
-    const before = proposal; // the strings and lists it points to stay as they are
+    // A shallow copy: it shares the strings and lists, and v.transform never
+    // writes into them, so `before` keeps the raw values.
+    const before = proposal;
 
-    // What the transforms allocate lives in an arena, freed with the request.
+    // One arena for this proposal (in a server: one per request): the
+    // transforms allocate from it, and arena.deinit() frees it all at once.
     var arena: std.heap.ArenaAllocator = .init(init.gpa);
     defer arena.deinit();
     try v.transform(arena.allocator(), &proposal); // 1. the transforms
@@ -645,30 +680,44 @@ $ zig build run
 `v.checkAll` run the rules and never transform. So a handler calls them in
 this order:
 
-1. decode the request, finding the fields by their outside names;
+1. decode the request: with `std.json`, or with a codec that finds the fields
+   by their outside names;
 2. `try v.transform(arena.allocator(), &request)`: the transforms;
 3. `v.check` or `v.checkAll`: the rules, on the normalized value;
 4. your code.
 
-Skip step 2, and the rules check the raw values: `" Ada@Example.COM "` fails
-`v.email` because of its spaces, and `" Zig "` and `"ZIG"` pass
-`v.uniqueItems` as two different tags.
+They are two calls because they need different things: `v.check` allocates
+nothing and reads a `*const` value; `v.transform` changes the value and may
+allocate. Nothing reminds you of step 2: without it the program compiles, and
+the rules check the raw values.
 
-The order inside an entry is fixed for the same reason: name, transforms,
-rules. A transform after a rule is a compile error, so an entry reads the way
-it runs: `.email = .{ v.trim, v.toLower, v.email }` trims, lowercases, then
-checks.
+Inside an entry the order is fixed: name, transforms, rules; a transform after
+a rule is a compile error. But the two calls are two passes over the whole
+value: `v.transform` runs every transform first, those inside `v.each`
+included, and only then `v.checkAll` runs the rules. So in
+`.tags = .{ v.maxItems(5), v.uniqueItems, v.each(.{ v.trim, v.toLower, v.notEmpty }) }`,
+`v.uniqueItems` already sees trimmed, lowercased tags, although `v.each(...)`
+is written after it. A list's own `v.transformWith` also gets its items
+already transformed, wherever it is written.
+
+| Pass | What runs on `tags` | `tags` |
+| --- | --- | --- |
+| 1. `v.transform` | `v.trim` and `v.toLower` of every item | `[" Zig ", "comptime", "ZIG"]` becomes `["zig", "comptime", "zig"]` |
+| 2. `v.checkAll` | `v.maxItems(5)`, then `v.uniqueItems`; the items' `v.notEmpty` only when both pass | `validation.unique_items` |
 
 ### v.rename
 
 `v.rename("displayName")` gives a field the name it has outside the program.
 
-- **Both ways.** A decoder finds the field by this name, an encoder writes it,
-  and the paths of violations use it: `displayName`, `speakers[1].displayName`.
-  A field without `v.rename` is called outside as it is in Zig.
+- **Where it is used.** The paths of violations use it by themselves:
+  `displayName`, `speakers[1].displayName`. A codec that asks `v.fieldNamed`
+  and `v.nameOf` reads and writes JSON keys by it
+  ([below](#reading-and-writing-json-by-outside-names)); `std.json` alone
+  keeps the Zig names. A field without `v.rename` is called outside as it is
+  in Zig.
 - **The name** is 1 to 64 characters from `A-Z`, `a-z`, `0-9`, `_` and `-`,
   so that it fits a JSON key and a query parameter alike.
-- **The outside names of a struct differ**, renamed or not: a decoder could
+- **The outside names of a struct differ**, renamed or not: a codec could
   not tell two fields of one name apart. `.user_name = v.rename("login")` in a
   struct that also has a field `login` is a compile error.
 - **Any field type** takes a name: strings, numbers, enums, nested structs,
@@ -682,160 +731,17 @@ checks.
 before, and the walk reports the violation at the field's outside name:
 `speakers[1].displayName`. The `field` of the violation that `v.fail` itself
 returns holds the Zig name; `v.check` and `v.checkAll` turn it into the path.
+A violation built by hand names the field the same way, by its Zig name
+(`.field = "display_name"`); its outside name there is a malformed result: a
+panic in Debug, `validation.invalid` in the other modes.
 
 </details>
 
-### The built-in transforms
+### Reading and writing JSON by outside names
 
-| Transform | What it does | Before | After | Allocates |
-| --- | --- | --- | --- | --- |
-| `v.trim` | strips white space from both ends | `"  Ada Lovelace\t"` | `"Ada Lovelace"` | never: the result is a part of the same string |
-| `v.trimStart` | strips white space from the start | `"  Ada "` | `"Ada "` | never |
-| `v.trimEnd` | strips white space from the end | `"  Ada "` | `"  Ada"` | never |
-| `v.toLower` | turns the ASCII letters `A-Z` into `a-z` | `"Ada@Example.COM"` | `"ada@example.com"` | a new string, only when some letter changes |
-| `v.toUpper` | turns the ASCII letters `a-z` into `A-Z` | `"gb"` | `"GB"` | as `v.toLower` |
-
-- **They take strings**: a `[]const u8` field, or a `?[]const u8` one, where
-  they run when the value is there. On a list of strings they go inside
-  `v.each`. Any other type is a compile error, `[:0]const u8` and `[]u8`
-  included: a transform returns a new `[]const u8`.
-- **White space** is what `v.notBlank` treats as blank: the 25 code points of
-  Unicode White_Space. Besides the space, the tab and the line breaks, they
-  include the no-break space U+00A0 that comes with text copied from a web
-  page, and the ideographic space U+3000 of Chinese and Japanese input.
-- A string of white space alone becomes `""`, which `v.notBlank` and
-  `v.notEmpty` then reject.
-- **Case changes only for the ASCII Latin letters** in this version, since
-  std has no Unicode case tables: `v.toLower` turns `"ÄRGER"` into `"Ärger"`,
-  and `v.toUpper` turns `"straße"` into `"STRAßE"`. That is all that emails,
-  country codes and currency codes need. For other text, write the function
-  yourself with `v.transformWith`.
-
-<details>
-<summary>The 25 code points, and strings that are not UTF-8</summary>
-
-- White space: TAB, LF, VT, FF, CR, space, U+0085, U+00A0, U+1680,
-  U+2000-200A, U+2028, U+2029, U+202F, U+205F and U+3000, the list of
-  [v.notBlank](strings.md#vnotblank).
-- Format characters and fillers are content and stay, as for `v.notBlank`:
-  U+200B, U+FEFF, U+2060, U+180E, U+3164.
-- A string that is not valid UTF-8 is not trimmed: it stays as it is, and the
-  rule after the transform, `v.utf8` or any rule that reads code points,
-  rejects it. `v.toLower` and `v.toUpper` change the ASCII bytes of such a
-  string and leave the other bytes alone.
-
-</details>
-
-### v.transformWith
-
-`v.transformWith(f)` runs a function of your own. `f` takes the allocator and
-the value and returns the new value:
-
-```zig
-fn (allocator: std.mem.Allocator, value: T) E!T // or, when it cannot fail:
-fn (allocator: std.mem.Allocator, value: T) T
-```
-
-`T` is exactly the field type without `?`, and inside `v.each` the item type
-without `?`. Any type works, not only strings: on a `u32` field,
-`fn (std.mem.Allocator, u32) u32`.
-
-The example's `normalizePhone` drops the separators of a phone number:
-`"+44 (20) 7946-0958"` becomes `"+442079460958"`. It shows the three habits of
-a good transform:
-
-- **Return the value itself when nothing changes.** Nothing is allocated, and
-  a list whose items stay the same is not copied.
-- **Allocate from `allocator`**, the one given to `v.transform`, and never free
-  the value you got: it belongs to the decoder.
-- **Do not judge the value.** When a value cannot be normalized, return it as
-  it is, and let a rule after the transform report it with a code and a path:
-  `normalizePhone` keeps letters, and its `v.custom` rule rejects them as
-  `talks.phone_e164`.
-
-An error that `f` returns stops `v.transform` and comes out of it as it is.
-Keep errors for failures of the transform itself, such as `error.OutOfMemory`:
-no rule runs, and the request fails as a whole, without violations.
-`v.TransformError(T)`, the error set of `v.transform` on a `*T`, is exact:
-`error.OutOfMemory` and the errors of every `v.transformWith` function that
-the walk reaches from `T`. For `TalkProposal` it is `error{OutOfMemory}`; a
-function that returns `error{TagTooLong}![]const u8` would add `TagTooLong`.
-
-<details>
-<summary>After an error, and what f may do</summary>
-
-- After an error the value may be partly transformed: some fields changed,
-  others not yet. Do not use it; free the arena.
-- Keep `f` pure, like a `v.custom` function: no I/O, no global state, the same
-  result for the same value. It may allocate from `allocator`.
-- A generic function, a pointer to a function or any other shape is a compile
-  error that shows the type it got and the signature to write.
-
-</details>
-
-### Lists, optionals and nested structs
-
-`v.transform` walks a value the way `v.checkAll` does: the fields of nested
-structs, the value inside an optional, the items of slices and arrays. A
-struct's own `field_rules` apply wherever it appears, as `Speaker`'s apply to
-every speaker.
-
-- **Items.** `v.each` takes transforms too, before its rules:
-  `v.each(.{ v.trim, v.toLower, v.notEmpty })` normalizes every item, then
-  checks it. Transforms alone make an entry too: `v.each(v.trim)`.
-- **Optionals.** `null` skips the transforms along with the rules; a value is
-  transformed like a `T`. `null` items of a list are skipped.
-- **Order.** The parts of a value come first, then its own transforms, left
-  to right: the items of a list before the transforms of the list, the fields
-  of a struct before the transforms of the field that holds it. Fields go in
-  declaration order. So a `v.transformWith` on a whole list, one that sorts
-  the tags for example, gets them already trimmed.
-- **Lists are copied, never written to.** A slice may be shared, or live in
-  read-only memory, like the `&.{ ... }` literals of the example. When an item
-  changes, `v.transform` copies the slice into the allocator, once, at the
-  first item that changes, and puts the copy in the field; a list whose items
-  all stay as they are is not copied. Arrays, `[N]T`, and the fields of
-  structs change in place.
-
-### Memory
-
-`v.transform` frees nothing. The strings and lists that it replaces belong to
-whoever made them, the decoder or your program, and the ones it makes are what
-the value now points to. So give it an arena that lives as long as the value,
-usually the arena of the request, and free everything at once when the request
-is done:
-
-| What | Allocates |
-| --- | --- |
-| `v.trim`, `v.trimStart`, `v.trimEnd` | never: the result is a part of the same string |
-| `v.toLower`, `v.toUpper` | one new string, only when some letter changes |
-| `v.transformWith(f)` | what `f` takes from the allocator |
-| a slice with a changed item | one copy of the slice, made at the first changed item |
-| a type without transforms | nothing: `v.transform` does not even read the value |
-
-- **Who frees:** the owner of the arena, with `defer arena.deinit()`. After
-  that, the value points into freed memory: copy out whatever must live longer.
-- **The decoder's arena is the natural choice.** The decoded strings, the
-  transformed ones and the copied lists then live and die together.
-- **A DTO without transforms costs nothing**, so code that reads or writes
-  many types can call `v.transform` on each of them without asking whether
-  the type has transforms.
-- **`v.checkAll` keeps its own memory**: its `Report` comes from the allocator
-  you give it, the `gpa` of the example, until `report.deinit()`.
-
-<details>
-<summary>Threads</summary>
-
-`v.transform` writes the value: no other thread may read or check it during
-the call. Values that share nothing can be transformed on several threads at
-once, each with its own arena.
-
-</details>
-
-### Names for codecs: v.nameOf and v.fieldNamed
-
-A codec, the code that reads a struct from JSON, a query string or a form and
-writes it back, takes the outside names from the validator:
+`v.rename` reaches JSON only through a codec: the code that reads a struct
+from JSON, a query string or a form and writes it back. The codec takes the
+outside names from the validator with `v.nameOf` and `v.fieldNamed`:
 
 ```zig
 pub fn nameOf(comptime T: type, comptime field: std.meta.FieldEnum(T)) []const u8
@@ -850,11 +756,14 @@ pub fn fieldNamed(comptime T: type, name: []const u8) ?std.meta.FieldEnum(T)
   from a table built at compile time. A renamed field is found by its outside
   name only, never by its Zig name.
 
-`std.json` knows nothing of `v.rename`: `std.json.parseFromSlice` reads Zig
-names, so it would look for `tracking_number`. A codec of your own bridges the
-two. This test shows a small one: `decode` puts each key under the Zig name of
-its field and lets std.json fill the struct, `encode` writes the outside names,
-and in between the event goes through `v.transform` and `v.check`:
+This test shows a small codec of your own:
+
+- **`std.json` knows nothing of `v.rename`**: `std.json.parseFromSlice` reads
+  Zig names, so on its own it would look for `tracking_number`.
+- **`decode`** puts each key under the Zig name of its field, found with
+  `v.fieldNamed`, and lets std.json fill the struct.
+- **`encode`** writes the outside names, from `v.nameOf`.
+- In between, the event goes through `v.transform` and `v.check`.
 
 ```zig
 const std = @import("std");
@@ -934,14 +843,235 @@ test "a renamed field is found by its outside name only" {
 }
 ```
 
-`decode` reads one level, which is enough for a flat event; a codec for nested
-structs and lists asks the same two questions at every level.
+`decode` reads one level, which is enough for a flat event. It is not enough
+for `TalkProposal`: the objects of `speakers` keep `displayName`, and std.json
+rejects that key as an unknown field (`error.UnknownField`). A codec for
+nested DTOs rewrites the keys of every struct it meets, through optionals and
+lists, asking the same two questions at every level.
 
 <details>
 <summary>Comptime fields</summary>
 
 A comptime field is never read from outside: `v.fieldNamed` does not find it,
 and it may share its name with another field. `v.nameOf` gives its Zig name.
+
+</details>
+
+### The built-in transforms
+
+| Transform | What it does | Before | After |
+| --- | --- | --- | --- |
+| `v.trim` | strips white space from both ends | `"  Ada Lovelace\t"` | `"Ada Lovelace"` |
+| `v.trimStart` | strips white space from the start | `"  Ada "` | `"Ada "` |
+| `v.trimEnd` | strips white space from the end | `"  Ada "` | `"  Ada"` |
+| `v.toLower` | turns the ASCII letters `A-Z` into `a-z` | `"Ada@Example.COM"` | `"ada@example.com"` |
+| `v.toUpper` | turns the ASCII letters `a-z` into `A-Z` | `"gb"` | `"GB"` |
+
+What each of them allocates is in [Memory](#memory).
+
+- **They take strings**: a `[]const u8` field, or a `?[]const u8` one, where
+  they run when the value is there. On a list of strings they go inside
+  `v.each`. Any other type is a compile error, `[:0]const u8` and `[]u8`
+  included: a transform returns a new `[]const u8`.
+- **White space** is what `v.notBlank` treats as blank: the 25 code points of
+  Unicode White_Space. Besides the space, the tab and the line breaks, they
+  include the no-break space U+00A0 that comes with text copied from a web
+  page, and the ideographic space U+3000 of Chinese and Japanese input.
+- A string of white space alone becomes `""`, which `v.notBlank` and
+  `v.notEmpty` then reject.
+- **Case changes only for the ASCII Latin letters** in this version, since
+  std has no Unicode case tables: `v.toLower` turns `"ÄRGER"` into `"Ärger"`,
+  and `v.toUpper` turns `"straße"` into `"STRAßE"`. That is all that emails,
+  country codes and currency codes need. For other text, write the function
+  yourself with `v.transformWith`.
+
+<details>
+<summary>The 25 code points, and strings that are not UTF-8</summary>
+
+- White space: TAB, LF, VT, FF, CR, space, U+0085, U+00A0, U+1680,
+  U+2000-200A, U+2028, U+2029, U+202F, U+205F and U+3000, the list of
+  [v.notBlank](strings.md#vnotblank).
+- Format characters and fillers are content and stay, as for `v.notBlank`:
+  U+200B, U+FEFF, U+2060, U+180E, U+3164.
+- A string that is not valid UTF-8 is not trimmed: it stays as it is, and the
+  rule after the transform, `v.utf8` or any rule that reads code points,
+  rejects it. `v.toLower` and `v.toUpper` change the ASCII bytes of such a
+  string and leave the other bytes alone.
+
+</details>
+
+### v.transformWith
+
+`v.transformWith(f)` runs a function of your own. `f` takes the allocator and
+the value and returns the new value:
+
+```zig
+fn (allocator: std.mem.Allocator, value: T) E!T // or, when it cannot fail:
+fn (allocator: std.mem.Allocator, value: T) T
+```
+
+`T` is exactly the field type without `?`, and inside `v.each` the item type
+without `?`. Any type works, not only strings: on a `u32` field,
+`fn (std.mem.Allocator, u32) u32`.
+
+The example's `normalizePhone` drops the separators of a phone number:
+`"+44 (20) 7946-0958"` becomes `"+442079460958"`. It shows the four habits of
+a good transform:
+
+- **Return the value itself when nothing changes.** Nothing is allocated, and
+  a list whose items stay the same is not copied.
+- **Allocate from `allocator`**, the one given to `v.transform`, and never free
+  the value you got: it belongs to the decoder.
+- **Never write into the value you got**: copy it into `allocator` and change
+  the copy.
+- **Do not judge the value.** When a value cannot be normalized, return it as
+  it is, and let a rule after the transform report it with a code and a path:
+  `normalizePhone` keeps letters, and its `v.custom` rule rejects them as
+  `talks.phone_e164`.
+
+A transform of a whole list follows the same habits. This one sorts the tags,
+which `v.each` has already trimmed and lowercased when it runs:
+
+```zig
+fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+    return std.mem.lessThan(u8, a, b);
+}
+
+fn sortTags(allocator: std.mem.Allocator, tags: []const []const u8) std.mem.Allocator.Error![]const []const u8 {
+    if (std.sort.isSorted([]const u8, tags, {}, lessThan)) return tags; // nothing to change
+    const copy = try allocator.dupe([]const u8, tags); // the list you got may be read-only, like a literal
+    std.mem.sort([]const u8, copy, {}, lessThan);
+    return copy;
+}
+
+// .tags = .{ v.transformWith(sortTags), v.maxItems(5), v.each(.{ v.trim, v.toLower }) },
+```
+
+When `f` fails:
+
+- An error that `f` returns stops `v.transform` and comes out of it as it is;
+  no rule runs, and the request fails as a whole, without violations.
+- Return errors only for failures of the transform itself: `error.OutOfMemory`,
+  or `error.Overflow` from `std.math.mul` in a transform that turns euros into
+  cents.
+- `v.TransformError(T)`, the error set of `v.transform` on a `*T`, is exact:
+  `error.OutOfMemory` and the errors of every `v.transformWith` function that
+  the walk reaches from `T`. For `TalkProposal` it is `error{OutOfMemory}`;
+  `fn toCents(_: std.mem.Allocator, euros: u32) error{Overflow}!u32` would add
+  `Overflow`.
+
+The handler decides what each error means:
+
+```zig
+v.transform(arena.allocator(), &order) catch |err| switch (err) {
+    error.OutOfMemory => return error.OutOfMemory, // the server's failure
+    error.Overflow => return error.AmountTooLarge, // an amount that does not fit in cents
+};
+```
+
+<details>
+<summary>After an error, and what f may do</summary>
+
+- After an error the value may be partly transformed: some fields changed,
+  others not yet. Do not use it; free the arena.
+- For a union, a vector or another type that the walk cannot compare
+  cheaply, a list is copied whenever `f` runs on its items, even when `f`
+  returns the value itself.
+- Keep `f` pure, like a `v.custom` function: no I/O, no global state, the same
+  result for the same value. It may allocate from `allocator`.
+- A generic function, a pointer to a function or any other shape is a compile
+  error that shows the type it got and the signature to write.
+
+</details>
+
+### Lists, optionals and nested structs
+
+`v.transform` walks a value the way `v.checkAll` does: the fields of nested
+structs, the value inside an optional, the items of slices and arrays. A
+struct's own `field_rules` apply wherever it appears, as `Speaker`'s apply to
+every speaker.
+
+- **Items.** `v.each` takes transforms too, before its rules:
+  `v.each(.{ v.trim, v.toLower, v.notEmpty })` normalizes every item, then
+  checks it. Transforms alone make an entry too: `v.each(v.trim)`.
+- **Optionals.** `null` skips the transforms along with the rules; a value is
+  transformed like a `T`. `null` items of a list are skipped.
+- **Order.** The parts of a value come first, then its own transforms, left
+  to right: the items of a list before the transforms of the list, the fields
+  of a struct before the transforms of the field that holds it. Fields go in
+  declaration order. So a `v.transformWith` on a whole list, one that sorts
+  the tags for example, gets them already trimmed.
+- **Lists are copied, never written to**: a slice may be shared, or live in
+  read-only memory, like the `&.{ ... }` literals of the example. Arrays,
+  `[N]T`, and the fields of structs change in place. [Memory](#memory) says
+  when a list is copied.
+
+### Memory
+
+`v.transform` frees nothing, so give it an arena that lives as long as the
+value. Who owns what:
+
+- **The old strings and lists** stay with whoever made them, the decoder or
+  your program: `v.transform` never writes into them or frees them.
+- **The new ones** live in the arena, and the value points to them now.
+- **`arena.deinit()`** frees the new ones all at once, when the request is
+  done. After that the value points into freed memory: copy out whatever must
+  live longer.
+
+| What | Allocates |
+| --- | --- |
+| `v.trim`, `v.trimStart`, `v.trimEnd` | never: the result is a part of the same string |
+| `v.toLower`, `v.toUpper` | one new string, only when some letter changes |
+| `v.transformWith(f)` | what `f` takes from the allocator |
+| a slice with a changed item | one copy of the slice, made once, at the first changed item, and put in the field |
+| a slice whose items all stay as they are | nothing: the field keeps the same slice |
+| a type without transforms | nothing: `v.transform` does not even read the value |
+
+- **A DTO without transforms costs nothing**: `v.transform` does not even read
+  it. So a generic handler can call `v.transform` on every request type,
+  whether it has transforms or not.
+- **`v.checkAll` keeps its own memory**: its `Report` comes from the allocator
+  you give it, the `gpa` of the example, until `report.deinit()`.
+
+**Where the arena comes from.** Make one for the value, as the example does,
+or use the arena that decoded it, the natural choice: the decoded strings, the
+transformed ones and the copied lists then live and die together.
+`std.json.parseFromSlice` returns a `std.json.Parsed(T)` whose arena holds the
+decoded strings; keep it in a `var`, since `v.transform` changes
+`parsed.value`:
+
+```zig
+var parsed = try std.json.parseFromSlice(Post, gpa, body, .{}); // var: v.transform changes parsed.value
+defer parsed.deinit(); // frees the decoded strings and what v.transform made
+try v.transform(parsed.arena.allocator(), &parsed.value);
+```
+
+**If you allocated the value yourself**, keep your own slice in a variable and
+free that one: after `v.transform` a field of the value may point into the
+arena, so never free a field with `gpa`:
+
+```zig
+const tags = try gpa.dupe([]const u8, raw_tags);
+defer gpa.free(tags); // the original: v.transform never writes or frees it
+var post: Post = .{ .tags = tags };
+try v.transform(arena.allocator(), &post); // post.tags may now point into the arena
+```
+
+<details>
+<summary>Why not gpa</summary>
+
+`v.transform` does not tell which strings and lists it made, so with `gpa`
+you could not tell which fields to free: the new strings and lists would leak.
+An arena frees them all with one `deinit`.
+
+</details>
+
+<details>
+<summary>Threads</summary>
+
+`v.transform` writes the value: no other thread may read or check it during
+the call. Values that share nothing can be transformed on several threads at
+once, each with its own arena.
 
 </details>
 
@@ -962,7 +1092,8 @@ mistake, and a program calls `v.transform` on each:
 ```
 
 The build stops at the first mistake (paths and line numbers shortened, the
-library's lines of source left out):
+library's lines of source and the `referenced by:` list after the notes left
+out):
 
 ```text
 …/validator/walk.zig:…: error: validator: talks.Speaker.field_rules.email: email is a rule; transforms (trim) must come before the rules
@@ -982,12 +1113,15 @@ Fix it, and the next two builds stop at the other two:
 …/validator/walk.zig:…: error: validator: talks.Reviewer.field_rules: display_name and login are both named "displayName" outside
 ```
 
-The text says where the mistake is: the type, `field_rules` and the field.
-Zig points into the library, and its last note, `generic function instantiated
-here`, is your call of `v.transform`. A `v.check`, a `v.checkAll` or a
-`comptime v.assertRules(T)` that reaches the type reports the same mistake. As
-in the errors of rules, a transform is named by its label: `trim`,
-`trim_start`, `to_lower`, `transform_with(...)`.
+How to read them:
+
+- **Where the mistake is**: the text names the type, `field_rules` and the
+  field. A `v.check`, a `v.checkAll` or a `comptime v.assertRules(T)` that
+  reaches the type reports the same mistake.
+- **Where your call is**: Zig points into the library, and its last note,
+  `generic function instantiated here`, is your call of `v.transform`.
+- **How transforms are named**: by their labels, as rules are in their
+  errors: `trim`, `trim_start`, `to_lower`, `transform_with(...)`.
 
 | You wrote | The error ends with |
 | --- | --- |
@@ -1002,6 +1136,7 @@ in the errors of rules, a transform is named by its label: `trim`,
 | `v.rename("display name")` | `rename("display name"): an outside name is 1 to 64 characters from A-Z, a-z, 0-9, '_' and '-'` |
 | `.id = v.rename`, without the call | `rename must be called, e.g. v.rename("userName")` |
 | `.phone = v.transformWith`, without the call | `transformWith must be called, e.g. v.transformWith(normalizePhone)` |
+| `.phone = .{ v.trim, normalizePhone }`: a function of your own without `v.transformWith` | `item 1 of the tuple is fn (mem.Allocator, []const u8) error{OutOfMemory}![]const u8; wrap a transform function in v.transformWith(f)` |
 | `v.transformWith(f)` with `fn ([]const u8) []const u8` | `transform_with(...) is fn ([]const u8) []const u8; write fn (allocator: std.mem.Allocator, value: []const u8) E![]const u8` |
 | `.phones = v.transformWith(normalizePhone)` on a list of strings | `...; write fn (allocator: std.mem.Allocator, value: []const []const u8) E![]const []const u8; use v.each(v.transformWith(...))` |
 | `v.transform(arena, &request)` on a `const request` | `transform changes the value: pass a pointer to a var (&value), got *const talks.TalkProposal` |
@@ -1524,7 +1659,9 @@ pub const Violation = struct {
   `items[2].name`, `[1].email` for a slice root. Fields appear by their
   outside names: `speakers[1].displayName` for a field renamed with
   `v.rename("displayName")`. `null` means the root value itself or, for `check`
-  only, a path that did not fit `path_buf`.
+  only, a path that did not fit `path_buf`. In the result of `v.fail` or a
+  hand-built `validateSelf` result, it is the Zig name of a field of that
+  struct instead (`display_name`), which the walk turns into the field's path.
 
 ### v.check
 
@@ -1710,6 +1847,19 @@ test "CreateUserRequest rejects an invalid email" {
   the loop: `inline for (.{ CreateUserRequest, User }) |Dto| comptime v.assertRules(Dto);`.
 - `assertRules` cannot see a private `field_rules` and does not run the rules.
   The second test, a value that must fail, catches both.
+- For a DTO with transforms, a test of a value runs `v.transform` before
+  `v.check`, as a handler does:
+
+  ```zig
+  test "SignUp accepts an email with spaces around it" {
+      var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+      defer arena.deinit();
+      var req: SignUp = .{ .email = " Ada@Example.COM " }; // .email = .{ v.trim, v.toLower, v.email }
+      try v.transform(arena.allocator(), &req);
+      var path_buf: [256]u8 = undefined;
+      try std.testing.expectEqual(null, v.check(&req, &path_buf));
+  }
+  ```
 
 ## Compile errors
 
@@ -1814,10 +1964,11 @@ The limits are `comptime_int` constants and part of the contract (see below).
   values that were stored or written into configuration before the fix: check
   such data with the new rule before you upgrade.
 - **Outside names and transforms** are part of the contract of a DTO with its
-  clients. Changing a `v.rename` renames the field in JSON and in the paths of
-  violations, which breaks the clients that use the old name; renaming the Zig
-  field and keeping its `v.rename` changes nothing outside. What a built-in
-  transform does is a contract like the behaviour of a rule.
+  clients. Changing a `v.rename` renames the field in the paths of violations,
+  and in the JSON of codecs that use `v.nameOf` and `v.fieldNamed`, which
+  breaks the clients that use the old name; renaming the Zig field and keeping
+  its `v.rename` changes nothing outside. What a built-in transform does is a
+  contract like the behaviour of a rule.
 - Compile error texts and hints are not part of the contract; a release may
   improve them as long as the same declarations still compile, or still fail.
 - **One copy of zefir.** The packages that share DTOs — the DTO package, API
