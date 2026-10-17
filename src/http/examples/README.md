@@ -1286,7 +1286,7 @@ outside name:
 
 ```text
 $ curl -i localhost:8080/api/v1/todos -H "Authorization: Bearer ann-secret" --json '{"titel":"Buy bread","priority":"urgent"}'
-HTTP/1.1 422 Unprocessable Entity
+HTTP/1.1 422 Unprocessable Content
 content-type: application/json
 x-request-id: 7288cd5e5684dbfd5651eb149e9e056d
 x-content-type-options: nosniff
@@ -1315,7 +1315,7 @@ Content-Length: 149
 {"items":[{"id":2,"title":"Call Bob","done":false,"priority":"high","dueDate":"2026-10-20","tags":["phone","home"]}],"page":1,"perPage":20,"total":1}
 
 $ curl -i 'localhost:8080/api/v1/todos?perPage=500' -H "Authorization: Bearer ann-secret"
-HTTP/1.1 422 Unprocessable Entity
+HTTP/1.1 422 Unprocessable Content
 content-type: application/json
 x-request-id: 8c3072075a3522b51f809d6d3ac2f3fc
 x-content-type-options: nosniff

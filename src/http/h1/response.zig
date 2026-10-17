@@ -57,11 +57,19 @@ pub fn writeHead(
     try w.writeAll("\r\n");
 }
 
-/// The reason phrase of `status`; empty for a status std has no name for.
+/// The reason phrase of `status`, by the names of RFC 9110, as
+/// `http.defaultTitle` gives them; empty for a status std has no name for.
 pub fn reason(status: u16) []const u8 {
-    if (status > std.math.maxInt(u10)) return "";
-    const known: std.http.Status = @fromBackingInt(@intCast(status));
-    return known.phrase() orelse "";
+    return switch (status) {
+        // std names these two as RFC 7231 and RFC 4918 did.
+        413 => "Content Too Large",
+        422 => "Unprocessable Content",
+        else => {
+            if (status > std.math.maxInt(u10)) return "";
+            const known: std.http.Status = @fromBackingInt(@intCast(status));
+            return known.phrase() orelse "";
+        },
+    };
 }
 
 /// The longest chunk-size line: 16 hex digits and CRLF.
@@ -128,4 +136,7 @@ test "chunkHeader: the size in hex; the last chunk ends the body" {
     try testing.expectEqualStrings("0\r\n\r\n", last_chunk);
     try testing.expectEqualStrings("", reason(1024));
     try testing.expectEqualStrings("Request Header Fields Too Large", reason(431));
+    // The names of RFC 9110, which http.defaultTitle gives too.
+    try testing.expectEqualStrings("Content Too Large", reason(413));
+    try testing.expectEqualStrings("Unprocessable Content", reason(422));
 }
