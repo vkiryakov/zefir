@@ -1,6 +1,6 @@
 //! The code of zefir-http that runs on zio, in a package of its own: the
 //! probes of how zio behaves on each system, the end-to-end tests, the
-//! service of the guide, and later the benchmark.
+//! service of the guide and the benchmark.
 //!
 //!   zig build e2e        run the end-to-end tests: servers on http.native
 //!                        over loopback, on zio with one executor and with
@@ -13,7 +13,11 @@
 //!                        four: read and write timeouts, the socket watcher
 //!                        of a request, and the cost of the tasks of a
 //!                        request; they print what they measure
-//!   zig build check      build everything without running it
+//!   zig build bench      run the benchmark, built with ReleaseFast unless
+//!                        -Dbench-optimize says otherwise (CI's bench.yml,
+//!                        on Linux)
+//!   zig build check      build everything without running it, the
+//!                        benchmark in the mode of -Doptimize
 
 const std = @import("std");
 
@@ -130,10 +134,44 @@ pub fn build(b: *std.Build) void {
         step.dependOn(&run_guide.step);
     }
 
-    // Everything above built and nothing run.
-    const check_step = b.step("check", "Build the probes, the end-to-end tests and the examples without running them");
+    // The benchmark: `bench` runs it, built with ReleaseFast unless
+    // -Dbench-optimize says otherwise, with zefir and zio built in that
+    // mode too; it serves the files of the guide's service. Only CI runs it
+    // (bench.yml, on Linux).
+    const bench_optimize = b.option(std.lang.Optimize, "bench-optimize", "The mode of the benchmark (default: ReleaseFast)") orelse .fast;
+    const run_bench = b.addRunArtifact(addBench(b, target, bench_optimize));
+    run_bench.addDirectoryArg(zefir.path(examples_dir ++ "public"));
+    run_bench.stdio = .inherit;
+    run_bench.has_side_effects = true;
+    b.step("bench", "Run the benchmark of zefir-http (ReleaseFast unless -Dbench-optimize says otherwise)").dependOn(&run_bench.step);
+
+    // Everything above built and nothing run; the benchmark in the mode
+    // of -Doptimize.
+    const check_step = b.step("check", "Build the probes, the end-to-end tests, the examples and the benchmark without running them");
     check_step.dependOn(&probes.step);
     check_step.dependOn(&e2e.step);
     check_step.dependOn(&guide.step);
     check_step.dependOn(&service.step);
+    const checked_bench = addBench(b, target, optimize);
+    // Code generation too, not only analysis: the binary is asked for.
+    _ = checked_bench.getEmittedBin();
+    check_step.dependOn(&checked_bench.step);
+}
+
+/// The benchmark, with zefir and zio built in `mode` too.
+fn addBench(b: *std.Build, target: std.Build.ResolvedTarget, mode: std.lang.Optimize) *std.Build.Step.Compile {
+    const zefir = b.dependency("zefir", .{ .target = target, .optimize = mode });
+    const zio = b.dependency("zio", .{ .target = target, .optimize = mode });
+    return b.addExecutable(.{
+        .name = b.fmt("bench-{t}", .{mode}),
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/main.zig"),
+            .target = target,
+            .optimize = mode,
+            .imports = &.{
+                .{ .name = "http", .module = zefir.module("zefir-http") },
+                .{ .name = "zio", .module = zio.module("zio") },
+            },
+        }),
+    });
 }
