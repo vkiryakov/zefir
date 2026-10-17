@@ -89,9 +89,12 @@ pub fn serve(server: *Server, io: std.Io, exchange: *Exchange) void {
             .io = io,
             .operation = core.Context.root.withTrace(trace).withCancellation(&token),
             .arena = arena,
+            .gpa = server.gpa,
             .request_id = ids.newRequestId(io),
             .trace_id = trace.trace_id.toHex(),
             .max_body_bytes = server.settings.max_body_bytes,
+            .max_query_params = server.settings.max_query_params,
+            .unknown_fields = server.settings.unknown_fields,
         },
     };
     if (!takeSlot(server)) return respond(&ctx, exchange, error.Overloaded);
@@ -214,6 +217,7 @@ fn runRequest(server: *Server, ctx: *Context, found: Found) anyerror!void {
         .found => |f| {
             const route = &server.routes[f.route];
             ctx.internal.route = route.info;
+            ctx.internal.param_names = route.params;
             ctx.internal.params = f.params;
             ctx.internal.max_body_bytes = route.max_body_bytes orelse server.settings.max_body_bytes;
             return route.handle(route.controller, ctx);
@@ -241,7 +245,9 @@ fn respond(ctx: *Context, exchange: *Exchange, result: anyerror!void) void {
         if (err == error.ReadFailed) if (exchange.bodyFailure()) |failure| return answerBodyFailure(ctx, exchange, failure);
         if (errors.defaultStatus(err) == 500)
             log.warn("{s} failed with error.{t}; the response is 500 (request {s})", .{ routeName(ctx), err, ctx.requestId() });
-        setProblem(ctx, errors.DefaultErrors.problem(err));
+        var problem = errors.DefaultErrors.problem(err);
+        if (err == error.ValidationFailed) problem.errors = ctx.violations();
+        setProblem(ctx, problem);
     }
     send(ctx, exchange);
 }

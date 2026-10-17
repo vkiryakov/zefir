@@ -31,8 +31,10 @@
 //! leaves, the stop and the limit of requests at work), the backend in
 //! memory of `http.testing`, the network backend of `http.native`
 //! (connections, heads, request bodies, responses, keep-alive and the
-//! watcher), and `ctx.body()`; the rest of the API comes with the next
-//! commits.
+//! watcher), `ctx.body()`, the input from strings (`ctx.path`,
+//! `ctx.query`, `ctx.form`, `ctx.headers`, `ctx.cookies`: mapped by
+//! outside names, transformed and checked by the validator); the rest of
+//! the API comes with the next commits.
 
 const std = @import("std");
 const route_decls = @import("routes.zig");
@@ -49,6 +51,10 @@ pub const testing = @import("testing.zig");
 
 pub const Json = dto.Json;
 pub const UnknownFields = dto.UnknownFields;
+/// A violation of the input: a field of the wrong type, missing or unknown
+/// (`http.invalid_type`, `http.missing_field`, `http.unknown_field`), or a
+/// rule of the validator; the field under its outside name.
+pub const Violation = @import("validator").Violation;
 pub const RouteInfo = route_decls.RouteInfo;
 pub const TrustedProxies = Server.TrustedProxies;
 
@@ -86,6 +92,11 @@ test {
     _ = @import("errors.zig");
     _ = @import("ids.zig");
     _ = @import("Request.zig");
+    _ = @import("Context.zig");
+    _ = @import("input/strings.zig");
+    _ = @import("input/urlencoded.zig");
+    _ = @import("input/cookies.zig");
+    _ = @import("input/violations.zig");
     _ = @import("Response.zig");
     _ = @import("flow.zig");
     _ = @import("wait.zig");

@@ -48,6 +48,11 @@ pub const compile_errors = [_]Fixture{
     .{ .file = dir ++ "server_unknown_option.zig", .expect = "zefir.http: Server.init: unknown option .contollers" },
     .{ .file = dir ++ "server_unknown_nested_option.zig", .expect = "zefir.http: Server.init: UnknownFieldsOptions has no option .bdy" },
     .{ .file = dir ++ "server_trusted_proxies.zig", .expect = "zefir.http: Server.init: .trusted_proxies is .all, .private, .none or .{ .list = &.{\"10.1.0.0/16\"} }" },
+    // DTOs of the input.
+    .{ .file = dir ++ "header_dto_rename.zig", .expect = "zefir.http: header_dto_rename.Headers.field_rules.request_id: v.rename does not apply to headers; field request_id reads the header Request-Id" },
+    .{ .file = dir ++ "query_nested_struct.zig", .expect = "zefir.http: query_nested_struct.Query.filter: a struct field comes only from JSON; query, form, path, headers and cookies hold strings" },
+    .{ .file = dir ++ "dto_not_struct.zig", .expect = "zefir.http: ctx.query takes a struct, got u32" },
+    .{ .file = dir ++ "dto_bad_rule.zig", .expect = "validator: dto_bad_rule.IdPath.field_rules.id: max_length expects a string, field is u64" },
 };
 
 const dir = "src/http/tests/compile_errors/";
