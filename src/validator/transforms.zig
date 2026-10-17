@@ -8,7 +8,9 @@
 //!
 //! The built-in transforms take exactly `[]const u8` once the optionals are
 //! unwrapped (on a `?[]const u8` field they run when the value is there);
-//! for a list of strings they go inside `v.each`. They never fail.
+//! for a list of strings they go inside `v.each`. The trims never fail and
+//! never allocate; `toLower` and `toUpper` fail only with
+//! `error.OutOfMemory`, when a letter changes.
 const std = @import("std");
 const core = @import("core.zig");
 const strings = @import("strings.zig");

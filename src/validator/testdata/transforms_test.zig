@@ -112,6 +112,38 @@ test "an optional is transformed when the value is there" {
     try testing.expectEqual(null, absent.nickname);
 }
 
+const Optionals = struct {
+    names: []const ?[]const u8 = &.{},
+    labels: ?[]const []const u8 = null,
+    pub const field_rules = .{
+        .names = v.each(v.trim),
+        .labels = v.each(v.trim),
+    };
+};
+
+test "optional items and an optional list: a null stays, the rest is transformed into copies" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const names = [_]?[]const u8{ null, " a " };
+    const labels = [_][]const u8{ " b", "c" };
+    var value: Optionals = .{ .names = &names, .labels = &labels };
+    try v.transform(arena.allocator(), &value);
+    try testing.expect(value.names.ptr != @as([*]const ?[]const u8, &names));
+    try testing.expectEqual(2, value.names.len);
+    try testing.expectEqual(null, value.names[0]);
+    try testing.expectEqualStrings("a", value.names[1] orelse return error.TestUnexpectedNull);
+    try testing.expectEqualStrings(" a ", names[1] orelse return error.TestUnexpectedNull);
+    const got = value.labels orelse return error.TestUnexpectedNull;
+    try testing.expect(got.ptr != @as([*]const []const u8, &labels));
+    try testing.expectEqual(2, got.len);
+    try testing.expectEqualStrings("b", got[0]);
+    try testing.expectEqualStrings(" b", labels[0]);
+    // A null list stays null, and nothing is allocated.
+    var none: Optionals = .{};
+    try v.transform(testing.failing_allocator, &none);
+    try testing.expectEqual(null, none.labels);
+}
+
 test "a slice is never written to: the first item that changes brings one copy" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
@@ -203,6 +235,24 @@ test "nested structs change in place, an optional one when it is there" {
     try testing.expectEqualStrings("c", team.members[1].name);
 }
 
+/// No field_rules of its own: the walk goes through it to the transforms
+/// below it.
+const Pair = struct {
+    people: [2]Person,
+    team: ?Team = null,
+};
+
+test "a struct without field_rules and an array of structs on the way to the transforms" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var pair: Pair = .{ .people = .{ .{ .name = " a " }, .{ .name = "b" } }, .team = .{ .lead = .{ .name = " c " } } };
+    try v.transform(arena.allocator(), &pair);
+    try testing.expectEqualStrings("a", pair.people[0].name);
+    try testing.expectEqualStrings("b", pair.people[1].name);
+    const team = pair.team orelse return error.TestUnexpectedNull;
+    try testing.expectEqualStrings("c", team.lead.name);
+}
+
 const Grid = struct {
     rows: []const []const []const u8,
     pub const field_rules = .{ .rows = v.each(v.each(v.trim)) };
@@ -279,10 +329,11 @@ const Tree = struct {
     first: Leaf = .{},
     list: []const Leaf = &.{},
     last: []const u8 = "",
+    // Keys in another order than the fields: the fields' order counts.
     pub const field_rules = .{
-        .first = v.transformWith(wholeLeaf),
-        .list = .{ v.transformWith(wholeList), v.each(v.transformWith(wholeLeaf)) },
         .last = v.transformWith(Logged("last").run),
+        .list = .{ v.transformWith(wholeList), v.each(v.transformWith(wholeLeaf)) },
+        .first = v.transformWith(wholeLeaf),
     };
 };
 
@@ -300,6 +351,27 @@ test "nested parts first, then the value's own transforms, left to right; fields
         "leaf.a 1", "leaf.a 2", "leaf.b",   "leaf", "leaf.a 1", "leaf.a 2",
         "leaf.b",   "leaf",     "list",     "last",
     });
+}
+
+/// A transform of a whole list that records the first item it got.
+fn firstItem(_: Allocator, list: []const []const u8) []const []const u8 {
+    record("list");
+    if (list.len > 0) record(list[0]);
+    return list;
+}
+
+const Labels = struct {
+    tags: []const []const u8,
+    pub const field_rules = .{ .tags = .{ v.transformWith(firstItem), v.each(v.trim) } };
+};
+
+test "the transform of a list gets its items already transformed" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var labels: Labels = .{ .tags = &.{ " a ", "b" } };
+    log_len = 0;
+    try v.transform(arena.allocator(), &labels);
+    try expectLog(&.{ "list", "a" });
 }
 
 // ------------------------------------------------------------------ errors and memory
@@ -379,6 +451,41 @@ test "TransformError is exactly OutOfMemory and the errors of the transformWith 
     try testing.expect(@typeInfo(@TypeOf(v.transform(testing.allocator, @as(*Tagged, undefined)))).error_union.error_set == v.TransformError(Tagged));
 }
 
+const Rows = struct {
+    rows: []const []const []const u8 = &.{},
+    pub const field_rules = .{ .rows = v.each(v.each(v.transformWith(shortTag))) };
+};
+
+/// No field_rules of its own.
+const Bundle = struct {
+    rows: Rows = .{},
+    tagged: ?Tagged = null,
+};
+
+test "TransformError reaches the functions of an each inside each and those below a struct without field_rules" {
+    try expectErrorNames(v.TransformError(Rows), &.{ "OutOfMemory", "TagTooLong" });
+    try expectErrorNames(v.TransformError(Bundle), &.{ "OutOfMemory", "TagTooLong" });
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const row = [_][]const u8{ "ok", "far too long" };
+    const rows = [_][]const []const u8{&row};
+    var bundle: Bundle = .{ .rows = .{ .rows = &rows } };
+    try testing.expectError(error.TagTooLong, v.transform(arena.allocator(), &bundle));
+}
+
+const LowerThenTrim = struct {
+    a: []const u8,
+    b: []const u8,
+    pub const field_rules = .{ .a = v.toLower, .b = v.trim };
+};
+
+test "error.OutOfMemory stops the walk: the fields after it stay as they were" {
+    var value: LowerThenTrim = .{ .a = "A", .b = " b " };
+    try testing.expectError(error.OutOfMemory, v.transform(testing.failing_allocator, &value));
+    try testing.expectEqualStrings("A", value.a);
+    try testing.expectEqualStrings(" b ", value.b);
+}
+
 /// A transform in an arena of `gpa`, for checkAllAllocationFailures.
 fn transformInArena(gpa: Allocator) !void {
     var arena: std.heap.ArenaAllocator = .init(gpa);
@@ -434,6 +541,12 @@ test "a root type without transforms is left alone: nothing is read, written or 
     var checked: Checked = .{ .name = " " };
     try v.transform(testing.failing_allocator, &checked);
     try testing.expectEqualStrings(" ", checked.name);
+    // A list of them at the root: the same slice.
+    const checked_items = [_]Checked{.{ .name = " " }};
+    var checked_list: []const Checked = &checked_items;
+    try v.transform(testing.failing_allocator, &checked_list);
+    try testing.expectEqual(@as([*]const Checked, &checked_items), checked_list.ptr);
+    try testing.expectEqualStrings(" ", checked_list[0].name);
 }
 
 test "a root behind an under-aligned or volatile pointer is transformed through a copy" {

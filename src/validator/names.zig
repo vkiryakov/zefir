@@ -1,8 +1,9 @@
 //! Outside names: `v.rename` gives a field the name it has outside the
-//! program, in JSON and in the paths of violations, and `v.nameOf` and
-//! `v.fieldNamed` read the names of a struct for the code that reads and
-//! writes its values, such as the JSON codec of zefir-rpc. A field without
-//! `v.rename` is called outside as it is in Zig.
+//! program. The validator itself uses it only in the paths of violations;
+//! `v.nameOf` and `v.fieldNamed` give the names of a struct to code that
+//! reads and writes its values by those names, such as a codec of your own.
+//! `std.json` does not know them: it reads and writes the Zig names. A field
+//! without `v.rename` is called outside as it is in Zig.
 const std = @import("std");
 const core = @import("core.zig");
 
@@ -11,12 +12,14 @@ const max_name_bytes = 64;
 
 /// The outside name of a field: the first element of its entry in
 /// `field_rules`, `.user_name = .{ v.rename("userName"), v.trim, v.notBlank }`.
-/// The field is called so in JSON, both ways, and in the paths of
-/// violations (`userName`, `items[2].userName`). A name is 1 to 64
-/// characters from `A-Z`, `a-z`, `0-9`, `_` and `-`, so that it fits a JSON
-/// key and a query parameter alike; the outside names of the fields of a
-/// struct must differ. List items have no name: it never goes inside
-/// `v.each`. A mistake is a compile error.
+/// The paths of violations call the field so (`userName`,
+/// `items[2].userName`), and `v.nameOf` and `v.fieldNamed` give the name to
+/// a codec that reads and writes values by it; `std.json` does not know it
+/// and keeps the Zig name. A name is 1 to 64 characters from `A-Z`, `a-z`,
+/// `0-9`, `_` and `-`, so that it fits a JSON key and a query parameter
+/// alike; the outside names of the fields of a struct must differ. List
+/// items have no name: it never goes inside `v.each`. A mistake is a
+/// compile error.
 pub fn rename(comptime name: []const u8) core.Rename {
     comptime {
         @setEvalBranchQuota(core.eval_quota);

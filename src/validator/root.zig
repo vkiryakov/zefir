@@ -34,10 +34,10 @@
 //! The entry of a field may also give it an outside name and transforms,
 //! in this order before its rules:
 //! `.user_name = .{ v.rename("userName"), v.trim, v.notBlank }`. The name is
-//! what JSON and the paths of violations call the field (`v.nameOf` and
-//! `v.fieldNamed` read it); `v.transform` runs the transforms (`v.trim`,
-//! `v.toLower`, `v.transformWith(f)`, ...), and then `v.check` checks the
-//! transformed value.
+//! what the paths of violations call the field; `v.nameOf` and
+//! `v.fieldNamed` give it to a codec. `v.transform` runs the transforms
+//! (`v.trim`, `v.toLower`, `v.transformWith(f)`, ...); call it before
+//! `v.check` so that the rules check the transformed value.
 
 const std = @import("std");
 const core = @import("core.zig");

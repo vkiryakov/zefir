@@ -150,14 +150,27 @@ test "a comptime field keeps its Zig name and is not found from outside" {
     try testing.expectEqual(.name, v.fieldNamed(Versioned, "fullName").?);
 }
 
-/// Names and transforms only: nothing for the check walk.
+/// Names and transforms only, those of list items too: nothing for the
+/// check walk.
 const NamesOnly = struct {
     user_name: []const u8,
     email: []const u8,
+    tags: []const []const u8 = &.{},
+    rows: []const []const []const u8 = &.{},
     pub const field_rules = .{
         .user_name = v.rename("userName"),
         .email = .{ v.rename("eMail"), v.trim },
+        .tags = v.each(v.trim),
+        .rows = .{ v.rename("grid"), v.each(v.each(v.trim)) },
     };
+};
+
+/// The fields of `NamesOnly` without `field_rules`.
+const NoRules = struct {
+    user_name: []const u8,
+    email: []const u8,
+    tags: []const []const u8 = &.{},
+    rows: []const []const []const u8 = &.{},
 };
 
 /// The allocations of a `checkAll` of `value` that finds nothing.
@@ -170,17 +183,63 @@ fn emptyReportAllocations(value: anytype) !usize {
 }
 
 test "a field with only a name or transforms has no rules: the check walk reports nothing and does not descend" {
-    try h.expectValid(&NamesOnly{ .user_name = "", .email = " " });
-    // A walk that visited the items would push their paths into the report's
-    // arena: it takes no more memory than for a list of numbers.
-    const many: [1000]NamesOnly = @splat(.{ .user_name = "", .email = "" });
+    const tags: []const []const u8 = &.{ " a ", "" };
+    const rows: []const []const []const u8 = &.{ tags, tags };
+    const one: NamesOnly = .{ .user_name = "", .email = " ", .tags = tags, .rows = rows };
+    try h.expectValid(&one);
+    // A walk that visited a field or an item would push its path into the
+    // report's arena: it takes no more memory than for the same fields
+    // without field_rules, or for a list of numbers.
+    try testing.expectEqual(try emptyReportAllocations(&NoRules{ .user_name = "", .email = " ", .tags = tags, .rows = rows }), try emptyReportAllocations(&one));
+    const many: [1000]NamesOnly = @splat(one);
     const list: []const NamesOnly = &many;
+    const plain_many: [1000]NoRules = @splat(.{ .user_name = "", .email = " ", .tags = tags, .rows = rows });
+    const plain_list: []const NoRules = &plain_many;
+    try testing.expectEqual(try emptyReportAllocations(&plain_list), try emptyReportAllocations(&list));
     const numbers: []const u32 = &.{ 1, 2, 3 };
     try testing.expectEqual(try emptyReportAllocations(&numbers), try emptyReportAllocations(&list));
     // A list whose items have rules is visited.
     const items: [1000]Item = @splat(.{ .display_name = "a" });
     const checked: []const Item = &items;
     try testing.expect(try emptyReportAllocations(&checked) > try emptyReportAllocations(&numbers));
+}
+
+const Grid = struct {
+    rows: []const []const []const u8,
+    pub const field_rules = .{ .rows = .{ v.maxItems(5000), v.each(v.each(v.trim)) } };
+};
+
+test "a list whose each holds transforms alone is checked by its own rules, and its items are not visited" {
+    const row: []const []const u8 = &.{ " a ", "b" };
+    const grid: Grid = .{ .rows = &.{ row, row, row } };
+    // check writes the path of every value it visits into path_buf: here
+    // only the field itself.
+    var path_buf: [32]u8 = @splat(0xaa);
+    try testing.expect(v.check(&grid, &path_buf) == null);
+    try testing.expectEqualStrings("rows", path_buf[0..4]);
+    try testing.expect(std.mem.allEqual(u8, path_buf[4..], 0xaa));
+}
+
+/// Outside names alone, for a codec: nothing for either walk.
+const Profile = struct {
+    display_name: []const u8,
+    pub const field_rules = .{ .display_name = v.rename("displayName") };
+};
+
+const Holder = struct {
+    n: u32 = 1,
+    profile: *const Profile,
+    choice: union(enum) { profile: Profile, none: void } = .none,
+    pub const field_rules = .{ .n = v.positive };
+};
+
+test "a struct with outside names alone may sit behind a pointer or in a union: no walk would skip anything there" {
+    comptime v.assertRules(Holder);
+    const profile: Profile = .{ .display_name = "" };
+    try h.expectValid(&Holder{ .profile = &profile, .choice = .{ .profile = profile } });
+    try h.expectAt(&Holder{ .n = 0, .profile = &profile }, "validation.positive", null, "n");
+    var holder: Holder = .{ .profile = &profile };
+    try v.transform(testing.failing_allocator, &holder);
 }
 
 const Dotted = struct {

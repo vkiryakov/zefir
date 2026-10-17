@@ -1869,6 +1869,12 @@ pub const hints = struct {
     pub const u8_array = "[N]u8 is an array of numbers, not a string: use []const u8";
     pub const one_each = "put all item rules into one v.each(.{ ... })";
     pub const wrap_predicate = "wrap a predicate in v.custom(code, message, f)";
+    /// A function of your own shaped like a transform,
+    /// `fn (std.mem.Allocator, T) ...`, where an element of `field_rules`
+    /// is expected.
+    pub const wrap_transform = "wrap a transform function in v.transformWith(f)";
+    /// A Zig field name that would make paths ambiguous.
+    pub const outside_name = "rename the field or give it an outside name with v.rename(\"...\")";
     /// `v.custom` on a list whose items its predicate would take.
     pub const use_each_custom = "use v.each(v.custom(...))";
     /// A rule on a slice that `isString` and `isListSlice` reject only for
@@ -2661,7 +2667,7 @@ pub fn entryParts(comptime value: anytype, comptime where: []const u8, comptime 
             }
             return entry;
         }
-        notARule(value, where, "expected a rule or a tuple of rules, got ");
+        notARule(value, where, if (in_each) "expected a transform or a rule, or a tuple of them, got " else "expected a name, a transform or a rule, or a tuple of them, got ");
     }
 }
 
@@ -2702,23 +2708,26 @@ pub fn isFieldRulesTable(comptime R: type) bool {
 /// predicate or constructor (a function that returns a `Rule`, a `Transform`
 /// or a name) that `root.zig` exports is named, without the tuple item
 /// prefix: a predicate gets the rule to use instead, a constructor the call
-/// it needs. Any other function, `v.check` and the other entry points
-/// included, gets the prefixed text with the hint to wrap it in `v.custom`.
-/// A tuple, a pointer to a tuple and a struct literal are named by what they
-/// are, with a hint, since their type names are long or generated; any other
-/// value is named by its type (`core.Rule` for a rule of another copy of the
-/// package).
+/// it needs. Any other function gets the prefixed text with a hint: a
+/// function of your own shaped like a transform (see `isTransformShaped`)
+/// to wrap it in `v.transformWith`, any other one, `v.check` and the other
+/// entry points included, to wrap it in `v.custom`. A tuple, a pointer to a
+/// tuple and a struct literal are named by what they are, with a hint, since
+/// their type names are long or generated; any other value is named by its
+/// type (`core.Rule` for a rule of another copy of the package).
 fn notARule(comptime value: anytype, comptime where: []const u8, comptime prefix: []const u8) noreturn {
     const V = @TypeOf(value);
     if (@typeInfo(V) == .@"fn") {
-        if (constructorName(value)) |name| {
+        const exported = constructorName(value);
+        if (exported) |name| {
             if (exportedPredicateRule(root, name)) |rule|
                 @compileError("validator: " ++ where ++ ": " ++ hints.predicateAsRule(name, rule, @TypeOf(@field(root, rule))));
             const R = @typeInfo(V).@"fn".return_type orelse void;
             if (R == Rule or R == Transform or R == Rename)
                 @compileError("validator: " ++ where ++ ": " ++ hints.mustBeCalled(name, V));
         }
-        @compileError("validator: " ++ where ++ ": " ++ prefix ++ @typeName(V) ++ "; " ++ hints.wrap_predicate);
+        const hint = if (exported == null and isTransformShaped(V)) hints.wrap_transform else hints.wrap_predicate;
+        @compileError("validator: " ++ where ++ ": " ++ prefix ++ @typeName(V) ++ "; " ++ hint);
     }
     if (isTuple(V)) @compileError("validator: " ++ where ++ ": " ++ prefix ++ "a tuple; " ++ hints.nested_tuple);
     if (isTuplePointer(V)) @compileError("validator: " ++ where ++ ": " ++ prefix ++ "a pointer to a tuple; " ++ hints.tuple_pointer);
@@ -2728,6 +2737,15 @@ fn notARule(comptime value: anytype, comptime where: []const u8, comptime prefix
 
 fn isTuple(comptime T: type) bool {
     return @typeInfo(T) == .@"struct" and @typeInfo(T).@"struct".is_tuple;
+}
+
+/// A function of two parameters whose first is `std.mem.Allocator`: the
+/// shape of the function that `v.transformWith` takes, whatever the rest of
+/// its signature.
+fn isTransformShaped(comptime F: type) bool {
+    const f = @typeInfo(F).@"fn";
+    if (f.param_types.len != 2) return false;
+    return (f.param_types[0] orelse return false) == std.mem.Allocator;
 }
 
 /// A struct declared in place: a field type (`address: struct { ... }`) or
@@ -2800,6 +2818,13 @@ pub fn itemTransforms(comptime rules: []const Rule) []const Transform {
 /// A trailing `each`, or one nested in it, declares item transforms.
 pub fn hasItemTransforms(comptime rules: []const Rule) bool {
     return itemTransforms(rules).len > 0 or (itemRules(rules).len > 0 and hasItemTransforms(itemRules(rules)));
+}
+
+/// `rules` check something: a rule of the value itself, or one for the
+/// items at some depth of its `each`. An `each` with transforms alone
+/// (`v.each(v.trim)`, `v.each(v.each(v.trim))`) checks nothing.
+pub fn hasCheckRules(comptime rules: []const Rule) bool {
+    return ownRules(rules).len > 0 or (itemRules(rules).len > 0 and hasCheckRules(itemRules(rules)));
 }
 
 /// The declaration check of one value's transforms: each one's `fits`
@@ -3285,6 +3310,14 @@ test "an entry takes apart its outside name, transforms and rules, each in the o
     try t.expect(!comptime hasItemTransforms(&.{test_rules.each_positive}));
     try t.expect(comptime hasItemTransforms(&.{r.each(r.each(r.trim))}));
     try t.expect(!comptime hasItemTransforms(&.{test_rules.positive}));
+    // An each of transforms alone, at any depth, checks nothing.
+    try t.expect(comptime hasCheckRules(&.{test_rules.positive}));
+    try t.expect(comptime hasCheckRules(&.{test_rules.each_positive}));
+    try t.expect(comptime hasCheckRules(&.{r.each(r.each(.{ r.trim, r.notBlank }))}));
+    try t.expect(comptime hasCheckRules(&.{ test_rules.min_items, r.each(r.trim) }));
+    try t.expect(!comptime hasCheckRules(&.{r.each(r.trim)}));
+    try t.expect(!comptime hasCheckRules(&.{r.each(r.each(r.trim))}));
+    try t.expect(!comptime hasCheckRules(&.{}));
 }
 
 /// The text of the problem of `value` as an entry of `field_rules` or, with

@@ -25,11 +25,11 @@ const Violation = core.Violation;
 /// single-item pointer (`&dto`); the path is written into `path_buf`, and
 /// `field` is null when it does not fit. A path names fields by their
 /// outside names (`v.rename`). `path_buf` must not overlap the checked
-/// value: the walk writes the path while it still reads the value. Names and
-/// transforms in `field_rules` are skipped: run `v.transform` first to check
-/// the transformed value. Allocates nothing. Calls on several threads at
-/// once are safe when each has its own `path_buf` and no thread changes the
-/// value meanwhile.
+/// value: the walk writes the path while it still reads the value. The
+/// transforms in `field_rules` are not run: call `v.transform` first so
+/// that the rules check the transformed value. Allocates nothing. Calls on
+/// several threads at once are safe when each has its own `path_buf` and no
+/// thread changes the value meanwhile.
 pub fn check(value: anytype, path_buf: []u8) ?Violation {
     const T = comptime pointee(@TypeOf(value));
     comptime verify(T);
@@ -108,8 +108,11 @@ pub fn assertRules(comptime T: type) void {
 /// to: when an item changes, the slice is replaced by a copy in `allocator`,
 /// made once, at the first item that changes. Arrays and fields change in
 /// place. New strings and copies come from `allocator`, and nothing is
-/// freed, so `allocator` is usually an arena that lives as long as the
-/// value: transformed strings and lists point into it.
+/// freed, so `allocator` must be an arena (or another allocator that is
+/// freed as a whole) that lives as long as the value: the transformed value
+/// mixes its own memory with memory from `allocator` (a trimmed string is a
+/// part of the original, a string or a list that did not change is the
+/// original), so its parts cannot be freed one by one.
 ///
 /// An error of a `v.transformWith` function stops the walk and comes back
 /// as it is, and so does `error.OutOfMemory`; the value may then be partly
@@ -313,17 +316,17 @@ fn reachable(comptime X: type) []const type {
 }
 
 /// A type declares something for the check walk: `validateSelf`, a misnamed
-/// `validate`, or rules in its `field_rules`, which names and transforms
-/// alone are not. Anything but a struct with a well-formed `field_rules`
-/// that declares rules at all counts, so that the declaration check reports
-/// what is wrong with it.
+/// `validate`, or rules in its `field_rules`; names and transforms, those
+/// of an `each` included, are not rules. Anything but a struct with a
+/// well-formed `field_rules` that declares rules at all counts, so that the
+/// declaration check reports what is wrong with it.
 fn declaresChecks(comptime T: type) bool {
     if (!declaresRules(T)) return false;
     if (@typeInfo(T) != .@"struct" or @hasDecl(T, "validateSelf") or misnamedRules(T)) return true;
     if (!core.isFieldRulesTable(@TypeOf(T.field_rules))) return true;
     const info = @typeInfo(T).@"struct";
     for (info.field_names, info.field_attrs) |name, attrs| {
-        if (!attrs.@"comptime" and entryFor(T, name).rules.len > 0) return true;
+        if (!attrs.@"comptime" and core.hasCheckRules(entryFor(T, name).rules)) return true;
     }
     return false;
 }
@@ -461,11 +464,16 @@ fn visit(comptime T: type, comptime where: []const u8, comptime stack: []const t
 }
 
 /// `T` is a type the walker does not descend into; `what` names its kind in
-/// the error ("pointers", "unions", ...). Rules declared below `T` would be
-/// skipped without a word, so reaching a type that declares them is a
-/// compile error.
+/// the error ("pointers", "unions", ...). Rules, `validateSelf` and
+/// transforms declared below `T` would be skipped without a word, so
+/// reaching a type that declares them is a compile error. Outside names
+/// alone are not: no path goes below `T`, so nothing would use them. To
+/// tell them apart, the search reads the entries of `field_rules` below
+/// `T`, which no declaration check visits: an entry with something other
+/// than a name, transforms and rules stops compilation there.
 fn hidden(comptime T: type, comptime what: []const u8, comptime where: []const u8) void {
-    if (findRuleType(T)) |R| {
+    const skipped: ?type = findDeclaring(T, .checks) orelse findDeclaring(T, .transforms);
+    if (skipped) |R| {
         const reach = if (R == T) @typeName(T) ++ " declares" else @typeName(T) ++ " reaches " ++ @typeName(R) ++ ", which declares";
         // A type that declares only a misnamed validate has neither name.
         const declared = if (@hasDecl(R, "field_rules") or @hasDecl(R, "validateSelf"))
@@ -503,7 +511,7 @@ fn checkStruct(comptime T: type, comptime label: []const u8) void {
     for (info.field_names, info.field_attrs, outside) |name, attrs, outside_name| {
         if (attrs.@"comptime") continue;
         if (std.mem.findAny(u8, outside_name, ".[]") != null)
-            @compileError("validator: " ++ label ++ "." ++ name ++ ": a field name with '.', '[' or ']' makes paths ambiguous; rename the field");
+            @compileError("validator: " ++ label ++ "." ++ name ++ ": a field name with '.', '[' or ']' makes paths ambiguous; " ++ core.hints.outside_name);
     }
     if (names.duplicateText(T, label, outside)) |text| @compileError(text);
     if (@hasDecl(T, "validateSelf")) checkValidateSelf(T, label);
@@ -518,7 +526,7 @@ fn checkFieldRules(comptime T: type, comptime label: []const u8) void {
     const shape = @typeInfo(R);
     if (!core.isFieldRulesTable(R)) {
         const got = if (shape == .@"struct" and shape.@"struct".is_tuple) "a tuple" else @typeName(R);
-        @compileError("validator: " ++ label ++ ".field_rules: must be a struct literal .{ .field = rule or .{ rules } }, got " ++ got);
+        @compileError("validator: " ++ label ++ ".field_rules: must be a struct literal .{ .field = element or .{ elements } }, got " ++ got);
     }
     for (shape.@"struct".field_names) |key| {
         const where = label ++ ".field_rules." ++ key;
@@ -589,7 +597,8 @@ fn rulesFor(comptime T: type, comptime name: []const u8) []const Rule {
 
 /// The indices of the fields of struct `T` that the check walk visits, in
 /// declaration order: not comptime, with rules in or below them. A field
-/// with only a name or transforms is not among them.
+/// with only a name or transforms, for itself or in its `each`, is not
+/// among them.
 fn walkedFields(comptime T: type) []const usize {
     comptime {
         @setEvalBranchQuota(core.eval_quota);
@@ -597,7 +606,7 @@ fn walkedFields(comptime T: type) []const usize {
         var out: []const usize = &.{};
         for (info.field_names, info.field_types, info.field_attrs, 0..) |name, F, attrs, i| {
             if (attrs.@"comptime") continue;
-            if (rulesFor(T, name).len == 0 and !containsChecks(F)) continue;
+            if (!core.hasCheckRules(rulesFor(T, name)) and !containsChecks(F)) continue;
             out = out ++ &[_]usize{i};
         }
         return out;
@@ -833,7 +842,7 @@ fn walkValue(comptime T: type, value: *const T, comptime rules: []const Rule, si
     }
     if (comptime core.ListChild(T)) |Child| {
         const item_rules = comptime core.itemRules(rules);
-        if (comptime (item_rules.len == 0 and !containsChecks(Child))) return;
+        if (comptime (!core.hasCheckRules(item_rules) and !containsChecks(Child))) return;
         const items: []const Child = if (@typeInfo(T) == .array) value else value.*;
         for (items, 0..) |*item, i| {
             const mark = sink.pathLen();
