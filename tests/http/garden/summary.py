@@ -12,6 +12,7 @@ what zefir refused, read the request otherwise, or read another number of
 requests from the same bytes.
 """
 
+import itertools
 import shlex
 import sys
 
@@ -40,16 +41,27 @@ def payloads():
 
 
 def verdict(results) -> str:
+    """What a server did with the payload: each request it read, by method
+    and target, and the status of each response that refused one."""
     if not results:
         return "no response"
-    if isinstance(results[0], HTTPRequest):
-        return f"accepted, {len(results)} request(s)"
-    return f"refused, {results[0].code.decode('latin1')}"
+    parts = []
+    for r in results:
+        if isinstance(r, HTTPRequest):
+            uri = r.uri.decode("latin1")
+            parts.append(f"read {r.method.decode('latin1')} {uri if len(uri) <= 40 else uri[:40] + '…'}")
+        else:
+            parts.append(f"refused {r.code.decode('latin1')}")
+    return ", then ".join(parts)
 
 
-def kind_of(error: ErrorType, mine) -> str:
+def kind_of(error: ErrorType, mine, theirs) -> str:
     if error == ErrorType.TYPE_DISCREPANCY:
-        return KINDS[0] if mine and isinstance(mine[0], HTTPRequest) else KINDS[1]
+        # The first place where one read a request and the other did not.
+        for a, b in itertools.zip_longest(mine, theirs):
+            if isinstance(a, HTTPRequest) != isinstance(b, HTTPRequest):
+                return KINDS[0] if isinstance(a, HTTPRequest) else KINDS[1]
+        return KINDS[1]
     if error == ErrorType.REQUEST_DISCREPANCY:
         return KINDS[2]
     if error == ErrorType.STREAM_DISCREPANCY:
@@ -72,7 +84,7 @@ def main() -> None:
             error = categorize_discrepancy(mine, theirs, zefir, server)
             if error in (ErrorType.OK, ErrorType.RESPONSE_DISCREPANCY):
                 continue
-            found.setdefault(kind_of(error, mine), []).append(f"{server.name} ({verdict(theirs)})")
+            found.setdefault(kind_of(error, mine, theirs), []).append(f"{server.name} ({verdict(theirs)})")
         if not found:
             continue
         differing += 1
