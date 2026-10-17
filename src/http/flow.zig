@@ -159,6 +159,7 @@ pub fn serve(server: *Server, io: std.Io, exchange: *Exchange) void {
     defer if (ctx.internal.in_flight) releaseSlot(server, io);
 
     const found = find(server, &ctx);
+    ctx.internal.max_body_bytes = bodyLimitOf(server, found);
     const deadline: ?core.Deadline = if (budgetOf(server, found)) |budget| .after(ctx.now(), budget) else null;
     if (deadline) |d| ctx.internal.operation = ctx.internal.operation.withDeadline(d);
     // Without a body, the watcher watches the connection at once.
@@ -476,6 +477,21 @@ fn budgetOf(server: *const Server, found: Found) ?std.Io.Duration {
     };
 }
 
+/// The limit of the request's body: the route's `.max_body_bytes`, else
+/// the server's. Known before any task, as the deadline is, so that the
+/// server's middleware, which runs before the route is applied, reads the
+/// body within the route's limit too.
+fn bodyLimitOf(server: *const Server, found: Found) usize {
+    const own: ?usize = switch (found) {
+        .match => |match| switch (match) {
+            .found => |f| server.routes[f.route].max_body_bytes,
+            else => null,
+        },
+        .static, .failed => null,
+    };
+    return own orelse server.settings.max_body_bytes;
+}
+
 /// Waits for the first end of a request: its task or its watcher, else
 /// the deadline, else the stop, which cancels the connection's task (then
 /// `canceled`).
@@ -542,7 +558,6 @@ fn runRequest(server: *Server, ctx: *Context, found: Found) anyerror!void {
             ctx.internal.route_index = f.route;
             ctx.internal.param_names = route.params;
             ctx.internal.params = f.params;
-            ctx.internal.max_body_bytes = route.max_body_bytes orelse server.settings.max_body_bytes;
             ctx.internal.middleware.route = route.links;
             if (try mw.runPhases(ctx, route.links)) return;
             return route.handle(route.controller, ctx);

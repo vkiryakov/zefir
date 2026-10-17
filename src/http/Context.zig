@@ -589,6 +589,38 @@ test "body: over the limit by Content-Length is 413 before reading; chunked over
     }
 }
 
+/// The server's middleware that reads the body before the route is
+/// applied, as a check of a webhook's signature would.
+fn readsBody(ctx: *Context) !mw.MiddlewareResult {
+    _ = try ctx.body();
+    return .next;
+}
+
+test "body: the route's .max_body_bytes holds for the server's middleware too" {
+    const test_io = testing.io;
+    // The server's limit below the route's 8, then above it: what the
+    // middleware reads, and the handler gets again, is held to the route's.
+    for ([_]struct { usize, []const struct { []const u8, []const u8, u16 } }{
+        .{ 4, &.{ .{ "/small", "12345678", 200 }, .{ "/small", "123456789", 413 }, .{ "/echo", "12345", 413 } } },
+        .{ 16, &.{ .{ "/small", "1234567890", 413 }, .{ "/small", "12345678", 200 }, .{ "/echo", "1234567890", 200 } } },
+    }) |run| {
+        var bodies: BodyController = .{};
+        var b: TestingBackend = .init(testing.allocator);
+        defer b.deinit();
+        var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&bodies}, .strict_errors = false, .max_body_bytes = run[0], .middleware = .{readsBody} });
+        defer server.deinit(test_io);
+        try server.start(test_io);
+        for (run[1]) |case| {
+            var res = try b.request(test_io, .{ .method = .POST, .target = case[0], .body = case[1] });
+            defer res.deinit();
+            testing.expectEqual(case[2], res.status) catch |err| {
+                std.debug.print("server limit {d}: POST {s} with {d} bytes\n", .{ run[0], case[0], case[1].len });
+                return err;
+            };
+        }
+    }
+}
+
 test "body: a Content-Length is reserved as the body comes, not before its first byte" {
     // A head that announces a body of the limit and sends three bytes of
     // it: the request holds no more than the first part of the body.
