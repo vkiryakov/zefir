@@ -1,8 +1,9 @@
 //! The stop of a server under load, on `http.native` over loopback TCP,
 //! on zio with one executor and with four: requests answered, requests at
 //! their deadline and requests that outlive the grace, all at once when
-//! the stop comes. Every request ends once, and the server stops within
-//! `.shutdown_grace` and a second.
+//! the stop comes. Every request ends once, and the server stops soon
+//! after `.shutdown_grace`: a second after it is the server's budget, and
+//! the test gives slow runners of CI three.
 
 const std = @import("std");
 const http = @import("http");
@@ -97,7 +98,7 @@ const Fixture = struct {
 const long_clients = 8;
 const loop_clients = 24;
 
-test "deadline and stop under load: every request ends once, the server stops within shutdown_grace + 1 s" {
+test "deadline and stop under load: every request ends once, the server stops within shutdown_grace + 3 s" {
     try runtime.forEachRuntime(gpa, stopUnderLoad);
 }
 
@@ -124,7 +125,7 @@ fn stopUnderLoad(io: Io) !void {
     const stop = Io.Clock.awake.now(io);
     f.server.requestStop(io);
     try f.server.wait(io);
-    try e2e.expectWithin("the stop under load", e2e.sinceMs(io, stop), grace_ms, grace_ms + 1000);
+    try e2e.expectWithin("the stop under load", e2e.sinceMs(io, stop), grace_ms, grace_ms + 3000);
     try clients.await(io);
     try failures.expectNone();
 

@@ -213,8 +213,8 @@ fn slowClient(io: Io) !void {
     var dog = try e2e.Watchdog.start(io, "SSE close(key) and a slow client");
     defer dog.stop(io);
     var f: Fixture = undefined;
-    // A queue that takes all the events, and a write timeout of 3 s.
-    try f.startWith(io, .{ .queue = .{ .max_events = 1 << 20, .max_bytes = 64 << 20 } }, .{ .write = .fromSeconds(3) });
+    // A queue that takes all the events, and a write timeout of 1 s.
+    try f.startWith(io, .{ .queue = .{ .max_events = 1 << 20, .max_bytes = 64 << 20 } }, .{ .write = .fromSeconds(1) });
     defer f.deinit(io);
 
     var c = try f.connect(io);
@@ -238,6 +238,6 @@ fn slowClient(io: Io) !void {
     // the stream is cut. The writes before the one that waits may still
     // send a little, on Windows for a while.
     try e2e.waitCount(io, &f.app.closes, 1, 10_000);
-    try e2e.expectWithin("close(key) held by a client that reads nothing", e2e.sinceMs(io, closed_at), 200, 3000 + 2000);
+    try e2e.expectWithin("close(key) held by a client that reads nothing", e2e.sinceMs(io, closed_at), 200, 1000 + 4000);
     try waitNoStreams(io, &f.server);
 }
