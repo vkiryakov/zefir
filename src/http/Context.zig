@@ -81,7 +81,7 @@ pub const Internal = struct {
     middleware: mw.Reached = .{},
     /// The server that serves the request; null in unit tests of a context.
     server: ?*Server = null,
-    /// The route the request matched, as an index into `server.routes`.
+    /// The route the request matched, as an index into the server's routes.
     route_index: ?usize = null,
     /// The request holds a place of `.max_in_flight`: from its start to its
     /// end, or until `subscribe` moves it among the streams.

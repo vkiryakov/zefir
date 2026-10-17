@@ -136,7 +136,7 @@ pub fn subscribe(m: *Manager, ctx: *sse.Context, key: []const u8) SubscribeError
     const sub = try Subscription.create(m, http_ctx, key);
     errdefer sub.destroy();
     try m.add(io, sub);
-    errdefer m.remove(io, sub);
+    errdefer removeSubscription(m, io, sub);
     try openStream(http_ctx);
     flow.leaveInFlight(http_ctx);
     http_ctx.internal.subscription = sub;
@@ -200,11 +200,19 @@ fn addToKey(m: *Manager, sub: *Subscription) error{OutOfMemory}!void {
     };
 }
 
-/// Lets `sub` go, once its stream has ended and its `.on_close` has run:
-/// publishers no longer reach it, and its place is free with a new
-/// generation. The last one after `deinit` has begun wakes it, as the last
-/// touch of the manager: `deinit` may free the manager from then on.
-pub fn remove(m: *Manager, io: std.Io, sub: *Subscription) void {
+/// Internal to the server.
+pub const Internal = struct {
+    /// Lets `sub` go, once its stream has ended and its `.on_close` has
+    /// run: publishers no longer reach it, and its place is free with a new
+    /// generation. The last one after `deinit` has begun wakes it, as the
+    /// last touch of the manager: `deinit` may free the manager from then
+    /// on.
+    pub fn remove(m: *Manager, io: std.Io, sub: *Subscription) void {
+        removeSubscription(m, io, sub);
+    }
+};
+
+fn removeSubscription(m: *Manager, io: std.Io, sub: *Subscription) void {
     const last = last: {
         m.mutex.lockUncancelable(io);
         defer m.mutex.unlock(io);

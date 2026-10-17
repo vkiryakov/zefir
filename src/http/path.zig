@@ -54,6 +54,23 @@ pub fn literalByte(c: u8) bool {
     return c >= 0x21 and c <= 0x7e and std.mem.findScalar(u8, "%?#{}", c) == null;
 }
 
+/// "" or "/api", "/api/v2": the server's prefix, and a mount of `.static`
+/// but "/": segments of `literalByte`s, no empty or dot segment, no
+/// trailing slash. The router compares it, segment by segment, with the
+/// decoded segments of a path.
+pub fn validPrefix(prefix: []const u8) bool {
+    if (prefix.len == 0) return true;
+    if (prefix[0] != '/') return false;
+    var it = std.mem.splitScalar(u8, prefix[1..], '/');
+    while (it.next()) |s| {
+        if (s.len == 0 or std.mem.eql(u8, s, ".") or std.mem.eql(u8, s, "..")) return false;
+        for (s) |c| {
+            if (!literalByte(c)) return false;
+        }
+    }
+    return true;
+}
+
 /// A path ready for the router.
 pub const Normalized = struct {
     /// The decoded segments, without dot segments and without the trailing

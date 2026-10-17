@@ -126,7 +126,7 @@ fn serve(gpa: std.mem.Allocator, prefix: []const u8) http.Server.InitError!void 
         .error_handler = &app_errors,
     });
     defer server.deinit(std.testing.io);
-    const info: http.RouteInfo = server.routes[0].info;
+    const info: http.RouteInfo = server.internal.routes[0].info;
     _ = info;
 }
 

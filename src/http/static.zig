@@ -122,7 +122,7 @@ pub fn copyMounts(gpa: std.mem.Allocator, option: anytype) Server.InitError![]Mo
 
 fn copyMount(gpa: std.mem.Allocator, s: Static) Server.InitError!Mount {
     const o = s.options;
-    if (!std.mem.eql(u8, s.mount, "/") and (s.mount.len == 0 or !Server.validPrefix(s.mount))) return error.InvalidConfiguration;
+    if (!std.mem.eql(u8, s.mount, "/") and (s.mount.len == 0 or !path.validPrefix(s.mount))) return error.InvalidConfiguration;
     if (o.root.len == 0) return error.InvalidConfiguration;
     if (o.index) |name| if (!resolve.allowed(name)) return error.InvalidConfiguration;
     if (o.spa_fallback) |file| {
@@ -238,7 +238,7 @@ pub const File = struct {
 /// `MethodNotAllowed`; `ReadFailed`, 500, for a system that failed to open
 /// a file, logged).
 pub fn open(server: *Server, ctx: *Context, target: Target) anyerror!void {
-    const mount = &server.mounts[target.mount];
+    const mount = &server.internal.mounts[target.mount];
     const io = ctx.io();
     const reading = ctx.request.method == .GET or ctx.request.method == .HEAD;
     const root = mount.dir.?;
@@ -456,7 +456,7 @@ test "start fails with InvalidStaticRoot for a missing root or a file root" {
         // The first root opens, the second does not: none stays open, and
         // nothing is accepted.
         try testing.expectError(error.InvalidStaticRoot, server.start(testing.io));
-        for (server.mounts) |m| try testing.expectEqual(null, m.dir);
+        for (server.internal.mounts) |m| try testing.expectEqual(null, m.dir);
         try testing.expectEqual(Server.State.stopped, server.state());
         try testing.expectError(error.NotStarted, backend.request(testing.io, .{ .method = .GET, .target = "/assets/app.js" }));
         try testing.expectError(error.InvalidState, server.start(testing.io));
@@ -510,15 +510,15 @@ test "two mounts with one prefix fail init" {
     };
     defer server.deinit(testing.io);
     for ([_][]const u8{ mount, root, spa }) |s| gpa.free(s);
-    try testing.expectEqual(2, server.needs.static_mounts);
-    const m = server.mounts[0];
+    try testing.expectEqual(2, server.internal.needs.static_mounts);
+    const m = server.internal.mounts[0];
     try testing.expectEqualStrings("/assets", m.mount);
     try testing.expectEqualStrings("public/assets", m.root);
     try testing.expectEqualStrings("index.html", m.index.?);
     try testing.expectEqualStrings("app", m.spa_fallback.?[0]);
     try testing.expectEqualStrings("index.html", m.spa_fallback.?[1]);
     try testing.expectEqualStrings("no-cache", m.cache_control.?);
-    try testing.expectEqual(null, server.mounts[1].index);
+    try testing.expectEqual(null, server.internal.mounts[1].index);
 }
 
 fn memoryOfMounts(gpa: std.mem.Allocator) !void {

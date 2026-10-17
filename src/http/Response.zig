@@ -60,6 +60,12 @@ pub const Internal = struct {
     /// The server cut the response, or ended the request without one.
     aborted: bool = false,
 
+    /// What runs right before the head of a response goes out.
+    pub const BeforeHead = struct {
+        ptr: *anyopaque,
+        call: *const fn (ptr: *anyopaque) void,
+    };
+
     /// Whether the handler wrote a response: a status or a body. A `!void`
     /// handler that wrote none answers 204.
     pub fn written(i: *const Internal) bool {
@@ -271,7 +277,7 @@ fn kindOf(code: u16, length: ?u64) Exchange.BodyKind {
 pub const State = enum { uncommitted, committed, finished };
 
 /// The body of a response.
-pub const Body = union(enum) {
+const Body = union(enum) {
     none,
     /// Held whole in the arena: `text`, `html`, `json`, the answer to an
     /// error.
@@ -285,7 +291,7 @@ pub const Body = union(enum) {
 };
 
 /// A value written as JSON when its response goes out.
-pub const Value = struct {
+const Value = struct {
     ptr: *const anyopaque,
     write: *const fn (ptr: *const anyopaque, w: *Writer) Writer.Error!void,
 };
@@ -299,14 +305,8 @@ fn ValueOf(comptime T: type) type {
     };
 }
 
-/// What runs right before the head of a response goes out.
-pub const BeforeHead = struct {
-    ptr: *anyopaque,
-    call: *const fn (ptr: *anyopaque) void,
-};
-
 /// The request's exchange, for the bodies that go out as they are written.
-pub const Sink = struct {
+const Sink = struct {
     exchange: *Exchange,
     io: std.Io,
     /// The backend sends a body as it is written:
@@ -316,7 +316,7 @@ pub const Sink = struct {
 
 /// The buffer of a body written as it goes, as a `std.Io.Writer`: when it
 /// is full, it sends what it holds.
-pub const Out = struct {
+const Out = struct {
     writer: Writer = .{ .vtable = &out_vtable, .buffer = &.{} },
     /// The error that broke the body; every write after it fails with it.
     failure: ?Exchange.WriteError = null,

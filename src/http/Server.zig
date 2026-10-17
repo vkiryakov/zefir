@@ -44,70 +44,76 @@ const Server = @This();
 const Duration = std.Io.Duration;
 const log = std.log.scoped(.http);
 
-gpa: std.mem.Allocator,
-backend: Backend,
-/// The server's prefix, copied: it may come from the config.
-prefix: []const u8,
-/// The routes of all controllers, in the order of `.controllers`, each in
-/// the order of its `.methods`; `router` gives indices into it.
-routes: []Route,
-router: routing.Router,
-/// The links of every chain: the server's middleware, then the own
-/// middleware of each route, in the order of `routes`. `middleware` and
-/// the `links` of each route are parts of it.
-links: []mw.Link,
-/// The server's middleware: every request runs it before its route is
-/// applied.
-middleware: []const mw.Link,
-/// The options of `init` with their defaults.
-settings: Settings,
-/// `.trusted_proxies`, its list parsed.
-trust: proxies.Trust,
-/// What the routes need of the backend; `start` checks it.
-needs: Needs,
-/// `.error_handler`, borrowed, or the default one.
-error_handler: flow.ErrorHandler,
-/// The mounts of `.static`, copied; `start` opens their roots, `deinit`
-/// closes them.
-mounts: []static_files.Mount,
+/// Internal to the server: its tables, which `init` builds, and the state
+/// of its lifecycle.
+internal: Internal,
 
-/// Guards the lifecycle fields below that are not atomic; every section
-/// under it is short.
-mutex: std.Io.Mutex = .init,
-/// Written under `mutex`; `state` reads it without.
-state_value: std.atomic.Value(State) = .init(.configured),
-/// `requestStop` came.
-stop_requested: bool = false,
-/// The backend did not start: the lifecycle task ends without a stop.
-rollback: bool = false,
-/// The task that leads the stop; `start` starts it, `deinit` joins it.
-lifecycle: ?std.Io.Future(void) = null,
-/// Set by `requestStop`: the lifecycle task begins the stop.
-stop_event: std.Io.Event = .unset,
-/// Set once `start` has the backend's answer.
-start_done: std.Io.Event = .unset,
-/// Set when the server has stopped: `wait` returns.
-wait_event: std.Io.Event = .unset,
-/// Set when the server has stopped: `shutdown` returns.
-shutdown_event: std.Io.Event = .unset,
-/// Set when the grace of a stop is over and what still runs is canceled;
-/// also when the server stops. `shutdown` waits a second more from here.
-grace_over: std.Io.Event = .unset,
-/// The requests at work, as `.max_in_flight` counts them: `serve` takes a
-/// place before a request runs and gives it back at its end.
-in_flight: std.atomic.Value(u32) = .init(0),
-/// Set when `in_flight` or `streams` drops to zero. Only the lifecycle
-/// task waits on it, and resets it before it looks at the counts.
-idle: std.Io.Event = .unset,
-/// The SSE streams open now, as `.max_streams` counts them: `subscribe`
-/// takes a place, the end of the stream gives it back.
-streams: std.atomic.Value(u32) = .init(0),
-/// The streams that run, for the stop to close them at once; under
-/// `streams_mutex`, which is never held across I/O.
-stream_list: std.DoublyLinkedList = .{},
-streams_mutex: std.Io.Mutex = .init,
-/// The stop has closed the streams: one that begins now ends at once.
-streams_closed: bool = false,
+pub const Internal = struct {
+    gpa: std.mem.Allocator,
+    backend: Backend,
+    /// The server's prefix, copied: it may come from the config.
+    prefix: []const u8,
+    /// The routes of all controllers, in the order of `.controllers`, each in
+    /// the order of its `.methods`; `router` gives indices into it.
+    routes: []Route,
+    router: routing.Router,
+    /// The links of every chain: the server's middleware, then the own
+    /// middleware of each route, in the order of `routes`. `middleware` and
+    /// the `links` of each route are parts of it.
+    links: []mw.Link,
+    /// The server's middleware: every request runs it before its route is
+    /// applied.
+    middleware: []const mw.Link,
+    /// The options of `init` with their defaults.
+    settings: Settings,
+    /// `.trusted_proxies`, its list parsed.
+    trust: proxies.Trust,
+    /// What the routes need of the backend; `start` checks it.
+    needs: Needs,
+    /// `.error_handler`, borrowed, or the default one.
+    error_handler: flow.ErrorHandler,
+    /// The mounts of `.static`, copied; `start` opens their roots, `deinit`
+    /// closes them.
+    mounts: []static_files.Mount,
+
+    /// Guards the lifecycle fields below that are not atomic; every section
+    /// under it is short.
+    mutex: std.Io.Mutex = .init,
+    /// Written under `mutex`; `state` reads it without.
+    state_value: std.atomic.Value(State) = .init(.configured),
+    /// `requestStop` came.
+    stop_requested: bool = false,
+    /// The backend did not start: the lifecycle task ends without a stop.
+    rollback: bool = false,
+    /// The task that leads the stop; `start` starts it, `deinit` joins it.
+    lifecycle: ?std.Io.Future(void) = null,
+    /// Set by `requestStop`: the lifecycle task begins the stop.
+    stop_event: std.Io.Event = .unset,
+    /// Set once `start` has the backend's answer.
+    start_done: std.Io.Event = .unset,
+    /// Set when the server has stopped: `wait` returns.
+    wait_event: std.Io.Event = .unset,
+    /// Set when the server has stopped: `shutdown` returns.
+    shutdown_event: std.Io.Event = .unset,
+    /// Set when the grace of a stop is over and what still runs is canceled;
+    /// also when the server stops. `shutdown` waits a second more from here.
+    grace_over: std.Io.Event = .unset,
+    /// The requests at work, as `.max_in_flight` counts them: `serve` takes a
+    /// place before a request runs and gives it back at its end.
+    in_flight: std.atomic.Value(u32) = .init(0),
+    /// Set when `in_flight` or `streams` drops to zero. Only the lifecycle
+    /// task waits on it, and resets it before it looks at the counts.
+    idle: std.Io.Event = .unset,
+    /// The SSE streams open now, as `.max_streams` counts them: `subscribe`
+    /// takes a place, the end of the stream gives it back.
+    streams: std.atomic.Value(u32) = .init(0),
+    /// The streams that run, for the stop to close them at once; under
+    /// `streams_mutex`, which is never held across I/O.
+    stream_list: std.DoublyLinkedList = .{},
+    streams_mutex: std.Io.Mutex = .init,
+    /// The stop has closed the streams: one that begins now ends at once.
+    streams_closed: bool = false,
+};
 
 /// The states of a server, in order.
 pub const State = enum(u8) { configured, starting, running, draining, stopped };
@@ -174,7 +180,7 @@ pub const Settings = struct {
 };
 
 /// One route at run time.
-pub const Route = struct {
+const Route = struct {
     /// The method, the full pattern with the server's prefix, the
     /// controller and its method, as `ctx.route()` gives them.
     info: route_decls.RouteInfo,
@@ -199,7 +205,7 @@ pub const Route = struct {
 };
 
 /// What the routes need of the backend, known at compile time.
-pub const Needs = struct {
+const Needs = struct {
     /// The first SSE route, which needs `flush`.
     flush: ?u32 = null,
     /// Mounts of `.static`, which need `streaming_response`.
@@ -252,7 +258,7 @@ pub fn init(gpa: std.mem.Allocator, options: anytype) InitError!Server {
     if (!validSettings(settings)) return error.InvalidConfiguration;
 
     const given: []const u8 = if (@hasField(O, "prefix")) options.prefix else "";
-    if (!validPrefix(given)) return error.InvalidConfiguration;
+    if (!path_rules.validPrefix(given)) return error.InvalidConfiguration;
     const prefix = try gpa.dupe(u8, given);
     errdefer gpa.free(prefix);
 
@@ -294,7 +300,7 @@ pub fn init(gpa: std.mem.Allocator, options: anytype) InitError!Server {
         filled += 1;
     }
 
-    return .{
+    return .{ .internal = .{
         .gpa = gpa,
         .backend = options.backend,
         .prefix = prefix,
@@ -307,7 +313,7 @@ pub fn init(gpa: std.mem.Allocator, options: anytype) InitError!Server {
         .needs = comptime needsOf(O, p),
         .error_handler = if (@hasField(O, "error_handler")) .of(p.Handler, options.error_handler) else .default,
         .mounts = mounts,
-    };
+    } };
 }
 
 /// The links of every chain of `p`, in one allocation: the server's
@@ -485,23 +491,23 @@ fn OnCloseOf(comptime C: type, comptime name: []const u8) type {
 /// `stopped`; a second `start` is `error.InvalidState`.
 pub fn start(server: *Server, io: std.Io) StartError!void {
     {
-        server.mutex.lockUncancelable(io);
-        defer server.mutex.unlock(io);
-        if (server.state_value.load(.monotonic) != .configured) return error.InvalidState;
-        server.state_value.store(.starting, .release);
+        server.internal.mutex.lockUncancelable(io);
+        defer server.internal.mutex.unlock(io);
+        if (server.internal.state_value.load(.monotonic) != .configured) return error.InvalidState;
+        server.internal.state_value.store(.starting, .release);
     }
     if (!server.backendCanServe()) {
         server.markStopped(io);
         return error.UnsupportedByBackend;
     }
-    static_files.openRoots(server.mounts, io) catch |err| {
+    static_files.openRoots(server.internal.mounts, io) catch |err| {
         server.markStopped(io);
         return err;
     };
     // The stop runs in a task of its own: `requestStop` only wakes it. It
     // starts first, so that a stop requested while the backend starts is
     // not lost.
-    server.lifecycle = lifecycle: {
+    server.internal.lifecycle = lifecycle: {
         const protection = io.swapCancelProtection(.blocked);
         defer _ = io.swapCancelProtection(protection);
         break :lifecycle io.concurrent(runLifecycle, .{ server, io }) catch |err| {
@@ -509,37 +515,37 @@ pub fn start(server: *Server, io: std.Io) StartError!void {
             return err;
         };
     };
-    server.backend.start(io, flow.handler(server)) catch |err| {
+    server.internal.backend.start(io, flow.handler(server)) catch |err| {
         {
-            server.mutex.lockUncancelable(io);
-            defer server.mutex.unlock(io);
-            server.rollback = true;
+            server.internal.mutex.lockUncancelable(io);
+            defer server.internal.mutex.unlock(io);
+            server.internal.rollback = true;
         }
-        server.start_done.set(io);
-        server.stop_event.set(io);
+        server.internal.start_done.set(io);
+        server.internal.stop_event.set(io);
         server.joinLifecycle(io);
         server.markStopped(io);
         return err;
     };
     {
-        server.mutex.lockUncancelable(io);
-        defer server.mutex.unlock(io);
+        server.internal.mutex.lockUncancelable(io);
+        defer server.internal.mutex.unlock(io);
         // A stop requested while the backend started: straight to draining.
-        server.state_value.store(if (server.stop_requested) .draining else .running, .release);
+        server.internal.state_value.store(if (server.internal.stop_requested) .draining else .running, .release);
     }
-    server.start_done.set(io);
+    server.internal.start_done.set(io);
 }
 
 /// Whether the backend has every capability the routes need; logs the
 /// route that needs one it lacks.
 fn backendCanServe(server: *const Server) bool {
-    const can = server.backend.capabilities();
-    if (server.needs.flush) |index| if (!can.flush) {
-        const info = server.routes[index].info;
+    const can = server.internal.backend.capabilities();
+    if (server.internal.needs.flush) |index| if (!can.flush) {
+        const info = server.internal.routes[index].info;
         log.warn("{s}.{s} (GET {s}) is an SSE route, which needs a backend with flush; this backend has none", .{ info.controller, info.handler, info.pattern });
         return false;
     };
-    if (server.needs.static_mounts > 0 and !can.streaming_response) {
+    if (server.internal.needs.static_mounts > 0 and !can.streaming_response) {
         log.warn("static files need a backend with streaming_response; this backend has none", .{});
         return false;
     }
@@ -549,8 +555,8 @@ fn backendCanServe(server: *const Server) bool {
 /// Waits until the server has stopped; `error.InvalidState` before
 /// `start`. Canceling the wait does not stop the server.
 pub fn wait(server: *Server, io: std.Io) WaitError!void {
-    if (server.state_value.load(.acquire) == .configured) return error.InvalidState;
-    try server.wait_event.wait(io);
+    if (server.internal.state_value.load(.acquire) == .configured) return error.InvalidState;
+    try server.internal.wait_event.wait(io);
 }
 
 /// `start` and `wait`: for a service that runs one server until it stops.
@@ -566,20 +572,20 @@ pub fn run(server: *Server, io: std.Io) (StartError || WaitError)!void {
 /// get `.shutdown_grace` to end, those that outlive it are canceled without
 /// a response or cut, and the server stops.
 pub fn requestStop(server: *Server, io: std.Io) void {
-    server.mutex.lockUncancelable(io);
-    defer server.mutex.unlock(io);
-    switch (server.state_value.load(.monotonic)) {
+    server.internal.mutex.lockUncancelable(io);
+    defer server.internal.mutex.unlock(io);
+    switch (server.internal.state_value.load(.monotonic)) {
         .configured => {
-            server.state_value.store(.stopped, .release);
-            server.wait_event.set(io);
-            server.shutdown_event.set(io);
-            server.grace_over.set(io);
+            server.internal.state_value.store(.stopped, .release);
+            server.internal.wait_event.set(io);
+            server.internal.shutdown_event.set(io);
+            server.internal.grace_over.set(io);
         },
         .starting, .running => |current| {
             // While starting, `start` moves on to draining itself.
-            if (current == .running) server.state_value.store(.draining, .release);
-            server.stop_requested = true;
-            server.stop_event.set(io);
+            if (current == .running) server.internal.state_value.store(.draining, .release);
+            server.internal.stop_requested = true;
+            server.internal.stop_event.set(io);
         },
         .draining, .stopped => {},
     }
@@ -593,9 +599,9 @@ pub fn requestStop(server: *Server, io: std.Io) void {
 /// `deinit` would wait for such requests without a limit.
 pub fn shutdown(server: *Server, io: std.Io) ShutdownError!void {
     server.requestStop(io);
-    try server.grace_over.wait(io);
-    const budget: Duration = .{ .nanoseconds = cancel_budget.nanoseconds +| server.settings.finish_timeout.nanoseconds };
-    waiting.untilSet(&server.shutdown_event, io, .after(std.Io.Clock.awake.now(io), budget)) catch |err| switch (err) {
+    try server.internal.grace_over.wait(io);
+    const budget: Duration = .{ .nanoseconds = cancel_budget.nanoseconds +| server.internal.settings.finish_timeout.nanoseconds };
+    waiting.untilSet(&server.internal.shutdown_event, io, .after(std.Io.Clock.awake.now(io), budget)) catch |err| switch (err) {
         error.Timeout => return error.ShutdownTimeout,
         error.Canceled => |e| return e,
     };
@@ -609,12 +615,12 @@ const cancel_budget: Duration = .fromSeconds(1);
 /// Running, and the backend takes requests. Thread-safe; for health
 /// checks.
 pub fn isReady(server: *const Server) bool {
-    return server.state() == .running and server.backend.isReady();
+    return server.state() == .running and server.internal.backend.isReady();
 }
 
 /// The state now. Thread-safe; for health checks.
 pub fn state(server: *const Server) State {
-    return server.state_value.load(.acquire);
+    return server.internal.state_value.load(.acquire);
 }
 
 /// Stops the server if it runs, waits for the stop and frees the tables.
@@ -625,34 +631,34 @@ pub fn deinit(server: *Server, io: std.Io) void {
     defer _ = io.swapCancelProtection(protection);
     server.requestStop(io);
     server.joinLifecycle(io);
-    static_files.closeRoots(server.mounts, io);
-    static_files.freeMounts(server.gpa, server.mounts);
-    freeSettings(server.gpa, server.settings);
-    server.trust.deinit(server.gpa);
-    for (server.routes) |r| server.gpa.free(r.info.pattern);
-    server.gpa.free(server.routes);
-    server.gpa.free(server.links);
-    server.gpa.free(server.prefix);
+    static_files.closeRoots(server.internal.mounts, io);
+    static_files.freeMounts(server.internal.gpa, server.internal.mounts);
+    freeSettings(server.internal.gpa, server.internal.settings);
+    server.internal.trust.deinit(server.internal.gpa);
+    for (server.internal.routes) |r| server.internal.gpa.free(r.info.pattern);
+    server.internal.gpa.free(server.internal.routes);
+    server.internal.gpa.free(server.internal.links);
+    server.internal.gpa.free(server.internal.prefix);
     server.* = undefined;
 }
 
 fn markStopped(server: *Server, io: std.Io) void {
     {
-        server.mutex.lockUncancelable(io);
-        defer server.mutex.unlock(io);
-        server.state_value.store(.stopped, .release);
+        server.internal.mutex.lockUncancelable(io);
+        defer server.internal.mutex.unlock(io);
+        server.internal.state_value.store(.stopped, .release);
     }
-    server.wait_event.set(io);
-    server.shutdown_event.set(io);
-    server.grace_over.set(io);
+    server.internal.wait_event.set(io);
+    server.internal.shutdown_event.set(io);
+    server.internal.grace_over.set(io);
 }
 
 fn joinLifecycle(server: *Server, io: std.Io) void {
-    const future = if (server.lifecycle) |*future| future else return;
+    const future = if (server.internal.lifecycle) |*future| future else return;
     const protection = io.swapCancelProtection(.blocked);
     defer _ = io.swapCancelProtection(protection);
     future.await(io);
-    server.lifecycle = null;
+    server.internal.lifecycle = null;
 }
 
 /// The lifecycle task: waits for a stop and leads it. The backend takes no
@@ -665,16 +671,16 @@ fn runLifecycle(server: *Server, io: std.Io) void {
     // Nothing cancels this task, and its waits are no cancelation points.
     const protection = io.swapCancelProtection(.blocked);
     defer _ = io.swapCancelProtection(protection);
-    server.stop_event.waitUncancelable(io);
-    server.start_done.waitUncancelable(io);
-    if (server.rollback) return;
-    const grace_end: core.Deadline = .after(std.Io.Clock.awake.now(io), server.settings.shutdown_grace);
-    server.backend.stopAccepting(io);
+    server.internal.stop_event.waitUncancelable(io);
+    server.internal.start_done.waitUncancelable(io);
+    if (server.internal.rollback) return;
+    const grace_end: core.Deadline = .after(std.Io.Clock.awake.now(io), server.internal.settings.shutdown_grace);
+    server.internal.backend.stopAccepting(io);
     flow.closeStreams(server, io);
     server.waitIdle(io, grace_end);
-    server.grace_over.set(io);
-    server.backend.cancelAll(io);
-    server.backend.wait(io);
+    server.internal.grace_over.set(io);
+    server.internal.backend.cancelAll(io);
+    server.internal.backend.wait(io);
     server.markStopped(io);
 }
 
@@ -683,33 +689,18 @@ fn runLifecycle(server: *Server, io: std.Io) void {
 /// what was published before. Only the lifecycle task calls it.
 fn waitIdle(server: *Server, io: std.Io, deadline: core.Deadline) void {
     while (true) {
-        server.idle.reset();
+        server.internal.idle.reset();
         // Read-modify-writes, not loads: they order the reset before the
         // `set` of the request or the stream that drops its count last. A
         // plain load may read the count from before that while the reset
         // lands after its `set`, and the stop would sleep through it.
-        if (server.in_flight.fetchAdd(0, .acq_rel) == 0 and server.streams.fetchAdd(0, .acq_rel) == 0) return;
-        waiting.untilSet(&server.idle, io, deadline) catch |err| switch (err) {
+        if (server.internal.in_flight.fetchAdd(0, .acq_rel) == 0 and server.internal.streams.fetchAdd(0, .acq_rel) == 0) return;
+        waiting.untilSet(&server.internal.idle, io, deadline) catch |err| switch (err) {
             error.Timeout => return,
             // The lifecycle task waits with cancelation blocked.
             error.Canceled => unreachable,
         };
     }
-}
-
-/// "" or "/api", "/api/v2": what the router compares, segment by segment,
-/// with the decoded segments of a path; a mount of `.static` too.
-pub fn validPrefix(prefix: []const u8) bool {
-    if (prefix.len == 0) return true;
-    if (prefix[0] != '/') return false;
-    var it = std.mem.splitScalar(u8, prefix[1..], '/');
-    while (it.next()) |s| {
-        if (s.len == 0 or std.mem.eql(u8, s, ".") or std.mem.eql(u8, s, "..")) return false;
-        for (s) |c| {
-            if (!path_rules.literalByte(c)) return false;
-        }
-    }
-    return true;
 }
 
 const testing = std.testing;
@@ -769,33 +760,33 @@ test "Server.init builds the table and deinit frees it" {
         .{ .GET, "/api", "HealthController", "root" },
         .{ .GET, "/api/health", "HealthController", "check" },
     };
-    try testing.expectEqual(want.len, server.routes.len);
-    for (want, server.routes) |w, r| {
+    try testing.expectEqual(want.len, server.internal.routes.len);
+    for (want, server.internal.routes) |w, r| {
         try testing.expectEqual(w[0], r.info.method);
         try testing.expectEqualStrings(w[1], r.info.pattern);
         try testing.expectEqualStrings(w[2], r.info.controller);
         try testing.expectEqualStrings(w[3], r.info.handler);
     }
-    try testing.expectEqual(@as(*anyopaque, &users), server.routes[1].controller);
-    try testing.expectEqual(@as(*anyopaque, &health), server.routes[5].controller);
-    try testing.expectEqualStrings("id", server.routes[2].params[0]);
-    try testing.expectEqual(route_decls.Timeout{ .after = .fromSeconds(5) }, server.routes[1].timeout);
-    try testing.expectEqual(route_decls.Kind.sse, server.routes[3].kind);
-    try testing.expect(server.routes[3].on_close != null and server.routes[2].on_close == null);
-    try testing.expectEqual(3, server.needs.flush.?);
-    try testing.expectEqualStrings("/api", server.prefix);
+    try testing.expectEqual(@as(*anyopaque, &users), server.internal.routes[1].controller);
+    try testing.expectEqual(@as(*anyopaque, &health), server.internal.routes[5].controller);
+    try testing.expectEqualStrings("id", server.internal.routes[2].params[0]);
+    try testing.expectEqual(route_decls.Timeout{ .after = .fromSeconds(5) }, server.internal.routes[1].timeout);
+    try testing.expectEqual(route_decls.Kind.sse, server.internal.routes[3].kind);
+    try testing.expect(server.internal.routes[3].on_close != null and server.internal.routes[2].on_close == null);
+    try testing.expectEqual(3, server.internal.needs.flush.?);
+    try testing.expectEqualStrings("/api", server.internal.prefix);
 
     // The router of the server takes its prefix.
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const values = try arena.alloc([]const u8, server.router.max_params);
-    const m = server.router.match(.DELETE, try normalize(arena, "/api/v1/users/42"), values);
-    try testing.expectEqualStrings("remove", server.routes[m.found.route].info.handler);
+    const values = try arena.alloc([]const u8, server.internal.router.max_params);
+    const m = server.internal.router.match(.DELETE, try normalize(arena, "/api/v1/users/42"), values);
+    try testing.expectEqualStrings("remove", server.internal.routes[m.found.route].info.handler);
     try testing.expectEqualStrings("42", m.found.params[0]);
-    const root = server.router.match(.GET, try normalize(arena, "/api/"), values);
-    try testing.expectEqualStrings("root", server.routes[root.found.route].info.handler);
-    try testing.expectEqual(routing.Match.not_found, server.router.match(.GET, try normalize(arena, "/v1/users"), values));
+    const root = server.internal.router.match(.GET, try normalize(arena, "/api/"), values);
+    try testing.expectEqualStrings("root", server.internal.routes[root.found.route].info.handler);
+    try testing.expectEqual(routing.Match.not_found, server.internal.router.match(.GET, try normalize(arena, "/v1/users"), values));
 }
 
 test "init checks the prefix without I/O" {
@@ -804,8 +795,8 @@ test "init checks the prefix without I/O" {
     defer backend.deinit();
     var server = try init(testing.allocator, .{ .backend = backend.backend(), .controllers = .{&health} });
     defer server.deinit(testing.io);
-    try testing.expectEqualStrings("/", server.routes[0].info.pattern);
-    try testing.expectEqualStrings("/health", server.routes[1].info.pattern);
+    try testing.expectEqualStrings("/", server.internal.routes[0].info.pattern);
+    try testing.expectEqualStrings("/health", server.internal.routes[1].info.pattern);
     try testing.expectEqual(State.configured, server.state());
 
     for ([_][]const u8{ "api", "/api/", "/", "//api", "/a//b", "/a b", "/a%20b", "/./a", "/a/..", "/{x}", "/a?b", "/a#b", "/caf\xc3\xa9" }) |prefix| {
@@ -823,7 +814,7 @@ test "init reads every option of section 4 with its default" {
     {
         var server = try init(testing.allocator, .{ .backend = backend.backend(), .controllers = .{&health} });
         defer server.deinit(testing.io);
-        const s = server.settings;
+        const s = server.internal.settings;
         try testing.expectEqual(dto.UnknownFields.reject, s.unknown_fields.body);
         try testing.expectEqual(dto.UnknownFields.ignore, s.unknown_fields.query);
         try testing.expectEqual(64, s.json.max_depth);
@@ -835,8 +826,8 @@ test "init reads every option of section 4 with its default" {
         try testing.expectEqual(Duration.fromSeconds(10), s.shutdown_grace);
         try testing.expectEqual(Duration.fromSeconds(5), s.finish_timeout);
         try testing.expect(s.trusted_proxies == .all);
-        try testing.expectEqual(0, server.needs.static_mounts);
-        try testing.expectEqual(null, server.needs.flush);
+        try testing.expectEqual(0, server.internal.needs.static_mounts);
+        try testing.expectEqual(null, server.internal.needs.flush);
     }
     {
         // Nested literals, null, a duration in full, a list from the config.
@@ -860,7 +851,7 @@ test "init reads every option of section 4 with its default" {
         };
         defer server.deinit(testing.io);
         testing.allocator.free(cidrs);
-        const s = server.settings;
+        const s = server.internal.settings;
         try testing.expectEqual(dto.UnknownFields.ignore, s.unknown_fields.body);
         try testing.expectEqual(dto.UnknownFields.ignore, s.unknown_fields.query);
         try testing.expectEqual(16, s.json.max_depth);
@@ -980,7 +971,7 @@ test "start refuses a backend without a capability a route needs" {
     var no_stream: FakeBackend = .{ .can = .{ .http1 = true, .flush = true } };
     var with_static = try init(testing.allocator, .{ .backend = no_stream.backend(), .controllers = .{&health}, .static = .{static_files.static("/", .{ .root = "public" })} });
     defer with_static.deinit(io);
-    try testing.expectEqual(1, with_static.needs.static_mounts);
+    try testing.expectEqual(1, with_static.internal.needs.static_mounts);
     try testing.expectError(error.UnsupportedByBackend, with_static.start(io));
     try testing.expectEqual(0, no_stream.starts);
 }

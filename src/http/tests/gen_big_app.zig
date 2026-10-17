@@ -148,7 +148,7 @@ fn write(w: *std.Io.Writer) !void {
         \\    defer server.deinit(std.testing.io);
         \\
     );
-    try w.print("    try std.testing.expectEqual({d}, server.routes.len);\n", .{controllers * routes_per_controller});
+    try w.print("    try std.testing.expectEqual({d}, server.internal.routes.len);\n", .{controllers * routes_per_controller});
     try w.writeAll("}\n");
 }
 

@@ -117,7 +117,7 @@ pub fn serve(server: *Server, io: std.Io, exchange: *Exchange) void {
     var token: core.CancellationToken = .init;
     var body_done: std.Io.Event = .unset;
     // A trusted peer names the client and may give the request's id.
-    const trusted_peer = server.trust.trusts(exchange.client);
+    const trusted_peer = server.internal.trust.trusts(exchange.client);
     var ctx: Context = .{
         .request = .{
             .method = exchange.method,
@@ -127,28 +127,28 @@ pub fn serve(server: *Server, io: std.Io, exchange: *Exchange) void {
                 .io = io,
                 .query = target.query,
                 .body_done = &body_done,
-                .client = proxies.clientAddress(&server.trust, exchange.client, exchange.fields),
+                .client = proxies.clientAddress(&server.internal.trust, exchange.client, exchange.fields),
             },
         },
         .response = .{ .internal = .{
             .arena = arena,
-            .sink = .{ .exchange = exchange, .io = io, .streaming = server.backend.capabilities().streaming_response },
+            .sink = .{ .exchange = exchange, .io = io, .streaming = server.internal.backend.capabilities().streaming_response },
         } },
         .locals = .init(arena),
         .internal = .{
             .io = io,
             .operation = core.Context.root.withTrace(trace).withCancellation(&token),
             .arena = arena,
-            .gpa = server.gpa,
+            .gpa = server.internal.gpa,
             .request_id = ids.newRequestId(io),
             .given_request_id = if (trusted_peer) proxies.requestIdOf(exchange.fields) else null,
             .trace_id = trace.trace_id.toHex(),
-            .max_body_bytes = server.settings.max_body_bytes,
-            .max_query_params = server.settings.max_query_params,
-            .unknown_fields = server.settings.unknown_fields,
-            .json = server.settings.json,
-            .error_handler = server.error_handler,
-            .middleware = .{ .global = server.middleware },
+            .max_body_bytes = server.internal.settings.max_body_bytes,
+            .max_query_params = server.internal.settings.max_query_params,
+            .unknown_fields = server.internal.settings.unknown_fields,
+            .json = server.internal.settings.json,
+            .error_handler = server.internal.error_handler,
+            .middleware = .{ .global = server.internal.middleware },
             .server = server,
         },
     };
@@ -241,7 +241,7 @@ fn finishPhases(server: *Server, ctx: *Context, outcome: mw.Outcome) void {
     const io = ctx.internal.io;
     const protection = io.swapCancelProtection(.blocked);
     defer _ = io.swapCancelProtection(protection);
-    const deadline: core.Deadline = .after(std.Io.Clock.awake.now(io), server.settings.finish_timeout);
+    const deadline: core.Deadline = .after(std.Io.Clock.awake.now(io), server.internal.settings.finish_timeout);
     var operation: core.Context = .root;
     if (ctx.internal.operation.trace) |trace| operation = operation.withTrace(trace);
     ctx.internal.operation = operation.withDeadline(deadline);
@@ -277,23 +277,23 @@ fn finishTask(ctx: *Context, outcome: mw.Outcome, state: *Finish) void {
 
 /// Takes one of the `.max_in_flight` places, unless all are taken.
 fn takeSlot(server: *Server) bool {
-    var current = server.in_flight.load(.monotonic);
-    while (current < server.settings.max_in_flight) {
-        current = server.in_flight.cmpxchgWeak(current, current + 1, .acq_rel, .monotonic) orelse return true;
+    var current = server.internal.in_flight.load(.monotonic);
+    while (current < server.internal.settings.max_in_flight) {
+        current = server.internal.in_flight.cmpxchgWeak(current, current + 1, .acq_rel, .monotonic) orelse return true;
     }
     return false;
 }
 
 fn releaseSlot(server: *Server, io: std.Io) void {
-    if (server.in_flight.fetchSub(1, .acq_rel) == 1) server.idle.set(io);
+    if (server.internal.in_flight.fetchSub(1, .acq_rel) == 1) server.internal.idle.set(io);
 }
 
 /// Takes one of the `.max_streams` places, unless all are taken: for
 /// `subscribe`.
 pub fn takeStream(server: *Server) bool {
-    var current = server.streams.load(.monotonic);
-    while (current < server.settings.max_streams) {
-        current = server.streams.cmpxchgWeak(current, current + 1, .acq_rel, .monotonic) orelse return true;
+    var current = server.internal.streams.load(.monotonic);
+    while (current < server.internal.settings.max_streams) {
+        current = server.internal.streams.cmpxchgWeak(current, current + 1, .acq_rel, .monotonic) orelse return true;
     }
     return false;
 }
@@ -301,7 +301,7 @@ pub fn takeStream(server: *Server) bool {
 /// Gives a place among the streams back; the last one wakes a stop that
 /// waits for the streams to end.
 pub fn releaseStream(server: *Server, io: std.Io) void {
-    if (server.streams.fetchSub(1, .acq_rel) == 1) server.idle.set(io);
+    if (server.internal.streams.fetchSub(1, .acq_rel) == 1) server.internal.idle.set(io);
 }
 
 /// The request of `ctx` leaves the count of `.max_in_flight`: `subscribe`
@@ -315,10 +315,10 @@ pub fn leaveInFlight(ctx: *Context) void {
 /// Ends every stream that runs, at once, and every one that begins after:
 /// for the stop.
 pub fn closeStreams(server: *Server, io: std.Io) void {
-    server.streams_mutex.lockUncancelable(io);
-    defer server.streams_mutex.unlock(io);
-    server.streams_closed = true;
-    var it = server.stream_list.first;
+    server.internal.streams_mutex.lockUncancelable(io);
+    defer server.internal.streams_mutex.unlock(io);
+    server.internal.streams_closed = true;
+    var it = server.internal.stream_list.first;
     while (it) |node| : (it = node.next) {
         const sub: *Subscription = @alignCast(@fieldParentPtr("node", node));
         sub.end(io, .shutdown);
@@ -328,19 +328,19 @@ pub fn closeStreams(server: *Server, io: std.Io) void {
 /// Lists a stream that begins, for the stop; false once the stop has
 /// closed the streams.
 fn listStream(server: *Server, io: std.Io, sub: *Subscription) bool {
-    server.streams_mutex.lockUncancelable(io);
-    defer server.streams_mutex.unlock(io);
-    if (server.streams_closed) return false;
-    server.stream_list.append(&sub.node);
+    server.internal.streams_mutex.lockUncancelable(io);
+    defer server.internal.streams_mutex.unlock(io);
+    if (server.internal.streams_closed) return false;
+    server.internal.stream_list.append(&sub.node);
     sub.listed = true;
     return true;
 }
 
 fn unlistStream(server: *Server, io: std.Io, sub: *Subscription) void {
     if (!sub.listed) return;
-    server.streams_mutex.lockUncancelable(io);
-    defer server.streams_mutex.unlock(io);
-    server.stream_list.remove(&sub.node);
+    server.internal.streams_mutex.lockUncancelable(io);
+    defer server.internal.streams_mutex.unlock(io);
+    server.internal.stream_list.remove(&sub.node);
     sub.listed = false;
 }
 
@@ -360,7 +360,7 @@ fn unlistStream(server: *Server, io: std.Io, sub: *Subscription) void {
 fn serveStream(server: *Server, ctx: *Context, sub: *Subscription, reason: Reason, started: std.Io.Timestamp) bool {
     const io = ctx.internal.io;
     const exchange = ctx.request.internal.exchange;
-    const route = &server.routes[ctx.internal.route_index.?];
+    const route = &server.internal.routes[ctx.internal.route_index.?];
     var failure: ?anyerror = switch (reason) {
         .done => |result| if (result) |_| null else |err| err,
         .deadline => error.RequestTimeout,
@@ -405,7 +405,7 @@ fn serveStream(server: *Server, ctx: *Context, sub: *Subscription, reason: Reaso
         call(route.controller, &closing);
     }
     // Publishers reach it no more; the last touch of its manager.
-    sub.manager.remove(io, sub);
+    sse.Manager.Internal.remove(sub.manager, io, sub);
     sub.token.cancel();
     finishPhases(server, ctx, .{
         .status = res.status_sent orelse 0,
@@ -467,14 +467,14 @@ fn find(server: *Server, ctx: *Context) Found {
     if (std.mem.eql(u8, ctx.request.path, "*")) {
         // `OPTIONS *` asks about the server, not a path.
         if (ctx.request.method != .OPTIONS) return .{ .failed = error.InvalidRequest };
-        return .{ .match = .{ .options = server.router.serverAllow() } };
+        return .{ .match = .{ .options = server.internal.router.serverAllow() } };
     }
     const normalized = path.normalize(arena, ctx.request.path) catch |err| return .{ .failed = err };
-    const values = arena.alloc([]const u8, server.router.max_params) catch |err| return .{ .failed = err };
-    const match = server.router.match(ctx.request.method, normalized, values);
+    const values = arena.alloc([]const u8, server.internal.router.max_params) catch |err| return .{ .failed = err };
+    const match = server.internal.router.match(ctx.request.method, normalized, values);
     // The routes of the controllers come first.
     if (match == .not_found) {
-        if (static_files.find(server.mounts, server.prefix, normalized)) |target| return .{ .static = target };
+        if (static_files.find(server.internal.mounts, server.internal.prefix, normalized)) |target| return .{ .static = target };
     }
     return .{ .match = match };
 }
@@ -489,9 +489,9 @@ fn budgetOf(server: *const Server, found: Found) ?std.Io.Duration {
             else => null,
         },
         .static, .failed => null,
-    } orelse return server.settings.request_timeout;
-    return switch (server.routes[index].timeout) {
-        .server => server.settings.request_timeout,
+    } orelse return server.internal.settings.request_timeout;
+    return switch (server.internal.routes[index].timeout) {
+        .server => server.internal.settings.request_timeout,
         .none => null,
         .after => |budget| budget,
     };
@@ -504,12 +504,12 @@ fn budgetOf(server: *const Server, found: Found) ?std.Io.Duration {
 fn bodyLimitOf(server: *const Server, found: Found) usize {
     const own: ?usize = switch (found) {
         .match => |match| switch (match) {
-            .found => |f| server.routes[f.route].max_body_bytes,
+            .found => |f| server.internal.routes[f.route].max_body_bytes,
             else => null,
         },
         .static, .failed => null,
     };
-    return own orelse server.settings.max_body_bytes;
+    return own orelse server.internal.settings.max_body_bytes;
 }
 
 /// Waits for the first end of a request: its task or its watcher, else
@@ -564,7 +564,7 @@ fn requestTask(server: *Server, ctx: *Context, found: Found, race: *Race) void {
 fn runRequest(server: *Server, ctx: *Context, found: Found) anyerror!void {
     // Before the route is applied: a preflight, an unknown path and a
     // method the path does not take reach the server's middleware too.
-    if (try mw.runPhases(ctx, server.middleware)) return;
+    if (try mw.runPhases(ctx, server.internal.middleware)) return;
     const match = switch (found) {
         .match => |match| match,
         .static => |target| return static_files.open(server, ctx, target),
@@ -572,7 +572,7 @@ fn runRequest(server: *Server, ctx: *Context, found: Found) anyerror!void {
     };
     switch (match) {
         .found => |f| {
-            const route = &server.routes[f.route];
+            const route = &server.internal.routes[f.route];
             ctx.internal.route = route.info;
             ctx.internal.route_index = f.route;
             ctx.internal.param_names = route.params;

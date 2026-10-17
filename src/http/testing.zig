@@ -16,13 +16,13 @@ pub const OpenError = backend.OpenError;
 /// The requests of `server` at work now, those `.max_in_flight` counts: 0
 /// once every request has ended, whatever its outcome.
 pub fn inFlight(server: *const Server) u32 {
-    return server.in_flight.load(.acquire);
+    return server.internal.in_flight.load(.acquire);
 }
 
 /// The SSE streams of `server` open now, those `.max_streams` counts: 0
 /// once every stream has ended, however it ended.
 pub fn openStreams(server: *const Server) u32 {
-    return server.streams.load(.acquire);
+    return server.internal.streams.load(.acquire);
 }
 
 /// The chain of the route `method` `pattern` of a server built from

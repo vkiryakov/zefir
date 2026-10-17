@@ -475,7 +475,7 @@ pub fn runPhases(ctx: *Context, links: []const Link) anyerror!bool {
 
 /// The hook of the response before its head goes out: the `onResponse`
 /// phases of the links the request reached, in order.
-pub fn beforeHead(ctx: *Context) Context.Response.BeforeHead {
+pub fn beforeHead(ctx: *Context) Context.Response.Internal.BeforeHead {
     return .{ .ptr = ctx, .call = onResponsePhases };
 }
 
