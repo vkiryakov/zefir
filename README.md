@@ -51,7 +51,7 @@ Take any module on its own, or all the finished ones at once through the umbrell
 | `zefir-events`                     | Typed in-process event bus                                                                                 | 📋 Planned                                               |
 | `zefir-retry`                      | Retry policies, backoff, jitter, circuit breaker                                                           | 📋 Planned                                               |
 | **Networking & Communication**     |                                                                                                            |                                                         |
-| `zefir-http`                       | HTTP server, REST API, routing, middleware, WebSocket, SSE                                                 | 📋 Planned                                               |
+| `zefir-http`                       | HTTP server, REST API, routing, middleware, WebSocket, SSE                                                 | 🚧 In progress                                           |
 | `zefir-rpc`                        | Typed RPC with pluggable transports: NATS now, HTTP (Connect) and TCP later                                | ✅ Done · [docs](src/rpc/examples/README.md)             |
 | `zefir-rpc-nats`                   | NATS transport for `zefir-rpc`: request-reply, ADR-32 errors, NATS micro discovery                         | ✅ Done · [docs](src/rpc-nats/examples/README.md)        |
 | `zefir-rpc-log`                    | Access logs of `zefir-rpc` calls on `zefir-log`: one record per call, never bodies or credentials          | ✅ Done · [docs](src/rpc/examples/README.md#access-logs) |

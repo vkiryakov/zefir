@@ -91,6 +91,12 @@ jobs:
         shell: bash
         working-directory: tests/rpc-nats
         run: zig build check --summary all
+      # The same for tests/http, the code of zefir-http on zio: its probes
+      # run only in http-probes.
+      - if: contains(format(' {0} ', env.MODULES), ' http ')
+        shell: bash
+        working-directory: tests/http
+        run: zig build check --summary all
 
   # The tests again under ThreadSanitizer; it does not build for Windows.
   tsan:
@@ -147,6 +153,7 @@ jobs:
       - run: >-
           zig fmt --check build.zig build.zig.zon src tests examples
           --exclude tests/nats/zig-pkg --exclude tests/rpc-nats/zig-pkg
+          --exclude tests/http/zig-pkg
           --exclude examples/rpc-custom-transport/zig-pkg
           --exclude examples/rpc-custom-transport/consumer/zig-pkg
 
@@ -214,3 +221,27 @@ jobs:
       - name: Stop the NATS servers
         if: always()
         run: docker compose down
+
+  # The probes of tests/http: how zio behaves on each system for zefir-http,
+  # that is read and write timeouts, the socket watcher of a request and
+  # the cost of the tasks of a request, on one executor and on four. They
+  # print what they measure, for a person to read: the job is informational,
+  # runs only in a manual run (gh workflow run CI) and never fails the run.
+  http-probes:
+    name: http-probes (${{ matrix.os }})
+    needs: changes
+    if: github.event_name == 'workflow_dispatch' && contains(format(' {0} ', needs.changes.outputs.modules), ' http ')
+    timeout-minutes: 15
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: mlugg/setup-zig@v2
+      - name: Run the probes
+        shell: bash
+        working-directory: tests/http
+        run: zig build probes --summary all

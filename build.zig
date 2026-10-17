@@ -2,6 +2,7 @@ const std = @import("std");
 const manifest = @import("build.zig.zon");
 const validator_cases = @import("src/validator/testdata/cases.zig");
 const rpc_guide = @import("src/rpc/examples/cases.zig");
+const http_cases = @import("src/http/tests/cases.zig");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -106,7 +107,18 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // Umbrella module: @import("zefir").core, .log, .confy, .validator, .rpc, .rpc_nats, .rpc_log, .orm, .nats
+    const http = b.addModule("zefir-http", .{
+        .root_source_file = b.path("src/http/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+        .imports = &.{
+            .{ .name = "core", .module = core },
+            .{ .name = "validator", .module = validator },
+        },
+    });
+
+    // Umbrella module: @import("zefir").core, .log, .confy, .validator, .rpc, .rpc_nats, .rpc_log, .orm, .nats, .http
     const zefir = b.addModule("zefir", .{
         .root_source_file = b.path("src/zefir.zig"),
         .target = target,
@@ -122,6 +134,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "rpc-log", .module = rpc_log },
             .{ .name = "orm", .module = orm },
             .{ .name = "nats", .module = nats },
+            .{ .name = "http", .module = http },
         },
     });
 
@@ -139,14 +152,15 @@ pub fn build(b: *std.Build) void {
     const test_rpc_log = addModuleTestStep(b, test_step, "rpc-log");
     const test_orm = addModuleTestStep(b, test_step, "orm");
     const test_nats = addModuleTestStep(b, test_step, "nats");
+    const test_http = addModuleTestStep(b, test_step, "http");
     const test_zefir = addModuleTestStep(b, test_step, "zefir");
     // Builds the validator's test binaries without running them, so that
     // `-Dtarget` may name another system: CI builds them for x86-linux-musl,
     // where usize has 32 bits.
     const validator_compile_step = b.step("compile-validator-tests", "Build the validator's test binaries for -Dtarget without running them");
     for (
-        [_]*std.Build.Module{ core, log, confy, validator, rpc, rpc_nats, rpc_log, orm, nats, zefir },
-        [_]*std.Build.Step{ test_core, test_log, test_confy, test_validator, test_rpc, test_rpc_nats, test_rpc_log, test_orm, test_nats, test_zefir },
+        [_]*std.Build.Module{ core, log, confy, validator, rpc, rpc_nats, rpc_log, orm, nats, http, zefir },
+        [_]*std.Build.Step{ test_core, test_log, test_confy, test_validator, test_rpc, test_rpc_nats, test_rpc_log, test_orm, test_nats, test_http, test_zefir },
     ) |module, module_test_step| {
         const tests = b.addTest(.{ .root_module = module });
         module_test_step.dependOn(&addRun(b, tests, tsan).step);
@@ -154,6 +168,7 @@ pub fn build(b: *std.Build) void {
     }
 
     addValidatorTests(b, test_validator, validator_compile_step, validator, log, target, optimize, tsan);
+    addHttpCompileChecks(b, test_http, http, validator, target, optimize);
 
     // core examples: `zig build test` builds and runs them; an example that
     // exits with an error fails the step.
@@ -1064,4 +1079,54 @@ fn addValidatorTests(
     });
     test_step.dependOn(&b.addRunArtifact(readme_test).step);
     compile_step.dependOn(&readme_test.step);
+}
+
+/// The compile checks of zefir-http, from the lists in
+/// src/http/tests/cases.zig: client code that must fail to compile with
+/// its message, and client code that must compile. Each file imports
+/// "http" and "validator".
+fn addHttpCompileChecks(
+    b: *std.Build,
+    test_step: *std.Build.Step,
+    http: *std.Build.Module,
+    validator: *std.Build.Module,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+) void {
+    const imports: []const std.Build.Module.Import = &.{
+        .{ .name = "http", .module = http },
+        .{ .name = "validator", .module = validator },
+    };
+    // Each fixture is compiled (never run) and passes only when the
+    // compilation fails with an error whose message is `expect`.
+    // `.contains` matches the end of an error line, so `error: ` in front
+    // makes `expect` the whole message, from its start; a fixture whose
+    // message starts with a type name, which depends on the file, matches
+    // only the end of the line.
+    for (http_cases.compile_errors) |fixture| {
+        const t = b.addTest(.{
+            .name = std.fs.path.stem(fixture.file),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(fixture.file),
+                .target = target,
+                .optimize = optimize,
+                .imports = imports,
+            }),
+        });
+        t.expect_errors = .{ .contains = if (fixture.whole) b.fmt("error: {s}", .{fixture.expect}) else fixture.expect };
+        test_step.dependOn(&t.step);
+    }
+    // Built and not run: they only have to compile.
+    for (http_cases.must_compile) |file| {
+        const t = b.addTest(.{
+            .name = std.fs.path.stem(file),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(file),
+                .target = target,
+                .optimize = optimize,
+                .imports = imports,
+            }),
+        });
+        test_step.dependOn(&t.step);
+    }
 }
