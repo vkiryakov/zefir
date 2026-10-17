@@ -356,7 +356,8 @@ fn keep(w: *Writer, bytes: []const u8) usize {
 /// with CR, LF, NUL or another control character but HTAB.
 /// `ReservedHeader`: a field the backend writes itself, from the body and
 /// the connection: `Content-Length`, `Transfer-Encoding`, `Connection`,
-/// `Keep-Alive`, `TE`, `Trailer`, `Upgrade` and `Date`.
+/// `Keep-Alive`, `TE`, `Trailer`, `Upgrade` and `Date`; and `Set-Cookie`,
+/// a field per cookie, which `setCookie` adds.
 /// `ResponseCommitted`: the head of the response has gone to the client,
 /// or, for a body, a stream or a file has taken it.
 pub const SetError = error{ InvalidHeaderValue, ReservedHeader, ResponseCommitted, OutOfMemory };
@@ -400,7 +401,8 @@ pub fn state(r: *const Response) State {
 }
 
 /// Sets the header field `name` to `value`, in place of a field of that
-/// name set before (names are case-insensitive). Both are copied.
+/// name set before (names are case-insensitive). Both are copied. A cookie
+/// goes with `setCookie`: `Set-Cookie` here is `error.ReservedHeader`.
 pub fn setHeader(r: *Response, name: []const u8, value: []const u8) SetError!void {
     try r.checkField(name, value);
     return r.putField(name, try r.internal.arena.dupe(u8, value));
@@ -700,6 +702,8 @@ fn checkField(r: *const Response, name: []const u8, value: []const u8) SetError!
     for (reserved_names) |reserved| {
         if (std.ascii.eqlIgnoreCase(name, reserved)) return error.ReservedHeader;
     }
+    // A field per cookie: setting it would replace one of setCookie's.
+    if (std.ascii.eqlIgnoreCase(name, "set-cookie")) return error.ReservedHeader;
 }
 
 /// Sets the field `name` to `value`, which lives in the arena already.
@@ -811,6 +815,13 @@ test "setHeader refuses the fields the backend writes itself, in any case" {
     try r.setHeader("x-date", "1");
     try r.setHeader("tea", "1");
     try testing.expectEqual(3, r.internal.headers.items.len);
+
+    // Set-Cookie is setCookie's, a field per cookie: setHeader would
+    // replace the first of them.
+    try r.setCookie(.{ .name = "session", .value = "s1" });
+    try testing.expectError(error.ReservedHeader, r.setHeader("set-cookie", "theme=dark"));
+    try testing.expectError(error.ReservedHeader, r.setHeaderFmt("Set-Cookie", "theme={s}", .{"dark"}));
+    try testing.expectEqualStrings("session=s1; Path=/", r.internal.headers.items[3].value);
 }
 
 test "text, html and json set the body and its type; status is chainable" {
