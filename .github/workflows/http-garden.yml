@@ -19,7 +19,12 @@ on:
     paths:
       - src/http/h1/**
       - src/http/native/**
+      - src/http/native.zig
+      # The exchange that the echo answers through.
+      - src/http/Backend.zig
       - tests/http/garden/**
+      # The step that builds the echo.
+      - tests/http/build.zig
       - .github/workflows/http-garden.yml
   workflow_dispatch:
 
