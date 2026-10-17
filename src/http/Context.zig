@@ -203,7 +203,7 @@ fn readWhole(ctx: *Context) BodyError![]const u8 {
             if (bytes.items.len > limit) return error.PayloadTooLarge;
         }
     }
-    // The body has been read to its end: the guard watches the connection.
+    // The body has been read to its end: the watcher watches the connection.
     if (ctx.request.internal.body_done) |done| done.set(ctx.internal.io);
     return bytes.items;
 }

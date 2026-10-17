@@ -32,7 +32,7 @@
 //!   that follow a head stay in the buffer for the next one. The arena of
 //!   the requests keeps at most 64 KiB between them.
 //! - **The watcher.** Once a request's body has been read, the server's
-//!   guard calls `watch`: it reads ahead into the buffer, so a client that
+//!   watcher calls `watch`: it reads ahead into the buffer, so a client that
 //!   leaves (or half-closes) is seen at once, and the bytes it reads stay
 //!   for the next request.
 //!
@@ -657,8 +657,10 @@ fn failBody(conn: *Connection, failure: ?Exchange.BodyFailure) void {
 
 /// Reads ahead into the buffer until the client goes or `deadline` passes:
 /// what it reads stays for the next request. With the buffer full it reads
-/// no more and waits for the deadline. The server's guard calls it once
-/// the body has been read, so nothing else reads the socket meanwhile.
+/// no more and waits for the deadline. The server's watcher calls it once
+/// the body has been read, so nothing else reads the socket meanwhile; it
+/// gives no deadline, so the read is one operation without a timer, and a
+/// read canceled as it completes keeps its bytes.
 fn watch(ptr: *anyopaque, io: std.Io, deadline: std.Io.Timeout) Exchange.Watch {
     const conn = of(ptr);
     const limit: ?core.Deadline = switch (deadline) {

@@ -2,11 +2,12 @@
 //! on the task the backend runs it on, the connection's. The request gets
 //! its context: its trace and id, its deadline (the route's `.timeout`, or
 //! the server's `.request_timeout`) and a cancelation token of its own.
-//! Then two tasks race in an `Io.Select`: the request (the route, the
-//! handler, the response it writes) and its guard, which waits for the
-//! deadline and, once the body has been read, watches the connection for a
-//! client that leaves. Whichever ends first decides; the server keeps the
-//! reason itself, since a canceled task sees only `error.Canceled`:
+//! Then two tasks race: the request (the route, the handler, the response
+//! it writes) and its watcher, which, once the body has been read, watches
+//! the connection for a client that leaves; the connection's task waits
+//! for the first of them until the deadline. Whichever ends first decides;
+//! the server keeps the reason itself, since a canceled task sees only
+//! `error.Canceled`:
 //!
 //! - the request ended: its response. A handler that wrote nothing
 //!   answers 204, an `http.Json(T)` its value, an error what the server's
@@ -58,10 +59,20 @@ fn serveErased(ptr: *anyopaque, io: std.Io, exchange: *Exchange) void {
     serve(@ptrCast(@alignCast(ptr)), io, exchange);
 }
 
-/// The two tasks of a request and what each returns.
-const Task = union(enum) {
-    request: anyerror!void,
-    guard: Exchange.Watch,
+/// The race of a request's two tasks and of its deadline: the first to
+/// end claims it, once, and sets `decided`.
+const Race = struct {
+    decided: std.Io.Event = .unset,
+    winner: std.atomic.Value(Winner) = .init(.none),
+    /// The handler's result, once the request has claimed the race.
+    result: anyerror!void = {},
+
+    const Winner = enum(u8) { none, request, client_gone, deadline, shutdown };
+
+    /// Claims the race for `who`; false when another ended first.
+    fn claim(r: *Race, who: Winner) bool {
+        return r.winner.cmpxchgStrong(.none, who, .acq_rel, .acquire) == null;
+    }
 };
 
 /// What ended a request, as the server keeps it.
@@ -122,34 +133,26 @@ pub fn serve(server: *Server, io: std.Io, exchange: *Exchange) void {
     const found = find(server, &ctx);
     const deadline: ?core.Deadline = if (budgetOf(server, found)) |budget| .after(ctx.now(), budget) else null;
     if (deadline) |d| ctx.internal.operation = ctx.internal.operation.withDeadline(d);
-    // Without a body, the guard watches the connection at once.
+    // Without a body, the watcher watches the connection at once.
     if (exchange.bodyLength() == 0) body_done.set(io);
 
-    var buffer: [2]Task = undefined;
-    var select: std.Io.Select(Task) = .init(io, &buffer);
-    // The guard first: without a task for the request, no handler has begun.
-    select.concurrent(.guard, guard, .{ io, exchange, deadline, &body_done }) catch
+    var race: Race = .{};
+    var tasks: std.Io.Group = .init;
+    // The watcher first: without a task for the request, no handler has
+    // begun.
+    tasks.concurrent(io, watcher, .{ io, exchange, &body_done, &race }) catch
         return unavailable(&ctx, exchange);
-    select.concurrent(.request, runRequest, .{ server, &ctx, found }) catch {
-        select.cancelDiscard();
+    tasks.concurrent(io, requestTask, .{ server, &ctx, found, &race }) catch {
+        tasks.cancel(io);
         return unavailable(&ctx, exchange);
     };
     var canceled = false;
-    const reason: Reason = if (select.await()) |first| switch (first) {
-        .request => |result| .{ .done = result },
-        .guard => |watch| switch (watch) {
-            .deadline => .deadline,
-            .client_gone => .client_gone,
-        },
-    } else |_| reason: {
-        canceled = true;
-        break :reason .shutdown;
-    };
+    const reason = firstOf(&race, io, deadline, &canceled);
     // A deadline leaves the token alone (design section 17).
     if (reason == .client_gone or reason == .shutdown) token.cancel();
-    // Cancels the other task and waits for it: from here on, only this
+    // Cancels the other task and waits for both: from here on, only this
     // task touches the context.
-    select.cancelDiscard();
+    tasks.cancel(io);
     switch (reason) {
         .done => |result| respond(&ctx, exchange, result),
         .deadline => respond(&ctx, exchange, error.RequestTimeout),
@@ -215,18 +218,54 @@ fn budgetOf(server: *const Server, found: Found) ?std.Io.Duration {
     };
 }
 
-/// The guard of a request: the deadline, and the connection once the body
-/// has been read, so that one task at a time reads it. The request's end
-/// cancels the guard, and its value is then dropped.
-fn guard(io: std.Io, exchange: *Exchange, deadline: ?core.Deadline, body_done: *std.Io.Event) Exchange.Watch {
-    if (deadline) |d| {
-        waiting.untilSet(body_done, io, d) catch return .deadline;
-    } else body_done.wait(io) catch return .deadline;
-    return exchange.watch(io, if (deadline) |d| d.toTimeout() else .none);
+/// Waits for the first end of a request: its task or its watcher, else
+/// the deadline, else the stop, which cancels the connection's task (then
+/// `canceled`).
+fn firstOf(race: *Race, io: std.Io, deadline: ?core.Deadline, canceled: *bool) Reason {
+    const waited = if (deadline) |d| waiting.untilSet(&race.decided, io, d) else race.decided.wait(io);
+    waited catch |err| switch (err) {
+        error.Timeout => if (race.claim(.deadline)) return .deadline,
+        error.Canceled => {
+            canceled.* = true;
+            if (race.claim(.shutdown)) return .shutdown;
+        },
+    };
+    // A task claimed the race; it sets the event right after.
+    race.decided.waitUncancelable(io);
+    return switch (race.winner.load(.acquire)) {
+        .request => .{ .done = race.result },
+        .client_gone => .client_gone,
+        .none, .deadline, .shutdown => unreachable,
+    };
 }
 
-/// The request task: the route and its handler, or the error that answers
-/// the request.
+/// The watcher of a request: the connection, once the body has been read,
+/// so that one task at a time reads it; a client that leaves claims the
+/// race. Its read has no time limit of its own, the deadline being the
+/// connection task's: canceled once the request has ended, a read keeps
+/// what it took, for the next request (a read with a timeout may drop it
+/// when it is canceled: a runtime that reads by completion, such as zio on
+/// Windows, has the bytes before the cancelation comes).
+fn watcher(io: std.Io, exchange: *Exchange, body_done: *std.Io.Event, race: *Race) void {
+    body_done.wait(io) catch return;
+    switch (exchange.watch(io, .none)) {
+        .client_gone => if (race.claim(.client_gone)) race.decided.set(io),
+        // Without a deadline only a canceled watch ends.
+        .deadline => {},
+    }
+}
+
+/// The request task: the handler's result claims the race, unless the
+/// deadline, the client or the stop came first.
+fn requestTask(server: *Server, ctx: *Context, found: Found, race: *Race) void {
+    const result = runRequest(server, ctx, found);
+    if (race.claim(.request)) {
+        race.result = result;
+        race.decided.set(ctx.internal.io);
+    }
+}
+
+/// The route and its handler, or the error that answers the request.
 fn runRequest(server: *Server, ctx: *Context, found: Found) anyerror!void {
     const match = switch (found) {
         .match => |match| match,
@@ -1423,8 +1462,8 @@ fn requestInto(backend: *TestingBackend, io: std.Io, req: TestingBackend.Request
     out.* = backend.request(io, req) catch null;
 }
 
-/// How many more tasks `scarce_vtable` gives before `Group.concurrent` and
-/// `Select.concurrent` fail with `ConcurrencyUnavailable`.
+/// How many more tasks `scarce_vtable` gives before `Group.concurrent`
+/// fails with `ConcurrencyUnavailable`.
 var tasks_left: std.atomic.Value(u32) = .init(0);
 
 fn concurrentWhileLeft(
@@ -1460,14 +1499,14 @@ test "when the runtime gives no task, the request gets 503" {
     defer testing.log_level = level;
 
     // No task at all: the backend serves on the caller's task, and the
-    // guard gets none.
+    // watcher gets none.
     tasks_left.store(0, .monotonic);
     var none = try b.request(scarce, .{ .method = .GET, .target = "/gated" });
     defer none.deinit();
     try testing.expectEqual(503, none.status);
     try expectProblemCode(&none, "unavailable");
-    // A task for the backend and one for the guard, none for the request:
-    // the guard is canceled.
+    // A task for the backend and one for the watcher, none for the request:
+    // the watcher is canceled.
     tasks_left.store(2, .monotonic);
     var no_request = try b.request(scarce, .{ .method = .GET, .target = "/gated" });
     defer no_request.deinit();

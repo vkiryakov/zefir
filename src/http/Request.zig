@@ -21,7 +21,7 @@ pub const Internal = struct {
     query: []const u8 = "",
     body: ?BodyReader = null,
     /// Set once the body has been read to its end: from then on the
-    /// request's guard watches the connection.
+    /// request's watcher watches the connection.
     body_done: ?*std.Io.Event = null,
     /// `ctx.body()` has taken the body: no reader any more.
     bytes_taken: bool = false,
