@@ -8,5 +8,7 @@ test {
     _ = @import("responses.zig");
     _ = @import("static.zig");
     _ = @import("sse.zig");
+    _ = @import("load.zig");
+    _ = @import("shutdown.zig");
     _ = @import("counting_allocator.zig");
 }

@@ -1,8 +1,11 @@
 //! SSE on `http.native` over loopback TCP, on zio: the head of a stream at
 //! once, events in the order they were published, a heartbeat while none
 //! comes, the end of the stream when the client leaves, and its last chunk
-//! when the server closes it. Each scenario runs on one executor, then on
-//! four.
+//! when the server closes it, after which the connection serves the next
+//! request; a stream to an HTTP/1.0 client, which ends with the
+//! connection; and a client that reads nothing, which holds `close(key)`
+//! only until the write timeout. Each scenario runs on one executor, then
+//! on four.
 
 const std = @import("std");
 const http = @import("http");
@@ -25,7 +28,12 @@ const App = struct {
 
     pub const http_routes = http.routes(.{ .methods = .{
         .events = http.sse.get("/events", .{ .heartbeat = std.Io.Duration.fromMilliseconds(200), .on_close = .eventsClosed }),
+        .hello = http.get("/hello", .{}),
     } });
+
+    pub fn hello(_: *App, ctx: *http.Context) !void {
+        try ctx.response.text("hello");
+    }
 
     pub fn events(self: *App, ctx: *http.sse.Context) !void {
         _ = try self.live.subscribe(ctx, "all");
@@ -46,10 +54,14 @@ const Fixture = struct {
     server: http.Server,
 
     fn start(f: *Fixture, io: Io) !void {
-        f.live = .init(gpa, .{});
+        return f.startWith(io, .{}, .{});
+    }
+
+    fn startWith(f: *Fixture, io: Io, options: http.sse.ManagerOptions, timeouts: http.native.Timeouts) !void {
+        f.live = .init(gpa, options);
         errdefer f.live.deinit(io);
         f.app = .{ .live = &f.live };
-        f.native = try .init(gpa, .{ .address = "127.0.0.1", .port = 0 });
+        f.native = try .init(gpa, .{ .address = "127.0.0.1", .port = 0, .timeouts = timeouts });
         errdefer f.native.deinit();
         f.server = try http.Server.init(gpa, .{ .backend = f.native.backend(), .controllers = .{&f.app} });
         errdefer f.server.deinit(io);
@@ -150,5 +162,81 @@ fn closedByServer(io: Io) !void {
     try testing.expectEqualStrings("text/event-stream", res.header("content-type").?);
     try testing.expectEqualStrings("data: \"last\"\n\n", res.body);
     try e2e.waitCount(io, &f.app.closes, 1, 5000);
+    try waitNoStreams(io, &f.server);
+    // The stream ended whole, so the connection stays: it serves the next
+    // request.
+    try c.send(io, get("/hello"));
+    const next = try c.readResponse(io, arena.allocator(), .{});
+    try testing.expectEqual(200, next.status);
+    try testing.expectEqualStrings("hello", next.body);
+}
+
+test "SSE over the network: to an HTTP/1.0 client the stream goes until the connection closes" {
+    try runtime.forEachRuntime(gpa, http10Stream);
+}
+
+fn http10Stream(io: Io) !void {
+    var dog = try e2e.Watchdog.start(io, "SSE to an HTTP/1.0 client");
+    defer dog.stop(io);
+    var f: Fixture = undefined;
+    try f.start(io);
+    defer f.deinit(io);
+
+    var c = try f.connect(io);
+    defer c.close(io);
+    try c.send(io, "GET /events HTTP/1.0\r\n\r\n");
+    try e2e.waitCount(io, &f.app.subscribed, 1, 5000);
+    try f.publish(io, .{ .data = "one" });
+    try f.publish(io, .{ .data = "two" });
+    f.live.close(io, "all");
+    // No chunks for HTTP/1.0: the events, then the end of the connection.
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const res = try c.readResponse(io, arena.allocator(), .{});
+    try testing.expectEqual(200, res.status);
+    try testing.expectEqual(null, res.header("transfer-encoding"));
+    try testing.expectEqual(null, res.header("content-length"));
+    try testing.expectEqualStrings("close", res.header("connection").?);
+    try testing.expectEqualStrings("data: \"one\"\n\ndata: \"two\"\n\n", res.body);
+    try e2e.waitCount(io, &f.app.closes, 1, 5000);
+    try waitNoStreams(io, &f.server);
+}
+
+/// An event of `slowClient`.
+const piece: [64 << 10]u8 = @splat('s');
+
+test "SSE over the network: a client that reads nothing holds close(key) until the write timeout" {
+    try runtime.forEachRuntime(gpa, slowClient);
+}
+
+fn slowClient(io: Io) !void {
+    var dog = try e2e.Watchdog.start(io, "SSE close(key) and a slow client");
+    defer dog.stop(io);
+    var f: Fixture = undefined;
+    // A queue that takes all the events, and a write timeout of 3 s.
+    try f.startWith(io, .{ .queue = .{ .max_events = 1 << 20, .max_bytes = 64 << 20 } }, .{ .write = .fromSeconds(3) });
+    defer f.deinit(io);
+
+    var c = try f.connect(io);
+    defer c.close(io);
+    try c.send(io, get("/events"));
+    try e2e.waitCount(io, &f.app.subscribed, 1, 5000);
+    // 16 MiB of events that the client never reads: more than the buffers
+    // of the connection hold, so the stream's write waits.
+    for (0..256) |_| try f.publish(io, .{ .data = @as([]const u8, &piece) });
+    // close(key) is soft: the stream first sends what was published
+    // before it, so it stays open...
+    const closed_at = Io.Clock.awake.now(io);
+    f.live.close(io, "all");
+    try io.sleep(.fromMilliseconds(200), .awake);
+    if (f.app.closes.load(.acquire) != 0) {
+        std.debug.print("the stream ended within 200 ms of close(key): 16 MiB fit the buffers of the connection (zio x{d})\n", .{runtime.executors});
+        return error.TestStreamNotHeld;
+    }
+    try testing.expectEqual(1, http.testing.openStreams(&f.server));
+    // ...but only until a write sends nothing for the write timeout: then
+    // the stream is cut.
+    try e2e.waitCount(io, &f.app.closes, 1, 10_000);
+    try e2e.expectWithin("close(key) held by a client that reads nothing", e2e.sinceMs(io, closed_at), 200, 3500);
     try waitNoStreams(io, &f.server);
 }

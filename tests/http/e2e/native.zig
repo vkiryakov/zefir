@@ -128,16 +128,21 @@ pub const Watchdog = struct {
     future: Io.Future(void),
 
     pub fn start(io: Io, name: []const u8) !Watchdog {
-        return .{ .future = try io.concurrent(watch, .{ io, name }) };
+        return startFor(io, name, 60);
+    }
+
+    /// The same with a time of `seconds`, for the scenarios under load.
+    pub fn startFor(io: Io, name: []const u8, seconds: i64) !Watchdog {
+        return .{ .future = try io.concurrent(watch, .{ io, name, seconds }) };
     }
 
     pub fn stop(w: *Watchdog, io: Io) void {
         w.future.cancel(io);
     }
 
-    fn watch(io: Io, name: []const u8) void {
-        io.sleep(.fromSeconds(60), .awake) catch return;
-        std.debug.print("\"{s}\" still runs after 60 s on zio x{d}: a hang\n", .{ name, runtime.executors });
+    fn watch(io: Io, name: []const u8, seconds: i64) void {
+        io.sleep(.fromSeconds(seconds), .awake) catch return;
+        std.debug.print("\"{s}\" still runs after {d} s on zio x{d}: a hang\n", .{ name, seconds, runtime.executors });
         std.process.exit(4);
     }
 };

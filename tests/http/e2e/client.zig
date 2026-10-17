@@ -65,10 +65,16 @@ pub const Client = struct {
 
     /// Connects to `port` on 127.0.0.1.
     pub fn connect(io: Io, gpa: std.mem.Allocator, port: u16) !Client {
+        return connectSized(io, gpa, port, 1 << 20);
+    }
+
+    /// The same, with a buffer of `size` bytes: a response must fit in it.
+    /// Scenarios with hundreds of clients take a small one.
+    pub fn connectSized(io: Io, gpa: std.mem.Allocator, port: u16, size: usize) !Client {
         const address: net.IpAddress = try .parseIp4("127.0.0.1", port);
         const stream = try address.connect(io, .{ .mode = .stream });
         errdefer stream.close(io);
-        return .{ .stream = stream, .gpa = gpa, .buffer = try gpa.alloc(u8, 1 << 20) };
+        return .{ .stream = stream, .gpa = gpa, .buffer = try gpa.alloc(u8, size) };
     }
 
     /// Closes the connection; a second call does nothing.
