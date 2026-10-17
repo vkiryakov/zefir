@@ -23,34 +23,11 @@
 //! pub fn get(self: *TodosV1Controller, ctx: *http.Context) !http.Json(dto.TodoResponse) { ... }
 //! ```
 //!
-//! Status: in progress. So far the module holds its HTTP/1.1 parser
-//! (h1/, internal), the routes of controllers (their declarations, the
-//! checks the compiler makes of them, the router and the normalization of
-//! paths), the server with its lifecycle and the path of a request (each
-//! request in a task of its own, with its deadline, the client that
-//! leaves, the stop and the limit of requests at work), the backend in
-//! memory of `http.testing`, the network backend of `http.native`
-//! (connections, heads, request bodies, responses, keep-alive and the
-//! watcher), `ctx.body()`, the input from strings (`ctx.path`,
-//! `ctx.query`, `ctx.form`, `ctx.headers`, `ctx.cookies`: mapped by
-//! outside names, transformed and checked by the validator), JSON in and
-//! out by the same names (`ctx.json`, `http.Json(T)`,
-//! `ctx.response.json`), the states of a response, cookies, redirects,
-//! files and streamed responses (`ctx.response.setCookie`, `redirect`,
-//! `file`, `stream`, and the buffer of 16 KiB that bodies written as they
-//! go pass through), the client behind trusted proxies, the error
-//! handler with the strict error check at compile time (`mapError`,
-//! `.fallback`, `handle`; `http.ErrorResponse`, `http.Problem`), the
-//! mechanism of the application's middleware on three levels (functions,
-//! types, objects, sets; the phases `run`, `onResponse` and `onFinish`;
-//! `http.onResponse`, `http.onFinish`, `http.MiddlewareResult`,
-//! `http.Outcome`), the typed locals of a request (`ctx.locals`,
-//! `ctx.local`), static files (`http.static`: conditional requests,
-//! ranges, index files, the SPA file, a root that nothing leaves) and
-//! server-sent events (`http.sse.get`, `http.sse.Context`,
-//! `http.sse.Manager`: streams by key, `publish`, `close`, heartbeats, the
-//! queues of slow clients, `.max_streams`, `on_close` and the stop); the
-//! rest of the API comes with the next commits.
+//! The guide, src/http/examples/README.md, builds a whole service step by
+//! step: controllers and routes, the input and the output by `field_rules`,
+//! responses, the error handler and its strict check, middleware of the
+//! application on three levels, static files, server-sent events, tests on
+//! `http.testing`, limits and timeouts, and a graceful stop on zio.
 
 const std = @import("std");
 const route_decls = @import("routes.zig");

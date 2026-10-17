@@ -57,12 +57,17 @@ pub const TokenAuth = struct {
     /// the pages that need no user.
     pub fn run(self: *TokenAuth, ctx: *http.Context) !http.MiddlewareResult {
         const token = bearer(ctx.request.header("authorization")) orelse ctx.request.cookie("session") orelse return .next;
-        for (self.users) |user| {
-            if (!sameToken(token, user.token.expose())) continue;
-            try ctx.locals.put(CurrentUser, .{ .id = user.id, .permissions = user.permissions });
-            return .next;
-        }
+        const user = self.userOf(token) orelse return .next;
+        try ctx.locals.put(CurrentUser, .{ .id = user.id, .permissions = user.permissions });
         return .next;
+    }
+
+    /// The user of `token`; null for a token nobody has.
+    pub fn userOf(self: *const TokenAuth, token: []const u8) ?User {
+        for (self.users) |user| {
+            if (sameToken(token, user.token.expose())) return user;
+        }
+        return null;
     }
 };
 

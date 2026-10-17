@@ -115,7 +115,7 @@ edit examples/other/main.zig                    | core log confy validator rpc r
 edit src/core/root.zig src/nats/root.zig        | core log confy validator rpc rpc-nats rpc-log orm nats http zefir
 edit src/confy/examples/README.md               | confy rpc rpc-nats rpc-log nats http zefir
 edit README.md src/validator/root.zig           | validator rpc rpc-nats rpc-log http zefir
-edit README.md                                  | rpc rpc-nats rpc-log zefir
+edit README.md                                  | rpc rpc-nats rpc-log http zefir
 edit docs/plan.md docs/notes.txt                |
 edit build.zig                                  | core log confy validator rpc rpc-nats rpc-log orm nats http zefir
 edit build.zig.zon                              | core log confy validator rpc rpc-nats rpc-log orm nats http zefir

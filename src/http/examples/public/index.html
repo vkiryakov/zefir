@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Todos</title>
+</head>
+<body>
+<h1>Todos</h1>
+<!-- Shown until the cookie session is there: SessionController sets it. -->
+<form id="login" method="post" action="/api/session" hidden>
+  <input name="token" type="password" placeholder="Token" required>
+  <button>Sign in</button>
+</form>
+<form id="add" hidden>
+  <input name="title" placeholder="What to do" required>
+  <button>Add</button>
+</form>
+<ul id="todos"></ul>
+<script>
+  const list = document.getElementById("todos");
+  const add = document.getElementById("add");
+
+  // The browser sends the cookie session with every request to the site.
+  async function show() {
+    const res = await fetch("/api/v1/todos");
+    if (res.status === 401) {
+      document.getElementById("login").hidden = false;
+      return false;
+    }
+    const page = await res.json();
+    list.replaceChildren(...page.items.map((todo) => {
+      const item = document.createElement("li");
+      item.textContent = todo.done ? todo.title + " (done)" : todo.title;
+      return item;
+    }));
+    add.hidden = false;
+    return true;
+  }
+
+  add.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const title = new FormData(add).get("title");
+    // JSON, as ctx.json asks: a form of another site cannot send it.
+    await fetch("/api/v1/todos", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title }),
+    });
+    add.reset();
+  });
+
+  // Live updates: an EventSource sends the cookie, not Authorization.
+  show().then((signedIn) => {
+    if (!signedIn) return;
+    const live = new EventSource("/api/v1/todos/events");
+    for (const name of ["todo.created", "todo.updated", "todo.deleted"]) live.addEventListener(name, show);
+  });
+</script>
+</body>
+</html>

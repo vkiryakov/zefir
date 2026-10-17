@@ -4,7 +4,7 @@
 
 <p align="center">
   <strong>A modular framework for building services in Zig.</strong><br>
-  Web servers, web services and APIs, built from modules you pick: typed configuration, request deadlines, cancellation, tracing, structured logging, validation, a NATS client and RPC today; an async MongoDB driver with an ODM, and an HTTP server next.
+  Web servers, web services and APIs, built from modules you pick: typed configuration, request deadlines, cancellation, tracing, structured logging, validation, a NATS client, RPC and an HTTP server today; an async MongoDB driver with an ODM next.
 </p>
 
 <p align="center">
@@ -51,7 +51,7 @@ Take any module on its own, or all the finished ones at once through the umbrell
 | `zefir-events`                     | Typed in-process event bus                                                                                 | 📋 Planned                                               |
 | `zefir-retry`                      | Retry policies, backoff, jitter, circuit breaker                                                           | 📋 Planned                                               |
 | **Networking & Communication**     |                                                                                                            |                                                         |
-| `zefir-http`                       | HTTP server, REST API, routing, middleware, WebSocket, SSE                                                 | 🚧 In progress                                           |
+| `zefir-http`                       | HTTP server: REST APIs, routes checked at compile time, middleware, static files, SSE                      | ✅ Done · [docs](src/http/examples/README.md)            |
 | `zefir-rpc`                        | Typed RPC with pluggable transports: NATS now, HTTP (Connect) and TCP later                                | ✅ Done · [docs](src/rpc/examples/README.md)             |
 | `zefir-rpc-nats`                   | NATS transport for `zefir-rpc`: request-reply, ADR-32 errors, NATS micro discovery                         | ✅ Done · [docs](src/rpc-nats/examples/README.md)        |
 | `zefir-rpc-log`                    | Access logs of `zefir-rpc` calls on `zefir-log`: one record per call, never bodies or credentials          | ✅ Done · [docs](src/rpc/examples/README.md#access-logs) |
@@ -291,6 +291,109 @@ $ zig build run
 
 The compiler checks the handler against the contract and the request of every call against the method's type, and a failure of the service, such as `users.not_found`, comes as a value, not an error. On NATS, `rpc_nats.Transport` on a connection to the broker takes the place of the memory transport, and the contract, the handler and the calls stay the same. Validation with zefir-validator on both sides, middleware, authentication, deadlines that travel into nested calls, access logs and a graceful stop are in the guide. **[Read the rpc guide →](src/rpc/examples/README.md)**
 
+## http in a minute
+
+Declare a controller with its routes, give it to a server, and send it requests. Here the server runs on the backend in memory, which needs no network:
+
+```zig
+const std = @import("std");
+const http = @import("http");
+const v = @import("validator");
+
+const Todo = struct { id: u64, title: []const u8 };
+
+// The body of POST: the title is trimmed, then checked.
+const NewTodo = struct {
+    title: []const u8,
+
+    pub const field_rules = .{ .title = .{ v.trim, v.notBlank, v.maxLength(200) } };
+};
+
+// A controller: the routes it declares, and a method for each.
+const TodosV1Controller = struct {
+    gpa: std.mem.Allocator,
+    mutex: std.Io.Mutex = .init,
+    todos: std.ArrayList(Todo) = .empty,
+
+    pub const http_routes = http.routes(.{
+        .prefix = "/v1/todos",
+        .methods = .{
+            .list = http.get("", .{}),
+            .create = http.post("", .{}),
+        },
+    });
+
+    pub fn list(self: *TodosV1Controller, ctx: *http.Context) !http.Json([]const Todo) {
+        try self.mutex.lock(ctx.io());
+        defer self.mutex.unlock(ctx.io());
+        return .{ .value = try ctx.allocator().dupe(Todo, self.todos.items) };
+    }
+
+    pub fn create(self: *TodosV1Controller, ctx: *http.Context) !http.Json(Todo) {
+        // Parsed, trimmed and checked: a body that does not fit never gets here.
+        const body = try ctx.json(NewTodo);
+        try self.mutex.lock(ctx.io());
+        defer self.mutex.unlock(ctx.io());
+        const todo: Todo = .{ .id = self.todos.items.len + 1, .title = try self.gpa.dupe(u8, body.title) };
+        try self.todos.append(self.gpa, todo);
+        return .{ .value = todo, .status = 201 };
+    }
+
+    fn deinit(self: *TodosV1Controller) void {
+        for (self.todos.items) |todo| self.gpa.free(todo.title);
+        self.todos.deinit(self.gpa);
+    }
+};
+
+pub fn main(init: std.process.Init) !void {
+    const gpa = init.gpa;
+    const io = init.io;
+
+    // The backend in memory serves the server without a network; on the
+    // network, http.native.Backend takes its place.
+    var backend: http.testing.Backend = .init(gpa);
+    defer backend.deinit();
+    var todos: TodosV1Controller = .{ .gpa = gpa };
+    defer todos.deinit();
+    var server = try http.Server.init(gpa, .{ .backend = backend.backend(), .prefix = "/api", .controllers = .{&todos} });
+    defer server.deinit(io);
+    try server.start(io);
+
+    var buffer: [1024]u8 = undefined;
+    var stdout = std.Io.File.stdout().writer(io, &buffer);
+    const out = &stdout.interface;
+    for ([_]struct { std.http.Method, []const u8 }{
+        .{ .POST, "{\"title\":\"  Buy milk  \"}" },
+        .{ .POST, "{\"title\":\"   \"}" },
+        .{ .GET, "" },
+    }) |request| {
+        const method, const body = request;
+        var res = try backend.request(io, .{
+            .method = method,
+            .target = "/api/v1/todos",
+            .headers = &.{.{ "content-type", "application/json" }},
+            .body = body,
+        });
+        defer res.deinit();
+        try out.print("{t} /api/v1/todos{s}{s}\n", .{ method, if (body.len > 0) " " else "", body });
+        try out.print("→ {d} {s} {s}\n", .{ res.status, res.header("content-type").?, res.body });
+    }
+    try out.flush();
+}
+```
+
+```text
+$ zig build run
+POST /api/v1/todos {"title":"  Buy milk  "}
+→ 201 application/json {"id":1,"title":"Buy milk"}
+POST /api/v1/todos {"title":"   "}
+→ 422 application/problem+json {"type":"about:blank","title":"Unprocessable Content","status":422,"code":"validation_failed","errors":[{"code":"validation.not_blank","message":"must not be blank","field":"title"}]}
+GET /api/v1/todos
+→ 200 application/json [{"id":1,"title":"Buy milk"}]
+```
+
+The compiler checks the routes and the handlers when it builds the server, `ctx.json(NewTodo)` reads the body by the `field_rules` of the DTO, trims the title and checks it, and a body that does not fit is a 422 that names every field. On the network, `http.native.Backend` on zio takes the place of the backend in memory, and the controller stays the same. Middleware of your own, one error handler for every error, static files, streamed responses, server-sent events and a graceful stop are in the guide. **[Read the http guide →](src/http/examples/README.md)**
+
 ## Installation
 
 Requires **Zig 0.17.0**. Add the dependency to your `build.zig.zon`. This is the `dev` branch, the next version in progress, so the command fetches its latest commit:
@@ -343,7 +446,7 @@ zig fmt --check build.zig build.zig.zon src tests examples \
   --exclude examples/rpc-custom-transport/zig-pkg --exclude examples/rpc-custom-transport/consumer/zig-pkg
 ```
 
-CI tests a pull request only on the modules it affects. A change under `src/<module>/` runs the tests of that module, of every module that depends on it and of `zefir`; a change to `build.zig`, `build.zig.zon`, `src/zefir.zig` or `.github/` runs them all, and documentation outside `src/` runs none, except this README: its "rpc in a minute" is a program that the tests of rpc check. Every push to `dev` and `main` tests all modules. The module graph for this is in `.github/scripts/affected-modules.sh`: a new module goes there as well as into `build.zig`.
+CI tests a pull request only on the modules it affects. A change under `src/<module>/` runs the tests of that module, of every module that depends on it and of `zefir`; a change to `build.zig`, `build.zig.zon`, `src/zefir.zig` or `.github/` runs them all, and documentation outside `src/` runs none, except this README: its "rpc in a minute" and "http in a minute" are programs that the tests of rpc and of http check. Every push to `dev` and `main` tests all modules. The module graph for this is in `.github/scripts/affected-modules.sh`: a new module goes there as well as into `build.zig`.
 
 The end-to-end tests of nats run against real NATS servers in Docker, described by `docker-compose.yml` at the repository root. The tests are a package of their own in `tests/nats`, so zio, the runtime they use, never reaches zefir's users:
 
@@ -370,6 +473,17 @@ zig build down     # stop the servers
 ```
 
 CI treats it as nats: whenever it tests rpc-nats, it builds the package on the three systems and runs it on Linux; a change to `tests/rpc-nats/` counts as a change to rpc-nats, and one to `docker-compose.yml` as a change to both.
+
+The end-to-end tests of http, with the service of its guide, are a package of the same kind in `tests/http`, on zio, and need no servers:
+
+```sh
+cd tests/http
+zig build e2e        # the end-to-end tests, then the service of the guide with its curl commands, checked against the guide
+zig build examples   # only the service of the guide and its check (Linux and macOS)
+zig build check      # build all of it without running it
+```
+
+Whenever CI tests http, it builds the package and runs its end-to-end tests on the three systems; a change to `tests/http/` counts as a change to http.
 
 `examples/rpc-custom-transport` is a transport of rpc in a package of its own, the proof that one can be written outside zefir. Its `consumer/` builds it as an application does, against the zefir of this checkout, and CI runs it whenever it tests rpc; a change to the package counts as a change to rpc:
 

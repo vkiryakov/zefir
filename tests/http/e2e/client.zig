@@ -141,7 +141,9 @@ pub const Client = struct {
         return c.buffer[0..c.len];
     }
 
-    fn consume(c: *Client, n: usize) void {
+    /// Drops the first `n` bytes kept, once a reader of its own has taken
+    /// them.
+    pub fn consume(c: *Client, n: usize) void {
         std.mem.copyForwards(u8, c.buffer[0 .. c.len - n], c.buffer[n..c.len]);
         c.len -= n;
     }
