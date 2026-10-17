@@ -7,6 +7,13 @@ const std = @import("std");
 /// `return .{ .value = .from(todo), .status = 201 };`. The value goes out
 /// as `ctx.response.json` writes it: through the transforms of its
 /// `field_rules`, with the outside names of its fields.
+///
+/// The transforms run when the handler returns; the JSON is written as the
+/// response goes out, through the response's buffer of 16 KiB: a value
+/// that fits goes with `Content-Length`, a larger one chunked, and a long
+/// list is never held whole in memory. So what the value points to lives,
+/// unchanged, until the response has gone out, as memory of the request's
+/// arena (`ctx.allocator()`) does.
 pub fn Json(comptime T: type) type {
     return struct {
         value: T,

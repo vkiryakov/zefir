@@ -62,6 +62,10 @@ pub const Response = struct {
     headers: []const [2][]const u8,
     /// Empty for HEAD, 204 and 304.
     body: []const u8,
+    /// The body as the server handed it over, a piece per write: a body
+    /// held whole is one, a streamed one comes a buffer at a time, and a
+    /// `flush` sends what it has as a piece of its own.
+    chunks: []const []const u8,
     /// The response did not end: the server aborted it, as it does when the
     /// client has gone or the server stops.
     aborted: bool,
@@ -156,6 +160,7 @@ pub fn request(b: *Backend, io: std.Io, req: Request) RequestError!Response {
         .status = rec.status,
         .headers = rec.headers.items,
         .body = rec.body.items,
+        .chunks = rec.chunks.items,
         .aborted = !ended,
         .arena = rec.arena,
     };
@@ -320,6 +325,8 @@ const Recorder = struct {
     status: u16 = 0,
     headers: std.ArrayList([2][]const u8) = .empty,
     body: std.ArrayList(u8) = .empty,
+    /// Each write of the body, kept.
+    chunks: std.ArrayList([]const u8) = .empty,
     kind: Exchange.BodyKind = .none,
     /// Bytes of the body written, kept or not.
     written: u64 = 0,
@@ -351,7 +358,8 @@ const Recorder = struct {
         switch (kind) {
             .none => {},
             .length => |n| rec.headers.appendAssumeCapacity(.{ "content-length", try std.fmt.allocPrint(a, "{d}", .{n}) }),
-            .stream => rec.headers.appendAssumeCapacity(.{ "transfer-encoding", "chunked" }),
+            // A HEAD response has no body to delimit, as on the network.
+            .stream => if (!rec.head_request) rec.headers.appendAssumeCapacity(.{ "transfer-encoding", "chunked" }),
         }
         rec.status = status;
         rec.kind = kind;
@@ -370,7 +378,10 @@ const Recorder = struct {
             .stream => {},
         }
         rec.written += data.len;
-        if (!rec.head_request) try rec.body.appendSlice(rec.arena.allocator(), data);
+        if (rec.head_request or data.len == 0) return;
+        const a = rec.arena.allocator();
+        try rec.body.appendSlice(a, data);
+        try rec.chunks.append(a, try a.dupe(u8, data));
     }
 
     fn flush(rec: *Recorder) Error!void {

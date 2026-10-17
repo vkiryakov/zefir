@@ -123,6 +123,24 @@ pub const Client = struct {
         return true;
     }
 
+    /// Reads until the bytes kept hold `needle`, `timeout` at most, and
+    /// keeps them for `readResponse`: false when they did not come.
+    pub fn readUntil(c: *Client, io: Io, needle: []const u8, timeout: Io.Duration) Error!bool {
+        const deadline: Io.Clock.Timestamp = .fromNow(io, .{ .raw = timeout, .clock = .awake });
+        while (std.mem.find(u8, c.buffer[0..c.len], needle) == null) {
+            c.fill(io, deadline) catch |err| switch (err) {
+                error.Timeout => return false,
+                else => |e| return e,
+            };
+        }
+        return true;
+    }
+
+    /// The bytes kept and not yet part of a response read.
+    pub fn kept(c: *const Client) []const u8 {
+        return c.buffer[0..c.len];
+    }
+
     fn consume(c: *Client, n: usize) void {
         std.mem.copyForwards(u8, c.buffer[0 .. c.len - n], c.buffer[n..c.len]);
         c.len -= n;

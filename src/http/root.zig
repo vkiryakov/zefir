@@ -35,8 +35,11 @@
 //! `ctx.query`, `ctx.form`, `ctx.headers`, `ctx.cookies`: mapped by
 //! outside names, transformed and checked by the validator), JSON in and
 //! out by the same names (`ctx.json`, `http.Json(T)`,
-//! `ctx.response.json`), the states of a response and the client behind
-//! trusted proxies; the rest of the API comes with the next commits.
+//! `ctx.response.json`), the states of a response, cookies, redirects,
+//! files and streamed responses (`ctx.response.setCookie`, `redirect`,
+//! `file`, `stream`, and the buffer of 16 KiB that bodies written as they
+//! go pass through) and the client behind trusted proxies; the rest of the
+//! API comes with the next commits.
 
 const std = @import("std");
 const route_decls = @import("routes.zig");
@@ -107,6 +110,7 @@ test {
     _ = @import("input/json_in.zig");
     _ = @import("output/json_out.zig");
     _ = @import("Response.zig");
+    _ = @import("mime.zig");
     _ = @import("flow.zig");
     _ = @import("wait.zig");
     _ = @import("testing.zig");

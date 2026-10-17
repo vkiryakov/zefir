@@ -94,7 +94,10 @@ pub fn serve(server: *Server, io: std.Io, exchange: *Exchange) void {
                 .client = proxies.clientAddress(&server.trust, exchange.client, exchange.fields),
             },
         },
-        .response = .{ .internal = .{ .arena = arena } },
+        .response = .{ .internal = .{
+            .arena = arena,
+            .sink = .{ .exchange = exchange, .io = io, .streaming = server.backend.capabilities().streaming_response },
+        } },
         .internal = .{
             .io = io,
             .operation = core.Context.root.withTrace(trace).withCancellation(&token),
@@ -251,9 +254,9 @@ fn respond(ctx: *Context, exchange: *Exchange, result: anyerror!void) void {
         .uncommitted => {},
         .committed => {
             const err = if (result) |_| {
-                // Its head and body went out: the end of it.
-                exchange.finish(ctx.internal.io) catch return cut(ctx, exchange);
-                ctx.response.internal.state = .finished;
+                // Its head went out, and the handler is done: what is left
+                // of the body, then the end of it.
+                ctx.response.internal.finishBody() catch return cut(ctx, exchange);
                 return;
             } else |err| err;
             if (!errors.isCancellation(err))
@@ -299,8 +302,7 @@ fn answerBodyFailure(ctx: *Context, exchange: *Exchange, failure: Exchange.BodyF
     const res = &ctx.response.internal;
     dropContentFields(res);
     res.code = status;
-    res.content_type = "text/plain; charset=utf-8";
-    res.body = response.reason(status);
+    res.replaceBody("text/plain; charset=utf-8", response.reason(status));
     send(ctx, exchange);
 }
 
@@ -311,12 +313,11 @@ fn setProblem(ctx: *Context, problem: errors.Problem) void {
     const res = &ctx.response.internal;
     dropContentFields(res);
     res.code = problem.status;
-    res.content_type = "application/problem+json";
-    res.body = json_out.alloc(res.arena, problem, .{ .omit_null_fields = true }) catch internal: {
+    res.replaceBody("application/problem+json", json_out.alloc(res.arena, problem, .{ .omit_null_fields = true }) catch internal: {
         // Out of memory: the problem of every 500, known at compile time.
         res.code = 500;
         break :internal internal_problem;
-    };
+    });
 }
 
 const internal_problem = "{\"type\":\"about:blank\",\"title\":\"Internal Server Error\",\"status\":500,\"code\":\"internal\",\"errors\":[]}";
@@ -340,44 +341,18 @@ fn isContentField(name: []const u8) bool {
 
 /// Sends the response: its status (204 without a body, 200 with one,
 /// unless the handler set it), its fields with `Content-Type`, and its
-/// body; none for HEAD, 204 and 304. The head commits the response; a
+/// body; none for HEAD, 204 and 304. A body held whole goes with its
+/// length; the value of an `http.Json(T)` and what a stream left in the
+/// buffer go through it (`Response`). The head commits the response; a
 /// write that fails cuts it.
 fn send(ctx: *Context, exchange: *Exchange) void {
-    const io = ctx.internal.io;
-    const res = &ctx.response.internal;
-    const code = res.code orelse if (res.body != null) @as(u16, 200) else 204;
-    const fields = fieldsOf(res) catch {
-        log.warn("{s}: out of memory for the fields of the response (request {s})", .{ routeName(ctx), ctx.requestId() });
-        return cut(ctx, exchange);
-    };
-    const body = res.body orelse "";
-    const has_body = code != 204 and code != 304;
-    const kind: Exchange.BodyKind = if (has_body) .{ .length = body.len } else .none;
-    res.state = .committed;
-    write(io, exchange, code, fields, kind, if (has_body and ctx.request.method != .HEAD) body else "") catch
-        return cut(ctx, exchange);
-    res.state = .finished;
-}
-
-fn write(io: std.Io, exchange: *Exchange, code: u16, fields: []const h1.Field, kind: Exchange.BodyKind, body: []const u8) Exchange.WriteError!void {
-    try exchange.writeHead(io, code, fields, kind);
-    if (body.len > 0) try exchange.writeBody(io, body);
-    try exchange.finish(io);
+    ctx.response.internal.send() catch return cut(ctx, exchange);
 }
 
 /// Ends the response broken, or without one: the client sees it cut.
 fn cut(ctx: *Context, exchange: *Exchange) void {
     ctx.response.internal.state = .finished;
     exchange.abort(ctx.internal.io);
-}
-
-/// The fields of the response, `Content-Type` first when there is one.
-fn fieldsOf(res: *const Context.Response.Internal) error{OutOfMemory}![]const h1.Field {
-    const content_type = res.content_type orelse return res.headers.items;
-    const fields = try res.arena.alloc(h1.Field, res.headers.items.len + 1);
-    fields[0] = .{ .name = "content-type", .value = content_type };
-    @memcpy(fields[1..], res.headers.items);
-    return fields;
 }
 
 /// The route for a line of the log: its controller and handler, or the
@@ -623,7 +598,7 @@ const CountingExchange = struct {
             .vtable = &.{
                 .bodyLength = bodyLength,
                 .readBody = undefined,
-                .bodyFailure = undefined,
+                .bodyFailure = bodyFailure,
                 .watch = undefined,
                 .writeHead = writeHead,
                 .writeBody = writeBody,
@@ -646,7 +621,7 @@ const CountingExchange = struct {
         c.exchange.arena = arena;
         return .{
             .request = .{ .method = .GET, .path = "/", .internal = .{ .exchange = &c.exchange, .io = testing.io } },
-            .response = .{ .internal = .{ .arena = arena } },
+            .response = .{ .internal = .{ .arena = arena, .sink = .{ .exchange = &c.exchange, .io = testing.io, .streaming = true } } },
             .internal = .{
                 .io = testing.io,
                 .operation = core.Context.root,
@@ -664,6 +639,10 @@ const CountingExchange = struct {
     }
     fn bodyLength(_: *anyopaque) ?u64 {
         return 0;
+    }
+    /// The body stalled, as a client that stops sending it.
+    fn bodyFailure(_: *anyopaque) ?Exchange.BodyFailure {
+        return .timeout;
     }
     fn writeHead(ptr: *anyopaque, _: std.Io, _: u16, _: []const h1.Field, _: Exchange.BodyKind) Exchange.WriteError!void {
         of(ptr).heads += 1;
@@ -721,6 +700,13 @@ test "a response is written once; after commit an error cuts it" {
     ended_ctx.response.internal.state = .committed;
     respond(&ended_ctx, &ended.exchange, {});
     try ended.expect(0, 1, 0);
+    // A body that failed once the head had gone out: cut, never the 408
+    // of decision 21 after a head of its own.
+    var late_body: CountingExchange = .init();
+    var late_body_ctx = late_body.context(arena);
+    late_body_ctx.response.internal.state = .committed;
+    respond(&late_body_ctx, &late_body.exchange, error.ReadFailed);
+    try late_body.expect(0, 0, 1);
     // A request canceled before its response: cut, once.
     var canceled: CountingExchange = .init();
     var canceled_ctx = canceled.context(arena);

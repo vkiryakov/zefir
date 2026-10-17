@@ -341,7 +341,8 @@ fn freeSettings(gpa: std.mem.Allocator, settings: Settings) void {
 }
 
 /// The handler of a route, type-erased: a JSON value goes out with its
-/// status; `void` leaves the response to what the handler wrote.
+/// status, written through the response's buffer when the response goes
+/// out; `void` leaves the response to what the handler wrote.
 fn HandlerOf(comptime C: type, comptime name: []const u8, comptime kind: route_decls.Kind) type {
     return struct {
         fn handle(ptr: *anyopaque, ctx: *Context) anyerror!void {
@@ -351,7 +352,7 @@ fn HandlerOf(comptime C: type, comptime name: []const u8, comptime kind: route_d
                 .rest => {
                     const result = method(self, ctx);
                     const out = if (@typeInfo(@TypeOf(result)) == .error_union) try result else result;
-                    if (@TypeOf(out) != void) try ctx.response.status(out.status).json(out.value);
+                    if (@TypeOf(out) != void) try ctx.response.status(out.status).internal.setValue(out.value);
                 },
                 .sse => {
                     var stream: sse.Context = .{ .opening = ctx };
