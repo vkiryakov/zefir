@@ -29,9 +29,13 @@ fn identify(ctx: *Context) !mw.MiddlewareResult {
 /// Counts the `onFinish` of the requests and keeps the last outcome.
 const Finisher = struct {
     calls: std.atomic.Value(u32) = .init(0),
+    /// Guards `last`: the streams of a test may end at once.
+    mutex: std.Io.Mutex = .init,
     last: ?mw.Outcome = null,
 
-    pub fn onFinish(self: *Finisher, _: *Context, outcome: mw.Outcome) !void {
+    pub fn onFinish(self: *Finisher, ctx: *Context, outcome: mw.Outcome) !void {
+        self.mutex.lockUncancelable(ctx.io());
+        defer self.mutex.unlock(ctx.io());
         self.last = outcome;
         _ = self.calls.fetchAdd(1, .release);
     }
