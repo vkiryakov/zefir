@@ -757,6 +757,84 @@ test "on_close runs exactly once: client left, overflow, close(key), server stop
     try testing.expectEqual(0, http_testing.openStreams(&f.server));
 }
 
+/// The streams of rooms, whose `.on_close` tells the others of the room,
+/// through the same manager, that someone left.
+const RoomsV1Controller = struct {
+    live: *sse.Manager,
+    subscribed: std.atomic.Value(u32) = .init(0),
+    closes: std.atomic.Value(u32) = .init(0),
+    /// Publishes of `.on_close` that failed.
+    farewells_failed: std.atomic.Value(u32) = .init(0),
+
+    pub const http_routes = routes.routes(.{
+        .prefix = "/v1",
+        .methods = .{ .events = sse.get("/rooms/{room}/events", .{ .on_close = .left }) },
+    });
+
+    pub fn events(self: *RoomsV1Controller, ctx: *sse.Context) !void {
+        const p = try ctx.path(struct { room: []const u8 });
+        _ = try self.live.subscribe(ctx, p.room);
+        _ = self.subscribed.fetchAdd(1, .release);
+    }
+
+    pub fn left(self: *RoomsV1Controller, ctx: *sse.Context) void {
+        const room = if (ctx.path(struct { room: []const u8 })) |p| p.room else |_| "?";
+        self.live.publish(ctx.operation(), ctx.io(), room, .{ .event = "left", .data = ctx.requestId() }) catch {
+            _ = self.farewells_failed.fetchAdd(1, .release);
+        };
+        _ = self.closes.fetchAdd(1, .release);
+    }
+};
+
+/// An `onFinish` that takes its time: the end of each stream goes on after
+/// its manager's `deinit` has returned.
+const SlowFinish = struct {
+    done: std.atomic.Value(u32) = .init(0),
+
+    pub fn onFinish(self: *SlowFinish, ctx: *Context, _: mw.Outcome) !void {
+        try ctx.io().sleep(.fromMilliseconds(50), .awake);
+        _ = self.done.fetchAdd(1, .release);
+    }
+};
+
+test "Manager.deinit while the server runs waits for its streams, which never touch it after" {
+    const io = testing.io;
+    var dog = try Watchdog.start("Manager.deinit while the server runs");
+    defer dog.stop();
+    var live: sse.Manager = .init(testing.allocator, .{});
+    var rooms: RoomsV1Controller = .{ .live = &live };
+    var slow: SlowFinish = .{};
+    var backend: TestingBackend = .init(testing.allocator);
+    defer backend.deinit();
+    var server = try Server.init(testing.allocator, .{ .backend = backend.backend(), .controllers = .{&rooms}, .middleware = .{&slow} });
+    defer server.deinit(io);
+    try server.start(io);
+
+    const a = try backend.open(io, .{ .method = .GET, .target = "/v1/rooms/lobby/events" });
+    defer a.deinit(io);
+    const b = try backend.open(io, .{ .method = .GET, .target = "/v1/rooms/lobby/events" });
+    defer b.deinit(io);
+    try waitCount(&rooms.subscribed, 2);
+    // Each stream sent an event: its queue holds memory of the manager's
+    // allocator.
+    try live.publish(.root, io, "lobby", .{ .data = "hello" });
+    for ([_]*Stream{ a, b }) |s| try testing.expectEqualStrings("data: \"hello\"\n\n", try nextPiece(s));
+
+    // The manager goes while the server runs: it closes both streams and
+    // returns once their .on_close has run, each publishing through it.
+    live.deinit(io);
+    try testing.expectEqual(2, rooms.closes.load(.acquire));
+    try testing.expectEqual(0, rooms.farewells_failed.load(.acquire));
+    // Both ended whole; the farewells came after their ends were decided.
+    for ([_]*Stream{ a, b }) |s| {
+        try expectEnd(s);
+        try testing.expect(!s.aborted());
+    }
+    // The ends go on without the manager: onFinish, then the places.
+    try waitCount(&slow.done, 2);
+    try waitStreams(&server, 0);
+}
+
 test "stream slots come back after every way a stream ends" {
     // Review focus 2: 100 streams ended by each way (the client left,
     // close(key), an overflow, a failure after subscribe), four at a time

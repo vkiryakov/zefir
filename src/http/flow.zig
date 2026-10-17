@@ -335,9 +335,11 @@ fn unlistStream(server: *Server, io: std.Io, sub: *Subscription) void {
 /// last chunk when the server closed the stream, cut otherwise. A request
 /// that did not end well after `subscribe` (its handler failed, its
 /// deadline passed, its client left) ends its stream at once. Then come
-/// the route's `.on_close`, once, with the subscription's context, the
-/// `onFinish` phases of the request, the values of its locals, and last
-/// the place among the streams. True when the stop canceled this task.
+/// the route's `.on_close`, once, with the subscription's context; the
+/// manager lets the subscription go, and from then on nothing here touches
+/// the manager, whose `deinit` may return; the `onFinish` phases of the
+/// request, the values of its locals, and last the place among the
+/// streams. True when the stop canceled this task.
 fn serveStream(server: *Server, ctx: *Context, sub: *Subscription, reason: Reason, started: std.Io.Timestamp) bool {
     const io = ctx.internal.io;
     const exchange = ctx.request.internal.exchange;
@@ -357,8 +359,8 @@ fn serveStream(server: *Server, ctx: *Context, sub: *Subscription, reason: Reaso
     // published to it before.
     const begun = sub.endReason(io);
     const canceled = if (begun == .open or Subscription.endsWhole(begun)) runStream(sub, io, exchange, route.heartbeat, &failure) else false;
-    // Publishers reach it no more, and the stop looks for it no more.
-    sub.manager.remove(io, sub);
+    // The stop looks for it no more. Publishers may still reach it until
+    // `remove`; its end is decided, so what they push is dropped.
     unlistStream(server, io, sub);
     const end = sub.endReason(io);
     const res = &ctx.response.internal;
@@ -385,6 +387,8 @@ fn serveStream(server: *Server, ctx: *Context, sub: *Subscription, reason: Reaso
         };
         call(route.controller, &closing);
     }
+    // Publishers reach it no more; the last touch of its manager.
+    sub.manager.remove(io, sub);
     sub.token.cancel();
     finishPhases(server, ctx, .{
         .status = res.status_sent orelse 0,

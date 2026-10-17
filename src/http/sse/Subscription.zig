@@ -23,6 +23,10 @@ const Subscription = @This();
 const log = std.log.scoped(.http);
 
 manager: *Manager,
+/// The manager's allocator, copied: the queue comes from it, and the end of
+/// the stream frees it without touching the manager, which may be gone
+/// once `remove` has let the subscription go.
+gpa: std.mem.Allocator,
 /// Its place in the manager, set when the manager takes it.
 id: Manager.SubscriptionId = .{ .index = 0, .generation = 0 },
 /// The key it was subscribed under, copied.
@@ -95,6 +99,7 @@ pub fn create(manager: *Manager, ctx: *const HttpContext, key: []const u8) error
     }
     sub.* = .{
         .manager = manager,
+        .gpa = manager.gpa,
         .key = try a.dupe(u8, key),
         .request_id = try a.dupe(u8, ctx.requestId()),
         .arena = undefined,
@@ -108,7 +113,7 @@ pub fn create(manager: *Manager, ctx: *const HttpContext, key: []const u8) error
 /// Frees the subscription, once its stream has ended and the manager has
 /// let it go.
 pub fn destroy(sub: *Subscription) void {
-    sub.queue.deinit(sub.manager.gpa);
+    sub.queue.deinit(sub.gpa);
     // The subscription lives in its arena: the arena goes by value.
     sub.arena.deinit();
 }
@@ -157,7 +162,7 @@ pub fn push(sub: *Subscription, io: std.Io, bytes: []const u8, limits: Manager.O
             sub.end_reason = .overflow;
             break :pushed .overflow;
         }
-        sub.queue.appendSlice(sub.manager.gpa, bytes) catch {
+        sub.queue.appendSlice(sub.gpa, bytes) catch {
             sub.end_reason = .overflow;
             break :pushed .out_of_memory;
         };
@@ -185,7 +190,7 @@ pub fn push(sub: *Subscription, io: std.Io, bytes: []const u8, limits: Manager.O
 /// the stream.
 pub fn writer(sub: *Subscription, io: std.Io, exchange: *Exchange, heartbeat: ?std.Io.Duration) void {
     defer sub.writer_done.set(io);
-    const gpa = sub.manager.gpa;
+    const gpa = sub.gpa;
     // The queue and this batch trade places: the writer sends one while
     // publishers fill the other.
     var batch: std.ArrayList(u8) = .empty;

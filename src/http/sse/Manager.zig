@@ -92,8 +92,9 @@ pub fn init(gpa: std.mem.Allocator, options: Options) Manager {
 }
 
 /// Closes the streams still open, as `close` does, waits until they have
-/// ended, and frees the manager. Usually after the server's `deinit`, when
-/// none is open.
+/// ended and their `.on_close` has run, and frees the manager. Usually
+/// after the server's `deinit`, when none is open; an `.on_close` may still
+/// publish through it meanwhile.
 pub fn deinit(m: *Manager, io: std.Io) void {
     const open = open: {
         m.mutex.lockUncancelable(io);
@@ -198,28 +199,34 @@ fn addToKey(m: *Manager, sub: *Subscription) error{OutOfMemory}!void {
     };
 }
 
-/// Lets `sub` go, once its stream has ended: publishers no longer reach
-/// it, and its place is free with a new generation.
+/// Lets `sub` go, once its stream has ended and its `.on_close` has run:
+/// publishers no longer reach it, and its place is free with a new
+/// generation. The last one after `deinit` has begun wakes it, as the last
+/// touch of the manager: `deinit` may free the manager from then on.
 pub fn remove(m: *Manager, io: std.Io, sub: *Subscription) void {
-    m.mutex.lockUncancelable(io);
-    defer m.mutex.unlock(io);
-    if (m.keys.getPtr(sub.key)) |list| {
-        for (list.items, 0..) |item, i| {
-            if (item != sub) continue;
-            _ = list.swapRemove(i);
-            break;
+    const last = last: {
+        m.mutex.lockUncancelable(io);
+        defer m.mutex.unlock(io);
+        if (m.keys.getPtr(sub.key)) |list| {
+            for (list.items, 0..) |item, i| {
+                if (item != sub) continue;
+                _ = list.swapRemove(i);
+                break;
+            }
+            if (list.items.len == 0) {
+                const gone = m.keys.fetchRemove(sub.key).?;
+                m.gpa.free(gone.key);
+                var empty = gone.value;
+                empty.deinit(m.gpa);
+            }
         }
-        if (list.items.len == 0) {
-            const gone = m.keys.fetchRemove(sub.key).?;
-            m.gpa.free(gone.key);
-            var empty = gone.value;
-            empty.deinit(m.gpa);
-        }
-    }
-    m.generations.items[sub.id.index] +%= 1;
-    m.free.appendAssumeCapacity(sub.id.index);
-    m.count -= 1;
-    if (m.closing and m.count == 0) m.emptied.set(io);
+        m.generations.items[sub.id.index] +%= 1;
+        m.free.appendAssumeCapacity(sub.id.index);
+        m.count -= 1;
+        break :last m.closing and m.count == 0;
+    };
+    // After the unlock: once `emptied` is set, the mutex may be gone too.
+    if (last) m.emptied.set(io);
 }
 
 /// Sends `event` to every subscriber of `key`, in the publisher's own
