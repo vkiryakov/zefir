@@ -22,6 +22,8 @@ pub const Error = error{
     // 500: mistakes of the program.
     ResponseCommitted,
     InvalidHeaderValue,
+    /// `setHeader` of a field the backend writes itself.
+    ReservedHeader,
     LocalMissing,
     BodyConsumed,
     HandledWithoutResponse,

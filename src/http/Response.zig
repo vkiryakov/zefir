@@ -34,7 +34,14 @@ pub const Internal = struct {
 
 /// `InvalidHeaderValue`: a name that is not a token (RFC 9110), or a value
 /// with CR, LF, NUL or another control character but HTAB.
-pub const HeaderError = error{ InvalidHeaderValue, OutOfMemory };
+/// `ReservedHeader`: a field the backend writes itself, from the body and
+/// the connection: `Content-Length`, `Transfer-Encoding`, `Connection`,
+/// `Keep-Alive`, `TE`, `Trailer`, `Upgrade` and `Date`.
+pub const HeaderError = error{ InvalidHeaderValue, ReservedHeader, OutOfMemory };
+
+/// The fields of framing, of the connection and `Date`: the backend writes
+/// them, so that what the head says always matches the body it sends.
+const reserved_names = [_][]const u8{ "content-length", "transfer-encoding", "connection", "keep-alive", "te", "trailer", "upgrade", "date" };
 
 /// Sets the status; chainable: `try ctx.response.status(404).html(page)`.
 /// Without it a body goes out as 200, and no body at all as 204.
@@ -47,6 +54,9 @@ pub fn status(r: *Response, code: u16) *Response {
 /// name set before (names are case-insensitive). Both are copied.
 pub fn setHeader(r: *Response, name: []const u8, value: []const u8) HeaderError!void {
     if (!validName(name) or !validValue(value)) return error.InvalidHeaderValue;
+    for (reserved_names) |reserved| {
+        if (std.ascii.eqlIgnoreCase(name, reserved)) return error.ReservedHeader;
+    }
     const arena = r.internal.arena;
     const copy = try arena.dupe(u8, value);
     if (std.ascii.eqlIgnoreCase(name, "content-type")) {
@@ -137,6 +147,26 @@ test "setHeader rejects CR, LF and NUL" {
     buffer[0] = 'X';
     try testing.expectEqualStrings("text/csv", r.internal.content_type.?);
     try testing.expectEqual(2, r.internal.headers.items.len);
+}
+
+test "setHeader refuses the fields the backend writes itself, in any case" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    var r: Response = .{ .internal = .{ .arena = arena_state.allocator() } };
+
+    for ([_][]const u8{
+        "content-length", "Content-Length", "transfer-encoding", "TRANSFER-ENCODING",
+        "connection",     "Keep-Alive",     "te",                "Trailer",
+        "upgrade",        "date",           "DATE",
+    }) |name| {
+        try testing.expectError(error.ReservedHeader, r.setHeader(name, "1"));
+    }
+    try testing.expectEqual(0, r.internal.headers.items.len);
+    // Names that only begin or end like one are the application's.
+    try r.setHeader("content-length-hint", "1");
+    try r.setHeader("x-date", "1");
+    try r.setHeader("tea", "1");
+    try testing.expectEqual(3, r.internal.headers.items.len);
 }
 
 test "text, html and json set the body and its type; status is chainable" {

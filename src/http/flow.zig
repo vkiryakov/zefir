@@ -238,7 +238,7 @@ fn respond(ctx: *Context, exchange: *Exchange, result: anyerror!void) void {
 }
 
 /// OPTIONS without a route of its own: 204 with `Allow`.
-fn answerOptions(ctx: *Context, allow: Allow) error{ InvalidHeaderValue, OutOfMemory }!void {
+fn answerOptions(ctx: *Context, allow: Allow) Context.Response.HeaderError!void {
     try ctx.response.setHeader("allow", allow.header());
     _ = ctx.response.status(204);
 }
@@ -363,7 +363,7 @@ const TodosV1Controller = struct {
     pub fn page(_: *TodosV1Controller, ctx: *Context) !void {
         try ctx.response.status(203).html("<p>todo</p>");
     }
-    pub fn fail(_: *TodosV1Controller, ctx: *Context) error{ TodoNotFound, InvalidHeaderValue, OutOfMemory }!void {
+    pub fn fail(_: *TodosV1Controller, ctx: *Context) error{ TodoNotFound, InvalidHeaderValue, ReservedHeader, OutOfMemory }!void {
         try ctx.response.setHeader("x-kept", "yes");
         try ctx.response.setHeader("content-disposition", "attachment; filename=\"todo.txt\"");
         try ctx.response.text("half a body");
