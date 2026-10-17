@@ -1522,3 +1522,48 @@ test "the chain of DELETE /v1/todos/{id} for the sketch's options" {
         "ServerTiming.onResponse securityHeaders.onResponse Cors.onResponse AccessLog.onFinish");
     try testing.expectEqual(null, anonymous.header("cache-control"));
 }
+
+/// An onFinish that fails, before one that notes it ran.
+const FailingFinish = struct {
+    pub fn onFinish(_: *FailingFinish, _: *Context, _: Outcome) !void {
+        journal.add("FailingFinish.onFinish");
+        return error.Broken;
+    }
+};
+
+test "a failing onFinish is logged and the next one runs" {
+    const io = testing.io;
+    var failing: FailingFinish = .{};
+    var after: AfterSleeper = .{};
+    var outcomes: OutcomeController = .{};
+    var b: TestingBackend = .init(testing.allocator);
+    defer b.deinit();
+    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&outcomes}, .middleware = .{ &failing, &after }, .strict_errors = false });
+    defer server.deinit(io);
+    try server.start(io);
+    const level = testing.log_level;
+    testing.log_level = .err; // the failing onFinish is logged as a warning
+    defer testing.log_level = level;
+    journal = .{};
+    var res = try b.request(io, .{ .method = .GET, .target = "/ok" });
+    defer res.deinit();
+    try testing.expectEqual(204, res.status);
+    try journal.expect("FailingFinish.onFinish");
+    try testing.expect(after.ran);
+}
+
+test "a field of the controller is read on every request" {
+    var f: OrderFixture = .{};
+    try f.start();
+    defer f.stop();
+    var other: Step = .init("other");
+    var before = try f.request("/v1/order/1");
+    defer before.deinit();
+    try testing.expectEqualStrings("audit.run", journal.words[5]);
+    // The controller points .audit elsewhere: the next request runs that.
+    f.controller.audit = &other;
+    var after = try f.request("/v1/order/1");
+    defer after.deinit();
+    try testing.expectEqualStrings("other.run", journal.words[5]);
+    try testing.expectEqualStrings("1", after.header("x-other").?);
+}

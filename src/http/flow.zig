@@ -1338,6 +1338,33 @@ test "a response is written once; after commit an error cuts it" {
     try canceled.expect(0, 0, 1);
 }
 
+/// The onResponse phases that `notedResponse` ran.
+var noted_responses: u32 = 0;
+
+fn notedResponse(_: ?*anyopaque, ctx: *Context) anyerror!void {
+    noted_responses += 1;
+    try ctx.response.setHeader("x-noted", "1");
+}
+
+test "the answer to a body that did not arrive goes through the onResponse phases" {
+    // Decision 21: the server's 408 or 400, after phases as for any answer.
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    var stalled: CountingExchange = .init();
+    var ctx = stalled.context(arena_state.allocator());
+    const links = [_]mw.Link{.{ .name = "noted", .on_response = notedResponse }};
+    ctx.internal.middleware = .{ .global = &links, .count = 1 };
+    ctx.response.internal.before_head = mw.beforeHead(&ctx);
+    noted_responses = 0;
+    respond(&ctx, &stalled.exchange, error.ReadFailed);
+    try stalled.expect(1, 1, 0);
+    try testing.expectEqual(408, ctx.response.internal.status_sent.?);
+    try testing.expectEqual(1, noted_responses);
+    var noted = false;
+    for (ctx.response.internal.headers.items) |f| noted = noted or std.mem.eql(u8, f.name, "x-noted");
+    try testing.expect(noted);
+}
+
 test "the server logs through std.log.scoped(.http) and needs no logger" {
     // No logger is installed here: a 500 goes to std.log under the scope
     // http, and the request gets its answer.
