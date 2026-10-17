@@ -394,7 +394,7 @@ Applies rules to every item of a slice or an array. Written `v.each(rule)` or
 Compile errors (`<Type>.field_rules.<field>` is the entry of your struct):
 
 ```text
-validator: each(...): expected a rule or a tuple of rules, got *const [1:0]u8
+validator: each(...): expected a transform or a rule, or a tuple of them, got *const [1:0]u8
 validator: each(...): item 1 of the tuple is comptime_int
 validator: each(.{}): the list is empty
 validator: each(...).withMessage("x"): each has no message of its own; put .withMessage on the inner rules

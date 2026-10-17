@@ -117,6 +117,23 @@ test "a hand-built field must be a field name exactly: a prefix, a longer name o
     try testing.expectEqualStrings("name", exact.field orelse return error.FieldIsNull);
 }
 
+const RenamedSelf = struct {
+    user_name: []const u8 = "n",
+    returned: []const u8,
+    pub const field_rules = .{ .user_name = v.rename("userName") };
+    pub fn validateSelf(self: *const RenamedSelf) ?v.Violation {
+        return .{ .code = "t.renamed", .message = "renamed", .field = self.returned };
+    }
+};
+
+test "a hand-built field is the Zig name of the field, reported at its outside name; the outside name is invalid" {
+    var buf: [64]u8 = undefined;
+    const got = v.check(&RenamedSelf{ .returned = "user_name" }, &buf) orelse return error.NoViolation;
+    try testing.expectEqualStrings("t.renamed", got.code);
+    try testing.expectEqualStrings("userName", got.field orelse return error.FieldIsNull);
+    try expectInvalid(&RenamedSelf{ .returned = "userName" }, null);
+}
+
 test "a well-formed hand-built result is reported as returned" {
     var buf: [64]u8 = undefined;
     const got = v.check(&Wrapper{ .fine = .{ .n = 0 } }, &buf) orelse return error.NoViolation;
