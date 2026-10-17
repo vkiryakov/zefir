@@ -1,0 +1,97 @@
+name: HTTP Garden
+
+# zefir-http in the HTTP Garden (tests/http/garden/README.md): the Garden
+# runs HTTP servers side by side in Docker, sends each the same bytes and
+# shows where they understand them differently, the way requests get
+# smuggled. The echo server of tests/http/garden is an origin server next
+# to nginx, Apache httpd, h2o, hyper and gunicorn, and the bytes are the
+# corpus of zefir-http's parser. The Garden is pinned to a commit below.
+#
+# It runs on a pull request into dev that changes the parser, the network
+# backend or the target, and by hand: `gh workflow run http-garden.yml
+# --ref <branch>`; GitHub dispatches only workflows that are on the default
+# branch too. It is not a required check: its output is for a person to
+# read, in the summary of the run and in its artifact.
+
+on:
+  pull_request:
+    branches: [dev]
+    paths:
+      - src/http/h1/**
+      - src/http/native/**
+      - tests/http/garden/**
+      - .github/workflows/http-garden.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  garden:
+    name: http-garden
+    timeout-minutes: 60
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # The Garden in http-garden/: its tools find their servers on the
+      # Docker network http-garden_default, named after that directory.
+      - uses: actions/checkout@v7
+        with:
+          repository: narfindustries/http-garden
+          ref: b417e806c1b15e8ea0b9312f81a91fbdcbc7a83e
+          path: http-garden
+      - uses: mlugg/setup-zig@v2
+      # The Garden's tools run with uv.
+      - uses: astral-sh/setup-uv@v10
+      - name: Print the payloads
+        working-directory: tests/http
+        run: zig build garden-payloads > "$RUNNER_TEMP/payloads.txt" && wc -l "$RUNNER_TEMP/payloads.txt"
+      - name: Add the target of zefir-http to the Garden
+        run: |
+          mkdir -p http-garden/images/zefir/zefir/tests
+          cp tests/http/garden/Dockerfile http-garden/images/zefir/
+          cp -r build.zig build.zig.zon src README.md LICENSE http-garden/images/zefir/zefir/
+          rsync -a --exclude .zig-cache --exclude zig-out --exclude zig-pkg tests/http http-garden/images/zefir/zefir/tests/
+          # The service, after the Garden's own: `services` is the only key
+          # at the top of its docker-compose.yml.
+          sed '1,/^services:$/d' tests/http/garden/compose.yml >> http-garden/docker-compose.yml
+          tail -n 6 http-garden/docker-compose.yml
+      - name: Build and start the servers
+        working-directory: http-garden
+        timeout-minutes: 45
+        run: ./garden.sh start --build --detach zefir nginx apache_httpd h2o hyper gunicorn
+      - name: Wait for the servers
+        working-directory: http-garden
+        run: |
+          sleep 15
+          docker compose ps
+          docker compose logs zefir
+      - name: Send the payloads through the REPL
+        working-directory: http-garden
+        run: ./garden.sh repl < "$RUNNER_TEMP/payloads.txt" > "$RUNNER_TEMP/repl.txt"
+      - name: Summarize where zefir and the others differ
+        working-directory: http-garden
+        run: |
+          uv run python3 ../tests/http/garden/summary.py < "$RUNNER_TEMP/payloads.txt" > "$RUNNER_TEMP/summary.md"
+          cat "$RUNNER_TEMP/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          tail -n 8 "$RUNNER_TEMP/summary.md"
+      - name: Upload the output
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: http-garden
+          path: |
+            ${{ runner.temp }}/payloads.txt
+            ${{ runner.temp }}/repl.txt
+            ${{ runner.temp }}/summary.md
+          if-no-files-found: ignore
+      - name: Stop the servers
+        if: always()
+        working-directory: http-garden
+        run: |
+          docker compose logs zefir || true
+          docker compose down || true

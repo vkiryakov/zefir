@@ -1,6 +1,6 @@
 //! The code of zefir-http that runs on zio, in a package of its own: the
 //! probes of how zio behaves on each system, the end-to-end tests, the
-//! service of the guide and the benchmark.
+//! service of the guide, the benchmark and the target of the HTTP Garden.
 //!
 //!   zig build e2e        run the end-to-end tests: servers on http.native
 //!                        over loopback, on zio with one executor and with
@@ -16,6 +16,12 @@
 //!   zig build bench      run the benchmark, built with ReleaseFast unless
 //!                        -Dbench-optimize says otherwise (CI's bench.yml,
 //!                        on Linux)
+//!   zig build garden-echo
+//!                        build the echo server of the HTTP Garden's target
+//!                        into zig-out/bin (garden/README.md)
+//!   zig build garden-payloads
+//!                        print the corpus of the parser as lines of the
+//!                        HTTP Garden's REPL
 //!   zig build check      build everything without running it, the
 //!                        benchmark in the mode of -Doptimize
 
@@ -145,17 +151,53 @@ pub fn build(b: *std.Build) void {
     run_bench.has_side_effects = true;
     b.step("bench", "Run the benchmark of zefir-http (ReleaseFast unless -Dbench-optimize says otherwise)").dependOn(&run_bench.step);
 
+    // The target of the HTTP Garden (garden/README.md): the echo server
+    // that its Dockerfile builds and runs, and the corpus of the parser as
+    // lines of the Garden's REPL.
+    const garden_echo = b.addExecutable(.{
+        .name = "zefir-garden-echo",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("garden/echo.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "http", .module = zefir.module("zefir-http") },
+                .{ .name = "zio", .module = zio.module("zio") },
+            },
+        }),
+    });
+    b.step("garden-echo", "Build the echo server of the HTTP Garden's target into zig-out/bin").dependOn(&b.addInstallArtifact(garden_echo, .{}).step);
+    const garden_payloads = b.addExecutable(.{
+        .name = "garden-payloads",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("garden/payloads.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "corpus", .module = b.createModule(.{
+                .root_source_file = zefir.path("src/http/h1/fuzz.zig"),
+                .target = target,
+                .optimize = optimize,
+            }) }},
+        }),
+    });
+    const run_payloads = b.addRunArtifact(garden_payloads);
+    run_payloads.stdio = .inherit;
+    run_payloads.has_side_effects = true;
+    b.step("garden-payloads", "Print the corpus of the parser as lines of the HTTP Garden's REPL").dependOn(&run_payloads.step);
+
     // Everything above built and nothing run; the benchmark in the mode
     // of -Doptimize.
-    const check_step = b.step("check", "Build the probes, the end-to-end tests, the examples and the benchmark without running them");
+    const check_step = b.step("check", "Build the probes, the end-to-end tests, the examples, the benchmark and the Garden's target without running them");
     check_step.dependOn(&probes.step);
     check_step.dependOn(&e2e.step);
     check_step.dependOn(&guide.step);
     check_step.dependOn(&service.step);
     const checked_bench = addBench(b, target, optimize);
-    // Code generation too, not only analysis: the binary is asked for.
-    _ = checked_bench.getEmittedBin();
-    check_step.dependOn(&checked_bench.step);
+    // Code generation too, not only analysis: the binaries are asked for.
+    for ([_]*std.Build.Step.Compile{ checked_bench, garden_echo, garden_payloads }) |exe| {
+        _ = exe.getEmittedBin();
+        check_step.dependOn(&exe.step);
+    }
 }
 
 /// The benchmark, with zefir and zio built in `mode` too.

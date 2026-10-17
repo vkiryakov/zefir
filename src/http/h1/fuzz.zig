@@ -309,8 +309,9 @@ fn fuzzOne(_: void, smith: *testing.Smith) anyerror!void {
 const chunked_head = "POST /upload HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\n";
 
 /// Every input of testdata/, whole requests: heads, chunked bodies after
-/// a head, llhttp's rows as llhttp sends them and with Host added.
-const inputs = collect: {
+/// a head, llhttp's rows as llhttp sends them and with Host added. Also
+/// the payloads of the HTTP Garden (tests/http/garden/payloads.zig).
+pub const inputs = collect: {
     @setEvalBranchQuota(100_000);
     var list: []const []const u8 = &.{};
     for (cases.field_rules ++ cases.length_rules) |case| list = list ++ .{case.raw};
