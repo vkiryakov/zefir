@@ -34,8 +34,9 @@
 //! In the request's task, the `run` phases of the server's middleware come
 //! first, before the route is applied, then those of the route's own
 //! middleware, then the handler (middleware.zig); a path that no route
-//! takes goes to the longest static mount that begins it, with no
-//! deadline (static.zig). The `onResponse` phases
+//! takes goes to the longest static mount that begins it, which opens its
+//! file there, within the deadline, and sends it after the request, on the
+//! connection's task, without one (static.zig). The `onResponse` phases
 //! run right before the head goes out, whichever task sends it. Once the
 //! request has ended, the `onFinish` phases run, once, on a task of their
 //! own within `.finish_timeout`; then the values of `ctx.locals` go.
@@ -176,7 +177,7 @@ pub fn serve(server: *Server, io: std.Io, exchange: *Exchange) void {
         return unavailable(&ctx, exchange);
     };
     var canceled = false;
-    const reason = firstOf(&race, io, deadline, &canceled);
+    var reason = firstOf(&race, io, deadline, &canceled);
     // A deadline leaves the token alone (design section 17).
     if (reason == .client_gone or reason == .shutdown) token.cancel();
     // Cancels the other task and waits for both: from here on, only this
@@ -187,6 +188,21 @@ pub fn serve(server: *Server, io: std.Io, exchange: *Exchange) void {
         const stream_canceled = serveStream(server, &ctx, sub, reason, started);
         if (canceled or stream_canceled) io.recancel();
         return;
+    }
+    // A static file opened within the deadline goes out now, on this task,
+    // without it; a request that did not end well leaves it unsent.
+    if (ctx.internal.static_file) |file| {
+        ctx.internal.static_file = null;
+        reason = switch (reason) {
+            .done => |result| if (result) |_| .{ .done = static_files.send(&ctx, file) } else |_| unsent: {
+                file.opened.file.close(io);
+                break :unsent reason;
+            },
+            else => unsent: {
+                file.opened.file.close(io);
+                break :unsent reason;
+            },
+        };
     }
     var failure: ?anyerror = switch (reason) {
         .done => |result| if (result) |_| null else |err| err,
@@ -464,16 +480,15 @@ fn find(server: *Server, ctx: *Context) Found {
 }
 
 /// The budget of the request's deadline: the route's `.timeout`, else the
-/// server's `.request_timeout`; null for none, as for a static file (design
-/// section 15: the backend's write timeout holds for it).
+/// server's `.request_timeout`, which holds for a static file until it is
+/// open; null for none.
 fn budgetOf(server: *const Server, found: Found) ?std.Io.Duration {
     const index = switch (found) {
         .match => |match| switch (match) {
             .found => |f| f.route,
             else => null,
         },
-        .static => return null,
-        .failed => null,
+        .static, .failed => null,
     } orelse return server.settings.request_timeout;
     return switch (server.routes[index].timeout) {
         .server => server.settings.request_timeout,
@@ -552,7 +567,7 @@ fn runRequest(server: *Server, ctx: *Context, found: Found) anyerror!void {
     if (try mw.runPhases(ctx, server.middleware)) return;
     const match = switch (found) {
         .match => |match| match,
-        .static => |target| return static_files.serve(server, ctx, target),
+        .static => |target| return static_files.open(server, ctx, target),
         .failed => |err| return err,
     };
     switch (match) {

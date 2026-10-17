@@ -16,16 +16,18 @@
 //! directory gives its index file and never a listing. `If-None-Match`, and
 //! without it `If-Modified-Since`, give 304; one range of a GET gives 206,
 //! several the whole file, one past the end 416, and `If-Range` sends a
-//! changed file whole. Another method on a file is 405 with
-//! `Allow: GET, HEAD`; on a path without a file, 404.
+//! changed file whole. OPTIONS on a file is 204 with `Allow: GET, HEAD`,
+//! another method 405 with it; on a path without a file, 404.
 //!
 //! The root is safe to serve: hidden files, the names of Windows devices
 //! and every way out of the root are refused (static/resolve.zig), and so
 //! is every symbolic link inside it, wherever it points.
 //!
 //! A static response runs the server's middleware, as every request does,
-//! and has no deadline: a large file to a slow client takes its time, and
-//! only the backend's write timeout cuts a client that stops reading.
+//! within the server's `.request_timeout`, and so does the open of its
+//! file. The file goes out after, without a deadline: a large file to a
+//! slow client takes its time, and only the backend's write timeout cuts a
+//! client that stops reading.
 const std = @import("std");
 const Context = @import("Context.zig");
 const Server = @import("Server.zig");
@@ -222,11 +224,20 @@ fn segmentsAfter(prefix: []const u8, segments: []const []const u8) ?usize {
     return i;
 }
 
-/// Serves `target`, after the server's middleware: the file of a GET or
-/// HEAD, its SPA file, or the error that answers the request
-/// (`RouteNotFound`, `MethodNotAllowed`; `ReadFailed`, 500, for a system
-/// that failed to open a file, logged).
-pub fn serve(server: *Server, ctx: *Context, target: Target) anyerror!void {
+/// The file of a GET or HEAD, open: `open` leaves it in the request's
+/// context, and `send` sends it once the request has ended.
+pub const File = struct {
+    mount: *const Mount,
+    opened: resolve.Opened,
+};
+
+/// Opens the file of `target`, after the server's middleware, within the
+/// request's deadline: the file of a GET or HEAD, or its SPA file, stays
+/// open in `ctx` for `send`; OPTIONS on a file gets 204 with its methods;
+/// else the error that answers the request (`RouteNotFound`,
+/// `MethodNotAllowed`; `ReadFailed`, 500, for a system that failed to open
+/// a file, logged).
+pub fn open(server: *Server, ctx: *Context, target: Target) anyerror!void {
     const mount = &server.mounts[target.mount];
     const io = ctx.io();
     const reading = ctx.request.method == .GET or ctx.request.method == .HEAD;
@@ -237,12 +248,20 @@ pub fn serve(server: *Server, ctx: *Context, target: Target) anyerror!void {
     }
     switch (found) {
         .file => |opened| {
-            defer opened.file.close(io);
-            if (reading) return sendFile(ctx, mount, opened);
-            // Another method on a file (decision 24); under the prefix the
-            // path is the API's.
+            if (reading) {
+                ctx.internal.static_file = .{ .mount = mount, .opened = opened };
+                return;
+            }
+            opened.file.close(io);
+            // Another method on a file; under the prefix the path is the
+            // API's.
             if (target.under_prefix) return error.RouteNotFound;
             try ctx.response.setHeader("allow", "GET, HEAD");
+            // OPTIONS: the methods of the file, as of a route's path.
+            if (ctx.request.method == .OPTIONS) {
+                _ = ctx.response.status(204);
+                return;
+            }
             return error.MethodNotAllowed;
         },
         .missing, .refused => return error.RouteNotFound,
@@ -251,6 +270,14 @@ pub fn serve(server: *Server, ctx: *Context, target: Target) anyerror!void {
             return error.ReadFailed;
         },
     }
+}
+
+/// Sends the file `open` left, on the connection's task, once the request
+/// has ended within its deadline: without one, as the backend's write
+/// timeout holds for it. Closes the file.
+pub fn send(ctx: *Context, file: File) anyerror!void {
+    defer file.opened.file.close(ctx.io());
+    return sendFile(ctx, file.mount, file.opened);
 }
 
 /// The response of a file: 304 when the client has it, the range a GET
@@ -548,7 +575,7 @@ test "controllers win; the longest mount wins" {
     try testing.expectEqualStrings("api data", data.body);
 }
 
-test "POST on a mount: 405 for a file, 404 for a missing one and under the server prefix" {
+test "POST on a mount: 405 for a file, OPTIONS 204; 404 for a missing one and under the server prefix" {
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
     var site: Site = undefined;
@@ -569,19 +596,29 @@ test "POST on a mount: 405 for a file, 404 for a missing one and under the serve
     var delete = try f.request(.DELETE, "/sub/b.txt", &.{});
     defer delete.deinit();
     try testing.expectEqual(405, delete.status);
+    // OPTIONS on a file: 204 with its methods, as on the path of a route.
+    var options = try f.request(.OPTIONS, "/a.txt", &.{});
+    defer options.deinit();
+    try testing.expectEqual(204, options.status);
+    try testing.expectEqualStrings("GET, HEAD", options.header("allow").?);
+    try testing.expectEqualStrings("", options.body);
     // No file there: 404, and the SPA file is for GET and HEAD only.
-    for ([_][]const u8{ "/missing.txt", "/app/settings", "/.env", "/empty" }) |target| {
-        var res = try f.request(.POST, target, &.{});
-        defer res.deinit();
-        try testing.expectEqual(404, res.status);
-        try testing.expectEqual(null, res.header("allow"));
+    for ([_]std.http.Method{ .POST, .OPTIONS }) |method| {
+        for ([_][]const u8{ "/missing.txt", "/app/settings", "/.env", "/empty" }) |target| {
+            var res = try f.request(method, target, &.{});
+            defer res.deinit();
+            try testing.expectEqual(404, res.status);
+            try testing.expectEqual(null, res.header("allow"));
+        }
     }
     // Under the server's prefix the path is the API's: 404 though a file
     // lies there.
-    var api = try f.request(.POST, "/api/data.txt", &.{});
-    defer api.deinit();
-    try testing.expectEqual(404, api.status);
-    try testing.expectEqual(null, api.header("allow"));
+    for ([_]std.http.Method{ .POST, .OPTIONS }) |method| {
+        var api = try f.request(method, "/api/data.txt", &.{});
+        defer api.deinit();
+        try testing.expectEqual(404, api.status);
+        try testing.expectEqual(null, api.header("allow"));
+    }
 }
 
 test "static: .., %2e%2e, %2F, %5C, NUL, an absolute path and hidden files are 404; invalid UTF-8 is 400" {
@@ -1005,55 +1042,80 @@ test "ranges: 206, a suffix range, several ranges, 416 with */N, If-Range" {
     try testing.expect(part.chunks.len >= 2);
 }
 
-/// Every request runs it: it marks the response and sleeps past the
-/// server's deadline of 5 ms.
-const SlowMark = struct {
-    var finished: std.atomic.Value(u16) = .init(0);
-
+/// Every request runs it: it sleeps past the server's deadline of 5 ms.
+const SlowRun = struct {
     pub fn run(ctx: *Context) !mw.MiddlewareResult {
-        try ctx.response.setHeader("x-seen", "yes");
         try ctx.io().sleep(.fromMilliseconds(100), .awake);
         return .next;
     }
+};
 
-    pub fn onFinish(_: *Context, outcome: mw.Outcome) !void {
-        finished.store(outcome.status, .release);
+fn expectTimeout(res: *TestingBackend.Response) !void {
+    try testing.expectEqualStrings("application/problem+json", res.header("content-type").?);
+    try testing.expect(std.mem.find(u8, res.body, "\"code\":\"timeout\"") != null);
+}
+
+/// Every response waits 100 ms right before its head goes out, past the
+/// server's deadline of 50 ms.
+const SlowHead = struct {
+    pub fn onResponse(ctx: *Context) !void {
+        try ctx.io().sleep(.fromMilliseconds(100), .awake);
     }
 };
 
-test "static: through the server's middleware, without the request's deadline" {
+test "static: the server's deadline holds for its middleware and the open of the file, not for the file going out" {
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
     var site: Site = undefined;
     try site.create(arena_state.allocator());
     defer site.tmp.cleanup();
     var ping: PingV1Controller = .{};
-    var backend: TestingBackend = .init(testing.allocator);
-    defer backend.deinit();
-    var server = try Server.init(testing.allocator, .{
-        .backend = backend.backend(),
-        .prefix = "/api",
-        .controllers = .{&ping},
-        .middleware = .{SlowMark},
-        .request_timeout = std.Io.Duration.fromMilliseconds(5),
-        .static = .{static("/", .{ .root = site.public })},
-    });
-    defer server.deinit(testing.io);
-    try server.start(testing.io);
+    {
+        var backend: TestingBackend = .init(testing.allocator);
+        defer backend.deinit();
+        var server = try Server.init(testing.allocator, .{
+            .backend = backend.backend(),
+            .prefix = "/api",
+            .controllers = .{&ping},
+            .middleware = .{SlowRun},
+            .request_timeout = std.Io.Duration.fromMilliseconds(5),
+            .static = .{static("/", .{ .root = site.public })},
+        });
+        defer server.deinit(testing.io);
+        try server.start(testing.io);
 
-    // A route has the deadline: 504.
-    var route = try backend.request(testing.io, .{ .method = .GET, .target = "/api/v1/ping" });
-    defer route.deinit();
-    try testing.expectEqual(504, route.status);
-    // A file has none, and its response went through the middleware.
-    var file = try backend.request(testing.io, .{ .method = .GET, .target = "/a.txt" });
-    defer file.deinit();
-    try testing.expectEqual(200, file.status);
-    try testing.expectEqualStrings("alpha", file.body);
-    try testing.expectEqualStrings("yes", file.header("x-seen").?);
-    try testing.expectEqual(200, SlowMark.finished.load(.acquire));
-    var missing = try backend.request(testing.io, .{ .method = .GET, .target = "/missing.txt" });
-    defer missing.deinit();
-    try testing.expectEqual(404, missing.status);
-    try testing.expectEqual(404, SlowMark.finished.load(.acquire));
+        // A route, a file and a path without one: the middleware runs past
+        // the deadline, and each gets 504.
+        for ([_][]const u8{ "/api/v1/ping", "/a.txt", "/missing.txt" }) |target| {
+            var res = try backend.request(testing.io, .{ .method = .GET, .target = target });
+            defer res.deinit();
+            testing.expectEqual(504, res.status) catch |err| {
+                std.debug.print("GET {s}\n", .{target});
+                return err;
+            };
+            try expectTimeout(&res);
+        }
+    }
+    {
+        var backend: TestingBackend = .init(testing.allocator);
+        defer backend.deinit();
+        var server = try Server.init(testing.allocator, .{
+            .backend = backend.backend(),
+            .prefix = "/api",
+            .controllers = .{&ping},
+            .middleware = .{SlowHead},
+            .request_timeout = std.Io.Duration.fromMilliseconds(50),
+            .static = .{static("/", .{ .root = site.public })},
+        });
+        defer server.deinit(testing.io);
+        try server.start(testing.io);
+
+        // The file is open within the deadline; it goes out after, without
+        // one, whole.
+        var file = try backend.request(testing.io, .{ .method = .GET, .target = "/large.bin" });
+        defer file.deinit();
+        try testing.expectEqual(200, file.status);
+        try testing.expect(!file.aborted);
+        try testing.expectEqualSlices(u8, &site.large, file.body);
+    }
 }

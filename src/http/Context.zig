@@ -25,6 +25,7 @@ const json_in = @import("input/json_in.zig");
 const collect = @import("input/violations.zig");
 const plan = @import("plan.zig");
 const mw = @import("middleware.zig");
+const static_files = @import("static.zig");
 const Subscription = @import("sse/Subscription.zig");
 
 const Context = @This();
@@ -87,6 +88,9 @@ pub const Internal = struct {
     in_flight: bool = false,
     /// The stream that `subscribe` opened for the request.
     subscription: ?*Subscription = null,
+    /// The static file that the request opened, which goes out once the
+    /// request has ended within its deadline.
+    static_file: ?static_files.File = null,
 };
 
 /// The errors of `body`. `PayloadTooLarge` (413): over the limit.
