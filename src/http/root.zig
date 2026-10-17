@@ -6,11 +6,17 @@
 //! SSE. The network backend runs on `std.Io` (zio in production), and an
 //! in-memory backend serves the same server to tests.
 //!
-//! Status: in progress. So far this file only wires the module into the
-//! build; the API comes with the next commits.
+//! Status: in progress. So far the module holds its HTTP/1.1 parser
+//! (h1/, internal); the API comes with the next commits.
 
 const std = @import("std");
 
 test "zefir-http is wired into the build" {
     try std.testing.expect(true);
+}
+
+test {
+    _ = @import("h1/head.zig");
+    _ = @import("h1/chunked.zig");
+    _ = @import("h1/fuzz.zig");
 }

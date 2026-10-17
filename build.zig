@@ -170,6 +170,20 @@ pub fn build(b: *std.Build) void {
     addValidatorTests(b, test_validator, validator_compile_step, validator, log, target, optimize, tsan);
     addHttpCompileChecks(b, test_http, http, validator, target, optimize);
 
+    // `zig build fuzz-http` runs the fuzz test of zefir-http's HTTP/1.1
+    // parser on its corpus, once, like `zig build test-http` does; with
+    // `--fuzz` it runs the fuzzer on it (Linux: CI's fuzz.yml).
+    const fuzz_http = b.step("fuzz-http", "Run the fuzz test of the zefir-http parser; with --fuzz, the fuzzer (Linux)");
+    const http_fuzz_tests = b.addTest(.{
+        .name = "fuzz-http",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/http/h1/fuzz.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    fuzz_http.dependOn(&b.addRunArtifact(http_fuzz_tests).step);
+
     // core examples: `zig build test` builds and runs them; an example that
     // exits with an error fails the step.
     for ([_][]const u8{ "http_handler", "rpc_handler", "services" }) |name| {
