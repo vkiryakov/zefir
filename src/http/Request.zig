@@ -139,8 +139,11 @@ pub fn bodyReader(r: *Request) error{BodyConsumed}!*std.Io.Reader {
 pub const BodyReader = struct {
     exchange: *Exchange,
     io: std.Io,
-    /// Set at the end of the body.
+    /// Set at the end of the body: a read of nothing, or the last byte of a
+    /// body of a known length, which a handler may read to it without one.
     done: ?*std.Io.Event = null,
+    /// The bytes of the body read so far.
+    taken: u64 = 0,
     interface: std.Io.Reader = .{
         .vtable = &.{ .stream = stream },
         .buffer = &.{},
@@ -167,6 +170,10 @@ pub const BodyReader = struct {
             if (b.done) |done| done.set(b.io);
             return error.EndOfStream;
         }
+        b.taken += n;
+        if (b.exchange.bodyLength()) |length| if (b.taken >= length) {
+            if (b.done) |done| done.set(b.io);
+        };
         w.advance(n);
         return n;
     }
@@ -185,7 +192,7 @@ const Fake = struct {
         return .{ .exchange = .{
             .ptr = undefined,
             .vtable = &.{
-                .bodyLength = undefined,
+                .bodyLength = bodyLength,
                 .readBody = readBody,
                 .bodyFailure = undefined,
                 .watch = undefined,
@@ -207,6 +214,11 @@ const Fake = struct {
     fn request(f: *Fake) Request {
         f.exchange.ptr = f;
         return .{ .method = .GET, .path = "/", .internal = .{ .exchange = &f.exchange, .io = testing.io } };
+    }
+
+    fn bodyLength(ptr: *anyopaque) ?u64 {
+        const f: *Fake = @ptrCast(@alignCast(ptr));
+        return f.body.len;
     }
 
     /// Three bytes at most per read, so the reader reads more than once.
@@ -289,4 +301,15 @@ test "bodyReader reads the whole body, then marks it done" {
     try testing.expectEqualStrings(body[4..], rest);
     try testing.expect(done.isSet());
     try testing.expectError(error.EndOfStream, reader.takeByte());
+
+    // A body of a known length read to its last byte, without a read of
+    // nothing after it: done all the same.
+    var exact: Fake = .init(&.{}, body);
+    var exact_request = exact.request();
+    var exact_done: std.Io.Event = .unset;
+    exact_request.internal.body_done = &exact_done;
+    var whole: [body.len]u8 = undefined;
+    try (try exact_request.bodyReader()).readSliceAll(&whole);
+    try testing.expectEqualStrings(body, &whole);
+    try testing.expect(exact_done.isSet());
 }

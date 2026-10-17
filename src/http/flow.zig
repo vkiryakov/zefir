@@ -196,7 +196,8 @@ pub fn serve(server: *Server, io: std.Io, exchange: *Exchange) void {
     switch (reason) {
         .done => |result| respond(&ctx, exchange, result),
         .deadline => respond(&ctx, exchange, error.RequestTimeout),
-        .client_gone, .shutdown => cut(&ctx, exchange),
+        // A response the handler had ended whole has gone out as it is.
+        .client_gone, .shutdown => if (ctx.response.internal.state != .finished) cut(&ctx, exchange),
     }
     const res = &ctx.response.internal;
     // A response cut without an error before: the error of its write.
@@ -1887,6 +1888,108 @@ test "a client that leaves cancels the request: no response, the handler sees Ca
     try testing.expectEqual(204, quick.status);
 }
 
+/// Keeps the last outcome of the requests, for their onFinish.
+const LastOutcome = struct {
+    mutex: std.Io.Mutex = .init,
+    last: ?mw.Outcome = null,
+    calls: std.atomic.Value(u32) = .init(0),
+
+    pub fn onFinish(self: *LastOutcome, ctx: *Context, outcome: mw.Outcome) !void {
+        self.mutex.lockUncancelable(ctx.io());
+        defer self.mutex.unlock(ctx.io());
+        self.last = outcome;
+        _ = self.calls.fetchAdd(1, .release);
+    }
+
+    fn get(self: *LastOutcome) ?mw.Outcome {
+        self.mutex.lockUncancelable(testing.io);
+        defer self.mutex.unlock(testing.io);
+        return self.last;
+    }
+};
+
+/// Work after the response, or after the body: its servers turn the strict
+/// error check off, as `bodyReader` may fail with errors of std's reader.
+const AfterController = struct {
+    /// Handlers whose work after the response or the body was canceled.
+    canceled: std.atomic.Value(u32) = .init(0),
+
+    pub const http_routes = routes.routes(.{ .methods = .{
+        .streamed = routes.get("/streamed", .{}),
+        .exact = routes.post("/exact", .{}),
+    } });
+
+    /// A whole response, then 300 ms of work.
+    pub fn streamed(self: *AfterController, ctx: *Context) !void {
+        var out = try ctx.response.stream(.{ .content_type = "text/plain" });
+        try out.writeAll("whole");
+        try out.finish();
+        return self.work(ctx, .fromMilliseconds(300));
+    }
+
+    /// Reads exactly the body's length, never to a read of nothing, then
+    /// works a second.
+    pub fn exact(self: *AfterController, ctx: *Context) !void {
+        const reader = try ctx.request.bodyReader();
+        _ = try reader.readAllocAll(ctx.allocator(), 10);
+        try self.work(ctx, .fromSeconds(1));
+        try ctx.response.text("worked");
+    }
+
+    fn work(self: *AfterController, ctx: *Context, duration: std.Io.Duration) !void {
+        ctx.io().sleep(duration, .awake) catch |err| {
+            _ = self.canceled.fetchAdd(1, .release);
+            return err;
+        };
+    }
+};
+
+test "a response that went out whole before its client left is not cut in its outcome" {
+    const io = testing.io;
+    var dog = try Watchdog.start(io, "a response that went out whole before its client left");
+    defer dog.stop(io);
+    var after: AfterController = .{};
+    var finished: LastOutcome = .{};
+    var b: TestingBackend = .init(testing.allocator);
+    defer b.deinit();
+    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&after}, .middleware = .{&finished}, .strict_errors = false });
+    defer server.deinit(io);
+    try server.start(io);
+
+    var res = try b.request(io, .{ .method = .GET, .target = "/streamed", .leave_after = .fromMilliseconds(50) });
+    defer res.deinit();
+    try testing.expectEqual(200, res.status);
+    try testing.expect(!res.aborted);
+    try testing.expectEqualStrings("whole", res.body);
+    // The work after it was canceled; the response was not.
+    try testing.expectEqual(1, after.canceled.load(.acquire));
+    try waitCount(io, &finished.calls, 1);
+    const outcome = finished.get().?;
+    try testing.expectEqual(200, outcome.status);
+    try testing.expect(!outcome.aborted);
+    try testing.expectEqual(error.Canceled, outcome.err.?);
+}
+
+test "a body read to its length, without a read of nothing, lets the watcher see the client leave" {
+    const io = testing.io;
+    var dog = try Watchdog.start(io, "a body read to its length lets the watcher see the client leave");
+    defer dog.stop(io);
+    var after: AfterController = .{};
+    var b: TestingBackend = .init(testing.allocator);
+    defer b.deinit();
+    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&after}, .strict_errors = false });
+    defer server.deinit(io);
+    try server.start(io);
+
+    const start = std.Io.Clock.awake.now(io);
+    var res = try b.request(io, .{ .method = .POST, .target = "/exact", .body = "0123456789", .leave_after = .fromMilliseconds(50) });
+    defer res.deinit();
+    // At the client's leave, long before the second of work.
+    try testing.expect(sinceMs(io, start) < 500);
+    try testing.expect(res.aborted);
+    try testing.expectEqual(1, after.canceled.load(.acquire));
+}
+
 test "after a deadline the operation reports DeadlineExceeded, never Cancelled" {
     const io = testing.io;
     var dog = try Watchdog.start(io, "after a deadline the operation reports DeadlineExceeded, never Cancelled");
@@ -2196,5 +2299,58 @@ test "shutdown gives up on a request that ignores its cancelation; the stop ends
     try testing.expectEqual(Server.State.stopped, server.state());
     try client.await(io);
     try testing.expect(result.?.aborted);
+    try testing.expectEqual(0, inFlight(&server));
+}
+
+/// An onFinish of 300 ms of work, which notes whether it was cut short.
+const SlowFinish = struct {
+    entered: std.atomic.Value(u32) = .init(0),
+    done: std.atomic.Value(u32) = .init(0),
+    cut: std.atomic.Value(u32) = .init(0),
+
+    pub fn onFinish(self: *SlowFinish, ctx: *Context, _: mw.Outcome) !void {
+        _ = self.entered.fetchAdd(1, .release);
+        ctx.io().sleep(.fromMilliseconds(300), .awake) catch |err| {
+            _ = self.cut.fetchAdd(1, .release);
+            return err;
+        };
+        _ = self.done.fetchAdd(1, .release);
+    }
+};
+
+test "the stop does not cut short an onFinish at work: it gets its .finish_timeout" {
+    const io = testing.io;
+    var dog = try Watchdog.start(io, "the stop does not cut short an onFinish at work");
+    defer dog.stop(io);
+    var waits: WaitController = .{};
+    var slow: SlowFinish = .{};
+    var b: TestingBackend = .init(testing.allocator);
+    defer b.deinit();
+    var server = try Server.init(testing.allocator, .{
+        .backend = b.backend(),
+        .controllers = .{&waits},
+        .middleware = .{&slow},
+        .strict_errors = false,
+        .shutdown_grace = std.Io.Duration.fromMilliseconds(20),
+        .finish_timeout = std.Io.Duration.fromSeconds(2),
+    });
+    defer server.deinit(io);
+    try server.start(io);
+
+    var result: ?TestingBackend.Response = null;
+    var client = try io.concurrent(requestInto, .{ &b, io, .{ .method = .GET, .target = "/ok" }, &result });
+    defer client.cancel(io) catch {};
+    defer if (result) |*res| res.deinit();
+    try waitCount(io, &slow.entered, 1);
+
+    // The grace ends while the onFinish works; the stop's cancelation does
+    // not reach it, and the stop ends with it, in time.
+    const start = std.Io.Clock.awake.now(io);
+    try server.shutdown(io);
+    try testing.expect(sinceMs(io, start) >= 200);
+    try client.await(io);
+    try testing.expectEqual(204, result.?.status);
+    try testing.expectEqual(1, slow.done.load(.acquire));
+    try testing.expectEqual(0, slow.cut.load(.acquire));
     try testing.expectEqual(0, inFlight(&server));
 }
