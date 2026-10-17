@@ -43,8 +43,11 @@ pub fn io(ctx: *const Context) std.Io {
     return ctx.internal.io;
 }
 
-/// The trace of the request, by value, as a `core.Context`: pass it to
-/// the services the handler calls.
+/// The request as a `core.Context`, by value: its trace, its deadline (the
+/// route's `.timeout` or the server's `.request_timeout`) and its token,
+/// which the server cancels when the client has gone or a stop's grace is
+/// over. Pass it to the services the handler calls; `check(ctx.now())`
+/// gives `error.DeadlineExceeded` or `error.Cancelled`.
 pub fn operation(ctx: *const Context) core.Context {
     return ctx.internal.operation;
 }

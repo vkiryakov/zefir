@@ -47,6 +47,11 @@ pub const Request = struct {
     /// The address of the client, as `ctx.request.clientAddress()` gives
     /// it; null for none.
     client_address: ?std.Io.net.IpAddress = null,
+    /// The client leaves this long after it sent the request, as one that
+    /// closes its connection: the request is canceled and gets no
+    /// response, unless it ended before. The server notices it once the
+    /// body has been read, as on the network. Null: the client waits.
+    leave_after: ?std.Io.Duration = null,
 };
 
 /// The response as the server wrote it: the status, the fields with
@@ -105,6 +110,7 @@ pub fn request(b: *Backend, io: std.Io, req: Request) RequestError!Response {
 
     var call: Call = .{
         .body = req.body,
+        .leave_at = if (req.leave_after) |after| .fromNow(io, .{ .raw = after, .clock = .awake }) else null,
         .recorder = .{ .arena = .init(b.gpa), .head_request = req.method == .HEAD },
         .exchange = .{
             .ptr = undefined,
@@ -213,6 +219,8 @@ const Call = struct {
     exchange: Exchange,
     body: []const u8,
     body_read: usize = 0,
+    /// When the client leaves, on the awake clock; null: it waits.
+    leave_at: ?std.Io.Clock.Timestamp,
     recorder: Recorder,
     /// The recorder ran out of memory: `request` returns `OutOfMemory`.
     out_of_memory: bool = false,
@@ -262,11 +270,19 @@ fn bodyFailure(_: *anyopaque) ?Exchange.BodyFailure {
     return null;
 }
 
-fn watch(_: *anyopaque, io: std.Io, deadline: std.Io.Timeout) Exchange.Watch {
-    // The client stays: only the deadline, or the end of the request,
-    // ends the watch.
-    deadline.sleep(io) catch {};
-    return .deadline;
+/// Until the client leaves (`leave_after`) or `deadline` passes, whichever
+/// comes first. The server cancels the watch when the request ends.
+fn watch(ptr: *anyopaque, io: std.Io, deadline: std.Io.Timeout) Exchange.Watch {
+    const leave = Call.of(ptr).leave_at orelse {
+        deadline.sleep(io) catch {};
+        return .deadline;
+    };
+    if (deadline.toTimestamp(io)) |at| if (at.toClock(io, .awake).compare(.lte, leave)) {
+        deadline.sleep(io) catch {};
+        return .deadline;
+    };
+    leave.wait(io) catch return .deadline;
+    return .client_gone;
 }
 
 fn writeHead(ptr: *anyopaque, _: std.Io, status: u16, fields: []const h1.Field, body: Exchange.BodyKind) Exchange.WriteError!void {

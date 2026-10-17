@@ -20,6 +20,9 @@ pub const Internal = struct {
     /// What follows '?' in the target, without it.
     query: []const u8 = "",
     body: ?BodyReader = null,
+    /// Set once the body has been read to its end: from then on the
+    /// request's guard watches the connection.
+    body_done: ?*std.Io.Event = null,
 };
 
 /// The value of the first header field `name`, which is case-insensitive.
@@ -114,7 +117,7 @@ pub fn clientAddress(r: *const Request) ?std.Io.net.IpAddress {
 /// is `error.ReadFailed` of `std.Io.Reader`.
 pub fn bodyReader(r: *Request) error{BodyConsumed}!*std.Io.Reader {
     if (r.internal.body == null) {
-        r.internal.body = .{ .exchange = r.internal.exchange, .io = r.internal.io };
+        r.internal.body = .{ .exchange = r.internal.exchange, .io = r.internal.io, .done = r.internal.body_done };
         const body = &r.internal.body.?;
         body.interface.buffer = &body.buffer;
     }
@@ -126,6 +129,8 @@ pub fn bodyReader(r: *Request) error{BodyConsumed}!*std.Io.Reader {
 pub const BodyReader = struct {
     exchange: *Exchange,
     io: std.Io,
+    /// Set at the end of the body.
+    done: ?*std.Io.Event = null,
     interface: std.Io.Reader = .{
         .vtable = &.{ .stream = stream },
         .buffer = &.{},
@@ -147,6 +152,7 @@ pub const BodyReader = struct {
         };
         if (n == 0) {
             b.ended = true;
+            if (b.done) |done| done.set(b.io);
             return error.EndOfStream;
         }
         w.advance(n);
@@ -256,14 +262,19 @@ test "header and cookie: the first of a name; cookies by their exact name" {
     try testing.expectEqual(null, r.clientAddress());
 }
 
-test "bodyReader reads the whole body" {
+test "bodyReader reads the whole body, then marks it done" {
     const body = "{\"title\":\"Buy milk\",\"done\":false}";
     var fake: Fake = .init(&.{}, body);
     var r = fake.request();
+    var done: std.Io.Event = .unset;
+    r.internal.body_done = &done;
     const reader = try r.bodyReader();
     try testing.expect(reader == try r.bodyReader());
-    const all = try reader.allocRemaining(testing.allocator, .unlimited);
-    defer testing.allocator.free(all);
-    try testing.expectEqualStrings(body, all);
+    _ = try reader.take(4);
+    try testing.expect(!done.isSet());
+    const rest = try reader.allocRemaining(testing.allocator, .unlimited);
+    defer testing.allocator.free(rest);
+    try testing.expectEqualStrings(body[4..], rest);
+    try testing.expect(done.isSet());
     try testing.expectError(error.EndOfStream, reader.takeByte());
 }

@@ -127,7 +127,11 @@ pub const Exchange = struct {
         readBody: *const fn (ptr: *anyopaque, io: std.Io, buffer: []u8) ReadError!usize,
         /// After `ReadFailed`: why; null for a broken connection.
         bodyFailure: *const fn (ptr: *anyopaque) ?BodyFailure,
-        /// Returns when the client has gone or `deadline` has passed.
+        /// Returns when the client has gone or `deadline` has passed. The
+        /// request's guard calls it on a task of its own once the body has
+        /// been read to its end (or there is none), so it never reads the
+        /// connection while `readBody` does; the guard is canceled when the
+        /// request ends, and what a canceled watch returns is dropped.
         watch: *const fn (ptr: *anyopaque, io: std.Io, deadline: std.Io.Timeout) Watch,
         writeHead: *const fn (ptr: *anyopaque, io: std.Io, status: u16, fields: []const h1.Field, body: BodyKind) WriteError!void,
         writeBody: *const fn (ptr: *anyopaque, io: std.Io, data: []const u8) WriteError!void,

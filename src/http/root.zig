@@ -26,9 +26,11 @@
 //! Status: in progress. So far the module holds its HTTP/1.1 parser
 //! (h1/, internal), the routes of controllers (their declarations, the
 //! checks the compiler makes of them, the router and the normalization of
-//! paths), the server with its lifecycle and the path of a request, and
-//! the backend in memory of `http.testing`; the rest of the API comes with
-//! the next commits.
+//! paths), the server with its lifecycle and the path of a request (each
+//! request in a task of its own, with its deadline, the client that
+//! leaves, the stop and the limit of requests at work), and the backend
+//! in memory of `http.testing`; the rest of the API comes with the next
+//! commits.
 
 const std = @import("std");
 const route_decls = @import("routes.zig");
@@ -81,5 +83,6 @@ test {
     _ = @import("Request.zig");
     _ = @import("Response.zig");
     _ = @import("flow.zig");
+    _ = @import("wait.zig");
     _ = @import("testing.zig");
 }

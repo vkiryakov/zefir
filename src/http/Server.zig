@@ -25,6 +25,7 @@
 //! configured → starting → running → draining → stopped. From `start` on
 //! the server stays where it is: its backend holds a pointer to it.
 const std = @import("std");
+const core = @import("core");
 const Backend = @import("Backend.zig");
 const Context = @import("Context.zig");
 const dto = @import("dto.zig");
@@ -33,6 +34,7 @@ const plan = @import("plan.zig");
 const route_decls = @import("routes.zig");
 const routing = @import("router.zig");
 const sse = @import("sse.zig");
+const waiting = @import("wait.zig");
 
 const Server = @This();
 const Duration = std.Io.Duration;
@@ -70,6 +72,15 @@ start_done: std.Io.Event = .unset,
 wait_event: std.Io.Event = .unset,
 /// Set when the server has stopped: `shutdown` returns.
 shutdown_event: std.Io.Event = .unset,
+/// Set when the grace of a stop is over and what still runs is canceled;
+/// also when the server stops. `shutdown` waits a second more from here.
+grace_over: std.Io.Event = .unset,
+/// The requests at work, as `.max_in_flight` counts them: `serve` takes a
+/// place before a request runs and gives it back at its end.
+in_flight: std.atomic.Value(u32) = .init(0),
+/// Set when `in_flight` drops to zero. Only the lifecycle task waits on
+/// it, and resets it before it looks at `in_flight`.
+idle: std.Io.Event = .unset,
 
 /// The states of a server, in order.
 pub const State = enum(u8) { configured, starting, running, draining, stopped };
@@ -436,7 +447,8 @@ pub fn run(server: *Server, io: std.Io) (StartError || WaitError)!void {
 
 /// Begins a graceful stop. From any task, also from a handler; never
 /// waits; a second call does nothing. The backend takes no new requests,
-/// the requests at work end with their responses, and the server stops.
+/// the requests at work get `.shutdown_grace` to end with their responses,
+/// those that outlive it are canceled without one, and the server stops.
 pub fn requestStop(server: *Server, io: std.Io) void {
     server.mutex.lockUncancelable(io);
     defer server.mutex.unlock(io);
@@ -445,6 +457,7 @@ pub fn requestStop(server: *Server, io: std.Io) void {
             server.state_value.store(.stopped, .release);
             server.wait_event.set(io);
             server.shutdown_event.set(io);
+            server.grace_over.set(io);
         },
         .starting, .running => |current| {
             // While starting, `start` moves on to draining itself.
@@ -457,12 +470,22 @@ pub fn requestStop(server: *Server, io: std.Io) void {
 }
 
 /// `requestStop` and a wait for the stop. `error.ShutdownTimeout` when
-/// requests did not end in time: the server stays in `draining`.
+/// requests did not end within `.shutdown_grace` and one second more
+/// after they were canceled (a handler that ignores its cancelation): the
+/// server stays in `draining` until they end. Treat it as fatal and end
+/// the process; `deinit` would wait for such requests without a limit.
 pub fn shutdown(server: *Server, io: std.Io) ShutdownError!void {
     server.requestStop(io);
-    try server.shutdown_event.wait(io);
-    if (server.state() != .stopped) return error.ShutdownTimeout;
+    try server.grace_over.wait(io);
+    waiting.untilSet(&server.shutdown_event, io, .after(std.Io.Clock.awake.now(io), cancel_budget)) catch |err| switch (err) {
+        error.Timeout => return error.ShutdownTimeout,
+        error.Canceled => |e| return e,
+    };
 }
+
+/// How long the requests canceled at the end of a stop's grace have to
+/// end before `shutdown` gives up on them.
+const cancel_budget: Duration = .fromSeconds(1);
 
 /// Running, and the backend takes requests. Thread-safe; for health
 /// checks.
@@ -498,6 +521,7 @@ fn markStopped(server: *Server, io: std.Io) void {
     }
     server.wait_event.set(io);
     server.shutdown_event.set(io);
+    server.grace_over.set(io);
 }
 
 fn joinLifecycle(server: *Server, io: std.Io) void {
@@ -508,7 +532,11 @@ fn joinLifecycle(server: *Server, io: std.Io) void {
     server.lifecycle = null;
 }
 
-/// The lifecycle task: waits for a stop and leads it.
+/// The lifecycle task: waits for a stop and leads it. The backend takes no
+/// new requests; those at work get `.shutdown_grace` to end; then the
+/// backend cancels what still runs (a request it cancels ends without a
+/// response) and the server stops once every task of the backend has
+/// ended.
 fn runLifecycle(server: *Server, io: std.Io) void {
     // Nothing cancels this task, and its waits are no cancelation points.
     const protection = io.swapCancelProtection(.blocked);
@@ -516,9 +544,31 @@ fn runLifecycle(server: *Server, io: std.Io) void {
     server.stop_event.waitUncancelable(io);
     server.start_done.waitUncancelable(io);
     if (server.rollback) return;
+    const grace_end: core.Deadline = .after(std.Io.Clock.awake.now(io), server.settings.shutdown_grace);
     server.backend.stopAccepting(io);
+    server.waitIdle(io, grace_end);
+    server.grace_over.set(io);
+    server.backend.cancelAll(io);
     server.backend.wait(io);
     server.markStopped(io);
+}
+
+/// Waits until no request is at work or `deadline` passes. Only the
+/// lifecycle task calls it.
+fn waitIdle(server: *Server, io: std.Io, deadline: core.Deadline) void {
+    while (true) {
+        server.idle.reset();
+        // A read-modify-write, not a load: it orders the reset before the
+        // `set` of the request that drops the count last. A plain load may
+        // read the count from before that while the reset lands after its
+        // `set`, and the stop would sleep through it.
+        if (server.in_flight.fetchAdd(0, .acq_rel) == 0) return;
+        waiting.untilSet(&server.idle, io, deadline) catch |err| switch (err) {
+            error.Timeout => return,
+            // The lifecycle task waits with cancelation blocked.
+            error.Canceled => unreachable,
+        };
+    }
 }
 
 /// "" or "/api", "/api/v2": what the router compares, segment by segment,
