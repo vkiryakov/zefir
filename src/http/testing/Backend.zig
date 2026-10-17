@@ -279,15 +279,24 @@ fn bodyFailure(_: *anyopaque) ?Exchange.BodyFailure {
 /// comes first. The server cancels the watch when the request ends.
 fn watch(ptr: *anyopaque, io: std.Io, deadline: std.Io.Timeout) Exchange.Watch {
     const leave = Call.of(ptr).leave_at orelse {
-        deadline.sleep(io) catch {};
+        sleepUntil(io, deadline);
         return .deadline;
     };
     if (deadline.toTimestamp(io)) |at| if (at.toClock(io, .awake).compare(.lte, leave)) {
-        deadline.sleep(io) catch {};
+        sleepUntil(io, deadline);
         return .deadline;
     };
     leave.wait(io) catch return .deadline;
     return .client_gone;
+}
+
+/// Sleeps until `deadline`; without one, until the task is canceled, an
+/// hour at a time: a sleep of `.none` is no sleep every `std.Io` can take.
+fn sleepUntil(io: std.Io, deadline: std.Io.Timeout) void {
+    if (deadline == .none) {
+        while (true) io.sleep(.fromSeconds(60 * 60), .awake) catch return;
+    }
+    deadline.sleep(io) catch {};
 }
 
 fn writeHead(ptr: *anyopaque, _: std.Io, status: u16, fields: []const h1.Field, body: Exchange.BodyKind) Exchange.WriteError!void {
