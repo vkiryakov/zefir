@@ -407,6 +407,60 @@ fn earlyResponses(io: Io) !void {
     try testing.expectEqual(6, f.app.served.load(.monotonic));
 }
 
+test "the body left after an early response is dropped within one timeouts.body, else the connection closes" {
+    try runtime.forEachRuntime(gpa, stuckDrain);
+}
+
+fn stuckDrain(io: Io) !void {
+    var dog = try e2e.Watchdog.start(io, "the body left after an early response");
+    defer dog.stop(io);
+    var f: Fixture = undefined;
+    try f.start(io, .{ .timeouts = .{ .body = .fromMilliseconds(200) } });
+    defer f.deinit(io);
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // 100 bytes of a body of 10 KiB, then nothing: the 401 keeps the
+    // connection, which waits for the rest no longer than timeouts.body.
+    var c = try f.connect(io);
+    defer c.close(io);
+    try c.send(io, try std.mem.concat(a, u8, &.{ try postHead(a, "/early", 10 << 10), &@as([100]u8, @splat('x')) }));
+    const res = try c.readResponse(io, a, .{});
+    try testing.expectEqual(401, res.status);
+    try testing.expectEqual(null, res.header("connection"));
+    const start = Io.Clock.awake.now(io);
+    try c.expectEnd(io, .fromSeconds(5));
+    try e2e.expectWithin("the connection closed after the body stalled", e2e.sinceMs(io, start), 100, 1500);
+}
+
+test "a stop while the body left after an early response drains closes the connection at once" {
+    try runtime.forEachRuntime(gpa, stopDuringDrain);
+}
+
+fn stopDuringDrain(io: Io) !void {
+    var dog = try e2e.Watchdog.start(io, "a stop while the body left drains");
+    defer dog.stop(io);
+    var f: Fixture = undefined;
+    try f.start(io, .{});
+    defer f.deinit(io);
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // The connection waits for the rest of the body after its 401 when the
+    // stop comes: no request is at work, so the stop cancels it at once,
+    // and the connection closes without a lingering close of a second.
+    var c = try f.connect(io);
+    defer c.close(io);
+    try c.send(io, try std.mem.concat(a, u8, &.{ try postHead(a, "/early", 10 << 10), &@as([100]u8, @splat('x')) }));
+    try testing.expectEqual(401, (try c.readResponse(io, a, .{})).status);
+    const start = Io.Clock.awake.now(io);
+    try f.server.shutdown(io);
+    try e2e.expectWithin("the stop while the body drained", e2e.sinceMs(io, start), 0, 900);
+    try c.expectEnd(io, .fromSeconds(2));
+}
+
 // Task 39: ctx.body.
 
 test "Expect: 100-continue over the limit: 413 without 100" {
