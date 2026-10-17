@@ -38,6 +38,7 @@ const routing = @import("router.zig");
 const sse = @import("sse.zig");
 const static_files = @import("static.zig");
 const waiting = @import("wait.zig");
+const path_rules = @import("path.zig");
 
 const Server = @This();
 const Duration = std.Io.Duration;
@@ -705,7 +706,7 @@ pub fn validPrefix(prefix: []const u8) bool {
     while (it.next()) |s| {
         if (s.len == 0 or std.mem.eql(u8, s, ".") or std.mem.eql(u8, s, "..")) return false;
         for (s) |c| {
-            if (c < 0x21 or c > 0x7e or std.mem.findScalar(u8, "%?#{}", c) != null) return false;
+            if (!path_rules.literalByte(c)) return false;
         }
     }
     return true;

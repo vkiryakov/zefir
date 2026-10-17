@@ -17,7 +17,8 @@
 //! `Allow`; else 404.
 const std = @import("std");
 const routes = @import("routes.zig");
-const Normalized = @import("path.zig").Normalized;
+const path_rules = @import("path.zig");
+const Normalized = path_rules.Normalized;
 
 /// The methods a route can have, in the order of `Allow`.
 pub const methods = [_]std.http.Method{ .GET, .HEAD, .POST, .PUT, .PATCH, .DELETE, .OPTIONS };
@@ -84,7 +85,8 @@ pub const Segment = union(enum) {
 /// compile error that names the route (`where`, "UsersV1Controller.get"):
 /// an unclosed `{`, a parameter that is not a whole segment, a name that is
 /// not 1 to 64 of `A-Z a-z 0-9 _ -` or comes twice, `{*name}` before the
-/// last segment, an empty segment, a dot segment.
+/// last segment, an empty segment, a dot segment, a literal segment with a
+/// byte that is not visible ASCII or is '%', '?' or '#'.
 pub fn parse(comptime pattern: []const u8, comptime where: []const u8) []const Segment {
     if (pattern.len == 0) return &.{};
     const head = "zefir.http: " ++ where ++ ": route path \"" ++ pattern ++ "\"";
@@ -100,6 +102,8 @@ pub fn parse(comptime pattern: []const u8, comptime where: []const u8) []const S
             if (std.mem.findAny(u8, s, "{}") != null) @compileError(head ++ ": a parameter is a whole segment, such as /{id}");
             if (std.mem.eql(u8, s, ".") or std.mem.eql(u8, s, ".."))
                 @compileError(head ++ " has a dot segment, which a request path never keeps");
+            for (s) |c| if (!path_rules.literalByte(c))
+                @compileError(head ++ ": a segment is visible ASCII without '%', '?' and '#', written as the path reads decoded");
             out = out ++ [_]Segment{.{ .literal = s }};
             continue;
         }

@@ -80,7 +80,8 @@ pub fn routes(comptime spec: anytype) type {
 /// A GET route; a HEAD request on its path is served by it too, without
 /// a body. `opts` may hold `.middleware`, `.max_body_bytes` (a number of
 /// bytes, instead of the server's) and `.timeout` (a `std.Io.Duration`
-/// instead of the server's `.request_timeout`, or null for no deadline).
+/// above zero instead of the server's `.request_timeout`, or null for no
+/// deadline; a `?std.Io.Duration` of the config too).
 pub fn get(comptime path: []const u8, comptime opts: anytype) type {
     return Route(.GET, .rest, path, opts);
 }
@@ -139,8 +140,10 @@ pub fn Route(comptime method: std.http.Method, comptime kind: Kind, comptime pat
         .int, .comptime_int => {},
         else => @compileError("zefir.http: " ++ where ++ ": .max_body_bytes is a number of bytes, such as 8 << 20"),
     };
-    if (@hasField(O, "timeout")) expectDuration(@TypeOf(opts.timeout), where ++ ": .timeout is a std.Io.Duration, such as std.Io.Duration.fromSeconds(300), or null for no deadline");
-    if (@hasField(O, "heartbeat")) expectDuration(@TypeOf(opts.heartbeat), where ++ ": .heartbeat is a std.Io.Duration, such as std.Io.Duration.fromSeconds(15), or null for none");
+    const timeout_form = where ++ ": .timeout is a std.Io.Duration above zero, such as std.Io.Duration.fromSeconds(300), or null for no deadline";
+    const heartbeat_form = where ++ ": .heartbeat is a std.Io.Duration above zero, such as std.Io.Duration.fromSeconds(15), or null for none";
+    if (@hasField(O, "timeout")) expectDuration(@TypeOf(opts.timeout), timeout_form);
+    if (@hasField(O, "heartbeat")) expectDuration(@TypeOf(opts.heartbeat), heartbeat_form);
     if (@hasField(O, "on_close") and @TypeOf(opts.on_close) != @EnumLiteral())
         @compileError("zefir.http: " ++ where ++ ": .on_close names a method of the controller, such as .on_close = .eventsClosed");
     return struct {
@@ -152,8 +155,8 @@ pub fn Route(comptime method: std.http.Method, comptime kind: Kind, comptime pat
         pub const max_body_bytes: ?usize = if (@hasField(O, "max_body_bytes")) opts.max_body_bytes else null;
         pub const timeout: Timeout = if (!@hasField(O, "timeout"))
             .server
-        else if (@TypeOf(opts.timeout) == @TypeOf(null)) .none else .{ .after = opts.timeout };
-        pub const heartbeat: ?std.Io.Duration = if (@hasField(O, "heartbeat")) opts.heartbeat else null;
+        else if (positive(opts.timeout, timeout_form)) |budget| .{ .after = budget } else .none;
+        pub const heartbeat: ?std.Io.Duration = if (@hasField(O, "heartbeat")) positive(opts.heartbeat, heartbeat_form) else null;
         pub const on_close: ?[]const u8 = if (@hasField(O, "on_close")) @tagName(opts.on_close) else null;
     };
 }
@@ -173,6 +176,14 @@ pub fn isMarked(comptime T: type, comptime marker: []const u8) bool {
 
 fn expectDuration(comptime T: type, comptime message: []const u8) void {
     if (T != std.Io.Duration and T != @TypeOf(null) and T != ?std.Io.Duration) @compileError("zefir.http: " ++ message);
+}
+
+/// A duration of the options, null for none; one of zero or below stops the
+/// build with `message`, since a route's options are known at compile time.
+fn positive(comptime value: anytype, comptime message: []const u8) ?std.Io.Duration {
+    const duration: ?std.Io.Duration = value;
+    if (duration) |d| if (d.nanoseconds <= 0) @compileError("zefir.http: " ++ message);
+    return duration;
 }
 
 fn lowerName(comptime method: std.http.Method) []const u8 {

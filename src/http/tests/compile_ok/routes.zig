@@ -7,6 +7,10 @@ const http = @import("http");
 
 const TodoResponse = struct { id: u64, title: []const u8 };
 
+/// Timeouts of a config: a duration, or none.
+const report_timeout: ?std.Io.Duration = std.Io.Duration.fromSeconds(60);
+const archive_timeout: ?std.Io.Duration = null;
+
 // Application code (src/middleware.zig of a client): zefir-http ships none of these.
 fn requestId(ctx: *http.Context) !http.MiddlewareResult {
     try ctx.response.setHeader("x-request-id", ctx.requestId());
@@ -50,6 +54,8 @@ const TodosV1Controller = struct {
             .probe = http.head("/{id}", .{}),
             .preflight = http.options("/{id}", .{}),
             .exportCsv = http.get("/export.csv", .{ .timeout = std.Io.Duration.fromSeconds(300) }),
+            .report = http.get("/report", .{ .timeout = report_timeout }),
+            .archive = http.get("/archive", .{ .timeout = archive_timeout }),
             .files = http.get("/{id}/files/{*path}", .{}),
             .events = http.sse.get("/events", .{ .heartbeat = std.Io.Duration.fromSeconds(15), .on_close = .eventsClosed }),
         },
@@ -68,6 +74,8 @@ const TodosV1Controller = struct {
     pub fn probe(_: *TodosV1Controller, _: *http.Context) !void {}
     pub fn preflight(_: *TodosV1Controller, _: *http.Context) !void {}
     pub fn exportCsv(_: *TodosV1Controller, _: *http.Context) !void {}
+    pub fn report(_: *TodosV1Controller, _: *http.Context) !void {}
+    pub fn archive(_: *TodosV1Controller, _: *http.Context) !void {}
     pub fn files(_: *TodosV1Controller, _: *http.Context) void {}
     pub fn events(_: *TodosV1Controller, _: *http.sse.Context) !void {}
     pub fn eventsClosed(_: *TodosV1Controller, _: *http.sse.Context) void {}

@@ -45,6 +45,15 @@ fn queryOf(after_path: []const u8) []const u8 {
     return q[0 .. std.mem.findScalar(u8, q, '#') orelse q.len];
 }
 
+/// Whether `c` may be a byte of a literal segment of a route's pattern, of
+/// the server's prefix or of a static mount: visible ASCII but '%', '?',
+/// '#', '{' and '}'. The router compares those segments with the segments
+/// of a path decoded, so a segment written encoded would never match, and
+/// '?' and '#' never come in a path.
+pub fn literalByte(c: u8) bool {
+    return c >= 0x21 and c <= 0x7e and std.mem.findScalar(u8, "%?#{}", c) == null;
+}
+
 /// A path ready for the router.
 pub const Normalized = struct {
     /// The decoded segments, without dot segments and without the trailing
