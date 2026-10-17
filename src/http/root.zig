@@ -44,8 +44,10 @@
 //! mechanism of the application's middleware on three levels (functions,
 //! types, objects, sets; the phases `run`, `onResponse` and `onFinish`;
 //! `http.onResponse`, `http.onFinish`, `http.MiddlewareResult`,
-//! `http.Outcome`) and the typed locals of a request (`ctx.locals`,
-//! `ctx.local`); the rest of the API comes with the next commits.
+//! `http.Outcome`), the typed locals of a request (`ctx.locals`,
+//! `ctx.local`) and static files (`http.static`: conditional requests,
+//! ranges, index files, the SPA file, a root that nothing leaves); the
+//! rest of the API comes with the next commits.
 
 const std = @import("std");
 const route_decls = @import("routes.zig");
@@ -53,6 +55,7 @@ const route_decls = @import("routes.zig");
 const errors = @import("errors.zig");
 const dto = @import("dto.zig");
 const middleware = @import("middleware.zig");
+const static_files = @import("static.zig");
 
 pub const Server = @import("Server.zig");
 pub const Backend = @import("Backend.zig");
@@ -87,6 +90,11 @@ pub const MiddlewareResult = middleware.MiddlewareResult;
 pub const Outcome = middleware.Outcome;
 pub const onResponse = middleware.onResponse;
 pub const onFinish = middleware.onFinish;
+
+// Static files: `.static = .{ http.static("/", .{ .root = "public" }) }`.
+pub const static = static_files.static;
+pub const Static = static_files.Static;
+pub const StaticOptions = static_files.StaticOptions;
 
 pub const routes = route_decls.routes;
 pub const get = route_decls.get;
@@ -129,6 +137,7 @@ test {
     _ = @import("output/json_out.zig");
     _ = @import("Response.zig");
     _ = @import("mime.zig");
+    _ = @import("static.zig");
     _ = @import("flow.zig");
     _ = @import("wait.zig");
     _ = @import("testing.zig");

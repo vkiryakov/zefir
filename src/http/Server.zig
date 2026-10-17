@@ -36,6 +36,7 @@ const proxies = @import("proxies.zig");
 const route_decls = @import("routes.zig");
 const routing = @import("router.zig");
 const sse = @import("sse.zig");
+const static_files = @import("static.zig");
 const waiting = @import("wait.zig");
 
 const Server = @This();
@@ -65,6 +66,9 @@ trust: proxies.Trust,
 needs: Needs,
 /// `.error_handler`, borrowed, or the default one.
 error_handler: flow.ErrorHandler,
+/// The mounts of `.static`, copied; `start` opens their roots, `deinit`
+/// closes them.
+mounts: []static_files.Mount,
 
 /// Guards the lifecycle fields below that are not atomic; every section
 /// under it is short.
@@ -103,13 +107,19 @@ pub const State = enum(u8) { configured, starting, running, draining, stopped };
 /// `{` and `}`, no empty or dot segments, no trailing slash); a
 /// `.max_in_flight`, `.max_streams` or `.json.max_depth` of 0; a negative
 /// duration, or a `.request_timeout` of 0; an entry of a `.trusted_proxies`
-/// list that is neither a CIDR block nor an address.
+/// list that is neither a CIDR block nor an address; a `.static` mount
+/// whose path is not "/" or such as a prefix, two mounts on one path, an
+/// empty root, an index file that is not one name, a `spa_fallback` with a
+/// segment that a request could not name (a hidden one, say), or a
+/// `cache_control` with CR, LF or NUL.
 pub const InitError = error{ InvalidConfiguration, OutOfMemory };
 /// The backend's errors from its `start`, a task the runtime did not give,
-/// a second `start` (`InvalidState`), and a route that needs what the
-/// backend cannot do (`UnsupportedByBackend`: an SSE route needs `flush`,
-/// static files `streaming_response`).
-pub const StartError = Backend.StartError || error{ InvalidState, UnsupportedByBackend };
+/// a second `start` (`InvalidState`), a route that needs what the backend
+/// cannot do (`UnsupportedByBackend`: an SSE route needs `flush`, static
+/// files `streaming_response`), and the root of a `.static` mount that is
+/// missing, is not a directory or does not open (`InvalidStaticRoot`,
+/// logged with the mount, the path and the error of the system).
+pub const StartError = Backend.StartError || error{ InvalidState, UnsupportedByBackend, InvalidStaticRoot };
 /// The wait was canceled, or the server never started (`InvalidState`).
 pub const WaitError = error{InvalidState} || std.Io.Cancelable;
 pub const ShutdownError = error{ShutdownTimeout} || WaitError;
@@ -193,7 +203,9 @@ pub const Needs = struct {
 /// `.strict_errors`, `.unknown_fields`, `.json`, `.max_body_bytes`,
 /// `.max_query_params`, `.max_in_flight`, `.max_streams`,
 /// `.request_timeout`, `.shutdown_grace`, `.finish_timeout` and
-/// `.trusted_proxies`, as `Settings` describes them. The options are
+/// `.trusted_proxies`, as `Settings` describes them, and `.static`, a
+/// tuple of mounts: `.{ http.static("/", .{ .root = "public" }) }`. The
+/// options are
 /// `anytype`, so a duration among them is written in full:
 /// `std.Io.Duration.fromSeconds(10)`, not `.fromSeconds(10)`.
 ///
@@ -212,8 +224,9 @@ pub const Needs = struct {
 /// compile time, turns the check off.
 ///
 /// The controllers, the error handler and the objects of the middleware
-/// are borrowed and live as long as the server; the prefix and the list of
-/// trusted proxies are copied. No I/O.
+/// are borrowed and live as long as the server; the prefix, the list of
+/// trusted proxies and the strings of the mounts are copied. No I/O: the
+/// roots of the mounts open in `start`.
 pub fn init(gpa: std.mem.Allocator, options: anytype) InitError!Server {
     const O = @TypeOf(options);
     const p = comptime plan.of(O);
@@ -237,6 +250,9 @@ pub fn init(gpa: std.mem.Allocator, options: anytype) InitError!Server {
     errdefer freeSettings(gpa, settings);
     const trust = try proxies.Trust.init(gpa, settings.trusted_proxies);
     errdefer trust.deinit(gpa);
+
+    const mounts = try static_files.copyMounts(gpa, if (@hasField(O, "static")) options.static else .{});
+    errdefer static_files.freeMounts(gpa, mounts);
 
     const links = try linksOf(gpa, p, options);
     errdefer gpa.free(links);
@@ -280,6 +296,7 @@ pub fn init(gpa: std.mem.Allocator, options: anytype) InitError!Server {
         .trust = trust,
         .needs = comptime needsOf(O, p),
         .error_handler = if (@hasField(O, "error_handler")) .of(p.Handler, options.error_handler) else .default,
+        .mounts = mounts,
     };
 }
 
@@ -452,10 +469,10 @@ fn OnCloseOf(comptime C: type, comptime name: []const u8) type {
     };
 }
 
-/// Checks that the backend can do what the routes need, starts the
-/// backend and returns once the server takes requests. On an error
-/// nothing runs and the server is `stopped`; a second `start` is
-/// `error.InvalidState`.
+/// Checks that the backend can do what the routes and the mounts need,
+/// opens the roots of the mounts, starts the backend and returns once the
+/// server takes requests. On an error nothing runs and the server is
+/// `stopped`; a second `start` is `error.InvalidState`.
 pub fn start(server: *Server, io: std.Io) StartError!void {
     {
         server.mutex.lockUncancelable(io);
@@ -467,6 +484,10 @@ pub fn start(server: *Server, io: std.Io) StartError!void {
         server.markStopped(io);
         return error.UnsupportedByBackend;
     }
+    static_files.openRoots(server.mounts, io) catch |err| {
+        server.markStopped(io);
+        return err;
+    };
     // The stop runs in a task of its own: `requestStop` only wakes it. It
     // starts first, so that a stop requested while the backend starts is
     // not lost.
@@ -592,6 +613,8 @@ pub fn deinit(server: *Server, io: std.Io) void {
     defer _ = io.swapCancelProtection(protection);
     server.requestStop(io);
     server.joinLifecycle(io);
+    static_files.closeRoots(server.mounts, io);
+    static_files.freeMounts(server.gpa, server.mounts);
     freeSettings(server.gpa, server.settings);
     server.trust.deinit(server.gpa);
     for (server.routes) |r| server.gpa.free(r.info.pattern);
@@ -660,8 +683,8 @@ fn waitIdle(server: *Server, io: std.Io, deadline: core.Deadline) void {
 }
 
 /// "" or "/api", "/api/v2": what the router compares, segment by segment,
-/// with the decoded segments of a path.
-fn validPrefix(prefix: []const u8) bool {
+/// with the decoded segments of a path; a mount of `.static` too.
+pub fn validPrefix(prefix: []const u8) bool {
     if (prefix.len == 0) return true;
     if (prefix[0] != '/') return false;
     var it = std.mem.splitScalar(u8, prefix[1..], '/');
@@ -940,7 +963,7 @@ test "start refuses a backend without a capability a route needs" {
 
     // Static files need streaming_response.
     var no_stream: FakeBackend = .{ .can = .{ .http1 = true, .flush = true } };
-    var with_static = try init(testing.allocator, .{ .backend = no_stream.backend(), .controllers = .{&health}, .static = .{.{}} });
+    var with_static = try init(testing.allocator, .{ .backend = no_stream.backend(), .controllers = .{&health}, .static = .{static_files.static("/", .{ .root = "public" })} });
     defer with_static.deinit(io);
     try testing.expectEqual(1, with_static.needs.static_mounts);
     try testing.expectError(error.UnsupportedByBackend, with_static.start(io));

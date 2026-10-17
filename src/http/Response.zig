@@ -133,6 +133,46 @@ pub const Internal = struct {
         i.state = .finished;
     }
 
+    /// Sends `length` bytes of the open file `f`, from `offset` on, as the
+    /// body of `content_type`, read from the disk as they go out: the head
+    /// with that length, the bytes a buffer at a time, then the end; HEAD
+    /// gets the head alone. `file` and the server's static files send
+    /// through it; `what` names the caller in the log. `content_type` lives
+    /// as long as the response.
+    pub fn sendFile(i: *Internal, f: std.Io.File, content_type: []const u8, offset: u64, length: u64, comptime what: []const u8) FileError!void {
+        const sink = i.sink orelse return error.WriteFailed;
+        i.content_type = content_type;
+        try i.useBuffer();
+        i.body = .stream;
+        try i.commit(length);
+        if (i.sendsBody()) {
+            var reader: std.Io.File.Reader = .init(f, sink.io, &.{});
+            // Positional reads only: zio does them on every system.
+            reader.mode = .positional_simple;
+            reader.pos = offset;
+            reader.interface.streamExact64(&i.out.writer, length) catch |err| switch (err) {
+                error.WriteFailed => return i.out.failure orelse error.WriteFailed,
+                error.ReadFailed => {
+                    const cause: anyerror = reader.err orelse error.Unexpected;
+                    if (cause == error.Canceled) {
+                        i.out.failure = error.Canceled;
+                        return error.Canceled;
+                    }
+                    // The head has gone out: the server cuts the response.
+                    i.out.failure = error.WriteFailed;
+                    log.warn(what ++ " could not read the file: error.{t}; the response is cut", .{cause});
+                    return error.ReadFailed;
+                },
+                error.EndOfStream => {
+                    i.out.failure = error.WriteFailed;
+                    log.warn(what ++ ": the file ended before its length; the response is cut", .{});
+                    return error.ReadFailed;
+                },
+            };
+        }
+        return i.finishBody();
+    }
+
     /// Sends the head: the status, the fields with `Content-Type` first,
     /// and the body's `length`, or chunked for null. From here on the
     /// response is committed. Every head of a response goes out here.
@@ -523,35 +563,7 @@ pub fn file(r: *Response, path: []const u8, options: FileOptions) FileError!void
         return error.ReadFailed;
     }
     if (options.download_as) |name| try r.putField("content-disposition", try disposition(i.arena, name));
-    i.content_type = try i.arena.dupe(u8, content_type);
-    try i.useBuffer();
-    i.body = .stream;
-    try i.commit(info.size);
-    if (i.sendsBody()) {
-        var reader: std.Io.File.Reader = .initSize(f, io, &.{}, info.size);
-        // Positional reads only: zio does them on every system.
-        reader.mode = .positional_simple;
-        reader.interface.streamExact64(&i.out.writer, info.size) catch |err| switch (err) {
-            error.WriteFailed => return i.out.failure orelse error.WriteFailed,
-            error.ReadFailed => {
-                const cause: anyerror = reader.err orelse error.Unexpected;
-                if (cause == error.Canceled) {
-                    i.out.failure = error.Canceled;
-                    return error.Canceled;
-                }
-                // The head has gone out: the server cuts the response.
-                i.out.failure = error.WriteFailed;
-                log.warn("ctx.response.file could not read the file: error.{t}; the response is cut", .{cause});
-                return error.ReadFailed;
-            },
-            error.EndOfStream => {
-                i.out.failure = error.WriteFailed;
-                log.warn("ctx.response.file: the file ended before its length; the response is cut", .{});
-                return error.ReadFailed;
-            },
-        };
-    }
-    return i.finishBody();
+    return i.sendFile(f, try i.arena.dupe(u8, content_type), 0, info.size, "ctx.response.file");
 }
 
 fn notOpened(err: anyerror) error{ReadFailed} {

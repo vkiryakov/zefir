@@ -33,7 +33,9 @@
 //!
 //! In the request's task, the `run` phases of the server's middleware come
 //! first, before the route is applied, then those of the route's own
-//! middleware, then the handler (middleware.zig). The `onResponse` phases
+//! middleware, then the handler (middleware.zig); a path that no route
+//! takes goes to the longest static mount that begins it, with no
+//! deadline (static.zig). The `onResponse` phases
 //! run right before the head goes out, whichever task sends it. Once the
 //! request has ended, the `onFinish` phases run, once, on a task of their
 //! own within `.finish_timeout`; then the values of `ctx.locals` go.
@@ -54,6 +56,7 @@ const response = @import("h1/response.zig");
 const json_out = @import("output/json_out.zig");
 const plan = @import("plan.zig");
 const mw = @import("middleware.zig");
+const static_files = @import("static.zig");
 const waiting = @import("wait.zig");
 
 const log = std.log.scoped(.http);
@@ -257,10 +260,11 @@ fn unavailable(ctx: *Context, exchange: *Exchange) void {
 }
 
 /// What the path comes to, found before any task so that the route's
-/// `.timeout` is known: the router's match, or the error of a path the
-/// router cannot take.
+/// `.timeout` is known: the router's match, the static mount of a path
+/// that no route takes, or the error of a path the router cannot take.
 const Found = union(enum) {
     match: routing.Match,
+    static: static_files.Target,
     failed: anyerror,
 };
 
@@ -273,17 +277,24 @@ fn find(server: *Server, ctx: *Context) Found {
     }
     const normalized = path.normalize(arena, ctx.request.path) catch |err| return .{ .failed = err };
     const values = arena.alloc([]const u8, server.router.max_params) catch |err| return .{ .failed = err };
-    return .{ .match = server.router.match(ctx.request.method, normalized, values) };
+    const match = server.router.match(ctx.request.method, normalized, values);
+    // The routes of the controllers come first.
+    if (match == .not_found) {
+        if (static_files.find(server.mounts, server.prefix, normalized)) |target| return .{ .static = target };
+    }
+    return .{ .match = match };
 }
 
 /// The budget of the request's deadline: the route's `.timeout`, else the
-/// server's `.request_timeout`; null for none.
+/// server's `.request_timeout`; null for none, as for a static file (design
+/// section 15: the backend's write timeout holds for it).
 fn budgetOf(server: *const Server, found: Found) ?std.Io.Duration {
     const index = switch (found) {
         .match => |match| switch (match) {
             .found => |f| f.route,
             else => null,
         },
+        .static => return null,
         .failed => null,
     } orelse return server.settings.request_timeout;
     return switch (server.routes[index].timeout) {
@@ -349,6 +360,7 @@ fn runRequest(server: *Server, ctx: *Context, found: Found) anyerror!void {
     if (try mw.runPhases(ctx, server.middleware)) return;
     const match = switch (found) {
         .match => |match| match,
+        .static => |target| return static_files.serve(server, ctx, target),
         .failed => |err| return err,
     };
     switch (match) {

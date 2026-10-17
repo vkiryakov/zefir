@@ -6,5 +6,6 @@ test {
     _ = @import("native.zig");
     _ = @import("bodies.zig");
     _ = @import("responses.zig");
+    _ = @import("static.zig");
     _ = @import("counting_allocator.zig");
 }
