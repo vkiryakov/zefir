@@ -320,13 +320,17 @@ fn contains(comptime list: []const []const u8, comptime name: []const u8) bool {
 }
 
 /// A type as messages print it: `*const UsersV1Controller`, without the
-/// file that declares it; the contexts as the application names them.
+/// file that declares it; the types of zefir-http as the application names
+/// them, `http.ErrorResponse(ApiError)` with its body.
 pub fn typeName(comptime T: type) []const u8 {
     if (T == Context) return "http.Context";
     if (T == sse.Context) return "http.sse.Context";
     if (T == errors.Problem) return "http.Problem";
+    if (T == errors.ErrorAction) return "http.ErrorAction";
     if (T == mw.MiddlewareResult) return "http.MiddlewareResult";
     if (T == mw.Outcome) return "http.Outcome";
+    if (routes.isMarked(T, "zefir_http_error_response")) return "http.ErrorResponse(" ++ typeName(T.Body) ++ ")";
+    if (routes.isMarked(T, "zefir_http_json")) return "http.Json(" ++ typeName(T.Value) ++ ")";
     const info = @typeInfo(T);
     if (info == .pointer and info.pointer.size == .one)
         return "*" ++ (if (info.pointer.attrs.@"const") "const " else "") ++ typeName(info.pointer.child);
@@ -363,6 +367,9 @@ pub fn shortName(comptime full: []const u8) []const u8 {
 const testing = std.testing;
 const Backend = @import("Backend.zig");
 const Json = @import("dto.zig").Json;
+
+/// A value of the tests' types.
+const Todo = struct { id: u64 };
 
 // Application code of the tests below: zefir-http ships no middleware.
 const Audit = struct {
@@ -475,5 +482,10 @@ test "plan: messages print types without their files" {
     try testing.expectEqualStrings("fn (*UsersV1Controller, *http.Context) !void", comptime fnForm(@TypeOf(UsersV1Controller.list)));
     try testing.expectEqualStrings("fn (*UsersV1Controller, *http.Context) void", comptime fnForm(@TypeOf(UsersV1Controller.files)));
     try testing.expectEqualStrings("fn (*UsersV1Controller, *const http.sse.Context) void", comptime fnForm(fn (*UsersV1Controller, *const sse.Context) void));
+    // The types of zefir-http as the application names them.
+    try testing.expectEqualStrings("fn (*UsersV1Controller, *http.Context) !http.Json(Todo)", comptime fnForm(fn (*UsersV1Controller, *Context) anyerror!Json(Todo)));
+    try testing.expectEqualStrings("fn (anyerror) http.ErrorResponse(http.Problem)", comptime fnForm(fn (anyerror) errors.ErrorResponse(errors.Problem)));
+    try testing.expectEqualStrings("*http.ErrorResponse(Todo)", comptime typeName(*errors.ErrorResponse(Todo)));
+    try testing.expectEqualStrings("http.ErrorAction", comptime typeName(errors.ErrorAction));
     try testing.expectEqualStrings("Json(plan.UsersV1Controller.get__struct_0)", comptime shortName("http.dto.Json(plan.UsersV1Controller.get__struct_0)"));
 }

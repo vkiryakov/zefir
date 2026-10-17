@@ -6,10 +6,8 @@
 //! API under check.
 
 /// A file that must fail to compile with an error whose message is
-/// `expect`. With `whole`, `expect` is the whole text after `error: ` to
-/// the end of the line; without it, only the end of the line, for messages
-/// that start with a name that depends on the file.
-pub const Fixture = struct { file: []const u8, expect: []const u8, whole: bool = true };
+/// `expect`: the whole text after `error: ` to the end of the line.
+pub const Fixture = struct { file: []const u8, expect: []const u8 };
 
 const handler_form = "pub fn get(self: *UsersV1Controller, ctx: *http.Context) !http.Json(T), or !void for a response without a JSON value";
 const no_routes = "zefir.http: UsersV1Controller has no pub const http_routes = http.routes(.{ ... })";
@@ -25,8 +23,8 @@ pub const compile_errors = [_]Fixture{
     .{ .file = dir ++ "controllers_empty.zig", .expect = "zefir.http: Server.init .controllers is a tuple of pointers to controllers, at least one: .{ &todos_v1, &health }" },
     // Handlers.
     .{ .file = dir ++ "handler_missing.zig", .expect = "zefir.http: UsersV1Controller.get: the route has no handler; write " ++ handler_form },
-    .{ .file = dir ++ "handler_signature.zig", .expect = "; write " ++ handler_form, .whole = false },
-    .{ .file = dir ++ "sse_handler_signature.zig", .expect = "; write pub fn events(self: *UsersV1Controller, ctx: *http.sse.Context) !void", .whole = false },
+    .{ .file = dir ++ "handler_signature.zig", .expect = "zefir.http: UsersV1Controller.get is fn (*UsersV1Controller, *const http.Context) !void; write " ++ handler_form },
+    .{ .file = dir ++ "sse_handler_signature.zig", .expect = "zefir.http: UsersV1Controller.events is fn (*UsersV1Controller, *http.Context) !void; write pub fn events(self: *UsersV1Controller, ctx: *http.sse.Context) !void" },
     .{ .file = dir ++ "sse_on_close_missing.zig", .expect = "zefir.http: UsersV1Controller.events: .on_close = .closed names no pub fn closed(self: *UsersV1Controller, ctx: *http.sse.Context) void" },
     .{ .file = dir ++ "sse_on_close_signature.zig", .expect = "zefir.http: UsersV1Controller.events: .on_close = .closed is fn (*UsersV1Controller, *http.sse.Context) !void; write pub fn closed(self: *UsersV1Controller, ctx: *http.sse.Context) void" },
     // Patterns.
@@ -58,17 +56,17 @@ pub const compile_errors = [_]Fixture{
     .{ .file = dir ++ "dto_bad_rule.zig", .expect = "validator: dto_bad_rule.IdPath.field_rules.id: max_length expects a string, field is u64" },
     .{ .file = dir ++ "json_unsupported_field.zig", .expect = "zefir.http: json_unsupported_field.Item.codes: [3]u8 does not come from JSON; ctx.json reads integers, floats, bool, enums, []const u8 and structs, alone, as ?T or as []const T" },
     // The strict error check.
-    .{ .file = dir ++ "strict_app_error.zig", .expect = "UsersV1Controller.create can return error.UserLimitReached; AppErrors.mapError gives it 500 through .fallback" ++ strict_hint },
-    .{ .file = dir ++ "strict_default_handler.zig", .expect = "UsersV1Controller.create can return error.UserLimitReached; the default error handler gives it 500; set .error_handler and map it" ++ strict_hint },
-    .{ .file = dir ++ "strict_framework_error.zig", .expect = "AppErrors.mapError gives error.RouteNotFound 500, while its status is 404; map it or keep .fallback in else" ++ strict_hint },
+    .{ .file = dir ++ "strict_app_error.zig", .expect = "zefir.http: UsersV1Controller.create can return error.UserLimitReached; AppErrors.mapError gives it 500 through .fallback" ++ strict_hint },
+    .{ .file = dir ++ "strict_default_handler.zig", .expect = "zefir.http: UsersV1Controller.create can return error.UserLimitReached; the default error handler gives it 500; set .error_handler and map it" ++ strict_hint },
+    .{ .file = dir ++ "strict_framework_error.zig", .expect = "zefir.http: AppErrors.mapError gives error.RouteNotFound 500, while its status is 404; map it or keep .fallback in else" ++ strict_hint },
     .{ .file = dir ++ "strict_anyerror_handler.zig", .expect = "zefir.http: UsersV1Controller.get returns anyerror; the strict error check needs the errors it can return: give it an error set" ++ strict_hint },
-    .{ .file = dir ++ "strict_input_transform_error.zig", .expect = "UsersV1Controller.search can return error.TooManyTags; AppErrors.mapError gives it 500 through .fallback" ++ strict_hint },
-    .{ .file = dir ++ "strict_response_transform_error.zig", .expect = "UsersV1Controller.get (writing its response) can return error.BadDisplayName; AppErrors.mapError gives it 500 through .fallback" ++ strict_hint },
+    .{ .file = dir ++ "strict_input_transform_error.zig", .expect = "zefir.http: UsersV1Controller.search can return error.TooManyTags; AppErrors.mapError gives it 500 through .fallback" ++ strict_hint },
+    .{ .file = dir ++ "strict_response_transform_error.zig", .expect = "zefir.http: UsersV1Controller.get (writing its response) can return error.BadDisplayName; AppErrors.mapError gives it 500 through .fallback" ++ strict_hint },
     .{ .file = dir ++ "strict_errors_runtime.zig", .expect = "zefir.http: Server.init .strict_errors must be known at compile time: true or false" },
     // The error handler.
     .{ .file = dir ++ "error_handler_no_map.zig", .expect = "zefir.http: the error handler AppErrors has no pub fn mapError(err: anyerror) http.ErrorResponse(Body)" },
-    .{ .file = dir ++ "error_handler_handle_signature.zig", .expect = "; write pub fn handle(self: *AppErrors, ctx: *http.Context, err: anyerror, res: *http.ErrorResponse(ApiError)) !http.ErrorAction", .whole = false },
-    .{ .file = dir ++ "error_handler_map_signature.zig", .expect = "; write pub fn mapError(err: anyerror) http.ErrorResponse(Body) (no ctx: the strict error check calls it at compile time)", .whole = false },
+    .{ .file = dir ++ "error_handler_handle_signature.zig", .expect = "zefir.http: AppErrors.handle is fn (*AppErrors, *const http.Context, anyerror, *http.ErrorResponse(ApiError)) !http.ErrorAction; write pub fn handle(self: *AppErrors, ctx: *http.Context, err: anyerror, res: *http.ErrorResponse(ApiError)) !http.ErrorAction" },
+    .{ .file = dir ++ "error_handler_map_signature.zig", .expect = "zefir.http: AppErrors.mapError is fn (*http.Context, anyerror) http.ErrorResponse(ApiError); write pub fn mapError(err: anyerror) http.ErrorResponse(Body) (no ctx: the strict error check calls it at compile time)" },
     .{ .file = dir ++ "error_handler_by_value.zig", .expect = "zefir.http: Server.init .error_handler is AppErrors; pass a pointer to the error handler, e.g. &app_errors" },
     // Middleware.
     .{ .file = dir ++ "mw_pointer_in_controller.zig", .expect = "zefir.http: UsersV1Controller.http_routes.middleware[0]: a pointer to an object goes into the server's middleware; in a controller, make it a field and name it: .field" },
@@ -79,7 +77,7 @@ pub const compile_errors = [_]Fixture{
     .{ .file = dir ++ "mw_field_missing.zig", .expect = "zefir.http: UsersV1Controller.http_routes.methods.delete.middleware[1]: .audt is not a field of UsersV1Controller" },
     .{ .file = dir ++ "mw_field_not_pointer.zig", .expect = "zefir.http: UsersV1Controller.http_routes.methods.delete.middleware[1]: field 'audit' of UsersV1Controller is 'mw_field_not_pointer.Audit'; it must point to a middleware object" },
     .{ .file = dir ++ "mw_run_anyerror.zig", .expect = "zefir.http: requireUser.run (middleware of UsersV1Controller.get) returns anyerror; the strict error check needs the errors it can return: give it an error set" ++ strict_hint },
-    .{ .file = dir ++ "strict_middleware_error.zig", .expect = "requirePermission(users:delete).run (middleware of UsersV1Controller.delete) can return error.NoSuchTenant; AppErrors.mapError gives it 500 through .fallback" ++ strict_hint },
+    .{ .file = dir ++ "strict_middleware_error.zig", .expect = "zefir.http: requirePermission(users:delete).run (middleware of UsersV1Controller.delete) can return error.NoSuchTenant; AppErrors.mapError gives it 500 through .fallback" ++ strict_hint },
     .{ .file = dir ++ "mw_phase_signature.zig", .expect = "zefir.http: Server.init .middleware[0]: Timing.run is fn (*http.Context) !http.MiddlewareResult; write pub fn run(self: *@This(), ctx: *http.Context) !http.MiddlewareResult" },
 };
 

@@ -1,13 +1,18 @@
-//! Writes big_app.zig, the file the arguments name: client code of a large
-//! application, which `zig build test-http` only compiles, to show that
-//! `http.Server.init` builds it without an eval branch quota of the
-//! application's own. Ten controllers of thirty routes each; ten functions
-//! in the server's middleware; three elements per controller (a function, a
-//! type with a permission and a field of the controller) and two per method
-//! (a function and a type); forty errors of the application spread over the
-//! handlers and the runs, every one mapped by the error handler, so that the
-//! strict error check passes. Every eighth route answers with a JSON value,
-//! whose transforms the check reads too.
+//! Writes two files of client code, which `zig build test-http` only
+//! compiles, to show that `http.Server.init` builds them without an eval
+//! branch quota of the application's own:
+//!
+//! - big_app.zig, a large application: ten controllers of thirty routes
+//!   each; ten functions in the server's middleware; three elements per
+//!   controller (a function, a type with a permission and a field of the
+//!   controller) and two per method (a function and a type); forty errors
+//!   of the application, of long names that share their beginning, spread
+//!   over the handlers and the runs, every one mapped by the error handler,
+//!   so that the strict error check passes. Every eighth route answers
+//!   with a JSON value, whose transforms the check reads too;
+//! - long_names_app.zig, one route whose handler can return 200 errors of
+//!   the application, whose names share their first 30 characters: the
+//!   check sorts them by name, which takes a quota of its own.
 //!
 //! A host program of the build, like the validator's vector_gen; a panic
 //! exits with code 3 instead of aborting.
@@ -25,16 +30,22 @@ const routes_per_controller = 30;
 const global_elements = 10;
 const method_functions = 10;
 const app_errors = 40;
+/// The beginning of the names of the big application's errors.
+const app_error = "ApplicationServiceUnavailable";
+const long_name_errors = 200;
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len != 2) {
-        std.debug.print("usage: gen_big_app <out.zig>\n", .{});
+    if (args.len != 3) {
+        std.debug.print("usage: gen_big_app <big_app.zig> <long_names_app.zig>\n", .{});
         std.process.exit(2);
     }
     var out: std.Io.Writer.Allocating = .init(init.arena.allocator());
     try write(&out.writer);
     try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = args[1], .data = out.written() });
+    var long_names: std.Io.Writer.Allocating = .init(init.arena.allocator());
+    try writeLongNames(&long_names.writer);
+    try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = args[2], .data = long_names.written() });
 }
 
 fn write(w: *std.Io.Writer) !void {
@@ -52,7 +63,7 @@ fn write(w: *std.Io.Writer) !void {
         \\        return switch (err) {
         \\
     );
-    for (0..app_errors) |e| try w.print("            error.App{d} => .{{ .status = {d}, .body = .{{ .code = \"app.{d}\" }} }},\n", .{ e, 400 + e % 30, e });
+    for (0..app_errors) |e| try w.print("            error." ++ app_error ++ "{d} => .{{ .status = {d}, .body = .{{ .code = \"app.{d}\" }} }},\n", .{ e, 400 + e % 30, e });
     try w.writeAll(
         \\            else => .fallback(err, .{ .code = http.defaultCode(err) }),
         \\        };
@@ -64,7 +75,10 @@ fn write(w: *std.Io.Writer) !void {
         \\/// An object of each controller: a run and an onFinish.
         \\const Audit = struct {
         \\    pub fn run(_: *Audit, ctx: *http.Context) !http.MiddlewareResult {
-        \\        if (ctx.request.header("x-audit") != null) return error.App39;
+        \\
+    );
+    try w.print("        if (ctx.request.header(\"x-audit\") != null) return error.{s}39;\n", .{app_error});
+    try w.writeAll(
         \\        return .next;
         \\    }
         \\    pub fn onFinish(_: *Audit, _: *http.Context, _: http.Outcome) !void {}
@@ -79,7 +93,7 @@ fn write(w: *std.Io.Writer) !void {
         \\            return switch (code) {
         \\
     );
-    for (20..30) |e| try w.print("                {d} => error.App{d},\n", .{ e - 20, e });
+    for (20..30) |e| try w.print("                {d} => error." ++ app_error ++ "{d},\n", .{ e - 20, e });
     try w.writeAll(
         \\                else => error.PermissionDenied,
         \\            };
@@ -89,23 +103,23 @@ fn write(w: *std.Io.Writer) !void {
         \\
         \\
     );
-    // The server's functions, App0 to App9.
+    // The server's functions, errors 0 to 9.
     for (0..global_elements) |g| try w.print(
         \\fn global{d}(ctx: *http.Context) !http.MiddlewareResult {{
-        \\    if (ctx.request.header("x-global-{d}") != null) return error.App{d};
+        \\    if (ctx.request.header("x-global-{d}") != null) return error.{s}{d};
         \\    return .next;
         \\}}
         \\
-    , .{ g, g, g });
-    // The methods' functions, App30 to App38 and a framework error.
+    , .{ g, g, app_error, g });
+    // The methods' functions, errors 30 to 38 and a framework error.
     for (0..method_functions) |m| try w.print(
         \\fn method{d}(ctx: *http.Context) !http.MiddlewareResult {{
-        \\    if (ctx.request.header("x-method-{d}") != null) return error.App{d};
+        \\    if (ctx.request.header("x-method-{d}") != null) return error.{s}{d};
         \\    if (ctx.request.header("x-denied") != null) return error.PermissionDenied;
         \\    return .next;
         \\}}
         \\
-    , .{ m, m, 30 + m % 9 });
+    , .{ m, m, app_error, 30 + m % 9 });
     for (0..controllers) |c| try writeController(w, c);
 
     try w.writeAll(
@@ -139,12 +153,12 @@ fn write(w: *std.Io.Writer) !void {
 }
 
 /// A controller of thirty routes: its own three elements, two per method,
-/// and handlers that return App30 to App38 or a JSON value.
+/// and handlers that return errors 30 to 38 or a JSON value.
 fn writeController(w: *std.Io.Writer, c: usize) !void {
     try w.print(
         \\
         \\fn check{d}(ctx: *http.Context) !http.MiddlewareResult {{
-        \\    if (ctx.request.header("x-check-{d}") != null) return error.App{d};
+        \\    if (ctx.request.header("x-check-{d}") != null) return error.{s}{d};
         \\    return .next;
         \\}}
         \\
@@ -156,7 +170,7 @@ fn writeController(w: *std.Io.Writer, c: usize) !void {
         \\        .middleware = .{{ check{d}, permission("c{d}", {d}), .audit }},
         \\        .methods = .{{
         \\
-    , .{ c, c, 10 + c, c, c, c, c, c % 10 });
+    , .{ c, c, app_error, 10 + c, c, c, c, c, c % 10 });
     const kinds = [_][]const u8{ "get", "post", "put", "delete", "patch" };
     for (0..routes_per_controller) |r| {
         try w.print("            .r{d} = http.{s}(\"/r{d}/{{id}}\", .{{ .middleware = .{{ method{d}, permission(\"c{d}.r{d}\", {d}) }} }}),\n", .{
@@ -172,19 +186,74 @@ fn writeController(w: *std.Io.Writer, c: usize) !void {
         if (r % 8 == 0) {
             try w.print(
                 \\    pub fn r{d}(_: *Controller{d}, ctx: *http.Context) !http.Json(Item) {{
-                \\        if (ctx.request.header("x-fail") != null) return error.App{d};
+                \\        if (ctx.request.header("x-fail") != null) return error.{s}{d};
                 \\        return .{{ .value = .{{ .id = {d}, .name = "item" }} }};
                 \\    }}
                 \\
-            , .{ r, c, 30 + r % 9, r });
+            , .{ r, c, app_error, 30 + r % 9, r });
         } else {
             try w.print(
                 \\    pub fn r{d}(_: *Controller{d}, ctx: *http.Context) !void {{
-                \\        if (ctx.request.header("x-fail") != null) return error.App{d};
+                \\        if (ctx.request.header("x-fail") != null) return error.{s}{d};
                 \\    }}
                 \\
-            , .{ r, c, 30 + r % 9 });
+            , .{ r, c, app_error, 30 + r % 9 });
         }
     }
     try w.writeAll("};\n");
+}
+
+/// One route whose handler can return each of `long_name_errors` errors,
+/// every one mapped.
+fn writeLongNames(w: *std.Io.Writer) !void {
+    const name = "BillingProviderRejectedPayment";
+    try w.writeAll(
+        \\//! Generated by src/http/tests/gen_big_app.zig; `zig build test-http`
+        \\//! compiles it. It holds no @setEvalBranchQuota.
+        \\// Application code (long_names_app.zig, generated): zefir-http ships none of these.
+        \\const std = @import("std");
+        \\const http = @import("http");
+        \\
+        \\const ApiError = struct { code: []const u8 };
+        \\
+        \\const AppErrors = struct {
+        \\    pub fn mapError(err: anyerror) http.ErrorResponse(ApiError) {
+        \\        return switch (err) {
+        \\
+    );
+    for (0..long_name_errors) |e| try w.print("            error." ++ name ++ "{d:0>3} => .{{ .status = 402, .body = .{{ .code = \"billing.{d}\" }} }},\n", .{ e, e });
+    try w.writeAll(
+        \\            else => .fallback(err, .{ .code = http.defaultCode(err) }),
+        \\        };
+        \\    }
+        \\};
+        \\
+        \\fn charge(code: usize) !void {
+        \\    return switch (code) {
+        \\
+    );
+    for (0..long_name_errors) |e| try w.print("        {d} => error." ++ name ++ "{d:0>3},\n", .{ e, e });
+    try w.writeAll(
+        \\        else => {},
+        \\    };
+        \\}
+        \\
+        \\const BillingV1Controller = struct {
+        \\    pub const http_routes = http.routes(.{ .prefix = "/v1/billing", .methods = .{ .pay = http.post("/{id}", .{}) } });
+        \\
+        \\    pub fn pay(_: *BillingV1Controller, ctx: *http.Context) !void {
+        \\        try charge(ctx.request.path.len);
+        \\    }
+        \\};
+        \\
+        \\test "200 errors of long names on one route build without a quota of their own" {
+        \\    var billing: BillingV1Controller = .{};
+        \\    var app_errors: AppErrors = .{};
+        \\    var backend: http.testing.Backend = .init(std.testing.allocator);
+        \\    defer backend.deinit();
+        \\    var server = try http.Server.init(std.testing.allocator, .{ .backend = backend.backend(), .controllers = .{&billing}, .error_handler = &app_errors });
+        \\    defer server.deinit(std.testing.io);
+        \\}
+        \\
+    );
 }

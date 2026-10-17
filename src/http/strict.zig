@@ -36,7 +36,7 @@ pub const hint = " (strict error check; .strict_errors = false turns it off)";
 
 /// Checks every error of `entries` against `H`, the error handler that
 /// messages call `name`; `errors.DefaultErrors` without `.error_handler`.
-/// The eval branch quota is set here, from the number of errors: the
+/// The eval branch quota is set here, from the errors and their names: the
 /// application sets none.
 ///
 /// Zig orders the names of an error set by when the compilation first met
@@ -45,24 +45,32 @@ pub const hint = " (strict error check; .strict_errors = false turns it off)";
 /// `entries`, the errors of one place by name.
 pub fn check(comptime H: type, comptime name: []const u8, comptime entries: []const Entry) void {
     comptime {
-        var count: u32 = 0;
+        var count: u64 = 0;
         for (entries) |entry| {
             const list = @typeInfo(entry.Errors).error_set.error_names orelse
                 @compileError("zefir.http: " ++ entry.where ++ " returns anyerror; the strict error check needs the errors it can return: give it an error set" ++ hint);
             count += list.len;
         }
-        // Per error: the list of known ones, the errors already checked, its
-        // place among the new ones and a call of mapError.
-        @setEvalBranchQuota(10_000 + count * (200 + 2 * count) + statused.len * 200);
+        // A look at every name first, then each place raises it by its work.
+        var quota: u64 = 10_000 + 4 * count + statused.len * 200;
+        @setEvalBranchQuota(capped(quota));
         const verdict = if (H == errors.DefaultErrors)
             "the default error handler gives it 500; set .error_handler and map it"
         else
             name ++ ".mapError gives it 500 through .fallback";
         var seen: []const anyerror = &.{};
         for (entries) |entry| {
+            const list = @typeInfo(entry.Errors).error_set.error_names.?;
+            // Per error: the list of known ones, the errors checked before,
+            // its place among the new ones, found by comparing names a byte
+            // at a time, and a call of mapError.
+            var longest: u64 = 0;
+            for (list) |error_name| longest = @max(longest, error_name.len);
+            quota += list.len * (200 + 2 * seen.len + list.len * (longest + 2));
+            @setEvalBranchQuota(capped(quota));
             // The errors of the application this place adds, by name.
             var new: []const []const u8 = &.{};
-            for (@typeInfo(entry.Errors).error_set.error_names.?) |error_name| {
+            for (list) |error_name| {
                 const err = @field(anyerror, error_name);
                 if (isKnown(err) or contains(seen, err)) continue;
                 new = insertSorted(new, error_name);
@@ -72,7 +80,7 @@ pub fn check(comptime H: type, comptime name: []const u8, comptime entries: []co
                 seen = seen ++ [_]anyerror{err};
                 const res = H.mapError(err);
                 if (res.from_fallback and res.status == 500)
-                    @compileError(entry.where ++ " can return error." ++ error_name ++ "; " ++ verdict ++ hint);
+                    @compileError("zefir.http: " ++ entry.where ++ " can return error." ++ error_name ++ "; " ++ verdict ++ hint);
             }
         }
         // The default handler maps every error through .fallback.
@@ -118,9 +126,14 @@ fn checkStatused(comptime H: type, comptime name: []const u8) void {
         const err = @field(anyerror, error_name);
         const status = errors.defaultStatus(err);
         if (H.mapError(err).status == 500)
-            @compileError(name ++ ".mapError gives error." ++ error_name ++ " 500, while its status is " ++
+            @compileError("zefir.http: " ++ name ++ ".mapError gives error." ++ error_name ++ " 500, while its status is " ++
                 std.fmt.comptimePrint("{d}", .{status}) ++ "; map it or keep .fallback in else" ++ hint);
     }
+}
+
+/// An eval branch quota, which is a u32.
+fn capped(quota: u64) u32 {
+    return @intCast(@min(quota, std.math.maxInt(u32)));
 }
 
 /// `list`, sorted, with `item` in its place.

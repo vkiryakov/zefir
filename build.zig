@@ -1214,9 +1214,7 @@ fn addHttpCompileChecks(
     // Each fixture is compiled (never run) and passes only when the
     // compilation fails with an error whose message is `expect`.
     // `.contains` matches the end of an error line, so `error: ` in front
-    // makes `expect` the whole message, from its start; a fixture whose
-    // message starts with a type name, which depends on the file, matches
-    // only the end of the line.
+    // makes `expect` the whole message, from its start.
     for (http_cases.compile_errors) |fixture| {
         const t = b.addTest(.{
             .name = std.fs.path.stem(fixture.file),
@@ -1227,7 +1225,7 @@ fn addHttpCompileChecks(
                 .imports = imports,
             }),
         });
-        t.expect_errors = .{ .contains = if (fixture.whole) b.fmt("error: {s}", .{fixture.expect}) else fixture.expect };
+        t.expect_errors = .{ .contains = b.fmt("error: {s}", .{fixture.expect}) };
         test_step.dependOn(&t.step);
     }
     // Built and not run: they only have to compile.
@@ -1245,9 +1243,10 @@ fn addHttpCompileChecks(
     }
     // A large application, which gen_big_app writes into the build cache:
     // ten controllers of thirty routes, middleware on every level and forty
-    // errors of its own. It must compile without an eval branch quota of
-    // its own. The generator is built for the host, so it also runs when
-    // -Dtarget names another system.
+    // errors of its own; and one route that returns 200 errors of long
+    // names. Each must compile without an eval branch quota of its own. The
+    // generator is built for the host, so it also runs when -Dtarget names
+    // another system.
     const gen_big_app = b.addExecutable(.{
         .name = "gen_big_app",
         .root_module = b.createModule(.{
@@ -1257,14 +1256,16 @@ fn addHttpCompileChecks(
         }),
     });
     const run_gen = b.addRunArtifact(gen_big_app);
-    const big_app = b.addTest(.{
-        .name = "big_app",
-        .root_module = b.createModule(.{
-            .root_source_file = run_gen.addOutputFileArg("big_app.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = imports,
-        }),
-    });
-    test_step.dependOn(&big_app.step);
+    for ([_][]const u8{ "big_app", "long_names_app" }) |name| {
+        const app = b.addTest(.{
+            .name = name,
+            .root_module = b.createModule(.{
+                .root_source_file = run_gen.addOutputFileArg(b.fmt("{s}.zig", .{name})),
+                .target = target,
+                .optimize = optimize,
+                .imports = imports,
+            }),
+        });
+        test_step.dependOn(&app.step);
+    }
 }
