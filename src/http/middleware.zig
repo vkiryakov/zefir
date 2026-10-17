@@ -176,7 +176,9 @@ pub fn unfold(comptime List: type, comptime place: Place, comptime path: []const
             list = list ++ unfold(Item, place, here);
             continue;
         }
-        const value = if (attrs.@"comptime") attrs.defaultValue(Item).? else {};
+        // A pointer's value is not read, even when it is known: the server
+        // takes it at run time, and one of a test may be `undefined`.
+        const value = if (attrs.@"comptime" and readsValue(Item)) attrs.defaultValue(Item).? else {};
         list = list ++ [_]Elem{describe(Item, value, place, here)};
     }
     return list;
@@ -184,6 +186,15 @@ pub fn unfold(comptime List: type, comptime place: Place, comptime path: []const
 
 fn isTuple(comptime T: type) bool {
     return @typeInfo(T) == .@"struct" and @typeInfo(T).@"struct".is_tuple;
+}
+
+/// The elements whose value `describe` reads: functions, types and
+/// `.field`.
+fn readsValue(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .@"fn", .type, .enum_literal => true,
+        else => false,
+    };
 }
 
 /// One element of type `Item` at `place`; `value` is the element itself
@@ -702,6 +713,20 @@ test "a set unfolds in place on every level, nested sets too" {
     try testing.expectEqualStrings("first.run", journal.words[0]);
     try testing.expectEqualStrings("third.run", journal.words[6]);
     try testing.expectEqualStrings("handler", journal.words[7]);
+}
+
+test "chainNames takes options whose pointers are undefined: a pointer's value is never read" {
+    // The options of a test, without a server: the pointers stand for
+    // objects that do not exist.
+    const names = comptime chainNames(@TypeOf(.{
+        .backend = @as(@import("Backend.zig"), undefined),
+        .controllers = .{@as(*OrderV1Controller, undefined)},
+        .middleware = .{ first, @as(*Step, undefined), .{ Typed, onResponse(stamp) } },
+        .strict_errors = false,
+    }), .GET, "/v1/order/{id}");
+    const want = [_][]const u8{ "first", "Step", "Typed", "onResponse(stamp)", ".ctl (Step)", "second", "onFinish(count)", ".audit (Step)", "third" };
+    try testing.expectEqual(want.len, names.len);
+    for (want, names) |w, n| try testing.expectEqualStrings(w, n);
 }
 
 test "order on three levels: run, onResponse and onFinish all go forward" {
