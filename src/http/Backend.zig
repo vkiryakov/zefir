@@ -110,8 +110,6 @@ pub const Exchange = struct {
     pub const BodyKind = union(enum) { none, length: u64, stream };
     /// Why `readBody` failed: 408 or 400.
     pub const BodyFailure = enum { timeout, malformed };
-    /// What ended `watch`.
-    pub const Watch = enum { client_gone, deadline };
     pub const ReadError = error{ReadFailed} || std.Io.Cancelable;
     pub const WriteError = error{WriteFailed} || std.Io.Cancelable;
 
@@ -128,17 +126,17 @@ pub const Exchange = struct {
         readBody: *const fn (ptr: *anyopaque, io: std.Io, buffer: []u8) ReadError!usize,
         /// After `ReadFailed`: why; null for a broken connection.
         bodyFailure: *const fn (ptr: *anyopaque) ?BodyFailure,
-        /// Returns when the client has gone or `deadline` has passed. The
-        /// request's watcher calls it on a task of its own once the body
-        /// has been read to its end (or there is none), so it never reads
-        /// the connection while `readBody` does, and so does the watcher of
-        /// an SSE stream after it; a watcher is canceled when its request
-        /// or stream ends, and what a canceled watch returns is
-        /// dropped. The server gives no deadline (`.none`): it keeps the
-        /// request's deadline itself, so that a canceled read never has a
-        /// timer of its own (a read that a runtime completes as it is
+        /// Returns when the client has gone, or when the watch is canceled.
+        /// The request's watcher calls it on a task of its own once the
+        /// body has been read to its end (or there is none), so it never
+        /// reads the connection while `readBody` does, and so does the
+        /// watcher of an SSE stream after it; a watcher is canceled when its
+        /// request or stream ends, which the server knows, so it drops what
+        /// a canceled watch tells. It has no deadline: the server keeps the
+        /// request's deadline itself, so that a read of the watch never has
+        /// a timer of its own (a read that a runtime completes as it is
         /// canceled must keep its bytes for the next request).
-        watch: *const fn (ptr: *anyopaque, io: std.Io, deadline: std.Io.Timeout) Watch,
+        watch: *const fn (ptr: *anyopaque, io: std.Io) void,
         writeHead: *const fn (ptr: *anyopaque, io: std.Io, status: u16, fields: []const h1.Field, body: BodyKind) WriteError!void,
         writeBody: *const fn (ptr: *anyopaque, io: std.Io, data: []const u8) WriteError!void,
         /// Sends what is buffered now.
@@ -162,8 +160,8 @@ pub const Exchange = struct {
         return e.vtable.bodyFailure(e.ptr);
     }
 
-    pub fn watch(e: *const Exchange, io: std.Io, deadline: std.Io.Timeout) Watch {
-        return e.vtable.watch(e.ptr, io, deadline);
+    pub fn watch(e: *const Exchange, io: std.Io) void {
+        e.vtable.watch(e.ptr, io);
     }
 
     pub fn writeHead(e: *const Exchange, io: std.Io, status: u16, fields: []const h1.Field, body: BodyKind) WriteError!void {

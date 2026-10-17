@@ -248,10 +248,8 @@ fn fail(sub: *Subscription, io: std.Io) bool {
 /// stream when the client leaves. What it reads stays in the connection's
 /// buffer.
 pub fn watcher(sub: *Subscription, io: std.Io, exchange: *Exchange) void {
-    switch (exchange.watch(io, .none)) {
-        // A watch canceled at the end of the stream may say so too: the
-        // end is decided by then, and this changes nothing.
-        .client_gone => sub.end(io, .client_gone),
-        .deadline => {},
-    }
+    exchange.watch(io);
+    // The client left, unless the watch was canceled at the end of the
+    // stream: the end is decided by then, and this changes nothing.
+    sub.end(io, .client_gone);
 }

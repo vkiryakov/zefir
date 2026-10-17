@@ -1,7 +1,10 @@
-//! Reads and writes on the socket of a connection, each within its time:
-//! `io.operateTimeout`, where the runtime runs one operation with a timer
-//! of its own and no task more (the probes of tests/http checked it on
-//! zio on Linux, macOS and Windows). Internal to `http.native`.
+//! Reads and writes on the socket of a connection. A read with a deadline
+//! and every write run within their time as `io.operateTimeout`, where the
+//! runtime runs one operation with a timer of its own and no task more
+//! (the probes of tests/http checked it on zio on Linux, macOS and
+//! Windows); a read without one, such as the watcher's, as `io.operate`,
+//! so that a read canceled as it completes keeps its bytes. Internal to
+//! `http.native`.
 
 const std = @import("std");
 const core = @import("core");

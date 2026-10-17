@@ -468,33 +468,17 @@ fn bodyFailure(_: *anyopaque) ?Exchange.BodyFailure {
 }
 
 /// Until the client leaves, by its clock (`leave_after`) or from its stream
-/// (`Stream.leave`), or until `deadline` passes, whichever comes first.
-/// The server cancels the watch when the request ends.
-fn watch(ptr: *anyopaque, io: std.Io, deadline: std.Io.Timeout) Exchange.Watch {
+/// (`Stream.leave`), or until the watch is canceled, which the server does
+/// when the request ends.
+fn watch(ptr: *anyopaque, io: std.Io) void {
     const call = Call.of(ptr);
-    var until: ?core.Deadline = switch (deadline) {
-        .none => null,
-        .duration => |d| .after(std.Io.Clock.awake.now(io), d.raw),
-        .deadline => |at| .at(at.toClock(io, .awake).raw),
+    // A sleep without a limit is no sleep every `std.Io` can take: then
+    // the event alone.
+    const at = call.leave_at orelse {
+        call.left.wait(io) catch {};
+        return;
     };
-    var leaves = false;
-    if (call.leave_at) |at| {
-        if (until == null or at.raw.nanoseconds < until.?.expires.nanoseconds) {
-            until = .at(at.raw);
-            leaves = true;
-        }
-    }
-    // A sleep of `.none` is no sleep every `std.Io` can take: without a
-    // limit, the event alone.
-    const limit = until orelse {
-        call.left.wait(io) catch return .deadline;
-        return .client_gone;
-    };
-    waiting.untilSet(&call.left, io, limit) catch |err| return switch (err) {
-        error.Canceled => .deadline,
-        error.Timeout => if (leaves) .client_gone else .deadline,
-    };
-    return .client_gone;
+    waiting.untilSet(&call.left, io, .at(at.raw)) catch {};
 }
 
 fn writeHead(ptr: *anyopaque, io: std.Io, status: u16, fields: []const h1.Field, body: Exchange.BodyKind) Exchange.WriteError!void {

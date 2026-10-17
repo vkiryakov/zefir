@@ -274,7 +274,12 @@ fn skipBody(conn: *Connection, io: std.Io) End {
     const deadline: core.Deadline = .after(std.Io.Clock.awake.now(io), conn.backend.timeouts.body);
     const start = conn.body.wire;
     while (true) {
-        const bytes = conn.peekBody(io, deadline) catch return .close;
+        const bytes = conn.peekBody(io, deadline) catch |err| return switch (err) {
+            error.ReadFailed => .close,
+            // The stop's cancelation, which this read took: a lingering
+            // close would wait out its whole time after it.
+            error.Canceled => .drop,
+        };
         if (bytes.len == 0) return .keep_alive;
         conn.takeBody(bytes.len);
         if (conn.body.wire - start > drain_limit) return .close;
@@ -655,46 +660,24 @@ fn failBody(conn: *Connection, failure: ?Exchange.BodyFailure) void {
     conn.body.failure = failure;
 }
 
-/// Reads ahead into the buffer until the client goes or `deadline` passes:
-/// what it reads stays for the next request. With the buffer full it reads
-/// no more and waits for the deadline. The server's watcher calls it once
-/// the body has been read, so nothing else reads the socket meanwhile; it
-/// gives no deadline, so the read is one operation without a timer, and a
-/// read canceled as it completes keeps its bytes.
-fn watch(ptr: *anyopaque, io: std.Io, deadline: std.Io.Timeout) Exchange.Watch {
+/// Reads ahead into the buffer until the client goes, or the watch is
+/// canceled: what it reads stays for the next request. With the buffer
+/// full it reads no more and waits for the cancelation. The server's
+/// watcher calls it once the body has been read, so nothing else reads the
+/// socket meanwhile. Each read is one operation without a timer, so a read
+/// canceled as it completes keeps its bytes.
+fn watch(ptr: *anyopaque, io: std.Io) void {
     const conn = of(ptr);
-    const limit: ?core.Deadline = switch (deadline) {
-        .none => null,
-        .duration => |d| .after(std.Io.Clock.awake.now(io), d.raw),
-        .deadline => |at| .at(at.toClock(io, .awake).raw),
-    };
     while (conn.len < conn.buffer.len) {
-        const n = socket.read(io, conn.stream, conn.buffer[conn.len..], limit) catch |err| return switch (err) {
-            error.Timeout => .deadline,
-            error.ReadFailed => .client_gone,
-            // The request has ended and the server drops what this returns;
-            // were it taken, no response is the safe answer.
-            error.Canceled => .client_gone,
-        };
+        // A broken connection, or a canceled read: the request has ended
+        // then, and the server drops what this tells.
+        const n = socket.read(io, conn.stream, conn.buffer[conn.len..], null) catch return;
         // The end of the stream: the client has gone, or half-closed after
         // its request, which is the same to the server.
-        if (n == 0) return .client_gone;
+        if (n == 0) return;
         conn.len += n;
     }
-    sleepUntil(io, limit) catch return .client_gone;
-    return .deadline;
-}
-
-/// Sleeps until the awake clock passes `deadline`; null: until canceled.
-fn sleepUntil(io: std.Io, deadline: ?core.Deadline) std.Io.Cancelable!void {
-    const limit = deadline orelse {
-        while (true) try io.sleep(.fromSeconds(60 * 60), .awake);
-    };
-    while (true) {
-        const now = std.Io.Clock.awake.now(io);
-        if (limit.isExpired(now)) return;
-        try io.sleep(limit.remaining(now), .awake);
-    }
+    while (true) io.sleep(.fromSeconds(60 * 60), .awake) catch return;
 }
 
 fn writeHead(ptr: *anyopaque, io: std.Io, status: u16, fields: []const h1.Field, body: Exchange.BodyKind) Exchange.WriteError!void {

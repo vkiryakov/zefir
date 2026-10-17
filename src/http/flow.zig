@@ -526,11 +526,10 @@ fn firstOf(race: *Race, io: std.Io, deadline: ?core.Deadline, canceled: *bool) R
 /// Windows, has the bytes before the cancelation comes).
 fn watcher(io: std.Io, exchange: *Exchange, body_done: *std.Io.Event, race: *Race) void {
     body_done.wait(io) catch return;
-    switch (exchange.watch(io, .none)) {
-        .client_gone => if (race.claim(.client_gone)) race.decided.set(io),
-        // Without a deadline only a canceled watch ends.
-        .deadline => {},
-    }
+    exchange.watch(io);
+    // The client left, unless the watch was canceled: the request has ended
+    // then, and the race is taken already.
+    if (race.claim(.client_gone)) race.decided.set(io);
 }
 
 /// The request task: the handler's result claims the race, unless the
