@@ -122,8 +122,9 @@ pub const Exchange = struct {
     pub const VTable = struct {
         /// `Content-Length`; null when the body is chunked.
         bodyLength: *const fn (ptr: *anyopaque) ?u64,
-        /// Reads the body into `buffer`; 0 at its end. The first call sends
-        /// `100 Continue` when the client asked for it.
+        /// Reads the body into `buffer`, which is not empty; 0 at its end.
+        /// The first call sends `100 Continue` when the client asked for it
+        /// and no response has begun.
         readBody: *const fn (ptr: *anyopaque, io: std.Io, buffer: []u8) ReadError!usize,
         /// After `ReadFailed`: why; null for a broken connection.
         bodyFailure: *const fn (ptr: *anyopaque) ?BodyFailure,

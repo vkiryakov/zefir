@@ -4,4 +4,6 @@
 
 test {
     _ = @import("native.zig");
+    _ = @import("bodies.zig");
+    _ = @import("counting_allocator.zig");
 }

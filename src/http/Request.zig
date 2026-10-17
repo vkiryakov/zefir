@@ -23,6 +23,8 @@ pub const Internal = struct {
     /// Set once the body has been read to its end: from then on the
     /// request's guard watches the connection.
     body_done: ?*std.Io.Event = null,
+    /// `ctx.body()` has taken the body: no reader any more.
+    bytes_taken: bool = false,
 };
 
 /// The value of the first header field `name`, which is case-insensitive.
@@ -112,10 +114,13 @@ pub fn clientAddress(r: *const Request) ?std.Io.net.IpAddress {
     return r.internal.exchange.client;
 }
 
-/// The body as a stream, read as the handler takes it; the same reader on
-/// each call. A broken connection, or the request canceled while it reads,
-/// is `error.ReadFailed` of `std.Io.Reader`.
+/// The body as a stream, read as the handler takes it, without the limit
+/// of `ctx.body()`; the same reader on each call. A body that does not
+/// arrive whole, or the request canceled while it reads, is
+/// `error.ReadFailed` of `std.Io.Reader`. After `ctx.body()`,
+/// `error.BodyConsumed`: a body is read one way only.
 pub fn bodyReader(r: *Request) error{BodyConsumed}!*std.Io.Reader {
+    if (r.internal.bytes_taken) return error.BodyConsumed;
     if (r.internal.body == null) {
         r.internal.body = .{ .exchange = r.internal.exchange, .io = r.internal.io, .done = r.internal.body_done };
         const body = &r.internal.body.?;
@@ -146,6 +151,8 @@ pub const BodyReader = struct {
         const b: *BodyReader = @fieldParentPtr("interface", io_reader);
         if (b.ended) return error.EndOfStream;
         const dest = limit.slice(try w.writableSliceGreedy(1));
+        // A read of nothing would look like the end of the body.
+        if (dest.len == 0) return 0;
         const n = b.exchange.readBody(b.io, dest) catch |err| {
             b.err = err;
             return error.ReadFailed;

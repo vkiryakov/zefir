@@ -17,6 +17,11 @@
 //! - the client left, or the stop canceled the connection after its
 //!   grace: the token and the request are canceled, no response goes out.
 //!
+//! A body that did not arrive whole because it stalled past the backend's
+//! body timeout or broke its chunked framing is answered as the backend
+//! answers a broken head: 408 or 400 as short text, and the connection
+//! closes after it; the error handler has no part in it.
+//!
 //! Before any task, a request over `.max_in_flight` gets 503
 //! (`error.Overloaded`), and so does one the runtime gives no task for
 //! (`error.ConcurrencyUnavailable`). The other task is canceled and waited
@@ -34,6 +39,7 @@ const path = @import("path.zig");
 const routing = @import("router.zig");
 const Allow = routing.Allow;
 const h1 = @import("h1/head.zig");
+const response = @import("h1/response.zig");
 const waiting = @import("wait.zig");
 
 const log = std.log.scoped(.http);
@@ -85,6 +91,7 @@ pub fn serve(server: *Server, io: std.Io, exchange: *Exchange) void {
             .arena = arena,
             .request_id = ids.newRequestId(io),
             .trace_id = trace.trace_id.toHex(),
+            .max_body_bytes = server.settings.max_body_bytes,
         },
     };
     if (!takeSlot(server)) return respond(&ctx, exchange, error.Overloaded);
@@ -208,6 +215,7 @@ fn runRequest(server: *Server, ctx: *Context, found: Found) anyerror!void {
             const route = &server.routes[f.route];
             ctx.internal.route = route.info;
             ctx.internal.params = f.params;
+            ctx.internal.max_body_bytes = route.max_body_bytes orelse server.settings.max_body_bytes;
             return route.handle(route.controller, ctx);
         },
         .method_not_allowed => |allow| {
@@ -230,6 +238,7 @@ fn respond(ctx: *Context, exchange: *Exchange, result: anyerror!void) void {
         }
     } else |err| {
         if (errors.isCancellation(err)) return exchange.abort(ctx.internal.io);
+        if (err == error.ReadFailed) if (exchange.bodyFailure()) |failure| return answerBodyFailure(ctx, exchange, failure);
         if (errors.defaultStatus(err) == 500)
             log.warn("{s} failed with error.{t}; the response is 500 (request {s})", .{ routeName(ctx), err, ctx.requestId() });
         setProblem(ctx, errors.DefaultErrors.problem(err));
@@ -243,18 +252,30 @@ fn answerOptions(ctx: *Context, allow: Allow) Context.Response.HeaderError!void 
     _ = ctx.response.status(204);
 }
 
+/// The answer to a body that did not arrive whole (decision 21): 408 when
+/// it stalled past the backend's body timeout, 400 when its framing broke;
+/// its reason as short text, the fields of the content gone and the others
+/// kept, as `setProblem` does. The backend closes the connection after it.
+/// The response is written only here, so nothing of it has gone out yet.
+fn answerBodyFailure(ctx: *Context, exchange: *Exchange, failure: Exchange.BodyFailure) void {
+    const status: u16 = switch (failure) {
+        .timeout => 408,
+        .malformed => 400,
+    };
+    const res = &ctx.response.internal;
+    dropContentFields(res);
+    res.code = status;
+    res.content_type = "text/plain; charset=utf-8";
+    res.body = response.reason(status);
+    send(ctx, exchange);
+}
+
 /// Replaces the response with `problem` as problem+json. The fields of
 /// the content go with the old body; the others stay (`Allow`, those of
 /// the application).
 fn setProblem(ctx: *Context, problem: errors.Problem) void {
     const res = &ctx.response.internal;
-    var kept: usize = 0;
-    for (res.headers.items) |f| {
-        if (isContentField(f.name)) continue;
-        res.headers.items[kept] = f;
-        kept += 1;
-    }
-    res.headers.shrinkRetainingCapacity(kept);
+    dropContentFields(res);
     res.code = problem.status;
     res.content_type = "application/problem+json";
     res.body = std.json.Stringify.valueAlloc(res.arena, problem, .{ .emit_null_optional_fields = false }) catch internal: {
@@ -265,6 +286,16 @@ fn setProblem(ctx: *Context, problem: errors.Problem) void {
 }
 
 const internal_problem = "{\"type\":\"about:blank\",\"title\":\"Internal Server Error\",\"status\":500,\"code\":\"internal\",\"errors\":[]}";
+
+fn dropContentFields(res: *Context.Response.Internal) void {
+    var kept: usize = 0;
+    for (res.headers.items) |f| {
+        if (isContentField(f.name)) continue;
+        res.headers.items[kept] = f;
+        kept += 1;
+    }
+    res.headers.shrinkRetainingCapacity(kept);
+}
 
 fn isContentField(name: []const u8) bool {
     for ([_][]const u8{ "content-length", "content-encoding", "content-disposition" }) |content| {

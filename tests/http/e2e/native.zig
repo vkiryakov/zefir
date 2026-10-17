@@ -2,7 +2,8 @@
 //! the stop, the heads and the answers of the backend, responses,
 //! keep-alive and pipelining, and the watcher that sees a client leave.
 //! Each scenario runs on one executor, then on four, with a watchdog that
-//! ends the run (exit code 4) when it hangs.
+//! ends the run (exit code 4) when it hangs. The other files of e2e/ share
+//! its helpers.
 
 const std = @import("std");
 const http = @import("http");
@@ -28,6 +29,8 @@ const App = struct {
     canceled_at: std.atomic.Value(i64) = .init(0),
     /// Opens `gated`.
     gate: Io.Event = .unset,
+    /// Requests of `upload` whose body did not come whole.
+    body_failures: std.atomic.Value(u32) = .init(0),
 
     pub const http_routes = http.routes(.{ .methods = .{
         .hello = http.get("/hello", .{}),
@@ -41,6 +44,7 @@ const App = struct {
         .fail = http.get("/fail", .{}),
         .sleep = http.get("/sleep", .{}),
         .gated = http.get("/gated", .{}),
+        .upload = http.post("/upload", .{}),
     } });
 
     pub fn hello(_: *App, ctx: *http.Context) !void {
@@ -87,18 +91,30 @@ const App = struct {
         try self.gate.wait(ctx.io());
         try ctx.response.text("opened");
     }
+    /// The length of the body; a body its client cut short counts in
+    /// `body_failures`, and the response goes to nobody.
+    pub fn upload(self: *App, ctx: *http.Context) !void {
+        const body = ctx.body() catch |err| switch (err) {
+            error.ReadFailed => {
+                _ = self.body_failures.fetchAdd(1, .release);
+                return;
+            },
+            else => |e| return e,
+        };
+        try ctx.response.text(try std.fmt.allocPrint(ctx.allocator(), "{d}", .{body.len}));
+    }
 };
 
 fn nowNs(io: Io) i64 {
     return @intCast(Io.Clock.awake.now(io).nanoseconds);
 }
 
-fn sinceMs(io: Io, start: Io.Timestamp) i64 {
+pub fn sinceMs(io: Io, start: Io.Timestamp) i64 {
     return start.durationTo(Io.Clock.awake.now(io)).toMilliseconds();
 }
 
 /// Fails unless `ms` lies in [min, max).
-fn expectWithin(what: []const u8, ms: i64, min: i64, max: i64) !void {
+pub fn expectWithin(what: []const u8, ms: i64, min: i64, max: i64) !void {
     if (ms < min or ms >= max) {
         std.debug.print("{s}: {d} ms, expected [{d}, {d}) ms (zio x{d})\n", .{ what, ms, min, max, runtime.executors });
         return error.TestUnexpectedTime;
@@ -107,14 +123,14 @@ fn expectWithin(what: []const u8, ms: i64, min: i64, max: i64) !void {
 
 /// Ends the process with code 4 when a scenario runs longer than its time:
 /// a hang fails at once, by name.
-const Watchdog = struct {
+pub const Watchdog = struct {
     future: Io.Future(void),
 
-    fn start(io: Io, name: []const u8) !Watchdog {
+    pub fn start(io: Io, name: []const u8) !Watchdog {
         return .{ .future = try io.concurrent(watch, .{ io, name }) };
     }
 
-    fn stop(w: *Watchdog, io: Io) void {
+    pub fn stop(w: *Watchdog, io: Io) void {
         w.future.cancel(io);
     }
 
@@ -156,12 +172,12 @@ const Fixture = struct {
     }
 };
 
-inline fn get(comptime target: []const u8) []const u8 {
+pub inline fn get(comptime target: []const u8) []const u8 {
     return "GET " ++ target ++ " HTTP/1.1\r\nHost: test\r\n\r\n";
 }
 
 /// Waits until `count` reaches `n`, `limit_ms` at most.
-fn waitCount(io: Io, count: *const std.atomic.Value(u32), n: u32, limit_ms: i64) !void {
+pub fn waitCount(io: Io, count: *const std.atomic.Value(u32), n: u32, limit_ms: i64) !void {
     const start = Io.Clock.awake.now(io);
     while (count.load(.acquire) < n) {
         if (sinceMs(io, start) > limit_ms) return error.TestCountNotReached;
@@ -170,7 +186,7 @@ fn waitCount(io: Io, count: *const std.atomic.Value(u32), n: u32, limit_ms: i64)
 }
 
 /// Waits until the server has no request at work, a second at most.
-fn waitIdle(io: Io, server: *const http.Server) !void {
+pub fn waitIdle(io: Io, server: *const http.Server) !void {
     const start = Io.Clock.awake.now(io);
     while (http.testing.inFlight(server) != 0) {
         if (sinceMs(io, start) > 1000) return error.TestRequestsStillAtWork;
@@ -284,25 +300,31 @@ test "connection slots come back after resets" {
     try runtime.forEachRuntime(gpa, slotsComeBack);
 }
 
+/// Where a connection of `dropConnections` ends.
+const Drop = enum { mid_head, mid_body, mid_response };
+
 /// Connections a worker opens and drops: one ends mid-head, the next
-/// mid-response, and so on.
+/// mid-body, the next mid-response, and so on.
 fn dropConnections(io: Io, port: u16, count: usize, failures: *std.atomic.Value(u32)) void {
     for (0..count) |i| {
-        dropOne(io, port, i % 2 == 0) catch {
+        dropOne(io, port, @fromBackingInt(@intCast(i % 3))) catch {
             _ = failures.fetchAdd(1, .monotonic);
         };
     }
 }
 
-fn dropOne(io: Io, port: u16, mid_head: bool) !void {
+fn dropOne(io: Io, port: u16, where: Drop) !void {
     var c = try raw.Client.connect(io, gpa, port);
     defer c.close(io);
-    if (mid_head) {
-        try c.send(io, "GET /hello HTTP/1.1\r\nHost: test\r\nX-Pad: abc");
-    } else {
-        try c.send(io, get("/big"));
-        // Some of the response has come: the close cuts it.
-        if (!try c.waitData(io, .fromSeconds(5))) return error.TestNoResponse;
+    switch (where) {
+        .mid_head => try c.send(io, "GET /hello HTTP/1.1\r\nHost: test\r\nX-Pad: abc"),
+        // The handler reads the body, and the close cuts it.
+        .mid_body => try c.send(io, "POST /upload HTTP/1.1\r\nHost: test\r\nContent-Length: 1000\r\n\r\npartial"),
+        .mid_response => {
+            try c.send(io, get("/big"));
+            // Some of the response has come: the close cuts it.
+            if (!try c.waitData(io, .fromSeconds(5))) return error.TestNoResponse;
+        },
     }
 }
 
@@ -316,13 +338,17 @@ fn slotsComeBack(io: Io) !void {
     defer arena.deinit();
     const a = arena.allocator();
 
-    // 2 000 connections from 16 workers, each closed mid-head or
-    // mid-response.
+    // 2 000 connections from 16 workers, each closed mid-head, mid-body
+    // or mid-response.
     var failures: std.atomic.Value(u32) = .init(0);
     var workers: Io.Group = .init;
     for (0..16) |_| try workers.concurrent(io, dropConnections, .{ io, f.native.port(), 125, &failures });
     try workers.await(io);
     try testing.expectEqual(0, failures.load(.monotonic));
+    // Each body cut short reached its handler as ReadFailed.
+    const mid_body: u32 = 16 * 42;
+    try waitCount(io, &f.app.body_failures, mid_body, 5000);
+    try testing.expectEqual(mid_body, f.app.body_failures.load(.acquire));
 
     // Every slot is free again: four clients at once are all served.
     var clients: [4]raw.Client = undefined;

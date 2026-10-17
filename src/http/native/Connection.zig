@@ -11,10 +11,23 @@
 //!   `timeouts.header`, one deadline for all its reads; else 408. A head the
 //!   parser refuses gets its status (400, 414, 417, 431, 501, 505). Either
 //!   answer is short text with `Connection: close`.
+//! - **The body.** By its length or chunked, each read within
+//!   `timeouts.body`; chunk extensions and trailers within
+//!   `max_chunk_meta_bytes`, trailers dropped. A body that stalls is
+//!   `.timeout`, broken framing `.malformed`: the server answers 408 or
+//!   400, and the connection closes. `Expect: 100-continue` gets
+//!   `100 Continue` at the first read of the body, never once a response
+//!   has begun.
 //! - **The response.** The backend writes `Date`, the length or chunked
 //!   (to the end of the connection for HTTP/1.0), and `Connection`. HEAD,
 //!   204 and 304 go without a body. Each write sends something within
 //!   `timeouts.write`, else the connection closes.
+//! - **A body left unread** when the response has gone: the backend reads
+//!   and drops it, `drain_limit` at most and within `timeouts.body`, so the
+//!   next request starts where it should; past that the connection closes.
+//!   A body over `drain_limit` by its length, or one whose client still
+//!   waits for `100 Continue`, makes the response say `Connection: close`
+//!   instead.
 //! - **Keep-alive and pipelining.** Requests run one after another; bytes
 //!   that follow a head stay in the buffer for the next one. The arena of
 //!   the requests keeps at most 64 KiB between them.
@@ -34,6 +47,7 @@ const Exchange = Interface.Exchange;
 const Backend = @import("Backend.zig");
 const socket = @import("socket.zig");
 const h1 = @import("../h1/head.zig");
+const chunked = @import("../h1/chunked.zig");
 const response = @import("../h1/response.zig");
 const date = @import("../h1/date.zig");
 
@@ -55,6 +69,8 @@ fields: []h1.Field,
 arena: std.heap.ArenaAllocator,
 /// The request being served.
 request: Request = undefined,
+/// Its body, as `readBody` has read it.
+body: Body = .{},
 out: Out = .{},
 exchange: Exchange = undefined,
 
@@ -64,6 +80,10 @@ const arena_retain = 64 << 10;
 /// much of it.
 const linger_time: Duration = .fromSeconds(1);
 const linger_bytes = 64 << 10;
+/// The most of a body left unread that the connection reads and drops
+/// after the response, to keep the connection for the next request.
+const drain_limit = 64 << 10;
+const continue_line = "HTTP/1.1 100 Continue\r\n\r\n";
 
 /// The head of the request being served, as the connection needs it.
 const Request = struct {
@@ -73,6 +93,38 @@ const Request = struct {
     /// The client keeps the connection: HTTP/1.1 without `Connection:
     /// close`, HTTP/1.0 with `Connection: keep-alive`.
     keep_alive: bool,
+    /// HTTP/1.1 with `Expect: 100-continue`: the client may hold the body
+    /// back until `100 Continue`.
+    expect_continue: bool,
+};
+
+/// The body of the request being served.
+const Body = struct {
+    state: enum { reading, done, failed } = .done,
+    /// Bytes of a body by length not taken yet.
+    left: u64 = 0,
+    decoder: chunked.Decoder = .init(0),
+    /// Where the bytes of `buffer` not taken yet begin while the body is
+    /// read: what comes before is dropped once, at the end of the body or
+    /// before the next read of the socket, not at every take.
+    start: usize = 0,
+    /// Data of a chunk at `start`, decoded and not taken yet.
+    pending: usize = 0,
+    /// Bytes of the body off the wire so far, framing included.
+    wire: u64 = 0,
+    /// `100 Continue` has gone out.
+    continued: bool = false,
+    /// Why the body failed, once `state` is `failed`; null for a broken
+    /// connection.
+    failure: ?Exchange.BodyFailure = null,
+
+    fn of(framing: h1.Framing, max_chunk_meta_bytes: u32) Body {
+        return switch (framing) {
+            .none => .{},
+            .length => |n| if (n == 0) .{} else .{ .state = .reading, .left = n },
+            .chunked => .{ .state = .reading, .decoder = .init(max_chunk_meta_bytes) },
+        };
+    }
 };
 
 /// The response being written.
@@ -188,7 +240,8 @@ fn serveOne(conn: *Connection, io: std.Io) End {
         log.warn("out of memory for the head of a request; the connection is closed", .{});
         return .drop;
     };
-    conn.request = .{ .method = h.method, .version = h.version, .framing = h.framing, .keep_alive = h.keep_alive };
+    conn.request = .{ .method = h.method, .version = h.version, .framing = h.framing, .keep_alive = h.keep_alive, .expect_continue = h.expect_continue };
+    conn.body = .of(h.framing, b.limits.max_chunk_meta_bytes);
     conn.out = .{};
     conn.exchange = .{
         .ptr = conn,
@@ -202,10 +255,30 @@ fn serveOne(conn: *Connection, io: std.Io) End {
     };
     b.handler.serve(b.handler.ptr, io, &conn.exchange);
     return switch (conn.out.state) {
-        .finished => if (conn.out.close) .close else .keep_alive,
+        .finished => if (conn.out.close) .close else conn.skipBody(io),
         // Aborted, broken, or never written.
         .ready, .head, .body, .broken => .drop,
     };
+}
+
+/// After a response that keeps the connection: reads and drops what is
+/// left of the body, `drain_limit` at most and within one `timeouts.body`,
+/// so that the next request starts where it should; else the connection
+/// closes. The request has ended, so nothing else reads the socket.
+fn skipBody(conn: *Connection, io: std.Io) End {
+    switch (conn.body.state) {
+        .done => return .keep_alive,
+        .failed => return .close,
+        .reading => {},
+    }
+    const deadline: core.Deadline = .after(std.Io.Clock.awake.now(io), conn.backend.timeouts.body);
+    const start = conn.body.wire;
+    while (true) {
+        const bytes = conn.peekBody(io, deadline) catch return .close;
+        if (bytes.len == 0) return .keep_alive;
+        conn.takeBody(bytes.len);
+        if (conn.body.wire - start > drain_limit) return .close;
+    }
 }
 
 const HeadRead = union(enum) {
@@ -269,7 +342,8 @@ fn consume(conn: *Connection, n: usize) void {
 /// reason as text, `Connection: close`.
 fn refuse(conn: *Connection, io: std.Io, status: u16) End {
     const text = response.reason(status);
-    conn.request = .{ .method = .GET, .version = .http11, .framing = .none, .keep_alive = false };
+    conn.request = .{ .method = .GET, .version = .http11, .framing = .none, .keep_alive = false, .expect_continue = false };
+    conn.body = .{};
     conn.out = .{};
     const fields = [_]h1.Field{.{ .name = "Content-Type", .value = "text/plain; charset=utf-8" }};
     conn.startResponse(io, status, &fields, .{ .length = text.len }) catch return .drop;
@@ -294,13 +368,20 @@ fn lingerClose(conn: *Connection, io: std.Io) void {
     }
 }
 
-/// The body of a request is still on the wire after the response: the
-/// connection cannot read the next request.
-fn bodyUnread(conn: *const Connection) bool {
-    return switch (conn.request.framing) {
-        .none => false,
-        .length => |n| n > 0,
-        .chunked => true,
+/// What the body makes of the connection after the response, known when
+/// its head goes out: a body that failed, a client that still waits for
+/// `100 Continue` (RFC 9110 §10.1.1), or more left of a body by length than
+/// `drain_limit` close it. A chunked body says not how much is left: the
+/// connection drains it after the response.
+fn bodyCloses(conn: *const Connection) bool {
+    const body = &conn.body;
+    return switch (body.state) {
+        .done => false,
+        .failed => true,
+        .reading => (conn.request.expect_continue and !body.continued) or switch (conn.request.framing) {
+            .length => body.left > drain_limit,
+            .none, .chunked => false,
+        },
     };
 }
 
@@ -324,7 +405,7 @@ fn startResponse(conn: *Connection, io: std.Io, status: u16, fields: []const h1.
     const out = &conn.out;
     if (out.state != .ready) return conn.misuse("a second head");
     const framing = framingOf(conn.request.method, conn.request.version, status, kind);
-    const close = !conn.request.keep_alive or conn.bodyUnread() or framing == .until_close or
+    const close = !conn.request.keep_alive or conn.bodyCloses() or framing == .until_close or
         conn.backend.stopping.load(.acquire);
     var imf_date: [date.len]u8 = undefined;
     _ = date.formatImfFixdate(std.Io.Clock.real.now(io), &imf_date);
@@ -439,20 +520,139 @@ fn bodyLength(ptr: *anyopaque) ?u64 {
     };
 }
 
-/// The body of a request: none so far. A request with a body gets
-/// `ReadFailed`, and its connection closes after the response, its body
-/// unread.
-fn readBody(ptr: *anyopaque, io: std.Io, _: []u8) Exchange.ReadError!usize {
+/// Reads the body into `buffer`, which is not empty; 0 at its end. Each
+/// read of the socket waits `timeouts.body` at most. The first read sends
+/// `100 Continue` when the client asked for it.
+fn readBody(ptr: *anyopaque, io: std.Io, buffer: []u8) Exchange.ReadError!usize {
+    const conn = of(ptr);
     try io.checkCancel();
-    return switch (of(ptr).request.framing) {
-        .none => 0,
-        .length => |n| if (n == 0) 0 else error.ReadFailed,
-        .chunked => error.ReadFailed,
-    };
+    switch (conn.body.state) {
+        .done => return 0,
+        .failed => return error.ReadFailed,
+        .reading => {},
+    }
+    try conn.sendContinue(io);
+    const bytes = try conn.peekBody(io, null);
+    const n = @min(bytes.len, buffer.len);
+    @memcpy(buffer[0..n], bytes[0..n]);
+    conn.takeBody(n);
+    return n;
 }
 
-fn bodyFailure(_: *anyopaque) ?Exchange.BodyFailure {
-    return null;
+fn bodyFailure(ptr: *anyopaque) ?Exchange.BodyFailure {
+    const body = &of(ptr).body;
+    return if (body.state == .failed) body.failure else null;
+}
+
+/// `100 Continue`, once, before the first read of a body whose client
+/// asked for it; never once a response has begun.
+fn sendContinue(conn: *Connection, io: std.Io) Exchange.ReadError!void {
+    if (!conn.request.expect_continue or conn.body.continued or conn.out.state != .ready) return;
+    socket.writeAll(io, conn.stream, continue_line, &.{}, conn.backend.timeouts.write) catch |err| {
+        // Some of it may have gone out: the connection is out of step.
+        conn.failBody(null);
+        return switch (err) {
+            error.Canceled => error.Canceled,
+            error.Timeout, error.WriteFailed => error.ReadFailed,
+        };
+    };
+    conn.body.continued = true;
+}
+
+/// The next bytes of the body, in `buffer`, and not past the end of the
+/// body: the bytes after it belong to the next request. Empty at the end of
+/// the body. Reads the socket when the buffer holds none, by `deadline`,
+/// or null for `timeouts.body` from now. The caller takes what it uses
+/// with `takeBody`.
+fn peekBody(conn: *Connection, io: std.Io, deadline: ?core.Deadline) Exchange.ReadError![]const u8 {
+    const body = &conn.body;
+    while (true) {
+        switch (body.state) {
+            .done => return "",
+            .failed => return error.ReadFailed,
+            .reading => {},
+        }
+        const held = conn.buffer[body.start..conn.len];
+        switch (conn.request.framing) {
+            .none => return "",
+            .length => {
+                if (held.len > 0) return held[0..@intCast(@min(held.len, body.left))];
+                conn.len = 0;
+                body.start = 0;
+                const room: usize = @intCast(@min(conn.buffer.len, body.left));
+                conn.len = try conn.readSocket(io, conn.buffer[0..room], deadline);
+            },
+            .chunked => {
+                if (body.pending > 0) return held[0..body.pending];
+                if (held.len == 0) {
+                    conn.len = 0;
+                    body.start = 0;
+                    conn.len = try conn.readSocket(io, conn.buffer, deadline);
+                    continue;
+                }
+                const step = body.decoder.feed(held) catch return conn.bodyFailed(.malformed);
+                body.wire += step.consumed;
+                // The data ends what the step consumed: the framing before
+                // it is taken, the data waits at `start`.
+                body.start += step.consumed - step.data.len;
+                body.pending = step.data.len;
+                if (step.done) conn.endBody();
+            },
+        }
+    }
+}
+
+/// Takes `n` bytes of what `peekBody` returned.
+fn takeBody(conn: *Connection, n: usize) void {
+    if (n == 0) return;
+    const body = &conn.body;
+    body.start += n;
+    switch (conn.request.framing) {
+        .none => {},
+        .length => {
+            body.left -= n;
+            body.wire += n;
+            if (body.left == 0) conn.endBody();
+        },
+        .chunked => body.pending -= n,
+    }
+}
+
+/// The body has been read to its end: what follows it in the buffer, the
+/// next request, moves to the start, where the watcher and the next head
+/// expect it.
+fn endBody(conn: *Connection) void {
+    conn.body.state = .done;
+    conn.consume(conn.body.start);
+    conn.body.start = 0;
+}
+
+/// One read of the body into `dest`, by `deadline`, or null for
+/// `timeouts.body` from now. A read that fails fails the body: the stream
+/// is out of step after it, so the connection closes.
+fn readSocket(conn: *Connection, io: std.Io, dest: []u8, deadline: ?core.Deadline) Exchange.ReadError!usize {
+    const limit = deadline orelse core.Deadline.after(std.Io.Clock.awake.now(io), conn.backend.timeouts.body);
+    const n = socket.read(io, conn.stream, dest, limit) catch |err| switch (err) {
+        error.Timeout => return conn.bodyFailed(.timeout),
+        error.ReadFailed => return conn.bodyFailed(null),
+        error.Canceled => {
+            conn.failBody(null);
+            return error.Canceled;
+        },
+    };
+    // The client ended the connection before the end of the body.
+    if (n == 0) return conn.bodyFailed(null);
+    return n;
+}
+
+fn bodyFailed(conn: *Connection, failure: ?Exchange.BodyFailure) error{ReadFailed} {
+    conn.failBody(failure);
+    return error.ReadFailed;
+}
+
+fn failBody(conn: *Connection, failure: ?Exchange.BodyFailure) void {
+    conn.body.state = .failed;
+    conn.body.failure = failure;
 }
 
 /// Reads ahead into the buffer until the client goes or `deadline` passes:

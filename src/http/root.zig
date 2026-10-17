@@ -29,9 +29,10 @@
 //! paths), the server with its lifecycle and the path of a request (each
 //! request in a task of its own, with its deadline, the client that
 //! leaves, the stop and the limit of requests at work), the backend in
-//! memory of `http.testing`, and the network backend of `http.native`
-//! (connections, heads, responses, keep-alive and the watcher; request
-//! bodies come next); the rest of the API comes with the next commits.
+//! memory of `http.testing`, the network backend of `http.native`
+//! (connections, heads, request bodies, responses, keep-alive and the
+//! watcher), and `ctx.body()`; the rest of the API comes with the next
+//! commits.
 
 const std = @import("std");
 const route_decls = @import("routes.zig");
