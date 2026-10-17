@@ -1,0 +1,308 @@
+//! The compile-time plan of a server (design sections 4 and 5):
+//! `of(@TypeOf(options))` reads the options of `Server.init` and the
+//! routes of its controllers, builds the router's trie and stops the build
+//! on a mistake, with a message that names the place and what to write:
+//! - an unknown option, or no `.backend` or `.controllers`;
+//! - a controller that is not a pointer to a mutable instance, has no
+//!   `pub const http_routes`, or whose `http_routes` is not
+//!   `http.routes(...)`;
+//! - a route without its handler, a handler of another form, an
+//!   `.on_close` that names no method of its form;
+//! - a pattern that does not parse, two routes of one method on one shape
+//!   of path (router.zig).
+const std = @import("std");
+const routes = @import("routes.zig");
+const router = @import("router.zig");
+const Context = @import("Context.zig");
+const sse = @import("sse.zig");
+
+/// One route of the server, at compile time.
+pub const RoutePlan = struct {
+    method: std.http.Method,
+    kind: routes.Kind,
+    /// The controller's prefix and the route's path, as declared:
+    /// "/v1/todos/{id}"; "" for the root. The server's prefix joins them at
+    /// run time: it may come from the config.
+    pattern: []const u8,
+    /// The names of the pattern's parameters, in order.
+    params: []const []const u8,
+    /// The controller: its place in `.controllers`, its type and its name.
+    controller_index: usize,
+    Controller: type,
+    controller_name: []const u8,
+    /// The controller's method that handles the route.
+    handler: []const u8,
+    /// The route as `http.get` and the others made it, with its
+    /// `.middleware`.
+    Route: type,
+    max_body_bytes: ?usize,
+    timeout: routes.Timeout,
+    heartbeat: ?std.Io.Duration,
+    on_close: ?[]const u8,
+};
+
+pub const Plan = struct {
+    /// In the order of `.controllers`, each in the order of its `.methods`.
+    routes: []const RoutePlan,
+    /// The router's trie; its routes are indices into `routes`.
+    nodes: []const router.Node,
+    /// The most parameters a route has.
+    max_params: usize,
+};
+
+const known_options = [_][]const u8{
+    "backend",       "prefix",          "controllers",    "middleware",     "error_handler",    "static",
+    "strict_errors", "unknown_fields",  "json",           "max_body_bytes", "max_query_params", "max_in_flight",
+    "max_streams",   "request_timeout", "shutdown_grace", "finish_timeout", "trusted_proxies",
+};
+
+pub fn of(comptime O: type) Plan {
+    var quota: u32 = 100_000;
+    @setEvalBranchQuota(quota);
+    if (@typeInfo(O) != .@"struct") @compileError("zefir.http: Server.init takes a struct literal of options, got " ++ @typeName(O));
+    for (@typeInfo(O).@"struct".field_names) |name| {
+        if (!contains(&known_options, name)) @compileError("zefir.http: Server.init: unknown option ." ++ name);
+    }
+    if (!@hasField(O, "backend")) @compileError("zefir.http: Server.init needs .backend, such as native.backend()");
+    const controllers_form = "zefir.http: Server.init .controllers is a tuple of pointers to controllers, at least one: .{ &todos_v1, &health }";
+    if (!@hasField(O, "controllers")) @compileError(controllers_form);
+    const cinfo = @typeInfo(@FieldType(O, "controllers"));
+    if (cinfo != .@"struct" or !cinfo.@"struct".is_tuple or cinfo.@"struct".field_names.len == 0) @compileError(controllers_form);
+
+    var table: []const RoutePlan = &.{};
+    var specs: []const router.Spec = &.{};
+    var max_params: usize = 0;
+    for (cinfo.@"struct".field_types, 0..) |Ptr, ci| {
+        const C = controllerOf(Ptr, ci);
+        const cname = shortName(@typeName(C));
+        // A declaration without pub in the application's file is not
+        // visible here: the same message covers it.
+        if (!@hasDecl(C, "http_routes")) @compileError("zefir.http: " ++ cname ++ " has no pub const http_routes = http.routes(.{ ... })");
+        const R = C.http_routes;
+        if (@TypeOf(R) != type or !routes.isMarked(R, "zefir_http_routes")) @compileError("zefir.http: " ++ cname ++ ".http_routes must be http.routes(.{ ... })");
+        for (@typeInfo(@TypeOf(R.methods)).@"struct".field_names) |name| {
+            const Route = @field(R.methods, name);
+            const where = cname ++ "." ++ name;
+            const pattern = R.prefix ++ Route.route_path;
+            quota += 20_000 + 500 * @as(u32, @intCast(pattern.len));
+            @setEvalBranchQuota(quota);
+            checkHandler(C, name, Route.route_kind, where);
+            if (Route.on_close) |on_close| checkOnClose(C, on_close, where);
+            const segments = router.parse(pattern, where);
+            const params = router.paramNames(segments);
+            max_params = @max(max_params, params.len);
+            table = table ++ [_]RoutePlan{.{
+                .method = Route.http_method,
+                .kind = Route.route_kind,
+                .pattern = pattern,
+                .params = params,
+                .controller_index = ci,
+                .Controller = C,
+                .controller_name = cname,
+                .handler = name,
+                .Route = Route,
+                .max_body_bytes = Route.max_body_bytes,
+                .timeout = Route.timeout,
+                .heartbeat = Route.heartbeat,
+                .on_close = Route.on_close,
+            }};
+            specs = specs ++ [_]router.Spec{.{
+                .method = Route.http_method,
+                .kind = Route.route_kind,
+                .segments = segments,
+                .name = where,
+                .pattern = pattern,
+            }};
+        }
+    }
+    return .{ .routes = table, .nodes = router.build(specs), .max_params = max_params };
+}
+
+/// The controller of the element `Ptr` of `.controllers`: a pointer to a
+/// mutable instance.
+fn controllerOf(comptime Ptr: type, comptime index: usize) type {
+    const at = std.fmt.comptimePrint("zefir.http: Server.init .controllers[{d}] is ", .{index});
+    const info = @typeInfo(Ptr);
+    if (info != .pointer or info.pointer.size != .one or @typeInfo(info.pointer.child) != .@"struct")
+        @compileError(at ++ typeName(Ptr) ++ "; pass a pointer to the controller, e.g. &controller");
+    if (info.pointer.attrs.@"const")
+        @compileError(at ++ typeName(Ptr) ++ "; the controller must be mutable, declared with var");
+    return info.pointer.child;
+}
+
+fn checkHandler(comptime C: type, comptime name: []const u8, comptime kind: routes.Kind, comptime where: []const u8) void {
+    const cname = shortName(@typeName(C));
+    const form = switch (kind) {
+        .rest => "pub fn " ++ name ++ "(self: *" ++ cname ++ ", ctx: *http.Context) !http.Json(T), or !void for a response without a JSON value",
+        .sse => "pub fn " ++ name ++ "(self: *" ++ cname ++ ", ctx: *http.sse.Context) !void",
+    };
+    if (!@hasDecl(C, name)) @compileError("zefir.http: " ++ where ++ ": the route has no handler; write " ++ form);
+    const F = @TypeOf(@field(C, name));
+    const bad = "zefir.http: " ++ where ++ " is " ++ fnForm(F) ++ "; write " ++ form;
+    if (@typeInfo(F) != .@"fn") @compileError(bad);
+    const info = @typeInfo(F).@"fn";
+    if (info.is_generic or info.param_types.len != 2 or info.param_types[0].? != *C) @compileError(bad);
+    const Ctx = switch (kind) {
+        .rest => *Context,
+        .sse => *sse.Context,
+    };
+    if (info.param_types[1].? != Ctx) @compileError(bad);
+    const Payload = payloadOf(info.return_type.?);
+    const ok = switch (kind) {
+        .rest => Payload == void or routes.isMarked(Payload, "zefir_http_json"),
+        .sse => Payload == void,
+    };
+    if (!ok) @compileError(bad);
+}
+
+fn checkOnClose(comptime C: type, comptime name: []const u8, comptime where: []const u8) void {
+    const cname = shortName(@typeName(C));
+    const form = "pub fn " ++ name ++ "(self: *" ++ cname ++ ", ctx: *http.sse.Context) void";
+    const at = "zefir.http: " ++ where ++ ": .on_close = ." ++ name;
+    if (!@hasDecl(C, name)) @compileError(at ++ " names no " ++ form);
+    const F = @TypeOf(@field(C, name));
+    if (F != fn (*C, *sse.Context) void) @compileError(at ++ " is " ++ fnForm(F) ++ "; write " ++ form);
+}
+
+fn payloadOf(comptime R: type) type {
+    return if (@typeInfo(R) == .error_union) @typeInfo(R).error_union.payload else R;
+}
+
+fn contains(comptime list: []const []const u8, comptime name: []const u8) bool {
+    for (list) |item| {
+        if (std.mem.eql(u8, item, name)) return true;
+    }
+    return false;
+}
+
+/// A type as messages print it: `*const UsersV1Controller`, without the
+/// file that declares it; the contexts as the application names them.
+pub fn typeName(comptime T: type) []const u8 {
+    if (T == Context) return "http.Context";
+    if (T == sse.Context) return "http.sse.Context";
+    const info = @typeInfo(T);
+    if (info == .pointer and info.pointer.size == .one)
+        return "*" ++ (if (info.pointer.attrs.@"const") "const " else "") ++ typeName(info.pointer.child);
+    return shortName(@typeName(T));
+}
+
+/// The form of a function type, for messages: `fn (*C, *const Context) !void`.
+pub fn fnForm(comptime F: type) []const u8 {
+    if (@typeInfo(F) != .@"fn") return typeName(F);
+    const info = @typeInfo(F).@"fn";
+    var text: []const u8 = "fn (";
+    for (info.param_types, 0..) |P, i| text = text ++ (if (i == 0) "" else ", ") ++ (if (P) |T| typeName(T) else "anytype");
+    const R = info.return_type orelse return text ++ ") anytype";
+    const ret = if (@typeInfo(R) == .error_union) "!" ++ typeName(@typeInfo(R).error_union.payload) else typeName(R);
+    return text ++ ") " ++ ret;
+}
+
+/// The last part of a type's name, outside parentheses:
+/// "todos.TodosV1Controller" is "TodosV1Controller".
+pub fn shortName(comptime full: []const u8) []const u8 {
+    var depth: usize = 0;
+    var start: usize = 0;
+    for (full, 0..) |c, i| switch (c) {
+        '(' => depth += 1,
+        ')' => depth -= 1,
+        '.' => if (depth == 0) {
+            start = i + 1;
+        },
+        else => {},
+    };
+    return full[start..];
+}
+
+const testing = std.testing;
+const Backend = @import("Backend.zig");
+const Json = @import("dto.zig").Json;
+
+const UsersV1Controller = struct {
+    calls: u32 = 0,
+
+    pub const http_routes = routes.routes(.{
+        .prefix = "/v1/users",
+        .middleware = .{.audit},
+        .methods = .{
+            .list = routes.get("", .{}),
+            .get = routes.get("/{id}", .{ .timeout = std.Io.Duration.fromSeconds(5) }),
+            .create = routes.post("/", .{ .max_body_bytes = 64 << 10, .timeout = null, .middleware = .{.plans} }),
+            .files = routes.get("/{id}/files/{*path}", .{}),
+            .events = sse.get("/events", .{ .heartbeat = std.Io.Duration.fromSeconds(15), .on_close = .eventsClosed }),
+        },
+    });
+
+    pub fn list(_: *UsersV1Controller, _: *Context) !void {}
+    pub fn get(_: *UsersV1Controller, _: *Context) !Json(struct { id: u64 }) {
+        return .{ .value = .{ .id = 1 } };
+    }
+    pub fn create(_: *UsersV1Controller, _: *Context) error{Conflict}!Json(struct { id: u64 }) {
+        return .{ .value = .{ .id = 2 }, .status = 201 };
+    }
+    pub fn files(_: *UsersV1Controller, _: *Context) void {}
+    pub fn events(_: *UsersV1Controller, _: *sse.Context) !void {}
+    pub fn eventsClosed(_: *UsersV1Controller, _: *sse.Context) void {}
+};
+
+const HealthController = struct {
+    pub const http_routes = routes.routes(.{ .methods = .{ .check = routes.get("/health", .{}) } });
+
+    pub fn check(_: *HealthController, _: *Context) !void {}
+};
+
+test "routes: patterns are the controller prefix plus the path; options are kept" {
+    var users: UsersV1Controller = .{};
+    var health: HealthController = .{};
+    const backend: Backend = undefined;
+    const p = comptime of(@TypeOf(.{ .backend = backend, .prefix = "/api", .controllers = .{ &users, &health } }));
+    try testing.expectEqual(6, p.routes.len);
+    try testing.expectEqual(2, p.max_params);
+
+    const want = [_]struct { std.http.Method, routes.Kind, []const u8, []const u8, usize }{
+        .{ .GET, .rest, "/v1/users", "list", 0 },
+        .{ .GET, .rest, "/v1/users/{id}", "get", 0 },
+        .{ .POST, .rest, "/v1/users/", "create", 0 },
+        .{ .GET, .rest, "/v1/users/{id}/files/{*path}", "files", 0 },
+        .{ .GET, .sse, "/v1/users/events", "events", 0 },
+        .{ .GET, .rest, "/health", "check", 1 },
+    };
+    inline for (want, p.routes) |w, r| {
+        try testing.expectEqual(w[0], r.method);
+        try testing.expectEqual(w[1], r.kind);
+        try testing.expectEqualStrings(w[2], r.pattern);
+        try testing.expectEqualStrings(w[3], r.handler);
+        try testing.expectEqual(w[4], r.controller_index);
+    }
+    try testing.expectEqualStrings("UsersV1Controller", p.routes[0].controller_name);
+    try testing.expectEqualStrings("HealthController", p.routes[5].controller_name);
+    try testing.expect(p.routes[0].Controller == UsersV1Controller);
+
+    // The options of each route, and the defaults where it has none.
+    try testing.expectEqual(routes.Timeout.server, p.routes[0].timeout);
+    try testing.expectEqual(null, p.routes[0].max_body_bytes);
+    try testing.expectEqual(routes.Timeout{ .after = .fromSeconds(5) }, p.routes[1].timeout);
+    try testing.expectEqual(64 << 10, p.routes[2].max_body_bytes.?);
+    try testing.expectEqual(routes.Timeout.none, p.routes[2].timeout);
+    try testing.expectEqual(std.Io.Duration.fromSeconds(15), p.routes[4].heartbeat.?);
+    try testing.expectEqualStrings("eventsClosed", p.routes[4].on_close.?);
+    try testing.expectEqual(null, p.routes[1].heartbeat);
+    try testing.expectEqual(null, p.routes[1].on_close);
+    try testing.expect(p.routes[2].Route.middleware[0] == .plans);
+    try testing.expect(p.routes[2].Controller.http_routes.middleware[0] == .audit);
+    try testing.expectEqual(0, p.routes[0].Route.middleware.len);
+
+    // The parameters of each pattern, in order.
+    try testing.expectEqual(0, p.routes[0].params.len);
+    try testing.expectEqualStrings("id", p.routes[1].params[0]);
+    try testing.expectEqualStrings("id", p.routes[3].params[0]);
+    try testing.expectEqualStrings("path", p.routes[3].params[1]);
+}
+
+test "plan: messages print types without their files" {
+    try testing.expectEqualStrings("UsersV1Controller", comptime typeName(UsersV1Controller));
+    try testing.expectEqualStrings("*const UsersV1Controller", comptime typeName(*const UsersV1Controller));
+    try testing.expectEqualStrings("fn (*UsersV1Controller, *http.Context) !void", comptime fnForm(@TypeOf(UsersV1Controller.list)));
+    try testing.expectEqualStrings("fn (*UsersV1Controller, *http.Context) void", comptime fnForm(@TypeOf(UsersV1Controller.files)));
+    try testing.expectEqualStrings("fn (*UsersV1Controller, *const http.sse.Context) void", comptime fnForm(fn (*UsersV1Controller, *const sse.Context) void));
+    try testing.expectEqualStrings("Json(plan.UsersV1Controller.get__struct_0)", comptime shortName("http.dto.Json(plan.UsersV1Controller.get__struct_0)"));
+}
