@@ -65,7 +65,8 @@ pub const Options = struct {
     pub const Queue = struct {
         /// Events queued and not sent yet.
         max_events: u32 = 64,
-        /// Their bytes, as the stream sends them.
+        /// Their bytes, as the stream sends them. An event longer than this
+        /// alone fits no queue: `publish` refuses it, `error.EventTooLarge`.
         max_bytes: u32 = 256 << 10,
     };
 
@@ -245,10 +246,13 @@ pub fn remove(m: *Manager, io: std.Io, sub: *Subscription) void {
 /// try live.publish(ctx.operation(), ctx.io(), key, .{ .event = "todo.created", .id = "42", .data = todo });
 /// ```
 ///
-/// `error.InvalidEvent` (500): CR, LF or NUL in `.event` or `.id`. An error
-/// of a transform of the data comes back as it is, as
-/// `v.TransformError(T)` says. `op` is the publisher's: publishing never
-/// waits, so its deadline and token do not stop it.
+/// `error.InvalidEvent` (500): CR, LF or NUL in `.event` or `.id`.
+/// `error.EventTooLarge` (500, logged): the event, as the stream sends it,
+/// is longer than `.queue.max_bytes`, so no queue could hold it; it goes to
+/// nobody, and the subscribers stay. An error of a transform of the data
+/// comes back as it is, as `v.TransformError(T)` says. `op` is the
+/// publisher's: publishing never waits, so its deadline and token do not
+/// stop it.
 pub fn publish(m: *Manager, op: core.Context, io: std.Io, key: []const u8, event: anytype) PublishError(@TypeOf(event))!void {
     _ = op;
     const E = @TypeOf(event);
@@ -262,6 +266,10 @@ pub fn publish(m: *Manager, op: core.Context, io: std.Io, key: []const u8, event
     const a = arena.allocator();
     const data = try json_out.encode(a, event.data, .{});
     const bytes = try format.alloc(a, .{ .event = name, .id = id, .retry = retry, .data = data });
+    if (bytes.len > m.options.queue.max_bytes) {
+        log.warn("publish: an SSE event of {d} bytes is longer than the .queue.max_bytes of its manager, {d}; it is sent to nobody", .{ bytes.len, m.options.queue.max_bytes });
+        return error.EventTooLarge;
+    }
     m.mutex.lockUncancelable(io);
     defer m.mutex.unlock(io);
     const list = m.keys.getPtr(key) orelse return;
@@ -283,7 +291,7 @@ pub fn close(m: *Manager, io: std.Io, key: []const u8) void {
 /// compile time first.
 fn PublishError(comptime E: type) type {
     comptime checkEvent(E);
-    return error{InvalidEvent} || v.TransformError(@FieldType(E, "data"));
+    return error{ InvalidEvent, EventTooLarge } || v.TransformError(@FieldType(E, "data"));
 }
 
 fn checkEvent(comptime E: type) void {

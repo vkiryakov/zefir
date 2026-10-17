@@ -574,6 +574,32 @@ test "publish: CR, LF or NUL in event or id is InvalidEvent" {
     try testing.expectEqualStrings("id: 7\ndata: 1\n\n", try nextPiece(s));
 }
 
+test "publish: an event over .queue.max_bytes is EventTooLarge, and its subscribers stay" {
+    const io = testing.io;
+    var dog = try Watchdog.start("publish: an event over .queue.max_bytes is EventTooLarge");
+    defer dog.stop();
+    var f: Fixture = .{};
+    try f.start(testing.allocator, .{ .queue = .{ .max_bytes = 1024 } }, .{});
+    defer f.stop();
+    const level = testing.log_level;
+    testing.log_level = .err; // the refusal is logged as a warning
+    defer testing.log_level = level;
+
+    const a = try f.open("/v1/events/lobby?key=k");
+    defer a.deinit(io);
+    const b = try f.open("/v1/events/lobby?key=k");
+    defer b.deinit(io);
+    try waitCount(&f.events.subscribed, 2);
+    // No queue could hold it: refused, and sent to nobody.
+    const big: [2048]u8 = @splat('x');
+    try testing.expectError(error.EventTooLarge, f.publish("k", .{ .data = @as([]const u8, &big) }));
+    try io.sleep(.fromMilliseconds(20), .awake);
+    try testing.expectEqual(0, f.events.closes.load(.acquire));
+    // Both streams are open and take the next event.
+    try f.publish("k", .{ .data = "small" });
+    for ([_]*Stream{ a, b }) |s| try testing.expectEqualStrings("data: \"small\"\n\n", try nextPiece(s));
+}
+
 /// An allocator that keeps the most bytes it held at once. Safe from any
 /// number of threads when its child is.
 const Peak = struct {

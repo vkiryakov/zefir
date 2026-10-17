@@ -55,6 +55,8 @@ pub const Error = error{
     HandledWithoutResponse,
     /// CR, LF or NUL in the `event` or the `id` of an SSE event.
     InvalidEvent,
+    /// An SSE event longer than the `.queue.max_bytes` of its manager.
+    EventTooLarge,
 };
 
 /// What `handle` decided: `respond` sends the `http.ErrorResponse` as it
@@ -218,6 +220,7 @@ test "status table: every http.Error and the std and core errors" {
         .{ error.BodyConsumed, 500, "internal", "Internal Server Error" },
         .{ error.HandledWithoutResponse, 500, "internal", "Internal Server Error" },
         .{ error.InvalidEvent, 500, "internal", "Internal Server Error" },
+        .{ error.EventTooLarge, 500, "internal", "Internal Server Error" },
     };
     // The table holds every error of http.Error.
     const names = @typeInfo(Error).error_set.error_names.?;
