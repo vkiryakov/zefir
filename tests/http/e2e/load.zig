@@ -121,9 +121,12 @@ const App = struct {
     pub fn fail(_: *App, _: *http.Context) !void {
         return error.TodoNotFound;
     }
-    /// 50 ms of work, past its deadline of 5 ms: 504.
+    /// A second of work, past its deadline of 5 ms: 504. The deadline
+    /// cancels the work, so a second costs nothing, and a runner that
+    /// leaves the connection's task waiting under load cannot let the
+    /// work end first.
     pub fn short(_: *App, ctx: *http.Context) !void {
-        try ctx.io().sleep(.fromMilliseconds(50), .awake);
+        try ctx.io().sleep(.fromSeconds(1), .awake);
     }
     /// Five seconds of work: its client leaves first.
     pub fn stay(_: *App, ctx: *http.Context) !void {
