@@ -272,6 +272,18 @@ fn sinceMs(start: std.Io.Timestamp) i64 {
     return start.durationTo(std.Io.Clock.awake.now(testing.io)).toMilliseconds();
 }
 
+/// Sleeps `ms` milliseconds by the awake clock at least: a sleep of std's
+/// threaded `Io` on Windows may end a tick of its timer early.
+fn sleepAtLeast(ms: i64) std.Io.Cancelable!void {
+    const io = testing.io;
+    const start = std.Io.Clock.awake.now(io);
+    while (true) {
+        const left = ms - sinceMs(start);
+        if (left <= 0) return;
+        try io.sleep(.fromMilliseconds(left), .awake);
+    }
+}
+
 fn expectProblemCode(res: *TestingBackend.Response, code: []const u8) !void {
     try testing.expectEqualStrings("application/problem+json", res.header("content-type").?);
     const problem = try std.json.parseFromSliceLeaky(struct { code: []const u8 }, res.arena.allocator(), res.body, .{ .ignore_unknown_fields = true });
@@ -318,7 +330,8 @@ test "Last-Event-ID is ctx.lastEventId(); the context has the request's methods"
         .{ "cookie", "session=s1" },
         .{ "accept", "text/event-stream" },
     } });
-    errdefer s.deinit(io);
+    var s_ended = false;
+    errdefer if (!s_ended) s.deinit(io);
     try waitCount(&f.events.subscribed, 1);
     const opening = f.events.now().seen;
     try testing.expectEqualStrings("41", opening.last_event_id.get().?);
@@ -336,6 +349,7 @@ test "Last-Event-ID is ctx.lastEventId(); the context has the request's methods"
     f.live.close(io, "ann");
     try expectEnd(s);
     s.deinit(io);
+    s_ended = true;
     try testing.expectEqual(1, f.events.closes.load(.acquire));
     const closing = f.events.now().closed;
     try testing.expectEqualStrings("41", closing.last_event_id.get().?);
@@ -364,7 +378,8 @@ test "subscribe sends the stream headers and the handler returns at once" {
     defer testing.log_level = level;
 
     const s = try f.open("/v1/events/lobby?key=ann&then=twice");
-    errdefer s.deinit(io);
+    var s_ended = false;
+    errdefer if (!s_ended) s.deinit(io);
     try testing.expectEqual(200, s.status);
     try testing.expectEqualStrings("text/event-stream", s.header("content-type").?);
     try testing.expectEqualStrings("no-cache", s.header("cache-control").?);
@@ -388,6 +403,7 @@ test "subscribe sends the stream headers and the handler returns at once" {
     try expectEnd(s);
     try testing.expect(!s.aborted());
     s.deinit(io);
+    s_ended = true;
     try testing.expectEqual(1, f.events.closes.load(.acquire));
     try testing.expectEqual(0, http_testing.openStreams(&f.server));
 }
@@ -403,11 +419,13 @@ test "a stream closed before it began still sends what was published to it" {
     // The handler publishes and closes its key before it returns, before
     // the stream runs: the event goes out, then the last chunk.
     const s = try f.open("/v1/events/lobby?key=ann&then=close");
-    errdefer s.deinit(io);
+    var s_ended = false;
+    errdefer if (!s_ended) s.deinit(io);
     try testing.expectEqualStrings("data: \"early\"\n\n", try nextPiece(s));
     try expectEnd(s);
     try testing.expect(!s.aborted());
     s.deinit(io);
+    s_ended = true;
     try testing.expectEqual(1, f.events.closes.load(.acquire));
 }
 
@@ -424,7 +442,8 @@ test "max_subscriptions and max_streams give 503" {
         defer f.stop();
 
         const first = try f.open("/v1/events/lobby?key=a");
-        errdefer first.deinit(io);
+        var first_ended = false;
+        errdefer if (!first_ended) first.deinit(io);
         try testing.expectEqual(200, first.status);
         var over = try f.backend.request(io, .{ .method = .GET, .target = "/v1/events/lobby?key=b" });
         defer over.deinit();
@@ -434,6 +453,7 @@ test "max_subscriptions and max_streams give 503" {
 
         // The first ends: its place comes back.
         first.deinit(io);
+        first_ended = true;
         try testing.expectEqual(0, http_testing.openStreams(&f.server));
         const again = try f.open("/v1/events/lobby?key=c");
         defer again.deinit(io);
@@ -499,8 +519,9 @@ test "the stream outlives the request deadline; HTTP middleware onFinish runs wh
 
     const start = std.Io.Clock.awake.now(io);
     const s = try f.open("/v1/events/lobby?key=ann");
-    errdefer s.deinit(io);
-    try io.sleep(.fromMilliseconds(150), .awake);
+    var s_ended = false;
+    errdefer if (!s_ended) s.deinit(io);
+    try sleepAtLeast(150);
     try f.publish("ann", .{ .data = "still here" });
     try testing.expectEqualStrings("data: \"still here\"\n\n", try nextPiece(s));
     // onFinish waits for the end of the stream, not of its request.
@@ -509,6 +530,7 @@ test "the stream outlives the request deadline; HTTP middleware onFinish runs wh
     f.live.close(io, "ann");
     try expectEnd(s);
     s.deinit(io);
+    s_ended = true;
     try testing.expectEqual(1, f.finisher.calls.load(.acquire));
     const outcome = f.finisher.last.?;
     try testing.expectEqual(200, outcome.status);
@@ -667,7 +689,8 @@ test "a full queue closes the slow subscriber and memory stays bounded" {
     // A client that reads nothing: the writer sticks in its first write,
     // and the queue fills behind it.
     const s = try f.backend.open(io, .{ .method = .GET, .target = "/v1/events/lobby?key=slow", .stalled = true });
-    errdefer s.deinit(io);
+    var s_ended = false;
+    errdefer if (!s_ended) s.deinit(io);
     try testing.expectEqual(200, s.status);
     const big: [8 << 10]u8 = @splat('x');
     for (0..300) |_| try f.publish("slow", .{ .data = @as([]const u8, &big) });
@@ -676,6 +699,7 @@ test "a full queue closes the slow subscriber and memory stays bounded" {
     try expectEnd(s);
     try testing.expect(s.aborted());
     s.deinit(io);
+    s_ended = true;
     try testing.expectEqual(0, http_testing.openStreams(&f.server));
     // 300 events of 8 KiB came, 2.4 MiB: the subscriber held at most its
     // queue of 256 KiB and a batch of as much, the lists' spare room aside.
@@ -796,7 +820,8 @@ test "the stop cuts a stream whose last events a client that reads nothing holds
     // The writer sticks in the write of the event: the stream closes softly,
     // sending what was published, which the client never takes.
     const s = try f.backend.open(io, .{ .method = .GET, .target = "/v1/events/lobby?key=stuck", .stalled = true });
-    errdefer s.deinit(io);
+    var s_ended = false;
+    errdefer if (!s_ended) s.deinit(io);
     try waitCount(&f.events.subscribed, 1);
     try f.publish("stuck", .{ .data = "stuck" });
     try io.sleep(.fromMilliseconds(20), .awake);
@@ -808,6 +833,7 @@ test "the stop cuts a stream whose last events a client that reads nothing holds
     try expectEnd(s);
     try testing.expect(s.aborted());
     s.deinit(io);
+    s_ended = true;
     // Its end ran whole: .on_close and onFinish once, and its places back.
     try testing.expectEqual(1, f.events.closes.load(.acquire));
     try testing.expectEqual(1, f.finisher.calls.load(.acquire));
