@@ -46,7 +46,7 @@ jobs:
           path: http-garden
       - uses: mlugg/setup-zig@v2
       # The Garden's tools run with uv.
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.3.0
       - name: Print the payloads
         working-directory: tests/http
         run: zig build garden-payloads > "$RUNNER_TEMP/payloads.txt" && wc -l "$RUNNER_TEMP/payloads.txt"
