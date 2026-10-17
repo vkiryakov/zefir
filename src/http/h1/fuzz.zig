@@ -187,15 +187,14 @@ fn expectSameOutcome(want: Outcome, got: Outcome) !void {
 
 // llhttp's vectors.
 
-/// The field the test adds to rows of HTTP/1.1 without `Host`.
-const added_host = "Host: llhttp.test\r\n";
-
-/// `raw` with `added_host` inserted at each offset of `at`.
-fn withHost(comptime raw: []const u8, comptime at: []const usize) []const u8 {
+/// `raw` with the field `Host: <host>`, which the test adds to rows of
+/// HTTP/1.1 without one, inserted at each offset of `at`.
+fn withHost(comptime raw: []const u8, comptime at: []const usize, comptime host: []const u8) []const u8 {
+    const added = "Host: " ++ host ++ "\r\n";
     comptime var out: []const u8 = "";
     comptime var from: usize = 0;
     inline for (at) |offset| {
-        out = out ++ raw[from..offset] ++ added_host;
+        out = out ++ raw[from..offset] ++ added;
         from = offset;
     }
     return out ++ raw[from..];
@@ -216,7 +215,7 @@ fn expectRow(arena: std.mem.Allocator, row: llhttp.Row, raw: []const u8, skip_ho
         const fields = if (skip_host) b.fields[1..] else b.fields;
         if (skip_host) {
             try testing.expectEqualStrings("Host", b.fields[0].name);
-            try testing.expectEqualStrings("llhttp.test", b.fields[0].value);
+            try testing.expectEqualStrings(row.host, b.fields[0].value);
         }
         try testing.expectEqual(a.fields.len, fields.len);
         for (a.fields, fields) |x, y| {
@@ -269,7 +268,7 @@ test "llhttp request vectors" {
                 printOutcome(row.name ++ " (as llhttp sends it)", row.raw, verbatim);
                 failed += 1;
             }
-            expectRow(arena, row, comptime withHost(row.raw, row.host_at), true) catch {
+            expectRow(arena, row, comptime withHost(row.raw, row.host_at, row.host), true) catch {
                 failed += 1;
             };
         }
@@ -318,7 +317,7 @@ pub const inputs = collect: {
     for (cases.chunked_rules) |case| list = list ++ .{chunked_head ++ case.raw};
     for (llhttp.rows) |row| {
         list = list ++ .{row.raw};
-        if (row.host_at.len > 0) list = list ++ .{withHost(row.raw, row.host_at)};
+        if (row.host_at.len > 0) list = list ++ .{withHost(row.raw, row.host_at, row.host)};
     }
     break :collect list;
 };

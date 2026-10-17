@@ -120,7 +120,11 @@ pub const field_rules = [_]Case{
     fails("HTTP/1.1 without Host", "GET / HTTP/1.1\r\nX-A: 1\r\n\r\n", error.BadRequest),
     fails("HTTP/1.1 with two Host fields", "GET / HTTP/1.1\r\nHost: a\r\nHost: a\r\n\r\n", error.BadRequest),
     fails("HTTP/1.1 with two Host fields that differ", "GET / HTTP/1.1\r\nHost: a\r\nhost: b\r\n\r\n", error.BadRequest),
-    ok("an empty Host", "GET / HTTP/1.1\r\nHost:\r\n\r\n", .{ .fields = &.{.{ "Host", "" }} }),
+    // An http URI has a host (RFC 9110 §4.2.1); nginx and Apache httpd
+    // refuse an empty one too. HTTP/1.0 needs none.
+    fails("an empty Host", "GET / HTTP/1.1\r\nHost:\r\n\r\n", error.BadRequest),
+    fails("an empty Host of whitespace", "GET / HTTP/1.1\r\nHost:  \t \r\n\r\n", error.BadRequest),
+    ok("an empty Host in HTTP/1.0", "GET / HTTP/1.0\r\nHost:\r\n\r\n", .{ .version = .http10, .keep_alive = false, .fields = &.{.{ "Host", "" }} }),
     ok("Host in any case", "GET / HTTP/1.1\r\nhOST: example.com\r\n\r\n", .{ .fields = &.{.{ "hOST", "example.com" }} }),
     ok("Host with a port", "GET / HTTP/1.1\r\nHost: example.com:8080\r\n\r\n", .{}),
     ok("Host as an IPv6 literal", "GET / HTTP/1.1\r\nHost: [::1]:8080\r\n\r\n", .{}),
@@ -140,6 +144,16 @@ pub const field_rules = [_]Case{
         .target = "http://example.com/",
     }),
     fails("HTTP/1.1 with an absolute target and no Host", "GET http://example.com/ HTTP/1.1\r\n\r\n", error.BadRequest),
+    // The authority of an absolute target is the request's host (RFC 9112
+    // §3.2.2): a Host that names another is refused, so that the
+    // application, which reads Host, sees the host the client asked.
+    fails("an absolute target whose authority is not Host", "GET http://a.example/x HTTP/1.1\r\nHost: b.example\r\n\r\n", error.BadRequest),
+    fails("an absolute target whose port is not Host's", "GET http://example.com:8080/ HTTP/1.1\r\nHost: example.com\r\n\r\n", error.BadRequest),
+    fails("HTTP/1.0 with an absolute target whose authority is not Host", "GET http://a.example/ HTTP/1.0\r\nHost: b.example\r\n\r\n", error.BadRequest),
+    ok("an absolute target and Host in other cases", "GET HTTP://Example.COM:8080?q HTTP/1.1\r\nHost: example.com:8080\r\n\r\n", .{
+        .target = "HTTP://Example.COM:8080?q",
+    }),
+    ok("HTTP/1.0 with an absolute target and no Host", "GET http://example.com/ HTTP/1.0\r\n\r\n", .{ .target = "http://example.com/", .version = .http10, .keep_alive = false, .fields = &.{} }),
 
     // Connection.
     ok("HTTP/1.1 keeps alive by default", get(""), .{}),

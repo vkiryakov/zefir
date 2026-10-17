@@ -17,8 +17,9 @@
 //! Most of llhttp's inputs are HTTP/1.1 without `Host`, which we refuse
 //! (400, RFC 9112 §3.2). For such a row `host_at` lists where its request
 //! lines end: the test checks that the input as llhttp sends it fails with
-//! 400, then inserts `Host: llhttp.test` at those offsets and expects the
-//! rest of the row (the inserted field is not in `fields`).
+//! 400, then inserts `Host: llhttp.test` at those offsets, or the `host` of
+//! the row, the authority of its absolute target, which `Host` must name,
+//! and expects the rest of the row (the inserted field is not in `fields`).
 //!
 //! llhttp's license:
 //!
@@ -53,8 +54,10 @@ pub const Row = struct {
     /// "<file>.md:<line> <the test's heading>".
     name: []const u8,
     raw: []const u8,
-    /// Offsets of `raw` where the test inserts `Host: llhttp.test` + CRLF.
+    /// Offsets of `raw` where the test inserts `Host: <host>` + CRLF.
     host_at: []const usize = &.{},
+    /// The value of the `Host` the test inserts.
+    host: []const u8 = "llhttp.test",
     expect: Expect,
 };
 
@@ -254,6 +257,7 @@ pub const rows = [_]Row{
             "\r\n" ++
             "\r\n",
         .host_at = &.{44},
+        .host = "hypnotoad.org",
         .expect = .{ .end = .incomplete, .messages = &.{
             .{ .method = .GET, .target = "http://hypnotoad.org?hail=all" },
         } },
@@ -263,6 +267,7 @@ pub const rows = [_]Row{
         .raw = "GET http://hypnotoad.org:1234?hail=all HTTP/1.1\r\n" ++
             "\r\n",
         .host_at = &.{49},
+        .host = "hypnotoad.org:1234",
         .expect = .{ .end = .complete, .messages = &.{
             .{ .method = .GET, .target = "http://hypnotoad.org:1234?hail=all" },
         } },
@@ -281,6 +286,7 @@ pub const rows = [_]Row{
         .raw = "GET http://hypnotoad.org:1234 HTTP/1.1\r\n" ++
             "\r\n",
         .host_at = &.{40},
+        .host = "hypnotoad.org:1234",
         .expect = .{ .end = .complete, .messages = &.{
             .{ .method = .GET, .target = "http://hypnotoad.org:1234" },
         } },

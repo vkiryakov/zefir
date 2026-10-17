@@ -185,7 +185,7 @@ fn scan(w: []const u8, limits: Limits, storage: []Field) ScanError!Head {
     }
     const fields = storage[0..count];
 
-    try checkHost(version, fields);
+    try checkHost(version, target, fields);
     var transfer_encoding = false;
     var lengths: usize = 0;
     var length_value: []const u8 = "";
@@ -248,16 +248,19 @@ fn checkTarget(method: std.http.Method, target: []const u8) Error!void {
         if (method != .OPTIONS) return error.BadRequest;
         return;
     }
+    const authority = authorityOf(target) orelse return error.BadRequest;
+    if (authority.len == 0 or std.mem.findScalar(u8, authority, '@') != null) return error.BadRequest;
+}
+
+/// The authority of an absolute target, `http://` or `https://` in any
+/// case before it; null for a target of another form.
+fn authorityOf(target: []const u8) ?[]const u8 {
     for ([_][]const u8{ "http://", "https://" }) |scheme| {
-        if (std.ascii.startsWithIgnoreCase(target, scheme)) {
-            const rest = target[scheme.len..];
-            if (rest.len == 0 or rest[0] == '/' or rest[0] == '?' or rest[0] == '#') return error.BadRequest;
-            const authority = rest[0 .. std.mem.findAny(u8, rest, "/?#") orelse rest.len];
-            if (std.mem.findScalar(u8, authority, '@') != null) return error.BadRequest;
-            return;
-        }
+        if (!std.ascii.startsWithIgnoreCase(target, scheme)) continue;
+        const rest = target[scheme.len..];
+        return rest[0 .. std.mem.findAny(u8, rest, "/?#") orelse rest.len];
     }
-    return error.BadRequest;
+    return null;
 }
 
 /// "HTTP/" DIGIT "." DIGIT CRLF. A major version other than 1 is 505 as
@@ -281,18 +284,27 @@ fn scanVersion(w: []const u8, pos: *usize) ScanError!Version {
 }
 
 /// Exactly one `Host` in HTTP/1.1, at most one in HTTP/1.0, and a value
-/// that is a host with an optional port (RFC 9112 §3.2). An empty value
-/// is allowed.
-fn checkHost(version: Version, fields: []const Field) Error!void {
+/// that is a host with an optional port (RFC 9112 §3.2), not empty in
+/// HTTP/1.1: an http URI has a host (RFC 9110 §4.2.1). Beside an absolute
+/// target, `Host` is the target's authority, in any case: the target names
+/// the host (RFC 9112 §3.2.2), and the application reads `Host`.
+fn checkHost(version: Version, target: []const u8, fields: []const Field) Error!void {
     var hosts: usize = 0;
+    var host: ?[]const u8 = null;
     for (fields) |field| {
         if (!std.ascii.eqlIgnoreCase(field.name, "host")) continue;
         hosts += 1;
+        host = field.value;
         for (field.value) |c| {
             if (!host_chars[c]) return error.BadRequest;
         }
     }
     if (hosts > 1 or (hosts == 0 and version == .http11)) return error.BadRequest;
+    const value = host orelse return;
+    if (value.len == 0 and version == .http11) return error.BadRequest;
+    if (authorityOf(target)) |authority| {
+        if (!std.ascii.eqlIgnoreCase(authority, value)) return error.BadRequest;
+    }
 }
 
 /// 1*DIGIT that fits in u64.
@@ -520,7 +532,12 @@ test "parseHead: target forms and versions" {
     };
     for (rows) |row| {
         var buffer: [128]u8 = undefined;
-        const raw = try std.fmt.bufPrint(&buffer, "{s}\r\nHost: a\r\n\r\n", .{row[0]});
+        // Beside an absolute target, Host is its authority.
+        const host = if (std.mem.find(u8, row[0], "://")) |at| host: {
+            const rest = row[0][at + 3 ..];
+            break :host rest[0 .. std.mem.findAny(u8, rest, "/?# ") orelse rest.len];
+        } else "a";
+        const raw = try std.fmt.bufPrint(&buffer, "{s}\r\nHost: {s}\r\n\r\n", .{ row[0], host });
         if (row[2]) |want| {
             testing.expectError(want, parse(raw, &storage)) catch |err| {
                 std.debug.print("request line {f}\n", .{std.zig.fmtString(row[0])});
