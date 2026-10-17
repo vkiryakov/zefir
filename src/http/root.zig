@@ -28,9 +28,10 @@
 //! checks the compiler makes of them, the router and the normalization of
 //! paths), the server with its lifecycle and the path of a request (each
 //! request in a task of its own, with its deadline, the client that
-//! leaves, the stop and the limit of requests at work), and the backend
-//! in memory of `http.testing`; the rest of the API comes with the next
-//! commits.
+//! leaves, the stop and the limit of requests at work), the backend in
+//! memory of `http.testing`, and the network backend of `http.native`
+//! (connections, heads, responses, keep-alive and the watcher; request
+//! bodies come next); the rest of the API comes with the next commits.
 
 const std = @import("std");
 const route_decls = @import("routes.zig");
@@ -42,6 +43,7 @@ pub const Server = @import("Server.zig");
 pub const Backend = @import("Backend.zig");
 pub const Context = @import("Context.zig");
 pub const sse = @import("sse.zig");
+pub const native = @import("native.zig");
 pub const testing = @import("testing.zig");
 
 pub const Json = dto.Json;
@@ -73,6 +75,8 @@ test {
     _ = @import("h1/head.zig");
     _ = @import("h1/chunked.zig");
     _ = @import("h1/fuzz.zig");
+    _ = @import("h1/date.zig");
+    _ = @import("h1/response.zig");
     _ = @import("dto.zig");
     _ = @import("path.zig");
     _ = @import("router.zig");
@@ -85,4 +89,5 @@ test {
     _ = @import("flow.zig");
     _ = @import("wait.zig");
     _ = @import("testing.zig");
+    _ = @import("native.zig");
 }
