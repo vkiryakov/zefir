@@ -45,8 +45,11 @@
 //! types, objects, sets; the phases `run`, `onResponse` and `onFinish`;
 //! `http.onResponse`, `http.onFinish`, `http.MiddlewareResult`,
 //! `http.Outcome`), the typed locals of a request (`ctx.locals`,
-//! `ctx.local`) and static files (`http.static`: conditional requests,
-//! ranges, index files, the SPA file, a root that nothing leaves); the
+//! `ctx.local`), static files (`http.static`: conditional requests,
+//! ranges, index files, the SPA file, a root that nothing leaves) and
+//! server-sent events (`http.sse.get`, `http.sse.Context`,
+//! `http.sse.Manager`: streams by key, `publish`, `close`, heartbeats, the
+//! queues of slow clients, `.max_streams`, `on_close` and the stop); the
 //! rest of the API comes with the next commits.
 
 const std = @import("std");
@@ -142,4 +145,5 @@ test {
     _ = @import("wait.zig");
     _ = @import("testing.zig");
     _ = @import("native.zig");
+    _ = @import("sse.zig");
 }

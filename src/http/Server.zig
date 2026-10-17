@@ -95,9 +95,18 @@ grace_over: std.Io.Event = .unset,
 /// The requests at work, as `.max_in_flight` counts them: `serve` takes a
 /// place before a request runs and gives it back at its end.
 in_flight: std.atomic.Value(u32) = .init(0),
-/// Set when `in_flight` drops to zero. Only the lifecycle task waits on
-/// it, and resets it before it looks at `in_flight`.
+/// Set when `in_flight` or `streams` drops to zero. Only the lifecycle
+/// task waits on it, and resets it before it looks at the counts.
 idle: std.Io.Event = .unset,
+/// The SSE streams open now, as `.max_streams` counts them: `subscribe`
+/// takes a place, the end of the stream gives it back.
+streams: std.atomic.Value(u32) = .init(0),
+/// The streams that run, for the stop to close them at once; under
+/// `streams_mutex`, which is never held across I/O.
+stream_list: std.DoublyLinkedList = .{},
+streams_mutex: std.Io.Mutex = .init,
+/// The stop has closed the streams: one that begins now ends at once.
+streams_closed: bool = false,
 
 /// The states of a server, in order.
 pub const State = enum(u8) { configured, starting, running, draining, stopped };
@@ -452,7 +461,7 @@ fn HandlerOf(comptime C: type, comptime name: []const u8, comptime kind: route_d
                     if (@TypeOf(out) != void) try ctx.response.status(out.status).internal.setValue(out.value);
                 },
                 .sse => {
-                    var stream: sse.Context = .{ .opening = ctx };
+                    var stream: sse.Context = .{ .request = &ctx.request, .locals = &ctx.locals, .internal = .{ .http = ctx } };
                     try method(self, &stream);
                 },
             }
@@ -551,8 +560,9 @@ pub fn run(server: *Server, io: std.Io) (StartError || WaitError)!void {
 
 /// Begins a graceful stop. From any task, also from a handler; never
 /// waits; a second call does nothing. The backend takes no new requests,
-/// the requests at work get `.shutdown_grace` to end with their responses,
-/// those that outlive it are canceled without one, and the server stops.
+/// the SSE streams close at once, the requests at work get
+/// `.shutdown_grace` to end with their responses, those that outlive it are
+/// canceled without one, and the server stops.
 pub fn requestStop(server: *Server, io: std.Io) void {
     server.mutex.lockUncancelable(io);
     defer server.mutex.unlock(io);
@@ -644,10 +654,11 @@ fn joinLifecycle(server: *Server, io: std.Io) void {
 }
 
 /// The lifecycle task: waits for a stop and leads it. The backend takes no
-/// new requests; those at work get `.shutdown_grace` to end; then the
-/// backend cancels what still runs (a request it cancels ends without a
-/// response) and the server stops once every task of the backend has
-/// ended.
+/// new requests and the SSE streams are closed at once; the requests at
+/// work, and the streams that still send what was published before, get
+/// `.shutdown_grace` to end; then the backend cancels what still runs (a
+/// request it cancels ends without a response, a stream cut) and the server
+/// stops once every task of the backend has ended.
 fn runLifecycle(server: *Server, io: std.Io) void {
     // Nothing cancels this task, and its waits are no cancelation points.
     const protection = io.swapCancelProtection(.blocked);
@@ -657,6 +668,7 @@ fn runLifecycle(server: *Server, io: std.Io) void {
     if (server.rollback) return;
     const grace_end: core.Deadline = .after(std.Io.Clock.awake.now(io), server.settings.shutdown_grace);
     server.backend.stopAccepting(io);
+    flow.closeStreams(server, io);
     server.waitIdle(io, grace_end);
     server.grace_over.set(io);
     server.backend.cancelAll(io);
@@ -664,16 +676,17 @@ fn runLifecycle(server: *Server, io: std.Io) void {
     server.markStopped(io);
 }
 
-/// Waits until no request is at work or `deadline` passes. Only the
-/// lifecycle task calls it.
+/// Waits until no request is at work and no stream is open, or `deadline`
+/// passes: the stop has closed the streams, which end once they have sent
+/// what was published before. Only the lifecycle task calls it.
 fn waitIdle(server: *Server, io: std.Io, deadline: core.Deadline) void {
     while (true) {
         server.idle.reset();
-        // A read-modify-write, not a load: it orders the reset before the
-        // `set` of the request that drops the count last. A plain load may
-        // read the count from before that while the reset lands after its
-        // `set`, and the stop would sleep through it.
-        if (server.in_flight.fetchAdd(0, .acq_rel) == 0) return;
+        // Read-modify-writes, not loads: they order the reset before the
+        // `set` of the request or the stream that drops its count last. A
+        // plain load may read the count from before that while the reset
+        // lands after its `set`, and the stop would sleep through it.
+        if (server.in_flight.fetchAdd(0, .acq_rel) == 0 and server.streams.fetchAdd(0, .acq_rel) == 0) return;
         waiting.untilSet(&server.idle, io, deadline) catch |err| switch (err) {
             error.Timeout => return,
             // The lifecycle task waits with cancelation blocked.

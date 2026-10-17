@@ -14,14 +14,27 @@
 //! try std.testing.expectEqual(200, res.status);
 //! ```
 //!
+//! `open` hands a request over and returns once the head of its response
+//! has come: for an SSE stream, read a piece at a time as the server
+//! writes it, while the request goes on.
+//!
+//! ```zig
+//! var stream = try backend.open(io, .{ .method = .GET, .target = "/v1/todos/events" });
+//! defer stream.deinit(io);
+//! try std.testing.expectEqualStrings("text/event-stream", stream.header("content-type").?);
+//! const event = (try stream.next(io, .fromSeconds(5))).?; // "event: todo.created\ndata: {...}\n\n"
+//! ```
+//!
 //! Each request runs on a task of its own, as on the network, so a stop of
 //! the server reaches it. The backend checks how the server writes: a
 //! second head, a body before the head or after the end, or a body that
 //! does not match its length is logged as an error, which fails the test.
 const std = @import("std");
+const core = @import("core");
 const Interface = @import("../Backend.zig");
 const Exchange = Interface.Exchange;
 const h1 = @import("../h1/head.zig");
+const waiting = @import("../wait.zig");
 
 const Backend = @This();
 
@@ -52,6 +65,13 @@ pub const Request = struct {
     /// response, unless it ended before. The server notices it once the
     /// body has been read, as on the network. Null: the client waits.
     leave_after: ?std.Io.Duration = null,
+    /// The client reads nothing of the body, as one whose connection's
+    /// buffers are full: each write of the body waits until the request
+    /// is canceled. The head goes out. For a subscriber of a stream that
+    /// falls behind: its queue overflows. There is no write timeout here, so
+    /// a stream the server closes waits for its write until the stop
+    /// cancels it.
+    stalled: bool = false,
 };
 
 /// The response as the server wrote it: the status, the fields with
@@ -88,6 +108,86 @@ pub const Response = struct {
 /// `NotStarted`: the server has not started or stops.
 pub const RequestError = error{ NotStarted, OutOfMemory } || std.Io.Cancelable;
 
+/// `RequestError`, and `ConcurrencyUnavailable` when the runtime gives no
+/// task for the request: `open` cannot serve it on the caller's task.
+pub const OpenError = RequestError || error{ConcurrencyUnavailable};
+
+/// A response read as the server writes it, from `open`: for an SSE
+/// stream. The head is here once `open` has returned; `next` gives the
+/// pieces of the body one by one. The request goes on until the server
+/// ends it or the client leaves (`leave`, `deinit`).
+pub const Stream = struct {
+    gpa: std.mem.Allocator,
+    /// The memory of the request: its fields.
+    request_arena: std.heap.ArenaAllocator,
+    call: Call,
+    /// The status and the fields of the response, as its head came; 0 and
+    /// none when the request ended without a response.
+    status: u16 = 0,
+    headers: []const [2][]const u8 = &.{},
+    /// The pieces of the body `next` has given.
+    taken: usize = 0,
+
+    /// The value of the first field `name`, which is case-insensitive.
+    pub fn header(s: *const Stream, name: []const u8) ?[]const u8 {
+        for (s.headers) |h| {
+            if (std.ascii.eqlIgnoreCase(h[0], name)) return h[1];
+        }
+        return null;
+    }
+
+    /// The next piece of the body, as the server wrote it, such as one SSE
+    /// event or a heartbeat; null once the response has ended and every
+    /// piece is taken. `error.Timeout` when none came within `timeout`.
+    pub fn next(s: *Stream, io: std.Io, timeout: std.Io.Duration) (error{Timeout} || std.Io.Cancelable)!?[]const u8 {
+        const deadline: core.Deadline = .after(std.Io.Clock.awake.now(io), timeout);
+        while (true) {
+            // Before the pieces are looked at: a write after it sets it again.
+            s.call.changed.reset();
+            {
+                s.call.mutex.lockUncancelable(io);
+                defer s.call.mutex.unlock(io);
+                const rec = &s.call.recorder;
+                if (s.taken < rec.chunks.items.len) {
+                    s.taken += 1;
+                    return rec.chunks.items[s.taken - 1];
+                }
+                if (rec.state == .finished or rec.state == .aborted or s.call.done.isSet()) return null;
+            }
+            waiting.untilSet(&s.call.changed, io, deadline) catch |err| return switch (err) {
+                error.Timeout => error.Timeout,
+                error.Canceled => error.Canceled,
+            };
+        }
+    }
+
+    /// Whether the response ended without its end: the server cut it, as
+    /// it does when the client has gone. For after `next` gave null.
+    pub fn aborted(s: *const Stream) bool {
+        return s.call.recorder.state != .finished;
+    }
+
+    /// The client leaves, as one that closes its connection: the server
+    /// sees it go.
+    pub fn leave(s: *Stream, io: std.Io) void {
+        s.call.left.set(io);
+    }
+
+    /// The client leaves, unless it has; waits until the request has ended
+    /// and frees the stream.
+    pub fn deinit(s: *Stream, io: std.Io) void {
+        s.leave(io);
+        s.call.done.waitUncancelable(io);
+        s.free();
+    }
+
+    fn free(s: *Stream) void {
+        s.call.recorder.arena.deinit();
+        s.request_arena.deinit();
+        s.gpa.destroy(s);
+    }
+};
+
 pub fn init(gpa: std.mem.Allocator) Backend {
     return .{ .gpa = gpa };
 }
@@ -108,25 +208,7 @@ pub fn backend(b: *Backend) Interface {
 pub fn request(b: *Backend, io: std.Io, req: Request) RequestError!Response {
     var exchange_arena: std.heap.ArenaAllocator = .init(b.gpa);
     defer exchange_arena.deinit();
-    const arena = exchange_arena.allocator();
-    const fields = try arena.alloc(h1.Field, req.headers.len);
-    for (fields, req.headers) |*f, h| f.* = .{ .name = h[0], .value = h[1] };
-
-    var call: Call = .{
-        .body = req.body,
-        .leave_at = if (req.leave_after) |after| .fromNow(io, .{ .raw = after, .clock = .awake }) else null,
-        .recorder = .{ .arena = .init(b.gpa), .head_request = req.method == .HEAD },
-        .exchange = .{
-            .ptr = undefined,
-            .vtable = &exchange_vtable,
-            .method = req.method,
-            .target = req.target,
-            .version = .http11,
-            .fields = fields,
-            .client = req.client_address,
-            .arena = arena,
-        },
-    };
+    var call: Call = try .init(b.gpa, io, exchange_arena.allocator(), req);
     call.exchange.ptr = &call;
     errdefer call.recorder.arena.deinit();
 
@@ -166,10 +248,68 @@ pub fn request(b: *Backend, io: std.Io, req: Request) RequestError!Response {
     };
 }
 
+/// Hands `req` to the server on a task of its own and returns once the
+/// head of its response has come, or the request has ended without one:
+/// the body is read with `Stream.next` as the server writes it. When the
+/// caller is canceled meanwhile, the client leaves, the request ends, and
+/// the call returns `error.Canceled`.
+pub fn open(b: *Backend, io: std.Io, req: Request) OpenError!*Stream {
+    const s = try b.newStream(io, req);
+    b.spawn(io, &s.call) catch |err| {
+        s.free();
+        return err;
+    };
+    // The head, or the end of the request.
+    while (true) {
+        s.call.changed.reset();
+        {
+            s.call.mutex.lockUncancelable(io);
+            defer s.call.mutex.unlock(io);
+            const rec = &s.call.recorder;
+            if (rec.state != .head or s.call.done.isSet()) {
+                s.status = rec.status;
+                s.headers = rec.headers.items;
+                break;
+            }
+        }
+        s.call.changed.wait(io) catch {
+            s.deinit(io);
+            return error.Canceled;
+        };
+    }
+    if (s.call.out_of_memory) {
+        s.deinit(io);
+        return error.OutOfMemory;
+    }
+    return s;
+}
+
+/// A stream for `req`, its call ready and not handed over yet.
+fn newStream(b: *Backend, io: std.Io, req: Request) error{OutOfMemory}!*Stream {
+    const s = try b.gpa.create(Stream);
+    errdefer b.gpa.destroy(s);
+    s.* = .{ .gpa = b.gpa, .request_arena = .init(b.gpa), .call = undefined };
+    errdefer s.request_arena.deinit();
+    s.call = try .init(b.gpa, io, s.request_arena.allocator(), req);
+    s.call.exchange.ptr = &s.call;
+    return s;
+}
+
+/// Hands `call` to the server on a task of its own.
+fn spawn(b: *Backend, io: std.Io, call: *Call) OpenError!void {
+    b.mutex.lockUncancelable(io);
+    defer b.mutex.unlock(io);
+    if (!b.accepting.load(.acquire)) return error.NotStarted;
+    try b.tasks.concurrent(io, serveTask, .{ b.handler.?, io, call });
+}
+
 const log = std.log.scoped(.http);
 
 fn serveTask(handler: Interface.Handler, io: std.Io, call: *Call) void {
-    defer call.done.set(io);
+    defer {
+        call.done.set(io);
+        call.changed.set(io);
+    }
     handler.serve(handler.ptr, io, &call.exchange);
 }
 
@@ -224,16 +364,61 @@ const Call = struct {
     exchange: Exchange,
     body: []const u8,
     body_read: usize = 0,
-    /// When the client leaves, on the awake clock; null: it waits.
+    /// When the client leaves, on the awake clock; null: when `left` is
+    /// set, if ever.
     leave_at: ?std.Io.Clock.Timestamp,
+    /// Set when the client of a stream leaves: `Stream.leave`.
+    left: std.Io.Event = .unset,
+    /// The client reads nothing of the body: `Request.stalled`.
+    stalled: bool,
+    /// Guards `recorder` while the server writes and a `Stream` reads.
+    mutex: std.Io.Mutex = .init,
     recorder: Recorder,
+    /// Set after each write of the server and when `serve` has returned:
+    /// a `Stream` waits on it.
+    changed: std.Io.Event = .unset,
     /// The recorder ran out of memory: `request` returns `OutOfMemory`.
     out_of_memory: bool = false,
     /// Set when `serve` has returned.
     done: std.Io.Event = .unset,
 
+    /// A call for `req`; its fields in `arena`. Its exchange points to it
+    /// once it stays where it is.
+    fn init(gpa: std.mem.Allocator, io: std.Io, arena: std.mem.Allocator, req: Request) error{OutOfMemory}!Call {
+        const fields = try arena.alloc(h1.Field, req.headers.len);
+        for (fields, req.headers) |*f, h| f.* = .{ .name = h[0], .value = h[1] };
+        return .{
+            .body = req.body,
+            .leave_at = if (req.leave_after) |after| .fromNow(io, .{ .raw = after, .clock = .awake }) else null,
+            .stalled = req.stalled,
+            .recorder = .{ .arena = .init(gpa), .head_request = req.method == .HEAD },
+            .exchange = .{
+                .ptr = undefined,
+                .vtable = &exchange_vtable,
+                .method = req.method,
+                .target = req.target,
+                .version = .http11,
+                .fields = fields,
+                .client = req.client_address,
+                .arena = arena,
+            },
+        };
+    }
+
     fn of(ptr: *anyopaque) *Call {
         return @ptrCast(@alignCast(ptr));
+    }
+
+    /// The recorder, for one write of the server.
+    fn record(call: *Call, io: std.Io) *Recorder {
+        call.mutex.lockUncancelable(io);
+        return &call.recorder;
+    }
+
+    /// The write is recorded: a `Stream` that waits sees it.
+    fn recorded(call: *Call, io: std.Io) void {
+        call.mutex.unlock(io);
+        call.changed.set(io);
     }
 
     fn failed(call: *Call, err: Recorder.Error) Exchange.WriteError {
@@ -275,52 +460,68 @@ fn bodyFailure(_: *anyopaque) ?Exchange.BodyFailure {
     return null;
 }
 
-/// Until the client leaves (`leave_after`) or `deadline` passes, whichever
-/// comes first. The server cancels the watch when the request ends.
+/// Until the client leaves, by its clock (`leave_after`) or from its stream
+/// (`Stream.leave`), or until `deadline` passes, whichever comes first.
+/// The server cancels the watch when the request ends.
 fn watch(ptr: *anyopaque, io: std.Io, deadline: std.Io.Timeout) Exchange.Watch {
-    const leave = Call.of(ptr).leave_at orelse {
-        sleepUntil(io, deadline);
-        return .deadline;
+    const call = Call.of(ptr);
+    var until: ?core.Deadline = switch (deadline) {
+        .none => null,
+        .duration => |d| .after(std.Io.Clock.awake.now(io), d.raw),
+        .deadline => |at| .at(at.toClock(io, .awake).raw),
     };
-    if (deadline.toTimestamp(io)) |at| if (at.toClock(io, .awake).compare(.lte, leave)) {
-        sleepUntil(io, deadline);
-        return .deadline;
+    var leaves = false;
+    if (call.leave_at) |at| {
+        if (until == null or at.raw.nanoseconds < until.?.expires.nanoseconds) {
+            until = .at(at.raw);
+            leaves = true;
+        }
+    }
+    // A sleep of `.none` is no sleep every `std.Io` can take: without a
+    // limit, the event alone.
+    const limit = until orelse {
+        call.left.wait(io) catch return .deadline;
+        return .client_gone;
     };
-    leave.wait(io) catch return .deadline;
+    waiting.untilSet(&call.left, io, limit) catch |err| return switch (err) {
+        error.Canceled => .deadline,
+        error.Timeout => if (leaves) .client_gone else .deadline,
+    };
     return .client_gone;
 }
 
-/// Sleeps until `deadline`; without one, until the task is canceled, an
-/// hour at a time: a sleep of `.none` is no sleep every `std.Io` can take.
-fn sleepUntil(io: std.Io, deadline: std.Io.Timeout) void {
-    if (deadline == .none) {
-        while (true) io.sleep(.fromSeconds(60 * 60), .awake) catch return;
+fn writeHead(ptr: *anyopaque, io: std.Io, status: u16, fields: []const h1.Field, body: Exchange.BodyKind) Exchange.WriteError!void {
+    const call = Call.of(ptr);
+    defer call.recorded(io);
+    call.record(io).head(status, fields, body) catch |err| return call.failed(err);
+}
+
+fn writeBody(ptr: *anyopaque, io: std.Io, data: []const u8) Exchange.WriteError!void {
+    const call = Call.of(ptr);
+    if (call.stalled and data.len > 0) {
+        // The client reads nothing: the write waits until it is canceled.
+        while (true) io.sleep(.fromSeconds(60 * 60), .awake) catch return error.Canceled;
     }
-    deadline.sleep(io) catch {};
+    defer call.recorded(io);
+    call.record(io).write(data) catch |err| return call.failed(err);
 }
 
-fn writeHead(ptr: *anyopaque, _: std.Io, status: u16, fields: []const h1.Field, body: Exchange.BodyKind) Exchange.WriteError!void {
+fn flush(ptr: *anyopaque, io: std.Io) Exchange.WriteError!void {
     const call = Call.of(ptr);
-    call.recorder.head(status, fields, body) catch |err| return call.failed(err);
+    defer call.recorded(io);
+    call.record(io).flush() catch |err| return call.failed(err);
 }
 
-fn writeBody(ptr: *anyopaque, _: std.Io, data: []const u8) Exchange.WriteError!void {
+fn finish(ptr: *anyopaque, io: std.Io) Exchange.WriteError!void {
     const call = Call.of(ptr);
-    call.recorder.write(data) catch |err| return call.failed(err);
+    defer call.recorded(io);
+    call.record(io).finish() catch |err| return call.failed(err);
 }
 
-fn flush(ptr: *anyopaque, _: std.Io) Exchange.WriteError!void {
+fn abort(ptr: *anyopaque, io: std.Io) void {
     const call = Call.of(ptr);
-    call.recorder.flush() catch |err| return call.failed(err);
-}
-
-fn finish(ptr: *anyopaque, _: std.Io) Exchange.WriteError!void {
-    const call = Call.of(ptr);
-    call.recorder.finish() catch |err| return call.failed(err);
-}
-
-fn abort(ptr: *anyopaque, _: std.Io) void {
-    Call.of(ptr).recorder.abort();
+    defer call.recorded(io);
+    call.record(io).abort();
 }
 
 /// The response as the server writes it, with the checks of the order of

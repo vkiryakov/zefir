@@ -131,8 +131,9 @@ pub const Exchange = struct {
         /// Returns when the client has gone or `deadline` has passed. The
         /// request's watcher calls it on a task of its own once the body
         /// has been read to its end (or there is none), so it never reads
-        /// the connection while `readBody` does; the watcher is canceled
-        /// when the request ends, and what a canceled watch returns is
+        /// the connection while `readBody` does, and so does the watcher of
+        /// an SSE stream after it; a watcher is canceled when its request
+        /// or stream ends, and what a canceled watch returns is
         /// dropped. The server gives no deadline (`.none`): it keeps the
         /// request's deadline itself, so that a canceled read never has a
         /// timer of its own (a read that a runtime completes as it is

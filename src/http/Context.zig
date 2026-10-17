@@ -25,6 +25,7 @@ const json_in = @import("input/json_in.zig");
 const collect = @import("input/violations.zig");
 const plan = @import("plan.zig");
 const mw = @import("middleware.zig");
+const Subscription = @import("sse/Subscription.zig");
 
 const Context = @This();
 const Violation = v.Violation;
@@ -77,6 +78,15 @@ pub const Internal = struct {
     /// The middleware of the request: the server's, the route's once it
     /// is applied, and those the request reached.
     middleware: mw.Reached = .{},
+    /// The server that serves the request; null in unit tests of a context.
+    server: ?*Server = null,
+    /// The route the request matched, as an index into `server.routes`.
+    route_index: ?usize = null,
+    /// The request holds a place of `.max_in_flight`: from its start to its
+    /// end, or until `subscribe` moves it among the streams.
+    in_flight: bool = false,
+    /// The stream that `subscribe` opened for the request.
+    subscription: ?*Subscription = null,
 };
 
 /// The errors of `body`. `PayloadTooLarge` (413): over the limit.

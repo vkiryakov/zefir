@@ -39,6 +39,12 @@
 //! run right before the head goes out, whichever task sends it. Once the
 //! request has ended, the `onFinish` phases run, once, on a task of their
 //! own within `.finish_timeout`; then the values of `ctx.locals` go.
+//!
+//! A request whose SSE handler subscribed goes on as its stream, on this
+//! task, which keeps the connection for it (`serveStream`): it leaves the
+//! count of `.max_in_flight` for that of `.max_streams`, its deadline no
+//! longer applies, and its `onFinish` phases wait for the end of the
+//! stream.
 const std = @import("std");
 const core = @import("core");
 const Backend = @import("Backend.zig");
@@ -58,6 +64,8 @@ const plan = @import("plan.zig");
 const mw = @import("middleware.zig");
 const static_files = @import("static.zig");
 const waiting = @import("wait.zig");
+const sse = @import("sse.zig");
+const Subscription = @import("sse/Subscription.zig");
 
 const log = std.log.scoped(.http);
 
@@ -140,12 +148,15 @@ pub fn serve(server: *Server, io: std.Io, exchange: *Exchange) void {
             .json = server.settings.json,
             .error_handler = server.error_handler,
             .middleware = .{ .global = server.middleware },
+            .server = server,
         },
     };
     ctx.response.internal.before_head = mw.beforeHead(&ctx);
     // A request refused here has run no middleware: none has after phases.
     if (!takeSlot(server)) return respond(&ctx, exchange, error.Overloaded);
-    defer releaseSlot(server, io);
+    ctx.internal.in_flight = true;
+    // Unless `subscribe` moved the request among the streams.
+    defer if (ctx.internal.in_flight) releaseSlot(server, io);
 
     const found = find(server, &ctx);
     const deadline: ?core.Deadline = if (budgetOf(server, found)) |budget| .after(ctx.now(), budget) else null;
@@ -170,6 +181,12 @@ pub fn serve(server: *Server, io: std.Io, exchange: *Exchange) void {
     // Cancels the other task and waits for both: from here on, only this
     // task touches the context.
     tasks.cancel(io);
+    // The handler subscribed: the request goes on as its stream.
+    if (ctx.internal.subscription) |sub| {
+        const stream_canceled = serveStream(server, &ctx, sub, reason, started);
+        if (canceled or stream_canceled) io.recancel();
+        return;
+    }
     var failure: ?anyerror = switch (reason) {
         .done => |result| if (result) |_| null else |err| err,
         .deadline => error.RequestTimeout,
@@ -251,6 +268,161 @@ fn takeSlot(server: *Server) bool {
 
 fn releaseSlot(server: *Server, io: std.Io) void {
     if (server.in_flight.fetchSub(1, .acq_rel) == 1) server.idle.set(io);
+}
+
+/// Takes one of the `.max_streams` places, unless all are taken: for
+/// `subscribe`.
+pub fn takeStream(server: *Server) bool {
+    var current = server.streams.load(.monotonic);
+    while (current < server.settings.max_streams) {
+        current = server.streams.cmpxchgWeak(current, current + 1, .acq_rel, .monotonic) orelse return true;
+    }
+    return false;
+}
+
+/// Gives a place among the streams back; the last one wakes a stop that
+/// waits for the streams to end.
+pub fn releaseStream(server: *Server, io: std.Io) void {
+    if (server.streams.fetchSub(1, .acq_rel) == 1) server.idle.set(io);
+}
+
+/// The request of `ctx` leaves the count of `.max_in_flight`: `subscribe`
+/// made it a stream, which counts among the streams.
+pub fn leaveInFlight(ctx: *Context) void {
+    if (!ctx.internal.in_flight) return;
+    ctx.internal.in_flight = false;
+    releaseSlot(ctx.internal.server.?, ctx.internal.io);
+}
+
+/// Ends every stream that runs, at once, and every one that begins after:
+/// for the stop.
+pub fn closeStreams(server: *Server, io: std.Io) void {
+    server.streams_mutex.lockUncancelable(io);
+    defer server.streams_mutex.unlock(io);
+    server.streams_closed = true;
+    var it = server.stream_list.first;
+    while (it) |node| : (it = node.next) {
+        const sub: *Subscription = @alignCast(@fieldParentPtr("node", node));
+        sub.end(io, .shutdown);
+    }
+}
+
+/// Lists a stream that begins, for the stop; false once the stop has
+/// closed the streams.
+fn listStream(server: *Server, io: std.Io, sub: *Subscription) bool {
+    server.streams_mutex.lockUncancelable(io);
+    defer server.streams_mutex.unlock(io);
+    if (server.streams_closed) return false;
+    server.stream_list.append(&sub.node);
+    sub.listed = true;
+    return true;
+}
+
+fn unlistStream(server: *Server, io: std.Io, sub: *Subscription) void {
+    if (!sub.listed) return;
+    server.streams_mutex.lockUncancelable(io);
+    defer server.streams_mutex.unlock(io);
+    server.stream_list.remove(&sub.node);
+    sub.listed = false;
+}
+
+/// The rest of a request whose handler subscribed (design section 12): its
+/// stream, served from this task, which keeps the connection for it. The
+/// writer and the watcher of the stream run on tasks of their own; this one
+/// waits until the end is decided (the client left, a write failed,
+/// `close(key)`, an overflow, the stop), then ends the response: with its
+/// last chunk when the server closed the stream, cut otherwise. A request
+/// that did not end well after `subscribe` (its handler failed, its
+/// deadline passed, its client left) ends its stream at once. Then come
+/// the route's `.on_close`, once, with the subscription's context, the
+/// `onFinish` phases of the request, the values of its locals, and last
+/// the place among the streams. True when the stop canceled this task.
+fn serveStream(server: *Server, ctx: *Context, sub: *Subscription, reason: Reason, started: std.Io.Timestamp) bool {
+    const io = ctx.internal.io;
+    const exchange = ctx.request.internal.exchange;
+    const route = &server.routes[ctx.internal.route_index.?];
+    var failure: ?anyerror = switch (reason) {
+        .done => |result| if (result) |_| null else |err| err,
+        .deadline => error.RequestTimeout,
+        .client_gone, .shutdown => error.Canceled,
+    };
+    if (failure) |err| {
+        if (!errors.isCancellation(err))
+            log.warn("{s} failed with error.{t} after subscribe; the stream is cut (request {s})", .{ routeName(ctx), err, ctx.requestId() });
+        sub.end(io, if (reason == .client_gone) .client_gone else .failed);
+    }
+    if (!listStream(server, io, sub)) sub.end(io, .shutdown);
+    // A stream the server closed before it began still sends what was
+    // published to it before.
+    const begun = sub.endReason(io);
+    const canceled = if (begun == .open or Subscription.endsWhole(begun)) runStream(sub, io, exchange, route.heartbeat, &failure) else false;
+    // Publishers reach it no more, and the stop looks for it no more.
+    sub.manager.remove(io, sub);
+    unlistStream(server, io, sub);
+    const end = sub.endReason(io);
+    const res = &ctx.response.internal;
+    const whole = whole: {
+        // The writer has ended: what it wrote is known.
+        if (canceled or sub.broken or !Subscription.endsWhole(end)) break :whole false;
+        exchange.finish(io) catch |err| {
+            if (failure == null) failure = err;
+            break :whole false;
+        };
+        break :whole true;
+    };
+    res.state = .finished;
+    if (!whole) {
+        exchange.abort(io);
+        res.aborted = true;
+        if (failure == null) failure = if (end == .client_gone) error.Canceled else error.WriteFailed;
+    }
+    if (route.on_close) |call| {
+        var closing: sse.Context = .{
+            .request = &ctx.request,
+            .locals = &ctx.locals,
+            .internal = .{ .http = ctx, .operation = sub.operation, .phase = .closing },
+        };
+        call(route.controller, &closing);
+    }
+    sub.token.cancel();
+    finishPhases(server, ctx, .{
+        .status = res.status_sent orelse 0,
+        .duration = started.durationTo(std.Io.Clock.awake.now(io)),
+        .aborted = res.aborted,
+        .err = failure,
+    });
+    ctx.locals.internal.deinitValues();
+    ctx.internal.subscription = null;
+    sub.destroy();
+    releaseStream(server, io);
+    return canceled;
+}
+
+/// Runs the writer and the watcher of a stream until its end is decided:
+/// when the server closed it, until the writer has sent what was queued
+/// before. Then cancels both and waits for them. True when this task was
+/// canceled while it waited: the stop's grace is over.
+fn runStream(sub: *Subscription, io: std.Io, exchange: *Exchange, heartbeat: ?std.Io.Duration, failure: *?anyerror) bool {
+    var tasks: std.Io.Group = .init;
+    defer tasks.cancel(io);
+    tasks.concurrent(io, Subscription.writer, .{ sub, io, exchange, heartbeat }) catch return noStreamTask(sub, io, failure);
+    tasks.concurrent(io, Subscription.watcher, .{ sub, io, exchange }) catch return noStreamTask(sub, io, failure);
+    sub.ended.wait(io) catch return canceledStream(sub, io, failure);
+    if (Subscription.endsWhole(sub.endReason(io))) sub.writer_done.wait(io) catch return canceledStream(sub, io, failure);
+    return false;
+}
+
+fn canceledStream(sub: *Subscription, io: std.Io, failure: *?anyerror) bool {
+    failure.* = error.Canceled;
+    sub.end(io, .failed);
+    return true;
+}
+
+fn noStreamTask(sub: *Subscription, io: std.Io, failure: *?anyerror) bool {
+    log.warn("the runtime gave no task for an SSE stream; it is cut (request {s})", .{sub.request_id});
+    failure.* = error.ConcurrencyUnavailable;
+    sub.end(io, .failed);
+    return false;
 }
 
 /// The runtime gave no task for the request: 503.
@@ -367,6 +539,7 @@ fn runRequest(server: *Server, ctx: *Context, found: Found) anyerror!void {
         .found => |f| {
             const route = &server.routes[f.route];
             ctx.internal.route = route.info;
+            ctx.internal.route_index = f.route;
             ctx.internal.param_names = route.params;
             ctx.internal.params = f.params;
             ctx.internal.max_body_bytes = route.max_body_bytes orelse server.settings.max_body_bytes;
