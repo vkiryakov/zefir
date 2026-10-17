@@ -164,6 +164,7 @@ const Limits = struct {
     max_streams: u32 = 10_000,
     max_in_flight: u32 = 10_000,
     request_timeout: std.Io.Duration = .fromSeconds(30),
+    shutdown_grace: std.Io.Duration = .fromSeconds(10),
 };
 
 /// A server of `EventsV1Controller` with a manager; it stays where `start`
@@ -188,6 +189,7 @@ const Fixture = struct {
             .max_streams = limits.max_streams,
             .max_in_flight = limits.max_in_flight,
             .request_timeout = limits.request_timeout,
+            .shutdown_grace = limits.shutdown_grace,
         }) catch |err| {
             f.live.deinit(io);
             return err;
@@ -755,6 +757,37 @@ test "on_close runs exactly once: client left, overflow, close(key), server stop
     try testing.expectEqual(6, f.events.closes.load(.acquire));
     try testing.expectEqual(6, f.finisher.calls.load(.acquire));
     try testing.expectEqual(0, http_testing.openStreams(&f.server));
+}
+
+test "the stop cuts a stream whose last events a client that reads nothing holds past the grace" {
+    const io = testing.io;
+    var dog = try Watchdog.start("the stop cuts a stream held past the grace");
+    defer dog.stop();
+    var f: Fixture = .{};
+    try f.start(testing.allocator, .{}, .{ .shutdown_grace = .fromMilliseconds(200) });
+    defer f.stop();
+
+    // The writer sticks in the write of the event: the stream closes softly,
+    // sending what was published, which the client never takes.
+    const s = try f.backend.open(io, .{ .method = .GET, .target = "/v1/events/lobby?key=stuck", .stalled = true });
+    errdefer s.deinit(io);
+    try waitCount(&f.events.subscribed, 1);
+    try f.publish("stuck", .{ .data = "stuck" });
+    try io.sleep(.fromMilliseconds(20), .awake);
+    const start = std.Io.Clock.awake.now(io);
+    try f.server.shutdown(io);
+    // Within the grace and the second after it, the stream cut.
+    const elapsed = sinceMs(start);
+    try testing.expect(elapsed >= 150 and elapsed < 5000);
+    try expectEnd(s);
+    try testing.expect(s.aborted());
+    s.deinit(io);
+    // Its end ran whole: .on_close and onFinish once, and its places back.
+    try testing.expectEqual(1, f.events.closes.load(.acquire));
+    try testing.expectEqual(1, f.finisher.calls.load(.acquire));
+    try testing.expect(f.finisher.last.?.aborted);
+    try testing.expectEqual(0, http_testing.openStreams(&f.server));
+    try testing.expectEqual(0, http_testing.inFlight(&f.server));
 }
 
 /// The streams of rooms, whose `.on_close` tells the others of the room,

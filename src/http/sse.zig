@@ -20,8 +20,9 @@
 //! opens the stream: `run` before the handler, `onResponse` before the head
 //! of the stream, `onFinish` when the stream has ended. Streams count in
 //! the server's `.max_streams`, not in `.max_in_flight`, and the deadline
-//! of a request does not apply to them. A stop of the server closes them
-//! at once: their clients connect to another instance.
+//! of a request does not apply to them. A stop of the server closes them:
+//! each sends what was published to it before, within `.shutdown_grace`,
+//! then ends, and its client connects to another instance.
 const std = @import("std");
 const core = @import("core");
 const v = @import("validator");

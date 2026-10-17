@@ -560,9 +560,10 @@ pub fn run(server: *Server, io: std.Io) (StartError || WaitError)!void {
 
 /// Begins a graceful stop. From any task, also from a handler; never
 /// waits; a second call does nothing. The backend takes no new requests,
-/// the SSE streams close at once, the requests at work get
-/// `.shutdown_grace` to end with their responses, those that outlive it are
-/// canceled without one, and the server stops.
+/// the SSE streams are closed (each sends what was published to it before,
+/// then the end of its response), the requests at work and those streams
+/// get `.shutdown_grace` to end, those that outlive it are canceled without
+/// a response or cut, and the server stops.
 pub fn requestStop(server: *Server, io: std.Io) void {
     server.mutex.lockUncancelable(io);
     defer server.mutex.unlock(io);
