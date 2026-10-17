@@ -41,6 +41,7 @@ const routing = @import("router.zig");
 const Allow = routing.Allow;
 const h1 = @import("h1/head.zig");
 const response = @import("h1/response.zig");
+const json_out = @import("output/json_out.zig");
 const waiting = @import("wait.zig");
 
 const log = std.log.scoped(.http);
@@ -105,6 +106,7 @@ pub fn serve(server: *Server, io: std.Io, exchange: *Exchange) void {
             .max_body_bytes = server.settings.max_body_bytes,
             .max_query_params = server.settings.max_query_params,
             .unknown_fields = server.settings.unknown_fields,
+            .json = server.settings.json,
         },
     };
     if (!takeSlot(server)) return respond(&ctx, exchange, error.Overloaded);
@@ -144,7 +146,7 @@ pub fn serve(server: *Server, io: std.Io, exchange: *Exchange) void {
     switch (reason) {
         .done => |result| respond(&ctx, exchange, result),
         .deadline => respond(&ctx, exchange, error.RequestTimeout),
-        .client_gone, .shutdown => exchange.abort(io),
+        .client_gone, .shutdown => cut(&ctx, exchange),
     }
     // The backend sees the stop's cancelation at its next cancelation point.
     if (canceled) io.recancel();
@@ -242,8 +244,24 @@ fn runRequest(server: *Server, ctx: *Context, found: Found) anyerror!void {
 }
 
 /// The response to `result`: what the handler wrote, or the answer to its
-/// error; none for a request canceled.
+/// error; none for a request canceled. A response is written once: after
+/// its head has gone out, an error can only cut it (design section 8).
 fn respond(ctx: *Context, exchange: *Exchange, result: anyerror!void) void {
+    switch (ctx.response.internal.state) {
+        .uncommitted => {},
+        .committed => {
+            const err = if (result) |_| {
+                // Its head and body went out: the end of it.
+                exchange.finish(ctx.internal.io) catch return cut(ctx, exchange);
+                ctx.response.internal.state = .finished;
+                return;
+            } else |err| err;
+            if (!errors.isCancellation(err))
+                log.warn("{s} failed with error.{t} after its response was committed; the response is cut (request {s})", .{ routeName(ctx), err, ctx.requestId() });
+            return cut(ctx, exchange);
+        },
+        .finished => return,
+    }
     if (result) {
         const code = ctx.response.internal.code orelse 200;
         if (code < 200 or code > 599) {
@@ -251,7 +269,7 @@ fn respond(ctx: *Context, exchange: *Exchange, result: anyerror!void) void {
             setProblem(ctx, errors.DefaultErrors.problem(error.Unexpected));
         }
     } else |err| {
-        if (errors.isCancellation(err)) return exchange.abort(ctx.internal.io);
+        if (errors.isCancellation(err)) return cut(ctx, exchange);
         if (err == error.ReadFailed) if (exchange.bodyFailure()) |failure| return answerBodyFailure(ctx, exchange, failure);
         if (errors.defaultStatus(err) == 500)
             log.warn("{s} failed with error.{t}; the response is 500 (request {s})", .{ routeName(ctx), err, ctx.requestId() });
@@ -263,7 +281,7 @@ fn respond(ctx: *Context, exchange: *Exchange, result: anyerror!void) void {
 }
 
 /// OPTIONS without a route of its own: 204 with `Allow`.
-fn answerOptions(ctx: *Context, allow: Allow) Context.Response.HeaderError!void {
+fn answerOptions(ctx: *Context, allow: Allow) Context.Response.SetError!void {
     try ctx.response.setHeader("allow", allow.header());
     _ = ctx.response.status(204);
 }
@@ -294,7 +312,7 @@ fn setProblem(ctx: *Context, problem: errors.Problem) void {
     dropContentFields(res);
     res.code = problem.status;
     res.content_type = "application/problem+json";
-    res.body = std.json.Stringify.valueAlloc(res.arena, problem, .{ .emit_null_optional_fields = false }) catch internal: {
+    res.body = json_out.alloc(res.arena, problem, .{ .omit_null_fields = true }) catch internal: {
         // Out of memory: the problem of every 500, known at compile time.
         res.code = 500;
         break :internal internal_problem;
@@ -322,27 +340,35 @@ fn isContentField(name: []const u8) bool {
 
 /// Sends the response: its status (204 without a body, 200 with one,
 /// unless the handler set it), its fields with `Content-Type`, and its
-/// body; none for HEAD, 204 and 304. A write that fails aborts it.
+/// body; none for HEAD, 204 and 304. The head commits the response; a
+/// write that fails cuts it.
 fn send(ctx: *Context, exchange: *Exchange) void {
     const io = ctx.internal.io;
     const res = &ctx.response.internal;
     const code = res.code orelse if (res.body != null) @as(u16, 200) else 204;
     const fields = fieldsOf(res) catch {
         log.warn("{s}: out of memory for the fields of the response (request {s})", .{ routeName(ctx), ctx.requestId() });
-        exchange.abort(io);
-        return;
+        return cut(ctx, exchange);
     };
     const body = res.body orelse "";
     const has_body = code != 204 and code != 304;
     const kind: Exchange.BodyKind = if (has_body) .{ .length = body.len } else .none;
+    res.state = .committed;
     write(io, exchange, code, fields, kind, if (has_body and ctx.request.method != .HEAD) body else "") catch
-        exchange.abort(io);
+        return cut(ctx, exchange);
+    res.state = .finished;
 }
 
 fn write(io: std.Io, exchange: *Exchange, code: u16, fields: []const h1.Field, kind: Exchange.BodyKind, body: []const u8) Exchange.WriteError!void {
     try exchange.writeHead(io, code, fields, kind);
     if (body.len > 0) try exchange.writeBody(io, body);
     try exchange.finish(io);
+}
+
+/// Ends the response broken, or without one: the client sees it cut.
+fn cut(ctx: *Context, exchange: *Exchange) void {
+    ctx.response.internal.state = .finished;
+    exchange.abort(ctx.internal.io);
 }
 
 /// The fields of the response, `Content-Type` first when there is one.
@@ -410,7 +436,7 @@ const TodosV1Controller = struct {
     pub fn page(_: *TodosV1Controller, ctx: *Context) !void {
         try ctx.response.status(203).html("<p>todo</p>");
     }
-    pub fn fail(_: *TodosV1Controller, ctx: *Context) error{ TodoNotFound, InvalidHeaderValue, ReservedHeader, OutOfMemory }!void {
+    pub fn fail(_: *TodosV1Controller, ctx: *Context) (error{TodoNotFound} || Context.Response.SetError)!void {
         try ctx.response.setHeader("x-kept", "yes");
         try ctx.response.setHeader("content-disposition", "attachment; filename=\"todo.txt\"");
         try ctx.response.text("half a body");
@@ -581,6 +607,126 @@ test "an error is problem+json: the fields of the content go, the others stay" {
     defer canceled.deinit();
     try testing.expect(canceled.aborted);
     try testing.expectEqual(0, canceled.status);
+}
+
+/// An exchange without a client that counts what the server writes.
+const CountingExchange = struct {
+    exchange: Exchange,
+    heads: usize = 0,
+    bodies: usize = 0,
+    finishes: usize = 0,
+    aborts: usize = 0,
+
+    fn init() CountingExchange {
+        return .{ .exchange = .{
+            .ptr = undefined,
+            .vtable = &.{
+                .bodyLength = bodyLength,
+                .readBody = undefined,
+                .bodyFailure = undefined,
+                .watch = undefined,
+                .writeHead = writeHead,
+                .writeBody = writeBody,
+                .flush = undefined,
+                .finish = finish,
+                .abort = abort,
+            },
+            .method = .GET,
+            .target = "/",
+            .version = .http11,
+            .fields = &.{},
+            .client = null,
+            .arena = undefined,
+        } };
+    }
+
+    /// A context over the exchange, as the server makes one.
+    fn context(c: *CountingExchange, arena: std.mem.Allocator) Context {
+        c.exchange.ptr = c;
+        c.exchange.arena = arena;
+        return .{
+            .request = .{ .method = .GET, .path = "/", .internal = .{ .exchange = &c.exchange, .io = testing.io } },
+            .response = .{ .internal = .{ .arena = arena } },
+            .internal = .{
+                .io = testing.io,
+                .operation = core.Context.root,
+                .arena = arena,
+                .gpa = testing.allocator,
+                .request_id = @splat('0'),
+                .trace_id = @splat('0'),
+                .max_body_bytes = 0,
+            },
+        };
+    }
+
+    fn of(ptr: *anyopaque) *CountingExchange {
+        return @ptrCast(@alignCast(ptr));
+    }
+    fn bodyLength(_: *anyopaque) ?u64 {
+        return 0;
+    }
+    fn writeHead(ptr: *anyopaque, _: std.Io, _: u16, _: []const h1.Field, _: Exchange.BodyKind) Exchange.WriteError!void {
+        of(ptr).heads += 1;
+    }
+    fn writeBody(ptr: *anyopaque, _: std.Io, _: []const u8) Exchange.WriteError!void {
+        of(ptr).bodies += 1;
+    }
+    fn finish(ptr: *anyopaque, _: std.Io) Exchange.WriteError!void {
+        of(ptr).finishes += 1;
+    }
+    fn abort(ptr: *anyopaque, _: std.Io) void {
+        of(ptr).aborts += 1;
+    }
+
+    fn expect(c: *const CountingExchange, heads: usize, finishes: usize, aborts: usize) !void {
+        errdefer std.debug.print("heads {d}, finishes {d}, aborts {d}\n", .{ c.heads, c.finishes, c.aborts });
+        try testing.expectEqual(heads, c.heads);
+        try testing.expectEqual(finishes, c.finishes);
+        try testing.expectEqual(aborts, c.aborts);
+    }
+};
+
+test "a response is written once; after commit an error cuts it" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const level = testing.log_level;
+    testing.log_level = .err; // the error after commit is logged as a warning
+    defer testing.log_level = level;
+
+    // The handler's response goes out whole, and the response is finished:
+    // whatever comes after writes nothing.
+    var whole: CountingExchange = .init();
+    var ctx = whole.context(arena);
+    try ctx.response.text("done");
+    respond(&ctx, &whole.exchange, {});
+    try whole.expect(1, 1, 0);
+    try testing.expectEqual(1, whole.bodies);
+    try testing.expectEqual(.finished, ctx.response.state());
+    respond(&ctx, &whole.exchange, error.TodoNotFound);
+    respond(&ctx, &whole.exchange, {});
+    try whole.expect(1, 1, 0);
+    try testing.expectError(error.ResponseCommitted, ctx.response.setHeader("x-late", "1"));
+
+    // Committed and not finished, as a stream is: an error cuts it, the
+    // end of the handler ends it; neither writes a second head.
+    var failed: CountingExchange = .init();
+    var failed_ctx = failed.context(arena);
+    failed_ctx.response.internal.state = .committed;
+    respond(&failed_ctx, &failed.exchange, error.TodoNotFound);
+    try failed.expect(0, 0, 1);
+    try testing.expectEqual(.finished, failed_ctx.response.state());
+    var ended: CountingExchange = .init();
+    var ended_ctx = ended.context(arena);
+    ended_ctx.response.internal.state = .committed;
+    respond(&ended_ctx, &ended.exchange, {});
+    try ended.expect(0, 1, 0);
+    // A request canceled before its response: cut, once.
+    var canceled: CountingExchange = .init();
+    var canceled_ctx = canceled.context(arena);
+    respond(&canceled_ctx, &canceled.exchange, error.Canceled);
+    respond(&canceled_ctx, &canceled.exchange, error.TodoNotFound);
+    try canceled.expect(0, 0, 1);
 }
 
 test "the server logs through std.log.scoped(.http) and needs no logger" {

@@ -53,6 +53,7 @@ pub const compile_errors = [_]Fixture{
     .{ .file = dir ++ "query_nested_struct.zig", .expect = "zefir.http: query_nested_struct.Query.filter: a struct field comes only from JSON; query, form, path, headers and cookies hold strings" },
     .{ .file = dir ++ "dto_not_struct.zig", .expect = "zefir.http: ctx.query takes a struct, got u32" },
     .{ .file = dir ++ "dto_bad_rule.zig", .expect = "validator: dto_bad_rule.IdPath.field_rules.id: max_length expects a string, field is u64" },
+    .{ .file = dir ++ "json_unsupported_field.zig", .expect = "zefir.http: json_unsupported_field.Item.codes: [3]u8 does not come from JSON; ctx.json reads integers, floats, bool, enums, []const u8 and structs, alone, as ?T or as []const T" },
 };
 
 const dir = "src/http/tests/compile_errors/";

@@ -4,7 +4,9 @@ const std = @import("std");
 
 /// A JSON response of a handler, 200 unless it says otherwise:
 /// `return .{ .value = .from(todo) };`, or with a status of its own,
-/// `return .{ .value = .from(todo), .status = 201 };`.
+/// `return .{ .value = .from(todo), .status = 201 };`. The value goes out
+/// as `ctx.response.json` writes it: through the transforms of its
+/// `field_rules`, with the outside names of its fields.
 pub fn Json(comptime T: type) type {
     return struct {
         value: T,

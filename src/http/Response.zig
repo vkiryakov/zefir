@@ -7,8 +7,16 @@
 //! try ctx.response.setHeader("cache-control", "no-store");
 //! try ctx.response.status(404).html(not_found_page);
 //! ```
+//!
+//! A response goes through three states, in order: `uncommitted` (its
+//! status, fields and body can change, and an error replaces it),
+//! `committed` (its head has gone to the client: a change is
+//! `error.ResponseCommitted`) and `finished`, once.
 const std = @import("std");
+const v = @import("validator");
 const h1 = @import("h1/head.zig");
+const Exchange = @import("Backend.zig").Exchange;
+const json_out = @import("output/json_out.zig");
 
 const Response = @This();
 
@@ -24,6 +32,7 @@ pub const Internal = struct {
     headers: std.ArrayList(h1.Field) = .empty,
     content_type: ?[]const u8 = null,
     body: ?[]const u8 = null,
+    state: State = .uncommitted,
 
     /// Whether the handler wrote a response: a status or a body. A `!void`
     /// handler that wrote none answers 204.
@@ -32,67 +41,113 @@ pub const Internal = struct {
     }
 };
 
+/// Where a response is: `uncommitted` until its head goes to the client,
+/// then `committed`, then `finished`, once, whether it ended whole or cut.
+pub const State = enum { uncommitted, committed, finished };
+
 /// `InvalidHeaderValue`: a name that is not a token (RFC 9110), or a value
 /// with CR, LF, NUL or another control character but HTAB.
 /// `ReservedHeader`: a field the backend writes itself, from the body and
 /// the connection: `Content-Length`, `Transfer-Encoding`, `Connection`,
 /// `Keep-Alive`, `TE`, `Trailer`, `Upgrade` and `Date`.
-pub const HeaderError = error{ InvalidHeaderValue, ReservedHeader, OutOfMemory };
+/// `ResponseCommitted`: the head of the response has gone to the client.
+pub const SetError = error{ InvalidHeaderValue, ReservedHeader, ResponseCommitted, OutOfMemory };
+
+/// The errors of `json`: those of setting the body, of the transforms of
+/// `T` (`v.TransformError(T)`), and of writing it.
+fn JsonError(comptime T: type) type {
+    return SetError || Exchange.WriteError || v.TransformError(T);
+}
 
 /// The fields of framing, of the connection and `Date`: the backend writes
 /// them, so that what the head says always matches the body it sends.
 const reserved_names = [_][]const u8{ "content-length", "transfer-encoding", "connection", "keep-alive", "te", "trailer", "upgrade", "date" };
 
 /// Sets the status; chainable: `try ctx.response.status(404).html(page)`.
-/// Without it a body goes out as 200, and no body at all as 204.
+/// Without it a body goes out as 200, and no body at all as 204. Once the
+/// response is committed, its status has gone out and this changes nothing.
 pub fn status(r: *Response, code: u16) *Response {
-    r.internal.code = code;
+    if (r.internal.state == .uncommitted) r.internal.code = code;
     return r;
+}
+
+/// Where the response is: `uncommitted`, `committed` or `finished`.
+pub fn state(r: *const Response) State {
+    return r.internal.state;
 }
 
 /// Sets the header field `name` to `value`, in place of a field of that
 /// name set before (names are case-insensitive). Both are copied.
-pub fn setHeader(r: *Response, name: []const u8, value: []const u8) HeaderError!void {
-    if (!validName(name) or !validValue(value)) return error.InvalidHeaderValue;
-    for (reserved_names) |reserved| {
-        if (std.ascii.eqlIgnoreCase(name, reserved)) return error.ReservedHeader;
-    }
-    const arena = r.internal.arena;
-    const copy = try arena.dupe(u8, value);
-    if (std.ascii.eqlIgnoreCase(name, "content-type")) {
-        r.internal.content_type = copy;
-        return;
-    }
-    for (r.internal.headers.items) |*f| {
-        if (std.ascii.eqlIgnoreCase(f.name, name)) {
-            f.value = copy;
-            return;
-        }
-    }
-    try r.internal.headers.append(arena, .{ .name = try arena.dupe(u8, name), .value = copy });
+pub fn setHeader(r: *Response, name: []const u8, value: []const u8) SetError!void {
+    try r.checkField(name, value);
+    return r.putField(name, try r.internal.arena.dupe(u8, value));
+}
+
+/// Sets the header field `name` to `fmt` formatted with `args`, as
+/// `setHeader` does:
+/// `try ctx.response.setHeaderFmt("server-timing", "app;dur={d}", .{ms});`
+pub fn setHeaderFmt(r: *Response, name: []const u8, comptime fmt: []const u8, args: anytype) SetError!void {
+    if (r.internal.state != .uncommitted) return error.ResponseCommitted;
+    const value = try std.fmt.allocPrint(r.internal.arena, fmt, args);
+    try r.checkField(name, value);
+    return r.putField(name, value);
 }
 
 /// The body `bytes` as `text/plain; charset=utf-8`; copied.
-pub fn text(r: *Response, bytes: []const u8) error{OutOfMemory}!void {
+pub fn text(r: *Response, bytes: []const u8) error{ ResponseCommitted, OutOfMemory }!void {
     return r.setBody("text/plain; charset=utf-8", bytes);
 }
 
 /// The body `bytes` as `text/html; charset=utf-8`; copied.
-pub fn html(r: *Response, bytes: []const u8) error{OutOfMemory}!void {
+pub fn html(r: *Response, bytes: []const u8) error{ ResponseCommitted, OutOfMemory }!void {
     return r.setBody("text/html; charset=utf-8", bytes);
 }
 
-/// `value` as the JSON body (`application/json`), fields under their Zig
-/// names. A handler that returns `http.Json(T)` answers through it.
-pub fn json(r: *Response, value: anytype) error{OutOfMemory}!void {
-    const bytes = try std.json.Stringify.valueAlloc(r.internal.arena, value, .{});
+/// `value` as the JSON body (`application/json`): the transforms of its
+/// `field_rules` run first, on a copy (`v.transform`), then it is written
+/// with the outside names of its fields (`v.rename`), the Zig names where
+/// it has none. A handler that returns `http.Json(T)` answers through it.
+/// An error of a transform of its own comes back as it is, for the error
+/// handler.
+///
+/// ```zig
+/// try ctx.response.status(201).json(dto.TodoResponse.from(todo));
+/// ```
+pub fn json(r: *Response, value: anytype) JsonError(@TypeOf(value))!void {
+    if (r.internal.state != .uncommitted) return error.ResponseCommitted;
+    r.internal.body = try json_out.encode(r.internal.arena, value, .{});
     r.internal.content_type = "application/json";
-    r.internal.body = bytes;
 }
 
-fn setBody(r: *Response, content_type: []const u8, bytes: []const u8) error{OutOfMemory}!void {
+fn setBody(r: *Response, content_type: []const u8, bytes: []const u8) error{ ResponseCommitted, OutOfMemory }!void {
+    if (r.internal.state != .uncommitted) return error.ResponseCommitted;
     r.internal.body = try r.internal.arena.dupe(u8, bytes);
     r.internal.content_type = content_type;
+}
+
+/// Whether `name` and `value` may be set now.
+fn checkField(r: *const Response, name: []const u8, value: []const u8) SetError!void {
+    if (r.internal.state != .uncommitted) return error.ResponseCommitted;
+    if (!validName(name) or !validValue(value)) return error.InvalidHeaderValue;
+    for (reserved_names) |reserved| {
+        if (std.ascii.eqlIgnoreCase(name, reserved)) return error.ReservedHeader;
+    }
+}
+
+/// Sets the field `name` to `value`, which lives in the arena already.
+fn putField(r: *Response, name: []const u8, value: []const u8) error{OutOfMemory}!void {
+    const arena = r.internal.arena;
+    if (std.ascii.eqlIgnoreCase(name, "content-type")) {
+        r.internal.content_type = value;
+        return;
+    }
+    for (r.internal.headers.items) |*f| {
+        if (std.ascii.eqlIgnoreCase(f.name, name)) {
+            f.value = value;
+            return;
+        }
+    }
+    try r.internal.headers.append(arena, .{ .name = try arena.dupe(u8, name), .value = value });
 }
 
 fn validName(name: []const u8) bool {
@@ -186,4 +241,47 @@ test "text, html and json set the body and its type; status is chainable" {
     try r.json(.{ .id = 7, .title = "Buy milk" });
     try testing.expectEqualStrings("application/json", r.internal.content_type.?);
     try testing.expectEqualStrings("{\"id\":7,\"title\":\"Buy milk\"}", r.internal.body.?);
+}
+
+test "setHeader after commit is ResponseCommitted; finish happens once" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    var r: Response = .{ .internal = .{ .arena = arena_state.allocator() } };
+    try testing.expectEqual(.uncommitted, r.state());
+    try r.status(201).setHeader("x-a", "1");
+
+    // The server commits the response when its head goes out: from then
+    // on nothing of it changes.
+    r.internal.state = .committed;
+    try testing.expectEqual(.committed, r.state());
+    try testing.expectError(error.ResponseCommitted, r.setHeader("x-a", "2"));
+    try testing.expectError(error.ResponseCommitted, r.setHeader("x-b", "2"));
+    try testing.expectError(error.ResponseCommitted, r.setHeaderFmt("x-b", "{d}", .{2}));
+    try testing.expectError(error.ResponseCommitted, r.text("late"));
+    try testing.expectError(error.ResponseCommitted, r.html("late"));
+    try testing.expectError(error.ResponseCommitted, r.json(.{ .late = true }));
+    try testing.expectError(error.ResponseCommitted, r.status(500).text("late"));
+    try testing.expectEqual(201, r.internal.code.?);
+    try testing.expectEqual(1, r.internal.headers.items.len);
+    try testing.expectEqualStrings("1", r.internal.headers.items[0].value);
+    try testing.expectEqual(null, r.internal.body);
+    // The server's own path, through http.testing, is in flow.zig: a
+    // response is written once, and an error after commit cuts it.
+}
+
+test "setHeaderFmt formats the value" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    var r: Response = .{ .internal = .{ .arena = arena_state.allocator() } };
+    try r.setHeaderFmt("Server-Timing", "app;dur={d}", .{12});
+    try r.setHeaderFmt("server-timing", "app;dur={d}, db;dur={d}", .{ 12, 3 });
+    try testing.expectEqual(1, r.internal.headers.items.len);
+    try testing.expectEqualStrings("Server-Timing", r.internal.headers.items[0].name);
+    try testing.expectEqualStrings("app;dur=12, db;dur=3", r.internal.headers.items[0].value);
+    try r.setHeaderFmt("content-type", "text/{s}; charset=utf-8", .{"csv"});
+    try testing.expectEqualStrings("text/csv; charset=utf-8", r.internal.content_type.?);
+    // What it formats is checked as setHeader checks a value.
+    try testing.expectError(error.InvalidHeaderValue, r.setHeaderFmt("x-name", "{s}", .{"a\r\nset-cookie: evil=1"}));
+    try testing.expectError(error.ReservedHeader, r.setHeaderFmt("content-length", "{d}", .{5}));
+    try testing.expectEqual(1, r.internal.headers.items.len);
 }

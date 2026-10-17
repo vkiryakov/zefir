@@ -20,6 +20,10 @@ pub const messages = struct {
     pub const number = "must be a number";
     pub const boolean = "must be true, false, 1 or 0";
     pub const once = "must be given once";
+    pub const true_or_false = "must be true or false";
+    pub const string = "must be a string";
+    pub const array = "must be an array";
+    pub const object = "must be an object";
 
     /// "must be one of low, normal, high": the variants of `E`.
     pub fn oneOf(comptime E: type) []const u8 {
@@ -49,6 +53,14 @@ pub const Collector = struct {
     /// long as the request.
     pub fn add(c: *Collector, code: []const u8, message: []const u8, field: ?[]const u8) std.mem.Allocator.Error!void {
         if (c.full()) return;
+        try c.list.append(c.arena, .{ .code = code, .message = message, .field = field });
+    }
+
+    /// Adds a violation at a copy of `path`, made only when the violation is
+    /// kept; null for the root value.
+    pub fn addCopy(c: *Collector, code: []const u8, message: []const u8, path: ?[]const u8) std.mem.Allocator.Error!void {
+        if (c.full()) return;
+        const field = if (path) |p| try c.arena.dupe(u8, p) else null;
         try c.list.append(c.arena, .{ .code = code, .message = message, .field = field });
     }
 

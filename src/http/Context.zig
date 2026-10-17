@@ -20,6 +20,7 @@ const Server = @import("Server.zig");
 const strings = @import("input/strings.zig");
 const urlencoded = @import("input/urlencoded.zig");
 const cookie_input = @import("input/cookies.zig");
+const json_in = @import("input/json_in.zig");
 const collect = @import("input/violations.zig");
 
 const Context = @This();
@@ -55,9 +56,10 @@ pub const Internal = struct {
     /// The limit of `body`: the route's `.max_body_bytes`, else the
     /// server's.
     max_body_bytes: usize,
-    /// The server's `.max_query_params` and `.unknown_fields`.
+    /// The server's `.max_query_params`, `.unknown_fields` and `.json`.
     max_query_params: u32 = 100,
     unknown_fields: Server.UnknownFieldsOptions = .{},
+    json: Server.JsonOptions = .{},
     /// The violations of the input call that last failed with them.
     violations: []const Violation = &.{},
     /// What `body` returned, for the next calls.
@@ -73,12 +75,14 @@ pub const Internal = struct {
 pub const BodyError = error{ PayloadTooLarge, UnsupportedMediaType, BodyConsumed, ReadFailed } ||
     std.Io.Cancelable || std.mem.Allocator.Error;
 
-/// The errors of every input call (`path`, `query`, `form`, `headers`,
-/// `cookies`). `InvalidRequest` (400): bad percent-encoding, a string that
-/// is not valid UTF-8, more query parameters than `.max_query_params`.
-/// `ValidationFailed` (422): the input does not fit the DTO, or the DTO's
-/// rules refuse it; `ctx.violations()` names the fields. A call's error set
-/// adds the errors of the DTO's transforms, `v.TransformError(T)`.
+/// The errors of every input call (`path`, `query`, `json`, `form`,
+/// `headers`, `cookies`). `InvalidRequest` (400): bad percent-encoding, a
+/// string that is not valid UTF-8, more query parameters than
+/// `.max_query_params`; a body that is not JSON, a key given twice in an
+/// object, JSON nested deeper than `.json.max_depth`. `ValidationFailed`
+/// (422): the input does not fit the DTO, or the DTO's rules refuse it;
+/// `ctx.violations()` names the fields. A call's error set adds the errors
+/// of the DTO's transforms, `v.TransformError(T)`.
 pub const ExtractError = error{ InvalidRequest, ValidationFailed } || std.mem.Allocator.Error;
 
 /// The error set of an input call for a `T` from `source`. Checks `T` at
@@ -86,6 +90,12 @@ pub const ExtractError = error{ InvalidRequest, ValidationFailed } || std.mem.Al
 fn InputError(comptime T: type, comptime source: strings.Source) type {
     comptime strings.check(T, source);
     return ExtractError || v.TransformError(T);
+}
+
+/// The error set of `json` for a `T`, checked at compile time first.
+fn JsonError(comptime T: type) type {
+    comptime json_in.check(T);
+    return ExtractError || BodyError || v.TransformError(T);
 }
 
 /// The `std.Io` of the request, for every wait and every I/O: a database,
@@ -234,6 +244,38 @@ pub fn query(ctx: *Context, comptime T: type) InputError(T, .query)!T {
     return ctx.extract(T, .query, pairs, strings.unknownPolicy(T, ctx.internal.unknown_fields.query));
 }
 
+/// The JSON body as a `T`, by outside names: the key `userName` fills the
+/// field renamed `v.rename("userName")`, a nested object a struct field, an
+/// array a `[]const T`. Unknown keys are refused (`http.unknown_field`)
+/// unless the server's `.unknown_fields.body` or the struct's own
+/// `pub const unknown_fields = .ignore;` says otherwise.
+///
+/// The body is read with `ctx.body()`, so `ctx.json` again parses the same
+/// bytes. It needs `Content-Type: application/json` or a `+json` type such
+/// as `application/merge-patch+json`, else `error.UnsupportedMediaType`
+/// (415) before the body is read. JSON that is broken, a key given twice in
+/// one object and nesting deeper than `.json.max_depth` are
+/// `error.InvalidRequest` (400). Then come the steps of every input call:
+/// what does not fit is `ValidationFailed` with every violation at once, in
+/// the order of the body (`http.invalid_type`, `http.missing_field`,
+/// `http.unknown_field`, at paths such as `items[2].displayName`), then the
+/// transforms, then the rules.
+///
+/// ```zig
+/// const body = try ctx.json(dto.CreateTodoRequest);
+/// ```
+pub fn json(ctx: *Context, comptime T: type) JsonError(T)!T {
+    if (!isJson(ctx.request.header("content-type"))) return error.UnsupportedMediaType;
+    const bytes = try ctx.body();
+    const arena = ctx.internal.arena;
+    var sink: collect.Collector = .init(arena);
+    const value = (try json_in.parse(T, arena, bytes, .{ .max_depth = ctx.internal.json.max_depth, .unknown = ctx.internal.unknown_fields.body }, &sink)) orelse {
+        ctx.internal.violations = sink.items();
+        return error.ValidationFailed;
+    };
+    return ctx.refine(T, value, .outside);
+}
+
 /// A form body, `application/x-www-form-urlencoded`, as a `T`: read with
 /// `ctx.body()` and taken apart as the query is. Unknown fields are
 /// refused (`http.unknown_field`) unless the server's `.unknown_fields.body`
@@ -280,10 +322,22 @@ pub fn violations(ctx: *const Context) []const Violation {
 fn extract(ctx: *Context, comptime T: type, comptime source: strings.Source, pairs: []const strings.Pair, unknown: dto.UnknownFields) InputError(T, source)!T {
     const arena = ctx.internal.arena;
     var sink: collect.Collector = .init(arena);
-    var value = (try strings.map(T, source, arena, pairs, unknown, &sink)) orelse {
+    const value = (try strings.map(T, source, arena, pairs, unknown, &sink)) orelse {
         ctx.internal.violations = sink.items();
         return error.ValidationFailed;
     };
+    return ctx.refine(T, value, if (source == .headers) .headers else .outside);
+}
+
+/// How the violations of the rules name fields: by outside names, or, in a
+/// DTO of headers, by the headers' names.
+const Names = enum { outside, headers };
+
+/// The steps of every input call after the mapping: the transforms of
+/// `T`, then its rules; their violations go to `ctx.violations()`.
+fn refine(ctx: *Context, comptime T: type, mapped: T, comptime names: Names) (ExtractError || v.TransformError(T))!T {
+    const arena = ctx.internal.arena;
+    var value = mapped;
     try v.transform(arena, &value);
     // The rules once without allocating; the report only when one fails.
     var path_buf: [256]u8 = undefined;
@@ -295,10 +349,30 @@ fn extract(ctx: *Context, comptime T: type, comptime source: strings.Source, pai
         slot.* = item;
         const field = item.field orelse continue;
         const owned = try arena.dupe(u8, field);
-        slot.field = if (source == .headers) try strings.headerPath(T, arena, owned) else owned;
+        slot.field = if (names == .headers) try strings.headerPath(T, arena, owned) else owned;
     }
     ctx.internal.violations = copied;
     return error.ValidationFailed;
+}
+
+/// Whether `content_type` is `application/json` or a `+json` type, such as
+/// `application/problem+json`, its parameters aside.
+fn isJson(content_type: ?[]const u8) bool {
+    const value = content_type orelse return false;
+    const mime = std.mem.trim(u8, value[0 .. std.mem.findScalar(u8, value, ';') orelse value.len], " \t");
+    if (std.ascii.eqlIgnoreCase(mime, "application/json")) return true;
+    const slash = std.mem.findScalar(u8, mime, '/') orelse return false;
+    const subtype = mime[slash + 1 ..];
+    if (!isToken(mime[0..slash]) or !isToken(subtype)) return false;
+    return subtype.len > "+json".len and std.ascii.endsWithIgnoreCase(subtype, "+json");
+}
+
+fn isToken(text: []const u8) bool {
+    if (text.len == 0) return false;
+    for (text) |c| {
+        if (!h1.isToken(c)) return false;
+    }
+    return true;
 }
 
 /// Whether `content_type` is `application/x-www-form-urlencoded`, its
@@ -1077,4 +1151,170 @@ test "the checkAll report is freed" {
     var fine = try get(&b, "/search?q=milk", &.{});
     defer fine.deinit();
     try testing.expectEqual(before, counted.allocations);
+}
+
+const CreateTodo = struct {
+    title: []const u8,
+    user_name: []const u8,
+    tags: []const []const u8 = &.{},
+
+    pub const field_rules = .{
+        .title = .{ v.trim, v.notBlank, v.maxLength(200) },
+        .user_name = .{ v.rename("userName"), v.trim },
+    };
+};
+
+/// The response: renamed, and transformed on the way out.
+const TodoView = struct {
+    title: []const u8,
+    user_name: []const u8,
+
+    pub const field_rules = .{ .user_name = .{ v.rename("userName"), v.toUpper } };
+};
+
+/// A response whose transform of its own fails.
+const Tagged = struct {
+    tags: []const []const u8,
+    pub const field_rules = .{ .tags = v.transformWith(refuseNoTags) };
+};
+
+fn refuseNoTags(_: std.mem.Allocator, tags: []const []const u8) error{NoTags}![]const []const u8 {
+    if (tags.len == 0) return error.NoTags;
+    return tags;
+}
+
+const JsonController = struct {
+    pub const http_routes = routes.routes(.{ .methods = .{
+        .create = routes.post("/todos", .{}),
+        .twice = routes.post("/twice", .{}),
+        .untagged = routes.get("/untagged", .{}),
+    } });
+
+    pub fn create(_: *JsonController, ctx: *Context) !dto.Json(TodoView) {
+        const todo = try ctx.json(CreateTodo);
+        return .{ .value = .{ .title = todo.title, .user_name = todo.user_name }, .status = 201 };
+    }
+    /// Two calls: the body read once, its bytes parsed twice.
+    pub fn twice(_: *JsonController, ctx: *Context) !void {
+        const first = try ctx.json(CreateTodo);
+        const second = try ctx.json(CreateTodo);
+        try ctx.response.text(try std.fmt.allocPrint(ctx.allocator(), "{s}|{s}", .{ first.title, second.title }));
+    }
+    pub fn untagged(_: *JsonController, _: *Context) !dto.Json(Tagged) {
+        return .{ .value = .{ .tags = &.{} } };
+    }
+};
+
+/// Starts `server` in place: once started, the backend points at it.
+fn startJson(server: *Server, b: *TestingBackend, controller: *JsonController, max_depth: u16) !void {
+    server.* = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{controller}, .json = .{ .max_depth = max_depth } });
+    errdefer server.deinit(testing.io);
+    try server.start(testing.io);
+}
+
+test "json: needs application/json or +json, else 415" {
+    var todos: JsonController = .{};
+    var b: TestingBackend = .init(testing.allocator);
+    defer b.deinit();
+    var server: Server = undefined;
+    try startJson(&server, &b, &todos, 64);
+    defer server.deinit(testing.io);
+    const payload = "{\"title\":\"Buy milk\",\"userName\":\"ann\"}";
+    for ([_][]const u8{ "application/json", "Application/JSON; charset=utf-8", "application/merge-patch+json", "application/vnd.api+json ; q=1" }) |content_type| {
+        var res = try post(&b, "/todos", content_type, payload);
+        defer res.deinit();
+        testing.expectEqual(201, res.status) catch |err| {
+            std.debug.print("{s}: {s}\n", .{ content_type, res.body });
+            return err;
+        };
+    }
+    for ([_]?[]const u8{ "text/plain", "application/x-www-form-urlencoded", "text/json", "application/jsonx", "application/+json", "/x+json", "application/x y+json", null }) |content_type| {
+        var res = try post(&b, "/todos", content_type, payload);
+        defer res.deinit();
+        testing.expectEqual(415, res.status) catch |err| {
+            std.debug.print("{?s}\n", .{content_type});
+            return err;
+        };
+        try testing.expectEqualStrings("unsupported_media_type", (try problemOf(&res)).code);
+    }
+}
+
+test "json: transforms then rules" {
+    var todos: JsonController = .{};
+    var b: TestingBackend = .init(testing.allocator);
+    defer b.deinit();
+    var server: Server = undefined;
+    try startJson(&server, &b, &todos, 64);
+    defer server.deinit(testing.io);
+
+    var ok = try post(&b, "/todos", "application/json", "{\"title\":\"  Buy milk  \",\"userName\":\" ann \"}");
+    defer ok.deinit();
+    try testing.expectEqual(201, ok.status);
+    try testing.expectEqualStrings("application/json", ok.header("content-type").?);
+    try testing.expectEqualStrings("{\"title\":\"Buy milk\",\"userName\":\"ANN\"}", ok.body);
+    // notBlank sees the trimmed title; maxLength too.
+    var blank = try post(&b, "/todos", "application/json", "{\"title\":\"   \",\"userName\":\"ann\"}");
+    defer blank.deinit();
+    try expectViolations(&blank, &.{.{ "validation.not_blank", "title" }});
+    const long = try std.fmt.allocPrint(testing.allocator, "{{\"title\":\" {s} \",\"userName\":\"ann\"}}", .{&@as([201]u8, @splat('a'))});
+    defer testing.allocator.free(long);
+    var too_long = try post(&b, "/todos", "application/json", long);
+    defer too_long.deinit();
+    try expectViolations(&too_long, &.{.{ "validation.max_length", "title" }});
+    // A second ctx.json parses the same bytes again.
+    var twice = try post(&b, "/twice", "application/json", "{\"title\":\" a \",\"userName\":\"b\"}");
+    defer twice.deinit();
+    try testing.expectEqualStrings("a|a", twice.body);
+}
+
+test "json: outside names in and out" {
+    var todos: JsonController = .{};
+    var b: TestingBackend = .init(testing.allocator);
+    defer b.deinit();
+    var server: Server = undefined;
+    try startJson(&server, &b, &todos, 64);
+    defer server.deinit(testing.io);
+
+    var zig_name = try post(&b, "/todos", "application/json", "{\"title\":\"x\",\"user_name\":\"Ann\"}");
+    defer zig_name.deinit();
+    try expectViolations(&zig_name, &.{ .{ "http.unknown_field", "user_name" }, .{ "http.missing_field", "userName" } });
+    var all = try post(&b, "/todos", "application/json", "{\"titel\":1,\"userName\":5,\"tags\":[\"a\",2]}");
+    defer all.deinit();
+    try expectViolations(&all, &.{
+        .{ "http.unknown_field", "titel" },
+        .{ "http.invalid_type", "userName" },
+        .{ "http.invalid_type", "tags[1]" },
+        .{ "http.missing_field", "title" },
+    });
+    try testing.expectEqualStrings("must be a string", (try problemOf(&all)).errors[1].message);
+    // A response's transform of its own fails as the handler would.
+    const level = testing.log_level;
+    testing.log_level = .err; // the 500 is logged as a warning
+    defer testing.log_level = level;
+    var untagged = try get(&b, "/untagged", &.{});
+    defer untagged.deinit();
+    try testing.expectEqual(500, untagged.status);
+    try testing.expectEqualStrings("internal", (try problemOf(&untagged)).code);
+}
+
+test "json: broken JSON, a repeated key and nesting past .json.max_depth are 400" {
+    var todos: JsonController = .{};
+    var b: TestingBackend = .init(testing.allocator);
+    defer b.deinit();
+    var server: Server = undefined;
+    try startJson(&server, &b, &todos, 2);
+    defer server.deinit(testing.io);
+    for ([_][]const u8{ "{\"title\":", "", "{\"title\":\"a\",\"title\":\"b\",\"userName\":\"c\"}", "{\"title\":\"a\",\"userName\":\"c\",\"tags\":[[]]}", "{\"title\":\"\xff\",\"userName\":\"c\"}" }) |payload| {
+        var res = try post(&b, "/todos", "application/json", payload);
+        defer res.deinit();
+        testing.expectEqual(400, res.status) catch |err| {
+            std.debug.print("{s}\n", .{payload});
+            return err;
+        };
+        try testing.expectEqualStrings("invalid_request", (try problemOf(&res)).code);
+    }
+    // Two levels pass.
+    var two = try post(&b, "/todos", "application/json", "{\"title\":\"a\",\"userName\":\"c\",\"tags\":[\"x\"]}");
+    defer two.deinit();
+    try testing.expectEqual(201, two.status);
 }

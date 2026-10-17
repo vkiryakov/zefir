@@ -192,7 +192,7 @@ fn isScalar(comptime X: type) bool {
 }
 
 /// The item of `[]const Item`, else null.
-fn listItem(comptime X: type) ?type {
+pub fn listItem(comptime X: type) ?type {
     const info = @typeInfo(X);
     if (info != .pointer or info.pointer.size != .slice) return null;
     const Item = info.pointer.child;

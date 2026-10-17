@@ -33,9 +33,10 @@
 //! (connections, heads, request bodies, responses, keep-alive and the
 //! watcher), `ctx.body()`, the input from strings (`ctx.path`,
 //! `ctx.query`, `ctx.form`, `ctx.headers`, `ctx.cookies`: mapped by
-//! outside names, transformed and checked by the validator) and the client
-//! behind trusted proxies; the rest of the API comes with the next
-//! commits.
+//! outside names, transformed and checked by the validator), JSON in and
+//! out by the same names (`ctx.json`, `http.Json(T)`,
+//! `ctx.response.json`), the states of a response and the client behind
+//! trusted proxies; the rest of the API comes with the next commits.
 
 const std = @import("std");
 const route_decls = @import("routes.zig");
@@ -52,6 +53,9 @@ pub const testing = @import("testing.zig");
 
 pub const Json = dto.Json;
 pub const UnknownFields = dto.UnknownFields;
+/// Where a response is (design section 8): `uncommitted`, `committed`
+/// once its head has gone to the client, then `finished`.
+pub const ResponseState = Context.Response.State;
 /// A violation of the input: a field of the wrong type, missing or unknown
 /// (`http.invalid_type`, `http.missing_field`, `http.unknown_field`), or a
 /// rule of the validator; the field under its outside name.
@@ -77,6 +81,7 @@ pub const options = route_decls.options;
 
 test "zefir-http is wired into the build" {
     try std.testing.expect(true);
+    try std.testing.expect(ResponseState == Context.Response.State);
 }
 
 test {
@@ -99,6 +104,8 @@ test {
     _ = @import("input/urlencoded.zig");
     _ = @import("input/cookies.zig");
     _ = @import("input/violations.zig");
+    _ = @import("input/json_in.zig");
+    _ = @import("output/json_out.zig");
     _ = @import("Response.zig");
     _ = @import("flow.zig");
     _ = @import("wait.zig");
