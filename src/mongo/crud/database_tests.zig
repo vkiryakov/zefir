@@ -1,7 +1,7 @@
 //! Tests of `Collection.drop` and of the operations of `mongo.Database` on
-//! `mongo.testing.FakeDriver`: `listCollections`, `drop`, `runCommand` and
-//! `runCursorCommand`, their exact commands in the script's journal and
-//! what their replies give.
+//! the client against `mongo.testing.FakeServer`: `listCollections`,
+//! `drop`, `runCommand` and `runCursorCommand`, their exact commands in
+//! the script's journal and what their replies give.
 
 const std = @import("std");
 const testing = std.testing;
@@ -9,27 +9,27 @@ const core = @import("core");
 const mongo = @import("../root.zig");
 const bson = mongo.bson;
 const Script = mongo.testing.Script;
-const FakeDriver = mongo.testing.FakeDriver;
+const Served = @import("../tests/Served.zig");
 
-/// A script whose handler is `handler`, and the fake on it.
+/// A script whose handler is `handler`, and the client on it.
 const Fixture = struct {
-    script: Script = undefined,
-    fake: FakeDriver = undefined,
+    served: Served = undefined,
+    /// The script of the server.
+    script: *Script = undefined,
     ids: bson.ObjectId.Generator = .{ .random = .{ 1, 2, 3, 4, 5 }, .counter = .init(0) },
 
-    /// Lives where it is: the fake points into it.
-    fn init(f: *Fixture, handler: Script.Handler) void {
-        f.script = .init(testing.allocator, handler);
-        f.fake = .init(testing.allocator, &f.script);
+    /// Lives where it is: the server and the client point into it.
+    fn init(f: *Fixture, handler: Script.Handler) !void {
+        try f.served.start(testing.io, handler, .{});
+        f.script = &f.served.script;
     }
 
     fn deinit(f: *Fixture) void {
-        f.fake.deinit();
-        f.script.deinit();
+        f.served.stop(testing.io);
     }
 
     fn db(f: *Fixture) mongo.Database {
-        return .init(f.fake.client(), "app", &f.ids);
+        return .init(f.served.client(), "app", &f.ids);
     }
 
     fn body(f: *Fixture, i: usize) bson.RawDocument {
@@ -51,7 +51,7 @@ test "Collection.drop sends drop; a collection that is not there, code 26, is no
     const io = testing.io;
     var queue: Script.Queue = .{ .answers = &.{ .{ .reply = bson.literal(.{ .ns = "app.users", .nIndexesWas = 1, .ok = 1.0 }) }, .{ .reply = not_found }, .{ .reply = unauthorized } } };
     var f: Fixture = .{};
-    f.init(queue.handler());
+    try f.init(queue.handler());
     defer f.deinit();
     const users = f.db().collection("users");
     var d: mongo.Diagnostics = .{};
@@ -78,7 +78,7 @@ test "listCollections sends listCollections: 1 with its options, and its comment
     const posts = bson.literal(.{ .name = "posts", .type = "collection" });
     var cursor: Script.Cursor = .{ .ns = "app.$cmd.listCollections", .batches = &.{ &.{users}, &.{posts} } };
     var f: Fixture = .{};
-    f.init(cursor.handler());
+    try f.init(cursor.handler());
     defer f.deinit();
     const db = f.db();
     {
@@ -116,7 +116,7 @@ test "Database.drop sends dropDatabase: 1" {
     const io = testing.io;
     var queue: Script.Queue = .{ .answers = &.{ .{ .reply = bson.literal(.{ .dropped = "app", .ok = 1.0 }) }, .{ .reply = Script.ok }, .{ .reply = unauthorized } } };
     var f: Fixture = .{};
-    f.init(queue.handler());
+    try f.init(queue.handler());
     defer f.deinit();
     const db = f.db();
     try db.drop(io, .of(.root), .{ .allocator = testing.allocator });
@@ -133,7 +133,7 @@ test "runCommand sends the command as it is, in each of the three forms, with th
     const reply = bson.literal(.{ .n = 3, .ok = 1.0 });
     var queue: Script.Queue = .{ .answers = &.{ .{ .reply = reply }, .{ .reply = reply }, .{ .reply = reply }, .{ .reply = reply } } };
     var f: Fixture = .{};
-    f.init(queue.handler());
+    try f.init(queue.handler());
     defer f.deinit();
     const db = f.db();
 
@@ -153,29 +153,30 @@ test "runCommand sends the command as it is, in each of the three forms, with th
     }
 }
 
-test "runCommand is bound by the rules of the contract only" {
+test "runCommand is bound by the rules of the client only" {
+    // dbStats, not ping: FakeServer answers ping itself, before the script.
     const io = testing.io;
     var queue: Script.Queue = .{ .answers = &.{ .{ .reply = Script.ok }, .{ .reply = unauthorized } } };
     var f: Fixture = .{};
-    f.init(queue.handler());
+    try f.init(queue.handler());
     defer f.deinit();
     const db = f.db();
     var d: mongo.Diagnostics = .{};
-    try testing.expectError(error.InvalidArgument, db.runCommand(io, .of(.root), .{ .ping = 1, .@"$db" = "admin" }, .{ .allocator = testing.allocator, .diagnostics = &d }));
+    try testing.expectError(error.InvalidArgument, db.runCommand(io, .of(.root), .{ .dbStats = 1, .@"$db" = "admin" }, .{ .allocator = testing.allocator, .diagnostics = &d }));
     try testing.expectEqualStrings("the command holds '$db', which only the driver writes", d.message());
     const deadline: core.Context = core.Context.root.withDeadline(.after(std.Io.Clock.awake.now(io), .fromSeconds(60)));
-    try testing.expectError(error.InvalidArgument, db.runCommand(io, .of(deadline), .{ .ping = 1, .maxTimeMS = 5 }, .{ .allocator = testing.allocator }));
+    try testing.expectError(error.InvalidArgument, db.runCommand(io, .of(deadline), .{ .dbStats = 1, .maxTimeMS = 5 }, .{ .allocator = testing.allocator }));
     // Without a deadline, maxTimeMS of the command goes as it is.
-    const pong = try db.runCommand(io, .of(.root), .{ .ping = 1, .maxTimeMS = 5 }, .{ .allocator = testing.allocator });
-    pong.deinit();
-    try expectBody(bson.literal(.{ .ping = 1, .maxTimeMS = 5, .@"$db" = "app" }), f.body(0));
+    const stats = try db.runCommand(io, .of(.root), .{ .dbStats = 1, .maxTimeMS = 5 }, .{ .allocator = testing.allocator });
+    stats.deinit();
+    try expectBody(bson.literal(.{ .dbStats = 1, .maxTimeMS = 5, .@"$db" = "app" }), f.body(0));
     var failure: ?bson.OwnedDocument = null;
-    try testing.expectError(error.CommandFailed, db.runCommand(io, .of(.root), .{ .ping = 1 }, .{ .allocator = testing.allocator, .diagnostics = &d, .failure_reply = &failure }));
+    try testing.expectError(error.CommandFailed, db.runCommand(io, .of(.root), .{ .dbStats = 1 }, .{ .allocator = testing.allocator, .diagnostics = &d, .failure_reply = &failure }));
     defer failure.?.deinit();
     try testing.expectEqualSlices(u8, unauthorized.bytes, failure.?.bytes);
     try testing.expectEqual(@as(i32, 13), d.server.?.code);
     const bad: []const u8 = "\xff";
-    try testing.expectError(error.InvalidArgument, db.runCommand(io, .of(.root), .{ .ping = bad }, .{ .allocator = testing.allocator, .diagnostics = &d }));
+    try testing.expectError(error.InvalidArgument, db.runCommand(io, .of(.root), .{ .dbStats = bad }, .{ .allocator = testing.allocator, .diagnostics = &d }));
     try testing.expect(std.mem.startsWith(u8, d.message(), "the command cannot be written as BSON"));
     try testing.expectEqual(@as(usize, 2), f.script.received(io));
 }
@@ -186,7 +187,7 @@ test "runCursorCommand opens the cursor of the command as it is, with the batch 
     const bob = bson.literal(.{ ._id = 2 });
     var cursor: Script.Cursor = .{ .ns = "app.users", .batches = &.{ &.{ann}, &.{bob} } };
     var f: Fixture = .{};
-    f.init(cursor.handler());
+    try f.init(cursor.handler());
     defer f.deinit();
     const db = f.db();
     {
@@ -207,7 +208,7 @@ test "ok 0 of runCursorCommand and listCollections is CommandFailed, with the re
     const io = testing.io;
     var queue: Script.Queue = .{ .answers = &.{ .{ .reply = unauthorized }, .{ .reply = unauthorized } } };
     var f: Fixture = .{};
-    f.init(queue.handler());
+    try f.init(queue.handler());
     defer f.deinit();
     const db = f.db();
     var d: mongo.Diagnostics = .{};
@@ -225,9 +226,9 @@ test "a bad database name is InvalidArgument, and nothing is sent" {
     const io = testing.io;
     var queue: Script.Queue = .{ .answers = &.{} };
     var f: Fixture = .{};
-    f.init(queue.handler());
+    try f.init(queue.handler());
     defer f.deinit();
-    const bad: mongo.Database = .init(f.fake.client(), "a.b", &f.ids);
+    const bad: mongo.Database = .init(f.served.client(), "a.b", &f.ids);
     const a = testing.allocator;
     var d: mongo.Diagnostics = .{};
     try testing.expectError(error.InvalidArgument, bad.listCollections(io, .of(.root), .{ .allocator = a, .diagnostics = &d }));

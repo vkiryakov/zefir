@@ -1,39 +1,40 @@
-//! Tests of `find` and `findOne` on `mongo.testing.FakeDriver`: the exact
-//! `find` commands and `getMore`s in the script's journal, and the
-//! documents they give, in each form of the filter.
+//! Tests of `find` and `findOne` on the client against
+//! `mongo.testing.FakeServer`: the exact `find` commands and `getMore`s in
+//! the script's journal, and the documents they give, in each form of the
+//! filter.
 
 const std = @import("std");
 const testing = std.testing;
 const mongo = @import("../root.zig");
 const bson = mongo.bson;
 const Script = mongo.testing.Script;
-const FakeDriver = mongo.testing.FakeDriver;
+const Served = @import("../tests/Served.zig");
 
 const ann = bson.literal(.{ ._id = 1, .name = "Ann" });
 const bob = bson.literal(.{ ._id = 2, .name = "Bob" });
 const cid = bson.literal(.{ ._id = 3, .name = "Cid" });
 const batches = [_][]const bson.RawDocument{ &.{ ann, bob }, &.{cid} };
 
-/// A cursor of users on the server, and the fake on it.
+/// A cursor of users on the server, and the client on it.
 const Fixture = struct {
     cursor: Script.Cursor = .{ .ns = "app.users", .batches = &batches },
-    script: Script = undefined,
-    fake: FakeDriver = undefined,
+    served: Served = undefined,
+    /// The script of the server.
+    script: *Script = undefined,
     ids: bson.ObjectId.Generator = .{ .random = .{ 1, 2, 3, 4, 5 }, .counter = .init(0) },
 
-    /// Lives where it is: the script and the fake point into it.
-    fn init(f: *Fixture) void {
-        f.script = .init(testing.allocator, f.cursor.handler());
-        f.fake = .init(testing.allocator, &f.script);
+    /// Lives where it is: the server and the client point into it.
+    fn init(f: *Fixture) !void {
+        try f.served.start(testing.io, f.cursor.handler(), .{});
+        f.script = &f.served.script;
     }
 
     fn deinit(f: *Fixture) void {
-        f.fake.deinit();
-        f.script.deinit();
+        f.served.stop(testing.io);
     }
 
     fn users(f: *Fixture) mongo.Collection {
-        return mongo.Database.init(f.fake.client(), "app", &f.ids).collection("users");
+        return mongo.Database.init(f.served.client(), "app", &f.ids).collection("users");
     }
 };
 
@@ -59,7 +60,7 @@ fn filterByBuilder() !bson.OwnedDocument {
 test "find sends find with the filter, in each of the three forms, and its cursor gives the documents of every batch" {
     const io = testing.io;
     var f: Fixture = .{};
-    f.init();
+    try f.init();
     defer f.deinit();
     const users = f.users();
 
@@ -84,7 +85,7 @@ test "find sends find with the filter, in each of the three forms, and its curso
 test "find(.{}) sends filter: {}" {
     const io = testing.io;
     var f: Fixture = .{};
-    f.init();
+    try f.init();
     defer f.deinit();
     const cursor = try f.users().find(io, .of(.root), .{}, .{ .allocator = testing.allocator });
     defer cursor.deinit(io);
@@ -94,7 +95,7 @@ test "find(.{}) sends filter: {}" {
 test "the options of find go out in their order, and the batch size and the comment go to each getMore too" {
     const io = testing.io;
     var f: Fixture = .{};
-    f.init();
+    try f.init();
     defer f.deinit();
     const cursor = try f.users().find(io, .of(.root), .{ .name = .{ .@"$ne" = "Dan" } }, .{
         .allocator = testing.allocator,
@@ -138,7 +139,7 @@ test "the options of find go out in their order, and the batch size and the comm
 test "find with a limit equal to its batch size asks for one more in the first batch, so that the server closes the cursor" {
     const io = testing.io;
     var f: Fixture = .{};
-    f.init();
+    try f.init();
     defer f.deinit();
     const users = f.users();
     for ([_][2]u32{ .{ 5, 5 }, .{ 0, 0 }, .{ 5, 4 }, .{ std.math.maxInt(u32), std.math.maxInt(u32) } }, 0..) |case, i| {
@@ -162,12 +163,12 @@ test "findOne sends limit: 1 and singleBatch: true without a batch size, and ret
     const io = testing.io;
     const reply = bson.literal(.{ .cursor = .{ .firstBatch = .{.{ ._id = 1, .name = "Ann" }}, .id = @as(i64, 0), .ns = "app.users" }, .ok = 1.0 });
     var queue: Script.Queue = .{ .answers = &.{ .{ .reply = reply }, .{ .reply = reply }, .{ .reply = reply }, .{ .reply = reply } } };
-    var script: Script = .init(testing.allocator, queue.handler());
-    defer script.deinit();
-    var fake: FakeDriver = .init(testing.allocator, &script);
-    defer fake.deinit();
+    var served: Served = undefined;
+    try served.start(io, queue.handler(), .{});
+    defer served.stop(io);
+    const script = &served.script;
     var ids: bson.ObjectId.Generator = .init(io);
-    const users = mongo.Database.init(fake.client(), "app", &ids).collection("users");
+    const users = mongo.Database.init(served.client(), "app", &ids).collection("users");
 
     const built = try filterByBuilder();
     defer built.deinit();
@@ -192,7 +193,7 @@ test "findOne sends limit: 1 and singleBatch: true without a batch size, and ret
 test "the options of findOne go out in their order" {
     const io = testing.io;
     var f: Fixture = .{};
-    f.init();
+    try f.init();
     defer f.deinit();
     const doc = (try f.users().findOne(io, .of(.root), .{}, .{
         .allocator = testing.allocator,
@@ -224,7 +225,7 @@ test "the options of findOne go out in their order" {
 test "findOne frees its cursor: one left open on the server gets its killCursors" {
     const io = testing.io;
     var f: Fixture = .{};
-    f.init();
+    try f.init();
     defer f.deinit();
     const doc = (try f.users().findOne(io, .of(.root), .{}, .{ .allocator = testing.allocator })) orelse return error.TestNoDocument;
     defer doc.deinit();
@@ -236,12 +237,11 @@ test "findOne frees its cursor: one left open on the server gets its killCursors
 test "findOne of no document is null" {
     const io = testing.io;
     var cursor: Script.Cursor = .{ .ns = "app.users", .batches = &.{} };
-    var script: Script = .init(testing.allocator, cursor.handler());
-    defer script.deinit();
-    var fake: FakeDriver = .init(testing.allocator, &script);
-    defer fake.deinit();
+    var served: Served = undefined;
+    try served.start(io, cursor.handler(), .{});
+    defer served.stop(io);
     var ids: bson.ObjectId.Generator = .init(io);
-    const users = mongo.Database.init(fake.client(), "app", &ids).collection("users");
+    const users = mongo.Database.init(served.client(), "app", &ids).collection("users");
     try testing.expect(try users.findOne(io, .of(.root), .{ .name = "Dan" }, .{ .allocator = testing.allocator }) == null);
     const empty = try users.find(io, .of(.root), .{ .name = "Dan" }, .{ .allocator = testing.allocator });
     defer empty.deinit(io);
@@ -252,12 +252,11 @@ test "ok 0 of find is CommandFailed, with the reply in failure_reply; a reply wi
     const io = testing.io;
     const refused = bson.literal(.{ .ok = 0.0, .errmsg = "unknown operator: $bad", .code = 2, .codeName = "BadValue" });
     var queue: Script.Queue = .{ .answers = &.{ .{ .reply = refused }, .{ .reply = refused }, .{ .reply = Script.ok } } };
-    var script: Script = .init(testing.allocator, queue.handler());
-    defer script.deinit();
-    var fake: FakeDriver = .init(testing.allocator, &script);
-    defer fake.deinit();
+    var served: Served = undefined;
+    try served.start(io, queue.handler(), .{});
+    defer served.stop(io);
     var ids: bson.ObjectId.Generator = .init(io);
-    const users = mongo.Database.init(fake.client(), "app", &ids).collection("users");
+    const users = mongo.Database.init(served.client(), "app", &ids).collection("users");
 
     var d: mongo.Diagnostics = .{};
     var failure: ?bson.OwnedDocument = null;
@@ -279,9 +278,9 @@ test "ok 0 of find is CommandFailed, with the reply in failure_reply; a reply wi
 test "a bad collection name, filter or sort is InvalidArgument, and nothing is sent" {
     const io = testing.io;
     var f: Fixture = .{};
-    f.init();
+    try f.init();
     defer f.deinit();
-    const db: mongo.Database = .init(f.fake.client(), "app", &f.ids);
+    const db: mongo.Database = .init(f.served.client(), "app", &f.ids);
     var d: mongo.Diagnostics = .{};
     try testing.expectError(error.InvalidArgument, db.collection("").find(io, .of(.root), .{}, .{ .allocator = testing.allocator, .diagnostics = &d }));
     try testing.expectEqualStrings("the collection name is empty", d.message());

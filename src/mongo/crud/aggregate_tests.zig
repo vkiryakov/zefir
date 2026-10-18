@@ -1,37 +1,38 @@
 //! Tests of `aggregate`, `countDocuments`, `estimatedDocumentCount` and
-//! `distinct` on `mongo.testing.FakeDriver`: the exact commands and
-//! pipelines in the script's journal, and what their replies give.
+//! `distinct` on the client against `mongo.testing.FakeServer`: the exact
+//! commands and pipelines in the script's journal, and what their replies
+//! give.
 
 const std = @import("std");
 const testing = std.testing;
 const mongo = @import("../root.zig");
 const bson = mongo.bson;
 const Script = mongo.testing.Script;
-const FakeDriver = mongo.testing.FakeDriver;
+const Served = @import("../tests/Served.zig");
 
 const ann = bson.literal(.{ ._id = 1, .n = 1 });
 const bob = bson.literal(.{ ._id = 2, .n = 2 });
 const batches = [_][]const bson.RawDocument{ &.{ann}, &.{bob} };
 
-/// A script whose handler is `handler`, and the fake on it.
+/// A script whose handler is `handler`, and the client on it.
 const Fixture = struct {
-    script: Script = undefined,
-    fake: FakeDriver = undefined,
+    served: Served = undefined,
+    /// The script of the server.
+    script: *Script = undefined,
     ids: bson.ObjectId.Generator = .{ .random = .{ 1, 2, 3, 4, 5 }, .counter = .init(0) },
 
-    /// Lives where it is: the fake points into it.
-    fn init(f: *Fixture, handler: Script.Handler) void {
-        f.script = .init(testing.allocator, handler);
-        f.fake = .init(testing.allocator, &f.script);
+    /// Lives where it is: the server and the client point into it.
+    fn init(f: *Fixture, handler: Script.Handler) !void {
+        try f.served.start(testing.io, handler, .{});
+        f.script = &f.served.script;
     }
 
     fn deinit(f: *Fixture) void {
-        f.fake.deinit();
-        f.script.deinit();
+        f.served.stop(testing.io);
     }
 
     fn users(f: *Fixture) mongo.Collection {
-        return mongo.Database.init(f.fake.client(), "app", &f.ids).collection("users");
+        return mongo.Database.init(f.served.client(), "app", &f.ids).collection("users");
     }
 
     fn body(f: *Fixture, i: usize) bson.RawDocument {
@@ -75,7 +76,7 @@ test "aggregate sends its pipeline with cursor: {}, the list and its stages in a
     const io = testing.io;
     var cursor: Script.Cursor = .{ .ns = "app.users", .batches = &batches };
     var f: Fixture = .{};
-    f.init(cursor.handler());
+    try f.init(cursor.handler());
     defer f.deinit();
     const users = f.users();
 
@@ -111,7 +112,7 @@ test "aggregate(.{}) sends pipeline: []" {
     const io = testing.io;
     var cursor: Script.Cursor = .{ .ns = "app.users", .batches = &.{} };
     var f: Fixture = .{};
-    f.init(cursor.handler());
+    try f.init(cursor.handler());
     defer f.deinit();
     const docs = try f.users().aggregate(io, .of(.root), .{}, .{ .allocator = testing.allocator });
     defer docs.deinit(io);
@@ -123,7 +124,7 @@ test "the options of aggregate go out in their order, the batch size in cursor a
     const io = testing.io;
     var cursor: Script.Cursor = .{ .ns = "app.users", .batches = &batches };
     var f: Fixture = .{};
-    f.init(cursor.handler());
+    try f.init(cursor.handler());
     defer f.deinit();
     const docs = try f.users().aggregate(io, .of(.root), .{.{ .@"$match" = .{} }}, .{
         .allocator = testing.allocator,
@@ -156,7 +157,7 @@ test "a pipeline that ends in $out or $merge sends no batch size in its cursor, 
     const io = testing.io;
     var cursor: Script.Cursor = .{ .ns = "app.users", .batches = &.{} };
     var f: Fixture = .{};
-    f.init(cursor.handler());
+    try f.init(cursor.handler());
     defer f.deinit();
     const users = f.users();
     const out = try users.aggregate(io, .of(.root), .{ .{ .@"$match" = .{} }, .{ .@"$out" = "archive" } }, .{ .allocator = testing.allocator, .batch_size = 0 });
@@ -179,7 +180,7 @@ test "countDocuments sends $match, $skip, $limit and $group, the filter in any f
     const io = testing.io;
     var same: Same = .{ .reply = countReply(3) };
     var f: Fixture = .{};
-    f.init(same.handler());
+    try f.init(same.handler());
     defer f.deinit();
     const users = f.users();
 
@@ -225,7 +226,7 @@ test "countDocuments(.{}) sends $match: {}, and an empty cursor counts 0" {
     const io = testing.io;
     var cursor: Script.Cursor = .{ .ns = "app.users", .batches = &.{} };
     var f: Fixture = .{};
-    f.init(cursor.handler());
+    try f.init(cursor.handler());
     defer f.deinit();
     try testing.expectEqual(@as(u64, 0), try f.users().countDocuments(io, .of(.root), .{}, .{ .allocator = testing.allocator }));
     try expectBody(bson.literal(.{
@@ -240,7 +241,7 @@ test "a count is n as an int32, an int64 or a whole double; anything else is a p
     const io = testing.io;
     var same: Same = .{ .reply = countReply(@as(i64, 5_000_000_000)) };
     var f: Fixture = .{};
-    f.init(same.handler());
+    try f.init(same.handler());
     defer f.deinit();
     const users = f.users();
     try testing.expectEqual(@as(u64, 5_000_000_000), try users.countDocuments(io, .of(.root), .{}, .{ .allocator = testing.allocator }));
@@ -271,7 +272,7 @@ test "estimatedDocumentCount sends count without a query, and returns n" {
     const io = testing.io;
     var same: Same = .{ .reply = bson.literal(.{ .n = 7, .ok = 1.0 }) };
     var f: Fixture = .{};
-    f.init(same.handler());
+    try f.init(same.handler());
     defer f.deinit();
     const users = f.users();
     try testing.expectEqual(@as(u64, 7), try users.estimatedDocumentCount(io, .of(.root), .{ .allocator = testing.allocator }));
@@ -284,7 +285,7 @@ test "distinct sends key and query, the filter in any form, and returns values a
     const io = testing.io;
     var same: Same = .{ .reply = bson.literal(.{ .values = .{ "Ann", "Bob" }, .ok = 1.0 }) };
     var f: Fixture = .{};
-    f.init(same.handler());
+    try f.init(same.handler());
     defer f.deinit();
     const users = f.users();
 
@@ -325,7 +326,7 @@ test "ok 0 is CommandFailed, with the reply in failure_reply, for the counts, di
     const refused = bson.literal(.{ .ok = 0.0, .errmsg = "ns does not exist", .code = 26, .codeName = "NamespaceNotFound" });
     var same: Same = .{ .reply = refused };
     var f: Fixture = .{};
-    f.init(same.handler());
+    try f.init(same.handler());
     defer f.deinit();
     const users = f.users();
     var d: mongo.Diagnostics = .{};
@@ -354,9 +355,9 @@ test "a bad collection name, filter or stage is InvalidArgument, and nothing is 
     const io = testing.io;
     var same: Same = .{ .reply = Script.ok };
     var f: Fixture = .{};
-    f.init(same.handler());
+    try f.init(same.handler());
     defer f.deinit();
-    const db: mongo.Database = .init(f.fake.client(), "app", &f.ids);
+    const db: mongo.Database = .init(f.served.client(), "app", &f.ids);
     const a = testing.allocator;
     var d: mongo.Diagnostics = .{};
     try testing.expectError(error.InvalidArgument, db.collection("").aggregate(io, .of(.root), .{}, .{ .allocator = a, .diagnostics = &d }));

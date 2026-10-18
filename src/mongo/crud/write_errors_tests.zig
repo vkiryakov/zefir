@@ -1,7 +1,7 @@
-//! Tests of the errors of the collection API's writes on
-//! `mongo.testing.FakeDriver`: `WriteFailed` when the server refused items
-//! or a write concern, an error of the contract as it is, and `partial`
-//! with all that is known, its indexes in the whole list.
+//! Tests of the errors of the collection API's writes on the client
+//! against `mongo.testing.FakeServer`: `WriteFailed` when the server
+//! refused items or a write concern, an error of the client as it is, and
+//! `partial` with all that is known, its indexes in the whole list.
 
 const std = @import("std");
 const Io = std.Io;
@@ -11,7 +11,7 @@ const core = @import("core");
 const mongo = @import("../root.zig");
 const bson = mongo.bson;
 const Script = mongo.testing.Script;
-const FakeDriver = mongo.testing.FakeDriver;
+const Served = @import("../tests/Served.zig");
 
 const Doc = struct { n: i32 };
 
@@ -35,13 +35,12 @@ fn sentIds(io: Io, script: *Script, buffer: []bson.ObjectId) ![]bson.ObjectId {
 test "an unordered insertMany whose items the server refused is WriteFailed; partial holds them by their index in the whole list" {
     const io = testing.io;
     var write: Script.Write = .{ .refuse = &.{ .{ .index = 4 }, .{ .index = 7, .errmsg = "E11000 duplicate key error collection: app.users" } } };
-    var script: Script = .init(testing.allocator, write.handler());
-    defer script.deinit();
-    script.hello.max_write_batch_size = 3;
-    var fake: FakeDriver = .init(testing.allocator, &script);
-    defer fake.deinit();
+    var served: Served = undefined;
+    try served.start(io, write.handler(), .{ .max_write_batch_size = 3 });
+    defer served.stop(io);
+    const script = &served.script;
     var ids: bson.ObjectId.Generator = .init(io);
-    const users = mongo.Database.init(fake.client(), "app", &ids).collection("users");
+    const users = mongo.Database.init(served.client(), "app", &ids).collection("users");
 
     var partial: mongo.Collection.InsertManyResult = .{};
     defer partial.deinit(testing.allocator);
@@ -63,7 +62,7 @@ test "an unordered insertMany whose items the server refused is WriteFailed; par
     try testing.expectEqual(@as(usize, 7), partial.write_errors[1].index);
     try testing.expectEqualStrings("E11000 duplicate key error collection: app.users", partial.write_errors[1].message);
     var buffer: [10]bson.ObjectId = undefined;
-    const sent = try sentIds(io, &script, &buffer);
+    const sent = try sentIds(io, script, &buffer);
     try testing.expectEqual(@as(usize, 10), partial.inserted_ids.len);
     for (sent, partial.inserted_ids) |made, reported| try testing.expectEqualSlices(u8, &made.bytes, &reported.object_id.bytes);
     // The first refused item, in the diagnostics.
@@ -75,13 +74,12 @@ test "an unordered insertMany whose items the server refused is WriteFailed; par
 test "an ordered insertMany stops at the batch of its first refused item: WriteFailed, with what came before it" {
     const io = testing.io;
     var write: Script.Write = .{ .refuse = &.{.{ .index = 4 }} };
-    var script: Script = .init(testing.allocator, write.handler());
-    defer script.deinit();
-    script.hello.max_write_batch_size = 3;
-    var fake: FakeDriver = .init(testing.allocator, &script);
-    defer fake.deinit();
+    var served: Served = undefined;
+    try served.start(io, write.handler(), .{ .max_write_batch_size = 3 });
+    defer served.stop(io);
+    const script = &served.script;
     var ids: bson.ObjectId.Generator = .init(io);
-    const users = mongo.Database.init(fake.client(), "app", &ids).collection("users");
+    const users = mongo.Database.init(served.client(), "app", &ids).collection("users");
 
     var partial: mongo.Collection.InsertManyResult = .{};
     defer partial.deinit(testing.allocator);
@@ -103,12 +101,11 @@ test "an ordered insertMany stops at the batch of its first refused item: WriteF
 test "insertOne of a document the server refuses is WriteFailed with its error, and partial reports the _id" {
     const io = testing.io;
     var write: Script.Write = .{ .refuse = &.{.{ .index = 0 }} };
-    var script: Script = .init(testing.allocator, write.handler());
-    defer script.deinit();
-    var fake: FakeDriver = .init(testing.allocator, &script);
-    defer fake.deinit();
+    var served: Served = undefined;
+    try served.start(io, write.handler(), .{});
+    defer served.stop(io);
     var ids: bson.ObjectId.Generator = .init(io);
-    const users = mongo.Database.init(fake.client(), "app", &ids).collection("users");
+    const users = mongo.Database.init(served.client(), "app", &ids).collection("users");
     var partial: mongo.Collection.InsertOneResult = .{};
     defer partial.deinit(testing.allocator);
     var d: mongo.Diagnostics = .{};
@@ -127,12 +124,11 @@ test "a writeConcernError makes a write that ran WriteFailed: the first one in t
         .ok = 1.0,
     });
     var queue: Script.Queue = .{ .answers = &.{ .{ .reply = concern }, .{ .reply = concern }, .{ .reply = concern } } };
-    var script: Script = .init(testing.allocator, queue.handler());
-    defer script.deinit();
-    var fake: FakeDriver = .init(testing.allocator, &script);
-    defer fake.deinit();
+    var served: Served = undefined;
+    try served.start(io, queue.handler(), .{});
+    defer served.stop(io);
     var ids: bson.ObjectId.Generator = .init(io);
-    const users = mongo.Database.init(fake.client(), "app", &ids).collection("users");
+    const users = mongo.Database.init(served.client(), "app", &ids).collection("users");
 
     var inserted: mongo.Collection.InsertManyResult = .{};
     defer inserted.deinit(testing.allocator);
@@ -167,12 +163,11 @@ test "an update whose statement the server refuses is WriteFailed, with its code
         .ok = 1.0,
     });
     var queue: Script.Queue = .{ .answers = &.{ .{ .reply = immutable }, .{ .reply = immutable } } };
-    var script: Script = .init(testing.allocator, queue.handler());
-    defer script.deinit();
-    var fake: FakeDriver = .init(testing.allocator, &script);
-    defer fake.deinit();
+    var served: Served = undefined;
+    try served.start(io, queue.handler(), .{});
+    defer served.stop(io);
     var ids: bson.ObjectId.Generator = .init(io);
-    const users = mongo.Database.init(fake.client(), "app", &ids).collection("users");
+    const users = mongo.Database.init(served.client(), "app", &ids).collection("users");
     var partial: mongo.Collection.UpdateResult = .{};
     defer partial.deinit(testing.allocator);
     var d: mongo.Diagnostics = .{};
@@ -198,13 +193,12 @@ const CutAtThird = struct {
 test "a write cut at its third batch is IncompleteWrite: partial holds the two batches and the _ids of all the documents" {
     const io = testing.io;
     var cut: CutAtThird = .{};
-    var script: Script = .init(testing.allocator, .init(&cut));
-    defer script.deinit();
-    script.hello.max_write_batch_size = 3;
-    var fake: FakeDriver = .init(testing.allocator, &script);
-    defer fake.deinit();
+    var served: Served = undefined;
+    try served.start(io, .init(&cut), .{ .max_write_batch_size = 3 });
+    defer served.stop(io);
+    const script = &served.script;
     var ids: bson.ObjectId.Generator = .init(io);
-    const users = mongo.Database.init(fake.client(), "app", &ids).collection("users");
+    const users = mongo.Database.init(served.client(), "app", &ids).collection("users");
 
     var partial: mongo.Collection.InsertManyResult = .{};
     defer partial.deinit(testing.allocator);
@@ -220,7 +214,7 @@ test "a write cut at its third batch is IncompleteWrite: partial holds the two b
     // the batch of unknown outcome can be checked by them.
     try testing.expectEqual(@as(usize, 10), partial.inserted_ids.len);
     var buffer: [10]bson.ObjectId = undefined;
-    const sent = try sentIds(io, &script, &buffer);
+    const sent = try sentIds(io, script, &buffer);
     try testing.expectEqual(@as(usize, 9), sent.len);
     for (sent, partial.inserted_ids[0..9]) |made, reported| try testing.expectEqualSlices(u8, &made.bytes, &reported.object_id.bytes);
     try testing.expect(partial.inserted_ids[9] == .object_id);
@@ -241,13 +235,12 @@ const CancelAtSecond = struct {
 test "a token canceled while the second batch was out is IncompleteWrite with reason Cancelled; partial holds two batches" {
     const io = testing.io;
     var canceler: CancelAtSecond = .{};
-    var script: Script = .init(testing.allocator, .init(&canceler));
-    defer script.deinit();
-    script.hello.max_write_batch_size = 3;
-    var fake: FakeDriver = .init(testing.allocator, &script);
-    defer fake.deinit();
+    var served: Served = undefined;
+    try served.start(io, .init(&canceler), .{ .max_write_batch_size = 3 });
+    defer served.stop(io);
+    const script = &served.script;
     var ids: bson.ObjectId.Generator = .init(io);
-    const users = mongo.Database.init(fake.client(), "app", &ids).collection("users");
+    const users = mongo.Database.init(served.client(), "app", &ids).collection("users");
     var partial: mongo.Collection.InsertManyResult = .{};
     defer partial.deinit(testing.allocator);
     var d: mongo.Diagnostics = .{};
@@ -262,12 +255,11 @@ test "a token canceled while the second batch was out is IncompleteWrite with re
 test "an error of the contract at the first batch passes as it is, with partial; a token canceled while the write was out is Interrupted with its result" {
     const io = testing.io;
     var queue: Script.Queue = .{ .answers = &.{.close_connection} };
-    var script: Script = .init(testing.allocator, queue.handler());
-    defer script.deinit();
-    var fake: FakeDriver = .init(testing.allocator, &script);
-    defer fake.deinit();
+    var served: Served = undefined;
+    try served.start(io, queue.handler(), .{});
+    defer served.stop(io);
     var ids: bson.ObjectId.Generator = .init(io);
-    const users = mongo.Database.init(fake.client(), "app", &ids).collection("users");
+    const users = mongo.Database.init(served.client(), "app", &ids).collection("users");
     var lost: mongo.Collection.InsertOneResult = .{};
     defer lost.deinit(testing.allocator);
     try testing.expectError(error.ConnectionLost, users.insertOne(io, .of(.root), .{ .name = "Ann" }, .{ .allocator = testing.allocator, .partial = &lost }));
@@ -276,11 +268,10 @@ test "an error of the contract at the first batch passes as it is, with partial;
 
     var canceler: CancelAtSecond = .{};
     canceler.batches.store(1, .monotonic);
-    var other: Script = .init(testing.allocator, .init(&canceler));
-    defer other.deinit();
-    var second: FakeDriver = .init(testing.allocator, &other);
-    defer second.deinit();
-    const cancelable = mongo.Database.init(second.client(), "app", &ids).collection("users");
+    var other_served: Served = undefined;
+    try other_served.start(io, .init(&canceler), .{});
+    defer other_served.stop(io);
+    const cancelable = mongo.Database.init(other_served.client(), "app", &ids).collection("users");
     var interrupted: mongo.Collection.DeleteResult = .{};
     defer interrupted.deinit(testing.allocator);
     const op: mongo.OperationContext = .of(core.Context.root.withCancellation(&canceler.token));
@@ -291,12 +282,11 @@ test "an error of the contract at the first batch passes as it is, with partial;
 test "MaxTimeMSExpired in writeErrors is the contract's Timeout, with partial" {
     const io = testing.io;
     var write: Script.Write = .{ .refuse = &.{.{ .index = 0, .code = 50, .errmsg = "operation exceeded time limit" }} };
-    var script: Script = .init(testing.allocator, write.handler());
-    defer script.deinit();
-    var fake: FakeDriver = .init(testing.allocator, &script);
-    defer fake.deinit();
+    var served: Served = undefined;
+    try served.start(io, write.handler(), .{});
+    defer served.stop(io);
     var ids: bson.ObjectId.Generator = .init(io);
-    const users = mongo.Database.init(fake.client(), "app", &ids).collection("users");
+    const users = mongo.Database.init(served.client(), "app", &ids).collection("users");
     var partial: mongo.Collection.InsertManyResult = .{};
     defer partial.deinit(testing.allocator);
     try testing.expectError(error.Timeout, users.insertMany(io, .of(.root), .{.{ .n = 1 }}, .{ .allocator = testing.allocator, .partial = &partial }));
@@ -307,12 +297,11 @@ test "MaxTimeMSExpired in writeErrors is the contract's Timeout, with partial" {
 test "an argument the collection API refuses leaves partial as it was" {
     const io = testing.io;
     var write: Script.Write = .{};
-    var script: Script = .init(testing.allocator, write.handler());
-    defer script.deinit();
-    var fake: FakeDriver = .init(testing.allocator, &script);
-    defer fake.deinit();
+    var served: Served = undefined;
+    try served.start(io, write.handler(), .{});
+    defer served.stop(io);
     var ids: bson.ObjectId.Generator = .init(io);
-    const users = mongo.Database.init(fake.client(), "app", &ids).collection("users");
+    const users = mongo.Database.init(served.client(), "app", &ids).collection("users");
     var partial: mongo.Collection.InsertManyResult = .{};
     try testing.expectError(error.InvalidArgument, users.insertMany(io, .of(.root), .{}, .{ .allocator = testing.allocator, .partial = &partial }));
     try testing.expectEqual(@as(usize, 0), partial.inserted_ids.len);
@@ -321,12 +310,11 @@ test "an argument the collection API refuses leaves partial as it was" {
 test "a successful write returns empty lists of errors" {
     const io = testing.io;
     var write: Script.Write = .{};
-    var script: Script = .init(testing.allocator, write.handler());
-    defer script.deinit();
-    var fake: FakeDriver = .init(testing.allocator, &script);
-    defer fake.deinit();
+    var served: Served = undefined;
+    try served.start(io, write.handler(), .{});
+    defer served.stop(io);
     var ids: bson.ObjectId.Generator = .init(io);
-    const users = mongo.Database.init(fake.client(), "app", &ids).collection("users");
+    const users = mongo.Database.init(served.client(), "app", &ids).collection("users");
     var partial: mongo.Collection.InsertManyResult = .{};
     var result = try users.insertMany(io, .of(.root), .{ .{ .n = 1 }, .{ .n = 2 } }, .{ .allocator = testing.allocator, .partial = &partial });
     defer result.deinit(testing.allocator);
@@ -351,12 +339,11 @@ test "a writeConcernError of findAndModify is WriteFailed, with the reply in fai
         .ok = 1.0,
     });
     var queue: Script.Queue = .{ .answers = &.{ .{ .reply = concern }, .{ .reply = expired } } };
-    var script: Script = .init(testing.allocator, queue.handler());
-    defer script.deinit();
-    var fake: FakeDriver = .init(testing.allocator, &script);
-    defer fake.deinit();
+    var served: Served = undefined;
+    try served.start(io, queue.handler(), .{});
+    defer served.stop(io);
     var ids: bson.ObjectId.Generator = .init(io);
-    const users = mongo.Database.init(fake.client(), "app", &ids).collection("users");
+    const users = mongo.Database.init(served.client(), "app", &ids).collection("users");
 
     var d: mongo.Diagnostics = .{};
     var failure: ?bson.OwnedDocument = null;

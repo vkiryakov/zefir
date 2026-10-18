@@ -12,7 +12,7 @@ const testing = std.testing;
 const mongo = @import("../root.zig");
 const bson = mongo.bson;
 const Script = mongo.testing.Script;
-const FakeDriver = mongo.testing.FakeDriver;
+const Served = @import("../tests/Served.zig");
 
 /// Answers every command of the operations as mongod does, at its
 /// simplest: the batches of writes with their `n`, the cursors with one
@@ -42,23 +42,23 @@ const Server = struct {
 
 const Fixture = struct {
     server: Server = .{},
-    script: Script = undefined,
-    fake: FakeDriver = undefined,
+    served: Served = undefined,
+    /// The script of the server.
+    script: *Script = undefined,
     ids: bson.ObjectId.Generator = .{ .random = .{ 1, 2, 3, 4, 5 }, .counter = .init(0) },
 
-    /// Lives where it is: the script and the fake point into it.
-    fn init(f: *Fixture) void {
-        f.script = .init(testing.allocator, f.server.handler());
-        f.fake = .init(testing.allocator, &f.script);
+    /// Lives where it is: the server and the client point into it.
+    fn init(f: *Fixture) !void {
+        try f.served.start(testing.io, f.server.handler(), .{});
+        f.script = &f.served.script;
     }
 
     fn deinit(f: *Fixture) void {
-        f.fake.deinit();
-        f.script.deinit();
+        f.served.stop(testing.io);
     }
 
     fn db(f: *Fixture) mongo.Database {
-        return .init(f.fake.client(), "app", &f.ids);
+        return .init(f.served.client(), "app", &f.ids);
     }
 };
 
@@ -88,7 +88,7 @@ fn expectOne(cursor: mongo.Cursor) !void {
 test "the operations with a filter take it in each of the three forms" {
     const io = testing.io;
     var f: Fixture = .{};
-    f.init();
+    try f.init();
     defer f.deinit();
     const users = f.db().collection("users");
     const a = testing.allocator;
@@ -122,7 +122,7 @@ test "the operations with a filter take it in each of the three forms" {
 test "an update, a replacement and a document to insert take each of the three forms" {
     const io = testing.io;
     var f: Fixture = .{};
-    f.init();
+    try f.init();
     defer f.deinit();
     const users = f.db().collection("users");
     const a = testing.allocator;
@@ -151,7 +151,7 @@ test "an update, a replacement and a document to insert take each of the three f
 test "the lists of documents, of stages and of updates take a slice, an array, a pointer to one, a tuple and a pointer to one" {
     const io = testing.io;
     var f: Fixture = .{};
-    f.init();
+    try f.init();
     defer f.deinit();
     const users = f.db().collection("users");
     const a = testing.allocator;
@@ -206,7 +206,7 @@ test "the lists of documents, of stages and of updates take a slice, an array, a
 test "the commands of runCommand and runCursorCommand take each of the three forms" {
     const io = testing.io;
     var f: Fixture = .{};
-    f.init();
+    try f.init();
     defer f.deinit();
     const db = f.db();
     const a = testing.allocator;
@@ -230,7 +230,7 @@ test "the commands of runCommand and runCursorCommand take each of the three for
 test "the operations without documents of their own" {
     const io = testing.io;
     var f: Fixture = .{};
-    f.init();
+    try f.init();
     defer f.deinit();
     const db = f.db();
     const users = db.collection("users");

@@ -1,38 +1,38 @@
 //! Tests of `createIndexes`, `listIndexes`, `dropIndex` and `dropIndexes`
-//! on `mongo.testing.FakeDriver`: the exact commands in the script's
-//! journal, and the names of the indexes.
+//! on the client against `mongo.testing.FakeServer`: the exact commands in
+//! the script's journal, and the names of the indexes.
 
 const std = @import("std");
 const testing = std.testing;
 const mongo = @import("../root.zig");
 const bson = mongo.bson;
 const Script = mongo.testing.Script;
-const FakeDriver = mongo.testing.FakeDriver;
+const Served = @import("../tests/Served.zig");
 
 /// A script that answers each command with the next of `replies`, and
-/// the fake on it.
+/// the client on it.
 const Fixture = struct {
     replies: [8]Script.Answer = undefined,
     queue: Script.Queue = undefined,
-    script: Script = undefined,
-    fake: FakeDriver = undefined,
+    served: Served = undefined,
+    /// The script of the server.
+    script: *Script = undefined,
     ids: bson.ObjectId.Generator = .{ .random = .{ 1, 2, 3, 4, 5 }, .counter = .init(0) },
 
-    /// Lives where it is: the script and the fake point into it.
-    fn init(f: *Fixture, reply: bson.RawDocument) void {
+    /// Lives where it is: the server and the client point into it.
+    fn init(f: *Fixture, reply: bson.RawDocument) !void {
         for (&f.replies) |*answer| answer.* = .{ .reply = reply };
         f.queue = .{ .answers = &f.replies };
-        f.script = .init(testing.allocator, f.queue.handler());
-        f.fake = .init(testing.allocator, &f.script);
+        try f.served.start(testing.io, f.queue.handler(), .{});
+        f.script = &f.served.script;
     }
 
     fn deinit(f: *Fixture) void {
-        f.fake.deinit();
-        f.script.deinit();
+        f.served.stop(testing.io);
     }
 
     fn users(f: *Fixture) mongo.Collection {
-        return mongo.Database.init(f.fake.client(), "app", &f.ids).collection("users");
+        return mongo.Database.init(f.served.client(), "app", &f.ids).collection("users");
     }
 };
 
@@ -53,7 +53,7 @@ fn expectBody(expected: bson.RawDocument, got: bson.RawDocument) !void {
 test "createIndexes sends the models in their order, each with its name, and returns the names" {
     const io = testing.io;
     var f: Fixture = .{};
-    f.init(created);
+    try f.init(created);
     defer f.deinit();
     const names = try f.users().createIndexes(io, .of(.root), &.{
         .{ .keys = bson.literal(.{ .email = 1 }), .unique = true },
@@ -98,7 +98,7 @@ test "createIndexes sends the models in their order, each with its name, and ret
 test "createIndexes of no models, or of a model whose keys make no name, is InvalidArgument, and nothing is sent" {
     const io = testing.io;
     var f: Fixture = .{};
-    f.init(created);
+    try f.init(created);
     defer f.deinit();
     const users = f.users();
     var d: mongo.Diagnostics = .{};
@@ -124,7 +124,7 @@ test "ok 0 of createIndexes is CommandFailed with the reply in failure_reply, an
     const io = testing.io;
     const refused = bson.literal(.{ .ok = 0.0, .errmsg = "Index already exists with a different name: email_1", .code = 85, .codeName = "IndexOptionsConflict" });
     var f: Fixture = .{};
-    f.init(refused);
+    try f.init(refused);
     defer f.deinit();
     var d: mongo.Diagnostics = .{};
     var failure: ?bson.OwnedDocument = null;
@@ -143,12 +143,12 @@ test "listIndexes sends cursor: {} or its batch size, which goes with the commen
     const id_index = bson.literal(.{ .v = 2, .key = .{ ._id = 1 }, .name = "_id_" });
     const email_index = bson.literal(.{ .v = 2, .key = .{ .email = 1 }, .name = "email_1", .unique = true });
     var cursor: Script.Cursor = .{ .ns = "app.users", .batches = &.{ &.{id_index}, &.{email_index} } };
-    var script: Script = .init(testing.allocator, cursor.handler());
-    defer script.deinit();
-    var fake: FakeDriver = .init(testing.allocator, &script);
-    defer fake.deinit();
+    var served: Served = undefined;
+    try served.start(io, cursor.handler(), .{});
+    defer served.stop(io);
+    const script = &served.script;
     var ids: bson.ObjectId.Generator = .init(io);
-    const users = mongo.Database.init(fake.client(), "app", &ids).collection("users");
+    const users = mongo.Database.init(served.client(), "app", &ids).collection("users");
 
     {
         const indexes = try users.listIndexes(io, .of(.root), .{ .allocator = testing.allocator });
@@ -171,7 +171,7 @@ const namespace_not_found = bson.literal(.{ .ok = 0.0, .errmsg = "ns does not ex
 test "listIndexes of a collection that is not there, code 26, is an empty cursor, with or without diagnostics" {
     const io = testing.io;
     var f: Fixture = .{};
-    f.init(namespace_not_found);
+    try f.init(namespace_not_found);
     defer f.deinit();
     const users = f.users();
 
@@ -206,12 +206,11 @@ test "a cursor of listIndexes without diagnostics: the error of a getMore ends i
     const first = bson.literal(.{ .cursor = .{ .firstBatch = .{.{ .v = 2, .key = .{ ._id = 1 }, .name = "_id_" }}, .id = @as(i64, 42), .ns = "app.users" }, .ok = 1.0 });
     const gone = bson.literal(.{ .ok = 0.0, .errmsg = "cursor id 42 not found", .code = 43, .codeName = "CursorNotFound" });
     var queue: Script.Queue = .{ .answers = &.{ .{ .reply = first }, .{ .reply = gone } } };
-    var script: Script = .init(testing.allocator, queue.handler());
-    defer script.deinit();
-    var fake: FakeDriver = .init(testing.allocator, &script);
-    defer fake.deinit();
+    var served: Served = undefined;
+    try served.start(io, queue.handler(), .{});
+    defer served.stop(io);
     var ids: bson.ObjectId.Generator = .init(io);
-    const users = mongo.Database.init(fake.client(), "app", &ids).collection("users");
+    const users = mongo.Database.init(served.client(), "app", &ids).collection("users");
     const indexes = try users.listIndexes(io, .of(.root), .{ .allocator = testing.allocator });
     defer indexes.deinit(io);
     try testing.expectEqualStrings("_id_", (try (try indexes.next(io, .of(.root))).?.get("name")).?.string);
@@ -223,7 +222,7 @@ test "listIndexes answered with any other code is CommandFailed, with or without
     const io = testing.io;
     const refused = bson.literal(.{ .ok = 0.0, .errmsg = "not authorized on app to execute command { listIndexes: \"users\" }", .code = 13, .codeName = "Unauthorized" });
     var f: Fixture = .{};
-    f.init(refused);
+    try f.init(refused);
     defer f.deinit();
     const users = f.users();
     var d: mongo.Diagnostics = .{};
@@ -238,7 +237,7 @@ test "listIndexes answered with any other code is CommandFailed, with or without
 test "dropIndex sends dropIndexes with the name, dropIndexes with *, and dropIndex(\"*\") is InvalidArgument" {
     const io = testing.io;
     var f: Fixture = .{};
-    f.init(bson.literal(.{ .nIndexesWas = 2, .ok = 1.0 }));
+    try f.init(bson.literal(.{ .nIndexesWas = 2, .ok = 1.0 }));
     defer f.deinit();
     const users = f.users();
     try users.dropIndex(io, .of(.root), "email_1", .{ .allocator = testing.allocator });
@@ -256,7 +255,7 @@ test "ok 0 of dropIndex is CommandFailed, with the reply in failure_reply" {
     const io = testing.io;
     const refused = bson.literal(.{ .ok = 0.0, .errmsg = "index not found with name [nope]", .code = 27, .codeName = "IndexNotFound" });
     var f: Fixture = .{};
-    f.init(refused);
+    try f.init(refused);
     defer f.deinit();
     var d: mongo.Diagnostics = .{};
     var failure: ?bson.OwnedDocument = null;
@@ -269,9 +268,9 @@ test "ok 0 of dropIndex is CommandFailed, with the reply in failure_reply" {
 test "a bad collection name is InvalidArgument for the indexes too, and nothing is sent" {
     const io = testing.io;
     var f: Fixture = .{};
-    f.init(created);
+    try f.init(created);
     defer f.deinit();
-    const bad = mongo.Database.init(f.fake.client(), "app", &f.ids).collection("");
+    const bad = mongo.Database.init(f.served.client(), "app", &f.ids).collection("");
     const a = testing.allocator;
     try testing.expectError(error.InvalidArgument, bad.createIndexes(io, .of(.root), &.{.{ .keys = bson.literal(.{ .n = 1 }) }}, .{ .allocator = a }));
     try testing.expectError(error.InvalidArgument, bad.listIndexes(io, .of(.root), .{ .allocator = a }));

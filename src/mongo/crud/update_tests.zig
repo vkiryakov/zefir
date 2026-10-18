@@ -1,13 +1,14 @@
 //! Tests of `updateOne`, `updateMany`, `replaceOne`, `deleteOne` and
-//! `deleteMany` on `mongo.testing.FakeDriver`: the exact commands in the
-//! script's journal and the results, in each form of the documents.
+//! `deleteMany` on the client against `mongo.testing.FakeServer`: the
+//! exact commands in the script's journal and the results, in each form
+//! of the documents.
 
 const std = @import("std");
 const testing = std.testing;
 const mongo = @import("../root.zig");
 const bson = mongo.bson;
 const Script = mongo.testing.Script;
-const FakeDriver = mongo.testing.FakeDriver;
+const Served = @import("../tests/Served.zig");
 
 /// The one item of the write in `entry`, in its section `identifier`.
 fn item(entry: Script.Entry, identifier: []const u8) !bson.RawDocument {
@@ -19,29 +20,29 @@ fn item(entry: Script.Entry, identifier: []const u8) !bson.RawDocument {
     return doc;
 }
 
-/// A script that answers each write with `reply`, and the fake on it.
+/// A script that answers each write with `reply`, and the client on it.
 const Fixture = struct {
     replies: [16]Script.Answer = undefined,
     queue: Script.Queue = undefined,
-    script: Script = undefined,
-    fake: FakeDriver = undefined,
+    served: Served = undefined,
+    /// The script of the server.
+    script: *Script = undefined,
     ids: bson.ObjectId.Generator = .{ .random = .{ 1, 2, 3, 4, 5 }, .counter = .init(0) },
 
-    /// Lives where it is: the script and the fake point into it.
-    fn init(f: *Fixture, reply: bson.RawDocument) void {
+    /// Lives where it is: the server and the client point into it.
+    fn init(f: *Fixture, reply: bson.RawDocument) !void {
         for (&f.replies) |*answer| answer.* = .{ .reply = reply };
         f.queue = .{ .answers = &f.replies };
-        f.script = .init(testing.allocator, f.queue.handler());
-        f.fake = .init(testing.allocator, &f.script);
+        try f.served.start(testing.io, f.queue.handler(), .{});
+        f.script = &f.served.script;
     }
 
     fn deinit(f: *Fixture) void {
-        f.fake.deinit();
-        f.script.deinit();
+        f.served.stop(testing.io);
     }
 
     fn users(f: *Fixture) mongo.Collection {
-        return mongo.Database.init(f.fake.client(), "app", &f.ids).collection("users");
+        return mongo.Database.init(f.served.client(), "app", &f.ids).collection("users");
     }
 };
 
@@ -64,7 +65,7 @@ fn idOneByBuilder() !bson.OwnedDocument {
 test "updateOne sends one statement {q, u} in updates and reports matched and modified, in each of the three forms" {
     const io = testing.io;
     var f: Fixture = .{};
-    f.init(bson.literal(.{ .n = 1, .nModified = 1, .ok = 1.0 }));
+    try f.init(bson.literal(.{ .n = 1, .nModified = 1, .ok = 1.0 }));
     defer f.deinit();
     const users = f.users();
 
@@ -96,7 +97,7 @@ test "updateOne sends one statement {q, u} in updates and reports matched and mo
 test "updateMany sends multi: true; updateOne and replaceOne send no multi" {
     const io = testing.io;
     var f: Fixture = .{};
-    f.init(bson.literal(.{ .n = 3, .nModified = 2, .ok = 1.0 }));
+    try f.init(bson.literal(.{ .n = 3, .nModified = 2, .ok = 1.0 }));
     defer f.deinit();
     const users = f.users();
     var many = try users.updateMany(io, .of(.root), .{ .age = .{ .@"$lt" = 18 } }, .{ .@"$set" = .{ .minor = true } }, .{ .allocator = testing.allocator });
@@ -118,7 +119,7 @@ test "updateMany sends multi: true; updateOne and replaceOne send no multi" {
 test "an update that is a list is a pipeline: a tuple, an array or a slice of stages" {
     const io = testing.io;
     var f: Fixture = .{};
-    f.init(bson.literal(.{ .n = 1, .nModified = 1, .ok = 1.0 }));
+    try f.init(bson.literal(.{ .n = 1, .nModified = 1, .ok = 1.0 }));
     defer f.deinit();
     const users = f.users();
     const stages = [_]bson.RawDocument{ bson.literal(.{ .@"$set" = .{ .n = 1 } }), bson.literal(.{ .@"$unset" = "old" }) };
@@ -138,7 +139,7 @@ test "an update that is a list is a pipeline: a tuple, an array or a slice of st
 test "the options of an update: upsert, arrayFilters, collation and hint in the statement; let, bypassDocumentValidation and comment in the body" {
     const io = testing.io;
     var f: Fixture = .{};
-    f.init(bson.literal(.{ .n = 1, .nModified = 1, .ok = 1.0 }));
+    try f.init(bson.literal(.{ .n = 1, .nModified = 1, .ok = 1.0 }));
     defer f.deinit();
     const users = f.users();
     var result = try users.updateMany(io, .of(.root), .{ .grades = .{ .@"$gte" = 100 } }, .{ .@"$set" = .{ .@"grades.$[high]" = 100 } }, .{
@@ -190,7 +191,7 @@ test "an upsert reports the _id that the server made, and matched without it" {
     const reply = try bson.encode(testing.allocator, .{ .n = 1, .nModified = 0, .upserted = .{.{ .index = 0, ._id = made }}, .ok = 1.0 }, .{});
     defer reply.deinit();
     var f: Fixture = .{};
-    f.init(reply.raw());
+    try f.init(reply.raw());
     defer f.deinit();
     const users = f.users();
     var result = try users.updateOne(io, .of(.root), .{ .email = "ann@example.com" }, .{ .@"$set" = .{ .name = "Ann" } }, .{ .allocator = testing.allocator, .upsert = true });
@@ -211,7 +212,7 @@ test "an upsert reports the _id that the server made, and matched without it" {
 test "an update that does not start with an operator, or is empty, is InvalidArgument; a replacement may not start with one" {
     const io = testing.io;
     var f: Fixture = .{};
-    f.init(bson.literal(.{ .n = 1, .nModified = 1, .ok = 1.0 }));
+    try f.init(bson.literal(.{ .n = 1, .nModified = 1, .ok = 1.0 }));
     defer f.deinit();
     const users = f.users();
     var d: mongo.Diagnostics = .{};
@@ -239,7 +240,7 @@ test "an update that does not start with an operator, or is empty, is InvalidArg
 test "deleteOne sends limit 1 and deleteMany limit 0; deleteMany(.{}) sends q: {}, and the result reports deleted" {
     const io = testing.io;
     var f: Fixture = .{};
-    f.init(bson.literal(.{ .n = 5, .ok = 1.0 }));
+    try f.init(bson.literal(.{ .n = 5, .ok = 1.0 }));
     defer f.deinit();
     const users = f.users();
 
@@ -288,7 +289,7 @@ test "deleteOne sends limit 1 and deleteMany limit 0; deleteMany(.{}) sends q: {
 test "a filter with a null field sends BSON null, so that it matches only documents without the field" {
     const io = testing.io;
     var f: Fixture = .{};
-    f.init(bson.literal(.{ .n = 0, .ok = 1.0 }));
+    try f.init(bson.literal(.{ .n = 0, .ok = 1.0 }));
     defer f.deinit();
     const email: ?[]const u8 = null;
     var result = try f.users().deleteMany(io, .of(.root), .{ .email = email }, .{ .allocator = testing.allocator });
@@ -299,12 +300,12 @@ test "a filter with a null field sends BSON null, so that it matches only docume
 test "a bad collection name, filter, collation or comment is InvalidArgument, and nothing is sent" {
     const io = testing.io;
     var f: Fixture = .{};
-    f.init(bson.literal(.{ .n = 0, .ok = 1.0 }));
+    try f.init(bson.literal(.{ .n = 0, .ok = 1.0 }));
     defer f.deinit();
     const users = f.users();
     var d: mongo.Diagnostics = .{};
     const bad: []const u8 = "\xff";
-    const db: mongo.Database = .init(f.fake.client(), "app", &f.ids);
+    const db: mongo.Database = .init(f.served.client(), "app", &f.ids);
     try testing.expectError(error.InvalidArgument, db.collection("").deleteOne(io, .of(.root), .{}, .{ .allocator = testing.allocator, .diagnostics = &d }));
     try testing.expectEqualStrings("the collection name is empty", d.message());
     try testing.expectError(error.InvalidArgument, db.collection("$cmd").updateOne(io, .of(.root), .{}, .{ .@"$set" = .{ .a = 1 } }, .{ .allocator = testing.allocator }));

@@ -1,13 +1,13 @@
-//! Tests of `insertOne` and `insertMany` on `mongo.testing.FakeDriver`:
-//! the exact commands in the script's journal and the results, in each
-//! form of the documents.
+//! Tests of `insertOne` and `insertMany` on the client against
+//! `mongo.testing.FakeServer`: the exact commands in the script's journal
+//! and the results, in each form of the documents.
 
 const std = @import("std");
 const testing = std.testing;
 const mongo = @import("../root.zig");
 const bson = mongo.bson;
 const Script = mongo.testing.Script;
-const FakeDriver = mongo.testing.FakeDriver;
+const Served = @import("../tests/Served.zig");
 
 /// A generator whose ids differ only in their seconds and counters.
 fn generator() bson.ObjectId.Generator {
@@ -36,12 +36,12 @@ fn sent(entry: Script.Entry, buffer: []bson.RawDocument) ![]bson.RawDocument {
 test "insertOne sends insert with the document in a section of kind 1 and reports its _id, in each of the three forms" {
     const io = testing.io;
     var write: Script.Write = .{};
-    var script: Script = .init(testing.allocator, write.handler());
-    defer script.deinit();
-    var fake: FakeDriver = .init(testing.allocator, &script);
-    defer fake.deinit();
+    var served: Served = undefined;
+    try served.start(io, write.handler(), .{});
+    defer served.stop(io);
+    const script = &served.script;
     var ids = generator();
-    const users = mongo.Database.init(fake.client(), "app", &ids).collection("users");
+    const users = mongo.Database.init(served.client(), "app", &ids).collection("users");
 
     const ann = bson.literal(.{ ._id = 1, .name = "Ann" });
     const built = try annByBuilder();
@@ -67,12 +67,12 @@ test "insertOne sends insert with the document in a section of kind 1 and report
 test "insertOne gives a document without _id the next ObjectId of the database first, and reports it" {
     const io = testing.io;
     var write: Script.Write = .{};
-    var script: Script = .init(testing.allocator, write.handler());
-    defer script.deinit();
-    var fake: FakeDriver = .init(testing.allocator, &script);
-    defer fake.deinit();
+    var served: Served = undefined;
+    try served.start(io, write.handler(), .{});
+    defer served.stop(io);
+    const script = &served.script;
     var ids = generator();
-    const users = mongo.Database.init(fake.client(), "app", &ids).collection("users");
+    const users = mongo.Database.init(served.client(), "app", &ids).collection("users");
 
     const User = struct { _id: ?bson.ObjectId = null, name: []const u8 };
     inline for (.{ bson.literal(.{ .name = "Ann" }), User{ .name = "Ann" }, .{ .name = "Ann" } }, 0..) |doc, i| {
@@ -92,12 +92,12 @@ test "insertOne gives a document without _id the next ObjectId of the database f
 test "insertOne sends bypassDocumentValidation only when true, and the comment" {
     const io = testing.io;
     var write: Script.Write = .{};
-    var script: Script = .init(testing.allocator, write.handler());
-    defer script.deinit();
-    var fake: FakeDriver = .init(testing.allocator, &script);
-    defer fake.deinit();
+    var served: Served = undefined;
+    try served.start(io, write.handler(), .{});
+    defer served.stop(io);
+    const script = &served.script;
     var ids = generator();
-    const users = mongo.Database.init(fake.client(), "app", &ids).collection("users");
+    const users = mongo.Database.init(served.client(), "app", &ids).collection("users");
 
     var result = try users.insertOne(io, .of(.root), .{ ._id = 1 }, .{
         .allocator = testing.allocator,
@@ -120,13 +120,12 @@ test "insertOne sends bypassDocumentValidation only when true, and the comment" 
 test "insertMany of 10 documents at a maxWriteBatchSize of 3 goes out as four commands, with the _ids it made" {
     const io = testing.io;
     var write: Script.Write = .{};
-    var script: Script = .init(testing.allocator, write.handler());
-    defer script.deinit();
-    script.hello.max_write_batch_size = 3;
-    var fake: FakeDriver = .init(testing.allocator, &script);
-    defer fake.deinit();
+    var served: Served = undefined;
+    try served.start(io, write.handler(), .{ .max_write_batch_size = 3 });
+    defer served.stop(io);
+    const script = &served.script;
     var ids = generator();
-    const users = mongo.Database.init(fake.client(), "app", &ids).collection("users");
+    const users = mongo.Database.init(served.client(), "app", &ids).collection("users");
 
     const Doc = struct { n: i32 };
     var docs: [10]Doc = undefined;
@@ -160,12 +159,12 @@ test "insertMany of 10 documents at a maxWriteBatchSize of 3 goes out as four co
 test "insertMany takes a slice, an array and a tuple, of documents in any of the three forms, and sends ordered as given" {
     const io = testing.io;
     var write: Script.Write = .{};
-    var script: Script = .init(testing.allocator, write.handler());
-    defer script.deinit();
-    var fake: FakeDriver = .init(testing.allocator, &script);
-    defer fake.deinit();
+    var served: Served = undefined;
+    try served.start(io, write.handler(), .{});
+    defer served.stop(io);
+    const script = &served.script;
     var ids = generator();
-    const users = mongo.Database.init(fake.client(), "app", &ids).collection("users");
+    const users = mongo.Database.init(served.client(), "app", &ids).collection("users");
 
     const ann = bson.literal(.{ ._id = 1, .name = "Ann" });
     const bob = bson.literal(.{ ._id = 2, .name = "Bob" });
@@ -208,12 +207,12 @@ test "insertMany takes a slice, an array and a tuple, of documents in any of the
 test "an empty insertMany, .{} among them, is InvalidArgument, and nothing is sent" {
     const io = testing.io;
     var write: Script.Write = .{};
-    var script: Script = .init(testing.allocator, write.handler());
-    defer script.deinit();
-    var fake: FakeDriver = .init(testing.allocator, &script);
-    defer fake.deinit();
+    var served: Served = undefined;
+    try served.start(io, write.handler(), .{});
+    defer served.stop(io);
+    const script = &served.script;
     var ids = generator();
-    const users = mongo.Database.init(fake.client(), "app", &ids).collection("users");
+    const users = mongo.Database.init(served.client(), "app", &ids).collection("users");
 
     var d: mongo.Diagnostics = .{};
     try testing.expectError(error.InvalidArgument, users.insertMany(io, .of(.root), .{}, .{ .allocator = testing.allocator, .diagnostics = &d }));
@@ -226,12 +225,12 @@ test "an empty insertMany, .{} among them, is InvalidArgument, and nothing is se
 test "a bad collection name or a document the codec cannot write is InvalidArgument, and nothing is sent" {
     const io = testing.io;
     var write: Script.Write = .{};
-    var script: Script = .init(testing.allocator, write.handler());
-    defer script.deinit();
-    var fake: FakeDriver = .init(testing.allocator, &script);
-    defer fake.deinit();
+    var served: Served = undefined;
+    try served.start(io, write.handler(), .{});
+    defer served.stop(io);
+    const script = &served.script;
     var ids = generator();
-    const db: mongo.Database = .init(fake.client(), "app", &ids);
+    const db: mongo.Database = .init(served.client(), "app", &ids);
 
     var d: mongo.Diagnostics = .{};
     try testing.expectError(error.InvalidArgument, db.collection("").insertOne(io, .of(.root), .{ .a = 1 }, .{ .allocator = testing.allocator, .diagnostics = &d }));
@@ -255,38 +254,35 @@ test "a bad collection name or a document the codec cannot write is InvalidArgum
 test "an insert that the server refuses is WriteFailed" {
     const io = testing.io;
     var write: Script.Write = .{ .refuse = &.{.{ .index = 0 }} };
-    var script: Script = .init(testing.allocator, write.handler());
-    defer script.deinit();
-    var fake: FakeDriver = .init(testing.allocator, &script);
-    defer fake.deinit();
+    var served: Served = undefined;
+    try served.start(io, write.handler(), .{});
+    defer served.stop(io);
     var ids = generator();
-    const users = mongo.Database.init(fake.client(), "app", &ids).collection("users");
+    const users = mongo.Database.init(served.client(), "app", &ids).collection("users");
     try testing.expectError(error.WriteFailed, users.insertOne(io, .of(.root), .{ ._id = 1 }, .{ .allocator = testing.allocator }));
 }
 
 test "an error of the contract passes as it is" {
     const io = testing.io;
     var queue: Script.Queue = .{ .answers = &.{.close_connection} };
-    var script: Script = .init(testing.allocator, queue.handler());
-    defer script.deinit();
-    var fake: FakeDriver = .init(testing.allocator, &script);
-    defer fake.deinit();
+    var served: Served = undefined;
+    try served.start(io, queue.handler(), .{});
+    defer served.stop(io);
     var ids = generator();
-    const users = mongo.Database.init(fake.client(), "app", &ids).collection("users");
+    const users = mongo.Database.init(served.client(), "app", &ids).collection("users");
     try testing.expectError(error.ConnectionLost, users.insertOne(io, .of(.root), .{ ._id = 1 }, .{ .allocator = testing.allocator }));
-    fake.close(io);
+    served.driver.close(io);
     try testing.expectError(error.Closed, users.insertMany(io, .of(.root), .{.{ ._id = 1 }}, .{ .allocator = testing.allocator }));
 }
 
 test "the documents of an insert are freed before it returns: only the result is left, and it frees" {
     const io = testing.io;
     var write: Script.Write = .{};
-    var script: Script = .init(testing.allocator, write.handler());
-    defer script.deinit();
-    var fake: FakeDriver = .init(testing.allocator, &script);
-    defer fake.deinit();
+    var served: Served = undefined;
+    try served.start(io, write.handler(), .{});
+    defer served.stop(io);
     var ids = generator();
-    const users = mongo.Database.init(fake.client(), "app", &ids).collection("users");
+    const users = mongo.Database.init(served.client(), "app", &ids).collection("users");
     // testing.allocator fails the test on a leak; a string _id is copied
     // into the result.
     var result = try users.insertMany(io, .of(.root), .{ .{ ._id = "ann" }, .{ .name = "Bob" } }, .{ .allocator = testing.allocator });

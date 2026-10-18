@@ -1,28 +1,30 @@
 //! Tests of `findOneAndUpdate`, `findOneAndReplace` and
-//! `findOneAndDelete` on `mongo.testing.FakeDriver`: the exact
-//! `findAndModify` commands in the script's journal, and their `value`.
+//! `findOneAndDelete` on the client against `mongo.testing.FakeServer`:
+//! the exact `findAndModify` commands in the script's journal, and their
+//! `value`.
 
 const std = @import("std");
 const testing = std.testing;
 const mongo = @import("../root.zig");
 const bson = mongo.bson;
 const Script = mongo.testing.Script;
-const FakeDriver = mongo.testing.FakeDriver;
+const Served = @import("../tests/Served.zig");
 
-/// A script that answers each command with `reply`, and the fake on it.
+/// A script that answers each command with `reply`, and the client on it.
 const Fixture = struct {
     replies: [16]Script.Answer = undefined,
     queue: Script.Queue = undefined,
-    script: Script = undefined,
-    fake: FakeDriver = undefined,
+    served: Served = undefined,
+    /// The script of the server.
+    script: *Script = undefined,
     ids: bson.ObjectId.Generator = .{ .random = .{ 1, 2, 3, 4, 5 }, .counter = .init(0) },
 
-    /// Lives where it is: the script and the fake point into it.
-    fn init(f: *Fixture, reply: bson.RawDocument) void {
+    /// Lives where it is: the server and the client point into it.
+    fn init(f: *Fixture, reply: bson.RawDocument) !void {
         f.answerWith(reply);
         f.queue = .{ .answers = &f.replies };
-        f.script = .init(testing.allocator, f.queue.handler());
-        f.fake = .init(testing.allocator, &f.script);
+        try f.served.start(testing.io, f.queue.handler(), .{});
+        f.script = &f.served.script;
     }
 
     fn answerWith(f: *Fixture, reply: bson.RawDocument) void {
@@ -30,12 +32,11 @@ const Fixture = struct {
     }
 
     fn deinit(f: *Fixture) void {
-        f.fake.deinit();
-        f.script.deinit();
+        f.served.stop(testing.io);
     }
 
     fn users(f: *Fixture) mongo.Collection {
-        return mongo.Database.init(f.fake.client(), "app", &f.ids).collection("users");
+        return mongo.Database.init(f.served.client(), "app", &f.ids).collection("users");
     }
 };
 
@@ -54,7 +55,7 @@ fn expectValue(expected: bson.RawDocument, got: ?bson.OwnedDocument) !void {
 test "findOneAndUpdate sends findAndModify with query and update, and returns a copy of value, in each of the three forms" {
     const io = testing.io;
     var f: Fixture = .{};
-    f.init(found);
+    try f.init(found);
     defer f.deinit();
     const users = f.users();
 
@@ -86,7 +87,7 @@ test "findOneAndUpdate sends findAndModify with query and update, and returns a 
 test "the options of findOneAndUpdate: return_document after is new: true, projection is fields" {
     const io = testing.io;
     var f: Fixture = .{};
-    f.init(found);
+    try f.init(found);
     defer f.deinit();
     try expectValue(bson.literal(.{ ._id = 1, .n = 2 }), try f.users().findOneAndUpdate(io, .of(.root), .{ .n = .{ .@"$gte" = 1 } }, .{ .@"$set" = .{ .@"tags.$[t]" = "x" } }, .{
         .allocator = testing.allocator,
@@ -136,7 +137,7 @@ test "the options of findOneAndUpdate: return_document after is new: true, proje
 test "findOneAndReplace sends the replacement as update, and refuses one that starts with an operator" {
     const io = testing.io;
     var f: Fixture = .{};
-    f.init(found);
+    try f.init(found);
     defer f.deinit();
     const users = f.users();
     try expectValue(bson.literal(.{ ._id = 1, .n = 2 }), try users.findOneAndReplace(io, .of(.root), .{ ._id = 1 }, .{ .n = 5 }, .{
@@ -165,7 +166,7 @@ test "findOneAndReplace sends the replacement as update, and refuses one that st
 test "findOneAndDelete sends remove: true, with its sort and projection" {
     const io = testing.io;
     var f: Fixture = .{};
-    f.init(found);
+    try f.init(found);
     defer f.deinit();
     try expectValue(bson.literal(.{ ._id = 1, .n = 2 }), try f.users().findOneAndDelete(io, .of(.root), .{ .n = 2 }, .{
         .allocator = testing.allocator,
@@ -193,7 +194,7 @@ test "findOneAndDelete sends remove: true, with its sort and projection" {
 test "value null is a null result; a reply without value is a protocol violation" {
     const io = testing.io;
     var f: Fixture = .{};
-    f.init(bson.literal(.{ .lastErrorObject = .{ .n = 0, .updatedExisting = false }, .value = null, .ok = 1.0 }));
+    try f.init(bson.literal(.{ .lastErrorObject = .{ .n = 0, .updatedExisting = false }, .value = null, .ok = 1.0 }));
     defer f.deinit();
     const users = f.users();
     try testing.expect(try users.findOneAndUpdate(io, .of(.root), .{ ._id = 9 }, .{ .@"$set" = .{ .n = 1 } }, .{ .allocator = testing.allocator }) == null);
@@ -213,7 +214,7 @@ test "ok 0 is CommandFailed, with the reply in failure_reply" {
     const io = testing.io;
     const refused = bson.literal(.{ .ok = 0.0, .errmsg = "E11000 duplicate key error", .code = 11000, .codeName = "DuplicateKey" });
     var f: Fixture = .{};
-    f.init(refused);
+    try f.init(refused);
     defer f.deinit();
     var d: mongo.Diagnostics = .{};
     var failure: ?bson.OwnedDocument = null;
@@ -231,9 +232,9 @@ test "ok 0 is CommandFailed, with the reply in failure_reply" {
 test "a bad collection name or filter is InvalidArgument, and nothing is sent" {
     const io = testing.io;
     var f: Fixture = .{};
-    f.init(found);
+    try f.init(found);
     defer f.deinit();
-    const db: mongo.Database = .init(f.fake.client(), "app", &f.ids);
+    const db: mongo.Database = .init(f.served.client(), "app", &f.ids);
     var d: mongo.Diagnostics = .{};
     try testing.expectError(error.InvalidArgument, db.collection("").findOneAndDelete(io, .of(.root), .{}, .{ .allocator = testing.allocator, .diagnostics = &d }));
     try testing.expectEqualStrings("the collection name is empty", d.message());
