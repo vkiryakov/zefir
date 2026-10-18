@@ -319,7 +319,7 @@ fn connectAndPing(io: Io) !void {
     try testing.expectEqual(@as(f64, 1), try (try reply.raw().get("ok")).?.asF64());
     const caps = c.capabilities();
     try testing.expectEqualStrings("zefir-mongo-async-driver", caps.name);
-    try testing.expect(caps.commands and caps.cursors and caps.aggregation and !caps.batched_writes);
+    try testing.expect(caps.commands and caps.cursors and caps.aggregation and caps.batched_writes);
     try testing.expectEqual(@as(i32, 21), caps.server.?.max_wire_version);
     // A second connect keeps the connection it has.
     try driver.connect(io, .root, null);

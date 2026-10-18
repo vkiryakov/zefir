@@ -18,7 +18,7 @@
 //! ```
 //!
 //! Calls come from any task. Each takes a connection of the pool for its
-//! exchange and gives it back: up to `maxPoolSize` connections, opened as
+//! exchange, every batch of a write for its own, and gives it back: up to `maxPoolSize` connections, opened as
 //! calls need them, `maxConnecting` at once, and calls that find none wait
 //! in line, first come first served, within their deadline and
 //! `serverSelectionTimeoutMS` (`error.PoolExhausted`). Every new
@@ -64,6 +64,7 @@ const Pool = @import("engine/Pool.zig");
 const command_ = @import("engine/command.zig");
 const connect_ = @import("engine/connect.zig");
 const cursor_ = @import("engine/cursor.zig");
+const write_ = @import("engine/write.zig");
 const handshake = @import("engine/handshake.zig");
 const KeyCache = @import("engine/KeyCache.zig");
 const scram = @import("engine/scram.zig");
@@ -205,6 +206,7 @@ pub fn capabilities(self: *Client) mongo.Capabilities {
         .commands = true,
         .cursors = true,
         .aggregation = true,
+        .batched_writes = true,
         .server = self.server.load(),
     };
 }
@@ -221,8 +223,7 @@ pub fn openCursor(self: *Client, io: Io, op: OperationContext, command: *const m
 
 pub fn write(self: *Client, io: Io, op: OperationContext, request: *const mongo.WriteRequest, options: mongo.WriteOptions) mongo.Error!mongo.WriteResult {
     self.checkUse(io);
-    _ = .{ op, request };
-    return fail(options.diagnostics, null, error.Unsupported, "this version of zefir-mongo-async-driver runs commands only, without batched writes", .{});
+    return write_.run(self.runner(), io, op, request, options);
 }
 
 /// In safe builds: a call on a moved copy of the client, or on another

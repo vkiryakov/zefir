@@ -101,21 +101,44 @@ pub fn run(r: Runner, io: Io, op: OperationContext, command: *const mongo.Comman
 /// or clears the pool, as the exchange and the reply say. The caller has
 /// entered the pool.
 pub fn send(r: Runner, io: Io, op: OperationContext, deadline: ?core.Deadline, request: Request, allocator: Allocator, d: ?*Diagnostics) mongo.Error!bson.OwnedDocument {
-    // A call that cannot go out takes no connection.
+    var taken = try take(r, io, op, deadline, request.body, d);
+    defer give(r, io, &taken);
+    return exchange(r, io, &taken, op, deadline, request, allocator, d);
+}
+
+/// A connection of the pool taken for one exchange, and what the exchange
+/// left of it, which `give` hands back to the pool.
+pub const Taken = struct {
+    entry: *Pool.Entry,
+    after: Pool.After = .ok,
+
+    pub fn connection(t: *const Taken) *Connection {
+        return Connection.of(t.entry);
+    }
+};
+
+/// A connection for a command of `body` under `deadline`, within the
+/// deadline and `serverSelectionTimeoutMS`. A call that cannot go out
+/// takes none: less than 1 ms left of the deadline, a canceled token, or
+/// `maxTimeMS` of the caller next to a deadline of `timeoutMS`, which the
+/// contract leaves to the driver to see.
+pub fn take(r: Runner, io: Io, op: OperationContext, deadline: ?core.Deadline, body: bson.RawDocument, d: ?*Diagnostics) mongo.Error!Taken {
     if (deadline) |dl| if (dl.remaining(time.now(io)).nanoseconds < std.time.ns_per_ms) {
         return fail(d, .checkout, error.DeadlineExceeded, "less than 1 ms was left of the deadline before the command went out", .{});
     };
     if (op.ctx.isCancelled()) return fail(d, .checkout, error.Cancelled, "the token was canceled before the command went out", .{});
-    // The contract refuses maxTimeMS next to a deadline of the context;
-    // one of timeoutMS is the driver's to see.
-    if (deadline != null and op.ctx.deadline == null and hasMaxTime(request.body)) {
+    if (deadline != null and op.ctx.deadline == null and hasMaxTime(body)) {
         return fail(d, null, error.InvalidArgument, "the command holds maxTimeMS and timeoutMS of the connection string gives the call a deadline, from which the driver writes maxTimeMS: drop one of the two", .{});
     }
-    const entry = try r.pool.checkOut(io, r.opener, r.limits(io, deadline), d);
-    var after: Pool.After = .ok;
-    defer r.pool.checkIn(io, entry, after);
+    return .{ .entry = try r.pool.checkOut(io, r.opener, r.limits(io, deadline), d) };
+}
+
+/// Sends `request` on the connection of `taken` and returns the reply,
+/// from `allocator`, with its `ok` unchecked; `taken` keeps what the
+/// exchange and the reply leave of the connection.
+pub fn exchange(r: Runner, io: Io, taken: *Taken, op: OperationContext, deadline: ?core.Deadline, request: Request, allocator: Allocator, d: ?*Diagnostics) mongo.Error!bson.OwnedDocument {
     const max_time_ms = try beforeSend(r, io, op, deadline, request.body, d);
-    const conn = Connection.of(entry);
+    const conn = taken.connection();
     const reply = conn.exchange(.{
         .database = request.database,
         .body = request.body,
@@ -123,11 +146,16 @@ pub fn send(r: Runner, io: Io, op: OperationContext, deadline: ?core.Deadline, r
         .max_time_ms = max_time_ms,
         .sequence = request.sequence,
     }, allocator, deadline, d) catch |err| {
-        after = errors.afterExchange(conn, err, d);
+        taken.after = errors.afterExchange(conn, err, d);
         return err;
     };
-    after = errors.afterReply(reply.raw());
+    taken.after = errors.afterReply(reply.raw());
     return reply;
+}
+
+/// Hands the connection of `taken` back to the pool.
+pub fn give(r: Runner, io: Io, taken: *Taken) void {
+    r.pool.checkIn(io, taken.entry, taken.after);
 }
 
 /// The checks of a command about to go out on its connection, and its

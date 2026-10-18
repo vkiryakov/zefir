@@ -31,6 +31,7 @@ test {
     _ = @import("engine/errors.zig");
     _ = @import("engine/command.zig");
     _ = @import("engine/cursor.zig");
+    _ = @import("engine/write.zig");
     _ = @import("testing/connection_tests.zig");
     _ = @import("testing/handshake_tests.zig");
     _ = @import("testing/auth_tests.zig");
@@ -39,4 +40,5 @@ test {
     _ = @import("testing/command_tests.zig");
     _ = @import("testing/errors_tests.zig");
     _ = @import("testing/cursor_tests.zig");
+    _ = @import("testing/write_tests.zig");
 }
