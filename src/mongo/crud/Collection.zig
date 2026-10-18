@@ -89,6 +89,10 @@ pub const FindOneAndReplaceOptions = options_.FindOneAndReplaceOptions;
 pub const FindOneAndDeleteOptions = options_.FindOneAndDeleteOptions;
 pub const FindOptions = options_.FindOptions;
 pub const FindOneOptions = options_.FindOneOptions;
+pub const AggregateOptions = options_.AggregateOptions;
+pub const CountDocumentsOptions = options_.CountDocumentsOptions;
+pub const EstimatedDocumentCountOptions = options_.EstimatedDocumentCountOptions;
+pub const DistinctOptions = options_.DistinctOptions;
 pub const ReturnDocument = options_.ReturnDocument;
 pub const Hint = options_.Hint;
 pub const InsertOneResult = results.InsertOneResult;
@@ -485,6 +489,157 @@ fn findAndModify(c: Collection, io: Io, op: OperationContext, body: bson.RawDocu
     };
 }
 
+/// Runs the aggregation `pipeline`, a list of stages, `.{}` the empty one:
+/// `aggregate`, whose cursor gives the documents of its last stage:
+///
+/// ```zig
+/// var by_city = try users.aggregate(io, op, .{
+///     .{ .@"$match" = .{ .active = true } },
+///     .{ .@"$group" = .{ ._id = "$city", .n = .{ .@"$sum" = 1 } } },
+/// }, .{ .allocator = arena });
+/// defer by_city.deinit(io);
+/// ```
+pub fn aggregate(c: Collection, io: Io, op: OperationContext, pipeline: anytype, options: AggregateOptions) Error!Cursor {
+    comptime document.expectList("aggregate", "pipeline", @TypeOf(pipeline));
+    try c.begin(options.diagnostics);
+    var scratch: std.heap.ArenaAllocator = .init(options.allocator);
+    defer scratch.deinit();
+    const a = scratch.allocator();
+    const stages = document.encodeList(a, pipeline) catch |err| return unwritten(err, options.diagnostics, "the pipeline");
+    var w: Writer = .init(a, options.diagnostics);
+    try w.string("aggregate", c.name);
+    try w.documents("pipeline", stages, "the pipeline");
+    if (options.allow_disk_use) |allow| try w.boolean("allowDiskUse", allow);
+    // By the CRUD spec, a pipeline that writes runs with the server's
+    // batch size: a batch size of 0 would keep it from running.
+    try w.cursor(if (writes(stages)) null else options.batch_size);
+    if (options.bypass_document_validation) try w.boolean("bypassDocumentValidation", true);
+    if (options.collation) |collation| try w.document("collation", collation, "the collation");
+    if (options.hint) |hint| try w.hint(hint);
+    if (options.comment) |value| try w.value("comment", value, "the comment");
+    if (options.let) |let| try w.document("let", let, "let");
+    return c.db.client.openCursor(io, op, .{ .database = c.db.name, .body = try w.finish() }, .{
+        .batch_size = options.batch_size,
+        .comment = options.comment,
+        .diagnostics = options.diagnostics,
+        .failure_reply = options.failure_reply,
+    });
+}
+
+/// Whether the last of `stages` writes its documents: `$out` or `$merge`.
+fn writes(stages: []const bson.RawDocument) bool {
+    if (stages.len == 0) return false;
+    const first = (stages[stages.len - 1].first() catch return false) orelse return false;
+    return std.mem.eql(u8, first.key, "$out") or std.mem.eql(u8, first.key, "$merge");
+}
+
+/// The stage of `countDocuments` that counts what comes to it.
+const count_stage = bson.literal(.{ .@"$group" = .{ ._id = 1, .n = .{ .@"$sum" = 1 } } });
+
+/// How many documents `filter` matches, `.{}` all of them, counted by the
+/// server one by one: `aggregate` with `$match`, then `$skip` and
+/// `$limit` when given, then `$group`. Exact, as `estimatedDocumentCount`
+/// is not.
+pub fn countDocuments(c: Collection, io: Io, op: OperationContext, filter: anytype, options: CountDocumentsOptions) Error!u64 {
+    comptime document.expectDocument("countDocuments", "filter", @TypeOf(filter));
+    try c.begin(options.diagnostics);
+    var scratch: std.heap.ArenaAllocator = .init(options.allocator);
+    defer scratch.deinit();
+    const a = scratch.allocator();
+    const match = try argument(a, filter, "the filter", options.diagnostics);
+    var w: Writer = .init(a, options.diagnostics);
+    try w.string("aggregate", c.name);
+    try w.beginArray("pipeline");
+    try w.beginDocument("");
+    try w.document("$match", match, "the filter");
+    try w.end();
+    if (options.skip != 0) {
+        try w.beginDocument("");
+        try w.count("$skip", options.skip);
+        try w.end();
+    }
+    if (options.limit != 0) {
+        try w.beginDocument("");
+        try w.count("$limit", options.limit);
+        try w.end();
+    }
+    try w.document("", count_stage, "the pipeline");
+    try w.end();
+    try w.cursor(null);
+    if (options.collation) |collation| try w.document("collation", collation, "the collation");
+    if (options.hint) |hint| try w.hint(hint);
+    if (options.comment) |value| try w.value("comment", value, "the comment");
+    const cursor = try c.db.client.openCursor(io, op, .{ .database = c.db.name, .body = try w.finish() }, .{
+        .diagnostics = options.diagnostics,
+        .failure_reply = options.failure_reply,
+    });
+    defer cursor.deinit(io);
+    // No document: nothing matched.
+    const counted = (try cursor.next(io, op)) orelse return 0;
+    return countIn(counted, options.diagnostics, "the result of countDocuments");
+}
+
+/// How many documents the collection holds, by its metadata: `count`
+/// without a query. Fast, but after an unclean shutdown it may be off
+/// until the server counts again; `countDocuments` is exact.
+pub fn estimatedDocumentCount(c: Collection, io: Io, op: OperationContext, options: EstimatedDocumentCountOptions) Error!u64 {
+    try c.begin(options.diagnostics);
+    var scratch: std.heap.ArenaAllocator = .init(options.allocator);
+    defer scratch.deinit();
+    var w: Writer = .init(scratch.allocator(), options.diagnostics);
+    try w.string("count", c.name);
+    if (options.comment) |value| try w.value("comment", value, "the comment");
+    const reply = try c.db.client.runCommand(io, op, .{ .database = c.db.name, .body = try w.finish() }, .{
+        .allocator = options.allocator,
+        .diagnostics = options.diagnostics,
+        .failure_reply = options.failure_reply,
+    });
+    defer reply.deinit();
+    return countIn(reply.raw(), options.diagnostics, "the reply of count");
+}
+
+/// The values that the field `field`, a name or a dotted path, takes in
+/// the documents that `filter` matches, `.{}` in all of them, each once:
+/// `distinct`. The result is a BSON array, a document whose keys are "0",
+/// "1", …, in `options.allocator`; its `iterator()` gives the values:
+///
+/// ```zig
+/// const cities = try users.distinct(io, op, "address.city", .{ .active = true }, .{ .allocator = arena });
+/// var it = cities.raw().iterator();
+/// while (try it.next()) |element| try show(element.value);
+/// ```
+pub fn distinct(c: Collection, io: Io, op: OperationContext, field: []const u8, filter: anytype, options: DistinctOptions) Error!bson.OwnedDocument {
+    comptime document.expectDocument("distinct", "filter", @TypeOf(filter));
+    try c.begin(options.diagnostics);
+    var scratch: std.heap.ArenaAllocator = .init(options.allocator);
+    defer scratch.deinit();
+    const a = scratch.allocator();
+    const query = try argument(a, filter, "the filter", options.diagnostics);
+    var w: Writer = .init(a, options.diagnostics);
+    try w.string("distinct", c.name);
+    try w.string("key", field);
+    try w.document("query", query, "the filter");
+    if (options.collation) |collation| try w.document("collation", collation, "the collation");
+    if (options.comment) |value| try w.value("comment", value, "the comment");
+    const reply = try c.db.client.runCommand(io, op, .{ .database = c.db.name, .body = try w.finish() }, .{
+        .allocator = options.allocator,
+        .diagnostics = options.diagnostics,
+        .failure_reply = options.failure_reply,
+    });
+    defer reply.deinit();
+    const values = (reply.raw().get("values") catch null) orelse return violation(options.diagnostics, "the reply of distinct holds no values");
+    if (values != .array) return violation(options.diagnostics, "values in the reply of distinct is not an array");
+    return values.array.dupe(options.allocator);
+}
+
+/// The `n` of `doc`, a count: a whole number, 0 or more, of any numeric
+/// type.
+fn countIn(doc: bson.RawDocument, diagnostics: ?*Diagnostics, comptime what: []const u8) Error!u64 {
+    const n = (doc.get("n") catch null) orelse return violation(diagnostics, what ++ " holds no n");
+    const count = n.asI64() catch return violation(diagnostics, what ++ " holds an n that is not a count: a whole number, 0 or more");
+    return std.math.cast(u64, count) orelse violation(diagnostics, what ++ " holds an n that is not a count: a whole number, 0 or more");
+}
+
 /// Stops the build unless `T` is an update: a document, or a list of the
 /// stages of a pipeline.
 fn expectUpdate(comptime operation: []const u8, comptime T: type) void {
@@ -742,6 +897,27 @@ const Writer = struct {
     /// A document, checked whole as `RawDocument.validate` checks it.
     fn document(w: *Writer, key: []const u8, doc: bson.RawDocument, what: []const u8) Error!void {
         w.b.putDocument(key, doc) catch |err| return w.fail(err, what);
+    }
+
+    /// Opens a document under `key`; in an array, `key` is empty.
+    fn beginDocument(w: *Writer, key: []const u8) Error!void {
+        w.b.beginDocument(key) catch |err| return w.fail(err, key);
+    }
+
+    /// Opens an array under `key`.
+    fn beginArray(w: *Writer, key: []const u8) Error!void {
+        w.b.beginArray(key) catch |err| return w.fail(err, key);
+    }
+
+    fn end(w: *Writer) Error!void {
+        w.b.end() catch |err| return w.fail(err, "the command");
+    }
+
+    /// `cursor`: `{}`, or `{batchSize: n}`.
+    fn cursor(w: *Writer, batch_size: ?u32) Error!void {
+        try w.beginDocument("cursor");
+        if (batch_size) |n| try w.count("batchSize", n);
+        try w.end();
     }
 
     /// An array of documents.

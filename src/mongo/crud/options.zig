@@ -262,3 +262,78 @@ pub const FindOneOptions = struct {
     /// slot must hold null.
     failure_reply: ?*?bson.OwnedDocument = null,
 };
+
+pub const AggregateOptions = struct {
+    /// The memory of the call's scratch, which is freed before the call
+    /// returns; the cursor belongs to the driver.
+    allocator: std.mem.Allocator,
+    /// How many documents each batch holds, the first and those of every
+    /// `getMore`; null leaves it to the server. A pipeline that ends in
+    /// `$out` or `$merge` runs with the server's batch size: one of 0
+    /// would keep it from running.
+    batch_size: ?u32 = null,
+    /// Whether stages too large for memory may use the disk; null leaves
+    /// it to the server.
+    allow_disk_use: ?bool = null,
+    hint: ?Hint = null,
+    collation: ?bson.RawDocument = null,
+    /// Variables that the stages read as `$$name`.
+    let: ?bson.RawDocument = null,
+    /// Let the documents that `$out` or `$merge` writes past the
+    /// collection's validator.
+    bypass_document_validation: bool = false,
+    /// Sent with the command and with each `getMore`, for the server's
+    /// logs and profiler.
+    comment: ?bson.Value = null,
+    /// The cursor writes the errors of its `getMore`s here too: it must
+    /// outlive the cursor.
+    diagnostics: ?*Diagnostics = null,
+    /// After `CommandFailed`, or `Timeout` by code 50, of the command or a
+    /// `getMore`, the whole reply of the server, from the driver's
+    /// allocator: free it with `deinit`. The slot must hold null and
+    /// outlive the cursor.
+    failure_reply: ?*?bson.OwnedDocument = null,
+};
+
+pub const CountDocumentsOptions = struct {
+    /// The memory of the call's scratch, which is freed before the call
+    /// returns.
+    allocator: std.mem.Allocator,
+    /// How many of the matching documents to pass over before counting.
+    skip: u32 = 0,
+    /// How many documents to count at most; 0 counts all.
+    limit: u32 = 0,
+    hint: ?Hint = null,
+    collation: ?bson.RawDocument = null,
+    comment: ?bson.Value = null,
+    diagnostics: ?*Diagnostics = null,
+    /// After `CommandFailed`, or `Timeout` by code 50, the whole reply of
+    /// the server, from the driver's allocator: free it with `deinit`. The
+    /// slot must hold null.
+    failure_reply: ?*?bson.OwnedDocument = null,
+};
+
+pub const EstimatedDocumentCountOptions = struct {
+    /// The memory of the call's scratch, which is freed before the call
+    /// returns.
+    allocator: std.mem.Allocator,
+    comment: ?bson.Value = null,
+    diagnostics: ?*Diagnostics = null,
+    /// After `CommandFailed`, or `Timeout` by code 50, the whole reply of
+    /// the server, from `allocator`; the slot must hold null.
+    failure_reply: ?*?bson.OwnedDocument = null,
+};
+
+pub const DistinctOptions = struct {
+    /// The memory of the values returned, and of the call's scratch,
+    /// which is freed before the call returns.
+    allocator: std.mem.Allocator,
+    /// How strings compare, in the filter and among the values:
+    /// `bson.literal(.{ .locale = "en", .strength = 1 })`.
+    collation: ?bson.RawDocument = null,
+    comment: ?bson.Value = null,
+    diagnostics: ?*Diagnostics = null,
+    /// After `CommandFailed`, or `Timeout` by code 50, the whole reply of
+    /// the server, from `allocator`; the slot must hold null.
+    failure_reply: ?*?bson.OwnedDocument = null,
+};
