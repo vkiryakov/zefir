@@ -1,10 +1,9 @@
 //! Opening a connection to the server. `std.Io` has no portable timeout
 //! for TCP connect, so a whole attempt, DNS, TCP, the handshake and
 //! authentication, runs in a task of its own and races a timer
-//! (`race.zig`); a timer that wins
-//! shuts the attempt's socket down, which ends an attempt blocked on it
-//! even when it lost its cancelation. `close` of the client stops an
-//! attempt the same way.
+//! (`race.zig`); a timer that wins shuts the attempt's socket down, which
+//! ends an attempt blocked on it even when it lost its cancelation.
+//! `close` of the client stops an attempt the same way.
 
 const std = @import("std");
 const Io = std.Io;
