@@ -19,6 +19,7 @@
 const std = @import("std");
 const bson = @import("../bson.zig");
 const read = @import("read.zig");
+const ejson = @import("ejson.zig");
 const RawDocument = @This();
 
 /// The whole document: the int32 length, the elements and the final 0.
@@ -102,4 +103,12 @@ pub fn first(doc: RawDocument) bson.Error!?bson.Element {
 /// A copy of the document in `allocator`.
 pub fn dupe(doc: RawDocument, allocator: std.mem.Allocator) std.mem.Allocator.Error!bson.OwnedDocument {
     return .{ .bytes = try allocator.dupe(u8, doc.bytes), .allocator = allocator };
+}
+
+/// Prints the document as Relaxed Extended JSON, for logs and test
+/// messages: `{f}`. A document that fails `validate` prints as
+/// "<invalid BSON>". Values of documents print as they are, so keep
+/// secrets out of what you log.
+pub fn format(doc: RawDocument, w: *std.Io.Writer) std.Io.Writer.Error!void {
+    return ejson.writeDocument(w, doc);
 }

@@ -3,7 +3,8 @@
 //! mongodb/specifications is not used: its license does not fit zefir.
 //!
 //! `valid` holds a document {"a": value} for every BSON type, with the
-//! value it reads back as; `broken` holds bytes that no reader may accept.
+//! value it reads back as and its Relaxed Extended JSON; `broken` holds
+//! bytes that no reader may accept.
 
 const std = @import("std");
 const bson = @import("../bson.zig");
@@ -16,72 +17,77 @@ pub const Vector = struct {
     bson: []const u8,
     /// What "a" reads back as.
     value: Value,
+    /// The document as Relaxed Extended JSON, as `{f}` prints it.
+    json: []const u8,
 };
 
 pub const object_id = hex("56e1fc72e0c917e9c4714161").*;
 const uuid = hex("73ffd26444b34c6990e8e7d1dfc035d4");
 
 pub const valid = [_]Vector{
-    .{ .name = "double 1.0", .bson = hex("10000000 01 6100 000000000000f03f 00"), .value = .{ .double = 1.0 } },
-    .{ .name = "double -0.0", .bson = hex("10000000 01 6100 0000000000000080 00"), .value = .{ .double = -0.0 } },
-    .{ .name = "double 2.5", .bson = hex("10000000 01 6100 0000000000000440 00"), .value = .{ .double = 2.5 } },
-    .{ .name = "double 1e300", .bson = hex("10000000 01 6100 9c7500883ce4377e 00"), .value = .{ .double = 1e300 } },
-    .{ .name = "double NaN", .bson = hex("10000000 01 6100 000000000000f87f 00"), .value = .{ .double = std.math.nan(f64) } },
-    .{ .name = "double +inf", .bson = hex("10000000 01 6100 000000000000f07f 00"), .value = .{ .double = std.math.inf(f64) } },
-    .{ .name = "double -inf", .bson = hex("10000000 01 6100 000000000000f0ff 00"), .value = .{ .double = -std.math.inf(f64) } },
-    .{ .name = "string", .bson = hex("10000000 02 6100 04000000 416e6e00 00"), .value = .{ .string = "Ann" } },
-    .{ .name = "empty string", .bson = hex("0d000000 02 6100 01000000 00 00"), .value = .{ .string = "" } },
-    .{ .name = "string in Cyrillic", .bson = hex("19000000 02 6100 0d000000 d09fd180d0b8d0b2d0b5d182 00 00"), .value = .{ .string = "Привет" } },
-    .{ .name = "string with a NUL", .bson = hex("10000000 02 6100 04000000 61006200 00"), .value = .{ .string = "a\x00b" } },
-    .{ .name = "document", .bson = hex("14000000 03 6100 0c000000 10 6200 01000000 00 00"), .value = .{ .document = .{ .bytes = hex("0c000000 10 6200 01000000 00") } } },
-    .{ .name = "empty document", .bson = hex("0d000000 03 6100 05000000 00 00"), .value = .{ .document = .{ .bytes = hex("05000000 00") } } },
+    .{ .name = "double 1.0", .bson = hex("10000000 01 6100 000000000000f03f 00"), .value = .{ .double = 1.0 }, .json = "{\"a\":1.0}" },
+    .{ .name = "double -0.0", .bson = hex("10000000 01 6100 0000000000000080 00"), .value = .{ .double = -0.0 }, .json = "{\"a\":-0.0}" },
+    .{ .name = "double 2.5", .bson = hex("10000000 01 6100 0000000000000440 00"), .value = .{ .double = 2.5 }, .json = "{\"a\":2.5}" },
+    .{ .name = "double 1e300", .bson = hex("10000000 01 6100 9c7500883ce4377e 00"), .value = .{ .double = 1e300 }, .json = "{\"a\":1e300}" },
+    .{ .name = "double NaN", .bson = hex("10000000 01 6100 000000000000f87f 00"), .value = .{ .double = std.math.nan(f64) }, .json = "{\"a\":{\"$numberDouble\":\"NaN\"}}" },
+    .{ .name = "double +inf", .bson = hex("10000000 01 6100 000000000000f07f 00"), .value = .{ .double = std.math.inf(f64) }, .json = "{\"a\":{\"$numberDouble\":\"Infinity\"}}" },
+    .{ .name = "double -inf", .bson = hex("10000000 01 6100 000000000000f0ff 00"), .value = .{ .double = -std.math.inf(f64) }, .json = "{\"a\":{\"$numberDouble\":\"-Infinity\"}}" },
+    .{ .name = "string", .bson = hex("10000000 02 6100 04000000 416e6e00 00"), .value = .{ .string = "Ann" }, .json = "{\"a\":\"Ann\"}" },
+    .{ .name = "empty string", .bson = hex("0d000000 02 6100 01000000 00 00"), .value = .{ .string = "" }, .json = "{\"a\":\"\"}" },
+    .{ .name = "string in Cyrillic", .bson = hex("19000000 02 6100 0d000000 d09fd180d0b8d0b2d0b5d182 00 00"), .value = .{ .string = "Привет" }, .json = "{\"a\":\"Привет\"}" },
+    .{ .name = "string with a NUL", .bson = hex("10000000 02 6100 04000000 61006200 00"), .value = .{ .string = "a\x00b" }, .json = "{\"a\":\"a\\u0000b\"}" },
+    .{ .name = "document", .bson = hex("14000000 03 6100 0c000000 10 6200 01000000 00 00"), .value = .{ .document = .{ .bytes = hex("0c000000 10 6200 01000000 00") } }, .json = "{\"a\":{\"b\":1}}" },
+    .{ .name = "empty document", .bson = hex("0d000000 03 6100 05000000 00 00"), .value = .{ .document = .{ .bytes = hex("05000000 00") } }, .json = "{\"a\":{}}" },
     .{
         .name = "array",
         .bson = hex("1d000000 04 6100 15000000 10 3000 01000000 02 3100 02000000 7800 00 00"),
         .value = .{ .array = .{ .bytes = hex("15000000 10 3000 01000000 02 3100 02000000 7800 00") } },
+        .json = "{\"a\":[1,\"x\"]}",
     },
-    .{ .name = "empty array", .bson = hex("0d000000 04 6100 05000000 00 00"), .value = .{ .array = .{ .bytes = hex("05000000 00") } } },
-    .{ .name = "binary", .bson = hex("10000000 05 6100 03000000 00 010203 00"), .value = .{ .binary = .{ .subtype = .generic, .bytes = &.{ 1, 2, 3 } } } },
-    .{ .name = "binary UUID", .bson = hex("1d000000 05 6100 10000000 04 73ffd26444b34c6990e8e7d1dfc035d4 00"), .value = .{ .binary = .{ .subtype = .uuid, .bytes = uuid } } },
+    .{ .name = "empty array", .bson = hex("0d000000 04 6100 05000000 00 00"), .value = .{ .array = .{ .bytes = hex("05000000 00") } }, .json = "{\"a\":[]}" },
+    .{ .name = "binary", .bson = hex("10000000 05 6100 03000000 00 010203 00"), .value = .{ .binary = .{ .subtype = .generic, .bytes = &.{ 1, 2, 3 } } }, .json = "{\"a\":{\"$binary\":{\"base64\":\"AQID\",\"subType\":\"00\"}}}" },
+    .{ .name = "binary UUID", .bson = hex("1d000000 05 6100 10000000 04 73ffd26444b34c6990e8e7d1dfc035d4 00"), .value = .{ .binary = .{ .subtype = .uuid, .bytes = uuid } }, .json = "{\"a\":{\"$binary\":{\"base64\":\"c//SZESzTGmQ6OfR38A11A==\",\"subType\":\"04\"}}}" },
     // The old binary subtype keeps a second length inside the data; the
     // value is the data after it.
-    .{ .name = "binary of the old subtype", .bson = hex("13000000 05 6100 06000000 02 02000000 ffff 00"), .value = .{ .binary = .{ .subtype = .binary_old, .bytes = &.{ 0xff, 0xff } } } },
-    .{ .name = "empty user-defined binary", .bson = hex("0d000000 05 6100 00000000 80 00"), .value = .{ .binary = .{ .subtype = .user_defined, .bytes = "" } } },
-    .{ .name = "undefined", .bson = hex("08000000 06 6100 00"), .value = .undefined },
-    .{ .name = "ObjectId", .bson = hex("14000000 07 6100 56e1fc72e0c917e9c4714161 00"), .value = .{ .object_id = .{ .bytes = object_id } } },
-    .{ .name = "true", .bson = hex("09000000 08 6100 01 00"), .value = .{ .boolean = true } },
-    .{ .name = "false", .bson = hex("09000000 08 6100 00 00"), .value = .{ .boolean = false } },
-    .{ .name = "datetime at the epoch", .bson = hex("10000000 09 6100 0000000000000000 00"), .value = .{ .date_time = .{ .milliseconds = 0 } } },
-    .{ .name = "datetime with milliseconds", .bson = hex("10000000 09 6100 c5d8d6cc3b010000 00"), .value = .{ .date_time = .{ .milliseconds = 1356351330501 } } },
-    .{ .name = "datetime before the epoch", .bson = hex("10000000 09 6100 ffffffffffffffff 00"), .value = .{ .date_time = .{ .milliseconds = -1 } } },
-    .{ .name = "datetime in the year 10000", .bson = hex("10000000 09 6100 00dc1fd277e60000 00"), .value = .{ .date_time = .{ .milliseconds = 253402300800000 } } },
-    .{ .name = "null", .bson = hex("08000000 0a 6100 00"), .value = .null },
-    .{ .name = "regular expression", .bson = hex("10000000 0b 6100 5e612e6300 696d00 00"), .value = .{ .regex = .{ .pattern = "^a.c", .options = "im" } } },
-    .{ .name = "empty regular expression", .bson = hex("0a000000 0b 6100 00 00 00"), .value = .{ .regex = .{ .pattern = "", .options = "" } } },
+    .{ .name = "binary of the old subtype", .bson = hex("13000000 05 6100 06000000 02 02000000 ffff 00"), .value = .{ .binary = .{ .subtype = .binary_old, .bytes = &.{ 0xff, 0xff } } }, .json = "{\"a\":{\"$binary\":{\"base64\":\"//8=\",\"subType\":\"02\"}}}" },
+    .{ .name = "empty user-defined binary", .bson = hex("0d000000 05 6100 00000000 80 00"), .value = .{ .binary = .{ .subtype = .user_defined, .bytes = "" } }, .json = "{\"a\":{\"$binary\":{\"base64\":\"\",\"subType\":\"80\"}}}" },
+    .{ .name = "undefined", .bson = hex("08000000 06 6100 00"), .value = .undefined, .json = "{\"a\":{\"$undefined\":true}}" },
+    .{ .name = "ObjectId", .bson = hex("14000000 07 6100 56e1fc72e0c917e9c4714161 00"), .value = .{ .object_id = .{ .bytes = object_id } }, .json = "{\"a\":{\"$oid\":\"56e1fc72e0c917e9c4714161\"}}" },
+    .{ .name = "true", .bson = hex("09000000 08 6100 01 00"), .value = .{ .boolean = true }, .json = "{\"a\":true}" },
+    .{ .name = "false", .bson = hex("09000000 08 6100 00 00"), .value = .{ .boolean = false }, .json = "{\"a\":false}" },
+    .{ .name = "datetime at the epoch", .bson = hex("10000000 09 6100 0000000000000000 00"), .value = .{ .date_time = .{ .milliseconds = 0 } }, .json = "{\"a\":{\"$date\":\"1970-01-01T00:00:00Z\"}}" },
+    .{ .name = "datetime with milliseconds", .bson = hex("10000000 09 6100 c5d8d6cc3b010000 00"), .value = .{ .date_time = .{ .milliseconds = 1356351330501 } }, .json = "{\"a\":{\"$date\":\"2012-12-24T12:15:30.501Z\"}}" },
+    .{ .name = "datetime before the epoch", .bson = hex("10000000 09 6100 ffffffffffffffff 00"), .value = .{ .date_time = .{ .milliseconds = -1 } }, .json = "{\"a\":{\"$date\":{\"$numberLong\":\"-1\"}}}" },
+    .{ .name = "datetime in the year 10000", .bson = hex("10000000 09 6100 00dc1fd277e60000 00"), .value = .{ .date_time = .{ .milliseconds = 253402300800000 } }, .json = "{\"a\":{\"$date\":{\"$numberLong\":\"253402300800000\"}}}" },
+    .{ .name = "null", .bson = hex("08000000 0a 6100 00"), .value = .null, .json = "{\"a\":null}" },
+    .{ .name = "regular expression", .bson = hex("10000000 0b 6100 5e612e6300 696d00 00"), .value = .{ .regex = .{ .pattern = "^a.c", .options = "im" } }, .json = "{\"a\":{\"$regularExpression\":{\"pattern\":\"^a.c\",\"options\":\"im\"}}}" },
+    .{ .name = "empty regular expression", .bson = hex("0a000000 0b 6100 00 00 00"), .value = .{ .regex = .{ .pattern = "", .options = "" } }, .json = "{\"a\":{\"$regularExpression\":{\"pattern\":\"\",\"options\":\"\"}}}" },
     .{
         .name = "DBPointer",
         .bson = hex("1a000000 0c 6100 02000000 6200 56e1fc72e0c917e9c4714161 00"),
         .value = .{ .db_pointer = .{ .namespace = "b", .id = .{ .bytes = object_id } } },
+        .json = "{\"a\":{\"$dbPointer\":{\"$ref\":\"b\",\"$id\":{\"$oid\":\"56e1fc72e0c917e9c4714161\"}}}}",
     },
-    .{ .name = "JavaScript", .bson = hex("10000000 0d 6100 04000000 783d3100 00"), .value = .{ .javascript = "x=1" } },
-    .{ .name = "symbol", .bson = hex("0e000000 0e 6100 02000000 7300 00"), .value = .{ .symbol = "s" } },
+    .{ .name = "JavaScript", .bson = hex("10000000 0d 6100 04000000 783d3100 00"), .value = .{ .javascript = "x=1" }, .json = "{\"a\":{\"$code\":\"x=1\"}}" },
+    .{ .name = "symbol", .bson = hex("0e000000 0e 6100 02000000 7300 00"), .value = .{ .symbol = "s" }, .json = "{\"a\":{\"$symbol\":\"s\"}}" },
     .{
         .name = "JavaScript with scope",
         .bson = hex("1e000000 0f 6100 16000000 02000000 7800 0c000000 10 7800 01000000 00 00"),
         .value = .{ .javascript_with_scope = .{ .code = "x", .scope = .{ .bytes = hex("0c000000 10 7800 01000000 00") } } },
+        .json = "{\"a\":{\"$code\":\"x\",\"$scope\":{\"x\":1}}}",
     },
-    .{ .name = "int32", .bson = hex("0c000000 10 6100 01000000 00"), .value = .{ .int32 = 1 } },
-    .{ .name = "smallest int32", .bson = hex("0c000000 10 6100 00000080 00"), .value = .{ .int32 = std.math.minInt(i32) } },
-    .{ .name = "largest int32", .bson = hex("0c000000 10 6100 ffffff7f 00"), .value = .{ .int32 = std.math.maxInt(i32) } },
+    .{ .name = "int32", .bson = hex("0c000000 10 6100 01000000 00"), .value = .{ .int32 = 1 }, .json = "{\"a\":1}" },
+    .{ .name = "smallest int32", .bson = hex("0c000000 10 6100 00000080 00"), .value = .{ .int32 = std.math.minInt(i32) }, .json = "{\"a\":-2147483648}" },
+    .{ .name = "largest int32", .bson = hex("0c000000 10 6100 ffffff7f 00"), .value = .{ .int32 = std.math.maxInt(i32) }, .json = "{\"a\":2147483647}" },
     // The increment comes first: the low 32 bits of the uint64.
-    .{ .name = "timestamp", .bson = hex("10000000 11 6100 2a000000 15cd5b07 00"), .value = .{ .timestamp = .{ .seconds = 123456789, .increment = 42 } } },
-    .{ .name = "int64", .bson = hex("10000000 12 6100 0100000000000000 00"), .value = .{ .int64 = 1 } },
-    .{ .name = "int64 beyond int32", .bson = hex("10000000 12 6100 005ed0b200000000 00"), .value = .{ .int64 = 3_000_000_000 } },
-    .{ .name = "largest int64", .bson = hex("10000000 12 6100 ffffffffffffff7f 00"), .value = .{ .int64 = std.math.maxInt(i64) } },
-    .{ .name = "smallest int64", .bson = hex("10000000 12 6100 0000000000000080 00"), .value = .{ .int64 = std.math.minInt(i64) } },
-    .{ .name = "Decimal128", .bson = hex("18000000 13 6100 0f000000000000000000000000003e30 00"), .value = .{ .decimal128 = .{ .bytes = hex("0f000000000000000000000000003e30").* } } },
-    .{ .name = "MinKey", .bson = hex("08000000 ff 6100 00"), .value = .min_key },
-    .{ .name = "MaxKey", .bson = hex("08000000 7f 6100 00"), .value = .max_key },
+    .{ .name = "timestamp", .bson = hex("10000000 11 6100 2a000000 15cd5b07 00"), .value = .{ .timestamp = .{ .seconds = 123456789, .increment = 42 } }, .json = "{\"a\":{\"$timestamp\":{\"t\":123456789,\"i\":42}}}" },
+    .{ .name = "int64", .bson = hex("10000000 12 6100 0100000000000000 00"), .value = .{ .int64 = 1 }, .json = "{\"a\":1}" },
+    .{ .name = "int64 beyond int32", .bson = hex("10000000 12 6100 005ed0b200000000 00"), .value = .{ .int64 = 3_000_000_000 }, .json = "{\"a\":3000000000}" },
+    .{ .name = "largest int64", .bson = hex("10000000 12 6100 ffffffffffffff7f 00"), .value = .{ .int64 = std.math.maxInt(i64) }, .json = "{\"a\":9223372036854775807}" },
+    .{ .name = "smallest int64", .bson = hex("10000000 12 6100 0000000000000080 00"), .value = .{ .int64 = std.math.minInt(i64) }, .json = "{\"a\":-9223372036854775808}" },
+    .{ .name = "Decimal128", .bson = hex("18000000 13 6100 0f000000000000000000000000003e30 00"), .value = .{ .decimal128 = .{ .bytes = hex("0f000000000000000000000000003e30").* } }, .json = "{\"a\":{\"$numberDecimal\":\"1.5\"}}" },
+    .{ .name = "MinKey", .bson = hex("08000000 ff 6100 00"), .value = .min_key, .json = "{\"a\":{\"$minKey\":1}}" },
+    .{ .name = "MaxKey", .bson = hex("08000000 7f 6100 00"), .value = .max_key, .json = "{\"a\":{\"$maxKey\":1}}" },
 };
 
 /// {}
