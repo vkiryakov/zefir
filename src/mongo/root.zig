@@ -16,6 +16,8 @@
 //!   `mongo.OperationContext`, `mongo.Command`, `mongo.WriteRequest`, their
 //!   options, `mongo.WriteResult`, and `mongo.Capabilities` with the
 //!   revision of the contract, `mongo.contract_revision`.
+//! - `mongo.testing` — a scripted server, served on loopback or run in the
+//!   process as a fake driver, for tests without MongoDB.
 
 const std = @import("std");
 const errors = @import("contract/errors.zig");
@@ -25,6 +27,7 @@ const capabilities = @import("contract/capabilities.zig");
 
 pub const bson = @import("bson.zig");
 pub const wire = @import("wire.zig");
+pub const testing = @import("testing.zig");
 
 pub const Client = @import("contract/Client.zig");
 pub const Cursor = @import("contract/Cursor.zig");
@@ -57,6 +60,7 @@ test {
     std.testing.refAllDecls(@This());
     _ = bson;
     _ = wire;
+    _ = testing;
     _ = @import("contract/errors_tests.zig");
     _ = @import("contract/types_tests.zig");
     _ = @import("contract/client_tests.zig");
