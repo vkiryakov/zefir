@@ -313,15 +313,11 @@ flowchart TD
 
 ## Installation
 
-Add Zefir to your `build.zig.zon`:
+Add Zefir to your `build.zig.zon`; http ships since v0.8.0:
 
 ```sh
-zig fetch --save git+https://github.com/vkiryakov/zefir#dev
+zig fetch --save git+https://github.com/vkiryakov/zefir#v0.8.0
 ```
-
-zefir-http is on the `dev` branch until the next release. The command
-fetches the latest commit of `dev`; `--save` pins that commit. The latest
-release, v0.7.0, came before zefir-http, so `#v0.7.0` does not have it.
 
 A service runs on zio. zio has no release for Zig 0.17 yet, so pin the
 commit Zefir is tested with:
