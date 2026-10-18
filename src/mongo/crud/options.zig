@@ -337,3 +337,44 @@ pub const DistinctOptions = struct {
     /// the server, from `allocator`; the slot must hold null.
     failure_reply: ?*?bson.OwnedDocument = null,
 };
+
+pub const CreateIndexesOptions = struct {
+    /// The memory of the names returned, and of the call's scratch, which
+    /// is freed before the call returns.
+    allocator: std.mem.Allocator,
+    comment: ?bson.Value = null,
+    diagnostics: ?*Diagnostics = null,
+    /// After `CommandFailed`, or `Timeout` by code 50, the whole reply of
+    /// the server, from `allocator`; the slot must hold null.
+    failure_reply: ?*?bson.OwnedDocument = null,
+};
+
+pub const ListIndexesOptions = struct {
+    /// The memory of the call's scratch, which is freed before the call
+    /// returns; the cursor belongs to the driver.
+    allocator: std.mem.Allocator,
+    /// How many indexes each batch holds; null leaves it to the server.
+    batch_size: ?u32 = null,
+    /// Sent with the command and with each `getMore`.
+    comment: ?bson.Value = null,
+    /// The cursor writes the errors of its `getMore`s here too: it must
+    /// outlive the cursor.
+    diagnostics: ?*Diagnostics = null,
+    /// After `CommandFailed`, or `Timeout` by code 50, of the command or a
+    /// `getMore`, the whole reply of the server, from the driver's
+    /// allocator: free it with `deinit`. The slot must hold null and
+    /// outlive the cursor.
+    failure_reply: ?*?bson.OwnedDocument = null,
+};
+
+/// The options of `dropIndex` and `dropIndexes`.
+pub const DropIndexOptions = struct {
+    /// The memory of the call's scratch, which is freed before the call
+    /// returns.
+    allocator: std.mem.Allocator,
+    comment: ?bson.Value = null,
+    diagnostics: ?*Diagnostics = null,
+    /// After `CommandFailed`, or `Timeout` by code 50, the whole reply of
+    /// the server, from `allocator`; the slot must hold null.
+    failure_reply: ?*?bson.OwnedDocument = null,
+};

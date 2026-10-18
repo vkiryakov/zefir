@@ -67,6 +67,7 @@ const Cursor = @import("../contract/Cursor.zig");
 const Database = @import("Database.zig");
 const document = @import("document.zig");
 const id = @import("id.zig");
+const index = @import("index.zig");
 const options_ = @import("options.zig");
 const results = @import("results.zig");
 const commands = @import("command.zig");
@@ -100,6 +101,10 @@ pub const AggregateOptions = options_.AggregateOptions;
 pub const CountDocumentsOptions = options_.CountDocumentsOptions;
 pub const EstimatedDocumentCountOptions = options_.EstimatedDocumentCountOptions;
 pub const DistinctOptions = options_.DistinctOptions;
+pub const CreateIndexesOptions = options_.CreateIndexesOptions;
+pub const ListIndexesOptions = options_.ListIndexesOptions;
+pub const DropIndexOptions = options_.DropIndexOptions;
+pub const IndexModel = index.IndexModel;
 pub const ReturnDocument = options_.ReturnDocument;
 pub const Hint = options_.Hint;
 pub const InsertOneResult = results.InsertOneResult;
@@ -645,6 +650,104 @@ fn countIn(doc: bson.RawDocument, diagnostics: ?*Diagnostics, comptime what: []c
     const n = (doc.get("n") catch null) orelse return violation(diagnostics, what ++ " holds no n");
     const count = n.asI64() catch return violation(diagnostics, what ++ " holds an n that is not a count: a whole number, 0 or more");
     return std.math.cast(u64, count) orelse violation(diagnostics, what ++ " holds an n that is not a count: a whole number, 0 or more");
+}
+
+/// Makes the indexes of `models`, in one `createIndexes`, and returns
+/// their names in the order of the models: a model's own name, or the one
+/// made of its keys, "email_1_age_-1". An index that exists already with
+/// the same keys and options is no error. The names come from
+/// `options.allocator`, each and the slice: free them so, or with an
+/// arena. No models is `error.InvalidArgument`.
+pub fn createIndexes(c: Collection, io: Io, op: OperationContext, models: []const IndexModel, options: CreateIndexesOptions) Error![]const []const u8 {
+    try c.begin(options.diagnostics);
+    if (models.len == 0) return invalid(options.diagnostics, "createIndexes has no models: it needs at least one", .{});
+    const gpa = options.allocator;
+    const names = try gpa.alloc([]const u8, models.len);
+    var made: usize = 0;
+    errdefer {
+        for (names[0..made]) |name| gpa.free(name);
+        gpa.free(names);
+    }
+    for (models, names, 0..) |model, *name, i| {
+        name.* = if (model.name) |own| try gpa.dupe(u8, own) else try index.defaultName(gpa, model.keys, i, options.diagnostics);
+        made += 1;
+    }
+    var scratch: std.heap.ArenaAllocator = .init(gpa);
+    defer scratch.deinit();
+    const a = scratch.allocator();
+    var w: Writer = .init(a, options.diagnostics);
+    try w.string("createIndexes", c.name);
+    try w.beginArray("indexes");
+    for (models, names, 0..) |model, name, i| {
+        try w.beginDocument("");
+        try w.document("key", model.keys, try std.fmt.allocPrint(a, "the keys of index {d}", .{i}));
+        try w.string("name", name);
+        if (model.unique) try w.boolean("unique", true);
+        if (model.sparse) try w.boolean("sparse", true);
+        if (model.expire_after_seconds) |seconds| try w.count("expireAfterSeconds", seconds);
+        if (model.partial_filter_expression) |filter| try w.document("partialFilterExpression", filter, try std.fmt.allocPrint(a, "the partial filter expression of index {d}", .{i}));
+        if (model.collation) |collation| try w.document("collation", collation, try std.fmt.allocPrint(a, "the collation of index {d}", .{i}));
+        if (model.hidden) try w.boolean("hidden", true);
+        try w.end();
+    }
+    try w.end();
+    if (options.comment) |value| try w.value("comment", value, "the comment");
+    const reply = try c.db.client.runCommand(io, op, .{ .database = c.db.name, .body = try w.finish() }, .{
+        .allocator = gpa,
+        .diagnostics = options.diagnostics,
+        .failure_reply = options.failure_reply,
+    });
+    reply.deinit();
+    return names;
+}
+
+/// The indexes of the collection, each a document with its `name`, `key`
+/// and options: `listIndexes`, whose cursor gives them.
+pub fn listIndexes(c: Collection, io: Io, op: OperationContext, options: ListIndexesOptions) Error!Cursor {
+    try c.begin(options.diagnostics);
+    var scratch: std.heap.ArenaAllocator = .init(options.allocator);
+    defer scratch.deinit();
+    var w: Writer = .init(scratch.allocator(), options.diagnostics);
+    try w.string("listIndexes", c.name);
+    try w.cursor(options.batch_size);
+    if (options.comment) |value| try w.value("comment", value, "the comment");
+    return c.db.client.openCursor(io, op, .{ .database = c.db.name, .body = try w.finish() }, .{
+        .batch_size = options.batch_size,
+        .comment = options.comment,
+        .diagnostics = options.diagnostics,
+        .failure_reply = options.failure_reply,
+    });
+}
+
+/// Drops the index `name`: `dropIndexes` with its name. `"*"`, which
+/// would drop all of them, is `error.InvalidArgument`: that is what
+/// `dropIndexes` does.
+pub fn dropIndex(c: Collection, io: Io, op: OperationContext, name: []const u8, options: DropIndexOptions) Error!void {
+    try c.begin(options.diagnostics);
+    if (std.mem.eql(u8, name, "*")) return invalid(options.diagnostics, "dropIndex(\"*\") would drop every index of the collection: dropIndexes does that", .{});
+    return c.dropIndexesNamed(io, op, name, options);
+}
+
+/// Drops every index of the collection but the one of `_id`: `dropIndexes`
+/// with `"*"`.
+pub fn dropIndexes(c: Collection, io: Io, op: OperationContext, options: DropIndexOptions) Error!void {
+    try c.begin(options.diagnostics);
+    return c.dropIndexesNamed(io, op, "*", options);
+}
+
+fn dropIndexesNamed(c: Collection, io: Io, op: OperationContext, name: []const u8, options: DropIndexOptions) Error!void {
+    var scratch: std.heap.ArenaAllocator = .init(options.allocator);
+    defer scratch.deinit();
+    var w: Writer = .init(scratch.allocator(), options.diagnostics);
+    try w.string("dropIndexes", c.name);
+    try w.string("index", name);
+    if (options.comment) |value| try w.value("comment", value, "the comment");
+    const reply = try c.db.client.runCommand(io, op, .{ .database = c.db.name, .body = try w.finish() }, .{
+        .allocator = options.allocator,
+        .diagnostics = options.diagnostics,
+        .failure_reply = options.failure_reply,
+    });
+    reply.deinit();
 }
 
 /// Stops the build unless `T` is an update: a document, or a list of the
