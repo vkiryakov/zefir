@@ -351,7 +351,10 @@ pub const CreateIndexesOptions = struct {
 
 pub const ListIndexesOptions = struct {
     /// The memory of the call's scratch, which is freed before the call
-    /// returns; the cursor belongs to the driver.
+    /// returns; the cursor belongs to the driver. Without `diagnostics`,
+    /// the cursor also holds a `mongo.Diagnostics` of it until its
+    /// `deinit`, to tell a collection that is not there: the allocator
+    /// outlives the cursor then.
     allocator: std.mem.Allocator,
     /// How many indexes each batch holds; null leaves it to the server.
     batch_size: ?u32 = null,

@@ -608,6 +608,16 @@ fn indexes(io: Io, db: mongo.Database) anyerror!void {
     try testing.expectError(error.InvalidArgument, users.dropIndex(io, op(io), "*", .{ .allocator = a }));
     try users.dropIndexes(io, op(io), .{ .allocator = a, .comment = .{ .string = "e2e" } });
     try expectIndexes(io, users, &.{"_id_"});
+
+    // A collection that is not there has no indexes: every mongod answers
+    // NamespaceNotFound (26), which is an empty cursor, with diagnostics and
+    // without.
+    const none = db.collection("crud_indexes_none");
+    try drop(io, db, "crud_indexes_none");
+    try expectIndexes(io, none, &.{});
+    const cursor = try none.listIndexes(io, op(io), .{ .allocator = a });
+    defer cursor.deinit(io);
+    try testing.expect(try cursor.next(io, op(io)) == null);
 }
 
 /// The names that `listCollections` with `filter` gives in `db`, one per

@@ -74,6 +74,7 @@ const index = @import("index.zig");
 const options_ = @import("options.zig");
 const results = @import("results.zig");
 const commands = @import("command.zig");
+const cursors = @import("cursors.zig");
 const Writer = commands.Writer;
 const argument = commands.argument;
 const unwritten = commands.unwritten;
@@ -706,7 +707,10 @@ pub fn createIndexes(c: Collection, io: Io, op: OperationContext, models: []cons
 }
 
 /// The indexes of the collection, each a document with its `name`, `key`
-/// and options: `listIndexes`, whose cursor gives them.
+/// and options: `listIndexes`, whose cursor gives them. A collection that
+/// is not there has no indexes: the code 26 (NamespaceNotFound) of the
+/// server is an empty cursor, as the official drivers make it, and leaves
+/// nothing in the diagnostics or in `failure_reply`.
 pub fn listIndexes(c: Collection, io: Io, op: OperationContext, options: ListIndexesOptions) Error!Cursor {
     try c.begin(options.diagnostics);
     var scratch: std.heap.ArenaAllocator = .init(options.allocator);
@@ -715,12 +719,29 @@ pub fn listIndexes(c: Collection, io: Io, op: OperationContext, options: ListInd
     try w.string("listIndexes", c.name);
     try w.cursor(options.batch_size);
     if (options.comment) |value| try w.value("comment", value, "the comment");
-    return c.db.client.openCursor(io, op, .{ .database = c.db.name, .body = try w.finish() }, .{
+    const body = try w.finish();
+    // The code of the server's error tells a missing collection, so the
+    // call needs diagnostics; the driver keeps them for the getMores of
+    // the cursor, so they live with it when the caller passed none.
+    const own: ?*cursors.WithDiagnostics = if (options.diagnostics == null) try .create(options.allocator) else null;
+    const diagnostics = options.diagnostics orelse &own.?.diagnostics;
+    const cursor = c.db.client.openCursor(io, op, .{ .database = c.db.name, .body = body }, .{
         .batch_size = options.batch_size,
         .comment = options.comment,
-        .diagnostics = options.diagnostics,
+        .diagnostics = diagnostics,
         .failure_reply = options.failure_reply,
-    });
+    }) catch |err| {
+        const missing = err == error.CommandFailed and diagnostics.server != null and diagnostics.server.?.code == 26;
+        if (own) |o| o.destroy();
+        if (!missing) return err;
+        if (options.diagnostics) |d| d.* = .{};
+        if (options.failure_reply) |slot| if (slot.*) |doc| {
+            doc.deinit();
+            slot.* = null;
+        };
+        return cursors.empty();
+    };
+    return if (own) |o| o.wrap(cursor) else cursor;
 }
 
 /// Drops the index `name`: `dropIndexes` with its name. `"*"`, which

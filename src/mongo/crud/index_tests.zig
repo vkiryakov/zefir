@@ -166,6 +166,75 @@ test "listIndexes sends cursor: {} or its batch size, which goes with the commen
     try expectBody(bson.literal(.{ .getMore = @as(i64, 42), .collection = "users", .batchSize = 1, .comment = "check", .@"$db" = "app" }), script.entry(io, 3).body);
 }
 
+const namespace_not_found = bson.literal(.{ .ok = 0.0, .errmsg = "ns does not exist: app.users", .code = 26, .codeName = "NamespaceNotFound" });
+
+test "listIndexes of a collection that is not there, code 26, is an empty cursor, with or without diagnostics" {
+    const io = testing.io;
+    var f: Fixture = .{};
+    f.init(namespace_not_found);
+    defer f.deinit();
+    const users = f.users();
+
+    // With the caller's diagnostics and failure_reply: both stay empty.
+    var d: mongo.Diagnostics = .{};
+    var failure: ?bson.OwnedDocument = null;
+    {
+        const indexes = try users.listIndexes(io, .of(.root), .{ .allocator = testing.allocator, .diagnostics = &d, .failure_reply = &failure });
+        defer indexes.deinit(io);
+        try testing.expect(try indexes.next(io, .of(.root)) == null);
+        try testing.expect(try indexes.next(io, .of(.root)) == null);
+        indexes.close(io);
+        indexes.close(io);
+    }
+    try testing.expect(d.server == null);
+    try testing.expectEqualStrings("", d.message());
+    try testing.expect(failure == null);
+    // Without them.
+    {
+        const indexes = try users.listIndexes(io, .of(.root), .{ .allocator = testing.allocator, .batch_size = 1 });
+        defer indexes.deinit(io);
+        try testing.expect(try indexes.next(io, .of(.root)) == null);
+    }
+    // The command went out each time, and nothing else: no getMore, no
+    // killCursors.
+    try testing.expectEqual(@as(usize, 2), f.script.received(io));
+    try expectBody(bson.literal(.{ .listIndexes = "users", .cursor = .{ .batchSize = 1 }, .@"$db" = "app" }), f.script.entry(io, 1).body);
+}
+
+test "a cursor of listIndexes without diagnostics: the error of a getMore ends it, and its deinit frees all it holds" {
+    const io = testing.io;
+    const first = bson.literal(.{ .cursor = .{ .firstBatch = .{.{ .v = 2, .key = .{ ._id = 1 }, .name = "_id_" }}, .id = @as(i64, 42), .ns = "app.users" }, .ok = 1.0 });
+    const gone = bson.literal(.{ .ok = 0.0, .errmsg = "cursor id 42 not found", .code = 43, .codeName = "CursorNotFound" });
+    var queue: Script.Queue = .{ .answers = &.{ .{ .reply = first }, .{ .reply = gone } } };
+    var script: Script = .init(testing.allocator, queue.handler());
+    defer script.deinit();
+    var fake: FakeDriver = .init(testing.allocator, &script);
+    defer fake.deinit();
+    var ids: bson.ObjectId.Generator = .init(io);
+    const users = mongo.Database.init(fake.client(), "app", &ids).collection("users");
+    const indexes = try users.listIndexes(io, .of(.root), .{ .allocator = testing.allocator });
+    defer indexes.deinit(io);
+    try testing.expectEqualStrings("_id_", (try (try indexes.next(io, .of(.root))).?.get("name")).?.string);
+    try testing.expectError(error.CommandFailed, indexes.next(io, .of(.root)));
+    try testing.expectError(error.Closed, indexes.next(io, .of(.root)));
+}
+
+test "listIndexes answered with any other code is CommandFailed, with or without diagnostics" {
+    const io = testing.io;
+    const refused = bson.literal(.{ .ok = 0.0, .errmsg = "not authorized on app to execute command { listIndexes: \"users\" }", .code = 13, .codeName = "Unauthorized" });
+    var f: Fixture = .{};
+    f.init(refused);
+    defer f.deinit();
+    const users = f.users();
+    var d: mongo.Diagnostics = .{};
+    var failure: ?bson.OwnedDocument = null;
+    try testing.expectError(error.CommandFailed, users.listIndexes(io, .of(.root), .{ .allocator = testing.allocator, .diagnostics = &d, .failure_reply = &failure }));
+    defer failure.?.deinit();
+    try testing.expectEqualSlices(u8, refused.bytes, failure.?.bytes);
+    try testing.expectEqual(@as(i32, 13), d.server.?.code);
+    try testing.expectError(error.CommandFailed, users.listIndexes(io, .of(.root), .{ .allocator = testing.allocator }));
+}
+
 test "dropIndex sends dropIndexes with the name, dropIndexes with *, and dropIndex(\"*\") is InvalidArgument" {
     const io = testing.io;
     var f: Fixture = .{};
