@@ -1,0 +1,25 @@
+.{
+    .name = .mongo_minidriver,
+    .version = "0.1.0",
+    .fingerprint = 0xe072003b7a18f223,
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{
+        // Only for the package's own tests. Lazy: an application that
+        // depends on this package never fetches it, and gives the driver
+        // its own zefir modules instead (README.md). A release of the
+        // package pins a release of zefir with zefir-mongo here; the one
+        // below came before zefir-mongo, so build.zig says to run the tests
+        // in consumer/ instead.
+        .zefir = .{
+            .url = "git+https://github.com/vkiryakov/zefir#v0.8.0",
+            .hash = "zefir-0.8.0-533VDRcpbAAJ54fA8Qda4lKRbNWvz-JZ_KORghXhkeUI",
+            .lazy = true,
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "README.md",
+    },
+}
