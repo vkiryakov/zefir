@@ -22,6 +22,16 @@
 # nats-box, in the profile `tools`, is the NATS CLI that the tests of
 # rpc-nats run against the servers, by their service names:
 # `docker compose run --rm nats-box nats -s nats://plain:4222 micro ls`.
+#
+# The MongoDB servers of the end-to-end tests of zefir-mongo, in
+# tests/mongo-async-driver, are in the profile `mongo`, so that `up` and
+# `down` without it, as the NATS tests run them, leave them alone:
+# `docker compose --profile mongo up -d --wait mongo-plain` starts them,
+# and so does `zig build e2e` there. MONGO_VERSION picks the image of
+# mongo, 9.0.4 by default; CI also runs 7.0.45 and 8.0.34. Each starts
+# with an empty database. Their ports, on 127.0.0.1 only:
+#
+#   27117  mongo-plain: no authentication, test commands on for fail points
 
 name: zefir-nats-e2e
 
@@ -35,6 +45,17 @@ x-nats: &nats
     interval: 1s
     timeout: 2s
     retries: 30
+
+x-mongo: &mongo
+  image: mongo:${MONGO_VERSION:-9.0.4}
+  profiles: ["mongo"]
+  # In memory: every start has an empty database, and no volume is left.
+  tmpfs: ["/data/db", "/data/configdb"]
+  healthcheck:
+    test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand({ ping: 1 }).ok"]
+    interval: 1s
+    timeout: 5s
+    retries: 60
 
 services:
   plain:
@@ -120,3 +141,9 @@ services:
   nats-box:
     image: natsio/nats-box:0.20.0
     profiles: ["tools"]
+
+  # enableTestCommands lets the tests set fail points (failCommand).
+  mongo-plain:
+    <<: *mongo
+    command: ["mongod", "--setParameter", "enableTestCommands=1"]
+    ports: ["127.0.0.1:27117:27017"]
