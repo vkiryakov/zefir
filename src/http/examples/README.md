@@ -3035,9 +3035,10 @@ zig build bench
 ```
 
 It is built with ReleaseFast, and so are zefir and zio under it; the run
-takes about a minute. CI runs it only when asked, in the job `bench-http`
-of `.github/workflows/bench.yml`, on a runner of GitHub:
-`gh workflow run bench.yml --ref <branch>`. No check waits for it.
+takes about a minute. On GitHub it runs only when asked, as the job
+`bench-http` of the workflow `.github/workflows/bench.yml`:
+`gh workflow run bench.yml --ref <branch>`. It is not a part of CI, and no
+check waits for it.
 
 **What it measures.** One process holds the server, on `http.native`, and
 the clients that load it, all on one zio runtime, and they talk over
@@ -3048,7 +3049,7 @@ opens one connection and keeps it alive, as a browser or a proxy in front
 of a service does, so that opening connections is not what is timed: it
 sends a request, reads the whole response, and only then sends the next.
 One connection has one request at work at a time, then, and 64 connections
-have 64. Each scenario is a route of the server:
+have 64. Each scenario asks for a path of its own:
 
 | Scenario | Request | What the server does |
 | --- | --- | --- |
@@ -3105,7 +3106,7 @@ Three runs of the commit on that CPU, this one,
 and [39110562340](https://github.com/vkiryakov/zefir/actions/runs/39110562340),
 gave these requests per second, from the lowest to the highest:
 
-| Scenario | 1 executor, 1 connection | 1 executor, 64 | 4 executors, 1 connection | 4 executors, 64 |
+| Scenario | 1 executor, 1 connection | 1 executor, 64 connections | 4 executors, 1 connection | 4 executors, 64 connections |
 | --- | ---: | ---: | ---: | ---: |
 | plain text | 41 454–42 579 | 49 896–51 028 | 11 754–12 076 | 122 440–124 104 |
 | JSON out | 40 632–41 660 | 49 447–50 381 | 11 601–11 846 | 119 795–121 567 |
