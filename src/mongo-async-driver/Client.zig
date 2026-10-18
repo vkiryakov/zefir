@@ -56,6 +56,7 @@ const OwnedOptions = @import("OwnedOptions.zig");
 const Stats = @import("Stats.zig");
 const Connection = @import("engine/Connection.zig");
 const Pool = @import("engine/Pool.zig");
+const command_ = @import("engine/command.zig");
 const connect_ = @import("engine/connect.zig");
 const handshake = @import("engine/handshake.zig");
 const KeyCache = @import("engine/KeyCache.zig");
@@ -75,6 +76,8 @@ keys: KeyCache = .{},
 pool: Pool,
 /// What the latest hello said, for `capabilities`, which takes no `io`.
 server: Server = .{},
+/// The round trips of hello on new connections, for `maxTimeMS`.
+round_trips: time.RoundTrips = .{},
 /// Where `connect` succeeded, 0 before, in safe builds: a call on a copy
 /// of the client somewhere else panics. Atomic: any task may call while
 /// another connects.
@@ -138,7 +141,7 @@ pub fn connect(self: *Client, io: Io, ctx: core.Context, diagnostics: ?*Diagnost
     defer self.pool.leave(io);
     if (self.pool.isConnected(io)) return;
     try checkBeforeSend(io, .of(ctx), ctx.deadline, d);
-    try self.pool.connect(io, self.opener(), self.limits(io, ctx.deadline), d);
+    try self.pool.connect(io, self.opener(), self.runner().limits(io, ctx.deadline), d);
     if (std.debug.runtime_safety) self.home.store(@intFromPtr(self), .monotonic);
 }
 
@@ -181,25 +184,7 @@ pub fn capabilities(self: *Client) mongo.Capabilities {
 
 pub fn runCommand(self: *Client, io: Io, op: OperationContext, command: *const mongo.Command, options: mongo.CommandOptions) mongo.Error!bson.OwnedDocument {
     self.checkUse(io);
-    const d = options.diagnostics;
-    try self.pool.enter(io, d);
-    defer self.pool.leave(io);
-    const deadline = self.deadlineOf(io, op);
-    const entry = try self.pool.checkOut(io, self.opener(), self.limits(io, deadline), d);
-    var after: Pool.After = .ok;
-    defer self.pool.checkIn(io, entry, after);
-    try checkBeforeSend(io, op, deadline, d);
-    const conn = Connection.of(entry);
-    const reply = conn.exchange(.{ .database = command.database, .body = command.body }, options.allocator, deadline, d) catch |err| {
-        after = afterExchange(conn, err, d);
-        return err;
-    };
-    wire.checkReply(reply.raw(), options.allocator, d, options.failure_reply) catch |err| {
-        after = afterRefusal(reply.raw());
-        reply.deinit();
-        return err;
-    };
-    return reply;
+    return command_.run(self.runner(), io, op, command, options);
 }
 
 pub fn openCursor(self: *Client, io: Io, op: OperationContext, command: *const mongo.Command, options: mongo.CursorOptions) mongo.Error!mongo.Cursor {
@@ -231,41 +216,21 @@ inline fn checkHome(self: *const Client) void {
     }
 }
 
-/// What an exchange that failed leaves of its connection: a network error
-/// on it clears the pool, since the others are likely gone too; a cut is
-/// `close`'s; a timeout, a cancelation or a broken reply close only it.
-fn afterExchange(conn: *Connection, err: mongo.Error, d: ?*Diagnostics) Pool.After {
-    if (err != error.ConnectionLost) return if (conn.usable) .ok else .broken;
-    const cause = conn.stream.err orelse return .{ .clear = "a connection to it broke" };
-    if (cause != error.Stopped) return .{ .clear = "a connection to it broke" };
-    // The phase stays: the cut may come while the command goes out.
-    if (d) |x| x.set(x.phase, null, "close() of the client cut the exchange", .{});
-    return .broken;
-}
-
-/// What a reply with ok 0 leaves: a server shutting down clears the pool.
-fn afterRefusal(reply: bson.RawDocument) Pool.After {
-    return switch (mongo.ServerError.fromReply(reply).code) {
-        11600 => .{ .clear = "it answered InterruptedAtShutdown (11600)" },
-        91 => .{ .clear = "it answered ShutdownInProgress (91)" },
-        else => .ok,
+/// What the operations need of the client, for one call.
+fn runner(self: *Client) command_.Runner {
+    return .{
+        .io = self.io,
+        .gpa = self.gpa,
+        .pool = &self.pool,
+        .opener = self.opener(),
+        .round_trips = &self.round_trips,
+        .timeout = self.options.uri.timeout,
+        .server_selection_timeout = self.options.uri.server_selection_timeout,
     };
 }
 
-/// The deadline of a call: its context's, else `timeoutMS` from now.
-fn deadlineOf(self: *const Client, io: Io, op: OperationContext) ?core.Deadline {
-    if (op.ctx.deadline) |deadline| return deadline;
-    const timeout = self.options.uri.timeout orelse return null;
-    return .after(time.now(io), timeout);
-}
-
-/// The budget of a call that starts now with `deadline`.
-fn limits(self: *const Client, io: Io, deadline: ?core.Deadline) Pool.Limits {
-    return .{ .deadline = deadline, .checkout = .after(time.now(io), self.options.uri.server_selection_timeout) };
-}
-
-/// The context before a command goes out: less than 1 ms left of the
-/// deadline, a canceled token or a canceled task.
+/// The context before `connect` opens its connection: less than 1 ms left
+/// of the deadline, a canceled token or a canceled task.
 fn checkBeforeSend(io: Io, op: OperationContext, deadline: ?core.Deadline, d: ?*Diagnostics) mongo.Error!void {
     if (deadline) |dl| if (dl.remaining(time.now(io)).nanoseconds < std.time.ns_per_ms) {
         return fail(d, .send, error.DeadlineExceeded, "less than 1 ms was left of the deadline before the command went out", .{});
@@ -340,6 +305,7 @@ fn open(self: *Client, io: Io, call: Pool.Limits, attempt: *connect_.Attempt, d:
         },
     };
     self.server.store(conn.hello);
+    if (conn.rtt) |rtt| self.round_trips.add(io, rtt);
     return conn;
 }
 

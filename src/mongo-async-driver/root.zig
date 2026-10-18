@@ -28,9 +28,12 @@ test {
     _ = @import("engine/scram.zig");
     _ = @import("engine/KeyCache.zig");
     _ = @import("engine/Pool.zig");
+    _ = @import("engine/errors.zig");
+    _ = @import("engine/command.zig");
     _ = @import("testing/connection_tests.zig");
     _ = @import("testing/handshake_tests.zig");
     _ = @import("testing/auth_tests.zig");
     _ = @import("testing/pool_tests.zig");
     _ = @import("testing/lifecycle_tests.zig");
+    _ = @import("testing/command_tests.zig");
 }
