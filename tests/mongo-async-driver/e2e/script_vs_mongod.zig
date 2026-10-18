@@ -124,6 +124,14 @@ fn cursorReplies(io: Io) !void {
     defer killed.deinit();
     try testing.expectEqual(id, try (try killed.raw().getPath("cursorsKilled.0")).?.asI64());
     try expectFieldsIn(try replyOf(handler, io, a, request("killCursors", kill.raw(), null)), killed.raw(), "");
+
+    // The cursor is gone: getMore finds it no more.
+    const gone = try conn.exchange(.{ .request_id = 0, .body = more.raw(), .database = e2e.database }, null);
+    defer gone.deinit();
+    try testing.expectEqual(@as(i32, 43), mongo.ServerError.fromReply(gone.raw()).code);
+    const ours = try replyOf(handler, io, a, request("getMore", more.raw(), null));
+    try testing.expectEqual(@as(i32, 43), mongo.ServerError.fromReply(ours).code);
+    try expectFieldsIn(ours, gone.raw(), "");
 }
 
 test "Script.Write writes only what mongod writes in its replies to insert, update and delete, writeErrors of a duplicate _id among them" {
