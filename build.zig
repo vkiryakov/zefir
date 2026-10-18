@@ -727,6 +727,34 @@ pub fn build(b: *std.Build) void {
         test_mongo.dependOn(&compile.step);
     }
 
+    // mongo compile errors of the conformance suite: harnesses whose
+    // methods do not fit mongo.testing.conformance.run, checked as the
+    // drivers above.
+    const mongo_conformance_errors = b.createModule(.{
+        .root_source_file = b.path("src/mongo/tests/conformance_errors.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+        .imports = &.{
+            .{ .name = "mongo", .module = mongo },
+        },
+    });
+    for ([_][2][]const u8{
+        .{ "harness by value", "mongo.testing.conformance.run: pass a pointer to the harness, e.g. &harness; got conformance_errors.Harness" },
+        .{ "harness behind a const pointer", "mongo.testing.conformance.run: the harness must be mutable, declared with var; got *const conformance_errors.Harness" },
+        .{ "harness without close", "mongo.testing.conformance.run: conformance_errors.test.harness without close.NoClose has no method close; expected pub fn close(self: *@This(), io: std.Io) void" },
+        .{ "setUp without the target", "mongo.testing.conformance.run: conformance_errors.test.setUp without the target.NoTarget.setUp has another signature; expected pub fn setUp(self: *@This(), io: std.Io, gpa: std.mem.Allocator, target: mongo.testing.conformance.Target) !mongo.Client" },
+        .{ "tearDown that may fail", "mongo.testing.conformance.run: conformance_errors.test.tearDown that may fail.Failing.tearDown has another signature; expected pub fn tearDown(self: *@This(), io: std.Io) void" },
+    }, 0..) |case, i| {
+        const compile = b.addTest(.{
+            .name = b.fmt("mongo-conformance-error-{d}", .{i}),
+            .root_module = mongo_conformance_errors,
+            .filters = &.{case[0]},
+        });
+        compile.expect_errors = .{ .exact = b.allocator.dupe([]const u8, &.{ case[1], "note: called at comptime here" }) catch @panic("OOM") };
+        test_mongo.dependOn(&compile.step);
+    }
+
     // rpc-nats panic program: a second conn() of one ZefirNats panics in
     // safe builds, since one adapter serves one transport. Like the rpc
     // ones above, it ends in its own panic handler with code 3 and gets

@@ -217,6 +217,7 @@ test "each connection gets a number of its own, and its commands carry it in the
     try testing.expectEqual(@as(usize, 2), script.received(io));
     try testing.expectEqual(@as(u32, 1), script.entry(io, 0).connection);
     try testing.expectEqual(@as(u32, 2), script.entry(io, 1).connection);
+    try testing.expectEqual(@as(u32, 2), script.acceptedConnections());
 }
 
 fn twoConnections(io: Io, port: u16) !void {

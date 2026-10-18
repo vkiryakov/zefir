@@ -13,6 +13,9 @@
 //!   network, real deadlines and cancelation.
 //! - `vectors` — the BSON test vectors of zefir: a document of each BSON
 //!   type with what it reads back as, and bytes no reader may accept.
+//! - `conformance` — the conformance suite of drivers: a driver that
+//!   passes it keeps the contract of `mongo.Client`, against a scripted
+//!   server and against a live mongod.
 
 const std = @import("std");
 
@@ -20,10 +23,12 @@ pub const Script = @import("testing/Script.zig");
 pub const FakeServer = @import("testing/FakeServer.zig");
 pub const FakeDriver = @import("testing/FakeDriver.zig");
 pub const vectors = @import("bson/vectors.zig");
+pub const conformance = @import("testing/conformance.zig");
 
 test {
     std.testing.refAllDecls(@This());
     _ = @import("testing/script_tests.zig");
     _ = @import("testing/fake_server_tests.zig");
     _ = @import("testing/fake_driver_tests.zig");
+    _ = @import("testing/conformance_tests.zig");
 }

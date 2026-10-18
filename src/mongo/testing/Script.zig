@@ -48,6 +48,7 @@ allocator: Allocator,
 mutex: Io.Mutex = .init,
 journal: std.ArrayList(Recorded) = .empty,
 connections: std.atomic.Value(u32) = .init(0),
+accepted: std.atomic.Value(u32) = .init(0),
 refusing: std.atomic.Value(bool) = .init(false),
 
 /// A script whose commands go to `handler`, with an empty journal in
@@ -236,6 +237,13 @@ pub fn count(s: *Script, io: Io, name: []const u8) usize {
 pub fn openConnection(s: *Script) ?u32 {
     if (s.refusing.load(.acquire)) return null;
     return s.connections.fetchAdd(1, .monotonic) + 1;
+}
+
+/// How many connections `FakeServer.serve` accepted and served for the
+/// script: a driver on the wire makes them, a driver in the process, such
+/// as `FakeDriver`, makes none.
+pub fn acceptedConnections(s: *const Script) u32 {
+    return s.accepted.load(.acquire);
 }
 
 /// Refuses new connections until `acceptConnections`, as

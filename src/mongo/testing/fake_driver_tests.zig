@@ -417,6 +417,8 @@ test "close_connection is ConnectionLost; refuse_connections, then Unavailable u
     try ok(try count(client, io, .of(.root), &d));
     const connections = [_]u32{ 1, 2, 3, 3, 4 };
     for (connections, 0..) |connection, i| try testing.expectEqual(connection, script.entry(io, i).connection);
+    // Fake connections: FakeServer accepted none.
+    try testing.expectEqual(@as(u32, 0), script.acceptedConnections());
 }
 
 /// Serves the cursor's commands, and holds `count` for 10 s.

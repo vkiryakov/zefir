@@ -74,6 +74,7 @@ pub fn serve(io: Io, listener: *net.Server, script: *Script) Io.Cancelable!void 
             stream.close(io);
             continue;
         };
+        _ = script.accepted.fetchAdd(1, .release);
         group.concurrent(io, serveConnection, .{ io, stream, script, number }) catch stream.close(io);
     }
 }
