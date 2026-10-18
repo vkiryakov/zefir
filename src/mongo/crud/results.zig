@@ -5,7 +5,8 @@
 //!
 //! `write_errors` and `write_concern_errors` are empty in a result that
 //! an operation returns: a write whose items the server refused is
-//! `error.WriteFailed`.
+//! `error.WriteFailed`, and the result with them goes to the `partial` of
+//! the options. Their indexes count in the whole list of the operation.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -122,7 +123,7 @@ pub fn ofInsertMany(allocator: Allocator, merged: *WriteResult, docs: []const bs
 /// The result of updateOne, updateMany or replaceOne, of their one
 /// statement, from the merged result of its write, which it takes over:
 /// `merged` is empty after it.
-pub fn ofUpdate(allocator: Allocator, merged: *WriteResult) UpdateResult {
+pub fn ofUpdate(allocator: Allocator, merged: *WriteResult, _: void) Allocator.Error!UpdateResult {
     const n = merged.n;
     const modified = merged.modified;
     const upserts = merged.upserted.len;
@@ -137,7 +138,7 @@ pub fn ofUpdate(allocator: Allocator, merged: *WriteResult) UpdateResult {
 }
 
 /// The result of deleteOne or deleteMany, as `ofUpdate` makes it.
-pub fn ofDelete(allocator: Allocator, merged: *WriteResult) DeleteResult {
+pub fn ofDelete(allocator: Allocator, merged: *WriteResult, _: void) Allocator.Error!DeleteResult {
     const n = merged.n;
     const lists = take(allocator, merged);
     if (lists.upserted_id) |value| contract.freeValue(allocator, value);

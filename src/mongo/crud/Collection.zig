@@ -33,6 +33,25 @@
 //! generator as its first field, and reports the `_id` of every document,
 //! its own or made.
 //!
+//! A write may run in part. One that ran to its end, but whose items the
+//! server refused or whose write concern failed, is `error.WriteFailed`:
+//! the first error is in `mongo.Diagnostics`, and the whole result, with
+//! the errors by their index in the whole list, goes to `options.partial`.
+//! An error of the contract, `IncompleteWrite` among them, passes as it
+//! is, and `partial` gets what is known:
+//!
+//! ```zig
+//! var partial: mongo.Collection.InsertManyResult = .{};
+//! defer partial.deinit(gpa);
+//! const result = users.insertMany(io, op, docs, .{ .allocator = gpa, .ordered = false, .partial = &partial }) catch |err| switch (err) {
+//!     // The server answered all: only the items of write_errors are not in (11000: a duplicate key).
+//!     error.WriteFailed => return report(partial.write_errors),
+//!     // In up to partial.answered, but for write_errors; after it, unknown or not sent.
+//!     error.IncompleteWrite => return reconcile(partial.inserted_ids, partial.answered),
+//!     else => return err,
+//! };
+//! ```
+//!
 //! Results come from `options.allocator`; free them with `deinit`. The
 //! scratch memory of a call, such as the documents a struct is written
 //! to, comes from it too and is freed before the call returns.
@@ -86,12 +105,11 @@ pub fn insertOne(c: Collection, io: Io, op: OperationContext, doc: anytype, opti
     const body = try c.writeBody(a, "insert", .{ .bypass_document_validation = options.bypass_document_validation, .comment = options.comment }, options.diagnostics);
     const inserts: Inserts = .{ .io = io, .ids = c.db.ids, .arena = a, .diagnostics = options.diagnostics, .one = true };
     const items = [_]bson.RawDocument{try inserts.prepare(0, doc)};
-    var merged = try c.runWrite(io, op, .insert, body, &items, true, .{
+    return c.runWrite(io, op, .{ .kind = .insert, .body = body, .items = &items }, .{
         .allocator = options.allocator,
         .diagnostics = options.diagnostics,
         .failure_reply = options.failure_reply,
-    });
-    return results.ofInsertOne(options.allocator, &merged, items[0]);
+    }, InsertOneResult, options.partial, items[0], results.ofInsertOne);
 }
 
 /// Inserts the documents of the list `docs`, in batches that the driver
@@ -108,12 +126,11 @@ pub fn insertMany(c: Collection, io: Io, op: OperationContext, docs: anytype, op
     const inserts: Inserts = .{ .io = io, .ids = c.db.ids, .arena = a, .diagnostics = options.diagnostics, .one = false };
     const items = try document.mapItems(a, docs, inserts, Inserts.prepare);
     if (items.len == 0) return invalid(options.diagnostics, "insertMany has no documents: it needs at least one", .{});
-    var merged = try c.runWrite(io, op, .insert, body, items, options.ordered, .{
+    return c.runWrite(io, op, .{ .kind = .insert, .body = body, .items = items, .ordered = options.ordered }, .{
         .allocator = options.allocator,
         .diagnostics = options.diagnostics,
         .failure_reply = options.failure_reply,
-    });
-    return results.ofInsertMany(options.allocator, &merged, items);
+    }, InsertManyResult, options.partial, items, results.ofInsertMany);
 }
 
 /// Updates the first document that `filter` matches. `update` is a
@@ -153,12 +170,11 @@ pub fn replaceOne(c: Collection, io: Io, op: OperationContext, filter: anytype, 
         .collation = options.collation,
         .hint = options.hint,
     }, options.diagnostics);
-    var merged = try c.runWrite(io, op, .update, body, &.{statement}, true, .{
+    return c.runWrite(io, op, .{ .kind = .update, .body = body, .items = &.{statement} }, .{
         .allocator = options.allocator,
         .diagnostics = options.diagnostics,
         .failure_reply = options.failure_reply,
-    });
-    return results.ofUpdate(options.allocator, &merged);
+    }, UpdateResult, options.partial, {}, results.ofUpdate);
 }
 
 /// Deletes the first document that `filter` matches: limit 1.
@@ -190,12 +206,11 @@ fn updateWith(c: Collection, io: Io, op: OperationContext, filter: anytype, upda
         .collation = options.collation,
         .hint = options.hint,
     }, options.diagnostics);
-    var merged = try c.runWrite(io, op, .update, body, &.{statement}, true, .{
+    return c.runWrite(io, op, .{ .kind = .update, .body = body, .items = &.{statement} }, .{
         .allocator = options.allocator,
         .diagnostics = options.diagnostics,
         .failure_reply = options.failure_reply,
-    });
-    return results.ofUpdate(options.allocator, &merged);
+    }, UpdateResult, options.partial, {}, results.ofUpdate);
 }
 
 fn deleteWith(c: Collection, io: Io, op: OperationContext, filter: anytype, limit: i32, options: DeleteOptions) Error!DeleteResult {
@@ -210,12 +225,11 @@ fn deleteWith(c: Collection, io: Io, op: OperationContext, filter: anytype, limi
     if (options.collation) |collation| try w.document("collation", collation, "the collation");
     if (options.hint) |hint| try w.hint(hint);
     const statement = try w.finish();
-    var merged = try c.runWrite(io, op, .delete, body, &.{statement}, true, .{
+    return c.runWrite(io, op, .{ .kind = .delete, .body = body, .items = &.{statement} }, .{
         .allocator = options.allocator,
         .diagnostics = options.diagnostics,
         .failure_reply = options.failure_reply,
-    });
-    return results.ofDelete(options.allocator, &merged);
+    }, DeleteResult, options.partial, {}, results.ofDelete);
 }
 
 /// Updates the first document that `filter` matches, the first in `sort`
@@ -345,6 +359,14 @@ fn findAndModify(c: Collection, io: Io, op: OperationContext, body: bson.RawDocu
         .failure_reply = failure_reply,
     });
     defer reply.deinit();
+    // The write ran, but not with its write concern: as for the other
+    // writes, that is WriteFailed, and Timeout for MaxTimeMSExpired.
+    if (reply.raw().get("writeConcernError") catch null) |concern| {
+        if (concern != .document) return violation(diagnostics, "writeConcernError in the reply of findAndModify is not a document");
+        if (failure_reply) |slot| slot.* = try reply.raw().dupe(allocator);
+        if (diagnostics) |d| d.setServer(.receive, concern.document);
+        return if (errors.ServerError.fromReply(concern.document).code == 50) error.Timeout else error.WriteFailed;
+    }
     const value = (reply.raw().get("value") catch null) orelse
         return violation(diagnostics, "the reply of findAndModify holds no value; the command may have run");
     return switch (value) {
@@ -489,26 +511,65 @@ const WriteCommon = struct {
     failure_reply: ?*?bson.OwnedDocument,
 };
 
-/// Sends the write and returns its merged result, from `common.allocator`.
-/// A write that ran to its end with writeErrors or a writeConcernError is
-/// `error.WriteFailed`. An error of the contract passes as it is.
-fn runWrite(c: Collection, io: Io, op: OperationContext, kind: requests.WriteKind, body: bson.RawDocument, items: []const bson.RawDocument, ordered: bool, common: WriteCommon) Error!WriteResult {
-    var merged = try c.db.client.write(io, op, .{
+/// A write of an operation, as it goes to the contract.
+const Write = struct {
+    kind: requests.WriteKind,
+    /// The command without its items.
+    body: bson.RawDocument,
+    items: []const bson.RawDocument,
+    ordered: bool = true,
+};
+
+/// Sends `write` and makes the operation's result of its merged one with
+/// `make(allocator, merged, context)`, which takes it over. A write that
+/// ran to its end with writeErrors or a writeConcernError is
+/// `error.WriteFailed`, with the first of them in the diagnostics; an
+/// error of the contract passes as it is. After either, `partial` gets
+/// the result of all that is known: the batches that the server answered,
+/// with the indexes of their errors in the whole list.
+fn runWrite(c: Collection, io: Io, op: OperationContext, write: Write, common: WriteCommon, comptime R: type, partial: ?*R, context: anytype, comptime make: anytype) Error!R {
+    // What the driver knew when the write failed.
+    var known: WriteResult = .{};
+    var merged = c.db.client.write(io, op, .{
         .database = c.db.name,
-        .kind = kind,
-        .body = body,
-        .items = items,
-        .ordered = ordered,
+        .kind = write.kind,
+        .body = write.body,
+        .items = write.items,
+        .ordered = write.ordered,
     }, .{
         .allocator = common.allocator,
         .diagnostics = common.diagnostics,
         .failure_reply = common.failure_reply,
-    });
-    if (merged.write_errors.len > 0 or merged.write_concern_errors.len > 0) {
-        merged.deinit(common.allocator);
-        return error.WriteFailed;
+        .partial = if (partial != null) &known else null,
+    }) catch |err| {
+        if (partial) |slot| slot.* = try make(common.allocator, &known, context);
+        return err;
+    };
+    if (merged.write_errors.len == 0 and merged.write_concern_errors.len == 0) return make(common.allocator, &merged, context);
+    if (common.diagnostics) |d| refused(d, &merged);
+    if (partial) |slot| {
+        slot.* = try make(common.allocator, &merged, context);
+    } else merged.deinit(common.allocator);
+    return error.WriteFailed;
+}
+
+/// The diagnostics of `error.WriteFailed`: the first item that the server
+/// refused, or else the first write concern that failed, with the
+/// server's errmsg as the message.
+fn refused(d: *Diagnostics, merged: *const WriteResult) void {
+    if (merged.write_errors.len > 0) {
+        const first = merged.write_errors[0];
+        if (first.message.len > 0) {
+            d.set(.receive, null, "{s}", .{first.message});
+        } else d.set(.receive, null, "the server refused item {d} of the write with code {d}", .{ first.index, first.code });
+        d.server = .{ .code = first.code };
+    } else {
+        const first = merged.write_concern_errors[0];
+        if (first.message.len > 0) {
+            d.set(.receive, null, "{s}", .{first.message});
+        } else d.set(.receive, null, "the write concern failed with code {d}", .{first.code});
+        d.server = .{ .code = first.code };
     }
-    return merged;
 }
 
 /// Starts an operation: the caller's diagnostics afresh, and the name.

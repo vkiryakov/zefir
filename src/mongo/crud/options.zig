@@ -11,6 +11,7 @@
 const std = @import("std");
 const bson = @import("../bson.zig");
 const errors = @import("../contract/errors.zig");
+const results = @import("results.zig");
 const Diagnostics = errors.Diagnostics;
 
 pub const InsertOneOptions = struct {
@@ -25,6 +26,10 @@ pub const InsertOneOptions = struct {
     /// After `CommandFailed`, or `Timeout` by code 50, the whole reply of
     /// the server, from `allocator`; the slot must hold null.
     failure_reply: ?*?bson.OwnedDocument = null,
+    /// After `error.WriteFailed`, or an error of `mongo.Client.write`, all
+    /// that is known of the write, from `allocator`: free it with `deinit`.
+    /// After `WriteFailed`, the whole result with its errors.
+    partial: ?*results.InsertOneResult = null,
 };
 
 pub const InsertManyOptions = struct {
@@ -42,6 +47,14 @@ pub const InsertManyOptions = struct {
     /// After `CommandFailed`, or `Timeout` by code 50, the whole reply of
     /// the server, from `allocator`; the slot must hold null.
     failure_reply: ?*?bson.OwnedDocument = null,
+    /// After `error.WriteFailed`, or an error of `mongo.Client.write`, all
+    /// that is known of the write, from `allocator`: free it with `deinit`.
+    /// It holds the `_id`s of all the documents, made before the first
+    /// batch, the documents inserted, how many went out in batches that the
+    /// server answered, and the refused ones by their index in the list.
+    /// After `IncompleteWrite`, `answered` says how far the write is known
+    /// to have come; the documents after it may be checked by their `_id`.
+    partial: ?*results.InsertManyResult = null,
 };
 
 /// Which index the server uses for the filter, by name or by keys.
@@ -75,6 +88,10 @@ pub const UpdateOptions = struct {
     /// After `CommandFailed`, or `Timeout` by code 50, the whole reply of
     /// the server, from `allocator`; the slot must hold null.
     failure_reply: ?*?bson.OwnedDocument = null,
+    /// After `error.WriteFailed`, or an error of `mongo.Client.write`, all
+    /// that is known of the write, from `allocator`: free it with `deinit`.
+    /// After `WriteFailed`, the whole result with its errors.
+    partial: ?*results.UpdateResult = null,
 };
 
 /// The options of `replaceOne`: those of an update, without
@@ -96,6 +113,10 @@ pub const ReplaceOptions = struct {
     comment: ?bson.Value = null,
     diagnostics: ?*Diagnostics = null,
     failure_reply: ?*?bson.OwnedDocument = null,
+    /// After `error.WriteFailed`, or an error of `mongo.Client.write`, all
+    /// that is known of the write, from `allocator`: free it with `deinit`.
+    /// After `WriteFailed`, the whole result with its errors.
+    partial: ?*results.UpdateResult = null,
 };
 
 pub const DeleteOptions = struct {
@@ -109,6 +130,10 @@ pub const DeleteOptions = struct {
     comment: ?bson.Value = null,
     diagnostics: ?*Diagnostics = null,
     failure_reply: ?*?bson.OwnedDocument = null,
+    /// After `error.WriteFailed`, or an error of `mongo.Client.write`, all
+    /// that is known of the write, from `allocator`: free it with `deinit`.
+    /// After `WriteFailed`, the whole result with its errors.
+    partial: ?*results.DeleteResult = null,
 };
 
 /// Which version of the document a `findOneAnd*` returns.
@@ -147,6 +172,8 @@ pub const FindOneAndUpdateOptions = struct {
 /// The options of `findOneAndReplace`: those of `findOneAndUpdate`,
 /// without `array_filters`.
 pub const FindOneAndReplaceOptions = struct {
+    /// The memory of the document returned, and of the call's scratch,
+    /// which is freed before the call returns.
     allocator: std.mem.Allocator,
     sort: ?bson.RawDocument = null,
     projection: ?bson.RawDocument = null,
@@ -162,13 +189,21 @@ pub const FindOneAndReplaceOptions = struct {
 };
 
 pub const FindOneAndDeleteOptions = struct {
+    /// The memory of the document returned, and of the call's scratch,
+    /// which is freed before the call returns.
     allocator: std.mem.Allocator,
+    /// The order in which the first document is chosen when the filter
+    /// matches several.
     sort: ?bson.RawDocument = null,
+    /// The fields of the document returned.
     projection: ?bson.RawDocument = null,
     collation: ?bson.RawDocument = null,
     hint: ?Hint = null,
     let: ?bson.RawDocument = null,
     comment: ?bson.Value = null,
     diagnostics: ?*Diagnostics = null,
+    /// After `CommandFailed`, `Timeout` by code 50 or `WriteFailed`, the
+    /// whole reply of the server, from `allocator`; the slot must hold
+    /// null.
     failure_reply: ?*?bson.OwnedDocument = null,
 };
