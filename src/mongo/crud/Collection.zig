@@ -69,6 +69,13 @@ const document = @import("document.zig");
 const id = @import("id.zig");
 const options_ = @import("options.zig");
 const results = @import("results.zig");
+const commands = @import("command.zig");
+const Writer = commands.Writer;
+const argument = commands.argument;
+const unwritten = commands.unwritten;
+const unwritable = commands.unwritable;
+const invalid = commands.invalid;
+const violation = commands.violation;
 const Error = errors.Error;
 const Diagnostics = errors.Diagnostics;
 const OperationContext = requests.OperationContext;
@@ -736,18 +743,6 @@ fn writeBody(c: Collection, a: Allocator, command: []const u8, body: Body, diagn
     return w.finish();
 }
 
-/// The document `value` of an argument, of the three forms, in `a`.
-fn argument(a: Allocator, value: anytype, comptime what: []const u8, diagnostics: ?*Diagnostics) Error!bson.RawDocument {
-    return document.encode(a, value) catch |err| unwritten(err, diagnostics, what);
-}
-
-fn unwritten(err: bson.Builder.Error, diagnostics: ?*Diagnostics, what: []const u8) Error {
-    return switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
-        error.InvalidBson => invalid(diagnostics, "{s} " ++ unwritable, .{what}),
-    };
-}
-
 /// Makes the documents of an insert as it sends them, each with its `_id`.
 const Inserts = struct {
     io: Io,
@@ -851,108 +846,6 @@ fn checkName(c: Collection, diagnostics: ?*Diagnostics) Error!void {
         return invalid(diagnostics, "a collection name holds no '$' and no NUL; this one holds {s} at byte {d}", .{ what, at });
     }
 }
-
-const unwritable = "cannot be written as BSON: it holds a string that is not UTF-8, a broken document, a value of a deprecated type, or more than 100 levels";
-
-fn invalid(diagnostics: ?*Diagnostics, comptime fmt: []const u8, args: anytype) Error {
-    if (diagnostics) |d| d.set(null, null, fmt, args);
-    return error.InvalidArgument;
-}
-
-fn violation(diagnostics: ?*Diagnostics, comptime text: []const u8) Error {
-    if (diagnostics) |d| d.set(.receive, null, text, .{});
-    return error.ProtocolViolation;
-}
-
-/// A `bson.Builder` for the commands of operations, in their scratch
-/// memory, whose errors are the contract's: a part that cannot be written
-/// is `error.InvalidArgument`, and the diagnostics name it.
-const Writer = struct {
-    b: bson.Builder,
-    diagnostics: ?*Diagnostics,
-
-    fn init(arena: Allocator, diagnostics: ?*Diagnostics) Writer {
-        return .{ .b = .init(arena), .diagnostics = diagnostics };
-    }
-
-    fn string(w: *Writer, key: []const u8, text: []const u8) Error!void {
-        w.b.putString(key, text) catch |err| return w.fail(err, key);
-    }
-
-    fn boolean(w: *Writer, key: []const u8, value_: bool) Error!void {
-        w.b.putBoolean(key, value_) catch |err| return w.fail(err, key);
-    }
-
-    fn int32(w: *Writer, key: []const u8, value_: i32) Error!void {
-        w.b.putInt32(key, value_) catch |err| return w.fail(err, key);
-    }
-
-    /// A count, such as a limit: an int32 when it fits, as mongod writes
-    /// one, an int64 otherwise.
-    fn count(w: *Writer, key: []const u8, n: u64) Error!void {
-        const put = if (std.math.cast(i32, n)) |small| w.b.putInt32(key, small) else w.b.putInt64(key, std.math.cast(i64, n) orelse std.math.maxInt(i64));
-        put catch |err| return w.fail(err, key);
-    }
-
-    /// A document, checked whole as `RawDocument.validate` checks it.
-    fn document(w: *Writer, key: []const u8, doc: bson.RawDocument, what: []const u8) Error!void {
-        w.b.putDocument(key, doc) catch |err| return w.fail(err, what);
-    }
-
-    /// Opens a document under `key`; in an array, `key` is empty.
-    fn beginDocument(w: *Writer, key: []const u8) Error!void {
-        w.b.beginDocument(key) catch |err| return w.fail(err, key);
-    }
-
-    /// Opens an array under `key`.
-    fn beginArray(w: *Writer, key: []const u8) Error!void {
-        w.b.beginArray(key) catch |err| return w.fail(err, key);
-    }
-
-    fn end(w: *Writer) Error!void {
-        w.b.end() catch |err| return w.fail(err, "the command");
-    }
-
-    /// `cursor`: `{}`, or `{batchSize: n}`.
-    fn cursor(w: *Writer, batch_size: ?u32) Error!void {
-        try w.beginDocument("cursor");
-        if (batch_size) |n| try w.count("batchSize", n);
-        try w.end();
-    }
-
-    /// An array of documents.
-    fn documents(w: *Writer, key: []const u8, docs: []const bson.RawDocument, what: []const u8) Error!void {
-        w.b.beginArray(key) catch |err| return w.fail(err, what);
-        for (docs) |doc| w.b.putDocument("", doc) catch |err| return w.fail(err, what);
-        w.b.end() catch |err| return w.fail(err, what);
-    }
-
-    /// `hint`: the name of an index, or its keys.
-    fn hint(w: *Writer, value_: Hint) Error!void {
-        switch (value_) {
-            .name => |name| try w.string("hint", name),
-            .keys => |keys| try w.document("hint", keys, "the hint"),
-        }
-    }
-
-    /// A value of any BSON type but the deprecated ones; a string must be
-    /// UTF-8.
-    fn value(w: *Writer, key: []const u8, value_: bson.Value, what: []const u8) Error!void {
-        w.b.put(key, value_) catch |err| return w.fail(err, what);
-    }
-
-    fn finish(w: *Writer) Error!bson.RawDocument {
-        const doc = w.b.finish() catch |err| return w.fail(err, "the command");
-        return doc.raw();
-    }
-
-    fn fail(w: *Writer, err: bson.Builder.Error, what: []const u8) Error {
-        return switch (err) {
-            error.OutOfMemory => error.OutOfMemory,
-            error.InvalidBson => invalid(w.diagnostics, "{s} " ++ unwritable, .{what}),
-        };
-    }
-};
 
 test "a collection name is not empty and holds no $ and no NUL" {
     const testing = std.testing;
