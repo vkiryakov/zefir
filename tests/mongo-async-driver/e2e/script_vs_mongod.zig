@@ -253,7 +253,9 @@ fn ownAnswers(io: Io) !void {
 
     // A command without $db, sent as it is.
     const theirs = try conn.forward(a, bson.literal(.{ .ping = 1 }), null);
-    try testing.expectEqual(@as(i32, 40414), mongo.ServerError.fromReply(theirs.raw()).code);
+    // 40414 since MongoDB 8.0, 40571 in 7.0; the fake server answers 40414.
+    const code = mongo.ServerError.fromReply(theirs.raw()).code;
+    try testing.expect(code == 40414 or code == 40571);
     var no_database = request("ping", bson.literal(.{ .ping = 1 }), null);
     no_database.database = "";
     try expectFieldsIn((try FakeServer.ownAnswer(io, a, &script, &no_database)).?.reply, theirs.raw(), "");

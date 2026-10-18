@@ -25,7 +25,7 @@
 //!   hello is answered by `script.hello`; `ping` and `endSessions` get
 //!   `{ok: 1.0}`; `saslStart` and `saslContinue` fail with code 18, since
 //!   the server has no users; a command without `$db` fails with code
-//!   40414, as in mongod. The handler answers the rest.
+//!   40414, as in mongod 8.0 and later. The handler answers the rest.
 //! - A message that is not OP_MSG, OP_QUERY among them, or that breaks
 //!   it, closes the connection.
 //!
