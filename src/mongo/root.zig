@@ -74,4 +74,5 @@ test {
     _ = @import("contract/signature.zig");
     _ = Collection;
     _ = @import("crud/document_tests.zig");
+    _ = @import("crud/id_tests.zig");
 }
