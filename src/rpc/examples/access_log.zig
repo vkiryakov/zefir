@@ -1,32 +1,56 @@
-//! Access logs on both sides of the users service: `rpc_log.AccessLog`
-//! first in the server's chain, `rpc_log.ClientAccessLog` first in the
-//! client's, each writing one record per call. The calls come from a
-//! gateway that got a W3C traceparent, so the records of both sides carry
-//! its trace id.
+//! The access log of the users service: middleware of the application on
+//! zefir-log, first in the server's chain, that writes a record of every
+//! call once the rest of the chain has run. The calls come from a gateway
+//! that got a W3C traceparent, so every record carries its trace id.
 
 const std = @import("std");
 const core = @import("core");
 const log = @import("log");
 const rpc = @import("rpc");
-const rpc_log = @import("rpc-log");
 const api = @import("users-api");
 const UserHandler = @import("UserHandler.zig");
 const UserRepository = @import("UserRepository.zig");
+
+/// Middleware of the server with a dependency, the logger: a record of
+/// every call, with its route, its outcome, its tenant, its request id and
+/// how long it took. Never a body, credentials or the whole metadata: only
+/// the keys it names.
+const AccessLog = struct {
+    logger: log.Logger,
+
+    pub fn run(self: *AccessLog, ctx: *rpc.Context, next: *rpc.Next) anyerror!void {
+        const started = std.Io.Clock.awake.now(ctx.io());
+        const result = next.run();
+        // The failure the client gets for the error of the chain.
+        const failure: ?rpc.Failure = if (result) |_| null else |err| ctx.mapError(err);
+        const route = ctx.route();
+        // withContext puts the trace and span ids of the call in the record.
+        self.logger.withContext(ctx.operation()).info("RPC call served", .{ .rpc = .{
+            .service = route.service,
+            .version = route.version,
+            .method = route.method,
+            .code = if (failure) |f| @tagName(f.code) else "ok",
+            .app_code = if (failure) |f| f.app_code else "-",
+            .tenant = ctx.metadata().get("x-tenant") orelse "-",
+            .request_id = log.hex(&ctx.requestId()),
+            .duration_ms = started.untilNow(ctx.io(), .awake).toMilliseconds(),
+        } });
+        // The outcome of the chain goes on as it is.
+        return result;
+    }
+};
 
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
     const logger: log.Logger = try .init(gpa, io, .{ .format = .text });
     defer logger.deinit();
-    const app = logger.scoped("app");
 
     var repo: UserRepository = .init(gpa);
     defer repo.deinit();
     var users: UserHandler = .{ .repo = &repo };
 
-    // A record per call that reaches the server's chain, with the values
-    // of x-tenant; never a body or credentials.
-    var access_log: rpc_log.AccessLog = .init(logger.scoped("rpc"), .{ .metadata_keys = &.{"x-tenant"} });
+    var access_log: AccessLog = .{ .logger = logger.scoped("rpc") };
     var memory: rpc.testing.MemoryTransport = try .init(gpa, .{});
     defer memory.deinit(io);
     var server = try rpc.Server.init(gpa, .{
@@ -38,11 +62,7 @@ pub fn main(init: std.process.Init) !void {
     defer server.deinit(io);
     try server.start(io);
 
-    var client_log: rpc_log.ClientAccessLog = .init(logger.scoped("rpc.client"), .{});
-    var client = try rpc.Client.init(gpa, .{
-        .transport = memory.clientTransport(),
-        .middleware = .{&client_log},
-    });
+    var client = try rpc.Client.init(gpa, .{ .transport = memory.clientTransport() });
     defer client.deinit();
 
     // The trace of the request the gateway got, from its traceparent header.
@@ -54,17 +74,4 @@ pub fn main(init: std.process.Init) !void {
     defer created.deinit();
     var missing = try client.call(io, ctx, api.UserApi.getUser, .{ .id = 42 }, .{ .metadata = tenant });
     defer missing.deinit();
-    // Against the rules of CreateUserRequest, so never sent: neither log
-    // has a record of it.
-    var invalid = try client.call(io, ctx, api.UserApi.createUser, .{ .name = "", .email = "ada@example.com" }, .{});
-    defer invalid.deinit();
-
-    // After the stop the call has no response: the client's record names
-    // its error.
-    try server.shutdown(io);
-    var late = client.call(io, ctx, api.UserApi.getUser, .{ .id = 1 }, .{}) catch |err| {
-        app.warn("Call failed", .{ .reason = err });
-        return;
-    };
-    late.deinit();
 }

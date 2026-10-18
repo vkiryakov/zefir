@@ -28,9 +28,9 @@ in tests, or one you write yourself.
 > - **The App container.** `main` builds the objects of a service and runs
 >   its server; the App of zefir-core, which will run the lifecycle of
 >   many components, is planned.
-> - **Metrics.** No interface of its own: count in middleware. The access
->   log of zefir-rpc-log writes a record per call, and NATS micro shows the
->   counters of every method.
+> - **Metrics.** No interface of its own: count in middleware, the way an
+>   [access log](#access-logs) writes a record per call. NATS micro shows
+>   the counters of every method.
 
 A whole program: a contract, a handler, a server and a client of it.
 
@@ -132,8 +132,8 @@ $ zig build run
 - [Limits](#limits)
 - [Your own transport](#your-own-transport)
 
-Examples that `zig build test-rpc` and `zig build test-rpc-log` compile and
-run, checking what they print against this guide:
+Examples that `zig build test-rpc` compiles and runs, checking what they
+print against this guide:
 [getting started](getting_started.zig) · [a service that calls another](orders.zig) ·
 [authentication and middleware](service.zig) · [tests](users_test.zig) ·
 [access logs](access_log.zig) · [idempotency](idempotency.zig) · [a graceful stop](shutdown.zig)
@@ -270,8 +270,7 @@ In a repository of several services, the package is a path in their
 
 > [!TIP]
 > rpc is also part of the umbrella module: with `zefir.module("zefir")`
-> imported as `zefir`, it is `@import("zefir").rpc`, and the access logs
-> are `@import("zefir").rpc_log`.
+> imported as `zefir`, it is `@import("zefir").rpc`.
 
 ## Getting started
 
@@ -2017,42 +2016,69 @@ test "deleteUser needs the permission users.delete" {
 
 ## Access logs
 
-The module zefir-rpc-log has the access logs of rpc, on zefir-log:
-middleware that writes one record per call, `rpc_log.AccessLog` on the
-server and `rpc_log.ClientAccessLog` on the client. It is a module of its
-own, so zefir-rpc does not depend on log; import it as `rpc-log`, from
-`zefir.module("zefir-rpc-log")`.
+An access log keeps a record of every call a service served: which method,
+how the call ended, for which tenant, how long it took. An operator reads it
+when a caller reports a failure, and a log store joins it to the other
+records of the request by its trace id. The access log is middleware of the
+application, a few lines on zefir-log: an object first in the server's
+chain, which writes its record once the rest of the chain has run. Here the
+users service serves two calls of a gateway, which got a W3C traceparent
+and names the tenant of each call in the metadata, `x-tenant`:
 
 ```zig
-//! Access logs on both sides of the users service: `rpc_log.AccessLog`
-//! first in the server's chain, `rpc_log.ClientAccessLog` first in the
-//! client's, each writing one record per call. The calls come from a
-//! gateway that got a W3C traceparent, so the records of both sides carry
-//! its trace id.
+//! The access log of the users service: middleware of the application on
+//! zefir-log, first in the server's chain, that writes a record of every
+//! call once the rest of the chain has run. The calls come from a gateway
+//! that got a W3C traceparent, so every record carries its trace id.
 
 const std = @import("std");
 const core = @import("core");
 const log = @import("log");
 const rpc = @import("rpc");
-const rpc_log = @import("rpc-log");
 const api = @import("users-api");
 const UserHandler = @import("UserHandler.zig");
 const UserRepository = @import("UserRepository.zig");
+
+/// Middleware of the server with a dependency, the logger: a record of
+/// every call, with its route, its outcome, its tenant, its request id and
+/// how long it took. Never a body, credentials or the whole metadata: only
+/// the keys it names.
+const AccessLog = struct {
+    logger: log.Logger,
+
+    pub fn run(self: *AccessLog, ctx: *rpc.Context, next: *rpc.Next) anyerror!void {
+        const started = std.Io.Clock.awake.now(ctx.io());
+        const result = next.run();
+        // The failure the client gets for the error of the chain.
+        const failure: ?rpc.Failure = if (result) |_| null else |err| ctx.mapError(err);
+        const route = ctx.route();
+        // withContext puts the trace and span ids of the call in the record.
+        self.logger.withContext(ctx.operation()).info("RPC call served", .{ .rpc = .{
+            .service = route.service,
+            .version = route.version,
+            .method = route.method,
+            .code = if (failure) |f| @tagName(f.code) else "ok",
+            .app_code = if (failure) |f| f.app_code else "-",
+            .tenant = ctx.metadata().get("x-tenant") orelse "-",
+            .request_id = log.hex(&ctx.requestId()),
+            .duration_ms = started.untilNow(ctx.io(), .awake).toMilliseconds(),
+        } });
+        // The outcome of the chain goes on as it is.
+        return result;
+    }
+};
 
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
     const logger: log.Logger = try .init(gpa, io, .{ .format = .text });
     defer logger.deinit();
-    const app = logger.scoped("app");
 
     var repo: UserRepository = .init(gpa);
     defer repo.deinit();
     var users: UserHandler = .{ .repo = &repo };
 
-    // A record per call that reaches the server's chain, with the values
-    // of x-tenant; never a body or credentials.
-    var access_log: rpc_log.AccessLog = .init(logger.scoped("rpc"), .{ .metadata_keys = &.{"x-tenant"} });
+    var access_log: AccessLog = .{ .logger = logger.scoped("rpc") };
     var memory: rpc.testing.MemoryTransport = try .init(gpa, .{});
     defer memory.deinit(io);
     var server = try rpc.Server.init(gpa, .{
@@ -2064,11 +2090,7 @@ pub fn main(init: std.process.Init) !void {
     defer server.deinit(io);
     try server.start(io);
 
-    var client_log: rpc_log.ClientAccessLog = .init(logger.scoped("rpc.client"), .{});
-    var client = try rpc.Client.init(gpa, .{
-        .transport = memory.clientTransport(),
-        .middleware = .{&client_log},
-    });
+    var client = try rpc.Client.init(gpa, .{ .transport = memory.clientTransport() });
     defer client.deinit();
 
     // The trace of the request the gateway got, from its traceparent header.
@@ -2080,75 +2102,42 @@ pub fn main(init: std.process.Init) !void {
     defer created.deinit();
     var missing = try client.call(io, ctx, api.UserApi.getUser, .{ .id = 42 }, .{ .metadata = tenant });
     defer missing.deinit();
-    // Against the rules of CreateUserRequest, so never sent: neither log
-    // has a record of it.
-    var invalid = try client.call(io, ctx, api.UserApi.createUser, .{ .name = "", .email = "ada@example.com" }, .{});
-    defer invalid.deinit();
-
-    // After the stop the call has no response: the client's record names
-    // its error.
-    try server.shutdown(io);
-    var late = client.call(io, ctx, api.UserApi.getUser, .{ .id = 1 }, .{}) catch |err| {
-        app.warn("Call failed", .{ .reason = err });
-        return;
-    };
-    late.deinit();
 }
 ```
 
 ```text
 $ zig build run
-2026-10-16T09:42:55.199Z INFO  [rpc] RPC call served rpc.service=users rpc.version=1 rpc.method=createUser rpc.request_id=3ac51e87c2f5826e764110ec1ab9d607 rpc.code=ok rpc.duration_ms=0.165291 rpc.transport=memory rpc.peer=memory rpc.metadata=[{key=x-tenant,value=acme}] trace_id=4bf92f3577b34da6a3ce929d0e0e4736 span_id=fce7b275951c6a4f
-2026-10-16T09:42:55.199Z INFO  [rpc.client] RPC call made rpc.service=users rpc.version=1 rpc.method=createUser rpc.request_id=3ac51e87c2f5826e764110ec1ab9d607 rpc.code=ok rpc.duration_ms=0.95075 rpc.transport=memory trace_id=4bf92f3577b34da6a3ce929d0e0e4736 span_id=e7131d29fc7fab07
-2026-10-16T09:42:55.199Z INFO  [rpc] RPC call served rpc.service=users rpc.version=1 rpc.method=getUser rpc.request_id=46fcb0289b37866a801361cadbe493fd rpc.code=not_found rpc.app_code=users.not_found rpc.duration_ms=0.028917 rpc.transport=memory rpc.peer=memory rpc.metadata=[{key=x-tenant,value=acme}] trace_id=4bf92f3577b34da6a3ce929d0e0e4736 span_id=c25474366da8266f
-2026-10-16T09:42:55.200Z INFO  [rpc.client] RPC call made rpc.service=users rpc.version=1 rpc.method=getUser rpc.request_id=46fcb0289b37866a801361cadbe493fd rpc.code=not_found rpc.app_code=users.not_found rpc.duration_ms=0.499208 rpc.transport=memory trace_id=4bf92f3577b34da6a3ce929d0e0e4736 span_id=0e7d4bb2e0c429a0
-2026-10-16T09:42:55.200Z WARN  [rpc.client] RPC call made rpc.service=users rpc.version=1 rpc.method=getUser rpc.request_id=fb8fe1f8271fe2b2708e72da7bf88a39 rpc.code=unavailable rpc.error=Unavailable rpc.duration_ms=0.025291 rpc.transport=memory trace_id=4bf92f3577b34da6a3ce929d0e0e4736 span_id=d3686ae8523b2215
-2026-10-16T09:42:55.200Z WARN  [app] Call failed reason=Unavailable
+2026-10-18T18:51:38.207Z INFO  [rpc] RPC call served rpc.service=users rpc.version=1 rpc.method=createUser rpc.code=ok rpc.app_code=- rpc.tenant=acme rpc.request_id=4c80cfd822527a6aa1d22b9effcef239 rpc.duration_ms=0 trace_id=4bf92f3577b34da6a3ce929d0e0e4736 span_id=2e03c66973dca7cc
+2026-10-18T18:51:38.207Z INFO  [rpc] RPC call served rpc.service=users rpc.version=1 rpc.method=getUser rpc.code=not_found rpc.app_code=users.not_found rpc.tenant=acme rpc.request_id=1ddb82201a5dd01b9b2937be033a18a5 rpc.duration_ms=0 trace_id=4bf92f3577b34da6a3ce929d0e0e4736 span_id=1a84ac23c242e308
 ```
 
-Every record carries the route, the request id in hex (the same on both
-sides), `code` (`ok` or the code of the failure) with `app_code` for a
-failure, how long the call took in milliseconds, and the name of the
-transport. The server's record adds the `peer` when the transport knows
-one, the listed `metadata`, and, with `.log_subject = true`, the `subject`
-of the caller. The client's record adds `error`, the name of the error that
-ended a call without a response, next to the code it amounts to, and
-`sent` set to false when the failure is the client's own refusal, not the
-server's. The trace
-id comes from the call's context: here the gateway's, on both sides; each
-side has a span of its own. In JSON, the format a log store reads, the
-fields sit in the object `rpc`: `"rpc":{"service":"users","version":1,…}`.
+Each record has the route, `code` (`ok` or the code of the failure) with
+the `app_code` of a failure, the tenant, the request id in hex, and the
+time in milliseconds. `ctx.mapError` turns the error of the chain into the
+failure the client gets, as the server does once the chain has unwound:
+`error.UserNotFound` is `not_found` with `users.not_found`, as the contract
+says. The trace id is the gateway's: `withContext` puts the trace and the
+server's span of the call in the record, so a log store finds every record
+of the request across services. In JSON, the format a log store reads, the
+fields under `.rpc` sit in one object: `"rpc":{"service":"users","version":1,…}`.
 
-- **Levels.** The failures of the service itself are `error`: `unknown`,
-  `unimplemented`, `internal`, `data_loss`. What an operator watches is
-  `warn`: `deadline_exceeded`, `permission_denied`, `resource_exhausted`,
-  `failed_precondition`, `aborted`, `out_of_range`, `unavailable`. A
-  success and the answers a caller's own request earns (`not_found`,
-  `invalid_argument`, …) are `info`. `.levels = .{ .ok = .debug }`
-  changes any of them.
-- **Never in a record:** a body, credentials (`authorization` never reaches
-  middleware as metadata), metadata outside `.metadata_keys`, the identity
-  beyond its subject. List no key whose value is a secret.
-- **First in the chain.** On the server, put it before the other links:
-  then it sees what they did, and its time covers them.
+- **Never in a record:** a body, credentials, or the metadata wholesale.
+  Name the keys a record carries, as `x-tenant` here, and never a key whose
+  value is a secret; `authorization` never reaches middleware as metadata.
+- **First in the chain.** Before the other links of the server, it sees
+  what they did, and its time covers them.
+- **What middleware cannot see.** Calls the server ends before the chain
+  have no record: refused at admission (an unknown method, the limits, a
+  full queue), refused by the authenticator, or out of time before their
+  task began; NATS micro counts those of a known route. And the outcome of
+  the chain is not final: past the deadline the server sends
+  `deadline_exceeded`, at the client's cancel or the stop it ends the call
+  as `cancelled`, and a response the transport cannot carry goes out as
+  `resource_exhausted` ([the rules of the chain](#middleware)).
 
-What a middleware cannot see, the log does not show as it went out:
-
-- Calls the server ends before the chain have no record: refused at
-  admission (an unknown method, the limits, a full queue), refused by the
-  authenticator, or out of time before their task began. Those that name
-  a known route are counted in its counters, which NATS micro shows.
-- A success the server still turns into a failure after the chain is
-  logged as a success: a response the transport cannot carry (over its
-  own limit, such as the NATS max payload), or one that ends a fraction of
-  a millisecond before the deadline. A response over `max_response_bytes`
-  is refused inside the chain, by the method's encoding, and its record
-  has the `resource_exhausted`.
-- On the client, the chain sees the response before it is decoded: a
-  success that does not decode is logged `ok`, and the call ends with
-  `InvalidResponse`. A call the client refuses before the chain has no
-  record, as the invalid `createUser` above shows; so do a caller's
-  context that has expired or is canceled and a call over `max_pending`.
+A client logs its calls the same way, with middleware of `rpc.Client`
+whose `run` takes `*rpc.ClientContext` and `*rpc.ClientNext` (see
+[A service that calls another](#a-service-that-calls-another)).
 
 ## Idempotency
 
