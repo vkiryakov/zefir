@@ -73,7 +73,7 @@ fn pingCounted(io: Io, c: mongo.Client, failures: *std.atomic.Value(u32)) void {
     };
 }
 
-test "a deadline that passes while mongod works is Timeout, and the next call opens a new connection" {
+test "a deadline that passes while mongod works is Timeout, by the maxTimeMS of mongod or by the driver's own wait, and the next call goes through" {
     try e2e.onZio(deadlineInFlight);
 }
 
@@ -83,12 +83,20 @@ fn deadlineInFlight(io: Io) !void {
     try connected(io, &driver, &buffer, e2e.servers.plain_port);
     defer driver.deinit();
     const c = driver.client();
-    // sleep is a test command of mongo-plain; no maxTimeMS stops it.
+    // sleep is a test command of mongo-plain. It goes with maxTimeMS, the
+    // time left less the shortest round trip, so mongod may stop it with
+    // code 50 just before the deadline; else the driver stops waiting at
+    // the deadline and closes the connection.
     const sleep: mongo.Command = .{ .database = "admin", .body = bson.literal(.{ .sleep = 1, .millis = 500 }) };
     var d: mongo.Diagnostics = .{};
     try testing.expectError(error.Timeout, c.runCommand(io, .of(within(io, .fromMilliseconds(100))), sleep, .{ .allocator = testing.allocator, .diagnostics = &d }));
-    try testing.expectEqualStrings("the deadline passed before the reply came", d.message());
-    try testing.expectEqual(@as(usize, 0), driver.stats().connections);
+    if (d.server) |server| {
+        try testing.expectEqual(@as(i32, 50), server.code);
+        try testing.expectEqual(@as(usize, 1), driver.stats().connections);
+    } else {
+        try testing.expectEqualStrings("the deadline passed before the reply came", d.message());
+        try testing.expectEqual(@as(usize, 0), driver.stats().connections);
+    }
     try pingOnce(io, c);
     try testing.expectEqual(@as(usize, 1), driver.stats().connections);
 }
