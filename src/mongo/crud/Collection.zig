@@ -104,6 +104,7 @@ pub const DistinctOptions = options_.DistinctOptions;
 pub const CreateIndexesOptions = options_.CreateIndexesOptions;
 pub const ListIndexesOptions = options_.ListIndexesOptions;
 pub const DropIndexOptions = options_.DropIndexOptions;
+pub const DropOptions = options_.DropOptions;
 pub const IndexModel = index.IndexModel;
 pub const ReturnDocument = options_.ReturnDocument;
 pub const Hint = options_.Hint;
@@ -747,6 +748,40 @@ fn dropIndexesNamed(c: Collection, io: Io, op: OperationContext, name: []const u
         .diagnostics = options.diagnostics,
         .failure_reply = options.failure_reply,
     });
+    reply.deinit();
+}
+
+/// Drops the collection with its documents and indexes: `drop`. A
+/// collection that is not there is no error: the code 26
+/// (NamespaceNotFound) of the servers before 7.0 is taken as success, as
+/// the official drivers take it, and leaves nothing in the diagnostics or
+/// in `failure_reply`.
+pub fn drop(c: Collection, io: Io, op: OperationContext, options: DropOptions) Error!void {
+    try c.begin(options.diagnostics);
+    var scratch: std.heap.ArenaAllocator = .init(options.allocator);
+    defer scratch.deinit();
+    var w: Writer = .init(scratch.allocator(), options.diagnostics);
+    try w.string("drop", c.name);
+    if (options.comment) |value| try w.value("comment", value, "the comment");
+    // The code of the server's error tells success from failure, so the
+    // call has diagnostics of its own, which go to the caller's on an
+    // error.
+    var own: Diagnostics = .{};
+    const reply = c.db.client.runCommand(io, op, .{ .database = c.db.name, .body = try w.finish() }, .{
+        .allocator = options.allocator,
+        .diagnostics = &own,
+        .failure_reply = options.failure_reply,
+    }) catch |err| {
+        if (err == error.CommandFailed) if (own.server) |server| if (server.code == 26) {
+            if (options.failure_reply) |slot| if (slot.*) |doc| {
+                doc.deinit();
+                slot.* = null;
+            };
+            return;
+        };
+        if (options.diagnostics) |d| d.* = own;
+        return err;
+    };
     reply.deinit();
 }
 

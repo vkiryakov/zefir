@@ -378,3 +378,61 @@ pub const DropIndexOptions = struct {
     /// the server, from `allocator`; the slot must hold null.
     failure_reply: ?*?bson.OwnedDocument = null,
 };
+
+/// The options of `Collection.drop` and `Database.drop`.
+pub const DropOptions = struct {
+    /// The memory of the call's scratch, which is freed before the call
+    /// returns.
+    allocator: std.mem.Allocator,
+    comment: ?bson.Value = null,
+    diagnostics: ?*Diagnostics = null,
+    /// After `CommandFailed`, or `Timeout` by code 50, the whole reply of
+    /// the server, from `allocator`; the slot must hold null.
+    failure_reply: ?*?bson.OwnedDocument = null,
+};
+
+pub const ListCollectionsOptions = struct {
+    /// The memory of the call's scratch, which is freed before the call
+    /// returns; the cursor belongs to the driver.
+    allocator: std.mem.Allocator,
+    /// Only the collections whose documents of `listCollections` match it:
+    /// `bson.literal(.{ .name = "users" })`.
+    filter: ?bson.RawDocument = null,
+    /// Only the name and the type of each collection, without its options
+    /// and info, and without the locks that reading them takes.
+    name_only: bool = false,
+    /// Only the collections the user may act on, for a user without the
+    /// right to list all.
+    authorized_collections: bool = false,
+    /// How many collections each batch holds; null leaves it to the
+    /// server.
+    batch_size: ?u32 = null,
+    /// Sent with the command only, never with a `getMore`, as the
+    /// enumerate collections spec says.
+    comment: ?bson.Value = null,
+    /// The cursor writes the errors of its `getMore`s here too: it must
+    /// outlive the cursor.
+    diagnostics: ?*Diagnostics = null,
+    /// After `CommandFailed`, or `Timeout` by code 50, of the command or a
+    /// `getMore`, the whole reply of the server, from the driver's
+    /// allocator: free it with `deinit`. The slot must hold null and
+    /// outlive the cursor.
+    failure_reply: ?*?bson.OwnedDocument = null,
+};
+
+pub const RunCursorCommandOptions = struct {
+    /// The memory of the call's scratch, which is freed before the call
+    /// returns; the cursor belongs to the driver.
+    allocator: std.mem.Allocator,
+    /// The `batchSize` of each `getMore`; null leaves it to the server.
+    /// The first batch is the command's, such as its `cursor.batchSize`.
+    batch_size: ?u32 = null,
+    /// The cursor writes the errors of its `getMore`s here too: it must
+    /// outlive the cursor.
+    diagnostics: ?*Diagnostics = null,
+    /// After `CommandFailed`, or `Timeout` by code 50, of the command or a
+    /// `getMore`, the whole reply of the server, from the driver's
+    /// allocator: free it with `deinit`. The slot must hold null and
+    /// outlive the cursor.
+    failure_reply: ?*?bson.OwnedDocument = null,
+};

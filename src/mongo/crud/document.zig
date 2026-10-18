@@ -74,6 +74,12 @@ pub fn expectDocument(comptime operation: []const u8, comptime argument: []const
     if (comptime check.document(T, .encode)) |problem| @compileError(prefix(operation, argument) ++ problem);
 }
 
+/// As `expectDocument`, for an operation of `mongo.Database`: the message
+/// starts "mongo.Database.<operation>: <argument>: ".
+pub fn expectDatabaseDocument(comptime operation: []const u8, comptime argument: []const u8, comptime T: type) void {
+    if (comptime check.document(T, .encode)) |problem| @compileError("mongo.Database." ++ operation ++ ": " ++ argument ++ ": " ++ problem);
+}
+
 /// Stops the build unless `T` is a list of documents of the three forms,
 /// or `.{}`, the empty list.
 pub fn expectList(comptime operation: []const u8, comptime argument: []const u8, comptime T: type) void {
