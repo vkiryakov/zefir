@@ -392,3 +392,142 @@ fn perished(io: Io) !void {
     try testing.expectEqual(@as(u32, 2), fakes.destroyed.load(.acquire));
     try testing.expectEqual(@as(usize, 0), pool.counts(io).idle);
 }
+
+test "a clear closes the idle connections at once and those in use at check-in, and pauses the pool" {
+    try within5s(testing.io, clearCloses, .{testing.io});
+}
+
+fn clearCloses(io: Io) !void {
+    var fakes: Fakes = .{};
+    var pool: Pool = undefined;
+    try ready(io, &pool, &fakes, options(3));
+    defer closeAndDeinit(io, &pool);
+    const a = try pool.checkOut(io, fakes.opener(), within(io, 1000), null);
+    const b = try pool.checkOut(io, fakes.opener(), within(io, 1000), null);
+    const c = try pool.checkOut(io, fakes.opener(), within(io, 1000), null);
+    pool.checkIn(io, c, .ok);
+    pool.checkIn(io, a, .{ .clear = "the connection to fake:1 broke" });
+    try testing.expectEqual(@as(u32, 2), fakes.destroyed.load(.acquire));
+    try testing.expectEqual(Pool.Counts{ .idle = 0, .in_use = 1, .opening = 0, .waiting = 0, .generation = 1, .clears = 1 }, pool.counts(io));
+    // b is of the generation before: it closes when it comes back.
+    pool.checkIn(io, b, .ok);
+    try testing.expectEqual(@as(u32, 3), fakes.destroyed.load(.acquire));
+    try testing.expectEqual(@as(usize, 0), pool.counts(io).idle);
+}
+
+test "the calls in line at a clear get Unavailable" {
+    try within5s(testing.io, clearSendsAway, .{testing.io});
+}
+
+fn clearSendsAway(io: Io) !void {
+    var fakes: Fakes = .{};
+    var pool: Pool = undefined;
+    try ready(io, &pool, &fakes, options(1));
+    defer closeAndDeinit(io, &pool);
+    const held = try pool.checkOut(io, fakes.opener(), within(io, 1000), null);
+    var first = try io.concurrent(checkOutFails, .{ io, &pool, &fakes, within(io, 4000), error.Unavailable, "the pool was cleared while the call waited for a connection" });
+    try awaitWaiting(io, &pool, 1);
+    var second = try io.concurrent(checkOutFails, .{ io, &pool, &fakes, within(io, 4000), error.Unavailable, "the pool was cleared while the call waited for a connection" });
+    try awaitWaiting(io, &pool, 2);
+    pool.checkIn(io, held, .{ .clear = "the server at fake:1 is shutting down" });
+    try first.await(io);
+    try second.await(io);
+    try testing.expectEqual(@as(usize, 0), pool.counts(io).waiting);
+}
+
+/// A pool that `ready` made, then cleared.
+fn cleared(io: Io, pool: *Pool, fakes: *Fakes, opts: Pool.Options) !void {
+    try ready(io, pool, fakes, opts);
+    const entry = try pool.checkOut(io, fakes.opener(), within(io, 1000), null);
+    pool.checkIn(io, entry, .{ .clear = "the connection to fake:1 broke" });
+}
+
+test "a paused pool lets the first call open a connection as a probe and turns the others away at once; a probe that succeeds makes it ready" {
+    try within5s(testing.io, probeSucceeds, .{testing.io});
+}
+
+fn probeSucceeds(io: Io) !void {
+    var fakes: Fakes = .{};
+    var pool: Pool = undefined;
+    try cleared(io, &pool, &fakes, options(2));
+    defer closeAndDeinit(io, &pool);
+    fakes.hold.store(true, .release);
+    var probe: *Pool.Entry = undefined;
+    var probing = try io.concurrent(openAndKeep, .{ io, &pool, &fakes, &probe });
+    try awaitStarted(io, &fakes, 2);
+    try checkOutFails(io, &pool, &fakes, within(io, 1000), error.Unavailable, "the pool is paused after a clear, and a probe is opening a connection");
+    fakes.release(io);
+    try probing.await(io);
+    // Ready again: the next call opens a connection of its own.
+    const next = try pool.checkOut(io, fakes.opener(), within(io, 1000), null);
+    pool.checkIn(io, next, .ok);
+    pool.checkIn(io, probe, .ok);
+    try testing.expectEqual(Pool.Counts{ .idle = 2, .in_use = 0, .opening = 0, .waiting = 0, .generation = 1, .clears = 1 }, pool.counts(io));
+}
+
+test "a probe that fails leaves the pool paused, and the next probe goes 500 ms after it at the soonest" {
+    try within5s(testing.io, probeFails, .{testing.io});
+}
+
+fn probeFails(io: Io) !void {
+    var fakes: Fakes = .{};
+    var pool: Pool = undefined;
+    try cleared(io, &pool, &fakes, options(2));
+    defer closeAndDeinit(io, &pool);
+    fakes.fail_with = error.Unavailable;
+    const start = time.now(io);
+    var d: Diagnostics = .{};
+    try testing.expectError(error.Unavailable, pool.checkOut(io, fakes.opener(), within(io, 1000), &d));
+    try testing.expectEqualStrings("the fake refuses", d.message());
+    fakes.fail_with = null;
+    try testing.expectError(error.Unavailable, pool.checkOut(io, fakes.opener(), within(io, 1000), &d));
+    try testing.expect(std.mem.startsWith(u8, d.message(), "the pool is paused after a clear; the next probe may open a connection in "));
+    try testing.expectEqual(@as(u32, 2), fakes.started.load(.acquire));
+    try time.sleepUntil(io, .after(start, Pool.probe_interval));
+    const conn = try pool.checkOut(io, fakes.opener(), within(io, 1000), null);
+    pool.checkIn(io, conn, .ok);
+    try testing.expectEqual(Pool.Counts{ .idle = 1, .in_use = 0, .opening = 0, .waiting = 0, .generation = 1, .clears = 1 }, pool.counts(io));
+}
+
+test "a failed authentication clears the pool; an error of an older generation, a broken connection and another failed opening do not" {
+    try within5s(testing.io, whatClears, .{testing.io});
+}
+
+fn whatClears(io: Io) !void {
+    var fakes: Fakes = .{};
+    var pool: Pool = undefined;
+    try ready(io, &pool, &fakes, options(3));
+    defer closeAndDeinit(io, &pool);
+    const old = try pool.checkOut(io, fakes.opener(), within(io, 1000), null);
+    const gone = try pool.checkOut(io, fakes.opener(), within(io, 1000), null);
+    pool.checkIn(io, gone, .{ .clear = "the connection to fake:1 broke" });
+    const probe = try pool.checkOut(io, fakes.opener(), within(io, 1000), null);
+    // The error of a connection from before the clear is stale.
+    pool.checkIn(io, old, .{ .clear = "the connection to fake:1 broke" });
+    // A timeout closes its own connection only.
+    pool.checkIn(io, probe, .broken);
+    fakes.fail_with = error.Unavailable;
+    try testing.expectError(error.Unavailable, pool.checkOut(io, fakes.opener(), within(io, 1000), null));
+    try testing.expectEqual(Pool.Counts{ .idle = 0, .in_use = 0, .opening = 0, .waiting = 0, .generation = 1, .clears = 1 }, pool.counts(io));
+    fakes.fail_with = error.AuthenticationFailed;
+    try testing.expectError(error.AuthenticationFailed, pool.checkOut(io, fakes.opener(), within(io, 1000), null));
+    try testing.expectEqual(@as(u64, 2), pool.counts(io).generation);
+    try testing.expectEqual(@as(u64, 2), pool.counts(io).clears);
+    // Paused again, within 500 ms of the probe before.
+    fakes.fail_with = null;
+    var d: Diagnostics = .{};
+    try testing.expectError(error.Unavailable, pool.checkOut(io, fakes.opener(), within(io, 1000), &d));
+    try testing.expect(std.mem.startsWith(u8, d.message(), "the pool is paused after a clear; the next probe may open a connection in "));
+}
+
+test "a failed authentication of connect leaves the pool as it was: it was not ready" {
+    const io = testing.io;
+    var fakes: Fakes = .{ .fail_with = error.AuthenticationFailed };
+    var pool: Pool = .init(options(2));
+    defer closeAndDeinit(io, &pool);
+    try testing.expectError(error.AuthenticationFailed, pool.connect(io, fakes.opener(), within(io, 1000), null));
+    try testing.expectEqual(@as(u64, 0), pool.counts(io).clears);
+    fakes.fail_with = null;
+    try pool.connect(io, fakes.opener(), within(io, 1000), null);
+    try testing.expect(pool.isConnected(io));
+}

@@ -130,7 +130,9 @@ pub const Diagnostics = struct {
     /// The error of std or of a library underneath, for logs, not for logic.
     cause: ?anyerror = null,
     /// The server's error, when the server answered: `CommandFailed`,
-    /// `WriteFailed`, `Timeout` by code 50.
+    /// `WriteFailed`, `Timeout` by code 50. A driver may also give an
+    /// error of its own errorLabels here, with code 0, as the overload
+    /// labels that CMAP gives a network error while a connection opens.
     server: ?ServerError = null,
     /// For a write: the index of the first item of the batch where the
     /// write stopped.

@@ -61,6 +61,7 @@ fn openUnlessStopped(io: Io, gpa: Allocator, address: Connection.Address, setup:
         error.Canceled => return error.Canceled,
         else => {
             d.set(.connect, err, "cannot connect to {f}: {t}", .{ address, err });
+            if (!isNameError(err)) handshake.markOverloaded(d);
             return error.Unavailable;
         },
     };
@@ -104,6 +105,28 @@ pub fn dial(io: Io, address: Connection.Address) DialError!net.Stream {
     }
     const name: net.HostName = try .init(host);
     return name.connect(io, address.port, .{ .mode = .stream });
+}
+
+/// Whether an error of `dial` comes from the name of the host: DNS, a
+/// name that is not one, an IPv6 zone that cannot be read. CMAP counts it
+/// as no sign of an overloaded server.
+fn isNameError(err: DialError) bool {
+    return switch (err) {
+        error.UnknownHostName,
+        error.ResolvConfParseFailed,
+        error.InvalidDnsARecord,
+        error.InvalidDnsAAAARecord,
+        error.InvalidDnsCnameRecord,
+        error.NameServerFailure,
+        error.NoAddressReturned,
+        error.DetectingNetworkConfigurationFailed,
+        error.InvalidHostName,
+        error.NameTooLong,
+        error.ParseFailed,
+        error.InterfaceNotFound,
+        => true,
+        else => false,
+    };
 }
 
 /// The socket of an attempt in progress, for the timer of its race or for

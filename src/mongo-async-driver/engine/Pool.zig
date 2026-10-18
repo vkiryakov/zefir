@@ -17,6 +17,15 @@
 //! - A connection is perished when it is of an older generation, idle for
 //!   longer than `max_idle_time`, or left broken by its exchange: it
 //!   closes at check-out or at check-in.
+//! - A clear makes every connection of the generation perished, closing
+//!   the idle ones at once, and pauses the pool; the calls in line get
+//!   `error.Unavailable`. It comes from a network error on an established
+//!   connection, a failed authentication or a server shutting down, which
+//!   the caller names at check-in; an error of an older generation is
+//!   stale and clears nothing. With no monitor to find the server back,
+//!   the first call to a paused pool opens one connection as a probe, at
+//!   most once every 500 ms, and the others get `error.Unavailable` at
+//!   once; a probe that succeeds makes the pool ready again.
 //! - `close` refuses new calls and those in line (`error.Closed`), stops
 //!   the openings, lets the exchanges in progress end within its time,
 //!   then cuts them.
@@ -33,8 +42,13 @@ const Diagnostics = mongo.Diagnostics;
 const Address = @import("Connection.zig").Address;
 const Attempt = @import("connect.zig").Attempt;
 const time = @import("time.zig");
+const log = std.log.scoped(.mongo);
 const Pool = @This();
 const List = std.DoublyLinkedList;
+
+/// The shortest time between two probes of a paused pool:
+/// minHeartbeatFrequencyMS of the SDAM specification.
+pub const probe_interval: Io.Duration = .fromMilliseconds(500);
 
 options: Options,
 mutex: Io.Mutex = .init,
@@ -54,6 +68,10 @@ line: List = .{},
 waiting: usize = 0,
 /// The calls between `enter` and `leave`.
 calls: usize = 0,
+/// A probe of the paused pool is opening a connection.
+probing: bool = false,
+/// When the latest probe started.
+last_probe: ?Io.Timestamp = null,
 /// Set once the pool is closing and no call is left.
 drained: Io.Event = .unset,
 /// Set once `close` is done.
@@ -68,7 +86,7 @@ pub const Options = struct {
     max_idle_time: ?Io.Duration = null,
 };
 
-pub const State = enum { initialized, ready, closing, closed };
+pub const State = enum { initialized, ready, paused, closing, closed };
 
 /// The pool's part of a connection, which the connection holds as a
 /// field: its place in a list, its generation, and how the pool closes it
@@ -122,8 +140,11 @@ pub const Limits = struct {
 pub const After = union(enum) {
     /// It is as it was.
     ok,
-    /// It is broken: close it.
+    /// It is broken, as after a timeout: close it.
     broken,
+    /// The server is gone or going: close it and clear the pool, for the
+    /// reason given, which the log shows.
+    clear: []const u8,
 };
 
 /// What the pool holds at a moment.
@@ -154,7 +175,7 @@ pub fn enter(pool: *Pool, io: Io, d: ?*Diagnostics) mongo.Error!void {
     defer pool.mutex.unlock(io);
     switch (pool.state) {
         .closing, .closed => return fail(d, .checkout, error.Closed, "the client is closed", .{}),
-        .initialized, .ready => {},
+        .initialized, .ready, .paused => {},
     }
     pool.calls += 1;
 }
@@ -170,7 +191,7 @@ pub fn leave(pool: *Pool, io: Io) void {
 pub fn isConnected(pool: *Pool, io: Io) bool {
     pool.mutex.lockUncancelable(io);
     defer pool.mutex.unlock(io);
-    return pool.state == .ready;
+    return pool.state == .ready or pool.state == .paused;
 }
 
 /// Opens the first connection, for the client's `connect`, which calls
@@ -192,16 +213,21 @@ pub fn checkOut(pool: *Pool, io: Io, opener: Opener, limits: Limits, d: ?*Diagno
     return pool.take(io, opener, limits, .call, d);
 }
 
-/// Takes `entry` back: idle, or closed when it is perished or the pool is
-/// closing.
+/// Takes `entry` back: idle, or closed when it is perished, the pool is
+/// closing, or `after` says so; `after.clear` clears the pool too.
 pub fn checkIn(pool: *Pool, io: Io, entry: *Entry, after: After) void {
     var dead: List = .{};
+    var cleared = false;
     pool.mutex.lockUncancelable(io);
     pool.in_use.remove(&entry.node);
     pool.in_use_count -= 1;
     const keep = switch (after) {
         .ok => pool.state == .ready and entry.generation == pool.generation,
         .broken => false,
+        .clear => keep: {
+            cleared = pool.clear(io, entry.generation, &dead);
+            break :keep false;
+        },
     };
     if (keep) {
         entry.idle_since = time.now(io);
@@ -211,8 +237,10 @@ pub fn checkIn(pool: *Pool, io: Io, entry: *Entry, after: After) void {
         dead.append(&entry.node);
     }
     pool.passTurn(io);
+    const generation = pool.generation;
     pool.mutex.unlock(io);
     bury(&dead);
+    if (cleared) logClear(pool.options.server, generation, after.clear);
 }
 
 /// Refuses new calls and those in line (`error.Closed`) and stops the
@@ -235,7 +263,7 @@ pub fn close(pool: *Pool, io: Io, timeout: Io.Duration) void {
             pool.closed.waitUncancelable(io);
             return;
         },
-        .initialized, .ready => {},
+        .initialized, .ready, .paused => {},
     }
     pool.state = .closing;
     pool.wakeAll(io);
@@ -318,6 +346,8 @@ const Found = union(enum) {
 const Place = struct {
     /// The generation the new connection belongs to.
     generation: u64,
+    /// The opening is the probe of a paused pool.
+    probe: bool = false,
 };
 
 fn take(pool: *Pool, io: Io, opener: Opener, limits: Limits, purpose: Purpose, d: ?*Diagnostics) mongo.Error!*Entry {
@@ -340,6 +370,7 @@ fn wait(pool: *Pool, io: Io, limits: Limits, purpose: Purpose, opening: *Opening
     switch (pool.state) {
         .initialized => if (purpose == .call) return fail(d, .checkout, error.Unavailable, "connect() has not succeeded", .{}),
         .ready => {},
+        .paused => return pool.probe(io, opening, d),
         .closing, .closed => return fail(d, .checkout, error.Closed, "the client is closed", .{}),
     }
     // Nobody in line: no need to queue.
@@ -357,6 +388,7 @@ fn wait(pool: *Pool, io: Io, limits: Limits, purpose: Purpose, opening: *Opening
     while (true) {
         switch (pool.state) {
             .initialized, .ready => {},
+            .paused => return fail(d, .checkout, error.Unavailable, "the pool was cleared while the call waited for a connection", .{}),
             .closing, .closed => return fail(d, .checkout, error.Closed, "the client was closed while the call waited for a connection", .{}),
         }
         if (pool.line.first == &waiter.node) if (pool.find(io, opening, dead)) |found| return found;
@@ -403,31 +435,84 @@ fn find(pool: *Pool, io: Io, opening: *Opening, dead: *List) ?Found {
     return .{ .open = .{ .generation = pool.generation } };
 }
 
-/// What an opening ended with, under the lock: the new connection, in use
-/// by the call that opened it, or the error.
+/// A call to a paused pool: the probe, which opens a connection, when no
+/// probe is opening one, the last began 500 ms ago or more, and there is
+/// room; else `error.Unavailable` at once.
+fn probe(pool: *Pool, io: Io, opening: *Opening, d: ?*Diagnostics) mongo.Error!Found {
+    if (pool.probing) return fail(d, .checkout, error.Unavailable, "the pool is paused after a clear, and a probe is opening a connection", .{});
+    const now = time.now(io);
+    if (pool.last_probe) |last| {
+        const left = probe_interval.nanoseconds - last.durationTo(now).nanoseconds;
+        if (left > 0) return fail(d, .checkout, error.Unavailable, "the pool is paused after a clear; the next probe may open a connection in {d} ms", .{
+            @divFloor(left + std.time.ns_per_ms - 1, std.time.ns_per_ms),
+        });
+    }
+    if (!pool.roomToOpen()) return fail(d, .checkout, error.Unavailable, "the pool is paused after a clear, and the connections before it fill it", .{});
+    pool.probing = true;
+    pool.last_probe = now;
+    pool.opening.append(&opening.node);
+    pool.opening_count += 1;
+    return .{ .open = .{ .generation = pool.generation, .probe = true } };
+}
+
+/// What an opening ended with: the new connection, in use by the call
+/// that opened it, or the error. A failed authentication clears the pool;
+/// a probe that succeeds makes it ready again.
 fn opened(pool: *Pool, io: Io, opening: *Opening, place: Place, result: mongo.Error!*Entry, d: ?*Diagnostics) mongo.Error!*Entry {
     var dead: List = .{};
+    var cleared = false;
     pool.mutex.lockUncancelable(io);
     defer {
         // A place to open, or an opening less: the next in line may go.
         pool.passTurn(io);
+        const generation = pool.generation;
         pool.mutex.unlock(io);
         bury(&dead);
+        if (cleared) logClear(pool.options.server, generation, "the server refused the user");
     }
     pool.opening.remove(&opening.node);
     pool.opening_count -= 1;
-    const entry = try result;
+    if (place.probe) pool.probing = false;
+    const entry = result catch |err| {
+        // The server refuses the credentials of every connection alike.
+        if (err == error.AuthenticationFailed) cleared = pool.clear(io, place.generation, &dead);
+        return err;
+    };
     entry.generation = place.generation;
     switch (pool.state) {
         .closing, .closed => {
             dead.append(&entry.node);
             return fail(d, .connect, error.Closed, "the client was closed while it connected", .{});
         },
+        // A clear pauses the pool only from ready, and the generation
+        // stays while it is paused: the probe's connection is current.
+        .paused => if (place.probe) {
+            pool.state = .ready;
+        },
         .initialized, .ready => {},
     }
     pool.in_use.append(&entry.node);
     pool.in_use_count += 1;
     return entry;
+}
+
+/// Clears the pool, under the lock: a new generation, the idle
+/// connections to `dead`, the pool paused and the calls in line sent away.
+/// False, and nothing changes, when the pool is not ready or `generation`
+/// is older than the pool's: the error is stale, or cleared already.
+fn clear(pool: *Pool, io: Io, generation: u64, dead: *List) bool {
+    if (pool.state != .ready or generation != pool.generation) return false;
+    pool.generation += 1;
+    pool.clears += 1;
+    pool.state = .paused;
+    dead.concatByMoving(&pool.idle);
+    pool.idle_count = 0;
+    pool.wakeAll(io);
+    return true;
+}
+
+fn logClear(server: Address, generation: u64, reason: []const u8) void {
+    log.warn("the pool of connections to {f} is cleared: {s}; generation {d} begins, and calls get error.Unavailable until a new connection opens", .{ server, reason, generation });
 }
 
 fn perished(pool: *const Pool, entry: *const Entry, now: Io.Timestamp) bool {

@@ -151,6 +151,7 @@ pub fn run(conn: *Connection, setup: Setup, gpa: Allocator, d: ?*Diagnostics) Er
                 // wants TLS does to a plain hello.
                 const closed = if (conn.stream.err) |cause| cause == error.ConnectionResetByPeer else true;
                 if (closed) if (d) |x| x.set(.handshake, null, "the server at {f} closed the connection during hello; a server that requires TLS does so, and v0.1 does not speak TLS", .{conn.address});
+                markOverloaded(d);
                 return error.Unavailable;
             },
             else => error.Unavailable,
@@ -160,6 +161,16 @@ pub fn run(conn: *Connection, setup: Setup, gpa: Allocator, d: ?*Diagnostics) Er
     conn.rtt = start.durationTo(time.now(io));
     conn.hello = try check(reply.raw(), conn.address, gpa, d);
     if (setup.auth) |auth| try authenticate(conn, auth, reply.raw(), &opening, gpa, d);
+}
+
+/// Gives `d` the errorLabels that CMAP gives, since 2026, to a network
+/// error or a timeout while a connection opens, before authentication:
+/// SystemOverloadedError and RetryableError, since the server may be
+/// overloaded and the call may go again. They go to `Diagnostics.server`,
+/// with code 0: no server answered.
+pub fn markOverloaded(d: ?*Diagnostics) void {
+    const x = d orelse return;
+    x.server = .{ .code = 0, .labels = .initMany(&.{ .system_overloaded_error, .retryable_error }) };
 }
 
 /// What hello carries for authentication: the user whose mechanisms the

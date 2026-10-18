@@ -185,6 +185,8 @@ fn hangUp(io: Io) !void {
     var d: Diagnostics = .{};
     try testing.expectError(error.Unavailable, openAs(io, &server, credentials(null), &d));
     try testing.expectEqual(Diagnostics.Phase.authenticate, d.phase.?);
+    // A network error after hello: no labels of overload.
+    try testing.expect(d.server == null);
 }
 
 test "a user with ',' and '=' goes escaped in SCRAM and as it is in saslSupportedMechs, and the user's database is where SASL goes" {

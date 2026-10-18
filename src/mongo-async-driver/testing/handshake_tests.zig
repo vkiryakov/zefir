@@ -51,6 +51,14 @@ fn open(io: Io, listener: *const net.Server, setup: *const handshake.Setup, d: *
     return connect.open(io, testing.allocator, address(listener), setup, .after(time.now(io), .fromSeconds(5)), &attempt, d);
 }
 
+/// The labels that CMAP gives a network error while a connection opens.
+fn expectOverloaded(d: *const Diagnostics) !void {
+    const server = d.server orelse return error.TestExpectedLabels;
+    try testing.expectEqual(@as(i32, 0), server.code);
+    try testing.expect(server.labels.contains(.system_overloaded_error));
+    try testing.expect(server.labels.contains(.retryable_error));
+}
+
 const standalone = bson.literal(.{
     .helloOk = true,
     .ismaster = true,
@@ -170,6 +178,7 @@ fn closedOnHello(io: Io) !void {
     var buffer: [256]u8 = undefined;
     try testing.expectEqualStrings(try std.fmt.bufPrint(&buffer, "the server at {f} closed the connection during hello; a server that requires TLS does so, and v0.1 does not speak TLS", .{address(&listener)}), d.message());
     try testing.expectEqual(Diagnostics.Phase.handshake, d.phase.?);
+    try expectOverloaded(&d);
 }
 
 test "ok 0 from hello is Unavailable, with the server's error" {
@@ -198,6 +207,8 @@ fn helloFails(io: Io) !void {
     try testing.expectEqual(@as(i32, 91), d.server.?.code);
     try testing.expectEqualStrings("Failing command via 'failCommand' failpoint", d.message());
     try testing.expectEqual(Diagnostics.Phase.handshake, d.phase.?);
+    // The server answered: no labels of overload.
+    try testing.expect(!d.server.?.labels.contains(.system_overloaded_error));
 }
 
 test "an attempt that the server leaves unanswered ends at its deadline, and a closed port is Unavailable" {
@@ -232,6 +243,13 @@ fn unanswered(io: Io) !void {
     try testing.expectEqual(Diagnostics.Phase.connect, d.phase.?);
     var buffer: [128]u8 = undefined;
     try testing.expectEqualStrings(try std.fmt.bufPrint(&buffer, "cannot connect to {f}: ConnectionRefused", .{gone}), d.message());
+    try expectOverloaded(&d);
+    // A host name that cannot be read is no sign of an overloaded server.
+    var named: Diagnostics = .{};
+    var named_attempt: connect.Attempt = .{};
+    try testing.expectError(error.Unavailable, connect.open(io, testing.allocator, .{ .host = "bad..name", .port = 27017 }, &setup, .after(time.now(io), .fromSeconds(5)), &named_attempt, &named));
+    try testing.expectEqualStrings("cannot connect to bad..name:27017: InvalidHostName", named.message());
+    try testing.expect(named.server == null);
 }
 
 const Client = @import("../Client.zig");
