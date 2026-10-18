@@ -36,11 +36,19 @@ pub fn isSpecial(comptime T: type) bool {
 }
 
 fn documentProblem(comptime T: type, comptime direction: Direction) ?[]const u8 {
-    const not_a_document = "a document is a struct with named fields, such as .{ .name = name }; got " ++ @typeName(T);
+    const not_a_document = switch (direction) {
+        .encode => "a document is a struct with named fields, such as .{ .name = name }, or a bson.RawDocument; got ",
+        .decode => "decode fills a struct with named fields; got ",
+    } ++ @typeName(T);
     if (direction == .encode and (T == bson.RawDocument or T == bson.OwnedDocument)) return null;
     if (isSpecial(T)) return not_a_document;
     switch (@typeInfo(T)) {
-        .@"struct" => return walk(T, "", direction, &.{}),
+        .@"struct" => |info| {
+            if (direction == .encode and info.is_tuple and info.field_names.len > 0) {
+                return "a tuple is an array, not a document: give its values names, such as .{ .a = x }";
+            }
+            return walk(T, "", direction, &.{});
+        },
         else => return not_a_document,
     }
 }

@@ -389,6 +389,19 @@ test "what encode writes, decode reads back" {
     }
 }
 
+test "packed and extern structs are documents too" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const Flags = packed struct { read: bool, write: bool, level: u6 };
+    const Point = extern struct { x: i32, y: f64 };
+    const Both = struct { flags: Flags, point: Point };
+    const value: Both = .{ .flags = .{ .read = true, .write = false, .level = 5 }, .point = .{ .x = 1, .y = 2.5 } };
+    const doc = try bson.encode(testing.allocator, value, .{});
+    defer doc.deinit();
+    try testing.expectEqualSlices(u8, literal(.{ .flags = .{ .read = true, .write = false, .level = 5 }, .point = .{ .x = 1, .y = 2.5 } }).bytes, doc.bytes);
+    try testing.expectEqualDeep(value, try bson.decode(Both, arena.allocator(), doc.raw(), .{}));
+}
+
 /// Whether `part` points into `bytes`.
 fn inside(bytes: []const u8, part: []const u8) bool {
     const start = @intFromPtr(bytes.ptr);

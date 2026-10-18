@@ -21,6 +21,14 @@
 //!
 //! No bytes make a reader go out of bounds or panic: broken ones give
 //! `error.InvalidBson`.
+//!
+//! ```zig
+//! const User = struct { name: []const u8, age: i32 };
+//! const doc = try bson.encode(gpa, User{ .name = "Ann", .age = 30 }, .{});
+//! defer doc.deinit();
+//! const user = try bson.decode(User, arena, doc.raw(), .{});
+//! const by_age = bson.literal(.{ .age = -1 }); // static bytes, no allocator
+//! ```
 
 const std = @import("std");
 const value = @import("bson/value.zig");
@@ -28,6 +36,9 @@ const types = @import("bson/types.zig");
 const encoding = @import("bson/encode.zig");
 const decoding = @import("bson/decode.zig");
 
+pub const RawDocument = @import("bson/RawDocument.zig");
+pub const OwnedDocument = @import("bson/OwnedDocument.zig");
+pub const Builder = @import("bson/Builder.zig");
 pub const encode = encoding.encode;
 pub const EncodeOptions = encoding.EncodeOptions;
 pub const literal = @import("bson/literal.zig").literal;
@@ -35,9 +46,6 @@ pub const decode = decoding.decode;
 pub const DecodeOptions = decoding.DecodeOptions;
 pub const DecodeError = decoding.DecodeError;
 pub const DecodeDiagnostics = decoding.DecodeDiagnostics;
-pub const RawDocument = @import("bson/RawDocument.zig");
-pub const OwnedDocument = @import("bson/OwnedDocument.zig");
-pub const Builder = @import("bson/Builder.zig");
 pub const Value = value.Value;
 pub const Element = value.Element;
 pub const Type = value.Type;
@@ -73,4 +81,5 @@ test {
     _ = @import("bson/encode_tests.zig");
     _ = @import("bson/literal_tests.zig");
     _ = @import("bson/decode_tests.zig");
+    _ = @import("bson/check_tests.zig");
 }

@@ -3,7 +3,8 @@
 //! drivers import it.
 //!
 //! - `mongo.bson` — BSON, the format of MongoDB's documents and commands:
-//!   read a document where it lies, check it, write one, and print it as
+//!   read a document where it lies, check it, write one, turn structs and
+//!   literals into documents and documents into structs, and print it as
 //!   Extended JSON for logs and test messages.
 
 const std = @import("std");

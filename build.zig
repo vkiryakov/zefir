@@ -594,6 +594,50 @@ pub fn build(b: *std.Build) void {
         test_rpc_nats.dependOn(&compile.step);
     }
 
+    // mongo compile errors: types that the BSON codec cannot write or read.
+    // Each test of the file must fail to compile with the message next to
+    // its name, which names the field; the filter compiles one test at a
+    // time. A type declared in the file is named after the file.
+    const mongo_compile_errors = b.createModule(.{
+        .root_source_file = b.path("src/mongo/tests/compile_errors.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+        .imports = &.{
+            .{ .name = "mongo", .module = mongo },
+        },
+    });
+    for ([_][2][]const u8{
+        .{ "u64", "bson.encode: field 'n' is u64, which BSON has no type for: its integers are signed; use i64" },
+        .{ "usize", "bson.encode: field 'n' is usize, whose size depends on the target: use i64 or i32" },
+        .{ "isize", "bson.decode: field 'n' is isize, whose size depends on the target: use i64 or i32" },
+        .{ "c_int", "bson.encode: field 'n' is c_int, whose size depends on the target: use an integer of a fixed width, such as i32" },
+        .{ "non-exhaustive enum", "bson.encode: field 'kind' is compile_errors.Open, a non-exhaustive enum: a value without a tag has no name to write; make the enum exhaustive" },
+        .{ "union", "bson.decode: field 'shape' is compile_errors.Shape: unions are not supported; a field of any BSON type is a bson.Value" },
+        .{ "pointer", "bson.encode: field 'owner' is *const compile_errors.User: pass the value itself, not a pointer to it" },
+        .{ "many-item pointer", "bson.encode: field 'name' is [*]const u8, which has no length: pass a slice" },
+        .{ "type that holds itself", "bson.encode: field 'children[]' is compile_errors.Node inside itself: a type that holds itself is not supported" },
+        .{ "optional of an optional", "bson.encode: field 'n' is ??u32: BSON null cannot tell the two nulls apart" },
+        .{ "path of a nested field", "bson.decode: field 'items[].owner.id' is u64, which BSON has no type for: its integers are signed; use i64" },
+        .{ "put of a u64", "bson.Builder.put: the value is u64, which BSON has no type for: its integers are signed; use i64" },
+        .{ "literal of a string that is not UTF-8", "bson.literal: the string of 'a' is not UTF-8" },
+        .{ "integer literal beyond int64", "bson.encode: field 'n' is 9223372036854775808, which does not fit int64" },
+        .{ "tuple as a document", "bson.encode: a tuple is an array, not a document: give its values names, such as .{ .a = x }" },
+        .{ "number as a document", "bson.encode: a document is a struct with named fields, such as .{ .name = name }, or a bson.RawDocument; got u32" },
+        .{ "deprecated type to encode", "bson.encode: field 'p' is bson.types.DbPointer, a deprecated type: it is read, never written" },
+        .{ "tuple to decode", "bson.decode: field 'pair' is struct { i32, i32 }, a tuple: decode needs the names of fields; use a struct, or a slice for an array" },
+        .{ "comptime field to decode", "bson.decode: field 'version' is a comptime field: decode fills only fields known at run time" },
+        .{ "mutable slice to decode", "bson.decode: field 'name' is []u8: decode gives const slices; use []const u8" },
+    }, 0..) |case, i| {
+        const compile = b.addTest(.{
+            .name = b.fmt("mongo-compile-error-{d}", .{i}),
+            .root_module = mongo_compile_errors,
+            .filters = &.{case[0]},
+        });
+        compile.expect_errors = .{ .contains = case[1] };
+        test_mongo.dependOn(&compile.step);
+    }
+
     // rpc-nats panic program: a second conn() of one ZefirNats panics in
     // safe builds, since one adapter serves one transport. Like the rpc
     // ones above, it ends in its own panic handler with code 3 and gets
