@@ -27,7 +27,9 @@ test {
     _ = @import("engine/handshake.zig");
     _ = @import("engine/scram.zig");
     _ = @import("engine/KeyCache.zig");
+    _ = @import("engine/Pool.zig");
     _ = @import("testing/connection_tests.zig");
     _ = @import("testing/handshake_tests.zig");
     _ = @import("testing/auth_tests.zig");
+    _ = @import("testing/pool_tests.zig");
 }
