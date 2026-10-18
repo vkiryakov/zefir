@@ -28,4 +28,5 @@ test {
     _ = @import("engine/scram.zig");
     _ = @import("testing/connection_tests.zig");
     _ = @import("testing/handshake_tests.zig");
+    _ = @import("testing/auth_tests.zig");
 }

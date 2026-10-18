@@ -1,8 +1,8 @@
 //! The native driver. `init` checks the options and does no I/O;
 //! `connect` opens the first connection under the caller's deadline, so a
-//! server of the wrong kind shows at start; `client()` hands out the
-//! `mongo.Client` that the code above uses; `close` ends the work and
-//! `deinit` frees everything.
+//! server of the wrong kind or a user it refuses shows at start; `client()`
+//! hands out the `mongo.Client` that the code above uses; `close` ends the
+//! work and `deinit` frees everything.
 //!
 //! ```zig
 //! var driver: mongo_async_driver.Client = try .init(gpa, io, .{ .uri = "mongodb://127.0.0.1:27017/app" });
@@ -18,8 +18,9 @@
 //! ```
 //!
 //! Calls come from any task, one at a time on the connection; a connection
-//! that breaks is opened again by the next call. After `connect` the
-//! client must stay where it is.
+//! that breaks is opened again by the next call. Every new connection
+//! authenticates as the user of the connection string, by SCRAM-SHA-256
+//! or SCRAM-SHA-1. After `connect` the client must stay where it is.
 
 const std = @import("std");
 const Io = std.Io;
@@ -36,6 +37,7 @@ const Stats = @import("Stats.zig");
 const Connection = @import("engine/Connection.zig");
 const connect_ = @import("engine/connect.zig");
 const handshake = @import("engine/handshake.zig");
+const scram = @import("engine/scram.zig");
 const time = @import("engine/time.zig");
 const Client = @This();
 
@@ -43,8 +45,8 @@ gpa: Allocator,
 /// The `io` of `init`: every call comes on it.
 io: Io,
 options: OwnedOptions,
-/// The hello of every new connection.
-hello: bson.OwnedDocument,
+/// The `client` document of the hello of every new connection.
+metadata: bson.OwnedDocument,
 /// One call at a time on the connection, and on its opening.
 exchange_mutex: Io.Mutex = .init,
 /// Guards what follows, which `close` and `stats` read from other tasks.
@@ -67,23 +69,17 @@ pub fn init(gpa: Allocator, io: Io, options: Options) InitError!Client {
     const d = options.diagnostics;
     var owned: OwnedOptions = try .init(gpa, options);
     errdefer owned.deinit(gpa);
-    if (owned.credentials() != null) {
-        if (d) |x| x.set(null, null, "the connection string names a user, and this version of zefir-mongo-async-driver does not authenticate yet: connect to a mongod without --auth", .{});
-        return error.Unsupported;
-    }
+    // authMechanism=SCRAM-SHA-256 must take the password; the mechanism
+    // the server picks is checked when it picks it.
+    if (owned.credentials()) |c| if (c.mechanism) |mechanism| try scram.checkPassword(mechanism, c.password, null, d);
     const metadata = try handshake.metadata(gpa, owned.uri.app_name, d);
-    defer metadata.deinit();
-    const hello = handshake.command(gpa, metadata.raw(), .{}) catch |err| return switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
-        error.InvalidBson => error.InvalidArgument,
-    };
-    return .{ .gpa = gpa, .io = io, .options = owned, .hello = hello };
+    return .{ .gpa = gpa, .io = io, .options = owned, .metadata = metadata };
 }
 
 /// Closes the client, if `close` has not, and frees it.
 pub fn deinit(self: *Client) void {
     self.close(self.io);
-    self.hello.deinit();
+    self.metadata.deinit();
     self.options.deinit(self.gpa);
     self.* = undefined;
 }
@@ -93,10 +89,11 @@ pub fn client(self: *Client) mongo.Client {
     return .init(self);
 }
 
-/// Opens the first connection, hello included, under the deadline of
-/// `ctx`. Until it succeeds, calls are `error.Unavailable`; it may be
-/// called again after a failure, and does nothing once the client is
-/// connected. Why it failed goes to `diagnostics`.
+/// Opens the first connection, hello and authentication included, under
+/// the deadline of `ctx`. Until it succeeds, calls are
+/// `error.Unavailable`; it may be called again after a failure, and does
+/// nothing once the client is connected. Why it failed goes to
+/// `diagnostics`.
 pub fn connect(self: *Client, io: Io, ctx: core.Context, diagnostics: ?*Diagnostics) mongo.Error!void {
     const d = diagnostics;
     if (d) |x| x.* = .{};
@@ -274,11 +271,15 @@ fn open(self: *Client, io: Io, deadline: ?core.Deadline, d: ?*Diagnostics) mongo
         budget = dl;
         by_deadline = true;
     };
+    const setup: handshake.Setup = .{
+        .metadata = self.metadata.raw(),
+        .auth = if (self.options.credentials()) |c| .{ .credentials = c } else null,
+    };
     var attempt: connect_.Attempt = .{};
     self.state_mutex.lockUncancelable(io);
     self.attempt = &attempt;
     self.state_mutex.unlock(io);
-    const opened = connect_.open(io, self.gpa, address, self.hello.raw(), budget, &attempt, d);
+    const opened = connect_.open(io, self.gpa, address, &setup, budget, &attempt, d);
     self.state_mutex.lockUncancelable(io);
     self.attempt = null;
     const closed = self.state == .closed;
@@ -289,7 +290,7 @@ fn open(self: *Client, io: Io, deadline: ?core.Deadline, d: ?*Diagnostics) mongo
     const conn = opened catch |err| {
         if (closed) return fail(d, .connect, error.Closed, "the client was closed while it connected", .{});
         return switch (err) {
-            error.Unavailable, error.Unsupported, error.OutOfMemory => |e| e,
+            error.Unavailable, error.Unsupported, error.AuthenticationFailed, error.OutOfMemory => |e| e,
             error.Timeout => if (by_deadline)
                 fail(d, .connect, error.DeadlineExceeded, "the deadline passed while the client connected to {f}", .{address})
             else

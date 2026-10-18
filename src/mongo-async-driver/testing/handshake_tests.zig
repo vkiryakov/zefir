@@ -40,10 +40,15 @@ fn address(listener: *const net.Server) Connection.Address {
     return .{ .host = "127.0.0.1", .port = FakeServer.port(listener) };
 }
 
+/// The setup of a client without a user, with `metadata`.
+fn plain(metadata: bson.OwnedDocument) handshake.Setup {
+    return .{ .metadata = metadata.raw() };
+}
+
 /// Opens a connection to `listener` under a deadline 5 s away.
-fn open(io: Io, listener: *const net.Server, command: bson.RawDocument, d: *Diagnostics) connect.OpenError!*Connection {
+fn open(io: Io, listener: *const net.Server, setup: *const handshake.Setup, d: *Diagnostics) connect.OpenError!*Connection {
     var attempt: connect.Attempt = .{};
-    return connect.open(io, testing.allocator, address(listener), command, .after(time.now(io), .fromSeconds(5)), &attempt, d);
+    return connect.open(io, testing.allocator, address(listener), setup, .after(time.now(io), .fromSeconds(5)), &attempt, d);
 }
 
 const standalone = bson.literal(.{
@@ -90,10 +95,10 @@ fn helloBytes(io: Io) !void {
         .@"$db" = "admin",
     });
     var server = try io.concurrent(expectHello, .{ io, &listener, expected, standalone });
-    const command = try hello("orders");
-    defer command.deinit();
+    const meta = try handshake.metadata(testing.allocator, "orders", null);
+    defer meta.deinit();
     var d: Diagnostics = .{};
-    const conn = open(io, &listener, command.raw(), &d) catch |err| {
+    const conn = open(io, &listener, &plain(meta), &d) catch |err| {
         server.cancel(io) catch {};
         return err;
     };
@@ -121,8 +126,8 @@ fn refusedServers(io: Io) !void {
         .{ .{ .server_type = .mongos }, "the server at {f} is a mongos (Mongos); v0.1 supports standalone mongod only" },
         .{ .{ .max_wire_version = 20 }, "Server at {f} reports wire version 20, but this version of zefir-mongo-async-driver requires at least 21 (MongoDB 7.0)." },
     };
-    const command = try hello(null);
-    defer command.deinit();
+    const meta = try handshake.metadata(testing.allocator, null, null);
+    defer meta.deinit();
     inline for (cases) |case| {
         var ok: Ok = .{};
         var script: Script = .init(testing.allocator, .init(&ok));
@@ -133,7 +138,7 @@ fn refusedServers(io: Io) !void {
         var server = try io.concurrent(FakeServer.serve, .{ io, &listener, &script });
         defer server.cancel(io) catch {};
         var d: Diagnostics = .{};
-        try testing.expectError(error.Unsupported, open(io, &listener, command.raw(), &d));
+        try testing.expectError(error.Unsupported, open(io, &listener, &plain(meta), &d));
         var buffer: [256]u8 = undefined;
         try testing.expectEqualStrings(try std.fmt.bufPrint(&buffer, case[1], .{address(&listener)}), d.message());
         try testing.expectEqual(Diagnostics.Phase.handshake, d.phase.?);
@@ -158,10 +163,10 @@ fn closedOnHello(io: Io) !void {
     defer listener.deinit(io);
     var server = try io.concurrent(readAndClose, .{ io, &listener });
     defer server.await(io) catch {};
-    const command = try hello(null);
-    defer command.deinit();
+    const meta = try handshake.metadata(testing.allocator, null, null);
+    defer meta.deinit();
     var d: Diagnostics = .{};
-    try testing.expectError(error.Unavailable, open(io, &listener, command.raw(), &d));
+    try testing.expectError(error.Unavailable, open(io, &listener, &plain(meta), &d));
     var buffer: [256]u8 = undefined;
     try testing.expectEqualStrings(try std.fmt.bufPrint(&buffer, "the server at {f} closed the connection during hello; a server that requires TLS does so, and v0.1 does not speak TLS", .{address(&listener)}), d.message());
     try testing.expectEqual(Diagnostics.Phase.handshake, d.phase.?);
@@ -186,8 +191,10 @@ fn helloFails(io: Io) !void {
     defer with_db.deinit();
     var server = try io.concurrent(expectHello, .{ io, &listener, with_db.raw(), failure });
     defer server.await(io) catch {};
+    const meta = try handshake.metadata(testing.allocator, null, null);
+    defer meta.deinit();
     var d: Diagnostics = .{};
-    try testing.expectError(error.Unavailable, open(io, &listener, command.raw(), &d));
+    try testing.expectError(error.Unavailable, open(io, &listener, &plain(meta), &d));
     try testing.expectEqual(@as(i32, 91), d.server.?.code);
     try testing.expectEqualStrings("Failing command via 'failCommand' failpoint", d.message());
     try testing.expectEqual(Diagnostics.Phase.handshake, d.phase.?);
@@ -205,22 +212,23 @@ fn holdSilent(io: Io, listener: *net.Server) !void {
 }
 
 fn unanswered(io: Io) !void {
-    const command = try hello(null);
-    defer command.deinit();
+    const meta = try handshake.metadata(testing.allocator, null, null);
+    defer meta.deinit();
+    const setup = plain(meta);
     var listener = try FakeServer.listen(io);
     {
         var server = try io.concurrent(holdSilent, .{ io, &listener });
         defer server.await(io) catch {};
         var attempt: connect.Attempt = .{};
         const deadline: core.Deadline = .after(time.now(io), .fromMilliseconds(100));
-        try testing.expectError(error.Timeout, connect.open(io, testing.allocator, address(&listener), command.raw(), deadline, &attempt, null));
+        try testing.expectError(error.Timeout, connect.open(io, testing.allocator, address(&listener), &setup, deadline, &attempt, null));
         try testing.expect(time.expired(io, deadline));
     }
     const gone = address(&listener);
     listener.deinit(io);
     var d: Diagnostics = .{};
     var attempt: connect.Attempt = .{};
-    try testing.expectError(error.Unavailable, connect.open(io, testing.allocator, gone, command.raw(), .after(time.now(io), .fromSeconds(5)), &attempt, &d));
+    try testing.expectError(error.Unavailable, connect.open(io, testing.allocator, gone, &setup, .after(time.now(io), .fromSeconds(5)), &attempt, &d));
     try testing.expectEqual(Diagnostics.Phase.connect, d.phase.?);
     var buffer: [128]u8 = undefined;
     try testing.expectEqualStrings(try std.fmt.bufPrint(&buffer, "cannot connect to {f}: ConnectionRefused", .{gone}), d.message());
@@ -384,10 +392,7 @@ fn brokenAndFailed(io: Io) !void {
     try testing.expectEqual(@as(usize, 1), driver.stats().connections);
 }
 
-test "init does no I/O, and a user in the connection string is Unsupported until the driver authenticates" {
+test "init does no I/O" {
     var driver: Client = try .init(testing.allocator, testing.io, .{ .uri = "mongodb://127.0.0.1:1/?appName=orders" });
     driver.deinit();
-    var d: Diagnostics = .{};
-    try testing.expectError(error.Unsupported, Client.init(testing.allocator, testing.io, .{ .uri = "mongodb://app:secret@127.0.0.1/app", .diagnostics = &d }));
-    try testing.expectEqualStrings("the connection string names a user, and this version of zefir-mongo-async-driver does not authenticate yet: connect to a mongod without --auth", d.message());
 }

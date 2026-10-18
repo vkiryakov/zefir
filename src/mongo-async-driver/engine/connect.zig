@@ -1,6 +1,7 @@
 //! Opening a connection to the server. `std.Io` has no portable timeout
-//! for TCP connect, so a whole attempt, DNS, TCP and the handshake, runs
-//! in a task of its own and races a timer (`race.zig`); a timer that wins
+//! for TCP connect, so a whole attempt, DNS, TCP, the handshake and
+//! authentication, runs in a task of its own and races a timer
+//! (`race.zig`); a timer that wins
 //! shuts the attempt's socket down, which ends an attempt blocked on it
 //! even when it lost its cancelation. `close` of the client stops an
 //! attempt the same way.
@@ -11,7 +12,6 @@ const net = Io.net;
 const Allocator = std.mem.Allocator;
 const core = @import("core");
 const mongo = @import("mongo");
-const bson = mongo.bson;
 const Diagnostics = mongo.Diagnostics;
 const Connection = @import("Connection.zig");
 const DeadlineStream = @import("DeadlineStream.zig");
@@ -22,22 +22,22 @@ const race = @import("race.zig");
 /// the diagnostics, and `Timeout` when the deadline came first,
 /// `Canceled` when the caller's task was canceled or the attempt stopped,
 /// `ConcurrencyUnavailable` when the attempt found no task to run in.
-pub const OpenError = error{ Unavailable, Unsupported, OutOfMemory, Canceled, Timeout, ConcurrencyUnavailable };
+pub const OpenError = error{ Unavailable, Unsupported, AuthenticationFailed, OutOfMemory, Canceled, Timeout, ConcurrencyUnavailable };
 
-/// Opens a connection to `address` and runs `hello` on it, all of it
-/// before `deadline`, in a task of its own; null: no limit, and the
-/// caller's task does it. `attempt` lets another task stop it.
-pub fn open(io: Io, gpa: Allocator, address: Connection.Address, hello: bson.RawDocument, deadline: ?core.Deadline, attempt: *Attempt, d: ?*Diagnostics) OpenError!*Connection {
+/// Opens a connection to `address` and runs the handshake of `setup` on
+/// it, all of it before `deadline`, in a task of its own; null: no limit,
+/// and the caller's task does it. `attempt` lets another task stop it.
+pub fn open(io: Io, gpa: Allocator, address: Connection.Address, setup: *const handshake.Setup, deadline: ?core.Deadline, attempt: *Attempt, d: ?*Diagnostics) OpenError!*Connection {
     // The attempt's own diagnostics: what it says counts only when its
     // error is the one returned.
     var attempt_d: Diagnostics = .{};
-    const limit = deadline orelse return openNow(io, gpa, address, hello, attempt, d orelse &attempt_d);
-    return race.race(io, limit, openNow, .{ io, gpa, address, hello, attempt, &attempt_d }, destroy, .{
+    const limit = deadline orelse return openNow(io, gpa, address, setup, attempt, d orelse &attempt_d);
+    return race.race(io, limit, openNow, .{ io, gpa, address, setup, attempt, &attempt_d }, destroy, .{
         .context = attempt,
         .function = Attempt.abort,
     }) catch |err| {
         switch (err) {
-            error.Unavailable, error.Unsupported => if (d) |x| {
+            error.Unavailable, error.Unsupported, error.AuthenticationFailed => if (d) |x| {
                 x.* = attempt_d;
             },
             else => {},
@@ -46,7 +46,7 @@ pub fn open(io: Io, gpa: Allocator, address: Connection.Address, hello: bson.Raw
     };
 }
 
-fn openNow(io: Io, gpa: Allocator, address: Connection.Address, hello: bson.RawDocument, attempt: *Attempt, d: *Diagnostics) handshake.Error!*Connection {
+fn openNow(io: Io, gpa: Allocator, address: Connection.Address, setup: *const handshake.Setup, attempt: *Attempt, d: *Diagnostics) handshake.Error!*Connection {
     const stream = dial(io, address) catch |err| switch (err) {
         error.Canceled => return error.Canceled,
         else => {
@@ -63,7 +63,7 @@ fn openNow(io: Io, gpa: Allocator, address: Connection.Address, hello: bson.RawD
         stream.close(io);
         return error.OutOfMemory;
     };
-    handshake.run(conn, hello, gpa, d) catch |err| {
+    handshake.run(conn, setup.*, gpa, d) catch |err| {
         conn.destroy();
         return err;
     };
