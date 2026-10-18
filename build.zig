@@ -354,6 +354,53 @@ pub fn build(b: *std.Build) void {
     run_moved_client.expectExitCode(3);
     test_nats.dependOn(&run_moved_client.step);
 
+    // mongo-async-driver panic programs: a client moved after connect() and
+    // a call on another std.Io panic in safe builds. Each program must
+    // print the panic message and end in its own panic handler, which
+    // exits with code 3 instead of aborting. They get their own Debug
+    // copies of mongo and the driver, whatever -Doptimize says.
+    const panic_mongo = b.createModule(.{
+        .root_source_file = b.path("src/mongo/root.zig"),
+        .target = target,
+        .optimize = .Debug,
+        .imports = &.{
+            .{ .name = "core", .module = panic_core },
+        },
+    });
+    const panic_mongo_async_driver = b.createModule(.{
+        .root_source_file = b.path("src/mongo-async-driver/root.zig"),
+        .target = target,
+        .optimize = .Debug,
+        .imports = &.{
+            .{ .name = "mongo", .module = panic_mongo },
+            .{ .name = "core", .module = panic_core },
+        },
+    });
+    panic_mongo_async_driver.addOptions("build_options", version_options);
+    for ([_][2][]const u8{
+        .{ "moved_client", "panic: zefir-mongo-async-driver: Client moved after connect(): keep it where connect() ran (see the guide)" },
+        .{ "another_io", "panic: zefir-mongo-async-driver: a call on another std.Io than the client's: pass the io of Client.init" },
+    }) |case| {
+        const exe = b.addExecutable(.{
+            .name = b.fmt("mongo-async-driver-panic-{s}", .{case[0]}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(b.fmt("src/mongo-async-driver/testdata/panic/{s}.zig", .{case[0]})),
+                .target = target,
+                .optimize = .Debug,
+                .imports = &.{
+                    .{ .name = "mongo", .module = panic_mongo },
+                    .{ .name = "mongo-async-driver", .module = panic_mongo_async_driver },
+                },
+            }),
+        });
+        const run = b.addRunArtifact(exe);
+        run.expectStdErrMatch(case[1]);
+        // expectStdErrMatch accepts any exit: only the panic handler exits
+        // with 3, so a program that printed the text and returned fails.
+        run.expectExitCode(3);
+        test_mongo_async_driver.dependOn(&run.step);
+    }
+
     // log compile errors: each test of the file must fail to compile with
     // the message next to its name. The filter compiles one test at a time;
     // the message must be the end of an error line.

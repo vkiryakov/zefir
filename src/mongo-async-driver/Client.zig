@@ -38,7 +38,9 @@
 //! refuse a connection. Bodies of commands, passwords and the replies of
 //! authentication never go to the log.
 //!
-//! After `connect` the client must stay where it is.
+//! After `connect` the client must stay where it is, and every call comes
+//! on the `io` of `init`: in safe builds, a call on a moved copy of the
+//! client or on another `std.Io` panics.
 
 const std = @import("std");
 const Io = std.Io;
@@ -73,6 +75,10 @@ keys: KeyCache = .{},
 pool: Pool,
 /// What the latest hello said, for `capabilities`, which takes no `io`.
 server: Server = .{},
+/// Where `connect` succeeded, 0 before, in safe builds: a call on a copy
+/// of the client somewhere else panics. Atomic: any task may call while
+/// another connects.
+home: if (std.debug.runtime_safety) std.atomic.Value(usize) else void = if (std.debug.runtime_safety) .init(0) else {},
 
 pub const InitError = error{ InvalidArgument, Unsupported, OutOfMemory };
 
@@ -104,6 +110,7 @@ pub fn init(gpa: Allocator, io: Io, options: Options) InitError!Client {
 /// Closes the client, if `close` has not, and frees it: the copies of the
 /// connection string and the password, and the keys of SCRAM, wiped.
 pub fn deinit(self: *Client) void {
+    self.checkHome();
     self.close(self.io);
     self.pool.deinit();
     self.keys.deinit();
@@ -114,6 +121,7 @@ pub fn deinit(self: *Client) void {
 
 /// The handle of the contract, for `mongo.Database` and the code above.
 pub fn client(self: *Client) mongo.Client {
+    self.checkHome();
     return .init(self);
 }
 
@@ -123,6 +131,7 @@ pub fn client(self: *Client) mongo.Client {
 /// nothing once the client is connected. Why it failed goes to
 /// `diagnostics`.
 pub fn connect(self: *Client, io: Io, ctx: core.Context, diagnostics: ?*Diagnostics) mongo.Error!void {
+    self.checkUse(io);
     const d = diagnostics;
     if (d) |x| x.* = .{};
     try self.pool.enter(io, d);
@@ -130,6 +139,7 @@ pub fn connect(self: *Client, io: Io, ctx: core.Context, diagnostics: ?*Diagnost
     if (self.pool.isConnected(io)) return;
     try checkBeforeSend(io, .of(ctx), ctx.deadline, d);
     try self.pool.connect(io, self.opener(), self.limits(io, ctx.deadline), d);
+    if (std.debug.runtime_safety) self.home.store(@intFromPtr(self), .monotonic);
 }
 
 /// Ends the client's work, in the order of the contract: new calls, and
@@ -139,11 +149,13 @@ pub fn connect(self: *Client, io: Io, ctx: core.Context, diagnostics: ?*Diagnost
 /// connections close. A second call returns once the first is done. The
 /// task's cancelation waits until it returns.
 pub fn close(self: *Client, io: Io) void {
+    self.checkUse(io);
     self.pool.close(io, self.options.close_timeout);
 }
 
 /// A snapshot of the connections and the calls waiting for them.
 pub fn stats(self: *Client) Stats {
+    self.checkHome();
     const counts = self.pool.counts(self.io);
     return .{
         .connections = counts.idle + counts.in_use,
@@ -158,6 +170,7 @@ pub fn stats(self: *Client) Stats {
 }
 
 pub fn capabilities(self: *Client) mongo.Capabilities {
+    self.checkHome();
     return .{
         .revision = 1,
         .name = handshake.driver_name,
@@ -167,6 +180,7 @@ pub fn capabilities(self: *Client) mongo.Capabilities {
 }
 
 pub fn runCommand(self: *Client, io: Io, op: OperationContext, command: *const mongo.Command, options: mongo.CommandOptions) mongo.Error!bson.OwnedDocument {
+    self.checkUse(io);
     const d = options.diagnostics;
     try self.pool.enter(io, d);
     defer self.pool.leave(io);
@@ -189,13 +203,32 @@ pub fn runCommand(self: *Client, io: Io, op: OperationContext, command: *const m
 }
 
 pub fn openCursor(self: *Client, io: Io, op: OperationContext, command: *const mongo.Command, options: mongo.CursorOptions) mongo.Error!mongo.Cursor {
-    _ = .{ self, io, op, command };
+    self.checkUse(io);
+    _ = .{ op, command };
     return fail(options.diagnostics, null, error.Unsupported, "this version of zefir-mongo-async-driver runs commands only, without cursors", .{});
 }
 
 pub fn write(self: *Client, io: Io, op: OperationContext, request: *const mongo.WriteRequest, options: mongo.WriteOptions) mongo.Error!mongo.WriteResult {
-    _ = .{ self, io, op, request };
+    self.checkUse(io);
+    _ = .{ op, request };
     return fail(options.diagnostics, null, error.Unsupported, "this version of zefir-mongo-async-driver runs commands only, without batched writes", .{});
+}
+
+/// In safe builds: a call on a moved copy of the client, or on another
+/// `std.Io` than the one of `init`, panics, since the pool and the waits
+/// of the client belong to the original and its `io`.
+fn checkUse(self: *const Client, io: Io) void {
+    self.checkHome();
+    if (std.debug.runtime_safety and io.vtable != self.io.vtable) {
+        @panic("zefir-mongo-async-driver: a call on another std.Io than the client's: pass the io of Client.init");
+    }
+}
+
+inline fn checkHome(self: *const Client) void {
+    if (std.debug.runtime_safety) {
+        const home = self.home.load(.monotonic);
+        if (home != 0 and home != @intFromPtr(self)) @panic("zefir-mongo-async-driver: Client moved after connect(): keep it where connect() ran (see the guide)");
+    }
 }
 
 /// What an exchange that failed leaves of its connection: a network error
