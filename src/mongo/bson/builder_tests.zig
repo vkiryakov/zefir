@@ -174,6 +174,18 @@ test "deprecated types are read but never written" {
     try testing.expectEqualSlices(u8, vectors.empty, doc.bytes);
 }
 
+test "a builder made as a struct literal works as one made with init" {
+    var b: Builder = .{ .allocator = testing.allocator };
+    defer b.deinit();
+    try b.beginArray("a");
+    try b.putInt32("", 1);
+    try b.putString("", "x");
+    try b.end();
+    const doc = try b.finish();
+    defer doc.deinit();
+    try testing.expectEqualSlices(u8, vectorNamed("array"), doc.bytes);
+}
+
 test "an empty builder gives {}, and a builder builds again after finish" {
     var b: Builder = .init(testing.allocator);
     defer b.deinit();

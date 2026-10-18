@@ -2,13 +2,16 @@
 //! commands (https://bsonspec.org/spec.html).
 //!
 //! - `RawDocument` — a document where it lies, in borrowed bytes: read
-//!   element by element, looked up by key or path, checked as a whole.
+//!   element by element, looked up by key or path, checked as a whole,
+//!   printed with `{f}` as Relaxed Extended JSON.
 //! - `OwnedDocument` — a document whose bytes belong to an allocator, such
 //!   as a copy made with `RawDocument.dupe`.
+//! - `Builder` — writes a document, element by element.
 //! - `Value` — the value of one element, of any BSON type; its strings and
 //!   documents are slices into the document.
-//! - The types Zig has no type for: `ObjectId`, `DateTime`, `Timestamp`,
-//!   `Binary`, `Decimal128`, `Regex`, and the deprecated `DbPointer` and
+//! - The types Zig has no type for: `ObjectId` with its `Generator`,
+//!   `DateTime`, `Timestamp`, `Binary`, `Decimal128`, `Regex`, `Null`,
+//!   `MinKey`, `MaxKey`, and the deprecated `DbPointer` and
 //!   `JavaScriptWithScope`, which are read but never written.
 //!
 //! No bytes make a reader go out of bounds or panic: broken ones give

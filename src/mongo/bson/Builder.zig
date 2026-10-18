@@ -27,10 +27,11 @@ const Builder = @This();
 allocator: std.mem.Allocator,
 /// The document so far; the lengths of open documents are not filled in.
 buffer: std.ArrayList(u8) = .empty,
-/// The open documents and arrays; `levels[0]` is the top-level document.
-levels: [bson.max_depth]Level = undefined,
-/// How many of `levels` are open; the top-level document always is.
-depth: usize = 1,
+/// The documents and arrays opened and not closed yet, the innermost
+/// last; the top-level document is not among them.
+levels: [bson.max_depth - 1]Level = undefined,
+/// How many of `levels` are open.
+open: usize = 0,
 
 const Level = struct {
     /// Where the length of the document is in `buffer`.
@@ -44,9 +45,7 @@ const Level = struct {
 pub const Error = bson.Error || std.mem.Allocator.Error;
 
 pub fn init(allocator: std.mem.Allocator) Builder {
-    var b: Builder = .{ .allocator = allocator };
-    b.levels[0] = .{ .start = 0, .next_index = null };
-    return b;
+    return .{ .allocator = allocator };
 }
 
 /// Frees the document, unless `finish` has handed it over.
@@ -138,7 +137,8 @@ pub fn putValue(b: *Builder, key: []const u8, value: bson.Value) Error!void {
         .double => |d| try b.writeInt(u64, @bitCast(d)),
         .string, .javascript => |s| try b.writeString(s),
         .document, .array => |doc| {
-            try read.validate(doc.bytes, bson.max_depth - b.depth);
+            // The levels left: the top-level document and the open ones take theirs.
+            try read.validate(doc.bytes, bson.max_depth - 1 - b.open);
             try b.writeBytes(doc.bytes);
         },
         .binary => |binary| {
@@ -189,15 +189,15 @@ pub fn beginArray(b: *Builder, key: []const u8) Error!void {
 
 /// Closes the document or array opened last.
 pub fn end(b: *Builder) Error!void {
-    if (b.depth == 1) return error.InvalidBson;
-    try b.close(b.levels[b.depth - 1].start);
-    b.depth -= 1;
+    if (b.open == 0) return error.InvalidBson;
+    try b.close(b.levels[b.open - 1].start);
+    b.open -= 1;
 }
 
 /// The document, which now belongs to the caller; the builder is empty
 /// again. Every document and array opened must be closed first.
 pub fn finish(b: *Builder) Error!bson.OwnedDocument {
-    if (b.depth != 1) return error.InvalidBson;
+    if (b.open != 0) return error.InvalidBson;
     try b.reserveLength();
     const mark = b.buffer.items.len;
     errdefer b.buffer.shrinkRetainingCapacity(mark);
@@ -207,32 +207,38 @@ pub fn finish(b: *Builder) Error!bson.OwnedDocument {
 }
 
 fn begin(b: *Builder, kind: bson.Type, key: []const u8) Error!void {
-    if (b.depth == bson.max_depth) return error.InvalidBson;
+    if (b.open == b.levels.len) return error.InvalidBson;
     const mark = b.buffer.items.len;
     errdefer b.buffer.shrinkRetainingCapacity(mark);
     try b.header(kind, key);
     const start = b.buffer.items.len;
     try b.writeBytes(&.{ 0, 0, 0, 0 });
     b.advance();
-    b.levels[b.depth] = .{ .start = start, .next_index = if (kind == .array) 0 else null };
-    b.depth += 1;
+    b.levels[b.open] = .{ .start = start, .next_index = if (kind == .array) 0 else null };
+    b.open += 1;
 }
 
 /// Writes the type and the key of the next element.
 fn header(b: *Builder, kind: bson.Type, key: []const u8) Error!void {
     try b.reserveLength();
     try b.writeByte(@backingInt(kind));
-    if (b.levels[b.depth - 1].next_index) |index| {
+    if (b.arrayIndex()) |index| {
         if (key.len != 0) return error.InvalidBson;
         var digits: [20]u8 = undefined;
-        try b.writeCString(std.fmt.bufPrint(&digits, "{d}", .{index}) catch unreachable);
+        try b.writeCString(std.fmt.bufPrint(&digits, "{d}", .{index.*}) catch unreachable);
     } else try b.writeCString(key);
 }
 
 /// Moves the key of the open array, if any, past the element just written.
 fn advance(b: *Builder) void {
-    const level = &b.levels[b.depth - 1];
-    if (level.next_index) |*index| index.* += 1;
+    if (b.arrayIndex()) |index| index.* += 1;
+}
+
+/// The key of the next element, if the innermost open level is an array.
+fn arrayIndex(b: *Builder) ?*usize {
+    if (b.open == 0) return null;
+    const level = &b.levels[b.open - 1];
+    return if (level.next_index) |*index| index else null;
 }
 
 /// The top-level document's length goes first; it is filled in by `finish`.

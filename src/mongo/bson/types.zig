@@ -55,15 +55,16 @@ pub const Regex = struct {
     options: []const u8,
 };
 
-/// BSON null as a type of its own, for a field that is always null; an
-/// optional that holds null is written as null too.
+/// BSON null as a type: a field of this type always holds null. A `Value`
+/// holds null as `.null`.
 pub const Null = struct {};
 
-/// The BSON value below every other value: queries and index bounds use
-/// it as minus infinity.
+/// The value below every other BSON value; queries and index bounds use
+/// it as minus infinity. A `Value` holds it as `.min_key`.
 pub const MinKey = struct {};
 
-/// The BSON value above every other value.
+/// The value above every other BSON value. A `Value` holds it as
+/// `.max_key`.
 pub const MaxKey = struct {};
 
 /// Deprecated, read but never written: a namespace and an id.
