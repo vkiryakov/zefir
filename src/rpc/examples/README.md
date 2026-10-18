@@ -214,7 +214,7 @@ sequenceDiagram
 Add Zefir to your `build.zig.zon`; rpc ships since v0.6.0:
 
 ```sh
-zig fetch --save git+https://github.com/vkiryakov/zefir#v0.7.0
+zig fetch --save git+https://github.com/vkiryakov/zefir#v0.8.0
 ```
 
 Then import the modules in `build.zig`. The examples also read their
