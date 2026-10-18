@@ -1,0 +1,13 @@
+.{
+    .name = .mongo_minidriver_consumer,
+    .version = "0.0.0",
+    .fingerprint = 0x9f4cf6c89e5ee008,
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{
+        // zefir of this checkout: CI builds the driver against the commit it
+        // checks, not the one the driver's package pins.
+        .zefir = .{ .path = "../../.." },
+        .mongo_minidriver = .{ .path = ".." },
+    },
+    .paths = .{""},
+}
