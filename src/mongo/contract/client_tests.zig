@@ -164,3 +164,159 @@ test "a cursor's close and deinit reach the cursor" {
     cursor.deinit(io);
     try testing.expectEqual(@as(u32, 1), list.deinits);
 }
+
+/// A command whose first key is "".
+const nameless = bson.RawDocument{ .bytes = &.{ 0x0b, 0, 0, 0, 0x10, 0, 1, 0, 0, 0, 0 } };
+/// A command whose second element is cut short.
+const broken = bson.RawDocument{ .bytes = &.{ 0x0f, 0, 0, 0, 0x10, 'a', 0, 1, 0, 0, 0, 0x10, 'b', 0, 0 } };
+
+test "a command that breaks a rule is InvalidArgument, and the driver never sees it" {
+    const io = testing.io;
+    const cases = [_]struct { []const u8, bson.RawDocument }{
+        .{ "", ping },
+        .{ &@as([64]u8, @splat('a')), ping },
+        .{ "app\x00", ping },
+        .{ "my/app", ping },
+        .{ "my\\app", ping },
+        .{ "my.app", ping },
+        .{ "my app", ping },
+        .{ "my\"app", ping },
+        .{ "my$app", ping },
+        .{ "app", bson.RawDocument.empty },
+        .{ "app", nameless },
+        .{ "app", bson.literal(.{ .@"$ping" = 1 }) },
+        .{ "app", broken },
+        .{ "app", bson.literal(.{ .find = "users", .@"$db" = "other" }) },
+        .{ "app", bson.literal(.{ .find = "users", .@"$readPreference" = .{ .mode = "primary" } }) },
+        .{ "app", bson.literal(.{ .find = "users", .lsid = .{ .id = 1 } }) },
+        .{ "app", bson.literal(.{ .find = "users", .txnNumber = 1 }) },
+        .{ "app", bson.literal(.{ .find = "users", .@"$clusterTime" = .{} }) },
+        .{ "app", bson.literal(.{ .find = "users", .autocommit = false }) },
+        .{ "app", bson.literal(.{ .find = "users", .startTransaction = true }) },
+    };
+    var driver: Recorder = .{};
+    const client = driver.client();
+    for (cases) |case| {
+        errdefer std.debug.print("database '{s}', command {f}\n", .{ case[0], case[1] });
+        var d: mongo.Diagnostics = .{};
+        const command: mongo.Command = .{ .database = case[0], .body = case[1] };
+        try testing.expectError(error.InvalidArgument, client.runCommand(io, .of(.root), command, .{ .allocator = testing.allocator, .diagnostics = &d }));
+        try testing.expect(d.message().len > 0);
+        try testing.expectError(error.InvalidArgument, client.openCursor(io, .of(.root), command, .{}));
+    }
+    try testing.expectEqual(@as(u32, 0), driver.calls());
+    // A name of 63 bytes is fine.
+    const reply = try client.runCommand(io, .of(.root), .{ .database = &@as([63]u8, @splat('a')), .body = ping }, .{ .allocator = testing.allocator });
+    reply.deinit();
+}
+
+test "maxTimeMS goes out as it is without a deadline, and is refused under one" {
+    const io = testing.io;
+    var driver: Recorder = .{};
+    const client = driver.client();
+    const command: mongo.Command = .{ .database = "app", .body = bson.literal(.{ .find = "users", .maxTimeMS = 100 }) };
+    const reply = try client.runCommand(io, .of(.root), command, .{ .allocator = testing.allocator });
+    reply.deinit();
+    const ctx = core.Context.root.withDeadline(.after(std.Io.Clock.awake.now(io), .fromSeconds(60)));
+    try testing.expectError(error.InvalidArgument, client.runCommand(io, .of(ctx), command, .{ .allocator = testing.allocator }));
+    try testing.expectEqual(@as(u32, 1), driver.commands);
+}
+
+test "a write names its kind, keeps the driver's fields out and has items" {
+    const io = testing.io;
+    const cases = [_]struct { mongo.WriteKind, bson.RawDocument, []const bson.RawDocument }{
+        .{ .update, insert, &docs },
+        .{ .insert, bson.literal(.{ .delete = "users" }), &docs },
+        .{ .insert, bson.literal(.{ .insert = "users", .documents = .{.{ .a = 1 }} }), &docs },
+        .{ .update, bson.literal(.{ .update = "users", .updates = .{} }), &docs },
+        .{ .delete, bson.literal(.{ .delete = "users", .deletes = .{} }), &docs },
+        .{ .insert, bson.literal(.{ .insert = "users", .ordered = false }), &docs },
+        .{ .insert, bson.literal(.{ .insert = "users", .@"$db" = "app" }), &docs },
+        .{ .insert, insert, &.{} },
+        // Items are validated in Debug only.
+        .{ .insert, insert, &.{broken} },
+    };
+    var driver: Recorder = .{};
+    const client = driver.client();
+    for (cases, 0..) |case, i| {
+        if (i == cases.len - 1 and @import("builtin").mode != .debug) continue;
+        errdefer std.debug.print("{t} {f} with {d} items\n", .{ case[0], case[1], case[2].len });
+        const request: mongo.WriteRequest = .{ .database = "app", .kind = case[0], .body = case[1], .items = case[2] };
+        try testing.expectError(error.InvalidArgument, client.write(io, .of(.root), request, .{ .allocator = testing.allocator }));
+    }
+    try testing.expectEqual(@as(u32, 0), driver.calls());
+}
+
+test "a deadline with less than 1 ms left and a canceled token stop the call before the driver" {
+    const io = testing.io;
+    var driver: Recorder = .{};
+    const client = driver.client();
+    const now = std.Io.Clock.awake.now(io);
+    const expired = core.Context.root.withDeadline(.after(now, .zero));
+    const almost = core.Context.root.withDeadline(.after(now, .fromNanoseconds(500 * std.time.ns_per_us)));
+    var token: core.CancellationToken = .init;
+    token.cancel();
+    const canceled = core.Context.root.withCancellation(&token);
+    const command: mongo.Command = .{ .database = "app", .body = ping };
+    const request: mongo.WriteRequest = .{ .database = "app", .kind = .insert, .body = insert, .items = &docs };
+
+    try testing.expectError(error.DeadlineExceeded, client.runCommand(io, .of(expired), command, .{ .allocator = testing.allocator }));
+    try testing.expectError(error.DeadlineExceeded, client.runCommand(io, .of(almost), command, .{ .allocator = testing.allocator }));
+    try testing.expectError(error.Cancelled, client.runCommand(io, .of(canceled), command, .{ .allocator = testing.allocator }));
+    try testing.expectError(error.Cancelled, client.openCursor(io, .of(canceled), command, .{}));
+    try testing.expectError(error.Cancelled, client.write(io, .of(canceled), request, .{ .allocator = testing.allocator }));
+    // The deadline comes first: a server cancels the token at the deadline.
+    try testing.expectError(error.DeadlineExceeded, client.write(io, .of(expired.withCancellation(&token)), request, .{ .allocator = testing.allocator }));
+    // The rules of the request come before the context.
+    try testing.expectError(error.InvalidArgument, client.runCommand(io, .of(expired), .{ .database = "", .body = ping }, .{ .allocator = testing.allocator }));
+    try testing.expectEqual(@as(u32, 0), driver.calls());
+}
+
+test "a token canceled while the call is out gives Interrupted, and nothing of the call is lost" {
+    const io = testing.io;
+    var token: core.CancellationToken = .init;
+    var driver: Recorder = .{ .list = .{ .docs = &docs }, .cancel_during_call = &token };
+    const client = driver.client();
+    const op: mongo.OperationContext = .of(core.Context.root.withCancellation(&token));
+    var d: mongo.Diagnostics = .{};
+
+    // The reply is freed: testing.allocator reports it otherwise.
+    try testing.expectError(error.Interrupted, client.runCommand(io, op, .{ .database = "admin", .body = ping }, .{ .allocator = testing.allocator, .diagnostics = &d }));
+    try testing.expect(d.message().len > 0);
+    token = .init;
+    // The cursor is closed with deinit, which sends killCursors.
+    try testing.expectError(error.Interrupted, client.openCursor(io, op, .{ .database = "app", .body = find }, .{}));
+    try testing.expectEqual(@as(u32, 1), driver.list.deinits);
+    token = .init;
+    // The result goes to partial.
+    driver.result = .{ .n = 1, .write_errors = &.{.{ .index = 1, .code = 11000, .message = "E11000 duplicate key" }} };
+    var partial: mongo.WriteResult = .{};
+    defer partial.deinit(testing.allocator);
+    const request: mongo.WriteRequest = .{ .database = "app", .kind = .insert, .body = insert, .items = &docs };
+    try testing.expectError(error.Interrupted, client.write(io, op, request, .{ .allocator = testing.allocator, .partial = &partial }));
+    try testing.expectEqual(@as(u64, 1), partial.n);
+    try testing.expectEqual(@as(usize, 2), partial.answered);
+    try testing.expectEqualStrings("E11000 duplicate key", partial.write_errors[0].message);
+    token = .init;
+    // Without partial the result is freed.
+    try testing.expectError(error.Interrupted, client.write(io, op, request, .{ .allocator = testing.allocator }));
+    try testing.expectEqual(@as(u32, 4), driver.calls());
+}
+
+test "a Diagnostics used again holds nothing of the error before" {
+    const io = testing.io;
+    var driver: Recorder = .{};
+    const client = driver.client();
+    var d: mongo.Diagnostics = .{ .server = .{ .code = 11000 }, .batch_offset = 6, .reason = error.ConnectionLost, .cause = error.BrokenPipe };
+    d.set(.send, error.BrokenPipe, "an old error", .{});
+
+    const reply = try client.runCommand(io, .of(.root), .{ .database = "admin", .body = ping }, .{ .allocator = testing.allocator, .diagnostics = &d });
+    reply.deinit();
+    try testing.expect(d.server == null and d.batch_offset == null and d.reason == null and d.cause == null and d.phase == null);
+    try testing.expectEqualStrings("", d.message());
+
+    d = .{ .server = .{ .code = 11000 }, .batch_offset = 6, .reason = error.ConnectionLost };
+    try testing.expectError(error.InvalidArgument, client.runCommand(io, .of(.root), .{ .database = "my.app", .body = ping }, .{ .allocator = testing.allocator, .diagnostics = &d }));
+    try testing.expect(d.server == null and d.batch_offset == null and d.reason == null);
+    try testing.expect(std.mem.find(u8, d.message(), "database name") != null);
+}

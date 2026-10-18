@@ -49,6 +49,19 @@
 //!    all). Cursors follow `mongo.Cursor`.
 //! 10. `init`, `connect`, `close` and `deinit` belong to the driver's own
 //!    type: only the application that built it calls them.
+//!
+//! The functions below check, for every driver, before it sees a call:
+//! the request (a database name of 1–63 bytes without `/\. "$` or NUL; a
+//! command whose first key names it and does not start with `$`; none of
+//! the driver's fields in it, nor `maxTimeMS` under a deadline; a write
+//! named after its kind, without `documents`, `updates`, `deletes` and
+//! `ordered`, with items), which is `error.InvalidArgument`; then the
+//! context, `error.DeadlineExceeded` before `error.Cancelled`. After the
+//! driver's reply they check the token again: canceled meanwhile, the call
+//! is `error.Interrupted`, its reply freed, its cursor closed, its write
+//! result in `partial`. `Cursor.next` has no such check: a batch of
+//! `getMore` has moved the cursor on the server already. Each call starts
+//! the caller's `Diagnostics` afresh.
 
 const std = @import("std");
 const bson = @import("../bson.zig");
@@ -57,6 +70,7 @@ const requests = @import("requests.zig");
 const results = @import("results.zig");
 const capabilities_ = @import("capabilities.zig");
 const signature = @import("signature.zig");
+const rules = @import("rules.zig");
 const Cursor = @import("Cursor.zig");
 const Error = errors.Error;
 const OperationContext = requests.OperationContext;
@@ -85,19 +99,46 @@ pub const VTable = struct {
 /// Runs `command` and returns the server's reply, from
 /// `options.allocator`.
 pub fn runCommand(c: Client, io: std.Io, op: OperationContext, command: Command, options: CommandOptions) Error!bson.OwnedDocument {
-    return c.vtable.runCommand(c.ptr, io, op, &command, options);
+    if (options.diagnostics) |d| d.* = .{};
+    try rules.checkCommand(&command, op, options.diagnostics);
+    try rules.checkContext(io, op, options.diagnostics);
+    // Revision 1 has no fields of a later revision to gate: such a field,
+    // set for a driver that did not declare it, will be Unsupported here.
+    const reply = try c.vtable.runCommand(c.ptr, io, op, &command, options);
+    if (op.ctx.isCancelled()) {
+        reply.deinit();
+        return rules.interrupted(options.diagnostics);
+    }
+    return reply;
 }
 
 /// Runs a command that answers with a cursor, such as `find` or
 /// `aggregate`, and returns the cursor; `deinit` it.
 pub fn openCursor(c: Client, io: std.Io, op: OperationContext, command: Command, options: CursorOptions) Error!Cursor {
-    return c.vtable.openCursor(c.ptr, io, op, &command, options);
+    if (options.diagnostics) |d| d.* = .{};
+    try rules.checkCommand(&command, op, options.diagnostics);
+    try rules.checkContext(io, op, options.diagnostics);
+    const cursor = try c.vtable.openCursor(c.ptr, io, op, &command, options);
+    if (op.ctx.isCancelled()) {
+        // deinit sends killCursors when the cursor is open on the server.
+        cursor.deinit(io);
+        return rules.interrupted(options.diagnostics);
+    }
+    return cursor;
 }
 
 /// Sends the items of `request` in batches and returns their merged
 /// result, from `options.allocator`.
 pub fn write(c: Client, io: std.Io, op: OperationContext, request: WriteRequest, options: WriteOptions) Error!WriteResult {
-    return c.vtable.write(c.ptr, io, op, &request, options);
+    if (options.diagnostics) |d| d.* = .{};
+    try rules.checkWrite(&request, op, options.diagnostics);
+    try rules.checkContext(io, op, options.diagnostics);
+    var result = try c.vtable.write(c.ptr, io, op, &request, options);
+    if (op.ctx.isCancelled()) {
+        if (options.partial) |partial| partial.* = result else result.deinit(options.allocator);
+        return rules.interrupted(options.diagnostics);
+    }
+    return result;
 }
 
 /// What the driver can do. Thread-safe; `server` may change.
