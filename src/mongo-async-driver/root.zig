@@ -9,6 +9,12 @@
 
 const std = @import("std");
 
+pub const Options = @import("Options.zig");
+pub const Uri = @import("uri.zig").Uri;
+
 test {
     std.testing.refAllDecls(@This());
+    _ = @import("uri.zig");
+    _ = @import("uri_tests.zig");
+    _ = @import("OwnedOptions.zig");
 }
