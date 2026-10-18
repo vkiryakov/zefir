@@ -12,6 +12,7 @@ const opmsg = wire.opmsg;
 const errors = @import("../contract/errors.zig");
 const Script = @import("Script.zig");
 const FakeServer = @import("FakeServer.zig");
+const early_io = @import("early_io.zig");
 
 /// Runs `function(args)` in a task of its own and fails with
 /// `error.TestTimedOut` when it takes longer than 5 s.
@@ -269,6 +270,17 @@ test "a delayed answer comes after its delay" {
     var serving: Serving = undefined;
     try serving.start(io, &script);
     defer serving.stop(io);
+    try within5s(io, delayed, .{ io, serving.port() });
+}
+
+test "a delayed answer comes after its delay, though each sleep of the server's Io ends early, as on Windows" {
+    const io = testing.io;
+    var queue: Script.Queue = .{ .answers = &.{.{ .delayed = .{ .after = .fromMilliseconds(100), .reply = Script.ok } }} };
+    var script: Script = .init(testing.allocator, queue.handler());
+    defer script.deinit();
+    var serving: Serving = undefined;
+    try serving.start(early_io.io(), &script);
+    defer serving.stop(early_io.io());
     try within5s(io, delayed, .{ io, serving.port() });
 }
 

@@ -128,7 +128,8 @@ pub const Request = struct {
 pub const Answer = union(enum) {
     /// Answer with this document.
     reply: bson.RawDocument,
-    /// Answer after a delay: for deadlines, cancelation and closing.
+    /// Answer after a delay, never sooner: for deadlines, cancelation
+    /// and closing.
     delayed: Delayed,
     /// Close the connection after reading the command, without a reply.
     close_connection,

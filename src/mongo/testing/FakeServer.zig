@@ -40,6 +40,7 @@ const bson = @import("../bson.zig");
 const wire = @import("../wire.zig");
 const opmsg = wire.opmsg;
 const Script = @import("Script.zig");
+const sleepAtLeast = @import("sleep.zig").sleepAtLeast;
 
 /// Listens on 127.0.0.1, on a port the system picks.
 pub fn listen(io: Io) !net.Server {
@@ -124,7 +125,7 @@ fn serveConnection(io: Io, stream: net.Stream, script: *Script, number: u32) voi
         switch (answer) {
             .reply => |reply| writeReply(conn, &incoming, reply) catch return,
             .delayed => |d| {
-                io.sleep(d.after, .awake) catch return;
+                sleepAtLeast(io, d.after) catch return;
                 writeReply(conn, &incoming, d.reply) catch return;
             },
             .close_connection => return,

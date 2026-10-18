@@ -17,6 +17,7 @@ const Cursor = @import("../../contract/Cursor.zig");
 const Script = @import("../Script.zig");
 const FakeServer = @import("../FakeServer.zig");
 const conformance = @import("../conformance.zig");
+const sleepAtLeast = @import("../sleep.zig").sleepAtLeast;
 const Job = @This();
 
 io: Io,
@@ -112,9 +113,10 @@ pub fn encodeIn(job: *Job, allocator: Allocator, value: anytype) Error!bson.Owne
     };
 }
 
-/// Sleeps in the check's task, which nothing cancels.
+/// Sleeps in the check's task, which nothing cancels, for `duration` at
+/// least: a check that waits out a deadline must not wake up before it.
 pub fn pause(job: *Job, duration: Io.Duration) void {
-    job.io.sleep(duration, .awake) catch {};
+    sleepAtLeast(job.io, duration) catch {};
 }
 
 /// Fails unless the call of `caller` ended with `expected`.
