@@ -37,6 +37,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
+                .{ .name = "core", .module = zefir.module("zefir-core") },
                 .{ .name = "mongo", .module = zefir.module("zefir-mongo") },
                 .{ .name = "zio", .module = zio.module("zio") },
             },
