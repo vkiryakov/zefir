@@ -30,9 +30,14 @@ const Slow = struct {
     delay: Io.Duration,
 
     pub fn answer(s: *Slow, io: Io, arena: std.mem.Allocator, request: *const Script.Request) Script.HandlerError!Script.Answer {
-        _ = .{ io, arena };
+        _ = io;
         if (std.mem.eql(u8, request.name, "slow")) return .{ .delayed = .{ .after = s.delay, .reply = Script.ok } };
         if (std.mem.eql(u8, request.name, "breakme")) return .close_connection;
+        if (std.mem.eql(u8, request.name, "goingaway")) {
+            const code: i32 = if (request.body.get("code") catch null) |v| @intCast(v.asI64() catch 91) else 91;
+            const name = if (code == 11600) "InterruptedAtShutdown" else "ShutdownInProgress";
+            return .{ .reply = Script.failure(arena, .{ .code = code, .code_name = name, .errmsg = "the server is shutting down" }) catch return error.OutOfMemory };
+        }
         return .{ .reply = Script.ok };
     }
 };
@@ -297,4 +302,30 @@ fn statsTell(io: Io) !void {
     try testing.expectEqual(Stats{ .connections = 1, .idle = 1, .in_use = 0, .opening = 0, .waiting = 0, .generation = 1, .clears = 1, .open_cursors = 0 }, driver.stats());
     driver.close(io);
     try testing.expectEqual(Stats{ .connections = 0, .idle = 0, .in_use = 0, .opening = 0, .waiting = 0, .generation = 1, .clears = 1, .open_cursors = 0 }, driver.stats());
+}
+
+test "a server that answers ShutdownInProgress or InterruptedAtShutdown clears the pool, and the next call opens anew" {
+    try within5s(testing.io, shutdownClears, .{testing.io});
+}
+
+fn shutdownClears(io: Io) !void {
+    var served: Served = undefined;
+    try served.start(io, .zero);
+    defer served.stop(io);
+    var driver: Client = try .init(testing.allocator, io, .{ .uri = try served.uri("") });
+    defer driver.deinit();
+    try driver.connect(io, .root, null);
+    for ([_]i32{ 91, 11600 }, 1..) |code, clears| {
+        var d: Diagnostics = .{};
+        const going: mongo.Command = .{ .database = "admin", .body = if (code == 91) bson.literal(.{ .goingaway = 1, .code = 91 }) else bson.literal(.{ .goingaway = 1, .code = 11600 }) };
+        try testing.expectError(error.CommandFailed, driver.client().runCommand(io, .of(.root), going, .{ .allocator = testing.allocator, .diagnostics = &d }));
+        try testing.expectEqual(code, d.server.?.code);
+        const stats = driver.stats();
+        try testing.expectEqual(@as(u64, clears), stats.clears);
+        try testing.expectEqual(@as(usize, 0), stats.connections);
+        // The probe: at most one every 500 ms.
+        try time.sleepUntil(io, .after(time.now(io), .fromMilliseconds(500)));
+        try run(io, &driver, ping, null, "");
+    }
+    try testing.expectEqual(@as(u32, 3), served.script.acceptedConnections());
 }

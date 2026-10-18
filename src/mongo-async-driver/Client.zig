@@ -238,7 +238,8 @@ fn afterExchange(conn: *Connection, err: mongo.Error, d: ?*Diagnostics) Pool.Aft
     if (err != error.ConnectionLost) return if (conn.usable) .ok else .broken;
     const cause = conn.stream.err orelse return .{ .clear = "a connection to it broke" };
     if (cause != error.Stopped) return .{ .clear = "a connection to it broke" };
-    if (d) |x| x.set(.wait, null, "close() of the client cut the exchange", .{});
+    // The phase stays: the cut may come while the command goes out.
+    if (d) |x| x.set(x.phase, null, "close() of the client cut the exchange", .{});
     return .broken;
 }
 
