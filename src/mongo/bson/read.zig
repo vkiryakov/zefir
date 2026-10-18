@@ -65,14 +65,20 @@ pub fn element(bytes: []const u8, pos: usize, end: usize) bson.Error!struct { El
     return .{ .{ .key = key, .value = value }, r.pos };
 }
 
+/// The most levels `validate` walks: a stored document of
+/// `bson.max_depth` levels inside the three levels of a reply,
+/// `reply.cursor.firstBatch`.
+pub const max_levels = bson.max_depth + 3;
+
 /// Checks every element of the document `bytes` and of the documents in
-/// it, with at most `levels` documents inside one another, `bytes`
-/// included. Walks with a stack of its own rather than recursion.
+/// it, with at most `levels` (and at most `max_levels`) documents inside
+/// one another, `bytes` included. Walks with a stack of its own rather
+/// than recursion.
 pub fn validate(bytes: []const u8, levels: usize) bson.Error!void {
     if (!isDocument(bytes) or levels == 0) return error.InvalidBson;
-    const limit = @min(levels, bson.max_depth);
+    const limit = @min(levels, max_levels);
     const Frame = struct { bytes: []const u8, pos: usize };
-    var stack: [bson.max_depth]Frame = undefined;
+    var stack: [max_levels]Frame = undefined;
     stack[0] = .{ .bytes = bytes, .pos = 4 };
     var depth: usize = 1;
     while (depth > 0) {

@@ -24,6 +24,7 @@ const results = @import("contract/results.zig");
 const capabilities = @import("contract/capabilities.zig");
 
 pub const bson = @import("bson.zig");
+pub const wire = @import("wire.zig");
 
 pub const Client = @import("contract/Client.zig");
 pub const Cursor = @import("contract/Cursor.zig");
@@ -55,6 +56,7 @@ pub const contract_revision = capabilities.contract_revision;
 test {
     std.testing.refAllDecls(@This());
     _ = bson;
+    _ = wire;
     _ = @import("contract/errors_tests.zig");
     _ = @import("contract/types_tests.zig");
     _ = @import("contract/client_tests.zig");
