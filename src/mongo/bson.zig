@@ -31,6 +31,9 @@ pub const Timestamp = types.Timestamp;
 pub const Binary = types.Binary;
 pub const Decimal128 = @import("bson/Decimal128.zig");
 pub const Regex = types.Regex;
+pub const Null = types.Null;
+pub const MinKey = types.MinKey;
+pub const MaxKey = types.MaxKey;
 pub const DbPointer = types.DbPointer;
 pub const JavaScriptWithScope = types.JavaScriptWithScope;
 
@@ -47,4 +50,5 @@ test {
     _ = @import("bson/read.zig");
     _ = @import("bson/read_tests.zig");
     _ = @import("bson/builder_tests.zig");
+    _ = @import("bson/types_tests.zig");
 }

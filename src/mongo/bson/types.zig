@@ -7,6 +7,13 @@ const bson = @import("../bson.zig");
 /// A UTC instant: milliseconds since the Unix epoch, BSON's datetime.
 pub const DateTime = struct {
     milliseconds: i64,
+
+    /// Now, from the real-time clock of `io`: wall-clock time, which may
+    /// jump when the system clock is set. Measure durations with
+    /// `std.Io.Clock.awake` instead.
+    pub fn now(io: std.Io) DateTime {
+        return .{ .milliseconds = std.Io.Clock.real.now(io).toMilliseconds() };
+    }
 };
 
 /// The timestamp of MongoDB's replication: seconds since the Unix epoch
@@ -47,6 +54,17 @@ pub const Regex = struct {
     /// Letters such as "i" and "m".
     options: []const u8,
 };
+
+/// BSON null as a type of its own, for a field that is always null; an
+/// optional that holds null is written as null too.
+pub const Null = struct {};
+
+/// The BSON value below every other value: queries and index bounds use
+/// it as minus infinity.
+pub const MinKey = struct {};
+
+/// The BSON value above every other value.
+pub const MaxKey = struct {};
 
 /// Deprecated, read but never written: a namespace and an id.
 pub const DbPointer = struct {
