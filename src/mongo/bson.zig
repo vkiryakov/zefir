@@ -1,7 +1,37 @@
 //! `mongo.bson`: BSON, the binary format of MongoDB's documents and
 //! commands (https://bsonspec.org/spec.html).
+//!
+//! - `RawDocument` — a document where it lies, in borrowed bytes: read
+//!   element by element, looked up by key or path, checked as a whole.
+//! - `OwnedDocument` — a document whose bytes belong to an allocator, such
+//!   as a copy made with `RawDocument.dupe`.
+//! - `Value` — the value of one element, of any BSON type; its strings and
+//!   documents are slices into the document.
+//! - The types Zig has no type for: `ObjectId`, `DateTime`, `Timestamp`,
+//!   `Binary`, `Decimal128`, `Regex`, and the deprecated `DbPointer` and
+//!   `JavaScriptWithScope`, which are read but never written.
+//!
+//! No bytes make a reader go out of bounds or panic: broken ones give
+//! `error.InvalidBson`.
 
 const std = @import("std");
+const value = @import("bson/value.zig");
+const types = @import("bson/types.zig");
+
+pub const RawDocument = @import("bson/RawDocument.zig");
+pub const OwnedDocument = @import("bson/OwnedDocument.zig");
+pub const Value = value.Value;
+pub const Element = value.Element;
+pub const Type = value.Type;
+pub const NumberError = value.NumberError;
+pub const ObjectId = @import("bson/ObjectId.zig");
+pub const DateTime = types.DateTime;
+pub const Timestamp = types.Timestamp;
+pub const Binary = types.Binary;
+pub const Decimal128 = @import("bson/Decimal128.zig");
+pub const Regex = types.Regex;
+pub const DbPointer = types.DbPointer;
+pub const JavaScriptWithScope = types.JavaScriptWithScope;
 
 /// The bytes are not a valid BSON document, or a document being written
 /// would not be one.
@@ -13,4 +43,6 @@ pub const max_depth = 100;
 
 test {
     std.testing.refAllDecls(@This());
+    _ = @import("bson/read.zig");
+    _ = @import("bson/read_tests.zig");
 }
