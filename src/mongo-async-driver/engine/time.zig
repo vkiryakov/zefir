@@ -24,9 +24,11 @@ pub fn expired(io: Io, deadline: core.Deadline) bool {
 }
 
 /// Where the next wait toward `deadline` ends: at the deadline, or
-/// `max_step` from now.
-pub fn step(io: Io, deadline: core.Deadline) core.Deadline {
-    return deadline.earliest(.after(now(io), max_step));
+/// `max_step` from now; with no deadline, `max_step` from now.
+pub fn step(io: Io, deadline: ?core.Deadline) core.Deadline {
+    const far: core.Deadline = .after(now(io), max_step);
+    const d = deadline orelse return far;
+    return d.earliest(far);
 }
 
 /// Sleeps until `deadline`, and never wakes before it: a timer that fires
@@ -84,13 +86,17 @@ pub fn maxTimeMs(left: Io.Duration, min_rtt: Io.Duration) ?i64 {
 
 const testing = std.testing;
 
-test "a far deadline is waited for in steps of an hour at most" {
+test "a far deadline is waited for in steps of an hour at most, and so is none" {
     const io = testing.io;
     const far: core.Deadline = .at(.{ .nanoseconds = std.math.maxInt(i96) });
     const next = step(io, far);
     try testing.expect(next.expires.nanoseconds <= now(io).nanoseconds + max_step.nanoseconds);
     const near: core.Deadline = .after(now(io), .fromMilliseconds(5));
     try testing.expectEqual(near, step(io, near));
+    const before = now(io);
+    const none = step(io, null);
+    try testing.expect(none.expires.nanoseconds >= before.nanoseconds + max_step.nanoseconds);
+    try testing.expect(none.expires.nanoseconds <= now(io).nanoseconds + max_step.nanoseconds);
 }
 
 test "sleepUntil never wakes before the deadline" {

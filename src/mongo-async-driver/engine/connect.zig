@@ -1,9 +1,10 @@
 //! Opening a connection to the server. `std.Io` has no portable timeout
 //! for TCP connect, so a whole attempt, DNS, TCP, the handshake and
 //! authentication, runs in a task of its own and races a timer
-//! (`race.zig`); a timer that wins shuts the attempt's socket down, which
-//! ends an attempt blocked on it even when it lost its cancelation.
-//! `close` of the client stops an attempt the same way.
+//! (`race.zig`); a timer that wins cuts the attempt's stream, which ends
+//! an attempt blocked on it even when it lost its cancelation, also where
+//! a shutdown of the socket does not end a read, as on Windows. `close` of
+//! the client stops an attempt the same way.
 
 const std = @import("std");
 const Io = std.Io;
@@ -32,7 +33,7 @@ pub fn open(io: Io, gpa: Allocator, address: Connection.Address, setup: *const h
     // error is the one returned.
     var attempt_d: Diagnostics = .{};
     const limit = deadline orelse return openNow(io, gpa, address, setup, attempt, d orelse &attempt_d);
-    return race.race(io, limit, openNow, .{ io, gpa, address, setup, attempt, &attempt_d }, destroy, .{
+    return race.race(io, .{ .deadline = limit }, openNow, .{ io, gpa, address, setup, attempt, &attempt_d }, destroy, .{
         .context = attempt,
         .function = Attempt.abort,
     }) catch |err| {
@@ -69,19 +70,16 @@ fn openUnlessStopped(io: Io, gpa: Allocator, address: Connection.Address, setup:
             return error.Unavailable;
         },
     };
-    if (!attempt.hold(io, stream)) {
-        stream.close(io);
-        return error.Stopped;
-    }
-    defer attempt.release(io);
     const conn = Connection.create(gpa, io, stream, address) catch {
         stream.close(io);
         return error.OutOfMemory;
     };
-    handshake.run(conn, setup.*, gpa, d) catch |err| {
-        conn.destroy();
-        return err;
-    };
+    errdefer conn.destroy();
+    if (!attempt.hold(io, &conn.stream)) return error.Stopped;
+    // It runs before the errdefer above: the attempt lets the stream go
+    // before the stream is freed.
+    defer attempt.release(io);
+    try handshake.run(conn, setup.*, gpa, d);
     return conn;
 }
 
@@ -133,25 +131,27 @@ fn isNameError(err: DialError) bool {
     };
 }
 
-/// The socket of an attempt in progress, for the timer of its race or for
-/// `close` to shut down. The mutex keeps the shutdown off a socket that is
-/// closed or no longer the attempt's.
+/// The stream of an attempt in progress, for the timer of its race or for
+/// `close` to cut. The mutex keeps the cut off a stream that is gone or no
+/// longer the attempt's.
 pub const Attempt = struct {
     mutex: Io.Mutex = .init,
-    stream: ?net.Stream = null,
+    stream: ?*DeadlineStream = null,
     stopped: bool = false,
 
-    /// Makes the attempt end soon: now, or as soon as it has a socket.
+    /// Makes the attempt end soon: now, or as soon as it has a stream. The
+    /// cut ends the read or the write in progress, also one in a task of
+    /// its own, which the cancelation of the attempt's task may not reach.
     pub fn stop(a: *Attempt, io: Io) void {
         a.mutex.lockUncancelable(io);
         defer a.mutex.unlock(io);
         a.stopped = true;
-        if (a.stream) |stream| DeadlineStream.shutdown(io, stream);
+        if (a.stream) |stream| stream.cut(io, .stop);
     }
 
-    /// Registers the attempt's socket; false when the attempt was stopped
+    /// Registers the attempt's stream; false when the attempt was stopped
     /// already.
-    pub fn hold(a: *Attempt, io: Io, stream: net.Stream) bool {
+    pub fn hold(a: *Attempt, io: Io, stream: *DeadlineStream) bool {
         a.mutex.lockUncancelable(io);
         defer a.mutex.unlock(io);
         if (a.stopped) return false;
@@ -159,7 +159,7 @@ pub const Attempt = struct {
         return true;
     }
 
-    /// From here on the socket is no longer the attempt's to shut down.
+    /// From here on the stream is no longer the attempt's to cut.
     pub fn release(a: *Attempt, io: Io) void {
         a.mutex.lockUncancelable(io);
         defer a.mutex.unlock(io);

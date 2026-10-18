@@ -3,7 +3,9 @@
 //! flight end within `close_timeout` and cuts those that outlast it, sends
 //! away the calls in line and those that come after it, stops a connection
 //! being opened, and keeps the cancelation of its task; a second `close`
-//! waits for the first. Every test runs under a time limit of 5 s.
+//! waits for the first. Every test runs under a time limit of 5 s. The
+//! cuts and the stops run on the `Io` of `windows_like_io.zig` too, where a
+//! shutdown of a socket does not end the read that waits on it.
 
 const std = @import("std");
 const Io = std.Io;
@@ -20,6 +22,7 @@ const Stats = @import("../Stats.zig");
 const Pool = @import("../engine/Pool.zig");
 const time = @import("../engine/time.zig");
 const within5s = @import("connection_tests.zig").within5s;
+const WindowsLike = @import("windows_like_io.zig").WindowsLike;
 
 const ping: mongo.Command = .{ .database = "admin", .body = bson.literal(.{ .ping = 1 }) };
 const slow: mongo.Command = .{ .database = "admin", .body = bson.literal(.{ .slow = 1 }) };
@@ -135,19 +138,21 @@ fn closeWaits(io: Io) !void {
     try testing.expectEqual(@as(usize, 0), driver.stats().connections);
 }
 
-test "a call that outlasts close_timeout is cut: ConnectionLost, and close does not wait for its reply" {
-    try within5s(testing.io, closeCuts, .{testing.io});
+test "a call that outlasts close_timeout is cut: ConnectionLost, and close does not wait for its reply, also where a shutdown does not end a read" {
+    var windows: WindowsLike = undefined;
+    for ([_]Io{ testing.io, windows.io() }) |io| try within5s(testing.io, closeCuts, .{io});
 }
 
+/// The client on `io`, the server on `std.testing.io`.
 fn closeCuts(io: Io) !void {
     var served: Served = undefined;
-    try served.start(io, .fromSeconds(3));
-    defer served.stop(io);
+    try served.start(testing.io, .fromSeconds(3));
+    defer served.stop(testing.io);
     var driver: Client = try .init(testing.allocator, io, .{ .uri = try served.uri(""), .close_timeout = .fromMilliseconds(50) });
     defer driver.deinit();
     try driver.connect(io, .root, null);
     var call = try io.concurrent(run, .{ io, &driver, slow, error.ConnectionLost, "close() of the client cut the exchange" });
-    try awaitReceived(io, &served.script, "slow", 1);
+    try awaitReceived(testing.io, &served.script, "slow", 1);
     const start = time.now(io);
     driver.close(io);
     try testing.expect(start.durationTo(time.now(io)).toMilliseconds() < 1000);
@@ -232,16 +237,21 @@ fn closeKeepsCancel(io: Io) !void {
     try call.await(io);
 }
 
-test "close stops a connection being opened, and connect is Closed" {
-    try within5s(testing.io, closeStopsOpening, .{testing.io});
+test "close stops a connection being opened, and connect is Closed, also where a shutdown does not end a read" {
+    var windows: WindowsLike = undefined;
+    for ([_]Io{ testing.io, windows.io() }) |io| try within5s(testing.io, closeStopsOpening, .{io});
 }
 
-/// Accepts one client and reads until it goes, answering nothing.
-fn holdSilent(io: Io, listener: *net.Server) !void {
+/// Accepts one client, reads its hello, says so, and answers nothing nor
+/// reads on until `done`: the end of the client's stream changes nothing.
+fn hearHelloThenHold(io: Io, listener: *net.Server, heard: *Io.Event, done: *Io.Event) !void {
     var peer: FakeServer.Peer = undefined;
     try peer.accept(io, listener);
     defer peer.close();
-    _ = try peer.readToEnd();
+    const request = (try peer.readRequest(testing.allocator)) orelse return error.TestUnexpectedResult;
+    request.deinit();
+    heard.set(io);
+    try done.wait(io);
 }
 
 fn connectClosed(io: Io, driver: *Client) !void {
@@ -250,16 +260,23 @@ fn connectClosed(io: Io, driver: *Client) !void {
     try testing.expectEqualStrings("the client was closed while it connected", d.message());
 }
 
+/// The client on `io`, the server on `std.testing.io`.
 fn closeStopsOpening(io: Io) !void {
-    var listener = try FakeServer.listen(io);
-    defer listener.deinit(io);
-    var server = try io.concurrent(holdSilent, .{ io, &listener });
-    defer server.await(io) catch {};
+    var listener = try FakeServer.listen(testing.io);
+    defer listener.deinit(testing.io);
+    var heard: Io.Event = .unset;
+    var done: Io.Event = .unset;
+    var server = try testing.io.concurrent(hearHelloThenHold, .{ testing.io, &listener, &heard, &done });
+    defer {
+        done.set(testing.io);
+        server.await(testing.io) catch {};
+    }
     var buffer: [64]u8 = undefined;
     var driver: Client = try .init(testing.allocator, io, .{ .uri = try FakeServer.uri(&listener, &buffer) });
     defer driver.deinit();
     var connecting = try io.concurrent(connectClosed, .{ io, &driver });
-    try awaitStats(io, &driver, "opening", 1);
+    // The opening waits for the reply to hello when the server has it.
+    try heard.wait(testing.io);
     const start = time.now(io);
     driver.close(io);
     try testing.expect(start.durationTo(time.now(io)).toMilliseconds() < 1000);
