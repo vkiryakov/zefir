@@ -107,7 +107,7 @@ pub const Entry = struct {
 };
 
 /// How a call opens a connection: `open` returns the entry of the new
-/// connection, or the contract's error for the call. A canceled task gives
+/// connection, or the client's error for the call. A canceled task gives
 /// `error.Cancelled`, and stays canceled; an attempt that `close` stopped
 /// gives `error.Closed`.
 pub const Opener = struct {

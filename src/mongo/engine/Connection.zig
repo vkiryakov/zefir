@@ -99,7 +99,7 @@ pub const Request = struct {
 };
 
 /// Sends `request` and returns the reply, from `allocator`, waiting no
-/// longer than `deadline`. The errors are the contract's: a request that
+/// longer than `deadline`. The errors are the client's: a request that
 /// cannot go out is `InvalidArgument` and the connection stays usable;
 /// after the request started to go out, a lost stream is `ConnectionLost`,
 /// the deadline `Timeout`, a canceled task `Interrupted` (and the task is

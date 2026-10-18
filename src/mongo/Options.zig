@@ -1,7 +1,7 @@
 //! The options of `Client.init`. Only `uri` has no default:
 //!
 //! ```zig
-//! var driver: mongo.native.Client = try .init(gpa, io, .{
+//! var client: mongo.Client = try .init(gpa, io, .{
 //!     .uri = "mongodb://orders@db.internal:27017/orders?appName=orders",
 //!     .password = config.mongo.password.expose(), // a confy.Secret
 //! });
@@ -14,7 +14,7 @@ const std = @import("std");
 const Duration = std.Io.Duration;
 const mongo = @import("root.zig");
 
-/// The connection string; `Uri` lists what it may hold.
+/// The connection string; `mongo.Client.Uri` lists what it may hold.
 uri: []const u8,
 /// The password of the user that `uri` names, when the string does not
 /// hold it: a secret kept out of the connection string.

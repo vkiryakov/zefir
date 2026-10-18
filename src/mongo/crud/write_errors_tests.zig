@@ -252,7 +252,7 @@ test "a token canceled while the second batch was out is IncompleteWrite with re
     try testing.expectEqual(@as(usize, 2), script.count(io, "insert"));
 }
 
-test "an error of the contract at the first batch passes as it is, with partial; a token canceled while the write was out is Interrupted with its result" {
+test "an error of the client at the first batch passes as it is, with partial; a token canceled while the write was out is Interrupted with its result" {
     const io = testing.io;
     var queue: Script.Queue = .{ .answers = &.{.close_connection} };
     var served: Served = undefined;
@@ -279,7 +279,7 @@ test "an error of the contract at the first batch passes as it is, with partial;
     try testing.expectEqual(@as(u64, 1), interrupted.deleted);
 }
 
-test "MaxTimeMSExpired in writeErrors is the contract's Timeout, with partial" {
+test "MaxTimeMSExpired in writeErrors is the client's Timeout, with partial" {
     const io = testing.io;
     var write: Script.Write = .{ .refuse = &.{.{ .index = 0, .code = 50, .errmsg = "operation exceeded time limit" }} };
     var served: Served = undefined;

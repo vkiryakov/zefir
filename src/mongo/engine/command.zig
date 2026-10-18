@@ -1,5 +1,5 @@
 //! One command of a call, on a connection of the pool, by the rules of the
-//! contract and of CSOT:
+//! client and of CSOT:
 //!
 //! - The deadline of a call is its context's, else `timeoutMS` from the
 //!   start of the call, else there is none.
@@ -121,7 +121,7 @@ pub const Taken = struct {
 /// deadline and `serverSelectionTimeoutMS`. A call that cannot go out
 /// takes none: less than 1 ms left of the deadline, a canceled token, or
 /// `maxTimeMS` of the caller next to a deadline of `timeoutMS`, which the
-/// contract leaves to the driver to see.
+/// checks of the client before the call do not see.
 pub fn take(r: Runner, io: Io, op: OperationContext, deadline: ?core.Deadline, body: bson.RawDocument, d: ?*Diagnostics) mongo.Error!Taken {
     if (deadline) |dl| if (dl.remaining(time.now(io)).nanoseconds < std.time.ns_per_ms) {
         return fail(d, .checkout, error.DeadlineExceeded, "less than 1 ms was left of the deadline before the command went out", .{});

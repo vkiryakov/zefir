@@ -262,7 +262,7 @@ test "an insert that the server refuses is WriteFailed" {
     try testing.expectError(error.WriteFailed, users.insertOne(io, .of(.root), .{ ._id = 1 }, .{ .allocator = testing.allocator }));
 }
 
-test "an error of the contract passes as it is" {
+test "an error of the client passes as it is" {
     const io = testing.io;
     var queue: Script.Queue = .{ .answers = &.{.close_connection} };
     var served: Served = undefined;
