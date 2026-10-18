@@ -7,7 +7,14 @@
 //! An `Io` whose `operateTimeout` cannot time an operation, and says
 //! `error.ConcurrencyUnavailable`, keeps the deadline too: the operation
 //! then runs in a task of its own against a timer, and a timer that wins
-//! shuts the socket down.
+//! cuts the stream.
+//!
+//! A stream is cut for good, by that timer or by its owner from another
+//! task (`cut`): the socket is shut down, and from then on every read and
+//! write fails with the error of the cut, `error.Timeout` or
+//! `error.Stopped`, whatever the socket says. Most systems end the stream
+//! of a socket that their own side shut down; Windows answers
+//! `error.Unexpected` instead, and that is no error of the network.
 //!
 //! It points into itself: `init` it in place, in an object that does not
 //! move.
@@ -24,13 +31,24 @@ io: Io,
 stream: net.Stream,
 /// The deadline of the exchange in progress; null for none.
 deadline: ?core.Deadline = null,
-/// Why the last read or write failed: `error.Timeout`, `error.Canceled`,
-/// or an error of the socket.
+/// Why the last read or write failed: `error.Timeout`, `error.Stopped`,
+/// `error.Canceled`, or an error of the socket.
 err: ?Error = null,
+/// Who cut the stream, if anybody did; set once, from any task.
+cut_by: std.atomic.Value(Cut) = .init(.none),
 reader: Io.Reader,
 writer: Io.Writer,
 
-pub const Error = Io.Operation.NetRead.Error || Io.Operation.NetWrite.Error || error{ Timeout, Canceled, ConcurrencyUnavailable };
+pub const Error = Io.Operation.NetRead.Error || Io.Operation.NetWrite.Error || error{ Timeout, Stopped, Canceled, ConcurrencyUnavailable };
+
+/// Who cut a stream.
+pub const Cut = enum(u8) {
+    none,
+    /// The timer of the deadline: `error.Timeout`.
+    deadline,
+    /// The owner, through `cut`: `error.Stopped`.
+    stop,
+};
 
 const max_iovecs_len = 8;
 
@@ -50,17 +68,45 @@ pub fn begin(ds: *DeadlineStream, deadline: ?core.Deadline) void {
 }
 
 /// Shuts `stream` down both ways, from any task: a read blocked on it
-/// ends the stream and a blocked write fails, whether or not its task still
-/// sees cancelation. The socket stays open for its owner to close.
+/// ends and a blocked write fails, whether or not its task still sees
+/// cancelation. The socket stays open for its owner to close.
 pub fn shutdown(io: Io, stream: net.Stream) void {
     const protection = io.swapCancelProtection(.blocked);
     defer _ = io.swapCancelProtection(protection);
     stream.shutdown(io, .both) catch {};
 }
 
-/// Runs `operation`, waiting no longer than the deadline.
+/// Cuts the stream from any task, for good: the read or write in progress
+/// ends, and it and every later one fail with the error of `by`; the
+/// first cut decides it. The socket stays open for its owner to close.
+pub fn cut(ds: *DeadlineStream, io: Io, by: Cut) void {
+    std.debug.assert(by != .none);
+    _ = ds.cut_by.cmpxchgStrong(.none, by, .acq_rel, .monotonic);
+    shutdown(io, ds.stream);
+}
+
+/// The error of a cut stream; null while nobody cut it.
+fn cutError(ds: *const DeadlineStream) ?Error {
+    return switch (ds.cut_by.load(.acquire)) {
+        .none => null,
+        .deadline => error.Timeout,
+        .stop => error.Stopped,
+    };
+}
+
+/// What a failed read or write says: the error of the cut, when the
+/// stream was cut, but the cancelation of the task as it is, so that the
+/// task keeps it.
+fn failure(ds: *const DeadlineStream, err: Error) Error {
+    if (err == error.Canceled) return err;
+    return ds.cutError() orelse err;
+}
+
+/// Runs `operation`, waiting no longer than the deadline; on a cut
+/// stream it fails at once.
 fn operate(ds: *DeadlineStream, operation: Io.Operation) Error!Io.Operation.Result {
     const io = ds.io;
+    if (ds.cutError()) |err| return err;
     const deadline = ds.deadline orelse return io.operate(operation);
     while (true) {
         return io.operateTimeout(operation, time.step(io, deadline).toTimeout()) catch |err| switch (err) {
@@ -94,7 +140,7 @@ fn forget(io: Io, result: Io.Operation.Result) void {
 
 fn abort(context: *anyopaque, io: Io) void {
     const ds: *DeadlineStream = @ptrCast(@alignCast(context));
-    shutdown(io, ds.stream);
+    ds.cut(io, .deadline);
 }
 
 fn streamImpl(io_r: *Io.Reader, io_w: *Io.Writer, limit: Io.Limit) Io.Reader.StreamError!usize {
@@ -112,14 +158,18 @@ fn readVec(io_r: *Io.Reader, data: [][]u8) Io.Reader.Error!usize {
     const dest = iovecs_buffer[0..dest_n];
     std.debug.assert(dest[0].len > 0);
     const result = ds.operate(.{ .net_read = .{ .socket_handle = ds.stream.socket.handle, .data = dest } }) catch |err| {
-        ds.err = err;
+        ds.err = ds.failure(err);
         return error.ReadFailed;
     };
     const read = result.net_read catch |err| {
-        ds.err = err;
+        ds.err = ds.failure(err);
         return error.ReadFailed;
     };
-    if (read.data_len == 0) return error.EndOfStream;
+    if (read.data_len == 0) {
+        // The end of a stream that was cut is the cut's.
+        ds.err = ds.cutError() orelse return error.EndOfStream;
+        return error.ReadFailed;
+    }
     if (read.data_len > data_size) {
         io_r.end += read.data_len - data_size;
         return data_size;
@@ -135,17 +185,19 @@ fn drain(io_w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Err
         .data = data,
         .splat = splat,
     } }) catch |err| {
-        ds.err = err;
+        ds.err = ds.failure(err);
         return error.WriteFailed;
     };
     const n = result.net_write catch |err| {
-        ds.err = err;
+        ds.err = ds.failure(err);
         return error.WriteFailed;
     };
     return io_w.consume(n);
 }
 
 const testing = std.testing;
+const WindowsLike = @import("../testing/windows_like_io.zig").WindowsLike;
+const within5s = @import("../testing/connection_tests.zig").within5s;
 
 /// A stream to a loopback listener, and the listener's side of it.
 const Pair = struct {
@@ -208,18 +260,66 @@ test "without a deadline a read waits for what comes" {
     try testing.expectEqual(@as(u8, 'x'), try p.ds.reader.takeByte());
 }
 
-test "an operation in a task of its own keeps the deadline and shuts the socket down at it" {
-    // The way of an Io that cannot time an operation itself.
-    const io = testing.io;
+test "an operation in a task of its own keeps the deadline, and the stream it cut fails every later read with Timeout" {
+    // The way of an Io that cannot time an operation itself, as std's
+    // test Io on Windows.
+    var windows: WindowsLike = undefined;
+    for ([_]Io{ testing.io, windows.io() }) |io| {
+        var p: Pair = undefined;
+        try p.open(io);
+        defer p.close(io);
+        var byte: [1]u8 = undefined;
+        var data: [1][]u8 = .{&byte};
+        const deadline: core.Deadline = .after(time.now(io), .fromMilliseconds(50));
+        try testing.expectError(error.Timeout, p.ds.operateInTask(.{ .net_read = .{ .socket_handle = p.ds.stream.socket.handle, .data = &data } }, deadline));
+        try testing.expect(time.expired(io, deadline));
+        // Cut at the deadline: whatever the socket would say, a read of
+        // any later exchange fails at once with the deadline's error.
+        p.ds.begin(null);
+        try testing.expectError(error.ReadFailed, p.ds.reader.takeByte());
+        try testing.expectEqual(Error.Timeout, p.ds.err.?);
+        p.ds.begin(null);
+        try p.ds.writer.writeAll("ping");
+        try testing.expectError(error.WriteFailed, p.ds.writer.flush());
+        try testing.expectEqual(Error.Timeout, p.ds.err.?);
+    }
+}
+
+test "a stream its owner cuts fails the read in progress with Stopped, also where the system says error.Unexpected" {
+    var windows: WindowsLike = undefined;
+    for ([_]Io{ testing.io, windows.io() }) |io| try within5s(testing.io, cutWhileReading, .{io});
+}
+
+fn takeFails(ds: *DeadlineStream) !void {
+    try testing.expectError(error.ReadFailed, ds.reader.takeByte());
+}
+
+fn cutWhileReading(io: Io) !void {
     var p: Pair = undefined;
     try p.open(io);
     defer p.close(io);
-    var byte: [1]u8 = undefined;
-    var data: [1][]u8 = .{&byte};
-    const deadline: core.Deadline = .after(time.now(io), .fromMilliseconds(50));
-    try testing.expectError(error.Timeout, p.ds.operateInTask(.{ .net_read = .{ .socket_handle = p.ds.stream.socket.handle, .data = &data } }, deadline));
-    try testing.expect(time.expired(io, deadline));
-    // The socket is shut down: the next read ends the stream at once.
     p.ds.begin(null);
-    try testing.expectError(error.EndOfStream, p.ds.reader.takeByte());
+    var reading = try io.concurrent(takeFails, .{&p.ds});
+    // Long enough for the read to wait on the socket; a cut that comes
+    // before it ends the read the same way.
+    try io.sleep(.fromMilliseconds(50), .awake);
+    p.ds.cut(io, .stop);
+    try reading.await(io);
+    try testing.expectEqual(Error.Stopped, p.ds.err.?);
+}
+
+test "without a cut the socket's own errors stay what they are" {
+    var windows: WindowsLike = undefined;
+    const io = windows.io();
+    var p: Pair = undefined;
+    try p.open(io);
+    defer {
+        p.ds.stream.close(io);
+        p.listener.deinit(io);
+    }
+    // The server ends the stream, which this Io reads as error.Unexpected.
+    p.server.close(io);
+    p.ds.begin(null);
+    try testing.expectError(error.ReadFailed, p.ds.reader.takeByte());
+    try testing.expectEqual(Error.Unexpected, p.ds.err.?);
 }

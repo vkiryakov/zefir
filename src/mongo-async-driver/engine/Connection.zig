@@ -1,8 +1,9 @@
 //! One connection to the server, in the heap: the reader and the writer of
 //! its stream point into it. It holds one exchange at a time, a request
 //! and its reply, under the deadline of the exchange. A connection that
-//! broke the protocol, timed out, lost its stream or was canceled in the
-//! middle of an exchange is no longer `usable`: its owner destroys it.
+//! broke the protocol, timed out, lost its stream, was cut or was
+//! canceled in the middle of an exchange is no longer `usable`: its owner
+//! destroys it.
 
 const std = @import("std");
 const Io = std.Io;
@@ -63,10 +64,11 @@ pub fn destroy(conn: *Connection) void {
     conn.gpa.destroy(conn);
 }
 
-/// Wakes an exchange blocked on the socket, from another task: its read
-/// ends the stream and its write fails. `destroy` still closes the socket.
-pub fn shutdown(conn: *Connection, io: Io) void {
-    DeadlineStream.shutdown(io, conn.stream.stream);
+/// Cuts the exchange in progress from another task, and every later one:
+/// they fail with `error.ConnectionLost` at once. `destroy` still closes
+/// the socket.
+pub fn cut(conn: *Connection, io: Io) void {
+    conn.stream.cut(io, .stop);
 }
 
 /// A request, as `wire.opmsg.Request` without its requestID.
@@ -133,6 +135,7 @@ fn broken(conn: *Connection, d: ?*Diagnostics, phase: Diagnostics.Phase) mongo.E
             conn.stream.io.recancel();
             return fail(d, phase, error.Interrupted, "the task was canceled while the command was out", .{});
         },
+        error.Stopped => return fail(d, phase, error.ConnectionLost, "the exchange was cut", .{}),
         else => {
             if (d) |x| x.set(phase, cause, "the connection to {f} broke: {t}", .{ conn.address, cause });
             return error.ConnectionLost;

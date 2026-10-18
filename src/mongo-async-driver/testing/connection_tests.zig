@@ -15,6 +15,7 @@ const Diagnostics = mongo.Diagnostics;
 const FakeServer = mongo.testing.FakeServer;
 const Connection = @import("../engine/Connection.zig");
 const time = @import("../engine/time.zig");
+const WindowsLike = @import("windows_like_io.zig").WindowsLike;
 
 /// Runs `function(args)` in a task of its own and fails with
 /// `error.TestTimedOut` when it takes longer than 5 s.
@@ -252,6 +253,31 @@ fn replyTooLate(io: Io) !void {
     try testing.expect(time.expired(io, deadline));
     try testing.expect(!p.conn.usable);
     try testing.expectEqualStrings("the deadline passed before the reply came", d.message());
+}
+
+test "an exchange cut from another task is ConnectionLost, also where the system says error.Unexpected" {
+    var windows: WindowsLike = undefined;
+    for ([_]Io{ testing.io, windows.io() }) |io| try within5s(testing.io, cutInFlight, .{io});
+}
+
+fn exchangeCut(conn: *Connection, d: *Diagnostics) !void {
+    try testing.expectError(error.ConnectionLost, conn.exchange(ping, testing.allocator, null, d));
+}
+
+fn cutInFlight(io: Io) !void {
+    var p: Pair = undefined;
+    try p.open(io);
+    defer p.close(io);
+    var d: Diagnostics = .{};
+    var client = try io.concurrent(exchangeCut, .{ p.conn, &d });
+    // The command is out once the server has read it.
+    const swallowed = swallow(&p.peer);
+    p.conn.cut(io);
+    try client.await(io);
+    try swallowed;
+    try testing.expect(!p.conn.usable);
+    try testing.expectEqualStrings("the exchange was cut", d.message());
+    try testing.expectEqual(Diagnostics.Phase.wait, d.phase.?);
 }
 
 test "canceling the task while the reply is out is Interrupted, and the task stays canceled" {

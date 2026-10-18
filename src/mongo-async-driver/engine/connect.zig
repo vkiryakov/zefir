@@ -45,7 +45,18 @@ pub fn open(io: Io, gpa: Allocator, address: Connection.Address, setup: *const h
     };
 }
 
+/// The attempt in the task that runs it. A stopped attempt ends with
+/// `error.Canceled`, whatever its socket said: a socket that its own side
+/// shut down ends the stream on most systems, and answers
+/// `error.Unexpected` on Windows.
 fn openNow(io: Io, gpa: Allocator, address: Connection.Address, setup: *const handshake.Setup, attempt: *Attempt, d: *Diagnostics) handshake.Error!*Connection {
+    return openUnlessStopped(io, gpa, address, setup, attempt, d) catch |err| {
+        if (attempt.isStopped(io)) return error.Canceled;
+        return err;
+    };
+}
+
+fn openUnlessStopped(io: Io, gpa: Allocator, address: Connection.Address, setup: *const handshake.Setup, attempt: *Attempt, d: *Diagnostics) handshake.Error!*Connection {
     const stream = dial(io, address) catch |err| switch (err) {
         error.Canceled => return error.Canceled,
         else => {
@@ -128,6 +139,12 @@ pub const Attempt = struct {
         a.stream = null;
     }
 
+    pub fn isStopped(a: *Attempt, io: Io) bool {
+        a.mutex.lockUncancelable(io);
+        defer a.mutex.unlock(io);
+        return a.stopped;
+    }
+
     /// For `race`: stops the attempt when the timer wins.
     pub fn abort(context: *anyopaque, io: Io) void {
         const a: *Attempt = @ptrCast(@alignCast(context));
@@ -136,6 +153,9 @@ pub const Attempt = struct {
 };
 
 const testing = std.testing;
+const FakeServer = mongo.testing.FakeServer;
+const WindowsLike = @import("../testing/windows_like_io.zig").WindowsLike;
+const within5s = @import("../testing/connection_tests.zig").within5s;
 
 test "dial reaches a listener by IP address and by name, and a closed port refuses" {
     const io = testing.io;
@@ -152,24 +172,69 @@ test "dial reaches a listener by IP address and by name, and a closed port refus
     try testing.expectError(error.ConnectionRefused, dial(io, .{ .host = "127.0.0.1", .port = port }));
 }
 
-test "a stopped attempt shuts its socket down, and one stopped before it has a socket keeps none" {
-    const io = testing.io;
-    const loopback: net.IpAddress = try .parseIp4("127.0.0.1", 0);
-    var listener = try loopback.listen(io, .{ .reuse_address = true });
-    defer listener.deinit(io);
-    const stream = try dial(io, .{ .host = "127.0.0.1", .port = listener.socket.address.getPort() });
-    defer stream.close(io);
-    const accepted = try listener.accept(io);
-    defer accepted.close(io);
+test "an attempt stopped during hello is Canceled, whatever its socket says, and one stopped before it has a socket keeps none" {
+    var windows: WindowsLike = undefined;
+    for ([_]Io{ testing.io, windows.io() }) |io| {
+        try within5s(testing.io, stopInHello, .{io});
+        try within5s(testing.io, stopBeforeSocket, .{io});
+    }
+}
 
+/// Accepts one client and reads its hello, says so, and reads until the
+/// client goes.
+fn hearHello(io: Io, listener: *net.Server, heard: *Io.Event) !void {
+    var peer: FakeServer.Peer = undefined;
+    try peer.accept(io, listener);
+    defer peer.close();
+    const request = (try peer.readRequest(testing.allocator)) orelse return error.TestUnexpectedResult;
+    request.deinit();
+    heard.set(io);
+    _ = try peer.readToEnd();
+}
+
+fn stopInHello(io: Io) !void {
+    var listener = try FakeServer.listen(testing.io);
+    defer listener.deinit(testing.io);
+    var heard: Io.Event = .unset;
+    var server = try testing.io.concurrent(hearHello, .{ testing.io, &listener, &heard });
+    defer server.await(testing.io) catch {};
+    const meta = try handshake.metadata(testing.allocator, null, null);
+    defer meta.deinit();
+    const setup: handshake.Setup = .{ .metadata = meta.raw() };
     var attempt: Attempt = .{};
-    try testing.expect(attempt.hold(io, stream));
+    var d: Diagnostics = .{};
+    var opening = try io.concurrent(openNow, .{ io, testing.allocator, .{ .host = "127.0.0.1", .port = FakeServer.port(&listener) }, &setup, &attempt, &d });
+    // The client waits for the reply to hello when the server has it.
+    const waited = heard.wait(testing.io);
     attempt.stop(io);
-    var buffer: [16]u8 = undefined;
-    var reader = stream.reader(io, &buffer);
-    try testing.expectError(error.EndOfStream, reader.interface.takeByte());
+    const opened = opening.await(io);
+    if (opened) |conn| conn.destroy() else |_| {}
+    try waited;
+    try testing.expectError(error.Canceled, opened);
+}
 
-    var stopped: Attempt = .{};
-    stopped.stop(io);
-    try testing.expect(!stopped.hold(io, stream));
+/// Accepts one client and reads until it goes.
+fn hearNothing(io: Io, listener: *net.Server) !void {
+    var peer: FakeServer.Peer = undefined;
+    try peer.accept(io, listener);
+    defer peer.close();
+    try testing.expectEqual(@as(usize, 0), try peer.readToEnd());
+}
+
+fn stopBeforeSocket(io: Io) !void {
+    var listener = try FakeServer.listen(testing.io);
+    defer listener.deinit(testing.io);
+    var server = try testing.io.concurrent(hearNothing, .{ testing.io, &listener });
+    defer server.await(testing.io) catch {};
+    const meta = try handshake.metadata(testing.allocator, null, null);
+    defer meta.deinit();
+    const setup: handshake.Setup = .{ .metadata = meta.raw() };
+    var attempt: Attempt = .{};
+    attempt.stop(io);
+    var d: Diagnostics = .{};
+    // It dials, closes the socket it got and sends nothing.
+    const opened = openNow(io, testing.allocator, .{ .host = "127.0.0.1", .port = FakeServer.port(&listener) }, &setup, &attempt, &d);
+    if (opened) |conn| conn.destroy() else |_| {}
+    try testing.expectError(error.Canceled, opened);
+    try server.await(testing.io);
 }

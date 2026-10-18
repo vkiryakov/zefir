@@ -127,7 +127,7 @@ pub fn close(self: *Client, io: Io) void {
     }
     self.state = .closed;
     if (self.attempt) |a| a.stop(io);
-    if (self.conn) |c| c.shutdown(io);
+    if (self.conn) |c| c.cut(io);
     self.state_mutex.unlock(io);
     // After the call in flight.
     self.exchange_mutex.lockUncancelable(io);
