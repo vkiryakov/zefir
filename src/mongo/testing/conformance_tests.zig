@@ -103,6 +103,8 @@ const Flaw = enum {
     close_swallows_cancel,
     /// write counts one item more than the server did.
     miscounts,
+    /// write gives Timeout as the reason of every IncompleteWrite.
+    misreports_reason,
 };
 
 /// `FakeDriver` with one flaw: the harness and the driver in one object.
@@ -176,7 +178,12 @@ const Flawed = struct {
     }
 
     pub fn write(f: *Flawed, io: Io, op: mongo.OperationContext, request: *const mongo.WriteRequest, options: mongo.WriteOptions) mongo.Error!mongo.WriteResult {
-        var result = try f.fake.write(io, op, request, options);
+        var result = f.fake.write(io, op, request, options) catch |err| {
+            if (f.flaw == .misreports_reason and err == error.IncompleteWrite) {
+                if (options.diagnostics) |d| d.reason = error.Timeout;
+            }
+            return err;
+        };
         if (f.flaw == .miscounts) result.n += 1;
         return result;
     }
@@ -228,6 +235,14 @@ test "a driver that miscounts a write fails S11" {
     var report = try conformance.run(testing.io, testing.allocator, &flawed, .{ .only = &.{.s11} });
     defer report.deinit();
     try expectFailed(&report, .s11, "n is 11");
+}
+
+test "a driver that gives another reason for an IncompleteWrite fails S14 and S21, which name both" {
+    var flawed: Flawed = .{ .flaw = .misreports_reason };
+    var report = try conformance.run(testing.io, testing.allocator, &flawed, .{ .only = &.{ .s14, .s21 } });
+    defer report.deinit();
+    try expectFailed(&report, .s14, "Diagnostics.reason of the IncompleteWrite is Timeout, not ConnectionLost");
+    try expectFailed(&report, .s21, "Diagnostics.reason of the IncompleteWrite is Timeout, not Cancelled");
 }
 
 test "a driver that keeps memory after tearDown fails the check with a leak" {

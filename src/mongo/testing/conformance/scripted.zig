@@ -55,7 +55,8 @@ pub fn s1(job: *Job) Job.Error!void {
     try job.expectSent((try job.received(&stage.script, "count", 0)).body, s1_body, database, &.{}, "the command");
     try job.expect(same, "the reply came back changed: {s}", .{shown});
     try job.expect(held > 0, "the reply was not allocated from options.allocator", .{});
-    try job.expect(fence.held() == 0, "{d} allocation(s) of options.allocator were left after the reply's deinit: the reply is to be one allocation of options.allocator, and nothing else", .{fence.held()});
+    const left = fence.held();
+    try job.expect(left == 0, "{d} allocation(s) of options.allocator were left after the reply's deinit: the reply is to be one allocation of options.allocator, and nothing else", .{left});
 }
 
 /// The fields that no driver of revision 1 writes.
@@ -145,8 +146,10 @@ pub fn s2(job: *Job) Job.Error!void {
 
     try expectMaxTime(job, try job.received(script, "find", 0), limit);
     try expectMaxTime(job, try job.received(script, "insert", 0), limit);
-    try job.expect(script.count(io, "getMore") >= 2, "the cursor read to its end sent {d} getMore, not 2", .{script.count(io, "getMore")});
-    try job.expect(script.count(io, "killCursors") == 1, "the cursor closed in its middle sent {d} killCursors, not 1", .{script.count(io, "killCursors")});
+    const get_mores = script.count(io, "getMore");
+    try job.expect(get_mores >= 2, "the cursor read to its end sent {d} getMore, not 2", .{get_mores});
+    const kills = script.count(io, "killCursors");
+    try job.expect(kills == 1, "the cursor closed in its middle sent {d} killCursors, not 1", .{kills});
     for (0..script.received(io)) |i| {
         const entry = script.entry(io, i);
         if (eql(u8, entry.name, "getMore") or eql(u8, entry.name, "killCursors")) {
@@ -200,7 +203,8 @@ pub fn s3(job: *Job) Job.Error!void {
     try job.expect(eql(u8, d.message(), "The server is in quiesce mode and will shut down"), "Diagnostics.message() is \"{s}\", not the errmsg of the server", .{d.message()});
     try job.expect(fence.held() > 0, "failure_reply of runCommand was not allocated from options.allocator", .{});
     try expectFailureReply(job, &failure, s3_overloaded, "runCommand");
-    try job.expect(fence.held() == 0, "{d} allocation(s) of options.allocator were left after failure_reply's deinit", .{fence.held()});
+    const left = fence.held();
+    try job.expect(left == 0, "{d} allocation(s) of options.allocator were left after failure_reply's deinit", .{left});
 
     try job.expectError(client.runCommand(io, .of(.root), .{ .database = database, .body = body }, .{ .allocator = job.gpa, .diagnostics = &d, .failure_reply = &failure }), error.Timeout, "a command answered with code 50");
     try job.expect(d.server != null and d.server.?.code == 50, "Diagnostics.server.code is not 50 after Timeout by code 50", .{});
@@ -274,7 +278,8 @@ pub fn s4(job: *Job) Job.Error!void {
     for ([_][]const u8{ "count", "insert", "getMore", "$where" }) |name| {
         try job.expect(script.count(io, name) == 0, "the server got {s}, which was not to be sent", .{name});
     }
-    try job.expect(script.count(io, "find") == 1, "the server got {d} find, and only the first was to be sent", .{script.count(io, "find")});
+    const finds = script.count(io, "find");
+    try job.expect(finds == 1, "the server got {d} find, and only the first was to be sent", .{finds});
     // The cursor goes on.
     const next = try job.need(cursor.next(io, .of(.root)), "next after the calls that were not sent");
     try job.expect(next != null and eql(u8, next.?.bytes, docs[1].bytes), "the cursor did not go on to its next document", .{});
@@ -564,7 +569,8 @@ pub fn s8(job: *Job) Job.Error!void {
         const after = try job.need(cursor.next(io, .of(.root)), "next after the end");
         try job.expect(after == null, "next after the last document gave a document, not null", .{});
     }
-    try job.expect(script.count(io, "getMore") == 3, "the cursor sent {d} getMore for the three batches after the first", .{script.count(io, "getMore")});
+    const get_mores = script.count(io, "getMore");
+    try job.expect(get_mores == 3, "the cursor sent {d} getMore for the three batches after the first", .{get_mores});
     try expectKills(job, script, 0, "a cursor read to its end");
     for (0..3) |i| try expectGetMore(job, try job.received(script, "getMore", i), 8, "fs.chunks", "conformance_ns", 2, s8_comment);
 }
@@ -744,7 +750,8 @@ pub fn s17(job: *Job) Job.Error!void {
     const twice = again.durationTo(Job.now(io));
     try job.expect(twice.nanoseconds <= job.ms(1000).nanoseconds, "a second close took {d} ms", .{twice.toMilliseconds()});
     cursor.close(io);
-    try job.expect(script.received(io) == received, "a second close, or close of a cursor after close of the client, sent {d} command(s)", .{script.received(io) - received});
+    const sent = script.received(io) - received;
+    try job.expect(sent == 0, "a second close, or close of a cursor after close of the client, sent {d} command(s)", .{sent});
 }
 
 const s18_comment = "the comment of S18";
@@ -768,7 +775,8 @@ pub fn s18(job: *Job) Job.Error!void {
     // A reply: one allocation of the call's allocator.
     const reply = try job.need(client.runCommand(io, .of(.root), .{ .database = database, .body = bson.literal(.{ .count = "s18" }) }, .{ .allocator = fences[0].allocator() }), "runCommand");
     fences[0].close();
-    try job.expect(fences[0].held() == 1, "the reply is {d} allocation(s) of options.allocator, not one", .{fences[0].held()});
+    const reply_held = fences[0].held();
+    try job.expect(reply_held == 1, "the reply is {d} allocation(s) of options.allocator, not one", .{reply_held});
     reply.deinit();
     try job.expect(fences[0].held() == 0, "the reply's deinit left an allocation of options.allocator", .{});
 
@@ -781,7 +789,8 @@ pub fn s18(job: *Job) Job.Error!void {
     for (items) |item| @memset(@constCast(item.bytes), 0xAA);
     try job.expect(result.write_errors.len == 1, "the write came back with {d} refused items, not 1", .{result.write_errors.len});
     result.deinit(fences[1].allocator());
-    try job.expect(fences[1].held() == 0, "{d} allocation(s) of options.allocator were left after the result's deinit: a WriteResult is all from options.allocator", .{fences[1].held()});
+    const result_left = fences[1].held();
+    try job.expect(result_left == 0, "{d} allocation(s) of options.allocator were left after the result's deinit: a WriteResult is all from options.allocator", .{result_left});
 
     // A cursor: its command, database and comment are the caller's, and may
     // change once openCursor has returned.
@@ -816,7 +825,8 @@ pub fn s18(job: *Job) Job.Error!void {
     try job.expect(fences[2].held() == 0, "failure_reply is not one allocation of options.allocator", .{});
 
     for (&fences, [_][]const u8{ "runCommand", "write", "runCommand of a failure" }) |*fence, what| {
-        try job.expect(fence.late() == 0, "{s} took memory of its options.allocator {d} time(s) after it returned", .{ what, fence.late() });
+        const late = fence.late();
+        try job.expect(late == 0, "{s} took memory of its options.allocator {d} time(s) after it returned", .{ what, late });
     }
 }
 
@@ -912,7 +922,8 @@ fn messageLength(entry: Script.Entry) usize {
 /// plus `ordered` and `$db`.
 fn expectBatches(job: *Job, script: *Script, name: []const u8, first: usize, identifier: []const u8, items: []const bson.RawDocument, sizes: []const usize, body: bson.RawDocument, ordered: bool) Job.Error!void {
     const io = job.io;
-    try job.expect(script.count(io, name) == first + sizes.len, "{d} items went out in {d} {s} command(s), not {d}", .{ items.len, script.count(io, name) - first, name, sizes.len });
+    const commands = script.count(io, name) - first;
+    try job.expect(commands == sizes.len, "{d} items went out in {d} {s} command(s), not {d}", .{ items.len, commands, name, sizes.len });
     var at: usize = 0;
     for (sizes, first..) |size, i| {
         const entry = try job.received(script, name, i);
@@ -1051,7 +1062,8 @@ pub fn s13(job: *Job) Job.Error!void {
 
     var result = try job.need(client.write(io, .of(.root), .{ .database = database, .kind = .update, .body = body, .items = &ten_updates, .ordered = false }, .{ .allocator = job.gpa }), "an unordered write with refused items");
     defer result.deinit(job.gpa);
-    try job.expect(script.count(io, "update") == 4, "an unordered write sent {d} batches of 4", .{script.count(io, "update")});
+    const unordered_batches = script.count(io, "update");
+    try job.expect(unordered_batches == 4, "an unordered write sent {d} batches of 4", .{unordered_batches});
     try job.expect(result.n == 9 and result.modified == 6, "the merge came with n {d} and modified {d}, not the sums 9 and 6", .{ result.n, result.modified });
     try job.expect(result.upserted.len == 2, "the merge came with {d} upserts, not 2", .{result.upserted.len});
     try expectUpserted(job, result.upserted[0], 1, "up-1");
@@ -1066,12 +1078,23 @@ pub fn s13(job: *Job) Job.Error!void {
 
     var ordered = try job.need(client.write(io, .of(.root), .{ .database = database, .kind = .update, .body = body, .items = &ten_updates }, .{ .allocator = job.gpa }), "an ordered write with a refused item");
     defer ordered.deinit(job.gpa);
-    try job.expect(script.count(io, "update") == 6, "an ordered write sent {d} batches; it sends none after the batch with a refused item, the second", .{script.count(io, "update") - 4});
+    const ordered_batches = script.count(io, "update") - unordered_batches;
+    try job.expect(ordered_batches == 2, "an ordered write sent {d} batches; it sends none after the batch with a refused item, the second", .{ordered_batches});
     try job.expect(ordered.n == 5 and ordered.modified == 3 and ordered.answered == 6, "the ordered merge came with n {d}, modified {d}, answered {d}, not 5, 3 and 6", .{ ordered.n, ordered.modified, ordered.answered });
     try job.expect(ordered.upserted.len == 1 and ordered.write_errors.len == 1 and ordered.write_errors[0].index == 5, "the ordered merge came with other upserts or refused items than those of its two batches", .{});
 }
 
 const three = bson.literal(.{ .n = 3, .ok = 1.0 });
+
+/// Fails unless `d.reason` is `reason`. It reads the reason once, so that
+/// the message shows the value compared, and compares the error inside the
+/// optional: Zig 0.17.0 builds Debug for x86_64 Linux with its own x86_64
+/// backend, which compiles `==` of two optional error sets wrong.
+fn expectReason(job: *Job, d: *const errors.Diagnostics, reason: errors.Error) Job.Error!void {
+    const got = d.reason;
+    const same = if (got) |err| err == reason else false;
+    try job.expect(same, "Diagnostics.reason of the IncompleteWrite is {?t}, not {t}", .{ got, reason });
+}
 
 pub fn s14(job: *Job) Job.Error!void {
     const io = job.io;
@@ -1087,10 +1110,11 @@ pub fn s14(job: *Job) Job.Error!void {
     var d: errors.Diagnostics = .{};
     const body = bson.literal(.{ .insert = "s14" });
     try job.expectError(client.write(io, .of(.root), .{ .database = database, .kind = .insert, .body = body, .items = &ten }, .{ .allocator = fence.allocator(), .diagnostics = &d, .partial = &partial }), error.IncompleteWrite, "a write whose third batch lost its connection");
-    try job.expect(d.reason == @as(?errors.Error, error.ConnectionLost), "Diagnostics.reason of the IncompleteWrite is {?t}, not ConnectionLost", .{d.reason});
+    try expectReason(job, &d, error.ConnectionLost);
     try job.expect(d.batch_offset == 6, "Diagnostics.batch_offset of the IncompleteWrite is {?d}, not 6", .{d.batch_offset});
     try job.expect(partial.n == 6 and partial.answered == 6, "partial came with n {d} and answered {d}, not the 6 of the two batches answered", .{ partial.n, partial.answered });
-    try job.expect(script.count(io, "insert") == 3, "the write sent {d} batches, not 3", .{script.count(io, "insert")});
+    const batches = script.count(io, "insert");
+    try job.expect(batches == 3, "the write sent {d} batches, not 3", .{batches});
     partial.deinit(fence.allocator());
     try job.expect(fence.held() == 0, "partial is not all from options.allocator", .{});
 
@@ -1205,11 +1229,12 @@ pub fn s21(job: *Job) Job.Error!void {
     var d: errors.Diagnostics = .{};
     const op: OperationContext = .of(core.Context.root.withCancellation(&canceler.token));
     try job.expectError(client.write(io, op, .{ .database = database, .kind = .insert, .body = body, .items = &ten }, .{ .allocator = job.gpa, .diagnostics = &d, .partial = &partial }), error.IncompleteWrite, "a write whose token was canceled while its second batch was out");
-    try job.expect(d.reason == @as(?errors.Error, error.Cancelled), "Diagnostics.reason of the IncompleteWrite is {?t}, not Cancelled", .{d.reason});
+    try expectReason(job, &d, error.Cancelled);
     try job.expect(errors.outcome(error.IncompleteWrite) == .may_have_executed, "IncompleteWrite is not may_have_executed", .{});
     try job.expect(d.batch_offset == 6, "Diagnostics.batch_offset of the IncompleteWrite is {?d}, not 6", .{d.batch_offset});
     try job.expect(partial.n == 6 and partial.answered == 6, "partial came with n {d} and answered {d}, not the 6 of the two batches", .{ partial.n, partial.answered });
-    try job.expect(script.count(io, "insert") == 2, "the write sent {d} batches; the token is checked before each", .{script.count(io, "insert")});
+    const batches = script.count(io, "insert");
+    try job.expect(batches == 2, "the write sent {d} batches; the token is checked before each", .{batches});
 
     var token: core.CancellationToken = .init;
     token.cancel();

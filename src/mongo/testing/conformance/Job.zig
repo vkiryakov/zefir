@@ -147,8 +147,10 @@ pub fn received(job: *Job, script: *Script, name: []const u8, index: usize) Erro
 /// most, stretched.
 pub fn awaitReceived(job: *Job, script: *Script, name: []const u8, n: usize) Error!void {
     const deadline: core.Deadline = .after(now(job.io), job.ms(10_000));
-    while (script.count(job.io, name) < n) {
-        if (deadline.isExpired(now(job.io))) return job.fail("the server got {d} command(s) named {s} in {d} s, not {d}", .{ script.count(job.io, name), name, 10 * job.scale(), n });
+    while (true) {
+        const got = script.count(job.io, name);
+        if (got >= n) return;
+        if (deadline.isExpired(now(job.io))) return job.fail("the server got {d} command(s) named {s} in {d} s, not {d}", .{ got, name, 10 * job.scale(), n });
         job.pause(.fromMilliseconds(1));
     }
 }
