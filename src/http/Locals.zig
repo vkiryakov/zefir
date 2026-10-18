@@ -1,4 +1,4 @@
-//! The locals of a request (design section 6), as `ctx.locals`: values that
+//! The locals of a request, as `ctx.locals`: values that
 //! a middleware puts for the middleware after it and for the handler, one
 //! value per type. The type itself is the key, so two types never share
 //! one, whatever their names.

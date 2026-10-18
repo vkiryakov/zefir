@@ -1,4 +1,4 @@
-//! Server-sent events (design section 12): a long response of
+//! Server-sent events: a long response of
 //! `text/event-stream`, without an upgrade. A route of `http.sse.get`
 //! opens a stream, an `http.sse.Manager` keeps the streams by key and
 //! publishes to them, and `http.sse.Context` is the context of the route's

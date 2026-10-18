@@ -1,4 +1,4 @@
-//! SSE streams through the server, on `http.testing` (design section 12):
+//! SSE streams through the server, on `http.testing`:
 //! the route and its context, `subscribe` and its limits, the stream past
 //! the request's deadline, `publish` and the queues, the heartbeat,
 //! `close`, `on_close` and the stop.

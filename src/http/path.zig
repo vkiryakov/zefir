@@ -1,4 +1,4 @@
-//! The path of a request as the router sees it (design section 5). The
+//! The path of a request as the router sees it. The
 //! path is split into segments first, and each segment is percent-decoded
 //! after, so `%2F` stays a `/` inside its segment and never splits the
 //! path. `.` and `..` are resolved per RFC 3986, never above the root; an

@@ -1,4 +1,4 @@
-//! The compile-time plan of a server (design sections 4 and 5):
+//! The compile-time plan of a server:
 //! `of(@TypeOf(options))` reads the options of `Server.init` and the
 //! routes of its controllers, builds the router's trie and stops the build
 //! on a mistake, with a message that names the place and what to write:

@@ -1,4 +1,4 @@
-//! Typed responses (design section 8): `http.Json(T)`, what a handler
+//! Typed responses: `http.Json(T)`, what a handler
 //! returns to answer with a JSON value.
 const std = @import("std");
 

@@ -1,4 +1,4 @@
-//! `http.native` (design sections 14 and 15): the backend of a server on
+//! `http.native`: the backend of a server on
 //! the network, over `std.Io` (zio in production): connections, the heads
 //! and bodies of requests, responses, keep-alive and pipelining, and the
 //! watcher that sees a client leave.

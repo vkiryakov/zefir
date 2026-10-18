@@ -1,5 +1,5 @@
 //! Conditional requests and ranges of static files (RFC 9110 §13 and §14),
-//! as design section 13 takes them: the validators `ETag` and
+//! as the static files take them: the validators `ETag` and
 //! `Last-Modified`; `If-None-Match`, which beats `If-Modified-Since`, for a
 //! 304; one byte range of a GET for a 206, several for the whole file, a
 //! range past the end for a 416; `If-Range`, without which a resumed

@@ -1,4 +1,4 @@
-//! The response of a context (design section 8), as `ctx.response`: its
+//! The response of a context, as `ctx.response`: its
 //! status, its header fields and its body.
 //!
 //! ```zig
@@ -368,7 +368,7 @@ fn JsonError(comptime T: type) type {
     return SetError || Exchange.WriteError || v.TransformError(T);
 }
 
-/// The errors of `file` (decision 22). `FileNotFound`: no file at the
+/// The errors of `file`. `FileNotFound`: no file at the
 /// path, or a part of the path is not a directory; an error of the
 /// application, for its error handler to map (to 404, say). `ReadFailed`
 /// (500): every other error of the system that opens, checks or reads the

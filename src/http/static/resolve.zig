@@ -1,5 +1,5 @@
-//! The file of a static request under the root of its mount (design
-//! section 13). The path comes normalized (path.zig): split into segments,
+//! The file of a static request under the root of its mount. The path
+//! comes normalized (path.zig): split into segments,
 //! each percent-decoded, dot segments resolved, never above the root. Every
 //! segment is checked here before any I/O; then the file is opened one
 //! component at a time from the root, a directory, then the next, and no

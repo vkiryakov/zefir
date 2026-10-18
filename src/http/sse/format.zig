@@ -1,4 +1,4 @@
-//! The bytes of an SSE event (design section 12, the event stream of the
+//! The bytes of an SSE event (the event stream of the
 //! HTML standard): the fields `event:`, `id:` and `retry:`, then a `data:`
 //! line for each line of the data, then a blank line that ends the event.
 //! A comment line, such as the heartbeat `: ping`, is ignored by clients.

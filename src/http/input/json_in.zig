@@ -1,4 +1,4 @@
-//! JSON into DTOs (design section 7). The tokens of the body come from
+//! JSON into DTOs. The tokens of the body come from
 //! `std.json.Scanner`, which holds them to the syntax of RFC 8259 and
 //! refuses invalid UTF-8; the mapping is our own, by the outside names of
 //! the validator (`v.fieldNamed`), so that every problem of the input
@@ -241,8 +241,8 @@ const Parser = struct {
                 try p.skip();
                 continue;
             };
-            // A key given twice (decision 14): two parsers could each take
-            // another value of it.
+            // A key given twice: two parsers could each take another value
+            // of it.
             if (seen[index]) return error.InvalidRequest;
             seen[index] = true;
             inline for (info.field_names, info.field_types, info.field_attrs, 0..) |name, F, attrs, i| {

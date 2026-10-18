@@ -1,4 +1,4 @@
-//! A backend in memory for tests (design section 14): the same server, the
+//! A backend in memory for tests: the same server, the
 //! same controllers, no sockets. `request` hands one request to the server
 //! and returns its response once the request has ended.
 //!

@@ -1,4 +1,4 @@
-//! One subscription of an `http.sse.Manager` (design section 12): the
+//! One subscription of an `http.sse.Manager`: the
 //! stream of one request, from its `subscribe` to its end. It owns what the
 //! stream lives on: the connection, which the server hands over and keeps
 //! for it to the end, an arena, a copy of its key and a `core.Context` of

@@ -1,4 +1,4 @@
-//! `http.sse.Manager` (design section 12): the subscriptions of this
+//! `http.sse.Manager`: the subscriptions of this
 //! process to SSE streams, by key. A controller keeps a pointer to one;
 //! the route's handler subscribes the request under a key, such as the id
 //! of its user, and any task publishes to every subscriber of a key.
@@ -52,7 +52,7 @@ closing: bool = false,
 /// Set when the last subscription goes after `deinit` has begun.
 emptied: std.Io.Event = .unset,
 
-/// The limits of a manager (design section 15).
+/// The limits of a manager.
 pub const Options = struct {
     /// Subscriptions open at once; over it `subscribe` is
     /// `error.Overloaded`, 503.

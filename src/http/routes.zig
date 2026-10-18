@@ -1,4 +1,4 @@
-//! The routes of a controller (design section 5). A controller declares
+//! The routes of a controller. A controller declares
 //! them in `pub const http_routes = http.routes(.{ ... })`: the entries of
 //! `.methods` name its methods and are made by `http.get`, `post`, `put`,
 //! `patch`, `delete`, `head`, `options` or `http.sse.get`. They are types,

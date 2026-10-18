@@ -1,4 +1,4 @@
-//! The context of one request (design section 6), as `*http.Context`:
+//! The context of one request, as `*http.Context`:
 //! what a handler, a middleware and the error handler see. The request is
 //! `ctx.request`, the response `ctx.response`. Strings it gives live in
 //! the request's arena until the request has ended; to keep one longer,
@@ -270,7 +270,7 @@ fn readWhole(ctx: *Context) BodyError![]const u8 {
 /// ```
 ///
 /// Every input call works in three steps. The strings fill the fields by
-/// their outside names, as the table of design section 7 converts them;
+/// their outside names, as the guide's table in "Input" converts them;
 /// what does not fit is `error.ValidationFailed`, with all its violations
 /// in `ctx.violations()` (`http.invalid_type`, `http.missing_field`,
 /// `http.unknown_field`). Then the transforms of `field_rules` run
@@ -834,7 +834,7 @@ const SignUp = struct {
     };
 };
 
-/// Unknown fields ignored, written as the design writes it.
+/// Unknown fields ignored, by an enum literal: `= .ignore`.
 const LooseSignUp = struct {
     email: []const u8,
     pub const unknown_fields = .ignore;

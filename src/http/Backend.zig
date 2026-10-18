@@ -1,4 +1,4 @@
-//! The backend of a server (design section 14): it owns the connections
+//! The backend of a server: it owns the connections
 //! and the bytes of HTTP/1.1, hands the server parsed requests and takes
 //! their responses. `http.native.Backend` serves the network and
 //! `http.testing.Backend` serves tests from memory; the server sees only

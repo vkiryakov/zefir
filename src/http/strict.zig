@@ -1,4 +1,4 @@
-//! The strict error check (design section 11): at compile time, once per
+//! The strict error check: at compile time, once per
 //! server, the compiler calls the error handler's `mapError` for every
 //! error the application can return to it, and the build stops
 //!

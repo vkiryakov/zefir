@@ -1,4 +1,4 @@
-//! The request of a context (design section 6), as `ctx.request`: its
+//! The request of a context, as `ctx.request`: its
 //! method and path, its headers and cookies as they came, what `Accept`
 //! takes, the client's address and the body as a stream. Strings it
 //! returns live in the request's arena.

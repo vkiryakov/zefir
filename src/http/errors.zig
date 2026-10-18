@@ -1,4 +1,4 @@
-//! Errors and their responses (design section 11): the framework's own
+//! Errors and their responses: the framework's own
 //! errors, `http.Error`, the status, code and title of every error the
 //! framework knows, the form of an error handler (`http.ErrorResponse`,
 //! `.fallback`, `http.ErrorAction`) and `http.Problem`, the body of RFC
@@ -168,7 +168,7 @@ pub fn defaultTitle(err: anyerror) []const u8 {
     };
 }
 
-/// The error handler of a server without `.error_handler` (decision 23):
+/// The error handler of a server without `.error_handler`:
 /// problem+json with the framework's status, code and title, and the
 /// violations of a 422 in `errors`. Every error goes through `.fallback`,
 /// so an error of the application is 500, and the strict error check asks

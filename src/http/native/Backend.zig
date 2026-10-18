@@ -1,4 +1,4 @@
-//! `http.native.Backend` (design sections 14 and 15): the server on the
+//! `http.native.Backend`: the server on the
 //! network, over `std.Io` (zio in production). It listens on an address,
 //! serves each connection on a task of its own and reads its requests one
 //! after another (keep-alive and pipelining), within the limits of
@@ -57,7 +57,7 @@ stopping: std.atomic.Value(bool) = .init(false),
 /// Set by `stopAccepting`: wakes the connections that wait for a request.
 stop_event: std.Io.Event = .unset,
 
-/// The limits of a connection and its requests (design section 15).
+/// The limits of a connection and its requests.
 pub const Limits = struct {
     /// The head of a request: its request line and fields. Over it: 431.
     /// Each connection reads into a buffer of this size.
@@ -73,7 +73,7 @@ pub const Limits = struct {
     max_connections: u32 = 10_000,
 };
 
-/// The times of a connection (design section 15).
+/// The times of a connection.
 pub const Timeouts = struct {
     /// A new connection sends its first byte within it, else it is closed
     /// without an answer; from the first byte, the whole head comes within

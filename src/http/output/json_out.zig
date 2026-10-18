@@ -1,4 +1,4 @@
-//! Values out as JSON (design section 8): the body of `http.Json(T)` and
+//! Values out as JSON: the body of `http.Json(T)` and
 //! of `ctx.response.json`, keys by the outside names of the validator
 //! (`v.nameOf`). A field with `v.rename("userName")` is written as
 //! `userName`; a DTO without `field_rules` keeps its Zig names. `encode`

@@ -1,4 +1,4 @@
-//! Strings into DTOs (design section 7). The parameters of the path, the
+//! Strings into DTOs. The parameters of the path, the
 //! query, a form, the headers and the cookies are names with string
 //! values; the fields of a DTO are typed. Each field is found by its
 //! outside name (`v.rename`, else its Zig name), a field of a DTO of

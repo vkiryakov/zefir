@@ -1,4 +1,4 @@
-//! Static files (design section 13): `http.static(mount, options)` serves
+//! Static files: `http.static(mount, options)` serves
 //! a directory of the disk under a path of the site.
 //!
 //! ```zig
@@ -677,7 +677,7 @@ test "static: .., %2e%2e, %2F, %5C, NUL, an absolute path and hidden files are 4
         try testing.expectEqualStrings("application/problem+json", res.header("content-type").?);
     }
     // A path that is not UTF-8 once decoded is the server's 400 for every
-    // path (design section 5): no file is opened for it.
+    // path: no file is opened for it.
     try testing.expectEqual(400, try f.statusOf("/a%ff.txt"));
     try testing.expectEqual(400, try f.statusOf("/sub/%c3%28"));
 }

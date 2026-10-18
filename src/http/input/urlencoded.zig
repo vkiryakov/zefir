@@ -1,5 +1,5 @@
 //! `application/x-www-form-urlencoded`, the format of query strings and of
-//! forms (design section 7): pairs split on '&' and on the first '=', '+'
+//! forms: pairs split on '&' and on the first '=', '+'
 //! a space, `%HH` the byte HH. Stricter than std's decoder, which turns
 //! `%-0` into NUL: a '%' comes with exactly two hex digits, and every name
 //! and value is valid UTF-8 once decoded; else the request is bad (400).

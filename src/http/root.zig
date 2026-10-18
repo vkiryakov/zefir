@@ -45,7 +45,7 @@ pub const testing = @import("testing.zig");
 
 pub const Json = dto.Json;
 pub const UnknownFields = dto.UnknownFields;
-/// Where a response is (design section 8): `uncommitted`, `committed`
+/// Where a response is: `uncommitted`, `committed`
 /// once its head has gone to the client, then `finished`.
 pub const ResponseState = Context.Response.State;
 /// A violation of the input: a field of the wrong type, missing or unknown

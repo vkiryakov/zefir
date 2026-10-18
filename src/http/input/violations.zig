@@ -1,4 +1,4 @@
-//! The violations of mapping the input into a DTO (design section 7): a
+//! The violations of mapping the input into a DTO: a
 //! value of the wrong type, a field that is missing, a field the DTO does
 //! not have. Like the validator's, they name fields by their outside names
 //! and stop at `v.max_report_violations`; a request with more still gets

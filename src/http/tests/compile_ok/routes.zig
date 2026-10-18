@@ -1,7 +1,7 @@
 //! Must compile: every kind of route and each of its options, declared by
 //! client code and passed to Server.init with a prefix from the config,
-//! every kind of middleware element, and the error handler of design
-//! section 11, which maps the error of `create`.
+//! every kind of middleware element, and an error handler with `mapError`
+//! and `handle`, which maps the error of `create`.
 const std = @import("std");
 const http = @import("http");
 

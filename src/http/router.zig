@@ -1,4 +1,4 @@
-//! The router (design section 5): the routes of all controllers in one
+//! The router: the routes of all controllers in one
 //! trie of path segments, built at compile time. A pattern is literal
 //! segments, `{name}` (one segment) and `{*name}` (the rest of the path,
 //! one segment or more, last only). Two routes of one method whose

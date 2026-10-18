@@ -1,4 +1,4 @@
-//! `http.Server` (design section 4): one type for every application.
+//! `http.Server`: one type for every application.
 //! `init` does the compile-time work over its options (plan.zig): it reads
 //! the routes of the controllers, checks them and builds the router's trie;
 //! at run time it copies the server's prefix and keeps the table of routes.
@@ -140,10 +140,9 @@ pub const StartError = Backend.StartError || error{ InvalidState, UnsupportedByB
 pub const WaitError = error{InvalidState} || std.Io.Cancelable;
 pub const ShutdownError = error{ShutdownTimeout} || WaitError;
 
-/// From whom to believe `X-Forwarded-For` and `Forwarded` (design section
-/// 16): everybody, loopback and private networks, nobody, or a list of
-/// CIDR blocks, such as `.{ .list = &.{"10.1.0.0/16"} }`, which `init`
-/// copies and checks.
+/// From whom to believe `X-Forwarded-For` and `Forwarded`: everybody,
+/// loopback and private networks, nobody, or a list of CIDR blocks, such
+/// as `.{ .list = &.{"10.1.0.0/16"} }`, which `init` copies and checks.
 pub const TrustedProxies = proxies.TrustedProxies;
 
 /// Unknown fields of the input: those of a JSON or form body are refused,
@@ -158,8 +157,8 @@ pub const JsonOptions = struct {
     max_depth: u16 = 64,
 };
 
-/// The options of `init` as the server keeps them, with the defaults of
-/// design section 4. Durations are `std.Io.Duration`.
+/// The options of `init` as the server keeps them, with their defaults.
+/// Durations are `std.Io.Duration`.
 pub const Settings = struct {
     unknown_fields: UnknownFieldsOptions = .{},
     json: JsonOptions = .{},
@@ -212,7 +211,7 @@ const Needs = struct {
     static_mounts: usize = 0,
 };
 
-/// Builds a server from `options`, a struct literal (design section 4):
+/// Builds a server from `options`, a struct literal:
 /// `.backend` and `.controllers` (a tuple of pointers to controllers, at
 /// least one), and optionally `.prefix` (before the routes of the
 /// controllers, such as "/api"), `.middleware`, `.error_handler`,
@@ -232,7 +231,7 @@ const Needs = struct {
 /// element; the objects it points to are borrowed.
 ///
 /// `.error_handler = &app_errors` turns every error into its response
-/// (`mapError`, then `handle`; design section 11); without it errors go
+/// (`mapError`, then `handle`); without it errors go
 /// out as problem+json. The strict error check runs here, at compile time:
 /// an error of the application that the error handler gives 500 through
 /// `.fallback`, or that no error handler maps, fails the build, as does a

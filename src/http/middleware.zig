@@ -1,4 +1,4 @@
-//! Middleware (design section 9): the mechanism, and not one middleware of
+//! Middleware: the mechanism, and not one middleware of
 //! its own. An application writes its middleware and lists them in
 //! `.middleware`: of the server (global), of `http.routes` (a controller)
 //! and of a route (a method). Every phase runs in that order, global, then
@@ -1391,9 +1391,9 @@ test "in-flight slots come back after .handled, a failing run and a failing onFi
     try testing.expectEqual(0, inFlight(&server));
 }
 
-/// The middleware of the application of design section 9, as far as the
-/// chain of `DELETE /api/v1/todos/{id}` goes; each phase writes its name
-/// into the journal.
+/// The middleware of the guide's example app, as far as the chain of
+/// `DELETE /api/v1/todos/{id}` goes; each phase writes its name into the
+/// journal.
 const sketch = struct {
     const CurrentUser = struct {
         permissions: []const []const u8,
@@ -1514,7 +1514,7 @@ test "the chain of DELETE /v1/todos/{id} for the sketch's options" {
         .middleware = .{ sketch.requestId, &access_log, &timing, onResponse(sketch.securityHeaders), &maintenance, &cors, &jwt_auth },
     };
 
-    // The order of design section 9, at compile time.
+    // The order of the guide's chapter "Middleware", at compile time.
     const names = comptime chainNames(@TypeOf(options), .DELETE, "/v1/todos/{id}");
     const want = [_][]const u8{
         "requestId",           "AccessLog",                "ServerTiming",                    "onResponse(securityHeaders)",

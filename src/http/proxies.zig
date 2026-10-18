@@ -1,4 +1,4 @@
-//! The client behind proxies (design sections 16 and 17). `.trusted_proxies`
+//! The client behind proxies. `.trusted_proxies`
 //! says which peers the server believes when they name the client in
 //! `X-Forwarded-For` or `Forwarded` (RFC 7239), and whose `X-Request-Id`
 //! it takes: everybody (`.all`, the default), loopback and private networks

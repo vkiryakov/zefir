@@ -1,4 +1,4 @@
-//! The identity of a request (design section 17): its id, and its trace,
+//! The identity of a request: its id, and its trace,
 //! continued from the client's `traceparent` or new.
 const std = @import("std");
 const core = @import("core");

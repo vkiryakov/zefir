@@ -1,4 +1,4 @@
-//! One request through the server (design sections 5, 8, 11, 14 and 17),
+//! One request through the server,
 //! on the task the backend runs it on, the connection's. The request gets
 //! its context: its trace and id, its deadline (the route's `.timeout`, or
 //! the server's `.request_timeout`) and a cancelation token of its own.
@@ -178,7 +178,8 @@ pub fn serve(server: *Server, io: std.Io, exchange: *Exchange) void {
     };
     var canceled = false;
     var reason = firstOf(&race, io, deadline, &canceled);
-    // A deadline leaves the token alone (design section 17).
+    // A deadline leaves the token alone: past it, the context's own
+    // deadline says so.
     if (reason == .client_gone or reason == .shutdown) token.cancel();
     // Cancels the other task and waits for both: from here on, only this
     // task touches the context.
@@ -231,7 +232,7 @@ pub fn serve(server: *Server, io: std.Io, exchange: *Exchange) void {
 }
 
 /// The `onFinish` phases of the middleware the request reached, once it
-/// has ended (design sections 9 and 17): on a task of their own, which
+/// has ended: on a task of their own, which
 /// `.finish_timeout` cancels, with a context of their own: the request's
 /// trace, no token of the request, the deadline `.finish_timeout` away. A
 /// stop of the server does not cut them short: this task waits for them
@@ -344,7 +345,7 @@ fn unlistStream(server: *Server, io: std.Io, sub: *Subscription) void {
     sub.listed = false;
 }
 
-/// The rest of a request whose handler subscribed (design section 12): its
+/// The rest of a request whose handler subscribed: its
 /// stream, served from this task, which keeps the connection for it. The
 /// writer and the watcher of the stream run on tasks of their own; this one
 /// waits until the end is decided (the client left, a write failed,
@@ -592,7 +593,7 @@ fn runRequest(server: *Server, ctx: *Context, found: Found) anyerror!void {
 
 /// The response to `result`: what the handler wrote, or the answer to its
 /// error; none for a request canceled. A response is written once: after
-/// its head has gone out, an error can only cut it (design section 8).
+/// its head has gone out, an error can only cut it.
 fn respond(ctx: *Context, exchange: *Exchange, result: anyerror!void) void {
     switch (ctx.response.internal.state) {
         .uncommitted => {},
@@ -638,7 +639,7 @@ pub const ErrorHandler = struct {
     /// cut the response that `handle` began and did not finish.
     pub const Next = enum { send, finish, cut };
 
-    /// The handler of a server without `.error_handler` (decision 23).
+    /// The handler of a server without `.error_handler`.
     pub const default: ErrorHandler = .of(errors.DefaultErrors, &default_errors);
 
     /// `object`, an error handler of type `H` that `plan.zig` checked.
@@ -654,7 +655,7 @@ var default_errors: errors.DefaultErrors = .{};
 const internal_line = "{s} failed with error.{t}; the response is 500 (request {s})";
 
 /// The answer to `err`: what the error handler makes of it, in place of
-/// what the handler wrote (design section 11).
+/// what the handler wrote.
 fn answerError(ctx: *Context, exchange: *Exchange, err: anyerror) void {
     const errors_of = ctx.internal.error_handler;
     switch (errors_of.answer(errors_of.object, ctx, err)) {
@@ -719,8 +720,8 @@ fn clearResponse(res: *Context.Response.Internal) void {
 }
 
 /// `reply` as the response: its status, and its body as JSON through the
-/// transforms and with the outside names of its `field_rules` (design
-/// section 8), as `application/problem+json` for `http.Problem`, else as
+/// transforms and with the outside names of its `field_rules`, as
+/// `application/problem+json` for `http.Problem`, else as
 /// `application/json`. A body that does not transform, or a status that is
 /// not final, is logged, and the answer is the framework's problem+json
 /// 500.
@@ -753,7 +754,7 @@ fn answerOptions(ctx: *Context, allow: Allow) Context.Response.SetError!void {
     _ = ctx.response.status(204);
 }
 
-/// The answer to a body that did not arrive whole (decision 21): 408 when
+/// The answer to a body that did not arrive whole: 408 when
 /// it stalled past the backend's body timeout, 400 when its framing broke;
 /// its reason as short text, the fields of the content gone and the others
 /// kept, as `setProblem` does. The backend closes the connection after it.
@@ -1547,7 +1548,7 @@ test "a response is written once; after commit an error cuts it" {
     respond(&ended_ctx, &ended.exchange, {});
     try ended.expect(0, 1, 0);
     // A body that failed once the head had gone out: cut, never the 408
-    // of decision 21 after a head of its own.
+    // or 400 of a body that did not arrive, after a head of its own.
     var late_body: CountingExchange = .init();
     var late_body_ctx = late_body.context(arena);
     late_body_ctx.response.internal.state = .committed;
@@ -1570,7 +1571,7 @@ fn notedResponse(_: ?*anyopaque, ctx: *Context) anyerror!void {
 }
 
 test "the answer to a body that did not arrive goes through the onResponse phases" {
-    // Decision 21: the server's 408 or 400, after phases as for any answer.
+    // The server's 408 or 400, after phases as for any answer.
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
     var stalled: CountingExchange = .init();
