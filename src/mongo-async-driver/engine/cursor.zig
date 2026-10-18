@@ -251,7 +251,12 @@ pub const Cursor = struct {
                 c.end(io, null);
                 return violation(d, "the namespace '{s}' of the cursor has no collection", .{more.ns});
             }
-            break :ns try r.gpa.dupe(u8, more.ns);
+            // The server has moved on past this batch: without it the
+            // cursor cannot go on.
+            break :ns r.gpa.dupe(u8, more.ns) catch {
+                c.end(io, null);
+                return error.OutOfMemory;
+            };
         };
         const reg = r.cursors;
         var stale: ?[]u8 = null;
