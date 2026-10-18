@@ -18,10 +18,11 @@ const handshake = @import("handshake.zig");
 const race = @import("race.zig");
 
 /// The errors of `open`: those of the attempt, which leave the details in
-/// the diagnostics, and `Timeout` when the deadline came first,
-/// `Canceled` when the caller's task was canceled or the attempt stopped,
-/// `ConcurrencyUnavailable` when the attempt found no task to run in.
-pub const OpenError = error{ Unavailable, Unsupported, AuthenticationFailed, OutOfMemory, Canceled, Timeout, ConcurrencyUnavailable };
+/// the diagnostics; `Timeout` when the deadline came first; `Canceled`
+/// when the caller's task was canceled, which stays canceled; `Stopped`
+/// when another task stopped the attempt; `ConcurrencyUnavailable` when
+/// the attempt found no task to run in.
+pub const OpenError = error{ Unavailable, Unsupported, AuthenticationFailed, OutOfMemory, Canceled, Stopped, Timeout, ConcurrencyUnavailable };
 
 /// Opens a connection to `address` and runs the handshake of `setup` on
 /// it, all of it before `deadline`, in a task of its own; null: no limit,
@@ -45,18 +46,21 @@ pub fn open(io: Io, gpa: Allocator, address: Connection.Address, setup: *const h
     };
 }
 
+const AttemptError = handshake.Error || error{Stopped};
+
 /// The attempt in the task that runs it. A stopped attempt ends with
-/// `error.Canceled`, whatever its socket said: a socket that its own side
+/// `error.Stopped`, whatever its socket said: a socket that its own side
 /// shut down ends the stream on most systems, and answers
-/// `error.Unexpected` on Windows.
-fn openNow(io: Io, gpa: Allocator, address: Connection.Address, setup: *const handshake.Setup, attempt: *Attempt, d: *Diagnostics) handshake.Error!*Connection {
+/// `error.Unexpected` on Windows. The task's own cancelation stays what it
+/// is, so that the task keeps it.
+fn openNow(io: Io, gpa: Allocator, address: Connection.Address, setup: *const handshake.Setup, attempt: *Attempt, d: *Diagnostics) AttemptError!*Connection {
     return openUnlessStopped(io, gpa, address, setup, attempt, d) catch |err| {
-        if (attempt.isStopped(io)) return error.Canceled;
+        if (err != error.Canceled and attempt.isStopped(io)) return error.Stopped;
         return err;
     };
 }
 
-fn openUnlessStopped(io: Io, gpa: Allocator, address: Connection.Address, setup: *const handshake.Setup, attempt: *Attempt, d: *Diagnostics) handshake.Error!*Connection {
+fn openUnlessStopped(io: Io, gpa: Allocator, address: Connection.Address, setup: *const handshake.Setup, attempt: *Attempt, d: *Diagnostics) AttemptError!*Connection {
     const stream = dial(io, address) catch |err| switch (err) {
         error.Canceled => return error.Canceled,
         else => {
@@ -67,7 +71,7 @@ fn openUnlessStopped(io: Io, gpa: Allocator, address: Connection.Address, setup:
     };
     if (!attempt.hold(io, stream)) {
         stream.close(io);
-        return error.Canceled;
+        return error.Stopped;
     }
     defer attempt.release(io);
     const conn = Connection.create(gpa, io, stream, address) catch {
@@ -195,7 +199,7 @@ test "dial reaches a listener by IP address and by name, and a closed port refus
     try testing.expectError(error.ConnectionRefused, dial(io, .{ .host = "127.0.0.1", .port = port }));
 }
 
-test "an attempt stopped during hello is Canceled, whatever its socket says, and one stopped before it has a socket keeps none" {
+test "an attempt stopped during hello is Stopped, whatever its socket says, and one stopped before it has a socket keeps none" {
     var windows: WindowsLike = undefined;
     for ([_]Io{ testing.io, windows.io() }) |io| {
         try within5s(testing.io, stopInHello, .{io});
@@ -233,7 +237,7 @@ fn stopInHello(io: Io) !void {
     const opened = opening.await(io);
     if (opened) |conn| conn.destroy() else |_| {}
     try waited;
-    try testing.expectError(error.Canceled, opened);
+    try testing.expectError(error.Stopped, opened);
 }
 
 /// Accepts one client and reads until it goes.
@@ -258,6 +262,6 @@ fn stopBeforeSocket(io: Io) !void {
     // It dials, closes the socket it got and sends nothing.
     const opened = openNow(io, testing.allocator, .{ .host = "127.0.0.1", .port = FakeServer.port(&listener) }, &setup, &attempt, &d);
     if (opened) |conn| conn.destroy() else |_| {}
-    try testing.expectError(error.Canceled, opened);
+    try testing.expectError(error.Stopped, opened);
     try server.await(testing.io);
 }

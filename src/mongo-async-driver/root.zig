@@ -32,4 +32,5 @@ test {
     _ = @import("testing/handshake_tests.zig");
     _ = @import("testing/auth_tests.zig");
     _ = @import("testing/pool_tests.zig");
+    _ = @import("testing/lifecycle_tests.zig");
 }

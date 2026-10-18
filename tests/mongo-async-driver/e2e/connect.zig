@@ -29,7 +29,7 @@ fn connected(io: Io, driver: *native.Client, uri_buffer: []u8, port: u16) !void 
     };
 }
 
-test "the native driver connects to mongo-plain, pings it and runs commands from many tasks" {
+test "the native driver connects to mongo-plain, pings it and runs commands from many tasks on its pool" {
     try e2e.onZio(connectAndPing);
 }
 
@@ -55,13 +55,16 @@ fn connectAndPing(io: Io) !void {
     try testing.expectError(error.CommandFailed, c.runCommand(io, .of(.root), .{ .database = "admin", .body = bson.literal(.{ .zefirNoSuchCommand = 1 }) }, .{ .allocator = testing.allocator, .diagnostics = &d }));
     try testing.expectEqual(@as(i32, 59), d.server.?.code);
 
-    // Tasks take turns on the one connection.
+    // The pool opens connections as the tasks need them, and keeps them.
     var group: Io.Group = .init;
     var failures: std.atomic.Value(u32) = .init(0);
     for (0..16) |_| group.concurrent(io, pingCounted, .{ io, c, &failures }) catch try pingOnce(io, c);
     try group.await(io);
     try testing.expectEqual(@as(u32, 0), failures.load(.acquire));
-    try testing.expectEqual(@as(usize, 1), driver.stats().connections);
+    const stats = driver.stats();
+    try testing.expect(stats.connections >= 1 and stats.connections <= 16);
+    try testing.expectEqual(stats.connections, stats.idle);
+    try testing.expectEqual(@as(usize, 0), stats.waiting + stats.opening);
 }
 
 fn pingCounted(io: Io, c: mongo.Client, failures: *std.atomic.Value(u32)) void {

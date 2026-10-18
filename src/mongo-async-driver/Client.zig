@@ -17,10 +17,23 @@
 //! const db: mongo.Database = .init(driver.client(), "app", &ids);
 //! ```
 //!
-//! Calls come from any task, one at a time on the connection; a connection
-//! that breaks is opened again by the next call. Every new connection
-//! authenticates as the user of the connection string, by SCRAM-SHA-256
-//! or SCRAM-SHA-1. After `connect` the client must stay where it is.
+//! Calls come from any task. Each takes a connection of the pool for its
+//! exchange and gives it back: up to `maxPoolSize` connections, opened as
+//! calls need them, `maxConnecting` at once, and calls that find none wait
+//! in line, first come first served, within their deadline and
+//! `serverSelectionTimeoutMS` (`error.PoolExhausted`). Every new
+//! connection authenticates as the user of the connection string, by
+//! SCRAM-SHA-256 or SCRAM-SHA-1.
+//!
+//! A network error on a connection, a failed authentication or a server
+//! shutting down (codes 11600 and 91) clears the pool: its connections are
+//! closed, and calls get `error.Unavailable` until one, at most every
+//! 500 ms, opens a new connection. A timeout closes only its own
+//! connection. A network error while a connection opens clears nothing;
+//! its `Diagnostics.server` holds the labels SystemOverloadedError and
+//! RetryableError, code 0, unless the host name is to blame.
+//!
+//! After `connect` the client must stay where it is.
 
 const std = @import("std");
 const Io = std.Io;
@@ -35,6 +48,7 @@ const Options = @import("Options.zig");
 const OwnedOptions = @import("OwnedOptions.zig");
 const Stats = @import("Stats.zig");
 const Connection = @import("engine/Connection.zig");
+const Pool = @import("engine/Pool.zig");
 const connect_ = @import("engine/connect.zig");
 const handshake = @import("engine/handshake.zig");
 const KeyCache = @import("engine/KeyCache.zig");
@@ -50,20 +64,9 @@ options: OwnedOptions,
 metadata: bson.OwnedDocument,
 /// The keys of SCRAM, so that PBKDF2 runs for the first connection only.
 keys: KeyCache = .{},
-/// One call at a time on the connection, and on its opening.
-exchange_mutex: Io.Mutex = .init,
-/// Guards what follows, which `close` and `stats` read from other tasks.
-state_mutex: Io.Mutex = .init,
-state: State = .initialized,
-conn: ?*Connection = null,
-/// The opening in progress, for `close` to stop.
-attempt: ?*connect_.Attempt = null,
-in_use: bool = false,
-waiting: usize = 0,
+pool: Pool,
 /// What the latest hello said, for `capabilities`, which takes no `io`.
 server: Server = .{},
-
-pub const State = enum { initialized, ready, closed };
 
 pub const InitError = error{ InvalidArgument, Unsupported, OutOfMemory };
 
@@ -76,12 +79,27 @@ pub fn init(gpa: Allocator, io: Io, options: Options) InitError!Client {
     // the server picks is checked when it picks it.
     if (owned.credentials()) |c| if (c.mechanism) |mechanism| try scram.checkPassword(mechanism, c.password, null, d);
     const metadata = try handshake.metadata(gpa, owned.uri.app_name, d);
-    return .{ .gpa = gpa, .io = io, .options = owned, .metadata = metadata };
+    const uri = &owned.uri;
+    return .{
+        .gpa = gpa,
+        .io = io,
+        .options = owned,
+        .metadata = metadata,
+        // The host is in the copy of the strings, which does not move.
+        .pool = .init(.{
+            .server = .{ .host = uri.host, .port = uri.port },
+            .max_size = uri.max_pool_size,
+            .max_connecting = uri.max_connecting,
+            .max_idle_time = uri.max_idle_time,
+        }),
+    };
 }
 
-/// Closes the client, if `close` has not, and frees it.
+/// Closes the client, if `close` has not, and frees it: the copies of the
+/// connection string and the password, and the keys of SCRAM, wiped.
 pub fn deinit(self: *Client) void {
     self.close(self.io);
+    self.pool.deinit();
     self.keys.deinit();
     self.metadata.deinit();
     self.options.deinit(self.gpa);
@@ -101,58 +119,34 @@ pub fn client(self: *Client) mongo.Client {
 pub fn connect(self: *Client, io: Io, ctx: core.Context, diagnostics: ?*Diagnostics) mongo.Error!void {
     const d = diagnostics;
     if (d) |x| x.* = .{};
-    if (self.isClosed(io)) return fail(d, null, error.Closed, "the client is closed", .{});
-    try self.lockExchange(io, d);
-    defer self.unlockExchange(io);
-    if (self.isClosed(io)) return fail(d, .checkout, error.Closed, "the client was closed while connect() waited", .{});
-    if (self.conn != null) return;
+    try self.pool.enter(io, d);
+    defer self.pool.leave(io);
+    if (self.pool.isConnected(io)) return;
     try checkBeforeSend(io, .of(ctx), ctx.deadline, d);
-    _ = try self.open(io, ctx.deadline, d);
-    self.state_mutex.lockUncancelable(io);
-    defer self.state_mutex.unlock(io);
-    if (self.state == .initialized) self.state = .ready;
+    try self.pool.connect(io, self.opener(), self.limits(io, ctx.deadline), d);
 }
 
-/// Ends the client's work: new calls, and those that wait for the
-/// connection, get `error.Closed`; the call in flight ends with
-/// `error.ConnectionLost`, and an opening in progress stops. A second call
-/// does nothing. The task's cancelation waits until it returns.
+/// Ends the client's work, in the order of the contract: new calls, and
+/// those waiting for a connection, get `error.Closed`; connections being
+/// opened stop; the calls in flight get up to `close_timeout` to end, and
+/// after it their exchanges are cut (`error.ConnectionLost`); then the
+/// connections close. A second call returns once the first is done. The
+/// task's cancelation waits until it returns.
 pub fn close(self: *Client, io: Io) void {
-    const protection = io.swapCancelProtection(.blocked);
-    defer _ = io.swapCancelProtection(protection);
-    self.state_mutex.lockUncancelable(io);
-    if (self.state == .closed) {
-        self.state_mutex.unlock(io);
-        return;
-    }
-    self.state = .closed;
-    if (self.attempt) |a| a.stop(io);
-    if (self.conn) |c| c.cut(io);
-    self.state_mutex.unlock(io);
-    // After the call in flight.
-    self.exchange_mutex.lockUncancelable(io);
-    defer self.exchange_mutex.unlock(io);
-    self.state_mutex.lockUncancelable(io);
-    const conn = self.conn;
-    self.conn = null;
-    self.state_mutex.unlock(io);
-    if (conn) |c| c.destroy();
+    self.pool.close(io, self.options.close_timeout);
 }
 
 /// A snapshot of the connections and the calls waiting for them.
 pub fn stats(self: *Client) Stats {
-    self.state_mutex.lockUncancelable(self.io);
-    defer self.state_mutex.unlock(self.io);
-    const connected = @intFromBool(self.conn != null);
-    const in_use = @intFromBool(self.conn != null and self.in_use);
+    const counts = self.pool.counts(self.io);
     return .{
-        .connections = connected,
-        .idle = connected - in_use,
-        .in_use = in_use,
-        .opening = @intFromBool(self.attempt != null),
-        .waiting = self.waiting,
-        .generation = 0,
-        .clears = 0,
+        .connections = counts.idle + counts.in_use,
+        .idle = counts.idle,
+        .in_use = counts.in_use,
+        .opening = counts.opening,
+        .waiting = counts.waiting,
+        .generation = counts.generation,
+        .clears = counts.clears,
         .open_cursors = 0,
     };
 }
@@ -168,14 +162,20 @@ pub fn capabilities(self: *Client) mongo.Capabilities {
 
 pub fn runCommand(self: *Client, io: Io, op: OperationContext, command: *const mongo.Command, options: mongo.CommandOptions) mongo.Error!bson.OwnedDocument {
     const d = options.diagnostics;
+    try self.pool.enter(io, d);
+    defer self.pool.leave(io);
     const deadline = self.deadlineOf(io, op);
-    const conn = try self.acquire(io, op, deadline, d);
-    defer self.unlockExchange(io);
+    const entry = try self.pool.checkOut(io, self.opener(), self.limits(io, deadline), d);
+    var after: Pool.After = .ok;
+    defer self.pool.checkIn(io, entry, after);
+    try checkBeforeSend(io, op, deadline, d);
+    const conn = Connection.of(entry);
     const reply = conn.exchange(.{ .database = command.database, .body = command.body }, options.allocator, deadline, d) catch |err| {
-        if (err == error.ConnectionLost and self.isClosed(io)) return fail(d, .wait, error.ConnectionLost, "close() of the client cut the exchange", .{});
+        after = afterExchange(conn, err, d);
         return err;
     };
     wire.checkReply(reply.raw(), options.allocator, d, options.failure_reply) catch |err| {
+        after = afterRefusal(reply.raw());
         reply.deinit();
         return err;
     };
@@ -192,6 +192,26 @@ pub fn write(self: *Client, io: Io, op: OperationContext, request: *const mongo.
     return fail(options.diagnostics, null, error.Unsupported, "this version of zefir-mongo-async-driver runs commands only, without batched writes", .{});
 }
 
+/// What an exchange that failed leaves of its connection: a network error
+/// on it clears the pool, since the others are likely gone too; a cut is
+/// `close`'s; a timeout, a cancelation or a broken reply close only it.
+fn afterExchange(conn: *Connection, err: mongo.Error, d: ?*Diagnostics) Pool.After {
+    if (err != error.ConnectionLost) return if (conn.usable) .ok else .broken;
+    const cause = conn.stream.err orelse return .{ .clear = "a connection to it broke" };
+    if (cause != error.Stopped) return .{ .clear = "a connection to it broke" };
+    if (d) |x| x.set(.wait, null, "close() of the client cut the exchange", .{});
+    return .broken;
+}
+
+/// What a reply with ok 0 leaves: a server shutting down clears the pool.
+fn afterRefusal(reply: bson.RawDocument) Pool.After {
+    return switch (mongo.ServerError.fromReply(reply).code) {
+        11600 => .{ .clear = "it answered InterruptedAtShutdown (11600)" },
+        91 => .{ .clear = "it answered ShutdownInProgress (91)" },
+        else => .ok,
+    };
+}
+
 /// The deadline of a call: its context's, else `timeoutMS` from now.
 fn deadlineOf(self: *const Client, io: Io, op: OperationContext) ?core.Deadline {
     if (op.ctx.deadline) |deadline| return deadline;
@@ -199,56 +219,9 @@ fn deadlineOf(self: *const Client, io: Io, op: OperationContext) ?core.Deadline 
     return .after(time.now(io), timeout);
 }
 
-fn isClosed(self: *Client, io: Io) bool {
-    self.state_mutex.lockUncancelable(io);
-    defer self.state_mutex.unlock(io);
-    return self.state == .closed;
-}
-
-/// Takes the connection for one call, opening it when there is none.
-/// `unlockExchange` gives it back.
-fn acquire(self: *Client, io: Io, op: OperationContext, deadline: ?core.Deadline, d: ?*Diagnostics) mongo.Error!*Connection {
-    self.state_mutex.lockUncancelable(io);
-    const state = self.state;
-    self.state_mutex.unlock(io);
-    switch (state) {
-        .initialized => return fail(d, .checkout, error.Unavailable, "connect() has not succeeded", .{}),
-        .closed => return fail(d, .checkout, error.Closed, "the client is closed", .{}),
-        .ready => {},
-    }
-    try self.lockExchange(io, d);
-    errdefer self.unlockExchange(io);
-    if (self.isClosed(io)) return fail(d, .checkout, error.Closed, "the client was closed while the call waited for the connection", .{});
-    try checkBeforeSend(io, op, deadline, d);
-    return self.conn orelse try self.open(io, deadline, d);
-}
-
-fn lockExchange(self: *Client, io: Io, d: ?*Diagnostics) mongo.Error!void {
-    self.state_mutex.lockUncancelable(io);
-    self.waiting += 1;
-    self.state_mutex.unlock(io);
-    const locked = self.exchange_mutex.lock(io);
-    self.state_mutex.lockUncancelable(io);
-    self.waiting -= 1;
-    if (locked) |_| self.in_use = true else |_| {}
-    self.state_mutex.unlock(io);
-    locked catch {
-        io.recancel();
-        return fail(d, .checkout, error.Cancelled, "the task was canceled while it waited for the connection", .{});
-    };
-}
-
-/// Gives the connection back, and closes it when its exchange left it
-/// unusable.
-fn unlockExchange(self: *Client, io: Io) void {
-    self.state_mutex.lockUncancelable(io);
-    self.in_use = false;
-    const broken = if (self.conn) |c| !c.usable else false;
-    const conn = self.conn;
-    if (broken) self.conn = null;
-    self.state_mutex.unlock(io);
-    if (broken) conn.?.destroy();
-    self.exchange_mutex.unlock(io);
+/// The budget of a call that starts now with `deadline`.
+fn limits(self: *const Client, io: Io, deadline: ?core.Deadline) Pool.Limits {
+    return .{ .deadline = deadline, .checkout = .after(time.now(io), self.options.uri.server_selection_timeout) };
 }
 
 /// The context before a command goes out: less than 1 ms left of the
@@ -264,57 +237,69 @@ fn checkBeforeSend(io: Io, op: OperationContext, deadline: ?core.Deadline, d: ?*
     };
 }
 
-/// Opens a connection for the holder of `exchange_mutex`, within
-/// `connectTimeoutMS` or the deadline, whichever comes first.
-fn open(self: *Client, io: Io, deadline: ?core.Deadline, d: ?*Diagnostics) mongo.Error!*Connection {
+fn opener(self: *Client) Pool.Opener {
+    return .{ .context = self, .open = openForPool };
+}
+
+fn openForPool(context: *anyopaque, io: Io, call: Pool.Limits, attempt: *connect_.Attempt, d: ?*Diagnostics) mongo.Error!*Pool.Entry {
+    const self: *Client = @ptrCast(@alignCast(context));
+    const conn = try self.open(io, call, attempt, d);
+    return &conn.pooled;
+}
+
+/// What ends the opening of a connection first.
+const Budget = enum { deadline, connect_timeout, server_selection };
+
+/// Opens a connection for the pool, within `connectTimeoutMS`, the
+/// deadline of the call and `serverSelectionTimeoutMS`, whichever ends
+/// first.
+fn open(self: *Client, io: Io, call: Pool.Limits, attempt: *connect_.Attempt, d: ?*Diagnostics) mongo.Error!*Connection {
     const uri = &self.options.uri;
     const address: Connection.Address = .{ .host = uri.host, .port = uri.port };
-    var budget: ?core.Deadline = if (uri.connect_timeout) |t| .after(time.now(io), t) else null;
-    var by_deadline = false;
-    if (deadline) |dl| if (budget == null or dl.expires.nanoseconds <= budget.?.expires.nanoseconds) {
-        budget = dl;
-        by_deadline = true;
+    var budget = call.checkout;
+    var by: Budget = .server_selection;
+    if (uri.connect_timeout) |timeout| {
+        const limit: core.Deadline = .after(time.now(io), timeout);
+        if (limit.expires.nanoseconds < budget.expires.nanoseconds) {
+            budget = limit;
+            by = .connect_timeout;
+        }
+    }
+    if (call.deadline) |deadline| if (deadline.expires.nanoseconds <= budget.expires.nanoseconds) {
+        budget = deadline;
+        by = .deadline;
     };
     const setup: handshake.Setup = .{
         .metadata = self.metadata.raw(),
         .auth = if (self.options.credentials()) |c| .{ .credentials = c, .keys = &self.keys } else null,
     };
-    var attempt: connect_.Attempt = .{};
-    self.state_mutex.lockUncancelable(io);
-    self.attempt = &attempt;
-    self.state_mutex.unlock(io);
-    const opened = connect_.open(io, self.gpa, address, &setup, budget, &attempt, d);
-    self.state_mutex.lockUncancelable(io);
-    self.attempt = null;
-    const closed = self.state == .closed;
-    if (!closed) if (opened) |conn| {
-        self.conn = conn;
-    } else |_| {};
-    self.state_mutex.unlock(io);
-    const conn = opened catch |err| {
-        if (closed) return fail(d, .connect, error.Closed, "the client was closed while it connected", .{});
-        return switch (err) {
-            error.Unavailable, error.Unsupported, error.AuthenticationFailed, error.OutOfMemory => |e| e,
-            error.Timeout => if (by_deadline)
-                fail(d, .connect, error.DeadlineExceeded, "the deadline passed while the client connected to {f}", .{address})
-            else
-                fail(d, .connect, error.Unavailable, "{f} did not answer within connectTimeoutMS ({d} ms)", .{ address, uri.connect_timeout.?.toMilliseconds() }),
-            error.Canceled => {
-                io.recancel();
-                return fail(d, .connect, error.Cancelled, "the task was canceled while the client connected to {f}", .{address});
-            },
-            error.ConcurrencyUnavailable => {
-                if (d) |x| x.set(.connect, err, "no task to connect to {f} in: the std.Io has no room for one", .{address});
-                return error.Unavailable;
-            },
-        };
+    const conn = connect_.open(io, self.gpa, address, &setup, budget, attempt, d) catch |err| return switch (err) {
+        error.Unavailable, error.Unsupported, error.AuthenticationFailed, error.OutOfMemory => |e| e,
+        error.Timeout => switch (by) {
+            .deadline => fail(d, .connect, error.DeadlineExceeded, "the deadline passed while the client connected to {f}", .{address}),
+            .connect_timeout => overloaded(d, "{f} did not answer within connectTimeoutMS ({d} ms)", .{ address, uri.connect_timeout.?.toMilliseconds() }),
+            .server_selection => overloaded(d, "{f} did not answer within serverSelectionTimeoutMS ({d} ms)", .{ address, uri.server_selection_timeout.toMilliseconds() }),
+        },
+        error.Canceled => {
+            io.recancel();
+            return fail(d, .connect, error.Cancelled, "the task was canceled while the client connected to {f}", .{address});
+        },
+        error.Stopped => fail(d, .connect, error.Closed, "the client was closed while it connected", .{}),
+        error.ConcurrencyUnavailable => {
+            if (d) |x| x.set(.connect, err, "no task to connect to {f} in: the std.Io has no room for one", .{address});
+            return error.Unavailable;
+        },
     };
-    if (closed) {
-        conn.destroy();
-        return fail(d, .connect, error.Closed, "the client was closed while it connected", .{});
-    }
     self.server.store(conn.hello);
     return conn;
+}
+
+/// `error.Unavailable` of a connection that did not open in time, with the
+/// labels of overload.
+fn overloaded(d: ?*Diagnostics, comptime fmt: []const u8, args: anytype) mongo.Error {
+    if (d) |x| x.set(.connect, null, fmt, args);
+    handshake.markOverloaded(d);
+    return error.Unavailable;
 }
 
 fn fail(d: ?*Diagnostics, phase: ?Diagnostics.Phase, err: mongo.Error, comptime fmt: []const u8, args: anytype) mongo.Error {

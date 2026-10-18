@@ -3,7 +3,7 @@
 //! and its reply, under the deadline of the exchange. A connection that
 //! broke the protocol, timed out, lost its stream, was cut or was
 //! canceled in the middle of an exchange is no longer `usable`: its owner
-//! destroys it.
+//! destroys it. The pool keeps it through its `pooled` entry.
 
 const std = @import("std");
 const Io = std.Io;
@@ -16,6 +16,7 @@ const wire = mongo.wire;
 const opmsg = wire.opmsg;
 const Diagnostics = mongo.Diagnostics;
 const DeadlineStream = @import("DeadlineStream.zig");
+const Pool = @import("Pool.zig");
 const Connection = @This();
 
 gpa: Allocator,
@@ -32,6 +33,8 @@ rtt: ?Io.Duration = null,
 next_id: i32 = 1,
 /// False after an exchange that left the stream unusable.
 usable: bool = true,
+/// The pool's part of the connection.
+pooled: Pool.Entry = .{ .hooks = &pool_hooks },
 read_buffer: [buffer_len]u8,
 write_buffer: [buffer_len]u8,
 
@@ -62,6 +65,21 @@ pub fn create(gpa: Allocator, io: Io, stream: net.Stream, address: Address) Allo
 pub fn destroy(conn: *Connection) void {
     conn.stream.stream.close(conn.stream.io);
     conn.gpa.destroy(conn);
+}
+
+/// The connection of a pool's entry.
+pub fn of(entry: *Pool.Entry) *Connection {
+    return @alignCast(@fieldParentPtr("pooled", entry));
+}
+
+const pool_hooks: Pool.Entry.Hooks = .{ .destroy = destroyEntry, .cut = cutEntry };
+
+fn destroyEntry(entry: *Pool.Entry) void {
+    of(entry).destroy();
+}
+
+fn cutEntry(entry: *Pool.Entry, io: Io) void {
+    of(entry).cut(io);
 }
 
 /// Cuts the exchange in progress from another task, and every later one:
