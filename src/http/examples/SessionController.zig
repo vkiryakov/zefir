@@ -3,6 +3,7 @@
 //! from then on, and sends the browser back to the page. A cookie, since a
 //! browser's `EventSource` cannot send `Authorization`.
 
+const std = @import("std");
 const http = @import("http");
 const v = @import("validator");
 const auth = @import("auth.zig");
@@ -30,6 +31,9 @@ pub const LoginForm = struct {
 };
 
 pub fn login(self: *SessionController, ctx: *http.Context) !void {
+    // A page of another site can post this form too, with a token of its
+    // own, and sign the browser in as somebody else: login CSRF. 403.
+    if (!fromThisSite(ctx)) return error.PermissionDenied;
     const form = try ctx.form(LoginForm);
     // A token nobody has: 401, as on any request.
     _ = self.token_auth.userOf(form.token) orelse return error.Unauthenticated;
@@ -55,4 +59,19 @@ pub fn logout(self: *SessionController, ctx: *http.Context) !void {
     // The cookie again, empty and expired: the browser deletes it.
     try ctx.response.setCookie(.{ .name = "session", .value = "", .http_only = true, .same_site = .lax, .secure = true, .max_age = .zero });
     // No body: 204 No Content.
+}
+
+/// Whether the request comes from a page of this site, as the browser
+/// says. `Sec-Fetch-Site` is `same-origin` from a page of this site and
+/// `none` from the user, from a bookmark say; `same-site` and `cross-site`
+/// from other sites. An older browser sends only `Origin`, which then
+/// names the host of `Host`. A request with neither comes from no browser,
+/// curl say, and goes on.
+fn fromThisSite(ctx: *http.Context) bool {
+    if (ctx.request.header("sec-fetch-site")) |site| return std.mem.eql(u8, site, "same-origin") or std.mem.eql(u8, site, "none");
+    const origin = ctx.request.header("origin") orelse return true;
+    const host = ctx.request.header("host") orelse return false;
+    // "http://localhost:8080": the host and the port after the scheme.
+    const scheme_end = std.mem.find(u8, origin, "://") orelse return false;
+    return std.ascii.eqlIgnoreCase(origin[scheme_end + 3 ..], host);
 }

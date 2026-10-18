@@ -177,7 +177,7 @@ test "TokenAuth: no token is anonymous; requireUser is 401 and the app's handle 
     try testing.expectEqual(204, deleted.status);
 }
 
-test "Cors: preflight 204; an error response carries Access-Control-Allow-Origin; Vary: Origin; no * with credentials" {
+test "Cors: preflight 204; an error response carries Access-Control-Allow-Origin; Vary: Origin on every response but with *; no * with credentials" {
     var environ = try testEnviron();
     defer environ.deinit();
     var app: App = undefined;
@@ -210,6 +210,13 @@ test "Cors: preflight 204; an error response carries Access-Control-Allow-Origin
     try testing.expectEqual(204, stranger.status);
     try testing.expectEqual(null, stranger.header("access-control-allow-origin"));
     try testing.expectEqualStrings("DELETE, OPTIONS", stranger.header("allow").?);
+    // The answer depends on Origin all the same, and so does that of a
+    // request without one: a cache must keep them apart.
+    try testing.expectEqualStrings("Origin", stranger.header("vary").?);
+    var plain = try app.request(.GET, "/api/health", &.{});
+    defer plain.deinit();
+    try testing.expectEqual(null, plain.header("access-control-allow-origin"));
+    try testing.expectEqualStrings("Origin", plain.header("vary").?);
 
     // The answer to an error carries the headers too, so that the page can
     // read the 401.
@@ -220,11 +227,13 @@ test "Cors: preflight 204; an error response carries Access-Control-Allow-Origin
     try testing.expectEqualStrings("Origin", refused.header("vary").?);
     try testing.expectEqualStrings("x-request-id", refused.header("access-control-expose-headers").?);
 
-    // Any origin: "*", and then never with credentials.
+    // Any origin: "*", and then never with credentials; the answer is the
+    // same for every origin, without Vary.
     const any = [_][]const u8{"*"};
     app.cors = .{ .origins = &any };
     var open = try app.request(.GET, "/api/health", &.{.{ "origin", "https://other.example" }});
     defer open.deinit();
     try testing.expectEqualStrings("*", open.header("access-control-allow-origin").?);
     try testing.expectEqual(null, open.header("access-control-allow-credentials"));
+    try testing.expectEqual(null, open.header("vary"));
 }

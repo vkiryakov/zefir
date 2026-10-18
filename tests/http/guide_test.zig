@@ -75,6 +75,8 @@ const session = [_]Step{
     .{ .curl = "curl -i localhost:8080/api/session -d 'token=ann-secret'" },
     .{ .curl = "curl -i localhost:8080/api/v1/todos -b 'session=ann-secret'" },
     .{ .curl = "curl -i -X DELETE localhost:8080/api/session -b 'session=ann-secret'" },
+    // The form of a page of another site, as a browser says.
+    .{ .curl = "curl -i localhost:8080/api/session -d 'token=ann-secret' -H \"Sec-Fetch-Site: cross-site\"" },
     .{ .curl = "curl -i -X OPTIONS localhost:8080/api/v1/todos/2 -H \"Origin: http://localhost:5173\" -H \"Access-Control-Request-Method: DELETE\"" },
     // Server-sent events: the stream in one terminal, a change in another.
     .{ .open = "curl -i -N localhost:8080/api/v1/todos/events -b 'session=ann-secret'" },

@@ -290,20 +290,31 @@ test "the export is a CSV attachment, its quotes doubled" {
     try testing.expect(std.mem.startsWith(u8, res.header("content-disposition").?, "attachment; filename=\"todos.csv\""));
 }
 
-test "a form signs a browser in with the cookie session and a 303; signing out clears it" {
+test "a form signs a browser in with the cookie session and a 303, a form of another site gets 403; signing out clears it" {
     var app: App = undefined;
     try app.start();
     defer app.stop();
 
-    var login = try app.request(.POST, "/api/session", &.{.{ "content-type", "application/x-www-form-urlencoded" }}, "token=ann-secret");
+    const form: [2][]const u8 = .{ "content-type", "application/x-www-form-urlencoded" };
+    // The browser says that the page of this site sent it.
+    var login = try app.request(.POST, "/api/session", &.{ form, .{ "sec-fetch-site", "same-origin" } }, "token=ann-secret");
     defer login.deinit();
     try testing.expectEqual(303, login.status);
     try testing.expectEqualStrings("/", login.header("location").?);
     try testing.expectEqualStrings("session=ann-secret; Path=/; Max-Age=28800; Secure; HttpOnly; SameSite=Lax", login.header("set-cookie").?);
 
-    var wrong = try app.request(.POST, "/api/session", &.{.{ "content-type", "application/x-www-form-urlencoded" }}, "token=guess");
+    var wrong = try app.request(.POST, "/api/session", &.{form}, "token=guess");
     defer wrong.deinit();
     try testing.expectEqual(401, wrong.status);
+
+    // The page of another site, as a browser says, or as the Origin of an
+    // older one shows: 403, and no cookie.
+    for ([_][2][]const u8{ .{ "sec-fetch-site", "cross-site" }, .{ "origin", "https://evil.example" } }) |from| {
+        var forged = try app.request(.POST, "/api/session", &.{ form, from, .{ "host", "localhost:8080" } }, "token=ann-secret");
+        defer forged.deinit();
+        try testing.expectEqual(403, forged.status);
+        try testing.expectEqual(null, forged.header("set-cookie"));
+    }
 
     var logout = try app.request(.DELETE, "/api/session", &.{.{ "cookie", "session=ann-secret" }}, "");
     defer logout.deinit();

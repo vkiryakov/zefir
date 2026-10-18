@@ -532,7 +532,7 @@ Run it with the tokens of the two users:
 
 ```text
 $ APP_AUTH_ANN_TOKEN=ann-secret APP_AUTH_BOB_TOKEN=bob-secret zig build run
-2026-10-17T20:02:44.960Z INFO  [app] Serving port=52382
+2026-10-17T20:02:44.960Z INFO  [app] Serving port=8080
 ```
 
 It waits for requests on port 8080. In another terminal:
@@ -543,6 +543,7 @@ HTTP/1.1 200 OK
 content-type: application/json
 x-request-id: fd94ff4adbee24f59a6e042180ee85d6
 x-content-type-options: nosniff
+vary: Origin
 Date: Sat, 17 Oct 2026 20:02:44 GMT
 Content-Length: 15
 
@@ -550,9 +551,10 @@ Content-Length: 15
 ```
 
 `curl -i` shows the head of the response too: the status, then the header
-fields, then the body. `x-request-id` and `x-content-type-options` come from
-the middleware of the service, `Date` and `Content-Length` from the
-backend. Make a todo as Ann, and list hers:
+fields, then the body. `x-request-id`, `x-content-type-options` and `vary`
+come from the middleware of the service, `vary` from its CORS (see
+[Authentication and CORS](#authentication-and-cors)); `Date` and
+`Content-Length` come from the backend. Make a todo as Ann, and list hers:
 
 ```text
 $ curl -i localhost:8080/api/v1/todos -H "Authorization: Bearer ann-secret" --json '{"title":"Buy milk"}'
@@ -560,6 +562,7 @@ HTTP/1.1 201 Created
 content-type: application/json
 x-request-id: acf21061a073486c45ed19fe75dd9b41
 x-content-type-options: nosniff
+vary: Origin
 cache-control: no-store
 Date: Sat, 17 Oct 2026 20:02:44 GMT
 Content-Length: 85
@@ -571,6 +574,7 @@ HTTP/1.1 200 OK
 content-type: application/json
 x-request-id: 2ea3528aa741ad5e8d7ce72c0c20ac79
 x-content-type-options: nosniff
+vary: Origin
 cache-control: no-store
 Date: Sat, 17 Oct 2026 20:02:44 GMT
 Content-Length: 129
@@ -1027,6 +1031,7 @@ HTTP/1.1 200 OK
 content-type: application/json
 x-request-id: 9cb5a0caaf77967c00b4bacc5a232a8d
 x-content-type-options: nosniff
+vary: Origin
 cache-control: no-store
 Date: Sat, 17 Oct 2026 20:02:44 GMT
 Content-Length: 85
@@ -1045,6 +1050,7 @@ content-type: application/json
 x-request-id: b37fcc3bc87070d9c97b379811072bf2
 allow: GET, HEAD, PATCH, DELETE, OPTIONS
 x-content-type-options: nosniff
+vary: Origin
 Date: Sat, 17 Oct 2026 20:02:44 GMT
 Content-Length: 118
 
@@ -1055,6 +1061,7 @@ HTTP/1.1 404 Not Found
 content-type: application/json
 x-request-id: 11a28cc05650ab58a71564a5ba4148ad
 x-content-type-options: nosniff
+vary: Origin
 Date: Sat, 17 Oct 2026 20:02:44 GMT
 Content-Length: 100
 
@@ -1069,6 +1076,7 @@ HTTP/1.1 200 OK
 content-type: application/json
 x-request-id: ae48102b9e2993d164e3895e745726c2
 x-content-type-options: nosniff
+vary: Origin
 Date: Sat, 17 Oct 2026 20:02:44 GMT
 Content-Length: 15
 ```
@@ -1272,6 +1280,7 @@ HTTP/1.1 201 Created
 content-type: application/json
 x-request-id: 3295353046ea6e46b8ab48ec5665db72
 x-content-type-options: nosniff
+vary: Origin
 cache-control: no-store
 Date: Sat, 17 Oct 2026 20:02:44 GMT
 Content-Length: 105
@@ -1290,6 +1299,7 @@ HTTP/1.1 422 Unprocessable Content
 content-type: application/json
 x-request-id: 7288cd5e5684dbfd5651eb149e9e056d
 x-content-type-options: nosniff
+vary: Origin
 cache-control: no-store
 Date: Sat, 17 Oct 2026 20:02:44 GMT
 Content-Length: 348
@@ -1308,6 +1318,7 @@ HTTP/1.1 200 OK
 content-type: application/json
 x-request-id: cddb6c0cc059a3d3a28574fb959d1590
 x-content-type-options: nosniff
+vary: Origin
 cache-control: no-store
 Date: Sat, 17 Oct 2026 20:02:44 GMT
 Content-Length: 149
@@ -1319,6 +1330,7 @@ HTTP/1.1 422 Unprocessable Content
 content-type: application/json
 x-request-id: 8c3072075a3522b51f809d6d3ac2f3fc
 x-content-type-options: nosniff
+vary: Origin
 cache-control: no-store
 Date: Sat, 17 Oct 2026 20:02:44 GMT
 Content-Length: 193
@@ -1350,6 +1362,7 @@ HTTP/1.1 200 OK
 content-type: application/json
 x-request-id: 70a687213e8c8703a82a8913b48c157a
 x-content-type-options: nosniff
+vary: Origin
 cache-control: no-store
 Date: Sat, 17 Oct 2026 20:02:44 GMT
 Content-Length: 84
@@ -1370,6 +1383,7 @@ HTTP/1.1 201 Created
 content-type: application/json
 x-request-id: db527cbb15e40f24218d51dd8dca4042
 x-content-type-options: nosniff
+vary: Origin
 cache-control: no-store
 Date: Sat, 17 Oct 2026 20:02:44 GMT
 Content-Length: 93
@@ -1381,6 +1395,7 @@ HTTP/1.1 200 OK
 content-type: application/json
 x-request-id: ad400f14731c00fbc94fd63ca0b9c2cb
 x-content-type-options: nosniff
+vary: Origin
 cache-control: no-store
 Date: Sat, 17 Oct 2026 20:02:45 GMT
 Content-Length: 93
@@ -1434,6 +1449,7 @@ content-type: text/csv
 x-request-id: 6f6d6699b8903b99aa45ac664d65cfb6
 content-disposition: attachment; filename="todos.csv"; filename*=UTF-8''todos.csv
 x-content-type-options: nosniff
+vary: Origin
 cache-control: no-store
 Date: Sat, 17 Oct 2026 20:02:45 GMT
 Content-Length: 78
@@ -1539,6 +1555,7 @@ HTTP/1.1 404 Not Found
 content-type: application/json
 x-request-id: d1f57d9f45d673d0d21c641f0295f231
 x-content-type-options: nosniff
+vary: Origin
 cache-control: no-store
 Date: Sat, 17 Oct 2026 20:02:45 GMT
 Content-Length: 111
@@ -1550,6 +1567,7 @@ HTTP/1.1 409 Conflict
 content-type: application/json
 x-request-id: 10b2f37bc0682da2a86c3eaa1dca23ea
 x-content-type-options: nosniff
+vary: Origin
 cache-control: no-store
 Date: Sat, 17 Oct 2026 20:02:45 GMT
 Content-Length: 130
@@ -1561,6 +1579,7 @@ HTTP/1.1 415 Unsupported Media Type
 content-type: application/json
 x-request-id: c673882e0c719dd4ae1eb4f8620671de
 x-content-type-options: nosniff
+vary: Origin
 cache-control: no-store
 Date: Sat, 17 Oct 2026 20:02:45 GMT
 Content-Length: 126
@@ -1827,6 +1846,7 @@ HTTP/1.1 200 OK
 content-type: application/json
 x-request-id: checkout-42
 x-content-type-options: nosniff
+vary: Origin
 Date: Sat, 17 Oct 2026 20:02:45 GMT
 Content-Length: 15
 
@@ -1978,6 +1998,7 @@ content-type: application/json
 x-request-id: 7b35c989e7bbb17766eb8e2adff210f1
 www-authenticate: Bearer
 x-content-type-options: nosniff
+vary: Origin
 Date: Sat, 17 Oct 2026 20:02:45 GMT
 Content-Length: 109
 
@@ -1988,6 +2009,7 @@ HTTP/1.1 403 Forbidden
 content-type: application/json
 x-request-id: 3551b6f041f05d6332ac31e2ca2f718b
 x-content-type-options: nosniff
+vary: Origin
 cache-control: no-store
 Date: Sat, 17 Oct 2026 20:02:45 GMT
 Content-Length: 108
@@ -1998,6 +2020,7 @@ $ curl -i -X DELETE localhost:8080/api/v1/todos/1 -H "Authorization: Bearer ann-
 HTTP/1.1 204 No Content
 x-request-id: d8fb5ccd6e6492337e9b60a5885ddeea
 x-content-type-options: nosniff
+vary: Origin
 cache-control: no-store
 Date: Sat, 17 Oct 2026 20:02:45 GMT
 ```
@@ -2010,6 +2033,7 @@ A browser signs in with a form, and keeps its token in a cookie:
 //! from then on, and sends the browser back to the page. A cookie, since a
 //! browser's `EventSource` cannot send `Authorization`.
 
+const std = @import("std");
 const http = @import("http");
 const v = @import("validator");
 const auth = @import("auth.zig");
@@ -2037,6 +2061,9 @@ pub const LoginForm = struct {
 };
 
 pub fn login(self: *SessionController, ctx: *http.Context) !void {
+    // A page of another site can post this form too, with a token of its
+    // own, and sign the browser in as somebody else: login CSRF. 403.
+    if (!fromThisSite(ctx)) return error.PermissionDenied;
     const form = try ctx.form(LoginForm);
     // A token nobody has: 401, as on any request.
     _ = self.token_auth.userOf(form.token) orelse return error.Unauthenticated;
@@ -2063,6 +2090,21 @@ pub fn logout(self: *SessionController, ctx: *http.Context) !void {
     try ctx.response.setCookie(.{ .name = "session", .value = "", .http_only = true, .same_site = .lax, .secure = true, .max_age = .zero });
     // No body: 204 No Content.
 }
+
+/// Whether the request comes from a page of this site, as the browser
+/// says. `Sec-Fetch-Site` is `same-origin` from a page of this site and
+/// `none` from the user, from a bookmark say; `same-site` and `cross-site`
+/// from other sites. An older browser sends only `Origin`, which then
+/// names the host of `Host`. A request with neither comes from no browser,
+/// curl say, and goes on.
+fn fromThisSite(ctx: *http.Context) bool {
+    if (ctx.request.header("sec-fetch-site")) |site| return std.mem.eql(u8, site, "same-origin") or std.mem.eql(u8, site, "none");
+    const origin = ctx.request.header("origin") orelse return true;
+    const host = ctx.request.header("host") orelse return false;
+    // "http://localhost:8080": the host and the port after the scheme.
+    const scheme_end = std.mem.find(u8, origin, "://") orelse return false;
+    return std.ascii.eqlIgnoreCase(origin[scheme_end + 3 ..], host);
+}
 ```
 
 ```text
@@ -2072,6 +2114,7 @@ x-request-id: 1356f41e8bfb8f433e811fd9742f2e32
 set-cookie: session=ann-secret; Path=/; Max-Age=28800; Secure; HttpOnly; SameSite=Lax
 location: /
 x-content-type-options: nosniff
+vary: Origin
 Date: Sat, 17 Oct 2026 20:02:45 GMT
 Content-Length: 0
 
@@ -2080,6 +2123,7 @@ HTTP/1.1 200 OK
 content-type: application/json
 x-request-id: 66c0cc38f6498fa4f2c2436cc2c7bc46
 x-content-type-options: nosniff
+vary: Origin
 cache-control: no-store
 Date: Sat, 17 Oct 2026 20:02:45 GMT
 Content-Length: 243
@@ -2091,6 +2135,7 @@ HTTP/1.1 204 No Content
 x-request-id: 836c0333d29e41bd80020ffcb8d0feb3
 set-cookie: session=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Lax
 x-content-type-options: nosniff
+vary: Origin
 Date: Sat, 17 Oct 2026 20:02:45 GMT
 ```
 
@@ -2106,13 +2151,36 @@ asks for `Content-Type: application/json`: a form of another site cannot
 send that, and a script of another site has to ask first, with a preflight
 that CORS does not let through.
 
+The form of signing in is the exception: it needs no cookie, and a page of
+any site can post it. A page of another site could post it with a token of
+the attacker's and sign the browser in as the attacker, so that what the
+user writes next lands in the attacker's account: this is called login
+CSRF. So `login` asks where the form comes from, as the browser says it
+(`fromThisSite` above), and a form of another site gets 403:
+
+```text
+$ curl -i localhost:8080/api/session -d 'token=ann-secret' -H "Sec-Fetch-Site: cross-site"
+HTTP/1.1 403 Forbidden
+content-type: application/json
+x-request-id: f0b5d259d3ac19145fef81e1e47703d2
+x-content-type-options: nosniff
+vary: Origin
+Date: Sat, 17 Oct 2026 20:02:45 GMT
+Content-Length: 108
+
+{"code":"permission_denied","message":"Forbidden","details":[],"traceId":"b9b2b26092aacb48a56ad1f183e2209f"}
+```
+
+curl sends neither `Sec-Fetch-Site` nor `Origin`, as no browser would, so
+its form above goes on.
+
 **CORS.** A page of another origin, such as the frontend at
 `http://localhost:5173` while it is developed, may call the API only when
 the API's answers say so. The service's middleware for it:
 
 ```zig
 // Application code (src/cors.zig of the example app): zefir-http ships none of these.
-//! The CORS of the example app, by the rules of design section 9: what a
+//! The CORS of the example app, as the Fetch standard defines it: what a
 //! browser needs before a page of another origin may call the API. It sits
 //! in the server's middleware, which runs before the route is chosen, so
 //! the preflight of any path reaches it.
@@ -2157,17 +2225,21 @@ pub const Cors = struct {
         return .handled;
     }
 
-    /// Every other response of an origin it lets in, the answers to errors
-    /// too: `onResponse` runs for both, right before the head goes out.
+    /// Every response, the answers to errors too: `onResponse` runs for
+    /// all, right before the head goes out. Unless any origin may call, the
+    /// answer depends on `Origin`, so every one says `Vary: Origin`: else a
+    /// cache could keep a response without `Access-Control-Allow-Origin`
+    /// and give it to the page of an origin it lists.
     pub fn onResponse(self: *Cors, ctx: *http.Context) !void {
+        if (!self.anyOrigin()) try ctx.response.setHeader("vary", "Origin");
         const origin = ctx.request.header("origin") orelse return;
         if (!try self.allow(ctx, origin)) return;
         try ctx.response.setHeader("access-control-expose-headers", self.expose);
     }
 
     /// Lets `origin` in when it is listed: `Access-Control-Allow-Origin`,
-    /// the credentials when they go with it, and `Vary: Origin`, since the
-    /// answer depends on it; false for an origin it does not list.
+    /// and the credentials when they go with it; false for an origin it
+    /// does not list.
     fn allow(self: *const Cors, ctx: *http.Context, origin: []const u8) !bool {
         for (self.origins) |listed| {
             if (std.mem.eql(u8, listed, "*")) {
@@ -2177,8 +2249,15 @@ pub const Cors = struct {
             if (!std.mem.eql(u8, listed, origin)) continue;
             try ctx.response.setHeader("access-control-allow-origin", origin);
             if (self.credentials) try ctx.response.setHeader("access-control-allow-credentials", "true");
-            try ctx.response.setHeader("vary", "Origin");
             return true;
+        }
+        return false;
+    }
+
+    /// Whether the list has "*", which lets the page of any origin call.
+    fn anyOrigin(self: *const Cors) bool {
+        for (self.origins) |listed| {
+            if (std.mem.eql(u8, listed, "*")) return true;
         }
         return false;
     }
@@ -2195,10 +2274,10 @@ HTTP/1.1 204 No Content
 x-request-id: 0f7b330190aa38dee44ff9fabbad3faf
 access-control-allow-origin: http://localhost:5173
 access-control-allow-credentials: true
-vary: Origin
 access-control-allow-methods: GET, HEAD, POST, PUT, PATCH, DELETE
 access-control-allow-headers: authorization, content-type, idempotency-key
 x-content-type-options: nosniff
+vary: Origin
 access-control-expose-headers: x-request-id
 Date: Sat, 17 Oct 2026 20:02:45 GMT
 ```
@@ -2207,7 +2286,9 @@ Date: Sat, 17 Oct 2026 20:02:45 GMT
 sends 204 without a body, and nothing after it runs: neither `TokenAuth` nor
 a route. On every other response of an origin it lists, its `onResponse`
 adds the fields, on the answers to errors too, so that the page can read a
-401.
+401. Unless the list has `*`, every response says `Vary: Origin`, the
+answers to curl too: the answer depends on `Origin`, and a cache must not
+give the answer to one origin to another.
 
 ## Server-sent events
 
@@ -2245,6 +2326,7 @@ x-request-id: 3c4e2e4c38f06aff4263880e3f851255
 cache-control: no-store
 x-accel-buffering: no
 x-content-type-options: nosniff
+vary: Origin
 Date: Sat, 17 Oct 2026 20:02:45 GMT
 Transfer-Encoding: chunked
 
@@ -2264,6 +2346,7 @@ HTTP/1.1 200 OK
 content-type: application/json
 x-request-id: f2fc0a1772fcc137cbdde2218d93b5b8
 x-content-type-options: nosniff
+vary: Origin
 cache-control: no-store
 Date: Sat, 17 Oct 2026 20:02:45 GMT
 Content-Length: 104
@@ -2373,6 +2456,7 @@ etag: "18df694d8e0bc286-735"
 last-modified: Sat, 17 Oct 2026 19:55:58 GMT
 x-content-type-options: nosniff
 accept-ranges: bytes
+vary: Origin
 Date: Sat, 17 Oct 2026 20:02:45 GMT
 Content-Length: 1845
 
@@ -2384,6 +2468,7 @@ etag: "18df694d8e0bc286-735"
 last-modified: Sat, 17 Oct 2026 19:55:58 GMT
 x-content-type-options: nosniff
 accept-ranges: bytes
+vary: Origin
 Date: Sat, 17 Oct 2026 20:02:45 GMT
 Content-Length: 1845
 
@@ -2392,6 +2477,7 @@ HTTP/1.1 404 Not Found
 content-type: application/json
 x-request-id: 6bcb4d2c288468ad324e01449d4fa1bd
 x-content-type-options: nosniff
+vary: Origin
 Date: Sat, 17 Oct 2026 20:02:45 GMT
 Content-Length: 100
 
@@ -2729,20 +2815,31 @@ test "the export is a CSV attachment, its quotes doubled" {
     try testing.expect(std.mem.startsWith(u8, res.header("content-disposition").?, "attachment; filename=\"todos.csv\""));
 }
 
-test "a form signs a browser in with the cookie session and a 303; signing out clears it" {
+test "a form signs a browser in with the cookie session and a 303, a form of another site gets 403; signing out clears it" {
     var app: App = undefined;
     try app.start();
     defer app.stop();
 
-    var login = try app.request(.POST, "/api/session", &.{.{ "content-type", "application/x-www-form-urlencoded" }}, "token=ann-secret");
+    const form: [2][]const u8 = .{ "content-type", "application/x-www-form-urlencoded" };
+    // The browser says that the page of this site sent it.
+    var login = try app.request(.POST, "/api/session", &.{ form, .{ "sec-fetch-site", "same-origin" } }, "token=ann-secret");
     defer login.deinit();
     try testing.expectEqual(303, login.status);
     try testing.expectEqualStrings("/", login.header("location").?);
     try testing.expectEqualStrings("session=ann-secret; Path=/; Max-Age=28800; Secure; HttpOnly; SameSite=Lax", login.header("set-cookie").?);
 
-    var wrong = try app.request(.POST, "/api/session", &.{.{ "content-type", "application/x-www-form-urlencoded" }}, "token=guess");
+    var wrong = try app.request(.POST, "/api/session", &.{form}, "token=guess");
     defer wrong.deinit();
     try testing.expectEqual(401, wrong.status);
+
+    // The page of another site, as a browser says, or as the Origin of an
+    // older one shows: 403, and no cookie.
+    for ([_][2][]const u8{ .{ "sec-fetch-site", "cross-site" }, .{ "origin", "https://evil.example" } }) |from| {
+        var forged = try app.request(.POST, "/api/session", &.{ form, from, .{ "host", "localhost:8080" } }, "token=ann-secret");
+        defer forged.deinit();
+        try testing.expectEqual(403, forged.status);
+        try testing.expectEqual(null, forged.header("set-cookie"));
+    }
 
     var logout = try app.request(.DELETE, "/api/session", &.{.{ "cookie", "session=ann-secret" }}, "");
     defer logout.deinit();
@@ -2895,7 +2992,7 @@ start of the service to Ctrl+C:
 
 ```text
 $ APP_AUTH_ANN_TOKEN=ann-secret APP_AUTH_BOB_TOKEN=bob-secret zig build run
-2026-10-17T20:02:44.960Z INFO  [app] Serving port=52382
+2026-10-17T20:02:44.960Z INFO  [app] Serving port=8080
 2026-10-17T20:02:44.962Z INFO  [access] Request method=GET path=/api/health status=200 user=- err=- request=fd94ff4adbee24f59a6e042180ee85d6 duration_ms=0
 2026-10-17T20:02:44.970Z INFO  [access] Request method=POST path=/api/v1/todos status=201 user=ann err=- request=acf21061a073486c45ed19fe75dd9b41 duration_ms=6
 2026-10-17T20:02:44.971Z INFO  [access] Request method=GET path=/api/v1/todos status=200 user=ann err=- request=2ea3528aa741ad5e8d7ce72c0c20ac79 duration_ms=0
@@ -2921,6 +3018,7 @@ $ APP_AUTH_ANN_TOKEN=ann-secret APP_AUTH_BOB_TOKEN=bob-secret zig build run
 2026-10-17T20:02:45.026Z INFO  [access] Request method=POST path=/api/session status=303 user=- err=- request=1356f41e8bfb8f433e811fd9742f2e32 duration_ms=0
 2026-10-17T20:02:45.027Z INFO  [access] Request method=GET path=/api/v1/todos status=200 user=ann err=- request=66c0cc38f6498fa4f2c2436cc2c7bc46 duration_ms=0
 2026-10-17T20:02:45.027Z INFO  [access] Request method=DELETE path=/api/session status=204 user=ann err=- request=836c0333d29e41bd80020ffcb8d0feb3 duration_ms=0
+2026-10-17T20:02:45.027Z INFO  [access] Request method=POST path=/api/session status=403 user=- err=PermissionDenied request=f0b5d259d3ac19145fef81e1e47703d2 duration_ms=0
 2026-10-17T20:02:45.028Z INFO  [access] Request method=OPTIONS path=/api/v1/todos/2 status=204 user=- err=- request=0f7b330190aa38dee44ff9fabbad3faf duration_ms=0
 2026-10-17T20:02:45.031Z INFO  [access] Request method=PATCH path=/api/v1/todos/2 status=200 user=ann err=- request=f2fc0a1772fcc137cbdde2218d93b5b8 duration_ms=0
 2026-10-17T20:02:45.031Z INFO  [todos] Live updates closed for ann
