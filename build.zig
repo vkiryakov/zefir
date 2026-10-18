@@ -2,6 +2,8 @@ const std = @import("std");
 const manifest = @import("build.zig.zon");
 const validator_cases = @import("src/validator/testdata/cases.zig");
 const rpc_guide = @import("src/rpc/examples/cases.zig");
+const http_cases = @import("src/http/tests/cases.zig");
+const http_guide = @import("src/http/examples/cases.zig");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -118,7 +120,18 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // Umbrella module: @import("zefir").core, .log, .confy, .validator, .rpc, .rpc_nats, .rpc_log, .orm, .mongo, .nats
+    const http = b.addModule("zefir-http", .{
+        .root_source_file = b.path("src/http/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+        .imports = &.{
+            .{ .name = "core", .module = core },
+            .{ .name = "validator", .module = validator },
+        },
+    });
+
+    // Umbrella module: @import("zefir").core, .log, .confy, .validator, .rpc, .rpc_nats, .rpc_log, .orm, .mongo, .nats, .http
     const zefir = b.addModule("zefir", .{
         .root_source_file = b.path("src/zefir.zig"),
         .target = target,
@@ -135,6 +148,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "orm", .module = orm },
             .{ .name = "mongo", .module = mongo },
             .{ .name = "nats", .module = nats },
+            .{ .name = "http", .module = http },
         },
     });
 
@@ -153,14 +167,15 @@ pub fn build(b: *std.Build) void {
     const test_orm = addModuleTestStep(b, test_step, "orm");
     const test_mongo = addModuleTestStep(b, test_step, "mongo");
     const test_nats = addModuleTestStep(b, test_step, "nats");
+    const test_http = addModuleTestStep(b, test_step, "http");
     const test_zefir = addModuleTestStep(b, test_step, "zefir");
     // Builds the validator's test binaries without running them, so that
     // `-Dtarget` may name another system: CI builds them for x86-linux-musl,
     // where usize has 32 bits.
     const validator_compile_step = b.step("compile-validator-tests", "Build the validator's test binaries for -Dtarget without running them");
     for (
-        [_]*std.Build.Module{ core, log, confy, validator, rpc, rpc_nats, rpc_log, orm, mongo, nats, zefir },
-        [_]*std.Build.Step{ test_core, test_log, test_confy, test_validator, test_rpc, test_rpc_nats, test_rpc_log, test_orm, test_mongo, test_nats, test_zefir },
+        [_]*std.Build.Module{ core, log, confy, validator, rpc, rpc_nats, rpc_log, orm, mongo, nats, http, zefir },
+        [_]*std.Build.Step{ test_core, test_log, test_confy, test_validator, test_rpc, test_rpc_nats, test_rpc_log, test_orm, test_mongo, test_nats, test_http, test_zefir },
     ) |module, module_test_step| {
         const tests = b.addTest(.{ .root_module = module });
         module_test_step.dependOn(&addRun(b, tests, tsan).step);
@@ -168,6 +183,42 @@ pub fn build(b: *std.Build) void {
     }
 
     addValidatorTests(b, test_validator, validator_compile_step, validator, log, target, optimize, tsan);
+    addHttpCompileChecks(b, test_http, http, validator, target, optimize);
+    // The examples of the zefir-http guide: the middleware of an
+    // application (authentication, CORS) and their tests. Like an
+    // application, they may read settings with confy and log with log.
+    const http_examples = b.addTest(.{
+        .name = "http-examples",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/http/examples/middleware_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .sanitize_thread = tsan,
+            .imports = &.{
+                .{ .name = "core", .module = core },
+                .{ .name = "validator", .module = validator },
+                .{ .name = "confy", .module = confy },
+                .{ .name = "log", .module = log },
+                .{ .name = "http", .module = http },
+            },
+        }),
+    });
+    test_http.dependOn(&addRun(b, http_examples, tsan).step);
+    addHttpGuide(b, test_http, .{ .core = core, .validator = validator, .confy = confy, .log = log, .http = http }, target, optimize, tsan);
+
+    // `zig build fuzz-http` runs the fuzz test of zefir-http's HTTP/1.1
+    // parser on its corpus, once, like `zig build test-http` does; with
+    // `--fuzz` it runs the fuzzer on it (Linux: CI's fuzz.yml).
+    const fuzz_http = b.step("fuzz-http", "Run the fuzz test of the zefir-http parser; with --fuzz, the fuzzer (Linux)");
+    const http_fuzz_tests = b.addTest(.{
+        .name = "fuzz-http",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/http/h1/fuzz.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    fuzz_http.dependOn(&b.addRunArtifact(http_fuzz_tests).step);
 
     // core examples: `zig build test` builds and runs them; an example that
     // exits with an error fails the step.
@@ -1122,4 +1173,157 @@ fn addValidatorTests(
     });
     test_step.dependOn(&b.addRunArtifact(readme_test).step);
     compile_step.dependOn(&readme_test.step);
+}
+
+/// The modules that the examples of the http guide import.
+const HttpGuideModules = struct {
+    core: *std.Build.Module,
+    validator: *std.Build.Module,
+    confy: *std.Build.Module,
+    log: *std.Build.Module,
+    http: *std.Build.Module,
+};
+
+/// The examples of src/http/examples/README.md, the guide of zefir-http,
+/// as cases.zig there lists them: the tests of the example app, and the
+/// programs that run on the backend in memory, each through
+/// example_main.zig, which exits with code 3 on a panic instead of
+/// aborting and with code 4 past its time limit; it must exit with 0.
+/// readme_test.zig then checks that README.md shows every file as it is
+/// and every run as it printed. The service, main.zig, imports zio: only
+/// tests/http builds and runs it.
+fn addHttpGuide(
+    b: *std.Build,
+    test_http: *std.Build.Step,
+    m: HttpGuideModules,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+    tsan: bool,
+) void {
+    const dir = "src/http/examples/";
+    const imports: []const std.Build.Module.Import = &.{
+        .{ .name = "core", .module = m.core },
+        .{ .name = "validator", .module = m.validator },
+        .{ .name = "confy", .module = m.confy },
+        .{ .name = "log", .module = m.log },
+        .{ .name = "http", .module = m.http },
+    };
+    const todos_test = b.addTest(.{
+        .name = "http-todos-examples",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(dir ++ "todos_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .sanitize_thread = tsan,
+            .imports = imports,
+        }),
+    });
+    test_http.dependOn(&addRun(b, todos_test, tsan).step);
+
+    const readme = b.createModule(.{
+        .root_source_file = b.path(dir ++ "readme_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+    });
+    // "http in a minute" of the repository's README.md is a program of the
+    // guide too.
+    readme.addAnonymousImport("root_readme", .{ .root_source_file = b.path("README.md") });
+    for (http_guide.programs) |name| {
+        const exe = b.addExecutable(.{
+            .name = b.fmt("http-guide-{s}", .{name}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(dir ++ "example_main.zig"),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+                .imports = &.{.{ .name = "example", .module = b.createModule(.{
+                    .root_source_file = b.path(b.fmt(dir ++ "{s}.zig", .{name})),
+                    .target = target,
+                    .optimize = optimize,
+                    .sanitize_thread = tsan,
+                    .imports = imports,
+                }) }},
+            }),
+        });
+        const run = addRun(b, exe, tsan);
+        run.expectExitCode(0);
+        readme.addAnonymousImport(b.fmt("{s}.out", .{name}), .{ .root_source_file = run.captureStdOut(.{}) });
+    }
+    test_http.dependOn(&addRun(b, b.addTest(.{ .name = "http-guide-readme", .root_module = readme }), tsan).step);
+}
+
+/// The compile checks of zefir-http, from the lists in
+/// src/http/tests/cases.zig: client code that must fail to compile with
+/// its message, and client code that must compile. Each file imports
+/// "http" and "validator".
+fn addHttpCompileChecks(
+    b: *std.Build,
+    test_step: *std.Build.Step,
+    http: *std.Build.Module,
+    validator: *std.Build.Module,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+) void {
+    const imports: []const std.Build.Module.Import = &.{
+        .{ .name = "http", .module = http },
+        .{ .name = "validator", .module = validator },
+    };
+    // Each fixture is compiled (never run) and passes only when the
+    // compilation fails with an error whose message is `expect`.
+    // `.contains` matches the end of an error line, so `error: ` in front
+    // makes `expect` the whole message, from its start.
+    for (http_cases.compile_errors) |fixture| {
+        const t = b.addTest(.{
+            .name = std.fs.path.stem(fixture.file),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(fixture.file),
+                .target = target,
+                .optimize = optimize,
+                .imports = imports,
+            }),
+        });
+        t.expect_errors = .{ .contains = b.fmt("error: {s}", .{fixture.expect}) };
+        test_step.dependOn(&t.step);
+    }
+    // Built and not run: they only have to compile.
+    for (http_cases.must_compile) |file| {
+        const t = b.addTest(.{
+            .name = std.fs.path.stem(file),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(file),
+                .target = target,
+                .optimize = optimize,
+                .imports = imports,
+            }),
+        });
+        test_step.dependOn(&t.step);
+    }
+    // A large application, which gen_big_app writes into the build cache:
+    // ten controllers of thirty routes, middleware on every level and forty
+    // errors of its own; and one route that returns 200 errors of long
+    // names. Each must compile without an eval branch quota of its own. The
+    // generator is built for the host, so it also runs when -Dtarget names
+    // another system.
+    const gen_big_app = b.addExecutable(.{
+        .name = "gen_big_app",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/http/tests/gen_big_app.zig"),
+            .target = b.graph.host,
+            .optimize = .Debug,
+        }),
+    });
+    const run_gen = b.addRunArtifact(gen_big_app);
+    for ([_][]const u8{ "big_app", "long_names_app" }) |name| {
+        const app = b.addTest(.{
+            .name = name,
+            .root_module = b.createModule(.{
+                .root_source_file = run_gen.addOutputFileArg(b.fmt("{s}.zig", .{name})),
+                .target = target,
+                .optimize = optimize,
+                .imports = imports,
+            }),
+        });
+        test_step.dependOn(&app.step);
+    }
 }

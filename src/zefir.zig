@@ -10,6 +10,7 @@ pub const rpc_log = @import("rpc-log");
 pub const orm = @import("orm");
 pub const mongo = @import("mongo");
 pub const nats = @import("nats");
+pub const http = @import("http");
 
 test {
     @import("std").testing.refAllDecls(@This());
