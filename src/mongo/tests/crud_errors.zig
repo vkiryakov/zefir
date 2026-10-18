@@ -72,3 +72,16 @@ test "replaceOne with a pipeline" {
 test "deleteMany with a filter that is a string" {
     _ = try users().deleteMany(io(), op(), "all", .{ .allocator = gpa() });
 }
+
+test "findOneAndUpdate with a pointer in the filter" {
+    const ann: User = .{ .name = "Ann" };
+    _ = try users().findOneAndUpdate(io(), op(), Post{ .owner = &ann }, .{ .@"$set" = .{ .n = 1 } }, .{ .allocator = gpa() });
+}
+
+test "findOneAndReplace with a pipeline" {
+    _ = try users().findOneAndReplace(io(), op(), .{}, &.{.{ .@"$set" = .{ .a = 1 } }}, .{ .allocator = gpa() });
+}
+
+test "findOneAndDelete with a filter that is a tuple" {
+    _ = try users().findOneAndDelete(io(), op(), .{ 1, 2 }, .{ .allocator = gpa() });
+}

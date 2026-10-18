@@ -64,6 +64,10 @@ pub const InsertManyOptions = options_.InsertManyOptions;
 pub const UpdateOptions = options_.UpdateOptions;
 pub const ReplaceOptions = options_.ReplaceOptions;
 pub const DeleteOptions = options_.DeleteOptions;
+pub const FindOneAndUpdateOptions = options_.FindOneAndUpdateOptions;
+pub const FindOneAndReplaceOptions = options_.FindOneAndReplaceOptions;
+pub const FindOneAndDeleteOptions = options_.FindOneAndDeleteOptions;
+pub const ReturnDocument = options_.ReturnDocument;
 pub const Hint = options_.Hint;
 pub const InsertOneResult = results.InsertOneResult;
 pub const InsertManyResult = results.InsertManyResult;
@@ -212,6 +216,142 @@ fn deleteWith(c: Collection, io: Io, op: OperationContext, filter: anytype, limi
         .failure_reply = options.failure_reply,
     });
     return results.ofDelete(options.allocator, &merged);
+}
+
+/// Updates the first document that `filter` matches, the first in `sort`
+/// when it matches several, and returns it: as it was, or as the update
+/// left it with `.return_document = .after`. `update` is as `updateOne`
+/// takes it. Null when no document matched, or when an upsert inserted it
+/// and `return_document` is `.before`. The document is a copy in
+/// `options.allocator`.
+pub fn findOneAndUpdate(c: Collection, io: Io, op: OperationContext, filter: anytype, update: anytype, options: FindOneAndUpdateOptions) Error!?bson.OwnedDocument {
+    comptime document.expectDocument("findOneAndUpdate", "filter", @TypeOf(filter));
+    comptime expectUpdate("findOneAndUpdate", @TypeOf(update));
+    try c.begin(options.diagnostics);
+    var scratch: std.heap.ArenaAllocator = .init(options.allocator);
+    defer scratch.deinit();
+    const a = scratch.allocator();
+    const body = try c.findAndModifyBody(a, .{
+        .query = try argument(a, filter, "the filter", options.diagnostics),
+        .sort = options.sort,
+        .change = try changeOf(a, update, options.diagnostics),
+        .change_name = "the update",
+        .new = options.return_document == .after,
+        .fields = options.projection,
+        .upsert = options.upsert,
+        .bypass_document_validation = options.bypass_document_validation,
+        .array_filters = options.array_filters,
+        .collation = options.collation,
+        .hint = options.hint,
+        .let = options.let,
+        .comment = options.comment,
+    }, options.diagnostics);
+    return c.findAndModify(io, op, body, options.allocator, options.diagnostics, options.failure_reply);
+}
+
+/// Replaces the first document that `filter` matches, as `replaceOne`
+/// does, and returns it as `findOneAndUpdate` does.
+pub fn findOneAndReplace(c: Collection, io: Io, op: OperationContext, filter: anytype, replacement: anytype, options: FindOneAndReplaceOptions) Error!?bson.OwnedDocument {
+    comptime document.expectDocument("findOneAndReplace", "filter", @TypeOf(filter));
+    comptime expectReplacement("findOneAndReplace", @TypeOf(replacement));
+    try c.begin(options.diagnostics);
+    var scratch: std.heap.ArenaAllocator = .init(options.allocator);
+    defer scratch.deinit();
+    const a = scratch.allocator();
+    const body = try c.findAndModifyBody(a, .{
+        .query = try argument(a, filter, "the filter", options.diagnostics),
+        .sort = options.sort,
+        .change = .{ .document = try replacementOf(a, replacement, options.diagnostics) },
+        .change_name = "the replacement",
+        .new = options.return_document == .after,
+        .fields = options.projection,
+        .upsert = options.upsert,
+        .bypass_document_validation = options.bypass_document_validation,
+        .collation = options.collation,
+        .hint = options.hint,
+        .let = options.let,
+        .comment = options.comment,
+    }, options.diagnostics);
+    return c.findAndModify(io, op, body, options.allocator, options.diagnostics, options.failure_reply);
+}
+
+/// Deletes the first document that `filter` matches, the first in `sort`
+/// when it matches several, and returns it; null when none matched. The
+/// document is a copy in `options.allocator`.
+pub fn findOneAndDelete(c: Collection, io: Io, op: OperationContext, filter: anytype, options: FindOneAndDeleteOptions) Error!?bson.OwnedDocument {
+    comptime document.expectDocument("findOneAndDelete", "filter", @TypeOf(filter));
+    try c.begin(options.diagnostics);
+    var scratch: std.heap.ArenaAllocator = .init(options.allocator);
+    defer scratch.deinit();
+    const a = scratch.allocator();
+    const body = try c.findAndModifyBody(a, .{
+        .query = try argument(a, filter, "the filter", options.diagnostics),
+        .sort = options.sort,
+        .fields = options.projection,
+        .collation = options.collation,
+        .hint = options.hint,
+        .let = options.let,
+        .comment = options.comment,
+    }, options.diagnostics);
+    return c.findAndModify(io, op, body, options.allocator, options.diagnostics, options.failure_reply);
+}
+
+/// What a `findAndModify` command carries besides its name.
+const Modify = struct {
+    query: bson.RawDocument,
+    sort: ?bson.RawDocument = null,
+    /// The update or the replacement; null removes the document.
+    change: ?Change = null,
+    /// What `change` is to the caller, for the diagnostics.
+    change_name: []const u8 = "",
+    new: bool = false,
+    fields: ?bson.RawDocument = null,
+    upsert: bool = false,
+    bypass_document_validation: bool = false,
+    array_filters: ?[]const bson.RawDocument = null,
+    collation: ?bson.RawDocument = null,
+    hint: ?Hint = null,
+    let: ?bson.RawDocument = null,
+    comment: ?bson.Value = null,
+};
+
+fn findAndModifyBody(c: Collection, a: Allocator, m: Modify, diagnostics: ?*Diagnostics) Error!bson.RawDocument {
+    var w: Writer = .init(a, diagnostics);
+    try w.string("findAndModify", c.name);
+    try w.document("query", m.query, "the filter");
+    if (m.sort) |sort| try w.document("sort", sort, "the sort");
+    if (m.change) |change| switch (change) {
+        .document => |doc| try w.document("update", doc, m.change_name),
+        .pipeline => |stages| try w.documents("update", stages, "the pipeline of the update"),
+    } else try w.boolean("remove", true);
+    if (m.new) try w.boolean("new", true);
+    if (m.fields) |fields| try w.document("fields", fields, "the projection");
+    if (m.upsert) try w.boolean("upsert", true);
+    if (m.bypass_document_validation) try w.boolean("bypassDocumentValidation", true);
+    if (m.array_filters) |filters| try w.documents("arrayFilters", filters, "array_filters");
+    if (m.collation) |collation| try w.document("collation", collation, "the collation");
+    if (m.hint) |hint| try w.hint(hint);
+    if (m.let) |let| try w.document("let", let, "let");
+    if (m.comment) |value| try w.value("comment", value, "the comment");
+    return w.finish();
+}
+
+/// Runs `body`, a findAndModify, and returns a copy of the `value` of its
+/// reply in `allocator`, or null.
+fn findAndModify(c: Collection, io: Io, op: OperationContext, body: bson.RawDocument, allocator: Allocator, diagnostics: ?*Diagnostics, failure_reply: ?*?bson.OwnedDocument) Error!?bson.OwnedDocument {
+    const reply = try c.db.client.runCommand(io, op, .{ .database = c.db.name, .body = body }, .{
+        .allocator = allocator,
+        .diagnostics = diagnostics,
+        .failure_reply = failure_reply,
+    });
+    defer reply.deinit();
+    const value = (reply.raw().get("value") catch null) orelse
+        return violation(diagnostics, "the reply of findAndModify holds no value; the command may have run");
+    return switch (value) {
+        .null => null,
+        .document => |doc| try doc.dupe(allocator),
+        else => violation(diagnostics, "the value in the reply of findAndModify is neither a document nor null"),
+    };
 }
 
 /// Stops the build unless `T` is an update: a document, or a list of the
@@ -392,6 +532,11 @@ const unwritable = "cannot be written as BSON: it holds a string that is not UTF
 fn invalid(diagnostics: ?*Diagnostics, comptime fmt: []const u8, args: anytype) Error {
     if (diagnostics) |d| d.set(null, null, fmt, args);
     return error.InvalidArgument;
+}
+
+fn violation(diagnostics: ?*Diagnostics, comptime text: []const u8) Error {
+    if (diagnostics) |d| d.set(.receive, null, text, .{});
+    return error.ProtocolViolation;
 }
 
 /// A `bson.Builder` for the commands of operations, in their scratch

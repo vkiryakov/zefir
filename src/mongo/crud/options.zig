@@ -110,3 +110,65 @@ pub const DeleteOptions = struct {
     diagnostics: ?*Diagnostics = null,
     failure_reply: ?*?bson.OwnedDocument = null,
 };
+
+/// Which version of the document a `findOneAnd*` returns.
+pub const ReturnDocument = enum {
+    /// As it was before the write; null when the write inserted it.
+    before,
+    /// As the write left it: `new: true`.
+    after,
+};
+
+pub const FindOneAndUpdateOptions = struct {
+    /// The memory of the document returned, and of the call's scratch,
+    /// which is freed before the call returns.
+    allocator: std.mem.Allocator,
+    /// The order in which the first document is chosen when the filter
+    /// matches several: `bson.literal(.{ .age = -1 })`.
+    sort: ?bson.RawDocument = null,
+    /// The fields of the document returned: `bson.literal(.{ .name = 1 })`.
+    projection: ?bson.RawDocument = null,
+    /// Insert a document when none matches the filter.
+    upsert: bool = false,
+    return_document: ReturnDocument = .before,
+    array_filters: ?[]const bson.RawDocument = null,
+    collation: ?bson.RawDocument = null,
+    hint: ?Hint = null,
+    let: ?bson.RawDocument = null,
+    bypass_document_validation: bool = false,
+    comment: ?bson.Value = null,
+    diagnostics: ?*Diagnostics = null,
+    /// After `CommandFailed`, `Timeout` by code 50 or `WriteFailed`, the
+    /// whole reply of the server, from `allocator`; the slot must hold
+    /// null.
+    failure_reply: ?*?bson.OwnedDocument = null,
+};
+
+/// The options of `findOneAndReplace`: those of `findOneAndUpdate`,
+/// without `array_filters`.
+pub const FindOneAndReplaceOptions = struct {
+    allocator: std.mem.Allocator,
+    sort: ?bson.RawDocument = null,
+    projection: ?bson.RawDocument = null,
+    upsert: bool = false,
+    return_document: ReturnDocument = .before,
+    collation: ?bson.RawDocument = null,
+    hint: ?Hint = null,
+    let: ?bson.RawDocument = null,
+    bypass_document_validation: bool = false,
+    comment: ?bson.Value = null,
+    diagnostics: ?*Diagnostics = null,
+    failure_reply: ?*?bson.OwnedDocument = null,
+};
+
+pub const FindOneAndDeleteOptions = struct {
+    allocator: std.mem.Allocator,
+    sort: ?bson.RawDocument = null,
+    projection: ?bson.RawDocument = null,
+    collation: ?bson.RawDocument = null,
+    hint: ?Hint = null,
+    let: ?bson.RawDocument = null,
+    comment: ?bson.Value = null,
+    diagnostics: ?*Diagnostics = null,
+    failure_reply: ?*?bson.OwnedDocument = null,
+};

@@ -77,4 +77,5 @@ test {
     _ = @import("crud/id_tests.zig");
     _ = @import("crud/insert_tests.zig");
     _ = @import("crud/update_tests.zig");
+    _ = @import("crud/find_and_modify_tests.zig");
 }

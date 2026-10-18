@@ -779,6 +779,9 @@ pub fn build(b: *std.Build) void {
         .{ "updateMany with a stage of a pipeline that is a number", "mongo.Collection.updateMany: update[1]: a document is a struct with named fields, such as .{ .name = name }, or a bson.RawDocument; got u32" },
         .{ "replaceOne with a pipeline", "mongo.Collection.replaceOne: replacement: a replacement is one document, not a list; a pipeline updates, with updateOne or updateMany" },
         .{ "deleteMany with a filter that is a string", "mongo.Collection.deleteMany: filter: a document is a struct with named fields, such as .{ .name = name }, or a bson.RawDocument; got *const [3:0]u8" },
+        .{ "findOneAndUpdate with a pointer in the filter", "mongo.Collection.findOneAndUpdate: filter: field 'owner' is *const crud_errors.User: pass the value itself, not a pointer to it" },
+        .{ "findOneAndReplace with a pipeline", "mongo.Collection.findOneAndReplace: replacement: a replacement is one document, not a list; a pipeline updates, with updateOne or updateMany" },
+        .{ "findOneAndDelete with a filter that is a tuple", "mongo.Collection.findOneAndDelete: filter: a tuple is an array, not a document: give its values names, such as .{ .a = x }" },
     }, 0..) |case, i| {
         const compile = b.addTest(.{
             .name = b.fmt("mongo-crud-error-{d}", .{i}),
