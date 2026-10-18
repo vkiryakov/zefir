@@ -43,3 +43,70 @@ pub const InsertManyOptions = struct {
     /// the server, from `allocator`; the slot must hold null.
     failure_reply: ?*?bson.OwnedDocument = null,
 };
+
+/// Which index the server uses for the filter, by name or by keys.
+pub const Hint = union(enum) {
+    /// The name of the index, such as "email_1".
+    name: []const u8,
+    /// The keys of the index as it was made: `bson.literal(.{ .email = 1 })`.
+    keys: bson.RawDocument,
+};
+
+pub const UpdateOptions = struct {
+    /// The memory of the result, and of the call's scratch, which is
+    /// freed before the call returns.
+    allocator: std.mem.Allocator,
+    /// Insert a document when none matches the filter; the server makes
+    /// its `_id`, and the result reports it.
+    upsert: bool = false,
+    /// `arrayFilters`: the items of arrays that an update operator with
+    /// `$[<name>]` changes, such as `bson.literal(.{ .high = .{ .@"$gte" = 100 } })`.
+    array_filters: ?[]const bson.RawDocument = null,
+    /// How strings compare in the filter: `bson.literal(.{ .locale = "fr" })`.
+    collation: ?bson.RawDocument = null,
+    hint: ?Hint = null,
+    /// Variables that the filter and the update read as `$$name`.
+    let: ?bson.RawDocument = null,
+    /// Let the changed documents past the collection's validator.
+    bypass_document_validation: bool = false,
+    /// Sent with the command, for the server's logs and profiler.
+    comment: ?bson.Value = null,
+    diagnostics: ?*Diagnostics = null,
+    /// After `CommandFailed`, or `Timeout` by code 50, the whole reply of
+    /// the server, from `allocator`; the slot must hold null.
+    failure_reply: ?*?bson.OwnedDocument = null,
+};
+
+/// The options of `replaceOne`: those of an update, without
+/// `array_filters`.
+pub const ReplaceOptions = struct {
+    /// The memory of the result, and of the call's scratch, which is
+    /// freed before the call returns.
+    allocator: std.mem.Allocator,
+    /// Insert the replacement when no document matches the filter; the
+    /// server makes its `_id`, unless it has one, and the result reports
+    /// it.
+    upsert: bool = false,
+    collation: ?bson.RawDocument = null,
+    hint: ?Hint = null,
+    /// Variables that the filter reads as `$$name`.
+    let: ?bson.RawDocument = null,
+    /// Let the replacement past the collection's validator.
+    bypass_document_validation: bool = false,
+    comment: ?bson.Value = null,
+    diagnostics: ?*Diagnostics = null,
+    failure_reply: ?*?bson.OwnedDocument = null,
+};
+
+pub const DeleteOptions = struct {
+    /// The memory of the result, and of the call's scratch, which is
+    /// freed before the call returns.
+    allocator: std.mem.Allocator,
+    collation: ?bson.RawDocument = null,
+    hint: ?Hint = null,
+    /// Variables that the filter reads as `$$name`.
+    let: ?bson.RawDocument = null,
+    comment: ?bson.Value = null,
+    diagnostics: ?*Diagnostics = null,
+    failure_reply: ?*?bson.OwnedDocument = null,
+};

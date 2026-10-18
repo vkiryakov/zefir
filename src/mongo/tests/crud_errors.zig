@@ -52,3 +52,23 @@ test "insertMany with a pointer in a document of a tuple" {
 test "insertMany of a slice of numbers" {
     _ = try users().insertMany(io(), op(), @as([]const u32, &.{1}), .{ .allocator = gpa() });
 }
+
+test "updateOne with a filter that holds a u64" {
+    _ = try users().updateOne(io(), op(), Counter{ .n = 1 }, .{ .@"$set" = .{ .n = 2 } }, .{ .allocator = gpa() });
+}
+
+test "updateOne with a u64 in the update" {
+    _ = try users().updateOne(io(), op(), .{}, .{ .@"$set" = Counter{ .n = 2 } }, .{ .allocator = gpa() });
+}
+
+test "updateMany with a stage of a pipeline that is a number" {
+    _ = try users().updateMany(io(), op(), .{}, .{ .{ .@"$set" = .{ .a = 1 } }, @as(u32, 1) }, .{ .allocator = gpa() });
+}
+
+test "replaceOne with a pipeline" {
+    _ = try users().replaceOne(io(), op(), .{}, .{.{ .@"$set" = .{ .a = 1 } }}, .{ .allocator = gpa() });
+}
+
+test "deleteMany with a filter that is a string" {
+    _ = try users().deleteMany(io(), op(), "all", .{ .allocator = gpa() });
+}

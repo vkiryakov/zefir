@@ -61,8 +61,14 @@ name: []const u8,
 
 pub const InsertOneOptions = options_.InsertOneOptions;
 pub const InsertManyOptions = options_.InsertManyOptions;
+pub const UpdateOptions = options_.UpdateOptions;
+pub const ReplaceOptions = options_.ReplaceOptions;
+pub const DeleteOptions = options_.DeleteOptions;
+pub const Hint = options_.Hint;
 pub const InsertOneResult = results.InsertOneResult;
 pub const InsertManyResult = results.InsertManyResult;
+pub const UpdateResult = results.UpdateResult;
+pub const DeleteResult = results.DeleteResult;
 
 /// Inserts `doc`: `insert` with the document in a section of kind 1. A
 /// document without `_id` gets an ObjectId first; the result reports the
@@ -73,7 +79,7 @@ pub fn insertOne(c: Collection, io: Io, op: OperationContext, doc: anytype, opti
     var scratch: std.heap.ArenaAllocator = .init(options.allocator);
     defer scratch.deinit();
     const a = scratch.allocator();
-    const body = try c.insertBody(a, options.bypass_document_validation, options.comment, options.diagnostics);
+    const body = try c.writeBody(a, "insert", .{ .bypass_document_validation = options.bypass_document_validation, .comment = options.comment }, options.diagnostics);
     const inserts: Inserts = .{ .io = io, .ids = c.db.ids, .arena = a, .diagnostics = options.diagnostics, .one = true };
     const items = [_]bson.RawDocument{try inserts.prepare(0, doc)};
     var merged = try c.runWrite(io, op, .insert, body, &items, true, .{
@@ -94,7 +100,7 @@ pub fn insertMany(c: Collection, io: Io, op: OperationContext, docs: anytype, op
     var scratch: std.heap.ArenaAllocator = .init(options.allocator);
     defer scratch.deinit();
     const a = scratch.allocator();
-    const body = try c.insertBody(a, options.bypass_document_validation, options.comment, options.diagnostics);
+    const body = try c.writeBody(a, "insert", .{ .bypass_document_validation = options.bypass_document_validation, .comment = options.comment }, options.diagnostics);
     const inserts: Inserts = .{ .io = io, .ids = c.db.ids, .arena = a, .diagnostics = options.diagnostics, .one = false };
     const items = try document.mapItems(a, docs, inserts, Inserts.prepare);
     if (items.len == 0) return invalid(options.diagnostics, "insertMany has no documents: it needs at least one", .{});
@@ -106,13 +112,214 @@ pub fn insertMany(c: Collection, io: Io, op: OperationContext, docs: anytype, op
     return results.ofInsertMany(options.allocator, &merged, items);
 }
 
-/// The body of an insert, without its documents.
-fn insertBody(c: Collection, a: Allocator, bypass: bool, comment: ?bson.Value, diagnostics: ?*Diagnostics) Error!bson.RawDocument {
+/// Updates the first document that `filter` matches. `update` is a
+/// document of update operators, its first key such as `$set`, or a
+/// pipeline: a list of stages. Anything else, `.{}` among it, is
+/// `error.InvalidArgument`.
+pub fn updateOne(c: Collection, io: Io, op: OperationContext, filter: anytype, update: anytype, options: UpdateOptions) Error!UpdateResult {
+    comptime document.expectDocument("updateOne", "filter", @TypeOf(filter));
+    comptime expectUpdate("updateOne", @TypeOf(update));
+    return c.updateWith(io, op, filter, update, false, options);
+}
+
+/// Updates every document that `filter` matches, as `updateOne` updates
+/// one: one statement with `multi: true`.
+pub fn updateMany(c: Collection, io: Io, op: OperationContext, filter: anytype, update: anytype, options: UpdateOptions) Error!UpdateResult {
+    comptime document.expectDocument("updateMany", "filter", @TypeOf(filter));
+    comptime expectUpdate("updateMany", @TypeOf(update));
+    return c.updateWith(io, op, filter, update, true, options);
+}
+
+/// Replaces the first document that `filter` matches with `replacement`,
+/// a document whose first key is no update operator (that is
+/// `error.InvalidArgument`); the document keeps its `_id`.
+pub fn replaceOne(c: Collection, io: Io, op: OperationContext, filter: anytype, replacement: anytype, options: ReplaceOptions) Error!UpdateResult {
+    comptime document.expectDocument("replaceOne", "filter", @TypeOf(filter));
+    comptime expectReplacement("replaceOne", @TypeOf(replacement));
+    try c.begin(options.diagnostics);
+    var scratch: std.heap.ArenaAllocator = .init(options.allocator);
+    defer scratch.deinit();
+    const a = scratch.allocator();
+    const body = try c.writeBody(a, "update", .{ .let = options.let, .bypass_document_validation = options.bypass_document_validation, .comment = options.comment }, options.diagnostics);
+    const statement = try updateStatement(a, .{
+        .q = try argument(a, filter, "the filter", options.diagnostics),
+        .u = .{ .document = try replacementOf(a, replacement, options.diagnostics) },
+        .u_name = "the replacement",
+        .upsert = options.upsert,
+        .collation = options.collation,
+        .hint = options.hint,
+    }, options.diagnostics);
+    var merged = try c.runWrite(io, op, .update, body, &.{statement}, true, .{
+        .allocator = options.allocator,
+        .diagnostics = options.diagnostics,
+        .failure_reply = options.failure_reply,
+    });
+    return results.ofUpdate(options.allocator, &merged);
+}
+
+/// Deletes the first document that `filter` matches: limit 1.
+pub fn deleteOne(c: Collection, io: Io, op: OperationContext, filter: anytype, options: DeleteOptions) Error!DeleteResult {
+    comptime document.expectDocument("deleteOne", "filter", @TypeOf(filter));
+    return c.deleteWith(io, op, filter, 1, options);
+}
+
+/// Deletes every document that `filter` matches: limit 0. `.{}` matches
+/// all.
+pub fn deleteMany(c: Collection, io: Io, op: OperationContext, filter: anytype, options: DeleteOptions) Error!DeleteResult {
+    comptime document.expectDocument("deleteMany", "filter", @TypeOf(filter));
+    return c.deleteWith(io, op, filter, 0, options);
+}
+
+fn updateWith(c: Collection, io: Io, op: OperationContext, filter: anytype, update: anytype, multi: bool, options: UpdateOptions) Error!UpdateResult {
+    try c.begin(options.diagnostics);
+    var scratch: std.heap.ArenaAllocator = .init(options.allocator);
+    defer scratch.deinit();
+    const a = scratch.allocator();
+    const body = try c.writeBody(a, "update", .{ .let = options.let, .bypass_document_validation = options.bypass_document_validation, .comment = options.comment }, options.diagnostics);
+    const statement = try updateStatement(a, .{
+        .q = try argument(a, filter, "the filter", options.diagnostics),
+        .u = try changeOf(a, update, options.diagnostics),
+        .u_name = "the update",
+        .multi = multi,
+        .upsert = options.upsert,
+        .array_filters = options.array_filters,
+        .collation = options.collation,
+        .hint = options.hint,
+    }, options.diagnostics);
+    var merged = try c.runWrite(io, op, .update, body, &.{statement}, true, .{
+        .allocator = options.allocator,
+        .diagnostics = options.diagnostics,
+        .failure_reply = options.failure_reply,
+    });
+    return results.ofUpdate(options.allocator, &merged);
+}
+
+fn deleteWith(c: Collection, io: Io, op: OperationContext, filter: anytype, limit: i32, options: DeleteOptions) Error!DeleteResult {
+    try c.begin(options.diagnostics);
+    var scratch: std.heap.ArenaAllocator = .init(options.allocator);
+    defer scratch.deinit();
+    const a = scratch.allocator();
+    const body = try c.writeBody(a, "delete", .{ .let = options.let, .comment = options.comment }, options.diagnostics);
+    var w: Writer = .init(a, options.diagnostics);
+    try w.document("q", try argument(a, filter, "the filter", options.diagnostics), "the filter");
+    try w.int32("limit", limit);
+    if (options.collation) |collation| try w.document("collation", collation, "the collation");
+    if (options.hint) |hint| try w.hint(hint);
+    const statement = try w.finish();
+    var merged = try c.runWrite(io, op, .delete, body, &.{statement}, true, .{
+        .allocator = options.allocator,
+        .diagnostics = options.diagnostics,
+        .failure_reply = options.failure_reply,
+    });
+    return results.ofDelete(options.allocator, &merged);
+}
+
+/// Stops the build unless `T` is an update: a document, or a list of the
+/// stages of a pipeline.
+fn expectUpdate(comptime operation: []const u8, comptime T: type) void {
+    if (document.kind(T) == .list) document.expectList(operation, "update", T) else document.expectDocument(operation, "update", T);
+}
+
+/// Stops the build unless `T` is a document: a replacement is never a list.
+fn expectReplacement(comptime operation: []const u8, comptime T: type) void {
+    if (document.kind(T) == .list) {
+        @compileError("mongo.Collection." ++ operation ++ ": replacement: a replacement is one document, not a list; a pipeline updates, with updateOne or updateMany");
+    }
+    document.expectDocument(operation, "replacement", T);
+}
+
+/// What the `u` of a statement holds.
+const Change = union(enum) {
+    /// A document of update operators, or a replacement.
+    document: bson.RawDocument,
+    /// The stages of a pipeline.
+    pipeline: []const bson.RawDocument,
+};
+
+/// The update `value`: a pipeline when it is a list, at least one stage
+/// long, or else a document whose first key is an update operator.
+fn changeOf(a: Allocator, value: anytype, diagnostics: ?*Diagnostics) Error!Change {
+    if (comptime document.kind(@TypeOf(value)) == .list) {
+        const stages = document.encodeList(a, value) catch |err| return unwritten(err, diagnostics, "the pipeline of the update");
+        if (stages.len == 0) return invalid(diagnostics, "the update is an empty pipeline: a pipeline needs at least one stage", .{});
+        return .{ .pipeline = stages };
+    }
+    const doc = try argument(a, value, "the update", diagnostics);
+    const first = (doc.first() catch return invalid(diagnostics, "the update " ++ unwritable, .{})) orelse
+        return invalid(diagnostics, "the update is empty: it starts with an update operator, such as $set, or it is a pipeline", .{});
+    if (first.key.len == 0 or first.key[0] != '$') {
+        return invalid(diagnostics, "the update starts with '{s}', not with an update operator such as $set: to replace the whole document, use replaceOne", .{first.key});
+    }
+    return .{ .document = doc };
+}
+
+/// The replacement `value`: a document whose first key is no update
+/// operator; `{}` is one.
+fn replacementOf(a: Allocator, value: anytype, diagnostics: ?*Diagnostics) Error!bson.RawDocument {
+    const doc = try argument(a, value, "the replacement", diagnostics);
+    const first = doc.first() catch return invalid(diagnostics, "the replacement " ++ unwritable, .{});
+    if (first) |element| if (element.key.len > 0 and element.key[0] == '$') {
+        return invalid(diagnostics, "the replacement starts with the update operator '{s}': to change fields of the document, use updateOne", .{element.key});
+    };
+    return doc;
+}
+
+/// A statement of `update`: `{q, u, multi?, upsert?, arrayFilters?, collation?, hint?}`.
+const UpdateStatement = struct {
+    q: bson.RawDocument,
+    u: Change,
+    /// What `u` is to the caller, for the diagnostics.
+    u_name: []const u8,
+    multi: bool = false,
+    upsert: bool = false,
+    array_filters: ?[]const bson.RawDocument = null,
+    collation: ?bson.RawDocument = null,
+    hint: ?Hint = null,
+};
+
+fn updateStatement(a: Allocator, s: UpdateStatement, diagnostics: ?*Diagnostics) Error!bson.RawDocument {
     var w: Writer = .init(a, diagnostics);
-    try w.string("insert", c.name);
-    if (bypass) try w.boolean("bypassDocumentValidation", true);
-    if (comment) |value| try w.value("comment", value, "the comment");
+    try w.document("q", s.q, "the filter");
+    switch (s.u) {
+        .document => |doc| try w.document("u", doc, s.u_name),
+        .pipeline => |stages| try w.documents("u", stages, "the pipeline of the update"),
+    }
+    if (s.multi) try w.boolean("multi", true);
+    if (s.upsert) try w.boolean("upsert", true);
+    if (s.array_filters) |filters| try w.documents("arrayFilters", filters, "array_filters");
+    if (s.collation) |collation| try w.document("collation", collation, "the collation");
+    if (s.hint) |hint| try w.hint(hint);
     return w.finish();
+}
+
+/// What the body of a write may carry besides its name.
+const Body = struct {
+    let: ?bson.RawDocument = null,
+    bypass_document_validation: bool = false,
+    comment: ?bson.Value = null,
+};
+
+/// The body of a write without its items: `{<command>: <collection>,
+/// let?, bypassDocumentValidation?, comment?}`.
+fn writeBody(c: Collection, a: Allocator, command: []const u8, body: Body, diagnostics: ?*Diagnostics) Error!bson.RawDocument {
+    var w: Writer = .init(a, diagnostics);
+    try w.string(command, c.name);
+    if (body.let) |let| try w.document("let", let, "let");
+    if (body.bypass_document_validation) try w.boolean("bypassDocumentValidation", true);
+    if (body.comment) |value| try w.value("comment", value, "the comment");
+    return w.finish();
+}
+
+/// The document `value` of an argument, of the three forms, in `a`.
+fn argument(a: Allocator, value: anytype, comptime what: []const u8, diagnostics: ?*Diagnostics) Error!bson.RawDocument {
+    return document.encode(a, value) catch |err| unwritten(err, diagnostics, what);
+}
+
+fn unwritten(err: bson.Builder.Error, diagnostics: ?*Diagnostics, what: []const u8) Error {
+    return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.InvalidBson => invalid(diagnostics, "{s} " ++ unwritable, .{what}),
+    };
 }
 
 /// Makes the documents of an insert as it sends them, each with its `_id`.
@@ -204,6 +411,30 @@ const Writer = struct {
 
     fn boolean(w: *Writer, key: []const u8, value_: bool) Error!void {
         w.b.putBoolean(key, value_) catch |err| return w.fail(err, key);
+    }
+
+    fn int32(w: *Writer, key: []const u8, value_: i32) Error!void {
+        w.b.putInt32(key, value_) catch |err| return w.fail(err, key);
+    }
+
+    /// A document, checked whole as `RawDocument.validate` checks it.
+    fn document(w: *Writer, key: []const u8, doc: bson.RawDocument, what: []const u8) Error!void {
+        w.b.putDocument(key, doc) catch |err| return w.fail(err, what);
+    }
+
+    /// An array of documents.
+    fn documents(w: *Writer, key: []const u8, docs: []const bson.RawDocument, what: []const u8) Error!void {
+        w.b.beginArray(key) catch |err| return w.fail(err, what);
+        for (docs) |doc| w.b.putDocument("", doc) catch |err| return w.fail(err, what);
+        w.b.end() catch |err| return w.fail(err, what);
+    }
+
+    /// `hint`: the name of an index, or its keys.
+    fn hint(w: *Writer, value_: Hint) Error!void {
+        switch (value_) {
+            .name => |name| try w.string("hint", name),
+            .keys => |keys| try w.document("hint", keys, "the hint"),
+        }
     }
 
     /// A value of any BSON type but the deprecated ones; a string must be

@@ -50,6 +50,37 @@ pub const InsertManyResult = struct {
     }
 };
 
+pub const UpdateResult = struct {
+    /// How many documents matched the filter: the server's `n` less the
+    /// upserts.
+    matched: u64 = 0,
+    /// How many of them the write changed: `nModified`.
+    modified: u64 = 0,
+    /// The `_id` of the document that an upsert inserted, which the
+    /// server made unless the document had one.
+    upserted_id: ?bson.Value = null,
+    write_errors: []const WriteError = &.{},
+    write_concern_errors: []const WriteConcernError = &.{},
+
+    pub fn deinit(r: *UpdateResult, allocator: Allocator) void {
+        if (r.upserted_id) |value| contract.freeValue(allocator, value);
+        freeErrors(allocator, r.write_errors, r.write_concern_errors);
+        r.* = .{};
+    }
+};
+
+pub const DeleteResult = struct {
+    /// How many documents the server deleted.
+    deleted: u64 = 0,
+    write_errors: []const WriteError = &.{},
+    write_concern_errors: []const WriteConcernError = &.{},
+
+    pub fn deinit(r: *DeleteResult, allocator: Allocator) void {
+        freeErrors(allocator, r.write_errors, r.write_concern_errors);
+        r.* = .{};
+    }
+};
+
 /// The result of insertOne of `doc`, as it went out, from the merged result
 /// of its write, which it takes over: `merged` is empty after it, and on
 /// an error too.
@@ -57,6 +88,7 @@ pub fn ofInsertOne(allocator: Allocator, merged: *WriteResult, doc: bson.RawDocu
     errdefer merged.deinit(allocator);
     const inserted_id = try id.idOf(allocator, doc);
     const lists = take(allocator, merged);
+    if (lists.upserted_id) |value| contract.freeValue(allocator, value);
     return .{ .inserted_id = inserted_id, .write_errors = lists.write_errors, .write_concern_errors = lists.write_concern_errors };
 }
 
@@ -77,6 +109,7 @@ pub fn ofInsertMany(allocator: Allocator, merged: *WriteResult, docs: []const bs
     const n = merged.n;
     const answered = merged.answered;
     const lists = take(allocator, merged);
+    if (lists.upserted_id) |value| contract.freeValue(allocator, value);
     return .{
         .inserted_ids = ids,
         .inserted = n,
@@ -86,18 +119,49 @@ pub fn ofInsertMany(allocator: Allocator, merged: *WriteResult, docs: []const bs
     };
 }
 
+/// The result of updateOne, updateMany or replaceOne, of their one
+/// statement, from the merged result of its write, which it takes over:
+/// `merged` is empty after it.
+pub fn ofUpdate(allocator: Allocator, merged: *WriteResult) UpdateResult {
+    const n = merged.n;
+    const modified = merged.modified;
+    const upserts = merged.upserted.len;
+    const lists = take(allocator, merged);
+    return .{
+        .matched = n -| upserts,
+        .modified = modified,
+        .upserted_id = lists.upserted_id,
+        .write_errors = lists.write_errors,
+        .write_concern_errors = lists.write_concern_errors,
+    };
+}
+
+/// The result of deleteOne or deleteMany, as `ofUpdate` makes it.
+pub fn ofDelete(allocator: Allocator, merged: *WriteResult) DeleteResult {
+    const n = merged.n;
+    const lists = take(allocator, merged);
+    if (lists.upserted_id) |value| contract.freeValue(allocator, value);
+    return .{ .deleted = n, .write_errors = lists.write_errors, .write_concern_errors = lists.write_concern_errors };
+}
+
 const Lists = struct {
+    /// The `_id` of the first upsert: a write of one statement has at most
+    /// one.
+    upserted_id: ?bson.Value,
     write_errors: []const WriteError,
     write_concern_errors: []const WriteConcernError,
 };
 
-/// The lists of errors of `merged`, which it hands over; what else it
-/// holds is freed, and it is empty after it.
+/// The lists of errors of `merged` and the `_id` of its first upsert,
+/// which it hands over; what else it holds is freed, and it is empty
+/// after it.
 fn take(allocator: Allocator, merged: *WriteResult) Lists {
-    const lists: Lists = .{ .write_errors = merged.write_errors, .write_concern_errors = merged.write_concern_errors };
-    merged.write_errors = &.{};
-    merged.write_concern_errors = &.{};
-    merged.deinit(allocator);
+    var lists: Lists = .{ .upserted_id = null, .write_errors = merged.write_errors, .write_concern_errors = merged.write_concern_errors };
+    for (merged.upserted, 0..) |upserted, i| {
+        if (i == 0) lists.upserted_id = upserted.id else contract.freeValue(allocator, upserted.id);
+    }
+    allocator.free(merged.upserted);
+    merged.* = .{};
     return lists;
 }
 
