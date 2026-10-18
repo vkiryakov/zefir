@@ -2,7 +2,7 @@
 //! `mongo.Database`, so that every driver runs the same ones; here they
 //! run on `FakeDriver` through `Proxy` against mongo-plain, with a
 //! `maxWriteBatchSize` of 3, so that writes go out in several batches.
-//! Each scenario works in a collection of its own, which it drops before
+//! Each scenario works in collections of its own, which it drops before
 //! and after.
 
 const std = @import("std");
@@ -28,6 +28,10 @@ pub const scenarios = [_]Scenario{
     .{ .name = "an unordered insertMany inserts all but its duplicates", .run = unorderedDuplicates },
     .{ .name = "findOneAndUpdate before and after, findOneAndReplace, findOneAndDelete", .run = findAndModify },
     .{ .name = "upserts, updates, replaces and deletes", .run = upserts },
+    .{ .name = "find of 250 documents in batches of 7, with a filter, a projection, a skip and a limit; findOne", .run = findMany },
+    .{ .name = "countDocuments, estimatedDocumentCount, distinct and aggregate", .run = counts },
+    .{ .name = "createIndexes names its indexes, listIndexes lists them, dropIndex and dropIndexes drop them", .run = indexes },
+    .{ .name = "listCollections, runCommand, runCursorCommand, a drop twice and Database.drop", .run = collections },
 };
 
 /// Runs every scenario on `db`, and names the one that fails.
@@ -69,6 +73,17 @@ fn onFakeDriver(io: Io) !void {
         if (n == 3) full += 1;
     }
     try testing.expect(full >= 3);
+
+    // The find of 250 documents at a batch size of 7: a first batch and 35
+    // getMores of 7.
+    var sevens: usize = 0;
+    for (0..script.received(io)) |i| {
+        const entry = script.entry(io, i);
+        if (!std.mem.eql(u8, entry.name, "getMore")) continue;
+        const size = (try entry.body.get("batchSize")) orelse continue;
+        if (try size.asI64() == 7) sevens += 1;
+    }
+    try testing.expectEqual(@as(usize, 35), sevens);
 }
 
 /// Under a deadline, so that every command takes maxTimeMS to mongod and
@@ -373,4 +388,305 @@ fn upserts(io: Io, db: mongo.Database) anyerror!void {
     var rest = try users.deleteMany(io, op(io), .{}, .{ .allocator = a });
     defer rest.deinit(a);
     try testing.expectEqual(@as(u64, 0), rest.deleted);
+}
+
+/// Inserts `count` documents `{n, even, tag}` into `name`, `n` from 0 and
+/// `tag` "t0" to "t4" in turn.
+fn seed(io: Io, db: mongo.Database, name: []const u8, count: usize) !void {
+    const Doc = struct { n: i32, even: bool, tag: []const u8 };
+    const docs = try testing.allocator.alloc(Doc, count);
+    defer testing.allocator.free(docs);
+    for (docs, 0..) |*doc, i| doc.* = .{ .n = @intCast(i), .even = i % 2 == 0, .tag = tags[i % tags.len] };
+    var d: mongo.Diagnostics = .{};
+    var result = db.collection(name).insertMany(io, op(io), docs, .{ .allocator = testing.allocator, .diagnostics = &d }) catch |err|
+        return report(err, &d, "insertMany");
+    result.deinit(testing.allocator);
+}
+
+const tags = [_][]const u8{ "t0", "t1", "t2", "t3", "t4" };
+
+fn nOf(doc: bson.RawDocument) !i64 {
+    return (try doc.get("n") orelse return error.TestNoN).asI64();
+}
+
+fn findMany(io: Io, db: mongo.Database) anyerror!void {
+    const name = "crud_find";
+    try drop(io, db, name);
+    defer drop(io, db, name) catch {};
+    try seed(io, db, name, 250);
+    const users = db.collection(name);
+    const a = testing.allocator;
+    var d: mongo.Diagnostics = .{};
+
+    // All of them, in the order of the sort, batch by batch.
+    {
+        const cursor = users.find(io, op(io), .{}, .{ .allocator = a, .sort = bson.literal(.{ .n = 1 }), .batch_size = 7, .diagnostics = &d }) catch |err|
+            return report(err, &d, "find");
+        defer cursor.deinit(io);
+        var expected: i64 = 0;
+        while (cursor.next(io, op(io)) catch |err| return report(err, &d, "next of find")) |doc| : (expected += 1) {
+            try testing.expectEqual(expected, try nOf(doc));
+        }
+        try testing.expectEqual(@as(i64, 250), expected);
+    }
+    // A limit equal to the batch size: the server ends the cursor with
+    // the first batch, and the cursor gives no more than the limit.
+    {
+        const cursor = try users.find(io, op(io), .{ .even = true }, .{
+            .allocator = a,
+            .sort = bson.literal(.{ .n = -1 }),
+            .projection = bson.literal(.{ ._id = 0, .n = 1 }),
+            .skip = 1,
+            .limit = 10,
+            .batch_size = 10,
+        });
+        defer cursor.deinit(io);
+        var got: i64 = 0;
+        while (try cursor.next(io, op(io))) |doc| : (got += 1) {
+            // The even ones from the top, the first skipped: 246, 244, …
+            try testing.expectEqual(246 - 2 * got, try nOf(doc));
+            try testing.expect(try doc.get("_id") == null);
+            try testing.expect(try doc.get("tag") == null);
+        }
+        try testing.expectEqual(@as(i64, 10), got);
+    }
+    const top = (try users.findOne(io, op(io), .{}, .{ .allocator = a, .sort = bson.literal(.{ .n = -1 }) })) orelse return error.TestNoDocument;
+    defer top.deinit();
+    try testing.expectEqual(@as(i64, 249), try nOf(top.raw()));
+    const second_t3 = (try users.findOne(io, op(io), .{ .tag = "t3" }, .{ .allocator = a, .sort = bson.literal(.{ .n = 1 }), .skip = 1 })) orelse return error.TestNoDocument;
+    defer second_t3.deinit();
+    try testing.expectEqual(@as(i64, 8), try nOf(second_t3.raw()));
+    try testing.expect(try users.findOne(io, op(io), .{ .n = 1000 }, .{ .allocator = a }) == null);
+}
+
+fn counts(io: Io, db: mongo.Database) anyerror!void {
+    const name = "crud_count";
+    try drop(io, db, name);
+    defer drop(io, db, name) catch {};
+    try seed(io, db, name, 250);
+    const users = db.collection(name);
+    const a = testing.allocator;
+    var d: mongo.Diagnostics = .{};
+
+    try testing.expectEqual(@as(u64, 250), users.countDocuments(io, op(io), .{}, .{ .allocator = a, .diagnostics = &d }) catch |err|
+        return report(err, &d, "countDocuments"));
+    try testing.expectEqual(@as(u64, 125), try users.countDocuments(io, op(io), .{ .even = true }, .{ .allocator = a }));
+    try testing.expectEqual(@as(u64, 100), try users.countDocuments(io, op(io), .{}, .{ .allocator = a, .skip = 10, .limit = 100 }));
+    try testing.expectEqual(@as(u64, 0), try users.countDocuments(io, op(io), .{ .n = .{ .@"$gt" = 1000 } }, .{ .allocator = a }));
+    try testing.expectEqual(@as(u64, 250), users.estimatedDocumentCount(io, op(io), .{ .allocator = a, .diagnostics = &d }) catch |err|
+        return report(err, &d, "estimatedDocumentCount"));
+    // A collection that is not there counts 0 both ways.
+    const none = db.collection("crud_count_none");
+    try testing.expectEqual(@as(u64, 0), try none.countDocuments(io, op(io), .{}, .{ .allocator = a }));
+    try testing.expectEqual(@as(u64, 0), try none.estimatedDocumentCount(io, op(io), .{ .allocator = a }));
+
+    // Each tag once, in any order.
+    const values = users.distinct(io, op(io), "tag", .{}, .{ .allocator = a, .diagnostics = &d }) catch |err| return report(err, &d, "distinct");
+    defer values.deinit();
+    var seen: [tags.len]bool = @splat(false);
+    var it = values.raw().iterator();
+    var distinct: usize = 0;
+    while (try it.next()) |element| : (distinct += 1) {
+        const tag = element.value.string;
+        for (tags, &seen) |known, *was| {
+            if (std.mem.eql(u8, known, tag)) was.* = true;
+        }
+    }
+    try testing.expectEqual(tags.len, distinct);
+    for (seen) |was| try testing.expect(was);
+    const flags = try users.distinct(io, op(io), "even", .{ .n = .{ .@"$lt" = 2 } }, .{ .allocator = a });
+    defer flags.deinit();
+    var flag_count: usize = 0;
+    var flag_it = flags.raw().iterator();
+    while (try flag_it.next()) |_| flag_count += 1;
+    try testing.expectEqual(@as(usize, 2), flag_count);
+
+    // The even ones by tag: 25 of each, in batches of 2.
+    const groups = users.aggregate(io, op(io), .{
+        .{ .@"$match" = .{ .even = true } },
+        .{ .@"$group" = .{ ._id = "$tag", .n = .{ .@"$sum" = 1 } } },
+        .{ .@"$sort" = .{ ._id = 1 } },
+    }, .{ .allocator = a, .batch_size = 2, .diagnostics = &d }) catch |err| return report(err, &d, "aggregate");
+    defer groups.deinit(io);
+    var group: usize = 0;
+    while (try groups.next(io, op(io))) |doc| : (group += 1) {
+        try testing.expectEqualStrings(tags[group], (try doc.get("_id")).?.string);
+        try testing.expectEqual(@as(i64, 25), try nOf(doc));
+    }
+    try testing.expectEqual(tags.len, group);
+    // The empty pipeline gives every document.
+    const everything = try users.aggregate(io, op(io), .{}, .{ .allocator = a });
+    defer everything.deinit(io);
+    var all_count: usize = 0;
+    while (try everything.next(io, op(io))) |_| all_count += 1;
+    try testing.expectEqual(@as(usize, 250), all_count);
+}
+
+fn freeNames(names: []const []const u8) void {
+    for (names) |name| testing.allocator.free(name);
+    testing.allocator.free(names);
+}
+
+/// Fails unless the indexes of `users` are those named `expected`, in any
+/// order; listed one per batch, so that getMore goes to the namespace of
+/// the cursor of listIndexes.
+fn expectIndexes(io: Io, users: mongo.Collection, expected: []const []const u8) !void {
+    var d: mongo.Diagnostics = .{};
+    const cursor = users.listIndexes(io, op(io), .{ .allocator = testing.allocator, .batch_size = 1, .diagnostics = &d }) catch |err|
+        return report(err, &d, "listIndexes");
+    defer cursor.deinit(io);
+    var listed: usize = 0;
+    while (cursor.next(io, op(io)) catch |err| return report(err, &d, "next of listIndexes")) |index| : (listed += 1) {
+        const name = (try index.get("name")).?.string;
+        for (expected) |known| {
+            if (std.mem.eql(u8, known, name)) break;
+        } else {
+            std.debug.print("listIndexes gave {s}, which is not among the expected ones\n", .{name});
+            return error.TestUnexpectedIndex;
+        }
+    }
+    try testing.expectEqual(expected.len, listed);
+}
+
+/// The index `name` of `users`, as listIndexes gives it, copied into
+/// `arena`.
+fn indexNamed(io: Io, users: mongo.Collection, arena: std.mem.Allocator, name: []const u8) !bson.RawDocument {
+    const cursor = try users.listIndexes(io, op(io), .{ .allocator = testing.allocator });
+    defer cursor.deinit(io);
+    while (try cursor.next(io, op(io))) |index| {
+        if (std.mem.eql(u8, (try index.get("name")).?.string, name)) return .{ .bytes = try arena.dupe(u8, index.bytes) };
+    }
+    return error.TestNoIndex;
+}
+
+fn indexes(io: Io, db: mongo.Database) anyerror!void {
+    const name = "crud_indexes";
+    try drop(io, db, name);
+    defer drop(io, db, name) catch {};
+    const users = db.collection(name);
+    const a = testing.allocator;
+    var d: mongo.Diagnostics = .{};
+
+    const models = [_]mongo.Collection.IndexModel{
+        .{ .keys = bson.literal(.{ .email = 1 }), .unique = true },
+        .{ .keys = bson.literal(.{ .age = -1, .name = 1 }) },
+        .{ .keys = bson.literal(.{ .created = 1 }), .expire_after_seconds = 3600 },
+        .{ .keys = bson.literal(.{ .tag = 1 }), .name = "by_tag", .partial_filter_expression = bson.literal(.{ .tag = .{ .@"$exists" = true } }), .hidden = true },
+    };
+    const names = users.createIndexes(io, op(io), &models, .{ .allocator = a, .diagnostics = &d }) catch |err|
+        return report(err, &d, "createIndexes");
+    defer freeNames(names);
+    try testing.expectEqual(models.len, names.len);
+    for ([_][]const u8{ "email_1", "age_-1_name_1", "created_1", "by_tag" }, names) |expected, got| try testing.expectEqualStrings(expected, got);
+    // The same indexes again: they are there, and that is no error.
+    freeNames(users.createIndexes(io, op(io), &models, .{ .allocator = a, .diagnostics = &d }) catch |err|
+        return report(err, &d, "createIndexes again"));
+    try expectIndexes(io, users, &.{ "_id_", "email_1", "age_-1_name_1", "created_1", "by_tag" });
+
+    // The options went out: mongod lists them with the indexes.
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    try testing.expect((try (try indexNamed(io, users, arena.allocator(), "email_1")).get("unique")).?.boolean);
+    try testing.expectEqual(@as(i64, 3600), try (try (try indexNamed(io, users, arena.allocator(), "created_1")).get("expireAfterSeconds")).?.asI64());
+    const by_tag = try indexNamed(io, users, arena.allocator(), "by_tag");
+    try testing.expect((try by_tag.get("hidden")).?.boolean);
+    try testing.expect(try by_tag.get("partialFilterExpression") != null);
+    // The unique index refuses a duplicate.
+    var first = try users.insertOne(io, op(io), .{ .email = "ann@example.com" }, .{ .allocator = a });
+    first.deinit(a);
+    try testing.expectError(error.WriteFailed, users.insertOne(io, op(io), .{ .email = "ann@example.com" }, .{ .allocator = a, .diagnostics = &d }));
+    try testing.expectEqual(@as(i32, 11000), d.server.?.code);
+
+    try users.dropIndex(io, op(io), "by_tag", .{ .allocator = a });
+    try expectIndexes(io, users, &.{ "_id_", "email_1", "age_-1_name_1", "created_1" });
+    // An index that is not there: older servers answer IndexNotFound (27),
+    // newer ones ok.
+    if (users.dropIndex(io, op(io), "by_tag", .{ .allocator = a, .diagnostics = &d })) |_| {} else |err| {
+        try testing.expectEqual(error.CommandFailed, err);
+        try testing.expectEqual(@as(i32, 27), d.server.?.code);
+    }
+    try testing.expectError(error.InvalidArgument, users.dropIndex(io, op(io), "*", .{ .allocator = a }));
+    try users.dropIndexes(io, op(io), .{ .allocator = a, .comment = .{ .string = "e2e" } });
+    try expectIndexes(io, users, &.{"_id_"});
+}
+
+/// The names that `listCollections` with `filter` gives in `db`, one per
+/// batch, copied into `arena`.
+fn collectionNames(io: Io, db: mongo.Database, arena: std.mem.Allocator, filter: ?bson.RawDocument) ![]const []const u8 {
+    var d: mongo.Diagnostics = .{};
+    const cursor = db.listCollections(io, op(io), .{
+        .allocator = testing.allocator,
+        .filter = filter,
+        .name_only = true,
+        .batch_size = 1,
+        .comment = .{ .string = "e2e" },
+        .diagnostics = &d,
+    }) catch |err| return report(err, &d, "listCollections");
+    defer cursor.deinit(io);
+    var names: std.ArrayList([]const u8) = .empty;
+    while (cursor.next(io, op(io)) catch |err| return report(err, &d, "next of listCollections")) |info| {
+        try testing.expectEqualStrings("collection", (try info.get("type")).?.string);
+        try names.append(arena, try arena.dupe(u8, (try info.get("name")).?.string));
+    }
+    return names.items;
+}
+
+fn has(names: []const []const u8, name: []const u8) bool {
+    for (names) |listed| {
+        if (std.mem.eql(u8, listed, name)) return true;
+    }
+    return false;
+}
+
+fn collections(io: Io, db: mongo.Database) anyerror!void {
+    const first = "crud_list_a";
+    const second = "crud_list_b";
+    try drop(io, db, first);
+    try drop(io, db, second);
+    defer drop(io, db, first) catch {};
+    defer drop(io, db, second) catch {};
+    const a = testing.allocator;
+    var d: mongo.Diagnostics = .{};
+    for ([_][]const u8{ first, second }) |name| {
+        var made = try db.collection(name).insertOne(io, op(io), .{ .n = 1 }, .{ .allocator = a });
+        made.deinit(a);
+    }
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    const both = bson.literal(.{ .name = .{ .@"$in" = .{ "crud_list_a", "crud_list_b" } } });
+    const listed = try collectionNames(io, db, arena.allocator(), both);
+    try testing.expectEqual(@as(usize, 2), listed.len);
+    try testing.expect(has(listed, first) and has(listed, second));
+
+    // Any command, as it is.
+    const counted = db.runCommand(io, op(io), .{ .count = first }, .{ .allocator = a, .diagnostics = &d }) catch |err| return report(err, &d, "runCommand");
+    defer counted.deinit();
+    try testing.expectEqual(@as(i64, 1), try nOf(counted.raw()));
+    // A cursor whose first batch is empty: the document comes in a
+    // getMore of the batch size given.
+    {
+        const docs = db.runCursorCommand(io, op(io), .{ .find = second, .filter = .{}, .batchSize = 0 }, .{ .allocator = a, .batch_size = 1, .diagnostics = &d }) catch |err|
+            return report(err, &d, "runCursorCommand");
+        defer docs.deinit(io);
+        try testing.expectEqual(@as(i64, 1), try nOf((try docs.next(io, op(io))).?));
+        try testing.expect(try docs.next(io, op(io)) == null);
+    }
+
+    // A drop, and a drop of what is gone: no error either time.
+    try db.collection(first).drop(io, op(io), .{ .allocator = a, .diagnostics = &d });
+    try db.collection(first).drop(io, op(io), .{ .allocator = a, .diagnostics = &d });
+    try testing.expect(d.server == null);
+    const left = try collectionNames(io, db, arena.allocator(), both);
+    try testing.expectEqual(@as(usize, 1), left.len);
+    try testing.expectEqualStrings(second, left[0]);
+
+    // Database.drop drops every collection of a database, and twice is no
+    // error.
+    const other: mongo.Database = .init(db.client, "zefir_e2e_drop", db.ids);
+    var made = try other.collection("x").insertOne(io, op(io), .{ .n = 1 }, .{ .allocator = a });
+    made.deinit(a);
+    try testing.expectEqual(@as(usize, 1), (try collectionNames(io, other, arena.allocator(), null)).len);
+    try other.drop(io, op(io), .{ .allocator = a });
+    try other.drop(io, op(io), .{ .allocator = a });
+    try testing.expectEqual(@as(usize, 0), (try collectionNames(io, other, arena.allocator(), null)).len);
 }
