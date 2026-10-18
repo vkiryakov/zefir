@@ -16,7 +16,7 @@
 const std = @import("std");
 
 /// The services of the profile `mongo` that the tests use.
-const services = [_][]const u8{ "mongo-plain", "mongo-ghost" };
+const services = [_][]const u8{ "mongo-plain", "mongo-auth", "mongo-ghost" };
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});

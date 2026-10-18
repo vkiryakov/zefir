@@ -15,6 +15,9 @@ pub const Proxy = @import("Proxy.zig");
 pub const servers = struct {
     /// mongo-plain: no authentication, test commands on.
     pub const plain_port: u16 = 27117;
+    /// mongo-auth: --auth with the users of init/users.js, test commands
+    /// on.
+    pub const auth_port: u16 = 27118;
     /// mongo-ghost: a member of a replica set that is not initialized.
     pub const ghost_port: u16 = 27121;
 };
@@ -69,4 +72,5 @@ test {
     _ = @import("conformance.zig");
     _ = @import("crud.zig");
     _ = @import("connect.zig");
+    _ = @import("auth.zig");
 }

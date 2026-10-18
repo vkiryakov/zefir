@@ -32,6 +32,8 @@
 # with an empty database. Their ports, on 127.0.0.1 only:
 #
 #   27117  mongo-plain: no authentication, test commands on for fail points
+#   27118  mongo-auth: --auth with the users of
+#          tests/mongo-async-driver/init/users.js, test commands on
 #   27121  mongo-ghost: a member of the replica set "ghost" that is never
 #          initialized (RSGhost), for the native driver to refuse
 
@@ -149,6 +151,22 @@ services:
     <<: *mongo
     command: ["mongod", "--setParameter", "enableTestCommands=1"]
     ports: ["127.0.0.1:27117:27017"]
+
+  # The image makes the users of init/users.js at every start, on a
+  # temporary mongod without --auth that listens on 127.0.0.1 of the
+  # container only. The healthcheck waits for the mongod after it: a
+  # command without a user must be refused (code 13), as only --auth does.
+  mongo-auth:
+    <<: *mongo
+    command: ["mongod", "--auth", "--setParameter", "enableTestCommands=1"]
+    volumes:
+      - ./tests/mongo-async-driver/init:/docker-entrypoint-initdb.d:ro
+    ports: ["127.0.0.1:27118:27017"]
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "let r; try { r = db.adminCommand({ listDatabases: 1 }) } catch (e) { r = e } quit(r.code === 13 ? 0 : 1)"]
+      interval: 1s
+      timeout: 5s
+      retries: 60
 
   # A member of a replica set without rs.initiate(): its hello says
   # isreplicaset, and the native driver refuses it.
