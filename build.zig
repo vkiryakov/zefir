@@ -106,7 +106,19 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // Umbrella module: @import("zefir").core, .log, .confy, .validator, .rpc, .rpc_nats, .rpc_log, .orm, .nats
+    // What every MongoDB driver of zefir shares, starting with BSON. It
+    // imports no driver: drivers import it.
+    const mongo = b.addModule("zefir-mongo", .{
+        .root_source_file = b.path("src/mongo/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+        .imports = &.{
+            .{ .name = "core", .module = core },
+        },
+    });
+
+    // Umbrella module: @import("zefir").core, .log, .confy, .validator, .rpc, .rpc_nats, .rpc_log, .orm, .mongo, .nats
     const zefir = b.addModule("zefir", .{
         .root_source_file = b.path("src/zefir.zig"),
         .target = target,
@@ -121,6 +133,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "rpc-nats", .module = rpc_nats },
             .{ .name = "rpc-log", .module = rpc_log },
             .{ .name = "orm", .module = orm },
+            .{ .name = "mongo", .module = mongo },
             .{ .name = "nats", .module = nats },
         },
     });
@@ -138,6 +151,7 @@ pub fn build(b: *std.Build) void {
     const test_rpc_nats = addModuleTestStep(b, test_step, "rpc-nats");
     const test_rpc_log = addModuleTestStep(b, test_step, "rpc-log");
     const test_orm = addModuleTestStep(b, test_step, "orm");
+    const test_mongo = addModuleTestStep(b, test_step, "mongo");
     const test_nats = addModuleTestStep(b, test_step, "nats");
     const test_zefir = addModuleTestStep(b, test_step, "zefir");
     // Builds the validator's test binaries without running them, so that
@@ -145,8 +159,8 @@ pub fn build(b: *std.Build) void {
     // where usize has 32 bits.
     const validator_compile_step = b.step("compile-validator-tests", "Build the validator's test binaries for -Dtarget without running them");
     for (
-        [_]*std.Build.Module{ core, log, confy, validator, rpc, rpc_nats, rpc_log, orm, nats, zefir },
-        [_]*std.Build.Step{ test_core, test_log, test_confy, test_validator, test_rpc, test_rpc_nats, test_rpc_log, test_orm, test_nats, test_zefir },
+        [_]*std.Build.Module{ core, log, confy, validator, rpc, rpc_nats, rpc_log, orm, mongo, nats, zefir },
+        [_]*std.Build.Step{ test_core, test_log, test_confy, test_validator, test_rpc, test_rpc_nats, test_rpc_log, test_orm, test_mongo, test_nats, test_zefir },
     ) |module, module_test_step| {
         const tests = b.addTest(.{ .root_module = module });
         module_test_step.dependOn(&addRun(b, tests, tsan).step);
