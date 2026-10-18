@@ -21,7 +21,7 @@ set -eu
 # The modules and what the tests of each one import. Keep this in sync with
 # build.zig: the `.imports` of each module and of the programs that its
 # test-<module> step builds. CI tests only the modules listed here.
-modules="core log confy validator rpc rpc-nats rpc-log orm nats zefir"
+modules="core log confy validator rpc rpc-nats rpc-log orm mongo nats zefir"
 imports() {
     case $1 in
     core) ;;
@@ -43,7 +43,8 @@ imports() {
     # its end-to-end tests build and run them. confy brings log.
     nats) echo core confy ;;
     orm) echo log ;;
-    zefir) echo core log confy validator rpc rpc-nats rpc-log orm nats ;;
+    mongo) echo core ;;
+    zefir) echo core log confy validator rpc rpc-nats rpc-log orm mongo nats ;;
     esac
 }
 
