@@ -782,6 +782,14 @@ pub fn build(b: *std.Build) void {
         .{ "findOneAndUpdate with a pointer in the filter", "mongo.Collection.findOneAndUpdate: filter: field 'owner' is *const crud_errors.User: pass the value itself, not a pointer to it" },
         .{ "findOneAndReplace with a pipeline", "mongo.Collection.findOneAndReplace: replacement: a replacement is one document, not a list; a pipeline updates, with updateOne or updateMany" },
         .{ "findOneAndDelete with a filter that is a tuple", "mongo.Collection.findOneAndDelete: filter: a tuple is an array, not a document: give its values names, such as .{ .a = x }" },
+        .{ "find with a filter that holds a u64", "mongo.Collection.find: filter: field 'n' is u64, which BSON has no type for: its integers are signed; use i64" },
+        .{ "findOne with a filter that is a tuple", "mongo.Collection.findOne: filter: a tuple is an array, not a document: give its values names, such as .{ .a = x }" },
+        .{ "aggregate of one document", "mongo.Collection.aggregate: pipeline: a list of documents is a slice, an array or a tuple of them; got crud_errors.User" },
+        .{ "aggregate with a stage that is a number", "mongo.Collection.aggregate: pipeline[1]: a document is a struct with named fields, such as .{ .name = name }, or a bson.RawDocument; got u32" },
+        .{ "countDocuments with a pointer in the filter", "mongo.Collection.countDocuments: filter: field 'owner' is *const crud_errors.User: pass the value itself, not a pointer to it" },
+        .{ "distinct with a filter that is a string", "mongo.Collection.distinct: filter: a document is a struct with named fields, such as .{ .name = name }, or a bson.RawDocument; got *const [3:0]u8" },
+        .{ "runCommand of a tuple", "mongo.Database.runCommand: command: a tuple is an array, not a document: give its values names, such as .{ .a = x }" },
+        .{ "runCursorCommand with a u64 in the command", "mongo.Database.runCursorCommand: command: field 'limit' is u64, which BSON has no type for: its integers are signed; use i64" },
     }, 0..) |case, i| {
         const compile = b.addTest(.{
             .name = b.fmt("mongo-crud-error-{d}", .{i}),

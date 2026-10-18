@@ -12,6 +12,10 @@ fn users() mongo.Collection {
     return undefined;
 }
 
+fn db() mongo.Database {
+    return undefined;
+}
+
 fn io() std.Io {
     return undefined;
 }
@@ -84,4 +88,37 @@ test "findOneAndReplace with a pipeline" {
 
 test "findOneAndDelete with a filter that is a tuple" {
     _ = try users().findOneAndDelete(io(), op(), .{ 1, 2 }, .{ .allocator = gpa() });
+}
+
+test "find with a filter that holds a u64" {
+    _ = try users().find(io(), op(), Counter{ .n = 1 }, .{ .allocator = gpa() });
+}
+
+test "findOne with a filter that is a tuple" {
+    _ = try users().findOne(io(), op(), .{ 1, 2 }, .{ .allocator = gpa() });
+}
+
+test "aggregate of one document" {
+    _ = try users().aggregate(io(), op(), User{ .name = "Ann" }, .{ .allocator = gpa() });
+}
+
+test "aggregate with a stage that is a number" {
+    _ = try users().aggregate(io(), op(), .{ .{ .@"$match" = .{} }, @as(u32, 1) }, .{ .allocator = gpa() });
+}
+
+test "countDocuments with a pointer in the filter" {
+    const ann: User = .{ .name = "Ann" };
+    _ = try users().countDocuments(io(), op(), Post{ .owner = &ann }, .{ .allocator = gpa() });
+}
+
+test "distinct with a filter that is a string" {
+    _ = try users().distinct(io(), op(), "name", "all", .{ .allocator = gpa() });
+}
+
+test "runCommand of a tuple" {
+    _ = try db().runCommand(io(), op(), .{ "ping", 1 }, .{ .allocator = gpa() });
+}
+
+test "runCursorCommand with a u64 in the command" {
+    _ = try db().runCursorCommand(io(), op(), .{ .find = "users", .limit = @as(u64, 1) }, .{ .allocator = gpa() });
 }

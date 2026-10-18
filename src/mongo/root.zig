@@ -83,5 +83,6 @@ test {
     _ = @import("crud/index.zig");
     _ = @import("crud/index_tests.zig");
     _ = @import("crud/database_tests.zig");
+    _ = @import("crud/forms_tests.zig");
     _ = @import("crud/write_errors_tests.zig");
 }
