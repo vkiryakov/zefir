@@ -2118,9 +2118,9 @@ pub fn logout(self: *SessionController, ctx: *http.Context) !void {
 /// Whether the request comes from a page of this site, as the browser
 /// says. `Sec-Fetch-Site` is `same-origin` from a page of this site and
 /// `none` from the user, from a bookmark say; `same-site` and `cross-site`
-/// from other sites. An older browser sends only `Origin`, which then
-/// names the host of `Host`. A request with neither comes from no browser,
-/// curl say, and goes on.
+/// from other sites. An older browser sends only `Origin`, which for a
+/// page of this site names the host and the port of `Host`. A request with
+/// neither comes from no browser, curl say, and goes on.
 fn fromThisSite(ctx: *http.Context) bool {
     if (ctx.request.header("sec-fetch-site")) |site| return std.mem.eql(u8, site, "same-origin") or std.mem.eql(u8, site, "none");
     const origin = ctx.request.header("origin") orelse return true;
@@ -2180,7 +2180,8 @@ any site can post it. A page of another site could post it with a token of
 the attacker's and sign the browser in as the attacker, so that what the
 user writes next lands in the attacker's account: this is called login
 CSRF. So `login` asks where the form comes from, as the browser says it
-(`fromThisSite` above), and a form of another site gets 403:
+(`fromThisSite` above), and a form of another site gets 403. Here curl sends
+the field that a browser adds to such a form:
 
 ```text
 $ curl -i localhost:8080/api/session -d 'token=ann-secret' -H "Sec-Fetch-Site: cross-site"
@@ -2195,8 +2196,8 @@ Content-Length: 108
 {"code":"permission_denied","message":"Forbidden","details":[],"traceId":"b9b2b26092aacb48a56ad1f183e2209f"}
 ```
 
-curl sends neither `Sec-Fetch-Site` nor `Origin`, as no browser would, so
-its form above goes on.
+Without it, curl sends neither `Sec-Fetch-Site` nor `Origin`, one of which
+a browser of today sends with every form, so the form of curl above goes on.
 
 **CORS.** A page of another origin, such as the frontend at
 `http://localhost:5173` while it is developed, may call the API only when

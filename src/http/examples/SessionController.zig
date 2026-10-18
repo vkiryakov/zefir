@@ -64,9 +64,9 @@ pub fn logout(self: *SessionController, ctx: *http.Context) !void {
 /// Whether the request comes from a page of this site, as the browser
 /// says. `Sec-Fetch-Site` is `same-origin` from a page of this site and
 /// `none` from the user, from a bookmark say; `same-site` and `cross-site`
-/// from other sites. An older browser sends only `Origin`, which then
-/// names the host of `Host`. A request with neither comes from no browser,
-/// curl say, and goes on.
+/// from other sites. An older browser sends only `Origin`, which for a
+/// page of this site names the host and the port of `Host`. A request with
+/// neither comes from no browser, curl say, and goes on.
 fn fromThisSite(ctx: *http.Context) bool {
     if (ctx.request.header("sec-fetch-site")) |site| return std.mem.eql(u8, site, "same-origin") or std.mem.eql(u8, site, "none");
     const origin = ctx.request.header("origin") orelse return true;
