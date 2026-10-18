@@ -42,10 +42,8 @@ Examples that `zig build test` compiles and runs:
 Add Zefir to your `build.zig.zon`; core ships since v0.2.0:
 
 ```sh
-zig fetch --save git+https://github.com/vkiryakov/zefir#dev
+zig fetch --save git+https://github.com/vkiryakov/zefir#v0.8.0
 ```
-
-This guide is on the `dev` branch, so the command fetches its latest commit; `--save` pins that commit. For the latest release, v0.7.0, fetch `#v0.7.0` instead.
 
 Then import the `zefir-core` module in `build.zig`:
 
