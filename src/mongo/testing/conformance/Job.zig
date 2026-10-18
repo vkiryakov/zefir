@@ -34,7 +34,6 @@ options: conformance.Options,
 /// the wire protocol.
 on_wire: bool,
 failure: ?[]const u8 = null,
-notes: std.ArrayList([]const u8) = .empty,
 /// The scripted server of the check, until `end`.
 stage: ?*Stage = null,
 /// Whether a driver is set up and not torn down yet.
@@ -111,10 +110,6 @@ pub fn encodeIn(job: *Job, allocator: Allocator, value: anytype) Error!bson.Owne
         error.OutOfMemory => error.OutOfMemory,
         error.InvalidBson => job.fail("a document of the check is not valid BSON", .{}),
     };
-}
-
-pub fn note(job: *Job, comptime fmt: []const u8, args: anytype) Error!void {
-    try job.notes.append(job.arena, try std.fmt.allocPrint(job.arena, fmt, args));
 }
 
 /// Sleeps in the check's task, which nothing cancels.

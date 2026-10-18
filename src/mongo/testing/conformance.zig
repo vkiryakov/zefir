@@ -72,7 +72,9 @@
 //! driver cannot take is skipped, with the reason in the report: a check of
 //! a later revision of the contract than the driver's; S16 when the driver
 //! never connected to the FakeServer, since it reads no OP_MSG then; L
-//! without `Options.live`. Times are generous for CI, and
+//! without `Options.live`; L7–L10 without `fail_points`, or for a driver
+//! that never connected to the FakeServer, since a fail point acts on the
+//! connections of a driver to mongod. Times are generous for CI, and
 //! `Options.time_scale` stretches them further.
 
 const std = @import("std");
@@ -232,16 +234,12 @@ pub const Outcome = union(enum) {
     skipped: []const u8,
 };
 
-/// A part of a check that did not run, and why.
-pub const Note = struct { check: Check, text: []const u8 };
-
 /// What came of a run. It owns its strings: one `deinit`.
 pub const Report = struct {
     arena: std.heap.ArenaAllocator,
     /// `capabilities().name` of the driver.
     driver_name: []const u8 = "",
     outcomes: std.EnumArray(Check, Outcome) = .initFill(.{ .skipped = "not run" }),
-    notes: []const Note = &.{},
 
     pub fn deinit(r: *Report) void {
         r.arena.deinit();
@@ -272,7 +270,7 @@ pub const Report = struct {
         return n;
     }
 
-    /// A line a check, then the notes: `{f}`.
+    /// A line a check: `{f}`.
     pub fn format(r: *const Report, w: *std.Io.Writer) std.Io.Writer.Error!void {
         try w.print("mongo conformance of \"{s}\": {d} passed, {d} failed, {d} skipped\n", .{
             r.driver_name, r.passedCount(), r.failedCount(), r.skippedCount(),
@@ -284,7 +282,6 @@ pub const Report = struct {
                 .skipped => |why| try w.print("  skipped  {s: <3}  {s}: {s}\n", .{ check.label(), check.title(), why }),
             }
         }
-        for (r.notes) |note| try w.print("  note     {s: <3}  {s}\n", .{ note.check.label(), note.text });
     }
 };
 
@@ -320,7 +317,6 @@ pub fn run(io: std.Io, gpa: std.mem.Allocator, harness: anytype, options: Option
         return report;
     }
 
-    var notes: std.ArrayList(Note) = .empty;
     for (std.enums.values(Check)) |check| {
         try checkpoint(io, outer);
         const result: Outcome = if (!selected(options, check))
@@ -328,10 +324,9 @@ pub fn run(io: std.Io, gpa: std.mem.Allocator, harness: anytype, options: Option
         else if (try skipReason(arena, check, &probe, options)) |why|
             .{ .skipped = why }
         else
-            try runCheck(io, gpa, arena, h, &probe, options, check, &notes);
+            try runCheck(io, gpa, arena, h, &probe, options, check);
         report.outcomes.set(check, result);
     }
-    report.notes = notes.items;
     return report;
 }
 
@@ -374,7 +369,6 @@ fn runCheck(
     probe: *const Job.Probe,
     options: Options,
     check: Check,
-    notes: *std.ArrayList(Note),
 ) error{OutOfMemory}!Outcome {
     var counting: Job.Counting = .{ .parent = gpa };
     var job: Job = .{
@@ -388,7 +382,6 @@ fn runCheck(
     };
     var task = io.concurrent(go, .{ &job, check }) catch return .{ .failed = no_concurrency };
     task.await(io);
-    for (job.notes.items) |text| try notes.append(arena, .{ .check = check, .text = text });
     const leaked = counting.live.load(.acquire);
     if (leaked > 0) {
         const leak = try std.fmt.allocPrint(arena, "{d} bytes in {d} allocation(s) were still held after harness.tearDown", .{ counting.bytes.load(.acquire), leaked });
