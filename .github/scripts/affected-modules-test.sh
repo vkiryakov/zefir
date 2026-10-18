@@ -54,35 +54,21 @@ http_foreign=$(grep -rhoE '@import\("[^"]*"\)' "$here/../../src/http" --include=
     sed 's/@import("\(.*\)")/\1/' | grep -vE '^(std|builtin|core|validator)$|\.zig$' | sort -u)
 expect "the code of zefir-http imports only std, builtin, core and validator" "" "$(echo $http_foreign)"
 
-# An acceptance criterion of zefir-mongo: drivers import it and never the
-# other way round, so build.zig gives it only core.
+# An acceptance criterion of zefir-mongo: it stands on core alone, so
+# build.zig gives it only core.
 mongo_imports=$(awk '
     /b\.addModule\("zefir-mongo",/ { inside = 1; next }
     inside && /^    }\);/ { exit }
     inside && match($0, /\.name = "[^"]*"/) { print substr($0, RSTART + 9, RLENGTH - 10) }
 ' "$here/../../build.zig" | sort)
 expect "zefir-mongo imports only core" "core" "$(echo $mongo_imports)"
-# The same in its code: only std, builtin, core and the module's own files.
-# src/mongo/tests/ and src/mongo/examples/ hold programs with imports of
-# their own.
-mongo_foreign=$(grep -rhoE '@import\("[^"]*"\)' "$here/../../src/mongo" --include='*.zig' --exclude-dir=tests --exclude-dir=examples |
-    sed 's/@import("\(.*\)")/\1/' | grep -vE '^(std|builtin|core)$|\.zig$' | sort -u)
-expect "the code of zefir-mongo imports only std, builtin and core" "" "$(echo $mongo_foreign)"
-
-# zefir-mongo-async-driver, the native driver, stands on zefir-mongo and
-# core alone: build.zig gives it only those two, and its code imports only
-# them and build_options, which holds the version it sends in hello.
-# src/mongo-async-driver/testdata/ and examples/ hold programs with imports
-# of their own.
-driver_imports=$(awk '
-    /b\.addModule\("zefir-mongo-async-driver",/ { inside = 1; next }
-    inside && /^    }\);/ { exit }
-    inside && match($0, /\.name = "[^"]*"/) { print substr($0, RSTART + 9, RLENGTH - 10) }
-' "$here/../../build.zig" | sort)
-expect "zefir-mongo-async-driver imports only mongo and core" "core mongo" "$(echo $driver_imports)"
-driver_foreign=$(grep -rhoE '@import\("[^"]*"\)' "$here/../../src/mongo-async-driver" --include='*.zig' --exclude-dir=tests --exclude-dir=testdata --exclude-dir=examples |
-    sed 's/@import("\(.*\)")/\1/' | grep -vE '^(std|builtin|core|mongo|build_options)$|\.zig$' | sort -u)
-expect "the code of zefir-mongo-async-driver imports only std, builtin, core, mongo and build_options" "" "$(echo $driver_foreign)"
+# The same in its code: only std, builtin, core, build_options, which holds
+# the version it sends in hello, and the module's own files.
+# src/mongo/tests/, src/mongo/testdata/ and src/mongo/examples/ hold
+# programs with imports of their own.
+mongo_foreign=$(grep -rhoE '@import\("[^"]*"\)' "$here/../../src/mongo" --include='*.zig' --exclude-dir=tests --exclude-dir=testdata --exclude-dir=examples |
+    sed 's/@import("\(.*\)")/\1/' | grep -vE '^(std|builtin|core|build_options)$|\.zig$' | sort -u)
+expect "the code of zefir-mongo imports only std, builtin, core and build_options" "" "$(echo $mongo_foreign)"
 
 repo=$(mktemp -d)
 trap 'rm -rf "$repo"' EXIT
@@ -122,51 +108,51 @@ while IFS='|' read -r change modules <&3; do
     git commit -q -m "$change"
     expect "$(echo $change)" "$(echo $modules)" "$(sh "$script" "$base" HEAD)"
 done 3<<'EOF'
-edit src/core/Context.zig                       | core log confy validator rpc rpc-nats orm mongo mongo-async-driver nats http zefir
-edit src/log/Logger.zig                         | log confy validator rpc rpc-nats orm mongo-async-driver nats http zefir
-edit src/confy/root.zig                         | confy rpc rpc-nats mongo-async-driver nats http zefir
+edit src/core/Context.zig                       | core log confy validator rpc rpc-nats orm mongo nats http zefir
+edit src/log/Logger.zig                         | log confy validator rpc rpc-nats orm mongo nats http zefir
+edit src/confy/root.zig                         | confy rpc rpc-nats mongo nats http zefir
 edit src/validator/strings.zig                  | validator rpc rpc-nats http zefir
 edit src/rpc/root.zig                           | rpc rpc-nats zefir
 edit src/orm/root.zig                           | orm zefir
 edit src/rpc/root.zig src/orm/root.zig          | rpc rpc-nats orm zefir
-edit src/mongo/bson.zig                         | mongo mongo-async-driver zefir
-edit src/mongo/bson/RawDocument.zig             | mongo mongo-async-driver zefir
-edit src/orm/root.zig src/mongo/root.zig        | orm mongo mongo-async-driver zefir
-edit src/mongo-async-driver/root.zig            | mongo-async-driver zefir
-edit src/mongo-async-driver/engine/Connection.zig | mongo-async-driver zefir
+edit src/mongo/bson.zig                         | mongo zefir
+edit src/mongo/bson/RawDocument.zig             | mongo zefir
+edit src/orm/root.zig src/mongo/root.zig        | orm mongo zefir
+edit src/mongo/Client.zig                       | mongo zefir
+edit src/mongo/engine/Connection.zig            | mongo zefir
 edit src/rpc-nats/Transport.zig                 | rpc-nats zefir
 edit src/nats/Client.zig                        | rpc-nats nats zefir
 edit tests/nats/e2e/pubsub.zig                  | rpc-nats nats zefir
 edit tests/nats/README.md                       | rpc-nats nats zefir
-edit docker-compose.yml                         | rpc-nats mongo-async-driver nats zefir
+edit docker-compose.yml                         | rpc-nats mongo nats zefir
 edit tests/rpc-nats/e2e/root.zig                | rpc-nats zefir
 edit tests/rpc-nats/conf/acl.conf               | rpc-nats zefir
 edit tests/http/build.zig                       | http zefir
-edit tests/mongo-async-driver/e2e/wire.zig      | mongo-async-driver zefir
-edit tests/mongo-async-driver/build.zig.zon     | mongo-async-driver zefir
+edit tests/mongo/e2e/wire.zig                   | mongo zefir
+edit tests/mongo/build.zig.zon                  | mongo zefir
 edit examples/rpc-custom-transport/src/root.zig | rpc rpc-nats zefir
 edit examples/rpc-custom-transport/consumer/build.zig | rpc rpc-nats zefir
 edit examples/rpc-custom-transport/README.md    | rpc rpc-nats zefir
-edit examples/mongo-custom-driver/src/root.zig  | mongo mongo-async-driver zefir
-edit examples/mongo-custom-driver/consumer/build.zig | mongo mongo-async-driver zefir
-edit examples/mongo-custom-driver/README.md     | mongo mongo-async-driver zefir
-edit examples/other/main.zig                    | core log confy validator rpc rpc-nats orm mongo mongo-async-driver nats http zefir
-edit src/core/root.zig src/nats/root.zig        | core log confy validator rpc rpc-nats orm mongo mongo-async-driver nats http zefir
-edit src/confy/examples/README.md               | confy rpc rpc-nats mongo-async-driver nats http zefir
+edit examples/mongo-custom-driver/src/root.zig  | mongo zefir
+edit examples/mongo-custom-driver/consumer/build.zig | mongo zefir
+edit examples/mongo-custom-driver/README.md     | mongo zefir
+edit examples/other/main.zig                    | core log confy validator rpc rpc-nats orm mongo nats http zefir
+edit src/core/root.zig src/nats/root.zig        | core log confy validator rpc rpc-nats orm mongo nats http zefir
+edit src/confy/examples/README.md               | confy rpc rpc-nats mongo nats http zefir
 edit README.md src/validator/root.zig           | validator rpc rpc-nats http zefir
 edit README.md                                  | rpc rpc-nats http zefir
 edit docs/plan.md docs/notes.txt                |
-edit build.zig                                  | core log confy validator rpc rpc-nats orm mongo mongo-async-driver nats http zefir
-edit build.zig.zon                              | core log confy validator rpc rpc-nats orm mongo mongo-async-driver nats http zefir
-edit src/zefir.zig                              | core log confy validator rpc rpc-nats orm mongo mongo-async-driver nats http zefir
-edit .github/workflows/ci.yml                   | core log confy validator rpc rpc-nats orm mongo mongo-async-driver nats http zefir
+edit build.zig                                  | core log confy validator rpc rpc-nats orm mongo nats http zefir
+edit build.zig.zon                              | core log confy validator rpc rpc-nats orm mongo nats http zefir
+edit src/zefir.zig                              | core log confy validator rpc rpc-nats orm mongo nats http zefir
+edit .github/workflows/ci.yml                   | core log confy validator rpc rpc-nats orm mongo nats http zefir
 edit src/http/root.zig                          | http zefir
-edit src/ws/root.zig                            | core log confy validator rpc rpc-nats orm mongo mongo-async-driver nats http zefir
-edit src/helpers.zig                            | core log confy validator rpc rpc-nats orm mongo mongo-async-driver nats http zefir
-edit src/notes.md                               | core log confy validator rpc rpc-nats orm mongo mongo-async-driver nats http zefir
-edit tests/other/main.zig                       | core log confy validator rpc rpc-nats orm mongo mongo-async-driver nats http zefir
-edit LICENSE                                    | core log confy validator rpc rpc-nats orm mongo mongo-async-driver nats http zefir
-git rm -q src/log/root.zig                      | log confy validator rpc rpc-nats orm mongo-async-driver nats http zefir
+edit src/ws/root.zig                            | core log confy validator rpc rpc-nats orm mongo nats http zefir
+edit src/helpers.zig                            | core log confy validator rpc rpc-nats orm mongo nats http zefir
+edit src/notes.md                               | core log confy validator rpc rpc-nats orm mongo nats http zefir
+edit tests/other/main.zig                       | core log confy validator rpc rpc-nats orm mongo nats http zefir
+edit LICENSE                                    | core log confy validator rpc rpc-nats orm mongo nats http zefir
+git rm -q src/log/root.zig                      | log confy validator rpc rpc-nats orm mongo nats http zefir
 git mv src/orm/root.zig src/rpc/orm.zig         | rpc rpc-nats orm zefir
 EOF
 
@@ -181,7 +167,7 @@ edit src/validator/root.zig
 git commit -q -am "head"
 expect "a later base" "validator rpc rpc-nats http zefir" "$(sh "$script" "$later" HEAD)"
 
-expect "--all" "core log confy validator rpc rpc-nats orm mongo mongo-async-driver nats http zefir" "$(sh "$script" --all)"
+expect "--all" "core log confy validator rpc rpc-nats orm mongo nats http zefir" "$(sh "$script" --all)"
 
 if [ "$failures" -ne 0 ]; then
     echo "$failures failed"
