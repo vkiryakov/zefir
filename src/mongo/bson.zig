@@ -11,6 +11,7 @@
 //!   `Builder.put` writes one value so.
 //! - `literal` — writes a document known at compile time, such as a sort,
 //!   into static bytes.
+//! - `decode` — reads a document into a struct, by the types of its fields.
 //! - `Value` — the value of one element, of any BSON type; its strings and
 //!   documents are slices into the document.
 //! - The types Zig has no type for: `ObjectId` with its `Generator`,
@@ -25,10 +26,15 @@ const std = @import("std");
 const value = @import("bson/value.zig");
 const types = @import("bson/types.zig");
 const encoding = @import("bson/encode.zig");
+const decoding = @import("bson/decode.zig");
 
 pub const encode = encoding.encode;
 pub const EncodeOptions = encoding.EncodeOptions;
 pub const literal = @import("bson/literal.zig").literal;
+pub const decode = decoding.decode;
+pub const DecodeOptions = decoding.DecodeOptions;
+pub const DecodeError = decoding.DecodeError;
+pub const DecodeDiagnostics = decoding.DecodeDiagnostics;
 pub const RawDocument = @import("bson/RawDocument.zig");
 pub const OwnedDocument = @import("bson/OwnedDocument.zig");
 pub const Builder = @import("bson/Builder.zig");
@@ -66,4 +72,5 @@ test {
     _ = @import("bson/fuzz.zig");
     _ = @import("bson/encode_tests.zig");
     _ = @import("bson/literal_tests.zig");
+    _ = @import("bson/decode_tests.zig");
 }

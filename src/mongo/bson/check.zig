@@ -54,12 +54,16 @@ fn walk(comptime T: type, comptime path: []const u8, comptime direction: Directi
     if (T == bson.DbPointer or T == bson.JavaScriptWithScope) {
         return if (direction == .decode) null else is ++ ", a deprecated type: it is read, never written";
     }
+    if (T == bson.OwnedDocument and direction == .decode) return is ++ ": decode into a bson.RawDocument, whose bytes live in the arena";
     if (isSpecial(T)) return null;
     switch (@typeInfo(T)) {
         .bool => return null,
         .int => |int| return integer(T, int, is),
         // The types of the values of anonymous literals: .{ .age = 30 }.
-        .comptime_int, .comptime_float, .enum_literal, .null => return null,
+        .comptime_int, .comptime_float, .enum_literal, .null => return switch (direction) {
+            .encode => null,
+            .decode => is ++ ", the type of a literal: decode needs a type such as i64, f64, []const u8 or an enum",
+        },
         .float => return if (T == f32 or T == f64) null else is ++ ": a BSON double is an f64; use f64 or f32",
         .@"enum" => |info| {
             if (info.mode == .nonexhaustive) return is ++ ", a non-exhaustive enum: a value without a tag has no name to write; make the enum exhaustive";
@@ -73,7 +77,10 @@ fn walk(comptime T: type, comptime path: []const u8, comptime direction: Directi
             return walk(info.child, path, direction, outer);
         },
         .pointer => |info| return pointer(T, info, path, direction, outer),
-        .array => |info| return walk(info.child, path ++ "[]", direction, outer),
+        .array => |info| {
+            if (direction == .decode and info.sentinel_ptr != null) return is ++ ": decode fills arrays without a sentinel";
+            return walk(info.child, path ++ "[]", direction, outer);
+        },
         .@"struct" => |info| return structure(T, info, path, direction, outer),
         .@"union" => return is ++ ": unions are not supported; a field of any BSON type is a bson.Value",
         else => return is ++ ", which has no BSON type",
@@ -98,12 +105,19 @@ fn pointer(comptime T: type, comptime info: std.lang.Type.Pointer, comptime path
     const is = subject(path) ++ " is " ++ @typeName(T);
     switch (info.size) {
         .slice => {
+            if (direction == .decode) {
+                const plain = "[]const " ++ @typeName(info.child);
+                if (!info.attrs.@"const") return is ++ ": decode gives const slices; use " ++ plain;
+                if (info.sentinel_ptr != null) return is ++ ": decode gives slices without a sentinel; use " ++ plain;
+            }
             // []const u8 is a string.
             if (info.child == u8) return null;
             return walk(info.child, path ++ "[]", direction, outer);
         },
         .many, .c => return is ++ ", which has no length: pass a slice",
-        .one => switch (@typeInfo(info.child)) {
+        .one => if (direction == .decode) {
+            return is ++ ": decode fills values, not pointers; use " ++ @typeName(info.child);
+        } else switch (@typeInfo(info.child)) {
             // &[_]T{ … } is a list; a string literal and &[_]u8{ … } are strings.
             .array => |array| return if (array.child == u8) null else walk(array.child, path ++ "[]", direction, outer),
             // &.{ … } is a list.
@@ -120,6 +134,7 @@ fn structure(comptime T: type, comptime info: std.lang.Type.Struct, comptime pat
     }
     const inner = outer ++ [_]type{T};
     if (info.is_tuple) {
+        if (direction == .decode) return subject(path) ++ " is " ++ @typeName(T) ++ ", a tuple: decode needs the names of fields; use a struct, or a slice for an array";
         // .{} is an empty document; any other tuple is an array of its items.
         for (info.field_types, info.field_attrs, 0..) |Item, attrs, i| {
             const item = std.fmt.comptimePrint("{s}[{d}]", .{ path, i });
@@ -131,6 +146,7 @@ fn structure(comptime T: type, comptime info: std.lang.Type.Struct, comptime pat
     for (info.field_names, info.field_types, info.field_attrs) |name, Field, attrs| {
         const field = if (path.len == 0) name else path ++ "." ++ name;
         if (!std.unicode.utf8ValidateSlice(name)) return subject(path) ++ " is " ++ @typeName(T) ++ ": the name of one of its fields is not UTF-8";
+        if (attrs.@"comptime" and direction == .decode) return subject(field) ++ " is a comptime field: decode fills only fields known at run time";
         if (constant(Field, attrs, field)) |found| return found;
         if (walk(Field, field, direction, inner)) |found| return found;
     }
