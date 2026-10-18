@@ -207,3 +207,58 @@ pub const FindOneAndDeleteOptions = struct {
     /// null.
     failure_reply: ?*?bson.OwnedDocument = null,
 };
+
+pub const FindOptions = struct {
+    /// The memory of the call's scratch, which is freed before the call
+    /// returns; the cursor belongs to the driver.
+    allocator: std.mem.Allocator,
+    /// The order of the documents: `bson.literal(.{ .age = -1 })`.
+    sort: ?bson.RawDocument = null,
+    /// The fields of each document: `bson.literal(.{ .name = 1 })`.
+    projection: ?bson.RawDocument = null,
+    /// How many of the matching documents to pass over first.
+    skip: u32 = 0,
+    /// How many documents to give at most; 0 gives all.
+    limit: u32 = 0,
+    /// How many documents each batch holds, the first and those of every
+    /// `getMore`; null leaves it to the server.
+    batch_size: ?u32 = null,
+    hint: ?Hint = null,
+    collation: ?bson.RawDocument = null,
+    /// Variables that the filter reads as `$$name`.
+    let: ?bson.RawDocument = null,
+    /// Whether a sort too large for memory may use the disk; null leaves
+    /// it to the server.
+    allow_disk_use: ?bool = null,
+    /// Sent with the command and with each `getMore`, for the server's
+    /// logs and profiler.
+    comment: ?bson.Value = null,
+    /// The cursor writes the errors of its `getMore`s here too: it must
+    /// outlive the cursor.
+    diagnostics: ?*Diagnostics = null,
+    /// After `CommandFailed`, or `Timeout` by code 50, of the command or a
+    /// `getMore`, the whole reply of the server, from the driver's
+    /// allocator: free it with `deinit`. The slot must hold null and
+    /// outlive the cursor.
+    failure_reply: ?*?bson.OwnedDocument = null,
+};
+
+/// The options of `findOne`: those of `find` that choose the document.
+pub const FindOneOptions = struct {
+    /// The memory of the document returned, and of the call's scratch,
+    /// which is freed before the call returns.
+    allocator: std.mem.Allocator,
+    /// Which document comes first when the filter matches several.
+    sort: ?bson.RawDocument = null,
+    projection: ?bson.RawDocument = null,
+    skip: u32 = 0,
+    hint: ?Hint = null,
+    collation: ?bson.RawDocument = null,
+    let: ?bson.RawDocument = null,
+    comment: ?bson.Value = null,
+    diagnostics: ?*Diagnostics = null,
+    /// After `CommandFailed`, or `Timeout` by code 50, the whole reply of
+    /// the server, from the driver's allocator: free it with `deinit`. The
+    /// slot must hold null.
+    failure_reply: ?*?bson.OwnedDocument = null,
+};

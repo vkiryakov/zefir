@@ -63,6 +63,7 @@ const bson = @import("../bson.zig");
 const errors = @import("../contract/errors.zig");
 const requests = @import("../contract/requests.zig");
 const contract_results = @import("../contract/results.zig");
+const Cursor = @import("../contract/Cursor.zig");
 const Database = @import("Database.zig");
 const document = @import("document.zig");
 const id = @import("id.zig");
@@ -86,6 +87,8 @@ pub const DeleteOptions = options_.DeleteOptions;
 pub const FindOneAndUpdateOptions = options_.FindOneAndUpdateOptions;
 pub const FindOneAndReplaceOptions = options_.FindOneAndReplaceOptions;
 pub const FindOneAndDeleteOptions = options_.FindOneAndDeleteOptions;
+pub const FindOptions = options_.FindOptions;
+pub const FindOneOptions = options_.FindOneOptions;
 pub const ReturnDocument = options_.ReturnDocument;
 pub const Hint = options_.Hint;
 pub const InsertOneResult = results.InsertOneResult;
@@ -230,6 +233,112 @@ fn deleteWith(c: Collection, io: Io, op: OperationContext, filter: anytype, limi
         .diagnostics = options.diagnostics,
         .failure_reply = options.failure_reply,
     }, DeleteResult, options.partial, {}, results.ofDelete);
+}
+
+/// Finds the documents that `filter` matches, `.{}` all of them: `find`,
+/// whose cursor gives them batch by batch, borrowed until its next call:
+///
+/// ```zig
+/// var adults = try users.find(io, op, .{ .age = .{ .@"$gte" = 18 } }, .{ .allocator = arena, .sort = bson.literal(.{ .age = -1 }) });
+/// defer adults.deinit(io);
+/// while (try adults.next(io, op)) |doc| try show(try bson.decode(User, arena, doc, .{}));
+/// ```
+///
+/// A limit equal to the batch size asks for one more document in the
+/// first batch, so that the server does not leave the cursor open.
+pub fn find(c: Collection, io: Io, op: OperationContext, filter: anytype, options: FindOptions) Error!Cursor {
+    comptime document.expectDocument("find", "filter", @TypeOf(filter));
+    try c.begin(options.diagnostics);
+    var scratch: std.heap.ArenaAllocator = .init(options.allocator);
+    defer scratch.deinit();
+    const a = scratch.allocator();
+    var first_batch: ?u64 = null;
+    if (options.batch_size) |n| {
+        first_batch = if (options.limit != 0 and n == options.limit) @as(u64, n) + 1 else n;
+    }
+    const body = try c.findBody(a, .{
+        .filter = try argument(a, filter, "the filter", options.diagnostics),
+        .sort = options.sort,
+        .projection = options.projection,
+        .hint = options.hint,
+        .skip = options.skip,
+        .limit = options.limit,
+        .batch_size = first_batch,
+        .comment = options.comment,
+        .collation = options.collation,
+        .allow_disk_use = options.allow_disk_use,
+        .let = options.let,
+    }, options.diagnostics);
+    return c.db.client.openCursor(io, op, .{ .database = c.db.name, .body = body }, .{
+        .batch_size = options.batch_size,
+        .comment = options.comment,
+        .diagnostics = options.diagnostics,
+        .failure_reply = options.failure_reply,
+    });
+}
+
+/// The first document that `filter` matches, the first in `sort` when it
+/// matches several, as a copy in `options.allocator`; null when none
+/// does. `find` with `limit: 1` and `singleBatch: true`, whose cursor is
+/// freed before the call returns.
+pub fn findOne(c: Collection, io: Io, op: OperationContext, filter: anytype, options: FindOneOptions) Error!?bson.OwnedDocument {
+    comptime document.expectDocument("findOne", "filter", @TypeOf(filter));
+    try c.begin(options.diagnostics);
+    var scratch: std.heap.ArenaAllocator = .init(options.allocator);
+    defer scratch.deinit();
+    const a = scratch.allocator();
+    const body = try c.findBody(a, .{
+        .filter = try argument(a, filter, "the filter", options.diagnostics),
+        .sort = options.sort,
+        .projection = options.projection,
+        .hint = options.hint,
+        .skip = options.skip,
+        .limit = 1,
+        .single_batch = true,
+        .comment = options.comment,
+        .collation = options.collation,
+        .let = options.let,
+    }, options.diagnostics);
+    const cursor = try c.db.client.openCursor(io, op, .{ .database = c.db.name, .body = body }, .{
+        .diagnostics = options.diagnostics,
+        .failure_reply = options.failure_reply,
+    });
+    defer cursor.deinit(io);
+    return cursor.nextOwned(io, op, options.allocator);
+}
+
+/// What a `find` command carries besides its name, in the order it goes.
+const Find = struct {
+    filter: bson.RawDocument,
+    sort: ?bson.RawDocument = null,
+    projection: ?bson.RawDocument = null,
+    hint: ?Hint = null,
+    skip: u32 = 0,
+    limit: u32 = 0,
+    batch_size: ?u64 = null,
+    single_batch: bool = false,
+    comment: ?bson.Value = null,
+    collation: ?bson.RawDocument = null,
+    allow_disk_use: ?bool = null,
+    let: ?bson.RawDocument = null,
+};
+
+fn findBody(c: Collection, a: Allocator, f: Find, diagnostics: ?*Diagnostics) Error!bson.RawDocument {
+    var w: Writer = .init(a, diagnostics);
+    try w.string("find", c.name);
+    try w.document("filter", f.filter, "the filter");
+    if (f.sort) |sort| try w.document("sort", sort, "the sort");
+    if (f.projection) |projection| try w.document("projection", projection, "the projection");
+    if (f.hint) |hint| try w.hint(hint);
+    if (f.skip != 0) try w.count("skip", f.skip);
+    if (f.limit != 0) try w.count("limit", f.limit);
+    if (f.batch_size) |n| try w.count("batchSize", n);
+    if (f.single_batch) try w.boolean("singleBatch", true);
+    if (f.comment) |value| try w.value("comment", value, "the comment");
+    if (f.collation) |collation| try w.document("collation", collation, "the collation");
+    if (f.allow_disk_use) |allow| try w.boolean("allowDiskUse", allow);
+    if (f.let) |let| try w.document("let", let, "let");
+    return w.finish();
 }
 
 /// Updates the first document that `filter` matches, the first in `sort`
@@ -621,6 +730,13 @@ const Writer = struct {
 
     fn int32(w: *Writer, key: []const u8, value_: i32) Error!void {
         w.b.putInt32(key, value_) catch |err| return w.fail(err, key);
+    }
+
+    /// A count, such as a limit: an int32 when it fits, as mongod writes
+    /// one, an int64 otherwise.
+    fn count(w: *Writer, key: []const u8, n: u64) Error!void {
+        const put = if (std.math.cast(i32, n)) |small| w.b.putInt32(key, small) else w.b.putInt64(key, std.math.cast(i64, n) orelse std.math.maxInt(i64));
+        put catch |err| return w.fail(err, key);
     }
 
     /// A document, checked whole as `RawDocument.validate` checks it.

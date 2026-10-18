@@ -1,0 +1,296 @@
+//! Tests of `find` and `findOne` on `mongo.testing.FakeDriver`: the exact
+//! `find` commands and `getMore`s in the script's journal, and the
+//! documents they give, in each form of the filter.
+
+const std = @import("std");
+const testing = std.testing;
+const mongo = @import("../root.zig");
+const bson = mongo.bson;
+const Script = mongo.testing.Script;
+const FakeDriver = mongo.testing.FakeDriver;
+
+const ann = bson.literal(.{ ._id = 1, .name = "Ann" });
+const bob = bson.literal(.{ ._id = 2, .name = "Bob" });
+const cid = bson.literal(.{ ._id = 3, .name = "Cid" });
+const batches = [_][]const bson.RawDocument{ &.{ ann, bob }, &.{cid} };
+
+/// A cursor of users on the server, and the fake on it.
+const Fixture = struct {
+    cursor: Script.Cursor = .{ .ns = "app.users", .batches = &batches },
+    script: Script = undefined,
+    fake: FakeDriver = undefined,
+    ids: bson.ObjectId.Generator = .{ .random = .{ 1, 2, 3, 4, 5 }, .counter = .init(0) },
+
+    /// Lives where it is: the script and the fake point into it.
+    fn init(f: *Fixture) void {
+        f.script = .init(testing.allocator, f.cursor.handler());
+        f.fake = .init(testing.allocator, &f.script);
+    }
+
+    fn deinit(f: *Fixture) void {
+        f.fake.deinit();
+        f.script.deinit();
+    }
+
+    fn users(f: *Fixture) mongo.Collection {
+        return mongo.Database.init(f.fake.client(), "app", &f.ids).collection("users");
+    }
+};
+
+/// Reads `cursor` to its end, and fails unless it gives `expected`.
+fn expectDocuments(cursor: mongo.Cursor, expected: []const bson.RawDocument) !void {
+    const io = testing.io;
+    for (expected) |doc| {
+        const got = (try cursor.next(io, .of(.root))) orelse return error.TestCursorEndedEarly;
+        try testing.expectEqualSlices(u8, doc.bytes, got.bytes);
+    }
+    try testing.expect(try cursor.next(io, .of(.root)) == null);
+}
+
+fn filterByBuilder() !bson.OwnedDocument {
+    var b: bson.Builder = .init(testing.allocator);
+    errdefer b.deinit();
+    try b.beginDocument("age");
+    try b.putInt32("$gte", 18);
+    try b.end();
+    return b.finish();
+}
+
+test "find sends find with the filter, in each of the three forms, and its cursor gives the documents of every batch" {
+    const io = testing.io;
+    var f: Fixture = .{};
+    f.init();
+    defer f.deinit();
+    const users = f.users();
+
+    const built = try filterByBuilder();
+    defer built.deinit();
+    const Age = struct { @"$gte": i32 };
+    const Filter = struct { age: Age };
+    inline for (.{ bson.literal(.{ .age = .{ .@"$gte" = 18 } }), built, Filter{ .age = .{ .@"$gte" = 18 } }, .{ .age = .{ .@"$gte" = 18 } } }, 0..) |filter, i| {
+        const cursor = try users.find(io, .of(.root), filter, .{ .allocator = testing.allocator });
+        defer cursor.deinit(io);
+        try expectDocuments(cursor, &.{ ann, bob, cid });
+        const sent = f.script.entry(io, 2 * i);
+        try testing.expectEqualStrings("find", sent.name);
+        try testing.expect(sent.sequence == null);
+        try testing.expectEqualSlices(u8, bson.literal(.{ .find = "users", .filter = .{ .age = .{ .@"$gte" = 18 } }, .@"$db" = "app" }).bytes, sent.body.bytes);
+        const more = f.script.entry(io, 2 * i + 1);
+        try testing.expectEqualSlices(u8, bson.literal(.{ .getMore = @as(i64, 42), .collection = "users", .@"$db" = "app" }).bytes, more.body.bytes);
+    }
+    try testing.expectEqual(@as(usize, 8), f.script.received(io));
+}
+
+test "find(.{}) sends filter: {}" {
+    const io = testing.io;
+    var f: Fixture = .{};
+    f.init();
+    defer f.deinit();
+    const cursor = try f.users().find(io, .of(.root), .{}, .{ .allocator = testing.allocator });
+    defer cursor.deinit(io);
+    try testing.expectEqualSlices(u8, bson.literal(.{ .find = "users", .filter = .{}, .@"$db" = "app" }).bytes, f.script.entry(io, 0).body.bytes);
+}
+
+test "the options of find go out in their order, and the batch size and the comment go to each getMore too" {
+    const io = testing.io;
+    var f: Fixture = .{};
+    f.init();
+    defer f.deinit();
+    const cursor = try f.users().find(io, .of(.root), .{ .name = .{ .@"$ne" = "Dan" } }, .{
+        .allocator = testing.allocator,
+        .sort = bson.literal(.{ .name = 1 }),
+        .projection = bson.literal(.{ .name = 1 }),
+        .skip = 1,
+        .limit = 10,
+        .batch_size = 2,
+        .hint = .{ .name = "name_1" },
+        .collation = bson.literal(.{ .locale = "en" }),
+        .let = bson.literal(.{ .x = 1 }),
+        .allow_disk_use = false,
+        .comment = .{ .string = "list users" },
+    });
+    defer cursor.deinit(io);
+    try expectDocuments(cursor, &.{ ann, bob, cid });
+    try testing.expectEqualSlices(u8, bson.literal(.{
+        .find = "users",
+        .filter = .{ .name = .{ .@"$ne" = "Dan" } },
+        .sort = .{ .name = 1 },
+        .projection = .{ .name = 1 },
+        .hint = "name_1",
+        .skip = 1,
+        .limit = 10,
+        .batchSize = 2,
+        .comment = "list users",
+        .collation = .{ .locale = "en" },
+        .allowDiskUse = false,
+        .let = .{ .x = 1 },
+        .@"$db" = "app",
+    }).bytes, f.script.entry(io, 0).body.bytes);
+    try testing.expectEqualSlices(u8, bson.literal(.{
+        .getMore = @as(i64, 42),
+        .collection = "users",
+        .batchSize = 2,
+        .comment = "list users",
+        .@"$db" = "app",
+    }).bytes, f.script.entry(io, 1).body.bytes);
+}
+
+test "find with a limit equal to its batch size asks for one more in the first batch, so that the server closes the cursor" {
+    const io = testing.io;
+    var f: Fixture = .{};
+    f.init();
+    defer f.deinit();
+    const users = f.users();
+    for ([_][2]u32{ .{ 5, 5 }, .{ 0, 0 }, .{ 5, 4 }, .{ std.math.maxInt(u32), std.math.maxInt(u32) } }, 0..) |case, i| {
+        const cursor = try users.find(io, .of(.root), .{}, .{ .allocator = testing.allocator, .limit = case[0], .batch_size = case[1] });
+        cursor.deinit(io);
+        const body = f.script.entry(io, 2 * i).body;
+        const expected = switch (i) {
+            0 => bson.literal(.{ .find = "users", .filter = .{}, .limit = 5, .batchSize = 6, .@"$db" = "app" }),
+            // A limit of 0 is none: the batch size goes as it is.
+            1 => bson.literal(.{ .find = "users", .filter = .{}, .batchSize = 0, .@"$db" = "app" }),
+            2 => bson.literal(.{ .find = "users", .filter = .{}, .limit = 5, .batchSize = 4, .@"$db" = "app" }),
+            else => bson.literal(.{ .find = "users", .filter = .{}, .limit = @as(i64, std.math.maxInt(u32)), .batchSize = @as(i64, 1 << 32), .@"$db" = "app" }),
+        };
+        try testing.expectEqualSlices(u8, expected.bytes, body.bytes);
+        // deinit killed the cursor, open after its first batch.
+        try testing.expectEqualStrings("killCursors", f.script.entry(io, 2 * i + 1).name);
+    }
+}
+
+test "findOne sends limit: 1 and singleBatch: true without a batch size, and returns a copy of the document" {
+    const io = testing.io;
+    const reply = bson.literal(.{ .cursor = .{ .firstBatch = .{.{ ._id = 1, .name = "Ann" }}, .id = @as(i64, 0), .ns = "app.users" }, .ok = 1.0 });
+    var queue: Script.Queue = .{ .answers = &.{ .{ .reply = reply }, .{ .reply = reply }, .{ .reply = reply }, .{ .reply = reply } } };
+    var script: Script = .init(testing.allocator, queue.handler());
+    defer script.deinit();
+    var fake: FakeDriver = .init(testing.allocator, &script);
+    defer fake.deinit();
+    var ids: bson.ObjectId.Generator = .init(io);
+    const users = mongo.Database.init(fake.client(), "app", &ids).collection("users");
+
+    const built = try filterByBuilder();
+    defer built.deinit();
+    const Age = struct { @"$gte": i32 };
+    const Filter = struct { age: Age };
+    inline for (.{ bson.literal(.{ .age = .{ .@"$gte" = 18 } }), built, Filter{ .age = .{ .@"$gte" = 18 } }, .{ .age = .{ .@"$gte" = 18 } } }, 0..) |filter, i| {
+        const doc = (try users.findOne(io, .of(.root), filter, .{ .allocator = testing.allocator })) orelse return error.TestNoDocument;
+        defer doc.deinit();
+        try testing.expectEqualSlices(u8, ann.bytes, doc.bytes);
+        try testing.expectEqualSlices(u8, bson.literal(.{
+            .find = "users",
+            .filter = .{ .age = .{ .@"$gte" = 18 } },
+            .limit = 1,
+            .singleBatch = true,
+            .@"$db" = "app",
+        }).bytes, script.entry(io, i).body.bytes);
+    }
+    // The cursor was closed on the server: no killCursors went out.
+    try testing.expectEqual(@as(usize, 4), script.received(io));
+}
+
+test "the options of findOne go out in their order" {
+    const io = testing.io;
+    var f: Fixture = .{};
+    f.init();
+    defer f.deinit();
+    const doc = (try f.users().findOne(io, .of(.root), .{}, .{
+        .allocator = testing.allocator,
+        .sort = bson.literal(.{ .name = -1 }),
+        .projection = bson.literal(.{ ._id = 0 }),
+        .skip = 2,
+        .hint = .{ .keys = bson.literal(.{ .name = 1 }) },
+        .collation = bson.literal(.{ .locale = "fr" }),
+        .let = bson.literal(.{ .y = 2 }),
+        .comment = .{ .int32 = 7 },
+    })) orelse return error.TestNoDocument;
+    defer doc.deinit();
+    try testing.expectEqualSlices(u8, bson.literal(.{
+        .find = "users",
+        .filter = .{},
+        .sort = .{ .name = -1 },
+        .projection = .{ ._id = 0 },
+        .hint = .{ .name = 1 },
+        .skip = 2,
+        .limit = 1,
+        .singleBatch = true,
+        .comment = 7,
+        .collation = .{ .locale = "fr" },
+        .let = .{ .y = 2 },
+        .@"$db" = "app",
+    }).bytes, f.script.entry(io, 0).body.bytes);
+}
+
+test "findOne frees its cursor: one left open on the server gets its killCursors" {
+    const io = testing.io;
+    var f: Fixture = .{};
+    f.init();
+    defer f.deinit();
+    const doc = (try f.users().findOne(io, .of(.root), .{}, .{ .allocator = testing.allocator })) orelse return error.TestNoDocument;
+    defer doc.deinit();
+    try testing.expectEqualSlices(u8, ann.bytes, doc.bytes);
+    try testing.expectEqual(@as(usize, 2), f.script.received(io));
+    try testing.expectEqualSlices(u8, bson.literal(.{ .killCursors = "users", .cursors = .{@as(i64, 42)}, .@"$db" = "app" }).bytes, f.script.entry(io, 1).body.bytes);
+}
+
+test "findOne of no document is null" {
+    const io = testing.io;
+    var cursor: Script.Cursor = .{ .ns = "app.users", .batches = &.{} };
+    var script: Script = .init(testing.allocator, cursor.handler());
+    defer script.deinit();
+    var fake: FakeDriver = .init(testing.allocator, &script);
+    defer fake.deinit();
+    var ids: bson.ObjectId.Generator = .init(io);
+    const users = mongo.Database.init(fake.client(), "app", &ids).collection("users");
+    try testing.expect(try users.findOne(io, .of(.root), .{ .name = "Dan" }, .{ .allocator = testing.allocator }) == null);
+    const empty = try users.find(io, .of(.root), .{ .name = "Dan" }, .{ .allocator = testing.allocator });
+    defer empty.deinit(io);
+    try testing.expect(try empty.next(io, .of(.root)) == null);
+}
+
+test "ok 0 of find is CommandFailed, with the reply in failure_reply; a reply without a cursor is a protocol violation" {
+    const io = testing.io;
+    const refused = bson.literal(.{ .ok = 0.0, .errmsg = "unknown operator: $bad", .code = 2, .codeName = "BadValue" });
+    var queue: Script.Queue = .{ .answers = &.{ .{ .reply = refused }, .{ .reply = refused }, .{ .reply = Script.ok } } };
+    var script: Script = .init(testing.allocator, queue.handler());
+    defer script.deinit();
+    var fake: FakeDriver = .init(testing.allocator, &script);
+    defer fake.deinit();
+    var ids: bson.ObjectId.Generator = .init(io);
+    const users = mongo.Database.init(fake.client(), "app", &ids).collection("users");
+
+    var d: mongo.Diagnostics = .{};
+    var failure: ?bson.OwnedDocument = null;
+    try testing.expectError(error.CommandFailed, users.find(io, .of(.root), .{ .n = .{ .@"$bad" = 1 } }, .{
+        .allocator = testing.allocator,
+        .diagnostics = &d,
+        .failure_reply = &failure,
+    }));
+    try testing.expectEqualSlices(u8, refused.bytes, failure.?.bytes);
+    failure.?.deinit();
+    try testing.expectEqual(@as(i32, 2), d.server.?.code);
+    try testing.expectEqualStrings("unknown operator: $bad", d.message());
+    try testing.expectError(error.CommandFailed, users.findOne(io, .of(.root), .{}, .{ .allocator = testing.allocator, .diagnostics = &d }));
+    try testing.expectEqual(@as(i32, 2), d.server.?.code);
+    try testing.expectError(error.ProtocolViolation, users.findOne(io, .of(.root), .{}, .{ .allocator = testing.allocator, .diagnostics = &d }));
+    try testing.expectEqualStrings("the reply holds no cursor; the command may have run", d.message());
+}
+
+test "a bad collection name, filter or sort is InvalidArgument, and nothing is sent" {
+    const io = testing.io;
+    var f: Fixture = .{};
+    f.init();
+    defer f.deinit();
+    const db: mongo.Database = .init(f.fake.client(), "app", &f.ids);
+    var d: mongo.Diagnostics = .{};
+    try testing.expectError(error.InvalidArgument, db.collection("").find(io, .of(.root), .{}, .{ .allocator = testing.allocator, .diagnostics = &d }));
+    try testing.expectEqualStrings("the collection name is empty", d.message());
+    try testing.expectError(error.InvalidArgument, db.collection("a$b").findOne(io, .of(.root), .{}, .{ .allocator = testing.allocator, .diagnostics = &d }));
+    const bad: []const u8 = "\xff";
+    try testing.expectError(error.InvalidArgument, db.collection("users").find(io, .of(.root), .{ .name = bad }, .{ .allocator = testing.allocator, .diagnostics = &d }));
+    try testing.expect(std.mem.startsWith(u8, d.message(), "the filter cannot be written as BSON"));
+    const broken: bson.RawDocument = .{ .bytes = &.{ 9, 0, 0, 0, 0x10, 'a', 0, 1, 0 } };
+    try testing.expectError(error.InvalidArgument, db.collection("users").findOne(io, .of(.root), .{}, .{ .allocator = testing.allocator, .sort = broken, .diagnostics = &d }));
+    try testing.expect(std.mem.startsWith(u8, d.message(), "the sort cannot be written as BSON"));
+    try testing.expectEqual(@as(usize, 0), f.script.received(io));
+}
