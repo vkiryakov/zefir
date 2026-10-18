@@ -6,6 +6,10 @@
 //!   read a document where it lies, check it, write one, turn structs and
 //!   literals into documents and documents into structs, and print it as
 //!   Extended JSON for logs and test messages.
+//! - `mongo.Database` and `mongo.Collection` — the API of a database and
+//!   its collections, the same on every driver: insert, update, replace,
+//!   delete and `findOneAnd*`, with documents as raw BSON, built with
+//!   `bson.Builder`, or written from structs and literals.
 //! - `mongo.Client` and `mongo.Cursor` — the contract between zefir and a
 //!   driver: a pointer and a table of functions, with the rules of the
 //!   calls checked once, here, for every driver.
@@ -28,6 +32,9 @@ const capabilities = @import("contract/capabilities.zig");
 pub const bson = @import("bson.zig");
 pub const wire = @import("wire.zig");
 pub const testing = @import("testing.zig");
+
+pub const Database = @import("crud/Database.zig");
+pub const Collection = @import("crud/Collection.zig");
 
 pub const Client = @import("contract/Client.zig");
 pub const Cursor = @import("contract/Cursor.zig");
@@ -65,4 +72,6 @@ test {
     _ = @import("contract/types_tests.zig");
     _ = @import("contract/client_tests.zig");
     _ = @import("contract/signature.zig");
+    _ = Collection;
+    _ = @import("crud/document_tests.zig");
 }
