@@ -20,36 +20,39 @@ memory.
 > [!IMPORTANT]
 > **Not implemented yet (TODO):**
 >
-> - **WebSocket.** It will come, outside this version. Server-sent events
->   carry events from the server to a browser today.
+> - **WebSocket.** It will come, outside this version.
 > - **Templates.** No view engine: `ctx.response.html(…)` sends HTML that
 >   you build.
 > - **File uploads.** A body of `multipart/form-data` is not taken apart;
 >   `ctx.request.bodyReader()` reads a body as a stream.
 > - **OpenAPI.** No document is generated from the routes yet.
-> - **`http.Patch(T)`.** A PATCH body fills `?T` fields, where a missing
->   field and `null` look the same: a field can be changed, but not
->   cleared to `null`.
+> - **`http.Patch(T)`.** PATCH routes work, and their body fills `?T`
+>   fields, where a missing field and `null` look the same: a field can be
+>   changed, but not cleared to `null`.
 > - **`zefir.map`.** Fields are not copied between structs by themselves: a
 >   DTO of a response is filled by a function of its own, such as
 >   `dto.TodoResponse.from(todo)`.
 > - **Routes known only at start.** Every route is declared when the service
 >   compiles; of the paths, only the server's `.prefix` may come from the
 >   settings.
-> - **Ready-made middleware.** zefir-http ships none: CORS, authentication,
->   rate limits and security headers are code of your application, and this
->   guide shows the first two. A library of them will come.
+> - **Ready-made middleware.** [Middleware](#middleware) of your own work,
+>   on three levels, but zefir-http ships none ready to use: CORS,
+>   authentication, rate limits and security headers are code of your
+>   application, and this guide shows the first two. A library of them will
+>   come.
 > - **HTTP/2, HTTP/3 and TLS.** The server speaks HTTP/1.1 and 1.0; TLS
 >   ends at a proxy in front of it.
 > - **Compression.** Responses go out as they are, and a request body with
 >   `Content-Encoding` is refused with 415.
-> - **Static files.** Several ranges in one request get the whole file, not
->   `multipart/byteranges`; no precompressed `.gz` or `.br` files; no
->   `If-Match` or `If-Unmodified-Since`; no listings of directories; no
->   symbolic links inside the root.
-> - **Missed events.** A client of server-sent events that reconnects gets
->   the events from then on; those it missed are not sent again. The data of
->   an event is JSON.
+> - **More for static files.** [Static files](#static-files) work, with
+>   `ETag`, 304 and a range; not yet: several ranges in one request, which
+>   get the whole file instead of `multipart/byteranges`; precompressed
+>   `.gz` or `.br` files; `If-Match` and `If-Unmodified-Since`; listings of
+>   directories; symbolic links inside the root.
+> - **Replay of missed server-sent events.**
+>   [Server-sent events](#server-sent-events) work; a client that
+>   reconnects gets the events from then on, since the server keeps no
+>   history to send it the ones it missed.
 > - **The App container.** `main` builds the objects of a service and runs
 >   its server; the App of zefir-core, which will run the lifecycle of many
 >   components, is planned.
