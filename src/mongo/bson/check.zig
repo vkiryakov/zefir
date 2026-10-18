@@ -58,6 +58,8 @@ fn walk(comptime T: type, comptime path: []const u8, comptime direction: Directi
     switch (@typeInfo(T)) {
         .bool => return null,
         .int => |int| return integer(T, int, is),
+        // The types of the values of anonymous literals: .{ .age = 30 }.
+        .comptime_int, .comptime_float, .enum_literal, .null => return null,
         .float => return if (T == f32 or T == f64) null else is ++ ": a BSON double is an f64; use f64 or f32",
         .@"enum" => |info| {
             if (info.mode == .nonexhaustive) return is ++ ", a non-exhaustive enum: a value without a tag has no name to write; make the enum exhaustive";
@@ -101,8 +103,15 @@ fn pointer(comptime T: type, comptime info: std.lang.Type.Pointer, comptime path
             return walk(info.child, path ++ "[]", direction, outer);
         },
         .many, .c => return is ++ ", which has no length: pass a slice",
-        .one => return is ++ ": pass the value itself, not a pointer to it",
+        .one => switch (@typeInfo(info.child)) {
+            // &[_]T{ … } is a list; a string literal and &[_]u8{ … } are strings.
+            .array => |array| return if (array.child == u8) null else walk(array.child, path ++ "[]", direction, outer),
+            // &.{ … } is a list.
+            .@"struct" => |child| if (child.is_tuple) return walk(info.child, path, direction, outer),
+            else => {},
+        },
     }
+    return is ++ ": pass the value itself, not a pointer to it";
 }
 
 fn structure(comptime T: type, comptime info: std.lang.Type.Struct, comptime path: []const u8, comptime direction: Direction, comptime outer: []const type) ?[]const u8 {
@@ -110,10 +119,41 @@ fn structure(comptime T: type, comptime info: std.lang.Type.Struct, comptime pat
         if (Outer == T) return subject(path) ++ " is " ++ @typeName(T) ++ " inside itself: a type that holds itself is not supported";
     }
     const inner = outer ++ [_]type{T};
-    for (info.field_names, info.field_types) |name, Field| {
+    if (info.is_tuple) {
+        // .{} is an empty document; any other tuple is an array of its items.
+        for (info.field_types, info.field_attrs, 0..) |Item, attrs, i| {
+            const item = std.fmt.comptimePrint("{s}[{d}]", .{ path, i });
+            if (constant(Item, attrs, item)) |found| return found;
+            if (walk(Item, item, direction, inner)) |found| return found;
+        }
+        return null;
+    }
+    for (info.field_names, info.field_types, info.field_attrs) |name, Field, attrs| {
         const field = if (path.len == 0) name else path ++ "." ++ name;
         if (!std.unicode.utf8ValidateSlice(name)) return subject(path) ++ " is " ++ @typeName(T) ++ ": the name of one of its fields is not UTF-8";
+        if (constant(Field, attrs, field)) |found| return found;
         if (walk(Field, field, direction, inner)) |found| return found;
+    }
+    return null;
+}
+
+/// The problem of the value of a comptime field, the field of a literal:
+/// an integer beyond int64, an enum literal whose name is not UTF-8.
+fn constant(comptime Field: type, comptime attrs: std.lang.Type.Struct.FieldAttributes, comptime path: []const u8) ?[]const u8 {
+    if (!attrs.@"comptime") return null;
+    switch (@typeInfo(Field)) {
+        .comptime_int => {
+            const n = attrs.defaultValue(Field).?;
+            if (n < std.math.minInt(i64) or n > std.math.maxInt(i64)) {
+                return std.fmt.comptimePrint("{s} is {d}, which does not fit int64", .{ subject(path), n });
+            }
+        },
+        .enum_literal => {
+            if (!std.unicode.utf8ValidateSlice(@tagName(attrs.defaultValue(Field).?))) {
+                return subject(path) ++ " is an enum literal whose name is not UTF-8";
+            }
+        },
+        else => {},
     }
     return null;
 }

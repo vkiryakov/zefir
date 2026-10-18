@@ -30,11 +30,19 @@ pub const EncodeOptions = struct {
 /// | `[]const T`, `[N]T` | array |
 /// | `bson.RawDocument`, `bson.OwnedDocument`, `bson.Value` and the special types | as they are |
 ///
+/// Anonymous literals are written too, for filters, updates and commands:
+/// `.{ .age = .{ .@"$gte" = 18 }, .status = .active }`. In them an integer
+/// is int32 when it fits and int64 otherwise, a float is a double, a string
+/// literal a string, `null` is null and an enum literal the name of its
+/// tag. A tuple, `.{ a, b }` or `&.{ a, b }`, is an array: a pipeline, the
+/// list of `$in`. `.{}` is the empty document `{}`; `&.{}` an empty array.
+/// Comptime fields are written like the others.
+///
 /// `value` itself is a struct, or a `RawDocument` or an `OwnedDocument`,
 /// which is checked and copied. Every other type stops the build with the
 /// path of the field: `u64`, `usize`, `isize` and the C integers, floats
 /// other than f32 and f64, non-exhaustive enums, unions, pointers other
-/// than slices, and types that hold themselves.
+/// than slices and lists, `??T`, and types that hold themselves.
 ///
 /// `error.InvalidBson`: a string is not UTF-8, a document in a field fails
 /// `RawDocument.validate`, a `Value` is of a deprecated type, a regular
@@ -60,9 +68,11 @@ pub const Shape = enum {
     /// One BSON value: a number, a string, a special type, a document
     /// given as it is.
     scalar,
-    /// A struct: a document of its fields.
+    /// A struct, `.{}` among them: a document of its fields.
     document,
-    /// A slice or an array: an array of its items.
+    /// A tuple of values, or a pointer to one: an array of its items.
+    tuple,
+    /// A slice, an array, or a pointer to an array: an array of its items.
     list,
     /// Null or the value.
     optional,
@@ -71,10 +81,17 @@ pub const Shape = enum {
 pub fn shape(comptime T: type) Shape {
     if (check.isSpecial(T)) return .scalar;
     return switch (@typeInfo(T)) {
-        .@"struct" => .document,
+        .@"struct" => |info| if (info.is_tuple and info.field_names.len > 0) .tuple else .document,
         .optional => .optional,
         .array => .list,
-        .pointer => |info| if (info.child == u8) .scalar else .list,
+        .pointer => |info| switch (info.size) {
+            .slice => if (info.child == u8) .scalar else .list,
+            // A pointer to an array or a tuple (the check refuses others).
+            else => switch (@typeInfo(info.child)) {
+                .array => |array| if (array.child == u8) .scalar else .list,
+                else => .tuple,
+            },
+        },
         else => .scalar,
     };
 }
@@ -94,6 +111,14 @@ pub fn writeElement(b: *Builder, key: []const u8, value: anytype, options: Encod
         .document => {
             try b.beginDocument(key);
             try writeFields(b, value, options);
+            try b.end();
+        },
+        .tuple => {
+            const items = if (@typeInfo(@TypeOf(value)) == .pointer) value.* else value;
+            try b.beginArray(key);
+            inline for (@typeInfo(@TypeOf(items)).@"struct".field_names) |name| {
+                try writeElement(b, "", @field(items, name), options);
+            }
             try b.end();
         },
         .list => {
@@ -130,8 +155,14 @@ pub fn scalar(value: anytype) bson.Error!bson.Value {
             const fits_int32 = int.bits <= @as(u16, if (int.signedness == .signed) 32 else 31);
             return if (fits_int32) .{ .int32 = value } else .{ .int64 = value };
         },
-        .float => return .{ .double = value },
+        .comptime_int => return comptime integerLiteral(value),
+        .float, .comptime_float => return .{ .double = value },
         .@"enum" => return .{ .string = @tagName(value) },
+        .enum_literal => {
+            try utf8(@tagName(value));
+            return .{ .string = @tagName(value) };
+        },
+        .null => return .null,
         .pointer => {
             try utf8(value);
             return .{ .string = value };
@@ -143,8 +174,16 @@ pub fn scalar(value: anytype) bson.Error!bson.Value {
 fn isNull(value: anytype) bool {
     return switch (@typeInfo(@TypeOf(value))) {
         .optional => value == null,
+        .null => true,
         else => false,
     };
+}
+
+/// An integer literal: int32 when it fits, otherwise int64.
+fn integerLiteral(comptime n: comptime_int) bson.Value {
+    if (n >= std.math.minInt(i32) and n <= std.math.maxInt(i32)) return .{ .int32 = n };
+    if (n >= std.math.minInt(i64) and n <= std.math.maxInt(i64)) return .{ .int64 = n };
+    @compileError(std.fmt.comptimePrint("bson: the integer {d} does not fit int64", .{n}));
 }
 
 fn utf8(text: []const u8) bson.Error!void {
