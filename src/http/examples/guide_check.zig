@@ -79,6 +79,30 @@ fn showsRun(doc: []const u8, file: []const u8, command: []const u8, output: []co
 /// it printed, `output`, below it: up to the next line of a command or
 /// the end of the block. Such as a curl command and the response it got.
 pub fn expectExchange(name: []const u8, doc: []const u8, command: []const u8, output: []const u8) !void {
+    const shown = try exchangeShown(doc, command, output);
+    if (shown == .same) return;
+    const expected = try maskedLines(output);
+    defer testing.allocator.free(expected);
+    if (shown == .other) {
+        std.debug.print("{s} shows `$ {s}` with another output; the parts in <> may vary:\n{s}\n", .{ name, command, expected });
+    } else {
+        std.debug.print("{s} does not show `$ {s}`, which printed; the parts in <> may vary:\n{s}\n", .{ name, command, expected });
+    }
+    return error.TestExchangeNotInGuide;
+}
+
+/// How a document shows a command against what it printed.
+const Exchange = enum {
+    /// With that output below it, once at least.
+    same,
+    /// Only with other outputs.
+    other,
+    /// Not at all.
+    missing,
+};
+
+/// How `doc` shows `$ <command>` with `output` below it.
+fn exchangeShown(doc: []const u8, command: []const u8, output: []const u8) !Exchange {
     const text = try unixLines(doc);
     defer testing.allocator.free(text);
     const line = try std.mem.concat(testing.allocator, u8, &.{ "\n$ ", command, "\n" });
@@ -91,16 +115,9 @@ pub fn expectExchange(name: []const u8, doc: []const u8, command: []const u8, ou
         rest = body;
         const fence = closingFence(body) orelse body.len;
         const end = std.mem.find(u8, body[0..fence], "\n$ ") orelse fence;
-        if (try sameMasked(body[0..end], output)) return;
+        if (try sameMasked(body[0..end], output)) return .same;
     }
-    const expected = try maskedLines(output);
-    defer testing.allocator.free(expected);
-    if (shown_any) {
-        std.debug.print("{s} shows `$ {s}` with another output; the parts in <> may vary:\n{s}\n", .{ name, command, expected });
-    } else {
-        std.debug.print("{s} does not show `$ {s}`, which printed; the parts in <> may vary:\n{s}\n", .{ name, command, expected });
-    }
-    return error.TestExchangeNotInGuide;
+    return if (shown_any) .other else .missing;
 }
 
 /// Fails unless every ```text block of the document `name`, `doc`, that
@@ -109,6 +126,31 @@ pub fn expectExchange(name: []const u8, doc: []const u8, command: []const u8, ou
 /// and again as it stops. A line `^C` of a block, where the reader stops
 /// the service, is not a line of the output.
 pub fn expectSession(name: []const u8, doc: []const u8, command: []const u8, output: []const u8) !void {
+    const shown = try sessionShown(doc, command, output);
+    if (shown == .whole) return;
+    const expected = try maskedLines(output);
+    defer testing.allocator.free(expected);
+    if (shown == .other_start) {
+        std.debug.print("{s} shows a run of `$ {s}` that is not how its output begins; the parts in <> may vary:\n{s}\n", .{ name, command, expected });
+    } else {
+        std.debug.print("{s} shows no whole run of `$ {s}`; the parts in <> may vary:\n{s}\n", .{ name, command, expected });
+    }
+    return error.TestSessionNotInGuide;
+}
+
+/// How a document shows the runs of a command against its output.
+const Session = enum {
+    /// Each run as the output begins, and one of them whole.
+    whole,
+    /// A run that is not how the output begins.
+    other_start,
+    /// No run, or none of them whole.
+    not_whole,
+};
+
+/// How `doc` shows the runs of `$ <command>` against `output`, as
+/// `expectSession` checks them.
+fn sessionShown(doc: []const u8, command: []const u8, output: []const u8) !Session {
     const text = try unixLines(doc);
     defer testing.allocator.free(text);
     const expected = try maskedLines(output);
@@ -116,13 +158,11 @@ pub fn expectSession(name: []const u8, doc: []const u8, command: []const u8, out
     const start = try std.mem.concat(testing.allocator, u8, &.{ "```text\n$ ", command, "\n" });
     defer testing.allocator.free(start);
     var whole = false;
-    var blocks: usize = 0;
     var rest: []const u8 = text;
     while (std.mem.find(u8, rest, start)) |at| {
         const body = rest[at + start.len ..];
         const end = closingFence(body) orelse return error.TestUnclosedBlock;
         rest = body[end..];
-        blocks += 1;
         var shown: std.ArrayList(u8) = .empty;
         defer shown.deinit(testing.allocator);
         var lines = std.mem.splitScalar(u8, body[0..end], '\n');
@@ -133,16 +173,10 @@ pub fn expectSession(name: []const u8, doc: []const u8, command: []const u8, out
         }
         const masked = try maskedLines(shown.items);
         defer testing.allocator.free(masked);
-        if (!std.mem.startsWith(u8, expected, masked)) {
-            std.debug.print("{s} shows a run of `$ {s}` that is not how its output begins; the parts in <> may vary:\n{s}\n", .{ name, command, expected });
-            return error.TestSessionNotInGuide;
-        }
+        if (!std.mem.startsWith(u8, expected, masked)) return .other_start;
         if (masked.len == expected.len) whole = true;
     }
-    if (blocks == 0 or !whole) {
-        std.debug.print("{s} shows no whole run of `$ {s}`; the parts in <> may vary:\n{s}\n", .{ name, command, expected });
-        return error.TestSessionNotInGuide;
-    }
+    return if (whole) .whole else .not_whole;
 }
 
 /// Where the block that `body` begins closes: at the first line that
@@ -378,8 +412,9 @@ test "an exchange is a command and its output, up to the next command or the end
     const doc = "```text\n$ curl -i localhost:8080/a\nHTTP/1.1 200 OK\nDate: Sat, 17 Oct 2026 19:45:03 GMT\n\nfirst\n\n$ curl -i localhost:8080/b\nHTTP/1.1 404 Not Found\n```\n";
     try expectExchange("doc", doc, "curl -i localhost:8080/a", "HTTP/1.1 200 OK\r\nDate: Sun, 18 Oct 2026 10:00:00 GMT\r\n\r\nfirst");
     try expectExchange("doc", doc, "curl -i localhost:8080/b", "HTTP/1.1 404 Not Found\n");
-    try testing.expectError(error.TestExchangeNotInGuide, expectExchange("doc", doc, "curl -i localhost:8080/b", "HTTP/1.1 200 OK\n"));
-    try testing.expectError(error.TestExchangeNotInGuide, expectExchange("doc", doc, "curl -i localhost:8080/c", "HTTP/1.1 200 OK\n"));
+    // What expectExchange fails on, without the message it prints.
+    try testing.expectEqual(.other, try exchangeShown(doc, "curl -i localhost:8080/b", "HTTP/1.1 200 OK\n"));
+    try testing.expectEqual(.missing, try exchangeShown(doc, "curl -i localhost:8080/c", "HTTP/1.1 200 OK\n"));
 }
 
 test "a block closes at a line that starts with its fence, and an exchange at the end of its block" {
@@ -396,9 +431,11 @@ test "a session shows how its log begins, and once all of it, ^C aside" {
     const log = "2026-10-17T19:45:01.000Z INFO  [app] Serving port=54321\n2026-10-17T19:45:02.000Z INFO  [app] Stopping\n2026-10-17T19:45:02.001Z INFO  [app] Stopped\n";
     const doc = "```text\n$ zig build run\n2026-10-17T10:00:00.000Z INFO  [app] Serving port=8080\n```\n\nLater:\n\n```text\n$ zig build run\n2026-10-17T10:00:00.000Z INFO  [app] Serving port=8080\n^C\n2026-10-17T10:00:09.000Z INFO  [app] Stopping\n2026-10-17T10:00:09.001Z INFO  [app] Stopped\n```\n";
     try expectSession("doc", doc, "zig build run", log);
-    // Only the beginning, or a block that is not how the log begins.
-    try testing.expectError(error.TestSessionNotInGuide, expectSession("doc", doc[0..std.mem.find(u8, doc, "Later").?], "zig build run", log));
-    try testing.expectError(error.TestSessionNotInGuide, expectSession("doc", "```text\n$ zig build run\nINFO  [app] Stopped\n```\n", "zig build run", log));
+    // Only the beginning, or a block that is not how the log begins: what
+    // expectSession fails on, without the message it prints.
+    try testing.expectEqual(.not_whole, try sessionShown(doc[0..std.mem.find(u8, doc, "Later").?], "zig build run", log));
+    try testing.expectEqual(.not_whole, try sessionShown("No run here.\n", "zig build run", log));
+    try testing.expectEqual(.other_start, try sessionShown("```text\n$ zig build run\nINFO  [app] Stopped\n```\n", "zig build run", log));
 }
 
 test "a guide passes when it shows the file, the run and only parts of the file" {
