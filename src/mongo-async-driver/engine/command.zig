@@ -25,23 +25,36 @@ const Diagnostics = mongo.Diagnostics;
 const OperationContext = mongo.OperationContext;
 const Connection = @import("Connection.zig");
 const Pool = @import("Pool.zig");
+const cursor = @import("cursor.zig");
 const errors = @import("errors.zig");
 const time = @import("time.zig");
 
 /// What the operations need of their client: its pool and how the pool
-/// opens connections, its timeouts and the round trips of its
-/// connections. The client hands one out for each call; it points into
-/// the client, which stays where `connect` ran.
+/// opens connections, its timeouts, the round trips of its connections
+/// and its cursors. The client hands one out for each call; it points
+/// into the client, which stays where `connect` ran.
 pub const Runner = struct {
     /// The `io` of `Client.init`: every call comes on it.
     io: Io,
+    /// The client's memory, which its cursors hold their batches in.
     gpa: Allocator,
     pool: *Pool,
     opener: Pool.Opener,
     round_trips: *time.RoundTrips,
+    cursors: *cursor.Registry,
     /// `timeoutMS`: the deadline of a call whose context has none.
     timeout: ?Io.Duration,
     server_selection_timeout: Io.Duration,
+    /// The budget of the `killCursors` that closing a cursor sends.
+    cursor_close_timeout: Io.Duration,
+
+    /// In safe builds: a call on another `std.Io` than the client's
+    /// panics, since the waits of the client belong to its own.
+    pub fn checkIo(r: Runner, io: Io) void {
+        if (std.debug.runtime_safety and io.vtable != r.io.vtable) {
+            @panic("zefir-mongo-async-driver: a call on another std.Io than the client's: pass the io of Client.init");
+        }
+    }
 
     /// The deadline of a call that starts now: its context's, else
     /// `timeoutMS` from now.

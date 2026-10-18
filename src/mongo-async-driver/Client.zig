@@ -38,9 +38,14 @@
 //! refuse a connection. Bodies of commands, passwords and the replies of
 //! authentication never go to the log.
 //!
+//! A cursor holds its batches in the client's memory, and gets more of
+//! them on any connection of the pool. One task at a time uses a cursor;
+//! `deinit` every cursor before the client.
+//!
 //! After `connect` the client must stay where it is, and every call comes
 //! on the `io` of `init`: in safe builds, a call on a moved copy of the
-//! client or on another `std.Io` panics.
+//! client or on another `std.Io`, a cursor used by two tasks at once, and
+//! `deinit` with cursors left panic.
 
 const std = @import("std");
 const Io = std.Io;
@@ -58,6 +63,7 @@ const Connection = @import("engine/Connection.zig");
 const Pool = @import("engine/Pool.zig");
 const command_ = @import("engine/command.zig");
 const connect_ = @import("engine/connect.zig");
+const cursor_ = @import("engine/cursor.zig");
 const handshake = @import("engine/handshake.zig");
 const KeyCache = @import("engine/KeyCache.zig");
 const scram = @import("engine/scram.zig");
@@ -78,6 +84,11 @@ pool: Pool,
 server: Server = .{},
 /// The round trips of hello on new connections, for `maxTimeMS`.
 round_trips: time.RoundTrips = .{},
+/// The cursors, which `close` kills while the server holds them.
+cursors: cursor_.Registry = .{},
+/// Set by the first `close`, and `closed` once it is done.
+closing: std.atomic.Value(bool) = .init(false),
+closed: Io.Event = .unset,
 /// Where `connect` succeeded, 0 before, in safe builds: a call on a copy
 /// of the client somewhere else panics. Atomic: any task may call while
 /// another connects.
@@ -112,8 +123,12 @@ pub fn init(gpa: Allocator, io: Io, options: Options) InitError!Client {
 
 /// Closes the client, if `close` has not, and frees it: the copies of the
 /// connection string and the password, and the keys of SCRAM, wiped.
+/// `deinit` the cursors before: in safe builds a cursor left panics.
 pub fn deinit(self: *Client) void {
     self.checkHome();
+    if (std.debug.runtime_safety and self.cursors.liveCount(self.io) > 0) {
+        @panic("zefir-mongo-async-driver: Client.deinit() with cursors left: deinit every cursor before the client");
+    }
     self.close(self.io);
     self.pool.deinit();
     self.keys.deinit();
@@ -148,12 +163,22 @@ pub fn connect(self: *Client, io: Io, ctx: core.Context, diagnostics: ?*Diagnost
 /// Ends the client's work, in the order of the contract: new calls, and
 /// those waiting for a connection, get `error.Closed`; connections being
 /// opened stop; the calls in flight get up to `close_timeout` to end, and
-/// after it their exchanges are cut (`error.ConnectionLost`); then the
+/// after it their exchanges are cut (`error.ConnectionLost`); the cursors
+/// that the server still holds get `killCursors`, within
+/// `cursor_close_timeout`, and their `next` is `error.Closed`; then the
 /// connections close. A second call returns once the first is done. The
 /// task's cancelation waits until it returns.
 pub fn close(self: *Client, io: Io) void {
     self.checkUse(io);
+    const protection = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(protection);
+    if (self.closing.swap(true, .acq_rel)) {
+        self.closed.waitUncancelable(io);
+        return;
+    }
     self.pool.close(io, self.options.close_timeout);
+    cursor_.closeAll(self.runner(), io);
+    self.closed.set(io);
 }
 
 /// A snapshot of the connections and the calls waiting for them.
@@ -168,7 +193,7 @@ pub fn stats(self: *Client) Stats {
         .waiting = counts.waiting,
         .generation = counts.generation,
         .clears = counts.clears,
-        .open_cursors = 0,
+        .open_cursors = self.cursors.openCount(self.io),
     };
 }
 
@@ -178,6 +203,8 @@ pub fn capabilities(self: *Client) mongo.Capabilities {
         .revision = 1,
         .name = handshake.driver_name,
         .commands = true,
+        .cursors = true,
+        .aggregation = true,
         .server = self.server.load(),
     };
 }
@@ -189,8 +216,7 @@ pub fn runCommand(self: *Client, io: Io, op: OperationContext, command: *const m
 
 pub fn openCursor(self: *Client, io: Io, op: OperationContext, command: *const mongo.Command, options: mongo.CursorOptions) mongo.Error!mongo.Cursor {
     self.checkUse(io);
-    _ = .{ op, command };
-    return fail(options.diagnostics, null, error.Unsupported, "this version of zefir-mongo-async-driver runs commands only, without cursors", .{});
+    return .init(try cursor_.open(self.runner(), io, op, command, options));
 }
 
 pub fn write(self: *Client, io: Io, op: OperationContext, request: *const mongo.WriteRequest, options: mongo.WriteOptions) mongo.Error!mongo.WriteResult {
@@ -224,8 +250,10 @@ fn runner(self: *Client) command_.Runner {
         .pool = &self.pool,
         .opener = self.opener(),
         .round_trips = &self.round_trips,
+        .cursors = &self.cursors,
         .timeout = self.options.uri.timeout,
         .server_selection_timeout = self.options.uri.server_selection_timeout,
+        .cursor_close_timeout = self.options.cursor_close_timeout,
     };
 }
 
