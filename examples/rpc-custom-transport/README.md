@@ -129,9 +129,10 @@ out its budget.
 `reply_to` and the correlation ids are secrets of a call. With the name of
 a reply queue, anyone who may publish to it can answer for the server, and
 the ids of `rpc.transport.Pending` are easy to guess: 1, 2, 3… The sample
-draws the name from `io.randomSecure` and gives the engine no peer, so the
-access log never shows it. With RabbitMQ, take an exclusive reply queue or
-direct reply-to (`amq.rabbitmq.reply-to`), and keep both values out of logs.
+draws the name from `io.randomSecure` and gives the engine no peer, so
+`ctx.peer()`, and so no log, ever holds it. With RabbitMQ, take an exclusive
+reply queue or direct reply-to (`amq.rabbitmq.reply-to`), and keep both
+values out of logs.
 
 A server answers only in reply queues, and drops a request whose
 `reply_to` names any other queue: a client that may publish requests

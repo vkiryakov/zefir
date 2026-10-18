@@ -21,11 +21,18 @@ const AccessLog = struct {
     pub fn run(self: *AccessLog, ctx: *rpc.Context, next: *rpc.Next) anyerror!void {
         const started = std.Io.Clock.awake.now(ctx.io());
         const result = next.run();
-        // The failure the client gets for the error of the chain.
-        const failure: ?rpc.Failure = if (result) |_| null else |err| ctx.mapError(err);
+        const op = ctx.operation();
+        // The failure the client gets: deadline_exceeded once the deadline
+        // has passed, cancelled after the client's cancel or the stop,
+        // whatever the chain returned; else that of the chain's error.
+        const failure: ?rpc.Failure = if (op.isExpired(std.Io.Clock.awake.now(ctx.io())))
+            ctx.mapError(error.DeadlineExceeded)
+        else if (op.isCancelled())
+            ctx.mapError(error.Cancelled)
+        else if (result) |_| null else |err| ctx.mapError(err);
         const route = ctx.route();
         // withContext puts the trace and span ids of the call in the record.
-        self.logger.withContext(ctx.operation()).info("RPC call served", .{ .rpc = .{
+        self.logger.withContext(op).info("RPC call served", .{ .rpc = .{
             .service = route.service,
             .version = route.version,
             .method = route.method,
@@ -74,4 +81,16 @@ pub fn main(init: std.process.Init) !void {
     defer created.deinit();
     var missing = try client.call(io, ctx, api.UserApi.getUser, .{ .id = 42 }, .{ .metadata = tenant });
     defer missing.deinit();
+
+    // A long write, such as a migration, holds the table of users: the last
+    // call waits for it past its deadline, 200 ms away.
+    try repo.mutex.lock(io);
+    defer repo.mutex.unlock(io);
+    var late = client.call(io, ctx, api.UserApi.getUser, .{ .id = 1 }, .{ .metadata = tenant, .timeout = .fromMilliseconds(200) }) catch |err| switch (err) {
+        // The client gives up at the deadline, the moment the server does.
+        error.DeadlineExceeded => return,
+        else => return err,
+    };
+    // Or the server's deadline_exceeded reached it first.
+    late.deinit();
 }

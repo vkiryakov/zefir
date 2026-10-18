@@ -1,6 +1,6 @@
-//! The examples of README.md, the guide of rpc. build.zig
-//! builds and runs the programs and the tests; readme_test.zig checks that
-//! README.md shows every file as it is and every run as it printed.
+//! The examples of README.md, the guide of rpc. build.zig builds and runs
+//! the programs and the tests; readme_test.zig checks that README.md shows
+//! every file as it is and every run as it printed.
 
 /// A program of the guide: a whole service, or a service and its clients,
 /// that logs what happens with zefir-log as text.

@@ -761,12 +761,11 @@ const GuideModules = struct {
 };
 
 /// The examples of src/rpc/examples/README.md, the guide of rpc, as
-/// cases.zig there lists them. Every program runs through
-/// example_main.zig, which exits with code 3 on a panic instead of
-/// aborting and with code 4 when the run takes longer than its time limit
-/// (testdata/hang.zig checks that), and must exit with 0; readme_test.zig
-/// then checks that README.md shows every file as it is and every run as
-/// it printed.
+/// cases.zig there lists them. Every program runs through example_main.zig,
+/// which exits with code 3 on a panic instead of aborting and with code 4
+/// when the run takes longer than its time limit (testdata/hang.zig checks
+/// that), and must exit with 0; readme_test.zig then checks that README.md
+/// shows every file as it is and every run as it printed.
 fn addRpcGuide(
     b: *std.Build,
     test_rpc: *std.Build.Step,

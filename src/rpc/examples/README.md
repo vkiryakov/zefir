@@ -28,6 +28,10 @@ in tests, or one you write yourself.
 > - **The App container.** `main` builds the objects of a service and runs
 >   its server; the App of zefir-core, which will run the lifecycle of
 >   many components, is planned.
+> - **Ready-made middleware.** [Middleware](#middleware) of your own work,
+>   on three levels, but zefir-rpc ships none ready to use: an access log,
+>   rate limits and permissions are code of your application, and this
+>   guide shows them.
 > - **Metrics.** No interface of its own: count in middleware, the way an
 >   [access log](#access-logs) writes a record per call. NATS micro shows
 >   the counters of every method.
@@ -2022,8 +2026,9 @@ when a caller reports a failure, and a log store joins it to the other
 records of the request by its trace id. The access log is middleware of the
 application, a few lines on zefir-log: an object first in the server's
 chain, which writes its record once the rest of the chain has run. Here the
-users service serves two calls of a gateway, which got a W3C traceparent
-and names the tenant of each call in the metadata, `x-tenant`:
+users service serves three calls of a gateway, which got a W3C traceparent
+and names the tenant of each call in the metadata, `x-tenant`; the third
+runs out of time:
 
 ```zig
 //! The access log of the users service: middleware of the application on
@@ -2049,11 +2054,18 @@ const AccessLog = struct {
     pub fn run(self: *AccessLog, ctx: *rpc.Context, next: *rpc.Next) anyerror!void {
         const started = std.Io.Clock.awake.now(ctx.io());
         const result = next.run();
-        // The failure the client gets for the error of the chain.
-        const failure: ?rpc.Failure = if (result) |_| null else |err| ctx.mapError(err);
+        const op = ctx.operation();
+        // The failure the client gets: deadline_exceeded once the deadline
+        // has passed, cancelled after the client's cancel or the stop,
+        // whatever the chain returned; else that of the chain's error.
+        const failure: ?rpc.Failure = if (op.isExpired(std.Io.Clock.awake.now(ctx.io())))
+            ctx.mapError(error.DeadlineExceeded)
+        else if (op.isCancelled())
+            ctx.mapError(error.Cancelled)
+        else if (result) |_| null else |err| ctx.mapError(err);
         const route = ctx.route();
         // withContext puts the trace and span ids of the call in the record.
-        self.logger.withContext(ctx.operation()).info("RPC call served", .{ .rpc = .{
+        self.logger.withContext(op).info("RPC call served", .{ .rpc = .{
             .service = route.service,
             .version = route.version,
             .method = route.method,
@@ -2102,38 +2114,67 @@ pub fn main(init: std.process.Init) !void {
     defer created.deinit();
     var missing = try client.call(io, ctx, api.UserApi.getUser, .{ .id = 42 }, .{ .metadata = tenant });
     defer missing.deinit();
+
+    // A long write, such as a migration, holds the table of users: the last
+    // call waits for it past its deadline, 200 ms away.
+    try repo.mutex.lock(io);
+    defer repo.mutex.unlock(io);
+    var late = client.call(io, ctx, api.UserApi.getUser, .{ .id = 1 }, .{ .metadata = tenant, .timeout = .fromMilliseconds(200) }) catch |err| switch (err) {
+        // The client gives up at the deadline, the moment the server does.
+        error.DeadlineExceeded => return,
+        else => return err,
+    };
+    // Or the server's deadline_exceeded reached it first.
+    late.deinit();
 }
 ```
 
 ```text
 $ zig build run
-2026-10-18T18:51:38.207Z INFO  [rpc] RPC call served rpc.service=users rpc.version=1 rpc.method=createUser rpc.code=ok rpc.app_code=- rpc.tenant=acme rpc.request_id=4c80cfd822527a6aa1d22b9effcef239 rpc.duration_ms=0 trace_id=4bf92f3577b34da6a3ce929d0e0e4736 span_id=2e03c66973dca7cc
-2026-10-18T18:51:38.207Z INFO  [rpc] RPC call served rpc.service=users rpc.version=1 rpc.method=getUser rpc.code=not_found rpc.app_code=users.not_found rpc.tenant=acme rpc.request_id=1ddb82201a5dd01b9b2937be033a18a5 rpc.duration_ms=0 trace_id=4bf92f3577b34da6a3ce929d0e0e4736 span_id=1a84ac23c242e308
+2026-10-18T19:19:52.983Z INFO  [rpc] RPC call served rpc.service=users rpc.version=1 rpc.method=createUser rpc.code=ok rpc.app_code=- rpc.tenant=acme rpc.request_id=b840e2f3046ff63da47cd1ebf21bc2fe rpc.duration_ms=0 trace_id=4bf92f3577b34da6a3ce929d0e0e4736 span_id=0e68a7ff55adff42
+2026-10-18T19:19:52.983Z INFO  [rpc] RPC call served rpc.service=users rpc.version=1 rpc.method=getUser rpc.code=not_found rpc.app_code=users.not_found rpc.tenant=acme rpc.request_id=b64926176020c86ca9fdb8f1a951d3dc rpc.duration_ms=0 trace_id=4bf92f3577b34da6a3ce929d0e0e4736 span_id=e78473dbc119bce0
+2026-10-18T19:19:53.186Z INFO  [rpc] RPC call served rpc.service=users rpc.version=1 rpc.method=getUser rpc.code=deadline_exceeded rpc.app_code=rpc.deadline_exceeded rpc.tenant=acme rpc.request_id=62828c397f19ec8002e502550b944309 rpc.duration_ms=202 trace_id=4bf92f3577b34da6a3ce929d0e0e4736 span_id=3a5c47be1cc6b3be
 ```
 
 Each record has the route, `code` (`ok` or the code of the failure) with
 the `app_code` of a failure, the tenant, the request id in hex, and the
-time in milliseconds. `ctx.mapError` turns the error of the chain into the
-failure the client gets, as the server does once the chain has unwound:
-`error.UserNotFound` is `not_found` with `users.not_found`, as the contract
-says. The trace id is the gateway's: `withContext` puts the trace and the
-server's span of the call in the record, so a log store finds every record
-of the request across services. In JSON, the format a log store reads, the
-fields under `.rpc` sit in one object: `"rpc":{"service":"users","version":1,…}`.
+time in milliseconds. The code is the one the client gets, which is not
+always the outcome of the chain. Once the deadline has passed, it is
+`deadline_exceeded`, whatever the chain returned: the server sends it at
+the deadline and only then cancels the handler, so the chain of the third
+call returns `error.Canceled`, or even a success, after the client has
+given up. After the client's cancel or the stop, it is `cancelled`.
+Otherwise `ctx.mapError` maps the error of the chain as the server does
+once the chain has unwound: `error.UserNotFound` is `not_found` with
+`users.not_found`, as the contract says. The trace id is the gateway's:
+`withContext` puts the trace and the server's span of the call in the
+record, so a log store finds every record of the request across services.
+In JSON, the format a log store reads, the fields under `.rpc` sit in one
+object: `"rpc":{"service":"users","version":1,…}`.
 
-- **Never in a record:** a body, credentials, or the metadata wholesale.
-  Name the keys a record carries, as `x-tenant` here, and never a key whose
-  value is a secret; `authorization` never reaches middleware as metadata.
+- **Never in a record:** a body, credentials, the metadata wholesale, or
+  the identity beyond its subject (`ctx.identity()` carries roles and
+  permissions too). Name the keys a record carries, as `x-tenant` here, and
+  never a key whose value is a secret; `authorization` never reaches
+  middleware as metadata. A tenant in the metadata is the caller's claim,
+  not verified: the tenant an authenticator verified is the identity's
+  `tenant_id`.
+- **One level.** Every record here is `info`, so a failure of the service
+  itself, such as `internal`, raises no alert by its level: pick the level
+  from `failure.code` (`err` for `internal`, `unknown` and `data_loss`,
+  `warn` for `deadline_exceeded`, `unavailable`, …), or alert on `rpc.code`
+  in the log store.
 - **First in the chain.** Before the other links of the server, it sees
   what they did, and its time covers them.
 - **What middleware cannot see.** Calls the server ends before the chain
   have no record: refused at admission (an unknown method, the limits, a
   full queue), refused by the authenticator, or out of time before their
-  task began; NATS micro counts those of a known route. And the outcome of
-  the chain is not final: past the deadline the server sends
-  `deadline_exceeded`, at the client's cancel or the stop it ends the call
-  as `cancelled`, and a response the transport cannot carry goes out as
-  `resource_exhausted` ([the rules of the chain](#middleware)).
+  task began; NATS micro counts those of a known route. Two outcomes come
+  only after the record, which logs them as `ok`: a response the transport
+  cannot carry (over its own limit, such as the NATS max payload) goes out
+  as `resource_exhausted`, and a success that ends a fraction of a
+  millisecond before the deadline as `deadline_exceeded`
+  ([the rules of the chain](#middleware)).
 
 A client logs its calls the same way, with middleware of `rpc.Client`
 whose `run` takes `*rpc.ClientContext` and `*rpc.ClientNext` (see
