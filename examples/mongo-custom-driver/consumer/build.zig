@@ -33,7 +33,7 @@ pub fn build(b: *std.Build) void {
     // The scenarios of the collection API that every driver of zefir runs,
     // from the end-to-end tests of this checkout.
     const crud_scenarios = b.createModule(.{
-        .root_source_file = zefir.path("tests/mongo-async-driver/e2e/crud_scenarios.zig"),
+        .root_source_file = zefir.path("tests/mongo/e2e/crud_scenarios.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{

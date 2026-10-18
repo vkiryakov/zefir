@@ -1,6 +1,6 @@
 //! The collection API of zefir-mongo on minidriver against a live mongod:
 //! the scenarios that the end-to-end tests of zefir run on every driver,
-//! taken from tests/mongo-async-driver of this checkout. Without
+//! taken from tests/mongo of this checkout. Without
 //! `-Dlive-uri` the test is skipped.
 
 const std = @import("std");

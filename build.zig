@@ -59,10 +59,10 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // nats sends the package version in CONNECT, and the native MongoDB
-    // driver in hello; build.zig.zon is its only source. One module of the
-    // options serves both: two of the same content would be one file in two
-    // modules of the umbrella.
+    // nats sends the package version in CONNECT, and zefir-mongo in hello;
+    // build.zig.zon is its only source. One module of the options serves
+    // both: two of the same content would be one file in two modules of the
+    // umbrella.
     const version_options = b.addOptions();
     version_options.addOption([]const u8, "version", manifest.version);
     const build_options = version_options.createModule();
@@ -98,8 +98,8 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // What every MongoDB driver of zefir shares, starting with BSON. It
-    // imports no driver: drivers import it.
+    // MongoDB for zefir applications: the native driver, BSON and the
+    // collection API.
     const mongo = b.addModule("zefir-mongo", .{
         .root_source_file = b.path("src/mongo/root.zig"),
         .target = target,
@@ -109,19 +109,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "core", .module = core },
         },
     });
-
-    // The native MongoDB driver of zefir-mongo.
-    const mongo_async_driver = b.addModule("zefir-mongo-async-driver", .{
-        .root_source_file = b.path("src/mongo-async-driver/root.zig"),
-        .target = target,
-        .optimize = optimize,
-        .sanitize_thread = tsan,
-        .imports = &.{
-            .{ .name = "mongo", .module = mongo },
-            .{ .name = "core", .module = core },
-        },
-    });
-    mongo_async_driver.addImport("build_options", build_options);
+    mongo.addImport("build_options", build_options);
 
     const http = b.addModule("zefir-http", .{
         .root_source_file = b.path("src/http/root.zig"),
@@ -134,7 +122,7 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // Umbrella module: @import("zefir").core, .log, .confy, .validator, .rpc, .rpc_nats, .orm, .mongo, .mongo_async_driver, .nats, .http
+    // Umbrella module: @import("zefir").core, .log, .confy, .validator, .rpc, .rpc_nats, .orm, .mongo, .nats, .http
     const zefir = b.addModule("zefir", .{
         .root_source_file = b.path("src/zefir.zig"),
         .target = target,
@@ -149,7 +137,6 @@ pub fn build(b: *std.Build) void {
             .{ .name = "rpc-nats", .module = rpc_nats },
             .{ .name = "orm", .module = orm },
             .{ .name = "mongo", .module = mongo },
-            .{ .name = "mongo-async-driver", .module = mongo_async_driver },
             .{ .name = "nats", .module = nats },
             .{ .name = "http", .module = http },
         },
@@ -168,7 +155,6 @@ pub fn build(b: *std.Build) void {
     const test_rpc_nats = addModuleTestStep(b, test_step, "rpc-nats");
     const test_orm = addModuleTestStep(b, test_step, "orm");
     const test_mongo = addModuleTestStep(b, test_step, "mongo");
-    const test_mongo_async_driver = addModuleTestStep(b, test_step, "mongo-async-driver");
     const test_nats = addModuleTestStep(b, test_step, "nats");
     const test_http = addModuleTestStep(b, test_step, "http");
     const test_zefir = addModuleTestStep(b, test_step, "zefir");
@@ -177,8 +163,8 @@ pub fn build(b: *std.Build) void {
     // where usize has 32 bits.
     const validator_compile_step = b.step("compile-validator-tests", "Build the validator's test binaries for -Dtarget without running them");
     for (
-        [_]*std.Build.Module{ core, log, confy, validator, rpc, rpc_nats, orm, mongo, mongo_async_driver, nats, http, zefir },
-        [_]*std.Build.Step{ test_core, test_log, test_confy, test_validator, test_rpc, test_rpc_nats, test_orm, test_mongo, test_mongo_async_driver, test_nats, test_http, test_zefir },
+        [_]*std.Build.Module{ core, log, confy, validator, rpc, rpc_nats, orm, mongo, nats, http, zefir },
+        [_]*std.Build.Step{ test_core, test_log, test_confy, test_validator, test_rpc, test_rpc_nats, test_orm, test_mongo, test_nats, test_http, test_zefir },
     ) |module, module_test_step| {
         const tests = b.addTest(.{ .root_module = module });
         module_test_step.dependOn(&addRun(b, tests, tsan).step);
@@ -338,12 +324,12 @@ pub fn build(b: *std.Build) void {
     run_moved_client.expectExitCode(3);
     test_nats.dependOn(&run_moved_client.step);
 
-    // mongo-async-driver panic programs: a client moved after connect(), a
-    // call on another std.Io, a cursor used by two tasks at once and
+    // mongo panic programs: a client moved after connect(), a call on
+    // another std.Io, a cursor used by two tasks at once and
     // Client.deinit() with cursors left panic in safe builds. Each program
     // must print the panic message and end in its own panic handler, which
-    // exits with code 3 instead of aborting. They get their own Debug
-    // copies of mongo and the driver, whatever -Doptimize says.
+    // exits with code 3 instead of aborting. They get their own Debug copy
+    // of mongo, whatever -Doptimize says.
     const panic_mongo = b.createModule(.{
         .root_source_file = b.path("src/mongo/root.zig"),
         .target = target,
@@ -352,31 +338,21 @@ pub fn build(b: *std.Build) void {
             .{ .name = "core", .module = panic_core },
         },
     });
-    const panic_mongo_async_driver = b.createModule(.{
-        .root_source_file = b.path("src/mongo-async-driver/root.zig"),
-        .target = target,
-        .optimize = .Debug,
-        .imports = &.{
-            .{ .name = "mongo", .module = panic_mongo },
-            .{ .name = "core", .module = panic_core },
-        },
-    });
-    panic_mongo_async_driver.addOptions("build_options", version_options);
+    panic_mongo.addOptions("build_options", version_options);
     for ([_][2][]const u8{
-        .{ "moved_client", "panic: zefir-mongo-async-driver: Client moved after connect(): keep it where connect() ran (see the guide)" },
-        .{ "another_io", "panic: zefir-mongo-async-driver: a call on another std.Io than the client's: pass the io of Client.init" },
-        .{ "cursor_two_tasks", "panic: zefir-mongo-async-driver: a cursor used by two tasks at once: one task at a time calls next, close and deinit of a cursor" },
-        .{ "deinit_live_cursor", "panic: zefir-mongo-async-driver: Client.deinit() with cursors left: deinit every cursor before the client" },
+        .{ "moved_client", "panic: zefir-mongo: Client moved after connect(): keep it where connect() ran (see the guide)" },
+        .{ "another_io", "panic: zefir-mongo: a call on another std.Io than the client's: pass the io of Client.init" },
+        .{ "cursor_two_tasks", "panic: zefir-mongo: a cursor used by two tasks at once: one task at a time calls next, close and deinit of a cursor" },
+        .{ "deinit_live_cursor", "panic: zefir-mongo: Client.deinit() with cursors left: deinit every cursor before the client" },
     }) |case| {
         const exe = b.addExecutable(.{
-            .name = b.fmt("mongo-async-driver-panic-{s}", .{case[0]}),
+            .name = b.fmt("mongo-panic-{s}", .{case[0]}),
             .root_module = b.createModule(.{
-                .root_source_file = b.path(b.fmt("src/mongo-async-driver/testdata/panic/{s}.zig", .{case[0]})),
+                .root_source_file = b.path(b.fmt("src/mongo/testdata/panic/{s}.zig", .{case[0]})),
                 .target = target,
                 .optimize = .Debug,
                 .imports = &.{
                     .{ .name = "mongo", .module = panic_mongo },
-                    .{ .name = "mongo-async-driver", .module = panic_mongo_async_driver },
                 },
             }),
         });
@@ -385,7 +361,7 @@ pub fn build(b: *std.Build) void {
         // expectStdErrMatch accepts any exit: only the panic handler exits
         // with 3, so a program that printed the text and returned fails.
         run.expectExitCode(3);
-        test_mongo_async_driver.dependOn(&run.step);
+        test_mongo.dependOn(&run.step);
     }
 
     // log compile errors: each test of the file must fail to compile with

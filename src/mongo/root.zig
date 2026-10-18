@@ -1,6 +1,5 @@
 //! zefir-mongo — MongoDB for zefir applications, written against `std.Io`
-//! only: what every MongoDB driver of zefir shares. It imports no driver;
-//! drivers import it.
+//! only: the native driver and everything it stands on.
 //!
 //! - `mongo.bson` — BSON, the format of MongoDB's documents and commands:
 //!   read a document where it lies, check it, write one, turn structs and
@@ -14,6 +13,9 @@
 //! - `mongo.Client` and `mongo.Cursor` — the contract between zefir and a
 //!   driver: a pointer and a table of functions, with the rules of the
 //!   calls checked once, here, for every driver.
+//! - `mongo.native` — the native driver: `mongo.native.Client` talks to one
+//!   standalone mongod of MongoDB 7.0 or later over plain TCP, with SCRAM
+//!   and a pool of connections, and hands out a `mongo.Client`.
 //! - `mongo.Error`, `mongo.outcome`, `mongo.Diagnostics` — what can go
 //!   wrong in a call, whether the server may have run it, and the details
 //!   for logs.
@@ -39,6 +41,8 @@ pub const Collection = @import("crud/Collection.zig");
 
 pub const Client = @import("contract/Client.zig");
 pub const Cursor = @import("contract/Cursor.zig");
+
+pub const native = @import("native.zig");
 
 pub const Error = errors.Error;
 pub const Outcome = errors.Outcome;
@@ -69,6 +73,7 @@ test {
     _ = bson;
     _ = wire;
     _ = testing;
+    _ = native;
     _ = @import("contract/errors_tests.zig");
     _ = @import("contract/types_tests.zig");
     _ = @import("contract/client_tests.zig");
