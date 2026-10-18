@@ -8,8 +8,73 @@
 const std = @import("std");
 const Io = std.Io;
 const net = Io.net;
+const Allocator = std.mem.Allocator;
+const core = @import("core");
+const mongo = @import("mongo");
+const bson = mongo.bson;
+const Diagnostics = mongo.Diagnostics;
 const Connection = @import("Connection.zig");
 const DeadlineStream = @import("DeadlineStream.zig");
+const handshake = @import("handshake.zig");
+const race = @import("race.zig");
+
+/// The errors of `open`: those of the attempt, which leave the details in
+/// the diagnostics, and `Timeout` when the deadline came first,
+/// `Canceled` when the caller's task was canceled or the attempt stopped,
+/// `ConcurrencyUnavailable` when the attempt found no task to run in.
+pub const OpenError = error{ Unavailable, Unsupported, OutOfMemory, Canceled, Timeout, ConcurrencyUnavailable };
+
+/// Opens a connection to `address` and runs `hello` on it, all of it
+/// before `deadline`, in a task of its own; null: no limit, and the
+/// caller's task does it. `attempt` lets another task stop it.
+pub fn open(io: Io, gpa: Allocator, address: Connection.Address, hello: bson.RawDocument, deadline: ?core.Deadline, attempt: *Attempt, d: ?*Diagnostics) OpenError!*Connection {
+    // The attempt's own diagnostics: what it says counts only when its
+    // error is the one returned.
+    var attempt_d: Diagnostics = .{};
+    const limit = deadline orelse return openNow(io, gpa, address, hello, attempt, d orelse &attempt_d);
+    return race.race(io, limit, openNow, .{ io, gpa, address, hello, attempt, &attempt_d }, destroy, .{
+        .context = attempt,
+        .function = Attempt.abort,
+    }) catch |err| {
+        switch (err) {
+            error.Unavailable, error.Unsupported => if (d) |x| {
+                x.* = attempt_d;
+            },
+            else => {},
+        }
+        return err;
+    };
+}
+
+fn openNow(io: Io, gpa: Allocator, address: Connection.Address, hello: bson.RawDocument, attempt: *Attempt, d: *Diagnostics) handshake.Error!*Connection {
+    const stream = dial(io, address) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => {
+            d.set(.connect, err, "cannot connect to {f}: {t}", .{ address, err });
+            return error.Unavailable;
+        },
+    };
+    if (!attempt.hold(io, stream)) {
+        stream.close(io);
+        return error.Canceled;
+    }
+    defer attempt.release(io);
+    const conn = Connection.create(gpa, io, stream, address) catch {
+        stream.close(io);
+        return error.OutOfMemory;
+    };
+    handshake.run(conn, hello, gpa, d) catch |err| {
+        conn.destroy();
+        return err;
+    };
+    return conn;
+}
+
+/// A connection that came after the deadline.
+fn destroy(io: Io, conn: *Connection) void {
+    _ = io;
+    conn.destroy();
+}
 
 pub const DialError = net.IpAddress.ConnectError || net.HostName.ConnectError ||
     net.HostName.ValidateError || net.Ip6Address.ResolveError;
