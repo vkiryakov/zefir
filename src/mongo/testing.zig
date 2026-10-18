@@ -15,8 +15,10 @@
 const std = @import("std");
 
 pub const Script = @import("testing/Script.zig");
+pub const FakeServer = @import("testing/FakeServer.zig");
 
 test {
     std.testing.refAllDecls(@This());
     _ = @import("testing/script_tests.zig");
+    _ = @import("testing/fake_server_tests.zig");
 }
