@@ -877,3 +877,351 @@ pub fn s20(job: *Job) Job.Error!void {
         try job.expect(still, "{s} swallowed a cancelation of its task: io.checkCancel() after it saw none", .{step});
     }
 }
+
+/// Ten inserts, `{_id: 0}` to `{_id: 9}`.
+const ten = ten: {
+    var items: [10]bson.RawDocument = undefined;
+    for (&items, 0..) |*item, i| item.* = bson.literal(.{ ._id = @as(i32, i) });
+    break :ten items;
+};
+
+/// Ten updates of `{_id: 0}` to `{_id: 9}`.
+const ten_updates = updates: {
+    var items: [10]bson.RawDocument = undefined;
+    for (&items, 0..) |*item, i| item.* = bson.literal(.{ .q = .{ ._id = @as(i32, i) }, .u = .{ .@"$set" = .{ .seen = true } } });
+    break :updates items;
+};
+
+/// Four deletes of `{_id: 0}` to `{_id: 3}`.
+const four_deletes = deletes: {
+    var items: [4]bson.RawDocument = undefined;
+    for (&items, 0..) |*item, i| item.* = bson.literal(.{ .q = .{ ._id = @as(i32, i) }, .limit = 1 });
+    break :deletes items;
+};
+
+/// The length of the OP_MSG that carried `entry`, without a checksum.
+fn messageLength(entry: Script.Entry) usize {
+    var n: usize = 16 + 4 + 1 + entry.body.bytes.len;
+    if (entry.sequence) |sequence| n += 1 + 4 + sequence.identifier.len + 1 + sequence.bytes.len;
+    return n;
+}
+
+/// Fails unless the journal's commands named `name`, from number `first`
+/// on, carry `items` in their order, in batches of `sizes`, each in a
+/// section of kind 1 named `identifier`, with `body` as the caller wrote it
+/// plus `ordered` and `$db`.
+fn expectBatches(job: *Job, script: *Script, name: []const u8, first: usize, identifier: []const u8, items: []const bson.RawDocument, sizes: []const usize, body: bson.RawDocument, ordered: bool) Job.Error!void {
+    const io = job.io;
+    try job.expect(script.count(io, name) == first + sizes.len, "{d} items went out in {d} {s} command(s), not {d}", .{ items.len, script.count(io, name) - first, name, sizes.len });
+    var at: usize = 0;
+    for (sizes, first..) |size, i| {
+        const entry = try job.received(script, name, i);
+        const sequence = entry.sequence orelse return job.fail("batch {d} of {s} came without a section of kind 1; its items go in one", .{ i - first, name });
+        try job.expect(eql(u8, sequence.identifier, identifier), "batch {d} of {s} came in a section of kind 1 named \"{s}\", not \"{s}\"", .{ i - first, name, sequence.identifier, identifier });
+        var sent = sequence.documents();
+        var n: usize = 0;
+        while (sent.next()) |doc| : (n += 1) {
+            try job.expect(at + n < items.len and eql(u8, doc.bytes, items[at + n].bytes), "item {d} of {s} came changed or out of its order", .{ at + n, name });
+        }
+        try job.expect(n == size, "batch {d} of {s} carried {d} items, not {d}", .{ i - first, name, n, size });
+        at += n;
+        try job.expectSent(entry.body, body, database, &.{"ordered"}, "a batch of a write");
+        const flag = (entry.body.get("ordered") catch null) orelse return job.fail("batch {d} of {s} came without ordered", .{ i - first, name });
+        try job.expect(flag == .boolean and flag.boolean == ordered, "batch {d} of {s} came with another ordered than the request's {}", .{ i - first, name, ordered });
+    }
+}
+
+pub fn s11(job: *Job) Job.Error!void {
+    const io = job.io;
+    var writes: Script.Write = .{};
+    var stage: Job.Stage = undefined;
+    const client = try job.scripted(&stage, writes.handler(), .{ .max_write_batch_size = 3 });
+    defer job.end();
+    const script = &stage.script;
+    const kinds = [_]struct { requests.WriteKind, bson.RawDocument, []const bson.RawDocument, []const usize }{
+        .{ .insert, bson.literal(.{ .insert = "s11" }), &ten, &.{ 3, 3, 3, 1 } },
+        .{ .update, bson.literal(.{ .update = "s11" }), ten_updates[0..4], &.{ 3, 1 } },
+        .{ .delete, bson.literal(.{ .delete = "s11" }), &four_deletes, &.{ 3, 1 } },
+    };
+    for (kinds) |write| {
+        const kind, const body, const items, const sizes = write;
+        var result = try job.need(client.write(io, .of(.root), .{ .database = database, .kind = kind, .body = body, .items = items }, .{ .allocator = job.gpa }), "write");
+        defer result.deinit(job.gpa);
+        try job.expect(result.n == items.len, "a write of {d} items that the server took in batches came back with n is {d}: the n of the batches add up", .{ items.len, result.n });
+        try job.expect(result.answered == items.len, "a write of {d} items came back with answered {d}", .{ items.len, result.answered });
+        if (kind == .update) try job.expect(result.modified == items.len, "an update of {d} items came back with modified {d}: the nModified of the batches add up", .{ items.len, result.modified });
+        try expectBatches(job, script, kind.command(), 0, kind.items(), items, sizes, body, true);
+    }
+}
+
+pub fn s12(job: *Job) Job.Error!void {
+    const io = job.io;
+    var writes: Script.Write = .{};
+    var stage: Job.Stage = undefined;
+    const hello: wire.Hello = .{ .max_message_size_bytes = 2048, .max_bson_object_size = 512 };
+    const client = try job.scripted(&stage, writes.handler(), hello);
+    defer job.end();
+    const script = &stage.script;
+    var arena: std.heap.ArenaAllocator = .init(job.gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const pad = try a.alloc(u8, 2100);
+    @memset(pad, 'p');
+    const body = bson.literal(.{ .insert = "s12" });
+
+    // Twelve items of 304 bytes: a message holds six.
+    var items: [12]bson.RawDocument = undefined;
+    for (&items, 0..) |*item, i| item.* = (try encodeIn(job, a, .{ ._id = @as(i32, @intCast(i)), .pad = pad[0..280] })).raw();
+    var result = try job.need(client.write(io, .of(.root), .{ .database = database, .kind = .insert, .body = body, .items = &items }, .{ .allocator = job.gpa }), "a write of twelve items");
+    result.deinit(job.gpa);
+    const batches = script.count(io, "insert");
+    try job.expect(batches >= 2, "twelve items of 304 bytes went out in one message, which the server takes at 2048 bytes at most", .{});
+    var at: usize = 0;
+    for (0..batches) |i| {
+        const entry = try job.received(script, "insert", i);
+        try job.expect(messageLength(entry) <= hello.max_message_size_bytes, "batch {d} went out in a message of {d} bytes; the server takes {d} at most", .{ i, messageLength(entry), hello.max_message_size_bytes });
+        var sent = (entry.sequence orelse return job.fail("batch {d} came without a section of kind 1", .{i})).documents();
+        while (sent.next()) |doc| : (at += 1) {
+            try job.expect(at < items.len and eql(u8, doc.bytes, items[at].bytes), "item {d} came changed or out of its order", .{at});
+        }
+    }
+    try job.expect(at == items.len, "{d} of twelve items went out", .{at});
+
+    // An item that no message holds alone: not sent.
+    const huge = (try encodeIn(job, a, .{ ._id = 100, .pad = pad })).raw();
+    try job.expectError(client.write(io, .of(.root), .{ .database = database, .kind = .insert, .body = body, .items = &.{ items[0], huge } }, .{ .allocator = job.gpa }), error.InvalidArgument, "a write of an item that no message holds");
+    try job.expect(script.count(io, "insert") == batches, "a write of an item that no message holds sent a batch", .{});
+
+    // An item larger than maxBsonObjectSize, within a message: it goes out,
+    // and the server refuses it, not the driver.
+    const large = (try encodeIn(job, a, .{ ._id = 200, .pad = pad[0..700] })).raw();
+    var sent = try job.need(client.write(io, .of(.root), .{ .database = database, .kind = .insert, .body = body, .items = &.{large} }, .{ .allocator = job.gpa }), "a write of an item larger than maxBsonObjectSize");
+    sent.deinit(job.gpa);
+    const last = try job.received(script, "insert", batches);
+    var carried = (last.sequence orelse return job.fail("the large item came without a section of kind 1", .{})).documents();
+    const item = carried.next() orelse return job.fail("the large item came without items", .{});
+    try job.expect(eql(u8, item.bytes, large.bytes), "the item larger than maxBsonObjectSize came changed", .{});
+}
+
+/// A document of the check in `allocator`.
+fn encodeIn(job: *Job, allocator: Allocator, value: anytype) Job.Error!bson.OwnedDocument {
+    return bson.encode(allocator, value, .{}) catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.InvalidBson => job.fail("a document of the check is not valid BSON", .{}),
+    };
+}
+
+/// The `q._id` of the first item of a write's batch.
+fn firstItemId(request: *const Script.Request) ?i64 {
+    const sequence = request.sequence orelse return null;
+    var items = sequence.documents();
+    const first = items.next() orelse return null;
+    const id = (first.getPath("q._id") catch null) orelse return null;
+    return id.asI64() catch null;
+}
+
+const replication_timeout = .{ .code = 64, .codeName = "WriteConcernTimeout", .errmsg = "waiting for replication timed out" };
+
+/// Answers each batch of ten updates, by its first item, with upserts,
+/// refused items and failed write concerns, indexed in the batch.
+const S13 = struct {
+    pub fn handler(h: *S13) Script.Handler {
+        return .init(h);
+    }
+
+    pub fn answer(h: *S13, io: Io, arena: Allocator, request: *const Script.Request) Script.HandlerError!Script.Answer {
+        _ = h;
+        _ = io;
+        _ = arena;
+        return .{ .reply = switch (firstItemId(request) orelse -1) {
+            0 => bson.literal(.{ .n = 3, .nModified = 2, .upserted = .{.{ .index = 1, ._id = "up-1" }}, .ok = 1.0 }),
+            3 => bson.literal(.{ .n = 2, .nModified = 1, .writeErrors = .{.{ .index = 2, .code = 11000, .errmsg = "E11000 duplicate key error" }}, .ok = 1.0 }),
+            6 => bson.literal(.{ .n = 3, .nModified = 3, .writeConcernError = replication_timeout, .ok = 1.0 }),
+            9 => bson.literal(.{ .n = 1, .nModified = 0, .upserted = .{.{ .index = 0, ._id = "up-9" }}, .writeConcernError = replication_timeout, .ok = 1.0 }),
+            else => bad_value,
+        } };
+    }
+};
+
+fn expectUpserted(job: *Job, got: results.Upserted, index: usize, id: []const u8) Job.Error!void {
+    try job.expect(got.index == index, "an upsert came with the index {d}, not {d}: indexes count in the whole request", .{ got.index, index });
+    try job.expect(got.id == .string and eql(u8, got.id.string, id), "the upsert of item {d} came with another _id than \"{s}\"", .{ index, id });
+}
+
+pub fn s13(job: *Job) Job.Error!void {
+    const io = job.io;
+    var merging: S13 = .{};
+    var stage: Job.Stage = undefined;
+    const client = try job.scripted(&stage, merging.handler(), .{ .max_write_batch_size = 3 });
+    defer job.end();
+    const script = &stage.script;
+    const body = bson.literal(.{ .update = "s13" });
+
+    var result = try job.need(client.write(io, .of(.root), .{ .database = database, .kind = .update, .body = body, .items = &ten_updates, .ordered = false }, .{ .allocator = job.gpa }), "an unordered write with refused items");
+    defer result.deinit(job.gpa);
+    try job.expect(script.count(io, "update") == 4, "an unordered write sent {d} batches of 4", .{script.count(io, "update")});
+    try job.expect(result.n == 9 and result.modified == 6, "the merge came with n {d} and modified {d}, not the sums 9 and 6", .{ result.n, result.modified });
+    try job.expect(result.upserted.len == 2, "the merge came with {d} upserts, not 2", .{result.upserted.len});
+    try expectUpserted(job, result.upserted[0], 1, "up-1");
+    try expectUpserted(job, result.upserted[1], 9, "up-9");
+    try job.expect(result.write_errors.len == 1, "the merge came with {d} refused items, not 1", .{result.write_errors.len});
+    const refused = result.write_errors[0];
+    try job.expect(refused.index == 5 and refused.code == 11000 and eql(u8, refused.message, "E11000 duplicate key error"), "the refused item came as index {d}, code {d}, \"{s}\"; the server refused index 5, code 11000", .{ refused.index, refused.code, refused.message });
+    try job.expect(result.write_concern_errors.len == 2, "the merge came with {d} failed write concerns, not those of the 2 batches", .{result.write_concern_errors.len});
+    for (result.write_concern_errors) |concern| try job.expect(concern.code == 64, "a failed write concern came with the code {d}, not 64", .{concern.code});
+    try job.expect(result.answered == 10, "the merge came with answered {d}, not 10", .{result.answered});
+    try expectBatches(job, script, "update", 0, "updates", &ten_updates, &.{ 3, 3, 3, 1 }, body, false);
+
+    var ordered = try job.need(client.write(io, .of(.root), .{ .database = database, .kind = .update, .body = body, .items = &ten_updates }, .{ .allocator = job.gpa }), "an ordered write with a refused item");
+    defer ordered.deinit(job.gpa);
+    try job.expect(script.count(io, "update") == 6, "an ordered write sent {d} batches; it sends none after the batch with a refused item, the second", .{script.count(io, "update") - 4});
+    try job.expect(ordered.n == 5 and ordered.modified == 3 and ordered.answered == 6, "the ordered merge came with n {d}, modified {d}, answered {d}, not 5, 3 and 6", .{ ordered.n, ordered.modified, ordered.answered });
+    try job.expect(ordered.upserted.len == 1 and ordered.write_errors.len == 1 and ordered.write_errors[0].index == 5, "the ordered merge came with other upserts or refused items than those of its two batches", .{});
+}
+
+const three = bson.literal(.{ .n = 3, .ok = 1.0 });
+
+pub fn s14(job: *Job) Job.Error!void {
+    const io = job.io;
+    var queue: Script.Queue = .{ .answers = &.{ .{ .reply = three }, .{ .reply = three }, .close_connection } };
+    var stage: Job.Stage = undefined;
+    const client = try job.scripted(&stage, queue.handler(), .{ .max_write_batch_size = 3 });
+    defer job.end();
+    const script = &stage.script;
+    var arena: std.heap.ArenaAllocator = .init(job.gpa);
+    defer arena.deinit();
+    var fence: Job.Fence = .{ .parent = arena.allocator() };
+    var partial: results.WriteResult = .{};
+    var d: errors.Diagnostics = .{};
+    const body = bson.literal(.{ .insert = "s14" });
+    try job.expectError(client.write(io, .of(.root), .{ .database = database, .kind = .insert, .body = body, .items = &ten }, .{ .allocator = fence.allocator(), .diagnostics = &d, .partial = &partial }), error.IncompleteWrite, "a write whose third batch lost its connection");
+    try job.expect(d.reason == @as(?errors.Error, error.ConnectionLost), "Diagnostics.reason of the IncompleteWrite is {?t}, not ConnectionLost", .{d.reason});
+    try job.expect(d.batch_offset == 6, "Diagnostics.batch_offset of the IncompleteWrite is {?d}, not 6", .{d.batch_offset});
+    try job.expect(partial.n == 6 and partial.answered == 6, "partial came with n {d} and answered {d}, not the 6 of the two batches answered", .{ partial.n, partial.answered });
+    try job.expect(script.count(io, "insert") == 3, "the write sent {d} batches, not 3", .{script.count(io, "insert")});
+    partial.deinit(fence.allocator());
+    try job.expect(fence.held() == 0, "partial is not all from options.allocator", .{});
+
+    try job.expectError(client.write(io, .of(.root), .{ .database = database, .kind = .insert, .body = body, .items = &.{} }, .{ .allocator = job.gpa }), error.InvalidArgument, "a write without items");
+    try job.expect(script.count(io, "insert") == 3, "a write without items reached the server", .{});
+}
+
+/// Closes the connection of the first command, refuses connections at the
+/// second, and answers the rest.
+const S15 = struct {
+    seen: std.atomic.Value(u32) = .init(0),
+
+    pub fn handler(h: *S15) Script.Handler {
+        return .init(h);
+    }
+
+    pub fn answer(h: *S15, io: Io, arena: Allocator, request: *const Script.Request) Script.HandlerError!Script.Answer {
+        _ = io;
+        _ = arena;
+        _ = request;
+        return switch (h.seen.fetchAdd(1, .monotonic)) {
+            0 => .close_connection,
+            1 => .refuse_connections,
+            else => .{ .reply = Script.ok },
+        };
+    }
+};
+
+pub fn s15(job: *Job) Job.Error!void {
+    const io = job.io;
+    var lossy: S15 = .{};
+    var stage: Job.Stage = undefined;
+    const client = try job.scripted(&stage, lossy.handler(), .{});
+    defer job.end();
+    const script = &stage.script;
+    const command: requests.Command = .{ .database = database, .body = bson.literal(.{ .count = "s15" }) };
+    try job.expectError(client.runCommand(io, job.within(10_000), command, .{ .allocator = job.gpa }), error.ConnectionLost, "a command whose connection the server closed after reading it");
+    try job.expectError(client.runCommand(io, job.within(10_000), command, .{ .allocator = job.gpa }), error.ConnectionLost, "a command whose connection the server closed, refusing new ones");
+    try job.expectError(client.runCommand(io, job.within(10_000), command, .{ .allocator = job.gpa }), error.Unavailable, "a command while the server refuses connections");
+    try job.expect(script.received(io) == 2, "a command while the server refuses connections reached it", .{});
+    script.acceptConnections();
+    // Calls may be Unavailable while the driver reconnects; then they go
+    // through.
+    const deadline: core.Deadline = .after(Job.now(io), job.ms(10_000));
+    while (true) {
+        if (client.runCommand(io, job.within(5_000), command, .{ .allocator = job.gpa })) |reply| {
+            reply.deinit();
+            break;
+        } else |err| {
+            if (err != error.Unavailable) return job.fail("a command after the server came back returned error.{t}", .{err});
+            if (deadline.isExpired(Job.now(io))) return job.fail("commands did not go through within {d} s after the server came back", .{10 * job.scale()});
+            job.pause(job.ms(50));
+        }
+    }
+}
+
+pub fn s16(job: *Job) Job.Error!void {
+    const io = job.io;
+    const kinds = [_]Script.Malformed{ .wrong_response_to, .unknown_required_flag, .sequence_in_reply, .truncated };
+    var answers: [2 * kinds.len]Script.Answer = undefined;
+    for (kinds, 0..) |kind, i| {
+        answers[2 * i] = .{ .malformed = kind };
+        answers[2 * i + 1] = .{ .reply = Script.ok };
+    }
+    var queue: Script.Queue = .{ .answers = &answers };
+    var stage: Job.Stage = undefined;
+    const client = try job.scripted(&stage, queue.handler(), .{});
+    defer job.end();
+    const script = &stage.script;
+    const command: requests.Command = .{ .database = database, .body = bson.literal(.{ .count = "s16" }) };
+    for (kinds, 0..) |kind, i| {
+        if (client.runCommand(io, job.within(10_000), command, .{ .allocator = job.gpa })) |reply| {
+            reply.deinit();
+            return job.fail("a reply that breaks OP_MSG ({t}) was taken", .{kind});
+        } else |err| {
+            try job.expect(err == error.ProtocolViolation, "a reply that breaks OP_MSG ({t}) gave error.{t}, not ProtocolViolation", .{ kind, err });
+        }
+        const next = try job.need(client.runCommand(io, job.within(10_000), command, .{ .allocator = job.gpa }), "the command after a ProtocolViolation");
+        next.deinit();
+        const broken = try job.received(script, "count", 2 * i);
+        const after = try job.received(script, "count", 2 * i + 1);
+        try job.expect(after.connection != broken.connection, "after a ProtocolViolation ({t}), the next command came on the same connection; a connection is not used after a violation", .{kind});
+    }
+}
+
+/// Cancels its token at the second batch of a write.
+const S21 = struct {
+    write: Script.Write = .{},
+    token: core.CancellationToken = .init,
+    batches: std.atomic.Value(u32) = .init(0),
+
+    pub fn handler(h: *S21) Script.Handler {
+        return .init(h);
+    }
+
+    pub fn answer(h: *S21, io: Io, arena: Allocator, request: *const Script.Request) Script.HandlerError!Script.Answer {
+        if (h.batches.fetchAdd(1, .monotonic) == 1) h.token.cancel();
+        return h.write.answer(io, arena, request);
+    }
+};
+
+pub fn s21(job: *Job) Job.Error!void {
+    const io = job.io;
+    var canceler: S21 = .{};
+    var stage: Job.Stage = undefined;
+    const client = try job.scripted(&stage, canceler.handler(), .{ .max_write_batch_size = 3 });
+    defer job.end();
+    const script = &stage.script;
+    const body = bson.literal(.{ .insert = "s21" });
+    var partial: results.WriteResult = .{};
+    defer partial.deinit(job.gpa);
+    var d: errors.Diagnostics = .{};
+    const op: OperationContext = .of(core.Context.root.withCancellation(&canceler.token));
+    try job.expectError(client.write(io, op, .{ .database = database, .kind = .insert, .body = body, .items = &ten }, .{ .allocator = job.gpa, .diagnostics = &d, .partial = &partial }), error.IncompleteWrite, "a write whose token was canceled while its second batch was out");
+    try job.expect(d.reason == @as(?errors.Error, error.Cancelled), "Diagnostics.reason of the IncompleteWrite is {?t}, not Cancelled", .{d.reason});
+    try job.expect(errors.outcome(error.IncompleteWrite) == .may_have_executed, "IncompleteWrite is not may_have_executed", .{});
+    try job.expect(d.batch_offset == 6, "Diagnostics.batch_offset of the IncompleteWrite is {?d}, not 6", .{d.batch_offset});
+    try job.expect(partial.n == 6 and partial.answered == 6, "partial came with n {d} and answered {d}, not the 6 of the two batches", .{ partial.n, partial.answered });
+    try job.expect(script.count(io, "insert") == 2, "the write sent {d} batches; the token is checked before each", .{script.count(io, "insert")});
+
+    var token: core.CancellationToken = .init;
+    token.cancel();
+    try job.expectError(client.write(io, .of(core.Context.root.withCancellation(&token)), .{ .database = database, .kind = .insert, .body = body, .items = ten[0..2] }, .{ .allocator = job.gpa }), error.Cancelled, "a write of one batch whose token was canceled before it");
+    try job.expect(errors.outcome(error.Cancelled) == .not_sent, "Cancelled is not not_sent", .{});
+    try job.expect(script.count(io, "insert") == 2, "a write whose token was canceled before it reached the server", .{});
+}

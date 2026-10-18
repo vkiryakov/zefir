@@ -135,10 +135,17 @@ pub const Check = enum {
     s8,
     s9,
     s10,
+    s11,
+    s12,
+    s13,
+    s14,
+    s15,
+    s16,
     s17,
     s18,
     s19,
     s20,
+    s21,
 
     /// "S1" to "S21", "L1" to "L10".
     pub fn label(check: Check) []const u8 {
@@ -160,10 +167,17 @@ pub const Check = enum {
             .s8 => "a cursor: firstBatch and three getMore in its namespace, then null and null again",
             .s9 => "close and deinit of a cursor: one killCursors, none at the end, one past the deadline",
             .s10 => "errors of a cursor: a lost getMore ends it, a deadline before getMore does not",
+            .s11 => "batches by count: a maxWriteBatchSize of 3 splits 10 items as 3+3+3+1, in sections of kind 1",
+            .s12 => "batches by size: each message within maxMessageSizeBytes; an item no message holds is not sent",
+            .s13 => "merging: the indexes of writeErrors and upserted shifted, counts summed, ordered stops",
+            .s14 => "a write cut at its third batch: IncompleteWrite with the two batches before in partial",
+            .s15 => "the connection: closed after a request, refused, and back again",
+            .s16 => "wire only: a reply that breaks OP_MSG is ProtocolViolation, and its connection is dropped",
             .s17 => "closing the client: calls out end, new ones are Closed, open cursors are killed, twice is harmless",
             .s18 => "memory: replies only from the options' allocator, the caller's buffers free after return",
             .s19 => "capabilities: the revision, the four of revision 1, none reserved, stable, a name",
             .s20 => "cancelation is never swallowed: close, deinit and paths of errors keep it",
+            .s21 => "a token canceled after the second batch: IncompleteWrite for Cancelled; before sending: Cancelled",
         };
     }
 
@@ -310,6 +324,7 @@ fn skipReason(arena: std.mem.Allocator, check: Check, probe: *const Job.Probe, o
     if (probe.revision < check.revision()) {
         return try std.fmt.allocPrint(arena, "it needs revision {d} of the contract, and the driver declares {d}", .{ check.revision(), probe.revision });
     }
+    if (check == .s16 and !probe.wire) return "it is for drivers on the wire: no connection came to the FakeServer, so the driver reads no OP_MSG";
     if (check.layer() == .live and options.live == null) return "it needs a live mongod: options.live is null";
     return null;
 }
@@ -368,9 +383,16 @@ fn runBody(job: *Job, check: Check) Job.Error!void {
         .s8 => scripted.s8(job),
         .s9 => scripted.s9(job),
         .s10 => scripted.s10(job),
+        .s11 => scripted.s11(job),
+        .s12 => scripted.s12(job),
+        .s13 => scripted.s13(job),
+        .s14 => scripted.s14(job),
+        .s15 => scripted.s15(job),
+        .s16 => scripted.s16(job),
         .s17 => scripted.s17(job),
         .s18 => scripted.s18(job),
         .s19 => scripted.s19(job),
         .s20 => scripted.s20(job),
+        .s21 => scripted.s21(job),
     };
 }
