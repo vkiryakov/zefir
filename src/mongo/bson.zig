@@ -20,6 +20,7 @@ const types = @import("bson/types.zig");
 
 pub const RawDocument = @import("bson/RawDocument.zig");
 pub const OwnedDocument = @import("bson/OwnedDocument.zig");
+pub const Builder = @import("bson/Builder.zig");
 pub const Value = value.Value;
 pub const Element = value.Element;
 pub const Type = value.Type;
@@ -45,4 +46,5 @@ test {
     std.testing.refAllDecls(@This());
     _ = @import("bson/read.zig");
     _ = @import("bson/read_tests.zig");
+    _ = @import("bson/builder_tests.zig");
 }

@@ -68,11 +68,11 @@ test "a broken element inside a document waits for validate or for its own itera
 }
 
 test "100 levels of nesting pass validate, 101 do not" {
-    const allowed = try nested(testing.allocator, 100);
+    const allowed = try vectors.nested(testing.allocator, 100);
     defer testing.allocator.free(allowed);
     try (try RawDocument.init(allowed)).validate();
 
-    const too_deep = try nested(testing.allocator, 101);
+    const too_deep = try vectors.nested(testing.allocator, 101);
     defer testing.allocator.free(too_deep);
     const doc = try RawDocument.init(too_deep);
     try testing.expectError(error.InvalidBson, doc.validate());
@@ -186,19 +186,4 @@ fn walkLazily(doc: RawDocument) void {
             else => {},
         }
     }
-}
-
-/// {"a": {"a": … {}}}: `levels` documents inside one another, the
-/// outermost one included.
-fn nested(allocator: std.mem.Allocator, levels: usize) ![]u8 {
-    const bytes = try allocator.alloc(u8, 5 + 8 * (levels - 1));
-    for (0..levels) |level| {
-        // Each document starts 7 bytes after its parent: length, type, "a\x00".
-        const start = 7 * level;
-        const size = 5 + 8 * (levels - 1 - level);
-        std.mem.writeInt(i32, bytes[start..][0..4], @intCast(size), .little);
-        if (level + 1 < levels) @memcpy(bytes[start + 4 ..][0..3], "\x03a\x00");
-        bytes[start + size - 1] = 0;
-    }
-    return bytes;
 }
