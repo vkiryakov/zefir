@@ -32,8 +32,8 @@
 
 const std = @import("std");
 const bson = @import("../bson.zig");
-const errors = @import("errors.zig");
-const requests = @import("requests.zig");
+const errors = @import("../errors.zig");
+const requests = @import("../requests.zig");
 const signature = @import("signature.zig");
 const Error = errors.Error;
 const OperationContext = requests.OperationContext;

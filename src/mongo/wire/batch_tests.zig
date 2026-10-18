@@ -8,8 +8,8 @@ const bson = @import("../bson.zig");
 const batch = @import("batch.zig");
 const opmsg = @import("opmsg.zig");
 const Hello = @import("Hello.zig");
-const errors = @import("../contract/errors.zig");
-const results = @import("../contract/results.zig");
+const errors = @import("../errors.zig");
+const results = @import("../results.zig");
 
 fn insert(items: []const bson.RawDocument) opmsg.Request {
     return .{

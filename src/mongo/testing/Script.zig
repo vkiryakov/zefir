@@ -34,7 +34,7 @@ const Allocator = std.mem.Allocator;
 const bson = @import("../bson.zig");
 const wire = @import("../wire.zig");
 const opmsg = wire.opmsg;
-const WriteKind = @import("../contract/requests.zig").WriteKind;
+const WriteKind = @import("../requests.zig").WriteKind;
 const Script = @This();
 
 /// What the server says about itself in hello: a standalone mongod of

@@ -25,9 +25,9 @@ const std = @import("std");
 const bson = @import("../bson.zig");
 const opmsg = @import("opmsg.zig");
 const Hello = @import("Hello.zig");
-const errors = @import("../contract/errors.zig");
-const requests = @import("../contract/requests.zig");
-const results = @import("../contract/results.zig");
+const errors = @import("../errors.zig");
+const requests = @import("../requests.zig");
+const results = @import("../results.zig");
 const Allocator = std.mem.Allocator;
 const Diagnostics = errors.Diagnostics;
 

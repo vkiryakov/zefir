@@ -10,7 +10,7 @@
 
 const std = @import("std");
 const bson = @import("../bson.zig");
-const errors = @import("../contract/errors.zig");
+const errors = @import("../errors.zig");
 const results = @import("results.zig");
 const Diagnostics = errors.Diagnostics;
 

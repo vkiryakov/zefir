@@ -16,7 +16,7 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const bson = @import("../bson.zig");
 const codec = @import("../bson/encode.zig");
-const results = @import("../contract/results.zig");
+const results = @import("../results.zig");
 const document = @import("document.zig");
 
 /// `value`, a document of the three forms, as an insert sends it: as it

@@ -5,8 +5,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const bson = @import("../bson.zig");
-const errors = @import("errors.zig");
-const requests = @import("requests.zig");
+const errors = @import("../errors.zig");
+const requests = @import("../requests.zig");
 const Error = errors.Error;
 const Diagnostics = errors.Diagnostics;
 

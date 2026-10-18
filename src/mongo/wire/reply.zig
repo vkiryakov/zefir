@@ -2,7 +2,7 @@
 
 const std = @import("std");
 const bson = @import("../bson.zig");
-const errors = @import("../contract/errors.zig");
+const errors = @import("../errors.zig");
 const Diagnostics = errors.Diagnostics;
 
 /// Checks the `ok` of a command's reply: 1 passes, any other number is the

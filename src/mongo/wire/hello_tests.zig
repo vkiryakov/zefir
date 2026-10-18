@@ -6,7 +6,7 @@ const std = @import("std");
 const testing = std.testing;
 const bson = @import("../bson.zig");
 const Hello = @import("Hello.zig");
-const errors = @import("../contract/errors.zig");
+const errors = @import("../errors.zig");
 
 test "a standalone mongod: no setName, no msg isdbgrid, no isreplicaset" {
     // What mongod 9.0 answers, its topologyVersion and localTime left out.

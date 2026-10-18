@@ -5,7 +5,7 @@ const std = @import("std");
 const testing = std.testing;
 const bson = @import("../bson.zig");
 const opmsg = @import("opmsg.zig");
-const errors = @import("../contract/errors.zig");
+const errors = @import("../errors.zig");
 const vectors = @import("../bson/vectors.zig");
 
 const Crc = std.hash.crc.@"CRC-32/ISCSI";

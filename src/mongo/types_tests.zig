@@ -4,10 +4,10 @@
 const std = @import("std");
 const testing = std.testing;
 const core = @import("core");
-const bson = @import("../bson.zig");
+const bson = @import("bson.zig");
 const requests = @import("requests.zig");
 const results = @import("results.zig");
-const capabilities = @import("capabilities.zig");
+const capabilities = @import("contract/capabilities.zig");
 
 test "an operation context of a core context adds no tracing" {
     const ctx = core.Context.root.withDeadline(.after(.zero, .fromSeconds(1)));

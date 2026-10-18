@@ -27,9 +27,9 @@
 //!   process as a fake driver, for tests without MongoDB.
 
 const std = @import("std");
-const errors = @import("contract/errors.zig");
-const requests = @import("contract/requests.zig");
-const results = @import("contract/results.zig");
+const errors = @import("errors.zig");
+const requests = @import("requests.zig");
+const results = @import("results.zig");
 const capabilities = @import("contract/capabilities.zig");
 
 pub const bson = @import("bson.zig");
@@ -74,8 +74,8 @@ test {
     _ = wire;
     _ = testing;
     _ = native;
-    _ = @import("contract/errors_tests.zig");
-    _ = @import("contract/types_tests.zig");
+    _ = @import("errors_tests.zig");
+    _ = @import("types_tests.zig");
     _ = @import("contract/client_tests.zig");
     _ = @import("contract/signature.zig");
     _ = Collection;

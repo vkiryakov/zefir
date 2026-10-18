@@ -5,7 +5,7 @@ const testing = std.testing;
 const mongo = @import("../root.zig");
 const bson = mongo.bson;
 const id = @import("id.zig");
-const results = @import("../contract/results.zig");
+const results = @import("../results.zig");
 
 /// A generator whose ids differ only in their seconds and counters.
 fn generator() bson.ObjectId.Generator {

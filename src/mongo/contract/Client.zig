@@ -65,9 +65,9 @@
 
 const std = @import("std");
 const bson = @import("../bson.zig");
-const errors = @import("errors.zig");
-const requests = @import("requests.zig");
-const results = @import("results.zig");
+const errors = @import("../errors.zig");
+const requests = @import("../requests.zig");
+const results = @import("../results.zig");
 const capabilities_ = @import("capabilities.zig");
 const signature = @import("signature.zig");
 const rules = @import("rules.zig");
