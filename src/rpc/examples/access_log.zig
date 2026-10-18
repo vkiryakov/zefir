@@ -83,10 +83,10 @@ pub fn main(init: std.process.Init) !void {
     defer missing.deinit();
 
     // A long write, such as a migration, holds the table of users: the last
-    // call waits for it past its deadline, 200 ms away.
+    // call waits for it past its deadline, a second away.
     try repo.mutex.lock(io);
     defer repo.mutex.unlock(io);
-    var late = client.call(io, ctx, api.UserApi.getUser, .{ .id = 1 }, .{ .metadata = tenant, .timeout = .fromMilliseconds(200) }) catch |err| switch (err) {
+    var late = client.call(io, ctx, api.UserApi.getUser, .{ .id = 1 }, .{ .metadata = tenant, .timeout = .fromSeconds(1) }) catch |err| switch (err) {
         // The client gives up at the deadline, the moment the server does.
         error.DeadlineExceeded => return,
         else => return err,

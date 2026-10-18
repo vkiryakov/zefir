@@ -2116,10 +2116,10 @@ pub fn main(init: std.process.Init) !void {
     defer missing.deinit();
 
     // A long write, such as a migration, holds the table of users: the last
-    // call waits for it past its deadline, 200 ms away.
+    // call waits for it past its deadline, a second away.
     try repo.mutex.lock(io);
     defer repo.mutex.unlock(io);
-    var late = client.call(io, ctx, api.UserApi.getUser, .{ .id = 1 }, .{ .metadata = tenant, .timeout = .fromMilliseconds(200) }) catch |err| switch (err) {
+    var late = client.call(io, ctx, api.UserApi.getUser, .{ .id = 1 }, .{ .metadata = tenant, .timeout = .fromSeconds(1) }) catch |err| switch (err) {
         // The client gives up at the deadline, the moment the server does.
         error.DeadlineExceeded => return,
         else => return err,
@@ -2131,9 +2131,9 @@ pub fn main(init: std.process.Init) !void {
 
 ```text
 $ zig build run
-2026-10-18T19:19:52.983Z INFO  [rpc] RPC call served rpc.service=users rpc.version=1 rpc.method=createUser rpc.code=ok rpc.app_code=- rpc.tenant=acme rpc.request_id=b840e2f3046ff63da47cd1ebf21bc2fe rpc.duration_ms=0 trace_id=4bf92f3577b34da6a3ce929d0e0e4736 span_id=0e68a7ff55adff42
-2026-10-18T19:19:52.983Z INFO  [rpc] RPC call served rpc.service=users rpc.version=1 rpc.method=getUser rpc.code=not_found rpc.app_code=users.not_found rpc.tenant=acme rpc.request_id=b64926176020c86ca9fdb8f1a951d3dc rpc.duration_ms=0 trace_id=4bf92f3577b34da6a3ce929d0e0e4736 span_id=e78473dbc119bce0
-2026-10-18T19:19:53.186Z INFO  [rpc] RPC call served rpc.service=users rpc.version=1 rpc.method=getUser rpc.code=deadline_exceeded rpc.app_code=rpc.deadline_exceeded rpc.tenant=acme rpc.request_id=62828c397f19ec8002e502550b944309 rpc.duration_ms=202 trace_id=4bf92f3577b34da6a3ce929d0e0e4736 span_id=3a5c47be1cc6b3be
+2026-10-18T19:34:40.025Z INFO  [rpc] RPC call served rpc.service=users rpc.version=1 rpc.method=createUser rpc.code=ok rpc.app_code=- rpc.tenant=acme rpc.request_id=d011fb0b83081d634663862ddba2855e rpc.duration_ms=0 trace_id=4bf92f3577b34da6a3ce929d0e0e4736 span_id=3350774fd5d14373
+2026-10-18T19:34:40.026Z INFO  [rpc] RPC call served rpc.service=users rpc.version=1 rpc.method=getUser rpc.code=not_found rpc.app_code=users.not_found rpc.tenant=acme rpc.request_id=4cc36f91958bdd6d098519ecb087950c rpc.duration_ms=0 trace_id=4bf92f3577b34da6a3ce929d0e0e4736 span_id=acf27faf2aa8896a
+2026-10-18T19:34:41.028Z INFO  [rpc] RPC call served rpc.service=users rpc.version=1 rpc.method=getUser rpc.code=deadline_exceeded rpc.app_code=rpc.deadline_exceeded rpc.tenant=acme rpc.request_id=e38c4547b3f5202ad339c69b918aa6ea rpc.duration_ms=1001 trace_id=4bf92f3577b34da6a3ce929d0e0e4736 span_id=f5ce8c6214d093d1
 ```
 
 Each record has the route, `code` (`ok` or the code of the failure) with
@@ -2143,14 +2143,16 @@ always the outcome of the chain. Once the deadline has passed, it is
 `deadline_exceeded`, whatever the chain returned: the server sends it at
 the deadline and only then cancels the handler, so the chain of the third
 call returns `error.Canceled`, or even a success, after the client has
-given up. After the client's cancel or the stop, it is `cancelled`.
-Otherwise `ctx.mapError` maps the error of the chain as the server does
-once the chain has unwound: `error.UserNotFound` is `not_found` with
-`users.not_found`, as the contract says. The trace id is the gateway's:
-`withContext` puts the trace and the server's span of the call in the
-record, so a log store finds every record of the request across services.
-In JSON, the format a log store reads, the fields under `.rpc` sit in one
-object: `"rpc":{"service":"users","version":1,…}`.
+given up. After the client's cancel or the stop it is `cancelled`, unless
+the record comes past the deadline: a handler that ignores the stop and
+runs that long is logged `deadline_exceeded`, though its client got
+`cancelled`. Otherwise `ctx.mapError` maps the error of the chain as the
+server does once the chain has unwound: `error.UserNotFound` is `not_found`
+with `users.not_found`, as the contract says. The trace id is the
+gateway's: `withContext` puts the trace and the server's span of the call
+in the record, so a log store finds every record of the request across
+services. In JSON, the format a log store reads, the fields under `.rpc`
+sit in one object: `"rpc":{"service":"users","version":1,…}`.
 
 - **Never in a record:** a body, credentials, the metadata wholesale, or
   the identity beyond its subject (`ctx.identity()` carries roles and
@@ -2169,11 +2171,11 @@ object: `"rpc":{"service":"users","version":1,…}`.
 - **What middleware cannot see.** Calls the server ends before the chain
   have no record: refused at admission (an unknown method, the limits, a
   full queue), refused by the authenticator, or out of time before their
-  task began; NATS micro counts those of a known route. Two outcomes come
-  only after the record, which logs them as `ok`: a response the transport
-  cannot carry (over its own limit, such as the NATS max payload) goes out
-  as `resource_exhausted`, and a success that ends a fraction of a
-  millisecond before the deadline as `deadline_exceeded`
+  task began; NATS micro counts those of a known route. Outcomes decided
+  after the record, such as `resource_exhausted` for a response the
+  transport cannot carry (over its own limit, as the NATS max payload) or
+  `deadline_exceeded` for a success that ends a fraction of a millisecond
+  before the deadline, are logged as the chain ended
   ([the rules of the chain](#middleware)).
 
 A client logs its calls the same way, with middleware of `rpc.Client`
