@@ -132,17 +132,44 @@ fn operate(ds: *DeadlineStream, operation: Io.Operation) Error!Io.Operation.Resu
 /// wait for it ends at the deadline, which cuts the stream, or at a cut,
 /// and then the task is canceled. What that cancelation makes of the
 /// operation is the cut's: `failure` says `error.Timeout` or
-/// `error.Stopped`. `error.Canceled` is the caller's own cancelation.
+/// `error.Stopped`. An operation that moved bytes before its task could be
+/// stopped took place, and the cut fails the next one; one that the cut
+/// ended, at the end of the stream or with an error, fails with the cut's
+/// error. `error.Canceled` is the caller's own cancelation.
 fn operateInTask(ds: *DeadlineStream, operation: Io.Operation) Error!Io.Operation.Result {
-    return race.race(ds.io, .{ .deadline = ds.deadline, .stop = &ds.cut_event }, operateUntimed, .{ ds.io, operation }, forget, .{ .context = ds, .function = abort });
+    var outcome: ?(Io.Cancelable!Io.Operation.Result) = null;
+    return race.race(ds.io, .{ .deadline = ds.deadline, .stop = &ds.cut_event }, operateUntimed, .{ ds.io, operation, &outcome }, forget, .{ .context = ds, .function = abort }) catch |err| switch (err) {
+        error.Timeout, error.Stopped => if (outcome) |o| movedBytes(o) orelse err else err,
+        else => err,
+    };
 }
 
-fn operateUntimed(io: Io, operation: Io.Operation) Io.Cancelable!Io.Operation.Result {
-    return io.operate(operation);
+/// The result of an operation that read or wrote bytes; null for any other.
+fn movedBytes(outcome: Io.Cancelable!Io.Operation.Result) ?Io.Operation.Result {
+    const result = outcome catch return null;
+    switch (result) {
+        .net_read => |r| {
+            const read = r catch return null;
+            return if (read.data_len > 0) result else null;
+        },
+        .net_write => |w| {
+            const n = w catch return null;
+            return if (n > 0) result else null;
+        },
+        else => return null,
+    }
 }
 
-/// A result that came after the deadline or the cut: the stream is cut
-/// anyway.
+/// `operation`, and what it got, into `outcome`, which the race of
+/// `operateInTask` leaves for it to see once the task has ended.
+fn operateUntimed(io: Io, operation: Io.Operation, outcome: *?(Io.Cancelable!Io.Operation.Result)) Io.Cancelable!Io.Operation.Result {
+    const result = io.operate(operation);
+    outcome.* = result;
+    return result;
+}
+
+/// The race's copy of a result that came after the deadline or the cut:
+/// `operateInTask` takes it from the outcome.
 fn forget(io: Io, result: Io.Operation.Result) void {
     _ = io;
     _ = result;
@@ -322,6 +349,64 @@ fn cutWhileReading(io: Io, deadline: ?core.Deadline) !void {
     try io.sleep(.fromMilliseconds(50), .awake);
     p.ds.cut(io, .stop);
     try reading.await(io);
+    try testing.expectEqual(Error.Stopped, p.ds.err.?);
+}
+
+/// `std.testing.io` whose writes go out and then wait, deaf to
+/// cancelation, for the second shutdown of their socket: the one that
+/// `operateInTask` makes once a cut has won its race. So a write ends just
+/// after the cut, as one that the cut overtakes.
+const LateWrites = struct {
+    vtable: Io.VTable,
+
+    var shutdowns: std.atomic.Value(u32) = .init(0);
+    var released: Io.Event = .unset;
+
+    fn io(l: *LateWrites) Io {
+        l.vtable = testing.io.vtable.*;
+        l.vtable.operate = operateLate;
+        l.vtable.netShutdown = netShutdown;
+        shutdowns.store(0, .monotonic);
+        released = .unset;
+        return .{ .userdata = testing.io.userdata, .vtable = &l.vtable };
+    }
+
+    fn operateLate(userdata: ?*anyopaque, operation: Io.Operation) Io.Cancelable!Io.Operation.Result {
+        const result = try testing.io.vtable.operate(userdata, operation);
+        if (operation == .net_write) released.waitUncancelable(testing.io);
+        return result;
+    }
+
+    fn netShutdown(userdata: ?*anyopaque, handle: net.Socket.Handle, how: net.ShutdownHow) net.ShutdownError!void {
+        defer if (shutdowns.fetchAdd(1, .monotonic) == 1) released.set(testing.io);
+        return testing.io.vtable.netShutdown(userdata, handle, how);
+    }
+};
+
+fn cutSoon(io: Io, ds: *DeadlineStream) Io.Cancelable!void {
+    try io.sleep(.fromMilliseconds(20), .awake);
+    ds.cut(io, .stop);
+}
+
+test "an operation in a task of its own that ends as a cut wins its race took place, and the cut fails the next one" {
+    var late: LateWrites = undefined;
+    const io = late.io();
+    var p: Pair = undefined;
+    try p.open(io);
+    defer p.close(io);
+    p.ds.begin(null);
+    var cutter = try io.concurrent(cutSoon, .{ io, &p.ds });
+    var data: [1][]const u8 = .{"ping"};
+    const result = p.ds.operateInTask(.{ .net_write = .{ .socket_handle = p.ds.stream.socket.handle, .header = "", .data = &data, .splat = 1 } });
+    try cutter.await(io);
+    try testing.expectEqual(@as(usize, 4), try (try result).net_write);
+    var buffer: [4]u8 = undefined;
+    var server_buffer: [16]u8 = undefined;
+    var server_reader = p.server.reader(testing.io, &server_buffer);
+    try server_reader.interface.readSliceAll(&buffer);
+    try testing.expectEqualStrings("ping", &buffer);
+    p.ds.begin(null);
+    try testing.expectError(error.ReadFailed, p.ds.reader.takeByte());
     try testing.expectEqual(Error.Stopped, p.ds.err.?);
 }
 
