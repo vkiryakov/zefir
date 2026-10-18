@@ -62,6 +62,34 @@ pub fn exchange(conn: *RawConn, request: opmsg.Request, diagnostics: ?*mongo.Dia
     }, diagnostics);
 }
 
+/// Sends `body` and the section of kind 1 `sequence` exactly as they
+/// are, as a driver wrote them: nothing is added, not even `$db`. Returns
+/// the reply, from `allocator`, as `opmsg.readReply` checks it; its `ok`
+/// is not checked.
+pub fn forward(conn: *RawConn, allocator: std.mem.Allocator, body: bson.RawDocument, sequence: ?opmsg.Section) !bson.OwnedDocument {
+    const id = conn.next_id;
+    conn.next_id +%= 1;
+    const w = &conn.writer.interface;
+    const sequence_len = if (sequence) |q| 4 + q.identifier.len + 1 + q.bytes.len else 0;
+    const len = opmsg.header_len + 4 + 1 + body.bytes.len + if (sequence != null) 1 + sequence_len else 0;
+    try (opmsg.Header{ .message_length = @intCast(len), .request_id = id, .response_to = 0, .op_code = opmsg.op_code }).write(w);
+    try w.writeInt(u32, 0, .little);
+    try w.writeByte(0);
+    try w.writeAll(body.bytes);
+    if (sequence) |q| {
+        try w.writeByte(1);
+        try w.writeInt(i32, @intCast(sequence_len), .little);
+        try w.writeAll(q.identifier);
+        try w.writeByte(0);
+        try w.writeAll(q.bytes);
+    }
+    try w.flush();
+    return opmsg.readReply(&conn.reader.interface, allocator, .{
+        .request_id = id,
+        .max_message_size = conn.hello.max_message_size_bytes,
+    }, null);
+}
+
 /// Runs `body` in `database` and returns its reply after
 /// `mongo.wire.checkReply` has passed it.
 pub fn command(conn: *RawConn, database: []const u8, body: bson.RawDocument) !bson.OwnedDocument {

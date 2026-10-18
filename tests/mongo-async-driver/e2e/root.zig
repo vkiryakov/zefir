@@ -61,4 +61,5 @@ test {
     testing.refAllDecls(@This());
     testing.refAllDecls(RawConn);
     _ = @import("wire.zig");
+    _ = @import("script_vs_mongod.zig");
 }

@@ -11,12 +11,15 @@
 //! - `FakeDriver` — a `mongo.Client` in the process over a `Script`, for
 //!   the tests of code on the collection API and of applications: no
 //!   network, real deadlines and cancelation.
+//! - `vectors` — the BSON test vectors of zefir: a document of each BSON
+//!   type with what it reads back as, and bytes no reader may accept.
 
 const std = @import("std");
 
 pub const Script = @import("testing/Script.zig");
 pub const FakeServer = @import("testing/FakeServer.zig");
 pub const FakeDriver = @import("testing/FakeDriver.zig");
+pub const vectors = @import("bson/vectors.zig");
 
 test {
     std.testing.refAllDecls(@This());

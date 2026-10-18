@@ -25,7 +25,7 @@
 //!   hello is answered by `script.hello`; `ping` and `endSessions` get
 //!   `{ok: 1.0}`; `saslStart` and `saslContinue` fail with code 18, since
 //!   the server has no users; a command without `$db` fails with code
-//!   40571, as in mongod. The handler answers the rest.
+//!   40414, as in mongod. The handler answers the rest.
 //! - A message that is not OP_MSG, OP_QUERY among them, or that breaks
 //!   it, closes the connection.
 //!
@@ -117,7 +117,7 @@ fn serveConnection(io: Io, stream: net.Stream, script: *Script, number: u32) voi
             }
         }
         script.record(io, &request) catch return;
-        const built_in = builtIn(io, a, script, &request) catch return;
+        const built_in = ownAnswer(io, a, script, &request) catch return;
         const answer = if (built_in) |own| own else script.answer(io, a, &request) catch return;
         if (!answers) continue;
         switch (answer) {
@@ -140,22 +140,20 @@ fn isHello(name: []const u8) bool {
     return std.mem.eql(u8, name, "hello") or std.mem.eql(u8, name, "isMaster") or std.mem.eql(u8, name, "ismaster");
 }
 
-/// The answers of the server itself, or null for the handler's commands.
-fn builtIn(io: Io, arena: Allocator, script: *Script, request: *const Script.Request) bson.Builder.Error!?Script.Answer {
+/// What `serve` answers itself to `request`, a command after the
+/// handshake, or null for the commands it hands to the script's handler.
+pub fn ownAnswer(io: Io, arena: Allocator, script: *Script, request: *const Script.Request) bson.Builder.Error!?Script.Answer {
     const name = request.name;
-    if (request.database.len == 0) return .{ .reply = no_database };
+    if (request.database.len == 0) return .{ .reply = try Script.failure(arena, .{
+        .code = 40414,
+        .code_name = "IDLFailedToParse",
+        .errmsg = try std.fmt.allocPrint(arena, "BSON field '{s}.$db' is missing but a required field", .{name}),
+    }) };
     if (isHello(name)) return .{ .reply = try helloReply(io, arena, script.hello, request) };
     if (std.mem.eql(u8, name, "ping") or std.mem.eql(u8, name, "endSessions")) return .{ .reply = Script.ok };
     if (std.mem.eql(u8, name, "saslStart") or std.mem.eql(u8, name, "saslContinue")) return .{ .reply = no_users };
     return null;
 }
-
-const no_database = bson.literal(.{
-    .ok = 0.0,
-    .errmsg = "OP_MSG requests require a $db argument",
-    .code = 40571,
-    .codeName = "Location40571",
-});
 
 const no_users = bson.literal(.{
     .ok = 0.0,

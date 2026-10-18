@@ -417,7 +417,9 @@ fn brokenRequests(io: Io, port: u16) !void {
     const reply = try no_db.reply(1, null);
     defer reply.deinit();
     const failure = errors.ServerError.fromReply(reply.raw());
-    try testing.expectEqual(@as(i32, 40571), failure.code);
+    try testing.expectEqual(@as(i32, 40414), failure.code);
+    try testing.expectEqualStrings("IDLFailedToParse", failure.code_name.slice());
+    try testing.expectEqualStrings("BSON field 'ping.$db' is missing but a required field", (try reply.raw().get("errmsg")).?.string);
 }
 
 /// An OP_MSG of requestID 1 with one section of `kind` holding `doc`.
