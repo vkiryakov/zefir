@@ -7,6 +7,8 @@
 //! - `OwnedDocument` — a document whose bytes belong to an allocator, such
 //!   as a copy made with `RawDocument.dupe`.
 //! - `Builder` — writes a document, element by element.
+//! - `encode` — writes a struct as a document, by the types of its fields;
+//!   `Builder.put` writes one value so.
 //! - `Value` — the value of one element, of any BSON type; its strings and
 //!   documents are slices into the document.
 //! - The types Zig has no type for: `ObjectId` with its `Generator`,
@@ -20,7 +22,10 @@
 const std = @import("std");
 const value = @import("bson/value.zig");
 const types = @import("bson/types.zig");
+const encoding = @import("bson/encode.zig");
 
+pub const encode = encoding.encode;
+pub const EncodeOptions = encoding.EncodeOptions;
 pub const RawDocument = @import("bson/RawDocument.zig");
 pub const OwnedDocument = @import("bson/OwnedDocument.zig");
 pub const Builder = @import("bson/Builder.zig");
@@ -56,4 +61,5 @@ test {
     _ = @import("bson/types_tests.zig");
     _ = @import("bson/ejson_tests.zig");
     _ = @import("bson/fuzz.zig");
+    _ = @import("bson/encode_tests.zig");
 }

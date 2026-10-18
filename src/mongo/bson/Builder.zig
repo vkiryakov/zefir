@@ -12,6 +12,9 @@
 //! defer doc.deinit();
 //! ```
 //!
+//! `put` writes a value of any type that `bson.encode` takes, a struct or a
+//! slice with all that is in it: `try b.put("filter", .{ .age = 30 })`.
+//!
 //! Keys must not hold a 0 byte. Inside an array the builder numbers the
 //! elements itself ("0", "1", …), so the key passed there must be empty.
 //! At most `bson.max_depth` documents and arrays nest inside one another,
@@ -22,6 +25,8 @@
 const std = @import("std");
 const bson = @import("../bson.zig");
 const read = @import("read.zig");
+const check = @import("check.zig");
+const codec = @import("encode.zig");
 const Builder = @This();
 
 allocator: std.mem.Allocator,
@@ -175,6 +180,24 @@ pub fn putValue(b: *Builder, key: []const u8, value: bson.Value) Error!void {
         .undefined, .db_pointer, .symbol, .javascript_with_scope => return error.InvalidBson,
     }
     b.advance();
+}
+
+/// Writes `value` by its type, as `bson.encode` writes a field: a struct
+/// as a document, a slice or an array as an array, an optional as null or
+/// its value, a number, a string or a special type as the BSON value of
+/// its own. A value that fails halfway, such as a document whose last
+/// string is not UTF-8, leaves the document as it was.
+pub fn put(b: *Builder, key: []const u8, value: anytype) Error!void {
+    if (comptime check.value(@TypeOf(value), .encode)) |problem| @compileError("bson.Builder.put: " ++ problem);
+    const mark = b.buffer.items.len;
+    const open = b.open;
+    const index = if (b.arrayIndex()) |i| i.* else 0;
+    errdefer {
+        b.buffer.shrinkRetainingCapacity(mark);
+        b.open = open;
+        if (b.arrayIndex()) |i| i.* = index;
+    }
+    try codec.writeElement(b, key, value, .{});
 }
 
 /// Opens a document under `key`; `end` closes it.

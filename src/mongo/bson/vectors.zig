@@ -90,6 +90,14 @@ pub const valid = [_]Vector{
     .{ .name = "MaxKey", .bson = hex("08000000 7f 6100 00"), .value = .max_key, .json = "{\"a\":{\"$maxKey\":1}}" },
 };
 
+/// The document of the valid vector called `name`.
+pub fn named(comptime name: []const u8) []const u8 {
+    inline for (valid) |vector| {
+        if (comptime std.mem.eql(u8, vector.name, name)) return vector.bson;
+    }
+    @compileError("no vector named " ++ name);
+}
+
 /// {}
 pub const empty = hex("05000000 00");
 

@@ -1,0 +1,119 @@
+//! The comptime check of the types that the typed codec takes: one walk
+//! over a type, which names the first field that does not fit and says what
+//! to write instead. `bson.encode`, `bson.literal`, `Builder.put` and
+//! `bson.decode` stop the build with its message.
+
+const std = @import("std");
+const bson = @import("../bson.zig");
+
+/// Which way the codec goes.
+pub const Direction = enum { encode, decode };
+
+/// Why `T` cannot be the document that `encode` writes or `decode` fills,
+/// as the end of a compile error, or null when it can.
+pub fn document(comptime T: type, comptime direction: Direction) ?[]const u8 {
+    return comptime documentProblem(T, direction);
+}
+
+/// Why a value of type `T` cannot be written into a document, or read from
+/// one, or null.
+pub fn value(comptime T: type, comptime direction: Direction) ?[]const u8 {
+    return comptime walk(T, "", direction, &.{});
+}
+
+/// Whether the codec writes `T` as the BSON value of its own: the documents
+/// and values of `mongo.bson` and its special types.
+pub fn isSpecial(comptime T: type) bool {
+    inline for (.{
+        bson.RawDocument, bson.OwnedDocument,       bson.Value,  bson.ObjectId,
+        bson.DateTime,    bson.Timestamp,           bson.Binary, bson.Decimal128,
+        bson.Regex,       bson.Null,                bson.MinKey, bson.MaxKey,
+        bson.DbPointer,   bson.JavaScriptWithScope,
+    }) |Special| {
+        if (T == Special) return true;
+    }
+    return false;
+}
+
+fn documentProblem(comptime T: type, comptime direction: Direction) ?[]const u8 {
+    const not_a_document = "a document is a struct with named fields, such as .{ .name = name }; got " ++ @typeName(T);
+    if (direction == .encode and (T == bson.RawDocument or T == bson.OwnedDocument)) return null;
+    if (isSpecial(T)) return not_a_document;
+    switch (@typeInfo(T)) {
+        .@"struct" => return walk(T, "", direction, &.{}),
+        else => return not_a_document,
+    }
+}
+
+/// The problem of `T`, which sits at `path` ("" for the value itself).
+/// `outer` lists the structs that hold `T`, to find a type that holds
+/// itself.
+fn walk(comptime T: type, comptime path: []const u8, comptime direction: Direction, comptime outer: []const type) ?[]const u8 {
+    @setEvalBranchQuota(100_000);
+    const is = subject(path) ++ " is " ++ @typeName(T);
+    if (T == bson.DbPointer or T == bson.JavaScriptWithScope) {
+        return if (direction == .decode) null else is ++ ", a deprecated type: it is read, never written";
+    }
+    if (isSpecial(T)) return null;
+    switch (@typeInfo(T)) {
+        .bool => return null,
+        .int => |int| return integer(T, int, is),
+        .float => return if (T == f32 or T == f64) null else is ++ ": a BSON double is an f64; use f64 or f32",
+        .@"enum" => |info| {
+            if (info.mode == .nonexhaustive) return is ++ ", a non-exhaustive enum: a value without a tag has no name to write; make the enum exhaustive";
+            for (info.field_names) |tag| {
+                if (!std.unicode.utf8ValidateSlice(tag)) return is ++ ": the name of one of its tags is not UTF-8";
+            }
+            return null;
+        },
+        .optional => |info| {
+            if (@typeInfo(info.child) == .optional) return is ++ ": BSON null cannot tell the two nulls apart";
+            return walk(info.child, path, direction, outer);
+        },
+        .pointer => |info| return pointer(T, info, path, direction, outer),
+        .array => |info| return walk(info.child, path ++ "[]", direction, outer),
+        .@"struct" => |info| return structure(T, info, path, direction, outer),
+        .@"union" => return is ++ ": unions are not supported; a field of any BSON type is a bson.Value",
+        else => return is ++ ", which has no BSON type",
+    }
+}
+
+fn subject(comptime path: []const u8) []const u8 {
+    return if (path.len == 0) "the value" else "field '" ++ path ++ "'";
+}
+
+fn integer(comptime T: type, comptime int: std.lang.Type.Int, comptime is: []const u8) ?[]const u8 {
+    if (T == usize or T == isize) return is ++ ", whose size depends on the target: use i64 or i32";
+    // c_int and the other C types are distinct types of a size that
+    // depends on the target too.
+    if (T != @Int(int.signedness, int.bits)) return is ++ ", whose size depends on the target: use an integer of a fixed width, such as i32";
+    if (int.signedness == .unsigned and int.bits == 64) return is ++ ", which BSON has no type for: its integers are signed; use i64";
+    if (int.bits > 64) return is ++ ": BSON integers have at most 64 bits; use i64";
+    return null;
+}
+
+fn pointer(comptime T: type, comptime info: std.lang.Type.Pointer, comptime path: []const u8, comptime direction: Direction, comptime outer: []const type) ?[]const u8 {
+    const is = subject(path) ++ " is " ++ @typeName(T);
+    switch (info.size) {
+        .slice => {
+            // []const u8 is a string.
+            if (info.child == u8) return null;
+            return walk(info.child, path ++ "[]", direction, outer);
+        },
+        .many, .c => return is ++ ", which has no length: pass a slice",
+        .one => return is ++ ": pass the value itself, not a pointer to it",
+    }
+}
+
+fn structure(comptime T: type, comptime info: std.lang.Type.Struct, comptime path: []const u8, comptime direction: Direction, comptime outer: []const type) ?[]const u8 {
+    for (outer) |Outer| {
+        if (Outer == T) return subject(path) ++ " is " ++ @typeName(T) ++ " inside itself: a type that holds itself is not supported";
+    }
+    const inner = outer ++ [_]type{T};
+    for (info.field_names, info.field_types) |name, Field| {
+        const field = if (path.len == 0) name else path ++ "." ++ name;
+        if (!std.unicode.utf8ValidateSlice(name)) return subject(path) ++ " is " ++ @typeName(T) ++ ": the name of one of its fields is not UTF-8";
+        if (walk(Field, field, direction, inner)) |found| return found;
+    }
+    return null;
+}
