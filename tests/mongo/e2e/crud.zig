@@ -1,18 +1,39 @@
-//! The collection API against mongod, on `FakeDriver` through `Proxy`
-//! against mongo-plain, with a `maxWriteBatchSize` of 3, so that writes go
-//! out in several batches. The scenarios are those of crud_scenarios.zig,
-//! which every driver runs.
+//! The collection API against mongo-plain: on the native driver, and on
+//! `FakeDriver` through `Proxy` with a `maxWriteBatchSize` of 3, so that
+//! writes go out in several batches. The scenarios are those of
+//! crud_scenarios.zig, which every driver runs.
 
 const std = @import("std");
 const Io = std.Io;
 const testing = std.testing;
+const core = @import("core");
 const mongo = @import("mongo");
+const native = mongo.native;
 const bson = mongo.bson;
 const Script = mongo.testing.Script;
 const FakeDriver = mongo.testing.FakeDriver;
 const e2e = @import("root.zig");
 const Proxy = @import("Proxy.zig");
 const crud_scenarios = @import("crud_scenarios.zig");
+
+test "the collection API on the native driver against mongo-plain" {
+    try e2e.onZio(onNativeDriver);
+}
+
+fn onNativeDriver(io: Io) !void {
+    var buffer: [64]u8 = undefined;
+    const uri = try std.fmt.bufPrint(&buffer, "mongodb://127.0.0.1:{d}", .{e2e.servers.plain_port});
+    var driver: native.Client = try .init(testing.allocator, io, .{ .uri = uri });
+    defer driver.deinit();
+    var d: mongo.Diagnostics = .{};
+    const ctx = core.Context.root.withDeadline(.after(Io.Clock.awake.now(io), .fromSeconds(10)));
+    driver.connect(io, ctx, &d) catch |err| {
+        std.debug.print("connect: {t}: {s}\n", .{ err, d.message() });
+        return err;
+    };
+    var ids: bson.ObjectId.Generator = .init(io);
+    try crud_scenarios.runAll(io, .init(driver.client(), e2e.database, &ids));
+}
 
 test "the collection API on FakeDriver through the proxy against mongo-plain, at a maxWriteBatchSize of 3" {
     try e2e.onZio(onFakeDriver);
