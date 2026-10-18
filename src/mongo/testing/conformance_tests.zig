@@ -59,8 +59,23 @@ test "FakeDriver passes every check of layer S but S16, which is for drivers on 
     try expectNoFailures(&report);
     try testing.expectEqualStrings("fake", report.driver_name);
     try testing.expectEqual(@as(usize, 20), report.passedCount());
-    try testing.expectEqual(@as(usize, 1), report.skippedCount());
+    try testing.expectEqual(@as(usize, 11), report.skippedCount());
     try testing.expectEqualStrings("it is for drivers on the wire: no connection came to the FakeServer, so the driver reads no OP_MSG", report.outcome(.s16).skipped);
+    for ([_]Check{ .l1, .l2, .l3, .l4, .l5, .l6, .l7, .l8, .l9, .l10 }) |check| {
+        try testing.expectEqualStrings("it needs a live mongod: options.live is null", report.outcome(check).skipped);
+    }
+}
+
+test "the fail points of L7 to L10 run only when the options ask for them, and only on a driver on the wire" {
+    var harness: FakeHarness = .{};
+    const only: []const Check = &.{ .l7, .l8, .l9, .l10 };
+    // Skipped before they run: nothing listens at this port.
+    var off = try conformance.run(testing.io, testing.allocator, &harness, .{ .only = only, .live = .{ .uri = "mongodb://127.0.0.1:1" } });
+    defer off.deinit();
+    for (only) |check| try testing.expectEqualStrings("it needs fail points: options.live.fail_points is false", off.outcome(check).skipped);
+    var on = try conformance.run(testing.io, testing.allocator, &harness, .{ .only = only, .live = .{ .uri = "mongodb://127.0.0.1:1", .fail_points = true } });
+    defer on.deinit();
+    for (only) |check| try testing.expectEqualStrings("fail points need a driver on the wire: no connection came to the FakeServer, and a fail point acts on the connections of a driver to mongod", on.outcome(check).skipped);
 }
 
 test "only runs the checks it names, and the report says why the others were skipped" {

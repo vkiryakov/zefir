@@ -971,7 +971,7 @@ pub fn s12(job: *Job) Job.Error!void {
 
     // Twelve items of 304 bytes: a message holds six.
     var items: [12]bson.RawDocument = undefined;
-    for (&items, 0..) |*item, i| item.* = (try encodeIn(job, a, .{ ._id = @as(i32, @intCast(i)), .pad = pad[0..280] })).raw();
+    for (&items, 0..) |*item, i| item.* = (try job.encodeIn(a, .{ ._id = @as(i32, @intCast(i)), .pad = pad[0..280] })).raw();
     var result = try job.need(client.write(io, .of(.root), .{ .database = database, .kind = .insert, .body = body, .items = &items }, .{ .allocator = job.gpa }), "a write of twelve items");
     result.deinit(job.gpa);
     const batches = script.count(io, "insert");
@@ -988,27 +988,19 @@ pub fn s12(job: *Job) Job.Error!void {
     try job.expect(at == items.len, "{d} of twelve items went out", .{at});
 
     // An item that no message holds alone: not sent.
-    const huge = (try encodeIn(job, a, .{ ._id = 100, .pad = pad })).raw();
+    const huge = (try job.encodeIn(a, .{ ._id = 100, .pad = pad })).raw();
     try job.expectError(client.write(io, .of(.root), .{ .database = database, .kind = .insert, .body = body, .items = &.{ items[0], huge } }, .{ .allocator = job.gpa }), error.InvalidArgument, "a write of an item that no message holds");
     try job.expect(script.count(io, "insert") == batches, "a write of an item that no message holds sent a batch", .{});
 
     // An item larger than maxBsonObjectSize, within a message: it goes out,
     // and the server refuses it, not the driver.
-    const large = (try encodeIn(job, a, .{ ._id = 200, .pad = pad[0..700] })).raw();
+    const large = (try job.encodeIn(a, .{ ._id = 200, .pad = pad[0..700] })).raw();
     var sent = try job.need(client.write(io, .of(.root), .{ .database = database, .kind = .insert, .body = body, .items = &.{large} }, .{ .allocator = job.gpa }), "a write of an item larger than maxBsonObjectSize");
     sent.deinit(job.gpa);
     const last = try job.received(script, "insert", batches);
     var carried = (last.sequence orelse return job.fail("the large item came without a section of kind 1", .{})).documents();
     const item = carried.next() orelse return job.fail("the large item came without items", .{});
     try job.expect(eql(u8, item.bytes, large.bytes), "the item larger than maxBsonObjectSize came changed", .{});
-}
-
-/// A document of the check in `allocator`.
-fn encodeIn(job: *Job, allocator: Allocator, value: anytype) Job.Error!bson.OwnedDocument {
-    return bson.encode(allocator, value, .{}) catch |err| switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
-        error.InvalidBson => job.fail("a document of the check is not valid BSON", .{}),
-    };
 }
 
 /// The `q._id` of the first item of a write's batch.

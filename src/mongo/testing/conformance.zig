@@ -79,6 +79,7 @@ const std = @import("std");
 const Script = @import("Script.zig");
 const Job = @import("conformance/Job.zig");
 const scripted = @import("conformance/scripted.zig");
+const live = @import("conformance/live.zig");
 
 /// Where the driver of a check connects; `setUp` gets it.
 pub const Target = union(enum) {
@@ -146,6 +147,16 @@ pub const Check = enum {
     s19,
     s20,
     s21,
+    l1,
+    l2,
+    l3,
+    l4,
+    l5,
+    l6,
+    l7,
+    l8,
+    l9,
+    l10,
 
     /// "S1" to "S21", "L1" to "L10".
     pub fn label(check: Check) []const u8 {
@@ -178,6 +189,16 @@ pub const Check = enum {
             .s19 => "capabilities: the revision, the four of revision 1, none reserved, stable, a name",
             .s20 => "cancelation is never swallowed: close, deinit and paths of errors keep it",
             .s21 => "a token canceled after the second batch: IncompleteWrite for Cancelled; before sending: Cancelled",
+            .l1 => "a full round on a fresh collection: insert, find, update, findAndModify, delete, count",
+            .l2 => "a real cursor: 250 documents at a batchSize of 7; close in its middle kills it",
+            .l3 => "real write errors: duplicates refused at their indexes; unordered goes on, ordered stops",
+            .l4 => "an unknown command: CommandFailed 59 with Diagnostics and failure_reply",
+            .l5 => "64 tasks of 20 operations each",
+            .l6 => "large: a document of 16 MiB there and back, a find of 18 MiB, an insert of 50 MiB",
+            .l7 => "fail point closeConnection: ConnectionLost, and the next call goes through",
+            .l8 => "fail point errorCode 91 with a label: CommandFailed with both, and no retry",
+            .l9 => "fail point 462 with SystemOverloadedError and RetryableError: CommandFailed, and no retry",
+            .l10 => "fail points blockConnection past the deadline and errorCode 50: Timeout",
         };
     }
 
@@ -185,6 +206,14 @@ pub const Check = enum {
 
     pub fn layer(check: Check) Layer {
         return if (@tagName(check)[0] == 's') .scripted else .live;
+    }
+
+    /// Whether the check configures fail points: L7–L10.
+    pub fn needsFailPoints(check: Check) bool {
+        return switch (check) {
+            .l7, .l8, .l9, .l10 => true,
+            else => false,
+        };
     }
 
     /// The revision of the contract that the check needs of a driver.
@@ -325,7 +354,13 @@ fn skipReason(arena: std.mem.Allocator, check: Check, probe: *const Job.Probe, o
         return try std.fmt.allocPrint(arena, "it needs revision {d} of the contract, and the driver declares {d}", .{ check.revision(), probe.revision });
     }
     if (check == .s16 and !probe.wire) return "it is for drivers on the wire: no connection came to the FakeServer, so the driver reads no OP_MSG";
-    if (check.layer() == .live and options.live == null) return "it needs a live mongod: options.live is null";
+    if (check.layer() == .live) {
+        const l = options.live orelse return "it needs a live mongod: options.live is null";
+        if (check.needsFailPoints()) {
+            if (!l.fail_points) return "it needs fail points: options.live.fail_points is false";
+            if (!probe.wire) return "fail points need a driver on the wire: no connection came to the FakeServer, and a fail point acts on the connections of a driver to mongod";
+        }
+    }
     return null;
 }
 
@@ -394,5 +429,15 @@ fn runBody(job: *Job, check: Check) Job.Error!void {
         .s19 => scripted.s19(job),
         .s20 => scripted.s20(job),
         .s21 => scripted.s21(job),
+        .l1 => live.l1(job),
+        .l2 => live.l2(job),
+        .l3 => live.l3(job),
+        .l4 => live.l4(job),
+        .l5 => live.l5(job),
+        .l6 => live.l6(job),
+        .l7 => live.l7(job),
+        .l8 => live.l8(job),
+        .l9 => live.l9(job),
+        .l10 => live.l10(job),
     };
 }

@@ -102,7 +102,12 @@ pub fn discard(job: *Job, value: anytype) void {
 
 /// A document of the check, in `job.gpa`.
 pub fn encode(job: *Job, value: anytype) Error!bson.OwnedDocument {
-    return bson.encode(job.gpa, value, .{}) catch |err| switch (err) {
+    return job.encodeIn(job.gpa, value);
+}
+
+/// A document of the check, in `allocator`.
+pub fn encodeIn(job: *Job, allocator: Allocator, value: anytype) Error!bson.OwnedDocument {
+    return bson.encode(allocator, value, .{}) catch |err| switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         error.InvalidBson => job.fail("a document of the check is not valid BSON", .{}),
     };

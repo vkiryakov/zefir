@@ -64,4 +64,5 @@ test {
     _ = @import("wire.zig");
     _ = @import("script_vs_mongod.zig");
     _ = @import("Proxy.zig");
+    _ = @import("conformance.zig");
 }
