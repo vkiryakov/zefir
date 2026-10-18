@@ -36,4 +36,5 @@ test {
     _ = @import("testing/pool_tests.zig");
     _ = @import("testing/lifecycle_tests.zig");
     _ = @import("testing/command_tests.zig");
+    _ = @import("testing/errors_tests.zig");
 }

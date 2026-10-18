@@ -133,10 +133,7 @@ fn beforeSend(r: Runner, io: Io, op: OperationContext, deadline: ?core.Deadline,
         if (takesMaxTime(body)) max_time_ms = ms;
     }
     if (op.ctx.isCancelled()) return fail(d, .send, error.Cancelled, "the token was canceled before the command went out", .{});
-    io.checkCancel() catch {
-        io.recancel();
-        return fail(d, .send, error.Cancelled, "the task was canceled before the command went out", .{});
-    };
+    io.checkCancel() catch return errors.canceled(io, d, .send, false, "the task was canceled before the command went out");
     return max_time_ms;
 }
 
