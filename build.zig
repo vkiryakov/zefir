@@ -354,9 +354,10 @@ pub fn build(b: *std.Build) void {
     run_moved_client.expectExitCode(3);
     test_nats.dependOn(&run_moved_client.step);
 
-    // mongo-async-driver panic programs: a client moved after connect() and
-    // a call on another std.Io panic in safe builds. Each program must
-    // print the panic message and end in its own panic handler, which
+    // mongo-async-driver panic programs: a client moved after connect(), a
+    // call on another std.Io, a cursor used by two tasks at once and
+    // Client.deinit() with cursors left panic in safe builds. Each program
+    // must print the panic message and end in its own panic handler, which
     // exits with code 3 instead of aborting. They get their own Debug
     // copies of mongo and the driver, whatever -Doptimize says.
     const panic_mongo = b.createModule(.{
@@ -380,6 +381,8 @@ pub fn build(b: *std.Build) void {
     for ([_][2][]const u8{
         .{ "moved_client", "panic: zefir-mongo-async-driver: Client moved after connect(): keep it where connect() ran (see the guide)" },
         .{ "another_io", "panic: zefir-mongo-async-driver: a call on another std.Io than the client's: pass the io of Client.init" },
+        .{ "cursor_two_tasks", "panic: zefir-mongo-async-driver: a cursor used by two tasks at once: one task at a time calls next, close and deinit of a cursor" },
+        .{ "deinit_live_cursor", "panic: zefir-mongo-async-driver: Client.deinit() with cursors left: deinit every cursor before the client" },
     }) |case| {
         const exe = b.addExecutable(.{
             .name = b.fmt("mongo-async-driver-panic-{s}", .{case[0]}),
