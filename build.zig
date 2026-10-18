@@ -84,20 +84,6 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // The access logs of rpc on zefir-log: a module of their own, so that
-    // zefir-rpc does not depend on log.
-    const rpc_log = b.addModule("zefir-rpc-log", .{
-        .root_source_file = b.path("src/rpc-log/root.zig"),
-        .target = target,
-        .optimize = optimize,
-        .sanitize_thread = tsan,
-        .imports = &.{
-            .{ .name = "rpc", .module = rpc },
-            .{ .name = "core", .module = core },
-            .{ .name = "log", .module = log },
-        },
-    });
-
     const orm = b.addModule("zefir-orm", .{
         .root_source_file = b.path("src/orm/root.zig"),
         .target = target,
@@ -119,7 +105,7 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // Umbrella module: @import("zefir").core, .log, .confy, .validator, .rpc, .rpc_nats, .rpc_log, .orm, .nats, .http
+    // Umbrella module: @import("zefir").core, .log, .confy, .validator, .rpc, .rpc_nats, .orm, .nats, .http
     const zefir = b.addModule("zefir", .{
         .root_source_file = b.path("src/zefir.zig"),
         .target = target,
@@ -132,7 +118,6 @@ pub fn build(b: *std.Build) void {
             .{ .name = "validator", .module = validator },
             .{ .name = "rpc", .module = rpc },
             .{ .name = "rpc-nats", .module = rpc_nats },
-            .{ .name = "rpc-log", .module = rpc_log },
             .{ .name = "orm", .module = orm },
             .{ .name = "nats", .module = nats },
             .{ .name = "http", .module = http },
@@ -150,7 +135,6 @@ pub fn build(b: *std.Build) void {
     const test_validator = addModuleTestStep(b, test_step, "validator");
     const test_rpc = addModuleTestStep(b, test_step, "rpc");
     const test_rpc_nats = addModuleTestStep(b, test_step, "rpc-nats");
-    const test_rpc_log = addModuleTestStep(b, test_step, "rpc-log");
     const test_orm = addModuleTestStep(b, test_step, "orm");
     const test_nats = addModuleTestStep(b, test_step, "nats");
     const test_http = addModuleTestStep(b, test_step, "http");
@@ -160,8 +144,8 @@ pub fn build(b: *std.Build) void {
     // where usize has 32 bits.
     const validator_compile_step = b.step("compile-validator-tests", "Build the validator's test binaries for -Dtarget without running them");
     for (
-        [_]*std.Build.Module{ core, log, confy, validator, rpc, rpc_nats, rpc_log, orm, nats, http, zefir },
-        [_]*std.Build.Step{ test_core, test_log, test_confy, test_validator, test_rpc, test_rpc_nats, test_rpc_log, test_orm, test_nats, test_http, test_zefir },
+        [_]*std.Build.Module{ core, log, confy, validator, rpc, rpc_nats, orm, nats, http, zefir },
+        [_]*std.Build.Step{ test_core, test_log, test_confy, test_validator, test_rpc, test_rpc_nats, test_orm, test_nats, test_http, test_zefir },
     ) |module, module_test_step| {
         const tests = b.addTest(.{ .root_module = module });
         module_test_step.dependOn(&addRun(b, tests, tsan).step);
@@ -692,13 +676,12 @@ pub fn build(b: *std.Build) void {
     }
     test_rpc_nats.dependOn(&addRun(b, rpc_nats_guide, tsan).step);
 
-    addRpcGuide(b, test_rpc, test_rpc_log, .{
+    addRpcGuide(b, test_rpc, .{
         .core = core,
         .validator = validator,
         .confy = confy,
         .log = log,
         .rpc = rpc,
-        .rpc_log = rpc_log,
     }, target, optimize, tsan);
 
     // core benchmarks: `zig build test` only compiles them, `zig build bench`
@@ -775,22 +758,18 @@ const GuideModules = struct {
     confy: *std.Build.Module,
     log: *std.Build.Module,
     rpc: *std.Build.Module,
-    rpc_log: *std.Build.Module,
 };
 
-/// The examples of src/rpc/examples/README.md, the guide of rpc and
-/// rpc-log, as cases.zig there lists them. Every program runs through
+/// The examples of src/rpc/examples/README.md, the guide of rpc, as
+/// cases.zig there lists them. Every program runs through
 /// example_main.zig, which exits with code 3 on a panic instead of
 /// aborting and with code 4 when the run takes longer than its time limit
 /// (testdata/hang.zig checks that), and must exit with 0; readme_test.zig
 /// then checks that README.md shows every file as it is and every run as
-/// it printed. The programs of the access logs and their check belong to
-/// `test_rpc_log`, the rest to `test_rpc`, so that the programs of
-/// `test_rpc` never import zefir-rpc-log, which imports rpc.
+/// it printed.
 fn addRpcGuide(
     b: *std.Build,
     test_rpc: *std.Build.Step,
-    test_rpc_log: *std.Build.Step,
     m: GuideModules,
     target: std.Build.ResolvedTarget,
     optimize: std.lang.Optimize,
@@ -821,7 +800,6 @@ fn addRpcGuide(
         .{ .name = "users-api", .module = contracts[0] },
         .{ .name = "orders-api", .module = contracts[1] },
     };
-    const access_log_imports = std.mem.concat(b.allocator, std.Build.Module.Import, &.{ imports, &.{.{ .name = "rpc-log", .module = m.rpc_log }} }) catch @panic("OOM");
 
     for (rpc_guide.tests) |name| {
         const tests = b.addTest(.{
@@ -863,50 +841,39 @@ fn addRpcGuide(
         .target = target,
         .optimize = optimize,
     });
-    for (
-        [_]bool{ false, true },
-        [_][]const rpc_guide.Program{ &rpc_guide.programs, &rpc_guide.access_log_programs },
-        [_]*std.Build.Step{ test_rpc, test_rpc_log },
-    ) |access_log, programs, step| {
-        const options = b.addOptions();
-        options.addOption(bool, "access_log", access_log);
-        const readme = b.createModule(.{
-            .root_source_file = b.path(dir ++ "readme_test.zig"),
-            .target = target,
-            .optimize = optimize,
-            .sanitize_thread = tsan,
-            .imports = &.{
-                .{ .name = "cases", .module = cases },
-                .{ .name = "readme_options", .module = options.createModule() },
-            },
-        });
-        // "rpc in a minute" of the repository's README.md is a program of
-        // the guide too.
-        readme.addAnonymousImport("root_readme", .{ .root_source_file = b.path("README.md") });
-        for (programs) |program| {
-            const exe = b.addExecutable(.{
-                .name = b.fmt("rpc-guide-{s}", .{program.name}),
-                .root_module = b.createModule(.{
-                    .root_source_file = b.path(dir ++ "example_main.zig"),
+    const readme = b.createModule(.{
+        .root_source_file = b.path(dir ++ "readme_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+        .imports = &.{.{ .name = "cases", .module = cases }},
+    });
+    // "rpc in a minute" of the repository's README.md is a program of
+    // the guide too.
+    readme.addAnonymousImport("root_readme", .{ .root_source_file = b.path("README.md") });
+    for (rpc_guide.programs) |program| {
+        const exe = b.addExecutable(.{
+            .name = b.fmt("rpc-guide-{s}", .{program.name}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(dir ++ "example_main.zig"),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+                .imports = &.{.{ .name = "example", .module = b.createModule(.{
+                    .root_source_file = b.path(b.fmt(dir ++ "{s}.zig", .{program.name})),
                     .target = target,
                     .optimize = optimize,
                     .sanitize_thread = tsan,
-                    .imports = &.{.{ .name = "example", .module = b.createModule(.{
-                        .root_source_file = b.path(b.fmt(dir ++ "{s}.zig", .{program.name})),
-                        .target = target,
-                        .optimize = optimize,
-                        .sanitize_thread = tsan,
-                        .imports = if (access_log) access_log_imports else imports,
-                    }) }},
-                }),
-            });
-            const run = addRun(b, exe, tsan);
-            for (program.env) |pair| run.setEnvironmentVariable(pair[0], pair[1]);
-            run.expectExitCode(0);
-            readme.addAnonymousImport(b.fmt("{s}.out", .{program.name}), .{ .root_source_file = run.captureStdOut(.{}) });
-        }
-        step.dependOn(&addRun(b, b.addTest(.{ .name = "rpc-guide-readme", .root_module = readme }), tsan).step);
+                    .imports = imports,
+                }) }},
+            }),
+        });
+        const run = addRun(b, exe, tsan);
+        for (program.env) |pair| run.setEnvironmentVariable(pair[0], pair[1]);
+        run.expectExitCode(0);
+        readme.addAnonymousImport(b.fmt("{s}.out", .{program.name}), .{ .root_source_file = run.captureStdOut(.{}) });
     }
+    test_rpc.dependOn(&addRun(b, b.addTest(.{ .name = "rpc-guide-readme", .root_module = readme }), tsan).step);
 }
 
 /// The validator tests that use only its public API, compiled as client code

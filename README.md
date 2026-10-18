@@ -54,7 +54,6 @@ Take any module on its own, or all the finished ones at once through the umbrell
 | `zefir-http`                       | HTTP server: REST APIs, routes checked at compile time, middleware, static files, SSE                      | ✅ Done · [docs](src/http/examples/README.md)            |
 | `zefir-rpc`                        | Typed RPC with pluggable transports: NATS now, HTTP (Connect) and TCP later                                | ✅ Done · [docs](src/rpc/examples/README.md)             |
 | `zefir-rpc-nats`                   | NATS transport for `zefir-rpc`: request-reply, ADR-32 errors, NATS micro discovery                         | ✅ Done · [docs](src/rpc-nats/examples/README.md)        |
-| `zefir-rpc-log`                    | Access logs of `zefir-rpc` calls on `zefir-log`: one record per call, never bodies or credentials          | ✅ Done · [docs](src/rpc/examples/README.md#access-logs) |
 | `zefir-graphql`                    | GraphQL queries, mutations, subscriptions, resolvers                                                       | 📋 Planned                                               |
 | `zefir-messaging`                  | Pub/sub, message queues, consumers, backpressure                                                           | 📋 Planned                                               |
 | `zefir-nats`                       | Native async NATS client on `std.Io`: publish/subscribe, request/reply, reconnect                          | ✅ Done · [docs](src/nats/examples/README.md)            |
