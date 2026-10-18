@@ -132,7 +132,13 @@ pub const Check = enum {
     s5,
     s6,
     s7,
+    s8,
+    s9,
+    s10,
+    s17,
+    s18,
     s19,
+    s20,
 
     /// "S1" to "S21", "L1" to "L10".
     pub fn label(check: Check) []const u8 {
@@ -151,7 +157,13 @@ pub const Check = enum {
             .s5 => "a deadline in flight: Timeout on time; the late reply is not seen",
             .s6 => "cancelation in flight: Interrupted, and the task keeps its cancelation",
             .s7 => "64 calls at once with random delays get their own replies; a cursor moves between tasks",
+            .s8 => "a cursor: firstBatch and three getMore in its namespace, then null and null again",
+            .s9 => "close and deinit of a cursor: one killCursors, none at the end, one past the deadline",
+            .s10 => "errors of a cursor: a lost getMore ends it, a deadline before getMore does not",
+            .s17 => "closing the client: calls out end, new ones are Closed, open cursors are killed, twice is harmless",
+            .s18 => "memory: replies only from the options' allocator, the caller's buffers free after return",
             .s19 => "capabilities: the revision, the four of revision 1, none reserved, stable, a name",
+            .s20 => "cancelation is never swallowed: close, deinit and paths of errors keep it",
         };
     }
 
@@ -353,6 +365,12 @@ fn runBody(job: *Job, check: Check) Job.Error!void {
         .s5 => scripted.s5(job),
         .s6 => scripted.s6(job),
         .s7 => scripted.s7(job),
+        .s8 => scripted.s8(job),
+        .s9 => scripted.s9(job),
+        .s10 => scripted.s10(job),
+        .s17 => scripted.s17(job),
+        .s18 => scripted.s18(job),
         .s19 => scripted.s19(job),
+        .s20 => scripted.s20(job),
     };
 }

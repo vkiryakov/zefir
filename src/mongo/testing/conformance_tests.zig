@@ -58,7 +58,7 @@ test "FakeDriver passes every check of layer S but S16, which is for drivers on 
     defer report.deinit();
     try expectNoFailures(&report);
     try testing.expectEqualStrings("fake", report.driver_name);
-    try testing.expectEqual(@as(usize, 8), report.passedCount());
+    try testing.expectEqual(@as(usize, 14), report.passedCount());
     try testing.expectEqual(@as(usize, 0), report.skippedCount());
 }
 
@@ -81,6 +81,10 @@ const Flaw = enum {
     /// runCommand takes the cancelation of its task that it reports as
     /// Interrupted, instead of leaving it to the task.
     swallows_cancel,
+    /// close does nothing.
+    ignores_close,
+    /// close takes a cancelation of its task.
+    close_swallows_cancel,
 };
 
 /// `FakeDriver` with one flaw: the harness and the driver in one object.
@@ -109,7 +113,14 @@ const Flawed = struct {
     }
 
     pub fn close(f: *Flawed, io: Io) void {
-        f.fake.close(io);
+        switch (f.flaw) {
+            .ignores_close => {},
+            .close_swallows_cancel => {
+                f.fake.close(io);
+                io.checkCancel() catch {};
+            },
+            else => f.fake.close(io),
+        }
     }
 
     pub fn tearDown(f: *Flawed, io: Io) void {
@@ -176,6 +187,20 @@ test "a driver that swallows the cancelation of its task fails S6" {
     var report = try conformance.run(testing.io, testing.allocator, &flawed, .{ .only = &.{.s6} });
     defer report.deinit();
     try expectFailed(&report, .s6, "swallowed");
+}
+
+test "a driver whose close does nothing fails S17" {
+    var flawed: Flawed = .{ .flaw = .ignores_close };
+    var report = try conformance.run(testing.io, testing.allocator, &flawed, .{ .only = &.{.s17} });
+    defer report.deinit();
+    try expectFailed(&report, .s17, "killCursors");
+}
+
+test "a driver whose close swallows the cancelation of its task fails S20" {
+    var flawed: Flawed = .{ .flaw = .close_swallows_cancel };
+    var report = try conformance.run(testing.io, testing.allocator, &flawed, .{ .only = &.{.s20} });
+    defer report.deinit();
+    try expectFailed(&report, .s20, "close of the client swallowed");
 }
 
 test "a driver that keeps memory after tearDown fails the check with a leak" {

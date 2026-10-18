@@ -61,10 +61,12 @@ pub fn s1(job: *Job) Job.Error!void {
 /// The fields that no driver of revision 1 writes.
 const session_fields = [_][]const u8{ "$readPreference", "lsid", "txnNumber", "$clusterTime", "autocommit", "startTransaction" };
 
-/// A cursor, a write and anything else answered with `{ok: 1.0}`.
+/// A cursor, a write, `distinct` answered with `distinct`, and anything
+/// else answered with `{ok: 1.0}`.
 const Mixed = struct {
     cursor: Script.Cursor,
     write: Script.Write = .{},
+    distinct: bson.RawDocument = Script.ok,
 
     pub fn handler(m: *Mixed) Script.Handler {
         return .init(m);
@@ -74,9 +76,13 @@ const Mixed = struct {
         const name = request.name;
         if (eql(u8, name, "find") or eql(u8, name, "getMore") or eql(u8, name, "killCursors")) return m.cursor.answer(io, arena, request);
         if (eql(u8, name, "insert") or eql(u8, name, "update") or eql(u8, name, "delete")) return m.write.answer(io, arena, request);
+        if (eql(u8, name, "distinct")) return .{ .reply = m.distinct };
         return .{ .reply = Script.ok };
     }
 };
+
+/// A failure for the paths of errors.
+const bad_value = bson.literal(.{ .ok = 0.0, .errmsg = "key must be a string", .code = 2, .codeName = "BadValue" });
 
 const docs = [_]bson.RawDocument{
     bson.literal(.{ ._id = 0, .n = "zero" }),
@@ -491,5 +497,383 @@ pub fn s19(job: *Job) Job.Error!void {
             server.max_bson_object_size, server.max_message_size_bytes, server.max_write_batch_size,
             hello.max_bson_object_size,  hello.max_message_size_bytes,  hello.max_write_batch_size,
         });
+    }
+}
+
+/// Opens a cursor of `command` in `database` with no deadline.
+fn open(job: *Job, client: Client, command: bson.RawDocument, options: requests.CursorOptions) Job.Error!Cursor {
+    return job.need(client.openCursor(job.io, .of(.root), .{ .database = database, .body = command }, options), "openCursor");
+}
+
+/// Fails unless the journal holds `n` killCursors in all.
+fn expectKills(job: *Job, script: *Script, n: usize, comptime what: []const u8) Job.Error!void {
+    const got = script.count(job.io, "killCursors");
+    try job.expect(got == n, what ++ ": the server has got {d} killCursors in all, not {d}", .{ got, n });
+}
+
+const s8_comment = bson.literal(.{ .tag = "S8", .n = 8 });
+
+/// Fails unless `entry` is the getMore of cursor `id`, in `collection` of
+/// `db`, with `batchSize` and `comment` of the options, and nothing else.
+fn expectGetMore(job: *Job, entry: Script.Entry, id: i64, collection: []const u8, db: []const u8, batch_size: i64, comment: bson.RawDocument) Job.Error!void {
+    var seen: [4]bool = @splat(false);
+    var it = entry.body.iterator();
+    while (it.next() catch return job.fail("getMore came as invalid BSON", .{})) |element| {
+        const key = element.key;
+        const value = element.value;
+        if (eql(u8, key, "getMore")) {
+            try job.expect(value == .int64 and value.int64 == id, "getMore came with another cursor id than the int64 {d} of the cursor", .{id});
+            seen[0] = true;
+        } else if (eql(u8, key, "collection")) {
+            const got = if (value == .string) value.string else "";
+            try job.expect(eql(u8, got, collection), "getMore came with the collection \"{s}\", not \"{s}\": it is the namespace of the cursor after its first dot", .{ got, collection });
+            seen[1] = true;
+        } else if (eql(u8, key, "batchSize")) {
+            const n = value.asI64() catch -1;
+            try job.expect(n == batch_size, "getMore came with batchSize {d}, not the {d} of the options", .{ n, batch_size });
+            seen[2] = true;
+        } else if (eql(u8, key, "comment")) {
+            try job.expect(value == .document and eql(u8, value.document.bytes, comment.bytes), "getMore came with another comment than that of the options", .{});
+            seen[3] = true;
+        } else if (eql(u8, key, "$db")) {
+            const got = if (value == .string) value.string else "";
+            try job.expect(eql(u8, got, db), "getMore came with $db \"{s}\", not \"{s}\": it is the namespace of the cursor before its first dot", .{ got, db });
+        } else return job.fail("getMore came with '{s}'; it carries getMore, collection, batchSize, comment and $db", .{key});
+    }
+    for (seen, [_][]const u8{ "getMore", "collection", "batchSize", "comment" }) |found, key| {
+        try job.expect(found, "getMore came without {s}", .{key});
+    }
+}
+
+pub fn s8(job: *Job) Job.Error!void {
+    const io = job.io;
+    // The namespace of the cursor names another database than the command,
+    // and a collection with a dot in it: getMore follows the namespace.
+    var chunks: Script.Cursor = .{ .ns = "conformance_ns.fs.chunks", .id = 8, .batches = &.{ docs[0..2], docs[2..4], docs[4..6], docs[6..7] } };
+    var stage: Job.Stage = undefined;
+    const client = try job.scripted(&stage, chunks.handler(), .{});
+    defer job.end();
+    const script = &stage.script;
+    var cursor = try open(job, client, bson.literal(.{ .find = "fs.chunks" }), .{ .batch_size = 2, .comment = .{ .document = s8_comment } });
+    defer cursor.deinit(io);
+    for (docs, 0..) |expected, i| {
+        const doc = (try job.need(cursor.next(io, .of(.root)), "next")) orelse return job.fail("the cursor ended after {d} documents, not 7", .{i});
+        try job.expect(eql(u8, doc.bytes, expected.bytes), "document {d} of the cursor came changed or out of its order", .{i});
+    }
+    for (0..2) |_| {
+        const after = try job.need(cursor.next(io, .of(.root)), "next after the end");
+        try job.expect(after == null, "next after the last document gave a document, not null", .{});
+    }
+    try job.expect(script.count(io, "getMore") == 3, "the cursor sent {d} getMore for the three batches after the first", .{script.count(io, "getMore")});
+    try expectKills(job, script, 0, "a cursor read to its end");
+    for (0..3) |i| try expectGetMore(job, try job.received(script, "getMore", i), 8, "fs.chunks", "conformance_ns", 2, s8_comment);
+}
+
+pub fn s9(job: *Job) Job.Error!void {
+    const io = job.io;
+    var cursor_handler: Script.Cursor = .{ .ns = database ++ ".s9", .id = 9, .batches = &.{ docs[0..1], docs[1..2], docs[2..3] } };
+    var stage: Job.Stage = undefined;
+    const client = try job.scripted(&stage, cursor_handler.handler(), .{});
+    defer job.end();
+    const script = &stage.script;
+    const find = bson.literal(.{ .find = "s9" });
+    {
+        var cursor = try open(job, client, find, .{});
+        defer cursor.deinit(io);
+        _ = try job.need(cursor.next(io, .of(.root)), "next");
+        cursor.close(io);
+        try expectKills(job, script, 1, "close in the middle of a cursor");
+        cursor.close(io);
+        try expectKills(job, script, 1, "a second close");
+        try job.expectError(cursor.next(io, .of(.root)), error.Closed, "next after close");
+    }
+    try expectKills(job, script, 1, "deinit after close");
+    {
+        var cursor = try open(job, client, find, .{});
+        _ = try job.need(cursor.next(io, .of(.root)), "next");
+        cursor.deinit(io);
+    }
+    try expectKills(job, script, 2, "deinit in the middle of a cursor");
+    {
+        var cursor = try open(job, client, find, .{});
+        defer cursor.deinit(io);
+        while (try job.need(cursor.next(io, .of(.root)), "next")) |_| {}
+        cursor.close(io);
+    }
+    try expectKills(job, script, 2, "close and deinit of a cursor read to its end");
+    {
+        const op = job.within(300);
+        var cursor = try job.need(client.openCursor(io, op, .{ .database = database, .body = find }, .{}), "openCursor");
+        defer cursor.deinit(io);
+        _ = try job.need(cursor.next(io, op), "next");
+        job.pause(job.ms(350));
+        cursor.close(io);
+        try expectKills(job, script, 3, "close of a cursor whose deadline has passed: its killCursors has a budget of its own");
+    }
+    for (0..3) |i| {
+        const kill = try job.received(script, "killCursors", i);
+        try job.expectSent(kill.body, bson.literal(.{ .killCursors = "s9", .cursors = .{@as(i64, 9)} }), database, &.{}, "killCursors");
+    }
+}
+
+const cursor_not_found = bson.literal(.{ .ok = 0.0, .errmsg = "cursor id 10 not found", .code = 43, .codeName = "CursorNotFound" });
+
+/// A cursor whose getMore the check breaks; aggregate gets a reply without
+/// a cursor.
+const S10 = struct {
+    cursor: Script.Cursor,
+    get_more: std.atomic.Value(GetMore) = .init(.serve),
+
+    const GetMore = enum(u8) { serve, lose, not_found };
+
+    pub fn handler(h: *S10) Script.Handler {
+        return .init(h);
+    }
+
+    pub fn answer(h: *S10, io: Io, arena: Allocator, request: *const Script.Request) Script.HandlerError!Script.Answer {
+        if (eql(u8, request.name, "aggregate")) return .{ .reply = bson.literal(.{ .n = 1, .ok = 1.0 }) };
+        if (eql(u8, request.name, "getMore")) switch (h.get_more.load(.acquire)) {
+            .serve => {},
+            .lose => return .close_connection,
+            .not_found => return .{ .reply = cursor_not_found },
+        };
+        return h.cursor.answer(io, arena, request);
+    }
+};
+
+pub fn s10(job: *Job) Job.Error!void {
+    const io = job.io;
+    var faulty: S10 = .{ .cursor = .{ .ns = database ++ ".s10", .id = 10, .batches = &.{ docs[0..1], docs[1..2], docs[2..3], docs[3..4] } } };
+    var stage: Job.Stage = undefined;
+    const client = try job.scripted(&stage, faulty.handler(), .{});
+    defer job.end();
+    const script = &stage.script;
+    const find = bson.literal(.{ .find = "s10" });
+    {
+        var cursor = try open(job, client, find, .{});
+        defer cursor.deinit(io);
+        _ = try job.need(cursor.next(io, .of(.root)), "next");
+        const past: OperationContext = .of(core.Context.root.withDeadline(.after(Job.now(io), .zero)));
+        try job.expectError(cursor.next(io, past), error.DeadlineExceeded, "next past the deadline before getMore");
+        try job.expect(script.count(io, "getMore") == 0, "next past the deadline sent getMore", .{});
+        const second = try job.need(cursor.next(io, .of(.root)), "next after DeadlineExceeded");
+        try job.expect(second != null and eql(u8, second.?.bytes, docs[1].bytes), "after DeadlineExceeded before getMore, the cursor did not go on to its next document", .{});
+        faulty.get_more.store(.lose, .release);
+        try job.expectError(cursor.next(io, .of(.root)), error.ConnectionLost, "next whose getMore lost its connection");
+        try job.expectError(cursor.next(io, .of(.root)), error.Closed, "next after a lost getMore");
+        try job.expectError(cursor.next(io, .of(.root)), error.Closed, "next again after a lost getMore");
+    }
+    faulty.get_more.store(.serve, .release);
+    try job.expectError(client.openCursor(io, .of(.root), .{ .database = database, .body = bson.literal(.{ .aggregate = "s10", .pipeline = [0]i32{}, .cursor = .{} }) }, .{}), error.ProtocolViolation, "openCursor answered without cursor");
+    {
+        var d: errors.Diagnostics = .{};
+        var cursor = try open(job, client, find, .{ .diagnostics = &d });
+        defer cursor.deinit(io);
+        _ = try job.need(cursor.next(io, .of(.root)), "next");
+        faulty.get_more.store(.not_found, .release);
+        try job.expectError(cursor.next(io, .of(.root)), error.CommandFailed, "next whose getMore got CursorNotFound");
+        try job.expect(d.server != null and d.server.?.code == 43, "Diagnostics.server.code after CursorNotFound is not 43", .{});
+        try job.expectError(cursor.next(io, .of(.root)), error.Closed, "next after CursorNotFound");
+    }
+}
+
+/// Serves a cursor and holds `count`.
+const Held = struct {
+    cursor: Script.Cursor,
+    hold: Io.Duration,
+
+    pub fn handler(h: *Held) Script.Handler {
+        return .init(h);
+    }
+
+    pub fn answer(h: *Held, io: Io, arena: Allocator, request: *const Script.Request) Script.HandlerError!Script.Answer {
+        if (eql(u8, request.name, "count")) return .{ .delayed = .{ .after = h.hold, .reply = Script.ok } };
+        return h.cursor.answer(io, arena, request);
+    }
+};
+
+pub fn s17(job: *Job) Job.Error!void {
+    const io = job.io;
+    const hold = job.ms(2000);
+    var held_handler: Held = .{ .cursor = .{ .ns = database ++ ".s17", .id = 17, .batches = &.{ docs[0..1], docs[1..2] } }, .hold = hold };
+    var stage: Job.Stage = undefined;
+    const client = try job.scripted(&stage, held_handler.handler(), .{});
+    defer job.end();
+    const script = &stage.script;
+    const count_s17 = bson.literal(.{ .count = "s17" });
+    const find = bson.literal(.{ .find = "s17" });
+    var cursor = try open(job, client, find, .{});
+    defer cursor.deinit(io);
+    _ = try job.need(cursor.next(io, .of(.root)), "next");
+
+    var callers: [4]Job.Caller = undefined;
+    var begun: usize = 0;
+    defer for (callers[0..begun]) |*caller| caller.deinit();
+    for (&callers) |*caller| {
+        caller.* = .init(job, client, .{ .database = database, .body = count_s17 });
+        try caller.begin();
+        begun += 1;
+    }
+    try job.awaitReceived(script, "count", 1);
+
+    const began = Job.now(io);
+    job.close();
+    const closed_in = began.durationTo(Job.now(io));
+    const bound = hold.nanoseconds + job.ms(3000).nanoseconds;
+    for (&callers, 0..) |*caller, i| {
+        caller.join();
+        if (caller.err) |err| switch (err) {
+            error.ConnectionLost, error.Closed => {},
+            else => return job.fail("call {d}, out at close, returned error.{t}; close cuts a call with ConnectionLost, and one waiting for a connection gets Closed", .{ i, err }),
+        };
+        const took = began.durationTo(caller.ended);
+        try job.expect(took.nanoseconds <= bound, "call {d}, out at close, returned {d} ms after close began", .{ i, took.toMilliseconds() });
+    }
+    try job.expect(closed_in.nanoseconds <= bound, "close took {d} ms with calls out", .{closed_in.toMilliseconds()});
+    try expectKills(job, script, 1, "close of the client with a cursor open");
+    try job.expectSent((try job.received(script, "killCursors", 0)).body, bson.literal(.{ .killCursors = "s17", .cursors = .{@as(i64, 17)} }), database, &.{}, "killCursors of close");
+
+    try job.expectError(client.runCommand(io, .of(.root), .{ .database = database, .body = count_s17 }, .{ .allocator = job.gpa }), error.Closed, "runCommand after close");
+    try job.expectError(client.openCursor(io, .of(.root), .{ .database = database, .body = find }, .{}), error.Closed, "openCursor after close");
+    try job.expectError(client.write(io, .of(.root), .{ .database = database, .kind = .insert, .body = bson.literal(.{ .insert = "s17" }), .items = docs[0..1] }, .{ .allocator = job.gpa }), error.Closed, "write after close");
+    try job.expectError(cursor.next(io, .of(.root)), error.Closed, "next of a cursor after close of the client");
+
+    const received = script.received(io);
+    const again = Job.now(io);
+    job.close();
+    const twice = again.durationTo(Job.now(io));
+    try job.expect(twice.nanoseconds <= job.ms(1000).nanoseconds, "a second close took {d} ms", .{twice.toMilliseconds()});
+    cursor.close(io);
+    try job.expect(script.received(io) == received, "a second close, or close of a cursor after close of the client, sent {d} command(s)", .{script.received(io) - received});
+}
+
+const s18_comment = "the comment of S18";
+
+pub fn s18(job: *Job) Job.Error!void {
+    const io = job.io;
+    var mixed: Mixed = .{
+        .cursor = .{ .ns = database ++ ".s18", .id = 18, .batches = &.{ docs[0..1], docs[1..2], docs[2..3] } },
+        .write = .{ .refuse = &.{.{ .index = 1 }} },
+        .distinct = bad_value,
+    };
+    var stage: Job.Stage = undefined;
+    const client = try job.scripted(&stage, mixed.handler(), .{});
+    defer job.end();
+    const script = &stage.script;
+    var arena: std.heap.ArenaAllocator = .init(job.gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var fences: [3]Job.Fence = @splat(.{ .parent = a });
+
+    // A reply: one allocation of the call's allocator.
+    const reply = try job.need(client.runCommand(io, .of(.root), .{ .database = database, .body = bson.literal(.{ .count = "s18" }) }, .{ .allocator = fences[0].allocator() }), "runCommand");
+    fences[0].close();
+    try job.expect(fences[0].held() == 1, "the reply is {d} allocation(s) of options.allocator, not one", .{fences[0].held()});
+    reply.deinit();
+    try job.expect(fences[0].held() == 0, "the reply's deinit left an allocation of options.allocator", .{});
+
+    // The result of a write, refused items among it: all of it from the
+    // call's allocator.
+    var items: [3]bson.RawDocument = undefined;
+    for (&items, docs[0..3]) |*item, doc| item.* = .{ .bytes = try a.dupe(u8, doc.bytes) };
+    var result = try job.need(client.write(io, .of(.root), .{ .database = database, .kind = .insert, .body = bson.literal(.{ .insert = "s18" }), .items = &items, .ordered = false }, .{ .allocator = fences[1].allocator() }), "write");
+    fences[1].close();
+    for (items) |item| @memset(@constCast(item.bytes), 0xAA);
+    try job.expect(result.write_errors.len == 1, "the write came back with {d} refused items, not 1", .{result.write_errors.len});
+    result.deinit(fences[1].allocator());
+    try job.expect(fences[1].held() == 0, "{d} allocation(s) of options.allocator were left after the result's deinit: a WriteResult is all from options.allocator", .{fences[1].held()});
+
+    // A cursor: its command, database and comment are the caller's, and may
+    // change once openCursor has returned.
+    const db = try a.dupe(u8, database);
+    const find = try a.dupe(u8, bson.literal(.{ .find = "s18" }).bytes);
+    const comment = try a.dupe(u8, s18_comment);
+    var cursor = try job.need(client.openCursor(io, .of(.root), .{ .database = db, .body = .{ .bytes = find } }, .{ .comment = .{ .string = comment }, .batch_size = 1 }), "openCursor");
+    defer cursor.deinit(io);
+    @memset(db, 'x');
+    @memset(find, 0xAA);
+    @memset(comment, '?');
+    var n: usize = 0;
+    while (try job.need(cursor.next(io, .of(.root)), "next")) |doc| : (n += 1) {
+        try job.expect(n < 3 and eql(u8, doc.bytes, docs[n].bytes), "document {d} of the cursor came changed", .{n});
+    }
+    try job.expect(n == 3, "the cursor gave {d} documents, not 3", .{n});
+    for (0..2) |i| {
+        const more = try job.received(script, "getMore", i);
+        const got = if (more.body.get("comment") catch null) |value| switch (value) {
+            .string => |text| text,
+            else => "",
+        } else "";
+        try job.expect(eql(u8, got, s18_comment), "getMore came with the comment \"{s}\": the driver kept the caller's comment instead of a copy", .{got});
+        try job.expect(eql(u8, more.database, database), "getMore came with $db \"{s}\": the driver kept the caller's database instead of the namespace of the cursor", .{more.database});
+    }
+
+    // failure_reply: from the call's allocator too.
+    var failure: ?bson.OwnedDocument = null;
+    try job.expectError(client.runCommand(io, .of(.root), .{ .database = database, .body = bson.literal(.{ .distinct = "s18", .key = "n" }) }, .{ .allocator = fences[2].allocator(), .failure_reply = &failure }), error.CommandFailed, "a command answered with ok: 0");
+    fences[2].close();
+    if (failure) |f| f.deinit() else return job.fail("failure_reply is null after CommandFailed", .{});
+    try job.expect(fences[2].held() == 0, "failure_reply is not one allocation of options.allocator", .{});
+
+    for (&fences, [_][]const u8{ "runCommand", "write", "runCommand of a failure" }) |*fence, what| {
+        try job.expect(fence.late() == 0, "{s} took memory of its options.allocator {d} time(s) after it returned", .{ what, fence.late() });
+    }
+}
+
+/// Closes and frees cursors, fails a command and closes the client, all in
+/// a task with a cancelation pending, and tells after each step whether
+/// the cancelation is still there.
+const Keeper = struct {
+    job: *Job,
+    client: Client,
+    closing: Cursor,
+    freeing: Cursor,
+    canceled: bool = false,
+    freed: bool = false,
+    kept: [4]?bool = @splat(null),
+
+    const steps = [_][]const u8{ "close of a cursor", "deinit of a cursor", "a command that failed", "close of the client" };
+
+    fn task(k: *Keeper) void {
+        const io = k.job.io;
+        // Waits until the check cancels the task.
+        if (io.sleep(.fromSeconds(3600), .awake)) |_| return else |_| {}
+        k.canceled = true;
+        for (0..steps.len) |i| {
+            io.recancel();
+            switch (i) {
+                0 => k.closing.close(io),
+                1 => {
+                    k.freeing.deinit(io);
+                    k.freed = true;
+                },
+                2 => if (k.client.runCommand(io, .of(.root), .{ .database = database, .body = bson.literal(.{ .distinct = "s20", .key = "n" }) }, .{ .allocator = k.job.gpa })) |reply| reply.deinit() else |_| {},
+                else => k.job.close(),
+            }
+            k.kept[i] = if (io.checkCancel()) |_| false else |_| true;
+            if (!k.kept[i].?) return;
+        }
+    }
+};
+
+pub fn s20(job: *Job) Job.Error!void {
+    const io = job.io;
+    var mixed: Mixed = .{ .cursor = .{ .ns = database ++ ".s20", .id = 20, .batches = &.{ docs[0..1], docs[1..2] } }, .distinct = bad_value };
+    var stage: Job.Stage = undefined;
+    const client = try job.scripted(&stage, mixed.handler(), .{});
+    defer job.end();
+    const find = bson.literal(.{ .find = "s20" });
+    const closing = try open(job, client, find, .{});
+    defer closing.deinit(io);
+    var keeper: Keeper = .{ .job = job, .client = client, .closing = closing, .freeing = try open(job, client, find, .{}) };
+    defer if (!keeper.freed) keeper.freeing.deinit(io);
+    _ = try job.need(closing.next(io, .of(.root)), "next");
+    _ = try job.need(keeper.freeing.next(io, .of(.root)), "next");
+    var task = io.concurrent(Keeper.task, .{&keeper}) catch |err| return job.fail("no task for the check: io.concurrent returned error.{t}", .{err});
+    task.cancel(io);
+    try job.expect(keeper.canceled, "the task of the check was not canceled", .{});
+    for (keeper.kept, Keeper.steps) |kept, step| {
+        const still = kept orelse break;
+        try job.expect(still, "{s} swallowed a cancelation of its task: io.checkCancel() after it saw none", .{step});
     }
 }
