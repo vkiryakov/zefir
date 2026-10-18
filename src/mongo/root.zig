@@ -8,8 +8,9 @@
 //!   Extended JSON for logs and test messages.
 //! - `mongo.Database` and `mongo.Collection` — the API of a database and
 //!   its collections, the same on every driver: insert, update, replace,
-//!   delete and `findOneAnd*`, with documents as raw BSON, built with
-//!   `bson.Builder`, or written from structs and literals.
+//!   delete, find and `findOneAnd*`, aggregate, count and distinct,
+//!   indexes, collections and any command, with documents as raw BSON,
+//!   built with `bson.Builder`, or written from structs and literals.
 //! - `mongo.Client` and `mongo.Cursor` — the contract between zefir and a
 //!   driver: a pointer and a table of functions, with the rules of the
 //!   calls checked once, here, for every driver.

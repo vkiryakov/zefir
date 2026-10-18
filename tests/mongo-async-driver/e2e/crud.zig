@@ -599,8 +599,8 @@ fn indexes(io: Io, db: mongo.Database) anyerror!void {
 
     try users.dropIndex(io, op(io), "by_tag", .{ .allocator = a });
     try expectIndexes(io, users, &.{ "_id_", "email_1", "age_-1_name_1", "created_1" });
-    // An index that is not there: older servers answer IndexNotFound (27),
-    // newer ones ok.
+    // An index that is not there: mongod 7.0 and 8.0 answer IndexNotFound
+    // (27), 9.0 ok.
     if (users.dropIndex(io, op(io), "by_tag", .{ .allocator = a, .diagnostics = &d })) |_| {} else |err| {
         try testing.expectEqual(error.CommandFailed, err);
         try testing.expectEqual(@as(i32, 27), d.server.?.code);

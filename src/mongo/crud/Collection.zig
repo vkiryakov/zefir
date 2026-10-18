@@ -23,8 +23,9 @@
 //! `bson.OwnedDocument` (from `bson.Builder`), or a struct or an anonymous
 //! literal that `bson.encode` writes, nulls as BSON null. They are
 //! borrowed until the operation returns. A list — the documents of
-//! `insertMany` — is a slice, an array or a tuple of them; `.{}` is the
-//! empty document, and the empty list where a list goes. A type that fits
+//! `insertMany`, a pipeline — is a slice, an array or a tuple of them;
+//! `.{}` is the empty document, and the empty list where a list goes:
+//! `find(.{})` finds all, `aggregate(.{})` runs no stage. A type that fits
 //! none of the forms stops the build with the name of the operation and
 //! the path of the field. Documents inside options, such as a collation,
 //! are `bson.RawDocument`s; `bson.literal` writes constant ones.
@@ -54,7 +55,9 @@
 //!
 //! Results come from `options.allocator`; free them with `deinit`. The
 //! scratch memory of a call, such as the documents a struct is written
-//! to, comes from it too and is freed before the call returns.
+//! to, comes from it too and is freed before the call returns. A cursor,
+//! which `find`, `aggregate` and `listIndexes` give, belongs to the
+//! driver: `deinit` it.
 
 const std = @import("std");
 const Io = std.Io;
