@@ -755,6 +755,35 @@ pub fn build(b: *std.Build) void {
         test_mongo.dependOn(&compile.step);
     }
 
+    // mongo compile errors of the collection API: documents of types that
+    // its operations cannot take. Each message names the operation, the
+    // argument and the field.
+    const mongo_crud_errors = b.createModule(.{
+        .root_source_file = b.path("src/mongo/tests/crud_errors.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+        .imports = &.{
+            .{ .name = "mongo", .module = mongo },
+        },
+    });
+    for ([_][2][]const u8{
+        .{ "insertOne of a number", "mongo.Collection.insertOne: document: a document is a struct with named fields, such as .{ .name = name }, or a bson.RawDocument; got u32" },
+        .{ "insertOne of a struct with a u64", "mongo.Collection.insertOne: document: field 'n' is u64, which BSON has no type for: its integers are signed; use i64" },
+        .{ "insertOne of a tuple", "mongo.Collection.insertOne: document: a tuple is an array, not a document: give its values names, such as .{ .a = x }" },
+        .{ "insertMany of one document", "mongo.Collection.insertMany: documents: a list of documents is a slice, an array or a tuple of them; got crud_errors.User" },
+        .{ "insertMany with a pointer in a document of a tuple", "mongo.Collection.insertMany: documents[1]: field 'owner' is *const crud_errors.User: pass the value itself, not a pointer to it" },
+        .{ "insertMany of a slice of numbers", "mongo.Collection.insertMany: documents[]: a document is a struct with named fields, such as .{ .name = name }, or a bson.RawDocument; got u32" },
+    }, 0..) |case, i| {
+        const compile = b.addTest(.{
+            .name = b.fmt("mongo-crud-error-{d}", .{i}),
+            .root_module = mongo_crud_errors,
+            .filters = &.{case[0]},
+        });
+        compile.expect_errors = .{ .contains = case[1] };
+        test_mongo.dependOn(&compile.step);
+    }
+
     // rpc-nats panic program: a second conn() of one ZefirNats panics in
     // safe builds, since one adapter serves one transport. Like the rpc
     // ones above, it ends in its own panic handler with code 3 and gets
