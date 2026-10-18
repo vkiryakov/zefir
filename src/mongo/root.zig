@@ -9,9 +9,16 @@
 //! - `mongo.Error`, `mongo.outcome`, `mongo.Diagnostics` — what can go
 //!   wrong in a call, whether the server may have run it, and the details
 //!   for logs.
+//! - The arguments and results of the driver's calls:
+//!   `mongo.OperationContext`, `mongo.Command`, `mongo.WriteRequest`, their
+//!   options, `mongo.WriteResult`, and `mongo.Capabilities` with the
+//!   revision of the contract, `mongo.contract_revision`.
 
 const std = @import("std");
 const errors = @import("contract/errors.zig");
+const requests = @import("contract/requests.zig");
+const results = @import("contract/results.zig");
+const capabilities = @import("contract/capabilities.zig");
 
 pub const bson = @import("bson.zig");
 
@@ -22,8 +29,26 @@ pub const Diagnostics = errors.Diagnostics;
 pub const ServerError = errors.ServerError;
 pub const Label = errors.Label;
 
+pub const OperationContext = requests.OperationContext;
+pub const Tracing = requests.Tracing;
+pub const Command = requests.Command;
+pub const CommandOptions = requests.CommandOptions;
+pub const WriteKind = requests.WriteKind;
+pub const WriteRequest = requests.WriteRequest;
+pub const WriteOptions = requests.WriteOptions;
+pub const CursorOptions = requests.CursorOptions;
+pub const WriteResult = results.WriteResult;
+pub const Upserted = results.Upserted;
+pub const WriteError = results.WriteError;
+pub const WriteConcernError = results.WriteConcernError;
+pub const Capabilities = capabilities.Capabilities;
+pub const ServerInfo = capabilities.ServerInfo;
+pub const ServerKind = capabilities.ServerKind;
+pub const contract_revision = capabilities.contract_revision;
+
 test {
     std.testing.refAllDecls(@This());
     _ = bson;
     _ = @import("contract/errors_tests.zig");
+    _ = @import("contract/types_tests.zig");
 }
