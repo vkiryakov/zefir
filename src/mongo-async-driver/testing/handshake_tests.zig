@@ -225,3 +225,169 @@ fn unanswered(io: Io) !void {
     var buffer: [128]u8 = undefined;
     try testing.expectEqualStrings(try std.fmt.bufPrint(&buffer, "cannot connect to {f}: ConnectionRefused", .{gone}), d.message());
 }
+
+const Client = @import("../Client.zig");
+const ping: mongo.Command = .{ .database = "admin", .body = bson.literal(.{ .ping = 1 }) };
+
+/// Answers `breakme` by closing the connection and `nope` with ok 0, code
+/// 59; anything else with `{ok: 1.0}`.
+const Commands = struct {
+    pub fn answer(c: *Commands, io: Io, arena: std.mem.Allocator, request: *const Script.Request) Script.HandlerError!Script.Answer {
+        _ = .{ c, io };
+        if (std.mem.eql(u8, request.name, "breakme")) return .close_connection;
+        if (std.mem.eql(u8, request.name, "nope")) return .{ .reply = Script.failure(arena, .{ .code = 59, .code_name = "CommandNotFound", .errmsg = "no such command: 'nope'" }) catch return error.OutOfMemory };
+        return .{ .reply = Script.ok };
+    }
+};
+
+/// A scripted server on loopback, served until `stop`.
+const Served = struct {
+    commands: Commands = .{},
+    script: Script,
+    listener: net.Server,
+    server: Io.Future(Io.Cancelable!void),
+    buffer: [64]u8 = undefined,
+
+    /// It points into itself: start it in place.
+    fn start(s: *Served, io: Io) !void {
+        s.* = .{ .script = undefined, .listener = undefined, .server = undefined };
+        s.script = .init(testing.allocator, .init(&s.commands));
+        errdefer s.script.deinit();
+        s.listener = try FakeServer.listen(io);
+        errdefer s.listener.deinit(io);
+        s.server = try io.concurrent(FakeServer.serve, .{ io, &s.listener, &s.script });
+    }
+
+    fn uri(s: *Served) ![]const u8 {
+        return FakeServer.uri(&s.listener, &s.buffer);
+    }
+
+    fn stop(s: *Served, io: Io) void {
+        s.server.cancel(io) catch {};
+        s.listener.deinit(io);
+        s.script.deinit();
+    }
+};
+
+test "connect opens the first connection, ping runs on it, and after close every call is Closed" {
+    try within5s(testing.io, connectAndPing, .{testing.io});
+}
+
+fn connectAndPing(io: Io) !void {
+    var served: Served = undefined;
+    try served.start(io);
+    defer served.stop(io);
+    var driver: Client = try .init(testing.allocator, io, .{ .uri = try served.uri() });
+    defer driver.deinit();
+    const c = driver.client();
+    var d: Diagnostics = .{};
+    try testing.expectError(error.Unavailable, c.runCommand(io, .of(.root), ping, .{ .allocator = testing.allocator, .diagnostics = &d }));
+    try testing.expectEqualStrings("connect() has not succeeded", d.message());
+    try testing.expect(c.capabilities().server == null);
+
+    try driver.connect(io, .root, &d);
+    try testing.expectEqual(@as(usize, 1), driver.stats().connections);
+    try testing.expectEqual(@as(usize, 1), driver.stats().idle);
+    const reply = try c.runCommand(io, .of(.root), ping, .{ .allocator = testing.allocator });
+    defer reply.deinit();
+    try testing.expectEqual(@as(f64, 1), try (try reply.raw().get("ok")).?.asF64());
+    const caps = c.capabilities();
+    try testing.expectEqualStrings("zefir-mongo-async-driver", caps.name);
+    try testing.expect(caps.commands and !caps.cursors and !caps.batched_writes);
+    try testing.expectEqual(@as(i32, 21), caps.server.?.max_wire_version);
+    // A second connect keeps the connection it has.
+    try driver.connect(io, .root, null);
+    try testing.expectEqual(@as(u32, 1), served.script.accepted.load(.acquire));
+
+    driver.close(io);
+    driver.close(io);
+    try testing.expectEqual(@as(usize, 0), driver.stats().connections);
+    try testing.expectError(error.Closed, c.runCommand(io, .of(.root), ping, .{ .allocator = testing.allocator, .diagnostics = &d }));
+    try testing.expectError(error.Closed, driver.connect(io, .root, &d));
+}
+
+test "connect may be tried again after it failed" {
+    try within5s(testing.io, connectAgain, .{testing.io});
+}
+
+fn connectAgain(io: Io) !void {
+    var served: Served = undefined;
+    try served.start(io);
+    defer served.stop(io);
+    served.script.refuseConnections();
+    var driver: Client = try .init(testing.allocator, io, .{ .uri = try served.uri() });
+    defer driver.deinit();
+    var d: Diagnostics = .{};
+    try testing.expectError(error.Unavailable, driver.connect(io, .root, &d));
+    served.script.acceptConnections();
+    try driver.connect(io, .root, &d);
+    const reply = try driver.client().runCommand(io, .of(.root), ping, .{ .allocator = testing.allocator });
+    reply.deinit();
+}
+
+test "the deadline of connect passing is DeadlineExceeded, and connectTimeoutMS passing is Unavailable" {
+    try within5s(testing.io, connectTimeouts, .{testing.io});
+}
+
+fn connectTimeouts(io: Io) !void {
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var buffer: [128]u8 = undefined;
+    var expected: [128]u8 = undefined;
+    {
+        var server = try io.concurrent(holdSilent, .{ io, &listener });
+        defer server.await(io) catch {};
+        var driver: Client = try .init(testing.allocator, io, .{ .uri = try FakeServer.uri(&listener, &buffer) });
+        defer driver.deinit();
+        var d: Diagnostics = .{};
+        const ctx = core.Context.root.withDeadline(.after(time.now(io), .fromMilliseconds(100)));
+        try testing.expectError(error.DeadlineExceeded, driver.connect(io, ctx, &d));
+        try testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "the deadline passed while the client connected to {f}", .{address(&listener)}), d.message());
+    }
+    var server = try io.concurrent(holdSilent, .{ io, &listener });
+    defer server.await(io) catch {};
+    const uri = try std.fmt.bufPrint(&buffer, "mongodb://127.0.0.1:{d}/?connectTimeoutMS=100", .{FakeServer.port(&listener)});
+    var driver: Client = try .init(testing.allocator, io, .{ .uri = uri });
+    defer driver.deinit();
+    var d: Diagnostics = .{};
+    try testing.expectError(error.Unavailable, driver.connect(io, .root, &d));
+    try testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "{f} did not answer within connectTimeoutMS (100 ms)", .{address(&listener)}), d.message());
+}
+
+test "a connection that broke is opened again by the next call, and ok 0 is CommandFailed with the reply" {
+    try within5s(testing.io, brokenAndFailed, .{testing.io});
+}
+
+fn brokenAndFailed(io: Io) !void {
+    var served: Served = undefined;
+    try served.start(io);
+    defer served.stop(io);
+    var driver: Client = try .init(testing.allocator, io, .{ .uri = try served.uri() });
+    defer driver.deinit();
+    try driver.connect(io, .root, null);
+    const c = driver.client();
+    var d: Diagnostics = .{};
+    const breakme: mongo.Command = .{ .database = "admin", .body = bson.literal(.{ .breakme = 1 }) };
+    try testing.expectError(error.ConnectionLost, c.runCommand(io, .of(.root), breakme, .{ .allocator = testing.allocator, .diagnostics = &d }));
+    try testing.expectEqual(@as(usize, 0), driver.stats().connections);
+    const reply = try c.runCommand(io, .of(.root), ping, .{ .allocator = testing.allocator });
+    reply.deinit();
+    try testing.expectEqual(@as(u32, 2), served.script.accepted.load(.acquire));
+
+    var failure: ?bson.OwnedDocument = null;
+    const nope: mongo.Command = .{ .database = "admin", .body = bson.literal(.{ .nope = 1 }) };
+    try testing.expectError(error.CommandFailed, c.runCommand(io, .of(.root), nope, .{ .allocator = testing.allocator, .diagnostics = &d, .failure_reply = &failure }));
+    defer failure.?.deinit();
+    try testing.expectEqual(@as(i32, 59), d.server.?.code);
+    try testing.expectEqualStrings("no such command: 'nope'", d.message());
+    // ok 0 leaves the connection as it was.
+    try testing.expectEqual(@as(usize, 1), driver.stats().connections);
+}
+
+test "init does no I/O, and a user in the connection string is Unsupported until the driver authenticates" {
+    var driver: Client = try .init(testing.allocator, testing.io, .{ .uri = "mongodb://127.0.0.1:1/?appName=orders" });
+    driver.deinit();
+    var d: Diagnostics = .{};
+    try testing.expectError(error.Unsupported, Client.init(testing.allocator, testing.io, .{ .uri = "mongodb://app:secret@127.0.0.1/app", .diagnostics = &d }));
+    try testing.expectEqualStrings("the connection string names a user, and this version of zefir-mongo-async-driver does not authenticate yet: connect to a mongod without --auth", d.message());
+}

@@ -59,16 +59,20 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // nats sends the package version in CONNECT; build.zig.zon is its only source.
-    const nats_options = b.addOptions();
-    nats_options.addOption([]const u8, "version", manifest.version);
+    // nats sends the package version in CONNECT, and the native MongoDB
+    // driver in hello; build.zig.zon is its only source. One module of the
+    // options serves both: two of the same content would be one file in two
+    // modules of the umbrella.
+    const version_options = b.addOptions();
+    version_options.addOption([]const u8, "version", manifest.version);
+    const build_options = version_options.createModule();
     const nats = b.addModule("zefir-nats", .{
         .root_source_file = b.path("src/nats/root.zig"),
         .target = target,
         .optimize = optimize,
         .sanitize_thread = tsan,
     });
-    nats.addOptions("build_options", nats_options);
+    nats.addImport("build_options", build_options);
 
     // nats only for its adapter, rpc_nats.ZefirNats: Zig compiles that file
     // only for an application that uses it.
@@ -120,10 +124,7 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // The native MongoDB driver of zefir-mongo. It sends the package
-    // version in hello, as nats does in CONNECT.
-    const mongo_driver_options = b.addOptions();
-    mongo_driver_options.addOption([]const u8, "version", manifest.version);
+    // The native MongoDB driver of zefir-mongo.
     const mongo_async_driver = b.addModule("zefir-mongo-async-driver", .{
         .root_source_file = b.path("src/mongo-async-driver/root.zig"),
         .target = target,
@@ -134,7 +135,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "core", .module = core },
         },
     });
-    mongo_async_driver.addOptions("build_options", mongo_driver_options);
+    mongo_async_driver.addImport("build_options", build_options);
 
     const http = b.addModule("zefir-http", .{
         .root_source_file = b.path("src/http/root.zig"),
@@ -334,7 +335,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = .Debug,
     });
-    panic_nats.addOptions("build_options", nats_options);
+    panic_nats.addOptions("build_options", version_options);
     const moved_client = b.addExecutable(.{
         .name = "nats-panic-moved-client",
         .root_module = b.createModule(.{

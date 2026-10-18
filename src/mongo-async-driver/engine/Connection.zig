@@ -117,7 +117,13 @@ pub fn exchange(conn: *Connection, request: Request, allocator: Allocator, deadl
 /// The error of an exchange whose stream failed.
 fn broken(conn: *Connection, d: ?*Diagnostics, phase: Diagnostics.Phase) mongo.Error {
     conn.usable = false;
-    const cause = conn.stream.err orelse return fail(d, phase, error.ConnectionLost, "the server at {f} closed the connection", .{conn.address});
+    // The end of the stream, or a reset: the server closed it.
+    const closed = if (conn.stream.err) |cause| cause == error.ConnectionResetByPeer else true;
+    if (closed) {
+        if (d) |x| x.set(phase, conn.stream.err, "the server at {f} closed the connection", .{conn.address});
+        return error.ConnectionLost;
+    }
+    const cause = conn.stream.err.?;
     switch (cause) {
         error.Timeout => return switch (phase) {
             .send => fail(d, phase, error.Timeout, "the deadline passed while the command went out", .{}),
