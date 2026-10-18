@@ -73,4 +73,5 @@ test {
     _ = @import("crud.zig");
     _ = @import("connect.zig");
     _ = @import("auth.zig");
+    _ = @import("pool.zig");
 }
