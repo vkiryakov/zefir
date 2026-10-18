@@ -1,5 +1,5 @@
-//! The end-to-end tests of zefir-mongo and of its native driver against
-//! real mongod servers, on zio. The servers are those of the profile `mongo` of docker-compose.yml
+//! The end-to-end tests of zefir-mongo against real mongod servers, on
+//! zio. The servers are those of the profile `mongo` of docker-compose.yml
 //! at the repository root.
 //!
 //!   zig build e2e     start the servers, run the tests

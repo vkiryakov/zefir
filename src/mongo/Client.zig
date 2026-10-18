@@ -1,20 +1,22 @@
-//! The native driver. `init` checks the options and does no I/O;
+//! `mongo.Client`: a client of one standalone mongod of MongoDB 7.0 or
+//! later, over plain TCP. `init` checks the options and does no I/O;
 //! `connect` opens the first connection under the caller's deadline, so a
-//! server of the wrong kind or a user it refuses shows at start; `client()`
-//! hands out the `mongo.Client` that the code above uses; `close` ends the
-//! work and `deinit` frees everything.
+//! server of the wrong kind or a user it refuses shows at start; the calls
+//! `runCommand`, `openCursor` and `write` go to the server; `close` ends
+//! the work and `deinit` frees everything. There is no TLS: the client
+//! belongs on a trusted network only.
 //!
 //! ```zig
-//! var driver: mongo.native.Client = try .init(gpa, io, .{ .uri = "mongodb://127.0.0.1:27017/app" });
-//! defer driver.deinit();
+//! var client: mongo.Client = try .init(gpa, io, .{ .uri = "mongodb://127.0.0.1:27017/app" });
+//! defer client.deinit();
 //! var diagnostics: mongo.Diagnostics = .{};
-//! driver.connect(io, ctx, &diagnostics) catch |err| {
+//! client.connect(io, ctx, &diagnostics) catch |err| {
 //!     log.err("mongo: {t}: {s}", .{ err, diagnostics.message() });
 //!     return err;
 //! };
-//! defer driver.close(io);
+//! defer client.close(io);
 //! var ids: mongo.bson.ObjectId.Generator = .init(io);
-//! const db: mongo.Database = .init(driver.client(), "app", &ids);
+//! const db: mongo.Database = .init(&client, "app", &ids);
 //! ```
 //!
 //! Calls come from any task. Each takes a connection of the pool for its
@@ -42,23 +44,73 @@
 //! them on any connection of the pool. One task at a time uses a cursor;
 //! `deinit` every cursor before the client.
 //!
+//! The rules of the calls:
+//!
+//! 1. Concurrency. Any number of tasks and threads call a client at once;
+//!    it guards what they share with `std.Io` primitives, since a lock of
+//!    the OS would stop a whole thread of an event loop. A cursor serves
+//!    one task at a time.
+//! 2. `io` is the instance of `init`, and every wait goes through it.
+//! 3. Deadline. With less than 1 ms, or less than the shortest round trip
+//!    to the server, left before sending, the call is
+//!    `error.DeadlineExceeded`. Otherwise the client adds `maxTimeMS` (to
+//!    every command but `getMore` and `killCursors`) and waits for the
+//!    reply no longer than the deadline; after sending, the error is
+//!    `error.Timeout`. Without a deadline of the context or of `timeoutMS`
+//!    no `maxTimeMS` goes out, and only the client's own timeouts bound
+//!    the wait.
+//! 4. Cancellation. The token is no alarm: the client checks it before the
+//!    call, before each send and after the reply. Canceling the task ends
+//!    a wait: `error.Cancelled` before sending, `error.Interrupted` after,
+//!    and the task keeps its cancelation. A cancelation or a timeout in
+//!    the middle of an exchange closes that connection.
+//! 5. Memory. The request and its slices are borrowed until the call
+//!    returns. The reply, the write result, `failure_reply` and `partial`
+//!    come from `options.allocator`, during the call only; the
+//!    `failure_reply` of `openCursor`, whose options have no allocator,
+//!    from the client's. After it the client holds no reference to the
+//!    caller's memory.
+//! 6. Errors. Only `mongo.Error`. `ok: 0` is `CommandFailed`, code 50
+//!    anywhere is `Timeout`, a write stopped at batch k > 1 is
+//!    `IncompleteWrite`. `writeErrors` and `writeConcernError` are soft:
+//!    they are in the `WriteResult`. `WriteFailed` is the collection API's.
+//! 7. The client adds `$db` to every command, `maxTimeMS` by rule 3, and
+//!    `ordered` to writes; nothing else.
+//! 8. No retries: the client sends each command and each batch at most
+//!    once.
+//! 9. Writes follow `mongo.WriteRequest`: batches by the limits of the
+//!    connection they go through, items in a section of kind 1, replies
+//!    merged as the Bulk API spec merges them. Cursors follow
+//!    `mongo.Cursor`.
+//!
+//! Before an exchange the client checks the request — a database name of
+//! 1–63 bytes without `/\. "$` or NUL; a command whose first key names
+//! it and does not start with `$`; none of the client's fields in it, nor
+//! `maxTimeMS` under a deadline; a write named after its kind, without
+//! `documents`, `updates`, `deletes` and `ordered`, with items — which is
+//! `error.InvalidArgument`; then the context, `error.DeadlineExceeded`
+//! before `error.Cancelled`. After the reply it checks the token again:
+//! canceled meanwhile, the call is `error.Interrupted`, its reply freed,
+//! its cursor closed, its write result in `partial`. `Cursor.next` has no
+//! such check: a batch of `getMore` has moved the cursor on the server
+//! already. Each call starts the caller's `Diagnostics` afresh.
+//!
 //! After `connect` the client must stay where it is, and every call comes
 //! on the `io` of `init`: in safe builds, a call on a moved copy of the
 //! client or on another `std.Io`, a cursor used by two tasks at once, and
 //! `deinit` with cursors left panic.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const core = @import("core");
 const mongo = @import("root.zig");
 const bson = mongo.bson;
-const wire = mongo.wire;
 const Diagnostics = mongo.Diagnostics;
 const OperationContext = mongo.OperationContext;
-const Options = @import("Options.zig");
+const Cursor = @import("Cursor.zig");
 const OwnedOptions = @import("OwnedOptions.zig");
-const Stats = @import("Stats.zig");
 const Connection = @import("engine/Connection.zig");
 const Pool = @import("engine/Pool.zig");
 const command_ = @import("engine/command.zig");
@@ -81,8 +133,6 @@ metadata: bson.OwnedDocument,
 /// The keys of SCRAM, so that PBKDF2 runs for the first connection only.
 keys: KeyCache = .{},
 pool: Pool,
-/// What the latest hello said, for `capabilities`, which takes no `io`.
-server: Server = .{},
 /// The round trips of hello on new connections, for `maxTimeMS`.
 round_trips: time.RoundTrips = .{},
 /// The cursors, which `close` kills while the server holds them.
@@ -94,6 +144,14 @@ closed: Io.Event = .unset,
 /// of the client somewhere else panics. Atomic: any task may call while
 /// another connects.
 home: if (std.debug.runtime_safety) std.atomic.Value(usize) else void = if (std.debug.runtime_safety) .init(0) else {},
+
+/// The options of `init`.
+pub const Options = @import("Options.zig");
+/// What `stats` returns.
+pub const Stats = @import("Stats.zig");
+/// The connection string as `init` reads it, and what each of its options
+/// does.
+pub const Uri = @import("uri.zig").Uri;
 
 pub const InitError = error{ InvalidArgument, Unsupported, OutOfMemory };
 
@@ -138,12 +196,6 @@ pub fn deinit(self: *Client) void {
     self.* = undefined;
 }
 
-/// The handle of the contract, for `mongo.Database` and the code above.
-pub fn client(self: *Client) mongo.Client {
-    self.checkHome();
-    return .init(self);
-}
-
 /// Opens the first connection, hello and authentication included, under
 /// the deadline of `ctx`. Until it succeeds, calls are
 /// `error.Unavailable`; it may be called again after a failure, and does
@@ -161,7 +213,7 @@ pub fn connect(self: *Client, io: Io, ctx: core.Context, diagnostics: ?*Diagnost
     if (std.debug.runtime_safety) self.home.store(@intFromPtr(self), .monotonic);
 }
 
-/// Ends the client's work, in the order of the contract: new calls, and
+/// Ends the client's work, in this order: new calls, and
 /// those waiting for a connection, get `error.Closed`; connections being
 /// opened stop; the calls in flight get up to `close_timeout` to end, and
 /// after it their exchanges are cut (`error.ConnectionLost`); the cursors
@@ -198,32 +250,63 @@ pub fn stats(self: *Client) Stats {
     };
 }
 
-pub fn capabilities(self: *Client) mongo.Capabilities {
-    self.checkHome();
-    return .{
-        .revision = 1,
-        .name = handshake.driver_name,
-        .commands = true,
-        .cursors = true,
-        .aggregation = true,
-        .batched_writes = true,
-        .server = self.server.load(),
-    };
+/// Runs `command` and returns the server's reply, from
+/// `options.allocator`; `deinit` it.
+///
+/// ```zig
+/// const reply = try client.runCommand(io, .of(ctx), .{ .database = "app", .body = bson.literal(.{ .ping = 1 }) }, .{ .allocator = arena });
+/// ```
+pub fn runCommand(self: *Client, io: Io, op: OperationContext, command: mongo.Command, options: mongo.CommandOptions) mongo.Error!bson.OwnedDocument {
+    self.checkUse(io);
+    const d = options.diagnostics;
+    if (d) |x| x.* = .{};
+    try checkCommand(&command, op, d);
+    try checkContext(io, op, d);
+    const reply = try command_.run(self.runner(), io, op, &command, options);
+    if (op.ctx.isCancelled()) {
+        reply.deinit();
+        return interrupted(d);
+    }
+    return reply;
 }
 
-pub fn runCommand(self: *Client, io: Io, op: OperationContext, command: *const mongo.Command, options: mongo.CommandOptions) mongo.Error!bson.OwnedDocument {
+/// Runs a command that answers with a cursor, such as `find` or
+/// `aggregate`, and returns the cursor with its first batch; `deinit` it.
+///
+/// ```zig
+/// var cursor = try client.openCursor(io, .of(ctx), .{ .database = "app", .body = find }, .{ .batch_size = 100 });
+/// defer cursor.deinit(io);
+/// while (try cursor.next(io, .of(ctx))) |doc| try handle(doc);
+/// ```
+pub fn openCursor(self: *Client, io: Io, op: OperationContext, command: mongo.Command, options: mongo.CursorOptions) mongo.Error!Cursor {
     self.checkUse(io);
-    return command_.run(self.runner(), io, op, command, options);
+    const d = options.diagnostics;
+    if (d) |x| x.* = .{};
+    try checkCommand(&command, op, d);
+    try checkContext(io, op, d);
+    const cursor: Cursor = .{ .state = try cursor_.open(self.runner(), io, op, &command, options) };
+    if (op.ctx.isCancelled()) {
+        // deinit sends killCursors when the server holds the cursor.
+        cursor.deinit(io);
+        return interrupted(d);
+    }
+    return cursor;
 }
 
-pub fn openCursor(self: *Client, io: Io, op: OperationContext, command: *const mongo.Command, options: mongo.CursorOptions) mongo.Error!mongo.Cursor {
+/// Sends the items of `request` in batches and returns their merged
+/// result, from `options.allocator`; `deinit` it with that allocator.
+pub fn write(self: *Client, io: Io, op: OperationContext, request: mongo.WriteRequest, options: mongo.WriteOptions) mongo.Error!mongo.WriteResult {
     self.checkUse(io);
-    return .init(try cursor_.open(self.runner(), io, op, command, options));
-}
-
-pub fn write(self: *Client, io: Io, op: OperationContext, request: *const mongo.WriteRequest, options: mongo.WriteOptions) mongo.Error!mongo.WriteResult {
-    self.checkUse(io);
-    return write_.run(self.runner(), io, op, request, options);
+    const d = options.diagnostics;
+    if (d) |x| x.* = .{};
+    try checkWrite(&request, op, d);
+    try checkContext(io, op, d);
+    var result = try write_.run(self.runner(), io, op, &request, options);
+    if (op.ctx.isCancelled()) {
+        if (options.partial) |partial| partial.* = result else result.deinit(options.allocator);
+        return interrupted(d);
+    }
+    return result;
 }
 
 /// In safe builds: a call on a moved copy of the client, or on another
@@ -333,7 +416,6 @@ fn open(self: *Client, io: Io, call: Pool.Limits, attempt: *connect_.Attempt, d:
             return error.Unavailable;
         },
     };
-    self.server.store(conn.hello);
     if (conn.rtt) |rtt| self.round_trips.add(io, rtt);
     return conn;
 }
@@ -351,31 +433,85 @@ fn fail(d: ?*Diagnostics, phase: ?Diagnostics.Phase, err: mongo.Error, comptime 
     return err;
 }
 
-/// What the latest hello said, in atomics: `capabilities` reads it from
-/// any thread without `io`.
-const Server = struct {
-    known: std.atomic.Value(bool) = .init(false),
-    max_wire_version: std.atomic.Value(i32) = .init(0),
-    max_bson_object_size: std.atomic.Value(u32) = .init(0),
-    max_message_size_bytes: std.atomic.Value(u32) = .init(0),
-    max_write_batch_size: std.atomic.Value(u32) = .init(0),
+/// The fields that only the client writes into a command: `$db` always,
+/// the rest with the sessions and read preferences of later releases.
+const driver_fields = [_][]const u8{ "$db", "$readPreference", "lsid", "txnNumber", "$clusterTime", "autocommit", "startTransaction" };
 
-    fn store(s: *Server, hello: wire.Hello) void {
-        s.max_wire_version.store(hello.max_wire_version, .monotonic);
-        s.max_bson_object_size.store(hello.max_bson_object_size, .monotonic);
-        s.max_message_size_bytes.store(hello.max_message_size_bytes, .monotonic);
-        s.max_write_batch_size.store(hello.max_write_batch_size, .monotonic);
-        s.known.store(true, .release);
-    }
+/// The fields that the client writes into a write from its request.
+const write_fields = [_][]const u8{ "documents", "updates", "deletes", "ordered" };
 
-    fn load(s: *const Server) ?mongo.ServerInfo {
-        if (!s.known.load(.acquire)) return null;
-        return .{
-            .kind = .standalone,
-            .max_wire_version = s.max_wire_version.load(.monotonic),
-            .max_bson_object_size = s.max_bson_object_size.load(.monotonic),
-            .max_message_size_bytes = s.max_message_size_bytes.load(.monotonic),
-            .max_write_batch_size = s.max_write_batch_size.load(.monotonic),
-        };
+/// The rules of a command, before anything else of a call: a broken one is
+/// `error.InvalidArgument`, and nothing goes out.
+fn checkCommand(command: *const mongo.Command, op: OperationContext, d: ?*Diagnostics) mongo.Error!void {
+    try checkDatabase(command.database, d);
+    _ = try checkBody(command.body, op, &.{}, d);
+}
+
+fn checkWrite(request: *const mongo.WriteRequest, op: OperationContext, d: ?*Diagnostics) mongo.Error!void {
+    try checkDatabase(request.database, d);
+    const name = try checkBody(request.body, op, &write_fields, d);
+    const kind = request.kind.command();
+    if (!std.mem.eql(u8, name, kind)) return invalid(d, "a write of kind {s} is the command {s}, but its body starts with '{s}'", .{ kind, kind, name });
+    if (request.items.len == 0) return invalid(d, "the write has no items: it needs at least one", .{});
+    if (builtin.mode == .debug) for (request.items, 0..) |item, i| {
+        item.validate() catch return invalid(d, "item {d} of the write is not valid BSON", .{i});
+    };
+}
+
+/// The caller's context: `DeadlineExceeded` with less than 1 ms left, else
+/// `Cancelled` when its token is canceled. The deadline comes first, as
+/// in rpc: a server cancels the token of a call at its deadline.
+fn checkContext(io: Io, op: OperationContext, d: ?*Diagnostics) mongo.Error!void {
+    if (op.ctx.remaining(time.now(io))) |left| {
+        if (left.nanoseconds < std.time.ns_per_ms) return fail(d, null, error.DeadlineExceeded, "less than 1 ms was left of the deadline before the call", .{});
     }
-};
+    if (op.ctx.isCancelled()) return fail(d, null, error.Cancelled, "the token was canceled before the call", .{});
+}
+
+/// After a reply: a token canceled while the call was out.
+fn interrupted(d: ?*Diagnostics) mongo.Error {
+    return fail(d, null, error.Interrupted, "the token was canceled while the call was out; its outcome is dropped", .{});
+}
+
+/// A database name: 1 to 63 bytes, without NUL and without any of
+/// `/\. "$`.
+fn checkDatabase(name: []const u8, d: ?*Diagnostics) mongo.Error!void {
+    if (name.len == 0 or name.len > 63) return invalid(d, "a database name is 1 to 63 bytes long; this one is {d}", .{name.len});
+    if (std.mem.findAny(u8, name, "\x00/\\. \"$")) |at| {
+        return invalid(d, "a database name holds none of / \\ . \" $, a space or NUL; '{s}' holds byte {d}", .{ name, name[at] });
+    }
+}
+
+/// Checks the top level of `body` and returns the command's name, its
+/// first key. In Debug it validates the whole body too.
+fn checkBody(body: bson.RawDocument, op: OperationContext, extra: []const []const u8, d: ?*Diagnostics) mongo.Error![]const u8 {
+    var it = body.iterator();
+    const first = (it.next() catch return notBson(d)) orelse
+        return invalid(d, "the command is empty: its first key is its name", .{});
+    if (first.key.len == 0 or first.key[0] == '$') {
+        return invalid(d, "the first key of a command is its name, which is not empty and does not start with '$'; got '{s}'", .{first.key});
+    }
+    var element = first;
+    while (true) {
+        for (driver_fields) |field| {
+            if (std.mem.eql(u8, element.key, field)) return invalid(d, "the command holds '{s}', which only the driver writes", .{field});
+        }
+        for (extra) |field| {
+            if (std.mem.eql(u8, element.key, field)) return invalid(d, "the body of a write holds '{s}', which the driver writes from the request", .{field});
+        }
+        if (op.ctx.deadline != null and std.mem.eql(u8, element.key, "maxTimeMS")) {
+            return invalid(d, "the command holds maxTimeMS and the call has a deadline, from which the driver writes it: drop one of the two", .{});
+        }
+        element = (it.next() catch return notBson(d)) orelse break;
+    }
+    if (builtin.mode == .debug) body.validate() catch return notBson(d);
+    return first.key;
+}
+
+fn invalid(d: ?*Diagnostics, comptime fmt: []const u8, args: anytype) mongo.Error {
+    return fail(d, null, error.InvalidArgument, fmt, args);
+}
+
+fn notBson(d: ?*Diagnostics) mongo.Error {
+    return invalid(d, "the command is not valid BSON", .{});
+}

@@ -1,6 +1,5 @@
-//! `mongo.Collection`: a collection of MongoDB and its operations, written
-//! once over `mongo.Client`, so the same on every driver. `Database`
-//! gives it: `db.collection("users")`.
+//! `mongo.Collection`: a collection of MongoDB and its operations, over
+//! `mongo.Client`. `Database` gives it: `db.collection("users")`.
 //!
 //! ```zig
 //! const User = struct {
@@ -14,7 +13,7 @@
 //! ```
 //!
 //! Each operation takes `io` and the caller's `mongo.OperationContext`,
-//! as the contract does, and makes one call of the contract. No operation
+//! as the client does, and makes one call of the client. No operation
 //! retries. The name is checked before each one: an empty name, or one
 //! with `$` or NUL, is `error.InvalidArgument`, and nothing is sent.
 //!
@@ -38,8 +37,8 @@
 //! server refused or whose write concern failed, is `error.WriteFailed`:
 //! the first error is in `mongo.Diagnostics`, and the whole result, with
 //! the errors by their index in the whole list, goes to `options.partial`.
-//! An error of the contract, `IncompleteWrite` among them, passes as it
-//! is, and `partial` gets what is known:
+//! An error of the client, `IncompleteWrite` among them, passes as it is,
+//! and `partial` gets what is known:
 //!
 //! ```zig
 //! var partial: mongo.Collection.InsertManyResult = .{};
@@ -56,8 +55,8 @@
 //! Results come from `options.allocator`; free them with `deinit`. The
 //! scratch memory of a call, such as the documents a struct is written
 //! to, comes from it too and is freed before the call returns. A cursor,
-//! which `find`, `aggregate` and `listIndexes` give, belongs to the
-//! driver: `deinit` it.
+//! which `find`, `aggregate` and `listIndexes` give, holds its batches in
+//! the memory of the client: `deinit` it.
 
 const std = @import("std");
 const Io = std.Io;
@@ -65,8 +64,8 @@ const Allocator = std.mem.Allocator;
 const bson = @import("../bson.zig");
 const errors = @import("../errors.zig");
 const requests = @import("../requests.zig");
-const contract_results = @import("../results.zig");
-const Cursor = @import("../contract/Cursor.zig");
+const client_results = @import("../results.zig");
+const Cursor = @import("../Cursor.zig");
 const Database = @import("Database.zig");
 const document = @import("document.zig");
 const id = @import("id.zig");
@@ -74,7 +73,6 @@ const index = @import("index.zig");
 const options_ = @import("options.zig");
 const results = @import("results.zig");
 const commands = @import("command.zig");
-const cursors = @import("cursors.zig");
 const Writer = commands.Writer;
 const argument = commands.argument;
 const unwritten = commands.unwritten;
@@ -84,7 +82,7 @@ const violation = commands.violation;
 const Error = errors.Error;
 const Diagnostics = errors.Diagnostics;
 const OperationContext = requests.OperationContext;
-const WriteResult = contract_results.WriteResult;
+const WriteResult = client_results.WriteResult;
 const Collection = @This();
 
 db: Database,
@@ -136,7 +134,7 @@ pub fn insertOne(c: Collection, io: Io, op: OperationContext, doc: anytype, opti
     }, InsertOneResult, options.partial, items[0], results.ofInsertOne);
 }
 
-/// Inserts the documents of the list `docs`, in batches that the driver
+/// Inserts the documents of the list `docs`, in batches that the client
 /// cuts by the server's limits. Each document without `_id` gets an
 /// ObjectId first; the result reports the `_id` of each, by its index in
 /// the list. An empty list is `error.InvalidArgument`.
@@ -721,10 +719,10 @@ pub fn listIndexes(c: Collection, io: Io, op: OperationContext, options: ListInd
     if (options.comment) |value| try w.value("comment", value, "the comment");
     const body = try w.finish();
     // The code of the server's error tells a missing collection, so the
-    // call needs diagnostics; the driver keeps them for the getMores of
-    // the cursor, so they live with it when the caller passed none.
-    const own: ?*cursors.WithDiagnostics = if (options.diagnostics == null) try .create(options.allocator) else null;
-    const diagnostics = options.diagnostics orelse &own.?.diagnostics;
+    // call needs diagnostics; the cursor keeps the caller's for the errors
+    // of its getMores, and none when the caller passed none.
+    var own: Diagnostics = .{};
+    const diagnostics = options.diagnostics orelse &own;
     const cursor = c.db.client.openCursor(io, op, .{ .database = c.db.name, .body = body }, .{
         .batch_size = options.batch_size,
         .comment = options.comment,
@@ -732,16 +730,17 @@ pub fn listIndexes(c: Collection, io: Io, op: OperationContext, options: ListInd
         .failure_reply = options.failure_reply,
     }) catch |err| {
         const missing = err == error.CommandFailed and diagnostics.server != null and diagnostics.server.?.code == 26;
-        if (own) |o| o.destroy();
         if (!missing) return err;
-        if (options.diagnostics) |d| d.* = .{};
+        diagnostics.* = .{};
         if (options.failure_reply) |slot| if (slot.*) |doc| {
             doc.deinit();
             slot.* = null;
         };
-        return cursors.empty();
+        // No documents, and nothing on the server to end.
+        return .{ .state = null };
     };
-    return if (own) |o| o.wrap(cursor) else cursor;
+    cursor.state.?.diagnostics = options.diagnostics;
+    return cursor;
 }
 
 /// Drops the index `name`: `dropIndexes` with its name. `"*"`, which
@@ -925,14 +924,14 @@ const Inserts = struct {
     }
 };
 
-/// What the parts of a write share with the contract's call.
+/// What the parts of a write share with the client's call.
 const WriteCommon = struct {
     allocator: Allocator,
     diagnostics: ?*Diagnostics,
     failure_reply: ?*?bson.OwnedDocument,
 };
 
-/// A write of an operation, as it goes to the contract.
+/// A write of an operation, as it goes to the client.
 const Write = struct {
     kind: requests.WriteKind,
     /// The command without its items.
@@ -945,11 +944,11 @@ const Write = struct {
 /// `make(allocator, merged, context)`, which takes it over. A write that
 /// ran to its end with writeErrors or a writeConcernError is
 /// `error.WriteFailed`, with the first of them in the diagnostics; an
-/// error of the contract passes as it is. After either, `partial` gets
+/// error of the client passes as it is. After either, `partial` gets
 /// the result of all that is known: the batches that the server answered,
 /// with the indexes of their errors in the whole list.
 fn runWrite(c: Collection, io: Io, op: OperationContext, write: Write, common: WriteCommon, comptime R: type, partial: ?*R, context: anytype, comptime make: anytype) Error!R {
-    // What the driver knew when the write failed.
+    // What the client knew when the write failed.
     var known: WriteResult = .{};
     var merged = c.db.client.write(io, op, .{
         .database = c.db.name,

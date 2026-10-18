@@ -1,4 +1,4 @@
-//! The native driver against mongod: it connects to mongo-plain and runs
+//! The client against mongod: it connects to mongo-plain and runs
 //! commands there, and refuses mongo-ghost, a member of a replica set that
 //! is not initialized yet.
 
@@ -7,7 +7,6 @@ const Io = std.Io;
 const testing = std.testing;
 const core = @import("core");
 const mongo = @import("mongo");
-const native = mongo.native;
 const bson = mongo.bson;
 const e2e = @import("root.zig");
 
@@ -18,7 +17,7 @@ fn within(io: Io, duration: Io.Duration) core.Context {
 }
 
 /// A client of `port`, connected.
-fn connected(io: Io, driver: *native.Client, uri_buffer: []u8, port: u16) !void {
+fn connected(io: Io, driver: *mongo.Client, uri_buffer: []u8, port: u16) !void {
     const uri = try std.fmt.bufPrint(uri_buffer, "mongodb://127.0.0.1:{d}/?appName=zefir-e2e", .{port});
     driver.* = try .init(testing.allocator, io, .{ .uri = uri });
     errdefer driver.deinit();
@@ -29,27 +28,24 @@ fn connected(io: Io, driver: *native.Client, uri_buffer: []u8, port: u16) !void 
     };
 }
 
-test "the native driver connects to mongo-plain, pings it and runs commands from many tasks on its pool" {
+test "the client connects to mongo-plain, pings it and runs commands from many tasks on its pool" {
     try e2e.onZio(connectAndPing);
 }
 
-fn pingOnce(io: Io, c: mongo.Client) !void {
+fn pingOnce(io: Io, c: *mongo.Client) !void {
     const reply = try c.runCommand(io, .of(within(io, .fromSeconds(10))), ping, .{ .allocator = testing.allocator });
     reply.deinit();
 }
 
 fn connectAndPing(io: Io) !void {
-    var driver: native.Client = undefined;
+    var driver: mongo.Client = undefined;
     var buffer: [128]u8 = undefined;
     try connected(io, &driver, &buffer, e2e.servers.plain_port);
     defer driver.deinit();
-    const c = driver.client();
+    const c = &driver;
     const reply = try c.runCommand(io, .of(.root), ping, .{ .allocator = testing.allocator });
     defer reply.deinit();
     try testing.expectEqual(@as(f64, 1), try (try reply.raw().get("ok")).?.asF64());
-    const server = c.capabilities().server.?;
-    try testing.expect(server.max_wire_version >= 21);
-    try testing.expectEqual(@as(u32, 48_000_000), server.max_message_size_bytes);
 
     var d: mongo.Diagnostics = .{};
     try testing.expectError(error.CommandFailed, c.runCommand(io, .of(.root), .{ .database = "admin", .body = bson.literal(.{ .zefirNoSuchCommand = 1 }) }, .{ .allocator = testing.allocator, .diagnostics = &d }));
@@ -67,7 +63,7 @@ fn connectAndPing(io: Io) !void {
     try testing.expectEqual(@as(usize, 0), stats.waiting + stats.opening);
 }
 
-fn pingCounted(io: Io, c: mongo.Client, failures: *std.atomic.Value(u32)) void {
+fn pingCounted(io: Io, c: *mongo.Client, failures: *std.atomic.Value(u32)) void {
     pingOnce(io, c) catch {
         _ = failures.fetchAdd(1, .acq_rel);
     };
@@ -78,11 +74,11 @@ test "a deadline that passes while mongod works is Timeout, by the maxTimeMS of 
 }
 
 fn deadlineInFlight(io: Io) !void {
-    var driver: native.Client = undefined;
+    var driver: mongo.Client = undefined;
     var buffer: [128]u8 = undefined;
     try connected(io, &driver, &buffer, e2e.servers.plain_port);
     defer driver.deinit();
-    const c = driver.client();
+    const c = &driver;
     // sleep is a test command of mongo-plain. It goes with maxTimeMS, the
     // time left less the shortest round trip, so mongod may stop it with
     // code 50 just before the deadline; else the driver stops waiting at
@@ -108,13 +104,13 @@ test "mongo-ghost, a member of a replica set not initialized yet, is Unsupported
 fn ghost(io: Io) !void {
     var buffer: [128]u8 = undefined;
     const uri = try std.fmt.bufPrint(&buffer, "mongodb://127.0.0.1:{d}", .{e2e.servers.ghost_port});
-    var driver: native.Client = try .init(testing.allocator, io, .{ .uri = uri });
+    var driver: mongo.Client = try .init(testing.allocator, io, .{ .uri = uri });
     defer driver.deinit();
     var d: mongo.Diagnostics = .{};
     try testing.expectError(error.Unsupported, driver.connect(io, within(io, .fromSeconds(10)), &d));
     var expected: [160]u8 = undefined;
     try testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "the server at 127.0.0.1:{d} is a replica set member not initialized yet (RSGhost); v0.1 supports standalone mongod only", .{e2e.servers.ghost_port}), d.message());
     try testing.expectEqual(mongo.Diagnostics.Phase.handshake, d.phase.?);
-    try testing.expectError(error.Unavailable, driver.client().runCommand(io, .of(.root), ping, .{ .allocator = testing.allocator, .diagnostics = &d }));
+    try testing.expectError(error.Unavailable, driver.runCommand(io, .of(.root), ping, .{ .allocator = testing.allocator, .diagnostics = &d }));
     try testing.expectEqualStrings("connect() has not succeeded", d.message());
 }

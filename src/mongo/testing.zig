@@ -5,12 +5,11 @@
 //!   answers each command (ready ones: a queue of answers, a cursor from a
 //!   list of batches, a write that refuses given items), and the journal
 //!   of what came.
-//! - `FakeServer` — serves a `Script` on loopback to a driver that speaks
-//!   MongoDB's wire protocol, or lets a test play the server's side of one
-//!   connection with a raw `Peer`.
-//! - `FakeDriver` — a `mongo.Client` in the process over a `Script`, for
-//!   the tests of code on the collection API and of applications: no
-//!   network, real deadlines and cancelation.
+//! - `FakeServer` — serves a `Script` on loopback, at
+//!   `mongodb://127.0.0.1:<port>`, to a `mongo.Client`: the tests of code
+//!   on the collection API and of applications run on the real client,
+//!   with real deadlines and cancelation. Or it lets a test play the
+//!   server's side of one connection with a raw `Peer`.
 //! - `vectors` — the BSON test vectors of zefir: a document of each BSON
 //!   type with what it reads back as, and bytes no reader may accept.
 //! - `sleepAtLeast` — a sleep that never ends before its time, which a
@@ -21,7 +20,6 @@ const std = @import("std");
 
 pub const Script = @import("testing/Script.zig");
 pub const FakeServer = @import("testing/FakeServer.zig");
-pub const FakeDriver = @import("testing/FakeDriver.zig");
 pub const vectors = @import("bson/vectors.zig");
 pub const sleepAtLeast = @import("testing/sleep.zig").sleepAtLeast;
 
@@ -29,6 +27,5 @@ test {
     std.testing.refAllDecls(@This());
     _ = @import("testing/script_tests.zig");
     _ = @import("testing/fake_server_tests.zig");
-    _ = @import("testing/fake_driver_tests.zig");
     _ = @import("testing/sleep.zig");
 }

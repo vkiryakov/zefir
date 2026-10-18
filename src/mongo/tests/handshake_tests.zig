@@ -305,11 +305,10 @@ fn connectAndPing(io: Io) !void {
     defer served.stop(io);
     var driver: Client = try .init(testing.allocator, io, .{ .uri = try served.uri() });
     defer driver.deinit();
-    const c = driver.client();
+    const c = &driver;
     var d: Diagnostics = .{};
     try testing.expectError(error.Unavailable, c.runCommand(io, .of(.root), ping, .{ .allocator = testing.allocator, .diagnostics = &d }));
     try testing.expectEqualStrings("connect() has not succeeded", d.message());
-    try testing.expect(c.capabilities().server == null);
 
     try driver.connect(io, .root, &d);
     try testing.expectEqual(@as(usize, 1), driver.stats().connections);
@@ -317,10 +316,6 @@ fn connectAndPing(io: Io) !void {
     const reply = try c.runCommand(io, .of(.root), ping, .{ .allocator = testing.allocator });
     defer reply.deinit();
     try testing.expectEqual(@as(f64, 1), try (try reply.raw().get("ok")).?.asF64());
-    const caps = c.capabilities();
-    try testing.expectEqualStrings("zefir-mongo", caps.name);
-    try testing.expect(caps.commands and caps.cursors and caps.aggregation and caps.batched_writes);
-    try testing.expectEqual(@as(i32, 21), caps.server.?.max_wire_version);
     // A second connect keeps the connection it has.
     try driver.connect(io, .root, null);
     try testing.expectEqual(@as(u32, 1), served.script.accepted.load(.acquire));
@@ -347,7 +342,7 @@ fn connectAgain(io: Io) !void {
     try testing.expectError(error.Unavailable, driver.connect(io, .root, &d));
     served.script.acceptConnections();
     try driver.connect(io, .root, &d);
-    const reply = try driver.client().runCommand(io, .of(.root), ping, .{ .allocator = testing.allocator });
+    const reply = try driver.runCommand(io, .of(.root), ping, .{ .allocator = testing.allocator });
     reply.deinit();
 }
 
@@ -391,7 +386,7 @@ fn brokenAndFailed(io: Io) !void {
     var driver: Client = try .init(testing.allocator, io, .{ .uri = try served.uri() });
     defer driver.deinit();
     try driver.connect(io, .root, null);
-    const c = driver.client();
+    const c = &driver;
     var d: Diagnostics = .{};
     const breakme: mongo.Command = .{ .database = "admin", .body = bson.literal(.{ .breakme = 1 }) };
     try testing.expectError(error.ConnectionLost, c.runCommand(io, .of(.root), breakme, .{ .allocator = testing.allocator, .diagnostics = &d }));

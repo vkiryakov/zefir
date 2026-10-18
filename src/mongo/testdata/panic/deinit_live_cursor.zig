@@ -5,7 +5,6 @@
 const std = @import("std");
 const Io = std.Io;
 const mongo = @import("mongo");
-const native = mongo.native;
 const bson = mongo.bson;
 const Script = mongo.testing.Script;
 const FakeServer = mongo.testing.FakeServer;
@@ -32,9 +31,9 @@ pub fn main(init: std.process.Init) !void {
     defer server.cancel(io) catch {};
 
     var uri: [64]u8 = undefined;
-    var driver: native.Client = try .init(init.gpa, io, .{ .uri = try FakeServer.uri(&listener, &uri) });
+    var driver: mongo.Client = try .init(init.gpa, io, .{ .uri = try FakeServer.uri(&listener, &uri) });
     try driver.connect(io, .root, null);
-    const cursor = try driver.client().openCursor(io, .of(.root), .{ .database = "app", .body = bson.literal(.{ .find = "users" }) }, .{});
+    const cursor = try driver.openCursor(io, .of(.root), .{ .database = "app", .body = bson.literal(.{ .find = "users" }) }, .{});
     _ = cursor;
     // The mistake: the client goes before its cursor.
     driver.deinit();

@@ -1,7 +1,6 @@
-//! The arguments of the contract's calls: the caller's context, the
-//! command or the write, and the options. They are structs, so that a
-//! later revision adds a field with a default without breaking callers or
-//! drivers.
+//! The arguments of the client's calls: the caller's context, the command
+//! or the write, and the options. They are structs, so that a later
+//! release adds a field with a default without breaking callers.
 
 const std = @import("std");
 const core = @import("core");
@@ -107,7 +106,7 @@ pub const CursorOptions = struct {
     comment: ?bson.Value = null,
     diagnostics: ?*errors.Diagnostics = null,
     /// After `CommandFailed`, or `Timeout` by code 50, the whole reply of
-    /// the server goes here, from the driver's allocator; free it with
+    /// the server goes here, from the client's allocator; free it with
     /// `deinit`.
     failure_reply: ?*?bson.OwnedDocument = null,
 };

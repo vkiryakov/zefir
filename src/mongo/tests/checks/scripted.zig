@@ -1,5 +1,6 @@
 //! The checks of layer S, each against a scripted server: S1–S21 of the
-//! design of zefir-mongo.
+//! design of zefir-mongo, but S19, which design 1.4 dropped with the
+//! capabilities of drivers.
 
 const std = @import("std");
 const Io = std.Io;
@@ -7,7 +8,8 @@ const Allocator = std.mem.Allocator;
 const core = @import("core");
 const mongo = @import("mongo");
 const bson = mongo.bson;
-const Client = mongo.Client;
+/// The client of a check, as the checks hold it.
+const Client = *mongo.Client;
 const Cursor = mongo.Cursor;
 const Script = mongo.testing.Script;
 const Job = @import("Job.zig");
@@ -55,7 +57,8 @@ pub fn s1(job: *Job) Job.Error!void {
     try job.expect(left == 0, "{d} allocation(s) of options.allocator were left after the reply's deinit: the reply is to be one allocation of options.allocator, and nothing else", .{left});
 }
 
-/// The fields that no driver of revision 1 writes.
+/// The fields that the client never writes: those of sessions and of read
+/// preferences.
 const session_fields = [_][]const u8{ "$readPreference", "lsid", "txnNumber", "$clusterTime", "autocommit", "startTransaction" };
 
 /// A cursor, a write, `distinct` answered with `distinct`, and anything
@@ -153,7 +156,7 @@ pub fn s2(job: *Job) Job.Error!void {
         }
         var it = entry.body.iterator();
         while (it.next() catch null) |element| {
-            try job.expect(!Job.isIn(&session_fields, element.key), "{s} came with {s}, which no driver of revision 1 writes", .{ entry.name, element.key });
+            try job.expect(!Job.isIn(&session_fields, element.key), "{s} came with {s}, which the client never writes", .{ entry.name, element.key });
         }
     }
 }
@@ -344,7 +347,7 @@ pub fn s6(job: *Job) Job.Error!void {
     held.cancel();
     const took = canceled_at.durationTo(Job.now(io));
     try job.expectCallError(&held, error.Interrupted, "a command whose task was canceled while the server held its reply");
-    try job.expect(held.kept_cancel, "after Interrupted, io.checkCancel() in the task saw no cancelation: the driver swallowed it; it calls io.recancel() before it returns", .{});
+    try job.expect(held.kept_cancel, "after Interrupted, io.checkCancel() in the task saw no cancelation: the client swallowed it; it calls io.recancel() before it returns", .{});
     try job.expect(took.nanoseconds <= job.ms(2000).nanoseconds, "Interrupted came {d} ms after the task was canceled", .{took.toMilliseconds()});
 
     const op: OperationContext = .of(core.Context.root.withCancellation(&held_handler.token));
@@ -457,47 +460,6 @@ pub fn s7(job: *Job) Job.Error!void {
     try job.expect(handed.count == 6, "a cursor handed from one task to another gave {d} documents, not 6", .{handed.count});
     for (handed.read[0..6], docs[0..6], 0..) |got, expected, i| {
         try job.expect(eql(u8, got.?.bytes, expected.bytes), "document {d} of a cursor handed between tasks came changed", .{i});
-    }
-}
-
-/// The capabilities that revision 1 requires, and those it reserves.
-const required = [_][]const u8{ "commands", "cursors", "aggregation", "batched_writes" };
-const reserved = [_][]const u8{ "sessions", "transactions", "change_streams", "retryable_reads", "retryable_writes", "read_preference", "tailable_cursors", "bulk_write_command", "compression" };
-
-pub fn s19(job: *Job) Job.Error!void {
-    const io = job.io;
-    var answering: Job.Answering = .{ .with = .{ .reply = Script.ok } };
-    var stage: Job.Stage = undefined;
-    const hello: Job.Hello = .{ .max_wire_version = 25, .max_bson_object_size = 4 * 1024 * 1024, .max_message_size_bytes = 8_000_000, .max_write_batch_size = 7 };
-    const client = try job.scripted(&stage, answering.handler(), hello);
-    defer job.end();
-
-    const caps = client.capabilities();
-    try job.expect(caps.revision >= 1 and caps.revision <= mongo.contract_revision, "capabilities().revision is {d}; a driver of this zefir-mongo is of revision 1 to {d}", .{ caps.revision, mongo.contract_revision });
-    try job.expect(caps.name.len > 0, "capabilities().name is empty; name the driver, for logs and reports", .{});
-    inline for (required) |name| {
-        try job.expect(@field(caps, name), "capabilities()." ++ name ++ " is false; revision 1 requires it", .{});
-    }
-    inline for (reserved) |name| {
-        try job.expect(!@field(caps, name), "capabilities()." ++ name ++ " is true; revision 1 reserves it, so a driver of revision 1 leaves it false", .{});
-    }
-
-    // After a command the driver has talked to the server for sure.
-    const reply = try job.need(client.runCommand(io, job.within(10_000), .{ .database = database, .body = bson.literal(.{ .count = "s19" }) }, .{ .allocator = job.gpa }), "runCommand");
-    reply.deinit();
-    const again = client.capabilities();
-    try job.expect(again.revision == caps.revision and std.mem.eql(u8, again.name, caps.name), "capabilities() changed from one call to the next: revision {d} \"{s}\", then {d} \"{s}\"", .{ caps.revision, caps.name, again.revision, again.name });
-    inline for (required ++ reserved) |name| {
-        try job.expect(@field(again, name) == @field(caps, name), "capabilities()." ++ name ++ " changed from one call to the next", .{});
-    }
-    if (again.server) |server| {
-        try job.expect(server.kind == .standalone, "capabilities().server.kind is not standalone, and the server is a standalone mongod", .{});
-        try job.expect(server.max_wire_version == hello.max_wire_version, "capabilities().server.max_wire_version is {d}; the server said {d} in hello", .{ server.max_wire_version, hello.max_wire_version });
-        try job.expect(server.max_bson_object_size == hello.max_bson_object_size and server.max_message_size_bytes == hello.max_message_size_bytes and
-            server.max_write_batch_size == hello.max_write_batch_size, "capabilities().server holds the limits {d}, {d} and {d}; the server said {d}, {d} and {d} in hello", .{
-            server.max_bson_object_size, server.max_message_size_bytes, server.max_write_batch_size,
-            hello.max_bson_object_size,  hello.max_message_size_bytes,  hello.max_write_batch_size,
-        });
     }
 }
 
@@ -809,8 +771,8 @@ pub fn s18(job: *Job) Job.Error!void {
             .string => |text| text,
             else => "",
         } else "";
-        try job.expect(eql(u8, got, s18_comment), "getMore came with the comment \"{s}\": the driver kept the caller's comment instead of a copy", .{got});
-        try job.expect(eql(u8, more.database, database), "getMore came with $db \"{s}\": the driver kept the caller's database instead of the namespace of the cursor", .{more.database});
+        try job.expect(eql(u8, got, s18_comment), "getMore came with the comment \"{s}\": the client kept the caller's comment instead of a copy", .{got});
+        try job.expect(eql(u8, more.database, database), "getMore came with $db \"{s}\": the client kept the caller's database instead of the namespace of the cursor", .{more.database});
     }
 
     // failure_reply: from the call's allocator too.
@@ -1000,7 +962,7 @@ pub fn s12(job: *Job) Job.Error!void {
     try job.expect(script.count(io, "insert") == batches, "a write of an item that no message holds sent a batch", .{});
 
     // An item larger than maxBsonObjectSize, within a message: it goes out,
-    // and the server refuses it, not the driver.
+    // and the server refuses it, not the client.
     const large = (try job.encodeIn(a, .{ ._id = 200, .pad = pad[0..700] })).raw();
     var sent = try job.need(client.write(io, .of(.root), .{ .database = database, .kind = .insert, .body = body, .items = &.{large} }, .{ .allocator = job.gpa }), "a write of an item larger than maxBsonObjectSize");
     sent.deinit(job.gpa);
@@ -1152,7 +1114,7 @@ pub fn s15(job: *Job) Job.Error!void {
     try job.expectError(client.runCommand(io, job.within(10_000), command, .{ .allocator = job.gpa }), error.Unavailable, "a command while the server refuses connections");
     try job.expect(script.received(io) == 2, "a command while the server refuses connections reached it", .{});
     script.acceptConnections();
-    // Calls may be Unavailable while the driver reconnects; then they go
+    // Calls may be Unavailable while the client reconnects; then they go
     // through.
     const deadline: core.Deadline = .after(Job.now(io), job.ms(10_000));
     while (true) {

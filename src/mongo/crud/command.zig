@@ -1,6 +1,7 @@
 //! What the operations of `mongo.Collection` and `mongo.Database` share
 //! to write their commands: a writer of command bodies whose errors are
-//! the contract's, and the errors of their checks. Not part of the API.
+//! those of the client, and the errors of their checks. Not part of the
+//! API.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -36,8 +37,8 @@ pub fn violation(diagnostics: ?*Diagnostics, comptime text: []const u8) Error {
 }
 
 /// A `bson.Builder` for the commands of operations, in their scratch
-/// memory, whose errors are the contract's: a part that cannot be written
-/// is `error.InvalidArgument`, and the diagnostics name it.
+/// memory, whose errors are those of the client: a part that cannot be
+/// written is `error.InvalidArgument`, and the diagnostics name it.
 pub const Writer = struct {
     b: bson.Builder,
     diagnostics: ?*Diagnostics,

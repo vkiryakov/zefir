@@ -99,7 +99,7 @@ const shutdown: mongo.Command = .{ .database = "app", .body = bson.literal(.{ .s
 
 /// Runs `command` and expects `expected`, with the diagnostics it left.
 fn expectFailure(io: Io, driver: *Client, op: mongo.OperationContext, command: mongo.Command, expected: mongo.Error, d: *Diagnostics) !void {
-    const result = driver.client().runCommand(io, op, command, .{ .allocator = testing.allocator, .diagnostics = d });
+    const result = driver.runCommand(io, op, command, .{ .allocator = testing.allocator, .diagnostics = d });
     if (result) |reply| reply.deinit() else |_| {}
     try testing.expectError(expected, result);
 }
@@ -143,9 +143,8 @@ fn beforeSending(io: Io) !void {
     try served.connect(io, &driver, "");
     defer driver.deinit();
     var d: Diagnostics = .{};
-    // The driver itself, behind the checks of mongo.Client.
-    try testing.expectError(error.DeadlineExceeded, driver.runCommand(io, within(io, .fromMicroseconds(500)), &ping, .{ .allocator = testing.allocator, .diagnostics = &d }));
-    try testing.expectEqualStrings("less than 1 ms was left of the deadline before the command went out", d.message());
+    try testing.expectError(error.DeadlineExceeded, driver.runCommand(io, within(io, .fromMicroseconds(500)), ping, .{ .allocator = testing.allocator, .diagnostics = &d }));
+    try testing.expectEqualStrings("less than 1 ms was left of the deadline before the call", d.message());
     try testing.expectEqual(@as(usize, 0), served.script.received(io));
     try expectPool(driver.stats(), 1, 0);
     try testing.expectEqual(@as(usize, 1), driver.stats().idle);
@@ -156,7 +155,7 @@ test "checkout: a deadline that ends in line is PoolExhausted" {
 }
 
 fn holdOne(io: Io, driver: *Client) void {
-    const reply = driver.client().runCommand(io, .of(.root), hold, .{ .allocator = testing.allocator }) catch return;
+    const reply = driver.runCommand(io, .of(.root), hold, .{ .allocator = testing.allocator }) catch return;
     reply.deinit();
 }
 
@@ -386,7 +385,7 @@ fn refused(io: Io) !void {
         const command, const expected, const code, const clears = case;
         var d: Diagnostics = .{};
         var failure: ?bson.OwnedDocument = null;
-        const result = driver.client().runCommand(io, .of(.root), command, .{ .allocator = testing.allocator, .diagnostics = &d, .failure_reply = &failure });
+        const result = driver.runCommand(io, .of(.root), command, .{ .allocator = testing.allocator, .diagnostics = &d, .failure_reply = &failure });
         if (result) |reply| reply.deinit() else |_| {}
         defer if (failure) |f| f.deinit();
         try testing.expectError(expected, result);

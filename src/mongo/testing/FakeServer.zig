@@ -1,10 +1,10 @@
 //! `mongo.testing.FakeServer`: a MongoDB server for tests, on loopback, for
-//! drivers that speak the wire protocol. It has two modes.
+//! `mongo.Client`. It has two modes.
 //!
 //! `serve` plays a `Script`: it accepts connections, each in a task of its
 //! own, answers hello by `script.hello`, and hands the commands to the
-//! script's handler. A driver connects to `mongodb://127.0.0.1:<port>`,
-//! without TLS and without credentials:
+//! script's handler. A client connects to `mongodb://127.0.0.1:<port>`,
+//! without credentials:
 //!
 //! ```zig
 //! var listener = try FakeServer.listen(io);
@@ -12,15 +12,17 @@
 //! var server = try io.concurrent(FakeServer.serve, .{ io, &listener, &script });
 //! defer server.cancel(io) catch {};
 //! var buffer: [64]u8 = undefined;
-//! var driver: MyDriver = try .init(gpa, io, .{ .uri = try FakeServer.uri(&listener, &buffer) });
+//! var client: mongo.Client = try .init(gpa, io, .{ .uri = try FakeServer.uri(&listener, &buffer) });
+//! defer client.deinit();
+//! try client.connect(io, .root, null);
 //! ```
 //!
 //! What the server answers itself, and what goes to the handler:
 //!
 //! - The first hello of a connection (`hello`, `isMaster` or `ismaster`)
 //!   is its handshake: answered by `script.hello`, without
-//!   `logicalSessionTimeoutMinutes` unless the script sets it, so that
-//!   drivers with sessions start none, and not recorded.
+//!   `logicalSessionTimeoutMinutes` unless the script sets it, so that a
+//!   client with sessions starts none, and not recorded.
 //! - Every command after it is recorded in the script's journal. A later
 //!   hello is answered by `script.hello`; `ping` and `endSessions` get
 //!   `{ok: 1.0}`; `saslStart` and `saslContinue` fail with code 18, since
@@ -53,7 +55,7 @@ pub fn port(listener: *const net.Server) u16 {
     return listener.socket.address.getPort();
 }
 
-/// The URI of `listener`, "mongodb://127.0.0.1:<port>", for a driver.
+/// The URI of `listener`, "mongodb://127.0.0.1:<port>", for a client.
 pub fn uri(listener: *const net.Server, buffer: []u8) error{NoSpaceLeft}![]const u8 {
     return std.fmt.bufPrint(buffer, "mongodb://127.0.0.1:{d}", .{port(listener)});
 }
@@ -219,7 +221,7 @@ fn writeReply(conn: *Connection, request: *const opmsg.Incoming, reply: bson.Raw
 }
 
 /// A reply of `{ok: 1.0}` that breaks OP_MSG as `defect` says; the
-/// connection stays open, so that a driver that uses it again shows in the
+/// connection stays open, so that a client that uses it again shows in the
 /// journal.
 fn writeMalformed(conn: *Connection, request: *const opmsg.Incoming, defect: Script.Malformed) !void {
     const w = &conn.writer.interface;

@@ -106,7 +106,7 @@ fn batches(io: Io) !void {
     var driver: Client = undefined;
     try served.connect(io, &driver, "");
     defer driver.deinit();
-    var result = try driver.client().write(io, within(io, .fromMilliseconds(4000)), .{ .database = "app", .kind = .insert, .body = insert, .items = &ten }, .{ .allocator = testing.allocator });
+    var result = try driver.write(io, within(io, .fromMilliseconds(4000)), .{ .database = "app", .kind = .insert, .body = insert, .items = &ten }, .{ .allocator = testing.allocator });
     defer result.deinit(testing.allocator);
     try testing.expectEqual(@as(u64, 10), result.n);
     try testing.expectEqual(@as(usize, 10), result.answered);
@@ -159,10 +159,10 @@ fn sizes(io: Io) !void {
     const huge = try bson.encode(arena.allocator(), .{ ._id = 1, .pad = pad }, .{});
     const large = try bson.encode(arena.allocator(), .{ ._id = 2, .pad = pad[0..700] }, .{});
     var d: Diagnostics = .{};
-    try testing.expectError(error.InvalidArgument, driver.client().write(io, .of(.root), .{ .database = "app", .kind = .insert, .body = insert, .items = &.{ ten[0], huge.raw() } }, .{ .allocator = testing.allocator, .diagnostics = &d }));
+    try testing.expectError(error.InvalidArgument, driver.write(io, .of(.root), .{ .database = "app", .kind = .insert, .body = insert, .items = &.{ ten[0], huge.raw() } }, .{ .allocator = testing.allocator, .diagnostics = &d }));
     try testing.expect(std.mem.startsWith(u8, d.message(), "item 1 of the write is "));
     try testing.expectEqual(@as(usize, 0), served.script.received(io));
-    var result = try driver.client().write(io, .of(.root), .{ .database = "app", .kind = .insert, .body = insert, .items = &.{large.raw()} }, .{ .allocator = testing.allocator });
+    var result = try driver.write(io, .of(.root), .{ .database = "app", .kind = .insert, .body = insert, .items = &.{large.raw()} }, .{ .allocator = testing.allocator });
     result.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 1), served.script.count(io, "insert"));
 }
@@ -182,7 +182,7 @@ fn cutAtThird(io: Io) !void {
     var d: Diagnostics = .{};
     var partial: mongo.WriteResult = .{};
     defer partial.deinit(testing.allocator);
-    try testing.expectError(error.IncompleteWrite, driver.client().write(io, .of(.root), .{ .database = "app", .kind = .insert, .body = insert, .items = &ten }, .{ .allocator = testing.allocator, .diagnostics = &d, .partial = &partial }));
+    try testing.expectError(error.IncompleteWrite, driver.write(io, .of(.root), .{ .database = "app", .kind = .insert, .body = insert, .items = &ten }, .{ .allocator = testing.allocator, .diagnostics = &d, .partial = &partial }));
     try testing.expectEqual(mongo.Error.ConnectionLost, d.reason.?);
     try testing.expectEqual(@as(usize, 6), d.batch_offset.?);
     try testing.expectEqual(@as(u64, 6), partial.n);
@@ -222,15 +222,13 @@ fn tokenCanceled(io: Io) !void {
     var d: Diagnostics = .{};
     var partial: mongo.WriteResult = .{};
     defer partial.deinit(testing.allocator);
-    // The driver itself: the checks of mongo.Client after the reply would
-    // see the token too.
     const request: mongo.WriteRequest = .{ .database = "app", .kind = .insert, .body = insert, .items = &ten };
-    try testing.expectError(error.IncompleteWrite, driver.write(io, .of(core.Context.root.withCancellation(&canceler.token)), &request, .{ .allocator = testing.allocator, .diagnostics = &d, .partial = &partial }));
+    try testing.expectError(error.IncompleteWrite, driver.write(io, .of(core.Context.root.withCancellation(&canceler.token)), request, .{ .allocator = testing.allocator, .diagnostics = &d, .partial = &partial }));
     try testing.expectEqual(mongo.Error.Cancelled, d.reason.?);
     try testing.expectEqual(@as(usize, 6), d.batch_offset.?);
     try testing.expectEqual(@as(u64, 6), partial.n);
     try testing.expectEqual(@as(usize, 2), script.count(io, "insert"));
-    try testing.expectError(error.Cancelled, driver.write(io, .of(core.Context.root.withCancellation(&canceler.token)), &request, .{ .allocator = testing.allocator, .diagnostics = &d }));
+    try testing.expectError(error.Cancelled, driver.write(io, .of(core.Context.root.withCancellation(&canceler.token)), request, .{ .allocator = testing.allocator, .diagnostics = &d }));
     try testing.expectEqual(@as(usize, 2), script.count(io, "insert"));
 }
 
@@ -239,7 +237,7 @@ test "every batch takes a connection of the pool: one that a call took meanwhile
 }
 
 fn hold(io: Io, driver: *Client) void {
-    const reply = driver.client().runCommand(io, .of(.root), .{ .database = "app", .body = bson.literal(.{ .hold = 1 }) }, .{ .allocator = testing.allocator }) catch return;
+    const reply = driver.runCommand(io, .of(.root), .{ .database = "app", .body = bson.literal(.{ .hold = 1 }) }, .{ .allocator = testing.allocator }) catch return;
     reply.deinit();
 }
 
@@ -257,12 +255,12 @@ fn batchInLine(io: Io) !void {
     var holder: ?Io.Future(void) = null;
     defer if (holder) |*h| h.cancel(io);
     const Writer = struct {
-        fn run(task_io: Io, c: mongo.Client, diagnostics: *Diagnostics, result: *mongo.WriteResult) mongo.Error!void {
+        fn run(task_io: Io, c: *mongo.Client, diagnostics: *Diagnostics, result: *mongo.WriteResult) mongo.Error!void {
             var written = try c.write(task_io, within(task_io, .fromMilliseconds(1500)), .{ .database = "app", .kind = .insert, .body = insert, .items = &ten }, .{ .allocator = testing.allocator, .diagnostics = diagnostics, .partial = result });
             written.deinit(testing.allocator);
         }
     };
-    var writing = try io.concurrent(Writer.run, .{ io, driver.client(), &d, &partial });
+    var writing = try io.concurrent(Writer.run, .{ io, &driver, &d, &partial });
     // While the second batch is out, a call joins the line for the only
     // connection, and takes it when the batch comes back.
     try awaitReceived(io, &served.script, "insert", 2);
@@ -292,7 +290,7 @@ fn expiredItem(io: Io) !void {
     var d: Diagnostics = .{};
     var partial: mongo.WriteResult = .{};
     defer partial.deinit(testing.allocator);
-    try testing.expectError(error.Timeout, driver.client().write(io, .of(.root), .{ .database = "app", .kind = .insert, .body = insert, .items = ten[0..3] }, .{ .allocator = testing.allocator, .diagnostics = &d, .partial = &partial }));
+    try testing.expectError(error.Timeout, driver.write(io, .of(.root), .{ .database = "app", .kind = .insert, .body = insert, .items = ten[0..3] }, .{ .allocator = testing.allocator, .diagnostics = &d, .partial = &partial }));
     try testing.expectEqual(@as(i32, 50), d.server.?.code);
     try testing.expectEqualStrings("operation exceeded time limit", d.message());
     try testing.expectEqual(@as(u64, 2), partial.n);

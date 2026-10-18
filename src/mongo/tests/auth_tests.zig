@@ -260,7 +260,7 @@ fn connectWithUser(io: Io) !void {
             task.cancel(io) catch {};
             return err;
         };
-        const reply = driver.client().runCommand(io, .of(.root), ping, .{ .allocator = testing.allocator });
+        const reply = driver.runCommand(io, .of(.root), ping, .{ .allocator = testing.allocator });
         // The server ends when the client hangs up; what it saw is read
         // after it ended.
         driver.deinit();
@@ -303,8 +303,8 @@ fn reconnect(io: Io, driver: *Client) !void {
     try driver.connect(io, .root, null);
     try testing.expectEqual(@as(u32, 1), driver.keys.derivations);
     const breakme: mongo.Command = .{ .database = "admin", .body = bson.literal(.{ .breakme = 1 }) };
-    try testing.expectError(error.ConnectionLost, driver.client().runCommand(io, .of(.root), breakme, .{ .allocator = testing.allocator }));
-    const reply = try driver.client().runCommand(io, .of(.root), ping, .{ .allocator = testing.allocator });
+    try testing.expectError(error.ConnectionLost, driver.runCommand(io, .of(.root), breakme, .{ .allocator = testing.allocator }));
+    const reply = try driver.runCommand(io, .of(.root), ping, .{ .allocator = testing.allocator });
     reply.deinit();
     try testing.expectEqual(@as(u32, 1), driver.keys.derivations);
 }

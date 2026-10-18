@@ -1,8 +1,7 @@
 //! `mongo.testing.Script`: a scripted MongoDB server, the brain that
-//! `FakeServer` serves on loopback to drivers that speak the wire protocol
-//! and that `FakeDriver` runs in the process. It holds what the server says
-//! about itself in hello, a handler that answers each command, and the
-//! journal of the commands that came.
+//! `FakeServer` serves on loopback to `mongo.Client`. It holds what the
+//! server says about itself in hello, a handler that answers each command,
+//! and the journal of the commands that came.
 //!
 //! ```zig
 //! const docs = [_]bson.RawDocument{ bson.literal(.{ .name = "Ann" }), bson.literal(.{ .name = "Bob" }) };
@@ -10,7 +9,7 @@
 //! var script: Script = .init(gpa, users.handler());
 //! defer script.deinit();
 //! script.hello.max_write_batch_size = 3; // tiny limits split writes
-//! // ... run the code under test against FakeServer or FakeDriver ...
+//! // ... serve it with FakeServer, and run the code under test on a client of it ...
 //! try std.testing.expectEqualStrings("getMore", script.entry(io, 1).name);
 //! ```
 //!
@@ -22,9 +21,9 @@
 //! passed as `.init(&value)`. Handlers are called from many tasks at once:
 //! guard their state with `std.Io` primitives, as the ready ones do.
 //!
-//! What a handler answers is the same to every driver: a reply, a reply
-//! after a delay, a closed connection, a server that refuses connections,
-//! or a reply that breaks OP_MSG. The replies of the ready handlers carry
+//! A handler answers with a reply, a reply after a delay, a closed
+//! connection, a server that refuses connections, or a reply that breaks
+//! OP_MSG. The replies of the ready handlers carry
 //! only fields that mongod writes in its replies to the same commands, of
 //! the same BSON types; the end-to-end tests check it against mongod.
 
@@ -94,14 +93,14 @@ pub const Handler = struct {
 /// A command as the server read it.
 pub const Request = struct {
     /// The number of the connection it came on: 1 for the first connection
-    /// to the server or of the fake driver, 2 for the next, and so on.
+    /// to the server, 2 for the next, and so on.
     connection: u32,
     /// The command's name, its first key: "find".
     name: []const u8,
     /// Its `$db`; empty when it has none.
     database: []const u8,
-    /// The document of kind 0 as the driver sent it: the command, with the
-    /// fields the driver adds, `$db` always, `maxTimeMS` under a deadline,
+    /// The document of kind 0 as the client sent it: the command, with the
+    /// fields the client adds, `$db` always, `maxTimeMS` under a deadline,
     /// `ordered` for a write.
     body: bson.RawDocument,
     /// The first section of kind 1, such as the documents of an insert.
@@ -137,8 +136,8 @@ pub const Answer = union(enum) {
     /// until `acceptConnections`: the server is gone. Calls in flight see
     /// a lost connection, later calls an unavailable server.
     refuse_connections,
-    /// Answer with a message that breaks OP_MSG; only drivers on the wire
-    /// see it, and the fake driver takes it as a protocol violation.
+    /// Answer with a message that breaks OP_MSG: the client takes it as a
+    /// protocol violation.
     malformed: Malformed,
 };
 
@@ -173,9 +172,9 @@ const Recorded = struct {
     entry: Entry,
 };
 
-/// Adds a copy of `request` to the journal. `FakeServer` and `FakeDriver`
-/// record every command they read; a server of your own on a script does
-/// the same.
+/// Adds a copy of `request` to the journal. `FakeServer` records every
+/// command it reads after the handshake; a server of your own on a script
+/// does the same.
 pub fn record(s: *Script, io: Io, request: *const Request) Allocator.Error!void {
     const identifier: []const u8 = if (request.sequence) |q| q.identifier else "";
     const documents: []const u8 = if (request.sequence) |q| q.bytes else "";
@@ -241,8 +240,7 @@ pub fn openConnection(s: *Script) ?u32 {
 }
 
 /// How many connections `FakeServer.serve` accepted and served for the
-/// script: a driver on the wire makes them, a driver in the process, such
-/// as `FakeDriver`, makes none.
+/// script.
 pub fn acceptedConnections(s: *const Script) u32 {
     return s.accepted.load(.acquire);
 }

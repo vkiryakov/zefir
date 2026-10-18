@@ -4,7 +4,7 @@
 //! option at its default is not sent.
 //!
 //! There is no `maxTimeMS`: the deadline comes from the context only, and
-//! the driver writes it. There is no `writeConcern` or `readConcern`
+//! the client writes it. There is no `writeConcern` or `readConcern`
 //! either: a standalone server writes with `w: 1`; who needs them puts
 //! them in the body of `mongo.Client.write` or `runCommand`.
 
@@ -210,7 +210,7 @@ pub const FindOneAndDeleteOptions = struct {
 
 pub const FindOptions = struct {
     /// The memory of the call's scratch, which is freed before the call
-    /// returns; the cursor belongs to the driver.
+    /// returns; the cursor holds its batches in the memory of the client.
     allocator: std.mem.Allocator,
     /// The order of the documents: `bson.literal(.{ .age = -1 })`.
     sort: ?bson.RawDocument = null,
@@ -237,7 +237,7 @@ pub const FindOptions = struct {
     /// outlive the cursor.
     diagnostics: ?*Diagnostics = null,
     /// After `CommandFailed`, or `Timeout` by code 50, of the command or a
-    /// `getMore`, the whole reply of the server, from the driver's
+    /// `getMore`, the whole reply of the server, from the client's
     /// allocator: free it with `deinit`. The slot must hold null and
     /// outlive the cursor.
     failure_reply: ?*?bson.OwnedDocument = null,
@@ -258,14 +258,14 @@ pub const FindOneOptions = struct {
     comment: ?bson.Value = null,
     diagnostics: ?*Diagnostics = null,
     /// After `CommandFailed`, or `Timeout` by code 50, the whole reply of
-    /// the server, from the driver's allocator: free it with `deinit`. The
+    /// the server, from the client's allocator: free it with `deinit`. The
     /// slot must hold null.
     failure_reply: ?*?bson.OwnedDocument = null,
 };
 
 pub const AggregateOptions = struct {
     /// The memory of the call's scratch, which is freed before the call
-    /// returns; the cursor belongs to the driver.
+    /// returns; the cursor holds its batches in the memory of the client.
     allocator: std.mem.Allocator,
     /// How many documents each batch holds, the first and those of every
     /// `getMore`; null leaves it to the server. A pipeline that ends in
@@ -289,7 +289,7 @@ pub const AggregateOptions = struct {
     /// outlive the cursor.
     diagnostics: ?*Diagnostics = null,
     /// After `CommandFailed`, or `Timeout` by code 50, of the command or a
-    /// `getMore`, the whole reply of the server, from the driver's
+    /// `getMore`, the whole reply of the server, from the client's
     /// allocator: free it with `deinit`. The slot must hold null and
     /// outlive the cursor.
     failure_reply: ?*?bson.OwnedDocument = null,
@@ -308,7 +308,7 @@ pub const CountDocumentsOptions = struct {
     comment: ?bson.Value = null,
     diagnostics: ?*Diagnostics = null,
     /// After `CommandFailed`, or `Timeout` by code 50, the whole reply of
-    /// the server, from the driver's allocator: free it with `deinit`. The
+    /// the server, from the client's allocator: free it with `deinit`. The
     /// slot must hold null.
     failure_reply: ?*?bson.OwnedDocument = null,
 };
@@ -351,10 +351,7 @@ pub const CreateIndexesOptions = struct {
 
 pub const ListIndexesOptions = struct {
     /// The memory of the call's scratch, which is freed before the call
-    /// returns; the cursor belongs to the driver. Without `diagnostics`,
-    /// the cursor also holds a `mongo.Diagnostics` of it until its
-    /// `deinit`, to tell a collection that is not there: the allocator
-    /// outlives the cursor then.
+    /// returns; the cursor holds its batches in the memory of the client.
     allocator: std.mem.Allocator,
     /// How many indexes each batch holds; null leaves it to the server.
     batch_size: ?u32 = null,
@@ -364,7 +361,7 @@ pub const ListIndexesOptions = struct {
     /// outlive the cursor.
     diagnostics: ?*Diagnostics = null,
     /// After `CommandFailed`, or `Timeout` by code 50, of the command or a
-    /// `getMore`, the whole reply of the server, from the driver's
+    /// `getMore`, the whole reply of the server, from the client's
     /// allocator: free it with `deinit`. The slot must hold null and
     /// outlive the cursor.
     failure_reply: ?*?bson.OwnedDocument = null,
@@ -396,7 +393,7 @@ pub const DropOptions = struct {
 
 pub const ListCollectionsOptions = struct {
     /// The memory of the call's scratch, which is freed before the call
-    /// returns; the cursor belongs to the driver.
+    /// returns; the cursor holds its batches in the memory of the client.
     allocator: std.mem.Allocator,
     /// Only the collections whose documents of `listCollections` match it:
     /// `bson.literal(.{ .name = "users" })`.
@@ -417,7 +414,7 @@ pub const ListCollectionsOptions = struct {
     /// outlive the cursor.
     diagnostics: ?*Diagnostics = null,
     /// After `CommandFailed`, or `Timeout` by code 50, of the command or a
-    /// `getMore`, the whole reply of the server, from the driver's
+    /// `getMore`, the whole reply of the server, from the client's
     /// allocator: free it with `deinit`. The slot must hold null and
     /// outlive the cursor.
     failure_reply: ?*?bson.OwnedDocument = null,
@@ -425,7 +422,7 @@ pub const ListCollectionsOptions = struct {
 
 pub const RunCursorCommandOptions = struct {
     /// The memory of the call's scratch, which is freed before the call
-    /// returns; the cursor belongs to the driver.
+    /// returns; the cursor holds its batches in the memory of the client.
     allocator: std.mem.Allocator,
     /// The `batchSize` of each `getMore`; null leaves it to the server.
     /// The first batch is the command's, such as its `cursor.batchSize`.
@@ -434,7 +431,7 @@ pub const RunCursorCommandOptions = struct {
     /// outlive the cursor.
     diagnostics: ?*Diagnostics = null,
     /// After `CommandFailed`, or `Timeout` by code 50, of the command or a
-    /// `getMore`, the whole reply of the server, from the driver's
+    /// `getMore`, the whole reply of the server, from the client's
     /// allocator: free it with `deinit`. The slot must hold null and
     /// outlive the cursor.
     failure_reply: ?*?bson.OwnedDocument = null,

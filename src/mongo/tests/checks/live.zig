@@ -9,7 +9,8 @@ const Allocator = std.mem.Allocator;
 const core = @import("core");
 const mongo = @import("mongo");
 const bson = mongo.bson;
-const Client = mongo.Client;
+/// The client of a check, as the checks hold it.
+const Client = *mongo.Client;
 const Cursor = mongo.Cursor;
 const Job = @import("Job.zig");
 
@@ -393,7 +394,7 @@ pub fn l8(job: *Job) Job.Error!void {
     const server = d.server orelse return job.fail("Diagnostics.server is null after CommandFailed", .{});
     try job.expect(server.code == 91, "Diagnostics.server.code is {d}, not 91", .{server.code});
     try job.expect(server.labels.contains(.retryable_write_error), "Diagnostics.server.labels lack RetryableWriteError", .{});
-    try job.expect(try countOf(job, client, "l8") == 0, "the failed insert left a document: the driver sent it again", .{});
+    try job.expect(try countOf(job, client, "l8") == 0, "the failed insert left a document: the client sent it again", .{});
     var again = try write(job, client, .insert, "l8", ten[0..1], true);
     again.deinit(job.gpa);
 }

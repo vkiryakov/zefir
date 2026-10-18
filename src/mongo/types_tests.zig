@@ -1,4 +1,4 @@
-//! Tests of the types of the contract's calls: their defaults, and what a
+//! Tests of the types of the client's calls: their defaults, and what a
 //! `WriteResult` owns.
 
 const std = @import("std");
@@ -7,7 +7,6 @@ const core = @import("core");
 const bson = @import("bson.zig");
 const requests = @import("requests.zig");
 const results = @import("results.zig");
-const capabilities = @import("contract/capabilities.zig");
 
 test "an operation context of a core context adds no tracing" {
     const ctx = core.Context.root.withDeadline(.after(.zero, .fromSeconds(1)));
@@ -37,19 +36,6 @@ test "a kind of write names its command and the section of its items" {
         try testing.expectEqualStrings(row[1], row[0].command());
         try testing.expectEqualStrings(row[2], row[0].items());
     }
-}
-
-test "a driver declares no capability by default, the reserved ones included" {
-    try testing.expectEqual(@as(u16, 1), capabilities.contract_revision);
-    const declared: capabilities.Capabilities = .{ .revision = 1, .name = "test" };
-    inline for (@typeInfo(capabilities.Capabilities).@"struct".field_names, @typeInfo(capabilities.Capabilities).@"struct".field_types) |name, Field| {
-        if (Field == bool) {
-            errdefer std.debug.print("capability {s}\n", .{name});
-            try testing.expect(!@field(declared, name));
-        }
-    }
-    try testing.expect(declared.server == null);
-    try testing.expectEqual(std.lang.Type.Enum.Mode.nonexhaustive, @typeInfo(capabilities.ServerKind).@"enum".mode);
 }
 
 test "an empty write result is all zero" {

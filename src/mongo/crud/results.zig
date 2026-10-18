@@ -11,11 +11,11 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const bson = @import("../bson.zig");
-const contract = @import("../results.zig");
+const client_results = @import("../results.zig");
 const id = @import("id.zig");
-const WriteResult = contract.WriteResult;
-const WriteError = contract.WriteError;
-const WriteConcernError = contract.WriteConcernError;
+const WriteResult = client_results.WriteResult;
+const WriteError = client_results.WriteError;
+const WriteConcernError = client_results.WriteConcernError;
 
 pub const InsertOneResult = struct {
     /// The `_id` of the document: its own, or the one the insert made.
@@ -24,7 +24,7 @@ pub const InsertOneResult = struct {
     write_concern_errors: []const WriteConcernError = &.{},
 
     pub fn deinit(r: *InsertOneResult, allocator: Allocator) void {
-        contract.freeValue(allocator, r.inserted_id);
+        client_results.freeValue(allocator, r.inserted_id);
         freeErrors(allocator, r.write_errors, r.write_concern_errors);
         r.* = .{};
     }
@@ -44,7 +44,7 @@ pub const InsertManyResult = struct {
     write_concern_errors: []const WriteConcernError = &.{},
 
     pub fn deinit(r: *InsertManyResult, allocator: Allocator) void {
-        for (r.inserted_ids) |value| contract.freeValue(allocator, value);
+        for (r.inserted_ids) |value| client_results.freeValue(allocator, value);
         allocator.free(r.inserted_ids);
         freeErrors(allocator, r.write_errors, r.write_concern_errors);
         r.* = .{};
@@ -64,7 +64,7 @@ pub const UpdateResult = struct {
     write_concern_errors: []const WriteConcernError = &.{},
 
     pub fn deinit(r: *UpdateResult, allocator: Allocator) void {
-        if (r.upserted_id) |value| contract.freeValue(allocator, value);
+        if (r.upserted_id) |value| client_results.freeValue(allocator, value);
         freeErrors(allocator, r.write_errors, r.write_concern_errors);
         r.* = .{};
     }
@@ -89,7 +89,7 @@ pub fn ofInsertOne(allocator: Allocator, merged: *WriteResult, doc: bson.RawDocu
     errdefer merged.deinit(allocator);
     const inserted_id = try id.idOf(allocator, doc);
     const lists = take(allocator, merged);
-    if (lists.upserted_id) |value| contract.freeValue(allocator, value);
+    if (lists.upserted_id) |value| client_results.freeValue(allocator, value);
     return .{ .inserted_id = inserted_id, .write_errors = lists.write_errors, .write_concern_errors = lists.write_concern_errors };
 }
 
@@ -100,7 +100,7 @@ pub fn ofInsertMany(allocator: Allocator, merged: *WriteResult, docs: []const bs
     const ids = try allocator.alloc(bson.Value, docs.len);
     var made: usize = 0;
     errdefer {
-        for (ids[0..made]) |value| contract.freeValue(allocator, value);
+        for (ids[0..made]) |value| client_results.freeValue(allocator, value);
         allocator.free(ids);
     }
     for (docs, ids) |doc, *slot| {
@@ -110,7 +110,7 @@ pub fn ofInsertMany(allocator: Allocator, merged: *WriteResult, docs: []const bs
     const n = merged.n;
     const answered = merged.answered;
     const lists = take(allocator, merged);
-    if (lists.upserted_id) |value| contract.freeValue(allocator, value);
+    if (lists.upserted_id) |value| client_results.freeValue(allocator, value);
     return .{
         .inserted_ids = ids,
         .inserted = n,
@@ -141,7 +141,7 @@ pub fn ofUpdate(allocator: Allocator, merged: *WriteResult, _: void) Allocator.E
 pub fn ofDelete(allocator: Allocator, merged: *WriteResult, _: void) Allocator.Error!DeleteResult {
     const n = merged.n;
     const lists = take(allocator, merged);
-    if (lists.upserted_id) |value| contract.freeValue(allocator, value);
+    if (lists.upserted_id) |value| client_results.freeValue(allocator, value);
     return .{ .deleted = n, .write_errors = lists.write_errors, .write_concern_errors = lists.write_concern_errors };
 }
 
@@ -159,7 +159,7 @@ const Lists = struct {
 fn take(allocator: Allocator, merged: *WriteResult) Lists {
     var lists: Lists = .{ .upserted_id = null, .write_errors = merged.write_errors, .write_concern_errors = merged.write_concern_errors };
     for (merged.upserted, 0..) |upserted, i| {
-        if (i == 0) lists.upserted_id = upserted.id else contract.freeValue(allocator, upserted.id);
+        if (i == 0) lists.upserted_id = upserted.id else client_results.freeValue(allocator, upserted.id);
     }
     allocator.free(merged.upserted);
     merged.* = .{};

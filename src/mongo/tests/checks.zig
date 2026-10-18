@@ -55,7 +55,8 @@ pub const Options = struct {
     };
 };
 
-/// The checks of design §5.3.
+/// The checks of design §5.3; S19, the capabilities of a driver, went
+/// with them in design 1.4.
 pub const Check = enum {
     s1,
     s2,
@@ -75,7 +76,6 @@ pub const Check = enum {
     s16,
     s17,
     s18,
-    s19,
     s20,
     s21,
     l1,
@@ -117,7 +117,6 @@ pub const Check = enum {
             .s16 => "a reply that breaks OP_MSG is ProtocolViolation, and its connection is dropped",
             .s17 => "closing the client: calls out end, new ones are Closed, open cursors are killed, twice is harmless",
             .s18 => "memory: replies only from the options' allocator, the caller's buffers free after return",
-            .s19 => "capabilities: the revision, the four of revision 1, none reserved, stable, a name",
             .s20 => "cancelation is never swallowed: close, deinit and paths of errors keep it",
             .s21 => "a token canceled after the second batch: IncompleteWrite for Cancelled; before sending: Cancelled",
             .l1 => "a full round on a fresh collection: insert, find, update, findAndModify, delete, count",
@@ -227,7 +226,6 @@ fn runBody(job: *Job, check: Check) Job.Error!void {
         .s16 => scripted.s16(job),
         .s17 => scripted.s17(job),
         .s18 => scripted.s18(job),
-        .s19 => scripted.s19(job),
         .s20 => scripted.s20(job),
         .s21 => scripted.s21(job),
         .l1 => live.l1(job),
@@ -322,10 +320,6 @@ test "S17: closing the client: calls out end, new ones are Closed, open cursors 
 
 test "S18: memory: replies only from the options' allocator, the caller's buffers free after return" {
     try expectPasses(.s18);
-}
-
-test "S19: capabilities: the revision, the four of revision 1, none reserved, stable, a name" {
-    try expectPasses(.s19);
 }
 
 test "S20: cancelation is never swallowed: close, deinit and paths of errors keep it" {

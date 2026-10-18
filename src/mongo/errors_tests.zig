@@ -1,4 +1,4 @@
-//! Tests of the errors of the contract: the class of every name, and what
+//! Tests of the errors of the client: the class of every name, and what
 //! `Diagnostics` and `ServerError` keep of long texts and of the labels.
 
 const std = @import("std");

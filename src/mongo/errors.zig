@@ -1,5 +1,5 @@
-//! The errors of the contract and of the collection API, and what the
-//! driver or the server said about one.
+//! The errors of the client and of the collection API, and what the
+//! client or the server said about one.
 //!
 //! - `Error` — the closed set of 16 names that the functions of
 //!   `mongo.Client`, `mongo.Cursor` and the collection API return.
@@ -27,12 +27,14 @@ const bson = @import("bson.zig");
 /// What can go wrong in a call. Each name says whether the server may have
 /// run the operation; `outcome` tells it in code.
 pub const Error = error{
-    /// The request breaks a rule of the contract or of the collection API:
+    /// The request breaks a rule of the client or of the collection API:
     /// a bad database name, a field that only the driver writes, an empty
     /// write, an item that no message can hold, a bad URI. Not sent.
     InvalidArgument,
-    /// The call needs what the driver did not declare, or the server is not
-    /// one the driver works with. Not sent.
+    /// The client does not do what the call needs: an option of the
+    /// connection string that it lacks, TLS among them, a server other than
+    /// a standalone mongod of 7.0 or later, SCRAM-SHA-256 with a password
+    /// that is not ASCII. Not sent.
     Unsupported,
     /// The client or the cursor was closed before the call. Not sent.
     Closed,
@@ -122,15 +124,15 @@ pub fn outcome(err: Error) Outcome {
 /// (code 11000: `dup key: { email: … }`), so log it where such values may
 /// go.
 pub const Diagnostics = struct {
-    /// Where the error happened. `tls` is for drivers with TLS. Later
-    /// releases may add values, so a `switch` over it needs `else`.
+    /// Where the error happened. `tls` is for a later release with TLS,
+    /// which may add other values too, so a `switch` over it needs `else`.
     pub const Phase = enum(u8) { checkout, connect, tls, handshake, authenticate, send, wait, receive, _ };
 
     phase: ?Phase = null,
     /// The error of std or of a library underneath, for logs, not for logic.
     cause: ?anyerror = null,
     /// The server's error, when the server answered: `CommandFailed`,
-    /// `WriteFailed`, `Timeout` by code 50. A driver may also give an
+    /// `WriteFailed`, `Timeout` by code 50. The client may also give an
     /// error of its own errorLabels here, with code 0, as the overload
     /// labels that CMAP gives a network error while a connection opens.
     server: ?ServerError = null,
@@ -225,7 +227,7 @@ pub const ServerError = struct {
     }
 };
 
-/// The errorLabels that revision 1 knows, the overload labels of 2026
+/// The errorLabels that zefir-mongo knows, the overload labels of 2026
 /// among them.
 pub const Label = enum {
     retryable_write_error,

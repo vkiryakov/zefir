@@ -1,48 +1,45 @@
-//! zefir-mongo — MongoDB for zefir applications, written against `std.Io`
-//! only: the native driver and everything it stands on.
+//! zefir-mongo — an async driver of MongoDB for zefir applications,
+//! written against `std.Io` only. It talks to one standalone mongod of
+//! MongoDB 7.0 or later, over plain TCP: there is no TLS, so it belongs on
+//! a trusted network only.
 //!
+//! - `mongo.Client` and `mongo.Cursor` — the client: `init`, `connect`,
+//!   `close` and `deinit`, and the calls `runCommand`, `openCursor` and
+//!   `write`, with SCRAM and a pool of connections. Its options are
+//!   `mongo.Client.Options`, what `stats` returns `mongo.Client.Stats`.
+//! - `mongo.Database` and `mongo.Collection` — the API of a database and
+//!   its collections over the client: insert, update, replace, delete,
+//!   find and `findOneAnd*`, aggregate, count and distinct, indexes,
+//!   collections and any command, with documents as raw BSON, built with
+//!   `bson.Builder`, or written from structs and literals.
 //! - `mongo.bson` — BSON, the format of MongoDB's documents and commands:
 //!   read a document where it lies, check it, write one, turn structs and
 //!   literals into documents and documents into structs, and print it as
 //!   Extended JSON for logs and test messages.
-//! - `mongo.Database` and `mongo.Collection` — the API of a database and
-//!   its collections, the same on every driver: insert, update, replace,
-//!   delete, find and `findOneAnd*`, aggregate, count and distinct,
-//!   indexes, collections and any command, with documents as raw BSON,
-//!   built with `bson.Builder`, or written from structs and literals.
-//! - `mongo.Client` and `mongo.Cursor` — the contract between zefir and a
-//!   driver: a pointer and a table of functions, with the rules of the
-//!   calls checked once, here, for every driver.
-//! - `mongo.native` — the native driver: `mongo.native.Client` talks to one
-//!   standalone mongod of MongoDB 7.0 or later over plain TCP, with SCRAM
-//!   and a pool of connections, and hands out a `mongo.Client`.
 //! - `mongo.Error`, `mongo.outcome`, `mongo.Diagnostics` — what can go
 //!   wrong in a call, whether the server may have run it, and the details
 //!   for logs.
-//! - The arguments and results of the driver's calls:
+//! - The arguments and results of the client's calls:
 //!   `mongo.OperationContext`, `mongo.Command`, `mongo.WriteRequest`, their
-//!   options, `mongo.WriteResult`, and `mongo.Capabilities` with the
-//!   revision of the contract, `mongo.contract_revision`.
-//! - `mongo.testing` — a scripted server, served on loopback or run in the
-//!   process as a fake driver, for tests without MongoDB.
+//!   options and `mongo.WriteResult`.
+//! - `mongo.testing` — a scripted server on loopback, for tests of code on
+//!   zefir-mongo without MongoDB: the client connects to it as to a
+//!   mongod.
 
 const std = @import("std");
 const errors = @import("errors.zig");
 const requests = @import("requests.zig");
 const results = @import("results.zig");
-const capabilities = @import("contract/capabilities.zig");
 
 pub const bson = @import("bson.zig");
 pub const wire = @import("wire.zig");
 pub const testing = @import("testing.zig");
 
+pub const Client = @import("Client.zig");
+pub const Cursor = @import("Cursor.zig");
+
 pub const Database = @import("crud/Database.zig");
 pub const Collection = @import("crud/Collection.zig");
-
-pub const Client = @import("contract/Client.zig");
-pub const Cursor = @import("contract/Cursor.zig");
-
-pub const native = @import("native.zig");
 
 pub const Error = errors.Error;
 pub const Outcome = errors.Outcome;
@@ -63,21 +60,14 @@ pub const WriteResult = results.WriteResult;
 pub const Upserted = results.Upserted;
 pub const WriteError = results.WriteError;
 pub const WriteConcernError = results.WriteConcernError;
-pub const Capabilities = capabilities.Capabilities;
-pub const ServerInfo = capabilities.ServerInfo;
-pub const ServerKind = capabilities.ServerKind;
-pub const contract_revision = capabilities.contract_revision;
 
 test {
     std.testing.refAllDecls(@This());
     _ = bson;
     _ = wire;
     _ = testing;
-    _ = native;
     _ = @import("errors_tests.zig");
     _ = @import("types_tests.zig");
-    _ = @import("contract/client_tests.zig");
-    _ = @import("contract/signature.zig");
     _ = Collection;
     _ = @import("crud/document_tests.zig");
     _ = @import("crud/id_tests.zig");
@@ -91,4 +81,30 @@ test {
     _ = @import("crud/database_tests.zig");
     _ = @import("crud/forms_tests.zig");
     _ = @import("crud/write_errors_tests.zig");
+    _ = @import("uri.zig");
+    _ = @import("uri_tests.zig");
+    _ = @import("OwnedOptions.zig");
+    _ = @import("engine/time.zig");
+    _ = @import("engine/race.zig");
+    _ = @import("engine/DeadlineStream.zig");
+    _ = @import("engine/Connection.zig");
+    _ = @import("engine/connect.zig");
+    _ = @import("engine/handshake.zig");
+    _ = @import("engine/scram.zig");
+    _ = @import("engine/KeyCache.zig");
+    _ = @import("engine/Pool.zig");
+    _ = @import("engine/errors.zig");
+    _ = @import("engine/command.zig");
+    _ = @import("engine/cursor.zig");
+    _ = @import("engine/write.zig");
+    _ = @import("tests/connection_tests.zig");
+    _ = @import("tests/handshake_tests.zig");
+    _ = @import("tests/auth_tests.zig");
+    _ = @import("tests/pool_tests.zig");
+    _ = @import("tests/lifecycle_tests.zig");
+    _ = @import("tests/command_tests.zig");
+    _ = @import("tests/errors_tests.zig");
+    _ = @import("tests/cursor_tests.zig");
+    _ = @import("tests/write_tests.zig");
+    _ = @import("tests/rules_tests.zig");
 }

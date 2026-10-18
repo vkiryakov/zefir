@@ -1,4 +1,4 @@
-//! The native driver against mongo-auth, a mongod with --auth and the
+//! The client against mongo-auth, a mongod with --auth and the
 //! users of init/users.js: each user gets in by the mechanism it has,
 //! speculatively in hello where the server takes it, in the database the
 //! connection string names; a wrong password, a user mongod does not know
@@ -11,7 +11,6 @@ const Io = std.Io;
 const testing = std.testing;
 const core = @import("core");
 const mongo = @import("mongo");
-const native = mongo.native;
 const bson = mongo.bson;
 const e2e = @import("root.zig");
 
@@ -25,7 +24,7 @@ fn uriOf(buffer: []u8, userinfo: []const u8, rest: []const u8) ![]const u8 {
 }
 
 /// A client of `uri`, connected; `name` says which in a failure.
-fn connected(io: Io, driver: *native.Client, uri: []const u8, name: []const u8) !void {
+fn connected(io: Io, driver: *mongo.Client, uri: []const u8, name: []const u8) !void {
     driver.* = try .init(testing.allocator, io, .{ .uri = uri });
     errdefer driver.deinit();
     var d: mongo.Diagnostics = .{};
@@ -36,11 +35,11 @@ fn connected(io: Io, driver: *native.Client, uri: []const u8, name: []const u8) 
 }
 
 /// The observer: the user `both`, root, which reads serverStatus.
-fn observer(io: Io, driver: *native.Client, buffer: []u8) !void {
+fn observer(io: Io, driver: *mongo.Client, buffer: []u8) !void {
     try connected(io, driver, try uriOf(buffer, "both:both-pass", "?appName=zefir-e2e-observer"), "observer");
 }
 
-fn run(io: Io, c: mongo.Client, body: bson.RawDocument) !bson.OwnedDocument {
+fn run(io: Io, c: *mongo.Client, body: bson.RawDocument) !bson.OwnedDocument {
     return c.runCommand(io, .of(within(io, .fromSeconds(10))), .{ .database = "admin", .body = body }, .{ .allocator = testing.allocator });
 }
 
@@ -59,7 +58,7 @@ fn stringOf(value: ?bson.Value) ![]const u8 {
 
 /// The user that the connection of `c` authenticated as, by
 /// connectionStatus.
-fn expectUser(io: Io, c: mongo.Client, user: []const u8, db: []const u8) !void {
+fn expectUser(io: Io, c: *mongo.Client, user: []const u8, db: []const u8) !void {
     const reply = try run(io, c, bson.literal(.{ .connectionStatus = 1 }));
     defer reply.deinit();
     const authenticated = try documentOf(try reply.raw().getPath("authInfo.authenticatedUsers"));
@@ -89,7 +88,7 @@ const Counts = struct {
 
 /// The counters of `mechanism` in serverStatus: 9.0 keeps them under
 /// `ingress`, and calls what 7.0 and 8.0 call `received` `total`.
-fn counts(io: Io, c: mongo.Client, mechanism: []const u8) !Counts {
+fn counts(io: Io, c: *mongo.Client, mechanism: []const u8) !Counts {
     const reply = try run(io, c, bson.literal(.{ .serverStatus = 1 }));
     defer reply.deinit();
     const mechanisms = try documentOf(try reply.raw().getPath("security.authentication.mechanisms"));
@@ -116,7 +115,7 @@ fn number(doc: bson.RawDocument, key: []const u8) !i64 {
 
 const Both = struct { sha1: Counts, sha256: Counts };
 
-fn countsOfBoth(io: Io, c: mongo.Client) !Both {
+fn countsOfBoth(io: Io, c: *mongo.Client) !Both {
     return .{ .sha1 = try counts(io, c, "SCRAM-SHA-1"), .sha256 = try counts(io, c, "SCRAM-SHA-256") };
 }
 
@@ -158,20 +157,20 @@ test "every user of users.js gets in, by the mechanism it has, speculatively in 
 }
 
 fn everyUser(io: Io) !void {
-    var watch: native.Client = undefined;
+    var watch: mongo.Client = undefined;
     var buffer: [160]u8 = undefined;
     try observer(io, &watch, &buffer);
     defer watch.deinit();
     for (users) |u| {
-        const before = try countsOfBoth(io, watch.client());
-        var driver: native.Client = undefined;
+        const before = try countsOfBoth(io, &watch);
+        var driver: mongo.Client = undefined;
         try connected(io, &driver, try uriOf(&buffer, u.userinfo, u.rest), u.name);
         defer driver.deinit();
-        expectUser(io, driver.client(), u.user, u.db) catch |err| {
+        expectUser(io, &driver, u.user, u.db) catch |err| {
             std.debug.print("{s}: {t}\n", .{ u.name, err });
             return err;
         };
-        const after = try countsOfBoth(io, watch.client());
+        const after = try countsOfBoth(io, &watch);
         const sha1 = after.sha1.since(before.sha1);
         const sha256 = after.sha256.since(before.sha256);
         const used, const other = switch (u.mechanism) {
@@ -193,11 +192,11 @@ test "without a user mongo-auth refuses commands, so the users above authenticat
 
 fn withoutUser(io: Io) !void {
     var buffer: [96]u8 = undefined;
-    var driver: native.Client = try .init(testing.allocator, io, .{ .uri = try std.fmt.bufPrint(&buffer, "mongodb://127.0.0.1:{d}", .{e2e.servers.auth_port}) });
+    var driver: mongo.Client = try .init(testing.allocator, io, .{ .uri = try std.fmt.bufPrint(&buffer, "mongodb://127.0.0.1:{d}", .{e2e.servers.auth_port}) });
     defer driver.deinit();
     try driver.connect(io, within(io, .fromSeconds(10)), null);
     var d: mongo.Diagnostics = .{};
-    try testing.expectError(error.CommandFailed, driver.client().runCommand(io, .of(.root), .{ .database = "admin", .body = bson.literal(.{ .listDatabases = 1 }) }, .{ .allocator = testing.allocator, .diagnostics = &d }));
+    try testing.expectError(error.CommandFailed, driver.runCommand(io, .of(.root), .{ .database = "admin", .body = bson.literal(.{ .listDatabases = 1 }) }, .{ .allocator = testing.allocator, .diagnostics = &d }));
     try testing.expectEqual(@as(i32, 13), d.server.?.code);
 }
 
@@ -216,7 +215,7 @@ fn refusedUsers(io: Io) !void {
     var buffer: [160]u8 = undefined;
     for (cases) |case| {
         const name, const userinfo, const rest, const code = case;
-        var driver: native.Client = try .init(testing.allocator, io, .{ .uri = try uriOf(&buffer, userinfo, rest) });
+        var driver: mongo.Client = try .init(testing.allocator, io, .{ .uri = try uriOf(&buffer, userinfo, rest) });
         defer driver.deinit();
         var d: mongo.Diagnostics = .{};
         driver.connect(io, within(io, .fromSeconds(30)), &d) catch |err| {
@@ -239,26 +238,26 @@ test "a password that SCRAM-SHA-256 would need SASLprep for is Unsupported, and 
 }
 
 fn saslPrep(io: Io) !void {
-    var watch: native.Client = undefined;
+    var watch: mongo.Client = undefined;
     var buffer: [160]u8 = undefined;
     try observer(io, &watch, &buffer);
     defer watch.deinit();
     const hint = "SCRAM-SHA-256 needs the password prepared by SASLprep, which v0.1 does for printable ASCII only: use a password of printable ASCII, or a user with SCRAM-SHA-1 credentials and authMechanism=SCRAM-SHA-1";
     // Ⅸ with Ⅳ, and IX with I, a soft hyphen and X, which SASLprep makes IX.
     for ([_][]const u8{ "%E2%85%A8:%E2%85%A3", "IX:I%C2%ADX" }) |userinfo| {
-        const before = try counts(io, watch.client(), "SCRAM-SHA-256");
-        var driver: native.Client = try .init(testing.allocator, io, .{ .uri = try uriOf(&buffer, userinfo, "") });
+        const before = try counts(io, &watch, "SCRAM-SHA-256");
+        var driver: mongo.Client = try .init(testing.allocator, io, .{ .uri = try uriOf(&buffer, userinfo, "") });
         defer driver.deinit();
         var d: mongo.Diagnostics = .{};
         try testing.expectError(error.Unsupported, driver.connect(io, within(io, .fromSeconds(30)), &d));
         try testing.expectEqualStrings(hint, d.message());
-        const seen = (try counts(io, watch.client(), "SCRAM-SHA-256")).since(before);
+        const seen = (try counts(io, &watch, "SCRAM-SHA-256")).since(before);
         try testing.expectEqual(@as(i64, 0), seen.speculative_tried);
         try testing.expectEqual(@as(i64, 0), seen.tried);
     }
     // Asked for by authMechanism, it is refused at init.
     var d: mongo.Diagnostics = .{};
-    try testing.expectError(error.Unsupported, native.Client.init(testing.allocator, io, .{ .uri = try uriOf(&buffer, "%E2%85%A8:%E2%85%A3", "?authMechanism=SCRAM-SHA-256"), .diagnostics = &d }));
+    try testing.expectError(error.Unsupported, mongo.Client.init(testing.allocator, io, .{ .uri = try uriOf(&buffer, "%E2%85%A8:%E2%85%A3", "?authMechanism=SCRAM-SHA-256"), .diagnostics = &d }));
     try testing.expectEqualStrings(hint, d.message());
 }
 
@@ -267,17 +266,17 @@ test "a connection after the first authenticates with the keys of the first: PBK
 }
 
 fn cachedKeys(io: Io) !void {
-    var watch: native.Client = undefined;
+    var watch: mongo.Client = undefined;
     var buffer: [160]u8 = undefined;
     try observer(io, &watch, &buffer);
     defer watch.deinit();
     const iterations = iterations: {
-        const reply = try run(io, watch.client(), bson.literal(.{ .getParameter = 1, .scramSHA256IterationCount = 1 }));
+        const reply = try run(io, &watch, bson.literal(.{ .getParameter = 1, .scramSHA256IterationCount = 1 }));
         defer reply.deinit();
         break :iterations try number(reply.raw(), "scramSHA256IterationCount");
     };
 
-    var driver: native.Client = try .init(testing.allocator, io, .{ .uri = try uriOf(&buffer, "sha256:sha256-pass", "?appName=zefir-e2e-keys") });
+    var driver: mongo.Client = try .init(testing.allocator, io, .{ .uri = try uriOf(&buffer, "sha256:sha256-pass", "?appName=zefir-e2e-keys") });
     defer driver.deinit();
     const clock: Io.Clock = .awake;
     const start = clock.now(io);
@@ -291,16 +290,16 @@ fn cachedKeys(io: Io) !void {
         .mode = .{ .times = 1 },
         .data = .{ .failCommands = .{"ping"}, .closeConnection = true, .appName = "zefir-e2e-keys" },
     });
-    const set = try run(io, watch.client(), fail_point);
+    const set = try run(io, &watch, fail_point);
     set.deinit();
-    defer if (run(io, watch.client(), bson.literal(.{ .configureFailPoint = "failCommand", .mode = "off" }))) |off| off.deinit() else |_| {};
+    defer if (run(io, &watch, bson.literal(.{ .configureFailPoint = "failCommand", .mode = "off" }))) |off| off.deinit() else |_| {};
     const ping = bson.literal(.{ .ping = 1 });
-    try testing.expectError(error.ConnectionLost, run(io, driver.client(), ping));
+    try testing.expectError(error.ConnectionLost, run(io, &driver, ping));
     const again = clock.now(io);
-    const reply = try run(io, driver.client(), ping);
+    const reply = try run(io, &driver, ping);
     reply.deinit();
     const second = again.durationTo(clock.now(io));
     try testing.expectEqual(@as(u32, 1), driver.keys.derivations);
-    try expectUser(io, driver.client(), "sha256", "admin");
+    try expectUser(io, &driver, "sha256", "admin");
     std.debug.print("     SCRAM-SHA-256, {d} iterations: the first connection {d} ms, the next with the cached keys {d} ms\n", .{ iterations, first.toMilliseconds(), second.toMilliseconds() });
 }

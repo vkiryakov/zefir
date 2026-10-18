@@ -125,7 +125,7 @@ fn readToEnd(io: Io) !void {
     defer driver.deinit();
     const op = within(io, .fromMilliseconds(4000));
     const comment = bson.literal(.{ .tag = "chunks" });
-    var cursor = try driver.client().openCursor(io, op, find("fs.chunks"), .{ .batch_size = 2, .comment = .{ .document = comment } });
+    var cursor = try driver.openCursor(io, op, find("fs.chunks"), .{ .batch_size = 2, .comment = .{ .document = comment } });
     defer cursor.deinit(io);
     try testing.expectEqual(@as(usize, 1), driver.stats().open_cursors);
     for (docs) |doc| try expectNext(io, cursor, op, doc);
@@ -153,10 +153,10 @@ fn noCursor(io: Io) !void {
     try served.connect(io, &driver);
     defer driver.deinit();
     var d: Diagnostics = .{};
-    try testing.expectError(error.ProtocolViolation, driver.client().openCursor(io, .of(.root), .{ .database = "app", .body = bson.literal(.{ .aggregate = "users", .pipeline = [0]i32{}, .cursor = .{} }) }, .{ .diagnostics = &d }));
+    try testing.expectError(error.ProtocolViolation, driver.openCursor(io, .of(.root), .{ .database = "app", .body = bson.literal(.{ .aggregate = "users", .pipeline = [0]i32{}, .cursor = .{} }) }, .{ .diagnostics = &d }));
     try testing.expectEqualStrings("the reply holds no cursor; the command may have run", d.message());
     var failure: ?bson.OwnedDocument = null;
-    try testing.expectError(error.CommandFailed, driver.client().openCursor(io, .of(.root), .{ .database = "app", .body = bson.literal(.{ .missing = 1 }) }, .{ .diagnostics = &d, .failure_reply = &failure }));
+    try testing.expectError(error.CommandFailed, driver.openCursor(io, .of(.root), .{ .database = "app", .body = bson.literal(.{ .missing = 1 }) }, .{ .diagnostics = &d, .failure_reply = &failure }));
     defer failure.?.deinit();
     try testing.expectEqualSlices(u8, namespace_not_found.bytes, failure.?.bytes);
     try testing.expectEqual(@as(i32, 26), d.server.?.code);
@@ -178,7 +178,7 @@ fn errorsOfGetMore(io: Io) !void {
     const script = &served.script;
     var d: Diagnostics = .{};
     const op = within(io, .fromMilliseconds(200));
-    var cursor = try driver.client().openCursor(io, op, find("users"), .{ .diagnostics = &d });
+    var cursor = try driver.openCursor(io, op, find("users"), .{ .diagnostics = &d });
     defer cursor.deinit(io);
     try expectNext(io, cursor, op, docs[0]);
     try time.sleepUntil(io, op.ctx.deadline.?);
@@ -214,7 +214,7 @@ fn notFound(io: Io) !void {
     try served.connect(io, &driver);
     defer driver.deinit();
     var d: Diagnostics = .{};
-    var cursor = try driver.client().openCursor(io, .of(.root), find("users"), .{ .diagnostics = &d });
+    var cursor = try driver.openCursor(io, .of(.root), find("users"), .{ .diagnostics = &d });
     defer cursor.deinit(io);
     try expectNext(io, cursor, .of(.root), docs[0]);
     served.router.get_more.store(.not_found, .release);
@@ -248,7 +248,7 @@ fn kills(io: Io) !void {
     try served.connect(io, &driver);
     defer driver.deinit();
     const script = &served.script;
-    const c = driver.client();
+    const c = &driver;
     {
         var cursor = try c.openCursor(io, .of(.root), find("users"), .{});
         defer cursor.deinit(io);
@@ -315,7 +315,7 @@ fn closeKills(io: Io) !void {
     var driver: Client = undefined;
     try served.connect(io, &driver);
     defer driver.deinit();
-    const c = driver.client();
+    const c = &driver;
     var a = try c.openCursor(io, .of(.root), find("a"), .{});
     defer a.deinit(io);
     var b = try c.openCursor(io, .of(.root), find("b"), .{});

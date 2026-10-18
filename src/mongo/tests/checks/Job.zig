@@ -9,7 +9,8 @@ const Allocator = std.mem.Allocator;
 const core = @import("core");
 const mongo = @import("mongo");
 const bson = mongo.bson;
-const Client = mongo.Client;
+/// The client of a check, as the checks hold it.
+const Client = *mongo.Client;
 const Cursor = mongo.Cursor;
 const Script = mongo.testing.Script;
 const FakeServer = mongo.testing.FakeServer;
@@ -28,7 +29,7 @@ arena: Allocator,
 options: checks.Options,
 failure: ?[]const u8 = null,
 /// The client of the check, once `scripted` or `live` has set it up.
-driver: mongo.native.Client = undefined,
+client: mongo.Client = undefined,
 /// The scripted server of the check, until `end`.
 stage: ?*Stage = null,
 /// Whether the client is set up and not freed yet.
@@ -317,23 +318,23 @@ pub fn scripted(job: *Job, stage: *Stage, handler: Script.Handler, hello: Hello)
     stage.start(job.io, job.gpa, handler, hello) catch |err| return job.fail("the FakeServer of the check did not start: error.{t}", .{err});
     job.stage = stage;
     try job.connect(stage.uri);
-    return job.driver.client();
+    return &job.client;
 }
 
 /// Connects a fresh client to the live mongod of `Options.live`. `end`
 /// undoes it.
 pub fn live(job: *Job) Error!Client {
     try job.connect(job.options.live.?.uri);
-    return job.driver.client();
+    return &job.client;
 }
 
 /// A fresh client of `uri`, connected; its memory is counted.
 fn connect(job: *Job, uri: []const u8) Error!void {
     var d: mongo.Diagnostics = .{};
-    job.driver = mongo.native.Client.init(job.client_gpa, job.io, .{ .uri = uri, .diagnostics = &d }) catch |err|
+    job.client = mongo.Client.init(job.client_gpa, job.io, .{ .uri = uri, .diagnostics = &d }) catch |err|
         return job.fail("Client.init of {s} returned error.{t}: {s}", .{ uri, err, d.message() });
-    job.driver.connect(job.io, .root, &d) catch |err| {
-        job.driver.deinit();
+    job.client.connect(job.io, .root, &d) catch |err| {
+        job.client.deinit();
         return job.fail("connect to {s} returned error.{t}: {s}", .{ uri, err, d.message() });
     };
     job.up = true;
@@ -341,15 +342,15 @@ fn connect(job: *Job, uri: []const u8) Error!void {
 
 /// `close` of the client, for a check of closing; `end` calls it again.
 pub fn close(job: *Job) void {
-    job.driver.close(job.io);
+    job.client.close(job.io);
 }
 
 /// Closes and frees the client of the check, then stops its server.
 /// Every call of the check has returned, and every cursor is freed.
 pub fn end(job: *Job) void {
     if (job.up) {
-        job.driver.close(job.io);
-        job.driver.deinit();
+        job.client.close(job.io);
+        job.client.deinit();
         job.up = false;
     }
     if (job.stage) |stage| {
@@ -381,22 +382,6 @@ pub const Stage = struct {
         s.server.cancel(io) catch {};
         s.listener.deinit(io);
         s.script.deinit();
-    }
-};
-
-/// Answers every command with one answer.
-pub const Answering = struct {
-    with: Script.Answer,
-
-    pub fn handler(a: *Answering) Script.Handler {
-        return .init(a);
-    }
-
-    pub fn answer(a: *Answering, io: Io, arena: Allocator, request: *const Script.Request) Script.HandlerError!Script.Answer {
-        _ = io;
-        _ = arena;
-        _ = request;
-        return a.with;
     }
 };
 

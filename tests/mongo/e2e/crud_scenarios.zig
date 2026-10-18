@@ -1,8 +1,8 @@
-//! The collection API against mongod: scenarios that take only a
-//! `mongo.Database`, so that every driver runs the same ones. crud.zig runs
-//! them on the native driver and on `FakeDriver` through `Proxy`. Each
-//! scenario works in collections of its own, which it drops before and
-//! after.
+//! The collection API against mongod: scenarios that take a
+//! `mongo.Database` and the limit its client batches writes by. crud.zig
+//! runs them on a client of mongod and on one of a FakeServer that relays
+//! to mongod. Each scenario works in collections of its own, which it
+//! drops before and after.
 
 const std = @import("std");
 const Io = std.Io;
@@ -13,7 +13,14 @@ const bson = mongo.bson;
 
 pub const Scenario = struct {
     name: []const u8,
-    run: *const fn (io: Io, db: mongo.Database) anyerror!void,
+    run: *const fn (io: Io, db: mongo.Database, server: Server) anyerror!void,
+};
+
+/// What the server of the client says in its hello.
+pub const Server = struct {
+    /// The most items of a write in one batch: mongod's own, or that of the
+    /// script of a FakeServer.
+    max_write_batch_size: usize = 100_000,
 };
 
 /// The scenarios, in their order.
@@ -29,10 +36,11 @@ pub const scenarios = [_]Scenario{
     .{ .name = "listCollections, runCommand, runCursorCommand, a drop twice and Database.drop", .run = collections },
 };
 
-/// Runs every scenario on `db`, and names the one that fails.
-pub fn runAll(io: Io, db: mongo.Database) !void {
+/// Runs every scenario on `db`, whose client talks to `server`, and names
+/// the one that fails.
+pub fn runAll(io: Io, db: mongo.Database, server: Server) !void {
     for (scenarios) |scenario| {
-        scenario.run(io, db) catch |err| {
+        scenario.run(io, db, server) catch |err| {
             std.debug.print("scenario '{s}': {t}\n", .{ scenario.name, err });
             return err;
         };
@@ -101,7 +109,7 @@ fn expectDocument(expected: bson.RawDocument, got: ?bson.OwnedDocument) !void {
     }
 }
 
-fn madeIds(io: Io, db: mongo.Database) anyerror!void {
+fn madeIds(io: Io, db: mongo.Database, _: Server) anyerror!void {
     const name = "crud_ids";
     try drop(io, db, name);
     defer drop(io, db, name) catch {};
@@ -144,7 +152,7 @@ fn madeIds(io: Io, db: mongo.Database) anyerror!void {
     }
 }
 
-fn duplicateKey(io: Io, db: mongo.Database) anyerror!void {
+fn duplicateKey(io: Io, db: mongo.Database, server: Server) anyerror!void {
     const name = "crud_unique";
     try drop(io, db, name);
     defer drop(io, db, name) catch {};
@@ -171,7 +179,7 @@ fn duplicateKey(io: Io, db: mongo.Database) anyerror!void {
     // Ordered: the duplicate at index 5 stops the write in its batch, and
     // no batch goes after it, so answered ends with that batch: 6 at a
     // maxWriteBatchSize of 3, all 10 in the one batch of mongod's limit.
-    const batch: usize = if (db.client.capabilities().server) |server| server.max_write_batch_size else 100_000;
+    const batch = server.max_write_batch_size;
     const Doc = struct { email: []const u8, n: i32 };
     var docs: [10]Doc = undefined;
     var emails: [10][16]u8 = undefined;
@@ -199,7 +207,7 @@ fn duplicateKey(io: Io, db: mongo.Database) anyerror!void {
     }
 }
 
-fn unorderedDuplicates(io: Io, db: mongo.Database) anyerror!void {
+fn unorderedDuplicates(io: Io, db: mongo.Database, _: Server) anyerror!void {
     const name = "crud_unordered";
     try drop(io, db, name);
     defer drop(io, db, name) catch {};
@@ -243,7 +251,7 @@ fn unorderedDuplicates(io: Io, db: mongo.Database) anyerror!void {
     }
 }
 
-fn findAndModify(io: Io, db: mongo.Database) anyerror!void {
+fn findAndModify(io: Io, db: mongo.Database, _: Server) anyerror!void {
     const name = "crud_find_and_modify";
     try drop(io, db, name);
     defer drop(io, db, name) catch {};
@@ -293,7 +301,7 @@ fn findAndModify(io: Io, db: mongo.Database) anyerror!void {
     try testing.expectEqual(@as(i32, 66), d.server.?.code);
 }
 
-fn upserts(io: Io, db: mongo.Database) anyerror!void {
+fn upserts(io: Io, db: mongo.Database, _: Server) anyerror!void {
     const name = "crud_upserts";
     try drop(io, db, name);
     defer drop(io, db, name) catch {};
@@ -365,7 +373,7 @@ fn nOf(doc: bson.RawDocument) !i64 {
     return (try doc.get("n") orelse return error.TestNoN).asI64();
 }
 
-fn findMany(io: Io, db: mongo.Database) anyerror!void {
+fn findMany(io: Io, db: mongo.Database, _: Server) anyerror!void {
     const name = "crud_find";
     try drop(io, db, name);
     defer drop(io, db, name) catch {};
@@ -415,7 +423,7 @@ fn findMany(io: Io, db: mongo.Database) anyerror!void {
     try testing.expect(try users.findOne(io, op(io), .{ .n = 1000 }, .{ .allocator = a }) == null);
 }
 
-fn counts(io: Io, db: mongo.Database) anyerror!void {
+fn counts(io: Io, db: mongo.Database, _: Server) anyerror!void {
     const name = "crud_count";
     try drop(io, db, name);
     defer drop(io, db, name) catch {};
@@ -515,7 +523,7 @@ fn indexNamed(io: Io, users: mongo.Collection, arena: std.mem.Allocator, name: [
     return error.TestNoIndex;
 }
 
-fn indexes(io: Io, db: mongo.Database) anyerror!void {
+fn indexes(io: Io, db: mongo.Database, _: Server) anyerror!void {
     const name = "crud_indexes";
     try drop(io, db, name);
     defer drop(io, db, name) catch {};
@@ -604,7 +612,7 @@ fn has(names: []const []const u8, name: []const u8) bool {
     return false;
 }
 
-fn collections(io: Io, db: mongo.Database) anyerror!void {
+fn collections(io: Io, db: mongo.Database, _: Server) anyerror!void {
     const first = "crud_list_a";
     const second = "crud_list_b";
     try drop(io, db, first);

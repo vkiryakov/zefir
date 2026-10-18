@@ -1,4 +1,4 @@
-//! The pool of the native driver against mongo-plain: 200 calls share
+//! The pool of the client against mongo-plain: 200 calls share
 //! four connections, first come first served, and the pool comes back to
 //! rest; a deadline or serverSelectionTimeoutMS that ends in line is
 //! PoolExhausted; `close` sends the calls in line away, lets the calls in
@@ -9,7 +9,6 @@ const Io = std.Io;
 const testing = std.testing;
 const core = @import("core");
 const mongo = @import("mongo");
-const native = mongo.native;
 const bson = mongo.bson;
 const e2e = @import("root.zig");
 
@@ -27,7 +26,7 @@ fn within(io: Io, duration: Io.Duration) core.Context {
 }
 
 /// A client of mongo-plain with the options `query`, connected.
-fn connected(io: Io, driver: *native.Client, buffer: []u8, query: []const u8, close_timeout: Io.Duration) !void {
+fn connected(io: Io, driver: *mongo.Client, buffer: []u8, query: []const u8, close_timeout: Io.Duration) !void {
     const uri = try std.fmt.bufPrint(buffer, "mongodb://127.0.0.1:{d}/?appName=zefir-e2e-pool&{s}", .{ e2e.servers.plain_port, query });
     driver.* = try .init(testing.allocator, io, .{ .uri = uri, .close_timeout = close_timeout });
     errdefer driver.deinit();
@@ -38,7 +37,7 @@ fn connected(io: Io, driver: *native.Client, buffer: []u8, query: []const u8, cl
     };
 }
 
-fn awaitStats(io: Io, driver: *native.Client, comptime field: []const u8, value: usize) !void {
+fn awaitStats(io: Io, driver: *mongo.Client, comptime field: []const u8, value: usize) !void {
     const give_up: core.Deadline = .after(Io.Clock.awake.now(io), .fromSeconds(20));
     while (@field(driver.stats(), field) != value) {
         if (give_up.isExpired(Io.Clock.awake.now(io))) return error.TestTimedOut;
@@ -49,7 +48,7 @@ fn awaitStats(io: Io, driver: *native.Client, comptime field: []const u8, value:
 /// Calls run in tasks of a group, which return nothing: each counts what
 /// it got against what it expected.
 const Calls = struct {
-    c: mongo.Client,
+    c: *mongo.Client,
     /// Null: success.
     expected: ?mongo.Error = null,
     message: []const u8 = "",
@@ -78,7 +77,7 @@ test "200 calls ping through four connections, served first come first served, a
 /// The calls in line: once a call has its connection, none of those that
 /// joined the line before it waits any more.
 const Line = struct {
-    driver: *native.Client,
+    driver: *mongo.Client,
     count: usize,
     calls: Calls,
     overtaken: std.atomic.Value(u32) = .init(0),
@@ -91,11 +90,11 @@ const Line = struct {
 };
 
 fn firstComeFirstServed(io: Io) !void {
-    var driver: native.Client = undefined;
+    var driver: mongo.Client = undefined;
     var buffer: [160]u8 = undefined;
     try connected(io, &driver, &buffer, "maxPoolSize=4", .fromSeconds(5));
     defer driver.deinit();
-    const c = driver.client();
+    const c = &driver;
     // Four calls hold the four connections while the line forms.
     var holders: Calls = .{ .c = c };
     var holding: Io.Group = .init;
@@ -139,11 +138,11 @@ test "a deadline that ends in line is PoolExhausted, and so is serverSelectionTi
 }
 
 fn exhausted(io: Io) !void {
-    var driver: native.Client = undefined;
+    var driver: mongo.Client = undefined;
     var buffer: [160]u8 = undefined;
     try connected(io, &driver, &buffer, "maxPoolSize=1&serverSelectionTimeoutMS=300", .fromSeconds(5));
     defer driver.deinit();
-    const c = driver.client();
+    const c = &driver;
     var holder: Calls = .{ .c = c };
     var holding: Io.Group = .init;
     defer holding.cancel(io);
@@ -165,11 +164,11 @@ test "close sends the calls in line away and cuts the calls in flight that outla
 }
 
 fn closeCuts(io: Io) !void {
-    var driver: native.Client = undefined;
+    var driver: mongo.Client = undefined;
     var buffer: [160]u8 = undefined;
     try connected(io, &driver, &buffer, "maxPoolSize=2", .fromMilliseconds(300));
     defer driver.deinit();
-    const c = driver.client();
+    const c = &driver;
     var in_flight: Calls = .{ .c = c, .expected = error.ConnectionLost, .message = "close() of the client cut the exchange" };
     var flying: Io.Group = .init;
     defer flying.cancel(io);
@@ -199,11 +198,11 @@ test "close lets the calls in flight end within close_timeout" {
 }
 
 fn closeWaits(io: Io) !void {
-    var driver: native.Client = undefined;
+    var driver: mongo.Client = undefined;
     var buffer: [160]u8 = undefined;
     try connected(io, &driver, &buffer, "maxPoolSize=2", .fromSeconds(5));
     defer driver.deinit();
-    const c = driver.client();
+    const c = &driver;
     var in_flight: Calls = .{ .c = c };
     var flying: Io.Group = .init;
     defer flying.cancel(io);

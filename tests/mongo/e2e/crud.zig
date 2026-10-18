@@ -1,55 +1,69 @@
-//! The collection API against mongo-plain: on the native driver, and on
-//! `FakeDriver` through `Proxy` with a `maxWriteBatchSize` of 3, so that
-//! writes go out in several batches. The scenarios are those of
-//! crud_scenarios.zig, which every driver runs.
+//! The collection API against mongo-plain: on a client of mongo-plain, and
+//! on a client of a FakeServer with a `maxWriteBatchSize` of 3 whose
+//! script relays every command to mongo-plain, so that writes go out in
+//! several batches, each answered by mongod. The scenarios are those of
+//! crud_scenarios.zig.
 
 const std = @import("std");
 const Io = std.Io;
 const testing = std.testing;
 const core = @import("core");
 const mongo = @import("mongo");
-const native = mongo.native;
 const bson = mongo.bson;
 const Script = mongo.testing.Script;
-const FakeDriver = mongo.testing.FakeDriver;
+const FakeServer = mongo.testing.FakeServer;
 const e2e = @import("root.zig");
-const Proxy = @import("Proxy.zig");
+const Relay = @import("Relay.zig");
 const crud_scenarios = @import("crud_scenarios.zig");
 
-test "the collection API on the native driver against mongo-plain" {
-    try e2e.onZio(onNativeDriver);
-}
-
-fn onNativeDriver(io: Io) !void {
-    var buffer: [64]u8 = undefined;
-    const uri = try std.fmt.bufPrint(&buffer, "mongodb://127.0.0.1:{d}", .{e2e.servers.plain_port});
-    var driver: native.Client = try .init(testing.allocator, io, .{ .uri = uri });
-    defer driver.deinit();
+/// A client of `uri`, connected.
+fn connected(io: Io, client: *mongo.Client, uri: []const u8) !void {
+    client.* = try .init(testing.allocator, io, .{ .uri = uri });
+    errdefer client.deinit();
     var d: mongo.Diagnostics = .{};
     const ctx = core.Context.root.withDeadline(.after(Io.Clock.awake.now(io), .fromSeconds(10)));
-    driver.connect(io, ctx, &d) catch |err| {
-        std.debug.print("connect: {t}: {s}\n", .{ err, d.message() });
+    client.connect(io, ctx, &d) catch |err| {
+        std.debug.print("connect to {s}: {t}: {s}\n", .{ uri, err, d.message() });
         return err;
     };
+}
+
+test "the collection API on a client of mongo-plain" {
+    try e2e.onZio(direct);
+}
+
+fn direct(io: Io) !void {
+    var buffer: [64]u8 = undefined;
+    var client: mongo.Client = undefined;
+    try connected(io, &client, try std.fmt.bufPrint(&buffer, "mongodb://127.0.0.1:{d}", .{e2e.servers.plain_port}));
+    defer client.deinit();
     var ids: bson.ObjectId.Generator = .init(io);
-    try crud_scenarios.runAll(io, .init(driver.client(), e2e.database, &ids));
+    try crud_scenarios.runAll(io, .init(&client, e2e.database, &ids), .{});
 }
 
-test "the collection API on FakeDriver through the proxy against mongo-plain, at a maxWriteBatchSize of 3" {
-    try e2e.onZio(onFakeDriver);
+test "the collection API on a client of a FakeServer that relays to mongo-plain, at a maxWriteBatchSize of 3" {
+    try e2e.onZio(relayed);
 }
 
-fn onFakeDriver(io: Io) !void {
-    var proxy: Proxy = .init(testing.allocator, e2e.servers.plain_port);
-    defer proxy.deinit(io);
-    var script: Script = .init(testing.allocator, proxy.handler());
+fn relayed(io: Io) !void {
+    var mongod_uri: [64]u8 = undefined;
+    var mongod: mongo.Client = undefined;
+    try connected(io, &mongod, try std.fmt.bufPrint(&mongod_uri, "mongodb://127.0.0.1:{d}", .{e2e.servers.plain_port}));
+    defer mongod.deinit();
+    var relay: Relay = .{ .mongod = &mongod };
+    var script: Script = .init(testing.allocator, relay.handler());
     defer script.deinit();
     script.hello.max_write_batch_size = 3;
-    var fake: FakeDriver = .init(testing.allocator, &script);
-    defer fake.deinit();
-    defer fake.close(io);
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var server = try io.concurrent(FakeServer.serve, .{ io, &listener, &script });
+    defer server.cancel(io) catch {};
+    var uri: [64]u8 = undefined;
+    var client: mongo.Client = undefined;
+    try connected(io, &client, try FakeServer.uri(&listener, &uri));
+    defer client.deinit();
     var ids: bson.ObjectId.Generator = .init(io);
-    try crud_scenarios.runAll(io, .init(fake.client(), e2e.database, &ids));
+    try crud_scenarios.runAll(io, .init(&client, e2e.database, &ids), .{ .max_write_batch_size = 3 });
 
     // The writes went out in batches of 3 items at most, and some in
     // batches of exactly 3.

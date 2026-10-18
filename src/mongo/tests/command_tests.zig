@@ -68,7 +68,7 @@ fn within(io: Io, duration: Io.Duration) mongo.OperationContext {
 }
 
 fn run(io: Io, driver: *Client, op: mongo.OperationContext, command: mongo.Command) !void {
-    const reply = try driver.client().runCommand(io, op, command, .{ .allocator = testing.allocator });
+    const reply = try driver.runCommand(io, op, command, .{ .allocator = testing.allocator });
     reply.deinit();
 }
 
@@ -155,7 +155,7 @@ fn roundTrip(io: Io) !void {
     driver.round_trips.add(io, .fromMilliseconds(400));
     driver.round_trips.add(io, .fromMilliseconds(450));
     var d: Diagnostics = .{};
-    try testing.expectError(error.DeadlineExceeded, driver.client().runCommand(io, within(io, .fromMilliseconds(300)), count, .{ .allocator = testing.allocator, .diagnostics = &d }));
+    try testing.expectError(error.DeadlineExceeded, driver.runCommand(io, within(io, .fromMilliseconds(300)), count, .{ .allocator = testing.allocator, .diagnostics = &d }));
     try testing.expectEqualStrings("less than 1 ms beyond the shortest round trip to the server (400000 us) was left of the deadline before the command went out", d.message());
     try testing.expectEqual(Diagnostics.Phase.send, d.phase.?);
     try testing.expectEqual(@as(usize, 0), served.script.received(io));
@@ -210,7 +210,7 @@ fn callersMaxTime(io: Io) !void {
     try driver.connect(io, .root, null);
     const received = served.script.received(io);
     var d: Diagnostics = .{};
-    try testing.expectError(error.InvalidArgument, driver.client().runCommand(io, .of(.root), own, .{ .allocator = testing.allocator, .diagnostics = &d }));
+    try testing.expectError(error.InvalidArgument, driver.runCommand(io, .of(.root), own, .{ .allocator = testing.allocator, .diagnostics = &d }));
     try testing.expectEqualStrings("the command holds maxTimeMS and timeoutMS of the connection string gives the call a deadline, from which the driver writes maxTimeMS: drop one of the two", d.message());
     try testing.expectEqual(received, served.script.received(io));
 }

@@ -5,7 +5,6 @@
 const std = @import("std");
 const Io = std.Io;
 const mongo = @import("mongo");
-const native = mongo.native;
 const Script = mongo.testing.Script;
 const FakeServer = mongo.testing.FakeServer;
 
@@ -38,7 +37,7 @@ pub fn main(init: std.process.Init) !void {
     defer server.cancel(io) catch {};
 
     var uri: [64]u8 = undefined;
-    var driver: native.Client = try .init(init.gpa, io, .{ .uri = try FakeServer.uri(&listener, &uri) });
+    var driver: mongo.Client = try .init(init.gpa, io, .{ .uri = try FakeServer.uri(&listener, &uri) });
     defer driver.deinit();
     try driver.connect(io, .root, null);
 
@@ -47,6 +46,6 @@ pub fn main(init: std.process.Init) !void {
     var vtable = io.vtable.*;
     const other: Io = .{ .userdata = io.userdata, .vtable = &vtable };
     const ping: mongo.Command = .{ .database = "admin", .body = mongo.bson.literal(.{ .ping = 1 }) };
-    const reply = driver.client().runCommand(other, .of(.root), ping, .{ .allocator = init.gpa }) catch return;
+    const reply = driver.runCommand(other, .of(.root), ping, .{ .allocator = init.gpa }) catch return;
     reply.deinit();
 }

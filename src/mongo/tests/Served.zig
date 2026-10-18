@@ -57,8 +57,9 @@ pub fn stop(s: *Served, io: Io) void {
     s.script.deinit();
 }
 
-pub fn client(s: *Served) mongo.Client {
-    return s.driver.client();
+/// The client, connected to the server.
+pub fn client(s: *Served) *Client {
+    return &s.driver;
 }
 
 /// The database `name` of the client, whose inserts take their `_id`s

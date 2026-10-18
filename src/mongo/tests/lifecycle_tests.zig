@@ -79,7 +79,7 @@ const Served = struct {
 /// error with `message`.
 fn run(io: Io, driver: *Client, command: mongo.Command, expected: ?mongo.Error, message: []const u8) !void {
     var d: Diagnostics = .{};
-    const result = driver.client().runCommand(io, .of(.root), command, .{ .allocator = testing.allocator, .diagnostics = &d });
+    const result = driver.runCommand(io, .of(.root), command, .{ .allocator = testing.allocator, .diagnostics = &d });
     if (expected) |err| {
         if (result) |reply| reply.deinit() else |_| {}
         try testing.expectError(err, result);
@@ -335,7 +335,7 @@ fn shutdownClears(io: Io) !void {
     for ([_]i32{ 91, 11600 }, 1..) |code, clears| {
         var d: Diagnostics = .{};
         const going: mongo.Command = .{ .database = "admin", .body = if (code == 91) bson.literal(.{ .goingaway = 1, .code = 91 }) else bson.literal(.{ .goingaway = 1, .code = 11600 }) };
-        try testing.expectError(error.CommandFailed, driver.client().runCommand(io, .of(.root), going, .{ .allocator = testing.allocator, .diagnostics = &d }));
+        try testing.expectError(error.CommandFailed, driver.runCommand(io, .of(.root), going, .{ .allocator = testing.allocator, .diagnostics = &d }));
         try testing.expectEqual(code, d.server.?.code);
         const stats = driver.stats();
         try testing.expectEqual(@as(u64, clears), stats.clears);
