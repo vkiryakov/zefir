@@ -33,6 +33,11 @@
 //! its `Diagnostics.server` holds the labels SystemOverloadedError and
 //! RetryableError, code 0, unless the host name is to blame.
 //!
+//! It logs to `std.log.scoped(.mongo)`, as warnings: the options of the
+//! connection string it skips, the clears of the pool and the servers that
+//! refuse a connection. Bodies of commands, passwords and the replies of
+//! authentication never go to the log.
+//!
 //! After `connect` the client must stay where it is.
 
 const std = @import("std");
@@ -54,6 +59,7 @@ const handshake = @import("engine/handshake.zig");
 const KeyCache = @import("engine/KeyCache.zig");
 const scram = @import("engine/scram.zig");
 const time = @import("engine/time.zig");
+const log = std.log.scoped(.mongo);
 const Client = @This();
 
 gpa: Allocator,
@@ -273,8 +279,17 @@ fn open(self: *Client, io: Io, call: Pool.Limits, attempt: *connect_.Attempt, d:
         .metadata = self.metadata.raw(),
         .auth = if (self.options.credentials()) |c| .{ .credentials = c, .keys = &self.keys } else null,
     };
-    const conn = connect_.open(io, self.gpa, address, &setup, budget, attempt, d) catch |err| return switch (err) {
-        error.Unavailable, error.Unsupported, error.AuthenticationFailed, error.OutOfMemory => |e| e,
+    // The reason of a refusal goes to the log too.
+    var own: Diagnostics = .{};
+    const why = d orelse &own;
+    const conn = connect_.open(io, self.gpa, address, &setup, budget, attempt, why) catch |err| return switch (err) {
+        error.Unavailable, error.OutOfMemory => |e| e,
+        error.Unsupported, error.AuthenticationFailed => |e| {
+            // The text is the server's errmsg or the driver's own: no
+            // password, no reply of authentication.
+            log.warn("{f} refused a connection: {t}: {s}", .{ address, e, why.message() });
+            return e;
+        },
         error.Timeout => switch (by) {
             .deadline => fail(d, .connect, error.DeadlineExceeded, "the deadline passed while the client connected to {f}", .{address}),
             .connect_timeout => overloaded(d, "{f} did not answer within connectTimeoutMS ({d} ms)", .{ address, uri.connect_timeout.?.toMilliseconds() }),

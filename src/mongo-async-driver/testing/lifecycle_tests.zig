@@ -16,6 +16,7 @@ const Diagnostics = mongo.Diagnostics;
 const FakeServer = mongo.testing.FakeServer;
 const Script = mongo.testing.Script;
 const Client = @import("../Client.zig");
+const Stats = @import("../Stats.zig");
 const Pool = @import("../engine/Pool.zig");
 const time = @import("../engine/time.zig");
 const within5s = @import("connection_tests.zig").within5s;
@@ -23,14 +24,15 @@ const within5s = @import("connection_tests.zig").within5s;
 const ping: mongo.Command = .{ .database = "admin", .body = bson.literal(.{ .ping = 1 }) };
 const slow: mongo.Command = .{ .database = "admin", .body = bson.literal(.{ .slow = 1 }) };
 
-/// Answers `slow` after `delay`, and anything else with `{ok: 1.0}` at
-/// once.
+/// Answers `slow` after `delay`, `breakme` by closing the connection, and
+/// anything else with `{ok: 1.0}` at once.
 const Slow = struct {
     delay: Io.Duration,
 
     pub fn answer(s: *Slow, io: Io, arena: std.mem.Allocator, request: *const Script.Request) Script.HandlerError!Script.Answer {
         _ = .{ io, arena };
         if (std.mem.eql(u8, request.name, "slow")) return .{ .delayed = .{ .after = s.delay, .reply = Script.ok } };
+        if (std.mem.eql(u8, request.name, "breakme")) return .close_connection;
         return .{ .reply = Script.ok };
     }
 };
@@ -258,4 +260,41 @@ fn closeStopsOpening(io: Io) !void {
     try testing.expect(start.durationTo(time.now(io)).toMilliseconds() < 1000);
     try connecting.await(io);
     try testing.expectEqual(@as(usize, 0), driver.stats().opening);
+}
+
+test "stats count the connections idle, in use and opening, the calls in line, the generation and the clears" {
+    try within5s(testing.io, statsTell, .{testing.io});
+}
+
+fn statsTell(io: Io) !void {
+    var served: Served = undefined;
+    try served.start(io, .fromMilliseconds(300));
+    defer served.stop(io);
+    var driver: Client = try .init(testing.allocator, io, .{ .uri = try served.uri("?maxPoolSize=1") });
+    defer driver.deinit();
+    const none: Stats = .{ .connections = 0, .idle = 0, .in_use = 0, .opening = 0, .waiting = 0, .generation = 0, .clears = 0, .open_cursors = 0 };
+    try testing.expectEqual(none, driver.stats());
+    try driver.connect(io, .root, null);
+    var expected = none;
+    expected.connections = 1;
+    expected.idle = 1;
+    try testing.expectEqual(expected, driver.stats());
+
+    var holder = try io.concurrent(run, .{ io, &driver, slow, null, "" });
+    try awaitReceived(io, &served.script, "slow", 1);
+    var waiter = try io.concurrent(run, .{ io, &driver, ping, null, "" });
+    try awaitStats(io, &driver, "waiting", 1);
+    try testing.expectEqual(Stats{ .connections = 1, .idle = 0, .in_use = 1, .opening = 0, .waiting = 1, .generation = 0, .clears = 0, .open_cursors = 0 }, driver.stats());
+    try holder.await(io);
+    try waiter.await(io);
+    try testing.expectEqual(expected, driver.stats());
+
+    // A connection that breaks clears the pool.
+    try run(io, &driver, .{ .database = "admin", .body = bson.literal(.{ .breakme = 1 }) }, error.ConnectionLost, try std.fmt.bufPrint(&served.buffer, "the server at 127.0.0.1:{d} closed the connection", .{FakeServer.port(&served.listener)}));
+    try testing.expectEqual(Stats{ .connections = 0, .idle = 0, .in_use = 0, .opening = 0, .waiting = 0, .generation = 1, .clears = 1, .open_cursors = 0 }, driver.stats());
+    // The probe opens a connection of the new generation.
+    try run(io, &driver, ping, null, "");
+    try testing.expectEqual(Stats{ .connections = 1, .idle = 1, .in_use = 0, .opening = 0, .waiting = 0, .generation = 1, .clears = 1, .open_cursors = 0 }, driver.stats());
+    driver.close(io);
+    try testing.expectEqual(Stats{ .connections = 0, .idle = 0, .in_use = 0, .opening = 0, .waiting = 0, .generation = 1, .clears = 1, .open_cursors = 0 }, driver.stats());
 }
