@@ -689,6 +689,44 @@ pub fn build(b: *std.Build) void {
         test_mongo.dependOn(&compile.step);
     }
 
+    // mongo compile errors of the contract: drivers and cursors whose
+    // methods do not fit mongo.Client and mongo.Cursor. As with the
+    // transports of rpc, each test must fail with exactly one error, the
+    // message next to its name, and its note "called at comptime here" at
+    // the check in zefir-mongo.
+    const mongo_contract_errors = b.createModule(.{
+        .root_source_file = b.path("src/mongo/tests/contract_errors.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+        .imports = &.{
+            .{ .name = "mongo", .module = mongo },
+        },
+    });
+    const run_command_signature = "pub fn runCommand(self: *@This(), io: std.Io, op: mongo.OperationContext, command: *const mongo.Command, options: mongo.CommandOptions) mongo.Error!mongo.bson.OwnedDocument";
+    const open_cursor_signature = "pub fn openCursor(self: *@This(), io: std.Io, op: mongo.OperationContext, command: *const mongo.Command, options: mongo.CursorOptions) mongo.Error!mongo.Cursor";
+    const write_signature = "pub fn write(self: *@This(), io: std.Io, op: mongo.OperationContext, request: *const mongo.WriteRequest, options: mongo.WriteOptions) mongo.Error!mongo.WriteResult";
+    for ([_][2][]const u8{
+        .{ "client init with a value", "mongo.Client.init: pass a pointer to the driver, e.g. &driver; got contract_errors.Driver" },
+        .{ "client init with a pointer to a constant", "mongo.Client.init: the driver must be mutable, declared with var; got *const contract_errors.Driver" },
+        .{ "driver without write", "mongo.Client.init: contract_errors.test.driver without write.NoWrite has no method write; expected " ++ write_signature },
+        .{ "runCommand that takes the command by value", "mongo.Client.init: contract_errors.test.runCommand that takes the command by value.ByValue.runCommand has another signature; expected " ++ run_command_signature },
+        .{ "openCursor with an inferred error set", "mongo.Client.init: contract_errors.test.openCursor with an inferred error set.Inferred.openCursor has another signature; expected " ++ open_cursor_signature },
+        .{ "capabilities that take io", "mongo.Client.init: contract_errors.test.capabilities that take io.WithIo.capabilities has another signature; expected pub fn capabilities(self: *@This()) mongo.Capabilities" },
+        .{ "cursor init with a value", "mongo.Cursor.init: pass a pointer to the cursor, e.g. &cursor; got contract_errors.Cursor" },
+        .{ "cursor init with a pointer to a constant", "mongo.Cursor.init: the cursor must be mutable, declared with var; got *const contract_errors.Cursor" },
+        .{ "cursor without close", "mongo.Cursor.init: contract_errors.test.cursor without close.NoClose has no method close; expected pub fn close(self: *@This(), io: std.Io) void" },
+        .{ "next that gives an owned document", "mongo.Cursor.init: contract_errors.test.next that gives an owned document.Owned.next has another signature; expected pub fn next(self: *@This(), io: std.Io, op: mongo.OperationContext) mongo.Error!?mongo.bson.RawDocument" },
+    }, 0..) |case, i| {
+        const compile = b.addTest(.{
+            .name = b.fmt("mongo-contract-error-{d}", .{i}),
+            .root_module = mongo_contract_errors,
+            .filters = &.{case[0]},
+        });
+        compile.expect_errors = .{ .exact = b.allocator.dupe([]const u8, &.{ case[1], "note: called at comptime here" }) catch @panic("OOM") };
+        test_mongo.dependOn(&compile.step);
+    }
+
     // rpc-nats panic program: a second conn() of one ZefirNats panics in
     // safe builds, since one adapter serves one transport. Like the rpc
     // ones above, it ends in its own panic handler with code 3 and gets

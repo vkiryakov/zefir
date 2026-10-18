@@ -6,6 +6,9 @@
 //!   read a document where it lies, check it, write one, turn structs and
 //!   literals into documents and documents into structs, and print it as
 //!   Extended JSON for logs and test messages.
+//! - `mongo.Client` and `mongo.Cursor` — the contract between zefir and a
+//!   driver: a pointer and a table of functions, with the rules of the
+//!   calls checked once, here, for every driver.
 //! - `mongo.Error`, `mongo.outcome`, `mongo.Diagnostics` — what can go
 //!   wrong in a call, whether the server may have run it, and the details
 //!   for logs.
@@ -21,6 +24,9 @@ const results = @import("contract/results.zig");
 const capabilities = @import("contract/capabilities.zig");
 
 pub const bson = @import("bson.zig");
+
+pub const Client = @import("contract/Client.zig");
+pub const Cursor = @import("contract/Cursor.zig");
 
 pub const Error = errors.Error;
 pub const Outcome = errors.Outcome;
@@ -51,4 +57,6 @@ test {
     _ = bson;
     _ = @import("contract/errors_tests.zig");
     _ = @import("contract/types_tests.zig");
+    _ = @import("contract/client_tests.zig");
+    _ = @import("contract/signature.zig");
 }
