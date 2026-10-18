@@ -131,6 +131,9 @@ edit tests/mongo-async-driver/build.zig.zon     | mongo zefir
 edit examples/rpc-custom-transport/src/root.zig | rpc rpc-nats rpc-log zefir
 edit examples/rpc-custom-transport/consumer/build.zig | rpc rpc-nats rpc-log zefir
 edit examples/rpc-custom-transport/README.md    | rpc rpc-nats rpc-log zefir
+edit examples/mongo-custom-driver/src/root.zig  | mongo zefir
+edit examples/mongo-custom-driver/consumer/build.zig | mongo zefir
+edit examples/mongo-custom-driver/README.md     | mongo zefir
 edit examples/other/main.zig                    | core log confy validator rpc rpc-nats rpc-log orm mongo nats http zefir
 edit src/core/root.zig src/nats/root.zig        | core log confy validator rpc rpc-nats rpc-log orm mongo nats http zefir
 edit src/confy/examples/README.md               | confy rpc rpc-nats rpc-log nats http zefir

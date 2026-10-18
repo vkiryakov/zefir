@@ -13,9 +13,10 @@
 # mongo. docker-compose.yml, the servers of nats, rpc-nats and mongo,
 # counts as all three.
 # examples/rpc-custom-transport/, a transport outside zefir that CI runs
-# against rpc, counts as rpc. build.zig, build.zig.zon, src/zefir.zig,
-# .github/ and any other path the script does not know affect every
-# module.
+# against rpc, counts as rpc, and examples/mongo-custom-driver/, a driver
+# outside zefir that CI runs against mongo, as mongo. build.zig,
+# build.zig.zon, src/zefir.zig, .github/ and any other path the script does
+# not know affect every module.
 # Documentation outside src/ (*.md files and docs/) affects none, but
 # README.md at the root: its "rpc in a minute" and "http in a minute" are
 # programs of the guides of rpc and of http, which their tests check, so it
@@ -96,6 +97,7 @@ elif [ $# -eq 2 ] && [ -n "$1" ] && [ -n "$2" ]; then
         tests/http/*) changed="$changed http" ;;
         tests/mongo-async-driver/*) changed="$changed mongo" ;;
         examples/rpc-custom-transport/*) changed="$changed rpc" ;;
+        examples/mongo-custom-driver/*) changed="$changed mongo" ;;
         docker-compose.yml) changed="$changed nats rpc-nats mongo" ;;
         README.md) changed="$changed rpc http" ;;
         docs/* | *.md) ;;
