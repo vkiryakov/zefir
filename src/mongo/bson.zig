@@ -9,6 +9,8 @@
 //! - `Builder` — writes a document, element by element.
 //! - `encode` — writes a struct as a document, by the types of its fields;
 //!   `Builder.put` writes one value so.
+//! - `literal` — writes a document known at compile time, such as a sort,
+//!   into static bytes.
 //! - `Value` — the value of one element, of any BSON type; its strings and
 //!   documents are slices into the document.
 //! - The types Zig has no type for: `ObjectId` with its `Generator`,
@@ -26,6 +28,7 @@ const encoding = @import("bson/encode.zig");
 
 pub const encode = encoding.encode;
 pub const EncodeOptions = encoding.EncodeOptions;
+pub const literal = @import("bson/literal.zig").literal;
 pub const RawDocument = @import("bson/RawDocument.zig");
 pub const OwnedDocument = @import("bson/OwnedDocument.zig");
 pub const Builder = @import("bson/Builder.zig");
@@ -62,4 +65,5 @@ test {
     _ = @import("bson/ejson_tests.zig");
     _ = @import("bson/fuzz.zig");
     _ = @import("bson/encode_tests.zig");
+    _ = @import("bson/literal_tests.zig");
 }
