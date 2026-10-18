@@ -122,10 +122,12 @@ edit src/rpc-log/AccessLog.zig                  | rpc-log zefir
 edit src/nats/Client.zig                        | rpc-nats nats zefir
 edit tests/nats/e2e/pubsub.zig                  | rpc-nats nats zefir
 edit tests/nats/README.md                       | rpc-nats nats zefir
-edit docker-compose.yml                         | rpc-nats nats zefir
+edit docker-compose.yml                         | rpc-nats mongo nats zefir
 edit tests/rpc-nats/e2e/root.zig                | rpc-nats zefir
 edit tests/rpc-nats/conf/acl.conf               | rpc-nats zefir
 edit tests/http/build.zig                       | http zefir
+edit tests/mongo-async-driver/e2e/wire.zig      | mongo zefir
+edit tests/mongo-async-driver/build.zig.zon     | mongo zefir
 edit examples/rpc-custom-transport/src/root.zig | rpc rpc-nats rpc-log zefir
 edit examples/rpc-custom-transport/consumer/build.zig | rpc rpc-nats rpc-log zefir
 edit examples/rpc-custom-transport/README.md    | rpc rpc-nats rpc-log zefir

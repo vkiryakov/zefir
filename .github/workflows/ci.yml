@@ -97,6 +97,12 @@ jobs:
         shell: bash
         working-directory: tests/http
         run: zig build check --summary all
+      # The same for tests/mongo-async-driver, the end-to-end tests of
+      # zefir-mongo, which need mongod in Docker.
+      - if: contains(format(' {0} ', env.MODULES), ' mongo ')
+        shell: bash
+        working-directory: tests/mongo-async-driver
+        run: zig build check --summary all
 
   # The tests again under ThreadSanitizer; it does not build for Windows.
   tsan:
@@ -153,7 +159,7 @@ jobs:
       - run: >-
           zig fmt --check build.zig build.zig.zon src tests examples
           --exclude tests/nats/zig-pkg --exclude tests/rpc-nats/zig-pkg
-          --exclude tests/http/zig-pkg
+          --exclude tests/http/zig-pkg --exclude tests/mongo-async-driver/zig-pkg
           --exclude examples/rpc-custom-transport/zig-pkg
           --exclude examples/rpc-custom-transport/consumer/zig-pkg
 
