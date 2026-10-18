@@ -125,6 +125,13 @@ pub const Options = struct {
 /// The checks. Later releases may add checks, so a `switch` over it needs
 /// an `else` branch.
 pub const Check = enum {
+    s1,
+    s2,
+    s3,
+    s4,
+    s5,
+    s6,
+    s7,
     s19,
 
     /// "S1" to "S21", "L1" to "L10".
@@ -137,6 +144,13 @@ pub const Check = enum {
     /// What the check proves, in a few words.
     pub fn title(check: Check) []const u8 {
         return switch (check) {
+            .s1 => "a command goes out as it is, with $db; its reply comes back byte for byte",
+            .s2 => "the driver's fields: maxTimeMS within the deadline, none in getMore and killCursors, no sessions",
+            .s3 => "ok: 0 is CommandFailed with the server's error and reply; code 50 is Timeout",
+            .s4 => "not sent: a past deadline, a canceled token and a bad request reach no server",
+            .s5 => "a deadline in flight: Timeout on time; the late reply is not seen",
+            .s6 => "cancelation in flight: Interrupted, and the task keeps its cancelation",
+            .s7 => "64 calls at once with random delays get their own replies; a cursor moves between tasks",
             .s19 => "capabilities: the revision, the four of revision 1, none reserved, stable, a name",
         };
     }
@@ -332,6 +346,13 @@ fn go(job: *Job, check: Check) void {
 
 fn runBody(job: *Job, check: Check) Job.Error!void {
     return switch (check) {
+        .s1 => scripted.s1(job),
+        .s2 => scripted.s2(job),
+        .s3 => scripted.s3(job),
+        .s4 => scripted.s4(job),
+        .s5 => scripted.s5(job),
+        .s6 => scripted.s6(job),
+        .s7 => scripted.s7(job),
         .s19 => scripted.s19(job),
     };
 }

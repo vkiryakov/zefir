@@ -58,7 +58,7 @@ test "FakeDriver passes every check of layer S but S16, which is for drivers on 
     defer report.deinit();
     try expectNoFailures(&report);
     try testing.expectEqualStrings("fake", report.driver_name);
-    try testing.expectEqual(@as(usize, 1), report.passedCount());
+    try testing.expectEqual(@as(usize, 8), report.passedCount());
     try testing.expectEqual(@as(usize, 0), report.skippedCount());
 }
 
@@ -76,12 +76,18 @@ const Flaw = enum {
     claims_sessions,
     /// setUp takes memory that tearDown does not give back.
     leaks,
+    /// runCommand adds a field of its own to the command.
+    adds_field,
+    /// runCommand takes the cancelation of its task that it reports as
+    /// Interrupted, instead of leaving it to the task.
+    swallows_cancel,
 };
 
 /// `FakeDriver` with one flaw: the harness and the driver in one object.
 const Flawed = struct {
     flaw: Flaw,
     fake: FakeDriver = undefined,
+    gpa: std.mem.Allocator = undefined,
     /// What `leaks` took, one block a setUp: the test frees it, from the
     /// allocator under the suite's.
     leaked: [4][]u8 = undefined,
@@ -93,6 +99,7 @@ const Flawed = struct {
             .live => return error.NoLiveServer,
         };
         f.fake = .init(gpa, script);
+        f.gpa = gpa;
         if (f.flaw == .leaks and f.leaks < f.leaked.len) {
             f.leaked[f.leaks] = try gpa.alloc(u8, 16);
             f.leaks += 1;
@@ -116,7 +123,23 @@ const Flawed = struct {
     }
 
     pub fn runCommand(f: *Flawed, io: Io, op: mongo.OperationContext, command: *const mongo.Command, options: mongo.CommandOptions) mongo.Error!bson.OwnedDocument {
-        return f.fake.runCommand(io, op, command, options);
+        switch (f.flaw) {
+            .adds_field => {
+                var b: bson.Builder = .init(f.gpa);
+                defer b.deinit();
+                var it = command.body.iterator();
+                while (it.next() catch return error.InvalidArgument) |element| b.putValue(element.key, element.value) catch return error.OutOfMemory;
+                b.putInt32("zefir", 1) catch return error.OutOfMemory;
+                const body = b.finish() catch return error.OutOfMemory;
+                defer body.deinit();
+                return f.fake.runCommand(io, op, &.{ .database = command.database, .body = body.raw() }, options);
+            },
+            .swallows_cancel => return f.fake.runCommand(io, op, command, options) catch |err| {
+                if (err == error.Interrupted) io.checkCancel() catch {};
+                return err;
+            },
+            else => return f.fake.runCommand(io, op, command, options),
+        }
     }
 
     pub fn openCursor(f: *Flawed, io: Io, op: mongo.OperationContext, command: *const mongo.Command, options: mongo.CursorOptions) mongo.Error!mongo.Cursor {
@@ -139,6 +162,20 @@ test "a driver that claims a reserved capability fails S19, which names it" {
     var report = try conformance.run(testing.io, testing.allocator, &flawed, .{ .only = &.{.s19} });
     defer report.deinit();
     try expectFailed(&report, .s19, "sessions");
+}
+
+test "a driver that adds a field to the command fails S1, which names the field" {
+    var flawed: Flawed = .{ .flaw = .adds_field };
+    var report = try conformance.run(testing.io, testing.allocator, &flawed, .{ .only = &.{.s1} });
+    defer report.deinit();
+    try expectFailed(&report, .s1, "'zefir'");
+}
+
+test "a driver that swallows the cancelation of its task fails S6" {
+    var flawed: Flawed = .{ .flaw = .swallows_cancel };
+    var report = try conformance.run(testing.io, testing.allocator, &flawed, .{ .only = &.{.s6} });
+    defer report.deinit();
+    try expectFailed(&report, .s6, "swallowed");
 }
 
 test "a driver that keeps memory after tearDown fails the check with a leak" {
@@ -184,6 +221,8 @@ test "the report has a line a check, with the reason of each failure and skip" {
     defer report.deinit();
     var buffer: [16 * 1024]u8 = undefined;
     const text = try std.fmt.bufPrint(&buffer, "{f}", .{&report});
-    try testing.expect(std.mem.startsWith(u8, text, "mongo conformance of \"fake\": 0 passed, 1 failed, 0 skipped\n"));
+    var first: [128]u8 = undefined;
+    try testing.expect(std.mem.startsWith(u8, text, try std.fmt.bufPrint(&first, "mongo conformance of \"fake\": {d} passed, 1 failed, {d} skipped\n", .{ report.passedCount(), report.skippedCount() })));
     try testing.expect(std.mem.find(u8, text, "\n  FAILED   S19  capabilities: ") != null);
+    try testing.expect(std.mem.find(u8, text, "\n  passed   S1   ") != null);
 }

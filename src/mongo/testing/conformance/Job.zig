@@ -89,6 +89,8 @@ pub fn expectError(job: *Job, result: anytype, expected: errors.Error, comptime 
 pub fn discard(job: *Job, value: anytype) void {
     switch (@TypeOf(value)) {
         bson.OwnedDocument => value.deinit(),
+        // A document of a cursor is borrowed.
+        ?bson.RawDocument => {},
         Cursor => value.deinit(job.io),
         results.WriteResult => {
             var result = value;
@@ -96,6 +98,14 @@ pub fn discard(job: *Job, value: anytype) void {
         },
         else => @compileError("discard: " ++ @typeName(@TypeOf(value))),
     }
+}
+
+/// A document of the check, in `job.gpa`.
+pub fn encode(job: *Job, value: anytype) Error!bson.OwnedDocument {
+    return bson.encode(job.gpa, value, .{}) catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.InvalidBson => job.fail("a document of the check is not valid BSON", .{}),
+    };
 }
 
 pub fn note(job: *Job, comptime fmt: []const u8, args: anytype) Error!void {
@@ -106,6 +116,199 @@ pub fn note(job: *Job, comptime fmt: []const u8, args: anytype) Error!void {
 pub fn pause(job: *Job, duration: Io.Duration) void {
     job.io.sleep(duration, .awake) catch {};
 }
+
+/// Fails unless the call of `caller` ended with `expected`.
+pub fn expectCallError(job: *Job, caller: *const Caller, expected: errors.Error, comptime what: []const u8) Error!void {
+    const err = caller.err orelse return job.fail(what ++ " succeeded, not error.{t}", .{expected});
+    if (err != expected) return job.fail(what ++ " returned error.{t}, not error.{t}", .{ err, expected });
+}
+
+/// Runs `function(args)` in a task of its own and waits for it, so that a
+/// check can act from another task than its own.
+pub fn inTask(job: *Job, function: anytype, args: std.meta.ArgsTuple(@TypeOf(function))) Error!void {
+    var future = job.io.concurrent(function, args) catch |err| return job.fail("no task: io.concurrent returned error.{t}", .{err});
+    future.await(job.io);
+}
+
+/// Command `index` of the journal named `name`, from 0.
+pub fn received(job: *Job, script: *Script, name: []const u8, index: usize) Error!Script.Entry {
+    const io = job.io;
+    var seen: usize = 0;
+    for (0..script.received(io)) |i| {
+        const entry = script.entry(io, i);
+        if (!std.mem.eql(u8, entry.name, name)) continue;
+        if (seen == index) return entry;
+        seen += 1;
+    }
+    return job.fail("the server got {d} command(s) named {s}, and the check expected at least {d}", .{ seen, name, index + 1 });
+}
+
+/// Waits until the journal holds `n` commands named `name`, for 10 s at
+/// most, stretched.
+pub fn awaitReceived(job: *Job, script: *Script, name: []const u8, n: usize) Error!void {
+    const deadline: core.Deadline = .after(now(job.io), job.ms(10_000));
+    while (script.count(job.io, name) < n) {
+        if (deadline.isExpired(now(job.io))) return job.fail("the server got {d} command(s) named {s} in {d} s, not {d}", .{ script.count(job.io, name), name, 10 * job.scale(), n });
+        job.pause(.fromMilliseconds(1));
+    }
+}
+
+/// Fails unless `got`, a command as the server read it, is `written` as the
+/// caller gave it, with each element unchanged and in its place, plus
+/// `$db` = `database` and, of the driver's own fields, only those named in
+/// `extra`.
+pub fn expectSent(job: *Job, got: bson.RawDocument, written: bson.RawDocument, database: []const u8, extra: []const []const u8, comptime what: []const u8) Error!void {
+    var caller: std.ArrayList(Element) = .empty;
+    defer caller.deinit(job.gpa);
+    var has_db = false;
+    var it = got.iterator();
+    while (true) {
+        const start = it.pos;
+        const element = (it.next() catch return job.fail(what ++ " came as invalid BSON", .{})) orelse break;
+        if (std.mem.eql(u8, element.key, "$db")) {
+            const db = if (element.value == .string) element.value.string else "";
+            try job.expect(std.mem.eql(u8, db, database), what ++ " came with $db \"{s}\", not \"{s}\"", .{ db, database });
+            has_db = true;
+            continue;
+        }
+        if (isIn(extra, element.key)) continue;
+        try caller.append(job.gpa, .{ .key = element.key, .bytes = got.bytes[start..it.pos] });
+    }
+    try job.expect(has_db, what ++ " came without $db", .{});
+    var original = written.iterator();
+    for (caller.items, 0..) |sent, i| {
+        const start = original.pos;
+        const element = (original.next() catch null) orelse
+            return job.fail(what ++ " came with '{s}', which the caller did not write", .{sent.key});
+        if (!std.mem.eql(u8, element.key, sent.key)) {
+            return job.fail(what ++ " came with '{s}' as element {d}, where the caller wrote '{s}'", .{ sent.key, i, element.key });
+        }
+        try job.expect(std.mem.eql(u8, sent.bytes, written.bytes[start..original.pos]), what ++ " came with '{s}' changed", .{sent.key});
+    }
+    if (original.next() catch null) |missing| return job.fail(what ++ " came without '{s}', which the caller wrote", .{missing.key});
+}
+
+/// An element of a document: its key and its bytes, type byte included.
+const Element = struct { key: []const u8, bytes: []const u8 };
+
+pub fn isIn(names: []const []const u8, name: []const u8) bool {
+    for (names) |candidate| {
+        if (std.mem.eql(u8, candidate, name)) return true;
+    }
+    return false;
+}
+
+/// A call of `runCommand` in a task of its own, which the check may cancel.
+/// The reply comes from `job.gpa`; `deinit` frees it.
+pub const Caller = struct {
+    job: *Job,
+    client: Client,
+    command: requests.Command,
+    op: requests.OperationContext = .of(.root),
+    reply: ?bson.OwnedDocument = null,
+    err: ?errors.Error = null,
+    diagnostics: errors.Diagnostics = .{},
+    ended: Io.Timestamp = .zero,
+    /// After the call returned, `io.checkCancel()` in its task saw a
+    /// cancelation.
+    kept_cancel: bool = false,
+    future: ?Io.Future(void) = null,
+
+    pub fn init(job: *Job, client: Client, command: requests.Command) Caller {
+        return .{ .job = job, .client = client, .command = command };
+    }
+
+    pub fn begin(c: *Caller) Error!void {
+        c.future = c.job.io.concurrent(task, .{c}) catch |err| return c.job.fail("no task for a call: io.concurrent returned error.{t}", .{err});
+    }
+
+    fn task(c: *Caller) void {
+        const io = c.job.io;
+        if (c.client.runCommand(io, c.op, c.command, .{ .allocator = c.job.gpa, .diagnostics = &c.diagnostics })) |reply| {
+            c.reply = reply;
+        } else |err| c.err = err;
+        c.ended = now(io);
+        c.kept_cancel = if (io.checkCancel()) |_| false else |_| true;
+    }
+
+    /// Waits until the call has returned.
+    pub fn join(c: *Caller) void {
+        if (c.future) |*future| future.await(c.job.io);
+    }
+
+    /// Cancels the task and waits until the call has returned.
+    pub fn cancel(c: *Caller) void {
+        if (c.future) |*future| future.cancel(c.job.io);
+    }
+
+    pub fn deinit(c: *Caller) void {
+        c.cancel();
+        if (c.reply) |reply| reply.deinit();
+        c.reply = null;
+    }
+};
+
+/// The allocator of the options of one call. It counts the allocations the
+/// driver holds of it, and those it makes after the call returned, which
+/// the contract forbids. Put it over an arena of the check, so that what a
+/// broken driver leaves goes with the arena.
+pub const Fence = struct {
+    parent: Allocator,
+    live: std.atomic.Value(usize) = .init(0),
+    closed: std.atomic.Value(bool) = .init(false),
+    late_uses: std.atomic.Value(u32) = .init(0),
+
+    pub fn allocator(f: *Fence) Allocator {
+        return .{ .ptr = f, .vtable = &vtable };
+    }
+
+    /// The call returned: what the driver takes from now on is late.
+    pub fn close(f: *Fence) void {
+        f.closed.store(true, .release);
+    }
+
+    /// How many allocations are held.
+    pub fn held(f: *const Fence) usize {
+        return f.live.load(.acquire);
+    }
+
+    /// How many times the driver took memory after `close`.
+    pub fn late(f: *const Fence) u32 {
+        return f.late_uses.load(.acquire);
+    }
+
+    fn touch(f: *Fence) void {
+        if (f.closed.load(.acquire)) _ = f.late_uses.fetchAdd(1, .monotonic);
+    }
+
+    const vtable: Allocator.VTable = .{ .alloc = alloc, .resize = resize, .remap = remap, .free = free };
+
+    fn alloc(ptr: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const f: *Fence = @ptrCast(@alignCast(ptr));
+        f.touch();
+        const memory = f.parent.rawAlloc(len, alignment, ret_addr) orelse return null;
+        _ = f.live.fetchAdd(1, .monotonic);
+        return memory;
+    }
+
+    fn resize(ptr: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const f: *Fence = @ptrCast(@alignCast(ptr));
+        f.touch();
+        return f.parent.rawResize(memory, alignment, new_len, ret_addr);
+    }
+
+    fn remap(ptr: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const f: *Fence = @ptrCast(@alignCast(ptr));
+        f.touch();
+        return f.parent.rawRemap(memory, alignment, new_len, ret_addr);
+    }
+
+    fn free(ptr: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const f: *Fence = @ptrCast(@alignCast(ptr));
+        f.parent.rawFree(memory, alignment, ret_addr);
+        _ = f.live.fetchSub(1, .monotonic);
+    }
+};
 
 /// Starts the scripted server of the check, serving `handler` with `hello`,
 /// and sets up a fresh driver on it. `end` undoes both.
