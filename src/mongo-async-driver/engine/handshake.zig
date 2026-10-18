@@ -25,6 +25,7 @@ const wire = mongo.wire;
 const Diagnostics = mongo.Diagnostics;
 const Credentials = @import("../OwnedOptions.zig").Credentials;
 const Connection = @import("Connection.zig");
+const KeyCache = @import("KeyCache.zig");
 const scram = @import("scram.zig");
 const time = @import("time.zig");
 
@@ -111,6 +112,8 @@ pub const Setup = struct {
 
 pub const Auth = struct {
     credentials: Credentials,
+    /// The client's keys, which every connection of it shares.
+    keys: *KeyCache,
 };
 
 pub const Error = error{
@@ -229,7 +232,7 @@ fn authenticate(conn: *Connection, auth: Auth, hello: bson.RawDocument, opening:
     var digest: [32]u8 = undefined;
     defer std.crypto.secureZero(u8, &digest);
     const password = scram.saltingPassword(conversation.mechanism, c.username, c.password, &digest);
-    var keys = scram.deriveKeys(conversation.mechanism, password, challenge.salt, challenge.iterations);
+    var keys = auth.keys.get(conn.stream.io, conversation.mechanism, password, challenge.salt, challenge.iterations);
     defer keys.wipe();
     const proof = try conversation.prove(first.payload, challenge, keys);
     defer gpa.free(proof);

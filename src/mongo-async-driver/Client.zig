@@ -37,6 +37,7 @@ const Stats = @import("Stats.zig");
 const Connection = @import("engine/Connection.zig");
 const connect_ = @import("engine/connect.zig");
 const handshake = @import("engine/handshake.zig");
+const KeyCache = @import("engine/KeyCache.zig");
 const scram = @import("engine/scram.zig");
 const time = @import("engine/time.zig");
 const Client = @This();
@@ -47,6 +48,8 @@ io: Io,
 options: OwnedOptions,
 /// The `client` document of the hello of every new connection.
 metadata: bson.OwnedDocument,
+/// The keys of SCRAM, so that PBKDF2 runs for the first connection only.
+keys: KeyCache = .{},
 /// One call at a time on the connection, and on its opening.
 exchange_mutex: Io.Mutex = .init,
 /// Guards what follows, which `close` and `stats` read from other tasks.
@@ -79,6 +82,7 @@ pub fn init(gpa: Allocator, io: Io, options: Options) InitError!Client {
 /// Closes the client, if `close` has not, and frees it.
 pub fn deinit(self: *Client) void {
     self.close(self.io);
+    self.keys.deinit();
     self.metadata.deinit();
     self.options.deinit(self.gpa);
     self.* = undefined;
@@ -273,7 +277,7 @@ fn open(self: *Client, io: Io, deadline: ?core.Deadline, d: ?*Diagnostics) mongo
     };
     const setup: handshake.Setup = .{
         .metadata = self.metadata.raw(),
-        .auth = if (self.options.credentials()) |c| .{ .credentials = c } else null,
+        .auth = if (self.options.credentials()) |c| .{ .credentials = c, .keys = &self.keys } else null,
     };
     var attempt: connect_.Attempt = .{};
     self.state_mutex.lockUncancelable(io);

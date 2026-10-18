@@ -14,6 +14,7 @@ const Credentials = @import("../OwnedOptions.zig").Credentials;
 const Client = @import("../Client.zig");
 const connect = @import("../engine/connect.zig");
 const handshake = @import("../engine/handshake.zig");
+const KeyCache = @import("../engine/KeyCache.zig");
 const scram = @import("../engine/scram.zig");
 const time = @import("../engine/time.zig");
 const ScramServer = @import("ScramServer.zig");
@@ -33,7 +34,9 @@ fn openAs(io: Io, server: *ScramServer, user: Credentials, d: *Diagnostics) !voi
     var task = try io.concurrent(ScramServer.serve, .{ server, io, &listener, 1 });
     const meta = try handshake.metadata(testing.allocator, null, null);
     defer meta.deinit();
-    const setup: handshake.Setup = .{ .metadata = meta.raw(), .auth = .{ .credentials = user } };
+    var keys: KeyCache = .{};
+    defer keys.deinit();
+    const setup: handshake.Setup = .{ .metadata = meta.raw(), .auth = .{ .credentials = user, .keys = &keys } };
     var attempt: connect.Attempt = .{};
     const opened = connect.open(io, testing.allocator, .{ .host = "127.0.0.1", .port = FakeServer.port(&listener) }, &setup, .after(time.now(io), .fromSeconds(5)), &attempt, d);
     if (opened) |conn| conn.destroy() else |_| {}
@@ -273,4 +276,33 @@ fn connectWithUser(io: Io) !void {
     try testing.expectEqual(@as(i32, 18), d.server.?.code);
     try testing.expectEqual(Diagnostics.Phase.authenticate, d.phase.?);
     try testing.expectEqual(@as(usize, 0), driver.stats().connections);
+}
+
+test "the second connection of a client authenticates with the keys of the first, without PBKDF2" {
+    try within5s(testing.io, keysReused, .{testing.io});
+}
+
+fn keysReused(io: Io) !void {
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var server: ScramServer = .{};
+    var task = try io.concurrent(ScramServer.serve, .{ &server, io, &listener, 2 });
+    var buffer: [96]u8 = undefined;
+    var driver: Client = try .init(testing.allocator, io, .{ .uri = try std.fmt.bufPrint(&buffer, "mongodb://app:secret@127.0.0.1:{d}/", .{FakeServer.port(&listener)}) });
+    const result = reconnect(io, &driver);
+    driver.deinit();
+    if (result) |_| try task.await(io) else |_| task.cancel(io) catch {};
+    try result;
+    try expectSteps(&.{ .sasl_continue, .other, .sasl_continue, .ping }, &server);
+}
+
+/// Connects, breaks the connection, and runs a command on the next one.
+fn reconnect(io: Io, driver: *Client) !void {
+    try driver.connect(io, .root, null);
+    try testing.expectEqual(@as(u32, 1), driver.keys.derivations);
+    const breakme: mongo.Command = .{ .database = "admin", .body = bson.literal(.{ .breakme = 1 }) };
+    try testing.expectError(error.ConnectionLost, driver.client().runCommand(io, .of(.root), breakme, .{ .allocator = testing.allocator }));
+    const reply = try driver.client().runCommand(io, .of(.root), ping, .{ .allocator = testing.allocator });
+    reply.deinit();
+    try testing.expectEqual(@as(u32, 1), driver.keys.derivations);
 }
