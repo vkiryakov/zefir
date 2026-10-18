@@ -235,15 +235,15 @@ pub fn isPartOf(file: []const u8, block: []const u8) !bool {
 }
 
 test "the parts of a run that vary are masked, in text and in JSON" {
-    const text = "2026-10-16T09:41:07.415Z INFO  [rpc] RPC call served rpc.code=ok rpc.duration_ms=0.42 trace_id=4bf9 span_id=00f0\n";
+    const text = "2026-10-16T09:41:07.415Z INFO  [rpc] RPC call served rpc.code=ok rpc.request_id=6f1e rpc.duration_ms=12 trace_id=4bf9 span_id=00f0\n";
     const masked_text = try mask(text);
     defer testing.allocator.free(masked_text);
-    try testing.expectEqualStrings("<timestamp> INFO  [rpc] RPC call served rpc.code=ok rpc.duration_ms=<…> trace_id=4bf9 span_id=<…>\n", masked_text);
+    try testing.expectEqualStrings("<timestamp> INFO  [rpc] RPC call served rpc.code=ok rpc.request_id=<…> rpc.duration_ms=<…> trace_id=4bf9 span_id=<…>\n", masked_text);
 
-    const json = "{\"timestamp\":\"2026-10-16T09:41:07.415Z\",\"trace_id\":\"4bf9\",\"rpc\":{\"request_id\":\"6f1e\",\"duration_ms\":0.42}}";
+    const json = "{\"timestamp\":\"2026-10-16T09:41:07.415Z\",\"trace_id\":\"4bf9\",\"rpc\":{\"code\":\"ok\",\"request_id\":\"6f1e\",\"duration_ms\":12}}";
     const masked_json = try mask(json);
     defer testing.allocator.free(masked_json);
-    try testing.expectEqualStrings("{\"timestamp\":<…>,\"trace_id\":\"4bf9\",\"rpc\":{\"request_id\":<…>,\"duration_ms\":<…>}}", masked_json);
+    try testing.expectEqualStrings("{\"timestamp\":<…>,\"trace_id\":\"4bf9\",\"rpc\":{\"code\":\"ok\",\"request_id\":<…>,\"duration_ms\":<…>}}", masked_json);
 
     // A value that is the end of the line, a lone key, an unclosed string;
     // the tokens of inboxes, and what is no token.

@@ -1,6 +1,6 @@
-//! The examples of README.md, the guide of rpc and rpc-log. build.zig
-//! builds and runs the programs and the tests; readme_test.zig checks that
-//! README.md shows every file as it is and every run as it printed.
+//! The examples of README.md, the guide of rpc. build.zig builds and runs
+//! the programs and the tests; readme_test.zig checks that README.md shows
+//! every file as it is and every run as it printed.
 
 /// A program of the guide: a whole service, or a service and its clients,
 /// that logs what happens with zefir-log as text.
@@ -23,14 +23,9 @@ pub const programs = [_]Program{
         .{ "APP_AUTH_ADMIN_TOKEN", "admin-secret" },
         .{ "APP_AUTH_REPORTING_TOKEN", "reporting-secret" },
     } },
+    .{ .name = "access_log" },
     .{ .name = "idempotency" },
     .{ .name = "shutdown" },
-};
-
-/// The programs that also use zefir-rpc-log: `zig build test-rpc-log` runs
-/// them.
-pub const access_log_programs = [_]Program{
-    .{ .name = "access_log" },
 };
 
 /// The other files README.md shows as they are: the packages of the
