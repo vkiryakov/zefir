@@ -162,8 +162,6 @@ jobs:
           --exclude tests/http/zig-pkg --exclude tests/mongo/zig-pkg
           --exclude examples/rpc-custom-transport/zig-pkg
           --exclude examples/rpc-custom-transport/consumer/zig-pkg
-          --exclude examples/mongo-custom-driver/zig-pkg
-          --exclude examples/mongo-custom-driver/consumer/zig-pkg
 
   # The end-to-end tests of nats against NATS servers in Docker. Only the
   # Linux runners run Linux containers, so this job is ubuntu only. It is
@@ -206,29 +204,6 @@ jobs:
       # job.
       - name: Run the tests of the transport
         working-directory: examples/rpc-custom-transport/consumer
-        run: zig build test --summary all --test-timeout 5m
-
-  # The package of examples/mongo-custom-driver: a MongoDB driver outside
-  # zefir, on the public API of zefir-mongo only, built the way an
-  # application builds it (zefir's modules come from the application, here
-  # this commit, not the one the package pins) and run through layer S of
-  # the conformance suite of zefir-mongo, with the application of the
-  # example on FakeDriver; layer L needs a live mongod, which this job does
-  # not start. It runs when mongo or its native driver is among the modules
-  # to test.
-  custom-driver:
-    name: custom-driver
-    needs: changes
-    if: contains(format(' {0} ', needs.changes.outputs.modules), ' mongo ') || contains(format(' {0} ', needs.changes.outputs.modules), ' mongo-async-driver ')
-    timeout-minutes: 20
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: mlugg/setup-zig@v2
-      # A test that hangs fails after 5 minutes, by name, as in the test
-      # job.
-      - name: Run the tests of the driver
-        working-directory: examples/mongo-custom-driver/consumer
         run: zig build test --summary all --test-timeout 5m
 
   # The end-to-end tests of rpc-nats against the same NATS servers, with the

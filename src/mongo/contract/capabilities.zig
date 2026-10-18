@@ -12,8 +12,7 @@ pub const Capabilities = struct {
     /// `mongo.contract_revision`: rebuilt against a later zefir, the
     /// driver would claim rules it does not know.
     revision: u16,
-    /// For logs and the conformance report: "zefir-mongo", "fake",
-    /// "minidriver".
+    /// For logs and the conformance report: "zefir-mongo", "fake".
     name: []const u8,
 
     // Required in revision 1: a driver declares all four.

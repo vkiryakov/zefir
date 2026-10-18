@@ -1,10 +1,8 @@
 //! The collection API against mongod: scenarios that take only a
 //! `mongo.Database`, so that every driver runs the same ones. crud.zig runs
-//! them on the native driver and on `FakeDriver` through `Proxy`, and the
-//! application of examples/mongo-custom-driver on minidriver. Each
+//! them on the native driver and on `FakeDriver` through `Proxy`. Each
 //! scenario works in collections of its own, which it drops before and
-//! after. The file imports only `std`, `core` and `mongo`, so that a
-//! package without zio can run it.
+//! after.
 
 const std = @import("std");
 const Io = std.Io;
