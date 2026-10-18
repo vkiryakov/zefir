@@ -32,6 +32,8 @@
 # with an empty database. Their ports, on 127.0.0.1 only:
 #
 #   27117  mongo-plain: no authentication, test commands on for fail points
+#   27121  mongo-ghost: a member of the replica set "ghost" that is never
+#          initialized (RSGhost), for the native driver to refuse
 
 name: zefir-nats-e2e
 
@@ -147,3 +149,10 @@ services:
     <<: *mongo
     command: ["mongod", "--setParameter", "enableTestCommands=1"]
     ports: ["127.0.0.1:27117:27017"]
+
+  # A member of a replica set without rs.initiate(): its hello says
+  # isreplicaset, and the native driver refuses it.
+  mongo-ghost:
+    <<: *mongo
+    command: ["mongod", "--replSet", "ghost"]
+    ports: ["127.0.0.1:27121:27017"]

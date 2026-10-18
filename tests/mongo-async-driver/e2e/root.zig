@@ -1,7 +1,7 @@
-//! End-to-end tests of zefir-mongo against the mongod servers of the
-//! repository's docker-compose.yml, profile `mongo`. Every scenario runs
-//! on zio with one executor and again with four, under a time limit, and
-//! sees only `std.Io`.
+//! End-to-end tests of zefir-mongo and of its native driver against the
+//! mongod servers of the repository's docker-compose.yml, profile
+//! `mongo`. Every scenario runs on zio with one executor and again with
+//! four, under a time limit, and sees only `std.Io`.
 
 const std = @import("std");
 const Io = std.Io;
@@ -15,6 +15,8 @@ pub const Proxy = @import("Proxy.zig");
 pub const servers = struct {
     /// mongo-plain: no authentication, test commands on.
     pub const plain_port: u16 = 27117;
+    /// mongo-ghost: a member of a replica set that is not initialized.
+    pub const ghost_port: u16 = 27121;
 };
 
 /// The database the tests write to; each scenario drops what it made.
@@ -66,4 +68,5 @@ test {
     _ = @import("Proxy.zig");
     _ = @import("conformance.zig");
     _ = @import("crud.zig");
+    _ = @import("connect.zig");
 }

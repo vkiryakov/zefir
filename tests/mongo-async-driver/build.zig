@@ -1,5 +1,5 @@
-//! The end-to-end tests of zefir-mongo against real mongod servers, on
-//! zio. The servers are those of the profile `mongo` of docker-compose.yml
+//! The end-to-end tests of zefir-mongo and of its native driver against
+//! real mongod servers, on zio. The servers are those of the profile `mongo` of docker-compose.yml
 //! at the repository root.
 //!
 //!   zig build e2e     start the servers, run the tests
@@ -16,7 +16,7 @@
 const std = @import("std");
 
 /// The services of the profile `mongo` that the tests use.
-const services = [_][]const u8{"mongo-plain"};
+const services = [_][]const u8{ "mongo-plain", "mongo-ghost" };
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -39,6 +39,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "core", .module = zefir.module("zefir-core") },
                 .{ .name = "mongo", .module = zefir.module("zefir-mongo") },
+                .{ .name = "mongo-async-driver", .module = zefir.module("zefir-mongo-async-driver") },
                 .{ .name = "zio", .module = zio.module("zio") },
             },
         }),
