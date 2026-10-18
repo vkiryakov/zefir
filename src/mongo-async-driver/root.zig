@@ -17,4 +17,10 @@ test {
     _ = @import("uri.zig");
     _ = @import("uri_tests.zig");
     _ = @import("OwnedOptions.zig");
+    _ = @import("engine/time.zig");
+    _ = @import("engine/race.zig");
+    _ = @import("engine/DeadlineStream.zig");
+    _ = @import("engine/Connection.zig");
+    _ = @import("engine/connect.zig");
+    _ = @import("testing/connection_tests.zig");
 }
