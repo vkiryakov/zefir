@@ -1,25 +1,21 @@
-//! The checks of layer S of `mongo.testing.conformance`, each against a
-//! scripted server: S1–S21 of the design of zefir-mongo.
+//! The checks of layer S, each against a scripted server: S1–S21 of the
+//! design of zefir-mongo.
 
 const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const core = @import("core");
-const bson = @import("../../bson.zig");
-const wire = @import("../../wire.zig");
-const errors = @import("../../errors.zig");
-const requests = @import("../../requests.zig");
-const results = @import("../../results.zig");
-const capabilities = @import("../../contract/capabilities.zig");
-const Client = @import("../../contract/Client.zig");
-const Cursor = @import("../../contract/Cursor.zig");
-const Script = @import("../Script.zig");
+const mongo = @import("mongo");
+const bson = mongo.bson;
+const Client = mongo.Client;
+const Cursor = mongo.Cursor;
+const Script = mongo.testing.Script;
 const Job = @import("Job.zig");
 
 /// The database of the commands of layer S.
-const database = "conformance";
+const database = "checks";
 
-const OperationContext = requests.OperationContext;
+const OperationContext = mongo.OperationContext;
 const eql = std.mem.eql;
 
 const s1_body = bson.literal(.{
@@ -82,7 +78,7 @@ const Mixed = struct {
     }
 };
 
-/// A failure for the paths of errors.
+/// A failure for the paths of mongo.
 const bad_value = bson.literal(.{ .ok = 0.0, .errmsg = "key must be a string", .code = 2, .codeName = "BadValue" });
 
 const docs = [_]bson.RawDocument{
@@ -170,8 +166,8 @@ const s3_overloaded = bson.literal(.{
     .errorLabels = .{ "SystemOverloadedError", "RetryableError" },
 });
 const s3_expired = bson.literal(.{ .ok = 0.0, .errmsg = "operation exceeded time limit", .code = 50, .codeName = "MaxTimeMSExpired" });
-const s3_missing = bson.literal(.{ .ok = 0.0, .errmsg = "ns does not exist: conformance.s3", .code = 26, .codeName = "NamespaceNotFound" });
-const s3_unauthorized = bson.literal(.{ .ok = 0.0, .errmsg = "not authorized on conformance to execute command { insert: \"s3\" }", .code = 13, .codeName = "Unauthorized" });
+const s3_missing = bson.literal(.{ .ok = 0.0, .errmsg = "ns does not exist: checks.s3", .code = 26, .codeName = "NamespaceNotFound" });
+const s3_unauthorized = bson.literal(.{ .ok = 0.0, .errmsg = "not authorized on checks to execute command { insert: \"s3\" }", .code = 13, .codeName = "Unauthorized" });
 
 /// Fails unless `slot` holds `reply` byte for byte; frees it.
 fn expectFailureReply(job: *Job, slot: *?bson.OwnedDocument, reply: bson.RawDocument, comptime what: []const u8) Job.Error!void {
@@ -190,7 +186,7 @@ pub fn s3(job: *Job) Job.Error!void {
     var arena: std.heap.ArenaAllocator = .init(job.gpa);
     defer arena.deinit();
     var fence: Job.Fence = .{ .parent = arena.allocator() };
-    var d: errors.Diagnostics = .{};
+    var d: mongo.Diagnostics = .{};
     var failure: ?bson.OwnedDocument = null;
     defer if (failure) |f| f.deinit();
     const body = bson.literal(.{ .count = "s3" });
@@ -252,8 +248,8 @@ pub fn s4(job: *Job) Job.Error!void {
 
     const bad_commands = [_]struct { []const u8, bson.RawDocument, OperationContext }{
         .{ "", bson.literal(.{ .count = "s4" }), .of(.root) },
-        .{ "con.formance", bson.literal(.{ .count = "s4" }), .of(.root) },
-        .{ "conformance$", bson.literal(.{ .count = "s4" }), .of(.root) },
+        .{ "che.cks", bson.literal(.{ .count = "s4" }), .of(.root) },
+        .{ "checks$", bson.literal(.{ .count = "s4" }), .of(.root) },
         .{ database, bson.RawDocument.empty, .of(.root) },
         .{ database, bson.literal(.{ .@"$where" = "s4" }), .of(.root) },
         .{ database, bson.literal(.{ .count = "s4", .@"$db" = "other" }), .of(.root) },
@@ -391,7 +387,7 @@ const Handed = struct {
     cursor: ?Cursor = null,
     read: [docs.len]?bson.OwnedDocument = @splat(null),
     count: usize = 0,
-    err: ?errors.Error = null,
+    err: ?mongo.Error = null,
 
     fn open(h: *Handed) void {
         h.cursor = h.client.openCursor(h.io, .of(.root), .{ .database = database, .body = bson.literal(.{ .find = "s7" }) }, .{}) catch |err| {
@@ -472,12 +468,12 @@ pub fn s19(job: *Job) Job.Error!void {
     const io = job.io;
     var answering: Job.Answering = .{ .with = .{ .reply = Script.ok } };
     var stage: Job.Stage = undefined;
-    const hello: wire.Hello = .{ .max_wire_version = 25, .max_bson_object_size = 4 * 1024 * 1024, .max_message_size_bytes = 8_000_000, .max_write_batch_size = 7 };
+    const hello: Job.Hello = .{ .max_wire_version = 25, .max_bson_object_size = 4 * 1024 * 1024, .max_message_size_bytes = 8_000_000, .max_write_batch_size = 7 };
     const client = try job.scripted(&stage, answering.handler(), hello);
     defer job.end();
 
     const caps = client.capabilities();
-    try job.expect(caps.revision >= 1 and caps.revision <= capabilities.contract_revision, "capabilities().revision is {d}; a driver of this zefir-mongo is of revision 1 to {d}", .{ caps.revision, capabilities.contract_revision });
+    try job.expect(caps.revision >= 1 and caps.revision <= mongo.contract_revision, "capabilities().revision is {d}; a driver of this zefir-mongo is of revision 1 to {d}", .{ caps.revision, mongo.contract_revision });
     try job.expect(caps.name.len > 0, "capabilities().name is empty; name the driver, for logs and reports", .{});
     inline for (required) |name| {
         try job.expect(@field(caps, name), "capabilities()." ++ name ++ " is false; revision 1 requires it", .{});
@@ -506,7 +502,7 @@ pub fn s19(job: *Job) Job.Error!void {
 }
 
 /// Opens a cursor of `command` in `database` with no deadline.
-fn open(job: *Job, client: Client, command: bson.RawDocument, options: requests.CursorOptions) Job.Error!Cursor {
+fn open(job: *Job, client: Client, command: bson.RawDocument, options: mongo.CursorOptions) Job.Error!Cursor {
     return job.need(client.openCursor(job.io, .of(.root), .{ .database = database, .body = command }, options), "openCursor");
 }
 
@@ -554,7 +550,7 @@ pub fn s8(job: *Job) Job.Error!void {
     const io = job.io;
     // The namespace of the cursor names another database than the command,
     // and a collection with a dot in it: getMore follows the namespace.
-    var chunks: Script.Cursor = .{ .ns = "conformance_ns.fs.chunks", .id = 8, .batches = &.{ docs[0..2], docs[2..4], docs[4..6], docs[6..7] } };
+    var chunks: Script.Cursor = .{ .ns = "checks_ns.fs.chunks", .id = 8, .batches = &.{ docs[0..2], docs[2..4], docs[4..6], docs[6..7] } };
     var stage: Job.Stage = undefined;
     const client = try job.scripted(&stage, chunks.handler(), .{});
     defer job.end();
@@ -572,7 +568,7 @@ pub fn s8(job: *Job) Job.Error!void {
     const get_mores = script.count(io, "getMore");
     try job.expect(get_mores == 3, "the cursor sent {d} getMore for the three batches after the first", .{get_mores});
     try expectKills(job, script, 0, "a cursor read to its end");
-    for (0..3) |i| try expectGetMore(job, try job.received(script, "getMore", i), 8, "fs.chunks", "conformance_ns", 2, s8_comment);
+    for (0..3) |i| try expectGetMore(job, try job.received(script, "getMore", i), 8, "fs.chunks", "checks_ns", 2, s8_comment);
 }
 
 pub fn s9(job: *Job) Job.Error!void {
@@ -672,7 +668,7 @@ pub fn s10(job: *Job) Job.Error!void {
     faulty.get_more.store(.serve, .release);
     try job.expectError(client.openCursor(io, .of(.root), .{ .database = database, .body = bson.literal(.{ .aggregate = "s10", .pipeline = [0]i32{}, .cursor = .{} }) }, .{}), error.ProtocolViolation, "openCursor answered without cursor");
     {
-        var d: errors.Diagnostics = .{};
+        var d: mongo.Diagnostics = .{};
         var cursor = try open(job, client, find, .{ .diagnostics = &d });
         defer cursor.deinit(io);
         _ = try job.need(cursor.next(io, .of(.root)), "next");
@@ -949,7 +945,7 @@ pub fn s11(job: *Job) Job.Error!void {
     const client = try job.scripted(&stage, writes.handler(), .{ .max_write_batch_size = 3 });
     defer job.end();
     const script = &stage.script;
-    const kinds = [_]struct { requests.WriteKind, bson.RawDocument, []const bson.RawDocument, []const usize }{
+    const kinds = [_]struct { mongo.WriteKind, bson.RawDocument, []const bson.RawDocument, []const usize }{
         .{ .insert, bson.literal(.{ .insert = "s11" }), &ten, &.{ 3, 3, 3, 1 } },
         .{ .update, bson.literal(.{ .update = "s11" }), ten_updates[0..4], &.{ 3, 1 } },
         .{ .delete, bson.literal(.{ .delete = "s11" }), &four_deletes, &.{ 3, 1 } },
@@ -969,7 +965,7 @@ pub fn s12(job: *Job) Job.Error!void {
     const io = job.io;
     var writes: Script.Write = .{};
     var stage: Job.Stage = undefined;
-    const hello: wire.Hello = .{ .max_message_size_bytes = 2048, .max_bson_object_size = 512 };
+    const hello: Job.Hello = .{ .max_message_size_bytes = 2048, .max_bson_object_size = 512 };
     const client = try job.scripted(&stage, writes.handler(), hello);
     defer job.end();
     const script = &stage.script;
@@ -1046,7 +1042,7 @@ const S13 = struct {
     }
 };
 
-fn expectUpserted(job: *Job, got: results.Upserted, index: usize, id: []const u8) Job.Error!void {
+fn expectUpserted(job: *Job, got: mongo.Upserted, index: usize, id: []const u8) Job.Error!void {
     try job.expect(got.index == index, "an upsert came with the index {d}, not {d}: indexes count in the whole request", .{ got.index, index });
     try job.expect(got.id == .string and eql(u8, got.id.string, id), "the upsert of item {d} came with another _id than \"{s}\"", .{ index, id });
 }
@@ -1090,7 +1086,7 @@ const three = bson.literal(.{ .n = 3, .ok = 1.0 });
 /// the message shows the value compared, and compares the error inside the
 /// optional: Zig 0.17.0 builds Debug for x86_64 Linux with its own x86_64
 /// backend, which compiles `==` of two optional error sets wrong.
-fn expectReason(job: *Job, d: *const errors.Diagnostics, reason: errors.Error) Job.Error!void {
+fn expectReason(job: *Job, d: *const mongo.Diagnostics, reason: mongo.Error) Job.Error!void {
     const got = d.reason;
     const same = if (got) |err| err == reason else false;
     try job.expect(same, "Diagnostics.reason of the IncompleteWrite is {?t}, not {t}", .{ got, reason });
@@ -1106,8 +1102,8 @@ pub fn s14(job: *Job) Job.Error!void {
     var arena: std.heap.ArenaAllocator = .init(job.gpa);
     defer arena.deinit();
     var fence: Job.Fence = .{ .parent = arena.allocator() };
-    var partial: results.WriteResult = .{};
-    var d: errors.Diagnostics = .{};
+    var partial: mongo.WriteResult = .{};
+    var d: mongo.Diagnostics = .{};
     const body = bson.literal(.{ .insert = "s14" });
     try job.expectError(client.write(io, .of(.root), .{ .database = database, .kind = .insert, .body = body, .items = &ten }, .{ .allocator = fence.allocator(), .diagnostics = &d, .partial = &partial }), error.IncompleteWrite, "a write whose third batch lost its connection");
     try expectReason(job, &d, error.ConnectionLost);
@@ -1150,7 +1146,7 @@ pub fn s15(job: *Job) Job.Error!void {
     const client = try job.scripted(&stage, lossy.handler(), .{});
     defer job.end();
     const script = &stage.script;
-    const command: requests.Command = .{ .database = database, .body = bson.literal(.{ .count = "s15" }) };
+    const command: mongo.Command = .{ .database = database, .body = bson.literal(.{ .count = "s15" }) };
     try job.expectError(client.runCommand(io, job.within(10_000), command, .{ .allocator = job.gpa }), error.ConnectionLost, "a command whose connection the server closed after reading it");
     try job.expectError(client.runCommand(io, job.within(10_000), command, .{ .allocator = job.gpa }), error.ConnectionLost, "a command whose connection the server closed, refusing new ones");
     try job.expectError(client.runCommand(io, job.within(10_000), command, .{ .allocator = job.gpa }), error.Unavailable, "a command while the server refuses connections");
@@ -1184,7 +1180,7 @@ pub fn s16(job: *Job) Job.Error!void {
     const client = try job.scripted(&stage, queue.handler(), .{});
     defer job.end();
     const script = &stage.script;
-    const command: requests.Command = .{ .database = database, .body = bson.literal(.{ .count = "s16" }) };
+    const command: mongo.Command = .{ .database = database, .body = bson.literal(.{ .count = "s16" }) };
     for (kinds, 0..) |kind, i| {
         if (client.runCommand(io, job.within(10_000), command, .{ .allocator = job.gpa })) |reply| {
             reply.deinit();
@@ -1224,13 +1220,13 @@ pub fn s21(job: *Job) Job.Error!void {
     defer job.end();
     const script = &stage.script;
     const body = bson.literal(.{ .insert = "s21" });
-    var partial: results.WriteResult = .{};
+    var partial: mongo.WriteResult = .{};
     defer partial.deinit(job.gpa);
-    var d: errors.Diagnostics = .{};
+    var d: mongo.Diagnostics = .{};
     const op: OperationContext = .of(core.Context.root.withCancellation(&canceler.token));
     try job.expectError(client.write(io, op, .{ .database = database, .kind = .insert, .body = body, .items = &ten }, .{ .allocator = job.gpa, .diagnostics = &d, .partial = &partial }), error.IncompleteWrite, "a write whose token was canceled while its second batch was out");
     try expectReason(job, &d, error.Cancelled);
-    try job.expect(errors.outcome(error.IncompleteWrite) == .may_have_executed, "IncompleteWrite is not may_have_executed", .{});
+    try job.expect(mongo.outcome(error.IncompleteWrite) == .may_have_executed, "IncompleteWrite is not may_have_executed", .{});
     try job.expect(d.batch_offset == 6, "Diagnostics.batch_offset of the IncompleteWrite is {?d}, not 6", .{d.batch_offset});
     try job.expect(partial.n == 6 and partial.answered == 6, "partial came with n {d} and answered {d}, not the 6 of the two batches", .{ partial.n, partial.answered });
     const batches = script.count(io, "insert");
@@ -1239,6 +1235,6 @@ pub fn s21(job: *Job) Job.Error!void {
     var token: core.CancellationToken = .init;
     token.cancel();
     try job.expectError(client.write(io, .of(core.Context.root.withCancellation(&token)), .{ .database = database, .kind = .insert, .body = body, .items = ten[0..2] }, .{ .allocator = job.gpa }), error.Cancelled, "a write of one batch whose token was canceled before it");
-    try job.expect(errors.outcome(error.Cancelled) == .not_sent, "Cancelled is not not_sent", .{});
+    try job.expect(mongo.outcome(error.Cancelled) == .not_sent, "Cancelled is not not_sent", .{});
     try job.expect(script.count(io, "insert") == 2, "a write whose token was canceled before it reached the server", .{});
 }

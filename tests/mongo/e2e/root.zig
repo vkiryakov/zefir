@@ -69,7 +69,7 @@ test {
     _ = @import("wire.zig");
     _ = @import("script_vs_mongod.zig");
     _ = @import("Proxy.zig");
-    _ = @import("conformance.zig");
+    _ = @import("checks.zig");
     _ = @import("crud.zig");
     _ = @import("connect.zig");
     _ = @import("auth.zig");

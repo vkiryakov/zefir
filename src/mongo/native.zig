@@ -41,6 +41,5 @@ test {
     _ = @import("tests/errors_tests.zig");
     _ = @import("tests/cursor_tests.zig");
     _ = @import("tests/write_tests.zig");
-    _ = @import("tests/conformance_tests.zig");
     _ = @import("tests/rules_tests.zig");
 }

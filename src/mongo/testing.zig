@@ -13,9 +13,6 @@
 //!   network, real deadlines and cancelation.
 //! - `vectors` — the BSON test vectors of zefir: a document of each BSON
 //!   type with what it reads back as, and bytes no reader may accept.
-//! - `conformance` — the conformance suite of drivers: a driver that
-//!   passes it keeps the contract of `mongo.Client`, against a scripted
-//!   server and against a live mongod.
 //! - `sleepAtLeast` — a sleep that never ends before its time, which a
 //!   sleep of std's `Io` on Windows may do: for delays and deadlines in
 //!   tests.
@@ -26,7 +23,6 @@ pub const Script = @import("testing/Script.zig");
 pub const FakeServer = @import("testing/FakeServer.zig");
 pub const FakeDriver = @import("testing/FakeDriver.zig");
 pub const vectors = @import("bson/vectors.zig");
-pub const conformance = @import("testing/conformance.zig");
 pub const sleepAtLeast = @import("testing/sleep.zig").sleepAtLeast;
 
 test {
@@ -34,6 +30,5 @@ test {
     _ = @import("testing/script_tests.zig");
     _ = @import("testing/fake_server_tests.zig");
     _ = @import("testing/fake_driver_tests.zig");
-    _ = @import("testing/conformance_tests.zig");
     _ = @import("testing/sleep.zig");
 }

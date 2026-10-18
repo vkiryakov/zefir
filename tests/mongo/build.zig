@@ -30,6 +30,17 @@ pub fn build(b: *std.Build) void {
     const down = compose(b, compose_file, &.{"down"});
     b.step("down", "Stop the mongod servers").dependOn(&down.step);
 
+    // The checks S and L of the client: the file of the zefir package whose
+    // layer S `zig build test-mongo` runs; here every check runs, on zio.
+    const checks = b.createModule(.{
+        .root_source_file = zefir.path("src/mongo/tests/checks.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "mongo", .module = zefir.module("zefir-mongo") },
+            .{ .name = "core", .module = zefir.module("zefir-core") },
+        },
+    });
     const e2e = b.addTest(.{
         .name = "e2e",
         .root_module = b.createModule(.{
@@ -39,6 +50,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "core", .module = zefir.module("zefir-core") },
                 .{ .name = "mongo", .module = zefir.module("zefir-mongo") },
+                .{ .name = "checks", .module = checks },
                 .{ .name = "zio", .module = zio.module("zio") },
             },
         }),

@@ -1,44 +1,41 @@
-//! One check of `mongo.testing.conformance` on its way, and what the checks
-//! share: the harness behind a table of functions, the scripted server of a
-//! check, calls in tasks of their own, and allocators that count.
+//! One check of the checks S and L on its way, and what the checks share:
+//! the client of the check, its scripted server, calls in tasks of their
+//! own, and allocators that count.
 
 const std = @import("std");
 const Io = std.Io;
 const net = Io.net;
 const Allocator = std.mem.Allocator;
 const core = @import("core");
-const bson = @import("../../bson.zig");
-const wire = @import("../../wire.zig");
-const errors = @import("../../errors.zig");
-const requests = @import("../../requests.zig");
-const results = @import("../../results.zig");
-const Client = @import("../../contract/Client.zig");
-const Cursor = @import("../../contract/Cursor.zig");
-const Script = @import("../Script.zig");
-const FakeServer = @import("../FakeServer.zig");
-const conformance = @import("../conformance.zig");
-const sleepAtLeast = @import("../sleep.zig").sleepAtLeast;
+const mongo = @import("mongo");
+const bson = mongo.bson;
+const Client = mongo.Client;
+const Cursor = mongo.Cursor;
+const Script = mongo.testing.Script;
+const FakeServer = mongo.testing.FakeServer;
+const sleepAtLeast = mongo.testing.sleepAtLeast;
+const checks = @import("../checks.zig");
 const Job = @This();
 
 io: Io,
-/// The caller's allocator, for what the suite makes itself: scripts,
+/// The caller's allocator, for what the check makes itself: scripts,
 /// servers, documents, replies.
 gpa: Allocator,
-/// Counts what the driver holds: the harness gets it in `setUp`.
-driver_gpa: Allocator,
-/// The report's arena: the messages of the check. Only the check's own task
-/// writes to it.
+/// Counts what the client of the check holds.
+client_gpa: Allocator,
+/// The messages of the check. Only the check's own task writes to it.
 arena: Allocator,
-harness: Harness,
-options: conformance.Options,
-/// Whether the driver connected to the FakeServer in the probe: it speaks
-/// the wire protocol.
-on_wire: bool,
+options: checks.Options,
 failure: ?[]const u8 = null,
+/// The client of the check, once `scripted` or `live` has set it up.
+driver: mongo.native.Client = undefined,
 /// The scripted server of the check, until `end`.
 stage: ?*Stage = null,
-/// Whether a driver is set up and not torn down yet.
+/// Whether the client is set up and not freed yet.
 up: bool = false,
+
+/// What a scripted server says about itself in hello.
+pub const Hello = @FieldType(Script, "hello");
 
 pub const Error = error{ CheckFailed, OutOfMemory };
 
@@ -56,7 +53,7 @@ pub fn scale(job: *const Job) i64 {
 }
 
 /// A context whose deadline is `n` milliseconds away, stretched.
-pub fn within(job: *const Job, n: i64) requests.OperationContext {
+pub fn within(job: *const Job, n: i64) mongo.OperationContext {
     return .of(core.Context.root.withDeadline(.after(now(job.io), job.ms(n))));
 }
 
@@ -75,7 +72,7 @@ pub fn need(job: *Job, result: anytype, comptime what: []const u8) Error!@typeIn
 }
 
 /// Fails unless `result` is `expected`; a success is freed.
-pub fn expectError(job: *Job, result: anytype, expected: errors.Error, comptime what: []const u8) Error!void {
+pub fn expectError(job: *Job, result: anytype, expected: mongo.Error, comptime what: []const u8) Error!void {
     const value = result catch |err| {
         if (err != expected) return job.fail(what ++ " returned error.{t}, not error.{t}", .{ err, expected });
         return;
@@ -92,7 +89,7 @@ pub fn discard(job: *Job, value: anytype) void {
         // A document of a cursor is borrowed.
         ?bson.RawDocument => {},
         Cursor => value.deinit(job.io),
-        results.WriteResult => {
+        mongo.WriteResult => {
             var result = value;
             result.deinit(job.gpa);
         },
@@ -120,7 +117,7 @@ pub fn pause(job: *Job, duration: Io.Duration) void {
 }
 
 /// Fails unless the call of `caller` ended with `expected`.
-pub fn expectCallError(job: *Job, caller: *const Caller, expected: errors.Error, comptime what: []const u8) Error!void {
+pub fn expectCallError(job: *Job, caller: *const Caller, expected: mongo.Error, comptime what: []const u8) Error!void {
     const err = caller.err orelse return job.fail(what ++ " succeeded, not error.{t}", .{expected});
     if (err != expected) return job.fail(what ++ " returned error.{t}, not error.{t}", .{ err, expected });
 }
@@ -207,18 +204,18 @@ pub fn isIn(names: []const []const u8, name: []const u8) bool {
 pub const Caller = struct {
     job: *Job,
     client: Client,
-    command: requests.Command,
-    op: requests.OperationContext = .of(.root),
+    command: mongo.Command,
+    op: mongo.OperationContext = .of(.root),
     reply: ?bson.OwnedDocument = null,
-    err: ?errors.Error = null,
-    diagnostics: errors.Diagnostics = .{},
+    err: ?mongo.Error = null,
+    diagnostics: mongo.Diagnostics = .{},
     ended: Io.Timestamp = .zero,
     /// After the call returned, `io.checkCancel()` in its task saw a
     /// cancelation.
     kept_cancel: bool = false,
     future: ?Io.Future(void) = null,
 
-    pub fn init(job: *Job, client: Client, command: requests.Command) Caller {
+    pub fn init(job: *Job, client: Client, command: mongo.Command) Caller {
         return .{ .job = job, .client = client, .command = command };
     }
 
@@ -253,9 +250,9 @@ pub const Caller = struct {
 };
 
 /// The allocator of the options of one call. It counts the allocations the
-/// driver holds of it, and those it makes after the call returned, which
-/// the contract forbids. Put it over an arena of the check, so that what a
-/// broken driver leaves goes with the arena.
+/// client holds of it, and those it makes after the call returned, which
+/// its rules forbid. Put it over an arena of the check, so that what a
+/// broken client leaves goes with the arena.
 pub const Fence = struct {
     parent: Allocator,
     live: std.atomic.Value(usize) = .init(0),
@@ -266,7 +263,7 @@ pub const Fence = struct {
         return .{ .ptr = f, .vtable = &vtable };
     }
 
-    /// The call returned: what the driver takes from now on is late.
+    /// The call returned: what the client takes from now on is late.
     pub fn close(f: *Fence) void {
         f.closed.store(true, .release);
     }
@@ -276,7 +273,7 @@ pub const Fence = struct {
         return f.live.load(.acquire);
     }
 
-    /// How many times the driver took memory after `close`.
+    /// How many times the client took memory after `close`.
     pub fn late(f: *const Fence) u32 {
         return f.late_uses.load(.acquire);
     }
@@ -315,39 +312,44 @@ pub const Fence = struct {
 };
 
 /// Starts the scripted server of the check, serving `handler` with `hello`,
-/// and sets up a fresh driver on it. `end` undoes both.
-pub fn scripted(job: *Job, stage: *Stage, handler: Script.Handler, hello: wire.Hello) Error!Client {
+/// and connects a fresh client to it. `end` undoes both.
+pub fn scripted(job: *Job, stage: *Stage, handler: Script.Handler, hello: Hello) Error!Client {
     stage.start(job.io, job.gpa, handler, hello) catch |err| return job.fail("the FakeServer of the check did not start: error.{t}", .{err});
-    const client = job.harness.set_up(job.harness.ptr, job.io, job.driver_gpa, .{ .scripted = .{ .uri = stage.uri, .script = &stage.script } }) catch |err| {
-        stage.stop(job.io);
-        return job.fail("harness.setUp returned error.{t}", .{err});
-    };
     job.stage = stage;
-    job.up = true;
-    return client;
+    try job.connect(stage.uri);
+    return job.driver.client();
 }
 
-/// Sets up a fresh driver on the live mongod of `Options.live`. `end`
+/// Connects a fresh client to the live mongod of `Options.live`. `end`
 /// undoes it.
 pub fn live(job: *Job) Error!Client {
-    const uri = job.options.live.?.uri;
-    const client = job.harness.set_up(job.harness.ptr, job.io, job.driver_gpa, .{ .live = .{ .uri = uri } }) catch |err|
-        return job.fail("harness.setUp returned error.{t}", .{err});
+    try job.connect(job.options.live.?.uri);
+    return job.driver.client();
+}
+
+/// A fresh client of `uri`, connected; its memory is counted.
+fn connect(job: *Job, uri: []const u8) Error!void {
+    var d: mongo.Diagnostics = .{};
+    job.driver = mongo.native.Client.init(job.client_gpa, job.io, .{ .uri = uri, .diagnostics = &d }) catch |err|
+        return job.fail("Client.init of {s} returned error.{t}: {s}", .{ uri, err, d.message() });
+    job.driver.connect(job.io, .root, &d) catch |err| {
+        job.driver.deinit();
+        return job.fail("connect to {s} returned error.{t}: {s}", .{ uri, err, d.message() });
+    };
     job.up = true;
-    return client;
 }
 
-/// `close` of the driver, for a check of closing; `end` calls it again.
+/// `close` of the client, for a check of closing; `end` calls it again.
 pub fn close(job: *Job) void {
-    job.harness.close(job.harness.ptr, job.io);
+    job.driver.close(job.io);
 }
 
-/// Closes and tears down the driver of the check, then stops its server.
+/// Closes and frees the client of the check, then stops its server.
 /// Every call of the check has returned, and every cursor is freed.
 pub fn end(job: *Job) void {
     if (job.up) {
-        job.harness.close(job.harness.ptr, job.io);
-        job.harness.tear_down(job.harness.ptr, job.io);
+        job.driver.close(job.io);
+        job.driver.deinit();
         job.up = false;
     }
     if (job.stage) |stage| {
@@ -355,133 +357,6 @@ pub fn end(job: *Job) void {
         job.stage = null;
     }
 }
-
-/// The harness behind a pointer and a table of its methods.
-pub const Harness = struct {
-    ptr: *anyopaque,
-    set_up: *const fn (ptr: *anyopaque, io: Io, gpa: Allocator, target: conformance.Target) anyerror!Client,
-    close: *const fn (ptr: *anyopaque, io: Io) void,
-    tear_down: *const fn (ptr: *anyopaque, io: Io) void,
-
-    const where = "mongo.testing.conformance.run: ";
-
-    /// A method of a harness: `fn (self: *H, io: std.Io, rest...)`
-    /// returning `Payload`, or an error union of it when `may_fail`.
-    const Method = struct {
-        name: []const u8,
-        rest: []const type,
-        Payload: type,
-        may_fail: bool,
-        signature: []const u8,
-    };
-
-    const methods = [_]Method{
-        .{ .name = "setUp", .rest = &.{ Allocator, conformance.Target }, .Payload = Client, .may_fail = true, .signature = "pub fn setUp(self: *@This(), io: std.Io, gpa: std.mem.Allocator, target: mongo.testing.conformance.Target) !mongo.Client" },
-        .{ .name = "close", .rest = &.{}, .Payload = void, .may_fail = false, .signature = "pub fn close(self: *@This(), io: std.Io) void" },
-        .{ .name = "tearDown", .rest = &.{}, .Payload = void, .may_fail = false, .signature = "pub fn tearDown(self: *@This(), io: std.Io) void" },
-    };
-
-    /// The type `Ptr` points to. Stops the build unless it is a pointer to
-    /// one mutable struct with the three methods of a harness in the form
-    /// the suite calls, with a message that names what to write.
-    fn expectHarness(comptime Ptr: type) type {
-        const not_a_pointer = where ++ "pass a pointer to the harness, e.g. &harness; got " ++ @typeName(Ptr);
-        const pointer = switch (@typeInfo(Ptr)) {
-            .pointer => |pointer| pointer,
-            else => @compileError(not_a_pointer),
-        };
-        if (pointer.size != .one or @typeInfo(pointer.child) != .@"struct") @compileError(not_a_pointer);
-        if (pointer.attrs.@"const") @compileError(where ++ "the harness must be mutable, declared with var; got " ++ @typeName(Ptr));
-        const H = pointer.child;
-        inline for (methods) |method| {
-            if (!@hasDecl(H, method.name))
-                @compileError(where ++ @typeName(H) ++ " has no method " ++ method.name ++ "; expected " ++ method.signature);
-            if (!fits(H, method))
-                @compileError(where ++ @typeName(H) ++ "." ++ method.name ++ " has another signature; expected " ++ method.signature);
-        }
-        return H;
-    }
-
-    /// Whether `H` declares `method` in the form the suite calls.
-    fn fits(comptime H: type, comptime method: Method) bool {
-        const function = switch (@typeInfo(@TypeOf(@field(H, method.name)))) {
-            .@"fn" => |function| function,
-            else => return false,
-        };
-        const params = function.param_types;
-        if (params.len != 2 + method.rest.len or params[0] != *H or params[1] != Io) return false;
-        inline for (method.rest, params[2..]) |Expected, Param| {
-            if (Param != Expected) return false;
-        }
-        const Return = function.return_type orelse return false;
-        if (Return == method.Payload) return true;
-        if (!method.may_fail) return false;
-        return switch (@typeInfo(Return)) {
-            .error_union => |error_union| error_union.payload == method.Payload,
-            else => false,
-        };
-    }
-
-    pub fn of(harness: anytype) Harness {
-        const Ptr = @TypeOf(harness);
-        _ = comptime expectHarness(Ptr);
-        const gen = struct {
-            fn setUp(ptr: *anyopaque, io: Io, gpa: Allocator, target: conformance.Target) anyerror!Client {
-                const self: Ptr = @ptrCast(@alignCast(ptr));
-                return self.setUp(io, gpa, target);
-            }
-            fn close(ptr: *anyopaque, io: Io) void {
-                const self: Ptr = @ptrCast(@alignCast(ptr));
-                self.close(io);
-            }
-            fn tearDown(ptr: *anyopaque, io: Io) void {
-                const self: Ptr = @ptrCast(@alignCast(ptr));
-                self.tearDown(io);
-            }
-        };
-        return .{ .ptr = harness, .set_up = gen.setUp, .close = gen.close, .tear_down = gen.tearDown };
-    }
-};
-
-/// What the suite learns of the driver before the checks, on one scripted
-/// server, set up and torn down in a task of its own: its name, its
-/// revision, and whether it connects to the FakeServer at all.
-pub const Probe = struct {
-    io: Io,
-    gpa: Allocator,
-    arena: Allocator,
-    harness: Harness,
-    name: []const u8 = "",
-    revision: u16 = 0,
-    wire: bool = false,
-    failure: ?[]const u8 = null,
-
-    pub fn go(p: *Probe) void {
-        var answering: Answering = .{ .with = .{ .reply = Script.ok } };
-        var stage: Stage = undefined;
-        stage.start(p.io, p.gpa, answering.handler(), .{}) catch |err| {
-            p.failure = std.fmt.allocPrint(p.arena, "the FakeServer of the probe did not start: error.{t}", .{err}) catch "the FakeServer did not start";
-            return;
-        };
-        defer stage.stop(p.io);
-        const client = p.harness.set_up(p.harness.ptr, p.io, p.gpa, .{ .scripted = .{ .uri = stage.uri, .script = &stage.script } }) catch |err| {
-            p.failure = std.fmt.allocPrint(p.arena, "harness.setUp returned error.{t}", .{err}) catch "harness.setUp failed";
-            return;
-        };
-        defer p.harness.tear_down(p.harness.ptr, p.io);
-        defer p.harness.close(p.harness.ptr, p.io);
-        const caps = client.capabilities();
-        // The name points into the driver, which tearDown frees.
-        p.name = p.arena.dupe(u8, caps.name) catch "";
-        p.revision = caps.revision;
-        // A driver that connects only for its first command connects now.
-        const op: requests.OperationContext = .of(core.Context.root.withDeadline(.after(now(p.io), .fromSeconds(10))));
-        if (client.runCommand(p.io, op, .{ .database = "admin", .body = ping }, .{ .allocator = p.gpa })) |reply| reply.deinit() else |_| {}
-        p.wire = stage.script.acceptedConnections() > 0;
-    }
-};
-
-pub const ping = bson.literal(.{ .ping = 1 });
 
 /// The scripted server of one check: its script, served by `FakeServer`
 /// on loopback. It points into itself: start it in place.
@@ -492,7 +367,7 @@ pub const Stage = struct {
     uri_buffer: [64]u8,
     uri: []const u8,
 
-    fn start(s: *Stage, io: Io, gpa: Allocator, handler: Script.Handler, hello: wire.Hello) !void {
+    fn start(s: *Stage, io: Io, gpa: Allocator, handler: Script.Handler, hello: Hello) !void {
         s.script = .init(gpa, handler);
         s.script.hello = hello;
         errdefer s.script.deinit();
@@ -526,7 +401,7 @@ pub const Answering = struct {
 };
 
 /// Counts what one check holds of the caller's allocator, so that memory
-/// left after `tearDown` shows as a leak of that check.
+/// left after `deinit` of its client shows as a leak of that check.
 pub const Counting = struct {
     parent: Allocator,
     live: std.atomic.Value(usize) = .init(0),
@@ -575,3 +450,15 @@ pub const Counting = struct {
         }
     }
 };
+
+test "the counting allocator counts what is held, and nothing once it is freed" {
+    const testing = std.testing;
+    var counting: Counting = .{ .parent = testing.allocator };
+    const a = counting.allocator();
+    const block = try a.alloc(u8, 16);
+    try testing.expectEqual(@as(usize, 1), counting.live.load(.acquire));
+    try testing.expectEqual(@as(usize, 16), counting.bytes.load(.acquire));
+    a.free(block);
+    try testing.expectEqual(@as(usize, 0), counting.live.load(.acquire));
+    try testing.expectEqual(@as(usize, 0), counting.bytes.load(.acquire));
+}

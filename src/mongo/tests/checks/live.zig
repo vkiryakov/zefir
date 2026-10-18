@@ -1,32 +1,29 @@
-//! The checks of layer L of `mongo.testing.conformance`, each against the
-//! live mongod of `Options.live`: L1–L10 of the design of zefir-mongo.
-//! They write to the database "zefir_conformance", in a collection of
-//! their own, and drop it; L7–L10 configure the fail point `failCommand`
-//! for one command and turn it off.
+//! The checks of layer L, each against the live mongod of `Options.live`:
+//! L1–L10 of the design of zefir-mongo. They write to the database
+//! "zefir_checks", each in a collection of its own, and drop it; L7–L10
+//! configure the fail point `failCommand` for one command and turn it off.
 
 const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const core = @import("core");
-const bson = @import("../../bson.zig");
-const errors = @import("../../errors.zig");
-const requests = @import("../../requests.zig");
-const results = @import("../../results.zig");
-const Client = @import("../../contract/Client.zig");
-const Cursor = @import("../../contract/Cursor.zig");
+const mongo = @import("mongo");
+const bson = mongo.bson;
+const Client = mongo.Client;
+const Cursor = mongo.Cursor;
 const Job = @import("Job.zig");
 
-const database = "zefir_conformance";
+const database = "zefir_checks";
 const eql = std.mem.eql;
 
 /// The budget of one operation of a check.
-fn op(job: *const Job) requests.OperationContext {
+fn op(job: *const Job) mongo.OperationContext {
     return job.within(60_000);
 }
 
 /// Runs `body` in the database of the checks and returns its reply.
 fn command(job: *Job, client: Client, body: bson.RawDocument, comptime what: []const u8) Job.Error!bson.OwnedDocument {
-    var d: errors.Diagnostics = .{};
+    var d: mongo.Diagnostics = .{};
     return client.runCommand(job.io, op(job), .{ .database = database, .body = body }, .{ .allocator = job.gpa, .diagnostics = &d }) catch |err|
         job.fail(what ++ " returned error.{t}: {s}", .{ err, d.message() });
 }
@@ -35,7 +32,7 @@ fn command(job: *Job, client: Client, body: bson.RawDocument, comptime what: []c
 fn drop(job: *Job, client: Client, collection: []const u8) Job.Error!void {
     const body = try job.encode(.{ .drop = collection });
     defer body.deinit();
-    var d: errors.Diagnostics = .{};
+    var d: mongo.Diagnostics = .{};
     if (client.runCommand(job.io, op(job), .{ .database = database, .body = body.raw() }, .{ .allocator = job.gpa, .diagnostics = &d })) |reply| {
         reply.deinit();
     } else |err| {
@@ -45,20 +42,20 @@ fn drop(job: *Job, client: Client, collection: []const u8) Job.Error!void {
     }
 }
 
-fn write(job: *Job, client: Client, kind: requests.WriteKind, collection: []const u8, items: []const bson.RawDocument, ordered: bool) Job.Error!results.WriteResult {
+fn write(job: *Job, client: Client, kind: mongo.WriteKind, collection: []const u8, items: []const bson.RawDocument, ordered: bool) Job.Error!mongo.WriteResult {
     var b: bson.Builder = .init(job.gpa);
     defer b.deinit();
     b.putString(kind.command(), collection) catch return error.OutOfMemory;
     const body = b.finish() catch return error.OutOfMemory;
     defer body.deinit();
-    var d: errors.Diagnostics = .{};
+    var d: mongo.Diagnostics = .{};
     return client.write(job.io, op(job), .{ .database = database, .kind = kind, .body = body.raw(), .items = items, .ordered = ordered }, .{ .allocator = job.gpa, .diagnostics = &d }) catch |err|
         job.fail("{s} into {s} returned error.{t}: {s}", .{ kind.command(), collection, err, d.message() });
 }
 
 /// The documents of the cursor of `body`, copied into `arena`.
-fn all(job: *Job, client: Client, arena: Allocator, body: bson.RawDocument, options: requests.CursorOptions) Job.Error![]const bson.RawDocument {
-    var d: errors.Diagnostics = .{};
+fn all(job: *Job, client: Client, arena: Allocator, body: bson.RawDocument, options: mongo.CursorOptions) Job.Error![]const bson.RawDocument {
+    var d: mongo.Diagnostics = .{};
     var with = options;
     with.diagnostics = &d;
     const cursor = client.openCursor(job.io, op(job), .{ .database = database, .body = body }, with) catch |err|
@@ -84,7 +81,7 @@ fn countOf(job: *Job, client: Client, collection: []const u8) Job.Error!i64 {
 }
 
 /// Fails unless `result` holds no refused item; the first one says why.
-fn expectNoRefused(job: *Job, result: results.WriteResult, comptime what: []const u8) Job.Error!void {
+fn expectNoRefused(job: *Job, result: mongo.WriteResult, comptime what: []const u8) Job.Error!void {
     if (result.write_errors.len == 0) return;
     const first = result.write_errors[0];
     return job.fail(what ++ ": mongod refused {d} item(s), the first, item {d}, with code {d}: {s}", .{ result.write_errors.len, first.index, first.code, first.message });
@@ -132,7 +129,7 @@ pub fn l1(job: *Job) Job.Error!void {
     try expectSame(job, try all(job, client, a, find, .{}), &.{ bson.literal(.{ ._id = 2, .name = "Bob", .n = 20 }), bson.literal(.{ ._id = 3, .name = "Cid", .n = 4 }) }, "find after the update, findAndModify and the delete");
 }
 
-const l2_comment = "zefir-conformance-l2";
+const l2_comment = "zefir-checks-l2";
 
 /// The id of the idle cursor of mongod whose command had `comment`.
 fn idleCursor(job: *Job, client: Client) Job.Error!?i64 {
@@ -144,7 +141,7 @@ fn idleCursor(job: *Job, client: Client) Job.Error!?i64 {
         },
         .cursor = .{},
     });
-    var d: errors.Diagnostics = .{};
+    var d: mongo.Diagnostics = .{};
     const reply = client.runCommand(job.io, op(job), .{ .database = "admin", .body = body }, .{ .allocator = job.gpa, .diagnostics = &d }) catch |err|
         return job.fail("$currentOp returned error.{t}: {s}", .{ err, d.message() });
     defer reply.deinit();
@@ -196,7 +193,7 @@ const ten = ten: {
     break :ten items;
 };
 
-fn expectRefused(job: *Job, result: results.WriteResult, indexes: []const usize, comptime what: []const u8) Job.Error!void {
+fn expectRefused(job: *Job, result: mongo.WriteResult, indexes: []const usize, comptime what: []const u8) Job.Error!void {
     try job.expect(result.write_errors.len == indexes.len, what ++ ": {d} items refused, not {d}", .{ result.write_errors.len, indexes.len });
     for (result.write_errors, indexes) |refused, index| {
         try job.expect(refused.index == index and refused.code == 11000, what ++ ": item {d} refused with code {d}, where item {d} is a duplicate key (11000)", .{ refused.index, refused.code, index });
@@ -229,7 +226,7 @@ pub fn l3(job: *Job) Job.Error!void {
 pub fn l4(job: *Job) Job.Error!void {
     const client = try job.live();
     defer job.end();
-    var d: errors.Diagnostics = .{};
+    var d: mongo.Diagnostics = .{};
     var failure: ?bson.OwnedDocument = null;
     defer if (failure) |f| f.deinit();
     try job.expectError(client.runCommand(job.io, op(job), .{ .database = database, .body = bson.literal(.{ .zefirNoSuchCommand = 1 }) }, .{ .allocator = job.gpa, .diagnostics = &d, .failure_reply = &failure }), error.CommandFailed, "an unknown command");
@@ -246,7 +243,7 @@ const Worker = struct {
     job: *Job,
     client: Client,
     task: usize,
-    err: ?errors.Error = null,
+    err: ?mongo.Error = null,
     what: []const u8 = "",
 
     fn go(w: *Worker) void {
@@ -269,7 +266,7 @@ const Worker = struct {
         }
     }
 
-    fn failed(w: *Worker, err: errors.Error, what: []const u8) void {
+    fn failed(w: *Worker, err: mongo.Error, what: []const u8) void {
         w.err = err;
         w.what = what;
     }
@@ -360,7 +357,7 @@ pub fn l6(job: *Job) Job.Error!void {
 fn failPoint(job: *Job, client: Client, data: anytype) Job.Error!void {
     const body = try job.encode(.{ .configureFailPoint = "failCommand", .mode = .{ .times = 1 }, .data = data });
     defer body.deinit();
-    var d: errors.Diagnostics = .{};
+    var d: mongo.Diagnostics = .{};
     const reply = client.runCommand(job.io, op(job), .{ .database = "admin", .body = body.raw() }, .{ .allocator = job.gpa, .diagnostics = &d }) catch |err|
         return job.fail("configureFailPoint returned error.{t}: {s}; fail points need a mongod with enableTestCommands=1", .{ err, d.message() });
     reply.deinit();
@@ -390,7 +387,7 @@ pub fn l8(job: *Job) Job.Error!void {
     defer drop(job, client, "l8") catch {};
     defer failPointOff(job, client);
     try failPoint(job, client, .{ .failCommands = .{"insert"}, .errorCode = 91, .errorLabels = .{"RetryableWriteError"} });
-    var d: errors.Diagnostics = .{};
+    var d: mongo.Diagnostics = .{};
     // Failed once: a retry would have gone through.
     try job.expectError(client.write(job.io, op(job), .{ .database = database, .kind = .insert, .body = bson.literal(.{ .insert = "l8" }), .items = ten[0..1] }, .{ .allocator = job.gpa, .diagnostics = &d }), error.CommandFailed, "an insert that mongod failed with 91 once");
     const server = d.server orelse return job.fail("Diagnostics.server is null after CommandFailed", .{});
@@ -406,8 +403,8 @@ pub fn l9(job: *Job) Job.Error!void {
     defer job.end();
     defer failPointOff(job, client);
     try failPoint(job, client, .{ .failCommands = .{"find"}, .errorCode = 462, .errorLabels = .{ "SystemOverloadedError", "RetryableError" } });
-    var d: errors.Diagnostics = .{};
-    const find: requests.Command = .{ .database = database, .body = bson.literal(.{ .find = "l9" }) };
+    var d: mongo.Diagnostics = .{};
+    const find: mongo.Command = .{ .database = database, .body = bson.literal(.{ .find = "l9" }) };
     try job.expectError(client.openCursor(job.io, op(job), find, .{ .diagnostics = &d }), error.CommandFailed, "a find that mongod failed with 462 once, which a retry would have passed");
     const server = d.server orelse return job.fail("Diagnostics.server is null after CommandFailed", .{});
     try job.expect(server.code == 462, "Diagnostics.server.code is {d}, not 462", .{server.code});

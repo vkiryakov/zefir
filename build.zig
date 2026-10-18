@@ -674,6 +674,25 @@ pub fn build(b: *std.Build) void {
         test_rpc_nats.dependOn(&compile.step);
     }
 
+    // The checks S and L of zefir-mongo's client (design §5): a test module
+    // of its own over the public API, which tests/mongo takes through
+    // dependency.path and runs on zio against mongod, layer L included.
+    // Here it runs layer S, against scripted servers on loopback.
+    const mongo_checks = b.addTest(.{
+        .name = "mongo-checks",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/mongo/tests/checks.zig"),
+            .target = target,
+            .optimize = optimize,
+            .sanitize_thread = tsan,
+            .imports = &.{
+                .{ .name = "mongo", .module = mongo },
+                .{ .name = "core", .module = core },
+            },
+        }),
+    });
+    test_mongo.dependOn(&addRun(b, mongo_checks, tsan).step);
+
     // mongo compile errors: types that the BSON codec cannot write or read.
     // Each test of the file must fail to compile with the message next to
     // its name, which names the field; the filter compiles one test at a
@@ -750,34 +769,6 @@ pub fn build(b: *std.Build) void {
         const compile = b.addTest(.{
             .name = b.fmt("mongo-contract-error-{d}", .{i}),
             .root_module = mongo_contract_errors,
-            .filters = &.{case[0]},
-        });
-        compile.expect_errors = .{ .exact = b.allocator.dupe([]const u8, &.{ case[1], "note: called at comptime here" }) catch @panic("OOM") };
-        test_mongo.dependOn(&compile.step);
-    }
-
-    // mongo compile errors of the conformance suite: harnesses whose
-    // methods do not fit mongo.testing.conformance.run, checked as the
-    // drivers above.
-    const mongo_conformance_errors = b.createModule(.{
-        .root_source_file = b.path("src/mongo/tests/conformance_errors.zig"),
-        .target = target,
-        .optimize = optimize,
-        .sanitize_thread = tsan,
-        .imports = &.{
-            .{ .name = "mongo", .module = mongo },
-        },
-    });
-    for ([_][2][]const u8{
-        .{ "harness by value", "mongo.testing.conformance.run: pass a pointer to the harness, e.g. &harness; got conformance_errors.Harness" },
-        .{ "harness behind a const pointer", "mongo.testing.conformance.run: the harness must be mutable, declared with var; got *const conformance_errors.Harness" },
-        .{ "harness without close", "mongo.testing.conformance.run: conformance_errors.test.harness without close.NoClose has no method close; expected pub fn close(self: *@This(), io: std.Io) void" },
-        .{ "setUp without the target", "mongo.testing.conformance.run: conformance_errors.test.setUp without the target.NoTarget.setUp has another signature; expected pub fn setUp(self: *@This(), io: std.Io, gpa: std.mem.Allocator, target: mongo.testing.conformance.Target) !mongo.Client" },
-        .{ "tearDown that may fail", "mongo.testing.conformance.run: conformance_errors.test.tearDown that may fail.Failing.tearDown has another signature; expected pub fn tearDown(self: *@This(), io: std.Io) void" },
-    }, 0..) |case, i| {
-        const compile = b.addTest(.{
-            .name = b.fmt("mongo-conformance-error-{d}", .{i}),
-            .root_module = mongo_conformance_errors,
             .filters = &.{case[0]},
         });
         compile.expect_errors = .{ .exact = b.allocator.dupe([]const u8, &.{ case[1], "note: called at comptime here" }) catch @panic("OOM") };
