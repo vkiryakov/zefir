@@ -52,4 +52,5 @@ test {
     _ = @import("bson/builder_tests.zig");
     _ = @import("bson/types_tests.zig");
     _ = @import("bson/ejson_tests.zig");
+    _ = @import("bson/fuzz.zig");
 }

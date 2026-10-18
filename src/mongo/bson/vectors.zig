@@ -165,7 +165,18 @@ pub const broken = [_]Broken{
 /// {"a": {"a": … {}}}: `levels` documents inside one another, the
 /// outermost one included. Free it with `allocator`.
 pub fn nested(allocator: std.mem.Allocator, levels: usize) ![]u8 {
-    const bytes = try allocator.alloc(u8, 5 + 8 * (levels - 1));
+    const bytes = try allocator.alloc(u8, nestedLen(levels));
+    fillNested(bytes, levels);
+    return bytes;
+}
+
+/// The length of `nested(levels)`.
+pub fn nestedLen(levels: usize) usize {
+    return 5 + 8 * (levels - 1);
+}
+
+/// Writes `nested(levels)` into `bytes`, which are `nestedLen(levels)` long.
+pub fn fillNested(bytes: []u8, levels: usize) void {
     for (0..levels) |level| {
         // Each document starts 7 bytes after its parent: length, type, "a\x00".
         const start = 7 * level;
@@ -174,7 +185,6 @@ pub fn nested(allocator: std.mem.Allocator, levels: usize) ![]u8 {
         if (level + 1 < levels) @memcpy(bytes[start + 4 ..][0..3], "\x03a\x00");
         bytes[start + size - 1] = 0;
     }
-    return bytes;
 }
 
 /// The bytes that `text` spells in hex; spaces are ignored.
