@@ -9,9 +9,9 @@
 # tests import it, directly or through other modules; zefir imports them
 # all. tests/nats/, tests/rpc-nats/ and tests/http/, the end-to-end tests
 # of nats, of rpc-nats and of http, count as their modules, and
-# tests/mongo-async-driver/, the end-to-end tests of zefir-mongo, as
-# mongo. docker-compose.yml, the servers of nats, rpc-nats and mongo,
-# counts as all three.
+# tests/mongo-async-driver/, the end-to-end tests of zefir-mongo and of its
+# native driver, as mongo-async-driver. docker-compose.yml, the servers of
+# nats, rpc-nats and mongo-async-driver, counts as all three.
 # examples/rpc-custom-transport/, a transport outside zefir that CI runs
 # against rpc, counts as rpc, and examples/mongo-custom-driver/, a driver
 # outside zefir that CI runs against mongo, as mongo. build.zig,
@@ -26,7 +26,7 @@ set -eu
 # The modules and what the tests of each one import. Keep this in sync with
 # build.zig: the `.imports` of each module and of the programs that its
 # test-<module> step builds. CI tests only the modules listed here.
-modules="core log confy validator rpc rpc-nats rpc-log orm mongo nats http zefir"
+modules="core log confy validator rpc rpc-nats rpc-log orm mongo mongo-async-driver nats http zefir"
 imports() {
     case $1 in
     core) ;;
@@ -49,10 +49,14 @@ imports() {
     nats) echo core confy ;;
     orm) echo log ;;
     mongo) echo core ;;
+    # The native driver imports mongo and core, and the examples of its
+    # guide and its end-to-end tests read their settings with confy and
+    # log with log.
+    mongo-async-driver) echo mongo core confy log ;;
     # http imports core and validator; the examples of its guide read
     # their settings with confy and log with log.
     http) echo core validator confy log ;;
-    zefir) echo core log confy validator rpc rpc-nats rpc-log orm mongo nats http ;;
+    zefir) echo core log confy validator rpc rpc-nats rpc-log orm mongo mongo-async-driver nats http ;;
     esac
 }
 
@@ -95,10 +99,10 @@ elif [ $# -eq 2 ] && [ -n "$1" ] && [ -n "$2" ]; then
         tests/nats/*) changed="$changed nats" ;;
         tests/rpc-nats/*) changed="$changed rpc-nats" ;;
         tests/http/*) changed="$changed http" ;;
-        tests/mongo-async-driver/*) changed="$changed mongo" ;;
+        tests/mongo-async-driver/*) changed="$changed mongo-async-driver" ;;
         examples/rpc-custom-transport/*) changed="$changed rpc" ;;
         examples/mongo-custom-driver/*) changed="$changed mongo" ;;
-        docker-compose.yml) changed="$changed nats rpc-nats mongo" ;;
+        docker-compose.yml) changed="$changed nats rpc-nats mongo-async-driver" ;;
         README.md) changed="$changed rpc http" ;;
         docs/* | *.md) ;;
         *) all=true ;;

@@ -98,8 +98,8 @@ jobs:
         working-directory: tests/http
         run: zig build check --summary all
       # The same for tests/mongo-async-driver, the end-to-end tests of
-      # zefir-mongo, which need mongod in Docker.
-      - if: contains(format(' {0} ', env.MODULES), ' mongo ')
+      # zefir-mongo and of its native driver, which need mongod in Docker.
+      - if: contains(format(' {0} ', env.MODULES), ' mongo ') || contains(format(' {0} ', env.MODULES), ' mongo-async-driver ')
         shell: bash
         working-directory: tests/mongo-async-driver
         run: zig build check --summary all
@@ -214,11 +214,12 @@ jobs:
   # this commit, not the one the package pins) and run through layer S of
   # the conformance suite of zefir-mongo, with the application of the
   # example on FakeDriver; layer L needs a live mongod, which this job does
-  # not start. It runs when mongo is among the modules to test.
+  # not start. It runs when mongo or its native driver is among the modules
+  # to test.
   custom-driver:
     name: custom-driver
     needs: changes
-    if: contains(format(' {0} ', needs.changes.outputs.modules), ' mongo ')
+    if: contains(format(' {0} ', needs.changes.outputs.modules), ' mongo ') || contains(format(' {0} ', needs.changes.outputs.modules), ' mongo-async-driver ')
     timeout-minutes: 20
     runs-on: ubuntu-latest
     steps:

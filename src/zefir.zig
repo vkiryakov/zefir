@@ -9,6 +9,7 @@ pub const rpc_nats = @import("rpc-nats");
 pub const rpc_log = @import("rpc-log");
 pub const orm = @import("orm");
 pub const mongo = @import("mongo");
+pub const mongo_async_driver = @import("mongo-async-driver");
 pub const nats = @import("nats");
 pub const http = @import("http");
 
