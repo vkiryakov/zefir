@@ -1,0 +1,9 @@
+# The service of zefir-http in the HTTP Garden: http-garden.yml adds it to
+# the `services` of the Garden's docker-compose.yml, next to the Garden's
+# own, with its build context in the Garden's images/zefir (see README.md).
+services:
+  zefir:
+    build:
+      context: ./images/zefir
+    x-props:
+      role: origin
