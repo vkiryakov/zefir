@@ -30,6 +30,12 @@ memory.
 > - **`http.Patch(T)`.** A PATCH body fills `?T` fields, where a missing
 >   field and `null` look the same: a field can be changed, but not
 >   cleared to `null`.
+> - **`zefir.map`.** Fields are not copied between structs by themselves: a
+>   DTO of a response is filled by a function of its own, such as
+>   `dto.TodoResponse.from(todo)`.
+> - **Routes known only at start.** Every route is declared when the service
+>   compiles; of the paths, only the server's `.prefix` may come from the
+>   settings.
 > - **Ready-made middleware.** zefir-http ships none: CORS, authentication,
 >   rate limits and security headers are code of your application, and this
 >   guide shows the first two. A library of them will come.
@@ -1018,7 +1024,7 @@ What a handler returns:
 
 | It returns | The response |
 | --- | --- |
-| `!http.Json(T)` | 200 and the value as JSON; another status with `.{ .value = x, .status = 201 }` |
+| `!http.Json(T)` | 200 and the value as JSON, written after the handler has returned (see [Responses](#responses)); another status with `.{ .value = x, .status = 201 }` |
 | `!void`, nothing written | 204 No Content |
 | `!void`, a response written with `ctx.response` | what was written: text, HTML, a redirect, a stream |
 | an error | the response of the error handler (see [Errors](#errors)) |
@@ -1430,9 +1436,19 @@ The responses a handler writes itself go through `ctx.response`:
 | `ctx.response.text(s)`, `.html(s)` | `text/plain` or `text/html`, UTF-8 |
 | `ctx.response.status(303).redirect("/")` | a redirect; without a status, 302 |
 | `ctx.response.setCookie(.{ … })` | a `Set-Cookie` field |
-| `ctx.response.setHeader(name, value)` | a header field; CR, LF and NUL are refused |
+| `ctx.response.setHeader(name, value)` | a header field, in place of one of that name; not those the backend writes, nor `Set-Cookie` (see below) |
 | `ctx.response.file(path, .{ … })` | a file of the application, read as it goes out |
 | `ctx.response.stream(.{ … })` | a body written as it goes |
+
+**The value of `http.Json(T)` goes out after the handler has returned**, and
+after its `defer`s: the JSON is written from the value as the response goes
+to the client. So what the value points to must live, unchanged, until then.
+The memory of `ctx.allocator()` does, and so do the copies the repository
+makes there. A slice of something that the handler shares with other
+requests does not, such as the list of an object read under a mutex that a
+`defer` unlocks: before it goes out, another request may change it or free
+it. Copy such a value into `ctx.allocator()` first, or write it at once with
+`ctx.response.json(x)`.
 
 The export of the service writes a CSV row by row, through a buffer of
 16 KiB, so the file is never whole in memory:
@@ -1473,9 +1489,16 @@ content (`Content-Type`, `Content-Length`, `Content-Encoding`,
 `Content-Disposition`) go, the other fields set before, such as
 `x-request-id`, stay. Once it is committed, an error cuts the response: a
 chunked body loses its end, a body with a length its connection, so the
-client sees a broken response, never a whole one. The backend writes the
-fields of the framing itself, so `setHeader` refuses `content-length`,
-`transfer-encoding`, `connection` and `date`.
+client sees a broken response, never a whole one.
+
+The backend writes the fields of the framing and of the connection itself,
+so that the head always says what the body is: `setHeader` refuses
+`Content-Length`, `Transfer-Encoding`, `Connection`, `Keep-Alive`, `TE`,
+`Trailer`, `Upgrade` and `Date` with `error.ReservedHeader`. It refuses
+`Set-Cookie` too, since a response has a field of its own for each cookie:
+`setCookie` adds them. A name that is not a token, or a value with CR, LF,
+NUL or another control character but a tab, is `error.InvalidHeaderValue`.
+Both errors are mistakes of the program, 500.
 
 `ctx.response.setCookie` and `redirect` are shown in
 [Authentication and CORS](#authentication-and-cors): signing in sets a cookie
@@ -1611,7 +1634,7 @@ fallback gives 500 is a mistake, and stops the build. Without the branch of
 `error.TodoLimitReached` above, the service does not compile:
 
 ```text
-error: TodosV1Controller.create can return error.TodoLimitReached; AppErrors.mapError gives it 500 through .fallback (strict error check; .strict_errors = false turns it off)
+error: zefir.http: TodosV1Controller.create can return error.TodoLimitReached; AppErrors.mapError gives it 500 through .fallback (strict error check; .strict_errors = false turns it off)
 ```
 
 An explicit `error.X => .{ .status = 500, … }` is a choice, and passes. A
@@ -1635,7 +1658,8 @@ errors have their statuses already:
 | `Overloaded`, `Unavailable` | 503 |
 | `RequestTimeout`, `DeadlineExceeded` of core | 504 |
 | `Canceled`: the client has gone, or a stop | no response |
-| the rest: `OutOfMemory`, `LocalMissing`, `InvalidHeaderValue`, … | 500 |
+| `InvalidEvent`, `EventTooLarge`: an SSE event that cannot go out | 500 |
+| the rest: `OutOfMemory`, `LocalMissing`, `InvalidHeaderValue`, `ReservedHeader`, … | 500 |
 
 A request whose head is broken never reaches the error handler: it has no
 method and no path yet. The backend answers it with a short text and closes
@@ -2358,22 +2382,35 @@ Content-Length: 104
   empty line. `id` is what the browser sends back as `Last-Event-ID` when it
   reconnects: the handler reads it with `ctx.lastEventId()`. The server does
   not send again what the client missed.
+- **The head of the stream** says `Cache-Control: no-cache` and
+  `X-Accel-Buffering: no`, so that no proxy holds the events back. The
+  `onResponse` phases of its middleware run before it goes out and may
+  change its fields: here `noCache` of `mw.protected` makes it `no-store`.
 - **The stream is no request at work.** It does not count in
   `.max_in_flight`, and the deadline of its request does not apply to it;
   the streams count in `.max_streams`, 10 000 by default. The `onFinish` of
   its middleware runs when the stream has ended.
-- **A heartbeat**, the comment `: ping`, goes out when nothing else did for
-  `.heartbeat`: it keeps the connection through proxies, and shows that a
-  client has gone. A route has none unless it sets one.
+- **A heartbeat**, the comment `: ping`, goes out after `.heartbeat` of
+  silence, when nothing else went out for that long, not on a clock: it
+  keeps the connection through proxies, and shows that a client has gone. A
+  route has none unless it sets one.
 - **A client that falls behind** fills its queue, 64 events or 256 KiB by
   default, and its stream is closed: memory does not grow. The client
-  reconnects and reads the list anew.
+  reconnects and reads the list anew. An event longer than the queue's
+  `.max_bytes` alone fits no queue: `publish` returns `error.EventTooLarge`,
+  a 500, and logs it; the event goes to nobody, and the streams stay open.
+- **A stream that ends whole**, by `close(key)` or by a stop, ends its
+  response with the last chunk, as any chunked response ends. On HTTP/1.1
+  its connection then serves the next request, as keep-alive does, unless
+  the server is stopping, which closes it. To an HTTP/1.0 client a stream
+  goes on until its connection closes.
 - **`EventSource` cannot send `Authorization`**, so the stream of a browser
   comes with the cookie `session`. A token in the URL would end up in the
   logs of every proxy.
 - **The manager outlives the server.** `main` declares `live` before the
   server, so that the server's `deinit`, which ends the streams, runs first.
-  A stop of the server closes the streams at once: their clients reconnect,
+  A stop of the server closes the streams: each sends what was published to
+  it before, within `.shutdown_grace`, then ends, and its client reconnects,
   to another instance.
 
 ## Static files
@@ -2485,8 +2522,9 @@ Content-Length: 100
 ```
 
 - **Routes come first.** A GET or HEAD that no route takes is served from the
-  mount with the longest path that begins it; another method on a file is
-  405, on a path without a file 404.
+  mount with the longest path that begins it. OPTIONS on a file gets 204
+  with `Allow: GET, HEAD`, as the path of a route does, and another method
+  405 with the same `Allow`; on a path without a file, both are 404.
 - **`spa_fallback`** gives `index.html` to a GET of any path without a file,
   `/todos/today` above, so that a single-page application reads its own
   paths; never under the server's prefix, `/api`, where a 404 stays a 404.
@@ -2501,18 +2539,28 @@ Content-Length: 100
   `error.InvalidStaticRoot`. A deploy that swaps the directory needs a
   restart.
 - **Nothing leaves the root.** A path is decoded by the server's own code,
-  and `..`, `%2F`, `%5C`, NUL and invalid UTF-8 are refused. Each
-  component of the path opens on its own, and a symbolic link inside the
-  root is not served at all, wherever it points. Hidden files, such as
-  `.env` above, and the names of Windows devices are 404.
+  and its `.` and `..` resolve inside the path, as RFC 3986 says:
+  `/sub/../a.txt` is `/a.txt`, and `..` never climbs above the root. A path
+  that is not UTF-8 is 400. Each segment is checked before a file is
+  opened, and these are 404: a `/` or a `\` inside it (`%2F`, `%5C`), NUL
+  and `:`; a hidden name, which begins with a dot, such as `.env` above; a
+  name that ends with a dot or a space; `~` before a digit, as in
+  `report~1.pdf`, the mark of a short name on Windows; and the names of
+  Windows devices, such as `CON` or `nul.txt`. The rules of Windows hold on
+  every system, so a site behaves the same wherever it runs, a share of a
+  Windows disk too. Each component of the path opens on its own, and a
+  symbolic link inside the root is not served at all, wherever it points.
 - **No redirect to a trailing slash**: `/docs` serves `docs/index.html` as
   it is, and its relative links would resolve against `/`. Make the links of
   `index.html` absolute, `/api/v1/todos`, as the page above does.
 - **`Cache-Control`** comes from the mount's option `.cache_control`, such
   as `"public, max-age=31536000, immutable"` for files whose names change
   with their content; `X-Content-Type-Options: nosniff` always.
-- **A static response has no deadline**: a large file to a slow client takes
-  its time, and the backend's write timeout cuts a client that stops reading.
+- **The deadline covers the start of a static response.** The server's
+  middleware run within `.request_timeout`, as for every request, and so
+  does the open of the file: past it, 504. The file then goes out without a
+  deadline: a large file to a slow client takes its time, and the backend's
+  write timeout cuts a client that stops reading.
 
 ## Tests
 
@@ -2903,21 +2951,27 @@ A request's are in the options of `http.Server.init`:
 
 | Option | Default | Over it |
 | --- | --- | --- |
-| `.max_body_bytes`; a route may set its own | 1 MiB | 413, before the body is read |
+| `.max_body_bytes`; a route may set its own, which holds in the server's middleware too | 1 MiB | 413: by its `Content-Length` before the body is read; a chunked body once it crosses the limit |
+| the items of the lists of a JSON body, in memory, each as `@sizeOf` its type | 4 × `.max_body_bytes` | 413 |
 | `.json.max_depth` | 64 | 400 |
-| `.max_query_params` | 100 | 400 |
+| `.max_query_params`, of a query and of a form | 100 | 400 |
 | `.max_in_flight`, the requests at work, streams aside | 10 000 | 503 |
 | `.max_streams`, the SSE streams | 10 000 | 503 |
 | `.request_timeout`, the deadline of a request; a route may set its own; `null` for none | 30 s | 504 |
 | `.shutdown_grace` | 10 s | the requests left are canceled |
 | `.finish_timeout`, all `onFinish` phases of a request | 5 s | they are canceled |
 
+A JSON body of small items, such as `[{},{},…]`, takes many times its size
+once it is read into a list of structs, so its lists have a budget of their
+own: a rule such as `v.maxItems` runs only after the list is built.
+
 The deadline of a request begins once its head is parsed, and covers the
 server's middleware, the reading of its body and its handler. It is in
 `ctx.operation()`, the request's `core.Context`, which the handler passes to
 its services: they check it themselves, `ctx.check(now)`, and when it passes,
-the server cancels the request too. It does not cover the static files and
-the streams of SSE.
+the server cancels the request too. Of a static file, it covers the server's
+middleware and the open of the file, not the file going out; it does not
+cover the streams of SSE.
 
 - **A client that leaves while its body is unread.** The watcher of a
   request reads the connection only once the body has been read; until
@@ -2933,6 +2987,10 @@ the streams of SSE.
   blocks, `.{ .list = &.{"10.1.0.0/16"} }`. A service open to the internet
   without a proxy in front sets `.none`: a client would forge its address and
   the id of its request otherwise, as `checkout-42` above shows.
+  `X-Forwarded-For` comes first: `Forwarded` is read only when a request has
+  no `X-Forwarded-For`. So a proxy that writes only `Forwarded` must remove
+  the `X-Forwarded-For` that a client sends, or the client names its own
+  address.
 - **10 000 connections on Linux.** On zio a request at work takes three
   coroutines, and each coroutine about two mappings of memory: 10 000
   requests at work take about 60 000, under Linux's default limit of 65 530,
@@ -2940,6 +2998,20 @@ the streams of SSE.
   `PlanLookup`. Raise the limit on a machine that serves that many, to
   262 144 say: `sudo sysctl -w vm.max_map_count=262144`, and in
   `/etc/sysctl.conf` to keep it.
+- **Open files.** Each connection is a file descriptor, and a process may
+  open 1024 of them by default on Linux and 256 on macOS, far fewer than
+  `.max_connections`. Past that, `accept` fails, the backend logs a warning
+  and tries again every 100 ms, and new clients wait. Raise the limit where
+  the service starts: `ulimit -n 65536` in its shell, or `LimitNOFILE=65536`
+  in its systemd unit.
+- **One instance per port.** On Linux and macOS a second server on a port
+  that another one serves starts too, and the two share the connections of
+  the port, or the new one takes them all: the backend listens with
+  `SO_REUSEADDR`, so that a restart need not wait out the connections of its
+  last run, and zio sets `SO_REUSEPORT` with it there. Keeping one instance
+  per port is the job of what runs the service, such as systemd or
+  Kubernetes. On Windows the second server's `start` returns
+  `error.AddressInUse`.
 
 The backend reads the requests of a connection one after another, kept
 alive between them; HTTP/1.0 keeps a connection only with its own
@@ -2978,11 +3050,14 @@ What a stop does:
 1. The backend takes no new connections. A connection that waits for its
    next request closes at once; a busy one after its response, which says
    `Connection: close`.
-2. The streams of SSE close at once: their clients reconnect, to another
-   instance.
-3. The requests at work get `.shutdown_grace`, 10 seconds, to end.
+2. The streams of SSE are closed: each sends what was published to it
+   before, then the end of its response, and its client reconnects, to
+   another instance.
+3. The requests at work and the streams get `.shutdown_grace`, 10 seconds,
+   to end.
 4. What has not ended then is canceled: its next wait through `std.Io`
-   returns `error.Canceled`, and its client gets no response.
+   returns `error.Canceled`, and its client gets no response, or a stream
+   that is cut.
 5. The `onFinish` phases of every request run once, the canceled ones too.
 
 A handler of the system's signals may not call `std.Io`, so `main` gives a
