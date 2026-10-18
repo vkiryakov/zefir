@@ -15,6 +15,7 @@ const bson = mongo.bson;
 const Diagnostics = mongo.Diagnostics;
 const FakeServer = mongo.testing.FakeServer;
 const Script = mongo.testing.Script;
+const wire = @import("../wire.zig");
 const Client = @import("../Client.zig");
 const Stats = @import("../Stats.zig");
 const time = @import("../engine/time.zig");
@@ -59,7 +60,7 @@ const Served = struct {
     buffer: [96]u8 = undefined,
 
     /// It points into itself: start it in place.
-    fn start(s: *Served, io: Io, hello: mongo.wire.Hello) !void {
+    fn start(s: *Served, io: Io, hello: wire.Hello) !void {
         s.* = .{ .script = undefined, .listener = undefined, .server = undefined };
         s.script = .init(testing.allocator, .init(&s.rows));
         s.script.hello = hello;
@@ -258,7 +259,7 @@ test "opening: a server that is not a standalone mongod of MongoDB 7.0 or later 
 }
 
 fn wrongServer(io: Io) !void {
-    for ([_]mongo.wire.Hello{ .{ .server_type = .rs_ghost }, .{ .max_wire_version = 20 } }) |hello| {
+    for ([_]wire.Hello{ .{ .server_type = .rs_ghost }, .{ .max_wire_version = 20 } }) |hello| {
         var served: Served = undefined;
         try served.start(io, hello);
         defer served.stop(io);

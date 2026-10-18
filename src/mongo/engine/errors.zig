@@ -18,9 +18,9 @@
 //! | after `close` | — | `Closed` | — |
 //!
 //! Code 50, MaxTimeMSExpired, is `Timeout` wherever it comes: in a reply
-//! with ok 0, which `mongo.wire.checkReply` reads, and among the
+//! with ok 0, which `wire.checkReply` reads, and among the
 //! `writeErrors` or in the `writeConcernError` of a write, which
-//! `mongo.wire.batch.Merge` reads. The whole reply of a failure goes to
+//! `wire.batch.Merge` reads. The whole reply of a failure goes to
 //! `failure_reply` from the call's allocator, and for `openCursor` from the
 //! client's, as the cursor's replies do.
 //!

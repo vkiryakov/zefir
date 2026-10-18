@@ -48,7 +48,7 @@ const Served = struct {
     buffer: [96]u8 = undefined,
 
     /// It points into itself: start it in place.
-    fn start(s: *Served, io: Io, answers: []const Script.Answer, hello: mongo.wire.Hello) !void {
+    fn start(s: *Served, io: Io, answers: []const Script.Answer, hello: @import("../wire.zig").Hello) !void {
         s.* = .{ .writes = .{ .queue = .{ .answers = answers } }, .script = undefined, .listener = undefined, .server = undefined };
         s.script = .init(testing.allocator, .init(&s.writes));
         s.script.hello = hello;

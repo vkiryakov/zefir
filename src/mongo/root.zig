@@ -32,8 +32,9 @@ const requests = @import("requests.zig");
 const results = @import("results.zig");
 
 pub const bson = @import("bson.zig");
-pub const wire = @import("wire.zig");
 pub const testing = @import("testing.zig");
+/// The wire protocol, for the client and `testing.FakeServer` only.
+const wire = @import("wire.zig");
 
 pub const Client = @import("Client.zig");
 pub const Cursor = @import("Cursor.zig");

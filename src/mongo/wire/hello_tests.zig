@@ -1,5 +1,5 @@
 //! Tests of `wire.Hello`: the type of server by each row of the table of
-//! SDAM that the native driver follows (design §6.1), the limits and
+//! SDAM that the client follows (design §6.1), the limits and
 //! their defaults, and replies that break the types of their fields.
 
 const std = @import("std");

@@ -8,8 +8,6 @@ const Io = std.Io;
 const testing = std.testing;
 const zio = @import("zio");
 
-pub const RawConn = @import("RawConn.zig");
-
 /// The servers of docker-compose.yml.
 pub const servers = struct {
     /// mongo-plain: no authentication, test commands on.
@@ -64,8 +62,7 @@ fn withinTimeLimit(io: Io, comptime scenario: fn (Io) anyerror!void) anyerror!vo
 
 test {
     testing.refAllDecls(@This());
-    testing.refAllDecls(RawConn);
-    _ = @import("wire.zig");
+    _ = @import("limits.zig");
     _ = @import("script_vs_mongod.zig");
     _ = @import("Relay.zig");
     _ = @import("checks.zig");

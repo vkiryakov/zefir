@@ -1,20 +1,17 @@
-//! `mongo.wire`: what every driver that speaks MongoDB's wire protocol
-//! needs, in one implementation for the native driver, the example
-//! driver, the test server of `mongo.testing` and drivers outside zefir.
-//! It holds no network code: it reads from a `std.Io.Reader` and writes
-//! to a `std.Io.Writer`.
+//! `wire`: the wire protocol of MongoDB, inside zefir-mongo. The client
+//! and `mongo.testing.FakeServer` use it; nothing outside the module sees
+//! it. It holds no network code: it reads from a `std.Io.Reader` and
+//! writes to a `std.Io.Writer`.
 //!
-//! - `opmsg` — OP_MSG for both sides: a driver writes requests and reads
-//!   replies, a test server reads requests and writes replies.
+//! - `opmsg` — OP_MSG for both sides: the client writes requests and reads
+//!   replies, the test server reads requests and writes replies.
 //! - `Hello` — what a server says about itself in its reply to hello: its
 //!   type, its wire versions and its limits.
 //! - `batch` — the items of a write in batches that fit the server's
-//!   limits.
-//! - `checkReply` — the `ok` of a reply as the contract's errors: ok 0 is
+//!   limits, and the merge of their replies.
+//! - `checkReply` — the `ok` of a reply as the client's errors: ok 0 is
 //!   `CommandFailed`, code 50 `Timeout`, with the server's error in
 //!   `mongo.Diagnostics`.
-//!
-//! Experimental until zefir 1.0, like the transport interfaces of rpc.
 
 const std = @import("std");
 

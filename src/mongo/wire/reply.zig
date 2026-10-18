@@ -1,4 +1,4 @@
-//! The `ok` of a reply, as every driver maps it to the contract's errors.
+//! The `ok` of a reply, as the client maps it to its errors.
 
 const std = @import("std");
 const bson = @import("../bson.zig");

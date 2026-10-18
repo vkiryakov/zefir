@@ -11,7 +11,7 @@
 //!   it back before the next. The write has one deadline: the `maxTimeMS`
 //!   of each batch counts to it, and the token goes before each batch.
 //! - The replies merge as the Bulk API specification merges them
-//!   (`mongo.wire.batch.Merge`); an ordered write sends no batch after
+//!   (`wire.batch.Merge`); an ordered write sends no batch after
 //!   one with `writeErrors`. Code 50 among them, or in a
 //!   `writeConcernError`, is `error.Timeout`.
 //! - A write that stops at batch k > 1, after batches that the server
@@ -25,7 +25,7 @@ const std = @import("std");
 const Io = std.Io;
 const core = @import("core");
 const mongo = @import("../root.zig");
-const wire = mongo.wire;
+const wire = @import("../wire.zig");
 const opmsg = wire.opmsg;
 const OperationContext = mongo.OperationContext;
 const command_ = @import("command.zig");
