@@ -39,7 +39,7 @@
 #   27120  mongo-restart: no authentication, test commands on, for tests
 #          that restart it
 #   27121  mongo-ghost: a member of the replica set "ghost" that is never
-#          initialized (RSGhost), for the native driver to refuse
+#          initialized (RSGhost), for the client to refuse
 
 name: zefir-nats-e2e
 
@@ -186,7 +186,7 @@ services:
     ports: ["127.0.0.1:27120:27017"]
 
   # A member of a replica set without rs.initiate(): its hello says
-  # isreplicaset, and the native driver refuses it.
+  # isreplicaset, and the client refuses it.
   mongo-ghost:
     <<: *mongo
     command: ["mongod", "--replSet", "ghost"]

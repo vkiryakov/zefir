@@ -128,7 +128,7 @@ edit docker-compose.yml                         | rpc-nats mongo nats zefir
 edit tests/rpc-nats/e2e/root.zig                | rpc-nats zefir
 edit tests/rpc-nats/conf/acl.conf               | rpc-nats zefir
 edit tests/http/build.zig                       | http zefir
-edit tests/mongo/e2e/wire.zig                   | mongo zefir
+edit tests/mongo/e2e/crud.zig                   | mongo zefir
 edit tests/mongo/build.zig.zon                  | mongo zefir
 edit tests/mongo/stress/storm.zig               | mongo zefir
 edit examples/rpc-custom-transport/src/root.zig | rpc rpc-nats zefir

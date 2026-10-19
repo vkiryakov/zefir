@@ -11,10 +11,10 @@ const results = @import("results.zig");
 /// The caller's context of one operation.
 pub const OperationContext = struct {
     /// The deadline, the cancellation token and the W3C trace of the
-    /// caller. A driver turns the deadline into `maxTimeMS` and waits no
+    /// caller. The client turns the deadline into `maxTimeMS` and waits no
     /// longer than it; it checks the token before every send.
     ctx: core.Context,
-    /// For the driver's logs and spans; never sent to the server.
+    /// For the client's logs and spans; never sent to the server.
     tracing: Tracing = .{},
 
     pub fn of(ctx: core.Context) OperationContext {

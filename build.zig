@@ -99,7 +99,7 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // MongoDB for zefir applications: the native driver, BSON and the
+    // MongoDB for zefir applications: the client, BSON and the
     // collection API.
     const mongo = b.addModule("zefir-mongo", .{
         .root_source_file = b.path("src/mongo/root.zig"),

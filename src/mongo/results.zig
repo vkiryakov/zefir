@@ -11,8 +11,8 @@ const Allocator = std.mem.Allocator;
 ///
 /// Every slice, and every string, document and value in its items, is an
 /// allocation of its own from the call's allocator, so `deinit` frees the
-/// result with that allocator; `wire.batch` builds results so. An
-/// arena frees it all at once instead.
+/// result with that allocator; the client builds results so. An arena
+/// frees it all at once instead.
 pub const WriteResult = struct {
     /// insert: documents inserted; update: documents matched, upserts
     /// included; delete: documents deleted.

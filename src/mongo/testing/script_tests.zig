@@ -252,7 +252,7 @@ test "the journal keeps copies of what came, with the connection, the database a
     defer script.deinit();
     const io = testing.io;
 
-    // A request read back from OP_MSG, as the servers and the fake driver get one.
+    // A request read back from OP_MSG, as FakeServer gets one.
     const docs = [_]bson.RawDocument{ bson.literal(.{ ._id = 1 }), bson.literal(.{ ._id = 2 }) };
     var out: Io.Writer.Allocating = .init(a);
     try opmsg.writeRequest(&out.writer, .{
