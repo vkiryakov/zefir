@@ -22,7 +22,7 @@
 //!   an idle connection, or on a new one when none is left.
 //! - The cursor keeps the details of the errors of `next` itself, in its
 //!   own `Diagnostics` and, after a getMore that the server refused, the
-//!   whole reply: each error starts them afresh. The diagnostics and the
+//!   whole reply: each error and each getMore start them afresh. The diagnostics and the
 //!   failure_reply of the options serve `openCursor` alone, so that no
 //!   cursor writes to the caller's memory after the call returned.
 //! - One task at a time uses a cursor, any task; in safe builds two at
@@ -133,7 +133,8 @@ pub const Cursor = struct {
     /// `{comment: value}`: the comment of the options, kept for getMore.
     comment: ?bson.OwnedDocument,
     /// The details of the latest error of `next`, which
-    /// `mongo.Cursor.diagnostics` shows.
+    /// `mongo.Cursor.diagnostics` shows; each error and each getMore start
+    /// them afresh.
     diagnostics: Diagnostics = .{},
     /// The whole reply of the getMore of that error, when the server
     /// refused it, in the client's memory.

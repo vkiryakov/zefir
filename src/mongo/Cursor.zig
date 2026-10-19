@@ -72,8 +72,9 @@ pub fn nextOwned(c: Cursor, io: Io, op: OperationContext, allocator: std.mem.All
 }
 
 /// The details of the latest error of `next` or `nextOwned`: where it
-/// happened, the server's error of a `getMore`, the message. Each such
-/// error starts them afresh. They live with the cursor, until `deinit`,
+/// happened, the server's error of a `getMore`, the message. Each error
+/// starts them afresh, and so does each `getMore`, so that they hold
+/// nothing of an error before. They live with the cursor, until `deinit`,
 /// and only the task that uses the cursor reads them.
 pub fn diagnostics(c: Cursor) *const Diagnostics {
     const state = c.state orelse return &no_diagnostics;

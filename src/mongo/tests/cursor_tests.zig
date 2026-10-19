@@ -190,6 +190,8 @@ fn errorsOfGetMore(io: Io) !void {
     try testing.expectError(error.Cancelled, cursor.next(io, .of(core.Context.root.withCancellation(&token))));
     try testing.expectEqual(@as(usize, 0), script.count(io, "getMore"));
     try expectNext(io, cursor, .of(.root), docs[2]);
+    // The getMore started the diagnostics afresh.
+    try testing.expectEqualStrings("", cursor.diagnostics().message());
 
     served.router.get_more.store(.lose, .release);
     try testing.expectError(error.ConnectionLost, cursor.next(io, .of(.root)));
