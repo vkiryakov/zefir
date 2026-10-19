@@ -1,7 +1,9 @@
 //! The options of the collection API's operations, which `Collection`
 //! names: `mongo.Collection.InsertManyOptions`. Each one has the fields of
 //! all: `allocator`, `comment`, `diagnostics` and `failure_reply`. An
-//! option at its default is not sent.
+//! option at its default is not sent. A `failure_reply` slot must hold
+//! null: a call fills it on an error of the server only, and never frees
+//! what is there.
 //!
 //! There is no `maxTimeMS`: the deadline comes from the context only, and
 //! the client writes it. There is no `writeConcern` or `readConcern`
@@ -24,7 +26,9 @@ pub const InsertOneOptions = struct {
     comment: ?bson.Value = null,
     diagnostics: ?*Diagnostics = null,
     /// After `CommandFailed`, or `Timeout` by code 50, the whole reply of
-    /// the server, from `allocator`; the slot must hold null.
+    /// the server, from `allocator`: free it with `deinit`. The slot must
+    /// hold null: the call fills it on such an error only, and never frees
+    /// what is there.
     failure_reply: ?*?bson.OwnedDocument = null,
     /// After `error.WriteFailed`, or an error of `mongo.Client.write`, all
     /// that is known of the write, from `allocator`: free it with `deinit`.
@@ -45,7 +49,9 @@ pub const InsertManyOptions = struct {
     comment: ?bson.Value = null,
     diagnostics: ?*Diagnostics = null,
     /// After `CommandFailed`, or `Timeout` by code 50, the whole reply of
-    /// the server, from `allocator`; the slot must hold null.
+    /// the server, from `allocator`: free it with `deinit`. The slot must
+    /// hold null: the call fills it on such an error only, and never frees
+    /// what is there.
     failure_reply: ?*?bson.OwnedDocument = null,
     /// After `error.WriteFailed`, or an error of `mongo.Client.write`, all
     /// that is known of the write, from `allocator`: free it with `deinit`.
@@ -86,7 +92,9 @@ pub const UpdateOptions = struct {
     comment: ?bson.Value = null,
     diagnostics: ?*Diagnostics = null,
     /// After `CommandFailed`, or `Timeout` by code 50, the whole reply of
-    /// the server, from `allocator`; the slot must hold null.
+    /// the server, from `allocator`: free it with `deinit`. The slot must
+    /// hold null: the call fills it on such an error only, and never frees
+    /// what is there.
     failure_reply: ?*?bson.OwnedDocument = null,
     /// After `error.WriteFailed`, or an error of `mongo.Client.write`, all
     /// that is known of the write, from `allocator`: free it with `deinit`.
@@ -112,6 +120,10 @@ pub const ReplaceOptions = struct {
     bypass_document_validation: bool = false,
     comment: ?bson.Value = null,
     diagnostics: ?*Diagnostics = null,
+    /// After `CommandFailed`, or `Timeout` by code 50, the whole reply of
+    /// the server, from `allocator`: free it with `deinit`. The slot must
+    /// hold null: the call fills it on such an error only, and never frees
+    /// what is there.
     failure_reply: ?*?bson.OwnedDocument = null,
     /// After `error.WriteFailed`, or an error of `mongo.Client.write`, all
     /// that is known of the write, from `allocator`: free it with `deinit`.
@@ -129,6 +141,10 @@ pub const DeleteOptions = struct {
     let: ?bson.RawDocument = null,
     comment: ?bson.Value = null,
     diagnostics: ?*Diagnostics = null,
+    /// After `CommandFailed`, or `Timeout` by code 50, the whole reply of
+    /// the server, from `allocator`: free it with `deinit`. The slot must
+    /// hold null: the call fills it on such an error only, and never frees
+    /// what is there.
     failure_reply: ?*?bson.OwnedDocument = null,
     /// After `error.WriteFailed`, or an error of `mongo.Client.write`, all
     /// that is known of the write, from `allocator`: free it with `deinit`.
@@ -164,8 +180,9 @@ pub const FindOneAndUpdateOptions = struct {
     comment: ?bson.Value = null,
     diagnostics: ?*Diagnostics = null,
     /// After `CommandFailed`, `Timeout` by code 50 or `WriteFailed`, the
-    /// whole reply of the server, from `allocator`; the slot must hold
-    /// null.
+    /// whole reply of the server, from `allocator`: free it with `deinit`.
+    /// The slot must hold null: the call fills it on such an error only,
+    /// and never frees what is there.
     failure_reply: ?*?bson.OwnedDocument = null,
 };
 
@@ -185,6 +202,10 @@ pub const FindOneAndReplaceOptions = struct {
     bypass_document_validation: bool = false,
     comment: ?bson.Value = null,
     diagnostics: ?*Diagnostics = null,
+    /// After `CommandFailed`, `Timeout` by code 50 or `WriteFailed`, the
+    /// whole reply of the server, from `allocator`: free it with `deinit`.
+    /// The slot must hold null: the call fills it on such an error only,
+    /// and never frees what is there.
     failure_reply: ?*?bson.OwnedDocument = null,
 };
 
@@ -203,8 +224,9 @@ pub const FindOneAndDeleteOptions = struct {
     comment: ?bson.Value = null,
     diagnostics: ?*Diagnostics = null,
     /// After `CommandFailed`, `Timeout` by code 50 or `WriteFailed`, the
-    /// whole reply of the server, from `allocator`; the slot must hold
-    /// null.
+    /// whole reply of the server, from `allocator`: free it with `deinit`.
+    /// The slot must hold null: the call fills it on such an error only,
+    /// and never frees what is there.
     failure_reply: ?*?bson.OwnedDocument = null,
 };
 
@@ -238,8 +260,9 @@ pub const FindOptions = struct {
     diagnostics: ?*Diagnostics = null,
     /// After `CommandFailed`, or `Timeout` by code 50, of the command, the
     /// whole reply of the server, from the client's allocator: free it with
-    /// `deinit`. The slot must hold null. The cursor keeps the reply of a
-    /// refused `getMore`: `cursor.failureReply()`.
+    /// `deinit`. The slot must hold null: the call fills it on such an
+    /// error only, and never frees what is there. The cursor keeps the reply
+    /// of a refused `getMore`: `cursor.failureReply()`.
     failure_reply: ?*?bson.OwnedDocument = null,
 };
 
@@ -258,8 +281,9 @@ pub const FindOneOptions = struct {
     comment: ?bson.Value = null,
     diagnostics: ?*Diagnostics = null,
     /// After `CommandFailed`, or `Timeout` by code 50, of the command or of
-    /// a `getMore`, the whole reply of the server, from `allocator`; the
-    /// slot must hold null.
+    /// a `getMore`, the whole reply of the server, from `allocator`: free it
+    /// with `deinit`. The slot must hold null: the call fills it on such an
+    /// error only, and never frees what is there.
     failure_reply: ?*?bson.OwnedDocument = null,
 };
 
@@ -290,8 +314,9 @@ pub const AggregateOptions = struct {
     diagnostics: ?*Diagnostics = null,
     /// After `CommandFailed`, or `Timeout` by code 50, of the command, the
     /// whole reply of the server, from the client's allocator: free it with
-    /// `deinit`. The slot must hold null. The cursor keeps the reply of a
-    /// refused `getMore`: `cursor.failureReply()`.
+    /// `deinit`. The slot must hold null: the call fills it on such an
+    /// error only, and never frees what is there. The cursor keeps the reply
+    /// of a refused `getMore`: `cursor.failureReply()`.
     failure_reply: ?*?bson.OwnedDocument = null,
 };
 
@@ -308,8 +333,9 @@ pub const CountDocumentsOptions = struct {
     comment: ?bson.Value = null,
     diagnostics: ?*Diagnostics = null,
     /// After `CommandFailed`, or `Timeout` by code 50, of the command or of
-    /// a `getMore`, the whole reply of the server, from `allocator`; the
-    /// slot must hold null.
+    /// a `getMore`, the whole reply of the server, from `allocator`: free it
+    /// with `deinit`. The slot must hold null: the call fills it on such an
+    /// error only, and never frees what is there.
     failure_reply: ?*?bson.OwnedDocument = null,
 };
 
@@ -320,7 +346,9 @@ pub const EstimatedDocumentCountOptions = struct {
     comment: ?bson.Value = null,
     diagnostics: ?*Diagnostics = null,
     /// After `CommandFailed`, or `Timeout` by code 50, the whole reply of
-    /// the server, from `allocator`; the slot must hold null.
+    /// the server, from `allocator`: free it with `deinit`. The slot must
+    /// hold null: the call fills it on such an error only, and never frees
+    /// what is there.
     failure_reply: ?*?bson.OwnedDocument = null,
 };
 
@@ -334,7 +362,9 @@ pub const DistinctOptions = struct {
     comment: ?bson.Value = null,
     diagnostics: ?*Diagnostics = null,
     /// After `CommandFailed`, or `Timeout` by code 50, the whole reply of
-    /// the server, from `allocator`; the slot must hold null.
+    /// the server, from `allocator`: free it with `deinit`. The slot must
+    /// hold null: the call fills it on such an error only, and never frees
+    /// what is there.
     failure_reply: ?*?bson.OwnedDocument = null,
 };
 
@@ -345,7 +375,9 @@ pub const CreateIndexesOptions = struct {
     comment: ?bson.Value = null,
     diagnostics: ?*Diagnostics = null,
     /// After `CommandFailed`, or `Timeout` by code 50, the whole reply of
-    /// the server, from `allocator`; the slot must hold null.
+    /// the server, from `allocator`: free it with `deinit`. The slot must
+    /// hold null: the call fills it on such an error only, and never frees
+    /// what is there.
     failure_reply: ?*?bson.OwnedDocument = null,
 };
 
@@ -362,8 +394,9 @@ pub const ListIndexesOptions = struct {
     diagnostics: ?*Diagnostics = null,
     /// After `CommandFailed`, or `Timeout` by code 50, of the command, the
     /// whole reply of the server, from the client's allocator: free it with
-    /// `deinit`. The slot must hold null. The cursor keeps the reply of a
-    /// refused `getMore`: `cursor.failureReply()`.
+    /// `deinit`. The slot must hold null: the call fills it on such an
+    /// error only, and never frees what is there. The cursor keeps the reply
+    /// of a refused `getMore`: `cursor.failureReply()`.
     failure_reply: ?*?bson.OwnedDocument = null,
 };
 
@@ -375,7 +408,9 @@ pub const DropIndexOptions = struct {
     comment: ?bson.Value = null,
     diagnostics: ?*Diagnostics = null,
     /// After `CommandFailed`, or `Timeout` by code 50, the whole reply of
-    /// the server, from `allocator`; the slot must hold null.
+    /// the server, from `allocator`: free it with `deinit`. The slot must
+    /// hold null: the call fills it on such an error only, and never frees
+    /// what is there.
     failure_reply: ?*?bson.OwnedDocument = null,
 };
 
@@ -387,7 +422,9 @@ pub const DropOptions = struct {
     comment: ?bson.Value = null,
     diagnostics: ?*Diagnostics = null,
     /// After `CommandFailed`, or `Timeout` by code 50, the whole reply of
-    /// the server, from `allocator`; the slot must hold null.
+    /// the server, from `allocator`: free it with `deinit`. The slot must
+    /// hold null: the call fills it on such an error only, and never frees
+    /// what is there.
     failure_reply: ?*?bson.OwnedDocument = null,
 };
 
@@ -415,8 +452,9 @@ pub const ListCollectionsOptions = struct {
     diagnostics: ?*Diagnostics = null,
     /// After `CommandFailed`, or `Timeout` by code 50, of the command, the
     /// whole reply of the server, from the client's allocator: free it with
-    /// `deinit`. The slot must hold null. The cursor keeps the reply of a
-    /// refused `getMore`: `cursor.failureReply()`.
+    /// `deinit`. The slot must hold null: the call fills it on such an
+    /// error only, and never frees what is there. The cursor keeps the reply
+    /// of a refused `getMore`: `cursor.failureReply()`.
     failure_reply: ?*?bson.OwnedDocument = null,
 };
 
@@ -432,7 +470,8 @@ pub const RunCursorCommandOptions = struct {
     diagnostics: ?*Diagnostics = null,
     /// After `CommandFailed`, or `Timeout` by code 50, of the command, the
     /// whole reply of the server, from the client's allocator: free it with
-    /// `deinit`. The slot must hold null. The cursor keeps the reply of a
-    /// refused `getMore`: `cursor.failureReply()`.
+    /// `deinit`. The slot must hold null: the call fills it on such an
+    /// error only, and never frees what is there. The cursor keeps the reply
+    /// of a refused `getMore`: `cursor.failureReply()`.
     failure_reply: ?*?bson.OwnedDocument = null,
 };

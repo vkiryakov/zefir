@@ -43,7 +43,9 @@ pub const CommandOptions = struct {
     allocator: std.mem.Allocator,
     diagnostics: ?*errors.Diagnostics = null,
     /// After `CommandFailed`, or `Timeout` by code 50, the whole reply of
-    /// the server goes here, from `allocator`; the caller frees it.
+    /// the server goes here, from `allocator`; the caller frees it. The
+    /// slot must hold null: the call fills it on such an error only, and
+    /// never frees what is there.
     failure_reply: ?*?bson.OwnedDocument = null,
 };
 
@@ -94,7 +96,8 @@ pub const WriteOptions = struct {
     /// After `CommandFailed`, or `Timeout` by code 50 (with ok 0, among
     /// the `writeErrors` or in the `writeConcernError`), the whole reply of
     /// the batch that failed goes here, from `allocator`; the caller frees
-    /// it.
+    /// it. The slot must hold null: the call fills it on such an error
+    /// only, and never frees what is there.
     failure_reply: ?*?bson.OwnedDocument = null,
     /// When the write fails after batches that the server answered, their
     /// merged result goes here, from `allocator`: free it with `deinit`.
@@ -111,7 +114,8 @@ pub const CursorOptions = struct {
     diagnostics: ?*errors.Diagnostics = null,
     /// After `CommandFailed`, or `Timeout` by code 50, of `openCursor`
     /// itself, the whole reply of the server goes here, from the client's
-    /// allocator; free it with `deinit`. The cursor keeps the reply of a
-    /// `getMore`: `mongo.Cursor.failureReply`.
+    /// allocator; free it with `deinit`. The slot must hold null: the call
+    /// fills it on such an error only, and never frees what is there. The
+    /// cursor keeps the reply of a `getMore`: `mongo.Cursor.failureReply`.
     failure_reply: ?*?bson.OwnedDocument = null,
 };
