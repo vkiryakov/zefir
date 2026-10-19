@@ -23,7 +23,8 @@
 //! `writeErrors` or in the `writeConcernError` of a write, which
 //! `wire.batch.Merge` reads. The whole reply of a failure goes to
 //! `failure_reply` from the call's allocator, and for `openCursor` from the
-//! client's, as the cursor's replies do.
+//! client's, as the cursor's replies do; a cursor keeps the reply of its
+//! refused `getMore` itself, with the diagnostics of the error.
 //!
 //! A canceled task sees `error.Canceled` of std once: the driver cancels
 //! the task again (`io.recancel()`) and returns `Cancelled` before its

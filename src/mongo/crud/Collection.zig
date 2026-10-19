@@ -56,7 +56,10 @@
 //! scratch memory of a call, such as the documents a struct is written
 //! to, comes from it too and is freed before the call returns. A cursor,
 //! which `find`, `aggregate` and `listIndexes` give, holds its batches in
-//! the memory of the client: `deinit` it.
+//! the memory of the client: `deinit` it. It keeps the errors of its
+//! `getMore`s too, in `cursor.diagnostics()` and `cursor.failureReply()`:
+//! the `diagnostics` and `failure_reply` of the options serve the call that
+//! opens it alone.
 
 const std = @import("std");
 const Io = std.Io;
@@ -299,7 +302,9 @@ pub fn find(c: Collection, io: Io, op: OperationContext, filter: anytype, option
 /// The first document that `filter` matches, the first in `sort` when it
 /// matches several, as a copy in `options.allocator`; null when none
 /// does. `find` with `limit: 1` and `singleBatch: true`, whose cursor is
-/// freed before the call returns.
+/// freed before the call returns: its errors, those of a `getMore` among
+/// them, go to `options.diagnostics` and `options.failure_reply`, the
+/// reply from `options.allocator`.
 pub fn findOne(c: Collection, io: Io, op: OperationContext, filter: anytype, options: FindOneOptions) Error!?bson.OwnedDocument {
     comptime document.expectDocument("findOne", "filter", @TypeOf(filter));
     try c.begin(options.diagnostics);
@@ -318,12 +323,39 @@ pub fn findOne(c: Collection, io: Io, op: OperationContext, filter: anytype, opt
         .collation = options.collation,
         .let = options.let,
     }, options.diagnostics);
-    const cursor = try c.db.client.openCursor(io, op, .{ .database = c.db.name, .body = body }, .{
-        .diagnostics = options.diagnostics,
-        .failure_reply = options.failure_reply,
-    });
+    const cursor = try c.openRead(io, op, body, options.allocator, options.diagnostics, options.failure_reply);
     defer cursor.deinit(io);
-    return cursor.nextOwned(io, op, options.allocator);
+    return cursor.nextOwned(io, op, options.allocator) catch |err|
+        readError(cursor, err, options.allocator, options.diagnostics, options.failure_reply);
+}
+
+/// Opens the cursor of `body` for an operation that reads it before it
+/// returns, such as `findOne`: the reply of a refusal goes to
+/// `failure_reply` from `allocator`, as for the operations that give no
+/// cursor, rather than from the client's memory.
+fn openRead(c: Collection, io: Io, op: OperationContext, body: bson.RawDocument, allocator: Allocator, diagnostics: ?*Diagnostics, failure_reply: ?*?bson.OwnedDocument) Error!Cursor {
+    var refusal: ?bson.OwnedDocument = null;
+    defer if (refusal) |reply| reply.deinit();
+    return c.db.client.openCursor(io, op, .{ .database = c.db.name, .body = body }, .{
+        .diagnostics = diagnostics,
+        .failure_reply = if (failure_reply != null) &refusal else null,
+    }) catch |err| {
+        if (failure_reply) |slot| if (refusal) |reply| {
+            slot.* = try reply.raw().dupe(allocator);
+        };
+        return err;
+    };
+}
+
+/// `err` of `next` of a cursor that `openRead` opened: the cursor's
+/// diagnostics and the reply of its refused `getMore` go to those of the
+/// operation, the reply from `allocator`.
+fn readError(cursor: Cursor, err: Error, allocator: Allocator, diagnostics: ?*Diagnostics, failure_reply: ?*?bson.OwnedDocument) Error {
+    if (diagnostics) |d| d.* = cursor.diagnostics().*;
+    if (failure_reply) |slot| if (cursor.failureReply()) |reply| {
+        slot.* = reply.dupe(allocator) catch return error.OutOfMemory;
+    };
+    return err;
 }
 
 /// What a `find` command carries besides its name, in the order it goes.
@@ -554,7 +586,7 @@ const count_stage = bson.literal(.{ .@"$group" = .{ ._id = 1, .n = .{ .@"$sum" =
 /// How many documents `filter` matches, `.{}` all of them, counted by the
 /// server one by one: `aggregate` with `$match`, then `$skip` and
 /// `$limit` when given, then `$group`. Exact, as `estimatedDocumentCount`
-/// is not.
+/// is not. Its cursor is freed before the call returns, as `findOne`'s.
 pub fn countDocuments(c: Collection, io: Io, op: OperationContext, filter: anytype, options: CountDocumentsOptions) Error!u64 {
     comptime document.expectDocument("countDocuments", "filter", @TypeOf(filter));
     try c.begin(options.diagnostics);
@@ -584,13 +616,11 @@ pub fn countDocuments(c: Collection, io: Io, op: OperationContext, filter: anyty
     if (options.collation) |collation| try w.document("collation", collation, "the collation");
     if (options.hint) |hint| try w.hint(hint);
     if (options.comment) |value| try w.value("comment", value, "the comment");
-    const cursor = try c.db.client.openCursor(io, op, .{ .database = c.db.name, .body = try w.finish() }, .{
-        .diagnostics = options.diagnostics,
-        .failure_reply = options.failure_reply,
-    });
+    const cursor = try c.openRead(io, op, try w.finish(), options.allocator, options.diagnostics, options.failure_reply);
     defer cursor.deinit(io);
     // No document: nothing matched.
-    const counted = (try cursor.next(io, op)) orelse return 0;
+    const counted = (cursor.next(io, op) catch |err|
+        return readError(cursor, err, options.allocator, options.diagnostics, options.failure_reply)) orelse return 0;
     return countIn(counted, options.diagnostics, "the result of countDocuments");
 }
 
@@ -719,8 +749,7 @@ pub fn listIndexes(c: Collection, io: Io, op: OperationContext, options: ListInd
     if (options.comment) |value| try w.value("comment", value, "the comment");
     const body = try w.finish();
     // The code of the server's error tells a missing collection, so the
-    // call needs diagnostics; the cursor keeps the caller's for the errors
-    // of its getMores, and none when the caller passed none.
+    // call needs diagnostics: the caller's, or its own.
     var own: Diagnostics = .{};
     const diagnostics = options.diagnostics orelse &own;
     const cursor = c.db.client.openCursor(io, op, .{ .database = c.db.name, .body = body }, .{
@@ -739,7 +768,6 @@ pub fn listIndexes(c: Collection, io: Io, op: OperationContext, options: ListInd
         // No documents, and nothing on the server to end.
         return .{ .state = null };
     };
-    cursor.state.?.diagnostics = options.diagnostics;
     return cursor;
 }
 

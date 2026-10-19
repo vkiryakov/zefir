@@ -388,7 +388,7 @@ fn findMany(io: Io, db: mongo.Database, _: Server) anyerror!void {
             return report(err, &d, "find");
         defer cursor.deinit(io);
         var expected: i64 = 0;
-        while (cursor.next(io, op(io)) catch |err| return report(err, &d, "next of find")) |doc| : (expected += 1) {
+        while (cursor.next(io, op(io)) catch |err| return report(err, cursor.diagnostics(), "next of find")) |doc| : (expected += 1) {
             try testing.expectEqual(expected, try nOf(doc));
         }
         try testing.expectEqual(@as(i64, 250), expected);
@@ -500,7 +500,7 @@ fn expectIndexes(io: Io, users: mongo.Collection, expected: []const []const u8) 
         return report(err, &d, "listIndexes");
     defer cursor.deinit(io);
     var listed: usize = 0;
-    while (cursor.next(io, op(io)) catch |err| return report(err, &d, "next of listIndexes")) |index| : (listed += 1) {
+    while (cursor.next(io, op(io)) catch |err| return report(err, cursor.diagnostics(), "next of listIndexes")) |index| : (listed += 1) {
         const name = (try index.get("name")).?.string;
         for (expected) |known| {
             if (std.mem.eql(u8, known, name)) break;
@@ -598,7 +598,7 @@ fn collectionNames(io: Io, db: mongo.Database, arena: std.mem.Allocator, filter:
     }) catch |err| return report(err, &d, "listCollections");
     defer cursor.deinit(io);
     var names: std.ArrayList([]const u8) = .empty;
-    while (cursor.next(io, op(io)) catch |err| return report(err, &d, "next of listCollections")) |info| {
+    while (cursor.next(io, op(io)) catch |err| return report(err, cursor.diagnostics(), "next of listCollections")) |info| {
         try testing.expectEqualStrings("collection", (try info.get("type")).?.string);
         try names.append(arena, try arena.dupe(u8, (try info.get("name")).?.string));
     }

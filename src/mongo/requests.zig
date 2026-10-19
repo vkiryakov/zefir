@@ -106,9 +106,12 @@ pub const CursorOptions = struct {
     batch_size: ?u32 = null,
     /// The `comment` of each `getMore`; the driver copies it.
     comment: ?bson.Value = null,
+    /// The details of an error of `openCursor` itself. The cursor keeps
+    /// those of its `getMore`s: `mongo.Cursor.diagnostics`.
     diagnostics: ?*errors.Diagnostics = null,
-    /// After `CommandFailed`, or `Timeout` by code 50, the whole reply of
-    /// the server goes here, from the client's allocator; free it with
-    /// `deinit`.
+    /// After `CommandFailed`, or `Timeout` by code 50, of `openCursor`
+    /// itself, the whole reply of the server goes here, from the client's
+    /// allocator; free it with `deinit`. The cursor keeps the reply of a
+    /// `getMore`: `mongo.Cursor.failureReply`.
     failure_reply: ?*?bson.OwnedDocument = null,
 };

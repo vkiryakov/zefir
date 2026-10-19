@@ -176,14 +176,14 @@ fn errorsOfGetMore(io: Io) !void {
     try served.connect(io, &driver);
     defer driver.deinit();
     const script = &served.script;
-    var d: Diagnostics = .{};
     const op = within(io, .fromMilliseconds(200));
-    var cursor = try driver.openCursor(io, op, find("users"), .{ .diagnostics = &d });
+    var cursor = try driver.openCursor(io, op, find("users"), .{});
     defer cursor.deinit(io);
     try expectNext(io, cursor, op, docs[0]);
     try time.sleepUntil(io, op.ctx.deadline.?);
     try expectNext(io, cursor, op, docs[1]);
     try testing.expectError(error.DeadlineExceeded, cursor.next(io, op));
+    try testing.expectEqualStrings("less than 1 ms was left of the deadline before the command went out", cursor.diagnostics().message());
     var token: core.CancellationToken = .init;
     token.cancel();
     try testing.expectError(error.Cancelled, cursor.next(io, .of(core.Context.root.withCancellation(&token))));
@@ -193,7 +193,7 @@ fn errorsOfGetMore(io: Io) !void {
     served.router.get_more.store(.lose, .release);
     try testing.expectError(error.ConnectionLost, cursor.next(io, .of(.root)));
     try testing.expectError(error.Closed, cursor.next(io, .of(.root)));
-    try testing.expectEqualStrings("the cursor is closed", d.message());
+    try testing.expectEqualStrings("the cursor is closed", cursor.diagnostics().message());
     try testing.expectError(error.Closed, cursor.next(io, .of(.root)));
     // The server may still hold it: close kills it.
     served.router.get_more.store(.serve, .release);
@@ -230,6 +230,53 @@ fn ownedOutOfMemory(io: Io) !void {
     try testing.expectEqual(@as(usize, 1), served.script.count(io, "getMore"));
 }
 
+test "the diagnostics and the failure_reply of openCursor serve the call alone: a getMore leaves them alone, and its errors stay in the cursor, each error afresh" {
+    try within5s(testing.io, ownDiagnostics, .{testing.io});
+}
+
+fn ownDiagnostics(io: Io) !void {
+    var users = [_]Script.Cursor{.{ .ns = "app.users", .id = 7, .batches = &.{ docs[0..1], docs[1..2], docs[2..3] } }};
+    var served: Served = undefined;
+    try served.start(io, &users);
+    defer served.stop(io);
+    var driver: Client = undefined;
+    try served.connect(io, &driver);
+    defer driver.deinit();
+    var d: Diagnostics = .{};
+    var failure: ?bson.OwnedDocument = null;
+    defer if (failure) |f| f.deinit();
+    var cursor = try driver.openCursor(io, .of(.root), find("users"), .{ .diagnostics = &d, .failure_reply = &failure });
+    defer cursor.deinit(io);
+    // Once openCursor returned, they are the caller's own again.
+    d.set(.wait, null, "the caller's own", .{});
+    try testing.expectEqualStrings("", cursor.diagnostics().message());
+    try testing.expect(cursor.failureReply() == null);
+    try expectNext(io, cursor, .of(.root), docs[0]);
+    try expectNext(io, cursor, .of(.root), docs[1]);
+    served.router.get_more.store(.not_found, .release);
+    try testing.expectError(error.CommandFailed, cursor.next(io, .of(.root)));
+    try testing.expectEqualStrings("the caller's own", d.message());
+    try testing.expect(d.server == null);
+    try testing.expectEqual(@as(?Diagnostics.Phase, .wait), d.phase);
+    try testing.expect(failure == null);
+    const own = cursor.diagnostics();
+    try testing.expectEqual(@as(?i32, 43), if (own.server) |server| server.code else null);
+    try testing.expectEqualStrings("cursor id 7 not found", own.message());
+    const reply = cursor.failureReply() orelse return error.TestNoFailureReply;
+    try testing.expectEqualSlices(u8, cursor_not_found.bytes, reply.bytes);
+    // The next error starts them afresh: Closed, of no server.
+    try testing.expectError(error.Closed, cursor.next(io, .of(.root)));
+    try testing.expectEqualStrings("the cursor is closed", own.message());
+    try testing.expect(own.server == null);
+    try testing.expect(cursor.failureReply() == null);
+    try testing.expectEqualStrings("the caller's own", d.message());
+    // A cursor without a state, as listIndexes gives for a collection
+    // that is not there, has nothing to tell.
+    const empty: mongo.Cursor = .{ .state = null };
+    try testing.expectEqualStrings("", empty.diagnostics().message());
+    try testing.expect(empty.failureReply() == null);
+}
+
 test "CursorNotFound ends the cursor, which leaves nothing to kill" {
     try within5s(testing.io, notFound, .{testing.io});
 }
@@ -242,13 +289,12 @@ fn notFound(io: Io) !void {
     var driver: Client = undefined;
     try served.connect(io, &driver);
     defer driver.deinit();
-    var d: Diagnostics = .{};
-    var cursor = try driver.openCursor(io, .of(.root), find("users"), .{ .diagnostics = &d });
+    var cursor = try driver.openCursor(io, .of(.root), find("users"), .{});
     defer cursor.deinit(io);
     try expectNext(io, cursor, .of(.root), docs[0]);
     served.router.get_more.store(.not_found, .release);
     try testing.expectError(error.CommandFailed, cursor.next(io, .of(.root)));
-    try testing.expectEqual(@as(i32, 43), d.server.?.code);
+    try testing.expectEqual(@as(?i32, 43), if (cursor.diagnostics().server) |server| server.code else null);
     try testing.expectError(error.Closed, cursor.next(io, .of(.root)));
     try testing.expectEqual(@as(usize, 0), driver.stats().open_cursors);
     cursor.close(io);

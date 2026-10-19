@@ -233,13 +233,13 @@ pub const FindOptions = struct {
     /// Sent with the command and with each `getMore`, for the server's
     /// logs and profiler.
     comment: ?bson.Value = null,
-    /// The cursor writes the errors of its `getMore`s here too: it must
-    /// outlive the cursor.
+    /// The details of an error of the call. The cursor keeps those of its
+    /// `getMore`s: `cursor.diagnostics()`.
     diagnostics: ?*Diagnostics = null,
-    /// After `CommandFailed`, or `Timeout` by code 50, of the command or a
-    /// `getMore`, the whole reply of the server, from the client's
-    /// allocator: free it with `deinit`. The slot must hold null and
-    /// outlive the cursor.
+    /// After `CommandFailed`, or `Timeout` by code 50, of the command, the
+    /// whole reply of the server, from the client's allocator: free it with
+    /// `deinit`. The slot must hold null. The cursor keeps the reply of a
+    /// refused `getMore`: `cursor.failureReply()`.
     failure_reply: ?*?bson.OwnedDocument = null,
 };
 
@@ -257,8 +257,8 @@ pub const FindOneOptions = struct {
     let: ?bson.RawDocument = null,
     comment: ?bson.Value = null,
     diagnostics: ?*Diagnostics = null,
-    /// After `CommandFailed`, or `Timeout` by code 50, the whole reply of
-    /// the server, from the client's allocator: free it with `deinit`. The
+    /// After `CommandFailed`, or `Timeout` by code 50, of the command or of
+    /// a `getMore`, the whole reply of the server, from `allocator`; the
     /// slot must hold null.
     failure_reply: ?*?bson.OwnedDocument = null,
 };
@@ -285,13 +285,13 @@ pub const AggregateOptions = struct {
     /// Sent with the command and with each `getMore`, for the server's
     /// logs and profiler.
     comment: ?bson.Value = null,
-    /// The cursor writes the errors of its `getMore`s here too: it must
-    /// outlive the cursor.
+    /// The details of an error of the call. The cursor keeps those of its
+    /// `getMore`s: `cursor.diagnostics()`.
     diagnostics: ?*Diagnostics = null,
-    /// After `CommandFailed`, or `Timeout` by code 50, of the command or a
-    /// `getMore`, the whole reply of the server, from the client's
-    /// allocator: free it with `deinit`. The slot must hold null and
-    /// outlive the cursor.
+    /// After `CommandFailed`, or `Timeout` by code 50, of the command, the
+    /// whole reply of the server, from the client's allocator: free it with
+    /// `deinit`. The slot must hold null. The cursor keeps the reply of a
+    /// refused `getMore`: `cursor.failureReply()`.
     failure_reply: ?*?bson.OwnedDocument = null,
 };
 
@@ -307,8 +307,8 @@ pub const CountDocumentsOptions = struct {
     collation: ?bson.RawDocument = null,
     comment: ?bson.Value = null,
     diagnostics: ?*Diagnostics = null,
-    /// After `CommandFailed`, or `Timeout` by code 50, the whole reply of
-    /// the server, from the client's allocator: free it with `deinit`. The
+    /// After `CommandFailed`, or `Timeout` by code 50, of the command or of
+    /// a `getMore`, the whole reply of the server, from `allocator`; the
     /// slot must hold null.
     failure_reply: ?*?bson.OwnedDocument = null,
 };
@@ -357,13 +357,13 @@ pub const ListIndexesOptions = struct {
     batch_size: ?u32 = null,
     /// Sent with the command and with each `getMore`.
     comment: ?bson.Value = null,
-    /// The cursor writes the errors of its `getMore`s here too: it must
-    /// outlive the cursor.
+    /// The details of an error of the call. The cursor keeps those of its
+    /// `getMore`s: `cursor.diagnostics()`.
     diagnostics: ?*Diagnostics = null,
-    /// After `CommandFailed`, or `Timeout` by code 50, of the command or a
-    /// `getMore`, the whole reply of the server, from the client's
-    /// allocator: free it with `deinit`. The slot must hold null and
-    /// outlive the cursor.
+    /// After `CommandFailed`, or `Timeout` by code 50, of the command, the
+    /// whole reply of the server, from the client's allocator: free it with
+    /// `deinit`. The slot must hold null. The cursor keeps the reply of a
+    /// refused `getMore`: `cursor.failureReply()`.
     failure_reply: ?*?bson.OwnedDocument = null,
 };
 
@@ -410,13 +410,13 @@ pub const ListCollectionsOptions = struct {
     /// Sent with the command only, never with a `getMore`, as the
     /// enumerate collections spec says.
     comment: ?bson.Value = null,
-    /// The cursor writes the errors of its `getMore`s here too: it must
-    /// outlive the cursor.
+    /// The details of an error of the call. The cursor keeps those of its
+    /// `getMore`s: `cursor.diagnostics()`.
     diagnostics: ?*Diagnostics = null,
-    /// After `CommandFailed`, or `Timeout` by code 50, of the command or a
-    /// `getMore`, the whole reply of the server, from the client's
-    /// allocator: free it with `deinit`. The slot must hold null and
-    /// outlive the cursor.
+    /// After `CommandFailed`, or `Timeout` by code 50, of the command, the
+    /// whole reply of the server, from the client's allocator: free it with
+    /// `deinit`. The slot must hold null. The cursor keeps the reply of a
+    /// refused `getMore`: `cursor.failureReply()`.
     failure_reply: ?*?bson.OwnedDocument = null,
 };
 
@@ -427,12 +427,12 @@ pub const RunCursorCommandOptions = struct {
     /// The `batchSize` of each `getMore`; null leaves it to the server.
     /// The first batch is the command's, such as its `cursor.batchSize`.
     batch_size: ?u32 = null,
-    /// The cursor writes the errors of its `getMore`s here too: it must
-    /// outlive the cursor.
+    /// The details of an error of the call. The cursor keeps those of its
+    /// `getMore`s: `cursor.diagnostics()`.
     diagnostics: ?*Diagnostics = null,
-    /// After `CommandFailed`, or `Timeout` by code 50, of the command or a
-    /// `getMore`, the whole reply of the server, from the client's
-    /// allocator: free it with `deinit`. The slot must hold null and
-    /// outlive the cursor.
+    /// After `CommandFailed`, or `Timeout` by code 50, of the command, the
+    /// whole reply of the server, from the client's allocator: free it with
+    /// `deinit`. The slot must hold null. The cursor keeps the reply of a
+    /// refused `getMore`: `cursor.failureReply()`.
     failure_reply: ?*?bson.OwnedDocument = null,
 };

@@ -42,7 +42,8 @@
 //! authentication never go to the log.
 //!
 //! A cursor holds its batches in the client's memory, and gets more of
-//! them on any connection of the pool. One task at a time uses a cursor;
+//! them on any connection of the pool. It keeps the details of its errors
+//! itself, `cursor.diagnostics()`. One task at a time uses a cursor;
 //! `deinit` every cursor before the client.
 //!
 //! The rules of the calls:
@@ -70,7 +71,8 @@
 //!    come from `options.allocator`, during the call only; the
 //!    `failure_reply` of `openCursor`, whose options have no allocator,
 //!    from the client's. After it the client holds no reference to the
-//!    caller's memory.
+//!    caller's memory: a cursor keeps the errors of its `getMore`s in its
+//!    own `diagnostics()` and `failureReply()`.
 //! 6. Errors. Only `mongo.Error`. `ok: 0` is `CommandFailed`, code 50
 //!    anywhere is `Timeout`, a write stopped at batch k > 1 is
 //!    `IncompleteWrite`. `writeErrors` and `writeConcernError` are soft:
@@ -273,6 +275,8 @@ pub fn runCommand(self: *Client, io: Io, op: OperationContext, command: mongo.Co
 
 /// Runs a command that answers with a cursor, such as `find` or
 /// `aggregate`, and returns the cursor with its first batch; `deinit` it.
+/// `options.diagnostics` and `options.failure_reply` serve this call
+/// alone: the errors of `next` stay in the cursor.
 ///
 /// ```zig
 /// var cursor = try client.openCursor(io, .of(ctx), .{ .database = "app", .body = find }, .{ .batch_size = 100 });

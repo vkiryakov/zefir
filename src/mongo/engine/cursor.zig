@@ -18,6 +18,11 @@
 //!   cursor, within `cursor_close_timeout` and with the task's cancelation
 //!   held off meanwhile, and ignore the reply. `close` of the client sends
 //!   it for every cursor still open, after the calls in flight ended.
+//! - The cursor keeps the details of the errors of `next` itself, in its
+//!   own `Diagnostics` and, after a getMore that the server refused, the
+//!   whole reply: each error starts them afresh. The diagnostics and the
+//!   failure_reply of the options serve `openCursor` alone, so that no
+//!   cursor writes to the caller's memory after the call returned.
 //! - One task at a time uses a cursor, any task; in safe builds two at
 //!   once panic. A cursor holds its batches in the client's memory:
 //!   `deinit` every cursor before the client, which in safe builds panics
@@ -70,7 +75,8 @@ pub const Registry = struct {
 };
 
 /// Runs `command` and returns its cursor, with the first batch of its
-/// reply; `deinit` it.
+/// reply; `deinit` it. `options.diagnostics` and `options.failure_reply`
+/// serve this call alone: the cursor keeps none of them.
 pub fn open(r: Runner, io: Io, op: OperationContext, command: *const mongo.Command, options: mongo.CursorOptions) mongo.Error!*Cursor {
     const d = options.diagnostics;
     try r.pool.enter(io, d);
@@ -95,8 +101,6 @@ pub fn open(r: Runner, io: Io, op: OperationContext, command: *const mongo.Comma
         .batch = first.batch.iterator(),
         .batch_size = options.batch_size,
         .comment = comment,
-        .diagnostics = d,
-        .failure_reply = options.failure_reply,
     };
     const reg = r.cursors;
     reg.mutex.lockUncancelable(io);
@@ -126,8 +130,12 @@ pub const Cursor = struct {
     batch_size: ?u32,
     /// `{comment: value}`: the comment of the options, kept for getMore.
     comment: ?bson.OwnedDocument,
-    diagnostics: ?*Diagnostics,
-    failure_reply: ?*?bson.OwnedDocument,
+    /// The details of the latest error of `next`, which
+    /// `mongo.Cursor.diagnostics` shows.
+    diagnostics: Diagnostics = .{},
+    /// The whole reply of the getMore of that error, when the server
+    /// refused it, in the client's memory.
+    failure_reply: ?bson.OwnedDocument = null,
     /// `close` was called.
     closed: bool = false,
     /// In safe builds: a task is in a method of the cursor.
@@ -159,7 +167,7 @@ pub const Cursor = struct {
     /// before the document.
     fn peek(c: *Cursor, io: Io, op: OperationContext) mongo.Error!?Head {
         while (true) {
-            const id = c.state(io) orelse return fail(c.diagnostics, null, error.Closed, "the cursor is closed", .{});
+            const id = c.state(io) orelse return fail(c.fresh(), null, error.Closed, "the cursor is closed", .{});
             var after = c.batch;
             const element = after.next() catch return c.broken(io, "a batch of the cursor is not valid BSON");
             if (element) |e| {
@@ -188,6 +196,7 @@ pub const Cursor = struct {
         c.reply.deinit();
         r.gpa.free(c.ns);
         if (c.comment) |kept| kept.deinit();
+        if (c.failure_reply) |kept| kept.deinit();
         const reg = r.cursors;
         reg.mutex.lockUncancelable(io);
         reg.list.remove(&c.node);
@@ -238,15 +247,23 @@ pub const Cursor = struct {
 
     fn broken(c: *Cursor, io: Io, comptime text: []const u8) mongo.Error {
         c.end(io, null);
-        return violation(c.diagnostics, text, .{});
+        return violation(c.fresh(), text, .{});
+    }
+
+    /// The diagnostics for an error about to happen, with nothing left of
+    /// the one before, nor of its reply.
+    fn fresh(c: *Cursor) *Diagnostics {
+        c.diagnostics = .{};
+        if (c.failure_reply) |kept| kept.deinit();
+        c.failure_reply = null;
+        return &c.diagnostics;
     }
 
     /// The next batch. An error before the command went out leaves the
     /// cursor as it was; an error of the exchange ends it.
     fn getMore(c: *Cursor, io: Io, op: OperationContext, id: i64) mongo.Error!void {
         const r = c.runner;
-        const d = c.diagnostics;
-        if (d) |x| x.* = .{};
+        const d = c.fresh();
         try r.pool.enter(io, d);
         defer r.pool.leave(io);
         var arena: std.heap.ArenaAllocator = .init(r.gpa);
@@ -261,7 +278,7 @@ pub const Cursor = struct {
             return err;
         };
         errdefer reply.deinit();
-        wire.checkReply(reply.raw(), r.gpa, d, c.failure_reply) catch |err| {
+        wire.checkReply(reply.raw(), r.gpa, d, &c.failure_reply) catch |err| {
             // CursorNotFound: the server holds the cursor no more.
             c.end(io, if (mongo.ServerError.fromReply(reply.raw()).code == 43) 0 else null);
             return err;

@@ -275,6 +275,69 @@ test "ok 0 of find is CommandFailed, with the reply in failure_reply; a reply wi
     try testing.expectEqualStrings("the reply holds no cursor; the command may have run", d.message());
 }
 
+test "a Diagnostics and a failure_reply passed to find serve find alone: the getMores of its cursor leave them alone, and keep their errors in the cursor" {
+    const io = testing.io;
+    var f: Fixture = .{};
+    try f.init();
+    defer f.deinit();
+    const users = f.users();
+    var d: mongo.Diagnostics = .{};
+    var failure: ?bson.OwnedDocument = null;
+    defer if (failure) |reply| reply.deinit();
+    const cursor = try users.find(io, .of(.root), .{}, .{ .allocator = testing.allocator, .batch_size = 1, .diagnostics = &d, .failure_reply = &failure });
+    defer cursor.deinit(io);
+    // From here on, the caller's own: say, a helper's stack, gone.
+    d.set(.wait, null, "the caller's own", .{});
+    try expectNextIs(cursor, ann);
+    try expectNextIs(cursor, bob);
+    // Another find of the same cursor on the server, and its killCursors:
+    // the server holds the first cursor no more.
+    const other = try users.find(io, .of(.root), .{}, .{ .allocator = testing.allocator });
+    other.deinit(io);
+    try testing.expectError(error.CommandFailed, cursor.next(io, .of(.root)));
+    try testing.expectEqualStrings("the caller's own", d.message());
+    try testing.expect(d.server == null);
+    try testing.expect(failure == null);
+    try testing.expectEqual(@as(?i32, 43), if (cursor.diagnostics().server) |server| server.code else null);
+    try testing.expectEqualStrings("cursor id 42 not found", cursor.diagnostics().message());
+    const reply = cursor.failureReply() orelse return error.TestNoFailureReply;
+    try testing.expectEqual(@as(?i32, 43), if (try reply.get("code")) |code| @as(i32, @intCast(try code.asI64())) else null);
+}
+
+fn expectNextIs(cursor: mongo.Cursor, expected: bson.RawDocument) !void {
+    const got = (try cursor.next(testing.io, .of(.root))) orelse return error.TestCursorEndedEarly;
+    try testing.expectEqualSlices(u8, expected.bytes, got.bytes);
+}
+
+test "findOne copies the reply of a refusal into options.allocator, of its find as of a getMore, with the diagnostics of the getMore" {
+    const io = testing.io;
+    const refused = bson.literal(.{ .ok = 0.0, .errmsg = "unknown operator: $bad", .code = 2, .codeName = "BadValue" });
+    const pending = bson.literal(.{ .cursor = .{ .firstBatch = [0]i32{}, .id = @as(i64, 9), .ns = "app.users" }, .ok = 1.0 });
+    var queue: Script.Queue = .{ .answers = &.{ .{ .reply = refused }, .{ .reply = pending }, .{ .reply = refused }, .{ .reply = Script.ok } } };
+    var served: Served = undefined;
+    try served.start(io, queue.handler(), .{});
+    defer served.stop(io);
+    var ids: bson.ObjectId.Generator = .init(io);
+    const users = mongo.Database.init(served.client(), "app", &ids).collection("users");
+    // An arena frees what it gave; a copy in the client's memory would
+    // leak, and the test allocator would say so.
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var d: mongo.Diagnostics = .{};
+    for (0..2) |_| {
+        var failure: ?bson.OwnedDocument = null;
+        try testing.expectError(error.CommandFailed, users.findOne(io, .of(.root), .{}, .{ .allocator = a, .diagnostics = &d, .failure_reply = &failure }));
+        const reply = failure orelse return error.TestNoFailureReply;
+        try testing.expect(reply.allocator.ptr == a.ptr);
+        try testing.expectEqualSlices(u8, refused.bytes, reply.bytes);
+        try testing.expectEqual(@as(?i32, 2), if (d.server) |server| server.code else null);
+        try testing.expectEqualStrings("unknown operator: $bad", d.message());
+    }
+    // The second refusal was of the getMore.
+    try testing.expectEqual(@as(usize, 1), served.script.count(io, "getMore"));
+}
+
 test "a bad collection name, filter or sort is InvalidArgument, and nothing is sent" {
     const io = testing.io;
     var f: Fixture = .{};

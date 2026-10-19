@@ -631,13 +631,19 @@ pub fn s10(job: *Job) Job.Error!void {
     try job.expectError(client.openCursor(io, .of(.root), .{ .database = database, .body = bson.literal(.{ .aggregate = "s10", .pipeline = [0]i32{}, .cursor = .{} }) }, .{}), error.ProtocolViolation, "openCursor answered without cursor");
     {
         var d: mongo.Diagnostics = .{};
-        var cursor = try open(job, client, find, .{ .diagnostics = &d });
+        var failure: ?bson.OwnedDocument = null;
+        defer if (failure) |f| f.deinit();
+        var cursor = try open(job, client, find, .{ .diagnostics = &d, .failure_reply = &failure });
         defer cursor.deinit(io);
         _ = try job.need(cursor.next(io, .of(.root)), "next");
         faulty.get_more.store(.not_found, .release);
         try job.expectError(cursor.next(io, .of(.root)), error.CommandFailed, "next whose getMore got CursorNotFound");
-        try job.expect(d.server != null and d.server.?.code == 43, "Diagnostics.server.code after CursorNotFound is not 43", .{});
+        const own = cursor.diagnostics();
+        try job.expect(own.server != null and own.server.?.code == 43, "the cursor's Diagnostics.server.code after CursorNotFound is not 43", .{});
+        try job.expect(cursor.failureReply() != null, "the cursor's failureReply() is null after CursorNotFound", .{});
+        try job.expect(d.server == null and failure == null, "the getMore wrote to the diagnostics or the failure_reply of openCursor, which serve openCursor alone", .{});
         try job.expectError(cursor.next(io, .of(.root)), error.Closed, "next after CursorNotFound");
+        try job.expect(own.server == null, "the cursor's Diagnostics.server after Closed still holds the error before", .{});
     }
 }
 

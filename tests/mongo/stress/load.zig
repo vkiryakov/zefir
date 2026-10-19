@@ -69,7 +69,11 @@ const Round = struct {
         const cursor = try r.db.collection("cursor").find(io, op, .{}, .{ .allocator = testing.allocator, .batch_size = cursor_batch, .diagnostics = d });
         defer cursor.deinit(io);
         var count: usize = 0;
-        while (try cursor.next(io, op)) |_| count += 1;
+        // The cursor keeps the errors of its getMores.
+        while (cursor.next(io, op) catch |err| {
+            d.* = cursor.diagnostics().*;
+            return err;
+        }) |_| count += 1;
         if (count != cursor_docs) return error.TestWrongCount;
     }
 };

@@ -351,6 +351,33 @@ test "ok 0 is CommandFailed, with the reply in failure_reply, for the counts, di
     try testing.expectEqualStrings("ns does not exist", d.message());
 }
 
+test "countDocuments copies the reply of a refusal into options.allocator, of its aggregate as of a getMore, with the diagnostics of the getMore" {
+    const io = testing.io;
+    const refused = bson.literal(.{ .ok = 0.0, .errmsg = "ns does not exist", .code = 26, .codeName = "NamespaceNotFound" });
+    const pending = bson.literal(.{ .cursor = .{ .firstBatch = [0]i32{}, .id = @as(i64, 9), .ns = "app.users" }, .ok = 1.0 });
+    var queue: Script.Queue = .{ .answers = &.{ .{ .reply = refused }, .{ .reply = pending }, .{ .reply = refused }, .{ .reply = Script.ok } } };
+    var f: Fixture = .{};
+    try f.init(queue.handler());
+    defer f.deinit();
+    const users = f.users();
+    // An arena frees what it gave; a copy in the client's memory would
+    // leak, and the test allocator would say so.
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var d: mongo.Diagnostics = .{};
+    for (0..2) |_| {
+        var failure: ?bson.OwnedDocument = null;
+        try testing.expectError(error.CommandFailed, users.countDocuments(io, .of(.root), .{}, .{ .allocator = a, .diagnostics = &d, .failure_reply = &failure }));
+        const reply = failure orelse return error.TestNoFailureReply;
+        try testing.expect(reply.allocator.ptr == a.ptr);
+        try testing.expectEqualSlices(u8, refused.bytes, reply.bytes);
+        try testing.expectEqual(@as(?i32, 26), if (d.server) |server| server.code else null);
+        try testing.expectEqualStrings("ns does not exist", d.message());
+    }
+    try testing.expectEqual(@as(usize, 1), f.script.count(io, "getMore"));
+}
+
 test "a bad collection name, filter or stage is InvalidArgument, and nothing is sent" {
     const io = testing.io;
     var same: Same = .{ .reply = Script.ok };
