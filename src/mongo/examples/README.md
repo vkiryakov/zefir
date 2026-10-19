@@ -894,7 +894,9 @@ $ zig build run
   batches, the second by a `getMore` that the cursor sends by itself when
   `next` reaches the end of the first. `.skip` and `.limit` page through
   the results. A cursor serves one task at a time; `deinit` it, and a
-  cursor that ends before its last batch tells the server to drop it.
+  cursor that ends before its last batch tells the server to drop it. An
+  error of `next` leaves its details in the cursor itself, see
+  [the operations](#the-operations).
 - **`updateMany`** changes every document that the filter matches,
   `updateOne` the first. The update is a document of update operators,
   such as `$set`, `$inc` or `$push`, or a pipeline; `matched` and
@@ -1123,15 +1125,21 @@ documents, and a struct of options whose fields have defaults, such as
 `mongo.Collection.FindOptions`. Each has `allocator`, required: the memory
 of the result, and of the call's scratch, which the call frees before it
 returns. Each has `diagnostics`, where an error leaves its details, and
-`failure_reply`, where a refusal of the server leaves its whole reply. All
-but those of `runCommand` and `runCursorCommand`, whose command holds its
-own, have `comment`: a value that the server writes into its logs and its
-profiler next to the command. The writes have `partial` too, see
-[A write cut short](#a-write-cut-short). An option at its default is not
-sent, and none of them is `maxTimeMS`: the deadline comes from the
+`failure_reply`, where a refusal of the server leaves its whole reply.
+For an operation that gives a cursor, such as `find`, they serve the call
+that opens it: the cursor never writes to them once that call returned.
+The errors of its `next` stay in the cursor: `cursor.diagnostics()` holds
+the details of the latest, and `cursor.failureReply()` the reply of a
+`getMore` that the server refused, until the next call of the cursor.
+
+All but the options of `runCommand` and `runCursorCommand`, whose command
+holds its own, have `comment`: a value that the server writes into its
+logs and its profiler next to the command. The writes have `partial` too,
+see [A write cut short](#a-write-cut-short). An option at its default is
+not sent, and none of them is `maxTimeMS`: the deadline comes from the
 context. A collection name is checked before every operation: an empty
-one, one with `$` or NUL, or one that is not UTF-8, is
-`InvalidArgument`, and nothing is sent.
+one, one with `$` or NUL, or one that is not UTF-8, is `InvalidArgument`,
+and nothing is sent.
 
 ## Documents
 
@@ -1380,7 +1388,8 @@ that a call gets in `.diagnostics`: `message()`, the server's errmsg or
 the client's own text; `server`, the server's code, codeName and
 errorLabels; `phase`, where it happened; and for writes `batch_offset` and
 `reason`, see [A write cut short](#a-write-cut-short). Every call starts
-it afresh. The client's own texts never hold documents or passwords; the
+it afresh. A cursor keeps one of its own, `cursor.diagnostics()`, for the
+errors of its `next`, see [the operations](#the-operations). The client's own texts never hold documents or passwords; the
 server's errmsg may quote a value of a document, as code 11000 quotes the
 duplicate key, so log it where such values may go.
 
@@ -1542,7 +1551,8 @@ $ zig build run
   documents after it are not sent.
 - **`CommandFailed`** is a reply with `ok: 0`: its code and codeName are
   in `diagnostics.server`, and the whole reply in `failure_reply`, from
-  `.allocator`.
+  `.allocator`. The slot holds null when the call begins: the call fills
+  it, and never frees what is there.
 - **`InvalidArgument`** stops a call before anything goes out: here an
   update without an operator, and a collection name with `$`.
 
