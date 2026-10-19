@@ -25,7 +25,7 @@ const Served = @This();
 
 script: Script,
 listener: net.Server,
-server: Io.Future(Io.Cancelable!void),
+server: Io.Future(FakeServer.ServeError!void),
 /// The client, connected to the server; `stop` closes and frees it.
 driver: Client,
 uri: [64]u8,

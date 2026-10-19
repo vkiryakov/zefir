@@ -322,7 +322,7 @@ pub fn scripted(job: *Job, stage: *Stage, handler: Script.Handler, hello: Hello)
     stage.start(job.io, job.gpa, handler, hello) catch |err| return job.fail("the FakeServer of the check did not start: error.{t}", .{err});
     job.stage = stage;
     errdefer {
-        stage.stop(job.io);
+        stage.stop(job.io) catch {};
         job.stage = null;
     }
     try job.connect(stage.uri);
@@ -354,7 +354,8 @@ pub fn close(job: *Job) void {
 }
 
 /// Closes and frees the client of the check, then stops its server.
-/// Every call of the check has returned, and every cursor is freed.
+/// Every call of the check has returned, and every cursor is freed. A
+/// server that stopped serving by itself fails the check.
 pub fn end(job: *Job) void {
     if (job.up) {
         job.client.close(job.io);
@@ -362,7 +363,9 @@ pub fn end(job: *Job) void {
         job.up = false;
     }
     if (job.stage) |stage| {
-        stage.stop(job.io);
+        stage.stop(job.io) catch |err| if (job.failure == null) {
+            job.failure = std.fmt.allocPrint(job.arena, "the FakeServer of the check stopped serving: accept returned error.{t}", .{err}) catch "the FakeServer of the check stopped serving";
+        };
         job.stage = null;
     }
 }
@@ -372,7 +375,7 @@ pub fn end(job: *Job) void {
 pub const Stage = struct {
     script: Script,
     listener: net.Server,
-    server: Io.Future(Io.Cancelable!void),
+    server: Io.Future(FakeServer.ServeError!void),
     uri_buffer: [64]u8,
     uri: []const u8,
 
@@ -386,10 +389,17 @@ pub const Stage = struct {
         s.server = try io.concurrent(FakeServer.serve, .{ io, &s.listener, &s.script });
     }
 
-    fn stop(s: *Stage, io: Io) void {
-        s.server.cancel(io) catch {};
-        s.listener.deinit(io);
-        s.script.deinit();
+    /// Stops the server; an error of `accept` that stopped it earlier
+    /// comes back, never `error.Canceled`.
+    fn stop(s: *Stage, io: Io) FakeServer.ServeError!void {
+        defer {
+            s.listener.deinit(io);
+            s.script.deinit();
+        }
+        s.server.cancel(io) catch |err| switch (err) {
+            error.Canceled => {},
+            else => |e| return e,
+        };
     }
 };
 

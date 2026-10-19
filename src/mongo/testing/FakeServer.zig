@@ -60,20 +60,26 @@ pub fn uri(listener: *const net.Server, buffer: []u8) error{NoSpaceLeft}![]const
     return std.fmt.bufPrint(buffer, "mongodb://127.0.0.1:{d}", .{port(listener)});
 }
 
+/// What `serve` ends with: `error.Canceled` when canceled, or an error of
+/// `accept` that it cannot serve past, such as running out of file
+/// descriptors.
+pub const ServeError = net.Server.AcceptError;
+
 /// Serves `script` on `listener` until canceled, which ends the
 /// connections too: run it in a task of its own and cancel it at the end
 /// of the test. While the script refuses connections, a new connection is
 /// closed at once. A `refuse_connections` answer ends every connection
-/// being served, as a server that goes away does.
-pub fn serve(io: Io, listener: *net.Server, script: *Script) Io.Cancelable!void {
+/// being served, as a server that goes away does. An error of `accept`
+/// other than a connection that its client dropped stops the server, and
+/// `serve` returns it.
+pub fn serve(io: Io, listener: *net.Server, script: *Script) ServeError!void {
     var served: Served = .{};
     var group: Io.Group = .init;
     defer group.cancel(io);
     while (true) {
         const stream = listener.accept(io) catch |err| switch (err) {
-            error.Canceled => return error.Canceled,
             error.ConnectionAborted, error.WouldBlock, error.ProtocolFailure, error.BlockedByFirewall => continue,
-            else => return,
+            else => |e| return e,
         };
         const number = script.openConnection() orelse {
             stream.close(io);

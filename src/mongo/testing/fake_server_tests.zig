@@ -116,7 +116,7 @@ fn expectOk(reply: bson.OwnedDocument) !void {
 /// A server for `script`, served until the test ends.
 const Serving = struct {
     listener: net.Server,
-    future: Io.Future(Io.Cancelable!void),
+    future: Io.Future(FakeServer.ServeError!void),
 
     fn start(s: *Serving, io: Io, script: *Script) !void {
         s.listener = try FakeServer.listen(io);
@@ -528,6 +528,34 @@ test "helloReply describes every type of server so that Hello.parse reads it bac
         }
     }
 }
+
+test "serve returns an error of accept that it cannot serve past" {
+    const io = testing.io;
+    var queue: Script.Queue = .{ .answers = &.{} };
+    var script: Script = .init(testing.allocator, queue.handler());
+    defer script.deinit();
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    try testing.expectError(error.SystemResources, FakeServer.serve(no_accept.io(), &listener, &script));
+}
+
+/// `std.testing.io` whose every accept fails with `error.SystemResources`.
+const no_accept = struct {
+    const vtable: Io.VTable = vtable: {
+        var v = testing.io.vtable.*;
+        v.netAccept = accept;
+        break :vtable v;
+    };
+
+    fn io() Io {
+        return .{ .userdata = testing.io.userdata, .vtable = &vtable };
+    }
+
+    fn accept(userdata: ?*anyopaque, listener: net.Socket.Handle, options: net.Server.AcceptOptions) net.Server.AcceptError!net.Socket {
+        _ = .{ userdata, listener, options };
+        return error.SystemResources;
+    }
+};
 
 test "serve ends when canceled, and closes the connections it served" {
     const io = testing.io;

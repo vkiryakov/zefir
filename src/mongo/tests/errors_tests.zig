@@ -56,7 +56,7 @@ const Served = struct {
     rows: Rows = .{},
     script: Script,
     listener: net.Server,
-    server: Io.Future(Io.Cancelable!void),
+    server: Io.Future(FakeServer.ServeError!void),
     buffer: [96]u8 = undefined,
 
     /// It points into itself: start it in place.
