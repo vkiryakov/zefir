@@ -15,6 +15,7 @@
 //! | exchange | the task canceled | `Interrupted` | the connection closes |
 //! | reply | it breaks OP_MSG | `ProtocolViolation` | the connection closes |
 //! | reply | ok 0 | `CommandFailed`, code 50 `Timeout` | cleared by 11600 and 91 |
+//! | reply | ok 1, a writeConcernError of 11600 or 91 | none: the reply, or the write result, holds it | cleared |
 //! | after `close` | — | `Closed` | — |
 //!
 //! Code 50, MaxTimeMSExpired, is `Timeout` wherever it comes: in a reply
@@ -57,20 +58,28 @@ pub fn canceled(io: Io, d: ?*Diagnostics, phase: Diagnostics.Phase, sent: bool, 
     return if (sent) error.Interrupted else error.Cancelled;
 }
 
-/// What a reply leaves: ok 0 from a server shutting down clears the pool.
+/// What a reply leaves: a server shutting down clears the pool, whether it
+/// says so with ok 0 or, as SDAM reads a reply too, in the
+/// `writeConcernError` of a write it did.
 pub fn afterReply(reply: bson.RawDocument) Pool.After {
     const ok = if (reply.get("ok") catch null) |value| value.asF64() catch 0 else 0;
-    if (ok == 1) return .ok;
-    return switch (mongo.ServerError.fromReply(reply).code) {
+    if (ok != 1) return switch (mongo.ServerError.fromReply(reply).code) {
         11600 => .{ .clear = "it answered InterruptedAtShutdown (11600)" },
         91 => .{ .clear = "it answered ShutdownInProgress (91)" },
+        else => .ok,
+    };
+    const concern = (reply.get("writeConcernError") catch null) orelse return .ok;
+    if (concern != .document) return .ok;
+    return switch (mongo.ServerError.fromReply(concern.document).code) {
+        11600 => .{ .clear = "it answered InterruptedAtShutdown (11600) in a writeConcernError" },
+        91 => .{ .clear = "it answered ShutdownInProgress (91) in a writeConcernError" },
         else => .ok,
     };
 }
 
 const testing = std.testing;
 
-test "a reply clears the pool only with ok 0 and the codes of a server shutting down" {
+test "a reply clears the pool only with the codes of a server shutting down: with ok 0, or in a writeConcernError" {
     const cases = [_]struct { bson.RawDocument, bool }{
         .{ bson.literal(.{ .ok = 1.0 }), false },
         .{ bson.literal(.{ .ok = 0.0, .code = 59, .codeName = "CommandNotFound" }), false },
@@ -78,6 +87,12 @@ test "a reply clears the pool only with ok 0 and the codes of a server shutting 
         .{ bson.literal(.{ .ok = 0, .code = 11600, .codeName = "InterruptedAtShutdown" }), true },
         // A code of 91 next to ok 1 is no refusal.
         .{ bson.literal(.{ .ok = 1, .code = 91 }), false },
+        // A write done, whose write concern the server shutting down left
+        // unsatisfied: SDAM reads the writeConcernError as a refusal.
+        .{ bson.literal(.{ .n = 1, .writeConcernError = .{ .code = 91, .codeName = "ShutdownInProgress", .errmsg = "the server is shutting down" }, .ok = 1.0 }), true },
+        .{ bson.literal(.{ .n = 1, .writeConcernError = .{ .code = 11600, .codeName = "InterruptedAtShutdown", .errmsg = "interrupted at shutdown" }, .ok = 1.0 }), true },
+        .{ bson.literal(.{ .n = 1, .writeConcernError = .{ .code = 64, .codeName = "WriteConcernFailed", .errmsg = "waiting for replication timed out" }, .ok = 1.0 }), false },
+        .{ bson.literal(.{ .n = 1, .writeConcernError = "not a document", .ok = 1.0 }), false },
     };
     for (cases) |case| {
         const reply, const clears = case;

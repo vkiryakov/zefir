@@ -27,8 +27,13 @@ const WindowsLike = @import("windows_like_io.zig").WindowsLike;
 const ping: mongo.Command = .{ .database = "admin", .body = bson.literal(.{ .ping = 1 }) };
 const slow: mongo.Command = .{ .database = "admin", .body = bson.literal(.{ .slow = 1 }) };
 
-/// Answers `slow` after `delay`, `breakme` by closing the connection, and
-/// anything else with `{ok: 1.0}` at once.
+/// A write done, whose write concern a server shutting down left
+/// unsatisfied.
+const concern_away = bson.literal(.{ .n = 1, .writeConcernError = .{ .code = 91, .codeName = "ShutdownInProgress", .errmsg = "the server is shutting down" }, .ok = 1.0 });
+
+/// Answers `slow` after `delay`, `breakme` by closing the connection, an
+/// insert into `away` and `concernaway` with `concern_away`, and anything
+/// else with `{ok: 1.0}` at once.
 const Slow = struct {
     delay: Io.Duration,
 
@@ -36,6 +41,10 @@ const Slow = struct {
         _ = io;
         if (std.mem.eql(u8, request.name, "slow")) return .{ .delayed = .{ .after = s.delay, .reply = Script.ok } };
         if (std.mem.eql(u8, request.name, "breakme")) return .close_connection;
+        if (std.mem.eql(u8, request.name, "concernaway")) return .{ .reply = concern_away };
+        if (std.mem.eql(u8, request.name, "insert")) if (request.body.get("insert") catch null) |into| {
+            if (into == .string and std.mem.eql(u8, into.string, "away")) return .{ .reply = concern_away };
+        };
         if (std.mem.eql(u8, request.name, "goingaway")) {
             const code: i32 = if (request.body.get("code") catch null) |v| @intCast(v.asI64() catch 91) else 91;
             const name = if (code == 11600) "InterruptedAtShutdown" else "ShutdownInProgress";
@@ -345,4 +354,32 @@ fn shutdownClears(io: Io) !void {
         try run(io, &driver, ping, null, "");
     }
     try testing.expectEqual(@as(u32, 3), served.script.acceptedConnections());
+}
+
+test "a writeConcernError of a server shutting down clears the pool too, though the call itself succeeds" {
+    try within5s(testing.io, shutdownConcernClears, .{testing.io});
+}
+
+fn shutdownConcernClears(io: Io) !void {
+    var served: Served = undefined;
+    try served.start(io, .zero);
+    defer served.stop(io);
+    var driver: Client = try .init(testing.allocator, io, .{ .uri = try served.uri("") });
+    defer driver.deinit();
+    try driver.connect(io, .root, null);
+    // ok 1: the reply comes back as it is.
+    const reply = try driver.runCommand(io, .of(.root), .{ .database = "admin", .body = bson.literal(.{ .concernaway = 1 }) }, .{ .allocator = testing.allocator });
+    defer reply.deinit();
+    try testing.expectEqualSlices(u8, concern_away.bytes, reply.bytes);
+    try testing.expectEqual(@as(u64, 1), driver.stats().clears);
+    try testing.expectEqual(@as(usize, 0), driver.stats().connections);
+    // A write keeps the writeConcernError in its result.
+    try time.sleepUntil(io, .after(time.now(io), Pool.probe_interval));
+    const items = [_]bson.RawDocument{bson.literal(.{ ._id = 1 })};
+    var result = try driver.write(io, .of(.root), .{ .database = "app", .kind = .insert, .body = bson.literal(.{ .insert = "away" }), .items = &items }, .{ .allocator = testing.allocator });
+    defer result.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 1), result.write_concern_errors.len);
+    try testing.expectEqual(@as(i32, 91), result.write_concern_errors[0].code);
+    try testing.expectEqual(@as(u64, 2), driver.stats().clears);
+    try testing.expectEqual(@as(usize, 0), driver.stats().connections);
 }

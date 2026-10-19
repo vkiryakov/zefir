@@ -28,12 +28,13 @@
 //! SCRAM-SHA-256 or SCRAM-SHA-1.
 //!
 //! A network error on a connection, a failed authentication or a server
-//! shutting down (codes 11600 and 91) clears the pool: its connections are
-//! closed, and calls get `error.Unavailable` until one, at most every
-//! 500 ms, opens a new connection. A timeout closes only its own
-//! connection. A network error while a connection opens clears nothing;
-//! its `Diagnostics.server` holds the labels SystemOverloadedError and
-//! RetryableError, code 0, unless the host name is to blame.
+//! shutting down (codes 11600 and 91, with ok 0 or in the writeConcernError
+//! of a reply) clears the pool: its connections are closed, and calls get
+//! `error.Unavailable` until one, at most every 500 ms, opens a new
+//! connection. A timeout closes only its own connection. A network error
+//! while a connection opens clears nothing; its `Diagnostics.server` holds
+//! the labels SystemOverloadedError and RetryableError, code 0, unless the
+//! host name is to blame.
 //!
 //! It logs to `std.log.scoped(.mongo)`, as warnings: the options of the
 //! connection string it skips, the clears of the pool and the servers that
