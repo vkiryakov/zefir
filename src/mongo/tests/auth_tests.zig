@@ -199,61 +199,80 @@ fn expectOverloaded(d: *const Diagnostics) !void {
     try testing.expect(server.labels.contains(.retryable_error));
 }
 
-test "a new connection whose SCRAM the server cuts after saslStart, or leaves unanswered, is Unavailable with the labels of overload, and the pool is not cleared" {
+test "a new connection whose SCRAM the server cuts after saslStart is Unavailable with the labels of overload, and the pool is not cleared" {
     try within5s(testing.io, cutAfterStart, .{testing.io});
 }
 
 /// The client connects through a server that takes the user; its idle
 /// connection perishes at once (maxIdleTimeMS=1), so that the next call
-/// opens another, through the server of `broken`. A third server, which
-/// takes the user again, serves the call after it: the pool is not
-/// paused, so that call opens a connection at once and goes through.
+/// opens another, through a server that hangs up when saslStart comes. A
+/// third server, which takes the user again, serves the call after it: the
+/// pool is not paused, so that call opens a connection at once and goes
+/// through.
 fn cutAfterStart(io: Io) !void {
-    for ([_]ScramServer{
-        .{ .tamper = .hang_up_at_start, .speculative = false },
-        .{ .tamper = .stall_at_start, .speculative = false },
-    }) |broken| {
-        var listener = try FakeServer.listen(io);
-        defer listener.deinit(io);
-        var first: ScramServer = .{};
-        var first_task = try io.concurrent(ScramServer.serve, .{ &first, io, &listener, 1 });
-        defer first_task.cancel(io) catch {};
-        var buffer: [128]u8 = undefined;
-        const uri = try std.fmt.bufPrint(&buffer, "mongodb://app:secret@127.0.0.1:{d}/?maxIdleTimeMS=1&connectTimeoutMS=200", .{FakeServer.port(&listener)});
-        var driver: Client = try .init(testing.allocator, io, .{ .uri = uri });
-        defer driver.deinit();
-        try driver.connect(io, .root, null);
-        // The idle connection perishes, and the client closes it at the
-        // next checkout: the first server is done.
-        try mongo.testing.sleepAtLeast(io, .fromMilliseconds(5));
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var first: ScramServer = .{};
+    var first_task = try io.concurrent(ScramServer.serve, .{ &first, io, &listener, 1 });
+    defer first_task.cancel(io) catch {};
+    var buffer: [128]u8 = undefined;
+    const uri = try std.fmt.bufPrint(&buffer, "mongodb://app:secret@127.0.0.1:{d}/?maxIdleTimeMS=1", .{FakeServer.port(&listener)});
+    var driver: Client = try .init(testing.allocator, io, .{ .uri = uri });
+    defer driver.deinit();
+    try driver.connect(io, .root, null);
+    // The idle connection perishes, and the client closes it at the next
+    // checkout: the first server is done.
+    try mongo.testing.sleepAtLeast(io, .fromMilliseconds(5));
 
-        var cut = broken;
-        var cut_task = try io.concurrent(ScramServer.serve, .{ &cut, io, &listener, 1 });
-        defer cut_task.cancel(io) catch {};
-        var d: Diagnostics = .{};
-        try testing.expectError(error.Unavailable, driver.runCommand(io, .of(.root), ping, .{ .allocator = testing.allocator, .diagnostics = &d }));
-        try expectOverloaded(&d);
-        if (broken.tamper == .hang_up_at_start) {
-            try testing.expectEqual(Diagnostics.Phase.authenticate, d.phase.?);
-        } else {
-            try testing.expectEqual(Diagnostics.Phase.connect, d.phase.?);
-        }
-        try first_task.await(io);
-        try cut_task.await(io);
-        try testing.expectEqualSlices(Step, &.{.sasl_start}, cut.seen.sequence());
-        var stats = driver.stats();
-        try testing.expectEqual(@as(u64, 0), stats.clears);
-        try testing.expectEqual(@as(u64, 0), stats.generation);
+    var cut: ScramServer = .{ .tamper = .hang_up_at_start, .speculative = false };
+    var cut_task = try io.concurrent(ScramServer.serve, .{ &cut, io, &listener, 1 });
+    defer cut_task.cancel(io) catch {};
+    var d: Diagnostics = .{};
+    try testing.expectError(error.Unavailable, driver.runCommand(io, .of(.root), ping, .{ .allocator = testing.allocator, .diagnostics = &d }));
+    try expectOverloaded(&d);
+    try testing.expectEqual(Diagnostics.Phase.authenticate, d.phase.?);
+    try first_task.await(io);
+    try cut_task.await(io);
+    try testing.expectEqualSlices(Step, &.{.sasl_start}, cut.seen.sequence());
+    var stats = driver.stats();
+    try testing.expectEqual(@as(u64, 0), stats.clears);
+    try testing.expectEqual(@as(u64, 0), stats.generation);
 
-        var again: ScramServer = .{};
-        var again_task = try io.concurrent(ScramServer.serve, .{ &again, io, &listener, 1 });
-        defer again_task.cancel(io) catch {};
-        const reply = try driver.runCommand(io, .of(.root), ping, .{ .allocator = testing.allocator });
-        reply.deinit();
-        stats = driver.stats();
-        try testing.expectEqual(@as(usize, 1), stats.connections);
-        try testing.expectEqual(@as(u64, 0), stats.clears);
-    }
+    var again: ScramServer = .{};
+    var again_task = try io.concurrent(ScramServer.serve, .{ &again, io, &listener, 1 });
+    defer again_task.cancel(io) catch {};
+    const reply = try driver.runCommand(io, .of(.root), ping, .{ .allocator = testing.allocator });
+    reply.deinit();
+    stats = driver.stats();
+    try testing.expectEqual(@as(usize, 1), stats.connections);
+    try testing.expectEqual(@as(u64, 0), stats.clears);
+}
+
+test "a SCRAM conversation that the server leaves unanswered is Unavailable with the labels of overload at connectTimeoutMS" {
+    try within5s(testing.io, stallAtStart, .{testing.io});
+}
+
+/// Neither side derives a key before the server stops answering: the
+/// client's first message of SCRAM needs none, and the server takes no
+/// speculative conversation. So connectTimeoutMS is all the time it takes.
+fn stallAtStart(io: Io) !void {
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var server: ScramServer = .{ .tamper = .stall_at_start, .speculative = false };
+    var task = try io.concurrent(ScramServer.serve, .{ &server, io, &listener, 1 });
+    defer task.cancel(io) catch {};
+    var buffer: [128]u8 = undefined;
+    const port = FakeServer.port(&listener);
+    var driver: Client = try .init(testing.allocator, io, .{ .uri = try std.fmt.bufPrint(&buffer, "mongodb://app:secret@127.0.0.1:{d}/?connectTimeoutMS=200", .{port}) });
+    defer driver.deinit();
+    var d: Diagnostics = .{};
+    try testing.expectError(error.Unavailable, driver.connect(io, .root, &d));
+    try expectOverloaded(&d);
+    try testing.expectEqual(Diagnostics.Phase.connect, d.phase.?);
+    var expected: [96]u8 = undefined;
+    try testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "127.0.0.1:{d} did not answer within connectTimeoutMS (200 ms)", .{port}), d.message());
+    try task.await(io);
+    try testing.expectEqualSlices(Step, &.{.sasl_start}, server.seen.sequence());
 }
 
 test "a user with ',' and '=' goes escaped in SCRAM and as it is in saslSupportedMechs, and the user's database is where SASL goes" {
