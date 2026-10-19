@@ -32,8 +32,10 @@ production.
 > - **Authentication other than SCRAM.** SCRAM-SHA-256 and SCRAM-SHA-1
 >   work; X.509, LDAP, Kerberos, AWS and OIDC do not. SCRAM-SHA-256 takes a
 >   password of printable ASCII only, as the driver does not prepare other
->   passwords (SASLprep) yet; a user with another password goes with
->   SCRAM-SHA-1.
+>   passwords (SASLprep) yet: for a user that has SCRAM-SHA-256, another
+>   password is `Unsupported` at `connect`, and such a user needs
+>   SCRAM-SHA-1 credentials and `authMechanism=SCRAM-SHA-1`, see
+>   [Users and passwords](#users-and-passwords).
 > - **Retries.** The client never repeats a command by itself.
 >   `mongo.outcome` tells which failed calls are safe to make again,
 >   [Errors and what is safe to retry](#errors-and-what-is-safe-to-retry)
