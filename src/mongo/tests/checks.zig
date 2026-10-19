@@ -32,6 +32,7 @@
 const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
+const mongo = @import("mongo");
 const Job = @import("checks/Job.zig");
 const scripted = @import("checks/scripted.zig");
 const live = @import("checks/live.zig");
@@ -384,4 +385,22 @@ test "a check whose client cannot connect fails with why, and leaves nothing hel
     // Nothing listens at this port.
     const why = (try reasonOf(&arena, connectsLive, .{ .live = .{ .uri = "mongodb://127.0.0.1:1" } })) orelse return error.TestExpectedFailure;
     try std.testing.expectStringStartsWith(why, "connect to mongodb://127.0.0.1:1 returned error.Unavailable: ");
+}
+
+/// Starts a scripted server that says it is a mongos, which the client
+/// refuses at connect: the setup of the check fails.
+fn refusedSetup(job: *Job) Job.Error!void {
+    var queue: mongo.testing.Script.Queue = .{ .answers = &.{} };
+    var stage: Job.Stage = undefined;
+    _ = try job.scripted(&stage, queue.handler(), .{ .server_type = .mongos });
+    job.end();
+    return job.fail("the client connected to a mongos", .{});
+}
+
+test "a check whose scripted server the client refuses fails with why, and its server stops with it" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const why = (try reasonOf(&arena, refusedSetup, .{})) orelse return error.TestExpectedFailure;
+    try std.testing.expectStringStartsWith(why, "connect to mongodb://127.0.0.1:");
+    try std.testing.expect(std.mem.find(u8, why, "returned error.Unsupported") != null);
 }

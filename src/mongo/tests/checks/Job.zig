@@ -313,10 +313,17 @@ pub const Fence = struct {
 };
 
 /// Starts the scripted server of the check, serving `handler` with `hello`,
-/// and connects a fresh client to it. `end` undoes both.
+/// and connects a fresh client to it. `end` undoes both. When the client
+/// cannot connect, the server is stopped before the check returns: the
+/// stage lives in the check's frame, and the check has no `end` deferred
+/// yet.
 pub fn scripted(job: *Job, stage: *Stage, handler: Script.Handler, hello: Hello) Error!Client {
     stage.start(job.io, job.gpa, handler, hello) catch |err| return job.fail("the FakeServer of the check did not start: error.{t}", .{err});
     job.stage = stage;
+    errdefer {
+        stage.stop(job.io);
+        job.stage = null;
+    }
     try job.connect(stage.uri);
     return &job.client;
 }
@@ -446,4 +453,22 @@ test "the counting allocator counts what is held, and nothing once it is freed" 
     a.free(block);
     try testing.expectEqual(@as(usize, 0), counting.live.load(.acquire));
     try testing.expectEqual(@as(usize, 0), counting.bytes.load(.acquire));
+}
+
+test "scripted stops the server of a check whose client cannot connect to it, and keeps nothing of either" {
+    const testing = std.testing;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var job: Job = .{ .io = testing.io, .gpa = testing.allocator, .client_gpa = testing.allocator, .arena = arena.allocator(), .options = .{} };
+    var queue: Script.Queue = .{ .answers = &.{} };
+    var stage: Stage = undefined;
+    // A mongos, which the client refuses at connect: Unsupported.
+    const connected = job.scripted(&stage, queue.handler(), .{ .server_type = .mongos });
+    // What the check would have ended; nothing, once scripted cleans up.
+    defer job.end();
+    try testing.expectError(error.CheckFailed, connected);
+    try testing.expect(job.stage == null);
+    try testing.expect(!job.up);
+    try testing.expectStringStartsWith(job.failure.?, "connect to mongodb://127.0.0.1:");
+    try testing.expect(std.mem.find(u8, job.failure.?, "returned error.Unsupported") != null);
 }
