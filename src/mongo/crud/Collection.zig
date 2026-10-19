@@ -737,8 +737,8 @@ pub fn createIndexes(c: Collection, io: Io, op: OperationContext, models: []cons
 /// The indexes of the collection, each a document with its `name`, `key`
 /// and options: `listIndexes`, whose cursor gives them. A collection that
 /// is not there has no indexes: the code 26 (NamespaceNotFound) of the
-/// server is an empty cursor, as the official drivers make it, and leaves
-/// nothing in the diagnostics or in `failure_reply`.
+/// server is an empty cursor, and leaves nothing in the diagnostics or in
+/// `failure_reply`.
 pub fn listIndexes(c: Collection, io: Io, op: OperationContext, options: ListIndexesOptions) Error!Cursor {
     try c.begin(options.diagnostics);
     var scratch: std.heap.ArenaAllocator = .init(options.allocator);
@@ -804,9 +804,8 @@ fn dropIndexesNamed(c: Collection, io: Io, op: OperationContext, name: []const u
 
 /// Drops the collection with its documents and indexes: `drop`. A
 /// collection that is not there is no error: the code 26
-/// (NamespaceNotFound) of the servers before 7.0 is taken as success, as
-/// the official drivers take it, and leaves nothing in the diagnostics or
-/// in `failure_reply`.
+/// (NamespaceNotFound) of the servers before 7.0 is taken as success, and
+/// leaves nothing in the diagnostics or in `failure_reply`.
 pub fn drop(c: Collection, io: Io, op: OperationContext, options: DropOptions) Error!void {
     try c.begin(options.diagnostics);
     var scratch: std.heap.ArenaAllocator = .init(options.allocator);

@@ -17,8 +17,8 @@ these documents, find those, change them, count them. This module is the
 client side: it connects to a mongod, keeps a pool of connections that
 every task of the service shares, authenticates them, reads and writes
 BSON, the format of MongoDB's documents, and gives you databases and
-collections with the operations of MongoDB's own drivers: `insertOne`,
-`find`, `updateMany`, `aggregate` and the rest. It is written against
+collections with the operations of MongoDB's CRUD specification:
+`insertOne`, `find`, `updateMany`, `aggregate` and the rest. It is written against
 `std.Io` only, and runs on [zio](https://github.com/lalinsky/zio) in
 production.
 
@@ -91,9 +91,9 @@ while (try adults.next(io, op)) |doc| {
 - **One client for the whole service.** Any task may call it at once; its
   pool of connections serves them, first come first served, and every
   connection authenticates by itself.
-- **The operations of MongoDB's drivers.** Insert, find with cursors,
-  update, replace, delete, `findOneAnd*`, aggregate, counts, distinct,
-  indexes, collections and any command, as MongoDB's CRUD specification
+- **The operations of MongoDB's CRUD specification.** Insert, find with
+  cursors, update, replace, delete, `findOneAnd*`, aggregate, counts,
+  distinct, indexes, collections and any command, as the specification
   has them, for one standalone server.
 - **Documents three ways.** A struct of yours, an anonymous literal such
   as `.{ .age = .{ .@"$gte" = 18 } }`, or raw BSON. An insert gives a
@@ -668,10 +668,10 @@ $ APP_MONGO_URI=mongodb://admin@127.0.0.1:27018 APP_MONGO_PASSWORD=change-me zig
   would refuse every connection alike.
 - **A server that is not there** is `Unavailable`, and so is one that
   does not answer within `connectTimeoutMS`. Their diagnostics carry the
-  labels `SystemOverloadedError` and `RetryableError`, which MongoDB's
-  drivers give a connection that could not open: the server may be
-  overloaded or restarting, and the call may go again later. A host name
-  that does not resolve gets no labels: it is the name that is wrong.
+  labels `SystemOverloadedError` and `RetryableError`, which the client
+  gives a connection that could not open: the server may be overloaded or
+  restarting, and the call may go again later. A host name that does not
+  resolve gets no labels: it is the name that is wrong.
 - **Connection strings** that ask for what v0.1 cannot do stop at `init`,
   with what to do instead.
 - `connect` may be called again after a failure; until it succeeds, a call
