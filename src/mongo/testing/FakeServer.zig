@@ -70,8 +70,8 @@ pub const ServeError = net.Server.AcceptError;
 /// of the test. While the script refuses connections, a new connection is
 /// closed at once. A `refuse_connections` answer ends every connection
 /// being served, as a server that goes away does. An error of `accept`
-/// other than a connection that its client dropped stops the server, and
-/// `serve` returns it.
+/// that costs one connection, such as a client that dropped it, is
+/// skipped; any other stops the server, and `serve` returns it.
 pub fn serve(io: Io, listener: *net.Server, script: *Script) ServeError!void {
     var served: Served = .{};
     var group: Io.Group = .init;
