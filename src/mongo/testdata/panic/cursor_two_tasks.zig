@@ -1,6 +1,7 @@
 //! Debug build: a cursor that two tasks use at once panics; one task at a
 //! time calls its methods. build.zig runs this program and checks the
 //! panic message on stderr and the exit code 3 of the panic handler below.
+//! A getMore that never reaches the server exits with code 4 after 5 s.
 const std = @import("std");
 const Io = std.Io;
 const mongo = @import("mongo");
@@ -53,7 +54,15 @@ pub fn main(init: std.process.Init) !void {
     // One task waits in a getMore that the server holds...
     var waiting = try io.concurrent(next, .{ io, cursor });
     defer waiting.cancel(io);
-    while (script.count(io, "getMore") == 0) try io.sleep(.fromMilliseconds(1), .awake);
+    const given_up = Io.Clock.awake.now(io).addDuration(.fromSeconds(5));
+    while (script.count(io, "getMore") == 0) {
+        if (Io.Clock.awake.now(io).compare(.gte, given_up)) {
+            // Not the panic build.zig looks for: the run fails, and says why.
+            std.debug.print("the getMore of the waiting task did not reach the server in 5 s\n", .{});
+            std.process.exit(4);
+        }
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
     // ...and the mistake: another task calls the cursor meanwhile.
     _ = cursor.next(io, .of(.root)) catch {};
 }
