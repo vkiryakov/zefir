@@ -89,6 +89,10 @@ test "literal of a string that is not UTF-8" {
     _ = bson.literal(.{ .a = "\xff" });
 }
 
+test "literal of a regular expression that is not UTF-8" {
+    _ = bson.literal(.{ .a = bson.Regex{ .pattern = "^\xff", .options = "" } });
+}
+
 test "integer literal beyond int64" {
     _ = try bson.encode(arena(), .{ .n = 9223372036854775808 }, .{});
 }

@@ -69,7 +69,8 @@ fn walk(doc: bson.RawDocument) bool {
 /// Writes the elements of a valid document again with `Builder` and
 /// compares the bytes; skipped when the document holds what the builder
 /// writes otherwise on purpose: a deprecated type, or the options of a
-/// regular expression out of order.
+/// regular expression out of order. A key or a text that is not UTF-8,
+/// which the reader takes, the builder refuses.
 fn rebuild(doc: bson.RawDocument) !void {
     var b: bson.Builder = .init(testing.allocator);
     defer b.deinit();
@@ -80,11 +81,23 @@ fn rebuild(doc: bson.RawDocument) !void {
             .regex => |regex| if (!std.sort.isSorted(u8, regex.options, {}, std.sort.asc(u8))) return,
             else => {},
         }
+        if (!isUtf8(element)) return testing.expectError(error.InvalidBson, b.putValue(element.key, element.value));
         try b.putValue(element.key, element.value);
     }
     const copy = try b.finish();
     defer copy.deinit();
     try testing.expectEqualSlices(u8, doc.bytes, copy.bytes);
+}
+
+/// Whether the key of `element` and the text of its value are UTF-8.
+fn isUtf8(element: bson.Element) bool {
+    const valid = std.unicode.utf8ValidateSlice;
+    if (!valid(element.key)) return false;
+    return switch (element.value) {
+        .string, .javascript => |text| valid(text),
+        .regex => |regex| valid(regex.pattern) and valid(regex.options),
+        else => true,
+    };
 }
 
 /// A corpus entry: `Smith.slice` reads a little-endian u32 length first.

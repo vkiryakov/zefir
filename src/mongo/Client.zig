@@ -481,8 +481,8 @@ fn interrupted(d: ?*Diagnostics) mongo.Error {
     return fail(d, null, error.Interrupted, "the token was canceled while the call was out; its outcome is dropped", .{});
 }
 
-/// A database name: 1 to 63 bytes, without NUL and without any of
-/// `/\. "$`.
+/// A database name: 1 to 63 bytes of UTF-8, without NUL and without any
+/// of `/\. "$`.
 fn checkDatabase(name: []const u8, d: ?*Diagnostics) mongo.Error!void {
     if (name.len == 0 or name.len > 63) return invalid(d, "a database name is 1 to 63 bytes long; this one is {d}", .{name.len});
     if (std.mem.findAny(u8, name, "\x00/\\. \"$")) |at| {
@@ -497,6 +497,7 @@ fn checkDatabase(name: []const u8, d: ?*Diagnostics) mongo.Error!void {
         };
         return invalid(d, "a database name holds none of / \\ . \" $, a space or NUL; this one holds {s} at byte {d}", .{ what, at });
     }
+    if (!std.unicode.utf8ValidateSlice(name)) return invalid(d, "a database name is UTF-8, and this one is not", .{});
 }
 
 /// Checks the top level of `body` and returns the command's name, its

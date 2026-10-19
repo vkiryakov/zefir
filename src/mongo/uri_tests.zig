@@ -154,6 +154,8 @@ test "the database of the path, authSource and authMechanism, SCRAM-SHA-256 or S
     try expectRefused("mongodb://app:secret@host/?authMechanism=scram-sha-256", error.InvalidArgument, "authMechanism is SCRAM-SHA-256 or SCRAM-SHA-1, as written here; got 'scram-sha-256'");
     try expectRefused("mongodb://app:secret@host/?authSource=", error.InvalidArgument, "authSource is a database name of 1 to 63 bytes; this one is 0");
     try expectRefused("mongodb://app:secret@host/?authSource=a.b", error.InvalidArgument, "authSource is a database name, without / \\ . \" $, a space or NUL");
+    try expectRefused("mongodb://app:secret@host/?authSource=a%FF", error.InvalidArgument, "authSource is a database name, of UTF-8 once percent-decoded");
+    try expectRefused("mongodb://host/a%C3", error.InvalidArgument, "the database of the connection string is a database name, of UTF-8 once percent-decoded");
     try expectRefused("mongodb://host/?authSource=admin", error.InvalidArgument, "authSource and authMechanism go with a user: mongodb://user:password@host/?authSource=admin");
     try expectRefused("mongodb://host/?authMechanism=SCRAM-SHA-256", error.InvalidArgument, "authSource and authMechanism go with a user: mongodb://user:password@host/?authSource=admin");
     try expectRefused("mongodb://host/a.b", error.InvalidArgument, "the database of the connection string is a database name, without / \\ . \" $, a space or NUL");

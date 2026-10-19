@@ -163,16 +163,13 @@ test "strings must be UTF-8, and are copied into the arena unless .copy_strings 
     try testing.expectEqualStrings("Ann", borrowed.name);
     try testing.expect(inside(doc.bytes, borrowed.name));
 
-    // Builder.putString writes any bytes; decode checks them.
-    var b: bson.Builder = .init(testing.allocator);
-    defer b.deinit();
-    try b.putString("name", "\xff");
-    const bad = try b.finish();
-    defer bad.deinit();
-    try expectFailure(Named, bad.raw(), .{}, error.InvalidBson, "name");
-    try expectFailure(Named, bad.raw(), .{ .copy_strings = false }, error.InvalidBson, "name");
-    try expectFailure(struct { name: bson.Value }, bad.raw(), .{}, error.InvalidBson, "name");
-    try expectFailure(struct { name: Status }, bad.raw(), .{}, error.InvalidBson, "name");
+    // {"name": "\xff"}, as a server or a file may give it: the builder
+    // would refuse it, and decode checks it.
+    const bad = try bson.RawDocument.init(hex("11000000 02 6e616d6500 02000000 ff00 00"));
+    try expectFailure(Named, bad, .{}, error.InvalidBson, "name");
+    try expectFailure(Named, bad, .{ .copy_strings = false }, error.InvalidBson, "name");
+    try expectFailure(struct { name: bson.Value }, bad, .{}, error.InvalidBson, "name");
+    try expectFailure(struct { name: Status }, bad, .{}, error.InvalidBson, "name");
 }
 
 test "an enum takes the name of one of its tags" {

@@ -94,6 +94,24 @@ test "a key with a 0 byte is refused, and the builder goes on as before" {
     try testing.expectEqualSlices(u8, vectorNamed("int32"), doc.bytes);
 }
 
+test "a string, a code, a key or a regular expression that is not UTF-8 is refused, and the builder goes on as before" {
+    var b: Builder = .init(testing.allocator);
+    defer b.deinit();
+    // A byte that UTF-8 never uses, a sequence cut short, a surrogate, an
+    // overlong encoding, a lone continuation byte.
+    try testing.expectError(error.InvalidBson, b.putString("a", "\xff"));
+    try testing.expectError(error.InvalidBson, b.putJavaScript("a", "x=\xd0"));
+    try testing.expectError(error.InvalidBson, b.putValue("a", .{ .string = "\xed\xa0\x80" }));
+    try testing.expectError(error.InvalidBson, b.putInt32("k\xc0\xaf", 1));
+    try testing.expectError(error.InvalidBson, b.beginDocument("\x80"));
+    try testing.expectError(error.InvalidBson, b.putRegex("a", .{ .pattern = "^\xff", .options = "" }));
+    try testing.expectError(error.InvalidBson, b.putRegex("a", .{ .pattern = "^a", .options = "\xff" }));
+    try b.putInt32("a", 1);
+    const doc = try b.finish();
+    defer doc.deinit();
+    try testing.expectEqualSlices(u8, vectorNamed("int32"), doc.bytes);
+}
+
 test "a regular expression with a 0 byte is refused" {
     var b: Builder = .init(testing.allocator);
     defer b.deinit();

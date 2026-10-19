@@ -249,6 +249,9 @@ test "a bad database name is InvalidArgument, and nothing is sent" {
         var buffer: [128]u8 = undefined;
         try testing.expectEqualStrings(try std.fmt.bufPrint(&buffer, "a database name holds none of / \\ . \" $, a space or NUL; this one holds {s}", .{what}), d.message());
     }
+    const not_utf8: mongo.Database = .init(f.served.client(), "app\xff", &f.ids);
+    try testing.expectError(error.InvalidArgument, not_utf8.runCommand(io, .of(.root), .{ .ping = 1 }, .{ .allocator = a, .diagnostics = &d }));
+    try testing.expectEqualStrings("a database name is UTF-8, and this one is not", d.message());
     try testing.expectError(error.InvalidArgument, bad.drop(io, .of(.root), .{ .allocator = a }));
     try testing.expectError(error.InvalidArgument, bad.runCommand(io, .of(.root), .{ .ping = 1 }, .{ .allocator = a }));
     try testing.expectError(error.InvalidArgument, bad.runCursorCommand(io, .of(.root), .{ .find = "users" }, .{ .allocator = a }));

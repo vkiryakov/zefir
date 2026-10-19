@@ -1026,17 +1026,18 @@ fn begin(c: Collection, diagnostics: ?*Diagnostics) Error!void {
     try c.checkName(diagnostics);
 }
 
-/// The name of the collection: not empty, without `$` and NUL. Breaking it
-/// is `error.InvalidArgument`, and nothing is sent.
+/// The name of the collection: not empty, UTF-8, without `$` and NUL.
+/// Breaking it is `error.InvalidArgument`, and nothing is sent.
 fn checkName(c: Collection, diagnostics: ?*Diagnostics) Error!void {
     if (c.name.len == 0) return invalid(diagnostics, "the collection name is empty", .{});
     if (std.mem.findAny(u8, c.name, "\x00$")) |at| {
         const what = if (c.name[at] == 0) "a NUL" else "a '$'";
         return invalid(diagnostics, "a collection name holds no '$' and no NUL; this one holds {s} at byte {d}", .{ what, at });
     }
+    if (!std.unicode.utf8ValidateSlice(c.name)) return invalid(diagnostics, "a collection name is UTF-8, and this one is not", .{});
 }
 
-test "a collection name is not empty and holds no $ and no NUL" {
+test "a collection name is not empty, is UTF-8, and holds no $ and no NUL" {
     const testing = std.testing;
     const db: Database = .init(undefined, "app", undefined);
     var d: Diagnostics = .{};
@@ -1048,4 +1049,6 @@ test "a collection name is not empty and holds no $ and no NUL" {
     try testing.expectEqualStrings("a collection name holds no '$' and no NUL; this one holds a '$' at byte 1", d.message());
     try testing.expectError(error.InvalidArgument, db.collection("ab\x00").checkName(&d));
     try testing.expectEqualStrings("a collection name holds no '$' and no NUL; this one holds a NUL at byte 2", d.message());
+    try testing.expectError(error.InvalidArgument, db.collection("us\xffers").checkName(&d));
+    try testing.expectEqualStrings("a collection name is UTF-8, and this one is not", d.message());
 }

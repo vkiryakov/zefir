@@ -404,5 +404,8 @@ test "a bad collection name, filter or stage is InvalidArgument, and nothing is 
     try testing.expect(std.mem.startsWith(u8, d.message(), "the filter cannot be written as BSON"));
     try testing.expectError(error.InvalidArgument, users.distinct(io, .of(.root), "n", broken, .{ .allocator = a, .diagnostics = &d }));
     try testing.expect(std.mem.startsWith(u8, d.message(), "the filter cannot be written as BSON"));
+    // A string that the command holds as it is, the field of distinct.
+    try testing.expectError(error.InvalidArgument, users.distinct(io, .of(.root), bad, .{}, .{ .allocator = a, .diagnostics = &d }));
+    try testing.expect(std.mem.startsWith(u8, d.message(), "key cannot be written as BSON: it holds a string that is not UTF-8"));
     try testing.expectEqual(@as(usize, 0), f.script.received(io));
 }

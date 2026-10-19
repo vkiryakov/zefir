@@ -395,6 +395,7 @@ fn checkDatabase(name: []const u8, what: []const u8, d: ?*Diagnostics) Uri.Error
     if (std.mem.findAny(u8, name, "\x00/\\. \"$") != null) {
         return fail(d, error.InvalidArgument, "{s} is a database name, without / \\ . \" $, a space or NUL", .{what});
     }
+    if (!std.unicode.utf8ValidateSlice(name)) return fail(d, error.InvalidArgument, "{s} is a database name, of UTF-8 once percent-decoded", .{what});
 }
 
 fn mechanism(value: []const u8, d: ?*Diagnostics) Uri.Error!Uri.Mechanism {

@@ -40,18 +40,15 @@ test "strings and keys are escaped" {
 }
 
 test "bytes that are not UTF-8 print as U+FFFD, each on its own" {
-    var b: Builder = .init(testing.allocator);
-    defer b.deinit();
-    // A lone continuation byte, an overlong encoding, a surrogate, a byte
-    // that UTF-8 never uses, and a sequence cut short by the end.
-    try b.putString("s", "a\x80b\xc0\x80c\xed\xa0\x80d\xffe\xd0");
-    try b.putInt32("k\xff", 1);
-    const doc = try b.finish();
-    defer doc.deinit();
+    // {"s": "a\x80b\xc0\x80c\xed\xa0\x80d\xffe\xd0", "k\xff": 1}, as a
+    // server or a file may give it: a lone continuation byte, an overlong
+    // encoding, a surrogate, a byte that UTF-8 never uses, and a sequence
+    // cut short by the end.
+    const doc = try RawDocument.init(vectors.hex("22000000 02 7300 0e000000 618062c08063eda08064ff65d000 10 6bff00 01000000 00"));
     try testing.expectFmt(
         "{\"s\":\"a\\ufffdb\\ufffd\\ufffdc\\ufffd\\ufffd\\ufffdd\\ufffde\\ufffd\",\"k\\ufffd\":1}",
         "{f}",
-        .{doc.raw()},
+        .{doc},
     );
 }
 

@@ -721,6 +721,7 @@ pub fn build(b: *std.Build) void {
         .{ "path of a nested field", "bson.decode: field 'items[].owner.id' is u64, which BSON has no type for: its integers are signed; use i64" },
         .{ "put of a u64", "bson.Builder.put: the value is u64, which BSON has no type for: its integers are signed; use i64" },
         .{ "literal of a string that is not UTF-8", "bson.literal: the string of 'a' is not UTF-8" },
+        .{ "literal of a regular expression that is not UTF-8", "bson.literal: a key or a regular expression is not UTF-8" },
         .{ "integer literal beyond int64", "bson.encode: field 'n' is 9223372036854775808, which does not fit int64" },
         .{ "tuple as a document", "bson.encode: a tuple is an array, not a document: give its values names, such as .{ .a = x }" },
         .{ "number as a document", "bson.encode: a document is a struct with named fields, such as .{ .name = name }, or a bson.RawDocument; got u32" },

@@ -107,11 +107,13 @@ fn frame(comptime body: []const u8) []const u8 {
 }
 
 fn string(comptime text: []const u8) []const u8 {
+    if (!std.unicode.utf8ValidateSlice(text)) fail("a string or a code is not UTF-8");
     return &little(i32, length(text.len + 1)) ++ text ++ "\x00";
 }
 
 fn cstring(comptime text: []const u8) []const u8 {
     if (std.mem.findScalar(u8, text, 0) != null) fail("a key or a regular expression holds a 0 byte");
+    if (!std.unicode.utf8ValidateSlice(text)) fail("a key or a regular expression is not UTF-8");
     return text ++ "\x00";
 }
 

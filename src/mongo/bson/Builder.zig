@@ -15,8 +15,10 @@
 //! `put` writes a value of any type that `bson.encode` takes, a struct or a
 //! slice with all that is in it: `try b.put("filter", .{ .age = 30 })`.
 //!
-//! Keys must not hold a 0 byte. Inside an array the builder numbers the
-//! elements itself ("0", "1", …), so the key passed there must be empty.
+//! Keys, strings, codes and regular expressions are UTF-8, as BSON asks,
+//! and keys and regular expressions hold no 0 byte. Inside an array the
+//! builder numbers the elements itself ("0", "1", …), so the key passed
+//! there must be empty.
 //! At most `bson.max_depth` documents and arrays nest inside one another,
 //! the top-level document included. A call that fails, for any of these
 //! reasons or for lack of memory, leaves the document as it was, and the
@@ -293,13 +295,14 @@ fn writeInt(b: *Builder, comptime T: type, value: T) Error!void {
 }
 
 fn writeString(b: *Builder, value: []const u8) Error!void {
+    if (!std.unicode.utf8ValidateSlice(value)) return error.InvalidBson;
     try b.writeInt(i32, try length(value.len + 1));
     try b.writeBytes(value);
     try b.writeByte(0);
 }
 
 fn writeCString(b: *Builder, value: []const u8) Error!void {
-    if (std.mem.findScalar(u8, value, 0) != null) return error.InvalidBson;
+    if (std.mem.findScalar(u8, value, 0) != null or !std.unicode.utf8ValidateSlice(value)) return error.InvalidBson;
     try b.writeBytes(value);
     try b.writeByte(0);
 }

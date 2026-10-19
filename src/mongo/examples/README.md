@@ -1128,7 +1128,8 @@ profiler next to the command. The writes have `partial` too, see
 [A write cut short](#a-write-cut-short). An option at its default is not
 sent, and none of them is `maxTimeMS`: the deadline comes from the
 context. A collection name is checked before every operation: an empty
-one, or one with `$` or NUL, is `InvalidArgument`, and nothing is sent.
+one, one with `$` or NUL, or one that is not UTF-8, is
+`InvalidArgument`, and nothing is sent.
 
 ## Documents
 
