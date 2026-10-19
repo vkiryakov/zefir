@@ -158,8 +158,8 @@ pub const Check = enum {
 /// before the check began.
 pub const Error = error{ CheckFailed, SkipZigTest, OutOfMemory, Canceled };
 
-/// How long a check may run, stretched by `Options.time_scale`. The
-/// slowest, L6, takes a few seconds.
+/// How long a check may run, stretched by `Options.time_scale`: every
+/// check of S and L takes a few seconds at most.
 const time_limit: Io.Duration = .fromSeconds(30);
 
 /// Runs `check` in a task of its own, on a fresh client whose memory comes
