@@ -3,8 +3,11 @@
 //! at the repository root.
 //!
 //!   zig build e2e     start the servers, run the tests
-//!   zig build check   build the tests without running them; no servers
-//!                     needed, so CI runs it on every system
+//!   zig build stress  start the servers, run the stress tests in Debug and
+//!                     in ReleaseSafe
+//!   zig build check   build the tests and the stress tests without
+//!                     running them; no servers needed, so CI runs it on
+//!                     every system
 //!   zig build up      only start the servers; it also unpauses
 //!                     mongo-stall, which a run that died in the middle
 //!                     of a test leaves paused
@@ -84,9 +87,63 @@ pub fn build(b: *std.Build) void {
     run.step.dependOn(&up.step);
     b.step("e2e", "Run the end-to-end tests against the mongod servers").dependOn(&run.step);
 
+    // The stress tests, in Debug and then in ReleaseSafe whatever
+    // -Doptimize says: each mode gets zefir and zio built in it. One mode
+    // after the other, as they share the servers and the CPU, and
+    // ReleaseSafe runs even when Debug fails.
+    const stress_step = b.step("stress", "Run the stress tests against the mongod servers, in Debug and in ReleaseSafe");
+    const run_stress = b.addSystemCommand(&.{
+        "sh",
+        "-c",
+        \\"$1"; debug=$?
+        \\"$2"; safe=$?
+        \\[ $debug -eq 0 ] && [ $safe -eq 0 ]
+        ,
+        "stress",
+    });
+    run_stress.stdio = .inherit;
+    run_stress.has_side_effects = true;
+    run_stress.step.dependOn(&up.step);
+    stress_step.dependOn(&run_stress.step);
+    var stress_builds: [2]*std.Build.Step.Compile = undefined;
+    for ([_]std.lang.Optimize{ .debug, .safe }, &stress_builds) |mode, *build_of_mode| {
+        const mode_zefir = b.dependency("zefir", .{ .target = target, .optimize = mode });
+        const mode_zio = b.dependency("zio", .{ .target = target, .optimize = mode });
+        const imports: []const std.Build.Module.Import = &.{
+            .{ .name = "core", .module = mode_zefir.module("zefir-core") },
+            .{ .name = "mongo", .module = mode_zefir.module("zefir-mongo") },
+            .{ .name = "zio", .module = mode_zio.module("zio") },
+        };
+        // The servers and the helpers of the end-to-end tests.
+        const helpers = b.createModule(.{
+            .root_source_file = b.path("e2e/root.zig"),
+            .target = target,
+            .optimize = mode,
+            .imports = imports,
+        });
+        const stress = b.addTest(.{
+            .name = b.fmt("stress-{t}", .{mode}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("stress/root.zig"),
+                .target = target,
+                .optimize = mode,
+                .imports = &.{
+                    imports[0],
+                    imports[1],
+                    imports[2],
+                    .{ .name = "e2e", .module = helpers },
+                },
+            }),
+            .test_runner = .{ .path = b.path("test_runner.zig"), .mode = .simple },
+        });
+        run_stress.addArtifactArg(stress);
+        build_of_mode.* = stress;
+    }
+
     // Built and not run: no servers needed.
-    const check_step = b.step("check", "Build the tests without running them");
+    const check_step = b.step("check", "Build the tests and the stress tests without running them");
     check_step.dependOn(&e2e.step);
+    for (stress_builds) |stress| check_step.dependOn(&stress.step);
 }
 
 /// `docker compose --profile mongo <args> <services>`, so that only the
