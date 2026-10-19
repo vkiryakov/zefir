@@ -137,17 +137,41 @@ pub const Cursor = struct {
         c.runner.checkIo(io);
         c.enter();
         defer c.leave();
+        const head = (try c.peek(io, op)) orelse return null;
+        c.batch = head.after;
+        return head.doc;
+    }
+
+    /// As `next`, but a copy in `allocator`, made before the cursor moves
+    /// past the document: out of memory, the next call gives it again.
+    pub fn nextOwned(c: *Cursor, io: Io, op: OperationContext, allocator: Allocator) mongo.Error!?bson.OwnedDocument {
+        c.runner.checkIo(io);
+        c.enter();
+        defer c.leave();
+        const head = (try c.peek(io, op)) orelse return null;
+        const copy = try head.doc.dupe(allocator);
+        c.batch = head.after;
+        return copy;
+    }
+
+    /// The next document and the rest of its batch after it, with a
+    /// getMore when the batch is out; null at the end. The cursor stays
+    /// before the document.
+    fn peek(c: *Cursor, io: Io, op: OperationContext) mongo.Error!?Head {
         while (true) {
             const id = c.state(io) orelse return fail(c.diagnostics, null, error.Closed, "the cursor is closed", .{});
-            const element = c.batch.next() catch return c.broken(io, "a batch of the cursor is not valid BSON");
+            var after = c.batch;
+            const element = after.next() catch return c.broken(io, "a batch of the cursor is not valid BSON");
             if (element) |e| {
                 if (e.value != .document) return c.broken(io, "a batch of the cursor holds something other than documents");
-                return e.value.document;
+                return .{ .doc = e.value.document, .after = after };
             }
             if (id == 0) return null;
             try c.getMore(io, op, id);
         }
     }
+
+    const Head = struct { doc: bson.RawDocument, after: bson.RawDocument.Iterator };
 
     pub fn close(c: *Cursor, io: Io) void {
         c.runner.checkIo(io);

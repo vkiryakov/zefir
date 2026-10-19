@@ -201,6 +201,35 @@ fn errorsOfGetMore(io: Io) !void {
     try testing.expectEqual(@as(usize, 1), script.count(io, "killCursors"));
 }
 
+test "nextOwned that runs out of memory leaves the document where it was: the next call gives it, also after a getMore" {
+    try within5s(testing.io, ownedOutOfMemory, .{testing.io});
+}
+
+fn ownedOutOfMemory(io: Io) !void {
+    var users = [_]Script.Cursor{.{ .ns = "app.users", .id = 7, .batches = &.{ docs[0..2], docs[2..3] } }};
+    var served: Served = undefined;
+    try served.start(io, &users);
+    defer served.stop(io);
+    var driver: Client = undefined;
+    try served.connect(io, &driver);
+    defer driver.deinit();
+    var cursor = try driver.openCursor(io, .of(.root), find("users"), .{});
+    defer cursor.deinit(io);
+    try testing.expectError(error.OutOfMemory, cursor.nextOwned(io, .of(.root), testing.failing_allocator));
+    const first = (try cursor.nextOwned(io, .of(.root), testing.allocator)) orelse return error.TestUnexpectedEnd;
+    defer first.deinit();
+    try testing.expectEqualSlices(u8, docs[0].bytes, first.bytes);
+    try expectNext(io, cursor, .of(.root), docs[1]);
+    // The batch is out: the getMore goes, and its document waits.
+    try testing.expectError(error.OutOfMemory, cursor.nextOwned(io, .of(.root), testing.failing_allocator));
+    try testing.expectEqual(@as(usize, 1), served.script.count(io, "getMore"));
+    const third = (try cursor.nextOwned(io, .of(.root), testing.allocator)) orelse return error.TestUnexpectedEnd;
+    defer third.deinit();
+    try testing.expectEqualSlices(u8, docs[2].bytes, third.bytes);
+    try testing.expect(try cursor.nextOwned(io, .of(.root), testing.allocator) == null);
+    try testing.expectEqual(@as(usize, 1), served.script.count(io, "getMore"));
+}
+
 test "CursorNotFound ends the cursor, which leaves nothing to kill" {
     try within5s(testing.io, notFound, .{testing.io});
 }

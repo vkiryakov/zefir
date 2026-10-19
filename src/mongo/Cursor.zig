@@ -54,10 +54,11 @@ pub fn next(c: Cursor, io: Io, op: OperationContext) Error!?bson.RawDocument {
     return state.next(io, op);
 }
 
-/// As `next`, but a copy in `allocator`, which the caller frees.
+/// As `next`, but a copy in `allocator`, which the caller frees. Out of
+/// memory, the cursor stays before the document: the next call gives it.
 pub fn nextOwned(c: Cursor, io: Io, op: OperationContext, allocator: std.mem.Allocator) Error!?bson.OwnedDocument {
-    const doc = (try c.next(io, op)) orelse return null;
-    return try doc.dupe(allocator);
+    const state = c.state orelse return null;
+    return state.nextOwned(io, op, allocator);
 }
 
 /// Ends the cursor on the server, when it is open there; idempotent.
