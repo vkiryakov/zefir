@@ -18,9 +18,9 @@
 //!   as "=2C" or "=3D".
 //!
 //! The checks of the client: the server's nonce extends the client's, the
-//! server asks for 4096 iterations or more, and its signature, compared in
-//! constant time, is the one its keys give. Each failure is
-//! `error.AuthenticationFailed`, with why in the diagnostics.
+//! server asks for 4096 iterations or more, and 1 000 000 at most, and its
+//! signature, compared in constant time, is the one its keys give. Each
+//! failure is `error.AuthenticationFailed`, with why in the diagnostics.
 
 const std = @import("std");
 const Io = std.Io;
@@ -36,6 +36,11 @@ pub const Mechanism = Uri.Mechanism;
 /// The fewest iterations a server may ask for: fewer would make the keys
 /// of a recorded conversation cheap to guess.
 pub const min_iterations = 4096;
+
+/// The most iterations a server may ask for: more would hold the thread
+/// that derives the keys for long, minutes for the largest u32. mongod
+/// asks for 15 000 of SCRAM-SHA-256 and 10 000 of SCRAM-SHA-1 by default.
+pub const max_iterations = 1_000_000;
 
 /// The length of the keys and signatures of SHA-256, the longer of the two.
 pub const max_mac_length = 32;
@@ -215,7 +220,7 @@ pub const Conversation = struct {
 
     /// Reads server-first-message, "r=<nonce>,s=<salt>,i=<count>", and
     /// checks it: the nonce must extend the client's, and the count must be
-    /// 4096 or more. The salt comes from `gpa`: free it with
+    /// from 4096 to 1 000 000. The salt comes from `gpa`: free it with
     /// `Challenge.deinit`.
     pub fn challenge(c: *const Conversation, gpa: Allocator, server_first: []const u8, d: ?*Diagnostics) error{ AuthenticationFailed, OutOfMemory }!Challenge {
         var attributes = std.mem.splitScalar(u8, server_first, ',');
@@ -236,6 +241,7 @@ pub const Conversation = struct {
         const iterations = (if (valid_count) std.fmt.parseInt(u32, count_text, 10) catch null else null) orelse
             return fail(d, "the count of iterations of the server's first message of SCRAM is not a number", .{});
         if (iterations < min_iterations) return fail(d, "the server asks for {d} iterations of SCRAM, and 4096 is the least that is safe", .{iterations});
+        if (iterations > max_iterations) return fail(d, "the server asks for {d} iterations of SCRAM, and 1000000 is the most that the client runs: more would hold its thread for long", .{iterations});
         const salt = try decode(gpa, salt_text) orelse return fail(d, "the salt of the server's first message of SCRAM is not base64", .{});
         return .{ .nonce = full_nonce, .salt = salt, .iterations = iterations };
     }
@@ -435,6 +441,16 @@ test "the server's nonce must extend the client's, and the server must ask for 4
     try expectRefused("r=ab,s=c2FsdA==,i=4096", foreign);
     try expectRefused("r=abcdef,s=c2FsdA==,i=4095", "the server asks for 4095 iterations of SCRAM, and 4096 is the least that is safe");
     try expectRefused("r=abcdef,s=c2FsdA==,i=0", "the server asks for 0 iterations of SCRAM, and 4096 is the least that is safe");
+}
+
+test "the server may ask for 1 000 000 iterations at most: more would hold a thread of the client in PBKDF2 for long" {
+    try expectRefused("r=abcdef,s=c2FsdA==,i=1000001", "the server asks for 1000001 iterations of SCRAM, and 1000000 is the most that the client runs: more would hold its thread for long");
+    try expectRefused("r=abcdef,s=c2FsdA==,i=4294967295", "the server asks for 4294967295 iterations of SCRAM, and 1000000 is the most that the client runs: more would hold its thread for long");
+    var c: Conversation = try .startWithNonce(testing.allocator, .scram_sha_256, "user", "abc");
+    defer c.deinit();
+    const ch = try c.challenge(testing.allocator, "r=abcdef,s=c2FsdA==,i=1000000", null);
+    defer ch.deinit(testing.allocator);
+    try testing.expectEqual(@as(u32, max_iterations), ch.iterations);
 }
 
 test "a first message of the server that breaks SCRAM is refused with what is wrong" {

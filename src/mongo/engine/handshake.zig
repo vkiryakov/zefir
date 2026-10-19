@@ -124,7 +124,8 @@ pub const Error = error{
     /// SCRAM-SHA-256 cannot take the password.
     Unsupported,
     /// The server refused the user, or broke SCRAM: a nonce that is not
-    /// the client's, fewer than 4096 iterations, a wrong signature.
+    /// the client's, fewer than 4096 iterations or more than 1 000 000, a
+    /// wrong signature.
     AuthenticationFailed,
     OutOfMemory,
     /// The task was canceled, and stays canceled.
