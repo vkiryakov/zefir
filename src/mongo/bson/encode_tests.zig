@@ -151,8 +151,8 @@ test "documents and the special types are written as they are" {
     defer owned.deinit();
     try expectField(named("document"), owned);
     try expectField(named("ObjectId"), bson.ObjectId{ .bytes = vectors.object_id });
-    try expectField(named("datetime with milliseconds"), bson.DateTime{ .milliseconds = 1356351330501 });
-    try expectField(named("timestamp"), bson.Timestamp{ .seconds = 123456789, .increment = 42 });
+    try expectField(named("datetime with milliseconds"), bson.DateTime{ .milliseconds = 2231982819287 });
+    try expectField(named("timestamp"), bson.Timestamp{ .seconds = 2355942023, .increment = 105 });
     try expectField(named("binary"), bson.Binary{ .subtype = .generic, .bytes = &.{ 1, 2, 3 } });
     try expectField(named("Decimal128"), bson.Decimal128{ .bytes = hex("0f000000000000000000000000003e30").* });
     try expectField(named("regular expression"), bson.Regex{ .pattern = "^a.c", .options = "mi" });

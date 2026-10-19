@@ -9,20 +9,20 @@ const ObjectId = bson.ObjectId;
 
 test "an ObjectId prints as 24 hex digits and parses back" {
     const id: ObjectId = .{ .bytes = vectors.object_id };
-    try testing.expectFmt("56e1fc72e0c917e9c4714161", "{f}", .{id});
-    try testing.expectEqual(id, try ObjectId.parseHex("56e1fc72e0c917e9c4714161"));
-    try testing.expectEqual(id, try ObjectId.parseHex("56E1FC72E0C917E9C4714161"));
+    try testing.expectFmt("eef732123cc60d97791de0cf", "{f}", .{id});
+    try testing.expectEqual(id, try ObjectId.parseHex("eef732123cc60d97791de0cf"));
+    try testing.expectEqual(id, try ObjectId.parseHex("EEF732123CC60D97791DE0CF"));
 }
 
 test "parseHex refuses anything but 24 hex digits" {
     for ([_][]const u8{
         "",
-        "56e1fc72e0c917e9c471416",
-        "56e1fc72e0c917e9c47141610",
-        "56e1fc72e0c917e9c471416g",
-        "56e1fc72-0c917e9c4714161",
-        " 56e1fc72e0c917e9c471416",
-        "56e1fc72e0c917e9c4714161\x00",
+        "eef732123cc60d97791de0c",
+        "eef732123cc60d97791de0cf0",
+        "eef732123cc60d97791de0cg",
+        "eef73212-cc60d97791de0cf",
+        " eef732123cc60d97791de0c",
+        "eef732123cc60d97791de0cf\x00",
     }) |text| {
         errdefer std.debug.print("text: \"{s}\"\n", .{text});
         try testing.expectError(error.InvalidObjectId, ObjectId.parseHex(text));
@@ -31,7 +31,7 @@ test "parseHex refuses anything but 24 hex digits" {
 
 test "the timestamp of an ObjectId is the seconds in its first 4 bytes" {
     const id: ObjectId = .{ .bytes = vectors.object_id };
-    try testing.expectEqual(1457650802, id.timestamp());
+    try testing.expectEqual(4009177618, id.timestamp());
 }
 
 test "a generated ObjectId holds the time, the generator's random bytes and a counter" {

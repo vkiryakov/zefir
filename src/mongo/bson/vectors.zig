@@ -1,6 +1,9 @@
 //! Test vectors of `mongo.bson`, written for zefir from the BSON spec
-//! (https://bsonspec.org/spec.html). The bson-corpus of
-//! mongodb/specifications is not used: its license does not fit zefir.
+//! (https://bsonspec.org/spec.html). Nothing here comes from the
+//! bson-corpus of mongodb/specifications, whose license does not fit
+//! zefir: the ObjectId, the UUID, the date, the timestamp and the bytes of
+//! binary data are values picked at random for zefir, and the others are
+//! the edges of their types.
 //!
 //! `valid` holds a document {"a": value} for every BSON type, with the
 //! value it reads back as and its Relaxed Extended JSON; `broken` holds
@@ -21,8 +24,8 @@ pub const Vector = struct {
     json: []const u8,
 };
 
-pub const object_id = hex("56e1fc72e0c917e9c4714161").*;
-const uuid = hex("73ffd26444b34c6990e8e7d1dfc035d4");
+pub const object_id = hex("eef732123cc60d97791de0cf").*;
+const uuid = hex("ea88a89b47fd4a5da835d0ec019c5a83");
 
 pub const valid = [_]Vector{
     .{ .name = "double 1.0", .bson = hex("10000000 01 6100 000000000000f03f 00"), .value = .{ .double = 1.0 }, .json = "{\"a\":1.0}" },
@@ -46,17 +49,17 @@ pub const valid = [_]Vector{
     },
     .{ .name = "empty array", .bson = hex("0d000000 04 6100 05000000 00 00"), .value = .{ .array = .{ .bytes = hex("05000000 00") } }, .json = "{\"a\":[]}" },
     .{ .name = "binary", .bson = hex("10000000 05 6100 03000000 00 010203 00"), .value = .{ .binary = .{ .subtype = .generic, .bytes = &.{ 1, 2, 3 } } }, .json = "{\"a\":{\"$binary\":{\"base64\":\"AQID\",\"subType\":\"00\"}}}" },
-    .{ .name = "binary UUID", .bson = hex("1d000000 05 6100 10000000 04 73ffd26444b34c6990e8e7d1dfc035d4 00"), .value = .{ .binary = .{ .subtype = .uuid, .bytes = uuid } }, .json = "{\"a\":{\"$binary\":{\"base64\":\"c//SZESzTGmQ6OfR38A11A==\",\"subType\":\"04\"}}}" },
+    .{ .name = "binary UUID", .bson = hex("1d000000 05 6100 10000000 04 ea88a89b47fd4a5da835d0ec019c5a83 00"), .value = .{ .binary = .{ .subtype = .uuid, .bytes = uuid } }, .json = "{\"a\":{\"$binary\":{\"base64\":\"6oiom0f9Sl2oNdDsAZxagw==\",\"subType\":\"04\"}}}" },
     // The old binary subtype keeps a second length inside the data; the
     // value is the data after it.
-    .{ .name = "binary of the old subtype", .bson = hex("13000000 05 6100 06000000 02 02000000 ffff 00"), .value = .{ .binary = .{ .subtype = .binary_old, .bytes = &.{ 0xff, 0xff } } }, .json = "{\"a\":{\"$binary\":{\"base64\":\"//8=\",\"subType\":\"02\"}}}" },
+    .{ .name = "binary of the old subtype", .bson = hex("14000000 05 6100 07000000 02 03000000 1c49f5 00"), .value = .{ .binary = .{ .subtype = .binary_old, .bytes = &.{ 0x1c, 0x49, 0xf5 } } }, .json = "{\"a\":{\"$binary\":{\"base64\":\"HEn1\",\"subType\":\"02\"}}}" },
     .{ .name = "empty user-defined binary", .bson = hex("0d000000 05 6100 00000000 80 00"), .value = .{ .binary = .{ .subtype = .user_defined, .bytes = "" } }, .json = "{\"a\":{\"$binary\":{\"base64\":\"\",\"subType\":\"80\"}}}" },
     .{ .name = "undefined", .bson = hex("08000000 06 6100 00"), .value = .undefined, .json = "{\"a\":{\"$undefined\":true}}" },
-    .{ .name = "ObjectId", .bson = hex("14000000 07 6100 56e1fc72e0c917e9c4714161 00"), .value = .{ .object_id = .{ .bytes = object_id } }, .json = "{\"a\":{\"$oid\":\"56e1fc72e0c917e9c4714161\"}}" },
+    .{ .name = "ObjectId", .bson = hex("14000000 07 6100 eef732123cc60d97791de0cf 00"), .value = .{ .object_id = .{ .bytes = object_id } }, .json = "{\"a\":{\"$oid\":\"eef732123cc60d97791de0cf\"}}" },
     .{ .name = "true", .bson = hex("09000000 08 6100 01 00"), .value = .{ .boolean = true }, .json = "{\"a\":true}" },
     .{ .name = "false", .bson = hex("09000000 08 6100 00 00"), .value = .{ .boolean = false }, .json = "{\"a\":false}" },
     .{ .name = "datetime at the epoch", .bson = hex("10000000 09 6100 0000000000000000 00"), .value = .{ .date_time = .{ .milliseconds = 0 } }, .json = "{\"a\":{\"$date\":\"1970-01-01T00:00:00Z\"}}" },
-    .{ .name = "datetime with milliseconds", .bson = hex("10000000 09 6100 c5d8d6cc3b010000 00"), .value = .{ .date_time = .{ .milliseconds = 1356351330501 } }, .json = "{\"a\":{\"$date\":\"2012-12-24T12:15:30.501Z\"}}" },
+    .{ .name = "datetime with milliseconds", .bson = hex("10000000 09 6100 d7078bac07020000 00"), .value = .{ .date_time = .{ .milliseconds = 2231982819287 } }, .json = "{\"a\":{\"$date\":\"2040-09-23T03:13:39.287Z\"}}" },
     .{ .name = "datetime before the epoch", .bson = hex("10000000 09 6100 ffffffffffffffff 00"), .value = .{ .date_time = .{ .milliseconds = -1 } }, .json = "{\"a\":{\"$date\":{\"$numberLong\":\"-1\"}}}" },
     .{ .name = "datetime in the year 10000", .bson = hex("10000000 09 6100 00dc1fd277e60000 00"), .value = .{ .date_time = .{ .milliseconds = 253402300800000 } }, .json = "{\"a\":{\"$date\":{\"$numberLong\":\"253402300800000\"}}}" },
     .{ .name = "null", .bson = hex("08000000 0a 6100 00"), .value = .null, .json = "{\"a\":null}" },
@@ -64,9 +67,9 @@ pub const valid = [_]Vector{
     .{ .name = "empty regular expression", .bson = hex("0a000000 0b 6100 00 00 00"), .value = .{ .regex = .{ .pattern = "", .options = "" } }, .json = "{\"a\":{\"$regularExpression\":{\"pattern\":\"\",\"options\":\"\"}}}" },
     .{
         .name = "DBPointer",
-        .bson = hex("1a000000 0c 6100 02000000 6200 56e1fc72e0c917e9c4714161 00"),
-        .value = .{ .db_pointer = .{ .namespace = "b", .id = .{ .bytes = object_id } } },
-        .json = "{\"a\":{\"$dbPointer\":{\"$ref\":\"b\",\"$id\":{\"$oid\":\"56e1fc72e0c917e9c4714161\"}}}}",
+        .bson = hex("24000000 0c 6100 0c000000 73686f702e6f726465727300 eef732123cc60d97791de0cf 00"),
+        .value = .{ .db_pointer = .{ .namespace = "shop.orders", .id = .{ .bytes = object_id } } },
+        .json = "{\"a\":{\"$dbPointer\":{\"$ref\":\"shop.orders\",\"$id\":{\"$oid\":\"eef732123cc60d97791de0cf\"}}}}",
     },
     .{ .name = "JavaScript", .bson = hex("10000000 0d 6100 04000000 783d3100 00"), .value = .{ .javascript = "x=1" }, .json = "{\"a\":{\"$code\":\"x=1\"}}" },
     .{ .name = "symbol", .bson = hex("0e000000 0e 6100 02000000 7300 00"), .value = .{ .symbol = "s" }, .json = "{\"a\":{\"$symbol\":\"s\"}}" },
@@ -80,7 +83,7 @@ pub const valid = [_]Vector{
     .{ .name = "smallest int32", .bson = hex("0c000000 10 6100 00000080 00"), .value = .{ .int32 = std.math.minInt(i32) }, .json = "{\"a\":-2147483648}" },
     .{ .name = "largest int32", .bson = hex("0c000000 10 6100 ffffff7f 00"), .value = .{ .int32 = std.math.maxInt(i32) }, .json = "{\"a\":2147483647}" },
     // The increment comes first: the low 32 bits of the uint64.
-    .{ .name = "timestamp", .bson = hex("10000000 11 6100 2a000000 15cd5b07 00"), .value = .{ .timestamp = .{ .seconds = 123456789, .increment = 42 } }, .json = "{\"a\":{\"$timestamp\":{\"t\":123456789,\"i\":42}}}" },
+    .{ .name = "timestamp", .bson = hex("10000000 11 6100 69000000 87d26c8c 00"), .value = .{ .timestamp = .{ .seconds = 2355942023, .increment = 105 } }, .json = "{\"a\":{\"$timestamp\":{\"t\":2355942023,\"i\":105}}}" },
     .{ .name = "int64", .bson = hex("10000000 12 6100 0100000000000000 00"), .value = .{ .int64 = 1 }, .json = "{\"a\":1}" },
     .{ .name = "int64 beyond int32", .bson = hex("10000000 12 6100 005ed0b200000000 00"), .value = .{ .int64 = 3_000_000_000 }, .json = "{\"a\":3000000000}" },
     .{ .name = "largest int64", .bson = hex("10000000 12 6100 ffffffffffffff7f 00"), .value = .{ .int64 = std.math.maxInt(i64) }, .json = "{\"a\":9223372036854775807}" },
@@ -107,7 +110,7 @@ pub const reply = hex("74000000" ++
     "03 637572736f7200 5b000000" ++
     "04 6669727374426174636800 2c000000" ++
     "03 3000 24000000" ++
-    "07 5f696400 56e1fc72e0c917e9c4714161" ++
+    "07 5f696400 eef732123cc60d97791de0cf" ++
     "02 6e616d6500 04000000 416e6e00" ++
     "00" ++ // the end of {"_id", "name"}
     "00" ++ // the end of firstBatch
@@ -137,7 +140,7 @@ pub const broken = [_]Broken{
     .{ .name = "key without its 0", .bytes = hex("08000000 0a 6162 00"), .caught_by = .validate },
     .{ .name = "int32 cut short", .bytes = hex("0b000000 10 6100 010000 00"), .caught_by = .validate },
     .{ .name = "double cut short", .bytes = hex("0f000000 01 6100 00000000000000 00"), .caught_by = .validate },
-    .{ .name = "ObjectId cut short", .bytes = hex("13000000 07 6100 56e1fc72e0c917e9c47141 00"), .caught_by = .validate },
+    .{ .name = "ObjectId cut short", .bytes = hex("13000000 07 6100 eef732123cc60d97791de0 00"), .caught_by = .validate },
     .{ .name = "Decimal128 cut short", .bytes = hex("17000000 13 6100 0f000000000000000000000000003e 00"), .caught_by = .validate },
     .{ .name = "string of length 0", .bytes = hex("0d000000 02 6100 00000000 00 00"), .caught_by = .validate },
     .{ .name = "string of negative length", .bytes = hex("0d000000 02 6100 ffffffff 00 00"), .caught_by = .validate },
@@ -152,13 +155,13 @@ pub const broken = [_]Broken{
     .{ .name = "binary of negative length", .bytes = hex("0d000000 05 6100 ffffffff 00 00"), .caught_by = .validate },
     .{ .name = "binary longer than the document", .bytes = hex("10000000 05 6100 04000000 00 010203 00"), .caught_by = .validate },
     .{ .name = "binary without its subtype", .bytes = hex("0c000000 05 6100 00000000 00"), .caught_by = .validate },
-    .{ .name = "old binary with a wrong inner length", .bytes = hex("13000000 05 6100 06000000 02 03000000 ffff 00"), .caught_by = .validate },
+    .{ .name = "old binary with a wrong inner length", .bytes = hex("14000000 05 6100 07000000 02 04000000 1c49f5 00"), .caught_by = .validate },
     .{ .name = "old binary too short for its inner length", .bytes = hex("10000000 05 6100 03000000 02 020000 00"), .caught_by = .validate },
     .{ .name = "boolean 2", .bytes = hex("09000000 08 6100 02 00"), .caught_by = .validate },
     .{ .name = "regular expression without the 0 of its pattern", .bytes = hex("0a000000 0b 6100 5e61 00"), .caught_by = .validate },
     .{ .name = "regular expression without its options", .bytes = hex("0b000000 0b 6100 5e6100 00"), .caught_by = .validate },
-    .{ .name = "DBPointer cut short", .bytes = hex("19000000 0c 6100 02000000 6200 56e1fc72e0c917e9c47141 00"), .caught_by = .validate },
-    .{ .name = "DBPointer with a broken string", .bytes = hex("1a000000 0c 6100 00000000 6200 56e1fc72e0c917e9c4714161 00"), .caught_by = .validate },
+    .{ .name = "DBPointer cut short", .bytes = hex("23000000 0c 6100 0c000000 73686f702e6f726465727300 eef732123cc60d97791de0 00"), .caught_by = .validate },
+    .{ .name = "DBPointer with a broken string", .bytes = hex("24000000 0c 6100 00000000 73686f702e6f726465727300 eef732123cc60d97791de0cf 00"), .caught_by = .validate },
     .{ .name = "JavaScript of length 0", .bytes = hex("0d000000 0d 6100 00000000 00 00"), .caught_by = .validate },
     .{ .name = "symbol without its 0", .bytes = hex("0e000000 0e 6100 02000000 7373 00"), .caught_by = .validate },
     .{ .name = "code with scope shorter than 14 bytes", .bytes = hex("16000000 0f 6100 0d000000 01000000 00 05000000 00 00"), .caught_by = .validate },

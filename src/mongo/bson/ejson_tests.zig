@@ -17,7 +17,7 @@ test "every vector prints as its Relaxed Extended JSON" {
 
 test "the reply and the empty document print with their nesting" {
     try testing.expectFmt(
-        "{\"cursor\":{\"firstBatch\":[{\"_id\":{\"$oid\":\"56e1fc72e0c917e9c4714161\"},\"name\":\"Ann\"}]," ++
+        "{\"cursor\":{\"firstBatch\":[{\"_id\":{\"$oid\":\"eef732123cc60d97791de0cf\"},\"name\":\"Ann\"}]," ++
             "\"id\":0,\"ns\":\"app.users\"},\"ok\":1.0}",
         "{f}",
         .{try RawDocument.init(vectors.reply)},

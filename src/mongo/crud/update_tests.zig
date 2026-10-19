@@ -187,7 +187,7 @@ test "the options of an update: upsert, arrayFilters, collation and hint in the 
 
 test "an upsert reports the _id that the server made, and matched without it" {
     const io = testing.io;
-    const made = try bson.ObjectId.parseHex("56e1fc72e0c917e9c4714161");
+    const made = try bson.ObjectId.parseHex("eef732123cc60d97791de0cf");
     const reply = try bson.encode(testing.allocator, .{ .n = 1, .nModified = 0, .upserted = .{.{ .index = 0, ._id = made }}, .ok = 1.0 }, .{});
     defer reply.deinit();
     var f: Fixture = .{};

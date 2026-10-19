@@ -209,7 +209,7 @@ test "a struct takes a document, and nothing else" {
     try expectFailure(struct { a: struct { b: i32 } }, literal(.{ .a = .{ 1, 2 } }), .{}, error.WrongType, "a");
     try expectFailure(struct { a: struct { b: i32 } }, literal(.{ .a = 1 }), .{}, error.WrongType, "a");
     try expectFailure(struct { a: bson.RawDocument }, literal(.{ .a = .{ 1, 2 } }), .{}, error.WrongType, "a");
-    try expectFailure(struct { a: bson.ObjectId }, literal(.{ .a = "56e1fc72e0c917e9c4714161" }), .{}, error.WrongType, "a");
+    try expectFailure(struct { a: bson.ObjectId }, literal(.{ .a = "eef732123cc60d97791de0cf" }), .{}, error.WrongType, "a");
 }
 
 const Special = struct {
@@ -230,8 +230,8 @@ const special: Special = .{
     .raw = .{ .bytes = vectors.reply },
     .value = .{ .string = "v" },
     .id = .{ .bytes = vectors.object_id },
-    .at = .{ .milliseconds = 1356351330501 },
-    .stamp = .{ .seconds = 123456789, .increment = 42 },
+    .at = .{ .milliseconds = 2231982819287 },
+    .stamp = .{ .seconds = 2355942023, .increment = 105 },
     .data = .{ .subtype = .uuid, .bytes = &.{ 1, 2, 3 } },
     .number = .{ .bytes = hex("0f000000000000000000000000003e30").* },
     .pattern = .{ .pattern = "^a.c", .options = "im" },
@@ -275,7 +275,7 @@ test "every vector reads back into a Value, the deprecated types too, and into i
         }
     }
     const pointer = try bson.decode(struct { a: bson.DbPointer }, arena.allocator(), try .init(named("DBPointer")), .{});
-    try testing.expectEqualStrings("b", pointer.a.namespace);
+    try testing.expectEqualStrings("shop.orders", pointer.a.namespace);
     const code = try bson.decode(struct { a: bson.JavaScriptWithScope }, arena.allocator(), try .init(named("JavaScript with scope")), .{});
     try testing.expectEqualStrings("x", code.a.code);
     try testing.expectEqualSlices(u8, hex("0c000000 10 7800 01000000 00"), code.a.scope.bytes);
