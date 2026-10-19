@@ -12,6 +12,7 @@ const Diagnostics = mongo.Diagnostics;
 const Pool = @import("../engine/Pool.zig");
 const connect = @import("../engine/connect.zig");
 const time = @import("../engine/time.zig");
+const early_io = @import("../testing/early_io.zig");
 const within5s = @import("connection_tests.zig").within5s;
 
 /// A connection that is nothing but its entry in the pool.
@@ -373,8 +374,9 @@ fn failedOpening(io: Io) !void {
     try testing.expectEqual(@as(usize, 2), pool.counts(io).idle);
 }
 
-test "an idle connection past maxIdleTimeMS closes at check-out, and a broken one at check-in" {
-    try within5s(testing.io, perished, .{testing.io});
+test "an idle connection past maxIdleTimeMS closes at check-out, and a broken one at check-in, also where a sleep ends early" {
+    // The sleeps of std's Io on Windows may end a tick of its timer early.
+    for ([_]Io{ testing.io, early_io.io() }) |io| try within5s(testing.io, perished, .{io});
 }
 
 fn perished(io: Io) !void {
@@ -384,7 +386,7 @@ fn perished(io: Io) !void {
     opts.max_idle_time = .fromMilliseconds(30);
     try ready(io, &pool, &fakes, opts);
     defer closeAndDeinit(io, &pool);
-    try io.sleep(.fromMilliseconds(40), .awake);
+    try time.sleepUntil(io, .after(time.now(io), .fromMilliseconds(40)));
     const fresh = try pool.checkOut(io, fakes.opener(), within(io, 1000), null);
     try testing.expectEqual(@as(u32, 2), FakeConn.of(fresh).id);
     try testing.expectEqual(@as(u32, 1), fakes.destroyed.load(.acquire));
