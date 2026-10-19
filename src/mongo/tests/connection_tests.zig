@@ -1,7 +1,7 @@
 //! Protocol tests of `engine/Connection.zig`: one connection against the
 //! server's side played by the test, `mongo.testing.FakeServer.Peer`, over
-//! loopback. Every test runs under a time limit of 5 s, so that a mistake
-//! fails it instead of hanging it.
+//! loopback. Every test runs under a time limit of 5 s, the one that loops
+//! in each round, so that a mistake fails it instead of hanging it.
 
 const std = @import("std");
 const Io = std.Io;
@@ -237,6 +237,31 @@ fn closedByServer(io: Io) !void {
     try testing.expectEqualStrings(try std.fmt.bufPrint(&buffer, "the server at 127.0.0.1:{d} closed the connection", .{FakeServer.port(&p.listener)}), d.message());
 }
 
+test "an error of the socket that no cut caused is ConnectionLost, error.Unexpected too, and the diagnostics keep it" {
+    var windows: WindowsLike = undefined;
+    try within5s(testing.io, brokenUnexpectedly, .{windows.io()});
+}
+
+/// The client on an `Io` that reads the end of the stream, which the
+/// server makes, as error.Unexpected.
+fn brokenUnexpectedly(io: Io) !void {
+    var p: Pair = undefined;
+    try p.open(io);
+    defer {
+        p.conn.destroy();
+        p.listener.deinit(io);
+    }
+    var server = try io.concurrent(swallowAndClose, .{&p.peer});
+    defer server.await(io) catch {};
+    var d: Diagnostics = .{};
+    try testing.expectError(error.ConnectionLost, p.conn.exchange(ping, testing.allocator, null, &d));
+    try testing.expect(!p.conn.usable);
+    try testing.expectEqual(Diagnostics.Phase.wait, d.phase.?);
+    try testing.expectEqual(@as(?anyerror, error.Unexpected), d.cause);
+    var buffer: [64]u8 = undefined;
+    try testing.expectEqualStrings(try std.fmt.bufPrint(&buffer, "the connection to 127.0.0.1:{d} broke: Unexpected", .{FakeServer.port(&p.listener)}), d.message());
+}
+
 test "the deadline passing while the reply is out is Timeout, and not before it" {
     try within5s(testing.io, replyTooLate, .{testing.io});
 }
@@ -257,27 +282,138 @@ fn replyTooLate(io: Io) !void {
 
 test "an exchange cut from another task is ConnectionLost, also where the system says error.Unexpected" {
     var windows: WindowsLike = undefined;
-    for ([_]Io{ testing.io, windows.io() }) |io| try within5s(testing.io, cutInFlight, .{io});
+    for ([_]Io{ testing.io, windows.io() }) |io| try within5s(testing.io, cutInFlight, .{ io, null });
 }
+
+test "a cut while the reply is out fails in the wait, 1000 times, also where the write completes late" {
+    for (0..1000) |_| {
+        var windows: WindowsLike = undefined;
+        try within5s(testing.io, cutInFlight, .{ windows.io(), .fromMilliseconds(1) });
+    }
+}
+
+test "a cut that overtakes a write gone out, whose completion its task's cancelation loses, is ConnectionLost while the command goes out" {
+    var windows: WindowsLike = undefined;
+    try within5s(testing.io, cutOvertakesWrite, .{windows.io()});
+}
+
+/// `base`, watching the stream of the connection that `watch` names: a
+/// read on it sets `reading` as it begins, and a write on it that went out
+/// completes `late` after, unless the cancelation of its task comes first,
+/// which makes it `error.Canceled`, whatever it wrote. That is how std's
+/// `Io.Threaded` on Windows reports an operation whose completion it has
+/// not taken yet when the cancelation comes. It points into itself: `io`
+/// it in place.
+const Watched = struct {
+    vtable: Io.VTable,
+
+    // The calls of the table get the userdata of `base`, so the state is
+    // the type's: one at a time.
+    var base: Io = undefined;
+    var socket: ?net.Socket.Handle = null;
+    var late: ?Io.Duration = null;
+    var reading: Io.Event = .unset;
+
+    fn io(w: *Watched, b: Io, l: ?Io.Duration) Io {
+        w.vtable = b.vtable.*;
+        w.vtable.operate = operate;
+        w.vtable.batchAwaitConcurrent = batchAwaitConcurrent;
+        base = b;
+        socket = null;
+        late = l;
+        reading = .unset;
+        return .{ .userdata = b.userdata, .vtable = &w.vtable };
+    }
+
+    fn watch(conn: *Connection) void {
+        socket = conn.stream.stream.socket.handle;
+    }
+
+    fn watched(handle: net.Socket.Handle) bool {
+        return if (socket) |s| s == handle else false;
+    }
+
+    fn begins(operation: Io.Operation) void {
+        switch (operation) {
+            .net_read => |o| if (watched(o.socket_handle)) reading.set(testing.io),
+            else => {},
+        }
+    }
+
+    fn operate(userdata: ?*anyopaque, operation: Io.Operation) Io.Cancelable!Io.Operation.Result {
+        begins(operation);
+        const result = try base.vtable.operate(userdata, operation);
+        switch (operation) {
+            .net_write => |o| if (watched(o.socket_handle)) if (late) |delay| {
+                testing.io.sleep(delay, .awake) catch return error.Canceled;
+            },
+            else => {},
+        }
+        return result;
+    }
+
+    /// Where a timed operation goes, through `io.operateTimeout`.
+    fn batchAwaitConcurrent(userdata: ?*anyopaque, batch: *Io.Batch, timeout: Io.Timeout) Io.Batch.AwaitConcurrentError!void {
+        var index = batch.submitted.head;
+        while (index != .none) {
+            const submission = &batch.storage[index.toIndex()].submission;
+            begins(submission.operation);
+            index = submission.node.next;
+        }
+        return base.vtable.batchAwaitConcurrent(userdata, batch, timeout);
+    }
+};
 
 fn exchangeCut(conn: *Connection, d: *Diagnostics) !void {
     try testing.expectError(error.ConnectionLost, conn.exchange(ping, testing.allocator, null, d));
 }
 
-fn cutInFlight(io: Io) !void {
+/// The client on `base`, whose writes complete `late` after they went
+/// out; null: at once.
+fn cutInFlight(base: Io, late: ?Io.Duration) !void {
+    var watching: Watched = undefined;
+    const io = watching.io(base, late);
     var p: Pair = undefined;
     try p.open(io);
     defer p.close(io);
+    Watched.watch(p.conn);
     var d: Diagnostics = .{};
     var client = try io.concurrent(exchangeCut, .{ p.conn, &d });
-    // The command is out once the server has read it.
     const swallowed = swallow(&p.peer);
+    // The reply is out once the server has the command and the client
+    // reads: its write is done. Before the read the cut may overtake the
+    // write, as `cutOvertakesWrite` does.
+    const give_up: core.Deadline = .after(time.now(testing.io), .fromSeconds(4));
+    Watched.reading.waitTimeout(testing.io, give_up.toTimeout()) catch {};
     p.conn.cut(io);
     try client.await(io);
     try swallowed;
     try testing.expect(!p.conn.usable);
     try testing.expectEqualStrings("the exchange was cut", d.message());
     try testing.expectEqual(Diagnostics.Phase.wait, d.phase.?);
+}
+
+fn cutOvertakesWrite(base: Io) !void {
+    var watching: Watched = undefined;
+    // Later than the cut.
+    const io = watching.io(base, .fromSeconds(4));
+    var p: Pair = undefined;
+    try p.open(io);
+    defer p.close(io);
+    Watched.watch(p.conn);
+    var d: Diagnostics = .{};
+    var client = try io.concurrent(exchangeCut, .{ p.conn, &d });
+    // The server has the command, and the client's write has not
+    // completed.
+    const swallowed = swallow(&p.peer);
+    p.conn.cut(io);
+    try client.await(io);
+    try swallowed;
+    try testing.expect(!p.conn.usable);
+    try testing.expectEqualStrings("the exchange was cut", d.message());
+    // What the write did is unknown, so the cut is the send's; the
+    // command may have run all the same, as ConnectionLost says.
+    try testing.expectEqual(Diagnostics.Phase.send, d.phase.?);
 }
 
 test "canceling the task while the reply is out is Interrupted, and the task stays canceled" {

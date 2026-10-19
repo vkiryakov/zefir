@@ -135,7 +135,11 @@ fn operate(ds: *DeadlineStream, operation: Io.Operation) Error!Io.Operation.Resu
 /// `error.Stopped`. An operation that moved bytes before its task could be
 /// stopped took place, and the cut fails the next one; one that the cut
 /// ended, at the end of the stream or with an error, fails with the cut's
-/// error. `error.Canceled` is the caller's own cancelation.
+/// error. So does one that the `Io` reports canceled although it moved
+/// bytes, as std's on Windows does when the cancelation comes before it
+/// has taken the operation's completion: a write may have reached the
+/// server then and still fail. `error.Canceled` is the caller's own
+/// cancelation.
 fn operateInTask(ds: *DeadlineStream, operation: Io.Operation) Error!Io.Operation.Result {
     var outcome: ?(Io.Cancelable!Io.Operation.Result) = null;
     return race.race(ds.io, .{ .deadline = ds.deadline, .stop = &ds.cut_event }, operateUntimed, .{ ds.io, operation, &outcome }, forget, .{ .context = ds, .function = abort }) catch |err| switch (err) {
