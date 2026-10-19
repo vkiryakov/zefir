@@ -60,7 +60,7 @@ Take any module on its own, or all the finished ones at once through the umbrell
 | `zefir-zmq`                        | ZeroMQ / ZMTP integration                                                                                  | 📋 Planned                                               |
 | `zefir-grpc`                       | gRPC interoperability                                                                                      | 📋 Planned                                               |
 | **Database & Persistence**         |                                                                                                            |                                                         |
-| `zefir-mongo`                      | Async MongoDB driver: BSON, connection pooling, transactions                                               | 📋 Planned                                               |
+| `zefir-mongo`                      | Async MongoDB driver on `std.Io`: standalone mongod, SCRAM, pooling, BSON, collections; no TLS yet         | ✅ Done · [docs](src/mongo/examples/README.md)           |
 | `zefir-odm`                        | MongoDB ODM (Object Data Mapper): typed schemas, models, CRUD, aggregation                                 | 📋 Planned                                               |
 | `zefir-cache`                      | L1/L2 caching, TTL, Redis, invalidation, synchronization                                                   | 📋 Planned                                               |
 | **Security**                       |                                                                                                            |                                                         |
