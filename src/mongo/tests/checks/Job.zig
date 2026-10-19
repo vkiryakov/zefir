@@ -336,6 +336,21 @@ pub fn live(job: *Job) Error!Client {
     return &job.client;
 }
 
+/// As `live`, with `app_name` as the client's appName: a fail point that
+/// names it acts on the connections of this client alone.
+pub fn liveAs(job: *Job, app_name: []const u8) Error!Client {
+    try job.connect(try withAppName(job.arena, job.options.live.?.uri, app_name));
+    return &job.client;
+}
+
+/// `uri` with the option `appName=app_name`, in `arena`.
+fn withAppName(arena: Allocator, uri: []const u8, app_name: []const u8) Allocator.Error![]const u8 {
+    const host = if (std.mem.find(u8, uri, "://")) |at| at + 3 else 0;
+    // The options come after the path, and the path after the host.
+    const separator: []const u8 = if (std.mem.findScalar(u8, uri, '?') != null) "&" else if (std.mem.findScalar(u8, uri[host..], '/') != null) "?" else "/?";
+    return std.fmt.allocPrint(arena, "{s}{s}appName={s}", .{ uri, separator, app_name });
+}
+
 /// A fresh client of `uri`, connected; its memory is counted.
 fn connect(job: *Job, uri: []const u8) Error!void {
     var d: mongo.Diagnostics = .{};
@@ -482,4 +497,15 @@ test "scripted stops the server of a check whose client cannot connect to it, an
     try testing.expect(!job.up);
     try testing.expectStringStartsWith(job.failure.?, "connect to mongodb://127.0.0.1:");
     try testing.expect(std.mem.find(u8, job.failure.?, "returned error.Unsupported") != null);
+}
+
+test "withAppName adds appName to a connection string after its '?', its path or its host" {
+    const testing = std.testing;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try testing.expectEqualStrings("mongodb://127.0.0.1:27117/?appName=l7", try withAppName(a, "mongodb://127.0.0.1:27117", "l7"));
+    try testing.expectEqualStrings("mongodb://db/?appName=l7", try withAppName(a, "mongodb://db/", "l7"));
+    try testing.expectEqualStrings("mongodb://db/app?appName=l7", try withAppName(a, "mongodb://db/app", "l7"));
+    try testing.expectEqualStrings("mongodb://db/?maxPoolSize=2&appName=l7", try withAppName(a, "mongodb://db/?maxPoolSize=2", "l7"));
 }

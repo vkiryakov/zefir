@@ -53,7 +53,9 @@ pub const Options = struct {
         uri: []const u8,
         /// Runs L7–L10, which configure the fail point `failCommand`: the
         /// mongod must run with `enableTestCommands=1`, and nothing else
-        /// may use it meanwhile. Without it, they are skipped.
+        /// may configure it meanwhile. Their fail points name the appName
+        /// of their own client, so that no other client sees them: `uri`
+        /// must not set appName. Without it, they are skipped.
         fail_points: bool = false,
     };
 };

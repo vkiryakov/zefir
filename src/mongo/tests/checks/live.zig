@@ -1,7 +1,8 @@
 //! The checks of layer L, each against the live mongod of `Options.live`:
 //! L1–L10 of the design of zefir-mongo. They write to the database
 //! "zefir_checks", each in a collection of its own, and drop it; L7–L10
-//! configure the fail point `failCommand` for one command and turn it off.
+//! configure the fail point `failCommand` for one command of their own
+//! client, which they name by its appName, and turn it off.
 
 const std = @import("std");
 const Io = std.Io;
@@ -354,7 +355,8 @@ pub fn l6(job: *Job) Job.Error!void {
     try job.expect(try countOf(job, client, "l6") == 9, "after the inserts the collection does not hold 9 documents", .{});
 }
 
-/// Configures `failCommand` to fail the next command it names, once.
+/// Configures `failCommand` to fail the next command it names, once; its
+/// `data` names the appName of the client of the check.
 fn failPoint(job: *Job, client: Client, data: anytype) Job.Error!void {
     const body = try job.encode(.{ .configureFailPoint = "failCommand", .mode = .{ .times = 1 }, .data = data });
     defer body.deinit();
@@ -371,10 +373,11 @@ fn failPointOff(job: *Job, client: Client) void {
 }
 
 pub fn l7(job: *Job) Job.Error!void {
-    const client = try job.live();
+    const app = "zefir-checks-l7";
+    const client = try job.liveAs(app);
     defer job.end();
     defer failPointOff(job, client);
-    try failPoint(job, client, .{ .failCommands = .{"count"}, .closeConnection = true });
+    try failPoint(job, client, .{ .failCommands = .{"count"}, .appName = app, .closeConnection = true });
     const body = bson.literal(.{ .count = "l7" });
     try job.expectError(client.runCommand(job.io, op(job), .{ .database = database, .body = body }, .{ .allocator = job.gpa }), error.ConnectionLost, "a command whose connection mongod closed");
     const next = try command(job, client, body, "the command after ConnectionLost");
@@ -382,12 +385,13 @@ pub fn l7(job: *Job) Job.Error!void {
 }
 
 pub fn l8(job: *Job) Job.Error!void {
-    const client = try job.live();
+    const app = "zefir-checks-l8";
+    const client = try job.liveAs(app);
     defer job.end();
     try drop(job, client, "l8");
     defer drop(job, client, "l8") catch {};
     defer failPointOff(job, client);
-    try failPoint(job, client, .{ .failCommands = .{"insert"}, .errorCode = 91, .errorLabels = .{"RetryableWriteError"} });
+    try failPoint(job, client, .{ .failCommands = .{"insert"}, .appName = app, .errorCode = 91, .errorLabels = .{"RetryableWriteError"} });
     var d: mongo.Diagnostics = .{};
     // Failed once: a retry would have gone through.
     try job.expectError(client.write(job.io, op(job), .{ .database = database, .kind = .insert, .body = bson.literal(.{ .insert = "l8" }), .items = ten[0..1] }, .{ .allocator = job.gpa, .diagnostics = &d }), error.CommandFailed, "an insert that mongod failed with 91 once");
@@ -400,10 +404,11 @@ pub fn l8(job: *Job) Job.Error!void {
 }
 
 pub fn l9(job: *Job) Job.Error!void {
-    const client = try job.live();
+    const app = "zefir-checks-l9";
+    const client = try job.liveAs(app);
     defer job.end();
     defer failPointOff(job, client);
-    try failPoint(job, client, .{ .failCommands = .{"find"}, .errorCode = 462, .errorLabels = .{ "SystemOverloadedError", "RetryableError" } });
+    try failPoint(job, client, .{ .failCommands = .{"find"}, .appName = app, .errorCode = 462, .errorLabels = .{ "SystemOverloadedError", "RetryableError" } });
     var d: mongo.Diagnostics = .{};
     const find: mongo.Command = .{ .database = database, .body = bson.literal(.{ .find = "l9" }) };
     try job.expectError(client.openCursor(job.io, op(job), find, .{ .diagnostics = &d }), error.CommandFailed, "a find that mongod failed with 462 once, which a retry would have passed");
@@ -416,16 +421,17 @@ pub fn l9(job: *Job) Job.Error!void {
 
 pub fn l10(job: *Job) Job.Error!void {
     const io = job.io;
-    const client = try job.live();
+    const app = "zefir-checks-l10";
+    const client = try job.liveAs(app);
     defer job.end();
     defer failPointOff(job, client);
-    try failPoint(job, client, .{ .failCommands = .{"find"}, .blockConnection = true, .blockTimeMS = @as(i32, @intCast(1000 * job.scale())) });
+    try failPoint(job, client, .{ .failCommands = .{"find"}, .appName = app, .blockConnection = true, .blockTimeMS = @as(i32, @intCast(1000 * job.scale())) });
     const deadline: core.Deadline = .after(Job.now(io), job.ms(300));
     try job.expectError(client.openCursor(io, .of(core.Context.root.withDeadline(deadline)), .{ .database = database, .body = bson.literal(.{ .find = "l10" }) }, .{}), error.Timeout, "a find that mongod held past the deadline");
     const overdue = deadline.expires.durationTo(Job.now(io));
     try job.expect(overdue.nanoseconds <= job.ms(500).nanoseconds, "Timeout came {d} ms after the deadline", .{overdue.toMilliseconds()});
 
-    try failPoint(job, client, .{ .failCommands = .{"count"}, .errorCode = 50 });
+    try failPoint(job, client, .{ .failCommands = .{"count"}, .appName = app, .errorCode = 50 });
     const body = bson.literal(.{ .count = "l10" });
     try job.expectError(client.runCommand(io, op(job), .{ .database = database, .body = body }, .{ .allocator = job.gpa }), error.Timeout, "a command that mongod failed with code 50");
     const next = try command(job, client, body, "the command after Timeout");
