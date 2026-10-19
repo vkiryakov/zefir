@@ -173,32 +173,40 @@ pub fn run(io: Io, gpa: Allocator, check: Check, options: Options) Error!void {
 
     var messages: std.heap.ArenaAllocator = .init(gpa);
     defer messages.deinit();
+    const why = (try runBody(io, gpa, messages.allocator(), bodyOf(check), options)) orelse return;
+    std.debug.print("{s} ({s}) failed: {s}\n", .{ check.label(), check.title(), why });
+    return error.CheckFailed;
+}
+
+/// What a check does, in its task.
+const Body = *const fn (job: *Job) Job.Error!void;
+
+/// Runs `body` as `run` runs a check: in a task of its own, on a job whose
+/// client allocator counts what it holds. Returns why the body failed, in
+/// `arena`, or null when it passed. The tests at the end of this file give
+/// it bodies that break the rules of a check.
+fn runBody(io: Io, gpa: Allocator, arena: Allocator, body: Body, options: Options) error{OutOfMemory}!?[]const u8 {
     var counting: Job.Counting = .{ .parent = gpa };
     var job: Job = .{
         .io = io,
         .gpa = gpa,
         .client_gpa = counting.allocator(),
-        .arena = messages.allocator(),
+        .arena = arena,
         .options = options,
     };
-    var task = io.concurrent(go, .{ &job, check }) catch
-        return failed(check, "no task for the check: io.concurrent returned error.ConcurrencyUnavailable; the checks need an std.Io with concurrency");
+    var task = io.concurrent(go, .{ &job, body }) catch
+        return "no task for the check: io.concurrent returned error.ConcurrencyUnavailable; the checks need an std.Io with concurrency";
     task.await(io);
     const leaked = counting.live.load(.acquire);
     if (leaked > 0) {
-        const leak = try std.fmt.allocPrint(job.arena, "{d} bytes in {d} allocation(s) were still held after the client's deinit", .{ counting.bytes.load(.acquire), leaked });
-        return failed(check, if (job.failure) |why| try std.fmt.allocPrint(job.arena, "{s}; {s}", .{ why, leak }) else leak);
+        const leak = try std.fmt.allocPrint(arena, "{d} bytes in {d} allocation(s) were still held after the client's deinit", .{ counting.bytes.load(.acquire), leaked });
+        return if (job.failure) |why| try std.fmt.allocPrint(arena, "{s}; {s}", .{ why, leak }) else leak;
     }
-    if (job.failure) |why| return failed(check, why);
+    return job.failure;
 }
 
-fn failed(check: Check, why: []const u8) error{CheckFailed} {
-    std.debug.print("{s} ({s}) failed: {s}\n", .{ check.label(), check.title(), why });
-    return error.CheckFailed;
-}
-
-fn go(job: *Job, check: Check) void {
-    runBody(job, check) catch |err| switch (err) {
+fn go(job: *Job, body: Body) void {
+    body(job) catch |err| switch (err) {
         error.CheckFailed => {},
         error.OutOfMemory => if (job.failure == null) {
             job.failure = "out of memory";
@@ -206,38 +214,38 @@ fn go(job: *Job, check: Check) void {
     };
 }
 
-fn runBody(job: *Job, check: Check) Job.Error!void {
+fn bodyOf(check: Check) Body {
     return switch (check) {
-        .s1 => scripted.s1(job),
-        .s2 => scripted.s2(job),
-        .s3 => scripted.s3(job),
-        .s4 => scripted.s4(job),
-        .s5 => scripted.s5(job),
-        .s6 => scripted.s6(job),
-        .s7 => scripted.s7(job),
-        .s8 => scripted.s8(job),
-        .s9 => scripted.s9(job),
-        .s10 => scripted.s10(job),
-        .s11 => scripted.s11(job),
-        .s12 => scripted.s12(job),
-        .s13 => scripted.s13(job),
-        .s14 => scripted.s14(job),
-        .s15 => scripted.s15(job),
-        .s16 => scripted.s16(job),
-        .s17 => scripted.s17(job),
-        .s18 => scripted.s18(job),
-        .s20 => scripted.s20(job),
-        .s21 => scripted.s21(job),
-        .l1 => live.l1(job),
-        .l2 => live.l2(job),
-        .l3 => live.l3(job),
-        .l4 => live.l4(job),
-        .l5 => live.l5(job),
-        .l6 => live.l6(job),
-        .l7 => live.l7(job),
-        .l8 => live.l8(job),
-        .l9 => live.l9(job),
-        .l10 => live.l10(job),
+        .s1 => scripted.s1,
+        .s2 => scripted.s2,
+        .s3 => scripted.s3,
+        .s4 => scripted.s4,
+        .s5 => scripted.s5,
+        .s6 => scripted.s6,
+        .s7 => scripted.s7,
+        .s8 => scripted.s8,
+        .s9 => scripted.s9,
+        .s10 => scripted.s10,
+        .s11 => scripted.s11,
+        .s12 => scripted.s12,
+        .s13 => scripted.s13,
+        .s14 => scripted.s14,
+        .s15 => scripted.s15,
+        .s16 => scripted.s16,
+        .s17 => scripted.s17,
+        .s18 => scripted.s18,
+        .s20 => scripted.s20,
+        .s21 => scripted.s21,
+        .l1 => live.l1,
+        .l2 => live.l2,
+        .l3 => live.l3,
+        .l4 => live.l4,
+        .l5 => live.l5,
+        .l6 => live.l6,
+        .l7 => live.l7,
+        .l8 => live.l8,
+        .l9 => live.l9,
+        .l10 => live.l10,
     };
 }
 
@@ -339,4 +347,41 @@ test "a check of layer L is skipped without a live mongod, and L7 to L10 without
             try std.testing.expectError(error.SkipZigTest, run(std.testing.io, std.testing.allocator, check, .{ .live = .{ .uri = "mongodb://127.0.0.1:1" } }));
         }
     }
+}
+
+/// Why `body` failed, as `run` would print it; null when it passed. Free
+/// the text with `arena`.
+fn reasonOf(arena: *std.heap.ArenaAllocator, body: Body, options: Options) !?[]const u8 {
+    return runBody(std.testing.io, std.testing.allocator, arena.allocator(), body, options);
+}
+
+/// What `leaks` took and did not give back: the test frees it, from the
+/// allocator under the check's.
+var leaked_block: []u8 = &.{};
+
+/// Takes memory of the client's allocator and keeps it.
+fn leaks(job: *Job) Job.Error!void {
+    leaked_block = try job.client_gpa.alloc(u8, 24);
+}
+
+test "a check that leaves memory of its client held fails, and says how much" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const why = try reasonOf(&arena, leaks, .{});
+    defer std.testing.allocator.free(leaked_block);
+    try std.testing.expectEqualStrings("24 bytes in 1 allocation(s) were still held after the client's deinit", why orelse return error.TestExpectedFailure);
+}
+
+/// Connects to the mongod of `Options.live`, and passes if it can.
+fn connectsLive(job: *Job) Job.Error!void {
+    _ = try job.live();
+    job.end();
+}
+
+test "a check whose client cannot connect fails with why, and leaves nothing held" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    // Nothing listens at this port.
+    const why = (try reasonOf(&arena, connectsLive, .{ .live = .{ .uri = "mongodb://127.0.0.1:1" } })) orelse return error.TestExpectedFailure;
+    try std.testing.expectStringStartsWith(why, "connect to mongodb://127.0.0.1:1 returned error.Unavailable: ");
 }
