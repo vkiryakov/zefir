@@ -17,7 +17,9 @@
 //! - `close` and `deinit` send `killCursors` while the server holds the
 //!   cursor, within `cursor_close_timeout` and with the task's cancelation
 //!   held off meanwhile, and ignore the reply. `close` of the client sends
-//!   it for every cursor still open, after the calls in flight ended.
+//!   it for every cursor still open, after the calls in flight ended and
+//!   before the connections close: one per namespace, with all its ids, on
+//!   an idle connection, or on a new one when none is left.
 //! - The cursor keeps the details of the errors of `next` itself, in its
 //!   own `Diagnostics` and, after a getMore that the server refused, the
 //!   whole reply: each error starts them afresh. The diagnostics and the
@@ -315,10 +317,12 @@ pub const Cursor = struct {
     }
 };
 
-/// For `close` of the client, once its calls ended: every cursor ends,
-/// and `killCursors` goes for each one that the server holds, on a
-/// connection of its own, within one `cursor_close_timeout` for all of
-/// them. The task's cancelation waits until it is done.
+/// For `close` of the client, between `drain` and `finish` of its pool:
+/// every cursor ends, and `killCursors` goes for those that the server
+/// holds, one per namespace with all its ids, within one
+/// `cursor_close_timeout` for all of them. They go on an idle connection
+/// of the pool, and on a new one only when none is idle. The task's
+/// cancelation waits until it is done.
 pub fn closeAll(r: Runner, io: Io) void {
     const protection = io.swapCancelProtection(.blocked);
     defer _ = io.swapCancelProtection(protection);
@@ -333,25 +337,39 @@ pub fn closeAll(r: Runner, io: Io) void {
         const c: *Cursor = @alignCast(@fieldParentPtr("node", node));
         c.ended = true;
         if (c.id == 0) continue;
-        if (a.dupe(u8, c.ns)) |ns| kills.append(a, .{ .ns = ns, .id = c.id }) catch {} else |_| {}
+        // Out of memory, the cursor is left to the server's timeout.
+        addKill(a, &kills, c.ns, c.id) catch {};
         reg.setId(c, 0);
     }
     reg.mutex.unlock(io);
     if (kills.items.len == 0) return;
     const deadline: core.Deadline = .after(time.now(io), r.cursor_close_timeout);
-    var attempt: connect_.Attempt = .{};
-    const entry = r.opener.open(r.opener.context, io, .{ .deadline = deadline, .checkout = deadline }, &attempt, null) catch return;
+    const entry = r.pool.takeIdle(io) orelse open: {
+        var attempt: connect_.Attempt = .{};
+        break :open r.opener.open(r.opener.context, io, .{ .deadline = deadline, .checkout = deadline }, &attempt, null) catch return;
+    };
     const conn = Connection.of(entry);
     defer conn.destroy();
     for (kills.items) |k| {
-        const body = killBody(a, k.ns, k.id) catch return;
+        const body = killBody(a, k.ns, k.ids.items) catch return;
         const database, _ = split(k.ns);
         const reply = conn.exchange(.{ .database = database, .body = body.raw() }, a, deadline, null) catch return;
         reply.deinit();
     }
 }
 
-const Kill = struct { ns: []const u8, id: i64 };
+/// The cursors of one namespace to kill.
+const Kill = struct { ns: []const u8, ids: std.ArrayList(i64) = .empty };
+
+/// Adds cursor `id` of `ns` to the kill of its namespace.
+fn addKill(a: Allocator, kills: *std.ArrayList(Kill), ns: []const u8, id: i64) Allocator.Error!void {
+    for (kills.items) |*k| {
+        if (std.mem.eql(u8, k.ns, ns)) return k.ids.append(a, id);
+    }
+    var k: Kill = .{ .ns = try a.dupe(u8, ns) };
+    try k.ids.append(a, id);
+    try kills.append(a, k);
+}
 
 /// Sends `killCursors` for cursor `id` of `ns` through the pool, with a
 /// budget of `cursor_close_timeout`, and ignores the reply; the task's
@@ -364,20 +382,21 @@ fn kill(r: Runner, io: Io, ns: []const u8, id: i64) void {
     defer r.pool.leave(io);
     var arena: std.heap.ArenaAllocator = .init(r.gpa);
     defer arena.deinit();
-    const body = killBody(arena.allocator(), ns, id) catch return;
+    const body = killBody(arena.allocator(), ns, &.{id}) catch return;
     const database, _ = split(ns);
     const op: OperationContext = .of(core.Context.root.withDeadline(.after(time.now(io), r.cursor_close_timeout)));
     const reply = command_.send(r, io, op, op.ctx.deadline, .{ .database = database, .body = body.raw() }, arena.allocator(), null) catch return;
     reply.deinit();
 }
 
-/// `{killCursors: collection, cursors: [id]}`.
-fn killBody(a: Allocator, ns: []const u8, id: i64) bson.Builder.Error!bson.OwnedDocument {
+/// `{killCursors: collection, cursors: [ids…]}`: the cursors `ids` of
+/// namespace `ns`.
+fn killBody(a: Allocator, ns: []const u8, ids: []const i64) bson.Builder.Error!bson.OwnedDocument {
     _, const collection = split(ns);
     var b: bson.Builder = .init(a);
     try b.putString("killCursors", collection);
     try b.beginArray("cursors");
-    try b.putInt64("", id);
+    for (ids) |id| try b.putInt64("", id);
     try b.end();
     return b.finish();
 }
@@ -466,7 +485,7 @@ test "a namespace splits at its first dot: the database before it, the collectio
     }
 }
 
-test "getMore carries the id, the collection, a batchSize that is not 0 and the comment, in that order" {
+test "getMore carries the id, the collection, a batchSize that is not 0 and the comment, in that order; killCursors every id of its namespace" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -475,6 +494,8 @@ test "getMore carries the id, the collection, a batchSize that is not 0 and the 
     try testing.expectEqualSlices(u8, bson.literal(.{ .getMore = @as(i64, 42), .collection = "fs.chunks", .batchSize = 7, .comment = "tag" }).bytes, full.bytes);
     const bare = try getMoreBody(a, 42, "users", 0, null);
     try testing.expectEqualSlices(u8, bson.literal(.{ .getMore = @as(i64, 42), .collection = "users" }).bytes, bare.bytes);
-    const kill_body = try killBody(a, "app.fs.chunks", 42);
+    const kill_body = try killBody(a, "app.fs.chunks", &.{42});
     try testing.expectEqualSlices(u8, bson.literal(.{ .killCursors = "fs.chunks", .cursors = .{@as(i64, 42)} }).bytes, kill_body.bytes);
+    const kill_all = try killBody(a, "app.fs.chunks", &.{ 42, 7, 9 });
+    try testing.expectEqualSlices(u8, bson.literal(.{ .killCursors = "fs.chunks", .cursors = .{ @as(i64, 42), @as(i64, 7), @as(i64, 9) } }).bytes, kill_all.bytes);
 }

@@ -522,6 +522,42 @@ fn whatClears(io: Io) !void {
     try testing.expect(std.mem.startsWith(u8, d.message(), "the pool is paused after a clear; the next probe may open a connection in "));
 }
 
+test "close in two steps: drain leaves the idle connections open, takeIdle gives the one checked in last that has not perished, and finish closes the rest" {
+    try within5s(testing.io, drainThenFinish, .{testing.io});
+}
+
+fn drainThenFinish(io: Io) !void {
+    var fakes: Fakes = .{};
+    var pool: Pool = undefined;
+    var opts = options(4);
+    opts.max_idle_time = .fromMilliseconds(30);
+    try ready(io, &pool, &fakes, opts);
+    defer pool.deinit();
+    const one = try pool.checkOut(io, fakes.opener(), within(io, 1000), null);
+    const two = try pool.checkOut(io, fakes.opener(), within(io, 1000), null);
+    const three = try pool.checkOut(io, fakes.opener(), within(io, 1000), null);
+    pool.checkIn(io, three, .ok);
+    try time.sleepUntil(io, .after(time.now(io), .fromMilliseconds(40)));
+    pool.checkIn(io, two, .ok);
+    try testing.expect(pool.drain(io, .zero));
+    // Back while the pool closes: it waits for finish too.
+    pool.checkIn(io, one, .ok);
+    try testing.expectEqual(@as(usize, 3), pool.counts(io).idle);
+    try testing.expectEqual(@as(u32, 0), fakes.destroyed.load(.acquire));
+    for ([_]*Pool.Entry{ one, two }) |expected| {
+        const kept = pool.takeIdle(io) orelse return error.TestNoIdleConnection;
+        try testing.expectEqual(expected, kept);
+        kept.hooks.destroy(kept);
+    }
+    // Three is past maxIdleTimeMS.
+    try testing.expect(pool.takeIdle(io) == null);
+    pool.finish(io);
+    try testing.expectEqual(@as(u32, 3), fakes.destroyed.load(.acquire));
+    try testing.expectEqual(Pool.State.closed, pool.state);
+    // A later close returns at once.
+    try testing.expect(!pool.drain(io, .zero));
+}
+
 test "a failed authentication of connect leaves the pool as it was: it was not ready" {
     const io = testing.io;
     var fakes: Fakes = .{ .fail_with = error.AuthenticationFailed };

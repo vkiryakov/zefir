@@ -221,9 +221,10 @@ pub fn connect(self: *Client, io: Io, ctx: core.Context, diagnostics: ?*Diagnost
 /// opened stop; the calls in flight get up to `close_timeout` to end, and
 /// after it their exchanges are cut (`error.ConnectionLost`); the cursors
 /// that the server still holds get `killCursors`, within
-/// `cursor_close_timeout`, and their `next` is `error.Closed`; then the
-/// connections close. A second call returns once the first is done. The
-/// task's cancelation waits until it returns.
+/// `cursor_close_timeout`, one per namespace on an idle connection, and
+/// their `next` is `error.Closed`; then the connections close. A second
+/// call returns once the first is done. The task's cancelation waits until
+/// it returns.
 pub fn close(self: *Client, io: Io) void {
     self.checkUse(io);
     const protection = io.swapCancelProtection(.blocked);
@@ -232,8 +233,10 @@ pub fn close(self: *Client, io: Io) void {
         self.closed.waitUncancelable(io);
         return;
     }
-    self.pool.close(io, self.options.close_timeout);
+    // Only the first close gets here: the pool is drained by it.
+    _ = self.pool.drain(io, self.options.close_timeout);
     cursor_.closeAll(self.runner(), io);
+    self.pool.finish(io);
     self.closed.set(io);
 }
 

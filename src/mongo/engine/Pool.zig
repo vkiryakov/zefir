@@ -28,7 +28,9 @@
 //!   once; a probe that succeeds makes the pool ready again.
 //! - `close` refuses new calls and those in line (`error.Closed`), stops
 //!   the openings, lets the exchanges in progress end within its time,
-//!   then cuts them.
+//!   then cuts them, and closes the connections last. In two steps,
+//!   `drain` and `finish`, it leaves the caller an idle connection between
+//!   them for a last exchange, `takeIdle`: the killCursors of the client.
 //!
 //! A connection holds its `Entry`, the pool's part of it, as a field; the
 //! pool opens connections through the caller's `Opener`, so that tests
@@ -213,8 +215,9 @@ pub fn checkOut(pool: *Pool, io: Io, opener: Opener, limits: Limits, d: ?*Diagno
     return pool.take(io, opener, limits, .call, d);
 }
 
-/// Takes `entry` back: idle, or closed when it is perished, the pool is
-/// closing, or `after` says so; `after.clear` clears the pool too.
+/// Takes `entry` back: idle, or closed when it is perished or `after` says
+/// so; `after.clear` clears the pool too. While the pool is closing, an
+/// idle connection waits for the end of `close`.
 pub fn checkIn(pool: *Pool, io: Io, entry: *Entry, after: After) void {
     var dead: List = .{};
     var cleared = false;
@@ -222,7 +225,7 @@ pub fn checkIn(pool: *Pool, io: Io, entry: *Entry, after: After) void {
     pool.in_use.remove(&entry.node);
     pool.in_use_count -= 1;
     const keep = switch (after) {
-        .ok => pool.state == .ready and entry.generation == pool.generation,
+        .ok => (pool.state == .ready or pool.state == .closing) and entry.generation == pool.generation,
         .broken => false,
         .clear => keep: {
             cleared = pool.clear(io, entry.generation, &dead);
@@ -246,22 +249,33 @@ pub fn checkIn(pool: *Pool, io: Io, entry: *Entry, after: After) void {
 /// Refuses new calls and those in line (`error.Closed`) and stops the
 /// openings; gives the exchanges in progress `timeout` to end, then cuts
 /// them, and returns once every call has left and every connection is
-/// closed. The task's cancelation waits until it returns. A second call,
-/// at once or later, returns once the first is done.
+/// closed: `drain`, then `finish`. The task's cancelation waits until it
+/// returns. A second call, at once or later, returns once the first is
+/// done.
 pub fn close(pool: *Pool, io: Io, timeout: Io.Duration) void {
+    if (pool.drain(io, timeout)) pool.finish(io);
+}
+
+/// The first step of `close`: refuses new calls and those in line
+/// (`error.Closed`) and stops the openings; gives the exchanges in
+/// progress `timeout` to end, then cuts them, and returns once every call
+/// has left. The idle connections stay open until `finish`. True for the
+/// call that closes the pool, which calls `finish`; a later one returns
+/// false once that `finish` is done. The task's cancelation waits until
+/// it returns.
+pub fn drain(pool: *Pool, io: Io, timeout: Io.Duration) bool {
     const protection = io.swapCancelProtection(.blocked);
     defer _ = io.swapCancelProtection(protection);
-    var dead: List = .{};
     pool.mutex.lockUncancelable(io);
     switch (pool.state) {
         .closed => {
             pool.mutex.unlock(io);
-            return;
+            return false;
         },
         .closing => {
             pool.mutex.unlock(io);
             pool.closed.waitUncancelable(io);
-            return;
+            return false;
         },
         .initialized, .ready, .paused => {},
     }
@@ -269,11 +283,8 @@ pub fn close(pool: *Pool, io: Io, timeout: Io.Duration) void {
     pool.wakeAll(io);
     var opening = pool.opening.first;
     while (opening) |node| : (opening = node.next) openingOf(node).attempt.stop(io);
-    dead.concatByMoving(&pool.idle);
-    pool.idle_count = 0;
     pool.signalDrained(io);
     pool.mutex.unlock(io);
-    bury(&dead);
 
     const until: core.Deadline = .after(time.now(io), timeout);
     while (!pool.drained.isSet() and !time.expired(io, until)) {
@@ -289,9 +300,39 @@ pub fn close(pool: *Pool, io: Io, timeout: Io.Duration) void {
         pool.mutex.unlock(io);
         pool.drained.waitUncancelable(io);
     }
+    return true;
+}
+
+/// Between `drain` and `finish`: an idle connection for a last exchange,
+/// the one checked in last that has not perished, out of the pool from
+/// now on: the caller destroys it. Null when there is none.
+pub fn takeIdle(pool: *Pool, io: Io) ?*Entry {
     pool.mutex.lockUncancelable(io);
+    defer pool.mutex.unlock(io);
+    std.debug.assert(pool.state == .closing and pool.calls == 0);
+    const now = time.now(io);
+    var it = pool.idle.last;
+    while (it) |node| : (it = node.prev) {
+        const entry = entryOf(node);
+        if (pool.perished(entry, now)) continue;
+        pool.idle.remove(node);
+        pool.idle_count -= 1;
+        return entry;
+    }
+    return null;
+}
+
+/// The last step of `close`, after `drain`: closes the idle connections,
+/// and the pool is closed.
+pub fn finish(pool: *Pool, io: Io) void {
+    var dead: List = .{};
+    pool.mutex.lockUncancelable(io);
+    std.debug.assert(pool.state == .closing);
+    dead.concatByMoving(&pool.idle);
+    pool.idle_count = 0;
     pool.state = .closed;
     pool.mutex.unlock(io);
+    bury(&dead);
     pool.closed.set(io);
 }
 

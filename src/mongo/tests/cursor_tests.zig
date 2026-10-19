@@ -15,6 +15,7 @@ const FakeServer = mongo.testing.FakeServer;
 const Script = mongo.testing.Script;
 const Client = @import("../Client.zig");
 const time = @import("../engine/time.zig");
+const Connected = @import("Served.zig");
 const within5s = @import("connection_tests.zig").within5s;
 
 const docs = [_]bson.RawDocument{
@@ -374,46 +375,113 @@ fn kills(io: Io) !void {
     try testing.expectEqual(@as(usize, 0), driver.cursors.liveCount(io));
 }
 
-test "close of the client ends every cursor and kills those that the server holds, on a connection of its own; stats count the open cursors" {
+test "close of the client kills the cursors that the server holds before it closes the connections: on an idle one, one killCursors per namespace with all its ids; stats count the open cursors" {
     try within5s(testing.io, closeKills, .{testing.io});
 }
 
+/// Opens a cursor at each `find`, of one batch and open on the server, but
+/// for collection `done`: ids 21, 22, … in the namespace of its
+/// collection. Holds `slow` for 3 s, and answers anything else with
+/// `{ok: 1.0}`.
+const Fresh = struct {
+    next_id: std.atomic.Value(i64) = .init(21),
+
+    pub fn answer(f: *Fresh, io: Io, arena: std.mem.Allocator, request: *const Script.Request) Script.HandlerError!Script.Answer {
+        _ = io;
+        if (eql(request.name, "slow")) return .{ .delayed = .{ .after = .fromSeconds(3), .reply = Script.ok } };
+        if (!eql(request.name, "find")) return .{ .reply = Script.ok };
+        const collection = if (request.body.get("find") catch null) |value| switch (value) {
+            .string => |text| text,
+            else => "",
+        } else "";
+        const ns = try std.fmt.allocPrint(arena, "app.{s}", .{collection});
+        const id = if (eql(collection, "done")) 0 else f.next_id.fetchAdd(1, .monotonic);
+        const reply = Script.cursorReply(arena, ns, id, .first, docs[0..1]) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidBson => return .{ .reply = Script.ok },
+        };
+        return .{ .reply = reply };
+    }
+};
+
 fn closeKills(io: Io) !void {
-    var cursors = [_]Script.Cursor{
-        .{ .ns = "app.a", .id = 11, .batches = &.{ docs[0..1], docs[1..2] } },
-        .{ .ns = "app.b", .id = 12, .batches = &.{ docs[0..1], docs[1..2] } },
-        .{ .ns = "app.c", .id = 13, .batches = &.{docs[0..1]} },
-    };
-    var served: Served = undefined;
-    try served.start(io, &cursors);
+    var fresh: Fresh = .{};
+    var served: Connected = undefined;
+    try served.start(io, .init(&fresh), .{});
     defer served.stop(io);
-    var driver: Client = undefined;
-    try served.connect(io, &driver);
-    defer driver.deinit();
-    const c = &driver;
+    const c = served.client();
     var a = try c.openCursor(io, .of(.root), find("a"), .{});
     defer a.deinit(io);
     var b = try c.openCursor(io, .of(.root), find("b"), .{});
     defer b.deinit(io);
+    var again = try c.openCursor(io, .of(.root), find("a"), .{});
+    defer again.deinit(io);
     // A cursor of one batch: the server holds nothing of it, and close of
     // the client ends it all the same.
-    var done = try c.openCursor(io, .of(.root), find("c"), .{});
+    var done = try c.openCursor(io, .of(.root), find("done"), .{});
     defer done.deinit(io);
-    try testing.expectEqual(@as(usize, 2), driver.stats().open_cursors);
-    const accepted = served.script.acceptedConnections();
-
-    driver.close(io);
+    try testing.expectEqual(@as(usize, 3), c.stats().open_cursors);
     const script = &served.script;
+    const accepted = script.acceptedConnections();
+
+    c.close(io);
+    // The connection of the finds, idle, sent the kills: no new one.
+    try testing.expectEqual(accepted, script.acceptedConnections());
     try testing.expectEqual(@as(usize, 2), script.count(io, "killCursors"));
-    try testing.expectEqual(accepted + 1, served.script.acceptedConnections());
-    try testing.expectEqualSlices(u8, bson.literal(.{ .killCursors = "a", .cursors = .{@as(i64, 11)}, .@"$db" = "app" }).bytes, script.entry(io, script.received(io) - 2).body.bytes);
-    try testing.expectEqualSlices(u8, bson.literal(.{ .killCursors = "b", .cursors = .{@as(i64, 12)}, .@"$db" = "app" }).bytes, script.entry(io, script.received(io) - 1).body.bytes);
+    const first = script.entry(io, script.received(io) - 2);
+    const second = script.entry(io, script.received(io) - 1);
+    try testing.expectEqualSlices(u8, bson.literal(.{ .killCursors = "a", .cursors = .{ @as(i64, 21), @as(i64, 23) }, .@"$db" = "app" }).bytes, first.body.bytes);
+    try testing.expectEqualSlices(u8, bson.literal(.{ .killCursors = "b", .cursors = .{@as(i64, 22)}, .@"$db" = "app" }).bytes, second.body.bytes);
+    try testing.expectEqual(@as(u32, 1), first.connection);
+    try testing.expectEqual(@as(u32, 1), second.connection);
+    // Then the connections closed.
+    try testing.expectEqual(@as(usize, 0), c.stats().connections);
     try testing.expectError(error.Closed, a.next(io, .of(.root)));
     try testing.expectError(error.Closed, done.next(io, .of(.root)));
-    try testing.expectEqual(@as(usize, 0), driver.stats().open_cursors);
+    try testing.expectEqual(@as(usize, 0), c.stats().open_cursors);
     // Nothing more goes out: not for a second close, nor for the cursors.
-    driver.close(io);
+    c.close(io);
     a.close(io);
     b.close(io);
     try testing.expectEqual(@as(usize, 2), script.count(io, "killCursors"));
+}
+
+test "close of the client opens a connection for the kills only when none is left idle" {
+    try within5s(testing.io, closeKillsOnNew, .{testing.io});
+}
+
+/// A call whose exchange close cuts.
+fn slowCut(io: Io, driver: *Client) !void {
+    try testing.expectError(error.ConnectionLost, driver.runCommand(io, .of(.root), .{ .database = "app", .body = bson.literal(.{ .slow = 1 }) }, .{ .allocator = testing.allocator }));
+}
+
+fn closeKillsOnNew(io: Io) !void {
+    var fresh: Fresh = .{};
+    var script: Script = .init(testing.allocator, .init(&fresh));
+    defer script.deinit();
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var server = try io.concurrent(FakeServer.serve, .{ io, &listener, &script });
+    defer server.cancel(io) catch {};
+    var buffer: [64]u8 = undefined;
+    var driver: Client = try .init(testing.allocator, io, .{ .uri = try FakeServer.uri(&listener, &buffer), .close_timeout = .fromMilliseconds(50) });
+    defer driver.deinit();
+    try driver.connect(io, .root, null);
+    var a = try driver.openCursor(io, .of(.root), find("a"), .{});
+    defer a.deinit(io);
+    // The only connection is out when close begins, and close cuts it.
+    var call = try io.concurrent(slowCut, .{ io, &driver });
+    defer call.cancel(io) catch {};
+    const give_up: core.Deadline = .after(time.now(io), .fromSeconds(4));
+    while (script.count(io, "slow") == 0) {
+        if (time.expired(io, give_up)) return error.TestTimedOut;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+    driver.close(io);
+    try call.await(io);
+    try testing.expectEqual(@as(u32, 2), script.acceptedConnections());
+    try testing.expectEqual(@as(usize, 1), script.count(io, "killCursors"));
+    const kill = script.entry(io, script.received(io) - 1);
+    try testing.expectEqualSlices(u8, bson.literal(.{ .killCursors = "a", .cursors = .{@as(i64, 21)}, .@"$db" = "app" }).bytes, kill.body.bytes);
+    try testing.expectEqual(@as(u32, 2), kill.connection);
 }
