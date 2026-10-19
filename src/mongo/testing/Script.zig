@@ -38,7 +38,9 @@ const Script = @This();
 
 /// What the server says about itself in hello: a standalone mongod of
 /// MongoDB 7.0 with the default limits, unless a test changes them, such
-/// as a `max_write_batch_size` of 3 to split a write of 10 items.
+/// as a `max_write_batch_size` of 3 to split a write of 10 items. Set it
+/// before `FakeServer.serve` runs: the connections read it without a lock,
+/// so a change while they are served races with them.
 hello: wire.Hello = .{},
 /// Answers every command that the server does not answer itself.
 handler: Handler,
@@ -51,7 +53,10 @@ accepted: std.atomic.Value(u32) = .init(0),
 refusing: std.atomic.Value(bool) = .init(false),
 
 /// A script whose commands go to `handler`, with an empty journal in
-/// `allocator`.
+/// `allocator`. The allocator must be thread-safe, such as
+/// `std.testing.allocator`: `FakeServer` serves each connection in a task
+/// of its own, which records its commands in the journal and keeps its
+/// buffers in the same allocator.
 pub fn init(allocator: Allocator, handler: Handler) Script {
     return .{ .handler = handler, .allocator = allocator };
 }
@@ -154,7 +159,9 @@ pub const Malformed = enum {
     unknown_required_flag,
     /// It holds a section of kind 1 after its section of kind 0.
     sequence_in_reply,
-    /// The connection closes halfway through it.
+    /// Its frame is whole, but the document in it is cut 3 bytes short:
+    /// the length of the message leaves them out. Like the others, it
+    /// leaves the connection open.
     truncated,
 };
 
