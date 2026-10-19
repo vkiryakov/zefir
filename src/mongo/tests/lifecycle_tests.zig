@@ -293,6 +293,67 @@ fn closeStopsOpening(io: Io) !void {
     try testing.expectEqual(@as(usize, 0), driver.stats().opening);
 }
 
+test "close stops a connection whose TCP connect or DNS lookup never ends, within close_timeout, and connect is Closed" {
+    var windows: WindowsLike = undefined;
+    for ([_]Io{ testing.io, windows.io() }) |base| {
+        for ([_][]const u8{ "127.0.0.1", "localhost" }) |host| {
+            var unreachable_: Unreachable = undefined;
+            try within5s(testing.io, closeStopsDial, .{ unreachable_.io(base), host });
+        }
+    }
+}
+
+/// `base`, but its TCP connects and DNS lookups never end until their task
+/// is canceled: a host that drops SYNs, a resolver that never answers. It
+/// points into itself: `io` it in place.
+const Unreachable = struct {
+    vtable: Io.VTable,
+
+    fn io(u: *Unreachable, base: Io) Io {
+        u.vtable = base.vtable.*;
+        u.vtable.netConnectIp = connectNever;
+        u.vtable.netLookup = lookupNever;
+        return .{ .userdata = base.userdata, .vtable = &u.vtable };
+    }
+
+    fn connectNever(userdata: ?*anyopaque, address: *const net.IpAddress, options: net.IpAddress.ConnectOptions) net.IpAddress.ConnectError!net.Socket {
+        _ = address;
+        _ = options;
+        try holdUntilCanceled(userdata);
+    }
+
+    fn lookupNever(userdata: ?*anyopaque, host: net.HostName, resolved: *Io.Queue(net.HostName.LookupResult), options: net.HostName.LookupOptions) net.HostName.LookupError!void {
+        _ = host;
+        _ = options;
+        // A lookup closes its queue when it returns.
+        defer resolved.close(.{ .userdata = userdata, .vtable = testing.io.vtable });
+        try holdUntilCanceled(userdata);
+    }
+
+    fn holdUntilCanceled(userdata: ?*anyopaque) Io.Cancelable!noreturn {
+        while (true) try testing.io.vtable.sleep(userdata, .{ .duration = .{ .raw = .fromSeconds(3600), .clock = .awake } });
+    }
+};
+
+/// The client on `io`, to `host`, which it never reaches.
+fn closeStopsDial(io: Io, host: []const u8) !void {
+    var buffer: [96]u8 = undefined;
+    // Without the stop, close would wait for connectTimeoutMS.
+    const uri = try std.fmt.bufPrint(&buffer, "mongodb://{s}:27017/?connectTimeoutMS=4000", .{host});
+    var driver: Client = try .init(testing.allocator, io, .{ .uri = uri, .close_timeout = .fromSeconds(2) });
+    defer driver.deinit();
+    var connecting = try io.concurrent(connectClosed, .{ io, &driver });
+    try awaitStats(io, &driver, "opening", 1);
+    // The opening is in its connect or its lookup by now, or soon.
+    try time.sleepUntil(io, .after(time.now(io), .fromMilliseconds(50)));
+    const start = time.now(io);
+    driver.close(io);
+    const took = start.durationTo(time.now(io));
+    try connecting.await(io);
+    try testing.expect(took.toMilliseconds() < 1000);
+    try testing.expectEqual(@as(usize, 0), driver.stats().opening);
+}
+
 test "stats count the connections idle, in use and opening, the calls in line, the generation and the clears" {
     try within5s(testing.io, statsTell, .{testing.io});
 }

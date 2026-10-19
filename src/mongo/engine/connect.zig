@@ -4,7 +4,9 @@
 //! (`race.zig`); a timer that wins cuts the attempt's stream, which ends
 //! an attempt blocked on it even when it lost its cancelation, also where
 //! a shutdown of the socket does not end a read, as on Windows. `close` of
-//! the client stops an attempt the same way.
+//! the client stops an attempt the same way, and ends the race at once:
+//! an attempt still in DNS or TCP connect, with no stream to cut yet, is
+//! canceled with it.
 
 const std = @import("std");
 const Io = std.Io;
@@ -33,7 +35,7 @@ pub fn open(io: Io, gpa: Allocator, address: Connection.Address, setup: *const h
     // error is the one returned.
     var attempt_d: Diagnostics = .{};
     const limit = deadline orelse return openNow(io, gpa, address, setup, attempt, d orelse &attempt_d);
-    return race.race(io, .{ .deadline = limit }, openNow, .{ io, gpa, address, setup, attempt, &attempt_d }, destroy, .{
+    return race.race(io, .{ .deadline = limit, .stop = &attempt.stopping }, openNow, .{ io, gpa, address, setup, attempt, &attempt_d }, destroy, .{
         .context = attempt,
         .function = Attempt.abort,
     }) catch |err| {
@@ -138,14 +140,21 @@ pub const Attempt = struct {
     mutex: Io.Mutex = .init,
     stream: ?*DeadlineStream = null,
     stopped: bool = false,
+    /// Set by `stop`: it ends the wait of the race that the attempt runs
+    /// in, which then cancels the attempt's task, in DNS or TCP connect
+    /// too.
+    stopping: Io.Event = .unset,
 
     /// Makes the attempt end soon: now, or as soon as it has a stream. The
     /// cut ends the read or the write in progress, also one in a task of
-    /// its own, which the cancelation of the attempt's task may not reach.
+    /// its own, which the cancelation of the attempt's task may not reach;
+    /// the race of `open` ends at once, and cancels the attempt before it
+    /// has a stream.
     pub fn stop(a: *Attempt, io: Io) void {
         a.mutex.lockUncancelable(io);
         defer a.mutex.unlock(io);
         a.stopped = true;
+        a.stopping.set(io);
         if (a.stream) |stream| stream.cut(io, .stop);
     }
 
