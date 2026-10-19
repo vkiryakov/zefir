@@ -444,6 +444,7 @@ zig build test-log --summary all                                                
 # check formatting, as CI does
 zig fmt --check build.zig build.zig.zon src tests examples \
   --exclude tests/nats/zig-pkg --exclude tests/rpc-nats/zig-pkg \
+  --exclude tests/http/zig-pkg --exclude tests/mongo/zig-pkg \
   --exclude examples/rpc-custom-transport/zig-pkg --exclude examples/rpc-custom-transport/consumer/zig-pkg
 ```
 
@@ -485,6 +486,18 @@ zig build check      # build all of it without running it
 ```
 
 Whenever CI tests http, it builds the package and runs its end-to-end tests on the three systems; a change to `tests/http/` counts as a change to http.
+
+The end-to-end tests of mongo, with the programs of its guide, are a package of the same kind in `tests/mongo`, against the mongod servers of the profile `mongo` of the same `docker-compose.yml`:
+
+```sh
+cd tests/mongo
+zig build e2e        # start the servers, run the tests, then the programs of the guide, checking their runs against the guide
+zig build stress     # the stress tests, in Debug and in ReleaseSafe
+zig build check      # build all of it without running it; no servers needed
+zig build down       # stop the servers
+```
+
+`MONGO_VERSION` picks the image, 9.0.4 by default: `MONGO_VERSION=7.0.45 zig build e2e`. Whenever CI tests mongo, it builds the package on the three systems and runs its end-to-end tests on Linux against 7.0, 8.0 and 9.0; a change to `tests/mongo/` or to `docker-compose.yml` counts as a change to mongo.
 
 `examples/rpc-custom-transport` is a transport of rpc in a package of its own, the proof that one can be written outside zefir. Its `consumer/` builds it as an application does, against the zefir of this checkout, and CI runs it whenever it tests rpc; a change to the package counts as a change to rpc:
 
