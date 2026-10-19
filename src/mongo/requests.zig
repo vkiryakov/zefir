@@ -91,8 +91,10 @@ pub const WriteOptions = struct {
     /// call.
     allocator: std.mem.Allocator,
     diagnostics: ?*errors.Diagnostics = null,
-    /// After `CommandFailed`, or `Timeout` by code 50, the whole reply of
-    /// the server goes here, from `allocator`; the caller frees it.
+    /// After `CommandFailed`, or `Timeout` by code 50 (with ok 0, among
+    /// the `writeErrors` or in the `writeConcernError`), the whole reply of
+    /// the batch that failed goes here, from `allocator`; the caller frees
+    /// it.
     failure_reply: ?*?bson.OwnedDocument = null,
     /// When the write fails after batches that the server answered, their
     /// merged result goes here, from `allocator`: free it with `deinit`.

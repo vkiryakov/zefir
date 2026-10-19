@@ -274,7 +274,7 @@ fn batchInLine(io: Io) !void {
     try testing.expectEqual(@as(usize, 2), served.script.count(io, "insert"));
 }
 
-test "code 50 among the writeErrors is Timeout, with its batch merged into partial" {
+test "code 50 among the writeErrors is Timeout, with its batch merged into partial and its whole reply in failure_reply" {
     try within5s(testing.io, expiredItem, .{testing.io});
 }
 
@@ -290,10 +290,43 @@ fn expiredItem(io: Io) !void {
     var d: Diagnostics = .{};
     var partial: mongo.WriteResult = .{};
     defer partial.deinit(testing.allocator);
-    try testing.expectError(error.Timeout, driver.write(io, .of(.root), .{ .database = "app", .kind = .insert, .body = insert, .items = ten[0..3] }, .{ .allocator = testing.allocator, .diagnostics = &d, .partial = &partial }));
+    var failure: ?bson.OwnedDocument = null;
+    defer if (failure) |f| f.deinit();
+    try testing.expectError(error.Timeout, driver.write(io, .of(.root), .{ .database = "app", .kind = .insert, .body = insert, .items = ten[0..3] }, .{ .allocator = testing.allocator, .diagnostics = &d, .partial = &partial, .failure_reply = &failure }));
     try testing.expectEqual(@as(i32, 50), d.server.?.code);
     try testing.expectEqualStrings("operation exceeded time limit", d.message());
     try testing.expectEqual(@as(u64, 2), partial.n);
     try testing.expectEqual(@as(usize, 1), partial.write_errors.len);
     try testing.expectEqual(@as(usize, 2), partial.write_errors[0].index);
+    const reply = failure orelse return error.TestNoFailureReply;
+    try testing.expectEqualSlices(u8, expired.bytes, reply.bytes);
+}
+
+test "code 50 in the writeConcernError is Timeout with its reply in failure_reply, and at batch 2 the reason of IncompleteWrite with the reply of batch 2" {
+    try within5s(testing.io, expiredConcern, .{testing.io});
+}
+
+fn expiredConcern(io: Io) !void {
+    var served: Served = undefined;
+    const expired = bson.literal(.{ .n = 3, .writeConcernError = .{ .code = 50, .codeName = "MaxTimeMSExpired", .errmsg = "operation exceeded time limit" }, .ok = 1.0 });
+    const answers = [_]Script.Answer{ .{ .reply = expired }, .{ .reply = three }, .{ .reply = expired } };
+    try served.start(io, &answers, .{ .max_write_batch_size = 3 });
+    defer served.stop(io);
+    var driver: Client = undefined;
+    try served.connect(io, &driver, "");
+    defer driver.deinit();
+    var d: Diagnostics = .{};
+    var failure: ?bson.OwnedDocument = null;
+    defer if (failure) |f| f.deinit();
+    try testing.expectError(error.Timeout, driver.write(io, .of(.root), .{ .database = "app", .kind = .insert, .body = insert, .items = ten[0..3] }, .{ .allocator = testing.allocator, .diagnostics = &d, .failure_reply = &failure }));
+    try testing.expectEqual(@as(?i32, 50), if (d.server) |server| server.code else null);
+    const first = failure orelse return error.TestNoFailureReply;
+    try testing.expectEqualSlices(u8, expired.bytes, first.bytes);
+    first.deinit();
+    failure = null;
+    try testing.expectError(error.IncompleteWrite, driver.write(io, .of(.root), .{ .database = "app", .kind = .insert, .body = insert, .items = ten[0..6] }, .{ .allocator = testing.allocator, .diagnostics = &d, .failure_reply = &failure }));
+    try testing.expectEqual(mongo.Error.Timeout, d.reason orelse return error.TestNoReason);
+    try testing.expectEqual(@as(?usize, 3), d.batch_offset);
+    const second = failure orelse return error.TestNoFailureReply;
+    try testing.expectEqualSlices(u8, expired.bytes, second.bytes);
 }

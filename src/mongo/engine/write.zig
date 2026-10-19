@@ -13,7 +13,8 @@
 //! - The replies merge as the Bulk API specification merges them
 //!   (`wire.batch.Merge`); an ordered write sends no batch after
 //!   one with `writeErrors`. Code 50 among them, or in a
-//!   `writeConcernError`, is `error.Timeout`.
+//!   `writeConcernError`, is `error.Timeout`, with the whole reply in
+//!   `failure_reply`, as a reply with ok 0 leaves it.
 //! - A write that stops at batch k > 1, after batches that the server
 //!   answered, is `error.IncompleteWrite`: the error it stopped at is in
 //!   `Diagnostics.reason`, the index of the first item of batch k in
@@ -85,5 +86,10 @@ fn send(r: Runner, io: Io, taken: *command_.Taken, op: OperationContext, deadlin
     }, r.gpa, d);
     defer reply.deinit();
     try wire.checkReply(reply.raw(), options.allocator, d, options.failure_reply);
-    return merge.add(options.allocator, b, reply.raw(), request.ordered, d);
+    const next = try merge.add(options.allocator, b, reply.raw(), request.ordered, d);
+    // Timeout by code 50 with ok 1: the whole reply, as one with ok 0 has.
+    if (next == .timeout) if (options.failure_reply) |slot| {
+        slot.* = try reply.raw().dupe(options.allocator);
+    };
+    return next;
 }
