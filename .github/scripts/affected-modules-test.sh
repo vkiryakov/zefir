@@ -130,6 +130,7 @@ edit tests/rpc-nats/conf/acl.conf               | rpc-nats zefir
 edit tests/http/build.zig                       | http zefir
 edit tests/mongo/e2e/wire.zig                   | mongo zefir
 edit tests/mongo/build.zig.zon                  | mongo zefir
+edit tests/mongo/stress/storm.zig               | mongo zefir
 edit examples/rpc-custom-transport/src/root.zig | rpc rpc-nats zefir
 edit examples/rpc-custom-transport/consumer/build.zig | rpc rpc-nats zefir
 edit examples/rpc-custom-transport/README.md    | rpc rpc-nats zefir
