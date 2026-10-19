@@ -53,6 +53,9 @@ fn connectAndPing(io: Io) !void {
 
     // The pool opens connections as the tasks need them, and keeps them.
     var group: Io.Group = .init;
+    // A ping of the fallback below that fails returns early: the tasks end
+    // before the client goes.
+    defer group.cancel(io);
     var failures: std.atomic.Value(u32) = .init(0);
     for (0..16) |_| group.concurrent(io, pingCounted, .{ io, c, &failures }) catch try pingOnce(io, c);
     try group.await(io);

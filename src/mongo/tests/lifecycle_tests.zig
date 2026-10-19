@@ -138,8 +138,10 @@ fn closeWaits(io: Io) !void {
     defer driver.deinit();
     try driver.connect(io, .root, null);
     var call = try io.concurrent(run, .{ io, &driver, slow, null, "" });
+    defer call.cancel(io) catch {};
     try awaitReceived(io, &served.script, "slow", 1);
     var closing = try io.concurrent(Client.close, .{ &driver, io });
+    defer closing.cancel(io);
     try awaitClosing(io, &driver);
     try run(io, &driver, ping, error.Closed, "the client is closed");
     try call.await(io);
@@ -161,6 +163,7 @@ fn closeCuts(io: Io) !void {
     defer driver.deinit();
     try driver.connect(io, .root, null);
     var call = try io.concurrent(run, .{ io, &driver, slow, error.ConnectionLost, "close() of the client cut the exchange" });
+    defer call.cancel(io) catch {};
     try awaitReceived(testing.io, &served.script, "slow", 1);
     const start = time.now(io);
     driver.close(io);
@@ -181,10 +184,13 @@ fn closeSendsAway(io: Io) !void {
     defer driver.deinit();
     try driver.connect(io, .root, null);
     var holder = try io.concurrent(run, .{ io, &driver, slow, null, "" });
+    defer holder.cancel(io) catch {};
     try awaitReceived(io, &served.script, "slow", 1);
     var waiter = try io.concurrent(run, .{ io, &driver, ping, error.Closed, "the client was closed while the call waited for a connection" });
+    defer waiter.cancel(io) catch {};
     try awaitStats(io, &driver, "waiting", 1);
     var closing = try io.concurrent(Client.close, .{ &driver, io });
+    defer closing.cancel(io);
     try waiter.await(io);
     try holder.await(io);
     closing.await(io);
@@ -202,8 +208,10 @@ fn closeTwice(io: Io) !void {
     defer driver.deinit();
     try driver.connect(io, .root, null);
     var call = try io.concurrent(run, .{ io, &driver, slow, null, "" });
+    defer call.cancel(io) catch {};
     try awaitReceived(io, &served.script, "slow", 1);
     var first = try io.concurrent(Client.close, .{ &driver, io });
+    defer first.cancel(io);
     try awaitClosing(io, &driver);
     driver.close(io);
     // The second returned once the first was done, and that waited for
@@ -238,8 +246,10 @@ fn closeKeepsCancel(io: Io) !void {
     defer driver.deinit();
     try driver.connect(io, .root, null);
     var call = try io.concurrent(run, .{ io, &driver, slow, null, "" });
+    defer call.cancel(io) catch {};
     try awaitReceived(io, &served.script, "slow", 1);
     var closer = try io.concurrent(closeThenSleep, .{ io, &driver });
+    defer closer.cancel(io) catch {};
     try awaitClosing(io, &driver);
     // close goes on to its end; the sleep after it sees the cancelation.
     try closer.cancel(io);
@@ -284,6 +294,9 @@ fn closeStopsOpening(io: Io) !void {
     var driver: Client = try .init(testing.allocator, io, .{ .uri = try FakeServer.uri(&listener, &buffer) });
     defer driver.deinit();
     var connecting = try io.concurrent(connectClosed, .{ io, &driver });
+    // A check that fails below returns: the task ends before the client
+    // goes.
+    defer connecting.cancel(io) catch {};
     // The opening waits for the reply to hello when the server has it.
     try heard.wait(testing.io);
     const start = time.now(io);
@@ -343,6 +356,7 @@ fn closeStopsDial(io: Io, host: []const u8) !void {
     var driver: Client = try .init(testing.allocator, io, .{ .uri = uri, .close_timeout = .fromSeconds(2) });
     defer driver.deinit();
     var connecting = try io.concurrent(connectClosed, .{ io, &driver });
+    defer connecting.cancel(io) catch {};
     try awaitStats(io, &driver, "opening", 1);
     // The opening is in its connect or its lookup by now, or soon.
     try time.sleepUntil(io, .after(time.now(io), .fromMilliseconds(50)));
@@ -373,8 +387,10 @@ fn statsTell(io: Io) !void {
     try testing.expectEqual(expected, driver.stats());
 
     var holder = try io.concurrent(run, .{ io, &driver, slow, null, "" });
+    defer holder.cancel(io) catch {};
     try awaitReceived(io, &served.script, "slow", 1);
     var waiter = try io.concurrent(run, .{ io, &driver, ping, null, "" });
+    defer waiter.cancel(io) catch {};
     try awaitStats(io, &driver, "waiting", 1);
     try testing.expectEqual(Stats{ .connections = 1, .idle = 0, .in_use = 1, .opening = 0, .waiting = 1, .generation = 0, .clears = 0, .open_cursors = 0 }, driver.stats());
     try holder.await(io);
