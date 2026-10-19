@@ -232,7 +232,23 @@ test "a bad database name is InvalidArgument, and nothing is sent" {
     const a = testing.allocator;
     var d: mongo.Diagnostics = .{};
     try testing.expectError(error.InvalidArgument, bad.listCollections(io, .of(.root), .{ .allocator = a, .diagnostics = &d }));
-    try testing.expect(std.mem.startsWith(u8, d.message(), "a database name holds none of"));
+    try testing.expectEqualStrings("a database name holds none of / \\ . \" $, a space or NUL; this one holds a '.' at byte 1", d.message());
+    // As for a collection name: what the name holds, and where.
+    const cases = [_]struct { []const u8, []const u8 }{
+        .{ "my app", "a space at byte 2" },
+        .{ "app\x00", "a NUL at byte 3" },
+        .{ "a/b", "a '/' at byte 1" },
+        .{ "a\\b", "a '\\' at byte 1" },
+        .{ "\"a", "a '\"' at byte 0" },
+        .{ "a$", "a '$' at byte 1" },
+    };
+    for (cases) |case| {
+        const name, const what = case;
+        const other: mongo.Database = .init(f.served.client(), name, &f.ids);
+        try testing.expectError(error.InvalidArgument, other.drop(io, .of(.root), .{ .allocator = a, .diagnostics = &d }));
+        var buffer: [128]u8 = undefined;
+        try testing.expectEqualStrings(try std.fmt.bufPrint(&buffer, "a database name holds none of / \\ . \" $, a space or NUL; this one holds {s}", .{what}), d.message());
+    }
     try testing.expectError(error.InvalidArgument, bad.drop(io, .of(.root), .{ .allocator = a }));
     try testing.expectError(error.InvalidArgument, bad.runCommand(io, .of(.root), .{ .ping = 1 }, .{ .allocator = a }));
     try testing.expectError(error.InvalidArgument, bad.runCursorCommand(io, .of(.root), .{ .find = "users" }, .{ .allocator = a }));

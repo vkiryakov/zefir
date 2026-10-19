@@ -30,7 +30,7 @@
 //!    reply; cancelation of the task is held off meanwhile and stays for
 //!    its next cancelation point.
 //! 6. One task at a time uses a cursor, but it may be any task. Two at
-//!    once panic in Debug.
+//!    once panic in safe builds (Debug, ReleaseSafe).
 
 const std = @import("std");
 const Io = std.Io;

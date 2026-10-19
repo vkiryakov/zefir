@@ -478,7 +478,16 @@ fn interrupted(d: ?*Diagnostics) mongo.Error {
 fn checkDatabase(name: []const u8, d: ?*Diagnostics) mongo.Error!void {
     if (name.len == 0 or name.len > 63) return invalid(d, "a database name is 1 to 63 bytes long; this one is {d}", .{name.len});
     if (std.mem.findAny(u8, name, "\x00/\\. \"$")) |at| {
-        return invalid(d, "a database name holds none of / \\ . \" $, a space or NUL; '{s}' holds byte {d}", .{ name, name[at] });
+        const what = switch (name[at]) {
+            0 => "a NUL",
+            ' ' => "a space",
+            '/' => "a '/'",
+            '\\' => "a '\\'",
+            '.' => "a '.'",
+            '"' => "a '\"'",
+            else => "a '$'",
+        };
+        return invalid(d, "a database name holds none of / \\ . \" $, a space or NUL; this one holds {s} at byte {d}", .{ what, at });
     }
 }
 
