@@ -4,6 +4,7 @@ const validator_cases = @import("src/validator/testdata/cases.zig");
 const rpc_guide = @import("src/rpc/examples/cases.zig");
 const http_cases = @import("src/http/tests/cases.zig");
 const http_guide = @import("src/http/examples/cases.zig");
+const mongo_guide = @import("src/mongo/examples/cases.zig");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -781,6 +782,7 @@ pub fn build(b: *std.Build) void {
         compile.expect_errors = .{ .contains = case[1] };
         test_mongo.dependOn(&compile.step);
     }
+    addMongoGuide(b, test_mongo, .{ .core = core, .mongo = mongo }, target, optimize, tsan);
 
     // rpc-nats panic program: a second conn() of one ZefirNats panics in
     // safe builds, since one adapter serves one transport. Like the rpc
@@ -1040,6 +1042,77 @@ fn addRpcGuide(
         readme.addAnonymousImport(b.fmt("{s}.out", .{program.name}), .{ .root_source_file = run.captureStdOut(.{}) });
     }
     test_rpc.dependOn(&addRun(b, b.addTest(.{ .name = "rpc-guide-readme", .root_module = readme }), tsan).step);
+}
+
+/// The modules that the examples of the mongo guide import here.
+const MongoGuideModules = struct {
+    core: *std.Build.Module,
+    mongo: *std.Build.Module,
+};
+
+/// The examples of src/mongo/examples/README.md, the guide of zefir-mongo,
+/// as cases.zig there lists them: the tests against
+/// mongo.testing.FakeServer, and the programs that need no server, each
+/// through example_main.zig, which exits with code 3 on a panic instead of
+/// aborting and with code 4 past its time limit; it must exit with 0.
+/// readme_test.zig then checks that README.md shows every file as it is and
+/// every run of those programs as it printed. The programs that need mongod
+/// import zio: only tests/mongo builds and runs them.
+fn addMongoGuide(
+    b: *std.Build,
+    test_mongo: *std.Build.Step,
+    m: MongoGuideModules,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+    tsan: bool,
+) void {
+    const dir = "src/mongo/examples/";
+    const imports: []const std.Build.Module.Import = &.{
+        .{ .name = "core", .module = m.core },
+        .{ .name = "mongo", .module = m.mongo },
+    };
+    for (mongo_guide.tests) |name| {
+        const tests = b.addTest(.{
+            .name = b.fmt("mongo-guide-{s}", .{name}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(b.fmt(dir ++ "{s}.zig", .{name})),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+                .imports = imports,
+            }),
+        });
+        test_mongo.dependOn(&addRun(b, tests, tsan).step);
+    }
+
+    const readme = b.createModule(.{
+        .root_source_file = b.path(dir ++ "readme_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+    });
+    for (mongo_guide.programs) |name| {
+        const exe = b.addExecutable(.{
+            .name = b.fmt("mongo-guide-{s}", .{name}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(dir ++ "example_main.zig"),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+                .imports = &.{.{ .name = "example", .module = b.createModule(.{
+                    .root_source_file = b.path(b.fmt(dir ++ "{s}.zig", .{name})),
+                    .target = target,
+                    .optimize = optimize,
+                    .sanitize_thread = tsan,
+                    .imports = imports,
+                }) }},
+            }),
+        });
+        const run = addRun(b, exe, tsan);
+        run.expectExitCode(0);
+        readme.addAnonymousImport(b.fmt("{s}.out", .{name}), .{ .root_source_file = run.captureStdOut(.{}) });
+    }
+    test_mongo.dependOn(&addRun(b, b.addTest(.{ .name = "mongo-guide-readme", .root_module = readme }), tsan).step);
 }
 
 /// The validator tests that use only its public API, compiled as client code
