@@ -26,8 +26,9 @@
 //! Each check runs in a task of its own, on a fresh client whose memory an
 //! allocator counts: memory still held after `deinit` of the client fails
 //! the check as a leak. Every wait has a deadline, and every delay of a
-//! script is a `mongo.testing.sleepAtLeast`; `Options.time_scale` stretches
-//! them for a slow machine.
+//! script is a `mongo.testing.sleepAtLeast`. A check that runs longer than
+//! 30 s hangs: `run` prints which one at once, cancels its task, and fails
+//! it. `Options.time_scale` stretches all of them for a slow machine.
 
 const std = @import("std");
 const Io = std.Io;
@@ -38,8 +39,9 @@ const scripted = @import("checks/scripted.zig");
 const live = @import("checks/live.zig");
 
 pub const Options = struct {
-    /// Stretches the deadlines, delays and tolerances the checks rely on:
-    /// raise it for a slow machine or a remote server.
+    /// Stretches the deadlines, delays and tolerances the checks rely on,
+    /// and the time limit of a check: raise it for a slow machine or a
+    /// remote server.
     time_scale: u32 = 1,
     /// The mongod of layer L; without it, a check of layer L is skipped.
     live: ?Live = null,
@@ -154,13 +156,19 @@ pub const Check = enum {
 /// before the check began.
 pub const Error = error{ CheckFailed, SkipZigTest, OutOfMemory, Canceled };
 
+/// How long a check may run, stretched by `Options.time_scale`. The
+/// slowest, L6, takes a few seconds.
+const time_limit: Io.Duration = .fromSeconds(30);
+
 /// Runs `check` in a task of its own, on a fresh client whose memory comes
-/// from `gpa` through an allocator that counts it. A check that fails, or
-/// leaves memory held after `deinit` of its client, prints its label and
-/// why to stderr and returns `error.CheckFailed`. `gpa` must be
-/// thread-safe, such as `std.testing.allocator`, and `io` must offer
-/// concurrency, as std's test `Io` and zio do: every check runs the server
-/// and its calls in tasks of their own.
+/// from `gpa` through an allocator that counts it. A check that fails,
+/// leaves memory held after `deinit` of its client, or runs past its time
+/// limit, prints its label and why to stderr and returns
+/// `error.CheckFailed`; one that runs past its limit says at once that it
+/// hangs, and its task is canceled. `gpa` must be thread-safe, such as
+/// `std.testing.allocator`, and `io` must offer concurrency, as std's test
+/// `Io` and zio do: every check runs the server and its calls in tasks of
+/// their own.
 pub fn run(io: Io, gpa: Allocator, check: Check, options: Options) Error!void {
     if (check.layer() == .live) {
         const l = options.live orelse return error.SkipZigTest;
@@ -174,19 +182,36 @@ pub fn run(io: Io, gpa: Allocator, check: Check, options: Options) Error!void {
 
     var messages: std.heap.ArenaAllocator = .init(gpa);
     defer messages.deinit();
-    const why = (try runBody(io, gpa, messages.allocator(), bodyOf(check), options)) orelse return;
-    std.debug.print("{s} ({s}) failed: {s}\n", .{ check.label(), check.title(), why });
+    var name: [256]u8 = undefined;
+    const plan: Plan = .{
+        .body = bodyOf(check),
+        .limit = .fromNanoseconds(time_limit.nanoseconds * @max(options.time_scale, 1)),
+        .name = std.fmt.bufPrint(&name, "{s} ({s})", .{ check.label(), check.title() }) catch check.label(),
+    };
+    const why = (try runBody(io, gpa, messages.allocator(), plan, options)) orelse return;
+    std.debug.print("{s} failed: {s}\n", .{ plan.name, why });
     return error.CheckFailed;
 }
 
 /// What a check does, in its task.
 const Body = *const fn (job: *Job) Job.Error!void;
 
-/// Runs `body` as `run` runs a check: in a task of its own, on a job whose
-/// client allocator counts what it holds. Returns why the body failed, in
-/// `arena`, or null when it passed. The tests at the end of this file give
-/// it bodies that break the rules of a check.
-fn runBody(io: Io, gpa: Allocator, arena: Allocator, body: Body, options: Options) error{OutOfMemory}!?[]const u8 {
+/// A check as `runBody` runs it.
+const Plan = struct {
+    body: Body,
+    /// How long it may run: past it, the check hangs, and its task is
+    /// canceled.
+    limit: Io.Duration,
+    /// Its label and title, for the line that says it hangs.
+    name: []const u8,
+};
+
+/// Runs `plan.body` as `run` runs a check: in a task of its own, on a job
+/// whose client allocator counts what it holds, within `plan.limit`.
+/// Returns why the body failed, in `arena`, or null when it passed. The
+/// tests at the end of this file give it bodies that break the rules of a
+/// check.
+fn runBody(io: Io, gpa: Allocator, arena: Allocator, plan: Plan, options: Options) error{OutOfMemory}!?[]const u8 {
     var counting: Job.Counting = .{ .parent = gpa };
     var job: Job = .{
         .io = io,
@@ -195,18 +220,43 @@ fn runBody(io: Io, gpa: Allocator, arena: Allocator, body: Body, options: Option
         .arena = arena,
         .options = options,
     };
-    var task = io.concurrent(go, .{ &job, body }) catch
+    var done: Io.Event = .unset;
+    var task = io.concurrent(go, .{ &job, plan.body, &done }) catch
         return "no task for the check: io.concurrent returned error.ConcurrencyUnavailable; the checks need an std.Io with concurrency";
-    task.await(io);
+    const hung = !awaitDone(io, &done, plan.limit);
+    if (hung) {
+        // Said at once: a task that ignores its cancelation would keep the
+        // line below from ever coming.
+        std.debug.print("{s} still runs after {f}: it hangs, and its task is canceled\n", .{ plan.name, plan.limit });
+        task.cancel(io);
+    } else task.await(io);
+    var why = job.failure;
+    if (hung) {
+        const late = try std.fmt.allocPrint(arena, "it did not end in {f}, and its task was canceled", .{plan.limit});
+        why = if (why) |then| try std.fmt.allocPrint(arena, "{s}; then: {s}", .{ late, then }) else late;
+    }
     const leaked = counting.live.load(.acquire);
     if (leaked > 0) {
         const leak = try std.fmt.allocPrint(arena, "{d} bytes in {d} allocation(s) were still held after the client's deinit", .{ counting.bytes.load(.acquire), leaked });
-        return if (job.failure) |why| try std.fmt.allocPrint(arena, "{s}; {s}", .{ why, leak }) else leak;
+        return if (why) |failure| try std.fmt.allocPrint(arena, "{s}; {s}", .{ failure, leak }) else leak;
     }
-    return job.failure;
+    return why;
 }
 
-fn go(job: *Job, body: Body) void {
+/// Waits until `done` is set, for `limit` at most; whether it was set.
+fn awaitDone(io: Io, done: *Io.Event, limit: Io.Duration) bool {
+    const deadline: Io.Clock.Timestamp = .fromNow(io, .{ .raw = limit, .clock = .awake });
+    while (!done.isSet()) {
+        if (deadline.durationFromNow(io).raw.nanoseconds <= 0) return false;
+        // A wakeup before the deadline that finds `done` unset comes back
+        // here.
+        done.waitTimeout(io, .{ .deadline = deadline }) catch {};
+    }
+    return true;
+}
+
+fn go(job: *Job, body: Body, done: *Io.Event) void {
+    defer done.set(job.io);
     body(job) catch |err| switch (err) {
         error.CheckFailed => {},
         error.OutOfMemory => if (job.failure == null) {
@@ -353,7 +403,7 @@ test "a check of layer L is skipped without a live mongod, and L7 to L10 without
 /// Why `body` failed, as `run` would print it; null when it passed. Free
 /// the text with `arena`.
 fn reasonOf(arena: *std.heap.ArenaAllocator, body: Body, options: Options) !?[]const u8 {
-    return runBody(std.testing.io, std.testing.allocator, arena.allocator(), body, options);
+    return runBody(std.testing.io, std.testing.allocator, arena.allocator(), .{ .body = body, .limit = time_limit, .name = "a body of a test" }, options);
 }
 
 /// What `leaks` took and did not give back: the test frees it, from the
@@ -403,4 +453,20 @@ test "a check whose scripted server the client refuses fails with why, and its s
     const why = (try reasonOf(&arena, refusedSetup, .{})) orelse return error.TestExpectedFailure;
     try std.testing.expectStringStartsWith(why, "connect to mongodb://127.0.0.1:");
     try std.testing.expect(std.mem.find(u8, why, "returned error.Unsupported") != null);
+}
+
+/// Waits for a minute, unless its task is canceled.
+fn hangs(job: *Job) Job.Error!void {
+    job.io.sleep(.fromSeconds(60), .awake) catch return job.fail("the sleep of the body was canceled", .{});
+    return job.fail("the body slept for a minute", .{});
+}
+
+test "a check that runs past its time limit fails, and its task is canceled" {
+    const io = std.testing.io;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const began = Io.Clock.awake.now(io);
+    const why = (try runBody(io, std.testing.allocator, arena.allocator(), .{ .body = hangs, .limit = .fromMilliseconds(100), .name = "a body that hangs" }, .{})) orelse return error.TestExpectedFailure;
+    try std.testing.expectEqualStrings("it did not end in 100ms, and its task was canceled; then: the sleep of the body was canceled", why);
+    try std.testing.expect(began.durationTo(Io.Clock.awake.now(io)).toSeconds() < 30);
 }
