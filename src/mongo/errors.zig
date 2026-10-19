@@ -5,7 +5,12 @@
 //!   `mongo.Client`, `mongo.Cursor` and the collection API return.
 //! - `outcome` — whether the server may have run the operation:
 //!   `.not_sent` is safe to retry, `.may_have_executed` only for an
-//!   operation that may run twice. Nothing in zefir retries by itself.
+//!   operation that may run twice. Safe is not the same as worth it: of
+//!   the `.not_sent` errors, `Unavailable` and `PoolExhausted` may go
+//!   through later, `DeadlineExceeded` and `Cancelled` only with a new
+//!   context, and `InvalidArgument`, `Unsupported`, `Closed` and
+//!   `AuthenticationFailed` fail the same way again. Nothing in zefir
+//!   retries by itself.
 //! - `Diagnostics` — the details of one error, for logs: where it
 //!   happened, the error of the library underneath, the server's error,
 //!   and the server's errmsg or the driver's text.
@@ -16,7 +21,9 @@
 //! var diagnostics: mongo.Diagnostics = .{};
 //! const reply = client.runCommand(io, .of(ctx), command, .{ .allocator = arena, .diagnostics = &diagnostics }) catch |err| {
 //!     log.warn("{t}: {s}", .{ err, diagnostics.message() });
-//!     if (mongo.outcome(err) == .not_sent) return retryLater();
+//!     // Nothing ran, and the server may be back, or a connection free,
+//!     // later.
+//!     if (err == error.Unavailable or err == error.PoolExhausted) return retryLater();
 //!     return err;
 //! };
 //! ```
@@ -81,7 +88,11 @@ pub const Error = error{
 
 /// Whether an operation that failed may have run on the server.
 pub const Outcome = enum {
-    /// Nothing reached the server: the call is safe to make again.
+    /// Nothing reached the server: the call is safe to make again. It
+    /// goes through only once what failed it has changed: the server is
+    /// back or a connection free (`Unavailable`, `PoolExhausted`), or the
+    /// context is new (`DeadlineExceeded`, `Cancelled`). The rest fail the
+    /// same way again.
     not_sent,
     /// The server may have run it, wholly or in part: make it again only
     /// if running it twice is safe.

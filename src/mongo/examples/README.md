@@ -35,9 +35,9 @@ production.
 >   passwords (SASLprep) yet; a user with another password goes with
 >   SCRAM-SHA-1.
 > - **Retries.** The client never repeats a command by itself.
->   `mongo.outcome` tells which failed calls are safe to make again, and
->   your code decides, see
->   [Errors and what is safe to retry](#errors-and-what-is-safe-to-retry).
+>   `mongo.outcome` tells which failed calls are safe to make again,
+>   [Errors and what is safe to retry](#errors-and-what-is-safe-to-retry)
+>   which of them are worth it, and your code decides.
 > - **Sessions, transactions and change streams**, and compression of
 >   messages.
 > - **A strict connection string.** An option that would change what the
@@ -1342,6 +1342,17 @@ Every call fails with one of 16 errors, `mongo.Error`, and
   again;
 - `.may_have_executed`: the server may have run it, wholly or in part:
   make it again only if running it twice does no harm.
+
+Safe to make again is not the same as worth making again. A call that
+is `.not_sent` goes through only once what stopped it has changed:
+
+- **`Unavailable` and `PoolExhausted`** are worth a retry after a pause:
+  the server may be back, or a connection free, by then;
+- **`DeadlineExceeded` and `Cancelled`** only with a new context: under
+  the same one the call stops again at once;
+- **`InvalidArgument`, `Unsupported`, `Closed` and
+  `AuthenticationFailed`** fail the same way however often the call
+  goes, until the call, the options, the client or the user changes.
 
 | Error | Outcome | When |
 |---|---|---|
