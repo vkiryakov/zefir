@@ -56,8 +56,10 @@ const Served = struct {
     }
 
     /// The body of the last command the server got.
-    fn last(s: *Served, io: Io) bson.RawDocument {
-        return s.script.entry(io, s.script.received(io) - 1).body;
+    fn last(s: *Served, io: Io) !bson.RawDocument {
+        const n = s.script.received(io);
+        if (n == 0) return error.NotReceived;
+        return (try s.script.entry(io, n - 1)).body;
     }
 };
 
@@ -91,7 +93,7 @@ fn noDeadline(io: Io) !void {
     defer driver.deinit();
     try driver.connect(io, .root, null);
     try run(io, &driver, .of(.root), count);
-    try testing.expectEqualSlices(u8, bson.literal(.{ .count = "users", .@"$db" = "app" }).bytes, served.last(io).bytes);
+    try testing.expectEqualSlices(u8, bson.literal(.{ .count = "users", .@"$db" = "app" }).bytes, (try served.last(io)).bytes);
 }
 
 test "under a deadline a command takes maxTimeMS, the time left in whole milliseconds, after its other fields" {
@@ -106,7 +108,7 @@ fn underDeadline(io: Io) !void {
     defer driver.deinit();
     try driver.connect(io, .root, null);
     try run(io, &driver, within(io, .fromMilliseconds(4000)), count);
-    const body = served.last(io);
+    const body = try served.last(io);
     const ms = try maxTimeOf(body);
     try testing.expect(ms >= 3000 and ms <= 4000);
     var b: bson.Builder = .init(testing.allocator);
@@ -131,10 +133,10 @@ fn timeoutMS(io: Io) !void {
     defer driver.deinit();
     try driver.connect(io, .root, null);
     try run(io, &driver, .of(.root), count);
-    const by_timeout = try maxTimeOf(served.last(io));
+    const by_timeout = try maxTimeOf(try served.last(io));
     try testing.expect(by_timeout >= 1 and by_timeout <= 700);
     try run(io, &driver, within(io, .fromMilliseconds(4000)), count);
-    const by_context = try maxTimeOf(served.last(io));
+    const by_context = try maxTimeOf(try served.last(io));
     try testing.expect(by_context > 700 and by_context <= 4000);
 }
 
@@ -164,7 +166,7 @@ fn roundTrip(io: Io) !void {
     try testing.expectEqual(@as(u64, 0), stats.clears);
 
     try run(io, &driver, within(io, .fromMilliseconds(4000)), count);
-    const ms = try maxTimeOf(served.last(io));
+    const ms = try maxTimeOf(try served.last(io));
     try testing.expect(ms >= 1 and ms <= 3600);
 }
 
@@ -183,9 +185,9 @@ fn noMaxTimeForCursors(io: Io) !void {
     const kill = bson.literal(.{ .killCursors = "users", .cursors = .{@as(i64, 7)} });
     for ([_]bson.RawDocument{ get_more, kill }) |body| {
         try run(io, &driver, within(io, .fromMilliseconds(4000)), .{ .database = "app", .body = body });
-        try testing.expect(try served.last(io).get("maxTimeMS") == null);
+        try testing.expect(try (try served.last(io)).get("maxTimeMS") == null);
         try run(io, &driver, .of(.root), .{ .database = "app", .body = body });
-        try testing.expect(try served.last(io).get("maxTimeMS") == null);
+        try testing.expect(try (try served.last(io)).get("maxTimeMS") == null);
     }
 }
 
@@ -203,7 +205,7 @@ fn callersMaxTime(io: Io) !void {
         defer driver.deinit();
         try driver.connect(io, .root, null);
         try run(io, &driver, .of(.root), own);
-        try testing.expectEqualSlices(u8, bson.literal(.{ .count = "users", .maxTimeMS = 250, .@"$db" = "app" }).bytes, served.last(io).bytes);
+        try testing.expectEqualSlices(u8, bson.literal(.{ .count = "users", .maxTimeMS = 250, .@"$db" = "app" }).bytes, (try served.last(io)).bytes);
     }
     var driver: Client = try .init(testing.allocator, io, .{ .uri = try served.uri("?timeoutMS=4000") });
     defer driver.deinit();

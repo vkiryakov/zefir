@@ -135,7 +135,8 @@ pub fn received(job: *Job, script: *Script, name: []const u8, index: usize) Erro
     const io = job.io;
     var seen: usize = 0;
     for (0..script.received(io)) |i| {
-        const entry = script.entry(io, i);
+        // The journal only grows: command i is there.
+        const entry = script.entry(io, i) catch break;
         if (!std.mem.eql(u8, entry.name, name)) continue;
         if (seen == index) return entry;
         seen += 1;

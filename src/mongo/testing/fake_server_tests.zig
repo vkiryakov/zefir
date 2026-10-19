@@ -161,11 +161,11 @@ test "serve answers the handshake by script.hello, ping, endSessions and saslSta
     // The handshake is not in the journal; every command after it is.
     try testing.expectEqual(@as(usize, 5), script.received(io));
     for ([_][]const u8{ "ping", "endSessions", "saslStart", "find", "hello" }, 0..) |name, i| {
-        const entry = script.entry(io, i);
+        const entry = try script.entry(io, i);
         try testing.expectEqualStrings(name, entry.name);
         try testing.expectEqual(@as(u32, 1), entry.connection);
     }
-    try testing.expectEqualStrings("app", script.entry(io, 3).database);
+    try testing.expectEqualStrings("app", (try script.entry(io, 3)).database);
     try testing.expectEqual(@as(usize, 0), queue.left());
 }
 
@@ -216,8 +216,8 @@ test "each connection gets a number of its own, and its commands carry it in the
     defer serving.stop(io);
     try within5s(io, twoConnections, .{ io, serving.port() });
     try testing.expectEqual(@as(usize, 2), script.received(io));
-    try testing.expectEqual(@as(u32, 1), script.entry(io, 0).connection);
-    try testing.expectEqual(@as(u32, 2), script.entry(io, 1).connection);
+    try testing.expectEqual(@as(u32, 1), (try script.entry(io, 0)).connection);
+    try testing.expectEqual(@as(u32, 2), (try script.entry(io, 1)).connection);
     try testing.expectEqual(@as(u32, 2), script.acceptedConnections());
 }
 
@@ -243,7 +243,7 @@ test "a write's section of kind 1 reaches the handler and the journal" {
     try serving.start(io, &script);
     defer serving.stop(io);
     try within5s(io, insertTwo, .{ io, serving.port() });
-    const entry = script.entry(io, 0);
+    const entry = try script.entry(io, 0);
     try testing.expectEqualStrings("insert", entry.name);
     try testing.expectEqualStrings("documents", entry.sequence.?.identifier);
     var docs = entry.sequence.?.documents();
@@ -306,7 +306,7 @@ test "close_connection closes after the command; refuse_connections refuses new 
     // The commands of the closed connections were read: they are in the
     // journal. The refused connection sent nothing that was read.
     try testing.expectEqual(@as(usize, 3), script.received(io));
-    try testing.expectEqual(@as(u32, 3), script.entry(io, 2).connection);
+    try testing.expectEqual(@as(u32, 3), (try script.entry(io, 2)).connection);
 }
 
 fn closeAndRefuse(io: Io, port: u16, script: *Script) !void {
@@ -388,7 +388,7 @@ test "OP_QUERY, and any message that breaks OP_MSG, closes the connection; a com
     defer serving.stop(io);
     try within5s(io, brokenRequests, .{ io, serving.port() });
     try testing.expectEqual(@as(usize, 1), script.received(io));
-    try testing.expectEqualStrings("", script.entry(io, 0).database);
+    try testing.expectEqualStrings("", (try script.entry(io, 0)).database);
 }
 
 fn brokenRequests(io: Io, port: u16) !void {

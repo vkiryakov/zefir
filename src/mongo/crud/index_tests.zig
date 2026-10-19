@@ -92,7 +92,7 @@ test "createIndexes sends the models in their order, each with its name, and ret
         },
         .comment = "set up",
         .@"$db" = "app",
-    }), f.script.entry(io, 0).body);
+    }), (try f.script.entry(io, 0)).body);
 }
 
 test "createIndexes of no models, or of a model whose keys make no name, is InvalidArgument, and nothing is sent" {
@@ -156,14 +156,14 @@ test "listIndexes sends cursor: {} or its batch size, which goes with the commen
         try testing.expectEqualStrings("_id_", (try (try indexes.next(io, .of(.root))).?.get("name")).?.string);
         try testing.expectEqualStrings("email_1", (try (try indexes.next(io, .of(.root))).?.get("name")).?.string);
         try testing.expect(try indexes.next(io, .of(.root)) == null);
-        try expectBody(bson.literal(.{ .listIndexes = "users", .cursor = .{}, .@"$db" = "app" }), script.entry(io, 0).body);
-        try expectBody(bson.literal(.{ .getMore = @as(i64, 42), .collection = "users", .@"$db" = "app" }), script.entry(io, 1).body);
+        try expectBody(bson.literal(.{ .listIndexes = "users", .cursor = .{}, .@"$db" = "app" }), (try script.entry(io, 0)).body);
+        try expectBody(bson.literal(.{ .getMore = @as(i64, 42), .collection = "users", .@"$db" = "app" }), (try script.entry(io, 1)).body);
     }
     const indexes = try users.listIndexes(io, .of(.root), .{ .allocator = testing.allocator, .batch_size = 1, .comment = .{ .string = "check" } });
     defer indexes.deinit(io);
     while (try indexes.next(io, .of(.root))) |_| {}
-    try expectBody(bson.literal(.{ .listIndexes = "users", .cursor = .{ .batchSize = 1 }, .comment = "check", .@"$db" = "app" }), script.entry(io, 2).body);
-    try expectBody(bson.literal(.{ .getMore = @as(i64, 42), .collection = "users", .batchSize = 1, .comment = "check", .@"$db" = "app" }), script.entry(io, 3).body);
+    try expectBody(bson.literal(.{ .listIndexes = "users", .cursor = .{ .batchSize = 1 }, .comment = "check", .@"$db" = "app" }), (try script.entry(io, 2)).body);
+    try expectBody(bson.literal(.{ .getMore = @as(i64, 42), .collection = "users", .batchSize = 1, .comment = "check", .@"$db" = "app" }), (try script.entry(io, 3)).body);
 }
 
 const namespace_not_found = bson.literal(.{ .ok = 0.0, .errmsg = "ns does not exist: app.users", .code = 26, .codeName = "NamespaceNotFound" });
@@ -198,7 +198,7 @@ test "listIndexes of a collection that is not there, code 26, is an empty cursor
     // The command went out each time, and nothing else: no getMore, no
     // killCursors.
     try testing.expectEqual(@as(usize, 2), f.script.received(io));
-    try expectBody(bson.literal(.{ .listIndexes = "users", .cursor = .{ .batchSize = 1 }, .@"$db" = "app" }), f.script.entry(io, 1).body);
+    try expectBody(bson.literal(.{ .listIndexes = "users", .cursor = .{ .batchSize = 1 }, .@"$db" = "app" }), (try f.script.entry(io, 1)).body);
 }
 
 test "a cursor of listIndexes without diagnostics: the error of a getMore ends it, and its deinit frees all it holds" {
@@ -241,9 +241,9 @@ test "dropIndex sends dropIndexes with the name, dropIndexes with *, and dropInd
     defer f.deinit();
     const users = f.users();
     try users.dropIndex(io, .of(.root), "email_1", .{ .allocator = testing.allocator });
-    try expectBody(bson.literal(.{ .dropIndexes = "users", .index = "email_1", .@"$db" = "app" }), f.script.entry(io, 0).body);
+    try expectBody(bson.literal(.{ .dropIndexes = "users", .index = "email_1", .@"$db" = "app" }), (try f.script.entry(io, 0)).body);
     try users.dropIndexes(io, .of(.root), .{ .allocator = testing.allocator, .comment = .{ .string = "reset" } });
-    try expectBody(bson.literal(.{ .dropIndexes = "users", .index = "*", .comment = "reset", .@"$db" = "app" }), f.script.entry(io, 1).body);
+    try expectBody(bson.literal(.{ .dropIndexes = "users", .index = "*", .comment = "reset", .@"$db" = "app" }), (try f.script.entry(io, 1)).body);
 
     var d: mongo.Diagnostics = .{};
     try testing.expectError(error.InvalidArgument, users.dropIndex(io, .of(.root), "*", .{ .allocator = testing.allocator, .diagnostics = &d }));

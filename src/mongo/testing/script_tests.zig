@@ -275,7 +275,7 @@ test "the journal keeps copies of what came, with the connection, the database a
 
     try script.record(io, &request("ping", bson.literal(.{ .ping = 1 }), null));
     try testing.expectEqual(@as(usize, 2), script.received(io));
-    const entry = script.entry(io, 0);
+    const entry = try script.entry(io, 0);
     try testing.expectEqual(@as(u32, 2), entry.connection);
     try testing.expectEqualStrings("insert", entry.name);
     try testing.expectEqualStrings("app", entry.database);
@@ -285,10 +285,22 @@ test "the journal keeps copies of what came, with the connection, the database a
     try testing.expectEqualSlices(u8, docs[0].bytes, stored.next().?.bytes);
     try testing.expectEqualSlices(u8, docs[1].bytes, stored.next().?.bytes);
     try testing.expect(stored.next() == null);
-    try testing.expectEqualStrings("ping", script.entry(io, 1).name);
-    try testing.expect(script.entry(io, 1).sequence == null);
+    try testing.expectEqualStrings("ping", (try script.entry(io, 1)).name);
+    try testing.expect((try script.entry(io, 1)).sequence == null);
     try testing.expectEqual(@as(usize, 1), script.count(io, "ping"));
     try testing.expectEqual(@as(usize, 0), script.count(io, "find"));
+}
+
+test "a command that the journal does not hold is NotReceived" {
+    var queue: Script.Queue = .{ .answers = &.{} };
+    var script: Script = .init(testing.allocator, queue.handler());
+    defer script.deinit();
+    const io = testing.io;
+    try testing.expectError(error.NotReceived, script.entry(io, 0));
+    try script.record(io, &request("ping", bson.literal(.{ .ping = 1 }), null));
+    try testing.expectEqualStrings("ping", (try script.entry(io, 0)).name);
+    try testing.expectError(error.NotReceived, script.entry(io, 1));
+    try testing.expectError(error.NotReceived, script.entry(io, std.math.maxInt(usize)));
 }
 
 test "answer hands the request to the handler, with io and an arena" {

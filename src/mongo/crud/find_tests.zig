@@ -72,11 +72,11 @@ test "find sends find with the filter, in each of the three forms, and its curso
         const cursor = try users.find(io, .of(.root), filter, .{ .allocator = testing.allocator });
         defer cursor.deinit(io);
         try expectDocuments(cursor, &.{ ann, bob, cid });
-        const sent = f.script.entry(io, 2 * i);
+        const sent = try f.script.entry(io, 2 * i);
         try testing.expectEqualStrings("find", sent.name);
         try testing.expect(sent.sequence == null);
         try testing.expectEqualSlices(u8, bson.literal(.{ .find = "users", .filter = .{ .age = .{ .@"$gte" = 18 } }, .@"$db" = "app" }).bytes, sent.body.bytes);
-        const more = f.script.entry(io, 2 * i + 1);
+        const more = try f.script.entry(io, 2 * i + 1);
         try testing.expectEqualSlices(u8, bson.literal(.{ .getMore = @as(i64, 42), .collection = "users", .@"$db" = "app" }).bytes, more.body.bytes);
     }
     try testing.expectEqual(@as(usize, 8), f.script.received(io));
@@ -89,7 +89,7 @@ test "find(.{}) sends filter: {}" {
     defer f.deinit();
     const cursor = try f.users().find(io, .of(.root), .{}, .{ .allocator = testing.allocator });
     defer cursor.deinit(io);
-    try testing.expectEqualSlices(u8, bson.literal(.{ .find = "users", .filter = .{}, .@"$db" = "app" }).bytes, f.script.entry(io, 0).body.bytes);
+    try testing.expectEqualSlices(u8, bson.literal(.{ .find = "users", .filter = .{}, .@"$db" = "app" }).bytes, (try f.script.entry(io, 0)).body.bytes);
 }
 
 test "the options of find go out in their order, and the batch size and the comment go to each getMore too" {
@@ -126,14 +126,14 @@ test "the options of find go out in their order, and the batch size and the comm
         .allowDiskUse = false,
         .let = .{ .x = 1 },
         .@"$db" = "app",
-    }).bytes, f.script.entry(io, 0).body.bytes);
+    }).bytes, (try f.script.entry(io, 0)).body.bytes);
     try testing.expectEqualSlices(u8, bson.literal(.{
         .getMore = @as(i64, 42),
         .collection = "users",
         .batchSize = 2,
         .comment = "list users",
         .@"$db" = "app",
-    }).bytes, f.script.entry(io, 1).body.bytes);
+    }).bytes, (try f.script.entry(io, 1)).body.bytes);
 }
 
 test "find with a limit equal to its batch size asks for one more in the first batch, so that the server closes the cursor" {
@@ -145,7 +145,7 @@ test "find with a limit equal to its batch size asks for one more in the first b
     for ([_][2]u32{ .{ 5, 5 }, .{ 0, 0 }, .{ 5, 4 }, .{ std.math.maxInt(u32), std.math.maxInt(u32) } }, 0..) |case, i| {
         const cursor = try users.find(io, .of(.root), .{}, .{ .allocator = testing.allocator, .limit = case[0], .batch_size = case[1] });
         cursor.deinit(io);
-        const body = f.script.entry(io, 2 * i).body;
+        const body = (try f.script.entry(io, 2 * i)).body;
         const expected = switch (i) {
             0 => bson.literal(.{ .find = "users", .filter = .{}, .limit = 5, .batchSize = 6, .@"$db" = "app" }),
             // A limit of 0 is none: the batch size goes as it is.
@@ -155,7 +155,7 @@ test "find with a limit equal to its batch size asks for one more in the first b
         };
         try testing.expectEqualSlices(u8, expected.bytes, body.bytes);
         // deinit killed the cursor, open after its first batch.
-        try testing.expectEqualStrings("killCursors", f.script.entry(io, 2 * i + 1).name);
+        try testing.expectEqualStrings("killCursors", (try f.script.entry(io, 2 * i + 1)).name);
     }
 }
 
@@ -184,7 +184,7 @@ test "findOne sends limit: 1 and singleBatch: true without a batch size, and ret
             .limit = 1,
             .singleBatch = true,
             .@"$db" = "app",
-        }).bytes, script.entry(io, i).body.bytes);
+        }).bytes, (try script.entry(io, i)).body.bytes);
     }
     // The cursor was closed on the server: no killCursors went out.
     try testing.expectEqual(@as(usize, 4), script.received(io));
@@ -219,7 +219,7 @@ test "the options of findOne go out in their order" {
         .collation = .{ .locale = "fr" },
         .let = .{ .y = 2 },
         .@"$db" = "app",
-    }).bytes, f.script.entry(io, 0).body.bytes);
+    }).bytes, (try f.script.entry(io, 0)).body.bytes);
 }
 
 test "findOne frees its cursor: one left open on the server gets its killCursors" {
@@ -231,7 +231,7 @@ test "findOne frees its cursor: one left open on the server gets its killCursors
     defer doc.deinit();
     try testing.expectEqualSlices(u8, ann.bytes, doc.bytes);
     try testing.expectEqual(@as(usize, 2), f.script.received(io));
-    try testing.expectEqualSlices(u8, bson.literal(.{ .killCursors = "users", .cursors = .{@as(i64, 42)}, .@"$db" = "app" }).bytes, f.script.entry(io, 1).body.bytes);
+    try testing.expectEqualSlices(u8, bson.literal(.{ .killCursors = "users", .cursors = .{@as(i64, 42)}, .@"$db" = "app" }).bytes, (try f.script.entry(io, 1)).body.bytes);
 }
 
 test "findOne of no document is null" {

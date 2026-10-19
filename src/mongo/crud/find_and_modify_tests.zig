@@ -72,7 +72,7 @@ test "findOneAndUpdate sends findAndModify with query and update, and returns a 
         .{ .{ ._id = 1 }, .{ .@"$inc" = .{ .n = 1 } } },
     }, 0..) |args, i| {
         try expectValue(bson.literal(.{ ._id = 1, .n = 2 }), try users.findOneAndUpdate(io, .of(.root), args[0], args[1], .{ .allocator = testing.allocator }));
-        const entry = f.script.entry(io, i);
+        const entry = try f.script.entry(io, i);
         try testing.expectEqualStrings("findAndModify", entry.name);
         try testing.expect(entry.sequence == null);
         try testing.expectEqualSlices(u8, bson.literal(.{
@@ -117,7 +117,7 @@ test "the options of findOneAndUpdate: return_document after is new: true, proje
         .let = .{ .x = 1 },
         .comment = "tag it",
         .@"$db" = "app",
-    }).bytes, f.script.entry(io, 0).body.bytes);
+    }).bytes, (try f.script.entry(io, 0)).body.bytes);
 
     // The defaults go out not at all; a pipeline goes as an array.
     try expectValue(bson.literal(.{ ._id = 1, .n = 2 }), try f.users().findOneAndUpdate(io, .of(.root), .{}, .{.{ .@"$set" = .{ .n = 3 } }}, .{
@@ -131,7 +131,7 @@ test "the options of findOneAndUpdate: return_document after is new: true, proje
         .query = .{},
         .update = .{.{ .@"$set" = .{ .n = 3 } }},
         .@"$db" = "app",
-    }).bytes, f.script.entry(io, 1).body.bytes);
+    }).bytes, (try f.script.entry(io, 1)).body.bytes);
 }
 
 test "findOneAndReplace sends the replacement as update, and refuses one that starts with an operator" {
@@ -152,7 +152,7 @@ test "findOneAndReplace sends the replacement as update, and refuses one that st
         .new = true,
         .hint = .{ ._id = 1 },
         .@"$db" = "app",
-    }).bytes, f.script.entry(io, 0).body.bytes);
+    }).bytes, (try f.script.entry(io, 0)).body.bytes);
 
     var d: mongo.Diagnostics = .{};
     try testing.expectError(error.InvalidArgument, users.findOneAndReplace(io, .of(.root), .{ ._id = 1 }, .{ .@"$set" = .{ .n = 5 } }, .{ .allocator = testing.allocator, .diagnostics = &d }));
@@ -186,9 +186,9 @@ test "findOneAndDelete sends remove: true, with its sort and projection" {
         .let = .{ .y = 2 },
         .comment = 7,
         .@"$db" = "app",
-    }).bytes, f.script.entry(io, 0).body.bytes);
+    }).bytes, (try f.script.entry(io, 0)).body.bytes);
     try expectValue(bson.literal(.{ ._id = 1, .n = 2 }), try f.users().findOneAndDelete(io, .of(.root), .{}, .{ .allocator = testing.allocator }));
-    try testing.expectEqualSlices(u8, bson.literal(.{ .findAndModify = "users", .query = .{}, .remove = true, .@"$db" = "app" }).bytes, f.script.entry(io, 1).body.bytes);
+    try testing.expectEqualSlices(u8, bson.literal(.{ .findAndModify = "users", .query = .{}, .remove = true, .@"$db" = "app" }).bytes, (try f.script.entry(io, 1)).body.bytes);
 }
 
 test "value null is a null result; a reply without value is a protocol violation" {

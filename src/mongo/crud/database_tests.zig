@@ -32,8 +32,8 @@ const Fixture = struct {
         return .init(f.served.client(), "app", &f.ids);
     }
 
-    fn body(f: *Fixture, i: usize) bson.RawDocument {
-        return f.script.entry(testing.io, i).body;
+    fn body(f: *Fixture, i: usize) !bson.RawDocument {
+        return (try f.script.entry(testing.io, i)).body;
     }
 };
 
@@ -58,9 +58,9 @@ test "Collection.drop sends drop; a collection that is not there, code 26, is no
     var failure: ?bson.OwnedDocument = null;
 
     try users.drop(io, .of(.root), .{ .allocator = testing.allocator });
-    try expectBody(bson.literal(.{ .drop = "users", .@"$db" = "app" }), f.body(0));
+    try expectBody(bson.literal(.{ .drop = "users", .@"$db" = "app" }), try f.body(0));
     try users.drop(io, .of(.root), .{ .allocator = testing.allocator, .comment = .{ .string = "clean" }, .diagnostics = &d, .failure_reply = &failure });
-    try expectBody(bson.literal(.{ .drop = "users", .comment = "clean", .@"$db" = "app" }), f.body(1));
+    try expectBody(bson.literal(.{ .drop = "users", .comment = "clean", .@"$db" = "app" }), try f.body(1));
     try testing.expect(d.server == null);
     try testing.expectEqualStrings("", d.message());
     try testing.expect(failure == null);
@@ -87,8 +87,8 @@ test "listCollections sends listCollections: 1 with its options, and its comment
         try testing.expectEqualSlices(u8, users.bytes, (try collections.next(io, .of(.root))).?.bytes);
         try testing.expectEqualSlices(u8, posts.bytes, (try collections.next(io, .of(.root))).?.bytes);
         try testing.expect(try collections.next(io, .of(.root)) == null);
-        try expectBody(bson.literal(.{ .listCollections = 1, .cursor = .{}, .@"$db" = "app" }), f.body(0));
-        try expectBody(bson.literal(.{ .getMore = @as(i64, 42), .collection = "$cmd.listCollections", .@"$db" = "app" }), f.body(1));
+        try expectBody(bson.literal(.{ .listCollections = 1, .cursor = .{}, .@"$db" = "app" }), try f.body(0));
+        try expectBody(bson.literal(.{ .getMore = @as(i64, 42), .collection = "$cmd.listCollections", .@"$db" = "app" }), try f.body(1));
     }
     const collections = try db.listCollections(io, .of(.root), .{
         .allocator = testing.allocator,
@@ -108,8 +108,8 @@ test "listCollections sends listCollections: 1 with its options, and its comment
         .cursor = .{ .batchSize = 1 },
         .comment = "tables",
         .@"$db" = "app",
-    }), f.body(2));
-    try expectBody(bson.literal(.{ .getMore = @as(i64, 42), .collection = "$cmd.listCollections", .batchSize = 1, .@"$db" = "app" }), f.body(3));
+    }), try f.body(2));
+    try expectBody(bson.literal(.{ .getMore = @as(i64, 42), .collection = "$cmd.listCollections", .batchSize = 1, .@"$db" = "app" }), try f.body(3));
 }
 
 test "Database.drop sends dropDatabase: 1" {
@@ -120,9 +120,9 @@ test "Database.drop sends dropDatabase: 1" {
     defer f.deinit();
     const db = f.db();
     try db.drop(io, .of(.root), .{ .allocator = testing.allocator });
-    try expectBody(bson.literal(.{ .dropDatabase = 1, .@"$db" = "app" }), f.body(0));
+    try expectBody(bson.literal(.{ .dropDatabase = 1, .@"$db" = "app" }), try f.body(0));
     try db.drop(io, .of(.root), .{ .allocator = testing.allocator, .comment = .{ .string = "reset" } });
-    try expectBody(bson.literal(.{ .dropDatabase = 1, .comment = "reset", .@"$db" = "app" }), f.body(1));
+    try expectBody(bson.literal(.{ .dropDatabase = 1, .comment = "reset", .@"$db" = "app" }), try f.body(1));
     var d: mongo.Diagnostics = .{};
     try testing.expectError(error.CommandFailed, db.drop(io, .of(.root), .{ .allocator = testing.allocator, .diagnostics = &d }));
     try testing.expectEqual(@as(i32, 13), d.server.?.code);
@@ -149,7 +149,7 @@ test "runCommand sends the command as it is, in each of the three forms, with th
         const got = try db.runCommand(io, .of(.root), command, .{ .allocator = testing.allocator });
         defer got.deinit();
         try testing.expectEqualSlices(u8, reply.bytes, got.bytes);
-        try expectBody(bson.literal(.{ .count = "users", .query = .{ .active = true }, .@"$db" = "app" }), f.body(i));
+        try expectBody(bson.literal(.{ .count = "users", .query = .{ .active = true }, .@"$db" = "app" }), try f.body(i));
     }
 }
 
@@ -169,7 +169,7 @@ test "runCommand is bound by the rules of the client only" {
     // Without a deadline, maxTimeMS of the command goes as it is.
     const stats = try db.runCommand(io, .of(.root), .{ .dbStats = 1, .maxTimeMS = 5 }, .{ .allocator = testing.allocator });
     stats.deinit();
-    try expectBody(bson.literal(.{ .dbStats = 1, .maxTimeMS = 5, .@"$db" = "app" }), f.body(0));
+    try expectBody(bson.literal(.{ .dbStats = 1, .maxTimeMS = 5, .@"$db" = "app" }), try f.body(0));
     var failure: ?bson.OwnedDocument = null;
     try testing.expectError(error.CommandFailed, db.runCommand(io, .of(.root), .{ .dbStats = 1 }, .{ .allocator = testing.allocator, .diagnostics = &d, .failure_reply = &failure }));
     defer failure.?.deinit();
@@ -197,11 +197,11 @@ test "runCursorCommand opens the cursor of the command as it is, with the batch 
         try testing.expectEqualSlices(u8, bob.bytes, (try docs.next(io, .of(.root))).?.bytes);
         try testing.expect(try docs.next(io, .of(.root)) == null);
     }
-    try expectBody(bson.literal(.{ .find = "users", .filter = .{}, .batchSize = 1, .@"$db" = "app" }), f.body(0));
-    try expectBody(bson.literal(.{ .getMore = @as(i64, 42), .collection = "users", .batchSize = 5, .@"$db" = "app" }), f.body(1));
+    try expectBody(bson.literal(.{ .find = "users", .filter = .{}, .batchSize = 1, .@"$db" = "app" }), try f.body(0));
+    try expectBody(bson.literal(.{ .getMore = @as(i64, 42), .collection = "users", .batchSize = 5, .@"$db" = "app" }), try f.body(1));
     const raw = try db.runCursorCommand(io, .of(.root), bson.literal(.{ .aggregate = "users", .pipeline = [0]i32{}, .cursor = .{} }), .{ .allocator = testing.allocator });
     raw.deinit(io);
-    try expectBody(bson.literal(.{ .aggregate = "users", .pipeline = [0]i32{}, .cursor = .{}, .@"$db" = "app" }), f.body(2));
+    try expectBody(bson.literal(.{ .aggregate = "users", .pipeline = [0]i32{}, .cursor = .{}, .@"$db" = "app" }), try f.body(2));
 }
 
 test "ok 0 of runCursorCommand and listCollections is CommandFailed, with the reply in failure_reply" {

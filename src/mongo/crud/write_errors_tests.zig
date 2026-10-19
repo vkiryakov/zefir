@@ -26,7 +26,7 @@ fn tenDocuments() [10]Doc {
 fn sentIds(io: Io, script: *Script, buffer: []bson.ObjectId) ![]bson.ObjectId {
     var n: usize = 0;
     for (0..script.received(io)) |i| {
-        var docs = script.entry(io, i).sequence.?.documents();
+        var docs = (try script.entry(io, i)).sequence.?.documents();
         while (docs.next()) |doc| : (n += 1) buffer[n] = (try doc.get("_id")).?.object_id;
     }
     return buffer[0..n];

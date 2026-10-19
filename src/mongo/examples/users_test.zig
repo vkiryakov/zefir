@@ -36,7 +36,7 @@ test "a sign-up is one insert of one document, with the _id made first" {
 
     // The journal: one command came, an insert into shop.users.
     try testing.expectEqual(@as(usize, 1), script.received(io));
-    const insert = script.entry(io, 0);
+    const insert = try script.entry(io, 0);
     try testing.expectEqualStrings("insert", insert.name);
     try testing.expectEqualStrings("shop", insert.database);
     try testing.expectEqualStrings("users", (try insert.body.get("insert")).?.string);
@@ -102,7 +102,7 @@ test "byEmail asks for one document by its e-mail, and reads it into a User" {
     try testing.expect(ann._id == null);
 
     // findOne is a find of the e-mail, for one document in one batch.
-    const find = script.entry(io, 0);
+    const find = try script.entry(io, 0);
     try testing.expectEqualStrings("find", find.name);
     try testing.expectEqualStrings("ann@example.com", (try find.body.getPath("filter.email")).?.string);
     try testing.expectEqual(@as(i64, 1), try (try find.body.get("limit")).?.asI64());

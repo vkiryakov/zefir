@@ -135,11 +135,11 @@ fn readToEnd(io: Io) !void {
     try testing.expectEqual(@as(usize, 0), driver.stats().open_cursors);
 
     const script = &served.script;
-    try testing.expect(try script.entry(io, 0).body.get("maxTimeMS") != null);
+    try testing.expect(try (try script.entry(io, 0)).body.get("maxTimeMS") != null);
     try testing.expectEqual(@as(usize, 2), script.count(io, "getMore"));
     try testing.expectEqual(@as(usize, 0), script.count(io, "killCursors"));
     const get_more = bson.literal(.{ .getMore = @as(i64, 7), .collection = "fs.chunks", .batchSize = 2, .comment = .{ .tag = "chunks" }, .@"$db" = "app" });
-    for (1..3) |i| try testing.expectEqualSlices(u8, get_more.bytes, script.entry(io, i).body.bytes);
+    for (1..3) |i| try testing.expectEqualSlices(u8, get_more.bytes, (try script.entry(io, i)).body.bytes);
 }
 
 test "a reply without a cursor is ProtocolViolation; a refusal is CommandFailed, with the reply in failure_reply; neither leaves a cursor" {
@@ -368,7 +368,7 @@ fn kills(io: Io) !void {
     for (0..4) |i| {
         var seen: usize = 0;
         for (0..script.received(io)) |at| {
-            const entry = script.entry(io, at);
+            const entry = try script.entry(io, at);
             if (!eql(entry.name, "killCursors")) continue;
             if (seen == i) try testing.expectEqualSlices(u8, kill.bytes, entry.body.bytes);
             seen += 1;
@@ -430,8 +430,8 @@ fn closeKills(io: Io) !void {
     // The connection of the finds, idle, sent the kills: no new one.
     try testing.expectEqual(accepted, script.acceptedConnections());
     try testing.expectEqual(@as(usize, 2), script.count(io, "killCursors"));
-    const first = script.entry(io, script.received(io) - 2);
-    const second = script.entry(io, script.received(io) - 1);
+    const first = try script.entry(io, script.received(io) - 2);
+    const second = try script.entry(io, script.received(io) - 1);
     try testing.expectEqualSlices(u8, bson.literal(.{ .killCursors = "a", .cursors = .{ @as(i64, 21), @as(i64, 23) }, .@"$db" = "app" }).bytes, first.body.bytes);
     try testing.expectEqualSlices(u8, bson.literal(.{ .killCursors = "b", .cursors = .{@as(i64, 22)}, .@"$db" = "app" }).bytes, second.body.bytes);
     try testing.expectEqual(@as(u32, 1), first.connection);
@@ -483,7 +483,7 @@ fn closeKillsOnNew(io: Io) !void {
     try call.await(io);
     try testing.expectEqual(@as(u32, 2), script.acceptedConnections());
     try testing.expectEqual(@as(usize, 1), script.count(io, "killCursors"));
-    const kill = script.entry(io, script.received(io) - 1);
+    const kill = try script.entry(io, script.received(io) - 1);
     try testing.expectEqualSlices(u8, bson.literal(.{ .killCursors = "a", .cursors = .{@as(i64, 21)}, .@"$db" = "app" }).bytes, kill.body.bytes);
     try testing.expectEqual(@as(u32, 2), kill.connection);
 }

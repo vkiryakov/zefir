@@ -116,7 +116,7 @@ fn batches(io: Io) !void {
     var at: usize = 0;
     var budgets: [4]i64 = undefined;
     for ([_]usize{ 3, 3, 3, 1 }, 0..) |size, i| {
-        const entry = script.entry(io, i);
+        const entry = try script.entry(io, i);
         const sequence = entry.sequence.?;
         try testing.expectEqualStrings("documents", sequence.identifier);
         var items = sequence.documents();

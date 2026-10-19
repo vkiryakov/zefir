@@ -35,8 +35,8 @@ const Fixture = struct {
         return mongo.Database.init(f.served.client(), "app", &f.ids).collection("users");
     }
 
-    fn body(f: *Fixture, i: usize) bson.RawDocument {
-        return f.script.entry(testing.io, i).body;
+    fn body(f: *Fixture, i: usize) !bson.RawDocument {
+        return (try f.script.entry(testing.io, i)).body;
     }
 };
 
@@ -103,8 +103,8 @@ test "aggregate sends its pipeline with cursor: {}, the list and its stages in a
             .pipeline = .{ .{ .@"$match" = .{ .n = 1 } }, .{ .@"$sort" = .{ .n = -1 } } },
             .cursor = .{},
             .@"$db" = "app",
-        }), f.body(2 * i));
-        try expectBody(bson.literal(.{ .getMore = @as(i64, 42), .collection = "users", .@"$db" = "app" }), f.body(2 * i + 1));
+        }), try f.body(2 * i));
+        try expectBody(bson.literal(.{ .getMore = @as(i64, 42), .collection = "users", .@"$db" = "app" }), try f.body(2 * i + 1));
     }
 }
 
@@ -117,7 +117,7 @@ test "aggregate(.{}) sends pipeline: []" {
     const docs = try f.users().aggregate(io, .of(.root), .{}, .{ .allocator = testing.allocator });
     defer docs.deinit(io);
     try testing.expect(try docs.next(io, .of(.root)) == null);
-    try expectBody(bson.literal(.{ .aggregate = "users", .pipeline = [0]i32{}, .cursor = .{}, .@"$db" = "app" }), f.body(0));
+    try expectBody(bson.literal(.{ .aggregate = "users", .pipeline = [0]i32{}, .cursor = .{}, .@"$db" = "app" }), try f.body(0));
 }
 
 test "the options of aggregate go out in their order, the batch size in cursor and with the comment to each getMore" {
@@ -149,8 +149,8 @@ test "the options of aggregate go out in their order, the batch size in cursor a
         .comment = "report",
         .let = .{ .x = 1 },
         .@"$db" = "app",
-    }), f.body(0));
-    try expectBody(bson.literal(.{ .getMore = @as(i64, 42), .collection = "users", .batchSize = 1, .comment = "report", .@"$db" = "app" }), f.body(1));
+    }), try f.body(0));
+    try expectBody(bson.literal(.{ .getMore = @as(i64, 42), .collection = "users", .batchSize = 1, .comment = "report", .@"$db" = "app" }), try f.body(1));
 }
 
 test "a pipeline that ends in $out or $merge sends no batch size in its cursor, so that a batch size of 0 cannot keep it from running" {
@@ -162,14 +162,14 @@ test "a pipeline that ends in $out or $merge sends no batch size in its cursor, 
     const users = f.users();
     const out = try users.aggregate(io, .of(.root), .{ .{ .@"$match" = .{} }, .{ .@"$out" = "archive" } }, .{ .allocator = testing.allocator, .batch_size = 0 });
     out.deinit(io);
-    try expectBody(bson.literal(.{ .aggregate = "users", .pipeline = .{ .{ .@"$match" = .{} }, .{ .@"$out" = "archive" } }, .cursor = .{}, .@"$db" = "app" }), f.body(0));
+    try expectBody(bson.literal(.{ .aggregate = "users", .pipeline = .{ .{ .@"$match" = .{} }, .{ .@"$out" = "archive" } }, .cursor = .{}, .@"$db" = "app" }), try f.body(0));
     const merge = try users.aggregate(io, .of(.root), .{.{ .@"$merge" = .{ .into = "archive" } }}, .{ .allocator = testing.allocator, .batch_size = 5 });
     merge.deinit(io);
-    try expectBody(bson.literal(.{ .aggregate = "users", .pipeline = .{.{ .@"$merge" = .{ .into = "archive" } }}, .cursor = .{}, .@"$db" = "app" }), f.body(1));
+    try expectBody(bson.literal(.{ .aggregate = "users", .pipeline = .{.{ .@"$merge" = .{ .into = "archive" } }}, .cursor = .{}, .@"$db" = "app" }), try f.body(1));
     // $out in the middle is not the end of the pipeline.
     const middle = try users.aggregate(io, .of(.root), .{ .{ .@"$out" = "x" }, .{ .@"$match" = .{} } }, .{ .allocator = testing.allocator, .batch_size = 0 });
     middle.deinit(io);
-    try expectBody(bson.literal(.{ .aggregate = "users", .pipeline = .{ .{ .@"$out" = "x" }, .{ .@"$match" = .{} } }, .cursor = .{ .batchSize = 0 }, .@"$db" = "app" }), f.body(2));
+    try expectBody(bson.literal(.{ .aggregate = "users", .pipeline = .{ .{ .@"$out" = "x" }, .{ .@"$match" = .{} } }, .cursor = .{ .batchSize = 0 }, .@"$db" = "app" }), try f.body(2));
 }
 
 fn countReply(comptime n: anytype) bson.RawDocument {
@@ -198,7 +198,7 @@ test "countDocuments sends $match, $skip, $limit and $group, the filter in any f
             .pipeline = .{ .{ .@"$match" = .{ .n = .{ .@"$gte" = 1 } } }, .{ .@"$group" = .{ ._id = 1, .n = .{ .@"$sum" = 1 } } } },
             .cursor = .{},
             .@"$db" = "app",
-        }), f.body(i));
+        }), try f.body(i));
     }
 
     try testing.expectEqual(@as(u64, 3), try users.countDocuments(io, .of(.root), .{}, .{
@@ -217,7 +217,7 @@ test "countDocuments sends $match, $skip, $limit and $group, the filter in any f
         .hint = .{ .n = 1 },
         .comment = "how many",
         .@"$db" = "app",
-    }), f.body(4));
+    }), try f.body(4));
     // The cursor held a single batch: no getMore, no killCursors.
     try testing.expectEqual(@as(usize, 5), f.script.received(io));
 }
@@ -234,7 +234,7 @@ test "countDocuments(.{}) sends $match: {}, and an empty cursor counts 0" {
         .pipeline = .{ .{ .@"$match" = .{} }, .{ .@"$group" = .{ ._id = 1, .n = .{ .@"$sum" = 1 } } } },
         .cursor = .{},
         .@"$db" = "app",
-    }), f.body(0));
+    }), try f.body(0));
 }
 
 test "a count is n as an int32, an int64 or a whole double; anything else is a protocol violation" {
@@ -276,9 +276,9 @@ test "estimatedDocumentCount sends count without a query, and returns n" {
     defer f.deinit();
     const users = f.users();
     try testing.expectEqual(@as(u64, 7), try users.estimatedDocumentCount(io, .of(.root), .{ .allocator = testing.allocator }));
-    try expectBody(bson.literal(.{ .count = "users", .@"$db" = "app" }), f.body(0));
+    try expectBody(bson.literal(.{ .count = "users", .@"$db" = "app" }), try f.body(0));
     try testing.expectEqual(@as(u64, 7), try users.estimatedDocumentCount(io, .of(.root), .{ .allocator = testing.allocator, .comment = .{ .string = "size" } }));
-    try expectBody(bson.literal(.{ .count = "users", .comment = "size", .@"$db" = "app" }), f.body(1));
+    try expectBody(bson.literal(.{ .count = "users", .comment = "size", .@"$db" = "app" }), try f.body(1));
 }
 
 test "distinct sends key and query, the filter in any form, and returns values as an array" {
@@ -301,7 +301,7 @@ test "distinct sends key and query, the filter in any form, and returns values a
         try testing.expectEqualStrings("Ann", (try it.next()).?.value.string);
         try testing.expectEqualStrings("Bob", (try it.next()).?.value.string);
         try testing.expect(try it.next() == null);
-        try expectBody(bson.literal(.{ .distinct = "users", .key = "name", .query = .{ .active = true }, .@"$db" = "app" }), f.body(i));
+        try expectBody(bson.literal(.{ .distinct = "users", .key = "name", .query = .{ .active = true }, .@"$db" = "app" }), try f.body(i));
     }
 
     const values = try users.distinct(io, .of(.root), "name", .{}, .{
@@ -310,7 +310,7 @@ test "distinct sends key and query, the filter in any form, and returns values a
         .comment = .{ .string = "names" },
     });
     values.deinit();
-    try expectBody(bson.literal(.{ .distinct = "users", .key = "name", .query = .{}, .collation = .{ .locale = "en", .strength = 1 }, .comment = "names", .@"$db" = "app" }), f.body(4));
+    try expectBody(bson.literal(.{ .distinct = "users", .key = "name", .query = .{}, .collation = .{ .locale = "en", .strength = 1 }, .comment = "names", .@"$db" = "app" }), try f.body(4));
 
     var d: mongo.Diagnostics = .{};
     same.reply = Script.ok;

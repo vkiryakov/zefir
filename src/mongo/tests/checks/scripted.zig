@@ -150,7 +150,8 @@ pub fn s2(job: *Job) Job.Error!void {
     const kills = script.count(io, "killCursors");
     try job.expect(kills == 1, "the cursor closed in its middle sent {d} killCursors, not 1", .{kills});
     for (0..script.received(io)) |i| {
-        const entry = script.entry(io, i);
+        // The journal only grows: command i is there.
+        const entry = script.entry(io, i) catch break;
         if (eql(u8, entry.name, "getMore") or eql(u8, entry.name, "killCursors")) {
             try job.expect((entry.body.get("maxTimeMS") catch null) == null, "{s} came with maxTimeMS; it goes in no getMore and no killCursors", .{entry.name});
         }

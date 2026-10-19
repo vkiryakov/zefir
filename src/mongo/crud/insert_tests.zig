@@ -51,7 +51,7 @@ test "insertOne sends insert with the document in a section of kind 1 and report
         var result = try users.insertOne(io, .of(.root), doc, .{ .allocator = testing.allocator });
         defer result.deinit(testing.allocator);
         try testing.expectEqual(@as(i32, 1), result.inserted_id.int32);
-        const entry = script.entry(io, i);
+        const entry = try script.entry(io, i);
         try testing.expectEqualStrings("insert", entry.name);
         try testing.expectEqualStrings("app", entry.database);
         try testing.expectEqualSlices(u8, bson.literal(.{ .insert = "users", .ordered = true, .@"$db" = "app" }).bytes, entry.body.bytes);
@@ -82,7 +82,7 @@ test "insertOne gives a document without _id the next ObjectId of the database f
         try testing.expectEqualSlices(u8, &.{ 1, 2, 3, 4, 5 }, made.bytes[4..9]);
         try testing.expectEqual(@as(u24, @intCast(i)), std.mem.readInt(u24, made.bytes[9..12], .big));
         var buffer: [1]bson.RawDocument = undefined;
-        const docs = try sent(script.entry(io, i), &buffer);
+        const docs = try sent(try script.entry(io, i), &buffer);
         const expected = try bson.encode(testing.allocator, .{ ._id = made, .name = "Ann" }, .{});
         defer expected.deinit();
         try testing.expectEqualSlices(u8, expected.bytes, docs[0].bytes);
@@ -111,10 +111,10 @@ test "insertOne sends bypassDocumentValidation only when true, and the comment" 
         .comment = "seed",
         .ordered = true,
         .@"$db" = "app",
-    }).bytes, script.entry(io, 0).body.bytes);
+    }).bytes, (try script.entry(io, 0)).body.bytes);
     var other = try users.insertOne(io, .of(.root), .{ ._id = 2 }, .{ .allocator = testing.allocator, .bypass_document_validation = false });
     other.deinit(testing.allocator);
-    try testing.expectEqualSlices(u8, bson.literal(.{ .insert = "users", .ordered = true, .@"$db" = "app" }).bytes, script.entry(io, 1).body.bytes);
+    try testing.expectEqualSlices(u8, bson.literal(.{ .insert = "users", .ordered = true, .@"$db" = "app" }).bytes, (try script.entry(io, 1)).body.bytes);
 }
 
 test "insertMany of 10 documents at a maxWriteBatchSize of 3 goes out as four commands, with the _ids it made" {
@@ -139,7 +139,7 @@ test "insertMany of 10 documents at a maxWriteBatchSize of 3 goes out as four co
 
     var at: usize = 0;
     for ([_]usize{ 3, 3, 3, 1 }, 0..) |count, i| {
-        const entry = script.entry(io, i);
+        const entry = try script.entry(io, i);
         try testing.expectEqualSlices(u8, bson.literal(.{ .insert = "users", .ordered = true, .@"$db" = "app" }).bytes, entry.body.bytes);
         var buffer: [3]bson.RawDocument = undefined;
         const batch = try sent(entry, &buffer);
@@ -193,7 +193,7 @@ test "insertMany takes a slice, an array and a tuple, of documents in any of the
         try testing.expectEqual(@as(usize, 2), result.answered);
         try testing.expectEqual(@as(i32, 1), result.inserted_ids[0].int32);
         try testing.expectEqual(@as(i32, 2), result.inserted_ids[1].int32);
-        const entry = script.entry(io, calls);
+        const entry = try script.entry(io, calls);
         const body = if (calls % 2 == 0)
             bson.literal(.{ .insert = "users", .ordered = true, .@"$db" = "app" })
         else

@@ -1702,7 +1702,8 @@ test "a reply that comes after the deadline is Timeout: the command went out, wi
     // The command went out, so the server may have run it.
     try testing.expectEqual(mongo.Outcome.may_have_executed, mongo.outcome(error.Timeout));
     // With it went maxTimeMS, the time left: the server gives up then too.
-    const max_time_ms = try (try script.entry(io, 0).body.get("maxTimeMS")).?.asI64();
+    const sent = try script.entry(io, 0);
+    const max_time_ms = try (try sent.body.get("maxTimeMS")).?.asI64();
     try testing.expect(max_time_ms >= 1 and max_time_ms <= 200);
 }
 
@@ -1920,9 +1921,9 @@ four batches.
 The journal gives `received(io)`, the number of commands that came;
 `entry(io, i)`, command number `i`: its `name`, `database` and `body`,
 the `sequence` of its documents for a write, and the number of the
-`connection` it came on; and `count(io, name)`, the commands of one name.
-With it a test checks what your code sent, and that it sent nothing
-twice.
+`connection` it came on, or `error.NotReceived` while fewer commands
+came; and `count(io, name)`, the commands of one name. With it a test
+checks what your code sent, and that it sent nothing twice.
 
 The users of the shop, as an application keeps them:
 
@@ -2021,7 +2022,7 @@ test "a sign-up is one insert of one document, with the _id made first" {
 
     // The journal: one command came, an insert into shop.users.
     try testing.expectEqual(@as(usize, 1), script.received(io));
-    const insert = script.entry(io, 0);
+    const insert = try script.entry(io, 0);
     try testing.expectEqualStrings("insert", insert.name);
     try testing.expectEqualStrings("shop", insert.database);
     try testing.expectEqualStrings("users", (try insert.body.get("insert")).?.string);
@@ -2087,7 +2088,7 @@ test "byEmail asks for one document by its e-mail, and reads it into a User" {
     try testing.expect(ann._id == null);
 
     // findOne is a find of the e-mail, for one document in one batch.
-    const find = script.entry(io, 0);
+    const find = try script.entry(io, 0);
     try testing.expectEqualStrings("find", find.name);
     try testing.expectEqualStrings("ann@example.com", (try find.body.getPath("filter.email")).?.string);
     try testing.expectEqual(@as(i64, 1), try (try find.body.get("limit")).?.asI64());

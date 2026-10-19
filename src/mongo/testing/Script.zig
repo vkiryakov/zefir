@@ -10,7 +10,7 @@
 //! defer script.deinit();
 //! script.hello.max_write_batch_size = 3; // tiny limits split writes
 //! // ... serve it with FakeServer, and run the code under test on a client of it ...
-//! try std.testing.expectEqualStrings("getMore", script.entry(io, 1).name);
+//! try std.testing.expectEqualStrings("getMore", (try script.entry(io, 1)).name);
 //! ```
 //!
 //! The ready handlers cover what tests need most: `Queue` answers in the
@@ -214,10 +214,12 @@ pub fn received(s: *Script, io: Io) usize {
     return s.journal.items.len;
 }
 
-/// The command number `i` of the journal, from 0.
-pub fn entry(s: *Script, io: Io, i: usize) Entry {
+/// The command number `i` of the journal, from 0, or `error.NotReceived`
+/// while the journal holds no more than `i` commands.
+pub fn entry(s: *Script, io: Io, i: usize) error{NotReceived}!Entry {
     s.mutex.lockUncancelable(io);
     defer s.mutex.unlock(io);
+    if (i >= s.journal.items.len) return error.NotReceived;
     return s.journal.items[i].entry;
 }
 

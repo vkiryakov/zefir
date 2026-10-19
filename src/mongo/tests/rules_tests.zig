@@ -93,7 +93,7 @@ fn callersMaxTime(io: Io) !void {
     const command: mongo.Command = .{ .database = "app", .body = bson.literal(.{ .find = "users", .maxTimeMS = 100 }) };
     const reply = try c.runCommand(io, .of(.root), command, .{ .allocator = testing.allocator });
     reply.deinit();
-    try testing.expectEqualSlices(u8, bson.literal(.{ .find = "users", .maxTimeMS = 100, .@"$db" = "app" }).bytes, served.script.entry(io, 0).body.bytes);
+    try testing.expectEqualSlices(u8, bson.literal(.{ .find = "users", .maxTimeMS = 100, .@"$db" = "app" }).bytes, (try served.script.entry(io, 0)).body.bytes);
     const ctx = core.Context.root.withDeadline(.after(Io.Clock.awake.now(io), .fromSeconds(60)));
     var d: mongo.Diagnostics = .{};
     try testing.expectError(error.InvalidArgument, c.runCommand(io, .of(ctx), command, .{ .allocator = testing.allocator, .diagnostics = &d }));
@@ -212,7 +212,7 @@ fn interrupted(io: Io) !void {
     // The cursor is freed, and its deinit sends killCursors.
     try testing.expectError(error.Interrupted, c.openCursor(io, op, .{ .database = "app", .body = find }, .{}));
     try testing.expectEqual(@as(usize, 1), served.script.count(io, "killCursors"));
-    try testing.expectEqualSlices(u8, bson.literal(.{ .killCursors = "users", .cursors = .{@as(i64, 9)}, .@"$db" = "app" }).bytes, served.script.entry(io, 2).body.bytes);
+    try testing.expectEqualSlices(u8, bson.literal(.{ .killCursors = "users", .cursors = .{@as(i64, 9)}, .@"$db" = "app" }).bytes, (try served.script.entry(io, 2)).body.bytes);
     canceler.token = .init;
     // The result goes to partial.
     var partial: mongo.WriteResult = .{};

@@ -69,7 +69,7 @@ fn relayed(io: Io) !void {
     // batches of exactly 3.
     var full: usize = 0;
     for (0..script.received(io)) |i| {
-        const entry = script.entry(io, i);
+        const entry = try script.entry(io, i);
         const sequence = entry.sequence orelse continue;
         var docs = sequence.documents();
         var n: usize = 0;
@@ -83,7 +83,7 @@ fn relayed(io: Io) !void {
     // getMores of 7.
     var sevens: usize = 0;
     for (0..script.received(io)) |i| {
-        const entry = script.entry(io, i);
+        const entry = try script.entry(io, i);
         if (!std.mem.eql(u8, entry.name, "getMore")) continue;
         const size = (try entry.body.get("batchSize")) orelse continue;
         if (try size.asI64() == 7) sevens += 1;

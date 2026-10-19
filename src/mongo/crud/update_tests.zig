@@ -87,7 +87,7 @@ test "updateOne sends one statement {q, u} in updates and reports matched and mo
         try testing.expectEqual(@as(u64, 1), result.matched);
         try testing.expectEqual(@as(u64, 1), result.modified);
         try testing.expect(result.upserted_id == null);
-        const entry = f.script.entry(io, i);
+        const entry = try f.script.entry(io, i);
         try testing.expectEqualStrings("update", entry.name);
         try testing.expectEqualSlices(u8, bson.literal(.{ .update = "users", .ordered = true, .@"$db" = "app" }).bytes, entry.body.bytes);
         try testing.expectEqualSlices(u8, expected.bytes, (try item(entry, "updates")).bytes);
@@ -108,12 +108,12 @@ test "updateMany sends multi: true; updateOne and replaceOne send no multi" {
         .q = .{ .age = .{ .@"$lt" = 18 } },
         .u = .{ .@"$set" = .{ .minor = true } },
         .multi = true,
-    }).bytes, (try item(f.script.entry(io, 0), "updates")).bytes);
+    }).bytes, (try item(try f.script.entry(io, 0), "updates")).bytes);
 
     var replaced = try users.replaceOne(io, .of(.root), .{ ._id = 1 }, .{ .name = "Ann" }, .{ .allocator = testing.allocator });
     defer replaced.deinit(testing.allocator);
-    try testing.expectEqualSlices(u8, bson.literal(.{ .q = .{ ._id = 1 }, .u = .{ .name = "Ann" } }).bytes, (try item(f.script.entry(io, 1), "updates")).bytes);
-    try testing.expectEqualSlices(u8, bson.literal(.{ .update = "users", .ordered = true, .@"$db" = "app" }).bytes, f.script.entry(io, 1).body.bytes);
+    try testing.expectEqualSlices(u8, bson.literal(.{ .q = .{ ._id = 1 }, .u = .{ .name = "Ann" } }).bytes, (try item(try f.script.entry(io, 1), "updates")).bytes);
+    try testing.expectEqualSlices(u8, bson.literal(.{ .update = "users", .ordered = true, .@"$db" = "app" }).bytes, (try f.script.entry(io, 1)).body.bytes);
 }
 
 test "an update that is a list is a pipeline: a tuple, an array or a slice of stages" {
@@ -132,7 +132,7 @@ test "an update that is a list is a pipeline: a tuple, an array or a slice of st
     }, 0..) |pipeline, i| {
         var result = try users.updateOne(io, .of(.root), .{}, pipeline, .{ .allocator = testing.allocator });
         result.deinit(testing.allocator);
-        try testing.expectEqualSlices(u8, expected.bytes, (try item(f.script.entry(io, i), "updates")).bytes);
+        try testing.expectEqualSlices(u8, expected.bytes, (try item(try f.script.entry(io, i), "updates")).bytes);
     }
 }
 
@@ -153,7 +153,7 @@ test "the options of an update: upsert, arrayFilters, collation and hint in the 
         .comment = .{ .string = "cap the grades" },
     });
     result.deinit(testing.allocator);
-    const entry = f.script.entry(io, 0);
+    const entry = try f.script.entry(io, 0);
     try testing.expectEqualSlices(u8, bson.literal(.{
         .update = "users",
         .let = .{ .top = 100 },
@@ -181,8 +181,8 @@ test "the options of an update: upsert, arrayFilters, collation and hint in the 
         .bypass_document_validation = false,
     });
     replaced.deinit(testing.allocator);
-    try testing.expectEqualSlices(u8, bson.literal(.{ .update = "users", .ordered = true, .@"$db" = "app" }).bytes, f.script.entry(io, 1).body.bytes);
-    try testing.expectEqualSlices(u8, bson.literal(.{ .q = .{ ._id = 1 }, .u = .{ .n = 1 }, .hint = .{ ._id = 1 } }).bytes, (try item(f.script.entry(io, 1), "updates")).bytes);
+    try testing.expectEqualSlices(u8, bson.literal(.{ .update = "users", .ordered = true, .@"$db" = "app" }).bytes, (try f.script.entry(io, 1)).body.bytes);
+    try testing.expectEqualSlices(u8, bson.literal(.{ .q = .{ ._id = 1 }, .u = .{ .n = 1 }, .hint = .{ ._id = 1 } }).bytes, (try item(try f.script.entry(io, 1), "updates")).bytes);
 }
 
 test "an upsert reports the _id that the server made, and matched without it" {
@@ -234,7 +234,7 @@ test "an update that does not start with an operator, or is empty, is InvalidArg
     // An empty replacement leaves the document its _id alone.
     var emptied = try users.replaceOne(io, .of(.root), .{ ._id = 1 }, .{}, .{ .allocator = testing.allocator });
     emptied.deinit(testing.allocator);
-    try testing.expectEqualSlices(u8, bson.literal(.{ .q = .{ ._id = 1 }, .u = .{} }).bytes, (try item(f.script.entry(io, 0), "updates")).bytes);
+    try testing.expectEqualSlices(u8, bson.literal(.{ .q = .{ ._id = 1 }, .u = .{} }).bytes, (try item(try f.script.entry(io, 0), "updates")).bytes);
 }
 
 test "deleteOne sends limit 1 and deleteMany limit 0; deleteMany(.{}) sends q: {}, and the result reports deleted" {
@@ -251,7 +251,7 @@ test "deleteOne sends limit 1 and deleteMany limit 0; deleteMany(.{}) sends q: {
         var result = try users.deleteOne(io, .of(.root), filter, .{ .allocator = testing.allocator });
         defer result.deinit(testing.allocator);
         try testing.expectEqual(@as(u64, 5), result.deleted);
-        const entry = f.script.entry(io, i);
+        const entry = try f.script.entry(io, i);
         try testing.expectEqualStrings("delete", entry.name);
         try testing.expectEqualSlices(u8, bson.literal(.{ .delete = "users", .ordered = true, .@"$db" = "app" }).bytes, entry.body.bytes);
         try testing.expectEqualSlices(u8, bson.literal(.{ .q = .{ ._id = 1 }, .limit = 1 }).bytes, (try item(entry, "deletes")).bytes);
@@ -260,7 +260,7 @@ test "deleteOne sends limit 1 and deleteMany limit 0; deleteMany(.{}) sends q: {
     var all = try users.deleteMany(io, .of(.root), .{}, .{ .allocator = testing.allocator });
     defer all.deinit(testing.allocator);
     try testing.expectEqual(@as(u64, 5), all.deleted);
-    try testing.expectEqualSlices(u8, bson.literal(.{ .q = .{}, .limit = 0 }).bytes, (try item(f.script.entry(io, 4), "deletes")).bytes);
+    try testing.expectEqualSlices(u8, bson.literal(.{ .q = .{}, .limit = 0 }).bytes, (try item(try f.script.entry(io, 4), "deletes")).bytes);
 
     var with_options = try users.deleteMany(io, .of(.root), .{ .age = .{ .@"$lt" = 18 } }, .{
         .allocator = testing.allocator,
@@ -270,7 +270,7 @@ test "deleteOne sends limit 1 and deleteMany limit 0; deleteMany(.{}) sends q: {
         .comment = .{ .string = "minors" },
     });
     defer with_options.deinit(testing.allocator);
-    const entry = f.script.entry(io, 5);
+    const entry = try f.script.entry(io, 5);
     try testing.expectEqualSlices(u8, bson.literal(.{
         .delete = "users",
         .let = .{ .min = 18 },
@@ -294,7 +294,7 @@ test "a filter with a null field sends BSON null, so that it matches only docume
     const email: ?[]const u8 = null;
     var result = try f.users().deleteMany(io, .of(.root), .{ .email = email }, .{ .allocator = testing.allocator });
     defer result.deinit(testing.allocator);
-    try testing.expectEqualSlices(u8, bson.literal(.{ .q = .{ .email = null }, .limit = 0 }).bytes, (try item(f.script.entry(io, 0), "deletes")).bytes);
+    try testing.expectEqualSlices(u8, bson.literal(.{ .q = .{ .email = null }, .limit = 0 }).bytes, (try item(try f.script.entry(io, 0), "deletes")).bytes);
 }
 
 test "a bad collection name, filter, collation or comment is InvalidArgument, and nothing is sent" {
