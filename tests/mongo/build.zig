@@ -5,7 +5,9 @@
 //!   zig build e2e     start the servers, run the tests
 //!   zig build check   build the tests without running them; no servers
 //!                     needed, so CI runs it on every system
-//!   zig build up      only start the servers
+//!   zig build up      only start the servers; it also unpauses
+//!                     mongo-stall, which a run that died in the middle
+//!                     of a test leaves paused
 //!   zig build down    stop the servers
 //!
 //! `up` and `down` touch the mongo services only: the NATS servers of the
@@ -16,7 +18,7 @@
 const std = @import("std");
 
 /// The services of the profile `mongo` that the tests use.
-const services = [_][]const u8{ "mongo-plain", "mongo-auth", "mongo-ghost" };
+const services = [_][]const u8{ "mongo-plain", "mongo-auth", "mongo-stall", "mongo-restart", "mongo-ghost" };
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -26,6 +28,24 @@ pub fn build(b: *std.Build) void {
 
     const compose_file = zefir.path("docker-compose.yml");
     const up = compose(b, compose_file, &.{ "up", "--detach", "--wait" });
+    // A run that died while a test held mongo-stall paused leaves it
+    // paused, and `up` cannot start a paused container. Unpause it first
+    // and wait until its health check passes again, for `up --wait` takes
+    // it as unhealthy until then. When it runs, or is not there,
+    // `docker unpause` fails, and that is fine.
+    const unpause = b.addSystemCommand(&.{
+        "sh", "-c",
+        \\if docker unpause zefir-mongo-e2e-stall >/dev/null 2>&1; then
+        \\  i=0
+        \\  while [ $i -lt 100 ] && [ "$(docker inspect --format '{{.State.Health.Status}}' zefir-mongo-e2e-stall)" != healthy ]; do
+        \\    sleep 0.1
+        \\    i=$((i + 1))
+        \\  done
+        \\fi
+        \\true
+    });
+    unpause.has_side_effects = true;
+    up.step.dependOn(&unpause.step);
     b.step("up", "Start the mongod servers and wait until they are healthy").dependOn(&up.step);
     const down = compose(b, compose_file, &.{"down"});
     b.step("down", "Stop the mongod servers").dependOn(&down.step);

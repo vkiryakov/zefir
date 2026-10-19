@@ -34,6 +34,10 @@
 #   27117  mongo-plain: no authentication, test commands on for fail points
 #   27118  mongo-auth: --auth with the users of tests/mongo/init/users.js,
 #          test commands on
+#   27119  mongo-stall: no authentication, for tests that pause it: a
+#          server that takes commands and answers none
+#   27120  mongo-restart: no authentication, test commands on, for tests
+#          that restart it
 #   27121  mongo-ghost: a member of the replica set "ghost" that is never
 #          initialized (RSGhost), for the native driver to refuse
 
@@ -167,6 +171,19 @@ services:
       interval: 1s
       timeout: 5s
       retries: 60
+
+  # The tests pause and unpause it by this name.
+  mongo-stall:
+    <<: *mongo
+    container_name: zefir-mongo-e2e-stall
+    ports: ["127.0.0.1:27119:27017"]
+
+  # The tests restart it by this name, with calls out that sleep on it.
+  mongo-restart:
+    <<: *mongo
+    container_name: zefir-mongo-e2e-restart
+    command: ["mongod", "--setParameter", "enableTestCommands=1"]
+    ports: ["127.0.0.1:27120:27017"]
 
   # A member of a replica set without rs.initiate(): its hello says
   # isreplicaset, and the native driver refuses it.
