@@ -3,10 +3,12 @@
 //! The property: any bytes are either refused by `RawDocument.init`, or
 //! give a document whose walk ends, and nothing panics. Walking every
 //! element through the iterators gets through exactly when `validate`
-//! passes. A valid document prints as valid JSON and comes out of
-//! `Builder` byte for byte; an invalid one prints as "<invalid BSON>".
-//! Each input is also tried as the elements of a document, so that the
-//! fuzzer does not have to find a matching length first.
+//! passes. A valid document prints as valid JSON, comes out of `Builder`
+//! byte for byte, and `bson.decode` reads it into structs of every kind
+//! of field, or refuses it with an error; an invalid one prints as
+//! "<invalid BSON>". Each input is also tried as the elements of a
+//! document, so that the fuzzer does not have to find a matching length
+//! first.
 
 const std = @import("std");
 const testing = std.testing;
@@ -36,6 +38,45 @@ fn check(bytes: []const u8) !void {
     if (!valid) return testing.expectEqualStrings(ejson.invalid, text);
     try testing.expect(try std.json.validate(testing.allocator, text));
     try rebuild(doc);
+    try decodeAll(doc);
+}
+
+/// Structs that `decodeAll` reads documents into: the field "a", the key
+/// of the vectors, as each kind of type that `bson.decode` takes, and
+/// fields of other names inside.
+const Targets = .{
+    struct { a: i32 },
+    struct { a: ?u16 = null, b: i64 = 0 },
+    struct { a: f32 = 0, x: ?f64 = null },
+    struct { a: []const u8 = "", @"0": enum { x, y } = .x },
+    struct { a: bool = false, b: bson.Value = .null },
+    struct { a: ?struct { b: i32 = 0, a: ?[]const u8 = null } = null },
+    struct { a: []const ?i64 = &.{} },
+    struct { a: [2]bool = .{ false, false } },
+    struct { a: bson.RawDocument = .empty },
+    struct { a: bson.Value = .null },
+    struct { a: ?bson.ObjectId = null, b: ?bson.DateTime = null, x: ?bson.Timestamp = null },
+    struct { a: ?bson.Binary = null, b: ?bson.Decimal128 = null, x: ?bson.Regex = null },
+    struct { a: ?bson.DbPointer = null, b: ?bson.JavaScriptWithScope = null, x: ?bson.Null = null },
+};
+
+/// Reads the valid document `doc` into each of `Targets`, with the strings
+/// copied and borrowed, unknown keys skipped and refused: a value, or an
+/// error of decode, and nothing panics. A struct without fields takes a
+/// document only when unknown keys are skipped or the document is empty.
+fn decodeAll(doc: bson.RawDocument) !void {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    inline for (Targets) |T| {
+        for ([_]bool{ true, false }) |copy| {
+            _ = bson.decode(T, a, doc, .{ .copy_strings = copy }) catch {};
+            _ = bson.decode(T, a, doc, .{ .copy_strings = copy, .unknown_fields = .fail }) catch {};
+        }
+    }
+    _ = try bson.decode(struct {}, a, doc, .{});
+    const taken = if (bson.decode(struct {}, a, doc, .{ .unknown_fields = .fail })) |_| true else |_| false;
+    try testing.expectEqual(doc.bytes.len == bson.RawDocument.empty.bytes.len, taken);
 }
 
 /// Walks every element through the iterators, into documents, arrays and
