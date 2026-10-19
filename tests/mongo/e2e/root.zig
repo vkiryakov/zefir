@@ -27,6 +27,13 @@ pub const servers = struct {
     pub const ghost_port: u16 = 27121;
 };
 
+// The helpers of docker below run it on std's test `Io`, whatever runtime
+// the test is on, and hold the thread that calls them until docker
+// returns. Called from a task of zio, they hold its executor: with one
+// executor, no other task of the runtime runs meanwhile, for the seconds
+// of a `docker restart` among them, so a call out sees the restart only
+// once it is over.
+
 /// Runs `docker` with `args` and fails unless it succeeds.
 pub fn docker(args: []const []const u8) !void {
     testing.allocator.free(try dockerOutput(args));
