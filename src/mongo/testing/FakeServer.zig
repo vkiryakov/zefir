@@ -63,8 +63,10 @@ pub fn uri(listener: *const net.Server, buffer: []u8) error{NoSpaceLeft}![]const
 /// Serves `script` on `listener` until canceled, which ends the
 /// connections too: run it in a task of its own and cancel it at the end
 /// of the test. While the script refuses connections, a new connection is
-/// closed at once.
+/// closed at once. A `refuse_connections` answer ends every connection
+/// being served, as a server that goes away does.
 pub fn serve(io: Io, listener: *net.Server, script: *Script) Io.Cancelable!void {
+    var served: Served = .{};
     var group: Io.Group = .init;
     defer group.cancel(io);
     while (true) {
@@ -78,7 +80,7 @@ pub fn serve(io: Io, listener: *net.Server, script: *Script) Io.Cancelable!void 
             continue;
         };
         _ = script.accepted.fetchAdd(1, .release);
-        group.concurrent(io, serveConnection, .{ io, stream, script, number }) catch stream.close(io);
+        group.concurrent(io, serveConnection, .{ io, stream, script, number, &served }) catch stream.close(io);
     }
 }
 
@@ -92,15 +94,55 @@ const Connection = struct {
     write_buffer: [16 * 1024]u8,
     /// The requestID of the next reply.
     next_id: i32 = 1,
+    /// In `Served.connections`.
+    node: std.DoublyLinkedList.Node = .{},
 };
 
-fn serveConnection(io: Io, stream: net.Stream, script: *Script, number: u32) void {
+/// The connections that `serve` serves, so that a server that goes away
+/// ends all of them.
+const Served = struct {
+    mutex: Io.Mutex = .init,
+    connections: std.DoublyLinkedList = .{},
+
+    fn add(s: *Served, io: Io, conn: *Connection) void {
+        s.mutex.lockUncancelable(io);
+        defer s.mutex.unlock(io);
+        s.connections.append(&conn.node);
+    }
+
+    fn remove(s: *Served, io: Io, conn: *Connection) void {
+        s.mutex.lockUncancelable(io);
+        defer s.mutex.unlock(io);
+        s.connections.remove(&conn.node);
+    }
+
+    /// Shuts every connection down both ways, from the task of any of
+    /// them: its client sees the end of the stream, and its read ends.
+    /// Each task closes its own socket.
+    fn shutAll(s: *Served, io: Io) void {
+        const protection = io.swapCancelProtection(.blocked);
+        defer _ = io.swapCancelProtection(protection);
+        s.mutex.lockUncancelable(io);
+        defer s.mutex.unlock(io);
+        var it = s.connections.first;
+        while (it) |node| : (it = node.next) {
+            const conn: *Connection = @fieldParentPtr("node", node);
+            conn.stream.shutdown(io, .both) catch {};
+        }
+    }
+};
+
+fn serveConnection(io: Io, stream: net.Stream, script: *Script, number: u32, served: *Served) void {
     defer stream.close(io);
     const conn = script.allocator.create(Connection) catch return;
     defer script.allocator.destroy(conn);
     conn.* = .{ .stream = stream, .reader = undefined, .writer = undefined, .read_buffer = undefined, .write_buffer = undefined };
     conn.reader = stream.reader(io, &conn.read_buffer);
     conn.writer = stream.writer(io, &conn.write_buffer);
+    served.add(io, conn);
+    defer served.remove(io, conn);
+    // Accepted just as the server went away, after `shutAll`: it ends too.
+    if (script.isRefusing()) return;
     var arena: std.heap.ArenaAllocator = .init(script.allocator);
     defer arena.deinit();
     var handshaken = false;
@@ -133,6 +175,7 @@ fn serveConnection(io: Io, stream: net.Stream, script: *Script, number: u32) voi
             .close_connection => return,
             .refuse_connections => {
                 script.refuseConnections();
+                served.shutAll(io);
                 return;
             },
             .malformed => |defect| writeMalformed(conn, &incoming, defect) catch return,

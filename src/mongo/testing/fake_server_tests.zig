@@ -335,6 +335,32 @@ fn closeAndRefuse(io: Io, port: u16, script: *Script) !void {
     try expectOk(try third.command("app", bson.literal(.{ .count = "users" })));
 }
 
+test "refuse_connections closes every connection of the server, not only the one of the command" {
+    const io = testing.io;
+    var queue: Script.Queue = .{ .answers = &.{.refuse_connections} };
+    var script: Script = .init(testing.allocator, queue.handler());
+    defer script.deinit();
+    var serving: Serving = undefined;
+    try serving.start(io, &script);
+    defer serving.stop(io);
+    try within5s(io, refuseClosesAll, .{ io, serving.port() });
+}
+
+fn refuseClosesAll(io: Io, port: u16) !void {
+    var idle: Client = undefined;
+    try idle.open(io, port);
+    defer idle.close();
+    (try idle.command("admin", bson.literal(.{ .isMaster = 1 }))).deinit();
+    var asking: Client = undefined;
+    try asking.open(io, port);
+    defer asking.close();
+    (try asking.command("admin", bson.literal(.{ .isMaster = 1 }))).deinit();
+    _ = try asking.send("app", bson.literal(.{ .count = "users" }), null);
+    try asking.expectClosed();
+    // The server went away: the connection that sat idle ends too.
+    try idle.expectClosed();
+}
+
 test "a malformed reply breaks OP_MSG as it says, and the server goes on serving the connection" {
     const io = testing.io;
     const kinds = [_]Script.Malformed{ .wrong_response_to, .unknown_required_flag, .sequence_in_reply, .truncated };

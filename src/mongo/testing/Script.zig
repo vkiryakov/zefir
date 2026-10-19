@@ -137,9 +137,10 @@ pub const Answer = union(enum) {
     delayed: Delayed,
     /// Close the connection after reading the command, without a reply.
     close_connection,
-    /// Close the connection without a reply, and refuse new connections
-    /// until `acceptConnections`: the server is gone. Calls in flight see
-    /// a lost connection, later calls an unavailable server.
+    /// Close the connection without a reply, end every other connection
+    /// of the server, and refuse new ones until `acceptConnections`: the
+    /// server is gone. Calls in flight see a lost connection, later calls
+    /// an unavailable server.
     refuse_connections,
     /// Answer with a message that breaks OP_MSG: the client takes it as a
     /// protocol violation.
@@ -255,7 +256,8 @@ pub fn acceptedConnections(s: *const Script) u32 {
 }
 
 /// Refuses new connections until `acceptConnections`, as
-/// `Answer.refuse_connections` does.
+/// `Answer.refuse_connections` does; the connections being served stay
+/// open.
 pub fn refuseConnections(s: *Script) void {
     s.refusing.store(true, .release);
 }
