@@ -2,10 +2,11 @@
 //! failCommand, limited to the appName of one client, makes mongod fail
 //! the hello or the SCRAM conversation of that client's next connection.
 //!
-//! - A hello that the server cuts is a network error before
-//!   authentication: `error.Unavailable` with the labels that CMAP gives a
-//!   server that may be overloaded, SystemOverloadedError and
-//!   RetryableError, and the pool keeps its other connections.
+//! - A hello that the server cuts is a network error while the connection
+//!   opens: `error.Unavailable` with the labels that CMAP gives a server
+//!   that may be overloaded, SystemOverloadedError and RetryableError, and
+//!   the pool keeps its other connections. So is a SCRAM conversation that
+//!   the server cuts.
 //! - A SCRAM conversation that the server refuses is
 //!   `error.AuthenticationFailed`, and the pool is cleared: the server
 //!   would refuse every new connection alike. The call after the clear
@@ -170,6 +171,51 @@ fn helloCut(io: Io) !void {
     var expected: [192]u8 = undefined;
     try testing.expectEqualStrings(try cutHello(&expected), d.message());
     try testing.expectEqual(mongo.Diagnostics.Phase.handshake, d.phase.?);
+    try expectOverloaded(&d);
+
+    // Nothing was cleared: the connection of the call out stays, and
+    // serves the next call.
+    holding.await(io);
+    try holder.result;
+    var stats = c.stats();
+    try testing.expectEqual(@as(u64, 0), stats.clears);
+    try testing.expectEqual(@as(u64, 0), stats.generation);
+    try testing.expectEqual(@as(usize, 1), stats.connections);
+    try run(io, c, ping);
+    stats = c.stats();
+    try testing.expectEqual(@as(usize, 1), stats.connections);
+    try testing.expectEqual(@as(u64, 0), stats.clears);
+}
+
+test "a new connection whose SCRAM conversation the server cuts is Unavailable with the labels of overload, and the pool keeps its other connection" {
+    try e2e.onZio(scramCut);
+}
+
+fn scramCut(io: Io) !void {
+    var watch: mongo.Client = undefined;
+    var watch_uri: [160]u8 = undefined;
+    try observer(io, &watch, &watch_uri);
+    defer watch.deinit();
+    defer failPointOff(io, &watch);
+    var driver: mongo.Client = undefined;
+    var buffer: [160]u8 = undefined;
+    try clientOf(io, &driver, &buffer, "zefir-e2e-sasl-cut");
+    defer driver.deinit();
+    try connectOk(io, &driver);
+    const c = &driver;
+    var holder: Holder = .{ .c = c };
+    var holding = try io.concurrent(Holder.hold, .{ &holder, io });
+    defer holding.cancel(io);
+    try awaitInUse(io, c, 1);
+
+    // The next call opens a connection, whose proof of SCRAM the server
+    // takes and answers by closing the connection.
+    try failOnce(io, &watch, .{ .failCommands = .{"saslContinue"}, .appName = "zefir-e2e-sasl-cut", .closeConnection = true });
+    var d: mongo.Diagnostics = .{};
+    try testing.expectError(error.Unavailable, c.runCommand(io, .of(within(io, .fromSeconds(10))), ping, .{ .allocator = testing.allocator, .diagnostics = &d }));
+    var expected: [96]u8 = undefined;
+    try testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "the server at 127.0.0.1:{d} closed the connection", .{e2e.servers.auth_port}), d.message());
+    try testing.expectEqual(mongo.Diagnostics.Phase.authenticate, d.phase.?);
     try expectOverloaded(&d);
 
     // Nothing was cleared: the connection of the call out stays, and

@@ -164,7 +164,7 @@ pub fn run(conn: *Connection, setup: Setup, gpa: Allocator, d: ?*Diagnostics) Er
 }
 
 /// Gives `d` the errorLabels that CMAP gives, since 2026, to a network
-/// error or a timeout while a connection opens, before authentication:
+/// error or a timeout while a connection opens, hello and SCRAM included:
 /// SystemOverloadedError and RetryableError, since the server may be
 /// overloaded and the call may go again. They go to `Diagnostics.server`,
 /// with code 0: no server answered.
@@ -355,13 +355,19 @@ fn continueWith(conn: *Connection, db: []const u8, conversation_id: i32, payload
 
 /// One SASL command on `conn`, to the user's database. ok 0 is the
 /// server's refusal: code 18 (AuthenticationFailed), 334
-/// (MechanismUnavailable) and the rest.
+/// (MechanismUnavailable) and the rest. A network error is one of opening
+/// the connection, as during hello: `error.Unavailable` with the labels of
+/// overload, and the pool is not cleared.
 fn sasl(conn: *Connection, db: []const u8, body: bson.RawDocument, gpa: Allocator, d: ?*Diagnostics) Error!bson.OwnedDocument {
     const reply = conn.exchange(.{ .database = db, .body = body }, gpa, null, d) catch |err| {
         if (d) |x| x.phase = .authenticate;
         return switch (err) {
             error.Interrupted => error.Canceled,
             error.OutOfMemory => error.OutOfMemory,
+            error.ConnectionLost, error.Timeout => {
+                markOverloaded(d);
+                return error.Unavailable;
+            },
             else => error.Unavailable,
         };
     };

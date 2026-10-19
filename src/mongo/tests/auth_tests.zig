@@ -176,17 +176,84 @@ fn brokenServer(io: Io) !void {
     try expectBroken(io, .{ .tamper = .no_signature }, &.{.sasl_continue}, "the server's final message of SCRAM holds no signature (v=)");
 }
 
-test "a server that hangs up during SCRAM leaves the client Unavailable" {
+test "a server that hangs up during SCRAM is Unavailable with the labels of overload, as during hello" {
     try within5s(testing.io, hangUp, .{testing.io});
 }
 
 fn hangUp(io: Io) !void {
-    var server: ScramServer = .{ .tamper = .hang_up };
-    var d: Diagnostics = .{};
-    try testing.expectError(error.Unavailable, openAs(io, &server, credentials(null), &d));
-    try testing.expectEqual(Diagnostics.Phase.authenticate, d.phase.?);
-    // A network error after hello: no labels of overload.
-    try testing.expect(d.server == null);
+    for ([_]ScramServer{ .{ .tamper = .hang_up }, .{ .tamper = .hang_up_at_start, .speculative = false } }) |broken| {
+        var server = broken;
+        var d: Diagnostics = .{};
+        try testing.expectError(error.Unavailable, openAs(io, &server, credentials(null), &d));
+        try testing.expectEqual(Diagnostics.Phase.authenticate, d.phase.?);
+        try expectOverloaded(&d);
+    }
+}
+
+/// The labels that CMAP gives a network error or a timeout while a
+/// connection opens, with code 0: no server answered.
+fn expectOverloaded(d: *const Diagnostics) !void {
+    const server = d.server orelse return error.TestNoLabels;
+    try testing.expectEqual(@as(i32, 0), server.code);
+    try testing.expect(server.labels.contains(.system_overloaded_error));
+    try testing.expect(server.labels.contains(.retryable_error));
+}
+
+test "a new connection whose SCRAM the server cuts after saslStart, or leaves unanswered, is Unavailable with the labels of overload, and the pool is not cleared" {
+    try within5s(testing.io, cutAfterStart, .{testing.io});
+}
+
+/// The client connects through a server that takes the user; its idle
+/// connection perishes at once (maxIdleTimeMS=1), so that the next call
+/// opens another, through the server of `broken`. A third server, which
+/// takes the user again, serves the call after it: the pool is not
+/// paused, so that call opens a connection at once and goes through.
+fn cutAfterStart(io: Io) !void {
+    for ([_]ScramServer{
+        .{ .tamper = .hang_up_at_start, .speculative = false },
+        .{ .tamper = .stall_at_start, .speculative = false },
+    }) |broken| {
+        var listener = try FakeServer.listen(io);
+        defer listener.deinit(io);
+        var first: ScramServer = .{};
+        var first_task = try io.concurrent(ScramServer.serve, .{ &first, io, &listener, 1 });
+        defer first_task.cancel(io) catch {};
+        var buffer: [128]u8 = undefined;
+        const uri = try std.fmt.bufPrint(&buffer, "mongodb://app:secret@127.0.0.1:{d}/?maxIdleTimeMS=1&connectTimeoutMS=200", .{FakeServer.port(&listener)});
+        var driver: Client = try .init(testing.allocator, io, .{ .uri = uri });
+        defer driver.deinit();
+        try driver.connect(io, .root, null);
+        // The idle connection perishes, and the client closes it at the
+        // next checkout: the first server is done.
+        try mongo.testing.sleepAtLeast(io, .fromMilliseconds(5));
+
+        var cut = broken;
+        var cut_task = try io.concurrent(ScramServer.serve, .{ &cut, io, &listener, 1 });
+        defer cut_task.cancel(io) catch {};
+        var d: Diagnostics = .{};
+        try testing.expectError(error.Unavailable, driver.runCommand(io, .of(.root), ping, .{ .allocator = testing.allocator, .diagnostics = &d }));
+        try expectOverloaded(&d);
+        if (broken.tamper == .hang_up_at_start) {
+            try testing.expectEqual(Diagnostics.Phase.authenticate, d.phase.?);
+        } else {
+            try testing.expectEqual(Diagnostics.Phase.connect, d.phase.?);
+        }
+        try first_task.await(io);
+        try cut_task.await(io);
+        try testing.expectEqualSlices(Step, &.{.sasl_start}, cut.seen.sequence());
+        var stats = driver.stats();
+        try testing.expectEqual(@as(u64, 0), stats.clears);
+        try testing.expectEqual(@as(u64, 0), stats.generation);
+
+        var again: ScramServer = .{};
+        var again_task = try io.concurrent(ScramServer.serve, .{ &again, io, &listener, 1 });
+        defer again_task.cancel(io) catch {};
+        const reply = try driver.runCommand(io, .of(.root), ping, .{ .allocator = testing.allocator });
+        reply.deinit();
+        stats = driver.stats();
+        try testing.expectEqual(@as(usize, 1), stats.connections);
+        try testing.expectEqual(@as(u64, 0), stats.clears);
+    }
 }
 
 test "a user with ',' and '=' goes escaped in SCRAM and as it is in saslSupportedMechs, and the user's database is where SASL goes" {

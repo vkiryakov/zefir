@@ -55,6 +55,10 @@ pub const Tamper = enum {
     no_signature,
     /// It hangs up when the proof comes.
     hang_up,
+    /// It hangs up when saslStart comes.
+    hang_up_at_start,
+    /// It reads saslStart and answers nothing, until the client hangs up.
+    stall_at_start,
 };
 
 /// What came after hello, in order.
@@ -147,6 +151,14 @@ fn serveConnection(s: *ScramServer, peer: *FakeServer.Peer) !void {
         } else if (std.mem.eql(u8, request.name, "saslStart")) {
             s.seen.add(.sasl_start);
             s.seen.database.set(request.database);
+            switch (s.tamper) {
+                .hang_up_at_start => return,
+                .stall_at_start => {
+                    _ = try peer.readToEnd();
+                    return;
+                },
+                else => {},
+            }
             try s.saslStart(&b, request.body, &exchange);
         } else if (std.mem.eql(u8, request.name, "saslContinue")) {
             s.seen.database.set(request.database);
