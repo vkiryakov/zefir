@@ -206,7 +206,7 @@ say. With it, an instance hears the others, not itself.
 Add Zefir to your `build.zig.zon`; nats ships since v0.5.0:
 
 ```sh
-zig fetch --save git+https://github.com/vkiryakov/zefir#v0.8.0
+zig fetch --save git+https://github.com/vkiryakov/zefir#v0.9.0
 ```
 
 The client needs an `std.Io` with real concurrency. For services, add zio

@@ -4,6 +4,7 @@ const validator_cases = @import("src/validator/testdata/cases.zig");
 const rpc_guide = @import("src/rpc/examples/cases.zig");
 const http_cases = @import("src/http/tests/cases.zig");
 const http_guide = @import("src/http/examples/cases.zig");
+const mongo_guide = @import("src/mongo/examples/cases.zig");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -59,16 +60,20 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // nats sends the package version in CONNECT; build.zig.zon is its only source.
-    const nats_options = b.addOptions();
-    nats_options.addOption([]const u8, "version", manifest.version);
+    // nats sends the package version in CONNECT, and zefir-mongo in hello;
+    // build.zig.zon is its only source. One module of the options serves
+    // both: two of the same content would be one file in two modules of the
+    // umbrella.
+    const version_options = b.addOptions();
+    version_options.addOption([]const u8, "version", manifest.version);
+    const build_options = version_options.createModule();
     const nats = b.addModule("zefir-nats", .{
         .root_source_file = b.path("src/nats/root.zig"),
         .target = target,
         .optimize = optimize,
         .sanitize_thread = tsan,
     });
-    nats.addOptions("build_options", nats_options);
+    nats.addImport("build_options", build_options);
 
     // nats only for its adapter, rpc_nats.ZefirNats: Zig compiles that file
     // only for an application that uses it.
@@ -84,20 +89,6 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // The access logs of rpc on zefir-log: a module of their own, so that
-    // zefir-rpc does not depend on log.
-    const rpc_log = b.addModule("zefir-rpc-log", .{
-        .root_source_file = b.path("src/rpc-log/root.zig"),
-        .target = target,
-        .optimize = optimize,
-        .sanitize_thread = tsan,
-        .imports = &.{
-            .{ .name = "rpc", .module = rpc },
-            .{ .name = "core", .module = core },
-            .{ .name = "log", .module = log },
-        },
-    });
-
     const orm = b.addModule("zefir-orm", .{
         .root_source_file = b.path("src/orm/root.zig"),
         .target = target,
@@ -107,6 +98,19 @@ pub fn build(b: *std.Build) void {
             .{ .name = "log", .module = log },
         },
     });
+
+    // MongoDB for zefir applications: the client, BSON and the
+    // collection API.
+    const mongo = b.addModule("zefir-mongo", .{
+        .root_source_file = b.path("src/mongo/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+        .imports = &.{
+            .{ .name = "core", .module = core },
+        },
+    });
+    mongo.addImport("build_options", build_options);
 
     const http = b.addModule("zefir-http", .{
         .root_source_file = b.path("src/http/root.zig"),
@@ -119,7 +123,7 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // Umbrella module: @import("zefir").core, .log, .confy, .validator, .rpc, .rpc_nats, .rpc_log, .orm, .nats, .http
+    // Umbrella module: @import("zefir").core, .log, .confy, .validator, .rpc, .rpc_nats, .orm, .mongo, .nats, .http
     const zefir = b.addModule("zefir", .{
         .root_source_file = b.path("src/zefir.zig"),
         .target = target,
@@ -132,8 +136,8 @@ pub fn build(b: *std.Build) void {
             .{ .name = "validator", .module = validator },
             .{ .name = "rpc", .module = rpc },
             .{ .name = "rpc-nats", .module = rpc_nats },
-            .{ .name = "rpc-log", .module = rpc_log },
             .{ .name = "orm", .module = orm },
+            .{ .name = "mongo", .module = mongo },
             .{ .name = "nats", .module = nats },
             .{ .name = "http", .module = http },
         },
@@ -150,8 +154,8 @@ pub fn build(b: *std.Build) void {
     const test_validator = addModuleTestStep(b, test_step, "validator");
     const test_rpc = addModuleTestStep(b, test_step, "rpc");
     const test_rpc_nats = addModuleTestStep(b, test_step, "rpc-nats");
-    const test_rpc_log = addModuleTestStep(b, test_step, "rpc-log");
     const test_orm = addModuleTestStep(b, test_step, "orm");
+    const test_mongo = addModuleTestStep(b, test_step, "mongo");
     const test_nats = addModuleTestStep(b, test_step, "nats");
     const test_http = addModuleTestStep(b, test_step, "http");
     const test_zefir = addModuleTestStep(b, test_step, "zefir");
@@ -160,8 +164,8 @@ pub fn build(b: *std.Build) void {
     // where usize has 32 bits.
     const validator_compile_step = b.step("compile-validator-tests", "Build the validator's test binaries for -Dtarget without running them");
     for (
-        [_]*std.Build.Module{ core, log, confy, validator, rpc, rpc_nats, rpc_log, orm, nats, http, zefir },
-        [_]*std.Build.Step{ test_core, test_log, test_confy, test_validator, test_rpc, test_rpc_nats, test_rpc_log, test_orm, test_nats, test_http, test_zefir },
+        [_]*std.Build.Module{ core, log, confy, validator, rpc, rpc_nats, orm, mongo, nats, http, zefir },
+        [_]*std.Build.Step{ test_core, test_log, test_confy, test_validator, test_rpc, test_rpc_nats, test_orm, test_mongo, test_nats, test_http, test_zefir },
     ) |module, module_test_step| {
         const tests = b.addTest(.{ .root_module = module });
         module_test_step.dependOn(&addRun(b, tests, tsan).step);
@@ -302,7 +306,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = .Debug,
     });
-    panic_nats.addOptions("build_options", nats_options);
+    panic_nats.addOptions("build_options", version_options);
     const moved_client = b.addExecutable(.{
         .name = "nats-panic-moved-client",
         .root_module = b.createModule(.{
@@ -320,6 +324,46 @@ pub fn build(b: *std.Build) void {
     // with 3, so a program that printed the text and returned fails.
     run_moved_client.expectExitCode(3);
     test_nats.dependOn(&run_moved_client.step);
+
+    // mongo panic programs: a client moved after connect(), a call on
+    // another std.Io, a cursor used by two tasks at once and
+    // Client.deinit() with cursors left panic in safe builds. Each program
+    // must print the panic message and end in its own panic handler, which
+    // exits with code 3 instead of aborting. They get their own Debug copy
+    // of mongo, whatever -Doptimize says.
+    const panic_mongo = b.createModule(.{
+        .root_source_file = b.path("src/mongo/root.zig"),
+        .target = target,
+        .optimize = .Debug,
+        .imports = &.{
+            .{ .name = "core", .module = panic_core },
+        },
+    });
+    panic_mongo.addOptions("build_options", version_options);
+    for ([_][2][]const u8{
+        .{ "moved_client", "panic: zefir-mongo: Client moved after connect(): keep it where connect() ran (see the guide)" },
+        .{ "another_io", "panic: zefir-mongo: a call on another std.Io than the client's: pass the io of Client.init" },
+        .{ "cursor_two_tasks", "panic: zefir-mongo: a cursor used by two tasks at once: one task at a time calls next, close and deinit of a cursor" },
+        .{ "deinit_live_cursor", "panic: zefir-mongo: Client.deinit() with cursors left: deinit every cursor before the client" },
+    }) |case| {
+        const exe = b.addExecutable(.{
+            .name = b.fmt("mongo-panic-{s}", .{case[0]}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(b.fmt("src/mongo/testdata/panic/{s}.zig", .{case[0]})),
+                .target = target,
+                .optimize = .Debug,
+                .imports = &.{
+                    .{ .name = "mongo", .module = panic_mongo },
+                },
+            }),
+        });
+        const run = b.addRunArtifact(exe);
+        run.expectStdErrMatch(case[1]);
+        // expectStdErrMatch accepts any exit: only the panic handler exits
+        // with 3, so a program that printed the text and returned fails.
+        run.expectExitCode(3);
+        test_mongo.dependOn(&run.step);
+    }
 
     // log compile errors: each test of the file must fail to compile with
     // the message next to its name. The filter compiles one test at a time;
@@ -631,6 +675,116 @@ pub fn build(b: *std.Build) void {
         test_rpc_nats.dependOn(&compile.step);
     }
 
+    // The checks S and L of zefir-mongo's client (design §5): a test module
+    // of its own over the public API, which tests/mongo takes through
+    // dependency.path and runs on zio against mongod, layer L included.
+    // Here it runs layer S, against scripted servers on loopback.
+    const mongo_checks = b.addTest(.{
+        .name = "mongo-checks",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/mongo/tests/checks.zig"),
+            .target = target,
+            .optimize = optimize,
+            .sanitize_thread = tsan,
+            .imports = &.{
+                .{ .name = "mongo", .module = mongo },
+                .{ .name = "core", .module = core },
+            },
+        }),
+    });
+    test_mongo.dependOn(&addRun(b, mongo_checks, tsan).step);
+
+    // mongo compile errors: types that the BSON codec cannot write or read.
+    // Each test of the file must fail to compile with the message next to
+    // its name, which names the field; the filter compiles one test at a
+    // time. A type declared in the file is named after the file.
+    const mongo_compile_errors = b.createModule(.{
+        .root_source_file = b.path("src/mongo/tests/compile_errors.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+        .imports = &.{
+            .{ .name = "mongo", .module = mongo },
+        },
+    });
+    for ([_][2][]const u8{
+        .{ "u64", "bson.encode: field 'n' is u64, which BSON has no type for: its integers are signed; use i64" },
+        .{ "usize", "bson.encode: field 'n' is usize, whose size depends on the target: use i64 or i32" },
+        .{ "isize", "bson.decode: field 'n' is isize, whose size depends on the target: use i64 or i32" },
+        .{ "c_int", "bson.encode: field 'n' is c_int, whose size depends on the target: use an integer of a fixed width, such as i32" },
+        .{ "non-exhaustive enum", "bson.encode: field 'kind' is compile_errors.Open, a non-exhaustive enum: a value without a tag has no name to write; make the enum exhaustive" },
+        .{ "union", "bson.decode: field 'shape' is compile_errors.Shape: unions are not supported; a field of any BSON type is a bson.Value" },
+        .{ "pointer", "bson.encode: field 'owner' is *const compile_errors.User: pass the value itself, not a pointer to it" },
+        .{ "many-item pointer", "bson.encode: field 'name' is [*]const u8, which has no length: pass a slice" },
+        .{ "type that holds itself", "bson.encode: field 'children[]' is compile_errors.Node inside itself: a type that holds itself is not supported" },
+        .{ "optional of an optional", "bson.encode: field 'n' is ??u32: BSON null cannot tell the two nulls apart" },
+        .{ "path of a nested field", "bson.decode: field 'items[].owner.id' is u64, which BSON has no type for: its integers are signed; use i64" },
+        .{ "put of a u64", "bson.Builder.put: the value is u64, which BSON has no type for: its integers are signed; use i64" },
+        .{ "literal of a string that is not UTF-8", "bson.literal: the string of 'a' is not UTF-8" },
+        .{ "literal of a regular expression that is not UTF-8", "bson.literal: a key or a regular expression is not UTF-8" },
+        .{ "integer literal beyond int64", "bson.encode: field 'n' is 9223372036854775808, which does not fit int64" },
+        .{ "tuple as a document", "bson.encode: a tuple is an array, not a document: give its values names, such as .{ .a = x }" },
+        .{ "number as a document", "bson.encode: a document is a struct with named fields, such as .{ .name = name }, or a bson.RawDocument; got u32" },
+        .{ "deprecated type to encode", "bson.encode: field 'p' is bson.types.DbPointer, a deprecated type: it is read, never written" },
+        .{ "tuple to decode", "bson.decode: field 'pair' is struct { i32, i32 }, a tuple: decode needs the names of fields; use a struct, or a slice for an array" },
+        .{ "comptime field to decode", "bson.decode: field 'version' is a comptime field: decode fills only fields known at run time" },
+        .{ "mutable slice to decode", "bson.decode: field 'name' is []u8: decode gives const slices; use []const u8" },
+    }, 0..) |case, i| {
+        const compile = b.addTest(.{
+            .name = b.fmt("mongo-compile-error-{d}", .{i}),
+            .root_module = mongo_compile_errors,
+            .filters = &.{case[0]},
+        });
+        compile.expect_errors = .{ .contains = case[1] };
+        test_mongo.dependOn(&compile.step);
+    }
+
+    // mongo compile errors of the collection API: documents of types that
+    // its operations cannot take. Each message names the operation, the
+    // argument and the field.
+    const mongo_crud_errors = b.createModule(.{
+        .root_source_file = b.path("src/mongo/tests/crud_errors.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+        .imports = &.{
+            .{ .name = "mongo", .module = mongo },
+        },
+    });
+    for ([_][2][]const u8{
+        .{ "insertOne of a number", "mongo.Collection.insertOne: document: a document is a struct with named fields, such as .{ .name = name }, or a bson.RawDocument; got u32" },
+        .{ "insertOne of a struct with a u64", "mongo.Collection.insertOne: document: field 'n' is u64, which BSON has no type for: its integers are signed; use i64" },
+        .{ "insertOne of a tuple", "mongo.Collection.insertOne: document: a tuple is an array, not a document: give its values names, such as .{ .a = x }" },
+        .{ "insertMany of one document", "mongo.Collection.insertMany: documents: a list of documents is a slice, an array or a tuple of them; got crud_errors.User" },
+        .{ "insertMany with a pointer in a document of a tuple", "mongo.Collection.insertMany: documents[1]: field 'owner' is *const crud_errors.User: pass the value itself, not a pointer to it" },
+        .{ "insertMany of a slice of numbers", "mongo.Collection.insertMany: documents[]: a document is a struct with named fields, such as .{ .name = name }, or a bson.RawDocument; got u32" },
+        .{ "updateOne with a filter that holds a u64", "mongo.Collection.updateOne: filter: field 'n' is u64, which BSON has no type for: its integers are signed; use i64" },
+        .{ "updateOne with a u64 in the update", "mongo.Collection.updateOne: update: field '$set.n' is u64, which BSON has no type for: its integers are signed; use i64" },
+        .{ "updateMany with a stage of a pipeline that is a number", "mongo.Collection.updateMany: update[1]: a document is a struct with named fields, such as .{ .name = name }, or a bson.RawDocument; got u32" },
+        .{ "replaceOne with a pipeline", "mongo.Collection.replaceOne: replacement: a replacement is one document, not a list; a pipeline updates, with updateOne or updateMany" },
+        .{ "deleteMany with a filter that is a string", "mongo.Collection.deleteMany: filter: a document is a struct with named fields, such as .{ .name = name }, or a bson.RawDocument; got *const [3:0]u8" },
+        .{ "findOneAndUpdate with a pointer in the filter", "mongo.Collection.findOneAndUpdate: filter: field 'owner' is *const crud_errors.User: pass the value itself, not a pointer to it" },
+        .{ "findOneAndReplace with a pipeline", "mongo.Collection.findOneAndReplace: replacement: a replacement is one document, not a list; a pipeline updates, with updateOne or updateMany" },
+        .{ "findOneAndDelete with a filter that is a tuple", "mongo.Collection.findOneAndDelete: filter: a tuple is an array, not a document: give its values names, such as .{ .a = x }" },
+        .{ "find with a filter that holds a u64", "mongo.Collection.find: filter: field 'n' is u64, which BSON has no type for: its integers are signed; use i64" },
+        .{ "findOne with a filter that is a tuple", "mongo.Collection.findOne: filter: a tuple is an array, not a document: give its values names, such as .{ .a = x }" },
+        .{ "aggregate of one document", "mongo.Collection.aggregate: pipeline: a list of documents is a slice, an array or a tuple of them; got crud_errors.User" },
+        .{ "aggregate with a stage that is a number", "mongo.Collection.aggregate: pipeline[1]: a document is a struct with named fields, such as .{ .name = name }, or a bson.RawDocument; got u32" },
+        .{ "countDocuments with a pointer in the filter", "mongo.Collection.countDocuments: filter: field 'owner' is *const crud_errors.User: pass the value itself, not a pointer to it" },
+        .{ "distinct with a filter that is a string", "mongo.Collection.distinct: filter: a document is a struct with named fields, such as .{ .name = name }, or a bson.RawDocument; got *const [3:0]u8" },
+        .{ "runCommand of a tuple", "mongo.Database.runCommand: command: a tuple is an array, not a document: give its values names, such as .{ .a = x }" },
+        .{ "runCursorCommand with a u64 in the command", "mongo.Database.runCursorCommand: command: field 'limit' is u64, which BSON has no type for: its integers are signed; use i64" },
+    }, 0..) |case, i| {
+        const compile = b.addTest(.{
+            .name = b.fmt("mongo-crud-error-{d}", .{i}),
+            .root_module = mongo_crud_errors,
+            .filters = &.{case[0]},
+        });
+        compile.expect_errors = .{ .contains = case[1] };
+        test_mongo.dependOn(&compile.step);
+    }
+    addMongoGuide(b, test_mongo, .{ .core = core, .mongo = mongo }, target, optimize, tsan);
+
     // rpc-nats panic program: a second conn() of one ZefirNats panics in
     // safe builds, since one adapter serves one transport. Like the rpc
     // ones above, it ends in its own panic handler with code 3 and gets
@@ -692,13 +846,12 @@ pub fn build(b: *std.Build) void {
     }
     test_rpc_nats.dependOn(&addRun(b, rpc_nats_guide, tsan).step);
 
-    addRpcGuide(b, test_rpc, test_rpc_log, .{
+    addRpcGuide(b, test_rpc, .{
         .core = core,
         .validator = validator,
         .confy = confy,
         .log = log,
         .rpc = rpc,
-        .rpc_log = rpc_log,
     }, target, optimize, tsan);
 
     // core benchmarks: `zig build test` only compiles them, `zig build bench`
@@ -775,22 +928,17 @@ const GuideModules = struct {
     confy: *std.Build.Module,
     log: *std.Build.Module,
     rpc: *std.Build.Module,
-    rpc_log: *std.Build.Module,
 };
 
-/// The examples of src/rpc/examples/README.md, the guide of rpc and
-/// rpc-log, as cases.zig there lists them. Every program runs through
-/// example_main.zig, which exits with code 3 on a panic instead of
-/// aborting and with code 4 when the run takes longer than its time limit
-/// (testdata/hang.zig checks that), and must exit with 0; readme_test.zig
-/// then checks that README.md shows every file as it is and every run as
-/// it printed. The programs of the access logs and their check belong to
-/// `test_rpc_log`, the rest to `test_rpc`, so that the programs of
-/// `test_rpc` never import zefir-rpc-log, which imports rpc.
+/// The examples of src/rpc/examples/README.md, the guide of rpc, as
+/// cases.zig there lists them. Every program runs through example_main.zig,
+/// which exits with code 3 on a panic instead of aborting and with code 4
+/// when the run takes longer than its time limit (testdata/hang.zig checks
+/// that), and must exit with 0; readme_test.zig then checks that README.md
+/// shows every file as it is and every run as it printed.
 fn addRpcGuide(
     b: *std.Build,
     test_rpc: *std.Build.Step,
-    test_rpc_log: *std.Build.Step,
     m: GuideModules,
     target: std.Build.ResolvedTarget,
     optimize: std.lang.Optimize,
@@ -821,7 +969,6 @@ fn addRpcGuide(
         .{ .name = "users-api", .module = contracts[0] },
         .{ .name = "orders-api", .module = contracts[1] },
     };
-    const access_log_imports = std.mem.concat(b.allocator, std.Build.Module.Import, &.{ imports, &.{.{ .name = "rpc-log", .module = m.rpc_log }} }) catch @panic("OOM");
 
     for (rpc_guide.tests) |name| {
         const tests = b.addTest(.{
@@ -863,50 +1010,110 @@ fn addRpcGuide(
         .target = target,
         .optimize = optimize,
     });
-    for (
-        [_]bool{ false, true },
-        [_][]const rpc_guide.Program{ &rpc_guide.programs, &rpc_guide.access_log_programs },
-        [_]*std.Build.Step{ test_rpc, test_rpc_log },
-    ) |access_log, programs, step| {
-        const options = b.addOptions();
-        options.addOption(bool, "access_log", access_log);
-        const readme = b.createModule(.{
-            .root_source_file = b.path(dir ++ "readme_test.zig"),
-            .target = target,
-            .optimize = optimize,
-            .sanitize_thread = tsan,
-            .imports = &.{
-                .{ .name = "cases", .module = cases },
-                .{ .name = "readme_options", .module = options.createModule() },
-            },
-        });
-        // "rpc in a minute" of the repository's README.md is a program of
-        // the guide too.
-        readme.addAnonymousImport("root_readme", .{ .root_source_file = b.path("README.md") });
-        for (programs) |program| {
-            const exe = b.addExecutable(.{
-                .name = b.fmt("rpc-guide-{s}", .{program.name}),
-                .root_module = b.createModule(.{
-                    .root_source_file = b.path(dir ++ "example_main.zig"),
+    const readme = b.createModule(.{
+        .root_source_file = b.path(dir ++ "readme_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+        .imports = &.{.{ .name = "cases", .module = cases }},
+    });
+    // "rpc in a minute" of the repository's README.md is a program of
+    // the guide too.
+    readme.addAnonymousImport("root_readme", .{ .root_source_file = b.path("README.md") });
+    for (rpc_guide.programs) |program| {
+        const exe = b.addExecutable(.{
+            .name = b.fmt("rpc-guide-{s}", .{program.name}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(dir ++ "example_main.zig"),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+                .imports = &.{.{ .name = "example", .module = b.createModule(.{
+                    .root_source_file = b.path(b.fmt(dir ++ "{s}.zig", .{program.name})),
                     .target = target,
                     .optimize = optimize,
                     .sanitize_thread = tsan,
-                    .imports = &.{.{ .name = "example", .module = b.createModule(.{
-                        .root_source_file = b.path(b.fmt(dir ++ "{s}.zig", .{program.name})),
-                        .target = target,
-                        .optimize = optimize,
-                        .sanitize_thread = tsan,
-                        .imports = if (access_log) access_log_imports else imports,
-                    }) }},
-                }),
-            });
-            const run = addRun(b, exe, tsan);
-            for (program.env) |pair| run.setEnvironmentVariable(pair[0], pair[1]);
-            run.expectExitCode(0);
-            readme.addAnonymousImport(b.fmt("{s}.out", .{program.name}), .{ .root_source_file = run.captureStdOut(.{}) });
-        }
-        step.dependOn(&addRun(b, b.addTest(.{ .name = "rpc-guide-readme", .root_module = readme }), tsan).step);
+                    .imports = imports,
+                }) }},
+            }),
+        });
+        const run = addRun(b, exe, tsan);
+        for (program.env) |pair| run.setEnvironmentVariable(pair[0], pair[1]);
+        run.expectExitCode(0);
+        readme.addAnonymousImport(b.fmt("{s}.out", .{program.name}), .{ .root_source_file = run.captureStdOut(.{}) });
     }
+    test_rpc.dependOn(&addRun(b, b.addTest(.{ .name = "rpc-guide-readme", .root_module = readme }), tsan).step);
+}
+
+/// The modules that the examples of the mongo guide import here.
+const MongoGuideModules = struct {
+    core: *std.Build.Module,
+    mongo: *std.Build.Module,
+};
+
+/// The examples of src/mongo/examples/README.md, the guide of zefir-mongo,
+/// as cases.zig there lists them: the tests against
+/// mongo.testing.FakeServer, and the programs that need no server, each
+/// through example_main.zig, which exits with code 3 on a panic instead of
+/// aborting and with code 4 past its time limit; it must exit with 0.
+/// readme_test.zig then checks that README.md shows every file as it is and
+/// every run of those programs as it printed. The programs that need mongod
+/// import zio: only tests/mongo builds and runs them.
+fn addMongoGuide(
+    b: *std.Build,
+    test_mongo: *std.Build.Step,
+    m: MongoGuideModules,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+    tsan: bool,
+) void {
+    const dir = "src/mongo/examples/";
+    const imports: []const std.Build.Module.Import = &.{
+        .{ .name = "core", .module = m.core },
+        .{ .name = "mongo", .module = m.mongo },
+    };
+    for (mongo_guide.tests) |name| {
+        const tests = b.addTest(.{
+            .name = b.fmt("mongo-guide-{s}", .{name}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(b.fmt(dir ++ "{s}.zig", .{name})),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+                .imports = imports,
+            }),
+        });
+        test_mongo.dependOn(&addRun(b, tests, tsan).step);
+    }
+
+    const readme = b.createModule(.{
+        .root_source_file = b.path(dir ++ "readme_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+    });
+    for (mongo_guide.programs) |name| {
+        const exe = b.addExecutable(.{
+            .name = b.fmt("mongo-guide-{s}", .{name}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(dir ++ "example_main.zig"),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+                .imports = &.{.{ .name = "example", .module = b.createModule(.{
+                    .root_source_file = b.path(b.fmt(dir ++ "{s}.zig", .{name})),
+                    .target = target,
+                    .optimize = optimize,
+                    .sanitize_thread = tsan,
+                    .imports = imports,
+                }) }},
+            }),
+        });
+        const run = addRun(b, exe, tsan);
+        run.expectExitCode(0);
+        readme.addAnonymousImport(b.fmt("{s}.out", .{name}), .{ .root_source_file = run.captureStdOut(.{}) });
+    }
+    test_mongo.dependOn(&addRun(b, b.addTest(.{ .name = "mongo-guide-readme", .root_module = readme }), tsan).step);
 }
 
 /// The validator tests that use only its public API, compiled as client code

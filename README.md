@@ -4,7 +4,7 @@
 
 <p align="center">
   <strong>A modular framework for building services in Zig.</strong><br>
-  Web servers, web services and APIs, built from modules you pick: typed configuration, request deadlines, cancellation, tracing, structured logging, validation, a NATS client, RPC and an HTTP server today; an async MongoDB driver with an ODM next.
+  Web servers, web services and APIs, built from modules you pick: typed configuration, request deadlines, cancellation, tracing, structured logging, validation, a NATS client, RPC, an HTTP server and an async MongoDB driver today; an ODM next.
 </p>
 
 <p align="center">
@@ -54,14 +54,13 @@ Take any module on its own, or all the finished ones at once through the umbrell
 | `zefir-http`                       | HTTP server: REST APIs, routes checked at compile time, middleware, static files, SSE                      | ✅ Done · [docs](src/http/examples/README.md)            |
 | `zefir-rpc`                        | Typed RPC with pluggable transports: NATS now, HTTP (Connect) and TCP later                                | ✅ Done · [docs](src/rpc/examples/README.md)             |
 | `zefir-rpc-nats`                   | NATS transport for `zefir-rpc`: request-reply, ADR-32 errors, NATS micro discovery                         | ✅ Done · [docs](src/rpc-nats/examples/README.md)        |
-| `zefir-rpc-log`                    | Access logs of `zefir-rpc` calls on `zefir-log`: one record per call, never bodies or credentials          | ✅ Done · [docs](src/rpc/examples/README.md#access-logs) |
 | `zefir-graphql`                    | GraphQL queries, mutations, subscriptions, resolvers                                                       | 📋 Planned                                               |
 | `zefir-messaging`                  | Pub/sub, message queues, consumers, backpressure                                                           | 📋 Planned                                               |
 | `zefir-nats`                       | Native async NATS client on `std.Io`: publish/subscribe, request/reply, reconnect                          | ✅ Done · [docs](src/nats/examples/README.md)            |
 | `zefir-zmq`                        | ZeroMQ / ZMTP integration                                                                                  | 📋 Planned                                               |
 | `zefir-grpc`                       | gRPC interoperability                                                                                      | 📋 Planned                                               |
 | **Database & Persistence**         |                                                                                                            |                                                         |
-| `zefir-mongo`                      | Async MongoDB driver: BSON, connection pooling, transactions                                               | 📋 Planned                                               |
+| `zefir-mongo`                      | Async MongoDB driver on `std.Io`: standalone mongod, SCRAM, pooling, BSON, collections; no TLS yet         | ✅ Done · [docs](src/mongo/examples/README.md)           |
 | `zefir-odm`                        | MongoDB ODM (Object Data Mapper): typed schemas, models, CRUD, aggregation                                 | 📋 Planned                                               |
 | `zefir-cache`                      | L1/L2 caching, TTL, Redis, invalidation, synchronization                                                   | 📋 Planned                                               |
 | **Security**                       |                                                                                                            |                                                         |
@@ -398,10 +397,10 @@ On a shared GitHub runner, 4 vCPUs of an AMD EPYC 7763, a server on zio with fou
 
 ## Installation
 
-Requires **Zig 0.17.0**. Add the dependency to your `build.zig.zon`; the latest release is **v0.8.0**:
+Requires **Zig 0.17.0**. Add the dependency to your `build.zig.zon`; the latest release is **v0.9.0**:
 
 ```sh
-zig fetch --save git+https://github.com/vkiryakov/zefir#v0.8.0
+zig fetch --save git+https://github.com/vkiryakov/zefir#v0.9.0
 ```
 
 Other versions are on the [releases page](https://github.com/vkiryakov/zefir/releases); a commit hash works too.
@@ -445,6 +444,7 @@ zig build test-log --summary all                                                
 # check formatting, as CI does
 zig fmt --check build.zig build.zig.zon src tests examples \
   --exclude tests/nats/zig-pkg --exclude tests/rpc-nats/zig-pkg \
+  --exclude tests/http/zig-pkg --exclude tests/mongo/zig-pkg \
   --exclude examples/rpc-custom-transport/zig-pkg --exclude examples/rpc-custom-transport/consumer/zig-pkg
 ```
 
@@ -486,6 +486,18 @@ zig build check      # build all of it without running it
 ```
 
 Whenever CI tests http, it builds the package and runs its end-to-end tests on the three systems; a change to `tests/http/` counts as a change to http.
+
+The end-to-end tests of mongo, with the programs of its guide, are a package of the same kind in `tests/mongo`, against the mongod servers of the profile `mongo` of the same `docker-compose.yml`:
+
+```sh
+cd tests/mongo
+zig build e2e        # start the servers, run the tests, then the programs of the guide, checking their runs against the guide
+zig build stress     # the stress tests, in Debug and in ReleaseSafe
+zig build check      # build all of it without running it; no servers needed
+zig build down       # stop the servers
+```
+
+`MONGO_VERSION` picks the image, 9.0.4 by default: `MONGO_VERSION=7.0.45 zig build e2e`. Whenever CI tests mongo, it builds the package on the three systems and runs its end-to-end tests on Linux against 7.0, 8.0 and 9.0; a change to `tests/mongo/` or to `docker-compose.yml` counts as a change to mongo.
 
 `examples/rpc-custom-transport` is a transport of rpc in a package of its own, the proof that one can be written outside zefir. Its `consumer/` builds it as an application does, against the zefir of this checkout, and CI runs it whenever it tests rpc; a change to the package counts as a change to rpc:
 
