@@ -9,8 +9,8 @@
         // its own zefir modules instead (README.md). A release of the
         // package pins a release of zefir here.
         .zefir = .{
-            .url = "git+https://github.com/vkiryakov/zefir#v0.8.0",
-            .hash = "zefir-0.8.0-533VDRcpbAAJ54fA8Qda4lKRbNWvz-JZ_KORghXhkeUI",
+            .url = "git+https://github.com/vkiryakov/zefir#v0.9.0",
+            .hash = "zefir-0.9.0-533VDe_-gQBC1RguQxPi5qnjQvQYise0CZ00p7j8TBbL",
             .lazy = true,
         },
     },

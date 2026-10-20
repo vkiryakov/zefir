@@ -208,14 +208,11 @@ the client, which build the commands; copy them and keep them anywhere.
 
 ## Installation
 
-Add Zefir to your `build.zig.zon`. zefir-mongo is on the `dev` branch
-until the next release: the latest release, v0.8.0, does not have it.
+Add Zefir to your `build.zig.zon`; mongo ships since v0.9.0:
 
 ```sh
-zig fetch --save git+https://github.com/vkiryakov/zefir#dev
+zig fetch --save git+https://github.com/vkiryakov/zefir#v0.9.0
 ```
-
-The command fetches the latest commit of `dev`; `--save` pins that commit.
 
 A service runs on [zio](https://github.com/lalinsky/zio). zio has no
 release for Zig 0.17 yet, so pin the commit Zefir is tested with:
