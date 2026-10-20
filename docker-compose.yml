@@ -22,6 +22,24 @@
 # nats-box, in the profile `tools`, is the NATS CLI that the tests of
 # rpc-nats run against the servers, by their service names:
 # `docker compose run --rm nats-box nats -s nats://plain:4222 micro ls`.
+#
+# The MongoDB servers of the end-to-end tests of zefir-mongo, in
+# tests/mongo, are in the profile `mongo`, so that `up` and `down` without
+# it, as the NATS tests run them, leave them alone:
+# `docker compose --profile mongo up -d --wait mongo-plain` starts them,
+# and so does `zig build e2e` there. MONGO_VERSION picks the image of
+# mongo, 9.0.4 by default; CI also runs 7.0.45 and 8.0.34. Each starts
+# with an empty database. Their ports, on 127.0.0.1 only:
+#
+#   27117  mongo-plain: no authentication, test commands on for fail points
+#   27118  mongo-auth: --auth with the users of tests/mongo/init/users.js,
+#          test commands on
+#   27119  mongo-stall: no authentication, for tests that pause it: a
+#          server that takes commands and answers none
+#   27120  mongo-restart: no authentication, test commands on, for tests
+#          that restart it
+#   27121  mongo-ghost: a member of the replica set "ghost" that is never
+#          initialized (RSGhost), for the client to refuse
 
 name: zefir-nats-e2e
 
@@ -35,6 +53,17 @@ x-nats: &nats
     interval: 1s
     timeout: 2s
     retries: 30
+
+x-mongo: &mongo
+  image: mongo:${MONGO_VERSION:-9.0.4}
+  profiles: ["mongo"]
+  # In memory: every start has an empty database, and no volume is left.
+  tmpfs: ["/data/db", "/data/configdb"]
+  healthcheck:
+    test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand({ ping: 1 }).ok"]
+    interval: 1s
+    timeout: 5s
+    retries: 60
 
 services:
   plain:
@@ -120,3 +149,45 @@ services:
   nats-box:
     image: natsio/nats-box:0.20.0
     profiles: ["tools"]
+
+  # enableTestCommands lets the tests set fail points (failCommand).
+  mongo-plain:
+    <<: *mongo
+    command: ["mongod", "--setParameter", "enableTestCommands=1"]
+    ports: ["127.0.0.1:27117:27017"]
+
+  # The image makes the users of init/users.js at every start, on a
+  # temporary mongod without --auth that listens on 127.0.0.1 of the
+  # container only. The healthcheck waits for the mongod after it: a
+  # command without a user must be refused (code 13), as only --auth does.
+  mongo-auth:
+    <<: *mongo
+    command: ["mongod", "--auth", "--setParameter", "enableTestCommands=1"]
+    volumes:
+      - ./tests/mongo/init:/docker-entrypoint-initdb.d:ro
+    ports: ["127.0.0.1:27118:27017"]
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "let r; try { r = db.adminCommand({ listDatabases: 1 }) } catch (e) { r = e } quit(r.code === 13 ? 0 : 1)"]
+      interval: 1s
+      timeout: 5s
+      retries: 60
+
+  # The tests pause and unpause it by this name.
+  mongo-stall:
+    <<: *mongo
+    container_name: zefir-mongo-e2e-stall
+    ports: ["127.0.0.1:27119:27017"]
+
+  # The tests restart it by this name, with calls out that sleep on it.
+  mongo-restart:
+    <<: *mongo
+    container_name: zefir-mongo-e2e-restart
+    command: ["mongod", "--setParameter", "enableTestCommands=1"]
+    ports: ["127.0.0.1:27120:27017"]
+
+  # A member of a replica set without rs.initiate(): its hello says
+  # isreplicaset, and the client refuses it.
+  mongo-ghost:
+    <<: *mongo
+    command: ["mongod", "--replSet", "ghost"]
+    ports: ["127.0.0.1:27121:27017"]

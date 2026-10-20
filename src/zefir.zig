@@ -7,6 +7,7 @@ pub const validator = @import("validator");
 pub const rpc = @import("rpc");
 pub const rpc_nats = @import("rpc-nats");
 pub const orm = @import("orm");
+pub const mongo = @import("mongo");
 pub const nats = @import("nats");
 pub const http = @import("http");
 

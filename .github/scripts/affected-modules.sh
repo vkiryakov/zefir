@@ -7,9 +7,10 @@
 #
 # A file under src/<module>/ affects that module and every module whose
 # tests import it, directly or through other modules; zefir imports them
-# all. tests/nats/, tests/rpc-nats/ and tests/http/, the end-to-end tests
-# of nats, of rpc-nats and of http, count as their modules, and
-# docker-compose.yml, the servers of the first two, as both of them.
+# all. tests/nats/, tests/rpc-nats/, tests/http/ and tests/mongo/, the
+# end-to-end tests of nats, of rpc-nats, of http and of mongo, count as
+# their modules. docker-compose.yml, the servers of nats, rpc-nats and
+# mongo, counts as all three.
 # examples/rpc-custom-transport/, a transport outside zefir that CI runs
 # against rpc, counts as rpc. build.zig, build.zig.zon, src/zefir.zig,
 # .github/ and any other path the script does not know affect every
@@ -23,7 +24,7 @@ set -eu
 # The modules and what the tests of each one import. Keep this in sync with
 # build.zig: the `.imports` of each module and of the programs that its
 # test-<module> step builds. CI tests only the modules listed here.
-modules="core log confy validator rpc rpc-nats orm nats http zefir"
+modules="core log confy validator rpc rpc-nats orm mongo nats http zefir"
 imports() {
     case $1 in
     core) ;;
@@ -44,10 +45,13 @@ imports() {
     # its end-to-end tests build and run them. confy brings log.
     nats) echo core confy ;;
     orm) echo log ;;
+    # mongo imports core, and the examples of its guide and its end-to-end
+    # tests read their settings with confy and log with log.
+    mongo) echo core confy log ;;
     # http imports core and validator; the examples of its guide read
     # their settings with confy and log with log.
     http) echo core validator confy log ;;
-    zefir) echo core log confy validator rpc rpc-nats orm nats http ;;
+    zefir) echo core log confy validator rpc rpc-nats orm mongo nats http ;;
     esac
 }
 
@@ -90,8 +94,9 @@ elif [ $# -eq 2 ] && [ -n "$1" ] && [ -n "$2" ]; then
         tests/nats/*) changed="$changed nats" ;;
         tests/rpc-nats/*) changed="$changed rpc-nats" ;;
         tests/http/*) changed="$changed http" ;;
+        tests/mongo/*) changed="$changed mongo" ;;
         examples/rpc-custom-transport/*) changed="$changed rpc" ;;
-        docker-compose.yml) changed="$changed nats rpc-nats" ;;
+        docker-compose.yml) changed="$changed nats rpc-nats mongo" ;;
         README.md) changed="$changed rpc http" ;;
         docs/* | *.md) ;;
         *) all=true ;;
