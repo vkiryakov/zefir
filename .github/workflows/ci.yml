@@ -200,16 +200,28 @@ jobs:
       fail-fast: false
       matrix:
         mongo: ["7.0.45", "8.0.34", "9.0.4"]
-    runs-on: ubuntu-latest
+        include:
+          # mongod 8.0 refuses to start on Linux 6.19 and newer
+          # (SERVER-121912), the kernel of ubuntu-latest; ubuntu-22.04 runs
+          # an older one.
+          - mongo: "8.0.34"
+            runner: ubuntu-22.04
+    runs-on: ${{ matrix.runner || 'ubuntu-latest' }}
     env:
       MONGO_VERSION: ${{ matrix.mongo }}
     steps:
       - uses: actions/checkout@v7
+      - name: Show the kernel
+        run: uname -r
       - uses: mlugg/setup-zig@v2
       # The mongo services only: the NATS servers, without a profile, would
       # start too.
       - name: Start the mongod servers
         run: docker compose --profile mongo up --detach --wait mongo-plain mongo-auth mongo-stall mongo-restart mongo-ghost
+      # Why a server did not start or a test failed: what mongod said.
+      - name: Show the logs of the mongod servers
+        if: failure()
+        run: docker compose --profile mongo logs --no-color --tail 200 mongo-plain mongo-auth mongo-stall mongo-restart mongo-ghost
       - name: Run the end-to-end tests
         working-directory: tests/mongo
         timeout-minutes: 15
