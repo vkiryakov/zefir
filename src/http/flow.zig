@@ -1474,6 +1474,8 @@ test "an error after commit cuts the response" {
 /// An exchange without a client that counts what the server writes.
 const CountingExchange = struct {
     exchange: Exchange,
+    /// How the body failed, as the backend says.
+    failure: Exchange.BodyFailure = .timeout,
     heads: usize = 0,
     bodies: usize = 0,
     finishes: usize = 0,
@@ -1528,9 +1530,10 @@ const CountingExchange = struct {
     fn bodyLength(_: *anyopaque) ?u64 {
         return 0;
     }
-    /// The body stalled, as a client that stops sending it.
-    fn bodyFailure(_: *anyopaque) ?Exchange.BodyFailure {
-        return .timeout;
+    /// The body stalled, as a client that stops sending it, or broke its
+    /// chunked framing.
+    fn bodyFailure(ptr: *anyopaque) ?Exchange.BodyFailure {
+        return of(ptr).failure;
     }
     fn writeHead(ptr: *anyopaque, _: std.Io, _: u16, _: []const h1.Field, _: Exchange.BodyKind) Exchange.WriteError!void {
         of(ptr).heads += 1;
@@ -1628,6 +1631,150 @@ test "the answer to a body that did not arrive goes through the onResponse phase
     var noted = false;
     for (ctx.response.internal.headers.items) |f| noted = noted or std.mem.eql(u8, f.name, "x-noted");
     try testing.expect(noted);
+}
+
+/// Review focus 5: a controller of the document, whose routes the Debug
+/// check compares (check.zig). The answers the server writes itself go out
+/// as they are.
+const DocumentedController = struct {
+    /// Requests that have entered `gated`.
+    entered: std.atomic.Value(u32) = .init(0),
+    /// Opens `gated`.
+    gate: std.Io.Event = .unset,
+
+    pub const openapi = .{};
+
+    pub const http_routes = routes.routes(.{
+        .prefix = "/v1/docs",
+        .methods = .{
+            .get = routes.get("/{id}", .{}),
+            .gated = routes.get("/gated", .{}),
+            .slow = routes.get("/slow", .{ .timeout = std.Io.Duration.fromMilliseconds(50) }),
+            .upload = routes.post("/upload", .{}),
+            // Answers a status it does not declare: the check is on.
+            .teapot = routes.get("/teapot", .{}),
+        },
+    });
+
+    pub fn get(_: *DocumentedController, _: *Context) !Json(Todo) {
+        return .{ .value = .{ .id = 1, .title = "Buy milk" } };
+    }
+    pub fn gated(self: *DocumentedController, ctx: *Context) !void {
+        _ = self.entered.fetchAdd(1, .monotonic);
+        try self.gate.wait(ctx.io());
+    }
+    pub fn slow(_: *DocumentedController, ctx: *Context) !void {
+        try ctx.io().sleep(.fromSeconds(1), .awake);
+    }
+    pub fn upload(_: *DocumentedController, ctx: *Context) !void {
+        _ = try ctx.body();
+    }
+    pub fn teapot(_: *DocumentedController, ctx: *Context) !void {
+        _ = ctx.response.status(418);
+    }
+};
+
+test "review focus 5: on a route of the document, 504, 503, 405, OPTIONS and HEAD go out as the server writes them" {
+    const io = testing.io;
+    var dog = try Watchdog.start(io, "review focus 5: the server's own answers on a route of the document");
+    defer dog.stop(io);
+    var docs: DocumentedController = .{};
+    var b: TestingBackend = .init(testing.allocator);
+    defer b.deinit();
+    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&docs}, .max_in_flight = 1 });
+    defer server.deinit(io);
+    try server.start(io);
+    const level = testing.log_level;
+    testing.log_level = .err; // the 503 and the line of the check are logged as warnings
+    defer testing.log_level = level;
+
+    // The check is on for these routes: an answer they do not declare is
+    // the server's 500.
+    var teapot = try b.request(io, .{ .method = .GET, .target = "/v1/docs/teapot" });
+    defer teapot.deinit();
+    try testing.expectEqual(if (check.enabled) 500 else 418, teapot.status);
+
+    // The deadline of the route: 504.
+    var slow = try b.request(io, .{ .method = .GET, .target = "/v1/docs/slow" });
+    defer slow.deinit();
+    try testing.expectEqual(504, slow.status);
+    try expectProblemCode(&slow, "timeout");
+
+    // A method the path does not take, and the automatic OPTIONS.
+    var wrong = try b.request(io, .{ .method = .PUT, .target = "/v1/docs/1" });
+    defer wrong.deinit();
+    try testing.expectEqual(405, wrong.status);
+    try testing.expectEqualStrings("GET, HEAD, OPTIONS", wrong.header("allow").?);
+    var options = try b.request(io, .{ .method = .OPTIONS, .target = "/v1/docs/1" });
+    defer options.deinit();
+    try testing.expectEqual(204, options.status);
+    try testing.expectEqualStrings("GET, HEAD, OPTIONS", options.header("allow").?);
+
+    // HEAD of a GET: the GET's answer without its body.
+    var head = try b.request(io, .{ .method = .HEAD, .target = "/v1/docs/1" });
+    defer head.deinit();
+    try testing.expectEqual(200, head.status);
+    try testing.expectEqualStrings("application/json", head.header("content-type").?);
+    try testing.expectEqualStrings("", head.body);
+
+    // Over .max_in_flight: 503.
+    var held: ?TestingBackend.Response = null;
+    var client: std.Io.Group = .init;
+    defer client.cancel(io);
+    defer if (held) |*res| res.deinit();
+    try client.concurrent(io, requestInto, .{ &b, io, .{ .method = .GET, .target = "/v1/docs/gated" }, &held });
+    try waitCount(io, &docs.entered, 1);
+    var over = try b.request(io, .{ .method = .GET, .target = "/v1/docs/1" });
+    defer over.deinit();
+    try testing.expectEqual(503, over.status);
+    try expectProblemCode(&over, "unavailable");
+    docs.gate.set(io);
+    try client.await(io);
+    try testing.expectEqual(204, held.?.status);
+}
+
+test "review focus 5: on a route of the document, the 503 of a request the runtime gives no task" {
+    const io = testing.io;
+    var dog = try Watchdog.start(io, "review focus 5: the 503 of no task on a route of the document");
+    defer dog.stop(io);
+    var scarce_vtable = io.vtable.*;
+    scarce_vtable.groupConcurrent = concurrentWhileLeft;
+    const scarce: std.Io = .{ .userdata = io.userdata, .vtable = &scarce_vtable };
+    var docs: DocumentedController = .{};
+    var b: TestingBackend = .init(testing.allocator);
+    defer b.deinit();
+    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&docs} });
+    defer server.deinit(io);
+    try server.start(io);
+    const level = testing.log_level;
+    testing.log_level = .err; // the 503 is logged as a warning
+    defer testing.log_level = level;
+
+    // The route matched, and the error is not one of its own.
+    tasks_left.store(0, .monotonic);
+    var none = try b.request(scarce, .{ .method = .GET, .target = "/v1/docs/1" });
+    defer none.deinit();
+    try testing.expectEqual(503, none.status);
+    try expectProblemCode(&none, "unavailable");
+}
+
+test "review focus 5: on a route of the document, the 408 and 400 of a body that did not arrive whole" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const Upload = DocumentedController.http_routes.methods.upload;
+    const table = comptime check.tableOf(DocumentedController, "upload", Upload, &.{}, errors.DefaultErrors);
+    const info: routes.RouteInfo = .{ .method = .POST, .pattern = "/v1/docs/upload", .controller = "DocumentedController", .handler = "upload" };
+    for ([_]struct { Exchange.BodyFailure, u16 }{ .{ .timeout, 408 }, .{ .malformed, 400 } }) |case| {
+        var broken: CountingExchange = .init();
+        broken.failure = case[0];
+        var ctx = broken.context(arena_state.allocator());
+        ctx.response.internal.before_head = .{ .ptr = &ctx, .call = beforeHead };
+        check.begin(&ctx, &info, table);
+        respond(&ctx, &broken.exchange, error.ReadFailed);
+        try broken.expect(1, 1, 0);
+        try testing.expectEqual(case[1], ctx.response.internal.status_sent.?);
+        try testing.expectEqualStrings("text/plain; charset=utf-8", ctx.response.internal.content_type.?);
+    }
 }
 
 test "the server logs through std.log.scoped(.http) and needs no logger" {

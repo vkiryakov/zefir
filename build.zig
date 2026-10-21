@@ -195,6 +195,28 @@ pub fn build(b: *std.Build) void {
     });
     test_http.dependOn(&addRun(b, http_examples, tsan).step);
     addHttpGuide(b, test_http, .{ .core = core, .validator = validator, .confy = confy, .log = log, .http = http }, target, optimize, tsan);
+    // Outside Debug the server does not check the declarations of a route
+    // (src/http/check.zig): check_release.zig runs on a ReleaseSafe copy
+    // of the module and of its imports, whatever -Doptimize says.
+    const release_imports: []const std.Build.Module.Import = &.{
+        .{ .name = "core", .module = b.createModule(.{ .root_source_file = b.path("src/core/root.zig"), .target = target, .optimize = .ReleaseSafe }) },
+        .{ .name = "validator", .module = b.createModule(.{ .root_source_file = b.path("src/validator/root.zig"), .target = target, .optimize = .ReleaseSafe }) },
+    };
+    const http_check_release = b.addTest(.{
+        .name = "http-check-release",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/http/tests/check_release.zig"),
+            .target = target,
+            .optimize = .ReleaseSafe,
+            .imports = &.{.{ .name = "http", .module = b.createModule(.{
+                .root_source_file = b.path("src/http/root.zig"),
+                .target = target,
+                .optimize = .ReleaseSafe,
+                .imports = release_imports,
+            }) }},
+        }),
+    });
+    test_http.dependOn(&b.addRunArtifact(http_check_release).step);
 
     // `zig build fuzz-http` runs the fuzz test of zefir-http's HTTP/1.1
     // parser on its corpus, once, like `zig build test-http` does; with
@@ -1464,10 +1486,12 @@ fn addHttpCompileChecks(
     }
     // A large application, which gen_big_app writes into the build cache:
     // ten controllers of thirty routes, middleware on every level and forty
-    // errors of its own; and one route that returns 200 errors of long
-    // names. Each must compile without an eval branch quota of its own. The
-    // generator is built for the host, so it also runs when -Dtarget names
-    // another system.
+    // errors of its own; one route that returns 200 errors of long names;
+    // and the large application with `pub const openapi` on its controllers
+    // and on some middleware, whose routes the Debug check compares. Each
+    // must compile without an eval branch quota of its own. The generator is
+    // built for the host, so it also runs when -Dtarget names another
+    // system.
     const gen_big_app = b.addExecutable(.{
         .name = "gen_big_app",
         .root_module = b.createModule(.{
@@ -1477,7 +1501,7 @@ fn addHttpCompileChecks(
         }),
     });
     const run_gen = b.addRunArtifact(gen_big_app);
-    for ([_][]const u8{ "big_app", "long_names_app" }) |name| {
+    for ([_][]const u8{ "big_app", "long_names_app", "doc_app" }) |name| {
         const app = b.addTest(.{
             .name = name,
             .root_module = b.createModule(.{
