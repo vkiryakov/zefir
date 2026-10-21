@@ -3,6 +3,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const core = @import("core.zig");
+const schema = @import("schema.zig");
 const Rule = core.Rule;
 const Outcome = core.Outcome;
 
@@ -54,6 +55,16 @@ pub fn custom(comptime code: []const u8, comptime message: []const u8, comptime 
             }
         }.eval,
     });
+}
+
+/// The JSON Schema keywords of `custom`, for `v.schemaOf`: none, since its
+/// predicate is code; the note gives its message.
+pub fn schemaOf(comptime rule: Rule, comptime T: type) schema.RuleSchema {
+    _ = T;
+    return switch (rule.kind) {
+        .custom => schema.none(rule.message),
+        else => unreachable,
+    };
 }
 
 /// The arguments the hints show for `custom` used without a call:

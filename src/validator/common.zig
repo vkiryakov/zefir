@@ -2,6 +2,7 @@
 //! `notEmpty`.
 const std = @import("std");
 const core = @import("core.zig");
+const schema = @import("schema.zig");
 const Rule = core.Rule;
 const Outcome = core.Outcome;
 
@@ -331,6 +332,23 @@ fn lengthProblem(comptime rule: *const Rule, comptime T: type, comptime where: [
             return core.isString(F) or core.isListSlice(F);
         }
     }.accepts, null);
+}
+
+// ------------------------------------------------------------------ schema
+
+/// The JSON Schema keywords of a rule of this file on the unwrapped field
+/// type `T`, for `v.schemaOf`; all exact. A tag is its name, as JSON writes
+/// an enum; an empty string or list has no characters or no items.
+pub fn schemaOf(comptime rule: Rule, comptime T: type) schema.RuleSchema {
+    return switch (rule.kind) {
+        .equals => schema.exact(&.{schema.keyword("const", schema.param(rule.params[0]))}),
+        .not_equals => schema.exact(&.{schema.keyword("not", schema.object(&.{schema.keyword("const", schema.param(rule.params[0]))}))}),
+        .one_of => schema.exact(&.{schema.keyword("enum", schema.value(rule.params[0].value))}),
+        .none_of => schema.exact(&.{schema.keyword("not", schema.object(&.{schema.keyword("enum", schema.value(rule.params[0].value))}))}),
+        .empty => schema.exact(&.{schema.count(if (core.isString(T)) "maxLength" else "maxItems", 0)}),
+        .not_empty => schema.exact(&.{schema.count(if (core.isString(T)) "minLength" else "minItems", 1)}),
+        else => unreachable,
+    };
 }
 
 /// The arguments the hints show for an uncalled constructor of this file:

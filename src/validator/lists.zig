@@ -4,6 +4,8 @@
 //! numbers).
 const std = @import("std");
 const core = @import("core.zig");
+const naming = @import("names.zig");
+const schema = @import("schema.zig");
 const Rule = core.Rule;
 const Outcome = core.Outcome;
 
@@ -585,6 +587,34 @@ pub fn each(comptime items: anytype) Rule {
                 @compileError("validator: internal: each is applied by the walker and never evaluated");
             }
         }.eval,
+    };
+}
+
+// ------------------------------------------------------------------ schema
+
+/// The JSON Schema keywords of a rule of this file on the unwrapped field
+/// type `T`, for `v.schemaOf`. Items compare by value, as JSON Schema
+/// compares them; a key of `uniqueBy` has no keyword.
+pub fn schemaOf(comptime rule: Rule, comptime T: type) schema.RuleSchema {
+    return switch (rule.kind) {
+        .min_items => schema.exact(&.{schema.count("minItems", rule.params[0].value.int)}),
+        .max_items => schema.exact(&.{schema.count("maxItems", rule.params[0].value.int)}),
+        .unique_items => schema.exact(&.{schema.keyword("uniqueItems", "true")}),
+        .unique_by => blk: {
+            const Item = core.Unwrap(core.ListChild(T).?);
+            const key = rule.params[0].value.tag;
+            break :blk schema.none("no two items with the same " ++ naming.namesOf(Item)[std.meta.fieldIndex(Item, key).?]);
+        },
+        .contains_all => blk: {
+            var each_value: []const []const u8 = &.{};
+            for (rule.params[0].value.list) |x| {
+                each_value = each_value ++ &[_][]const u8{schema.object(&.{schema.keyword("contains", schema.object(&.{schema.keyword("const", schema.value(x))}))})};
+            }
+            break :blk schema.exact(&.{schema.keyword("allOf", schema.array(each_value))});
+        },
+        // Not `not: {contains: ...}`, which a null list would fail.
+        .contains_none => schema.exact(&.{schema.keyword("items", schema.object(&.{schema.keyword("not", schema.object(&.{schema.keyword("enum", schema.value(rule.params[0].value))}))}))}),
+        else => unreachable,
     };
 }
 
