@@ -640,7 +640,7 @@ fn integerOf(comptime text: []const u8) ?comptime_int {
     var n: comptime_int = 0;
     for (digits) |c| {
         if (!std.ascii.isDigit(c)) return null;
-        n = n * 10 + (c - '0');
+        n = n * 10 + @as(comptime_int, c - '0');
     }
     return if (negative) -n else n;
 }

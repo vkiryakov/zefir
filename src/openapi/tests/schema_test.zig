@@ -422,6 +422,17 @@ test "rules: their keywords merged; a keyword of the type keeps the tighter boun
     try expectJson(comptime "{\"type\":[\"string\",\"null\"],\"description\":\"Leading and trailing spaces are removed.\"," ++ keywordsOf(v.date, ?[]const u8) ++ ",\"default\":null}", comptime propertyOf(CreateTodoRequest, "dueDate"));
 }
 
+test "rules: the bounds of a rule and of a wide integer, beyond 255, keep the tighter" {
+    const Paging = struct {
+        page: u32 = 1,
+        offset: i64 = 0,
+
+        pub const field_rules = .{ .page = v.range(1, 10000), .offset = v.min(-1000) };
+    };
+    try expectJson("{\"type\":\"integer\",\"format\":\"uint32\",\"minimum\":1,\"maximum\":10000,\"default\":1}", comptime propertyOf(Paging, "page"));
+    try expectJson("{\"type\":\"integer\",\"format\":\"int64\",\"minimum\":-1000,\"default\":0}", comptime propertyOf(Paging, "offset"));
+}
+
 test "rules: two with one keyword, or one with a keyword the schema has for another reason, go into allOf" {
     // email writes maxLength, as maxLength does.
     try expectJson(comptime "{\"type\":\"string\",\"description\":\"" ++ v.schemaOf(v.email, []const u8).note.? ++ "\",\"allOf\":[{" ++
