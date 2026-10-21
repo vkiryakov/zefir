@@ -1538,7 +1538,9 @@ fn addHttpCompileChecks(
 /// The golden documents of zefir-openapi: golden_test.zig compares the
 /// documents of the applications of src/openapi/tests/apps with their
 /// files in src/openapi/tests/golden, in 3.1 and 3.2, and sends each
-/// application's requests. It runs in src/openapi/tests.
+/// application's requests; determinism_a.zig and determinism_b.zig make the
+/// compiler meet the errors of one application in two orders and compare
+/// its documents with the same files. They run in src/openapi/tests.
 /// `zig build openapi` runs golden_test with ZEFIR_OPENAPI_UPDATE=1: it
 /// rewrites the files from the code.
 fn addOpenapiGoldens(
@@ -1550,7 +1552,7 @@ fn addOpenapiGoldens(
     tsan: bool,
 ) void {
     const update_step = b.step("openapi", "Rewrite the OpenAPI documents of zefir's tests from the code");
-    for ([_][]const u8{"golden_test"}) |name| {
+    for ([_][]const u8{ "golden_test", "determinism_a", "determinism_b" }) |name| {
         const t = b.addTest(.{
             .name = b.fmt("openapi-{s}", .{name}),
             .root_module = b.createModule(.{
