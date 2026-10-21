@@ -27,6 +27,7 @@ const net = Io.net;
 const Allocator = std.mem.Allocator;
 const core = @import("core");
 const resp = @import("../resp.zig");
+const cmd = @import("../cmd.zig");
 const errors = @import("../errors.zig");
 const Diagnostics = errors.Diagnostics;
 const Address = @import("Address.zig");
@@ -92,7 +93,7 @@ pub fn of(entry: *Pool.Entry) *Connection {
     return @alignCast(@fieldParentPtr("pooled", entry));
 }
 
-const pool_hooks: Pool.Entry.Hooks = .{ .destroy = destroyEntry, .cut = cutEntry };
+const pool_hooks: Pool.Entry.Hooks = .{ .destroy = destroyEntry, .cut = cutEntry, .ping = pingEntry };
 
 fn destroyEntry(entry: *Pool.Entry) void {
     of(entry).destroy();
@@ -100,6 +101,21 @@ fn destroyEntry(entry: *Pool.Entry) void {
 
 fn cutEntry(entry: *Pool.Entry, io: Io) void {
     of(entry).cut(io);
+}
+
+/// PING on a connection that lay idle. Any reply means the server is
+/// there, an error too: LOADING and BUSY refuse PING.
+fn pingEntry(entry: *Pool.Entry, io: Io, deadline: ?core.Deadline) Pool.Liveness {
+    _ = io;
+    var d: Diagnostics = .{};
+    of(entry).exchange(cmd.raw(void, .{"PING"}), null, deadline, &d) catch |err| return switch (err) {
+        error.ServerError, error.UnexpectedReply => .alive,
+        error.Timeout => .deadline,
+        // The task stays canceled.
+        error.Interrupted => .canceled,
+        else => .dead,
+    };
+    return .alive;
 }
 
 /// Sends `command` and reads its reply, from `arena`, waiting no longer

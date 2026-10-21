@@ -98,6 +98,7 @@ test {
     _ = @import("tests/connect_tests.zig");
     _ = @import("tests/pool_tests.zig");
     _ = @import("tests/run_tests.zig");
+    _ = @import("tests/idle_tests.zig");
 }
 
 test "the package version reaches the module" {

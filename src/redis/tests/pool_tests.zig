@@ -26,7 +26,7 @@ const FakeConn = struct {
     id: u32,
     cut: std.atomic.Value(bool) = .init(false),
 
-    const hooks: Pool.Entry.Hooks = .{ .destroy = destroy, .cut = cutIt };
+    const hooks: Pool.Entry.Hooks = .{ .destroy = destroy, .cut = cutIt, .ping = alive };
 
     fn of(entry: *Pool.Entry) *FakeConn {
         return @alignCast(@fieldParentPtr("pooled", entry));
@@ -39,6 +39,13 @@ const FakeConn = struct {
     fn free(conn: *FakeConn) void {
         _ = conn.fakes.destroyed.fetchAdd(1, .acq_rel);
         testing.allocator.destroy(conn);
+    }
+
+    fn alive(entry: *Pool.Entry, io: Io, deadline: ?core.Deadline) Pool.Liveness {
+        _ = entry;
+        _ = io;
+        _ = deadline;
+        return .alive;
     }
 
     fn cutIt(entry: *Pool.Entry, io: Io) void {

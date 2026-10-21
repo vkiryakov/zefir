@@ -17,6 +17,15 @@
 //!   idle one. An opening that fails or is canceled frees its place.
 //! - A connection of an older generation, or one its exchange left
 //!   broken, closes at check-in.
+//! - A connection that lay idle for 30 s or longer gets PING before it goes
+//!   to a call, under the call's deadline: a server's `timeout` or a
+//!   firewall may have closed it meanwhile, and there is no TCP keepalive
+//!   to tell. Any reply, an error too (LOADING and BUSY refuse PING), means
+//!   it is alive. The end of the stream or a broken reply closes it, and
+//!   the call takes another or opens one, keeping its turn: this is no
+//!   retry, since the call's command has not gone out. A deadline that
+//!   passes meanwhile is `error.DeadlineExceeded`, and a canceled task
+//!   `error.Cancelled`.
 //! - A clear makes every connection of the generation stale, closing the
 //!   idle ones at once, and pauses the pool; the calls in line get
 //!   `error.Unavailable`. It comes from a network error on an established
@@ -51,6 +60,8 @@ const List = std.DoublyLinkedList;
 
 /// The shortest time between two probes of a paused pool.
 pub const probe_interval: Io.Duration = .fromMilliseconds(500);
+/// How long a connection may lie idle before it is checked with PING.
+pub const idle_check_after: Io.Duration = .fromSeconds(30);
 
 options: Options,
 mutex: Io.Mutex = .init,
@@ -86,6 +97,10 @@ pub const Options = struct {
     max_size: u32 = 32,
     /// How many connections open at once at most.
     max_connecting: u32 = 2,
+    /// How long a connection may lie idle before it is checked with PING:
+    /// `idle_check_after`. Internal, not an option of the client: tests
+    /// shorten it, before the first call.
+    idle_check: Io.Duration = idle_check_after,
 };
 
 pub const State = enum { initialized, ready, paused, closing, closed };
@@ -105,7 +120,22 @@ pub const Entry = struct {
         destroy: *const fn (entry: *Entry) void,
         /// Cuts its exchange in progress, from another task.
         cut: *const fn (entry: *Entry, io: Io) void,
+        /// Sends PING on the connection, which lay idle, and waits for
+        /// any reply until `deadline`; null: no limit.
+        ping: *const fn (entry: *Entry, io: Io, deadline: ?core.Deadline) Liveness,
     };
+};
+
+/// What the PING of an idle connection found.
+pub const Liveness = enum {
+    /// A reply came: the connection goes to the call.
+    alive,
+    /// The stream ended or broke: the connection closes.
+    dead,
+    /// The deadline passed first.
+    deadline,
+    /// The task was canceled, and stays canceled.
+    canceled,
 };
 
 /// How a call opens a connection: `open` returns the entry of the new
@@ -342,8 +372,14 @@ const Purpose = enum {
 /// What the first in line found: an idle connection, now in use, or a
 /// place to open one, in which the call's opening is counted.
 const Found = union(enum) {
-    entry: *Entry,
+    idle: Idle,
     open: Place,
+};
+
+const Idle = struct {
+    entry: *Entry,
+    /// It lay idle long enough to need PING first.
+    check: bool,
 };
 
 const Place = struct {
@@ -354,22 +390,46 @@ const Place = struct {
 };
 
 fn take(pool: *Pool, io: Io, opener: Opener, deadline: ?core.Deadline, purpose: Purpose, d: ?*Diagnostics) Error!*Entry {
-    var dead: List = .{};
-    var opening: Opening = .{};
-    pool.mutex.lockUncancelable(io);
-    const found = pool.wait(io, deadline, purpose, &opening, &dead, d);
-    pool.mutex.unlock(io);
-    bury(&dead);
-    const place = switch (try found) {
-        .entry => |entry| return entry,
-        .open => |place| place,
-    };
-    const result = opener.open(opener.context, io, deadline, &opening.attempt, d);
-    return pool.opened(io, &opening, place, result, d);
+    // Back after a connection that failed its check.
+    var again = false;
+    while (true) {
+        var dead: List = .{};
+        var opening: Opening = .{};
+        pool.mutex.lockUncancelable(io);
+        const found = pool.wait(io, deadline, purpose, again, &opening, &dead, d);
+        pool.mutex.unlock(io);
+        bury(&dead);
+        const place = switch (try found) {
+            .idle => |idle| {
+                if (!idle.check) return idle.entry;
+                switch (idle.entry.hooks.ping(idle.entry, io, deadline)) {
+                    .alive => return idle.entry,
+                    .dead => {
+                        log.debug("an idle connection to {f} failed its PING; it closes, and the call takes another", .{pool.options.server});
+                        pool.checkIn(io, idle.entry, .broken);
+                        again = true;
+                        continue;
+                    },
+                    .deadline => {
+                        pool.checkIn(io, idle.entry, .broken);
+                        return fail(d, .checkout, error.DeadlineExceeded, "the deadline passed while PING checked a connection that had idled", .{});
+                    },
+                    .canceled => {
+                        pool.checkIn(io, idle.entry, .broken);
+                        return fail(d, .checkout, error.Cancelled, "the task was canceled while PING checked a connection that had idled", .{});
+                    },
+                }
+            },
+            .open => |place| place,
+        };
+        const result = opener.open(opener.context, io, deadline, &opening.attempt, d);
+        return pool.opened(io, &opening, place, result, d);
+    }
 }
 
-/// Waits in line, under the lock, which it lets go while it sleeps.
-fn wait(pool: *Pool, io: Io, deadline: ?core.Deadline, purpose: Purpose, opening: *Opening, dead: *List, d: ?*Diagnostics) Error!Found {
+/// Waits in line, under the lock, which it lets go while it sleeps. A call
+/// back `again` after a connection that failed its check goes first.
+fn wait(pool: *Pool, io: Io, deadline: ?core.Deadline, purpose: Purpose, again: bool, opening: *Opening, dead: *List, d: ?*Diagnostics) Error!Found {
     switch (pool.state) {
         .initialized => if (purpose == .call) return fail(d, .checkout, error.Unavailable, "connect() has not succeeded", .{}),
         .ready => {},
@@ -379,7 +439,7 @@ fn wait(pool: *Pool, io: Io, deadline: ?core.Deadline, purpose: Purpose, opening
     // Nobody in line: no need to queue.
     if (pool.line.first == null) if (pool.find(io, opening, dead)) |found| return found;
     var waiter: Waiter = .{};
-    pool.line.append(&waiter.node);
+    if (again) pool.line.prepend(&waiter.node) else pool.line.append(&waiter.node);
     pool.waiting += 1;
     defer {
         pool.line.remove(&waiter.node);
@@ -418,7 +478,7 @@ fn wait(pool: *Pool, io: Io, deadline: ?core.Deadline, purpose: Purpose, opening
 /// For the first in line: an idle connection, the one checked in last
 /// first, else a place to open one; stale idle ones go to `dead`.
 fn find(pool: *Pool, io: Io, opening: *Opening, dead: *List) ?Found {
-    _ = io;
+    const now = time.now(io);
     while (pool.idle.popLast()) |node| {
         pool.idle_count -= 1;
         const entry = entryOf(node);
@@ -428,7 +488,8 @@ fn find(pool: *Pool, io: Io, opening: *Opening, dead: *List) ?Found {
         }
         pool.in_use.append(node);
         pool.in_use_count += 1;
-        return .{ .entry = entry };
+        const idled = entry.idle_since.durationTo(now);
+        return .{ .idle = .{ .entry = entry, .check = idled.nanoseconds >= pool.options.idle_check.nanoseconds } };
     }
     if (!pool.roomToOpen()) return null;
     pool.opening.append(&opening.node);
