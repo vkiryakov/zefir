@@ -53,6 +53,9 @@ check tokens are code of your application, and this guide shows both.
 >   tokens of several issuers take a verifier each.
 > - **Claims of any shape.** No map of arbitrary keys and no field of "any
 >   JSON" in a struct of claims.
+> - **Transforms of claims.** Claims arrive as they were signed, so `v.trim`
+>   and the other transforms of zefir-validator never run on them: only
+>   their rules do.
 
 ## Contents
 
@@ -73,10 +76,10 @@ check tokens are code of your application, and this guide shows both.
 
 This guide follows one shop of two services. **Orders**, a service of
 zefir-http, signs Ann in at `POST /api/login` and gives her a token for 15
-minutes, signed with its Ed25519 key. Its routes, such as `GET
-/api/orders`, check that token in the middleware `JwtAuth`. **Billing**, a
-service of zefir-rpc, takes the same token when Ann pays: the token names
-both services as its audience. Billing checks it in its authenticator,
+minutes, signed with its Ed25519 key. Its routes, such as
+`GET /api/orders`, check that token in the middleware `JwtAuth`.
+**Billing**, a service of zefir-rpc, takes the same token when Ann pays:
+the token names both services as its audience. Billing checks it in its authenticator,
 `JwtAuthenticator`, with the public key of orders, which it has in its own
 settings. Billing can check tokens, but it cannot make one: only orders
 has the private key.
@@ -189,8 +192,9 @@ b.step("run", "Run the service").dependOn(&b.addRunArtifact(exe).step);
 > [!TIP]
 > jwt is also part of the umbrella module: with `zefir.module("zefir")`
 > imported as `zefir`, it is `@import("zefir").jwt`. zefir-jwt itself
-> imports only validator, and nothing outside Zefir: no network, no tasks,
-> no state of its own.
+> imports only validator, and nothing outside Zefir. It has no network
+> code, no tasks and no global state, but for the clock of tests in
+> `jwt.testing`.
 
 ## jwt in a minute
 
@@ -1531,6 +1535,146 @@ test "while the key of orders changes, billing takes the tokens of both keys" {
 
 ## Tests
 
+The tests of a service that signs and checks tokens need two things that
+production takes from outside: a key and the time.
+
+**A key made on the spot.** `jwt.SigningKey.generate` makes a new random
+key of any of the six algorithms, with the id you give it:
+
+```zig
+// A key of the tests alone, made on the spot.
+s.key = try .generate(io, .EdDSA, .{ .id = "2026-10" });
+```
+
+No key file sits in the repository, and no secret in the settings of the
+tests. Its public half is `verificationKey()`, as for a key from the
+settings. A key made this way cannot be written out: it lives as long as
+the test.
+
+**The time a test sets.** `verify` and `sign` read the time from the clock
+`.real` of their `std.Io`. `jwt.testing.FixedClock` wraps the `Io` of the
+test, and the `Io` it gives, `clock.io()`, says the time the test set;
+everything else goes to the wrapped `Io` as it is:
+
+```zig
+s.clock = try .init(testing.io, noon);
+errdefer s.clock.deinit();
+const io = s.clock.io();
+```
+
+The tests give that `Io` to the server and the backend of zefir-http, or
+to `rpc.testing.Server`, and the middleware sees the time of the test
+through `ctx.io()`, without a line of the service changed. Then a test
+moves the time:
+
+```zig
+// 15 minutes of its life and the 60 seconds of leeway have passed.
+s.clock.set(noon + 16 * 60);
+```
+
+`FixedClock` is unusual, and it has limits, which follow from how it works:
+it replaces the entry of the clock in the table of functions of `std.Io`,
+and that entry gets no pointer to the clock.
+
+- **One clock per process.** The time lives in a variable of
+  `jwt.testing`, so while one `FixedClock` lives, a second `init` is
+  `error.ClockInUse`. The test runner of Zig runs the tests of a binary one
+  after another, and every test binary is a process of its own, so a test
+  that takes the clock in its start and gives it back with `deinit` never
+  meets another.
+- **Only `.real` is fixed.** The clock `.awake` is left alone, so the
+  timeouts and the sleeps of the `Io`, and the deadlines of the requests of
+  zefir-http and of the calls of zefir-rpc, go as they always do.
+- **Everyone who uses `clock.io()` sees the fixed time**, such as the
+  `Date` header of zefir-http and the timestamps of zefir-log. In a test
+  that does no harm.
+- **There is no option "now" in `verify` or `sign`**, on purpose: the code
+  of the service reads the time where it always does, and production code
+  has no handle meant for tests.
+
+The tests of this guide, [`auth_test.zig`](#http) and
+[`rpc_auth_test.zig`](#rpc), run with `zig build test-jwt` in this
+repository; a service runs its own with a test step of its `build.zig`.
+
 ## Security
 
+What jwt refuses, and why:
+
+- **The algorithm comes from the key, never from the token.** A key is
+  bound to one algorithm when it loads, and a token whose `alg` is another
+  is `AlgorithmMismatch`. A public key never turns into an HMAC secret: a
+  token of `HS256` "signed" with the public key of orders, under its `kid`,
+  is refused, which is the attack of the confusion of algorithms.
+- **`none` never passes**, nor `None` nor `NONE`: `UnsupportedAlgorithm`.
+- **The key comes only from the verifier.** `jku`, `x5u`, `jwk`, `x5c`,
+  `x5t` and `x5t#S256` of a header are never read, and jwt has no network
+  code at all: a token cannot send a service to fetch a key, or bring a
+  key of its own (RFC 8725 §3.10).
+- **A key is chosen by `kid`, never tried in turn.** A verifier with several
+  keys takes only tokens with a `kid`, and an unknown one is `UnknownKey`.
+  `Verifier.init` refuses no keys, two keys with one id and a key without an
+  id next to others: a mistake of the settings shows when the service
+  starts, not on a request.
+- **One issuer per verifier.** With one list of keys for several issuers,
+  the key of one service could make tokens in the name of another. The
+  tokens of two issuers take two verifiers.
+- **`crit` in any form is `UnsupportedHeader`**: a token that asks for an
+  extension that jwt does not know is refused, as RFC 7515 says. So is a
+  token inside a token, `cty: "JWT"`.
+- **`typ` is required** and must be one of the verifier's types, so a token
+  of another kind, from the same issuer and the same key, does not pass
+  (RFC 8725 §3.11).
+- **`exp`, `iss` and `aud` are required.** A token without an end, or that
+  does not say for whom it is, never passes.
+- **Signatures are checked strictly.** An ECDSA signature of zeros (CVE-2022-21449)
+  and one in DER instead of r‖s are `BadSignature`; Ed25519 is verified
+  without its cofactor, which leaves no room for signatures made up to
+  pass; HMAC is compared in a time that does not depend on the bytes.
+- **Hostile input fails with an error.** A token over 8 KiB is refused
+  before anything else; JSON deeper than 32 levels, a key given twice and
+  bad UTF-8 are `Malformed`; a key file is read by a reader of DER and PEM
+  that checks every length first. No input crashes the service: the tests
+  of jwt give it broken tokens, keys and files, and a fuzzer gives it more.
+- **The payload is read only after the signature passed**, so JSON that
+  nobody signed is never parsed.
+
+**Secrets.** Keys and secrets come from the settings as `confy.Secret`. A
+key keeps a copy of what it needs, so the settings may be freed; its
+`deinit` wipes it, and jwt wipes the buffers in which it reads a key.
+zefir-log writes a key as `[REDACTED]`, `{f}` prints only its algorithm
+and `kid`, and `{any}` none of its bytes. jwt itself logs nothing.
+
+**A token is a credential to its bearer**: whoever has it is the user until
+it expires, and nothing takes it back early. So:
+
+- never log `Authorization` or a token, as `JwtAuth` logs only why it
+  refused one;
+- send tokens only over TLS: a service of zefir-http ends TLS at a proxy
+  in front of it, and the calls of zefir-rpc over NATS travel unencrypted,
+  so run them only in a network you trust;
+- keep the lifetime short, 15 minutes unless you have a reason;
+- put no secret into a claim: anybody who has the token can read it.
+
 ## Limits
+
+| What | Value | Where |
+| --- | --- | --- |
+| a token | 8 KiB | `jwt.max_token_bytes` |
+| nesting of the JSON of the header and of the payload | 32 levels | `jwt.max_json_depth` |
+| `kid` | 1 to 128 bytes of visible ASCII | `jwt.max_key_id_bytes` |
+| leeway of the clocks | 60 s, from 0 to 300 | `Verifier.Options.leeway` |
+| lifetime of a token | 15 minutes | `Signer.Options.lifetime` |
+| a PEM or a DER file | 16 KiB | — |
+| an HMAC secret | at least 32, 48 or 64 bytes, for HS256, HS384 and HS512 | — |
+| a time (NumericDate) | 0 to 253402300799 seconds, the end of the year 9999 | — |
+| the path of a violation | 256 bytes | `Details.path_buf` |
+
+- **Memory.** `verify` takes its memory from the arena it is given, about
+  twice the size of the token and the slices of your claims, and frees
+  nothing: the arena of the request frees it all. `sign` takes the token
+  from its allocator, which the caller frees, and frees its own buffers
+  before it returns.
+- **Many tasks at once.** A `Verifier` and a `Signer` never change after
+  `init`, and own nothing: one of each serves every task of a service. The
+  keys they borrow must live, unchanged, as long as they do: `deinit` a key
+  only after the last call that uses it.
