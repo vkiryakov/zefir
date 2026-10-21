@@ -7,7 +7,7 @@ const http = @import("http");
 const v = @import("validator");
 const json = @import("../json.zig");
 const schema = @import("../schema.zig");
-const Doc = @import("../root.zig").Doc;
+const Doc = @import("../openapi.zig").Doc;
 
 const testing = std.testing;
 

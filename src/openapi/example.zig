@@ -7,7 +7,7 @@
 const std = @import("std");
 const v = @import("validator");
 const json = @import("json.zig");
-const root = @import("root.zig");
+const declarations = @import("openapi.zig");
 
 /// The JSON of `x`, a value of `T`, as the server writes it; with
 /// `problem`, inside the body of an `http.Problem`, whose null fields it
@@ -25,7 +25,7 @@ pub fn value(comptime T: type, comptime x: T, comptime problem: bool, comptime w
             },
             .optional => |o| return if (x) |payload| value(o.child, payload, problem, where) else .null,
             .@"enum" => |e| {
-                if (root.writesItself(T)) writesItself(T, where);
+                if (declarations.writesItself(T)) writesItself(T, where);
                 for (e.field_names) |name| {
                     if (x == @field(T, name)) return .{ .string = name };
                 }
@@ -39,7 +39,7 @@ pub fn value(comptime T: type, comptime x: T, comptime problem: bool, comptime w
             },
             .array => |a| return if (a.child == u8) string(&x, where) else items(a.child, &x, problem, where),
             .@"struct" => |s| {
-                if (root.writesItself(T)) writesItself(T, where);
+                if (declarations.writesItself(T)) writesItself(T, where);
                 if (s.is_tuple) {
                     var out: [s.field_types.len]json.Node = undefined;
                     for (s.field_types, &out, 0..) |F, *item, i| item.* = value(F, x[i], problem, where);
@@ -57,7 +57,7 @@ pub fn value(comptime T: type, comptime x: T, comptime problem: bool, comptime w
                 return .{ .object = members };
             },
             .@"union" => |u| if (u.tag_type != null) {
-                if (root.writesItself(T)) writesItself(T, where);
+                if (declarations.writesItself(T)) writesItself(T, where);
                 const tag = @tagName(std.meta.activeTag(x));
                 const P = @FieldType(T, tag);
                 const payload: json.Node = if (P == void) .{ .object = &.{} } else value(P, @field(x, tag), problem, where ++ "." ++ tag);

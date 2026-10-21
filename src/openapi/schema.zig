@@ -15,7 +15,7 @@ const http = @import("http");
 const v = @import("validator");
 const json = @import("json.zig");
 const example = @import("example.zig");
-const root = @import("root.zig");
+const declarations = @import("openapi.zig");
 
 /// The way values of a type go: read from a request, or written in a
 /// response.
@@ -194,7 +194,7 @@ pub const Registry = struct {
                 }
                 if (!r.enter(T, mode, stack)) return;
                 const inner = stack ++ [_]type{T};
-                if (mode != .input and root.writesItself(T)) return r.mark(asOf(T), mode, inner);
+                if (mode != .input and declarations.writesItself(T)) return r.mark(asOf(T), mode, inner);
                 for (s.field_types, s.field_attrs) |F, attrs| {
                     if (F == void or (mode == .input and attrs.@"comptime")) continue;
                     r.mark(F, mode, inner);
@@ -203,14 +203,14 @@ pub const Registry = struct {
             .@"union" => |u| {
                 if (!r.enter(T, mode, stack)) return;
                 const inner = stack ++ [_]type{T};
-                if (root.writesItself(T)) return r.mark(asOf(T), mode, inner);
+                if (declarations.writesItself(T)) return r.mark(asOf(T), mode, inner);
                 for (u.field_types) |F| {
                     if (F != void) r.mark(F, mode, inner);
                 }
             },
             .@"enum" => {
                 if (!r.enter(T, mode, stack)) return;
-                if (mode != .input and root.writesItself(T)) r.mark(asOf(T), mode, stack ++ [_]type{T});
+                if (mode != .input and declarations.writesItself(T)) r.mark(asOf(T), mode, stack ++ [_]type{T});
             },
             else => {},
         }
@@ -341,7 +341,7 @@ pub const Registry = struct {
 
     /// The schema of a struct, an enum or a union `T` itself.
     fn bodyParts(comptime r: ?*const Registry, comptime T: type, comptime mode: Mode, comptime nullable: bool, comptime where: []const u8, comptime stack: []const type) Parts {
-        if (mode != .input and root.writesItself(T)) {
+        if (mode != .input and declarations.writesItself(T)) {
             var p = typeParts(r, asOf(T), mode, nullable, where, stack ++ [_]type{T});
             p.description = typeTexts(T);
             p.deprecated = typeDeprecated(T);
@@ -394,7 +394,7 @@ pub const Registry = struct {
         if (doc.description) |text| p.description = &.{text};
         p = withRules(p, rulesOf(T, name));
         p.deprecated = doc.deprecated;
-        if (mode == .input and !root.writesItself(F)) {
+        if (mode == .input and !declarations.writesItself(F)) {
             if (attrs.defaultValue(F)) |default| p.default = example.value(F, default, false, where);
         }
         const examples = fieldExamples(T, name, mode == .problem);
@@ -856,15 +856,15 @@ fn policyOf(comptime T: type, comptime r: ?*const Registry) http.UnknownFields {
 
 /// The `openapi` of `T`, null without one; one of another type stops the
 /// build.
-fn docOf(comptime T: type) ?root.Doc(T) {
+fn docOf(comptime T: type) ?declarations.Doc(T) {
     if (!@hasDecl(T, "openapi")) return null;
-    if (@TypeOf(T.openapi) != root.Doc(T))
+    if (@TypeOf(T.openapi) != declarations.Doc(T))
         @compileError("zefir.openapi: " ++ typeName(T) ++ ".openapi must be of type zefir.openapi.Doc(" ++ typeName(T) ++ ")");
     return T.openapi;
 }
 
 /// The texts of the field `name` of `T`, `.{}` when it has none.
-fn fieldDocOf(comptime T: type, comptime name: []const u8) root.FieldDoc(@FieldType(T, name)) {
+fn fieldDocOf(comptime T: type, comptime name: []const u8) declarations.FieldDoc(@FieldType(T, name)) {
     const doc = docOf(T) orelse return .{};
     if (!@hasField(@TypeOf(doc), "fields")) return .{};
     return @field(doc.fields, name);
