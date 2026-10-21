@@ -103,6 +103,12 @@ jobs:
         shell: bash
         working-directory: tests/mongo
         run: zig build check --summary all
+      # The same for tests/redis, the end-to-end tests of zefir-redis, which
+      # need Redis and Valkey in Docker.
+      - if: contains(format(' {0} ', env.MODULES), ' redis ')
+        shell: bash
+        working-directory: tests/redis
+        run: zig build check --summary all
 
   # The tests again under ThreadSanitizer; it does not build for Windows.
   tsan:
@@ -160,6 +166,7 @@ jobs:
           zig fmt --check build.zig build.zig.zon src tests examples
           --exclude tests/nats/zig-pkg --exclude tests/rpc-nats/zig-pkg
           --exclude tests/http/zig-pkg --exclude tests/mongo/zig-pkg
+          --exclude tests/redis/zig-pkg
           --exclude examples/rpc-custom-transport/zig-pkg
           --exclude examples/rpc-custom-transport/consumer/zig-pkg
 
@@ -229,6 +236,43 @@ jobs:
       - name: Stop the mongod servers
         if: always()
         run: docker compose --profile mongo down
+
+  # The end-to-end tests of redis against Redis and Valkey in Docker, on
+  # each server the client is tested with, through REDIS_IMAGE; ubuntu
+  # only, as nats-e2e. It is not a required check. It runs when redis is
+  # among the modules to test, so on every push to main or dev and on a
+  # manual run. The stress tests of tests/redis run on a developer's
+  # machine only.
+  redis-e2e:
+    name: redis-e2e (${{ matrix.image }})
+    needs: changes
+    if: contains(format(' {0} ', needs.changes.outputs.modules), ' redis ')
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["redis:7.2.16", "redis:8.10.2", "valkey/valkey:9.1.2"]
+    runs-on: ubuntu-latest
+    env:
+      REDIS_IMAGE: ${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: mlugg/setup-zig@v2
+      # The redis services only: the NATS servers, without a profile, would
+      # start too.
+      - name: Start the Redis servers
+        run: docker compose --profile redis up --detach --wait redis-plain redis-auth redis-cluster redis-old
+      # Why a server did not start or a test failed: what the servers said.
+      - name: Show the logs of the Redis servers
+        if: failure()
+        run: docker compose --profile redis logs --no-color --tail 200 redis-plain redis-auth redis-cluster redis-old
+      - name: Run the end-to-end tests
+        working-directory: tests/redis
+        timeout-minutes: 15
+        run: zig build e2e --summary all
+      - name: Stop the Redis servers
+        if: always()
+        run: docker compose --profile redis down
 
   # The package of examples/rpc-custom-transport: a transport outside zefir,
   # on the public API of rpc only, built the way an application builds it
