@@ -129,6 +129,7 @@ test {
     _ = @import("der.zig");
     _ = @import("pem.zig");
     _ = @import("pkcs.zig");
+    _ = @import("fuzz.zig");
 }
 
 test "limits have their documented values" {

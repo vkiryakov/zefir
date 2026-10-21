@@ -225,6 +225,24 @@ pub fn build(b: *std.Build) void {
     });
     fuzz_http.dependOn(&b.addRunArtifact(http_fuzz_tests).step);
 
+    // `zig build fuzz-jwt` runs the fuzz test of zefir-jwt's parsers of
+    // tokens, headers, payloads and key files on its corpus, once, like
+    // `zig build test-jwt` does; with `--fuzz` it runs the fuzzer on it
+    // (Linux: CI's fuzz.yml).
+    const fuzz_jwt = b.step("fuzz-jwt", "Run the fuzz test of the zefir-jwt parsers; with --fuzz, the fuzzer (Linux)");
+    const jwt_fuzz_tests = b.addTest(.{
+        .name = "fuzz-jwt",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/jwt/fuzz.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "validator", .module = validator },
+            },
+        }),
+    });
+    fuzz_jwt.dependOn(&b.addRunArtifact(jwt_fuzz_tests).step);
+
     // core examples: `zig build test` builds and runs them; an example that
     // exits with an error fails the step.
     for ([_][]const u8{ "http_handler", "rpc_handler", "services" }) |name| {
