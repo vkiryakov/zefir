@@ -145,7 +145,7 @@ fn checkEvents(comptime Events: type) void {
         @compileError("zefir.http: http.sse.Manager takes a union(enum) of the stream's events, such as http.sse.Manager(dto.LiveEvent); got " ++ plan.typeName(Events));
     for (@typeInfo(Events).@"union".field_names) |name| {
         if (!format.validField(name))
-            @compileError("zefir.http: http.sse.Manager(" ++ plan.typeName(Events) ++ "): the event ." ++ name ++ " has CR, LF or NUL in its name, which would break its line");
+            @compileError(std.fmt.comptimePrint("zefir.http: http.sse.Manager({s}): the event .{f} has CR, LF or NUL in its name, which would break its line", .{ plan.typeName(Events), std.zig.fmtId(name) }));
     }
 }
 

@@ -60,6 +60,14 @@ pub const compile_errors = [_]Fixture{
     .{ .file = dir ++ "route_responses_json_route.zig", .expect = "zefir.http: UsersV1Controller.create: .responses.created has a body of its own, but the handler returns http.Json(UserResponse), whose value is the body of its 2xx responses; write .created = .{}" },
     .{ .file = dir ++ "input_not_route.zig", .expect = "zefir.http: ctx.input takes a route, such as ctx.input(Get) with const Get = http.get(\"/{id}\", .{ .path = dto.TodoIdPath }); got u32" },
     .{ .file = dir ++ "sse_input_rest_route.zig", .expect = "zefir.http: ctx.input of an http.sse.Context takes the route of its stream, made by http.sse.get; got http.post(\"/import\")" },
+    // The events of a stream and its manager.
+    .{ .file = dir ++ "sse_events_missing.zig", .expect = "zefir.http: http.sse.get(\"/events\") needs .events, a union(enum) of the stream's events, such as .events = dto.LiveEvent" },
+    .{ .file = dir ++ "sse_events_not_union.zig", .expect = "zefir.http: http.sse.get(\"/events\"): .events is a union(enum) of the stream's events, such as .events = dto.LiveEvent; got u32" },
+    .{ .file = dir ++ "sse_manager_not_union.zig", .expect = "zefir.http: http.sse.Manager takes a union(enum) of the stream's events, such as http.sse.Manager(dto.LiveEvent); got u32" },
+    .{ .file = dir ++ "sse_event_name_line.zig", .expect = "zefir.http: http.sse.Manager(LiveEvent): the event .@\"todo\\ncreated\" has CR, LF or NUL in its name, which would break its line" },
+    // The compiler's own: the event is a value of the union.
+    .{ .file = dir ++ "sse_publish_unknown_event.zig", .expect = "no field named 'todo.archived' in union 'sse_publish_unknown_event.LiveEvent'" },
+    .{ .file = dir ++ "sse_publish_wrong_data.zig", .expect = "expected type 'sse_publish_wrong_data.Todo', found 'comptime_int'" },
     .{ .file = dir ++ "server_unknown_option.zig", .expect = "zefir.http: Server.init: unknown option .contollers" },
     .{ .file = dir ++ "server_unknown_nested_option.zig", .expect = "zefir.http: Server.init: UnknownFieldsOptions has no option .bdy" },
     .{ .file = dir ++ "server_trusted_proxies.zig", .expect = "zefir.http: Server.init: .trusted_proxies is .all, .private, .none or .{ .list = &.{\"10.1.0.0/16\"} }" },
