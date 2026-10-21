@@ -20,6 +20,12 @@
 //! The module has no network code, no tasks and no global state: `verify`
 //! and `sign` take only the clock from `io` (and, for ECDSA, its random
 //! noise), and the keys are plain values with a `deinit` that wipes them.
+//!
+//! The guide, src/jwt/examples/README.md, follows two services step by
+//! step: one of zefir-http that signs its users in and checks their tokens
+//! in a middleware, and one of zefir-rpc that checks them in an
+//! authenticator; with the claims, the keys and their rotation, the
+//! errors, tests on `jwt.testing.FixedClock`, security and the limits.
 
 const std = @import("std");
 const v = @import("validator");

@@ -2015,6 +2015,10 @@ pub fn requirePermission(comptime permission: []const u8) type {
 - **`requirePermission("todos:delete")`** is a type made at compile time for
   each permission, with a name of its own: `PermissionDenied`, 403.
 
+A service that signs the tokens of its users and verifies them, instead of
+a table, does it with the middleware `JwtAuth` of
+[the zefir-jwt guide](../../jwt/examples/README.md), of the same shape.
+
 A token that is not there, and one that may not delete:
 
 ```text
