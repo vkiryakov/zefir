@@ -3,6 +3,9 @@
 //! Redis 7.2 or later or Valkey 8 or later, in RESP3 over plain TCP: there
 //! is no TLS, so it belongs on a trusted network only.
 //!
+//! - `redis.cmd` — the commands, as values that the client runs, and
+//!   `cmd.raw` for a command that the catalog lacks, with its reply in a
+//!   type of the caller's.
 //! - `redis.Value` — a reply of any shape, for replies that fit no Zig
 //!   type: strings, numbers, doubles, booleans, arrays, sets, maps with
 //!   their pairs in the server's order, and errors inside aggregates.
@@ -19,6 +22,8 @@ const types = @import("cmd/types.zig");
 
 /// RESP3, for the client and `testing.FakeServer` only.
 const resp = @import("resp.zig");
+
+pub const cmd = @import("cmd.zig");
 
 pub const Value = resp.Value;
 
@@ -62,6 +67,7 @@ test {
     _ = @import("resp/decode_tests.zig");
     _ = @import("resp/hash_tests.zig");
     _ = @import("cmd/types_tests.zig");
+    _ = @import("cmd/raw_tests.zig");
     _ = @import("resp/fuzz.zig");
 }
 

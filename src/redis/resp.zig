@@ -11,6 +11,7 @@
 //!   read into an arena; `redis.Value` is this type.
 //! - `decode`, `Decoder`, `needsAllocator` and `checkReply` — a reply read
 //!   into the type a call names, by the rules of the design's §3.3.
+//! - `args` — the arguments of commands, by the rules of the design's §3.2.
 
 const std = @import("std");
 const value = @import("resp/value.zig");
@@ -26,6 +27,7 @@ pub const DecodeError = decoding.Error;
 pub const Decoder = decoding.Decoder;
 pub const needsAllocator = decoding.needsAllocator;
 pub const checkReply = decoding.checkReply;
+pub const args = @import("resp/args.zig");
 
 test {
     std.testing.refAllDecls(@This());
