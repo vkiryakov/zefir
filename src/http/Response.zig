@@ -53,17 +53,20 @@ pub const Internal = struct {
     /// The buffer of a body written as it goes.
     out: Out = .{},
     /// Runs once, right before the head goes out: the `onResponse` phases
-    /// of the middleware. The server sets it for each request.
+    /// of the middleware, then the Debug check of the route. The server
+    /// sets it for each request.
     before_head: ?BeforeHead = null,
     /// The status the head went out with; null before.
     status_sent: ?u16 = null,
     /// The server cut the response, or ended the request without one.
     aborted: bool = false,
 
-    /// What runs right before the head of a response goes out.
+    /// What runs right before the head of a response goes out: true when
+    /// the response goes as it is; false when the server put an answer of
+    /// its own in its place, which goes out instead.
     pub const BeforeHead = struct {
         ptr: *anyopaque,
-        call: *const fn (ptr: *anyopaque) void,
+        call: *const fn (ptr: *anyopaque) bool,
     };
 
     /// Whether the handler wrote a response: a status or a body. A `!void`
@@ -99,8 +102,8 @@ pub const Internal = struct {
     /// the buffer, or what a stream left in the buffer.
     pub fn send(i: *Internal) Exchange.WriteError!void {
         // First, as the head is not taken apart yet: its status and fields
-        // may still change.
-        i.runBeforeHead();
+        // may still change, and an answer of the server may take its place.
+        _ = i.runBeforeHead();
         const sink = i.sink.?;
         switch (i.body) {
             .none, .bytes => {
@@ -183,7 +186,13 @@ pub const Internal = struct {
     /// and the body's `length`, or chunked for null. From here on the
     /// response is committed. Every head of a response goes out here.
     fn commit(i: *Internal, length: ?u64) Exchange.WriteError!void {
-        i.runBeforeHead();
+        if (!i.runBeforeHead()) {
+            // The server put its own answer in place of the response, of
+            // which nothing had gone out: that answer goes out whole now,
+            // and what was being written goes nowhere.
+            try i.send();
+            return i.fail(error.WriteFailed);
+        }
         const sink = i.sink.?;
         const code = i.statusCode();
         if (code < 200 or code > 599) {
@@ -198,11 +207,12 @@ pub const Internal = struct {
         sink.exchange.writeHead(sink.io, code, head_fields, kindOf(code, length)) catch |err| return i.fail(err);
     }
 
-    /// The hook before the head, once.
-    fn runBeforeHead(i: *Internal) void {
-        const hook = i.before_head orelse return;
+    /// The hook before the head, once: false when it put an answer of the
+    /// server in place of the response.
+    fn runBeforeHead(i: *Internal) bool {
+        const hook = i.before_head orelse return true;
         i.before_head = null;
-        hook.call(hook.ptr);
+        return hook.call(hook.ptr);
     }
 
     /// Sends what the buffer holds, the head first if it has not gone:
@@ -227,7 +237,7 @@ pub const Internal = struct {
 
     /// The status the response goes with: the one set, else 200 with a
     /// body and 204 without.
-    fn statusCode(i: *const Internal) u16 {
+    pub fn statusCode(i: *const Internal) u16 {
         return i.code orelse if (i.body == .none) 204 else 200;
     }
 

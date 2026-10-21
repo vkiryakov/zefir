@@ -38,6 +38,7 @@ const v = @import("validator");
 const sse = @import("../sse.zig");
 const routes = @import("../routes.zig");
 const plan = @import("../plan.zig");
+const check = @import("../check.zig");
 const json_out = @import("../output/json_out.zig");
 const format = @import("format.zig");
 const Hub = @import("Hub.zig");
@@ -95,6 +96,7 @@ pub fn Manager(comptime Events: type) type {
         /// `.max_in_flight`, and its deadline no longer applies. The key is
         /// copied.
         pub fn subscribe(m: *Self, ctx: *sse.Context, key: []const u8) SubscribeError!SubscriptionId {
+            check.subscribe(ctx.internal.http, Events);
             return m.internal.subscribe(ctx, key);
         }
 

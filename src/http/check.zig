@@ -1,15 +1,40 @@
 //! The Debug check of a route's declarations: on a route
 //! of a controller with `pub const openapi`, the server compares what the
 //! handler, the middleware and the error handler do with what the route
-//! declares, and answers a mismatch with its own 500 and a line in the log.
+//! declares, and answers a mismatch with its own 500 and a line in the log:
+//!
+//! ```text
+//! zefir.http: GET /api/v1/todos (TodosV1Controller.list) reads the query as ListQuery, but declares .query = ListTodosQuery
+//! zefir.http: POST /api/v1/todos (TodosV1Controller.create) answered 202, which it does not declare in .responses
+//! ```
 //!
 //! At compile time `tableOf` builds what a route declares: the DTO of each
 //! source of its input, the responses it answers with (its `.responses`,
 //! else its default response: 200 `application/json` for `http.Json(T)`,
 //! 204 for `!void`, 200 `text/event-stream` for SSE), the errors it can
 //! give the error handler, whose answers `mapError` gives, and the events
-//! of an SSE route. Only for controllers with `openapi`, and only in Debug
-//! builds: elsewhere none of this is compiled.
+//! of an SSE route.
+//!
+//! At run time it compares:
+//! - each input call (`ctx.path`, `query`, `headers`, `cookies`, `json`,
+//!   `form`, and so `ctx.input`): its type must be the one the route
+//!   declares for that source;
+//! - each response of the route, from the handler, from a middleware that
+//!   answers `.handled`, from the error handler: its status and the media
+//!   type of its body must be among the route's responses, or among the
+//!   answers `mapError` gives its errors, in the error handler's media type;
+//! - `subscribe` of an `http.sse.Manager(Events)`: `Events` must be the
+//!   route's `.events`.
+//!
+//! A call works as usual, and no error set changes: a mismatch is kept,
+//! and right before the head of the response goes out, the response becomes
+//! the server's 500 problem+json, with one line in the log. The answers the
+//! server writes itself go as they are: the answer to an error that is not
+//! one of the route's (the 504 of a deadline, the 503 of a task the runtime
+//! did not give), the 408 or 400 of a body that did not arrive whole, the
+//! server's own 500; the automatic OPTIONS, a 405 and a 404 belong to no
+//! route. Only routes of controllers with `openapi` are checked, and only in
+//! Debug builds: elsewhere none of this is compiled.
 const std = @import("std");
 const builtin = @import("builtin");
 const routes = @import("routes.zig");
@@ -17,6 +42,10 @@ const plan = @import("plan.zig");
 const mw = @import("middleware.zig");
 const errors = @import("errors.zig");
 const describe = @import("describe.zig");
+const flow = @import("flow.zig");
+const Context = @import("Context.zig");
+
+const log = std.log.scoped(.http);
 
 /// The check runs in Debug builds only.
 pub const enabled = builtin.mode == .debug;
@@ -165,9 +194,226 @@ pub fn mediaType(content_type: []const u8) []const u8 {
     return std.mem.trim(u8, content_type[0..end], " \t");
 }
 
+// ---------- At run time ----------
+
+/// What the check keeps of a request, in its context; nothing outside
+/// Debug.
+pub const State = if (enabled) struct {
+    /// The route the request matched, when the check compares it.
+    route: ?Checked = null,
+    /// The first input call or `subscribe` that does not match the route.
+    mismatch: ?Mismatch = null,
+    /// The response that goes out is one the server writes itself: it goes
+    /// as it is.
+    untouched: bool = false,
+} else struct {};
+
+/// A route the check compares: its table, and its names for the line.
+const Checked = struct { info: *const routes.RouteInfo, table: *const Table };
+
+const Mismatch = union(enum) {
+    /// An input call read `source` as a type of the name `read`.
+    input: struct { source: Source, read: []const u8 },
+    /// `subscribe` of a manager of events of the type of this name.
+    events: []const u8,
+};
+
+/// The request of `ctx` matched the route `info`, whose table is `table`:
+/// from here on the check compares it, if the route has a table. Before
+/// the server's middleware runs, so that its input calls count too.
+pub fn begin(ctx: *Context, info: *const routes.RouteInfo, table: TableRef) void {
+    if (!enabled) return;
+    // Not in the literal: its result location, the optional, would be set
+    // before the return.
+    const t = table orelse return;
+    ctx.internal.check.route = .{ .info = info, .table = t };
+}
+
+/// An input call of `ctx` reads `source` as a `T`.
+pub fn input(ctx: *Context, comptime source: Source, comptime T: type) void {
+    if (!enabled) return;
+    const route = ctx.internal.check.route orelse return;
+    if (allowsInput(route.table, source, idOf(T))) return;
+    record(ctx, route, .{ .input = .{ .source = source, .read = comptime plan.typeName(T) } });
+}
+
+/// `subscribe` of an `http.sse.Manager(Events)` on the route of `ctx`.
+pub fn subscribe(ctx: *Context, comptime Events: type) void {
+    if (!enabled) return;
+    const route = ctx.internal.check.route orelse return;
+    if (route.table.events) |declared| if (declared.id == idOf(Events)) return;
+    record(ctx, route, .{ .events = comptime plan.typeName(Events) });
+}
+
+/// The error handler answers `err`. An error that is not one of the
+/// route's comes from the server, such as the 504 of a deadline: its
+/// answer goes as it is.
+pub fn answering(ctx: *Context, err: anyerror) void {
+    if (!enabled) return;
+    const route = ctx.internal.check.route orelse return;
+    // A place of the route returns anyerror: every error may be its.
+    const list = route.table.errors orelse return;
+    for (list) |e| {
+        if (e == err) return;
+    }
+    ctx.internal.check.untouched = true;
+}
+
+/// The response that goes out is one the server writes itself: the 408 or
+/// 400 of a body that did not arrive whole, the server's own 500.
+pub fn leave(ctx: *Context) void {
+    if (!enabled) return;
+    ctx.internal.check.untouched = true;
+}
+
+/// Right before the head of the response goes out, after the `onResponse`
+/// phases: true when the response goes as it is; false when the check put
+/// the server's 500 problem+json in its place and logged why, for a
+/// mismatch kept before, or for a status or a media type that the route
+/// does not declare.
+pub fn head(ctx: *Context) bool {
+    if (!enabled) return true;
+    const state = &ctx.internal.check;
+    const route = state.route orelse return true;
+    if (state.mismatch) |m| {
+        report(ctx, route, .{ .mismatch = m });
+        // The server's own answer goes as it is, with the line of the
+        // mismatch all the same.
+        if (state.untouched) return true;
+    } else {
+        if (state.untouched) return true;
+        const res = &ctx.response.internal;
+        const status = res.statusCode();
+        const media: ?[]const u8 = if (res.body == .none) null else if (res.content_type) |text| mediaType(text) else null;
+        if (allowsAnswer(route.table, status, media)) return true;
+        report(ctx, route, .{ .answer = .{ .status = status, .media = media } });
+    }
+    flow.replaceWithInternal(&ctx.response.internal);
+    return false;
+}
+
+/// Keeps the first mismatch of the request for the head of its response.
+/// Once the head has gone, as in the `.on_close` of a stream, the mismatch
+/// can change nothing: its line goes to the log at once.
+fn record(ctx: *Context, route: Checked, m: Mismatch) void {
+    if (ctx.response.internal.state != .uncommitted) return report(ctx, route, .{ .mismatch = m });
+    if (ctx.internal.check.mismatch == null) ctx.internal.check.mismatch = m;
+}
+
+fn allowsInput(t: *const Table, source: Source, id: *const anyopaque) bool {
+    if (t.own[@backingInt(source)]) |declared| if (declared.id == id) return true;
+    return false;
+}
+
+/// Whether the route declares a response of `status` with a body of
+/// `media`, or without one for null.
+fn allowsAnswer(t: *const Table, status: u16, media: ?[]const u8) bool {
+    for (t.responses) |a| {
+        if (a.status == status and sameMedia(status, a.media, media)) return true;
+    }
+    if (!sameMedia(status, t.error_media, media)) return false;
+    const list = t.errors orelse return true;
+    for (list) |err| {
+        if (t.statusOf(err) == status) return true;
+    }
+    return false;
+}
+
+/// Whether the route declares a response of `status`, whatever its body.
+fn declaresStatus(t: *const Table, status: u16) bool {
+    for (t.responses) |a| {
+        if (a.status == status) return true;
+    }
+    const list = t.errors orelse return false;
+    for (list) |err| {
+        if (t.statusOf(err) == status) return true;
+    }
+    return false;
+}
+
+/// Whether a body of `actual` is one of `declared`: 204 and 304 send none,
+/// whatever was set.
+fn sameMedia(status: u16, declared: ?[]const u8, actual: ?[]const u8) bool {
+    if (status == 204 or status == 304) return true;
+    const d = declared orelse return actual == null;
+    const a = actual orelse return false;
+    return std.ascii.eqlIgnoreCase(d, a);
+}
+
+/// What a line of the check is about.
+const What = union(enum) { mismatch: Mismatch, answer: Answer };
+
+/// Logs the line of `what` for the route of `ctx`.
+fn report(ctx: *Context, route: Checked, what: What) void {
+    var buf: [1024]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    // A line too long for the buffer is cut.
+    writeLine(&w, route, what) catch {};
+    const line = w.buffered();
+    log.warn("{s}", .{line});
+    if (builtin.is_test) seen.add(ctx.io(), line);
+}
+
+/// `zefir.http: <METHOD> <pattern> (<Controller>.<method>) <what>`.
+fn writeLine(w: *std.Io.Writer, route: Checked, what: What) std.Io.Writer.Error!void {
+    const info = route.info;
+    const t = route.table;
+    try w.print("zefir.http: {t} {s} ({s}.{s}) ", .{ info.method, info.pattern, info.controller, info.handler });
+    switch (what) {
+        .mismatch => |m| switch (m) {
+            .input => |in| {
+                try w.print("reads the {t} as {s}, but ", .{ in.source, in.read });
+                if (t.own[@backingInt(in.source)]) |declared|
+                    try w.print("declares .{t} = {s}", .{ in.source, declared.name })
+                else
+                    try w.print("declares no .{t}", .{in.source});
+            },
+            .events => |name| {
+                try w.print("subscribes with an http.sse.Manager({s}), but declares ", .{name});
+                if (t.events) |declared| try w.print(".events = {s}", .{declared.name}) else try w.writeAll("no .events");
+            },
+        },
+        .answer => |a| {
+            try w.print("answered {d}", .{a.status});
+            // Its status is declared, with another body.
+            if (declaresStatus(t, a.status)) {
+                if (a.media) |media| try w.print(" as {s}", .{media}) else try w.writeAll(" without a body");
+            }
+            try w.writeAll(", which it does not declare in .responses");
+        },
+    }
+}
+
+/// The lines of the check, for the tests of this file: how many there were,
+/// and the last one.
+const seen = struct {
+    var mutex: std.Io.Mutex = .init;
+    var count: u32 = 0;
+    var last: [1024]u8 = undefined;
+    var len: usize = 0;
+
+    fn add(io: std.Io, line: []const u8) void {
+        mutex.lockUncancelable(io);
+        defer mutex.unlock(io);
+        count += 1;
+        len = line.len;
+        @memcpy(last[0..len], line);
+    }
+
+    /// The lines since the last call: how many, and a copy of the last one
+    /// in `out`.
+    fn take(io: std.Io, out: []u8) struct { count: u32, line: []const u8 } {
+        mutex.lockUncancelable(io);
+        defer mutex.unlock(io);
+        const n = @min(len, out.len);
+        @memcpy(out[0..n], last[0..n]);
+        defer count = 0;
+        return .{ .count = count, .line = out[0..n] };
+    }
+};
+
 const testing = std.testing;
 const sse = @import("sse.zig");
-const Context = @import("Context.zig");
 const Json = @import("dto.zig").Json;
 
 // Application code of the tests: zefir-http ships no controller.
@@ -297,4 +543,303 @@ test "mediaType: a media type without its parameters" {
     try testing.expectEqualStrings("text/csv", mediaType("text/csv; charset=utf-8"));
     try testing.expectEqualStrings("application/json", mediaType("application/json"));
     try testing.expectEqualStrings("text/html", mediaType(" text/html ;q=1"));
+}
+
+// The check through the server, on `http.testing`.
+
+const Server = @import("Server.zig");
+const TestingBackend = @import("testing/Backend.zig");
+
+const Item = struct { id: u64, title: []const u8 };
+const ItemEvent = union(enum) { created: Item };
+const OtherEvent = union(enum) { other: u32 };
+const OtherQuery = struct { q: ?[]const u8 = null };
+
+/// What the test asks of a handler, in the header `x-mode`, which the
+/// handler reads raw: the check does not compare raw reads.
+fn is(ctx: *const Context, mode: []const u8) bool {
+    return std.mem.eql(u8, ctx.request.header("x-mode") orelse "", mode);
+}
+
+/// A controller of the document, whose handlers keep to what their routes
+/// declare unless `x-mode` asks otherwise.
+const ItemsV1Controller = struct {
+    live: *sse.Manager(ItemEvent),
+    other: *sse.Manager(OtherEvent),
+
+    pub const openapi = .{};
+
+    const Create = routes.post("", .{ .body = CreateTodo, .responses = .{ .created = .{}, .ok = .{} } });
+
+    pub const http_routes = routes.routes(.{
+        .prefix = "/v1/items",
+        .methods = .{
+            .list = routes.get("", .{ .query = ListQuery }),
+            .get = routes.get("/{id}", .{ .path = TodoPath }),
+            .create = Create,
+            .remove = routes.delete("/{id}", .{ .path = TodoPath }),
+            .exportCsv = routes.get("/export.csv", .{ .responses = .{ .ok = .{ .content_type = "text/csv" } } }),
+            .events = sse.get("/events", .{ .events = ItemEvent }),
+        },
+    });
+
+    pub fn list(_: *ItemsV1Controller, ctx: *Context) !Json(Item) {
+        if (is(ctx, "other query")) _ = try ctx.query(OtherQuery) else _ = try ctx.query(ListQuery);
+        if (is(ctx, "path")) _ = try ctx.path(TodoPath);
+        return .{ .value = .{ .id = 1, .title = "Buy milk" } };
+    }
+
+    pub fn get(_: *ItemsV1Controller, ctx: *Context) !Json(Item) {
+        const path = try ctx.path(TodoPath);
+        if (is(ctx, "missing") or is(ctx, "html") or is(ctx, "410")) return error.TodoNotFound;
+        return .{ .value = .{ .id = path.id, .title = "Buy milk" }, .status = if (is(ctx, "201")) 201 else 200 };
+    }
+
+    pub fn create(_: *ItemsV1Controller, ctx: *Context) !Json(Item) {
+        if (is(ctx, "form")) _ = try ctx.form(CreateTodo);
+        const in = try ctx.input(Create);
+        return .{ .value = .{ .id = 2, .title = in.body.title }, .status = if (is(ctx, "202")) 202 else 201 };
+    }
+
+    pub fn remove(_: *ItemsV1Controller, ctx: *Context) !void {
+        _ = try ctx.path(TodoPath);
+        if (is(ctx, "text")) try ctx.response.text("gone");
+        if (is(ctx, "redirect")) try ctx.response.status(303).redirect("/");
+    }
+
+    pub fn exportCsv(_: *ItemsV1Controller, ctx: *Context) !void {
+        var out = try ctx.response.stream(.{ .content_type = if (is(ctx, "html")) "text/html" else "text/csv; charset=utf-8" });
+        try out.writeAll("id,title\n1,Buy milk\n");
+        try out.finish();
+    }
+
+    pub fn events(self: *ItemsV1Controller, ctx: *sse.Context) !void {
+        if (is(ctx.internal.http, "other events")) {
+            _ = try self.other.subscribe(ctx, "items");
+            return;
+        }
+        _ = try self.live.subscribe(ctx, "items");
+    }
+};
+
+/// A controller outside the document: the same mistakes go unchecked.
+const PlainV1Controller = struct {
+    pub const http_routes = routes.routes(.{
+        .prefix = "/v1/plain",
+        .methods = .{
+            .list = routes.get("", .{ .query = ListQuery }),
+            .get = routes.get("/{id}", .{}),
+        },
+    });
+
+    pub fn list(_: *PlainV1Controller, ctx: *Context) !Json(Item) {
+        _ = try ctx.query(OtherQuery);
+        return .{ .value = .{ .id = 1, .title = "Buy milk" } };
+    }
+
+    pub fn get(_: *PlainV1Controller, _: *Context) !Json(Item) {
+        return .{ .value = .{ .id = 1, .title = "Buy milk" }, .status = 201 };
+    }
+};
+
+/// Maps the errors of the controllers; `handle` answers in HTML, or with
+/// another status, when `x-mode` asks.
+const ItemErrors = struct {
+    pub fn mapError(err: anyerror) errors.ErrorResponse(ApiError) {
+        return switch (err) {
+            error.TodoNotFound => .{ .status = 404, .body = .{ .code = "items.not_found" } },
+            else => .fallback(err, .{ .code = errors.defaultCode(err) }),
+        };
+    }
+
+    pub fn handle(_: *ItemErrors, ctx: *Context, err: anyerror, res: *errors.ErrorResponse(ApiError)) !errors.ErrorAction {
+        if (err != error.TodoNotFound) return .respond;
+        if (is(ctx, "410")) res.status = 410;
+        if (!is(ctx, "html")) return .respond;
+        try ctx.response.status(404).html("<p>Not found</p>");
+        return .handled;
+    }
+};
+
+/// A server of both controllers, under "/api"; it stays where `start` put
+/// it.
+const CheckFixture = struct {
+    live: sse.Manager(ItemEvent) = undefined,
+    other: sse.Manager(OtherEvent) = undefined,
+    items: ItemsV1Controller = undefined,
+    plain: PlainV1Controller = .{},
+    item_errors: ItemErrors = .{},
+    backend: TestingBackend = undefined,
+    server: Server = undefined,
+    /// The last line of the check, copied.
+    line: [1024]u8 = undefined,
+
+    fn start(f: *CheckFixture) !void {
+        const io = testing.io;
+        f.live = .init(testing.allocator, .{});
+        errdefer f.live.deinit(io);
+        f.other = .init(testing.allocator, .{});
+        errdefer f.other.deinit(io);
+        f.items = .{ .live = &f.live, .other = &f.other };
+        f.backend = .init(testing.allocator);
+        errdefer f.backend.deinit();
+        f.server = try Server.init(testing.allocator, .{
+            .backend = f.backend.backend(),
+            .prefix = "/api",
+            .controllers = .{ &f.items, &f.plain },
+            .error_handler = &f.item_errors,
+        });
+        errdefer f.server.deinit(io);
+        try f.server.start(io);
+        // The lines of the tests before.
+        _ = seen.take(io, &f.line);
+    }
+
+    fn stop(f: *CheckFixture) void {
+        const io = testing.io;
+        f.server.deinit(io);
+        f.other.deinit(io);
+        f.live.deinit(io);
+        f.backend.deinit();
+    }
+
+    /// A request with `x-mode: mode` and a JSON body when there is one.
+    fn request(f: *CheckFixture, method: std.http.Method, target: []const u8, mode: []const u8, body: []const u8) !TestingBackend.Response {
+        return f.backend.request(testing.io, .{
+            .method = method,
+            .target = target,
+            .headers = &.{ .{ "x-mode", mode }, .{ "content-type", "application/json" } },
+            .body = body,
+        });
+    }
+
+    /// The request gets the server's own 500 problem+json, and the check
+    /// logs `line`, once.
+    fn expectRefused(f: *CheckFixture, method: std.http.Method, target: []const u8, mode: []const u8, line: []const u8) !void {
+        var res = try f.request(method, target, mode, if (method == .POST) "{\"title\":\"Buy milk\"}" else "");
+        defer res.deinit();
+        errdefer std.debug.print("{t} {s} with x-mode {s}: {d} {s}\n", .{ method, target, mode, res.status, res.body });
+        try testing.expectEqual(500, res.status);
+        try testing.expect(!res.aborted);
+        try testing.expectEqualStrings("application/problem+json", res.header("content-type").?);
+        try testing.expectEqualStrings("{\"type\":\"about:blank\",\"title\":\"Internal Server Error\",\"status\":500,\"code\":\"internal\",\"errors\":[]}", res.body);
+        try f.expectLine(line);
+    }
+
+    /// The request gets `status`, and the check logs nothing.
+    fn expectPassed(f: *CheckFixture, method: std.http.Method, target: []const u8, mode: []const u8, status: u16) !void {
+        var res = try f.request(method, target, mode, if (method == .POST) "{\"title\":\"Buy milk\"}" else "");
+        defer res.deinit();
+        errdefer std.debug.print("{t} {s} with x-mode {s}: {d} {s}\n", .{ method, target, mode, res.status, res.body });
+        try testing.expectEqual(status, res.status);
+        try f.expectLine(null);
+    }
+
+    fn expectLine(f: *CheckFixture, line: ?[]const u8) !void {
+        const got = seen.take(testing.io, &f.line);
+        if (line) |want| {
+            try testing.expectEqual(1, got.count);
+            try testing.expectEqualStrings(want, got.line);
+        } else {
+            if (got.count != 0) std.debug.print("unexpected line: {s}\n", .{got.line});
+            try testing.expectEqual(0, got.count);
+        }
+    }
+};
+
+test "check: the calls and the answers a route declares pass" {
+    if (!enabled) return error.SkipZigTest;
+    var f: CheckFixture = .{};
+    try f.start();
+    defer f.stop();
+    const level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = level;
+
+    try f.expectPassed(.GET, "/api/v1/items", "", 200);
+    try f.expectPassed(.GET, "/api/v1/items/1", "", 200);
+    // HEAD of a GET: its answer without the body.
+    try f.expectPassed(.HEAD, "/api/v1/items/1", "", 200);
+    try f.expectPassed(.POST, "/api/v1/items", "", 201);
+    try f.expectPassed(.DELETE, "/api/v1/items/1", "", 204);
+    try f.expectPassed(.GET, "/api/v1/items/export.csv", "", 200);
+    // An error of the route, answered by mapError.
+    try f.expectPassed(.GET, "/api/v1/items/1", "missing", 404);
+    try f.expectPassed(.GET, "/api/v1/items/0x", "", 422);
+    // The stream of the route's events.
+    const s = try f.backend.open(testing.io, .{ .method = .GET, .target = "/api/v1/items/events" });
+    defer s.deinit(testing.io);
+    try testing.expectEqual(200, s.status);
+    try testing.expectEqualStrings("text/event-stream", s.header("content-type").?);
+    try f.expectLine(null);
+}
+
+test "check: an input call of another type, or of a source the route does not declare, is a 500 with its line" {
+    if (!enabled) return error.SkipZigTest;
+    var f: CheckFixture = .{};
+    try f.start();
+    defer f.stop();
+    const level = testing.log_level;
+    testing.log_level = .err; // the lines are warnings
+    defer testing.log_level = level;
+
+    try f.expectRefused(.GET, "/api/v1/items", "other query", "zefir.http: GET /api/v1/items (ItemsV1Controller.list) reads the query as OtherQuery, but declares .query = ListQuery");
+    try f.expectRefused(.GET, "/api/v1/items", "path", "zefir.http: GET /api/v1/items (ItemsV1Controller.list) reads the path as TodoPath, but declares no .path");
+    // The form fails with 415, which the route answers; its read is the
+    // mismatch all the same.
+    try f.expectRefused(.POST, "/api/v1/items", "form", "zefir.http: POST /api/v1/items (ItemsV1Controller.create) reads the form as CreateTodo, but declares no .form");
+}
+
+test "check: a status or a body the route does not declare is a 500 with its line" {
+    if (!enabled) return error.SkipZigTest;
+    var f: CheckFixture = .{};
+    try f.start();
+    defer f.stop();
+    const level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = level;
+
+    try f.expectRefused(.GET, "/api/v1/items/1", "201", "zefir.http: GET /api/v1/items/{id} (ItemsV1Controller.get) answered 201, which it does not declare in .responses");
+    try f.expectRefused(.POST, "/api/v1/items", "202", "zefir.http: POST /api/v1/items (ItemsV1Controller.create) answered 202, which it does not declare in .responses");
+    try f.expectRefused(.DELETE, "/api/v1/items/1", "text", "zefir.http: DELETE /api/v1/items/{id} (ItemsV1Controller.remove) answered 200, which it does not declare in .responses");
+    try f.expectRefused(.DELETE, "/api/v1/items/1", "redirect", "zefir.http: DELETE /api/v1/items/{id} (ItemsV1Controller.remove) answered 303, which it does not declare in .responses");
+    // A stream whose head did not go out: the 500 in its place, whole.
+    try f.expectRefused(.GET, "/api/v1/items/export.csv", "html", "zefir.http: GET /api/v1/items/export.csv (ItemsV1Controller.exportCsv) answered 200 as text/html, which it does not declare in .responses");
+}
+
+test "check: what the error handler's handle changes is compared too" {
+    if (!enabled) return error.SkipZigTest;
+    var f: CheckFixture = .{};
+    try f.start();
+    defer f.stop();
+    const level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = level;
+
+    try f.expectRefused(.GET, "/api/v1/items/1", "html", "zefir.http: GET /api/v1/items/{id} (ItemsV1Controller.get) answered 404 as text/html, which it does not declare in .responses");
+    try f.expectRefused(.GET, "/api/v1/items/1", "410", "zefir.http: GET /api/v1/items/{id} (ItemsV1Controller.get) answered 410, which it does not declare in .responses");
+}
+
+test "check: subscribe with a manager of other events is a 500 with its line" {
+    if (!enabled) return error.SkipZigTest;
+    var f: CheckFixture = .{};
+    try f.start();
+    defer f.stop();
+    const level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = level;
+
+    try f.expectRefused(.GET, "/api/v1/items/events", "other events", "zefir.http: GET /api/v1/items/events (ItemsV1Controller.events) subscribes with an http.sse.Manager(OtherEvent), but declares .events = ItemEvent");
+    // No stream opened.
+    try testing.expectEqual(0, @import("testing.zig").openStreams(&f.server));
+}
+
+test "check: the routes of a controller without openapi are not checked" {
+    if (!enabled) return error.SkipZigTest;
+    var f: CheckFixture = .{};
+    try f.start();
+    defer f.stop();
+
+    try f.expectPassed(.GET, "/api/v1/plain", "", 200);
+    try f.expectPassed(.GET, "/api/v1/plain/1", "", 201);
 }

@@ -37,9 +37,11 @@
 //! takes goes to the longest static mount that begins it, which opens its
 //! file there, within the deadline, and sends it after the request, on the
 //! connection's task, without one (static.zig). The `onResponse` phases
-//! run right before the head goes out, whichever task sends it. Once the
-//! request has ended, the `onFinish` phases run, once, on a task of their
-//! own within `.finish_timeout`; then the values of `ctx.locals` go.
+//! run right before the head goes out, whichever task sends it, then, in
+//! Debug, the check of a route of a controller with `openapi` (check.zig).
+//! Once the request has ended, the `onFinish` phases run, once, on a task
+//! of their own within `.finish_timeout`; then the values of `ctx.locals`
+//! go.
 //!
 //! A request whose SSE handler subscribed goes on as its stream, on this
 //! task, which keeps the connection for it (`serveStream`): it leaves the
@@ -63,6 +65,7 @@ const response = @import("h1/response.zig");
 const json_out = @import("output/json_out.zig");
 const plan = @import("plan.zig");
 const mw = @import("middleware.zig");
+const check = @import("check.zig");
 const static_files = @import("static.zig");
 const waiting = @import("wait.zig");
 const sse = @import("sse.zig");
@@ -152,7 +155,7 @@ pub fn serve(server: *Server, io: std.Io, exchange: *Exchange) void {
             .server = server,
         },
     };
-    ctx.response.internal.before_head = mw.beforeHead(&ctx);
+    ctx.response.internal.before_head = .{ .ptr = &ctx, .call = beforeHead };
     // A request refused here has run no middleware: none has after phases.
     if (!takeSlot(server)) return respond(&ctx, exchange, error.Overloaded);
     ctx.internal.in_flight = true;
@@ -160,6 +163,9 @@ pub fn serve(server: *Server, io: std.Io, exchange: *Exchange) void {
     defer if (ctx.internal.in_flight) releaseSlot(server, io);
 
     const found = find(server, &ctx);
+    // The server's middleware runs before the route is applied, and the
+    // check compares its input calls too.
+    if (check.enabled) if (routeOf(found)) |index| check.begin(&ctx, &server.internal.routes[index].info, server.internal.routes[index].check);
     ctx.internal.max_body_bytes = bodyLimitOf(server, found);
     const deadline: ?core.Deadline = if (budgetOf(server, found)) |budget| .after(ctx.now(), budget) else null;
     if (deadline) |d| ctx.internal.operation = ctx.internal.operation.withDeadline(d);
@@ -229,6 +235,16 @@ pub fn serve(server: *Server, io: std.Io, exchange: *Exchange) void {
     ctx.locals.internal.deinitValues();
     // The backend sees the stop's cancelation at its next cancelation point.
     if (canceled) io.recancel();
+}
+
+/// What runs right before the head of a response goes out: the
+/// `onResponse` phases of the middleware the request reached, then the
+/// Debug check of its route (check.zig), which may put the server's 500 in
+/// place of the response: false then.
+fn beforeHead(ptr: *anyopaque) bool {
+    const ctx: *Context = @ptrCast(@alignCast(ptr));
+    mw.onResponsePhases(ctx);
+    return check.head(ctx);
 }
 
 /// The `onFinish` phases of the middleware the request reached, once it
@@ -480,6 +496,17 @@ fn find(server: *Server, ctx: *Context) Found {
     return .{ .match = match };
 }
 
+/// The route the router matched, as an index into the server's routes.
+fn routeOf(found: Found) ?usize {
+    return switch (found) {
+        .match => |match| switch (match) {
+            .found => |f| f.route,
+            else => null,
+        },
+        .static, .failed => null,
+    };
+}
+
 /// The budget of the request's deadline: the route's `.timeout`, else the
 /// server's `.request_timeout`, which holds for a static file until it is
 /// open; null for none.
@@ -657,6 +684,7 @@ const internal_line = "{s} failed with error.{t}; the response is 500 (request {
 /// The answer to `err`: what the error handler makes of it, in place of
 /// what the handler wrote.
 fn answerError(ctx: *Context, exchange: *Exchange, err: anyerror) void {
+    check.answering(ctx, err);
     const errors_of = ctx.internal.error_handler;
     switch (errors_of.answer(errors_of.object, ctx, err)) {
         .send => {
@@ -732,10 +760,12 @@ fn setReply(ctx: *Context, err: anyerror, reply: anytype) void {
     dropContentFields(res);
     if (reply.status < 200 or reply.status > 599) {
         log.warn("the error handler gave error.{t} the status {d}, which is not a final status; the response is 500 (request {s})", .{ err, reply.status, ctx.requestId() });
+        check.leave(ctx);
         return setInternal(res);
     }
     const bytes = json_out.encode(res.arena, reply.body, .{ .omit_null_fields = problem }) catch |failure| {
         log.warn("the body of the response to error.{t} failed with error.{t}; the response is the framework's 500 (request {s})", .{ err, failure, ctx.requestId() });
+        check.leave(ctx);
         return setInternal(res);
     };
     res.code = reply.status;
@@ -746,6 +776,15 @@ fn setReply(ctx: *Context, err: anyerror, reply: anytype) void {
 fn setInternal(res: *Context.Response.Internal) void {
     res.code = 500;
     res.replaceBody("application/problem+json", internal_problem);
+}
+
+/// The framework's own 500 in place of a response that the Debug check
+/// refused before its head went out (check.zig): the fields of its content
+/// go, the others stay, and a stream begun for it is dropped.
+pub fn replaceWithInternal(res: *Context.Response.Internal) void {
+    dropContentFields(res);
+    res.out.failure = null;
+    setInternal(res);
 }
 
 /// OPTIONS without a route of its own: 204 with `Allow`.
@@ -760,6 +799,7 @@ fn answerOptions(ctx: *Context, allow: Allow) Context.Response.SetError!void {
 /// kept, as `setProblem` does. The backend closes the connection after it.
 /// The response is written only here, so nothing of it has gone out yet.
 fn answerBodyFailure(ctx: *Context, exchange: *Exchange, failure: Exchange.BodyFailure) void {
+    check.leave(ctx);
     const status: u16 = switch (failure) {
         .timeout => 408,
         .malformed => 400,
@@ -775,6 +815,7 @@ fn answerBodyFailure(ctx: *Context, exchange: *Exchange, failure: Exchange.BodyF
 /// the content go with the old body; the others stay (`Allow`, those of
 /// the application).
 fn setProblem(ctx: *Context, problem: errors.Problem) void {
+    check.leave(ctx);
     const res = &ctx.response.internal;
     dropContentFields(res);
     res.code = problem.status;
@@ -1578,7 +1619,7 @@ test "the answer to a body that did not arrive goes through the onResponse phase
     var ctx = stalled.context(arena_state.allocator());
     const links = [_]mw.Link{.{ .name = "noted", .on_response = notedResponse }};
     ctx.internal.middleware = .{ .global = &links, .count = 1 };
-    ctx.response.internal.before_head = mw.beforeHead(&ctx);
+    ctx.response.internal.before_head = .{ .ptr = &ctx, .call = beforeHead };
     noted_responses = 0;
     respond(&ctx, &stalled.exchange, error.ReadFailed);
     try stalled.expect(1, 1, 0);

@@ -25,6 +25,7 @@ const json_in = @import("input/json_in.zig");
 const collect = @import("input/violations.zig");
 const plan = @import("plan.zig");
 const mw = @import("middleware.zig");
+const check = @import("check.zig");
 const static_files = @import("static.zig");
 const Subscription = @import("sse/Subscription.zig");
 
@@ -91,6 +92,8 @@ pub const Internal = struct {
     /// The static file that the request opened, which goes out once the
     /// request has ended within its deadline.
     static_file: ?static_files.File = null,
+    /// What the Debug check keeps of the request (check.zig).
+    check: check.State = .{},
 };
 
 /// The errors of `body`. `PayloadTooLarge` (413): over the limit.
@@ -294,6 +297,7 @@ fn readWhole(ctx: *Context) BodyError![]const u8 {
 /// it is. Then the rules: `ValidationFailed` again, with the validator's
 /// violations. The strings of the result live in the request's arena.
 pub fn path(ctx: *Context, comptime T: type) InputError(T, .path)!T {
+    check.input(ctx, .path, T);
     const names = ctx.internal.param_names;
     const values = ctx.internal.params;
     const pairs = try ctx.internal.arena.alloc(strings.Pair, @min(names.len, values.len));
@@ -309,6 +313,7 @@ pub fn path(ctx: *Context, comptime T: type) InputError(T, .path)!T {
 /// `%HH` a byte; bad percent-encoding, invalid UTF-8 and more than
 /// `.max_query_params` parameters are `error.InvalidRequest` (400).
 pub fn query(ctx: *Context, comptime T: type) InputError(T, .query)!T {
+    check.input(ctx, .query, T);
     const pairs = try urlencoded.parse(ctx.internal.arena, ctx.request.internal.query, ctx.internal.max_query_params);
     return ctx.extract(T, .query, pairs, strings.unknownPolicy(T, ctx.internal.unknown_fields.query));
 }
@@ -339,6 +344,7 @@ pub fn query(ctx: *Context, comptime T: type) InputError(T, .query)!T {
 /// const body = try ctx.json(dto.CreateTodoRequest);
 /// ```
 pub fn json(ctx: *Context, comptime T: type) JsonError(T)!T {
+    check.input(ctx, .body, T);
     if (!isJson(ctx.request.header("content-type"))) return error.UnsupportedMediaType;
     const bytes = try ctx.body();
     const arena = ctx.internal.arena;
@@ -361,6 +367,7 @@ pub fn json(ctx: *Context, comptime T: type) JsonError(T)!T {
 /// Another `Content-Type` is `error.UnsupportedMediaType` (415), before
 /// the body is read.
 pub fn form(ctx: *Context, comptime T: type) (BodyError || InputError(T, .form))!T {
+    check.input(ctx, .form, T);
     if (!isForm(ctx.request.header("content-type"))) return error.UnsupportedMediaType;
     const bytes = try ctx.body();
     const pairs = try urlencoded.parse(ctx.internal.arena, bytes, ctx.internal.max_query_params);
@@ -375,6 +382,7 @@ pub fn form(ctx: *Context, comptime T: type) (BodyError || InputError(T, .form))
 /// compile error; its transforms and rules work, and its violations name
 /// the headers.
 pub fn headers(ctx: *Context, comptime T: type) InputError(T, .headers)!T {
+    check.input(ctx, .headers, T);
     const fields = ctx.request.internal.exchange.fields;
     const pairs = try ctx.internal.arena.alloc(strings.Pair, fields.len);
     for (pairs, fields) |*pair, f| pair.* = .{ .name = f.name, .value = f.value };
@@ -385,6 +393,7 @@ pub fn headers(ctx: *Context, comptime T: type) InputError(T, .headers)!T {
 /// sent, without the quotes around it. Of two cookies with one name the
 /// first wins; unknown cookies are ignored.
 pub fn cookies(ctx: *Context, comptime T: type) InputError(T, .cookies)!T {
+    check.input(ctx, .cookies, T);
     const pairs = try cookie_input.parse(ctx.internal.arena, ctx.request.internal.exchange.fields);
     return ctx.extract(T, .cookies, pairs, .ignore);
 }
