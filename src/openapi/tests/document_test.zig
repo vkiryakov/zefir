@@ -471,11 +471,28 @@ const live = struct {
         pub fn events(_: *LiveController, _: *http.sse.Context) error{}!void {}
     };
 
+    /// The same stream, without a text of its response.
+    const PlainController = struct {
+        pub const http_routes = http.routes(.{
+            .prefix = "/todos",
+            .methods = .{ .events = http.sse.get("/events", .{ .events = LiveEvent }) },
+        });
+
+        pub const openapi: ControllerDoc(@This()) = .{ .routes = .{ .events = .{ .summary = "Live updates" } } };
+
+        pub fn events(_: *PlainController, _: *http.sse.Context) error{}!void {}
+    };
+
     var controller: LiveController = .{};
+    var plain: PlainController = .{};
     const Options = @TypeOf(.{ .backend = @as(http.Backend, undefined), .controllers = .{&controller} });
+    const Plain = @TypeOf(.{ .backend = @as(http.Backend, undefined), .controllers = .{&plain} });
 };
 
 test "SSE in 3.1: a string, and the events with the schemas of their data in the description" {
+    // Without a text of the route, the events are the description.
+    const plain = comptime document(live.Plain, .{ .info = info });
+    try expectJson("\"The events of the stream, each with the schema of its data: todo.created (TodoResponse), todo.deleted (TodoIdPath), ping (an empty object), count (an integer).\"", comptime at(plain.root, &.{ "paths", "/todos/events", "get", "responses", "200", "description" }));
     const doc = comptime document(live.Options, .{ .info = info });
     try expectJson("{\"200\":{\"description\":\"The changes, as they happen. The events of the stream, each with the schema of its data: " ++
         "todo.created (TodoResponse), todo.deleted (TodoIdPath), ping (an empty object), count (an integer).\"," ++

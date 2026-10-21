@@ -634,14 +634,14 @@ fn textAnswer(comptime status: u16, comptime description: ?[]const u8, comptime 
 }
 
 /// The 200 of a stream of the events `E`. In 3.1 its body is a string, and
-/// its description names each event and the schema of its data; in 3.2
-/// its `itemSchema` is an event of `E`.
+/// its description, after the route's text, names each event and the
+/// schema of its data; in 3.2 its `itemSchema` is an event of `E`.
 fn streamAnswer(comptime reg: *const schema.Registry, comptime E: type, comptime text: ?[]const u8, comptime version: DocumentOptions.Version, comptime from: []const u8) Answer {
     const media = "text/event-stream";
     switch (version) {
         .@"3.1" => return .{
             .status = 200,
-            .description = (text orelse phrase(200)) ++ " " ++ eventsText(reg, E),
+            .description = if (text) |given| given ++ " " ++ eventsText(reg, E) else eventsText(reg, E),
             .media = media,
             .shape = json.object(&.{string("type", "string")}),
             .from = from,
