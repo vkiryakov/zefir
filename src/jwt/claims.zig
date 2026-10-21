@@ -18,9 +18,9 @@
 //! A claim's name is its entry in `pub const claim_names`, such as
 //! `.{ .is_root = "http://example.com/is_root" }`, or else the outside name
 //! of zefir-validator: `v.rename("userName")` or the Zig name. A type the
-//! table does not have, a claims type that contains itself, and a name
-//! that is empty, given twice or registered stop the build with a message
-//! that starts with `jwt: `.
+//! table does not have, a claims type that contains itself or nests deeper
+//! than `max_json_depth`, and a name that is empty, given twice or
+//! registered stop the build with a message that starts with `jwt: `.
 
 const std = @import("std");
 const v = @import("validator");
@@ -45,17 +45,19 @@ pub fn nameOf(comptime T: type, comptime field: std.meta.FieldEnum(T)) []const u
 
 /// Stops the build when `Claims` cannot be the claims of `verify` and
 /// `sign`: when it is not `void` or a struct of the types of the table,
-/// when it contains itself, or when its names are wrong.
+/// when it contains itself, when it nests deeper than `max_json_depth`, or
+/// when its names are wrong.
 pub fn check(comptime Claims: type) void {
     comptime {
         @setEvalBranchQuota(100_000);
         if (Claims == void) return;
-        if (isPlainStruct(Claims)) return checkStruct(Claims, @typeName(Claims), true, &.{});
+        if (isPlainStruct(Claims)) return checkStruct(Claims, @typeName(Claims), true, &.{}, 1);
         @compileError("jwt: " ++ @typeName(Claims) ++ ": claims are a struct, or void when jwt.Registered is enough");
     }
 }
 
-fn checkStruct(comptime S: type, comptime label: []const u8, comptime top: bool, comptime outer: []const type) void {
+/// `level`: the level of the JSON object of `S`, the payload's being 1.
+fn checkStruct(comptime S: type, comptime label: []const u8, comptime top: bool, comptime outer: []const type, comptime level: usize) void {
     const info = @typeInfo(S).@"struct";
     if (@hasDecl(S, "claim_names")) {
         const Names = @TypeOf(S.claim_names);
@@ -83,11 +85,13 @@ fn checkStruct(comptime S: type, comptime label: []const u8, comptime top: bool,
         }
     }
     for (info.field_names, info.field_types, info.field_attrs) |field, F, attrs| {
-        if (!attrs.@"comptime") checkType(F, label ++ "." ++ field, outer ++ &[_]type{S});
+        if (!attrs.@"comptime") checkType(F, label ++ "." ++ field, outer ++ &[_]type{S}, level + 1);
     }
 }
 
-fn checkType(comptime T: type, comptime where: []const u8, comptime outer: []const type) void {
+/// `level`: the level of JSON that a value of `T` opens when it is an
+/// object or an array.
+fn checkType(comptime T: type, comptime where: []const u8, comptime outer: []const type, comptime level: usize) void {
     switch (@typeInfo(T)) {
         .bool => return,
         .int => |int| {
@@ -99,22 +103,31 @@ fn checkType(comptime T: type, comptime where: []const u8, comptime outer: []con
         .optional => |info| {
             if (@typeInfo(info.child) == .optional)
                 @compileError("jwt: " ++ where ++ ": " ++ @typeName(T) ++ " is an optional of an optional, which JSON null cannot tell apart; use " ++ @typeName(info.child));
-            return checkType(info.child, where, outer);
+            return checkType(info.child, where, outer, level);
         },
         .pointer => if (ListItem(T)) |Item| {
             if (Item == u8) return;
-            return checkType(Item, where ++ "[]", outer);
+            checkDepth(where, level);
+            return checkType(Item, where ++ "[]", outer, level + 1);
         },
         .@"struct" => if (isPlainStruct(T)) {
             for (outer) |Outer| {
                 if (Outer == T)
                     @compileError("jwt: " ++ where ++ ": " ++ @typeName(T) ++ " contains itself; claims nest only as deep as their type, so give each level a type of its own");
             }
-            return checkStruct(T, if (isAnonymous(T)) where else @typeName(T), false, outer);
+            checkDepth(where, level);
+            return checkStruct(T, if (isAnonymous(T)) where else @typeName(T), false, outer, level);
         },
         else => {},
     }
     @compileError("jwt: " ++ where ++ ": " ++ @typeName(T) ++ " is not a claim type; a claim is bool, an integer, f32, f64, an enum, []const u8 or a struct, alone, as ?T or as []const T");
+}
+
+/// A value that opens JSON at `level` must stay within what `verify`
+/// reads: `sign` would write it, and `verify` would refuse the token.
+fn checkDepth(comptime where: []const u8, comptime level: usize) void {
+    if (level > root.max_json_depth)
+        @compileError(std.fmt.comptimePrint("jwt: {s}: claims nest deeper than jwt.max_json_depth, {d} levels with the object of the payload, which verify refuses; make the type flatter", .{ where, root.max_json_depth }));
 }
 
 /// The items of `T` when it is a slice `[]const Item` that holds a string
@@ -234,16 +247,10 @@ const Decoder = struct {
         return error.InvalidClaims;
     }
 
-    /// Adds `bytes` to the path, as much of them as fits, and returns the
-    /// length to go back to.
+    /// Adds `bytes` to the path and returns the length to go back to.
     fn push(d: *Decoder, bytes: []const u8) usize {
         const mark = d.path_len;
-        const buf = &d.details.path_buf;
-        if (d.path_len < buf.len) {
-            const n = @min(bytes.len, buf.len - d.path_len);
-            @memcpy(buf[d.path_len..][0..n], bytes[0..n]);
-        }
-        d.path_len +|= bytes.len;
+        appendPath(&d.details.path_buf, &d.path_len, bytes);
         return mark;
     }
 
@@ -310,16 +317,20 @@ const Decoder = struct {
         return d.fail(invalid_type, comptime messageOf(T));
     }
 
+    /// A list takes the memory of its items alone: their number is counted
+    /// first, so a list of one item is one item, not the start of a
+    /// growing buffer.
     fn readList(d: *Decoder, comptime Item: type, out: *[]const Item) DecodeError!void {
         try d.reader.beginArray();
-        var items: std.ArrayList(Item) = .empty;
+        const items = try d.arena.alloc(Item, try d.reader.countItems());
         var index: usize = 0;
         while (try d.reader.nextItem()) : (index += 1) {
+            if (index == items.len) return error.Malformed;
             const mark = d.pushIndex(index);
-            try d.read(Item, try items.addOne(d.arena));
+            try d.read(Item, &items[index]);
             d.path_len = mark;
         }
-        out.* = items.items;
+        out.* = items[0..index];
     }
 
     fn readObject(d: *Decoder, comptime S: type, out: *S) DecodeError!void {
@@ -361,6 +372,60 @@ const Decoder = struct {
         }
     }
 };
+
+/// Adds `bytes` to the path of `len.*` bytes in `buf`, as much of them as
+/// fits; `len.*` counts them all, so a path that did not fit shows.
+fn appendPath(buf: []u8, len: *usize, bytes: []const u8) void {
+    if (len.* < buf.len) {
+        const n = @min(bytes.len, buf.len - len.*);
+        @memcpy(buf[len.*..][0..n], bytes[0..n]);
+    }
+    len.* +|= bytes.len;
+}
+
+/// `violation` of zefir-validator on a `Claims`, with its path written into
+/// `path_buf` by claim names, as `decode` names the claims it refuses:
+/// validator names a field by its outside name, but a claim may have one
+/// of `claim_names`, such as "http://example.com/is_root". The field is
+/// null when the path does not fit `path_buf`.
+pub fn renamePath(comptime Claims: type, violation: v.Violation, path_buf: []u8) v.Violation {
+    var renamed = violation;
+    const path = violation.field orelse return renamed;
+    var len: usize = 0;
+    writeClaimPath(Claims, path, path_buf, &len);
+    renamed.field = if (len <= path_buf.len) path_buf[0..len] else null;
+    return renamed;
+}
+
+/// Appends `rest`, what is left of a path of validator at a value of `T`,
+/// with each field under its claim name: `.name` for a field, at the root
+/// without its dot, and `[index]` for an item of a list.
+fn writeClaimPath(comptime T: type, rest: []const u8, buf: []u8, len: *usize) void {
+    if (rest.len == 0) return;
+    switch (@typeInfo(T)) {
+        .optional => |o| return writeClaimPath(o.child, rest, buf, len),
+        .pointer => |p| if (p.child != u8 and rest[0] == '[') {
+            if (std.mem.findScalar(u8, rest, ']')) |close| {
+                appendPath(buf, len, rest[0 .. close + 1]);
+                return writeClaimPath(p.child, rest[close + 1 ..], buf, len);
+            }
+        },
+        .@"struct" => {
+            const start: usize = if (rest[0] == '.') 1 else 0;
+            const end = if (std.mem.findAny(u8, rest[start..], ".[")) |at| start + at else rest.len;
+            if (v.fieldNamed(T, rest[start..end])) |field| switch (field) {
+                inline else => |f| {
+                    appendPath(buf, len, rest[0..start]);
+                    appendPath(buf, len, comptime nameOf(T, f));
+                    return writeClaimPath(@FieldType(T, @tagName(f)), rest[end..], buf, len);
+                },
+            };
+        },
+        else => {},
+    }
+    // A path of another shape than the type: the rest as validator wrote it.
+    appendPath(buf, len, rest);
+}
 
 /// The index of the non-comptime field of `S` whose claim name is `key`.
 fn fieldIndex(comptime S: type, key: []const u8) ?usize {

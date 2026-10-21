@@ -21,6 +21,8 @@ pub const compile_errors = [_]Fixture{
     .{ .file = dir ++ "wide_integer.zig", .expect = "jwt: wide_integer.Claims.total: u128 has 128 bits; a claim integer has 1 to 64, such as u64 or i64" },
     .{ .file = dir ++ "double_optional.zig", .expect = "jwt: double_optional.Claims.level: ??u8 is an optional of an optional, which JSON null cannot tell apart; use ?u8" },
     .{ .file = dir ++ "recursive.zig", .expect = "jwt: recursive.Claims.children[]: recursive.Claims contains itself; claims nest only as deep as their type, so give each level a type of its own" },
+    // 32 lists: the last of them would open level 33 of the payload.
+    .{ .file = dir ++ "too_deep.zig", .expect = "jwt: too_deep.Claims.deep[][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][]: claims nest deeper than jwt.max_json_depth, 32 levels with the object of the payload, which verify refuses; make the type flatter" },
     // Names.
     .{ .file = dir ++ "registered_name.zig", .expect = "jwt: registered_name.Claims.exp: \"exp\" " ++ registered },
     .{ .file = dir ++ "registered_rename.zig", .expect = "jwt: registered_rename.Claims.issuer: \"iss\" " ++ registered },
@@ -43,4 +45,5 @@ pub const must_compile = [_][]const u8{
     "src/jwt/tests/compile_ok/all_types.zig",
     "src/jwt/tests/compile_ok/void_claims.zig",
     "src/jwt/tests/compile_ok/nested_registered_names.zig",
+    "src/jwt/tests/compile_ok/deepest.zig",
 };

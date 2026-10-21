@@ -139,6 +139,28 @@ test "aud of the wrong kind" {
     try testing.expectEqualStrings("aud", details.claim.?);
 }
 
+const Lists = struct { lists: []const []const u32 = &.{} };
+
+test "1500 lists of one item stay within a few sizes of the token" {
+    var bench: Bench = undefined;
+    try bench.init();
+    defer bench.deinit();
+    // A token of 8160 bytes, near the limit.
+    var payload: std.ArrayList(u8) = .empty;
+    defer payload.deinit(testing.allocator);
+    try payload.appendSlice(testing.allocator, "{\"iss\":\"orders\",\"aud\":\"orders\",\"exp\":1760000900,\"lists\":[");
+    for (0..1500) |i| try payload.appendSlice(testing.allocator, if (i == 0) "[1]" else ",[1]");
+    try payload.appendSlice(testing.allocator, "]}");
+    const token = try bench.seal(payload.items);
+    defer testing.allocator.free(token);
+    const memory = try testing.allocator.alloc(u8, 64 * 1024);
+    defer testing.allocator.free(memory);
+    var bounded: std.heap.FixedBufferAllocator = .init(memory);
+    const verified = try bench.verifier.verify(Lists, bench.clock.io(), bounded.allocator(), token, .{});
+    try testing.expectEqual(1500, verified.claims.lists.len);
+    try testing.expectEqualSlices(u32, &.{1}, verified.claims.lists[1499]);
+}
+
 test "text that is not one JSON object of UTF-8" {
     var bench: Bench = undefined;
     try bench.init();

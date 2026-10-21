@@ -89,10 +89,11 @@ fn allNamed(names: []const []const u8) bool {
 /// Checks `token` and gives its header, its registered claims and its
 /// claims as a `Claims`, which `jwt.assertClaims` describes; `void` takes
 /// the registered claims alone. Memory comes from `arena`, the arena of
-/// the request: the result lives as long as it and does not point into
-/// `token`. From `io` only the clock is read (`Clock.real`). On an error
-/// `options.details`, if given, says what the refusal was about; it holds
-/// no bytes of the token. Many tasks may call one verifier at once.
+/// the request: a few sizes of the token, each list of `Claims` taking its
+/// items alone. The result lives as long as the arena and does not point
+/// into `token`. From `io` only the clock is read (`Clock.real`). On an
+/// error `options.details`, if given, says what the refusal was about; it
+/// holds no bytes of the token. Many tasks may call one verifier at once.
 pub fn verify(
     verifier: *const Verifier,
     comptime Claims: type,
@@ -117,8 +118,11 @@ pub fn verify(
     }, std.Io.Clock.real.now(io).toSeconds(), details);
     const value = try claims.decode(Claims, arena, opened.payload, details);
     if (Claims != void) {
-        if (v.check(&value, &details.path_buf)) |violation| {
-            details.violation = violation;
+        // validator names a field by its outside name; Details names it by
+        // its claim name, as `decode` does.
+        var rule_path: [4 * details.path_buf.len]u8 = undefined;
+        if (v.check(&value, &rule_path)) |violation| {
+            details.violation = claims.renamePath(Claims, violation, &details.path_buf);
             return error.ClaimsRejected;
         }
     }
@@ -336,6 +340,65 @@ test "a broken rule is ClaimsRejected with its path" {
     try testing.expectEqual(null, details.claim);
     // Without rules to break, the same token passes.
     _ = try setup.verifier.verify(void, clock.io(), arena_state.allocator(), token, .{});
+}
+
+const Root = struct {
+    is_root: bool = false,
+
+    pub const claim_names = .{ .is_root = "http://example.com/is_root" };
+    pub const field_rules = .{ .is_root = v.equals(false) };
+};
+
+const Grants = struct {
+    grants: []const Root = &.{},
+
+    pub const claim_names = .{ .grants = "https://shop.example.com/grants" };
+};
+
+const LongName = struct {
+    is_root: bool = false,
+
+    pub const claim_names = .{ .is_root = &@as([300]u8, @splat('a')) };
+    pub const field_rules = .{ .is_root = v.equals(false) };
+};
+
+/// Verifies a token around `payload` and expects `expected`, with a
+/// violation at `field`; null: a path that did not fit.
+fn expectViolationAt(setup: *const Setup, comptime Claims: type, io: std.Io, payload: []const u8, expected: VerifyError, field: ?[]const u8) !void {
+    const token = try sealed(&setup.signing, header_k1, payload);
+    defer testing.allocator.free(token);
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    var details: Details = .{};
+    try testing.expectError(expected, setup.verifier.verify(Claims, io, arena_state.allocator(), token, .{ .details = &details }));
+    const violation = details.violation orelse return error.TestExpectedViolation;
+    if (field) |name| {
+        try testing.expectEqualStrings(name, violation.field orelse "(none)");
+    } else {
+        try testing.expectEqual(null, violation.field);
+    }
+}
+
+test "a broken rule and a value of the wrong type name a claim alike, by claim_names" {
+    var clock: FixedClock = try .init(testing.io, t0);
+    defer clock.deinit();
+    var setup: Setup = undefined;
+    try setup.init();
+    defer setup.deinit();
+    const io = clock.io();
+    const head = "{\"iss\":\"orders\",\"aud\":\"orders\",\"exp\":1760000900,";
+
+    // RFC 7519 §3.1.
+    try expectViolationAt(&setup, Root, io, head ++ "\"http://example.com/is_root\":true}", error.ClaimsRejected, "http://example.com/is_root");
+    try expectViolationAt(&setup, Root, io, head ++ "\"http://example.com/is_root\":\"yes\"}", error.InvalidClaims, "http://example.com/is_root");
+    // In a list of a claim with a name of its own.
+    const grants = "\"https://shop.example.com/grants\":[{},{\"http://example.com/is_root\":";
+    try expectViolationAt(&setup, Grants, io, head ++ grants ++ "true}]}", error.ClaimsRejected, "https://shop.example.com/grants[1].http://example.com/is_root");
+    try expectViolationAt(&setup, Grants, io, head ++ grants ++ "1}]}", error.InvalidClaims, "https://shop.example.com/grants[1].http://example.com/is_root");
+    // A claim name longer than path_buf: no path, as the decoder has it.
+    const long = "\"" ++ @as([300]u8, @splat('a')) ++ "\":";
+    try expectViolationAt(&setup, LongName, io, head ++ long ++ "true}", error.ClaimsRejected, null);
+    try expectViolationAt(&setup, LongName, io, head ++ long ++ "1}", error.InvalidClaims, null);
 }
 
 test "a reused Details keeps nothing of the last failure" {

@@ -87,6 +87,24 @@ pub const Reader = struct {
         try r.deeper();
     }
 
+    /// The number of items of the array that `beginArray` has just opened,
+    /// counted ahead by a reader of its own, which walks the array once
+    /// without allocating, so that a list takes the memory of its items
+    /// alone. Malformed JSON counts as nothing: this reader then refuses it.
+    pub fn countItems(r: *const Reader) Error!usize {
+        const at = r.scanner.cursor;
+        if (at == 0 or at > r.scanner.input.len or r.scanner.input[at - 1] != '[') return error.Malformed;
+        // The scanner's stack, a bit per level: within max_json_depth it
+        // stays in its first allocation.
+        var stack: [256]u8 = undefined;
+        var memory: std.heap.FixedBufferAllocator = .init(&stack);
+        var ahead: Reader = .init(memory.allocator(), r.scanner.input[at - 1 ..]);
+        try ahead.beginArray();
+        var count: usize = 0;
+        while (try ahead.nextItem()) : (count += 1) try ahead.skip();
+        return count;
+    }
+
     /// Whether the array being read has another item, which the caller
     /// then reads or skips; false at the array's end, whose `]` it reads.
     pub fn nextItem(r: *Reader) Error!bool {
@@ -224,6 +242,41 @@ test "numbers, booleans, null and arrays" {
     try testing.expectEqualStrings("x", try r.string());
     try testing.expectEqual(null, try r.nextKey());
     try r.finish();
+}
+
+test "countItems counts the items of the array just opened" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var r: Reader = .init(arena, "{\"a\": [1, [2, 3], {\"b\": [4]}, \"x,]\x5c\"\"], \"c\": [ ], \"d\": [1,");
+    try r.beginObject();
+    _ = try r.nextKey();
+    try r.beginArray();
+    try testing.expectEqual(4, try r.countItems());
+    // The count reads nothing of the array for this reader.
+    try testing.expectEqualStrings("1", try r.number());
+    try testing.expect(try r.nextItem());
+    try r.beginArray();
+    try testing.expectEqual(2, try r.countItems());
+    while (try r.nextItem()) try r.skip();
+    for (0..2) |_| {
+        try testing.expect(try r.nextItem());
+        try r.skip();
+    }
+    try testing.expect(!try r.nextItem());
+    _ = try r.nextKey();
+    try r.beginArray();
+    try testing.expectEqual(0, try r.countItems());
+    try testing.expect(!try r.nextItem());
+    _ = try r.nextKey();
+    try r.beginArray();
+    try testing.expectError(error.Malformed, r.countItems());
+
+    // Only just after the `[` of beginArray.
+    var at_object: Reader = .init(arena, "{\"a\":[]}");
+    try at_object.beginObject();
+    try testing.expectError(error.Malformed, at_object.countItems());
 }
 
 /// `{"x":` and `arrays` arrays inside each other, then `}`.
