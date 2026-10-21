@@ -171,7 +171,9 @@ pub fn scalar(value: anytype) bson.Error!bson.Value {
     }
 }
 
-fn isNull(value: anytype) bool {
+/// Whether `value` is null, which `.skip_nulls` leaves out: an optional
+/// without a value, or the literal `null`.
+pub fn isNull(value: anytype) bool {
     return switch (@typeInfo(@TypeOf(value))) {
         .optional => value == null,
         .null => true,

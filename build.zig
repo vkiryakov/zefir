@@ -749,6 +749,13 @@ pub fn build(b: *std.Build) void {
         .{ "tuple to decode", "bson.decode: field 'pair' is struct { i32, i32 }, a tuple: decode needs the names of fields; use a struct, or a slice for an array" },
         .{ "comptime field to decode", "bson.decode: field 'version' is a comptime field: decode fills only fields known at run time" },
         .{ "mutable slice to decode", "bson.decode: field 'name' is []u8: decode gives const slices; use []const u8" },
+        .{ "keys with a field that is not there", "bson.encodeKeyed: keys: 'nmae' is not a field of compile_errors.User" },
+        .{ "keys with an empty key", "bson.encodeKeyed: keys: the key of 'name' is empty" },
+        .{ "keys with a key that holds a NUL byte", "bson.encodeKeyed: keys: the key of 'name' holds a NUL byte" },
+        .{ "keys with a key that is not UTF-8", "bson.encodeKeyed: keys: the key of 'name' is not UTF-8" },
+        .{ "keys that give two fields one key", "bson.encodeKeyed: keys: 'a' and 'b' both have the key \"b\"" },
+        .{ "keys that list a field twice", "bson.encodeKeyed: keys: 'name' is listed twice" },
+        .{ "keys of decodeKeyed that leave a required field unread", "bson.decodeKeyed: keys: 'name' is not read, but it is not optional and has no default" },
     }, 0..) |case, i| {
         const compile = b.addTest(.{
             .name = b.fmt("mongo-bson-compile-error-{d}", .{i}),

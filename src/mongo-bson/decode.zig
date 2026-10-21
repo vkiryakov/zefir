@@ -3,6 +3,7 @@
 const std = @import("std");
 const bson = @import("root.zig");
 const check = @import("check.zig");
+const keyed = @import("keyed.zig");
 
 pub const DecodeOptions = struct {
     /// What a key does that no field of its struct takes: `.skip` it, as
@@ -104,30 +105,38 @@ pub const DecodeDiagnostics = struct {
 /// with `RawDocument.validate` first.
 pub fn decode(comptime T: type, arena: std.mem.Allocator, raw: bson.RawDocument, options: DecodeOptions) DecodeError!T {
     if (comptime check.document(T, .decode)) |problem| @compileError("bson.decode: " ++ problem);
+    return decodeWithKeys(T, &.{}, arena, raw, options);
+}
+
+/// `decode` after its check, with the keys of the top-level fields of `T`
+/// from `keys`, as `bson.decodeKeyed` takes them.
+pub fn decodeWithKeys(comptime T: type, comptime keys: []const bson.FieldKey, arena: std.mem.Allocator, raw: bson.RawDocument, options: DecodeOptions) DecodeError!T {
     if (options.diagnostics) |diagnostics| diagnostics.* = .{};
     const decoder: Decoder = .{ .arena = arena, .options = options };
-    return decoder.document(T, raw);
+    return decoder.document(T, keys, raw);
 }
 
 const Decoder = struct {
     arena: std.mem.Allocator,
     options: DecodeOptions,
 
-    fn document(d: Decoder, comptime T: type, doc: bson.RawDocument) DecodeError!T {
+    /// The struct `T` that `doc` holds; `keys` gives the keys of its
+    /// fields, which go by their names where it does not.
+    fn document(d: Decoder, comptime T: type, comptime keys: []const bson.FieldKey, doc: bson.RawDocument) DecodeError!T {
         const info = @typeInfo(T).@"struct";
         var result: T = undefined;
         var seen: [info.field_names.len]bool = @splat(false);
         var it = doc.iterator();
         while (try it.next()) |element| {
             if (comptime info.field_names.len > 0) {
-                if (std.meta.stringToEnum(std.meta.FieldEnum(T), element.key)) |field| {
+                if (keyed.fieldOf(T, keys, element.key)) |field| {
                     const index = @backingInt(field);
                     if (seen[index]) return d.at(element.key, error.DuplicateKey);
                     seen[index] = true;
                     switch (field) {
                         inline else => |known| {
                             const name = @tagName(known);
-                            @field(result, name) = d.value(@FieldType(T, name), element.value) catch |err| return d.at(name, err);
+                            @field(result, name) = d.value(@FieldType(T, name), element.value) catch |err| return d.at(element.key, err);
                         },
                     }
                     continue;
@@ -141,7 +150,7 @@ const Decoder = struct {
                     @field(result, name) = default;
                 } else if (@typeInfo(Field) == .optional) {
                     @field(result, name) = null;
-                } else return d.at(name, error.MissingField);
+                } else return d.at(comptime keyed.keyOf(keys, name) orelse name, error.MissingField);
             }
         }
         return result;
@@ -198,7 +207,7 @@ const Decoder = struct {
                 else => error.WrongType,
             },
             .@"struct" => return switch (v) {
-                .document => |doc| d.document(T, doc),
+                .document => |doc| d.document(T, &.{}, doc),
                 else => error.WrongType,
             },
             else => comptime unreachable,

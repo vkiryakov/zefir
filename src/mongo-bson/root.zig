@@ -15,6 +15,8 @@
 //! - `literal` — writes a document known at compile time, such as a sort,
 //!   into static bytes.
 //! - `decode` — reads a document into a struct, by the types of its fields.
+//! - `encodeKeyed`, `decodeKeyed` — the same with keys of their own for the
+//!   top-level fields of the struct, from a list of `FieldKey`s.
 //! - `Value` — the value of one element, of any BSON type; its strings and
 //!   documents are slices into the document.
 //! - The types Zig has no type for: `ObjectId` with its `Generator`,
@@ -43,6 +45,7 @@ const value = @import("value.zig");
 const types = @import("types.zig");
 const encoding = @import("encode.zig");
 const decoding = @import("decode.zig");
+const keyed = @import("keyed.zig");
 
 pub const RawDocument = @import("RawDocument.zig");
 pub const OwnedDocument = @import("OwnedDocument.zig");
@@ -54,6 +57,9 @@ pub const decode = decoding.decode;
 pub const DecodeOptions = decoding.DecodeOptions;
 pub const DecodeError = decoding.DecodeError;
 pub const DecodeDiagnostics = decoding.DecodeDiagnostics;
+pub const FieldKey = keyed.FieldKey;
+pub const encodeKeyed = keyed.encodeKeyed;
+pub const decodeKeyed = keyed.decodeKeyed;
 pub const Value = value.Value;
 pub const Element = value.Element;
 pub const Type = value.Type;
@@ -101,4 +107,5 @@ test {
     _ = @import("literal_tests.zig");
     _ = @import("decode_tests.zig");
     _ = @import("check_tests.zig");
+    _ = @import("keyed_tests.zig");
 }

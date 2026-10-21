@@ -34,6 +34,7 @@ const Pointer = struct { p: bson.DbPointer };
 const Pair = struct { pair: struct { i32, i32 } };
 const Versioned = struct { comptime version: u32 = 1 };
 const Mutable = struct { name: []u8 };
+const Two = struct { a: i32, b: i32 };
 
 test "u64" {
     _ = try bson.encode(arena(), Counter{ .n = 1 }, .{});
@@ -119,4 +120,32 @@ test "comptime field to decode" {
 
 test "mutable slice to decode" {
     _ = try bson.decode(Mutable, arena(), doc(), .{});
+}
+
+test "keys with a field that is not there" {
+    _ = try bson.encodeKeyed(arena(), User{ .name = "Ann" }, &.{.{ .field = "nmae", .key = "n" }}, .{});
+}
+
+test "keys with an empty key" {
+    _ = try bson.encodeKeyed(arena(), User{ .name = "Ann" }, &.{.{ .field = "name", .key = "" }}, .{});
+}
+
+test "keys with a key that holds a NUL byte" {
+    _ = try bson.encodeKeyed(arena(), User{ .name = "Ann" }, &.{.{ .field = "name", .key = "a\x00b" }}, .{});
+}
+
+test "keys with a key that is not UTF-8" {
+    _ = try bson.encodeKeyed(arena(), User{ .name = "Ann" }, &.{.{ .field = "name", .key = "\xff" }}, .{});
+}
+
+test "keys that give two fields one key" {
+    _ = try bson.encodeKeyed(arena(), Two{ .a = 1, .b = 2 }, &.{.{ .field = "a", .key = "b" }}, .{});
+}
+
+test "keys that list a field twice" {
+    _ = try bson.encodeKeyed(arena(), User{ .name = "Ann" }, &.{ .{ .field = "name", .key = "n" }, .{ .field = "name", .key = "m" } }, .{});
+}
+
+test "keys of decodeKeyed that leave a required field unread" {
+    _ = try bson.decodeKeyed(User, &.{.{ .field = "name", .key = null }}, arena(), doc(), .{});
 }
