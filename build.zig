@@ -1406,8 +1406,9 @@ fn addHttpGuide(
 
 /// The compile checks of zefir.App, from the list in
 /// src/core/app/tests/cases.zig: application code whose graph App must
-/// refuse, each file with the message it must fail with. Each file imports
-/// "core" alone.
+/// refuse, each file with the message it must fail with; and a large
+/// generated application that must compile. Each file imports "core"
+/// alone.
 fn addAppCompileChecks(
     b: *std.Build,
     test_step: *std.Build.Step,
@@ -1431,6 +1432,36 @@ fn addAppCompileChecks(
         t.expect_errors = .{ .contains = b.fmt("error: {s}", .{fixture.expect}) };
         test_step.dependOn(&t.step);
     }
+    // The scale guard: an application of 10 modules, each of 20 providers
+    // and 10 controllers, which gen_scale_app writes into the build cache.
+    // It must compile without an eval branch quota of its own; it is built
+    // and never run. The generator is built for the host, so it also runs
+    // when -Dtarget names another system.
+    const gen_scale = b.addExecutable(.{
+        .name = "app-gen-scale",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/core/app/tests/gen_scale_app.zig"),
+            .target = b.graph.host,
+            .optimize = .Debug,
+        }),
+    });
+    const run_gen = b.addRunArtifact(gen_scale);
+    run_gen.addArgs(&.{ "10", "20", "10" });
+    const app_scale = b.addTest(.{
+        .name = "app_scale",
+        .root_module = b.createModule(.{
+            .root_source_file = run_gen.addOutputFileArg("app_scale.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "core", .module = core }},
+        }),
+    });
+    test_step.dependOn(&app_scale.step);
+    // A larger application, to measure by hand:
+    // `zig build app-gen-scale -- 50 20 10 <out.zig>`.
+    const run_gen_by_hand = b.addRunArtifact(gen_scale);
+    run_gen_by_hand.addPassthruArgs();
+    b.step("app-gen-scale", "Write an application of zefir.App to measure: -- <modules> <providers> <controllers> <out.zig>").dependOn(&run_gen_by_hand.step);
 }
 
 /// The compile checks of zefir-http, from the lists in

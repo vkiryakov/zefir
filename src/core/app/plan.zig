@@ -266,10 +266,8 @@ fn computePlan(comptime Root: type) Plan {
     checkServedOnce(Root, &final_mods, &beans);
     checkValuesTaken(Root, &beans);
 
-    var build_order: []const u8 = "build order:";
-    for (beans, 0..) |b, i| build_order = build_order ++ (if (i == 0) " " else ", ") ++ b.label;
     const final_beans = beans;
-    return .{ .beans = &final_beans, .entry_count = entry_count, .build_order = build_order };
+    return .{ .beans = &final_beans, .entry_count = entry_count, .build_order = buildOrder(&final_beans) };
 }
 
 fn checkValues(comptime Root: type) void {
@@ -767,4 +765,22 @@ fn markValues(comptime sources: []const Source, comptime taken: []bool) void {
         .deps => |d| markValues(d.fields, taken),
         else => {},
     };
+}
+
+/// "build order: " and the labels joined by ", ", written into one buffer:
+/// a string that grows by `++` is copied whole at each step, which at
+/// comptime costs seconds for a thousand beans.
+fn buildOrder(comptime beans: []const Bean) []const u8 {
+    const head = "build order:";
+    var len: usize = head.len;
+    for (beans, 0..) |b, i| len += (if (i == 0) " " else ", ").len + b.label.len;
+    var out: [len]u8 = undefined;
+    @memcpy(out[0..head.len], head);
+    var at: usize = head.len;
+    for (beans, 0..) |b, i| for ([_][]const u8{ if (i == 0) " " else ", ", b.label }) |part| {
+        @memcpy(out[at..][0..part.len], part);
+        at += part.len;
+    };
+    const final = out;
+    return &final;
 }
