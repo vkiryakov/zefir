@@ -1264,6 +1264,20 @@ fn addValidatorTests(
         test_step.dependOn(&b.addRunArtifact(vector_tests).step);
         compile_step.dependOn(&vector_tests.step);
     }
+    // The program that writes the regex vectors of v.schemaOf: tests/openapi
+    // runs it and checks its records in other regex engines (zig build
+    // regex there, in Docker); here it is only built.
+    const regex_vectors = b.addExecutable(.{
+        .name = "regex_vectors",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/validator/testdata/regex_vectors.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "validator", .module = validator }},
+        }),
+    });
+    test_step.dependOn(&regex_vectors.step);
+
     // A JSON file in vectors/ that `vector_files` does not list would never
     // run. The build system does not see a file added to a directory
     // argument, so this check runs on every build.
