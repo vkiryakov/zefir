@@ -362,3 +362,188 @@ test "a type read and written whose schemas are the same has one; one that refer
     inline for (.{ "Address-Input", "Address-Output", "Labeled-Input", "Labeled-Output", "Point" }, nested) |name, m| try testing.expectEqualStrings(name, m.key);
     try expectJson("{\"type\":\"object\",\"required\":[\"point\",\"address\"],\"properties\":{\"point\":{\"$ref\":\"#/components/schemas/Point\"},\"address\":{\"$ref\":\"#/components/schemas/Address-Input\"}}}", nested[2].value);
 }
+
+/// The JSON text of the keywords of `v.schemaOf(element, T)`, as the
+/// members of an object: `"pattern":"…","maxLength":30`.
+fn keywordsOf(comptime element: anytype, comptime T: type) []const u8 {
+    comptime {
+        var out: []const u8 = "";
+        for (v.schemaOf(element, T).keywords, 0..) |k, i| out = out ++ (if (i == 0) "" else ",") ++ "\"" ++ k.name ++ "\":" ++ k.value;
+        return out;
+    }
+}
+
+const CreateTodoRequest = struct {
+    id: u64,
+    title: []const u8,
+    score: u8 = 0,
+    contact: []const u8,
+    tags: []const []const u8 = &.{},
+    grid: []const []const []const u8 = &.{},
+    due_date: ?[]const u8 = null,
+    numbers: []const u32 = &.{},
+    iban: []const u8,
+
+    pub const field_rules = .{
+        .id = v.positive,
+        .title = .{ v.trim, v.notBlank, v.maxLength(200) },
+        .score = v.max(100),
+        .contact = .{ v.email, v.maxLength(100) },
+        .tags = .{ v.maxItems(10), v.each(.{ v.trim, v.toLower, v.notBlank, v.maxLength(30) }) },
+        .grid = v.each(v.each(v.notEmpty)),
+        .due_date = .{ v.rename("dueDate"), v.trim, v.date },
+        .numbers = v.containsNone(.{ 1, 2 }),
+        .iban = v.iban,
+    };
+
+    pub const openapi: Doc(@This()) = .{
+        .fields = .{ .title = .{ .description = "What to do." } },
+    };
+};
+
+/// The schema of the property `name` of the input schema of `T`.
+fn propertyOf(comptime T: type, comptime name: []const u8) json.Node {
+    comptime {
+        const body = componentOf(&.{input(T)}, schema.typeName(T));
+        return json.get(json.get(body.object, "properties").?.object, name).?;
+    }
+}
+
+test "rules: their keywords merged; a keyword of the type keeps the tighter bound" {
+    try expectJson("{\"type\":\"integer\",\"format\":\"uint64\",\"minimum\":1}", comptime propertyOf(CreateTodoRequest, "id"));
+    try expectJson("{\"type\":\"integer\",\"format\":\"uint8\",\"minimum\":0,\"maximum\":100,\"default\":0}", comptime propertyOf(CreateTodoRequest, "score"));
+    // The application's text, then what the transform does.
+    try expectJson(comptime "{\"type\":\"string\",\"description\":\"What to do. Leading and trailing spaces are removed.\"," ++ keywordsOf(v.notBlank, []const u8) ++ ",\"maxLength\":200}", comptime propertyOf(CreateTodoRequest, "title"));
+    // A rule that the schema says roughly: the note says what the server checks.
+    const iban = comptime v.schemaOf(v.iban, []const u8);
+    try testing.expect(iban.accuracy == .approximate);
+    try expectJson(comptime "{\"type\":\"string\",\"description\":\"" ++ iban.note.? ++ "\"," ++ keywordsOf(v.iban, []const u8) ++ "}", comptime propertyOf(CreateTodoRequest, "iban"));
+    // The name of the field and the transform before the rules.
+    try expectJson(comptime "{\"type\":[\"string\",\"null\"],\"description\":\"Leading and trailing spaces are removed.\"," ++ keywordsOf(v.date, ?[]const u8) ++ ",\"default\":null}", comptime propertyOf(CreateTodoRequest, "dueDate"));
+}
+
+test "rules: two with one keyword, or one with a keyword the schema has for another reason, go into allOf" {
+    // email writes maxLength, as maxLength does.
+    try expectJson(comptime "{\"type\":\"string\",\"description\":\"" ++ v.schemaOf(v.email, []const u8).note.? ++ "\",\"allOf\":[{" ++
+        keywordsOf(v.email, []const u8) ++ "},{\"maxLength\":100}]}", comptime propertyOf(CreateTodoRequest, "contact"));
+    // containsNone writes items, which the list has.
+    try expectJson(comptime "{\"type\":\"array\",\"allOf\":[{" ++ keywordsOf(v.containsNone(.{ 1, 2 }), []const u32) ++ "}],\"default\":[],\"items\":{\"type\":\"integer\",\"format\":\"uint32\",\"minimum\":0,\"maximum\":4294967295}}", comptime propertyOf(CreateTodoRequest, "numbers"));
+}
+
+test "rules: each applies to the items, its notes in their description; each of each to theirs" {
+    try expectJson(comptime "{\"type\":\"array\",\"maxItems\":10,\"default\":[],\"items\":{\"type\":\"string\",\"description\":\"Leading and trailing spaces are removed. Converted to lowercase.\"," ++
+        keywordsOf(v.notBlank, []const u8) ++ ",\"maxLength\":30}}", comptime propertyOf(CreateTodoRequest, "tags"));
+    try expectJson("{\"type\":\"array\",\"default\":[],\"items\":{\"type\":\"array\",\"items\":{\"type\":\"string\",\"minLength\":1}}}", comptime propertyOf(CreateTodoRequest, "grid"));
+}
+
+const Choice = enum { a, b, c };
+const Picked = struct {
+    named: Choice,
+    inline_kind: enum { x, y, z },
+    maybe: ?[]const u8,
+
+    pub const field_rules = .{
+        .named = v.oneOf(.{ .a, .b }),
+        .inline_kind = v.oneOf(.{.x}),
+        .maybe = v.equals("yes"),
+    };
+};
+
+test "rules on enums and on ?T: the rule's values, null still allowed" {
+    try expectJson("{\"$ref\":\"#/components/schemas/Choice\",\"enum\":[\"a\",\"b\"]}", comptime propertyOf(Picked, "named"));
+    // An inline enum: the rule's values, a part of the type's, in their place.
+    try expectJson("{\"type\":\"string\",\"enum\":[\"x\"]}", comptime propertyOf(Picked, "inline_kind"));
+    try expectJson("{\"type\":[\"string\",\"null\"],\"enum\":[\"yes\",null]}", comptime propertyOf(Picked, "maybe"));
+}
+
+/// Checks two of its fields against each other.
+const Period = struct {
+    from: u32,
+    to: u32,
+
+    pub fn validateSelf(self: *const Period) ?v.Violation {
+        if (self.from > self.to) return v.fail(Period, .to, "periods.order", "must not be before from");
+        return null;
+    }
+
+    pub const openapi: Doc(@This()) = .{ .description = "A period of days." };
+};
+
+test "a struct with validateSelf: its description says the server also checks the fields together" {
+    try expectJson("{\"type\":\"object\",\"description\":\"A period of days. The server also checks how these fields fit together.\",\"required\":[\"from\",\"to\"],\"properties\":{" ++
+        "\"from\":{\"type\":\"integer\",\"format\":\"uint32\",\"minimum\":0,\"maximum\":4294967295},\"to\":{\"type\":\"integer\",\"format\":\"uint32\",\"minimum\":0,\"maximum\":4294967295}}}", comptime componentOf(&.{output(Period)}, "Period"));
+}
+
+/// Examples of a type and of its fields.
+const Task = struct {
+    title: []const u8,
+    due_date: ?[]const u8 = null,
+    priority: Priority = .normal,
+
+    pub const field_rules = .{
+        .title = .{ v.notBlank, v.maxLength(20) },
+        .due_date = .{ v.rename("dueDate"), v.date },
+    };
+
+    pub const openapi: Doc(@This()) = .{
+        .example = .{ .title = "Buy milk", .due_date = "2026-10-30" },
+        .examples = &.{.{ .name = "minimal", .summary = "Only a title", .value = .{ .title = "Call back" } }},
+        .fields = .{
+            .title = .{ .example = "Buy milk", .examples = &.{ "Call back", "Pay rent" } },
+            .due_date = .{ .example = "2026-10-30" },
+        },
+    };
+};
+
+test "examples: of a type, as the server writes it; of a field, its example then its examples" {
+    try expectJson(comptime "{\"type\":\"object\",\"required\":[\"title\",\"dueDate\",\"priority\"],\"properties\":{" ++
+        "\"title\":{\"type\":\"string\"," ++ keywordsOf(v.notBlank, []const u8) ++ ",\"maxLength\":20,\"examples\":[\"Buy milk\",\"Call back\",\"Pay rent\"]}," ++
+        "\"dueDate\":{\"type\":[\"string\",\"null\"]," ++ keywordsOf(v.date, ?[]const u8) ++ ",\"examples\":[\"2026-10-30\"]}," ++
+        "\"priority\":{\"$ref\":\"#/components/schemas/Priority\"}" ++
+        "},\"examples\":[{\"title\":\"Buy milk\",\"dueDate\":\"2026-10-30\",\"priority\":\"normal\"}]}", comptime componentOf(&.{output(Task)}, "Task"));
+}
+
+test "examples: one that breaks a rule of its type or of its field stops the build, with the rule's message" {
+    try testing.expectEqualStrings(
+        "zefir.openapi: Task.openapi.example: title must be at most 20 characters (validation.max_length); give an example that passes the rules of Task",
+        comptime schema.exampleProblem(Task, .{ .title = "A title that is far too long" }, "Task.openapi.example").?,
+    );
+    try testing.expectEqualStrings(
+        "zefir.openapi: Task.openapi.fields.due_date.example: dueDate must be a valid date in YYYY-MM-DD format (validation.date); give an example that passes the rules of Task.due_date",
+        comptime schema.fieldExampleProblem(Task, "due_date", "2026-13-45", "Task.openapi.fields.due_date.example").?,
+    );
+    try testing.expectEqual(null, comptime schema.exampleProblem(Task, .{ .title = "Buy milk" }, "Task.openapi.example"));
+    try testing.expectEqual(null, comptime schema.fieldExampleProblem(Task, "title", "Buy milk", "Task.openapi.fields.title.example"));
+}
+
+/// DTOs of parameters.
+const TodoIdPath = struct {
+    id: u64,
+    pub const field_rules = .{ .id = v.positive };
+    pub const openapi: Doc(@This()) = .{ .fields = .{ .id = .{ .description = "The id of the todo.", .example = 1 } } };
+};
+const ListQuery = struct {
+    tags: []const []const u8 = &.{},
+    page: u32 = 1,
+    sort: ?Priority = null,
+    pub const field_rules = .{ .tags = v.each(v.maxLength(30)), .page = v.positive };
+    pub const openapi: Doc(@This()) = .{ .fields = .{ .page = .{ .examples = &.{ 1, 2 }, .deprecated = true } } };
+};
+const KeyHeaders = struct {
+    idempotency_key: ?[]const u8 = null,
+    trace: []const []const u8 = &.{},
+    pub const field_rules = .{ .idempotency_key = .{ v.trim, v.notBlank, v.maxLength(64) } };
+    pub const openapi: Doc(@This()) = .{ .fields = .{ .idempotency_key = .{ .description = "Send the same key to get the same todo." } } };
+};
+
+test "parameter: description, deprecated, example and the schema of a field, never null" {
+    try expectJson("{\"description\":\"The id of the todo.\",\"example\":1,\"schema\":{\"type\":\"integer\",\"format\":\"uint64\",\"minimum\":1}}", comptime schema.parameter(TodoIdPath, "id", .path));
+    try expectJson("{\"schema\":{\"type\":\"array\",\"default\":[],\"items\":{\"type\":\"string\",\"maxLength\":30}}}", comptime schema.parameter(ListQuery, "tags", .query));
+    try expectJson("{\"deprecated\":true,\"schema\":{\"type\":\"integer\",\"format\":\"uint32\",\"minimum\":1,\"maximum\":4294967295,\"default\":1,\"examples\":[1,2]}}", comptime schema.parameter(ListQuery, "page", .query));
+    // An enum inline; a ?T has no null and no default of null.
+    try expectJson("{\"schema\":{\"type\":\"string\",\"enum\":[\"low\",\"normal\",\"high\"]}}", comptime schema.parameter(ListQuery, "sort", .query));
+    try expectJson(comptime "{\"description\":\"Send the same key to get the same todo. Leading and trailing spaces are removed.\",\"schema\":{\"type\":\"string\"," ++
+        keywordsOf(v.notBlank, ?[]const u8) ++ ",\"maxLength\":64}}", comptime schema.parameter(KeyHeaders, "idempotency_key", .headers));
+    // A list in a header: a line of the header an item.
+    try expectJson("{\"description\":\"The server reads an item from each line of this header and does not split a line at commas.\",\"schema\":{\"type\":\"array\",\"default\":[],\"items\":{\"type\":\"string\"}}}", comptime schema.parameter(KeyHeaders, "trace", .headers));
+}

@@ -373,11 +373,12 @@ pub const Registry = struct {
         }
         return .{
             .kind = typeKind("object", nullable),
-            .description = typeTexts(T),
+            .description = typeTexts(T) ++ selfNote(T),
             .deprecated = typeDeprecated(T),
             .required = required,
             .properties = properties,
             .closed = mode == .input and policyOf(T, r) == .reject,
+            .examples = typeExamples(T, mode == .problem),
         };
     }
 
@@ -391,10 +392,13 @@ pub const Registry = struct {
         if (attrs.@"comptime") p.keywords = [_]json.Member{.{ .key = "const", .value = example.value(F, attrs.defaultValue(F).?, false, where) }} ++ p.keywords;
         const doc = fieldDocOf(T, name);
         if (doc.description) |text| p.description = &.{text};
+        p = withRules(p, rulesOf(T, name));
         p.deprecated = doc.deprecated;
         if (mode == .input and !root.writesItself(F)) {
             if (attrs.defaultValue(F)) |default| p.default = example.value(F, default, false, where);
         }
+        const examples = fieldExamples(T, name, mode == .problem);
+        p.examples = (if (examples.example) |one| &[_]json.Node{one} else &[_]json.Node{}) ++ examples.examples;
         return p;
     }
 
@@ -407,7 +411,7 @@ pub const Registry = struct {
             const named = json.object(&.{ .{ .key = "type", .value = .{ .string = "string" } }, .{ .key = "enum", .value = .{ .array = names } } });
             const number = json.object(&.{.{ .key = "type", .value = .{ .string = "integer" } }});
             const ways: []const json.Node = if (nullable) &.{ named, number, null_schema } else &.{ named, number };
-            return .{ .kind = &.{.{ .key = "anyOf", .value = .{ .array = ways } }}, .description = typeTexts(T), .deprecated = typeDeprecated(T) };
+            return .{ .kind = &.{.{ .key = "anyOf", .value = .{ .array = ways } }}, .description = typeTexts(T), .deprecated = typeDeprecated(T), .examples = typeExamples(T, false) };
         }
         if (nullable) names = names ++ [_]json.Node{.null};
         return .{
@@ -415,6 +419,7 @@ pub const Registry = struct {
             .description = typeTexts(T),
             .deprecated = typeDeprecated(T),
             .keywords = &.{.{ .key = "enum", .value = .{ .array = names } }},
+            .examples = typeExamples(T, false),
         };
     }
 
@@ -439,9 +444,303 @@ pub const Registry = struct {
             })};
         }
         if (nullable) variants = variants ++ [_]json.Node{null_schema};
-        return .{ .kind = &.{.{ .key = "oneOf", .value = .{ .array = variants } }}, .description = typeTexts(T), .deprecated = typeDeprecated(T) };
+        return .{
+            .kind = &.{.{ .key = "oneOf", .value = .{ .array = variants } }},
+            .description = typeTexts(T),
+            .deprecated = typeDeprecated(T),
+            .examples = typeExamples(T, mode == .problem),
+        };
     }
 };
+
+/// Where a parameter is.
+pub const Source = enum { path, query, headers, cookies };
+
+/// The parameter of the field `field` of the DTO `Dto`, read from `source`,
+/// but its `name`, `in` and `required`: its `description` (the
+/// application's text, then what its transforms and rules say), its
+/// `deprecated` and `example` from the `FieldDoc` of the field, and its
+/// `schema`, with the rules of the field, its default and its `.examples`.
+/// A parameter is never null: a `?T` field is one that may be left out.
+pub fn parameter(comptime Dto: type, comptime field: []const u8, comptime source: Source) json.Node {
+    comptime {
+        @setEvalBranchQuota(quota);
+        const F = @FieldType(Dto, field);
+        const where = typeName(Dto) ++ "." ++ field;
+        const Value = if (@typeInfo(F) == .optional) @typeInfo(F).optional.child else F;
+        const Item = listItem(Value) orelse Value;
+        if (!isScalar(Item)) @compileError("zefir.openapi: " ++ where ++ ": " ++ @typeName(F) ++ " is not a parameter: a parameter is an integer, a float, bool, an enum or []const u8, alone, as ?T or as []const T");
+        var p = Registry.typeParts(null, Value, .input, false, where, &.{});
+        p = withRules(p, rulesOf(Dto, field));
+        const attrs = fieldAttrs(Dto, field);
+        if (attrs.defaultValue(F)) |default| {
+            if (@typeInfo(F) != .optional or default != null) p.default = example.value(F, default, false, where);
+        }
+        const examples = fieldExamples(Dto, field, false);
+        p.examples = examples.examples;
+        const doc = fieldDocOf(Dto, field);
+        var description: []const []const u8 = if (doc.description) |text| &.{text} else &.{};
+        description = description ++ p.description;
+        if (source == .headers and Item != Value) description = description ++ [_][]const u8{"The server reads an item from each line of this header and does not split a line at commas."};
+        p.description = &.{};
+        var members: []const json.Member = &.{};
+        if (description.len > 0) members = members ++ [_]json.Member{.{ .key = "description", .value = .{ .string = joined(description) } }};
+        if (doc.deprecated) members = members ++ [_]json.Member{.{ .key = "deprecated", .value = .{ .boolean = true } }};
+        if (examples.example) |one| members = members ++ [_]json.Member{.{ .key = "example", .value = one }};
+        return .{ .object = members ++ [_]json.Member{.{ .key = "schema", .value = node(p) }} };
+    }
+}
+
+/// A value one string gives: an integer, a float, bool, an enum or
+/// `[]const u8`.
+fn isScalar(comptime X: type) bool {
+    return switch (@typeInfo(X)) {
+        .int, .float, .bool, .@"enum" => true,
+        else => X == []const u8,
+    };
+}
+
+/// The item of `[]const Item`, else null.
+fn listItem(comptime X: type) ?type {
+    const info = @typeInfo(X);
+    if (info != .pointer or info.pointer.size != .slice or X == []const u8) return null;
+    return if (X == []const info.pointer.child) info.pointer.child else null;
+}
+
+fn fieldAttrs(comptime T: type, comptime name: []const u8) std.lang.Type.Struct.FieldAttributes {
+    const s = @typeInfo(T).@"struct";
+    for (s.field_names, s.field_attrs) |n, attrs| {
+        if (std.mem.eql(u8, n, name)) return attrs;
+    }
+    unreachable;
+}
+
+// ------------------------------------------------------------------ rules
+
+/// The type of `v.rename(...)`, a name, which `v.nameOf` gives: of a
+/// constant, so that `rename` runs at compile time.
+const rename_example = v.rename("x");
+const Rename = @TypeOf(rename_example);
+/// The type of a transform: `v.trim`, `v.transformWith(f)`.
+const Transform = @TypeOf(v.trim);
+
+/// The schemas of the transforms and rules of the field `name` of `T`, in
+/// the order of its entry in `field_rules`, as `v.schemaOf` gives them.
+fn rulesOf(comptime T: type, comptime name: []const u8) []const v.RuleSchema {
+    if (@typeInfo(T) != .@"struct" or !@hasDecl(T, "field_rules")) return &.{};
+    if (!@hasField(@TypeOf(T.field_rules), name)) return &.{};
+    const F = @FieldType(T, name);
+    const entry = @field(T.field_rules, name);
+    const E = @TypeOf(entry);
+    if (E == v.Rule or E == Transform) return &.{v.schemaOf(entry, F)};
+    if (E == Rename) return &.{};
+    var out: []const v.RuleSchema = &.{};
+    for (0..entry.len) |i| {
+        const Element = @TypeOf(entry[i]);
+        if (Element == v.Rule or Element == Transform) out = out ++ [_]v.RuleSchema{v.schemaOf(entry[i], F)};
+    }
+    return out;
+}
+
+/// `p` with the schemas of rules and transforms, `schemas`: their keywords
+/// merged into those of `p`, their notes after its description, and the
+/// schemas of `each` applied to its items the same way.
+fn withRules(comptime p: Parts, comptime schemas: []const v.RuleSchema) Parts {
+    var out = p;
+    var fragments: []const []const json.Member = &.{};
+    var notes: []const []const u8 = &.{};
+    for (schemas) |rs| {
+        if (rs.note) |note| notes = notes ++ [_][]const u8{note};
+        if (rs.keywords.len > 0) {
+            var members: [rs.keywords.len]json.Member = undefined;
+            for (rs.keywords, &members) |k, *m| m.* = .{ .key = k.name, .value = .{ .raw = k.value } };
+            const final = members;
+            fragments = fragments ++ [_][]const json.Member{&final};
+        }
+        if (rs.items.len > 0) {
+            const items = withRules(out.items.?.*, rs.items);
+            out.items = &items;
+        }
+    }
+    out.keywords = merged(out, fragments);
+    out.description = out.description ++ notes;
+    return out;
+}
+
+/// The keywords of `p` and those of the rules, `fragments`, one each. A
+/// keyword of the type and the same of a rule keep the tighter bound, or
+/// the rule's `enum`, a part of the type's. Two rules with one keyword, or
+/// a rule with a keyword that the schema has for another reason, cannot be
+/// one object: then the type's keywords stay, and each rule's go into
+/// `allOf`.
+fn merged(comptime p: Parts, comptime fragments: []const []const json.Member) []const json.Member {
+    if (fragments.len == 0) return p.keywords;
+    const taken = takenKeys(p);
+    var keywords = p.keywords;
+    var names: []const []const u8 = &.{};
+    for (fragments) |fragment| {
+        for (fragment) |k| {
+            if (contains(names, k.key) or contains(taken, k.key)) return withAllOf(p.keywords, fragments);
+            names = names ++ [_][]const u8{k.key};
+            for (keywords, 0..) |own, i| {
+                if (!std.mem.eql(u8, own.key, k.key)) continue;
+                const kept = tighter(own, k) orelse return withAllOf(p.keywords, fragments);
+                keywords = keywords[0..i] ++ [_]json.Member{kept} ++ keywords[i + 1 ..];
+                break;
+            } else keywords = keywords ++ [_]json.Member{k};
+        }
+    }
+    return keywords;
+}
+
+fn withAllOf(comptime keywords: []const json.Member, comptime fragments: []const []const json.Member) []const json.Member {
+    var all: []const json.Node = &.{};
+    for (fragments) |fragment| all = all ++ [_]json.Node{.{ .object = fragment }};
+    return keywords ++ [_]json.Member{.{ .key = "allOf", .value = .{ .array = all } }};
+}
+
+/// The keys of `p` besides its keywords.
+fn takenKeys(comptime p: Parts) []const []const u8 {
+    var out: []const []const u8 = &.{ "description", "deprecated", "default", "examples" };
+    for (p.kind) |m| out = out ++ [_][]const u8{m.key};
+    if (p.items != null) out = out ++ [_][]const u8{"items"};
+    if (p.properties != null) out = out ++ [_][]const u8{ "required", "properties", "additionalProperties" };
+    return out;
+}
+
+/// Of a keyword of the type, `own`, and the same keyword of a rule, the one
+/// to keep: the tighter bound, or the rule's `enum`; null for a keyword
+/// that is neither.
+fn tighter(comptime own: json.Member, comptime rule: json.Member) ?json.Member {
+    const key = own.key;
+    if (std.mem.eql(u8, key, "enum")) return rule;
+    if (own.value != .raw or rule.value != .raw) return null;
+    const lower = contains(&.{ "minimum", "exclusiveMinimum", "minLength", "minItems" }, key);
+    const upper = contains(&.{ "maximum", "exclusiveMaximum", "maxLength", "maxItems" }, key);
+    if (!lower and !upper) return null;
+    const rule_less = lessNumber(rule.value.raw, own.value.raw) orelse return null;
+    // The greater of two lower bounds, the less of two upper ones.
+    return if (rule_less == upper) rule else own;
+}
+
+/// Whether the JSON number `a` is less than `b`; null when one is not a
+/// number.
+fn lessNumber(comptime a: []const u8, comptime b: []const u8) ?bool {
+    if (integerOf(a)) |x| if (integerOf(b)) |y| return x < y;
+    const x = std.fmt.parseFloat(f128, a) catch return null;
+    const y = std.fmt.parseFloat(f128, b) catch return null;
+    return x < y;
+}
+
+/// The integer of the JSON text `text`, or null when it is not one.
+fn integerOf(comptime text: []const u8) ?comptime_int {
+    const negative = text.len > 0 and text[0] == '-';
+    const digits = if (negative) text[1..] else text;
+    if (digits.len == 0) return null;
+    var n: comptime_int = 0;
+    for (digits) |c| {
+        if (!std.ascii.isDigit(c)) return null;
+        n = n * 10 + (c - '0');
+    }
+    return if (negative) -n else n;
+}
+
+fn contains(comptime list: []const []const u8, comptime key: []const u8) bool {
+    for (list) |item| {
+        if (std.mem.eql(u8, item, key)) return true;
+    }
+    return false;
+}
+
+// ------------------------------------------------------------------ examples
+
+/// The `examples` of the schema of `T`: its `Doc(T).example`, written as
+/// the server writes it, inside an `http.Problem` with `problem`. Every
+/// example of a struct, those of `.examples` too, passes the rules of the
+/// struct, or the build stops.
+fn typeExamples(comptime T: type, comptime problem: bool) []const json.Node {
+    const doc = docOf(T) orelse return &.{};
+    if (!@hasField(@TypeOf(doc), "example")) return &.{};
+    if (@typeInfo(T) == .@"struct") {
+        if (doc.example) |x| {
+            if (exampleProblem(T, x, typeName(T) ++ ".openapi.example")) |text| @compileError(text);
+        }
+        for (doc.examples, 0..) |e, i| {
+            if (exampleProblem(T, e.value, std.fmt.comptimePrint("{s}.openapi.examples[{d}]", .{ typeName(T), i }))) |text| @compileError(text);
+        }
+    }
+    const x = doc.example orelse return &.{};
+    return &.{example.value(T, x, problem, typeName(T) ++ ".openapi.example")};
+}
+
+/// The examples of a field: its `.example` and its `.examples`.
+const FieldExamples = struct { example: ?json.Node = null, examples: []const json.Node = &.{} };
+
+/// The examples of the field `name` of `T`, written as the server writes
+/// them; each passes the rules of the field, or the build stops.
+fn fieldExamples(comptime T: type, comptime name: []const u8, comptime problem: bool) FieldExamples {
+    const F = @FieldType(T, name);
+    const doc = fieldDocOf(T, name);
+    if (!@hasField(@TypeOf(doc), "example")) return .{};
+    const where = typeName(T) ++ ".openapi.fields." ++ name;
+    var out: FieldExamples = .{};
+    if (doc.example) |x| {
+        if (fieldExampleProblem(T, name, x, where ++ ".example")) |text| @compileError(text);
+        out.example = example.value(F, x, problem, where ++ ".example");
+    }
+    for (doc.examples, 0..) |x, i| {
+        const at = std.fmt.comptimePrint("{s}.examples[{d}]", .{ where, i });
+        if (fieldExampleProblem(T, name, x, at)) |text| @compileError(text);
+        out.examples = out.examples ++ [_]json.Node{example.value(F, x, problem, at)};
+    }
+    return out;
+}
+
+/// The error of the example `x` of the struct `T`, named `where`, that
+/// breaks a rule of `T`; null when it passes them all, as `v.check` finds.
+pub fn exampleProblem(comptime T: type, comptime x: T, comptime where: []const u8) ?[]const u8 {
+    var buf: [256]u8 = undefined;
+    const violation = v.check(&x, &buf) orelse return null;
+    const field = violation.field orelse "";
+    const at = if (field.len > 0) field ++ " " else "";
+    return "zefir.openapi: " ++ where ++ ": " ++ at ++ violation.message ++ " (" ++ violation.code ++ "); give an example that passes the rules of " ++ typeName(T);
+}
+
+/// The error of `x`, an example of the field `name` of `T`, that breaks a
+/// rule of the field or of a type inside it; null when it passes them all.
+pub fn fieldExampleProblem(comptime T: type, comptime name: []const u8, comptime x: @FieldType(T, name), comptime where: []const u8) ?[]const u8 {
+    const F = @FieldType(T, name);
+    const ruled = @typeInfo(T) == .@"struct" and @hasDecl(T, "field_rules") and @hasField(@TypeOf(T.field_rules), name);
+    const Box = if (ruled) Ruled(F, @field(T.field_rules, name)) else Plain(F);
+    var buf: [256]u8 = undefined;
+    const box: Box = .{ .value = x };
+    const violation = v.check(&box, &buf) orelse return null;
+    // The box's field stands for the field: its outside name.
+    const path = violation.field orelse "";
+    const outside = if (@typeInfo(T) == .@"struct") v.nameOf(T, @field(std.meta.FieldEnum(T), name)) else name;
+    const at = outside ++ path[std.mem.findAny(u8, path, ".[") orelse path.len ..];
+    return "zefir.openapi: " ++ where ++ ": " ++ at ++ " " ++ violation.message ++ " (" ++ violation.code ++ "); give an example that passes the rules of " ++ typeName(T) ++ "." ++ name;
+}
+
+/// A value of `F` with the rules `entry` of a field.
+fn Ruled(comptime F: type, comptime entry: anytype) type {
+    return struct {
+        value: F,
+        pub const field_rules = .{ .value = entry };
+    };
+}
+
+/// A value of `F`, with the rules of the types inside it.
+fn Plain(comptime F: type) type {
+    return struct { value: F };
+}
+
+/// What the description of a struct with `validateSelf`, which checks
+/// fields against each other, adds: the schema cannot say it.
+fn selfNote(comptime T: type) []const []const u8 {
+    if (@hasDecl(T, "validateSelf")) return &.{"The server also checks how these fields fit together."};
+    return &.{};
+}
 
 /// A schema in the making, its members by what they say; `node` puts them
 /// in their order.
