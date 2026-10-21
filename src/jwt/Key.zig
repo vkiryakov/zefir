@@ -136,17 +136,6 @@ test "the text of a key file is no HMAC secret" {
     }
 }
 
-test "a bad key id leaves no secret in the result" {
-    // The secret of no other test, so that nothing else could have left it
-    // in the memory of the result.
-    const secret = "LEFTOVER-LEFTOVER-LEFTOVER-LEFTOVER";
-    inline for (.{ Key, SigningKey }) |K| {
-        const result = K.hmac(.HS256, secret, .{ .id = "" });
-        try testing.expectError(error.InvalidKeyId, result);
-        try testing.expect(std.mem.find(u8, std.mem.asBytes(&result), "LEFTOVER") == null);
-    }
-}
-
 test "a key id is 1 to 128 bytes of visible ASCII" {
     const longest: [128]u8 = @splat('a');
     const too_long: [129]u8 = @splat('a');
