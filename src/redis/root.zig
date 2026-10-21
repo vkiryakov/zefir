@@ -5,8 +5,13 @@
 
 const std = @import("std");
 
+/// RESP3, for the client and `testing.FakeServer` only.
+const resp = @import("resp.zig");
+
 test {
     std.testing.refAllDecls(@This());
+    _ = resp;
+    _ = @import("resp/writer_tests.zig");
 }
 
 test "the package version reaches the module" {
