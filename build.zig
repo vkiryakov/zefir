@@ -380,6 +380,43 @@ pub fn build(b: *std.Build) void {
         test_mongo.dependOn(&run.step);
     }
 
+    // redis panic programs: a client moved after connect() and a call on
+    // another std.Io panic in safe builds. Each program must print the
+    // panic message and end in its own panic handler, which exits with
+    // code 3 instead of aborting. They get their own Debug copy of redis,
+    // whatever -Doptimize says.
+    const panic_redis = b.createModule(.{
+        .root_source_file = b.path("src/redis/root.zig"),
+        .target = target,
+        .optimize = .Debug,
+        .imports = &.{
+            .{ .name = "core", .module = panic_core },
+        },
+    });
+    panic_redis.addOptions("build_options", version_options);
+    for ([_][2][]const u8{
+        .{ "moved_client", "panic: zefir-redis: Client moved after connect(): keep it where connect() ran (see the guide)" },
+        .{ "another_io", "panic: zefir-redis: a call on another std.Io than the client's: pass the io of Client.init" },
+    }) |case| {
+        const exe = b.addExecutable(.{
+            .name = b.fmt("redis-panic-{s}", .{case[0]}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(b.fmt("src/redis/testdata/panic/{s}.zig", .{case[0]})),
+                .target = target,
+                .optimize = .Debug,
+                .imports = &.{
+                    .{ .name = "redis", .module = panic_redis },
+                },
+            }),
+        });
+        const run = b.addRunArtifact(exe);
+        run.expectStdErrMatch(case[1]);
+        // expectStdErrMatch accepts any exit: only the panic handler exits
+        // with 3, so a program that printed the text and returned fails.
+        run.expectExitCode(3);
+        test_redis.dependOn(&run.step);
+    }
+
     // log compile errors: each test of the file must fail to compile with
     // the message next to its name. The filter compiles one test at a time;
     // the message must be the end of an error line.
