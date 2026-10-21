@@ -1,0 +1,136 @@
+name: openapi-probe
+
+# The measurement of design 1.2 of zefir-openapi, section 16: what building
+# the OpenAPI document at compile time costs the compiler, on synthetic
+# applications of 50, 100 and 300 routes (tests/openapi-probe). Each size
+# runs on one runner, its variants one after another, so that they compare
+# on one machine. Not part of CI: no check depends on it.
+
+on:
+  push:
+    branches: [feature/zefir-openapi]
+    paths:
+      - 'tests/openapi-probe/**'
+      - '.github/workflows/openapi-probe.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Every variant on 2 routes: compile errors show here within minutes,
+  # and A, B and naive A must write the same document.
+  smoke:
+    name: smoke (2 routes)
+    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    env:
+      STRICT: 1
+    steps:
+      - uses: actions/checkout@v7
+      - uses: mlugg/setup-zig@v2
+        with:
+          use-cache: false
+      - name: Install GNU time
+        run: test -x /usr/bin/time || (sudo apt-get update && sudo apt-get install -y time)
+      - name: Measure every variant
+        run: tests/openapi-probe/measure.sh 2 "$RUNNER_TEMP/results/n2" baseline a b naive
+      - name: Check the documents
+        run: tests/openapi-probe/measure.sh --check "$RUNNER_TEMP/results/n2"
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: openapi-probe-n2
+          path: |
+            ${{ runner.temp }}/results/n2/*.tsv
+            ${{ runner.temp }}/results/n2/*.md
+            ${{ runner.temp }}/results/n2/*.txt
+            ${{ runner.temp }}/results/n2/*.log
+            ${{ runner.temp }}/results/n2/*.time
+            ${{ runner.temp }}/results/n2/*.json
+            ${{ runner.temp }}/results/n2/work/app.orig.zig
+          if-no-files-found: ignore
+
+  # The package's build.zig builds the same programs.
+  package:
+    name: build.zig (2 routes)
+    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: mlugg/setup-zig@v2
+        with:
+          use-cache: false
+      - working-directory: tests/openapi-probe
+        run: zig build smoke -Droutes=2 --summary all
+
+  # One size a runner: the baseline, B, then A, each a step of its own, so
+  # that what a step measured stays when a later one runs out of time.
+  measure:
+    name: measure (${{ matrix.routes }} routes)
+    needs: smoke
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        routes: [50, 100, 300]
+    runs-on: ubuntu-latest
+    env:
+      ROUTES: ${{ matrix.routes }}
+      BUILD_TIMEOUT: 1200
+      SKIP_WARM_AFTER: 600
+    steps:
+      - uses: actions/checkout@v7
+      - uses: mlugg/setup-zig@v2
+        with:
+          use-cache: false
+      - name: Install GNU time
+        run: test -x /usr/bin/time || (sudo apt-get update && sudo apt-get install -y time)
+      - name: Baseline
+        run: tests/openapi-probe/measure.sh "$ROUTES" "$RUNNER_TEMP/results/n$ROUTES" baseline
+      - name: B, the model at compile time
+        run: tests/openapi-probe/measure.sh "$ROUTES" "$RUNNER_TEMP/results/n$ROUTES" b
+      - name: A, the JSON at compile time
+        run: tests/openapi-probe/measure.sh "$ROUTES" "$RUNNER_TEMP/results/n$ROUTES" a
+      - name: Check the documents
+        if: always()
+        run: tests/openapi-probe/measure.sh --check "$RUNNER_TEMP/results/n$ROUTES"
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: openapi-probe-n${{ matrix.routes }}
+          path: |
+            ${{ runner.temp }}/results/n${{ matrix.routes }}/*.tsv
+            ${{ runner.temp }}/results/n${{ matrix.routes }}/*.md
+            ${{ runner.temp }}/results/n${{ matrix.routes }}/*.txt
+            ${{ runner.temp }}/results/n${{ matrix.routes }}/*.log
+            ${{ runner.temp }}/results/n${{ matrix.routes }}/*.time
+          if-no-files-found: ignore
+
+  # The table of every size.
+  report:
+    name: report
+    needs: [smoke, measure]
+    if: ${{ !cancelled() }}
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: openapi-probe-n*
+          path: results
+      - name: The table
+        run: |
+          python3 -I tests/openapi-probe/summarize.py results/*/results.tsv | tee report.md
+          cat report.md >>"$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: openapi-probe-report
+          path: |
+            report.md
+            results/*/results.tsv
