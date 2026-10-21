@@ -1,10 +1,10 @@
 name: openapi-probe
 
-# The measurement of design 1.2 of zefir-openapi, section 16: what building
-# the OpenAPI document at compile time costs the compiler, on synthetic
+# The measurement of design 1.2 of zefir-openapi, section 16, on the real
+# generator: what zefir.openapi.document costs the compiler, on synthetic
 # applications of 50, 100 and 300 routes (tests/openapi-probe). Each size
-# runs on one runner, its variants one after another, so that they compare
-# on one machine. Not part of CI: no check depends on it.
+# runs on one runner, the baseline and the document one after another, so
+# that they compare on one machine. Not part of CI: no check depends on it.
 
 on:
   push:
@@ -22,8 +22,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Every variant on 5 routes, one of each kind: compile errors show here
-  # within minutes, and every document must be the bytes of B's.
+  # Both programs on 5 routes: compile errors show here within minutes, and
+  # the document must be JSON.
   smoke:
     name: smoke (5 routes)
     timeout-minutes: 30
@@ -37,9 +37,9 @@ jobs:
           use-cache: false
       - name: Install GNU time
         run: test -x /usr/bin/time || (sudo apt-get update && sudo apt-get install -y time)
-      - name: Measure every variant
-        run: tests/openapi-probe/measure.sh 5 "$RUNNER_TEMP/results/n5" baseline b a afill acount naive
-      - name: Check the documents
+      - name: Measure both
+        run: tests/openapi-probe/measure.sh 5 "$RUNNER_TEMP/results/n5" baseline real
+      - name: Check the document
         run: tests/openapi-probe/measure.sh --check "$RUNNER_TEMP/results/n5"
       - if: always()
         uses: actions/upload-artifact@v7
@@ -68,8 +68,9 @@ jobs:
       - working-directory: tests/openapi-probe
         run: zig build smoke -Droutes=5 --summary all
 
-  # One size a runner: the baseline, B, then A, each a step of its own, so
-  # that what a step measured stays when a later one runs out of time.
+  # One size a runner: the baseline, then the document, each a step of its
+  # own, so that what a step measured stays when a later one runs out of
+  # time.
   measure:
     name: measure (${{ matrix.routes }} routes)
     needs: smoke
@@ -92,11 +93,9 @@ jobs:
         run: test -x /usr/bin/time || (sudo apt-get update && sudo apt-get install -y time)
       - name: Baseline
         run: tests/openapi-probe/measure.sh "$ROUTES" "$RUNNER_TEMP/results/n$ROUTES" baseline
-      - name: B, the model at compile time
-        run: tests/openapi-probe/measure.sh "$ROUTES" "$RUNNER_TEMP/results/n$ROUTES" b
-      - name: A, the JSON at compile time
-        run: tests/openapi-probe/measure.sh "$ROUTES" "$RUNNER_TEMP/results/n$ROUTES" a
-      - name: Check the documents
+      - name: zefir.openapi.document
+        run: tests/openapi-probe/measure.sh "$ROUTES" "$RUNNER_TEMP/results/n$ROUTES" real
+      - name: Check the document
         if: always()
         run: tests/openapi-probe/measure.sh --check "$RUNNER_TEMP/results/n$ROUTES"
       - if: always()
@@ -111,78 +110,10 @@ jobs:
             ${{ runner.temp }}/results/n${{ matrix.routes }}/*.time
           if-no-files-found: ignore
 
-  # The smallest eval branch quota with which the document builds, for B
-  # and A: Sema-only builds, searched by doubling, then halving.
-  quota:
-    name: quota (${{ matrix.routes }} routes)
-    needs: smoke
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        routes: [50, 100, 300]
-    runs-on: ubuntu-latest
-    env:
-      ROUTES: ${{ matrix.routes }}
-    steps:
-      - uses: actions/checkout@v7
-      - uses: mlugg/setup-zig@v2
-        with:
-          use-cache: false
-      - name: B
-        run: tests/openapi-probe/measure.sh --quota "$ROUTES" "$RUNNER_TEMP/results/quota$ROUTES" b
-      - name: A
-        run: tests/openapi-probe/measure.sh --quota "$ROUTES" "$RUNNER_TEMP/results/quota$ROUTES" a
-      - if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: openapi-probe-quota${{ matrix.routes }}
-          path: |
-            ${{ runner.temp }}/results/quota${{ matrix.routes }}/*.tsv
-            ${{ runner.temp }}/results/quota${{ matrix.routes }}/*.log
-          if-no-files-found: ignore
-
-  # The other ways of A on 50 routes, on one runner, cold builds only: the
-  # first pass of count + fill alone, count + fill, and ++ per piece.
-  extra:
-    name: extra (50 routes)
-    needs: smoke
-    timeout-minutes: 45
-    runs-on: ubuntu-latest
-    env:
-      BUILD_TIMEOUT: 900
-      SKIP_WARM_AFTER: 0
-    steps:
-      - uses: actions/checkout@v7
-      - uses: mlugg/setup-zig@v2
-        with:
-          use-cache: false
-      - name: Install GNU time
-        run: test -x /usr/bin/time || (sudo apt-get update && sudo apt-get install -y time)
-      - name: The first pass of count + fill alone
-        run: tests/openapi-probe/measure.sh 50 "$RUNNER_TEMP/results/extra50" acount
-      - name: Count + fill
-        run: tests/openapi-probe/measure.sh 50 "$RUNNER_TEMP/results/extra50" afill
-      - name: ++ per piece
-        run: tests/openapi-probe/measure.sh 50 "$RUNNER_TEMP/results/extra50" naive
-      - if: always()
-        name: The table
-        run: python3 -I tests/openapi-probe/summarize.py "$RUNNER_TEMP/results/extra50/results.tsv" | tee -a "$GITHUB_STEP_SUMMARY"
-      - if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: openapi-probe-extra50
-          path: |
-            ${{ runner.temp }}/results/extra50/*.tsv
-            ${{ runner.temp }}/results/extra50/*.txt
-            ${{ runner.temp }}/results/extra50/*.log
-            ${{ runner.temp }}/results/extra50/*.time
-          if-no-files-found: ignore
-
   # The table of every size.
   report:
     name: report
-    needs: [smoke, measure, extra, quota]
+    needs: [smoke, measure]
     if: ${{ !cancelled() }}
     timeout-minutes: 10
     runs-on: ubuntu-latest
@@ -195,10 +126,6 @@ jobs:
       - name: The table
         run: |
           python3 -I tests/openapi-probe/summarize.py results/openapi-probe-n*/results.tsv | tee report.md
-          if [ -f results/openapi-probe-extra50/results.tsv ]; then
-            printf '\n**The other ways of A, 50 routes, on a runner of their own.**\n\n' | tee -a report.md
-            python3 -I tests/openapi-probe/summarize.py results/openapi-probe-extra50/results.tsv | tee -a report.md
-          fi
           cat report.md >>"$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v7
         with:

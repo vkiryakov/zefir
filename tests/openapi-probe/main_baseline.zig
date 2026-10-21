@@ -1,4 +1,4 @@
-//! The probe's program of variant None: the baseline, no document.
+//! The probe's program of the baseline: the server, no document.
 const std = @import("std");
 
 pub const panic = std.debug.FullPanic(exitOnPanic);
@@ -9,5 +9,5 @@ fn exitOnPanic(message: []const u8, _: ?usize) noreturn {
 }
 
 pub fn main(init: std.process.Init) !void {
-    return @import("run.zig").run(init, @import("openapi").None);
+    return @import("run.zig").run(init, @import("variants.zig").None);
 }

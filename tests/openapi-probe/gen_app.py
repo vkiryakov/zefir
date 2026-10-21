@@ -3,16 +3,19 @@
 
     gen_app.py <routes> <app.zig>
 
-The application is what design 1.2 of zefir-openapi calls typical: its
-routes are those of REST resources, five each (list, create, get, update,
-delete), six resources to a controller of thirty routes. Every route reads
-its input with ctx.path, ctx.query or ctx.json and answers with a JSON
-value; the DTOs have 4 to 8 fields with field_rules (v.rename, ranges,
-lengths, formats, lists), the controllers and the DTOs declare their texts
-in typed `pub const openapi`, the middleware runs on three levels, and the
-error handler maps twenty errors of the application. `Service.start` builds
-the server with http.Server.init, and the document of the variant it is
-given from the type of the same options.
+The application is what design 1.2 of zefir-openapi calls typical, written
+as an application of zefir-openapi writes it: its routes are those of REST
+resources, five each (list, create, get, update, delete), six resources to
+a controller of thirty routes. Every route declares its input (.path,
+.query, .body) and reads it with ctx.input; create declares its 201 in
+.responses. The DTOs have 4 to 8 fields with field_rules (v.rename,
+ranges, lengths, formats, lists), and every DTO, controller and
+middleware declares its texts in a typed `pub const openapi`
+(zefir.openapi.Doc, ControllerDoc, MiddlewareDoc): security schemes, the
+requirement and roles. The middleware runs on three levels, and the error
+handler maps twenty errors of the application. `Service.start` builds the
+server with http.Server.init and, for the variant it is given, the
+document from the type of the same options with zefir.openapi.document.
 
 Python rather than Zig, so that its output can be checked with
 `zig ast-check` without building anything.
@@ -175,33 +178,53 @@ def resource_types(c, k, rid):
     return out
 
 
+def route_name(kind, k):
+    return f"{kind.capitalize()}{k}"
+
+
+def route_decl(c, k, kind):
+    """The named route of kind `kind` of resource k of controller c."""
+    tag = f"{c}_{k}"
+    name = route_name(kind, k)
+    if kind == "list":
+        return f'    const {name} = http.get("/res{k}", .{{ .query = ListQuery{tag} }});'
+    if kind == "create":
+        return f'    const {name} = http.post("/res{k}", .{{ .body = Create{tag}, .responses = .{{ .created = .{{}} }} }});'
+    if kind == "get":
+        return f'    const {name} = http.get("/res{k}/{{id}}", .{{ .path = IdPath{c} }});'
+    if kind == "update":
+        return f'    const {name} = http.put("/res{k}/{{id}}", .{{ .path = IdPath{c}, .body = Update{tag}, .middleware = .{{requireOwner}} }});'
+    return f'    const {name} = http.delete("/res{k}/{{id}}", .{{ .path = IdPath{c}, .middleware = .{{requireOwner}} }});'
+
+
 def handler(c, k, kind, extra):
     tag = f"{c}_{k}"
     me = f"_: *Controller{c}, ctx: *http.Context"
+    route = route_name(kind, k)
     if kind == "list":
         return [
             f"    pub fn list{k}({me}) !http.Json(Page(Summary{tag})) {{",
-            f"        const in_query = try ctx.query(ListQuery{tag});",
+            f"        const in = try ctx.input({route});",
             f'        if (ctx.request.header("x-fail") != null) return error.{extra};',
-            "        return .{ .value = .{ .items = &.{}, .total = 0, .page = in_query.page, .per_page = in_query.per_page } };",
+            "        return .{ .value = .{ .items = &.{}, .total = 0, .page = in.query.page, .per_page = in.query.per_page } };",
             "    }",
         ]
     if kind == "create":
         return [
             f"    pub fn create{k}({me}) !http.Json(Item{tag}) {{",
-            f"        const in_body = try ctx.json(Create{tag});",
+            f"        const in = try ctx.input({route});",
             '        if (ctx.request.header("x-fail")) |reason| {',
             "            if (reason.len == 1) return error.AlreadyExists;",
             f"            return error.{extra};",
             "        }",
-            f"        return .{{ .value = sampleItem{tag}(in_body.name), .status = 201 }};",
+            f"        return .{{ .value = sampleItem{tag}(in.body.name), .status = 201 }};",
             "    }",
         ]
     if kind == "get":
         return [
             f"    pub fn get{k}({me}) !http.Json(Item{tag}) {{",
-            f"        const in_path = try ctx.path(IdPath{c});",
-            "        if (in_path.id == 404) return error.NotFound;",
+            f"        const in = try ctx.input({route});",
+            "        if (in.path.id == 404) return error.NotFound;",
             f'        if (ctx.request.header("x-fail") != null) return error.{extra};',
             f'        return .{{ .value = sampleItem{tag}("item") }};',
             "    }",
@@ -209,47 +232,35 @@ def handler(c, k, kind, extra):
     if kind == "update":
         return [
             f"    pub fn update{k}({me}) !http.Json(Item{tag}) {{",
-            f"        const in_path = try ctx.path(IdPath{c});",
-            f"        const in_body = try ctx.json(Update{tag});",
-            "        if (in_path.id == 404) return error.NotFound;",
-            "        if (in_body.version == 1) return error.StaleVersion;",
+            f"        const in = try ctx.input({route});",
+            "        if (in.path.id == 404) return error.NotFound;",
+            "        if (in.body.version == 1) return error.StaleVersion;",
             f'        if (ctx.request.header("x-fail") != null) return error.{extra};',
-            f'        return .{{ .value = sampleItem{tag}(in_body.name orelse "item") }};',
+            f'        return .{{ .value = sampleItem{tag}(in.body.name orelse "item") }};',
             "    }",
         ]
     return [
         f"    pub fn delete{k}({me}) !void {{",
-        f"        const in_path = try ctx.path(IdPath{c});",
-        "        if (in_path.id == 404) return error.NotFound;",
+        f"        const in = try ctx.input({route});",
+        "        if (in.path.id == 404) return error.NotFound;",
         '        if (ctx.request.header("x-fail") != null) return error.Locked;',
         f'        if (ctx.request.header("x-gone") != null) return error.{extra};',
         "    }",
     ]
 
 
-def route_decl(k, kind):
-    if kind == "list":
-        return f'            .list{k} = http.get("/res{k}", .{{}}),'
-    if kind == "create":
-        return f'            .create{k} = http.post("/res{k}", .{{}}),'
-    if kind == "get":
-        return f'            .get{k} = http.get("/res{k}/{{id}}", .{{}}),'
-    if kind == "update":
-        return f'            .update{k} = http.put("/res{k}/{{id}}", .{{ .middleware = .{{requireOwner}} }}),'
-    return f'            .delete{k} = http.delete("/res{k}/{{id}}", .{{ .middleware = .{{requireOwner}} }}),'
-
-
 def route_doc(c, k, kind):
     tag = f"{c}_{k}"
+    method = f"{kind}{k}"
     if kind == "list":
-        return f'            .list{k} = .{{ .summary = "List the items of resource {tag}", .query = ListQuery{tag} }},'
+        return f'            .{method} = .{{ .summary = "List the items of resource {tag}" }},'
     if kind == "create":
-        return f'            .create{k} = .{{ .summary = "Create an item of resource {tag}", .body = Create{tag}, .status = 201 }},'
+        return f'            .{method} = .{{ .summary = "Create an item of resource {tag}", .responses = .{{ .created = .{{ .description = "The item made." }} }} }},'
     if kind == "get":
-        return f'            .get{k} = .{{ .summary = "Get an item of resource {tag}", .path = IdPath{c} }},'
+        return f'            .{method} = .{{ .summary = "Get an item of resource {tag}" }},'
     if kind == "update":
-        return f'            .update{k} = .{{ .summary = "Change an item of resource {tag}", .path = IdPath{c}, .body = Update{tag} }},'
-    return f'            .delete{k} = .{{ .summary = "Delete an item of resource {tag}", .path = IdPath{c} }},'
+        return f'            .{method} = .{{ .summary = "Change an item of resource {tag}" }},'
+    return f'            .{method} = .{{ .summary = "Delete an item of resource {tag}" }},'
 
 
 def controller(c, routes, first_route):
@@ -259,7 +270,7 @@ def controller(c, routes, first_route):
     out = [f"pub const IdPath{c} = struct {{", "    id: u64,", ""]
     out.append("    pub const field_rules = .{ .id = v.positive };")
     out.append("    pub const openapi: oa.Doc(@This()) = .{")
-    out.append('        .fields = .{ .id = .{ .description = "The id of the item." } },')
+    out.append('        .fields = .{ .id = .{ .description = "The id of the item.", .example = 1 } },')
     out.append("    };")
     out.append("};")
     out.append("")
@@ -269,12 +280,15 @@ def controller(c, routes, first_route):
     out.append(f"pub const Controller{c} = struct {{")
     out.append("    calls: u32 = 0,")
     out.append("")
+    for k, kind in kinds:
+        out.append(route_decl(c, k, kind))
+    out.append("")
     out.append("    pub const http_routes = http.routes(.{")
     out.append(f'        .prefix = "/v1/c{c}",')
     out.append(f'        .middleware = .{{permission("c{c}")}},')
     out.append("        .methods = .{")
     for k, kind in kinds:
-        out.append(route_decl(k, kind))
+        out.append(f"            .{kind}{k} = {route_name(kind, k)},")
     out.append("        },")
     out.append("    });")
     out.append("")
@@ -362,10 +376,22 @@ def app(routes):
     out.append("}")
     out.append("")
     out += [
-        "fn requireAuth(ctx: *http.Context) !http.MiddlewareResult {",
-        '    if (ctx.request.header("authorization") == null) return error.Unauthenticated;',
-        "    return .next;",
-        "}",
+        "/// Knows the client by a bearer token or the cookie of a session, and",
+        "/// requires one of them.",
+        "const requireAuth = struct {",
+        "    pub const openapi: oa.MiddlewareDoc = .{",
+        "        .security_schemes = &.{",
+        '            .{ .name = "bearer", .kind = .{ .http = .{ .scheme = "bearer" } } },',
+        '            .{ .name = "session", .kind = .{ .api_key = .{ .in = .cookie, .param = "session" } } },',
+        "        },",
+        "        .security = .any,",
+        "    };",
+        "",
+        "    pub fn run(ctx: *http.Context) !http.MiddlewareResult {",
+        '        if (ctx.request.header("authorization") == null) return error.Unauthenticated;',
+        "        return .next;",
+        "    }",
+        "};",
         "",
         "fn rateLimit(ctx: *http.Context) !http.MiddlewareResult {",
         '    if (ctx.request.header("x-rate") != null) return error.RateLimited;',
@@ -381,6 +407,7 @@ def app(routes):
         "fn permission(comptime area: []const u8) type {",
         "    return struct {",
         '        pub const name = "permission(" ++ area ++ ")";',
+        "        pub const openapi: oa.MiddlewareDoc = .{ .roles = &.{area} };",
         "",
         "        pub fn run(ctx: *http.Context) !http.MiddlewareResult {",
         '            if (ctx.request.header("x-denied") != null) return error.PermissionDenied;',

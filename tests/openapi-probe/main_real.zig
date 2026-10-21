@@ -1,4 +1,5 @@
-//! The probe's program of variant A: the document as JSON built at compile time by pure functions that return the text of each object and array.
+//! The probe's program of the real generator: the server and its document,
+//! built by zefir.openapi.document at compile time and written at run time.
 const std = @import("std");
 
 pub const panic = std.debug.FullPanic(exitOnPanic);
@@ -9,5 +10,5 @@ fn exitOnPanic(message: []const u8, _: ?usize) noreturn {
 }
 
 pub fn main(init: std.process.Init) !void {
-    return @import("run.zig").run(init, @import("openapi").A);
+    return @import("run.zig").run(init, @import("variants.zig").Real);
 }

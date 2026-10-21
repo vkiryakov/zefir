@@ -4,12 +4,10 @@
     summarize.py <results.tsv>...
 
 For every size: each variant's cold and warm build, the peak RSS of the
-compiler, the binary and the document, and the increments of A and B over
-the baseline of the same run (one runner per size). Then what the rule of
-design 1.2, section 16, gives at the largest size with A, B and the
-baseline: A if it costs at most ~10% more than B in cold time and in peak
-memory; else B; STOP if the cheaper of them adds more than 30 s or 4 GB to
-the cold build.
+compiler, the binary and the document, and the increments of the real
+generator over the baseline of the same run (one runner per size). Then
+what the thresholds of design 1.2, section 16, say at the largest size:
+STOP if the document adds more than 30 s or 4 GB to the cold build.
 """
 
 import csv
@@ -17,11 +15,7 @@ import sys
 
 NAMES = {
     "baseline": "baseline",
-    "b": "B (model, JSON at startup)",
-    "a": "A (JSON at compile time, pure functions)",
-    "afill": "A (JSON at compile time, count + fill)",
-    "acount": "count pass of A count + fill alone",
-    "naive": "A naive (++ per piece)",
+    "real": "zefir.openapi.document",
 }
 
 
@@ -56,7 +50,7 @@ def main():
     print("|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
     for n in sorted(sizes):
         base = sizes[n].get("baseline")
-        for variant in ["baseline", "b", "a", "afill", "acount", "naive"]:
+        for variant in ["baseline", "real"]:
             row = sizes[n].get(variant)
             if row is None:
                 continue
@@ -83,37 +77,26 @@ def main():
                 f"{fmt(None if write_ms is None else write_ms / 1000, 2)} |"
             )
 
-    full = [n for n in sorted(sizes) if all(v in sizes[n] for v in ("baseline", "a", "b"))]
+    full = [n for n in sorted(sizes) if all(v in sizes[n] for v in ("baseline", "real"))]
     if not full:
         return
     n = full[-1]
-    base, a, b = sizes[n]["baseline"], sizes[n]["a"], sizes[n]["b"]
+    base, real = sizes[n]["baseline"], sizes[n]["real"]
     print()
-    print(f"**The rule of section 16 at {n} routes.**")
+    print(f"**The thresholds of section 16 at {n} routes.**")
     if base["cold_result"] != "ok":
         print(f"The baseline did not build: {base['cold_result']}.")
         return
-    base_s, base_gb = number(base["cold_s"]), gb(base["cold_rss_kb"])
-    within = {}
-    for name, row in (("A", a), ("B", b)):
-        if row["cold_result"] != "ok":
-            print(f"- {name}: {row['cold_result']}.")
-            continue
-        added_s = number(row["cold_s"]) - base_s
-        added_gb = gb(row["cold_rss_kb"]) - base_gb
-        within[name] = added_s <= 30 and added_gb <= 4
-        print(f"- {name} adds {added_s:+.1f} s and {added_gb:+.2f} GB to the cold build.")
-    if not any(within.values()):
-        print("- STOP: neither A nor B stays within +30 s and +4 GB of the cold build.")
+    if real["cold_result"] != "ok":
+        print(f"- STOP: the document did not build: {real['cold_result']}.")
         return
-    if a["cold_result"] == "ok" and b["cold_result"] == "ok":
-        ratio_s = number(a["cold_s"]) / number(b["cold_s"])
-        ratio_gb = gb(a["cold_rss_kb"]) / gb(b["cold_rss_kb"])
-        print(f"- A / B, cold build: {ratio_s:.3f} in time, {ratio_gb:.3f} in peak memory.")
-        pick = "A" if ratio_s <= 1.10 and ratio_gb <= 1.10 else "B"
-        print(f"- The rule gives {pick}.")
+    added_s = number(real["cold_s"]) - number(base["cold_s"])
+    added_gb = gb(real["cold_rss_kb"]) - gb(base["cold_rss_kb"])
+    print(f"- The document adds {added_s:+.1f} s and {added_gb:+.2f} GB to the cold build.")
+    if added_s > 30 or added_gb > 4:
+        print("- STOP: more than +30 s or +4 GB.")
     else:
-        print("- The rule gives " + ("A" if a["cold_result"] == "ok" else "B") + ": the other did not build.")
+        print("- Within +30 s and +4 GB.")
 
 
 if __name__ == "__main__":
