@@ -85,6 +85,12 @@ pub fn App(comptime Root: type) type {
             lifecycle.requestStop(&app.internal.block.runtime);
         }
 
+        /// `requestStop`, then `wait`.
+        pub fn shutdown(app: *@This()) anyerror!void {
+            app.requestStop();
+            return app.wait();
+        }
+
         pub fn state(app: *const @This()) State {
             return app.internal.block.status.state();
         }

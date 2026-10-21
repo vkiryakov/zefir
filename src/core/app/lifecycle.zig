@@ -52,8 +52,11 @@ pub const Runtime = struct {
     cause: ?Cause = null,
     /// The start failed: the stop rolls back what started.
     rollback: bool = false,
-    /// The stop ran out of time.
+    /// The stop ran out of time, or a bean returned `error.ShutdownTimeout`.
     fatal: bool = false,
+    /// A bean returned `error.ShutdownTimeout` itself: its tasks may still
+    /// use it, so App never frees the beans.
+    timed_out: bool = false,
     /// The entry that did not stop.
     stuck: ?usize = null,
     /// What `wait` returns, once it is known.
@@ -115,8 +118,31 @@ pub const Runtime = struct {
         rt.stop_event.set(rt.io);
     }
 
-    /// The entry the stop task is in: the one it calls, or, while it
-    /// gathers the watchers, the first entry whose watcher has not returned.
+    /// The shutdown of entry k failed: the first cause; `ShutdownTimeout`
+    /// makes the stop fatal.
+    fn shutdownFailed(rt: *Runtime, k: usize, err: anyerror) void {
+        rt.lock();
+        defer rt.unlock();
+        if (rt.cause == null) rt.cause = .{ .entry = k, .step = .shutdown, .err = err };
+        if (err == error.ShutdownTimeout) {
+            rt.fatal = true;
+            rt.timed_out = true;
+            if (rt.stuck == null) rt.stuck = k;
+        }
+    }
+
+    /// The deadline came before the `wait` of entry k returned.
+    fn didNotStop(rt: *Runtime, k: usize) void {
+        rt.lock();
+        defer rt.unlock();
+        rt.fatal = true;
+        if (rt.stuck == null) rt.stuck = k;
+        if (rt.cause == null) rt.cause = .{ .entry = k, .step = .shutdown, .err = error.ShutdownTimeout };
+    }
+
+    /// The entry the stop task is in: the one it calls, the one whose
+    /// watcher it waits for, or, while it gathers the watchers, the first
+    /// entry whose watcher has not returned.
     fn current(rt: *Runtime) ?usize {
         const at = rt.at.load(.acquire);
         if (at == none) return null;
@@ -246,7 +272,8 @@ pub fn failure(rt: *Runtime) ?Failure {
 
 /// Before `deinit` frees the beans: stops an App that runs, and takes back
 /// the stop task once it has returned (the Io allocated it). False when the
-/// beans must stay: a task of App may still use them.
+/// beans must stay: a task of App, or of a bean that returned
+/// `error.ShutdownTimeout`, may still use them.
 pub fn finish(rt: *Runtime) bool {
     const io = rt.io;
     // No cancelation point: a cancelation request of the caller stays.
@@ -260,7 +287,9 @@ pub fn finish(rt: *Runtime) bool {
             rt.stop_task = null;
         }
     }
-    return rt.stop_task == null;
+    rt.lock();
+    defer rt.unlock();
+    return rt.stop_task == null and !rt.timed_out;
 }
 
 /// Waits for a stop and for the end of `start`, then stops what started:
@@ -288,7 +317,11 @@ fn stopTask(rt: *Runtime) void {
         k -= 1;
         const entry = list[k];
         rt.at.store(k, .release);
-        if (entry.vtable.shutdown) |shutdownFn| shutdownFn(entry.ptr, io, deadline) catch {};
+        if (entry.vtable.shutdown) |shutdownFn| {
+            shutdownFn(entry.ptr, io, deadline) catch |err| rt.shutdownFailed(k, err);
+        } else if (entry.vtable.wait != null) {
+            untilSet(&rt.watches[k].returned, io, rt.deadline) catch rt.didNotStop(k);
+        }
     }
     // Nothing may wait in a bean's `wait` once App frees the bean.
     rt.at.store(Runtime.gathering, .release);
