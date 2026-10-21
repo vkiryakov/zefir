@@ -59,6 +59,8 @@ pub const RouteKind = route_decls.Kind;
 /// A status that a route declares in `.responses`, as its type keeps it
 /// in `responses`.
 pub const RouteResponse = route_decls.RouteResponse;
+/// What `ctx.input(R)` gives: the input that the route `R` declares.
+pub const Input = route_decls.Input;
 pub const TrustedProxies = Server.TrustedProxies;
 
 // Errors.

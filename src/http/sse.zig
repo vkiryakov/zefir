@@ -145,6 +145,22 @@ pub const Context = struct {
         return ctx.internal.http.cookies(T);
     }
 
+    /// All the input that the stream's route `R` declares, in one call:
+    /// its path, query, headers and cookies, as `http.Context.input` reads
+    /// them.
+    ///
+    /// ```zig
+    /// const Events = http.sse.get("/events", .{ .query = dto.EventsQuery });
+    ///
+    /// pub fn events(self: *TodosV1Controller, ctx: *http.sse.Context) !void {
+    ///     const in = try ctx.input(Events);
+    ///     // ...
+    /// }
+    /// ```
+    pub fn input(ctx: *Context, comptime R: type) InputErrors(R)!routes.Input(R) {
+        return ctx.internal.http.input(R);
+    }
+
     /// The `Last-Event-ID` a client sends when it reconnects: the `id` of
     /// the last event it got; null when it sent none. The server does not
     /// replay what the client missed: the stream goes on from now.
@@ -152,6 +168,15 @@ pub const Context = struct {
         return ctx.request.header("last-event-id");
     }
 };
+
+/// The error set of `Context.input` for `R`, an SSE route: a stream reads
+/// no body.
+fn InputErrors(comptime R: type) type {
+    routes.expectRoute(R, "ctx.input");
+    if (R.route_kind != .sse) @compileError("zefir.http: ctx.input of an http.sse.Context takes the route of its stream, made by http.sse.get; got the " ++
+        @tagName(R.http_method) ++ " route \"" ++ R.route_path ++ "\"");
+    return HttpContext.InputErrors(R);
+}
 
 test {
     _ = @import("sse/format.zig");

@@ -30,6 +30,7 @@
 const std = @import("std");
 const strings = @import("input/strings.zig");
 const json_in = @import("input/json_in.zig");
+const plan = @import("plan.zig");
 
 /// What a route serves: a request and its response, or an SSE stream.
 pub const Kind = enum { rest, sse };
@@ -226,6 +227,33 @@ pub fn Route(comptime method: std.http.Method, comptime kind: Kind, comptime pat
 /// The eval branch quota of a controller's declaration of its routes: a few
 /// hundred branches a route, so some hundreds of routes a controller.
 const route_quota = 200_000;
+
+/// The input that the route `R` declares, as `ctx.input(R)` gives it: a
+/// field for each source it declares, of its DTO, in the order the sources
+/// are read: `path`, `query`, `headers`, `cookies`, then `body` or `form`.
+pub fn Input(comptime R: type) type {
+    comptime {
+        expectRoute(R, "http.Input");
+        const all_names = [_][:0]const u8{ "path", "query", "headers", "cookies", "body", "form" };
+        const all_types = [_]type{ R.Path, R.Query, R.Headers, R.Cookies, R.Body, R.Form };
+        var names: []const [:0]const u8 = &.{};
+        var types: []const type = &.{};
+        for (all_names, all_types) |name, T| {
+            if (T == void) continue;
+            names = names ++ [_][:0]const u8{name};
+            types = types ++ [_]type{T};
+        }
+        const attrs: [names.len]std.lang.Type.Struct.FieldAttributes = @splat(.{});
+        return @Struct(.auto, null, names, types[0..names.len], &attrs);
+    }
+}
+
+/// Stops the build when `R` is not a route made by `http.get` and the
+/// others; `call` names what took it.
+pub fn expectRoute(comptime R: type, comptime call: []const u8) void {
+    if (!isMarked(R, "zefir_http_route"))
+        @compileError("zefir.http: " ++ call ++ " takes a route, such as " ++ call ++ "(Get) with const Get = http.get(\"/{id}\", .{ .path = dto.TodoIdPath }); got " ++ plan.typeName(R));
+}
 
 /// What a route declares of its input and its statuses.
 const Declarations = struct {

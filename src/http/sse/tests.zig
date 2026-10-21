@@ -974,3 +974,73 @@ test "stream slots come back after every way a stream ends" {
     try testing.expectEqual(closes + 4, f.events.closes.load(.acquire));
     try testing.expectEqual(0, http_testing.openStreams(&f.server));
 }
+
+/// The input that a stream's route declares.
+const LobbyPath = struct { room: []const u8 };
+const LobbyQuery = struct { key: []const u8, limit: u32 = 10 };
+const LobbyHeaders = struct { accept: ?[]const u8 = null };
+const LobbyCookies = struct { session: ?[]const u8 = null };
+const Lobby = sse.get("/lobbies/{room}", .{ .path = LobbyPath, .query = LobbyQuery, .headers = LobbyHeaders, .cookies = LobbyCookies });
+
+/// Reads the input of its stream at once, then subscribes under the key of
+/// the query.
+const LobbiesController = struct {
+    live: *sse.Manager,
+    /// Guards `seen`: the handler runs on another thread than the test.
+    mutex: std.Io.Mutex = .init,
+    subscribed: std.atomic.Value(u32) = .init(0),
+    /// "room key limit accept session", as the handler read them.
+    seen: Text = .{},
+
+    pub const http_routes = routes.routes(.{ .methods = .{ .lobby = Lobby } });
+
+    pub fn lobby(self: *LobbiesController, ctx: *sse.Context) !void {
+        const in = try ctx.input(Lobby);
+        var buf: [64]u8 = undefined;
+        const text = std.fmt.bufPrint(&buf, "{s} {s} {d} {s} {s}", .{
+            in.path.room, in.query.key, in.query.limit, in.headers.accept orelse "-", in.cookies.session orelse "-",
+        }) catch "too long";
+        self.mutex.lockUncancelable(ctx.io());
+        self.seen.set(text);
+        self.mutex.unlock(ctx.io());
+        _ = try self.live.subscribe(ctx, in.query.key);
+        _ = self.subscribed.fetchAdd(1, .release);
+    }
+};
+
+test "input: the context of a stream reads what its route declares" {
+    const io = testing.io;
+    var dog = try Watchdog.start("input: the context of a stream");
+    defer dog.stop();
+    var live: sse.Manager = .init(testing.allocator, .{});
+    defer live.deinit(io);
+    var lobbies: LobbiesController = .{ .live = &live };
+    var backend: TestingBackend = .init(testing.allocator);
+    defer backend.deinit();
+    var server = try Server.init(testing.allocator, .{ .backend = backend.backend(), .controllers = .{&lobbies} });
+    defer server.deinit(io);
+    try server.start(io);
+
+    const s = try backend.open(io, .{ .method = .GET, .target = "/lobbies/hall?key=ann&limit=3", .headers = &.{
+        .{ "accept", "text/event-stream" }, .{ "cookie", "session=s1" },
+    } });
+    var s_ended = false;
+    errdefer if (!s_ended) s.deinit(io);
+    try waitCount(&lobbies.subscribed, 1);
+    lobbies.mutex.lockUncancelable(io);
+    const seen = lobbies.seen;
+    lobbies.mutex.unlock(io);
+    try testing.expectEqualStrings("hall ann 3 text/event-stream s1", seen.get().?);
+    live.close(io, "ann");
+    try expectEnd(s);
+    s.deinit(io);
+    s_ended = true;
+
+    // A query that does not fit is an error before subscribe: 422, which
+    // names its field.
+    var bad = try backend.request(io, .{ .method = .GET, .target = "/lobbies/hall?limit=x" });
+    defer bad.deinit();
+    try testing.expectEqual(422, bad.status);
+    try expectProblemCode(&bad, "validation_failed");
+    try testing.expectEqual(1, lobbies.subscribed.load(.acquire));
+}
