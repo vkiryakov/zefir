@@ -800,6 +800,43 @@ pub fn build(b: *std.Build) void {
     }
     addMongoGuide(b, test_mongo, .{ .core = core, .mongo = mongo }, target, optimize, tsan);
 
+    // redis compile errors: reply types that no reply reads into, and
+    // arguments that cannot be written. Each test of the file must fail to
+    // compile with the message next to its name, which names the call, the
+    // field or the argument, and the fix; the filter compiles one test at a
+    // time. A type declared in the file is named after the file.
+    const redis_compile_errors = b.createModule(.{
+        .root_source_file = b.path("src/redis/tests/compile_errors.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+        .imports = &.{
+            .{ .name = "redis", .module = redis },
+        },
+    });
+    const one_value = "a field of a hash holds one string, number, bool or enum";
+    const argument = "an argument is a string, an integer, a float, a bool or an enum";
+    for ([_][2][]const u8{
+        .{ "reply of an optional of an optional", "redis.cmd.raw: the reply type is ??i64, an optional of an optional: a null reply cannot tell the two apart; use ?i64" },
+        .{ "reply of a non-exhaustive enum", "redis.cmd.raw: the reply type is compile_errors.Open, a non-exhaustive enum: a name that it lacks has no value to read into; make the enum exhaustive" },
+        .{ "reply with a nested struct", "redis.cmd.raw: field 'address' of the reply type compile_errors.User is compile_errors.Address, a struct: " ++ one_value ++ ", and a hash has no nesting; move its fields into the outer struct" },
+        .{ "reply with a slice of numbers", "redis.cmd.raw: field 'scores' of the reply type compile_errors.Player is []const i64: " ++ one_value ++ ", not a list; keep a list in a key of its own" },
+        .{ "reply with a union", "redis.cmd.raw: field 'shape' of the reply type compile_errors.Drawing is compile_errors.Shape, a union: " ++ one_value ++ "; keep its tag and its value in fields of their own" },
+        .{ "reply with a pointer", "redis.cmd.raw: field 'owner' of the reply type compile_errors.Post is *const compile_errors.User, a pointer: " ++ one_value ++ "; hold the value itself" },
+        .{ "argument that is a struct", "redis.cmd.raw: args[2] is compile_errors.Point, a struct: " ++ argument ++ "; pass its fields as arguments of their own" },
+        .{ "argument that is an optional", "redis.cmd.raw: args[1] is ?[]const u8: an argument cannot be null; unwrap it, or leave it out where it is null" },
+        .{ "argument of a non-exhaustive enum", "redis.cmd.raw: args[2] is compile_errors.Open, a non-exhaustive enum: a value without a tag has no name to write; make the enum exhaustive" },
+        .{ "arguments that are a string", "redis.cmd.raw: the arguments are a tuple, such as .{ \"GET\", key }, or a slice of strings; got *const [3:0]u8" },
+    }, 0..) |case, i| {
+        const compile = b.addTest(.{
+            .name = b.fmt("redis-compile-error-{d}", .{i}),
+            .root_module = redis_compile_errors,
+            .filters = &.{case[0]},
+        });
+        compile.expect_errors = .{ .contains = case[1] };
+        test_redis.dependOn(&compile.step);
+    }
+
     // rpc-nats panic program: a second conn() of one ZefirNats panics in
     // safe builds, since one adapter serves one transport. Like the rpc
     // ones above, it ends in its own panic handler with code 3 and gets

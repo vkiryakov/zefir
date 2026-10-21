@@ -108,7 +108,7 @@ fn checkField(comptime F: type, comptime subject: []const u8, comptime side: enu
         },
         .optional => @compileError(subject ++ ", an optional of an optional: a field that the hash lacks cannot tell the two apart; use " ++ @typeName(Plain)),
         .@"struct" => @compileError(subject ++ ", a struct: " ++ one_value ++ ", and a hash has no nesting; move its fields into the outer struct"),
-        .@"union" => @compileError(subject ++ ", a union: " ++ one_value),
+        .@"union" => @compileError(subject ++ ", a union: " ++ one_value ++ "; keep its tag and its value in fields of their own"),
         .pointer => |info| {
             if (info.size == .slice and info.child == u8) {
                 @compileError(subject ++ ": the strings of a reply are const and have no sentinel; use []const u8");
