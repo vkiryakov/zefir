@@ -169,6 +169,82 @@ fn make(rec: *mocks.Recorder) !zapp.App(Probed) {
     return zapp.App(Probed).init(testing.allocator, testing.io, .{rec}, .{});
 }
 
+test "a bean's lifecycle methods make its entry; deinit(self) and deinit(self, io) both run" {
+    const Plain = struct { rec: *mocks.Recorder };
+    const Full = struct {
+        rec: *mocks.Recorder,
+
+        pub fn start(_: *@This(), _: std.Io) !void {}
+        pub fn wait(_: *@This(), _: std.Io) !void {}
+        pub fn requestStop(_: *@This(), _: std.Io) void {}
+        pub fn shutdown(_: *@This(), _: std.Io, _: std.Io.Clock.Timestamp) !void {}
+        pub fn isReady(_: *const @This()) bool {
+            return true;
+        }
+        pub fn deinit(self: *@This(), _: std.Io) void {
+            self.rec.add("deinit", "Full");
+        }
+    };
+    const Short = struct {
+        rec: *mocks.Recorder,
+
+        pub fn deinit(self: *@This()) void {
+            self.rec.add("deinit", "Short");
+        }
+    };
+    const Root = struct {
+        pub const module: zapp.Module = .{ .providers = &.{ Plain, Full, Short }, .values = &.{*mocks.Recorder} };
+    };
+    var rec: mocks.Recorder = .init(testing.io);
+    var app = try zapp.App(Root).init(testing.allocator, testing.io, .{&rec}, .{});
+    {
+        errdefer app.deinit();
+        const entries = &app.internal.block.entries;
+        try testing.expectEqual(2, entries.len);
+        try testing.expectEqualStrings("Root.Full", entries[0].name);
+        try testing.expectEqualStrings("Root.Short", entries[1].name);
+        try testing.expect(entries[0].ptr == @as(*anyopaque, app.get(Full)));
+        const vt = entries[0].vtable;
+        try testing.expect(vt.start != null and vt.wait != null and vt.requestStop != null);
+        try testing.expect(vt.shutdown != null and vt.isReady != null and vt.deinit != null);
+        try testing.expect(entries[1].vtable.start == null and entries[1].vtable.deinit != null);
+    }
+    app.deinit();
+    try rec.expect("deinit", &.{ "Short", "Full" });
+}
+
+test "a marker type: App builds and frees it, and drives nothing else" {
+    // A transport of rpc: its start and isReady belong to the rpc server.
+    const Transport = struct {
+        rec: *mocks.Recorder,
+
+        pub const app_lifecycle = false;
+
+        pub fn start(_: *@This(), _: std.Io, _: u8) !void {}
+        pub fn isReady(_: *@This()) bool {
+            return true;
+        }
+        pub fn deinit(self: *@This(), _: std.Io) void {
+            self.rec.add("deinit", "Transport");
+        }
+    };
+    const Root = struct {
+        pub const module: zapp.Module = .{ .providers = &.{Transport}, .values = &.{*mocks.Recorder} };
+    };
+    var rec: mocks.Recorder = .init(testing.io);
+    var app = try zapp.App(Root).init(testing.allocator, testing.io, .{&rec}, .{});
+    {
+        errdefer app.deinit();
+        const entries = &app.internal.block.entries;
+        try testing.expectEqual(1, entries.len);
+        try testing.expect(entries[0].vtable.start == null);
+        try testing.expect(entries[0].vtable.isReady == null);
+        try testing.expect(entries[0].vtable.deinit != null);
+    }
+    app.deinit();
+    try rec.expect("deinit", &.{"Transport"});
+}
+
 test "*const Status stays valid when the App value moves" {
     var rec: mocks.Recorder = .init(testing.io);
     var app = try make(&rec);

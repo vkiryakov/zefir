@@ -129,12 +129,15 @@ fn computePlan(comptime Root: type) Plan {
         beans[c].sources = remap(decl[d].sources, &pos);
     }
 
-    // Entries: the beans App calls a method of.
+    // Entries: the beans App calls a method of, each method with its signature checked.
     var entry_count: usize = 0;
-    for (&beans) |*b| if (contract.needsEntry(b.T)) {
-        b.entry = entry_count;
-        entry_count += 1;
-    };
+    for (&beans) |*b| {
+        contract.checkMethods(Root, b.T, name(final_mods[b.module].T) ++ ".providers");
+        if (contract.needsEntry(b.T)) {
+            b.entry = entry_count;
+            entry_count += 1;
+        }
+    }
 
     var build_order: []const u8 = "build order:";
     for (beans, 0..) |b, i| build_order = build_order ++ (if (i == 0) " " else ", ") ++ b.label;

@@ -52,6 +52,19 @@ pub const compile_errors = [_]Fixture{
     .{ .file = dir ++ "value_mutable.zig", .expect = "zefir.App(Root): Root.X.config needs *Config, but Root.values declares *const Config; declare *Config to take it mutable, or take *const Config" },
     .{ .file = dir ++ "deps_nested.zig", .expect = "zefir.App(Root): Root.Report.init param 0.inner needs Inner, and nothing Root sees provides it; add Inner to Root.providers (or a factory that returns it), " ++
         "import a module that exports it, or declare *const Inner in Root.values and pass it to App.init" },
+    // The bean contract and the marker.
+    .{ .file = dir ++ "wrong_start.zig", .expect = "zefir.App(Root): Job.start" ++ wrong ++ "pub fn start(self: *Job, io: std.Io) !void" },
+    .{ .file = dir ++ "wrong_wait.zig", .expect = "zefir.App(Root): Job.wait" ++ wrong ++ "pub fn wait(self: *Job, io: std.Io) !void" },
+    .{ .file = dir ++ "wrong_request_stop.zig", .expect = "zefir.App(Root): Job.requestStop" ++ wrong ++ "pub fn requestStop(self: *Job, io: std.Io) void" },
+    .{ .file = dir ++ "wrong_shutdown.zig", .expect = "zefir.App(Root): Job.shutdown" ++ wrong ++ "pub fn shutdown(self: *Job, io: std.Io, deadline: std.Io.Clock.Timestamp) !void" },
+    .{ .file = dir ++ "wrong_is_ready.zig", .expect = "zefir.App(Root): Job.isReady" ++ wrong ++ "pub fn isReady(self: *const Job) bool" },
+    .{ .file = dir ++ "wrong_deinit.zig", .expect = "zefir.App(Root): Job.deinit" ++ wrong ++ "pub fn deinit(self: *Job) void or pub fn deinit(self: *Job, io: std.Io) void" },
+    .{ .file = dir ++ "marker_hint.zig", .expect = "zefir.App(Root): Transport.start" ++ wrong ++ "pub fn start(self: *Transport, io: std.Io) !void; " ++
+        "if Transport.start belongs to another contract (a transport of rpc), declare `pub const app_lifecycle = false;`" },
+    .{ .file = dir ++ "marker_value.zig", .expect = "zefir.App(Root): Root.providers: Transport.app_lifecycle is true; " ++
+        "the marker only says false (App builds and frees the type, its owner starts and stops it): write false, or drop the declaration" },
 };
+
+const wrong = " has the wrong signature; expected ";
 
 const dir = "src/core/app/tests/compile_errors/";
