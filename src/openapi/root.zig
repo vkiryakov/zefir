@@ -43,6 +43,8 @@ const document_file = @import("document.zig");
 /// `zefir.openapi.document(@TypeOf(options), .{ .info = ... })`.
 pub const document = document_file.document;
 pub const Document = document_file.Document;
+/// `expectFile`: the document of an application's test against its file.
+pub const testing = @import("testing.zig");
 
 pub const Doc = declarations.Doc;
 pub const FieldDoc = declarations.FieldDoc;

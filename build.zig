@@ -236,6 +236,7 @@ pub fn build(b: *std.Build) void {
     test_http.dependOn(&b.addRunArtifact(http_check_release).step);
 
     addOpenapiCompileChecks(b, test_openapi, zefir, target, optimize);
+    addOpenapiGoldens(b, test_openapi, zefir, target, optimize, tsan);
 
     // `zig build fuzz-http` runs the fuzz test of zefir-http's HTTP/1.1
     // parser on its corpus, once, like `zig build test-http` does; with
@@ -1531,6 +1532,43 @@ fn addHttpCompileChecks(
             }),
         });
         test_step.dependOn(&app.step);
+    }
+}
+
+/// The golden documents of zefir-openapi: golden_test.zig compares the
+/// documents of the applications of src/openapi/tests/apps with their
+/// files in src/openapi/tests/golden, in 3.1 and 3.2, and sends each
+/// application's requests. It runs in src/openapi/tests.
+/// `zig build openapi` runs golden_test with ZEFIR_OPENAPI_UPDATE=1: it
+/// rewrites the files from the code.
+fn addOpenapiGoldens(
+    b: *std.Build,
+    test_step: *std.Build.Step,
+    zefir: *std.Build.Module,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+    tsan: bool,
+) void {
+    const update_step = b.step("openapi", "Rewrite the OpenAPI documents of zefir's tests from the code");
+    for ([_][]const u8{"golden_test"}) |name| {
+        const t = b.addTest(.{
+            .name = b.fmt("openapi-{s}", .{name}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(b.fmt("src/openapi/tests/{s}.zig", .{name})),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+                .imports = &.{.{ .name = "zefir", .module = zefir }},
+            }),
+        });
+        const run = addRun(b, t, tsan);
+        run.setCwd(b.path("src/openapi/tests"));
+        test_step.dependOn(&run.step);
+        if (!std.mem.eql(u8, name, "golden_test")) continue;
+        const update = addRun(b, t, tsan);
+        update.setCwd(b.path("src/openapi/tests"));
+        update.setEnvironmentVariable("ZEFIR_OPENAPI_UPDATE", "1");
+        update_step.dependOn(&update.step);
     }
 }
 
