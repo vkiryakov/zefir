@@ -60,10 +60,10 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // nats sends the package version in CONNECT, and zefir-mongo in hello;
-    // build.zig.zon is its only source. One module of the options serves
-    // both: two of the same content would be one file in two modules of the
-    // umbrella.
+    // nats sends the package version in CONNECT, zefir-mongo in hello and
+    // zefir-redis in CLIENT SETINFO; build.zig.zon is its only source. One
+    // module of the options serves all three: two of the same content would
+    // be one file in two modules of the umbrella.
     const version_options = b.addOptions();
     version_options.addOption([]const u8, "version", manifest.version);
     const build_options = version_options.createModule();
@@ -112,6 +112,19 @@ pub fn build(b: *std.Build) void {
     });
     mongo.addImport("build_options", build_options);
 
+    // Redis and Valkey for zefir applications: the client, RESP3 and the
+    // catalog of commands.
+    const redis = b.addModule("zefir-redis", .{
+        .root_source_file = b.path("src/redis/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+        .imports = &.{
+            .{ .name = "core", .module = core },
+        },
+    });
+    redis.addImport("build_options", build_options);
+
     const http = b.addModule("zefir-http", .{
         .root_source_file = b.path("src/http/root.zig"),
         .target = target,
@@ -123,7 +136,7 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // Umbrella module: @import("zefir").core, .log, .confy, .validator, .rpc, .rpc_nats, .orm, .mongo, .nats, .http
+    // Umbrella module: @import("zefir").core, .log, .confy, .validator, .rpc, .rpc_nats, .orm, .mongo, .redis, .nats, .http
     const zefir = b.addModule("zefir", .{
         .root_source_file = b.path("src/zefir.zig"),
         .target = target,
@@ -138,6 +151,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "rpc-nats", .module = rpc_nats },
             .{ .name = "orm", .module = orm },
             .{ .name = "mongo", .module = mongo },
+            .{ .name = "redis", .module = redis },
             .{ .name = "nats", .module = nats },
             .{ .name = "http", .module = http },
         },
@@ -156,6 +170,7 @@ pub fn build(b: *std.Build) void {
     const test_rpc_nats = addModuleTestStep(b, test_step, "rpc-nats");
     const test_orm = addModuleTestStep(b, test_step, "orm");
     const test_mongo = addModuleTestStep(b, test_step, "mongo");
+    const test_redis = addModuleTestStep(b, test_step, "redis");
     const test_nats = addModuleTestStep(b, test_step, "nats");
     const test_http = addModuleTestStep(b, test_step, "http");
     const test_zefir = addModuleTestStep(b, test_step, "zefir");
@@ -164,8 +179,8 @@ pub fn build(b: *std.Build) void {
     // where usize has 32 bits.
     const validator_compile_step = b.step("compile-validator-tests", "Build the validator's test binaries for -Dtarget without running them");
     for (
-        [_]*std.Build.Module{ core, log, confy, validator, rpc, rpc_nats, orm, mongo, nats, http, zefir },
-        [_]*std.Build.Step{ test_core, test_log, test_confy, test_validator, test_rpc, test_rpc_nats, test_orm, test_mongo, test_nats, test_http, test_zefir },
+        [_]*std.Build.Module{ core, log, confy, validator, rpc, rpc_nats, orm, mongo, redis, nats, http, zefir },
+        [_]*std.Build.Step{ test_core, test_log, test_confy, test_validator, test_rpc, test_rpc_nats, test_orm, test_mongo, test_redis, test_nats, test_http, test_zefir },
     ) |module, module_test_step| {
         const tests = b.addTest(.{ .root_module = module });
         module_test_step.dependOn(&addRun(b, tests, tsan).step);
