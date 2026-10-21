@@ -488,24 +488,36 @@ and id, `jwt.SigningKey(EdDSA, kid "2026-10")`.
 **`kid` and rotation.** A key has an id, which you choose, such as the
 month it was made: "2026-10". The signer writes it into every token as
 `kid`, and a verifier picks the key of that id among its keys; a verifier
-with one key may take tokens without `kid`. To change the key of orders:
+with one key may take tokens without `kid`.
 
-1. Add the new public key to the settings of every other service that
-   checks the tokens of orders, such as billing, next to the old one, and
-   restart them: their verifiers take the tokens of both keys.
-2. Switch orders to the new private key, and give it the old public key
-   as its previous one, `APP_AUTH_PREVIOUS_KEY` and
-   `APP_AUTH_PREVIOUS_KEY_ID`: new tokens carry the new `kid`, and the
-   tokens that orders gave before still pass its own routes.
+While the key of orders changes, every service that checks its tokens,
+orders itself among them, takes one more public key from its settings:
+the *other key*, `APP_AUTH_OTHER_KEY` and `APP_AUTH_OTHER_KEY_ID`. It holds
+the next key before orders switches to it, and the previous one after. To
+change the key of orders, which may run as several replicas:
+
+1. Make the new key pair, and give its public key as the other key to
+   every service that checks the tokens of orders: billing, and orders
+   itself. Restart them: their verifiers take the tokens of both keys,
+   while orders still signs with the old one.
+2. Switch orders to the new private key, `APP_AUTH_SIGNING_KEY` and
+   `APP_AUTH_KEY_ID`, with the old public key as its other key now. New
+   tokens carry the new `kid`, and the tokens that orders gave before
+   still pass its routes. Its replicas restart one by one, and one that
+   has not switched yet takes the new tokens already, by step 1.
 3. Once the last token of the old key has expired, the lifetime of a token
-   and the leeway after step 2, remove the old key from the settings of
-   billing, and the previous key from those of orders.
+   and the leeway after step 2, remove the other key from the settings of
+   orders. Billing takes the new key as the key of orders,
+   `APP_AUTH_ORDERS_KEY` and `APP_AUTH_ORDERS_KEY_ID`, without an other
+   key.
 
 Done the other way round, step 2 before step 1, the new tokens fail with
-`UnknownKey` at billing at once, so the mistake shows. A verifier never
-changes: to take new keys without a restart, build a new one. The tests of
-orders go through step 2 (see [HTTP](#http)), and those of billing through
-steps 1 and 3, with a verifier made anew for each, as after a restart:
+`UnknownKey` at once, at billing and at the replicas of orders not yet
+switched, so the mistake shows. A verifier never changes: to take new keys
+without a restart, build a new one. The tests of orders go through step 2,
+on a replica that has switched and on one that has not yet (see
+[HTTP](#http)), and those of billing through steps 1 and 3, with a verifier
+made anew for each, as after a restart:
 
 ```zig
 // Step 1: billing restarts with the old key and the new one, and
@@ -923,9 +935,10 @@ const Config = struct {
         signing_key: confy.Secret,
         // APP_AUTH_KEY_ID: its id, the "kid" of its tokens.
         key_id: []const u8,
-        // While the key changes: the public key that signed before and its
-        // id, APP_AUTH_PREVIOUS_KEY and APP_AUTH_PREVIOUS_KEY_ID.
-        previous: ?struct {
+        // While the key changes: the other public key and its id,
+        // APP_AUTH_OTHER_KEY and APP_AUTH_OTHER_KEY_ID; the next key before
+        // orders switches to it, the previous one after.
+        other: ?struct {
             key: []const u8,
             key_id: []const u8,
         },
@@ -954,12 +967,14 @@ pub fn main(init: std.process.Init) !void {
     // Its tokens are meant for orders and for billing.
     const signer: jwt.Signer = try .init(&signing_key, .{ .issuer = "orders", .audiences = &.{ "orders", "billing" } });
     // Orders checks the tokens of its key and, while the key changes, those
-    // of the previous one, until the last of them expires.
+    // of the other one: of the next key, which the replicas that switched
+    // already sign with, then of the previous one, until its last token
+    // expires.
     var keys: [2]jwt.Key = undefined;
     keys[0] = signing_key.verificationKey();
     var key_count: usize = 1;
-    if (config.auth.previous) |previous| {
-        keys[1] = try .fromPem(.EdDSA, previous.key, .{ .id = previous.key_id });
+    if (config.auth.other) |other| {
+        keys[1] = try .fromPem(.EdDSA, other.key, .{ .id = other.key_id });
         key_count = 2;
     }
     const verifier: jwt.Verifier = try .init(.{ .keys = keys[0..key_count], .issuer = "orders", .audiences = &.{"orders"} });
@@ -1058,7 +1073,7 @@ const App = struct {
 ```
 
 Its settings are the key of orders, its id, and Ann's secret; while the
-key of orders changes, the previous public key too (see
+key of orders changes, the other public key too (see
 [Keys](#keys)). The line of `WARN` comes from the log of `JwtAuth`, in
 the middle of the request it refused:
 
@@ -1106,8 +1121,9 @@ const noon = 1_792_670_400;
 const Options = struct {
     /// The id of the key of orders, which the test makes on the spot.
     key_id: []const u8 = "2026-10",
-    /// While the key changes, the public key that signed before.
-    previous: ?jwt.Key = null,
+    /// While the key changes, the public key of the other key: the next one
+    /// before the switch, the previous one after it.
+    other: ?jwt.Key = null,
 };
 
 /// The service as `main` builds it, on the backend in memory, with a key
@@ -1138,11 +1154,11 @@ const Service = struct {
         s.key = try .generate(io, .EdDSA, .{ .id = options.key_id });
         errdefer s.key.deinit();
         s.signer = try .init(&s.key, .{ .issuer = "orders", .audiences = &.{ "orders", "billing" } });
-        // As in main: the key of orders, and the previous one, if any.
+        // As in main: the key of orders, and the other one, if any.
         s.keys[0] = s.key.verificationKey();
         var key_count: usize = 1;
-        if (options.previous) |previous| {
-            s.keys[1] = previous;
+        if (options.other) |other| {
+            s.keys[1] = other;
             key_count = 2;
         }
         s.verifier = try .init(.{ .keys = s.keys[0..key_count], .issuer = "orders", .audiences = &.{"orders"} });
@@ -1350,6 +1366,30 @@ test "a token of orders without sub is 401 where a user is needed" {
     try testing.expect(std.mem.find(u8, s.records.written(), "Token refused reason=MissingClaim claim=sub") != null);
 }
 
+test "while orders changes its key, a replica not yet switched takes the tokens of one that has" {
+    // Step 2 of the change goes from replica to replica. One that has
+    // switched signs with the next key already.
+    var next_key: jwt.Key = undefined;
+    const new_token = new: {
+        var switched: Service = undefined;
+        try switched.start(.{ .key_id = "2026-11" });
+        defer switched.stop();
+        next_key = switched.key.verificationKey();
+        break :new try switched.tokenOfAnn();
+    };
+    defer testing.allocator.free(new_token);
+
+    // A replica not yet switched signs with the first key, and since step 1
+    // it has the public key of the next one as its other key: Ann's new
+    // token passes there too.
+    var s: Service = undefined;
+    try s.start(.{ .other = next_key });
+    defer s.stop();
+    var res = try s.getOrders(new_token);
+    defer res.deinit();
+    try testing.expectEqual(200, res.status);
+}
+
 test "after orders changes its key, a token of the old one still passes" {
     // Before the change: Ann signs in with orders on its first key.
     var old_key: jwt.Key = undefined;
@@ -1363,9 +1403,9 @@ test "after orders changes its key, a token of the old one still passes" {
     defer testing.allocator.free(old_token);
 
     // Step 2 of the change: orders restarts with a new key, and with the
-    // public key of the old one as the previous key.
+    // public key of the old one as its other key.
     var s: Service = undefined;
-    try s.start(.{ .key_id = "2026-11", .previous = old_key });
+    try s.start(.{ .key_id = "2026-11", .other = old_key });
     defer s.stop();
     const new_token = try s.tokenOfAnn();
     defer testing.allocator.free(new_token);
@@ -1384,14 +1424,21 @@ every call, with the public key of orders from its settings:
 
 ```zig
 //! The authenticator of the billing service: who calls, by the token that
-//! orders signed for its user. Billing has the public key of orders alone,
+//! orders signed for its user. Billing has only public keys of orders,
 //! from its settings: it checks tokens, and cannot make one.
 //!
 //! ```zig
-//! // main of billing
-//! const orders_key: jwt.Key = try .fromPem(.EdDSA, config.auth.orders_key, .{ .id = config.auth.orders_key_id });
-//! const keys = [_]jwt.Key{orders_key};
-//! const verifier: jwt.Verifier = try .init(.{ .keys = &keys, .issuer = "orders", .audiences = &.{"billing"} });
+//! // main of billing: the key of orders, APP_AUTH_ORDERS_KEY and
+//! // APP_AUTH_ORDERS_KEY_ID, and while it changes the other one,
+//! // APP_AUTH_OTHER_KEY and APP_AUTH_OTHER_KEY_ID, as in orders
+//! var keys: [2]jwt.Key = undefined;
+//! keys[0] = try .fromPem(.EdDSA, config.auth.orders_key, .{ .id = config.auth.orders_key_id });
+//! var key_count: usize = 1;
+//! if (config.auth.other) |other| {
+//!     keys[1] = try .fromPem(.EdDSA, other.key, .{ .id = other.key_id });
+//!     key_count = 2;
+//! }
+//! const verifier: jwt.Verifier = try .init(.{ .keys = keys[0..key_count], .issuer = "orders", .audiences = &.{"billing"} });
 //! var authenticator: JwtAuthenticator = .{ .verifier = &verifier };
 //! // .authenticator = &authenticator in the options of rpc.Server
 //! ```

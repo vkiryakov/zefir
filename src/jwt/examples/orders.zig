@@ -18,9 +18,10 @@ const Config = struct {
         signing_key: confy.Secret,
         // APP_AUTH_KEY_ID: its id, the "kid" of its tokens.
         key_id: []const u8,
-        // While the key changes: the public key that signed before and its
-        // id, APP_AUTH_PREVIOUS_KEY and APP_AUTH_PREVIOUS_KEY_ID.
-        previous: ?struct {
+        // While the key changes: the other public key and its id,
+        // APP_AUTH_OTHER_KEY and APP_AUTH_OTHER_KEY_ID; the next key before
+        // orders switches to it, the previous one after.
+        other: ?struct {
             key: []const u8,
             key_id: []const u8,
         },
@@ -49,12 +50,14 @@ pub fn main(init: std.process.Init) !void {
     // Its tokens are meant for orders and for billing.
     const signer: jwt.Signer = try .init(&signing_key, .{ .issuer = "orders", .audiences = &.{ "orders", "billing" } });
     // Orders checks the tokens of its key and, while the key changes, those
-    // of the previous one, until the last of them expires.
+    // of the other one: of the next key, which the replicas that switched
+    // already sign with, then of the previous one, until its last token
+    // expires.
     var keys: [2]jwt.Key = undefined;
     keys[0] = signing_key.verificationKey();
     var key_count: usize = 1;
-    if (config.auth.previous) |previous| {
-        keys[1] = try .fromPem(.EdDSA, previous.key, .{ .id = previous.key_id });
+    if (config.auth.other) |other| {
+        keys[1] = try .fromPem(.EdDSA, other.key, .{ .id = other.key_id });
         key_count = 2;
     }
     const verifier: jwt.Verifier = try .init(.{ .keys = keys[0..key_count], .issuer = "orders", .audiences = &.{"orders"} });

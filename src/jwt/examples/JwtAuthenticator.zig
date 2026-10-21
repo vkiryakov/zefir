@@ -1,12 +1,19 @@
 //! The authenticator of the billing service: who calls, by the token that
-//! orders signed for its user. Billing has the public key of orders alone,
+//! orders signed for its user. Billing has only public keys of orders,
 //! from its settings: it checks tokens, and cannot make one.
 //!
 //! ```zig
-//! // main of billing
-//! const orders_key: jwt.Key = try .fromPem(.EdDSA, config.auth.orders_key, .{ .id = config.auth.orders_key_id });
-//! const keys = [_]jwt.Key{orders_key};
-//! const verifier: jwt.Verifier = try .init(.{ .keys = &keys, .issuer = "orders", .audiences = &.{"billing"} });
+//! // main of billing: the key of orders, APP_AUTH_ORDERS_KEY and
+//! // APP_AUTH_ORDERS_KEY_ID, and while it changes the other one,
+//! // APP_AUTH_OTHER_KEY and APP_AUTH_OTHER_KEY_ID, as in orders
+//! var keys: [2]jwt.Key = undefined;
+//! keys[0] = try .fromPem(.EdDSA, config.auth.orders_key, .{ .id = config.auth.orders_key_id });
+//! var key_count: usize = 1;
+//! if (config.auth.other) |other| {
+//!     keys[1] = try .fromPem(.EdDSA, other.key, .{ .id = other.key_id });
+//!     key_count = 2;
+//! }
+//! const verifier: jwt.Verifier = try .init(.{ .keys = keys[0..key_count], .issuer = "orders", .audiences = &.{"billing"} });
 //! var authenticator: JwtAuthenticator = .{ .verifier = &verifier };
 //! // .authenticator = &authenticator in the options of rpc.Server
 //! ```

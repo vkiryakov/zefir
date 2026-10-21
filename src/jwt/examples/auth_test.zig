@@ -22,8 +22,9 @@ const noon = 1_792_670_400;
 const Options = struct {
     /// The id of the key of orders, which the test makes on the spot.
     key_id: []const u8 = "2026-10",
-    /// While the key changes, the public key that signed before.
-    previous: ?jwt.Key = null,
+    /// While the key changes, the public key of the other key: the next one
+    /// before the switch, the previous one after it.
+    other: ?jwt.Key = null,
 };
 
 /// The service as `main` builds it, on the backend in memory, with a key
@@ -54,11 +55,11 @@ const Service = struct {
         s.key = try .generate(io, .EdDSA, .{ .id = options.key_id });
         errdefer s.key.deinit();
         s.signer = try .init(&s.key, .{ .issuer = "orders", .audiences = &.{ "orders", "billing" } });
-        // As in main: the key of orders, and the previous one, if any.
+        // As in main: the key of orders, and the other one, if any.
         s.keys[0] = s.key.verificationKey();
         var key_count: usize = 1;
-        if (options.previous) |previous| {
-            s.keys[1] = previous;
+        if (options.other) |other| {
+            s.keys[1] = other;
             key_count = 2;
         }
         s.verifier = try .init(.{ .keys = s.keys[0..key_count], .issuer = "orders", .audiences = &.{"orders"} });
@@ -266,6 +267,30 @@ test "a token of orders without sub is 401 where a user is needed" {
     try testing.expect(std.mem.find(u8, s.records.written(), "Token refused reason=MissingClaim claim=sub") != null);
 }
 
+test "while orders changes its key, a replica not yet switched takes the tokens of one that has" {
+    // Step 2 of the change goes from replica to replica. One that has
+    // switched signs with the next key already.
+    var next_key: jwt.Key = undefined;
+    const new_token = new: {
+        var switched: Service = undefined;
+        try switched.start(.{ .key_id = "2026-11" });
+        defer switched.stop();
+        next_key = switched.key.verificationKey();
+        break :new try switched.tokenOfAnn();
+    };
+    defer testing.allocator.free(new_token);
+
+    // A replica not yet switched signs with the first key, and since step 1
+    // it has the public key of the next one as its other key: Ann's new
+    // token passes there too.
+    var s: Service = undefined;
+    try s.start(.{ .other = next_key });
+    defer s.stop();
+    var res = try s.getOrders(new_token);
+    defer res.deinit();
+    try testing.expectEqual(200, res.status);
+}
+
 test "after orders changes its key, a token of the old one still passes" {
     // Before the change: Ann signs in with orders on its first key.
     var old_key: jwt.Key = undefined;
@@ -279,9 +304,9 @@ test "after orders changes its key, a token of the old one still passes" {
     defer testing.allocator.free(old_token);
 
     // Step 2 of the change: orders restarts with a new key, and with the
-    // public key of the old one as the previous key.
+    // public key of the old one as its other key.
     var s: Service = undefined;
-    try s.start(.{ .key_id = "2026-11", .previous = old_key });
+    try s.start(.{ .key_id = "2026-11", .other = old_key });
     defer s.stop();
     const new_token = try s.tokenOfAnn();
     defer testing.allocator.free(new_token);
