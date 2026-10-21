@@ -4,6 +4,7 @@ const validator_cases = @import("src/validator/testdata/cases.zig");
 const rpc_guide = @import("src/rpc/examples/cases.zig");
 const http_cases = @import("src/http/tests/cases.zig");
 const http_guide = @import("src/http/examples/cases.zig");
+const openapi_cases = @import("src/openapi/tests/cases.zig");
 const mongo_guide = @import("src/mongo/examples/cases.zig");
 
 pub fn build(b: *std.Build) void {
@@ -123,7 +124,21 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // Umbrella module: @import("zefir").core, .log, .confy, .validator, .rpc, .rpc_nats, .orm, .mongo, .nats, .http
+    // The OpenAPI document of a zefir-http server, which the compiler builds
+    // from the types the server works with: what http.describe tells of the
+    // server, and the rules of the DTOs as v.schemaOf gives them.
+    const openapi = b.addModule("zefir-openapi", .{
+        .root_source_file = b.path("src/openapi/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+        .imports = &.{
+            .{ .name = "http", .module = http },
+            .{ .name = "validator", .module = validator },
+        },
+    });
+
+    // Umbrella module: @import("zefir").core, .log, .confy, .validator, .rpc, .rpc_nats, .orm, .mongo, .nats, .http, .openapi
     const zefir = b.addModule("zefir", .{
         .root_source_file = b.path("src/zefir.zig"),
         .target = target,
@@ -140,6 +155,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "mongo", .module = mongo },
             .{ .name = "nats", .module = nats },
             .{ .name = "http", .module = http },
+            .{ .name = "openapi", .module = openapi },
         },
     });
 
@@ -158,14 +174,15 @@ pub fn build(b: *std.Build) void {
     const test_mongo = addModuleTestStep(b, test_step, "mongo");
     const test_nats = addModuleTestStep(b, test_step, "nats");
     const test_http = addModuleTestStep(b, test_step, "http");
+    const test_openapi = addModuleTestStep(b, test_step, "openapi");
     const test_zefir = addModuleTestStep(b, test_step, "zefir");
     // Builds the validator's test binaries without running them, so that
     // `-Dtarget` may name another system: CI builds them for x86-linux-musl,
     // where usize has 32 bits.
     const validator_compile_step = b.step("compile-validator-tests", "Build the validator's test binaries for -Dtarget without running them");
     for (
-        [_]*std.Build.Module{ core, log, confy, validator, rpc, rpc_nats, orm, mongo, nats, http, zefir },
-        [_]*std.Build.Step{ test_core, test_log, test_confy, test_validator, test_rpc, test_rpc_nats, test_orm, test_mongo, test_nats, test_http, test_zefir },
+        [_]*std.Build.Module{ core, log, confy, validator, rpc, rpc_nats, orm, mongo, nats, http, openapi, zefir },
+        [_]*std.Build.Step{ test_core, test_log, test_confy, test_validator, test_rpc, test_rpc_nats, test_orm, test_mongo, test_nats, test_http, test_openapi, test_zefir },
     ) |module, module_test_step| {
         const tests = b.addTest(.{ .root_module = module });
         module_test_step.dependOn(&addRun(b, tests, tsan).step);
@@ -217,6 +234,8 @@ pub fn build(b: *std.Build) void {
         }),
     });
     test_http.dependOn(&b.addRunArtifact(http_check_release).step);
+
+    addOpenapiCompileChecks(b, test_openapi, zefir, target, optimize);
 
     // `zig build fuzz-http` runs the fuzz test of zefir-http's HTTP/1.1
     // parser on its corpus, once, like `zig build test-http` does; with
@@ -1512,5 +1531,35 @@ fn addHttpCompileChecks(
             }),
         });
         test_step.dependOn(&app.step);
+    }
+}
+
+/// The compile checks of zefir-openapi, from the list in
+/// src/openapi/tests/cases.zig: application code that must fail to
+/// compile with its message. Each file imports the umbrella module "zefir"
+/// and writes its declarations through it, as an application does:
+/// `pub const openapi: zefir.openapi.Doc(@This()) = .{ ... }`.
+fn addOpenapiCompileChecks(
+    b: *std.Build,
+    test_step: *std.Build.Step,
+    zefir: *std.Build.Module,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+) void {
+    // Each fixture is compiled (never run) and passes only when the
+    // compilation fails with an error whose message is `expect`, from its
+    // start (`error: ` in front) to the end of its line.
+    for (openapi_cases.compile_errors) |fixture| {
+        const t = b.addTest(.{
+            .name = std.fs.path.stem(fixture.file),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(fixture.file),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{.{ .name = "zefir", .module = zefir }},
+            }),
+        });
+        t.expect_errors = .{ .contains = b.fmt("error: {s}", .{fixture.expect}) };
+        test_step.dependOn(&t.step);
     }
 }

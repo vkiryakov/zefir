@@ -10,6 +10,7 @@ pub const orm = @import("orm");
 pub const mongo = @import("mongo");
 pub const nats = @import("nats");
 pub const http = @import("http");
+pub const openapi = @import("openapi");
 
 test {
     @import("std").testing.refAllDecls(@This());

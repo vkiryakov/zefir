@@ -105,7 +105,7 @@ jobs:
         run: zig build check --summary all
       # The same for tests/openapi, whose checks need Docker: only
       # openapi-tools runs them.
-      - if: contains(format(' {0} ', env.MODULES), ' validator ')
+      - if: contains(format(' {0} ', env.MODULES), ' openapi ')
         shell: bash
         working-directory: tests/openapi
         run: zig build check --summary all
@@ -241,11 +241,12 @@ jobs:
   # Node (ECMA-262) and with Go's regexp (RE2), on the vectors of
   # src/validator/testdata/regex_vectors.zig. Docker runs Linux containers
   # on the Linux runners only, so this job is ubuntu only. It runs when
-  # validator is among the modules to test.
+  # openapi is among the modules to test, as it is for every change to the
+  # validator, which openapi imports.
   openapi-tools:
     name: openapi-tools
     needs: changes
-    if: contains(format(' {0} ', needs.changes.outputs.modules), ' validator ')
+    if: contains(format(' {0} ', needs.changes.outputs.modules), ' openapi ')
     timeout-minutes: 20
     runs-on: ubuntu-latest
     steps:
