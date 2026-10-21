@@ -1,6 +1,8 @@
-//! The JWS layer against the vectors of RFC 7515 and RFC 7520. Their
-//! payloads are no claims of zefir and most of their headers have no
-//! "typ", so the tests call `jws` and `crypto` directly.
+//! The JWS layer against the vectors of RFC 7515, RFC 7520 and RFC 8037.
+//! Their payloads are no claims of zefir and most of their headers have no
+//! "typ", so the tests call `jws` and `crypto` directly. The RFCs give
+//! their EC and Ed25519 keys as JWKs, which zefir-jwt does not read: the
+//! tests build the DER of each key from the JWK's bytes.
 
 const std = @import("std");
 const base64url = @import("base64url.zig");
@@ -10,8 +12,11 @@ const errors = @import("errors.zig");
 const jws = @import("jws.zig");
 const Key = @import("Key.zig");
 const SigningKey = @import("SigningKey.zig");
+const Verifier = @import("Verifier.zig");
 const rfc7515 = @import("testdata/rfc7515.zig");
 const rfc7520 = @import("testdata/rfc7520.zig");
+const rfc8037 = @import("testdata/rfc8037.zig");
+const hex = @import("testdata/keys.zig").hex;
 
 const testing = std.testing;
 const Details = errors.Details;
@@ -109,4 +114,131 @@ test "the JSON serialization is Malformed" {
     defer keys[0].deinit();
     try expectRefused(rfc7515.a6_json, &keys, error.Malformed, null);
     try expectRefused(rfc7515.a7_json, &keys, error.Malformed, null);
+}
+
+/// The SPKI of the P-256 key of RFC 7515 A.3.1: its "x" and "y" after the
+/// AlgorithmIdentifier of P-256.
+fn a3Spki() ![91]u8 {
+    var spki: [91]u8 = undefined;
+    @memcpy(spki[0..27], comptime hex("3059301306072a8648ce3d020106082a8648ce3d03010703420004"));
+    try base64url.decode(spki[27..59], rfc7515.a3_x);
+    try base64url.decode(spki[59..91], rfc7515.a3_y);
+    return spki;
+}
+
+/// The SEC1 of the same key: its "d" and the curve in [0].
+fn a3Sec1() ![51]u8 {
+    var sec1: [51]u8 = undefined;
+    @memcpy(sec1[0..7], comptime hex("30310201010420"));
+    try base64url.decode(sec1[7..39], rfc7515.a3_d);
+    @memcpy(sec1[39..51], comptime hex("a00a06082a8648ce3d030107"));
+    return sec1;
+}
+
+/// Verifies `token` with `keys` through a `Verifier` and expects
+/// `WrongType`: the headers of these vectors have no "typ".
+fn expectWrongType(token: []const u8, keys: []const Key, issuer: []const u8) !void {
+    const verifier: Verifier = try .init(.{ .keys = keys, .issuer = issuer, .audiences = &.{issuer} });
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    var details: Details = .{};
+    try testing.expectError(error.WrongType, verifier.verify(void, testing.io, arena_state.allocator(), token, .{ .details = &details }));
+    try testing.expectEqualStrings("typ", details.claim.?);
+}
+
+test "RFC 7515 A.3: the ES256 signature verifies, and the Verifier says WrongType" {
+    const spki = try a3Spki();
+    var key: Key = try .fromDer(.ES256, &spki, .{});
+    defer key.deinit();
+    const parts = try compact.split(rfc7515.a3_token);
+    var signature: [64]u8 = undefined;
+    try base64url.decode(&signature, parts.signature);
+    try crypto.verify(&key, parts.signing_input, &signature);
+
+    var sec1 = try a3Sec1();
+    defer std.crypto.secureZero(u8, &sec1);
+    var signing: SigningKey = try .fromDer(.ES256, &sec1, .{});
+    defer signing.deinit();
+    var own = [_]Key{signing.verificationKey()};
+    defer own[0].deinit();
+    try crypto.verify(&own[0], parts.signing_input, &signature);
+
+    // The header has no "typ", which zefir requires of every token.
+    try expectWrongType(rfc7515.a3_token, &own, "joe");
+}
+
+/// The PKCS#8 of the Ed25519 key of RFC 8037 A.1: its "d", the seed.
+fn rfc8037Pkcs8() ![48]u8 {
+    var pkcs8: [48]u8 = undefined;
+    @memcpy(pkcs8[0..16], comptime hex("302e020100300506032b657004220420"));
+    try base64url.decode(pkcs8[16..48], rfc8037.d);
+    return pkcs8;
+}
+
+/// The SPKI of its public key, "x" of A.2.
+fn rfc8037Spki() ![44]u8 {
+    var spki: [44]u8 = undefined;
+    @memcpy(spki[0..12], comptime hex("302a300506032b6570032100"));
+    try base64url.decode(spki[12..44], rfc8037.x);
+    return spki;
+}
+
+test "RFC 8037 A.1 and A.2: the public key comes from the seed" {
+    var pkcs8 = try rfc8037Pkcs8();
+    defer std.crypto.secureZero(u8, &pkcs8);
+    var signing: SigningKey = try .fromDer(.EdDSA, &pkcs8, .{});
+    defer signing.deinit();
+    var from_seed = signing.verificationKey();
+    defer from_seed.deinit();
+    const spki = try rfc8037Spki();
+    var key: Key = try .fromDer(.EdDSA, &spki, .{});
+    defer key.deinit();
+
+    // The seed and the public key are the hex dumps of A.1.
+    var expected: [32]u8 = undefined;
+    try testing.expectEqualSlices(u8, try std.fmt.hexToBytes(&expected, rfc8037.d_hex), pkcs8[16..48]);
+    try testing.expectEqualSlices(u8, try std.fmt.hexToBytes(&expected, rfc8037.x_hex), &from_seed.material.ed25519.toBytes());
+    try testing.expectEqualSlices(u8, &key.material.ed25519.toBytes(), &from_seed.material.ed25519.toBytes());
+
+    var out: [crypto.max_signature_bytes]u8 = undefined;
+    const signature = crypto.sign(&signing, testing.io, "abc", &out);
+    try crypto.verify(&from_seed, "abc", signature);
+    try crypto.verify(&key, "abc", signature);
+}
+
+test "RFC 8037 A.4: signing gives the JWS byte for byte" {
+    var pkcs8 = try rfc8037Pkcs8();
+    defer std.crypto.secureZero(u8, &pkcs8);
+    var signing: SigningKey = try .fromDer(.EdDSA, &pkcs8, .{});
+    defer signing.deinit();
+    const parts = try compact.split(rfc8037.token);
+
+    var out: [crypto.max_signature_bytes]u8 = undefined;
+    const signature = crypto.sign(&signing, testing.io, parts.signing_input, &out);
+    var expected: [64]u8 = undefined;
+    try testing.expectEqualSlices(u8, try std.fmt.hexToBytes(&expected, rfc8037.signature_hex), signature);
+    var text: [86]u8 = undefined;
+    const token = try std.fmt.allocPrint(testing.allocator, "{s}.{s}", .{ parts.signing_input, base64url.encode(&text, signature) });
+    defer testing.allocator.free(token);
+    try testing.expectEqualStrings(rfc8037.token, token);
+}
+
+test "RFC 8037 A.5: the JWS verifies" {
+    const spki = try rfc8037Spki();
+    var keys = [_]Key{try .fromDer(.EdDSA, &spki, .{})};
+    defer keys[0].deinit();
+    const parts = try compact.split(rfc8037.token);
+    var signature: [64]u8 = undefined;
+    try base64url.decode(&signature, parts.signature);
+    try crypto.verify(&keys[0], parts.signing_input, &signature);
+    var payload: [rfc8037.payload.len]u8 = undefined;
+    try base64url.decode(&payload, parts.payload);
+    try testing.expectEqualStrings(rfc8037.payload, &payload);
+
+    // Through a Verifier the header comes first, and it has no "typ"; the
+    // payload is text, not claims.
+    try expectWrongType(rfc8037.token, &keys, "orders");
+
+    // A.3, the thumbprint of a JWK, and A.6 and A.7, ECDH-ES with X25519
+    // and X448, do not apply: zefir-jwt reads no JWK and agrees on no keys.
 }
