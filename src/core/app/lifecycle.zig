@@ -115,10 +115,16 @@ pub const Runtime = struct {
         rt.stop_event.set(rt.io);
     }
 
-    /// The entry the stop task calls or waits for.
+    /// The entry the stop task is in: the one it calls, or, while it
+    /// gathers the watchers, the first entry whose watcher has not returned.
     fn current(rt: *Runtime) ?usize {
         const at = rt.at.load(.acquire);
-        return if (at == none or at == gathering) null else at;
+        if (at == none) return null;
+        if (at != gathering) return at;
+        for (rt.entries()[0..rt.started], 0..) |entry, i| {
+            if (entry.vtable.wait != null and !rt.watches[i].returned.isSet()) return i;
+        }
+        return null;
     }
 
     /// What `wait` returns once the stop has ended, fixed on the first

@@ -89,6 +89,12 @@ pub fn App(comptime Root: type) type {
             return app.internal.block.status.state();
         }
 
+        /// Running, and every bean with `isReady` is ready. False from the
+        /// first step of the stop on.
+        pub fn isReady(app: *const @This()) bool {
+            return app.internal.block.status.isReady();
+        }
+
         /// The first cause of the stop or of the failure; null when all
         /// went well.
         pub fn failure(app: *const @This()) ?Failure {

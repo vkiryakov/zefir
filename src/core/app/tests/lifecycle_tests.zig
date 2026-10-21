@@ -247,3 +247,86 @@ test "a bean that breaks while the next ones start fails the start" {
     try testing.expectEqual(zapp.State.failed, app.state());
     try rig.expect("shutdown", &.{ "B", "Waiter" });
 }
+
+test "a wait that ends with an error while running stops the App" {
+    const Root = struct {
+        pub const module: zapp.Module = .{ .providers = &.{ gates.A, gates.Waiter, gates.B }, .values = &.{*Rig} };
+    };
+    const level = quiet();
+    defer testing.log_level = level;
+    var rig: Rig = .init(testing.io);
+    defer rig.release();
+    var app = try zapp.App(Root).init(testing.allocator, testing.io, .{&rig}, .{});
+    defer app.deinit();
+    try app.start();
+    rig.end("Waiter", error.Unavailable);
+    try testing.expectError(error.Unavailable, app.wait());
+    try expectFailure(&app, "Root.Waiter", .wait, error.Unavailable);
+    try testing.expectEqual(zapp.State.stopped, app.state());
+    // Every bean got its shutdown, the broken one too.
+    try rig.expect("shutdown", &.{ "B", "Waiter", "A" });
+}
+
+test "a wait that returns {} while running is UnexpectedStop" {
+    const Root = struct {
+        pub const module: zapp.Module = .{ .providers = &.{ gates.A, gates.Waiter }, .values = &.{*Rig} };
+    };
+    const level = quiet();
+    defer testing.log_level = level;
+    var rig: Rig = .init(testing.io);
+    defer rig.release();
+    var app = try zapp.App(Root).init(testing.allocator, testing.io, .{&rig}, .{});
+    defer app.deinit();
+    try app.start();
+    rig.end("Waiter", {});
+    try testing.expectError(error.UnexpectedStop, app.wait());
+    try expectFailure(&app, "Root.Waiter", .wait, error.UnexpectedStop);
+    try rig.expect("shutdown", &.{ "Waiter", "A" });
+}
+
+test "a bean that is not ready does not stop the App" {
+    const Root = struct {
+        pub const module: zapp.Module = .{ .providers = &.{ gates.A, gates.Unready }, .values = &.{*Rig} };
+    };
+    const io = testing.io;
+    var rig: Rig = .init(io);
+    defer rig.release();
+    var app = try zapp.App(Root).init(testing.allocator, io, .{&rig}, .{});
+    defer app.deinit();
+    try app.start();
+    try testing.expect(!app.isReady());
+    try io.sleep(.fromMilliseconds(100), .awake);
+    try testing.expectEqual(zapp.State.running, app.state());
+    try rig.expect("shutdown", &.{});
+    app.requestStop();
+    try app.wait();
+    try rig.expect("shutdown", &.{"A"});
+    try testing.expect(app.failure() == null);
+}
+
+test "a wait deaf to cancelation without a shutdown: wait returns ShutdownTimeout at the deadline" {
+    const Root = struct {
+        pub const module: zapp.Module = .{ .providers = &.{gates.DeafWait}, .values = &.{*Rig} };
+    };
+    const io = testing.io;
+    const level = quiet();
+    defer testing.log_level = level;
+    var rig: Rig = .init(io);
+    defer rig.release();
+    var app = try zapp.App(Root).init(testing.allocator, io, .{&rig}, budget(50));
+    try app.start();
+    const asked = Io.Clock.awake.now(io);
+    app.requestStop();
+    try testing.expectError(error.ShutdownTimeout, app.wait());
+    const took = asked.durationTo(Io.Clock.awake.now(io)).toMilliseconds();
+    try testing.expect(took >= 50 - 16 and took < 2000);
+    try testing.expectEqual(zapp.State.failed, app.state());
+    try expectFailure(&app, "Root.DeafWait", .shutdown, error.ShutdownTimeout);
+    // The stop task still gathers the deaf watcher: deinit frees nothing.
+    app.deinit();
+    try rig.expect("deinit", &.{});
+    rig.open("DeafWait");
+    try awaitEnded(&app);
+    app.deinit();
+    try rig.expect("deinit", &.{"DeafWait"});
+}
