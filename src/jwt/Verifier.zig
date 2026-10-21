@@ -351,6 +351,8 @@ const Root = struct {
 
 const Grants = struct {
     grants: []const Root = &.{},
+    // No claim: claims skip a comptime field.
+    comptime version: u8 = 1,
 
     pub const claim_names = .{ .grants = "https://shop.example.com/grants" };
 };

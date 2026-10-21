@@ -413,8 +413,9 @@ fn writeClaimPath(comptime T: type, rest: []const u8, buf: []u8, len: *usize) vo
         .@"struct" => {
             const start: usize = if (rest[0] == '.') 1 else 0;
             const end = if (std.mem.findAny(u8, rest[start..], ".[")) |at| start + at else rest.len;
+            // fieldNamed finds no comptime field: claims skip them.
             if (v.fieldNamed(T, rest[start..end])) |field| switch (field) {
-                inline else => |f| {
+                inline else => |f| if (comptime !@typeInfo(T).@"struct".field_attrs[@backingInt(f)].@"comptime") {
                     appendPath(buf, len, rest[0..start]);
                     appendPath(buf, len, comptime nameOf(T, f));
                     return writeClaimPath(@FieldType(T, @tagName(f)), rest[end..], buf, len);
