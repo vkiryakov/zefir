@@ -22,6 +22,8 @@
 //! noise), and the keys are plain values with a `deinit` that wipes them.
 
 const std = @import("std");
+const v = @import("validator");
+const claims = @import("claims.zig");
 
 /// The longest token, in bytes: `verify` refuses a longer one before it
 /// reads anything else (`error.TokenTooLarge`), and `sign` never issues one.
@@ -51,6 +53,19 @@ pub const KeyOptions = struct {
 pub const Key = @import("Key.zig");
 pub const SigningKey = @import("SigningKey.zig");
 
+/// Checks at compile time that `Claims` can be the claims of `verify` and
+/// `sign`: `void`, or a struct of the claim types, whose claim names are
+/// its own (`claim_names`, `v.rename`) and whose rules fit their fields.
+/// `verify` and `sign` run the same check; a test of the package that
+/// declares the claims calls it, as `v.assertRules` for a DTO:
+/// `test { comptime jwt.assertClaims(Claims); }`.
+pub fn assertClaims(comptime Claims: type) void {
+    comptime {
+        claims.check(Claims);
+        v.assertRules(Claims);
+    }
+}
+
 test {
     _ = @import("algorithm.zig");
     _ = @import("base64url.zig");
@@ -64,6 +79,7 @@ test {
     _ = @import("SigningKey.zig");
     _ = @import("jws.zig");
     _ = @import("vectors_test.zig");
+    _ = @import("claims.zig");
 }
 
 test "limits have their documented values" {

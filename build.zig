@@ -4,6 +4,7 @@ const validator_cases = @import("src/validator/testdata/cases.zig");
 const rpc_guide = @import("src/rpc/examples/cases.zig");
 const http_cases = @import("src/http/tests/cases.zig");
 const http_guide = @import("src/http/examples/cases.zig");
+const jwt_cases = @import("src/jwt/tests/cases.zig");
 const mongo_guide = @import("src/mongo/examples/cases.zig");
 
 pub fn build(b: *std.Build) void {
@@ -208,6 +209,7 @@ pub fn build(b: *std.Build) void {
     });
     test_http.dependOn(&addRun(b, http_examples, tsan).step);
     addHttpGuide(b, test_http, .{ .core = core, .validator = validator, .confy = confy, .log = log, .http = http }, target, optimize, tsan);
+    addJwtCompileChecks(b, test_jwt, jwt, validator, target, optimize);
 
     // `zig build fuzz-http` runs the fuzz test of zefir-http's HTTP/1.1
     // parser on its corpus, once, like `zig build test-http` does; with
@@ -1487,5 +1489,52 @@ fn addHttpCompileChecks(
             }),
         });
         test_step.dependOn(&app.step);
+    }
+}
+
+/// The compile checks of zefir-jwt, from the lists in
+/// src/jwt/tests/cases.zig: claims types that must fail to compile with
+/// their message, and claims types that must compile. Each file imports
+/// "jwt" and "validator".
+fn addJwtCompileChecks(
+    b: *std.Build,
+    test_step: *std.Build.Step,
+    jwt: *std.Build.Module,
+    validator: *std.Build.Module,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+) void {
+    const imports: []const std.Build.Module.Import = &.{
+        .{ .name = "jwt", .module = jwt },
+        .{ .name = "validator", .module = validator },
+    };
+    // Each fixture is compiled (never run) and passes only when the
+    // compilation fails with an error whose message is `expect`, from its
+    // start: `error: ` in front of it, as in addHttpCompileChecks.
+    for (jwt_cases.compile_errors) |fixture| {
+        const t = b.addTest(.{
+            .name = std.fs.path.stem(fixture.file),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(fixture.file),
+                .target = target,
+                .optimize = optimize,
+                .imports = imports,
+            }),
+        });
+        t.expect_errors = .{ .contains = b.fmt("error: {s}", .{fixture.expect}) };
+        test_step.dependOn(&t.step);
+    }
+    // Built and not run: they only have to compile.
+    for (jwt_cases.must_compile) |file| {
+        const t = b.addTest(.{
+            .name = std.fs.path.stem(file),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(file),
+                .target = target,
+                .optimize = optimize,
+                .imports = imports,
+            }),
+        });
+        test_step.dependOn(&t.step);
     }
 }
