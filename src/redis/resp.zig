@@ -9,15 +9,23 @@
 //!   it skips attributes and reports a push at the top level.
 //! - `Value`, `readValue` and `readValueFrom` — a whole reply of any shape,
 //!   read into an arena; `redis.Value` is this type.
+//! - `decode`, `Decoder`, `needsAllocator` and `checkReply` — a reply read
+//!   into the type a call names, by the rules of the design's §3.3.
 
 const std = @import("std");
 const value = @import("resp/value.zig");
+const decoding = @import("resp/decode.zig");
 
 pub const Writer = @import("resp/Writer.zig");
 pub const Reader = @import("resp/Reader.zig");
 pub const Value = value.Value;
 pub const readValue = value.read;
 pub const readValueFrom = value.readFrom;
+pub const decode = decoding.decode;
+pub const DecodeError = decoding.Error;
+pub const Decoder = decoding.Decoder;
+pub const needsAllocator = decoding.needsAllocator;
+pub const checkReply = decoding.checkReply;
 
 test {
     std.testing.refAllDecls(@This());

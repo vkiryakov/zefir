@@ -32,6 +32,7 @@ test {
     _ = @import("resp/reader_tests.zig");
     _ = @import("resp/value_tests.zig");
     _ = @import("resp/args_tests.zig");
+    _ = @import("resp/decode_tests.zig");
     _ = @import("resp/fuzz.zig");
 }
 

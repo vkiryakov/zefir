@@ -132,7 +132,7 @@ pub fn write(w: Writer, value: anytype) Writer.Error!void {
 }
 
 /// The most bytes the decimal text of an integer of type `T` takes.
-fn intTextLen(comptime T: type) comptime_int {
+pub fn intTextLen(comptime T: type) comptime_int {
     return @max(std.fmt.count("{d}", .{std.math.maxInt(T)}), std.fmt.count("{d}", .{std.math.minInt(T)}));
 }
 

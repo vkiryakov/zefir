@@ -485,8 +485,9 @@ fn readDouble(r: *Reader) Error!f64 {
 }
 
 /// Whether `text` is a double of RESP3: `inf` or `nan`, or digits with a
-/// fraction and an exponent if any, all after a sign if any.
-fn isDouble(text: []const u8) bool {
+/// fraction and an exponent if any, all after a sign if any. The decoder
+/// takes the same grammar from a string that holds a number.
+pub fn isDouble(text: []const u8) bool {
     const unsigned = if (text.len > 0 and (text[0] == '-' or text[0] == '+')) text[1..] else text;
     if (std.mem.eql(u8, unsigned, "inf") or std.mem.eql(u8, unsigned, "nan")) return true;
     var i = digitsEnd(unsigned, 0);
