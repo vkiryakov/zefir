@@ -4,12 +4,18 @@
 //! after another (keep-alive and pipelining), within the limits of
 //! `Limits` and the times of `Timeouts`.
 //!
+//! A server makes one for `.listen = .{ .port = 8080 }` or `.native = .{
+//! ... }`, and frees it in its `deinit`. One made by hand outlives the
+//! server, which takes it as `.listen = .{ .backend = native.backend() }`:
+//! then `port()` names the port the system gave for 0.
+//!
 //! ```zig
-//! var native = try http.native.Backend.init(gpa, .{ .port = 8080 });
+//! var native = try http.native.Backend.init(gpa, .{ .port = 0 });
 //! defer native.deinit();
-//! var server = try http.Server.init(gpa, .{ .backend = native.backend(), .controllers = .{&todos_v1} });
+//! var server = try http.Server.init(gpa, .{ .controllers = .{&todos_v1} }, .{ .listen = .{ .backend = native.backend() } });
 //! defer server.deinit(io);
-//! try server.run(io);
+//! try server.start(io);
+//! std.debug.print("listening on {d}\n", .{native.port()});
 //! ```
 //!
 //! At most `.max_connections` connections are open at once: a client over
@@ -129,8 +135,8 @@ pub fn deinit(b: *Backend) void {
     b.* = undefined;
 }
 
-/// The backend for `http.Server.init`'s `.backend`. From the server's
-/// `start` on, the backend stays where it is.
+/// The backend for `.listen = .{ .backend = ... }` of `http.Server.init`.
+/// From the server's `start` on, the backend stays where it is.
 pub fn backend(b: *Backend) Interface {
     return .{ .ptr = b, .vtable = &vtable };
 }

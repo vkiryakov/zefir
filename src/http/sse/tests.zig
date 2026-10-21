@@ -183,9 +183,10 @@ const Fixture = struct {
         f.events = .{ .live = &f.live };
         f.backend = .init(testing.allocator);
         f.server = Server.init(testing.allocator, .{
-            .backend = f.backend.backend(),
             .controllers = .{&f.events},
             .middleware = .{ identify, &f.finisher },
+        }, .{
+            .listen = .{ .backend = f.backend.backend() },
             .max_streams = limits.max_streams,
             .max_in_flight = limits.max_in_flight,
             .request_timeout = limits.request_timeout,
@@ -891,7 +892,7 @@ test "Manager.deinit while the server runs waits for its streams, which never to
     var slow: SlowFinish = .{};
     var backend: TestingBackend = .init(testing.allocator);
     defer backend.deinit();
-    var server = try Server.init(testing.allocator, .{ .backend = backend.backend(), .controllers = .{&rooms}, .middleware = .{&slow} });
+    var server = try Server.init(testing.allocator, .{ .controllers = .{&rooms}, .middleware = .{&slow} }, .{ .listen = .{ .backend = backend.backend() } });
     defer server.deinit(io);
     try server.start(io);
 

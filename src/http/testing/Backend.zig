@@ -5,7 +5,7 @@
 //! ```zig
 //! var backend: http.testing.Backend = .init(gpa);
 //! defer backend.deinit();
-//! var server = try http.Server.init(gpa, .{ .backend = backend.backend(), .controllers = .{&todos_v1} });
+//! var server = try http.Server.init(gpa, .{ .controllers = .{&todos_v1} }, .{ .listen = .{ .backend = backend.backend() } });
 //! defer server.deinit(io);
 //! try server.start(io);
 //!
@@ -197,7 +197,7 @@ pub fn deinit(b: *Backend) void {
     b.* = undefined;
 }
 
-/// The backend for `http.Server.init`'s `.backend`.
+/// The backend for `.listen = .{ .backend = ... }` of `http.Server.init`.
 pub fn backend(b: *Backend) Interface {
     return .{ .ptr = b, .vtable = &vtable };
 }
@@ -675,7 +675,7 @@ test "request returns once the request has ended, with the body and the client's
     var echo: EchoController = .{};
     var b: Backend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&echo}, .strict_errors = false });
+    var server = try Server.init(testing.allocator, .{ .controllers = .{&echo}, .strict_errors = false }, .{ .listen = .{ .backend = b.backend() } });
     defer server.deinit(io);
     try server.start(io);
 
@@ -736,7 +736,7 @@ test "the task of a request never touches it once its caller has it back: 16 cli
     var ping: PingController = .{};
     var b: Backend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&ping} });
+    var server = try Server.init(testing.allocator, .{ .controllers = .{&ping} }, .{ .listen = .{ .backend = b.backend() } });
     defer server.deinit(io);
     try server.start(io);
 

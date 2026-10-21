@@ -117,12 +117,15 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
 
     // The backend in memory serves the server without a network; on the
-    // network, http.native.Backend takes its place.
+    // network, .listen = .{ .port = 8080 } takes its place.
     var backend: http.testing.Backend = .init(gpa);
     defer backend.deinit();
     var todos: TodosV1Controller = .{ .gpa = gpa };
     defer todos.deinit();
-    var server = try http.Server.init(gpa, .{ .backend = backend.backend(), .prefix = "/api", .controllers = .{&todos} });
+    var server = try http.Server.init(gpa, .{ .controllers = .{&todos} }, .{
+        .listen = .{ .backend = backend.backend() },
+        .prefix = "/api",
+    });
     defer server.deinit(io);
     try server.start(io);
 
@@ -474,16 +477,17 @@ pub fn main(init: std.process.Init) !void {
     var native: http.native.Backend = try .init(gpa, .{ .port = config.port });
     defer native.deinit();
     var server = try http.Server.init(gpa, .{
-        .backend = native.backend(),
-        // Before the routes of the controllers: /api/v1/todos, /api/health.
-        .prefix = "/api",
         .controllers = .{ &todos_v1, &sessions, &health },
         // Every request runs these, in this order, before its route is chosen.
         .middleware = .{ mw.requestId, &access_log, http.onResponse(mw.securityHeaders), &cors, &token_auth },
         .error_handler = &app_errors,
+    }, .{
+        .listen = .{ .backend = native.backend() },
+        // Before the routes of the controllers: /api/v1/todos, /api/health.
+        .prefix = "/api",
         // The page and its files; a path without a file gets index.html, so
         // that the page's own router reads the path.
-        .static = .{http.static("/", .{ .root = config.public_dir, .spa_fallback = "index.html" })},
+        .static = &.{http.static("/", .{ .root = config.public_dir, .spa_fallback = "index.html" })},
     });
     defer server.deinit(io);
 
@@ -526,11 +530,16 @@ What each part does:
   so they live as long as it does: Zig runs the `defer`s in reverse, and the
   server's `deinit` runs before theirs.
 - **`http.native.Backend`** is the network: it listens on the port, reads
-  the requests of each connection, and writes the responses.
-- **`http.Server.init`** takes the controllers, the server's middleware, the
-  error handler and the static files. The compiler checks all of it here:
-  the routes of every controller, the signature of every handler, every
-  middleware of every route, and every error a route can return.
+  the requests of each connection, and writes the responses. The service
+  makes its own, to log the port the system gives for `APP_PORT=0`;
+  `.listen = .{ .port = config.port }` would have the server make it.
+- **`http.Server.init`** takes two arguments. The first holds the parts the
+  compiler checks: the controllers, the server's middleware and the error
+  handler. It checks them all here: the routes of every controller, the
+  signature of every handler, every middleware of every route, and every
+  error a route can return. The second, `http.Server.Options`, holds the
+  settings: where the requests come from, the prefix and the static
+  files.
 - **`server.start`** opens the static files' directory and starts taking
   requests. A task waits for Ctrl+C or SIGTERM and asks the server to stop;
   `server.wait` returns once the stop is over. See
@@ -1019,8 +1028,8 @@ fn free(allocator: std.mem.Allocator, todo: Todo) void {
   1 MiB, and `.timeout` instead of its deadline of 30 seconds, here 300 for
   the export. The options are compile-time values of any type, so a
   duration is written in full: `std.Io.Duration.fromSeconds(300)`. Where a
-  type is known, as in the fields of `http.native.Backend.init` or of a
-  cookie, `.fromSeconds(300)` is enough.
+  type is known, as in `http.Server.Options`, the options of
+  `http.native.Backend.init` or a cookie, `.fromSeconds(300)` is enough.
 
 What a handler returns:
 
@@ -2427,7 +2436,7 @@ Content-Length: 104
 The page of the service and its files come from the directory `public/`:
 
 ```zig
-.static = .{http.static("/", .{ .root = config.public_dir, .spa_fallback = "index.html" })},
+.static = &.{http.static("/", .{ .root = config.public_dir, .spa_fallback = "index.html" })},
 ```
 
 ```html
@@ -2670,11 +2679,12 @@ const App = struct {
         app.todos_v1 = .{ .repo = &app.repo, .live = &app.live, .plans = &app.plans };
         app.sessions = .{ .token_auth = &app.token_auth, .live = &app.live };
         app.server = try .init(gpa, .{
-            .backend = app.backend.backend(),
-            .prefix = "/api",
             .controllers = .{ &app.todos_v1, &app.sessions, &app.health },
             .middleware = .{ mw.requestId, &app.access_log, http.onResponse(mw.securityHeaders), &app.cors, &app.token_auth },
             .error_handler = &app.app_errors,
+        }, .{
+            .listen = .{ .backend = app.backend.backend() },
+            .prefix = "/api",
         });
         app.server.start(testing.io) catch |err| {
             app.server.deinit(testing.io);

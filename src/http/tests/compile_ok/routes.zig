@@ -119,11 +119,12 @@ fn serve(gpa: std.mem.Allocator, prefix: []const u8) http.Server.InitError!void 
     var app_errors: AppErrors = .{};
     const backend: http.Backend = undefined;
     var server = try http.Server.init(gpa, .{
-        .backend = backend,
-        .prefix = prefix,
         .controllers = .{ &todos_v1, &health },
         .middleware = .{ requestId, &access_log, .{ http.onResponse(noCache), .{ Typed, http.onFinish(countRequest) } } },
         .error_handler = &app_errors,
+    }, .{
+        .listen = .{ .backend = backend },
+        .prefix = prefix,
     });
     defer server.deinit(std.testing.io);
     const info: http.RouteInfo = server.internal.routes[0].info;

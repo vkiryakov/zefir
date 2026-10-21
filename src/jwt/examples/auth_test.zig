@@ -74,11 +74,12 @@ const Service = struct {
         s.app_errors = .{};
         s.backend = .init(testing.allocator);
         s.server = try .init(testing.allocator, .{
-            .backend = s.backend.backend(),
-            .prefix = "/api",
             .controllers = .{ &s.login, &s.orders },
             .middleware = .{&s.jwt_auth},
             .error_handler = &s.app_errors,
+        }, .{
+            .listen = .{ .backend = s.backend.backend() },
+            .prefix = "/api",
         });
         errdefer s.server.deinit(io);
         try s.server.start(io);

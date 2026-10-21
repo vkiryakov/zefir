@@ -70,7 +70,7 @@ pub const Outcome = middleware.Outcome;
 pub const onResponse = middleware.onResponse;
 pub const onFinish = middleware.onFinish;
 
-// Static files: `.static = .{ http.static("/", .{ .root = "public" }) }`.
+// Static files: `.static = &.{http.static("/", .{ .root = "public" })}`.
 pub const static = static_files.static;
 pub const Static = static_files.Static;
 pub const StaticOptions = static_files.StaticOptions;

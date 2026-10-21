@@ -95,7 +95,7 @@ const Fixture = struct {
         f.app = .{};
         f.native = try .init(options.backend_gpa, .{ .address = "127.0.0.1", .port = 0, .limits = options.limits, .timeouts = options.timeouts });
         errdefer f.native.deinit();
-        f.server = try http.Server.init(gpa, .{ .backend = f.native.backend(), .controllers = .{&f.app} });
+        f.server = try http.Server.init(gpa, .{ .controllers = .{&f.app} }, .{ .listen = .{ .backend = f.native.backend() } });
         errdefer f.server.deinit(io);
         try f.server.start(io);
     }

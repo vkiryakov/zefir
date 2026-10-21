@@ -143,9 +143,10 @@ fn runAll(io: Io, out: *Io.Writer, public_dir: []const u8) !void {
     var native = try http.native.Backend.init(gpa, .{ .address = "127.0.0.1", .port = 0 });
     defer native.deinit();
     var server = try http.Server.init(gpa, .{
-        .backend = native.backend(),
         .controllers = .{&app},
-        .static = .{http.static("/", .{ .root = public_dir })},
+    }, .{
+        .listen = .{ .backend = native.backend() },
+        .static = &.{http.static("/", .{ .root = public_dir })},
     });
     defer server.deinit(io);
     try server.start(io);

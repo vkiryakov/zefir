@@ -350,12 +350,15 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
 
     // The backend in memory serves the server without a network; on the
-    // network, http.native.Backend takes its place.
+    // network, .listen = .{ .port = 8080 } takes its place.
     var backend: http.testing.Backend = .init(gpa);
     defer backend.deinit();
     var todos: TodosV1Controller = .{ .gpa = gpa };
     defer todos.deinit();
-    var server = try http.Server.init(gpa, .{ .backend = backend.backend(), .prefix = "/api", .controllers = .{&todos} });
+    var server = try http.Server.init(gpa, .{ .controllers = .{&todos} }, .{
+        .listen = .{ .backend = backend.backend() },
+        .prefix = "/api",
+    });
     defer server.deinit(io);
     try server.start(io);
 
@@ -392,7 +395,7 @@ GET /api/v1/todos
 → 200 application/json [{"id":1,"title":"Buy milk"}]
 ```
 
-The compiler checks the routes and the handlers when it builds the server, `ctx.json(NewTodo)` reads the body by the `field_rules` of the DTO, trims the title and checks it, and a body that does not fit is a 422 that names every field. On the network, `http.native.Backend` on zio takes the place of the backend in memory, and the controller stays the same. Middleware of your own, one error handler for every error, static files, streamed responses, server-sent events and a graceful stop are in the guide. **[Read the http guide →](src/http/examples/README.md)**
+The compiler checks the routes and the handlers when it builds the server, `ctx.json(NewTodo)` reads the body by the `field_rules` of the DTO, trims the title and checks it, and a body that does not fit is a 422 that names every field. On the network, `.listen = .{ .port = 8080 }` puts `http.native.Backend` on zio in the place of the backend in memory, and the controller stays the same. Middleware of your own, one error handler for every error, static files, streamed responses, server-sent events and a graceful stop are in the guide. **[Read the http guide →](src/http/examples/README.md)**
 
 On a shared GitHub runner, 4 vCPUs of an AMD EPYC 7763, a server on zio with four executors, loaded by clients in the same process, answers plain text at about 11 800 requests per second over one connection kept alive and 122 000 over 64, JSON out at 11 700 and 120 000, a JSON body in and JSON out at 11 800 and 116 000; the [guide's benchmark](src/http/examples/README.md#benchmark) shows the whole run, the spread across runs, and why one connection is faster on one executor.
 
