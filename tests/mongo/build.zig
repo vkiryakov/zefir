@@ -99,6 +99,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "mongo", .module = zefir.module("zefir-mongo") },
+            .{ .name = "mongo-bson", .module = zefir.module("zefir-mongo-bson") },
             .{ .name = "core", .module = zefir.module("zefir-core") },
         },
     });
@@ -111,6 +112,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "core", .module = zefir.module("zefir-core") },
                 .{ .name = "mongo", .module = zefir.module("zefir-mongo") },
+                .{ .name = "mongo-bson", .module = zefir.module("zefir-mongo-bson") },
                 .{ .name = "checks", .module = checks },
                 .{ .name = "zio", .module = zio.module("zio") },
             },
@@ -191,6 +193,7 @@ pub fn build(b: *std.Build) void {
         const imports: []const std.Build.Module.Import = &.{
             .{ .name = "core", .module = mode_zefir.module("zefir-core") },
             .{ .name = "mongo", .module = mode_zefir.module("zefir-mongo") },
+            .{ .name = "mongo-bson", .module = mode_zefir.module("zefir-mongo-bson") },
             .{ .name = "zio", .module = mode_zio.module("zio") },
         };
         // The servers and the helpers of the end-to-end tests.
@@ -210,6 +213,7 @@ pub fn build(b: *std.Build) void {
                     imports[0],
                     imports[1],
                     imports[2],
+                    imports[3],
                     .{ .name = "e2e", .module = helpers },
                 },
             }),
@@ -240,6 +244,7 @@ fn addExample(
         .optimize = optimize,
         .imports = &.{
             .{ .name = "mongo", .module = zefir.module("zefir-mongo") },
+            .{ .name = "mongo-bson", .module = zefir.module("zefir-mongo-bson") },
             .{ .name = "core", .module = zefir.module("zefir-core") },
             .{ .name = "confy", .module = zefir.module("zefir-confy") },
             .{ .name = "log", .module = zefir.module("zefir-log") },

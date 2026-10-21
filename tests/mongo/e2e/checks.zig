@@ -8,6 +8,7 @@ const Io = std.Io;
 const testing = std.testing;
 const core = @import("core");
 const mongo = @import("mongo");
+const bson = @import("mongo-bson");
 const checks = @import("checks");
 const e2e = @import("root.zig");
 
@@ -32,7 +33,7 @@ fn failPointOff(io: Io, uri: []const u8) !void {
     const ctx = core.Context.root.withDeadline(.after(Io.Clock.awake.now(io), .fromSeconds(10)));
     try client.connect(io, ctx, null);
     defer client.close(io);
-    const off = mongo.bson.literal(.{ .configureFailPoint = "failCommand", .mode = "off" });
+    const off = bson.literal(.{ .configureFailPoint = "failCommand", .mode = "off" });
     const reply = try client.runCommand(io, .of(ctx), .{ .database = "admin", .body = off }, .{ .allocator = testing.allocator });
     reply.deinit();
 }
