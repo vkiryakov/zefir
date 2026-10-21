@@ -12,6 +12,7 @@
 
 const std = @import("std");
 const errors = @import("errors.zig");
+const types = @import("cmd/types.zig");
 
 /// RESP3, for the client and `testing.FakeServer` only.
 const resp = @import("resp.zig");
@@ -24,6 +25,8 @@ pub const Outcome = errors.Outcome;
 pub const outcome = errors.outcome;
 pub const Diagnostics = errors.Diagnostics;
 
+pub const FieldValue = types.FieldValue;
+
 test {
     std.testing.refAllDecls(@This());
     _ = @import("errors_tests.zig");
@@ -33,6 +36,7 @@ test {
     _ = @import("resp/value_tests.zig");
     _ = @import("resp/args_tests.zig");
     _ = @import("resp/decode_tests.zig");
+    _ = @import("resp/hash_tests.zig");
     _ = @import("resp/fuzz.zig");
 }
 

@@ -16,7 +16,13 @@
 //! | `[]const T`          | `*` or `~`, each element as `T`                          |
 //! | `[N]T`               | `*` or `~` of exactly N elements                         |
 //! | a tuple              | `*` of exactly as many elements, each as its own type    |
+//! | a struct             | `%` by the names of its fields, or `*` of pairs: a hash  |
+//! | `[]const FieldValue` | `%` or `*` of pairs: a hash of any fields                |
 //! | `redis.Value`        | anything                                                 |
+//!
+//! A struct reads as a hash by the rules of `hash.zig`: defaults for the
+//! fields the hash lacks, null for optionals, extra fields skipped, and an
+//! empty hash null in `?T`.
 //!
 //! - `decode(T, reader, arena, diagnostics)` reads one whole reply.
 //! - An error of the server at the top of the reply is ServerError for any
@@ -45,6 +51,8 @@ const std = @import("std");
 const Reader = @import("Reader.zig");
 const value = @import("value.zig");
 const args = @import("args.zig");
+const hash = @import("hash.zig");
+const FieldValue = @import("../cmd/types.zig").FieldValue;
 const Diagnostics = @import("../errors.zig").Diagnostics;
 
 const Element = Reader.Element;
@@ -69,6 +77,8 @@ pub const Decoder = struct {
     diagnostics: ?*Diagnostics,
     /// How many aggregates hold the element being read: 0 at the top.
     depth: usize = 0,
+    /// The name of the field of a hash whose value is being read.
+    field: ?[]const u8 = null,
 
     /// Reads a whole reply into `T`: its first element, all it holds, and
     /// after ServerError or UnexpectedReply what is left of the reply.
@@ -106,10 +116,16 @@ pub const Decoder = struct {
             },
             .optional => |info| {
                 if (element == .null) return null;
+                // HGETALL answers an empty map for a key that is not there.
+                if (comptime hash.isHash(info.child)) switch (element) {
+                    .map, .array, .push => |n| if (n == 0) return null,
+                    else => {},
+                };
                 return try d.readNamed(info.child, element, Named);
             },
             .pointer => |info| {
                 if (T == []const u8) return d.readString(element, Named);
+                if (T == []const FieldValue) return hash.readFieldValues(d, element, Named);
                 if (info.size == .slice and info.attrs.@"const" and info.sentinel_ptr == null) {
                     return d.readSlice(info.child, element, Named);
                 }
@@ -119,6 +135,7 @@ pub const Decoder = struct {
             },
             .@"struct" => |info| {
                 if (info.is_tuple) return d.readTuple(T, element, Named);
+                return hash.readStruct(T, d, element, Named);
             },
             else => {},
         }
@@ -176,7 +193,9 @@ pub const Decoder = struct {
     pub fn mismatchText(d: *Decoder, comptime Named: type, element: Element, len: ?usize) Error {
         if (d.diagnostics) |diagnostics| {
             const kind: Kind = .{ .element = element, .len = len };
-            if (d.depth == 0) {
+            if (d.field) |name| {
+                diagnostics.set(.receive, null, "field '{s}' of the reply is {f}, and the call asked for {s}", .{ name, kind, @typeName(Named) });
+            } else if (d.depth == 0) {
                 diagnostics.set(.receive, null, "the reply is {f}, and the call asked for {s}", .{ kind, @typeName(Named) });
             } else {
                 diagnostics.set(.receive, null, "the reply holds {f} where the call asked for {s}", .{ kind, @typeName(Named) });
@@ -328,7 +347,7 @@ fn isError(element: Element) bool {
 }
 
 /// The length of the longest of `names`.
-fn longest(comptime names: []const [:0]const u8) usize {
+pub fn longest(comptime names: []const [:0]const u8) usize {
     var n: usize = 0;
     for (names) |name| n = @max(n, name.len);
     return n;
@@ -381,7 +400,7 @@ pub fn checkReply(comptime T: type, comptime call: []const u8) void {
     comptime checkPart(T, call, "", T);
 }
 
-const readable = "a reply reads into a string, a number, a bool, an enum, an optional, a slice, an array, a tuple or a redis.Value";
+const readable = "a reply reads into a string, a number, a bool, an enum, an optional, a slice, an array, a tuple, a struct of a hash or a redis.Value";
 
 fn checkPart(comptime T: type, comptime call: []const u8, comptime path: []const u8, comptime Root: type) void {
     const subject = if (path.len == 0)
@@ -412,7 +431,7 @@ fn checkPart(comptime T: type, comptime call: []const u8, comptime path: []const
             checkPart(info.child, call, path ++ "[]", Root);
         },
         .@"struct" => |info| {
-            if (!info.is_tuple) @compileError(subject ++ ", a struct: " ++ readable);
+            if (!info.is_tuple) return hash.checkRead(T, call, path, Root);
             for (info.field_types, info.field_attrs, 0..) |F, attrs, i| {
                 const at = path ++ std.fmt.comptimePrint("[{d}]", .{i});
                 if (attrs.@"comptime") @compileError(call ++ ": field '" ++ at ++ "' of the reply type " ++ @typeName(Root) ++ " is a comptime field: a reply fills only fields known at run time");
