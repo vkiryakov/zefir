@@ -29,6 +29,7 @@ const errors = @import("errors.zig");
 const json = @import("json.zig");
 
 const Details = errors.Details;
+const VerifyError = errors.VerifyError;
 
 /// The registered claims (RFC 7519 §4.1), which jwt sets and checks itself.
 pub const registered_names = [_][]const u8{ "iss", "sub", "aud", "exp", "nbf", "iat", "jti" };
@@ -392,6 +393,211 @@ fn messageOf(comptime T: type) []const u8 {
     };
 }
 
+/// The last second a NumericDate may name: the end of the year 9999.
+pub const max_numeric_date = 253402300799;
+
+/// The registered claims of a token that passed `verify`, which checked
+/// "iss", "aud", "exp", "nbf" and "iat" itself. A time is in seconds of
+/// Unix time; a fraction in the token is rounded to the safe side.
+pub const Registered = struct {
+    /// "iss": the verifier's issuer, byte for byte.
+    issuer: []const u8,
+    /// "sub": whom the token is about, such as a user's id.
+    subject: ?[]const u8,
+    /// "aud": the audiences of the token in its order; one of them is the
+    /// verifier's.
+    audience: []const []const u8,
+    /// "exp", rounded down.
+    expires_at: i64,
+    /// "nbf", rounded up.
+    not_before: ?i64,
+    /// "iat", rounded up.
+    issued_at: ?i64,
+    /// "jti": the token's own id.
+    id: ?[]const u8,
+};
+
+/// A registered claim as the payload has it: absent, of the wrong type
+/// or out of range, or its value.
+pub fn Found(comptime Value: type) type {
+    return union(enum) { absent, invalid, value: Value };
+}
+
+/// The registered claims of a payload, read but not checked yet.
+pub const RegisteredInput = struct {
+    issuer: Found([]const u8) = .absent,
+    subject: Found([]const u8) = .absent,
+    audience: Found([]const []const u8) = .absent,
+    expires_at: Found(i64) = .absent,
+    not_before: Found(i64) = .absent,
+    issued_at: Found(i64) = .absent,
+    id: Found([]const u8) = .absent,
+};
+
+/// What `checkRegistered` holds the registered claims to.
+pub const RegisteredRules = struct {
+    issuer: []const u8,
+    audiences: []const []const u8,
+    leeway_seconds: i64,
+};
+
+const RegisteredName = enum { iss, sub, aud, exp, nbf, iat, jti };
+
+/// The registered claims of `payload`, a JSON object, in one pass over
+/// the whole of it; the other claims are skipped. `Malformed`: not one JSON
+/// object, a registered claim given twice, or nesting deeper than
+/// `max_json_depth`. A registered claim of the wrong type is not an error
+/// here: `checkRegistered` refuses it in its turn.
+pub fn readRegistered(arena: std.mem.Allocator, payload: []const u8) error{ Malformed, OutOfMemory }!RegisteredInput {
+    var reader: json.Reader = .init(arena, payload);
+    var input: RegisteredInput = .{};
+    var seen: [registered_names.len]bool = @splat(false);
+    try reader.beginObject();
+    while (try reader.nextKey()) |key| {
+        const name = std.meta.stringToEnum(RegisteredName, key) orelse {
+            try reader.skip();
+            continue;
+        };
+        if (seen[@backingInt(name)]) return error.Malformed;
+        seen[@backingInt(name)] = true;
+        switch (name) {
+            .iss => input.issuer = try readString(&reader),
+            .sub => input.subject = try readString(&reader),
+            .aud => input.audience = try readAudience(&reader, arena),
+            .exp => input.expires_at = try readDate(&reader, .down),
+            .nbf => input.not_before = try readDate(&reader, .up),
+            .iat => input.issued_at = try readDate(&reader, .up),
+            .jti => input.id = try readString(&reader),
+        }
+    }
+    try reader.finish();
+    return input;
+}
+
+fn readString(reader: *json.Reader) json.Reader.Error!Found([]const u8) {
+    if (try reader.peek() == .string) return .{ .value = try reader.string() };
+    try reader.skip();
+    return .invalid;
+}
+
+/// "aud": a string, kept as a list of one, or a non-empty array of strings.
+fn readAudience(reader: *json.Reader, arena: std.mem.Allocator) json.Reader.Error!Found([]const []const u8) {
+    switch (try reader.peek()) {
+        .string => {
+            const one = try arena.alloc([]const u8, 1);
+            one[0] = try reader.string();
+            return .{ .value = one };
+        },
+        .array_begin => {
+            try reader.beginArray();
+            var list: std.ArrayList([]const u8) = .empty;
+            var valid = true;
+            while (try reader.nextItem()) {
+                if (valid and try reader.peek() == .string) {
+                    try list.append(arena, try reader.string());
+                } else {
+                    valid = false;
+                    try reader.skip();
+                }
+            }
+            if (!valid or list.items.len == 0) return .invalid;
+            return .{ .value = list.items };
+        },
+        else => {
+            try reader.skip();
+            return .invalid;
+        },
+    }
+}
+
+/// A NumericDate (RFC 7519 §2): an integer, or a number with a fraction or
+/// an exponent, from 0 to `max_numeric_date`, rounded `down` or `up` to a
+/// second.
+fn readDate(reader: *json.Reader, comptime rounding: enum { down, up }) json.Reader.Error!Found(i64) {
+    if (try reader.peek() != .number) {
+        try reader.skip();
+        return .invalid;
+    }
+    const text = try reader.number();
+    if (std.mem.findAny(u8, text, ".eE") == null) {
+        const seconds = std.fmt.parseInt(i64, text, 10) catch return .invalid;
+        if (seconds < 0 or seconds > max_numeric_date) return .invalid;
+        return .{ .value = seconds };
+    }
+    const seconds = std.fmt.parseFloat(f64, text) catch return .invalid;
+    // NaN and the infinities fail the comparison too.
+    if (!(seconds >= 0 and seconds <= max_numeric_date)) return .invalid;
+    return .{ .value = @intFromFloat(switch (rounding) {
+        .down => @floor(seconds),
+        .up => @ceil(seconds),
+    }) };
+}
+
+/// Holds the registered claims of `input` to `rules` at `now`, in seconds
+/// of Unix time, in this order: "iss", "aud", "exp", "nbf", "iat"; then
+/// the types of "sub" and "jti". On an error `details.claim` names the
+/// claim. `MissingClaim`: "iss", "aud" or "exp" is absent. `InvalidClaims`:
+/// a registered claim of the wrong type or out of range. `WrongIssuer`,
+/// `WrongAudience`; `Expired`: `now ≥ exp + leeway`; `NotYetValid`:
+/// `nbf` or `iat` later than `now + leeway`.
+pub fn checkRegistered(input: RegisteredInput, rules: RegisteredRules, now: i64, details: *Details) VerifyError!Registered {
+    const leeway: i128 = rules.leeway_seconds;
+    const issuer = try required([]const u8, input.issuer, "iss", details);
+    if (!std.mem.eql(u8, issuer, rules.issuer)) return refuse(details, "iss", error.WrongIssuer);
+    const audience = try required([]const []const u8, input.audience, "aud", details);
+    if (!anyOf(audience, rules.audiences)) return refuse(details, "aud", error.WrongAudience);
+    const expires_at = try required(i64, input.expires_at, "exp", details);
+    if (now >= expires_at + leeway) return refuse(details, "exp", error.Expired);
+    const not_before = try optional(i64, input.not_before, "nbf", details);
+    if (not_before) |nbf| {
+        if (nbf > now + leeway) return refuse(details, "nbf", error.NotYetValid);
+    }
+    const issued_at = try optional(i64, input.issued_at, "iat", details);
+    if (issued_at) |iat| {
+        if (iat > now + leeway) return refuse(details, "iat", error.NotYetValid);
+    }
+    return .{
+        .issuer = issuer,
+        .subject = try optional([]const u8, input.subject, "sub", details),
+        .audience = audience,
+        .expires_at = expires_at,
+        .not_before = not_before,
+        .issued_at = issued_at,
+        .id = try optional([]const u8, input.id, "jti", details),
+    };
+}
+
+fn required(comptime Value: type, found: Found(Value), comptime claim: []const u8, details: *Details) VerifyError!Value {
+    return switch (found) {
+        .absent => refuse(details, claim, error.MissingClaim),
+        .invalid => refuse(details, claim, error.InvalidClaims),
+        .value => |value| value,
+    };
+}
+
+fn optional(comptime Value: type, found: Found(Value), comptime claim: []const u8, details: *Details) VerifyError!?Value {
+    return switch (found) {
+        .absent => null,
+        .invalid => refuse(details, claim, error.InvalidClaims),
+        .value => |value| value,
+    };
+}
+
+/// Whether one of `values` is one of `wanted`.
+fn anyOf(values: []const []const u8, wanted: []const []const u8) bool {
+    for (values) |value| {
+        for (wanted) |name| {
+            if (std.mem.eql(u8, value, name)) return true;
+        }
+    }
+    return false;
+}
+
+fn refuse(details: *Details, claim: []const u8, err: VerifyError) VerifyError {
+    details.claim = claim;
+    return err;
+}
+
 /// `value` as a string, when it is one: a literal or a `[]const u8`.
 fn asName(comptime value: anytype) ?[]const u8 {
     const T = @TypeOf(value);
@@ -678,4 +884,154 @@ const Long = struct {
 test "a path longer than path_buf gives a violation without a field" {
     try expectViolation(Long, "{\"" ++ @as([300]u8, @splat('a')) ++ "\":{\"deeper\":\"x\"}}", invalid_type, null, "must be an integer");
     try expectViolation(Ids, "{\"ids\":[1,\"a\"]}", invalid_type, "ids[1]", "must be an integer");
+}
+
+const t0 = 1_760_000_000;
+const orders: RegisteredRules = .{ .issuer = "orders", .audiences = &.{"orders"}, .leeway_seconds = 60 };
+
+/// The registered claims of `payload` checked at `now` by `rules`.
+fn readChecked(arena: std.mem.Allocator, payload: []const u8, rules: RegisteredRules, now: i64, details: *Details) VerifyError!Registered {
+    return checkRegistered(try readRegistered(arena, payload), rules, now, details);
+}
+
+fn expectRegistered(arena: std.mem.Allocator, payload: []const u8, now: i64) !Registered {
+    var details: Details = .{};
+    return readChecked(arena, payload, orders, now, &details) catch |err| {
+        std.debug.print("{t} at {s}: {s}\n", .{ err, details.claim orelse "(none)", payload });
+        return err;
+    };
+}
+
+fn expectRefusedAt(payload: []const u8, rules: RegisteredRules, now: i64, expected: VerifyError, claim: []const u8) !void {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    var details: Details = .{};
+    if (readChecked(arena_state.allocator(), payload, rules, now, &details)) |_| {
+        std.debug.print("accepted: {s}\n", .{payload});
+        return error.TestUnexpectedResult;
+    } else |err| {
+        testing.expectEqual(expected, err) catch |e| {
+            std.debug.print("{s}\n", .{payload});
+            return e;
+        };
+    }
+    try testing.expectEqualStrings(claim, details.claim orelse "(none)");
+    try testing.expectEqual(null, details.violation);
+}
+
+fn expectRefused(payload: []const u8, now: i64, expected: VerifyError, claim: []const u8) !void {
+    return expectRefusedAt(payload, orders, now, expected, claim);
+}
+
+test "5.6: iss, aud and exp are required, in this order" {
+    try expectRefused("{}", t0, error.MissingClaim, "iss");
+    try expectRefused("{\"iss\":\"orders\"}", t0, error.MissingClaim, "aud");
+    try expectRefused("{\"iss\":\"orders\",\"aud\":\"orders\"}", t0, error.MissingClaim, "exp");
+    try expectRefused("{\"iss\":\"x\",\"exp\":\"no\"}", t0, error.WrongIssuer, "iss");
+    try expectRefused("{\"aud\":\"x\",\"exp\":1,\"iss\":5}", t0, error.InvalidClaims, "iss");
+    try expectRefused("{\"iss\":\"orders\",\"exp\":\"no\",\"aud\":\"x\"}", t0, error.WrongAudience, "aud");
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const got = try expectRegistered(arena_state.allocator(), "{\"iss\":\"orders\",\"aud\":\"orders\",\"exp\":1760000900}", t0);
+    try testing.expectEqualStrings("orders", got.issuer);
+    try testing.expectEqual(1760000900, got.expires_at);
+    try testing.expectEqual(null, got.subject);
+    try testing.expectEqual(null, got.not_before);
+    try testing.expectEqual(null, got.issued_at);
+    try testing.expectEqual(null, got.id);
+}
+
+test "iss is compared byte for byte" {
+    try expectRefused("{\"iss\":\"Orders\",\"aud\":\"orders\",\"exp\":1760000900}", t0, error.WrongIssuer, "iss");
+    try expectRefused("{\"iss\":\"orders \",\"aud\":\"orders\",\"exp\":1760000900}", t0, error.WrongIssuer, "iss");
+}
+
+test "aud is a string or a non-empty array of strings" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var details: Details = .{};
+    const one = try readChecked(arena, "{\"iss\":\"orders\",\"aud\":\"orders\",\"exp\":1760000900}", orders, t0, &details);
+    try testing.expectEqual(1, one.audience.len);
+    try testing.expectEqualStrings("orders", one.audience[0]);
+    const two = try readChecked(arena, "{\"iss\":\"orders\",\"aud\":[\"billing\",\"orders\"],\"exp\":1760000900}", orders, t0, &details);
+    try testing.expectEqual(2, two.audience.len);
+    try testing.expectEqualStrings("billing", two.audience[0]);
+    try testing.expectEqualStrings("orders", two.audience[1]);
+    // Any of the verifier's audiences will do.
+    const billing: RegisteredRules = .{ .issuer = "orders", .audiences = &.{ "billing", "reports" }, .leeway_seconds = 60 };
+    _ = try readChecked(arena, "{\"iss\":\"orders\",\"aud\":[\"orders\",\"reports\"],\"exp\":1760000900}", billing, t0, &details);
+
+    try expectRefused("{\"iss\":\"orders\",\"aud\":[\"billing\"],\"exp\":1760000900}", t0, error.WrongAudience, "aud");
+    try expectRefused("{\"iss\":\"orders\",\"aud\":\"Orders\",\"exp\":1760000900}", t0, error.WrongAudience, "aud");
+    for ([_][]const u8{ "5", "[]", "[\"orders\",5]", "null", "{}", "[[\"orders\"]]" }) |aud| {
+        const payload = try std.fmt.allocPrint(arena, "{{\"iss\":\"orders\",\"aud\":{s},\"exp\":1760000900}}", .{aud});
+        try expectRefused(payload, t0, error.InvalidClaims, "aud");
+    }
+}
+
+test "a NumericDate is 0 to 253402300799, whole or fractional" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const head = "{\"iss\":\"orders\",\"aud\":\"orders\",";
+    // 0 is a date, long past.
+    try expectRefused(head ++ "\"exp\":0}", t0, error.Expired, "exp");
+    try testing.expectEqual(max_numeric_date, (try expectRegistered(arena, head ++ "\"exp\":253402300799}", t0)).expires_at);
+    for ([_][]const u8{ "253402300800", "-1", "\"1700000000\"", "1e400", "-0.5", "253402300799.5", "true", "99999999999999999999" }) |exp| {
+        const payload = try std.fmt.allocPrint(arena, "{s}\"exp\":{s}}}", .{ head, exp });
+        try expectRefused(payload, t0, error.InvalidClaims, "exp");
+    }
+    // A fraction rounds to the safe side: exp down, nbf and iat up.
+    try testing.expectEqual(t0, (try expectRegistered(arena, head ++ "\"exp\":1760000000.9}", t0 - 10)).expires_at);
+    const late = try expectRegistered(arena, head ++ "\"exp\":1760000900,\"nbf\":1760000000.1,\"iat\":1760000000.5}", t0 + 1);
+    try testing.expectEqual(t0 + 1, late.not_before.?);
+    try testing.expectEqual(t0 + 1, late.issued_at.?);
+    try testing.expectEqual(1760000000, (try expectRegistered(arena, head ++ "\"exp\":1.76e9}", t0 - 10)).expires_at);
+    try testing.expectEqual(1760000060, (try expectRegistered(arena, head ++ "\"exp\":1760000060E0}", t0)).expires_at);
+    try testing.expectEqual(0, (try expectRegistered(arena, head ++ "\"exp\":1760000900,\"nbf\":0.0}", t0)).not_before.?);
+    try expectRefused(head ++ "\"exp\":1760000900,\"nbf\":\"0\"}", t0, error.InvalidClaims, "nbf");
+    try expectRefused(head ++ "\"exp\":1760000900,\"iat\":-1}", t0, error.InvalidClaims, "iat");
+}
+
+test "leeway on the edges of exp, nbf and iat" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const head = "{\"iss\":\"orders\",\"aud\":\"orders\",";
+    _ = try expectRegistered(arena, head ++ "\"exp\":1760000000}", t0 + 59);
+    try expectRefused(head ++ "\"exp\":1760000000}", t0 + 60, error.Expired, "exp");
+    _ = try expectRegistered(arena, head ++ "\"exp\":1760000900,\"nbf\":1760000000}", t0 - 60);
+    try expectRefused(head ++ "\"exp\":1760000900,\"nbf\":1760000000}", t0 - 61, error.NotYetValid, "nbf");
+    _ = try expectRegistered(arena, head ++ "\"exp\":1760000900,\"iat\":1760000000}", t0 - 60);
+    try expectRefused(head ++ "\"exp\":1760000900,\"iat\":1760000000}", t0 - 61, error.NotYetValid, "iat");
+    const strict: RegisteredRules = .{ .issuer = "orders", .audiences = &.{"orders"}, .leeway_seconds = 0 };
+    try expectRefusedAt(head ++ "\"exp\":1760000000}", strict, t0, error.Expired, "exp");
+    try expectRefusedAt(head ++ "\"exp\":1760000900,\"nbf\":1760000001}", strict, t0, error.NotYetValid, "nbf");
+    // A clock at the ends of i64 overflows nothing.
+    try expectRefused(head ++ "\"exp\":1760000900}", std.math.maxInt(i64), error.Expired, "exp");
+    try expectRefused(head ++ "\"exp\":1760000900,\"nbf\":1760000000}", std.math.minInt(i64), error.NotYetValid, "nbf");
+}
+
+test "sub and jti are strings when present" {
+    const head = "{\"iss\":\"orders\",\"aud\":\"orders\",\"exp\":1760000900,";
+    try expectRefused(head ++ "\"sub\":5}", t0, error.InvalidClaims, "sub");
+    try expectRefused(head ++ "\"jti\":[]}", t0, error.InvalidClaims, "jti");
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const got = try expectRegistered(arena_state.allocator(), head ++ "\"sub\":\"user-7\",\"jti\":\"t-1\",\"iat\":1759999990}", t0);
+    try testing.expectEqualStrings("user-7", got.subject.?);
+    try testing.expectEqualStrings("t-1", got.id.?);
+    try testing.expectEqual(1759999990, got.issued_at.?);
+}
+
+test "a registered claim given twice is Malformed" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try testing.expectError(error.Malformed, readRegistered(arena, "{\"exp\":1,\"exp\":1}"));
+    try testing.expectError(error.Malformed, readRegistered(arena, "{\"aud\":\"a\",\"aud\":[\"b\"]}"));
+    for ([_][]const u8{ "[]", "5", "{} x", "{\"iss\":\"\xff\"}", "{\"x\":" }) |payload| {
+        try testing.expectError(error.Malformed, readRegistered(arena, payload));
+    }
 }

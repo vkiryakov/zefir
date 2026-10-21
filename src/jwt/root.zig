@@ -44,6 +44,7 @@ pub const SignError = errors.SignError;
 pub const Details = errors.Details;
 
 pub const Header = @import("header.zig").Header;
+pub const Registered = claims.Registered;
 
 pub const KeyOptions = struct {
     /// The key id, "kid": 1 to `max_key_id_bytes` bytes of visible ASCII,
@@ -88,4 +89,5 @@ test "limits have their documented values" {
     try std.testing.expectEqual(128, max_key_id_bytes);
     const details: Details = .{};
     try std.testing.expectEqual(256, details.path_buf.len);
+    try std.testing.expectEqual(253402300799, claims.max_numeric_date);
 }
