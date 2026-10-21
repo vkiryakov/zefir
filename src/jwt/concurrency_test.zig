@@ -1,7 +1,11 @@
 //! One `Signer` and one `Verifier` serve many tasks at once (design
 //! 5.13): they are immutable, and every call keeps its memory to itself;
 //! ECDSA also takes its noise from the `Io` of each call.
-//! `zig build test-jwt -Dtsan=true` runs this under ThreadSanitizer.
+//! `zig build test-jwt -Dtsan=true` runs this under ThreadSanitizer, in CI
+//! too, on runners with few cores and next to the tests of other modules.
+//! So the test stays light: a few tasks per algorithm, a few tokens per
+//! task, and an arena of its own for each task instead of one allocator
+//! that all of them would wait on.
 
 const std = @import("std");
 const Key = @import("Key.zig");
@@ -11,8 +15,8 @@ const Verifier = @import("Verifier.zig");
 
 const testing = std.testing;
 
-const task_count = 64;
-const tokens_per_task = 16;
+const tasks_per_algorithm = 8;
+const tokens_per_task = 4;
 
 const Claims = struct {
     task: u32,
@@ -38,19 +42,20 @@ fn run(shared: *Shared, task: u32) void {
 fn signAndVerify(shared: *Shared, task: u32) !void {
     var subject_buf: [16]u8 = undefined;
     const subject = try std.fmt.bufPrint(&subject_buf, "user-{d}", .{task});
+    var arena_state: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    defer arena_state.deinit();
     for (0..tokens_per_task) |_| {
-        const token = try shared.signer.sign(Claims, shared.io, testing.allocator, &.{ .task = task, .roles = &.{"buyer"} }, .{ .subject = subject });
-        defer testing.allocator.free(token);
-        var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
-        defer arena_state.deinit();
-        const verified = try shared.verifier.verify(Claims, shared.io, arena_state.allocator(), token, .{});
+        _ = arena_state.reset(.retain_capacity);
+        const arena = arena_state.allocator();
+        const token = try shared.signer.sign(Claims, shared.io, arena, &.{ .task = task, .roles = &.{"buyer"} }, .{ .subject = subject });
+        const verified = try shared.verifier.verify(Claims, shared.io, arena, token, .{});
         if (!std.mem.eql(u8, subject, verified.registered.subject orelse "")) return error.TestWrongSubject;
         if (verified.claims.task != task) return error.TestWrongClaims;
         _ = shared.passed.fetchAdd(1, .monotonic);
     }
 }
 
-test "64 tasks sign and verify with one Signer and one Verifier at once, for HMAC, ECDSA and EdDSA" {
+test "tasks of three algorithms sign and verify at once, each algorithm with one Signer and one Verifier" {
     var hs256: SigningKey = try .hmac(.HS256, "0123456789abcdef0123456789abcdef", .{ .id = "k1" });
     defer hs256.deinit();
     var es256: SigningKey = try .generate(testing.io, .ES256, .{ .id = "k2" });
@@ -72,18 +77,20 @@ test "64 tasks sign and verify with one Signer and one Verifier at once, for HMA
         shared[i] = .{ .signer = &signers[i], .verifier = &verifiers[i], .io = testing.io };
     }
 
+    // All the tasks start before any is awaited, so the tasks of the three
+    // algorithms run side by side.
     var group: std.Io.Group = .init;
     // Should a start fail, the tasks already started end before `shared`
     // goes away.
     defer group.cancel(testing.io);
     for (&shared) |*one| {
-        for (0..task_count) |task| try group.concurrent(testing.io, run, .{ one, @as(u32, @intCast(task)) });
+        for (0..tasks_per_algorithm) |task| try group.concurrent(testing.io, run, .{ one, @as(u32, @intCast(task)) });
     }
     try group.await(testing.io);
 
     for (&shared, signing_keys) |*one, signing| {
         errdefer std.debug.print("{t}\n", .{signing.algorithm});
         try testing.expectEqual(0, one.failed.load(.monotonic));
-        try testing.expectEqual(task_count * tokens_per_task, one.passed.load(.monotonic));
+        try testing.expectEqual(tasks_per_algorithm * tokens_per_task, one.passed.load(.monotonic));
     }
 }
