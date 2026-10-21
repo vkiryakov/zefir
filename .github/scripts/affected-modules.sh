@@ -9,8 +9,9 @@
 # tests import it, directly or through other modules; zefir imports them
 # all. tests/nats/, tests/rpc-nats/, tests/http/ and tests/mongo/, the
 # end-to-end tests of nats, of rpc-nats, of http and of mongo, count as
-# their modules. docker-compose.yml, the servers of nats, rpc-nats and
-# mongo, counts as all three.
+# their modules. tests/openapi/, the checks of the JSON Schema that the
+# validator writes, counts as validator. docker-compose.yml, the servers of
+# nats, rpc-nats and mongo, counts as all three.
 # examples/rpc-custom-transport/, a transport outside zefir that CI runs
 # against rpc, counts as rpc. build.zig, build.zig.zon, src/zefir.zig,
 # .github/ and any other path the script does not know affect every
@@ -95,6 +96,7 @@ elif [ $# -eq 2 ] && [ -n "$1" ] && [ -n "$2" ]; then
         tests/rpc-nats/*) changed="$changed rpc-nats" ;;
         tests/http/*) changed="$changed http" ;;
         tests/mongo/*) changed="$changed mongo" ;;
+        tests/openapi/*) changed="$changed validator" ;;
         examples/rpc-custom-transport/*) changed="$changed rpc" ;;
         docker-compose.yml) changed="$changed nats rpc-nats mongo" ;;
         README.md) changed="$changed rpc http" ;;

@@ -1,0 +1,9 @@
+{
+  "name": "zefir-openapi-tests",
+  "private": true,
+  "description": "Checks of zefir's JSON Schema in JavaScript: ajv, ECMA-262 regular expressions with the u flag",
+  "type": "module",
+  "dependencies": {
+    "ajv": "8.20.0"
+  }
+}

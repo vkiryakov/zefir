@@ -103,6 +103,12 @@ jobs:
         shell: bash
         working-directory: tests/mongo
         run: zig build check --summary all
+      # The same for tests/openapi, whose checks need Docker: only
+      # openapi-tools runs them.
+      - if: contains(format(' {0} ', env.MODULES), ' validator ')
+        shell: bash
+        working-directory: tests/openapi
+        run: zig build check --summary all
 
   # The tests again under ThreadSanitizer; it does not build for Windows.
   tsan:
@@ -229,6 +235,26 @@ jobs:
       - name: Stop the mongod servers
         if: always()
         run: docker compose --profile mongo down
+
+  # The JSON Schema that the validator writes, in the tools of other
+  # languages, in Docker: the regular expressions of v.schemaOf with ajv in
+  # Node (ECMA-262) and with Go's regexp (RE2), on the vectors of
+  # src/validator/testdata/regex_vectors.zig. Docker runs Linux containers
+  # on the Linux runners only, so this job is ubuntu only. It runs when
+  # validator is among the modules to test.
+  openapi-tools:
+    name: openapi-tools
+    needs: changes
+    if: contains(format(' {0} ', needs.changes.outputs.modules), ' validator ')
+    timeout-minutes: 20
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: mlugg/setup-zig@v2
+      - name: Check the regular expressions in JavaScript and in Go
+        working-directory: tests/openapi
+        timeout-minutes: 15
+        run: zig build regex --summary all
 
   # The package of examples/rpc-custom-transport: a transport outside zefir,
   # on the public API of rpc only, built the way an application builds it
