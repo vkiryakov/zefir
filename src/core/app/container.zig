@@ -61,6 +61,15 @@ pub fn App(comptime Root: type) type {
             return .{ .internal = .{ .gpa = gpa, .io = io, .options = options, .block = block, .build_order = build_order } };
         }
 
+        /// `start`, then `wait`: for `main`. When the stop runs out of time
+        /// (`error.ShutdownTimeout`), tasks may still use the beans and
+        /// nothing may be freed: `run` writes which bean did not stop, to
+        /// the log and straight to stderr, and ends the process with code 1.
+        /// Any other error is returned; `failure()` says whose it is.
+        pub fn run(app: *@This()) anyerror!void {
+            return lifecycle.run(&app.internal.block.runtime);
+        }
+
         /// Starts the beans in creation order and returns once all are
         /// ready. When one fails, those already started are stopped in
         /// reverse order, within a budget of their own, and its error is

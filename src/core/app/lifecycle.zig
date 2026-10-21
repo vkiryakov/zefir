@@ -14,6 +14,8 @@ const Io = std.Io;
 const State = contract.State;
 const Entry = contract.Entry;
 
+const log = std.log.scoped(.zefir_app);
+
 /// One per entry: set once nothing waits in the entry's `wait` any more.
 pub const Watch = struct {
     returned: Io.Event = .unset,
@@ -59,6 +61,9 @@ pub const Runtime = struct {
     timed_out: bool = false,
     /// The entry that did not stop.
     stuck: ?usize = null,
+    /// "the stop ran out of time" is in the log: the stop task or `wait`,
+    /// whichever saw the deadline first, wrote it.
+    timeout_logged: bool = false,
     /// What `wait` returns, once it is known.
     result: ?anyerror!void = null,
 
@@ -133,11 +138,17 @@ pub const Runtime = struct {
 
     /// The deadline came before the `wait` of entry k returned.
     fn didNotStop(rt: *Runtime, k: usize) void {
-        rt.lock();
-        defer rt.unlock();
-        rt.fatal = true;
-        if (rt.stuck == null) rt.stuck = k;
-        if (rt.cause == null) rt.cause = .{ .entry = k, .step = .shutdown, .err = error.ShutdownTimeout };
+        const label = label: {
+            rt.lock();
+            defer rt.unlock();
+            rt.fatal = true;
+            if (rt.stuck == null) rt.stuck = k;
+            if (rt.cause == null) rt.cause = .{ .entry = k, .step = .shutdown, .err = error.ShutdownTimeout };
+            if (rt.timeout_logged) return;
+            rt.timeout_logged = true;
+            break :label rt.stuckLabel();
+        };
+        log.warn("the stop ran out of time: {s} did not stop", .{label});
     }
 
     /// The entry the stop task is in: the one it calls, the one whose
@@ -176,17 +187,30 @@ pub const Runtime = struct {
     /// failed`, unless the stop task, ending just now, set the final state
     /// first.
     fn late(rt: *Runtime) anyerror!void {
-        rt.lock();
-        defer rt.unlock();
-        if (rt.result) |result| return result;
-        if (rt.status.internal.state.cmpxchgStrong(.stopping, .failed, .acq_rel, .acquire) != null) return rt.fix();
-        rt.fatal = true;
-        rt.stuck = rt.stuck orelse rt.current();
-        if (rt.stuck) |k| if (rt.cause == null) {
-            rt.cause = .{ .entry = k, .step = .shutdown, .err = error.ShutdownTimeout };
+        const label = label: {
+            rt.lock();
+            defer rt.unlock();
+            if (rt.result) |result| return result;
+            if (rt.status.internal.state.cmpxchgStrong(.stopping, .failed, .acq_rel, .acquire) != null) return rt.fix();
+            rt.fatal = true;
+            rt.stuck = rt.stuck orelse rt.current();
+            if (rt.stuck) |k| if (rt.cause == null) {
+                rt.cause = .{ .entry = k, .step = .shutdown, .err = error.ShutdownTimeout };
+            };
+            rt.result = error.ShutdownTimeout;
+            if (rt.timeout_logged) return error.ShutdownTimeout;
+            rt.timeout_logged = true;
+            break :label rt.stuckLabel();
         };
-        rt.result = error.ShutdownTimeout;
+        log.warn("the stop ran out of time: {s} did not stop", .{label});
         return error.ShutdownTimeout;
+    }
+
+    /// The bean that did not stop: the one App gave up on, or the one the
+    /// stop task is in. Under `mutex`.
+    fn stuckLabel(rt: *Runtime) []const u8 {
+        const k = rt.stuck orelse rt.current() orelse return "App";
+        return rt.entries()[k].name;
     }
 };
 
@@ -202,10 +226,13 @@ pub fn start(rt: *Runtime) anyerror!void {
         const protection = io.swapCancelProtection(.blocked);
         defer _ = io.swapCancelProtection(protection);
         break :task io.concurrent(stopTask, .{rt}) catch |err| {
-            rt.lock();
-            defer rt.unlock();
-            rt.result = err;
-            rt.status.internal.state.store(.failed, .release);
+            {
+                rt.lock();
+                defer rt.unlock();
+                rt.result = err;
+                rt.status.internal.state.store(.failed, .release);
+            }
+            log.warn("the stop task did not start: error.{s}", .{@errorName(err)});
             return err;
         };
     };
@@ -215,14 +242,17 @@ pub fn start(rt: *Runtime) anyerror!void {
         // A stop request or a breakdown stops the starting.
         if (rt.state() != .starting) break false;
         if (entry.vtable.start) |startFn| startFn(entry.ptr, io) catch |err| {
+            log.warn("{s} did not start: error.{s}", .{ entry.name, @errorName(err) });
             rt.startFailed(i, err);
             break true;
         };
         count = i + 1;
         if (entry.vtable.wait != null) rt.watch(i) catch |err| {
+            log.warn("{s} did not start: error.{s}", .{ entry.name, @errorName(err) });
             rt.startFailed(i, err);
             break true;
         };
+        if (entry.vtable.start != null) log.info("{s} started", .{entry.name});
     } else false;
     const running = !failed and count == list.len and
         rt.status.internal.state.cmpxchgStrong(.starting, .running, .acq_rel, .acquire) == null;
@@ -266,6 +296,29 @@ pub fn requestStop(rt: *Runtime) void {
     rt.stop_event.set(rt.io);
 }
 
+/// `start`, then `wait`. `error.ShutdownTimeout` from either ends the
+/// process with code 1.
+pub fn run(rt: *Runtime) anyerror!void {
+    start(rt) catch |err| return exitOnTimeout(rt, err);
+    wait(rt) catch |err| return exitOnTimeout(rt, err);
+}
+
+/// `error.ShutdownTimeout`: tasks may still use the beans, so nothing may
+/// be freed, and the process ends with code 1. Any other error is returned.
+fn exitOnTimeout(rt: *Runtime, err: anyerror) anyerror {
+    if (err != error.ShutdownTimeout) return err;
+    const label = label: {
+        rt.lock();
+        defer rt.unlock();
+        break :label rt.stuckLabel();
+    };
+    log.err("{s} did not stop in time; the process exits with code 1", .{label});
+    // Straight to stderr too: a logger's queue may not be written out
+    // before the exit.
+    std.debug.print("{s} did not stop in time; the process exits with code 1\n", .{label});
+    std.process.exit(1);
+}
+
 /// The first cause of the stop or of the failure; null when all went well.
 pub fn failure(rt: *Runtime) ?Failure {
     rt.lock();
@@ -291,9 +344,14 @@ pub fn finish(rt: *Runtime) bool {
             rt.stop_task = null;
         }
     }
-    rt.lock();
-    defer rt.unlock();
-    return rt.stop_task == null and !rt.timed_out;
+    const label = label: {
+        rt.lock();
+        defer rt.unlock();
+        if (rt.stop_task == null and !rt.timed_out) return true;
+        break :label rt.stuckLabel();
+    };
+    log.warn("deinit frees nothing: {s} did not stop", .{label});
+    return false;
 }
 
 /// Waits for a stop and for the end of `start`, then stops what started:
@@ -307,6 +365,7 @@ fn stopTask(rt: *Runtime) void {
     rt.stop_event.waitUncancelable(io);
     rt.start_done.waitUncancelable(io);
     rt.deadline = .after(Io.Clock.awake.now(io), rt.shutdown_timeout);
+    log.info("stopping", .{});
     rt.began.set(io);
     const list = rt.entries()[0..rt.started];
     const deadline = rt.deadline.expires.withClock(.awake);
@@ -322,21 +381,30 @@ fn stopTask(rt: *Runtime) void {
         const entry = list[k];
         rt.at.store(k, .release);
         if (entry.vtable.shutdown) |shutdownFn| {
-            shutdownFn(entry.ptr, io, deadline) catch |err| rt.shutdownFailed(k, err);
+            if (shutdownFn(entry.ptr, io, deadline)) |_| {
+                log.info("{s} stopped", .{entry.name});
+            } else |err| {
+                log.warn("{s} did not stop cleanly: error.{s}", .{ entry.name, @errorName(err) });
+                rt.shutdownFailed(k, err);
+            }
         } else if (entry.vtable.wait != null) {
-            untilSet(&rt.watches[k].returned, io, rt.deadline) catch rt.didNotStop(k);
+            if (untilSet(&rt.watches[k].returned, io, rt.deadline)) |_| {
+                log.info("{s} stopped", .{entry.name});
+            } else |_| rt.didNotStop(k);
         }
     }
     // Nothing may wait in a bean's `wait` once App frees the bean.
     rt.at.store(Runtime.gathering, .release);
     rt.watchers.cancel(io);
-    {
+    const stopped = stopped: {
         rt.lock();
         defer rt.unlock();
         const final: State = if (rt.fatal or rt.rollback) .failed else .stopped;
         // A `wait` that declared the timeout first keeps its `failed`.
-        _ = rt.status.internal.state.cmpxchgStrong(.stopping, final, .acq_rel, .acquire);
-    }
+        const set = rt.status.internal.state.cmpxchgStrong(.stopping, final, .acq_rel, .acquire) == null;
+        break :stopped set and !rt.fatal;
+    };
+    if (stopped) log.info("stopped", .{});
     rt.ended.set(io);
 }
 
@@ -355,6 +423,13 @@ fn watcher(rt: *Runtime, i: usize) void {
         if (rt.cause == null) rt.cause = .{ .entry = i, .step = .wait, .err = if (result) |_| error.UnexpectedStop else |err| err };
         break :by_itself true;
     };
-    if (by_itself) rt.stop_event.set(io);
+    if (by_itself) {
+        if (result) |_| {
+            log.warn("{s} stopped by itself", .{entry.name});
+        } else |err| {
+            log.warn("{s} stopped by itself: error.{s}", .{ entry.name, @errorName(err) });
+        }
+        rt.stop_event.set(io);
+    }
     rt.watches[i].returned.set(io);
 }

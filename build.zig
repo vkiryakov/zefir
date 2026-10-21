@@ -299,6 +299,57 @@ pub fn build(b: *std.Build) void {
         test_log.dependOn(&run.step);
     }
 
+    // zefir.App's run and log, in a process of their own (see
+    // src/core/app/tests/programs/run_timeout.zig): when the stop runs out
+    // of time, run writes which bean did not stop and ends the process with
+    // code 1; when a bean breaks, run returns its error. Each mode checks
+    // the exit code and App's log lines. A Debug build with the Debug copy
+    // of core, whatever -Doptimize says, without TSan.
+    const app_run = b.addExecutable(.{
+        .name = "app-run-timeout",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/core/app/tests/programs/run_timeout.zig"),
+            .target = target,
+            .optimize = .Debug,
+            .imports = &.{.{ .name = "core", .module = panic_core }},
+        }),
+    });
+    for ([_]struct { mode: []const u8, exit: u8, lines: []const []const u8 }{
+        .{ .mode = "stop", .exit = 1, .lines = &.{
+            "debug(zefir_app): build order: Root.First, Root.Deaf\n",
+            "info(zefir_app): Root.First started\n",
+            "info(zefir_app): Root.Deaf started\n",
+            "info(zefir_app): stopping\n",
+            "warning(zefir_app): the stop ran out of time: Root.Deaf did not stop\n",
+            "error(zefir_app): Root.Deaf did not stop in time; the process exits with code 1\n",
+            "\nRoot.Deaf did not stop in time; the process exits with code 1\n",
+        } },
+        .{ .mode = "rollback", .exit = 1, .lines = &.{
+            "info(zefir_app): Root.First started\n",
+            "warning(zefir_app): Root.Second did not start: error.StartFailed\n",
+            "info(zefir_app): stopping\n",
+            "warning(zefir_app): the stop ran out of time: Root.First did not stop\n",
+            "error(zefir_app): Root.First did not stop in time; the process exits with code 1\n",
+            "\nRoot.First did not stop in time; the process exits with code 1\n",
+        } },
+        .{ .mode = "breaks", .exit = 2, .lines = &.{
+            "info(zefir_app): Root.First started\n",
+            "warning(zefir_app): Root.Broken stopped by itself: error.Broken\n",
+            "info(zefir_app): stopping\n",
+            "info(zefir_app): Root.Broken stopped\n",
+            "warning(zefir_app): Root.Fragile did not stop cleanly: error.ShutdownFailed\n",
+            "info(zefir_app): Root.First stopped\n",
+            "info(zefir_app): stopped\n",
+            "run returned error.Broken\n",
+        } },
+    }) |case| {
+        const run = b.addRunArtifact(app_run);
+        run.addArg(case.mode);
+        run.expectExitCode(case.exit);
+        for (case.lines) |line| run.expectStdErrMatch(line);
+        test_core.dependOn(&run.step);
+    }
+
     // nats panic program: a client copied after connect() panics in safe
     // builds. The program must print the panic message and end in its own
     // panic handler, which exits with code 3 instead of aborting. It gets

@@ -117,7 +117,12 @@ pub const Rig = struct {
 
     /// Checks the `who` of every event `what`, in order.
     pub fn expect(rig: *Rig, what: []const u8, expected: []const []const u8) !void {
-        if (rig.len == capacity) return error.TestUnexpectedResult;
+        const full = full: {
+            rig.mutex.lockUncancelable(rig.io);
+            defer rig.mutex.unlock(rig.io);
+            break :full rig.len == capacity;
+        };
+        if (full) return error.TestUnexpectedResult;
         return rig.rec.expect(what, expected);
     }
 
