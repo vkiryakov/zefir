@@ -1,4 +1,4 @@
-//! The probe's program of variant A: the document as JSON built at compile time.
+//! The probe's program of variant A: the document as JSON built at compile time by pure functions that return the text of each object and array.
 const std = @import("std");
 
 pub const panic = std.debug.FullPanic(exitOnPanic);

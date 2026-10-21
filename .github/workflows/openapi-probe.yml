@@ -22,10 +22,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Every variant on 2 routes: compile errors show here within minutes,
-  # and A, B and naive A must write the same document.
+  # Every variant on 5 routes, one of each kind: compile errors show here
+  # within minutes, and every document must be the bytes of B's.
   smoke:
-    name: smoke (2 routes)
+    name: smoke (5 routes)
     timeout-minutes: 30
     runs-on: ubuntu-latest
     env:
@@ -38,26 +38,26 @@ jobs:
       - name: Install GNU time
         run: test -x /usr/bin/time || (sudo apt-get update && sudo apt-get install -y time)
       - name: Measure every variant
-        run: tests/openapi-probe/measure.sh 2 "$RUNNER_TEMP/results/n2" baseline a b naive
+        run: tests/openapi-probe/measure.sh 5 "$RUNNER_TEMP/results/n5" baseline b a afill acount naive
       - name: Check the documents
-        run: tests/openapi-probe/measure.sh --check "$RUNNER_TEMP/results/n2"
+        run: tests/openapi-probe/measure.sh --check "$RUNNER_TEMP/results/n5"
       - if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: openapi-probe-n2
+          name: openapi-probe-n5
           path: |
-            ${{ runner.temp }}/results/n2/*.tsv
-            ${{ runner.temp }}/results/n2/*.md
-            ${{ runner.temp }}/results/n2/*.txt
-            ${{ runner.temp }}/results/n2/*.log
-            ${{ runner.temp }}/results/n2/*.time
-            ${{ runner.temp }}/results/n2/*.json
-            ${{ runner.temp }}/results/n2/work/app.orig.zig
+            ${{ runner.temp }}/results/n5/*.tsv
+            ${{ runner.temp }}/results/n5/*.md
+            ${{ runner.temp }}/results/n5/*.txt
+            ${{ runner.temp }}/results/n5/*.log
+            ${{ runner.temp }}/results/n5/*.time
+            ${{ runner.temp }}/results/n5/*.json
+            ${{ runner.temp }}/results/n5/work/app.orig.zig
           if-no-files-found: ignore
 
   # The package's build.zig builds the same programs.
   package:
-    name: build.zig (2 routes)
+    name: build.zig (5 routes)
     timeout-minutes: 30
     runs-on: ubuntu-latest
     steps:
@@ -66,7 +66,7 @@ jobs:
         with:
           use-cache: false
       - working-directory: tests/openapi-probe
-        run: zig build smoke -Droutes=2 --summary all
+        run: zig build smoke -Droutes=5 --summary all
 
   # One size a runner: the baseline, B, then A, each a step of its own, so
   # that what a step measured stays when a later one runs out of time.
@@ -111,10 +111,47 @@ jobs:
             ${{ runner.temp }}/results/n${{ matrix.routes }}/*.time
           if-no-files-found: ignore
 
+  # The other ways of A on 50 routes, on one runner, cold builds only: the
+  # first pass of count + fill alone, count + fill, and ++ per piece.
+  extra:
+    name: extra (50 routes)
+    needs: smoke
+    timeout-minutes: 45
+    runs-on: ubuntu-latest
+    env:
+      BUILD_TIMEOUT: 900
+      SKIP_WARM_AFTER: 0
+    steps:
+      - uses: actions/checkout@v7
+      - uses: mlugg/setup-zig@v2
+        with:
+          use-cache: false
+      - name: Install GNU time
+        run: test -x /usr/bin/time || (sudo apt-get update && sudo apt-get install -y time)
+      - name: The first pass of count + fill alone
+        run: tests/openapi-probe/measure.sh 50 "$RUNNER_TEMP/results/extra50" acount
+      - name: Count + fill
+        run: tests/openapi-probe/measure.sh 50 "$RUNNER_TEMP/results/extra50" afill
+      - name: ++ per piece
+        run: tests/openapi-probe/measure.sh 50 "$RUNNER_TEMP/results/extra50" naive
+      - if: always()
+        name: The table
+        run: python3 -I tests/openapi-probe/summarize.py "$RUNNER_TEMP/results/extra50/results.tsv" | tee -a "$GITHUB_STEP_SUMMARY"
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: openapi-probe-extra50
+          path: |
+            ${{ runner.temp }}/results/extra50/*.tsv
+            ${{ runner.temp }}/results/extra50/*.txt
+            ${{ runner.temp }}/results/extra50/*.log
+            ${{ runner.temp }}/results/extra50/*.time
+          if-no-files-found: ignore
+
   # The table of every size.
   report:
     name: report
-    needs: [smoke, measure]
+    needs: [smoke, measure, extra]
     if: ${{ !cancelled() }}
     timeout-minutes: 10
     runs-on: ubuntu-latest
@@ -122,11 +159,15 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v7
         with:
-          pattern: openapi-probe-n*
+          pattern: openapi-probe-*
           path: results
       - name: The table
         run: |
-          python3 -I tests/openapi-probe/summarize.py results/*/results.tsv | tee report.md
+          python3 -I tests/openapi-probe/summarize.py results/openapi-probe-n*/results.tsv | tee report.md
+          if [ -f results/openapi-probe-extra50/results.tsv ]; then
+            printf '\n**The other ways of A, 50 routes, on a runner of their own.**\n\n' | tee -a report.md
+            python3 -I tests/openapi-probe/summarize.py results/openapi-probe-extra50/results.tsv | tee -a report.md
+          fi
           cat report.md >>"$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v7
         with:

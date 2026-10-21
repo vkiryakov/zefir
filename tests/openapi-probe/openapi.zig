@@ -188,12 +188,32 @@ pub const None = struct {
     }
 };
 
-/// The JSON of the document, built at compile time.
+/// The JSON of the document, built at compile time by pure functions that
+/// return the text of each object and array (`documentText`).
 pub const A = struct {
     pub const Result = []const u8;
 
     pub fn document(comptime O: type) []const u8 {
+        return comptime renderTree(O);
+    }
+};
+
+/// The JSON of the document, built at compile time through the writer of
+/// B: its length counted first, then one array of that length filled.
+pub const AFill = struct {
+    pub const Result = []const u8;
+
+    pub fn document(comptime O: type) []const u8 {
         return comptime render(O);
+    }
+};
+
+/// The first pass of `AFill` alone, for a diagnosis: no document.
+pub const ACount = struct {
+    pub const Result = []const u8;
+
+    pub fn document(comptime O: type) []const u8 {
+        return comptime countOnly(O);
     }
 };
 
@@ -245,6 +265,29 @@ fn render(comptime O: type) []const u8 {
         writeDocument(&filler, doc) catch unreachable;
         const final = buf;
         return &final;
+    }
+}
+
+/// The length of the document, at compile time, and nothing else.
+fn countOnly(comptime O: type) []const u8 {
+    comptime {
+        const routes = routesIn(O);
+        @setEvalBranchQuota(quotaOf(routes, model_quota.base + render_quota.base, model_quota.per_route + render_quota.per_route));
+        const doc = model(O);
+        var counter: Counter = .{};
+        writeDocument(&counter, doc) catch unreachable;
+        if (counter.len == 0) unreachable;
+        return "";
+    }
+}
+
+/// The document as JSON, at compile time, by the pure functions of
+/// `documentText`.
+fn renderTree(comptime O: type) []const u8 {
+    comptime {
+        const routes = routesIn(O);
+        @setEvalBranchQuota(quotaOf(routes, model_quota.base + render_quota.base, model_quota.per_route + render_quota.per_route));
+        return documentText(model(O).*);
     }
 }
 
@@ -1387,12 +1430,218 @@ fn writeValue(e: anytype, value: *const Value) Error!void {
         },
         .object => |members| {
             try e.open("{");
-            for (members) |*member| {
-                try e.key(member.name);
-                try writeValue(e, &member.value);
+            for (members) |*field| {
+                try e.key(field.name);
+                try writeValue(e, &field.value);
             }
             try e.close("}");
         },
+    }
+}
+
+// ------------------------------------------------------------------ the JSON of variant A
+
+// The text of each object and array is what a pure function of its model
+// and its depth returns, the same bytes `writeDocument` writes. The
+// compiler memoizes such a call: a piece met again, such as a `$ref` or an
+// error response that many routes share, costs a lookup. Lists are joined
+// in halves, so a byte is copied a few times on its way up; no array is
+// written in place.
+
+const Text = []const u8;
+
+fn documentText(comptime doc: Document) Text {
+    comptime {
+        var members: []const Text = &.{
+            member("openapi", quoted("3.1.2")),
+            member("info", objectText(1, &.{ member("title", quoted(doc.title)), member("version", quoted(doc.version)) })),
+        };
+        if (doc.server) |url| members = members ++ &[_]Text{member("servers", arrayText(1, &.{objectText(2, &.{member("url", quoted(url))})}))};
+        var tags: [doc.tags.len]Text = undefined;
+        for (doc.tags, &tags) |tag, *slot| slot.* = tagText(tag);
+        const tag_texts = tags;
+        members = members ++ &[_]Text{member("tags", arrayText(1, &tag_texts))};
+        var paths: [doc.paths.len]Text = undefined;
+        for (doc.paths, &paths) |path, *slot| slot.* = member(path.path, pathText(path));
+        const path_texts = paths;
+        members = members ++ &[_]Text{member("paths", objectText(1, &path_texts))};
+        var schemas: [doc.schemas.len]Text = undefined;
+        for (doc.schemas, &schemas) |named, *slot| slot.* = member(named.name, schemaText(named.schema, 3));
+        const schema_texts = schemas;
+        members = members ++ &[_]Text{member("components", objectText(1, &.{member("schemas", objectText(2, &schema_texts))}))};
+        return objectText(0, members) ++ "\n";
+    }
+}
+
+fn tagText(comptime tag: Tag) Text {
+    comptime {
+        var members: []const Text = &.{member("name", quoted(tag.name))};
+        if (tag.description) |text| members = members ++ &[_]Text{member("description", quoted(text))};
+        return objectText(2, members);
+    }
+}
+
+fn pathText(comptime path: PathItem) Text {
+    comptime {
+        var operations: [path.operations.len]Text = undefined;
+        for (path.operations, &operations) |operation, *slot| slot.* = member(operation.method, operationText(operation, 3));
+        const final = operations;
+        return objectText(2, &final);
+    }
+}
+
+fn operationText(comptime operation: Operation, comptime depth: usize) Text {
+    comptime {
+        var members: []const Text = &.{
+            member("operationId", quoted(operation.operation_id)),
+            member("tags", arrayText(depth + 1, &.{quoted(operation.tag)})),
+            member("summary", quoted(operation.summary)),
+        };
+        if (operation.description) |text| members = members ++ &[_]Text{member("description", quoted(text))};
+        if (operation.parameters.len > 0) {
+            var parameters: [operation.parameters.len]Text = undefined;
+            for (operation.parameters, &parameters) |p, *slot| slot.* = parameterText(p, depth + 2);
+            const final = parameters;
+            members = members ++ &[_]Text{member("parameters", arrayText(depth + 1, &final))};
+        }
+        if (operation.request_body) |body| members = members ++ &[_]Text{member("requestBody", objectText(depth + 1, &.{
+            member("required", "true"),
+            member("content", contentText(body, depth + 2)),
+        }))};
+        var responses: [operation.responses.len]Text = undefined;
+        for (operation.responses, &responses) |response, *slot| slot.* = member(response.status, responseText(response, depth + 2));
+        const final = responses;
+        members = members ++ &[_]Text{member("responses", objectText(depth + 1, &final))};
+        return objectText(depth, members);
+    }
+}
+
+fn parameterText(comptime p: Parameter, comptime depth: usize) Text {
+    comptime {
+        var members: []const Text = &.{
+            member("name", quoted(p.name)),
+            member("in", quoted(p.in)),
+            member("required", if (p.required) "true" else "false"),
+        };
+        if (p.description) |text| members = members ++ &[_]Text{member("description", quoted(text))};
+        if (p.exploded) members = members ++ &[_]Text{ member("style", quoted("form")), member("explode", "true") };
+        members = members ++ &[_]Text{member("schema", schemaText(p.schema, depth + 1))};
+        return objectText(depth, members);
+    }
+}
+
+fn responseText(comptime response: Response, comptime depth: usize) Text {
+    comptime {
+        var members: []const Text = &.{member("description", quoted(response.description))};
+        if (response.content) |content| members = members ++ &[_]Text{member("content", contentText(content, depth + 1))};
+        return objectText(depth, members);
+    }
+}
+
+fn contentText(comptime content: Content, comptime depth: usize) Text {
+    comptime {
+        var inner: []const Text = &.{member("schema", schemaText(content.schema, depth + 2))};
+        if (content.examples.len > 0) {
+            var examples: [content.examples.len]Text = undefined;
+            for (content.examples, &examples) |example, *slot| {
+                slot.* = member(example.name, objectText(depth + 3, &.{member("value", valueText(example.value, depth + 4))}));
+            }
+            const final = examples;
+            inner = inner ++ &[_]Text{member("examples", objectText(depth + 2, &final))};
+        }
+        return objectText(depth, &.{member(content.media_type, objectText(depth + 1, inner))});
+    }
+}
+
+fn schemaText(comptime s: Schema, comptime depth: usize) Text {
+    comptime {
+        var members: []const Text = &.{};
+        if (s.ref) |ref| {
+            members = if (s.nullable) &.{member("oneOf", arrayText(depth + 1, &.{
+                objectText(depth + 2, &.{member("$ref", quoted(ref))}),
+                objectText(depth + 2, &.{member("type", quoted("null"))}),
+            }))} else &.{member("$ref", quoted(ref))};
+        } else {
+            const type_text = if (s.nullable) arrayText(depth + 1, &.{ quoted(s.json_type), quoted("null") }) else quoted(s.json_type);
+            members = &.{member("type", type_text)};
+            if (s.format) |format| members = members ++ &[_]Text{member("format", quoted(format))};
+        }
+        if (s.description) |text| members = members ++ &[_]Text{member("description", quoted(text))};
+        for (s.numbers) |k| members = members ++ &[_]Text{member(k.name, decimal(k.value))};
+        if (s.pattern) |pattern| members = members ++ &[_]Text{member("pattern", quoted(pattern))};
+        if (s.enum_values.len > 0) {
+            var values: []const Text = &.{};
+            for (s.enum_values) |name| values = values ++ &[_]Text{quoted(name)};
+            if (s.nullable) values = values ++ &[_]Text{"null"};
+            members = members ++ &[_]Text{member("enum", arrayText(depth + 1, values))};
+        }
+        if (s.default) |default| members = members ++ &[_]Text{member("default", valueText(default, depth + 1))};
+        if (s.items) |items| members = members ++ &[_]Text{member("items", schemaText(items.*, depth + 1))};
+        if (s.object) {
+            if (s.required.len > 0) {
+                var names: []const Text = &.{};
+                for (s.required) |name| names = names ++ &[_]Text{quoted(name)};
+                members = members ++ &[_]Text{member("required", arrayText(depth + 1, names))};
+            }
+            var properties: [s.properties.len]Text = undefined;
+            for (s.properties, &properties) |p, *slot| slot.* = member(p.name, schemaText(p.schema, depth + 2));
+            const final = properties;
+            members = members ++ &[_]Text{member("properties", objectText(depth + 1, &final))};
+            if (s.closed) members = members ++ &[_]Text{member("additionalProperties", "false")};
+        }
+        return objectText(depth, members);
+    }
+}
+
+fn valueText(comptime value: Value, comptime depth: usize) Text {
+    comptime {
+        switch (value) {
+            .null => return "null",
+            .bool => |b| return if (b) "true" else "false",
+            .int => |n| return decimal(n),
+            .string => |text| return quoted(text),
+            .array => |items| {
+                var texts: [items.len]Text = undefined;
+                for (items, &texts) |item, *slot| slot.* = valueText(item, depth + 1);
+                const final = texts;
+                return arrayText(depth, &final);
+            },
+            .object => |fields| {
+                var texts: [fields.len]Text = undefined;
+                for (fields, &texts) |field, *slot| slot.* = member(field.name, valueText(field.value, depth + 1));
+                const final = texts;
+                return objectText(depth, &final);
+            },
+        }
+    }
+}
+
+fn member(comptime key: Text, comptime value: Text) Text {
+    return quoted(key) ++ ": " ++ value;
+}
+
+/// An object at `depth`: its members a line each, one level deeper.
+fn objectText(comptime depth: usize, comptime members: []const Text) Text {
+    return enclosed("{", "}", depth, members);
+}
+
+fn arrayText(comptime depth: usize, comptime items: []const Text) Text {
+    return enclosed("[", "]", depth, items);
+}
+
+fn enclosed(comptime open: Text, comptime close: Text, comptime depth: usize, comptime items: []const Text) Text {
+    comptime {
+        if (items.len == 0) return open ++ close;
+        return open ++ breaks[0 .. 3 + 2 * depth] ++ joined(comma_breaks[0 .. 4 + 2 * depth], items) ++ breaks[0 .. 1 + 2 * depth] ++ close;
+    }
+}
+
+/// `items` with `separator` between them, joined in halves.
+fn joined(comptime separator: Text, comptime items: []const Text) Text {
+    comptime {
+        if (items.len == 1) return items[0];
+        const half = items.len / 2;
+        return joined(separator, items[0..half]) ++ separator ++ joined(separator, items[half..]);
     }
 }
 

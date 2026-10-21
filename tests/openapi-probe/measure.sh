@@ -2,7 +2,7 @@
 # The measurement of design 1.2 of zefir-openapi, section 16, for one size
 # of the synthetic application:
 #
-#   measure.sh <routes> <out-dir> <variant>...   measure these variants (baseline b a naive)
+#   measure.sh <routes> <out-dir> <variant>...   measure these variants (baseline b a afill acount naive)
 #   measure.sh --check <out-dir>                 check the documents, print the table
 #
 # Each variant is one process of `zig build-exe`, Debug, with LLVM (the
@@ -36,7 +36,7 @@ if [ "${1:-}" = --check ]; then
         echo "$(basename "$doc"): NOT valid JSON"
       fi
     done
-    for other in b naive; do
+    for other in b afill naive; do
       if [ -f "$out/doc-a.json" ] && [ -f "$out/doc-$other.json" ]; then
         if cmp -s "$out/doc-a.json" "$out/doc-$other.json"; then
           echo "doc-a.json and doc-$other.json: the same bytes"
@@ -109,11 +109,13 @@ watch_memory() {
   echo "$peak" >"$out/$tag.sampled"
 }
 
-# The peak RSS of a build, in kB: GNU time's, else the watchdog's.
+# The peak RSS of a build, in kB: the larger of GNU time's and the
+# watchdog's; GNU time misses the compiler that timeout killed.
 rss_of() {
-  local kb
+  local kb sampled
   kb=$(awk -F': ' '/Maximum resident set size/ {print $2}' "$out/$1.time" 2>/dev/null)
-  [ -n "$kb" ] || kb=$(cat "$out/$1.sampled" 2>/dev/null)
+  sampled=$(cat "$out/$1.sampled" 2>/dev/null)
+  [ "${sampled:-0}" -gt "${kb:-0}" ] && kb=$sampled
   echo "${kb:-0}"
 }
 

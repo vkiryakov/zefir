@@ -15,7 +15,14 @@ the cold build.
 import csv
 import sys
 
-NAMES = {"baseline": "baseline", "a": "A (JSON at compile time)", "b": "B (model, JSON at startup)", "naive": "naive A (++)"}
+NAMES = {
+    "baseline": "baseline",
+    "b": "B (model, JSON at startup)",
+    "a": "A (JSON at compile time, pure functions)",
+    "afill": "A (JSON at compile time, count + fill)",
+    "acount": "count pass of A count + fill alone",
+    "naive": "A naive (++ per piece)",
+}
 
 
 def number(text):
@@ -49,7 +56,7 @@ def main():
     print("|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
     for n in sorted(sizes):
         base = sizes[n].get("baseline")
-        for variant in ["baseline", "b", "a", "naive"]:
+        for variant in ["baseline", "b", "a", "afill", "acount", "naive"]:
             row = sizes[n].get(variant)
             if row is None:
                 continue
