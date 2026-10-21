@@ -460,3 +460,155 @@ test "on ?U, const becomes an enum with null and an enum gets null; other keywor
     try testing.expectEqualStrings("{\"const\":3}", s.keywords[2].value);
     try testing.expectEqualStrings("\"^a\"", s.keywords[3].value);
 }
+
+/// A rule of `kind` and a field type it takes, for the census. The switch
+/// has no `else`: a new kind needs its row here too.
+fn sample(comptime kind: core.Kind) struct { rule: core.Rule, T: type } {
+    const v = @import("root.zig");
+    const Keyed = struct { id: u32 };
+    const S = []const u8;
+    return switch (kind) {
+        .equals => .{ .rule = v.equals(1), .T = u32 },
+        .not_equals => .{ .rule = v.notEquals(1), .T = u32 },
+        .one_of => .{ .rule = v.oneOf(.{"a"}), .T = S },
+        .none_of => .{ .rule = v.noneOf(.{"a"}), .T = S },
+        .empty => .{ .rule = v.empty, .T = S },
+        .not_empty => .{ .rule = v.notEmpty, .T = S },
+        .min => .{ .rule = v.min(1), .T = u32 },
+        .max => .{ .rule = v.max(1), .T = u32 },
+        .range => .{ .rule = v.range(1, 2), .T = u32 },
+        .positive => .{ .rule = v.positive, .T = u32 },
+        .non_negative => .{ .rule = v.nonNegative, .T = i32 },
+        .negative => .{ .rule = v.negative, .T = i32 },
+        .non_positive => .{ .rule = v.nonPositive, .T = i32 },
+        .divisible_by => .{ .rule = v.divisibleBy(2), .T = u32 },
+        .finite => .{ .rule = v.finite, .T = f64 },
+        .min_length => .{ .rule = v.minLength(1), .T = S },
+        .max_length => .{ .rule = v.maxLength(1), .T = S },
+        .length => .{ .rule = v.length(1, 2), .T = S },
+        .min_bytes => .{ .rule = v.minBytes(1), .T = S },
+        .max_bytes => .{ .rule = v.maxBytes(1), .T = S },
+        .utf8 => .{ .rule = v.utf8, .T = S },
+        .not_blank => .{ .rule = v.notBlank, .T = S },
+        .ascii => .{ .rule = v.ascii, .T = S },
+        .printable_ascii => .{ .rule = v.printableAscii, .T = S },
+        .alphanumeric => .{ .rule = v.alphanumeric, .T = S },
+        .alpha => .{ .rule = v.alpha, .T = S },
+        .digits => .{ .rule = v.digits, .T = S },
+        .lowercase => .{ .rule = v.lowercase, .T = S },
+        .uppercase => .{ .rule = v.uppercase, .T = S },
+        .multibyte => .{ .rule = v.multibyte, .T = S },
+        .full_width => .{ .rule = v.fullWidth, .T = S },
+        .half_width => .{ .rule = v.halfWidth, .T = S },
+        .variable_width => .{ .rule = v.variableWidth, .T = S },
+        .contains => .{ .rule = v.contains("a"), .T = S },
+        .not_contains => .{ .rule = v.notContains("a"), .T = S },
+        .strong_password => .{ .rule = v.strongPassword(.{}), .T = S },
+        .number_string => .{ .rule = v.numberString, .T = S },
+        .decimal => .{ .rule = v.decimal(.{}), .T = S },
+        .boolean_string => .{ .rule = v.booleanString, .T = S },
+        .hexadecimal => .{ .rule = v.hexadecimal, .T = S },
+        .octal => .{ .rule = v.octal, .T = S },
+        .port => .{ .rule = v.port, .T = S },
+        .latitude => .{ .rule = v.latitude, .T = S },
+        .longitude => .{ .rule = v.longitude, .T = S },
+        .lat_long => .{ .rule = v.latLong, .T = S },
+        .email => .{ .rule = v.email, .T = S },
+        .http_url => .{ .rule = v.httpUrl, .T = S },
+        .fqdn => .{ .rule = v.fqdn(.{}), .T = S },
+        .ip => .{ .rule = v.ip, .T = S },
+        .ipv4 => .{ .rule = v.ipv4, .T = S },
+        .ipv6 => .{ .rule = v.ipv6, .T = S },
+        .mac_address => .{ .rule = v.macAddress(.{}), .T = S },
+        .json => .{ .rule = v.json, .T = S },
+        .jwt => .{ .rule = v.jwt, .T = S },
+        .base32 => .{ .rule = v.base32, .T = S },
+        .base58 => .{ .rule = v.base58, .T = S },
+        .base64 => .{ .rule = v.base64, .T = S },
+        .base64_url => .{ .rule = v.base64Url, .T = S },
+        .data_uri => .{ .rule = v.dataUri, .T = S },
+        .magnet_uri => .{ .rule = v.magnetUri, .T = S },
+        .mime_type => .{ .rule = v.mimeType, .T = S },
+        .locale => .{ .rule = v.locale, .T = S },
+        .sem_ver => .{ .rule = v.semVer, .T = S },
+        .hex_color => .{ .rule = v.hexColor, .T = S },
+        .rgb_color => .{ .rule = v.rgbColor, .T = S },
+        .hsl_color => .{ .rule = v.hslColor, .T = S },
+        .uuid => .{ .rule = v.uuid, .T = S },
+        .mongo_id => .{ .rule = v.mongoId, .T = S },
+        .firebase_push_id => .{ .rule = v.firebasePushId, .T = S },
+        .hash => .{ .rule = v.hash(.sha256), .T = S },
+        .credit_card => .{ .rule = v.creditCard, .T = S },
+        .isbn => .{ .rule = v.isbn, .T = S },
+        .isbn10 => .{ .rule = v.isbn10, .T = S },
+        .isbn13 => .{ .rule = v.isbn13, .T = S },
+        .issn => .{ .rule = v.issn, .T = S },
+        .ean => .{ .rule = v.ean, .T = S },
+        .isin => .{ .rule = v.isin, .T = S },
+        .isrc => .{ .rule = v.isrc, .T = S },
+        .bic => .{ .rule = v.bic, .T = S },
+        .iban => .{ .rule = v.iban, .T = S },
+        .btc_address => .{ .rule = v.btcAddress(.mainnet), .T = S },
+        .ethereum_address => .{ .rule = v.ethereumAddress, .T = S },
+        .date => .{ .rule = v.date, .T = S },
+        .rfc3339 => .{ .rule = v.rfc3339, .T = S },
+        .iso8601 => .{ .rule = v.iso8601, .T = S },
+        .min_date => .{ .rule = v.minDate("2020-01-01"), .T = S },
+        .max_date => .{ .rule = v.maxDate("2020-01-01"), .T = S },
+        .military_time => .{ .rule = v.militaryTime, .T = S },
+        .min_items => .{ .rule = v.minItems(1), .T = []const u32 },
+        .max_items => .{ .rule = v.maxItems(1), .T = []const u32 },
+        .unique_items => .{ .rule = v.uniqueItems, .T = []const bool },
+        .unique_by => .{ .rule = v.uniqueBy(.id), .T = []const Keyed },
+        .contains_all => .{ .rule = v.containsAll(.{1}), .T = []const u32 },
+        .contains_none => .{ .rule = v.containsNone(.{1}), .T = []const u32 },
+        .each => .{ .rule = v.each(v.notEmpty), .T = []const S },
+        .custom => .{ .rule = v.custom("users.ok", "must be ok", isOk), .T = u32 },
+    };
+}
+
+fn isOk(_: u32) bool {
+    return true;
+}
+
+/// The census over every kind: how many are exact, and which are
+/// approximate and which have no keyword, in the order of `core.kinds`;
+/// and every keyword of every sample, for the checks of their texts.
+fn census() struct { exact: usize, approximate: []const u8, none: []const u8, keywords: []const RuleSchema.Keyword } {
+    comptime {
+        @setEvalBranchQuota(core.eval_quota);
+        var exact_count: usize = 0;
+        var approximate_names: []const u8 = "";
+        var none_names: []const u8 = "";
+        var keywords: []const RuleSchema.Keyword = &.{};
+        for (core.kinds) |row| {
+            const s = sample(row.kind);
+            const schema = schemaOf(s.rule, s.T);
+            switch (schema.accuracy) {
+                .exact => exact_count += 1,
+                .approximate => approximate_names = approximate_names ++ " " ++ row.name,
+                .none => none_names = none_names ++ " " ++ row.name,
+            }
+            keywords = keywords ++ schema.keywords;
+            for (schema.items) |item| keywords = keywords ++ item.keywords;
+        }
+        return .{ .exact = exact_count, .approximate = approximate_names, .none = none_names, .keywords = keywords };
+    }
+}
+
+test "the census over the kinds: 66 exact, 26 approximate, 4 without a keyword" {
+    const c = comptime census();
+    try testing.expectEqual(66, c.exact);
+    try testing.expectEqualStrings(" minBytes maxBytes email httpUrl ip ipv6 json jwt dataUri magnetUri mimeType locale rgbColor hslColor" ++
+        " creditCard isbn isbn10 isbn13 issn ean isin iban btcAddress ethereumAddress rfc3339 iso8601", c.approximate);
+    try testing.expectEqualStrings(" minDate maxDate uniqueBy custom", c.none);
+}
+
+test "every keyword is standard and its value is JSON text" {
+    const c = comptime census();
+    for (c.keywords) |k| {
+        try testing.expect(!std.mem.startsWith(u8, k.name, "x-"));
+        const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, k.value, .{});
+        parsed.deinit();
+    }
+}
