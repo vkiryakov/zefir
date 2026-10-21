@@ -190,7 +190,7 @@ pub fn build(b: *std.Build) void {
     }
 
     addValidatorTests(b, test_validator, validator_compile_step, validator, log, target, optimize, tsan);
-    addHttpCompileChecks(b, test_http, http, validator, target, optimize);
+    const openapi_app = addHttpCompileChecks(b, test_http, http, validator, target, optimize);
     // The examples of the zefir-http guide: the middleware of an
     // application (authentication, CORS) and their tests. Like an
     // application, they may read settings with confy and log with log.
@@ -235,7 +235,7 @@ pub fn build(b: *std.Build) void {
     });
     test_http.dependOn(&b.addRunArtifact(http_check_release).step);
 
-    addOpenapiCompileChecks(b, test_openapi, zefir, target, optimize);
+    addOpenapiCompileChecks(b, test_openapi, zefir, target, optimize, openapi_app);
     addOpenapiGoldens(b, test_openapi, zefir, target, optimize, tsan);
 
     // `zig build fuzz-http` runs the fuzz test of zefir-http's HTTP/1.1
@@ -1461,7 +1461,9 @@ fn addHttpGuide(
 /// The compile checks of zefir-http, from the lists in
 /// src/http/tests/cases.zig: client code that must fail to compile with
 /// its message, and client code that must compile. Each file imports
-/// "http" and "validator".
+/// "http" and "validator". Gives the application of gen_big_app with the
+/// declarations of zefir.openapi and its document, which test-openapi
+/// compiles.
 fn addHttpCompileChecks(
     b: *std.Build,
     test_step: *std.Build.Step,
@@ -1469,7 +1471,7 @@ fn addHttpCompileChecks(
     validator: *std.Build.Module,
     target: std.Build.ResolvedTarget,
     optimize: std.lang.Optimize,
-) void {
+) std.Build.LazyPath {
     const imports: []const std.Build.Module.Import = &.{
         .{ .name = "http", .module = http },
         .{ .name = "validator", .module = validator },
@@ -1511,7 +1513,7 @@ fn addHttpCompileChecks(
     // and on some middleware, whose routes the Debug check compares. Each
     // must compile without an eval branch quota of its own. The generator is
     // built for the host, so it also runs when -Dtarget names another
-    // system.
+    // system. Its fourth file is the application of the document.
     const gen_big_app = b.addExecutable(.{
         .name = "gen_big_app",
         .root_module = b.createModule(.{
@@ -1533,6 +1535,7 @@ fn addHttpCompileChecks(
         });
         test_step.dependOn(&app.step);
     }
+    return run_gen.addOutputFileArg("openapi_app.zig");
 }
 
 /// The golden documents of zefir-openapi: golden_test.zig compares the
@@ -1578,14 +1581,27 @@ fn addOpenapiGoldens(
 /// src/openapi/tests/cases.zig: application code that must fail to
 /// compile with its message. Each file imports the umbrella module "zefir"
 /// and writes its declarations through it, as an application does:
-/// `pub const openapi: zefir.openapi.Doc(@This()) = .{ ... }`.
+/// `pub const openapi: zefir.openapi.Doc(@This()) = .{ ... }`. And
+/// `openapi_app`, an application of sixty routes that gen_big_app writes,
+/// whose document must compile without an eval branch quota of its own.
 fn addOpenapiCompileChecks(
     b: *std.Build,
     test_step: *std.Build.Step,
     zefir: *std.Build.Module,
     target: std.Build.ResolvedTarget,
     optimize: std.lang.Optimize,
+    openapi_app: std.Build.LazyPath,
 ) void {
+    const app = b.addTest(.{
+        .name = "openapi_app",
+        .root_module = b.createModule(.{
+            .root_source_file = openapi_app,
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zefir", .module = zefir }},
+        }),
+    });
+    test_step.dependOn(&app.step);
     // Each fixture is compiled (never run) and passes only when the
     // compilation fails with an error whose message is `expect`, from its
     // start (`error: ` in front) to the end of its line.
