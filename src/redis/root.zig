@@ -79,6 +79,7 @@ test {
     _ = @import("engine/DeadlineStream.zig");
     _ = @import("engine/connect.zig");
     _ = @import("engine/Address.zig");
+    _ = @import("tests/connection_tests.zig");
 }
 
 test "the package version reaches the module" {

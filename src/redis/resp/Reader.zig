@@ -22,6 +22,9 @@
 //!   last, with all it holds; `skipReply()` skips what is left of the
 //!   reply, all of it when nothing was read yet. Neither takes memory.
 //! - `done()` tells whether the reply has been read to its end.
+//! - `skipAttributes()`, before `next`, skips the attributes at the top of
+//!   the reply and leaves its first element unread, for a look at its type
+//!   byte.
 //!
 //! What the reader takes care of:
 //!
@@ -187,6 +190,24 @@ pub fn next(r: *Reader) Error!Element {
         }
         return element;
     }
+}
+
+/// Skips the attributes that stand at the top of the reply, before its
+/// first element, and leaves that element unread: for the connection,
+/// which looks at the first byte of what comes to tell a push between
+/// replies from a reply. Call it before `next`.
+pub fn skipAttributes(r: *Reader) Error!void {
+    std.debug.assert(!r.started);
+    while (try r.in.peekByte() == '|') {
+        _ = try r.byte();
+        const pairs = try r.readLength(false) orelse return error.ProtocolViolation;
+        try r.openAggregate(pairs, 2);
+        while (r.depth > 0) {
+            _ = try r.next();
+            try r.skipPayload();
+        }
+    }
+    r.started = false;
 }
 
 /// Whether the reply has been read to its end.

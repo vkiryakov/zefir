@@ -302,3 +302,38 @@ test "the end of the stream inside a reply is EndOfStream" {
         try testing.expectError(error.EndOfStream, result);
     }
 }
+
+test "skipAttributes skips the attributes at the top of a reply and leaves its first element unread" {
+    const cases = [_]struct { []const u8, u8 }{
+        // The attribute of the RESP3 specification, before a push.
+        .{ "|1\r\n+key-popularity\r\n%2\r\n$1\r\na\r\n,0.1923\r\n$1\r\nb\r\n,0.0012\r\n>2\r\n+x\r\n+y\r\n", '>' },
+        .{ "|1\r\n+a\r\n:1\r\n|1\r\n+b\r\n*1\r\n|1\r\n+c\r\n:3\r\n:2\r\n:42\r\n", ':' },
+        .{ "|0\r\n+OK\r\n", '+' },
+        .{ ":42\r\n", ':' },
+    };
+    for (cases) |case| {
+        const bytes, const first = case;
+        var in: std.Io.Reader = .fixed(bytes);
+        var reader: Reader = .init(&in, roomy);
+        try reader.skipAttributes();
+        try testing.expectEqual(first, try in.peekByte());
+        // What follows reads as a reply of its own.
+        try reader.skipReply();
+        try testing.expect(reader.done());
+        try testing.expectEqual(bytes.len, in.seek);
+    }
+}
+
+test "skipAttributes keeps the rules: no push inside an attribute, and the budget" {
+    var in: std.Io.Reader = .fixed("|1\r\n+a\r\n>1\r\n+x\r\n:1\r\n");
+    var reader: Reader = .init(&in, roomy);
+    try testing.expectError(error.ProtocolViolation, reader.skipAttributes());
+
+    var long: std.Io.Reader = .fixed("|1\r\n+a\r\n$100\r\n");
+    var small: Reader = .init(&long, 64);
+    try testing.expectError(error.ReplyTooLarge, small.skipAttributes());
+
+    var cut: std.Io.Reader = .fixed("|1\r\n+a\r\n");
+    var short: Reader = .init(&cut, roomy);
+    try testing.expectError(error.EndOfStream, short.skipAttributes());
+}
