@@ -13,16 +13,19 @@
 //! else its default response: 200 `application/json` for `http.Json(T)`,
 //! 204 for `!void`, 200 `text/event-stream` for SSE), the errors it can
 //! give the error handler, whose answers `mapError` gives, and the events
-//! of an SSE route.
+//! of an SSE route; and what the middleware of its chain declare in their
+//! own `pub const openapi`: the `.query`, `.headers` and `.cookies` they
+//! read, and the `.responses` they write themselves.
 //!
 //! At run time it compares:
 //! - each input call (`ctx.path`, `query`, `headers`, `cookies`, `json`,
-//!   `form`, and so `ctx.input`): its type must be the one the route
-//!   declares for that source;
+//!   `form`, and so `ctx.input`): its type must be one the route or a
+//!   middleware of its chain declares for that source;
 //! - each response of the route, from the handler, from a middleware that
 //!   answers `.handled`, from the error handler: its status and the media
-//!   type of its body must be among the route's responses, or among the
-//!   answers `mapError` gives its errors, in the error handler's media type;
+//!   type of its body must be among the responses of the route and of its
+//!   middleware, or among the answers `mapError` gives its errors, in the
+//!   error handler's media type;
 //! - `subscribe` of an `http.sse.Manager(Events)`: `Events` must be the
 //!   route's `.events`.
 //!
@@ -35,6 +38,14 @@
 //! server's own 500; the automatic OPTIONS, a 405 and a 404 belong to no
 //! route. Only routes of controllers with `openapi` are checked, and only in
 //! Debug builds: elsewhere none of this is compiled.
+//!
+//! zefir-http does not import zefir-openapi: it reads the `openapi` of a
+//! middleware by the names of its fields. `.query`, `.headers` and
+//! `.cookies` are types, `void` for none; `.responses` holds a field per
+//! status, named as in `std.http.Status`, optional or not, whose
+//! `.content_type` or `.json` give its body, and neither none. A
+//! `zefir.openapi.MiddlewareDoc` has this form, and so does a literal:
+//! `pub const openapi = .{ .query = PageQuery, .responses = .{ .not_modified = .{} } };`.
 const std = @import("std");
 const builtin = @import("builtin");
 const routes = @import("routes.zig");
@@ -62,13 +73,19 @@ const TypeRef = struct { id: *const anyopaque, name: []const u8 };
 /// its body, null for none.
 const Answer = struct { status: u16, media: ?[]const u8 };
 
+/// A DTO that a middleware of the chain declares for a source of input.
+const Declared = struct { source: Source, dto: TypeRef, by: []const u8 };
+
 /// What a route of a controller with `openapi` declares, as the check
 /// compares its requests with it.
 pub const Table = struct {
     /// The DTO the route declares for each source, by `Source`.
     own: [@typeInfo(Source).@"enum".field_names.len]?TypeRef,
-    /// The responses of the route: as `.responses` lists them, or its
-    /// default response.
+    /// The query, headers and cookies that the middleware of its chain
+    /// declare.
+    chain: []const Declared,
+    /// The responses of the route, as `.responses` lists them or its
+    /// default response, then those its middleware declare.
     responses: []const Answer,
     /// The errors the route can give the error handler; null when one of
     /// its places returns `anyerror`, so that every error may be its.
@@ -107,7 +124,8 @@ pub fn tableOf(comptime C: type, comptime handler: []const u8, comptime R: type,
                 dtoOf(R.Body),
                 dtoOf(R.Form),
             },
-            .responses = answersOf(R, ValueOf(C, handler)),
+            .chain = chainInputs(chain),
+            .responses = answersOf(R, ValueOf(C, handler)) ++ chainAnswers(chain),
             .errors = if (names) |list| errorsOf(list) else null,
             .statusOf = &StatusOf(H).status,
             .error_media = if (ErrorBodyOf(H) == errors.Problem) "application/problem+json" else "application/json",
@@ -163,6 +181,70 @@ fn answersOf(comptime R: type, comptime Value: type) []const Answer {
     }
     const final = out;
     return &final;
+}
+
+/// The query, headers and cookies that the elements of `chain` declare in
+/// their `openapi`.
+fn chainInputs(comptime chain: []const mw.Elem) []const Declared {
+    var out: []const Declared = &.{};
+    for (chain) |e| {
+        if (@hasDecl(e.Impl, "openapi")) out = out ++ inputsOf(e.Impl, e.name);
+    }
+    return out;
+}
+
+/// The responses that the elements of `chain` declare in their `openapi`.
+fn chainAnswers(comptime chain: []const mw.Elem) []const Answer {
+    var out: []const Answer = &.{};
+    for (chain) |e| {
+        if (@hasDecl(e.Impl, "openapi")) out = out ++ middlewareAnswers(e.Impl, e.name);
+    }
+    return out;
+}
+
+/// The `openapi` of the middleware `Impl`, which messages call `name`.
+fn docOf(comptime Impl: type, comptime name: []const u8) @TypeOf(Impl.openapi) {
+    const doc = Impl.openapi;
+    if (@typeInfo(@TypeOf(doc)) != .@"struct")
+        @compileError("zefir.http: the openapi of the middleware " ++ name ++ " is a zefir.openapi.MiddlewareDoc, such as .{ .query = PageQuery }; got " ++ plan.typeName(@TypeOf(doc)));
+    return doc;
+}
+
+/// The `.query`, `.headers` and `.cookies` of the `openapi` of `Impl`.
+fn inputsOf(comptime Impl: type, comptime name: []const u8) []const Declared {
+    const doc = docOf(Impl, name);
+    var out: []const Declared = &.{};
+    for ([_]Source{ .query, .headers, .cookies }) |source| {
+        if (!@hasField(@TypeOf(doc), @tagName(source))) continue;
+        const T = @field(doc, @tagName(source));
+        if (@TypeOf(T) != type)
+            @compileError("zefir.http: the openapi of the middleware " ++ name ++ ": ." ++ @tagName(source) ++ " is the type of a DTO, such as ." ++ @tagName(source) ++ " = PageQuery, or void");
+        if (T != void) out = out ++ [_]Declared{.{ .source = source, .dto = dtoOf(T).?, .by = name }};
+    }
+    return out;
+}
+
+/// The `.responses` of the `openapi` of `Impl`: a field per status, named
+/// as in `std.http.Status`; an optional one that is null declares nothing.
+fn middlewareAnswers(comptime Impl: type, comptime name: []const u8) []const Answer {
+    const doc = docOf(Impl, name);
+    if (!@hasField(@TypeOf(doc), "responses")) return &.{};
+    const list = doc.responses;
+    const L = @TypeOf(list);
+    const form = "zefir.http: the openapi of the middleware " ++ name ++ ": .responses ";
+    if (@typeInfo(L) != .@"struct") @compileError(form ++ "is a struct of statuses, such as .responses = .{ .not_modified = .{} }");
+    var out: []const Answer = &.{};
+    for (@typeInfo(L).@"struct".field_names) |key| {
+        if (!@hasField(std.http.Status, key)) @compileError(form ++ "names ." ++ key ++ "; its keys are names of std.http.Status, such as .not_modified");
+        const value = @field(list, key);
+        const entry = if (@typeInfo(@TypeOf(value)) == .optional) value orelse continue else value;
+        const E = @TypeOf(entry);
+        const content_type: ?[]const u8 = if (@hasField(E, "content_type")) entry.content_type else null;
+        const json: type = if (@hasField(E, "json")) entry.json else void;
+        const media: ?[]const u8 = if (content_type) |text| mediaType(text) else if (json != void) "application/json" else null;
+        out = out ++ [_]Answer{.{ .status = @backingInt(@field(std.http.Status, key)), .media = media }};
+    }
+    return out;
 }
 
 /// The errors of `names` as values.
@@ -302,6 +384,9 @@ fn record(ctx: *Context, route: Checked, m: Mismatch) void {
 
 fn allowsInput(t: *const Table, source: Source, id: *const anyopaque) bool {
     if (t.own[@backingInt(source)]) |declared| if (declared.id == id) return true;
+    for (t.chain) |declared| {
+        if (declared.source == source and declared.dto.id == id) return true;
+    }
     return false;
 }
 
@@ -367,6 +452,13 @@ fn writeLine(w: *std.Io.Writer, route: Checked, what: What) std.Io.Writer.Error!
                     try w.print("declares .{t} = {s}", .{ in.source, declared.name })
                 else
                     try w.print("declares no .{t}", .{in.source});
+                var first = true;
+                for (t.chain) |declared| {
+                    if (declared.source != in.source) continue;
+                    try w.writeAll(if (first) "; its middleware declare " else ", ");
+                    first = false;
+                    try w.print(".{t} = {s} ({s})", .{ declared.source, declared.dto.name, declared.by });
+                }
             },
             .events => |name| {
                 try w.print("subscribes with an http.sse.Manager({s}), but declares ", .{name});
@@ -554,6 +646,63 @@ const Item = struct { id: u64, title: []const u8 };
 const ItemEvent = union(enum) { created: Item };
 const OtherEvent = union(enum) { other: u32 };
 const OtherQuery = struct { q: ?[]const u8 = null };
+const PageQuery = struct { limit: u32 = 20 };
+const TokenHeaders = struct { authorization: ?[]const u8 = null };
+
+/// The form of `zefir.openapi.MiddlewareDoc`, as far as the check reads it:
+/// types, `void` for none, and a field per status of `std.http.Status`,
+/// null for none.
+const TypedDoc = struct {
+    query: type = void,
+    headers: type = void,
+    cookies: type = void,
+    responses: Responses = .{},
+
+    const Response = struct { description: ?[]const u8 = null, content_type: ?[]const u8 = null, json: type = void };
+    const Responses = ResponsesOf(Response);
+};
+
+fn ResponsesOf(comptime Response: type) type {
+    const names = @typeInfo(std.http.Status).@"enum".field_names;
+    const none: ?Response = null;
+    return @Struct(.auto, null, names, &@as([names.len]type, @splat(?Response)), &@as([names.len]std.lang.Type.Struct.FieldAttributes, @splat(.{ .default_value_ptr = &none })));
+}
+
+/// A middleware type, whose `openapi` is a literal: it reads a query of its
+/// own, and answers 304 itself when asked, or a 418 nobody declares.
+const Paging = struct {
+    pub const openapi = .{ .query = PageQuery, .responses = .{ .not_modified = .{} } };
+
+    pub fn run(ctx: *Context) !mw.MiddlewareResult {
+        _ = try ctx.query(PageQuery);
+        if (is(ctx, "not modified")) {
+            _ = ctx.response.status(304);
+            return .handled;
+        }
+        if (is(ctx, "teapot")) {
+            _ = ctx.response.status(418);
+            return .handled;
+        }
+        return .next;
+    }
+};
+
+/// A middleware object of the server, whose `openapi` is typed: it reads
+/// the headers of every request, before the route is applied, and answers
+/// a page of its own when asked.
+const TokenCheck = struct {
+    pub const openapi: TypedDoc = .{
+        .headers = TokenHeaders,
+        .responses = .{ .unauthorized = .{ .description = "Signs in.", .content_type = "text/html; charset=utf-8" } },
+    };
+
+    pub fn run(_: *TokenCheck, ctx: *Context) !mw.MiddlewareResult {
+        _ = try ctx.headers(TokenHeaders);
+        if (!is(ctx, "login page")) return .next;
+        try ctx.response.status(401).html("<p>Sign in</p>");
+        return .handled;
+    }
+};
 
 /// What the test asks of a handler, in the header `x-mode`, which the
 /// handler reads raw: the check does not compare raw reads.
@@ -580,8 +729,13 @@ const ItemsV1Controller = struct {
             .remove = routes.delete("/{id}", .{ .path = TodoPath }),
             .exportCsv = routes.get("/export.csv", .{ .responses = .{ .ok = .{ .content_type = "text/csv" } } }),
             .events = sse.get("/events", .{ .events = ItemEvent }),
+            .page = routes.get("/page", .{ .middleware = .{Paging} }),
         },
     });
+
+    pub fn page(_: *ItemsV1Controller, ctx: *Context) !void {
+        if (is(ctx, "other query")) _ = try ctx.query(OtherQuery) else _ = try ctx.query(PageQuery);
+    }
 
     pub fn list(_: *ItemsV1Controller, ctx: *Context) !Json(Item) {
         if (is(ctx, "other query")) _ = try ctx.query(OtherQuery) else _ = try ctx.query(ListQuery);
@@ -668,6 +822,7 @@ const CheckFixture = struct {
     other: sse.Manager(OtherEvent) = undefined,
     items: ItemsV1Controller = undefined,
     plain: PlainV1Controller = .{},
+    token_check: TokenCheck = .{},
     item_errors: ItemErrors = .{},
     backend: TestingBackend = undefined,
     server: Server = undefined,
@@ -687,6 +842,7 @@ const CheckFixture = struct {
             .backend = f.backend.backend(),
             .prefix = "/api",
             .controllers = .{ &f.items, &f.plain },
+            .middleware = .{&f.token_check},
             .error_handler = &f.item_errors,
         });
         errdefer f.server.deinit(io);
@@ -832,6 +988,43 @@ test "check: subscribe with a manager of other events is a 500 with its line" {
     try f.expectRefused(.GET, "/api/v1/items/events", "other events", "zefir.http: GET /api/v1/items/events (ItemsV1Controller.events) subscribes with an http.sse.Manager(OtherEvent), but declares .events = ItemEvent");
     // No stream opened.
     try testing.expectEqual(0, @import("testing.zig").openStreams(&f.server));
+}
+
+test "tableOf: the openapi of the middleware of the chain, a literal or typed, read by the names of its fields" {
+    if (!enabled) return error.SkipZigTest;
+    const chain = comptime mw.unfold(@TypeOf(.{ Paging, @as(*TokenCheck, undefined) }), .{ .level = .global }, &.{});
+    const t = comptime tableOf(TodosV1Controller, "remove", TodosV1Controller.Remove, chain, errors.DefaultErrors).?;
+    try testing.expectEqual(2, t.chain.len);
+    try testing.expectEqual(Source.query, t.chain[0].source);
+    try testing.expectEqual(idOf(PageQuery), t.chain[0].dto.id);
+    try testing.expectEqualStrings("Paging", t.chain[0].by);
+    try testing.expectEqual(Source.headers, t.chain[1].source);
+    try testing.expectEqualStrings("TokenHeaders", t.chain[1].dto.name);
+    try testing.expectEqualStrings("TokenCheck", t.chain[1].by);
+    // The route's 204, then the middleware's: a 304 without a body, and of
+    // all the statuses of the typed one, the 401 it declares.
+    try testing.expectEqual(3, t.responses.len);
+    try testing.expectEqual(304, t.responses[1].status);
+    try testing.expectEqual(null, t.responses[1].media);
+    try testing.expectEqual(401, t.responses[2].status);
+    try testing.expectEqualStrings("text/html", t.responses[2].media.?);
+}
+
+test "check: the input and the answers that the middleware of the chain declare pass; others do not" {
+    if (!enabled) return error.SkipZigTest;
+    var f: CheckFixture = .{};
+    try f.start();
+    defer f.stop();
+    const level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = level;
+
+    // Paging's query and TokenCheck's headers, read on every request.
+    try f.expectPassed(.GET, "/api/v1/items/page", "", 204);
+    try f.expectPassed(.GET, "/api/v1/items/page", "not modified", 304);
+    try f.expectPassed(.GET, "/api/v1/items/1", "login page", 401);
+    try f.expectRefused(.GET, "/api/v1/items/page", "teapot", "zefir.http: GET /api/v1/items/page (ItemsV1Controller.page) answered 418, which it does not declare in .responses");
+    try f.expectRefused(.GET, "/api/v1/items/page", "other query", "zefir.http: GET /api/v1/items/page (ItemsV1Controller.page) reads the query as OtherQuery, but declares no .query; its middleware declare .query = PageQuery (Paging)");
 }
 
 test "check: the routes of a controller without openapi are not checked" {
