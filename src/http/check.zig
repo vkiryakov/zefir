@@ -111,10 +111,11 @@ pub fn tableOf(comptime C: type, comptime handler: []const u8, comptime R: type,
     if (!enabled) return {};
     if (!@hasDecl(C, "openapi")) return null;
     comptime {
-        @setEvalBranchQuota(20_000 + 2_000 * chain.len);
+        // An element with `openapi` may list a field for every status.
+        @setEvalBranchQuota(20_000 + 5_000 * chain.len);
         const Errors = describe.RouteErrors(C, handler, chain);
         const names = @typeInfo(Errors).error_set.error_names;
-        if (names) |list| @setEvalBranchQuota(20_000 + 2_000 * chain.len + 200 * list.len);
+        if (names) |list| @setEvalBranchQuota(20_000 + 5_000 * chain.len + 200 * list.len);
         const table: Table = .{
             .own = .{
                 dtoOf(R.Path),
@@ -1008,6 +1009,28 @@ test "tableOf: the openapi of the middleware of the chain, a literal or typed, r
     try testing.expectEqual(null, t.responses[1].media);
     try testing.expectEqual(401, t.responses[2].status);
     try testing.expectEqualStrings("text/html", t.responses[2].media.?);
+}
+
+/// A middleware type of its own for each `n`, with a typed `openapi` that
+/// declares one status.
+fn Limiter(comptime n: u8) type {
+    return struct {
+        pub const name = std.fmt.comptimePrint("limiter{d}", .{n});
+        pub const openapi: TypedDoc = .{ .responses = .{ .too_many_requests = .{ .description = "Slow down." } } };
+
+        pub fn run(_: *Context) !mw.MiddlewareResult {
+            return .next;
+        }
+    };
+}
+
+test "tableOf: a chain of many typed openapi builds without a quota of the application's own" {
+    if (!enabled) return error.SkipZigTest;
+    const List = @TypeOf(.{ Limiter(0), Limiter(1), Limiter(2), Limiter(3), Limiter(4), Limiter(5), Limiter(6), Limiter(7), Limiter(8), Limiter(9), Limiter(10), Limiter(11) });
+    const chain = comptime mw.unfold(List, .{ .level = .global }, &.{});
+    const t = comptime tableOf(TodosV1Controller, "remove", TodosV1Controller.Remove, chain, errors.DefaultErrors).?;
+    try testing.expectEqual(13, t.responses.len);
+    try testing.expectEqual(429, t.responses[12].status);
 }
 
 test "check: the input and the answers that the middleware of the chain declare pass; others do not" {
