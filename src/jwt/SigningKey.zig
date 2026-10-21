@@ -14,10 +14,14 @@ const pkcs = @import("pkcs.zig");
 const Key = @import("Key.zig");
 const KeyId = @import("KeyId.zig");
 const isHmac = @import("algorithm.zig").isHmac;
+const minSecretBytes = @import("algorithm.zig").minSecretBytes;
 
 const Algorithm = root.Algorithm;
 const KeyError = root.KeyError;
 const KeyOptions = root.KeyOptions;
+const EcdsaP256Sha256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
+const EcdsaP384Sha384 = std.crypto.sign.ecdsa.EcdsaP384Sha384;
+const Ed25519 = std.crypto.sign.Ed25519;
 
 /// The algorithm of every token the key signs; the "alg" of their header.
 algorithm: Algorithm,
@@ -29,9 +33,9 @@ material: Material,
 
 const Material = union {
     hmac: crypto.HmacSecret,
-    p256: std.crypto.sign.ecdsa.EcdsaP256Sha256.KeyPair,
-    p384: std.crypto.sign.ecdsa.EcdsaP384Sha384.KeyPair,
-    ed25519: std.crypto.sign.Ed25519.KeyPair,
+    p256: EcdsaP256Sha256.KeyPair,
+    p384: EcdsaP384Sha384.KeyPair,
+    ed25519: Ed25519.KeyPair,
 };
 
 /// zefir-log writes a key as "[REDACTED]".
@@ -80,6 +84,37 @@ pub fn fromDer(algorithm: Algorithm, der: []const u8, options: KeyOptions) KeyEr
     };
 }
 
+/// A new random key of `algorithm`, for tests and development: an HMAC
+/// secret as long as the hash, or the key pair of a random seed; the
+/// entropy comes from `io.randomSecure`. There is no export of the key:
+/// a service keeps its keys in its settings.
+pub fn generate(io: std.Io, algorithm: Algorithm, options: KeyOptions) (KeyError || std.Io.RandomSecureError)!SigningKey {
+    const key_id: KeyId = try .init(options.id);
+    switch (algorithm) {
+        .HS256, .HS384, .HS512 => {
+            var secret: [64]u8 = undefined;
+            defer std.crypto.secureZero(u8, &secret);
+            const length = minSecretBytes(algorithm);
+            try io.randomSecure(secret[0..length]);
+            return hmac(algorithm, secret[0..length], options);
+        },
+        .ES256 => return .{ .algorithm = algorithm, .key_id = key_id, .material = .{ .p256 = try generatePair(EcdsaP256Sha256, io) } },
+        .ES384 => return .{ .algorithm = algorithm, .key_id = key_id, .material = .{ .p384 = try generatePair(EcdsaP384Sha384, io) } },
+        .EdDSA => return .{ .algorithm = algorithm, .key_id = key_id, .material = .{ .ed25519 = try generatePair(Ed25519, io) } },
+    }
+}
+
+/// The key pair of a random seed; a seed that gives no key, which happens
+/// about never, is drawn again.
+fn generatePair(comptime Scheme: type, io: std.Io) std.Io.RandomSecureError!Scheme.KeyPair {
+    var seed: [Scheme.KeyPair.seed_length]u8 = undefined;
+    defer std.crypto.secureZero(u8, &seed);
+    while (true) {
+        try io.randomSecure(&seed);
+        return Scheme.KeyPair.generateDeterministic(seed) catch continue;
+    }
+}
+
 /// The key id, "kid", which the header of every token it signs carries;
 /// null for a key without one.
 pub fn id(key: *const SigningKey) ?[]const u8 {
@@ -117,6 +152,35 @@ pub fn deinit(key: *SigningKey) void {
 }
 
 const testing = std.testing;
+
+/// The secret of `key`: the HMAC secret, the EC scalar or the Ed25519
+/// seed and public key.
+fn secretOf(key: *const SigningKey) []const u8 {
+    return switch (key.algorithm) {
+        .HS256, .HS384, .HS512 => key.material.hmac.slice(),
+        .ES256 => &key.material.p256.secret_key.bytes,
+        .ES384 => &key.material.p384.secret_key.bytes,
+        .EdDSA => &key.material.ed25519.secret_key.bytes,
+    };
+}
+
+test "generate makes a key of every algorithm with the given id" {
+    for ([_]Algorithm{ .HS256, .HS384, .HS512, .ES256, .ES384, .EdDSA }) |alg| {
+        var a: SigningKey = try .generate(testing.io, alg, .{ .id = "2026-10" });
+        defer a.deinit();
+        var b: SigningKey = try .generate(testing.io, alg, .{ .id = "2026-10" });
+        defer b.deinit();
+        try testing.expectEqual(alg, a.algorithm);
+        try testing.expectEqualStrings("2026-10", a.id().?);
+        try testing.expect(!std.mem.eql(u8, secretOf(&a), secretOf(&b)));
+        // An HMAC secret as long as the hash.
+        if (isHmac(alg)) try testing.expectEqual(minSecretBytes(alg), secretOf(&a).len);
+    }
+    var unnamed: SigningKey = try .generate(testing.io, .ES384, .{});
+    defer unnamed.deinit();
+    try testing.expectEqual(null, unnamed.id());
+    try testing.expectError(error.InvalidKeyId, SigningKey.generate(testing.io, .EdDSA, .{ .id = "" }));
+}
 
 test "the verification key of an HMAC signing key keeps its algorithm and id" {
     var signing: SigningKey = try .hmac(.HS384, "0123456789abcdef0123456789abcdef0123456789abcdef", .{ .id = "2026-10" });

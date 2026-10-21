@@ -229,6 +229,7 @@ const keys = @import("testdata/keys.zig");
 const Key = @import("Key.zig");
 const SigningKey = @import("SigningKey.zig");
 const KeyOptions = @import("root.zig").KeyOptions;
+const crypto = @import("crypto.zig");
 
 const tlv = keys.tlv;
 const hex = keys.hex;
@@ -292,24 +293,31 @@ fn expectFileRefused(alg: Algorithm, file: keys.File, part: keys.Part, expected:
 
 test "5.8: every key file loads" {
     for (asymmetric) |alg| {
-        var first_buf: [97]u8 = undefined;
-        var first: ?[]const u8 = null;
+        // The files of one algorithm hold one key: every one of them
+        // verifies what any private one signs.
+        var verifiers: [keys.supported.len]Key = undefined;
+        var count: usize = 0;
+        defer for (verifiers[0..count]) |*key| key.deinit();
         for (keys.supported) |file| {
             if (file.algorithm.? != alg) continue;
             errdefer std.debug.print("{s}\n", .{file.name});
-            var key = try verificationKeyOf(alg, file, .{ .id = "2026-10" });
-            defer key.deinit();
+            verifiers[count] = try verificationKeyOf(alg, file, .{ .id = "2026-10" });
+            count += 1;
+            const key = &verifiers[count - 1];
             try testing.expectEqual(alg, key.algorithm);
             try testing.expectEqualStrings("2026-10", key.id().?);
-            // The files of one algorithm hold one key.
+            var first_buf: [97]u8 = undefined;
             var buf: [97]u8 = undefined;
-            const public = try publicBytes(&key, &buf);
-            if (first) |bytes| {
-                try testing.expectEqualSlices(u8, bytes, public);
-            } else {
-                @memcpy(first_buf[0..public.len], public);
-                first = first_buf[0..public.len];
-            }
+            try testing.expectEqualSlices(u8, try publicBytes(&verifiers[0], &first_buf), try publicBytes(key, &buf));
+        }
+        for (keys.supported) |file| {
+            if (file.algorithm.? != alg or file.part != .private) continue;
+            errdefer std.debug.print("{s}\n", .{file.name});
+            var signing = try loadPrivate(alg, file, .{});
+            defer signing.deinit();
+            var out: [crypto.max_signature_bytes]u8 = undefined;
+            const signature = crypto.sign(&signing, testing.io, "abc", &out);
+            for (verifiers[0..count]) |*key| try crypto.verify(key, "abc", signature);
         }
     }
 }

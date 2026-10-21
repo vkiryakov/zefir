@@ -1,6 +1,8 @@
 //! Signing and verification by the algorithm of a key. HMAC (RFC 7518
 //! §3.2) compares its MAC in constant time and wipes its context on the
-//! stack after use.
+//! stack after use. ECDSA (RFC 7518 §3.4) signs with noise from the `Io`
+//! and writes r‖s; Ed25519 (RFC 8037) signs deterministically and verifies
+//! without the cofactor.
 
 const std = @import("std");
 const algorithm = @import("algorithm.zig");
@@ -11,6 +13,9 @@ const KeyError = @import("errors.zig").KeyError;
 const Algorithm = algorithm.Algorithm;
 const hmac = std.crypto.auth.hmac.sha2;
 const sha2 = std.crypto.hash.sha2;
+const EcdsaP256Sha256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
+const EcdsaP384Sha384 = std.crypto.sign.ecdsa.EcdsaP384Sha384;
+const Ed25519 = std.crypto.sign.Ed25519;
 
 /// The longest signature of the six algorithms: r‖s of ES384.
 pub const max_signature_bytes = 96;
@@ -59,23 +64,74 @@ pub fn verify(key: *const Key, signing_input: []const u8, signature: []const u8)
         .HS256 => verifyMac(hmac.HmacSha256, key.material.hmac.slice(), signing_input, signature),
         .HS384 => verifyMac(hmac.HmacSha384, key.material.hmac.slice(), signing_input, signature),
         .HS512 => verifyMac(hmac.HmacSha512, key.material.hmac.slice(), signing_input, signature),
-        // Key.hmac makes the only keys there are: HMAC ones.
-        .ES256, .ES384, .EdDSA => error.BadSignature,
+        .ES256 => verifyEcdsa(EcdsaP256Sha256, &key.material.p256, signing_input, signature),
+        .ES384 => verifyEcdsa(EcdsaP384Sha384, &key.material.p384, signing_input, signature),
+        .EdDSA => verifyEd25519(&key.material.ed25519, signing_input, signature),
     };
 }
 
 /// Signs `signing_input` with `key` into `out` and returns the signature,
-/// `signatureBytes(key.algorithm)` bytes of it. `io` is for the random
+/// `signatureBytes(key.algorithm)` bytes of it. `io` gives the random
 /// noise of ECDSA.
 pub fn sign(key: *const SigningKey, io: std.Io, signing_input: []const u8, out: *[max_signature_bytes]u8) []const u8 {
-    _ = io;
     return switch (key.algorithm) {
         .HS256 => mac(hmac.HmacSha256, key.material.hmac.slice(), signing_input, out),
         .HS384 => mac(hmac.HmacSha384, key.material.hmac.slice(), signing_input, out),
         .HS512 => mac(hmac.HmacSha512, key.material.hmac.slice(), signing_input, out),
-        // SigningKey.hmac makes the only signing keys there are: HMAC ones.
-        .ES256, .ES384, .EdDSA => unreachable,
+        .ES256 => signEcdsa(EcdsaP256Sha256, &key.material.p256, io, signing_input, out),
+        .ES384 => signEcdsa(EcdsaP384Sha384, &key.material.p384, io, signing_input, out),
+        .EdDSA => signEd25519(&key.material.ed25519, io, signing_input, out),
     };
+}
+
+/// r‖s, each of the curve's size (RFC 7518 §3.4), never DER. std refuses
+/// an r or an s that is 0 or not below the order of the curve, which
+/// stops the signature of CVE-2022-21449 (r = s = 0).
+fn verifyEcdsa(comptime Scheme: type, public_key: *const Scheme.PublicKey, message: []const u8, signature: []const u8) error{BadSignature}!void {
+    const length = Scheme.Signature.encoded_length;
+    if (signature.len != length) return error.BadSignature;
+    Scheme.Signature.fromBytes(signature[0..length].*).verify(message, public_key.*) catch return error.BadSignature;
+}
+
+/// `verifyStrict`: without the cofactor (RFC 8032 §5.1.7), and with s
+/// below the order of the group; it never refuses an honest signature.
+fn verifyEd25519(public_key: *const Ed25519.PublicKey, message: []const u8, signature: []const u8) error{BadSignature}!void {
+    const length = Ed25519.Signature.encoded_length;
+    if (signature.len != length) return error.BadSignature;
+    Ed25519.Signature.fromBytes(signature[0..length].*).verifyStrict(message, public_key.*) catch return error.BadSignature;
+}
+
+/// Signs with fresh noise from `io`, as std advises against fault attacks;
+/// std fails only for an r or an s of 0, and then fresh noise signs again.
+fn signEcdsa(comptime Scheme: type, pair: *const Scheme.KeyPair, io: std.Io, message: []const u8, out: *[max_signature_bytes]u8) []const u8 {
+    const length = Scheme.Signature.encoded_length;
+    var noise: [Scheme.noise_length]u8 = undefined;
+    defer std.crypto.secureZero(u8, &noise);
+    while (true) {
+        io.random(&noise);
+        const signature = pair.sign(message, noise) catch continue;
+        out[0..length].* = signature.toBytes();
+        return out[0..length];
+    }
+}
+
+/// Signs deterministically, as RFC 8032 does, so one input gives one
+/// signature. std fails only for a nonce of 0, which a hash does not give
+/// in practice; then a signature with noise from `io` takes its place,
+/// which verifies all the same.
+fn signEd25519(pair: *const Ed25519.KeyPair, io: std.Io, message: []const u8, out: *[max_signature_bytes]u8) []const u8 {
+    const length = Ed25519.Signature.encoded_length;
+    var noise: ?[Ed25519.noise_length]u8 = null;
+    defer if (noise) |*bytes| std.crypto.secureZero(u8, bytes);
+    while (true) {
+        const signature = pair.sign(message, noise) catch {
+            noise = @as([Ed25519.noise_length]u8, undefined);
+            io.random(&noise.?);
+            continue;
+        };
+        out[0..length].* = signature.toBytes();
+        return out[0..length];
+    }
 }
 
 fn mac(comptime H: type, secret: []const u8, message: []const u8, out: *[max_signature_bytes]u8) []const u8 {
@@ -146,6 +202,105 @@ test "verify takes only the right MAC" {
     const longer = right ++ [_]u8{0};
     try testing.expectError(error.BadSignature, verify(&key, "abc", &longer));
     try testing.expectError(error.BadSignature, verify(&key, "abc", ""));
+}
+
+const Signer = @import("Signer.zig");
+const Verifier = @import("Verifier.zig");
+const FixedClock = @import("testing.zig").FixedClock;
+const Details = @import("errors.zig").Details;
+const keys = @import("testdata/keys.zig");
+
+const every_algorithm = [_]Algorithm{ .HS256, .HS384, .HS512, .ES256, .ES384, .EdDSA };
+
+test "ECDSA signatures carry noise, EdDSA ones do not" {
+    var first: [max_signature_bytes]u8 = undefined;
+    var second: [max_signature_bytes]u8 = undefined;
+    for ([_]Algorithm{ .ES256, .ES384, .EdDSA }) |alg| {
+        var signing: SigningKey = try .generate(testing.io, alg, .{});
+        defer signing.deinit();
+        var key = signing.verificationKey();
+        defer key.deinit();
+        const a = sign(&signing, testing.io, "header.payload", &first);
+        const b = sign(&signing, testing.io, "header.payload", &second);
+        try testing.expectEqual(algorithm.signatureBytes(alg), a.len);
+        try verify(&key, "header.payload", a);
+        try verify(&key, "header.payload", b);
+        try testing.expectEqual(alg == .EdDSA, std.mem.eql(u8, a, b));
+        try testing.expectError(error.BadSignature, verify(&key, "header.payloaD", a));
+    }
+}
+
+const Roles = struct { roles: []const []const u8 = &.{} };
+
+/// Signs a token with `signing` through a `Signer` and verifies it through
+/// a `Verifier` with the verification key.
+fn expectRoundTrip(signing: *const SigningKey, io: std.Io) !void {
+    const signer: Signer = try .init(signing, .{ .issuer = "orders", .audiences = &.{"orders"} });
+    const token = try signer.sign(Roles, io, testing.allocator, &.{ .roles = &.{"buyer"} }, .{ .subject = "user-7" });
+    defer testing.allocator.free(token);
+    var own = [_]Key{signing.verificationKey()};
+    defer own[0].deinit();
+    const verifier: Verifier = try .init(.{ .keys = &own, .issuer = "orders", .audiences = &.{"orders"} });
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const verified = try verifier.verify(Roles, io, arena_state.allocator(), token, .{});
+    try testing.expectEqual(signing.algorithm, verified.header.algorithm);
+    try testing.expectEqualStrings("user-7", verified.registered.subject.?);
+    try testing.expectEqualStrings("buyer", verified.claims.roles[0]);
+}
+
+test "what sign issues, verify accepts, for all six algorithms" {
+    var clock: FixedClock = try .init(testing.io, 1_760_000_000);
+    defer clock.deinit();
+    for (every_algorithm) |alg| {
+        var generated: SigningKey = try .generate(testing.io, alg, .{ .id = "2026-10" });
+        defer generated.deinit();
+        try expectRoundTrip(&generated, clock.io());
+    }
+    for (keys.supported) |file| {
+        if (file.part != .private) continue;
+        errdefer std.debug.print("{s}\n", .{file.name});
+        const alg = file.algorithm.?;
+        var signing = try if (file.isPem()) SigningKey.fromPem(alg, file.bytes, .{}) else SigningKey.fromDer(alg, file.bytes, .{});
+        defer signing.deinit();
+        try expectRoundTrip(&signing, clock.io());
+    }
+}
+
+test "HS256 under the kid of an EdDSA key, MACed with its public key, is AlgorithmMismatch" {
+    var clock: FixedClock = try .init(testing.io, 1_760_000_000);
+    defer clock.deinit();
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    for ([_]Algorithm{ .EdDSA, .ES256 }) |alg| {
+        var real: SigningKey = try .generate(testing.io, alg, .{ .id = "ed" });
+        defer real.deinit();
+        var own = [_]Key{real.verificationKey()};
+        defer own[0].deinit();
+        const verifier: Verifier = try .init(.{ .keys = &own, .issuer = "orders", .audiences = &.{"orders"} });
+
+        // The attacker has the public key and takes its bytes as a secret.
+        var public: [65]u8 = undefined;
+        const secret: []const u8 = switch (alg) {
+            .EdDSA => ed25519: {
+                public[0..32].* = own[0].material.ed25519.toBytes();
+                break :ed25519 public[0..32];
+            },
+            .ES256 => p256: {
+                public = own[0].material.p256.toUncompressedSec1();
+                break :p256 &public;
+            },
+            else => return error.TestUnexpectedResult,
+        };
+        var forger: SigningKey = try .hmac(.HS256, secret, .{ .id = "ed" });
+        defer forger.deinit();
+        const signer: Signer = try .init(&forger, .{ .issuer = "orders", .audiences = &.{"orders"} });
+        const token = try signer.sign(void, clock.io(), testing.allocator, &{}, .{});
+        defer testing.allocator.free(token);
+        var details: Details = .{};
+        try testing.expectError(error.AlgorithmMismatch, verifier.verify(void, clock.io(), arena_state.allocator(), token, .{ .details = &details }));
+        try testing.expectEqualStrings("alg", details.claim.?);
+    }
 }
 
 test "the verification key of an HMAC signing key verifies what it signs" {

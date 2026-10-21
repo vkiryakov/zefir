@@ -1,5 +1,6 @@
 //! One `Signer` and one `Verifier` serve many tasks at once (design
-//! 5.13): they are immutable, and every call keeps its memory to itself.
+//! 5.13): they are immutable, and every call keeps its memory to itself;
+//! ECDSA also takes its noise from the `Io` of each call.
 //! `zig build test-jwt -Dtsan=true` runs this under ThreadSanitizer.
 
 const std = @import("std");
@@ -49,21 +50,40 @@ fn signAndVerify(shared: *Shared, task: u32) !void {
     }
 }
 
-test "64 tasks sign and verify with one Signer and one Verifier at once" {
-    var key: SigningKey = try .hmac(.HS256, "0123456789abcdef0123456789abcdef", .{ .id = "k1" });
-    defer key.deinit();
-    const keys = [_]Key{key.verificationKey()};
-    const signer: Signer = try .init(&key, .{ .issuer = "orders", .audiences = &.{"orders"} });
-    const verifier: Verifier = try .init(.{ .keys = &keys, .issuer = "orders", .audiences = &.{"orders"} });
-    var shared: Shared = .{ .signer = &signer, .verifier = &verifier, .io = testing.io };
+test "64 tasks sign and verify with one Signer and one Verifier at once, for HMAC, ECDSA and EdDSA" {
+    var hs256: SigningKey = try .hmac(.HS256, "0123456789abcdef0123456789abcdef", .{ .id = "k1" });
+    defer hs256.deinit();
+    var es256: SigningKey = try .generate(testing.io, .ES256, .{ .id = "k2" });
+    defer es256.deinit();
+    var eddsa: SigningKey = try .generate(testing.io, .EdDSA, .{ .id = "k3" });
+    defer eddsa.deinit();
+    const signing_keys = [_]*const SigningKey{ &hs256, &es256, &eddsa };
+
+    // One key, one signer and one verifier for each algorithm.
+    var keys: [signing_keys.len]Key = undefined;
+    defer for (&keys) |*key| key.deinit();
+    var signers: [signing_keys.len]Signer = undefined;
+    var verifiers: [signing_keys.len]Verifier = undefined;
+    var shared: [signing_keys.len]Shared = undefined;
+    for (signing_keys, 0..) |signing, i| {
+        keys[i] = signing.verificationKey();
+        signers[i] = try .init(signing, .{ .issuer = "orders", .audiences = &.{"orders"} });
+        verifiers[i] = try .init(.{ .keys = keys[i..][0..1], .issuer = "orders", .audiences = &.{"orders"} });
+        shared[i] = .{ .signer = &signers[i], .verifier = &verifiers[i], .io = testing.io };
+    }
 
     var group: std.Io.Group = .init;
     // Should a start fail, the tasks already started end before `shared`
     // goes away.
     defer group.cancel(testing.io);
-    for (0..task_count) |task| try group.concurrent(testing.io, run, .{ &shared, @as(u32, @intCast(task)) });
+    for (&shared) |*one| {
+        for (0..task_count) |task| try group.concurrent(testing.io, run, .{ one, @as(u32, @intCast(task)) });
+    }
     try group.await(testing.io);
 
-    try testing.expectEqual(0, shared.failed.load(.monotonic));
-    try testing.expectEqual(task_count * tokens_per_task, shared.passed.load(.monotonic));
+    for (&shared, signing_keys) |*one, signing| {
+        errdefer std.debug.print("{t}\n", .{signing.algorithm});
+        try testing.expectEqual(0, one.failed.load(.monotonic));
+        try testing.expectEqual(task_count * tokens_per_task, one.passed.load(.monotonic));
+    }
 }

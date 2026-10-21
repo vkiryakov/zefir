@@ -163,6 +163,32 @@ test "format names the algorithm and the kid, never the secret" {
     try testing.expectEqual(2, std.mem.count(u8, text, ".material = .{ ... }"));
 }
 
+test "format and deinit hide and wipe EC and Ed25519 keys too" {
+    for ([_]Algorithm{ .ES256, .ES384, .EdDSA }) |alg| {
+        var a: SigningKey = try .generate(testing.io, alg, .{ .id = "2026-10" });
+        var b: SigningKey = try .generate(testing.io, alg, .{ .id = "2026-10" });
+        var key_a = a.verificationKey();
+        var key_b = b.verificationKey();
+
+        // Two keys with one id print the same: nothing of their material.
+        const text_a = try std.fmt.allocPrint(testing.allocator, "{any} {any}", .{ a, key_a });
+        defer testing.allocator.free(text_a);
+        const text_b = try std.fmt.allocPrint(testing.allocator, "{any} {any}", .{ b, key_b });
+        defer testing.allocator.free(text_b);
+        try testing.expectEqualStrings(text_a, text_b);
+        var buf: [64]u8 = undefined;
+        try testing.expectFmt(try std.fmt.bufPrint(&buf, "jwt.SigningKey({t}, kid \"2026-10\")", .{alg}), "{f}", .{a});
+        try testing.expectFmt(try std.fmt.bufPrint(&buf, "jwt.Key({t}, kid \"2026-10\")", .{alg}), "{f}", .{key_a});
+
+        a.deinit();
+        b.deinit();
+        key_a.deinit();
+        key_b.deinit();
+        for (std.mem.asBytes(&a)) |byte| try testing.expectEqual(0, byte);
+        for (std.mem.asBytes(&key_a)) |byte| try testing.expectEqual(0, byte);
+    }
+}
+
 test "deinit zeroes the whole key" {
     var key: Key = try .hmac(.HS512, secret_64, .{ .id = "2026-10" });
     key.deinit();
