@@ -3,6 +3,9 @@
 //! Redis 7.2 or later or Valkey 8 or later, in RESP3 over plain TCP: there
 //! is no TLS, so it belongs on a trusted network only.
 //!
+//! - `redis.Client` — the client: `init` checks the options without I/O,
+//!   `connect` opens the first connection and shakes hands, `close` and
+//!   `deinit` end it; `Client.Options` and `Client.Url` say what it takes.
 //! - `redis.cmd` — the commands, as values that the client runs, and
 //!   `cmd.raw` for a command that the catalog lacks, with its reply in a
 //!   type of the caller's.
@@ -25,6 +28,7 @@ const types = @import("cmd/types.zig");
 /// RESP3, for the client and `testing.FakeServer` only.
 const resp = @import("resp.zig");
 
+pub const Client = @import("Client.zig");
 pub const cmd = @import("cmd.zig");
 pub const testing = @import("testing.zig");
 
@@ -82,6 +86,7 @@ test {
     _ = @import("tests/connection_tests.zig");
     _ = @import("engine/handshake.zig");
     _ = @import("tests/handshake_tests.zig");
+    _ = @import("tests/connect_tests.zig");
 }
 
 test "the package version reaches the module" {
