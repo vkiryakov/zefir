@@ -34,7 +34,7 @@ const v = @import("validator");
 const Error = std.Io.Writer.Error;
 /// The elements of an entry of `field_rules` besides the rules, which the
 /// validator does not export by name.
-const Rename = @TypeOf(v.rename("x"));
+const Rename = @typeInfo(@TypeOf(v.rename)).@"fn".return_type.?;
 const Transform = @TypeOf(v.trim);
 const Kind = @FieldType(v.Rule, "kind");
 
@@ -323,7 +323,7 @@ pub fn model(comptime O: type) *const Document {
                     .media_type = "application/json",
                     .schema = typeSchema(route.body, &.{}, .input, uses),
                 };
-                const responses = [_]Response{success} ++ errorResponses(H, Errors, error_media, error_schema);
+                const responses: []const Response = &[_]Response{success} ++ errorResponses(H, Errors, error_media, error_schema);
                 located = located ++ [_]Located{.{ .path = R.prefix ++ Route.route_path, .operation = .{
                     .method = methodName(Route.http_method),
                     .operation_id = docs.tag ++ "." ++ name,
@@ -332,7 +332,7 @@ pub fn model(comptime O: type) *const Document {
                     .description = route.description,
                     .parameters = parameters,
                     .request_body = request_body,
-                    .responses = &responses,
+                    .responses = responses,
                 } }};
             }
         }
