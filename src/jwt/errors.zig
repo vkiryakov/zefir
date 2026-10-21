@@ -65,8 +65,8 @@ pub const VerifyError = error{
 
 /// Why `Signer.sign` issued no token.
 pub const SignError = error{
-    /// A string that is not UTF-8, a number that is not finite, or a time
-    /// that a NumericDate cannot hold.
+    /// A string that is not UTF-8, a number that is not finite, a lifetime
+    /// under one second, or a time that a NumericDate cannot hold.
     InvalidClaims,
     /// The token would be longer than `max_token_bytes`: zefir issues no
     /// token that it would refuse itself.

@@ -68,7 +68,7 @@ pub fn Verified(comptime Claims: type) type {
 pub const VerifyOptions = struct {
     /// Where `verify` says what a refusal was about, for the response and
     /// the log; `verify` clears it first, so one `Details` serves many
-    /// calls.
+    /// calls, one at a time.
     details: ?*Details = null,
 };
 

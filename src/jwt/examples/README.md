@@ -677,7 +677,8 @@ for `WrongAudience`, and for `ClaimsRejected`, or `InvalidClaims` of your
 struct, the broken rule with its path, such as `roles`. `Details` holds
 only constant names and paths of your types: never a byte of the token,
 which a client sent and which a log must not take. `verify` clears it
-first, so one `Details` serves any number of calls.
+first, so one `Details` serves any number of calls, one at a time: a
+request keeps its own, as `JwtAuth` does.
 
 ## HTTP
 
