@@ -448,13 +448,18 @@ fn edgeOne(io: Io, conn: *Conn, n: u32, counts: *[2]std.atomic.Value(u32)) !void
 
 // Static files and SSE at once.
 
+/// The events of the streams of the scenarios below.
+const LoadEvent = union(enum) { count: u64, note: []const u8 };
+
+const Live = http.sse.Manager(LoadEvent);
+
 /// Streams of the site: every client on the key "all".
 const SiteApp = struct {
-    live: *http.sse.Manager,
+    live: *Live,
     subscribed: std.atomic.Value(u32) = .init(0),
 
     pub const http_routes = http.routes(.{ .methods = .{
-        .events = http.sse.get("/events", .{}),
+        .events = http.sse.get("/events", .{ .events = LoadEvent }),
     } });
 
     pub fn events(self: *SiteApp, ctx: *http.sse.Context) !void {
@@ -483,7 +488,7 @@ const Site = struct {
 };
 
 const SiteFixture = struct {
-    live: http.sse.Manager,
+    live: Live,
     app: SiteApp,
     native: http.native.Backend,
     server: http.Server,
@@ -551,11 +556,11 @@ fn readEvents(io: Io, port: u16) !void {
     var c = try raw.Client.connect(io, gpa, port);
     defer c.close(io);
     try c.send(io, get("/events"));
-    if (!try c.readUntil(io, "id: 199\ndata: 199\n\n", .fromSeconds(30))) return error.TestEventsMissing;
+    if (!try c.readUntil(io, "event: count\nid: 199\ndata: 199\n\n", .fromSeconds(30))) return error.TestEventsMissing;
     var at: usize = 0;
-    var event: [32]u8 = undefined;
+    var event: [48]u8 = undefined;
     for (0..site_events) |i| {
-        const text = try std.fmt.bufPrint(&event, "id: {d}\ndata: {d}\n\n", .{ i, i });
+        const text = try std.fmt.bufPrint(&event, "event: count\nid: {d}\ndata: {d}\n\n", .{ i, i });
         at = (std.mem.findPos(u8, c.kept(), at, text) orelse return error.TestEventOutOfOrder) + text.len;
     }
 }
@@ -570,7 +575,7 @@ fn publishEvents(io: Io, f: *SiteFixture) !void {
     try e2e.waitCount(io, &f.app.subscribed, 8, 5000);
     var id: [16]u8 = undefined;
     for (0..site_events) |i| {
-        try f.live.publish(.root, io, "all", .{ .id = try std.fmt.bufPrint(&id, "{d}", .{i}), .data = i });
+        try f.live.publish(.root, io, "all", .{ .event = .{ .count = i }, .id = try std.fmt.bufPrint(&id, "{d}", .{i}) });
         if (i % 8 == 7) try io.sleep(.fromMilliseconds(1), .awake);
     }
 }
@@ -623,14 +628,14 @@ const stream_rounds = 250;
 /// The application of the stream scenario: each stream on the key
 /// `{worker}-{cause}`; `failing` fails after its subscribe.
 const StreamApp = struct {
-    live: *http.sse.Manager,
+    live: *Live,
     /// By worker: streams subscribed, and streams ended (their on_close).
     opened: [stream_workers]std.atomic.Value(u32) = @splat(.init(0)),
     closed: [stream_workers]std.atomic.Value(u32) = @splat(.init(0)),
 
     pub const http_routes = http.routes(.{ .methods = .{
-        .events = http.sse.get("/events/{worker}/{cause}", .{ .on_close = .eventsClosed }),
-        .failing = http.sse.get("/failing/{worker}/{cause}", .{ .on_close = .eventsClosed }),
+        .events = http.sse.get("/events/{worker}/{cause}", .{ .events = LoadEvent, .on_close = .eventsClosed }),
+        .failing = http.sse.get("/failing/{worker}/{cause}", .{ .events = LoadEvent, .on_close = .eventsClosed }),
     } });
 
     const Key = struct { worker: u8, cause: []const u8 };
@@ -664,7 +669,7 @@ const StreamApp = struct {
 };
 
 const StreamFixture = struct {
-    live: http.sse.Manager,
+    live: Live,
     app: StreamApp,
     native: http.native.Backend,
     server: http.Server,
@@ -805,7 +810,7 @@ fn streamRounds(io: Io, f: *StreamFixture, w: u8) !void {
             var published: usize = 0;
             while (f.app.closed[w].load(.acquire) < ended) : (published += 1) {
                 if (published == 100_000) return error.TestNoOverflow;
-                try f.live.publish(.root, io, key, .{ .data = "overflow" });
+                try f.live.publish(.root, io, key, .{ .event = .{ .note = "overflow" } });
                 if (published % 8 == 7) try io.sleep(.fromMilliseconds(1), .awake);
             }
         }

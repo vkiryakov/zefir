@@ -129,3 +129,14 @@ pub const TodoListResponse = struct {
         return .{ .items = items, .page = query.page, .per_page = query.per_page, .total = page.total };
     }
 };
+
+// ---------- Events ----------
+
+/// The events of the stream of live updates, /v1/todos/events: the name of
+/// a variant is the name of its event, and its value is the data, written
+/// as JSON as a response is.
+pub const LiveEvent = union(enum) {
+    @"todo.created": TodoResponse,
+    @"todo.updated": TodoResponse,
+    @"todo.deleted": TodoIdPath,
+};

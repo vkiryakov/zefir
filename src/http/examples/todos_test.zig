@@ -10,6 +10,7 @@ const http = @import("http");
 const log = @import("log");
 const auth = @import("auth.zig");
 const Cors = @import("cors.zig").Cors;
+const dto = @import("dto.zig");
 const errors = @import("errors.zig");
 const mw = @import("middleware.zig");
 const Billing = @import("Billing.zig");
@@ -38,7 +39,7 @@ const App = struct {
     logger: log.Logger = undefined,
     repo: TodoRepository,
     billing: Billing = .{},
-    live: http.sse.Manager,
+    live: http.sse.Manager(dto.LiveEvent),
     users: [2]auth.TokenAuth.User = undefined,
     token_auth: auth.TokenAuth = undefined,
     origins: [1][]const u8 = .{"http://localhost:5173"},

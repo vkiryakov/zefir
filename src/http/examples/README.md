@@ -226,7 +226,7 @@ flowchart LR
     end
     todos --> repo["TodoRepository"]
     todos --> billing["Billing"]
-    todos --> live["http.sse.Manager"]
+    todos --> live["http.sse.Manager(LiveEvent)"]
 ```
 
 The files of the service, each shown whole in the chapter where it is
@@ -403,6 +403,7 @@ const log = @import("log");
 const zio = @import("zio");
 const auth = @import("auth.zig");
 const Cors = @import("cors.zig").Cors;
+const dto = @import("dto.zig");
 const errors = @import("errors.zig");
 const mw = @import("middleware.zig");
 const Billing = @import("Billing.zig");
@@ -451,7 +452,7 @@ pub fn main(init: std.process.Init) !void {
     var repo: TodoRepository = .init(gpa);
     defer repo.deinit();
     var billing: Billing = .{};
-    var live: http.sse.Manager = .init(gpa, .{});
+    var live: http.sse.Manager(dto.LiveEvent) = .init(gpa, .{});
     defer live.deinit(io);
 
     // The objects of the middleware; the server borrows them.
@@ -619,7 +620,7 @@ const TodosV1Controller = @This();
 // The dependencies are fields: `main` builds them and the controller.
 repo: *TodoRepository,
 /// The SSE streams of live updates, a key per user.
-live: *http.sse.Manager,
+live: *http.sse.Manager(dto.LiveEvent),
 /// A middleware object of this controller: `.plans` in the routes below.
 plans: *mw.PlanLookup,
 
@@ -636,7 +637,7 @@ pub const http_routes = http.routes(.{
         .delete = http.delete("/{id}", .{ .middleware = .{auth.requirePermission("todos:delete")} }),
         // A literal segment wins over {id}: /export.csv is not a todo.
         .exportCsv = http.get("/export.csv", .{ .timeout = std.Io.Duration.fromSeconds(300) }),
-        .events = http.sse.get("/events", .{ .heartbeat = std.Io.Duration.fromSeconds(15), .on_close = .eventsClosed }),
+        .events = http.sse.get("/events", .{ .events = dto.LiveEvent, .heartbeat = std.Io.Duration.fromSeconds(15), .on_close = .eventsClosed }),
     },
 });
 
@@ -680,7 +681,7 @@ pub fn create(self: *TodosV1Controller, ctx: *http.Context) !http.Json(dto.TodoR
         .tags = body.tags,
         .idempotency_key = headers.idempotency_key,
     });
-    try self.live.publish(ctx.operation(), ctx.io(), user, .{ .event = "todo.created", .data = dto.TodoResponse.from(todo) });
+    try self.live.publish(ctx.operation(), ctx.io(), user, .{ .event = .{ .@"todo.created" = .from(todo) } });
     return .{ .value = .from(todo), .status = 201 };
 }
 
@@ -694,7 +695,7 @@ pub fn update(self: *TodosV1Controller, ctx: *http.Context) !http.Json(dto.TodoR
         .priority = body.priority,
         .due_date = body.due_date,
     });
-    try self.live.publish(ctx.operation(), ctx.io(), user, .{ .event = "todo.updated", .data = dto.TodoResponse.from(todo) });
+    try self.live.publish(ctx.operation(), ctx.io(), user, .{ .event = .{ .@"todo.updated" = .from(todo) } });
     return .{ .value = .from(todo) };
 }
 
@@ -702,7 +703,7 @@ pub fn delete(self: *TodosV1Controller, ctx: *http.Context) !void {
     const path = try ctx.path(dto.TodoIdPath);
     const user = try owner(ctx);
     try self.repo.delete(ctx.operation(), ctx.io(), user, path.id);
-    try self.live.publish(ctx.operation(), ctx.io(), user, .{ .event = "todo.deleted", .data = path });
+    try self.live.publish(ctx.operation(), ctx.io(), user, .{ .event = .{ .@"todo.deleted" = path } });
     // Nothing written into the response: 204 No Content.
 }
 
@@ -1277,6 +1278,17 @@ pub const TodoListResponse = struct {
         for (items, page.items) |*item, todo| item.* = .from(todo);
         return .{ .items = items, .page = query.page, .per_page = query.per_page, .total = page.total };
     }
+};
+
+// ---------- Events ----------
+
+/// The events of the stream of live updates, /v1/todos/events: the name of
+/// a variant is the name of its event, and its value is the data, written
+/// as JSON as a response is.
+pub const LiveEvent = union(enum) {
+    @"todo.created": TodoResponse,
+    @"todo.updated": TodoResponse,
+    @"todo.deleted": TodoIdPath,
 };
 ```
 
@@ -2063,12 +2075,13 @@ const std = @import("std");
 const http = @import("http");
 const v = @import("validator");
 const auth = @import("auth.zig");
+const dto = @import("dto.zig");
 
 const SessionController = @This();
 
 token_auth: *auth.TokenAuth,
 /// The streams of a user end when they sign out.
-live: *http.sse.Manager,
+live: *http.sse.Manager(dto.LiveEvent),
 
 pub const http_routes = http.routes(.{
     .prefix = "/session",
@@ -2326,17 +2339,25 @@ connection drops. The service sends every change of a user's todos to the
 streams of that user:
 
 ```zig
-.events = http.sse.get("/events", .{ .heartbeat = std.Io.Duration.fromSeconds(15), .on_close = .eventsClosed }),
+.events = http.sse.get("/events", .{ .events = dto.LiveEvent, .heartbeat = std.Io.Duration.fromSeconds(15), .on_close = .eventsClosed }),
 ```
 
+- **`.events`** names the events of the stream: `dto.LiveEvent`, a
+  `union(enum)` with a variant per event. The name of a variant is the name
+  of its event, and its value is the data. The manager of the streams takes
+  the same union, `http.sse.Manager(dto.LiveEvent)`, so the compiler checks
+  every event the service publishes: an event the union does not have, or
+  data of another type, does not build.
 - **The handler of the route**, `events`, runs as an ordinary request: its
   middleware run, and an error here is an ordinary 4xx or 5xx answer, so a
   stream without a user gets 401. `subscribe` sends the head of the stream
   and returns at once; the stream lives on, until the client leaves.
-- **`publish`**, in `create`, `update` and `delete`, puts an event into the
-  queue of every stream of the user, and returns without waiting: the data
-  of an event is written as JSON, through the transforms and with the outside
-  names of its type, as `http.Json(T)` writes a response.
+- **`publish`**, in `create`, `update` and `delete`, puts an event, such as
+  `.{ .event = .{ .@"todo.created" = .from(todo) } }`, into the queue of
+  every stream of the user, and returns without waiting: the data of an
+  event is written as JSON, through the transforms and with the outside
+  names of its type, as `http.Json(T)` writes a response; a variant of
+  `void` has the data `{}`.
 - **`.on_close`** names the method that runs once, when the stream has
   ended: the client left, `close(key)`, the queue overflowed, or the server
   stopped.
@@ -2586,6 +2607,7 @@ const http = @import("http");
 const log = @import("log");
 const auth = @import("auth.zig");
 const Cors = @import("cors.zig").Cors;
+const dto = @import("dto.zig");
 const errors = @import("errors.zig");
 const mw = @import("middleware.zig");
 const Billing = @import("Billing.zig");
@@ -2614,7 +2636,7 @@ const App = struct {
     logger: log.Logger = undefined,
     repo: TodoRepository,
     billing: Billing = .{},
-    live: http.sse.Manager,
+    live: http.sse.Manager(dto.LiveEvent),
     users: [2]auth.TokenAuth.User = undefined,
     token_auth: auth.TokenAuth = undefined,
     origins: [1][]const u8 = .{"http://localhost:5173"},

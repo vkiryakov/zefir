@@ -7,12 +7,13 @@ const std = @import("std");
 const http = @import("http");
 const v = @import("validator");
 const auth = @import("auth.zig");
+const dto = @import("dto.zig");
 
 const SessionController = @This();
 
 token_auth: *auth.TokenAuth,
 /// The streams of a user end when they sign out.
-live: *http.sse.Manager,
+live: *http.sse.Manager(dto.LiveEvent),
 
 pub const http_routes = http.routes(.{
     .prefix = "/session",

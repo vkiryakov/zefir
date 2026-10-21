@@ -21,6 +21,7 @@ const log = @import("log");
 const zio = @import("zio");
 const auth = @import("auth.zig");
 const Cors = @import("cors.zig").Cors;
+const dto = @import("dto.zig");
 const errors = @import("errors.zig");
 const mw = @import("middleware.zig");
 const Billing = @import("Billing.zig");
@@ -69,7 +70,7 @@ pub fn main(init: std.process.Init) !void {
     var repo: TodoRepository = .init(gpa);
     defer repo.deinit();
     var billing: Billing = .{};
-    var live: http.sse.Manager = .init(gpa, .{});
+    var live: http.sse.Manager(dto.LiveEvent) = .init(gpa, .{});
     defer live.deinit(io);
 
     // The objects of the middleware; the server borrows them.

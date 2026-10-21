@@ -20,14 +20,23 @@ const get = e2e.get;
 
 const Todo = struct { id: u64, title: []const u8 };
 
+/// The events of the scenarios' stream.
+const Event = union(enum) {
+    @"todo.created": Todo,
+    @"todo.done": Todo,
+    note: []const u8,
+};
+
+const Live = http.sse.Manager(Event);
+
 /// The application of the scenarios: one stream of every client.
 const App = struct {
-    live: *http.sse.Manager,
+    live: *Live,
     subscribed: std.atomic.Value(u32) = .init(0),
     closes: std.atomic.Value(u32) = .init(0),
 
     pub const http_routes = http.routes(.{ .methods = .{
-        .events = http.sse.get("/events", .{ .heartbeat = std.Io.Duration.fromMilliseconds(200), .on_close = .eventsClosed }),
+        .events = http.sse.get("/events", .{ .events = Event, .heartbeat = std.Io.Duration.fromMilliseconds(200), .on_close = .eventsClosed }),
         .hello = http.get("/hello", .{}),
     } });
 
@@ -48,7 +57,7 @@ const App = struct {
 /// A server of `App` on `http.native`, on a free port of loopback. It
 /// stays where `start` put it.
 const Fixture = struct {
-    live: http.sse.Manager,
+    live: Live,
     app: App,
     native: http.native.Backend,
     server: http.Server,
@@ -78,7 +87,7 @@ const Fixture = struct {
         return raw.Client.connect(io, gpa, f.native.port());
     }
 
-    fn publish(f: *Fixture, io: Io, event: anytype) !void {
+    fn publish(f: *Fixture, io: Io, event: Live.Event) Live.PublishError!void {
         return f.live.publish(.root, io, "all", event);
     }
 };
@@ -120,8 +129,8 @@ fn eventsOverNetwork(io: Io) !void {
 
     // Two events, in the order they were published; then, while none
     // comes, the heartbeat.
-    try f.publish(io, .{ .event = "todo.created", .id = "1", .data = Todo{ .id = 1, .title = "Buy milk" } });
-    try f.publish(io, .{ .event = "todo.done", .id = "2", .data = Todo{ .id = 1, .title = "Buy milk" } });
+    try f.publish(io, .{ .event = .{ .@"todo.created" = .{ .id = 1, .title = "Buy milk" } }, .id = "1" });
+    try f.publish(io, .{ .event = .{ .@"todo.done" = .{ .id = 1, .title = "Buy milk" } }, .id = "2" });
     const done_event = "event: todo.done\nid: 2\ndata: {\"id\":1,\"title\":\"Buy milk\"}\n\n";
     try testing.expect(try c.readUntil(io, done_event, .fromSeconds(5)));
     const created = std.mem.find(u8, c.kept(), "event: todo.created\nid: 1\ndata: {\"id\":1,\"title\":\"Buy milk\"}\n\n") orelse return error.TestEventMissing;
@@ -152,7 +161,7 @@ fn closedByServer(io: Io) !void {
     defer c.close(io);
     try c.send(io, get("/events"));
     try e2e.waitCount(io, &f.app.subscribed, 1, 5000);
-    try f.publish(io, .{ .data = "last" });
+    try f.publish(io, .{ .event = .{ .note = "last" } });
     f.live.close(io, "all");
     // The whole response: the head, the event, the last chunk.
     var arena: std.heap.ArenaAllocator = .init(gpa);
@@ -160,7 +169,7 @@ fn closedByServer(io: Io) !void {
     const res = try c.readResponse(io, arena.allocator(), .{});
     try testing.expectEqual(200, res.status);
     try testing.expectEqualStrings("text/event-stream", res.header("content-type").?);
-    try testing.expectEqualStrings("data: \"last\"\n\n", res.body);
+    try testing.expectEqualStrings("event: note\ndata: \"last\"\n\n", res.body);
     try e2e.waitCount(io, &f.app.closes, 1, 5000);
     try waitNoStreams(io, &f.server);
     // The stream ended whole, so the connection stays: it serves the next
@@ -186,8 +195,8 @@ fn http10Stream(io: Io) !void {
     defer c.close(io);
     try c.send(io, "GET /events HTTP/1.0\r\n\r\n");
     try e2e.waitCount(io, &f.app.subscribed, 1, 5000);
-    try f.publish(io, .{ .data = "one" });
-    try f.publish(io, .{ .data = "two" });
+    try f.publish(io, .{ .event = .{ .note = "one" } });
+    try f.publish(io, .{ .event = .{ .note = "two" } });
     f.live.close(io, "all");
     // No chunks for HTTP/1.0: the events, then the end of the connection.
     var arena: std.heap.ArenaAllocator = .init(gpa);
@@ -197,7 +206,7 @@ fn http10Stream(io: Io) !void {
     try testing.expectEqual(null, res.header("transfer-encoding"));
     try testing.expectEqual(null, res.header("content-length"));
     try testing.expectEqualStrings("close", res.header("connection").?);
-    try testing.expectEqualStrings("data: \"one\"\n\ndata: \"two\"\n\n", res.body);
+    try testing.expectEqualStrings("event: note\ndata: \"one\"\n\nevent: note\ndata: \"two\"\n\n", res.body);
     try e2e.waitCount(io, &f.app.closes, 1, 5000);
     try waitNoStreams(io, &f.server);
 }
@@ -223,7 +232,7 @@ fn slowClient(io: Io) !void {
     try e2e.waitCount(io, &f.app.subscribed, 1, 5000);
     // 16 MiB of events that the client never reads: more than the buffers
     // of the connection hold, so the stream's write waits.
-    for (0..256) |_| try f.publish(io, .{ .data = @as([]const u8, &piece) });
+    for (0..256) |_| try f.publish(io, .{ .event = .{ .note = &piece } });
     // close(key) is soft: the stream first sends what was published
     // before it, so it stays open...
     const closed_at = Io.Clock.awake.now(io);

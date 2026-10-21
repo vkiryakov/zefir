@@ -16,7 +16,7 @@ const TodosV1Controller = @This();
 // The dependencies are fields: `main` builds them and the controller.
 repo: *TodoRepository,
 /// The SSE streams of live updates, a key per user.
-live: *http.sse.Manager,
+live: *http.sse.Manager(dto.LiveEvent),
 /// A middleware object of this controller: `.plans` in the routes below.
 plans: *mw.PlanLookup,
 
@@ -33,7 +33,7 @@ pub const http_routes = http.routes(.{
         .delete = http.delete("/{id}", .{ .middleware = .{auth.requirePermission("todos:delete")} }),
         // A literal segment wins over {id}: /export.csv is not a todo.
         .exportCsv = http.get("/export.csv", .{ .timeout = std.Io.Duration.fromSeconds(300) }),
-        .events = http.sse.get("/events", .{ .heartbeat = std.Io.Duration.fromSeconds(15), .on_close = .eventsClosed }),
+        .events = http.sse.get("/events", .{ .events = dto.LiveEvent, .heartbeat = std.Io.Duration.fromSeconds(15), .on_close = .eventsClosed }),
     },
 });
 
@@ -77,7 +77,7 @@ pub fn create(self: *TodosV1Controller, ctx: *http.Context) !http.Json(dto.TodoR
         .tags = body.tags,
         .idempotency_key = headers.idempotency_key,
     });
-    try self.live.publish(ctx.operation(), ctx.io(), user, .{ .event = "todo.created", .data = dto.TodoResponse.from(todo) });
+    try self.live.publish(ctx.operation(), ctx.io(), user, .{ .event = .{ .@"todo.created" = .from(todo) } });
     return .{ .value = .from(todo), .status = 201 };
 }
 
@@ -91,7 +91,7 @@ pub fn update(self: *TodosV1Controller, ctx: *http.Context) !http.Json(dto.TodoR
         .priority = body.priority,
         .due_date = body.due_date,
     });
-    try self.live.publish(ctx.operation(), ctx.io(), user, .{ .event = "todo.updated", .data = dto.TodoResponse.from(todo) });
+    try self.live.publish(ctx.operation(), ctx.io(), user, .{ .event = .{ .@"todo.updated" = .from(todo) } });
     return .{ .value = .from(todo) };
 }
 
@@ -99,7 +99,7 @@ pub fn delete(self: *TodosV1Controller, ctx: *http.Context) !void {
     const path = try ctx.path(dto.TodoIdPath);
     const user = try owner(ctx);
     try self.repo.delete(ctx.operation(), ctx.io(), user, path.id);
-    try self.live.publish(ctx.operation(), ctx.io(), user, .{ .event = "todo.deleted", .data = path });
+    try self.live.publish(ctx.operation(), ctx.io(), user, .{ .event = .{ .@"todo.deleted" = path } });
     // Nothing written into the response: 204 No Content.
 }
 
