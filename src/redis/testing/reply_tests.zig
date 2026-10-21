@@ -137,6 +137,7 @@ test "each well-formed reply reads back through the client's reader as the value
     for ([_]f64{ 0.1, 1e300, 5e-324, -0.0, std.math.floatMax(f64), std.math.nan(f64) }) |x| {
         var value: [1]Value = undefined;
         try readBack(a, .{ .double = x }, &value);
+        if (value[0] != .double) return error.TestNotADouble;
         if (std.math.isNan(x)) {
             try testing.expect(std.math.isNan(value[0].double));
         } else {
