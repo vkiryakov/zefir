@@ -1629,7 +1629,11 @@ What jwt refuses, and why:
 - **`exp`, `iss` and `aud` are required.** A token without an end, or that
   does not say for whom it is, never passes.
 - **Signatures are checked strictly.** An ECDSA signature of zeros (CVE-2022-21449)
-  and one in DER instead of r‖s are `BadSignature`; Ed25519 is verified
+  and one in DER instead of r‖s are `BadSignature`. ECDSA takes two
+  signatures for each one it makes, (r, s) and (r, n − s): jwt signs with
+  the low s and takes only that one, so a token of ES256 or ES384 is one
+  string, and nobody can turn it into a second one that passes, past a
+  service that remembers tokens by their text. Ed25519 is verified
   without its cofactor, which leaves no room for signatures made up to
   pass; HMAC is compared in a time that does not depend on the bytes.
 - **Hostile input fails with an error.** A token over 8 KiB is refused

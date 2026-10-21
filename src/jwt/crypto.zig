@@ -1,8 +1,8 @@
 //! Signing and verification by the algorithm of a key. HMAC (RFC 7518
 //! §3.2) compares its MAC in constant time and wipes its context on the
 //! stack after use. ECDSA (RFC 7518 §3.4) signs with noise from the `Io`
-//! and writes r‖s; Ed25519 (RFC 8037) signs deterministically and verifies
-//! without the cofactor.
+//! and writes r‖s with the low s, the only form it takes; Ed25519 (RFC
+//! 8037) signs deterministically and verifies without the cofactor.
 
 const std = @import("std");
 const algorithm = @import("algorithm.zig");
@@ -95,13 +95,33 @@ pub fn sign(key: *const SigningKey, io: std.Io, signing_input: []const u8, out: 
     };
 }
 
-/// r‖s, each of the curve's size (RFC 7518 §3.4), never DER. std refuses
-/// an r or an s that is 0 or not below the order of the curve, which
-/// stops the signature of CVE-2022-21449 (r = s = 0).
+/// r‖s, each of the curve's size (RFC 7518 §3.4), never DER, with the low
+/// s that `signEcdsa` writes. std refuses an r or an s that is 0 or not
+/// below the order of the curve, which stops the signature of
+/// CVE-2022-21449 (r = s = 0).
 fn verifyEcdsa(comptime Scheme: type, public_key: *const Scheme.PublicKey, message: []const u8, signature: []const u8) error{BadSignature}!void {
     const length = Scheme.Signature.encoded_length;
     if (signature.len != length) return error.BadSignature;
-    Scheme.Signature.fromBytes(signature[0..length].*).verify(message, public_key.*) catch return error.BadSignature;
+    const parsed = Scheme.Signature.fromBytes(signature[0..length].*);
+    if (!isLowS(Scheme, &parsed.s)) return error.BadSignature;
+    parsed.verify(message, public_key.*) catch return error.BadSignature;
+}
+
+/// Whether `s`, big-endian, is at most half the order n of the group.
+/// ECDSA takes (r, s) and (r, n − s) alike, so anybody could turn one token
+/// into a second string; zefir signs with the low s and takes only that
+/// one, so that a token of ES256 or ES384 has one string.
+fn isLowS(comptime Scheme: type, s: *const Scheme.Curve.scalar.CompressedScalar) bool {
+    const half = comptime halfOrder(Scheme);
+    return std.mem.order(u8, s, &half) != .gt;
+}
+
+/// ⌊n / 2⌋, big-endian.
+fn halfOrder(comptime Scheme: type) Scheme.Curve.scalar.CompressedScalar {
+    const length = Scheme.Curve.scalar.encoded_length;
+    var half: [length]u8 = undefined;
+    std.mem.writeInt(@Int(.unsigned, 8 * length), &half, Scheme.Curve.scalar.field_order / 2, .big);
+    return half;
 }
 
 /// `verifyStrict`: without the cofactor (RFC 8032 §5.1.7), and with s
@@ -112,15 +132,17 @@ fn verifyEd25519(public_key: *const Ed25519.PublicKey, message: []const u8, sign
     Ed25519.Signature.fromBytes(signature[0..length].*).verifyStrict(message, public_key.*) catch return error.BadSignature;
 }
 
-/// Signs with fresh noise from `io`, as std advises against fault attacks;
-/// std fails only for an r or an s of 0, and then fresh noise signs again.
+/// Signs with fresh noise from `io`, as std advises against fault attacks,
+/// and writes the low s of the two (`isLowS`); std fails only for an r or
+/// an s of 0, and then fresh noise signs again.
 fn signEcdsa(comptime Scheme: type, pair: *const Scheme.KeyPair, io: std.Io, message: []const u8, out: *[max_signature_bytes]u8) []const u8 {
     const length = Scheme.Signature.encoded_length;
     var noise: [Scheme.noise_length]u8 = undefined;
     defer std.crypto.secureZero(u8, &noise);
     while (true) {
         io.random(&noise);
-        const signature = pair.sign(message, noise) catch continue;
+        var signature = pair.sign(message, noise) catch continue;
+        if (!isLowS(Scheme, &signature.s)) signature.s = Scheme.Curve.scalar.neg(signature.s, .big) catch continue;
         out[0..length].* = signature.toBytes();
         return out[0..length];
     }
@@ -249,6 +271,26 @@ test "ECDSA signatures carry noise, EdDSA ones do not" {
         try testing.expectEqual(alg == .EdDSA, std.mem.eql(u8, a, b));
         try testing.expectError(error.BadSignature, verify(&key, "header.payloaD", a));
     }
+}
+
+/// Signs 16 times with a fresh key of `Scheme` and expects every s at
+/// most half the order of the group.
+fn expectLowS(comptime Scheme: type, alg: Algorithm) !void {
+    const length = Scheme.Curve.scalar.encoded_length;
+    var half: [length]u8 = undefined;
+    std.mem.writeInt(@Int(.unsigned, 8 * length), &half, Scheme.Curve.scalar.field_order / 2, .big);
+    var signing: SigningKey = try .generate(testing.io, alg, .{});
+    defer signing.deinit();
+    var out: [max_signature_bytes]u8 = undefined;
+    for (0..16) |_| {
+        const signature = try sign(&signing, testing.io, "header.payload", &out);
+        try testing.expect(std.mem.order(u8, signature[length..], &half) != .gt);
+    }
+}
+
+test "ECDSA signs with the low s alone" {
+    try expectLowS(EcdsaP256Sha256, .ES256);
+    try expectLowS(EcdsaP384Sha384, .ES384);
 }
 
 const Roles = struct { roles: []const []const u8 = &.{} };

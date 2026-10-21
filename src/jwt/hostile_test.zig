@@ -327,6 +327,24 @@ test "r = n and s = n are BadSignature" {
     try expectOrderRefused(EcdsaP384Sha384, .ES384, comptime hex("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFC7634D81F4372DDF581A0DB248B0A77AECEC196ACCC52973"));
 }
 
+test "the high-s twin of an ECDSA signature is BadSignature" {
+    // ECDSA takes (r, s) and (r, n − s) alike: anybody can turn one valid
+    // token into a second string. zefir signs with the lower s only and
+    // takes only that one.
+    inline for (.{ .{ Algorithm.ES256, EcdsaP256Sha256 }, .{ Algorithm.ES384, EcdsaP384Sha384 } }) |pair| {
+        const Scheme = pair[1];
+        const half = Scheme.Curve.scalar.encoded_length;
+        var signed: Signed = undefined;
+        try signed.init(pair[0]);
+        defer signed.deinit();
+        var out: [crypto.max_signature_bytes]u8 = undefined;
+        const valid = try signed.signature(&out);
+        var twin: [2 * half]u8 = valid[0 .. 2 * half].*;
+        twin[half..].* = try Scheme.Curve.scalar.neg(twin[half..].*, .big);
+        try signed.expectBadSignature(&twin);
+    }
+}
+
 test "an ECDSA signature in DER is BadSignature" {
     inline for (.{ .{ Algorithm.ES256, EcdsaP256Sha256 }, .{ Algorithm.ES384, EcdsaP384Sha384 } }) |pair| {
         const Scheme = pair[1];

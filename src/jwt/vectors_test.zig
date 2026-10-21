@@ -19,6 +19,7 @@ const rfc8037 = @import("testdata/rfc8037.zig");
 const hex = @import("testdata/keys.zig").hex;
 
 const testing = std.testing;
+const EcdsaP256Sha256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
 const Details = errors.Details;
 const VerifyError = errors.VerifyError;
 const jwt_types: []const []const u8 = &.{"JWT"};
@@ -146,14 +147,20 @@ fn expectWrongType(token: []const u8, keys: []const Key, issuer: []const u8) !vo
     try testing.expectEqualStrings("typ", details.claim.?);
 }
 
-test "RFC 7515 A.3: the ES256 signature verifies, and the Verifier says WrongType" {
+test "RFC 7515 A.3: the ES256 signature has a high s, its low twin verifies, and the Verifier says WrongType" {
     const spki = try a3Spki();
     var key: Key = try .fromDer(.ES256, &spki, .{});
     defer key.deinit();
     const parts = try compact.split(rfc7515.a3_token);
     var signature: [64]u8 = undefined;
     try base64url.decode(&signature, parts.signature);
-    try crypto.verify(&key, parts.signing_input, &signature);
+    // The s of A.3 lies in the upper half of the group. ECDSA takes (r, s)
+    // and (r, n − s) alike; zefir signs with the lower s alone and takes
+    // only that one, so that a token has one string.
+    try testing.expectError(error.BadSignature, crypto.verify(&key, parts.signing_input, &signature));
+    var twin = signature;
+    twin[32..].* = try EcdsaP256Sha256.Curve.scalar.neg(signature[32..].*, .big);
+    try crypto.verify(&key, parts.signing_input, &twin);
 
     var sec1 = try a3Sec1();
     defer std.crypto.secureZero(u8, &sec1);
@@ -161,7 +168,7 @@ test "RFC 7515 A.3: the ES256 signature verifies, and the Verifier says WrongTyp
     defer signing.deinit();
     var own = [_]Key{signing.verificationKey()};
     defer own[0].deinit();
-    try crypto.verify(&own[0], parts.signing_input, &signature);
+    try crypto.verify(&own[0], parts.signing_input, &twin);
 
     // The header has no "typ", which zefir requires of every token.
     try expectWrongType(rfc7515.a3_token, &own, "joe");
