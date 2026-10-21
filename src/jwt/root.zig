@@ -33,6 +33,12 @@ pub const max_json_depth = 32;
 /// The longest key id (`kid`), in bytes of visible ASCII.
 pub const max_key_id_bytes = 128;
 
+pub const Algorithm = @import("algorithm.zig").Algorithm;
+
+test {
+    _ = @import("algorithm.zig");
+}
+
 test "limits have their documented values" {
     try std.testing.expectEqual(8192, max_token_bytes);
     try std.testing.expectEqual(32, max_json_depth);
