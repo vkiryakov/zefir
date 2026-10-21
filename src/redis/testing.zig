@@ -12,4 +12,5 @@ pub const sleepAtLeast = @import("testing/sleep.zig").sleepAtLeast;
 test {
     std.testing.refAllDecls(@This());
     _ = @import("testing/sleep.zig");
+    _ = @import("testing/reply_tests.zig");
 }
