@@ -707,6 +707,9 @@ const TestingBackend = @import("testing/Backend.zig");
 const Json = @import("dto.zig").Json;
 const normalize = @import("path.zig").normalize;
 
+/// The events of the users' stream.
+const UserEvent = union(enum) { joined: struct { id: u64 } };
+
 const UsersV1Controller = struct {
     pub const http_routes = route_decls.routes(.{
         .prefix = "/v1/users",
@@ -714,7 +717,7 @@ const UsersV1Controller = struct {
             .list = route_decls.get("", .{}),
             .get = route_decls.get("/{id}", .{ .timeout = std.Io.Duration.fromSeconds(5) }),
             .remove = route_decls.delete("/{id}", .{}),
-            .events = sse.get("/events", .{ .on_close = .eventsClosed }),
+            .events = sse.get("/events", .{ .events = UserEvent, .on_close = .eventsClosed }),
         },
     });
 

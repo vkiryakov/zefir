@@ -5,12 +5,14 @@ const http = @import("http");
 
 const CreateUser = struct { name: []const u8 };
 
+const UserEvent = union(enum) { joined: struct { id: u64 } };
+
 const UsersV1Controller = struct {
     const Import = http.post("/import", .{ .body = CreateUser });
 
     pub const http_routes = http.routes(.{
         .prefix = "/v1/users",
-        .methods = .{ .events = http.sse.get("/events", .{}) },
+        .methods = .{ .events = http.sse.get("/events", .{ .events = UserEvent }) },
     });
 
     pub fn events(_: *UsersV1Controller, ctx: *http.sse.Context) !void {

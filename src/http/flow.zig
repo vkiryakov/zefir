@@ -406,7 +406,7 @@ fn serveStream(server: *Server, ctx: *Context, sub: *Subscription, reason: Reaso
         call(route.controller, &closing);
     }
     // Publishers reach it no more; the last touch of its manager.
-    sse.Manager.Internal.remove(sub.manager, io, sub);
+    sub.hub.remove(io, sub);
     sub.token.cancel();
     finishPhases(server, ctx, .{
         .status = res.status_sent orelse 0,

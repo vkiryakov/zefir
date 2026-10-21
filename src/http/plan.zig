@@ -454,6 +454,9 @@ const PlanLookup = struct {
 var audit_object: Audit = .{};
 var plans_object: PlanLookup = .{};
 
+/// The events of the users' stream.
+const UserEvent = union(enum) { joined: Todo };
+
 const UsersV1Controller = struct {
     calls: u32 = 0,
     audit: *Audit = &audit_object,
@@ -467,7 +470,7 @@ const UsersV1Controller = struct {
             .get = routes.get("/{id}", .{ .timeout = std.Io.Duration.fromSeconds(5) }),
             .create = routes.post("/", .{ .max_body_bytes = 64 << 10, .timeout = null, .middleware = .{.plans} }),
             .files = routes.get("/{id}/files/{*path}", .{}),
-            .events = sse.get("/events", .{ .heartbeat = std.Io.Duration.fromSeconds(15), .on_close = .eventsClosed }),
+            .events = sse.get("/events", .{ .events = UserEvent, .heartbeat = std.Io.Duration.fromSeconds(15), .on_close = .eventsClosed }),
         },
     });
 

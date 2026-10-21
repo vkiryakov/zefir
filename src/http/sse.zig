@@ -1,11 +1,12 @@
 //! Server-sent events: a long response of
 //! `text/event-stream`, without an upgrade. A route of `http.sse.get`
-//! opens a stream, an `http.sse.Manager` keeps the streams by key and
-//! publishes to them, and `http.sse.Context` is the context of the route's
-//! method and of its `.on_close`.
+//! opens a stream and declares its events, a `union(enum)` with a variant
+//! per event; an `http.sse.Manager(Events)` of the same union keeps the
+//! streams by key and publishes to them, and `http.sse.Context` is the
+//! context of the route's method and of its `.on_close`.
 //!
 //! ```zig
-//! .events = http.sse.get("/events", .{ .heartbeat = std.Io.Duration.fromSeconds(15), .on_close = .eventsClosed }),
+//! .events = http.sse.get("/events", .{ .events = dto.LiveEvent, .heartbeat = std.Io.Duration.fromSeconds(15), .on_close = .eventsClosed }),
 //!
 //! // An ordinary request until subscribe: an error here is an ordinary 4xx or 5xx.
 //! pub fn events(self: *TodosV1Controller, ctx: *http.sse.Context) !void {
@@ -29,22 +30,27 @@ const v = @import("validator");
 const routes = @import("routes.zig");
 const HttpContext = @import("Context.zig");
 
-pub const Manager = @import("sse/Manager.zig");
-pub const ManagerOptions = Manager.Options;
-pub const SubscriptionId = Manager.SubscriptionId;
-pub const SubscribeError = Manager.SubscribeError;
+const Hub = @import("sse/Hub.zig");
+
+pub const Manager = @import("sse/Manager.zig").Manager;
+/// The limits of a manager: `.max_subscriptions` and the queue of each
+/// subscriber.
+pub const ManagerOptions = Hub.Options;
+pub const SubscriptionId = Hub.SubscriptionId;
+pub const SubscribeError = Hub.SubscribeError;
 
 /// An SSE route, always GET; a HEAD request on its path is not served
-/// by it, since HEAD would open a subscription. `opts` may hold the input
-/// of the handler, which `ctx.input` reads at once: `.path`, `.query`,
-/// `.headers` and `.cookies` (DTOs, as for `http.get`; a stream has no
-/// body); `.middleware`, `.heartbeat` (a `std.Io.Duration`: a comment
-/// `: ping` goes out when nothing else did for that long) and
-/// `.on_close`, the name of the controller's method that runs once when
-/// the stream ends:
+/// by it, since HEAD would open a subscription. `opts` holds `.events`, the
+/// `union(enum)` of the stream's events, whose manager is
+/// `http.sse.Manager(Events)`; and may hold the input of the handler, which
+/// `ctx.input` reads at once: `.path`, `.query`, `.headers` and `.cookies`
+/// (DTOs, as for `http.get`; a stream has no body); `.middleware`,
+/// `.heartbeat` (a `std.Io.Duration`: a comment `: ping` goes out when
+/// nothing else did for that long) and `.on_close`, the name of the
+/// controller's method that runs once when the stream ends:
 ///
 /// ```zig
-/// .events = http.sse.get("/events", .{ .heartbeat = std.Io.Duration.fromSeconds(15), .on_close = .eventsClosed }),
+/// .events = http.sse.get("/events", .{ .events = dto.LiveEvent, .heartbeat = std.Io.Duration.fromSeconds(15), .on_close = .eventsClosed }),
 /// ```
 ///
 /// The handler is `pub fn events(self: *C, ctx: *http.sse.Context) !void`,
@@ -150,7 +156,7 @@ pub const Context = struct {
     /// them.
     ///
     /// ```zig
-    /// const Events = http.sse.get("/events", .{ .query = dto.EventsQuery });
+    /// const Events = http.sse.get("/events", .{ .events = dto.LiveEvent, .query = dto.EventsQuery });
     ///
     /// pub fn events(self: *TodosV1Controller, ctx: *http.sse.Context) !void {
     ///     const in = try ctx.input(Events);
@@ -181,6 +187,7 @@ fn InputErrors(comptime R: type) type {
 test {
     _ = @import("sse/format.zig");
     _ = @import("sse/Subscription.zig");
+    _ = @import("sse/Hub.zig");
     _ = @import("sse/Manager.zig");
     _ = @import("sse/tests.zig");
 }

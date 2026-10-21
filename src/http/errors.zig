@@ -53,7 +53,7 @@ pub const Error = error{
     LocalMissing,
     BodyConsumed,
     HandledWithoutResponse,
-    /// CR, LF or NUL in the `event` or the `id` of an SSE event.
+    /// CR, LF or NUL in the `id` of an SSE event.
     InvalidEvent,
     /// An SSE event longer than the `.queue.max_bytes` of its manager.
     EventTooLarge,

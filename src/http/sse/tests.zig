@@ -1,7 +1,7 @@
 //! SSE streams through the server, on `http.testing`:
 //! the route and its context, `subscribe` and its limits, the stream past
-//! the request's deadline, `publish` and the queues, the heartbeat,
-//! `close`, `on_close` and the stop.
+//! the request's deadline, `publish` of typed events and the queues, the
+//! heartbeat, `close`, `on_close` and the stop.
 const std = @import("std");
 const v = @import("validator");
 const Server = @import("../Server.zig");
@@ -87,6 +87,24 @@ const Seen = struct {
     }
 };
 
+/// The events of the tests' streams: a variant per event, its value the
+/// data.
+const RoomEvent = union(enum) {
+    note: []const u8,
+    count: u64,
+    tick: u64,
+    left: []const u8,
+    @"todo.created": Todo,
+    @"todo.done": TodoEvent,
+    refusing: Refusing,
+    cleared: void,
+};
+
+const Todo = struct { id: u64, title: []const u8 };
+
+/// The manager of the tests' streams.
+const Live = sse.Manager(RoomEvent);
+
 const KeyQuery = struct {
     key: []const u8 = "ann",
     /// "before": the handler fails before `subscribe`; "after": after it;
@@ -96,7 +114,7 @@ const KeyQuery = struct {
 };
 
 const EventsV1Controller = struct {
-    live: *sse.Manager,
+    live: *Live,
     /// Guards `seen`, `closed_seen`, `last_id` and `second`: handlers and
     /// `on_close` run on several threads.
     mutex: std.Io.Mutex = .init,
@@ -112,8 +130,8 @@ const EventsV1Controller = struct {
     pub const http_routes = routes.routes(.{
         .prefix = "/v1",
         .methods = .{
-            .events = sse.get("/events/{room}", .{ .on_close = .eventsClosed }),
-            .beating = sse.get("/beating", .{ .heartbeat = std.Io.Duration.fromMilliseconds(50), .on_close = .eventsClosed }),
+            .events = sse.get("/events/{room}", .{ .events = RoomEvent, .on_close = .eventsClosed }),
+            .beating = sse.get("/beating", .{ .events = RoomEvent, .heartbeat = std.Io.Duration.fromMilliseconds(50), .on_close = .eventsClosed }),
             .plain = routes.get("/plain", .{}),
         },
     });
@@ -133,7 +151,7 @@ const EventsV1Controller = struct {
         _ = self.subscribed.fetchAdd(1, .release);
         if (std.mem.eql(u8, q.then, "after")) return error.Unavailable;
         if (std.mem.eql(u8, q.then, "close")) {
-            try self.live.publish(ctx.operation(), ctx.io(), q.key, .{ .data = "early" });
+            try self.live.publish(ctx.operation(), ctx.io(), q.key, .{ .event = .{ .note = "early" } });
             self.live.close(ctx.io(), q.key);
         }
     }
@@ -170,7 +188,7 @@ const Limits = struct {
 /// A server of `EventsV1Controller` with a manager; it stays where `start`
 /// put it.
 const Fixture = struct {
-    live: sse.Manager = undefined,
+    live: Live = undefined,
     events: EventsV1Controller = undefined,
     finisher: Finisher = .{},
     backend: TestingBackend = undefined,
@@ -186,6 +204,9 @@ const Fixture = struct {
             .backend = f.backend.backend(),
             .controllers = .{&f.events},
             .middleware = .{ identify, &f.finisher },
+            // A variant of the events has a transform that fails, which the
+            // handler's publish may return; no error handler maps it.
+            .strict_errors = false,
             .max_streams = limits.max_streams,
             .max_in_flight = limits.max_in_flight,
             .request_timeout = limits.request_timeout,
@@ -211,7 +232,7 @@ const Fixture = struct {
         return f.backend.open(testing.io, .{ .method = .GET, .target = target });
     }
 
-    fn publish(f: *Fixture, key: []const u8, event: anytype) !void {
+    fn publish(f: *Fixture, key: []const u8, event: Live.Event) Live.PublishError!void {
         return f.live.publish(.root, testing.io, key, event);
     }
 };
@@ -392,10 +413,10 @@ test "subscribe sends the stream headers and the handler returns at once" {
     try testing.expectEqual(0, http_testing.inFlight(&f.server));
     try testing.expectEqual(1, http_testing.openStreams(&f.server));
 
-    try f.publish("ann", .{ .event = "todo.created", .id = "1", .data = .{ .id = 1, .title = "Buy milk" } });
+    try f.publish("ann", .{ .event = .{ .@"todo.created" = .{ .id = 1, .title = "Buy milk" } }, .id = "1" });
     try testing.expectEqualStrings("event: todo.created\nid: 1\ndata: {\"id\":1,\"title\":\"Buy milk\"}\n\n", try nextPiece(s));
     // Another key's event is not this stream's.
-    try f.publish("bob", .{ .data = "for bob" });
+    try f.publish("bob", .{ .event = .{ .note = "for bob" } });
     try testing.expectError(error.Timeout, s.next(io, .fromMilliseconds(20)));
 
     // close(key) ends it with its last chunk; then on_close, once.
@@ -421,7 +442,7 @@ test "a stream closed before it began still sends what was published to it" {
     const s = try f.open("/v1/events/lobby?key=ann&then=close");
     var s_ended = false;
     errdefer if (!s_ended) s.deinit(io);
-    try testing.expectEqualStrings("data: \"early\"\n\n", try nextPiece(s));
+    try testing.expectEqualStrings("event: note\ndata: \"early\"\n\n", try nextPiece(s));
     try expectEnd(s);
     try testing.expect(!s.aborted());
     s.deinit(io);
@@ -522,8 +543,8 @@ test "the stream outlives the request deadline; HTTP middleware onFinish runs wh
     var s_ended = false;
     errdefer if (!s_ended) s.deinit(io);
     try sleepAtLeast(150);
-    try f.publish("ann", .{ .data = "still here" });
-    try testing.expectEqualStrings("data: \"still here\"\n\n", try nextPiece(s));
+    try f.publish("ann", .{ .event = .{ .note = "still here" } });
+    try testing.expectEqualStrings("event: note\ndata: \"still here\"\n\n", try nextPiece(s));
     // onFinish waits for the end of the stream, not of its request.
     try testing.expectEqual(0, f.finisher.calls.load(.acquire));
 
@@ -557,6 +578,27 @@ fn refuse(_: std.mem.Allocator, code: []const u8) error{Refused}![]const u8 {
     return code;
 }
 
+test "publish: the event is named by its variant; its id, its retry, and {} for a variant of void" {
+    const io = testing.io;
+    var dog = try Watchdog.start("publish: the event is named by its variant");
+    defer dog.stop();
+    var f: Fixture = .{};
+    try f.start(testing.allocator, .{}, .{});
+    defer f.stop();
+
+    const s = try f.open("/v1/events/lobby?key=ann");
+    defer s.deinit(io);
+    try f.publish("ann", .{ .event = .{ .count = 3 }, .id = "42", .retry = 3000 });
+    try testing.expectEqualStrings("event: count\nid: 42\nretry: 3000\ndata: 3\n\n", try nextPiece(s));
+    // A variant without data: its name, and the data of void, {}.
+    try f.publish("ann", .{ .event = .cleared });
+    try testing.expectEqualStrings("event: cleared\ndata: {}\n\n", try nextPiece(s));
+    const id: ?[]const u8 = "7";
+    try f.publish("ann", .{ .event = .{ .note = "a\nb" }, .id = id });
+    // A line break in the data stays inside the JSON string.
+    try testing.expectEqualStrings("event: note\nid: 7\ndata: \"a\\nb\"\n\n", try nextPiece(s));
+}
+
 test "publish: data through transforms and outside names; a transform error returns to the publisher" {
     const io = testing.io;
     var dog = try Watchdog.start("publish: data through transforms and outside names");
@@ -567,17 +609,17 @@ test "publish: data through transforms and outside names; a transform error retu
 
     const s = try f.open("/v1/events/lobby?key=ann");
     defer s.deinit(io);
-    try f.publish("ann", .{ .event = "todo.done", .data = TodoEvent{ .title = "  Buy milk ", .done_at = 5 } });
+    try f.publish("ann", .{ .event = .{ .@"todo.done" = .{ .title = "  Buy milk ", .done_at = 5 } } });
     try testing.expectEqualStrings("event: todo.done\ndata: {\"title\":\"Buy milk\",\"doneAt\":5}\n\n", try nextPiece(s));
     // The publisher gets the error of the transform, and nothing goes out.
-    try testing.expectError(error.Refused, f.publish("ann", .{ .data = Refusing{ .code = "refused" } }));
-    try f.publish("ann", .{ .data = Refusing{ .code = "kept" }, .retry = 3000 });
-    try testing.expectEqualStrings("retry: 3000\ndata: {\"code\":\"kept\"}\n\n", try nextPiece(s));
+    try testing.expectError(error.Refused, f.publish("ann", .{ .event = .{ .refusing = .{ .code = "refused" } } }));
+    try f.publish("ann", .{ .event = .{ .refusing = .{ .code = "kept" } }, .retry = 3000 });
+    try testing.expectEqualStrings("event: refusing\nretry: 3000\ndata: {\"code\":\"kept\"}\n\n", try nextPiece(s));
 }
 
-test "publish: CR, LF or NUL in event or id is InvalidEvent" {
+test "publish: CR, LF or NUL in the id is InvalidEvent" {
     const io = testing.io;
-    var dog = try Watchdog.start("publish: CR, LF or NUL in event or id is InvalidEvent");
+    var dog = try Watchdog.start("publish: CR, LF or NUL in the id is InvalidEvent");
     defer dog.stop();
     var f: Fixture = .{};
     try f.start(testing.allocator, .{}, .{});
@@ -586,14 +628,12 @@ test "publish: CR, LF or NUL in event or id is InvalidEvent" {
     const s = try f.open("/v1/events/lobby?key=ann");
     defer s.deinit(io);
     for ([_][]const u8{ "a\nb", "a\rb", "a\x00b", "\r\n" }) |bad| {
-        try testing.expectError(error.InvalidEvent, f.publish("ann", .{ .event = bad, .data = 1 }));
-        try testing.expectError(error.InvalidEvent, f.publish("ann", .{ .id = bad, .data = 1 }));
+        try testing.expectError(error.InvalidEvent, f.publish("ann", .{ .event = .{ .count = 1 }, .id = bad }));
     }
     // Nothing went out; a valid one does.
     try testing.expectError(error.Timeout, s.next(io, .fromMilliseconds(20)));
-    const id: ?[]const u8 = "7";
-    try f.publish("ann", .{ .event = null, .id = id, .data = 1 });
-    try testing.expectEqualStrings("id: 7\ndata: 1\n\n", try nextPiece(s));
+    try f.publish("ann", .{ .event = .{ .count = 1 }, .id = "7" });
+    try testing.expectEqualStrings("event: count\nid: 7\ndata: 1\n\n", try nextPiece(s));
 }
 
 test "publish: an event over .queue.max_bytes is EventTooLarge, and its subscribers stay" {
@@ -614,12 +654,12 @@ test "publish: an event over .queue.max_bytes is EventTooLarge, and its subscrib
     try waitCount(&f.events.subscribed, 2);
     // No queue could hold it: refused, and sent to nobody.
     const big: [2048]u8 = @splat('x');
-    try testing.expectError(error.EventTooLarge, f.publish("k", .{ .data = @as([]const u8, &big) }));
+    try testing.expectError(error.EventTooLarge, f.publish("k", .{ .event = .{ .note = &big } }));
     try io.sleep(.fromMilliseconds(20), .awake);
     try testing.expectEqual(0, f.events.closes.load(.acquire));
     // Both streams are open and take the next event.
-    try f.publish("k", .{ .data = "small" });
-    for ([_]*Stream{ a, b }) |s| try testing.expectEqualStrings("data: \"small\"\n\n", try nextPiece(s));
+    try f.publish("k", .{ .event = .{ .note = "small" } });
+    for ([_]*Stream{ a, b }) |s| try testing.expectEqualStrings("event: note\ndata: \"small\"\n\n", try nextPiece(s));
 }
 
 /// An allocator that keeps the most bytes it held at once. Safe from any
@@ -693,7 +733,7 @@ test "a full queue closes the slow subscriber and memory stays bounded" {
     errdefer if (!s_ended) s.deinit(io);
     try testing.expectEqual(200, s.status);
     const big: [8 << 10]u8 = @splat('x');
-    for (0..300) |_| try f.publish("slow", .{ .data = @as([]const u8, &big) });
+    for (0..300) |_| try f.publish("slow", .{ .event = .{ .note = &big } });
     try waitCount(&f.events.closes, 1);
     // The stream is cut: its write never ended.
     try expectEnd(s);
@@ -722,7 +762,7 @@ test "heartbeat every interval" {
     const elapsed = sinceMs(start);
     try testing.expect(elapsed >= 150 and elapsed < 5000);
     // An event goes out between them.
-    try f.publish("beat", .{ .event = "tick", .data = 1 });
+    try f.publish("beat", .{ .event = .{ .tick = 1 } });
     while (true) {
         const piece = try nextPiece(s);
         if (std.mem.eql(u8, piece, ": ping\n\n")) continue;
@@ -736,7 +776,7 @@ test "heartbeat every interval" {
 /// behind the queue of two events: five events do it, however its writer
 /// took them.
 fn overflow(f: *Fixture, key: []const u8) !void {
-    for (0..5) |i| try f.publish(key, .{ .data = i });
+    for (0..5) |i| try f.publish(key, .{ .event = .{ .count = i } });
 }
 
 test "on_close runs exactly once: client left, overflow, close(key), server stop" {
@@ -769,14 +809,14 @@ test "on_close runs exactly once: client left, overflow, close(key), server stop
     // close(key): what was published before goes out, then the last
     // chunk; what is published after does not.
     const closed = try f.open("/v1/events/lobby?key=closed");
-    try f.publish("closed", .{ .data = "one" });
-    try f.publish("closed", .{ .data = "two" });
+    try f.publish("closed", .{ .event = .{ .note = "one" } });
+    try f.publish("closed", .{ .event = .{ .note = "two" } });
     f.live.close(io, "closed");
-    try f.publish("closed", .{ .data = "late" });
+    try f.publish("closed", .{ .event = .{ .note = "late" } });
     var got: std.ArrayList(u8) = .empty;
     defer got.deinit(testing.allocator);
     while (try closed.next(io, .fromSeconds(5))) |piece| try got.appendSlice(testing.allocator, piece);
-    try testing.expectEqualStrings("data: \"one\"\n\ndata: \"two\"\n\n", got.items);
+    try testing.expectEqualStrings("event: note\ndata: \"one\"\n\nevent: note\ndata: \"two\"\n\n", got.items);
     try testing.expect(!closed.aborted());
     closed.deinit(io);
     try testing.expectEqual(3, f.events.closes.load(.acquire));
@@ -823,7 +863,7 @@ test "the stop cuts a stream whose last events a client that reads nothing holds
     var s_ended = false;
     errdefer if (!s_ended) s.deinit(io);
     try waitCount(&f.events.subscribed, 1);
-    try f.publish("stuck", .{ .data = "stuck" });
+    try f.publish("stuck", .{ .event = .{ .note = "stuck" } });
     try io.sleep(.fromMilliseconds(20), .awake);
     const start = std.Io.Clock.awake.now(io);
     try f.server.shutdown(io);
@@ -845,7 +885,7 @@ test "the stop cuts a stream whose last events a client that reads nothing holds
 /// The streams of rooms, whose `.on_close` tells the others of the room,
 /// through the same manager, that someone left.
 const RoomsV1Controller = struct {
-    live: *sse.Manager,
+    live: *Live,
     subscribed: std.atomic.Value(u32) = .init(0),
     closes: std.atomic.Value(u32) = .init(0),
     /// Publishes of `.on_close` that failed.
@@ -853,7 +893,7 @@ const RoomsV1Controller = struct {
 
     pub const http_routes = routes.routes(.{
         .prefix = "/v1",
-        .methods = .{ .events = sse.get("/rooms/{room}/events", .{ .on_close = .left }) },
+        .methods = .{ .events = sse.get("/rooms/{room}/events", .{ .events = RoomEvent, .on_close = .left }) },
     });
 
     pub fn events(self: *RoomsV1Controller, ctx: *sse.Context) !void {
@@ -864,7 +904,7 @@ const RoomsV1Controller = struct {
 
     pub fn left(self: *RoomsV1Controller, ctx: *sse.Context) void {
         const room = if (ctx.path(struct { room: []const u8 })) |p| p.room else |_| "?";
-        self.live.publish(ctx.operation(), ctx.io(), room, .{ .event = "left", .data = ctx.requestId() }) catch {
+        self.live.publish(ctx.operation(), ctx.io(), room, .{ .event = .{ .left = ctx.requestId() } }) catch {
             _ = self.farewells_failed.fetchAdd(1, .release);
         };
         _ = self.closes.fetchAdd(1, .release);
@@ -886,7 +926,7 @@ test "Manager.deinit while the server runs waits for its streams, which never to
     const io = testing.io;
     var dog = try Watchdog.start("Manager.deinit while the server runs");
     defer dog.stop();
-    var live: sse.Manager = .init(testing.allocator, .{});
+    var live: Live = .init(testing.allocator, .{});
     var rooms: RoomsV1Controller = .{ .live = &live };
     var slow: SlowFinish = .{};
     var backend: TestingBackend = .init(testing.allocator);
@@ -902,8 +942,8 @@ test "Manager.deinit while the server runs waits for its streams, which never to
     try waitCount(&rooms.subscribed, 2);
     // Each stream sent an event: its queue holds memory of the manager's
     // allocator.
-    try live.publish(.root, io, "lobby", .{ .data = "hello" });
-    for ([_]*Stream{ a, b }) |s| try testing.expectEqualStrings("data: \"hello\"\n\n", try nextPiece(s));
+    try live.publish(.root, io, "lobby", .{ .event = .{ .note = "hello" } });
+    for ([_]*Stream{ a, b }) |s| try testing.expectEqualStrings("event: note\ndata: \"hello\"\n\n", try nextPiece(s));
 
     // The manager goes while the server runs: it closes both streams and
     // returns once their .on_close has run, each publishing through it.
@@ -980,12 +1020,12 @@ const LobbyPath = struct { room: []const u8 };
 const LobbyQuery = struct { key: []const u8, limit: u32 = 10 };
 const LobbyHeaders = struct { accept: ?[]const u8 = null };
 const LobbyCookies = struct { session: ?[]const u8 = null };
-const Lobby = sse.get("/lobbies/{room}", .{ .path = LobbyPath, .query = LobbyQuery, .headers = LobbyHeaders, .cookies = LobbyCookies });
+const Lobby = sse.get("/lobbies/{room}", .{ .events = RoomEvent, .path = LobbyPath, .query = LobbyQuery, .headers = LobbyHeaders, .cookies = LobbyCookies });
 
 /// Reads the input of its stream at once, then subscribes under the key of
 /// the query.
 const LobbiesController = struct {
-    live: *sse.Manager,
+    live: *Live,
     /// Guards `seen`: the handler runs on another thread than the test.
     mutex: std.Io.Mutex = .init,
     subscribed: std.atomic.Value(u32) = .init(0),
@@ -1012,7 +1052,7 @@ test "input: the context of a stream reads what its route declares" {
     const io = testing.io;
     var dog = try Watchdog.start("input: the context of a stream");
     defer dog.stop();
-    var live: sse.Manager = .init(testing.allocator, .{});
+    var live: Live = .init(testing.allocator, .{});
     defer live.deinit(io);
     var lobbies: LobbiesController = .{ .live = &live };
     var backend: TestingBackend = .init(testing.allocator);

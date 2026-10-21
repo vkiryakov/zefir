@@ -1,5 +1,5 @@
-//! One subscription of an `http.sse.Manager`: the
-//! stream of one request, from its `subscribe` to its end. It owns what the
+//! One subscription of an `http.sse.Manager`, kept by
+//! its hub: the stream of one request, from its `subscribe` to its end. It owns what the
 //! stream lives on: the connection, which the server hands over and keeps
 //! for it to the end, an arena, a copy of its key and a `core.Context` of
 //! its own (its own token, a copy of the request's trace, no deadline).
@@ -17,18 +17,18 @@ const Exchange = @import("../Backend.zig").Exchange;
 const HttpContext = @import("../Context.zig");
 const format = @import("format.zig");
 const waiting = @import("../wait.zig");
-const Manager = @import("Manager.zig");
+const Hub = @import("Hub.zig");
 
 const Subscription = @This();
 const log = std.log.scoped(.http);
 
-manager: *Manager,
-/// The manager's allocator, copied: the queue comes from it, and the end of
-/// the stream frees it without touching the manager, which may be gone
-/// once `remove` has let the subscription go.
+hub: *Hub,
+/// The hub's allocator, copied: the queue comes from it, and the end of
+/// the stream frees it without touching the hub, which may be gone once
+/// `remove` has let the subscription go.
 gpa: std.mem.Allocator,
-/// Its place in the manager, set when the manager takes it.
-id: Manager.SubscriptionId = .{ .index = 0, .generation = 0 },
+/// Its place in the hub, set when the hub takes it.
+id: Hub.SubscriptionId = .{ .index = 0, .generation = 0 },
 /// The key it was subscribed under, copied.
 key: []const u8,
 /// The id of the request that opened it, copied, for the log.
@@ -83,10 +83,10 @@ pub const End = enum(u8) {
     failed,
 };
 
-/// A subscription of `manager` for the request of `ctx` under `key`, not
-/// taken by the manager yet.
-pub fn create(manager: *Manager, ctx: *const HttpContext, key: []const u8) error{OutOfMemory}!*Subscription {
-    var arena: std.heap.ArenaAllocator = .init(manager.gpa);
+/// A subscription of `hub` for the request of `ctx` under `key`, not
+/// taken by the hub yet.
+pub fn create(hub: *Hub, ctx: *const HttpContext, key: []const u8) error{OutOfMemory}!*Subscription {
+    var arena: std.heap.ArenaAllocator = .init(hub.gpa);
     errdefer arena.deinit();
     const a = arena.allocator();
     const sub = try a.create(Subscription);
@@ -98,8 +98,8 @@ pub fn create(manager: *Manager, ctx: *const HttpContext, key: []const u8) error
         operation = operation.withTrace(copy);
     }
     sub.* = .{
-        .manager = manager,
-        .gpa = manager.gpa,
+        .hub = hub,
+        .gpa = hub.gpa,
         .key = try a.dupe(u8, key),
         .request_id = try a.dupe(u8, ctx.requestId()),
         .arena = undefined,
@@ -110,8 +110,8 @@ pub fn create(manager: *Manager, ctx: *const HttpContext, key: []const u8) error
     return sub;
 }
 
-/// Frees the subscription, once its stream has ended and the manager has
-/// let it go.
+/// Frees the subscription, once its stream has ended and the hub has let
+/// it go.
 pub fn destroy(sub: *Subscription) void {
     sub.queue.deinit(sub.gpa);
     // The subscription lives in its arena: the arena goes by value.
@@ -152,7 +152,7 @@ pub fn endReason(sub: *Subscription, io: std.Io) End {
 /// Queues the bytes of an event, unless the stream has ended; never
 /// waits. An event that would take the queue over `limits` ends the stream
 /// instead (`.overflow = .close`), and so does a queue that cannot grow.
-pub fn push(sub: *Subscription, io: std.Io, bytes: []const u8, limits: Manager.Options.Queue) void {
+pub fn push(sub: *Subscription, io: std.Io, bytes: []const u8, limits: Hub.Options.Queue) void {
     const Pushed = enum { queued, dropped, overflow, out_of_memory };
     const pushed: Pushed = pushed: {
         sub.mutex.lockUncancelable(io);

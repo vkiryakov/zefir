@@ -17,6 +17,8 @@ const CreateTodoRequest = struct { title: []const u8 };
 const CreateTodoHeaders = struct { idempotency_key: ?[]const u8 = null };
 const LoginForm = struct { user: []const u8, password: []const u8 };
 const SessionCookies = struct { session: ?[]const u8 = null };
+/// The events of the todos' stream: a todo, or nothing at all.
+const TodoEvent = union(enum) { @"todo.created": TodoResponse, @"todo.cleared": void };
 
 /// Timeouts of a config: a duration, or none.
 const report_timeout: ?std.Io.Duration = std.Io.Duration.fromSeconds(60);
@@ -62,7 +64,7 @@ const TodosV1Controller = struct {
         .middleware = .{.audit},
     });
     const Login = http.post("/login", .{ .form = LoginForm, .cookies = SessionCookies, .responses = .{ .see_other = .{} } });
-    const Events = http.sse.get("/events", .{ .query = ListTodosQuery, .heartbeat = std.Io.Duration.fromSeconds(15), .on_close = .eventsClosed });
+    const Events = http.sse.get("/events", .{ .events = TodoEvent, .query = ListTodosQuery, .heartbeat = std.Io.Duration.fromSeconds(15), .on_close = .eventsClosed });
 
     pub const http_routes = http.routes(.{
         .prefix = "/v1/todos",

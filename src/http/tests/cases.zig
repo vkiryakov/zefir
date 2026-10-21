@@ -41,7 +41,7 @@ pub const compile_errors = [_]Fixture{
     .{ .file = dir ++ "controller_bad_prefix.zig", .expect = "zefir.http: a controller prefix starts with '/' or is empty: \"v1/users\"" },
     // Options.
     .{ .file = dir ++ "route_unknown_option.zig", .expect = "zefir.http: http.get(\"/x\"): unknown option .timout; the options are .path, .query, .body, .form, .headers, .cookies, .responses, .middleware, .max_body_bytes and .timeout" },
-    .{ .file = dir ++ "sse_unknown_option.zig", .expect = "zefir.http: http.sse.get(\"/events\"): unknown option .timeout; the options are .path, .query, .headers, .cookies, .middleware, .heartbeat and .on_close" },
+    .{ .file = dir ++ "sse_unknown_option.zig", .expect = "zefir.http: http.sse.get(\"/events\"): unknown option .timeout; the options are .path, .query, .headers, .cookies, .events, .middleware, .heartbeat and .on_close" },
     .{ .file = dir ++ "routes_unknown_option.zig", .expect = "zefir.http: http.routes: unknown option .prefx; the options are .prefix, .middleware and .methods" },
     .{ .file = dir ++ "route_negative_timeout.zig", .expect = "zefir.http: http.get(\"/export.csv\"): .timeout is a std.Io.Duration above zero, such as std.Io.Duration.fromSeconds(300), or null for no deadline" },
     .{ .file = dir ++ "sse_zero_heartbeat.zig", .expect = "zefir.http: http.sse.get(\"/events\"): .heartbeat is a std.Io.Duration above zero, such as std.Io.Duration.fromSeconds(15), or null for none" },
@@ -50,7 +50,7 @@ pub const compile_errors = [_]Fixture{
     .{ .file = dir ++ "route_input_not_type.zig", .expect = "zefir.http: http.get(\"/{id}\"): .path is the type of a DTO, such as .path = dto.TodoIdPath" },
     .{ .file = dir ++ "route_declared_dto.zig", .expect = "zefir.http: route_declared_dto.Query.filter: a struct field comes only from JSON; query, form, path, headers and cookies hold strings" },
     .{ .file = dir ++ "route_body_and_form.zig", .expect = "zefir.http: http.post(\"\"): .body and .form together; a body is JSON or a form" },
-    .{ .file = dir ++ "sse_route_body.zig", .expect = "zefir.http: http.sse.get(\"/events\"): unknown option .body; the options are .path, .query, .headers, .cookies, .middleware, .heartbeat and .on_close" },
+    .{ .file = dir ++ "sse_route_body.zig", .expect = "zefir.http: http.sse.get(\"/events\"): unknown option .body; the options are .path, .query, .headers, .cookies, .events, .middleware, .heartbeat and .on_close" },
     .{ .file = dir ++ "route_path_param_without_field.zig", .expect = "zefir.http: UsersV1Controller.get: {id} in \"/v1/users/{id}\" has no field in .path = UserPath" },
     .{ .file = dir ++ "route_path_field_without_param.zig", .expect = "zefir.http: UsersV1Controller.list: .path = UserPath has the field id, but \"/v1/users\" has no {id}" },
     .{ .file = dir ++ "route_catch_all_field.zig", .expect = "zefir.http: UsersV1Controller.files: {*path} in \"/v1/files/{*path}\", the rest of the path, goes to the field path of .path = FilePath, a u32; make it a []const u8 or a ?[]const u8" },

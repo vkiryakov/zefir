@@ -156,6 +156,7 @@ pub fn options(comptime path: []const u8, comptime opts: anytype) type {
 /// options of a route: `.path`, `.query`, `.body`, `.form`, `.headers`,
 /// `.cookies`, `.responses`, `.middleware`, `.max_body_bytes` and
 /// `.timeout`; of an SSE route: `.path`, `.query`, `.headers`, `.cookies`,
+/// `.events` (the `union(enum)` of its events, which it needs),
 /// `.middleware`, `.heartbeat` (a `std.Io.Duration`) and `.on_close` (the
 /// name of a method of the controller, `.eventsClosed`).
 ///
@@ -163,7 +164,8 @@ pub fn options(comptime path: []const u8, comptime opts: anytype) type {
 /// `ctx.query` and the others check theirs; `.body` and `.form` together
 /// stop the build. The route's type declares them as `Path`, `Query`,
 /// `Body`, `Form`, `Headers` and `Cookies`, void for what it leaves out,
-/// and its statuses as `responses`, in the order of `.responses`.
+/// its events as `Events`, void on a route that is not SSE, and its
+/// statuses as `responses`, in the order of `.responses`.
 ///
 /// `.responses` lists every status the route answers with but those of
 /// its errors, which the error handler's `mapError` gives. Without it the
@@ -183,7 +185,7 @@ pub fn Route(comptime method: std.http.Method, comptime kind: Kind, comptime pat
     if (@typeInfo(O) != .@"struct") @compileError("zefir.http: " ++ where ++ " takes a struct literal of options, such as .{}");
     switch (kind) {
         .rest => expectOptions(O, &.{ "path", "query", "body", "form", "headers", "cookies", "responses", "middleware", "max_body_bytes", "timeout" }, where),
-        .sse => expectOptions(O, &.{ "path", "query", "headers", "cookies", "middleware", "heartbeat", "on_close" }, where),
+        .sse => expectOptions(O, &.{ "path", "query", "headers", "cookies", "events", "middleware", "heartbeat", "on_close" }, where),
     }
     if (path.len > 0 and path[0] != '/') @compileError("zefir.http: a route path starts with '/' or is empty: \"" ++ path ++ "\"");
     if (@hasField(O, "max_body_bytes")) switch (@typeInfo(@TypeOf(opts.max_body_bytes))) {
@@ -196,7 +198,7 @@ pub fn Route(comptime method: std.http.Method, comptime kind: Kind, comptime pat
     if (@hasField(O, "heartbeat")) expectDuration(@TypeOf(opts.heartbeat), heartbeat_form);
     if (@hasField(O, "on_close") and @TypeOf(opts.on_close) != @EnumLiteral())
         @compileError("zefir.http: " ++ where ++ ": .on_close names a method of the controller, such as .on_close = .eventsClosed");
-    const declared = declarationsOf(opts, where);
+    const declared = declarationsOf(opts, kind, where);
     return struct {
         pub const zefir_http_route = {};
         pub const http_method = method;
@@ -216,6 +218,8 @@ pub fn Route(comptime method: std.http.Method, comptime kind: Kind, comptime pat
         pub const Form: type = declared.Form;
         pub const Headers: type = declared.Headers;
         pub const Cookies: type = declared.Cookies;
+        /// The `union(enum)` of an SSE route's events; void on another.
+        pub const Events: type = declared.Events;
         /// As `.responses` lists them; empty without it.
         pub const responses: []const RouteResponse = declared.responses;
     };
@@ -252,7 +256,7 @@ pub fn expectRoute(comptime R: type, comptime call: []const u8) void {
         @compileError("zefir.http: " ++ call ++ " takes a route, such as " ++ call ++ "(Get) with const Get = http.get(\"/{id}\", .{ .path = dto.TodoIdPath }); got " ++ plan.typeName(R));
 }
 
-/// What a route declares of its input and its statuses.
+/// What a route declares of its input, its events and its statuses.
 const Declarations = struct {
     Path: type = void,
     Query: type = void,
@@ -260,12 +264,13 @@ const Declarations = struct {
     Form: type = void,
     Headers: type = void,
     Cookies: type = void,
+    Events: type = void,
     responses: []const RouteResponse = &.{},
 };
 
-/// The input and the statuses of the options `opts`, each DTO checked for
-/// its source.
-fn declarationsOf(comptime opts: anytype, comptime where: []const u8) Declarations {
+/// The input, the events and the statuses of the options `opts`, each DTO
+/// checked for its source.
+fn declarationsOf(comptime opts: anytype, comptime kind: Kind, comptime where: []const u8) Declarations {
     const d: Declarations = .{
         .Path = dtoOf(opts, "path", "dto.TodoIdPath", where),
         .Query = dtoOf(opts, "query", "dto.ListTodosQuery", where),
@@ -273,6 +278,7 @@ fn declarationsOf(comptime opts: anytype, comptime where: []const u8) Declaratio
         .Form = dtoOf(opts, "form", "dto.LoginForm", where),
         .Headers = dtoOf(opts, "headers", "dto.CreateTodoHeaders", where),
         .Cookies = dtoOf(opts, "cookies", "dto.SessionCookies", where),
+        .Events = if (kind == .sse) eventsOf(opts, where) else void,
         .responses = if (@hasField(@TypeOf(opts), "responses")) responsesOf(opts.responses, where) else &.{},
     };
     if (d.Body != void and d.Form != void) @compileError("zefir.http: " ++ where ++ ": .body and .form together; a body is JSON or a form");
@@ -292,6 +298,22 @@ fn dtoOf(comptime opts: anytype, comptime name: []const u8, comptime example: []
     const T = @field(opts, name);
     if (@TypeOf(T) != type) @compileError("zefir.http: " ++ where ++ ": ." ++ name ++ " is the type of a DTO, such as ." ++ name ++ " = " ++ example);
     return T;
+}
+
+/// The `.events` of an SSE route: a `union(enum)`, a variant per event.
+fn eventsOf(comptime opts: anytype, comptime where: []const u8) type {
+    const example = "a union(enum) of the stream's events, such as .events = dto.LiveEvent";
+    if (!@hasField(@TypeOf(opts), "events")) @compileError("zefir.http: " ++ where ++ " needs .events, " ++ example);
+    const E = opts.events;
+    if (@TypeOf(E) != type) @compileError("zefir.http: " ++ where ++ ": .events is " ++ example ++ "; got " ++ plan.typeName(@TypeOf(E)));
+    if (!isEventUnion(E)) @compileError("zefir.http: " ++ where ++ ": .events is " ++ example ++ "; got " ++ plan.typeName(E));
+    return E;
+}
+
+/// Whether `T` can be the events of a stream: a `union(enum)`.
+pub fn isEventUnion(comptime T: type) bool {
+    const info = @typeInfo(T);
+    return info == .@"union" and info.@"union".tag_type != null;
 }
 
 /// The statuses of `.responses`, in their order.
@@ -399,10 +421,11 @@ const LoginForm = struct { user: []const u8 };
 const KeyHeaders = struct { idempotency_key: ?[]const u8 = null };
 const SessionCookies = struct { session: ?[]const u8 = null };
 const Conflict = struct { code: []const u8 };
+const TodoEvent = union(enum) { @"todo.created": TodoIdPath, @"todo.cleared": void };
 
 test "routes: a route declares its input and statuses; what it leaves out is void" {
     const Plain = get("/{id}", .{});
-    inline for (.{ Plain.Path, Plain.Query, Plain.Body, Plain.Form, Plain.Headers, Plain.Cookies }) |T| try testing.expect(T == void);
+    inline for (.{ Plain.Path, Plain.Query, Plain.Body, Plain.Form, Plain.Headers, Plain.Cookies, Plain.Events }) |T| try testing.expect(T == void);
     try testing.expectEqual(0, Plain.responses.len);
 
     const Create = post("/{id}", .{
@@ -441,14 +464,16 @@ test "routes: a route declares its input and statuses; what it leaves out is voi
     try testing.expect(Export.responses[0].json == void);
 }
 
-test "routes: an SSE route declares its path, query, headers and cookies" {
+test "routes: an SSE route declares its events, path, query, headers and cookies" {
     const Events = Route(.GET, .sse, "/events/{id}", .{
         .path = TodoIdPath,
         .query = ListQuery,
         .headers = KeyHeaders,
         .cookies = SessionCookies,
+        .events = TodoEvent,
         .heartbeat = std.Io.Duration.fromSeconds(15),
     });
+    try testing.expect(Events.Events == TodoEvent);
     try testing.expect(Events.Path == TodoIdPath and Events.Query == ListQuery);
     try testing.expect(Events.Headers == KeyHeaders and Events.Cookies == SessionCookies);
     try testing.expect(Events.Body == void and Events.Form == void);

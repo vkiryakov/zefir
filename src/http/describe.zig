@@ -49,8 +49,8 @@ pub const RouteDescription = struct {
     /// The controller's method that handles the route: "create".
     handler: []const u8,
     /// The route as `http.get` and the others made it, with its
-    /// declarations: `Path`, `Query`, `Body`, `Form`, `Headers`, `Cookies`
-    /// and `responses`.
+    /// declarations: `Path`, `Query`, `Body`, `Form`, `Headers`, `Cookies`,
+    /// `Events` and `responses`.
     Route: type,
     /// The `T` of the `http.Json(T)` its handler returns; void for a
     /// handler of `!void` and for SSE.
@@ -214,6 +214,9 @@ fn refuseEmpty(_: std.mem.Allocator, name: []const u8) error{EmptyName}![]const 
     return name;
 }
 
+/// The events of the users' stream.
+const UserEvent = union(enum) { joined: UserResponse, left: void };
+
 const UsersV1Controller = struct {
     audit: *Audit = &audit_object,
     plans: *PlanLookup = &plans_object,
@@ -228,7 +231,7 @@ const UsersV1Controller = struct {
             .get = routes.get("/{id}", .{ .path = UserPath }),
             .create = Create,
             .files = routes.get("/{id}/files/{*path}", .{ .path = UserFilePath }),
-            .events = sse.get("/events", .{}),
+            .events = sse.get("/events", .{ .events = UserEvent }),
         },
     });
 
@@ -315,6 +318,8 @@ test "describe: the routes in the order of the controllers and their methods, wi
     try testing.expect(d.routes[1].Route.Path == UserPath);
     try testing.expect(d.routes[2].Route == UsersV1Controller.Create);
     try testing.expectEqual(2, d.routes[2].Route.responses.len);
+    // The events of the stream; void on the other routes.
+    try testing.expect(d.routes[4].Route.Events == UserEvent and d.routes[2].Route.Events == void);
     // The value of a JSON handler; void for !void and for SSE.
     try testing.expect(d.routes[1].Value == UserResponse and d.routes[2].Value == UserResponse);
     try testing.expect(d.routes[0].Value == void and d.routes[3].Value == void and d.routes[4].Value == void);
