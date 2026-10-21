@@ -2,10 +2,10 @@
 //! The authentication of the orders service, made of ordinary middleware.
 //! `JwtAuth` sits in the server's middleware and checks the token of
 //! `Authorization: Bearer` on every request: a token of orders puts its
-//! user into `ctx.locals`, a request without a token goes on as
-//! anonymous, and a token that does not pass ends the request with 401.
-//! `requireUser` sits in the middleware of the controllers that need a
-//! user.
+//! user into `ctx.locals`, and a request without a token goes on as
+//! anonymous. So does one with a token that does not pass, but with the
+//! reason kept for the answer. `requireUser` sits in the middleware of the
+//! controllers that need a user, and answers 401 with that reason.
 //!
 //! ```zig
 //! // main: the server's middleware, for every request
@@ -39,7 +39,8 @@ pub const CurrentUser = struct {
     roles: []const []const u8,
 };
 
-/// Why `JwtAuth` refused the token of a request, for the answer.
+/// Why `JwtAuth` refused the token of a request, for the 401 of
+/// `requireUser`.
 pub const Refusal = struct { reason: jwt.VerifyError };
 
 /// Checks the bearer token of every request with the verifier of orders.
@@ -61,13 +62,15 @@ pub const JwtAuth = struct {
         return .next;
     }
 
-    /// Logs why the token is refused, keeps the reason for the answer, and
-    /// ends the request with 401: a wrong token never passes as no token.
-    fn refuse(self: *JwtAuth, ctx: *http.Context, reason: jwt.VerifyError, details: *const jwt.Details) error{ Unauthenticated, OutOfMemory } {
+    /// Logs why the token is refused and keeps the reason for the answer.
+    /// The request goes on without a user: a route that needs none, such
+    /// as the sign-in, still serves an app that holds an expired token, and
+    /// `requireUser` answers the others with 401.
+    fn refuse(self: *JwtAuth, ctx: *http.Context, reason: jwt.VerifyError, details: *const jwt.Details) !http.MiddlewareResult {
         // What the refusal was about, never the token: it is a credential.
         self.logger.warn("Token refused", .{ .reason = reason, .claim = details.claim, .violation = details.violation });
-        ctx.locals.put(Refusal, .{ .reason = reason }) catch |err| return err;
-        return error.Unauthenticated;
+        try ctx.locals.put(Refusal, .{ .reason = reason });
+        return .next;
     }
 };
 
@@ -80,7 +83,8 @@ fn bearer(value: ?[]const u8) ?[]const u8 {
 }
 
 /// 401 without a signed-in user: `error.Unauthenticated`, which the
-/// framework answers with 401.
+/// framework answers with 401, and `challenge` with the reason when
+/// `JwtAuth` refused a token. A wrong token never passes as a user.
 pub fn requireUser(ctx: *http.Context) !http.MiddlewareResult {
     _ = ctx.locals.get(CurrentUser) orelse return error.Unauthenticated;
     return .next;

@@ -18,6 +18,12 @@ const Config = struct {
         signing_key: confy.Secret,
         // APP_AUTH_KEY_ID: its id, the "kid" of its tokens.
         key_id: []const u8,
+        // While the key changes: the public key that signed before and its
+        // id, APP_AUTH_PREVIOUS_KEY and APP_AUTH_PREVIOUS_KEY_ID.
+        previous: ?struct {
+            key: []const u8,
+            key_id: []const u8,
+        },
     },
     users: struct {
         // APP_USERS_ANN: the secret Ann signs in with.
@@ -42,8 +48,16 @@ pub fn main(init: std.process.Init) !void {
     defer signing_key.deinit();
     // Its tokens are meant for orders and for billing.
     const signer: jwt.Signer = try .init(&signing_key, .{ .issuer = "orders", .audiences = &.{ "orders", "billing" } });
-    const keys = [_]jwt.Key{signing_key.verificationKey()};
-    const verifier: jwt.Verifier = try .init(.{ .keys = &keys, .issuer = "orders", .audiences = &.{"orders"} });
+    // Orders checks the tokens of its key and, while the key changes, those
+    // of the previous one, until the last of them expires.
+    var keys: [2]jwt.Key = undefined;
+    keys[0] = signing_key.verificationKey();
+    var key_count: usize = 1;
+    if (config.auth.previous) |previous| {
+        keys[1] = try .fromPem(.EdDSA, previous.key, .{ .id = previous.key_id });
+        key_count = 2;
+    }
+    const verifier: jwt.Verifier = try .init(.{ .keys = keys[0..key_count], .issuer = "orders", .audiences = &.{"orders"} });
 
     // The objects of the service: main owns them, the server borrows them.
     const users = [_]LoginController.User{

@@ -24,9 +24,10 @@ pub const Program = struct {
 };
 
 /// The private key of orders in the runs of this build: Ed25519 in
-/// PKCS#8, as `openssl genpkey -algorithm ed25519` writes it. README.md
-/// runs the programs with the reader's own key, `"$(cat orders.pem)"`;
-/// they print the same with any key.
+/// PKCS#8, as `openssl genpkey -algorithm ed25519` writes it. It is
+/// published here, so it proves nothing: README.md says never to trust
+/// it, and runs the programs with the reader's own key,
+/// `"$(cat orders.pem)"`; they print the same with any key.
 const orders_key =
     \\-----BEGIN PRIVATE KEY-----
     \\MC4CAQAwBQYDK2VwBCIEIMhtZbAEuSrkg7vHeYU/2RAvkPjq6goubPZ3RsrYBmNR

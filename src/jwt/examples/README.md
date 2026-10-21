@@ -420,14 +420,20 @@ openssl ecparam -name prime256v1 -genkey -noout -out es256.pem   # ES256; secp38
 openssl rand -base64 48                                          # an HMAC secret of 64 characters
 ```
 
-The files are PEM: a block of base64 between two marker lines. The public
-key of orders in this guide is:
+The files are PEM: a block of base64 between two marker lines. The runs
+of this guide use a sample key of orders, whose public key is:
 
 ```text
 -----BEGIN PUBLIC KEY-----
 MCowBQYDK2VwAyEA1rQM3tcZwaeBG73FtMkSgozKMFHlEkT24K1KGN0rUAY=
 -----END PUBLIC KEY-----
 ```
+
+> [!WARNING]
+> This sample key is for reading the guide alone. Its private half is
+> published in this repository, in `cases.zig`, so anybody can sign tokens
+> with it: never let a service trust it. Make the keys of your services
+> with the commands above.
 
 Each kind of key loads with a function of its own, with the algorithm you
 name; a key of another curve than that algorithm's fails at once, when the
@@ -453,7 +459,7 @@ it on one line, with `\n` inside double quotes, which confy turns into
 line breaks:
 
 ```sh
-APP_AUTH_ORDERS_KEY="-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA1rQM3tcZwaeBG73FtMkSgozKMFHlEkT24K1KGN0rUAY=\n-----END PUBLIC KEY-----"
+APP_AUTH_ORDERS_KEY="-----BEGIN PUBLIC KEY-----\n<the base64 line of orders.pub.pem>\n-----END PUBLIC KEY-----"
 ```
 
 jwt reads a PEM with CRLF, indented, or on one line with spaces between
@@ -480,18 +486,22 @@ month it was made: "2026-10". The signer writes it into every token as
 `kid`, and a verifier picks the key of that id among its keys; a verifier
 with one key may take tokens without `kid`. To change the key of orders:
 
-1. Add the new public key to the settings of every service that checks
-   tokens, next to the old one, and restart them: their verifiers take the
-   tokens of both keys.
-2. Switch orders to the new private key: new tokens carry the new `kid`.
+1. Add the new public key to the settings of every other service that
+   checks the tokens of orders, such as billing, next to the old one, and
+   restart them: their verifiers take the tokens of both keys.
+2. Switch orders to the new private key, and give it the old public key
+   as its previous one, `APP_AUTH_PREVIOUS_KEY` and
+   `APP_AUTH_PREVIOUS_KEY_ID`: new tokens carry the new `kid`, and the
+   tokens that orders gave before still pass its own routes.
 3. Once the last token of the old key has expired, the lifetime of a token
-   and the leeway after step 2, remove the old key from the settings.
+   and the leeway after step 2, remove the old key from the settings of
+   billing, and the previous key from those of orders.
 
 Done the other way round, step 2 before step 1, the new tokens fail with
-`UnknownKey` at once, so the mistake shows. A verifier never changes: to
-take new keys without a restart, build a new one. The tests of billing go
-through steps 1 and 3, with a verifier made anew for each, as after a
-restart:
+`UnknownKey` at billing at once, so the mistake shows. A verifier never
+changes: to take new keys without a restart, build a new one. The tests of
+orders go through step 2 (see [HTTP](#http)), and those of billing through
+steps 1 and 3, with a verifier made anew for each, as after a restart:
 
 ```zig
 // Step 1: billing restarts with the old key and the new one, and
@@ -689,10 +699,10 @@ The middleware `JwtAuth` checks the token of every request of orders:
 //! The authentication of the orders service, made of ordinary middleware.
 //! `JwtAuth` sits in the server's middleware and checks the token of
 //! `Authorization: Bearer` on every request: a token of orders puts its
-//! user into `ctx.locals`, a request without a token goes on as
-//! anonymous, and a token that does not pass ends the request with 401.
-//! `requireUser` sits in the middleware of the controllers that need a
-//! user.
+//! user into `ctx.locals`, and a request without a token goes on as
+//! anonymous. So does one with a token that does not pass, but with the
+//! reason kept for the answer. `requireUser` sits in the middleware of the
+//! controllers that need a user, and answers 401 with that reason.
 //!
 //! ```zig
 //! // main: the server's middleware, for every request
@@ -726,7 +736,8 @@ pub const CurrentUser = struct {
     roles: []const []const u8,
 };
 
-/// Why `JwtAuth` refused the token of a request, for the answer.
+/// Why `JwtAuth` refused the token of a request, for the 401 of
+/// `requireUser`.
 pub const Refusal = struct { reason: jwt.VerifyError };
 
 /// Checks the bearer token of every request with the verifier of orders.
@@ -748,13 +759,15 @@ pub const JwtAuth = struct {
         return .next;
     }
 
-    /// Logs why the token is refused, keeps the reason for the answer, and
-    /// ends the request with 401: a wrong token never passes as no token.
-    fn refuse(self: *JwtAuth, ctx: *http.Context, reason: jwt.VerifyError, details: *const jwt.Details) error{ Unauthenticated, OutOfMemory } {
+    /// Logs why the token is refused and keeps the reason for the answer.
+    /// The request goes on without a user: a route that needs none, such
+    /// as the sign-in, still serves an app that holds an expired token, and
+    /// `requireUser` answers the others with 401.
+    fn refuse(self: *JwtAuth, ctx: *http.Context, reason: jwt.VerifyError, details: *const jwt.Details) !http.MiddlewareResult {
         // What the refusal was about, never the token: it is a credential.
         self.logger.warn("Token refused", .{ .reason = reason, .claim = details.claim, .violation = details.violation });
-        ctx.locals.put(Refusal, .{ .reason = reason }) catch |err| return err;
-        return error.Unauthenticated;
+        try ctx.locals.put(Refusal, .{ .reason = reason });
+        return .next;
     }
 };
 
@@ -767,7 +780,8 @@ fn bearer(value: ?[]const u8) ?[]const u8 {
 }
 
 /// 401 without a signed-in user: `error.Unauthenticated`, which the
-/// framework answers with 401.
+/// framework answers with 401, and `challenge` with the reason when
+/// `JwtAuth` refused a token. A wrong token never passes as a user.
 pub fn requireUser(ctx: *http.Context) !http.MiddlewareResult {
     _ = ctx.locals.get(CurrentUser) orelse return error.Unauthenticated;
     return .next;
@@ -787,12 +801,13 @@ pub fn challenge(ctx: *http.Context) ![]const u8 {
   request without `Authorization: Bearer` goes on as anonymous: the
   sign-in needs no user. A token that passes puts its user, `sub` and the
   roles, into `ctx.locals`.
-- **A token that does not pass ends the request** with
-  `error.Unauthenticated`, 401, even on a route that needs no user: a wrong
-  token never passes as no token. The log says why, with `jwt.Details`, and
-  never the token.
+- **A token that does not pass** puts no user there either. The log says
+  why, with `jwt.Details`, and never the token; the reason goes into
+  `ctx.locals` as a `Refusal`, and the request goes on. So a route that
+  needs no user still works: Ann signs in again even while her app sends
+  the token that has just expired.
 - **`requireUser`** stands where a user is needed: without one,
-  `error.Unauthenticated`.
+  `error.Unauthenticated`, 401. A wrong token never passes as a user.
 - **`challenge`** writes `WWW-Authenticate` for the answer: `Bearer` when
   no token came, and with `error="invalid_token"` and the text of
   `jwt.describe` when one was refused, as RFC 6750 asks.
@@ -890,6 +905,12 @@ const Config = struct {
         signing_key: confy.Secret,
         // APP_AUTH_KEY_ID: its id, the "kid" of its tokens.
         key_id: []const u8,
+        // While the key changes: the public key that signed before and its
+        // id, APP_AUTH_PREVIOUS_KEY and APP_AUTH_PREVIOUS_KEY_ID.
+        previous: ?struct {
+            key: []const u8,
+            key_id: []const u8,
+        },
     },
     users: struct {
         // APP_USERS_ANN: the secret Ann signs in with.
@@ -914,8 +935,16 @@ pub fn main(init: std.process.Init) !void {
     defer signing_key.deinit();
     // Its tokens are meant for orders and for billing.
     const signer: jwt.Signer = try .init(&signing_key, .{ .issuer = "orders", .audiences = &.{ "orders", "billing" } });
-    const keys = [_]jwt.Key{signing_key.verificationKey()};
-    const verifier: jwt.Verifier = try .init(.{ .keys = &keys, .issuer = "orders", .audiences = &.{"orders"} });
+    // Orders checks the tokens of its key and, while the key changes, those
+    // of the previous one, until the last of them expires.
+    var keys: [2]jwt.Key = undefined;
+    keys[0] = signing_key.verificationKey();
+    var key_count: usize = 1;
+    if (config.auth.previous) |previous| {
+        keys[1] = try .fromPem(.EdDSA, previous.key, .{ .id = previous.key_id });
+        key_count = 2;
+    }
+    const verifier: jwt.Verifier = try .init(.{ .keys = keys[0..key_count], .issuer = "orders", .audiences = &.{"orders"} });
 
     // The objects of the service: main owns them, the server borrows them.
     const users = [_]LoginController.User{
@@ -1010,9 +1039,10 @@ const App = struct {
 };
 ```
 
-Its settings are the key of orders, its id, and Ann's secret. The line of
-`WARN` comes from the log of `JwtAuth`, in the middle of the request it
-refused:
+Its settings are the key of orders, its id, and Ann's secret; while the
+key of orders changes, the previous public key too (see
+[Keys](#keys)). The line of `WARN` comes from the log of `JwtAuth`, in
+the middle of the request it refused:
 
 ```text
 $ APP_AUTH_SIGNING_KEY="$(cat orders.pem)" APP_AUTH_KEY_ID=2026-10 APP_USERS_ANN=ann-secret zig build run
@@ -1054,12 +1084,20 @@ const testing = std.testing;
 /// The time of the tests: 2026-10-22, 12:00 UTC, in seconds of Unix time.
 const noon = 1_792_670_400;
 
+/// What a test sets of the service, as `main` reads it from the settings.
+const Options = struct {
+    /// The id of the key of orders, which the test makes on the spot.
+    key_id: []const u8 = "2026-10",
+    /// While the key changes, the public key that signed before.
+    previous: ?jwt.Key = null,
+};
+
 /// The service as `main` builds it, on the backend in memory, with a key
 /// of its own and the clock at noon.
 const Service = struct {
     clock: jwt.testing.FixedClock,
     key: jwt.SigningKey,
-    keys: [1]jwt.Key,
+    keys: [2]jwt.Key,
     signer: jwt.Signer,
     verifier: jwt.Verifier,
     /// What the log of `JwtAuth` wrote, a record per line.
@@ -1074,16 +1112,22 @@ const Service = struct {
     server: http.Server,
 
     /// Starts the service; `s` stays where it is until `stop`.
-    fn start(s: *Service) !void {
+    fn start(s: *Service, options: Options) !void {
         s.clock = try .init(testing.io, noon);
         errdefer s.clock.deinit();
         const io = s.clock.io();
         // A key of the tests alone, made on the spot.
-        s.key = try .generate(io, .EdDSA, .{ .id = "2026-10" });
+        s.key = try .generate(io, .EdDSA, .{ .id = options.key_id });
         errdefer s.key.deinit();
-        s.keys = .{s.key.verificationKey()};
         s.signer = try .init(&s.key, .{ .issuer = "orders", .audiences = &.{ "orders", "billing" } });
-        s.verifier = try .init(.{ .keys = &s.keys, .issuer = "orders", .audiences = &.{"orders"} });
+        // As in main: the key of orders, and the previous one, if any.
+        s.keys[0] = s.key.verificationKey();
+        var key_count: usize = 1;
+        if (options.previous) |previous| {
+            s.keys[1] = previous;
+            key_count = 2;
+        }
+        s.verifier = try .init(.{ .keys = s.keys[0..key_count], .issuer = "orders", .audiences = &.{"orders"} });
         s.records = .init(testing.allocator);
         errdefer s.records.deinit();
         s.logger = try .init(testing.allocator, io, .{ .format = .text, .output = .{ .writer = &s.records.writer } });
@@ -1115,21 +1159,25 @@ const Service = struct {
         s.clock.deinit();
     }
 
-    /// POST /api/login as Ann with `secret`.
-    fn signIn(s: *Service, secret: []const u8) !http.testing.Response {
+    /// POST /api/login as Ann with `secret`, and with `token` in
+    /// `Authorization: Bearer` when her app still holds one.
+    fn signIn(s: *Service, secret: []const u8, token: ?[]const u8) !http.testing.Response {
         const body = try std.json.Stringify.valueAlloc(testing.allocator, LoginController.LoginRequest{ .user = "ann", .secret = secret }, .{});
         defer testing.allocator.free(body);
+        const authorization = try std.fmt.allocPrint(testing.allocator, "Bearer {s}", .{token orelse ""});
+        defer testing.allocator.free(authorization);
+        const headers: [2][2][]const u8 = .{ .{ "content-type", "application/json" }, .{ "authorization", authorization } };
         return s.backend.request(s.clock.io(), .{
             .method = .POST,
             .target = "/api/login",
-            .headers = &.{.{ "content-type", "application/json" }},
+            .headers = headers[0..if (token == null) 1 else 2],
             .body = body,
         });
     }
 
     /// Ann's token, which the caller frees.
     fn tokenOfAnn(s: *Service) ![]u8 {
-        var res = try s.signIn("ann-secret");
+        var res = try s.signIn("ann-secret", null);
         defer res.deinit();
         try testing.expectEqual(200, res.status);
         const answer = try std.json.parseFromSliceLeaky(LoginController.LoginResponse, res.arena.allocator(), res.body, .{});
@@ -1150,10 +1198,10 @@ const Service = struct {
 
 test "POST /api/login gives a token for 15 minutes" {
     var s: Service = undefined;
-    try s.start();
+    try s.start(.{});
     defer s.stop();
 
-    var res = try s.signIn("ann-secret");
+    var res = try s.signIn("ann-secret", null);
     defer res.deinit();
     try testing.expectEqual(200, res.status);
     const answer = try std.json.parseFromSliceLeaky(LoginController.LoginResponse, res.arena.allocator(), res.body, .{});
@@ -1171,7 +1219,7 @@ test "POST /api/login gives a token for 15 minutes" {
     try testing.expectEqualStrings("buyer", verified.claims.roles[0]);
 
     // A wrong secret gets no token.
-    var refused = try s.signIn("guess");
+    var refused = try s.signIn("guess", null);
     defer refused.deinit();
     try testing.expectEqual(401, refused.status);
     try testing.expectEqualStrings("Bearer", refused.header("www-authenticate").?);
@@ -1179,7 +1227,7 @@ test "POST /api/login gives a token for 15 minutes" {
 
 test "GET /api/orders with the token sees the user" {
     var s: Service = undefined;
-    try s.start();
+    try s.start(.{});
     defer s.stop();
     const token = try s.tokenOfAnn();
     defer testing.allocator.free(token);
@@ -1194,7 +1242,7 @@ test "GET /api/orders with the token sees the user" {
 
 test "without a token the request is anonymous, and a protected route says 401" {
     var s: Service = undefined;
-    try s.start();
+    try s.start(.{});
     defer s.stop();
 
     var res = try s.backend.request(s.clock.io(), .{ .method = .GET, .target = "/api/orders" });
@@ -1207,7 +1255,7 @@ test "without a token the request is anonymous, and a protected route says 401" 
 
 test "an expired token is 401 invalid_token with its description" {
     var s: Service = undefined;
-    try s.start();
+    try s.start(.{});
     defer s.stop();
     const token = try s.tokenOfAnn();
     defer testing.allocator.free(token);
@@ -1223,9 +1271,24 @@ test "an expired token is 401 invalid_token with its description" {
     try testing.expect(std.mem.find(u8, s.records.written(), token) == null);
 }
 
+test "an expired token does not stop POST /api/login" {
+    var s: Service = undefined;
+    try s.start(.{});
+    defer s.stop();
+    const token = try s.tokenOfAnn();
+    defer testing.allocator.free(token);
+
+    // Ann's app still sends her old token when she signs in again.
+    s.clock.set(noon + 16 * 60);
+    var res = try s.signIn("ann-secret", token);
+    defer res.deinit();
+    try testing.expectEqual(200, res.status);
+    try testing.expect(std.mem.find(u8, s.records.written(), "Token refused reason=Expired claim=exp") != null);
+}
+
 test "a token for billing alone is 401 at orders" {
     var s: Service = undefined;
-    try s.start();
+    try s.start(.{});
     defer s.stop();
 
     const for_billing: jwt.Signer = try .init(&s.key, .{ .issuer = "orders", .audiences = &.{"billing"} });
@@ -1235,6 +1298,47 @@ test "a token for billing alone is 401 at orders" {
     defer res.deinit();
     try testing.expectEqual(401, res.status);
     try testing.expectEqualStrings("Bearer error=\"invalid_token\", error_description=\"the token is not meant for this service\"", res.header("www-authenticate").?);
+}
+
+test "a token of orders without sub is 401 where a user is needed" {
+    var s: Service = undefined;
+    try s.start(.{});
+    defer s.stop();
+
+    // Signed by orders, but for nobody.
+    const token = try s.signer.sign(auth.Claims, s.clock.io(), testing.allocator, &.{}, .{});
+    defer testing.allocator.free(token);
+    var res = try s.getOrders(token);
+    defer res.deinit();
+    try testing.expectEqual(401, res.status);
+    try testing.expectEqualStrings("Bearer error=\"invalid_token\", error_description=\"the token lacks a required claim\"", res.header("www-authenticate").?);
+    try testing.expect(std.mem.find(u8, s.records.written(), "Token refused reason=MissingClaim claim=sub") != null);
+}
+
+test "after orders changes its key, a token of the old one still passes" {
+    // Before the change: Ann signs in with orders on its first key.
+    var old_key: jwt.Key = undefined;
+    const old_token = old: {
+        var before: Service = undefined;
+        try before.start(.{});
+        defer before.stop();
+        old_key = before.key.verificationKey();
+        break :old try before.tokenOfAnn();
+    };
+    defer testing.allocator.free(old_token);
+
+    // Step 2 of the change: orders restarts with a new key, and with the
+    // public key of the old one as the previous key.
+    var s: Service = undefined;
+    try s.start(.{ .key_id = "2026-11", .previous = old_key });
+    defer s.stop();
+    const new_token = try s.tokenOfAnn();
+    defer testing.allocator.free(new_token);
+    for ([_][]const u8{ old_token, new_token }) |token| {
+        var res = try s.getOrders(token);
+        defer res.deinit();
+        try testing.expectEqual(200, res.status);
+    }
 }
 ```
 
@@ -1546,13 +1650,12 @@ key of any of the six algorithms, with the id you give it:
 
 ```zig
 // A key of the tests alone, made on the spot.
-s.key = try .generate(io, .EdDSA, .{ .id = "2026-10" });
+s.key = try .generate(io, .EdDSA, .{ .id = options.key_id });
 ```
 
-No key file sits in the repository, and no secret in the settings of the
-tests. Its public half is `verificationKey()`, as for a key from the
-settings. A key made this way cannot be written out: it lives as long as
-the test.
+The tests need no key file and no secret in their settings. The public
+half of the key is `verificationKey()`, as for a key from the settings. A
+key made this way cannot be written out: it lives as long as the test.
 
 **The time a test sets.** `verify` and `sign` read the time from the clock
 `.real` of their `std.Io`. `jwt.testing.FixedClock` wraps the `Io` of the
