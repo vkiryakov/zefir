@@ -301,13 +301,915 @@ $ APP_AUTH_SIGNING_KEY="$(cat orders.pem)" APP_AUTH_KEY_ID=2026-10 zig build run
 
 ## Claims
 
+A token carries two kinds of claims.
+
+**The registered claims** of RFC 7519 are jwt's own. `jwt.Signer` writes
+them, `jwt.Verifier` checks them, and `verified.registered`, a
+`jwt.Registered`, gives them to you:
+
+| Claim | In `jwt.Registered` | What the verifier holds it to | Error |
+| --- | --- | --- | --- |
+| `iss` | `issuer` | required; equal to the verifier's `issuer`, byte for byte | `MissingClaim`, `WrongIssuer` |
+| `aud` | `audience` | required; a string or a non-empty array of them, one of which is among the verifier's `audiences` | `MissingClaim`, `WrongAudience` |
+| `exp` | `expires_at` | required; the token passes while now < `exp` + leeway | `MissingClaim`, `Expired` |
+| `nbf` | `not_before` | if present: `nbf` ≤ now + leeway | `NotYetValid` |
+| `iat` | `issued_at` | if present: `iat` ≤ now + leeway | `NotYetValid` |
+| `sub`, `jti` | `subject`, `id` | if present, a string | — |
+
+They are checked in this order, so a token of another issuer is
+`WrongIssuer` even when it has expired too. A claim of the wrong type,
+such as `"exp":"tomorrow"`, is `InvalidClaims`. A time is a number of
+seconds of Unix time, from 0 to 253402300799, the end of the year 9999; a
+fraction is rounded the safe way, `exp` down and `nbf` and `iat` up. The
+leeway is 60 seconds unless the verifier says otherwise, for the clocks of
+two services that disagree a little.
+
+**Your claims** are a struct of your own, such as the claims of orders in
+`auth.zig`:
+
+```zig
+/// The claims of the tokens of orders, besides the registered ones that
+/// jwt sets and checks itself.
+pub const Claims = struct {
+    /// What the user may do, such as "buyer".
+    roles: []const []const u8 = &.{},
+
+    pub const field_rules = .{ .roles = v.maxItems(16) };
+};
+```
+
+`verify(Claims, …)` fills it from the payload, and `sign(Claims, …)` writes
+it into a token; `void` instead of a struct means that the registered
+claims are enough. A field takes one of these types:
+
+| Field | From JSON |
+| --- | --- |
+| `bool` | `true`, `false` |
+| an integer of up to 64 bits | a number without a fraction or an exponent, within the type |
+| `f32`, `f64` | a number, finite |
+| an enum | a string, the name of a variant |
+| `[]const u8` | a string |
+| `[]const T` | an array |
+| `?T` | `null`, or the claim absent |
+| a struct | an object, with its own names and rules |
+
+- **Names.** A field's claim is its Zig name, or the name of `v.rename`, as
+  for the fields of a DTO in zefir-http and zefir-rpc. A name that is a URL,
+  as RFC 7519 suggests for claims that must not collide with others', goes
+  into `pub const claim_names = .{ .is_root = "http://example.com/is_root" };`.
+- **Required or not.** A field without a default and not `?T` must be in
+  the token, else `InvalidClaims`. A field with a default keeps it, and
+  `?T` without one is `null`.
+- **Unknown claims are skipped**, so a token of a newer version of a
+  service, with claims an older one does not know, still passes.
+- **Rules.** Once the struct is filled, its `field_rules` are checked, as
+  zefir-validator checks a DTO: `v.maxItems(16)` refuses a token with 17
+  roles, with `ClaimsRejected`. The transforms of validator, such as
+  `v.trim`, never run: claims arrive as they were signed.
+- **The registered names are jwt's.** A field named `exp` or renamed to
+  `iss` at the top level of the struct does not compile, and neither does
+  a type the table does not have. Every such message starts with `jwt:`,
+  and names the field:
+
+```text
+error: jwt: auth.Claims.exp: "exp" is a registered claim, which jwt sets and checks itself (jwt.Registered); remove the field or give it another claim name
+error: jwt: auth.Claims.since: [3]u8 is not a claim type; a claim is bool, an integer, f32, f64, an enum, []const u8 or a struct, alone, as ?T or as []const T
+```
+
+`verify` and `sign` check the struct when they compile; a package that only
+declares claims checks them in a test of its own with
+`comptime jwt.assertClaims(Claims);`.
+
+A route reads both kinds from the result of `verify`, as `minute.zig` does:
+
+```zig
+const verified = try verifier.verify(Claims, io, arena.allocator(), token, .{});
+logger.info("Token verified", .{
+    .subject = verified.registered.subject,
+    .roles = verified.claims.roles,
+```
+
+Everything in the result lives in the arena given to `verify`, the arena
+of the request, and nothing in it points into the token.
+
 ## Keys
+
+A key is bound to one algorithm, and the algorithm decides who can make
+tokens:
+
+- **HMAC (HS256, HS384, HS512)** signs and verifies with one secret. It is
+  enough when one service makes its tokens and checks them alone. Every
+  service that checks such tokens must hold the secret, and with it can
+  make tokens too.
+- **EdDSA (Ed25519), ES256 (P-256) and ES384 (P-384)** sign with a private
+  key and verify with its public key. The services that only check tokens
+  hold the public key, and cannot make a token with it. That is the case of
+  orders and billing, so this guide signs with EdDSA: its keys are small,
+  and it is fast.
+
+Make the keys with `openssl`:
+
+```sh
+openssl genpkey -algorithm ed25519 -out orders.pem               # EdDSA: the private key of orders
+openssl pkey -in orders.pem -pubout -out orders.pub.pem          # its public key, for billing
+openssl ecparam -name prime256v1 -genkey -noout -out es256.pem   # ES256; secp384r1 for ES384
+openssl rand -base64 48                                          # an HMAC secret of 64 characters
+```
+
+The files are PEM: a block of base64 between two marker lines. The public
+key of orders in this guide is:
+
+```text
+-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEA1rQM3tcZwaeBG73FtMkSgozKMFHlEkT24K1KGN0rUAY=
+-----END PUBLIC KEY-----
+```
+
+Each kind of key loads with a function of its own, with the algorithm you
+name; a key of another curve than that algorithm's fails at once, when the
+service starts, instead of turning into tokens of another algorithm:
+
+| What | `jwt.SigningKey`, which signs | `jwt.Key`, which verifies |
+| --- | --- | --- |
+| an HMAC secret: 32, 48 or 64 bytes at least, for HS256, HS384 and HS512 | `.hmac(.HS256, secret, .{})` | `.hmac(.HS256, secret, .{})` |
+| a private key in PEM: `PRIVATE KEY` (PKCS#8) or `EC PRIVATE KEY` (SEC1) | `.fromPem(.EdDSA, pem, .{})` | — |
+| a public key in PEM: `PUBLIC KEY` (SPKI) | — | `.fromPem(.EdDSA, pem, .{})` |
+| the same in DER | `.fromDer(…)` | `.fromDer(…)` |
+
+The public half of a signing key is `signing_key.verificationKey()`; of an
+HMAC key, the same secret. A key that does not load says why, with an error
+of `jwt.KeyError`: `InvalidKey` (not a key of the expected form),
+`UnsupportedKey` (RSA, P-521, Ed448, an encrypted PEM, a certificate, a key
+of OpenSSH), `WeakKey` (a secret too short), `KeyAlgorithmMismatch` (a key
+of another algorithm) and `InvalidKeyId`.
+
+**A PEM in the settings.** The environment takes it as the file has it:
+`APP_AUTH_SIGNING_KEY="$(cat orders.pem)"`. A `.env` file of confy holds
+it on one line, with `\n` inside double quotes, which confy turns into
+line breaks:
+
+```sh
+APP_AUTH_ORDERS_KEY="-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA1rQM3tcZwaeBG73FtMkSgozKMFHlEkT24K1KGN0rUAY=\n-----END PUBLIC KEY-----"
+```
+
+jwt reads a PEM with CRLF, indented, or on one line with spaces between
+its parts as well. A literal backslash and `n` between the lines, which
+an environment variable gets when the `\n` was never turned into line
+breaks, is `InvalidKey`.
+
+**A key is a secret value.** `jwt.Key` and `jwt.SigningKey` are plain
+values of a fixed size, without heap memory, so a verifier takes its keys
+as an array. A copy of a private key or of an HMAC secret is a secret too:
+keep a key in one place, pass a pointer to it, and call `deinit`, which
+wipes it, when it is no longer used:
+
+```zig
+var signing_key: jwt.SigningKey = try .fromPem(.EdDSA, config.auth.signing_key.expose(), .{ .id = config.auth.key_id });
+defer signing_key.deinit();
+```
+
+zefir-log writes a key as `[REDACTED]`, and `{f}` prints only its algorithm
+and id, `jwt.SigningKey(EdDSA, kid "2026-10")`.
+
+**`kid` and rotation.** A key has an id, which you choose, such as the
+month it was made: "2026-10". The signer writes it into every token as
+`kid`, and a verifier picks the key of that id among its keys; a verifier
+with one key may take tokens without `kid`. To change the key of orders:
+
+1. Add the new public key to the settings of every service that checks
+   tokens, next to the old one, and restart them: their verifiers take the
+   tokens of both keys.
+2. Switch orders to the new private key: new tokens carry the new `kid`.
+3. Once the last token of the old key has expired, the lifetime of a token
+   and the leeway after step 2, remove the old key from the settings.
+
+Done the other way round, step 2 before step 1, the new tokens fail with
+`UnknownKey` at once, so the mistake shows. A verifier never changes: to
+take new keys without a restart, build a new one.
 
 ## Signing in
 
+The sign-in of orders, `POST /api/login`, is a controller of zefir-http
+that checks a user's name and secret and signs a token for them:
+
+```zig
+//! Signing in: POST /api/login. A user sends a name and a secret, and the
+//! answer is a token of orders, in the form that OAuth clients read (RFC
+//! 6749 §5.1). zefir has no passwords: here the users and their secrets
+//! come from the settings. A real service checks a password against its
+//! hash in a store of users, or lets another system sign users in; the
+//! token it gives then is made the same way.
+
+const std = @import("std");
+const confy = @import("confy");
+const http = @import("http");
+const jwt = @import("jwt");
+const v = @import("validator");
+const auth = @import("auth.zig");
+
+const LoginController = @This();
+
+/// Signs the tokens; borrowed.
+signer: *const jwt.Signer,
+/// The users who may sign in; borrowed.
+users: []const User,
+
+pub const User = struct {
+    /// The name a user signs in with.
+    name: []const u8,
+    /// From the settings, such as `APP_USERS_ANN`; never logged.
+    secret: confy.Secret,
+    /// The id of the user: "sub" of their tokens.
+    id: []const u8,
+    roles: []const []const u8,
+};
+
+pub const http_routes = http.routes(.{
+    .methods = .{
+        // A name and a secret: a small limit for the body.
+        .login = http.post("/login", .{ .max_body_bytes = 1024 }),
+    },
+});
+
+pub const LoginRequest = struct {
+    user: []const u8,
+    secret: []const u8,
+
+    pub const field_rules = .{
+        .user = .{ v.notBlank, v.maxLength(64) },
+        .secret = .{ v.notEmpty, v.maxLength(256) },
+    };
+};
+
+pub const LoginResponse = struct {
+    access_token: []const u8,
+    token_type: []const u8 = "Bearer",
+    /// How long the token lives, in seconds.
+    expires_in: i64,
+};
+
+pub fn login(self: *LoginController, ctx: *http.Context) !http.Json(LoginResponse) {
+    const body = try ctx.json(LoginRequest);
+    // A wrong name or secret: 401, as on any request.
+    const user = self.userOf(body.user, body.secret) orelse return error.Unauthenticated;
+    const token = try self.signer.sign(auth.Claims, ctx.io(), ctx.allocator(), &.{ .roles = user.roles }, .{ .subject = user.id });
+    return .{ .value = .{ .access_token = token, .expires_in = self.signer.options.lifetime.toSeconds() } };
+}
+
+/// The user of `name` whose secret is `secret`; null for anybody else.
+fn userOf(self: *const LoginController, name: []const u8, secret: []const u8) ?User {
+    for (self.users) |user| {
+        const same_secret = sameSecret(secret, user.secret.expose());
+        if (same_secret and std.mem.eql(u8, user.name, name)) return user;
+    }
+    return null;
+}
+
+/// Compares the secrets in a time that does not depend on where they
+/// differ, so that a caller cannot guess a secret byte by byte.
+fn sameSecret(given: []const u8, expected: []const u8) bool {
+    const Sha256 = std.crypto.hash.sha2.Sha256;
+    var a: [Sha256.digest_length]u8 = undefined;
+    var b: [Sha256.digest_length]u8 = undefined;
+    Sha256.hash(given, &a, .{});
+    Sha256.hash(expected, &b, .{});
+    return std.crypto.timing_safe.eql([Sha256.digest_length]u8, a, b);
+}
+```
+
+> [!WARNING]
+> zefir has no passwords: no hashing, no store of users, no reset. The
+> secrets of this example come from the settings, as the tokens of the
+> zefir-http guide do, and stand in for a real check of a user. Whatever
+> checks the user, the token is made the same way.
+
+The signer of orders is made once, in `main`, with the key and the names
+of the services; tokens of orders are meant for orders and for billing:
+
+```zig
+const signer: jwt.Signer = try .init(&signing_key, .{ .issuer = "orders", .audiences = &.{ "orders", "billing" } });
+```
+
+- **`.issuer`** is `iss` of every token, **`.audiences`** its `aud`: one
+  audience is written as a string, several as an array.
+- **`.lifetime`**, 15 minutes unless given, makes `exp`: now plus the
+  lifetime. A call may give a token another one with
+  `.{ .lifetime = .fromSeconds(60) }`. A short lifetime is what keeps a
+  stolen token from being useful for long, since a token cannot be taken
+  back.
+- **`sign(Claims, io, allocator, &claims, options)`** writes the
+  registered claims, then yours. The options give `sub` (`.subject`), `jti`
+  (`.id`) and `nbf` (`.not_before`). The token comes from `allocator`, the
+  arena of the request here.
+- **`.token_type`**, "JWT" unless given, is `typ` of the header, and a
+  verifier takes only the types of its `.token_types`. A service that signs
+  tokens of several kinds gives each kind a type, such as "at+jwt" for
+  access tokens (RFC 9068), and its verifiers take only the kind they
+  expect: a token meant to invite a user is no access token.
+
+The header of a token of orders is `{"alg":"EdDSA","typ":"JWT","kid":"2026-10"}`:
+the algorithm of the key, the type and the id of the key. `sign` refuses
+what it cannot write as a token that `verify` would take, with
+`jwt.SignError`: `InvalidClaims` for a string that is not UTF-8, a float
+that is not finite or a time past the year 9999, `TokenTooLarge` for a
+token over 8 KiB, and `OutOfMemory`. They are mistakes of the program,
+so the error handler of orders answers them with 500.
+
 ## Errors
 
+`verify` refuses a token with one error per reason, in the order of the
+checks of [How a token is checked](#how-a-token-is-checked).
+`jwt.describe(err)` gives each a short English text for the answer to a
+client:
+
+| Error | When | `jwt.describe` |
+| --- | --- | --- |
+| `TokenTooLarge` | the token is over 8 KiB | the token is too large |
+| `Malformed` | not three parts; bad base64url or JSON; a key twice; nesting deeper than 32; a member of the header of the wrong type | the token is malformed |
+| `UnsupportedAlgorithm` | `alg` is none of the six, `none` among them | the token's algorithm is not supported |
+| `UnsupportedHeader` | the header has `crit`, or `cty` says the payload is a nested token | the token's header asks for what is not supported |
+| `WrongType` | `typ` is absent or none of the verifier's `token_types` | the token is of another type |
+| `UnknownKey` | no key of the verifier has this `kid`; or the token has no `kid` and the verifier more than one key | the token's key is unknown |
+| `AlgorithmMismatch` | the key of this `kid` is of another algorithm | the token's algorithm does not fit its key |
+| `BadSignature` | the signature does not verify | the token's signature is invalid |
+| `MissingClaim` | `exp`, `iss` or `aud` is absent | the token lacks a required claim |
+| `InvalidClaims` | a registered claim of the wrong type or out of range; a payload that does not fit your struct | the token's claims are invalid |
+| `WrongIssuer` | `iss` is not the verifier's issuer | the token is from another issuer |
+| `WrongAudience` | `aud` names none of the verifier's audiences | the token is not meant for this service |
+| `Expired` | now ≥ `exp` + leeway | the token has expired |
+| `NotYetValid` | `nbf` or `iat` lies in the future, past the leeway | the token is not valid yet |
+| `ClaimsRejected` | a rule of `field_rules` is broken | the token's claims are not accepted |
+| `OutOfMemory` | the arena of the request has no more memory | the server ran out of memory |
+
+The middleware of orders answers every one of them with 401, but
+`OutOfMemory` with 500; the authenticator of billing turns them into
+`error.InvalidCredentials` of zefir-rpc, but passes `OutOfMemory` as it is.
+
+The texts say what kind of problem it was, never which claim had which
+value. For your log there is more: give `verify` a `jwt.Details`, and on a
+refusal it names the claim at fault, such as `exp` for `Expired` or `aud`
+for `WrongAudience`, and for `ClaimsRejected`, or `InvalidClaims` of your
+struct, the broken rule with its path, such as `roles`. `Details` holds
+only constant names and paths of your types: never a byte of the token,
+which a client sent and which a log must not take. `verify` clears it
+first, so one `Details` serves any number of calls.
+
 ## HTTP
+
+The middleware `JwtAuth` checks the token of every request of orders:
+
+```zig
+// Application code (src/auth.zig of the orders service): zefir-jwt ships none of these.
+//! The authentication of the orders service, made of ordinary middleware.
+//! `JwtAuth` sits in the server's middleware and checks the token of
+//! `Authorization: Bearer` on every request: a token of orders puts its
+//! user into `ctx.locals`, a request without a token goes on as
+//! anonymous, and a token that does not pass ends the request with 401.
+//! `requireUser` sits in the middleware of the controllers that need a
+//! user.
+//!
+//! ```zig
+//! // main: the server's middleware, for every request
+//! .middleware = .{&jwt_auth},
+//! // a protected controller
+//! .middleware = .{auth.requireUser},
+//! // a handler
+//! const user = try ctx.local(auth.CurrentUser);
+//! ```
+
+const std = @import("std");
+const http = @import("http");
+const jwt = @import("jwt");
+const log = @import("log");
+const v = @import("validator");
+
+/// The claims of the tokens of orders, besides the registered ones that
+/// jwt sets and checks itself.
+pub const Claims = struct {
+    /// What the user may do, such as "buyer".
+    roles: []const []const u8 = &.{},
+
+    pub const field_rules = .{ .roles = v.maxItems(16) };
+};
+
+/// The signed-in user of a request, as `JwtAuth` puts it into
+/// `ctx.locals`.
+pub const CurrentUser = struct {
+    /// "sub" of the token.
+    id: []const u8,
+    roles: []const []const u8,
+};
+
+/// Why `JwtAuth` refused the token of a request, for the answer.
+pub const Refusal = struct { reason: jwt.VerifyError };
+
+/// Checks the bearer token of every request with the verifier of orders.
+pub const JwtAuth = struct {
+    /// Borrowed: it lives as long as the server.
+    verifier: *const jwt.Verifier,
+    logger: log.Logger,
+
+    pub fn run(self: *JwtAuth, ctx: *http.Context) !http.MiddlewareResult {
+        const token = bearer(ctx.request.header("authorization")) orelse return .next;
+        var details: jwt.Details = .{};
+        const verified = self.verifier.verify(Claims, ctx.io(), ctx.allocator(), token, .{ .details = &details }) catch |err| {
+            if (err == error.OutOfMemory) return error.OutOfMemory;
+            return self.refuse(ctx, err, &details);
+        };
+        // orders signs the token of every user with "sub".
+        const id = verified.registered.subject orelse return self.refuse(ctx, error.MissingClaim, &.{ .claim = "sub" });
+        try ctx.locals.put(CurrentUser, .{ .id = id, .roles = verified.claims.roles });
+        return .next;
+    }
+
+    /// Logs why the token is refused, keeps the reason for the answer, and
+    /// ends the request with 401: a wrong token never passes as no token.
+    fn refuse(self: *JwtAuth, ctx: *http.Context, reason: jwt.VerifyError, details: *const jwt.Details) error{ Unauthenticated, OutOfMemory } {
+        // What the refusal was about, never the token: it is a credential.
+        self.logger.warn("Token refused", .{ .reason = reason, .claim = details.claim, .violation = details.violation });
+        ctx.locals.put(Refusal, .{ .reason = reason }) catch |err| return err;
+        return error.Unauthenticated;
+    }
+};
+
+/// The token of `Authorization: Bearer <token>`.
+fn bearer(value: ?[]const u8) ?[]const u8 {
+    const header = value orelse return null;
+    const scheme = "bearer ";
+    if (header.len <= scheme.len or !std.ascii.startsWithIgnoreCase(header, scheme)) return null;
+    return header[scheme.len..];
+}
+
+/// 401 without a signed-in user: `error.Unauthenticated`, which the
+/// framework answers with 401.
+pub fn requireUser(ctx: *http.Context) !http.MiddlewareResult {
+    _ = ctx.locals.get(CurrentUser) orelse return error.Unauthenticated;
+    return .next;
+}
+
+/// The value of `WWW-Authenticate` for a 401, as RFC 6750 §3 has it:
+/// `Bearer` when the request brought no token, and with
+/// `error="invalid_token"` and the reason when `JwtAuth` refused one. The
+/// texts of `jwt.describe` stand between quotes as they are.
+pub fn challenge(ctx: *http.Context) ![]const u8 {
+    const refusal = ctx.locals.get(Refusal) orelse return "Bearer";
+    return std.fmt.allocPrint(ctx.allocator(), "Bearer error=\"invalid_token\", error_description=\"{s}\"", .{jwt.describe(refusal.reason)});
+}
+```
+
+- **`JwtAuth`** stands in the server's middleware, for every request. A
+  request without `Authorization: Bearer` goes on as anonymous: the
+  sign-in needs no user. A token that passes puts its user, `sub` and the
+  roles, into `ctx.locals`.
+- **A token that does not pass ends the request** with
+  `error.Unauthenticated`, 401, even on a route that needs no user: a wrong
+  token never passes as no token. The log says why, with `jwt.Details`, and
+  never the token.
+- **`requireUser`** stands where a user is needed: without one,
+  `error.Unauthenticated`.
+- **`challenge`** writes `WWW-Authenticate` for the answer: `Bearer` when
+  no token came, and with `error="invalid_token"` and the text of
+  `jwt.describe` when one was refused, as RFC 6750 asks.
+
+The error handler of orders adds that header to every 401, and maps the
+errors of `sign`:
+
+```zig
+//! The error handler of the orders service: the one place where errors
+//! become responses. Every 401 carries `WWW-Authenticate`, as RFC 9110
+//! asks, with the reason when a token was refused (RFC 6750 §3).
+
+const http = @import("http");
+const auth = @import("auth.zig");
+
+/// The body of every error response, as `application/json`.
+pub const ApiError = struct {
+    code: []const u8,
+    message: []const u8,
+};
+
+pub const AppErrors = struct {
+    pub fn mapError(err: anyerror) http.ErrorResponse(ApiError) {
+        return switch (err) {
+            // jwt.Signer refuses only claims that no token can hold, such
+            // as a string that is not UTF-8: a mistake of the program.
+            error.InvalidClaims, error.TokenTooLarge => .{ .status = 500, .body = .{ .code = "internal", .message = "Internal Server Error" } },
+            else => .fallback(err, .{ .code = http.defaultCode(err), .message = http.defaultTitle(err) }),
+        };
+    }
+
+    pub fn handle(_: *AppErrors, ctx: *http.Context, err: anyerror, _: *http.ErrorResponse(ApiError)) !http.ErrorAction {
+        if (err == error.Unauthenticated) try ctx.response.setHeader("www-authenticate", try auth.challenge(ctx));
+        return .respond;
+    }
+};
+```
+
+The orders of a user stand behind `requireUser`, and read the user from
+`ctx.locals`:
+
+```zig
+//! The orders of the signed-in user: GET /api/orders. Its routes stand
+//! behind `requireUser`, so a request without a user never reaches them.
+
+const http = @import("http");
+const auth = @import("auth.zig");
+
+const OrdersController = @This();
+
+pub const http_routes = http.routes(.{
+    .prefix = "/orders",
+    .middleware = .{auth.requireUser},
+    .methods = .{ .list = http.get("", .{}) },
+});
+
+pub const Order = struct { id: u64, item: []const u8 };
+
+/// Who the user is, by the claims of their token, and their orders.
+pub const OrdersResponse = struct {
+    user: []const u8,
+    roles: []const []const u8,
+    orders: []const Order,
+};
+
+pub fn list(_: *OrdersController, ctx: *http.Context) !http.Json(OrdersResponse) {
+    // JwtAuth put the user there, from the token.
+    const user = try ctx.local(auth.CurrentUser);
+    // A real service reads the orders of user.id from its store.
+    return .{ .value = .{ .user = user.id, .roles = user.roles, .orders = &.{} } };
+}
+```
+
+The whole service, on the backend in memory, with Ann's app as its client:
+
+```zig
+//! The orders service of the guide on the backend in memory, with Ann's
+//! app as its client: she signs in, and the app calls with her token,
+//! without it, and with a forged one.
+
+const std = @import("std");
+const confy = @import("confy");
+const http = @import("http");
+const jwt = @import("jwt");
+const log = @import("log");
+const auth = @import("auth.zig");
+const errors = @import("errors.zig");
+const LoginController = @import("LoginController.zig");
+const OrdersController = @import("OrdersController.zig");
+
+const Config = struct {
+    auth: struct {
+        // APP_AUTH_SIGNING_KEY: the private key of orders, Ed25519 in PEM.
+        signing_key: confy.Secret,
+        // APP_AUTH_KEY_ID: its id, the "kid" of its tokens.
+        key_id: []const u8,
+    },
+    users: struct {
+        // APP_USERS_ANN: the secret Ann signs in with.
+        ann: confy.Secret,
+    },
+};
+
+pub fn main(init: std.process.Init) !void {
+    const gpa = init.gpa;
+    const io = init.io;
+    var config: Config = undefined;
+    confy.loadOrExit(init.arena.allocator(), &config, .{
+        .io = io,
+        .environ = init.environ_map,
+        .env_prefix = "APP_",
+        .sources = &.{.osEnv()},
+    });
+    const logger: log.Logger = try .init(gpa, io, .{ .format = .text });
+    defer logger.deinit();
+
+    var signing_key: jwt.SigningKey = try .fromPem(.EdDSA, config.auth.signing_key.expose(), .{ .id = config.auth.key_id });
+    defer signing_key.deinit();
+    // Its tokens are meant for orders and for billing.
+    const signer: jwt.Signer = try .init(&signing_key, .{ .issuer = "orders", .audiences = &.{ "orders", "billing" } });
+    const keys = [_]jwt.Key{signing_key.verificationKey()};
+    const verifier: jwt.Verifier = try .init(.{ .keys = &keys, .issuer = "orders", .audiences = &.{"orders"} });
+
+    // The objects of the service: main owns them, the server borrows them.
+    const users = [_]LoginController.User{
+        .{ .name = "ann", .secret = config.users.ann, .id = "user-7", .roles = &.{"buyer"} },
+    };
+    var login: LoginController = .{ .signer = &signer, .users = &users };
+    var orders: OrdersController = .{};
+    var jwt_auth: auth.JwtAuth = .{ .verifier = &verifier, .logger = logger.scoped("auth") };
+    var app_errors: errors.AppErrors = .{};
+    var backend: http.testing.Backend = .init(gpa);
+    defer backend.deinit();
+    var server = try http.Server.init(gpa, .{
+        .backend = backend.backend(),
+        .prefix = "/api",
+        .controllers = .{ &login, &orders },
+        .middleware = .{&jwt_auth},
+        .error_handler = &app_errors,
+    });
+    defer server.deinit(io);
+    try server.start(io);
+
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    var buffer: [1024]u8 = undefined;
+    var stdout = std.Io.File.stdout().writer(io, &buffer);
+    var app: App = .{ .backend = &backend, .io = io, .arena = arena.allocator(), .out = &stdout.interface };
+
+    _ = try app.signIn("guess", "with a wrong secret");
+    const token = (try app.signIn(config.users.ann.expose(), "with her secret")) orelse return error.SignInRefused;
+    try app.getOrders(null, "without a token");
+    try app.getOrders(token, "with Ann's token");
+    // A forged token: one character of the signature is another.
+    const forged = try app.arena.dupe(u8, token);
+    const at = std.mem.findScalarLast(u8, forged, '.').? + 1;
+    forged[at] = if (forged[at] == 'A') 'B' else 'A';
+    try app.getOrders(forged, "with Ann's token, its signature changed");
+}
+
+/// Ann's app: it says what it sends and what comes back, but never the
+/// token, a credential.
+const App = struct {
+    backend: *http.testing.Backend,
+    io: std.Io,
+    arena: std.mem.Allocator,
+    out: *std.Io.Writer,
+
+    /// POST /api/login as Ann: her token, or null when refused.
+    fn signIn(app: *App, secret: []const u8, how: []const u8) !?[]const u8 {
+        try app.out.print("POST /api/login as ann, {s}\n", .{how});
+        try app.out.flush();
+        const body = try std.json.Stringify.valueAlloc(app.arena, LoginController.LoginRequest{ .user = "ann", .secret = secret }, .{});
+        var res = try app.backend.request(app.io, .{
+            .method = .POST,
+            .target = "/api/login",
+            .headers = &.{.{ "content-type", "application/json" }},
+            .body = body,
+        });
+        defer res.deinit();
+        if (res.status != 200) {
+            try app.show(&res);
+            return null;
+        }
+        const answer = try std.json.parseFromSliceLeaky(LoginController.LoginResponse, app.arena, res.body, .{ .allocate = .alloc_always });
+        try app.out.print("→ 200 token_type={s} expires_in={d}\n", .{ answer.token_type, answer.expires_in });
+        try app.out.flush();
+        return answer.access_token;
+    }
+
+    /// GET /api/orders, with `token` in `Authorization: Bearer` if any.
+    fn getOrders(app: *App, token: ?[]const u8, how: []const u8) !void {
+        try app.out.print("GET /api/orders {s}\n", .{how});
+        try app.out.flush();
+        const authorization: [1][2][]const u8 = .{.{ "authorization", if (token) |t| try std.fmt.allocPrint(app.arena, "Bearer {s}", .{t}) else "" }};
+        var res = try app.backend.request(app.io, .{
+            .method = .GET,
+            .target = "/api/orders",
+            .headers = if (token == null) &.{} else &authorization,
+        });
+        defer res.deinit();
+        try app.show(&res);
+    }
+
+    /// The status, then `WWW-Authenticate` of a 401 or else the body.
+    fn show(app: *App, res: *const http.testing.Response) !void {
+        if (res.status == 401) {
+            try app.out.print("→ 401 WWW-Authenticate: {s}\n", .{res.header("www-authenticate") orelse ""});
+        } else {
+            try app.out.print("→ {d} {s}\n", .{ res.status, res.body });
+        }
+        try app.out.flush();
+    }
+};
+```
+
+Its settings are the key of orders, its id, and Ann's secret. The line of
+`WARN` comes from the log of `JwtAuth`, in the middle of the request it
+refused:
+
+```text
+$ APP_AUTH_SIGNING_KEY="$(cat orders.pem)" APP_AUTH_KEY_ID=2026-10 APP_USERS_ANN=ann-secret zig build run
+POST /api/login as ann, with a wrong secret
+→ 401 WWW-Authenticate: Bearer
+POST /api/login as ann, with her secret
+→ 200 token_type=Bearer expires_in=900
+GET /api/orders without a token
+→ 401 WWW-Authenticate: Bearer
+GET /api/orders with Ann's token
+→ 200 {"user":"user-7","roles":["buyer"],"orders":[]}
+GET /api/orders with Ann's token, its signature changed
+2026-10-22T09:52:31.208Z WARN  [auth] Token refused reason=BadSignature claim=null violation=null
+→ 401 WWW-Authenticate: Bearer error="invalid_token", error_description="the token's signature is invalid"
+```
+
+The tests of orders run the same server on `http.testing.Backend`, with a
+key made for them and the time set by `jwt.testing.FixedClock`, so a token
+expires without a wait of 15 minutes ([Tests](#tests) tells more):
+
+```zig
+//! Tests of the orders service without a network: `http.testing.Backend`
+//! serves the same server, controllers and middleware from memory. The
+//! key is made for the tests, and `jwt.testing.FixedClock` sets the time
+//! that the server, the signer and the verifier read, so a test can let a
+//! token expire without waiting.
+
+const std = @import("std");
+const http = @import("http");
+const jwt = @import("jwt");
+const log = @import("log");
+const auth = @import("auth.zig");
+const errors = @import("errors.zig");
+const LoginController = @import("LoginController.zig");
+const OrdersController = @import("OrdersController.zig");
+
+const testing = std.testing;
+
+/// The time of the tests: 2026-10-22, 12:00 UTC, in seconds of Unix time.
+const noon = 1_792_670_400;
+
+/// The service as `main` builds it, on the backend in memory, with a key
+/// of its own and the clock at noon.
+const Service = struct {
+    clock: jwt.testing.FixedClock,
+    key: jwt.SigningKey,
+    keys: [1]jwt.Key,
+    signer: jwt.Signer,
+    verifier: jwt.Verifier,
+    /// What the log of `JwtAuth` wrote, a record per line.
+    records: std.Io.Writer.Allocating,
+    logger: log.Logger,
+    users: [1]LoginController.User,
+    login: LoginController,
+    orders: OrdersController,
+    jwt_auth: auth.JwtAuth,
+    app_errors: errors.AppErrors,
+    backend: http.testing.Backend,
+    server: http.Server,
+
+    /// Starts the service; `s` stays where it is until `stop`.
+    fn start(s: *Service) !void {
+        s.clock = try .init(testing.io, noon);
+        errdefer s.clock.deinit();
+        const io = s.clock.io();
+        // A key of the tests alone, made on the spot.
+        s.key = try .generate(io, .EdDSA, .{ .id = "2026-10" });
+        errdefer s.key.deinit();
+        s.keys = .{s.key.verificationKey()};
+        s.signer = try .init(&s.key, .{ .issuer = "orders", .audiences = &.{ "orders", "billing" } });
+        s.verifier = try .init(.{ .keys = &s.keys, .issuer = "orders", .audiences = &.{"orders"} });
+        s.records = .init(testing.allocator);
+        errdefer s.records.deinit();
+        s.logger = try .init(testing.allocator, io, .{ .format = .text, .output = .{ .writer = &s.records.writer } });
+        errdefer s.logger.deinit();
+        s.users = .{.{ .name = "ann", .secret = .init("ann-secret"), .id = "user-7", .roles = &.{"buyer"} }};
+        s.login = .{ .signer = &s.signer, .users = &s.users };
+        s.orders = .{};
+        s.jwt_auth = .{ .verifier = &s.verifier, .logger = s.logger.scoped("auth") };
+        s.app_errors = .{};
+        s.backend = .init(testing.allocator);
+        s.server = try .init(testing.allocator, .{
+            .backend = s.backend.backend(),
+            .prefix = "/api",
+            .controllers = .{ &s.login, &s.orders },
+            .middleware = .{&s.jwt_auth},
+            .error_handler = &s.app_errors,
+        });
+        errdefer s.server.deinit(io);
+        try s.server.start(io);
+    }
+
+    fn stop(s: *Service) void {
+        s.server.deinit(s.clock.io());
+        s.backend.deinit();
+        s.logger.deinit();
+        s.records.deinit();
+        s.keys[0].deinit();
+        s.key.deinit();
+        s.clock.deinit();
+    }
+
+    /// POST /api/login as Ann with `secret`.
+    fn signIn(s: *Service, secret: []const u8) !http.testing.Response {
+        const body = try std.json.Stringify.valueAlloc(testing.allocator, LoginController.LoginRequest{ .user = "ann", .secret = secret }, .{});
+        defer testing.allocator.free(body);
+        return s.backend.request(s.clock.io(), .{
+            .method = .POST,
+            .target = "/api/login",
+            .headers = &.{.{ "content-type", "application/json" }},
+            .body = body,
+        });
+    }
+
+    /// Ann's token, which the caller frees.
+    fn tokenOfAnn(s: *Service) ![]u8 {
+        var res = try s.signIn("ann-secret");
+        defer res.deinit();
+        try testing.expectEqual(200, res.status);
+        const answer = try std.json.parseFromSliceLeaky(LoginController.LoginResponse, res.arena.allocator(), res.body, .{});
+        return testing.allocator.dupe(u8, answer.access_token);
+    }
+
+    /// GET /api/orders with `token` in `Authorization: Bearer`.
+    fn getOrders(s: *Service, token: []const u8) !http.testing.Response {
+        const authorization = try std.fmt.allocPrint(testing.allocator, "Bearer {s}", .{token});
+        defer testing.allocator.free(authorization);
+        return s.backend.request(s.clock.io(), .{
+            .method = .GET,
+            .target = "/api/orders",
+            .headers = &.{.{ "authorization", authorization }},
+        });
+    }
+};
+
+test "POST /api/login gives a token for 15 minutes" {
+    var s: Service = undefined;
+    try s.start();
+    defer s.stop();
+
+    var res = try s.signIn("ann-secret");
+    defer res.deinit();
+    try testing.expectEqual(200, res.status);
+    const answer = try std.json.parseFromSliceLeaky(LoginController.LoginResponse, res.arena.allocator(), res.body, .{});
+    try testing.expectEqualStrings("Bearer", answer.token_type);
+    try testing.expectEqual(15 * 60, answer.expires_in);
+
+    // The token verifies, with the claims of Ann, from noon to 12:15.
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const verified = try s.verifier.verify(auth.Claims, s.clock.io(), arena.allocator(), answer.access_token, .{});
+    try testing.expectEqualStrings("user-7", verified.registered.subject.?);
+    try testing.expectEqual(noon, verified.registered.issued_at.?);
+    try testing.expectEqual(15 * 60, verified.registered.expires_at - verified.registered.issued_at.?);
+    try testing.expectEqual(1, verified.claims.roles.len);
+    try testing.expectEqualStrings("buyer", verified.claims.roles[0]);
+
+    // A wrong secret gets no token.
+    var refused = try s.signIn("guess");
+    defer refused.deinit();
+    try testing.expectEqual(401, refused.status);
+    try testing.expectEqualStrings("Bearer", refused.header("www-authenticate").?);
+}
+
+test "GET /api/orders with the token sees the user" {
+    var s: Service = undefined;
+    try s.start();
+    defer s.stop();
+    const token = try s.tokenOfAnn();
+    defer testing.allocator.free(token);
+
+    var res = try s.getOrders(token);
+    defer res.deinit();
+    try testing.expectEqual(200, res.status);
+    const mine = try std.json.parseFromSliceLeaky(OrdersController.OrdersResponse, res.arena.allocator(), res.body, .{});
+    try testing.expectEqualStrings("user-7", mine.user);
+    try testing.expectEqualStrings("buyer", mine.roles[0]);
+}
+
+test "without a token the request is anonymous, and a protected route says 401" {
+    var s: Service = undefined;
+    try s.start();
+    defer s.stop();
+
+    var res = try s.backend.request(s.clock.io(), .{ .method = .GET, .target = "/api/orders" });
+    defer res.deinit();
+    try testing.expectEqual(401, res.status);
+    try testing.expectEqualStrings("Bearer", res.header("www-authenticate").?);
+    // Nothing was refused: no token came.
+    try testing.expectEqualStrings("", s.records.written());
+}
+
+test "an expired token is 401 invalid_token with its description" {
+    var s: Service = undefined;
+    try s.start();
+    defer s.stop();
+    const token = try s.tokenOfAnn();
+    defer testing.allocator.free(token);
+
+    // 15 minutes of its life and the 60 seconds of leeway have passed.
+    s.clock.set(noon + 16 * 60);
+    var res = try s.getOrders(token);
+    defer res.deinit();
+    try testing.expectEqual(401, res.status);
+    try testing.expectEqualStrings("Bearer error=\"invalid_token\", error_description=\"the token has expired\"", res.header("www-authenticate").?);
+    // The log says why, and nothing of the token.
+    try testing.expect(std.mem.find(u8, s.records.written(), "Token refused reason=Expired claim=exp") != null);
+    try testing.expect(std.mem.find(u8, s.records.written(), token) == null);
+}
+
+test "a token for billing alone is 401 at orders" {
+    var s: Service = undefined;
+    try s.start();
+    defer s.stop();
+
+    const for_billing: jwt.Signer = try .init(&s.key, .{ .issuer = "orders", .audiences = &.{"billing"} });
+    const token = try for_billing.sign(auth.Claims, s.clock.io(), testing.allocator, &.{ .roles = &.{"buyer"} }, .{ .subject = "user-7" });
+    defer testing.allocator.free(token);
+    var res = try s.getOrders(token);
+    defer res.deinit();
+    try testing.expectEqual(401, res.status);
+    try testing.expectEqualStrings("Bearer error=\"invalid_token\", error_description=\"the token is not meant for this service\"", res.header("www-authenticate").?);
+}
+```
 
 ## RPC
 

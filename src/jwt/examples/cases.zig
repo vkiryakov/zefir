@@ -39,14 +39,21 @@ const key_id: Setting = .{ .name = "APP_AUTH_KEY_ID", .value = "2026-10" };
 /// The programs: `zig build test-jwt` runs them.
 pub const programs = [_]Program{
     .{ .name = "minute", .env = &.{ signing_key, key_id } },
+    .{ .name = "orders", .env = &.{ signing_key, key_id, .{ .name = "APP_USERS_ANN", .value = "ann-secret" } } },
 };
 
 /// The other files README.md shows as they are: the code of the services
 /// and their tests.
-pub const files = [_][]const u8{};
+pub const files = [_][]const u8{
+    "LoginController",
+    "auth",
+    "errors",
+    "OrdersController",
+    "auth_test",
+};
 
 /// The tests among `files`: `zig build test-jwt` runs them.
-pub const tests = [_][]const u8{};
+pub const tests = [_][]const u8{"auth_test"};
 
 /// The command README.md shows for a run of `program`.
 pub fn command(comptime program: Program) []const u8 {
