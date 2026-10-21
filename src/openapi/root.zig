@@ -37,6 +37,12 @@
 //! Constraints (`maxLength`, `minimum`, `required`, ...) are never written
 //! here: the document takes them from the types and their `field_rules`.
 const declarations = @import("openapi.zig");
+const document_file = @import("document.zig");
+
+/// The document of a server, built at compile time:
+/// `zefir.openapi.document(@TypeOf(options), .{ .info = ... })`.
+pub const document = document_file.document;
+pub const Document = document_file.Document;
 
 pub const Doc = declarations.Doc;
 pub const FieldDoc = declarations.FieldDoc;
@@ -53,4 +59,5 @@ test {
     _ = @import("json.zig");
     _ = @import("example.zig");
     _ = @import("schema.zig");
+    _ = document_file;
 }

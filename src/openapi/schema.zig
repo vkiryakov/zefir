@@ -501,7 +501,7 @@ fn isScalar(comptime X: type) bool {
 }
 
 /// The item of `[]const Item`, else null.
-fn listItem(comptime X: type) ?type {
+pub fn listItem(comptime X: type) ?type {
     const info = @typeInfo(X);
     if (info != .pointer or info.pointer.size != .slice or X == []const u8) return null;
     return if (X == []const info.pointer.child) info.pointer.child else null;
@@ -856,7 +856,7 @@ fn policyOf(comptime T: type, comptime r: ?*const Registry) http.UnknownFields {
 
 /// The `openapi` of `T`, null without one; one of another type stops the
 /// build.
-fn docOf(comptime T: type) ?declarations.Doc(T) {
+pub fn docOf(comptime T: type) ?declarations.Doc(T) {
     if (!@hasDecl(T, "openapi")) return null;
     if (@TypeOf(T.openapi) != declarations.Doc(T))
         @compileError("zefir.openapi: " ++ typeName(T) ++ ".openapi must be of type zefir.openapi.Doc(" ++ typeName(T) ++ ")");
