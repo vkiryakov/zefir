@@ -95,8 +95,10 @@ pub const Reader = struct {
         const at = r.scanner.cursor;
         if (at == 0 or at > r.scanner.input.len or r.scanner.input[at - 1] != '[') return error.Malformed;
         // The scanner's stack, a bit per level: within max_json_depth it
-        // stays in its first allocation.
-        var stack: [256]u8 = undefined;
+        // stays in its first allocation, which std's lists make
+        // cache_line + 1 bytes, and cache_line is up to 256 (s390x).
+        var stack: [2 * std.atomic.cache_line]u8 = undefined;
+        comptime std.debug.assert(stack.len >= std.atomic.cache_line + 1);
         var memory: std.heap.FixedBufferAllocator = .init(&stack);
         var ahead: Reader = .init(memory.allocator(), r.scanner.input[at - 1 ..]);
         try ahead.beginArray();
