@@ -864,6 +864,7 @@ pub fn build(b: *std.Build) void {
         .{ "argument that is an optional", "redis.cmd.raw: args[1] is ?[]const u8: an argument cannot be null; unwrap it, or leave it out where it is null" },
         .{ "argument of a non-exhaustive enum", "redis.cmd.raw: args[2] is compile_errors.Open, a non-exhaustive enum: a value without a tag has no name to write; make the enum exhaustive" },
         .{ "arguments that are a string", "redis.cmd.raw: the arguments are a tuple, such as .{ \"GET\", key }, or a slice of strings; got *const [3:0]u8" },
+        .{ "run of a value that is not a command", "redis.Client.run: u32 is not a command: make one with redis.cmd, such as redis.cmd.get([]const u8, key)" },
     }, 0..) |case, i| {
         const compile = b.addTest(.{
             .name = b.fmt("redis-compile-error-{d}", .{i}),

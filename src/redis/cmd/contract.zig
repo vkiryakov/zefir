@@ -20,6 +20,8 @@
 //! - `pub fn read(c: C, r: *resp.Reader, arena: ?std.mem.Allocator, diagnostics: ?*Diagnostics) resp.DecodeError!Reply`
 //!   — its reply, by the rules of `resp.decode`: after ServerError and
 //!   UnexpectedReply the reply is read to its end.
+//! - `pub fn name(c: C) []const u8` — the name of the command, such as
+//!   "GET", for the client's texts about it; never a value.
 //!
 //! Declarations that tell the client more about a command come with the
 //! commands that need them: the scope of a command that keeps state on
@@ -31,7 +33,7 @@
 pub fn ReplyOf(comptime C: type, comptime call: []const u8) type {
     comptime {
         const is_command = @typeInfo(C) == .@"struct" and @hasDecl(C, "Reply") and
-            @hasDecl(C, "check") and @hasDecl(C, "write") and @hasDecl(C, "read");
+            @hasDecl(C, "check") and @hasDecl(C, "write") and @hasDecl(C, "read") and @hasDecl(C, "name");
         if (!is_command) @compileError(call ++ ": " ++ @typeName(C) ++ " is not a command: make one with redis.cmd, such as redis.cmd.get([]const u8, key)");
         return C.Reply;
     }

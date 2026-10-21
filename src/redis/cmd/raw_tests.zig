@@ -87,3 +87,14 @@ test "a command value holds no state: written twice, it gives the same bytes" {
     defer testing.allocator.free(second);
     try testing.expectEqualStrings(first, second);
 }
+
+test "the name of raw is its first argument, for the client's texts" {
+    try testing.expectEqualStrings("GET", cmd.raw(i64, .{ "GET", "k" }).name());
+    const parts: []const []const u8 = &.{ "LRANGE", "k", "0", "-1" };
+    try testing.expectEqualStrings("LRANGE", cmd.raw([]const i64, parts).name());
+    const keys: []const []const u8 = &.{ "DEL", "a" };
+    try testing.expectEqualStrings("DEL", cmd.raw(u64, .{keys}).name());
+    try testing.expectEqualStrings("PING", cmd.raw(void, .{.PING}).name());
+    try testing.expectEqualStrings("the command", cmd.raw(void, .{ 7, "k" }).name());
+    try testing.expectEqualStrings("the command", cmd.raw(void, .{}).name());
+}

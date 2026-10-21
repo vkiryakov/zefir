@@ -48,6 +48,21 @@ pub fn Raw(comptime T: type, comptime Args: type) type {
             return resp.decode(T, r, arena, diagnostics);
         }
 
+        /// The first argument, the name of the command, when it is a
+        /// string or an enum; "the command" otherwise.
+        pub fn name(c: @This()) []const u8 {
+            const unnamed = "the command";
+            if (is_list) return if (c.args.len > 0) c.args[0] else unnamed;
+            if (fields == 0) return unnamed;
+            const First = @TypeOf(c.args[0]);
+            if (comptime args.isString(First)) return c.args[0];
+            if (comptime args.isStringList(First)) return if (c.args[0].len > 0) c.args[0][0] else unnamed;
+            return switch (@typeInfo(First)) {
+                .@"enum", .enum_literal => @tagName(c.args[0]),
+                else => unnamed,
+            };
+        }
+
         fn count(c: @This()) usize {
             if (is_list) return c.args.len;
             var n: usize = 0;

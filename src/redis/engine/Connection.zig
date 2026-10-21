@@ -18,6 +18,8 @@
 //! - The pushes that a server sends between replies are skipped, with the
 //!   attributes before them, and logged at debug: they do not knock the
 //!   replies out of their order.
+//!
+//! The pool keeps it through its `pooled` entry.
 
 const std = @import("std");
 const Io = std.Io;
@@ -29,6 +31,7 @@ const errors = @import("../errors.zig");
 const Diagnostics = errors.Diagnostics;
 const Address = @import("Address.zig");
 const DeadlineStream = @import("DeadlineStream.zig");
+const Pool = @import("Pool.zig");
 const log = std.log.scoped(.redis);
 const Connection = @This();
 
@@ -44,6 +47,8 @@ id: ?i64 = null,
 rtt: ?Io.Duration = null,
 /// False after an exchange that left the stream unusable.
 usable: bool = true,
+/// The pool's part of the connection.
+pooled: Pool.Entry = .{ .hooks = &pool_hooks },
 read_buffer: [buffer_len]u8,
 write_buffer: [buffer_len]u8,
 
@@ -80,6 +85,21 @@ pub fn destroy(conn: *Connection) void {
 /// the socket.
 pub fn cut(conn: *Connection, io: Io) void {
     conn.stream.cut(io, .stop);
+}
+
+/// The connection of a pool's entry.
+pub fn of(entry: *Pool.Entry) *Connection {
+    return @alignCast(@fieldParentPtr("pooled", entry));
+}
+
+const pool_hooks: Pool.Entry.Hooks = .{ .destroy = destroyEntry, .cut = cutEntry };
+
+fn destroyEntry(entry: *Pool.Entry) void {
+    of(entry).destroy();
+}
+
+fn cutEntry(entry: *Pool.Entry, io: Io) void {
+    of(entry).cut(io);
 }
 
 /// Sends `command` and reads its reply, from `arena`, waiting no longer

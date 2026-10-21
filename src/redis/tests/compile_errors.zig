@@ -1,8 +1,10 @@
-//! Calls of `redis.cmd.raw` that must not compile, one test each: reply
-//! types that no reply reads into and arguments that cannot be written.
-//! `zig build test-redis` compiles every test on its own and checks its
-//! error message; the list of messages is in build.zig.
+//! Calls of `redis.cmd.raw` and of the client that must not compile, one
+//! test each: reply types that no reply reads into, arguments that cannot
+//! be written, and values that are not commands. `zig build test-redis`
+//! compiles every test on its own and checks its error message; the list
+//! of messages is in build.zig.
 
+const std = @import("std");
 const redis = @import("redis");
 const cmd = redis.cmd;
 
@@ -54,4 +56,9 @@ test "argument of a non-exhaustive enum" {
 
 test "arguments that are a string" {
     _ = cmd.raw(i64, "GET");
+}
+
+test "run of a value that is not a command" {
+    var client: redis.Client = undefined;
+    _ = try client.run(std.testing.io, .of(.root), @as(u32, 7), .{});
 }

@@ -4,8 +4,12 @@
 //! is no TLS, so it belongs on a trusted network only.
 //!
 //! - `redis.Client` — the client: `init` checks the options without I/O,
-//!   `connect` opens the first connection and shakes hands, `close` and
-//!   `deinit` end it; `Client.Options` and `Client.Url` say what it takes.
+//!   `connect` opens the first connection and shakes hands, `run` sends a
+//!   command on a connection of its pool, `close` and `deinit` end it;
+//!   `Client.Options` and `Client.Url` say what it takes.
+//! - `redis.OperationContext`, `redis.Tracing`, `redis.RunOptions` — what
+//!   a call takes besides its command: the caller's context, with its
+//!   deadline and token, and the memory of the reply.
 //! - `redis.cmd` — the commands, as values that the client runs, and
 //!   `cmd.raw` for a command that the catalog lacks, with its reply in a
 //!   type of the caller's.
@@ -23,6 +27,7 @@
 
 const std = @import("std");
 const errors = @import("errors.zig");
+const requests = @import("requests.zig");
 const types = @import("cmd/types.zig");
 
 /// RESP3, for the client and `testing.FakeServer` only.
@@ -39,6 +44,10 @@ pub const CommandError = errors.CommandError;
 pub const Outcome = errors.Outcome;
 pub const outcome = errors.outcome;
 pub const Diagnostics = errors.Diagnostics;
+
+pub const OperationContext = requests.OperationContext;
+pub const Tracing = requests.Tracing;
+pub const RunOptions = requests.RunOptions;
 
 pub const Ttl = types.Ttl;
 pub const KeyType = types.KeyType;
@@ -88,6 +97,7 @@ test {
     _ = @import("tests/handshake_tests.zig");
     _ = @import("tests/connect_tests.zig");
     _ = @import("tests/pool_tests.zig");
+    _ = @import("tests/run_tests.zig");
 }
 
 test "the package version reaches the module" {
