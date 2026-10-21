@@ -40,8 +40,8 @@ pub const compile_errors = [_]Fixture{
     .{ .file = dir ++ "route_bad_literal.zig", .expect = "zefir.http: UsersV1Controller.search: route path \"/v1/users/search?q\": a segment is visible ASCII without '%', '?' and '#', written as the path reads decoded" },
     .{ .file = dir ++ "controller_bad_prefix.zig", .expect = "zefir.http: a controller prefix starts with '/' or is empty: \"v1/users\"" },
     // Options.
-    .{ .file = dir ++ "route_unknown_option.zig", .expect = "zefir.http: http.get(\"/x\"): unknown option .timout; the options are .middleware, .max_body_bytes and .timeout" },
-    .{ .file = dir ++ "sse_unknown_option.zig", .expect = "zefir.http: http.sse.get(\"/events\"): unknown option .timeout; the options are .middleware, .heartbeat and .on_close" },
+    .{ .file = dir ++ "route_unknown_option.zig", .expect = "zefir.http: http.get(\"/x\"): unknown option .timout; the options are .path, .query, .body, .form, .headers, .cookies, .responses, .middleware, .max_body_bytes and .timeout" },
+    .{ .file = dir ++ "sse_unknown_option.zig", .expect = "zefir.http: http.sse.get(\"/events\"): unknown option .timeout; the options are .path, .query, .headers, .cookies, .middleware, .heartbeat and .on_close" },
     .{ .file = dir ++ "routes_unknown_option.zig", .expect = "zefir.http: http.routes: unknown option .prefx; the options are .prefix, .middleware and .methods" },
     .{ .file = dir ++ "route_negative_timeout.zig", .expect = "zefir.http: http.get(\"/export.csv\"): .timeout is a std.Io.Duration above zero, such as std.Io.Duration.fromSeconds(300), or null for no deadline" },
     .{ .file = dir ++ "sse_zero_heartbeat.zig", .expect = "zefir.http: http.sse.get(\"/events\"): .heartbeat is a std.Io.Duration above zero, such as std.Io.Duration.fromSeconds(15), or null for none" },

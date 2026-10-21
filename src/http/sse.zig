@@ -35,10 +35,13 @@ pub const SubscriptionId = Manager.SubscriptionId;
 pub const SubscribeError = Manager.SubscribeError;
 
 /// An SSE route, always GET; a HEAD request on its path is not served
-/// by it, since HEAD would open a subscription. `opts` may hold
-/// `.middleware`, `.heartbeat` (a `std.Io.Duration`: a comment `: ping`
-/// goes out when nothing else did for that long) and `.on_close`, the
-/// name of the controller's method that runs once when the stream ends:
+/// by it, since HEAD would open a subscription. `opts` may hold the input
+/// of the handler, which `ctx.input` reads at once: `.path`, `.query`,
+/// `.headers` and `.cookies` (DTOs, as for `http.get`; a stream has no
+/// body); `.middleware`, `.heartbeat` (a `std.Io.Duration`: a comment
+/// `: ping` goes out when nothing else did for that long) and
+/// `.on_close`, the name of the controller's method that runs once when
+/// the stream ends:
 ///
 /// ```zig
 /// .events = http.sse.get("/events", .{ .heartbeat = std.Io.Duration.fromSeconds(15), .on_close = .eventsClosed }),

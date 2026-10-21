@@ -53,6 +53,12 @@ pub const ResponseState = Context.Response.State;
 /// rule of the validator; the field under its outside name.
 pub const Violation = @import("validator").Violation;
 pub const RouteInfo = route_decls.RouteInfo;
+/// What a route serves: `.rest`, a request and its response, or `.sse`, a
+/// stream.
+pub const RouteKind = route_decls.Kind;
+/// A status that a route declares in `.responses`, as its type keeps it
+/// in `responses`.
+pub const RouteResponse = route_decls.RouteResponse;
 pub const TrustedProxies = Server.TrustedProxies;
 
 // Errors.
