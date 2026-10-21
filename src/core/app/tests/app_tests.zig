@@ -426,3 +426,55 @@ test "two rpc servers with separate Handlers" {
     try expectNames(&.{"StatsHandler"}, internal.server.names);
     try testing.expect(internal.server.item(two.StatsHandler, 0).analytics == app.get(shop.AnalyticsDb));
 }
+
+/// A test of UsersModule alone (design §3.6): App builds nothing of
+/// InfraModule, and a fake database takes the place of its export.
+const UsersTest = struct {
+    pub const module: zapp.Module = .{
+        .imports = &.{shop.UsersModule},
+        .overrides = &.{shop.InfraModule},
+        .values = &.{ *shop.ShopDb, *const mocks.Logger },
+    };
+};
+
+test "a module alone: InfraModule overridden, a fake database in its place" {
+    var rec: mocks.Recorder = .init(testing.io);
+    var client: mocks.mongo.Client = try .init(testing.allocator, testing.io, &rec, "mongodb://fake");
+    var ids: mocks.mongo.bson.ObjectId.Generator = .init(testing.io);
+    var fake: shop.ShopDb = .{ .db = .init(&client, "test", &ids) };
+    const logger: mocks.Logger = .{ .id = 1 };
+    var app = try zapp.App(UsersTest).init(testing.allocator, testing.io, .{ &fake, &logger }, .{});
+    defer app.deinit();
+    try testing.expect(app.get(shop.UserRepository).db == &fake);
+    try testing.expect(app.get(shop.UsersController).service == app.get(shop.UserService));
+    // Nothing of InfraModule is built, so nothing of it is driven.
+    try testing.expectEqualStrings("build order: UsersModule.UserRepository, UsersModule.UserService, UsersModule.UsersController", app.internal.build_order);
+    try testing.expectEqual(0, app.internal.block.entries.len);
+}
+
+/// The real services of OrdersModule over a fake UserRepository (design §5.9).
+const OrdersTest = struct {
+    pub const module: zapp.Module = .{
+        .imports = &.{shop.OrdersModule},
+        .overrides = &.{ shop.InfraModule, shop.UserRepository },
+        .values = &.{ *shop.UserRepository, *shop.ShopDb, *shop.AnalyticsDb, *const mocks.Logger },
+    };
+};
+
+test "a provider overridden under the real services" {
+    var rec: mocks.Recorder = .init(testing.io);
+    var client: mocks.mongo.Client = try .init(testing.allocator, testing.io, &rec, "mongodb://fake");
+    var ids: mocks.mongo.bson.ObjectId.Generator = .init(testing.io);
+    var shop_db: shop.ShopDb = .{ .db = .init(&client, "shop", &ids) };
+    var analytics: shop.AnalyticsDb = .{ .db = .init(&client, "analytics", &ids) };
+    var fake_repo: shop.UserRepository = .{ .db = &shop_db };
+    const logger: mocks.Logger = .{ .id = 1 };
+    var app = try zapp.App(OrdersTest).init(testing.allocator, testing.io, .{ &logger, &analytics, &fake_repo, &shop_db }, .{});
+    defer app.deinit();
+    // The value takes the place of the bean where the bean would be: in UsersModule.
+    try testing.expect(app.get(shop.UserService).repo == &fake_repo);
+    try testing.expect(app.get(shop.UsersController).repo == &fake_repo);
+    try testing.expect(app.get(shop.OrderRepository).db == &shop_db);
+    try testing.expect(app.get(shop.OrderService).place(7));
+    try testing.expectEqual(1, fake_repo.lookups);
+}

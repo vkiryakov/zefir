@@ -60,7 +60,16 @@ pub const UsersModule = struct {
     };
 };
 
-pub const UserRepository = struct { db: *ShopDb };
+pub const UserRepository = struct {
+    db: *ShopDb,
+    /// How many users were looked up: a test sees whether its fake was used.
+    lookups: u32 = 0,
+
+    pub fn exists(r: *UserRepository, id: u64) bool {
+        r.lookups += 1;
+        return id != 0;
+    }
+};
 
 pub const UserService = struct {
     repo: *UserRepository,
@@ -68,6 +77,10 @@ pub const UserService = struct {
 
     pub fn init(repo: *UserRepository, logger: *const Logger) UserService {
         return .{ .repo = repo, .logger = logger.* };
+    }
+
+    pub fn exists(s: *UserService, id: u64) bool {
+        return s.repo.exists(id);
     }
 };
 
@@ -104,6 +117,11 @@ pub const OrderService = struct {
 
     pub fn init(deps: struct { repo: *OrderRepository, users: *UserService, logger: *const Logger }) OrderService {
         return .{ .repo = deps.repo, .users = deps.users, .logger = deps.logger.* };
+    }
+
+    /// Takes an order of a user who exists.
+    pub fn place(s: *OrderService, user: u64) bool {
+        return s.users.exists(user);
     }
 };
 

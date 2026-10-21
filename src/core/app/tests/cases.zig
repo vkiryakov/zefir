@@ -118,6 +118,17 @@ pub const compile_errors = [_]Fixture{
         "and Root.Servers.httpServer (param 0); " ++ one_server ++ "UsersModule" },
     .{ .file = dir ++ "handler_two_servers.zig", .expect = "zefir.App(AppModule): OrdersModule.OrdersHandler is served by both AppModule.Servers.rpcServer (param 2) " ++
         "and AppModule.Servers.internalRpc (param 2); one handler is served by one rpc server: take Handlers of a module that does not reach OrdersModule" },
+    // Overrides (design §5.9).
+    .{ .file = dir ++ "override_unknown.zig", .expect = "zefir.App(Root): Root.overrides: Config is neither a module nor a bean of Root" },
+    .{ .file = dir ++ "override_no_value.zig", .expect = "zefir.App(Root): UsersModule.UserService.repo needs *UserRepository, which Root overrides; " ++
+        "declare *UserRepository in Root.values and pass the replacement to App.init" },
+    .{ .file = dir ++ "override_unreached.zig", .expect = "zefir.App(Root): Root.overrides: InfraModule is a module Root does not reach through its imports" },
+    .{ .file = dir ++ "override_controller.zig", .expect = "zefir.App(Root): Root.overrides: UsersController is a controller of UsersModule; only providers, factory results and modules are overridden" },
+    .{ .file = dir ++ "override_visibility.zig", .expect = "zefir.App(Root): Reports.Peek.db needs *Database, which Root overrides in InfraModule; " ++
+        "the value that takes its place is visible only where the bean would be: import InfraModule in Reports" },
+    .{ .file = dir ++ "override_root.zig", .expect = "zefir.App(Root): Root.overrides: the root cannot override itself" },
+    .{ .file = dir ++ "overrides_twice.zig", .expect = "zefir.App(Root): Root.overrides: UserRepository is there twice" },
+    .{ .file = dir ++ "value_unused_override.zig", .expect = "zefir.App(Root): Root.values declares *Database, but no bean takes it; drop it from Root.values and from App.init" },
 };
 
 const nothing_to_inject = ", in which App has nothing to inject (every field has a default): these are options, not dependencies; ";

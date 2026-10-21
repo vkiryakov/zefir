@@ -1,7 +1,7 @@
 //! The plan of zefir.App, computed when the type `zefir.App(Root)` is
-//! named: every bean of the modules the root reaches, what each module sees
-//! and exports, where each dependency comes from, and the order App builds
-//! the beans in.
+//! named: every bean of the modules the root reaches but those it
+//! overrides, what each module sees and exports, where each dependency
+//! comes from, and the order App builds the beans in.
 //!
 //! The order (design §5.4): modules as the graph places them, imports
 //! first; inside a module App walks its beans in declaration order
@@ -58,21 +58,27 @@ pub const Ref = struct { i: usize, how: How };
 pub const Deps = struct { P: type, fields: []const Source };
 
 /// What a module may take by type: a bean or a value of the root.
-pub const Cand = struct { T: type, src: union(enum) { bean: usize, value: usize } };
+/// `unset`: an overridden bean in whose place the root declares no value.
+pub const Cand = struct { T: type, src: union(enum) { bean: usize, value: usize, unset } };
 
 pub const ModPlan = struct {
     T: type,
     imports: []const usize,
+    /// The root overrides the whole module: App builds none of its beans,
+    /// and its importers see values in the place of its exports.
+    overridden: bool = false,
     /// Its beans are `beans[first..end]` in declaration order.
     first: usize = 0,
     end: usize = 0,
+    /// Its providers and factory results that the root overrides.
+    overridden_beans: []const type = &.{},
     /// Its controllers and handlers, in list order.
     controllers: []const usize = &.{},
     handlers: []const usize = &.{},
     /// What its importers see.
     exports: []const Cand = &.{},
-    /// What its beans see: its providers and factory results, then the
-    /// exports of its imports.
+    /// What its beans see: its providers and factory results (values in
+    /// the place of the overridden ones), then the exports of its imports.
     visible: []const Cand = &.{},
 };
 
@@ -109,31 +115,52 @@ fn computePlan(comptime Root: type) Plan {
     const p = pre(Root);
     var mods: [g.len]ModPlan = undefined;
     for (g, 0..) |m, k| {
-        mods[k] = .{ .T = m.T, .imports = m.imports };
+        mods[k] = .{ .T = m.T, .imports = m.imports, .overridden = m.overridden };
         if (m.T != Root and (m.T.module.values.len > 0 or m.T.module.overrides.len > 0))
             @compileError(p ++ name(m.T) ++ " declares .values or .overrides, which only the root module " ++ name(Root) ++ " declares");
     }
     checkValues(Root);
+    checkOverrides(Root, g);
+    const overrides = Root.module.overrides;
 
-    // The beans, module by module, each module's in declaration order.
+    // The beans, module by module, each module's in declaration order; App
+    // builds none of an overridden module and no overridden bean.
     var count: usize = 0;
-    for (g) |m| {
+    for (g) |m| if (!m.overridden) {
         const M = m.T.module;
-        count += M.providers.len + M.controllers.len + M.handlers.len;
-        for (M.factories) |F| count += checkFactories(Root, m.T, F);
-    }
+        for (M.providers) |T| count += @intFromBool(!names.contains(overrides, T));
+        count += M.controllers.len + M.handlers.len;
+        for (M.factories) |F| {
+            checkFactories(Root, m.T, F);
+            for (names.fieldsOf(F).decl_names) |d| count += @intFromBool(!names.contains(overrides, resultOf(F, d)));
+        }
+    };
     var decl: [count]Bean = undefined;
     var n: usize = 0;
+    // Which entries of `.overrides` are beans App would build.
+    var seen: [overrides.len]bool = @splat(false);
     for (g, 0..) |m, k| {
         const M = m.T;
         mods[k].first = n;
+        mods[k].end = n;
+        if (m.overridden) continue;
         for (M.module.providers) |T| {
             checkProvider(Root, M, T);
+            if (names.indexOfType(overrides, T)) |o| {
+                seen[o] = true;
+                mods[k].overridden_beans = mods[k].overridden_beans ++ &[_]type{T};
+                continue;
+            }
             decl[n] = .{ .T = T, .kind = .provider, .module = k, .label = name(M) ++ "." ++ name(T) };
             n += 1;
         }
         for (M.module.factories) |F| for (names.fieldsOf(F).decl_names) |d| {
-            const T = names.Payload(@typeInfo(@TypeOf(@field(F, d))).@"fn".return_type.?);
+            const T = resultOf(F, d);
+            if (names.indexOfType(overrides, T)) |o| {
+                seen[o] = true;
+                mods[k].overridden_beans = mods[k].overridden_beans ++ &[_]type{T};
+                continue;
+            }
             decl[n] = .{ .T = T, .kind = .factory, .module = k, .Holder = F, .fn_name = d, .label = name(M) ++ "." ++ name(F) ++ "." ++ d };
             n += 1;
         };
@@ -141,6 +168,8 @@ fn computePlan(comptime Root: type) Plan {
             const list = if (kind == .controller) M.module.controllers else M.module.handlers;
             for (list) |T| {
                 checkServed(Root, M, T, kind);
+                if (names.contains(overrides, T)) @compileError(p ++ name(Root) ++ ".overrides: " ++ typeName(T) ++ " is a " ++ @tagName(kind) ++ " of " ++ name(M) ++
+                    "; only providers, factory results and modules are overridden");
                 if (kind == .controller) mods[k].controllers = mods[k].controllers ++ &[_]usize{n} else mods[k].handlers = mods[k].handlers ++ &[_]usize{n};
                 decl[n] = .{ .T = T, .kind = kind, .module = k, .label = name(M) ++ "." ++ name(T) };
                 n += 1;
@@ -148,6 +177,8 @@ fn computePlan(comptime Root: type) Plan {
         }
         mods[k].end = n;
     }
+    for (overrides, seen) |O, s| if (!s and !names.isModule(O))
+        @compileError(p ++ name(Root) ++ ".overrides: " ++ typeName(O) ++ " is neither a module nor a bean of " ++ name(Root));
     // One type, one bean (design §5.5), values included: App injects by
     // type. Only the beans of one bucket are compared.
     var buckets: Buckets = @splat(&.{});
@@ -161,14 +192,24 @@ fn computePlan(comptime Root: type) Plan {
         @compileError(p ++ name(Root) ++ ".values declares " ++ typeName(V) ++ ", but " ++ decl[i].label ++ " is a bean of that type; a type is one bean: drop one, or give it a wrapper type");
 
     // What each module sees and exports; its imports come before it.
+    // Every module sees the values, but one in the place of an overridden
+    // bean, which only the modules that would see the bean see.
     var globals: []const Cand = &.{};
-    for (Root.module.values, 0..) |V, i| globals = globals ++ &[_]Cand{.{ .T = names.dataPointer(V).?.child, .src = .{ .value = i } }};
+    for (Root.module.values, 0..) |V, i| {
+        const T = names.dataPointer(V).?.child;
+        if (!isOverridden(Root, &mods, T)) globals = globals ++ &[_]Cand{.{ .T = T, .src = .{ .value = i } }};
+    }
     for (0..mods.len) |k| {
         const M = mods[k].T;
+        if (mods[k].overridden) {
+            for (M.module.exports) |E| mods[k].exports = mods[k].exports ++ &[_]Cand{valueCand(Root, E)};
+            continue;
+        }
         var vis: []const Cand = &.{};
         for (mods[k].first..mods[k].end) |i| if (decl[i].kind == .provider or decl[i].kind == .factory) {
             vis = vis ++ &[_]Cand{.{ .T = decl[i].T, .src = .{ .bean = i } }};
         };
+        for (mods[k].overridden_beans) |T| vis = vis ++ &[_]Cand{valueCand(Root, T)};
         for (mods[k].imports) |j| for (mods[j].exports) |c| {
             if (findCand(vis, c.T) == null) vis = vis ++ &[_]Cand{c};
         };
@@ -242,6 +283,41 @@ fn checkValues(comptime Root: type) void {
     }
 }
 
+/// The entries of `.overrides` that are wrong whatever the modules hold.
+fn checkOverrides(comptime Root: type, comptime g: []const graph.Mod) void {
+    const at = pre(Root) ++ name(Root) ++ ".overrides: ";
+    const list = Root.module.overrides;
+    for (list, 0..) |O, n| {
+        if (O == Root) @compileError(at ++ "the root cannot override itself");
+        if (names.contains(list[0..n], O)) @compileError(at ++ typeName(O) ++ " is there twice");
+        if (names.isModule(O)) {
+            const reached = for (g) |m| {
+                if (m.T == O) break true;
+            } else false;
+            if (!reached) @compileError(at ++ name(O) ++ " is a module " ++ name(Root) ++ " does not reach through its imports");
+        }
+    }
+}
+
+/// Whether T is an overridden bean or an export of an overridden module:
+/// a value of the root in its place is seen only where the bean would be.
+fn isOverridden(comptime Root: type, comptime mods: []const ModPlan, comptime T: type) bool {
+    if (names.contains(Root.module.overrides, T)) return true;
+    for (mods) |m| if (m.overridden and names.contains(m.T.module.exports, T)) return true;
+    return false;
+}
+
+/// The value of the root in the place of the overridden bean of type T.
+fn valueCand(comptime Root: type, comptime T: type) Cand {
+    for (Root.module.values, 0..) |V, i| if (names.dataPointer(V).?.child == T) return .{ .T = T, .src = .{ .value = i } };
+    return .{ .T = T, .src = .unset };
+}
+
+/// The bean type of function `d` of the factories struct F.
+fn resultOf(comptime F: type, comptime d: []const u8) type {
+    return names.Payload(@typeInfo(@TypeOf(@field(F, d))).@"fn".return_type.?);
+}
+
 fn checkProvider(comptime Root: type, comptime M: type, comptime T: type) void {
     const at = pre(Root) ++ name(M) ++ ".providers: ";
     if (names.isModule(T)) @compileError(at ++ name(T) ++ " is a module; list it in .imports");
@@ -271,9 +347,9 @@ fn checkInit(comptime Root: type, comptime M: type, comptime list: []const u8, c
     if (names.Payload(R) != T) @compileError(at ++ "returns " ++ typeName(R) ++ "; it must return " ++ name(T) ++ " or !" ++ name(T));
 }
 
-/// The number of beans of a factories struct, after checking every pub
-/// declaration of it: each is a function, and each returns its bean.
-fn checkFactories(comptime Root: type, comptime M: type, comptime F: type) usize {
+/// Checks every pub declaration of a factories struct: each is a
+/// function, and each returns its bean.
+fn checkFactories(comptime Root: type, comptime M: type, comptime F: type) void {
     const at = pre(Root) ++ name(M) ++ ".factories: ";
     if (!names.isPlainStruct(F)) @compileError(at ++ typeName(F) ++ " is not a struct of factory functions");
     const decls = names.fieldsOf(F).decl_names;
@@ -293,7 +369,6 @@ fn checkFactories(comptime Root: type, comptime M: type, comptime F: type) usize
         }
         @compileError(who ++ " returns " ++ typeName(R) ++ "; a factory returns its bean, a struct (or an error union of one)");
     }
-    return decls.len;
 }
 
 const Ctx = struct {
@@ -341,7 +416,8 @@ fn fieldSources(comptime ctx: Ctx, comptime T: type, comptime label: []const u8)
 
 /// `top`: a param of init or of a factory, which may be a struct of
 /// dependencies; a struct inside one is an ordinary dependency. A struct
-/// of a bean's type is that bean, never a struct of dependencies.
+/// of a bean's type is that bean, never a struct of dependencies; so is
+/// one of an overridden bean's type.
 fn depSource(comptime ctx: Ctx, comptime P: type, comptime who: []const u8, comptime top: bool) Source {
     if (P == std.mem.Allocator) return .gpa;
     if (P == std.Io) return .io;
@@ -350,7 +426,7 @@ fn depSource(comptime ctx: Ctx, comptime P: type, comptime who: []const u8, comp
     if (names.isTuple(P)) return .{ .list = listOf(ctx, P, who) };
     if (names.dataPointer(P)) |ptr| return ref(ctx, ptr.child, if (ptr.attrs.@"const") .const_ptr else .ptr, who);
     if (top and names.isPlainStruct(P) and findCand(ctx.mods[ctx.k].visible, P) == null and findCand(ctx.globals, P) == null and
-        beanIn(ctx.beans, ctx.buckets, P) == null)
+        beanIn(ctx.beans, ctx.buckets, P) == null and !isOverridden(ctx.Root, ctx.mods, P))
     {
         const fields = fieldSources(ctx, P, who);
         for (fields) |f| {
@@ -391,11 +467,14 @@ fn ref(comptime ctx: Ctx, comptime T: type, comptime how: How, comptime who: []c
                     "; declare *" ++ typeName(T) ++ " to take it mutable, or take *const " ++ typeName(T));
             return .{ .value = .{ .i = v, .how = how } };
         },
+        .unset => @compileError(pre(ctx.Root) ++ who ++ " needs " ++ depName(T, how) ++ ", which " ++ name(ctx.Root) ++ " overrides; declare *" ++ typeName(T) ++
+            " in " ++ name(ctx.Root) ++ ".values and pass the replacement to App.init"),
     }
 }
 
 /// Why nothing the module of ctx sees provides T: a controller, a bean of
-/// a module it does not import, a private bean, or nothing anywhere.
+/// a module it does not import, a private bean, an overridden bean seen
+/// from elsewhere, or nothing anywhere.
 fn missing(comptime ctx: Ctx, comptime T: type, comptime how: How, comptime who: []const u8) noreturn {
     const p = pre(ctx.Root) ++ who ++ " needs " ++ depName(T, how);
     const here = name(ctx.mods[ctx.k].T);
@@ -406,16 +485,28 @@ fn missing(comptime ctx: Ctx, comptime T: type, comptime how: How, comptime who:
             @compileError(p ++ ", a " ++ @tagName(b.kind) ++ " of " ++ owner ++ "; controllers and handlers are not injected: a server factory takes them as zefir.app.Controllers(M) or Handlers(M)");
         if (findCand(ctx.mods[b.module].exports, T) != null)
             @compileError(p ++ ", which " ++ owner ++ " exports, but " ++ here ++ " does not import " ++ owner ++ "; add it: .imports = &.{ ..., " ++ owner ++ " }");
-        const imported = for (ctx.mods[ctx.k].imports) |j| {
-            if (j == b.module) break true;
-        } else false;
-        @compileError(p ++ ", which is private to " ++ owner ++ "; export it (" ++ owner ++ ": .exports = &.{ ..., " ++ typeName(T) ++ " })" ++
-            (if (imported) "" else " and import " ++ owner ++ " in " ++ here));
+        privateTo(ctx, T, p, b.module);
     }
+    // The value in the place of an overridden bean is where the bean would be.
+    for (ctx.mods, 0..) |mm, j| if ((mm.overridden and names.contains(mm.T.module.exports, T)) or names.contains(mm.overridden_beans, T)) {
+        if (!mm.overridden and findCand(mm.exports, T) == null) privateTo(ctx, T, p, j);
+        @compileError(p ++ ", which " ++ name(ctx.Root) ++ " overrides in " ++ name(mm.T) ++ "; the value that takes its place is visible only where the bean would be: import " ++
+            name(mm.T) ++ " in " ++ here);
+    };
     if (!names.isContainer(T)) @compileError(p ++ ", and nothing " ++ here ++ " sees provides it; App injects beans (structs) and values: declare *const " ++
         typeName(T) ++ " in " ++ name(ctx.Root) ++ ".values and take a pointer, or give it a default");
     @compileError(p ++ ", and nothing " ++ here ++ " sees provides it; add " ++ typeName(T) ++ " to " ++ here ++ ".providers (or a factory that returns it), import a module that exports it, or declare *const " ++
         typeName(T) ++ " in " ++ name(ctx.Root) ++ ".values and pass it to App.init");
+}
+
+/// The bean T is private to module j of the graph.
+fn privateTo(comptime ctx: Ctx, comptime T: type, comptime p: []const u8, comptime j: usize) noreturn {
+    const owner = name(ctx.mods[j].T);
+    const imported = for (ctx.mods[ctx.k].imports) |i| {
+        if (i == j) break true;
+    } else false;
+    @compileError(p ++ ", which is private to " ++ owner ++ "; export it (" ++ owner ++ ": .exports = &.{ ..., " ++ typeName(T) ++ " })" ++
+        (if (imported) "" else " and import " ++ owner ++ " in " ++ name(ctx.mods[ctx.k].T)));
 }
 
 /// The beans of `Controllers(M)` or `Handlers(M)`, for M the module of ctx
@@ -424,22 +515,30 @@ fn listOf(comptime ctx: Ctx, comptime P: type, comptime who: []const u8) []const
     const g = graph.modulesOf(ctx.Root);
     const here = name(ctx.mods[ctx.k].T);
     var matched: ?[]const u8 = null;
-    for (ctx.mods, 0..) |m, j| {
+    for (ctx.mods, 0..) |m, j| if (!m.overridden) {
         const list: ?[]const u8 = if (P == graph.Controllers(m.T)) "controllers" else if (P == graph.Handlers(m.T)) "handlers" else null;
         if (list) |l| {
-            if (matched == null) matched = (if (l[0] == 'c') "Controllers(" else "Handlers(") ++ name(m.T) ++ ")";
+            const tuple = (if (l[0] == 'c') "Controllers(" else "Handlers(") ++ name(m.T) ++ ")";
+            if (matched == null) matched = tuple;
             if (j == ctx.k or graph.reaches(g, ctx.k, j)) {
                 var out: []const usize = &.{};
-                for (graph.modulesOf(m.T)) |sm| {
-                    const jj = for (ctx.mods, 0..) |mm, i| {
+                // The modules of the tuple, as `Controllers(M)` takes them;
+                // App must build what each of them adds.
+                for (graph.modulesOf(m.T)) |sm| if (!sm.overridden) {
+                    const at: ?usize = for (ctx.mods, 0..) |mm, i| {
                         if (mm.T == sm.T) break i;
-                    } else unreachable;
-                    out = out ++ @field(ctx.mods[jj], l);
-                }
+                    } else null;
+                    if (at == null or ctx.mods[at.?].overridden) {
+                        if (@field(sm.T.module, l).len > 0) @compileError(pre(ctx.Root) ++ who ++ " takes zefir.app." ++ tuple ++ ", which holds the " ++ l ++ " of " ++
+                            name(sm.T) ++ ", but " ++ name(ctx.Root) ++ " overrides " ++ (if (at == null) "the module it comes through" else "it") ++ "; App does not build them");
+                        continue;
+                    }
+                    out = out ++ @field(ctx.mods[at.?], l);
+                };
                 return out;
             }
         }
-    }
+    };
     if (matched) |x| @compileError(pre(ctx.Root) ++ who ++ " takes zefir.app." ++ x ++ ", but " ++ here ++
         " does not import that module (directly or through its imports); import it in " ++ here);
     @compileError(pre(ctx.Root) ++ who ++ " is the tuple " ++ typeName(P) ++ "; App gives a tuple only as zefir.app.Controllers(M) or zefir.app.Handlers(M)");

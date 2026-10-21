@@ -6,12 +6,14 @@ const names = @import("names.zig");
 const pre = names.pre;
 const name = names.name;
 
-/// A module of the graph: its type and the graph indices of its imports.
-pub const Mod = struct { T: type, imports: []const usize };
+/// A module of the graph: its type, the graph indices of its imports, and
+/// whether the root overrides it.
+pub const Mod = struct { T: type, imports: []const usize, overridden: bool = false };
 
 /// The modules X reaches through `.imports`, X included: imports first,
 /// depth-first in `.imports` order, each module once, X last. X and every
-/// import are checked to be modules first.
+/// import are checked to be modules first. A module X overrides is in the
+/// graph without its imports: App builds nothing of it.
 pub fn modulesOf(comptime X: type) []const Mod {
     return ModulesOf(X).value;
 }
@@ -36,14 +38,15 @@ fn computeModules(comptime X: type) []const Mod {
 fn visit(comptime X: type, comptime T: type, comptime path: []const type, comptime done: *[]const Mod) usize {
     for (done.*, 0..) |m, i| if (m.T == T) return i;
     for (path, 0..) |P, i| if (P == T) @compileError(pre(X) ++ "module import cycle: " ++ names.chain(path[i..] ++ &[_]type{T}));
-    const list = T.module.imports;
+    const overridden = T != X and names.contains(X.module.overrides, T);
+    const list: []const type = if (overridden) &.{} else T.module.imports;
     var imports: []const usize = &.{};
     for (list, 0..) |I, n| {
         checkModule(X, I, T);
         if (names.contains(list[0..n], I)) @compileError(pre(X) ++ name(T) ++ ".imports: " ++ name(I) ++ " is there twice");
         imports = imports ++ &[_]usize{visit(X, I, path ++ &[_]type{T}, done)};
     }
-    done.* = done.* ++ &[_]Mod{.{ .T = T, .imports = imports }};
+    done.* = done.* ++ &[_]Mod{.{ .T = T, .imports = imports, .overridden = overridden }};
     return done.*.len - 1;
 }
 
@@ -81,7 +84,7 @@ pub fn reaches(comptime mods: []const Mod, comptime k: usize, comptime j: usize)
 /// `controllers: zefir.app.Controllers(AppModule)`. The modules come in the
 /// order of the graph of M (imports first, M last), each module's
 /// controllers in list order. Two modules that reach the same controllers
-/// give one type.
+/// give one type. A module the root overrides in a test adds none.
 pub fn Controllers(comptime M: type) type {
     return ListTuple(M, "controllers");
 }
@@ -91,13 +94,13 @@ pub fn Handlers(comptime M: type) type {
     return ListTuple(M, "handlers");
 }
 
-/// Reads only `.imports` and the list itself: reading `.factories` here
-/// would make a factory that takes `Controllers(M)` of its own module
-/// depend on itself.
+/// Reads only `.imports`, `.overrides` and the list itself: reading
+/// `.factories` here would make a factory that takes `Controllers(M)` of
+/// its own module depend on itself.
 fn ListTuple(comptime M: type, comptime list: []const u8) type {
     @setEvalBranchQuota(names.eval_quota);
     var types: []const type = &.{};
-    for (modulesOf(M)) |m| for (@field(m.T.module, list)) |C| {
+    for (modulesOf(M)) |m| if (!m.overridden) for (@field(m.T.module, list)) |C| {
         types = types ++ &[_]type{*C};
     };
     return @Tuple(types);
