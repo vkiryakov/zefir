@@ -1,6 +1,6 @@
 //! zefir-mongo-bson — BSON, the binary format of MongoDB's documents and
-//! commands (https://bsonspec.org/spec.html). Import it as
-//! `@import("mongo-bson")`, or reach it as `@import("zefir").mongo_bson`.
+//! commands (https://bsonspec.org/spec.html). Its import name is
+//! `mongo-bson`, and in the umbrella module it is `zefir.mongo_bson`.
 //! zefir-mongo reads and writes its documents and commands with it, and so
 //! can any other driver: the module imports nothing but std.
 //!
