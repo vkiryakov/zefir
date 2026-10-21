@@ -589,3 +589,132 @@ const no_accept = struct {
         return error.SystemResources;
     }
 };
+
+/// A handler that counts the INCR it answers, from many tasks at once.
+const Counter = struct {
+    mutex: Io.Mutex = .init,
+    n: i64 = 0,
+
+    pub fn answer(counter: *Counter, io: Io, arena: Allocator, request: *const FakeServer.Request) FakeServer.Handler.Error!Reply {
+        _ = arena;
+        if (!std.ascii.eqlIgnoreCase(request.args[0], "INCR")) return .{ .err = "ERR the counter answers INCR only" };
+        try counter.mutex.lock(io);
+        defer counter.mutex.unlock(io);
+        counter.n += 1;
+        return .{ .integer = counter.n };
+    }
+};
+
+test "a handler answers commands from many connections at once: 8 clients of 10 INCR get 80 replies, the last 80" {
+    const io = testing.io;
+    var counter: Counter = .{};
+    var server: FakeServer = try .startWith(testing.allocator, io, .{ .handler = .init(&counter) });
+    defer server.stop(io);
+    var got: [8][10]i64 = undefined;
+    try within5s(io, eightClients, .{ io, server.url(), &got });
+    // Each number from 1 to 80 came once.
+    var seen: [81]bool = @splat(false);
+    for (got) |row| for (row) |n| {
+        if (n < 1 or n > 80 or seen[@intCast(n)]) return error.TestUnexpectedCount;
+        seen[@intCast(n)] = true;
+    };
+    try testing.expectEqual(@as(i64, 80), counter.n);
+    try testing.expectEqual(@as(usize, 80), server.received(io));
+    try testing.expectEqual(@as(usize, 80), server.count(io, "incr"));
+    try server.finish(io);
+}
+
+fn eightClients(io: Io, url: []const u8, got: *[8][10]i64) !void {
+    var futures: [8]Io.Future(anyerror!void) = undefined;
+    var started: usize = 0;
+    defer for (futures[0..started]) |*future| future.cancel(io) catch {};
+    for (&futures, got) |*future, *row| {
+        future.* = try io.concurrent(tenIncr, .{ io, url, row });
+        started += 1;
+    }
+    for (futures[0..started]) |*future| try future.await(io);
+}
+
+fn tenIncr(io: Io, url: []const u8, row: *[10]i64) anyerror!void {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var c: Client = undefined;
+    try c.open(io, url);
+    defer c.close();
+    for (row) |*n| {
+        const value = try c.command(arena.allocator(), &.{ "INCR", "c" });
+        if (value != .integer) return error.TestNotAnInteger;
+        n.* = value.integer;
+    }
+}
+
+/// A handler that answers with the name of the command and the number of
+/// its connection, in a string built in the arena; SLOW after a delay.
+const Echo = struct {
+    label: []const u8 = "handler",
+
+    pub fn answer(echo: *Echo, io: Io, arena: Allocator, request: *const FakeServer.Request) FakeServer.Handler.Error!Reply {
+        _ = io;
+        const text = try std.fmt.allocPrint(arena, "{s}: {s} on {d}", .{ echo.label, request.args[0], request.connection });
+        if (!std.ascii.eqlIgnoreCase(request.args[0], "SLOW")) return .{ .string = text };
+        const late = try arena.create(Reply);
+        late.* = .{ .string = text };
+        return .{ .delayed = .{ .after = .fromMilliseconds(20), .reply = late } };
+    }
+};
+
+test "with steps and a handler, the command the next step expects takes the step, and any other goes to the handler" {
+    const io = testing.io;
+    var echo: Echo = .{};
+    var server: FakeServer = try .startWith(testing.allocator, io, .{
+        .steps = &.{.expect(.{ "GET", "a" }, .{ .string = "step" })},
+        .handler = .init(&echo),
+    });
+    defer server.stop(io);
+    try within5s(io, stepsAndHandler, .{ io, server.url() });
+    try server.finish(io);
+    try testing.expectEqual(@as(usize, 4), server.received(io));
+}
+
+fn stepsAndHandler(io: Io, url: []const u8) !void {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var c: Client = undefined;
+    try c.open(io, url);
+    defer c.close();
+    try expectValue(.{ .string = "handler: GET on 1" }, try c.command(a, &.{ "GET", "b" }));
+    try expectValue(.{ .string = "step" }, try c.command(a, &.{ "GET", "a" }));
+    // No step is left: the handler answers the same command now.
+    try expectValue(.{ .string = "handler: GET on 1" }, try c.command(a, &.{ "GET", "a" }));
+    try expectValue(.{ .string = "handler: SLOW on 1" }, try c.command(a, &.{"SLOW"}));
+}
+
+/// A handler that runs out of memory.
+const Failing = struct {
+    calls: usize = 0,
+
+    pub fn answer(failing: *Failing, io: Io, arena: Allocator, request: *const FakeServer.Request) FakeServer.Handler.Error!Reply {
+        _ = .{ io, arena, request };
+        failing.calls += 1;
+        return error.OutOfMemory;
+    }
+};
+
+test "an error of the handler closes the connection without a reply" {
+    const io = testing.io;
+    var failing: Failing = .{};
+    var server: FakeServer = try .startWith(testing.allocator, io, .{ .handler = .init(&failing) });
+    defer server.stop(io);
+    try within5s(io, handlerFails, .{ io, server.url() });
+    try testing.expectEqual(@as(usize, 1), failing.calls);
+    try server.finish(io);
+}
+
+fn handlerFails(io: Io, url: []const u8) !void {
+    var c: Client = undefined;
+    try c.open(io, url);
+    defer c.close();
+    try c.send(&.{ "GET", "k" });
+    try c.expectClosed();
+}

@@ -26,8 +26,10 @@
 //!   arguments byte for byte, that step answers it, and the `send` steps
 //!   right after it follow on the same connection. The steps run in the
 //!   order the commands arrive, on all connections together.
-//! - A command that the next step does not expect gets
-//!   `-ERR zefir FakeServer: unexpected command …`, and `finish` names it.
+//! - A command that the next step does not expect goes to the handler of
+//!   `Options`, if there is one: for tests whose commands come in no set
+//!   order. Without one it gets `-ERR zefir FakeServer: unexpected command …`,
+//!   and `finish` names it.
 //! - Bytes that are not a command, an array of bulk strings, get a
 //!   protocol error, as from Redis, and the connection closes.
 //!
@@ -59,9 +61,54 @@ pub const Malformed = replies.Malformed;
 pub const Options = struct {
     /// The script, in the order its steps run.
     steps: []const Step = &.{},
+    /// Answers the commands that the next step does not expect: for tests
+    /// whose commands come in no set order, such as from many tasks at
+    /// once.
+    handler: ?Handler = null,
     /// What the server says about itself in HELLO, and the password it
     /// takes.
     hello: Hello = .{},
+};
+
+/// Answers commands: a type of the test's own with
+/// `pub fn answer(self: *T, io: std.Io, arena: std.mem.Allocator, request: *const FakeServer.Request) FakeServer.Handler.Error!FakeServer.Reply`,
+/// passed as `.init(&value)`. The server calls it from the task of each
+/// connection, many at once: guard its state with `std.Io` primitives,
+/// such as an `Io.Mutex`.
+pub const Handler = struct {
+    context: *anyopaque,
+    /// Answers `request`. `arena` lives until the reply is sent: build
+    /// the reply in it. `io` is the server's, to wait with and to guard
+    /// state.
+    function: *const fn (context: *anyopaque, io: Io, arena: Allocator, request: *const Request) Error!Reply,
+
+    /// What a handler can fail with besides answering: memory, or the
+    /// cancelation of its task, such as when the server stops while it
+    /// waits. Either closes the connection without a reply.
+    pub const Error = error{ OutOfMemory, Canceled };
+
+    /// The handler of `context`, a `*T` whose `T` declares `answer`.
+    pub fn init(context: anytype) Handler {
+        const Ptr = @TypeOf(context);
+        const T = @typeInfo(Ptr).pointer.child;
+        const erased = struct {
+            fn answer(ptr: *anyopaque, io: Io, arena: Allocator, request: *const Request) Error!Reply {
+                const self: Ptr = @ptrCast(@alignCast(ptr));
+                return T.answer(self, io, arena, request);
+            }
+        };
+        return .{ .context = context, .function = erased.answer };
+    }
+};
+
+/// A command as the server read it, for a handler.
+pub const Request = struct {
+    /// The command, the name first, as the client wrote it; it lives
+    /// until the reply is sent.
+    args: []const []const u8,
+    /// The number of the connection it came on: 1 for the first connection
+    /// to the server, 2 for the next, and so on.
+    connection: u32,
 };
 
 /// The fields of the map that HELLO answers with, as a standalone Redis
@@ -143,6 +190,7 @@ pub fn startWith(gpa: Allocator, io: Io, options: Options) !FakeServer {
         .io = io,
         .listener = try loopback.listen(io, .{ .reuse_address = true }),
         .steps = options.steps,
+        .handler = options.handler,
         .hello = options.hello,
     };
     errdefer state.listener.deinit(io);
@@ -247,6 +295,7 @@ const State = struct {
     url_buffer: [32]u8 = undefined,
     url_len: usize = 0,
     steps: []const Step,
+    handler: ?Handler,
     hello: Hello,
     /// The task that accepts connections.
     serving: Io.Future(void) = undefined,
@@ -291,6 +340,7 @@ const State = struct {
             state.next = end;
             return .{ .steps = steps[first..end] };
         }
+        if (state.handler) |handler| return .{ .handler = handler };
         const why: Description = .unexpectedCommand(args, if (state.next < steps.len) steps[state.next] else null);
         if (state.unexpected == null) state.unexpected = .{ .why = why, .connection = number };
         return .{ .unexpected = why };
@@ -329,6 +379,8 @@ fn expects(step: Step, args: []const []const u8) bool {
 const Plan = union(enum) {
     /// The step that expects it, and the `send` steps after it.
     steps: []const Step,
+    /// The handler, since no step expects it.
+    handler: Handler,
     /// Nothing: the error says why.
     unexpected: Description,
 };
@@ -562,6 +614,11 @@ fn serveCommand(state: *State, conn: *Connection, arena: Allocator) !Next {
         .steps => |steps| for (steps) |step| {
             if (try perform(state, conn, step.reply) == .end) return .end;
         },
+        .handler => |handler| {
+            const request: Request = .{ .args = args, .connection = conn.number };
+            const reply = try handler.function(handler.context, state.io, arena, &request);
+            return perform(state, conn, reply);
+        },
         .unexpected => |why| {
             try w.writeAll("-ERR zefir FakeServer: ");
             try w.writeAll(why.text());
@@ -678,14 +735,14 @@ fn answerSelect(w: *Io.Writer, args: []const []const u8) Io.Writer.Error!void {
 fn stepsOf(plan: Plan) ![]const Step {
     return switch (plan) {
         .steps => |steps| steps,
-        .unexpected => error.TestUnexpectedCommand,
+        .handler, .unexpected => error.TestNoStep,
     };
 }
 
 fn whyOf(plan: Plan) !Description {
     return switch (plan) {
         .unexpected => |why| why,
-        .steps => error.TestExpectedCommand,
+        .steps, .handler => error.TestExpectedCommand,
     };
 }
 
