@@ -50,10 +50,15 @@ pub const files = [_][]const u8{
     "errors",
     "OrdersController",
     "auth_test",
+    "billing_api",
+    "BillingHandler",
+    "JwtAuthenticator",
+    "rpc_auth_test",
 };
 
-/// The tests among `files`: `zig build test-jwt` runs them.
-pub const tests = [_][]const u8{"auth_test"};
+/// The tests among `files`: `zig build test-jwt` runs them. The test of
+/// the contract, billing_api, runs with its package.
+pub const tests = [_][]const u8{ "auth_test", "rpc_auth_test" };
 
 /// The command README.md shows for a run of `program`.
 pub fn command(comptime program: Program) []const u8 {

@@ -485,7 +485,27 @@ with one key may take tokens without `kid`. To change the key of orders:
 
 Done the other way round, step 2 before step 1, the new tokens fail with
 `UnknownKey` at once, so the mistake shows. A verifier never changes: to
-take new keys without a restart, build a new one.
+take new keys without a restart, build a new one. The tests of billing go
+through steps 1 and 3, with a verifier made anew for each, as after a
+restart:
+
+```zig
+// Step 1: billing restarts with the old key and the new one, and
+// takes the tokens of both, each by its kid.
+const keys = [_]jwt.Key{ b.orders_key.verificationKey(), new_key.verificationKey() };
+try b.useKeys(&keys);
+for ([_][]const u8{ old_token, new_token }) |token| {
+    var result = try b.charge(.{ .bearer = token });
+    defer result.deinit();
+    try testing.expectEqualStrings("user-7", result.outcome.ok.customer);
+}
+
+// Step 3: the old key is gone, and a token it signed is refused.
+try b.useKeys(keys[1..]);
+var result = try b.charge(.{ .bearer = old_token });
+defer result.deinit();
+try testing.expectEqual(.unauthenticated, result.outcome.failure.code);
+```
 
 ## Signing in
 
@@ -1212,6 +1232,302 @@ test "a token for billing alone is 401 at orders" {
 ```
 
 ## RPC
+
+Billing is a service of zefir-rpc. Its authenticator checks the token of
+every call, with the public key of orders from its settings:
+
+```zig
+//! The authenticator of the billing service: who calls, by the token that
+//! orders signed for its user. Billing has the public key of orders alone,
+//! from its settings: it checks tokens, and cannot make one.
+//!
+//! ```zig
+//! // main of billing
+//! const orders_key: jwt.Key = try .fromPem(.EdDSA, config.auth.orders_key, .{ .id = config.auth.orders_key_id });
+//! const keys = [_]jwt.Key{orders_key};
+//! const verifier: jwt.Verifier = try .init(.{ .keys = &keys, .issuer = "orders", .audiences = &.{"billing"} });
+//! var authenticator: JwtAuthenticator = .{ .verifier = &verifier };
+//! // .authenticator = &authenticator in the options of rpc.Server
+//! ```
+
+const jwt = @import("jwt");
+const rpc = @import("rpc");
+const v = @import("validator");
+
+const JwtAuthenticator = @This();
+
+/// Borrowed: it lives as long as the server.
+verifier: *const jwt.Verifier,
+
+/// The claims billing reads from a token of orders. The claims it does
+/// not name are skipped.
+pub const Claims = struct {
+    roles: []const []const u8 = &.{},
+
+    pub const field_rules = .{ .roles = v.maxItems(16) };
+};
+
+pub fn authenticate(self: *JwtAuthenticator, ctx: *const rpc.AuthContext) rpc.AuthError!?rpc.IdentityView {
+    return switch (ctx.credentials) {
+        // No token: an anonymous call, which a method with
+        // `.auth = .required` refuses.
+        .none => null,
+        .bearer => |token| {
+            // The claims live in the arena of the call, as the identity must.
+            const verified = self.verifier.verify(Claims, ctx.io(), ctx.allocator(), token, .{}) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                // Expired, forged, or meant for another service: a wrong
+                // token never passes as no token.
+                else => return error.InvalidCredentials,
+            };
+            const subject = verified.registered.subject orelse return error.InvalidCredentials;
+            return .{ .subject = subject, .roles = verified.claims.roles };
+        },
+        // Basic credentials or a scheme of another kind: billing takes none.
+        else => error.InvalidCredentials,
+    };
+}
+```
+
+- **No token** is an anonymous call: a method with `.auth = .required`
+  refuses it with `unauthenticated`, "Authentication required".
+- **A token that passes** gives the caller an identity: its `sub` and its
+  roles, in the arena of the call, which the identity of zefir-rpc needs.
+- **A token that does not pass**, whatever the reason, is
+  `error.InvalidCredentials`: `unauthenticated`, "Invalid credentials",
+  even on a method where a caller is optional. `OutOfMemory` passes as it
+  is. `verify` waits for nothing, so the deadline and the cancelation of a
+  call never stop it halfway.
+- **Billing names only the claims it reads.** Its `Claims` has the roles
+  alone; a claim that orders adds later is skipped, and billing goes on
+  working.
+
+The contract of billing, a package that billing and its clients share,
+and its handler, which charges an order to the caller:
+
+```zig
+//! The package billing-api: the contract of the billing service.
+
+const rpc = @import("rpc");
+const v = @import("validator");
+
+pub const ChargeRequest = struct {
+    order_id: u64,
+    amount_cents: u64,
+
+    pub const field_rules = .{
+        .order_id = v.positive,
+        .amount_cents = v.range(1, 100_000_000),
+    };
+};
+
+/// An order, charged to the user who placed it.
+pub const Charge = struct {
+    order_id: u64,
+    /// The user of the token: its "sub".
+    customer: []const u8,
+    amount_cents: u64,
+};
+
+pub const BillingApi = rpc.Contract(.{
+    .name = "billing",
+    .version = 1,
+    .methods = .{
+        .charge = rpc.method(ChargeRequest, Charge),
+    },
+});
+
+test "the rules of the requests are valid" {
+    comptime v.assertRules(ChargeRequest);
+}
+```
+
+```zig
+//! The handler of billing.v1: it charges an order to the caller, whom the
+//! authenticator found by the token. Every method needs a caller.
+
+const rpc = @import("rpc");
+const api = @import("billing-api");
+
+const BillingHandler = @This();
+
+pub const rpc_handler = rpc.implement(api.BillingApi, .{
+    .defaults = .{ .auth = .required },
+});
+
+pub fn charge(_: *BillingHandler, ctx: *rpc.Context, req: api.ChargeRequest) error{Unauthenticated}!api.Charge {
+    // `.auth = .required`: an anonymous call never gets here.
+    const caller = ctx.identity() orelse return error.Unauthenticated;
+    // A real service charges the user here, by caller.subject.
+    return .{ .order_id = req.order_id, .customer = caller.subject, .amount_cents = req.amount_cents };
+}
+```
+
+The token reaches billing as the credentials of a call. Orders calls
+billing for the user it serves with the token that came with the request:
+`.{ .credentials = .{ .bearer = token } }` among the options of
+`client.call`, as the tests below do. The tests run billing on
+`rpc.testing.Server`, and sign their tokens as orders would, with a key of
+orders made for them; billing gets only its public half:
+
+```zig
+//! Tests of the billing service without a network: `rpc.testing.Server`
+//! runs its handler with the whole chain of `rpc.Server`, the
+//! authenticator first, on a memory transport. The client of a test calls
+//! as orders would, with the token of a user. The tokens come from a
+//! signer with a key of orders made for the tests, and
+//! `jwt.testing.FixedClock` sets the time.
+
+const std = @import("std");
+const jwt = @import("jwt");
+const rpc = @import("rpc");
+const api = @import("billing-api");
+const BillingHandler = @import("BillingHandler.zig");
+const JwtAuthenticator = @import("JwtAuthenticator.zig");
+
+const testing = std.testing;
+
+/// The time of the tests: 2026-10-22, 12:00 UTC, in seconds of Unix time.
+const noon = 1_792_670_400;
+
+/// Billing as its `main` builds it: the public key of orders, a verifier
+/// of the audience billing, and the server with the authenticator.
+const Billing = struct {
+    clock: jwt.testing.FixedClock,
+    /// The private key of orders, which billing never has: the tests sign
+    /// with it, as orders would.
+    orders_key: jwt.SigningKey,
+    /// The public key of orders, as billing reads it from its settings.
+    keys: [1]jwt.Key,
+    verifier: jwt.Verifier,
+    authenticator: JwtAuthenticator,
+    handler: BillingHandler,
+    server: rpc.testing.Server,
+    client: rpc.Client,
+
+    /// Starts billing; `b` stays where it is until `stop`.
+    fn start(b: *Billing) !void {
+        b.clock = try .init(testing.io, noon);
+        errdefer b.clock.deinit();
+        const io = b.clock.io();
+        b.orders_key = try .generate(io, .EdDSA, .{ .id = "2026-10" });
+        errdefer b.orders_key.deinit();
+        b.keys = .{b.orders_key.verificationKey()};
+        try b.useKeys(&b.keys);
+        b.authenticator = .{ .verifier = &b.verifier };
+        b.handler = .{};
+        b.server = try .init(testing.allocator, io, .{ .handlers = .{&b.handler}, .authenticator = &b.authenticator });
+        errdefer b.server.deinit();
+        b.client = try b.server.client(.{});
+    }
+
+    fn stop(b: *Billing) void {
+        b.client.deinit();
+        b.server.deinit();
+        b.keys[0].deinit();
+        b.orders_key.deinit();
+        b.clock.deinit();
+    }
+
+    /// The public keys of orders that billing takes, as its settings list
+    /// them after a restart.
+    fn useKeys(b: *Billing, keys: []const jwt.Key) !void {
+        b.verifier = try .init(.{ .keys = keys, .issuer = "orders", .audiences = &.{"billing"} });
+    }
+
+    /// A token of orders for user-7, signed with `key` for `audiences`;
+    /// the caller frees it.
+    fn tokenOf(b: *Billing, key: *const jwt.SigningKey, audiences: []const []const u8) ![]u8 {
+        const signer: jwt.Signer = try .init(key, .{ .issuer = "orders", .audiences = audiences });
+        return signer.sign(JwtAuthenticator.Claims, b.clock.io(), testing.allocator, &.{ .roles = &.{"buyer"} }, .{ .subject = "user-7" });
+    }
+
+    /// billing.v1.charge of order 42, with `credentials`.
+    fn charge(b: *Billing, credentials: rpc.Credentials) !rpc.Client.Result(api.Charge) {
+        return b.client.call(b.clock.io(), .root, api.BillingApi.charge, .{ .order_id = 42, .amount_cents = 1250 }, .{ .credentials = credentials });
+    }
+};
+
+test "billing takes the token of orders" {
+    var b: Billing = undefined;
+    try b.start();
+    defer b.stop();
+    const token = try b.tokenOf(&b.orders_key, &.{ "orders", "billing" });
+    defer testing.allocator.free(token);
+
+    var result = try b.charge(.{ .bearer = token });
+    defer result.deinit();
+    // The handler charged the user of the token.
+    try testing.expectEqualStrings("user-7", result.outcome.ok.customer);
+    try testing.expectEqual(42, result.outcome.ok.order_id);
+}
+
+test "a token without billing among its audiences is unauthenticated" {
+    var b: Billing = undefined;
+    try b.start();
+    defer b.stop();
+    const token = try b.tokenOf(&b.orders_key, &.{"orders"});
+    defer testing.allocator.free(token);
+
+    var result = try b.charge(.{ .bearer = token });
+    defer result.deinit();
+    try testing.expectEqual(.unauthenticated, result.outcome.failure.code);
+    try testing.expectEqualStrings("Invalid credentials", result.outcome.failure.message);
+}
+
+test "no token is anonymous, and a method that needs a user refuses it" {
+    var b: Billing = undefined;
+    try b.start();
+    defer b.stop();
+
+    var result = try b.charge(.none);
+    defer result.deinit();
+    try testing.expectEqual(.unauthenticated, result.outcome.failure.code);
+    try testing.expectEqualStrings("Authentication required", result.outcome.failure.message);
+}
+
+test "an expired token is unauthenticated" {
+    var b: Billing = undefined;
+    try b.start();
+    defer b.stop();
+    const token = try b.tokenOf(&b.orders_key, &.{ "orders", "billing" });
+    defer testing.allocator.free(token);
+
+    // 15 minutes of its life and the 60 seconds of leeway have passed.
+    b.clock.set(noon + 16 * 60);
+    var result = try b.charge(.{ .bearer = token });
+    defer result.deinit();
+    try testing.expectEqual(.unauthenticated, result.outcome.failure.code);
+}
+
+test "while the key of orders changes, billing takes the tokens of both keys" {
+    var b: Billing = undefined;
+    try b.start();
+    defer b.stop();
+    var new_key: jwt.SigningKey = try .generate(b.clock.io(), .EdDSA, .{ .id = "2026-11" });
+    defer new_key.deinit();
+    const old_token = try b.tokenOf(&b.orders_key, &.{ "orders", "billing" });
+    defer testing.allocator.free(old_token);
+    const new_token = try b.tokenOf(&new_key, &.{ "orders", "billing" });
+    defer testing.allocator.free(new_token);
+
+    // Step 1: billing restarts with the old key and the new one, and
+    // takes the tokens of both, each by its kid.
+    const keys = [_]jwt.Key{ b.orders_key.verificationKey(), new_key.verificationKey() };
+    try b.useKeys(&keys);
+    for ([_][]const u8{ old_token, new_token }) |token| {
+        var result = try b.charge(.{ .bearer = token });
+        defer result.deinit();
+        try testing.expectEqualStrings("user-7", result.outcome.ok.customer);
+    }
+
+    // Step 3: the old key is gone, and a token it signed is refused.
+    try b.useKeys(keys[1..]);
+    var result = try b.charge(.{ .bearer = old_token });
+    defer result.deinit();
+    try testing.expectEqual(.unauthenticated, result.outcome.failure.code);
+}
+```
 
 ## Tests
 

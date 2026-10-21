@@ -1549,6 +1549,19 @@ fn addJwtGuide(
     tsan: bool,
 ) void {
     const dir = "src/jwt/examples/";
+    // The package of the contract of billing, which its clients would
+    // fetch, with the test of its rules.
+    const billing_api = b.createModule(.{
+        .root_source_file = b.path(dir ++ "billing_api.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+        .imports = &.{
+            .{ .name = "rpc", .module = m.rpc },
+            .{ .name = "validator", .module = m.validator },
+        },
+    });
+    test_jwt.dependOn(&addRun(b, b.addTest(.{ .name = "jwt-guide-billing_api", .root_module = billing_api }), tsan).step);
     const imports: []const std.Build.Module.Import = &.{
         .{ .name = "core", .module = m.core },
         .{ .name = "validator", .module = m.validator },
@@ -1557,6 +1570,7 @@ fn addJwtGuide(
         .{ .name = "http", .module = m.http },
         .{ .name = "rpc", .module = m.rpc },
         .{ .name = "jwt", .module = m.jwt },
+        .{ .name = "billing-api", .module = billing_api },
     };
     for (jwt_guide.tests) |name| {
         const tests = b.addTest(.{
