@@ -471,7 +471,7 @@ pub fn parameter(comptime Dto: type, comptime field: []const u8, comptime source
         const Item = listItem(Value) orelse Value;
         if (!isScalar(Item)) @compileError("zefir.openapi: " ++ where ++ ": " ++ @typeName(F) ++ " is not a parameter: a parameter is an integer, a float, bool, an enum or []const u8, alone, as ?T or as []const T");
         var p = Registry.typeParts(null, Value, .input, false, where, &.{});
-        p = withRules(p, rulesOf(Dto, field));
+        p = withRules(p, rulesAs(Dto, field, Value));
         const attrs = fieldAttrs(Dto, field);
         if (attrs.defaultValue(F)) |default| {
             if (@typeInfo(F) != .optional or default != null) p.default = example.value(F, default, false, where);
@@ -527,9 +527,15 @@ const Transform = @TypeOf(v.trim);
 /// The schemas of the transforms and rules of the field `name` of `T`, in
 /// the order of its entry in `field_rules`, as `v.schemaOf` gives them.
 fn rulesOf(comptime T: type, comptime name: []const u8) []const v.RuleSchema {
+    return rulesAs(T, name, @FieldType(T, name));
+}
+
+/// The schemas of the rules of the field `name` of `T` for values of `F`:
+/// a parameter is never null, so the rules of a `?U` one are those of `U`,
+/// without `null` in their `enum`.
+fn rulesAs(comptime T: type, comptime name: []const u8, comptime F: type) []const v.RuleSchema {
     if (@typeInfo(T) != .@"struct" or !@hasDecl(T, "field_rules")) return &.{};
     if (!@hasField(@TypeOf(T.field_rules), name)) return &.{};
-    const F = @FieldType(T, name);
     const entry = @field(T.field_rules, name);
     const E = @TypeOf(entry);
     if (E == v.Rule or E == Transform) return &.{v.schemaOf(entry, F)};

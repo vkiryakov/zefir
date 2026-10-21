@@ -537,7 +537,8 @@ const ListQuery = struct {
     tags: []const []const u8 = &.{},
     page: u32 = 1,
     sort: ?Priority = null,
-    pub const field_rules = .{ .tags = v.each(v.maxLength(30)), .page = v.positive };
+    mode: ?[]const u8 = null,
+    pub const field_rules = .{ .tags = v.each(v.maxLength(30)), .page = v.positive, .sort = v.oneOf(.{ .low, .high }), .mode = v.equals("fast") };
     pub const openapi: Doc(@This()) = .{ .fields = .{ .page = .{ .examples = &.{ 1, 2 }, .deprecated = true } } };
 };
 const KeyHeaders = struct {
@@ -551,8 +552,10 @@ test "parameter: description, deprecated, example and the schema of a field, nev
     try expectJson("{\"description\":\"The id of the todo.\",\"example\":1,\"schema\":{\"type\":\"integer\",\"format\":\"uint64\",\"minimum\":1}}", comptime schema.parameter(TodoIdPath, "id", .path));
     try expectJson("{\"schema\":{\"type\":\"array\",\"default\":[],\"items\":{\"type\":\"string\",\"maxLength\":30}}}", comptime schema.parameter(ListQuery, "tags", .query));
     try expectJson("{\"deprecated\":true,\"schema\":{\"type\":\"integer\",\"format\":\"uint32\",\"minimum\":1,\"maximum\":4294967295,\"default\":1,\"examples\":[1,2]}}", comptime schema.parameter(ListQuery, "page", .query));
-    // An enum inline; a ?T has no null and no default of null.
-    try expectJson("{\"schema\":{\"type\":\"string\",\"enum\":[\"low\",\"normal\",\"high\"]}}", comptime schema.parameter(ListQuery, "sort", .query));
+    // An enum inline; a ?T has no null and no default of null, and its
+    // rules take no null either: a parameter is absent, never null.
+    try expectJson("{\"schema\":{\"type\":\"string\",\"enum\":[\"low\",\"high\"]}}", comptime schema.parameter(ListQuery, "sort", .query));
+    try expectJson("{\"schema\":{\"type\":\"string\",\"const\":\"fast\"}}", comptime schema.parameter(ListQuery, "mode", .query));
     try expectJson(comptime "{\"description\":\"Send the same key to get the same todo. Leading and trailing spaces are removed.\",\"schema\":{\"type\":\"string\"," ++
         keywordsOf(v.notBlank, ?[]const u8) ++ ",\"maxLength\":64}}", comptime schema.parameter(KeyHeaders, "idempotency_key", .headers));
     // A list in a header: a line of the header an item.
