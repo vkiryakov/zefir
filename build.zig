@@ -5,6 +5,7 @@ const rpc_guide = @import("src/rpc/examples/cases.zig");
 const http_cases = @import("src/http/tests/cases.zig");
 const http_guide = @import("src/http/examples/cases.zig");
 const jwt_cases = @import("src/jwt/tests/cases.zig");
+const jwt_guide = @import("src/jwt/examples/cases.zig");
 const mongo_guide = @import("src/mongo/examples/cases.zig");
 
 pub fn build(b: *std.Build) void {
@@ -210,6 +211,17 @@ pub fn build(b: *std.Build) void {
     test_http.dependOn(&addRun(b, http_examples, tsan).step);
     addHttpGuide(b, test_http, .{ .core = core, .validator = validator, .confy = confy, .log = log, .http = http }, target, optimize, tsan);
     addJwtCompileChecks(b, test_jwt, jwt, validator, target, optimize);
+    // The examples of the zefir-jwt guide: a service of zefir-http that
+    // signs its users in, and one of zefir-rpc that checks their tokens.
+    addJwtGuide(b, test_jwt, .{
+        .core = core,
+        .validator = validator,
+        .confy = confy,
+        .log = log,
+        .http = http,
+        .rpc = rpc,
+        .jwt = jwt,
+    }, target, optimize, tsan);
 
     // `zig build fuzz-http` runs the fuzz test of zefir-http's HTTP/1.1
     // parser on its corpus, once, like `zig build test-http` does; with
@@ -1508,6 +1520,87 @@ fn addHttpCompileChecks(
         });
         test_step.dependOn(&app.step);
     }
+}
+
+/// The modules that the examples of the jwt guide import.
+const JwtGuideModules = struct {
+    core: *std.Build.Module,
+    validator: *std.Build.Module,
+    confy: *std.Build.Module,
+    log: *std.Build.Module,
+    http: *std.Build.Module,
+    rpc: *std.Build.Module,
+    jwt: *std.Build.Module,
+};
+
+/// The examples of src/jwt/examples/README.md, the guide of zefir-jwt, as
+/// cases.zig there lists them: the tests of the services, on the backend of
+/// zefir-http and the server of zefir-rpc in memory, and the programs, each
+/// run with its settings in the environment through example_main.zig,
+/// which exits with code 3 on a panic instead of aborting and with code 4
+/// past its time limit; it must exit with 0. readme_test.zig then checks
+/// that README.md shows every file as it is and every run as it printed.
+fn addJwtGuide(
+    b: *std.Build,
+    test_jwt: *std.Build.Step,
+    m: JwtGuideModules,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+    tsan: bool,
+) void {
+    const dir = "src/jwt/examples/";
+    const imports: []const std.Build.Module.Import = &.{
+        .{ .name = "core", .module = m.core },
+        .{ .name = "validator", .module = m.validator },
+        .{ .name = "confy", .module = m.confy },
+        .{ .name = "log", .module = m.log },
+        .{ .name = "http", .module = m.http },
+        .{ .name = "rpc", .module = m.rpc },
+        .{ .name = "jwt", .module = m.jwt },
+    };
+    for (jwt_guide.tests) |name| {
+        const tests = b.addTest(.{
+            .name = b.fmt("jwt-guide-{s}", .{name}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(b.fmt(dir ++ "{s}.zig", .{name})),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+                .imports = imports,
+            }),
+        });
+        test_jwt.dependOn(&addRun(b, tests, tsan).step);
+    }
+
+    const readme = b.createModule(.{
+        .root_source_file = b.path(dir ++ "readme_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+    });
+    for (jwt_guide.programs) |program| {
+        const exe = b.addExecutable(.{
+            .name = b.fmt("jwt-guide-{s}", .{program.name}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(dir ++ "example_main.zig"),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+                .imports = &.{.{ .name = "example", .module = b.createModule(.{
+                    .root_source_file = b.path(b.fmt(dir ++ "{s}.zig", .{program.name})),
+                    .target = target,
+                    .optimize = optimize,
+                    .sanitize_thread = tsan,
+                    .imports = imports,
+                }) }},
+            }),
+        });
+        const run = addRun(b, exe, tsan);
+        for (program.env) |setting| run.setEnvironmentVariable(setting.name, setting.value);
+        run.expectExitCode(0);
+        readme.addAnonymousImport(b.fmt("{s}.out", .{program.name}), .{ .root_source_file = run.captureStdOut(.{}) });
+    }
+    test_jwt.dependOn(&addRun(b, b.addTest(.{ .name = "jwt-guide-readme", .root_module = readme }), tsan).step);
 }
 
 /// The compile checks of zefir-jwt, from the lists in
