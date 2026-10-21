@@ -14,9 +14,10 @@ pub const ApiError = struct {
 pub const AppErrors = struct {
     pub fn mapError(err: anyerror) http.ErrorResponse(ApiError) {
         return switch (err) {
-            // jwt.Signer refuses only claims that no token can hold, such
-            // as a string that is not UTF-8: a mistake of the program.
-            error.InvalidClaims, error.TokenTooLarge => .{ .status = 500, .body = .{ .code = "internal", .message = "Internal Server Error" } },
+            // jwt.Signer refuses only what no token can hold, such as a
+            // string that is not UTF-8, and a key that deinit wiped too
+            // early: mistakes of the program.
+            error.InvalidClaims, error.TokenTooLarge, error.BadSignature => .{ .status = 500, .body = .{ .code = "internal", .message = "Internal Server Error" } },
             else => .fallback(err, .{ .code = http.defaultCode(err), .message = http.defaultTitle(err) }),
         };
     }

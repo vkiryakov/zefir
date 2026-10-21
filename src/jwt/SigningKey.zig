@@ -45,10 +45,12 @@ pub const zefir_sensitive = true;
 /// least as long as the hash: 32, 48 or 64 bytes. The key keeps a copy of
 /// what it needs, so the settings may be freed.
 pub fn hmac(algorithm: Algorithm, secret: []const u8, options: KeyOptions) KeyError!SigningKey {
+    // The id first: nothing may fail once the secret is in the result.
+    const key_id: KeyId = try .init(options.id);
     return .{
         .algorithm = algorithm,
+        .key_id = key_id,
         .material = .{ .hmac = try .init(algorithm, secret) },
-        .key_id = try .init(options.id),
     };
 }
 

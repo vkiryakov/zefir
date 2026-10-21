@@ -316,7 +316,7 @@ test "5.8: every key file loads" {
             var signing = try loadPrivate(alg, file, .{});
             defer signing.deinit();
             var out: [crypto.max_signature_bytes]u8 = undefined;
-            const signature = crypto.sign(&signing, testing.io, "abc", &out);
+            const signature = try crypto.sign(&signing, testing.io, "abc", &out);
             for (verifiers[0..count]) |*key| try crypto.verify(key, "abc", signature);
         }
     }

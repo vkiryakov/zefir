@@ -41,10 +41,12 @@ pub const zefir_sensitive = true;
 /// least as long as the hash: 32, 48 or 64 bytes. The key keeps a copy of
 /// what it needs, so the settings may be freed.
 pub fn hmac(algorithm: Algorithm, secret: []const u8, options: KeyOptions) KeyError!Key {
+    // The id first: nothing may fail once the secret is in the result.
+    const key_id: KeyId = try .init(options.id);
     return .{
         .algorithm = algorithm,
+        .key_id = key_id,
         .material = .{ .hmac = try .init(algorithm, secret) },
-        .key_id = try .init(options.id),
     };
 }
 
@@ -98,6 +100,7 @@ pub fn deinit(key: *Key) void {
 
 const testing = std.testing;
 const SigningKey = @import("SigningKey.zig");
+const keys = @import("testdata/keys.zig");
 
 const secret_64: *const [64]u8 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -117,6 +120,30 @@ test "hmac takes only the HS algorithms" {
         for ([_]Algorithm{ .ES256, .ES384, .EdDSA }) |alg| {
             try testing.expectError(error.KeyAlgorithmMismatch, K.hmac(alg, secret_64, .{}));
         }
+    }
+}
+
+test "the text of a key file is no HMAC secret" {
+    const texts = [_][]const u8{
+        keys.get("ed25519.pub.pem").bytes,
+        keys.get("p384.pk8.pem").bytes,
+        // A PEM in the settings may come after other text.
+        "key: " ++ comptime keys.get("p256.sec1.pem").bytes,
+    };
+    for (texts) |text| {
+        try testing.expectError(error.KeyAlgorithmMismatch, Key.hmac(.HS256, text, .{}));
+        try testing.expectError(error.KeyAlgorithmMismatch, SigningKey.hmac(.HS512, text, .{ .id = "k1" }));
+    }
+}
+
+test "a bad key id leaves no secret in the result" {
+    // The secret of no other test, so that nothing else could have left it
+    // in the memory of the result.
+    const secret = "LEFTOVER-LEFTOVER-LEFTOVER-LEFTOVER";
+    inline for (.{ Key, SigningKey }) |K| {
+        const result = K.hmac(.HS256, secret, .{ .id = "" });
+        try testing.expectError(error.InvalidKeyId, result);
+        try testing.expect(std.mem.find(u8, std.mem.asBytes(&result), "LEFTOVER") == null);
     }
 }
 

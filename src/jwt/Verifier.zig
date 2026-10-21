@@ -19,6 +19,7 @@ const root = @import("root.zig");
 const claims = @import("claims.zig");
 const header = @import("header.zig");
 const jws = @import("jws.zig");
+const crypto = @import("crypto.zig");
 const base64url = @import("base64url.zig");
 const Key = @import("Key.zig");
 const SigningKey = @import("SigningKey.zig");
@@ -48,13 +49,14 @@ pub const Options = struct {
 };
 
 /// A verifier of `options`, whose keys and strings it borrows: they live
-/// as long as the verifier and do not move. `InvalidOptions`: no keys, two
-/// keys with one id, a key without an id next to another one, an empty
-/// issuer, no audiences or token types or an empty one among them, or a
-/// leeway outside 0 to 300 seconds.
+/// as long as the verifier and do not move. `InvalidOptions`: no keys, a
+/// key that `deinit` wiped, two keys with one id, a key without an id next
+/// to another one, an empty issuer, no audiences or token types or an empty
+/// one among them, or a leeway outside 0 to 300 seconds.
 pub fn init(options: Options) error{InvalidOptions}!Verifier {
     if (options.keys.len == 0) return error.InvalidOptions;
     for (options.keys, 0..) |*key, i| {
+        if (!crypto.holdsKey(key)) return error.InvalidOptions;
         const id = key.id() orelse {
             if (options.keys.len > 1) return error.InvalidOptions;
             continue;
@@ -209,6 +211,20 @@ test "Verifier.init refuses options it could never verify with" {
     }) |options| {
         try testing.expectError(error.InvalidOptions, Verifier.init(options));
     }
+}
+
+test "a zero-filled Key is refused by Verifier.init" {
+    // Zeroes read as an HS256 key with an empty secret, whose MAC anybody
+    // can compute.
+    var zero: Key = undefined;
+    @memset(std.mem.asBytes(&zero), 0);
+    try testing.expectError(error.InvalidOptions, Verifier.init(.{ .keys = &.{zero}, .issuer = "orders", .audiences = &.{"orders"} }));
+    // A key wiped by deinit is such a key too.
+    var signing: SigningKey = try .generate(testing.io, .ES256, .{});
+    defer signing.deinit();
+    var wiped = signing.verificationKey();
+    wiped.deinit();
+    try testing.expectError(error.InvalidOptions, Verifier.init(.{ .keys = &.{wiped}, .issuer = "orders", .audiences = &.{"orders"} }));
 }
 
 test "5.9: keys rotate by kid" {

@@ -18,6 +18,7 @@ const header = @import("header.zig");
 const jws = @import("jws.zig");
 const base64url = @import("base64url.zig");
 const compact = @import("compact.zig");
+const crypto = @import("crypto.zig");
 const Key = @import("Key.zig");
 const SigningKey = @import("SigningKey.zig");
 const Verifier = @import("Verifier.zig");
@@ -42,10 +43,12 @@ pub const Options = struct {
 };
 
 /// A signer with `key` and `options`, which it borrows: they live as long
-/// as the signer and do not change. `InvalidOptions`: an empty issuer or
-/// token type ("application/" alone too, which no verifier takes), no
-/// audiences or an empty one among them, or a lifetime under one second.
+/// as the signer and do not change. `InvalidOptions`: a key that `deinit`
+/// wiped, an empty issuer or token type ("application/" alone too, which no
+/// verifier takes), no audiences or an empty one among them, or a lifetime
+/// under one second.
 pub fn init(key: *const SigningKey, options: Options) error{InvalidOptions}!Signer {
+    if (!crypto.holdsKey(key)) return error.InvalidOptions;
     if (options.issuer.len == 0 or header.sameType(options.token_type, "")) return error.InvalidOptions;
     if (options.audiences.len == 0) return error.InvalidOptions;
     for (options.audiences) |audience| {
@@ -63,7 +66,8 @@ pub fn init(key: *const SigningKey, options: Options) error{InvalidOptions}!Sign
 /// not UTF-8, a float that is not finite, a lifetime under one second, or
 /// a time that a NumericDate cannot hold (before 1970 or after 9999).
 /// `TokenTooLarge`: the token would be longer than `max_token_bytes`,
-/// which no verifier takes.
+/// which no verifier takes. `BadSignature`: the key can make no signature
+/// that verifies, since `deinit` wiped it while the signer still used it.
 pub fn sign(
     signer: *const Signer,
     comptime Claims: type,
@@ -404,6 +408,19 @@ test "the longest token sign issues is 8192 bytes, and verify accepts it" {
     // Far too much: the payload alone is over max_token_bytes.
     const huge: [3 * root.max_token_bytes]u8 = @splat('y');
     try testing.expectError(error.TokenTooLarge, signer.sign(Filler, clock.io(), testing.allocator, &.{ .s = &huge }, .{}));
+}
+
+test "a wiped signing key signs nothing" {
+    var key: SigningKey = try .generate(testing.io, .ES256, .{ .id = "k1" });
+    const signer: Signer = try .init(&key, .{ .issuer = "orders", .audiences = &.{"orders"} });
+    // Against the rule of deinit, the signer still holds the key: zeroes,
+    // which read as HS256 with an empty secret.
+    key.deinit();
+    try testing.expectError(error.BadSignature, signer.sign(void, testing.io, testing.allocator, &nothing, .{}));
+    try testing.expectError(error.InvalidOptions, Signer.init(&key, .{ .issuer = "orders", .audiences = &.{"orders"} }));
+    var zero: SigningKey = undefined;
+    @memset(std.mem.asBytes(&zero), 0);
+    try testing.expectError(error.InvalidOptions, Signer.init(&zero, .{ .issuer = "orders", .audiences = &.{"orders"} }));
 }
 
 test "Signer.init refuses options it could not sign with" {

@@ -72,8 +72,9 @@ pub fn pickKey(keys: []const Key, head: Header, details: *Details) VerifyError!*
 
 /// Signs `header_json` and `payload_json` with `key` into a compact token
 /// in memory of `allocator`, which the caller frees. `TokenTooLarge`: the
-/// token would be longer than `max_token_bytes`.
-pub fn seal(allocator: std.mem.Allocator, io: std.Io, key: *const SigningKey, header_json: []const u8, payload_json: []const u8) error{ TokenTooLarge, OutOfMemory }![]u8 {
+/// token would be longer than `max_token_bytes`. `BadSignature`: the key
+/// holds no key, as one that `deinit` wiped.
+pub fn seal(allocator: std.mem.Allocator, io: std.Io, key: *const SigningKey, header_json: []const u8, payload_json: []const u8) error{ TokenTooLarge, BadSignature, OutOfMemory }![]u8 {
     if (header_json.len > root.max_token_bytes or payload_json.len > root.max_token_bytes) return error.TokenTooLarge;
     const header_len = base64url.encodedLen(header_json.len);
     const signing_len = header_len + 1 + base64url.encodedLen(payload_json.len);
@@ -81,12 +82,13 @@ pub fn seal(allocator: std.mem.Allocator, io: std.Io, key: *const SigningKey, he
     if (token_len > root.max_token_bytes) return error.TokenTooLarge;
 
     const token = try allocator.alloc(u8, token_len);
+    errdefer allocator.free(token);
     _ = base64url.encode(token[0..header_len], header_json);
     token[header_len] = '.';
     _ = base64url.encode(token[header_len + 1 .. signing_len], payload_json);
     token[signing_len] = '.';
     var signature: [crypto.max_signature_bytes]u8 = undefined;
-    _ = base64url.encode(token[signing_len + 1 ..], crypto.sign(key, io, token[0..signing_len], &signature));
+    _ = base64url.encode(token[signing_len + 1 ..], try crypto.sign(key, io, token[0..signing_len], &signature));
     return token;
 }
 

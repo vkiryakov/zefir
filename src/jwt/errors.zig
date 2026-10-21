@@ -71,6 +71,9 @@ pub const SignError = error{
     /// The token would be longer than `max_token_bytes`: zefir issues no
     /// token that it would refuse itself.
     TokenTooLarge,
+    /// The key can make no signature that verifies: `deinit` wiped it while
+    /// the signer still used it.
+    BadSignature,
     OutOfMemory,
 };
 
@@ -121,7 +124,7 @@ fn names(comptime E: type) usize {
 test "the error sets hold one name per reason" {
     try testing.expectEqual(5, names(KeyError));
     try testing.expectEqual(16, names(VerifyError));
-    try testing.expectEqual(3, names(SignError));
+    try testing.expectEqual(4, names(SignError));
     // What sign refuses, verify would refuse too.
     const refused: VerifyError = @as(SignError, error.InvalidClaims);
     try testing.expectEqual(error.InvalidClaims, refused);

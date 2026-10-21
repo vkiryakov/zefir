@@ -29,8 +29,10 @@ pub const HmacSecret = struct {
     len: u8,
 
     /// The secret of `alg`. `WeakKey`: shorter than the hash (RFC 7518
-    /// §3.2). `KeyAlgorithmMismatch`: `alg` takes no secret.
+    /// §3.2). `KeyAlgorithmMismatch`: `alg` takes no secret, or `secret` is
+    /// the text of a key file, a key of ES256, ES384 or EdDSA for `fromPem`.
     pub fn init(alg: Algorithm, secret: []const u8) KeyError!HmacSecret {
+        if (std.mem.find(u8, secret, "-----BEGIN") != null) return error.KeyAlgorithmMismatch;
         if (secret.len < algorithm.minSecretBytes(alg)) return error.WeakKey;
         return switch (alg) {
             .HS256 => store(sha2.Sha256, secret),
@@ -57,8 +59,17 @@ pub const HmacSecret = struct {
     }
 };
 
+/// Whether `key`, a `Key` or a `SigningKey`, holds a key. One that `deinit`
+/// wiped, or zeroed memory, reads as HS256 with an empty secret, whose MAC
+/// anybody can compute; `HmacSecret.init` never keeps a secret that short.
+pub fn holdsKey(key: anytype) bool {
+    if (!algorithm.isHmac(key.algorithm)) return true;
+    return key.material.hmac.len >= algorithm.minSecretBytes(key.algorithm);
+}
+
 /// Checks `signature` over `signing_input` by the algorithm of `key`.
-/// `BadSignature`: the signature has the wrong length or does not verify.
+/// `BadSignature`: the signature has the wrong length or does not verify,
+/// or the key holds no key (`holdsKey`).
 pub fn verify(key: *const Key, signing_input: []const u8, signature: []const u8) error{BadSignature}!void {
     return switch (key.algorithm) {
         .HS256 => verifyMac(hmac.HmacSha256, key.material.hmac.slice(), signing_input, signature),
@@ -72,12 +83,12 @@ pub fn verify(key: *const Key, signing_input: []const u8, signature: []const u8)
 
 /// Signs `signing_input` with `key` into `out` and returns the signature,
 /// `signatureBytes(key.algorithm)` bytes of it. `io` gives the random
-/// noise of ECDSA.
-pub fn sign(key: *const SigningKey, io: std.Io, signing_input: []const u8, out: *[max_signature_bytes]u8) []const u8 {
+/// noise of ECDSA. `BadSignature`: the key holds no key (`holdsKey`).
+pub fn sign(key: *const SigningKey, io: std.Io, signing_input: []const u8, out: *[max_signature_bytes]u8) error{BadSignature}![]const u8 {
     return switch (key.algorithm) {
-        .HS256 => mac(hmac.HmacSha256, key.material.hmac.slice(), signing_input, out),
-        .HS384 => mac(hmac.HmacSha384, key.material.hmac.slice(), signing_input, out),
-        .HS512 => mac(hmac.HmacSha512, key.material.hmac.slice(), signing_input, out),
+        .HS256 => signMac(hmac.HmacSha256, key.material.hmac.slice(), signing_input, out),
+        .HS384 => signMac(hmac.HmacSha384, key.material.hmac.slice(), signing_input, out),
+        .HS512 => signMac(hmac.HmacSha512, key.material.hmac.slice(), signing_input, out),
         .ES256 => signEcdsa(EcdsaP256Sha256, &key.material.p256, io, signing_input, out),
         .ES384 => signEcdsa(EcdsaP384Sha384, &key.material.p384, io, signing_input, out),
         .EdDSA => signEd25519(&key.material.ed25519, io, signing_input, out),
@@ -143,7 +154,16 @@ fn mac(comptime H: type, secret: []const u8, message: []const u8, out: *[max_sig
     return out[0..H.mac_length];
 }
 
+/// The shortest secret is as long as the MAC (RFC 7518 §3.2): a shorter one
+/// is that of a wiped key, and signs nothing, as it verifies nothing.
+fn signMac(comptime H: type, secret: []const u8, message: []const u8, out: *[max_signature_bytes]u8) error{BadSignature}![]const u8 {
+    if (secret.len < H.mac_length) return error.BadSignature;
+    return mac(H, secret, message, out);
+}
+
 fn verifyMac(comptime H: type, secret: []const u8, message: []const u8, signature: []const u8) error{BadSignature}!void {
+    // A wiped key: the MAC of an empty secret is anybody's.
+    if (secret.len < H.mac_length) return error.BadSignature;
     if (signature.len != H.mac_length) return error.BadSignature;
     // The right MAC of the message: what a forger looks for.
     var expected: [max_signature_bytes]u8 = undefined;
@@ -164,7 +184,7 @@ fn expectStdMac(comptime H: type, alg: Algorithm, secret: []const u8) !void {
     var expected: [H.mac_length]u8 = undefined;
     H.create(&expected, "abc", secret);
     var out: [max_signature_bytes]u8 = undefined;
-    try testing.expectEqualSlices(u8, &expected, sign(&key, testing.io, "abc", &out));
+    try testing.expectEqualSlices(u8, &expected, try sign(&key, testing.io, "abc", &out));
 }
 
 test "HMAC agrees with std for secrets of any length" {
@@ -206,6 +226,7 @@ test "verify takes only the right MAC" {
 
 const Signer = @import("Signer.zig");
 const Verifier = @import("Verifier.zig");
+const base64url = @import("base64url.zig");
 const FixedClock = @import("testing.zig").FixedClock;
 const Details = @import("errors.zig").Details;
 const keys = @import("testdata/keys.zig");
@@ -220,8 +241,8 @@ test "ECDSA signatures carry noise, EdDSA ones do not" {
         defer signing.deinit();
         var key = signing.verificationKey();
         defer key.deinit();
-        const a = sign(&signing, testing.io, "header.payload", &first);
-        const b = sign(&signing, testing.io, "header.payload", &second);
+        const a = try sign(&signing, testing.io, "header.payload", &first);
+        const b = try sign(&signing, testing.io, "header.payload", &second);
         try testing.expectEqual(algorithm.signatureBytes(alg), a.len);
         try verify(&key, "header.payload", a);
         try verify(&key, "header.payload", b);
@@ -303,6 +324,43 @@ test "HS256 under the kid of an EdDSA key, MACed with its public key, is Algorit
     }
 }
 
+/// `{"alg":"HS256","typ":"JWT"}` and claims that pass until 9999, MACed
+/// with `secret`, in `out`: a token that only the key of `secret` takes.
+fn macedToken(out: []u8, secret: []const u8) []const u8 {
+    const head = "{\"alg\":\"HS256\",\"typ\":\"JWT\"}";
+    const claims = "{\"iss\":\"orders\",\"sub\":\"admin\",\"aud\":\"orders\",\"exp\":253402300799}";
+    var len = base64url.encode(out, head).len;
+    out[len] = '.';
+    len += 1;
+    len += base64url.encode(out[len..], claims).len;
+    var tag: [32]u8 = undefined;
+    HmacSha256.create(&tag, out[0..len], secret);
+    out[len] = '.';
+    len += 1;
+    len += base64url.encode(out[len..], &tag).len;
+    return out[0..len];
+}
+
+test "a wiped key verifies nothing" {
+    // deinit zeroes a key, and zeroes read as HS256 with an empty secret,
+    // whose MAC anybody can compute.
+    var signing: SigningKey = try .generate(testing.io, .EdDSA, .{});
+    defer signing.deinit();
+    var own = [_]Key{signing.verificationKey()};
+    const verifier: Verifier = try .init(.{ .keys = &own, .issuer = "orders", .audiences = &.{"orders"} });
+    // Against the rule of deinit, the verifier still holds the key.
+    own[0].deinit();
+    try testing.expectEqual(.HS256, own[0].algorithm);
+
+    var empty_tag: [32]u8 = undefined;
+    HmacSha256.create(&empty_tag, "abc", "");
+    try testing.expectError(error.BadSignature, verify(&own[0], "abc", &empty_tag));
+    var buf: [256]u8 = undefined;
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    try testing.expectError(error.BadSignature, verifier.verify(void, testing.io, arena_state.allocator(), macedToken(&buf, ""), .{}));
+}
+
 test "the verification key of an HMAC signing key verifies what it signs" {
     inline for (.{ .HS256, .HS384, .HS512 }) |alg| {
         var signing: SigningKey = try .hmac(alg, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", .{ .id = "k1" });
@@ -311,7 +369,7 @@ test "the verification key of an HMAC signing key verifies what it signs" {
         defer key.deinit();
         try testing.expectEqualStrings(signing.id().?, key.id().?);
         var out: [max_signature_bytes]u8 = undefined;
-        const signature = sign(&signing, testing.io, "header.payload", &out);
+        const signature = try sign(&signing, testing.io, "header.payload", &out);
         try testing.expectEqual(algorithm.signatureBytes(alg), signature.len);
         try verify(&key, "header.payload", signature);
     }

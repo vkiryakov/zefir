@@ -92,7 +92,7 @@ test "RFC 7520 §4.4: the HS256 signature verifies, and signing its input gives 
     try base64url.decode(&signature, parts.signature);
     try crypto.verify(&key, parts.signing_input, &signature);
     var out: [crypto.max_signature_bytes]u8 = undefined;
-    try testing.expectEqualSlices(u8, &signature, crypto.sign(&signing_key, testing.io, parts.signing_input, &out));
+    try testing.expectEqualSlices(u8, &signature, try crypto.sign(&signing_key, testing.io, parts.signing_input, &out));
 
     // The header has no "typ", which zefir requires of every token.
     var keys = [_]Key{signing_key.verificationKey()};
@@ -201,7 +201,7 @@ test "RFC 8037 A.1 and A.2: the public key comes from the seed" {
     try testing.expectEqualSlices(u8, &key.material.ed25519.toBytes(), &from_seed.material.ed25519.toBytes());
 
     var out: [crypto.max_signature_bytes]u8 = undefined;
-    const signature = crypto.sign(&signing, testing.io, "abc", &out);
+    const signature = try crypto.sign(&signing, testing.io, "abc", &out);
     try crypto.verify(&from_seed, "abc", signature);
     try crypto.verify(&key, "abc", signature);
 }
@@ -214,7 +214,7 @@ test "RFC 8037 A.4: signing gives the JWS byte for byte" {
     const parts = try compact.split(rfc8037.token);
 
     var out: [crypto.max_signature_bytes]u8 = undefined;
-    const signature = crypto.sign(&signing, testing.io, parts.signing_input, &out);
+    const signature = try crypto.sign(&signing, testing.io, parts.signing_input, &out);
     var expected: [64]u8 = undefined;
     try testing.expectEqualSlices(u8, try std.fmt.hexToBytes(&expected, rfc8037.signature_hex), signature);
     var text: [86]u8 = undefined;
