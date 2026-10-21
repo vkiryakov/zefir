@@ -9,7 +9,10 @@ const Key = @This();
 const std = @import("std");
 const root = @import("root.zig");
 const crypto = @import("crypto.zig");
+const pem = @import("pem.zig");
+const pkcs = @import("pkcs.zig");
 const KeyId = @import("KeyId.zig");
+const isHmac = @import("algorithm.zig").isHmac;
 
 const Algorithm = root.Algorithm;
 const KeyError = root.KeyError;
@@ -26,6 +29,9 @@ material: Material,
 
 const Material = union {
     hmac: crypto.HmacSecret,
+    p256: std.crypto.sign.ecdsa.EcdsaP256Sha256.PublicKey,
+    p384: std.crypto.sign.ecdsa.EcdsaP384Sha384.PublicKey,
+    ed25519: std.crypto.sign.Ed25519.PublicKey,
 };
 
 /// zefir-log writes a key as "[REDACTED]".
@@ -39,6 +45,35 @@ pub fn hmac(algorithm: Algorithm, secret: []const u8, options: KeyOptions) KeyEr
         .algorithm = algorithm,
         .material = .{ .hmac = try .init(algorithm, secret) },
         .key_id = try .init(options.id),
+    };
+}
+
+/// The public key of ES256 (P-256), ES384 (P-384) or EdDSA (Ed25519) in
+/// the PEM of a "PUBLIC KEY" block, as `openssl pkey -pubout` writes it.
+/// The PEM may come as the settings hold it: with CRLF, indented, or on one
+/// line. `InvalidKey`: no such block, or one that is broken; a private key
+/// is no key here. `UnsupportedKey`: RSA, P-521, Ed448, a certificate and
+/// the rest of what zefir-jwt does not take. `KeyAlgorithmMismatch`: the
+/// key is of another algorithm than `algorithm`, or `algorithm` is HMAC.
+pub fn fromPem(algorithm: Algorithm, text: []const u8, options: KeyOptions) KeyError!Key {
+    if (isHmac(algorithm)) return error.KeyAlgorithmMismatch;
+    var der: [pem.max_der_bytes]u8 = undefined;
+    const block = try pem.decode(&der, text, &.{.public_key});
+    return fromDer(algorithm, block.der, options);
+}
+
+/// The public key of `fromPem` in DER: an SPKI.
+pub fn fromDer(algorithm: Algorithm, der: []const u8, options: KeyOptions) KeyError!Key {
+    const key_id: KeyId = try .init(options.id);
+    const public = try pkcs.publicKey(algorithm, der);
+    return .{
+        .algorithm = algorithm,
+        .key_id = key_id,
+        .material = switch (public) {
+            .p256 => |*key| .{ .p256 = key.* },
+            .p384 => |*key| .{ .p384 = key.* },
+            .ed25519 => |*key| .{ .ed25519 = key.* },
+        },
     };
 }
 

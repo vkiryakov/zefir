@@ -128,6 +128,7 @@ test {
     _ = @import("concurrency_test.zig");
     _ = @import("der.zig");
     _ = @import("pem.zig");
+    _ = @import("pkcs.zig");
 }
 
 test "limits have their documented values" {
@@ -144,4 +145,5 @@ test "limits have their documented values" {
     const signer: Signer.Options = .{ .issuer = "orders", .audiences = &.{"orders"} };
     try std.testing.expectEqual(900, signer.lifetime.toSeconds());
     try std.testing.expectEqualStrings("JWT", signer.token_type);
+    try std.testing.expectEqual(16384, @import("der.zig").max_input_bytes);
 }
