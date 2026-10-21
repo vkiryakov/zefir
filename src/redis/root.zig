@@ -99,6 +99,7 @@ test {
     _ = @import("tests/pool_tests.zig");
     _ = @import("tests/run_tests.zig");
     _ = @import("tests/idle_tests.zig");
+    _ = @import("tests/lifecycle_tests.zig");
 }
 
 test "the package version reaches the module" {

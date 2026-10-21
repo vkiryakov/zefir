@@ -106,6 +106,8 @@ home: if (std.debug.runtime_safety) std.atomic.Value(usize) else void = if (std.
 
 /// The options of `init`.
 pub const Options = @import("Options.zig");
+/// What `stats` returns.
+pub const Stats = @import("Stats.zig");
 /// The URL as `init` reads it.
 pub const Url = @import("url.zig").Url;
 
@@ -169,6 +171,22 @@ pub fn connect(c: *Client, io: Io, ctx: core.Context, diagnostics: ?*Diagnostics
 pub fn close(c: *Client, io: Io) void {
     c.checkUse(io);
     c.pool.close(io, c.options.close_timeout);
+}
+
+/// A snapshot of the connections and of the calls waiting for them.
+pub fn stats(c: *Client) Stats {
+    c.checkHome();
+    const counts = c.pool.counts(c.io);
+    return .{
+        .connections = counts.idle + counts.in_use,
+        .idle = counts.idle,
+        .in_use = counts.in_use,
+        .opening = counts.opening,
+        .waiting = counts.waiting,
+        .subscribers = 0,
+        .generation = counts.generation,
+        .clears = counts.clears,
+    };
 }
 
 /// Runs `command`, a value of `redis.cmd`, on a connection of the pool,
