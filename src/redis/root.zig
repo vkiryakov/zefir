@@ -74,6 +74,11 @@ test {
     _ = @import("resp/fuzz.zig");
     _ = testing;
     _ = @import("url_tests.zig");
+    _ = @import("engine/time.zig");
+    _ = @import("engine/race.zig");
+    _ = @import("engine/DeadlineStream.zig");
+    _ = @import("engine/connect.zig");
+    _ = @import("engine/Address.zig");
 }
 
 test "the package version reaches the module" {
