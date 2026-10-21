@@ -374,6 +374,40 @@ test "an Ed25519 signature with s ≥ L is BadSignature" {
     try signed.expectBadSignature(&forged);
 }
 
+test "an Ed25519 signature that only a cofactored check takes is BadSignature" {
+    var signed: Signed = undefined;
+    try signed.init(.EdDSA);
+    defer signed.deinit();
+    const pair = &signed.signing.material.ed25519;
+    const message = signed.signingInput();
+    const Sha512 = std.crypto.hash.sha2.Sha512;
+    const scalar = Ed25519.Curve.scalar;
+
+    // The secret scalar a of the key, from its seed (RFC 8032 §5.1.5).
+    const seed = pair.secret_key.seed();
+    var digest: [64]u8 = undefined;
+    Sha512.hash(&seed, &digest, .{});
+    var a: [32]u8 = digest[0..32].*;
+    scalar.clamp(&a);
+    // R = rB + T with T of order 8, and s = r + k·a with k = H(R‖A‖m):
+    // then [s]B − [k]A − R = −T, which [8] takes to the identity.
+    const r = scalar.reduce(@splat(0x2a));
+    const order_8 = try Ed25519.Curve.fromBytes(comptime hex("c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a")[0..32].*);
+    const big_r = (try Ed25519.Curve.basePoint.mul(r)).add(order_8).toBytes();
+    var h: Sha512 = .init(.{});
+    h.update(&big_r);
+    h.update(&pair.public_key.toBytes());
+    h.update(message);
+    var k: [64]u8 = undefined;
+    h.final(&k);
+    const forged = big_r ++ scalar.mulAdd(scalar.reduce64(k), a, r);
+
+    // The cofactored check of std takes the signature; zefir checks
+    // without the cofactor, and does not (design Р33).
+    try Ed25519.Signature.fromBytes(forged).verify(message, pair.public_key);
+    try signed.expectBadSignature(&forged);
+}
+
 test "a signature one byte short or long is BadSignature, for every algorithm" {
     for (every_algorithm) |alg| {
         var signed: Signed = undefined;
