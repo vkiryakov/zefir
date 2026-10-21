@@ -1,8 +1,13 @@
 //! zefir.App(Root): the container type of one application.
 const std = @import("std");
-const Options = @import("../app.zig").Options;
+const app_ns = @import("../app.zig");
+const lifecycle = @import("lifecycle.zig");
 const plan = @import("plan.zig");
 const store = @import("store.zig");
+
+const Options = app_ns.Options;
+const State = app_ns.State;
+const Failure = app_ns.Failure;
 
 const log = std.log.scoped(.zefir_app);
 
@@ -49,15 +54,53 @@ pub fn App(comptime Root: type) type {
                 return err;
             };
             block.status.internal.entries = &block.entries;
+            block.watches = @splat(.{});
+            block.runtime = .{ .io = io, .shutdown_timeout = options.shutdown_timeout, .status = &block.status, .watches = &block.watches };
             const build_order = comptime plan.planOf(Root).build_order;
             log.debug("{s}", .{build_order});
             return .{ .internal = .{ .gpa = gpa, .io = io, .options = options, .block = block, .build_order = build_order } };
         }
 
+        /// Starts the beans in creation order and returns once all are
+        /// ready. When one fails, those already started are stopped in
+        /// reverse order, within a budget of their own, and its error is
+        /// returned. A stop requested meanwhile lets the current start end,
+        /// starts no more and returns `{}`. `error.InvalidState` unless the
+        /// App was just built: there is no restart.
+        pub fn start(app: *@This()) anyerror!void {
+            return lifecycle.start(&app.internal.block.runtime);
+        }
+
+        /// Waits for the end of the stop. `{}`: stopped on request; a
+        /// bean's error: it stopped by itself, and App stopped the rest
+        /// (`failure()` names it); `error.ShutdownTimeout`: the stop ran out
+        /// of its budget. Canceling `wait` stops nothing.
+        pub fn wait(app: *@This()) anyerror!void {
+            return lifecycle.wait(&app.internal.block.runtime);
+        }
+
+        /// Begins the stop. From any task and any thread, but not from a
+        /// signal handler; never waits; a second call does nothing.
+        pub fn requestStop(app: *@This()) void {
+            lifecycle.requestStop(&app.internal.block.runtime);
+        }
+
+        pub fn state(app: *const @This()) State {
+            return app.internal.block.status.state();
+        }
+
+        /// The first cause of the stop or of the failure; null when all
+        /// went well.
+        pub fn failure(app: *const @This()) ?Failure {
+            return lifecycle.failure(&app.internal.block.runtime);
+        }
+
         /// Destroys the beans App built, in reverse creation order, then
-        /// frees the block. Values are never destroyed.
+        /// frees the block. A running App is stopped first. Values are
+        /// never destroyed.
         pub fn deinit(app: *@This()) void {
             const block = app.internal.block;
+            if (!lifecycle.finish(&block.runtime)) return;
             store.deinitReverse(&block.entries, app.internal.io);
             app.internal.gpa.destroy(block);
             app.* = undefined;

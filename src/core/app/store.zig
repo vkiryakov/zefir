@@ -3,6 +3,7 @@
 //! bean, called in creation order.
 const std = @import("std");
 const contract = @import("contract.zig");
+const lifecycle = @import("lifecycle.zig");
 const names = @import("names.zig");
 const plan = @import("plan.zig");
 
@@ -14,8 +15,9 @@ const typeName = names.typeName;
 const num = names.num;
 
 /// App's one allocation: the beans in creation order, the entries of the
-/// beans App calls methods of, and the status beans may read. Every address
-/// in it stays valid until App frees it.
+/// beans App calls methods of, the status beans may read, and the lifecycle
+/// with a watch per entry. Every address in it stays valid until App frees
+/// it.
 pub fn BlockOf(comptime Root: type) type {
     @setEvalBranchQuota(names.eval_quota);
     const p = plan.planOf(Root);
@@ -26,6 +28,8 @@ pub fn BlockOf(comptime Root: type) type {
         beans: @Tuple(&final),
         entries: [p.entry_count]contract.Entry,
         status: contract.Status,
+        runtime: lifecycle.Runtime,
+        watches: [p.entry_count]lifecycle.Watch,
     };
 }
 

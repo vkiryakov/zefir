@@ -87,5 +87,7 @@ pub const App = container.App;
 
 test {
     _ = @import("app/names.zig");
+    _ = @import("app/wait.zig");
     _ = @import("app/tests/app_tests.zig");
+    _ = @import("app/tests/lifecycle_tests.zig");
 }
