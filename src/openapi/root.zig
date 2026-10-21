@@ -519,4 +519,6 @@ test "the Debug check of zefir-http reads a typed MiddlewareDoc on a controller 
 test {
     std.testing.refAllDecls(@This());
     _ = @import("json.zig");
+    _ = @import("example.zig");
+    _ = @import("schema.zig");
 }
