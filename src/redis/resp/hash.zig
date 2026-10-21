@@ -34,7 +34,7 @@ const Element = Reader.Element;
 /// fields, or `[]const redis.FieldValue`.
 pub fn isHash(comptime T: type) bool {
     return switch (@typeInfo(T)) {
-        .@"struct" => |info| !info.is_tuple,
+        .@"struct" => |info| !info.is_tuple and !decode.hasRule(T),
         else => T == []const FieldValue,
     };
 }
@@ -187,19 +187,9 @@ pub fn write(w: Writer, fields: anytype) Writer.Error!void {
     }
 }
 
-/// How many pairs a map or a flat array of pairs holds; UnexpectedReply
-/// for anything else.
-fn pairCount(d: *Decoder, element: Element, comptime Named: type) decode.Error!usize {
-    return switch (element) {
-        .map => |n| n,
-        .array, .push => |n| if (n % 2 == 0) n / 2 else d.mismatch(Named, element),
-        else => d.mismatch(Named, element),
-    };
-}
-
 /// Reads a hash from a map or a flat array of pairs into the struct `T`.
 pub fn readStruct(comptime T: type, d: *Decoder, element: Element, comptime Named: type) decode.Error!T {
-    const pairs = try pairCount(d, element, Named);
+    const pairs = try d.pairs(element, Named);
     const info = @typeInfo(T).@"struct";
     var result: T = undefined;
     var seen: [info.field_names.len]bool = @splat(false);
@@ -264,13 +254,5 @@ fn fieldIndex(comptime T: type, d: *Decoder, key: Element) decode.Error!?usize {
 /// Reads a hash from a map or a flat array of pairs into a slice of
 /// `redis.FieldValue`, in the order of the server.
 pub fn readFieldValues(d: *Decoder, element: Element, comptime Named: type) decode.Error![]const FieldValue {
-    const pairs = try pairCount(d, element, Named);
-    const items = try (try d.allocator()).alloc(FieldValue, pairs);
-    d.depth += 1;
-    defer d.depth -= 1;
-    for (items) |*item| {
-        item.field = try d.read([]const u8, try d.reader.next());
-        item.value = try d.read([]const u8, try d.reader.next());
-    }
-    return items;
+    return d.readPairs(FieldValue, element, Named);
 }

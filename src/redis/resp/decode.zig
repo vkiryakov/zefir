@@ -106,6 +106,7 @@ pub const Decoder = struct {
     pub fn readNamed(d: *Decoder, comptime T: type, element: Element, comptime Named: type) Error!T {
         if (T == Value) return value.readFrom(d.reader, element, try d.allocator());
         if (isError(element)) return d.serverError();
+        if (comptime hasRule(T)) return T.redisDecode(d, element);
         switch (@typeInfo(T)) {
             .void => return d.reader.skipElement(),
             .bool => return d.readBool(element, Named),
@@ -146,14 +147,40 @@ pub const Decoder = struct {
     /// tuple `Tuple` has fields, each as the type of its field.
     pub fn readTuple(d: *Decoder, comptime Tuple: type, element: Element, comptime Named: type) Error!Tuple {
         const fields = @typeInfo(Tuple).@"struct".field_types;
-        switch (element) {
-            .array, .push => |n| if (n != fields.len) return d.mismatch(Named, element),
-            else => return d.mismatch(Named, element),
-        }
+        try d.expectArray(element, fields.len, Named);
         var items: Tuple = undefined;
         d.depth += 1;
         defer d.depth -= 1;
         inline for (fields, 0..) |F, i| items[i] = try d.read(F, try d.reader.next());
+        return items;
+    }
+
+    /// UnexpectedReply unless `element` is an array of `len` elements.
+    pub fn expectArray(d: *Decoder, element: Element, len: usize, comptime Named: type) Error!void {
+        switch (element) {
+            .array, .push => |n| if (n == len) return,
+            else => {},
+        }
+        return d.mismatch(Named, element);
+    }
+
+    /// How many pairs a map, or a flat array of pairs, holds; UnexpectedReply
+    /// for anything else.
+    pub fn pairs(d: *Decoder, element: Element, comptime Named: type) Error!usize {
+        return switch (element) {
+            .map => |n| n,
+            .array, .push => |n| if (n % 2 == 0) n / 2 else d.mismatch(Named, element),
+            else => d.mismatch(Named, element),
+        };
+    }
+
+    /// Reads a map, or a flat array of pairs, into a slice of `T`, whose
+    /// rule `redisDecodePair` reads one pair: as HSCAN and ZSCAN answer.
+    pub fn readPairs(d: *Decoder, comptime T: type, element: Element, comptime Named: type) Error![]const T {
+        const items = try (try d.allocator()).alloc(T, try d.pairs(element, Named));
+        d.depth += 1;
+        defer d.depth -= 1;
+        for (items) |*item| item.* = try T.redisDecodePair(d, try d.reader.next());
         return items;
     }
 
@@ -342,6 +369,16 @@ const Kind = struct {
     }
 };
 
+/// Whether `T` has a reading rule of its own, `redisDecode`, as the result
+/// types of the catalog have: `redis.Ttl`, `redis.ScanPage(T)` and the
+/// others of `cmd/types.zig`. The rule is internal to the module.
+pub fn hasRule(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .@"struct", .@"union", .@"enum" => @hasDecl(T, "redisDecode"),
+        else => false,
+    };
+}
+
 fn isError(element: Element) bool {
     return element == .simple_error or element == .bulk_error;
 }
@@ -408,6 +445,17 @@ fn checkPart(comptime T: type, comptime call: []const u8, comptime path: []const
     else
         call ++ ": field '" ++ path ++ "' of the reply type " ++ @typeName(Root) ++ " is " ++ @typeName(T);
     if (T == Value) return;
+    if (hasRule(T)) {
+        // A type with a rule of its own is read by it; the types it reads
+        // its parts into, such as the T of redis.Entry(T), are checked.
+        if (@typeInfo(T) == .@"struct") {
+            const info = @typeInfo(T).@"struct";
+            for (info.field_names, info.field_types) |name, F| {
+                checkPart(F, call, if (path.len == 0) name else path ++ "." ++ name, Root);
+            }
+        }
+        return;
+    }
     switch (@typeInfo(T)) {
         .void, .bool, .int, .float => {},
         .@"enum" => |info| if (info.mode != .exhaustive) {

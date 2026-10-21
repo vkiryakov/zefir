@@ -9,6 +9,9 @@
 //! - `redis.Error`, `redis.CommandError`, `redis.outcome`,
 //!   `redis.Diagnostics` — what can go wrong in a call, whether the server
 //!   may have run the command, and the details for logs.
+//! - The types of the results and the arguments of the catalog:
+//!   `redis.Ttl`, `redis.KeyType`, `redis.ScanPage(T)`, `redis.StreamId`,
+//!   `redis.Entry(T)`, `redis.FieldValue` and the others of `cmd/types.zig`.
 
 const std = @import("std");
 const errors = @import("errors.zig");
@@ -25,7 +28,28 @@ pub const Outcome = errors.Outcome;
 pub const outcome = errors.outcome;
 pub const Diagnostics = errors.Diagnostics;
 
+pub const Ttl = types.Ttl;
+pub const KeyType = types.KeyType;
+pub const End = types.End;
+pub const Block = types.Block;
+pub const ScoreBound = types.ScoreBound;
+pub const Only = types.Only;
+pub const Compare = types.Compare;
+pub const Limit = types.Limit;
+pub const Scored = types.Scored;
+pub const Popped = types.Popped;
 pub const FieldValue = types.FieldValue;
+pub const KeyValue = types.KeyValue;
+pub const ScanPage = types.ScanPage;
+pub const StreamId = types.StreamId;
+pub const StreamPosition = types.StreamPosition;
+pub const GroupPosition = types.GroupPosition;
+pub const Trim = types.Trim;
+pub const Entry = types.Entry;
+pub const PendingSummary = types.PendingSummary;
+pub const ConsumerPending = types.ConsumerPending;
+pub const Pending = types.Pending;
+pub const Claimed = types.Claimed;
 
 test {
     std.testing.refAllDecls(@This());
@@ -37,6 +61,7 @@ test {
     _ = @import("resp/args_tests.zig");
     _ = @import("resp/decode_tests.zig");
     _ = @import("resp/hash_tests.zig");
+    _ = @import("cmd/types_tests.zig");
     _ = @import("resp/fuzz.zig");
 }
 
