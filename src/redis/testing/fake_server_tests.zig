@@ -618,7 +618,12 @@ test "a handler answers commands from many connections at once: 8 clients of 10 
         if (n < 1 or n > 80 or seen[@intCast(n)]) return error.TestUnexpectedCount;
         seen[@intCast(n)] = true;
     };
-    try testing.expectEqual(@as(i64, 80), counter.n);
+    {
+        // The tasks of the server wrote it under the mutex: read it so too.
+        counter.mutex.lockUncancelable(io);
+        defer counter.mutex.unlock(io);
+        try testing.expectEqual(@as(i64, 80), counter.n);
+    }
     try testing.expectEqual(@as(usize, 80), server.received(io));
     try testing.expectEqual(@as(usize, 80), server.count(io, "incr"));
     try server.finish(io);
@@ -692,11 +697,11 @@ fn stepsAndHandler(io: Io, url: []const u8) !void {
 
 /// A handler that runs out of memory.
 const Failing = struct {
-    calls: usize = 0,
+    calls: std.atomic.Value(usize) = .init(0),
 
     pub fn answer(failing: *Failing, io: Io, arena: Allocator, request: *const FakeServer.Request) FakeServer.Handler.Error!Reply {
         _ = .{ io, arena, request };
-        failing.calls += 1;
+        _ = failing.calls.fetchAdd(1, .acq_rel);
         return error.OutOfMemory;
     }
 };
@@ -707,7 +712,7 @@ test "an error of the handler closes the connection without a reply" {
     var server: FakeServer = try .startWith(testing.allocator, io, .{ .handler = .init(&failing) });
     defer server.stop(io);
     try within5s(io, handlerFails, .{ io, server.url() });
-    try testing.expectEqual(@as(usize, 1), failing.calls);
+    try testing.expectEqual(@as(usize, 1), failing.calls.load(.acquire));
     try server.finish(io);
 }
 
