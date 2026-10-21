@@ -25,7 +25,10 @@ on:
     branches: [dev]
     paths:
       - src/http/h1/**
-      - src/jwt/**
+      # The parsers of jwt and their corpus, not its guide or compile
+      # probes.
+      - src/jwt/*.zig
+      - src/jwt/testdata/**
       - .github/workflows/fuzz.yml
   workflow_dispatch:
     inputs:

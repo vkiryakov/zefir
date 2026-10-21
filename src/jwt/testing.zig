@@ -90,9 +90,13 @@ test "FixedClock answers real with its time and leaves awake alone" {
 }
 
 test "a second FixedClock while one lives is ClockInUse" {
-    var first: FixedClock = try .init(std.testing.io, 1);
-    try std.testing.expectError(error.ClockInUse, FixedClock.init(std.testing.io, 2));
-    first.deinit();
+    {
+        // Given back even when the expectation fails, so that the tests
+        // after this one still find the clock free.
+        var first: FixedClock = try .init(std.testing.io, 1);
+        defer first.deinit();
+        try std.testing.expectError(error.ClockInUse, FixedClock.init(std.testing.io, 2));
+    }
     var second: FixedClock = try .init(std.testing.io, 3);
     defer second.deinit();
     try std.testing.expectEqual(3, std.Io.Clock.real.now(second.io()).toSeconds());

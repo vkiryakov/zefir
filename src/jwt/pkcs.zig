@@ -244,19 +244,6 @@ fn loadPrivate(alg: Algorithm, file: keys.File, options: KeyOptions) KeyError!Si
     return if (file.isPem()) SigningKey.fromPem(alg, file.bytes, options) else SigningKey.fromDer(alg, file.bytes, options);
 }
 
-/// The verification key of `file`: the key itself or the public part of
-/// the signing key.
-fn verificationKeyOf(alg: Algorithm, file: keys.File, options: KeyOptions) KeyError!Key {
-    switch (file.part) {
-        .public => return loadPublic(alg, file, options),
-        .private => {
-            var signing = try loadPrivate(alg, file, options);
-            defer signing.deinit();
-            return signing.verificationKey();
-        },
-    }
-}
-
 /// The public key of `key`: the uncompressed SEC1 point of EC, the 32
 /// bytes of Ed25519.
 fn publicBytes(key: *const Key, buf: *[97]u8) ![]const u8 {
@@ -293,31 +280,34 @@ fn expectFileRefused(alg: Algorithm, file: keys.File, part: keys.Part, expected:
 
 test "5.8: every key file loads" {
     for (asymmetric) |alg| {
-        // The files of one algorithm hold one key: every one of them
-        // verifies what any private one signs.
-        var verifiers: [keys.supported.len]Key = undefined;
-        var count: usize = 0;
-        defer for (verifiers[0..count]) |*key| key.deinit();
+        // The files of one algorithm hold one key: each of them gives the
+        // public key of the first, so that key verifies what each private
+        // one signs. Every file loads once, and every signature verifies
+        // once, which keeps the test short under ThreadSanitizer.
+        var first: ?Key = null;
+        defer if (first) |*key| key.deinit();
         for (keys.supported) |file| {
             if (file.algorithm.? != alg) continue;
             errdefer std.debug.print("{s}\n", .{file.name});
-            verifiers[count] = try verificationKeyOf(alg, file, .{ .id = "2026-10" });
-            count += 1;
-            const key = &verifiers[count - 1];
+            var out: [crypto.max_signature_bytes]u8 = undefined;
+            var signature: ?[]const u8 = null;
+            var key = switch (file.part) {
+                .public => try loadPublic(alg, file, .{ .id = "2026-10" }),
+                .private => private: {
+                    var signing = try loadPrivate(alg, file, .{ .id = "2026-10" });
+                    defer signing.deinit();
+                    signature = try crypto.sign(&signing, testing.io, "abc", &out);
+                    break :private signing.verificationKey();
+                },
+            };
+            defer key.deinit();
             try testing.expectEqual(alg, key.algorithm);
             try testing.expectEqualStrings("2026-10", key.id().?);
+            if (first == null) first = key;
             var first_buf: [97]u8 = undefined;
             var buf: [97]u8 = undefined;
-            try testing.expectEqualSlices(u8, try publicBytes(&verifiers[0], &first_buf), try publicBytes(key, &buf));
-        }
-        for (keys.supported) |file| {
-            if (file.algorithm.? != alg or file.part != .private) continue;
-            errdefer std.debug.print("{s}\n", .{file.name});
-            var signing = try loadPrivate(alg, file, .{});
-            defer signing.deinit();
-            var out: [crypto.max_signature_bytes]u8 = undefined;
-            const signature = try crypto.sign(&signing, testing.io, "abc", &out);
-            for (verifiers[0..count]) |*key| try crypto.verify(key, "abc", signature);
+            try testing.expectEqualSlices(u8, try publicBytes(&first.?, &first_buf), try publicBytes(&key, &buf));
+            if (signature) |bytes| try crypto.verify(&first.?, "abc", bytes);
         }
     }
 }

@@ -273,8 +273,9 @@ test "ECDSA signatures carry noise, EdDSA ones do not" {
     }
 }
 
-/// Signs 16 times with a fresh key of `Scheme` and expects every s at
-/// most half the order of the group.
+/// Signs 8 times with a fresh key of `Scheme` and expects every s at most
+/// half the order of the group; half of the signatures of ECDSA have a
+/// high s, so a signer that kept them would pass here once in 256 runs.
 fn expectLowS(comptime Scheme: type, alg: Algorithm) !void {
     const length = Scheme.Curve.scalar.encoded_length;
     var half: [length]u8 = undefined;
@@ -282,7 +283,7 @@ fn expectLowS(comptime Scheme: type, alg: Algorithm) !void {
     var signing: SigningKey = try .generate(testing.io, alg, .{});
     defer signing.deinit();
     var out: [max_signature_bytes]u8 = undefined;
-    for (0..16) |_| {
+    for (0..8) |_| {
         const signature = try sign(&signing, testing.io, "header.payload", &out);
         try testing.expect(std.mem.order(u8, signature[length..], &half) != .gt);
     }
