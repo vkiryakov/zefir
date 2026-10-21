@@ -12,6 +12,7 @@ test {
     std.testing.refAllDecls(@This());
     _ = resp;
     _ = @import("resp/writer_tests.zig");
+    _ = @import("resp/reader_tests.zig");
 }
 
 test "the package version reaches the module" {
