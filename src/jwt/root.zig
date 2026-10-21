@@ -35,14 +35,27 @@ pub const max_key_id_bytes = 128;
 
 pub const Algorithm = @import("algorithm.zig").Algorithm;
 
+const errors = @import("errors.zig");
+pub const KeyError = errors.KeyError;
+pub const VerifyError = errors.VerifyError;
+pub const SignError = errors.SignError;
+pub const Details = errors.Details;
+
+pub const Header = @import("header.zig").Header;
+
 test {
     _ = @import("algorithm.zig");
     _ = @import("base64url.zig");
     _ = @import("compact.zig");
+    _ = @import("errors.zig");
+    _ = @import("json.zig");
+    _ = @import("header.zig");
 }
 
 test "limits have their documented values" {
     try std.testing.expectEqual(8192, max_token_bytes);
     try std.testing.expectEqual(32, max_json_depth);
     try std.testing.expectEqual(128, max_key_id_bytes);
+    const details: Details = .{};
+    try std.testing.expectEqual(256, details.path_buf.len);
 }
