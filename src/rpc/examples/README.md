@@ -1647,6 +1647,10 @@ fn sameToken(given: []const u8, expected: []const u8) bool {
   application, such as `requirePermission`. A tenant id in the metadata of
   a request is what the client says; compare it with `identity.tenant_id`.
 
+An authenticator that verifies signed tokens instead of a table of them is
+`JwtAuthenticator` of [the zefir-jwt guide](../../jwt/examples/README.md),
+of the same shape.
+
 The whole service, with the authenticator, the store and the middleware on
 three levels; one client calls it as three callers, and the admin console
 takes its token from a provider:
