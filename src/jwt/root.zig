@@ -54,6 +54,9 @@ pub const KeyOptions = struct {
 pub const Key = @import("Key.zig");
 pub const SigningKey = @import("SigningKey.zig");
 
+/// Test support: `jwt.testing.FixedClock`, the clock a test sets.
+pub const testing = @import("testing.zig");
+
 /// Checks at compile time that `Claims` can be the claims of `verify` and
 /// `sign`: `void`, or a struct of the claim types, whose claim names are
 /// its own (`claim_names`, `v.rename`) and whose rules fit their fields.
@@ -81,6 +84,7 @@ test {
     _ = @import("jws.zig");
     _ = @import("vectors_test.zig");
     _ = @import("claims.zig");
+    _ = @import("testing.zig");
 }
 
 test "limits have their documented values" {
