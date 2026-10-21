@@ -1,5 +1,6 @@
 const std = @import("std");
 const manifest = @import("build.zig.zon");
+const app_cases = @import("src/core/app/tests/cases.zig");
 const validator_cases = @import("src/validator/testdata/cases.zig");
 const rpc_guide = @import("src/rpc/examples/cases.zig");
 const http_cases = @import("src/http/tests/cases.zig");
@@ -173,6 +174,7 @@ pub fn build(b: *std.Build) void {
     }
 
     addValidatorTests(b, test_validator, validator_compile_step, validator, log, target, optimize, tsan);
+    addAppCompileChecks(b, test_core, core, target, optimize);
     addHttpCompileChecks(b, test_http, http, validator, target, optimize);
     // The examples of the zefir-http guide: the middleware of an
     // application (authentication, CORS) and their tests. Like an
@@ -1400,6 +1402,35 @@ fn addHttpGuide(
         readme.addAnonymousImport(b.fmt("{s}.out", .{name}), .{ .root_source_file = run.captureStdOut(.{}) });
     }
     test_http.dependOn(&addRun(b, b.addTest(.{ .name = "http-guide-readme", .root_module = readme }), tsan).step);
+}
+
+/// The compile checks of zefir.App, from the list in
+/// src/core/app/tests/cases.zig: application code whose graph App must
+/// refuse, each file with the message it must fail with. Each file imports
+/// "core" alone.
+fn addAppCompileChecks(
+    b: *std.Build,
+    test_step: *std.Build.Step,
+    core: *std.Build.Module,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+) void {
+    // Each fixture is compiled (never run) and passes only when the
+    // compilation fails with an error whose message is `expect`, as in
+    // addHttpCompileChecks.
+    for (app_cases.compile_errors) |fixture| {
+        const t = b.addTest(.{
+            .name = std.fs.path.stem(fixture.file),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(fixture.file),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{.{ .name = "core", .module = core }},
+            }),
+        });
+        t.expect_errors = .{ .contains = b.fmt("error: {s}", .{fixture.expect}) };
+        test_step.dependOn(&t.step);
+    }
 }
 
 /// The compile checks of zefir-http, from the lists in
