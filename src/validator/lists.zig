@@ -614,8 +614,23 @@ pub fn schemaOf(comptime rule: Rule, comptime T: type) schema.RuleSchema {
         },
         // Not `not: {contains: ...}`, which a null list would fail.
         .contains_none => schema.exact(&.{schema.keyword("items", schema.object(&.{schema.keyword("not", schema.object(&.{schema.keyword("enum", schema.value(rule.params[0].value))}))}))}),
+        .each => eachSchema(rule, core.ListChild(T).?),
         else => unreachable,
     };
+}
+
+/// `each`: no keywords of its own, the schemas of its item transforms and
+/// item rules on the item type `Item` (an optional item, `?U`, as declared),
+/// and the accuracy of the least accurate of them.
+fn eachSchema(comptime rule: Rule, comptime Item: type) schema.RuleSchema {
+    var items: []const schema.RuleSchema = &.{};
+    for (rule.item_transforms) |t| items = items ++ &[_]schema.RuleSchema{schema.schemaOf(t, Item)};
+    for (rule.inner) |inner| items = items ++ &[_]schema.RuleSchema{schema.schemaOf(inner, Item)};
+    var accuracy: schema.RuleSchema.Accuracy = .exact;
+    for (items) |item| {
+        if (@backingInt(item.accuracy) > @backingInt(accuracy)) accuracy = item.accuracy;
+    }
+    return .{ .accuracy = accuracy, .items = items };
 }
 
 /// The arguments the hints show for an uncalled constructor of this file:
