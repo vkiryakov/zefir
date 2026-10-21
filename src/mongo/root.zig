@@ -12,10 +12,6 @@
 //!   find and `findOneAnd*`, aggregate, count and distinct, indexes,
 //!   collections and any command, with documents as raw BSON, built with
 //!   `bson.Builder`, or written from structs and literals.
-//! - `mongo.bson` — BSON, the format of MongoDB's documents and commands:
-//!   read a document where it lies, check it, write one, turn structs and
-//!   literals into documents and documents into structs, and print it as
-//!   Extended JSON for logs and test messages.
 //! - `mongo.Error`, `mongo.outcome`, `mongo.Diagnostics` — what can go
 //!   wrong in a call, whether the server may have run it, and the details
 //!   for logs.
@@ -25,13 +21,16 @@
 //! - `mongo.testing` — a scripted server on loopback, for tests of code on
 //!   zefir-mongo without MongoDB: the client connects to it as to a
 //!   mongod.
+//!
+//! The documents and commands are the BSON of zefir-mongo-bson,
+//! `@import("mongo-bson")`: `bson.Builder`, `bson.encode`, `bson.decode`
+//! and the rest.
 
 const std = @import("std");
 const errors = @import("errors.zig");
 const requests = @import("requests.zig");
 const results = @import("results.zig");
 
-pub const bson = @import("bson.zig");
 pub const testing = @import("testing.zig");
 /// The wire protocol, for the client and `testing.FakeServer` only.
 const wire = @import("wire.zig");
@@ -64,7 +63,6 @@ pub const WriteConcernError = results.WriteConcernError;
 
 test {
     std.testing.refAllDecls(@This());
-    _ = bson;
     _ = wire;
     _ = testing;
     _ = @import("errors_tests.zig");

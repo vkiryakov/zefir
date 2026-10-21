@@ -17,7 +17,7 @@
 //! ```
 
 const std = @import("std");
-const bson = @import("../bson.zig");
+const bson = @import("root.zig");
 const read = @import("read.zig");
 const ejson = @import("ejson.zig");
 const RawDocument = @This();

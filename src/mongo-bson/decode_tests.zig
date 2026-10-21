@@ -4,7 +4,7 @@
 
 const std = @import("std");
 const testing = std.testing;
-const bson = @import("../bson.zig");
+const bson = @import("root.zig");
 const vectors = @import("vectors.zig");
 const hex = vectors.hex;
 const named = vectors.named;

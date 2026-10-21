@@ -6,7 +6,7 @@
 //! print as U+FFFD.
 
 const std = @import("std");
-const bson = @import("../bson.zig");
+const bson = @import("root.zig");
 const Writer = std.Io.Writer;
 
 /// What a document that is not valid BSON prints as.

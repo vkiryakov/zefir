@@ -1,7 +1,7 @@
 //! The `ok` of a reply, as the client maps it to its errors.
 
 const std = @import("std");
-const bson = @import("../bson.zig");
+const bson = @import("mongo-bson");
 const errors = @import("../errors.zig");
 const Diagnostics = errors.Diagnostics;
 

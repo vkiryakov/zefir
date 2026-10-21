@@ -4,7 +4,7 @@
 //! document gives `error.InvalidBson`.
 
 const std = @import("std");
-const bson = @import("../bson.zig");
+const bson = @import("root.zig");
 const Element = bson.Element;
 const Value = bson.Value;
 

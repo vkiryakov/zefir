@@ -1,9 +1,9 @@
 //! Calls of the BSON codec that must not compile, one test each.
-//! `zig build test-mongo` compiles every test on its own and checks its
-//! error message; the list of messages is in build.zig.
+//! `zig build test-mongo-bson` compiles every test on its own and checks
+//! its error message; the list of messages is in build.zig.
 
 const std = @import("std");
-const bson = @import("mongo").bson;
+const bson = @import("mongo-bson");
 
 /// Never called at run time: these tests only have to fail to compile.
 fn arena() std.mem.Allocator {

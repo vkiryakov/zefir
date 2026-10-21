@@ -2,7 +2,7 @@
 //! `Builder.put`. `bson.literal` writes the same bytes at compile time.
 
 const std = @import("std");
-const bson = @import("../bson.zig");
+const bson = @import("root.zig");
 const check = @import("check.zig");
 const Builder = bson.Builder;
 

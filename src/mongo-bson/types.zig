@@ -2,7 +2,7 @@
 //! `Decimal128`, which have files of their own.
 
 const std = @import("std");
-const bson = @import("../bson.zig");
+const bson = @import("root.zig");
 
 /// A UTC instant: milliseconds since the Unix epoch, BSON's datetime.
 pub const DateTime = struct {

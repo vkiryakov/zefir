@@ -25,7 +25,7 @@
 //! builder can go on. The deprecated types are never written.
 
 const std = @import("std");
-const bson = @import("../bson.zig");
+const bson = @import("root.zig");
 const read = @import("read.zig");
 const check = @import("check.zig");
 const codec = @import("encode.zig");

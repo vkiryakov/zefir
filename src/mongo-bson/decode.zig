@@ -1,7 +1,7 @@
 //! Reading BSON documents into Zig values by their types: `bson.decode`.
 
 const std = @import("std");
-const bson = @import("../bson.zig");
+const bson = @import("root.zig");
 const check = @import("check.zig");
 
 pub const DecodeOptions = struct {

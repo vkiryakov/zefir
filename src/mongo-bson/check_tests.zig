@@ -1,11 +1,11 @@
 //! Tests of the comptime check of the typed codec: the message of each type
 //! it refuses, with the path of the field, and the types it lets through.
-//! `src/mongo/tests/compile_errors.zig` checks that the messages stop the
-//! build.
+//! `src/mongo-bson/tests/compile_errors.zig` checks that the messages
+//! stop the build.
 
 const std = @import("std");
 const testing = std.testing;
-const bson = @import("../bson.zig");
+const bson = @import("root.zig");
 const check = @import("check.zig");
 
 fn expectProblem(comptime T: type, comptime direction: check.Direction, comptime expected: ?[]const u8) !void {

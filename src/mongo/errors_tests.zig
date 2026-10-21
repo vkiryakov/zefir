@@ -3,7 +3,7 @@
 
 const std = @import("std");
 const testing = std.testing;
-const bson = @import("bson.zig");
+const bson = @import("mongo-bson");
 const errors = @import("errors.zig");
 const Diagnostics = errors.Diagnostics;
 const ServerError = errors.ServerError;

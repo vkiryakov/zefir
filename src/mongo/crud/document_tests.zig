@@ -4,7 +4,7 @@
 const std = @import("std");
 const testing = std.testing;
 const mongo = @import("../root.zig");
-const bson = mongo.bson;
+const bson = @import("mongo-bson");
 const document = @import("document.zig");
 
 const User = struct { name: []const u8, age: i32 };

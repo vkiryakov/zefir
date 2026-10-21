@@ -223,8 +223,9 @@ release for Zig 0.17 yet, so pin the commit Zefir is tested with:
 zig fetch --save git+https://github.com/lalinsky/zio#d15034f1a4d9ddaa42829aae8f7e02d37cd1093a
 ```
 
-Then import the modules in `build.zig`. The programs of this guide also
-use Zefir's confy for settings, log for records and core for deadlines:
+Then import the modules in `build.zig`: mongo, and mongo-bson for its
+documents. The programs of this guide also use Zefir's confy for
+settings, log for records and core for deadlines:
 
 ```zig
 // build.zig
@@ -239,6 +240,7 @@ const exe = b.addExecutable(.{
         .optimize = optimize,
         .imports = &.{
             .{ .name = "mongo", .module = zefir.module("zefir-mongo") },
+            .{ .name = "mongo-bson", .module = zefir.module("zefir-mongo-bson") },
             .{ .name = "zio", .module = zio.module("zio") },
             .{ .name = "confy", .module = zefir.module("zefir-confy") },
             .{ .name = "log", .module = zefir.module("zefir-log") },
@@ -253,8 +255,9 @@ b.step("run", "Run the service").dependOn(&b.addRunArtifact(exe).step);
 > [!TIP]
 > zefir-mongo is also part of the umbrella module: with
 > `zefir.module("zefir")` imported as `zefir`, it is
-> `@import("zefir").mongo`. It imports only zefir-core; zio comes from
-> your build.
+> `@import("zefir").mongo`, and its BSON `@import("zefir").mongo_bson`.
+> It imports only zefir-core and zefir-mongo-bson; zio comes from your
+> build.
 
 You need a mongod to talk to. With Docker:
 
@@ -290,7 +293,7 @@ const core = @import("core");
 const log = @import("log");
 const mongo = @import("mongo");
 const zio = @import("zio");
-const bson = mongo.bson;
+const bson = @import("mongo-bson");
 
 /// The client logs through std.log; this sends its records to the logger.
 pub const std_options: std.Options = .{ .logFn = log.stdLogFn };
@@ -732,7 +735,7 @@ const core = @import("core");
 const log = @import("log");
 const mongo = @import("mongo");
 const zio = @import("zio");
-const bson = mongo.bson;
+const bson = @import("mongo-bson");
 
 pub const std_options: std.Options = .{ .logFn = log.stdLogFn };
 
@@ -940,7 +943,7 @@ const core = @import("core");
 const log = @import("log");
 const mongo = @import("mongo");
 const zio = @import("zio");
-const bson = mongo.bson;
+const bson = @import("mongo-bson");
 
 pub const std_options: std.Options = .{ .logFn = log.stdLogFn };
 
@@ -1157,7 +1160,7 @@ MongoDB's tools show them in. It needs no server:
 
 const std = @import("std");
 const mongo = @import("mongo");
-const bson = mongo.bson;
+const bson = @import("mongo-bson");
 
 const Status = enum { active, suspended };
 
@@ -1415,7 +1418,7 @@ const core = @import("core");
 const log = @import("log");
 const mongo = @import("mongo");
 const zio = @import("zio");
-const bson = mongo.bson;
+const bson = @import("mongo-bson");
 
 pub const std_options: std.Options = .{ .logFn = log.stdLogFn };
 
@@ -1585,7 +1588,7 @@ the third batch:
 
 const std = @import("std");
 const mongo = @import("mongo");
-const bson = mongo.bson;
+const bson = @import("mongo-bson");
 const testing = std.testing;
 const FakeServer = mongo.testing.FakeServer;
 const Script = mongo.testing.Script;
@@ -1691,7 +1694,7 @@ against a scripted server that holds its replies show each case:
 const std = @import("std");
 const core = @import("core");
 const mongo = @import("mongo");
-const bson = mongo.bson;
+const bson = @import("mongo-bson");
 const testing = std.testing;
 const FakeServer = mongo.testing.FakeServer;
 const Script = mongo.testing.Script;
@@ -1959,7 +1962,7 @@ The users of the shop, as an application keeps them:
 
 const std = @import("std");
 const mongo = @import("mongo");
-const bson = mongo.bson;
+const bson = @import("mongo-bson");
 const Users = @This();
 
 collection: mongo.Collection,
@@ -2015,7 +2018,7 @@ And their tests:
 const std = @import("std");
 const mongo = @import("mongo");
 const Users = @import("Users.zig");
-const bson = mongo.bson;
+const bson = @import("mongo-bson");
 const testing = std.testing;
 const FakeServer = mongo.testing.FakeServer;
 const Script = mongo.testing.Script;

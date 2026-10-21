@@ -14,8 +14,8 @@
 const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
-const bson = @import("../bson.zig");
-const codec = @import("../bson/encode.zig");
+const bson = @import("mongo-bson");
+const codec = bson.codec;
 const results = @import("../results.zig");
 const document = @import("document.zig");
 

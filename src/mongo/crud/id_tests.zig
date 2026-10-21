@@ -3,7 +3,7 @@
 const std = @import("std");
 const testing = std.testing;
 const mongo = @import("../root.zig");
-const bson = mongo.bson;
+const bson = @import("mongo-bson");
 const id = @import("id.zig");
 const results = @import("../results.zig");
 
@@ -83,7 +83,7 @@ test "the elements of a RawDocument are copied as they are, of deprecated types 
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     var ids = generator();
-    const symbol: bson.RawDocument = try .init(mongo.testing.vectors.named("symbol"));
+    const symbol: bson.RawDocument = try .init(bson.testing.vectors.named("symbol"));
     const sent = try id.withId(arena.allocator(), testing.io, &ids, symbol);
     _ = try firstId(sent);
     try testing.expectEqualSlices(u8, symbol.bytes[4..], sent.bytes[21..]);

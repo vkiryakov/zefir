@@ -2,7 +2,7 @@
 //! `Type`.
 
 const std = @import("std");
-const bson = @import("../bson.zig");
+const bson = @import("root.zig");
 
 /// The type byte of a BSON element.
 pub const Type = enum(u8) {

@@ -99,8 +99,17 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // MongoDB for zefir applications: the client, BSON and the
-    // collection API.
+    // BSON, the format of MongoDB's documents, for zefir-mongo and any
+    // other driver. It imports nothing.
+    const mongo_bson = b.addModule("zefir-mongo-bson", .{
+        .root_source_file = b.path("src/mongo-bson/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+    });
+
+    // MongoDB for zefir applications: the client and the collection API,
+    // on the BSON of mongo-bson.
     const mongo = b.addModule("zefir-mongo", .{
         .root_source_file = b.path("src/mongo/root.zig"),
         .target = target,
@@ -108,6 +117,7 @@ pub fn build(b: *std.Build) void {
         .sanitize_thread = tsan,
         .imports = &.{
             .{ .name = "core", .module = core },
+            .{ .name = "mongo-bson", .module = mongo_bson },
         },
     });
     mongo.addImport("build_options", build_options);
@@ -123,7 +133,7 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // Umbrella module: @import("zefir").core, .log, .confy, .validator, .rpc, .rpc_nats, .orm, .mongo, .nats, .http
+    // Umbrella module: @import("zefir").core, .log, .confy, .validator, .rpc, .rpc_nats, .mongo_bson, .orm, .mongo, .nats, .http
     const zefir = b.addModule("zefir", .{
         .root_source_file = b.path("src/zefir.zig"),
         .target = target,
@@ -136,6 +146,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "validator", .module = validator },
             .{ .name = "rpc", .module = rpc },
             .{ .name = "rpc-nats", .module = rpc_nats },
+            .{ .name = "mongo-bson", .module = mongo_bson },
             .{ .name = "orm", .module = orm },
             .{ .name = "mongo", .module = mongo },
             .{ .name = "nats", .module = nats },
@@ -154,6 +165,7 @@ pub fn build(b: *std.Build) void {
     const test_validator = addModuleTestStep(b, test_step, "validator");
     const test_rpc = addModuleTestStep(b, test_step, "rpc");
     const test_rpc_nats = addModuleTestStep(b, test_step, "rpc-nats");
+    const test_mongo_bson = addModuleTestStep(b, test_step, "mongo-bson");
     const test_orm = addModuleTestStep(b, test_step, "orm");
     const test_mongo = addModuleTestStep(b, test_step, "mongo");
     const test_nats = addModuleTestStep(b, test_step, "nats");
@@ -164,8 +176,8 @@ pub fn build(b: *std.Build) void {
     // where usize has 32 bits.
     const validator_compile_step = b.step("compile-validator-tests", "Build the validator's test binaries for -Dtarget without running them");
     for (
-        [_]*std.Build.Module{ core, log, confy, validator, rpc, rpc_nats, orm, mongo, nats, http, zefir },
-        [_]*std.Build.Step{ test_core, test_log, test_confy, test_validator, test_rpc, test_rpc_nats, test_orm, test_mongo, test_nats, test_http, test_zefir },
+        [_]*std.Build.Module{ core, log, confy, validator, rpc, rpc_nats, mongo_bson, orm, mongo, nats, http, zefir },
+        [_]*std.Build.Step{ test_core, test_log, test_confy, test_validator, test_rpc, test_rpc_nats, test_mongo_bson, test_orm, test_mongo, test_nats, test_http, test_zefir },
     ) |module, module_test_step| {
         const tests = b.addTest(.{ .root_module = module });
         module_test_step.dependOn(&addRun(b, tests, tsan).step);
@@ -329,14 +341,20 @@ pub fn build(b: *std.Build) void {
     // another std.Io, a cursor used by two tasks at once and
     // Client.deinit() with cursors left panic in safe builds. Each program
     // must print the panic message and end in its own panic handler, which
-    // exits with code 3 instead of aborting. They get their own Debug copy
-    // of mongo, whatever -Doptimize says.
+    // exits with code 3 instead of aborting. They get their own Debug copies
+    // of mongo and mongo-bson, whatever -Doptimize says.
+    const panic_mongo_bson = b.createModule(.{
+        .root_source_file = b.path("src/mongo-bson/root.zig"),
+        .target = target,
+        .optimize = .Debug,
+    });
     const panic_mongo = b.createModule(.{
         .root_source_file = b.path("src/mongo/root.zig"),
         .target = target,
         .optimize = .Debug,
         .imports = &.{
             .{ .name = "core", .module = panic_core },
+            .{ .name = "mongo-bson", .module = panic_mongo_bson },
         },
     });
     panic_mongo.addOptions("build_options", version_options);
@@ -354,6 +372,7 @@ pub fn build(b: *std.Build) void {
                 .optimize = .Debug,
                 .imports = &.{
                     .{ .name = "mongo", .module = panic_mongo },
+                    .{ .name = "mongo-bson", .module = panic_mongo_bson },
                 },
             }),
         });
@@ -688,23 +707,24 @@ pub fn build(b: *std.Build) void {
             .sanitize_thread = tsan,
             .imports = &.{
                 .{ .name = "mongo", .module = mongo },
+                .{ .name = "mongo-bson", .module = mongo_bson },
                 .{ .name = "core", .module = core },
             },
         }),
     });
     test_mongo.dependOn(&addRun(b, mongo_checks, tsan).step);
 
-    // mongo compile errors: types that the BSON codec cannot write or read.
-    // Each test of the file must fail to compile with the message next to
-    // its name, which names the field; the filter compiles one test at a
-    // time. A type declared in the file is named after the file.
-    const mongo_compile_errors = b.createModule(.{
-        .root_source_file = b.path("src/mongo/tests/compile_errors.zig"),
+    // mongo-bson compile errors: types that the BSON codec cannot write or
+    // read. Each test of the file must fail to compile with the message
+    // next to its name, which names the field; the filter compiles one test
+    // at a time. A type declared in the file is named after the file.
+    const mongo_bson_compile_errors = b.createModule(.{
+        .root_source_file = b.path("src/mongo-bson/tests/compile_errors.zig"),
         .target = target,
         .optimize = optimize,
         .sanitize_thread = tsan,
         .imports = &.{
-            .{ .name = "mongo", .module = mongo },
+            .{ .name = "mongo-bson", .module = mongo_bson },
         },
     });
     for ([_][2][]const u8{
@@ -725,18 +745,18 @@ pub fn build(b: *std.Build) void {
         .{ "integer literal beyond int64", "bson.encode: field 'n' is 9223372036854775808, which does not fit int64" },
         .{ "tuple as a document", "bson.encode: a tuple is an array, not a document: give its values names, such as .{ .a = x }" },
         .{ "number as a document", "bson.encode: a document is a struct with named fields, such as .{ .name = name }, or a bson.RawDocument; got u32" },
-        .{ "deprecated type to encode", "bson.encode: field 'p' is bson.types.DbPointer, a deprecated type: it is read, never written" },
+        .{ "deprecated type to encode", "bson.encode: field 'p' is types.DbPointer, a deprecated type: it is read, never written" },
         .{ "tuple to decode", "bson.decode: field 'pair' is struct { i32, i32 }, a tuple: decode needs the names of fields; use a struct, or a slice for an array" },
         .{ "comptime field to decode", "bson.decode: field 'version' is a comptime field: decode fills only fields known at run time" },
         .{ "mutable slice to decode", "bson.decode: field 'name' is []u8: decode gives const slices; use []const u8" },
     }, 0..) |case, i| {
         const compile = b.addTest(.{
-            .name = b.fmt("mongo-compile-error-{d}", .{i}),
-            .root_module = mongo_compile_errors,
+            .name = b.fmt("mongo-bson-compile-error-{d}", .{i}),
+            .root_module = mongo_bson_compile_errors,
             .filters = &.{case[0]},
         });
         compile.expect_errors = .{ .contains = case[1] };
-        test_mongo.dependOn(&compile.step);
+        test_mongo_bson.dependOn(&compile.step);
     }
 
     // mongo compile errors of the collection API: documents of types that
@@ -783,7 +803,7 @@ pub fn build(b: *std.Build) void {
         compile.expect_errors = .{ .contains = case[1] };
         test_mongo.dependOn(&compile.step);
     }
-    addMongoGuide(b, test_mongo, .{ .core = core, .mongo = mongo }, target, optimize, tsan);
+    addMongoGuide(b, test_mongo, .{ .core = core, .mongo_bson = mongo_bson, .mongo = mongo }, target, optimize, tsan);
 
     // rpc-nats panic program: a second conn() of one ZefirNats panics in
     // safe builds, since one adapter serves one transport. Like the rpc
@@ -1048,6 +1068,7 @@ fn addRpcGuide(
 /// The modules that the examples of the mongo guide import here.
 const MongoGuideModules = struct {
     core: *std.Build.Module,
+    mongo_bson: *std.Build.Module,
     mongo: *std.Build.Module,
 };
 
@@ -1070,6 +1091,7 @@ fn addMongoGuide(
     const dir = "src/mongo/examples/";
     const imports: []const std.Build.Module.Import = &.{
         .{ .name = "core", .module = m.core },
+        .{ .name = "mongo-bson", .module = m.mongo_bson },
         .{ .name = "mongo", .module = m.mongo },
     };
     for (mongo_guide.tests) |name| {

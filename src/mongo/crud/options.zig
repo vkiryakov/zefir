@@ -11,7 +11,7 @@
 //! them in the body of `mongo.Client.write` or `runCommand`.
 
 const std = @import("std");
-const bson = @import("../bson.zig");
+const bson = @import("mongo-bson");
 const errors = @import("../errors.zig");
 const results = @import("results.zig");
 const Diagnostics = errors.Diagnostics;

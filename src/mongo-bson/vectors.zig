@@ -1,4 +1,4 @@
-//! Test vectors of `mongo.bson`, written for zefir from the BSON spec
+//! Test vectors of zefir-mongo-bson, written for zefir from the BSON spec
 //! (https://bsonspec.org/spec.html). Nothing here comes from the
 //! bson-corpus of mongodb/specifications, whose license does not fit
 //! zefir: the ObjectId, the UUID, the date, the timestamp and the bytes of
@@ -10,7 +10,7 @@
 //! bytes that no reader may accept.
 
 const std = @import("std");
-const bson = @import("../bson.zig");
+const bson = @import("root.zig");
 const Value = bson.Value;
 
 /// A document of one element, "a".

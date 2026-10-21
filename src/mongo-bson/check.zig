@@ -4,7 +4,7 @@
 //! `bson.decode` stop the build with its message.
 
 const std = @import("std");
-const bson = @import("../bson.zig");
+const bson = @import("root.zig");
 
 /// Which way the codec goes.
 pub const Direction = enum { encode, decode };
@@ -22,7 +22,7 @@ pub fn value(comptime T: type, comptime direction: Direction) ?[]const u8 {
 }
 
 /// Whether the codec writes `T` as the BSON value of its own: the documents
-/// and values of `mongo.bson` and its special types.
+/// and values of zefir-mongo-bson and its special types.
 pub fn isSpecial(comptime T: type) bool {
     inline for (.{
         bson.RawDocument, bson.OwnedDocument,       bson.Value,  bson.ObjectId,
