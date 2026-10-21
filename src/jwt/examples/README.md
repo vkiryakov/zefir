@@ -588,8 +588,9 @@ pub const LoginResponse = struct {
 
 pub fn login(self: *LoginController, ctx: *http.Context) !http.Json(LoginResponse) {
     const body = try ctx.json(LoginRequest);
-    // A wrong name or secret: 401, as on any request.
-    const user = self.userOf(body.user, body.secret) orelse return error.Unauthenticated;
+    // A wrong name or secret: a 401 of the sign-in's own (errors.zig),
+    // whatever token the app still sends.
+    const user = self.userOf(body.user, body.secret) orelse return error.InvalidCredentials;
     const token = try self.signer.sign(auth.Claims, ctx.io(), ctx.allocator(), &.{ .roles = user.roles }, .{ .subject = user.id });
     return .{ .value = .{ .access_token = token, .expires_in = self.signer.options.lifetime.toSeconds() } };
 }
@@ -791,8 +792,8 @@ pub fn requireUser(ctx: *http.Context) !http.MiddlewareResult {
     return .next;
 }
 
-/// The value of `WWW-Authenticate` for a 401, as RFC 6750 §3 has it:
-/// `Bearer` when the request brought no token, and with
+/// The value of `WWW-Authenticate` for the 401 of `requireUser`, as RFC
+/// 6750 §3 has it: `Bearer` when the request brought no token, and with
 /// `error="invalid_token"` and the reason when `JwtAuth` refused one. The
 /// texts of `jwt.describe` stand between quotes as they are.
 pub fn challenge(ctx: *http.Context) ![]const u8 {
@@ -812,17 +813,21 @@ pub fn challenge(ctx: *http.Context) ![]const u8 {
   the token that has just expired.
 - **`requireUser`** stands where a user is needed: without one,
   `error.Unauthenticated`, 401. A wrong token never passes as a user.
-- **`challenge`** writes `WWW-Authenticate` for the answer: `Bearer` when
-  no token came, and with `error="invalid_token"` and the text of
-  `jwt.describe` when one was refused, as RFC 6750 asks.
+- **`challenge`** writes `WWW-Authenticate` for the 401 of `requireUser`:
+  `Bearer` when no token came, and with `error="invalid_token"` and the
+  text of `jwt.describe` when one was refused, as RFC 6750 asks.
 
-The error handler of orders adds that header to every 401, and maps the
-errors of `sign`:
+The error handler of orders adds that header to the 401 of `requireUser`.
+The sign-in refuses a wrong name or secret with an error of its own,
+`InvalidCredentials`, and its 401 says `Bearer` alone: the reason a token
+was refused is no answer to a mistyped secret, even while Ann's app still
+sends her expired token. The handler also maps the errors of `sign`:
 
 ```zig
 //! The error handler of the orders service: the one place where errors
 //! become responses. Every 401 carries `WWW-Authenticate`, as RFC 9110
-//! asks, with the reason when a token was refused (RFC 6750 §3).
+//! asks: that of `requireUser` with the reason when a token was refused
+//! (RFC 6750 §3), that of the sign-in without one.
 
 const http = @import("http");
 const auth = @import("auth.zig");
@@ -836,6 +841,8 @@ pub const ApiError = struct {
 pub const AppErrors = struct {
     pub fn mapError(err: anyerror) http.ErrorResponse(ApiError) {
         return switch (err) {
+            // The sign-in's own refusal of a wrong name or secret.
+            error.InvalidCredentials => .{ .status = 401, .body = .{ .code = "invalid_credentials", .message = "Wrong user or secret" } },
             // jwt.Signer refuses only what no token can hold, such as a
             // string that is not UTF-8, and a key that deinit wiped too
             // early: mistakes of the program.
@@ -845,7 +852,14 @@ pub const AppErrors = struct {
     }
 
     pub fn handle(_: *AppErrors, ctx: *http.Context, err: anyerror, _: *http.ErrorResponse(ApiError)) !http.ErrorAction {
-        if (err == error.Unauthenticated) try ctx.response.setHeader("www-authenticate", try auth.challenge(ctx));
+        switch (err) {
+            // requireUser found no user: the reason, if JwtAuth refused a token.
+            error.Unauthenticated => try ctx.response.setHeader("www-authenticate", try auth.challenge(ctx)),
+            // The sign-in refused the name or the secret: no reason of a
+            // token here, even when the app still sends one.
+            error.InvalidCredentials => try ctx.response.setHeader("www-authenticate", "Bearer"),
+            else => {},
+        }
         return .respond;
     }
 };
@@ -1288,6 +1302,23 @@ test "an expired token does not stop POST /api/login" {
     defer res.deinit();
     try testing.expectEqual(200, res.status);
     try testing.expect(std.mem.find(u8, s.records.written(), "Token refused reason=Expired claim=exp") != null);
+}
+
+test "with an expired token and a wrong secret, POST /api/login refuses the secret" {
+    var s: Service = undefined;
+    try s.start(.{});
+    defer s.stop();
+    const token = try s.tokenOfAnn();
+    defer testing.allocator.free(token);
+
+    // Ann's app still sends her old token, and she mistypes her secret: the
+    // answer is the sign-in's own, with nothing of the old token.
+    s.clock.set(noon + 16 * 60);
+    var res = try s.signIn("guess", token);
+    defer res.deinit();
+    try testing.expectEqual(401, res.status);
+    try testing.expectEqualStrings("Bearer", res.header("www-authenticate").?);
+    try testing.expectEqualStrings("{\"code\":\"invalid_credentials\",\"message\":\"Wrong user or secret\"}", res.body);
 }
 
 test "a token for billing alone is 401 at orders" {

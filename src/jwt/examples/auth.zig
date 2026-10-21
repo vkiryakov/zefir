@@ -90,8 +90,8 @@ pub fn requireUser(ctx: *http.Context) !http.MiddlewareResult {
     return .next;
 }
 
-/// The value of `WWW-Authenticate` for a 401, as RFC 6750 §3 has it:
-/// `Bearer` when the request brought no token, and with
+/// The value of `WWW-Authenticate` for the 401 of `requireUser`, as RFC
+/// 6750 §3 has it: `Bearer` when the request brought no token, and with
 /// `error="invalid_token"` and the reason when `JwtAuth` refused one. The
 /// texts of `jwt.describe` stand between quotes as they are.
 pub fn challenge(ctx: *http.Context) ![]const u8 {

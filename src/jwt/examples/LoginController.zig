@@ -55,8 +55,9 @@ pub const LoginResponse = struct {
 
 pub fn login(self: *LoginController, ctx: *http.Context) !http.Json(LoginResponse) {
     const body = try ctx.json(LoginRequest);
-    // A wrong name or secret: 401, as on any request.
-    const user = self.userOf(body.user, body.secret) orelse return error.Unauthenticated;
+    // A wrong name or secret: a 401 of the sign-in's own (errors.zig),
+    // whatever token the app still sends.
+    const user = self.userOf(body.user, body.secret) orelse return error.InvalidCredentials;
     const token = try self.signer.sign(auth.Claims, ctx.io(), ctx.allocator(), &.{ .roles = user.roles }, .{ .subject = user.id });
     return .{ .value = .{ .access_token = token, .expires_in = self.signer.options.lifetime.toSeconds() } };
 }

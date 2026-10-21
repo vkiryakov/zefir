@@ -220,6 +220,23 @@ test "an expired token does not stop POST /api/login" {
     try testing.expect(std.mem.find(u8, s.records.written(), "Token refused reason=Expired claim=exp") != null);
 }
 
+test "with an expired token and a wrong secret, POST /api/login refuses the secret" {
+    var s: Service = undefined;
+    try s.start(.{});
+    defer s.stop();
+    const token = try s.tokenOfAnn();
+    defer testing.allocator.free(token);
+
+    // Ann's app still sends her old token, and she mistypes her secret: the
+    // answer is the sign-in's own, with nothing of the old token.
+    s.clock.set(noon + 16 * 60);
+    var res = try s.signIn("guess", token);
+    defer res.deinit();
+    try testing.expectEqual(401, res.status);
+    try testing.expectEqualStrings("Bearer", res.header("www-authenticate").?);
+    try testing.expectEqualStrings("{\"code\":\"invalid_credentials\",\"message\":\"Wrong user or secret\"}", res.body);
+}
+
 test "a token for billing alone is 401 at orders" {
     var s: Service = undefined;
     try s.start(.{});
