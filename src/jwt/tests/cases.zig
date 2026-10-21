@@ -31,6 +31,8 @@ pub const compile_errors = [_]Fixture{
     .{ .file = dir ++ "name_of_missing_field.zig", .expect = "jwt: name_of_missing_field.Claims.claim_names.is_admin: name_of_missing_field.Claims has no field is_admin" },
     // Rules: the validator's own message.
     .{ .file = dir ++ "bad_rule.zig", .expect = "validator: bad_rule.Claims.field_rules.count: max_length expects a string, field is u64" },
+    // The same checks through verify.
+    .{ .file = dir ++ "verify_unsupported_type.zig", .expect = "jwt: verify_unsupported_type.Claims.ratio: f16 is not a claim type; " ++ claim_types },
 };
 
 const dir = "src/jwt/tests/compile_errors/";

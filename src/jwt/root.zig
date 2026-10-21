@@ -45,6 +45,28 @@ pub const Details = errors.Details;
 
 pub const Header = @import("header.zig").Header;
 pub const Registered = claims.Registered;
+pub const describe = errors.describe;
+
+/// What `Verifier.verify` gives for a token it accepts. Everything in it
+/// lives in the arena of the call and nothing points into the token.
+pub fn Verified(comptime Claims: type) type {
+    return struct {
+        header: Header,
+        registered: Registered,
+        /// The application's claims; `void` when the registered ones are
+        /// enough.
+        claims: Claims,
+    };
+}
+
+pub const VerifyOptions = struct {
+    /// Where `verify` says what a refusal was about, for the response and
+    /// the log; `verify` clears it first, so one `Details` serves many
+    /// calls.
+    details: ?*Details = null,
+};
+
+pub const Verifier = @import("Verifier.zig");
 
 pub const KeyOptions = struct {
     /// The key id, "kid": 1 to `max_key_id_bytes` bytes of visible ASCII,
@@ -85,6 +107,7 @@ test {
     _ = @import("vectors_test.zig");
     _ = @import("claims.zig");
     _ = @import("testing.zig");
+    _ = @import("Verifier.zig");
 }
 
 test "limits have their documented values" {
@@ -94,4 +117,8 @@ test "limits have their documented values" {
     const details: Details = .{};
     try std.testing.expectEqual(256, details.path_buf.len);
     try std.testing.expectEqual(253402300799, claims.max_numeric_date);
+    const verifier: Verifier.Options = .{ .keys = &.{}, .issuer = "orders", .audiences = &.{"orders"} };
+    try std.testing.expectEqual(60, verifier.leeway.toSeconds());
+    try std.testing.expectEqual(1, verifier.token_types.len);
+    try std.testing.expectEqualStrings("JWT", verifier.token_types[0]);
 }

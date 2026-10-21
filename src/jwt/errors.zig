@@ -88,6 +88,30 @@ pub const Details = struct {
     path_buf: [256]u8 = undefined,
 };
 
+/// A short English text of why `verify` refused a token, for the
+/// `error_description` of `WWW-Authenticate: Bearer` (RFC 6750 §3): ASCII
+/// without '"' and '\', such as "the token has expired".
+pub fn describe(err: VerifyError) []const u8 {
+    return switch (err) {
+        error.TokenTooLarge => "the token is too large",
+        error.Malformed => "the token is malformed",
+        error.UnsupportedAlgorithm => "the token's algorithm is not supported",
+        error.UnsupportedHeader => "the token's header asks for what is not supported",
+        error.WrongType => "the token is of another type",
+        error.UnknownKey => "the token's key is unknown",
+        error.AlgorithmMismatch => "the token's algorithm does not fit its key",
+        error.BadSignature => "the token's signature is invalid",
+        error.MissingClaim => "the token lacks a required claim",
+        error.InvalidClaims => "the token's claims are invalid",
+        error.WrongIssuer => "the token is from another issuer",
+        error.WrongAudience => "the token is not meant for this service",
+        error.Expired => "the token has expired",
+        error.NotYetValid => "the token is not valid yet",
+        error.ClaimsRejected => "the token's claims are not accepted",
+        error.OutOfMemory => "the server ran out of memory",
+    };
+}
+
 const testing = std.testing;
 
 fn names(comptime E: type) usize {
@@ -101,6 +125,16 @@ test "the error sets hold one name per reason" {
     // What sign refuses, verify would refuse too.
     const refused: VerifyError = @as(SignError, error.InvalidClaims);
     try testing.expectEqual(error.InvalidClaims, refused);
+}
+
+test "describe gives every error a short text for error_description" {
+    inline for (@typeInfo(VerifyError).error_set.error_names.?) |name| {
+        const text = describe(@field(VerifyError, name));
+        try testing.expect(text.len > 0);
+        // RFC 6750 §3: error_description is %x20-21 / %x23-5B / %x5D-7E.
+        for (text) |c| try testing.expect(c >= 0x20 and c <= 0x7e and c != '"' and c != '\\');
+    }
+    try testing.expectEqualStrings("the token has expired", describe(error.Expired));
 }
 
 test "a fresh Details names nothing" {
