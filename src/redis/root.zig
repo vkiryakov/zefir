@@ -80,6 +80,8 @@ test {
     _ = @import("engine/connect.zig");
     _ = @import("engine/Address.zig");
     _ = @import("tests/connection_tests.zig");
+    _ = @import("engine/handshake.zig");
+    _ = @import("tests/handshake_tests.zig");
 }
 
 test "the package version reaches the module" {

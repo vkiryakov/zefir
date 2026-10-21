@@ -341,7 +341,7 @@ pub const Decoder = struct {
 
 /// What came, for the text of UnexpectedReply: its kind and its size,
 /// never its value.
-const Kind = struct {
+pub const Kind = struct {
     element: Element,
     /// The length of a simple string.
     len: ?usize,

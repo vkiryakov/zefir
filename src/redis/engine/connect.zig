@@ -13,9 +13,85 @@
 const std = @import("std");
 const Io = std.Io;
 const net = Io.net;
+const Allocator = std.mem.Allocator;
 const core = @import("core");
+const Diagnostics = @import("../errors.zig").Diagnostics;
 const Address = @import("Address.zig");
+const Connection = @import("Connection.zig");
 const DeadlineStream = @import("DeadlineStream.zig");
+const handshake = @import("handshake.zig");
+const race = @import("race.zig");
+
+/// The errors of `open`: those of the attempt, which leave the details in
+/// the diagnostics; `Timeout` when the deadline came first; `Canceled`
+/// when the caller's task was canceled, which stays canceled; `Stopped`
+/// when another task stopped the attempt; `ConcurrencyUnavailable` when
+/// the attempt found no task to run in.
+pub const OpenError = handshake.Error || error{ Stopped, Timeout, ConcurrencyUnavailable };
+
+/// Opens a connection to `address` and runs the handshake of `setup` on
+/// it, all of it before `deadline`, in a task of its own; null: no limit,
+/// and the caller's task does it. A reply of the connection may take
+/// `max_reply_bytes` on the wire. `attempt` lets another task stop it.
+pub fn open(io: Io, gpa: Allocator, address: Address, max_reply_bytes: usize, setup: *const handshake.Setup, deadline: ?core.Deadline, attempt: *Attempt, d: ?*Diagnostics) OpenError!*Connection {
+    // The attempt's own diagnostics: what it says counts only when its
+    // error is the one returned.
+    var attempt_d: Diagnostics = .{};
+    const limit = deadline orelse return openNow(io, gpa, address, max_reply_bytes, setup, attempt, d orelse &attempt_d);
+    return race.race(io, .{ .deadline = limit, .stop = &attempt.stopping }, openNow, .{ io, gpa, address, max_reply_bytes, setup, attempt, &attempt_d }, destroy, .{
+        .context = attempt,
+        .function = Attempt.abort,
+    }) catch |err| {
+        switch (err) {
+            error.Unavailable, error.Unsupported, error.AuthenticationFailed, error.InvalidArgument => if (d) |x| {
+                x.* = attempt_d;
+            },
+            else => {},
+        }
+        return err;
+    };
+}
+
+const AttemptError = handshake.Error || error{Stopped};
+
+/// The attempt in the task that runs it. A stopped attempt ends with
+/// `error.Stopped`, whatever its socket said: a socket that its own side
+/// shut down ends the stream on most systems, and answers
+/// `error.Unexpected` on Windows. The task's own cancelation stays what it
+/// is, so that the task keeps it.
+fn openNow(io: Io, gpa: Allocator, address: Address, max_reply_bytes: usize, setup: *const handshake.Setup, attempt: *Attempt, d: *Diagnostics) AttemptError!*Connection {
+    return openUnlessStopped(io, gpa, address, max_reply_bytes, setup, attempt, d) catch |err| {
+        if (err != error.Canceled and attempt.isStopped(io)) return error.Stopped;
+        return err;
+    };
+}
+
+fn openUnlessStopped(io: Io, gpa: Allocator, address: Address, max_reply_bytes: usize, setup: *const handshake.Setup, attempt: *Attempt, d: *Diagnostics) AttemptError!*Connection {
+    const stream = dial(io, address) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => {
+            d.set(.connect, err, "cannot connect to {f}: {t}", .{ address, err });
+            return error.Unavailable;
+        },
+    };
+    const conn = Connection.create(gpa, io, stream, address, max_reply_bytes) catch {
+        stream.close(io);
+        return error.OutOfMemory;
+    };
+    errdefer conn.destroy();
+    if (!attempt.hold(io, &conn.stream)) return error.Stopped;
+    // It runs before the errdefer above: the attempt lets the stream go
+    // before the stream is freed.
+    defer attempt.release(io);
+    try handshake.run(conn, setup.*, d);
+    return conn;
+}
+
+/// A connection that came after the deadline.
+fn destroy(io: Io, conn: *Connection) void {
+    _ = io;
+    conn.destroy();
+}
 
 /// What ends an attempt to open a connection first.
 pub const Budget = struct {

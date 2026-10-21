@@ -11,6 +11,8 @@
 //!   read into an arena; `redis.Value` is this type.
 //! - `decode`, `Decoder`, `needsAllocator` and `checkReply` — a reply read
 //!   into the type a call names, by the rules of the design's §3.3.
+//! - `Kind` — the kind and the size of an element, never its value, for
+//!   the texts of errors: "a bulk string of 3 bytes".
 //! - `args` — the arguments of commands, by the rules of the design's §3.2.
 
 const std = @import("std");
@@ -27,6 +29,7 @@ pub const DecodeError = decoding.Error;
 pub const Decoder = decoding.Decoder;
 pub const needsAllocator = decoding.needsAllocator;
 pub const checkReply = decoding.checkReply;
+pub const Kind = decoding.Kind;
 pub const args = @import("resp/args.zig");
 
 test {
