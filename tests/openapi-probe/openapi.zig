@@ -247,7 +247,12 @@ pub fn write(w: *std.Io.Writer, doc: *const Document) Error!void {
 const model_quota = .{ .base = 1_000_000, .per_route = 200_000 };
 const render_quota = .{ .base = 1_000_000, .per_route = 400_000 };
 
+/// A root module that declares `pub const openapi_quota: u32` sets the
+/// quota itself: `measure.sh --quota` so searches for the smallest that
+/// builds (see `TransformErrorOf`).
 fn quotaOf(comptime routes: usize, comptime base: u64, comptime per_route: u64) u32 {
+    const root = @import("root");
+    if (@hasDecl(root, "openapi_quota")) return root.openapi_quota;
     return @intCast(@min(std.math.maxInt(u32), base + per_route * routes));
 }
 
@@ -350,7 +355,7 @@ pub fn model(comptime O: type) *const Document {
                 // The errors the strict error check reads for the route:
                 // its chain, its handler, the transforms of its value.
                 const Errors = Global || ControllerErrors || chainErrors(@TypeOf(Route.middleware), C) ||
-                    handlerErrors(C, name) || (if (Answer == void) error{} else v.TransformError(Answer));
+                    handlerErrors(C, name) || (if (Answer == void) error{} else TransformErrorOf(Answer));
                 var parameters: []const Parameter = &.{};
                 if (route.path != void) parameters = parameters ++ parametersOf(route.path, "path");
                 if (route.query != void) parameters = parameters ++ parametersOf(route.query, "query");
@@ -435,6 +440,15 @@ fn answerOf(comptime C: type, comptime name: []const u8) type {
     const R = @typeInfo(@TypeOf(@field(C, name))).@"fn".return_type.?;
     const Payload = if (@typeInfo(R) == .error_union) @typeInfo(R).error_union.payload else R;
     return if (Payload == void) void else Payload.Value;
+}
+
+/// `v.TransformError(T)`, evaluated in a declaration of its own: the
+/// validator raises the eval branch quota of the evaluation that calls it
+/// to 10 million, which would hide the quota the document needs.
+fn TransformErrorOf(comptime T: type) type {
+    return struct {
+        const Set = v.TransformError(T);
+    }.Set;
 }
 
 fn handlerErrors(comptime C: type, comptime name: []const u8) type {

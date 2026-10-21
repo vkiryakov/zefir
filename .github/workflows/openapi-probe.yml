@@ -111,6 +111,37 @@ jobs:
             ${{ runner.temp }}/results/n${{ matrix.routes }}/*.time
           if-no-files-found: ignore
 
+  # The smallest eval branch quota with which the document builds, for B
+  # and A: Sema-only builds, searched by doubling, then halving.
+  quota:
+    name: quota (${{ matrix.routes }} routes)
+    needs: smoke
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        routes: [50, 100, 300]
+    runs-on: ubuntu-latest
+    env:
+      ROUTES: ${{ matrix.routes }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: mlugg/setup-zig@v2
+        with:
+          use-cache: false
+      - name: B
+        run: tests/openapi-probe/measure.sh --quota "$ROUTES" "$RUNNER_TEMP/results/quota$ROUTES" b
+      - name: A
+        run: tests/openapi-probe/measure.sh --quota "$ROUTES" "$RUNNER_TEMP/results/quota$ROUTES" a
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: openapi-probe-quota${{ matrix.routes }}
+          path: |
+            ${{ runner.temp }}/results/quota${{ matrix.routes }}/*.tsv
+            ${{ runner.temp }}/results/quota${{ matrix.routes }}/*.log
+          if-no-files-found: ignore
+
   # The other ways of A on 50 routes, on one runner, cold builds only: the
   # first pass of count + fill alone, count + fill, and ++ per piece.
   extra:
@@ -151,7 +182,7 @@ jobs:
   # The table of every size.
   report:
     name: report
-    needs: [smoke, measure, extra]
+    needs: [smoke, measure, extra, quota]
     if: ${{ !cancelled() }}
     timeout-minutes: 10
     runs-on: ubuntu-latest

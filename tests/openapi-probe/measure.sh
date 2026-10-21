@@ -58,8 +58,80 @@ if [ "${1:-}" = --check ]; then
   exit
 fi
 
+# The smallest eval branch quota of the document that builds: a root module
+# that sets `openapi_quota`, Sema only (-fno-emit-bin), the quota doubled
+# from 1M until the build passes, then halved to within 2%.
+if [ "${1:-}" = --quota ]; then
+  routes=$2
+  mkdir -p "$3"
+  out=$(cd "$3" && pwd)
+  variant=$4
+  case "$variant" in
+    a) decl=A ;;
+    b) decl=B ;;
+    afill) decl=AFill ;;
+    *) echo "measure.sh --quota: the variant is a, b or afill" >&2; exit 2 ;;
+  esac
+  work=${WORK:-$out/work-quota-$variant}
+  mkdir -p "$work"
+  python3 -I "$here/gen_app.py" "$routes" "$work/app.zig" || exit 1
+  root="$here/main_quota_$variant.zig"
+  builds=0
+  # passes <quota>: 0 when the build passes, 1 when the quota stops it.
+  passes() {
+    local start end status log="$out/quota-n$routes-$variant-$1.log"
+    printf '%s\n' \
+      'const std = @import("std");' \
+      "pub const openapi_quota: u32 = $1;" \
+      'pub const panic = std.debug.FullPanic(exitOnPanic);' \
+      'fn exitOnPanic(message: []const u8, _: ?usize) noreturn {' \
+      '    std.debug.print("panic: {s}\n", .{message});' \
+      '    std.process.exit(3);' \
+      '}' \
+      'pub fn main(init: std.process.Init) !void {' \
+      "    return @import(\"run.zig\").run(init, @import(\"openapi\").$decl);" \
+      '}' >"$root"
+    builds=$((builds + 1))
+    start=$(date +%s.%N)
+    timeout --signal=KILL 900 zig build-exe -fllvm -fno-emit-bin --name "quota-$variant" \
+      --dep app --dep openapi --dep http "-Mroot=$root" \
+      --dep http --dep validator --dep openapi "-Mapp=$work/app.zig" \
+      --dep http --dep validator "-Mopenapi=$here/openapi.zig" \
+      --dep core --dep validator "-Mhttp=$zefir/src/http/root.zig" \
+      "-Mvalidator=$zefir/src/validator/root.zig" \
+      "-Mcore=$zefir/src/core/root.zig" \
+      --cache-dir "$work/cache/local" --global-cache-dir "$work/cache/global" >"$log" 2>&1
+    status=$?
+    end=$(date +%s.%N)
+    echo "quota $1: status $status in $(awk -v a="$start" -v b="$end" 'BEGIN { printf "%.1f", b - a }') s"
+    [ "$status" -eq 0 ] && return 0
+    grep -q 'evaluation exceeded' "$log" && return 1
+    echo "measure.sh --quota: the build failed for another reason:" >&2
+    tail -n 60 "$log" >&2
+    exit 1
+  }
+  low=0
+  high=1048576
+  until passes "$high"; do
+    [ "$high" -lt 4294967295 ] || { echo "measure.sh --quota: over the largest quota" >&2; exit 1; }
+    low=$high
+    high=$((high * 2))
+    [ "$high" -le 4294967295 ] || high=4294967295
+  done
+  while [ $((high - low)) -gt $((high / 50)) ]; do
+    middle=$(((low + high) / 2))
+    if passes "$middle"; then high=$middle; else low=$middle; fi
+  done
+  rm -f "$root"
+  [ -f "$out/quota.tsv" ] || printf 'routes\tvariant\tquota_fails\tquota_passes\tbuilds\n' >"$out/quota.tsv"
+  printf '%s\t%s\t%s\t%s\t%s\n' "$routes" "$variant" "$low" "$high" "$builds" >>"$out/quota.tsv"
+  echo "- $routes routes, $variant: the document builds with an eval branch quota of $high, not with $low ($builds Sema-only builds)" |
+    tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
+  exit 0
+fi
+
 if [ $# -lt 3 ]; then
-  echo "usage: measure.sh <routes> <out-dir> <variant>... | measure.sh --check <out-dir>" >&2
+  echo "usage: measure.sh <routes> <out-dir> <variant>... | measure.sh --check <out-dir> | measure.sh --quota <routes> <out-dir> <variant>" >&2
   exit 2
 fi
 routes=$1
@@ -143,8 +215,9 @@ build() {
   watcher=$!
   wait "$pid"
   status=$?
-  wait "$watcher"
+  # Before the watchdog's last second of sleep.
   end=$(date +%s.%N)
+  wait "$watcher"
   elapsed=$(awk -v a="$start" -v b="$end" 'BEGIN { printf "%.1f", b - a }')
   if [ "$status" -eq 0 ]; then
     result=ok
