@@ -372,7 +372,7 @@ fn needsOf(comptime O: type, comptime p: plan.Plan) Needs {
 /// nested literal such as `.{ .body = .ignore }` has a struct type of its
 /// own, which does not coerce to `UnknownFieldsOptions`: its fields are
 /// taken one by one.
-fn optionValue(comptime T: type, value: anytype) T {
+pub fn optionValue(comptime T: type, value: anytype) T {
     const V = @TypeOf(value);
     if (V == T) return value;
     switch (@typeInfo(T)) {

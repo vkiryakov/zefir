@@ -35,6 +35,7 @@ const errors = @import("errors.zig");
 const dto = @import("dto.zig");
 const middleware = @import("middleware.zig");
 const static_files = @import("static.zig");
+const describe_file = @import("describe.zig");
 
 pub const Server = @import("Server.zig");
 pub const Backend = @import("Backend.zig");
@@ -83,6 +84,12 @@ pub const static = static_files.static;
 pub const Static = static_files.Static;
 pub const StaticOptions = static_files.StaticOptions;
 
+// The server described at compile time, for a generator of documents.
+pub const describe = describe_file.describe;
+pub const Description = describe_file.Description;
+pub const RouteDescription = describe_file.RouteDescription;
+pub const ChainElement = describe_file.ChainElement;
+
 pub const routes = route_decls.routes;
 pub const get = route_decls.get;
 pub const post = route_decls.post;
@@ -102,6 +109,7 @@ test {
     _ = @import("path.zig");
     _ = @import("router.zig");
     _ = @import("plan.zig");
+    _ = @import("describe.zig");
     _ = @import("Server.zig");
     _ = @import("errors.zig");
     _ = @import("strict.zig");
