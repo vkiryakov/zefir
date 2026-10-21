@@ -23,8 +23,23 @@ pub const Program = struct {
     env: []const Setting = &.{},
 };
 
+/// The private key of orders in the runs of this build: Ed25519 in
+/// PKCS#8, as `openssl genpkey -algorithm ed25519` writes it. README.md
+/// runs the programs with the reader's own key, `"$(cat orders.pem)"`;
+/// they print the same with any key.
+const orders_key =
+    \\-----BEGIN PRIVATE KEY-----
+    \\MC4CAQAwBQYDK2VwBCIEIMhtZbAEuSrkg7vHeYU/2RAvkPjq6goubPZ3RsrYBmNR
+    \\-----END PRIVATE KEY-----
+;
+
+const signing_key: Setting = .{ .name = "APP_AUTH_SIGNING_KEY", .value = orders_key, .shown = "\"$(cat orders.pem)\"" };
+const key_id: Setting = .{ .name = "APP_AUTH_KEY_ID", .value = "2026-10" };
+
 /// The programs: `zig build test-jwt` runs them.
-pub const programs = [_]Program{};
+pub const programs = [_]Program{
+    .{ .name = "minute", .env = &.{ signing_key, key_id } },
+};
 
 /// The other files README.md shows as they are: the code of the services
 /// and their tests.
