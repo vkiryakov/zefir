@@ -54,6 +54,47 @@ pub const Reader = struct {
         };
     }
 
+    /// The next value, which must be a number: its text as the JSON
+    /// writes it, such as "-1.5e3".
+    pub fn number(r: *Reader) Error![]const u8 {
+        if (try r.peek() != .number) return error.Malformed;
+        return switch (try r.next()) {
+            .number => |text| text,
+            .allocated_number => |text| text,
+            else => error.Malformed,
+        };
+    }
+
+    /// The next value, which must be `true` or `false`.
+    pub fn boolean(r: *Reader) Error!bool {
+        return switch (try r.peek()) {
+            .true, .false => try r.next() == .true,
+            else => error.Malformed,
+        };
+    }
+
+    /// Whether the next value is `null`; if it is, it is read.
+    pub fn isNull(r: *Reader) Error!bool {
+        if (try r.peek() != .null) return false;
+        _ = try r.next();
+        return true;
+    }
+
+    /// Reads the `[` of an array; `nextItem` walks its items.
+    pub fn beginArray(r: *Reader) Error!void {
+        if (try r.peek() != .array_begin) return error.Malformed;
+        _ = try r.next();
+        try r.deeper();
+    }
+
+    /// Whether the array being read has another item, which the caller
+    /// then reads or skips; false at the array's end, whose `]` it reads.
+    pub fn nextItem(r: *Reader) Error!bool {
+        if (try r.peek() != .array_end) return true;
+        _ = try r.next();
+        return false;
+    }
+
     /// Past the next value, whatever it holds. Its nesting counts toward
     /// `max_json_depth` as if it were read.
     pub fn skip(r: *Reader) Error!void {
@@ -154,6 +195,37 @@ test "a value of another kind, broken JSON and text after the value are Malforme
     try testing.expectError(error.Malformed, at_end.skip());
 }
 
+test "numbers, booleans, null and arrays" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    var r: Reader = .init(arena_state.allocator(), "{\"n\":-1.5e3,\"t\":true,\"f\":false,\"z\":null,\"a\":[1,[]],\"s\":\"x\"}");
+    try r.beginObject();
+    _ = try r.nextKey();
+    try testing.expectEqualStrings("-1.5e3", try r.number());
+    _ = try r.nextKey();
+    try testing.expect(try r.boolean());
+    _ = try r.nextKey();
+    try testing.expect(!try r.isNull());
+    try testing.expect(!try r.boolean());
+    _ = try r.nextKey();
+    try testing.expect(try r.isNull());
+    _ = try r.nextKey();
+    try r.beginArray();
+    try testing.expect(try r.nextItem());
+    try testing.expectEqualStrings("1", try r.number());
+    try testing.expect(try r.nextItem());
+    try r.beginArray();
+    try testing.expect(!try r.nextItem());
+    try testing.expect(!try r.nextItem());
+    _ = try r.nextKey();
+    try testing.expectError(error.Malformed, r.number());
+    try testing.expectError(error.Malformed, r.boolean());
+    try testing.expectError(error.Malformed, r.beginArray());
+    try testing.expectEqualStrings("x", try r.string());
+    try testing.expectEqual(null, try r.nextKey());
+    try r.finish();
+}
+
 /// `{"x":` and `arrays` arrays inside each other, then `}`.
 fn nested(arena: std.mem.Allocator, arrays: usize) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
@@ -180,4 +252,11 @@ test "the top object counts as one level of max_json_depth" {
     try too_deep.beginObject();
     _ = try too_deep.nextKey();
     try testing.expectError(error.Malformed, too_deep.skip());
+
+    // An array read by beginArray counts the same.
+    var read_deep: Reader = .init(arena, try nested(arena, root.max_json_depth));
+    try read_deep.beginObject();
+    _ = try read_deep.nextKey();
+    for (0..root.max_json_depth - 1) |_| try read_deep.beginArray();
+    try testing.expectError(error.Malformed, read_deep.beginArray());
 }

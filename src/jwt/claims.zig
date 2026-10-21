@@ -24,6 +24,11 @@
 
 const std = @import("std");
 const v = @import("validator");
+const root = @import("root.zig");
+const errors = @import("errors.zig");
+const json = @import("json.zig");
+
+const Details = errors.Details;
 
 /// The registered claims (RFC 7519 §4.1), which jwt sets and checks itself.
 pub const registered_names = [_][]const u8{ "iss", "sub", "aud", "exp", "nbf", "iat", "jti" };
@@ -155,6 +160,238 @@ fn claimName(comptime T: type, comptime field: []const u8) ?[]const u8 {
     return asName(@field(T.claim_names, field));
 }
 
+/// The code of a claim whose JSON is of another type than its field.
+pub const invalid_type = "jwt.invalid_type";
+/// The code of a required claim that the payload lacks.
+pub const missing_claim = "jwt.missing_claim";
+/// The code of a number that its field cannot hold.
+pub const out_of_range = "jwt.out_of_range";
+
+/// The messages of the mapping, without the claim's name; static, as the
+/// validator's are, so a violation never holds bytes of the token.
+const messages = struct {
+    const required = "is required";
+    const integer = "must be an integer";
+    const number = "must be a number";
+    const true_or_false = "must be true or false";
+    const string = "must be a string";
+    const array = "must be an array";
+    const object = "must be an object";
+    const range = "is out of range";
+
+    /// "must be one of low, high": the variants of `E`.
+    fn oneOf(comptime E: type) []const u8 {
+        comptime {
+            var text: []const u8 = "must be one of ";
+            for (@typeInfo(E).@"enum".field_names, 0..) |name, i| {
+                text = text ++ (if (i == 0) "" else ", ") ++ name;
+            }
+            return text;
+        }
+    }
+};
+
+pub const DecodeError = error{ Malformed, InvalidClaims, OutOfMemory };
+
+/// The claims of `payload`, a JSON object, as a `Claims`; `void` only
+/// checks that the payload is an object. Unknown claims, the registered
+/// ones among them, are skipped. `Malformed`: not one JSON object, a claim
+/// of the struct given twice, or nesting deeper than `max_json_depth`.
+/// `InvalidClaims`: the first claim, in the order of the payload, that does
+/// not fit its field, or a required claim that is absent; the violation is
+/// in `details.violation`, its path in `details.path_buf`. Strings point
+/// into `payload`, or into `arena` when they had escapes. The first problem
+/// ends the read; `verify` has read the whole payload for the registered
+/// claims before.
+pub fn decode(comptime Claims: type, arena: std.mem.Allocator, payload: []const u8, details: *Details) DecodeError!Claims {
+    comptime check(Claims);
+    var decoder: Decoder = .{ .reader = .init(arena, payload), .arena = arena, .details = details };
+    var claims: Claims = undefined;
+    if (Claims == void) {
+        try decoder.reader.beginObject();
+        while (try decoder.reader.nextKey()) |_| try decoder.reader.skip();
+    } else {
+        try decoder.readObject(Claims, &claims);
+    }
+    try decoder.reader.finish();
+    return claims;
+}
+
+const Decoder = struct {
+    reader: json.Reader,
+    arena: std.mem.Allocator,
+    details: *Details,
+    /// The length of the path of the value being read, in
+    /// `details.path_buf`; past its end when the path does not fit.
+    path_len: usize = 0,
+
+    /// The claim being read does not fit: `InvalidClaims`, with a violation
+    /// at the path, or without a field when the path did not fit.
+    fn fail(d: *Decoder, code: []const u8, message: []const u8) DecodeError {
+        const fits = d.path_len <= d.details.path_buf.len;
+        d.details.violation = .{ .code = code, .message = message, .field = if (fits) d.details.path_buf[0..d.path_len] else null };
+        return error.InvalidClaims;
+    }
+
+    /// Adds `bytes` to the path, as much of them as fits, and returns the
+    /// length to go back to.
+    fn push(d: *Decoder, bytes: []const u8) usize {
+        const mark = d.path_len;
+        const buf = &d.details.path_buf;
+        if (d.path_len < buf.len) {
+            const n = @min(bytes.len, buf.len - d.path_len);
+            @memcpy(buf[d.path_len..][0..n], bytes[0..n]);
+        }
+        d.path_len +|= bytes.len;
+        return mark;
+    }
+
+    fn pushName(d: *Decoder, name: []const u8) usize {
+        const mark = d.path_len;
+        if (mark > 0) _ = d.push(".");
+        _ = d.push(name);
+        return mark;
+    }
+
+    fn pushIndex(d: *Decoder, index: usize) usize {
+        var buf: [24]u8 = undefined;
+        return d.push(std.fmt.bufPrint(&buf, "[{d}]", .{index}) catch unreachable);
+    }
+
+    /// Reads the next value into `out`.
+    fn read(d: *Decoder, comptime T: type, out: *T) DecodeError!void {
+        const kind = try d.reader.peek();
+        switch (@typeInfo(T)) {
+            .optional => |o| {
+                if (try d.reader.isNull()) {
+                    out.* = null;
+                    return;
+                }
+                var payload: o.child = undefined;
+                try d.read(o.child, &payload);
+                out.* = payload;
+                return;
+            },
+            .bool => if (kind == .true or kind == .false) {
+                out.* = try d.reader.boolean();
+                return;
+            },
+            .int => if (kind == .number) {
+                const text = try d.reader.number();
+                if (std.mem.findAny(u8, text, ".eE") != null) return d.fail(invalid_type, messages.integer);
+                out.* = std.fmt.parseInt(T, text, 10) catch |err| switch (err) {
+                    error.Overflow => return d.fail(out_of_range, messages.range),
+                    error.InvalidCharacter => return error.Malformed,
+                };
+                return;
+            },
+            .float => if (kind == .number) {
+                const value = std.fmt.parseFloat(T, try d.reader.number()) catch return error.Malformed;
+                if (!std.math.isFinite(value)) return d.fail(out_of_range, messages.range);
+                out.* = value;
+                return;
+            },
+            .@"enum" => if (kind == .string) {
+                out.* = std.meta.stringToEnum(T, try d.reader.string()) orelse return d.fail(invalid_type, comptime messages.oneOf(T));
+                return;
+            },
+            .pointer => |p| if (p.child == u8) {
+                if (kind == .string) {
+                    out.* = try d.reader.string();
+                    return;
+                }
+            } else if (kind == .array_begin) {
+                return d.readList(p.child, out);
+            },
+            .@"struct" => if (kind == .object_begin) return d.readObject(T, out),
+            else => comptime unreachable,
+        }
+        return d.fail(invalid_type, comptime messageOf(T));
+    }
+
+    fn readList(d: *Decoder, comptime Item: type, out: *[]const Item) DecodeError!void {
+        try d.reader.beginArray();
+        var items: std.ArrayList(Item) = .empty;
+        var index: usize = 0;
+        while (try d.reader.nextItem()) : (index += 1) {
+            const mark = d.pushIndex(index);
+            try d.read(Item, try items.addOne(d.arena));
+            d.path_len = mark;
+        }
+        out.* = items.items;
+    }
+
+    fn readObject(d: *Decoder, comptime S: type, out: *S) DecodeError!void {
+        const info = @typeInfo(S).@"struct";
+        try d.reader.beginObject();
+        var seen: [@max(1, info.field_names.len)]bool = @splat(false);
+        while (try d.reader.nextKey()) |key| {
+            const index = fieldIndex(S, key) orelse {
+                try d.reader.skip();
+                continue;
+            };
+            // A claim given twice: two readers could each take another
+            // value of it.
+            if (seen[index]) return error.Malformed;
+            seen[index] = true;
+            inline for (info.field_names, info.field_types, info.field_attrs, 0..) |name, F, attrs, i| {
+                if (comptime !attrs.@"comptime") {
+                    if (index == i) {
+                        const mark = d.pushName(comptime nameOf(S, @field(std.meta.FieldEnum(S), name)));
+                        try d.read(F, &@field(out, name));
+                        d.path_len = mark;
+                    }
+                }
+            }
+        }
+        inline for (info.field_names, info.field_types, info.field_attrs, 0..) |name, F, attrs, i| {
+            if (comptime !attrs.@"comptime") {
+                if (!seen[i]) {
+                    if (comptime attrs.defaultValue(F)) |default| {
+                        @field(out, name) = default;
+                    } else if (comptime @typeInfo(F) == .optional) {
+                        @field(out, name) = null;
+                    } else {
+                        _ = d.pushName(comptime nameOf(S, @field(std.meta.FieldEnum(S), name)));
+                        return d.fail(missing_claim, messages.required);
+                    }
+                }
+            }
+        }
+    }
+};
+
+/// The index of the non-comptime field of `S` whose claim name is `key`.
+fn fieldIndex(comptime S: type, key: []const u8) ?usize {
+    const table = comptime lookup(S);
+    return table.get(key);
+}
+
+fn lookup(comptime S: type) std.StaticStringMap(usize) {
+    comptime {
+        const info = @typeInfo(S).@"struct";
+        var pairs: []const struct { []const u8, usize } = &.{};
+        for (info.field_names, info.field_attrs, 0..) |name, attrs, i| {
+            if (!attrs.@"comptime") pairs = pairs ++ .{.{ nameOf(S, @field(std.meta.FieldEnum(S), name)), i }};
+        }
+        return .initComptime(pairs);
+    }
+}
+
+/// What a value of `T` must be.
+fn messageOf(comptime T: type) []const u8 {
+    return switch (@typeInfo(T)) {
+        .optional => |o| messageOf(o.child),
+        .int => messages.integer,
+        .float => messages.number,
+        .bool => messages.true_or_false,
+        .@"enum" => messages.oneOf(T),
+        .@"struct" => messages.object,
+        .pointer => if (T == []const u8) messages.string else messages.array,
+        else => comptime unreachable,
+    };
+}
+
 /// `value` as a string, when it is one: a literal or a `[]const u8`.
 fn asName(comptime value: anytype) ?[]const u8 {
     const T = @TypeOf(value);
@@ -173,6 +410,7 @@ fn asName(comptime value: anytype) ?[]const u8 {
 }
 
 const testing = std.testing;
+const rfc7515 = @import("testdata/rfc7515.zig");
 
 const Named = struct {
     is_root: bool = false,
@@ -189,4 +427,255 @@ test "a claim is named by claim_names first, then by its outside name" {
     try testing.expectEqualStrings("level", comptime nameOf(Named, .level));
     comptime check(Named);
     comptime check(void);
+}
+
+/// `payload` decoded as a `T` in `arena`; on an error, prints what
+/// `Details` says.
+fn decoded(comptime T: type, arena: std.mem.Allocator, payload: []const u8) !T {
+    var details: Details = .{};
+    return decode(T, arena, payload, &details) catch |err| {
+        if (details.violation) |violation| std.debug.print("{t}: {s} at {?s}: {s}\n", .{ err, violation.code, violation.field, violation.message });
+        return err;
+    };
+}
+
+/// Decodes `payload` as a `T` and expects `InvalidClaims` with this
+/// violation; `field` null: a path that did not fit.
+fn expectViolation(comptime T: type, payload: []const u8, code: []const u8, field: ?[]const u8, message: []const u8) !void {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    var details: Details = .{};
+    if (decode(T, arena_state.allocator(), payload, &details)) |_| {
+        std.debug.print("decoded: {s}\n", .{payload});
+        return error.TestUnexpectedResult;
+    } else |err| try testing.expectEqual(error.InvalidClaims, err);
+    const violation = details.violation orelse return error.TestExpectedViolation;
+    try testing.expectEqualStrings(code, violation.code);
+    try testing.expectEqualStrings(message, violation.message);
+    if (field) |name| {
+        try testing.expectEqualStrings(name, violation.field orelse "(none)");
+    } else {
+        try testing.expectEqual(null, violation.field);
+    }
+    try testing.expectEqual(null, details.claim);
+}
+
+fn expectMalformed(comptime T: type, payload: []const u8) !void {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    var details: Details = .{};
+    try testing.expectError(error.Malformed, decode(T, arena_state.allocator(), payload, &details));
+}
+
+const Flag = struct { flag: bool };
+
+test "5.5: bool is true or false" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try testing.expect((try decoded(Flag, arena, "{\"flag\":true}")).flag);
+    try testing.expect(!(try decoded(Flag, arena, "{\"flag\":false}")).flag);
+    try expectViolation(Flag, "{\"flag\":1}", invalid_type, "flag", "must be true or false");
+    try expectViolation(Flag, "{\"flag\":\"true\"}", invalid_type, "flag", "must be true or false");
+}
+
+const Small = struct { small: i8 };
+const Count = struct { count: u32 };
+const Wide = struct { total: u64, delta: i64 };
+
+test "5.5: an integer is a number without a fraction or an exponent, within its type" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try testing.expectEqual(127, (try decoded(Small, arena, "{\"small\":127}")).small);
+    try testing.expectEqual(-128, (try decoded(Small, arena, "{\"small\":-128}")).small);
+    try expectViolation(Small, "{\"small\":128}", out_of_range, "small", "is out of range");
+    try expectViolation(Count, "{\"count\":-1}", out_of_range, "count", "is out of range");
+    try expectViolation(Count, "{\"count\":99999999999999999999999999}", out_of_range, "count", "is out of range");
+    const wide = try decoded(Wide, arena, "{\"total\":18446744073709551615,\"delta\":-9223372036854775808}");
+    try testing.expectEqual(std.math.maxInt(u64), wide.total);
+    try testing.expectEqual(std.math.minInt(i64), wide.delta);
+    try expectViolation(Count, "{\"count\":1.0}", invalid_type, "count", "must be an integer");
+    try expectViolation(Count, "{\"count\":1e3}", invalid_type, "count", "must be an integer");
+    try expectViolation(Count, "{\"count\":\"1\"}", invalid_type, "count", "must be an integer");
+}
+
+const Ratio = struct { ratio: f64 };
+const Single = struct { value: f32 };
+
+test "5.5: a float is a finite number" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try testing.expectEqual(1500, (try decoded(Ratio, arena, "{\"ratio\":1.5e3}")).ratio);
+    try testing.expectEqual(-2, (try decoded(Ratio, arena, "{\"ratio\":-2}")).ratio);
+    try testing.expectEqual(0.25, (try decoded(Single, arena, "{\"value\":0.25}")).value);
+    try expectViolation(Ratio, "{\"ratio\":1e400}", out_of_range, "ratio", "is out of range");
+    try expectViolation(Single, "{\"value\":1e39}", out_of_range, "value", "is out of range");
+    try expectViolation(Ratio, "{\"ratio\":true}", invalid_type, "ratio", "must be a number");
+}
+
+const Priority = enum { low, high };
+const Task = struct { priority: Priority };
+
+test "5.5: an enum is the name of one of its variants" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    try testing.expectEqual(.high, (try decoded(Task, arena_state.allocator(), "{\"priority\":\"high\"}")).priority);
+    try expectViolation(Task, "{\"priority\":\"urgent\"}", invalid_type, "priority", "must be one of low, high");
+    try expectViolation(Task, "{\"priority\":1}", invalid_type, "priority", "must be one of low, high");
+}
+
+const Note = struct { note: []const u8 };
+
+test "5.5: a string is decoded, its escapes into the arena" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const plain = "{\"note\":\"café 😀\"}";
+    const note = (try decoded(Note, arena, plain)).note;
+    try testing.expectEqualStrings("café 😀", note);
+    // Without escapes the string is a part of the payload.
+    try testing.expect(note.ptr == plain.ptr + 9);
+    const escaped = (try decoded(Note, arena, "{\"note\":\"caf\x5cu00e9 \x5cud83d\x5cude00 \x5c\"q\x5c\"\"}")).note;
+    try testing.expectEqualStrings("café 😀 \"q\"", escaped);
+    try expectViolation(Note, "{\"note\":5}", invalid_type, "note", "must be a string");
+    try expectViolation(Note, "{\"note\":null}", invalid_type, "note", "must be a string");
+}
+
+const Ids = struct { ids: []const u32 };
+
+test "5.5: a list is an array, each item of its type" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try testing.expectEqualSlices(u32, &.{ 1, 2 }, (try decoded(Ids, arena, "{\"ids\":[1,2]}")).ids);
+    try testing.expectEqual(0, (try decoded(Ids, arena, "{\"ids\":[]}")).ids.len);
+    try expectViolation(Ids, "{\"ids\":[1,\"a\"]}", invalid_type, "ids[1]", "must be an integer");
+    try expectViolation(Ids, "{\"ids\":\"x\"}", invalid_type, "ids", "must be an array");
+}
+
+const Maybe = struct { level: ?u32 };
+const MaybeDefault = struct { level: ?u32 = 7 };
+
+test "5.5: an optional is null or absent" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try testing.expectEqual(null, (try decoded(Maybe, arena, "{\"level\":null}")).level);
+    try testing.expectEqual(null, (try decoded(Maybe, arena, "{}")).level);
+    try testing.expectEqual(3, (try decoded(Maybe, arena, "{\"level\":3}")).level.?);
+    try testing.expectEqual(7, (try decoded(MaybeDefault, arena, "{}")).level.?);
+    try testing.expectEqual(null, (try decoded(MaybeDefault, arena, "{\"level\":null}")).level);
+    try expectViolation(Maybe, "{\"level\":\"3\"}", invalid_type, "level", "must be an integer");
+}
+
+const Profile = struct { count: u32, name: []const u8, page: u32 = 1 };
+
+test "5.5: a required claim that is absent is jwt.missing_claim, after the other keys" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    try expectViolation(Profile, "{\"name\":\"x\"}", missing_claim, "count", "is required");
+    // The value of the wrong type comes first, though its key is the last.
+    try expectViolation(Profile, "{\"page\":2,\"count\":\"x\"}", invalid_type, "count", "must be an integer");
+    const profile = try decoded(Profile, arena_state.allocator(), "{\"count\":2,\"name\":\"x\"}");
+    try testing.expectEqual(1, profile.page);
+}
+
+const Line = struct { sku: []const u8, qty: u32 = 1 };
+const Order = struct {
+    order: struct { id: u64, items: []const Line },
+};
+
+test "5.5: a nested struct is an object, and the path names each level" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const order = try decoded(Order, arena_state.allocator(), "{\"order\":{\"id\":5,\"items\":[{\"sku\":\"a\"},{\"sku\":\"b\",\"qty\":2}]}}");
+    try testing.expectEqual(5, order.order.id);
+    try testing.expectEqualStrings("b", order.order.items[1].sku);
+    try testing.expectEqual(2, order.order.items[1].qty);
+    try testing.expectEqual(1, order.order.items[0].qty);
+    try expectViolation(Order, "{\"order\":{\"id\":5,\"items\":[{\"sku\":\"a\"},{\"sku\":\"b\"},{\"qty\":3}]}}", missing_claim, "order.items[2].sku", "is required");
+    try expectViolation(Order, "{\"order\":[]}", invalid_type, "order", "must be an object");
+}
+
+const Renamed = struct {
+    user_name: []const u8,
+
+    pub const field_rules = .{ .user_name = v.rename("userName") };
+};
+
+const Rooted = struct {
+    is_root: bool = false,
+
+    pub const claim_names = .{ .is_root = "http://example.com/is_root" };
+};
+
+test "claims are read by their claim names" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try testing.expectEqualStrings("ann", (try decoded(Renamed, arena, "{\"userName\":\"ann\"}")).user_name);
+    try expectViolation(Renamed, "{\"user_name\":\"ann\"}", missing_claim, "userName", "is required");
+    try testing.expect((try decoded(Rooted, arena, "{\"http://example.com/is_root\":true}")).is_root);
+    try testing.expect(!(try decoded(Rooted, arena, "{\"is_root\":true}")).is_root);
+}
+
+test "RFC 7519 §3.1: is_root comes through claim_names" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    // "iss" and "exp" are registered: the claims skip them.
+    try testing.expect((try decoded(Rooted, arena_state.allocator(), rfc7515.a1_payload)).is_root);
+}
+
+test "a claim given twice is Malformed, an unknown one is not looked at" {
+    try expectMalformed(Count, "{\"count\":1,\"count\":1}");
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    try testing.expectEqual(1, (try decoded(Count, arena_state.allocator(), "{\"x\":1,\"x\":2,\"count\":1}")).count);
+}
+
+/// `{"x":` and `arrays` arrays inside each other, then `,"count":1}`.
+fn deepUnknown(arena: std.mem.Allocator, arrays: usize) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    try out.appendSlice(arena, "{\"x\":");
+    try out.appendNTimes(arena, '[', arrays);
+    try out.appendNTimes(arena, ']', arrays);
+    try out.appendSlice(arena, ",\"count\":1}");
+    return out.items;
+}
+
+test "unknown claims are skipped, within the depth of max_json_depth" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try testing.expectEqual(1, (try decoded(Count, arena, "{\"x\":{\"y\":[1,2,{\"z\":null}]},\"count\":1}")).count);
+    // The top object is level 1: 31 arrays reach level 32.
+    try testing.expectEqual(1, (try decoded(Count, arena, try deepUnknown(arena, root.max_json_depth - 1))).count);
+    try expectMalformed(Count, try deepUnknown(arena, root.max_json_depth));
+    try expectMalformed(void, try deepUnknown(arena, root.max_json_depth));
+}
+
+test "the payload is one JSON object, for void claims too" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try decoded(void, arena, "{}");
+    try decoded(void, arena, "{\"iss\":\"orders\",\"x\":[1,{\"y\":null}]}");
+    inline for (.{ void, Count }) |T| {
+        for ([_][]const u8{ "[]", "\"x\"", "5", "null", "", "{\"count\":1} x", "{\"count\":1", "\xef\xbb\xbf{}", "{\"s\":\"\xff\"}" }) |payload| {
+            try expectMalformed(T, payload);
+        }
+    }
+}
+
+const Long = struct {
+    deep: struct { deeper: u32 },
+
+    pub const claim_names = .{ .deep = &@as([300]u8, @splat('a')) };
+};
+
+test "a path longer than path_buf gives a violation without a field" {
+    try expectViolation(Long, "{\"" ++ @as([300]u8, @splat('a')) ++ "\":{\"deeper\":\"x\"}}", invalid_type, null, "must be an integer");
+    try expectViolation(Ids, "{\"ids\":[1,\"a\"]}", invalid_type, "ids[1]", "must be an integer");
 }
