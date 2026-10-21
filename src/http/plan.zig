@@ -12,6 +12,10 @@
 //!   returns `http.Json(T)`, whose value is that body;
 //! - a pattern that does not parse, two routes of one method on one shape
 //!   of path (router.zig);
+//! - a `.path` that does not fit the whole pattern, the controller's prefix
+//!   and the route's path: a parameter without its field, a required field
+//!   without its parameter, the rest of the path, `{*x}`, in a field that
+//!   is not a string;
 //! - an element of a `.middleware` list of no kind the server takes, or a
 //!   phase of another form (middleware.zig);
 //! - an `.error_handler` that is not a pointer to a mutable error handler
@@ -126,6 +130,12 @@ pub fn of(comptime O: type) Plan {
             if (Route.responses.len > 0) checkResponses(C, name, Route.responses, where);
             const segments = router.parse(pattern, where);
             const params = router.paramNames(segments);
+            if (Route.Path != void) {
+                const fields: u32 = @intCast(@typeInfo(Route.Path).@"struct".field_names.len);
+                quota += path_quota * (fields + 1) * (@as(u32, @intCast(params.len)) + 1);
+                @setEvalBranchQuota(quota);
+                checkPath(Route.Path, segments, pattern, where);
+            }
             max_params = @max(max_params, params.len);
             const method_chain = mw.unfold(@TypeOf(Route.middleware), .{ .level = .method, .Controller = C, .method = name }, &.{});
             table = table ++ [_]RoutePlan{.{
@@ -164,6 +174,9 @@ pub fn of(comptime O: type) Plan {
 /// taking one element of a controller's chain into a route's.
 const elem_quota = 6_000;
 const chain_quota = 200;
+/// The quota of matching a parameter of a pattern with a field of its path
+/// DTO by name.
+const path_quota = 200;
 
 /// How many elements a `.middleware` tuple holds, sets counted through.
 fn elemsIn(comptime List: type) u32 {
@@ -309,6 +322,47 @@ fn checkOnClose(comptime C: type, comptime name: []const u8, comptime where: []c
     if (!@hasDecl(C, name)) @compileError(at ++ " names no " ++ form);
     const F = @TypeOf(@field(C, name));
     if (F != fn (*C, *sse.Context) void) @compileError(at ++ " is " ++ fnForm(F) ++ "; write " ++ form);
+}
+
+/// The pattern of a route and its `.path`, both ways: each `{x}` is read
+/// by a field whose outside name is `x`, each field without a default that
+/// is not `?T` reads a parameter, and `{*x}`, the rest of the path, goes to
+/// a `[]const u8` or a `?[]const u8`.
+fn checkPath(comptime P: type, comptime segments: []const router.Segment, comptime pattern: []const u8, comptime where: []const u8) void {
+    const dto = ".path = " ++ typeName(P);
+    var params: []const []const u8 = &.{};
+    for (segments) |s| {
+        const param, const rest = switch (s) {
+            .literal => continue,
+            .param => |name| .{ name, false },
+            .catch_all => |name| .{ name, true },
+        };
+        params = params ++ [_][]const u8{param};
+        const shown = (if (rest) "{*" else "{") ++ param ++ "}";
+        const field = pathField(P, param) orelse
+            @compileError("zefir.http: " ++ where ++ ": " ++ shown ++ " in \"" ++ pattern ++ "\" has no field in " ++ dto);
+        const F = @FieldType(P, field);
+        if (rest and F != []const u8 and F != ?[]const u8)
+            @compileError("zefir.http: " ++ where ++ ": " ++ shown ++ " in \"" ++ pattern ++ "\", the rest of the path, goes to the field " ++ field ++
+                " of " ++ dto ++ ", a " ++ typeName(F) ++ "; make it a []const u8 or a ?[]const u8");
+    }
+    const info = @typeInfo(P).@"struct";
+    for (info.field_names, info.field_types, info.field_attrs) |field, F, attrs| {
+        if (attrs.@"comptime" or attrs.default_value_ptr != null or @typeInfo(F) == .optional) continue;
+        const outside = v.nameOf(P, @field(std.meta.FieldEnum(P), field));
+        if (!contains(params, outside))
+            @compileError("zefir.http: " ++ where ++ ": " ++ dto ++ " has the field " ++ field ++ ", but \"" ++ pattern ++ "\" has no {" ++ outside ++ "}");
+    }
+}
+
+/// The field of the path DTO `P` whose outside name is `param`, or null.
+fn pathField(comptime P: type, comptime param: []const u8) ?[]const u8 {
+    const info = @typeInfo(P).@"struct";
+    for (info.field_names, info.field_attrs) |field, attrs| {
+        if (attrs.@"comptime") continue;
+        if (std.mem.eql(u8, v.nameOf(P, @field(std.meta.FieldEnum(P), field)), param)) return field;
+    }
+    return null;
 }
 
 /// The value of a handler that returns `http.Json(T)` is the body of each
@@ -524,6 +578,66 @@ test "plan: .responses of a JSON route: its 2xx statuses carry its value, others
     // A handler of !void declares the body of every status it lists.
     try testing.expect(p.routes[2].Route.responses[1].json == Todo);
     try testing.expectEqualStrings("text/csv", p.routes[1].Route.responses[0].content_type.?);
+}
+
+/// `{projectId}` comes from the controller's prefix, `{id}` from the path.
+const ProjectTodoPath = struct {
+    project_id: u64,
+    id: u64,
+    /// Neither required: no parameter needs to fill them.
+    page: u32 = 1,
+    note: ?[]const u8,
+
+    pub const field_rules = .{ .project_id = .{ v.rename("projectId"), v.positive } };
+};
+
+const ProjectPath = struct {
+    project_id: u64,
+    pub const field_rules = .{ .project_id = v.rename("projectId") };
+};
+
+/// The rest of the path, as a string and as an optional one.
+const ProjectFilePath = struct {
+    project_id: u64,
+    path: []const u8,
+    pub const field_rules = .{ .project_id = v.rename("projectId") };
+};
+const ProjectArchivePath = struct {
+    project_id: u64,
+    rest: ?[]const u8,
+    pub const field_rules = .{ .project_id = v.rename("projectId") };
+};
+
+const ProjectTodosController = struct {
+    pub const http_routes = routes.routes(.{
+        .prefix = "/v1/projects/{projectId}/todos",
+        .methods = .{
+            .list = routes.get("", .{ .path = ProjectPath }),
+            .get = routes.get("/{id}", .{ .path = ProjectTodoPath }),
+            .files = routes.get("/files/{*path}", .{ .path = ProjectFilePath }),
+            .archive = routes.get("/archive/{*rest}", .{ .path = ProjectArchivePath }),
+            // Without .path the parameters are not checked.
+            .raw = routes.get("/raw/{id}", .{}),
+        },
+    });
+
+    pub fn list(_: *ProjectTodosController, _: *Context) !void {}
+    pub fn get(_: *ProjectTodosController, _: *Context) !void {}
+    pub fn files(_: *ProjectTodosController, _: *Context) !void {}
+    pub fn archive(_: *ProjectTodosController, _: *Context) !void {}
+    pub fn raw(_: *ProjectTodosController, _: *Context) !void {}
+};
+
+test "plan: a path DTO fits the whole pattern by outside names, the controller's prefix too" {
+    var projects: ProjectTodosController = .{};
+    const backend: Backend = undefined;
+    const p = comptime of(@TypeOf(.{ .backend = backend, .prefix = "/api", .controllers = .{&projects} }));
+    try testing.expectEqual(5, p.routes.len);
+    try testing.expectEqualStrings("/v1/projects/{projectId}/todos/{id}", p.routes[1].pattern);
+    try testing.expect(p.routes[1].Route.Path == ProjectTodoPath);
+    try testing.expectEqual(2, p.routes[2].params.len);
+    try testing.expectEqualStrings("path", p.routes[2].params[1]);
+    try testing.expect(p.routes[4].Route.Path == void);
 }
 
 test "plan: messages print types without their files" {
