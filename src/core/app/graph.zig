@@ -57,8 +57,31 @@ fn checkModule(comptime X: type, comptime T: type, comptime from: ?type) void {
         @compileError(pre(X) ++ where ++ name(T) ++ ".module is not a zefir.app.Module; declare it as `pub const module: zefir.app.Module = .{ ... }`");
 }
 
-/// The tuple of pointers to the controllers of module M, for a factory
-/// param: `controllers: zefir.app.Controllers(AppModule)`.
+/// Whether module j is among the modules module k imports, directly or
+/// through its imports: a visit in breadth with marks, so that a module
+/// imported along many paths is looked at once.
+pub fn reaches(comptime mods: []const Mod, comptime k: usize, comptime j: usize) bool {
+    var seen: [mods.len]bool = @splat(false);
+    var queue: [mods.len]usize = undefined;
+    queue[0] = k;
+    var head: usize = 0;
+    var tail: usize = 1;
+    while (head < tail) : (head += 1) for (mods[queue[head]].imports) |i| {
+        if (i == j) return true;
+        if (seen[i]) continue;
+        seen[i] = true;
+        queue[tail] = i;
+        tail += 1;
+    };
+    return false;
+}
+
+/// The tuple of pointers to the controllers of module M and of every
+/// module M reaches, for a param of a server factory:
+/// `controllers: zefir.app.Controllers(AppModule)`. The modules come in the
+/// order of the graph of M (imports first, M last), each module's
+/// controllers in list order. Two modules that reach the same controllers
+/// give one type.
 pub fn Controllers(comptime M: type) type {
     return ListTuple(M, "controllers");
 }
@@ -68,8 +91,14 @@ pub fn Handlers(comptime M: type) type {
     return ListTuple(M, "handlers");
 }
 
+/// Reads only `.imports` and the list itself: reading `.factories` here
+/// would make a factory that takes `Controllers(M)` of its own module
+/// depend on itself.
 fn ListTuple(comptime M: type, comptime list: []const u8) type {
+    @setEvalBranchQuota(names.eval_quota);
     var types: []const type = &.{};
-    for (@field(M.module, list)) |C| types = types ++ &[_]type{*C};
+    for (modulesOf(M)) |m| for (@field(m.T.module, list)) |C| {
+        types = types ++ &[_]type{*C};
+    };
     return @Tuple(types);
 }

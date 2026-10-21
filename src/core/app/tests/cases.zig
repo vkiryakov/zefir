@@ -63,8 +63,40 @@ pub const compile_errors = [_]Fixture{
         "if Transport.start belongs to another contract (a transport of rpc), declare `pub const app_lifecycle = false;`" },
     .{ .file = dir ++ "marker_value.zig", .expect = "zefir.App(Root): Root.providers: Transport.app_lifecycle is true; " ++
         "the marker only says false (App builds and frees the type, its owner starts and stops it): write false, or drop the declaration" },
+    // Factories.
+    .{ .file = dir ++ "factory_non_fn.zig", .expect = "zefir.App(Root): Root.factories: Tools.retries is not a function; a factories struct holds only pub fns, one per bean (make helpers private)" },
+    .{ .file = dir ++ "factory_void.zig", .expect = "zefir.App(Root): Root.factories: Tools.setup returns void" ++ factory_returns },
+    .{ .file = dir ++ "factory_error_void.zig", .expect = "zefir.App(Root): Root.factories: Tools.connect returns error{Down}!void" ++ factory_returns },
+    .{ .file = dir ++ "factory_generic.zig", .expect = "zefir.App(Root): Root.factories: Tools.make: param 0 is anytype or generic; App gives each param by its type" },
+    .{ .file = dir ++ "factory_empty.zig", .expect = "zefir.App(Root): Root.factories: Tools has no pub fn; each pub fn of a factories struct is a bean" },
+    .{ .file = dir ++ "cycle_factory.zig", .expect = "zefir.App(Root): dependency cycle: Root.Repo (.db) -> Root.Factories.database (param 0) -> Root.Repo" },
+    // Controllers and handlers.
+    .{ .file = dir ++ "controller_not.zig", .expect = "zefir.App(Root): Root.controllers: Plain is not a controller: it does not declare `pub const http_routes`" },
+    .{ .file = dir ++ "handler_not.zig", .expect = "zefir.App(Root): Root.handlers: Plain is not a handler: it does not declare `pub const rpc_handler`" },
+    .{ .file = dir ++ "controller_lifecycle.zig", .expect = "zefir.App(Root): Root.Ctl declares deinit, but App drives no lifecycle on controllers and handlers (their server does); " ++
+        "move what needs it into a provider" },
+    .{ .file = dir ++ "controller_injected.zig", .expect = "zefir.App(Root): Reports.Peek.ctl needs *UsersController, a controller of UsersModule; " ++ not_injected },
+    .{ .file = dir ++ "controllers_unreachable.zig", .expect = "zefir.App(Root): Reports.Servers.http param 2 takes zefir.app.Controllers(UsersModule), " ++
+        "but Reports does not import that module (directly or through its imports); import it in Reports" },
+    .{ .file = dir ++ "tuple_dep.zig", .expect = "zefir.App(Root): Root.X.pair is the tuple struct { u8, u8 }; App gives a tuple only as zefir.app.Controllers(M) or zefir.app.Handlers(M)" },
+    .{ .file = dir ++ "cycle_controllers.zig", .expect = "zefir.App(Root): dependency cycle: Root.Servers.http (param 2) -> Root.Ctl (.server) -> Root.Servers.http" },
+    // What a module sees, and its exports.
+    .{ .file = dir ++ "not_imported.zig", .expect = "zefir.App(Root): Reports.Peek.users needs *UserService, which UsersModule exports, but Reports does not import UsersModule; " ++
+        "add it: .imports = &.{ ..., UsersModule }" },
+    .{ .file = dir ++ "not_exported.zig", .expect = "zefir.App(Root): Reports.Peek.repo needs *UserRepository, which is private to UsersModule; " ++
+        "export it (UsersModule: .exports = &.{ ..., UserRepository })" },
+    .{ .file = dir ++ "struct_param_bean.zig", .expect = "zefir.App(Root): Reports.Peek.init param 0 needs UserRepository, which is private to UsersModule; " ++
+        "export it (UsersModule: .exports = &.{ ..., UserRepository })" },
+    .{ .file = dir ++ "export_invisible.zig", .expect = "zefir.App(Root): Reports.exports: UserService is neither a provider or factory result of Reports nor an export of a module it imports" },
+    .{ .file = dir ++ "export_controller.zig", .expect = "zefir.App(Root): Root.exports: Ctl is a controller; controllers and handlers are not exported: " ++
+        "a server factory takes them as zefir.app.Controllers(M) or Handlers(M)" },
+    .{ .file = dir ++ "export_module.zig", .expect = "zefir.App(Root): Root.exports: A is a module; a module exports beans: list the exports of A to pass on one by one" },
+    .{ .file = dir ++ "export_value.zig", .expect = "zefir.App(Root): Root.exports: Config is a value of Root.values, which every module sees; drop it from .exports" },
+    .{ .file = dir ++ "exports_twice.zig", .expect = "zefir.App(Root): Root.exports: X is there twice" },
 };
 
 const wrong = " has the wrong signature; expected ";
+const factory_returns = "; a factory returns its bean, a struct (or an error union of one)";
+const not_injected = "controllers and handlers are not injected: a server factory takes them as zefir.app.Controllers(M) or Handlers(M)";
 
 const dir = "src/core/app/tests/compile_errors/";

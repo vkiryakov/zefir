@@ -1,51 +1,49 @@
 //! The tests of zefir.App's graph and of `init`: modules, providers,
-//! values, the order of creation and the rollback of a failed `init`.
+//! factories, controllers and handlers, values, visibility, the order of
+//! creation and the rollback of a failed `init`.
 const std = @import("std");
 const testing = std.testing;
 const zapp = @import("../../app.zig");
 const mocks = @import("mocks.zig");
-
-// Providers built by filling their fields, by an init, and by an init that
-// takes a struct of dependencies; a value taken by copy.
-
-const Repo = struct {
-    config: *const mocks.Config,
-    rec: *mocks.Recorder,
-    hits: u32 = 0,
-    comptime tag: u8 = 1,
-};
-
-const Service = struct {
-    repo: *Repo,
-    logger: *const mocks.Logger,
-
-    pub fn init(repo: *Repo, logger: *const mocks.Logger) Service {
-        return .{ .repo = repo, .logger = logger };
-    }
-};
-
-const Report = struct {
-    repo: *Repo,
-    service: *Service,
-    gpa: std.mem.Allocator,
-    io: std.Io,
-    status: *const zapp.Status,
-
-    pub fn init(deps: struct { repo: *Repo, service: *Service, gpa: std.mem.Allocator, io: std.Io, status: *const zapp.Status }) Report {
-        return .{ .repo = deps.repo, .service = deps.service, .gpa = deps.gpa, .io = deps.io, .status = deps.status };
-    }
-};
-
-const Copy = struct { logger: mocks.Logger };
-
-const Basics = struct {
-    pub const module: zapp.Module = .{
-        .providers = &.{ Repo, Service, Report, Copy },
-        .values = &.{ *mocks.Recorder, *const mocks.Config, *const mocks.Logger },
-    };
-};
+const shop = @import("shop.zig");
 
 test "providers: fields, init params and a struct of dependencies; values by type, in any order" {
+    // Built by filling its fields; a field with a default and a comptime field are no dependencies.
+    const Repo = struct {
+        config: *const mocks.Config,
+        rec: *mocks.Recorder,
+        hits: u32 = 0,
+        comptime tag: u8 = 1,
+    };
+    // Built by its init, whose params are dependencies.
+    const Service = struct {
+        repo: *Repo,
+        logger: *const mocks.Logger,
+
+        pub fn init(repo: *Repo, logger: *const mocks.Logger) @This() {
+            return .{ .repo = repo, .logger = logger };
+        }
+    };
+    // Built by an init that takes a struct of dependencies, built-ins among them.
+    const Report = struct {
+        repo: *Repo,
+        service: *Service,
+        gpa: std.mem.Allocator,
+        io: std.Io,
+        status: *const zapp.Status,
+
+        pub fn init(deps: struct { repo: *Repo, service: *Service, gpa: std.mem.Allocator, io: std.Io, status: *const zapp.Status }) @This() {
+            return .{ .repo = deps.repo, .service = deps.service, .gpa = deps.gpa, .io = deps.io, .status = deps.status };
+        }
+    };
+    // A value taken by copy.
+    const Copy = struct { logger: mocks.Logger };
+    const Basics = struct {
+        pub const module: zapp.Module = .{
+            .providers = &.{ Repo, Service, Report, Copy },
+            .values = &.{ *mocks.Recorder, *const mocks.Config, *const mocks.Logger },
+        };
+    };
     var rec: mocks.Recorder = .init(testing.io);
     const config: mocks.Config = .{ .port = 9090 };
     var logger: mocks.Logger = .{ .id = 7 };
@@ -253,4 +251,149 @@ test "*const Status stays valid when the App value moves" {
     try testing.expect(status == &app.internal.block.status);
     try testing.expectEqual(zapp.State.created, status.state());
     try testing.expect(!status.isReady());
+}
+
+fn expectNames(expected: []const []const u8, got: []const []const u8) !void {
+    try testing.expectEqual(expected.len, got.len);
+    for (expected, got) |e, g| try testing.expectEqualStrings(e, g);
+}
+
+test "the shop of design §3: build order, shared beans, Controllers and Handlers" {
+    var rec: mocks.Recorder = .init(testing.io);
+    const config: mocks.Config = .{};
+    // A value with a deinit: App must not destroy it.
+    const logger: mocks.Logger = .{ .id = 1, .rec = &rec };
+    var app = try zapp.App(shop.AppModule).init(testing.allocator, testing.io, .{ &rec, &config, &logger }, .{});
+    {
+        errdefer app.deinit();
+        try testing.expectEqualStrings("build order: InfraModule.Generator, InfraModule.Mongo.mongoClient, InfraModule.Mongo.shopDb, " ++
+            "InfraModule.Mongo.analyticsDb, InfraModule.Nats.natsClient, InfraModule.Nats.bus, UsersModule.UserRepository, " ++
+            "UsersModule.UserService, UsersModule.UsersController, OrdersModule.OrderRepository, OrdersModule.OrderService, " ++
+            "OrdersModule.OrdersController, OrdersModule.OrdersHandler, AppModule.HealthController, AppModule.Servers.httpServer, " ++
+            "AppModule.Servers.rpcServer", app.internal.build_order);
+        // One bean per type, shared through exports.
+        try testing.expect(app.get(shop.OrderService).users == app.get(shop.UserService));
+        try testing.expect(app.get(shop.UserRepository).db == app.get(shop.ShopDb));
+        try testing.expect(app.get(shop.OrderRepository).analytics == app.get(shop.AnalyticsDb));
+        try testing.expectEqualStrings("shop", app.get(shop.ShopDb).db.name);
+        try testing.expectEqualStrings("analytics", app.get(shop.AnalyticsDb).db.name);
+        try testing.expect(app.get(shop.ShopDb).db.ids == app.get(mocks.mongo.bson.ObjectId.Generator));
+        // Controllers(AppModule) and Handlers(AppModule): modules in creation order, the root's own last.
+        const server = app.get(mocks.http.Server);
+        try expectNames(&.{ "UsersController", "OrdersController", "HealthController" }, server.names);
+        try testing.expect(server.item(shop.UsersController, 0) == app.get(shop.UsersController));
+        try testing.expect(server.item(shop.HealthController, 2) == app.get(shop.HealthController));
+        // A private bean, seen by its module's controller.
+        try testing.expect(app.get(shop.UsersController).repo == app.get(shop.UserRepository));
+        try expectNames(&.{"OrdersHandler"}, app.get(mocks.rpc.Server).names);
+        try testing.expect(app.get(mocks.rpc.Server).item(shop.OrdersHandler, 0).service == app.get(shop.OrderService));
+        try testing.expect(app.get(shop.HealthController).status == &app.internal.block.status);
+    }
+    app.deinit();
+    // In reverse creation order; the transport too, which only its deinit
+    // makes an entry. The logger, a value, is not destroyed.
+    try rec.expect("deinit", &.{ "rpc.Server", "http.Server", "Transport", "nats.Client", "mongo.Client" });
+}
+
+test "a provider takes a factory result of its own module" {
+    const Database = struct { name: []const u8 };
+    const Repo = struct { db: *Database };
+    const Tools = struct {
+        pub fn database() Database {
+            return .{ .name = "local" };
+        }
+    };
+    const Root = struct {
+        pub const module: zapp.Module = .{ .providers = &.{Repo}, .factories = &.{Tools} };
+    };
+    var app = try zapp.App(Root).init(testing.allocator, testing.io, .{}, .{});
+    defer app.deinit();
+    try testing.expectEqualStrings("build order: Root.Tools.database, Root.Repo", app.internal.build_order);
+    try testing.expect(app.get(Repo).db == app.get(Database));
+}
+
+const ReportService = struct {
+    db: *shop.ShopDb,
+    orders: *shop.OrderService,
+};
+
+/// Imports only OrdersModule, which re-exports InfraModule's ShopDb.
+const Reports = struct {
+    pub const module: zapp.Module = .{
+        .imports = &.{shop.OrdersModule},
+        .providers = &.{ReportService},
+        .values = &.{ *mocks.Recorder, *const mocks.Config, *const mocks.Logger },
+    };
+};
+
+test "a re-export passes one bean on" {
+    var rec: mocks.Recorder = .init(testing.io);
+    const config: mocks.Config = .{};
+    const logger: mocks.Logger = .{ .id = 1 };
+    var app = try zapp.App(Reports).init(testing.allocator, testing.io, .{ &rec, &config, &logger }, .{});
+    defer app.deinit();
+    try testing.expect(app.get(ReportService).db == app.get(shop.ShopDb));
+    try testing.expect(app.get(ReportService).orders == app.get(shop.OrderService));
+}
+
+test "Controllers and Handlers: imports first, the root's own last, structural" {
+    comptime {
+        std.debug.assert(zapp.Controllers(shop.UsersModule) == @Tuple(&.{*shop.UsersController}));
+        std.debug.assert(zapp.Controllers(shop.AppModule) == @Tuple(&.{ *shop.UsersController, *shop.OrdersController, *shop.HealthController }));
+        std.debug.assert(zapp.Handlers(shop.AppModule) == @Tuple(&.{*shop.OrdersHandler}));
+        // A module's tuple holds the controllers of every module it reaches.
+        std.debug.assert(zapp.Controllers(shop.OrdersModule) == @Tuple(&.{ *shop.UsersController, *shop.OrdersController }));
+        // Structural: two modules that reach the same controllers give one type.
+        std.debug.assert(zapp.Controllers(shop.InfraModule) == zapp.Handlers(shop.UsersModule));
+    }
+}
+
+/// Field-less beans: zero-size, as a health controller without a status is.
+const Nothing = struct {};
+
+const Ping = struct {
+    pub const http_routes = .{"GET /ping"};
+
+    pub fn ping(_: *Ping) u32 {
+        return 7;
+    }
+};
+
+const Pong = struct {
+    pub const rpc_handler = .{ .api = "pong.v1" };
+
+    pub fn pong(_: *Pong) u32 {
+        return 8;
+    }
+};
+
+const Tiny = struct {
+    pub const module: zapp.Module = .{
+        .providers = &.{Nothing},
+        .factories = &.{Servers},
+        .controllers = &.{Ping},
+        .handlers = &.{Pong},
+        .values = &.{*mocks.Recorder},
+    };
+
+    pub const Servers = struct {
+        pub fn httpServer(gpa: std.mem.Allocator, rec: *mocks.Recorder, controllers: zapp.Controllers(Tiny)) !mocks.http.Server {
+            return .init(gpa, rec, .{ .controllers = controllers });
+        }
+        pub fn rpcServer(gpa: std.mem.Allocator, rec: *mocks.Recorder, handlers: zapp.Handlers(Tiny)) !mocks.rpc.Server {
+            return .init(gpa, rec, .{ .handlers = handlers });
+        }
+    };
+};
+
+test "field-less controllers, handlers and providers: the server calls through its pointers" {
+    comptime std.debug.assert(@sizeOf(Nothing) == 0 and @sizeOf(Ping) == 0 and @sizeOf(Pong) == 0);
+    var rec: mocks.Recorder = .init(testing.io);
+    var app = try zapp.App(Tiny).init(testing.allocator, testing.io, .{&rec}, .{});
+    defer app.deinit();
+    try testing.expectEqualStrings("build order: Tiny.Nothing, Tiny.Ping, Tiny.Servers.httpServer, Tiny.Pong, Tiny.Servers.rpcServer", app.internal.build_order);
+    // The servers keep the controller and the handler as *anyopaque and call through them.
+    try testing.expectEqual(7, app.get(mocks.http.Server).item(Ping, 0).ping());
+    try testing.expectEqual(8, app.get(mocks.rpc.Server).item(Pong, 0).pong());
+    _ = app.get(Nothing);
 }

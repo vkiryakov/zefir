@@ -125,7 +125,9 @@ fn Builder(comptime Root: type, comptime B: type, comptime V: type, comptime i: 
             @setEvalBranchQuota(names.eval_quota);
             const bean = comptime plan.planOf(Root).beans[i];
             const dst = &block.beans[i];
-            if (comptime names.hasInitFn(bean.T)) {
+            if (bean.kind == .factory) {
+                dst.* = try callWith(bean.T, @field(bean.Holder, bean.fn_name), bean.sources, block, gpa, io, values);
+            } else if (comptime names.hasInitFn(bean.T)) {
                 dst.* = try callWith(bean.T, bean.T.init, bean.sources, block, gpa, io, values);
             } else {
                 fillStruct(bean.T, bean.sources, dst, block, gpa, io, values);
@@ -162,6 +164,11 @@ inline fn arg(comptime P: type, comptime src: plan.Source, block: anytype, gpa: 
         .deps => |d| {
             var out: P = undefined;
             fillStruct(P, d.fields, &out, block, gpa, io, values);
+            return out;
+        },
+        .list => |list| {
+            var out: P = undefined;
+            inline for (list, 0..) |b, k| out[k] = &block.beans[b];
             return out;
         },
         .default => unreachable,
