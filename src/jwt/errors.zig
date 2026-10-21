@@ -28,9 +28,9 @@ pub const KeyError = error{
 pub const VerifyError = error{
     /// The token is longer than `max_token_bytes`.
     TokenTooLarge,
-    /// Not three parts; bad base64url or JSON; a key given twice; nesting
-    /// deeper than `max_json_depth`; a member of the header of the wrong
-    /// type.
+    /// Not three parts; bad base64url or JSON; a claim or a member of the
+    /// header that jwt reads, given twice; nesting deeper than
+    /// `max_json_depth`; a member of the header of the wrong type.
     Malformed,
     /// "alg" is absent or names none of the six algorithms; "none" too.
     UnsupportedAlgorithm,

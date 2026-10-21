@@ -462,10 +462,14 @@ line breaks:
 APP_AUTH_ORDERS_KEY="-----BEGIN PUBLIC KEY-----\n<the base64 line of orders.pub.pem>\n-----END PUBLIC KEY-----"
 ```
 
-jwt reads a PEM with CRLF, indented, or on one line with spaces between
-its parts as well. A literal backslash and `n` between the lines, which
-an environment variable gets when the `\n` was never turned into line
-breaks, is `InvalidKey`.
+The programs of this guide read the environment alone, `.osEnv()`: a
+service that keeps its keys in a `.env` file lists that file among its
+sources too, `.sources = &.{ .env(".env"), .osEnv() }`, and the
+environment still wins over it. jwt reads a PEM with CRLF, indented, or
+on one line with spaces between its parts as well. A literal backslash
+and `n` between the lines, which an environment variable gets when the
+`\n` was never turned into line breaks, is `InvalidKey`. Where a key
+should live, and where not, is told in [Security](#security).
 
 **A key is a secret value.** `jwt.Key` and `jwt.SigningKey` are plain
 values of a fixed size, without heap memory, so a verifier takes its keys
@@ -660,7 +664,7 @@ client:
 | Error | When | `jwt.describe` |
 | --- | --- | --- |
 | `TokenTooLarge` | the token is over 8 KiB | the token is too large |
-| `Malformed` | not three parts; bad base64url or JSON; a key twice; nesting deeper than 32; a member of the header of the wrong type | the token is malformed |
+| `Malformed` | not three parts; bad base64url or JSON; a claim or a member of the header that jwt reads, given twice; nesting deeper than 32; a member of the header of the wrong type | the token is malformed |
 | `UnsupportedAlgorithm` | `alg` is none of the six, `none` among them | the token's algorithm is not supported |
 | `UnsupportedHeader` | the header has `crit`, or `cty` says the payload is a nested token | the token's header asks for what is not supported |
 | `WrongType` | `typ` is absent or none of the verifier's `token_types` | the token is of another type |
@@ -1611,6 +1615,27 @@ test "an expired token is unauthenticated" {
     try testing.expectEqual(.unauthenticated, result.outcome.failure.code);
 }
 
+test "Basic credentials and a token without sub are unauthenticated" {
+    var b: Billing = undefined;
+    try b.start();
+    defer b.stop();
+
+    // Billing takes tokens alone.
+    var basic = try b.charge(.{ .basic = .{ .user = "ann", .password = "ann-secret" } });
+    defer basic.deinit();
+    try testing.expectEqual(.unauthenticated, basic.outcome.failure.code);
+    try testing.expectEqualStrings("Invalid credentials", basic.outcome.failure.message);
+
+    // A token that orders signed for nobody: no caller to charge.
+    const signer: jwt.Signer = try .init(&b.orders_key, .{ .issuer = "orders", .audiences = &.{ "orders", "billing" } });
+    const token = try signer.sign(JwtAuthenticator.Claims, b.clock.io(), testing.allocator, &.{}, .{});
+    defer testing.allocator.free(token);
+    var nobody = try b.charge(.{ .bearer = token });
+    defer nobody.deinit();
+    try testing.expectEqual(.unauthenticated, nobody.outcome.failure.code);
+    try testing.expectEqualStrings("Invalid credentials", nobody.outcome.failure.message);
+}
+
 test "while the key of orders changes, billing takes the tokens of both keys" {
     var b: Billing = undefined;
     try b.start();
@@ -1741,10 +1766,12 @@ What jwt refuses, and why:
   without its cofactor, which leaves no room for signatures made up to
   pass; HMAC is compared in a time that does not depend on the bytes.
 - **Hostile input fails with an error.** A token over 8 KiB is refused
-  before anything else; JSON deeper than 32 levels, a key given twice and
-  bad UTF-8 are `Malformed`; a key file is read by a reader of DER and PEM
-  that checks every length first. No input crashes the service: the tests
-  of jwt give it broken tokens, keys and files, and a fuzzer gives it more.
+  before anything else; JSON deeper than 32 levels, a claim or a member of
+  the header that jwt reads given twice, and bad UTF-8 are `Malformed`;
+  a key that jwt does not read may come twice, and is skipped. A key file
+  is read by a reader of DER and PEM that checks every length first. No
+  input crashes the service: the tests of jwt give it broken tokens, keys
+  and files, and a fuzzer gives it more.
 - **The payload is read only after the signature passed**, so JSON that
   nobody signed is never parsed.
 
@@ -1753,6 +1780,18 @@ key keeps a copy of what it needs, so the settings may be freed; its
 `deinit` wipes it, and jwt wipes the buffers in which it reads a key.
 zefir-log writes a key as `[REDACTED]`, `{f}` prints only its algorithm
 and `kid`, and `{any}` none of its bytes. jwt itself logs nothing.
+
+**Where a key lives.** A private key or an HMAC secret is the power to make
+tokens: whoever reads it can be any user of the service. So:
+
+- an environment variable is not a safe: every child process of the
+  service inherits it, anybody allowed to read `/proc/<pid>/environ` on
+  Linux sees it, and so does `docker inspect` of its container. Where you
+  can, hand the key over as a file that only the user of the service may
+  read, such as a secret that the orchestrator mounts, which the service
+  reads when it starts;
+- never commit `orders.pem`, or a `.env` file that holds a key: list both
+  in `.gitignore`. A public key such as `orders.pub.pem` may go anywhere.
 
 **A token is a credential to its bearer**: whoever has it is the user until
 it expires, and nothing takes it back early. So:

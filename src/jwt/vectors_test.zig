@@ -1,4 +1,5 @@
-//! The JWS layer against the vectors of RFC 7515, RFC 7520 and RFC 8037.
+//! The JWS layer against the vectors of RFC 7515, RFC 7520 and RFC 8037,
+//! and against an ES384 token of OpenSSL, since the RFCs have none.
 //! Their payloads are no claims of zefir and most of their headers have no
 //! "typ", so the tests call `jws` and `crypto` directly. The RFCs give
 //! their EC and Ed25519 keys as JWKs, which zefir-jwt does not read: the
@@ -16,10 +17,14 @@ const Verifier = @import("Verifier.zig");
 const rfc7515 = @import("testdata/rfc7515.zig");
 const rfc7520 = @import("testdata/rfc7520.zig");
 const rfc8037 = @import("testdata/rfc8037.zig");
-const hex = @import("testdata/keys.zig").hex;
+const openssl = @import("testdata/openssl.zig");
+const key_files = @import("testdata/keys.zig");
+const hex = key_files.hex;
+const FixedClock = @import("testing.zig").FixedClock;
 
 const testing = std.testing;
 const EcdsaP256Sha256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
+const EcdsaP384Sha384 = std.crypto.sign.ecdsa.EcdsaP384Sha384;
 const Details = errors.Details;
 const VerifyError = errors.VerifyError;
 const jwt_types: []const []const u8 = &.{"JWT"};
@@ -172,6 +177,29 @@ test "RFC 7515 A.3: the ES256 signature has a high s, its low twin verifies, and
 
     // The header has no "typ", which zefir requires of every token.
     try expectWrongType(rfc7515.a3_token, &own, "joe");
+}
+
+test "an ES384 token of OpenSSL verifies, through a Verifier too" {
+    const parts = try compact.split(openssl.es384_token);
+    var signature: [96]u8 = undefined;
+    try base64url.decode(&signature, parts.signature);
+    // The token holds r‖s of the DER that OpenSSL wrote.
+    var der: [openssl.es384_der_hex.len / 2]u8 = undefined;
+    const from_der = try EcdsaP384Sha384.Signature.fromDer(try std.fmt.hexToBytes(&der, openssl.es384_der_hex));
+    try testing.expectEqualSlices(u8, &from_der.toBytes(), &signature);
+
+    var keys = [_]Key{try .fromPem(.ES384, key_files.get("p384.pub.pem").bytes, .{})};
+    defer keys[0].deinit();
+    try crypto.verify(&keys[0], parts.signing_input, &signature);
+
+    var clock: FixedClock = try .init(testing.io, 1_760_000_000);
+    defer clock.deinit();
+    const verifier: Verifier = try .init(.{ .keys = &keys, .issuer = "orders", .audiences = &.{"orders"} });
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const verified = try verifier.verify(void, clock.io(), arena_state.allocator(), openssl.es384_token, .{});
+    try testing.expectEqual(.ES384, verified.header.algorithm);
+    try testing.expectEqualStrings("user-7", verified.registered.subject.?);
 }
 
 /// The PKCS#8 of the Ed25519 key of RFC 8037 A.1: its "d", the seed.

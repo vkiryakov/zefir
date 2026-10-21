@@ -127,6 +127,27 @@ test "an expired token is unauthenticated" {
     try testing.expectEqual(.unauthenticated, result.outcome.failure.code);
 }
 
+test "Basic credentials and a token without sub are unauthenticated" {
+    var b: Billing = undefined;
+    try b.start();
+    defer b.stop();
+
+    // Billing takes tokens alone.
+    var basic = try b.charge(.{ .basic = .{ .user = "ann", .password = "ann-secret" } });
+    defer basic.deinit();
+    try testing.expectEqual(.unauthenticated, basic.outcome.failure.code);
+    try testing.expectEqualStrings("Invalid credentials", basic.outcome.failure.message);
+
+    // A token that orders signed for nobody: no caller to charge.
+    const signer: jwt.Signer = try .init(&b.orders_key, .{ .issuer = "orders", .audiences = &.{ "orders", "billing" } });
+    const token = try signer.sign(JwtAuthenticator.Claims, b.clock.io(), testing.allocator, &.{}, .{});
+    defer testing.allocator.free(token);
+    var nobody = try b.charge(.{ .bearer = token });
+    defer nobody.deinit();
+    try testing.expectEqual(.unauthenticated, nobody.outcome.failure.code);
+    try testing.expectEqualStrings("Invalid credentials", nobody.outcome.failure.message);
+}
+
 test "while the key of orders changes, billing takes the tokens of both keys" {
     var b: Billing = undefined;
     try b.start();
