@@ -127,6 +127,7 @@ test {
     _ = @import("hostile_test.zig");
     _ = @import("concurrency_test.zig");
     _ = @import("der.zig");
+    _ = @import("pem.zig");
 }
 
 test "limits have their documented values" {
