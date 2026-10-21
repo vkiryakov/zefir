@@ -20,7 +20,10 @@ check tokens are code of your application, and this guide shows both.
 >
 > - **Tokens of other issuers.** Only tokens that zefir services sign
 >   themselves: tokens of Keycloak, Auth0, Google and other providers are
->   not checked.
+>   not checked. Even with the right key, an ES256 or ES384 token that
+>   another library signed passes only when its signature has the low s
+>   that zefir writes (see [Security](#security)): about half of such
+>   tokens are refused, the example of RFC 7515 A.3 among them.
 > - **JWKS by URL, OIDC discovery and RSA.** No key set is fetched or
 >   refreshed, no HTTPS request goes out, and RS256 or PS256 is never
 >   verified: zefir cannot sign with RSA, so only other providers would
@@ -1862,12 +1865,17 @@ and `kid`, and `{any}` none of its bytes. jwt itself logs nothing.
 **Where a key lives.** A private key or an HMAC secret is the power to make
 tokens: whoever reads it can be any user of the service. So:
 
-- an environment variable is not a safe: every child process of the
-  service inherits it, anybody allowed to read `/proc/<pid>/environ` on
-  Linux sees it, and so does `docker inspect` of its container. Where you
-  can, hand the key over as a file that only the user of the service may
-  read, such as a secret that the orchestrator mounts, which the service
-  reads when it starts;
+- an environment variable is seen by more than the service: every child
+  process of the service inherits it, anybody allowed to read
+  `/proc/<pid>/environ` on Linux sees it, and so does `docker inspect` of
+  its container. Where you can, hand the key over as a file that only the
+  user of the service may read, such as a secret that the orchestrator
+  mounts: a `.env` file of confy, with the PEM on one line as in
+  [Keys](#keys), listed among the sources of the service,
+  `.sources = &.{ .env("/run/secrets/orders.env"), .osEnv() }`. confy
+  reads it when the service starts. A `.env` file that is not there is
+  skipped, so a mount that failed shows as a missing key: the service
+  stops at once and says so;
 - never commit `orders.pem`, or a `.env` file that holds a key: list both
   in `.gitignore`. A public key such as `orders.pub.pem` may go anywhere.
 
