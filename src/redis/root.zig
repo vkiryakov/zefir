@@ -20,6 +20,7 @@ test {
     _ = @import("resp/writer_tests.zig");
     _ = @import("resp/reader_tests.zig");
     _ = @import("resp/value_tests.zig");
+    _ = @import("resp/fuzz.zig");
 }
 
 test "the package version reaches the module" {
