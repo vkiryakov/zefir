@@ -179,10 +179,7 @@ pub fn options(comptime path: []const u8, comptime opts: anytype) type {
 pub fn Route(comptime method: std.http.Method, comptime kind: Kind, comptime path: []const u8, comptime opts: anytype) type {
     @setEvalBranchQuota(route_quota);
     const O = @TypeOf(opts);
-    const where = switch (kind) {
-        .rest => "http." ++ lowerName(method) ++ "(\"" ++ path ++ "\")",
-        .sse => "http.sse.get(\"" ++ path ++ "\")",
-    };
+    const where = routeName(method, kind, path);
     if (@typeInfo(O) != .@"struct") @compileError("zefir.http: " ++ where ++ " takes a struct literal of options, such as .{}");
     switch (kind) {
         .rest => expectOptions(O, &.{ "path", "query", "body", "form", "headers", "cookies", "responses", "middleware", "max_body_bytes", "timeout" }, where),
@@ -361,6 +358,15 @@ fn positive(comptime value: anytype, comptime message: []const u8) ?std.Io.Durat
     const duration: ?std.Io.Duration = value;
     if (duration) |d| if (d.nanoseconds <= 0) @compileError("zefir.http: " ++ message);
     return duration;
+}
+
+/// How messages name a route: `http.post("/import")`,
+/// `http.sse.get("/events")`.
+pub fn routeName(comptime method: std.http.Method, comptime kind: Kind, comptime path: []const u8) []const u8 {
+    return switch (kind) {
+        .rest => "http." ++ lowerName(method) ++ "(\"" ++ path ++ "\")",
+        .sse => "http.sse.get(\"" ++ path ++ "\")",
+    };
 }
 
 fn lowerName(comptime method: std.http.Method) []const u8 {

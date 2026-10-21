@@ -173,8 +173,8 @@ pub const Context = struct {
 /// no body.
 fn InputErrors(comptime R: type) type {
     routes.expectRoute(R, "ctx.input");
-    if (R.route_kind != .sse) @compileError("zefir.http: ctx.input of an http.sse.Context takes the route of its stream, made by http.sse.get; got the " ++
-        @tagName(R.http_method) ++ " route \"" ++ R.route_path ++ "\"");
+    if (R.route_kind != .sse) @compileError("zefir.http: ctx.input of an http.sse.Context takes the route of its stream, made by http.sse.get; got " ++
+        routes.routeName(R.http_method, R.route_kind, R.route_path));
     return HttpContext.InputErrors(R);
 }
 
