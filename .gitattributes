@@ -1,5 +1,6 @@
 # Keep first: test data stays byte for byte, and the lines below still give its .zig, .zon and .md files LF.
 src/validator/testdata/** -text
+src/jwt/testdata/** -text
 *.zig text eol=lf
 *.zon text eol=lf
 *.md text eol=lf
