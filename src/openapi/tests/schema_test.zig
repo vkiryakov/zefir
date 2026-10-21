@@ -303,3 +303,62 @@ test "the texts of a type and of its fields: description and deprecated" {
         "\"old\":{\"type\":[\"integer\",\"null\"],\"format\":\"uint8\",\"description\":\"Kept for old clients.\",\"deprecated\":true,\"minimum\":0,\"maximum\":255}" ++
         "}}", comptime componentOf(&.{output(Todo)}, "Todo"));
 }
+
+fn Page(comptime T: type) type {
+    return struct { items: []const T, total: u64 };
+}
+
+const TodoResponse = struct { id: u64 };
+
+const Renamed = struct {
+    id: u64,
+    pub const openapi: Doc(@This()) = .{ .name = "TodoV2" };
+};
+
+test "names: the last part of the type's name, a generic's arguments after it, or Doc(T).name; by name in components" {
+    const schemas = comptime componentsOf(&.{ output(Page(TodoResponse)), output(Renamed), output(Line) }).object;
+    try testing.expectEqual(4, schemas.len);
+    inline for (.{ "Line", "Page_TodoResponse", "TodoResponse", "TodoV2" }, schemas) |name, m| try testing.expectEqualStrings(name, m.key);
+    try expectJson("{\"type\":\"object\",\"required\":[\"items\",\"total\"],\"properties\":{\"items\":{\"type\":\"array\",\"items\":{\"$ref\":\"#/components/schemas/TodoResponse\"}},\"total\":{\"type\":\"integer\",\"format\":\"uint64\",\"minimum\":0}}}", schemas[1].value);
+    try expectJson("{\"$ref\":\"#/components/schemas/TodoV2\"}", comptime schemaOf(Renamed, .output));
+}
+
+const Address = struct { city: []const u8, zip: ?[]const u8 = null };
+const Customer = struct { name: []const u8, address: Address };
+
+test "a type read and written whose schemas differ has both, -Input and -Output, and so does a type inside it" {
+    const uses = &.{ input(Customer), output(Customer) };
+    const schemas = comptime componentsOf(uses).object;
+    try testing.expectEqual(4, schemas.len);
+    inline for (.{ "Address-Input", "Address-Output", "Customer-Input", "Customer-Output" }, schemas) |name, m| try testing.expectEqualStrings(name, m.key);
+    try expectJson("{\"type\":\"object\",\"required\":[\"name\",\"address\"],\"properties\":{\"name\":{\"type\":\"string\"},\"address\":{\"$ref\":\"#/components/schemas/Address-Input\"}},\"additionalProperties\":false}", schemas[2].value);
+    try expectJson("{\"type\":\"object\",\"required\":[\"name\",\"address\"],\"properties\":{\"name\":{\"type\":\"string\"},\"address\":{\"$ref\":\"#/components/schemas/Address-Output\"}}}", schemas[3].value);
+    try expectJson("{\"type\":\"object\",\"required\":[\"city\"],\"properties\":{\"city\":{\"type\":\"string\"},\"zip\":{\"type\":[\"string\",\"null\"],\"default\":null}},\"additionalProperties\":false}", schemas[0].value);
+    try expectJson("{\"type\":\"object\",\"required\":[\"city\",\"zip\"],\"properties\":{\"city\":{\"type\":\"string\"},\"zip\":{\"type\":[\"string\",\"null\"]}}}", schemas[1].value);
+    // The uses refer to theirs.
+    try expectJson("{\"$ref\":\"#/components/schemas/Customer-Input\"}", comptime registryOf(uses).schema(input(Customer)));
+    try expectJson("{\"$ref\":\"#/components/schemas/Customer-Output\"}", comptime registryOf(uses).schema(output(Customer)));
+}
+
+/// The same read and written: unknown keys ignored, nothing optional.
+const Point = struct {
+    x: i32,
+    y: i32,
+    pub const unknown_fields = .ignore;
+};
+/// The same itself, but a type inside it differs.
+const Labeled = struct {
+    point: Point,
+    address: Address,
+    pub const unknown_fields = .ignore;
+};
+
+test "a type read and written whose schemas are the same has one; one that refers to a type split is split too" {
+    const same = comptime componentsOf(&.{ input(Point), output(Point), input(Priority), output(Priority) }).object;
+    try testing.expectEqual(2, same.len);
+    try testing.expectEqualStrings("Point", same[0].key);
+    try testing.expectEqualStrings("Priority", same[1].key);
+    const nested = comptime componentsOf(&.{ input(Labeled), output(Labeled) }).object;
+    inline for (.{ "Address-Input", "Address-Output", "Labeled-Input", "Labeled-Output", "Point" }, nested) |name, m| try testing.expectEqualStrings(name, m.key);
+    try expectJson("{\"type\":\"object\",\"required\":[\"point\",\"address\"],\"properties\":{\"point\":{\"$ref\":\"#/components/schemas/Point\"},\"address\":{\"$ref\":\"#/components/schemas/Address-Input\"}}}", nested[2].value);
+}

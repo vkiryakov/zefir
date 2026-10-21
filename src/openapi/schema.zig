@@ -58,8 +58,11 @@ pub const Registry = struct {
     /// What happens to the unknown keys of a body whose DTO does not say it
     /// itself: the server's `.unknown_fields.body`.
     body_policy: http.UnknownFields,
-    /// The named types met, in the order met; after `finish`, by name.
+    /// The named types met, in the order met.
     entries: []const Entry = &.{},
+    /// The schemas of `components`, by name: one for each entry, two for an
+    /// entry whose schemas differ both ways.
+    schemas: []const Schema = &.{},
     finished: bool = false,
 
     /// A named type and the ways its values go.
@@ -70,6 +73,9 @@ pub const Registry = struct {
         problem: bool = false,
         /// The name of its schema, given by `finish`.
         name: []const u8 = "",
+        /// Read and written, it has two schemas, which differ:
+        /// `<name>-Input` and `<name>-Output`.
+        split: bool = false,
 
         /// How its values are written.
         fn outputMode(e: Entry) Mode {
@@ -82,6 +88,9 @@ pub const Registry = struct {
             return if (e.output or e.problem) e.outputMode() else .input;
         }
     };
+
+    /// A schema of `components`: its name, its type and how its values go.
+    const Schema = struct { name: []const u8, T: type, mode: Mode };
 
     pub fn init(comptime body_policy: http.UnknownFields) Registry {
         return .{ .body_policy = body_policy };
@@ -96,15 +105,54 @@ pub const Registry = struct {
         }
     }
 
-    /// Names the schemas.
+    /// Names the schemas. A type read and written whose two schemas differ
+    /// gets both, `<name>-Input` and `<name>-Output`, and so does a type
+    /// whose schemas differ only by the names of the schemas they refer to.
+    /// A name that is not one, and two types of one name, stop the build.
     pub fn finish(comptime r: *Registry) void {
         comptime {
             @setEvalBranchQuota(quota);
-            var entries = r.entries[0..r.entries.len].*;
-            for (&entries) |*e| e.name = baseName(e.T);
-            const final = entries;
-            r.entries = &final;
+            var named = r.entries[0..r.entries.len].*;
+            for (&named) |*e| e.name = checkedName(e.T);
+            const with_names = named;
+            r.entries = &with_names;
             r.finished = true;
+            // A split changes the references to the type, and so maybe the
+            // schemas of the types that refer to it: again, until none
+            // changes.
+            while (true) {
+                var next = r.entries[0..r.entries.len].*;
+                var changed = false;
+                for (&next, r.entries) |*e, now| {
+                    if (now.split or !now.input or !(now.output or now.problem)) continue;
+                    const read = node(r.componentParts(now, .input));
+                    const written = node(r.componentParts(now, now.outputMode()));
+                    if (json.eql(read, written)) continue;
+                    e.split = true;
+                    changed = true;
+                }
+                const final = next;
+                r.entries = &final;
+                if (!changed) break;
+            }
+            var schemas: []const Schema = &.{};
+            for (r.entries) |e| {
+                if (e.split) {
+                    schemas = schemas ++ [_]Schema{
+                        .{ .name = e.name ++ "-Input", .T = e.T, .mode = .input },
+                        .{ .name = e.name ++ "-Output", .T = e.T, .mode = e.outputMode() },
+                    };
+                } else {
+                    schemas = schemas ++ [_]Schema{.{ .name = e.name, .T = e.T, .mode = e.onlyMode() }};
+                }
+            }
+            const by_name = sorted(Schema, schemas, lessName);
+            for (by_name[0..by_name.len -| 1], by_name[@min(1, by_name.len)..]) |a, b| {
+                if (std.mem.eql(u8, a.name, b.name))
+                    @compileError("zefir.openapi: " ++ @typeName(a.T) ++ " and " ++ @typeName(b.T) ++ " have one schema name, " ++ a.name ++
+                        "; give one of them another: pub const openapi: zefir.openapi.Doc(@This()) = .{ .name = \"...\" }");
+            }
+            r.schemas = by_name;
         }
     }
 
@@ -123,11 +171,10 @@ pub const Registry = struct {
         comptime {
             @setEvalBranchQuota(quota);
             if (!r.finished) @compileError("zefir.openapi: internal: Registry.components before finish");
-            var members: []const json.Member = &.{};
-            for (r.entries) |e| {
-                members = members ++ [_]json.Member{.{ .key = e.name, .value = node(r.componentParts(e, e.onlyMode())) }};
-            }
-            return .{ .object = members };
+            var members: [r.schemas.len]json.Member = undefined;
+            for (r.schemas, &members) |sch, *m| m.* = .{ .key = sch.name, .value = node(r.componentParts(r.entryOf(sch.T).?, sch.mode)) };
+            const final = members;
+            return .{ .object = &final };
         }
     }
 
@@ -223,8 +270,8 @@ pub const Registry = struct {
 
     /// The name a `$ref` in `mode` takes to the schema of `e`.
     fn refName(comptime e: Entry, comptime mode: Mode) []const u8 {
-        _ = mode;
-        return e.name;
+        if (!e.split) return e.name;
+        return e.name ++ if (mode == .input) "-Input" else "-Output";
     }
 
     /// The schema of the named type of `e`, in `mode`.
@@ -566,11 +613,108 @@ fn isAnonymous(comptime T: type) bool {
     return false;
 }
 
-/// The name of the schema of `T`: its `Doc(T).name`, else the last part of
-/// its name.
-fn baseName(comptime T: type) []const u8 {
-    if (docOf(T)) |doc| if (doc.name) |name| return name;
-    return shortName(@typeName(T));
+/// The name of the schema of `T`: its `Doc(T).name`, else the one of
+/// `schemaName`; a name that is not one stops the build.
+fn checkedName(comptime T: type) []const u8 {
+    const rule = "1 or more of A-Z, a-z, 0-9, '.', '-' and '_'";
+    if (docOf(T)) |doc| if (doc.name) |name| {
+        if (!isSchemaName(name)) @compileError("zefir.openapi: " ++ typeName(T) ++ ".openapi.name \"" ++ name ++ "\" is not a schema name: " ++ rule);
+        return name;
+    };
+    const name = schemaName(@typeName(T));
+    if (!isSchemaName(name)) @compileError("zefir.openapi: the schema of " ++ @typeName(T) ++ " would be named " ++ name ++ ", which is not a schema name (" ++ rule ++
+        "); give it one: pub const openapi: zefir.openapi.Doc(@This()) = .{ .name = \"...\" }");
+    return name;
+}
+
+/// A name the document can give a schema: `^[a-zA-Z0-9.\-_]+$`.
+fn isSchemaName(comptime name: []const u8) bool {
+    if (name.len == 0) return false;
+    for (name) |c| {
+        if (!std.ascii.isAlphanumeric(c) and c != '.' and c != '-' and c != '_') return false;
+    }
+    return true;
+}
+
+/// The name of a schema from the name of its type, `@typeName`: its last
+/// part, a generic's arguments after it, each by its own last part:
+/// "dto.TodoResponse" is "TodoResponse", "dto.Page(dto.TodoResponse)" is
+/// "Page_TodoResponse", "dto.Pair(dto.Todo,u8)" is "Pair_Todo_u8", and an
+/// argument "[]const dto.Todo" or "?dto.Todo" is "Todo".
+fn schemaName(comptime full: []const u8) []const u8 {
+    const name = bare(lastWord(full));
+    const open = std.mem.findScalar(u8, name, '(') orelse return name;
+    if (name[name.len - 1] != ')') return name;
+    var out: []const u8 = name[0..open];
+    var depth: usize = 0;
+    var start = open + 1;
+    for (name[open + 1 .. name.len - 1], open + 1..) |c, i| switch (c) {
+        '(' => depth += 1,
+        ')' => depth -= 1,
+        ',' => if (depth == 0) {
+            out = out ++ "_" ++ schemaName(name[start..i]);
+            start = i + 1;
+        },
+        else => {},
+    };
+    if (start < name.len - 1) out = out ++ "_" ++ schemaName(name[start .. name.len - 1]);
+    return out;
+}
+
+/// The last word of a type's name outside parentheses, after its last '.'
+/// or ' ': "[]const dto.Todo" is "Todo", "dto.Page(dto.Todo)" is
+/// "Page(dto.Todo)".
+fn lastWord(comptime full: []const u8) []const u8 {
+    var depth: usize = 0;
+    var start: usize = 0;
+    for (full, 0..) |c, i| switch (c) {
+        '(' => depth += 1,
+        ')' => depth -= 1,
+        '.', ' ' => if (depth == 0) {
+            start = i + 1;
+        },
+        else => {},
+    };
+    return full[start..];
+}
+
+/// A name without the `?`, `*` and `[N]` in front of it.
+fn bare(comptime name: []const u8) []const u8 {
+    var rest = name;
+    while (rest.len > 0) {
+        switch (rest[0]) {
+            '?', '*' => rest = rest[1..],
+            '[' => rest = rest[(std.mem.findScalar(u8, rest, ']') orelse return rest) + 1 ..],
+            else => return rest,
+        }
+    }
+    return rest;
+}
+
+fn lessName(comptime a: Registry.Schema, comptime b: Registry.Schema) bool {
+    return std.mem.order(u8, a.name, b.name) == .lt;
+}
+
+/// `items` sorted by `less`, stable: a merge sort.
+fn sorted(comptime Item: type, comptime items: []const Item, comptime less: anytype) []const Item {
+    if (items.len <= 1) return items;
+    const half = items.len / 2;
+    const left = sorted(Item, items[0..half], less);
+    const right = sorted(Item, items[half..], less);
+    var out: [items.len]Item = undefined;
+    var i: usize = 0;
+    var j: usize = 0;
+    for (&out) |*slot| {
+        if (j == right.len or (i < left.len and !less(right[j], left[i]))) {
+            slot.* = left[i];
+            i += 1;
+        } else {
+            slot.* = right[j];
+            j += 1;
+        }
+    }
+    const final = out;
+    return &final;
 }
 
 /// How messages name `T`: the last part of its name.
@@ -599,6 +743,38 @@ fn shortName(comptime full: []const u8) []const u8 {
 /// The eval branch quota of a call of the registry: the validator raises
 /// it as much for each rule it maps.
 const quota = 10_000_000;
+
+const testing = std.testing;
+
+test "schemaName: the last part of a type's name, a generic's arguments each by its own" {
+    // The names `@typeName` gives, as Zig 0.17 prints them.
+    try testing.expectEqualStrings("TodoResponse", comptime schemaName("dto.TodoResponse"));
+    try testing.expectEqualStrings("Inner", comptime schemaName("dto.Outer.Inner"));
+    try testing.expectEqualStrings("Page_TodoResponse", comptime schemaName("dto.Page(dto.TodoResponse)"));
+    try testing.expectEqualStrings("Pair_Todo_u8", comptime schemaName("dto.Pair(dto.Todo,u8)"));
+    try testing.expectEqualStrings("Page_Page_Todo", comptime schemaName("dto.Page(dto.Page(dto.Todo))"));
+    try testing.expectEqualStrings("Page_u8", comptime schemaName("dto.Page([]const u8)"));
+    try testing.expectEqualStrings("Page_Todo", comptime schemaName("dto.Page(?dto.Todo)"));
+    try testing.expectEqualStrings("Page_Todo", comptime schemaName("dto.Page([]const dto.Todo)"));
+    try testing.expectEqualStrings("Grid_u8", comptime schemaName("dto.Grid([3]u8)"));
+    try testing.expectEqualStrings("Limited_5", comptime schemaName("dto.Limited(5)"));
+    try testing.expectEqualStrings("Todo", comptime schemaName("dto.test.a test of mine.Todo"));
+    // A string argument gives no name; the build asks for a .name then.
+    try testing.expect(!comptime isSchemaName(schemaName("dto.Named(\"abc\"[0..3])")));
+}
+
+test "isSchemaName: ^[a-zA-Z0-9.\\-_]+$" {
+    try testing.expect(comptime isSchemaName("Page_Todo-Input.v2"));
+    try testing.expect(!comptime isSchemaName(""));
+    try testing.expect(!comptime isSchemaName("Page Todo"));
+    try testing.expect(!comptime isSchemaName("Todo$"));
+}
+
+test "isAnonymous: the compiler's name of an anonymous type" {
+    try testing.expect(comptime isAnonymous(struct { a: u8 }));
+    try testing.expect(comptime isAnonymous(enum { a }));
+    try testing.expect(comptime !isAnonymous(http.Problem));
+}
 
 test {
     _ = @import("tests/schema_test.zig");
