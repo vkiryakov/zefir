@@ -43,6 +43,14 @@ pub const Details = errors.Details;
 
 pub const Header = @import("header.zig").Header;
 
+pub const KeyOptions = struct {
+    /// The key id, "kid": 1 to `max_key_id_bytes` bytes of visible ASCII,
+    /// such as "2026-10"; null for a key without one.
+    id: ?[]const u8 = null,
+};
+pub const Key = @import("Key.zig");
+pub const SigningKey = @import("SigningKey.zig");
+
 test {
     _ = @import("algorithm.zig");
     _ = @import("base64url.zig");
@@ -50,6 +58,10 @@ test {
     _ = @import("errors.zig");
     _ = @import("json.zig");
     _ = @import("header.zig");
+    _ = @import("KeyId.zig");
+    _ = @import("crypto.zig");
+    _ = @import("Key.zig");
+    _ = @import("SigningKey.zig");
 }
 
 test "limits have their documented values" {
