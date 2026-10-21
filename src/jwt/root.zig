@@ -68,6 +68,21 @@ pub const VerifyOptions = struct {
 
 pub const Verifier = @import("Verifier.zig");
 
+pub const SignOptions = struct {
+    /// "sub": whom the token is about, such as a user's id.
+    subject: ?[]const u8 = null,
+    /// "jti": the token's own id.
+    id: ?[]const u8 = null,
+    /// How long this token lives, instead of the signer's lifetime; at
+    /// least one second.
+    lifetime: ?std.Io.Duration = null,
+    /// "nbf": the first second the token is valid, in seconds of Unix
+    /// time.
+    not_before: ?i64 = null,
+};
+
+pub const Signer = @import("Signer.zig");
+
 pub const KeyOptions = struct {
     /// The key id, "kid": 1 to `max_key_id_bytes` bytes of visible ASCII,
     /// such as "2026-10"; null for a key without one.
@@ -108,6 +123,7 @@ test {
     _ = @import("claims.zig");
     _ = @import("testing.zig");
     _ = @import("Verifier.zig");
+    _ = @import("Signer.zig");
 }
 
 test "limits have their documented values" {
@@ -121,4 +137,7 @@ test "limits have their documented values" {
     try std.testing.expectEqual(60, verifier.leeway.toSeconds());
     try std.testing.expectEqual(1, verifier.token_types.len);
     try std.testing.expectEqualStrings("JWT", verifier.token_types[0]);
+    const signer: Signer.Options = .{ .issuer = "orders", .audiences = &.{"orders"} };
+    try std.testing.expectEqual(900, signer.lifetime.toSeconds());
+    try std.testing.expectEqualStrings("JWT", signer.token_type);
 }

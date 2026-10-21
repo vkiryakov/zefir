@@ -393,6 +393,91 @@ fn messageOf(comptime T: type) []const u8 {
     };
 }
 
+pub const EncodeError = error{ InvalidClaims, WriteFailed };
+
+/// Writes the claims of `value` into an object that `w` has open and that
+/// has members already: `,"name":value` for each field, in the order of
+/// the struct, by the names `decode` reads. A `?T` that is null is left
+/// out when that is what `decode` gives for an absent claim, and written as
+/// `null` when its default is a value. `InvalidClaims`: a string that is
+/// not UTF-8 or a float that is not finite, which no token could carry.
+pub fn encode(comptime Claims: type, w: *std.Io.Writer, value: *const Claims) EncodeError!void {
+    comptime check(Claims);
+    if (Claims != void) try writeMembers(Claims, w, value, false);
+}
+
+/// `text` as a JSON string. `InvalidClaims`: not UTF-8.
+pub fn writeString(w: *std.Io.Writer, text: []const u8) EncodeError!void {
+    if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidClaims;
+    try std.json.Stringify.encodeJsonString(text, .{}, w);
+}
+
+/// The fields of `value` as members, each after a ',' unless `first`.
+fn writeMembers(comptime S: type, w: *std.Io.Writer, value: *const S, first: bool) EncodeError!void {
+    const info = @typeInfo(S).@"struct";
+    var comma = !first;
+    inline for (info.field_names, info.field_types, info.field_attrs) |name, F, attrs| {
+        if (comptime !attrs.@"comptime") {
+            const field = &@field(value.*, name);
+            if (!(comptime absentIsNull(F, attrs)) or !isNull(F, field)) {
+                if (comma) try w.writeByte(',');
+                comma = true;
+                try writeString(w, comptime nameOf(S, @field(std.meta.FieldEnum(S), name)));
+                try w.writeByte(':');
+                try writeValue(F, w, field);
+            }
+        }
+    }
+}
+
+/// Whether `decode` gives null for an absent field of type `F`: an
+/// optional without a default, or with null for it.
+fn absentIsNull(comptime F: type, comptime attrs: std.lang.Type.Struct.FieldAttributes) bool {
+    if (@typeInfo(F) != .optional) return false;
+    const default = attrs.defaultValue(F) orelse return true;
+    return default == null;
+}
+
+fn isNull(comptime F: type, field: *const F) bool {
+    return switch (@typeInfo(F)) {
+        .optional => field.* == null,
+        else => false,
+    };
+}
+
+fn writeValue(comptime T: type, w: *std.Io.Writer, value: *const T) EncodeError!void {
+    switch (@typeInfo(T)) {
+        .optional => |o| if (value.*) |*payload| {
+            try writeValue(o.child, w, payload);
+        } else {
+            try w.writeAll("null");
+        },
+        .bool => try w.writeAll(if (value.*) "true" else "false"),
+        .int => try w.print("{d}", .{value.*}),
+        .float => {
+            if (!std.math.isFinite(value.*)) return error.InvalidClaims;
+            try w.print("{d}", .{value.*});
+        },
+        .@"enum" => try writeString(w, @tagName(value.*)),
+        .pointer => |p| if (p.child == u8) {
+            try writeString(w, value.*);
+        } else {
+            try w.writeByte('[');
+            for (value.*, 0..) |*item, i| {
+                if (i > 0) try w.writeByte(',');
+                try writeValue(p.child, w, item);
+            }
+            try w.writeByte(']');
+        },
+        .@"struct" => {
+            try w.writeByte('{');
+            try writeMembers(T, w, value, true);
+            try w.writeByte('}');
+        },
+        else => comptime unreachable,
+    }
+}
+
 /// The last second a NumericDate may name: the end of the year 9999.
 pub const max_numeric_date = 253402300799;
 
