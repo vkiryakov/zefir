@@ -38,6 +38,7 @@ pub const Algorithm = @import("algorithm.zig").Algorithm;
 test {
     _ = @import("algorithm.zig");
     _ = @import("base64url.zig");
+    _ = @import("compact.zig");
 }
 
 test "limits have their documented values" {
