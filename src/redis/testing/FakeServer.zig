@@ -38,6 +38,10 @@
 //! client closes it or `stop` ends it; the steps, and what they point to,
 //! must live until `stop`. The arguments of `Step.expect` and of the
 //! helpers of `Reply` are comptime literals, so their memory is static.
+//!
+//! A raw `Peer` lets a test play the server's side of a connection itself,
+//! byte by byte, where a script cannot: the bytes of a handshake, a reply
+//! that never comes.
 
 const std = @import("std");
 const Io = std.Io;
@@ -57,6 +61,7 @@ state: ?*State,
 pub const Reply = replies.Reply;
 pub const Delayed = replies.Delayed;
 pub const Malformed = replies.Malformed;
+pub const Peer = @import("Peer.zig");
 
 pub const Options = struct {
     /// The script, in the order its steps run.

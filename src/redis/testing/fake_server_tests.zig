@@ -718,3 +718,93 @@ fn handlerFails(io: Io, url: []const u8) !void {
     try c.send(&.{ "GET", "k" });
     try c.expectClosed();
 }
+
+test "a Peer accepts a client, reads its command and answers it; at the end of the stream no command comes" {
+    const io = testing.io;
+    var peer: FakeServer.Peer = try .listen(io);
+    defer peer.close(io);
+    try testing.expect(std.mem.startsWith(u8, peer.url(), "redis://127.0.0.1:"));
+    try within5s(io, pingPeer, .{ io, &peer });
+}
+
+fn pingPeer(io: Io, peer: *FakeServer.Peer) !void {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var c: Client = undefined;
+    try c.open(io, peer.url());
+    var open = true;
+    defer if (open) c.close();
+    try peer.accept(io);
+    try c.send(&.{"PING"});
+    const ping = (try peer.readCommand(arena.allocator())) orelse return error.TestNoCommand;
+    try testing.expectEqual(@as(usize, 1), ping.len);
+    try testing.expectEqualStrings("PING", ping[0]);
+    try peer.send("+PONG\r\n");
+    try c.expectBytes("+PONG\r\n");
+    // Arguments are bytes, `\r\n` and `\x00` included.
+    try c.send(&.{ "SET", "a\r\nb\x00c", "" });
+    const set = (try peer.readCommand(arena.allocator())) orelse return error.TestNoCommand;
+    try testing.expectEqual(@as(usize, 3), set.len);
+    try testing.expectEqualStrings("a\r\nb\x00c", set[1]);
+    try testing.expectEqualStrings("", set[2]);
+    c.close();
+    open = false;
+    try testing.expect(try peer.readCommand(arena.allocator()) == null);
+}
+
+test "a Peer's readToEnd counts the bytes left until the client hangs up; bytes that are not a command are a ProtocolViolation" {
+    const io = testing.io;
+    var peer: FakeServer.Peer = try .listen(io);
+    defer peer.close(io);
+    try within5s(io, drainPeer, .{ io, &peer });
+    // close is idempotent, and the defer closes once more.
+    peer.close(io);
+    peer.close(io);
+    try testing.expectError(error.NotConnected, peer.send("+OK\r\n"));
+}
+
+fn drainPeer(io: Io, peer: *FakeServer.Peer) !void {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var c: Client = undefined;
+    try c.open(io, peer.url());
+    var open = true;
+    defer if (open) c.close();
+    try peer.accept(io);
+    // An inline command, as a person types it in telnet.
+    try c.writer.interface.writeAll("PING\r\n");
+    try c.writer.interface.flush();
+    try testing.expectError(error.ProtocolViolation, peer.readCommand(arena.allocator()));
+    try c.writer.interface.writeAll("12345");
+    try c.writer.interface.flush();
+    c.close();
+    open = false;
+    // What is left of the inline command and the 5 bytes after it.
+    try testing.expectEqual(@as(usize, "ING\r\n".len + 5), try peer.readToEnd());
+}
+
+test "a Peer accepts the next client, and closes the connection it accepted before" {
+    const io = testing.io;
+    var peer: FakeServer.Peer = try .listen(io);
+    defer peer.close(io);
+    try within5s(io, twoClientsOfPeer, .{ io, &peer });
+}
+
+fn twoClientsOfPeer(io: Io, peer: *FakeServer.Peer) !void {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var first: Client = undefined;
+    try first.open(io, peer.url());
+    defer first.close();
+    try peer.accept(io);
+    var second: Client = undefined;
+    try second.open(io, peer.url());
+    defer second.close();
+    try peer.accept(io);
+    try first.expectClosed();
+    try second.send(&.{"PING"});
+    const ping = (try peer.readCommand(arena.allocator())) orelse return error.TestNoCommand;
+    try testing.expectEqualStrings("PING", ping[0]);
+    try peer.send("+PONG\r\n");
+    try second.expectBytes("+PONG\r\n");
+}
