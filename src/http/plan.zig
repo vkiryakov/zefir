@@ -8,6 +8,8 @@
 //!   `http.routes(...)`;
 //! - a route without its handler, a handler of another form, an
 //!   `.on_close` that names no method of its form;
+//! - a 2xx status of `.responses` with a body of its own on a handler that
+//!   returns `http.Json(T)`, whose value is that body;
 //! - a pattern that does not parse, two routes of one method on one shape
 //!   of path (router.zig);
 //! - an element of a `.middleware` list of no kind the server takes, or a
@@ -121,6 +123,7 @@ pub fn of(comptime O: type) Plan {
             @setEvalBranchQuota(quota);
             checkHandler(C, name, Route.route_kind, where);
             if (Route.on_close) |on_close| checkOnClose(C, on_close, where);
+            if (Route.responses.len > 0) checkResponses(C, name, Route.responses, where);
             const segments = router.parse(pattern, where);
             const params = router.paramNames(segments);
             max_params = @max(max_params, params.len);
@@ -308,6 +311,20 @@ fn checkOnClose(comptime C: type, comptime name: []const u8, comptime where: []c
     if (F != fn (*C, *sse.Context) void) @compileError(at ++ " is " ++ fnForm(F) ++ "; write " ++ form);
 }
 
+/// The value of a handler that returns `http.Json(T)` is the body of each
+/// 2xx status of its `.responses`, which therefore declares no body of its
+/// own there.
+fn checkResponses(comptime C: type, comptime name: []const u8, comptime list: []const routes.RouteResponse, comptime where: []const u8) void {
+    const Payload = payloadOf(@typeInfo(@TypeOf(@field(C, name))).@"fn".return_type.?);
+    if (!routes.isMarked(Payload, "zefir_http_json")) return;
+    for (list) |r| {
+        const code = @backingInt(r.status);
+        if (code < 200 or code > 299 or (r.content_type == null and r.json == void)) continue;
+        @compileError("zefir.http: " ++ where ++ ": .responses." ++ @tagName(r.status) ++ " has a body of its own, but the handler returns " ++
+            typeName(Payload) ++ ", whose value is the body of its 2xx responses; write ." ++ @tagName(r.status) ++ " = .{}");
+    }
+}
+
 fn payloadOf(comptime R: type) type {
     return if (@typeInfo(R) == .error_union) @typeInfo(R).error_union.payload else R;
 }
@@ -474,6 +491,39 @@ test "routes: patterns are the controller prefix plus the path; options are kept
     try testing.expectEqualStrings("id", p.routes[1].params[0]);
     try testing.expectEqualStrings("id", p.routes[3].params[0]);
     try testing.expectEqualStrings("path", p.routes[3].params[1]);
+}
+
+/// Its routes answer with more than one 200: a JSON value under 201 and
+/// 200, a redirect of the error handler, a JSON body of another type, a
+/// CSV and a redirect of its own.
+const ReportsController = struct {
+    pub const http_routes = routes.routes(.{
+        .prefix = "/v1/reports",
+        .methods = .{
+            .create = routes.post("", .{ .responses = .{ .created = .{}, .ok = .{}, .found = .{}, .conflict = .{ .json = Todo } } }),
+            .exportCsv = routes.get("/export.csv", .{ .responses = .{ .ok = .{ .content_type = "text/csv" } } }),
+            .archive = routes.post("/archive", .{ .responses = .{ .see_other = .{}, .accepted = .{ .json = Todo } } }),
+        },
+    });
+
+    pub fn create(_: *ReportsController, _: *Context) !Json(Todo) {
+        return .{ .value = .{ .id = 1 }, .status = 201 };
+    }
+    pub fn exportCsv(_: *ReportsController, _: *Context) !void {}
+    pub fn archive(_: *ReportsController, _: *Context) !void {}
+};
+
+test "plan: .responses of a JSON route: its 2xx statuses carry its value, others what they declare" {
+    var reports: ReportsController = .{};
+    const backend: Backend = undefined;
+    const p = comptime of(@TypeOf(.{ .backend = backend, .controllers = .{&reports} }));
+    try testing.expectEqual(3, p.routes.len);
+    const create = p.routes[0].Route.responses;
+    try testing.expectEqual(4, create.len);
+    try testing.expect(create[3].status == .conflict and create[3].json == Todo);
+    // A handler of !void declares the body of every status it lists.
+    try testing.expect(p.routes[2].Route.responses[1].json == Todo);
+    try testing.expectEqualStrings("text/csv", p.routes[1].Route.responses[0].content_type.?);
 }
 
 test "plan: messages print types without their files" {
