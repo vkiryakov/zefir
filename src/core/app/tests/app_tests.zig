@@ -6,6 +6,7 @@ const testing = std.testing;
 const zapp = @import("../../app.zig");
 const mocks = @import("mocks.zig");
 const shop = @import("shop.zig");
+const two = @import("two_servers.zig");
 
 test "providers: fields, init params and a struct of dependencies; values by type, in any order" {
     // Built by filling its fields; a field with a default and a comptime field are no dependencies.
@@ -396,4 +397,32 @@ test "field-less controllers, handlers and providers: the server calls through i
     try testing.expectEqual(7, app.get(mocks.http.Server).item(Ping, 0).ping());
     try testing.expectEqual(8, app.get(mocks.rpc.Server).item(Pong, 0).pong());
     _ = app.get(Nothing);
+}
+
+test "two servers, each with the controllers of its own module" {
+    var rec: mocks.Recorder = .init(testing.io);
+    const config: mocks.Config = .{};
+    const logger: mocks.Logger = .{ .id = 1 };
+    var app = try zapp.App(two.AppModule).init(testing.allocator, testing.io, .{ &rec, &config, &logger }, .{});
+    defer app.deinit();
+    // The public server: what PublicModule reaches, the health controller last.
+    try expectNames(&.{ "UsersController", "OrdersController", "HealthController" }, app.get(mocks.http.Server).names);
+    // The admin's: its own controllers only, its own health among them.
+    const admin = app.get(two.AdminHttp);
+    try expectNames(&.{ "AdminController", "AdminHealthController" }, admin.server.names);
+    try testing.expect(admin.server.item(two.AdminController, 0) == app.get(two.AdminController));
+    try testing.expect(app.get(two.AdminController).db == app.get(shop.ShopDb));
+    try expectNames(&.{"OrdersHandler"}, app.get(mocks.rpc.Server).names);
+}
+
+test "two rpc servers with separate Handlers" {
+    var rec: mocks.Recorder = .init(testing.io);
+    const config: mocks.Config = .{};
+    const logger: mocks.Logger = .{ .id = 1 };
+    var app = try zapp.App(two.RpcModule).init(testing.allocator, testing.io, .{ &rec, &config, &logger }, .{});
+    defer app.deinit();
+    try expectNames(&.{"OrdersHandler"}, app.get(mocks.rpc.Server).names);
+    const internal = app.get(two.InternalRpc);
+    try expectNames(&.{"StatsHandler"}, internal.server.names);
+    try testing.expect(internal.server.item(two.StatsHandler, 0).analytics == app.get(shop.AnalyticsDb));
 }

@@ -148,9 +148,17 @@ fn computePlan(comptime Root: type) Plan {
         }
         mods[k].end = n;
     }
+    // One type, one bean (design §5.5), values included: App injects by
+    // type. Only the beans of one bucket are compared.
     var buckets: Buckets = @splat(&.{});
-    for (decl, 0..) |b, i| buckets[bucketOf(b.T)] = buckets[bucketOf(b.T)] ++ &[_]usize{i};
+    for (decl, 0..) |b, i| {
+        const h = bucketOf(b.T);
+        for (buckets[h]) |j| if (decl[j].T == b.T) duplicateBean(Root, &mods, decl[j], b);
+        buckets[h] = buckets[h] ++ &[_]usize{i};
+    }
     const final_buckets = buckets;
+    for (Root.module.values) |V| if (beanIn(&decl, &final_buckets, names.dataPointer(V).?.child)) |i|
+        @compileError(p ++ name(Root) ++ ".values declares " ++ typeName(V) ++ ", but " ++ decl[i].label ++ " is a bean of that type; a type is one bean: drop one, or give it a wrapper type");
 
     // What each module sees and exports; its imports come before it.
     var globals: []const Cand = &.{};
@@ -185,7 +193,7 @@ fn computePlan(comptime Root: type) Plan {
     // Where every dependency comes from.
     const final_mods = mods;
     for (&decl) |*b| {
-        const ctx: Ctx = .{ .Root = Root, .mods = &final_mods, .beans = &decl, .buckets = &final_buckets, .globals = globals, .k = b.module };
+        const ctx: Ctx = .{ .Root = Root, .mods = &final_mods, .beans = &decl, .buckets = &final_buckets, .globals = globals, .k = b.module, .T = b.T, .kind = b.kind };
         b.sources = beanSources(ctx, b.*);
     }
 
@@ -214,6 +222,8 @@ fn computePlan(comptime Root: type) Plan {
             }
         },
     };
+    checkServedOnce(Root, &final_mods, &beans);
+    checkValuesTaken(Root, &beans);
 
     var build_order: []const u8 = "build order:";
     for (beans, 0..) |b, i| build_order = build_order ++ (if (i == 0) " " else ", ") ++ b.label;
@@ -294,6 +304,9 @@ const Ctx = struct {
     globals: []const Cand,
     /// The module of the bean that asks.
     k: usize,
+    /// The bean that asks, for the advice of a message.
+    T: type,
+    kind: Kind,
 };
 
 /// The bean of type T, wherever it is: its declaration index.
@@ -338,14 +351,39 @@ fn depSource(comptime ctx: Ctx, comptime P: type, comptime who: []const u8, comp
     if (names.dataPointer(P)) |ptr| return ref(ctx, ptr.child, if (ptr.attrs.@"const") .const_ptr else .ptr, who);
     if (top and names.isPlainStruct(P) and findCand(ctx.mods[ctx.k].visible, P) == null and findCand(ctx.globals, P) == null and
         beanIn(ctx.beans, ctx.buckets, P) == null)
-        return .{ .deps = .{ .P = P, .fields = fieldSources(ctx, P, who) } };
+    {
+        const fields = fieldSources(ctx, P, who);
+        for (fields) |f| {
+            if (f != .default) break;
+        } else optionsAsDeps(ctx, P, who);
+        return .{ .deps = .{ .P = P, .fields = fields } };
+    }
     return ref(ctx, P, .copy, who);
+}
+
+/// A struct of dependencies in which App has nothing to inject: options,
+/// which App would fill with defaults nobody wrote (design §5.2).
+fn optionsAsDeps(comptime ctx: Ctx, comptime P: type, comptime who: []const u8) noreturn {
+    const why = if (names.fieldsOf(P).field_names.len == 0) "(it has no fields)" else "(every field has a default)";
+    // `init(options: struct { size: usize = 64 })`: Zig names that type after its place.
+    const what = if (std.mem.indexOf(u8, @typeName(P), "__struct_") != null) "an anonymous struct" else typeName(P);
+    const fix = switch (ctx.kind) {
+        .factory => "write them inside the factory",
+        .provider => "build " ++ name(ctx.T) ++ " in a factory and pass its options there",
+        .controller, .handler => "write them inside " ++ name(ctx.T) ++ ".init",
+    };
+    @compileError(pre(ctx.Root) ++ who ++ " is " ++ what ++ ", in which App has nothing to inject " ++ why ++ ": these are options, not dependencies; " ++ fix);
 }
 
 fn ref(comptime ctx: Ctx, comptime T: type, comptime how: How, comptime who: []const u8) Source {
     const c = findCand(ctx.mods[ctx.k].visible, T) orelse (findCand(ctx.globals, T) orelse missing(ctx, T, how, who));
     switch (c.src) {
-        .bean => |i| return .{ .bean = .{ .i = i, .how = how } },
+        .bean => |i| {
+            // A copy of a bean App drives would be a second client or server.
+            if (how == .copy and contract.needsEntry(T)) @compileError(pre(ctx.Root) ++ who ++ " takes " ++ typeName(T) ++ " by value, but App drives that bean (" ++
+                contract.drivenMethods(T) ++ "): a copy would be a second " ++ typeName(T) ++ "; take *" ++ typeName(T));
+            return .{ .bean = .{ .i = i, .how = how } };
+        },
         .value => |v| {
             const V = ctx.Root.module.values[v];
             if (how == .ptr and names.dataPointer(V).?.attrs.@"const")
@@ -500,9 +538,13 @@ fn orderOf(comptime Root: type, comptime mods: []const ModPlan, comptime beans: 
 /// " (.repo)", " (param 2)" or " (.init param 0)": where bean b takes the
 /// dependency of its source `at`.
 fn edgeLabel(comptime b: Bean, comptime at: usize) []const u8 {
-    if (b.kind == .factory) return " (param " ++ num(at) ++ ")";
-    if (names.hasInitFn(b.T)) return " (.init param " ++ num(at) ++ ")";
-    return " (." ++ names.fieldsOf(b.T).field_names[at] ++ ")";
+    return " (" ++ edgeName(b, at) ++ ")";
+}
+
+fn edgeName(comptime b: Bean, comptime at: usize) []const u8 {
+    if (b.kind == .factory) return "param " ++ num(at);
+    if (names.hasInitFn(b.T)) return ".init param " ++ num(at);
+    return "." ++ names.fieldsOf(b.T).field_names[at];
 }
 
 /// The sources with bean indices of the declaration order turned into
@@ -522,4 +564,108 @@ fn remap(comptime sources: []const Source, comptime pos: []const usize) []const 
     };
     const final = out;
     return &final;
+}
+
+/// Two beans of one type; b is declared after a.
+fn duplicateBean(comptime Root: type, comptime mods: []const ModPlan, comptime a: Bean, comptime b: Bean) noreturn {
+    const p = pre(Root);
+    const t = typeName(b.T);
+    const m = name(mods[a.module].T);
+    if (a.module == b.module) {
+        if (a.kind == b.kind and a.kind != .factory) @compileError(p ++ m ++ "." ++ @tagName(a.kind) ++ "s lists " ++ t ++ " twice");
+        if (a.kind == .factory and b.kind == .factory and a.Holder == b.Holder and std.mem.eql(u8, a.fn_name, b.fn_name))
+            @compileError(p ++ m ++ ".factories lists " ++ name(a.Holder) ++ " twice");
+        if (a.kind != .factory and b.kind != .factory)
+            @compileError(p ++ m ++ "." ++ @tagName(a.kind) ++ "s and " ++ m ++ "." ++ @tagName(b.kind) ++ "s both list " ++ t ++ "; a type is one bean: keep it in one list");
+    }
+    const two = p ++ "two beans of type " ++ t ++ ": " ++ a.label ++ " and " ++ b.label;
+    const served: ?Kind = if (a.kind == .controller or a.kind == .handler) a.kind else if (b.kind == .controller or b.kind == .handler) b.kind else null;
+    if (served) |kind| @compileError(two ++ "; a type is one bean: list it in one module only, or give each module a " ++ @tagName(kind) ++ " of its own");
+    const w = wrapperName(mods, a);
+    @compileError(two ++ "; App injects by type, so a type is one bean: give each its own type, such as `pub const " ++ w ++ " = struct { " ++
+        fieldName(b.T) ++ ": " ++ t ++ " };`, and take *" ++ w);
+}
+
+/// A name for a wrapper type of bean b, for the advice of two beans of one
+/// type: its factory's name with a capital (`usersDb` gives `UsersDb`), or
+/// its module's name without `Module` and its type's (`UsersModule.Cache`
+/// gives `UsersCache`).
+fn wrapperName(comptime mods: []const ModPlan, comptime b: Bean) []const u8 {
+    if (b.kind == .factory) {
+        const capital = [_]u8{std.ascii.toUpper(b.fn_name[0])} ++ b.fn_name[1..];
+        return capital;
+    }
+    const m = name(mods[b.module].T);
+    const base = if (std.mem.endsWith(u8, m, "Module") and m.len > "Module".len) m[0 .. m.len - "Module".len] else m;
+    const t = name(b.T);
+    return base ++ (if (std.zig.isValidId(t)) t else "Bean");
+}
+
+/// A field name for a wrapper of T: T's name with a small first letter
+/// (`Database` gives `database`), or `inner`.
+fn fieldName(comptime T: type) []const u8 {
+    const t = name(T);
+    if (t.len == 0) return "inner";
+    const small = [_]u8{std.ascii.toLower(t[0])} ++ t[1..];
+    return if (std.zig.isValidId(small) and !std.zig.isPrimitive(small)) small else "inner";
+}
+
+/// One controller, one server (design §5.8): each place App gives a tuple
+/// of `Controllers(M)` or `Handlers(M)` at, in creation order, against the
+/// first place of each controller and handler.
+fn checkServedOnce(comptime Root: type, comptime mods: []const ModPlan, comptime beans: []const Bean) void {
+    var first: [beans.len]?[]const u8 = @splat(null);
+    for (beans) |b| for (b.sources, 0..) |s, at| switch (s) {
+        .list, .deps => recordSites(Root, mods, beans, &first, b, at, "", s),
+        else => {},
+    };
+}
+
+/// The places of source `at` of bean b: `path` holds the fields of the
+/// structs of dependencies on the way, as in "Root.X (.init param 0.controllers)".
+fn recordSites(
+    comptime Root: type,
+    comptime mods: []const ModPlan,
+    comptime beans: []const Bean,
+    comptime first: []?[]const u8,
+    comptime b: Bean,
+    comptime at: usize,
+    comptime path: []const u8,
+    comptime s: Source,
+) void {
+    switch (s) {
+        .list => |list| {
+            if (list.len == 0) return;
+            const site = b.label ++ " (" ++ edgeName(b, at) ++ path ++ ")";
+            for (list) |t| {
+                if (first[t]) |there| {
+                    const rule = if (beans[t].kind == .controller) "one controller is served by one server: take Controllers" else "one handler is served by one rpc server: take Handlers";
+                    @compileError(pre(Root) ++ beans[t].label ++ " is served by both " ++ there ++ " and " ++ site ++ "; " ++ rule ++
+                        " of a module that does not reach " ++ name(mods[beans[t].module].T));
+                }
+                first[t] = site;
+            }
+        },
+        .deps => |d| for (d.fields, names.fieldsOf(d.P).field_names) |f, field| switch (f) {
+            .list, .deps => recordSites(Root, mods, beans, first, b, at, path ++ "." ++ field, f),
+            else => {},
+        },
+        else => {},
+    }
+}
+
+/// A value of the root that no bean takes is a dead entry (design §5.7).
+fn checkValuesTaken(comptime Root: type, comptime beans: []const Bean) void {
+    var taken: [Root.module.values.len]bool = @splat(false);
+    for (beans) |b| markValues(b.sources, &taken);
+    for (Root.module.values, taken) |V, t| if (!t)
+        @compileError(pre(Root) ++ name(Root) ++ ".values declares " ++ typeName(V) ++ ", but no bean takes it; drop it from " ++ name(Root) ++ ".values and from App.init");
+}
+
+fn markValues(comptime sources: []const Source, comptime taken: []bool) void {
+    for (sources) |s| switch (s) {
+        .value => |r| taken[r.i] = true,
+        .deps => |d| markValues(d.fields, taken),
+        else => {},
+    };
 }

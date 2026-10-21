@@ -93,7 +93,36 @@ pub const compile_errors = [_]Fixture{
     .{ .file = dir ++ "export_module.zig", .expect = "zefir.App(Root): Root.exports: A is a module; a module exports beans: list the exports of A to pass on one by one" },
     .{ .file = dir ++ "export_value.zig", .expect = "zefir.App(Root): Root.exports: Config is a value of Root.values, which every module sees; drop it from .exports" },
     .{ .file = dir ++ "exports_twice.zig", .expect = "zefir.App(Root): Root.exports: X is there twice" },
+    // One type, one bean.
+    .{ .file = dir ++ "two_beans.zig", .expect = "zefir.App(Root): two beans of type Database: Root.Dbs.usersDb and Root.Dbs.analyticsDb; App injects by type, so a type is one bean: " ++
+        "give each its own type, such as `pub const UsersDb = struct { database: Database };`, and take *UsersDb" },
+    .{ .file = dir ++ "providers_twice.zig", .expect = "zefir.App(Root): Root.providers lists X twice" },
+    .{ .file = dir ++ "controllers_twice.zig", .expect = "zefir.App(Root): Root.controllers lists Ctl twice" },
+    .{ .file = dir ++ "value_is_bean.zig", .expect = "zefir.App(Root): Root.values declares *const Database, but InfraModule.Factories.database is a bean of that type; " ++
+        "a type is one bean: drop one, or give it a wrapper type" },
+    .{ .file = dir ++ "value_unused.zig", .expect = "zefir.App(Root): Root.values declares *const Config, but no bean takes it; drop it from Root.values and from App.init" },
+    // Copies and options.
+    .{ .file = dir ++ "bean_copy.zig", .expect = "zefir.App(Root): Reports.Stats.client takes Client by value, but App drives that bean (start, shutdown, deinit): " ++
+        "a copy would be a second Client; take *Client" },
+    .{ .file = dir ++ "options_as_deps.zig", .expect = "zefir.App(Root): Root.Cache.init param 1 is Cache.Options" ++ nothing_to_inject ++ "build Cache in a factory and pass its options there" },
+    .{ .file = dir ++ "options_as_deps_factory.zig", .expect = "zefir.App(Root): Root.Tools.cache param 1 is Cache.Options" ++ nothing_to_inject ++ "write them inside the factory" },
+    // get.
+    .{ .file = dir ++ "get_unknown.zig", .expect = "zefir.App(Root): get(Foo): no bean of type Foo in Root" ++ get_rule },
+    .{ .file = dir ++ "get_value.zig", .expect = "zefir.App(Root): get(Config): no bean of type Config in Root" ++ get_rule },
+    // One controller, one server (design §5.8).
+    .{ .file = dir ++ "controller_two_servers.zig", .expect = "zefir.App(AppModule): AdminModule.AdminController is served by both AppModule.Servers.httpServer (param 2) " ++
+        "and AppModule.Servers.adminHttp (param 2); " ++ one_server ++ "AdminModule" },
+    .{ .file = dir ++ "controller_equal_tuples.zig", .expect = "zefir.App(Root): UsersModule.UsersController is served by both Root.Servers.httpServer (param 0) " ++
+        "and Root.Servers.adminHttp (param 0); " ++ one_server ++ "UsersModule" },
+    .{ .file = dir ++ "controller_field_and_param.zig", .expect = "zefir.App(Root): UsersModule.UsersController is served by both Root.Panel (.controllers) " ++
+        "and Root.Servers.httpServer (param 0); " ++ one_server ++ "UsersModule" },
+    .{ .file = dir ++ "handler_two_servers.zig", .expect = "zefir.App(AppModule): OrdersModule.OrdersHandler is served by both AppModule.Servers.rpcServer (param 2) " ++
+        "and AppModule.Servers.internalRpc (param 2); one handler is served by one rpc server: take Handlers of a module that does not reach OrdersModule" },
 };
+
+const nothing_to_inject = ", in which App has nothing to inject (every field has a default): these are options, not dependencies; ";
+const get_rule = " (a value of Root.values is yours already; an overridden bean is not built)";
+const one_server = "one controller is served by one server: take Controllers of a module that does not reach ";
 
 const wrong = " has the wrong signature; expected ";
 const factory_returns = "; a factory returns its bean, a struct (or an error union of one)";

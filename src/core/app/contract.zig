@@ -69,6 +69,16 @@ pub fn needsEntry(comptime T: type) bool {
     return false;
 }
 
+/// The methods App calls on a bean of type T, as messages list them:
+/// "start, shutdown, deinit"; with the marker, "deinit".
+pub fn drivenMethods(comptime T: type) []const u8 {
+    var out: []const u8 = "";
+    for (lifecycle_names) |m| if (@hasDecl(T, m) and (!isMarked(T) or eql(m, "deinit"))) {
+        out = out ++ (if (out.len == 0) "" else ", ") ++ m;
+    };
+    return out;
+}
+
 /// Checks the marker and the signature of every method of the contract that
 /// T declares. `where` names the place of T in its module, for the marker:
 /// "Root.providers".
