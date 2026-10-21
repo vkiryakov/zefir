@@ -106,11 +106,6 @@ pub fn describe(comptime Options: type) Description {
             const Handler = @TypeOf(@field(r.Controller, r.handler));
             const Payload = payloadOf(@typeInfo(Handler).@"fn".return_type.?);
             const Value = if (Payload == void) void else Payload.Value;
-            var Errors: type = mw.ErrorSetOf(Handler);
-            if (Value != void) Errors = Errors || v.TransformError(Value);
-            for (p.global ++ r.chain) |e| {
-                if (@hasDecl(e.Impl, "run")) Errors = Errors || mw.ErrorSetOf(@TypeOf(e.Impl.run));
-            }
             const segments = router.parse(r.pattern, r.controller_name ++ "." ++ r.handler);
             out = out ++ [_]RouteDescription{.{
                 .method = r.method,
@@ -124,7 +119,7 @@ pub fn describe(comptime Options: type) Description {
                 .Route = r.Route,
                 .Value = Value,
                 .chain = global ++ chainOf(r.chain),
-                .Errors = Errors,
+                .Errors = RouteErrors(r.Controller, r.handler, p.global ++ r.chain),
             }};
         }
         const Map = @typeInfo(@TypeOf(p.Handler.mapError)).@"fn".return_type.?;
@@ -137,6 +132,21 @@ pub fn describe(comptime Options: type) Description {
             .global = global,
         };
     }
+}
+
+/// The errors the route of the handler `handler` of `C` can give the error
+/// handler: those of the handler, of the transforms of the value of the
+/// `http.Json(T)` it returns, and of the `run` of each element of its
+/// chain, the server's elements included.
+pub fn RouteErrors(comptime C: type, comptime handler: []const u8, comptime chain: []const mw.Elem) type {
+    const Handler = @TypeOf(@field(C, handler));
+    const Payload = payloadOf(@typeInfo(Handler).@"fn".return_type.?);
+    var Errors: type = mw.ErrorSetOf(Handler);
+    if (Payload != void) Errors = Errors || v.TransformError(Payload.Value);
+    for (chain) |e| {
+        if (@hasDecl(e.Impl, "run")) Errors = Errors || mw.ErrorSetOf(@TypeOf(e.Impl.run));
+    }
+    return Errors;
 }
 
 fn chainOf(comptime elems: []const mw.Elem) []const ChainElement {

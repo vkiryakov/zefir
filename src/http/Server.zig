@@ -28,6 +28,7 @@ const std = @import("std");
 const core = @import("core");
 const Backend = @import("Backend.zig");
 const Context = @import("Context.zig");
+const check = @import("check.zig");
 const dto = @import("dto.zig");
 const flow = @import("flow.zig");
 const mw = @import("middleware.zig");
@@ -201,6 +202,9 @@ const Route = struct {
     /// The route's own middleware, after the server's: the controller's,
     /// then the method's.
     links: []const mw.Link,
+    /// What the route declares, for the Debug check of a controller with
+    /// `openapi` (check.zig); null for another controller.
+    check: check.TableRef,
 };
 
 /// What the routes need of the backend, known at compile time.
@@ -294,6 +298,7 @@ pub fn init(gpa: std.mem.Allocator, options: anytype) InitError!Server {
             .timeout = r.timeout,
             .heartbeat = r.heartbeat,
             .links = links[offset..][0..r.chain.len],
+            .check = comptime check.tableOf(r.Controller, r.handler, r.Route, p.global ++ r.chain, p.Handler),
         };
         offset += r.chain.len;
         filled += 1;

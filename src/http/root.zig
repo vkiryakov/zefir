@@ -110,6 +110,7 @@ test {
     _ = @import("router.zig");
     _ = @import("plan.zig");
     _ = @import("describe.zig");
+    _ = @import("check.zig");
     _ = @import("Server.zig");
     _ = @import("errors.zig");
     _ = @import("strict.zig");
