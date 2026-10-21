@@ -84,3 +84,8 @@ pub const Status = contract.Status;
 pub const Controllers = graph.Controllers;
 pub const Handlers = graph.Handlers;
 pub const App = container.App;
+
+test {
+    _ = @import("app/names.zig");
+    _ = @import("app/tests/app_tests.zig");
+}

@@ -46,3 +46,22 @@ pub const Status = struct {
         return true;
     }
 };
+
+/// Whether App calls a method of a bean of type T, so that T gets an entry.
+pub fn needsEntry(comptime T: type) bool {
+    return @hasDecl(T, "deinit");
+}
+
+/// The methods of T, type-erased: one VTable per type, in static memory.
+pub fn vtableOf(comptime T: type) *const VTable {
+    const S = struct {
+        fn deinit(p: *anyopaque, io: std.Io) void {
+            const self: *T = @ptrCast(@alignCast(p));
+            if (@typeInfo(@TypeOf(T.deinit)).@"fn".param_types.len == 2) self.deinit(io) else self.deinit();
+        }
+        const vtable: VTable = .{
+            .deinit = if (@hasDecl(T, "deinit")) deinit else null,
+        };
+    };
+    return &S.vtable;
+}
