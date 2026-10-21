@@ -15,6 +15,8 @@
 //! - The types of the results and the arguments of the catalog:
 //!   `redis.Ttl`, `redis.KeyType`, `redis.ScanPage(T)`, `redis.StreamId`,
 //!   `redis.Entry(T)`, `redis.FieldValue` and the others of `cmd/types.zig`.
+//! - `redis.testing` — what tests of code on zefir-redis need without a
+//!   Redis server.
 
 const std = @import("std");
 const errors = @import("errors.zig");
@@ -24,6 +26,7 @@ const types = @import("cmd/types.zig");
 const resp = @import("resp.zig");
 
 pub const cmd = @import("cmd.zig");
+pub const testing = @import("testing.zig");
 
 pub const Value = resp.Value;
 
@@ -69,6 +72,7 @@ test {
     _ = @import("cmd/types_tests.zig");
     _ = @import("cmd/raw_tests.zig");
     _ = @import("resp/fuzz.zig");
+    _ = testing;
 }
 
 test "the package version reaches the module" {
