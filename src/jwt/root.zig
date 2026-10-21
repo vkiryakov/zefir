@@ -62,6 +62,7 @@ test {
     _ = @import("crypto.zig");
     _ = @import("Key.zig");
     _ = @import("SigningKey.zig");
+    _ = @import("jws.zig");
 }
 
 test "limits have their documented values" {
