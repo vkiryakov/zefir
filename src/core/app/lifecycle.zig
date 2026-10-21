@@ -247,17 +247,21 @@ pub fn wait(rt: *Runtime) anyerror!void {
         defer rt.unlock();
         if (rt.result) |result| return result;
     }
+    // `requestStop` before `start`: no stop began, and none will.
+    if (rt.stop_task == null) return;
     return rt.awaitStop();
 }
 
-/// Begins the stop: `starting` or `running → stopping` by one CAS, then the
-/// stop task wakes. Never waits; a second call does nothing.
+/// Begins the stop: `created → stopped`, `starting` or `running →
+/// stopping` by one CAS, then the stop task wakes. Never waits; a second
+/// call does nothing.
 pub fn requestStop(rt: *Runtime) void {
     const s = &rt.status.internal.state;
     var seen = s.load(.acquire);
     while (true) switch (seen) {
+        .created => seen = s.cmpxchgWeak(.created, .stopped, .acq_rel, .acquire) orelse return,
         .starting, .running => seen = s.cmpxchgWeak(seen, .stopping, .acq_rel, .acquire) orelse break,
-        .created, .stopping, .stopped, .failed => return,
+        .stopping, .stopped, .failed => return,
     };
     rt.stop_event.set(rt.io);
 }

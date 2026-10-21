@@ -174,6 +174,13 @@ fn Methods(comptime T: type) type {
             return s.result;
         }
 
+        /// A Stubborn's: until its task is canceled or the test opens its
+        /// gate; the bean's own stop does not end it.
+        pub fn waitHeld(t: *T, io: Io) anyerror!void {
+            defer t.rig.rec.add("waited", who);
+            try slot(t).gate.wait(io);
+        }
+
         /// A DeafWait's: deaf to cancelation, until the test opens its gate.
         pub fn waitDeaf(t: *T, io: Io) anyerror!void {
             const s = slot(t);
@@ -288,6 +295,16 @@ pub const Waiter = struct {
     pub const start = M.start;
     pub const wait = M.wait;
     pub const requestStop = M.requestStop;
+    pub const shutdown = M.shutdown;
+    pub const deinit = M.deinit;
+};
+
+/// A bean whose wait ends only when its task is canceled: App's gathering
+/// of the watchers ends it.
+pub const Stubborn = struct {
+    rig: *Rig,
+    const M = Methods(@This());
+    pub const wait = M.waitHeld;
     pub const shutdown = M.shutdown;
     pub const deinit = M.deinit;
 };

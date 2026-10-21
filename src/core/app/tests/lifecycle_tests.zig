@@ -23,6 +23,9 @@ fn Calls(comptime App: type) type {
         fn wait(app: *App) anyerror!void {
             return app.wait();
         }
+        fn requestStop(app: *App) void {
+            app.requestStop();
+        }
     };
 }
 
@@ -504,4 +507,305 @@ test "a deaf shutdown: wait returns ShutdownTimeout at the deadline; deinit free
     try rig.expect("shutdown", &.{ "B", "A" });
     app.deinit();
     try rig.expect("deinit", &.{ "B", "A" });
+}
+
+test "requestStop many times from many tasks: one stop" {
+    const Root = struct {
+        pub const module: zapp.Module = .{ .providers = &.{ gates.A, gates.B, gates.Waiter }, .values = &.{*Rig} };
+    };
+    const App = zapp.App(Root);
+    const io = testing.io;
+    const level = quiet();
+    defer testing.log_level = level;
+    var rig: Rig = .init(io);
+    defer rig.release();
+    var app = try App.init(testing.allocator, io, .{&rig}, .{});
+    defer app.deinit();
+    try app.start();
+    var group: Io.Group = .init;
+    defer group.cancel(io);
+    for (0..16) |_| try group.concurrent(io, Calls(App).requestStop, .{&app});
+    // And a bean breaks meanwhile.
+    rig.end("Waiter", error.Unavailable);
+    try group.await(io);
+    if (app.wait()) |_| {} else |err| try testing.expectEqual(error.Unavailable, err);
+    if (app.failure()) |failure| try testing.expectEqualStrings("Root.Waiter", failure.bean);
+    try rig.expect("requestStop", &.{ "A", "B", "Waiter" });
+    try rig.expect("shutdown", &.{ "Waiter", "B", "A" });
+    try testing.expectEqual(zapp.State.stopped, app.state());
+}
+
+test "requestStop before start: stopped, start is InvalidState, wait returns {}" {
+    const Root = struct {
+        pub const module: zapp.Module = .{ .providers = &.{ gates.A, gates.Waiter }, .values = &.{*Rig} };
+    };
+    var rig: Rig = .init(testing.io);
+    defer rig.release();
+    var app = try zapp.App(Root).init(testing.allocator, testing.io, .{&rig}, .{});
+    {
+        errdefer app.deinit();
+        app.requestStop();
+        try testing.expectEqual(zapp.State.stopped, app.state());
+        try testing.expectError(error.InvalidState, app.start());
+        try app.wait();
+        try app.shutdown();
+        try testing.expect(app.failure() == null);
+    }
+    app.deinit();
+    try rig.expect("start", &.{});
+    try rig.expect("shutdown", &.{});
+    try rig.expect("deinit", &.{ "Waiter", "A" });
+}
+
+test "wait before start is InvalidState" {
+    const Root = struct {
+        pub const module: zapp.Module = .{ .providers = &.{gates.A}, .values = &.{*Rig} };
+    };
+    var rig: Rig = .init(testing.io);
+    defer rig.release();
+    var app = try zapp.App(Root).init(testing.allocator, testing.io, .{&rig}, .{});
+    defer app.deinit();
+    try testing.expectError(error.InvalidState, app.wait());
+    try testing.expectEqual(zapp.State.created, app.state());
+}
+
+test "no restart: start after the stop is InvalidState" {
+    const Root = struct {
+        pub const module: zapp.Module = .{ .providers = &.{ gates.A, gates.B }, .values = &.{*Rig} };
+    };
+    const level = quiet();
+    defer testing.log_level = level;
+    var rig: Rig = .init(testing.io);
+    defer rig.release();
+    var app = try zapp.App(Root).init(testing.allocator, testing.io, .{&rig}, .{});
+    defer app.deinit();
+    try app.start();
+    try testing.expectError(error.InvalidState, app.start());
+    try app.shutdown();
+    try testing.expectError(error.InvalidState, app.start());
+    try rig.expect("start", &.{ "A", "B" });
+    // Nor after a start that failed.
+    var failed_rig: Rig = .init(testing.io);
+    defer failed_rig.release();
+    failed_rig.of("B").start = .fails;
+    var failed = try zapp.App(Root).init(testing.allocator, testing.io, .{&failed_rig}, .{});
+    defer failed.deinit();
+    try testing.expectError(error.StartFailed, failed.start());
+    try testing.expectError(error.InvalidState, failed.start());
+}
+
+test "wait after the end returns the same result again" {
+    const Root = struct {
+        pub const module: zapp.Module = .{ .providers = &.{ gates.A, gates.Waiter }, .values = &.{*Rig} };
+    };
+    const level = quiet();
+    defer testing.log_level = level;
+    var rig: Rig = .init(testing.io);
+    defer rig.release();
+    var app = try zapp.App(Root).init(testing.allocator, testing.io, .{&rig}, .{});
+    defer app.deinit();
+    try app.start();
+    rig.end("Waiter", error.Unavailable);
+    try testing.expectError(error.Unavailable, app.wait());
+    try testing.expectError(error.Unavailable, app.wait());
+    try testing.expectError(error.Unavailable, app.shutdown());
+    try rig.expect("shutdown", &.{ "Waiter", "A" });
+}
+
+test "canceling wait does not stop the App" {
+    const Root = struct {
+        pub const module: zapp.Module = .{ .providers = &.{ gates.A, gates.Waiter }, .values = &.{*Rig} };
+    };
+    const App = zapp.App(Root);
+    const io = testing.io;
+    var rig: Rig = .init(io);
+    defer rig.release();
+    var app = try App.init(testing.allocator, io, .{&rig}, .{});
+    defer app.deinit();
+    try app.start();
+    var waiting = try io.concurrent(Calls(App).wait, .{&app});
+    defer waiting.cancel(io) catch {};
+    try io.sleep(.fromMilliseconds(10), .awake);
+    try testing.expectError(error.Canceled, waiting.cancel(io));
+    try testing.expectEqual(zapp.State.running, app.state());
+    try rig.expect("requestStop", &.{});
+    try app.shutdown();
+    try testing.expectEqual(zapp.State.stopped, app.state());
+}
+
+test "shutdown is requestStop and wait" {
+    const Root = struct {
+        pub const module: zapp.Module = .{ .providers = &.{ gates.A, gates.Waiter }, .values = &.{*Rig} };
+    };
+    var rig: Rig = .init(testing.io);
+    defer rig.release();
+    var app = try zapp.App(Root).init(testing.allocator, testing.io, .{&rig}, .{});
+    defer app.deinit();
+    try app.start();
+    try app.shutdown();
+    try testing.expectEqual(zapp.State.stopped, app.state());
+    try rig.expect("requestStop", &.{ "A", "Waiter" });
+    try rig.expect("shutdown", &.{ "Waiter", "A" });
+    // A second one stops nothing more.
+    try app.shutdown();
+    try rig.expect("shutdown", &.{ "Waiter", "A" });
+}
+
+test "deinit while running stops the App first" {
+    const Root = struct {
+        pub const module: zapp.Module = .{ .providers = &.{ gates.A, gates.Waiter, gates.C }, .values = &.{*Rig} };
+    };
+    var rig: Rig = .init(testing.io);
+    defer rig.release();
+    var app = try zapp.App(Root).init(testing.allocator, testing.io, .{&rig}, .{});
+    {
+        errdefer app.deinit();
+        try app.start();
+    }
+    app.deinit();
+    try rig.expect("shutdown", &.{ "C", "Waiter", "A" });
+    try rig.expect("deinit", &.{ "C", "Waiter", "A" });
+    try testing.expect(rig.position("shutdown", "A").? < rig.position("deinit", "C").?);
+}
+
+test "deinit without start starts nothing and destroys in reverse" {
+    const Root = struct {
+        pub const module: zapp.Module = .{ .providers = &.{ gates.A, gates.Waiter, gates.C }, .values = &.{*Rig} };
+    };
+    var rig: Rig = .init(testing.io);
+    defer rig.release();
+    var app = try zapp.App(Root).init(testing.allocator, testing.io, .{&rig}, .{});
+    app.deinit();
+    try rig.expect("start", &.{});
+    try rig.expect("requestStop", &.{});
+    try rig.expect("shutdown", &.{});
+    try rig.expect("deinit", &.{ "C", "Waiter", "A" });
+}
+
+/// A ready object whose type has lifecycle methods: App never calls them.
+const Tool = struct {
+    rig: *Rig,
+
+    pub fn start(t: *Tool, _: Io) !void {
+        t.rig.rec.add("start", "Tool");
+    }
+    pub fn deinit(t: *Tool) void {
+        t.rig.rec.add("deinit", "Tool");
+    }
+};
+
+test "values, controllers and handlers are never driven" {
+    const User = struct { tool: *Tool };
+    const Panel = struct {
+        tool: *Tool,
+
+        pub const http_routes = .{"GET /panel"};
+    };
+    const Ops = struct {
+        pub const rpc_handler = .{ .api = "ops.v1" };
+    };
+    const Root = struct {
+        pub const module: zapp.Module = .{
+            .providers = &.{ User, gates.A },
+            .controllers = &.{Panel},
+            .handlers = &.{Ops},
+            .values = &.{ *Tool, *Rig },
+        };
+    };
+    var rig: Rig = .init(testing.io);
+    defer rig.release();
+    var tool: Tool = .{ .rig = &rig };
+    var app = try zapp.App(Root).init(testing.allocator, testing.io, .{ &tool, &rig }, .{});
+    {
+        errdefer app.deinit();
+        try testing.expectEqual(1, app.internal.block.entries.len);
+        try app.start();
+        try app.shutdown();
+    }
+    app.deinit();
+    try rig.expect("start", &.{"A"});
+    try rig.expect("deinit", &.{"A"});
+}
+
+test "Status: ready only while running and every bean is ready" {
+    const Probe = struct {
+        status: *const zapp.Status,
+        ready: std.atomic.Value(bool) = .init(true),
+        ready_in_request_stop: std.atomic.Value(bool) = .init(true),
+
+        pub fn requestStop(p: *@This(), _: Io) void {
+            p.ready_in_request_stop.store(p.status.isReady(), .release);
+        }
+        pub fn isReady(p: *const @This()) bool {
+            return p.ready.load(.acquire);
+        }
+    };
+    const Root = struct {
+        pub const module: zapp.Module = .{ .providers = &.{Probe} };
+    };
+    var app = try zapp.App(Root).init(testing.allocator, testing.io, .{}, .{});
+    defer app.deinit();
+    const probe = app.get(Probe);
+    try testing.expect(!probe.status.isReady());
+    try app.start();
+    try testing.expect(probe.status.isReady() and app.isReady());
+    probe.ready.store(false, .release);
+    try testing.expect(!probe.status.isReady() and !app.isReady());
+    probe.ready.store(true, .release);
+    try testing.expect(probe.status.isReady());
+    try app.shutdown();
+    // The first step of the stop took readiness away.
+    try testing.expect(!probe.ready_in_request_stop.load(.acquire));
+    try testing.expect(!probe.status.isReady() and !app.isReady());
+}
+
+test "the watchers end before the beans are destroyed" {
+    const Root = struct {
+        pub const module: zapp.Module = .{ .providers = &.{ gates.A, gates.Stubborn }, .values = &.{*Rig} };
+    };
+    var rig: Rig = .init(testing.io);
+    defer rig.release();
+    var app = try zapp.App(Root).init(testing.allocator, testing.io, .{&rig}, .{});
+    {
+        errdefer app.deinit();
+        try app.start();
+        // Its own shutdown does not end its wait: the gathering cancels it.
+        try app.shutdown();
+        try testing.expect(rig.position("shutdown", "A").? < rig.position("waited", "Stubborn").?);
+    }
+    app.deinit();
+    try testing.expect(rig.position("waited", "Stubborn").? < rig.position("deinit", "Stubborn").?);
+}
+
+const Moved = struct {
+    pub const module: zapp.Module = .{ .providers = &.{ gates.A, gates.Waiter }, .values = &.{*Rig} };
+};
+
+/// Returns the App by value: it moves, its block does not.
+fn makeMoved(rig: *Rig) !zapp.App(Moved) {
+    return zapp.App(Moved).init(testing.allocator, rig.io, .{rig}, .{});
+}
+
+test "an App returned from a helper starts and stops" {
+    var rig: Rig = .init(testing.io);
+    defer rig.release();
+    var first = try makeMoved(&rig);
+    const waiter = first.get(gates.Waiter);
+    const status = &first.internal.block.status;
+    // Moved once more, into a struct, before the start.
+    var holder: struct { before: u64 = 1, app: zapp.App(Moved) } = .{ .app = first };
+    first = undefined;
+    const app = &holder.app;
+    {
+        errdefer app.deinit();
+        try testing.expect(app.get(gates.Waiter) == waiter);
+        try app.start();
+        try testing.expect(status.state() == .running);
+        try app.shutdown();
+        try testing.expect(status.state() == .stopped);
+    }
+    app.deinit();
+    try rig.expect("start", &.{ "A", "Waiter" });
+    try rig.expect("shutdown", &.{ "Waiter", "A" });
+    try rig.expect("deinit", &.{ "Waiter", "A" });
 }
