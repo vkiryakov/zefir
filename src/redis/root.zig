@@ -73,6 +73,7 @@ test {
     _ = @import("cmd/raw_tests.zig");
     _ = @import("resp/fuzz.zig");
     _ = testing;
+    _ = @import("url_tests.zig");
 }
 
 test "the package version reaches the module" {
