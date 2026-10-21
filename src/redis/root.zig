@@ -6,16 +6,27 @@
 //! - `redis.Value` — a reply of any shape, for replies that fit no Zig
 //!   type: strings, numbers, doubles, booleans, arrays, sets, maps with
 //!   their pairs in the server's order, and errors inside aggregates.
+//! - `redis.Error`, `redis.CommandError`, `redis.outcome`,
+//!   `redis.Diagnostics` — what can go wrong in a call, whether the server
+//!   may have run the command, and the details for logs.
 
 const std = @import("std");
+const errors = @import("errors.zig");
 
 /// RESP3, for the client and `testing.FakeServer` only.
 const resp = @import("resp.zig");
 
 pub const Value = resp.Value;
 
+pub const Error = errors.Error;
+pub const CommandError = errors.CommandError;
+pub const Outcome = errors.Outcome;
+pub const outcome = errors.outcome;
+pub const Diagnostics = errors.Diagnostics;
+
 test {
     std.testing.refAllDecls(@This());
+    _ = @import("errors_tests.zig");
     _ = resp;
     _ = @import("resp/writer_tests.zig");
     _ = @import("resp/reader_tests.zig");
