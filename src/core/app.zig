@@ -65,7 +65,8 @@ pub const Module = struct {
 pub const Options = struct {
     /// The budget of the whole shutdown, from its start to the end of the
     /// last bean's shutdown, shared by every bean. It fits the 30 s that
-    /// Kubernetes gives a pod, with room to spare.
+    /// Kubernetes gives a pod, with room to spare. Zero or less is
+    /// `error.InvalidConfiguration` in `App.init`.
     shutdown_timeout: std.Io.Duration = .fromSeconds(25),
 };
 

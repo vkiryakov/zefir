@@ -151,6 +151,15 @@ test "an init that fails destroys what it built, in reverse, and returns its err
     try rec.expect("deinit", &.{ "Second", "First" });
 }
 
+test "init refuses a shutdown_timeout of zero or less, before it builds anything" {
+    var rec: mocks.Recorder = .init(testing.io);
+    for ([_]i64{ 0, -1 }) |ms| {
+        const options: zapp.Options = .{ .shutdown_timeout = .fromMilliseconds(ms) };
+        try testing.expectError(error.InvalidConfiguration, zapp.App(Rollback).init(testing.allocator, testing.io, .{&rec}, options));
+    }
+    try rec.expect("init", &.{});
+}
+
 const Probe = struct {
     status: *const zapp.Status,
     rec: *mocks.Recorder,

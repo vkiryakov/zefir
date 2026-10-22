@@ -41,8 +41,11 @@ pub fn App(comptime Root: type) type {
         /// tasks. If one fails, the beans built before it are destroyed in
         /// reverse order and its error is returned. `values` is a tuple of
         /// pointers, one per type of `Root.module.values`, in any order:
-        /// `.{ &config, &logger }`.
+        /// `.{ &config, &logger }`. `error.InvalidConfiguration`, before
+        /// anything is built, when `options.shutdown_timeout` is zero or less.
         pub fn init(gpa: std.mem.Allocator, io: std.Io, values: anytype, options: Options) anyerror!@This() {
+            // No stop could end in time.
+            if (options.shutdown_timeout.nanoseconds <= 0) return error.InvalidConfiguration;
             const given: Values = store.takeValues(Root, Values, values);
             const steps = comptime store.stepsOf(Root, Block, Values);
             const before = comptime store.entriesBefore(Root);
