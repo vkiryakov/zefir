@@ -73,7 +73,8 @@ pub const Plan = struct {
     /// ends it with `Closed`, its deadline with `DeadlineExceeded` and the
     /// cancelation of its task with `Cancelled`.
     connect_delay: Io.Duration = .zero,
-    /// Holds `ping` and every data operation, once journaled.
+    /// Holds `ping` and every data operation, once journaled, and the
+    /// `next` of their cursors.
     gate: ?*Gate = null,
 };
 
@@ -129,7 +130,8 @@ pub const Counts = struct {
 };
 
 /// Holds the calls of the clients whose plan names it: `ping` and every
-/// data operation, once journaled. A call at the gate ends when it opens
+/// data operation, once journaled, and the `next` of their cursors, as a
+/// getMore of a real server may wait. A call at the gate ends when it opens
 /// (then with its reply), at `close` of its client (`Closed`), at its
 /// deadline (`Timeout`) or at the cancelation of its task (`Interrupted`;
 /// the task stays canceled). Declare it as `.{}`, and keep it while calls
@@ -622,8 +624,10 @@ const FakeCursor = struct {
 
     pub fn next(cursor: *FakeCursor, io: Io, ctx: core.Context, d: ?*Diagnostics) DriverError!?bson.RawDocument {
         if (d) |x| x.* = .{};
-        if (cursor.client.closed.load(.acquire)) return fail(d, error.Closed, "the client of the cursor is closed", .{});
+        const c = cursor.client;
+        if (c.closed.load(.acquire)) return fail(d, error.Closed, "the client of the cursor is closed", .{});
         try checkContext(io, ctx, d);
+        if (c.fake.planOf(c.uri)) |node| if (node.plan.gate) |gate| try c.wait(io, gate, ctx, d);
         if (cursor.at == cursor.documents.len) return null;
         defer cursor.at += 1;
         return cursor.documents[cursor.at];

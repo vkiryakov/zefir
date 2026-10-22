@@ -278,6 +278,44 @@ test "a gate holds ping and operations until it opens, and close ends them with 
     try testing.expectEqual(@as(usize, 0), closing.waiting(io));
 }
 
+fn nextTask(cursor: odm.RawCursor, io: Io) odm.DriverError!?bson.RawDocument {
+    return cursor.next(io, .root, null);
+}
+
+test "a gate holds the next of a cursor too" {
+    const io = testing.io;
+    var fake: FakeDriver = .init(testing.allocator);
+    defer fake.deinit();
+    const client = try connected(&fake, io, "fake://held");
+    defer release(client, io);
+    try fake.reply("fake://held", .{ .documents = &.{ann} });
+    const cursor = try client.find(io, .root, &.{ .ns = ns, .filter = .empty }, .{ .allocator = testing.allocator });
+    defer cursor.deinit(io);
+
+    // The plan of the uri, looked up at each call, holds it from now on.
+    var gate: FakeDriver.Gate = .{};
+    try fake.plan("fake://held", .{ .gate = &gate });
+    {
+        var next = try io.concurrent(nextTask, .{ cursor, io });
+        defer _ = next.cancel(io) catch null;
+        defer gate.open(io);
+        try gate.waitFor(io, 1);
+        gate.open(io);
+        try testing.expectEqualSlices(u8, ann.bytes, (try next.await(io)).?.bytes);
+    }
+    // close ends a next at the gate with Closed.
+    var shut: FakeDriver.Gate = .{};
+    try fake.plan("fake://held", .{ .gate = &shut });
+    {
+        var next = try io.concurrent(nextTask, .{ cursor, io });
+        defer _ = next.cancel(io) catch null;
+        defer shut.open(io);
+        try shut.waitFor(io, 1);
+        client.close(io);
+        try testing.expectError(error.Closed, next.await(io));
+    }
+}
+
 test "a deadline under 1 ms and a cancelled token send nothing" {
     const io = testing.io;
     var fake: FakeDriver = .init(testing.allocator);

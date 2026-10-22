@@ -438,11 +438,13 @@ pub fn build(b: *std.Build) void {
     }
 
     // odm panic programs: a registry moved after its first
-    // registerConnection(), a call on another std.Io and Registry.deinit()
-    // with sessions left panic in safe builds. Each program must print the
-    // panic message and end in its own panic handler, which exits with code
-    // 3 instead of aborting. They get their own Debug copies of odm and the
-    // modules it imports, whatever -Doptimize says.
+    // registerConnection(), a call on another std.Io, Registry.deinit()
+    // with sessions left, a session or a cursor that two tasks call at once,
+    // and a collection used after the deinit of its session panic in safe
+    // builds. Each program must print the panic message and end in its own
+    // panic handler, which exits with code 3 instead of aborting. They get
+    // their own Debug copies of odm and the modules it imports, whatever
+    // -Doptimize says.
     const panic_validator = b.createModule(.{
         .root_source_file = b.path("src/validator/root.zig"),
         .target = target,
@@ -462,6 +464,9 @@ pub fn build(b: *std.Build) void {
         .{ "moved_registry", "panic: zefir-odm: Registry moved after its first registerConnection(): keep it where it was" },
         .{ "another_io", "panic: zefir-odm: a call on another std.Io than the registry's: pass the io of Registry.init" },
         .{ "deinit_with_leases", "panic: zefir-odm: Registry.deinit() with sessions or cursors left: deinit them first" },
+        .{ "session_two_tasks", "panic: zefir-odm: a session used by two tasks at once: take a session for each task" },
+        .{ "collection_after_deinit", "panic: zefir-odm: a collection used after the deinit of its session" },
+        .{ "cursor_two_tasks", "panic: zefir-odm: a cursor used by two tasks at once: one task at a time calls next and deinit of a cursor" },
     }) |case| {
         const exe = b.addExecutable(.{
             .name = b.fmt("odm-panic-{s}", .{case[0]}),
