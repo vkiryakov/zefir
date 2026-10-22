@@ -1550,6 +1550,8 @@ fn addHttpCompileChecks(
     // `.contains` matches the end of an error line, so `error: ` in front
     // makes `expect` the whole message, from its start.
     for (http_cases.compile_errors) |fixture| {
+        // Outside Debug the server reads no declarations for its check.
+        if (fixture.debug and optimize != .debug) continue;
         const t = b.addTest(.{
             .name = std.fs.path.stem(fixture.file),
             .root_module = b.createModule(.{

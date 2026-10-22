@@ -7,7 +7,10 @@
 
 /// A file that must fail to compile with an error whose message is
 /// `expect`: the whole text after `error: ` to the end of the line.
-pub const Fixture = struct { file: []const u8, expect: []const u8 };
+/// `debug`: an error of the Debug check (check.zig), which reads the
+/// declarations in Debug builds only, so the file is compiled only when
+/// -Doptimize is Debug.
+pub const Fixture = struct { file: []const u8, expect: []const u8, debug: bool = false };
 
 const handler_form = "pub fn get(self: *UsersV1Controller, ctx: *http.Context) !http.Json(T), or !void for a response without a JSON value";
 const no_routes = "zefir.http: UsersV1Controller has no pub const http_routes = http.routes(.{ ... })";
@@ -49,6 +52,8 @@ pub const compile_errors = [_]Fixture{
     // The declarations of a route: its input and its statuses.
     .{ .file = dir ++ "route_input_not_type.zig", .expect = "zefir.http: http.get(\"/{id}\"): .path is the type of a DTO, such as .path = dto.TodoIdPath" },
     .{ .file = dir ++ "route_declared_dto.zig", .expect = "zefir.http: route_declared_dto.Query.filter: a struct field comes only from JSON; query, form, path, headers and cookies hold strings" },
+    .{ .file = dir ++ "route_declared_headers.zig", .expect = "zefir.http: route_declared_headers.Headers.field_rules.request_id: v.rename does not apply to headers; field request_id reads the header Request-Id" },
+    .{ .file = dir ++ "route_declared_body.zig", .expect = "zefir.http: route_declared_body.CreateRequest.codes: [3]u8 does not come from JSON; ctx.json reads integers, floats, bool, enums, []const u8 and structs, alone, as ?T or as []const T" },
     .{ .file = dir ++ "route_body_and_form.zig", .expect = "zefir.http: http.post(\"\"): .body and .form together; a body is JSON or a form" },
     .{ .file = dir ++ "sse_route_body.zig", .expect = "zefir.http: http.sse.get(\"/events\"): unknown option .body; the options are .path, .query, .headers, .cookies, .events, .middleware, .heartbeat and .on_close" },
     .{ .file = dir ++ "route_path_param_without_field.zig", .expect = "zefir.http: UsersV1Controller.get: {id} in \"/v1/users/{id}\" has no field in .path = UserPath" },
@@ -101,6 +106,12 @@ pub const compile_errors = [_]Fixture{
     .{ .file = dir ++ "mw_run_anyerror.zig", .expect = "zefir.http: requireUser.run (middleware of UsersV1Controller.get) returns anyerror; the strict error check needs the errors it can return: give it an error set" ++ strict_hint },
     .{ .file = dir ++ "strict_middleware_error.zig", .expect = "zefir.http: requirePermission(users:delete).run (middleware of UsersV1Controller.delete) can return error.NoSuchTenant; AppErrors.mapError gives it 500 through .fallback" ++ strict_hint },
     .{ .file = dir ++ "mw_phase_signature.zig", .expect = "zefir.http: Server.init .middleware[0]: Timing.run is fn (*http.Context) !http.MiddlewareResult; write pub fn run(self: *@This(), ctx: *http.Context) !http.MiddlewareResult" },
+    // The openapi of a middleware on a route of the document, as the Debug
+    // check reads it.
+    .{ .file = dir ++ "mw_openapi_not_struct.zig", .expect = "zefir.http: the openapi of the middleware Paging is a zefir.openapi.MiddlewareDoc, such as .{ .query = PageQuery }; got type", .debug = true },
+    .{ .file = dir ++ "mw_openapi_input_not_type.zig", .expect = "zefir.http: the openapi of the middleware Paging: .query is the type of a DTO, such as .query = PageQuery, or void", .debug = true },
+    .{ .file = dir ++ "mw_openapi_responses_not_struct.zig", .expect = "zefir.http: the openapi of the middleware Paging: .responses is a struct of statuses, such as .responses = .{ .not_modified = .{} }", .debug = true },
+    .{ .file = dir ++ "mw_openapi_responses_status.zig", .expect = "zefir.http: the openapi of the middleware Paging: .responses names .notModified; its keys are names of std.http.Status, such as .not_modified", .debug = true },
 };
 
 const strict_hint = " (strict error check; .strict_errors = false turns it off)";
