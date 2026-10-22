@@ -310,7 +310,9 @@ pub fn c9(job: *Job) Error!void {
             return job.fail("no task for each of 16 workers: io.concurrent failed", .{});
         };
     }
-    group.await(io) catch {};
+    // Canceled meanwhile, the check's task waits for the workers all the
+    // same: they use the client and the job.
+    group.await(io) catch group.cancel(io);
     for (&workers, 0..) |*w, i| {
         if (w.err) |err| return job.fail("task {d}, round {d}: {s} returned error.{t}: {s}", .{ i, w.round, w.what, err, w.diag.message() });
     }
