@@ -108,5 +108,6 @@ test {
     _ = @import("tests/values_tests.zig");
     _ = @import("tests/filter_tests.zig");
     _ = @import("tests/options_tests.zig");
+    _ = @import("tests/update_tests.zig");
     _ = @import("tests/big_model.zig");
 }

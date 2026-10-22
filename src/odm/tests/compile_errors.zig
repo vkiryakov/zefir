@@ -16,6 +16,7 @@ const v = @import("validator");
 const odm = @import("../root.zig");
 const filter = @import("../query/filter.zig");
 const options = @import("../query/options.zig");
+const update = @import("../query/update.zig");
 const Client = odm.Client;
 
 // The models of tests/models.zig, declared here so that the messages name
@@ -709,4 +710,127 @@ const NestedTypo = struct { profile: ?struct { ctiy: []const u8 } };
 
 test "compile error: a nested projection field that the model does not have" {
     _ = try options.projection(User, NestedTypo, std.testing.allocator);
+}
+
+// Updates: one case per row of the design's table "Updates", through the
+// encoder of query/update.zig, on Account.
+
+const some_id = bson.ObjectId.parseHex("652f8a1b9c0d4e5f60718293") catch unreachable;
+
+test "compile error: inc of a string field" {
+    _ = try update.encode(Account, std.testing.allocator, .{ .inc = .{ .email = 1 } }, .update);
+}
+
+test "compile error: inc of an integer by a fraction" {
+    _ = try update.encode(Account, std.testing.allocator, .{ .inc = .{ .age = 1.5 } }, .update);
+}
+
+test "compile error: push to a string field" {
+    _ = try update.encode(Account, std.testing.allocator, .{ .push = .{ .email = "x" } }, .update);
+}
+
+test "compile error: max of an enum" {
+    _ = try update.encode(Account, std.testing.allocator, .{ .max = .{ .status = .active } }, .update);
+}
+
+test "compile error: set of a string to a number field" {
+    _ = try update.encode(Account, std.testing.allocator, .{ .set = .{ .age = "x" } }, .update);
+}
+
+test "compile error: set of an optional to null" {
+    _ = try update.encode(Account, std.testing.allocator, .{ .set = .{ .profile = null } }, .update);
+}
+
+test "compile error: set_on_insert of an optional to null" {
+    _ = try update.encode(Account, std.testing.allocator, .{ .set_on_insert = .{ .profile = null } }, .upsert);
+}
+
+test "compile error: set of an optional field by an optional value" {
+    var maybe: ?[]const u8 = "ann";
+    _ = &maybe;
+    _ = try update.encode(Account, std.testing.allocator, .{ .set = .{ .nickname = maybe } }, .update);
+}
+
+test "compile error: set of a path into an optional struct" {
+    _ = try update.encode(Account, std.testing.allocator, .{ .set = .{ .profile = .{ .city = "Lyon" } } }, .update);
+}
+
+test "compile error: unset of a required field" {
+    _ = try update.encode(Account, std.testing.allocator, .{ .unset = .{.email} }, .update);
+}
+
+test "compile error: set of the id" {
+    _ = try update.encode(Account, std.testing.allocator, .{ .set = .{ .id = some_id } }, .update);
+}
+
+test "compile error: one field changed by two operators" {
+    _ = try update.encode(Account, std.testing.allocator, .{ .set = .{ .age = 1 }, .inc = .{ .age = 1 } }, .update);
+}
+
+test "compile error: a struct and its field in one update" {
+    const a: Address = .{ .city = "Lyon", .country = "FR" };
+    _ = try update.encode(Account, std.testing.allocator, .{ .set = .{ .address = a }, .unset = .{.@"address.zip"} }, .update);
+}
+
+test "compile error: an unknown update operator" {
+    _ = try update.encode(Account, std.testing.allocator, .{ .sett = .{ .age = 1 } }, .update);
+}
+
+test "compile error: an update that changes nothing" {
+    _ = try update.encode(Account, std.testing.allocator, .{}, .update);
+}
+
+test "compile error: an empty operator of an update" {
+    _ = try update.encode(Account, std.testing.allocator, .{ .set = .{} }, .update);
+}
+
+test "compile error: pop by a number" {
+    _ = try update.encode(Account, std.testing.allocator, .{ .pop = .{ .tags = 1 } }, .update);
+}
+
+test "compile error: set_on_insert outside an upsert" {
+    _ = try update.encode(Account, std.testing.allocator, .{ .set_on_insert = .{ .status = .active } }, .update);
+}
+
+// The texts of updates that the design's table leaves to odm: the shapes
+// of an update, of its operators and of unset, paths through lists, empty
+// literals, push without each, an inc beyond the BSON integer of its field,
+// and set_on_insert of an optional value.
+
+test "compile error: an update that is not a literal" {
+    _ = try update.encode(Account, std.testing.allocator, 5, .update);
+}
+
+test "compile error: an operator that is not a literal" {
+    _ = try update.encode(Account, std.testing.allocator, .{ .set = 5 }, .update);
+}
+
+test "compile error: unset of a value that is not a path" {
+    _ = try update.encode(Account, std.testing.allocator, .{ .unset = .nickname }, .update);
+}
+
+test "compile error: unset of a path through a list" {
+    _ = try update.encode(Account, std.testing.allocator, .{ .unset = .{.@"items.sku"} }, .update);
+}
+
+test "compile error: set of a path through a list" {
+    _ = try update.encode(Account, std.testing.allocator, .{ .set = .{ .items = .{ .qty = 0 } } }, .update);
+}
+
+test "compile error: an empty literal in an update" {
+    _ = try update.encode(Account, std.testing.allocator, .{ .set = .{ .address = .{} } }, .update);
+}
+
+test "compile error: push of a literal without each" {
+    _ = try update.encode(Account, std.testing.allocator, .{ .push = .{ .tags = .{ .eac = .{"a"} } } }, .update);
+}
+
+test "compile error: inc beyond the BSON integer of its field" {
+    _ = try update.encode(Account, std.testing.allocator, .{ .inc = .{ .visits = 1 << 63 } }, .update);
+}
+
+test "compile error: set_on_insert of an optional field by an optional value" {
+    var maybe: ?[]const u8 = "ann";
+    _ = &maybe;
+    _ = try update.encode(Account, std.testing.allocator, .{ .set_on_insert = .{ .nickname = maybe } }, .upsert);
 }

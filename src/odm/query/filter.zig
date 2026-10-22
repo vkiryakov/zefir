@@ -41,7 +41,6 @@
 
 const std = @import("std");
 const bson = @import("mongo-bson");
-const errors = @import("../errors.zig");
 const schema = @import("../model/schema.zig");
 const values = @import("values.zig");
 const Allocator = std.mem.Allocator;
@@ -58,7 +57,7 @@ const ItemOf = values.ItemOf;
 /// of the model's fields, or `.{}` for every document, which needs no
 /// memory. `error.EncodeFailed`: a string is not UTF-8, or a regular
 /// expression holds a NUL byte.
-pub fn encode(comptime T: type, arena: Allocator, filter: anytype) errors.Error!bson.RawDocument {
+pub fn encode(comptime T: type, arena: Allocator, filter: anytype) EncodeError!bson.RawDocument {
     comptime schema.check(T);
     const L = @TypeOf(filter);
     comptime requireFilter(T, L);
@@ -74,7 +73,13 @@ pub fn encode(comptime T: type, arena: Allocator, filter: anytype) errors.Error!
 /// with a NUL byte.
 pub const WriteError = Builder.Error || error{EncodeFailed};
 
-fn encodeError(err: WriteError) errors.Error {
+/// What encoding a filter or an update fails with, all of it before
+/// anything is sent: a value that BSON cannot hold, a request that breaks a
+/// rule of odm, no memory.
+pub const EncodeError = error{ EncodeFailed, InvalidArgument, OutOfMemory };
+
+/// The error of an encoder, from the error of its writing.
+pub fn encodeError(err: WriteError) EncodeError {
     return switch (err) {
         error.InvalidBson, error.EncodeFailed => error.EncodeFailed,
         error.OutOfMemory => error.OutOfMemory,
@@ -315,7 +320,7 @@ fn equality(comptime at: At, comptime L: type, comptime name: []const u8, compti
 /// Whether a value of `X` must go under `$eq`, never as `{f: value}`:
 /// a document, or a value of any type, whose keys could be operators, and a
 /// regular expression, which would match strings instead.
-fn needsEq(comptime X: type) bool {
+pub fn needsEq(comptime X: type) bool {
     const S = Unwrap(X);
     return S == bson.RawDocument or S == bson.OwnedDocument or S == bson.Value or S == bson.Regex;
 }
@@ -444,21 +449,27 @@ fn writeNot(b: *Builder, comptime at: At, comptime L: type, comptime name: []con
 }
 
 /// Writes `$elemMatch`: conditions that one item of the list at `at` meets
-/// together, as a literal of the fields of a struct item or of operators on
-/// an item of values. Their keys are those of the item, and the messages
-/// name it with "[]": "items[].sku".
+/// together (`writeItemConditions`).
 fn writeElemMatch(b: *Builder, comptime at: At, comptime L: type, comptime name: []const u8, parent: L) WriteError!void {
-    const Item = comptime ItemOf(at).?;
-    const item: At = .{ .T = at.T, .path = at.path ++ "[]", .key = "", .F = Item, .optional = @typeInfo(Item) == .optional };
     const O = @FieldType(L, name);
-    if (comptime !values.isLiteral(O, Unwrap(Item))) {
+    if (comptime !values.isLiteral(O, Unwrap(ItemOf(at).?))) {
         @compileError("odm: elem_match on " ++ subject(at) ++ " takes a literal of conditions on the items of the list; got " ++ @typeName(O));
     }
-    const operand = @field(parent, name);
     try b.beginDocument("$elemMatch");
-    switch (comptime classify(item, O)) {
-        .paths => try writePaths(b, item, O, operand),
-        .operators => try writeOperators(b, item, O, operand),
-    }
+    try writeItemConditions(b, at, O, @field(parent, name));
     try b.end();
+}
+
+/// Writes the literal `conditions` on one item of the list at `at` into the
+/// document open in `b`: the fields of a struct item, or operators on an
+/// item of values. Their keys are those of the item, and the messages name
+/// it with "[]": "items[].sku". They are the operand of `$elemMatch`, and of
+/// `$pull` in an update.
+pub fn writeItemConditions(b: *Builder, comptime at: At, comptime O: type, conditions: O) WriteError!void {
+    const Item = comptime ItemOf(at).?;
+    const item: At = .{ .T = at.T, .path = at.path ++ "[]", .key = "", .F = Item, .optional = @typeInfo(Item) == .optional };
+    switch (comptime classify(item, O)) {
+        .paths => try writePaths(b, item, O, conditions),
+        .operators => try writeOperators(b, item, O, conditions),
+    }
 }
