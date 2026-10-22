@@ -44,6 +44,17 @@ fn awaitReceived(io: Io, server: *FakeServer, count: usize) !void {
     }
 }
 
+/// Checks that an acquire failed with `expected`. A Conn that came
+/// instead is released, so that the client's deinit finds none left.
+fn expectNoConn(io: Io, expected: redis.Error, result: redis.Error!redis.Conn) !void {
+    if (result) |conn| {
+        var left = conn;
+        left.release(io);
+        std.debug.print("expected error.{t}, found a Conn\n", .{expected});
+        return error.TestExpectedError;
+    } else |err| try testing.expectEqual(expected, err);
+}
+
 test "acquire takes a connection of the pool, which stats count in use, and another acquire waits in line until its deadline: PoolExhausted" {
     try within5s(testing.io, acquireWaits, .{testing.io});
 }
@@ -58,7 +69,7 @@ fn acquireWaits(io: Io) !void {
     defer conn.release(io);
     try testing.expectEqual(@as(usize, 1), client.stats().in_use);
     try testing.expectEqual(@as(usize, 0), client.stats().idle);
-    try testing.expectError(error.PoolExhausted, client.acquire(io, within(io, .fromMilliseconds(50))));
+    try expectNoConn(io, error.PoolExhausted, client.acquire(io, within(io, .fromMilliseconds(50))));
     try testing.expectError(error.PoolExhausted, client.run(io, within(io, .fromMilliseconds(50)), get, .{}));
     conn.release(io);
     try testing.expectEqual(@as(usize, 1), client.stats().idle);
@@ -78,6 +89,7 @@ fn releaseKeeps(io: Io) !void {
     try connected(io, &client, .{ .url = server.url() });
     defer client.deinit();
     var conn = try client.acquire(io, .of(.root));
+    defer conn.release(io);
     try testing.expectEqual(@as(?i64, 1), try conn.run(io, .of(.root), get, .{}));
     conn.release(io);
     // A second release does nothing.
@@ -245,7 +257,7 @@ fn closeCutsConn(io: Io) !void {
     try testing.expect(took >= 100 and took < 1000);
     var d: Diagnostics = .{};
     try testing.expectError(error.Closed, conn.run(io, .of(.root), get, .{ .diagnostics = &d }));
-    try testing.expectError(error.Closed, client.acquire(io, .of(.root)));
+    try expectNoConn(io, error.Closed, client.acquire(io, .of(.root)));
     try testing.expectEqual(@as(usize, 0), client.stats().connections);
 }
 
