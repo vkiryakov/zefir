@@ -138,6 +138,12 @@ pub fn write(conn: *Connection, command: anytype, d: ?*Diagnostics) Error!void {
     command.write(.init(&conn.stream.writer)) catch return conn.broken(d, .send);
 }
 
+/// Writes the blocking `command` with `timeout_ms` in place of its own
+/// timeout, 0 for forever.
+pub fn writeWith(conn: *Connection, command: anytype, timeout_ms: u64, d: ?*Diagnostics) Error!void {
+    command.writeWith(.init(&conn.stream.writer), timeout_ms) catch return conn.broken(d, .send);
+}
+
 /// Sends what was written.
 pub fn flush(conn: *Connection, d: ?*Diagnostics) Error!void {
     conn.stream.writer.flush() catch return conn.broken(d, .send);

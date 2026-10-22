@@ -47,7 +47,15 @@
 //!    reply. With less than 1 ms, or less than the shortest round trip to
 //!    the server, left before sending, the call is
 //!    `error.DeadlineExceeded` and nothing goes out; once the command went
-//!    out, the error is `error.Timeout` and its connection closes.
+//!    out, the error is `error.Timeout` and its connection closes. A
+//!    blocking command of the catalog sends the server what the deadline
+//!    leaves beyond 150 ms, or its own timeout when shorter, for a quiet
+//!    server answers a timeout up to 100 ms late: the call ends with an
+//!    empty reply before the deadline, not with `error.Timeout`. With 150
+//!    ms or less left, it is `error.DeadlineExceeded`, and the text names
+//!    the command that does not block. Without a deadline of the context,
+//!    it sends its own timeout, and `timeout` of the options is the margin
+//!    after it.
 //! 4. Cancellation. The token is no alarm: the client checks it before the
 //!    call and before it sends, never after the reply, which it returns,
 //!    since a reply of LPOP or GETDEL has taken its data off the server
@@ -212,9 +220,10 @@ pub fn run(c: *Client, io: Io, op: OperationContext, command: anytype, options: 
     if (d) |x| x.* = .{};
     try calls.checkCommand(command, options, d);
     try calls.checkContext(io, op, d);
+    _ = try calls.roomOf(c, io, op, .{command}, null, d);
     try c.pool.enter(io, d);
     defer c.pool.leave(io);
-    const deadline = calls.deadlineOf(c, io, op);
+    const deadline = calls.deadlineOf(c, io, op, calls.waitOf(.{command}));
     const entry = try c.pool.checkOut(io, c.opener(), deadline, d);
     var after: Pool.After = .ok;
     defer c.pool.checkIn(io, entry, after);
@@ -258,10 +267,11 @@ pub fn pipeline(c: *Client, io: Io, op: OperationContext, commands: anytype, opt
     if (d) |x| x.* = .{};
     try calls.checkCommands(commands, options, d, "redis.Client.pipeline");
     try calls.checkContext(io, op, d);
+    _ = try calls.roomOf(c, io, op, commands, null, d);
     var results = try calls.slots(Results(@TypeOf(commands)), commands, options);
     try c.pool.enter(io, d);
     defer c.pool.leave(io);
-    const deadline = calls.deadlineOf(c, io, op);
+    const deadline = calls.deadlineOf(c, io, op, calls.waitOf(commands));
     const entry = try c.pool.checkOut(io, c.opener(), deadline, d);
     var after: Pool.After = .ok;
     defer c.pool.checkIn(io, entry, after);
@@ -283,7 +293,7 @@ pub fn acquire(c: *Client, io: Io, op: OperationContext) Error!Conn {
     try calls.checkContext(io, op, null);
     try c.pool.enter(io, null);
     defer c.pool.leave(io);
-    const entry = try c.pool.checkOut(io, c.opener(), calls.deadlineOf(c, io, op), null);
+    const entry = try c.pool.checkOut(io, c.opener(), calls.deadlineOf(c, io, op, .none), null);
     return .{ .client = c, .entry = entry };
 }
 

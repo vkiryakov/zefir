@@ -31,14 +31,28 @@
 //!   `redis.Conn` runs it, with `run` or in a pipeline, and the Conn
 //!   notes whether keys are under WATCH after it succeeded; on the client
 //!   and inside a transaction it stops the build (`ReplyOn`).
-//! - where a blocking command takes its timeout and in which units, and
-//!   the cursor of a SCAN command, come with those commands.
+//! - `pub const blocking: contract.Blocking` — a blocking command: the
+//!   units of its timeout on the wire and what waits less. It also
+//!   declares `pub fn timeout(c: C) redis.Block`, how long the caller lets
+//!   it wait, and `pub fn writeWith(c: C, w: resp.Writer, timeout_ms: u64)`,
+//!   the command with `timeout_ms` in place of its timeout, 0 for forever,
+//!   written by `writeTimeout`. Under a deadline the client takes the
+//!   timeout from what is left of it (`engine/blocking.zig`) and writes the
+//!   command with `writeWith`; without one, and in a transaction, where
+//!   nothing blocks, `write` sends the command's own, `given`. Its `check`
+//!   calls `checkBlock`.
+//! - the cursor of a SCAN command comes with those commands.
 //!
 //! A pipeline and a transaction take their commands as a tuple of command
 //! values, each of its own type, or as many commands of one type: a slice
 //! of them, or a pointer to their array. `Results` is what they return.
 
-const CommandError = @import("../errors.zig").CommandError;
+const std = @import("std");
+const errors = @import("../errors.zig");
+const CommandError = errors.CommandError;
+const Diagnostics = errors.Diagnostics;
+const resp = @import("../resp.zig");
+const Block = @import("types.zig").Block;
 
 /// The type of the reply of the command type `C`; a compile error that
 /// starts with `call` when `C` is not one.
@@ -140,5 +154,76 @@ pub fn Results(comptime Commands: type, comptime call: []const u8, comptime plac
         var types: [commands.len]type = undefined;
         for (commands, &types) |C, *slot| slot.* = CommandError!ReplyOn(C, call, place);
         return @Tuple(&types);
+    }
+}
+
+/// The units of the timeout of a blocking command on the wire.
+pub const Unit = enum {
+    /// Seconds with a fraction: BLPOP, BRPOP, BLMOVE.
+    seconds,
+    /// Milliseconds: XREAD and XREADGROUP with BLOCK.
+    milliseconds,
+};
+
+/// The mark of a blocking command, `pub const blocking`.
+pub const Blocking = struct {
+    unit: Unit,
+    /// What waits less, for the text of DeadlineExceeded when the deadline
+    /// leaves too little: "redis.cmd.lpop".
+    instead: []const u8,
+};
+
+pub fn isBlocking(comptime C: type) bool {
+    return @hasDecl(C, "blocking");
+}
+
+/// The timeout of `block` in milliseconds, rounded down, 0 for forever:
+/// what a blocking command sends of its own. `checkBlock` has kept it
+/// between 1 ms and `maxInt(i64)` ms.
+pub fn given(block: Block) u64 {
+    return switch (block) {
+        .forever => 0,
+        .at_most => |duration| @intCast(std.math.clamp(@divFloor(duration.nanoseconds, std.time.ns_per_ms), 1, std.math.maxInt(i64))),
+    };
+}
+
+/// Writes a timeout of `timeout_ms` milliseconds, 0 for forever, as one
+/// argument in `unit`: seconds with as many decimals as it needs (`0.85`,
+/// `30`), or milliseconds (`850`).
+pub fn writeTimeout(w: resp.Writer, unit: Unit, timeout_ms: u64) resp.Writer.Error!void {
+    var buffer: [32]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&buffer);
+    switch (unit) {
+        .milliseconds => out.print("{d}", .{timeout_ms}) catch unreachable,
+        .seconds => {
+            out.print("{d}", .{timeout_ms / 1000}) catch unreachable;
+            const ms = timeout_ms % 1000;
+            if (ms > 0) {
+                var digits: [3]u8 = .{ '0' + @as(u8, @intCast(ms / 100)), '0' + @as(u8, @intCast(ms / 10 % 10)), '0' + @as(u8, @intCast(ms % 10)) };
+                var len: usize = digits.len;
+                while (digits[len - 1] == '0') len -= 1;
+                out.print(".{s}", .{digits[0..len]}) catch unreachable;
+            }
+        },
+    }
+    try w.bulk(out.buffered());
+}
+
+/// The rule of the timeout of a blocking command: `.at_most` of 1 ms to
+/// `maxInt(i64)` ms. Under 1 ms is InvalidArgument, since 0 is forever to
+/// a server, and so is a duration that does not fit the milliseconds of
+/// the client. `call` names the function of `cmd`.
+pub fn checkBlock(block: Block, comptime call: []const u8, diagnostics: ?*Diagnostics) error{InvalidArgument}!void {
+    const duration = switch (block) {
+        .forever => return,
+        .at_most => |duration| duration,
+    };
+    if (duration.nanoseconds < std.time.ns_per_ms) {
+        if (diagnostics) |d| d.set(null, null, call ++ ": the timeout .at_most is under 1 ms, which a server takes as forever: give 1 ms or more, or .forever", .{});
+        return error.InvalidArgument;
+    }
+    if (@divFloor(duration.nanoseconds, std.time.ns_per_ms) > std.math.maxInt(i64)) {
+        if (diagnostics) |d| d.set(null, null, call ++ ": the timeout .at_most is longer than {d} ms, the most the client counts", .{std.math.maxInt(i64)});
+        return error.InvalidArgument;
     }
 }

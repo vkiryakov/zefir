@@ -78,10 +78,11 @@ pub fn run(conn: *Conn, io: Io, op: OperationContext, command: anytype, options:
     if (d) |x| x.* = .{};
     try calls.checkCommand(command, options, d);
     try calls.checkContext(io, op, d);
+    _ = try calls.roomOf(c, io, op, .{command}, null, d);
     const connection = try conn.held(d);
     try c.pool.enter(io, d);
     defer c.pool.leave(io);
-    const deadline = calls.deadlineOf(c, io, op);
+    const deadline = calls.deadlineOf(c, io, op, calls.waitOf(.{command}));
     const reply = calls.one(c, connection, io, op, command, options, deadline, d) catch |err| {
         conn.after(io, calls.afterExchange(connection, err, d));
         return err;
@@ -99,11 +100,12 @@ pub fn pipeline(conn: *Conn, io: Io, op: OperationContext, commands: anytype, op
     if (d) |x| x.* = .{};
     try calls.checkCommands(commands, options, d, "redis.Conn.pipeline");
     try calls.checkContext(io, op, d);
+    _ = try calls.roomOf(c, io, op, commands, null, d);
     const connection = try conn.held(d);
     var results = try calls.slots(Results(@TypeOf(commands)), commands, options);
     try c.pool.enter(io, d);
     defer c.pool.leave(io);
-    const deadline = calls.deadlineOf(c, io, op);
+    const deadline = calls.deadlineOf(c, io, op, calls.waitOf(commands));
     calls.many(c, connection, io, op, commands, &results, options, deadline, d) catch |err| {
         conn.after(io, calls.afterExchange(connection, err, d));
         return err;
@@ -162,7 +164,8 @@ pub fn transaction(conn: *Conn, io: Io, op: OperationContext, commands: anytype,
     var results = try calls.slots(Queued(@TypeOf(commands)), commands, options);
     try c.pool.enter(io, d);
     defer c.pool.leave(io);
-    const deadline = calls.deadlineOf(c, io, op);
+    // Nothing blocks inside a transaction.
+    const deadline = calls.deadlineOf(c, io, op, .none);
     const executed = calls.transaction(c, connection, io, op, commands, &results, options, deadline, d, &conn.watching) catch |err| {
         conn.after(io, calls.afterExchange(connection, err, d));
         return err;

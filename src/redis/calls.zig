@@ -20,7 +20,9 @@ const resp = @import("resp.zig");
 const Client = @import("Client.zig");
 const Connection = @import("engine/Connection.zig");
 const Pool = @import("engine/Pool.zig");
+const blocking = @import("engine/blocking.zig");
 const time = @import("engine/time.zig");
+const Block = @import("cmd/types.zig").Block;
 
 /// In safe builds: a call on a moved copy of the client, or on another
 /// `std.Io` than the one of `init`, panics, since the connections and the
@@ -40,11 +42,86 @@ pub inline fn checkHome(c: *const Client) void {
 }
 
 /// The deadline of a call that starts now: its context's, else `timeout`
-/// from now, else none.
-pub fn deadlineOf(c: *const Client, io: Io, op: OperationContext) ?core.Deadline {
+/// from now, else none. Its blocking commands may `wait` that long on the
+/// server, so `timeout` is the margin after it: no deadline when one waits
+/// forever.
+pub fn deadlineOf(c: *const Client, io: Io, op: OperationContext, wait: Wait) ?core.Deadline {
     if (op.ctx.deadline) |deadline| return deadline;
     const timeout = c.options.timeout orelse return null;
-    return .after(time.now(io), timeout);
+    const longer: Io.Duration = switch (wait) {
+        .none => .zero,
+        .at_most => |duration| duration,
+        .forever => return null,
+    };
+    return .after(time.now(io), .{ .nanoseconds = timeout.nanoseconds +| longer.nanoseconds });
+}
+
+/// How long the blocking commands of a call wait on the server in all,
+/// for the deadline of a call without one of its own.
+pub const Wait = union(enum) {
+    none,
+    at_most: Io.Duration,
+    forever,
+
+    fn add(wait: Wait, block: Block) Wait {
+        const more = switch (block) {
+            .forever => return .forever,
+            .at_most => |duration| duration,
+        };
+        return switch (wait) {
+            .none => .{ .at_most = more },
+            .at_most => |sum| .{ .at_most = .{ .nanoseconds = sum.nanoseconds +| more.nanoseconds } },
+            .forever => .forever,
+        };
+    }
+};
+
+/// The wait of `commands`, a tuple or many of one type: one command is
+/// `.{command}`.
+pub fn waitOf(commands: anytype) Wait {
+    var wait: Wait = .none;
+    if (comptime @typeInfo(@TypeOf(commands)) == .@"struct") {
+        inline for (@typeInfo(@TypeOf(commands)).@"struct".field_types, 0..) |C, i| {
+            if (comptime contract.isBlocking(C)) wait = wait.add(commands[i].timeout());
+        }
+    } else if (comptime contract.isBlocking(contract.Element(@TypeOf(commands)))) {
+        for (commands) |command| wait = wait.add(command.timeout());
+    }
+    return wait;
+}
+
+/// What the blocking commands of a call may wait on the server, from
+/// what is left now of the deadline of its context: null when it has
+/// none, or no command of `commands` blocks. Too little left is
+/// `DeadlineExceeded`, about the first blocking command and what waits
+/// less. Before the pool, `phase` is null; then the check before the
+/// write, `.send`, gives the value it writes.
+pub fn roomOf(c: *Client, io: Io, op: OperationContext, commands: anytype, phase: ?Diagnostics.Phase, d: ?*Diagnostics) Error!?u64 {
+    const first = firstBlocking(commands) orelse return null;
+    const deadline = op.ctx.deadline orelse return null;
+    const left = deadline.remaining(time.now(io));
+    return blocking.room(left, c.round_trips.min(io)) catch return fail(d, phase, error.DeadlineExceeded, "a blocking command needs more than 150 ms left of the deadline beyond the shortest round trip, for a quiet server answers its timeout up to 100 ms late, and {f} had {d} ms: for a shorter wait, use {s}", .{
+        Name{ .text = first.name }, @divFloor(left.nanoseconds, std.time.ns_per_ms), first.instead,
+    });
+}
+
+/// A blocking command, for the text of DeadlineExceeded.
+const Blocker = struct {
+    name: []const u8,
+    instead: []const u8,
+};
+
+fn firstBlocking(commands: anytype) ?Blocker {
+    if (comptime @typeInfo(@TypeOf(commands)) == .@"struct") {
+        inline for (@typeInfo(@TypeOf(commands)).@"struct".field_types, 0..) |C, i| {
+            if (comptime contract.isBlocking(C)) return .{ .name = commands[i].name(), .instead = C.blocking.instead };
+        }
+        return null;
+    }
+    const C = contract.Element(@TypeOf(commands));
+    if (comptime !contract.isBlocking(C)) return null;
+    if (commands.len == 0) return null;
+    return .{ .name = commands[0].name(), .instead = C.blocking.instead };
 }
 
 /// The rules of the command before anything else of a call: its own, then
@@ -147,10 +224,24 @@ pub fn beforeSend(c: *Client, io: Io, op: OperationContext, deadline: ?core.Dead
 
 /// One command on `conn`, which the call has checked, by `deadline`: the
 /// checks before it goes out, the write, and its reply from
-/// `options.allocator`.
+/// `options.allocator`. A blocking command takes its timeout from the
+/// deadline of `op`, if any.
 pub fn one(c: *Client, conn: *Connection, io: Io, op: OperationContext, command: anytype, options: RunOptions, deadline: ?core.Deadline, d: ?*Diagnostics) Error!@TypeOf(command).Reply {
     try beforeSend(c, io, op, deadline, d);
-    return conn.exchange(command, options.allocator, deadline, d);
+    const room = try roomOf(c, io, op, .{command}, .send, d);
+    conn.begin(deadline);
+    try writeCommand(conn, command, room, d);
+    try conn.flush(d);
+    return conn.receive(command, options.allocator, d);
+}
+
+/// Writes `command` into the buffer of `conn`: a blocking one with its
+/// timeout within `room`, when the call has a deadline.
+fn writeCommand(conn: *Connection, command: anytype, room: ?u64, d: ?*Diagnostics) Error!void {
+    if (comptime contract.isBlocking(@TypeOf(command))) if (room) |limit| {
+        return conn.writeWith(command, blocking.timeout(command.timeout(), limit), d);
+    };
+    return conn.write(command, d);
 }
 
 /// Where the results of a pipeline of `R` go while its replies come: a
@@ -181,10 +272,11 @@ pub fn slots(comptime R: type, commands: anytype, options: RunOptions) error{Out
 /// came in `answered`, and the connection is no longer usable.
 pub fn many(c: *Client, conn: *Connection, io: Io, op: OperationContext, commands: anytype, results: anytype, options: RunOptions, deadline: ?core.Deadline, d: ?*Diagnostics) Error!void {
     try beforeSend(c, io, op, deadline, d);
+    const room = try roomOf(c, io, op, commands, .send, d);
     // The call has checked the type of the commands: a tuple, or many.
     const tuple = comptime @typeInfo(@TypeOf(commands)) == .@"struct";
     conn.begin(deadline);
-    writeCommands(conn, commands, d) catch |err| return ended(conn, err, d, 0);
+    writeCommands(conn, commands, room, d) catch |err| return ended(conn, err, d, 0);
     conn.flush(d) catch |err| return ended(conn, err, d, 0);
     var cells: Cells = .{ .d = d };
     if (tuple) {
@@ -197,11 +289,12 @@ pub fn many(c: *Client, conn: *Connection, io: Io, op: OperationContext, command
 }
 
 /// Writes `commands`, a tuple or many of one type, into the buffer of
-/// `conn`: what does not fit goes out, the rest at the next flush.
-fn writeCommands(conn: *Connection, commands: anytype, d: ?*Diagnostics) Error!void {
+/// `conn`, what does not fit going out at once: the blocking ones with
+/// their timeouts within `room`, or their own without it.
+fn writeCommands(conn: *Connection, commands: anytype, room: ?u64, d: ?*Diagnostics) Error!void {
     if (comptime @typeInfo(@TypeOf(commands)) == .@"struct") {
-        inline for (0..@typeInfo(@TypeOf(commands)).@"struct".field_types.len) |i| try conn.write(commands[i], d);
-    } else for (commands) |command| try conn.write(command, d);
+        inline for (0..@typeInfo(@TypeOf(commands)).@"struct".field_types.len) |i| try writeCommand(conn, commands[i], room, d);
+    } else for (commands) |command| try writeCommand(conn, command, room, d);
 }
 
 /// How many commands `commands` holds.
@@ -235,7 +328,8 @@ pub fn transaction(c: *Client, conn: *Connection, io: Io, op: OperationContext, 
         conn.usable = false;
         return err;
     };
-    writeCommands(conn, commands, d) catch |err| return ended(conn, err, d, answered);
+    // Nothing blocks inside a transaction: the timeouts go as given.
+    writeCommands(conn, commands, null, d) catch |err| return ended(conn, err, d, answered);
     conn.write(Exec{}, d) catch |err| return ended(conn, err, d, answered);
     conn.flush(d) catch |err| return ended(conn, err, d, answered);
     watching.* = false;
