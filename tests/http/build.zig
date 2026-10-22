@@ -4,7 +4,8 @@
 //!
 //!   zig build e2e        run the end-to-end tests: servers on http.native
 //!                        over loopback, on zio with one executor and with
-//!                        four; then the examples
+//!                        four; then the examples; and build the small
+//!                        application of the guide of zefir-openapi
 //!   zig build examples   run the service of the guide, send it the guide's
 //!                        curl commands, and check that the guide shows
 //!                        each with its response, and the service's log
@@ -140,6 +141,25 @@ pub fn build(b: *std.Build) void {
         step.dependOn(&run_guide.step);
     }
 
+    // The small application of the guide of zefir-openapi,
+    // src/openapi/examples/main.zig, which imports zio: built, not run.
+    // `zig build test-openapi` checks its document against its file.
+    const openapi_app = b.addExecutable(.{
+        .name = "openapi-todos",
+        .root_module = b.createModule(.{
+            .root_source_file = zefir.path("src/openapi/examples/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zefir", .module = zefir.module("zefir") },
+                .{ .name = "zio", .module = zio.module("zio") },
+            },
+        }),
+    });
+    // Code generation too, not only analysis: the binary is asked for.
+    _ = openapi_app.getEmittedBin();
+    e2e_step.dependOn(&openapi_app.step);
+
     // The benchmark: `bench` runs it, built with ReleaseFast unless
     // -Dbench-optimize says otherwise, with zefir and zio built in that
     // mode too; it serves the files of the guide's service. Only CI runs it
@@ -192,6 +212,7 @@ pub fn build(b: *std.Build) void {
     check_step.dependOn(&e2e.step);
     check_step.dependOn(&guide.step);
     check_step.dependOn(&service.step);
+    check_step.dependOn(&openapi_app.step);
     const checked_bench = addBench(b, target, optimize);
     // Code generation too, not only analysis: the binaries are asked for.
     for ([_]*std.Build.Step.Compile{ checked_bench, garden_echo, garden_payloads }) |exe| {

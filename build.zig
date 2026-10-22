@@ -264,7 +264,12 @@ pub fn build(b: *std.Build) void {
     }, target, optimize, tsan);
 
     addOpenapiCompileChecks(b, test_openapi, zefir, target, optimize, openapi_app);
-    addOpenapiGoldens(b, test_openapi, zefir, target, optimize, tsan);
+    // `zig build openapi` rewrites every OpenAPI document of zefir's tests
+    // and guides from the code: the tests that compare them with their
+    // files, run with ZEFIR_OPENAPI_UPDATE=1.
+    const openapi_step = b.step("openapi", "Rewrite the OpenAPI documents of zefir's tests and guides from the code");
+    addOpenapiGoldens(b, test_openapi, openapi_step, zefir, target, optimize, tsan);
+    addOpenapiGuide(b, test_openapi, openapi_step, zefir, target, optimize, tsan);
 
     // `zig build fuzz-http` runs the fuzz test of zefir-http's HTTP/1.1
     // parser on its corpus, once, like `zig build test-http` does; with
@@ -1593,17 +1598,17 @@ fn addHttpCompileChecks(
 /// path of golden/, `golden_options.dir`, and run where every test runs:
 /// with -Dtsan on macOS a test binary finds its TSan runtime by a path
 /// relative to that directory, so a test run elsewhere does not start.
-/// `zig build openapi` runs golden_test with ZEFIR_OPENAPI_UPDATE=1: it
-/// rewrites the files from the code.
+/// `zig build openapi`, `update_step`, runs golden_test with
+/// ZEFIR_OPENAPI_UPDATE=1: it rewrites the files from the code.
 fn addOpenapiGoldens(
     b: *std.Build,
     test_step: *std.Build.Step,
+    update_step: *std.Build.Step,
     zefir: *std.Build.Module,
     target: std.Build.ResolvedTarget,
     optimize: std.lang.Optimize,
     tsan: bool,
 ) void {
-    const update_step = b.step("openapi", "Rewrite the OpenAPI documents of zefir's tests from the code");
     const golden = b.addOptions();
     golden.addOption([]const u8, "dir", b.root.joinString(b.allocator, "src/openapi/tests/golden") catch @panic("OOM"));
     for ([_][]const u8{ "golden_test", "determinism_a", "determinism_b" }) |name| {
@@ -1625,6 +1630,42 @@ fn addOpenapiGoldens(
         update.setEnvironmentVariable("ZEFIR_OPENAPI_UPDATE", "1");
         update_step.dependOn(&update.step);
     }
+}
+
+/// The small application of src/openapi/examples/README.md, the guide of
+/// zefir-openapi: service_test.zig compares its document with openapi.json
+/// there. The test finds the file by its absolute path,
+/// `paths.openapi_json`, and runs where every test runs, as the golden
+/// tests do (see addOpenapiGoldens); `zig build openapi`, `update_step`,
+/// runs it with ZEFIR_OPENAPI_UPDATE=1, which rewrites the file. Its
+/// main.zig imports zio: only tests/http builds it.
+fn addOpenapiGuide(
+    b: *std.Build,
+    test_openapi: *std.Build.Step,
+    update_step: *std.Build.Step,
+    zefir: *std.Build.Module,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+    tsan: bool,
+) void {
+    const dir = "src/openapi/examples/";
+    const paths = b.addOptions();
+    paths.addOption([]const u8, "openapi_json", b.root.joinString(b.allocator, dir ++ "openapi.json") catch @panic("OOM"));
+    const service_test = b.addTest(.{
+        .name = "openapi-guide-service_test",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(dir ++ "service_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .sanitize_thread = tsan,
+            .imports = &.{.{ .name = "zefir", .module = zefir }},
+        }),
+    });
+    service_test.root_module.addOptions("paths", paths);
+    test_openapi.dependOn(&addRun(b, service_test, tsan).step);
+    const update = addRun(b, service_test, tsan);
+    update.setEnvironmentVariable("ZEFIR_OPENAPI_UPDATE", "1");
+    update_step.dependOn(&update.step);
 }
 
 /// The compile checks of zefir-openapi, from the list in
