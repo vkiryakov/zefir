@@ -53,6 +53,8 @@ pub const compile_errors = [_]Fixture{
     .{ .file = dir ++ "oauth2_flow_url.zig", .expect = "zefir.openapi: the OAuth2 flow oauth.clientCredentials needs its .token_url" },
     .{ .file = dir ++ "scheme_name_invalid.zig", .expect = "zefir.openapi: the security scheme \"bearer token\" of TokenAuth is not a name of the document: 1 or more of A-Z, a-z, 0-9, '.', '-' and '_'" },
     .{ .file = dir ++ "route_anyerror.zig", .expect = "zefir.openapi: TodosController.list returns anyerror; the document needs the errors it can return: give it an error set" },
+    // The paths of the controller of documentation.
+    .{ .file = dir ++ "docs_path_relative.zig", .expect = "zefir.openapi: Docs: .json is \"openapi.json\", which does not start with '/'; write the path of the route within the server's prefix, such as .json = \"/openapi.json\"" },
 };
 
 const dir = "src/openapi/tests/compile_errors/";

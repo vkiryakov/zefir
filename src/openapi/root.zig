@@ -38,6 +38,7 @@
 //! here: the document takes them from the types and their `field_rules`.
 const declarations = @import("openapi.zig");
 const document_file = @import("document.zig");
+const docs_file = @import("Docs.zig");
 
 /// The document of a server, built at compile time:
 /// `zefir.openapi.document(@TypeOf(options), .{ .info = ... })`.
@@ -45,6 +46,10 @@ pub const document = document_file.document;
 pub const Document = document_file.Document;
 /// `expectFile`: the document of an application's test against its file.
 pub const testing = @import("testing.zig");
+/// The controller that serves the document and a page of it:
+/// `docs: zefir.openapi.Docs(.{}) = undefined`, in `.controllers`.
+pub const Docs = docs_file.Docs;
+pub const DocsOptions = docs_file.DocsOptions;
 
 pub const Doc = declarations.Doc;
 pub const FieldDoc = declarations.FieldDoc;
@@ -62,4 +67,5 @@ test {
     _ = @import("example.zig");
     _ = @import("schema.zig");
     _ = document_file;
+    _ = docs_file;
 }
