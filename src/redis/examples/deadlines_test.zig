@@ -88,7 +88,7 @@ test "a token canceled while the command is out does not drop its reply: LPOP ha
 
     const op: redis.OperationContext = .of(core.Context.root.withCancellation(&token));
     const order = try client.run(io, op, cmd.lpop([]const u8, "orders:paid"), .{ .allocator = arena.allocator() });
-    try testing.expectEqualStrings("order:1001", order.?);
+    try testing.expectEqualStrings("order:1001", order orelse return error.TestUnexpectedResult);
     // The next call sees the token before it sends.
     try testing.expectError(error.Cancelled, client.run(io, op, cmd.lpop([]const u8, "orders:paid"), .{ .allocator = arena.allocator() }));
     try testing.expectEqual(1, server.received(io));
@@ -112,6 +112,9 @@ test "a task canceled while its command waits for the reply is Interrupted, and 
     defer client.close(io);
 
     var call = try io.concurrent(countPaid, .{ io, &client });
+    // The call ends with the test, even one that fails before the cancel
+    // below; a second cancel only gives the result of the first.
+    defer if (call.cancel(io)) |_| {} else |_| {};
     // Wait until the command is out, for 5 s at most.
     const give_up: core.Deadline = .after(std.Io.Clock.awake.now(io), .fromSeconds(5));
     while (server.received(io) == 0) {
@@ -152,14 +155,18 @@ test "a blocking command gives the server what the deadline leaves beyond 150 ms
     // less 150 ms, so 0.85 s at most, and less only by the time that passed
     // before the command went out.
     const sent = (try server.entry(io, 0)).args;
+    try testing.expectEqual(6, sent.len);
     try testing.expectEqualStrings("BLMOVE", sent[0]);
-    const timeout_ms: i64 = @intFromFloat(@round(try std.fmt.parseFloat(f64, sent[5]) * 1000));
-    try testing.expect(timeout_ms <= 850);
+    const seconds = try std.fmt.parseFloat(f64, sent[5]);
+    try testing.expect(seconds >= 0 and seconds <= 0.85);
+    const timeout_ms: i64 = @intFromFloat(@round(seconds * 1000));
     try testing.expect(timeout_ms + elapsed + 1 >= 850);
 
     // Its own timeout, when the deadline leaves more: 300 ms.
     _ = try client.run(io, .of(within(io, 1000)), cmd.blmove([]const u8, "orders:paid", "orders:packing", .left, .right, .{ .at_most = .fromMilliseconds(300) }), .{ .allocator = arena.allocator() });
-    try testing.expectEqualStrings("0.3", (try server.entry(io, 1)).args[5]);
+    const second = (try server.entry(io, 1)).args;
+    try testing.expectEqual(6, second.len);
+    try testing.expectEqualStrings("0.3", second[5]);
 }
 
 test "a blocking command with 150 ms or less left of its deadline is DeadlineExceeded, and nothing goes out" {

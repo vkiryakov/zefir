@@ -26,7 +26,7 @@ test "a profile is read from its hash" {
     defer arena.deinit();
 
     const profiles: Profiles = .init(&client);
-    const ann = (try profiles.byId(io, .of(.root), arena.allocator(), 42)).?;
+    const ann = (try profiles.byId(io, .of(.root), arena.allocator(), 42)) orelse return error.TestUnexpectedResult;
     try testing.expectEqualStrings("Ann", ann.name);
     try testing.expectEqual(30, ann.age);
     try testing.expectEqual(.pro, ann.plan);
@@ -74,6 +74,8 @@ test "a profile is saved as a field of the hash for each field of the struct, an
     try testing.expectEqual(1, try profiles.visit(io, .of(.root), 42));
     // The journal: what came, in order, byte for byte.
     try testing.expectEqual(2, server.received(io));
-    try testing.expectEqualStrings("HINCRBY", (try server.entry(io, 1)).args[0]);
+    const visit = (try server.entry(io, 1)).args;
+    try testing.expectEqual(4, visit.len);
+    try testing.expectEqualStrings("HINCRBY", visit[0]);
     try server.finish(io);
 }

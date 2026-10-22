@@ -34,10 +34,10 @@ test "an error of one command is the value in its place, and the commands after 
     }, .{ .allocator = arena.allocator(), .diagnostics = &d });
     try testing.expectEqual(41, try r[0]);
     try testing.expectError(error.ServerError, r[1]);
-    try testing.expectEqualStrings("Fresh beans from Ethiopia", (try r[2]).?);
+    try testing.expectEqualStrings("Fresh beans from Ethiopia", (try r[2]) orelse return error.TestUnexpectedResult);
     // The diagnostics hold the first error: the command's index, and the
     // server's code.
-    try testing.expectEqual(1, d.command.?);
+    try testing.expectEqual(1, d.command orelse return error.TestUnexpectedResult);
     try testing.expect(d.isCode("WRONGTYPE"));
     try server.finish(io);
 }
@@ -99,7 +99,7 @@ test "a connection that breaks in the middle of a pipeline is ConnectionLost, an
     try testing.expectError(error.ConnectionLost, client.pipeline(io, .of(.root), &restock, .{ .allocator = arena.allocator(), .diagnostics = &d }));
     // Two replies came: those two INCRs ran. The other two may have run,
     // or not: the pipeline must not go again as a whole.
-    try testing.expectEqual(2, d.answered.?);
+    try testing.expectEqual(2, d.answered orelse return error.TestUnexpectedResult);
     try testing.expectEqual(redis.Outcome.may_have_executed, redis.outcome(error.ConnectionLost));
     try server.finish(io);
 }

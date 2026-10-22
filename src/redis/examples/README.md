@@ -1201,10 +1201,10 @@ test "an error of one command is the value in its place, and the commands after 
     }, .{ .allocator = arena.allocator(), .diagnostics = &d });
     try testing.expectEqual(41, try r[0]);
     try testing.expectError(error.ServerError, r[1]);
-    try testing.expectEqualStrings("Fresh beans from Ethiopia", (try r[2]).?);
+    try testing.expectEqualStrings("Fresh beans from Ethiopia", (try r[2]) orelse return error.TestUnexpectedResult);
     // The diagnostics hold the first error: the command's index, and the
     // server's code.
-    try testing.expectEqual(1, d.command.?);
+    try testing.expectEqual(1, d.command orelse return error.TestUnexpectedResult);
     try testing.expect(d.isCode("WRONGTYPE"));
     try server.finish(io);
 }
@@ -1266,7 +1266,7 @@ test "a connection that breaks in the middle of a pipeline is ConnectionLost, an
     try testing.expectError(error.ConnectionLost, client.pipeline(io, .of(.root), &restock, .{ .allocator = arena.allocator(), .diagnostics = &d }));
     // Two replies came: those two INCRs ran. The other two may have run,
     // or not: the pipeline must not go again as a whole.
-    try testing.expectEqual(2, d.answered.?);
+    try testing.expectEqual(2, d.answered orelse return error.TestUnexpectedResult);
     try testing.expectEqual(redis.Outcome.may_have_executed, redis.outcome(error.ConnectionLost));
     try server.finish(io);
 }
@@ -2412,7 +2412,7 @@ test "a token canceled while the command is out does not drop its reply: LPOP ha
 
     const op: redis.OperationContext = .of(core.Context.root.withCancellation(&token));
     const order = try client.run(io, op, cmd.lpop([]const u8, "orders:paid"), .{ .allocator = arena.allocator() });
-    try testing.expectEqualStrings("order:1001", order.?);
+    try testing.expectEqualStrings("order:1001", order orelse return error.TestUnexpectedResult);
     // The next call sees the token before it sends.
     try testing.expectError(error.Cancelled, client.run(io, op, cmd.lpop([]const u8, "orders:paid"), .{ .allocator = arena.allocator() }));
     try testing.expectEqual(1, server.received(io));
@@ -2436,6 +2436,9 @@ test "a task canceled while its command waits for the reply is Interrupted, and 
     defer client.close(io);
 
     var call = try io.concurrent(countPaid, .{ io, &client });
+    // The call ends with the test, even one that fails before the cancel
+    // below; a second cancel only gives the result of the first.
+    defer if (call.cancel(io)) |_| {} else |_| {};
     // Wait until the command is out, for 5 s at most.
     const give_up: core.Deadline = .after(std.Io.Clock.awake.now(io), .fromSeconds(5));
     while (server.received(io) == 0) {
@@ -2476,14 +2479,18 @@ test "a blocking command gives the server what the deadline leaves beyond 150 ms
     // less 150 ms, so 0.85 s at most, and less only by the time that passed
     // before the command went out.
     const sent = (try server.entry(io, 0)).args;
+    try testing.expectEqual(6, sent.len);
     try testing.expectEqualStrings("BLMOVE", sent[0]);
-    const timeout_ms: i64 = @intFromFloat(@round(try std.fmt.parseFloat(f64, sent[5]) * 1000));
-    try testing.expect(timeout_ms <= 850);
+    const seconds = try std.fmt.parseFloat(f64, sent[5]);
+    try testing.expect(seconds >= 0 and seconds <= 0.85);
+    const timeout_ms: i64 = @intFromFloat(@round(seconds * 1000));
     try testing.expect(timeout_ms + elapsed + 1 >= 850);
 
     // Its own timeout, when the deadline leaves more: 300 ms.
     _ = try client.run(io, .of(within(io, 1000)), cmd.blmove([]const u8, "orders:paid", "orders:packing", .left, .right, .{ .at_most = .fromMilliseconds(300) }), .{ .allocator = arena.allocator() });
-    try testing.expectEqualStrings("0.3", (try server.entry(io, 1)).args[5]);
+    const second = (try server.entry(io, 1)).args;
+    try testing.expectEqual(6, second.len);
+    try testing.expectEqualStrings("0.3", second[5]);
 }
 
 test "a blocking command with 150 ms or less left of its deadline is DeadlineExceeded, and nothing goes out" {
@@ -2741,7 +2748,7 @@ test "a profile is read from its hash" {
     defer arena.deinit();
 
     const profiles: Profiles = .init(&client);
-    const ann = (try profiles.byId(io, .of(.root), arena.allocator(), 42)).?;
+    const ann = (try profiles.byId(io, .of(.root), arena.allocator(), 42)) orelse return error.TestUnexpectedResult;
     try testing.expectEqualStrings("Ann", ann.name);
     try testing.expectEqual(30, ann.age);
     try testing.expectEqual(.pro, ann.plan);
@@ -2789,7 +2796,9 @@ test "a profile is saved as a field of the hash for each field of the struct, an
     try testing.expectEqual(1, try profiles.visit(io, .of(.root), 42));
     // The journal: what came, in order, byte for byte.
     try testing.expectEqual(2, server.received(io));
-    try testing.expectEqualStrings("HINCRBY", (try server.entry(io, 1)).args[0]);
+    const visit = (try server.entry(io, 1)).args;
+    try testing.expectEqual(4, visit.len);
+    try testing.expectEqualStrings("HINCRBY", visit[0]);
     try server.finish(io);
 }
 ```
