@@ -165,7 +165,10 @@ fn use(comptime reg: *schema.Registry, comptime d: http.Description, comptime r:
     if (R.Body != void) reg.use(.{ .T = R.Body, .direction = .input });
     if (R.Form != void) reg.use(.{ .T = R.Form, .direction = .input });
     if (r.kind == .sse) {
-        for (@typeInfo(R.Events).@"union".field_types) |P| {
+        const events = @typeInfo(R.Events).@"union".field_types;
+        if (events.len == 0)
+            fail(where(r) ++ ": .events = " ++ schema.typeName(R.Events) ++ " has no variants, so the stream has no events to show; give it a variant for each event");
+        for (events) |P| {
             if (P != void) reg.use(.{ .T = P, .direction = .output });
         }
     } else if (R.responses.len == 0) {

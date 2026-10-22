@@ -146,6 +146,8 @@ test "lists, arrays and tuples" {
     try expectJson("{\"type\":\"array\",\"items\":{\"type\":[\"integer\",\"null\"],\"format\":\"int32\",\"minimum\":-2147483648,\"maximum\":2147483647}}", comptime schemaOf([]const ?i32, .output));
     try expectJson("{\"type\":\"array\",\"minItems\":3,\"maxItems\":3,\"items\":{\"type\":\"number\",\"format\":\"double\"}}", comptime schemaOf([3]f64, .output));
     try expectJson("{\"type\":\"array\",\"prefixItems\":[{\"type\":\"string\"},{\"type\":\"boolean\"}],\"minItems\":2,\"maxItems\":2}", comptime schemaOf(struct { []const u8, bool }, .output));
+    // An empty tuple: an empty array; prefixItems takes one schema at least.
+    try expectJson("{\"type\":\"array\",\"maxItems\":0}", comptime schemaOf(@TypeOf(.{}), .output));
 }
 
 test "enums: their names; one without a name for every value is written as an integer too" {

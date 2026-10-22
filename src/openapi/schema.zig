@@ -319,6 +319,9 @@ pub const Registry = struct {
                 return .{ .kind = typeKind("array", nullable), .keywords = &.{ count("minItems", a.len), count("maxItems", a.len) }, .items = &item };
             },
             .@"struct" => |s| {
+                // An empty tuple is an empty array: prefixItems takes one
+                // schema at least.
+                if (s.is_tuple and s.field_types.len == 0) return .{ .kind = typeKind("array", nullable), .keywords = &.{count("maxItems", 0)} };
                 if (s.is_tuple) {
                     var prefix: [s.field_types.len]json.Node = undefined;
                     for (s.field_types, &prefix, 0..) |F, *item, i| item.* = node(typeParts(r, F, mode, false, std.fmt.comptimePrint("{s}[{d}]", .{ where, i }), stack));
