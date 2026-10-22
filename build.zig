@@ -1454,9 +1454,10 @@ const HttpGuideModules = struct {
 /// and every run as it printed. The service, main.zig, imports zio: only
 /// tests/http builds and runs it. The tests of the app find its page and
 /// its OpenAPI document by their absolute paths, `paths`, and run where
-/// every test runs (see addOpenapiGoldens); `zig build openapi`,
-/// `update_step`, runs them with ZEFIR_OPENAPI_UPDATE=1, which rewrites
-/// openapi.json.
+/// every test runs (see addOpenapiGoldens); openapi.json is an input of
+/// their run, so a change of the file alone runs them again. `zig build
+/// openapi`, `update_step`, runs them with ZEFIR_OPENAPI_UPDATE=1, every
+/// time, which rewrites openapi.json.
 fn addHttpGuide(
     b: *std.Build,
     test_http: *std.Build.Step,
@@ -1489,9 +1490,12 @@ fn addHttpGuide(
         }),
     });
     todos_test.root_module.addOptions("paths", paths);
-    test_http.dependOn(&addRun(b, todos_test, tsan).step);
+    const run_tests = addRun(b, todos_test, tsan);
+    run_tests.addFileInput(b.path(dir ++ "openapi.json"));
+    test_http.dependOn(&run_tests.step);
     const update = addRun(b, todos_test, tsan);
     update.setEnvironmentVariable("ZEFIR_OPENAPI_UPDATE", "1");
+    update.has_side_effects = true;
     update_step.dependOn(&update.step);
 
     const readme = b.createModule(.{
@@ -1619,8 +1623,9 @@ fn addHttpCompileChecks(
 /// path of golden/, `golden_options.dir`, and run where every test runs:
 /// with -Dtsan on macOS a test binary finds its TSan runtime by a path
 /// relative to that directory, so a test run elsewhere does not start.
-/// `zig build openapi`, `update_step`, runs golden_test with
-/// ZEFIR_OPENAPI_UPDATE=1: it rewrites the files from the code.
+/// The files are inputs of each run, so a change of one alone runs the
+/// tests again. `zig build openapi`, `update_step`, runs golden_test with
+/// ZEFIR_OPENAPI_UPDATE=1, every time: it rewrites the files from the code.
 fn addOpenapiGoldens(
     b: *std.Build,
     test_step: *std.Build.Step,
@@ -1632,6 +1637,9 @@ fn addOpenapiGoldens(
 ) void {
     const golden = b.addOptions();
     golden.addOption([]const u8, "dir", b.root.joinString(b.allocator, "src/openapi/tests/golden") catch @panic("OOM"));
+    // The applications of golden_test.zig, each with a file per version;
+    // the determinism tests compare those of todos and shapes.
+    const golden_apps = [_][]const u8{ "todos", "shapes", "rules", "secure" };
     for ([_][]const u8{ "golden_test", "determinism_a", "determinism_b" }) |name| {
         const t = b.addTest(.{
             .name = b.fmt("openapi-{s}", .{name}),
@@ -1645,10 +1653,16 @@ fn addOpenapiGoldens(
         });
         t.root_module.addOptions("golden_options", golden);
         const run = addRun(b, t, tsan);
+        for (golden_apps) |app| {
+            for ([_][]const u8{ "3.1", "3.2" }) |version| {
+                run.addFileInput(b.path(b.fmt("src/openapi/tests/golden/{s}-{s}.json", .{ app, version })));
+            }
+        }
         test_step.dependOn(&run.step);
         if (!std.mem.eql(u8, name, "golden_test")) continue;
         const update = addRun(b, t, tsan);
         update.setEnvironmentVariable("ZEFIR_OPENAPI_UPDATE", "1");
+        update.has_side_effects = true;
         update_step.dependOn(&update.step);
     }
 }
@@ -1657,12 +1671,13 @@ fn addOpenapiGoldens(
 /// there lists its files. service_test.zig compares the document of the
 /// small application with openapi.json there: it finds the file by its
 /// absolute path, `paths.openapi_json`, and runs where every test runs, as
-/// the golden tests do (see addOpenapiGoldens); `zig build openapi`,
-/// `update_step`, runs it with ZEFIR_OPENAPI_UPDATE=1, which rewrites the
-/// file. readme_test.zig checks README.md against the files of the
-/// application, the service of the http guide and its document, the golden
-/// documents and the probes. The application's main.zig imports zio: only
-/// tests/http builds it.
+/// the golden tests do (see addOpenapiGoldens); the file is an input of its
+/// run, so a change of the file alone runs it again. `zig build openapi`,
+/// `update_step`, runs it with ZEFIR_OPENAPI_UPDATE=1, every time, which
+/// rewrites the file. readme_test.zig checks README.md against the files of
+/// the application, the service of the http guide and its document, the
+/// golden documents and the probes. The application's main.zig imports zio:
+/// only tests/http builds it.
 fn addOpenapiGuide(
     b: *std.Build,
     test_openapi: *std.Build.Step,
@@ -1686,9 +1701,12 @@ fn addOpenapiGuide(
         }),
     });
     service_test.root_module.addOptions("paths", paths);
-    test_openapi.dependOn(&addRun(b, service_test, tsan).step);
+    const run_tests = addRun(b, service_test, tsan);
+    run_tests.addFileInput(b.path(dir ++ "openapi.json"));
+    test_openapi.dependOn(&run_tests.step);
     const update = addRun(b, service_test, tsan);
     update.setEnvironmentVariable("ZEFIR_OPENAPI_UPDATE", "1");
+    update.has_side_effects = true;
     update_step.dependOn(&update.step);
 
     const http_dir = "src/http/examples/";
