@@ -210,6 +210,11 @@ pub fn connect(c: *Client, io: Io, ctx: core.Context, diagnostics: ?*Diagnostics
 /// connections close, that of a Conn left at its release. A second call
 /// returns once the first is done. The task's cancelation waits until it
 /// returns. QUIT does not go out: the connections just close.
+///
+/// On Windows, under zio, the cut does not end a read that already waits
+/// for the server: such a call ends with the reply or at its own deadline,
+/// and `close` waits for it past `close_timeout`, so a blocking command
+/// with `.forever` and no deadline holds `close` until the server answers.
 pub fn close(c: *Client, io: Io) void {
     calls.checkUse(c, io);
     c.subscribers.closeAll(io);
@@ -236,7 +241,9 @@ pub fn start(c: *Client, io: Io) Error!void {
 /// `deadline` at the latest, then their exchanges are cut, and the client
 /// is closed when it returns. It has no error to return: nothing of the
 /// client runs after it. As a second `close`, it returns once the first is
-/// done.
+/// done. On Windows a call that already waits for a reply ends only with
+/// the reply or at its own deadline, and `shutdown` waits for it, past
+/// `deadline` too: see `close`.
 pub fn shutdown(c: *Client, io: Io, deadline: Io.Clock.Timestamp) !void {
     calls.checkUse(c, io);
     const due: core.Deadline = .at(deadline.toClock(io, .awake).raw.subDuration(shutdown_reserve));

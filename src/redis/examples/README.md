@@ -46,10 +46,12 @@ and runs on [zio](https://github.com/lalinsky/zio) in production.
 >   takes it, and a subscriber sends PING after a silence; a blocking
 >   command that waits `.forever` without a deadline on a dead connection
 >   waits until its task is canceled.
-> - **`close` on Windows.** Under zio on Windows, `close` cannot cut a read
->   that already waits for the server: such a call ends with the server's
->   reply or at its own deadline, and the `next` of a subscriber at its next
->   PING.
+> - **`close` and `shutdown` on Windows.** Under zio on Windows, `close`
+>   cannot cut a read that already waits for the server: such a call ends
+>   with the server's reply or at its own deadline, and the `next` of a
+>   subscriber at its next PING. `close` and `shutdown` wait for it, past
+>   `close_timeout` and the deadline of `shutdown`: a blocking command with
+>   `.forever` and no deadline keeps them waiting until the server answers.
 > - **Modules and caching on the client.** No commands of JSON, Search,
 >   Bloom, TimeSeries or vector sets in the catalog, and no
 >   `CLIENT TRACKING`; `cmd.raw` with `redis.Value` sends the commands of
@@ -1520,7 +1522,7 @@ round trip, or the command's own timeout when that is shorter:
 | R left | `.at_most = t` | the shorter of `t` and R − 150 ms − rtt | until the deadline |
 | R left | `.forever` | R − 150 ms − rtt | until the deadline |
 | none | `.at_most = t` | `t` | `t`, and `Options.timeout` more |
-| none | `.forever` | 0: forever | until the task is canceled or the client closes |
+| none | `.forever` | 0: forever | until the task is canceled or the client closes (on Windows, only until the task is canceled) |
 
 Here rtt is the shortest round trip to the server that the client has
 measured, on the HELLO of its latest connections: the least time a reply
@@ -2594,7 +2596,8 @@ today, as [connect.zig](#what-can-go-wrong-at-the-start) shows:
   the subscribers end first, then the calls in flight get `close_timeout`,
   but no longer than what is left 250 ms before the deadline, so that App
   has time for the rest; then their exchanges are cut. It returns no
-  error: nothing of the client runs after it.
+  error: nothing of the client runs after it. On Windows a call that
+  already waits for a reply holds it longer, see the TODO list at the top.
 
 The client needs no wrapper for App: `init` does no I/O, so a factory of
 the service makes it from the settings, as `main` of [the quick
