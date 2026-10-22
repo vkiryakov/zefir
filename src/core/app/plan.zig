@@ -539,7 +539,45 @@ fn listOf(comptime ctx: Ctx, comptime P: type, comptime who: []const u8) []const
     };
     if (matched) |x| @compileError(pre(ctx.Root) ++ who ++ " takes zefir.app." ++ x ++ ", but " ++ here ++
         " does not import that module (directly or through its imports); import it in " ++ here);
+    listOutside(ctx, P, who);
     @compileError(pre(ctx.Root) ++ who ++ " is the tuple " ++ typeName(P) ++ "; App gives a tuple only as zefir.app.Controllers(M) or zefir.app.Handlers(M)");
+}
+
+/// A tuple of controllers, or of handlers, that is the tuple of no module
+/// App builds: the root overrides its module, or does not reach it. Any
+/// other tuple returns.
+fn listOutside(comptime ctx: Ctx, comptime P: type, comptime who: []const u8) void {
+    const kind = listKind(P) orelse return;
+    const l = if (kind == .controller) "controllers" else "handlers";
+    const at = pre(ctx.Root) ++ who ++ " takes ";
+    for (ctx.mods) |m| if (m.overridden and P == (if (kind == .controller) graph.Controllers(m.T) else graph.Handlers(m.T))) {
+        @compileError(at ++ "zefir.app." ++ (if (kind == .controller) "Controllers(" else "Handlers(") ++ name(m.T) ++ "), but " ++
+            name(ctx.Root) ++ " overrides " ++ name(m.T) ++ "; App does not build its " ++ l);
+    };
+    for (@typeInfo(P).@"struct".field_types) |F| {
+        const C = names.dataPointer(F).?.child;
+        const owned = for (ctx.mods) |m| {
+            if (names.contains(@field(m.T.module, l), C)) break true;
+        } else false;
+        if (!owned) @compileError(at ++ "the " ++ l ++ " of a module " ++ name(ctx.Root) ++ " does not reach (" ++ typeName(C) ++
+            " is a " ++ @tagName(kind) ++ " of none of its modules); import that module in " ++ name(ctx.mods[ctx.k].T));
+    }
+}
+
+/// `.controller` when every field of the tuple P points to a controller,
+/// `.handler` when every one points to a handler, null otherwise.
+fn listKind(comptime P: type) ?Kind {
+    const fields = @typeInfo(P).@"struct".field_types;
+    if (fields.len == 0) return null;
+    kinds: for ([_]Kind{ .controller, .handler }) |kind| {
+        const label = if (kind == .controller) "http_routes" else "rpc_handler";
+        for (fields) |F| {
+            const ptr = names.dataPointer(F) orelse continue :kinds;
+            if (!names.isPlainStruct(ptr.child) or !@hasDecl(ptr.child, label)) continue :kinds;
+        }
+        return kind;
+    }
+    return null;
 }
 
 fn depName(comptime T: type, comptime how: How) []const u8 {

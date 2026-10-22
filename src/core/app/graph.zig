@@ -26,7 +26,7 @@ fn ModulesOf(comptime X: type) type {
 
 fn computeModules(comptime X: type) []const Mod {
     @setEvalBranchQuota(names.eval_quota);
-    checkModule(X, X, null);
+    checkModule(pre(X), X, null);
     var done: []const Mod = &.{};
     _ = visit(X, X, &.{}, &done);
     return done;
@@ -42,7 +42,7 @@ fn visit(comptime X: type, comptime T: type, comptime path: []const type, compti
     const list: []const type = if (overridden) &.{} else T.module.imports;
     var imports: []const usize = &.{};
     for (list, 0..) |I, n| {
-        checkModule(X, I, T);
+        checkModule(pre(X), I, T);
         if (names.contains(list[0..n], I)) @compileError(pre(X) ++ name(T) ++ ".imports: " ++ name(I) ++ " is there twice");
         imports = imports ++ &[_]usize{visit(X, I, path ++ &[_]type{T}, done)};
     }
@@ -50,14 +50,14 @@ fn visit(comptime X: type, comptime T: type, comptime path: []const type, compti
     return done.*.len - 1;
 }
 
-/// T, the root X itself (`from` null) or an entry of `from.imports`, must
-/// declare `pub const module: zefir.app.Module`.
-fn checkModule(comptime X: type, comptime T: type, comptime from: ?type) void {
+/// T, a root itself (`from` null) or an entry of `from.imports`, must
+/// declare `pub const module: zefir.app.Module`; `at` starts the message.
+fn checkModule(comptime at: []const u8, comptime T: type, comptime from: ?type) void {
     const where = if (from) |F| name(F) ++ ".imports: " else "";
     if (!names.isModule(T))
-        @compileError(pre(X) ++ where ++ names.typeName(T) ++ " is not a module: it has no `pub const module: zefir.app.Module`");
+        @compileError(at ++ where ++ names.typeName(T) ++ " is not a module: it has no `pub const module: zefir.app.Module`");
     if (@TypeOf(T.module) != Module)
-        @compileError(pre(X) ++ where ++ name(T) ++ ".module is not a zefir.app.Module; declare it as `pub const module: zefir.app.Module = .{ ... }`");
+        @compileError(at ++ where ++ name(T) ++ ".module is not a zefir.app.Module; declare it as `pub const module: zefir.app.Module = .{ ... }`");
 }
 
 /// Whether module j is among the modules module k imports, directly or
@@ -99,6 +99,8 @@ pub fn Handlers(comptime M: type) type {
 /// its own module depend on itself.
 fn ListTuple(comptime M: type, comptime list: []const u8) type {
     @setEvalBranchQuota(names.eval_quota);
+    // M is checked here first, so that the message names the tuple, not an App.
+    checkModule("zefir.app." ++ (if (list[0] == 'c') "Controllers(" else "Handlers(") ++ names.typeName(M) ++ "): ", M, null);
     var types: []const type = &.{};
     for (modulesOf(M)) |m| if (!m.overridden) for (@field(m.T.module, list)) |C| {
         types = types ++ &[_]type{*C};

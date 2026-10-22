@@ -78,6 +78,11 @@ pub const compile_errors = [_]Fixture{
     .{ .file = dir ++ "controller_injected.zig", .expect = "zefir.App(Root): Reports.Peek.ctl needs *UsersController, a controller of UsersModule; " ++ not_injected },
     .{ .file = dir ++ "controllers_unreachable.zig", .expect = "zefir.App(Root): Reports.Servers.http param 2 takes zefir.app.Controllers(UsersModule), " ++
         "but Reports does not import that module (directly or through its imports); import it in Reports" },
+    .{ .file = dir ++ "controllers_not_imported.zig", .expect = "zefir.App(AppModule): AppModule.Servers.adminHttp param 2 takes the controllers of a module AppModule does not reach " ++
+        "(AdminController is a controller of none of its modules); import that module in AppModule" },
+    .{ .file = dir ++ "controllers_overridden.zig", .expect = "zefir.App(Root): Root.Servers.httpServer param 2 takes zefir.app.Controllers(UsersModule), " ++
+        "but Root overrides UsersModule; App does not build its controllers" },
+    .{ .file = dir ++ "controllers_not_module.zig", .expect = "zefir.app.Controllers(Config): Config" ++ not_module },
     .{ .file = dir ++ "tuple_dep.zig", .expect = "zefir.App(Root): Root.X.pair is the tuple struct { u8, u8 }; App gives a tuple only as zefir.app.Controllers(M) or zefir.app.Handlers(M)" },
     .{ .file = dir ++ "cycle_controllers.zig", .expect = "zefir.App(Root): dependency cycle: Root.Servers.http (param 2) -> Root.Ctl (.server) -> Root.Servers.http" },
     // What a module sees, and its exports.
