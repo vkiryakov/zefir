@@ -13,6 +13,7 @@ pub const programs = [_][]const u8{ "minute", "app" };
 /// imports zio, so only tests/http builds it.
 pub const files = [_][]const u8{
     "main",
+    "Service",
     "TodosV1Controller",
     "SessionController",
     "HealthController",

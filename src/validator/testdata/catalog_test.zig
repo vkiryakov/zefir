@@ -1218,7 +1218,7 @@ test "maxDate fails a value without the form of its bound with the date-form pre
     try expectViolation([]const u8, v.maxDate("2020-12-31T23:59:59Z").withMessage("another message"), "", "validation.rfc3339", "must be a valid RFC 3339 date-time", "x");
 }
 
-test "the module exports exactly its 190 public names, and Rule.withMessage" {
+test "the module exports exactly its 192 public names, and Rule.withMessage" {
     const names = [_][]const u8{
         "Violation",             "Rule",              "Report",         "max_code_bytes", "max_message_bytes", "max_report_violations", "max_unique_items", "max_json_depth",
         "check",                 "checkAll",          "assertRules",    "fail",           "equals",            "notEquals",             "oneOf",            "noneOf",
@@ -1243,7 +1243,7 @@ test "the module exports exactly its 190 public names, and Rule.withMessage" {
         "date",                  "isDate",            "rfc3339",        "isRfc3339",      "iso8601",           "isIso8601",             "minDate",          "maxDate",
         "militaryTime",          "isMilitaryTime",    "minItems",       "maxItems",       "uniqueItems",       "uniqueBy",              "containsAll",      "containsNone",
         "each",                  "custom",            "transform",      "TransformError", "rename",            "nameOf",                "fieldNamed",       "trim",
-        "trimStart",             "trimEnd",           "toLower",        "toUpper",        "transformWith",     "closest",
+        "trimStart",             "trimEnd",           "toLower",        "toUpper",        "transformWith",     "closest",               "RuleSchema",       "schemaOf",
     };
     inline for (names) |name| try testing.expect(@hasDecl(v, name));
     try testing.expectEqual(names.len, comptime std.meta.declarations(v).len);

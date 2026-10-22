@@ -473,14 +473,9 @@ pub fn runPhases(ctx: *Context, links: []const Link) anyerror!bool {
     return false;
 }
 
-/// The hook of the response before its head goes out: the `onResponse`
-/// phases of the links the request reached, in order.
-pub fn beforeHead(ctx: *Context) Context.Response.Internal.BeforeHead {
-    return .{ .ptr = ctx, .call = onResponsePhases };
-}
-
-fn onResponsePhases(ptr: *anyopaque) void {
-    const ctx: *Context = @ptrCast(@alignCast(ptr));
+/// The `onResponse` phases of the links the request reached, in order:
+/// right before the head of its response goes out.
+pub fn onResponsePhases(ctx: *Context) void {
     const reached = &ctx.internal.middleware;
     for (0..reached.count) |i| {
         const link = reached.at(i);

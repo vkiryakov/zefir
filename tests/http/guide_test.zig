@@ -7,9 +7,11 @@
 //! URL, headers and body from it as curl would, and sends what curl sends.
 //!
 //! The build gives the paths of the service's program and of the app's
-//! static files (`guide_options`), and embeds the guide (`guide`). Ctrl+C
-//! is SIGINT, which Windows cannot send to one process: there the test is
-//! skipped, and `zig build check` still builds the service.
+//! static files (`guide_options`), and embeds the guide (`guide`) and the
+//! guide of zefir-openapi (`openapi-guide`), which shows some of the
+//! commands with their responses too. Ctrl+C is SIGINT, which Windows
+//! cannot send to one process: there the test is skipped, and
+//! `zig build check` still builds the service.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -87,7 +89,13 @@ const session = [_]Step{
     .{ .curl = "curl -I localhost:8080/" },
     .{ .curl = "curl -I localhost:8080/todos/today" },
     .{ .curl = "curl -i localhost:8080/.env" },
+    // The OpenAPI document
+    .{ .curl = "curl -I localhost:8080/api/openapi.json" },
 };
+
+/// The commands of the session that the guide of zefir-openapi shows too,
+/// with the same responses.
+const openapi_guide_commands = [_][]const u8{"curl -I localhost:8080/api/openapi.json"};
 
 test "the guide shows every curl command of the service with its response, and the service's log" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
@@ -140,6 +148,14 @@ test "the guide shows every curl command of the service with its response, and t
     for (exchanges.items) |e| check.expectExchange(name, guide, e.command, e.output) catch {
         failed = true;
     };
+    for (exchanges.items) |e| {
+        for (openapi_guide_commands) |command| {
+            if (!std.mem.eql(u8, e.command, command)) continue;
+            check.expectExchange("src/openapi/examples/README.md", @embedFile("openapi-guide"), e.command, e.output) catch {
+                failed = true;
+            };
+        }
+    }
     check.expectSession(name, guide, run_command, log) catch {
         failed = true;
     };

@@ -37,9 +37,11 @@
 //! takes goes to the longest static mount that begins it, which opens its
 //! file there, within the deadline, and sends it after the request, on the
 //! connection's task, without one (static.zig). The `onResponse` phases
-//! run right before the head goes out, whichever task sends it. Once the
-//! request has ended, the `onFinish` phases run, once, on a task of their
-//! own within `.finish_timeout`; then the values of `ctx.locals` go.
+//! run right before the head goes out, whichever task sends it, then, in
+//! Debug, the check of a route of a controller with `openapi` (check.zig).
+//! Once the request has ended, the `onFinish` phases run, once, on a task
+//! of their own within `.finish_timeout`; then the values of `ctx.locals`
+//! go.
 //!
 //! A request whose SSE handler subscribed goes on as its stream, on this
 //! task, which keeps the connection for it (`serveStream`): it leaves the
@@ -63,6 +65,7 @@ const response = @import("h1/response.zig");
 const json_out = @import("output/json_out.zig");
 const plan = @import("plan.zig");
 const mw = @import("middleware.zig");
+const check = @import("check.zig");
 const static_files = @import("static.zig");
 const waiting = @import("wait.zig");
 const sse = @import("sse.zig");
@@ -170,7 +173,7 @@ pub fn serve(server: *Server, io: std.Io, exchange: *Exchange) void {
             .server = server,
         },
     };
-    ctx.response.internal.before_head = mw.beforeHead(&ctx);
+    ctx.response.internal.before_head = .{ .ptr = &ctx, .call = beforeHead };
     // A request refused here has run no middleware: none has after phases.
     if (!takeSlot(server)) return respond(&ctx, exchange, error.Overloaded);
     ctx.internal.in_flight = true;
@@ -178,6 +181,9 @@ pub fn serve(server: *Server, io: std.Io, exchange: *Exchange) void {
     defer if (ctx.internal.in_flight) releaseSlot(server, io);
 
     const found = find(server, &ctx);
+    // The server's middleware runs before the route is applied, and the
+    // check compares its input calls too.
+    if (check.enabled) if (routeOf(found)) |index| check.begin(&ctx, &server.internal.routes[index].info, server.internal.routes[index].check);
     ctx.internal.max_body_bytes = bodyLimitOf(server, found);
     const deadline: ?core.Deadline = if (budgetOf(server, found)) |budget| .after(ctx.now(), budget) else null;
     if (deadline) |d| ctx.internal.operation = ctx.internal.operation.withDeadline(d);
@@ -247,6 +253,16 @@ pub fn serve(server: *Server, io: std.Io, exchange: *Exchange) void {
     ctx.locals.internal.deinitValues();
     // The backend sees the stop's cancelation at its next cancelation point.
     if (canceled) io.recancel();
+}
+
+/// What runs right before the head of a response goes out: the
+/// `onResponse` phases of the middleware the request reached, then the
+/// Debug check of its route (check.zig), which may put the server's 500 in
+/// place of the response: false then.
+fn beforeHead(ptr: *anyopaque) bool {
+    const ctx: *Context = @ptrCast(@alignCast(ptr));
+    mw.onResponsePhases(ctx);
+    return check.head(ctx);
 }
 
 /// The `onFinish` phases of the middleware the request reached, once it
@@ -424,7 +440,7 @@ fn serveStream(server: *Server, ctx: *Context, sub: *Subscription, reason: Reaso
         call(route.controller, &closing);
     }
     // Publishers reach it no more; the last touch of its manager.
-    sse.Manager.Internal.remove(sub.manager, io, sub);
+    sub.hub.remove(io, sub);
     sub.token.cancel();
     finishPhases(server, ctx, .{
         .status = res.status_sent orelse 0,
@@ -496,6 +512,17 @@ fn find(server: *Server, ctx: *Context) Found {
         if (static_files.find(server.internal.mounts, server.internal.prefix, normalized)) |target| return .{ .static = target };
     }
     return .{ .match = match };
+}
+
+/// The route the router matched, as an index into the server's routes.
+fn routeOf(found: Found) ?usize {
+    return switch (found) {
+        .match => |match| switch (match) {
+            .found => |f| f.route,
+            else => null,
+        },
+        .static, .failed => null,
+    };
 }
 
 /// The budget of the request's deadline: the route's `.timeout`, else the
@@ -675,6 +702,7 @@ const internal_line = "{s} failed with error.{t}; the response is 500 (request {
 /// The answer to `err`: what the error handler makes of it, in place of
 /// what the handler wrote.
 fn answerError(ctx: *Context, exchange: *Exchange, err: anyerror) void {
+    check.answering(ctx, err);
     const errors_of = ctx.internal.error_handler;
     switch (errors_of.answer(errors_of.object, ctx, err)) {
         .send => {
@@ -707,6 +735,11 @@ fn ErrorPathOf(comptime H: type) type {
             if (@hasDecl(H, "handle")) {
                 const self: *H = @ptrCast(@alignCast(object));
                 const result = H.handle(self, ctx, err, &reply);
+                // The response has gone out whole: the one `handle` wrote,
+                // or the server's 500 that the Debug check put in its place,
+                // after which the writes of `handle` fail. As for a handler,
+                // what `handle` returned changes nothing then.
+                if (res.state == .finished) return .finish;
                 const action: errors.ErrorAction = if (@typeInfo(@TypeOf(result)) == .error_union) result catch |failure| failed: {
                     log.warn("{s}.handle failed with error.{t} on error.{t}; the response is mapError's, as handle left it (request {s})", .{ name, failure, err, ctx.requestId() });
                     break :failed .respond;
@@ -750,10 +783,12 @@ fn setReply(ctx: *Context, err: anyerror, reply: anytype) void {
     dropContentFields(res);
     if (reply.status < 200 or reply.status > 599) {
         log.warn("the error handler gave error.{t} the status {d}, which is not a final status; the response is 500 (request {s})", .{ err, reply.status, ctx.requestId() });
+        check.leave(ctx);
         return setInternal(res);
     }
     const bytes = json_out.encode(res.arena, reply.body, .{ .omit_null_fields = problem }) catch |failure| {
         log.warn("the body of the response to error.{t} failed with error.{t}; the response is the framework's 500 (request {s})", .{ err, failure, ctx.requestId() });
+        check.leave(ctx);
         return setInternal(res);
     };
     res.code = reply.status;
@@ -764,6 +799,15 @@ fn setReply(ctx: *Context, err: anyerror, reply: anytype) void {
 fn setInternal(res: *Context.Response.Internal) void {
     res.code = 500;
     res.replaceBody("application/problem+json", internal_problem);
+}
+
+/// The framework's own 500 in place of a response that the Debug check
+/// refused before its head went out (check.zig): the fields of its content
+/// go, the others stay, and a stream begun for it is dropped.
+pub fn replaceWithInternal(res: *Context.Response.Internal) void {
+    dropContentFields(res);
+    res.out.failure = null;
+    setInternal(res);
 }
 
 /// OPTIONS without a route of its own: 204 with `Allow`.
@@ -778,6 +822,7 @@ fn answerOptions(ctx: *Context, allow: Allow) Context.Response.SetError!void {
 /// kept, as `setProblem` does. The backend closes the connection after it.
 /// The response is written only here, so nothing of it has gone out yet.
 fn answerBodyFailure(ctx: *Context, exchange: *Exchange, failure: Exchange.BodyFailure) void {
+    check.leave(ctx);
     const status: u16 = switch (failure) {
         .timeout => 408,
         .malformed => 400,
@@ -793,6 +838,7 @@ fn answerBodyFailure(ctx: *Context, exchange: *Exchange, failure: Exchange.BodyF
 /// the content go with the old body; the others stay (`Allow`, those of
 /// the application).
 fn setProblem(ctx: *Context, problem: errors.Problem) void {
+    check.leave(ctx);
     const res = &ctx.response.internal;
     dropContentFields(res);
     res.code = problem.status;
@@ -824,7 +870,7 @@ fn isContentField(name: []const u8) bool {
 
 /// Sends the response: its status (204 without a body, 200 with one,
 /// unless the handler set it), its fields with `Content-Type`, and its
-/// body; none for HEAD, 204 and 304. A body held whole goes with its
+/// body; none for HEAD, 204, 205 and 304. A body held whole goes with its
 /// length; the value of an `http.Json(T)` and what a stream left in the
 /// buffer go through it (`Response`). The head commits the response; a
 /// write that fails cuts it.
@@ -985,6 +1031,44 @@ test "a !void handler is 204; http.Json is 200 or its status" {
     try testing.expectEqual(203, page.status);
     try testing.expectEqualStrings("text/html; charset=utf-8", page.header("content-type").?);
     try testing.expectEqualStrings("<p>todo</p>", page.body);
+}
+
+/// A form a client resets after it is sent: 205, by the value of an
+/// `http.Json(T)` or with a body written.
+const FormsController = struct {
+    pub const http_routes = routes.routes(.{
+        .prefix = "/v1/forms",
+        .methods = .{
+            .reset = routes.post("/reset", .{ .responses = .{ .reset_content = .{} } }),
+            .clear = routes.post("/clear", .{ .responses = .{ .reset_content = .{} } }),
+        },
+    });
+
+    pub fn reset(_: *FormsController, _: *Context) !Json(Todo) {
+        return .{ .value = .{ .id = 1, .title = "Buy milk" }, .status = 205 };
+    }
+    pub fn clear(_: *FormsController, ctx: *Context) !void {
+        try ctx.response.status(205).text("cleared");
+    }
+};
+
+test "205 goes with an empty body, Content-Length: 0, whatever the handler wrote" {
+    const io = testing.io;
+    var forms: FormsController = .{};
+    var backend: TestingBackend = .init(testing.allocator);
+    defer backend.deinit();
+    var server: Server = try .init(testing.allocator, .{ .controllers = .{&forms} }, .{ .listen = .{ .backend = backend.backend() } });
+    defer server.deinit(io);
+    try server.start(io);
+
+    for ([_][]const u8{ "/v1/forms/reset", "/v1/forms/clear" }) |target| {
+        var res = try backend.request(io, .{ .method = .POST, .target = target });
+        defer res.deinit();
+        try testing.expectEqual(205, res.status);
+        try testing.expectEqualStrings("0", res.header("content-length").?);
+        try testing.expectEqualStrings("", res.body);
+        try testing.expect(!res.aborted);
+    }
 }
 
 test "404, 405 with Allow, HEAD without a body, OPTIONS 204 with Allow" {
@@ -1452,6 +1536,8 @@ test "an error after commit cuts the response" {
 /// An exchange without a client that counts what the server writes.
 const CountingExchange = struct {
     exchange: Exchange,
+    /// How the body failed, as the backend says.
+    failure: Exchange.BodyFailure = .timeout,
     heads: usize = 0,
     bodies: usize = 0,
     finishes: usize = 0,
@@ -1506,9 +1592,10 @@ const CountingExchange = struct {
     fn bodyLength(_: *anyopaque) ?u64 {
         return 0;
     }
-    /// The body stalled, as a client that stops sending it.
-    fn bodyFailure(_: *anyopaque) ?Exchange.BodyFailure {
-        return .timeout;
+    /// The body stalled, as a client that stops sending it, or broke its
+    /// chunked framing.
+    fn bodyFailure(ptr: *anyopaque) ?Exchange.BodyFailure {
+        return of(ptr).failure;
     }
     fn writeHead(ptr: *anyopaque, _: std.Io, _: u16, _: []const h1.Field, _: Exchange.BodyKind) Exchange.WriteError!void {
         of(ptr).heads += 1;
@@ -1597,7 +1684,7 @@ test "the answer to a body that did not arrive goes through the onResponse phase
     var ctx = stalled.context(arena_state.allocator());
     const links = [_]mw.Link{.{ .name = "noted", .on_response = notedResponse }};
     ctx.internal.middleware = .{ .global = &links, .count = 1 };
-    ctx.response.internal.before_head = mw.beforeHead(&ctx);
+    ctx.response.internal.before_head = .{ .ptr = &ctx, .call = beforeHead };
     noted_responses = 0;
     respond(&ctx, &stalled.exchange, error.ReadFailed);
     try stalled.expect(1, 1, 0);
@@ -1606,6 +1693,202 @@ test "the answer to a body that did not arrive goes through the onResponse phase
     var noted = false;
     for (ctx.response.internal.headers.items) |f| noted = noted or std.mem.eql(u8, f.name, "x-noted");
     try testing.expect(noted);
+}
+
+/// Review focus 5: a controller of the document, whose routes the Debug
+/// check compares (check.zig). The answers the server writes itself go out
+/// as they are.
+const DocumentedController = struct {
+    /// Requests that have entered `gated`.
+    entered: std.atomic.Value(u32) = .init(0),
+    /// Opens `gated`.
+    gate: std.Io.Event = .unset,
+
+    pub const openapi = .{};
+
+    pub const http_routes = routes.routes(.{
+        .prefix = "/v1/docs",
+        .methods = .{
+            .get = routes.get("/{id}", .{}),
+            .gated = routes.get("/gated", .{}),
+            .slow = routes.get("/slow", .{ .timeout = std.Io.Duration.fromMilliseconds(50) }),
+            .upload = routes.post("/upload", .{}),
+            // Answers a status it does not declare: the check is on.
+            .teapot = routes.get("/teapot", .{}),
+        },
+    });
+
+    pub fn get(_: *DocumentedController, _: *Context) !Json(Todo) {
+        return .{ .value = .{ .id = 1, .title = "Buy milk" } };
+    }
+    pub fn gated(self: *DocumentedController, ctx: *Context) !void {
+        _ = self.entered.fetchAdd(1, .monotonic);
+        try self.gate.wait(ctx.io());
+    }
+    pub fn slow(_: *DocumentedController, ctx: *Context) !void {
+        try ctx.io().sleep(.fromSeconds(1), .awake);
+    }
+    pub fn upload(_: *DocumentedController, ctx: *Context) !void {
+        _ = try ctx.body();
+    }
+    pub fn teapot(_: *DocumentedController, ctx: *Context) !void {
+        _ = ctx.response.status(418);
+    }
+};
+
+test "review focus 5: on a route of the document, 504, 503, 405, OPTIONS and HEAD go out as the server writes them" {
+    const io = testing.io;
+    var dog = try Watchdog.start(io, "review focus 5: the server's own answers on a route of the document");
+    defer dog.stop(io);
+    var docs: DocumentedController = .{};
+    var b: TestingBackend = .init(testing.allocator);
+    defer b.deinit();
+    var server = try Server.init(testing.allocator, .{ .controllers = .{&docs} }, .{ .listen = .{ .backend = b.backend() }, .max_in_flight = 1 });
+    defer server.deinit(io);
+    try server.start(io);
+    const level = testing.log_level;
+    testing.log_level = .err; // the 503 and the line of the check are logged as warnings
+    defer testing.log_level = level;
+
+    // The check is on for these routes: an answer they do not declare is
+    // the server's 500.
+    var teapot = try b.request(io, .{ .method = .GET, .target = "/v1/docs/teapot" });
+    defer teapot.deinit();
+    try testing.expectEqual(if (check.enabled) 500 else 418, teapot.status);
+
+    // The deadline of the route: 504.
+    var slow = try b.request(io, .{ .method = .GET, .target = "/v1/docs/slow" });
+    defer slow.deinit();
+    try testing.expectEqual(504, slow.status);
+    try expectProblemCode(&slow, "timeout");
+
+    // A method the path does not take, and the automatic OPTIONS.
+    var wrong = try b.request(io, .{ .method = .PUT, .target = "/v1/docs/1" });
+    defer wrong.deinit();
+    try testing.expectEqual(405, wrong.status);
+    try testing.expectEqualStrings("GET, HEAD, OPTIONS", wrong.header("allow").?);
+    var options = try b.request(io, .{ .method = .OPTIONS, .target = "/v1/docs/1" });
+    defer options.deinit();
+    try testing.expectEqual(204, options.status);
+    try testing.expectEqualStrings("GET, HEAD, OPTIONS", options.header("allow").?);
+
+    // HEAD of a GET: the GET's answer without its body.
+    var head = try b.request(io, .{ .method = .HEAD, .target = "/v1/docs/1" });
+    defer head.deinit();
+    try testing.expectEqual(200, head.status);
+    try testing.expectEqualStrings("application/json", head.header("content-type").?);
+    try testing.expectEqualStrings("", head.body);
+
+    // Over .max_in_flight: 503.
+    var held: ?TestingBackend.Response = null;
+    var client: std.Io.Group = .init;
+    defer client.cancel(io);
+    defer if (held) |*res| res.deinit();
+    try client.concurrent(io, requestInto, .{ &b, io, .{ .method = .GET, .target = "/v1/docs/gated" }, &held });
+    try waitCount(io, &docs.entered, 1);
+    var over = try b.request(io, .{ .method = .GET, .target = "/v1/docs/1" });
+    defer over.deinit();
+    try testing.expectEqual(503, over.status);
+    try expectProblemCode(&over, "unavailable");
+    docs.gate.set(io);
+    try client.await(io);
+    try testing.expectEqual(204, held.?.status);
+}
+
+test "review focus 5: on a route of the document, the 503 of a request the runtime gives no task" {
+    const io = testing.io;
+    var dog = try Watchdog.start(io, "review focus 5: the 503 of no task on a route of the document");
+    defer dog.stop(io);
+    var scarce_vtable = io.vtable.*;
+    scarce_vtable.groupConcurrent = concurrentWhileLeft;
+    const scarce: std.Io = .{ .userdata = io.userdata, .vtable = &scarce_vtable };
+    var docs: DocumentedController = .{};
+    var b: TestingBackend = .init(testing.allocator);
+    defer b.deinit();
+    var server = try Server.init(testing.allocator, .{ .controllers = .{&docs} }, .{ .listen = .{ .backend = b.backend() } });
+    defer server.deinit(io);
+    try server.start(io);
+    const level = testing.log_level;
+    testing.log_level = .err; // the 503 is logged as a warning
+    defer testing.log_level = level;
+
+    // The route matched, and the error is not one of its own.
+    tasks_left.store(0, .monotonic);
+    var none = try b.request(scarce, .{ .method = .GET, .target = "/v1/docs/1" });
+    defer none.deinit();
+    try testing.expectEqual(503, none.status);
+    try expectProblemCode(&none, "unavailable");
+}
+
+test "review focus 5: on a route of the document, the 408 and 400 of a body that did not arrive whole" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const Upload = DocumentedController.http_routes.methods.upload;
+    const table = comptime check.tableOf(DocumentedController, "upload", Upload, &.{}, errors.DefaultErrors);
+    const info: routes.RouteInfo = .{ .method = .POST, .pattern = "/v1/docs/upload", .controller = "DocumentedController", .handler = "upload" };
+    for ([_]struct { Exchange.BodyFailure, u16 }{ .{ .timeout, 408 }, .{ .malformed, 400 } }) |case| {
+        var broken: CountingExchange = .init();
+        broken.failure = case[0];
+        var ctx = broken.context(arena_state.allocator());
+        ctx.response.internal.before_head = .{ .ptr = &ctx, .call = beforeHead };
+        check.begin(&ctx, &info, table);
+        respond(&ctx, &broken.exchange, error.ReadFailed);
+        try broken.expect(1, 1, 0);
+        try testing.expectEqual(case[1], ctx.response.internal.status_sent.?);
+        try testing.expectEqualStrings("text/plain; charset=utf-8", ctx.response.internal.content_type.?);
+    }
+}
+
+/// A controller of the document whose route fails with an error that the
+/// error handler answers with a page it streams itself.
+const PagesController = struct {
+    pub const openapi = .{};
+
+    pub fn gone(_: *PagesController, _: *Context) error{Gone}!void {
+        return error.Gone;
+    }
+};
+
+/// Gives `Gone` 404; its `handle` streams a page of HTML, which the route
+/// does not declare.
+const PageErrors = struct {
+    pub fn mapError(err: anyerror) errors.ErrorResponse(ApiError) {
+        return switch (err) {
+            error.Gone => .{ .status = 404, .body = .{ .code = "pages.gone", .message = "The page is gone" } },
+            else => .fallback(err, .{ .code = errors.defaultCode(err), .message = errors.defaultTitle(err) }),
+        };
+    }
+
+    pub fn handle(_: *PageErrors, ctx: *Context, _: anyerror, _: *errors.ErrorResponse(ApiError)) !errors.ErrorAction {
+        var out = try ctx.response.status(404).stream(.{ .content_type = "text/html" });
+        try out.writeAll("<p>The page is gone</p>");
+        try out.finish();
+        return .handled;
+    }
+};
+
+test "a page that handle streams and the Debug check refuses: the server's 500 goes out whole, and nothing cuts it" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const level = testing.log_level;
+    testing.log_level = .err; // the line of the check is a warning
+    defer testing.log_level = level;
+    const Gone = routes.get("/gone", .{});
+    const table = comptime check.tableOf(PagesController, "gone", Gone, &.{}, PageErrors);
+    const info: routes.RouteInfo = .{ .method = .GET, .pattern = "/v1/pages/gone", .controller = "PagesController", .handler = "gone" };
+    var page_errors: PageErrors = .{};
+    var counting: CountingExchange = .init();
+    var ctx = counting.context(arena_state.allocator());
+    ctx.internal.error_handler = .of(PageErrors, &page_errors);
+    ctx.response.internal.before_head = .{ .ptr = &ctx, .call = beforeHead };
+    check.begin(&ctx, &info, table);
+    respond(&ctx, &counting.exchange, error.Gone);
+    // One head and one end: of the server's 500 in Debug, which went out
+    // when the page began; of the page elsewhere.
+    try counting.expect(1, 1, 0);
+    try testing.expect(!ctx.response.internal.aborted);
+    try testing.expectEqual(.finished, ctx.response.state());
+    try testing.expectEqual(if (check.enabled) 500 else 404, ctx.response.internal.status_sent.?);
 }
 
 test "the server logs through std.log.scoped(.http) and needs no logger" {

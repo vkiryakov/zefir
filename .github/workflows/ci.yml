@@ -116,6 +116,12 @@ jobs:
         shell: bash
         working-directory: tests/redis
         run: zig build check --summary all
+      # The same for tests/openapi, whose checks need Docker: only
+      # openapi-tools runs them.
+      - if: contains(format(' {0} ', env.MODULES), ' openapi ')
+        shell: bash
+        working-directory: tests/openapi
+        run: zig build check --summary all
       # The same for tests/app, the end-to-end tests of zefir.App, which
       # import the umbrella module: app-e2e runs them, and its shop against
       # NATS and mongod runs on a developer's machine only.
@@ -323,6 +329,29 @@ jobs:
         if: always()
         run: docker compose --profile redis down
 
+  # The JSON Schema that the validator and zefir-openapi write, in the
+  # tools of other languages, in Docker (tests/openapi): the regular
+  # expressions of v.schemaOf with ajv in Node (ECMA-262) and with Go's
+  # regexp (RE2), on the vectors of src/validator/testdata/regex_vectors.zig;
+  # the golden documents against the official JSON Schema of OAS 3.1 and
+  # 3.2; and the bodies the golden applications read and write against
+  # their schemas. Docker runs Linux containers on the Linux runners only,
+  # so this job is ubuntu only. It runs when openapi is among the modules to
+  # test, as it is for every change to the validator, which openapi imports.
+  openapi-tools:
+    name: openapi-tools
+    needs: changes
+    if: contains(format(' {0} ', needs.changes.outputs.modules), ' openapi ')
+    timeout-minutes: 20
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: mlugg/setup-zig@v2
+      - name: Check the regular expressions, the documents and the bodies in JavaScript and in Go
+        working-directory: tests/openapi
+        timeout-minutes: 15
+        run: zig build all --summary all
+
   # The package of examples/rpc-custom-transport: a transport outside zefir,
   # on the public API of rpc only, built the way an application builds it
   # (zefir's modules come from the application, here this commit, not the
@@ -387,6 +416,27 @@ jobs:
         working-directory: tests/http
         timeout-minutes: 10
         run: zig build e2e --summary all
+
+  # Schemathesis against the service of the http guide on the network, in
+  # Docker (tests/http): it sends every operation of the service's OpenAPI
+  # document but its stream of events requests that the document allows,
+  # and checks each response against the document. Docker runs Linux
+  # containers on the Linux runners only, so this job is ubuntu only. It is
+  # not a required check. It runs when http is among the modules to test,
+  # as it is for every change to openapi, whose document the guide serves.
+  http-schemathesis:
+    name: http-schemathesis
+    needs: changes
+    if: contains(format(' {0} ', needs.changes.outputs.modules), ' http ')
+    timeout-minutes: 20
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: mlugg/setup-zig@v2
+      - name: Run Schemathesis against the service of the guide
+        working-directory: tests/http
+        timeout-minutes: 15
+        run: zig build schemathesis --summary all
 
   # The end-to-end tests of tests/app: zefir.App with a server of
   # zefir-http on http.native over loopback and one of zefir-rpc on the

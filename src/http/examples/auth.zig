@@ -17,10 +17,16 @@
 //!
 //! A real service verifies a signed token (a JWT) or asks a store of
 //! sessions instead of a table; the shape of the middleware stays the same.
+//!
+//! Each of them describes what it checks for the OpenAPI document, in a
+//! `pub const openapi: zefir.openapi.MiddlewareDoc`: `TokenAuth` how a
+//! client says who it is, `requireUser` that a route behind it needs that,
+//! and `requirePermission` the permission it needs.
 
 const std = @import("std");
 const confy = @import("confy");
 const http = @import("http");
+const zefir = @import("zefir");
 
 /// The signed-in user of a request, as `TokenAuth` puts it into
 /// `ctx.locals`.
@@ -43,6 +49,15 @@ pub const TokenAuth = struct {
     /// The tokens and their users; borrowed, they live as long as the
     /// server.
     users: []const User,
+
+    // The two ways a client says who it is: the security schemes of the
+    // document, which the routes behind requireUser require.
+    pub const openapi: zefir.openapi.MiddlewareDoc = .{
+        .security_schemes = &.{
+            .{ .name = "bearer", .description = "The token of a user: Authorization: Bearer <token>.", .kind = .{ .http = .{ .scheme = "bearer" } } },
+            .{ .name = "session", .description = "The token of a user in the cookie session, which POST /api/session sets.", .kind = .{ .api_key = .{ .in = .cookie, .param = "session" } } },
+        },
+    };
 
     pub const User = struct {
         /// From the settings, such as `APP_AUTH_ANN_TOKEN`; never logged.
@@ -92,11 +107,18 @@ fn sameToken(given: []const u8, expected: []const u8) bool {
 
 /// 401 without a signed-in user: `error.Unauthenticated`, which the
 /// framework answers with 401. The application's error handler adds
-/// `WWW-Authenticate`, as RFC 9110 asks of every 401.
-pub fn requireUser(ctx: *http.Context) !http.MiddlewareResult {
-    _ = ctx.locals.get(CurrentUser) orelse return error.Unauthenticated;
-    return .next;
-}
+/// `WWW-Authenticate`, as RFC 9110 asks of every 401. A type with `run`,
+/// not a function, since only a type can declare `pub const openapi`.
+pub const requireUser = struct {
+    // A route behind it requires one of the schemes that the middleware
+    // before it declare: bearer or session.
+    pub const openapi: zefir.openapi.MiddlewareDoc = .{ .security = .any };
+
+    pub fn run(ctx: *http.Context) !http.MiddlewareResult {
+        _ = ctx.locals.get(CurrentUser) orelse return error.Unauthenticated;
+        return .next;
+    }
+};
 
 /// 403 without the permission: a type made at compile time for each
 /// permission, with a name of its own, so that the log and the messages of
@@ -104,6 +126,9 @@ pub fn requireUser(ctx: *http.Context) !http.MiddlewareResult {
 pub fn requirePermission(comptime permission: []const u8) type {
     return struct {
         pub const name = "requirePermission(" ++ permission ++ ")";
+        // The permission is a role of the security requirement of every
+        // route behind it.
+        pub const openapi: zefir.openapi.MiddlewareDoc = .{ .roles = &.{permission} };
 
         pub fn run(ctx: *http.Context) !http.MiddlewareResult {
             const user = ctx.locals.get(CurrentUser) orelse return error.Unauthenticated;

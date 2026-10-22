@@ -7,7 +7,10 @@
 
 /// A file that must fail to compile with an error whose message is
 /// `expect`: the whole text after `error: ` to the end of the line.
-pub const Fixture = struct { file: []const u8, expect: []const u8 };
+/// `debug`: an error of the Debug check (check.zig), which reads the
+/// declarations in Debug builds only, so the file is compiled only when
+/// -Doptimize is Debug.
+pub const Fixture = struct { file: []const u8, expect: []const u8, debug: bool = false };
 
 const handler_form = "pub fn get(self: *UsersV1Controller, ctx: *http.Context) !http.Json(T), or !void for a response without a JSON value";
 const no_routes = "zefir.http: UsersV1Controller has no pub const http_routes = http.routes(.{ ... })";
@@ -40,12 +43,37 @@ pub const compile_errors = [_]Fixture{
     .{ .file = dir ++ "route_bad_literal.zig", .expect = "zefir.http: UsersV1Controller.search: route path \"/v1/users/search?q\": a segment is visible ASCII without '%', '?' and '#', written as the path reads decoded" },
     .{ .file = dir ++ "controller_bad_prefix.zig", .expect = "zefir.http: a controller prefix starts with '/' or is empty: \"v1/users\"" },
     // Options.
-    .{ .file = dir ++ "route_unknown_option.zig", .expect = "zefir.http: http.get(\"/x\"): unknown option .timout; the options are .middleware, .max_body_bytes and .timeout" },
-    .{ .file = dir ++ "sse_unknown_option.zig", .expect = "zefir.http: http.sse.get(\"/events\"): unknown option .timeout; the options are .middleware, .heartbeat and .on_close" },
+    .{ .file = dir ++ "route_unknown_option.zig", .expect = "zefir.http: http.get(\"/x\"): unknown option .timout; the options are .path, .query, .body, .form, .headers, .cookies, .responses, .middleware, .max_body_bytes and .timeout" },
+    .{ .file = dir ++ "sse_unknown_option.zig", .expect = "zefir.http: http.sse.get(\"/events\"): unknown option .timeout; the options are .path, .query, .headers, .cookies, .events, .middleware, .heartbeat and .on_close" },
     .{ .file = dir ++ "routes_unknown_option.zig", .expect = "zefir.http: http.routes: unknown option .prefx; the options are .prefix, .middleware and .methods" },
     .{ .file = dir ++ "route_negative_timeout.zig", .expect = "zefir.http: http.get(\"/export.csv\"): .timeout is a std.Io.Duration above zero, such as std.Io.Duration.fromSeconds(300), or null for no deadline" },
     .{ .file = dir ++ "sse_zero_heartbeat.zig", .expect = "zefir.http: http.sse.get(\"/events\"): .heartbeat is a std.Io.Duration above zero, such as std.Io.Duration.fromSeconds(15), or null for none" },
     .{ .file = dir ++ "methods_not_route.zig", .expect = "zefir.http: http.routes: .methods.get must be a route, such as http.get(\"/{id}\", .{})" },
+    // The declarations of a route: its input and its statuses.
+    .{ .file = dir ++ "route_input_not_type.zig", .expect = "zefir.http: http.get(\"/{id}\"): .path is the type of a DTO, such as .path = dto.TodoIdPath" },
+    .{ .file = dir ++ "route_declared_dto.zig", .expect = "zefir.http: route_declared_dto.Query.filter: a struct field comes only from JSON; query, form, path, headers and cookies hold strings" },
+    .{ .file = dir ++ "route_declared_headers.zig", .expect = "zefir.http: route_declared_headers.Headers.field_rules.request_id: v.rename does not apply to headers; field request_id reads the header Request-Id" },
+    .{ .file = dir ++ "route_declared_body.zig", .expect = "zefir.http: route_declared_body.CreateRequest.codes: [3]u8 does not come from JSON; ctx.json reads integers, floats, bool, enums, []const u8 and structs, alone, as ?T or as []const T" },
+    .{ .file = dir ++ "route_body_and_form.zig", .expect = "zefir.http: http.post(\"\"): .body and .form together; a body is JSON or a form" },
+    .{ .file = dir ++ "sse_route_body.zig", .expect = "zefir.http: http.sse.get(\"/events\"): unknown option .body; the options are .path, .query, .headers, .cookies, .events, .middleware, .heartbeat and .on_close" },
+    .{ .file = dir ++ "route_path_param_without_field.zig", .expect = "zefir.http: UsersV1Controller.get: {id} in \"/v1/users/{id}\" has no field in .path = UserPath" },
+    .{ .file = dir ++ "route_path_field_without_param.zig", .expect = "zefir.http: UsersV1Controller.list: .path = UserPath has the field id, but \"/v1/users\" has no {id}" },
+    .{ .file = dir ++ "route_catch_all_field.zig", .expect = "zefir.http: UsersV1Controller.files: {*path} in \"/v1/files/{*path}\", the rest of the path, goes to the field path of .path = FilePath, a u32; make it a []const u8 or a ?[]const u8" },
+    .{ .file = dir ++ "route_responses_not_struct.zig", .expect = "zefir.http: http.post(\"\"): .responses is a struct literal of statuses, such as .responses = .{ .created = .{}, .ok = .{} }" },
+    .{ .file = dir ++ "route_responses_status.zig", .expect = "zefir.http: http.post(\"\"): .responses.okay: the keys of .responses are names of std.http.Status, such as .ok, .created or .see_other" },
+    .{ .file = dir ++ "route_responses_entry.zig", .expect = "zefir.http: http.post(\"\"): .responses.created must be .{}, .{ .content_type = \"text/csv\" } or .{ .json = T }" },
+    .{ .file = dir ++ "route_responses_json_route.zig", .expect = "zefir.http: UsersV1Controller.create: .responses.created has a body of its own, but the handler returns http.Json(UserResponse), whose value is the body of its 2xx responses; write .created = .{}" },
+    .{ .file = dir ++ "route_responses_no_body.zig", .expect = "zefir.http: http.put(\"/sync\"): .responses.no_content declares a body, but a 204 response has none; write .no_content = .{}" },
+    .{ .file = dir ++ "input_not_route.zig", .expect = "zefir.http: ctx.input takes a route, such as ctx.input(Get) with const Get = http.get(\"/{id}\", .{ .path = dto.TodoIdPath }); got u32" },
+    .{ .file = dir ++ "sse_input_rest_route.zig", .expect = "zefir.http: ctx.input of an http.sse.Context takes the route of its stream, made by http.sse.get; got http.post(\"/import\")" },
+    // The events of a stream and its manager.
+    .{ .file = dir ++ "sse_events_missing.zig", .expect = "zefir.http: http.sse.get(\"/events\") needs .events, a union(enum) of the stream's events, such as .events = dto.LiveEvent" },
+    .{ .file = dir ++ "sse_events_not_union.zig", .expect = "zefir.http: http.sse.get(\"/events\"): .events is a union(enum) of the stream's events, such as .events = dto.LiveEvent; got u32" },
+    .{ .file = dir ++ "sse_manager_not_union.zig", .expect = "zefir.http: http.sse.Manager takes a union(enum) of the stream's events, such as http.sse.Manager(dto.LiveEvent); got u32" },
+    .{ .file = dir ++ "sse_event_name_line.zig", .expect = "zefir.http: http.sse.Manager(LiveEvent): the event .@\"todo\\ncreated\" has CR, LF or NUL in its name, which would break its line" },
+    // The compiler's own: the event is a value of the union.
+    .{ .file = dir ++ "sse_publish_unknown_event.zig", .expect = "no field named 'todo.archived' in union 'sse_publish_unknown_event.LiveEvent'" },
+    .{ .file = dir ++ "sse_publish_wrong_data.zig", .expect = "expected type 'sse_publish_wrong_data.Todo', found 'comptime_int'" },
     // The parts of Server.init, and its typed options, which Zig checks.
     .{ .file = dir ++ "server_unknown_option.zig", .expect = "zefir.http: Server.init: unknown part .contollers" ++ parts_list },
     .{ .file = dir ++ "parts_unknown.zig", .expect = "zefir.http: Server.init: unknown part .prefix" ++ parts_list },
@@ -83,6 +111,12 @@ pub const compile_errors = [_]Fixture{
     .{ .file = dir ++ "mw_run_anyerror.zig", .expect = "zefir.http: requireUser.run (middleware of UsersV1Controller.get) returns anyerror; the strict error check needs the errors it can return: give it an error set" ++ strict_hint },
     .{ .file = dir ++ "strict_middleware_error.zig", .expect = "zefir.http: requirePermission(users:delete).run (middleware of UsersV1Controller.delete) can return error.NoSuchTenant; AppErrors.mapError gives it 500 through .fallback" ++ strict_hint },
     .{ .file = dir ++ "mw_phase_signature.zig", .expect = "zefir.http: Server.init .middleware[0]: Timing.run is fn (*http.Context) !http.MiddlewareResult; write pub fn run(self: *@This(), ctx: *http.Context) !http.MiddlewareResult" },
+    // The openapi of a middleware on a route of the document, as the Debug
+    // check reads it.
+    .{ .file = dir ++ "mw_openapi_not_struct.zig", .expect = "zefir.http: the openapi of the middleware Paging is a zefir.openapi.MiddlewareDoc, such as .{ .query = PageQuery }; got type", .debug = true },
+    .{ .file = dir ++ "mw_openapi_input_not_type.zig", .expect = "zefir.http: the openapi of the middleware Paging: .query is the type of a DTO, such as .query = PageQuery, or void", .debug = true },
+    .{ .file = dir ++ "mw_openapi_responses_not_struct.zig", .expect = "zefir.http: the openapi of the middleware Paging: .responses is a struct of statuses, such as .responses = .{ .not_modified = .{} }", .debug = true },
+    .{ .file = dir ++ "mw_openapi_responses_status.zig", .expect = "zefir.http: the openapi of the middleware Paging: .responses names .notModified; its keys are names of std.http.Status, such as .not_modified", .debug = true },
 };
 
 const strict_hint = " (strict error check; .strict_errors = false turns it off)";

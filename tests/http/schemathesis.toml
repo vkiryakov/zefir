@@ -1,0 +1,9 @@
+# The configuration of Schemathesis in schemathesis_test.zig. Every check
+# runs, positive_data_acceptance too, which wants every request of valid
+# data taken. The schema of a u64 has no maximum (the tools of JavaScript
+# show 2^64 - 1 inexactly), so an id above 2^64 - 1 passes it, and the
+# server answers it with 422: the three operations of /v1/todos/{id} may
+# answer that, besides the statuses the check takes by default.
+[[operations]]
+include-name = ["GET /v1/todos/{id}", "PATCH /v1/todos/{id}", "DELETE /v1/todos/{id}"]
+checks.positive_data_acceptance.expected-statuses = ["2xx", "3xx", "401", "403", "404", "409", "422", "429", "5xx"]
