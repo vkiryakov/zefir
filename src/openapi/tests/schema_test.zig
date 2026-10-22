@@ -272,6 +272,21 @@ test "a type that writes itself has the schema of its .as when written; std.json
     try expectJson("{\"type\":\"object\",\"description\":\"An amount, in cents, as a string.\",\"required\":[\"cents\"],\"properties\":{\"cents\":{\"type\":\"integer\",\"format\":\"uint64\",\"minimum\":0}},\"additionalProperties\":false}", comptime componentOf(&.{input(Money)}, "Money"));
 }
 
+/// Counts by tag and the shapes of each owner: objects of any keys.
+const Tally = struct {
+    by_tag: std.json.ArrayHashMap(u32),
+    shapes: ?std.json.ArrayHashMap(Shape) = null,
+};
+
+test "std.json.ArrayHashMap(V), which writes itself: an object of any keys, each value a V" {
+    try expectJson("{\"type\":\"object\",\"required\":[\"by_tag\",\"shapes\"],\"properties\":{" ++
+        "\"by_tag\":{\"type\":\"object\",\"additionalProperties\":{\"type\":\"integer\",\"format\":\"uint32\",\"minimum\":0,\"maximum\":4294967295}}," ++
+        "\"shapes\":{\"type\":[\"object\",\"null\"],\"additionalProperties\":{\"$ref\":\"#/components/schemas/Shape\"}}" ++
+        "}}", comptime componentOf(&.{output(Tally)}, "Tally"));
+    // The types of its values have their schemas.
+    inline for (.{ "Circle", "Shape", "Tally" }, comptime componentsOf(&.{output(Tally)}).object) |name, m| try testing.expectEqualStrings(name, m.key);
+}
+
 test "an anonymous type stands inline: the compiler's name for it changes as the program does" {
     const Box = struct {
         size: struct { w: u16, h: u16 },

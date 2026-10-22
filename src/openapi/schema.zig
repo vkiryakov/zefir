@@ -198,6 +198,7 @@ pub const Registry = struct {
             .pointer => |p| if (!isString(T)) r.mark(p.child, mode, stack),
             .array => |a| if (a.child != u8) r.mark(a.child, mode, stack),
             .@"struct" => |s| {
+                if (mapValue(T)) |V| return r.mark(V, mode, stack);
                 if (s.is_tuple) {
                     for (s.field_types) |F| r.mark(F, mode, stack);
                     return;
@@ -319,6 +320,10 @@ pub const Registry = struct {
                 return .{ .kind = typeKind("array", nullable), .keywords = &.{ count("minItems", a.len), count("maxItems", a.len) }, .items = &item };
             },
             .@"struct" => |s| {
+                if (mapValue(T)) |V| {
+                    const values = typeParts(r, V, mode, false, where ++ "[]", stack);
+                    return .{ .kind = typeKind("object", nullable), .keywords = &.{.{ .key = "additionalProperties", .value = node(values) }} };
+                }
                 // An empty tuple is an empty array: prefixItems takes one
                 // schema at least.
                 if (s.is_tuple and s.field_types.len == 0) return .{ .kind = typeKind("array", nullable), .keywords = &.{count("maxItems", 0)} };
@@ -862,6 +867,19 @@ fn intParts(comptime T: type, comptime i: std.lang.Type.Int, comptime nullable: 
     else
         &.{};
     return .{ .kind = typeKind("integer", nullable) ++ formatOf(format), .keywords = keywords };
+}
+
+/// The type of the values of `std.json.ArrayHashMap(V)`, `V`, or null for
+/// another type. It writes itself as an object of any keys, a value of `V`
+/// each, written by `std.json`, which leaves the `v.rename` of a field of
+/// `V` out.
+fn mapValue(comptime T: type) ?type {
+    if (!@hasField(T, "map")) return null;
+    const M = @FieldType(T, "map");
+    if (@typeInfo(M) != .@"struct" or !@hasDecl(M, "KV") or @TypeOf(M.KV) != type) return null;
+    if (@typeInfo(M.KV) != .@"struct" or !@hasField(M.KV, "value")) return null;
+    const V = @FieldType(M.KV, "value");
+    return if (T == std.json.ArrayHashMap(V)) V else null;
 }
 
 /// A string: bytes, of a slice or of a many-item pointer with a sentinel.
