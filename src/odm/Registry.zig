@@ -34,10 +34,12 @@
 //! after the drain get `Closed`, and their memory stays until they are
 //! given back. `removeConnection` drains and closes the same way.
 //!
-//! `provisionTenant` binds a tenant, on an event of the application: to a
-//! connection registered already (`.existing`), or to one of its own
-//! (`.new`), which it registers and connects. The binding is published at
-//! once, whole, once its connection works. `tenant(io, id)` gives a
+//! `provisionTenant` binds a tenant, on an event of the application with a
+//! version: to a connection registered already (`.existing`), or to one of
+//! its own (`.new`), which it registers and connects. The provisionings of
+//! a tenant take turns; an older version than the tenant's changes nothing,
+//! and the same event again neither. The binding is published at once,
+//! whole, once its connection works. `tenant(io, id)` gives a
 //! `Session` on the tenant's database, with a lease of the current
 //! generation of its connection; `removeTenant` unbinds it. A connection
 //! that tenants are bound to cannot be removed.
@@ -64,7 +66,9 @@ const fingerprint = @import("fingerprint.zig");
 const names = @import("registry/names.zig");
 const connection = @import("registry/connection.zig");
 const generation = @import("registry/generation.zig");
-const Binding = @import("registry/binding.zig").Binding;
+const binding = @import("registry/binding.zig");
+const Binding = binding.Binding;
+const Provisioning = binding.Provisioning;
 const Session = @import("Session.zig");
 const Connection = connection.Connection;
 const ConnectionState = connection.ConnectionState;
@@ -106,6 +110,8 @@ bindings: Bindings = .empty,
 /// The slots of `bindings` promised to provisionings in progress, so that
 /// none runs out of memory at its publication.
 reserved: u32 = 0,
+/// The provisionings in progress, one per tenant at most.
+provisioning: List = .{},
 /// The generations closed by force since `init`.
 forced: usize = 0,
 state: State = .running,
@@ -191,7 +197,9 @@ pub const Provision = struct {
     /// The tenant's database: 1 to 63 bytes of UTF-8 without / \ . " $, a
     /// space or NUL, and never admin, local or config.
     database: []const u8,
-    /// Grows with each event of the tenant.
+    /// Grows with each event of the tenant: a lower one than the tenant's
+    /// changes nothing (`StaleVersion`), and the same one with the same
+    /// settings is the event again, which changes nothing either.
     version: u64,
     /// Why the provisioning failed: a text of odm or of the driver.
     diagnostics: ?*Diagnostics = null,
@@ -664,13 +672,29 @@ pub fn ping(r: *Registry, io: Io, ctx: core.Context, id: []const u8) Error!void 
     return g.client.ping(io, ctx, null);
 }
 
-/// Binds a tenant to a connection and a database, as `request` says: its
-/// names are checked first, then its connection is made ready — a known
-/// one connected when it is not yet, a new one registered and connected —
-/// and the binding is published at once, whole: `tenant()` finds the old
-/// one or the new one, never a half. On a failure the old binding stays,
-/// and a new connection that this call made goes again; the driver's
-/// text or odm's is in `request.diagnostics`.
+/// Binds a tenant to a connection and a database, on an event of the
+/// application with a version. The names are checked first, before any
+/// I/O. Then the tenant's queue: one provisioning of a tenant at a time,
+/// and the next one waits for its turn within the deadline of `ctx` and
+/// until its task is canceled. Then the version, against the tenant's
+/// binding, before the network:
+///
+/// - no binding, or one of a lower version: the request is applied;
+/// - a lower version than the binding's: `StaleVersion`, and nothing
+///   changes;
+/// - the same version with the same settings — the same database and the
+///   same connection, named the same way: the event again, and nothing to
+///   do;
+/// - the same version with other settings: `ProvisioningConflict`.
+///
+/// To apply it, the connection is made ready: a known one is connected
+/// when it is not yet. A `.new` one with an unknown id is registered and
+/// connected; with a known id it is taken as it is when its settings are
+/// the same, and else `ProvisioningConflict`: `replaceConnection` changes
+/// them. Then the binding is published at once, whole: `tenant()` finds
+/// the old one or the new one, never a half. On a failure the old binding
+/// stays, and a new connection that this call made goes again; the
+/// driver's text or odm's is in `request.diagnostics`.
 pub fn provisionTenant(r: *Registry, io: Io, ctx: core.Context, request: Provision) Error!void {
     r.checkUse(io);
     const d = request.diagnostics;
@@ -690,21 +714,36 @@ pub fn provisionTenant(r: *Registry, io: Io, ctx: core.Context, request: Provisi
     // The memory of the publication, before any I/O: a provisioning never
     // runs out of it once its connection is ready.
     const fresh = try Binding.create(r.gpa, request.tenant, request.database, request.version, print);
-    errdefer r.gpa.destroy(fresh);
+    var published = false;
+    defer if (!published) r.gpa.destroy(fresh);
 
-    // A slot of the table for the publication.
+    // The queue of the tenant: the version checked below stays the
+    // tenant's until the publication.
+    var mine: Provisioning = .{ .tenant = request.tenant };
     r.mutex.lockUncancelable(io);
-    if (r.state != .running) {
-        r.mutex.unlock(io);
-        return fail(d, error.ShuttingDown, "odm: the registry is shutting down", .{});
-    }
-    r.reserveTenant(io) catch |err| {
+    r.awaitTenant(io, ctx, request.tenant, d) catch |err| {
         r.mutex.unlock(io);
         return err;
     };
+    r.provisioning.append(&mine.node);
+    defer r.endProvisioning(io, &mine);
+    // The version, before the network.
+    const verdict = r.judge(request, id, if (print) |*p| p else null);
+    if (verdict == .apply) {
+        // A slot of the table for the publication.
+        r.reserveTenant(io) catch |err| {
+            r.mutex.unlock(io);
+            return err;
+        };
+        mine.reserved = true;
+    }
     r.mutex.unlock(io);
-    var reserved = true;
-    defer if (reserved) r.unreserve(io);
+    switch (verdict) {
+        .apply => {},
+        .same => return,
+        .stale => |known| return fail(d, error.StaleVersion, "odm: version {d} is older than the tenant's version {d}", .{ request.version, known }),
+        .conflict => return fail(d, error.ProvisioningConflict, "odm: version {d} is the tenant's version, with other settings", .{request.version}),
+    }
 
     // The connection, ready.
     switch (request.connection) {
@@ -714,25 +753,122 @@ pub fn provisionTenant(r: *Registry, io: Io, ctx: core.Context, request: Provisi
 
     // The publication, under one lock.
     r.mutex.lockUncancelable(io);
-    const published = r.publish(fresh, id);
-    r.reserved -= 1;
-    reserved = false;
+    const old = r.publish(fresh, id);
+    if (old) |_| {
+        // The slot is the binding's now, or the old one's was.
+        mine.reserved = false;
+        r.reserved -= 1;
+    } else |_| {}
     r.mutex.unlock(io);
-    const old = published catch |err| return switch (err) {
+    const replaced = old catch |err| return switch (err) {
         error.ConnectionNotFound => fail(d, err, "odm: the connection was removed while the tenant was provisioned", .{}),
         error.ShuttingDown => fail(d, err, "odm: the registry is shutting down", .{}),
     };
-    if (old) |b| r.gpa.destroy(b);
+    published = true;
+    if (replaced) |b| r.gpa.destroy(b);
 }
 
-/// A connection of a provisioning's own: registered by this call and
-/// connected in its turn, which no other call takes before; a failed
-/// connect takes it out again.
+/// What the version of a provisioning makes of the tenant's binding.
+const Verdict = union(enum) {
+    /// No binding, or one of a lower version: the request goes on.
+    apply,
+    /// The same version and settings: nothing to do.
+    same,
+    /// A lower version than the binding's, which it names.
+    stale: u64,
+    /// The same version, other settings.
+    conflict,
+};
+
+/// The version of `request` against the tenant's binding, under the lock.
+fn judge(r: *Registry, request: Provision, id: []const u8, print: ?*const fingerprint.Fingerprint) Verdict {
+    const b = r.bindings.get(request.tenant) orelse return .apply;
+    if (request.version < b.version) return .{ .stale = b.version };
+    if (request.version > b.version) return .apply;
+    return if (b.sameAs(request.database, id, print)) .same else .conflict;
+}
+
+/// Under the lock, which the wait lets go: until no provisioning of
+/// `tenant_id` is in progress, within the deadline of `ctx` and until the
+/// task is canceled. `ShuttingDown` once the registry stops, also for the
+/// calls that wait.
+fn awaitTenant(r: *Registry, io: Io, ctx: core.Context, tenant_id: []const u8, d: ?*Diagnostics) Error!void {
+    while (true) {
+        if (r.state != .running) return fail(d, error.ShuttingDown, "odm: the registry is shutting down", .{});
+        if (!r.isProvisioning(tenant_id)) return;
+        if (ctx.isCancelled()) return fail(d, error.Cancelled, "odm: the token was canceled while the call waited for another provisioning of the tenant", .{});
+        if (ctx.isExpired(Io.Clock.awake.now(io))) return fail(d, error.DeadlineExceeded, "odm: the deadline passed while the call waited for another provisioning of the tenant", .{});
+        r.cond.waitTimeout(io, &r.mutex, step(io, ctx.deadline)) catch |err| switch (err) {
+            // The deadline, a step of a far one, or a wake for another
+            // change: the loop looks again.
+            error.Timeout => {},
+            error.Canceled => {
+                io.recancel();
+                return fail(d, error.Cancelled, "odm: the task was canceled while the call waited for another provisioning of the tenant", .{});
+            },
+        };
+    }
+}
+
+/// Whether a provisioning of `tenant_id` is in progress, under the lock.
+fn isProvisioning(r: *Registry, tenant_id: []const u8) bool {
+    var it = r.provisioning.first;
+    while (it) |node| : (it = node.next) {
+        if (std.mem.eql(u8, Provisioning.of(node).tenant, tenant_id)) return true;
+    }
+    return false;
+}
+
+/// The end of the provisioning `mine`, with the lock: the slot it reserved
+/// goes back, and the next one of its tenant may go.
+fn endProvisioning(r: *Registry, io: Io, mine: *Provisioning) void {
+    r.mutex.lockUncancelable(io);
+    defer r.mutex.unlock(io);
+    r.provisioning.remove(&mine.node);
+    if (mine.reserved) r.reserved -= 1;
+    r.cond.broadcast(io);
+}
+
+/// The connection of a `.new`. A known id with the same settings is taken
+/// as `.existing` would be, and with others it is `ProvisioningConflict`.
+/// An unknown one is registered by this call and connected in its turn,
+/// which no other call takes first, and a failed connect takes it out
+/// again.
 fn readyNew(r: *Registry, io: Io, ctx: core.Context, new: NewConnection, print: *const fingerprint.Fingerprint, d: ?*Diagnostics) Error!void {
     const config: ConnectionConfig = .{ .uri = new.uri, .password = new.password, .diagnostics = d };
-    const c = try r.register(io, new.id, config, print, .held);
-    r.mutex.lockUncancelable(io);
-    return r.connectHeld(io, ctx, c, d, .remove);
+    while (true) {
+        r.mutex.lockUncancelable(io);
+        if (r.state == .running and r.find(new.id) == null) {
+            r.mutex.unlock(io);
+            const c = r.register(io, new.id, config, print, .held) catch |err| switch (err) {
+                // Another call registered it meanwhile: look again.
+                error.ConnectionExists => {
+                    if (d) |x| x.* = .{};
+                    continue;
+                },
+                else => return err,
+            };
+            r.mutex.lockUncancelable(io);
+            return r.connectHeld(io, ctx, c, d, .remove);
+        }
+        const c = switch (r.awaitTurn(io, ctx, new.id, .{ .settings = print }, d) catch |err| {
+            r.mutex.unlock(io);
+            // Its maker took it out after a failed connect: make it anew.
+            if (err == error.ConnectionNotFound) {
+                if (d) |x| x.* = .{};
+                continue;
+            }
+            return err;
+        }) {
+            .done => {
+                r.mutex.unlock(io);
+                return;
+            },
+            .mine => |c| c,
+        };
+        c.busy = true;
+        return r.connectHeld(io, ctx, c, d, .keep);
+    }
 }
 
 /// The publication of a provisioning, under the lock: `fresh` takes the
@@ -747,7 +883,7 @@ fn publish(r: *Registry, fresh: *Binding, id: []const u8) error{ ShuttingDown, C
     if (c.state != .active) return error.ConnectionNotFound;
     fresh.connection = c;
     c.tenants += 1;
-    // The slot reserved before.
+    // A new tenant takes the slot reserved before.
     const entry = r.bindings.getOrPutAssumeCapacity(fresh.tenant());
     const old: ?*Binding = if (entry.found_existing) entry.value_ptr.* else null;
     if (old) |b| b.connection.tenants -= 1;
@@ -784,26 +920,19 @@ fn reserveTenant(r: *Registry, io: Io) Allocator.Error!void {
     r.reserved += 1;
 }
 
-/// Gives back the slot of a provisioning that failed before its
-/// publication.
-fn unreserve(r: *Registry, io: Io) void {
-    r.mutex.lockUncancelable(io);
-    defer r.mutex.unlock(io);
-    r.reserved -= 1;
-}
-
 /// Removes the tenant `tenant_id`: `tenant()` finds it no more, at once.
 /// The sessions taken before work on until their `deinit`, and its
 /// connection stays: `removeConnection` removes that one once no tenant
 /// is bound to it. There is no version: the registry keeps no memory of
 /// removed tenants, so a provisioning that comes later binds the tenant
-/// again, whatever its version.
+/// again, whatever its version. A provisioning of the tenant in progress
+/// is waited for first, until the task is canceled.
 pub fn removeTenant(r: *Registry, io: Io, tenant_id: []const u8) Error!void {
     r.checkUse(io);
     r.mutex.lockUncancelable(io);
     const b: *Binding = b: {
         defer r.mutex.unlock(io);
-        if (r.state != .running) return error.ShuttingDown;
+        try r.awaitTenant(io, .root, tenant_id, null);
         const entry = r.bindings.fetchRemove(tenant_id) orelse return error.TenantNotFound;
         entry.value.connection.tenants -= 1;
         break :b entry.value;
@@ -944,6 +1073,9 @@ const Skip = union(enum) {
     /// An active connection whose settings have this fingerprint:
     /// `replaceConnection`.
     same: *const fingerprint.Fingerprint,
+    /// An active connection, for a `.new` of a provisioning, whose
+    /// settings must have this fingerprint, else `ProvisioningConflict`.
+    settings: *const fingerprint.Fingerprint,
 };
 
 /// The connection `id` for a call that needs it to itself, under the lock,
@@ -959,6 +1091,10 @@ fn awaitTurn(r: *Registry, io: Io, ctx: core.Context, id: []const u8, skip: Skip
             .never => {},
             .active => if (c.state == .active) return .done,
             .same => |print| if (c.state == .active and fingerprint.eql(print, &c.fingerprint)) return .done,
+            .settings => |print| {
+                if (!fingerprint.eql(print, &c.fingerprint)) return fail(d, error.ProvisioningConflict, "odm: connection {s} exists with other settings: change them with replaceConnection", .{id});
+                if (c.state == .active) return .done;
+            },
         }
         if (!c.busy) return .{ .mine = c };
         if (ctx.isCancelled()) return fail(d, error.Cancelled, "odm: the token was canceled while the call waited for another operation on the connection", .{});

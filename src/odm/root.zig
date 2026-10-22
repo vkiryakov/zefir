@@ -155,4 +155,5 @@ test {
     _ = @import("tests/registry_concurrency_tests.zig");
     _ = @import("tests/names_tests.zig");
     _ = @import("tests/tenant_tests.zig");
+    _ = @import("tests/provision_concurrency_tests.zig");
 }

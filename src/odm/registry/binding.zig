@@ -1,9 +1,11 @@
-//! A tenant of the registry: its binding to a connection and a database.
+//! A tenant of the registry: its binding to a connection and a database,
+//! and the mark of a provisioning in progress.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const fingerprint = @import("../fingerprint.zig");
 const Connection = @import("connection.zig").Connection;
+const List = std.DoublyLinkedList;
 
 /// What `tenant()` finds for a tenant id: a connection and a database, as
 /// one provisioning published them, whole and at once. A binding does not
@@ -48,5 +50,31 @@ pub const Binding = struct {
 
     pub fn database(b: *const Binding) []const u8 {
         return b.database_buf[0..b.database_len];
+    }
+
+    /// Whether a provisioning of the same version with these settings is
+    /// the same event again: the same database, and the same connection
+    /// named the same way, `.existing` with its id or `.new` with its id
+    /// and the fingerprint of the same settings. Under the registry's
+    /// mutex, which guards `connection`.
+    pub fn sameAs(b: *const Binding, name: []const u8, id: []const u8, print: ?*const fingerprint.Fingerprint) bool {
+        if (!std.mem.eql(u8, b.database(), name) or !std.mem.eql(u8, b.connection.id, id)) return false;
+        const mine = if (b.print) |*p| p else return print == null;
+        const other = print orelse return false;
+        return fingerprint.eql(mine, other);
+    }
+};
+
+/// A provisioning in progress, in the registry's list while it runs: the
+/// next provisioning of the same tenant, and its removal, wait for it.
+pub const Provisioning = struct {
+    node: List.Node = .{},
+    /// The request's: it lives as long as the call.
+    tenant: []const u8,
+    /// It holds a slot of the table of tenants for its publication.
+    reserved: bool = false,
+
+    pub fn of(node: *List.Node) *Provisioning {
+        return @fieldParentPtr("node", node);
     }
 };

@@ -331,3 +331,194 @@ test "a session keeps its generation" {
     try testing.expectEqual(@as(usize, 0), s.leases);
     try testing.expectEqual(@as(usize, 0), s.forced);
 }
+
+/// The session of `tenant_id` is on `database`.
+fn expectDatabase(r: *Registry, io: Io, tenant_id: []const u8, database: []const u8) !void {
+    var session = try r.tenant(io, tenant_id);
+    defer session.deinit(io);
+    try testing.expectEqualStrings(database, session.database());
+}
+
+test "the versions of a tenant" {
+    const io = testing.io;
+    var fake: FakeDriver = .init(testing.allocator);
+    defer fake.deinit();
+    var registry: Registry = .init(testing.allocator, io, fake.driver(), .{});
+    defer registry.deinit(io);
+    try shared(&registry, io);
+    try registry.registerConnection(io, "other-1", .{ .uri = "fake://other" });
+    try registry.connect(io, .root, "other-1");
+
+    // No binding: any version is applied.
+    try registry.provisionTenant(io, .root, existing("acme", "shared-1", "acme_v2", 2));
+    var old = try registry.tenant(io, "acme");
+    defer old.deinit(io);
+
+    // Older: nothing changes, and the text names both versions.
+    var d: odm.Diagnostics = .{};
+    var stale = existing("acme", "other-1", "acme_v1", 1);
+    stale.diagnostics = &d;
+    try testing.expectError(error.StaleVersion, registry.provisionTenant(io, .root, stale));
+    try testing.expectEqualStrings("odm: version 1 is older than the tenant's version 2", d.message());
+    try expectDatabase(&registry, io, "acme", "acme_v2");
+
+    // The same version with the same settings: the event again, nothing to
+    // do, nothing opened or connected.
+    const calls = fake.journal(io).len;
+    const counts = fake.counts(io);
+    var repeat = existing("acme", "shared-1", "acme_v2", 2);
+    repeat.diagnostics = &d;
+    try registry.provisionTenant(io, .root, repeat);
+    try testing.expectEqualStrings("", d.message());
+    try testing.expectEqual(calls, fake.journal(io).len);
+    try testing.expectEqual(counts, fake.counts(io));
+
+    // The same version with other settings: a conflict, whatever differs.
+    const conflicts = [_]odm.Provision{
+        existing("acme", "shared-1", "acme_other", 2),
+        existing("acme", "other-1", "acme_v2", 2),
+        // The same connection, named as a new one.
+        .{ .tenant = "acme", .connection = .{ .new = .{ .id = "shared-1", .uri = "fake://shared" } }, .database = "acme_v2", .version = 2 },
+    };
+    for (conflicts) |request| {
+        var conflict = request;
+        conflict.diagnostics = &d;
+        try testing.expectError(error.ProvisioningConflict, registry.provisionTenant(io, .root, conflict));
+        try testing.expectEqualStrings("odm: version 2 is the tenant's version, with other settings", d.message());
+    }
+    try testing.expectEqual(counts, fake.counts(io));
+    try expectDatabase(&registry, io, "acme", "acme_v2");
+
+    // Newer: applied, whatever the settings. New sessions get the new
+    // database and connection; the old session keeps its own.
+    try registry.provisionTenant(io, .root, existing("acme", "other-1", "acme_v3", 3));
+    var fresh = try registry.tenant(io, "acme");
+    defer fresh.deinit(io);
+    try testing.expectEqualStrings("acme_v3", fresh.database());
+    try testing.expectEqualStrings("acme_v2", old.database());
+    try testing.expect(fresh.generation != old.generation);
+    try testing.expectEqual(@as(usize, 0), (try registry.connectionStats(io, "shared-1")).tenants);
+    try testing.expectEqual(@as(usize, 1), (try registry.connectionStats(io, "other-1")).tenants);
+    try testing.expectEqual(@as(usize, 1), registry.stats(io).tenants);
+}
+
+test "a new connection with a known id" {
+    const io = testing.io;
+    var fake: FakeDriver = .init(testing.allocator);
+    defer fake.deinit();
+    var registry: Registry = .init(testing.allocator, io, fake.driver(), .{});
+    defer registry.deinit(io);
+
+    const big: odm.NewConnection = .{ .id = "big-1", .uri = "fake://big", .password = "a" };
+    try registry.provisionTenant(io, .root, .{ .tenant = "acme", .connection = .{ .new = big }, .database = "acme", .version = 1 });
+    // The same settings: the connection is taken as it is, as .existing.
+    try registry.provisionTenant(io, .root, .{ .tenant = "globex", .connection = .{ .new = big }, .database = "globex", .version = 1 });
+    try testing.expectEqual(@as(usize, 1), fake.counts(io).opened);
+    try testing.expectEqual(@as(usize, 2), (try registry.connectionStats(io, "big-1")).tenants);
+
+    // Other settings: a conflict, since changing them is replaceConnection's.
+    var d: odm.Diagnostics = .{};
+    var other = big;
+    other.password = "b";
+    try testing.expectError(error.ProvisioningConflict, registry.provisionTenant(io, .root, .{ .tenant = "initech", .connection = .{ .new = other }, .database = "initech", .version = 1, .diagnostics = &d }));
+    try testing.expectEqualStrings("odm: connection big-1 exists with other settings: change them with replaceConnection", d.message());
+    try testing.expectError(error.TenantNotFound, registry.tenant(io, "initech"));
+    try testing.expectEqual(@as(usize, 1), fake.counts(io).opened);
+
+    // A connection that registerConnection made counts the same way; a
+    // registered one is connected first.
+    try registry.registerConnection(io, "lazy", .{ .uri = "fake://lazy" });
+    try registry.provisionTenant(io, .root, .{ .tenant = "hooli", .connection = .{ .new = .{ .id = "lazy", .uri = "fake://lazy" } }, .database = "hooli", .version = 1 });
+    try testing.expectEqual(odm.ConnectionState.active, (try registry.connectionStats(io, "lazy")).state);
+    try testing.expectEqual(@as(usize, 2), fake.counts(io).opened);
+
+    // A failed connect of a connection that this call did not make keeps
+    // it, for a connect to come again.
+    try fake.plan("fake://locked", .{ .connects = &.{error.AuthenticationFailed} });
+    try registry.registerConnection(io, "locked", .{ .uri = "fake://locked" });
+    const level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = level;
+    try testing.expectError(error.AuthenticationFailed, registry.provisionTenant(io, .root, .{ .tenant = "pied", .connection = .{ .new = .{ .id = "locked", .uri = "fake://locked" } }, .database = "pied", .version = 1 }));
+    try testing.expectEqual(odm.ConnectionState.failed, (try registry.connectionStats(io, "locked")).state);
+}
+
+test "remove connection with a tenant bound" {
+    const io = testing.io;
+    var fake: FakeDriver = .init(testing.allocator);
+    defer fake.deinit();
+    var registry: Registry = .init(testing.allocator, io, fake.driver(), .{});
+    defer registry.deinit(io);
+    try shared(&registry, io);
+    try registry.provisionTenant(io, .root, existing("acme", "shared-1", "acme", 1));
+
+    try testing.expectError(error.ConnectionInUse, registry.removeConnection(io, "shared-1"));
+    try expectDatabase(&registry, io, "acme", "acme");
+    try registry.removeTenant(io, "acme");
+    try registry.removeConnection(io, "shared-1");
+    try testing.expectError(error.ConnectionNotFound, registry.connectionStats(io, "shared-1"));
+    try testing.expectEqual(@as(usize, 1), fake.counts(io).freed);
+    try testing.expectError(error.ConnectionNotFound, registry.provisionTenant(io, .root, existing("acme", "shared-1", "acme", 2)));
+}
+
+fn provisionTask(o: *Outcome, r: *Registry, io: Io, ctx: core.Context, request: odm.Provision) void {
+    o.set(r.provisionTenant(io, ctx, request));
+}
+
+fn slowConnecting(r: *Registry, io: Io) bool {
+    const s = r.connectionStats(io, "slow") catch return false;
+    return s.state == .connecting;
+}
+
+test "provisionings of one tenant take turns" {
+    const io = testing.io;
+    var fake: FakeDriver = .init(testing.allocator);
+    defer fake.deinit();
+    var registry: Registry = .init(testing.allocator, io, fake.driver(), .{});
+    defer registry.deinit(io);
+
+    try fake.plan("fake://slow", .{ .connect_delay = .fromMilliseconds(300) });
+    try registry.registerConnection(io, "slow", .{ .uri = "fake://slow" });
+    var group: Io.Group = .init;
+    defer group.cancel(io);
+    var first: Outcome = .{};
+    try group.concurrent(io, provisionTask, .{ &first, &registry, io, core.Context.root, existing("acme", "slow", "acme_v1", 1) });
+    try eventually(io, &registry, slowConnecting);
+    // The second waits until the first is done, then goes on.
+    var second: Outcome = .{};
+    try group.concurrent(io, provisionTask, .{ &second, &registry, io, core.Context.root, existing("acme", "slow", "acme_v2", 2) });
+
+    // A deadline passes while a third waits for its turn.
+    var d: odm.Diagnostics = .{};
+    var third = existing("acme", "slow", "acme_v3", 3);
+    third.diagnostics = &d;
+    const start = Io.Clock.awake.now(io);
+    const soon = core.Context.root.withDeadline(.after(start, .fromMilliseconds(50)));
+    try testing.expectError(error.DeadlineExceeded, registry.provisionTenant(io, soon, third));
+    try testing.expect(start.durationTo(Io.Clock.awake.now(io)).nanoseconds >= 50 * std.time.ns_per_ms);
+    try testing.expectEqualStrings("odm: the deadline passed while the call waited for another provisioning of the tenant", d.message());
+    // And so does the cancelation of its task.
+    var fourth: Outcome = .{};
+    var task = try io.concurrent(provisionTask, .{ &fourth, &registry, io, core.Context.root, existing("acme", "slow", "acme_v4", 4) });
+    try io.sleep(.fromMilliseconds(10), .awake);
+    task.cancel(io);
+    try testing.expectError(error.Cancelled, fourth.result);
+    // A canceled token ends the wait too.
+    var token: core.CancellationToken = .init;
+    token.cancel();
+    var fifth = existing("acme", "slow", "acme_v5", 5);
+    fifth.diagnostics = &d;
+    try testing.expectError(error.Cancelled, registry.provisionTenant(io, core.Context.root.withCancellation(&token), fifth));
+    try testing.expectEqualStrings("odm: the token was canceled while the call waited for another provisioning of the tenant", d.message());
+    try testing.expect(!second.done.load(.acquire));
+
+    try try first.wait(io);
+    try try second.wait(io);
+    try expectDatabase(&registry, io, "acme", "acme_v2");
+    // One connect: the second found the connection active.
+    var connects: usize = 0;
+    for (fake.journal(io)) |entry| {
+        if (entry.call == .connect) connects += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), connects);
+}
