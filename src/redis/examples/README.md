@@ -2518,8 +2518,9 @@ server the calls hear "not sent" quickly, rather than `ConnectionLost` on
 each old connection in turn. A timeout, a cancelation, and a reply that
 breaks RESP3 or is too large close only their own connection.
 
-A connection that idled in the pool for more than 30 s answers a PING
-before a call takes it, under the deadline of the call. A connection that
+A connection that idled for more than 30 s since its last reply, in the
+pool or in a Conn that held it, answers a PING before a call takes it,
+under the deadline of the call. A connection that
 does not answer closes, and the call takes another or opens a new one: its
 command has not gone out, so nothing ran.
 

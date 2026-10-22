@@ -33,6 +33,7 @@ const Diagnostics = errors.Diagnostics;
 const Address = @import("Address.zig");
 const DeadlineStream = @import("DeadlineStream.zig");
 const Pool = @import("Pool.zig");
+const time = @import("time.zig");
 const log = std.log.scoped(.redis);
 const Connection = @This();
 
@@ -150,18 +151,24 @@ pub fn flush(conn: *Connection, d: ?*Diagnostics) Error!void {
 }
 
 /// Reads the next reply on the stream as the reply of `command`, from
-/// `arena`.
+/// `arena`. A reply read to its end sets the idle clock of the pool's
+/// entry: a connection idles from its last reply, whoever holds it.
 pub fn receive(conn: *Connection, command: anytype, arena: ?Allocator, d: ?*Diagnostics) Error!@TypeOf(command).Reply {
     conn.skipPushes() catch |err| return conn.failed(err, d, .wait);
     var reader: resp.Reader = .init(&conn.stream.reader, conn.max_reply_bytes);
-    return command.read(&reader, arena, d) catch |err| switch (err) {
-        error.ServerError, error.UnexpectedReply => |e| e,
+    const reply = command.read(&reader, arena, d) catch |err| switch (err) {
+        error.ServerError, error.UnexpectedReply => |e| {
+            conn.pooled.idle_since = time.now(conn.stream.io);
+            return e;
+        },
         error.OutOfMemory => {
             conn.usable = false;
             return error.OutOfMemory;
         },
-        error.ProtocolViolation, error.ReplyTooLarge, error.ReadFailed, error.EndOfStream => |e| conn.failed(e, d, .receive),
+        error.ProtocolViolation, error.ReplyTooLarge, error.ReadFailed, error.EndOfStream => |e| return conn.failed(e, d, .receive),
     };
+    conn.pooled.idle_since = time.now(conn.stream.io);
+    return reply;
 }
 
 /// Skips the pushes before the next reply, with the attributes before

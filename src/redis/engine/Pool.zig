@@ -17,8 +17,9 @@
 //!   idle one. An opening that fails or is canceled frees its place.
 //! - A connection of an older generation, or one its exchange left
 //!   broken, closes at check-in.
-//! - A connection that lay idle for 30 s or longer gets PING before it goes
-//!   to a call, under the call's deadline: a server's `timeout` or a
+//! - A connection that had no reply for 30 s or longer, idle in the pool
+//!   or held by a Conn, gets PING before it goes to a call, under the
+//!   call's deadline: a server's `timeout` or a
 //!   firewall may have closed it meanwhile, and there is no TCP keepalive
 //!   to tell. Any reply, an error too (LOADING and BUSY refuse PING), means
 //!   it is alive. The end of the stream or a broken reply closes it, and
@@ -112,7 +113,10 @@ pub const Entry = struct {
     node: List.Node = .{},
     hooks: *const Hooks,
     generation: u64 = 0,
-    /// When it was checked in last, on the awake clock.
+    /// Since when it idles, on the awake clock: the pool notes when it
+    /// opened, and the connection each reply that came on it. So a
+    /// connection that a Conn held without a call idles from its last
+    /// reply, not from its check-in.
     idle_since: Io.Timestamp = .zero,
 
     pub const Hooks = struct {
@@ -244,7 +248,6 @@ pub fn checkIn(pool: *Pool, io: Io, entry: *Entry, after: After) void {
         },
     };
     if (keep) {
-        entry.idle_since = time.now(io);
         pool.idle.append(&entry.node);
         pool.idle_count += 1;
     } else {
@@ -541,6 +544,7 @@ fn opened(pool: *Pool, io: Io, opening: *Opening, place: Place, result: Error!*E
         return err;
     };
     entry.generation = place.generation;
+    entry.idle_since = time.now(io);
     switch (pool.state) {
         .closing, .closed => {
             dead.append(&entry.node);

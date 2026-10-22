@@ -72,6 +72,38 @@ fn pingFirst(io: Io) !void {
     try server.finish(io);
 }
 
+test "a connection that idled inside a Conn past the threshold gets PING before the call that takes it after release: its clock runs from its last reply, not from the release" {
+    try within5s(testing.io, idledInConn, .{testing.io});
+}
+
+fn idledInConn(io: Io) !void {
+    var server: FakeServer = try .start(testing.allocator, io, &.{
+        .expect(.{ "GET", "k" }, .{ .integer = 5 }),
+        .expect(.{ "GET", "k" }, .{ .integer = 6 }),
+    });
+    defer server.stop(io);
+    var client: Client = undefined;
+    try connected(io, &client, server.url());
+    defer client.deinit();
+    // No check until the Conn has its reply: however slow the machine,
+    // only the call after the release may get PING.
+    client.pool.options.idle_check = .fromSeconds(10);
+    {
+        var conn = try client.acquire(io, .of(.root));
+        defer conn.release(io);
+        try testing.expectEqual(@as(?i64, 5), try conn.run(io, .of(.root), get, .{}));
+        client.pool.options.idle_check = threshold;
+        try redis.testing.sleepAtLeast(io, idling);
+    }
+    try testing.expectEqual(@as(?i64, 6), try client.run(io, .of(.root), get, .{}));
+    try testing.expectEqual(@as(usize, 3), server.received(io));
+    const ping = try server.entry(io, 1);
+    try testing.expectEqualStrings("PING", ping.args[0]);
+    try testing.expectEqual(ping.connection, (try server.entry(io, 0)).connection);
+    try testing.expectEqual(ping.connection, (try server.entry(io, 2)).connection);
+    try server.finish(io);
+}
+
 test "a connection that the server closed while it idled fails its check: it closes, and the call goes on a new one without an error, also where the end of the stream reads as error.Unexpected" {
     var windows: WindowsLike = undefined;
     // The client and the server on each.
