@@ -63,6 +63,17 @@ const examples = [_]Example{
         },
         .command = "$ APP_BIG_URI=mongodb://admin@127.0.0.1:27018 APP_BIG_PASSWORD=change-me zig build run",
     },
+    .{
+        .name = "rotation",
+        // mongo-auth, where the root user sha256 plays the secrets system.
+        .env = &.{
+            .{ "APP_MONGO_SERVER", "127.0.0.1:27118" },
+            .{ "APP_ADMIN_URI", "mongodb://sha256@127.0.0.1:27118/admin" },
+            .{ "APP_ADMIN_PASSWORD", "sha256-pass" },
+        },
+        .command = "$ APP_MONGO_SERVER=127.0.0.1:27018 APP_ADMIN_URI=mongodb://admin@127.0.0.1:27018 APP_ADMIN_PASSWORD=change-me zig build run",
+    },
+    .{ .name = "errors", .env = plain, .command = "$ zig build run" },
 };
 
 pub fn build(b: *std.Build) void {

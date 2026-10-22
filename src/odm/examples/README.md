@@ -34,7 +34,8 @@ production, and reaches MongoDB through zefir-mongo.
 
 Programs that `zig build e2e` in `tests/odm` builds and runs against
 mongod, checking what they print against this guide:
-[quick start](quick_start.zig) · [tenants](tenants.zig).
+[quick start](quick_start.zig) · [tenants](tenants.zig) ·
+[rotation](rotation.zig) · [errors](errors.zig).
 Programs that `zig build test-odm` runs without a server:
 [models](models.zig) · [queries](queries.zig).
 
@@ -1558,4 +1559,706 @@ not know, is `TenantNotFound`.
 
 What keeps one tenant out of another's data, and what does not, is in
 [Security](#security).
+
+
+## Connections and credentials
+
+A connection lives in *generations*. A generation is one client of the
+driver, with its own pool of network connections and its own login.
+`registerConnection` makes generation 1; each replacement makes the next,
+and the old one *drains*: the sessions and cursors taken from it go on
+there, and once the last of them comes back, it closes.
+
+| State | What it means |
+|---|---|
+| `registered` | the settings are taken, and the client is open, but there was no network yet |
+| `connecting` | a `connect` is on its way |
+| `active` | the current generation is connected: `tenant()` gives sessions of it |
+| `failed` | the last `connect` failed; the client stays, and `connect` may come again |
+| `removing` | `removeConnection` is on its way: the id is gone, and the generation drains |
+
+### Generations and leases
+
+A *lease* is what keeps a generation open: each session holds one, each
+cursor one of its own, and `connect`, `ping` and `connectionStats` one
+for the time of their call. `replaceConnection(io, ctx, id, config)` goes
+this way:
+
+```mermaid
+flowchart LR
+    subgraph main["connection main"]
+        g1["generation 1<br/>user shop_a<br/>draining"]
+        g2["generation 2<br/>user shop_b<br/>active"]
+    end
+    before["sessions and cursors<br/>taken before"] -->|"their leases"| g1
+    after["sessions<br/>taken after"] -->|"their leases"| g2
+    g1 -->|"its last lease back,<br/>or drain_timeout"| closed(["closed"])
+```
+
+1. It opens a new generation with `config`, and connects it: the new
+   login is checked here. When that fails, the new generation closes, the
+   current one stays, and the call returns the error; the reason is in
+   `config.diagnostics` and in `connectionStats(io, id).last_failure`.
+2. It publishes the new generation at once: from now on `tenant()` gives
+   sessions of it, for every tenant of the connection.
+3. It waits, in the caller's task, until the leases of the old generation
+   come back, then closes it, and returns. The registry has no task of its
+   own: whatever waits, waits in a call of yours.
+4. When `Registry.Options.drain_timeout` (30 s by default) passes first,
+   it closes the old generation by force and logs a warning: the calls in
+   flight on it are cut (`ConnectionLost` or `Interrupted`), and the
+   sessions and cursors left get `Closed`. Their memory stays until they
+   come back, so nothing uses freed memory.
+
+Giving a lease back never does I/O: the task that ends a request does not
+wait for the network to close a generation. Take a session per request,
+and the old generation empties as fast as requests end.
+
+### Rotating credentials
+
+A password expires, or leaks, and the service gets new credentials for a
+connection. `rotation.zig` changes the user of a connection twice while
+four tasks serve requests through it:
+
+```zig
+//! New credentials on the fly. The connection of the tenant acme changes
+//! its user twice while four tasks serve requests through it, and none
+//! of them fails. The program plays two parts: the secrets system of the
+//! service, which makes and drops the users of mongod through zefir-mongo,
+//! and the service, which replaces its connection through odm. Then it
+//! repeats the last rotation, which changes nothing, and tries a password
+//! that the server does not know yet, which the registry refuses and rolls
+//! back. Each run makes users of its own, and drops them at the end.
+//!
+//! Settings, from the environment:
+//!
+//!   APP_MONGO_SERVER     the host and port of mongod, which checks logins;
+//!                        127.0.0.1:27017 by default
+//!   APP_ADMIN_URI        a user who may make users, for the secrets
+//!                        system, such as mongodb://admin@127.0.0.1:27017
+//!   APP_ADMIN_PASSWORD   that user's password
+//!
+//! In tests/odm, `zig build example-rotation` runs it against the servers
+//! of the repository's docker-compose.yml.
+
+const std = @import("std");
+const confy = @import("confy");
+const core = @import("core");
+const log = @import("log");
+const mongo = @import("mongo");
+const odm = @import("odm");
+const zio = @import("zio");
+const bson = @import("mongo-bson");
+
+pub const std_options: std.Options = .{ .logFn = log.stdLogFn };
+
+const Config = struct {
+    mongo: struct {
+        server: []const u8 = "127.0.0.1:27017",
+    } = .{},
+    admin: struct {
+        uri: []const u8,
+        password: confy.Secret,
+    },
+};
+
+/// A note of the shop, which the requests write and count.
+const Note = struct {
+    id: ?bson.ObjectId = null,
+    text: []const u8,
+
+    pub const odm_schema: odm.Schema(Note) = .{ .collection = "notes", .id = .id };
+};
+
+pub fn main(init: std.process.Init) !void {
+    var config: Config = undefined;
+    confy.loadOrExit(init.arena.allocator(), &config, .{
+        .io = init.io,
+        .environ = init.environ_map,
+        .env_prefix = "APP_",
+        .sources = &.{.osEnv()},
+    });
+    const logger: log.Logger = try .init(init.gpa, init.io, .{ .format = .text });
+    defer logger.deinit();
+    logger.installStdLog();
+    const app = logger.scoped("app");
+    const rt = try zio.Runtime.init(init.gpa, .{ .executors = .auto });
+    defer rt.deinit();
+    const io = rt.io();
+
+    // The secrets system, with a user who may make users. The users of an
+    // earlier run go first.
+    var secrets: Secrets = .{
+        .client = try .init(init.gpa, io, .{ .uri = config.admin.uri, .password = config.admin.password.expose() }),
+        .ids = .init(io),
+        .server = config.mongo.server,
+        .gpa = init.gpa,
+    };
+    defer secrets.client.deinit();
+    try secrets.client.connect(io, within(io, .fromSeconds(10)), null);
+    defer secrets.client.close(io);
+    try secrets.dropUser(io, "shop_a");
+    try secrets.dropUser(io, "shop_b");
+
+    // The service: its connection logs in as shop_a.
+    var a: Credentials = undefined;
+    var b: Credentials = undefined;
+    try secrets.newUser(io, "shop_a", &a);
+    var driver: mongo.OdmDriver = .init(init.gpa);
+    var registry: odm.Registry = .init(init.gpa, io, driver.driver(), .{});
+    defer registry.deinit(io);
+    try registry.registerConnection(io, "main", a.config());
+    try registry.connect(io, within(io, .fromSeconds(10)), "main");
+    try registry.provisionTenant(io, within(io, .fromSeconds(10)), .{ .tenant = "acme", .connection = .{ .existing = "main" }, .database = "acme", .version = 1 });
+    {
+        var acme = try registry.tenant(io, "acme");
+        defer acme.deinit(io);
+        _ = try acme.collection(Note).deleteMany(io, within(io, .fromSeconds(5)), .{});
+    }
+
+    // Four tasks serve requests while the credentials change.
+    var calls: Calls = .{};
+    var tasks: std.Io.Group = .init;
+    defer tasks.cancel(io);
+    for (0..4) |_| try tasks.concurrent(io, serve, .{ &registry, io, &calls });
+
+    // A rotation: a second user, the connection moves to it, and the
+    // first user goes once the call returned. Then back, to shop_a with a
+    // new password.
+    try rotate(&registry, io, &secrets, app, "shop_a", "shop_b", &b);
+    try rotate(&registry, io, &secrets, app, "shop_b", "shop_a", &a);
+    try tasks.await(io);
+    app.info("Requests during the rotations", .{ .made = calls.made.load(.monotonic), .failed = calls.failed.load(.monotonic) });
+
+    // The same rotation again, as a queue may deliver its event twice: the
+    // settings of the current generation, so nothing changes.
+    try registry.replaceConnection(io, within(io, .fromSeconds(10)), "main", a.config());
+    app.info("The same rotation again", .{ .generation = (try registry.connectionStats(io, "main")).generation });
+
+    // A new password that the server does not know yet: the new generation
+    // cannot log in, and the connection keeps the one it has.
+    var d: odm.Diagnostics = .{};
+    var early = a.config();
+    early.password = "not-set-on-the-server";
+    early.diagnostics = &d;
+    if (registry.replaceConnection(io, within(io, .fromSeconds(10)), "main", early)) |_| {
+        app.info("Rotated", .{});
+    } else |err| {
+        app.warn("Not rotated", .{ .reason = err, .details = d.message(), .generation = (try registry.connectionStats(io, "main")).generation });
+    }
+
+    // The service stops, and the secrets system drops its users.
+    try registry.shutdown(io, .fromNow(io, .{ .raw = .fromSeconds(10), .clock = .awake }));
+    try secrets.dropUser(io, "shop_a");
+    const stats = registry.stats(io);
+    app.info("Done", .{ .leases = stats.leases, .forced = stats.forced });
+}
+
+/// A context whose deadline is `budget` away.
+fn within(io: std.Io, budget: std.Io.Duration) core.Context {
+    return core.Context.root.withDeadline(.after(std.Io.Clock.awake.now(io), budget));
+}
+
+/// Moves the connection "main" from the user `from` to a new user `to`,
+/// whose credentials go to `next`, and drops `from` once the old
+/// generation of the connection is closed.
+fn rotate(registry: *odm.Registry, io: std.Io, secrets: *Secrets, app: log.Logger, from: []const u8, to: []const u8, next: *Credentials) !void {
+    try secrets.newUser(io, to, next);
+    // It returns once the leases of the old generation came back, or
+    // drain_timeout passed, and the old generation is closed.
+    try registry.replaceConnection(io, within(io, .fromSeconds(40)), "main", next.config());
+    try secrets.dropUser(io, from);
+    app.info("Rotated", .{ .user = to, .generation = (try registry.connectionStats(io, "main")).generation });
+}
+
+/// How the requests went.
+const Calls = struct {
+    made: std.atomic.Value(u32) = .init(0),
+    failed: std.atomic.Value(u32) = .init(0),
+};
+
+/// A task of the service: 50 requests of the tenant, 10 ms apart.
+fn serve(registry: *odm.Registry, io: std.Io, calls: *Calls) void {
+    for (0..50) |_| {
+        request(registry, io) catch {
+            _ = calls.failed.fetchAdd(1, .monotonic);
+        };
+        _ = calls.made.fetchAdd(1, .monotonic);
+        io.sleep(.fromMilliseconds(10), .awake) catch return;
+    }
+}
+
+/// One request: a session of its own, as a handler takes one, and two
+/// calls through it.
+fn request(registry: *odm.Registry, io: std.Io) !void {
+    var acme = try registry.tenant(io, "acme");
+    defer acme.deinit(io);
+    const notes = acme.collection(Note);
+    const ctx = within(io, .fromSeconds(5));
+    _ = try notes.insertOne(io, ctx, .{ .text = "hello" });
+    _ = try notes.count(io, ctx, .{});
+}
+
+/// The URI and the password of a user of the connection.
+const Credentials = struct {
+    uri_buffer: [128]u8,
+    uri_len: usize,
+    password: [32]u8,
+
+    fn config(c: *const Credentials) odm.ConnectionConfig {
+        return .{ .uri = c.uri_buffer[0..c.uri_len], .password = &c.password };
+    }
+};
+
+/// The secrets system of the service, as this program plays it: a client
+/// of zefir-mongo, as a user who may make and drop the users of the
+/// database "acme".
+const Secrets = struct {
+    client: mongo.Client,
+    ids: bson.ObjectId.Generator,
+    server: []const u8,
+    gpa: std.mem.Allocator,
+
+    /// A new user `name` of the database "acme", which it may read and
+    /// write, with a random password; its credentials go to `out`.
+    fn newUser(s: *Secrets, io: std.Io, name: []const u8, out: *Credentials) !void {
+        var bytes: [16]u8 = undefined;
+        io.random(&bytes);
+        out.password = std.fmt.bytesToHex(bytes, .lower);
+        out.uri_len = (try std.fmt.bufPrint(&out.uri_buffer, "mongodb://{s}@{s}/acme", .{ name, s.server })).len;
+        try s.command(io, .{ .createUser = name, .pwd = @as([]const u8, &out.password), .roles = .{.{ .role = "readWrite", .db = "acme" }} });
+    }
+
+    /// Drops the user `name` of "acme"; one that is not there is no error.
+    fn dropUser(s: *Secrets, io: std.Io, name: []const u8) !void {
+        s.command(io, .{ .dropUser = name }) catch |err| switch (err) {
+            error.UserNotFound => {},
+            else => return err,
+        };
+    }
+
+    fn command(s: *Secrets, io: std.Io, body: anytype) !void {
+        const db: mongo.Database = .init(&s.client, "acme", &s.ids);
+        var d: mongo.Diagnostics = .{};
+        const reply = db.runCommand(io, .of(within(io, .fromSeconds(10))), body, .{ .allocator = s.gpa, .diagnostics = &d }) catch |err| {
+            // 11: UserNotFound.
+            if (err == error.CommandFailed and d.server != null and d.server.?.code == 11) return error.UserNotFound;
+            return err;
+        };
+        reply.deinit();
+    }
+};
+```
+
+It needs a mongod that checks logins, as the second one of
+[Tenants](#tenants), and a user who may make users:
+
+```text
+$ APP_MONGO_SERVER=127.0.0.1:27018 APP_ADMIN_URI=mongodb://admin@127.0.0.1:27018 APP_ADMIN_PASSWORD=change-me zig build run
+2026-10-22T14:53:12.785Z INFO  [app] Rotated user=shop_b generation=2
+2026-10-22T14:53:12.823Z INFO  [app] Rotated user=shop_a generation=3
+2026-10-22T14:53:13.421Z INFO  [app] Requests during the rotations made=200 failed=0
+2026-10-22T14:53:13.421Z INFO  [app] The same rotation again generation=3
+2026-10-22T14:53:13.453Z WARN  [mongo] 127.0.0.1:27118 refused a connection: AuthenticationFailed: Authentication failed.
+2026-10-22T14:53:13.453Z WARN  [odm] connection main: connect failed: AuthenticationFailed: Authentication failed.
+2026-10-22T14:53:13.453Z WARN  [app] Not rotated reason=AuthenticationFailed details="Authentication failed." generation=3
+2026-10-22T14:53:13.454Z INFO  [app] Done leases=0 forced=0
+```
+
+**Rotate by a second user.** The secrets system, a program of its own in
+a real service, makes a second user with the same rights; the service
+calls `replaceConnection` with its URI and password; once the call
+returned, the old generation is closed, and the secrets system drops the
+first user. Until then both users log in: the old generation may still
+open network connections, as its pool needs them, and they still get in.
+So no request fails: 200 here, with two rotations, there and back. The
+end-to-end tests of odm make about 5 500 calls of 16 tasks through three
+rotations, and none fails.
+
+**Not a new password of the same user.** When the secrets system changes
+the password of the user in place, the server refuses the old password to
+every new connection from that moment on. The old generation still serves
+its calls until it drains, and opens a new connection when its pool needs
+one: under a growing load, after `maxIdleTimeMS`, after a connection
+broke. Its first refused login clears its pool and pauses it, so its calls
+get `AuthenticationFailed`, and the ones after `Unavailable`, until
+`replaceConnection` returns. In the end-to-end test of this case, with
+idle connections closed after 50 ms, each run saw about 3
+`AuthenticationFailed` and 50 `Unavailable` in that window, and no error
+after it. How many calls fall in the window depends on the load, so no
+test promises a number for it. The other order fails too: while the
+server does not know the new password, the new generation cannot log in,
+and the replacement rolls back, as the last part of `rotation.zig` shows:
+the driver's warning, the registry's, and generation 3 kept.
+
+**The same event again changes nothing.** `replaceConnection` with the
+settings of the current generation succeeds without a new generation, so
+a rotation event that a queue delivers twice is no harm: generation 3
+stays. The registry tells settings apart by a keyed hash of the URI and
+the password, and keeps no password itself. A connection that is
+`registered` or `failed` gets a fresh client even with the same settings.
+
+### Connecting, removing and health
+
+- **`connect`** works on a connection that is `registered` or `failed`,
+  and does nothing on one that is `active`. A failed `connect` keeps the
+  client: its error and the driver's text stay in
+  `connectionStats(io, id).last_failure`, the registry logs a warning,
+  and `connect` may come again.
+- **One operation at a time** works on a connection: `connect`,
+  `replaceConnection`, `removeConnection`, and a provisioning that
+  connects it. The next one waits for its turn within the deadline of its
+  context.
+- **`removeConnection(io, id)`** refuses with `ConnectionInUse` while
+  tenants are bound to the connection: remove them first. Then it drains
+  and closes the connection, as a replacement does.
+- **Health is not a state.** A connection whose server went down stays
+  `active`: its calls get `Unavailable` from the driver, and
+  `registry.ping(io, ctx, id)` and `connectionStats(io, id).pool` show it.
+
+## Errors and what is safe to retry
+
+Every call fails with one of the names of `odm.Error`: the 17 of the
+driver, `odm.DriverError`, and 11 of odm's own. `odm.outcome(err)` says
+whether the server may have run the call:
+
+- `.not_sent`: nothing reached the server, and the call is safe to make
+  again;
+- `.may_have_executed`: the server may have run it, wholly or in part:
+  make it again only if running it twice does no harm.
+
+Safe to make again is not the same as worth making again. Of the calls
+that did not reach the server, only those that met a passing condition go
+through later: `Unavailable` and `PoolExhausted`, after a pause.
+`DeadlineExceeded` and `Cancelled` go through with a new context only,
+and the rest fail the same way until the call, the tenant or the settings
+change. odm makes no call twice by itself.
+
+| Error | Outcome | When |
+|---|---|---|
+| `InvalidArgument` | not sent | the request breaks a rule of odm or of the driver: an empty `insertMany`, a bad name or id, an empty `odm.Update`, two `with` that change one path |
+| `Unsupported` | not sent | the driver lacks the operation, or a setting: `minPoolSize=5`, `tls=true` |
+| `Closed` | not sent | the generation was closed by force, or the registry shut down |
+| `Unavailable` | not sent | no connection to the server: it is down, the pool is paused, the connection never connected |
+| `AuthenticationFailed` | not sent | the server refused the login |
+| `PoolExhausted` | not sent | no connection of the pool came free in time |
+| `DeadlineExceeded` | not sent | less than 1 ms of the deadline was left before sending, or it passed while the call waited for its turn |
+| `Cancelled` | not sent | the token, or the task, was canceled before sending |
+| `ValidationFailed` | not sent | a document broke the `field_rules` |
+| `EncodeFailed` | not sent | a value did not become BSON: a string that is not UTF-8, documents nested deeper than 100 |
+| `TenantNotFound` | not sent | no such tenant |
+| `ConnectionNotFound`, `ConnectionExists`, `ConnectionInUse` | not sent | no such connection; the id is taken; tenants are bound to it |
+| `StaleVersion`, `ProvisioningConflict` | not sent | see [Events and versions](#events-and-versions) |
+| `ShuttingDown` | not sent | the registry is shutting down |
+| `ConnectionLost` | may have run | the link broke after sending began, or a forced close cut the call |
+| `Timeout` | may have run | the deadline passed after sending, or the server answered MaxTimeMSExpired |
+| `Interrupted` | may have run | the call was canceled while it was on the server |
+| `IncompleteWrite` | may have run | a write of several batches stopped in the middle |
+| `ProtocolViolation` | may have run | the reply broke MongoDB's protocol |
+| `CommandFailed` | may have run | the server answered `ok: 0`; its code is in the diagnostics |
+| `DuplicateKey` | may have run | a unique index refused a document: code 11000; the documents before it went in |
+| `WriteFailed` | may have run | the server refused a document for another reason |
+| `InvalidBson`, `DecodeFailed` | may have run | a document of the server is broken, or does not fit the model |
+| `OutOfMemory` | may have run | always: where it ran out is unknown |
+
+A Zig error carries no data, so the details go elsewhere: a call of a
+collection into `session.diagnostics()`, a cursor's `next` into
+`cursor.diagnostics()`, a provisioning into `Provision.diagnostics`, the
+settings of a connection into `ConnectionConfig.diagnostics`, and a
+failed `connect` or replacement into `connectionStats(io, id)
+.last_failure`. No text of odm holds a password or a connection string;
+the server's errmsg may quote a value of a document, as code 11000 quotes
+the duplicate key, so log it where such values may go.
+
+`errors.zig` makes the customers of acme sign up twice, and more:
+
+```zig
+//! The errors of odm against mongod: what each says, whether the call may
+//! have run on the server, and whether it is worth making again. The
+//! customers of the tenant acme have unique e-mails, some sign up twice,
+//! and another program leaves a document that the model cannot read. Each
+//! run starts from an empty collection.
+//!
+//! Settings, from the environment:
+//!
+//!   APP_MONGO_URI        the server; mongodb://127.0.0.1:27017 by default
+//!   APP_MONGO_PASSWORD   the password of the user that the URI names, if
+//!                        it names one
+//!
+//! In tests/odm, `zig build example-errors` runs it against the servers of
+//! the repository's docker-compose.yml.
+
+const std = @import("std");
+const confy = @import("confy");
+const core = @import("core");
+const log = @import("log");
+const mongo = @import("mongo");
+const odm = @import("odm");
+const v = @import("validator");
+const zio = @import("zio");
+const bson = @import("mongo-bson");
+
+pub const std_options: std.Options = .{ .logFn = log.stdLogFn };
+
+const Config = struct {
+    mongo: struct {
+        uri: []const u8 = "mongodb://127.0.0.1:27017",
+        password: ?confy.Secret = null,
+    } = .{},
+};
+
+const Customer = struct {
+    id: ?bson.ObjectId = null,
+    email: []const u8,
+    name: []const u8,
+
+    pub const odm_schema: odm.Schema(Customer) = .{
+        .collection = "customers",
+        .id = .id,
+        .indexes = &.{.{ .keys = &.{.{ .email = .asc }}, .unique = true }},
+    };
+    pub const field_rules = .{ .email = v.email };
+};
+
+pub fn main(init: std.process.Init) !void {
+    var config: Config = undefined;
+    confy.loadOrExit(init.arena.allocator(), &config, .{
+        .io = init.io,
+        .environ = init.environ_map,
+        .env_prefix = "APP_",
+        .sources = &.{.osEnv()},
+    });
+    const logger: log.Logger = try .init(init.gpa, init.io, .{ .format = .text });
+    defer logger.deinit();
+    logger.installStdLog();
+    const app = logger.scoped("app");
+    const rt = try zio.Runtime.init(init.gpa, .{ .executors = .auto });
+    defer rt.deinit();
+    const io = rt.io();
+
+    var driver: mongo.OdmDriver = .init(init.gpa);
+    var registry: odm.Registry = .init(init.gpa, io, driver.driver(), .{});
+    defer registry.deinit(io);
+    try registry.registerConnection(io, "main", .{
+        .uri = config.mongo.uri,
+        .password = if (config.mongo.password) |password| password.expose() else null,
+    });
+    try registry.connect(io, within(io, .fromSeconds(10)), "main");
+    try registry.provisionTenant(io, within(io, .fromSeconds(10)), .{ .tenant = "acme", .connection = .{ .existing = "main" }, .database = "acme", .version = 1 });
+
+    var arena_state: std.heap.ArenaAllocator = .init(init.gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const ctx = within(io, .fromSeconds(10));
+    var acme = try registry.tenant(io, "acme");
+    defer acme.deinit(io);
+    const customers = acme.collection(Customer);
+    _ = try customers.deleteMany(io, ctx, .{});
+    try customers.ensureIndexes(io, ctx);
+    _ = try customers.insertOne(io, ctx, .{ .email = "ann@example.com", .name = "Ann" });
+    const d = acme.diagnostics();
+
+    // DuplicateKey: the unique index refused the e-mail. The write reached
+    // the server, so it may have run: here it did not, as the index
+    // refused it, but odm cannot tell that from the error alone.
+    if (customers.insertOne(io, ctx, .{ .email = "ann@example.com", .name = "Ann B." })) |_| {
+        app.info("Signed up again", .{});
+    } else |err| report(app, "A second sign-up", err, d);
+
+    // In insertMany the documents before the refused one went in, and the
+    // ones after it did not: the index says which.
+    const newcomers = [_]Customer{
+        .{ .email = "bob@example.com", .name = "Bob" },
+        .{ .email = "ann@example.com", .name = "Ann" },
+        .{ .email = "cleo@example.com", .name = "Cleo" },
+    };
+    if (customers.insertMany(io, ctx, &newcomers, arena)) |_| {
+        app.info("All signed up", .{});
+    } else |err| {
+        report(app, "An import", err, d);
+        app.info("Refused", .{ .index = d.index.?, .customers = try customers.count(io, ctx, .{}) });
+    }
+
+    // ValidationFailed: the rules of the model; nothing was sent.
+    if (customers.insertOne(io, ctx, .{ .email = "dan", .name = "Dan" })) |_| {
+        app.info("Signed up", .{});
+    } else |err| report(app, "A sign-up", err, d);
+
+    // DecodeFailed: another program wrote a customer without a name. The
+    // cursor reports it, and goes on with the next document.
+    _ = try acme.runCommand(io, ctx, .{ .insert = "customers", .documents = .{.{ .email = "eve@example.com" }} }, arena);
+    var all = try customers.find(io, ctx, .{}, .{ .sort = .{ .email = .asc } });
+    defer all.deinit(io);
+    while (true) {
+        const customer = all.next(io, ctx, arena) catch |err| {
+            const cd = all.diagnostics();
+            app.warn("A document failed", .{ .reason = err, .outcome = odm.outcome(err), .path = cd.path(), .cause = cd.cause.? });
+            continue;
+        } orelse break;
+        app.info("Customer", .{ .email = customer.email, .name = customer.name });
+    }
+
+    // CommandFailed: the server answered ok: 0, with its code.
+    if (acme.runCommand(io, ctx, .{ .frobnicate = 1 }, arena)) |_| {
+        app.info("Frobnicated", .{});
+    } else |err| report(app, "A command", err, d);
+
+    // InvalidArgument: an update built at run time with no change.
+    if (customers.updateOne(io, ctx, .{ .email = "ann@example.com" }, odm.Update(Customer).init(arena))) |_| {
+        app.info("Updated", .{});
+    } else |err| report(app, "An update", err, d);
+
+    // DeadlineExceeded: no time left before sending.
+    if (customers.count(io, within(io, .zero), .{})) |_| {
+        app.info("Counted", .{});
+    } else |err| report(app, "A count", err, d);
+
+    // TenantNotFound, from the registry.
+    if (registry.tenant(io, "initech")) |found| {
+        var session = found;
+        session.deinit(io);
+    } else |err| app.warn("No session", .{ .reason = err, .outcome = odm.outcome(err), .retry = worthRetry(err) });
+
+    // Unavailable: a server that is not there, as a connection finds it.
+    try registry.registerConnection(io, "away", .{ .uri = "mongodb://127.0.0.1:1" });
+    if (registry.connect(io, within(io, .fromSeconds(5)), "away")) |_| {
+        app.info("Connected", .{});
+    } else |err| {
+        const stats = try registry.connectionStats(io, "away");
+        app.warn("Cannot connect", .{ .reason = err, .retry = worthRetry(err), .state = stats.state, .details = if (stats.last_failure) |*failure| failure.message() else "" });
+    }
+}
+
+/// A context whose deadline is `budget` away.
+fn within(io: std.Io, budget: std.Io.Duration) core.Context {
+    return core.Context.root.withDeadline(.after(std.Io.Clock.awake.now(io), budget));
+}
+
+/// Whether a call that failed with `err` is worth making again after a
+/// pause: it did not reach the server, and what stopped it may pass. The
+/// others that did not reach it fail the same way again until the call,
+/// its context, the tenant or the settings change.
+fn worthRetry(err: odm.Error) bool {
+    if (odm.outcome(err) != .not_sent) return false;
+    return switch (err) {
+        error.Unavailable, error.PoolExhausted => true,
+        else => false,
+    };
+}
+
+/// Logs `err` of `what`, its details, and whether the call may have run.
+fn report(app: log.Logger, comptime what: []const u8, err: odm.Error, d: *const odm.Diagnostics) void {
+    app.warn(what ++ " failed", .{
+        .reason = err,
+        .outcome = odm.outcome(err),
+        .retry = worthRetry(err),
+        .code = d.code orelse 0,
+        .details = d.message(),
+    });
+}
+```
+
+```text
+$ zig build run
+2026-10-22T14:53:14.166Z WARN  [app] A second sign-up failed reason=DuplicateKey outcome=may_have_executed retry=false code=11000 details="E11000 duplicate key error collection: acme.customers index: email_1 dup key: { email: \"ann@example.com\" }"
+2026-10-22T14:53:14.167Z WARN  [app] An import failed reason=DuplicateKey outcome=may_have_executed retry=false code=11000 details="E11000 duplicate key error collection: acme.customers index: email_1 dup key: { email: \"ann@example.com\" }"
+2026-10-22T14:53:14.168Z INFO  [app] Refused index=1 customers=2
+2026-10-22T14:53:14.168Z WARN  [app] A sign-up failed reason=ValidationFailed outcome=not_sent retry=false code=0 details="odm: email: must be a valid email address"
+2026-10-22T14:53:14.170Z INFO  [app] Customer email=ann@example.com name=Ann
+2026-10-22T14:53:14.170Z INFO  [app] Customer email=bob@example.com name=Bob
+2026-10-22T14:53:14.170Z WARN  [app] A document failed reason=DecodeFailed outcome=may_have_executed path=name cause=MissingField
+2026-10-22T14:53:14.170Z WARN  [app] A command failed reason=CommandFailed outcome=may_have_executed retry=false code=59 details="no such command: 'frobnicate'"
+2026-10-22T14:53:14.170Z WARN  [app] An update failed reason=InvalidArgument outcome=not_sent retry=false code=0 details="odm: the odm.Update(errors.Customer) changes nothing: it has no with"
+2026-10-22T14:53:14.170Z WARN  [app] A count failed reason=DeadlineExceeded outcome=not_sent retry=false code=0 details="less than 1 ms was left of the deadline before the call"
+2026-10-22T14:53:14.170Z WARN  [app] No session reason=TenantNotFound outcome=not_sent retry=false
+2026-10-22T14:53:14.170Z WARN  [odm] connection away: connect failed: Unavailable: cannot connect to 127.0.0.1:1: ConnectionRefused
+2026-10-22T14:53:14.171Z WARN  [app] Cannot connect reason=Unavailable retry=true state=failed details="cannot connect to 127.0.0.1:1: ConnectionRefused"
+```
+
+- **`DuplicateKey`** is a write that reached the server, so its outcome is
+  `may_have_executed`, though the index refused the document. In an
+  `insertMany` the index tells which document it refused: Bob, before it,
+  went in; Cleo, after it, did not, so the collection holds 2.
+- **`ValidationFailed`** stops a document before anything goes out:
+  `not_sent`, and the diagnostics name the field and the rule.
+- **`DecodeFailed`** is a document of the server that the model cannot
+  read; the diagnostics of the cursor say where, by the BSON key, and
+  why. The cursor goes on with the next document.
+- **`CommandFailed`** is a reply with `ok: 0`: 59 is CommandNotFound.
+- **`InvalidArgument`** and **`DeadlineExceeded`** stop a call before it
+  goes out; the second is worth a retry with a new context only.
+- **`TenantNotFound`** comes from the registry, before any I/O.
+- **`Unavailable`**, a server that is not there, is the one worth a retry
+  after a pause; the connection is `failed`, and `connect` may come
+  again. The registry logs the failure itself, as a warning with the id
+  of the connection.
+
+## Shutdown, statistics and logs
+
+`registry.shutdown(io, deadline)` stops the registry, in this order:
+
+1. New calls get `ShuttingDown`: `tenant()`, registering, connecting,
+   replacing and provisioning; the calls that wait for their turn too.
+2. The generations that never connected close at once. Every other one
+   drains until the deadline, one after another, each with what is left
+   of it, and closes.
+3. Leases left at the deadline: their generations are closed by force,
+   the registry logs a warning, and `shutdown` returns
+   `error.ShutdownTimeout`. The tasks that hold them are still alive, and
+   their calls get `Closed`; a service treats that as fatal.
+
+A second `shutdown` waits for the first and returns its result. Then
+`registry.deinit(io)` frees the registry, after a shutdown by now when
+none came before, as in the quick start. Give every session and cursor
+back first: in safe builds one left panics, and so do a registry moved
+after its first `registerConnection` and a call on another `std.Io` than
+the one of `init`.
+
+On Windows, under zio, closing cannot cut a read that already waits for
+the server's reply: such a call ends with the reply or at its own
+deadline.
+
+`registry.stats(io)` takes a snapshot of the registry, for tests and
+dashboards:
+
+| Field | What it counts |
+|---|---|
+| `connections` | connections by state: `registered`, `connecting`, `active`, `failed`, `removing` |
+| `draining` | old generations whose leases are not back yet |
+| `forced` | generations closed by force since `init` |
+| `leases` | sessions, cursors and calls of `connect`, `ping` and `connectionStats` out |
+| `tenants` | tenants bound |
+| `operations`, `operation_errors` | calls of collections, queries and `runCommand`, and those that failed |
+
+`registry.connectionStats(io, id)` takes one of a connection: its
+`state`, the number of its current `generation`, its `leases`, its
+generations `draining`, its `tenants`, the `pool` of its driver
+(connections, idle, in use, waiting), and `last_failure`.
+
+odm logs to `std.log.scoped(.odm)`, warnings only, three kinds:
+
+```text
+WARN  [odm] connection main: generation 2 closed by force with 3 leases left after 30s
+WARN  [odm] connection main: connect failed: AuthenticationFailed: Authentication failed.
+WARN  [odm] shutdown: 3 leases left at the deadline; their generations were closed by force
+```
+
+They never hold a tenant id, a database name, a connection string, a
+password, a document or a filter: an id of a connection is of letters,
+digits and `_ - . :` only. The driver logs to `std.log.scoped(.mongo)`.
+To send both to zefir-log, the root file of the program names the bridge,
+
+```zig
+pub const std_options: std.Options = .{ .logFn = log.stdLogFn };
+```
+
+and the logger installs itself as the target of std.log:
+
+```zig
+logger.installStdLog();
+```
+
+The records then have the scopes `odm` and `mongo`, as in the runs of
+`rotation.zig` and `errors.zig`. Without the bridge they go where std.log
+writes by default, to stderr.
 

@@ -12,7 +12,7 @@
 pub const programs = [_][]const u8{ "models", "queries" };
 
 /// The programs that need mongod: tests/odm runs them.
-pub const server_programs = [_][]const u8{ "quick_start", "tenants" };
+pub const server_programs = [_][]const u8{ "quick_start", "tenants", "rotation", "errors" };
 
 /// The tests of the guide, on `odm.testing.FakeDriver`: `zig build
 /// test-odm` runs them.
