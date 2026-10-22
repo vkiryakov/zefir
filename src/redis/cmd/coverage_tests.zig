@@ -17,6 +17,7 @@ const catalog = [_][]const []const u8{
     &@import("hashes_tests.zig").covered,
     &@import("lists_tests.zig").covered,
     &@import("sets_tests.zig").covered,
+    &@import("zsets_tests.zig").covered,
 };
 
 /// The functions that other tests run: `raw` in raw_tests.zig and in the

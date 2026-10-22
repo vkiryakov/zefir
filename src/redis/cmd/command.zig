@@ -16,6 +16,7 @@
 //! | a tuple of values         | its values, by the rules of `resp.args`  | no value at all; NaN             |
 //! | `std.Io.Duration`         | its milliseconds, rounded down           | under 1 ms; over maxInt(i64) ms  |
 //! | `redis.End`               | `LEFT` or `RIGHT`                        |                                  |
+//! | `redis.ScoreBound`        | the score, `(` and the score, `-inf`, `+inf` | NaN                          |
 //! | any other value           | by the rules of `resp.args`              | NaN                              |
 //!
 //! A refusal names the function of `cmd` and the field, never a value:
@@ -28,6 +29,7 @@
 //! - `Values(V, call)` and `values(v, call)` — the values of LPUSH and
 //!   RPUSH: a slice of strings, or a tuple of values.
 //! - `millis` and `writeMillis` — a duration as milliseconds.
+//! - `writeBound` — a bound of a range of scores.
 
 const std = @import("std");
 const Io = std.Io;
@@ -40,6 +42,7 @@ const args = resp.args;
 const Block = types.Block;
 const End = types.End;
 const KeyValue = types.KeyValue;
+const ScoreBound = types.ScoreBound;
 
 /// The type of a command that is `word` and then the fields of `Args` in
 /// their order, by the table above, and whose reply reads into `R`.
@@ -193,7 +196,7 @@ pub fn Cursor(comptime call: []const u8, comptime word: []const u8, comptime Ite
 }
 
 /// How a field of the arguments goes out, by its type.
-const Kind = enum { string, list, pairs, values, duration, end, value };
+const Kind = enum { string, list, pairs, values, duration, end, bound, value };
 
 fn kindOf(comptime F: type) Kind {
     if (F == []const u8) return .string;
@@ -201,6 +204,7 @@ fn kindOf(comptime F: type) Kind {
     if (F == []const KeyValue) return .pairs;
     if (F == Io.Duration) return .duration;
     if (F == End) return .end;
+    if (F == ScoreBound) return .bound;
     if (isTuple(F)) return .values;
     return .value;
 }
@@ -231,6 +235,10 @@ pub fn checkFields(fields: anytype, comptime call: []const u8, comptime word: []
                 if (n == 0) return invalid(diagnostics, none, .{});
             },
             .duration => _ = try millis(v, call, field, diagnostics),
+            .bound => switch (v) {
+                .inclusive, .exclusive => |score| if (std.math.isNan(score)) return invalid(diagnostics, call ++ ": " ++ field ++ " is NaN, which a server does not take", .{}),
+                .min, .max => {},
+            },
             .value => args.check(v) catch return invalid(diagnostics, call ++ ": " ++ field ++ " is NaN, which a server does not take", .{}),
         }
     }
@@ -274,8 +282,25 @@ pub fn writeFields(w: resp.Writer, fields: anytype) resp.Writer.Error!void {
                 .left => "LEFT",
                 .right => "RIGHT",
             }),
+            .bound => try writeBound(w, v),
             .value => try args.write(w, v),
         }
+    }
+}
+
+/// Writes `bound`, which `checkFields` has checked: the score of an
+/// inclusive bound, `(` and the score of an exclusive one, `-inf` for
+/// `.min` and `+inf` for `.max`.
+pub fn writeBound(w: resp.Writer, bound: ScoreBound) resp.Writer.Error!void {
+    var buffer: [1 + args.float_buffer_len]u8 = undefined;
+    switch (bound) {
+        .min => try w.bulk("-inf"),
+        .max => try w.bulk("+inf"),
+        .inclusive => |score| try w.bulk(args.formatFloat(buffer[1..], score)),
+        .exclusive => |score| {
+            buffer[0] = '(';
+            try w.bulk(buffer[0 .. 1 + args.formatFloat(buffer[1..], score).len]);
+        },
     }
 }
 

@@ -24,6 +24,10 @@
 //!   `blmove`, whose timeouts come from the deadline of the call.
 //! - Sets: `sadd`, `srem`, `sismember`, `smembers`, `scard`, `spop`,
 //!   `sinter`, `sunion`, `sdiff`, `sscan` (one page).
+//! - Sorted sets: `zadd`, `zincrby`, `zscore`, `zrank`, `zrevrank`,
+//!   `zrem`, `zcard`, `zcount`, `zrange`, `zrangeByScore`, `zpopmin`,
+//!   `zpopmax`, `zremrangebyscore`, `zremrangebyrank`, `zscan` (one page).
+//!   A range read into `redis.Scored(M)` asks for WITHSCORES.
 //! - `raw(T, args)` — a command that the catalog lacks: `args` is a tuple
 //!   of strings, numbers, bools and enums, the name of the command first,
 //!   or a slice of strings, and the reply reads into `T` by the rules of
@@ -51,6 +55,7 @@ const keys = @import("cmd/keys.zig");
 const hashes = @import("cmd/hashes.zig");
 const lists = @import("cmd/lists.zig");
 const sets = @import("cmd/sets.zig");
+const zsets = @import("cmd/zsets.zig");
 
 pub const get = strings.get;
 pub const Get = strings.Get;
@@ -179,6 +184,40 @@ pub const sdiff = sets.sdiff;
 pub const Sdiff = sets.Sdiff;
 pub const sscan = sets.sscan;
 pub const Sscan = sets.Sscan;
+
+pub const zadd = zsets.zadd;
+pub const Zadd = zsets.Zadd;
+pub const ZaddOptions = zsets.ZaddOptions;
+pub const zincrby = zsets.zincrby;
+pub const Zincrby = zsets.Zincrby;
+pub const zscore = zsets.zscore;
+pub const Zscore = zsets.Zscore;
+pub const zrank = zsets.zrank;
+pub const Zrank = zsets.Zrank;
+pub const zrevrank = zsets.zrevrank;
+pub const Zrevrank = zsets.Zrevrank;
+pub const zrem = zsets.zrem;
+pub const Zrem = zsets.Zrem;
+pub const zcard = zsets.zcard;
+pub const Zcard = zsets.Zcard;
+pub const zcount = zsets.zcount;
+pub const Zcount = zsets.Zcount;
+pub const zrange = zsets.zrange;
+pub const Zrange = zsets.Zrange;
+pub const ZrangeOptions = zsets.ZrangeOptions;
+pub const zrangeByScore = zsets.zrangeByScore;
+pub const ZrangeByScore = zsets.ZrangeByScore;
+pub const ZrangeByScoreOptions = zsets.ZrangeByScoreOptions;
+pub const zpopmin = zsets.zpopmin;
+pub const Zpopmin = zsets.Zpopmin;
+pub const zpopmax = zsets.zpopmax;
+pub const Zpopmax = zsets.Zpopmax;
+pub const zremrangebyscore = zsets.zremrangebyscore;
+pub const Zremrangebyscore = zsets.Zremrangebyscore;
+pub const zremrangebyrank = zsets.zremrangebyrank;
+pub const Zremrangebyrank = zsets.Zremrangebyrank;
+pub const zscan = zsets.zscan;
+pub const Zscan = zsets.Zscan;
 
 pub const raw = raw_command.raw;
 pub const Raw = raw_command.Raw;
