@@ -7,5 +7,6 @@ test {
     _ = @import("servers.zig");
     _ = @import("stop.zig");
     _ = @import("failfast.zig");
+    _ = @import("budget.zig");
     _ = @import("processes.zig");
 }

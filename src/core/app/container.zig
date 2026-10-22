@@ -74,9 +74,9 @@ pub fn App(comptime Root: type) type {
         }
 
         /// Starts the beans in creation order and returns once all are
-        /// ready. When one fails, those already started are stopped in
-        /// reverse order, within a budget of their own, and its error is
-        /// returned. A stop requested meanwhile lets the current start end,
+        /// ready. When one fails, those already started are stopped the
+        /// way `requestStop` stops them, within a budget of their own, and
+        /// its error is returned. A stop requested meanwhile lets the current start end,
         /// starts no more and returns `{}`. `error.InvalidState` unless the
         /// App was just built: there is no restart.
         /// `error.ConcurrencyUnavailable` when the Io had no task left for

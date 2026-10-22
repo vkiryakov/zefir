@@ -28,6 +28,8 @@ pub const Shutdown = enum {
     deaf,
     /// Returns `error.ShutdownFailed`: a Fragile.
     fails,
+    /// Waits on the gate, deaf to cancelation, then returns `error.ShutdownFailed`.
+    fails_late,
     /// Returns `error.ShutdownTimeout`, as a server whose handlers outlive its stop.
     times_out,
 };
@@ -137,6 +139,37 @@ pub const Rig = struct {
         return rig.rec.expect(what, expected);
     }
 
+    /// Checks the `who` of every event `what`, in any order: the shutdowns
+    /// of the servers, which App runs together.
+    pub fn expectUnordered(rig: *Rig, what: []const u8, expected: []const []const u8) !void {
+        const full = full: {
+            rig.mutex.lockUncancelable(rig.io);
+            defer rig.mutex.unlock(rig.io);
+            break :full rig.len == capacity;
+        };
+        if (full) return error.TestUnexpectedResult;
+        rig.rec.mutex.lockUncancelable(rig.io);
+        defer rig.rec.mutex.unlock(rig.io);
+        var n: usize = 0;
+        for (rig.rec.events[0..rig.rec.len]) |e| if (std.mem.eql(u8, e.what, what)) {
+            n += 1;
+        };
+        errdefer {
+            std.debug.print("{s}: got", .{what});
+            for (rig.rec.events[0..rig.rec.len]) |e| if (std.mem.eql(u8, e.what, what)) std.debug.print(" {s}", .{e.who});
+            std.debug.print("\n", .{});
+        }
+        if (rig.rec.overflow) return error.TestUnexpectedResult;
+        try std.testing.expectEqual(expected.len, n);
+        for (expected) |who| {
+            var times: usize = 0;
+            for (rig.rec.events[0..rig.rec.len]) |e| if (std.mem.eql(u8, e.what, what) and std.mem.eql(u8, e.who, who)) {
+                times += 1;
+            };
+            try std.testing.expectEqual(1, times);
+        }
+    }
+
     /// Where the event `what` of `who` stands among all events; null when
     /// it never came.
     pub fn position(rig: *Rig, what: []const u8, who: []const u8) ?usize {
@@ -241,8 +274,10 @@ fn Methods(comptime T: type) type {
             s.wake.set(io);
         }
 
+        /// Records "shutdown" when called and "shut" when it returns.
         pub fn shutdown(t: *T, io: Io, deadline: Timestamp) anyerror!void {
             t.rig.rec.add("shutdown", who);
+            defer t.rig.rec.add("shut", who);
             const s = slot(t);
             s.deadline = deadline;
             s.stopped.store(true, .release);
@@ -254,6 +289,11 @@ fn Methods(comptime T: type) type {
                     s.gate.waitUncancelable(io);
                 },
                 .fails => return error.ShutdownFailed,
+                .fails_late => {
+                    s.entered.set(io);
+                    s.gate.waitUncancelable(io);
+                    return error.ShutdownFailed;
+                },
                 .times_out => return error.ShutdownTimeout,
             }
         }
@@ -268,8 +308,10 @@ fn Methods(comptime T: type) type {
     };
 }
 
-/// Beans with start, requestStop, shutdown and deinit, whose slots script
-/// their start and shutdown: six types, as one type is one bean.
+/// Beans whose slots script their start and shutdown: six types, as one
+/// type is one bean. A, B and C stop as servers do: start, requestStop,
+/// shutdown and deinit. First, Second and Third stop as clients do: start,
+/// shutdown and deinit, and no requestStop.
 pub const A = struct {
     rig: *Rig,
     const M = Methods(@This());
@@ -301,7 +343,6 @@ pub const First = struct {
     rig: *Rig,
     const M = Methods(@This());
     pub const start = M.start;
-    pub const requestStop = M.requestStop;
     pub const shutdown = M.shutdown;
     pub const deinit = M.deinit;
 };
@@ -310,7 +351,6 @@ pub const Second = struct {
     rig: *Rig,
     const M = Methods(@This());
     pub const start = M.start;
-    pub const requestStop = M.requestStop;
     pub const shutdown = M.shutdown;
     pub const deinit = M.deinit;
 };
@@ -319,7 +359,6 @@ pub const Third = struct {
     rig: *Rig,
     const M = Methods(@This());
     pub const start = M.start;
-    pub const requestStop = M.requestStop;
     pub const shutdown = M.shutdown;
     pub const deinit = M.deinit;
 };

@@ -61,6 +61,25 @@ fn awaitGaveUp(app: anytype) !void {
     }
 }
 
+/// Waits, ten seconds at most, until the event `what` of `who` came.
+fn awaitEvent(rig: *Rig, what: []const u8, who: []const u8) !void {
+    const until = Io.Clock.awake.now(rig.io).addDuration(.fromSeconds(10));
+    while (rig.position(what, who) == null) {
+        if (Io.Clock.awake.now(rig.io).nanoseconds >= until.nanoseconds) return error.TestTimeout;
+        try rig.io.sleep(.fromMilliseconds(1), .awake);
+    }
+}
+
+/// Waits, ten seconds at most, until `app` has a cause.
+fn awaitFailure(app: anytype) !void {
+    const io = app.internal.io;
+    const until = Io.Clock.awake.now(io).addDuration(.fromSeconds(10));
+    while (app.failure() == null) {
+        if (Io.Clock.awake.now(io).nanoseconds >= until.nanoseconds) return error.TestTimeout;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+}
+
 /// Waits, ten seconds at most, until `app` is in `state`.
 fn awaitState(app: anytype, state: zapp.State) !void {
     const io = app.internal.io;
@@ -86,7 +105,7 @@ fn quiet() std.log.Level {
     return level;
 }
 
-test "start runs the beans in creation order; a stop asks all, then shuts down in reverse" {
+test "start runs the beans in creation order; a stop asks all, then shuts them down" {
     const Root = struct {
         pub const module: zapp.Module = .{ .providers = &.{ gates.A, gates.B, gates.C }, .values = &.{*Rig} };
     };
@@ -102,9 +121,10 @@ test "start runs the beans in creation order; a stop asks all, then shuts down i
         try app.wait();
         try testing.expectEqual(zapp.State.stopped, app.state());
         try rig.expect("requestStop", &.{ "A", "B", "C" });
-        try rig.expect("shutdown", &.{ "C", "B", "A" });
+        // Three servers: their shutdowns run together.
+        try rig.expectUnordered("shutdown", &.{ "A", "B", "C" });
         // Phase 1 asks every bean before phase 2 shuts the first one down.
-        try testing.expect(rig.position("requestStop", "C").? < rig.position("shutdown", "C").?);
+        for ([_][]const u8{ "A", "B", "C" }) |who| try testing.expect(rig.position("requestStop", "C").? < rig.position("shutdown", who).?);
         try testing.expect(app.failure() == null);
     }
     app.deinit();
@@ -198,6 +218,8 @@ test "no task for a watcher: the start rolls back with ConcurrencyUnavailable" {
         errdefer app.deinit();
         try testing.expectError(error.ConcurrencyUnavailable, app.start());
         try rig.expect("start", &.{ "A", "Waiter" });
+        // Nor for the shutdowns of the servers: the stop task calls them
+        // itself, last created first.
         try rig.expect("shutdown", &.{ "Waiter", "A" });
         try expectFailure(&app, "Root.Waiter", .start, error.ConcurrencyUnavailable);
         try testing.expectEqual(zapp.State.failed, app.state());
@@ -281,7 +303,7 @@ test "requestStop during start: the current start ends, the rest never start" {
     try app.wait();
     try testing.expectEqual(zapp.State.stopped, app.state());
     try rig.expect("start", &.{ "A", "B" });
-    try rig.expect("shutdown", &.{ "B", "A" });
+    try rig.expectUnordered("shutdown", &.{ "A", "B" });
     try testing.expect(app.failure() == null);
 }
 
@@ -309,7 +331,7 @@ test "a bean that breaks while the next ones start fails the start" {
     try expectFailure(&app, "Root.Waiter", .wait, error.Broken);
     try testing.expectError(error.Broken, app.wait());
     try testing.expectEqual(zapp.State.failed, app.state());
-    try rig.expect("shutdown", &.{ "B", "Waiter" });
+    try rig.expectUnordered("shutdown", &.{ "Waiter", "B" });
 }
 
 test "a wait that ends with an error while running stops the App" {
@@ -328,7 +350,7 @@ test "a wait that ends with an error while running stops the App" {
     try expectFailure(&app, "Root.Waiter", .wait, error.Unavailable);
     try testing.expectEqual(zapp.State.stopped, app.state());
     // Every bean got its shutdown, the broken one too.
-    try rig.expect("shutdown", &.{ "B", "Waiter", "A" });
+    try rig.expectUnordered("shutdown", &.{ "A", "Waiter", "B" });
 }
 
 test "a wait that returns {} while running is UnexpectedStop" {
@@ -345,7 +367,7 @@ test "a wait that returns {} while running is UnexpectedStop" {
     rig.end("Waiter", {});
     try testing.expectError(error.UnexpectedStop, app.wait());
     try expectFailure(&app, "Root.Waiter", .wait, error.UnexpectedStop);
-    try rig.expect("shutdown", &.{ "Waiter", "A" });
+    try rig.expectUnordered("shutdown", &.{ "A", "Waiter" });
 }
 
 test "a bean that is not ready does not stop the App" {
@@ -460,7 +482,7 @@ test "every shutdown gets one deadline: the start of the stop plus shutdown_time
 
 test "a bean with wait and no shutdown: App waits for its wait" {
     const Root = struct {
-        pub const module: zapp.Module = .{ .providers = &.{ gates.A, gates.Lingering }, .values = &.{*Rig} };
+        pub const module: zapp.Module = .{ .providers = &.{ gates.First, gates.Lingering }, .values = &.{*Rig} };
     };
     const io = testing.io;
     var rig: Rig = .init(io);
@@ -473,8 +495,9 @@ test "a bean with wait and no shutdown: App waits for its wait" {
     try app.shutdown();
     // One tick of the Windows timer early at most.
     try testing.expect(asked.durationTo(Io.Clock.awake.now(io)).toMilliseconds() >= 100 - 16);
-    // Its wait returned before App went on to the beans created before it.
-    try testing.expect(rig.position("waited", "Lingering").? < rig.position("shutdown", "A").?);
+    // It has requestStop, so App waits for it with the servers: its wait
+    // returned before App went on to the others.
+    try testing.expect(rig.position("waited", "Lingering").? < rig.position("shutdown", "First").?);
     try testing.expectEqual(zapp.State.stopped, app.state());
 }
 
@@ -492,7 +515,7 @@ test "an error of one shutdown: the others still stop, and it becomes the cause"
     try app.start();
     try testing.expectError(error.ShutdownFailed, app.shutdown());
     try expectFailure(&app, "Root.B", .shutdown, error.ShutdownFailed);
-    try rig.expect("shutdown", &.{ "C", "B", "A" });
+    try rig.expectUnordered("shutdown", &.{ "A", "B", "C" });
     try testing.expectEqual(zapp.State.stopped, app.state());
 }
 
@@ -511,7 +534,7 @@ test "the first cause stays: a shutdown error after a breakdown does not replace
     rig.end("Waiter", error.Unavailable);
     try testing.expectError(error.Unavailable, app.wait());
     try expectFailure(&app, "Root.Waiter", .wait, error.Unavailable);
-    try rig.expect("shutdown", &.{ "Waiter", "A" });
+    try rig.expectUnordered("shutdown", &.{ "A", "Waiter" });
 }
 
 test "a bean's own ShutdownTimeout is fatal" {
@@ -532,7 +555,7 @@ test "a bean's own ShutdownTimeout is fatal" {
     try testing.expectError(error.ShutdownTimeout, app.wait());
     try testing.expectEqual(zapp.State.failed, app.state());
     try expectFailure(&app, "Root.B", .shutdown, error.ShutdownTimeout);
-    try rig.expect("shutdown", &.{ "C", "B", "A" });
+    try rig.expectUnordered("shutdown", &.{ "A", "B", "C" });
     // It takes back the ended stop task, so testing.allocator sees no leak.
     app.deinit();
     try rig.expect("deinit", &.{});
@@ -587,7 +610,7 @@ test "a breakdown does not hide a shutdown that runs out of time" {
 
 test "a deaf shutdown: wait returns ShutdownTimeout at the deadline; deinit frees nothing until the stop ends" {
     const Root = struct {
-        pub const module: zapp.Module = .{ .providers = &.{ gates.A, gates.B }, .values = &.{*Rig} };
+        pub const module: zapp.Module = .{ .providers = &.{ gates.First, gates.B }, .values = &.{*Rig} };
     };
     const io = testing.io;
     const level = quiet();
@@ -613,11 +636,166 @@ test "a deaf shutdown: wait returns ShutdownTimeout at the deadline; deinit free
         try rig.expect("deinit", &.{});
         rig.open("B");
         try awaitEnded(&app);
-        // The stop went on: A got its shutdown once B's returned.
-        try rig.expect("shutdown", &.{ "B", "A" });
+        // The stop went on: First got its shutdown once B's returned.
+        try rig.expect("shutdown", &.{ "B", "First" });
     }
     app.deinit();
-    try rig.expect("deinit", &.{ "B", "A" });
+    try rig.expect("deinit", &.{ "B", "First" });
+}
+
+test "the stop shuts the servers down together, then the others one at a time, last created first" {
+    const Root = struct {
+        pub const module: zapp.Module = .{ .providers = &.{ gates.First, gates.A, gates.Second, gates.B }, .values = &.{*Rig} };
+    };
+    const io = testing.io;
+    var rig: Rig = .init(io);
+    defer rig.release();
+    rig.of("A").shutdown = .deaf;
+    rig.of("B").shutdown = .deaf;
+    var app = try zapp.App(Root).init(testing.allocator, io, .{&rig}, .{});
+    {
+        errdefer {
+            settle(&app, &rig);
+            app.deinit();
+        }
+        try app.start();
+        app.requestStop();
+        // Both servers are in their shutdown at once, with the deadline of
+        // the start of the stop; the clients wait for them.
+        try rig.entered("A");
+        try rig.entered("B");
+        try testing.expect(rig.position("shutdown", "Second") == null and rig.position("shutdown", "First") == null);
+        rig.open("A");
+        rig.open("B");
+        try app.wait();
+        try testing.expect(app.failure() == null);
+        try testing.expectEqual(rig.of("A").deadline.?, rig.of("B").deadline.?);
+    }
+    app.deinit();
+    try rig.expect("requestStop", &.{ "A", "B" });
+    // The clients once both servers had returned, Second, built later, first.
+    const second = rig.position("shutdown", "Second").?;
+    try testing.expect(second > rig.position("shut", "A").? and second > rig.position("shut", "B").?);
+    try testing.expect(rig.position("shutdown", "First").? > rig.position("shut", "Second").?);
+    try rig.expect("deinit", &.{ "B", "Second", "A", "First" });
+}
+
+test "two servers whose shutdowns fail: the error recorded first is the cause" {
+    const Root = struct {
+        pub const module: zapp.Module = .{ .providers = &.{ gates.A, gates.B }, .values = &.{*Rig} };
+    };
+    const io = testing.io;
+    const level = quiet();
+    defer testing.log_level = level;
+    {
+        var rig: Rig = .init(io);
+        defer rig.release();
+        rig.of("A").shutdown = .fails;
+        rig.of("B").shutdown = .fails_late;
+        var app = try zapp.App(Root).init(testing.allocator, io, .{&rig}, .{});
+        {
+            errdefer {
+                settle(&app, &rig);
+                app.deinit();
+            }
+            try app.start();
+            app.requestStop();
+            // B, built last, is still in its shutdown when A's fails.
+            try rig.entered("B");
+            try awaitFailure(&app);
+            try expectFailure(&app, "Root.A", .shutdown, error.ShutdownFailed);
+            // B's fails after it, and the first cause stays.
+            rig.open("B");
+            try testing.expectError(error.ShutdownFailed, app.wait());
+            try expectFailure(&app, "Root.A", .shutdown, error.ShutdownFailed);
+            try testing.expectEqual(zapp.State.stopped, app.state());
+        }
+        app.deinit();
+    }
+    // Both fail at the same time: one of them is the cause.
+    var rig: Rig = .init(io);
+    defer rig.release();
+    rig.of("A").shutdown = .fails;
+    rig.of("B").shutdown = .fails;
+    var app = try zapp.App(Root).init(testing.allocator, io, .{&rig}, .{});
+    defer app.deinit();
+    try app.start();
+    try testing.expectError(error.ShutdownFailed, app.shutdown());
+    const failure = app.failure() orelse return error.TestExpectedFailure;
+    try testing.expect(std.mem.eql(u8, failure.bean, "Root.A") or std.mem.eql(u8, failure.bean, "Root.B"));
+    try testing.expectEqual(zapp.Failure.Step.shutdown, failure.step);
+    try testing.expectEqual(error.ShutdownFailed, failure.err);
+    try rig.expectUnordered("shutdown", &.{ "A", "B" });
+}
+
+test "a deaf server: the other servers still stop, wait returns ShutdownTimeout at the deadline, deinit frees nothing" {
+    const Root = struct {
+        pub const module: zapp.Module = .{ .providers = &.{ gates.First, gates.A, gates.B }, .values = &.{*Rig} };
+    };
+    const io = testing.io;
+    const level = quiet();
+    defer testing.log_level = level;
+    var rig: Rig = .init(io);
+    defer rig.release();
+    rig.of("B").shutdown = .deaf;
+    var app = try zapp.App(Root).init(testing.allocator, io, .{&rig}, budget(50));
+    {
+        errdefer {
+            settle(&app, &rig);
+            app.deinit();
+        }
+        try app.start();
+        const asked = Io.Clock.awake.now(io);
+        app.requestStop();
+        try testing.expectError(error.ShutdownTimeout, app.wait());
+        const took = asked.durationTo(Io.Clock.awake.now(io)).toMilliseconds();
+        try testing.expect(took >= 50 - 16 and took < 2000);
+        try testing.expectEqual(zapp.State.failed, app.state());
+        try expectFailure(&app, "Root.B", .shutdown, error.ShutdownTimeout);
+        // A, the other server, stopped beside B; First, a client, waits for B.
+        try awaitEvent(&rig, "shut", "A");
+        try testing.expect(rig.position("shutdown", "First") == null);
+        app.deinit();
+        try rig.expect("deinit", &.{});
+        rig.open("B");
+        try awaitEnded(&app);
+        try testing.expect(rig.position("shutdown", "First").? > rig.position("shut", "B").?);
+    }
+    app.deinit();
+    try rig.expect("deinit", &.{ "B", "A", "First" });
+}
+
+test "no task for a server's shutdown: the stop task shuts it down itself, beside the others" {
+    const Root = struct {
+        pub const module: zapp.Module = .{ .providers = &.{ gates.First, gates.A, gates.B }, .values = &.{*Rig} };
+    };
+    // The stop task takes one task, and B's shutdown, asked first as B was
+    // built last, the other: A's shutdown gets none.
+    var threaded: Io.Threaded = .init(testing.allocator, .{ .concurrent_limit = .limited(2) });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var rig: Rig = .init(io);
+    defer rig.release();
+    rig.of("B").shutdown = .deaf;
+    var app = try zapp.App(Root).init(testing.allocator, io, .{&rig}, .{});
+    {
+        errdefer {
+            settle(&app, &rig);
+            app.deinit();
+        }
+        try app.start();
+        app.requestStop();
+        try rig.entered("B");
+        // A's shutdown runs in the stop task while B's holds a task of its own.
+        try awaitEvent(&rig, "shut", "A");
+        try testing.expect(rig.position("shutdown", "First") == null);
+        rig.open("B");
+        try app.wait();
+        try testing.expect(app.failure() == null);
+    }
+    app.deinit();
+    try testing.expect(rig.position("shutdown", "First").? > rig.position("shut", "B").?);
+    try rig.expect("deinit", &.{ "B", "A", "First" });
 }
 
 test "requestStop many times from many tasks: one stop" {
@@ -642,7 +820,7 @@ test "requestStop many times from many tasks: one stop" {
     if (app.wait()) |_| {} else |err| try testing.expectEqual(error.Unavailable, err);
     if (app.failure()) |failure| try testing.expectEqualStrings("Root.Waiter", failure.bean);
     try rig.expect("requestStop", &.{ "A", "B", "Waiter" });
-    try rig.expect("shutdown", &.{ "Waiter", "B", "A" });
+    try rig.expectUnordered("shutdown", &.{ "A", "B", "Waiter" });
     try testing.expectEqual(zapp.State.stopped, app.state());
 }
 
@@ -720,7 +898,7 @@ test "wait after the end returns the same result again" {
     try testing.expectError(error.Unavailable, app.wait());
     try testing.expectError(error.Unavailable, app.wait());
     try testing.expectError(error.Unavailable, app.shutdown());
-    try rig.expect("shutdown", &.{ "Waiter", "A" });
+    try rig.expectUnordered("shutdown", &.{ "A", "Waiter" });
 }
 
 test "canceling wait does not stop the App" {
@@ -756,10 +934,10 @@ test "shutdown is requestStop and wait" {
     try app.shutdown();
     try testing.expectEqual(zapp.State.stopped, app.state());
     try rig.expect("requestStop", &.{ "A", "Waiter" });
-    try rig.expect("shutdown", &.{ "Waiter", "A" });
+    try rig.expectUnordered("shutdown", &.{ "A", "Waiter" });
     // A second one stops nothing more.
     try app.shutdown();
-    try rig.expect("shutdown", &.{ "Waiter", "A" });
+    try rig.expectUnordered("shutdown", &.{ "A", "Waiter" });
 }
 
 test "deinit while running stops the App first" {
@@ -774,7 +952,7 @@ test "deinit while running stops the App first" {
         try app.start();
     }
     app.deinit();
-    try rig.expect("shutdown", &.{ "C", "Waiter", "A" });
+    try rig.expectUnordered("shutdown", &.{ "A", "Waiter", "C" });
     try rig.expect("deinit", &.{ "C", "Waiter", "A" });
     try testing.expect(rig.position("shutdown", "A").? < rig.position("deinit", "C").?);
 }
@@ -917,6 +1095,6 @@ test "an App returned from a helper starts and stops" {
     }
     app.deinit();
     try rig.expect("start", &.{ "A", "Waiter" });
-    try rig.expect("shutdown", &.{ "Waiter", "A" });
+    try rig.expectUnordered("shutdown", &.{ "A", "Waiter" });
     try rig.expect("deinit", &.{ "Waiter", "A" });
 }

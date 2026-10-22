@@ -1,9 +1,10 @@
 //! The lifecycle of zefir.App (design §9–§12): one stop task, one watcher
 //! per started bean with `wait`, the start in creation order with its
-//! rollback, and the stop in two phases within one deadline. It is not
-//! generic over the root: it runs on the entries and the status in App's
-//! block, so every application shares this code, and its tasks get the
-//! block, never the App value, which may move.
+//! rollback, and the stop in two phases within one deadline, with a task
+//! per server while the servers shut down together. It is not generic over
+//! the root: it runs on the entries and the status in App's block, so every
+//! application shares this code, and its tasks get the block, never the App
+//! value, which may move.
 const std = @import("std");
 const Deadline = @import("../Deadline.zig");
 const Failure = @import("../app.zig").Failure;
@@ -16,12 +17,19 @@ const Entry = contract.Entry;
 
 const log = std.log.scoped(.zefir_app);
 
-/// One per entry: set once nothing waits in the entry's `wait` any more.
+/// One per entry: what App's tasks know of it.
 pub const Watch = struct {
+    /// Set once nothing waits in the entry's `wait` any more.
     returned: Io.Event = .unset,
     /// App could not start the entry's watcher: while App stops, the stop
     /// task waits in the entry's `wait` itself.
     unwatched: bool = false,
+    /// A server whose `shutdown` got no task of its own: the stop task
+    /// calls it itself. Only the stop task touches it.
+    no_task: bool = false,
+    /// How the stop of a server ended: what its `shutdown` returned, or
+    /// `{}` once its `wait` returned in time; null until then. Under `mutex`.
+    outcome: ?anyerror!void = null,
 };
 
 /// The lifecycle of one App, in its block.
@@ -47,7 +55,8 @@ pub const Runtime = struct {
     /// Set once the stop began; `deadline` is written before it.
     began: Io.Event = .unset,
     deadline: Deadline = .{ .expires = .zero },
-    /// The entry the stop task calls or waits for, `none` or `gathering`.
+    /// The entry the stop task calls or waits for, `none`, `together` or
+    /// `gathering`.
     at: std.atomic.Value(usize) = .init(none),
 
     /// Guards what follows. Every section under it is short, and no bean is
@@ -75,6 +84,8 @@ pub const Runtime = struct {
 
     const none = std.math.maxInt(usize);
     const gathering = none - 1;
+    /// The servers stop together.
+    const together = none - 2;
 
     fn entries(rt: *const Runtime) []const Entry {
         return rt.status.internal.entries;
@@ -130,10 +141,9 @@ pub const Runtime = struct {
     }
 
     /// The shutdown of entry k failed: the first cause; `ShutdownTimeout`
-    /// makes the stop fatal.
+    /// makes the stop fatal. Under `mutex`: the servers' shutdowns may fail
+    /// at once.
     fn shutdownFailed(rt: *Runtime, k: usize, err: anyerror) void {
-        rt.lock();
-        defer rt.unlock();
         if (rt.cause == null) rt.cause = .{ .entry = k, .step = .shutdown, .err = err };
         if (err == error.ShutdownTimeout) {
             rt.fatal = true;
@@ -161,11 +171,24 @@ pub const Runtime = struct {
     }
 
     /// The entry the stop task is in: the one it calls, the one whose
-    /// watcher it waits for, or, while it gathers the watchers, the first
-    /// entry whose watcher has not returned.
+    /// watcher it waits for; while the servers stop together, the last
+    /// created server that has not stopped; while it gathers the watchers,
+    /// the first entry whose watcher has not returned. Under `mutex`.
     fn current(rt: *Runtime) ?usize {
         const at = rt.at.load(.acquire);
         if (at == none) return null;
+        if (at == together) {
+            var k = rt.started;
+            while (k > 0) {
+                k -= 1;
+                const vtable = rt.entries()[k].vtable;
+                if (vtable.requestStop == null) continue;
+                if (vtable.shutdown != null) {
+                    if (rt.watches[k].outcome == null) return k;
+                } else if (vtable.wait != null and !rt.watches[k].returned.isSet()) return k;
+            }
+            return null;
+        }
         if (at != gathering) return at;
         for (rt.entries()[0..rt.started], 0..) |entry, i| {
             if (entry.vtable.wait != null and !rt.watches[i].returned.isSet()) return i;
@@ -363,9 +386,10 @@ pub fn finish(rt: *Runtime) bool {
     return false;
 }
 
-/// Waits for a stop and for the end of `start`, then stops what started:
-/// `requestStop` to all at once, then `shutdown` one at a time, last
-/// created first, within one deadline; gathers the watchers last.
+/// Waits for a stop and for the end of `start`, then stops what started
+/// within one deadline: `requestStop` to all at once; then `shutdown` to
+/// the servers, the beans with `requestStop`, all together, and to the
+/// rest one at a time, last created first; gathers the watchers last.
 fn stopTask(rt: *Runtime) void {
     const io = rt.io;
     // Nothing cancels this task, and its waits are no cancelation points.
@@ -383,29 +407,28 @@ fn stopTask(rt: *Runtime) void {
         rt.at.store(k, .release);
         requestStopFn(entry.ptr, io);
     };
-    // Phase 2: each finishes its work and closes, last created first.
+    // Phase 2: each finishes its work and closes. First the servers, all
+    // together, so that each cuts its grace by the deadline now.
+    stopServers(rt, list, deadline);
+    // Then the rest, one at a time, last created first: a bean is built
+    // after what it takes, so what the servers use closes after them.
     var k = list.len;
     while (k > 0) {
         k -= 1;
         const entry = list[k];
+        if (entry.vtable.requestStop != null) continue;
         rt.at.store(k, .release);
         if (entry.vtable.shutdown) |shutdownFn| {
             if (shutdownFn(entry.ptr, io, deadline)) |_| {
                 log.info("{s} stopped", .{entry.name});
             } else |err| {
                 log.warn("{s} did not stop cleanly: error.{s}", .{ entry.name, @errorName(err) });
+                rt.lock();
+                defer rt.unlock();
                 rt.shutdownFailed(k, err);
             }
-        } else if (entry.vtable.wait) |waitFn| {
-            if (rt.watches[k].unwatched) {
-                // No watcher waits in its `wait`: the stop task does. A wait
-                // deaf to the stop holds it past the deadline, as a deaf
-                // shutdown does, and the owner's wait gives up then.
-                waitFn(entry.ptr, io) catch {};
-                log.info("{s} stopped", .{entry.name});
-            } else if (untilSet(&rt.watches[k].returned, io, rt.deadline)) |_| {
-                log.info("{s} stopped", .{entry.name});
-            } else |_| rt.didNotStop(k);
+        } else if (entry.vtable.wait != null) {
+            if (waitedFor(rt, k)) log.info("{s} stopped", .{entry.name});
         }
     }
     // Nothing may wait in a bean's `wait` once App frees the bean.
@@ -421,6 +444,98 @@ fn stopTask(rt: *Runtime) void {
     };
     if (stopped) log.info("stopped", .{});
     rt.ended.set(io);
+}
+
+/// Phase 2 for the servers, the entries with `requestStop`: the `shutdown`
+/// of each in a task of its own, all at once, by the one deadline. When the
+/// Io has no task for one, the stop task calls that `shutdown` itself, once
+/// the others run. A server with `wait` and no `shutdown` is waited for
+/// meanwhile. Returns once each has stopped or App gave up on it, then logs
+/// them, last created first, whatever order they stopped in.
+fn stopServers(rt: *Runtime, list: []const Entry, deadline: Io.Clock.Timestamp) void {
+    const io = rt.io;
+    rt.at.store(Runtime.together, .release);
+    var servers: Io.Group = .init;
+    var k = list.len;
+    while (k > 0) {
+        k -= 1;
+        const vtable = list[k].vtable;
+        if (vtable.requestStop == null or vtable.shutdown == null) continue;
+        servers.concurrent(io, closeServer, .{ rt, k, deadline }) catch {
+            rt.watches[k].no_task = true;
+        };
+    }
+    k = list.len;
+    while (k > 0) {
+        k -= 1;
+        if (rt.watches[k].no_task) closeServer(rt, k, deadline);
+    }
+    k = list.len;
+    while (k > 0) {
+        k -= 1;
+        const vtable = list[k].vtable;
+        if (vtable.requestStop == null or vtable.shutdown != null or vtable.wait == null) continue;
+        if (waitedFor(rt, k)) {
+            rt.lock();
+            defer rt.unlock();
+            rt.watches[k].outcome = {};
+        }
+    }
+    // Cancelation is blocked in the stop task: this returns once every task
+    // of the group has.
+    servers.await(io) catch {};
+    k = list.len;
+    while (k > 0) {
+        k -= 1;
+        const entry = list[k];
+        if (entry.vtable.requestStop == null) continue;
+        // Null: no `shutdown` and no `wait`, or App gave up on the `wait`.
+        const outcome = outcome: {
+            rt.lock();
+            defer rt.unlock();
+            break :outcome rt.watches[k].outcome;
+        } orelse continue;
+        if (outcome) |_| {
+            log.info("{s} stopped", .{entry.name});
+        } else |err| {
+            log.warn("{s} did not stop cleanly: error.{s}", .{ entry.name, @errorName(err) });
+        }
+    }
+}
+
+/// The `shutdown` of server k, in a task of the servers' group or, when the
+/// Io had none, in the stop task: keeps what it returned for the log, and
+/// an error as the first cause.
+fn closeServer(rt: *Runtime, k: usize, deadline: Io.Clock.Timestamp) void {
+    const io = rt.io;
+    // Nothing cancels it, as nothing cancels the stop task.
+    const protection = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(protection);
+    const entry = rt.entries()[k];
+    const outcome = entry.vtable.shutdown.?(entry.ptr, io, deadline);
+    rt.lock();
+    defer rt.unlock();
+    rt.watches[k].outcome = outcome;
+    if (outcome) |_| {} else |err| rt.shutdownFailed(k, err);
+}
+
+/// Waits for the `wait` of entry k, which has no `shutdown`, by the
+/// deadline; true when it returned in time. When the deadline comes first,
+/// App gives up on it.
+fn waitedFor(rt: *Runtime, k: usize) bool {
+    if (rt.watches[k].unwatched) {
+        // No watcher waits in its `wait`: the stop task does. A wait deaf to
+        // the stop holds it past the deadline, as a deaf shutdown does, and
+        // the owner's wait gives up then.
+        const entry = rt.entries()[k];
+        entry.vtable.wait.?(entry.ptr, rt.io) catch {};
+        return true;
+    }
+    untilSet(&rt.watches[k].returned, rt.io, rt.deadline) catch {
+        rt.didNotStop(k);
+        return false;
+    };
+    return true;
 }
 
 /// Waits in the `wait` of entry i. A return while App starts or runs is a
