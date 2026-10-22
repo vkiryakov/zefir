@@ -58,6 +58,8 @@ const examples = [_]Example{
         .env = &.{ .{ "APP_REDIS_URL", "redis://app@127.0.0.1:16380" }, .{ "APP_REDIS_PASSWORD", "app-pass" } },
         .command = "$ APP_REDIS_URL=redis://127.0.0.1:6380 APP_REDIS_PASSWORD=change-me zig build run",
     },
+    .{ .name = "leaders", .env = plain, .command = "$ zig build run" },
+    .{ .name = "checkout", .env = plain, .command = "$ zig build run" },
 };
 
 pub fn build(b: *std.Build) void {

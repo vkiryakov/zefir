@@ -504,6 +504,267 @@ in a struct that stays where it is, and hand out `&client`. In safe builds
 a call on a moved copy panics, and so does a call with another `std.Io`
 than the one of `init`.
 
+## The catalog
+
+About 90 commands, by the type of the data. Each function is named after
+its command; the options in braces are a struct with defaults, and `T` is
+the type that the reply reads into. [Commands and
+replies](#commands-and-replies) has the rules every one follows.
+
+**Strings and counters**
+
+| Function | Command | Returns |
+|---|---|---|
+| `get(T, key)` | GET | `?T` |
+| `set(key, value, .{ .ttl, .keep_ttl })` | SET [PX] [KEEPTTL] | `void` |
+| `setNx(key, value, .{ .ttl })`, `setXx(key, value, .{ .ttl, .keep_ttl })` | SET NX, SET XX | `bool`: whether it wrote |
+| `getdel(T, key)`, `getex(T, key, .{ .ttl, .persist })` | GETDEL, GETEX | `?T` |
+| `mget(T, keys)`, `mset(pairs)` | MGET, MSET | `[]const ?T`, `void` |
+| `incr(key)`, `decr(key)`, `incrby(key, by)`, `decrby(key, by)` | INCR… | `i64`: the new value |
+| `incrbyfloat(key, by)` | INCRBYFLOAT | `f64` |
+
+**Keys**
+
+| Function | Command | Returns |
+|---|---|---|
+| `del(keys)`, `unlink(keys)`, `exists(keys)` | DEL, UNLINK, EXISTS | `u64`: how many |
+| `expire(key, ttl)`, `persist(key)` | PEXPIRE, PERSIST | `bool`: whether it changed |
+| `ttl(key)` | PTTL | `redis.Ttl`: `.expires_in`, `.persistent` or `.missing` |
+| `keyType(key)` | TYPE | `redis.KeyType`; `type` is a keyword of Zig |
+| `rename(key, new_key)` | RENAME | `void` |
+| `scan(.{ .cursor, .match, .count, .type })` | SCAN | `redis.ScanPage([]const u8)`: one page |
+| `ping()` | PING | `void` |
+
+**Hashes**
+
+| Function | Command | Returns |
+|---|---|---|
+| `hset(key, fields)` | HSET | `void`; `fields` is a struct or `[]const redis.FieldValue` |
+| `hsetnx(key, field, value)` | HSETNX | `bool` |
+| `hget(T, key, field)`, `hmget(T, key, fields)` | HGET, HMGET | `?T`, `[]const ?T` |
+| `hgetall(T, key)` | HGETALL | `?T`: a struct, or `[]const redis.FieldValue` |
+| `hdel(key, fields)`, `hexists(key, field)`, `hlen(key)` | HDEL, HEXISTS, HLEN | `u64`, `bool`, `u64` |
+| `hincrby(key, field, by)`, `hincrbyfloat(key, field, by)` | HINCRBY, HINCRBYFLOAT | `i64`, `f64` |
+| `hkeys(key)` | HKEYS | `[]const []const u8` |
+| `hscan(key, .{ .cursor, .match, .count })` | HSCAN | `redis.ScanPage(redis.FieldValue)` |
+
+**Lists**
+
+| Function | Command | Returns |
+|---|---|---|
+| `lpush(key, values)`, `rpush(key, values)` | LPUSH, RPUSH | `u64`: the length |
+| `lpop(T, key)`, `rpop(T, key)`, `lindex(T, key, index)` | LPOP, RPOP, LINDEX | `?T` |
+| `llen(key)`, `lrange(T, key, start, stop)` | LLEN, LRANGE | `u64`, `[]const T` |
+| `ltrim(key, start, stop)`, `lrem(key, count, value)` | LTRIM, LREM | `void`, `u64` |
+| `lmove(T, source, destination, from, to)` | LMOVE | `?T` |
+| `blpop(T, keys, timeout)`, `brpop(T, keys, timeout)` | BLPOP, BRPOP | `?redis.Popped(T)`: the key and the value |
+| `blmove(T, source, destination, from, to, timeout)` | BLMOVE | `?T` |
+
+**Sets**
+
+| Function | Command | Returns |
+|---|---|---|
+| `sadd(key, members)`, `srem(key, members)` | SADD, SREM | `u64` |
+| `sismember(key, member)` | SISMEMBER | `bool` |
+| `smembers(T, key)`, `sinter(T, keys)`, `sunion(T, keys)`, `sdiff(T, keys)` | SMEMBERS… | `[]const T` |
+| `scard(key)`, `spop(T, key)` | SCARD, SPOP | `u64`, `?T` |
+| `sscan(key, .{ .cursor, .match, .count })` | SSCAN | `redis.ScanPage([]const u8)` |
+
+**Sorted sets**
+
+| Function | Command | Returns |
+|---|---|---|
+| `zadd(key, members, .{ .only, .compare, .changed })` | ZADD [NX\|XX] [GT\|LT] [CH] | `u64`: how many were added |
+| `zincrby(key, by, member)`, `zscore(key, member)` | ZINCRBY, ZSCORE | `f64`, `?f64` |
+| `zrank(key, member)`, `zrevrank(key, member)` | ZRANK, ZREVRANK | `?u64` |
+| `zrem(key, members)`, `zcard(key)`, `zcount(key, min, max)` | ZREM, ZCARD, ZCOUNT | `u64` |
+| `zrange(T, key, start, stop, .{ .rev })` | ZRANGE [REV] | `[]const T`; with `T` a `redis.Scored(M)`, the scores too |
+| `zrangeByScore(T, key, min, max, .{ .rev, .limit })` | ZRANGE BYSCORE | `[]const T` |
+| `zpopmin(T, key)`, `zpopmax(T, key)` | ZPOPMIN, ZPOPMAX | `?redis.Scored(T)` |
+| `zremrangebyscore(key, min, max)`, `zremrangebyrank(key, start, stop)` | ZREMRANGEBY… | `u64` |
+| `zscan(key, .{ .cursor, .match, .count })` | ZSCAN | `redis.ScanPage(redis.Scored([]const u8))` |
+
+**Streams**
+
+| Function | Command | Returns |
+|---|---|---|
+| `xadd(key, fields, .{ .id, .max_len, .approximate })` | XADD | `redis.StreamId` |
+| `xaddNoMkstream(key, fields, .{…})` | XADD NOMKSTREAM | `?redis.StreamId`: null when the stream is not there |
+| `xlen(key)` | XLEN | `u64` |
+| `xrange(T, key, .{ .start, .end, .count })`, `xrevrange(…)` | XRANGE, XREVRANGE | `[]const redis.Entry(T)` |
+| `xread(T, key, .{ .after, .count, .block })` | XREAD | `[]const redis.Entry(T)` |
+| `xgroupCreate(key, group, .{ .start, .mkstream })` | XGROUP CREATE | `void` |
+| `xreadgroup(T, key, .{ .group, .consumer, .from, .count, .block, .no_ack })` | XREADGROUP | `[]const redis.Entry(T)` |
+| `xack(key, group, ids)` | XACK | `u64` |
+| `xpending(key, group)` | XPENDING | `redis.PendingSummary` |
+| `xpendingRange(key, group, .{ .count, .start, .end, .consumer, .min_idle })` | XPENDING … | `[]const redis.Pending` |
+| `xautoclaim(T, key, .{ .group, .consumer, .min_idle, .start, .count })` | XAUTOCLAIM | `redis.Claimed(T)` |
+| `xdel(key, ids)`, `xtrim(key, by, .{ .approximate })` | XDEL, XTRIM | `u64` |
+
+**Scripts, pub/sub and the rest**
+
+| Function | Command | Returns |
+|---|---|---|
+| `eval(T, source, keys, args)` | EVAL | `T` |
+| `evalScript(T, &script, keys, args)` | EVALSHA, EVAL after NOSCRIPT | `T` |
+| `publish(channel, message)` | PUBLISH | `u64`: how many subscribers got it |
+| `watch(keys)`, `unwatch()` | WATCH, UNWATCH, on a `redis.Conn` only | `void` |
+| `raw(T, args)` | as given | `T` |
+
+What the catalog lacks, `cmd.raw` sends: APPEND and the bits, EXPIREAT,
+LPOS, SMOVE, ZUNION, XCLAIM and XINFO, FUNCTION and FCALL, HyperLogLog,
+geo, the commands of modules, INFO and CONFIG among them.
+
+### The best customers, and the sessions of one
+
+`leaders.zig` keeps the shop's best customers in a sorted set, and signs a
+customer out everywhere by walking the keys with SCAN:
+
+```zig
+//! The best customers of the shop, in a sorted set: what each spent is
+//! their score, the server keeps them in order, and the top comes in one
+//! call. Then the sessions of one customer, found by walking the keys with
+//! SCAN, end at once: "sign out everywhere". Each run starts afresh.
+//!
+//! Settings, from the environment:
+//!
+//!   APP_REDIS_URL        the server; redis://127.0.0.1:6379 by default
+//!   APP_REDIS_PASSWORD   the password of the user of the URL, or of the
+//!                        user default, if the server wants one
+//!
+//! In tests/redis, `zig build example-leaders` runs it against the servers
+//! of the repository's docker-compose.yml.
+
+const std = @import("std");
+const confy = @import("confy");
+const core = @import("core");
+const log = @import("log");
+const redis = @import("redis");
+const zio = @import("zio");
+const cmd = redis.cmd;
+
+pub const std_options: std.Options = .{ .logFn = log.stdLogFn };
+
+const Config = struct {
+    redis: struct {
+        url: []const u8 = "redis://127.0.0.1:6379",
+        password: ?confy.Secret = null,
+    } = .{},
+};
+
+pub fn main(init: std.process.Init) !void {
+    var config: Config = undefined;
+    confy.loadOrExit(init.arena.allocator(), &config, .{
+        .io = init.io,
+        .environ = init.environ_map,
+        .env_prefix = "APP_",
+        .sources = &.{.osEnv()},
+    });
+    const logger: log.Logger = try .init(init.gpa, init.io, .{ .format = .text });
+    defer logger.deinit();
+    logger.installStdLog();
+    const app = logger.scoped("app");
+    const rt = try zio.Runtime.init(init.gpa, .{ .executors = .auto });
+    defer rt.deinit();
+    const io = rt.io();
+
+    var client: redis.Client = try .init(init.gpa, io, .{
+        .url = config.redis.url,
+        .password = if (config.redis.password) |password| password.expose() else null,
+    });
+    defer client.deinit();
+    try client.connect(io, within(io, .fromSeconds(10)), null);
+    defer client.close(io);
+
+    var arena_state: std.heap.ArenaAllocator = .init(init.gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const op: redis.OperationContext = .of(within(io, .fromSeconds(10)));
+    _ = try client.run(io, op, cmd.del(&.{"leaders"}), .{});
+
+    // What each customer spent, as a member of the set and its score.
+    _ = try client.run(io, op, cmd.zadd("leaders", &.{
+        .{ .member = "ann", .score = 120.5 },
+        .{ .member = "bob", .score = 87 },
+        .{ .member = "cleo", .score = 240 },
+        .{ .member = "dan", .score = 15 },
+    }, .{}), .{});
+    // Bob buys more: his score grows, and the set keeps its order.
+    const bob = try client.run(io, op, cmd.zincrby("leaders", 42.5, "bob"), .{});
+    app.info("Bob spent", .{ .total = bob });
+
+    // The top three, the highest first, each with its score: a range read
+    // into redis.Scored asks the server for the scores too.
+    const top = try client.run(io, op, cmd.zrange(redis.Scored([]const u8), "leaders", 0, 2, .{ .rev = true }), .{ .allocator = arena });
+    for (top, 1..) |leader, place| app.info("Top", .{ .place = place, .name = leader.member, .spent = leader.score });
+    // Dan's place, from the top: ranks start at 0.
+    const dan = (try client.run(io, op, cmd.zrevrank("leaders", "dan"), .{})).?;
+    app.info("Dan", .{ .place = dan + 1, .of = try client.run(io, op, cmd.zcard("leaders"), .{}) });
+    // The customers who spent 100 or more get a free pack.
+    const generous = try client.run(io, op, cmd.zrangeByScore([]const u8, "leaders", .{ .inclusive = 100 }, .max, .{}), .{ .allocator = arena });
+    app.info("Free pack", .{ .customers = generous });
+
+    // Six sessions, three of them Ann's on her phone, laptop and tablet.
+    for ([_][2][]const u8{
+        .{ "session:a1", "ann" },  .{ "session:b2", "bob" }, .{ "session:a3", "ann" },
+        .{ "session:c4", "cleo" }, .{ "session:a5", "ann" }, .{ "session:d6", "dan" },
+    }) |session| try client.run(io, op, cmd.set(session[0], session[1], .{ .ttl = .fromSeconds(30 * 60) }), .{});
+
+    // Ann signs out everywhere. SCAN walks the keys a page at a time, and
+    // the iterator gives them one by one; a page is one call, so the
+    // server never blocks on a walk of all its keys.
+    var sessions = client.iterate(cmd.scan(.{ .match = "session:*", .count = 100 }), .{ .allocator = init.gpa });
+    defer sessions.deinit();
+    var ended: u64 = 0;
+    while (try sessions.next(io, op)) |key| {
+        // The key lives until the next call of next.
+        const owner = try client.run(io, op, cmd.get([]const u8, key), .{ .allocator = arena }) orelse continue;
+        if (std.mem.eql(u8, owner, "ann")) ended += try client.run(io, op, cmd.del(&.{key}), .{});
+    }
+    app.info("Ann signed out", .{ .sessions = ended });
+}
+
+/// A context whose deadline is `budget` away.
+fn within(io: std.Io, budget: std.Io.Duration) core.Context {
+    return core.Context.root.withDeadline(.after(std.Io.Clock.awake.now(io), budget));
+}
+```
+
+```text
+$ zig build run
+2026-10-22T05:28:06.199Z INFO  [app] Bob spent total=129.5
+2026-10-22T05:28:06.201Z INFO  [app] Top place=1 name=cleo spent=240
+2026-10-22T05:28:06.201Z INFO  [app] Top place=2 name=bob spent=129.5
+2026-10-22T05:28:06.201Z INFO  [app] Top place=3 name=ann spent=120.5
+2026-10-22T05:28:06.206Z INFO  [app] Dan place=4 of=4
+2026-10-22T05:28:06.209Z INFO  [app] Free pack customers=[ann,bob,cleo]
+2026-10-22T05:28:06.339Z INFO  [app] Ann signed out sessions=3
+```
+
+- **A sorted set** keeps its members in the order of their scores: ZADD
+  adds them, ZINCRBY adds to a score on the server, and ZRANGE gives a
+  range of ranks, here the top three, from the highest with `.rev`. Read
+  into `redis.Scored([]const u8)`, the range asks for WITHSCORES, and each
+  member comes with its score.
+- **Ranks** start at 0: ZREVRANK of Dan is 3, as three customers spent
+  more.
+- **A range of scores** takes its bounds as `redis.ScoreBound`:
+  `.{ .inclusive = 100 }`, `.{ .exclusive = 100 }`, and `.min` and `.max`
+  for no bound.
+- **SCAN** walks the keys a page at a time, from a cursor: a page is one
+  call, so neither the server nor the client holds all the keys at once,
+  and the commands of other clients run between the pages. `client.iterate`
+  gives the keys of the pages one at a time; it holds a page in an arena of
+  its own over `.allocator`, frees it in `deinit`, and a key lives until
+  the next `next`. SCAN gives every key that was there for the whole walk
+  at least once, and may give one twice when the server grows its table
+  meanwhile; a page may be empty while the walk goes on.
+- **A page that failed** leaves the iterator where it was: the next `next`,
+  under a new context, asks for that page again. The iterator itself never
+  retries.
+- `hscan`, `sscan` and `zscan` walk a hash, a set and a sorted set the same
+  way.
+
 ## Pipelines
 
 Every call is a round trip: the command goes to the server, and the call
@@ -670,6 +931,308 @@ test "a connection that breaks in the middle of a pipeline is ConnectionLost, an
     try server.finish(io);
 }
 ```
+
+## Transactions and WATCH
+
+A *transaction* runs commands as one: MULTI opens it, the commands queue
+up, and EXEC runs them all, with no command of another client between
+them. It has no rollback: a command that fails as it runs, such as
+WRONGTYPE, fails alone, and the others run. Nor does it read: "take a pack
+off the stock, if one is left" needs the stock first, and between the read
+and EXEC another customer may take the last pack. WATCH gives the
+transaction its condition: the server remembers the keys that it names,
+and when any of them changes before EXEC, EXEC runs nothing and answers
+null.
+
+```mermaid
+sequenceDiagram
+    participant A as Ann's connection
+    participant R as Redis
+    participant B as Bob's connection
+    A->>R: WATCH stock:coffee, GET stock:coffee
+    R-->>A: 1
+    B->>R: WATCH stock:coffee, GET stock:coffee
+    R-->>B: 1
+    A->>R: MULTI, DECR stock:coffee, RPUSH orders:paid ann, EXEC
+    R-->>A: 0, 1: the pack is Ann's
+    B->>R: MULTI, DECR stock:coffee, RPUSH orders:paid bob, EXEC
+    R-->>B: null: the stock changed after WATCH, and nothing ran
+```
+
+WATCH belongs to the connection it goes on, so a transaction with WATCH
+needs a connection of its own: `client.acquire` gives a `redis.Conn`,
+which holds a connection of the pool for one task until `release`.
+`conn.run` and `conn.pipeline` work as the client's do, and
+`conn.transaction(io, op, commands, options)` runs `commands` between
+MULTI and EXEC: it returns their results as a pipeline does, or null when a
+watched key changed.
+
+`checkout.zig` sells the last pack of coffee twice over, then packs the
+orders:
+
+```zig
+//! The checkout of the shop: customers buy packs of coffee while there are
+//! some left. A purchase watches the stock and pays in a transaction, which
+//! the server runs only if nobody changed the stock since: two customers
+//! race for the last pack, first step by step, then as two tasks of a
+//! service. Then the packer takes the paid orders off their queue, so that
+//! none is lost: BLMOVE moves each into the list of the orders being
+//! packed, which keeps it until it is packed. Each run starts afresh.
+//!
+//! Settings, from the environment:
+//!
+//!   APP_REDIS_URL        the server; redis://127.0.0.1:6379 by default
+//!   APP_REDIS_PASSWORD   the password of the user of the URL, or of the
+//!                        user default, if the server wants one
+//!
+//! In tests/redis, `zig build example-checkout` runs it against the
+//! servers of the repository's docker-compose.yml.
+
+const std = @import("std");
+const confy = @import("confy");
+const core = @import("core");
+const log = @import("log");
+const redis = @import("redis");
+const zio = @import("zio");
+const cmd = redis.cmd;
+
+pub const std_options: std.Options = .{ .logFn = log.stdLogFn };
+
+const Config = struct {
+    redis: struct {
+        url: []const u8 = "redis://127.0.0.1:6379",
+        password: ?confy.Secret = null,
+    } = .{},
+};
+
+pub fn main(init: std.process.Init) !void {
+    var config: Config = undefined;
+    confy.loadOrExit(init.arena.allocator(), &config, .{
+        .io = init.io,
+        .environ = init.environ_map,
+        .env_prefix = "APP_",
+        .sources = &.{.osEnv()},
+    });
+    const logger: log.Logger = try .init(init.gpa, init.io, .{ .format = .text });
+    defer logger.deinit();
+    logger.installStdLog();
+    const app = logger.scoped("app");
+    const rt = try zio.Runtime.init(init.gpa, .{ .executors = .auto });
+    defer rt.deinit();
+    const io = rt.io();
+
+    var client: redis.Client = try .init(init.gpa, io, .{
+        .url = config.redis.url,
+        .password = if (config.redis.password) |password| password.expose() else null,
+    });
+    defer client.deinit();
+    try client.connect(io, within(io, .fromSeconds(10)), null);
+    defer client.close(io);
+
+    var arena_state: std.heap.ArenaAllocator = .init(init.gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const op: redis.OperationContext = .of(within(io, .fromSeconds(10)));
+    _ = try client.run(io, op, cmd.del(&.{ "stock:coffee", "orders:paid", "orders:packing" }), .{});
+
+    // One pack left, and two customers at the checkout at once. Each has a
+    // connection of its own, which holds the WATCH of the stock.
+    try client.run(io, op, cmd.set("stock:coffee", 1, .{}), .{});
+    {
+        var ann = try client.acquire(io, op);
+        defer ann.release(io);
+        var bob = try client.acquire(io, op);
+        defer bob.release(io);
+        // Both watch the stock, and both see the last pack.
+        app.info("Ann sees", .{ .left = try look(io, op, &ann) });
+        app.info("Bob sees", .{ .left = try look(io, op, &bob) });
+        // Ann pays first: nobody changed the stock since her WATCH, so the
+        // server runs her transaction.
+        app.info("Ann pays", .{ .bought = try pay(io, op, &ann, "ann") });
+        // Bob pays next: the stock changed since his WATCH, so the server
+        // runs none of his.
+        app.info("Bob pays", .{ .bought = try pay(io, op, &bob, "bob") });
+    }
+
+    // The same race in a service: each customer is a task, and buy pays
+    // again whenever the stock changed in between. One of the two gets the
+    // pack, whichever is first.
+    try client.run(io, op, cmd.set("stock:coffee", 1, .{}), .{});
+    var cleo = try io.concurrent(buy, .{ io, &client, op, "cleo" });
+    defer _ = cleo.cancel(io) catch false;
+    var dan = try io.concurrent(buy, .{ io, &client, op, "dan" });
+    defer _ = dan.cancel(io) catch false;
+    const bought = @as(u8, @intFromBool(try cleo.await(io))) + @intFromBool(try dan.await(io));
+    app.info("Two at once", .{ .bought = bought, .sold_out = 2 - bought });
+
+    // The packer takes the paid orders one at a time. BLMOVE waits for one
+    // and moves it into orders:packing in the same step: an order that the
+    // packer took stays there until it is packed, so a packer that falls
+    // over leaves it there rather than lose it. Each wait has 2 s; the
+    // server gets 1.85 of them, so that an empty queue answers null before
+    // the deadline.
+    var done: usize = 0;
+    while (try client.run(io, .of(within(io, .fromSeconds(2))), cmd.blmove([]const u8, "orders:paid", "orders:packing", .left, .right, .forever), .{ .allocator = arena })) |order| {
+        // The order is packed: it leaves orders:packing.
+        _ = try client.run(io, op, cmd.lrem("orders:packing", 1, order), .{});
+        done += 1;
+    }
+    app.info("Packed", .{ .orders = done, .packing = try client.run(io, op, cmd.llen("orders:packing"), .{}) });
+}
+
+/// A context whose deadline is `budget` away.
+fn within(io: std.Io, budget: std.Io.Duration) core.Context {
+    return core.Context.root.withDeadline(.after(std.Io.Clock.awake.now(io), budget));
+}
+
+/// Watches the stock on `conn`, and returns how many packs are left.
+fn look(io: std.Io, op: redis.OperationContext, conn: *redis.Conn) !i64 {
+    try conn.run(io, op, cmd.watch(&.{"stock:coffee"}), .{});
+    return try conn.run(io, op, cmd.get(i64, "stock:coffee"), .{}) orelse 0;
+}
+
+/// Takes a pack off the stock and puts the order of `customer` on the
+/// queue of paid orders, in one transaction: false when the stock changed
+/// since the WATCH of `conn`, and the server ran none of it.
+fn pay(io: std.Io, op: redis.OperationContext, conn: *redis.Conn, customer: []const u8) !bool {
+    const done = try conn.transaction(io, op, .{
+        cmd.decr("stock:coffee"),
+        cmd.rpush("orders:paid", .{customer}),
+    }, .{}) orelse return false;
+    // Each command ran: an error of one would be in its place.
+    _ = try done[0];
+    _ = try done[1];
+    return true;
+}
+
+/// Buys a pack for `customer`: watches the stock and pays, again whenever
+/// the stock changed in between. False: sold out.
+fn buy(io: std.Io, client: *redis.Client, op: redis.OperationContext, customer: []const u8) !bool {
+    while (true) {
+        var conn = try client.acquire(io, op);
+        defer conn.release(io);
+        if (try look(io, op, &conn) == 0) {
+            // Nothing to buy. UNWATCH, so that release keeps the connection
+            // for the pool rather than close it.
+            try conn.run(io, op, cmd.unwatch(), .{});
+            return false;
+        }
+        if (try pay(io, op, &conn, customer)) return true;
+    }
+}
+```
+
+```text
+$ zig build run
+2026-10-22T05:28:08.349Z INFO  [app] Ann sees left=1
+2026-10-22T05:28:08.378Z INFO  [app] Bob sees left=1
+2026-10-22T05:28:08.381Z INFO  [app] Ann pays bought=true
+2026-10-22T05:28:08.384Z INFO  [app] Bob pays bought=false
+2026-10-22T05:28:08.440Z INFO  [app] Two at once bought=1 sold_out=1
+2026-10-22T05:28:10.346Z INFO  [app] Packed orders=2 packing=0
+```
+
+- **WATCH, then read, then the transaction.** `look` watches the stock and
+  reads it on the Conn, and `pay` sends DECR and RPUSH in a transaction.
+  The server ran Ann's; Bob's came after the stock changed, and got null:
+  none of it ran, so Bob paid nothing.
+- **A null means: look again.** In a service, `buy` loops: somebody else
+  changed the stock in between, and a fresh look decides. In the run, Cleo
+  and Dan raced as two tasks: one of them bought the last pack and the
+  other found none, whichever came first.
+- **`cmd.watch` and `cmd.unwatch` run on a Conn only.** On the client, or
+  inside a transaction, they are a compile error that says where they go.
+- **`release`** gives the connection back to the pool, unless keys may
+  still be under WATCH on it, as after `look` found no pack: then it closes
+  the connection, so that no later call gets the WATCH of another, and
+  sends no UNWATCH behind your back. To keep the connection, `buy` sends
+  UNWATCH itself. EXEC ends a WATCH either way.
+- **MULTI goes alone,** and the client waits for its OK before it sends the
+  commands and EXEC in one write: when the server refuses MULTI, as it does
+  for a user without the right to it, the commands never run outside a
+  transaction.
+- **A command that the server refuses as it queues it,** one it does not
+  know or one the user may not run, makes the server drop the whole
+  transaction: `ServerError` with the code EXECABORT, as
+  [errors.zig](#errors-and-what-is-safe-to-retry) shows.
+- **A transaction without WATCH,** a batch that runs as one, is the same
+  `conn.transaction` on a fresh Conn.
+- One task at a time calls a Conn, and every Conn is released before the
+  client's `deinit`: in safe builds, either mistake panics.
+
+## Blocking commands and the reliable queue
+
+BLPOP, BRPOP, BLMOVE, and XREAD and XREADGROUP with `.block`, wait on the
+server until a value comes, or until their timeout is over: then they
+answer null. The timeout is a `redis.Block`: `.forever`, or
+`.{ .at_most = duration }`. A server takes 0 as forever, so `.forever` is
+written out, and a 0 never waits forever by mistake.
+
+**The timeout comes from the deadline.** Under a deadline, the client
+sends the server what the deadline leaves, less 150 ms, or the command's
+own timeout when that is shorter:
+
+| Deadline of the call | Timeout of the command | The server gets | The call waits |
+|---|---|---|---|
+| R left | `.at_most = t` | the shorter of `t` and R − 150 ms | until the deadline |
+| R left | `.forever` | R − 150 ms | until the deadline |
+| none | `.at_most = t` | `t` | `t`, and `Options.timeout` more |
+| none | `.forever` | 0: forever | until the task is canceled or the client closes |
+
+Why 150 ms: Redis checks the timeouts of the clients it blocks when its
+loop of events goes to sleep, and a quiet server sleeps until its next
+timer, 100 ms later at most, as it wakes ten times a second by default
+(`hz 10`). So the null of a quiet server comes up to 100 ms after the
+timeout. Were the timeout all that the deadline leaves, that null would
+come after the deadline: `Timeout` instead of null, a closed connection,
+and a value that the server gave out in that moment, lost. With the margin
+the null comes before the deadline, from a quiet server too. With 150 ms
+or less left, the call is `DeadlineExceeded` and nothing goes out; the
+text names the command that does not block, `lmove` for `blmove`. The
+tests of [deadlines](#deadlines-and-cancellation) show both.
+
+**A read that takes the value can lose it.** BLPOP takes the value off the
+server as it answers. When the answer comes after the deadline after all,
+from a busy server or across a slow network, the call is `Timeout`, its
+connection closes, and the value is gone; so it is when the task is
+canceled while it waits. The margin makes this rare, not impossible.
+
+**The reliable queue** loses nothing: BLMOVE moves the value into a second
+list, of the work in progress, in the same step, and the worker takes it
+off that list once the work is done. The packer of
+[the checkout](#transactions-and-watch) works so:
+
+```zig
+    while (try client.run(io, .of(within(io, .fromSeconds(2))), cmd.blmove([]const u8, "orders:paid", "orders:packing", .left, .right, .forever), .{ .allocator = arena })) |order| {
+        // The order is packed: it leaves orders:packing.
+        _ = try client.run(io, op, cmd.lrem("orders:packing", 1, order), .{});
+        done += 1;
+    }
+```
+
+An order whose answer was lost, or whose packer fell over, stays in
+`orders:packing`, and a job of the service can give those back to
+`orders:paid` after a while, with LMOVE. In the run above, the queue ended
+empty: the last BLMOVE got 1.85 s of its 2, answered null before the
+deadline, and its connection went back to the pool. Streams with a group
+keep the same promise in their own way, see [Streams and consumer
+groups](#streams-and-consumer-groups).
+
+- **A blocking command holds its connection** of the pool while it waits:
+  32 tasks in `blpop(… .forever)` take the whole pool, and the other calls
+  wait in line. Wait with `.at_most` in a loop, and give many waiting tasks
+  a client of their own, with its own `max_connections`.
+- **Without TCP keepalive,** `.forever` without a deadline on a connection
+  that died waits until its task is canceled: `.at_most` in a loop catches
+  that too.
+- **Inside a transaction** a blocking command does not block: the server
+  answers at once, and its timeout goes as given.
+- **In a pipeline** a blocking command holds the commands after it, and
+  gets what is left of the deadline as the pipeline goes out: give a
+  pipeline one at most, and last.
+- **Through `cmd.raw`** a blocking command gets no timeout from the
+  deadline: give it a timeout of the server at least 150 ms shorter than
+  what is left of the deadline.
 
 ## Deadlines and cancellation
 

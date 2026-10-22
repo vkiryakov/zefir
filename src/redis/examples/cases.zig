@@ -5,7 +5,7 @@
 //! examples` there).
 
 /// The programs that need a server: tests/redis runs them, in this order.
-pub const server_programs = [_][]const u8{ "quick_start", "connect" };
+pub const server_programs = [_][]const u8{ "quick_start", "connect", "leaders", "checkout" };
 
 /// The tests of the guide, against `redis.testing.FakeServer`:
 /// `zig build test-redis` runs them.
