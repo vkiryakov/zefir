@@ -552,6 +552,10 @@ const ListQuery = struct {
     pub const field_rules = .{ .tags = v.each(v.maxLength(30)), .page = v.positive, .sort = v.oneOf(.{ .low, .high }), .mode = v.equals("fast") };
     pub const openapi: Doc(@This()) = .{ .fields = .{ .page = .{ .examples = &.{ 1, 2 }, .deprecated = true } } };
 };
+const RecentCookies = struct {
+    recent: []const []const u8 = &.{},
+    pub const field_rules = .{ .recent = v.maxItems(5) };
+};
 const KeyHeaders = struct {
     idempotency_key: ?[]const u8 = null,
     trace: []const []const u8 = &.{},
@@ -571,4 +575,7 @@ test "parameter: description, deprecated, example and the schema of a field, nev
         keywordsOf(v.notBlank, ?[]const u8) ++ ",\"maxLength\":64}}", comptime schema.parameter(KeyHeaders, "idempotency_key", .headers));
     // A list in a header: a line of the header an item.
     try expectJson("{\"description\":\"The server reads an item from each line of this header and does not split a line at commas.\",\"schema\":{\"type\":\"array\",\"default\":[],\"items\":{\"type\":\"string\"}}}", comptime schema.parameter(KeyHeaders, "trace", .headers));
+    // A list in a cookie: the first cookie of the name, one item; the
+    // tighter bound of its rule's.
+    try expectJson("{\"description\":\"The server reads only the first cookie of this name: a list of one item.\",\"schema\":{\"type\":\"array\",\"maxItems\":1,\"default\":[],\"items\":{\"type\":\"string\"}}}", comptime schema.parameter(RecentCookies, "recent", .cookies));
 }

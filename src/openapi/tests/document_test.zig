@@ -731,6 +731,7 @@ const params = struct {
     const SessionCookies = struct {
         theme: Theme = .light,
         session_id: ?[]const u8 = null,
+        recent: []const []const u8 = &.{},
 
         pub const field_rules = .{ .session_id = v.rename("sid") };
     };
@@ -786,6 +787,9 @@ test "parameters: the path by outside names, the query, headers and cookies, tho
         "{\"name\":\"Idempotency-Key\",\"in\":\"header\",\"required\":false,\"schema\":{\"type\":\"string\"}}," ++
         "{\"name\":\"theme\",\"in\":\"cookie\",\"required\":false,\"schema\":{\"type\":\"string\",\"enum\":[\"light\",\"dark\"],\"default\":\"light\"}}," ++
         "{\"name\":\"sid\",\"in\":\"cookie\",\"required\":false,\"schema\":{\"type\":\"string\"}}," ++
+        // A list in a cookie: the server reads the first cookie of the name.
+        "{\"name\":\"recent\",\"in\":\"cookie\",\"required\":false,\"description\":\"The server reads only the first cookie of this name: a list of one item.\"," ++
+        "\"style\":\"form\",\"explode\":true,\"schema\":{\"type\":\"array\",\"maxItems\":1,\"default\":[],\"items\":{\"type\":\"string\"}}}," ++
         // What the middleware reads, after the route's own.
         "{\"name\":\"limit\",\"in\":\"query\",\"required\":false,\"schema\":{\"type\":\"integer\",\"format\":\"uint32\",\"minimum\":0,\"maximum\":4294967295,\"default\":20}}" ++
         "]", comptime at(get, &.{"parameters"}));

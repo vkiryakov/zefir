@@ -461,7 +461,9 @@ pub const Source = enum { path, query, headers, cookies };
 /// application's text, then what its transforms and rules say), its
 /// `deprecated` and `example` from the `FieldDoc` of the field, and its
 /// `schema`, with the rules of the field, its default and its `.examples`.
-/// A parameter is never null: a `?T` field is one that may be left out.
+/// A parameter is never null: a `?T` field is one that may be left out. A
+/// list in the headers is an item a line, and in the cookies the first
+/// cookie of its name, an item alone, as the server reads them.
 pub fn parameter(comptime Dto: type, comptime field: []const u8, comptime source: Source) json.Node {
     comptime {
         @setEvalBranchQuota(quota);
@@ -471,6 +473,10 @@ pub fn parameter(comptime Dto: type, comptime field: []const u8, comptime source
         const Item = listItem(Value) orelse Value;
         if (!isScalar(Item)) @compileError("zefir.openapi: " ++ where ++ ": " ++ @typeName(F) ++ " is not a parameter: a parameter is an integer, a float, bool, an enum or []const u8, alone, as ?T or as []const T");
         var p = Registry.typeParts(null, Value, .input, false, where, &.{});
+        // The server keeps the first cookie of a name: a bound of the type,
+        // which a rule's bound may only make tighter.
+        const cookie_list = source == .cookies and Item != Value;
+        if (cookie_list) p.keywords = p.keywords ++ [_]json.Member{count("maxItems", 1)};
         p = withRules(p, rulesAs(Dto, field, Value));
         const attrs = fieldAttrs(Dto, field);
         if (attrs.defaultValue(F)) |default| {
@@ -482,6 +488,7 @@ pub fn parameter(comptime Dto: type, comptime field: []const u8, comptime source
         var description: []const []const u8 = if (doc.description) |text| &.{text} else &.{};
         description = description ++ p.description;
         if (source == .headers and Item != Value) description = description ++ [_][]const u8{"The server reads an item from each line of this header and does not split a line at commas."};
+        if (cookie_list) description = description ++ [_][]const u8{"The server reads only the first cookie of this name: a list of one item."};
         p.description = &.{};
         var members: []const json.Member = &.{};
         if (description.len > 0) members = members ++ [_]json.Member{.{ .key = "description", .value = .{ .string = joined(description) } }};
