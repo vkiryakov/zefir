@@ -35,16 +35,6 @@ fn subscribed(io: Io, client: *redis.Client, options: redis.SubscribeOptions) !r
     };
 }
 
-/// PUBLISH of `payload` to `channel` through `client`: how many
-/// subscribers got it.
-fn publish(io: Io, client: *redis.Client, channel: []const u8, payload: []const u8) !u64 {
-    var d: redis.Diagnostics = .{};
-    return client.run(io, within(io, .fromSeconds(10)), cmd.publish(channel, payload), .{ .diagnostics = &d }) catch |err| {
-        std.debug.print("publish: {t}: {s}\n", .{ err, d.message() });
-        return err;
-    };
-}
-
 /// The next message of `sub`, which must come: one of `channel`, by
 /// `pattern` when not null.
 fn nextMessage(io: Io, sub: *redis.Subscriber, channel: []const u8, pattern: ?[]const u8) !redis.Subscriber.Message {
@@ -111,12 +101,26 @@ fn slow(io: Io) !void {
     // 64 MiB while the subscriber reads nothing: far more than the sockets
     // between them hold, the ports of docker included, so the server keeps
     // more than 1 MiB for the subscriber, and drops it. Valkey may count
-    // it in PUBLISH until its socket drains.
-    const chunk = try testing.allocator.alloc(u8, 256 * 1024);
+    // it in PUBLISH until its socket drains. In messages of 8 KiB, which
+    // count against the limit as they queue: Valkey 9 queues a string of
+    // 16 KiB or more by reference and counts it only once it writes it,
+    // so larger messages may pass the limit unseen.
+    const chunk = try testing.allocator.alloc(u8, 8 * 1024);
     defer testing.allocator.free(chunk);
     @memset(chunk, 'x');
-    const sent = 256;
-    for (0..sent) |_| _ = try publish(io, &client, "e2e:pubsub:slow", chunk);
+    const sent = 8192;
+    // 512 messages, 4 MiB, a pipeline.
+    const batch: [512]cmd.Publish = @splat(cmd.publish("e2e:pubsub:slow", chunk));
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    for (0..sent / batch.len) |_| {
+        _ = arena.reset(.retain_capacity);
+        var d: redis.Diagnostics = .{};
+        _ = client.pipeline(io, within(io, .fromSeconds(30)), @as([]const cmd.Publish, &batch), .{ .allocator = arena.allocator(), .diagnostics = &d }) catch |err| {
+            std.debug.print("publish: {t}: {s}\n", .{ err, d.message() });
+            return err;
+        };
+    }
     // What the sockets held comes, then the end of the stream.
     var got: usize = 0;
     while (true) {
