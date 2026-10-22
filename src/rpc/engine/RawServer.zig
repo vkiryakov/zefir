@@ -408,9 +408,11 @@ pub fn requestStop(server: *RawServer, io: std.Io) void {
 /// the stop. Closing the transport keeps its own limit. Of several calls
 /// the earliest deadline counts.
 ///
-/// `error.ShutdownTimeout` when the server has not stopped by then: a
-/// handler that ignores its cancelation, or a transport slow to close. The
-/// server stays in `draining`. Treat it as fatal and end the process;
+/// `error.ShutdownTimeout` when a handler still runs a second after its
+/// cancelation, or when the server has not stopped 250 ms before
+/// `deadline`, whichever comes first: a handler that ignores its
+/// cancelation, or a transport slow to close. The server stays in
+/// `draining`. Treat it as fatal and end the process;
 /// `deinit` would wait for such handlers without a limit. Once stopped,
 /// the error of a transport that broke, as `wait` returns it.
 pub fn shutdown(server: *RawServer, io: std.Io, deadline: std.Io.Clock.Timestamp) ShutdownError!void {

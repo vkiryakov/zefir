@@ -26,6 +26,10 @@
 //! the handlers, so `zig build test` stops on a handler against its
 //! contract. Tests of failures reach the transport's hooks through
 //! `memory`: `t.memory.failNext(error.Unavailable)`, `t.memory.breakLink(io)`.
+//!
+//! It is not a bean of zefir.App: its `init` already starts the server.
+//! Under App, build an `rpc.Server` on an `rpc.testing.MemoryTransport`
+//! bean, as the section "Under zefir.App" of the rpc guide does.
 
 const std = @import("std");
 const AppServer = @import("../app/Server.zig");
