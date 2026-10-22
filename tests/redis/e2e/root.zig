@@ -126,4 +126,5 @@ fn withinTimeLimit(io: Io, comptime scenario: fn (Io) anyerror!void) anyerror!vo
 test {
     testing.refAllDecls(@This());
     _ = @import("handshake.zig");
+    _ = @import("auth.zig");
 }
