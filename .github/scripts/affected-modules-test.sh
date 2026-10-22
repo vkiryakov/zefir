@@ -166,13 +166,14 @@ edit src/rpc-nats/Transport.zig                 | rpc-nats zefir
 edit src/nats/Client.zig                        | rpc-nats nats zefir
 edit tests/nats/e2e/pubsub.zig                  | rpc-nats nats zefir
 edit tests/nats/README.md                       | rpc-nats nats zefir
-edit docker-compose.yml                         | rpc-nats mongo nats zefir
+edit docker-compose.yml                         | rpc-nats odm mongo nats zefir
 edit tests/rpc-nats/e2e/root.zig                | rpc-nats zefir
 edit tests/rpc-nats/conf/acl.conf               | rpc-nats zefir
 edit tests/http/build.zig                       | http jwt zefir
 edit tests/mongo/e2e/crud.zig                   | mongo zefir
 edit tests/mongo/build.zig.zon                  | mongo zefir
 edit tests/mongo/stress/storm.zig               | mongo zefir
+edit tests/odm/e2e/root.zig                     | odm mongo zefir
 edit examples/rpc-custom-transport/src/root.zig | rpc rpc-nats jwt zefir
 edit examples/rpc-custom-transport/consumer/build.zig | rpc rpc-nats jwt zefir
 edit examples/rpc-custom-transport/README.md    | rpc rpc-nats jwt zefir

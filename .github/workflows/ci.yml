@@ -103,6 +103,13 @@ jobs:
         shell: bash
         working-directory: tests/mongo
         run: zig build check --summary all
+      # The same for tests/odm, the end-to-end tests of zefir-odm on
+      # mongo.OdmDriver, which need mongod in Docker: it stands on both
+      # modules.
+      - if: contains(format(' {0} ', env.MODULES), ' odm ') || contains(format(' {0} ', env.MODULES), ' mongo ')
+        shell: bash
+        working-directory: tests/odm
+        run: zig build check --summary all
 
   # The tests again under ThreadSanitizer; it does not build for Windows.
   tsan:
@@ -160,6 +167,7 @@ jobs:
           zig fmt --check build.zig build.zig.zon src tests examples
           --exclude tests/nats/zig-pkg --exclude tests/rpc-nats/zig-pkg
           --exclude tests/http/zig-pkg --exclude tests/mongo/zig-pkg
+          --exclude tests/odm/zig-pkg
           --exclude examples/rpc-custom-transport/zig-pkg
           --exclude examples/rpc-custom-transport/consumer/zig-pkg
 

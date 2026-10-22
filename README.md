@@ -445,7 +445,7 @@ zig build test-log --summary all                                                
 # check formatting, as CI does
 zig fmt --check build.zig build.zig.zon src tests examples \
   --exclude tests/nats/zig-pkg --exclude tests/rpc-nats/zig-pkg \
-  --exclude tests/http/zig-pkg --exclude tests/mongo/zig-pkg \
+  --exclude tests/http/zig-pkg --exclude tests/mongo/zig-pkg --exclude tests/odm/zig-pkg \
   --exclude examples/rpc-custom-transport/zig-pkg --exclude examples/rpc-custom-transport/consumer/zig-pkg
 ```
 

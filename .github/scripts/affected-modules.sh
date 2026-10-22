@@ -7,10 +7,10 @@
 #
 # A file under src/<module>/ affects that module and every module whose
 # tests import it, directly or through other modules; zefir imports them
-# all. tests/nats/, tests/rpc-nats/, tests/http/ and tests/mongo/, the
-# end-to-end tests of nats, of rpc-nats, of http and of mongo, count as
-# their modules. docker-compose.yml, the servers of nats, rpc-nats and
-# mongo, counts as all three.
+# all. tests/nats/, tests/rpc-nats/, tests/http/, tests/mongo/ and
+# tests/odm/, the end-to-end tests of nats, of rpc-nats, of http, of mongo
+# and of odm, count as their modules. docker-compose.yml, the servers of
+# nats, rpc-nats, mongo and odm, counts as all four.
 # examples/rpc-custom-transport/, a transport outside zefir that CI runs
 # against rpc, counts as rpc. build.zig, build.zig.zon, src/zefir.zig,
 # .github/ and any other path the script does not know affect every
@@ -104,8 +104,9 @@ elif [ $# -eq 2 ] && [ -n "$1" ] && [ -n "$2" ]; then
         tests/rpc-nats/*) changed="$changed rpc-nats" ;;
         tests/http/*) changed="$changed http" ;;
         tests/mongo/*) changed="$changed mongo" ;;
+        tests/odm/*) changed="$changed odm" ;;
         examples/rpc-custom-transport/*) changed="$changed rpc" ;;
-        docker-compose.yml) changed="$changed nats rpc-nats mongo" ;;
+        docker-compose.yml) changed="$changed nats rpc-nats mongo odm" ;;
         README.md) changed="$changed rpc http" ;;
         docs/* | *.md) ;;
         *) all=true ;;
