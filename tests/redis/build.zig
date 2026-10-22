@@ -60,6 +60,8 @@ const examples = [_]Example{
     },
     .{ .name = "leaders", .env = plain, .command = "$ zig build run" },
     .{ .name = "checkout", .env = plain, .command = "$ zig build run" },
+    .{ .name = "limits", .env = plain, .command = "$ zig build run" },
+    .{ .name = "orders", .env = plain, .command = "$ zig build run" },
 };
 
 pub fn build(b: *std.Build) void {

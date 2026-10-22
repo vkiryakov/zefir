@@ -1234,6 +1234,346 @@ groups](#streams-and-consumer-groups).
   deadline: give it a timeout of the server at least 150 ms shorter than
   what is left of the deadline.
 
+## Scripts
+
+A Lua script runs on the server as one command: no other command runs
+while it does, so it reads keys, decides and writes, with nothing between,
+which a transaction cannot do. `cmd.eval(T, source, keys, args)` sends its
+text with each call. A `redis.Script` holds the text and its SHA1,
+computed when the program compiles for a script that is a constant, and
+`cmd.evalScript(T, &script, keys, args)` sends the SHA1 alone, EVALSHA.
+The server keeps its scripts in a cache that a restart, a failover or
+SCRIPT FLUSH empties; EVALSHA then answers NOSCRIPT and runs nothing, and
+the client sends the text, EVAL, on the same connection. That is no retry:
+nothing ran.
+
+`limits.zig` limits the requests of the shop's API with a script:
+
+```zig
+//! A limit on the requests of the shop's API: each customer may make five
+//! a minute. A Lua script counts them on the server, so that the count and
+//! the end of its minute change together, however many requests come at
+//! once. The client sends the script by its SHA1, and its text once when
+//! the server lacks it: after the server forgot its scripts, the next call
+//! goes on. Each run starts afresh.
+//!
+//! Settings, from the environment:
+//!
+//!   APP_REDIS_URL        the server; redis://127.0.0.1:6379 by default
+//!   APP_REDIS_PASSWORD   the password of the user of the URL, or of the
+//!                        user default, if the server wants one
+//!
+//! In tests/redis, `zig build example-limits` runs it against the servers
+//! of the repository's docker-compose.yml.
+
+const std = @import("std");
+const confy = @import("confy");
+const core = @import("core");
+const log = @import("log");
+const redis = @import("redis");
+const zio = @import("zio");
+const cmd = redis.cmd;
+
+pub const std_options: std.Options = .{ .logFn = log.stdLogFn };
+
+const Config = struct {
+    redis: struct {
+        url: []const u8 = "redis://127.0.0.1:6379",
+        password: ?confy.Secret = null,
+    } = .{},
+};
+
+/// Counts a request in the window KEYS[1], which lasts ARGV[2] ms from its
+/// first request: {1, the requests left} while no more than ARGV[1] came,
+/// else {0, the milliseconds until the window ends}. Its SHA1 is computed
+/// when the program compiles.
+const allow: redis.Script = .init(
+    \\local count = redis.call('INCR', KEYS[1])
+    \\if count == 1 then redis.call('PEXPIRE', KEYS[1], ARGV[2]) end
+    \\local limit = tonumber(ARGV[1])
+    \\if count > limit then return {0, redis.call('PTTL', KEYS[1])} end
+    \\return {1, limit - count}
+);
+
+/// The script's answer, a table of two numbers: a tuple.
+const Verdict = struct { i64, i64 };
+
+pub fn main(init: std.process.Init) !void {
+    var config: Config = undefined;
+    confy.loadOrExit(init.arena.allocator(), &config, .{
+        .io = init.io,
+        .environ = init.environ_map,
+        .env_prefix = "APP_",
+        .sources = &.{.osEnv()},
+    });
+    const logger: log.Logger = try .init(init.gpa, init.io, .{ .format = .text });
+    defer logger.deinit();
+    logger.installStdLog();
+    const app = logger.scoped("app");
+    const rt = try zio.Runtime.init(init.gpa, .{ .executors = .auto });
+    defer rt.deinit();
+    const io = rt.io();
+
+    var client: redis.Client = try .init(init.gpa, io, .{
+        .url = config.redis.url,
+        .password = if (config.redis.password) |password| password.expose() else null,
+    });
+    defer client.deinit();
+    try client.connect(io, within(io, .fromSeconds(10)), null);
+    defer client.close(io);
+
+    const op: redis.OperationContext = .of(within(io, .fromSeconds(10)));
+    _ = try client.run(io, op, cmd.del(&.{ "rate:ann", "rate:bob" }), .{});
+
+    // Ann makes seven requests in a row: five pass.
+    for (0..7) |_| try request(io, op, &client, app, "ann", "rate:ann");
+    // Bob's window is his own.
+    try request(io, op, &client, app, "bob", "rate:bob");
+    // The server forgets its scripts, as after a restart: the next call
+    // gets NOSCRIPT for the SHA1, sends the text, and goes on.
+    try client.run(io, op, cmd.raw(void, .{ "SCRIPT", "FLUSH" }), .{});
+    try request(io, op, &client, app, "bob", "rate:bob");
+}
+
+/// A context whose deadline is `budget` away.
+fn within(io: std.Io, budget: std.Io.Duration) core.Context {
+    return core.Context.root.withDeadline(.after(std.Io.Clock.awake.now(io), budget));
+}
+
+/// A request of `customer`, whose window is the key `window`: five a
+/// minute.
+fn request(io: std.Io, op: redis.OperationContext, client: *redis.Client, app: log.Logger, customer: []const u8, window: []const u8) !void {
+    const verdict = try client.run(io, op, cmd.evalScript(Verdict, &allow, &.{window}, .{ 5, 60_000 }), .{});
+    if (verdict[0] == 1) {
+        app.info("Allowed", .{ .customer = customer, .left = verdict[1] });
+    } else {
+        app.warn("Too many requests", .{ .customer = customer, .retry_in_s = @divFloor(verdict[1] + 999, 1000) });
+    }
+}
+```
+
+```text
+$ zig build run
+2026-10-22T05:28:13.267Z INFO  [app] Allowed customer=ann left=4
+2026-10-22T05:28:13.397Z INFO  [app] Allowed customer=ann left=3
+2026-10-22T05:28:13.418Z INFO  [app] Allowed customer=ann left=2
+2026-10-22T05:28:13.420Z INFO  [app] Allowed customer=ann left=1
+2026-10-22T05:28:13.430Z INFO  [app] Allowed customer=ann left=0
+2026-10-22T05:28:13.441Z WARN  [app] Too many requests customer=ann retry_in_s=60
+2026-10-22T05:28:13.457Z WARN  [app] Too many requests customer=ann retry_in_s=60
+2026-10-22T05:28:13.504Z INFO  [app] Allowed customer=bob left=4
+2026-10-22T05:28:13.576Z INFO  [app] Allowed customer=bob left=3
+```
+
+- **The script** counts a request with INCR, ends the window with PEXPIRE
+  at its first request, and answers a table of two numbers, which reads
+  into a tuple. The keys go in `keys`, the other values in `args`: KEYS[1],
+  ARGV[1] and ARGV[2] in the script.
+- **One command**, so two requests at once cannot both read four and both
+  pass as the fifth.
+- **After SCRIPT FLUSH** the call went on as before: EVALSHA met NOSCRIPT,
+  and EVAL ran the script.
+- **What a script answers**, the server converts: a Lua number becomes an
+  integer, its fraction dropped; a table an array; `false` null; and
+  `{err = …}` an error, a `ServerError` with that code.
+- **In a pipeline or a transaction** `evalScript` sends EVAL at once: there
+  a NOSCRIPT could not be answered without changing the order of the
+  commands.
+- **An error in the middle** of a script leaves the writes it made before:
+  a `ServerError` may have run, in part.
+
+## Streams and consumer groups
+
+A *stream* is a log of entries that only grows: XADD appends an entry of
+a few fields, and the server gives it an id from its clock,
+`<milliseconds>-<sequence>`. Anyone may read a stream from any id. A
+*consumer group* shares it among workers: each entry goes to one consumer
+of the group and stays *pending* for that consumer until it acknowledges
+it, with XACK, and the entries of a consumer that fell over another can
+claim.
+
+```mermaid
+flowchart LR
+    shop["the shop: XADD"] --> stream[("stream shipping:<br/>1001, 1002, 1003")]
+    stream -->|"XREADGROUP: 1001, 1002"| kim["courier kim"]
+    stream -->|"XREADGROUP: 1003"| lee["courier lee"]
+    kim -->|"XACK 1001"| done(["delivered"])
+    kim -.->|"falls over: 1002 stays pending"| pending[["pending for kim"]]
+    pending -->|"XAUTOCLAIM, later"| lee
+    lee -->|"XACK 1003, 1002"| done
+```
+
+`orders.zig` ships the shop's orders through a stream:
+
+```zig
+//! The shipping of the shop's orders, through a stream: the shop adds an
+//! entry to the stream "shipping" for each order to ship, and the couriers
+//! of the group "couriers" take them, each entry to one courier, and
+//! acknowledge each once it is delivered. A courier that falls over leaves
+//! the entries it took pending, and another claims them. Each run starts
+//! afresh.
+//!
+//! Settings, from the environment:
+//!
+//!   APP_REDIS_URL        the server; redis://127.0.0.1:6379 by default
+//!   APP_REDIS_PASSWORD   the password of the user of the URL, or of the
+//!                        user default, if the server wants one
+//!
+//! In tests/redis, `zig build example-orders` runs it against the servers
+//! of the repository's docker-compose.yml.
+
+const std = @import("std");
+const confy = @import("confy");
+const core = @import("core");
+const log = @import("log");
+const redis = @import("redis");
+const zio = @import("zio");
+const cmd = redis.cmd;
+
+pub const std_options: std.Options = .{ .logFn = log.stdLogFn };
+
+const Config = struct {
+    redis: struct {
+        url: []const u8 = "redis://127.0.0.1:6379",
+        password: ?confy.Secret = null,
+    } = .{},
+};
+
+/// An order to ship, as an entry of the stream keeps it: a field for each
+/// field of the struct.
+const Shipment = struct {
+    order: u64,
+    address: []const u8,
+};
+
+pub fn main(init: std.process.Init) !void {
+    var config: Config = undefined;
+    confy.loadOrExit(init.arena.allocator(), &config, .{
+        .io = init.io,
+        .environ = init.environ_map,
+        .env_prefix = "APP_",
+        .sources = &.{.osEnv()},
+    });
+    const logger: log.Logger = try .init(init.gpa, init.io, .{ .format = .text });
+    defer logger.deinit();
+    logger.installStdLog();
+    const app = logger.scoped("app");
+    const rt = try zio.Runtime.init(init.gpa, .{ .executors = .auto });
+    defer rt.deinit();
+    const io = rt.io();
+
+    var client: redis.Client = try .init(init.gpa, io, .{
+        .url = config.redis.url,
+        .password = if (config.redis.password) |password| password.expose() else null,
+    });
+    defer client.deinit();
+    try client.connect(io, within(io, .fromSeconds(10)), null);
+    defer client.close(io);
+
+    var arena_state: std.heap.ArenaAllocator = .init(init.gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const op: redis.OperationContext = .of(within(io, .fromSeconds(10)));
+    _ = try client.run(io, op, cmd.del(&.{"shipping"}), .{});
+
+    // The group of the couriers, made as the service starts; a group that
+    // is there already, from the start before, is fine.
+    try createGroup(io, op, &client);
+    try createGroup(io, op, &client);
+
+    // Three orders to ship. The server gives each entry its id: the time
+    // in milliseconds and a sequence number.
+    for ([_]Shipment{
+        .{ .order = 1001, .address = "12 Bean Street" },
+        .{ .order = 1002, .address = "7 Roast Lane" },
+        .{ .order = 1003, .address = "3 Crema Court" },
+    }) |shipment| {
+        const id = try client.run(io, op, cmd.xadd("shipping", shipment, .{ .max_len = 10_000 }), .{});
+        app.info("To ship", .{ .order = shipment.order, .id = id });
+    }
+
+    // Kim takes two orders: the group gives them to her alone.
+    const kim = try client.run(io, op, cmd.xreadgroup(Shipment, "shipping", .{ .group = "couriers", .consumer = "kim", .count = 2 }), .{ .allocator = arena });
+    for (kim) |entry| app.info("Kim takes", .{ .order = entry.fields.?.order });
+    // She delivers the first, and acknowledges it: it is done.
+    _ = try client.run(io, op, cmd.xack("shipping", "couriers", &.{kim[0].id}), .{});
+    app.info("Kim delivers", .{ .order = kim[0].fields.?.order });
+    // Then she falls over, with the second still hers: pending.
+
+    // Lee takes what nobody has taken yet, and delivers it.
+    const lee = try client.run(io, op, cmd.xreadgroup(Shipment, "shipping", .{ .group = "couriers", .consumer = "lee" }), .{ .allocator = arena });
+    for (lee) |entry| {
+        app.info("Lee takes", .{ .order = entry.fields.?.order });
+        _ = try client.run(io, op, cmd.xack("shipping", "couriers", &.{entry.id}), .{});
+    }
+
+    // What the group gave out and nobody acknowledged.
+    const pending = try client.run(io, op, cmd.xpending("shipping", "couriers"), .{ .allocator = arena });
+    for (pending.consumers) |consumer| app.info("Pending", .{ .consumer = consumer.name, .entries = consumer.count });
+
+    // Lee claims the entries that have been pending for long: in a service,
+    // minutes; here, 100 ms.
+    try io.sleep(.fromMilliseconds(200), .awake);
+    const claimed = try client.run(io, op, cmd.xautoclaim(Shipment, "shipping", .{ .group = "couriers", .consumer = "lee", .min_idle = .fromMilliseconds(100) }), .{ .allocator = arena });
+    for (claimed.entries) |entry| {
+        app.info("Lee claims", .{ .order = entry.fields.?.order });
+        _ = try client.run(io, op, cmd.xack("shipping", "couriers", &.{entry.id}), .{});
+    }
+    const left = try client.run(io, op, cmd.xpending("shipping", "couriers"), .{ .allocator = arena });
+    app.info("Pending now", .{ .entries = left.count });
+}
+
+/// A context whose deadline is `budget` away.
+fn within(io: std.Io, budget: std.Io.Duration) core.Context {
+    return core.Context.root.withDeadline(.after(std.Io.Clock.awake.now(io), budget));
+}
+
+/// Makes the group "couriers" of the stream "shipping", and the stream if
+/// it is not there; a group that is there already is no error.
+fn createGroup(io: std.Io, op: redis.OperationContext, client: *redis.Client) !void {
+    var d: redis.Diagnostics = .{};
+    client.run(io, op, cmd.xgroupCreate("shipping", "couriers", .{ .mkstream = true }), .{ .diagnostics = &d }) catch |err| {
+        if (err == error.ServerError and d.isCode("BUSYGROUP")) return;
+        return err;
+    };
+}
+```
+
+```text
+$ zig build run
+2026-10-22T05:28:15.652Z INFO  [app] To ship order=1001 id=1792646895645-0
+2026-10-22T05:28:15.676Z INFO  [app] To ship order=1002 id=1792646895669-0
+2026-10-22T05:28:15.697Z INFO  [app] To ship order=1003 id=1792646895683-0
+2026-10-22T05:28:15.729Z INFO  [app] Kim takes order=1001
+2026-10-22T05:28:15.729Z INFO  [app] Kim takes order=1002
+2026-10-22T05:28:15.745Z INFO  [app] Kim delivers order=1001
+2026-10-22T05:28:15.776Z INFO  [app] Lee takes order=1003
+2026-10-22T05:28:15.808Z INFO  [app] Pending consumer=kim entries=1
+2026-10-22T05:28:16.011Z INFO  [app] Lee claims order=1002
+2026-10-22T05:28:16.019Z INFO  [app] Pending now entries=0
+```
+
+- **An entry** reads into a struct of yours by the names of its fields, as
+  a hash does: `redis.Entry(Shipment)` holds its `id` and its `fields`.
+  `.max_len` keeps the stream to about that many entries.
+- **The group.** XGROUP CREATE with `.mkstream` makes the stream too. A
+  group that is there already is `ServerError` with the code BUSYGROUP,
+  which `createGroup` takes as done, so that every start of the service
+  may make it.
+- **XREADGROUP** with `.from = .new`, the default, gives the entries that
+  the group has not given out yet, each to one consumer; `.from =
+  .{ .id = .zero }` gives a consumer its own pending ones again, as after
+  its restart.
+- **XACK** takes an entry off the pending ones: it is done. Until then the
+  group keeps it, so nothing is lost when a consumer falls over.
+- **XAUTOCLAIM** hands the entries pending for longer than `.min_idle` to
+  another consumer: in a service, minutes. An entry that was deleted while
+  it was pending comes with `fields == null`.
+- **XREADGROUP with `.block`** waits for new entries, with its timeout
+  from the deadline, as [the blocking
+  commands](#blocking-commands-and-the-reliable-queue) do. A typed read
+  takes one stream; several at once go through `cmd.raw`.
+
 ## Deadlines and cancellation
 
 A call takes a `redis.OperationContext`, whose `ctx` is the
