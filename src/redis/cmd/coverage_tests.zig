@@ -19,6 +19,7 @@ const catalog = [_][]const []const u8{
     &@import("sets_tests.zig").covered,
     &@import("zsets_tests.zig").covered,
     &@import("scripting_tests.zig").covered,
+    &@import("streams_tests.zig").covered,
 };
 
 /// The functions that other tests run: `raw` in raw_tests.zig and in the

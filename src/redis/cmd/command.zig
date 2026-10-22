@@ -18,6 +18,8 @@
 //! | `std.Io.Duration`         | its milliseconds, rounded down           | under 1 ms; over maxInt(i64) ms  |
 //! | `redis.End`               | `LEFT` or `RIGHT`                        |                                  |
 //! | `redis.ScoreBound`        | the score, `(` and the score, `-inf`, `+inf` | NaN                          |
+//! | `redis.StreamId`          | `<ms>-<seq>`                             |                                  |
+//! | `[]const redis.StreamId`  | one argument per id                      | an empty list                    |
 //! | any other value           | by the rules of `resp.args`              | NaN                              |
 //!
 //! A refusal names the function of `cmd` and the field, never a value:
@@ -31,7 +33,10 @@
 //!   LPUSH and RPUSH and the arguments of scripts: a slice of strings, or
 //!   a tuple of values.
 //! - `millis` and `writeMillis` — a duration as milliseconds.
-//! - `writeBound` — a bound of a range of scores.
+//! - `writeBound` — a bound of a range of scores; `writeId` — the id of
+//!   an entry of a stream.
+//! - `FieldsOf(F)` and `fieldsOf(f)` — the fields of HSET and XADD: a
+//!   struct, or a list of `redis.FieldValue`.
 
 const std = @import("std");
 const Io = std.Io;
@@ -45,6 +50,8 @@ const Block = types.Block;
 const End = types.End;
 const KeyValue = types.KeyValue;
 const ScoreBound = types.ScoreBound;
+const StreamId = types.StreamId;
+const FieldValue = types.FieldValue;
 
 /// The type of a command that is `word` and then the fields of `Args` in
 /// their order, by the table above, and whose reply reads into `R`.
@@ -249,7 +256,7 @@ fn writePage(w: resp.Writer, p: contract.Page) resp.Writer.Error!void {
 }
 
 /// How a field of the arguments goes out, by its type.
-const Kind = enum { string, list, pairs, values, duration, end, bound, value };
+const Kind = enum { string, list, pairs, values, duration, end, bound, id, ids, value };
 
 fn kindOf(comptime F: type) Kind {
     if (F == []const u8) return .string;
@@ -258,6 +265,8 @@ fn kindOf(comptime F: type) Kind {
     if (F == Io.Duration) return .duration;
     if (F == End) return .end;
     if (F == ScoreBound) return .bound;
+    if (F == StreamId) return .id;
+    if (F == []const StreamId) return .ids;
     if (isTuple(F)) return .values;
     return .value;
 }
@@ -277,8 +286,8 @@ pub fn checkFields(fields: anytype, comptime call: []const u8, comptime word: []
         const v = @field(fields, field);
         const none = call ++ ": no " ++ field ++ ": " ++ word ++ " takes one or more";
         switch (comptime kindOf(F)) {
-            .string, .end => {},
-            .list, .pairs => if (v.len == 0) return invalid(diagnostics, none, .{}),
+            .string, .end, .id => {},
+            .list, .pairs, .ids => if (v.len == 0) return invalid(diagnostics, none, .{}),
             .values => {
                 var n: usize = 0;
                 inline for (0..@typeInfo(F).@"struct".field_types.len) |i| {
@@ -304,7 +313,7 @@ pub fn countFields(fields: anytype) usize {
     inline for (info.field_names, info.field_types) |field, F| {
         const v = @field(fields, field);
         switch (comptime kindOf(F)) {
-            .list => n += v.len,
+            .list, .ids => n += v.len,
             .pairs => n += 2 * v.len,
             .values => inline for (0..@typeInfo(F).@"struct".field_types.len) |i| {
                 n += args.count(v[i]);
@@ -336,9 +345,49 @@ pub fn writeFields(w: resp.Writer, fields: anytype) resp.Writer.Error!void {
                 .right => "RIGHT",
             }),
             .bound => try writeBound(w, v),
+            .id => try writeId(w, v),
+            .ids => for (v) |id| try writeId(w, id),
             .value => try args.write(w, v),
         }
     }
+}
+
+/// Writes `id` as the server writes it, `<ms>-<seq>`.
+pub fn writeId(w: resp.Writer, id: StreamId) resp.Writer.Error!void {
+    // Two numbers of 20 digits and the dash.
+    var buffer: [41]u8 = undefined;
+    try w.bulk(std.fmt.bufPrint(&buffer, "{f}", .{id}) catch unreachable);
+}
+
+/// The type in which HSET and XADD keep their fields, `F` the type the
+/// caller gave: a slice of `redis.FieldValue`, or a pointer to an array of
+/// them, as `[]const redis.FieldValue`; a pointer to a tuple of literals
+/// with a `.field` and a `.value` as an array of `redis.FieldValue` of its
+/// own; anything else as it is, for the command to check.
+pub fn FieldsOf(comptime F: type) type {
+    return switch (@typeInfo(F)) {
+        .pointer => |info| switch (info.size) {
+            .slice => if (info.child == FieldValue) []const FieldValue else F,
+            .one => switch (@typeInfo(info.child)) {
+                .array => |array| if (array.child == FieldValue) []const FieldValue else F,
+                .@"struct" => |child| if (child.is_tuple) [child.field_types.len]FieldValue else F,
+                else => F,
+            },
+            else => F,
+        },
+        else => F,
+    };
+}
+
+/// `fields` as HSET and XADD keep it: the literals behind a pointer to a
+/// tuple copied into an array of `redis.FieldValue`.
+pub fn fieldsOf(fields: anytype) FieldsOf(@TypeOf(fields)) {
+    const F = FieldsOf(@TypeOf(fields));
+    if (@typeInfo(F) == .array) {
+        var list: F = undefined;
+        inline for (&list, 0..) |*pair, i| pair.* = .{ .field = fields[i].field, .value = fields[i].value };
+        return list;
+    } else return fields;
 }
 
 /// Writes `bound`, which `checkFields` has checked: the score of an

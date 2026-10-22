@@ -34,7 +34,9 @@
 //! - `pub const blocking: contract.Blocking` — a blocking command: the
 //!   units of its timeout on the wire and what waits less. It also
 //!   declares `pub fn timeout(c: C) redis.Block`, how long the caller lets
-//!   it wait, and `pub fn writeWith(c: C, w: resp.Writer, timeout_ms: u64)`,
+//!   it wait, or `?redis.Block` for a command that blocks only with an
+//!   option, null without it, as XREAD without BLOCK (`timeoutOf`); and
+//!   `pub fn writeWith(c: C, w: resp.Writer, timeout_ms: u64)`,
 //!   the command with `timeout_ms` in place of its timeout, 0 for forever,
 //!   written by `writeTimeout`. Under a deadline the client takes the
 //!   timeout from what is left of it (`engine/blocking.zig`) and writes the
@@ -210,6 +212,12 @@ pub const Blocking = struct {
 
 pub fn isBlocking(comptime C: type) bool {
     return @hasDecl(C, "blocking");
+}
+
+/// How long the blocking command `c` lets the server wait; null when this
+/// one does not block.
+pub fn timeoutOf(c: anytype) ?Block {
+    return c.timeout();
 }
 
 pub fn isScript(comptime C: type) bool {

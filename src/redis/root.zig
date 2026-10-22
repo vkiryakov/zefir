@@ -123,6 +123,7 @@ test {
     _ = @import("cmd/sets_tests.zig");
     _ = @import("cmd/zsets_tests.zig");
     _ = @import("cmd/scripting_tests.zig");
+    _ = @import("cmd/streams_tests.zig");
     _ = @import("cmd/coverage_tests.zig");
 }
 

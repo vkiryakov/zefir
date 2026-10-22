@@ -30,6 +30,10 @@
 //!   A range read into `redis.Scored(M)` asks for WITHSCORES.
 //! - Scripts: `eval` of a text, and `evalScript` of a `redis.Script`,
 //!   which `run` sends by its SHA1, and by its text after NOSCRIPT.
+//! - Streams: `xadd`, `xlen`, `xrange`, `xrevrange`, `xread`,
+//!   `xreadgroup`, `xack`, `xgroupCreate`, `xpending`, `xpendingRange`,
+//!   `xautoclaim`, `xdel`, `xtrim`. XREAD and XREADGROUP read one stream,
+//!   and with `.block` take their timeout from the deadline of the call.
 //! - `raw(T, args)` — a command that the catalog lacks: `args` is a tuple
 //!   of strings, numbers, bools and enums, the name of the command first,
 //!   or a slice of strings, and the reply reads into `T` by the rules of
@@ -59,6 +63,7 @@ const lists = @import("cmd/lists.zig");
 const sets = @import("cmd/sets.zig");
 const zsets = @import("cmd/zsets.zig");
 const scripting = @import("cmd/scripting.zig");
+const streams = @import("cmd/streams.zig");
 
 pub const get = strings.get;
 pub const Get = strings.Get;
@@ -226,6 +231,41 @@ pub const eval = scripting.eval;
 pub const Eval = scripting.Eval;
 pub const evalScript = scripting.evalScript;
 pub const EvalScript = scripting.EvalScript;
+
+pub const xadd = streams.xadd;
+pub const Xadd = streams.Xadd;
+pub const XaddOptions = streams.XaddOptions;
+pub const xlen = streams.xlen;
+pub const Xlen = streams.Xlen;
+pub const xrange = streams.xrange;
+pub const Xrange = streams.Xrange;
+pub const XrangeOptions = streams.XrangeOptions;
+pub const xrevrange = streams.xrevrange;
+pub const Xrevrange = streams.Xrevrange;
+pub const xread = streams.xread;
+pub const Xread = streams.Xread;
+pub const XreadOptions = streams.XreadOptions;
+pub const xreadgroup = streams.xreadgroup;
+pub const Xreadgroup = streams.Xreadgroup;
+pub const XreadgroupOptions = streams.XreadgroupOptions;
+pub const xack = streams.xack;
+pub const Xack = streams.Xack;
+pub const xgroupCreate = streams.xgroupCreate;
+pub const XgroupCreate = streams.XgroupCreate;
+pub const XgroupCreateOptions = streams.XgroupCreateOptions;
+pub const xpending = streams.xpending;
+pub const Xpending = streams.Xpending;
+pub const xpendingRange = streams.xpendingRange;
+pub const XpendingRange = streams.XpendingRange;
+pub const XpendingRangeOptions = streams.XpendingRangeOptions;
+pub const xautoclaim = streams.xautoclaim;
+pub const Xautoclaim = streams.Xautoclaim;
+pub const XautoclaimOptions = streams.XautoclaimOptions;
+pub const xdel = streams.xdel;
+pub const Xdel = streams.Xdel;
+pub const xtrim = streams.xtrim;
+pub const Xtrim = streams.Xtrim;
+pub const XtrimOptions = streams.XtrimOptions;
 
 pub const raw = raw_command.raw;
 pub const Raw = raw_command.Raw;

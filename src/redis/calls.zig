@@ -82,10 +82,14 @@ pub fn waitOf(commands: anytype) Wait {
     var wait: Wait = .none;
     if (comptime @typeInfo(@TypeOf(commands)) == .@"struct") {
         inline for (@typeInfo(@TypeOf(commands)).@"struct".field_types, 0..) |C, i| {
-            if (comptime contract.isBlocking(C)) wait = wait.add(commands[i].timeout());
+            if (comptime contract.isBlocking(C)) {
+                if (contract.timeoutOf(commands[i])) |block| wait = wait.add(block);
+            }
         }
     } else if (comptime contract.isBlocking(contract.Element(@TypeOf(commands)))) {
-        for (commands) |command| wait = wait.add(command.timeout());
+        for (commands) |command| {
+            if (contract.timeoutOf(command)) |block| wait = wait.add(block);
+        }
     }
     return wait;
 }
@@ -114,14 +118,18 @@ const Blocker = struct {
 fn firstBlocking(commands: anytype) ?Blocker {
     if (comptime @typeInfo(@TypeOf(commands)) == .@"struct") {
         inline for (@typeInfo(@TypeOf(commands)).@"struct".field_types, 0..) |C, i| {
-            if (comptime contract.isBlocking(C)) return .{ .name = commands[i].name(), .instead = C.blocking.instead };
+            if (comptime contract.isBlocking(C)) {
+                if (contract.timeoutOf(commands[i]) != null) return .{ .name = commands[i].name(), .instead = C.blocking.instead };
+            }
         }
         return null;
     }
     const C = contract.Element(@TypeOf(commands));
     if (comptime !contract.isBlocking(C)) return null;
-    if (commands.len == 0) return null;
-    return .{ .name = commands[0].name(), .instead = C.blocking.instead };
+    for (commands) |command| {
+        if (contract.timeoutOf(command) != null) return .{ .name = command.name(), .instead = C.blocking.instead };
+    }
+    return null;
 }
 
 /// The rules of the command before anything else of a call: its own, then
@@ -278,7 +286,7 @@ fn Sha(comptime C: type) type {
 /// timeout within `room`, when the call has a deadline.
 fn writeCommand(conn: *Connection, command: anytype, room: ?u64, d: ?*Diagnostics) Error!void {
     if (comptime contract.isBlocking(@TypeOf(command))) if (room) |limit| {
-        return conn.writeWith(command, blocking.timeout(command.timeout(), limit), d);
+        if (contract.timeoutOf(command)) |block| return conn.writeWith(command, blocking.timeout(block, limit), d);
     };
     return conn.write(command, d);
 }

@@ -31,8 +31,8 @@ const By = struct { key: []const u8, field: []const u8, by: i64 };
 /// list of `redis.FieldValue` such as `&.{.{ .field = "plan", .value = "pro" }}`.
 /// One field to write at least. The count of new fields that HSET
 /// answers is dropped; `cmd.raw(u64, .{ "HSET", … })` keeps it.
-pub fn hset(key: []const u8, fields: anytype) Hset(FieldsOf(@TypeOf(fields))) {
-    return .{ .key = key, .fields = fieldsOf(fields) };
+pub fn hset(key: []const u8, fields: anytype) Hset(command.FieldsOf(@TypeOf(fields))) {
+    return .{ .key = key, .fields = command.fieldsOf(fields) };
 }
 
 pub fn Hset(comptime F: type) type {
@@ -74,37 +74,6 @@ pub fn Hset(comptime F: type) type {
             return "HSET";
         }
     };
-}
-
-/// The type in which `hset` keeps its fields, `F` the type the caller
-/// gave: a slice of `redis.FieldValue`, or a pointer to an array of them,
-/// as `[]const redis.FieldValue`; a pointer to a tuple of literals with a
-/// `.field` and a `.value` as an array of `redis.FieldValue` of its own;
-/// anything else as it is, for `Hset` to check.
-fn FieldsOf(comptime F: type) type {
-    return switch (@typeInfo(F)) {
-        .pointer => |info| switch (info.size) {
-            .slice => if (info.child == FieldValue) []const FieldValue else F,
-            .one => switch (@typeInfo(info.child)) {
-                .array => |array| if (array.child == FieldValue) []const FieldValue else F,
-                .@"struct" => |child| if (child.is_tuple) [child.field_types.len]FieldValue else F,
-                else => F,
-            },
-            else => F,
-        },
-        else => F,
-    };
-}
-
-/// `fields` as `hset` keeps it: the literals behind a pointer to a tuple
-/// copied into an array of `redis.FieldValue`.
-fn fieldsOf(fields: anytype) FieldsOf(@TypeOf(fields)) {
-    const F = FieldsOf(@TypeOf(fields));
-    if (@typeInfo(F) == .array) {
-        var list: F = undefined;
-        inline for (&list, 0..) |*pair, i| pair.* = .{ .field = fields[i].field, .value = fields[i].value };
-        return list;
-    } else return fields;
 }
 
 /// HSETNX `key` `field` `value`: true when the hash had no such field and

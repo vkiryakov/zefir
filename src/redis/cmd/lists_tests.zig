@@ -64,18 +64,6 @@ fn lists(io: Io) !void {
     try server.finish(io);
 }
 
-/// Answers each command with the next of `replies`, in the order the
-/// commands come.
-const Replies = struct {
-    replies: []const FakeServer.Reply,
-    next: std.atomic.Value(usize) = .init(0),
-
-    pub fn answer(r: *Replies, _: Io, _: std.mem.Allocator, _: *const FakeServer.Request) FakeServer.Handler.Error!FakeServer.Reply {
-        const i = r.next.fetchAdd(1, .acq_rel);
-        return if (i < r.replies.len) r.replies[i] else .{ .err = "ERR zefir test: no more replies" };
-    }
-};
-
 /// The timeout that the command number `i` of the journal sent, its last
 /// argument, in seconds with a fraction: in milliseconds.
 fn sent(io: Io, server: *FakeServer, i: usize) !u64 {
@@ -107,7 +95,7 @@ test "blpop, brpop and blmove send a timeout in seconds that the deadline leaves
 }
 
 fn blocking(io: Io) !void {
-    var replies: Replies = .{ .replies = &.{
+    var replies: fixture.Replies = .{ .replies = &.{
         .{ .array = &.{ .{ .string = "q" }, .{ .string = "job" } } },
         .nil,
         .{ .array = &.{ .{ .string = "r" }, .{ .string = "x" } } },

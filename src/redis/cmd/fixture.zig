@@ -48,3 +48,16 @@ pub const Fixture = struct {
 pub fn within(io: Io, duration: Io.Duration) redis.OperationContext {
     return .of(core.Context.root.withDeadline(.after(time.now(io), duration)));
 }
+
+/// A handler of `FakeServer` that answers each command with the next of
+/// `replies`, in the order the commands come: for commands whose
+/// arguments vary, such as a timeout taken from a deadline.
+pub const Replies = struct {
+    replies: []const FakeServer.Reply,
+    next: std.atomic.Value(usize) = .init(0),
+
+    pub fn answer(r: *Replies, _: Io, _: std.mem.Allocator, _: *const FakeServer.Request) FakeServer.Handler.Error!FakeServer.Reply {
+        const i = r.next.fetchAdd(1, .acq_rel);
+        return if (i < r.replies.len) r.replies[i] else .{ .err = "ERR zefir test: no more replies" };
+    }
+};
