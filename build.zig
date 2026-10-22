@@ -7,6 +7,7 @@ const http_guide = @import("src/http/examples/cases.zig");
 const jwt_cases = @import("src/jwt/tests/cases.zig");
 const jwt_guide = @import("src/jwt/examples/cases.zig");
 const mongo_guide = @import("src/mongo/examples/cases.zig");
+const redis_guide = @import("src/redis/examples/cases.zig");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -939,6 +940,7 @@ pub fn build(b: *std.Build) void {
         compile.expect_errors = .{ .contains = case[1] };
         test_redis.dependOn(&compile.step);
     }
+    addRedisGuide(b, test_redis, .{ .core = core, .redis = redis }, target, optimize, tsan);
 
     // rpc-nats panic program: a second conn() of one ZefirNats panics in
     // safe builds, since one adapter serves one transport. Like the rpc
@@ -1269,6 +1271,84 @@ fn addMongoGuide(
         readme.addAnonymousImport(b.fmt("{s}.out", .{name}), .{ .root_source_file = run.captureStdOut(.{}) });
     }
     test_mongo.dependOn(&addRun(b, b.addTest(.{ .name = "mongo-guide-readme", .root_module = readme }), tsan).step);
+}
+
+/// The modules that the examples of the redis guide import here.
+const RedisGuideModules = struct {
+    core: *std.Build.Module,
+    redis: *std.Build.Module,
+};
+
+/// The examples of src/redis/examples/README.md, the guide of zefir-redis,
+/// as cases.zig there lists them: the tests against
+/// redis.testing.FakeServer, and the checks of example_main.zig, the root
+/// of the guide's programs, which exits with code 3 on a panic instead of
+/// aborting and with code 4 past its time limit. readme_test.zig then
+/// checks that README.md shows every file as it is. The programs that need
+/// a server import zio: only tests/redis builds and runs them, and checks
+/// their runs against the guide.
+fn addRedisGuide(
+    b: *std.Build,
+    test_redis: *std.Build.Step,
+    m: RedisGuideModules,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+    tsan: bool,
+) void {
+    const dir = "src/redis/examples/";
+    const imports: []const std.Build.Module.Import = &.{
+        .{ .name = "core", .module = m.core },
+        .{ .name = "redis", .module = m.redis },
+    };
+    for (redis_guide.tests) |name| {
+        const tests = b.addTest(.{
+            .name = b.fmt("redis-guide-{s}", .{name}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(b.fmt(dir ++ "{s}.zig", .{name})),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+                .imports = imports,
+            }),
+        });
+        test_redis.dependOn(&addRun(b, tests, tsan).step);
+    }
+
+    // A program that panics and one that hangs: example_main.zig ends the
+    // first with code 3 and its message, the second at its time limit with
+    // code 4.
+    for ([_]struct { []const u8, []const u8, u8 }{
+        .{ "panic", "panic: a program of the guide panicked", 3 },
+        .{ "hang", "the run did not end within 1 s", 4 },
+    }) |case| {
+        const exe = b.addExecutable(.{
+            .name = b.fmt("redis-guide-{s}", .{case[0]}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(dir ++ "example_main.zig"),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+                .imports = &.{.{ .name = "example", .module = b.createModule(.{
+                    .root_source_file = b.path(b.fmt(dir ++ "testdata/{s}.zig", .{case[0]})),
+                    .target = target,
+                    .optimize = optimize,
+                    .sanitize_thread = tsan,
+                }) }},
+            }),
+        });
+        const run = addRun(b, exe, tsan);
+        run.expectStdErrMatch(case[1]);
+        run.expectExitCode(case[2]);
+        test_redis.dependOn(&run.step);
+    }
+
+    const readme = b.createModule(.{
+        .root_source_file = b.path(dir ++ "readme_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+    });
+    test_redis.dependOn(&addRun(b, b.addTest(.{ .name = "redis-guide-readme", .root_module = readme }), tsan).step);
 }
 
 /// The validator tests that use only its public API, compiled as client code
