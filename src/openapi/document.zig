@@ -52,6 +52,9 @@ pub const Document = struct {
     /// the document has no `servers`, and `Docs` puts the prefix in when it
     /// serves the document.
     runtime_prefix: bool = false,
+    /// The `.prefix` it was built with; null for none. In Debug, `Docs`
+    /// answers 500 on a route whose prefix is another.
+    prefix: ?[]const u8 = null,
 
     /// Writes the document: JSON with an indent of two spaces, a member or
     /// an item per line, a newline at the end. These are the bytes of
@@ -99,7 +102,7 @@ pub fn document(comptime Parts: type, comptime opts: DocumentOptions) Document {
         if (tags.array.len > 0) members = members ++ [_]Member{.{ .key = "tags", .value = tags }};
         members = members ++ [_]Member{.{ .key = "paths", .value = pathsNode(&reg, d, routes, opts.version) }};
         if (componentsNode(&reg, routes)) |components| members = members ++ [_]Member{.{ .key = "components", .value = components }};
-        return .{ .root = .{ .object = members }, .runtime_prefix = opts.prefix == null and opts.servers.len == 0 };
+        return .{ .root = .{ .object = members }, .runtime_prefix = opts.prefix == null and opts.servers.len == 0, .prefix = opts.prefix };
     }
 }
 

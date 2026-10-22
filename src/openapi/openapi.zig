@@ -215,7 +215,8 @@ pub const MiddlewareDoc = struct {
 ///   `http.Server.Options`, which the document puts in `servers`; null,
 ///   for a prefix that comes from the config, leaves `servers` to `Docs`,
 ///   which puts the prefix of its own route there as it serves the
-///   document;
+///   document. In Debug, `Docs` compares it with the prefix of its own
+///   route: another one gets the server's 500, and a line in the log;
 /// - `.unknown_fields`: the server's `.unknown_fields`, the same value as
 ///   in its `http.Server.Options`: whether a body may hold keys its DTO
 ///   does not know decides its schema;

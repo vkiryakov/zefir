@@ -37,12 +37,20 @@
 //! The paths are those of the routes within the server's prefix. When the
 //! prefix comes from the config, at run time, the document gets no
 //! `.prefix` and has no `servers`: `Docs` puts the prefix of its own route
-//! there as it serves the document. A document never holds the routes of
+//! there as it serves the document. In Debug, a document built with a
+//! `.prefix` that is not the server's gets the server's 500 on both
+//! routes, and a line in the log. A document never holds the routes of
 //! `Docs`, and in Debug the server does not check them against one.
 const std = @import("std");
+const builtin = @import("builtin");
 const http = @import("http");
 const tree = @import("json.zig");
 const Document = @import("document.zig").Document;
+
+const log = std.log.scoped(.openapi);
+
+/// The check of the document's prefix runs in Debug builds only.
+const check_prefix = builtin.mode == .debug;
 
 /// The paths of the routes of `Docs`, within the server's prefix.
 pub const DocsOptions = struct {
@@ -128,7 +136,9 @@ pub fn Docs(comptime opts: DocsOptions) type {
 
         /// `GET` of the document; HEAD too, as the server answers it.
         pub fn json(d: *Self, ctx: *http.Context) !void {
-            const doc = try d.served(ctx);
+            const prefix = prefixOf(ctx, opts.json);
+            if (try d.refused(ctx, prefix)) return;
+            const doc = try d.served(ctx, prefix);
             try ctx.response.setHeader("etag", &doc.etag);
             try ctx.response.setHeader("cache-control", "no-cache");
             const conditional = try ctx.headers(Conditional);
@@ -146,9 +156,8 @@ pub fn Docs(comptime opts: DocsOptions) type {
         pub fn page(d: *Self, ctx: *http.Context) !void {
             const i = &d.internal;
             const bytes = i.page.?;
-            // The pattern of the route is the server's prefix, then the path.
-            const pattern = ctx.route().?.pattern;
-            const prefix = pattern[0 .. pattern.len - opts.page.?.len];
+            const prefix = prefixOf(ctx, opts.page.?);
+            if (try d.refused(ctx, prefix)) return;
             try ctx.response.html(try std.fmt.allocPrint(ctx.allocator(), "{s}{f}{f}{s}", .{
                 bytes[0..i.page_url_at],
                 Html{ .text = prefix },
@@ -160,19 +169,41 @@ pub fn Docs(comptime opts: DocsOptions) type {
         /// The bytes of the document this request gets, and their ETag:
         /// with a prefix that comes at run time, those of the document
         /// with that prefix in `servers`, written for the request.
-        fn served(d: *const Self, ctx: *http.Context) error{OutOfMemory}!Served {
+        fn served(d: *const Self, ctx: *http.Context, prefix: []const u8) error{OutOfMemory}!Served {
             const i = &d.internal;
             const at = i.servers_at orelse return .{ .bytes = i.bytes, .etag = i.etag };
-            // The pattern of the route is the server's prefix, then the path.
-            const pattern = ctx.route().?.pattern;
-            const prefix = pattern[0 .. pattern.len - opts.json.len];
             if (prefix.len == 0) return .{ .bytes = i.bytes, .etag = i.etag };
             const arena = ctx.allocator();
             const bytes = try std.mem.concat(arena, u8, &.{ i.bytes[0..at], try serversMember(arena, prefix), i.bytes[at..] });
             return .{ .bytes = bytes, .etag = etagOf(bytes) };
         }
+
+        /// In Debug, a document built with a `.prefix` that is not
+        /// `prefix`, the server's: the server's own 500, a line in the log,
+        /// and true. A document without `.prefix` takes the server's.
+        fn refused(d: *const Self, ctx: *http.Context, prefix: []const u8) !bool {
+            if (!check_prefix) return false;
+            const given = d.document.prefix orelse return false;
+            if (std.mem.eql(u8, given, prefix)) return false;
+            const route = ctx.route().?;
+            log.warn("zefir.openapi: {t} {s}: the document has .prefix = \"{s}\", but the server's prefix is \"{s}\"; give the document the server's prefix", .{ route.method, route.pattern, given, prefix });
+            try ctx.response.status(500).text(internal_problem);
+            // After the body, which sets its own type.
+            try ctx.response.setHeader("content-type", "application/problem+json");
+            return true;
+        }
     };
 }
+
+/// The server's prefix: the pattern of the route of `path` is the prefix,
+/// then the path.
+fn prefixOf(ctx: *http.Context, comptime path: []const u8) []const u8 {
+    const pattern = ctx.route().?.pattern;
+    return pattern[0 .. pattern.len - path.len];
+}
+
+/// The server's own 500, as zefir-http answers a mistake of the program.
+const internal_problem = "{\"type\":\"about:blank\",\"title\":\"Internal Server Error\",\"status\":500,\"code\":\"internal\",\"errors\":[]}";
 
 /// A path of a route of `Docs` starts with '/', after the server's prefix:
 /// the page names the document by both.

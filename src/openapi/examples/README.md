@@ -983,7 +983,9 @@ s.docs = try .init(gpa, comptime zefir.openapi.document(@TypeOf(parts), .{
   `http.Server.Options` get too, which the document puts in `servers`.
   Without it, as for a prefix that comes from the settings, the document
   has no `servers` and `Docs` puts the prefix in as it serves the document
-  (see [Serving the document](#serving-the-document)).
+  (see [Serving the document](#serving-the-document)). In a Debug build,
+  `Docs` compares it with the prefix of its own route: a document of
+  another prefix gets the server's 500, and a line in the log names both.
 - **`.unknown_fields`**: the `.unknown_fields` of the server, the value its
   `http.Server.Options` get too, when it is not the default: with
   `.body = .ignore` the schemas of the bodies allow keys their DTOs do not
@@ -994,8 +996,8 @@ s.docs = try .init(gpa, comptime zefir.openapi.document(@TypeOf(parts), .{
 The settings of a server are values of the program that runs, which the
 type of the parts does not hold, so the document gets the two it needs,
 `.prefix` and `.unknown_fields`, from the call. The application gives the
-same values to the server and to the document, as `Service.start` does with
-its `prefix`.
+same values to the server and to the document, from one const, as
+`Service.start` does with its `prefix`.
 
 ## Types and rules
 

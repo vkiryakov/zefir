@@ -2,9 +2,11 @@
 //! at its route with its ETag and `Cache-Control: no-cache`, 304 for a
 //! client that has it, HEAD, the page of Scalar with its pinned version and
 //! hash, no proxy and no AI panel, which finds the document at each path
-//! the router gives the page, no page, a prefix that comes at run time, and
-//! two documents on two paths. A document never holds the routes of `Docs`.
+//! the router gives the page, no page, a prefix that comes at run time,
+//! two documents on two paths, and in Debug the server's 500 for a
+//! document of another prefix. A document never holds the routes of `Docs`.
 const std = @import("std");
+const builtin = @import("builtin");
 const http = @import("http");
 const openapi = @import("../openapi.zig");
 const document_file = @import("../document.zig");
@@ -351,4 +353,31 @@ test "two Docs on two paths serve two documents, each with its page" {
     try testing.expect(!std.mem.eql(u8, outside.header("etag").?, inside.header("etag").?));
     try expectPageFindsDocument(&backend, "/api/internal/docs", "/api/internal/openapi.json");
     try expectPageFindsDocument(&backend, "/api/docs", "/api/openapi.json");
+}
+
+test "in Debug, a document of a .prefix that is not the server's: the server's 500 for the document and for the page" {
+    if (builtin.mode != .debug) return error.SkipZigTest;
+    var backend: http.testing.Backend = .init(testing.allocator);
+    defer backend.deinit();
+    var todos: TodosController = .{};
+    var docs: Docs(.{}) = undefined;
+    const parts = .{ .controllers = .{ &todos, &docs } };
+    docs = try .init(testing.allocator, comptime document(@TypeOf(parts), .{ .info = info, .prefix = "/v1" }));
+    defer docs.deinit(testing.allocator);
+    var server: http.Server = try .init(testing.allocator, parts, .{ .listen = .{ .backend = backend.backend() }, .prefix = "/api" });
+    defer server.deinit(testing.io);
+    try server.start(testing.io);
+
+    // Each request writes a warning to the log.
+    const level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = level;
+    for ([_][]const u8{ "/api/openapi.json", "/api/docs" }) |target| {
+        var res = try get(&backend, target, &.{});
+        defer res.deinit();
+        errdefer std.debug.print("GET {s}: {d} {s}\n", .{ target, res.status, res.body });
+        try testing.expectEqual(500, res.status);
+        try testing.expectEqualDeep(@as(?[]const u8, "application/problem+json"), res.header("content-type"));
+        try testing.expectEqualStrings("{\"type\":\"about:blank\",\"title\":\"Internal Server Error\",\"status\":500,\"code\":\"internal\",\"errors\":[]}", res.body);
+    }
 }
