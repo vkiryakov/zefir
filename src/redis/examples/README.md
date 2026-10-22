@@ -1903,12 +1903,14 @@ $ zig build run
 - **XREADGROUP** with `.from = .new`, the default, gives the entries that
   the group has not given out yet, each to one consumer;
   `.from = .{ .id = .zero }` gives a consumer its own pending ones again,
-  as after its restart.
+  as after its restart; an entry deleted from the stream meanwhile comes
+  with `fields == null`.
 - **XACK** takes an entry off the pending ones: it is done. Until then the
   group keeps it, so nothing is lost when a consumer falls over.
 - **XAUTOCLAIM** hands the entries pending for longer than `.min_idle` to
   another consumer: in a service, minutes. An entry that was deleted while
-  it was pending comes with `fields == null`.
+  it was pending is not claimed: it leaves the group, and its id comes in
+  `claimed.deleted`.
 - **XREADGROUP with `.block`** waits for new entries, with its timeout
   from the deadline, as [the blocking
   commands](#blocking-commands-and-the-reliable-queue) do. A typed read

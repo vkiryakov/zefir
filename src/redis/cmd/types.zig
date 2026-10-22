@@ -218,7 +218,9 @@ pub const Trim = union(enum) { max_len: u64, min_id: StreamId };
 
 /// An entry of a stream: its id and its fields, a struct or
 /// `[]const redis.FieldValue`. `fields` is null for an entry deleted while
-/// it was pending in a group.
+/// it was pending in a group, as XREADGROUP gives a consumer its own
+/// pending entries (`.from = .{ .id = ... }`); XAUTOCLAIM does not claim
+/// such an entry, and gives its id in `Claimed.deleted`.
 pub fn Entry(comptime T: type) type {
     comptime if (!hash.isHash(T)) {
         @compileError("redis.Entry: the fields of an entry are a struct or []const redis.FieldValue; got " ++ @typeName(T));
@@ -278,7 +280,9 @@ pub const Pending = struct {
 };
 
 /// The reply of XAUTOCLAIM: the id to start the next call from, the
-/// entries claimed, and the ids of the pending entries that were deleted.
+/// entries claimed, and the ids of the pending entries that were deleted
+/// from the stream, which XAUTOCLAIM takes off the group's pending list
+/// instead of claiming them.
 pub fn Claimed(comptime T: type) type {
     return struct {
         next: StreamId,

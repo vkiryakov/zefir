@@ -7,7 +7,9 @@
 //! it is not there, and `xaddNoMkstream` only to a stream that is there,
 //! null otherwise. An entry read back is a `redis.Entry(T)`, its id and
 //! its fields read into `T`. `fields` is null for an entry deleted while
-//! it was pending in a group.
+//! it was pending in a group, when XREADGROUP gives a consumer its own
+//! pending entries again; XAUTOCLAIM does not claim such an entry, and
+//! gives its id in `deleted`.
 //!
 //! XREAD and XREADGROUP read one stream, and no entry is an empty slice;
 //! several streams at once go through `cmd.raw`. With `.block` they wait
