@@ -812,8 +812,8 @@ Content-Length: 39
 {"id":1,"user_id":1,"item":"Green tea"}
 ```
 
-Ctrl+C in the terminal of the shop. App stops the servers, the rpc server
-first since it was built last, then the stores, and `run` returns:
+Ctrl+C in the terminal of the shop. App stops the two servers together,
+then the stores, the last built first, and `run` returns:
 
 ```text
 $ zig build run
@@ -863,13 +863,19 @@ requestStop (a signal, a server that broke, or your code)
    ├─ phase 1: requestStop to every bean that has it, at once:
    │           httpServer and rpcServer take nothing new
    │
-   └─ phase 2: shutdown, the last built first, one deadline for all
-        rpcServer (lets its calls end) → httpServer (lets its requests end)
-        → OrdersDb → UsersDb
+   └─ phase 2: shutdown, one deadline for all
+        the servers together, each in a task of its own:
+          httpServer (lets its requests end), rpcServer (lets its calls end)
+        then the others, the last built first: OrdersDb → UsersDb
    │
    └─ freeing (deinit), the last built first, in app.deinit():
         rpcServer, httpServer, Bus.memory, OrdersDb, UsersDb
 ```
+
+The servers are the beans with `requestStop`. Each gets the deadline as
+the stop begins, so a server slow to stop takes no time from the other;
+App writes their lines once both have stopped, the last built first. The
+stores, which the servers use, close after them.
 
 The memory transport, `Bus.memory`, is neither started nor stopped by App:
 the rpc server starts and closes it. App frees it after the server, since it
@@ -946,8 +952,8 @@ and `rpcServer`, and a client of MongoDB's is `mongoClient`.
    pulls up the controllers of its module.
 3. **A cycle** cannot be built: it is a compile error with the whole path,
    such as `Root.X (.y) -> Root.Y (.z) -> Root.Z (.x) -> Root.X`.
-4. **Start** in the order of building; **stop and free** in the reverse
-   one.
+4. **Start** in the order of building; **stop** the servers together,
+   then the rest in the reverse order; **free** in the reverse order.
 
 ## Two databases and two servers
 
@@ -1038,8 +1044,11 @@ to build it:
   either may be the one named.
 - **The stop has one budget,** `shutdown_timeout` in the options of
   `init`, 25 s by default, which fits the 30 s Kubernetes gives a pod. The
-  servers of Zefir return from `shutdown` 250 ms before the deadline, so
-  that the beans after them have time.
+  servers, the beans with `requestStop`, get their `shutdown` together,
+  each in a task of its own, so each has the whole budget; then the other
+  beans get theirs one at a time, the last built first. The servers of
+  Zefir return from `shutdown` 250 ms before the deadline, so that the
+  beans after them have time.
 
 The methods of App:
 

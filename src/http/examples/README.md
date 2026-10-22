@@ -3404,10 +3404,11 @@ the app is stopped
   that stops by itself, such as one whose backend broke and whose `wait`
   returns `error.Unavailable`, stops the whole App.
 - **`app.requestStop()`** begins the stop. App asks every server to stop at
-  once, then calls the `shutdown(io, deadline)` of each, the last built
-  first, with one deadline for all: its `.shutdown_timeout`, 25 seconds by
-  default, after the stop began. Each server's `shutdown` returns
-  250 ms before that deadline at the latest, so App has time for the rest.
+  once, then calls the `shutdown(io, deadline)` of every server together,
+  each in a task of its own, with one deadline for all: its
+  `.shutdown_timeout`, 25 seconds by default, after the stop began. Each
+  server's `shutdown` returns 250 ms before that deadline at the latest,
+  so App has time for the rest.
 - **`app.wait()`** returns once the stop is over: `{}` here, or the error
   of the bean that stopped the App, which `app.failure()` names.
 

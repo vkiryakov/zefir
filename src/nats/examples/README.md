@@ -1458,9 +1458,10 @@ App drives it with three of its methods, and frees it with `deinit`:
   at once and returns `{}`, and so does one whose connection is lost
   during the drain.
 - **No `requestStop`.** The servers need NATS until their own drain ends:
-  their failures and last responses go out through it. App stops the
-  beans in the reverse order of their creation, and the client comes
-  before the servers that take it, so it is drained after them.
+  their failures and last responses go out through it. App shuts the
+  beans with `requestStop`, the servers, down first, all together, and
+  the other beans after them, in the reverse order of their creation: so
+  the client is drained after the servers.
 - `connect`, `drain` and `close` stay as they are, for a client that a
   program drives itself, as the examples of this guide do.
 
