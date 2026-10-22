@@ -157,3 +157,30 @@ test {
     testing.refAllDecls(@This());
     _ = @import("conformance.zig");
 }
+
+test "an Admin of mongo-auth makes a user that writes to its database, and drops both" {
+    try onZio(userRound);
+}
+
+fn userRound(io: Io) !void {
+    var admin: Admin = undefined;
+    try admin.openAuth(io);
+    defer admin.close();
+    var buffer: [64]u8 = undefined;
+    const name = try freshName(&buffer, "user");
+    try admin.dropDatabase(io, name);
+    try admin.createUser(io, name, name, "odm-user-pass", .{.{ .role = "readWrite", .db = name }});
+    var uri_buffer: [128]u8 = undefined;
+    const uri = try std.fmt.bufPrint(&uri_buffer, "mongodb://{s}@127.0.0.1:27118/{s}", .{ name, name });
+    {
+        var client: mongo.Client = try .init(testing.allocator, io, .{ .uri = uri, .password = "odm-user-pass" });
+        defer client.deinit();
+        try client.connect(io, op(io).ctx, null);
+        var ids: bson.ObjectId.Generator = .init(io);
+        const db: mongo.Database = .init(&client, name, &ids);
+        var inserted = try db.collection("things").insertOne(io, op(io), .{ .n = @as(i32, 1) }, .{ .allocator = testing.allocator });
+        inserted.deinit(testing.allocator);
+    }
+    try admin.dropUser(io, name, name);
+    try admin.dropDatabase(io, name);
+}
