@@ -437,6 +437,50 @@ pub fn build(b: *std.Build) void {
         test_mongo.dependOn(&run.step);
     }
 
+    // odm panic programs: a registry moved after its first
+    // registerConnection() and a call on another std.Io panic in safe
+    // builds. Each program must print the panic message and end in its own
+    // panic handler, which exits with code 3 instead of aborting. They get
+    // their own Debug copies of odm and the modules it imports, whatever
+    // -Doptimize says.
+    const panic_validator = b.createModule(.{
+        .root_source_file = b.path("src/validator/root.zig"),
+        .target = target,
+        .optimize = .Debug,
+    });
+    const panic_odm = b.createModule(.{
+        .root_source_file = b.path("src/odm/root.zig"),
+        .target = target,
+        .optimize = .Debug,
+        .imports = &.{
+            .{ .name = "mongo-bson", .module = panic_mongo_bson },
+            .{ .name = "core", .module = panic_core },
+            .{ .name = "validator", .module = panic_validator },
+        },
+    });
+    for ([_][2][]const u8{
+        .{ "moved_registry", "panic: zefir-odm: Registry moved after its first registerConnection(): keep it where it was" },
+        .{ "another_io", "panic: zefir-odm: a call on another std.Io than the registry's: pass the io of Registry.init" },
+    }) |case| {
+        const exe = b.addExecutable(.{
+            .name = b.fmt("odm-panic-{s}", .{case[0]}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(b.fmt("src/odm/testdata/panic/{s}.zig", .{case[0]})),
+                .target = target,
+                .optimize = .Debug,
+                .imports = &.{
+                    .{ .name = "odm", .module = panic_odm },
+                },
+            }),
+        });
+        const run = b.addRunArtifact(exe);
+        run.expectStdErrMatch(case[1]);
+        // expectStdErrMatch accepts any exit: only the panic handler exits
+        // with 3, so a program that printed the text and returned fails.
+        run.expectExitCode(3);
+        test_odm.dependOn(&run.step);
+    }
+
     // log compile errors: each test of the file must fail to compile with
     // the message next to its name. The filter compiles one test at a time;
     // the message must be the end of an error line.

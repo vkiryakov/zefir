@@ -33,7 +33,9 @@
 //!
 //! The registry has no tasks of its own. It keeps one `std.Io.Mutex` for
 //! short work on memory, and never holds it across a call of the driver, a
-//! wait or a log line. Every call comes on the `io` of `init`.
+//! wait or a log line. Every call comes on the `io` of `init`, and the
+//! registry stays where it is from its first `registerConnection` on: in
+//! safe builds, a call on another `std.Io` or on a moved copy panics.
 
 const std = @import("std");
 const Io = std.Io;
@@ -91,6 +93,10 @@ shut: Io.Event = .unset,
 /// The operations of collections and their errors (`stats`).
 operations: std.atomic.Value(u64) = .init(0),
 operation_errors: std.atomic.Value(u64) = .init(0),
+/// Where the first `registerConnection` found the registry, 0 before, in
+/// safe builds: a call on a copy somewhere else panics. Atomic: any task
+/// may call while another registers.
+home: if (std.debug.runtime_safety) std.atomic.Value(usize) else void = if (std.debug.runtime_safety) .init(0) else {},
 
 const State = enum { running, stopping, stopped };
 
@@ -162,6 +168,7 @@ pub fn init(gpa: Allocator, io: Io, driver: Driver, options: Options) Registry {
 /// call may be in progress, and every session and cursor must be deinit
 /// first.
 pub fn deinit(r: *Registry, io: Io) void {
+    r.checkUse(io);
     r.mutex.lockUncancelable(io);
     const state = r.state;
     r.mutex.unlock(io);
@@ -189,6 +196,7 @@ pub fn deinit(r: *Registry, io: Io) void {
 /// call waits for the first and returns its result. The task's
 /// cancelation waits until it returns.
 pub fn shutdown(r: *Registry, io: Io, deadline: Io.Clock.Timestamp) errors.ShutdownError!void {
+    r.checkUse(io);
     const protection = io.swapCancelProtection(.blocked);
     defer _ = io.swapCancelProtection(protection);
     const until = deadline.toClock(io, .awake).raw;
@@ -275,6 +283,7 @@ fn leasesOf(list: *const List) usize {
 /// `config.diagnostics` says why it failed. `ConnectionExists` when the id
 /// is taken; of several calls for one new id at once, one registers it.
 pub fn registerConnection(r: *Registry, io: Io, id: []const u8, config: ConnectionConfig) Error!void {
+    r.checkUse(io);
     const d = config.diagnostics;
     if (d) |x| x.* = .{};
     if (names.connectionId(id)) |problem| return fail(d, error.InvalidArgument, "odm: {s}", .{problem});
@@ -298,6 +307,7 @@ pub fn registerConnection(r: *Registry, io: Io, id: []const u8, config: Connecti
     if (lost == null) {
         r.connections.append(&c.node);
         r.generations.append(&g.node);
+        if (std.debug.runtime_safety) r.home.store(@intFromPtr(r), .monotonic);
     }
     r.mutex.unlock(io);
     if (lost) |err| {
@@ -313,6 +323,7 @@ pub fn registerConnection(r: *Registry, io: Io, id: []const u8, config: Connecti
 /// may come again, with the same client. The driver's text of a failure is
 /// in `connectionStats(io, id).last_failure` and in the log.
 pub fn connect(r: *Registry, io: Io, ctx: core.Context, id: []const u8) Error!void {
+    r.checkUse(io);
     r.mutex.lockUncancelable(io);
     const c = switch (r.awaitTurn(io, ctx, id, .active, null) catch |err| {
         r.mutex.unlock(io);
@@ -370,6 +381,7 @@ pub fn connect(r: *Registry, io: Io, ctx: core.Context, id: []const u8) Error!vo
 /// and the state does not change; `config.diagnostics`,
 /// `connectionStats(io, id).last_failure` and the log say why.
 pub fn replaceConnection(r: *Registry, io: Io, ctx: core.Context, id: []const u8, config: ConnectionConfig) Error!void {
+    r.checkUse(io);
     const d = config.diagnostics;
     if (d) |x| x.* = .{};
     const print = fingerprint.of(&r.key, config.uri, config.password);
@@ -458,6 +470,7 @@ pub fn replaceConnection(r: *Registry, io: Io, ctx: core.Context, id: []const u8
 /// for the operation on the connection in progress, if any, until its task
 /// is canceled; nothing changes before the removal begins.
 pub fn removeConnection(r: *Registry, io: Io, id: []const u8) Error!void {
+    r.checkUse(io);
     r.mutex.lockUncancelable(io);
     const c = switch (r.awaitTurn(io, .root, id, .never, null) catch |err| {
         r.mutex.unlock(io);
@@ -500,6 +513,7 @@ pub fn removeConnection(r: *Registry, io: Io, id: []const u8) Error!void {
 /// One round trip to the server of the connection `id`, through its current
 /// generation, under the deadline of `ctx`.
 pub fn ping(r: *Registry, io: Io, ctx: core.Context, id: []const u8) Error!void {
+    r.checkUse(io);
     const g = try r.lease(io, id);
     defer generation.release(r, io, g);
     return g.client.ping(io, ctx, null);
@@ -507,6 +521,7 @@ pub fn ping(r: *Registry, io: Io, ctx: core.Context, id: []const u8) Error!void 
 
 /// A snapshot of the registry.
 pub fn stats(r: *Registry, io: Io) Stats {
+    r.checkUse(io);
     r.mutex.lockUncancelable(io);
     defer r.mutex.unlock(io);
     var result: Stats = .{
@@ -544,6 +559,7 @@ pub fn stats(r: *Registry, io: Io) Stats {
 /// generation for the call, to read the pool of its client out of the
 /// lock.
 pub fn connectionStats(r: *Registry, io: Io, id: []const u8) Error!ConnectionStats {
+    r.checkUse(io);
     r.mutex.lockUncancelable(io);
     if (r.state != .running) {
         r.mutex.unlock(io);
@@ -575,6 +591,19 @@ pub fn connectionStats(r: *Registry, io: Io, id: []const u8) Error!ConnectionSta
     result.pool = g.client.stats();
     generation.release(r, io, g);
     return result;
+}
+
+/// In safe builds: a call on a copy of the registry moved after its first
+/// `registerConnection`, or on another `std.Io` than the one of `init`,
+/// panics. Every call into the registry, its sessions and its cursors
+/// checks it first.
+pub fn checkUse(r: *const Registry, io: Io) void {
+    if (!std.debug.runtime_safety) return;
+    const home = r.home.load(.monotonic);
+    if (home != 0 and home != @intFromPtr(r)) @panic("zefir-odm: Registry moved after its first registerConnection(): keep it where it was");
+    // Two instances of one implementation share the table, so the
+    // instance counts too.
+    if (io.vtable != r.io.vtable or io.userdata != r.io.userdata) @panic("zefir-odm: a call on another std.Io than the registry's: pass the io of Registry.init");
 }
 
 /// What a call that needs a connection to itself finds once nothing else
