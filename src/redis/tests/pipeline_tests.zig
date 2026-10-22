@@ -149,6 +149,42 @@ fn errorInPlace(io: Io) !void {
     try server.finish(io);
 }
 
+test "a reply of a pipeline that finds no memory is OutOfMemory for the whole pipeline, with answered 1: its connection closes, the pool is not cleared, and the next call goes on a new connection" {
+    try within5s(testing.io, outOfMemory, .{testing.io});
+}
+
+fn outOfMemory(io: Io) !void {
+    var server: FakeServer = try .start(testing.allocator, io, &.{
+        .expect(.{ "GET", "a" }, .{ .string = "first" }),
+        .expect(.{ "GET", "b" }, .{ .string = "second" }),
+        .expect(.{ "GET", "c" }, .{ .string = "third" }),
+        .expect(.{ "GET", "a" }, .{ .string = "again" }),
+    });
+    defer server.stop(io);
+    var client: Client = undefined;
+    try connected(io, &client, .{ .url = server.url() });
+    defer client.deinit();
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    // The string of the first reply fits; that of the second does not.
+    var failing: testing.FailingAllocator = .init(arena.allocator(), .{ .fail_index = 1 });
+    var d: Diagnostics = .{};
+    try testing.expectError(error.OutOfMemory, client.pipeline(io, .of(.root), .{
+        cmd.raw(?[]const u8, .{ "GET", "a" }),
+        cmd.raw(?[]const u8, .{ "GET", "b" }),
+        cmd.raw(?[]const u8, .{ "GET", "c" }),
+    }, .{ .allocator = failing.allocator(), .diagnostics = &d }));
+    try testing.expectEqual(@as(?usize, 1), d.answered);
+    const stats = client.stats();
+    try testing.expectEqual(@as(usize, 0), stats.connections);
+    try testing.expectEqual(@as(u64, 0), stats.clears);
+    const got = try client.run(io, .of(.root), cmd.raw(?[]const u8, .{ "GET", "a" }), .{ .allocator = arena.allocator() });
+    try testing.expectEqualStrings("again", got orelse return error.TestExpectedValue);
+    try testing.expectEqual(@as(usize, 4), server.received(io));
+    try testing.expect(try connectionOf(io, &server, 0) != try connectionOf(io, &server, 3));
+    try server.finish(io);
+}
+
 test "a connection that breaks after two replies is ConnectionLost for the whole pipeline, with answered 2, and clears the pool" {
     try within5s(testing.io, brokenAfterTwo, .{testing.io});
 }

@@ -152,6 +152,38 @@ fn needsAllocator(io: Io) !void {
     try testing.expectEqual(@as(usize, 0), server.received(io));
 }
 
+test "a reply that finds no memory in .allocator is OutOfMemory: its connection, with the rest of the reply on it, closes, the pool is not cleared, and the next call goes on a new connection" {
+    try within5s(testing.io, outOfMemory, .{testing.io});
+}
+
+/// A string of 1 KiB, longer than what the reader holds of it at once.
+const kilobyte: [1024]u8 = @splat('x');
+
+fn outOfMemory(io: Io) !void {
+    var server: FakeServer = try .start(testing.allocator, io, &.{
+        .expect(.{ "GET", "k" }, .{ .string = &kilobyte }),
+        .expect(.{ "GET", "k" }, .{ .string = "8" }),
+    });
+    defer server.stop(io);
+    var client: Client = undefined;
+    try connected(io, &client, .{ .url = server.url() });
+    defer client.deinit();
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var failing: testing.FailingAllocator = .init(arena.allocator(), .{ .fail_index = 0 });
+    const get_string = cmd.raw(?[]const u8, .{ "GET", "k" });
+    try testing.expectError(error.OutOfMemory, client.run(io, .of(.root), get_string, .{ .allocator = failing.allocator() }));
+    const stats = client.stats();
+    try testing.expectEqual(@as(usize, 0), stats.connections);
+    try testing.expectEqual(@as(u64, 0), stats.clears);
+    const got = try client.run(io, .of(.root), get_string, .{ .allocator = arena.allocator() });
+    try testing.expectEqualStrings("8", got orelse return error.TestExpectedValue);
+    try testing.expectEqual(@as(usize, 2), server.received(io));
+    try testing.expect((try server.entry(io, 0)).connection != (try server.entry(io, 1)).connection);
+    try testing.expectEqual(@as(u64, 0), client.stats().clears);
+    try server.finish(io);
+}
+
 test "the reply comes from .allocator, and a call on a warm pool takes nothing of the client's own memory" {
     try within5s(testing.io, replyMemory, .{testing.io});
 }
