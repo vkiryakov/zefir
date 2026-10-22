@@ -1,9 +1,10 @@
-//! The first half of the catalog of `redis.cmd` against the server that
-//! REDIS_IMAGE names, on redis-plain: strings and counters, keys and their
-//! time to live, SCAN, hashes, lists and sets, each function through its
-//! result, the RESP3 forms of Redis and Valkey alike; binary values and
-//! the empty string; and the blocking commands under deadlines, on a
-//! server with the default `hz`.
+//! The catalog of `redis.cmd` against the server that REDIS_IMAGE names,
+//! on redis-plain: strings and counters, keys and their time to live,
+//! SCAN and the iterator of `client.iterate`, hashes, lists, sets, sorted
+//! sets and PUBLISH, each function through its result, the RESP3 forms of
+//! Redis and Valkey alike; binary values and the empty string; and the
+//! blocking commands under deadlines, on a server with the default `hz`.
+//! Scripts and streams have files of their own.
 
 const std = @import("std");
 const Io = std.Io;
@@ -13,44 +14,9 @@ const redis = @import("redis");
 const cmd = redis.cmd;
 const e2e = @import("root.zig");
 
-fn within(io: Io, duration: Io.Duration) redis.OperationContext {
-    return .of(core.Context.root.withDeadline(.after(Io.Clock.awake.now(io), duration)));
-}
-
-/// A client of redis-plain, with an arena for the replies. A call that
-/// fails prints its error and diagnostics.
-const Session = struct {
-    io: Io,
-    client: redis.Client,
-    arena: std.heap.ArenaAllocator,
-
-    fn open(s: *Session, io: Io) !void {
-        s.* = .{ .io = io, .client = try .init(testing.allocator, io, .{ .url = "redis://127.0.0.1:16379" }), .arena = .init(testing.allocator) };
-        errdefer s.close();
-        var d: redis.Diagnostics = .{};
-        s.client.connect(io, within(io, .fromSeconds(10)).ctx, &d) catch |err| {
-            std.debug.print("connect: {t}: {s}\n", .{ err, d.message() });
-            return err;
-        };
-    }
-
-    fn close(s: *Session) void {
-        s.client.deinit();
-        s.arena.deinit();
-    }
-
-    fn run(s: *Session, command: anytype) !redis.Client.ReplyOf(@TypeOf(command)) {
-        return s.runIn(within(s.io, .fromSeconds(10)), command);
-    }
-
-    fn runIn(s: *Session, op: redis.OperationContext, command: anytype) !redis.Client.ReplyOf(@TypeOf(command)) {
-        var d: redis.Diagnostics = .{};
-        return s.client.run(s.io, op, command, .{ .allocator = s.arena.allocator(), .diagnostics = &d }) catch |err| {
-            std.debug.print("{s}: {t}: {s}\n", .{ command.name(), err, d.message() });
-            return err;
-        };
-    }
-};
+const within = e2e.within;
+const Session = e2e.Session;
+const infoNumber = e2e.infoNumber;
 
 /// A time to live of more than 0 and at most `at_most_ms`.
 fn expectExpires(ttl: redis.Ttl, at_most_ms: i64) !void {
@@ -361,15 +327,6 @@ fn sets(io: Io) !void {
     try expectSet(&.{ "x", "y", "z" }, scanned.items);
 }
 
-/// The number after `prefix` in the text of INFO; null when it lacks it.
-fn infoNumber(text: []const u8, comptime prefix: []const u8) ?u64 {
-    const at = std.mem.find(u8, text, prefix) orelse return null;
-    const start = at + prefix.len;
-    var end = start;
-    while (end < text.len and std.ascii.isDigit(text[end])) end += 1;
-    return std.fmt.parseInt(u64, text[start..end], 10) catch null;
-}
-
 /// How many BLPOP the server has run, by INFO commandstats.
 fn blpopCalls(s: *Session) !u64 {
     return infoNumber(try s.run(cmd.raw([]const u8, .{ "INFO", "commandstats" })), "\r\ncmdstat_blpop:calls=") orelse 0;
@@ -485,4 +442,98 @@ fn forever(io: Io) !void {
         return err;
     };
     try testing.expectEqual(connections - 1, s.client.stats().connections);
+}
+
+test "the sorted set commands: scores, NX, XX, GT and CH, ranks, counts and ranges by score with WITHSCORES from the type, pops, removals of ranges, a page of ZSCAN" {
+    try e2e.onZio(zsets);
+}
+
+fn zsets(io: Io) !void {
+    var s: Session = undefined;
+    try s.open(io);
+    defer s.close();
+    const k = "e2e:cmd:zset:leaders";
+    const none = "e2e:cmd:zset:none";
+    const Scored = redis.Scored([]const u8);
+    _ = try s.run(cmd.del(&.{ k, none }));
+
+    try testing.expectEqual(@as(u64, 3), try s.run(cmd.zadd(k, &.{ .{ .member = "ann", .score = 12.5 }, .{ .member = "bob", .score = 3 }, .{ .member = "cy", .score = 7 } }, .{})));
+    // NX adds new members only; XX GT CH updates to a higher score, and
+    // counts what changed.
+    try testing.expectEqual(@as(u64, 0), try s.run(cmd.zadd(k, &.{.{ .member = "ann", .score = 1 }}, .{ .only = .absent })));
+    try testing.expectEqual(@as(u64, 1), try s.run(cmd.zadd(k, &.{ .{ .member = "bob", .score = 5 }, .{ .member = "cy", .score = 1 }, .{ .member = "dan", .score = 9 } }, .{ .only = .present, .compare = .greater, .changed = true })));
+    try testing.expectEqual(@as(f64, 14), try s.run(cmd.zincrby(k, 1.5, "ann")));
+    // bob 5, cy 7, ann 14.
+    try testing.expectEqual(@as(?f64, 14), try s.run(cmd.zscore(k, "ann")));
+    try testing.expectEqual(@as(?f64, null), try s.run(cmd.zscore(k, "dan")));
+    try testing.expectEqual(@as(?u64, 0), try s.run(cmd.zrank(k, "bob")));
+    try testing.expectEqual(@as(?u64, 0), try s.run(cmd.zrevrank(k, "ann")));
+    try testing.expectEqual(@as(?u64, null), try s.run(cmd.zrank(k, "dan")));
+    try testing.expectEqual(@as(u64, 3), try s.run(cmd.zcard(k)));
+    try testing.expectEqual(@as(u64, 2), try s.run(cmd.zcount(k, .{ .exclusive = 5 }, .max)));
+    try testing.expectEqual(@as(u64, 2), try s.run(cmd.zcount(k, .min, .{ .inclusive = 7 })));
+    try testing.expectEqualDeep(@as([]const []const u8, &.{ "bob", "cy", "ann" }), try s.run(cmd.zrange([]const u8, k, 0, -1, .{})));
+    try testing.expectEqualDeep(@as([]const Scored, &.{ .{ .member = "ann", .score = 14 }, .{ .member = "cy", .score = 7 } }), try s.run(cmd.zrange(Scored, k, 0, 1, .{ .rev = true })));
+    try testing.expectEqualDeep(@as([]const []const u8, &.{ "ann", "cy" }), try s.run(cmd.zrangeByScore([]const u8, k, .{ .inclusive = 6 }, .max, .{ .rev = true })));
+    try testing.expectEqualDeep(@as([]const Scored, &.{.{ .member = "cy", .score = 7 }}), try s.run(cmd.zrangeByScore(Scored, k, .{ .exclusive = 5 }, .{ .inclusive = 14 }, .{ .limit = .{ .count = 1 } })));
+    try testing.expectEqualDeep(@as(?Scored, .{ .member = "bob", .score = 5 }), try s.run(cmd.zpopmin([]const u8, k)));
+    try testing.expectEqualDeep(@as(?Scored, .{ .member = "ann", .score = 14 }), try s.run(cmd.zpopmax([]const u8, k)));
+    try testing.expectEqualDeep(@as(?Scored, null), try s.run(cmd.zpopmin([]const u8, none)));
+    try testing.expectEqual(@as(u64, 1), try s.run(cmd.zrem(k, &.{ "cy", "dan" })));
+
+    const inf = std.math.inf(f64);
+    try testing.expectEqual(@as(u64, 4), try s.run(cmd.zadd(k, &.{ .{ .member = "a", .score = 1 }, .{ .member = "b", .score = 2 }, .{ .member = "c", .score = 3 }, .{ .member = "d", .score = inf } }, .{})));
+    try testing.expectEqual(@as(u64, 1), try s.run(cmd.zremrangebyscore(k, .min, .{ .exclusive = 2 })));
+    // b, c and d: all but the highest go.
+    try testing.expectEqual(@as(u64, 2), try s.run(cmd.zremrangebyrank(k, 0, -2)));
+    const page = try s.run(cmd.zscan(k, .{}));
+    try testing.expectEqual(@as(u64, 0), page.cursor);
+    try testing.expectEqualDeep(@as([]const Scored, &.{.{ .member = "d", .score = inf }}), page.items);
+}
+
+test "iterate walks the 1000 keys of a pattern, about 100 a page, and gives each of them at least once" {
+    try e2e.onZio(iterating);
+}
+
+fn iterating(io: Io) !void {
+    var s: Session = undefined;
+    try s.open(io);
+    defer s.close();
+    const prefix = "e2e:cmd:iterate:session:";
+    const n = 1000;
+    const arena = s.arena.allocator();
+    const names = try arena.alloc([]const u8, n);
+    const pairs = try arena.alloc(redis.KeyValue, n);
+    for (names, pairs, 0..) |*name, *pair, i| {
+        name.* = try std.fmt.allocPrint(arena, prefix ++ "{d}", .{i});
+        pair.* = .{ .key = name.*, .value = "v" };
+    }
+    try s.run(cmd.mset(pairs));
+
+    var seen: [n]bool = @splat(false);
+    var given: usize = 0;
+    var sessions = s.client.iterate(cmd.scan(.{ .match = prefix ++ "*", .count = 100 }), .{ .allocator = testing.allocator });
+    defer sessions.deinit();
+    while (try sessions.next(io, within(io, .fromSeconds(10)))) |key| {
+        try testing.expect(std.mem.startsWith(u8, key, prefix));
+        const i = try std.fmt.parseInt(usize, key[prefix.len..], 10);
+        if (i >= n) return error.TestUnexpectedResult;
+        seen[i] = true;
+        given += 1;
+        if (given > 10 * n) return error.TestUnexpectedResult;
+    }
+    for (seen) |found| try testing.expect(found);
+    try testing.expectEqual(@as(usize, 0), s.client.stats().in_use);
+    try testing.expectEqual(@as(u64, n), try s.run(cmd.del(names)));
+}
+
+test "publish reaches no one on a channel without subscribers" {
+    try e2e.onZio(publishing);
+}
+
+fn publishing(io: Io) !void {
+    var s: Session = undefined;
+    try s.open(io);
+    defer s.close();
+    try testing.expectEqual(@as(u64, 0), try s.run(cmd.publish("e2e:cmd:pubsub:nobody", "a\r\nb\x00c")));
 }

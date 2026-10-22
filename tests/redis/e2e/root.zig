@@ -6,7 +6,58 @@
 const std = @import("std");
 const Io = std.Io;
 const testing = std.testing;
+const core = @import("core");
+const redis = @import("redis");
 const zio = @import("zio");
+
+/// The context of a call that must end within `duration` from now.
+pub fn within(io: Io, duration: Io.Duration) redis.OperationContext {
+    return .of(core.Context.root.withDeadline(.after(Io.Clock.awake.now(io), duration)));
+}
+
+/// A client of redis-plain, with an arena for the replies. A call that
+/// fails prints its error and diagnostics.
+pub const Session = struct {
+    io: Io,
+    client: redis.Client,
+    arena: std.heap.ArenaAllocator,
+
+    pub fn open(s: *Session, io: Io) !void {
+        s.* = .{ .io = io, .client = try .init(testing.allocator, io, .{ .url = "redis://127.0.0.1:16379" }), .arena = .init(testing.allocator) };
+        errdefer s.close();
+        var d: redis.Diagnostics = .{};
+        s.client.connect(io, within(io, .fromSeconds(10)).ctx, &d) catch |err| {
+            std.debug.print("connect: {t}: {s}\n", .{ err, d.message() });
+            return err;
+        };
+    }
+
+    pub fn close(s: *Session) void {
+        s.client.deinit();
+        s.arena.deinit();
+    }
+
+    pub fn run(s: *Session, command: anytype) !redis.Client.ReplyOf(@TypeOf(command)) {
+        return s.runIn(within(s.io, .fromSeconds(10)), command);
+    }
+
+    pub fn runIn(s: *Session, op: redis.OperationContext, command: anytype) !redis.Client.ReplyOf(@TypeOf(command)) {
+        var d: redis.Diagnostics = .{};
+        return s.client.run(s.io, op, command, .{ .allocator = s.arena.allocator(), .diagnostics = &d }) catch |err| {
+            std.debug.print("{s}: {t}: {s}\n", .{ command.name(), err, d.message() });
+            return err;
+        };
+    }
+};
+
+/// The number after `prefix` in the text of INFO; null when it lacks it.
+pub fn infoNumber(text: []const u8, comptime prefix: []const u8) ?u64 {
+    const at = std.mem.find(u8, text, prefix) orelse return null;
+    const from = at + prefix.len;
+    var end = from;
+    while (end < text.len and std.ascii.isDigit(text[end])) end += 1;
+    return std.fmt.parseInt(u64, text[from..end], 10) catch null;
+}
 
 /// The servers of docker-compose.yml.
 pub const servers = struct {
@@ -138,4 +189,6 @@ test {
     _ = @import("pipeline.zig");
     _ = @import("transactions.zig");
     _ = @import("commands.zig");
+    _ = @import("scripts.zig");
+    _ = @import("streams.zig");
 }
