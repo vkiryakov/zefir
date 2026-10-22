@@ -43,6 +43,7 @@ const filter = @import("query/filter.zig");
 const options = @import("query/options.zig");
 const update = @import("query/update.zig");
 const connection = @import("registry/connection.zig");
+const collection = @import("Collection.zig");
 
 /// The errors that a driver returns, each in its class of `outcome`.
 pub const DriverError = errors.DriverError;
@@ -131,6 +132,14 @@ pub const NewConnection = Registry.NewConnection;
 /// gives it with a lease of the generation of its connection, and
 /// `session.deinit(io)` gives the lease back.
 pub const Session = @import("Session.zig");
+/// The typed operations on the collection of a model in a tenant's
+/// database: `session.collection(User)`.
+pub const Collection = collection.Collection;
+pub const InsertOneResult = collection.InsertOneResult;
+pub const InsertManyResult = collection.InsertManyResult;
+pub const UpdateResult = collection.UpdateResult;
+pub const UpsertResult = collection.UpsertResult;
+pub const DeleteResult = collection.DeleteResult;
 
 /// What tests of odm and of the code over it need: `testing.FakeDriver`.
 pub const testing = @import("testing.zig");
@@ -156,4 +165,5 @@ test {
     _ = @import("tests/names_tests.zig");
     _ = @import("tests/tenant_tests.zig");
     _ = @import("tests/provision_concurrency_tests.zig");
+    _ = @import("tests/collection_tests.zig");
 }

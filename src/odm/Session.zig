@@ -17,15 +17,19 @@
 //!
 //! One task at a time calls through a session: its diagnostics are those
 //! of its latest call. For work in parallel within one tenant, take a
-//! session for each task. A session is a value of the caller, and it has
-//! to stay where it is while its collections are in use.
+//! session for each task. In safe builds a session that two tasks call
+//! through at once panics, and so does a collection used after the
+//! session's `deinit`. A session is a value of the caller, and it has to
+//! stay where it is while its collections are in use.
 
 const std = @import("std");
 const Io = std.Io;
 const errors = @import("errors.zig");
 const leases = @import("registry/generation.zig");
+const operations = @import("Collection.zig");
 const Registry = @import("Registry.zig");
 const Diagnostics = errors.Diagnostics;
+const Collection = operations.Collection;
 
 const Session = @This();
 
@@ -46,6 +50,13 @@ busy: if (std.debug.runtime_safety) std.atomic.Value(bool) else void = if (std.d
 /// In safe builds: `deinit` came.
 released: if (std.debug.runtime_safety) bool else void = if (std.debug.runtime_safety) false else {},
 
+/// The collection of the model `T` in the tenant's database. The checks
+/// of the model run at compile time. It is valid until the session's
+/// `deinit`.
+pub fn collection(s: *Session, comptime T: type) Collection(T) {
+    return .{ .session = s };
+}
+
 /// The name of the tenant's database.
 pub fn database(s: *const Session) []const u8 {
     return s.name_buf[0..s.name_len];
@@ -63,6 +74,7 @@ pub fn deinit(s: *Session, io: Io) void {
     s.registry.checkUse(io);
     if (std.debug.runtime_safety) {
         if (s.released) @panic("zefir-odm: Session.deinit() twice: deinit a session once");
+        if (s.busy.load(.acquire)) @panic("zefir-odm: a session used by two tasks at once: take a session for each task");
         s.released = true;
     }
     leases.release(s.registry, io, s.generation);
