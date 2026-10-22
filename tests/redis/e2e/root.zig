@@ -135,4 +135,6 @@ test {
     _ = @import("handshake.zig");
     _ = @import("auth.zig");
     _ = @import("pool.zig");
+    _ = @import("pipeline.zig");
+    _ = @import("transactions.zig");
 }
