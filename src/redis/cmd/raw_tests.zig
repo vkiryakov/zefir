@@ -98,3 +98,20 @@ test "the name of raw is its first argument, for the client's texts" {
     try testing.expectEqualStrings("the command", cmd.raw(void, .{ 7, "k" }).name());
     try testing.expectEqualStrings("the command", cmd.raw(void, .{}).name());
 }
+
+test "raw finds the name of a command and the subcommand of CLIENT in each form of its arguments" {
+    var d: Diagnostics = .{};
+    const list: []const []const u8 = &.{ "client", "tracking", "on" };
+    try std.testing.expectError(error.InvalidArgument, cmd.raw(void, list).check(&d));
+    try std.testing.expectEqualStrings("redis.cmd.raw: CLIENT TRACKING makes the server send pushes about the keys of a cache of the client; the client does not run it", d.message());
+    const words: []const []const u8 = &.{ "CLIENT", "CACHING" };
+    try std.testing.expectError(error.InvalidArgument, cmd.raw(void, .{ words, "yes" }).check(&d));
+    try std.testing.expectError(error.InvalidArgument, cmd.raw(void, .{ "Client", words[1..] }).check(&d));
+    try std.testing.expectError(error.InvalidArgument, cmd.raw(void, .{.Quit}).check(&d));
+    // A name that only starts like a banned one, CLIENT alone and CLIENT
+    // with a number after it go.
+    try cmd.raw(void, .{ "SELECTED", "1" }).check(&d);
+    try cmd.raw(void, .{"CLIENT"}).check(&d);
+    try cmd.raw(void, .{ "CLIENT", 7 }).check(&d);
+    try cmd.raw(void, .{ "CLIENT", "INFO" }).check(&d);
+}

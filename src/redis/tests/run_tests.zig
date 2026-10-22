@@ -502,3 +502,82 @@ fn refusedUser(io: Io) !void {
     }
     try server.await(io);
 }
+
+test "a command that changes the state of its connection is InvalidArgument in raw, in any case, and nothing goes out, alone, in a pipeline or in a transaction" {
+    try within5s(testing.io, bannedCommands, .{testing.io});
+}
+
+/// A banned command and what its refusal says to use instead; empty where
+/// nothing replaces it.
+const Ban = struct { []const []const u8, []const u8 };
+
+const bans = [_]Ban{
+    .{ &.{ "HELLO", "3" }, "the handshake of the client" },
+    .{ &.{ "AUTH", "app", "pass" }, "the handshake of the client" },
+    .{ &.{"RESET"}, "the handshake of the client" },
+    .{ &.{ "SELECT", "3" }, "the database in the path of the URL" },
+    .{ &.{ "select", "3" }, "the database in the path of the URL" },
+    .{ &.{"QUIT"}, "client.close" },
+    .{ &.{"MULTI"}, "conn.transaction" },
+    .{ &.{"EXEC"}, "conn.transaction" },
+    .{ &.{"DISCARD"}, "conn.transaction" },
+    .{ &.{ "WATCH", "k" }, "redis.cmd.watch" },
+    .{ &.{"UNWATCH"}, "redis.cmd.unwatch" },
+    .{ &.{ "SUBSCRIBE", "orders" }, "client.subscribe" },
+    .{ &.{ "PSUBSCRIBE", "orders:*" }, "client.subscribe" },
+    .{ &.{ "SSUBSCRIBE", "orders" }, "client.subscribe" },
+    .{ &.{"UNSUBSCRIBE"}, "client.subscribe" },
+    .{ &.{"PUNSUBSCRIBE"}, "client.subscribe" },
+    .{ &.{"SUNSUBSCRIBE"}, "client.subscribe" },
+    .{ &.{"MONITOR"}, "" },
+    .{ &.{"SYNC"}, "" },
+    .{ &.{ "PSYNC", "?", "-1" }, "" },
+    .{ &.{ "REPLCONF", "listening-port", "6380" }, "" },
+    .{ &.{ "CLIENT", "REPLY", "OFF" }, "" },
+    .{ &.{ "Client", "Reply", "SKIP" }, "" },
+    .{ &.{ "CLIENT", "TRACKING", "ON" }, "" },
+    .{ &.{ "CLIENT", "CACHING", "YES" }, "" },
+    .{ &.{"READONLY"}, "" },
+    .{ &.{"READWRITE"}, "" },
+    .{ &.{"ASKING"}, "" },
+};
+
+fn bannedCommands(io: Io) !void {
+    var server: FakeServer = try .start(testing.allocator, io, &.{
+        .expect(.{ "CLIENT", "INFO" }, .{ .string = "id=3 addr=127.0.0.1:50000 lib-name=zefir-redis" }),
+    });
+    defer server.stop(io);
+    var client: Client = undefined;
+    try connected(io, &client, .{ .url = server.url() });
+    defer client.deinit();
+    var d: Diagnostics = .{};
+    for (bans) |ban| {
+        const parts, const instead = ban;
+        const command = cmd.raw(void, parts);
+        try testing.expectError(error.InvalidArgument, client.run(io, .of(.root), command, .{ .diagnostics = &d }));
+        try testing.expect(std.mem.startsWith(u8, d.message(), "redis.cmd.raw: "));
+        try testing.expect(std.mem.indexOf(u8, d.message(), instead) != null);
+    }
+    try testing.expectEqualStrings("redis.cmd.raw: SELECT would send the later calls on the connection to another database: put the database in the path of the URL", blk: {
+        _ = client.run(io, .of(.root), cmd.raw(void, .{ "select", 3 }), .{ .diagnostics = &d }) catch {};
+        break :blk d.message();
+    });
+    try testing.expectEqualStrings("redis.cmd.raw: CLIENT REPLY breaks the count of replies; the client does not run it", blk: {
+        _ = client.run(io, .of(.root), cmd.raw(void, .{ .client, .reply, .off }), .{ .diagnostics = &d }) catch {};
+        break :blk d.message();
+    });
+    // A whole pipeline and a whole transaction stop at a banned command.
+    try testing.expectError(error.InvalidArgument, client.pipeline(io, .of(.root), .{ get, cmd.raw(void, .{"MULTI"}) }, .{ .diagnostics = &d }));
+    try testing.expectEqual(@as(?usize, 1), d.command);
+    var conn = try client.acquire(io, .of(.root));
+    defer conn.release(io);
+    try testing.expectError(error.InvalidArgument, conn.transaction(io, .of(.root), .{ get, cmd.raw(void, .{ "SELECT", "1" }) }, .{ .diagnostics = &d }));
+    try testing.expectEqual(@as(?usize, 1), d.command);
+    try testing.expectEqual(@as(usize, 0), server.received(io));
+    // CLIENT with another subcommand goes.
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const info = try conn.run(io, .of(.root), cmd.raw([]const u8, .{ "CLIENT", "INFO" }), .{ .allocator = arena.allocator() });
+    try testing.expect(std.mem.indexOf(u8, info, "lib-name=zefir-redis") != null);
+    try server.finish(io);
+}
