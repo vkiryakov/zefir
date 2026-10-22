@@ -483,6 +483,74 @@ fn broken(io: Io) !void {
     try server.finish(io);
 }
 
+/// The memory of `child`, but no block larger than `limit`.
+const Capped = struct {
+    child: std.mem.Allocator,
+    limit: usize,
+
+    fn allocator(c: *Capped) std.mem.Allocator {
+        return .{ .ptr = c, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+
+    fn alloc(context: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const c: *Capped = @ptrCast(@alignCast(context));
+        if (len > c.limit) return null;
+        return c.child.rawAlloc(len, alignment, ret_addr);
+    }
+
+    fn resize(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const c: *Capped = @ptrCast(@alignCast(context));
+        if (new_len > c.limit) return false;
+        return c.child.rawResize(memory, alignment, new_len, ret_addr);
+    }
+
+    fn remap(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const c: *Capped = @ptrCast(@alignCast(context));
+        if (new_len > c.limit) return null;
+        return c.child.rawRemap(memory, alignment, new_len, ret_addr);
+    }
+
+    fn free(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const c: *Capped = @ptrCast(@alignCast(context));
+        c.child.rawFree(memory, alignment, ret_addr);
+    }
+};
+
+test "a message that finds no memory is OutOfMemory of next, then Closed; the pool and its connection are untouched, and the next call goes on" {
+    try within5s(testing.io, messageOutOfMemory, .{testing.io});
+}
+
+fn messageOutOfMemory(io: Io) !void {
+    const payload = try testing.allocator.alloc(u8, 256 * 1024);
+    defer testing.allocator.free(payload);
+    @memset(payload, 'x');
+    const big = [_]FakeServer.Reply{ .{ .string = "message" }, .{ .string = "orders" }, .{ .string = payload } };
+    const steps = [_]FakeServer.Step{
+        .expect(.{ "SUBSCRIBE", "orders" }, .subscribed(&.{"orders"})),
+        .send(.{ .push = &big }),
+        .expect(.{ "GET", "k" }, .{ .integer = 8 }),
+    };
+    var server: FakeServer = try .start(testing.allocator, io, &steps);
+    defer server.stop(io);
+    // Room for a connection, not for the message.
+    var capped: Capped = .{ .child = testing.allocator, .limit = 128 * 1024 };
+    var client: Client = try .init(capped.allocator(), io, .{ .url = server.url() });
+    defer client.deinit();
+    try client.connect(io, .root, null);
+    var sub = try client.subscribe(io, .of(.root), .{ .channels = &.{"orders"} });
+    defer sub.deinit();
+    try testing.expectError(error.OutOfMemory, sub.next(io));
+    try testing.expectEqualStrings("no memory was left for a message", sub.diagnostics().message());
+    try testing.expectError(error.Closed, sub.next(io));
+    const stats = client.stats();
+    try testing.expectEqual(@as(usize, 1), stats.connections);
+    try testing.expectEqual(@as(u64, 0), stats.clears);
+    try testing.expectEqual(@as(?i64, 8), try client.run(io, .of(.root), redis.cmd.raw(?i64, .{ "GET", "k" }), .{}));
+    // The pool's connection took the call: the one connect opened.
+    try testing.expectEqual(@as(u32, 1), (try server.entry(io, 1)).connection);
+    try server.finish(io);
+}
+
 test "a task canceled while next waits is Interrupted and keeps its cancelation, and next is Closed after it, also where a read cannot be timed" {
     var windows: WindowsLike = undefined;
     for ([_]Io{ testing.io, windows.io() }) |io| try within5s(testing.io, canceled, .{io});
