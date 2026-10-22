@@ -5,8 +5,9 @@
 //!
 //! - `redis.Client` — the client: `init` checks the options without I/O,
 //!   `connect` opens the first connection and shakes hands, `run` sends a
-//!   command on a connection of its pool, `close` and `deinit` end it;
-//!   `Client.Options` and `Client.Url` say what it takes.
+//!   command on a connection of its pool and `pipeline` many in one
+//!   exchange, `close` and `deinit` end it; `Client.Options` and
+//!   `Client.Url` say what it takes.
 //! - `redis.OperationContext`, `redis.Tracing`, `redis.RunOptions` — what
 //!   a call takes besides its command: the caller's context, with its
 //!   deadline and token, and the memory of the reply.
@@ -100,6 +101,7 @@ test {
     _ = @import("tests/run_tests.zig");
     _ = @import("tests/idle_tests.zig");
     _ = @import("tests/lifecycle_tests.zig");
+    _ = @import("tests/pipeline_tests.zig");
 }
 
 test "the package version reaches the module" {
