@@ -3,9 +3,11 @@
 //! commands of one type, the errors of single commands as values in their
 //! places, an exchange that breaks off with how many replies came, and the
 //! checks of every command before anything goes out. Every test runs under
-//! a time limit of 5 s.
+//! a time limit of 5 s; the test of 1000 commands gets 30 s under
+//! ThreadSanitizer.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Io = std.Io;
 const testing = std.testing;
 const core = @import("core");
@@ -15,7 +17,8 @@ const Client = redis.Client;
 const Diagnostics = redis.Diagnostics;
 const FakeServer = redis.testing.FakeServer;
 const time = @import("../engine/time.zig");
-const within5s = @import("time_limit.zig").within5s;
+const time_limit = @import("time_limit.zig");
+const within5s = time_limit.within5s;
 
 fn within(io: Io, duration: Io.Duration) redis.OperationContext {
     return .of(core.Context.root.withDeadline(.after(time.now(io), duration)));
@@ -71,8 +74,13 @@ fn tupleOfCommands(io: Io) !void {
     try server.finish(io);
 }
 
+/// The time limit of `manyCommands`, and the deadline of its pipeline:
+/// ThreadSanitizer makes the server's work on each of the 1000 commands
+/// many times slower, all the more on a busy runner.
+const many_limit: Io.Duration = if (builtin.sanitize_thread) .fromSeconds(30) else .fromSeconds(5);
+
 test "1000 commands of one type behind a pointer to their array give a slice of results from .allocator, and go out in their order" {
-    try within5s(testing.io, manyCommands, .{testing.io});
+    try time_limit.withinLimit(testing.io, many_limit, manyCommands, .{testing.io});
 }
 
 fn manyCommands(io: Io) !void {
@@ -92,7 +100,7 @@ fn manyCommands(io: Io) !void {
     var counting: testing.FailingAllocator = .init(testing.allocator, .{});
     var arena: std.heap.ArenaAllocator = .init(counting.allocator());
     defer arena.deinit();
-    const done = try client.pipeline(io, .of(.root), &commands, .{ .allocator = arena.allocator() });
+    const done = try client.pipeline(io, within(io, many_limit), &commands, .{ .allocator = arena.allocator() });
     comptime std.debug.assert(@TypeOf(done) == []const (redis.CommandError!void));
     try testing.expectEqual(@as(usize, 1000), done.len);
     for (done) |each| try each;
