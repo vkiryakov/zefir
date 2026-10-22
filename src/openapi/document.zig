@@ -596,12 +596,14 @@ fn answersOf(comptime reg: *const schema.Registry, comptime d: http.Description,
 
 /// The responses of the route itself: those of its `.responses`, else its
 /// default one, with the descriptions of its `ControllerDoc`; 204, 205 and
-/// 304 without content, the value of an `http.Json(T)` too.
+/// 304 without content, the value of an `http.Json(T)` too. A stream also
+/// answers 204, when its handler returns without `subscribe`, which tells
+/// an EventSource to stop reconnecting.
 fn routeAnswers(comptime reg: *const schema.Registry, comptime r: http.RouteDescription, comptime version: DocumentOptions.Version) []const Answer {
     const R = r.Route;
     const doc = @field(r.Controller.openapi.routes, r.handler);
     const from = ".responses of " ++ where(r);
-    if (r.kind == .sse) return &.{streamAnswer(reg, R.Events, routeText(doc, "ok"), version, from)};
+    if (r.kind == .sse) return &.{ streamAnswer(reg, R.Events, routeText(doc, "ok"), version, from), .{ .status = 204, .from = from } };
     if (R.responses.len == 0) {
         if (r.Value == void) return &.{.{ .status = 204, .description = routeText(doc, "no_content"), .from = from }};
         return &.{jsonAnswer(reg, 200, routeText(doc, "ok"), r.Value, from)};

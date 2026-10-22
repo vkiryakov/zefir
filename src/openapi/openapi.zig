@@ -126,7 +126,8 @@ pub fn ControllerDoc(comptime C: type) type {
 /// `.responses = .{ .ok = .{ .description = "All todos, a row each." } }`.
 /// Its statuses are those of its `.responses`, else its default one: 200
 /// for a handler that returns `http.Json(T)` and for a stream, 204 for one
-/// of `!void`. A status left out is described by its phrase, `OK`.
+/// of `!void`. A status left out is described by its phrase, `OK`, as is
+/// the 204 of a stream whose handler returns without `subscribe`.
 pub fn RouteDoc(comptime C: type, comptime method: []const u8) type {
     return struct {
         summary: []const u8,

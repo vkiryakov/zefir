@@ -327,6 +327,9 @@ pub const ProjectTodosController = struct {
 
     pub fn events(self: *ProjectTodosController, ctx: *http.sse.Context) !void {
         _ = try ctx.input(Events);
+        // Without subscribe the stream does not start: 204, which tells an
+        // EventSource to stop reconnecting.
+        if (ctx.request.header("x-no-stream") != null) return;
         _ = try self.live.subscribe(ctx, "ann");
     }
 
@@ -452,6 +455,7 @@ pub const requests = [_]Request{
     .{ .method = .GET, .target = "/api/v1/projects/7/todos/export.csv", .headers = &.{ann}, .status = 200 },
     .{ .method = .GET, .target = "/api/v1/projects/7/todos/count", .headers = &.{ann}, .status = 200 },
     .{ .method = .GET, .target = "/api/v1/projects/7/todos/events", .status = 401 },
+    .{ .method = .GET, .target = "/api/v1/projects/7/todos/events", .headers = &.{ ann, .{ "x-no-stream", "1" } }, .status = 204 },
     .{ .method = .GET, .target = "/api/v1/projects/7/todos/files/docs/plan.txt", .headers = &.{ann}, .status = 200 },
     .{ .method = .POST, .target = "/api/session/login", .headers = &.{form}, .body = "user=ann&password=secret&remember=true", .status = 303 },
     .{ .method = .POST, .target = "/api/session/login", .headers = &.{form}, .body = "user=ann&password=wrong", .status = 401 },

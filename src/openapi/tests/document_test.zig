@@ -541,14 +541,17 @@ const live = struct {
     const Plain = @TypeOf(.{ .backend = @as(http.Backend, undefined), .controllers = .{&plain} });
 };
 
-test "SSE in 3.1: a string, and the events with the schemas of their data in the description" {
+test "SSE in 3.1: a string, and the events with the schemas of their data in the description; 204 without a stream" {
     // Without a text of the route, the events are the description.
     const plain = comptime document(live.Plain, .{ .info = info });
     try expectJson("\"The events of the stream, each with the schema of its data: todo.created (TodoResponse), todo.deleted (TodoIdPath), ping (an empty object), count (an integer).\"", comptime at(plain.root, &.{ "paths", "/todos/events", "get", "responses", "200", "description" }));
     const doc = comptime document(live.Options, .{ .info = info });
     try expectJson("{\"200\":{\"description\":\"The changes, as they happen. The events of the stream, each with the schema of its data: " ++
         "todo.created (TodoResponse), todo.deleted (TodoIdPath), ping (an empty object), count (an integer).\"," ++
-        "\"content\":{\"text/event-stream\":{\"schema\":{\"type\":\"string\"}}}}}", comptime at(doc.root, &.{ "paths", "/todos/events", "get", "responses" }));
+        "\"content\":{\"text/event-stream\":{\"schema\":{\"type\":\"string\"}}}}," ++
+        // A handler that returns without subscribe: an EventSource stops
+        // reconnecting.
+        "\"204\":{\"description\":\"No Content\"}}", comptime at(doc.root, &.{ "paths", "/todos/events", "get", "responses" }));
     // The schemas of the data, for the generators of clients.
     try testing.expectEqualStrings("TodoIdPath TodoResponse", comptime keysOf(at(doc.root, &.{ "components", "schemas" })));
 }
@@ -568,7 +571,7 @@ test "SSE in 3.2: itemSchema, one of the events, each with its data" {
         event("todo.deleted", "{\"$ref\":\"#/components/schemas/TodoIdPath\"}") ++ "," ++
         event("ping", "{\"type\":\"object\",\"maxProperties\":0}") ++ "," ++
         event("count", "{\"type\":\"integer\",\"format\":\"uint32\",\"minimum\":0,\"maximum\":4294967295}") ++
-        "]}}}}}", comptime at(doc.root, &.{ "paths", "/todos/events", "get", "responses" }));
+        "]}}}},\"204\":{\"description\":\"No Content\"}}", comptime at(doc.root, &.{ "paths", "/todos/events", "get", "responses" }));
 }
 
 /// A controller of a route, a controller without texts, a controller of
