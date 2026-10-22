@@ -193,4 +193,5 @@ test {
     _ = @import("streams.zig");
     _ = @import("pubsub.zig");
     _ = @import("limits.zig");
+    _ = @import("resp3.zig");
 }
