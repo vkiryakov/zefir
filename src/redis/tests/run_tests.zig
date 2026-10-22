@@ -18,6 +18,7 @@ const FakeServer = redis.testing.FakeServer;
 const Peer = FakeServer.Peer;
 const time = @import("../engine/time.zig");
 const peers = @import("peers.zig");
+const WindowsLike = @import("windows_like_io.zig").WindowsLike;
 const within5s = @import("time_limit.zig").within5s;
 
 fn within(io: Io, duration: Io.Duration) redis.OperationContext {
@@ -433,33 +434,36 @@ fn brokenReply(io: Io) !void {
     try server.finish(io);
 }
 
-test "a connection that the server closes is ConnectionLost and clears the pool; the command went out once, and the next call opens anew" {
-    try within5s(testing.io, connectionLost, .{testing.io});
+test "a connection that the server closes is ConnectionLost and clears the pool; the command went out once, and the next call opens anew, also where the end of the stream reads as error.Unexpected" {
+    var windows: WindowsLike = undefined;
+    try within5s(testing.io, connectionLost, .{ testing.io, " closed the connection" });
+    try within5s(testing.io, connectionLost, .{ windows.io(), " broke: Unexpected" });
 }
 
-fn connectionLost(io: Io) !void {
+/// The client on `io`, the server on `std.testing.io`.
+fn connectionLost(io: Io, ending: []const u8) !void {
     const level = quiet();
     defer testing.log_level = level;
-    var server: FakeServer = try .start(testing.allocator, io, &.{
+    var server: FakeServer = try .start(testing.allocator, testing.io, &.{
         .expect(.{ "GET", "k" }, .close_connection),
         .expect(.{ "GET", "k" }, .{ .integer = 2 }),
     });
-    defer server.stop(io);
+    defer server.stop(testing.io);
     var client: Client = undefined;
     try connected(io, &client, .{ .url = server.url() });
     defer client.deinit();
     var d: Diagnostics = .{};
     try testing.expectError(error.ConnectionLost, client.run(io, .of(.root), get, .{ .diagnostics = &d }));
-    try testing.expect(std.mem.endsWith(u8, d.message(), " closed the connection"));
+    try testing.expect(std.mem.endsWith(u8, d.message(), ending));
     const counts = client.pool.counts(io);
     try testing.expectEqual(@as(u64, 1), counts.clears);
     try testing.expectEqual(@as(u64, 1), counts.generation);
     // No retry: the command came once.
-    try testing.expectEqual(@as(usize, 1), server.count(io, "GET"));
+    try testing.expectEqual(@as(usize, 1), server.count(testing.io, "GET"));
     // The pool is paused: this call is its probe.
     try testing.expectEqual(@as(?i64, 2), try client.run(io, .of(.root), get, .{}));
-    try testing.expectEqual(@as(u32, 2), try connectionOf(io, &server, 1));
-    try server.finish(io);
+    try testing.expectEqual(@as(u32, 2), try connectionOf(testing.io, &server, 1));
+    try server.finish(testing.io);
 }
 
 test "a server that refuses the user of a new connection is AuthenticationFailed, and clears the pool" {

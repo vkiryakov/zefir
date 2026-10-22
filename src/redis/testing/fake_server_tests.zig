@@ -11,6 +11,7 @@ const testing = std.testing;
 const resp = @import("../resp.zig");
 const FakeServer = @import("FakeServer.zig");
 const early_io = @import("early_io.zig");
+const WindowsLike = @import("../tests/windows_like_io.zig").WindowsLike;
 
 const Reply = FakeServer.Reply;
 const Value = resp.Value;
@@ -424,18 +425,24 @@ fn closeTwice(io: Io, url: []const u8) !void {
     try third.expectBytes("+OK\r\n");
 }
 
-test "refuse_connections ends every connection and refuses new ones until acceptConnections" {
-    const io = testing.io;
-    var server: FakeServer = try .start(testing.allocator, io, &.{
-        .expect(.{ "GET", "k" }, .refuse_connections),
-        .expect(.{ "GET", "k" }, .ok),
-    });
-    defer server.stop(io);
-    try within5s(io, refuse, .{ io, &server });
-    try server.finish(io);
-    // The connection refused got no number: the one after it is the third.
-    try testing.expectEqual(@as(usize, 3), server.received(io));
-    try testing.expectEqual(@as(u32, 3), (try server.entry(io, 2)).connection);
+test "refuse_connections ends every connection and refuses new ones until acceptConnections, also where a shutdown does not end the read that waits on it" {
+    // The server on each; on the second, as on Windows, its own shutdown
+    // does not end the read that waits on a connection.
+    var windows: WindowsLike = undefined;
+    for ([_]Io{ testing.io, windows.io() }) |server_io| {
+        const io = testing.io;
+        var server: FakeServer = try .start(testing.allocator, server_io, &.{
+            .expect(.{ "GET", "k" }, .refuse_connections),
+            .expect(.{ "GET", "k" }, .ok),
+        });
+        defer server.stop(server_io);
+        try within5s(io, refuse, .{ io, &server });
+        try server.finish(io);
+        // The connection refused got no number: the one after it is the
+        // third. What came on an ended connection is not in the journal.
+        try testing.expectEqual(@as(usize, 3), server.received(io));
+        try testing.expectEqual(@as(u32, 3), (try server.entry(io, 2)).connection);
+    }
 }
 
 fn refuse(io: Io, server: *FakeServer) !void {
@@ -449,8 +456,10 @@ fn refuse(io: Io, server: *FakeServer) !void {
     defer asking.close();
     try asking.send(&.{ "GET", "k" });
     try asking.expectClosed();
-    // The server went away: the connection that sat idle ends too.
+    // The server went away: the connection that sat idle ends too, and a
+    // command sent on it after that takes no step.
     try idle.expectClosed();
+    try idle.send(&.{ "GET", "k" });
     var refused: Client = undefined;
     try refused.open(io, server.url());
     defer refused.close();

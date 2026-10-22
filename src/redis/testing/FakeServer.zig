@@ -534,6 +534,9 @@ const Connection = struct {
     write_buffer: [16 * 1024]u8,
     /// In `Served.connections`.
     node: std.DoublyLinkedList.Node = .{},
+    /// Set when the server went away: what the connection still reads goes
+    /// to neither the journal nor the script.
+    ended: std.atomic.Value(bool) = .init(false),
 };
 
 /// The connections being served, so that a server that goes away ends all
@@ -556,7 +559,9 @@ const Served = struct {
 
     /// Shuts every connection down both ways, from the task of any of
     /// them: its client sees the end of the stream. Each task closes its
-    /// own socket.
+    /// own socket. On Windows the shutdown does not end the read that
+    /// waits on a connection, and that read gets what the client sends
+    /// next: the connection ends there, serving nothing.
     fn shutAll(s: *Served, io: Io) void {
         const protection = io.swapCancelProtection(.blocked);
         defer _ = io.swapCancelProtection(protection);
@@ -565,6 +570,7 @@ const Served = struct {
         var it = s.connections.first;
         while (it) |node| : (it = node.next) {
             const conn: *Connection = @fieldParentPtr("node", node);
+            conn.ended.store(true, .release);
             conn.stream.shutdown(io, .both) catch {};
         }
     }
@@ -609,6 +615,7 @@ fn serveCommand(state: *State, conn: *Connection, arena: Allocator) !Next {
         else => |e| return e,
     };
     const args = read orelse return .end;
+    if (conn.ended.load(.acquire)) return .end;
     if (ownCommand(args)) |own| {
         if (own == .ping) try state.record(conn.number, args);
         try answerOwn(state, conn, own, args);

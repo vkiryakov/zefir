@@ -5,7 +5,10 @@
 //! deadline is DeadlineExceeded, and the command never goes out. The
 //! threshold, 30 s, is shortened through the pool's internal field.
 //! Against `redis.testing.FakeServer` and `FakeServer.Peer` over loopback;
-//! every test runs under a time limit of 5 s.
+//! every test runs under a time limit of 5 s. A connection that the server
+//! closed is checked on the `Io` of `windows_like_io.zig` too, where the
+//! end of a stream reads as `error.Unexpected` and a shutdown does not end
+//! the read that waits on it.
 
 const std = @import("std");
 const Io = std.Io;
@@ -21,6 +24,7 @@ const FakeServer = redis.testing.FakeServer;
 const Peer = FakeServer.Peer;
 const time = @import("../engine/time.zig");
 const peers = @import("peers.zig");
+const WindowsLike = @import("windows_like_io.zig").WindowsLike;
 const within5s = @import("time_limit.zig").within5s;
 
 const get = cmd.raw(?i64, .{ "GET", "k" });
@@ -68,8 +72,10 @@ fn pingFirst(io: Io) !void {
     try server.finish(io);
 }
 
-test "a connection that the server closed while it idled meets the end of the stream at its check: it closes, and the call goes on a new one without an error" {
-    try within5s(testing.io, closedWhileIdle, .{testing.io});
+test "a connection that the server closed while it idled fails its check: it closes, and the call goes on a new one without an error, also where the end of the stream reads as error.Unexpected" {
+    var windows: WindowsLike = undefined;
+    // The client and the server on each.
+    for ([_]Io{ testing.io, windows.io() }) |io| try within5s(testing.io, closedWhileIdle, .{io});
 }
 
 /// Sends `GO` to `server` on a connection of its own, which a step of the
