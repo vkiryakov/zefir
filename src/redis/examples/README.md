@@ -9,7 +9,223 @@
 > its own with a long random password, and across a network you do not
 > trust, use a tunnel: WireGuard, SSH or a service mesh.
 
-**A Redis client for Zig services.**
+**A Redis client for Zig services.** Redis is a server that keeps data
+in memory: every piece of it sits under a *key*, a name such as
+`session:7f3a9c`, and a key holds a value of one of a few types, a string,
+a hash of fields, a list, a set, a sorted set or a stream. A key may
+expire. That makes Redis the place for what a service needs fast and for a
+while: sessions, caches, counters, limits on requests, queues of work,
+leaderboards and messages between services. [Valkey](https://valkey.io)
+is a server of the same kind, which speaks the same protocol. This module
+is the client side: it connects to one server, keeps a pool of connections
+that every task of the service shares, and sends commands whose replies
+it reads straight into Zig types. It is written against `std.Io` only,
+and runs on [zio](https://github.com/lalinsky/zio) in production.
+
+> [!IMPORTANT]
+> **Not in v0.1 (TODO):**
+>
+> - **One standalone server only.** Sentinel and Cluster come later, and
+>   with them replicas to read from and sharded pub/sub. A client refuses a
+>   node of a cluster or a Sentinel when it connects, with `Unsupported` and
+>   the mode of the server, so a cloud Redis in cluster mode does not
+>   connect.
+> - **TLS**, see above, and with it the authentication by tokens that
+>   expire, as the clouds' IAM has it: the password stays as `init` got it.
+> - **Redis 7.2 or later, or Valkey 8 or later, in RESP3.** A client refuses
+>   an older server when it connects, with its version.
+> - **Retries.** The client never repeats a command by itself.
+>   `redis.outcome` tells which failed calls are safe to make again,
+>   [Errors and what is safe to retry](#errors-and-what-is-safe-to-retry)
+>   which of them are worth it, and your code decides.
+> - **A subscription as it was made.** The channels and the patterns of a
+>   subscriber are set when it subscribes; to change them, close it and
+>   subscribe again.
+> - **No TCP keepalive.** `std.Io.net` has no socket options yet. Instead
+>   the client checks a connection that idled 30 s with PING before a call
+>   takes it, and a subscriber sends PING after a silence; a blocking
+>   command that waits `.forever` without a deadline on a dead connection
+>   waits until its task is canceled.
+> - **`close` on Windows.** Under zio on Windows, `close` cannot cut a read
+>   that already waits for the server: such a call ends with the server's
+>   reply or at its own deadline, and the `next` of a subscriber at its next
+>   PING.
+> - **Modules and caching on the client.** No commands of JSON, Search,
+>   Bloom, TimeSeries or vector sets in the catalog, and no
+>   `CLIENT TRACKING`; `cmd.raw` with `redis.Value` sends the commands of
+>   modules by hand.
+> - **A part of the commands.** About 90, see [The catalog](#the-catalog);
+>   no functions (`FUNCTION`, `FCALL`), `EVAL_RO` or `SCRIPT LOAD`, one
+>   stream per typed read, and no `CLIENT UNBLOCK` for a blocked command of
+>   a canceled task. `cmd.raw` sends what the catalog lacks.
+> - **One connection shared by many calls**, with their commands pipelined
+>   on it: later, if a benchmark shows that it pays. `run` and `pipeline`
+>   will not change.
+> - **A hook for observers**, such as OpenTelemetry, and metrics beyond
+>   `client.stats()`.
+
+From [the quick start](#quick-start): a session that expires, and a
+profile in a hash, read back into a struct.
+
+```zig
+// A session: its token names the customer, for half an hour.
+try client.run(io, op, cmd.set("session:7f3a9c", "42", .{ .ttl = .fromSeconds(30 * 60) }), .{});
+const user = try client.run(io, op, cmd.get([]const u8, "session:7f3a9c"), .{ .allocator = arena });
+app.info("Signed in", .{ .session = "7f3a9c", .user = user });
+```
+
+```zig
+// The profile: a hash with a field for each field of Profile.
+try client.run(io, op, cmd.hset("user:42", Profile{ .name = "Ann", .age = 30, .plan = .pro }), .{});
+const visits = try client.run(io, op, cmd.hincrby("user:42", "visits", 1), .{});
+app.info("Visit", .{ .user = 42, .visits = visits });
+const profile = (try client.run(io, op, cmd.hgetall(Profile, "user:42"), .{ .allocator = arena })) orelse
+    return error.ProfileGone;
+```
+
+- **One client for the whole service.** Any task may call it at once; its
+  pool of connections serves them, first come first served.
+- **A command is a value, and its reply a Zig type.**
+  `cmd.get(i64, "views")` knows its command and that its reply is a
+  `?i64`; a hash reads
+  into a struct of yours, and a reply that does not fit its type is an
+  error that leaves the connection fine.
+- **About 90 commands** of strings, keys, hashes, lists, sets, sorted sets,
+  streams with consumer groups, scripts and pub/sub, and `cmd.raw` for any
+  other.
+- **Pipelines, transactions with WATCH, Lua scripts by their SHA1,
+  subscribers, and blocking commands** whose timeout on the server comes
+  from the deadline of the call.
+- **Errors that say whether to retry.** Every error is one of 16 names, and
+  each tells whether the server may have run the command; the details, the
+  server's code and text among them, are in `redis.Diagnostics`.
+- **Deadlines of zefir-core.** A call takes a `core.Context`: its deadline
+  bounds the call, and its token stops the call before it goes out.
+- **Tests without Redis.** `redis.testing.FakeServer` plays a script on
+  loopback, and your code talks to it through a real client.
+- **No dependencies.** Only the standard library and zefir-core; zio comes
+  from your build, not from Zefir.
+
+## Contents
+
+- [How Redis keeps data](#how-redis-keeps-data)
+- [How the client works](#how-the-client-works)
+- [Installation](#installation)
+- [Quick start](#quick-start)
+- [Connecting](#connecting)
+- [Commands and replies](#commands-and-replies)
+- [The catalog](#the-catalog)
+- [Pipelines](#pipelines)
+- [Transactions and WATCH](#transactions-and-watch)
+- [Blocking commands and the reliable queue](#blocking-commands-and-the-reliable-queue)
+- [Scripts](#scripts)
+- [Streams and consumer groups](#streams-and-consumer-groups)
+- [Pub/sub](#pubsub)
+- [Errors and what is safe to retry](#errors-and-what-is-safe-to-retry)
+- [Deadlines and cancellation](#deadlines-and-cancellation)
+- [The pool, closing and statistics](#the-pool-closing-and-statistics)
+- [Under zefir.App](#under-zefirapp)
+- [Logs](#logs)
+- [Tests without Redis](#tests-without-redis)
+
+Programs that `zig build e2e` in `tests/redis` builds and runs against
+Redis and Valkey, checking what they print against this guide: [quick start](quick_start.zig) · [connecting](connect.zig) ·
+[the best customers](leaders.zig) · [checkout](checkout.zig) · [a limit on
+requests](limits.zig) · [shipping](orders.zig) ·
+[notifications](notifications.zig) · [errors](errors.zig). Tests that
+`zig build test-redis` runs without a server: [pipelines](pipeline_test.zig)
+· [deadlines](deadlines_test.zig) · [tests of an
+application](profiles_test.zig).
+
+## How Redis keeps data
+
+Picture the coffee shop of this guide. Everything it keeps in Redis is a
+key with a value:
+
+```mermaid
+flowchart LR
+    server[("Redis")] --> db["database 0"]
+    db --> session["session:7f3a9c<br/>a string: 42,<br/>expires in 30 minutes"]
+    db --> views["views:/home<br/>a string: 3, a counter"]
+    db --> user["user:42<br/>a hash: name Ann, age 30,<br/>plan pro, visits 1"]
+    db --> paid["orders:paid<br/>a list: ann, cleo"]
+    db --> leaders["leaders<br/>a sorted set: cleo 240,<br/>bob 129.5, ann 120.5, dan 15"]
+    db --> shipping["shipping<br/>a stream: 1001, 1002, 1003"]
+```
+
+- **Keys.** A key is a name, a string of bytes, whose parts are set apart
+  by colons by custom: `user:42`. Every command names the keys it works
+  on. There is no schema: the first write to a key makes it, with the type
+  of that write, and deleting the last value of a list or a hash deletes
+  the key.
+- **Types.** A *string* holds bytes, text or a number, which INCR counts
+  up; a *hash* holds fields and their values, like a struct; a *list*
+  holds values in order, a queue; a *set* holds values without order and
+  without repeats; a *sorted set* holds members with scores, in the order
+  of their scores; a *stream* holds entries that only grow, each with an id
+  from the server's clock, and groups of consumers that share them. A
+  command of one type on a key of another fails with `WRONGTYPE`.
+- **A time to live.** A key may expire: the server deletes it once its
+  time is over. Sessions and caches live so, and so do the windows of a
+  limit on requests.
+- **In memory.** Redis keeps it all in memory, which makes it fast, and
+  writes it to disk only when it is set up to. A session or a cache may be
+  lost with no harm; the only copy of an order belongs in a database.
+- **Databases.** A server has 16 numbered databases, 0 by default; the
+  path of the URL picks one, `redis://host:6379/2`.
+- **Commands.** A client sends commands, each a list of strings, such as
+  `SET session:7f3a9c 42 PX 1800000`. The server runs them one at a time,
+  so a command never sees another one half done.
+
+## How the client works
+
+One `redis.Client` talks to one server. The tasks of a service call it at
+once, and it keeps a pool of connections for them:
+
+```mermaid
+flowchart LR
+    subgraph yours["your tasks"]
+        a["client.run(…)"]
+        b["client.pipeline(…)"]
+        c["conn.transaction(…)"]
+        d["sub.next(…)"]
+    end
+    a --> client["redis.Client"]
+    b --> client
+    c -->|"a redis.Conn holds one"| client
+    client --> pool[("the pool: idle connections,<br/>calls waiting in line")]
+    pool --> c1(["connection"])
+    pool --> c2(["connection"])
+    c1 --> server[("Redis")]
+    c2 --> server
+    d --> own(["the subscriber's own connection"])
+    own --> server
+```
+
+1. **A call takes a connection:** an idle one from the pool, or a new one
+   when none is idle and the pool has room, up to `max_connections` (32),
+   two opening at once at most. A call that finds neither waits in line,
+   first come first served, until its deadline.
+2. **A new connection introduces itself.** Its first command is `HELLO 3`,
+   which makes it speak RESP3, the protocol of Redis since 6.0, carries the
+   user and the password when there is one, and the name of
+   `client_name`. The server answers what it is, and anything but Redis 7.2
+   or later or Valkey 8 or later, standalone, is refused. Then
+   `CLIENT SETINFO` tells the server the name and the version of the
+   client, and `SELECT` picks the database of the URL.
+3. **The command goes out and the reply comes back** on that connection,
+   in one write and one read; the client reads the reply straight into the
+   type that the call named.
+4. **The connection goes back to the pool**, unless the exchange broke it.
+   One that idled for more than 30 s answers a PING before a call takes it,
+   so that a connection that a firewall or the server's `timeout` closed
+   during the night fails no call.
+
+Two things take a connection out of the pool for longer: a `redis.Conn`,
+from `client.acquire`, holds one for one task, for WATCH and
+transactions; and a `redis.Subscriber`, from `client.subscribe`, opens one
+of its own, outside the pool. The client has no tasks of its own:
+everything happens in the calls of your tasks.
 
 ## Installation
 
@@ -69,9 +285,10 @@ You need a server to talk to. With Docker:
 docker run --rm -p 6379:6379 redis:8.10.2
 ```
 
-Valkey works the same way, `docker run --rm -p 6379:6379
-valkey/valkey:9.1.2`: the programs of this guide run against Redis 7.2,
-Redis 8.10 and Valkey 9.1, and print the same.
+Valkey works the same way,
+`docker run --rm -p 6379:6379 valkey/valkey:9.1.2`: the programs of this
+guide run against Redis 7.2, Redis 8.10 and Valkey 9.1, and print the
+same.
 
 ## Quick start
 
@@ -503,6 +720,125 @@ The client must not move once connected: keep it in a `var` of `main`, or
 in a struct that stays where it is, and hand out `&client`. In safe builds
 a call on a moved copy panics, and so does a call with another `std.Io`
 than the one of `init`.
+
+## Commands and replies
+
+### A command is a value
+
+A function of `redis.cmd` sends nothing. It returns a small value, the
+keys and the arguments of the command, whose type knows the command on the
+wire and the type of its reply; `client.run` sends it and returns that
+reply. So the compiler knows what each call returns:
+
+| Call | Sends | `run` returns |
+|---|---|---|
+| `cmd.get([]const u8, "motd")` | `GET motd` | `?[]const u8`: null when the key is not there |
+| `cmd.get(i64, "views:/home")` | `GET views:/home` | `?i64`: the string the server keeps, read as a number |
+| `cmd.set("session:7f3a9c", "42", .{ .ttl = .fromSeconds(1800) })` | `SET session:7f3a9c 42 PX 1800000` | `void` |
+| `cmd.incr("views:/home")` | `INCR views:/home` | `i64`: the new count |
+| `cmd.hgetall(Profile, "user:42")` | `HGETALL user:42` | `?Profile`: null when there is no hash |
+
+- **Names.** A function is named after its command, in lower case, and a
+  form of a command with another reply is a function of its own: `setNx`
+  answers whether it wrote. `type` is a keyword of Zig, so TYPE is
+  `keyType`.
+- **Durations** are `std.Io.Duration`, and go to the server in
+  milliseconds. One under 1 ms is `InvalidArgument`: `PEXPIRE key 0` would
+  delete the key.
+- **Lists.** An empty list where a command takes one or more, the keys of
+  `del`, the members of `sadd`, is `InvalidArgument`, and so is NaN for a
+  score: the client stops the call before anything goes out.
+- **A command holds the slices it was given:** they must live while it
+  runs. It holds no state, so it may be built once and run many times; its
+  type has a name, `cmd.Set([]const u8)` or `cmd.Incr`, for an array of
+  commands in a [pipeline](#pipelines).
+
+### The type of the reply
+
+The type that the call names decides how its reply is read, and one
+decoder reads every reply, by these rules:
+
+| Type | Reads | Note |
+|---|---|---|
+| `void` | any reply but an error | the reply is read and dropped |
+| `bool` | a boolean; the integers 1 and 0; the strings "1" and "0" | EXPIRE and SISMEMBER answer integers |
+| integers | an integer; a string or a big number with a number in range | GET of a counter gives a string |
+| `f32`, `f64` | a double, `inf` and `nan` too; an integer; a string with a number | INCRBYFLOAT answers a string |
+| `[]const u8` | a string of any kind; a number, as its text | |
+| `?T` | null, or what `T` reads | |
+| an exhaustive `enum` | a string that names one of its tags | |
+| `[]const T`, `[N]T` | an array or a set, of what `T` reads | |
+| a tuple, `struct { A, B }` | an array of exactly that many | a script's table, in [Scripts](#scripts) |
+| a struct | a map by the names of its fields, or an array of field and value pairs | a hash, or an entry of a stream |
+| `redis.Value` | anything | for replies of any shape |
+
+- **A reply that does not fit** its type is `UnexpectedReply`. The client
+  reads the reply to its end, so the connection stays fine, and the
+  diagnostics say what came and what the call asked for, without the
+  value: "the reply is a bulk string of 25 bytes, and the call asked for
+  ?i64".
+- **An error of the server** is `ServerError`, whatever the type, with its
+  code and its text in the diagnostics.
+- **A hash and a struct.** `cmd.hset(key, value)` writes a field of the
+  hash for each field of the struct: a number, a bool or an enum as its
+  text, and an optional that is null not at all. `cmd.hgetall(T, key)`
+  reads them back: a field that the hash lacks takes the default of the
+  struct's field, an optional null, and without either the call is
+  `UnexpectedReply`; the fields of the hash that the struct lacks are
+  skipped; a hash that is not there is null. A nested struct, a slice
+  other than a string, a union or a pointer is a compile error, as a hash
+  has no nesting; `[]const redis.FieldValue` reads a hash of any fields.
+- **`redis.Value`** is a union of what RESP3 sends: null, booleans,
+  integers, doubles, big numbers, strings, arrays, sets, maps with their
+  pairs in the server's order, and the errors inside an array.
+- **Limits.** A reply larger than `max_reply_bytes`, or nested deeper than
+  64 levels, is `ReplyTooLarge`, found before anything is allocated, and
+  its connection closes.
+
+### Memory
+
+- **Arguments** are borrowed until the call returns: the client writes
+  them straight into its connection, large ones without a copy.
+- **A reply** that holds strings or slices comes from `options.allocator`,
+  an arena: the client takes from it during the call only and frees
+  nothing, so the reply lives as long as the arena, often the one of a
+  request. A call whose reply needs memory and has no `.allocator` is
+  `InvalidArgument` before anything goes out. Numbers, bools, enums and
+  `void` need none, hence `.{}`.
+- **Borrowed results.** A message of a subscriber lives until its next
+  `next`, and so does an item of an iterator: the only results that the
+  client keeps for you.
+
+### Commands of your own: cmd.raw
+
+`cmd.raw(T, args)` sends a command that the catalog lacks. `args` is a
+tuple of strings, numbers, bools and enums, the name of the command
+first, or a slice of strings for a command built at run time, and the
+reply reads into `T` by the rules above. [The limit on
+requests](#scripts) flushes the scripts of the server with it:
+
+```zig
+try client.run(io, op, cmd.raw(void, .{ "SCRIPT", "FLUSH" }), .{});
+```
+
+The commands that change the state of their connection do not go
+through `raw`, as the calls after them on that connection would inherit
+it: `InvalidArgument`, with what to use instead, for these:
+
+| Commands | Why not | Instead |
+|---|---|---|
+| `HELLO`, `AUTH`, `RESET` | they change the protocol or the user of the connection | the handshake of the client |
+| `SELECT` | the later calls would go to another database | the database in the path of the URL |
+| `QUIT` | it closes the connection | `close` |
+| `MULTI`, `EXEC`, `DISCARD` | they leave the connection in a transaction | `conn.transaction` |
+| `WATCH`, `UNWATCH` | they hold keys on the connection | `cmd.watch`, `cmd.unwatch` on a `redis.Conn` |
+| `SUBSCRIBE` and its kin | pushes would come on the connection | `client.subscribe` |
+| `MONITOR`, `SYNC`, `PSYNC`, `REPLCONF` | the connection stops answering commands | — |
+| `CLIENT REPLY`, `CLIENT TRACKING`, `CLIENT CACHING` | they break the count of replies, or send pushes | — |
+| `READONLY`, `READWRITE`, `ASKING` | they are commands of a cluster | — |
+
+A blocking command through `raw` gets no timeout from the deadline, see
+[the blocking commands](#blocking-commands-and-the-reliable-queue).
 
 ## The catalog
 
@@ -1389,8 +1725,8 @@ a few fields, and the server gives it an id from its clock,
 `<milliseconds>-<sequence>`. Anyone may read a stream from any id. A
 *consumer group* shares it among workers: each entry goes to one consumer
 of the group and stays *pending* for that consumer until it acknowledges
-it, with XACK, and the entries of a consumer that fell over another can
-claim.
+it, with XACK; when a consumer falls over, another can claim its pending
+entries.
 
 ```mermaid
 flowchart LR
@@ -1561,9 +1897,9 @@ $ zig build run
   which `createGroup` takes as done, so that every start of the service
   may make it.
 - **XREADGROUP** with `.from = .new`, the default, gives the entries that
-  the group has not given out yet, each to one consumer; `.from =
-  .{ .id = .zero }` gives a consumer its own pending ones again, as after
-  its restart.
+  the group has not given out yet, each to one consumer;
+  `.from = .{ .id = .zero }` gives a consumer its own pending ones again,
+  as after its restart.
 - **XACK** takes an entry off the pending ones: it is done. Until then the
   group keeps it, so nothing is lost when a consumer falls over.
 - **XAUTOCLAIM** hands the entries pending for longer than `.min_idle` to
@@ -1948,8 +2284,8 @@ A call takes a `redis.OperationContext`, whose `ctx` is the
 and a trace. `.of(ctx)` makes one.
 
 - **The deadline.** A call's deadline is its context's, else `timeout` of
-  the options from the start of the call, 5 s by default; `.timeout =
-  null` leaves a call without a deadline of its context with none at all.
+  the options from the start of the call, 5 s by default; with
+  `.timeout = null`, a call whose context has no deadline has none at all.
   The deadline bounds the whole call: the line of the pool, the opening of
   a connection, the write and the reply. With less than 1 ms left before
   sending, or less than the shortest round trip that the client has seen
@@ -2161,6 +2497,110 @@ test "a blocking command with 150 ms or less left of its deadline is DeadlineExc
 }
 ```
 
+## The pool, closing and statistics
+
+The pool keeps the connections of a client, up to `max_connections`, and
+opens them as calls need them, two at once at most; nothing opens them
+ahead. A call that finds no idle connection and no room waits in line,
+first come first served, until its deadline: `PoolExhausted`.
+
+A connection that breaks under a call clears the pool, as a server that
+broke one may have broken them all; so does a server that refuses the user
+of a new connection, as it would refuse every one. A clear closes the idle
+connections, closes the ones in use when they come back, and pauses the
+pool: until a new connection opens, calls get `Unavailable` at once, and
+one call at most every 500 ms tries to open one. So after a restart of the
+server the calls hear "not sent" quickly, rather than `ConnectionLost` on
+each old connection in turn. A timeout, a cancelation, and a reply that
+breaks RESP3 or is too large close only their own connection.
+
+A connection that idled in the pool for more than 30 s answers a PING
+before a call takes it, under the deadline of the call. A connection that
+does not answer closes, and the call takes another or opens a new one: its
+command has not gone out, so nothing ran.
+
+`close(io)` ends the client's work, in this order:
+
+1. the subscribers end, and their `next` returns null;
+2. new calls, and the calls that wait for a connection, get `Closed`;
+3. the calls in flight, and the Conns given out, get `close_timeout` (5 s)
+   to end, and then their exchanges are cut: `ConnectionLost`;
+4. the connections close; QUIT does not go out.
+
+A second `close` waits for the first. `deinit` closes the client if
+`close` has not, and frees it, wiping its copy of the password. Release
+every Conn and close every subscriber before `deinit`: in safe builds a
+Conn or a subscriber left panics, and so do a client moved after
+`connect`, a call on another `std.Io` than the one of `init`, and a Conn,
+an iterator or a subscriber called from two tasks at once.
+
+`client.stats()` takes a snapshot, for tests and diagnostics, as the last
+line of [the quick start](#quick-start) shows:
+
+| Field | What it counts |
+|---|---|
+| `connections` | open connections of the pool: `idle` ones and those `in_use` by a call or a Conn |
+| `opening` | connections being opened |
+| `waiting` | calls waiting in line for a connection |
+| `subscribers` | open subscribers, on connections of their own |
+| `generation`, `clears` | the generation of the pool, and how many times it was cleared |
+
+## Under zefir.App
+
+zefir.App, the container of zefir-core that will build the parts of a
+service, start them in order and stop them all within one deadline, is
+planned. The client has the two methods that it will call, and they work
+today, as [connect.zig](#what-can-go-wrong-at-the-start) shows:
+
+- **`start(io)`** is `connect` under a deadline of `start_timeout`, 10 s
+  by default. When the client cannot connect, `start` writes why to the
+  log, as a warning of the scope `redis` with the message that
+  `Diagnostics` would hold, such as
+  `start failed: error.AuthenticationFailed: WRONGPASS …`: under App no
+  caller sees the diagnostics. A program that wants them calls `connect`
+  itself. Once the client is connected, `start` does nothing.
+- **`shutdown(io, deadline)`** is `close` by the deadline of App's stop:
+  the subscribers end first, then the calls in flight get `close_timeout`,
+  but no longer than what is left 250 ms before the deadline, so that App
+  has time for the rest; then their exchanges are cut. It returns no
+  error: nothing of the client runs after it.
+
+The client needs no wrapper for App: `init` does no I/O, so a factory of
+the service makes it from the settings, as `main` of [the quick
+start](#quick-start) does, and App calls `start` before the parts that use
+the client and `shutdown` after them.
+
+## Logs
+
+The client logs to `std.log.scoped(.redis)`, as warnings, what an operator
+needs to know: the clears of the pool, and why; the servers that refuse a
+connection, with their address; and a `start` that failed. At debug, it
+logs what it skips: a push between replies, an error of CLIENT SETINFO, an
+idle connection that failed its PING. It never logs arguments, values,
+passwords or the texts of replies. To send
+the records to zefir-log, the root file of the program names the bridge:
+
+```zig
+pub const std_options: std.Options = .{ .logFn = log.stdLogFn };
+```
+
+and the logger installs itself as the target of std.log:
+
+```zig
+logger.installStdLog();
+```
+
+The records then have the scope `redis`, as in the run of
+[connect.zig](#what-can-go-wrong-at-the-start):
+
+```text
+2026-10-22T05:28:03.515Z WARN  [redis] 127.0.0.1:6380 refused the connection: AuthenticationFailed: WRONGPASS invalid username-password pair or user is disabled.
+```
+
+Without the bridge they go where std.log writes by default, to stderr. The
+errors of your own calls are yours to log: the error with
+`diagnostics.message()`, as the programs here do.
+
 ## Tests without Redis
 
 `redis.testing.FakeServer` runs the tests of your code without a Redis
@@ -2186,13 +2626,14 @@ your code talks to it through a `redis.Client`, as to any Redis.
   `acceptConnections(io)`, a server that went away; `.malformed` breaks
   RESP3, and `.raw` sends bytes as they are.
 - **The handshake** the server answers itself: HELLO, CLIENT SETINFO,
-  SELECT, and PING, which goes to the journal. `startWith(gpa, io,
-  .{ .hello = .{ .password = "…" } })` makes it want a password, and
-  `.hello` can make it say that it is another server; `.handler`, a type
-  of yours with `pub fn answer(self, io, arena, request)
-  FakeServer.Handler.Error!FakeServer.Reply`, answers the commands that the
-  steps do not expect, for tests whose commands come in no set order, as
-  in [the deadlines](#deadlines-and-cancellation).
+  SELECT, and PING, which goes to the journal.
+  `startWith(gpa, io, .{ .hello = .{ .password = "…" } })` makes it want a
+  password, and `.hello` can make it say that it is another server.
+- **A handler**, the `.handler` of `startWith`, answers the commands that
+  the steps do not expect, for tests whose commands come in no set order,
+  as in [the deadlines](#deadlines-and-cancellation): a type of yours with
+  `pub fn answer(self, io, arena, request) FakeServer.Handler.Error!FakeServer.Reply`,
+  passed as `.init(&handler)`.
 - **`finish(io)`** fails when a step has not run, or a command came that
   no step expected, and says which. Such a command gets an error from the
   server: `-ERR zefir FakeServer: unexpected command …`.
