@@ -395,11 +395,27 @@ pub fn build(b: *std.Build) void {
     // Client.deinit() with cursors left panic in safe builds. Each program
     // must print the panic message and end in its own panic handler, which
     // exits with code 3 instead of aborting. They get their own Debug copies
-    // of mongo and mongo-bson, whatever -Doptimize says.
+    // of mongo and the modules it imports, odm's below among them, whatever
+    // -Doptimize says.
     const panic_mongo_bson = b.createModule(.{
         .root_source_file = b.path("src/mongo-bson/root.zig"),
         .target = target,
         .optimize = .Debug,
+    });
+    const panic_validator = b.createModule(.{
+        .root_source_file = b.path("src/validator/root.zig"),
+        .target = target,
+        .optimize = .Debug,
+    });
+    const panic_odm = b.createModule(.{
+        .root_source_file = b.path("src/odm/root.zig"),
+        .target = target,
+        .optimize = .Debug,
+        .imports = &.{
+            .{ .name = "mongo-bson", .module = panic_mongo_bson },
+            .{ .name = "core", .module = panic_core },
+            .{ .name = "validator", .module = panic_validator },
+        },
     });
     const panic_mongo = b.createModule(.{
         .root_source_file = b.path("src/mongo/root.zig"),
@@ -408,6 +424,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "core", .module = panic_core },
             .{ .name = "mongo-bson", .module = panic_mongo_bson },
+            .{ .name = "odm", .module = panic_odm },
         },
     });
     panic_mongo.addOptions("build_options", version_options);
@@ -443,23 +460,8 @@ pub fn build(b: *std.Build) void {
     // and a collection used after the deinit of its session panic in safe
     // builds. Each program must print the panic message and end in its own
     // panic handler, which exits with code 3 instead of aborting. They get
-    // their own Debug copies of odm and the modules it imports, whatever
-    // -Doptimize says.
-    const panic_validator = b.createModule(.{
-        .root_source_file = b.path("src/validator/root.zig"),
-        .target = target,
-        .optimize = .Debug,
-    });
-    const panic_odm = b.createModule(.{
-        .root_source_file = b.path("src/odm/root.zig"),
-        .target = target,
-        .optimize = .Debug,
-        .imports = &.{
-            .{ .name = "mongo-bson", .module = panic_mongo_bson },
-            .{ .name = "core", .module = panic_core },
-            .{ .name = "validator", .module = panic_validator },
-        },
-    });
+    // their own Debug copies of odm and the modules it imports, made above
+    // for the mongo programs, whatever -Doptimize says.
     for ([_][2][]const u8{
         .{ "moved_registry", "panic: zefir-odm: Registry moved after its first registerConnection(): keep it where it was" },
         .{ "another_io", "panic: zefir-odm: a call on another std.Io than the registry's: pass the io of Registry.init" },

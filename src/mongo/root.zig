@@ -18,6 +18,9 @@
 //! - The arguments and results of the client's calls:
 //!   `mongo.OperationContext`, `mongo.Command`, `mongo.WriteRequest`, their
 //!   options and `mongo.WriteResult`.
+//! - `mongo.OdmDriver` — the reference driver of zefir-odm: zefir-mongo
+//!   under odm's driver contract, whose `driver()` goes to
+//!   `odm.Registry.init`.
 //! - `mongo.testing` — a scripted server on loopback, for tests of code on
 //!   zefir-mongo without MongoDB: the client connects to it as to a
 //!   mongod.
@@ -40,6 +43,9 @@ pub const Cursor = @import("Cursor.zig");
 
 pub const Database = @import("crud/Database.zig");
 pub const Collection = @import("crud/Collection.zig");
+
+/// zefir-mongo under the driver contract of zefir-odm.
+pub const OdmDriver = @import("OdmDriver.zig");
 
 pub const Error = errors.Error;
 pub const Outcome = errors.Outcome;
@@ -106,4 +112,5 @@ test {
     _ = @import("tests/cursor_tests.zig");
     _ = @import("tests/write_tests.zig");
     _ = @import("tests/rules_tests.zig");
+    _ = @import("tests/odm_driver_tests.zig");
 }
