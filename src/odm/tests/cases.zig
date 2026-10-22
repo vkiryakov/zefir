@@ -33,6 +33,12 @@ pub const compile_errors = [_]Case{
     .{ .name = "compile error: a driver without a name", .expect = "odm.Driver.init: tests.compile_errors.NamelessDriver has no pub const name: []const u8" },
     .{ .name = "compile error: a driver without open", .expect = "odm.Driver.init: tests.compile_errors.DriverWithoutOpen has no method open; expected " ++ open },
     .{ .name = "compile error: a cursor without next", .expect = "odm.RawCursor.init: tests.compile_errors.CursorWithoutNext has no method next; expected " ++ next },
+    // The harness of odm.testing.conformance.run.
+    .{ .name = "compile error: a harness by value", .expect = "odm.testing.conformance.run: pass a pointer to the harness, e.g. &harness; got tests.compile_errors.SomeHarness" },
+    .{ .name = "compile error: a constant harness", .expect = "odm.testing.conformance.run: the harness must be mutable, declared with var; got *const tests.compile_errors.SomeHarness" },
+    .{ .name = "compile error: a harness without setUp", .expect = "odm.testing.conformance.run: tests.compile_errors.NoSetUp has no method setUp; expected pub fn setUp(self: *@This(), io: std.Io, gpa: std.mem.Allocator) !odm.testing.conformance.Setup" },
+    .{ .name = "compile error: a harness without tearDown", .expect = "odm.testing.conformance.run: tests.compile_errors.NoTearDown has no method tearDown; expected pub fn tearDown(self: *@This(), io: std.Io, setup: odm.testing.conformance.Setup) void" },
+    .{ .name = "compile error: a hook of the harness of another signature", .expect = "odm.testing.conformance.run: tests.compile_errors.OtherStall.stall has another signature; expected pub fn stall(self: *@This(), io: std.Io, setup: odm.testing.conformance.Setup) !void" },
     // The checks of a model: odm.assertModel.
     .{ .name = "compile error: assertModel of an integer", .expect = "odm: u32 is not a model: a model is a struct with named fields" },
     .{ .name = "compile error: assertModel of a tuple", .expect = "odm: struct { u32, u8 } is not a model: a model is a struct with named fields" },

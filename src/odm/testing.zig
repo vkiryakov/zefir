@@ -4,3 +4,6 @@
 /// gates that hold calls, a journal of the calls and counts of the
 /// clients.
 pub const FakeDriver = @import("testing/FakeDriver.zig");
+/// The conformance suite of drivers: a driver that passes it is "zefir
+/// compatible".
+pub const conformance = @import("testing/conformance.zig");

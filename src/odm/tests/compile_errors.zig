@@ -262,6 +262,73 @@ test "compile error: a cursor without next" {
     _ = odm.RawCursor.init(&cursor);
 }
 
+// The harness of the conformance suite: odm.testing.conformance.run.
+
+/// `setUp` and `tearDown` of a harness of type `H`.
+fn HarnessMethods(comptime H: type) type {
+    return struct {
+        pub fn setUp(_: *H, _: Io, _: std.mem.Allocator) !odm.testing.conformance.Setup {
+            return error.Unexpected;
+        }
+        pub fn tearDown(_: *H, _: Io, _: odm.testing.conformance.Setup) void {}
+    };
+}
+
+const SomeHarness = struct {
+    n: u8 = 0,
+    pub const setUp = HarnessMethods(SomeHarness).setUp;
+    pub const tearDown = HarnessMethods(SomeHarness).tearDown;
+};
+
+test "compile error: a harness by value" {
+    const harness: SomeHarness = .{};
+    var report = try odm.testing.conformance.run(std.testing.io, std.testing.allocator, harness, .{});
+    report.deinit();
+}
+
+test "compile error: a constant harness" {
+    const harness: SomeHarness = .{};
+    var report = try odm.testing.conformance.run(std.testing.io, std.testing.allocator, &harness, .{});
+    report.deinit();
+}
+
+const NoSetUp = struct {
+    n: u8 = 0,
+    pub const tearDown = HarnessMethods(NoSetUp).tearDown;
+};
+
+test "compile error: a harness without setUp" {
+    var harness: NoSetUp = .{};
+    var report = try odm.testing.conformance.run(std.testing.io, std.testing.allocator, &harness, .{});
+    report.deinit();
+}
+
+const NoTearDown = struct {
+    n: u8 = 0,
+    pub const setUp = HarnessMethods(NoTearDown).setUp;
+};
+
+test "compile error: a harness without tearDown" {
+    var harness: NoTearDown = .{};
+    var report = try odm.testing.conformance.run(std.testing.io, std.testing.allocator, &harness, .{});
+    report.deinit();
+}
+
+const OtherStall = struct {
+    n: u8 = 0,
+    pub const setUp = HarnessMethods(OtherStall).setUp;
+    pub const tearDown = HarnessMethods(OtherStall).tearDown;
+
+    /// Without the setup.
+    pub fn stall(_: *OtherStall, _: Io) !void {}
+};
+
+test "compile error: a hook of the harness of another signature" {
+    var harness: OtherStall = .{};
+    var report = try odm.testing.conformance.run(std.testing.io, std.testing.allocator, &harness, .{});
+    report.deinit();
+}
+
 // The checks of a model: odm.assertModel, one case per row of the design's
 // table "Model and schema".
 

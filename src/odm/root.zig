@@ -149,7 +149,8 @@ pub const Cursor = @import("Cursor.zig").Cursor;
 /// `first` or `count`.
 pub const Query = @import("query/Query.zig").Query;
 
-/// What tests of odm and of the code over it need: `testing.FakeDriver`.
+/// What tests of odm and of the code over it need: `testing.FakeDriver`
+/// and `testing.conformance`.
 pub const testing = @import("testing.zig");
 
 test {
@@ -177,4 +178,5 @@ test {
     _ = @import("tests/cursor_tests.zig");
     _ = @import("tests/query_tests.zig");
     _ = @import("tests/concurrency_tests.zig");
+    _ = @import("tests/conformance_tests.zig");
 }
