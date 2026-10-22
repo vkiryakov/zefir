@@ -223,7 +223,11 @@ fn userRound(io: Io) !void {
     var buffer: [64]u8 = undefined;
     const name = try freshName(&buffer, "user");
     try admin.dropDatabase(io, name);
-    try admin.createUser(io, name, name, "odm-user-pass", .{.{ .role = "readWrite", .db = name }});
+    defer admin.dropDatabaseAtEnd(io, name);
+    // A run that died after createUser left the user: the name is the same
+    // in every run.
+    try admin.freshUser(io, name, name, "odm-user-pass", .{.{ .role = "readWrite", .db = name }});
+    defer admin.dropUserAtEnd(io, name, name);
     var uri_buffer: [128]u8 = undefined;
     const uri = try std.fmt.bufPrint(&uri_buffer, "mongodb://{s}@127.0.0.1:27118/{s}", .{ name, name });
     {

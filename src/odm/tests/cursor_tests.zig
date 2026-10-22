@@ -224,15 +224,24 @@ test "a cursor outlives its session" {
     defer arena.deinit();
 
     try shop.fake.reply("fake://shared", .{ .documents = &.{ ann, bob } });
+    // Both are given back in the middle of the test; a failed check before
+    // that gives them back here, so that the registry's deinit finds no
+    // lease.
     var acme = try shop.registry.tenant(io, "acme");
+    var acme_held = true;
+    defer if (acme_held) acme.deinit(io);
     var cursor = try acme.collection(User).find(io, .root, .{}, .{});
+    var cursor_held = true;
+    defer if (cursor_held) cursor.deinit(io);
     // The session and the cursor hold a lease each.
     try testing.expectEqual(@as(usize, 2), shop.registry.stats(io).leases);
     acme.deinit(io);
+    acme_held = false;
     try testing.expectEqual(@as(usize, 1), shop.registry.stats(io).leases);
     try testing.expectEqualStrings("Ann", (try cursor.next(io, .root, arena.allocator())).?.name);
     try testing.expectEqualStrings("Bob", (try cursor.next(io, .root, arena.allocator())).?.name);
     cursor.deinit(io);
+    cursor_held = false;
     try testing.expectEqual(@as(usize, 0), shop.registry.stats(io).leases);
     try testing.expectEqual(@as(usize, 0), shop.fake.counts(io).cursors);
 }
@@ -265,9 +274,17 @@ test "Closed after a forced close" {
     defer arena.deinit();
 
     try shop.fake.reply("fake://shared", .{ .documents = &.{ ann, bob } });
+    // Both are given back in the middle of the test; a failed check before
+    // that gives them back here, so that the registry's deinit finds no
+    // lease.
     var acme = try shop.registry.tenant(io, "acme");
+    var acme_held = true;
+    defer if (acme_held) acme.deinit(io);
     var cursor = try acme.collection(User).find(io, .root, .{}, .{});
+    var cursor_held = true;
+    defer if (cursor_held) cursor.deinit(io);
     acme.deinit(io);
+    acme_held = false;
     // The cursor holds the old generation past its drain: it is closed by
     // force.
     try shop.registry.replaceConnection(io, .root, "shared-1", .{ .uri = "fake://next" });
@@ -276,6 +293,7 @@ test "Closed after a forced close" {
     try testing.expectEqual(@as(usize, 0), shop.fake.counts(io).freed);
     // Its deinit still works, and its lease was the last: the generation goes.
     cursor.deinit(io);
+    cursor_held = false;
     try testing.expectEqual(@as(usize, 0), shop.registry.stats(io).leases);
     try testing.expectEqual(@as(usize, 1), shop.fake.counts(io).freed);
 }

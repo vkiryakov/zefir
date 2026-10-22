@@ -238,8 +238,10 @@ test "a failed .new rolls back" {
     try registry.provisionTenant(io, .root, request);
     try testing.expectEqualStrings("", d.message());
     try testing.expectEqual(odm.ConnectionState.active, (try registry.connectionStats(io, "big-1")).state);
-    var big = try registry.tenant(io, "big");
-    big.deinit(io);
+    {
+        var big = try registry.tenant(io, "big");
+        defer big.deinit(io);
+    }
     counts = fake.counts(io);
     try testing.expectEqual(@as(usize, 2), counts.opened);
     try testing.expectEqual(@as(usize, 1), counts.freed);
@@ -255,6 +257,10 @@ test "remove tenant" {
     try registry.provisionTenant(io, .root, existing("acme", "shared-1", "acme", 1));
 
     var before = try registry.tenant(io, "acme");
+    // Given back in the middle of the test; a failed check before that
+    // gives it back here, so that the registry's deinit finds no lease.
+    var held = true;
+    defer if (held) before.deinit(io);
     try registry.removeTenant(io, "acme");
     try testing.expectError(error.TenantNotFound, registry.tenant(io, "acme"));
     try testing.expectEqual(@as(usize, 0), registry.stats(io).tenants);
@@ -264,6 +270,7 @@ test "remove tenant" {
     try testing.expectEqual(@as(usize, 1), registry.stats(io).leases);
     try before.generation.client.ping(io, .root, null);
     before.deinit(io);
+    held = false;
     try testing.expectEqual(@as(usize, 0), registry.stats(io).leases);
     // The connection stays.
     const s = try registry.connectionStats(io, "shared-1");
@@ -276,7 +283,7 @@ test "remove tenant" {
     // The tenant may come again.
     try registry.provisionTenant(io, .root, existing("acme", "shared-1", "acme", 1));
     var again = try registry.tenant(io, "acme");
-    again.deinit(io);
+    defer again.deinit(io);
 }
 
 /// Whether the connection "shared-1" has its generation `n`, with one old
@@ -297,31 +304,43 @@ test "a session keeps its generation" {
     try shared(&registry, io);
     try registry.provisionTenant(io, .root, existing("acme", "shared-1", "acme", 1));
 
-    var first = try registry.tenant(io, "acme");
-    var second = try registry.tenant(io, "acme");
     var group: Io.Group = .init;
     defer group.cancel(io);
+    // Both are given back in the middle of the test. A failed check before
+    // that gives them back here, before the group's cancel: the
+    // replacement drains until they are, and the registry's deinit must
+    // find no lease.
+    var first = try registry.tenant(io, "acme");
+    var first_held = true;
+    defer if (first_held) first.deinit(io);
+    var second = try registry.tenant(io, "acme");
+    var second_held = true;
+    defer if (second_held) second.deinit(io);
     var replace: Outcome = .{};
     try group.concurrent(io, replaceTask, .{ &replace, &registry, io, "shared-1", "fake://b" });
     // The new generation is published; the old one drains, held by both
     // sessions.
     try eventually(io, Replaced{ .r = &registry, .n = 2 }, isReplaced);
     try testing.expectEqual(@as(usize, 1), registry.stats(io).draining);
-    var fresh = try registry.tenant(io, "acme");
-    try testing.expectEqual(@as(u64, 2), fresh.generation.number);
-    try testing.expectEqual(@as(u64, 1), first.generation.number);
-    try testing.expectEqual(@as(usize, 3), registry.stats(io).leases);
-    fresh.deinit(io);
+    {
+        var fresh = try registry.tenant(io, "acme");
+        defer fresh.deinit(io);
+        try testing.expectEqual(@as(u64, 2), fresh.generation.number);
+        try testing.expectEqual(@as(u64, 1), first.generation.number);
+        try testing.expectEqual(@as(usize, 3), registry.stats(io).leases);
+    }
 
     // Giving a lease back makes no I/O.
     const calls = fake.journal(io).len;
     first.deinit(io);
+    first_held = false;
     try testing.expectEqual(calls, fake.journal(io).len);
     try testing.expectEqual(@as(usize, 0), fake.counts(io).close_calls);
     try io.sleep(.fromMilliseconds(30), .awake);
     try testing.expect(!replace.done.load(.acquire));
     // The last one lets the replacement close the old generation and return.
     second.deinit(io);
+    second_held = false;
     try try replace.wait(io);
     const counts = fake.counts(io);
     try testing.expectEqual(@as(usize, 1), counts.close_calls);

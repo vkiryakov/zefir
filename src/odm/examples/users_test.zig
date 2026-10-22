@@ -46,11 +46,33 @@ const Shop = struct {
     }
 
     /// The latest call that odm sent the driver.
-    fn last(shop: *Shop, io: std.Io) FakeDriver.Call {
+    fn last(shop: *Shop, io: std.Io) !FakeDriver.Call {
         const journal = shop.fake.journal(io);
+        if (journal.len == 0) return error.TestUnexpectedResult;
         return journal[journal.len - 1].call;
     }
 };
+
+// A test that reads what odm sent checks each optional and the tag of each
+// union before it takes the value inside: `.?` or a field of a union of
+// another tag would stop the test with a panic, where a regression has to
+// fail it.
+
+/// The string `value` of a document; the test fails on anything else.
+fn stringOf(value: ?bson.Value) ![]const u8 {
+    return switch (value orelse return error.TestUnexpectedResult) {
+        .string => |text| text,
+        else => error.TestUnexpectedResult,
+    };
+}
+
+/// The ObjectId `value` of a document; the test fails on anything else.
+fn objectIdOf(value: ?bson.Value) !bson.ObjectId {
+    return switch (value orelse return error.TestUnexpectedResult) {
+        .object_id => |id| id,
+        else => error.TestUnexpectedResult,
+    };
+}
 
 test "a sign-up is one insert of one document, with the id that odm made" {
     const io = testing.io;
@@ -64,16 +86,19 @@ test "a sign-up is one insert of one document, with the id that odm made" {
     const id = try users.signUp(io, .root, ann, now);
 
     // One insert into acme.users, of one document.
-    const insert = shop.last(io).insert;
+    const insert = switch (try shop.last(io)) {
+        .insert => |request| request,
+        else => return error.TestUnexpectedResult,
+    };
     try testing.expectEqualStrings("acme", insert.ns.database);
     try testing.expectEqualStrings("users", insert.ns.collection);
     try testing.expectEqual(@as(usize, 1), insert.documents.len);
     // Its _id comes first, and signUp returned it.
     const doc = insert.documents[0];
-    const first = (try doc.first()).?;
+    const first = try doc.first() orelse return error.TestUnexpectedResult;
     try testing.expectEqualStrings("_id", first.key);
-    try testing.expectEqualSlices(u8, &id.bytes, &first.value.object_id.bytes);
-    try testing.expectEqualStrings("ann@example.com", (try doc.get("email")).?.string);
+    try testing.expectEqualSlices(u8, &id.bytes, &(try objectIdOf(first.value)).bytes);
+    try testing.expectEqualStrings("ann@example.com", try stringOf(try doc.get("email")));
     // No null went out: Ann has no nickname.
     try testing.expectEqual(@as(?bson.Value, null), try doc.get("nickname"));
 }
@@ -136,14 +161,17 @@ test "byEmail asks for one user by e-mail, and reads it into a User" {
         .createdAt = now,
     }, .{});
     try shop.fake.reply("fake://shop", .{ .documents = &.{doc.raw()} });
-    const found = (try users.byEmail(io, .root, arena.allocator(), "ann@example.com")).?;
+    const found = try users.byEmail(io, .root, arena.allocator(), "ann@example.com") orelse return error.TestUnexpectedResult;
     try testing.expectEqualStrings("Ann", found.name);
     try testing.expectEqualStrings("Lisbon", found.address.city);
     try testing.expectEqual(@as(?[]const u8, null), found.nickname);
 
     // findOne is a find of the e-mail, for one document.
-    const find = shop.last(io).find;
-    try testing.expectEqualStrings("ann@example.com", (try find.filter.get("email")).?.string);
+    const find = switch (try shop.last(io)) {
+        .find => |request| request,
+        else => return error.TestUnexpectedResult,
+    };
+    try testing.expectEqualStrings("ann@example.com", try stringOf(try find.filter.get("email")));
     try testing.expectEqual(@as(u32, 1), find.limit);
 }
 
@@ -163,7 +191,10 @@ test "rename says whether the user was there" {
     try testing.expect(try users.rename(io, .root, id, "Ann B."));
 
     // An update of the user's id, which sets the name.
-    const update = shop.last(io).update;
-    try testing.expectEqualSlices(u8, &id.bytes, &(try update.filter.get("_id")).?.object_id.bytes);
-    try testing.expectEqualStrings("Ann B.", (try update.update.getPath("$set.name")).?.string);
+    const update = switch (try shop.last(io)) {
+        .update => |request| request,
+        else => return error.TestUnexpectedResult,
+    };
+    try testing.expectEqualSlices(u8, &id.bytes, &(try objectIdOf(try update.filter.get("_id"))).bytes);
+    try testing.expectEqualStrings("Ann B.", try stringOf(try update.update.getPath("$set.name")));
 }
