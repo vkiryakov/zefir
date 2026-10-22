@@ -166,6 +166,7 @@ edit tests/http/build.zig                       | http jwt zefir
 edit tests/mongo/e2e/crud.zig                   | mongo zefir
 edit tests/mongo/build.zig.zon                  | mongo zefir
 edit tests/mongo/stress/storm.zig               | mongo zefir
+edit tests/app/build.zig                        | zefir
 edit examples/rpc-custom-transport/src/root.zig | rpc rpc-nats jwt zefir
 edit examples/rpc-custom-transport/consumer/build.zig | rpc rpc-nats jwt zefir
 edit examples/rpc-custom-transport/README.md    | rpc rpc-nats jwt zefir

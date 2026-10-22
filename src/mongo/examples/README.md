@@ -58,9 +58,6 @@ production.
 >   write concerns in the options of operations; no `createCollection` or
 >   `renameCollection`, which `Database.runCommand` does, see
 >   [Reports, indexes and collections](#reports-indexes-and-collections).
-> - **The App container.** `main` builds the client and closes it; the App
->   of zefir-core, which will start and stop it with the rest of a
->   service, is planned.
 
 From [the quick start](#quick-start): a customer in, three more, and the
 adults out, the oldest first.

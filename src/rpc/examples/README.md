@@ -25,9 +25,6 @@ in tests, or one you write yourself.
 > - **Codecs.** JSON only.
 > - **Retries.** rpc never repeats a call by itself: which calls are safe
 >   to repeat is the application's decision, see [Idempotency](#idempotency).
-> - **The App container.** `main` builds the objects of a service and runs
->   its server; the App of zefir-core, which will run the lifecycle of
->   many components, is planned.
 > - **Ready-made middleware.** [Middleware](#middleware) of your own work,
 >   on three levels, but zefir-rpc ships none ready to use: an access log,
 >   rate limits and permissions are code of your application, and this

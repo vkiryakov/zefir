@@ -53,9 +53,6 @@ memory.
 >   [Server-sent events](#server-sent-events) work; a client that
 >   reconnects gets the events from then on, since the server keeps no
 >   history to send it the ones it missed.
-> - **The App container.** `main` builds the objects of a service and runs
->   its server; the App of zefir-core, which will run the lifecycle of many
->   components, is planned.
 
 A whole program: a controller, a server, and three requests to it. The
 server runs on the backend in memory, `http.testing`, which needs no
