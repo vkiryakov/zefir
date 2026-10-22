@@ -783,6 +783,7 @@ error. The other checks of the document are in the chapters below:
 | two types have one name of schema | [Types and rules](#types-and-rules) |
 | an example breaks the rules of its type | [Types and rules](#types-and-rules) |
 | two routes have one operationId, or a tag has two descriptions | [Declarations](#declarations) |
+| `mapError` gives an error of a route a status outside 200 to 599 | [Errors](#errors) |
 | a route requires a scheme that no middleware before it declares | [Security](#security) |
 | a controller of the server has no declaration and is not left out | [The document of the http guide's service](#the-document-of-the-http-guides-service) |
 
@@ -1177,6 +1178,13 @@ The `409` of creating a todo in the http guide, `error.TodoLimitReached`:
   brings every error of the function it calls. A status that never
   happens in practice is still listed, which is better than one that is
   missing; an error set written out narrows it.
+- **A status of `mapError` is a final status of HTTP**, 200 to 599. The
+  server answers 500 in place of any other, so another one, such as
+  `error.Teapot => 600`, stops the build:
+
+```text
+error: zefir.openapi: AppErrors.mapError(error.Teapot) gives the status 600, which is not a final status of HTTP; give it one of 200 to 599
+```
 
 ## Security
 
