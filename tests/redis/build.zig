@@ -3,8 +3,11 @@
 //! docker-compose.yml at the repository root.
 //!
 //!   zig build e2e      start the servers, run the tests
-//!   zig build check    build the tests without running them; no servers
-//!                      needed, so CI runs it on every system
+//!   zig build stress   start the servers, run the stress tests in Debug
+//!                      and in ReleaseSafe
+//!   zig build check    build the tests and the stress tests without
+//!                      running them; no servers needed, so CI runs it on
+//!                      every system
 //!   zig build up       only start the servers and wait until they are
 //!                      healthy; it also unpauses redis-stall, which a run
 //!                      that died in the middle of a test leaves paused
@@ -73,8 +76,61 @@ pub fn build(b: *std.Build) void {
     run.step.dependOn(&up.step);
     b.step("e2e", "Run the end-to-end tests against the Redis servers").dependOn(&run.step);
 
-    const check_step = b.step("check", "Build the tests without running them");
+    const check_step = b.step("check", "Build the tests and the stress tests without running them");
     check_step.dependOn(&e2e.step);
+
+    // The stress tests, in Debug and then in ReleaseSafe whatever
+    // -Doptimize says: each mode gets zefir and zio built in it. One mode
+    // after the other, as they share the server and the CPU, and
+    // ReleaseSafe runs even when Debug fails.
+    const stress_step = b.step("stress", "Run the stress tests against the Redis servers, in Debug and in ReleaseSafe");
+    const run_stress = b.addSystemCommand(&.{
+        "sh",
+        "-c",
+        \\"$1"; debug=$?
+        \\"$2"; safe=$?
+        \\[ $debug -eq 0 ] && [ $safe -eq 0 ]
+        ,
+        "stress",
+    });
+    run_stress.stdio = .inherit;
+    run_stress.has_side_effects = true;
+    run_stress.step.dependOn(&up.step);
+    stress_step.dependOn(&run_stress.step);
+    for ([_]std.lang.Optimize{ .debug, .safe }) |mode| {
+        const mode_zefir = b.dependency("zefir", .{ .target = target, .optimize = mode });
+        const mode_zio = b.dependency("zio", .{ .target = target, .optimize = mode });
+        const imports: []const std.Build.Module.Import = &.{
+            .{ .name = "core", .module = mode_zefir.module("zefir-core") },
+            .{ .name = "redis", .module = mode_zefir.module("zefir-redis") },
+            .{ .name = "zio", .module = mode_zio.module("zio") },
+        };
+        // The servers and the helpers of the end-to-end tests.
+        const helpers = b.createModule(.{
+            .root_source_file = b.path("e2e/root.zig"),
+            .target = target,
+            .optimize = mode,
+            .imports = imports,
+        });
+        const stress = b.addTest(.{
+            .name = b.fmt("stress-{t}", .{mode}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("stress/root.zig"),
+                .target = target,
+                .optimize = mode,
+                .imports = &.{
+                    imports[0],
+                    imports[1],
+                    imports[2],
+                    .{ .name = "e2e", .module = helpers },
+                },
+            }),
+            .test_runner = .{ .path = b.path("test_runner.zig"), .mode = .simple },
+        });
+        run_stress.addArtifactArg(stress);
+        // Built and not run: no servers needed.
+        check_step.dependOn(&stress.step);
+    }
 }
 
 /// `docker compose --profile redis <args> <services>`, so that only the
