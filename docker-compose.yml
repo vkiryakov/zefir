@@ -40,6 +40,28 @@
 #          that restart it
 #   27121  mongo-ghost: a member of the replica set "ghost" that is never
 #          initialized (RSGhost), for the client to refuse
+#
+# The Redis and Valkey servers of the end-to-end tests of zefir-redis, in
+# tests/redis, are in the profile `redis`, for the same reason:
+# `docker compose --profile redis up -d --wait redis-plain` starts them,
+# and so does `zig build e2e` there. REDIS_IMAGE picks the image,
+# redis:8.10.2 by default; CI also runs redis:7.2.16 and
+# valkey/valkey:9.1.2. Each starts with an empty database, kept in memory
+# only. Their ports, on 127.0.0.1 only:
+#
+#   16379  redis-plain: no password, DEBUG on for the types of RESP3
+#   16380  redis-auth: the users of tests/redis/conf/users.acl, each with
+#          the password <name>-pass: default; app; reader, which reads
+#          only; no-multi, without MULTI; limited, to the keys app:*; and
+#          gone, which is off
+#   16381  redis-stall: no password, for tests that pause it: a server that
+#          takes commands and answers none
+#   16382  redis-restart: no password, for tests that restart it, or stop
+#          and start it
+#   16383  redis-cluster: cluster mode without slots, for the client to
+#          refuse
+#   16384  redis-old: always redis:6.2.24, older than 7.2, for the client
+#          to refuse
 
 name: zefir-nats-e2e
 
@@ -50,6 +72,22 @@ x-nats: &nats
     - ./tests/nats/certs:/certs:ro
   healthcheck:
     test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8222/healthz"]
+    interval: 1s
+    timeout: 2s
+    retries: 30
+
+x-redis: &redis
+  image: ${REDIS_IMAGE:-redis:8.10.2}
+  profiles: ["redis"]
+  # In memory: every start has an empty database, and no volume is left.
+  tmpfs: ["/data"]
+  # The entrypoints of the redis and the valkey images put their server
+  # before arguments that start with --. No --hz: blocking commands are
+  # tested at the default, 10.
+  command: ["--save", "", "--appendonly", "no"]
+  # redis-cli is valkey-cli in the valkey image.
+  healthcheck:
+    test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
     interval: 1s
     timeout: 2s
     retries: 30
@@ -191,3 +229,46 @@ services:
     <<: *mongo
     command: ["mongod", "--replSet", "ghost"]
     ports: ["127.0.0.1:27121:27017"]
+
+  # DEBUG PROTOCOL gives each type of RESP3, for the tests of the reader.
+  redis-plain:
+    <<: *redis
+    command: ["--save", "", "--appendonly", "no", "--enable-debug-command", "yes"]
+    ports: ["127.0.0.1:16379:6379"]
+
+  redis-auth:
+    <<: *redis
+    command: ["--save", "", "--appendonly", "no", "--aclfile", "/conf/users.acl"]
+    volumes:
+      - ./tests/redis/conf:/conf:ro
+    ports: ["127.0.0.1:16380:6379"]
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a default-pass ping | grep -q PONG"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+
+  # The tests pause and unpause it by this name.
+  redis-stall:
+    <<: *redis
+    container_name: zefir-redis-e2e-stall
+    ports: ["127.0.0.1:16381:6379"]
+
+  # The tests restart it, and stop and start it, by this name.
+  redis-restart:
+    <<: *redis
+    container_name: zefir-redis-e2e-restart
+    ports: ["127.0.0.1:16382:6379"]
+
+  # Cluster mode without slots: HELLO says mode cluster.
+  redis-cluster:
+    <<: *redis
+    command: ["--save", "", "--appendonly", "no", "--cluster-enabled", "yes"]
+    ports: ["127.0.0.1:16383:6379"]
+
+  # Redis 6.2 whatever REDIS_IMAGE says: HELLO, and a version older than
+  # 7.2.
+  redis-old:
+    <<: *redis
+    image: redis:6.2.24
+    ports: ["127.0.0.1:16384:6379"]

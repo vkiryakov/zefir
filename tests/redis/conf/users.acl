@@ -1,0 +1,6 @@
+user default on >default-pass ~* &* +@all
+user app on >app-pass ~* &* +@all
+user reader on >reader-pass ~* &* -@all +@read +hello +ping +select +client|setinfo
+user no-multi on >no-multi-pass ~* &* +@all -multi
+user limited on >limited-pass ~app:* &* +@all
+user gone off >gone-pass ~* &* +@all

@@ -7,6 +7,7 @@ const http_guide = @import("src/http/examples/cases.zig");
 const jwt_cases = @import("src/jwt/tests/cases.zig");
 const jwt_guide = @import("src/jwt/examples/cases.zig");
 const mongo_guide = @import("src/mongo/examples/cases.zig");
+const redis_guide = @import("src/redis/examples/cases.zig");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -62,10 +63,10 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // nats sends the package version in CONNECT, and zefir-mongo in hello;
-    // build.zig.zon is its only source. One module of the options serves
-    // both: two of the same content would be one file in two modules of the
-    // umbrella.
+    // nats sends the package version in CONNECT, zefir-mongo in hello and
+    // zefir-redis in CLIENT SETINFO; build.zig.zon is its only source. One
+    // module of the options serves all three: two of the same content would
+    // be one file in two modules of the umbrella.
     const version_options = b.addOptions();
     version_options.addOption([]const u8, "version", manifest.version);
     const build_options = version_options.createModule();
@@ -114,6 +115,19 @@ pub fn build(b: *std.Build) void {
     });
     mongo.addImport("build_options", build_options);
 
+    // Redis and Valkey for zefir applications: the client, RESP3 and the
+    // catalog of commands.
+    const redis = b.addModule("zefir-redis", .{
+        .root_source_file = b.path("src/redis/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+        .imports = &.{
+            .{ .name = "core", .module = core },
+        },
+    });
+    redis.addImport("build_options", build_options);
+
     const http = b.addModule("zefir-http", .{
         .root_source_file = b.path("src/http/root.zig"),
         .target = target,
@@ -136,7 +150,7 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // Umbrella module: @import("zefir").core, .log, .confy, .validator, .rpc, .rpc_nats, .orm, .mongo, .nats, .http, .jwt
+    // Umbrella module: @import("zefir").core, .log, .confy, .validator, .rpc, .rpc_nats, .orm, .mongo, .redis, .nats, .http, .jwt
     const zefir = b.addModule("zefir", .{
         .root_source_file = b.path("src/zefir.zig"),
         .target = target,
@@ -151,6 +165,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "rpc-nats", .module = rpc_nats },
             .{ .name = "orm", .module = orm },
             .{ .name = "mongo", .module = mongo },
+            .{ .name = "redis", .module = redis },
             .{ .name = "nats", .module = nats },
             .{ .name = "http", .module = http },
             .{ .name = "jwt", .module = jwt },
@@ -170,6 +185,7 @@ pub fn build(b: *std.Build) void {
     const test_rpc_nats = addModuleTestStep(b, test_step, "rpc-nats");
     const test_orm = addModuleTestStep(b, test_step, "orm");
     const test_mongo = addModuleTestStep(b, test_step, "mongo");
+    const test_redis = addModuleTestStep(b, test_step, "redis");
     const test_nats = addModuleTestStep(b, test_step, "nats");
     const test_http = addModuleTestStep(b, test_step, "http");
     const test_jwt = addModuleTestStep(b, test_step, "jwt");
@@ -179,8 +195,8 @@ pub fn build(b: *std.Build) void {
     // where usize has 32 bits.
     const validator_compile_step = b.step("compile-validator-tests", "Build the validator's test binaries for -Dtarget without running them");
     for (
-        [_]*std.Build.Module{ core, log, confy, validator, rpc, rpc_nats, orm, mongo, nats, http, jwt, zefir },
-        [_]*std.Build.Step{ test_core, test_log, test_confy, test_validator, test_rpc, test_rpc_nats, test_orm, test_mongo, test_nats, test_http, test_jwt, test_zefir },
+        [_]*std.Build.Module{ core, log, confy, validator, rpc, rpc_nats, orm, mongo, redis, nats, http, jwt, zefir },
+        [_]*std.Build.Step{ test_core, test_log, test_confy, test_validator, test_rpc, test_rpc_nats, test_orm, test_mongo, test_redis, test_nats, test_http, test_jwt, test_zefir },
     ) |module, module_test_step| {
         const tests = b.addTest(.{ .root_module = module });
         module_test_step.dependOn(&addRun(b, tests, tsan).step);
@@ -408,6 +424,49 @@ pub fn build(b: *std.Build) void {
         // with 3, so a program that printed the text and returned fails.
         run.expectExitCode(3);
         test_mongo.dependOn(&run.step);
+    }
+
+    // redis panic programs: a client moved after connect(), a call on
+    // another std.Io, a Conn, an Iterator or a Subscriber of two tasks at
+    // once and a client deinited before its Conn or Subscriber panic in
+    // safe builds. Each program must print the panic message and end in its
+    // own panic handler, which exits with code 3 instead of aborting. They
+    // get their own Debug copy of redis, whatever -Doptimize says.
+    const panic_redis = b.createModule(.{
+        .root_source_file = b.path("src/redis/root.zig"),
+        .target = target,
+        .optimize = .Debug,
+        .imports = &.{
+            .{ .name = "core", .module = panic_core },
+        },
+    });
+    panic_redis.addOptions("build_options", version_options);
+    for ([_][2][]const u8{
+        .{ "moved_client", "panic: zefir-redis: Client moved after connect(): keep it where connect() ran (see the guide)" },
+        .{ "another_io", "panic: zefir-redis: a call on another std.Io than the client's: pass the io of Client.init" },
+        .{ "conn_two_tasks", "panic: zefir-redis: a Conn used by two tasks at once: one task at a time calls a Conn" },
+        .{ "deinit_live_conn", "panic: zefir-redis: Client.deinit() with a Conn not released: release every Conn before the client" },
+        .{ "iterator_two_tasks", "panic: zefir-redis: an Iterator used by two tasks at once: one task at a time calls next" },
+        .{ "subscriber_two_tasks", "panic: zefir-redis: a Subscriber used by two tasks at once: one task at a time calls next" },
+        .{ "deinit_live_subscriber", "panic: zefir-redis: Client.deinit() with a Subscriber left: deinit every Subscriber before the client" },
+    }) |case| {
+        const exe = b.addExecutable(.{
+            .name = b.fmt("redis-panic-{s}", .{case[0]}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(b.fmt("src/redis/testdata/panic/{s}.zig", .{case[0]})),
+                .target = target,
+                .optimize = .Debug,
+                .imports = &.{
+                    .{ .name = "redis", .module = panic_redis },
+                },
+            }),
+        });
+        const run = b.addRunArtifact(exe);
+        run.expectStdErrMatch(case[1]);
+        // expectStdErrMatch accepts any exit: only the panic handler exits
+        // with 3, so a program that printed the text and returned fails.
+        run.expectExitCode(3);
+        test_redis.dependOn(&run.step);
     }
 
     // log compile errors: each test of the file must fail to compile with
@@ -830,6 +889,59 @@ pub fn build(b: *std.Build) void {
     }
     addMongoGuide(b, test_mongo, .{ .core = core, .mongo = mongo }, target, optimize, tsan);
 
+    // redis compile errors: reply types that no reply reads into,
+    // arguments that cannot be written, WATCH where it cannot run,
+    // functions of the catalog given a type they do not take, and iterate
+    // of a command that is not a scan. Each
+    // test of the file must fail to compile with the message next to its
+    // name, which names the call, the field or the argument, and the fix;
+    // the filter compiles one test at a time. A type declared in the file
+    // is named after the file.
+    const redis_compile_errors = b.createModule(.{
+        .root_source_file = b.path("src/redis/tests/compile_errors.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+        .imports = &.{
+            .{ .name = "redis", .module = redis },
+        },
+    });
+    const one_value = "a field of a hash holds one string, number, bool or enum";
+    const argument = "an argument is a string, an integer, a float, a bool or an enum";
+    for ([_][2][]const u8{
+        .{ "reply of an optional of an optional", "redis.cmd.raw: the reply type is ??i64, an optional of an optional: a null reply cannot tell the two apart; use ?i64" },
+        .{ "reply of a non-exhaustive enum", "redis.cmd.raw: the reply type is compile_errors.Open, a non-exhaustive enum: a name that it lacks has no value to read into; make the enum exhaustive" },
+        .{ "reply with a nested struct", "redis.cmd.raw: field 'address' of the reply type compile_errors.User is compile_errors.Address, a struct: " ++ one_value ++ ", and a hash has no nesting; move its fields into the outer struct" },
+        .{ "reply with a slice of numbers", "redis.cmd.raw: field 'scores' of the reply type compile_errors.Player is []const i64: " ++ one_value ++ ", not a list; keep a list in a key of its own" },
+        .{ "reply with a union", "redis.cmd.raw: field 'shape' of the reply type compile_errors.Drawing is compile_errors.Shape, a union: " ++ one_value ++ "; keep its tag and its value in fields of their own" },
+        .{ "reply with a pointer", "redis.cmd.raw: field 'owner' of the reply type compile_errors.Post is *const compile_errors.User, a pointer: " ++ one_value ++ "; hold the value itself" },
+        .{ "argument that is a struct", "redis.cmd.raw: args[2] is compile_errors.Point, a struct: " ++ argument ++ "; pass its fields as arguments of their own" },
+        .{ "argument that is an optional", "redis.cmd.raw: args[1] is ?[]const u8: an argument cannot be null; unwrap it, or leave it out where it is null" },
+        .{ "argument of a non-exhaustive enum", "redis.cmd.raw: args[2] is compile_errors.Open, a non-exhaustive enum: a value without a tag has no name to write; make the enum exhaustive" },
+        .{ "arguments that are a string", "redis.cmd.raw: the arguments are a tuple, such as .{ \"GET\", key }, or a slice of strings; got *const [3:0]u8" },
+        .{ "run of a value that is not a command", "redis.Client.run: u32 is not a command: make one with redis.cmd, such as redis.cmd.get([]const u8, key)" },
+        .{ "watch on the client", "redis.Client.run: WATCH holds its keys on the connection it goes on: run it on a connection of client.acquire" },
+        .{ "watch in a pipeline of the client", "redis.Client.pipeline: WATCH holds its keys on the connection it goes on: run it on a connection of client.acquire" },
+        .{ "watch in a transaction", "redis.Conn.transaction: WATCH inside a transaction is refused by the server: run it with conn.run before the transaction" },
+        .{ "get of a struct", "redis.cmd.get: GET returns a string; a hash is hgetall" },
+        .{ "hset of a tuple", "redis.cmd.hset: a tuple has no field names: give the values names, such as .{ .name = name }" },
+        .{ "hset of a number", "redis.cmd.hset: the fields are a struct, such as .{ .name = name }, or a slice of redis.FieldValue; got comptime_int" },
+        .{ "hset of a nested struct", "redis.cmd.hset: field 'address' is compile_errors.Address, a struct: " ++ one_value ++ ", and a hash has no nesting; move its fields into the outer struct" },
+        .{ "hset of a slice of numbers", "redis.cmd.hset: field 'scores' is []const i64: " ++ one_value ++ ", not a list; keep a list in a key of its own" },
+        .{ "hset of a union", "redis.cmd.hset: field 'shape' is compile_errors.Shape, a union: " ++ one_value ++ "; keep its tag and its value in fields of their own" },
+        .{ "hset of a pointer", "redis.cmd.hset: field 'owner' is *const compile_errors.User, a pointer: " ++ one_value ++ "; hold the value itself" },
+        .{ "iterate of a command that is not a scan", "redis.Client.iterate: the command is not a scan: iterate walks the pages of redis.cmd.scan, redis.cmd.hscan, redis.cmd.sscan or redis.cmd.zscan" },
+    }, 0..) |case, i| {
+        const compile = b.addTest(.{
+            .name = b.fmt("redis-compile-error-{d}", .{i}),
+            .root_module = redis_compile_errors,
+            .filters = &.{case[0]},
+        });
+        compile.expect_errors = .{ .contains = case[1] };
+        test_redis.dependOn(&compile.step);
+    }
+    addRedisGuide(b, test_redis, .{ .core = core, .redis = redis }, target, optimize, tsan);
+
     // rpc-nats panic program: a second conn() of one ZefirNats panics in
     // safe builds, since one adapter serves one transport. Like the rpc
     // ones above, it ends in its own panic handler with code 3 and gets
@@ -1159,6 +1271,84 @@ fn addMongoGuide(
         readme.addAnonymousImport(b.fmt("{s}.out", .{name}), .{ .root_source_file = run.captureStdOut(.{}) });
     }
     test_mongo.dependOn(&addRun(b, b.addTest(.{ .name = "mongo-guide-readme", .root_module = readme }), tsan).step);
+}
+
+/// The modules that the examples of the redis guide import here.
+const RedisGuideModules = struct {
+    core: *std.Build.Module,
+    redis: *std.Build.Module,
+};
+
+/// The examples of src/redis/examples/README.md, the guide of zefir-redis,
+/// as cases.zig there lists them: the tests against
+/// redis.testing.FakeServer, and the checks of example_main.zig, the root
+/// of the guide's programs, which exits with code 3 on a panic instead of
+/// aborting and with code 4 past its time limit. readme_test.zig then
+/// checks that README.md shows every file as it is. The programs that need
+/// a server import zio: only tests/redis builds and runs them, and checks
+/// their runs against the guide.
+fn addRedisGuide(
+    b: *std.Build,
+    test_redis: *std.Build.Step,
+    m: RedisGuideModules,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+    tsan: bool,
+) void {
+    const dir = "src/redis/examples/";
+    const imports: []const std.Build.Module.Import = &.{
+        .{ .name = "core", .module = m.core },
+        .{ .name = "redis", .module = m.redis },
+    };
+    for (redis_guide.tests) |name| {
+        const tests = b.addTest(.{
+            .name = b.fmt("redis-guide-{s}", .{name}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(b.fmt(dir ++ "{s}.zig", .{name})),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+                .imports = imports,
+            }),
+        });
+        test_redis.dependOn(&addRun(b, tests, tsan).step);
+    }
+
+    // A program that panics and one that hangs: example_main.zig ends the
+    // first with code 3 and its message, the second at its time limit with
+    // code 4.
+    for ([_]struct { []const u8, []const u8, u8 }{
+        .{ "panic", "panic: a program of the guide panicked", 3 },
+        .{ "hang", "the run did not end within 1 s", 4 },
+    }) |case| {
+        const exe = b.addExecutable(.{
+            .name = b.fmt("redis-guide-{s}", .{case[0]}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(dir ++ "example_main.zig"),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+                .imports = &.{.{ .name = "example", .module = b.createModule(.{
+                    .root_source_file = b.path(b.fmt(dir ++ "testdata/{s}.zig", .{case[0]})),
+                    .target = target,
+                    .optimize = optimize,
+                    .sanitize_thread = tsan,
+                }) }},
+            }),
+        });
+        const run = addRun(b, exe, tsan);
+        run.expectStdErrMatch(case[1]);
+        run.expectExitCode(case[2]);
+        test_redis.dependOn(&run.step);
+    }
+
+    const readme = b.createModule(.{
+        .root_source_file = b.path(dir ++ "readme_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+    });
+    test_redis.dependOn(&addRun(b, b.addTest(.{ .name = "redis-guide-readme", .root_module = readme }), tsan).step);
 }
 
 /// The validator tests that use only its public API, compiled as client code
