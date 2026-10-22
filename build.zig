@@ -426,11 +426,11 @@ pub fn build(b: *std.Build) void {
     }
 
     // redis panic programs: a client moved after connect(), a call on
-    // another std.Io, a Conn or an Iterator of two tasks at once and a
-    // client deinited before its Conn panic in safe builds. Each program
-    // must print the panic message and end in its own panic handler, which
-    // exits with code 3 instead of aborting. They get their own Debug copy
-    // of redis, whatever -Doptimize says.
+    // another std.Io, a Conn, an Iterator or a Subscriber of two tasks at
+    // once and a client deinited before its Conn or Subscriber panic in
+    // safe builds. Each program must print the panic message and end in its
+    // own panic handler, which exits with code 3 instead of aborting. They
+    // get their own Debug copy of redis, whatever -Doptimize says.
     const panic_redis = b.createModule(.{
         .root_source_file = b.path("src/redis/root.zig"),
         .target = target,
@@ -446,6 +446,8 @@ pub fn build(b: *std.Build) void {
         .{ "conn_two_tasks", "panic: zefir-redis: a Conn used by two tasks at once: one task at a time calls a Conn" },
         .{ "deinit_live_conn", "panic: zefir-redis: Client.deinit() with a Conn not released: release every Conn before the client" },
         .{ "iterator_two_tasks", "panic: zefir-redis: an Iterator used by two tasks at once: one task at a time calls next" },
+        .{ "subscriber_two_tasks", "panic: zefir-redis: a Subscriber used by two tasks at once: one task at a time calls next" },
+        .{ "deinit_live_subscriber", "panic: zefir-redis: Client.deinit() with a Subscriber open: close every Subscriber before the client" },
     }) |case| {
         const exe = b.addExecutable(.{
             .name = b.fmt("redis-panic-{s}", .{case[0]}),

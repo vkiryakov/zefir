@@ -42,6 +42,21 @@
 //!   the details of the error of the last `next`.
 //! - Pushes other than messages are skipped, and so is the reply to the
 //!   subscriber's own PING.
+//! - `close` may come from any task: it cuts the connection, the `next`
+//!   that waits in another task returns null, and `close` frees the
+//!   subscriber once it has. The client's `close` ends every subscriber
+//!   the same way, and their `next` returns null; their own `close` frees
+//!   them, before the client's `deinit`.
+//! - One task at a time calls `next`. In safe builds, a second task that
+//!   calls it meanwhile panics, and so does the client's `deinit` with a
+//!   subscriber open.
+//!
+//! On Linux and macOS the cut wakes a `next` that waits at once. On
+//! Windows a shutdown of a socket by its own side does not end a read that
+//! waits on it: with zio, `next` returns at its next PING, within
+//! `idle_ping`; with an `Io` that cannot time a read, such as std's on
+//! Windows, the read waits in a task of its own, and the cut cancels it at
+//! once.
 
 const std = @import("std");
 const Io = std.Io;
@@ -55,10 +70,17 @@ const Subscriber = @This();
 
 client: *Client,
 /// The subscriber's state, in the heap, where the client reaches it; null
-/// once `close` has freed it.
+/// once `close` has taken it to free.
 state: std.atomic.Value(?*subscription.State),
+/// Held by `next` while it runs: `close` from another task waits for it.
+running: Io.Mutex = .init,
+/// Set once `close` has freed the state: a second `close` waits for it.
+freed: Io.Event = .unset,
 /// What went wrong in the last `next`.
 details: Diagnostics = .{},
+/// In safe builds: set while `next` runs, so that a second task that
+/// calls meanwhile panics.
+busy: if (std.debug.runtime_safety) std.atomic.Value(bool) else void = if (std.debug.runtime_safety) .init(false) else {},
 
 /// A message of a channel.
 pub const Message = struct {
@@ -71,16 +93,24 @@ pub const Message = struct {
 };
 
 /// The next message, which lives until the next call; null once the
-/// subscriber is closed. It waits as long as it takes, sending PING after
-/// `idle_ping` of silence. What went wrong goes to `diagnostics()`; after
-/// an error the subscriber is done with, and `next` is `error.Closed`.
+/// subscriber is closed, by its `close` or the client's. It waits as long
+/// as it takes, sending PING after `idle_ping` of silence. What went wrong
+/// goes to `diagnostics()`; after an error the subscriber is done with,
+/// and `next` is `error.Closed`.
 pub fn next(sub: *Subscriber, io: Io) Error!?Message {
+    sub.enter();
+    defer sub.leave();
+    sub.running.lockUncancelable(io);
+    defer sub.running.unlock(io);
     const state = sub.state.load(.acquire) orelse return null;
     calls.checkUse(sub.client, io);
     const d = &sub.details;
     d.* = .{};
+    if (state.isEnding()) return null;
     if (state.failed) return calls.fail(d, null, error.Closed, "the subscriber lost its connection to an error before: close it, and subscribe again", .{});
     return state.receive(io, d) catch |err| {
+        // A close cut the stream: the end, not an error.
+        if (state.isEnding()) return null;
         state.fail(io);
         return err;
     };
@@ -91,10 +121,28 @@ pub fn diagnostics(sub: *const Subscriber) *const Diagnostics {
     return &sub.details;
 }
 
-/// Closes the connection and frees the subscriber. A second call does
-/// nothing.
+/// Closes the subscriber from any task: it cuts the connection, so that a
+/// `next` that waits in another task returns null, waits for that `next`,
+/// and frees the subscriber. A second call returns once the first is done.
 pub fn close(sub: *Subscriber, io: Io) void {
-    const state = sub.state.swap(null, .acq_rel) orelse return;
+    const state = sub.state.swap(null, .acq_rel) orelse {
+        sub.freed.waitUncancelable(io);
+        return;
+    };
     sub.client.subscribers.remove(io, state);
+    sub.running.lockUncancelable(io);
+    sub.running.unlock(io);
     state.destroy();
+    sub.freed.set(io);
+}
+
+/// In safe builds: a call while another task's runs panics.
+fn enter(sub: *Subscriber) void {
+    if (std.debug.runtime_safety and sub.busy.swap(true, .acquire)) {
+        @panic("zefir-redis: a Subscriber used by two tasks at once: one task at a time calls next");
+    }
+}
+
+fn leave(sub: *Subscriber) void {
+    if (std.debug.runtime_safety) sub.busy.store(false, .release);
 }

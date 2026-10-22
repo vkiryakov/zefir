@@ -3,6 +3,9 @@
 //! own, and the frames that come on it. The client keeps a `Registry` of
 //! its subscribers, for its `stats`.
 //!
+//! A subscriber ends from any task, by its `close` or the client's: its
+//! opening stops, its stream is cut, and its `next` returns null.
+//!
 //! A frame on a subscriber's connection is a push, a message or the
 //! confirmation of a subscription; or a reply, which only the subscriber's
 //! own PING gets; or an error. The server sends a message only after the
@@ -37,8 +40,11 @@ pub const State = struct {
     gpa: Allocator,
     /// The connection, once its handshake is done; `destroy` closes it.
     conn: ?*Connection = null,
-    /// The opening of the connection.
+    /// The opening of the connection, for an end to stop.
     attempt: connect_.Attempt = .{},
+    /// Set when the subscriber ends, by its `close` or the client's: under
+    /// the lock of the registry, and read without it.
+    ending: std.atomic.Value(bool) = .init(false),
     /// Counted in `Registry.open`: `subscribe` returned it.
     counted: bool = false,
     idle_ping: Io.Duration,
@@ -55,6 +61,20 @@ pub const State = struct {
     pongs_due: u32 = 0,
     /// Set once an error ended the subscriber: `next` is `error.Closed`.
     failed: bool = false,
+
+    /// Whether the subscriber's `close` or the client's has begun.
+    pub fn isEnding(state: *const State) bool {
+        return state.ending.load(.acquire);
+    }
+
+    /// Ends the subscriber from any task, under the lock of the registry:
+    /// an opening in progress stops, and the stream is cut, which ends the
+    /// wait of `next` or of the confirmations.
+    fn end(state: *State, io: Io) void {
+        state.ending.store(true, .release);
+        state.attempt.stop(io);
+        if (state.conn) |conn| conn.cut(io);
+    }
 
     /// Closes the connection and frees the state.
     pub fn destroy(state: *State) void {
@@ -161,18 +181,31 @@ pub const State = struct {
 };
 
 /// The subscribers of a client, each from the start of its `subscribe`
-/// until its `close`.
+/// until its `close`, for the client's `close` to end them.
 pub const Registry = struct {
     mutex: Io.Mutex = .init,
     list: List = .{},
     /// How many of them `subscribe` returned.
     open: usize = 0,
+    /// Set by the client's `close`: no subscriber comes after it.
+    closed: bool = false,
 
-    /// Registers `state`.
-    fn add(r: *Registry, io: Io, state: *State) void {
+    /// Registers `state`; `error.Closed` once the client is closing.
+    fn add(r: *Registry, io: Io, state: *State, d: ?*Diagnostics) Error!void {
         r.mutex.lockUncancelable(io);
         defer r.mutex.unlock(io);
+        if (r.closed) return calls.fail(d, .checkout, error.Closed, "the client is closed", .{});
         r.list.append(&state.node);
+    }
+
+    /// Hands `conn` to `state`, from then on the client's `close` cuts it:
+    /// `error.Closed` when that close began meanwhile. `state` holds the
+    /// connection either way.
+    fn hold(r: *Registry, io: Io, state: *State, conn: *Connection, d: ?*Diagnostics) Error!void {
+        r.mutex.lockUncancelable(io);
+        defer r.mutex.unlock(io);
+        state.conn = conn;
+        if (state.isEnding()) return calls.fail(d, .connect, error.Closed, "the client was closed while it subscribed", .{});
     }
 
     /// Counts `state`, which `subscribe` returns.
@@ -183,12 +216,33 @@ pub const Registry = struct {
         r.open += 1;
     }
 
-    /// Unregisters `state`, which `close` is about to free.
+    /// Unregisters `state`, which is about to be freed, and ends it.
     pub fn remove(r: *Registry, io: Io, state: *State) void {
         r.mutex.lockUncancelable(io);
         defer r.mutex.unlock(io);
         r.list.remove(&state.node);
         if (state.counted) r.open -= 1;
+        state.end(io);
+    }
+
+    /// For the client's `close`: no subscriber comes after it, and every
+    /// one ends. Their memory stays theirs until their `close`.
+    pub fn closeAll(r: *Registry, io: Io) void {
+        r.mutex.lockUncancelable(io);
+        defer r.mutex.unlock(io);
+        r.closed = true;
+        var it = r.list.first;
+        while (it) |node| : (it = node.next) {
+            const state: *State = @alignCast(@fieldParentPtr("node", node));
+            state.end(io);
+        }
+    }
+
+    /// Whether no subscriber is left, for the client's `deinit`.
+    pub fn isEmpty(r: *Registry, io: Io) bool {
+        r.mutex.lockUncancelable(io);
+        defer r.mutex.unlock(io);
+        return r.list.first == null;
     }
 
     /// How many subscribers `subscribe` returned and `close` has not
@@ -217,13 +271,20 @@ pub fn subscribe(c: *Client, io: Io, op: OperationContext, options: SubscribeOpt
     const deadline = calls.deadlineOf(c, io, op, .none);
     const state = try c.gpa.create(State);
     state.* = .{ .gpa = c.gpa, .idle_ping = options.idle_ping };
-    c.subscribers.add(io, state);
+    c.subscribers.add(io, state, d) catch |err| {
+        state.destroy();
+        return err;
+    };
     errdefer {
         c.subscribers.remove(io, state);
         state.destroy();
     }
-    state.conn = try calls.open(c, io, deadline, &state.attempt, d);
-    try confirm(c, state, state.conn.?, io, op, options, deadline, d);
+    try c.subscribers.hold(io, state, try calls.open(c, io, deadline, &state.attempt, d), d);
+    confirm(c, state, state.conn.?, io, op, options, deadline, d) catch |err| {
+        // The client's close cut the stream.
+        if (state.isEnding()) return calls.fail(d, .receive, error.Closed, "the client was closed while it subscribed", .{});
+        return err;
+    };
     c.subscribers.opened(io, state);
     return state;
 }

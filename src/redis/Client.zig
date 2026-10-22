@@ -161,11 +161,15 @@ pub fn init(gpa: Allocator, io: Io, options: Options) InitError!Client {
 }
 
 /// Closes the client, if `close` has not, and frees it: the copies of the
-/// URL and of the password wiped.
+/// URL and of the password wiped. Release every Conn and close every
+/// Subscriber first.
 pub fn deinit(c: *Client) void {
     calls.checkHome(c);
     if (std.debug.runtime_safety and c.conns.load(.monotonic) != 0) {
         @panic("zefir-redis: Client.deinit() with a Conn not released: release every Conn before the client");
+    }
+    if (std.debug.runtime_safety and !c.subscribers.isEmpty(c.io)) {
+        @panic("zefir-redis: Client.deinit() with a Subscriber open: close every Subscriber before the client");
     }
     c.close(c.io);
     c.pool.deinit();
@@ -190,15 +194,17 @@ pub fn connect(c: *Client, io: Io, ctx: core.Context, diagnostics: ?*Diagnostics
     if (std.debug.runtime_safety) c.home.store(@intFromPtr(c), .monotonic);
 }
 
-/// Ends the client's work, in this order: new calls, and those waiting
-/// for a connection, get `error.Closed`; connections being opened stop;
-/// the calls in flight get up to `close_timeout` to end, and after it
-/// their exchanges are cut (`error.ConnectionLost`); then the connections
-/// close. A second call returns once the first is done. The task's
-/// cancelation waits until it returns. QUIT does not go out: the
-/// connections just close.
+/// Ends the client's work, in this order: the subscribers end, and their
+/// `next` returns null, while their memory waits for their own `close`;
+/// new calls, and those waiting for a connection, get `error.Closed`;
+/// connections being opened stop; the calls in flight get up to
+/// `close_timeout` to end, and after it their exchanges are cut
+/// (`error.ConnectionLost`); then the connections close. A second call
+/// returns once the first is done. The task's cancelation waits until it
+/// returns. QUIT does not go out: the connections just close.
 pub fn close(c: *Client, io: Io) void {
     calls.checkUse(c, io);
+    c.subscribers.closeAll(io);
     c.pool.close(io, c.options.close_timeout);
 }
 
