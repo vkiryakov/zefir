@@ -1,7 +1,7 @@
 //! What `redis.Subscriber` is made of, internal to the module: the state
 //! of a subscriber in the heap, the subscription on a connection of its
 //! own, and the frames that come on it. The client keeps a `Registry` of
-//! its subscribers, for its `stats`.
+//! its subscribers, for its `stats` and its `close`.
 //!
 //! A subscriber ends from any task, by its `close` or the client's: its
 //! opening stops, its stream is cut, and its `next` returns null.

@@ -22,10 +22,11 @@
 //!   `client.stats()` counts the subscribers in `subscribers`.
 //! - `next` waits for the next message without a deadline: a subscriber
 //!   lives long. The message lies in the subscriber's own memory until the
-//!   next call, however large: up to `max_reply_bytes`, beyond which it is
-//!   `error.ReplyTooLarge`. Keep the loop of `next` quick, and hand the
-//!   messages to a queue of your own: a server closes a subscriber that
-//!   falls behind (`client-output-buffer-limit pubsub`, 32 MiB by default).
+//!   next call or `close`, however large: up to `max_reply_bytes`, beyond
+//!   which it is `error.ReplyTooLarge`. Keep the loop of `next` quick, and
+//!   hand the messages to a queue of your own: a server closes a
+//!   subscriber that falls behind (`client-output-buffer-limit pubsub`,
+//!   32 MiB by default).
 //! - Silence. A dead connection is silent, and without TCP keepalive it
 //!   stays so: after `idle_ping` without a frame (15 s by default) the
 //!   subscriber sends PING, which the server answers on the subscribed
@@ -92,11 +93,11 @@ pub const Message = struct {
     pattern: ?[]const u8 = null,
 };
 
-/// The next message, which lives until the next call; null once the
-/// subscriber is closed, by its `close` or the client's. It waits as long
-/// as it takes, sending PING after `idle_ping` of silence. What went wrong
-/// goes to `diagnostics()`; after an error the subscriber is done with,
-/// and `next` is `error.Closed`.
+/// The next message, which lives until the next call or `close`; null
+/// once the subscriber is closed, by its `close` or the client's. It waits
+/// as long as it takes, sending PING after `idle_ping` of silence. What
+/// went wrong goes to `diagnostics()`; after an error the subscriber is
+/// done with, and `next` is `error.Closed`.
 pub fn next(sub: *Subscriber, io: Io) Error!?Message {
     sub.enter();
     defer sub.leave();
