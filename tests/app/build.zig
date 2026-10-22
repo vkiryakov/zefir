@@ -1,12 +1,17 @@
 //! The code of zefir.App that runs on zio, in a package of its own: the
-//! end-to-end tests of App with real servers, and programs that the tests
-//! run in processes of their own.
+//! end-to-end tests of App with real servers, programs that the tests run
+//! in processes of their own, the shop of the design against NATS and
+//! mongod, and the shop of the guide of App.
 //!
 //!   zig build e2e        run the end-to-end tests: servers of zefir-http on
 //!                        http.native over loopback and of zefir-rpc on the
 //!                        memory transport, beans of one App, on zio with
 //!                        one executor and with four; then the programs of
-//!                        programs/, stopped by SIGTERM (Linux and macOS)
+//!                        programs/, stopped by SIGTERM; then the examples
+//!   zig build examples   run the shop of the guide, send it the guide's
+//!                        curl commands, and check that the guide shows
+//!                        each with its response, and the shop's log
+//!                        (Linux and macOS)
 //!   zig build shop       start the NATS and mongod servers in Docker, then
 //!                        run the shop of the design of App, shop/,
 //!                        against them: an order over HTTP, read back over
@@ -82,7 +87,61 @@ pub fn build(b: *std.Build) void {
     // network and the clock.
     run_e2e.stdio = .inherit;
     run_e2e.has_side_effects = true;
-    b.step("e2e", "Run the end-to-end tests of zefir.App on zio, then its programs stopped by SIGTERM").dependOn(&run_e2e.step);
+    const e2e_step = b.step("e2e", "Run the end-to-end tests of zefir.App on zio, then its programs stopped by SIGTERM, then the examples");
+    e2e_step.dependOn(&run_e2e.step);
+
+    // The shop of the guide, src/core/examples/app/main.zig, through the
+    // root of the guide's programs: a panic exits with code 3, a run past
+    // two minutes with code 4.
+    const guide_dir = "src/core/examples/app/";
+    const service = b.addExecutable(.{
+        .name = "shop-of-the-guide",
+        .root_module = b.createModule(.{
+            .root_source_file = zefir.path(guide_dir ++ "example_main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "example", .module = b.createModule(.{
+                .root_source_file = zefir.path(guide_dir ++ "main.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "zefir", .module = zefir.module("zefir") },
+                    .{ .name = "zio", .module = zio.module("zio") },
+                },
+            }) }},
+        }),
+    });
+    // The session of the guide: the shop started, the guide's curl commands
+    // sent to it, and the guide checked against what they printed.
+    const guide_options = b.addOptions();
+    guide_options.addOptionPath("service", service.getEmittedBin());
+    const guide = b.addTest(.{
+        .name = "guide",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("guide_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zio", .module = zio.module("zio") },
+                .{ .name = "guide-check", .module = b.createModule(.{
+                    .root_source_file = zefir.path("src/http/examples/guide_check.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                }) },
+                .{ .name = "guide_options", .module = guide_options.createModule() },
+            },
+        }),
+        .test_runner = .{ .path = b.path("test_runner.zig"), .mode = .simple },
+    });
+    guide.root_module.addAnonymousImport("guide", .{ .root_source_file = zefir.path(guide_dir ++ "README.md") });
+    // In `e2e` after the tests; `examples` runs it alone.
+    for ([_]*std.Build.Step{ e2e_step, b.step("examples", "Run the shop of the guide with its curl session and check the guide") }, 0..) |step, i| {
+        const run_guide = b.addRunArtifact(guide);
+        run_guide.stdio = .inherit;
+        run_guide.has_side_effects = true;
+        if (i == 0) run_guide.step.dependOn(&run_e2e.step);
+        step.dependOn(&run_guide.step);
+    }
 
     // The shop of the design of App, shop/: its program, and the test that
     // starts it against the servers of `up`, whose path it gets.
@@ -121,7 +180,8 @@ pub fn build(b: *std.Build) void {
     b.step("shop", "Start NATS and mongod in Docker, then run the shop of the App design against them").dependOn(&run_shop.step);
 
     // Everything above built and nothing run.
-    const check_step = b.step("check", "Build the end-to-end tests, the programs and the shop without running them");
+    const check_step = b.step("check", "Build the end-to-end tests, the programs, the shops and the session of the guide without running them");
     check_step.dependOn(&e2e.step);
     check_step.dependOn(&shop_test.step);
+    check_step.dependOn(&guide.step);
 }

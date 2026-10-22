@@ -1,6 +1,7 @@
 const std = @import("std");
 const manifest = @import("build.zig.zon");
 const app_cases = @import("src/core/app/tests/cases.zig");
+const app_guide = @import("src/core/examples/app/cases.zig");
 const validator_cases = @import("src/validator/testdata/cases.zig");
 const rpc_guide = @import("src/rpc/examples/cases.zig");
 const http_cases = @import("src/http/tests/cases.zig");
@@ -224,6 +225,9 @@ pub fn build(b: *std.Build) void {
         .rpc = rpc,
         .jwt = jwt,
     }, target, optimize, tsan);
+    // The guide of zefir.App: the tests of its shop, which imports the
+    // umbrella module, and a program whose server does not stop.
+    addAppGuide(b, test_zefir, zefir, target, optimize, tsan);
 
     // `zig build fuzz-http` runs the fuzz test of zefir-http's HTTP/1.1
     // parser on its corpus, once, like `zig build test-http` does; with
@@ -1501,6 +1505,87 @@ fn addHttpGuide(
         readme.addAnonymousImport(b.fmt("{s}.out", .{name}), .{ .root_source_file = run.captureStdOut(.{}) });
     }
     test_http.dependOn(&addRun(b, b.addTest(.{ .name = "http-guide-readme", .root_module = readme }), tsan).step);
+}
+
+/// The examples of src/core/examples/app/README.md, the guide of zefir.App,
+/// as cases.zig there lists them, on the umbrella module: the tests of the
+/// shop, and stuck.zig, a program whose server does not stop, run through
+/// example_main.zig, which exits with code 3 on a panic instead of aborting
+/// and with code 4 past its time limit; it must exit with 1 and say which
+/// bean did not stop. readme_test.zig then checks that README.md shows
+/// every file as it is, the run of stuck.zig as it printed, and the compile
+/// checks of App it shows with their messages. The shop's main.zig imports
+/// zio: only tests/app builds and runs it.
+fn addAppGuide(
+    b: *std.Build,
+    test_zefir: *std.Build.Step,
+    zefir: *std.Build.Module,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+    tsan: bool,
+) void {
+    const dir = "src/core/examples/app/";
+    const imports: []const std.Build.Module.Import = &.{.{ .name = "zefir", .module = zefir }};
+    const shop_test = b.addTest(.{
+        .name = "app-guide-shop",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(dir ++ "shop_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .sanitize_thread = tsan,
+            .imports = imports,
+        }),
+    });
+    test_zefir.dependOn(&addRun(b, shop_test, tsan).step);
+
+    const stuck = b.addExecutable(.{
+        .name = "app-guide-stuck",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(dir ++ "example_main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .sanitize_thread = tsan,
+            .imports = &.{.{ .name = "example", .module = b.createModule(.{
+                .root_source_file = b.path(dir ++ "stuck.zig"),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+                .imports = imports,
+            }) }},
+        }),
+    });
+    const run_stuck = addRun(b, stuck, tsan);
+    run_stuck.expectExitCode(1);
+    run_stuck.expectStdErrMatch("\nAppModule.Servers.httpServer did not stop in time; the process exits with code 1\n");
+
+    const readme = b.createModule(.{
+        .root_source_file = b.path(dir ++ "readme_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+        .imports = &.{
+            // The checks of the guides, and the list of App's compile
+            // checks: files of other directories of src/, which a module
+            // reaches only as modules.
+            .{ .name = "guide-check", .module = b.createModule(.{
+                .root_source_file = b.path("src/http/examples/guide_check.zig"),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+            }) },
+            .{ .name = "app-cases", .module = b.createModule(.{
+                .root_source_file = b.path("src/core/app/tests/cases.zig"),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+            }) },
+        },
+    });
+    readme.addAnonymousImport("stuck.err", .{ .root_source_file = run_stuck.captureStdErr(.{}) });
+    for (app_guide.fixtures) |name| {
+        readme.addAnonymousImport(b.fmt("fixture-{s}", .{name}), .{ .root_source_file = b.path(b.fmt("src/core/app/tests/compile_errors/{s}.zig", .{name})) });
+    }
+    test_zefir.dependOn(&addRun(b, b.addTest(.{ .name = "app-guide-readme", .root_module = readme }), tsan).step);
 }
 
 /// The compile checks of zefir.App, from the list in

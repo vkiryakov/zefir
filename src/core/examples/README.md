@@ -9,7 +9,7 @@ allocates, reads a clock or does I/O.
 core also holds `zefir.App`, the root of an application: it builds the
 application out of modules and starts and stops its servers. App is the one
 exception to the rule above, since it holds memory, runs tasks and reads the
-clock.
+clock. **[Read the guide of App →](app/README.md)**
 
 ```zig
 var token: core.CancellationToken = .init; // owned by the request
