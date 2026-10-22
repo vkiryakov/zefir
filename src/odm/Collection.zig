@@ -196,6 +196,31 @@ pub fn Collection(comptime T: type) type {
             defer call.end();
             return call.finish(deleteIn(T, c.session, io, ctx, memory, filter, true));
         }
+
+        /// A raw aggregation, through the capability `aggregate` of the
+        /// driver: `pipeline` is a tuple, a slice or an array of stages that
+        /// `bson.encode` writes — literals, structs, `bson.RawDocument`s —
+        /// which nothing checks against the model. The results decode into
+        /// `R` by its field names. A raw path reaches what the login of the
+        /// connection may reach: a `$out` or a `$merge` into another
+        /// database too.
+        pub fn aggregateRaw(c: Self, comptime R: type, io: Io, ctx: core.Context, pipeline: anytype) Error!Cursor(R) {
+            var call: Call = undefined;
+            const memory = call.begin(c.session, io);
+            defer call.end();
+            return call.finish(aggregateIn(T, R, c.session, io, ctx, memory, pipeline));
+        }
+
+        /// Creates the indexes of `T.odm_schema.indexes`, through the
+        /// capability `indexes` of the driver; the same ones again are not
+        /// an error. An index without a name gets MongoDB's, such as
+        /// "status_1_createdAt_-1". A model without indexes sends nothing.
+        pub fn ensureIndexes(c: Self, io: Io, ctx: core.Context) Error!void {
+            var call: Call = undefined;
+            const memory = call.begin(c.session, io);
+            defer call.end();
+            return call.finish(ensureIndexesIn(T, c.session, io, ctx, memory));
+        }
     };
 }
 
@@ -411,6 +436,152 @@ fn findIn(comptime T: type, comptime P: type, s: *Session, io: Io, ctx: core.Con
         .batch_size = parts.batch_size,
     };
     return openCursor(T, P, s, io, ctx, memory, &request);
+}
+
+fn aggregateIn(comptime T: type, comptime R: type, s: *Session, io: Io, ctx: core.Context, memory: Allocator, pipeline: anytype) Error!Cursor(R) {
+    const request: Client.AggregateRequest = .{ .ns = namespace(T, s), .pipeline = try encodePipeline(memory, pipeline, &s.diag) };
+    leases.acquire(s.registry, io, s.generation);
+    errdefer leases.release(s.registry, io, s.generation);
+    const raw = try s.generation.client.aggregate(io, ctx, &request, callOptions(s, memory));
+    return .{ .registry = s.registry, .generation = s.generation, .raw = raw, .decode = rawDecoder(R) };
+}
+
+/// The stages of `pipeline`, a tuple, a slice or an array of documents, in
+/// `memory`.
+fn encodePipeline(memory: Allocator, pipeline: anytype, d: *Diagnostics) Error![]const bson.RawDocument {
+    const L = @TypeOf(pipeline);
+    if (comptime values.TupleOf(L)) |Tuple| {
+        const items: Tuple = if (comptime @typeInfo(L) == .pointer) pipeline.* else pipeline;
+        const names = @typeInfo(Tuple).@"struct".field_names;
+        const stages = try memory.alloc(bson.RawDocument, names.len);
+        inline for (names, 0..) |name, i| stages[i] = try encodeStage(memory, @field(items, name), i, d);
+        return stages;
+    }
+    if (comptime !values.isList(L)) @compileError("odm: the pipeline of aggregateRaw is a tuple, a slice or an array of documents; got " ++ @typeName(L));
+    const stages = try memory.alloc(bson.RawDocument, pipeline.len);
+    for (pipeline, stages, 0..) |stage, *raw, i| raw.* = try encodeStage(memory, stage, i, d);
+    return stages;
+}
+
+fn encodeStage(memory: Allocator, stage: anytype, i: usize, d: *Diagnostics) Error!bson.RawDocument {
+    const doc = bson.encode(memory, stage, .{}) catch |err| switch (err) {
+        error.InvalidBson => return fail(d, error.EncodeFailed, "odm: stage {d} of the pipeline did not become BSON: a string is not UTF-8, a document in it is not valid, or documents nest deeper than 100", .{i}),
+        error.OutOfMemory => return error.OutOfMemory,
+    };
+    return doc.raw();
+}
+
+/// The decoder of the results of an aggregateRaw into `R`, by the names of
+/// its fields.
+fn rawDecoder(comptime R: type) *const cursors.Decode(R) {
+    return &struct {
+        fn decode(arena: Allocator, raw: bson.RawDocument, d: *Diagnostics) cursors.DecodeError!R {
+            var where: bson.DecodeDiagnostics = .{};
+            return bson.decode(R, arena, raw, .{ .diagnostics = &where }) catch |err| switch (err) {
+                error.InvalidBson => decodeFailure(R, error.InvalidBson, d),
+                error.OutOfMemory => error.OutOfMemory,
+                else => |cause| {
+                    d.cause = cause;
+                    d.setPath(where.path());
+                    return decodeFailure(R, error.DecodeFailed, d);
+                },
+            };
+        }
+    }.decode;
+}
+
+/// An index of a model as the driver gets it, with the keys by their BSON
+/// paths.
+const IndexOf = struct {
+    name: []const u8,
+    keys: []const Key,
+    unique: bool,
+    sparse: bool,
+    expire_after_seconds: ?u32,
+
+    const Key = struct { path: []const u8, order: schema.IndexOrder };
+};
+
+/// The indexes of the schema of `T`, each named as MongoDB names it unless
+/// the schema names it: the BSON path and the order of each key, joined by
+/// '_'.
+fn indexesOf(comptime T: type) []const IndexOf {
+    comptime {
+        @setEvalBranchQuota(schema.eval_quota);
+        var out: []const IndexOf = &.{};
+        for (T.odm_schema.indexes) |index| {
+            var keys: []const IndexOf.Key = &.{};
+            var name: []const u8 = "";
+            for (index.keys, 0..) |key, i| {
+                const path = bsonPath(T, @tagName(key));
+                const order: schema.IndexOrder = switch (key) {
+                    inline else => |o| o,
+                };
+                keys = keys ++ &[_]IndexOf.Key{.{ .path = path, .order = order }};
+                const value = switch (order) {
+                    .asc => "1",
+                    .desc => "-1",
+                    .text => "text",
+                    .hashed => "hashed",
+                };
+                name = name ++ (if (i == 0) "" else "_") ++ path ++ "_" ++ value;
+            }
+            out = out ++ &[_]IndexOf{.{ .name = index.name orelse name, .keys = keys, .unique = index.unique, .sparse = index.sparse, .expire_after_seconds = index.expire_after_seconds }};
+        }
+        return out;
+    }
+}
+
+/// The BSON path of the path `path` of `T`: the key of its first field
+/// from the schema, then the Zig names.
+fn bsonPath(comptime T: type, comptime path: []const u8) []const u8 {
+    const dot = std.mem.findScalar(u8, path, '.') orelse return schema.keyOf(T, path);
+    return schema.keyOf(T, path[0..dot]) ++ path[dot..];
+}
+
+fn ensureIndexesIn(comptime T: type, s: *Session, io: Io, ctx: core.Context, memory: Allocator) Error!void {
+    const indexes = comptime indexesOf(T);
+    if (indexes.len == 0) return;
+    var specs: [indexes.len]Client.IndexSpec = undefined;
+    inline for (indexes, &specs) |index, *spec| {
+        spec.* = .{
+            .name = index.name,
+            .keys = keysOf(memory, index.keys) catch |err| return switch (err) {
+                error.InvalidBson => fail(&s.diag, error.EncodeFailed, "odm: the keys of the index {s} did not become BSON", .{index.name}),
+                error.OutOfMemory => error.OutOfMemory,
+            },
+            .unique = index.unique,
+            .sparse = index.sparse,
+            .expire_after_seconds = index.expire_after_seconds,
+        };
+    }
+    const request: Client.IndexRequest = .{ .ns = namespace(T, s), .indexes = &specs };
+    return s.generation.client.createIndexes(io, ctx, &request, callOptions(s, memory));
+}
+
+/// The document of the keys of an index: `1` and `-1` as int32, "text"
+/// and "hashed" as strings.
+fn keysOf(memory: Allocator, comptime keys: []const IndexOf.Key) bson.Builder.Error!bson.RawDocument {
+    var b: bson.Builder = .init(memory);
+    defer b.deinit();
+    inline for (keys) |key| switch (key.order) {
+        .asc => try b.putInt32(key.path, 1),
+        .desc => try b.putInt32(key.path, -1),
+        .text => try b.putString(key.path, "text"),
+        .hashed => try b.putString(key.path, "hashed"),
+    };
+    const doc = try b.finish();
+    return doc.raw();
+}
+
+/// The body of `Session.runCommand`.
+pub fn runCommandIn(s: *Session, io: Io, ctx: core.Context, memory: Allocator, command: anytype, arena: Allocator) Error!bson.RawDocument {
+    const body = bson.encode(memory, command, .{}) catch |err| switch (err) {
+        error.InvalidBson => return fail(&s.diag, error.EncodeFailed, "odm: the command did not become BSON: a string is not UTF-8, a document in it is not valid, or documents nest deeper than 100", .{}),
+        error.OutOfMemory => return error.OutOfMemory,
+    };
+    const request: Client.CommandRequest = .{ .database = s.database(), .body = body.raw() };
+    return s.generation.client.command(io, ctx, &request, .{ .allocator = arena, .diagnostics = &s.diag });
 }
 
 fn updateIn(comptime T: type, s: *Session, io: Io, ctx: core.Context, memory: Allocator, filter: anytype, update: anytype, comptime mode: Client.UpdateMode) Error!UpdateResult {

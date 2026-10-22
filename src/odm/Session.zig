@@ -24,6 +24,9 @@
 
 const std = @import("std");
 const Io = std.Io;
+const Allocator = std.mem.Allocator;
+const core = @import("core");
+const bson = @import("mongo-bson");
 const errors = @import("errors.zig");
 const leases = @import("registry/generation.zig");
 const operations = @import("Collection.zig");
@@ -66,6 +69,17 @@ pub fn database(s: *const Session) []const u8 {
 /// server's code, the item of a write, the rule or the path, and a text.
 pub fn diagnostics(s: *const Session) *const Diagnostics {
     return &s.diag;
+}
+
+/// Any command in the tenant's database, through the capability `command`
+/// of the driver: `command` is what `bson.encode` writes, such as
+/// `.{ .collStats = "users" }`, and the reply is copied into `arena`. A raw
+/// path: it reaches what the login of the connection may reach.
+pub fn runCommand(s: *Session, io: Io, ctx: core.Context, command: anytype, arena: Allocator) errors.Error!bson.RawDocument {
+    var call: operations.Call = undefined;
+    const memory = call.begin(s, io);
+    defer call.end();
+    return call.finish(operations.runCommandIn(s, io, ctx, memory, command, arena));
 }
 
 /// Gives the lease back, without I/O; the collections of the session are

@@ -147,4 +147,6 @@ pub const compile_errors = [_]Case{
     .{ .name = "compile error: an upsert with an odm.Filter", .expect = "odm: upsertOne of tests.compile_errors.Account takes a filter literal, not an odm.Filter(tests.compile_errors.Account): it checks at compile time that the document it may insert gets every required field" },
     .{ .name = "compile error: an upsert with an odm.Update", .expect = "odm: upsertOne of tests.compile_errors.Account takes an update literal, not an odm.Update(tests.compile_errors.Account): it checks at compile time that the document it may insert gets every required field" },
     .{ .name = "compile error: an update of another model", .expect = "odm: this update is an odm.Update(tests.compile_errors.User), not of tests.compile_errors.Account" },
+    // Collections.
+    .{ .name = "compile error: a pipeline that is not a list", .expect = "odm: the pipeline of aggregateRaw is a tuple, a slice or an array of documents; got comptime_int" },
 };

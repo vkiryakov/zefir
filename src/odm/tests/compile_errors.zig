@@ -924,3 +924,11 @@ test "compile error: an update of another model" {
     const users = odm.Update(User).init(std.testing.allocator);
     _ = try update.encode(Account, std.testing.allocator, users, .update);
 }
+
+// Collections.
+
+test "compile error: a pipeline that is not a list" {
+    var session: odm.Session = undefined;
+    var cursor = try session.collection(User).aggregateRaw(struct { n: i32 }, std.testing.io, .root, 5);
+    cursor.deinit(std.testing.io);
+}
