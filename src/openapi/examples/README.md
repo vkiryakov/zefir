@@ -1022,6 +1022,12 @@ what `ctx.json` reads, and what a response writes.
 error: zefir.openapi: Money writes itself with jsonStringify, so the document does not know its JSON; say what it looks like: pub const openapi: zefir.openapi.Doc(Money) = .{ .as = []const u8 }
 ```
 
+- **`std.json.ArrayHashMap(V)`** writes itself too, and needs nothing: it
+  is an object of any keys, each value a `V`,
+  `{"type": "object", "additionalProperties": <the schema of V>}`. Its
+  values are written by `std.json`, which knows no `v.rename`: a struct
+  with a renamed field, inside such a map, goes out with the field's name
+  in Zig, not the name its schema shows.
 - **A type that JSON cannot hold** stops the build:
 
 ```text
