@@ -25,3 +25,23 @@ pub fn forEachRuntime(gpa: std.mem.Allocator, comptime scenario: fn (io: std.Io)
     }
     if (first) |err| return err;
 }
+
+/// Ends the process with code 4 when a scenario runs longer than its time:
+/// a hang fails at once, by name.
+pub const Watchdog = struct {
+    future: std.Io.Future(void),
+
+    pub fn start(io: std.Io, name: []const u8, seconds: i64) !Watchdog {
+        return .{ .future = try io.concurrent(watch, .{ io, name, seconds }) };
+    }
+
+    pub fn stop(w: *Watchdog, io: std.Io) void {
+        w.future.cancel(io);
+    }
+
+    fn watch(io: std.Io, name: []const u8, seconds: i64) void {
+        io.sleep(.fromSeconds(seconds), .awake) catch return;
+        std.debug.print("\"{s}\" still runs after {d} s on zio x{d}: a hang\n", .{ name, seconds, executors });
+        std.process.exit(4);
+    }
+};
