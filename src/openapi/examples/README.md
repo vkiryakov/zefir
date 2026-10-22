@@ -46,6 +46,10 @@ controller `zefir.openapi.Docs` serves the document with a page of it.
 >   that a strict tool reads it.
 > - **u64 and i64 as strings.** They are JSON numbers, as zefir-http writes
 >   them (see [For integrators](#for-integrators)).
+> - **`Docs` under zefir.App.** The http server of an App cannot serve
+>   `Docs` yet: App builds the controllers of its modules itself, and
+>   `Docs` needs its document and a `deinit`. Serve it from an http server
+>   built with `http.Server.init`, as in this guide.
 
 ## Contents
 
