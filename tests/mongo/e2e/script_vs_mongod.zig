@@ -11,7 +11,7 @@ const Io = std.Io;
 const testing = std.testing;
 const core = @import("core");
 const mongo = @import("mongo");
-const bson = mongo.bson;
+const bson = @import("mongo-bson");
 const Script = mongo.testing.Script;
 const FakeServer = mongo.testing.FakeServer;
 const e2e = @import("root.zig");
@@ -278,7 +278,7 @@ fn everyTypeDocument(arena: std.mem.Allocator) !bson.RawDocument {
     var bytes: std.ArrayList(u8) = .empty;
     try bytes.appendSlice(arena, &.{ 0, 0, 0, 0 });
     try bytes.appendSlice(arena, "\x10_id\x00\x01\x00\x00\x00");
-    for (mongo.testing.vectors.valid, 0..) |vector, i| {
+    for (bson.testing.vectors.valid, 0..) |vector, i| {
         // The element of the vector: its type, "a" and its 0, the value.
         const element = vector.bson[4 .. vector.bson.len - 1];
         try bytes.append(arena, element[0]);

@@ -5,7 +5,7 @@
 
 const std = @import("std");
 const mongo = @import("mongo");
-const bson = mongo.bson;
+const bson = @import("mongo-bson");
 const testing = std.testing;
 const FakeServer = mongo.testing.FakeServer;
 const Script = mongo.testing.Script;

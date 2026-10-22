@@ -75,6 +75,10 @@ pub const assertRules = walk.assertRules;
 pub const fail = walk.fail;
 pub const transform = walk.transform;
 pub const TransformError = walk.TransformError;
+/// The name among a list that a key is most likely a typo of, for the "did
+/// you mean" of other modules' compile errors, by the rule of the
+/// validator's own: `v.closest(&.{ "name", "email" }, "nmae")` is "name".
+pub const closest = core.closest;
 
 pub const rename = names.rename;
 pub const nameOf = names.nameOf;

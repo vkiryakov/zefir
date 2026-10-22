@@ -19,7 +19,7 @@ const core = @import("core");
 const log = @import("log");
 const mongo = @import("mongo");
 const zio = @import("zio");
-const bson = mongo.bson;
+const bson = @import("mongo-bson");
 
 pub const std_options: std.Options = .{ .logFn = log.stdLogFn };
 

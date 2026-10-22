@@ -8,7 +8,7 @@
 
 const std = @import("std");
 const mongo = @import("mongo");
-const bson = mongo.bson;
+const bson = @import("mongo-bson");
 
 const Status = enum { active, suspended };
 

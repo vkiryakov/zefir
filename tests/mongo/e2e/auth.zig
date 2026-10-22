@@ -11,7 +11,7 @@ const Io = std.Io;
 const testing = std.testing;
 const core = @import("core");
 const mongo = @import("mongo");
-const bson = mongo.bson;
+const bson = @import("mongo-bson");
 const e2e = @import("root.zig");
 
 fn within(io: Io, duration: Io.Duration) core.Context {

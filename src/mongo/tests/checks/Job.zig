@@ -8,7 +8,7 @@ const net = Io.net;
 const Allocator = std.mem.Allocator;
 const core = @import("core");
 const mongo = @import("mongo");
-const bson = mongo.bson;
+const bson = @import("mongo-bson");
 /// The client of a check, as the checks hold it.
 const Client = *mongo.Client;
 const Cursor = mongo.Cursor;

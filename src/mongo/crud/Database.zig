@@ -4,7 +4,7 @@
 //! collections, drop it, and run any command in it.
 //!
 //! ```zig
-//! var ids: mongo.bson.ObjectId.Generator = .init(io); // one for the application
+//! var ids: bson.ObjectId.Generator = .init(io); // one for the application
 //! const db: mongo.Database = .init(&client, "app", &ids);
 //! const users = db.collection("users");
 //! const ann = try users.insertOne(io, .of(ctx), .{ .email = "ann@example.com", .name = "Ann" }, .{ .allocator = arena });
@@ -20,7 +20,7 @@
 
 const std = @import("std");
 const Io = std.Io;
-const bson = @import("../bson.zig");
+const bson = @import("mongo-bson");
 const errors = @import("../errors.zig");
 const requests = @import("../requests.zig");
 const Client = @import("../Client.zig");

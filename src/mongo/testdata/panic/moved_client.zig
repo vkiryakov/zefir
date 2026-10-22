@@ -5,6 +5,7 @@
 const std = @import("std");
 const Io = std.Io;
 const mongo = @import("mongo");
+const bson = @import("mongo-bson");
 const Script = mongo.testing.Script;
 const FakeServer = mongo.testing.FakeServer;
 
@@ -43,7 +44,7 @@ pub fn main(init: std.process.Init) !void {
 
     // The mistake: a copy of the connected client.
     var moved = driver;
-    const ping: mongo.Command = .{ .database = "admin", .body = mongo.bson.literal(.{ .ping = 1 }) };
+    const ping: mongo.Command = .{ .database = "admin", .body = bson.literal(.{ .ping = 1 }) };
     const reply = moved.runCommand(io, .of(.root), ping, .{ .allocator = init.gpa }) catch return;
     reply.deinit();
 }

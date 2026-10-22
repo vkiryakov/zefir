@@ -120,6 +120,7 @@ while (try adults.next(io, op)) |doc| {
 - [Under zefir.App](#under-zefirapp)
 - [Logs](#logs)
 - [Tests without MongoDB](#tests-without-mongodb)
+- [Under zefir-odm](#under-zefir-odm)
 
 Programs that `zig build e2e` in `tests/mongo` builds and runs against
 mongod, checking what they print against this guide:
@@ -214,6 +215,9 @@ zig fetch --save git+https://github.com/vkiryakov/zefir#dev
 ```
 
 This guide is on the `dev` branch, so the command fetches its latest commit; `--save` pins that commit. For the latest release, v0.10.0, fetch `#v0.10.0` instead.
+zefir-mongo-bson is not in v0.10.0: there BSON is `mongo.bson`, inside
+zefir-mongo, so with `#v0.10.0` follow
+[the guide of that release](https://github.com/vkiryakov/zefir/blob/v0.10.0/src/mongo/examples/README.md).
 
 A service runs on [zio](https://github.com/lalinsky/zio). zio has no
 release for Zig 0.17 yet, so pin the commit Zefir is tested with:
@@ -222,8 +226,9 @@ release for Zig 0.17 yet, so pin the commit Zefir is tested with:
 zig fetch --save git+https://github.com/lalinsky/zio#d15034f1a4d9ddaa42829aae8f7e02d37cd1093a
 ```
 
-Then import the modules in `build.zig`. The programs of this guide also
-use Zefir's confy for settings, log for records and core for deadlines:
+Then import the modules in `build.zig`: mongo, and mongo-bson for its
+documents. The programs of this guide also use Zefir's confy for
+settings, log for records and core for deadlines:
 
 ```zig
 // build.zig
@@ -238,6 +243,7 @@ const exe = b.addExecutable(.{
         .optimize = optimize,
         .imports = &.{
             .{ .name = "mongo", .module = zefir.module("zefir-mongo") },
+            .{ .name = "mongo-bson", .module = zefir.module("zefir-mongo-bson") },
             .{ .name = "zio", .module = zio.module("zio") },
             .{ .name = "confy", .module = zefir.module("zefir-confy") },
             .{ .name = "log", .module = zefir.module("zefir-log") },
@@ -252,8 +258,9 @@ b.step("run", "Run the service").dependOn(&b.addRunArtifact(exe).step);
 > [!TIP]
 > zefir-mongo is also part of the umbrella module: with
 > `zefir.module("zefir")` imported as `zefir`, it is
-> `@import("zefir").mongo`. It imports only zefir-core; zio comes from
-> your build.
+> `@import("zefir").mongo`, and its BSON `@import("zefir").mongo_bson`.
+> It imports only zefir-core, zefir-mongo-bson and zefir-odm, which
+> brings zefir-validator; zio comes from your build.
 
 You need a mongod to talk to. With Docker:
 
@@ -289,7 +296,7 @@ const core = @import("core");
 const log = @import("log");
 const mongo = @import("mongo");
 const zio = @import("zio");
-const bson = mongo.bson;
+const bson = @import("mongo-bson");
 
 /// The client logs through std.log; this sends its records to the logger.
 pub const std_options: std.Options = .{ .logFn = log.stdLogFn };
@@ -732,7 +739,7 @@ const core = @import("core");
 const log = @import("log");
 const mongo = @import("mongo");
 const zio = @import("zio");
-const bson = mongo.bson;
+const bson = @import("mongo-bson");
 
 pub const std_options: std.Options = .{ .logFn = log.stdLogFn };
 
@@ -940,7 +947,7 @@ const core = @import("core");
 const log = @import("log");
 const mongo = @import("mongo");
 const zio = @import("zio");
-const bson = mongo.bson;
+const bson = @import("mongo-bson");
 
 pub const std_options: std.Options = .{ .logFn = log.stdLogFn };
 
@@ -1157,7 +1164,7 @@ MongoDB's tools show them in. It needs no server:
 
 const std = @import("std");
 const mongo = @import("mongo");
-const bson = mongo.bson;
+const bson = @import("mongo-bson");
 
 const Status = enum { active, suspended };
 
@@ -1415,7 +1422,7 @@ const core = @import("core");
 const log = @import("log");
 const mongo = @import("mongo");
 const zio = @import("zio");
-const bson = mongo.bson;
+const bson = @import("mongo-bson");
 
 pub const std_options: std.Options = .{ .logFn = log.stdLogFn };
 
@@ -1585,7 +1592,7 @@ the third batch:
 
 const std = @import("std");
 const mongo = @import("mongo");
-const bson = mongo.bson;
+const bson = @import("mongo-bson");
 const testing = std.testing;
 const FakeServer = mongo.testing.FakeServer;
 const Script = mongo.testing.Script;
@@ -1691,7 +1698,7 @@ against a scripted server that holds its replies show each case:
 const std = @import("std");
 const core = @import("core");
 const mongo = @import("mongo");
-const bson = mongo.bson;
+const bson = @import("mongo-bson");
 const testing = std.testing;
 const FakeServer = mongo.testing.FakeServer;
 const Script = mongo.testing.Script;
@@ -1917,7 +1924,7 @@ const core = @import("core");
 const log = @import("log");
 const mongo = @import("mongo");
 const zio = @import("zio");
-const bson = mongo.bson;
+const bson = @import("mongo-bson");
 
 /// App and the client log through std.log; this sends their records to
 /// the logger.
@@ -2151,7 +2158,7 @@ The users of the shop, as an application keeps them:
 
 const std = @import("std");
 const mongo = @import("mongo");
-const bson = mongo.bson;
+const bson = @import("mongo-bson");
 const Users = @This();
 
 collection: mongo.Collection,
@@ -2207,7 +2214,7 @@ And their tests:
 const std = @import("std");
 const mongo = @import("mongo");
 const Users = @import("Users.zig");
-const bson = mongo.bson;
+const bson = @import("mongo-bson");
 const testing = std.testing;
 const FakeServer = mongo.testing.FakeServer;
 const Script = mongo.testing.Script;
@@ -2319,3 +2326,36 @@ test "byEmail asks for one document by its e-mail, and reads it into a User" {
 - The build of zefir runs these tests, and those of
   [deadlines](#deadlines-and-cancellation) and of
   [a write cut short](#a-write-cut-short), in `zig build test-mongo`.
+
+## Under zefir-odm
+
+zefir-mongo is also the reference driver of zefir-odm, the typed ODM of
+Zefir: models as structs, filters and updates that the compiler checks,
+and tenants with databases of their own on shared servers or on servers
+of their own, whose connections change their credentials while requests
+go on. odm reaches a database only through its driver contract, and
+`mongo.OdmDriver` implements that contract on `mongo.Client` and
+`mongo.Collection`. A service makes one,
+`var driver: mongo.OdmDriver = .init(gpa);`, and gives `driver.driver()`
+to `odm.Registry.init`; the driver lives longer than the registry.
+
+- **A client per connection.** Each connection of odm's registry, and
+  each generation of it, is a `mongo.Client` of its own, with its pool,
+  SCRAM and the options of its connection string, as this guide
+  describes them. The driver opens it with a `close_timeout` of 0: odm
+  waits for the sessions of a generation itself before it closes it.
+- **The operations are those of this guide.** odm's insert is an ordered
+  `insertMany`; its updates are `updateOne`, `updateMany` and
+  `replaceOne`; its find is `find`, or `findOne` when it asks for one
+  document; then `countDocuments`, `createIndexes`, `aggregate` and
+  `runCommand`. odm builds the BSON, and the driver builds no command of
+  its own.
+- **The errors keep their names**, and their diagnostics their texts and
+  codes; a write that a unique index refused, codes 11000, 11001 and
+  12582, is odm's `DuplicateKey`, with the index of the document.
+- **It is zefir compatible**: it passes both groups of odm's conformance
+  suite against mongod, and group C, the rules of the contract, against
+  `mongo.testing.FakeServer`.
+
+The guide of odm, [src/odm/examples/README.md](../../odm/examples/README.md),
+starts from its quick start.

@@ -103,6 +103,13 @@ jobs:
         shell: bash
         working-directory: tests/mongo
         run: zig build check --summary all
+      # The same for tests/odm, the end-to-end tests of zefir-odm on
+      # mongo.OdmDriver, which need mongod in Docker: it stands on both
+      # modules.
+      - if: contains(format(' {0} ', env.MODULES), ' odm ') || contains(format(' {0} ', env.MODULES), ' mongo ')
+        shell: bash
+        working-directory: tests/odm
+        run: zig build check --summary all
       # The same for tests/redis, the end-to-end tests of zefir-redis, which
       # need Redis and Valkey in Docker.
       - if: contains(format(' {0} ', env.MODULES), ' redis ')
@@ -179,7 +186,7 @@ jobs:
           zig fmt --check build.zig build.zig.zon src tests examples
           --exclude tests/nats/zig-pkg --exclude tests/rpc-nats/zig-pkg
           --exclude tests/http/zig-pkg --exclude tests/mongo/zig-pkg
-          --exclude tests/redis/zig-pkg --exclude tests/app/zig-pkg
+          --exclude tests/odm/zig-pkg --exclude tests/redis/zig-pkg --exclude tests/app/zig-pkg
           --exclude examples/rpc-custom-transport/zig-pkg
           --exclude examples/rpc-custom-transport/consumer/zig-pkg
 
@@ -246,6 +253,40 @@ jobs:
         working-directory: tests/mongo
         timeout-minutes: 15
         run: zig build e2e --summary all
+      - name: Stop the mongod servers
+        if: always()
+        run: docker compose --profile mongo down
+
+  # The end-to-end tests of odm against mongod in Docker: the conformance
+  # suite on mongo.OdmDriver and the registry on mongo-plain and
+  # mongo-auth, then the programs of its guide, checked against the guide;
+  # ubuntu only, as mongo-e2e. One server version: mongo-e2e
+  # runs the driver on each, and odm does not depend on it. It is not a
+  # required check. It runs when odm or mongo is among the modules to
+  # test, as tests/odm stands on both. The stress tests of tests/odm run on
+  # a developer's machine only.
+  odm-e2e:
+    name: odm-e2e
+    needs: changes
+    if: contains(format(' {0} ', needs.changes.outputs.modules), ' odm ') || contains(format(' {0} ', needs.changes.outputs.modules), ' mongo ')
+    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    env:
+      MONGO_VERSION: "9.0.4"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: mlugg/setup-zig@v2
+      # The two services of the tests only.
+      - name: Start the mongod servers
+        run: docker compose --profile mongo up --detach --wait mongo-plain mongo-auth
+      - name: Run the end-to-end tests
+        working-directory: tests/odm
+        timeout-minutes: 15
+        run: zig build e2e --summary all
+      # Why a server did not start or a test failed: what mongod said.
+      - name: Show the logs of the mongod servers
+        if: failure()
+        run: docker compose --profile mongo logs --no-color --tail 200 mongo-plain mongo-auth
       - name: Stop the mongod servers
         if: always()
         run: docker compose --profile mongo down

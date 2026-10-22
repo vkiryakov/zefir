@@ -4,7 +4,7 @@
 
 const std = @import("std");
 const core = @import("core");
-const bson = @import("bson.zig");
+const bson = @import("mongo-bson");
 const errors = @import("errors.zig");
 const results = @import("results.zig");
 

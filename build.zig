@@ -11,6 +11,8 @@ const jwt_guide = @import("src/jwt/examples/cases.zig");
 const openapi_cases = @import("src/openapi/tests/cases.zig");
 const openapi_guide = @import("src/openapi/examples/cases.zig");
 const mongo_guide = @import("src/mongo/examples/cases.zig");
+const odm_cases = @import("src/odm/tests/cases.zig");
+const odm_guide = @import("src/odm/examples/cases.zig");
 const redis_guide = @import("src/redis/examples/cases.zig");
 
 pub fn build(b: *std.Build) void {
@@ -96,18 +98,33 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    const orm = b.addModule("zefir-orm", .{
-        .root_source_file = b.path("src/orm/root.zig"),
+    // BSON, the format of MongoDB's documents, for zefir-mongo and any
+    // other driver. It imports nothing.
+    const mongo_bson = b.addModule("zefir-mongo-bson", .{
+        .root_source_file = b.path("src/mongo-bson/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+    });
+
+    // A typed ODM for MongoDB: models, queries, connections and tenants.
+    // It reaches a database only through its driver contract, so it
+    // imports no driver.
+    const odm = b.addModule("zefir-odm", .{
+        .root_source_file = b.path("src/odm/root.zig"),
         .target = target,
         .optimize = optimize,
         .sanitize_thread = tsan,
         .imports = &.{
-            .{ .name = "log", .module = log },
+            .{ .name = "mongo-bson", .module = mongo_bson },
+            .{ .name = "core", .module = core },
+            .{ .name = "validator", .module = validator },
         },
     });
 
-    // MongoDB for zefir applications: the client, BSON and the
-    // collection API.
+    // MongoDB for zefir applications: the client and the collection API,
+    // on the BSON of mongo-bson, and the reference driver of zefir-odm,
+    // which implements odm's driver contract.
     const mongo = b.addModule("zefir-mongo", .{
         .root_source_file = b.path("src/mongo/root.zig"),
         .target = target,
@@ -115,6 +132,8 @@ pub fn build(b: *std.Build) void {
         .sanitize_thread = tsan,
         .imports = &.{
             .{ .name = "core", .module = core },
+            .{ .name = "mongo-bson", .module = mongo_bson },
+            .{ .name = "odm", .module = odm },
         },
     });
     mongo.addImport("build_options", build_options);
@@ -168,7 +187,7 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // Umbrella module: @import("zefir").core, .log, .confy, .validator, .rpc, .rpc_nats, .orm, .mongo, .redis, .nats, .http, .jwt, .openapi
+    // Umbrella module: @import("zefir").core, .log, .confy, .validator, .rpc, .rpc_nats, .mongo_bson, .odm, .mongo, .redis, .nats, .http, .jwt, .openapi
     const zefir = b.addModule("zefir", .{
         .root_source_file = b.path("src/zefir.zig"),
         .target = target,
@@ -181,7 +200,8 @@ pub fn build(b: *std.Build) void {
             .{ .name = "validator", .module = validator },
             .{ .name = "rpc", .module = rpc },
             .{ .name = "rpc-nats", .module = rpc_nats },
-            .{ .name = "orm", .module = orm },
+            .{ .name = "mongo-bson", .module = mongo_bson },
+            .{ .name = "odm", .module = odm },
             .{ .name = "mongo", .module = mongo },
             .{ .name = "redis", .module = redis },
             .{ .name = "nats", .module = nats },
@@ -202,7 +222,8 @@ pub fn build(b: *std.Build) void {
     const test_validator = addModuleTestStep(b, test_step, "validator");
     const test_rpc = addModuleTestStep(b, test_step, "rpc");
     const test_rpc_nats = addModuleTestStep(b, test_step, "rpc-nats");
-    const test_orm = addModuleTestStep(b, test_step, "orm");
+    const test_mongo_bson = addModuleTestStep(b, test_step, "mongo-bson");
+    const test_odm = addModuleTestStep(b, test_step, "odm");
     const test_mongo = addModuleTestStep(b, test_step, "mongo");
     const test_redis = addModuleTestStep(b, test_step, "redis");
     const test_nats = addModuleTestStep(b, test_step, "nats");
@@ -215,8 +236,8 @@ pub fn build(b: *std.Build) void {
     // where usize has 32 bits.
     const validator_compile_step = b.step("compile-validator-tests", "Build the validator's test binaries for -Dtarget without running them");
     for (
-        [_]*std.Build.Module{ core, log, confy, validator, rpc, rpc_nats, orm, mongo, redis, nats, http, jwt, openapi, zefir },
-        [_]*std.Build.Step{ test_core, test_log, test_confy, test_validator, test_rpc, test_rpc_nats, test_orm, test_mongo, test_redis, test_nats, test_http, test_jwt, test_openapi, test_zefir },
+        [_]*std.Build.Module{ core, log, confy, validator, rpc, rpc_nats, mongo_bson, odm, mongo, redis, nats, http, jwt, openapi, zefir },
+        [_]*std.Build.Step{ test_core, test_log, test_confy, test_validator, test_rpc, test_rpc_nats, test_mongo_bson, test_odm, test_mongo, test_redis, test_nats, test_http, test_jwt, test_openapi, test_zefir },
     ) |module, module_test_step| {
         const tests = b.addTest(.{ .root_module = module });
         module_test_step.dependOn(&addRun(b, tests, tsan).step);
@@ -499,14 +520,37 @@ pub fn build(b: *std.Build) void {
     // another std.Io, a cursor used by two tasks at once and
     // Client.deinit() with cursors left panic in safe builds. Each program
     // must print the panic message and end in its own panic handler, which
-    // exits with code 3 instead of aborting. They get their own Debug copy
-    // of mongo, whatever -Doptimize says.
+    // exits with code 3 instead of aborting. They get their own Debug copies
+    // of mongo and the modules it imports, odm's below among them, whatever
+    // -Doptimize says.
+    const panic_mongo_bson = b.createModule(.{
+        .root_source_file = b.path("src/mongo-bson/root.zig"),
+        .target = target,
+        .optimize = .Debug,
+    });
+    const panic_validator = b.createModule(.{
+        .root_source_file = b.path("src/validator/root.zig"),
+        .target = target,
+        .optimize = .Debug,
+    });
+    const panic_odm = b.createModule(.{
+        .root_source_file = b.path("src/odm/root.zig"),
+        .target = target,
+        .optimize = .Debug,
+        .imports = &.{
+            .{ .name = "mongo-bson", .module = panic_mongo_bson },
+            .{ .name = "core", .module = panic_core },
+            .{ .name = "validator", .module = panic_validator },
+        },
+    });
     const panic_mongo = b.createModule(.{
         .root_source_file = b.path("src/mongo/root.zig"),
         .target = target,
         .optimize = .Debug,
         .imports = &.{
             .{ .name = "core", .module = panic_core },
+            .{ .name = "mongo-bson", .module = panic_mongo_bson },
+            .{ .name = "odm", .module = panic_odm },
         },
     });
     panic_mongo.addOptions("build_options", version_options);
@@ -524,6 +568,7 @@ pub fn build(b: *std.Build) void {
                 .optimize = .Debug,
                 .imports = &.{
                     .{ .name = "mongo", .module = panic_mongo },
+                    .{ .name = "mongo-bson", .module = panic_mongo_bson },
                 },
             }),
         });
@@ -533,6 +578,68 @@ pub fn build(b: *std.Build) void {
         // with 3, so a program that printed the text and returned fails.
         run.expectExitCode(3);
         test_mongo.dependOn(&run.step);
+    }
+
+    // odm panic programs: a registry moved after its first
+    // registerConnection(), a call on another std.Io, Registry.deinit()
+    // with sessions left, a session or a cursor that two tasks call at once,
+    // a collection used after the deinit of its session, and a second
+    // deinit of a session or of a cursor panic in safe builds. Each program
+    // must print the panic message and end in its own panic handler, which
+    // exits with code 3 instead of aborting. They get their own Debug
+    // copies of odm and the modules it imports, made above for the mongo
+    // programs, whatever -Doptimize says.
+    for ([_][2][]const u8{
+        .{ "moved_registry", "panic: zefir-odm: Registry moved after its first registerConnection(): keep it where it was" },
+        .{ "another_io", "panic: zefir-odm: a call on another std.Io than the registry's: pass the io of Registry.init" },
+        .{ "deinit_with_leases", "panic: zefir-odm: Registry.deinit() with sessions or cursors left: deinit them first" },
+        .{ "session_two_tasks", "panic: zefir-odm: a session used by two tasks at once: take a session for each task" },
+        .{ "collection_after_deinit", "panic: zefir-odm: a collection used after the deinit of its session" },
+        .{ "cursor_two_tasks", "panic: zefir-odm: a cursor used by two tasks at once: one task at a time calls next and deinit of a cursor" },
+        .{ "session_deinit_twice", "panic: zefir-odm: Session.deinit() twice: deinit a session once" },
+        .{ "cursor_deinit_twice", "panic: zefir-odm: a cursor used after its deinit: deinit a cursor once, after its last next" },
+    }) |case| {
+        const exe = b.addExecutable(.{
+            .name = b.fmt("odm-panic-{s}", .{case[0]}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(b.fmt("src/odm/testdata/panic/{s}.zig", .{case[0]})),
+                .target = target,
+                .optimize = .Debug,
+                .imports = &.{
+                    .{ .name = "odm", .module = panic_odm },
+                },
+            }),
+        });
+        const run = b.addRunArtifact(exe);
+        run.expectStdErrMatch(case[1]);
+        // expectStdErrMatch accepts any exit: only the panic handler exits
+        // with 3, so a program that printed the text and returned fails.
+        run.expectExitCode(3);
+        test_odm.dependOn(&run.step);
+    }
+
+    // odm race programs: orders of events in the registry that a test
+    // cannot hold still under the test runner, each in a process of its
+    // own with a log function or a driver that holds it still: a connect
+    // that fails while a removal waits for its turn, and a deinit right
+    // after a second shutdown. Each exits with 0, with 1 when the registry
+    // went wrong, and with 3 on a panic. Debug builds with the Debug copy
+    // of odm made above, whatever -Doptimize says.
+    for ([_][]const u8{ "connect_failed_remove", "shutdown_twice" }) |name| {
+        const exe = b.addExecutable(.{
+            .name = b.fmt("odm-race-{s}", .{name}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(b.fmt("src/odm/testdata/race/{s}.zig", .{name})),
+                .target = target,
+                .optimize = .Debug,
+                .imports = &.{
+                    .{ .name = "odm", .module = panic_odm },
+                },
+            }),
+        });
+        const run = b.addRunArtifact(exe);
+        run.expectExitCode(0);
+        test_odm.dependOn(&run.step);
     }
 
     // redis panic programs: a client moved after connect(), a call on
@@ -904,23 +1011,24 @@ pub fn build(b: *std.Build) void {
             .sanitize_thread = tsan,
             .imports = &.{
                 .{ .name = "mongo", .module = mongo },
+                .{ .name = "mongo-bson", .module = mongo_bson },
                 .{ .name = "core", .module = core },
             },
         }),
     });
     test_mongo.dependOn(&addRun(b, mongo_checks, tsan).step);
 
-    // mongo compile errors: types that the BSON codec cannot write or read.
-    // Each test of the file must fail to compile with the message next to
-    // its name, which names the field; the filter compiles one test at a
-    // time. A type declared in the file is named after the file.
-    const mongo_compile_errors = b.createModule(.{
-        .root_source_file = b.path("src/mongo/tests/compile_errors.zig"),
+    // mongo-bson compile errors: types that the BSON codec cannot write or
+    // read. Each test of the file must fail to compile with the message
+    // next to its name, which names the field; the filter compiles one test
+    // at a time. A type declared in the file is named after the file.
+    const mongo_bson_compile_errors = b.createModule(.{
+        .root_source_file = b.path("src/mongo-bson/tests/compile_errors.zig"),
         .target = target,
         .optimize = optimize,
         .sanitize_thread = tsan,
         .imports = &.{
-            .{ .name = "mongo", .module = mongo },
+            .{ .name = "mongo-bson", .module = mongo_bson },
         },
     });
     for ([_][2][]const u8{
@@ -941,19 +1049,39 @@ pub fn build(b: *std.Build) void {
         .{ "integer literal beyond int64", "bson.encode: field 'n' is 9223372036854775808, which does not fit int64" },
         .{ "tuple as a document", "bson.encode: a tuple is an array, not a document: give its values names, such as .{ .a = x }" },
         .{ "number as a document", "bson.encode: a document is a struct with named fields, such as .{ .name = name }, or a bson.RawDocument; got u32" },
-        .{ "deprecated type to encode", "bson.encode: field 'p' is bson.types.DbPointer, a deprecated type: it is read, never written" },
+        .{ "deprecated type to encode", "bson.encode: field 'p' is types.DbPointer, a deprecated type: it is read, never written" },
         .{ "tuple to decode", "bson.decode: field 'pair' is struct { i32, i32 }, a tuple: decode needs the names of fields; use a struct, or a slice for an array" },
         .{ "comptime field to decode", "bson.decode: field 'version' is a comptime field: decode fills only fields known at run time" },
         .{ "mutable slice to decode", "bson.decode: field 'name' is []u8: decode gives const slices; use []const u8" },
+        .{ "keys with a field that is not there", "bson.encodeKeyed: keys: 'nmae' is not a field of compile_errors.User" },
+        .{ "keys with an empty key", "bson.encodeKeyed: keys: the key of 'name' is empty" },
+        .{ "keys with a key that holds a NUL byte", "bson.encodeKeyed: keys: the key of 'name' holds a NUL byte" },
+        .{ "keys with a key that is not UTF-8", "bson.encodeKeyed: keys: the key of 'name' is not UTF-8" },
+        .{ "keys that give two fields one key", "bson.encodeKeyed: keys: 'a' and 'b' both have the key \"b\"" },
+        .{ "keys that list a field twice", "bson.encodeKeyed: keys: 'name' is listed twice" },
+        .{ "keys of decodeKeyed that leave a required field unread", "bson.decodeKeyed: keys: 'name' is not read, but it is not optional and has no default" },
     }, 0..) |case, i| {
         const compile = b.addTest(.{
-            .name = b.fmt("mongo-compile-error-{d}", .{i}),
-            .root_module = mongo_compile_errors,
+            .name = b.fmt("mongo-bson-compile-error-{d}", .{i}),
+            .root_module = mongo_bson_compile_errors,
             .filters = &.{case[0]},
         });
         compile.expect_errors = .{ .contains = case[1] };
-        test_mongo.dependOn(&compile.step);
+        test_mongo_bson.dependOn(&compile.step);
     }
+    addOdmCompileChecks(b, test_odm, &.{
+        .{ .name = "mongo-bson", .module = mongo_bson },
+        .{ .name = "core", .module = core },
+        .{ .name = "validator", .module = validator },
+    }, target, optimize);
+    addOdmGuide(b, test_odm, .{
+        .core = core,
+        .log = log,
+        .confy = confy,
+        .validator = validator,
+        .mongo_bson = mongo_bson,
+        .odm = odm,
+    }, target, optimize, tsan);
 
     // mongo compile errors of the collection API: documents of types that
     // its operations cannot take. Each message names the operation, the
@@ -999,7 +1127,7 @@ pub fn build(b: *std.Build) void {
         compile.expect_errors = .{ .contains = case[1] };
         test_mongo.dependOn(&compile.step);
     }
-    addMongoGuide(b, test_mongo, .{ .core = core, .mongo = mongo }, target, optimize, tsan);
+    addMongoGuide(b, test_mongo, .{ .core = core, .mongo_bson = mongo_bson, .mongo = mongo }, target, optimize, tsan);
 
     // redis compile errors: reply types that no reply reads into,
     // arguments that cannot be written, WATCH where it cannot run,
@@ -1317,6 +1445,7 @@ fn addRpcGuide(
 /// The modules that the examples of the mongo guide import here.
 const MongoGuideModules = struct {
     core: *std.Build.Module,
+    mongo_bson: *std.Build.Module,
     mongo: *std.Build.Module,
 };
 
@@ -1339,6 +1468,7 @@ fn addMongoGuide(
     const dir = "src/mongo/examples/";
     const imports: []const std.Build.Module.Import = &.{
         .{ .name = "core", .module = m.core },
+        .{ .name = "mongo-bson", .module = m.mongo_bson },
         .{ .name = "mongo", .module = m.mongo },
     };
     for (mongo_guide.tests) |name| {
@@ -1383,6 +1513,98 @@ fn addMongoGuide(
         readme.addAnonymousImport(b.fmt("{s}.out", .{name}), .{ .root_source_file = run.captureStdOut(.{}) });
     }
     test_mongo.dependOn(&addRun(b, b.addTest(.{ .name = "mongo-guide-readme", .root_module = readme }), tsan).step);
+}
+
+/// The modules that the examples of the odm guide import here. zefir-mongo
+/// is not among them: what `test-odm` builds never imports it, so that the
+/// graph of the CI scripts stays without cycles.
+const OdmGuideModules = struct {
+    core: *std.Build.Module,
+    log: *std.Build.Module,
+    confy: *std.Build.Module,
+    validator: *std.Build.Module,
+    mongo_bson: *std.Build.Module,
+    odm: *std.Build.Module,
+};
+
+/// The examples of src/odm/examples/README.md, the guide of zefir-odm, as
+/// cases.zig there lists them: the tests on odm.testing.FakeDriver, and
+/// the programs that need no server, each through example_main.zig, which
+/// exits with code 3 on a panic instead of aborting and with code 4 past
+/// its time limit; it must exit with 0. readme_test.zig then checks that
+/// README.md shows every file as it is and every run of those programs as
+/// it printed. The programs that need mongod import zio and zefir-mongo:
+/// only tests/odm builds and runs them.
+fn addOdmGuide(
+    b: *std.Build,
+    test_odm: *std.Build.Step,
+    m: OdmGuideModules,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+    tsan: bool,
+) void {
+    const dir = "src/odm/examples/";
+    const imports: []const std.Build.Module.Import = &.{
+        .{ .name = "core", .module = m.core },
+        .{ .name = "log", .module = m.log },
+        .{ .name = "confy", .module = m.confy },
+        .{ .name = "validator", .module = m.validator },
+        .{ .name = "mongo-bson", .module = m.mongo_bson },
+        .{ .name = "odm", .module = m.odm },
+    };
+    for (odm_guide.tests) |name| {
+        const tests = b.addTest(.{
+            .name = b.fmt("odm-guide-{s}", .{name}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(b.fmt(dir ++ "{s}.zig", .{name})),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+                .imports = imports,
+            }),
+        });
+        test_odm.dependOn(&addRun(b, tests, tsan).step);
+    }
+
+    const readme = b.createModule(.{
+        .root_source_file = b.path(dir ++ "readme_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+        .imports = &.{
+            // The compile checks of odm, with the errors that README.md
+            // shows: a file of another directory of src/, which a module
+            // reaches only as a module.
+            .{ .name = "odm-cases", .module = b.createModule(.{
+                .root_source_file = b.path("src/odm/tests/cases.zig"),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+            }) },
+        },
+    });
+    for (odm_guide.programs) |name| {
+        const exe = b.addExecutable(.{
+            .name = b.fmt("odm-guide-{s}", .{name}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(dir ++ "example_main.zig"),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+                .imports = &.{.{ .name = "example", .module = b.createModule(.{
+                    .root_source_file = b.path(b.fmt(dir ++ "{s}.zig", .{name})),
+                    .target = target,
+                    .optimize = optimize,
+                    .sanitize_thread = tsan,
+                    .imports = imports,
+                }) }},
+            }),
+        });
+        const run = addRun(b, exe, tsan);
+        run.expectExitCode(0);
+        readme.addAnonymousImport(b.fmt("{s}.out", .{name}), .{ .root_source_file = run.captureStdOut(.{}) });
+    }
+    test_odm.dependOn(&addRun(b, b.addTest(.{ .name = "odm-guide-readme", .root_module = readme }), tsan).step);
 }
 
 /// The modules that the examples of the redis guide import here.
@@ -1779,6 +2001,36 @@ fn addHttpGuide(
         readme.addAnonymousImport(b.fmt("{s}.out", .{name}), .{ .root_source_file = run.captureStdOut(.{}) });
     }
     test_http.dependOn(&addRun(b, b.addTest(.{ .name = "http-guide-readme", .root_module = readme }), tsan).step);
+}
+
+/// odm compile errors: each case of src/odm/tests/cases.zig compiles the
+/// test of src/odm/tests/compile_errors.zig of its name, in a module of
+/// its own rooted at src/odm/compile_checks.zig, so that a case may call
+/// the internal functions of odm too. It passes only when the build fails
+/// with the error of the case: `error: ` in front makes it the whole
+/// message, as in addHttpCompileChecks. `imports` are those of odm.
+fn addOdmCompileChecks(
+    b: *std.Build,
+    test_odm: *std.Build.Step,
+    imports: []const std.Build.Module.Import,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+) void {
+    const checks = b.createModule(.{
+        .root_source_file = b.path("src/odm/compile_checks.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = imports,
+    });
+    for (odm_cases.compile_errors, 0..) |case, i| {
+        const compile = b.addTest(.{
+            .name = b.fmt("odm-compile-error-{d}", .{i}),
+            .root_module = checks,
+            .filters = &.{case.name},
+        });
+        compile.expect_errors = .{ .contains = b.fmt("error: {s}", .{case.expect}) };
+        test_odm.dependOn(&compile.step);
+    }
 }
 
 /// The examples of src/core/examples/app/README.md, the guide of zefir.App,
