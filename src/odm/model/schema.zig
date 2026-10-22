@@ -181,7 +181,7 @@ pub fn ListItem(comptime T: type) ?type {
 
 /// Whether the codec writes `T` as a document of its fields: a struct with
 /// named fields that is not one of the types of BSON.
-fn isDocument(comptime T: type) bool {
+pub fn isDocument(comptime T: type) bool {
     return switch (@typeInfo(T)) {
         .@"struct" => |info| !info.is_tuple and !bson.codec.check.isSpecial(T),
         else => false,
