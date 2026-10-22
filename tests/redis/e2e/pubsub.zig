@@ -47,7 +47,7 @@ fn nextMessage(io: Io, sub: *redis.Subscriber, channel: []const u8, pattern: ?[]
     return message;
 }
 
-test "the messages of a channel and of a pattern come as PUBLISH sends them, which counts the subscriber; a payload comes byte for byte, one of 1 MiB whole" {
+test "the messages of channels and of a pattern come as PUBLISH sends them, which counts the subscriber; a payload and the name of a channel come byte for byte, a payload of 1 MiB whole" {
     try e2e.onZio(messages);
 }
 
@@ -55,7 +55,8 @@ fn messages(io: Io) !void {
     var s: e2e.Session = undefined;
     try s.open(io);
     defer s.close();
-    var sub = try subscribed(io, &s.client, .{ .channels = &.{"e2e:pubsub:orders"}, .patterns = &.{"e2e:pubsub:events.*"} });
+    const binary = "e2e:pubsub:a\r\nb\x00c";
+    var sub = try subscribed(io, &s.client, .{ .channels = &.{ "e2e:pubsub:orders", binary }, .patterns = &.{"e2e:pubsub:events.*"} });
     defer sub.deinit();
     try testing.expectEqual(@as(usize, 1), s.client.stats().subscribers);
 
@@ -63,6 +64,8 @@ fn messages(io: Io) !void {
     try testing.expectEqualStrings("new", (try nextMessage(io, &sub, "e2e:pubsub:orders", null)).payload);
     try testing.expectEqual(@as(u64, 1), try s.run(cmd.publish("e2e:pubsub:events.paid", "a\r\nb\x00c")));
     try testing.expectEqualStrings("a\r\nb\x00c", (try nextMessage(io, &sub, "e2e:pubsub:events.paid", "e2e:pubsub:events.*")).payload);
+    try testing.expectEqual(@as(u64, 1), try s.run(cmd.publish(binary, "bin")));
+    try testing.expectEqualStrings("bin", (try nextMessage(io, &sub, binary, null)).payload);
 
     const big = try testing.allocator.alloc(u8, 1024 * 1024);
     defer testing.allocator.free(big);

@@ -23,7 +23,7 @@ test "publish sends the channel and the message, any bytes, and reads how many s
 fn publish(io: Io) !void {
     var server: FakeServer = try .start(testing.allocator, io, &.{
         .expect(.{ "PUBLISH", "orders", "new" }, .{ .integer = 2 }),
-        .expect(.{ "PUBLISH", "a\r\nb", "x\x00y\r\n" }, .{ .integer = 0 }),
+        .expect(.{ "PUBLISH", "a\r\nb\x00c", "x\x00y\r\n" }, .{ .integer = 0 }),
     });
     defer server.stop(io);
     var t: Fixture = undefined;
@@ -31,6 +31,6 @@ fn publish(io: Io) !void {
     defer t.deinit();
 
     try testing.expectEqual(@as(u64, 2), try t.run(io, cmd.publish("orders", "new")));
-    try testing.expectEqual(@as(u64, 0), try t.run(io, cmd.publish("a\r\nb", "x\x00y\r\n")));
+    try testing.expectEqual(@as(u64, 0), try t.run(io, cmd.publish("a\r\nb\x00c", "x\x00y\r\n")));
     try server.finish(io);
 }

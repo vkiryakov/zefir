@@ -41,7 +41,7 @@ fn expectSet(expected: []const []const u8, got: []const []const u8) !void {
     }
 }
 
-test "the string and counter commands: values, null and the empty string, binary values, times to live, NX and XX, counters" {
+test "the string and counter commands: values, null and the empty string, binary values and keys, times to live, NX and XX, counters" {
     try e2e.onZio(strings);
 }
 
@@ -55,9 +55,10 @@ fn strings(io: Io) !void {
     const a = "e2e:cmd:str:a";
     const b = "e2e:cmd:str:b";
     const bin = "e2e:cmd:str:bin";
+    const bin_key = "e2e:cmd:str:a\r\nb\x00c";
     const empty = "e2e:cmd:str:empty";
     const none = "e2e:cmd:str:none";
-    _ = try s.run(cmd.del(&.{ k, n, f, a, b, bin, empty, none }));
+    _ = try s.run(cmd.del(&.{ k, n, f, a, b, bin, bin_key, empty, none }));
 
     try testing.expectEqualDeep(@as(?[]const u8, null), try s.run(cmd.get([]const u8, k)));
     try s.run(cmd.set(k, "v1", .{ .ttl = .fromSeconds(3600) }));
@@ -67,6 +68,9 @@ fn strings(io: Io) !void {
     try testing.expectEqualDeep(@as(?[]const u8, "v2"), try s.run(cmd.get([]const u8, k)));
     try s.run(cmd.set(bin, "a\r\nb\x00c", .{}));
     try testing.expectEqualDeep(@as(?[]const u8, "a\r\nb\x00c"), try s.run(cmd.get([]const u8, bin)));
+    // So does a key.
+    try s.run(cmd.set(bin_key, "v", .{}));
+    try testing.expectEqualDeep(@as(?[]const u8, "v"), try s.run(cmd.get([]const u8, bin_key)));
     try s.run(cmd.set(empty, "", .{}));
     try testing.expectEqualDeep(@as(?[]const u8, ""), try s.run(cmd.get([]const u8, empty)));
 

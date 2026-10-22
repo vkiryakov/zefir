@@ -294,6 +294,26 @@ fn messages(io: Io) !void {
     try server.finish(io);
 }
 
+test "a channel whose name holds CR, LF and NUL goes out byte for byte, its confirmation matches by its bytes, and its messages come with that name" {
+    try within5s(testing.io, binaryChannel, .{testing.io});
+}
+
+fn binaryChannel(io: Io) !void {
+    const name = "a\r\nb\x00c";
+    var server: FakeServer = try .start(testing.allocator, io, &.{
+        .expect(.{ "SUBSCRIBE", name }, .subscribed(&.{name})),
+        .send(.message(name, "new")),
+    });
+    defer server.stop(io);
+    var client: Client = undefined;
+    try connected(io, &client, .{ .url = server.url() });
+    defer client.deinit();
+    var sub = try client.subscribe(io, within(io, .fromSeconds(4)), .{ .channels = &.{name} });
+    defer sub.deinit();
+    try expectMessage(.{ .channel = name, .payload = "new" }, try sub.next(io));
+    try server.finish(io);
+}
+
 test "a message that comes between the confirmations of SUBSCRIBE and PSUBSCRIBE is the first that next gives" {
     try within5s(testing.io, between, .{testing.io});
 }

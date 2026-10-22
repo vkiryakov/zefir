@@ -44,6 +44,8 @@ fn values(io: Io) !void {
         .expect(.{ "GETEX", "k" }, .{ .string = "7" }),
         .expect(.{ "SET", "bin", "a\r\nb\x00c" }, .ok),
         .expect(.{ "GET", "bin" }, .{ .string = "a\r\nb\x00c" }),
+        .expect(.{ "SET", "a\r\nb\x00c", "v" }, .ok),
+        .expect(.{ "GET", "a\r\nb\x00c" }, .{ .string = "v" }),
     });
     defer server.stop(io);
     var t: Fixture = undefined;
@@ -74,6 +76,9 @@ fn values(io: Io) !void {
     try t.run(io, cmd.set("bin", "a\r\nb\x00c", .{}));
     try testing.expectEqualDeep(@as(?[]const u8, "a\r\nb\x00c"), try t.run(io, cmd.get([]const u8, "bin")));
     try testing.expectEqualStrings("a\r\nb\x00c", try fixture.argOf(io, &server, 17, 2));
+    // So does a key.
+    try t.run(io, cmd.set("a\r\nb\x00c", "v", .{}));
+    try testing.expectEqualDeep(@as(?[]const u8, "v"), try t.run(io, cmd.get([]const u8, "a\r\nb\x00c")));
     try server.finish(io);
 }
 
