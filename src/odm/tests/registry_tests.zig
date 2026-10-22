@@ -11,12 +11,15 @@ const FakeDriver = odm.testing.FakeDriver;
 const Registry = odm.Registry;
 const Warning = @import("../registry/connection.zig").Warning;
 
+/// The errors of the calls of the registry, `shutdown` with them.
+const CallError = odm.Error || odm.ShutdownError;
+
 /// The result of one call of the registry in a task of its own.
 const Outcome = struct {
-    result: odm.Error!void = {},
+    result: CallError!void = {},
     done: std.atomic.Value(bool) = .init(false),
 
-    fn set(o: *Outcome, result: odm.Error!void) void {
+    fn set(o: *Outcome, result: CallError!void) void {
         o.result = result;
         o.done.store(true, .release);
     }
@@ -27,7 +30,7 @@ const Outcome = struct {
     }
 
     /// The result, once the call returned; error.Timeout after 5 s.
-    fn wait(o: *Outcome, io: Io) !odm.Error!void {
+    fn wait(o: *Outcome, io: Io) !CallError!void {
         try eventually(io, o, isDone);
         return o.result;
     }
@@ -659,4 +662,153 @@ test "the warnings of the registry" {
         "{f}",
         .{Warning{ .shutdown_forced = .{ .leases = 2 } }},
     );
+}
+
+fn shutdownTask(o: *Outcome, r: *Registry, io: Io, budget: Io.Duration) void {
+    const deadline = Io.Clock.Timestamp.fromNow(io, .{ .raw = budget, .clock = .awake });
+    o.set(r.shutdown(io, deadline));
+}
+
+test "shutdown" {
+    const io = testing.io;
+    var fake: FakeDriver = .init(testing.allocator);
+    defer fake.deinit();
+    {
+        var registry: Registry = .init(testing.allocator, io, fake.driver(), .{});
+        defer registry.deinit(io);
+        try registry.registerConnection(io, "active", .{ .uri = "fake://a" });
+        try registry.connect(io, .root, "active");
+        try registry.registerConnection(io, "registered", .{ .uri = "fake://b" });
+
+        try registry.shutdown(io, .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake }));
+        // Both clients are closed and freed, none by force.
+        var counts = fake.counts(io);
+        try testing.expectEqual(@as(usize, 2), counts.closed);
+        try testing.expectEqual(@as(usize, 2), counts.freed);
+        const s = registry.stats(io);
+        try testing.expectEqual(@as(usize, 0), s.forced);
+        try testing.expectEqual(@as(usize, 0), s.leases);
+        try testing.expectEqual(@as(usize, 0), s.draining);
+
+        var d: odm.Diagnostics = .{};
+        try testing.expectError(error.ShuttingDown, registry.registerConnection(io, "new", .{ .uri = "fake://c", .diagnostics = &d }));
+        try testing.expectEqualStrings("odm: the registry is shutting down", d.message());
+        try testing.expectError(error.ShuttingDown, registry.connect(io, .root, "registered"));
+        try testing.expectError(error.ShuttingDown, registry.replaceConnection(io, .root, "active", .{ .uri = "fake://c" }));
+        try testing.expectError(error.ShuttingDown, registry.removeConnection(io, "active"));
+        try testing.expectError(error.ShuttingDown, registry.ping(io, .root, "active"));
+        try testing.expectError(error.ShuttingDown, registry.connectionStats(io, "active"));
+        // A second shutdown returns the result of the first.
+        try registry.shutdown(io, .now(io, .awake));
+        // The registration it refused opened no client.
+        counts = fake.counts(io);
+        try testing.expectEqual(@as(usize, 2), counts.opened);
+    }
+    const counts = fake.counts(io);
+    try testing.expectEqual(counts.opened, counts.freed);
+    try testing.expectEqual(counts.opened, counts.close_calls);
+}
+
+test "shutdown wakes the calls that wait, and closes a connect in its delay at once" {
+    const io = testing.io;
+    var fake: FakeDriver = .init(testing.allocator);
+    defer fake.deinit();
+    {
+        var registry: Registry = .init(testing.allocator, io, fake.driver(), .{});
+        defer registry.deinit(io);
+        try fake.plan("fake://slow", .{ .connect_delay = .fromSeconds(10) });
+        try registry.registerConnection(io, "slow", .{ .uri = "fake://slow" });
+        var group: Io.Group = .init;
+        defer group.cancel(io);
+        var connecting: Outcome = .{};
+        try group.concurrent(io, connectTask, .{ &connecting, &registry, io, core.Context.root, "slow" });
+        try eventually(io, Expected{ .r = &registry, .id = "slow", .state = .connecting }, inState);
+        // Both wait for their turn behind the connect.
+        var waiting: Outcome = .{};
+        try group.concurrent(io, connectTask, .{ &waiting, &registry, io, core.Context.root, "slow" });
+        var replacing: Outcome = .{};
+        try group.concurrent(io, replaceTask, .{ &replacing, &registry, io, "slow", "fake://other" });
+        try io.sleep(.fromMilliseconds(20), .awake);
+
+        const start = Io.Clock.awake.now(io);
+        try registry.shutdown(io, .fromNow(io, .{ .raw = .fromSeconds(5), .clock = .awake }));
+        // The generation that never connected closed at once, and not by force.
+        try testing.expect(start.durationTo(Io.Clock.awake.now(io)).nanoseconds < 2 * std.time.ns_per_s);
+        try testing.expectError(error.ShuttingDown, try connecting.wait(io));
+        try testing.expectError(error.ShuttingDown, try waiting.wait(io));
+        try testing.expectError(error.ShuttingDown, try replacing.wait(io));
+        try testing.expectEqual(@as(usize, 0), registry.stats(io).forced);
+        try eventually(io, Freed{ .fake = &fake, .n = 1 }, isFreed);
+        const counts = fake.counts(io);
+        try testing.expectEqual(@as(usize, 1), counts.opened);
+        try testing.expectEqual(@as(usize, 0), counts.connected);
+        try testing.expectEqual(@as(usize, 1), counts.closed);
+    }
+    const counts = fake.counts(io);
+    try testing.expectEqual(counts.opened, counts.freed);
+}
+
+test "a lease past the deadline of shutdown is closed by force" {
+    const io = testing.io;
+    var fake: FakeDriver = .init(testing.allocator);
+    defer fake.deinit();
+    {
+        var registry: Registry = .init(testing.allocator, io, fake.driver(), .{});
+        defer registry.deinit(io);
+        var gate: FakeDriver.Gate = .{};
+        defer gate.open(io);
+        try fake.plan("fake://held", .{ .gate = &gate });
+        try registry.registerConnection(io, "held", .{ .uri = "fake://held" });
+        try registry.connect(io, .root, "held");
+        const level = testing.log_level;
+        testing.log_level = .err;
+        defer testing.log_level = level;
+        var group: Io.Group = .init;
+        defer group.cancel(io);
+        var ping: Outcome = .{};
+        try group.concurrent(io, pingTask, .{ &ping, &registry, io, "held" });
+        try gate.waitFor(io, 1);
+
+        const start = Io.Clock.awake.now(io);
+        var first: Outcome = .{};
+        try group.concurrent(io, shutdownTask, .{ &first, &registry, io, Io.Duration.fromMilliseconds(100) });
+        // A second shutdown, with a deadline far away, waits for the first
+        // and returns its result.
+        try io.sleep(.fromMilliseconds(20), .awake);
+        var second: Outcome = .{};
+        try group.concurrent(io, shutdownTask, .{ &second, &registry, io, Io.Duration.fromSeconds(30) });
+        try testing.expectError(error.ShutdownTimeout, try first.wait(io));
+        try testing.expect(start.durationTo(Io.Clock.awake.now(io)).nanoseconds >= 100 * std.time.ns_per_ms);
+        try testing.expectError(error.ShutdownTimeout, try second.wait(io));
+        // The holder got Closed, and its release freed the generation.
+        try testing.expectError(error.Closed, try ping.wait(io));
+        try eventually(io, Freed{ .fake = &fake, .n = 1 }, isFreed);
+        const s = registry.stats(io);
+        try testing.expectEqual(@as(usize, 1), s.forced);
+        try testing.expectEqual(@as(usize, 0), s.leases);
+        try testing.expectEqual(@as(usize, 0), s.draining);
+        try testing.expectError(error.ShutdownTimeout, registry.shutdown(io, .now(io, .awake)));
+    }
+    const counts = fake.counts(io);
+    try testing.expectEqual(counts.opened, counts.freed);
+}
+
+test "deinit without shutdown shuts down by now" {
+    const io = testing.io;
+    var fake: FakeDriver = .init(testing.allocator);
+    defer fake.deinit();
+    {
+        var registry: Registry = .init(testing.allocator, io, fake.driver(), .{});
+        defer registry.deinit(io);
+        try registry.registerConnection(io, "a", .{ .uri = "fake://a" });
+        try registry.connect(io, .root, "a");
+        try registry.registerConnection(io, "b", .{ .uri = "fake://b" });
+        try registry.replaceConnection(io, .root, "a", .{ .uri = "fake://c" });
+        try testing.expectEqual(@as(usize, 1), fake.counts(io).freed);
+    }
+    const counts = fake.counts(io);
+    try testing.expectEqual(@as(usize, 3), counts.opened);
+    try testing.expectEqual(@as(usize, 3), counts.closed);
+    try testing.expectEqual(@as(usize, 3), counts.close_calls);
+    try testing.expectEqual(@as(usize, 3), counts.freed);
 }

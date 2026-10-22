@@ -26,6 +26,11 @@
 //! after the drain get `Closed`, and their memory stays until they are
 //! given back. `removeConnection` drains and closes the same way.
 //!
+//! `shutdown(io, deadline)` stops the registry: new calls get
+//! `ShuttingDown`, every generation drains until the deadline and closes,
+//! and leases left then make it `ShutdownTimeout`. `deinit(io)` frees the
+//! memory, after a shutdown by now if none came before.
+//!
 //! The registry has no tasks of its own. It keeps one `std.Io.Mutex` for
 //! short work on memory, and never holds it across a call of the driver, a
 //! wait or a log line. Every call comes on the `io` of `init`.
@@ -79,6 +84,10 @@ generations: List = .{},
 /// The generations closed by force since `init`.
 forced: usize = 0,
 state: State = .running,
+/// The result of the shutdown, for a second call; set once `shut` is.
+shutdown_result: errors.ShutdownError!void = {},
+/// Set once the shutdown is done.
+shut: Io.Event = .unset,
 /// The operations of collections and their errors (`stats`).
 operations: std.atomic.Value(u64) = .init(0),
 operation_errors: std.atomic.Value(u64) = .init(0),
@@ -149,15 +158,115 @@ pub fn init(gpa: Allocator, io: Io, driver: Driver, options: Options) Registry {
     };
 }
 
-/// Closes every client and frees the memory. No call may be in progress.
+/// Frees the memory, after a `shutdown` by now when none came before. No
+/// call may be in progress, and every session and cursor must be deinit
+/// first.
 pub fn deinit(r: *Registry, io: Io) void {
-    while (r.generations.popFirst()) |node| {
-        const g = Generation.of(node);
-        g.client.close(io);
-        generation.destroy(r, g);
+    r.mutex.lockUncancelable(io);
+    const state = r.state;
+    r.mutex.unlock(io);
+    switch (state) {
+        .running => r.shutdown(io, .now(io, .awake)) catch {},
+        .stopping => r.shut.waitUncancelable(io),
+        .stopped => {},
     }
+    // Every generation is closed. One still in the list holds leases, a
+    // mistake of the program: its memory stays, a leak rather than a use
+    // after free.
     while (r.connections.popFirst()) |node| Connection.of(node).destroy(r.gpa);
     r.* = undefined;
+}
+
+/// Stops the registry by `deadline`, the bean contract of `zefir.App`. From
+/// now on `registerConnection`, `connect`, `replaceConnection`,
+/// `removeConnection`, `ping`, `connectionStats` and the calls waiting for
+/// their turn get `ShuttingDown`. Generations that never connected close
+/// at once, and a connect in one of them gets `ShuttingDown`; the others
+/// drain one after the other, all until the deadline, and close. When
+/// leases are left at the deadline, their generations are closed by
+/// force, their holders get `Closed`, the log a warning, and the result is
+/// `error.ShutdownTimeout`: tasks that held them are still alive. A second
+/// call waits for the first and returns its result. The task's
+/// cancelation waits until it returns.
+pub fn shutdown(r: *Registry, io: Io, deadline: Io.Clock.Timestamp) errors.ShutdownError!void {
+    const protection = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(protection);
+    const until = deadline.toClock(io, .awake).raw;
+    r.mutex.lockUncancelable(io);
+    switch (r.state) {
+        .running => {},
+        .stopping => {
+            r.mutex.unlock(io);
+            r.shut.waitUncancelable(io);
+            return r.shutdown_result;
+        },
+        .stopped => {
+            const result = r.shutdown_result;
+            r.mutex.unlock(io);
+            return result;
+        },
+    }
+    r.state = .stopping;
+    // The calls that wait for their turn look again, and stop.
+    r.cond.broadcast(io);
+    var pending: List = .{};
+    var live: List = .{};
+    // Closed by force before, with holders left: their leases count too.
+    var closed: List = .{};
+    var it = r.generations.first;
+    while (it) |node| : (it = node.next) {
+        const g = Generation.of(node);
+        switch (g.state) {
+            .pending => {
+                generation.beginRetire(io, g, .pending);
+                pending.append(&g.shutdown_node);
+            },
+            .active, .draining => {
+                generation.beginRetire(io, g, .live);
+                live.append(&g.shutdown_node);
+            },
+            .closed => {
+                g.pins += 1;
+                closed.append(&g.shutdown_node);
+            },
+        }
+    }
+    r.mutex.unlock(io);
+
+    const now = Io.Clock.awake.now(io);
+    while (pending.popFirst()) |node| _ = generation.finishRetire(r, io, Generation.ofShutdown(node), now, .pending);
+    var left: usize = 0;
+    while (live.popFirst()) |node| {
+        if (generation.finishRetire(r, io, Generation.ofShutdown(node), until, .live).forced) |n| left += n;
+    }
+
+    var dead: List = .{};
+    r.mutex.lockUncancelable(io);
+    while (leasesOf(&closed) > 0 and Io.Clock.awake.now(io).nanoseconds < until.nanoseconds) {
+        // Each lease given back wakes the wait while the registry stops.
+        r.cond.waitTimeout(io, &r.mutex, step(io, .at(until))) catch {};
+    }
+    left += leasesOf(&closed);
+    while (closed.popFirst()) |node| {
+        const g = Generation.ofShutdown(node);
+        g.pins -= 1;
+        if (generation.settle(r, g)) dead.append(&g.shutdown_node);
+    }
+    r.state = .stopped;
+    r.shutdown_result = if (left > 0) error.ShutdownTimeout else {};
+    const result = r.shutdown_result;
+    r.shut.set(io);
+    r.mutex.unlock(io);
+    while (dead.popFirst()) |node| generation.destroy(r, Generation.ofShutdown(node));
+    if (left > 0) Warning.log(.{ .shutdown_forced = .{ .leases = left } });
+    return result;
+}
+
+fn leasesOf(list: *const List) usize {
+    var n: usize = 0;
+    var it = list.first;
+    while (it) |node| : (it = node.next) n += Generation.ofShutdown(node).leases;
+    return n;
 }
 
 /// Takes a connection under `id`, without the network: checks the id
