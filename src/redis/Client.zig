@@ -18,7 +18,7 @@
 //!     return err;
 //! };
 //! defer client.close(io);
-//! const views = try client.run(io, .of(ctx), redis.cmd.raw(i64, .{ "INCR", "views:/home" }), .{});
+//! const views = try client.run(io, .of(ctx), redis.cmd.incr("views:/home"), .{});
 //! ```
 //!
 //! Calls come from any task. Each takes a connection of the pool for its
@@ -271,7 +271,7 @@ pub fn stats(c: *Client) Stats {
 /// or slices.
 ///
 /// ```zig
-/// const rank = try client.run(io, .of(ctx), redis.cmd.raw(?u64, .{ "ZRANK", "leaders", "ann" }), .{});
+/// const rank = try client.run(io, .of(ctx), redis.cmd.zrank("leaders", "ann"), .{});
 /// ```
 pub fn run(c: *Client, io: Io, op: OperationContext, command: anytype, options: RunOptions) Error!ReplyOf(@TypeOf(command)) {
     calls.checkUse(c, io);
@@ -314,8 +314,8 @@ pub fn run(c: *Client, io: Io, op: OperationContext, command: anytype, options: 
 ///
 /// ```zig
 /// const r = try client.pipeline(io, op, .{
-///     redis.cmd.raw(i64, .{ "INCR", "views:/home" }),
-///     redis.cmd.raw(?[]const u8, .{ "GET", "motd" }),
+///     redis.cmd.incr("views:/home"),
+///     redis.cmd.get([]const u8, "motd"),
 /// }, .{ .allocator = arena });
 /// const views = try r[0];
 /// const motd = try r[1];

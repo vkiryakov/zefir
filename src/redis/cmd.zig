@@ -52,7 +52,9 @@
 //!
 //! ```zig
 //! try client.run(io, op, redis.cmd.set("session:42", token, .{ .ttl = .fromSeconds(3600) }), .{});
-//! const rank = try client.run(io, op, redis.cmd.raw(?u64, .{ "ZRANK", "leaders", "ann" }), .{});
+//! const rank = try client.run(io, op, redis.cmd.zrank("leaders", "ann"), .{});
+//! // OBJECT is not in the catalog.
+//! const encoding = try client.run(io, op, redis.cmd.raw(?[]const u8, .{ "OBJECT", "ENCODING", "leaders" }), .{ .allocator = arena });
 //! ```
 
 const std = @import("std");

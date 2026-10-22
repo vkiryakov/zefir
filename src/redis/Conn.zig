@@ -7,7 +7,7 @@
 //! var conn = try client.acquire(io, op);
 //! defer conn.release(io);
 //! try conn.run(io, op, redis.cmd.watch(&.{"stock:coffee"}), .{});
-//! const left = try conn.run(io, op, redis.cmd.raw(?i64, .{ "GET", "stock:coffee" }), .{}) orelse 0;
+//! const left = try conn.run(io, op, redis.cmd.get(i64, "stock:coffee"), .{}) orelse 0;
 //! if (left == 0) return error.OutOfStock;
 //! ```
 //!
@@ -163,8 +163,8 @@ pub fn pipeline(conn: *Conn, io: Io, op: OperationContext, commands: anytype, op
 ///
 /// ```zig
 /// const done = try conn.transaction(io, op, .{
-///     redis.cmd.raw(i64, .{ "DECR", "stock:coffee" }),
-///     redis.cmd.raw(u64, .{ "RPUSH", "orders:new", order_id }),
+///     redis.cmd.decr("stock:coffee"),
+///     redis.cmd.rpush("orders:new", .{order_id}),
 /// }, .{});
 /// _ = done orelse return error.TryAgain; // the stock changed after WATCH
 /// ```
