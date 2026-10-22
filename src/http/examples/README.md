@@ -3031,7 +3031,7 @@ cache-control: no-cache
 x-content-type-options: nosniff
 vary: Origin
 Date: Sat, 17 Oct 2026 20:02:45 GMT
-Content-Length: 54561
+Content-Length: 54633
 ```
 
 `/api/docs` is a page of it, which a browser opens: a reference of the API
