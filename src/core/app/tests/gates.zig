@@ -415,6 +415,17 @@ pub const Lingering = struct {
     pub const deinit = M.deinit;
 };
 
+/// A server with wait and no shutdown whose wait is deaf to its own
+/// requestStop and to cancelation: it returns only when the test opens its
+/// gate.
+pub const DeafServer = struct {
+    rig: *Rig,
+    const M = Methods(@This());
+    pub const wait = M.waitDeaf;
+    pub const requestStop = M.requestStop;
+    pub const deinit = M.deinit;
+};
+
 /// A bean that is never ready.
 pub const Unready = struct {
     rig: *Rig,

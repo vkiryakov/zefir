@@ -185,7 +185,12 @@ pub const Runtime = struct {
                 if (vtable.requestStop == null) continue;
                 if (vtable.shutdown != null) {
                     if (rt.watches[k].outcome == null) return k;
-                } else if (vtable.wait != null and !rt.watches[k].returned.isSet()) return k;
+                } else if (vtable.wait != null) {
+                    // No watcher waits in an unwatched server's `wait`: the
+                    // stop task does, and sets its outcome once it returns.
+                    const w = &rt.watches[k];
+                    if (if (w.unwatched) w.outcome == null else !w.returned.isSet()) return k;
+                }
             }
             return null;
         }

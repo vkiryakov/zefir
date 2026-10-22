@@ -97,6 +97,19 @@ fn expectFailure(app: anytype, bean: []const u8, step: zapp.Failure.Step, err: a
     try testing.expectEqual(err, failure.err);
 }
 
+/// Checks the bean App names as the one that did not stop, in the log of
+/// the stop and in `run`.
+fn expectStuck(app: anytype, bean: []const u8) !void {
+    const rt = &app.internal.block.runtime;
+    const io = app.internal.io;
+    const k = k: {
+        rt.mutex.lockUncancelable(io);
+        defer rt.mutex.unlock(io);
+        break :k rt.stuck orelse return error.TestExpectedStuck;
+    };
+    try testing.expectEqualStrings(bean, rt.status.internal.entries[k].name);
+}
+
 /// Silences App's warnings in a test that makes App warn; the standard
 /// runner prints them otherwise.
 fn quiet() std.log.Level {
@@ -256,6 +269,37 @@ test "no task for the watcher of a bean without shutdown: the rollback waits in 
     try rig.expect("waited", &.{"Worker"});
     app.deinit();
     try rig.expect("deinit", &.{"Worker"});
+}
+
+test "no task for the watcher of a server without shutdown, deaf to the stop: the rollback runs out of time and names it" {
+    const Root = struct {
+        pub const module: zapp.Module = .{ .providers = &.{gates.DeafServer}, .values = &.{*Rig} };
+    };
+    const level = quiet();
+    defer testing.log_level = level;
+    // The stop task takes the one task there is; the watcher gets none, so
+    // the stop task waits in the server's wait itself, past the deadline.
+    var threaded: Io.Threaded = .init(testing.allocator, .{ .concurrent_limit = .limited(1) });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var rig: Rig = .init(io);
+    defer rig.release();
+    var app = try zapp.App(Root).init(testing.allocator, io, .{&rig}, budget(50));
+    {
+        errdefer {
+            settle(&app, &rig);
+            app.deinit();
+        }
+        try testing.expectError(error.ShutdownTimeout, app.start());
+        try expectFailure(&app, "Root.DeafServer", .start, error.ConcurrencyUnavailable);
+        // The stop is in the server's wait: the log and `run` name the
+        // server, not App.
+        try expectStuck(&app, "Root.DeafServer");
+        rig.open("DeafServer");
+        try awaitEnded(&app);
+    }
+    app.deinit();
+    try rig.expect("deinit", &.{"DeafServer"});
 }
 
 test "no task for the stop: start returns ConcurrencyUnavailable and starts nothing" {
@@ -519,6 +563,24 @@ test "an error of one shutdown: the others still stop, and it becomes the cause"
     try testing.expectEqual(zapp.State.stopped, app.state());
 }
 
+test "an error of one client's shutdown: the other clients still stop, one at a time, and it becomes the cause" {
+    const Root = struct {
+        pub const module: zapp.Module = .{ .providers = &.{ gates.First, gates.Second, gates.Third }, .values = &.{*Rig} };
+    };
+    const level = quiet();
+    defer testing.log_level = level;
+    var rig: Rig = .init(testing.io);
+    defer rig.release();
+    rig.of("Second").shutdown = .fails;
+    var app = try zapp.App(Root).init(testing.allocator, testing.io, .{&rig}, .{});
+    defer app.deinit();
+    try app.start();
+    try testing.expectError(error.ShutdownFailed, app.shutdown());
+    try expectFailure(&app, "Root.Second", .shutdown, error.ShutdownFailed);
+    try rig.expect("shutdown", &.{ "Third", "Second", "First" });
+    try testing.expectEqual(zapp.State.stopped, app.state());
+}
+
 test "the first cause stays: a shutdown error after a breakdown does not replace it" {
     const Root = struct {
         pub const module: zapp.Module = .{ .providers = &.{ gates.A, gates.Waiter }, .values = &.{*Rig} };
@@ -556,6 +618,31 @@ test "a bean's own ShutdownTimeout is fatal" {
     try testing.expectEqual(zapp.State.failed, app.state());
     try expectFailure(&app, "Root.B", .shutdown, error.ShutdownTimeout);
     try rig.expectUnordered("shutdown", &.{ "A", "B", "C" });
+    // It takes back the ended stop task, so testing.allocator sees no leak.
+    app.deinit();
+    try rig.expect("deinit", &.{});
+    try testing.expect(app.internal.block.runtime.stop_task == null);
+}
+
+test "a client's own ShutdownTimeout is fatal; the other clients still stop, one at a time" {
+    const Root = struct {
+        pub const module: zapp.Module = .{ .providers = &.{ gates.First, gates.Second, gates.Third }, .values = &.{*Rig} };
+    };
+    const level = quiet();
+    defer testing.log_level = level;
+    var rig: Rig = .init(testing.io);
+    defer rig.release();
+    rig.of("Second").shutdown = .times_out;
+    // App frees no bean after it: the arena takes the block back.
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var app = try zapp.App(Root).init(arena.allocator(), testing.io, .{&rig}, .{});
+    try app.start();
+    app.requestStop();
+    try testing.expectError(error.ShutdownTimeout, app.wait());
+    try testing.expectEqual(zapp.State.failed, app.state());
+    try expectFailure(&app, "Root.Second", .shutdown, error.ShutdownTimeout);
+    try rig.expect("shutdown", &.{ "Third", "Second", "First" });
     // It takes back the ended stop task, so testing.allocator sees no leak.
     app.deinit();
     try rig.expect("deinit", &.{});
@@ -954,7 +1041,8 @@ test "deinit while running stops the App first" {
     app.deinit();
     try rig.expectUnordered("shutdown", &.{ "A", "Waiter", "C" });
     try rig.expect("deinit", &.{ "C", "Waiter", "A" });
-    try testing.expect(rig.position("shutdown", "A").? < rig.position("deinit", "C").?);
+    // Every shutdown returned before the first deinit.
+    for ([_][]const u8{ "A", "Waiter", "C" }) |who| try testing.expect(rig.position("shut", who).? < rig.position("deinit", "C").?);
 }
 
 test "deinit without start starts nothing and destroys in reverse" {

@@ -80,8 +80,8 @@ test "the shop: an order over HTTP, read back over rpc through NATS, then SIGTER
         },
     }
 
-    // SIGTERM: the servers stop first, the last built first, then the
-    // clients they used.
+    // SIGTERM: the servers stop together, then the clients they used, the
+    // last built first. App writes the servers' lines last built first too.
     const term = try shop.stop(io, .TERM);
     if (term != .exited or term.exited != 0) {
         std.debug.print("the shop {f}; its log:\n{s}\n", .{ term, shop.log.items });
