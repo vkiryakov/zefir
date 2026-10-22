@@ -48,8 +48,11 @@ pub const Slot = struct {
     /// Set when the bean enters the call its gate holds.
     entered: Io.Event = .unset,
     /// Ends a Waiter's or a Lingering's wait: the test sets it, and so do
-    /// the bean's own requestStop and shutdown.
+    /// the bean's own requestStop and shutdown. A Worker's task sets it
+    /// when it ends.
     wake: Io.Event = .unset,
+    /// A Worker's task; `Rig.release` awaits it.
+    task: ?Io.Future(void) = null,
     /// Set by the bean's own requestStop and shutdown: its wait returns {}.
     stopped: std.atomic.Value(bool) = .init(false),
     /// The deadline the bean's shutdown got.
@@ -87,14 +90,22 @@ pub const Rig = struct {
     }
 
     /// Opens every gate and ends every wait: in `defer`, so that no task
-    /// stays blocked on a bean when a test fails.
+    /// stays blocked on a bean when a test fails. Then awaits the Workers'
+    /// tasks, which end once their gates are open.
     pub fn release(rig: *Rig) void {
-        rig.mutex.lockUncancelable(rig.io);
-        defer rig.mutex.unlock(rig.io);
-        for (rig.slots[0..rig.len]) |*slot| {
-            slot.gate.set(rig.io);
-            slot.wake.set(rig.io);
-        }
+        const len = len: {
+            rig.mutex.lockUncancelable(rig.io);
+            defer rig.mutex.unlock(rig.io);
+            for (rig.slots[0..rig.len]) |*slot| {
+                slot.gate.set(rig.io);
+                slot.wake.set(rig.io);
+            }
+            break :len rig.len;
+        };
+        for (rig.slots[0..len]) |*slot| if (slot.task) |*task| {
+            task.await(rig.io);
+            slot.task = null;
+        };
     }
 
     /// Opens the gate of `who`.
@@ -141,6 +152,13 @@ pub const Rig = struct {
 /// Waits until `event` is set, `limit` at most: `error.TestTimeout` then.
 pub fn within(event: *Io.Event, io: Io, limit: Io.Duration) !void {
     untilSet(event, io, .after(Io.Clock.awake.now(io), limit)) catch return error.TestTimeout;
+}
+
+/// A Worker's task: one long item of work, which ends when the test opens
+/// the gate. It touches only the slot, never App's memory.
+fn work(s: *Slot, io: Io) void {
+    s.gate.waitUncancelable(io);
+    s.wake.set(io);
 }
 
 /// The methods of the gated beans, for a type T with a field `rig: *Rig`.
@@ -192,6 +210,20 @@ fn Methods(comptime T: type) type {
             s.entered.set(io);
             s.gate.waitUncancelable(io);
             t.rig.rec.add("waited", who);
+        }
+
+        /// A Worker's: starts its task, which the slot keeps.
+        pub fn startWorker(t: *T, io: Io) anyerror!void {
+            t.rig.rec.add("start", who);
+            const s = slot(t);
+            s.task = try io.concurrent(work, .{ s, io });
+        }
+
+        /// A Worker's: until its task ends; a cancelation ends the wait
+        /// sooner, not the task.
+        pub fn waitWorker(t: *T, io: Io) anyerror!void {
+            defer t.rig.rec.add("waited", who);
+            try slot(t).wake.wait(io);
         }
 
         /// A Lingering's: returns `sleep` after the bean's own requestStop.
@@ -320,6 +352,17 @@ pub const DeafWait = struct {
     rig: *Rig,
     const M = Methods(@This());
     pub const wait = M.waitDeaf;
+    pub const deinit = M.deinit;
+};
+
+/// A background worker with neither requestStop nor shutdown: its start
+/// runs a task of its own, which ends only when the test opens its gate,
+/// and its wait waits for that task.
+pub const Worker = struct {
+    rig: *Rig,
+    const M = Methods(@This());
+    pub const start = M.startWorker;
+    pub const wait = M.waitWorker;
     pub const deinit = M.deinit;
 };
 

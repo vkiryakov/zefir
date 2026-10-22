@@ -56,9 +56,10 @@ pub const Runtime = struct {
     rollback: bool = false,
     /// The stop ran out of time, or a bean returned `error.ShutdownTimeout`.
     fatal: bool = false,
-    /// A bean returned `error.ShutdownTimeout` itself: its tasks may still
-    /// use it, so App never frees the beans.
-    timed_out: bool = false,
+    /// A bean may still run: it returned `error.ShutdownTimeout` itself, or
+    /// App gave up on its `wait` at the deadline. Its tasks may still use
+    /// it, so App never frees the beans.
+    keep_beans: bool = false,
     /// The entry that did not stop.
     stuck: ?usize = null,
     /// "the stop ran out of time" is in the log: the stop task or `wait`,
@@ -131,17 +132,20 @@ pub const Runtime = struct {
         if (rt.cause == null) rt.cause = .{ .entry = k, .step = .shutdown, .err = err };
         if (err == error.ShutdownTimeout) {
             rt.fatal = true;
-            rt.timed_out = true;
+            rt.keep_beans = true;
             if (rt.stuck == null) rt.stuck = k;
         }
     }
 
-    /// The deadline came before the `wait` of entry k returned.
+    /// The deadline came before the `wait` of entry k returned: App gives
+    /// up on it. The gathering cancels that `wait`, which ends the wait, not
+    /// the bean's work, so App never frees the beans.
     fn didNotStop(rt: *Runtime, k: usize) void {
         const label = label: {
             rt.lock();
             defer rt.unlock();
             rt.fatal = true;
+            rt.keep_beans = true;
             if (rt.stuck == null) rt.stuck = k;
             if (rt.cause == null) rt.cause = .{ .entry = k, .step = .shutdown, .err = error.ShutdownTimeout };
             if (rt.timeout_logged) return;
@@ -329,8 +333,8 @@ pub fn failure(rt: *Runtime) ?Failure {
 
 /// Before `deinit` frees the beans: stops an App that runs, and takes back
 /// the stop task once it has returned (the Io allocated it). False when the
-/// beans must stay: a task of App, or of a bean that returned
-/// `error.ShutdownTimeout`, may still use them.
+/// beans must stay: a task of App may still use them, or one of a bean that
+/// returned `error.ShutdownTimeout` or whose `wait` App gave up on.
 pub fn finish(rt: *Runtime) bool {
     const io = rt.io;
     // No cancelation point: a cancelation request of the caller stays.
@@ -347,7 +351,7 @@ pub fn finish(rt: *Runtime) bool {
     const label = label: {
         rt.lock();
         defer rt.unlock();
-        if (rt.stop_task == null and !rt.timed_out) return true;
+        if (rt.stop_task == null and !rt.keep_beans) return true;
         break :label rt.stuckLabel();
     };
     log.warn("deinit frees nothing: {s} did not stop", .{label});

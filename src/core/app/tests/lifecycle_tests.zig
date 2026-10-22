@@ -34,6 +34,24 @@ fn awaitEnded(app: anytype) !void {
     return gates.within(&app.internal.block.runtime.ended, app.internal.io, .fromSeconds(10));
 }
 
+/// Waits, ten seconds at most, until the stop task of `app` has given up on
+/// a bean whose `wait` did not return by the deadline and gone on without it.
+fn awaitGaveUp(app: anytype) !void {
+    const rt = &app.internal.block.runtime;
+    const io = app.internal.io;
+    const until = Io.Clock.awake.now(io).addDuration(.fromSeconds(10));
+    while (true) {
+        const gave_up = gave_up: {
+            rt.mutex.lockUncancelable(io);
+            defer rt.mutex.unlock(io);
+            break :gave_up rt.keep_beans;
+        };
+        if (gave_up) return;
+        if (Io.Clock.awake.now(io).nanoseconds >= until.nanoseconds) return error.TestTimeout;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+}
+
 /// Waits, ten seconds at most, until `app` is in `state`.
 fn awaitState(app: anytype, state: zapp.State) !void {
     const io = app.internal.io;
@@ -316,7 +334,10 @@ test "a wait deaf to cancelation without a shutdown: wait returns ShutdownTimeou
     defer testing.log_level = level;
     var rig: Rig = .init(io);
     defer rig.release();
-    var app = try zapp.App(Root).init(testing.allocator, io, .{&rig}, budget(50));
+    // App frees no bean after it: the arena takes the block back.
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var app = try zapp.App(Root).init(arena.allocator(), io, .{&rig}, budget(50));
     try app.start();
     const asked = Io.Clock.awake.now(io);
     app.requestStop();
@@ -328,10 +349,44 @@ test "a wait deaf to cancelation without a shutdown: wait returns ShutdownTimeou
     // The stop task still gathers the deaf watcher: deinit frees nothing.
     app.deinit();
     try rig.expect("deinit", &.{});
+    // A wait that returns before the stop task gives up on it returned in
+    // time; this one returns after.
+    try awaitGaveUp(&app);
     rig.open("DeafWait");
     try awaitEnded(&app);
+    // App gave up on its wait at the deadline: deinit frees nothing even
+    // once the stop task has ended, and takes back that task.
     app.deinit();
-    try rig.expect("deinit", &.{"DeafWait"});
+    try rig.expect("deinit", &.{});
+    try testing.expect(app.internal.block.runtime.stop_task == null);
+}
+
+test "a wait App gave up on at the deadline: deinit frees nothing, as the bean's task may still run" {
+    const Root = struct {
+        pub const module: zapp.Module = .{ .providers = &.{gates.Worker}, .values = &.{*Rig} };
+    };
+    const io = testing.io;
+    const level = quiet();
+    defer testing.log_level = level;
+    var rig: Rig = .init(io);
+    defer rig.release();
+    // App frees no bean after it: the arena takes the block back.
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var app = try zapp.App(Root).init(arena.allocator(), io, .{&rig}, budget(50));
+    try app.start();
+    app.requestStop();
+    try testing.expectError(error.ShutdownTimeout, app.wait());
+    try expectFailure(&app, "Root.Worker", .shutdown, error.ShutdownTimeout);
+    // The gathering canceled the Worker's wait, and the stop task ended;
+    // the Worker's task still runs.
+    try awaitEnded(&app);
+    app.deinit();
+    try rig.expect("deinit", &.{});
+    app.deinit();
+    try rig.expect("deinit", &.{});
+    // It takes back the ended stop task, so testing.allocator sees no leak.
+    try testing.expect(app.internal.block.runtime.stop_task == null);
 }
 
 test "every shutdown gets one deadline: the start of the stop plus shutdown_timeout" {
