@@ -10,9 +10,12 @@
 //!   `Client.Url` say what it takes.
 //! - `redis.Conn` — a connection of the pool held by one task, from
 //!   `client.acquire` until `release`: for WATCH and transactions.
-//! - `redis.OperationContext`, `redis.Tracing`, `redis.RunOptions` — what
-//!   a call takes besides its command: the caller's context, with its
-//!   deadline and token, and the memory of the reply.
+//! - `redis.Iterator(T)` — the items of a scan one at a time, from
+//!   `client.iterate`, a page per exchange.
+//! - `redis.OperationContext`, `redis.Tracing`, `redis.RunOptions`,
+//!   `redis.IterateOptions` — what a call takes besides its command: the
+//!   caller's context, with its deadline and token, and the memory of the
+//!   reply.
 //! - `redis.cmd` — the commands, as values that the client runs, and
 //!   `cmd.raw` for a command that the catalog lacks, with its reply in a
 //!   type of the caller's.
@@ -38,6 +41,7 @@ const resp = @import("resp.zig");
 
 pub const Client = @import("Client.zig");
 pub const Conn = @import("Conn.zig");
+pub const Iterator = @import("Iterator.zig").Iterator;
 pub const cmd = @import("cmd.zig");
 pub const testing = @import("testing.zig");
 
@@ -52,6 +56,7 @@ pub const Diagnostics = errors.Diagnostics;
 pub const OperationContext = requests.OperationContext;
 pub const Tracing = requests.Tracing;
 pub const RunOptions = requests.RunOptions;
+pub const IterateOptions = requests.IterateOptions;
 
 pub const Ttl = types.Ttl;
 pub const KeyType = types.KeyType;
@@ -108,6 +113,7 @@ test {
     _ = @import("tests/conn_tests.zig");
     _ = @import("tests/transaction_tests.zig");
     _ = @import("tests/blocking_tests.zig");
+    _ = @import("tests/iterator_tests.zig");
     _ = @import("cmd/strings_tests.zig");
     _ = @import("cmd/keys_tests.zig");
     _ = @import("cmd/hashes_tests.zig");

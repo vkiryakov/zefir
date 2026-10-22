@@ -2,7 +2,8 @@
 //! of them are a word and then arguments of a few kinds in a fixed order,
 //! with a reply read into a fixed type: `Command` makes such a type from
 //! the struct of its arguments, `Blocking` one whose timeout in seconds
-//! goes last, and `Cursor` a page of a scan. The commands that write
+//! goes last, `Cursor` a page of a scan, and `Paged` a page of one as the
+//! iterator of `client.iterate` sends it. The commands that write
 //! themselves follow the same rules for their arguments, through the
 //! functions below.
 //!
@@ -137,10 +138,11 @@ pub const CursorOptions = struct {
 
 /// The type of a page of `word`, SCAN or a scan of the items of one key
 /// (`keyed`): `word [key] cursor [MATCH p] [COUNT n] [TYPE t]`, the TYPE
-/// for `Options` that has a field `type`, and its items read into `Item`.
-pub fn Cursor(comptime call: []const u8, comptime word: []const u8, comptime Item: type, comptime Options: type, comptime keyed: bool) type {
-    const Page = types.ScanPage(Item);
-    comptime resp.checkReply(Page, call);
+/// for `Options` that has a field `type`, and its items read into `I`. It
+/// carries the mark of a scan, so `client.iterate` walks its pages.
+pub fn Cursor(comptime call: []const u8, comptime word: []const u8, comptime I: type, comptime Options: type, comptime keyed: bool) type {
+    const R = types.ScanPage(I);
+    comptime resp.checkReply(R, call);
     const typed = @hasField(Options, "type");
     return struct {
         key: if (keyed) []const u8 else void,
@@ -148,51 +150,101 @@ pub fn Cursor(comptime call: []const u8, comptime word: []const u8, comptime Ite
 
         const Self = @This();
 
-        pub const Reply = Page;
+        pub const Reply = R;
 
-        /// A TYPE that names no type of a key, `.none` or `.other`, is
-        /// InvalidArgument.
+        pub const Item = I;
+
         pub fn check(c: Self, diagnostics: ?*Diagnostics) error{InvalidArgument}!void {
-            if (typed) if (c.options.type) |of| switch (of) {
-                .none, .other => return invalid(diagnostics, call ++ ": .type = .{t} names no type of a key: give string, list, set, zset, hash or stream", .{of}),
-                else => {},
-            };
+            return checkPage(c.page(), diagnostics);
         }
 
         pub fn write(c: Self, w: resp.Writer) resp.Writer.Error!void {
-            const o = c.options;
-            var n: usize = 2 + @as(usize, @intFromBool(keyed));
-            if (o.match != null) n += 2;
-            if (o.count != null) n += 2;
-            if (typed) {
-                if (o.type != null) n += 2;
-            }
-            try w.arrayHeader(n);
-            try w.bulk(word);
-            if (keyed) try w.bulk(c.key);
-            try args.write(w, o.cursor);
-            if (o.match) |pattern| {
-                try w.bulk("MATCH");
-                try w.bulk(pattern);
-            }
-            if (o.count) |count| {
-                try w.bulk("COUNT");
-                try args.write(w, count);
-            }
-            if (typed) if (o.type) |of| {
-                try w.bulk("TYPE");
-                try w.bulk(@tagName(of));
-            };
+            return writePage(w, c.page());
         }
 
-        pub fn read(_: Self, r: *resp.Reader, arena: ?std.mem.Allocator, diagnostics: ?*Diagnostics) resp.DecodeError!Page {
-            return resp.decode(Page, r, arena, diagnostics);
+        pub fn read(_: Self, r: *resp.Reader, arena: ?std.mem.Allocator, diagnostics: ?*Diagnostics) resp.DecodeError!R {
+            return resp.decode(R, r, arena, diagnostics);
         }
 
         pub fn name(_: Self) []const u8 {
             return word;
         }
+
+        pub fn page(c: Self) contract.Page {
+            const o = c.options;
+            return .{
+                .call = call,
+                .word = word,
+                .key = if (keyed) c.key else null,
+                .cursor = o.cursor,
+                .match = o.match,
+                .count = o.count,
+                .type = if (typed) o.type else null,
+            };
+        }
     };
+}
+
+/// The type of a page of a scan whose items read into `T`, as
+/// `client.iterate` sends it: the page that a scan of `Cursor` describes,
+/// with the cursor of the page before.
+pub fn Paged(comptime T: type) type {
+    const R = types.ScanPage(T);
+    return struct {
+        page: contract.Page,
+
+        const Self = @This();
+
+        pub const Reply = R;
+
+        pub fn check(c: Self, diagnostics: ?*Diagnostics) error{InvalidArgument}!void {
+            return checkPage(c.page, diagnostics);
+        }
+
+        pub fn write(c: Self, w: resp.Writer) resp.Writer.Error!void {
+            return writePage(w, c.page);
+        }
+
+        pub fn read(_: Self, r: *resp.Reader, arena: ?std.mem.Allocator, diagnostics: ?*Diagnostics) resp.DecodeError!R {
+            return resp.decode(R, r, arena, diagnostics);
+        }
+
+        pub fn name(c: Self) []const u8 {
+            return c.page.word;
+        }
+    };
+}
+
+/// A TYPE that names no type of a key, `.none` or `.other`, is
+/// InvalidArgument.
+fn checkPage(p: contract.Page, diagnostics: ?*Diagnostics) error{InvalidArgument}!void {
+    if (p.type) |of| switch (of) {
+        .none, .other => return invalid(diagnostics, "{s}: .type = .{t} names no type of a key: give string, list, set, zset, hash or stream", .{ p.call, of }),
+        else => {},
+    };
+}
+
+fn writePage(w: resp.Writer, p: contract.Page) resp.Writer.Error!void {
+    var n: usize = 2 + @as(usize, @intFromBool(p.key != null));
+    if (p.match != null) n += 2;
+    if (p.count != null) n += 2;
+    if (p.type != null) n += 2;
+    try w.arrayHeader(n);
+    try w.bulk(p.word);
+    if (p.key) |key| try w.bulk(key);
+    try args.write(w, p.cursor);
+    if (p.match) |pattern| {
+        try w.bulk("MATCH");
+        try w.bulk(pattern);
+    }
+    if (p.count) |count| {
+        try w.bulk("COUNT");
+        try args.write(w, count);
+    }
+    if (p.type) |of| {
+        try w.bulk("TYPE");
+        try w.bulk(@tagName(of));
+    }
 }
 
 /// How a field of the arguments goes out, by its type.

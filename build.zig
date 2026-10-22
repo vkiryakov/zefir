@@ -426,11 +426,11 @@ pub fn build(b: *std.Build) void {
     }
 
     // redis panic programs: a client moved after connect(), a call on
-    // another std.Io, a Conn of two tasks at once and a client deinited
-    // before its Conn panic in safe builds. Each program must print the
-    // panic message and end in its own panic handler, which exits with
-    // code 3 instead of aborting. They get their own Debug copy of redis,
-    // whatever -Doptimize says.
+    // another std.Io, a Conn or an Iterator of two tasks at once and a
+    // client deinited before its Conn panic in safe builds. Each program
+    // must print the panic message and end in its own panic handler, which
+    // exits with code 3 instead of aborting. They get their own Debug copy
+    // of redis, whatever -Doptimize says.
     const panic_redis = b.createModule(.{
         .root_source_file = b.path("src/redis/root.zig"),
         .target = target,
@@ -445,6 +445,7 @@ pub fn build(b: *std.Build) void {
         .{ "another_io", "panic: zefir-redis: a call on another std.Io than the client's: pass the io of Client.init" },
         .{ "conn_two_tasks", "panic: zefir-redis: a Conn used by two tasks at once: one task at a time calls a Conn" },
         .{ "deinit_live_conn", "panic: zefir-redis: Client.deinit() with a Conn not released: release every Conn before the client" },
+        .{ "iterator_two_tasks", "panic: zefir-redis: an Iterator used by two tasks at once: one task at a time calls next" },
     }) |case| {
         const exe = b.addExecutable(.{
             .name = b.fmt("redis-panic-{s}", .{case[0]}),
@@ -886,8 +887,9 @@ pub fn build(b: *std.Build) void {
     addMongoGuide(b, test_mongo, .{ .core = core, .mongo = mongo }, target, optimize, tsan);
 
     // redis compile errors: reply types that no reply reads into,
-    // arguments that cannot be written, WATCH where it cannot run, and
-    // functions of the catalog given a type they do not take. Each
+    // arguments that cannot be written, WATCH where it cannot run,
+    // functions of the catalog given a type they do not take, and iterate
+    // of a command that is not a scan. Each
     // test of the file must fail to compile with the message next to its
     // name, which names the call, the field or the argument, and the fix;
     // the filter compiles one test at a time. A type declared in the file
@@ -925,6 +927,7 @@ pub fn build(b: *std.Build) void {
         .{ "hset of a slice of numbers", "redis.cmd.hset: field 'scores' is []const i64: " ++ one_value ++ ", not a list; keep a list in a key of its own" },
         .{ "hset of a union", "redis.cmd.hset: field 'shape' is compile_errors.Shape, a union: " ++ one_value ++ "; keep its tag and its value in fields of their own" },
         .{ "hset of a pointer", "redis.cmd.hset: field 'owner' is *const compile_errors.User, a pointer: " ++ one_value ++ "; hold the value itself" },
+        .{ "iterate of a command that is not a scan", "redis.Client.iterate: the command is not a scan: iterate walks the pages of redis.cmd.scan, redis.cmd.hscan, redis.cmd.sscan or redis.cmd.zscan" },
     }, 0..) |case, i| {
         const compile = b.addTest(.{
             .name = b.fmt("redis-compile-error-{d}", .{i}),

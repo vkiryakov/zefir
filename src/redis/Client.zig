@@ -3,8 +3,9 @@
 //! options and does no I/O; `connect` opens the first connection under
 //! the caller's deadline, so that a server of the wrong kind or a password
 //! it refuses shows at start; `run` sends a command of `redis.cmd` and
-//! returns its reply, and `pipeline` sends many in one exchange; `close`
-//! ends the work and `deinit` frees everything.
+//! returns its reply, `pipeline` sends many in one exchange, and `iterate`
+//! walks the pages of a scan; `close` ends the work and `deinit` frees
+//! everything.
 //! There is no TLS: the client belongs on a trusted network only.
 //!
 //! ```zig
@@ -93,6 +94,7 @@ const RunOptions = requests.RunOptions;
 const contract = @import("cmd/contract.zig");
 const calls = @import("calls.zig");
 const Conn = @import("Conn.zig");
+const Iterator = @import("Iterator.zig").Iterator;
 const OwnedOptions = @import("OwnedOptions.zig");
 const Address = @import("engine/Address.zig");
 const Connection = @import("engine/Connection.zig");
@@ -287,6 +289,20 @@ pub fn pipeline(c: *Client, io: Io, op: OperationContext, commands: anytype, opt
         return err;
     };
     return results;
+}
+
+/// The items of `command`, a scan of `redis.cmd`, `scan`, `hscan`, `sscan`
+/// or `zscan`, one at a time: `redis.Iterator`. It does no I/O: each page
+/// is an exchange of its `next`. The client and the slices of the command
+/// must outlive the iterator.
+///
+/// ```zig
+/// var keys = client.iterate(redis.cmd.scan(.{ .match = "session:*" }), .{ .allocator = gpa });
+/// defer keys.deinit();
+/// while (try keys.next(io, op)) |key| try cleanUp(key);
+/// ```
+pub fn iterate(c: *Client, command: anytype, options: requests.IterateOptions) Iterator(contract.ItemOf(@TypeOf(command), "redis.Client.iterate")) {
+    return .init(c, command.page(), options);
 }
 
 /// A connection of the pool for the calling task alone, until

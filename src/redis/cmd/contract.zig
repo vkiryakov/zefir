@@ -41,7 +41,10 @@
 //!   command with `writeWith`; without one, and in a transaction, where
 //!   nothing blocks, `write` sends the command's own, `given`. Its `check`
 //!   calls `checkBlock`.
-//! - the cursor of a SCAN command comes with those commands.
+//! - `pub const Item: type` and `pub fn page(c: C) contract.Page` — a
+//!   page of a scan, SCAN, HSCAN, SSCAN or ZSCAN: the type of its items,
+//!   and the command as `client.iterate` sends it again for each page,
+//!   with the cursor that the page before returned (`command.Paged`).
 //!
 //! A pipeline and a transaction take their commands as a tuple of command
 //! values, each of its own type, or as many commands of one type: a slice
@@ -53,6 +56,7 @@ const CommandError = errors.CommandError;
 const Diagnostics = errors.Diagnostics;
 const resp = @import("../resp.zig");
 const Block = @import("types.zig").Block;
+const KeyType = @import("types.zig").KeyType;
 
 /// The type of the reply of the command type `C`; a compile error that
 /// starts with `call` when `C` is not one.
@@ -154,6 +158,32 @@ pub fn Results(comptime Commands: type, comptime call: []const u8, comptime plac
         var types: [commands.len]type = undefined;
         for (commands, &types) |C, *slot| slot.* = CommandError!ReplyOn(C, call, place);
         return @Tuple(&types);
+    }
+}
+
+/// A page of a scan as `client.iterate` sends it: `word [key] cursor
+/// [MATCH p] [COUNT n] [TYPE t]`, the cursor that of the page.
+pub const Page = struct {
+    /// The function of `cmd`, such as "redis.cmd.scan", for the texts.
+    call: []const u8,
+    /// SCAN, HSCAN, SSCAN or ZSCAN.
+    word: []const u8,
+    /// The key of HSCAN, SSCAN and ZSCAN; null for SCAN.
+    key: ?[]const u8,
+    cursor: u64,
+    match: ?[]const u8,
+    count: ?u32,
+    /// The TYPE of SCAN.
+    type: ?KeyType,
+};
+
+/// The type of the items of the scan `C`; a compile error that starts with
+/// `call` when `C` is no scan.
+pub fn ItemOf(comptime C: type, comptime call: []const u8) type {
+    comptime {
+        const scan = @typeInfo(C) == .@"struct" and @hasDecl(C, "Item") and @hasDecl(C, "page");
+        if (!scan) @compileError(call ++ ": the command is not a scan: iterate walks the pages of redis.cmd.scan, redis.cmd.hscan, redis.cmd.sscan or redis.cmd.zscan");
+        return C.Item;
     }
 }
 

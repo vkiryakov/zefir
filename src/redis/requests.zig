@@ -33,3 +33,12 @@ pub const RunOptions = struct {
     allocator: ?std.mem.Allocator = null,
     diagnostics: ?*Diagnostics = null,
 };
+
+pub const IterateOptions = struct {
+    /// The memory of the pages: the iterator holds each in an arena of its
+    /// own over it until the next page, and frees it in `deinit`, so a
+    /// general purpose allocator does.
+    allocator: std.mem.Allocator,
+    /// What went wrong with a page: each `next` that fetches one sets it.
+    diagnostics: ?*Diagnostics = null,
+};

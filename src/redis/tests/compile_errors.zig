@@ -106,3 +106,8 @@ test "hset of a union" {
 test "hset of a pointer" {
     _ = cmd.hset("post:1", @as(Post, undefined));
 }
+
+test "iterate of a command that is not a scan" {
+    var client: redis.Client = undefined;
+    _ = client.iterate(cmd.get([]const u8, "k"), .{ .allocator = std.testing.allocator });
+}
