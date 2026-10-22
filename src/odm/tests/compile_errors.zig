@@ -652,3 +652,61 @@ const RequiredProfile = struct { profile: User.Profile };
 test "compile error: a required projection field of an optional one" {
     _ = try options.projection(User, RequiredProfile, std.testing.allocator);
 }
+
+// The texts of query literals that the design's table leaves to odm: the
+// shapes of filters, options, sorts and projections, the operands of not
+// and elem_match, and the branches of the messages above.
+
+test "compile error: a filter that is not a literal" {
+    _ = try filter.encode(User, std.testing.allocator, 5);
+}
+
+test "compile error: not of a value" {
+    _ = try filter.encode(User, std.testing.allocator, .{ .age = .{ .not = 5 } });
+}
+
+test "compile error: elem_match of a value" {
+    _ = try filter.encode(Account, std.testing.allocator, .{ .tags = .{ .elem_match = "a" } });
+}
+
+test "compile error: a string literal that is not UTF-8" {
+    _ = try filter.encode(User, std.testing.allocator, .{ .email = "\xff" });
+}
+
+test "compile error: in of a value that is not a list" {
+    _ = try filter.encode(User, std.testing.allocator, .{ .age = .{ .in = 5 } });
+}
+
+test "compile error: an operator misspelled on a struct" {
+    _ = try filter.encode(User, std.testing.allocator, .{ .profile = .{ .exsts = false } });
+}
+
+test "compile error: options that are not a literal" {
+    _ = try options.find(User, .find, std.testing.allocator, 5);
+}
+
+test "compile error: a limit out of the range of u32" {
+    _ = try options.find(User, .find, std.testing.allocator, .{ .limit = -1 });
+}
+
+test "compile error: a sort that is not a literal" {
+    _ = try options.sort(User, std.testing.allocator, 5);
+}
+
+test "compile error: a sort by a tag that is not a direction" {
+    _ = try options.sort(User, std.testing.allocator, .{ .age = .ascending });
+}
+
+test "compile error: a sort by a field that a nested struct does not have" {
+    _ = try options.sort(User, std.testing.allocator, .{ .profile = .{ .ctiy = .asc } });
+}
+
+test "compile error: a projection that is not a struct" {
+    _ = try options.projection(User, u32, std.testing.allocator);
+}
+
+const NestedTypo = struct { profile: ?struct { ctiy: []const u8 } };
+
+test "compile error: a nested projection field that the model does not have" {
+    _ = try options.projection(User, NestedTypo, std.testing.allocator);
+}

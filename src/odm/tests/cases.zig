@@ -86,4 +86,18 @@ pub const compile_errors = [_]Case{
     .{ .name = "compile error: a projection field that the model does not have", .expect = "odm: tests.compile_errors.NameTypo.nmae is not a field of tests.compile_errors.User; did you mean 'name'?" },
     .{ .name = "compile error: a projection field of another type", .expect = "odm: tests.compile_errors.WideAge.age is i64, but tests.compile_errors.User.age is u32: a projection field has the type of the model's field or its optional" },
     .{ .name = "compile error: a required projection field of an optional one", .expect = "odm: tests.compile_errors.RequiredProfile.profile is required, but tests.compile_errors.User.profile is optional: make it ?tests.compile_errors.User.Profile" },
+    // The texts of query literals beyond the design's table.
+    .{ .name = "compile error: a filter that is not a literal", .expect = "odm: a filter of tests.compile_errors.User is a literal of its fields, or .{} for every document; got comptime_int" },
+    .{ .name = "compile error: not of a value", .expect = "odm: not on tests.compile_errors.User.age takes a literal of operators, such as .{ .gt = 5 }, or a bson.Regex; got comptime_int" },
+    .{ .name = "compile error: elem_match of a value", .expect = "odm: elem_match on tests.compile_errors.Account.tags takes a literal of conditions on the items of the list; got *const [1:0]u8" },
+    .{ .name = "compile error: a string literal that is not UTF-8", .expect = "odm: tests.compile_errors.User.email is []const u8, and its value is not UTF-8" },
+    .{ .name = "compile error: in of a value that is not a list", .expect = "odm: in on tests.compile_errors.User.age needs a []const u32; got comptime_int" },
+    .{ .name = "compile error: an operator misspelled on a struct", .expect = "odm: unknown filter operator 'exsts' on tests.compile_errors.User.profile; did you mean 'exists'?" },
+    .{ .name = "compile error: options that are not a literal", .expect = "odm: the options of find are a literal, such as .{ .skip = 10 }; got comptime_int" },
+    .{ .name = "compile error: a limit out of the range of u32", .expect = "odm: limit is u32, and -1 is out of its range" },
+    .{ .name = "compile error: a sort that is not a literal", .expect = "odm: a sort of tests.compile_errors.User is a literal of its fields with .asc or .desc; got comptime_int" },
+    .{ .name = "compile error: a sort by a tag that is not a direction", .expect = "odm: sort of tests.compile_errors.User.age takes .asc or .desc; got .ascending" },
+    .{ .name = "compile error: a sort by a field that a nested struct does not have", .expect = "odm: tests.compile_errors.User.profile has no field 'ctiy'; did you mean 'city'?" },
+    .{ .name = "compile error: a projection that is not a struct", .expect = "odm: a projection of tests.compile_errors.User is a struct of fields of tests.compile_errors.User; got u32" },
+    .{ .name = "compile error: a nested projection field that the model does not have", .expect = "odm: tests.compile_errors.NestedTypo.profile.ctiy is not a field of tests.compile_errors.User.profile; did you mean 'city'?" },
 };
