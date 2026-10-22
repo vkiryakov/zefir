@@ -124,4 +124,5 @@ test {
     _ = @import("tests/upsert_tests.zig");
     _ = @import("tests/builders_tests.zig");
     _ = @import("tests/big_model.zig");
+    _ = @import("tests/fingerprint_tests.zig");
 }
