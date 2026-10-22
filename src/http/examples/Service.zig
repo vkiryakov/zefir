@@ -1,10 +1,10 @@
 //! The server of the todo service, built in one place for `main` and for
 //! the tests: the objects of the service, the server, and its OpenAPI
-//! document, which the compiler builds from the type of the same parts,
-//! so that the document cannot differ from the server it describes. What
-//! differs between `main` and a test comes in the fields without a
-//! default: the users and their tokens, the origins of CORS, the directory
-//! of the page, and the logger.
+//! document, whose routes the compiler builds from the type of the same
+//! parts, so that they cannot differ from the server's, and whose prefix
+//! comes from the same const. What differs between `main` and a test
+//! comes in the fields without a default: the users and their tokens, the
+//! origins of CORS, the directory of the page, and the logger.
 
 const std = @import("std");
 const http = @import("http");

@@ -1,6 +1,6 @@
 //! Builds the server for main and for the tests. The document is built
-//! here too, from the type of the same parts, so it cannot differ from
-//! the server.
+//! here too: its routes from the type of the same parts, so they cannot
+//! differ from the server's, and its prefix from the same const.
 
 const std = @import("std");
 const zefir = @import("zefir");
