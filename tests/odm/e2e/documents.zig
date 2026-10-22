@@ -357,14 +357,15 @@ test "the server copies one item of in or all of an upsert filter into the docum
 }
 
 /// What mongod makes of `in` and `all` in the filter of an upsert that
-/// inserts, pinned here: odm lets them through (design Р47 counts them as
-/// conditions that give the document no field), and the server does not
-/// always agree. One item of `in`, and one of `all`, it copies into the
-/// document as an equality; on a list field that is the item where the
-/// list goes, which the model cannot read. `in` of two items it copies
-/// nothing of, `all` of two items it refuses (code 54). `in` of `null`
-/// writes a null. An empty `in` matches nothing, and the server then
-/// copies none of the filter's equalities.
+/// inserts, pinned here. odm lets them through: it takes them for
+/// conditions that give the document no field, as design Р47 refuses only
+/// null, items of lists, paths through lists and logical operators there.
+/// The server does not always agree. One item of `in`, and one of `all`,
+/// it copies into the document as an equality; on a list field that is
+/// the item where the list goes, which the model cannot read. `in` of two
+/// items it copies nothing of, `all` of two items it refuses (code 54).
+/// `in` of `null` writes a null. An empty `in` matches nothing, and the
+/// server then copies none of the filter's equalities.
 fn upsertInAndAll(io: Io) !void {
     const database = "odm_upsert_in";
     var admin: e2e.Admin = undefined;
