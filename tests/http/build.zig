@@ -150,7 +150,11 @@ pub fn build(b: *std.Build) void {
     }
 
     // Schemathesis in Docker against the service of the guide and its
-    // OpenAPI document (Linux and macOS; CI's http-schemathesis, on Linux).
+    // OpenAPI document (Linux and macOS; CI's http-schemathesis, on Linux),
+    // with its configuration, schemathesis.toml, by its absolute path,
+    // which Docker mounts in the container.
+    const schemathesis_options = b.addOptions();
+    schemathesis_options.addOption([]const u8, "config", b.root.joinString(b.allocator, "schemathesis.toml") catch @panic("OOM"));
     const schemathesis = b.addTest(.{
         .name = "schemathesis",
         .root_module = b.createModule(.{
@@ -160,6 +164,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "zio", .module = zio.module("zio") },
                 .{ .name = "guide_options", .module = guide_options.createModule() },
+                .{ .name = "schemathesis_options", .module = schemathesis_options.createModule() },
             },
         }),
         .test_runner = .{ .path = b.path("test_runner.zig"), .mode = .simple },

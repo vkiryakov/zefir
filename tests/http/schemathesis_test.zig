@@ -9,24 +9,28 @@
 //! end. Only data the document allows is sent: a schema may be stricter
 //! than the server, where a transform such as `v.trim` runs before a rule,
 //! and a request the server takes but the schema does not would be no
-//! mistake. Every check of a response runs, but one check of the server's
-//! input, `positive_data_acceptance`, which wants every request of valid
-//! data taken: the schema of a 64-bit integer has no `maximum` (the tools
-//! of JavaScript show 2^64 - 1 inexactly), so an id above it passes the
-//! schema, and the server answers it with 422. The service is a Debug
-//! build, so it checks each request and response against what its route
+//! mistake. Every check runs, `positive_data_acceptance` too, which wants
+//! every request of valid data taken: but the schema of a 64-bit integer
+//! has no `maximum` (the tools of JavaScript show 2^64 - 1 inexactly), so
+//! an id above it passes the schema, and the server answers it with 422.
+//! schemathesis.toml lets the three operations of /v1/todos/{id}, and no
+//! other, answer valid data with that 422. The service is a Debug build,
+//! so it checks each request and response against what its route
 //! declares, too: a mismatch is a 500, which Schemathesis reports, and a
 //! line of the log, which this test does.
 //!
 //! The build gives the paths of the service's program and of the app's
-//! static files (`guide_options`). Docker runs Linux containers on Linux,
-//! with the host's network, and on macOS, through host.docker.internal; on
+//! static files (`guide_options`), and of schemathesis.toml
+//! (`schemathesis_options`). Docker runs Linux containers on Linux, with
+//! the host's network, and on macOS, through host.docker.internal; on
 //! Windows the test is skipped.
 
 const std = @import("std");
 const builtin = @import("builtin");
 const zio = @import("zio");
 const options = @import("guide_options");
+/// The absolute path of schemathesis.toml.
+const config = @import("schemathesis_options").config;
 
 const Io = std.Io;
 const testing = std.testing;
@@ -57,14 +61,18 @@ test "Schemathesis finds every response of the guide's service as its OpenAPI do
     const on_mac = builtin.os.tag == .macos;
     const url = try std.fmt.bufPrint(&url_buffer, "http://{s}:{d}/api/openapi.json", .{ if (on_mac) "host.docker.internal" else "127.0.0.1", port });
     const network: []const []const u8 = if (on_mac) &.{} else &.{ "--network", "host" };
+    // The configuration, which the container reads at /schemathesis.toml:
+    // an option of Schemathesis itself, before its command `run`.
+    const mount = try std.fmt.allocPrint(gpa, "{s}:/schemathesis.toml:ro", .{config});
+    defer gpa.free(mount);
     var argv_buffer: [32][]const u8 = undefined;
     var argv: std.ArrayList([]const u8) = .initBuffer(&argv_buffer);
-    argv.appendSliceAssumeCapacity(&.{ "docker", "run", "--rm" });
+    argv.appendSliceAssumeCapacity(&.{ "docker", "run", "--rm", "-v", mount });
     argv.appendSliceAssumeCapacity(network);
-    argv.appendSliceAssumeCapacity(&.{ image, "run", url });
-    // Only data the document allows, and every check of a response.
+    argv.appendSliceAssumeCapacity(&.{ image, "--config-file", "/schemathesis.toml", "run", url });
+    // Only data the document allows, and every check.
     argv.appendSliceAssumeCapacity(&.{ "--mode", "positive" });
-    argv.appendSliceAssumeCapacity(&.{ "--checks", "all", "--exclude-checks", "positive_data_acceptance" });
+    argv.appendSliceAssumeCapacity(&.{ "--checks", "all" });
     argv.appendSliceAssumeCapacity(&.{ "--exclude-path", "/v1/todos/events" });
     argv.appendSliceAssumeCapacity(&.{ "--header", "Authorization: Bearer ann-secret", "--no-color" });
 

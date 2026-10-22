@@ -1539,8 +1539,9 @@ compare the document with
 and runs Schemathesis against it in Docker: it sends each route but the
 stream of events requests that the document allows, and checks every
 response against the document, its status, its media type and its body.
-One check of the server's input stays out, that every request of valid
-data is taken: an id above 2^64 − 1 passes the schema of a `u64` (see
+It also checks that every request of valid data is taken, with one answer
+more on the three routes of `/v1/todos/{id}`: 422 to an id above
+2^64 − 1, which passes the schema of a `u64` (see
 [For integrators](#for-integrators)).
 
 ## The Debug check
