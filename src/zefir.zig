@@ -57,3 +57,24 @@ test "zefir.log writes a jwt.Key and a jwt.SigningKey as [REDACTED]" {
     comptime std.debug.assert(log.isSensitive(jwt.Key));
     comptime std.debug.assert(log.isSensitive(jwt.SigningKey));
 }
+
+test "zefir.log writes an odm.ConnectionConfig and an odm.Provision as [REDACTED]" {
+    const std = @import("std");
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    const logger: log.Logger = try .init(std.testing.allocator, std.testing.io, .{ .output = .{ .writer = &out.writer } });
+    defer logger.deinit();
+    const config: odm.ConnectionConfig = .{ .uri = "mongodb://app@db:27017/?maxPoolSize=20", .password = "s3cret" };
+    const provision: odm.Provision = .{
+        .tenant = "acme",
+        .connection = .{ .new = .{ .id = "big-1", .uri = "mongodb://acme@big:27017", .password = "s3cret" } },
+        .database = "acme",
+        .version = 1,
+    };
+    logger.info("Settings", .{ .settings = config, .event = provision });
+    try std.testing.expect(std.mem.find(u8, out.written(), "s3cret") == null);
+    try std.testing.expect(std.mem.find(u8, out.written(), "mongodb://") == null);
+    try std.testing.expectStringEndsWith(out.written(), ",\"settings\":\"[REDACTED]\",\"event\":\"[REDACTED]\"}\n");
+    comptime std.debug.assert(log.isSensitive(odm.ConnectionConfig));
+    comptime std.debug.assert(log.isSensitive(odm.Provision));
+}
