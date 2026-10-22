@@ -7,12 +7,12 @@
 #
 # A file under src/<module>/ affects that module and every module whose
 # tests import it, directly or through other modules; zefir imports them
-# all. tests/nats/, tests/rpc-nats/, tests/http/ and tests/mongo/, the
-# end-to-end tests of nats, of rpc-nats, of http and of mongo, count as
-# their modules. tests/openapi/, the checks of the JSON Schema that
-# zefir-openapi and the validator write, counts as openapi, which imports
-# the validator. docker-compose.yml, the servers of nats, rpc-nats and
-# mongo, counts as all three.
+# all. tests/nats/, tests/rpc-nats/, tests/http/, tests/mongo/ and
+# tests/redis/, the end-to-end tests of nats, of rpc-nats, of http, of
+# mongo and of redis, count as their modules. tests/openapi/, the checks
+# of the JSON Schema that zefir-openapi and the validator write, counts
+# as openapi, which imports the validator. docker-compose.yml, the
+# servers of nats, rpc-nats, mongo and redis, counts as all four.
 # examples/rpc-custom-transport/, a transport outside zefir that CI runs
 # against rpc, counts as rpc. build.zig, build.zig.zon, src/zefir.zig,
 # .github/ and any other path the script does not know affect every
@@ -26,7 +26,7 @@ set -eu
 # The modules and what the tests of each one import. Keep this in sync with
 # build.zig: the `.imports` of each module and of the programs that its
 # test-<module> step builds. CI tests only the modules listed here.
-modules="core log confy validator rpc rpc-nats orm mongo nats http jwt openapi zefir"
+modules="core log confy validator rpc rpc-nats orm mongo redis nats http jwt openapi zefir"
 imports() {
     case $1 in
     core) ;;
@@ -50,6 +50,9 @@ imports() {
     # mongo imports core, and the examples of its guide and its end-to-end
     # tests read their settings with confy and log with log.
     mongo) echo core confy log ;;
+    # redis imports core, and the examples of its guide and its end-to-end
+    # tests read their settings with confy and log with log.
+    redis) echo core confy log ;;
     # http imports core and validator; the examples of its guide read
     # their settings with confy, log with log, and declare the texts of
     # their OpenAPI document with openapi, which imports http in turn.
@@ -61,7 +64,7 @@ imports() {
     # openapi reads the server through http and the rules through the
     # validator.
     openapi) echo http validator ;;
-    zefir) echo core log confy validator rpc rpc-nats orm mongo nats http jwt openapi ;;
+    zefir) echo core log confy validator rpc rpc-nats orm mongo redis nats http jwt openapi ;;
     esac
 }
 
@@ -111,9 +114,10 @@ elif [ $# -eq 2 ] && [ -n "$1" ] && [ -n "$2" ]; then
         tests/rpc-nats/*) changed="$changed rpc-nats" ;;
         tests/http/*) changed="$changed http" ;;
         tests/mongo/*) changed="$changed mongo" ;;
+        tests/redis/*) changed="$changed redis" ;;
         tests/openapi/*) changed="$changed openapi" ;;
         examples/rpc-custom-transport/*) changed="$changed rpc" ;;
-        docker-compose.yml) changed="$changed nats rpc-nats mongo" ;;
+        docker-compose.yml) changed="$changed nats rpc-nats mongo redis" ;;
         README.md) changed="$changed rpc http" ;;
         docs/* | *.md) ;;
         *) all=true ;;
