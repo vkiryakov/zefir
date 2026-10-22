@@ -4,9 +4,6 @@
 //! file from the code.
 //!
 //! ```zig
-//! /// The path of openapi.json, next to build.zig, as the build gives it.
-//! const openapi_json = @import("paths").openapi_json;
-//!
 //! test "openapi.json matches the code" {
 //!     var backend: http.testing.Backend = .init(testing.allocator);
 //!     defer backend.deinit();
@@ -17,10 +14,12 @@
 //! }
 //! ```
 //!
-//! The build of the application gives the test the path of the file, makes
-//! the file an input of the test's run, so that a change of the file alone
-//! runs the test again, and runs the test with `ZEFIR_OPENAPI_UPDATE=1` in
-//! a step of its own, which has side effects, so it runs every time:
+//! `openapi_json` is the path of the file, next to `build.zig`, which the
+//! build of the application gives the test as an option of the module
+//! `paths`. The build also makes the file an input of the test's run, so
+//! that a change of the file alone runs the test again, and runs the test
+//! with `ZEFIR_OPENAPI_UPDATE=1` in a step of its own, which has side
+//! effects, so it runs every time:
 //!
 //! ```zig
 //! const paths = b.addOptions();
