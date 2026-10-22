@@ -113,4 +113,5 @@ test {
     _ = @import("tests/write_tests.zig");
     _ = @import("tests/rules_tests.zig");
     _ = @import("tests/odm_driver_tests.zig");
+    _ = @import("tests/odm_conformance.zig");
 }
