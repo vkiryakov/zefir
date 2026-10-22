@@ -4,25 +4,34 @@
 //! file from the code.
 //!
 //! ```zig
+//! /// The path of openapi.json, next to build.zig, as the build gives it.
+//! const openapi_json = @import("paths").openapi_json;
+//!
 //! test "openapi.json matches the code" {
 //!     var backend: http.testing.Backend = .init(testing.allocator);
 //!     defer backend.deinit();
 //!     var service: Service = .{ .todos = .{ .repo = &repo } };
 //!     try service.start(testing.allocator, testing.io, backend.backend());
-//!     defer service.deinit(testing.io);
-//!     try zefir.openapi.testing.expectFile(testing.io, service.docs.document, "openapi.json");
+//!     defer service.deinit(testing.allocator, testing.io);
+//!     try zefir.openapi.testing.expectFile(testing.io, service.docs.document, openapi_json);
 //! }
 //! ```
 //!
-//! The build of the application runs this test in the directory of the
-//! file, and a step of its own runs it with `ZEFIR_OPENAPI_UPDATE=1`:
+//! The build of the application gives the test the path of the file, makes
+//! the file an input of the test's run, so that a change of the file alone
+//! runs the test again, and runs the test with `ZEFIR_OPENAPI_UPDATE=1` in
+//! a step of its own, which has side effects, so it runs every time:
 //!
 //! ```zig
+//! const paths = b.addOptions();
+//! paths.addOptionPathUntracked("openapi_json", b.path("openapi.json"));
+//! tests.root_module.addOptions("paths", paths);
 //! const run_tests = b.addRunArtifact(tests);
-//! run_tests.setCwd(b.path("."));
+//! run_tests.addFileInput(b.path("openapi.json"));
+//! b.step("test", "Run the tests").dependOn(&run_tests.step);
 //! const update = b.addRunArtifact(tests);
-//! update.setCwd(b.path("."));
 //! update.setEnvironmentVariable("ZEFIR_OPENAPI_UPDATE", "1");
+//! update.has_side_effects = true;
 //! b.step("openapi", "Rewrite openapi.json from the code").dependOn(&update.step);
 //! ```
 const std = @import("std");
