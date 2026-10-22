@@ -42,6 +42,7 @@ const schema = @import("model/schema.zig");
 const filter = @import("query/filter.zig");
 const options = @import("query/options.zig");
 const update = @import("query/update.zig");
+const connection = @import("registry/connection.zig");
 
 /// The errors that a driver returns, each in its class of `outcome`.
 pub const DriverError = errors.DriverError;
@@ -106,6 +107,21 @@ pub fn assertModel(comptime T: type) void {
     comptime schema.check(T);
 }
 
+/// The connections and tenants of a service: `registry.tenant(io, id)`
+/// gives a session on the tenant's database, and connections are replaced
+/// on the fly.
+pub const Registry = @import("Registry.zig");
+/// Where a connection is: registered, connecting, active, failed or
+/// removing.
+pub const ConnectionState = connection.ConnectionState;
+/// A snapshot of the registry: `registry.stats(io)`.
+pub const Stats = Registry.Stats;
+/// A snapshot of one connection: `registry.connectionStats(io, id)`.
+pub const ConnectionStats = Registry.ConnectionStats;
+/// The error of the latest failed connect or replacement of a connection,
+/// with the driver's text.
+pub const Failure = connection.Failure;
+
 /// What tests of odm and of the code over it need: `testing.FakeDriver`.
 pub const testing = @import("testing.zig");
 
@@ -125,4 +141,5 @@ test {
     _ = @import("tests/builders_tests.zig");
     _ = @import("tests/big_model.zig");
     _ = @import("tests/fingerprint_tests.zig");
+    _ = @import("tests/registry_tests.zig");
 }
