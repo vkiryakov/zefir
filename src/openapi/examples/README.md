@@ -1583,8 +1583,9 @@ What a client of the document should know of zefir-http:
 - **u64 and i64 are JSON numbers.** Above 2^53 JavaScript reads them
   inexactly; a client in JavaScript reads such a field as a `BigInt`, or
   the API keeps its numbers below 2^53. For the same reason their schema
-  has no `maximum`: a number above 2^64 − 1 passes it, and the server
-  answers it with 422.
+  has no `maximum`, and that of an `i64` no `minimum`: a number above
+  2^64 − 1 passes the schema of a `u64`, one above 2^63 − 1 or below −2^63
+  that of an `i64`, and the server answers it with 422.
 - **An integer is written without a fraction.** JSON Schema counts `1.0` as
   an integer, but zefir-http refuses `1.0` for an integer field: 422.
 - **NaN and the infinities go out as `null`**, which a float field of an
