@@ -34,6 +34,15 @@ fn awaitEnded(app: anytype) !void {
     return gates.within(&app.internal.block.runtime.ended, app.internal.io, .fromSeconds(10));
 }
 
+/// Opens every gate, then waits, ten seconds at most, until the stop task of
+/// `app` has returned. App's tasks use the block and the rig: a test that
+/// fails calls this before either goes. For `defer`, or for `errdefer` up to
+/// a `deinit` that frees the block.
+fn settle(app: anytype, rig: *Rig) void {
+    rig.release();
+    awaitEnded(app) catch {};
+}
+
 /// Waits, ten seconds at most, until the stop task of `app` has given up on
 /// a bean whose `wait` did not return by the deadline and gone on without it.
 fn awaitGaveUp(app: anytype) !void {
@@ -155,15 +164,19 @@ test "a rollback that runs out of time: start returns ShutdownTimeout, failure k
     rig.of("First").shutdown = .deaf;
     rig.of("Second").start = .fails;
     var app = try zapp.App(Root).init(testing.allocator, testing.io, .{&rig}, budget(50));
-    try testing.expectError(error.ShutdownTimeout, app.start());
-    try testing.expectError(error.ShutdownTimeout, app.wait());
-    try expectFailure(&app, "Root.Second", .start, error.StartFailed);
-    try testing.expectEqual(zapp.State.failed, app.state());
-    // The stop task still waits in First's shutdown: deinit frees nothing.
-    app.deinit();
-    try rig.expect("deinit", &.{});
-    rig.open("First");
-    try awaitEnded(&app);
+    {
+        // Only up to the last deinit: it frees the block, which settle reads.
+        errdefer settle(&app, &rig);
+        try testing.expectError(error.ShutdownTimeout, app.start());
+        try testing.expectError(error.ShutdownTimeout, app.wait());
+        try expectFailure(&app, "Root.Second", .start, error.StartFailed);
+        try testing.expectEqual(zapp.State.failed, app.state());
+        // The stop task still waits in First's shutdown: deinit frees nothing.
+        app.deinit();
+        try rig.expect("deinit", &.{});
+        rig.open("First");
+        try awaitEnded(&app);
+    }
     app.deinit();
     try rig.expect("deinit", &.{ "Second", "First" });
 }
@@ -362,12 +375,14 @@ test "a wait deaf to cancelation without a shutdown: wait returns ShutdownTimeou
     const io = testing.io;
     const level = quiet();
     defer testing.log_level = level;
-    var rig: Rig = .init(io);
-    defer rig.release();
-    // App frees no bean after it: the arena takes the block back.
+    // App frees no bean after it: the arena takes the block back, after
+    // settle has waited for App's tasks.
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
+    var rig: Rig = .init(io);
+    defer rig.release();
     var app = try zapp.App(Root).init(arena.allocator(), io, .{&rig}, budget(50));
+    defer settle(&app, &rig);
     try app.start();
     const asked = Io.Clock.awake.now(io);
     app.requestStop();
@@ -398,12 +413,14 @@ test "a wait App gave up on at the deadline: deinit frees nothing, as the bean's
     const io = testing.io;
     const level = quiet();
     defer testing.log_level = level;
-    var rig: Rig = .init(io);
-    defer rig.release();
-    // App frees no bean after it: the arena takes the block back.
+    // App frees no bean after it: the arena takes the block back, after
+    // settle has waited for App's tasks.
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
+    var rig: Rig = .init(io);
+    defer rig.release();
     var app = try zapp.App(Root).init(arena.allocator(), io, .{&rig}, budget(50));
+    defer settle(&app, &rig);
     try app.start();
     app.requestStop();
     try testing.expectError(error.ShutdownTimeout, app.wait());
@@ -552,14 +569,18 @@ test "a breakdown does not hide a shutdown that runs out of time" {
     defer rig.release();
     rig.of("B").shutdown = .deaf;
     var app = try zapp.App(Root).init(testing.allocator, testing.io, .{&rig}, budget(50));
-    try app.start();
-    rig.end("Waiter", error.Unavailable);
-    try testing.expectError(error.ShutdownTimeout, app.wait());
-    try expectFailure(&app, "Root.Waiter", .wait, error.Unavailable);
-    app.deinit();
-    try rig.expect("deinit", &.{});
-    rig.open("B");
-    try awaitEnded(&app);
+    {
+        // Only up to the last deinit: it frees the block, which settle reads.
+        errdefer settle(&app, &rig);
+        try app.start();
+        rig.end("Waiter", error.Unavailable);
+        try testing.expectError(error.ShutdownTimeout, app.wait());
+        try expectFailure(&app, "Root.Waiter", .wait, error.Unavailable);
+        app.deinit();
+        try rig.expect("deinit", &.{});
+        rig.open("B");
+        try awaitEnded(&app);
+    }
     app.deinit();
     try rig.expect("deinit", &.{ "Waiter", "B" });
 }
@@ -575,22 +596,26 @@ test "a deaf shutdown: wait returns ShutdownTimeout at the deadline; deinit free
     defer rig.release();
     rig.of("B").shutdown = .deaf;
     var app = try zapp.App(Root).init(testing.allocator, io, .{&rig}, budget(50));
-    try app.start();
-    const asked = Io.Clock.awake.now(io);
-    app.requestStop();
-    try testing.expectError(error.ShutdownTimeout, app.wait());
-    const took = asked.durationTo(Io.Clock.awake.now(io)).toMilliseconds();
-    try testing.expect(took >= 50 - 16 and took < 2000);
-    try testing.expectEqual(zapp.State.failed, app.state());
-    try expectFailure(&app, "Root.B", .shutdown, error.ShutdownTimeout);
-    // Every later wait returns the same.
-    try testing.expectError(error.ShutdownTimeout, app.wait());
-    app.deinit();
-    try rig.expect("deinit", &.{});
-    rig.open("B");
-    try awaitEnded(&app);
-    // The stop went on: A got its shutdown once B's returned.
-    try rig.expect("shutdown", &.{ "B", "A" });
+    {
+        // Only up to the last deinit: it frees the block, which settle reads.
+        errdefer settle(&app, &rig);
+        try app.start();
+        const asked = Io.Clock.awake.now(io);
+        app.requestStop();
+        try testing.expectError(error.ShutdownTimeout, app.wait());
+        const took = asked.durationTo(Io.Clock.awake.now(io)).toMilliseconds();
+        try testing.expect(took >= 50 - 16 and took < 2000);
+        try testing.expectEqual(zapp.State.failed, app.state());
+        try expectFailure(&app, "Root.B", .shutdown, error.ShutdownTimeout);
+        // Every later wait returns the same.
+        try testing.expectError(error.ShutdownTimeout, app.wait());
+        app.deinit();
+        try rig.expect("deinit", &.{});
+        rig.open("B");
+        try awaitEnded(&app);
+        // The stop went on: A got its shutdown once B's returned.
+        try rig.expect("shutdown", &.{ "B", "A" });
+    }
     app.deinit();
     try rig.expect("deinit", &.{ "B", "A" });
 }
