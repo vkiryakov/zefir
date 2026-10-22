@@ -1519,6 +1519,17 @@ fn addOdmGuide(
         .target = target,
         .optimize = optimize,
         .sanitize_thread = tsan,
+        .imports = &.{
+            // The compile checks of odm, with the errors that README.md
+            // shows: a file of another directory of src/, which a module
+            // reaches only as a module.
+            .{ .name = "odm-cases", .module = b.createModule(.{
+                .root_source_file = b.path("src/odm/tests/cases.zig"),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+            }) },
+        },
     });
     for (odm_guide.programs) |name| {
         const exe = b.addExecutable(.{

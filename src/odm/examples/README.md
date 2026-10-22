@@ -67,7 +67,9 @@ production, and reaches MongoDB through zefir-mongo.
 >   an `odm.Update`, or with `in`, `nin` or `all` in its filter: use
 >   `updateOne`, then `insertOne`.
 > - **Partial indexes** (`partialFilterExpression`): a unique optional in
->   a compound index with a required key cannot be declared.
+>   a compound index with a required key cannot be expressed: such an
+>   index compiles, and the documents without the optional collide on the
+>   other keys.
 
 From [the quick start](#quick-start): a session of the tenant acme, a
 customer in, three more, and the adults out, the oldest first.
@@ -176,7 +178,14 @@ flowchart LR
   database, with its typed operations: `insertOne`, `find`, `updateOne`,
   `upsertOne` and the rest. Each checks its literals when the program
   compiles, writes them as BSON, the binary form of MongoDB's documents,
-  and hands that to the driver.
+  and hands that to the driver. A collection is a view of its session,
+  and so are a query and a repository made of it, such as `Users` in
+  [the tests](#tests-without-mongodb): they work while the session lives,
+  and the session stays where it is meanwhile, a `var` of the request.
+  Make them for each request, and for work in parallel take a session for
+  each task. A session kept for long holds its generation: a replacement
+  of the connection waits for it until `drain_timeout`, then closes the
+  generation by force, and every call through the session gets `Closed`.
 - **The driver** talks to the server. odm itself has no network code: it
   reaches a database only through its *driver contract*, `odm.Driver`.
   zefir-mongo's `mongo.OdmDriver` is the reference driver;
@@ -196,7 +205,7 @@ zig fetch --save git+https://github.com/vkiryakov/zefir#dev
 
 zefir-odm is on the `dev` branch until the next release. The command
 fetches the latest commit of `dev`; `--save` pins that commit. The latest
-release, v0.9.0, came before zefir-odm, so `#v0.9.0` does not have it.
+release, v0.10.0, came before zefir-odm, so `#v0.10.0` does not have it.
 
 A service runs on [zio](https://github.com/lalinsky/zio). zio has no
 release for Zig 0.17 yet, so pin the commit Zefir is tested with:
@@ -695,7 +704,7 @@ makes it:
 |---|---|---|
 | `id: ?bson.ObjectId = null`, as in `User` | `T` itself | null: odm makes an ObjectId; a value goes as it is, as in an import of documents that have ids |
 | `id: bson.ObjectId`, as in `Visit` | `T` without `id` | odm makes an ObjectId every time |
-| any other type, not optional, as in `Product` | `T` itself | the application gives it |
+| any other type, not optional, as in `Product`; not an array or a `bson.Regex`, which the server refuses as an `_id`, so a UUID is a `bson.Binary` | `T` itself | the application gives it |
 
 An ObjectId is 12 bytes made of the time, a random part and a counter, so
 that services make unique ones without asking anyone; odm makes them with
@@ -748,6 +757,16 @@ field at all. odm keeps one of them: **it never writes a null.**
   out the documents without its key. Without it, every user without a
   nickname would be in the index as null, and the second one would
   collide with the first.
+- **In a compound unique index with a required key, `sparse` leaves out
+  nothing.** A sparse index of several keys takes every document that has
+  one of them, and the required key is in every document: the documents
+  without the optional are in it with null, and two of them collide on
+  the other keys, such as two users of one shop without a nickname under
+  `.{ .shop = .asc }, .{ .nickname = .asc }`. Partial indexes are not in
+  v1 (see the list at the top): keep such a uniqueness on optional keys
+  only, or check it in the application. A null that another program
+  wrote is in a sparse index too, so two such documents collide even in
+  a unique sparse index of one key.
 - **Filters and updates** follow from it: `.nickname = null` finds both
   kinds, and an update clears a field with `unset`, see
   [null and missing fields](#null-and-missing-fields).
@@ -769,7 +788,9 @@ field at all. odm keeps one of them: **it never writes a null.**
 
 The compiler refuses the rest: `u64` and `usize`, as the integers of BSON
 are signed; `f32`, which a double would round; unions, pointers, `??T`,
-and a struct inside itself.
+and a struct inside itself. At any depth it refuses a field name with a
+dot, which odm reads as a step of a path, and a name of a document that
+starts with `$` or is not UTF-8.
 
 ### What the compiler catches
 
@@ -1082,6 +1103,7 @@ that a field takes depend on its type:
 | a struct | the whole document | | | yes | | | paths to its fields |
 | a list | an item, or the whole list | on the items | items | yes | on strings | yes | yes |
 | `bson.RawDocument`, `bson.Value` | yes | | | yes | | | |
+| `bson.Regex` | `eq` only | | | yes | | | |
 
 - **A value fits its field without a cast:** an integer of the same sign
   and no wider, a string for a string, a tag of the field's enum. A value
@@ -1093,6 +1115,12 @@ that a field takes depend on its type:
   `all` a tuple or a slice.
 - Several conditions on one field go in one literal:
   `.age = .{ .gte = 18, .lt = 65 }`.
+- A list of documents or of values of any type,
+  `[]const bson.RawDocument` or `[]const bson.Value`, takes no `in`, `nin`
+  or `all`: an item of theirs could read as operators, or as a pattern.
+  Match each item by equality in `.@"or"`.
+- MongoDB takes no regular expression in `$ne`: the documents whose
+  `bson.Regex` does not equal one take the equality in `.nor`.
 
 The compiler names what does not fit:
 
@@ -1185,13 +1213,13 @@ changes:
 
 | Operator | Fields | Value |
 |---|---|---|
-| `set`, `set_on_insert` | any but the id; `set_on_insert` in `upsertOne` only | of the field's type; for `?F`, a value of `F` |
+| `set`, `set_on_insert` | any but the id; `set_on_insert` in `upsertOne` only, where it may give the id | of the field's type; for `?F`, a value of `F` |
 | `unset` | optionals, and fields with a default | a tuple of paths: `.{ .nickname, .profile }` |
 | `inc`, `mul` | integers and `f64` | a number of the field's type |
 | `min`, `max` | numbers, strings, `bson.DateTime`, `bson.ObjectId` | of the field's type |
-| `push`, `add_to_set` | lists | an item, or `.{ .each = items }` |
-| `pull` | lists | an item, or conditions on the items, as in `elem_match` |
-| `pop` | lists | `.first` or `.last` |
+| `push`, `add_to_set` | lists, not `[N]T` | an item, or `.{ .each = items }` |
+| `pull` | lists, not `[N]T` | an item, or conditions on the items, as in `elem_match` |
+| `pop` | lists, not `[N]T` | `.first` or `.last` |
 
 - **An optional is set to a value, and cleared by `unset`**: the lines
   `nickname` and `unset`. `set` to null does not compile, as odm writes no
@@ -1220,6 +1248,15 @@ changes:
   with their value, `mul` with 0, `push` and `add_to_set` create the
   list, `pull` and `pop` do nothing. A null that another program wrote is
   not missing: these operators fail on it, with `WriteFailed`.
+- **A step of `inc` and `mul` is checked against the BSON integer of the
+  field, not its range.** A `u32` is an int64 in BSON, and `inc` takes
+  any step that fits an int64, -1 too: on a `stock: u32` of 0 that writes
+  -1, and the next read of the document is `DecodeFailed`, an overflow in
+  `stock`; 256 steps of 1 on a `u8` the same. Keep counters in `i64`, and
+  let the filter guard a step down, `.stock = .{ .gte = 1 }`.
+- **An array of a fixed length**, `[N]T`, changes whole, with `set`:
+  `push`, `add_to_set`, `pull` and `pop` would change its length, and the
+  model would not read the document again, so they do not compile.
 - **One update changes a path once**, as MongoDB refuses two changes of
   one path, or of a struct and its field:
 
@@ -1624,8 +1661,11 @@ this table:
 | known | higher | any | the tenant is bound anew |
 
 The settings are the same when the database and the connection are:
-`.existing` of the same id, or `.new` of the same id, URI and password. A
-queue may deliver an event twice, and an old one late. The same event
+`.existing` of the same id, or `.new` of the same id, URI and password.
+The form counts too: at the tenant's version, `.existing` of a connection
+that the tenant's `.new` made is other settings, `ProvisioningConflict`,
+and so is the other way round, so a service repeats an event as it came
+first. A queue may deliver an event twice, and an old one late. The same event
 again succeeds and changes nothing; an old one is `StaleVersion` and
 changes nothing; so the service may take both as done, as the run does
 with the second event of acme at version 1 and the last one. Two events
@@ -1636,7 +1676,9 @@ connects it. When that fails, for a wrong password or a server that is
 not there, the registry removes it again, and the tenant stays as it was.
 A `.new` with the id of a connection that is there already reuses it when
 its URI and password are the same, and is `ProvisioningConflict` when
-they are not: credentials change with `replaceConnection`, see
+they are not, as the connection has them once an operation on it in
+progress, such as a replacement, is done: credentials change with
+`replaceConnection`, see
 [Connections and credentials](#connections-and-credentials).
 
 The registry publishes a binding whole, once its connection works: a
@@ -2323,7 +2365,14 @@ A second `shutdown` waits for the first and returns its result. Then
 none came before, as in the quick start. Give every session and cursor
 back first: in safe builds one left panics, and so do a registry moved
 after its first `registerConnection` and a call on another `std.Io` than
-the one of `init`.
+the one of `init`. In safe builds a session or a cursor that two tasks
+call at once panics as well, and so do a collection used after the
+`deinit` of its session and a second `deinit` of a session or a cursor.
+
+Each close also closes the cursors that the server holds for the client,
+within a budget of the driver's own (zefir-mongo: `cursor_close_timeout`,
+1 s), and the closes go one after another: a forced shutdown may return
+that long past its deadline for each connection with such cursors.
 
 On Windows, under zio, closing cannot cut a read that already waits for
 the server's reply: such a call ends with the reply or at its own
@@ -2334,7 +2383,7 @@ dashboards:
 
 | Field | What it counts |
 |---|---|
-| `connections` | connections by state: `registered`, `connecting`, `active`, `failed`, `removing` |
+| `connections` | connections by state: `registered`, `connecting`, `active`, `failed`, `removing`; once the shutdown began, only the removals in progress |
 | `draining` | old generations whose leases are not back yet |
 | `forced` | generations closed by force since `init` |
 | `leases` | sessions, cursors and calls of `connect`, `ping` and `connectionStats` out |
@@ -2942,7 +2991,8 @@ holds in full:
    in order, up to the first that the server refuses: `DuplicateKey`
    with its index for a unique index, `WriteFailed` for anything else. A
    replacement comes without `_id`.
-8. A find with `limit = 1` leaves no cursor open on the server.
+8. A find with `limit = 1` leaves no cursor open on the server, and a
+   `batch_size` is the most documents of one batch.
 9. `close` refuses new calls with `Closed`, cuts the calls in flight at
    once, and closes the cursors on the server within a short budget; the
    `next` of a cursor after it is `Closed`, without I/O.

@@ -50,7 +50,9 @@
 //!    11000) is `error.DuplicateKey` with `Diagnostics.index`, any other
 //!    `error.WriteFailed`. An `update` of mode `.replace` holds the whole
 //!    document in `update`, without `_id`.
-//! 8. A `find` with `limit = 1` leaves no cursor open on the server.
+//! 8. A `find` with `limit = 1` leaves no cursor open on the server. A
+//!    `batch_size` of `find` or `aggregate` is the most documents that the
+//!    driver asks the server for in one batch.
 //! 9. `close` refuses new calls (`error.Closed`), cuts the calls in flight
 //!    at once, closes the cursors that the server holds within a short
 //!    budget of its own and closes the connections. A second `close`
@@ -228,10 +230,17 @@ pub const Client = struct {
         skip: u32 = 0,
         /// 0: no limit. 1 leaves no cursor on the server (rule 8).
         limit: u32 = 0,
+        /// The most documents of one batch from the server (rule 8); null:
+        /// as the server likes.
         batch_size: ?u32 = null,
     };
 
-    pub const AggregateRequest = struct { ns: Namespace, pipeline: []const bson.RawDocument, batch_size: ?u32 = null };
+    pub const AggregateRequest = struct {
+        ns: Namespace,
+        pipeline: []const bson.RawDocument,
+        /// As in `FindRequest`.
+        batch_size: ?u32 = null,
+    };
     pub const CountRequest = struct { ns: Namespace, filter: bson.RawDocument };
 
     /// One index to create.

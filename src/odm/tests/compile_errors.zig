@@ -1163,3 +1163,161 @@ test "compile error: a pipeline that is not a list" {
     var cursor = try session.collection(User).aggregateRaw(struct { n: i32 }, std.testing.io, .root, 5);
     cursor.deinit(std.testing.io);
 }
+
+// The compile errors that the guide shows, src/odm/examples/README.md,
+// through the cases of `guide_errors` in cases.zig. Each namespace holds
+// the fixtures under the names of the guide, `models.User` and
+// `my_driver.Client`; `guide.models.User` is the guide's model as it is.
+// Inside them `@This()` names them: `User` and `Client` of this file would
+// be ambiguous there.
+
+const guide = struct {
+    const models = struct {
+        pub const User = struct {
+            id: ?bson.ObjectId = null,
+            email: []const u8,
+            name: []const u8,
+            age: u32 = 0,
+            status: Status = .active,
+            nickname: ?[]const u8 = null,
+            address: @This().Address,
+            profile: ?Profile = null,
+            tags: []const []const u8 = &.{},
+            created_at: bson.DateTime,
+
+            pub const Status = enum { active, blocked };
+            pub const Address = struct { city: []const u8, country: []const u8 };
+            pub const Profile = struct { bio: []const u8, site: ?[]const u8 = null };
+
+            pub const odm_schema: odm.Schema(@This()) = .{
+                .collection = "users",
+                .id = .id,
+                .names = .{ .created_at = "createdAt" },
+                .indexes = &.{
+                    .{ .keys = &.{.{ .email = .asc }}, .unique = true },
+                    .{ .keys = &.{.{ .nickname = .asc }}, .unique = true, .sparse = true },
+                    .{ .keys = &.{ .{ .status = .asc }, .{ .created_at = .desc } } },
+                },
+            };
+
+            pub const field_rules = .{
+                .email = .{ v.email, v.maxLength(254) },
+                .name = .{ v.minLength(1), v.maxLength(100) },
+                .age = v.range(0, 150),
+            };
+        };
+    };
+
+    const my_driver = struct {
+        /// A client of a driver, without the method insert.
+        pub const Client = struct {
+            n: u8 = 0,
+            pub const capabilities: odm.Capabilities = .{};
+            pub const connect = Methods(@This()).connect;
+            pub const ping = Methods(@This()).ping;
+            pub const close = Methods(@This()).close;
+            pub const deinit = Methods(@This()).deinit;
+            pub const stats = Methods(@This()).stats;
+        };
+    };
+};
+
+const guide_f32 = struct {
+    const models = struct {
+        pub const User = struct {
+            id: ?bson.ObjectId = null,
+            rating: f32 = 0,
+            pub const odm_schema: odm.Schema(@This()) = .{ .collection = "users", .id = .id };
+        };
+    };
+};
+
+const guide_default = struct {
+    const models = struct {
+        pub const User = struct {
+            id: ?bson.ObjectId = null,
+            nickname: ?[]const u8 = "none",
+            pub const odm_schema: odm.Schema(@This()) = .{ .collection = "users", .id = .id };
+        };
+    };
+};
+
+const guide_unique = struct {
+    const models = struct {
+        pub const User = struct {
+            id: ?bson.ObjectId = null,
+            email: []const u8,
+            nickname: ?[]const u8 = null,
+            pub const odm_schema: odm.Schema(@This()) = .{
+                .collection = "users",
+                .id = .id,
+                .indexes = &.{
+                    .{ .keys = &.{.{ .email = .asc }}, .unique = true },
+                    .{ .keys = &.{.{ .nickname = .asc }}, .unique = true },
+                },
+            };
+        };
+    };
+};
+
+test "compile error: guide: a field of f32" {
+    comptime odm.assertModel(guide_f32.models.User);
+}
+
+test "compile error: guide: an optional whose default is not null" {
+    comptime odm.assertModel(guide_default.models.User);
+}
+
+test "compile error: guide: a unique index on an optional without sparse" {
+    comptime odm.assertModel(guide_unique.models.User);
+}
+
+test "compile error: guide: a filter on a field that is not there" {
+    _ = try filter.encode(guide.models.User, std.testing.allocator, .{ .agee = .{ .gte = 18 } });
+}
+
+test "compile error: guide: a string where a number goes" {
+    _ = try filter.encode(guide.models.User, std.testing.allocator, .{ .age = .{ .gte = "18" } });
+}
+
+test "compile error: guide: a tag that the enum does not have" {
+    _ = try filter.encode(guide.models.User, std.testing.allocator, .{ .status = .actve });
+}
+
+test "compile error: guide: an option that find does not have" {
+    var session: odm.Session = undefined;
+    var cursor = try session.collection(guide.models.User).find(std.testing.io, .root, .{}, .{ .limt = 10 });
+    cursor.deinit(std.testing.io);
+}
+
+test "compile error: guide: a document without eq" {
+    const lyon: guide.models.User.Address = .{ .city = "Lyon", .country = "FR" };
+    _ = try filter.encode(guide.models.User, std.testing.allocator, .{ .address = lyon });
+}
+
+test "compile error: guide: set of an optional to null" {
+    _ = try update.encode(guide.models.User, std.testing.allocator, .{ .set = .{ .nickname = null } }, .update);
+}
+
+test "compile error: guide: set of a path into an optional struct" {
+    _ = try update.encode(guide.models.User, std.testing.allocator, .{ .set = .{ .profile = .{ .site = "https://ann.example" } } }, .update);
+}
+
+test "compile error: guide: one list changed twice" {
+    _ = try update.encode(guide.models.User, std.testing.allocator, .{ .push = .{ .tags = "vip" }, .pull = .{ .tags = "student" } }, .update);
+}
+
+test "compile error: guide: an upsert without required fields" {
+    var session: odm.Session = undefined;
+    _ = try session.collection(guide.models.User).upsertOne(std.testing.io, .root, .{ .email = "dan@example.com" }, .{ .set = .{ .name = "Dan" } });
+}
+
+test "compile error: guide: in in the filter of an upsert" {
+    var session: odm.Session = undefined;
+    _ = try session.collection(guide.models.User).upsertOne(std.testing.io, .root, .{ .email = "dan@example.com", .status = .{ .in = .{ .active, .blocked } } }, .{ .set = .{ .name = "Dan" } });
+}
+
+test "compile error: guide: a client without insert" {
+    var client: guide.my_driver.Client = .{};
+    _ = Client.init(&client);
+}

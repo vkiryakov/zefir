@@ -182,4 +182,60 @@ pub const compile_errors = [_]Case{
     .{ .name = "compile error: an update of another model", .expect = "odm: this update is an odm.Update(tests.compile_errors.User), not of tests.compile_errors.Account" },
     // Collections.
     .{ .name = "compile error: a pipeline that is not a list", .expect = "odm: the pipeline of aggregateRaw is a tuple, a slice or an array of documents; got comptime_int" },
+} ++ guide_checks;
+
+/// A compile error that the guide, src/odm/examples/README.md, shows: its
+/// text as README.md prints it after "error: ", with the names of the
+/// guide, `models.User` and `my_driver.Client`, and the namespace of
+/// tests/compile_errors.zig whose fixtures of those names give it there.
+/// readme_test.zig of the guide checks that README.md shows each text.
+pub const GuideError = struct { name: []const u8, fixtures: []const u8, text: []const u8 };
+
+pub const guide_errors = [_]GuideError{
+    .{ .name = "compile error: guide: a field of f32", .fixtures = "guide_f32", .text = "odm: models.User.rating is f32: a BSON double has 64 bits, and decoding one into f32 rounds it; use f64" },
+    .{ .name = "compile error: guide: an optional whose default is not null", .fixtures = "guide_default", .text = "odm: models.User.nickname is optional, and its default is not null: odm leaves a null optional out of the document, and a field that is not there reads back as its default; make the default null" },
+    .{ .name = "compile error: guide: a unique index on an optional without sparse", .fixtures = "guide_unique", .text = "odm: models.User.odm_schema.indexes[1] is unique on models.User.nickname, which is optional: odm leaves null out, and the documents without the field would collide in the index as null; add .sparse = true" },
+    .{ .name = "compile error: guide: a filter on a field that is not there", .fixtures = "guide", .text = "odm: models.User has no field 'agee'; did you mean 'age'?" },
+    .{ .name = "compile error: guide: a string where a number goes", .fixtures = "guide", .text = "odm: gte on models.User.age needs a u32; got *const [2:0]u8" },
+    .{ .name = "compile error: guide: a tag that the enum does not have", .fixtures = "guide", .text = "odm: models.User.status is models.User.Status, which has no tag 'actve'; did you mean 'active'?" },
+    .{ .name = "compile error: guide: an option that find does not have", .fixtures = "guide", .text = "odm: find has no option 'limt'; did you mean 'limit'?" },
+    .{ .name = "compile error: guide: a document without eq", .fixtures = "guide", .text = "odm: models.User.address is a document: match its fields, .{ .address = .{ .city = ... } }, or the whole document with .{ .eq = value }" },
+    .{ .name = "compile error: guide: set of an optional to null", .fixtures = "guide", .text = "odm: set of models.User.nickname to null: odm does not store null; clear the field with .unset = .{.nickname}" },
+    .{ .name = "compile error: guide: set of a path into an optional struct", .fixtures = "guide", .text = "odm: set of models.User.profile.site goes into models.User.profile, which is optional: in a document without profile it would create an incomplete models.User.Profile; set the whole models.User.Profile, .{ .set = .{ .profile = value } }, or unset profile" },
+    .{ .name = "compile error: guide: one list changed twice", .fixtures = "guide", .text = "odm: the update changes models.User.tags twice: in push and in pull" },
+    .{ .name = "compile error: guide: an upsert without required fields", .fixtures = "guide", .text = "odm: upsertOne of models.User may insert a document without its required fields 'address', 'created_at': give each by equality in the filter, in set, in set_on_insert, or with an operator that creates it, such as inc or push" },
+    .{ .name = "compile error: guide: in in the filter of an upsert", .fixtures = "guide", .text = "odm: upsertOne of models.User: the filter's in on models.User.status: in, nin and all stay out of the filter of an upsert, since the server copies one item of in or all into the document it may insert, an item where a list goes too, and with no item it inserts none of the filter's equalities; match by equality, or use updateOne, then insertOne when it matched nothing" },
+    .{ .name = "compile error: guide: a client without insert", .fixtures = "guide", .text = "odm.Client.init: my_driver.Client has no method insert; expected pub fn insert(self: *@This(), io: std.Io, ctx: core.Context, request: *const odm.Client.InsertRequest, options: odm.Client.CallOptions) odm.DriverError!odm.Client.InsertResult" },
 };
+
+/// The compile checks of `guide_errors`: each text with the names of its
+/// fixtures, as the compiler prints them in tests/compile_errors.zig.
+const guide_checks = checks: {
+    var out: [guide_errors.len]Case = undefined;
+    for (guide_errors, &out) |e, *check| check.* = .{ .name = e.name, .expect = fixtureText(e) };
+    break :checks out;
+};
+
+/// `e.text` with "tests.compile_errors.<fixtures>." before each name of the
+/// guide.
+fn fixtureText(comptime e: GuideError) []const u8 {
+    @setEvalBranchQuota(100_000);
+    const prefix = "tests.compile_errors." ++ e.fixtures ++ ".";
+    var out: []const u8 = "";
+    var i: usize = 0;
+    while (i < e.text.len) : (i += 1) {
+        for ([_][]const u8{ "models.User", "my_driver.Client" }) |name| {
+            if (e.text.len - i >= name.len and eql(e.text[i..][0..name.len], name)) out = out ++ prefix;
+        }
+        out = out ++ e.text[i..][0..1];
+    }
+    return out;
+}
+
+fn eql(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |x, y| {
+        if (x != y) return false;
+    }
+    return true;
+}
