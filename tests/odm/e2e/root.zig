@@ -207,6 +207,7 @@ test {
     testing.refAllDecls(@This());
     _ = @import("conformance.zig");
     _ = @import("tenants.zig");
+    _ = @import("rotation.zig");
 }
 
 test "an Admin of mongo-auth makes a user that writes to its database, and drops both" {
