@@ -99,4 +99,5 @@ test {
     _ = @import("tests/driver_tests.zig");
     _ = @import("tests/fake_driver_tests.zig");
     _ = @import("tests/model_tests.zig");
+    _ = @import("tests/codec_tests.zig");
 }
