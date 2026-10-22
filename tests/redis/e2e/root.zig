@@ -72,6 +72,13 @@ pub fn restart(container: []const u8) !void {
     try awaitHealthy(container);
 }
 
+/// Starts `container`, which a test stopped, and waits until it is healthy
+/// again.
+pub fn start(container: []const u8) !void {
+    try docker(&.{ "start", container });
+    try awaitHealthy(container);
+}
+
 /// Waits until the health check of `container` passes, for 60 s at most.
 pub fn awaitHealthy(container: []const u8) !void {
     const io = testing.io;
@@ -127,4 +134,5 @@ test {
     testing.refAllDecls(@This());
     _ = @import("handshake.zig");
     _ = @import("auth.zig");
+    _ = @import("pool.zig");
 }
