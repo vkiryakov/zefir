@@ -793,7 +793,11 @@ decoder reads every reply, by these rules:
   pairs in the server's order, and the errors inside an array.
 - **Limits.** A reply larger than `max_reply_bytes`, or nested deeper than
   64 levels, is `ReplyTooLarge`, found before anything is allocated, and
-  its connection closes.
+  its connection closes. The limit counts bytes on the wire, and memory
+  may take more: the elements of an array are allocated as soon as its
+  header comes, and each takes 3 bytes on the wire at least, so a slice of
+  `T` may take up to `@sizeOf(T) / 3` times `max_reply_bytes` in the arena,
+  and `redis.Value`, of 40 bytes, about 13 times.
 
 ### Memory
 

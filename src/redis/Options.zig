@@ -46,9 +46,12 @@ start_timeout: Duration = .fromSeconds(10),
 /// How long `close` lets the calls in flight finish before it cuts them.
 close_timeout: Duration = .fromSeconds(5),
 /// The largest reply, in bytes on the wire; a larger one is
-/// `error.ReplyTooLarge`. A reply read into `redis.Value` may take several
-/// times this in memory: a null is 3 bytes on the wire and a whole
-/// `Value` in the arena.
+/// `error.ReplyTooLarge`. Its memory in the arena may take more: the
+/// client takes the memory of an array's elements as soon as its header
+/// comes, before the elements do, and an element takes 3 bytes on the
+/// wire at least. So a reply read into a slice of `T` may take up to
+/// `@sizeOf(T) / 3` times this, and one read into `redis.Value`, of 40
+/// bytes, about 13 times.
 max_reply_bytes: usize = 64 * 1024 * 1024,
 /// Why `init` refused the options; it never shows the password.
 diagnostics: ?*Diagnostics = null,
