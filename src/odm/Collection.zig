@@ -264,7 +264,7 @@ pub const DeleteResult = struct { deleted: u64 };
 
 /// The size of the buffer on the stack that the working memory of a call
 /// takes first.
-pub const memory_size = 2048;
+const memory_size = 2048;
 
 /// One call through a session: its working memory, and its part in the
 /// rules of the session. `begin` makes the checks of the session in safe
@@ -305,7 +305,7 @@ pub const Call = struct {
 /// The start of a call through `s`: in safe builds a session given back,
 /// or one that another task is calling through, panics. Then the
 /// diagnostics of the session start afresh.
-pub fn enter(s: *Session, io: Io) void {
+fn enter(s: *Session, io: Io) void {
     if (std.debug.runtime_safety) {
         if (s.released) @panic("zefir-odm: a collection used after the deinit of its session");
     }
@@ -317,7 +317,7 @@ pub fn enter(s: *Session, io: Io) void {
 }
 
 /// The end of a call through `s`.
-pub fn leave(s: *Session) void {
+fn leave(s: *Session) void {
     if (std.debug.runtime_safety) s.busy.store(false, .release);
 }
 
@@ -328,12 +328,12 @@ pub fn namespace(comptime T: type, s: *const Session) Client.Namespace {
 
 /// The options of a call of the driver through `s`: the results in the
 /// working memory, the details of an error in the session's diagnostics.
-pub fn callOptions(s: *Session, memory: Allocator) Client.CallOptions {
+fn callOptions(s: *Session, memory: Allocator) Client.CallOptions {
     return .{ .allocator = memory, .diagnostics = &s.diag };
 }
 
 /// `err`, with the text in `d`.
-pub fn fail(d: *Diagnostics, err: anytype, comptime fmt: []const u8, args: anytype) @TypeOf(err) {
+fn fail(d: *Diagnostics, err: anytype, comptime fmt: []const u8, args: anytype) @TypeOf(err) {
     d.set(null, null, fmt, args);
     return err;
 }
@@ -374,7 +374,7 @@ pub fn projectionOf(comptime T: type, comptime P: type, memory: Allocator) Error
 
 /// The decoder of the documents of `T` into `P`, the model or a
 /// projection of it, for a cursor.
-pub fn decoderOf(comptime T: type, comptime P: type) *const cursors.Decode(P) {
+fn decoderOf(comptime T: type, comptime P: type) *const cursors.Decode(P) {
     return &struct {
         fn decode(arena: Allocator, raw: bson.RawDocument, d: *Diagnostics) cursors.DecodeError!P {
             return codec.decode(T, P, arena, raw, d) catch |err| return decodeFailure(P, err, d);
@@ -384,7 +384,7 @@ pub fn decoderOf(comptime T: type, comptime P: type) *const cursors.Decode(P) {
 
 /// `err` of a decode into `P`, with its text in `d`; the path and the cause
 /// are there already.
-pub fn decodeFailure(comptime P: type, err: cursors.DecodeError, d: *Diagnostics) cursors.DecodeError {
+fn decodeFailure(comptime P: type, err: cursors.DecodeError, d: *Diagnostics) cursors.DecodeError {
     switch (err) {
         error.DecodeFailed => d.set(null, null, "odm: a document of the server does not fit {s}", .{@typeName(P)}),
         error.InvalidBson => d.set(null, null, "odm: a document of the server is not valid BSON", .{}),
@@ -709,7 +709,7 @@ fn newId(comptime T: type, s: *Session, io: Io, doc: *const Insert(T)) Id(T) {
 /// The `field_rules` of the model on `value.*`: the first rule it breaks
 /// is `ValidationFailed`, with the rule, the path and a text in `d`, and
 /// `index` for a document of insertMany.
-pub fn check(value: anytype, d: *Diagnostics, index: ?usize) error{ValidationFailed}!void {
+fn check(value: anytype, d: *Diagnostics, index: ?usize) error{ValidationFailed}!void {
     var path: [512]u8 = undefined;
     const violation = v.check(value, &path) orelse return;
     const field = violation.field orelse "";
@@ -728,7 +728,7 @@ const unencodable = "a string is not UTF-8, a bson.RawDocument in it is not vali
 
 /// The document of `value.*` for `mode`, in `memory`; `EncodeFailed` with
 /// a text in `d`, and `index` for a document of insertMany.
-pub fn encodeDocument(comptime T: type, memory: Allocator, value: *const T, comptime mode: codec.Mode, d: *Diagnostics, index: ?usize) Error!bson.RawDocument {
+fn encodeDocument(comptime T: type, memory: Allocator, value: *const T, comptime mode: codec.Mode, d: *Diagnostics, index: ?usize) Error!bson.RawDocument {
     const doc = codec.encode(T, memory, value, mode) catch |err| switch (err) {
         error.EncodeFailed => {
             if (index) |i| {

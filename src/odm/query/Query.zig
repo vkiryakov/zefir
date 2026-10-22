@@ -37,6 +37,14 @@ const Session = @import("../Session.zig");
 const Cursor = @import("../Cursor.zig").Cursor;
 const Error = errors.Error;
 
+/// Whether `K` is the type of `.{}`.
+fn isEmpty(comptime K: type) bool {
+    return switch (@typeInfo(K)) {
+        .@"struct" => |info| info.field_names.len == 0,
+        else => false,
+    };
+}
+
 /// A find of the model `T` built at run time; `users.query(arena)` gives
 /// it. `arena` holds its conditions and the documents of `first`: an
 /// arena, or any allocator that is freed whole, which outlives the query.
@@ -80,7 +88,7 @@ pub fn Query(comptime T: type) type {
         pub fn sort(q: Self, keys: anytype) Self {
             const K = @TypeOf(keys);
             var next = q;
-            if (comptime @typeInfo(K) == .@"struct" and @typeInfo(K).@"struct".field_names.len == 0) {
+            if (comptime isEmpty(K)) {
                 next.order = .{};
                 return next;
             }

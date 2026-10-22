@@ -182,8 +182,8 @@ pub const Diagnostics = struct {
     /// CommandNotFound.
     code: ?i32 = null,
     /// The item of a write that the server refused, or the document of an
-    /// `insertMany` that broke its rules: its index in the list of the
-    /// call.
+    /// `insertMany` that broke its rules or did not become BSON: its index
+    /// in the list of the call.
     index: ?usize = null,
     /// `ValidationFailed`: the rule, by the code and the message of
     /// zefir-validator.
