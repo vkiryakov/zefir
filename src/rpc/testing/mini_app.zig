@@ -1,10 +1,9 @@
-//! A minimal application container, only in tests. It shows that an App can
-//! run `rpc.RawServer` and `rpc.Server` later through their public
-//! lifecycle alone, with no change to the servers' API, as the
+//! A minimal application container, only in tests. It runs `rpc.RawServer`
+//! and `rpc.Server` through their public lifecycle alone, as the
 //! specification's acceptance criteria ask. A component is any type with
-//! `start`, `wait` and `shutdown`. Their `requestStop` is for a signal
-//! handler of an App; this one stops its components with `shutdown` alone,
-//! one after another.
+//! `start`, `wait` and `shutdown(io, deadline)`. Their `requestStop` is for
+//! a signal handler of an App; this one stops its components with
+//! `shutdown` alone, one after another, within one deadline 30 s away.
 
 const std = @import("std");
 const core = @import("core");
@@ -14,6 +13,7 @@ const Context = @import("../engine/Context.zig").Context;
 const Server = @import("../app/Server.zig");
 const contract = @import("../app/contract.zig");
 const MemoryTransport = @import("MemoryTransport.zig");
+const far = @import("../wait.zig").far;
 
 pub const MiniApp = struct {
     /// Set by `requestStop`, or by a component that stopped by itself.
@@ -79,11 +79,12 @@ pub const MiniApp = struct {
     /// before the next. The weightiest error of a shutdown, the first of
     /// equal ones.
     fn stopFirst(io: std.Io, components: anytype, comptime count: usize) ?anyerror {
+        const deadline = far(io);
         var worst: ?anyerror = null;
         comptime var i = count;
         inline while (i > 0) {
             i -= 1;
-            components[i].shutdown(io) catch |err| {
+            components[i].shutdown(io, deadline) catch |err| {
                 if (worst == null or weight(err) > weight(worst.?)) worst = err;
             };
         }
@@ -342,9 +343,10 @@ const FailsToStart = struct {
         _ = io;
     }
 
-    pub fn shutdown(f: *FailsToStart, io: std.Io) !void {
+    pub fn shutdown(f: *FailsToStart, io: std.Io, deadline: std.Io.Clock.Timestamp) !void {
         _ = f;
         _ = io;
+        _ = deadline;
     }
 };
 
@@ -417,7 +419,7 @@ const Logged = struct {
         l.log.add(.{ .name = l.name, .what = .stop_begun });
     }
 
-    pub fn shutdown(l: *Logged, io: std.Io) !void {
+    pub fn shutdown(l: *Logged, io: std.Io, _: std.Io.Clock.Timestamp) !void {
         l.log.add(.{ .name = l.name, .what = .stop_begun });
         // A component that takes a while to stop.
         try io.sleep(.fromMilliseconds(20), .awake);
@@ -501,9 +503,9 @@ test "an App starts two rpc.Server, serves through both, and stops them on reque
     var second_memory: MemoryTransport = try .init(testing.allocator, .{});
     defer second_memory.deinit(io);
     var echo: AppEcho = .{};
-    var first: Server = try .init(testing.allocator, .{ .transport = first_memory.serverTransport(), .handlers = .{&echo} });
+    var first: Server = try .init(testing.allocator, .{ .handlers = .{&echo} }, .{ .transport = first_memory.serverTransport() });
     defer first.deinit(io);
-    var second: Server = try .init(testing.allocator, .{ .transport = second_memory.serverTransport(), .handlers = .{&echo} });
+    var second: Server = try .init(testing.allocator, .{ .handlers = .{&echo} }, .{ .transport = second_memory.serverTransport() });
     defer second.deinit(io);
 
     var app: MiniApp = .{};
@@ -523,10 +525,10 @@ test "when the second rpc.Server does not start, the App stops the first and ret
     var memory: MemoryTransport = try .init(testing.allocator, .{});
     defer memory.deinit(io);
     var echo: AppEcho = .{};
-    var first: Server = try .init(testing.allocator, .{ .transport = memory.serverTransport(), .handlers = .{&echo} });
+    var first: Server = try .init(testing.allocator, .{ .handlers = .{&echo} }, .{ .transport = memory.serverTransport() });
     defer first.deinit(io);
     // The same address: its transport is taken by the first.
-    var second: Server = try .init(testing.allocator, .{ .transport = memory.serverTransport(), .handlers = .{&echo} });
+    var second: Server = try .init(testing.allocator, .{ .handlers = .{&echo} }, .{ .transport = memory.serverTransport() });
     defer second.deinit(io);
 
     var app: MiniApp = .{};
@@ -551,12 +553,13 @@ test "an rpc.Server whose shutdown runs out of time: the App reports it and leav
     var deaf: DeafEcho = .{};
     var echo: AppEcho = .{};
     var server: Server = try .init(testing.allocator, .{
-        .transport = memory.serverTransport(),
         .handlers = .{&deaf},
+    }, .{
+        .transport = memory.serverTransport(),
         .shutdown_grace = std.Io.Duration.fromMilliseconds(50),
     });
     defer server.deinit(io);
-    var other: Server = try .init(testing.allocator, .{ .transport = other_memory.serverTransport(), .handlers = .{&echo} });
+    var other: Server = try .init(testing.allocator, .{ .handlers = .{&echo} }, .{ .transport = other_memory.serverTransport() });
     defer other.deinit(io);
     // Whatever happens, the handler ends before the server's deinit.
     defer deaf.gate.set(io);

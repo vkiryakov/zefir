@@ -19,6 +19,8 @@ uri: []const u8,
 /// The password of the user that `uri` names, when the string does not
 /// hold it: a secret kept out of the connection string.
 password: ?[]const u8 = null,
+/// How long `start` (zefir.App) waits for the first connection.
+start_timeout: Duration = .fromSeconds(10),
 /// How long `close` lets the operations in flight finish before it cuts
 /// them.
 close_timeout: Duration = .fromSeconds(5),

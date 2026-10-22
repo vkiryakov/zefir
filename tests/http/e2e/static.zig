@@ -81,7 +81,7 @@ const Fixture = struct {
         f.app = .{};
         f.native = try .init(gpa, .{ .address = "127.0.0.1", .port = 0 });
         errdefer f.native.deinit();
-        f.server = try http.Server.init(gpa, .{ .backend = f.native.backend(), .controllers = .{&f.app}, .static = .{http.static("/", .{ .root = root })} });
+        f.server = try http.Server.init(gpa, .{ .controllers = .{&f.app} }, .{ .listen = .{ .backend = f.native.backend() }, .static = &.{http.static("/", .{ .root = root })} });
         errdefer f.server.deinit(io);
         try f.server.start(io);
     }

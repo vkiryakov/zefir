@@ -25,3 +25,8 @@ pub fn forEachRuntime(gpa: std.mem.Allocator, comptime scenario: fn (io: std.Io)
     }
     if (first) |err| return err;
 }
+
+/// A deadline 30 s away, for a scenario that only needs a stop.
+pub fn far(io: std.Io) std.Io.Clock.Timestamp {
+    return .fromNow(io, .{ .raw = .fromSeconds(30), .clock = .awake });
+}

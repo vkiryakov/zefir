@@ -1,12 +1,15 @@
 //! The adapter of zefir-nats: `rpc_nats.Conn` on a `nats.Client`, so that
 //! the NATS transport of rpc runs on the NATS client of zefir.
+//! `rpc_nats.Transport.init(gpa, &nc, options)` makes one of its own; make
+//! it yourself for another `pending`, and give its `conn()` to
+//! `Transport.initConn`:
 //!
 //! ```zig
 //! var nc: nats.Client = try .init(gpa, io, .{ .servers = &.{"nats://127.0.0.1:4222"} });
 //! defer nc.deinit();
 //! try nc.connect();
-//! var adapter: rpc_nats.ZefirNats = .{ .client = &nc };
-//! var bus: rpc_nats.Transport = try .init(gpa, adapter.conn(), .{});
+//! var adapter: rpc_nats.ZefirNats = .{ .client = &nc, .pending = .{ .messages = 10_000 } };
+//! var bus: rpc_nats.Transport = try .initConn(gpa, adapter.conn(), .{});
 //! defer bus.deinit(io); // before nc.deinit()
 //! ```
 //!
@@ -81,8 +84,8 @@ const default_limits: rpc.Limits = .{};
 /// The `max_inflight` of a server with the default `rpc.Limits`.
 pub const default_pending_messages: u32 = default_limits.max_active_tasks + default_limits.queue_capacity;
 
-/// The interface, for `rpc_nats.Transport.init`: once per adapter, as one
-/// adapter serves one transport. In safe builds a second call panics.
+/// The interface, for `rpc_nats.Transport.initConn`: once per adapter, as
+/// one adapter serves one transport. In safe builds a second call panics.
 pub fn conn(z: *ZefirNats) Conn {
     if (std.debug.runtime_safety) {
         if (z.handed_out) @panic("rpc_nats.ZefirNats: conn() called twice; one adapter serves one transport: give each transport an adapter of its own");
@@ -407,7 +410,7 @@ test "the transport on a client without a connection: start and calls are Unavai
     defer nc.deinit();
     try nc.connect();
     var adapter: ZefirNats = .{ .client = &nc };
-    var bus: Transport = try .init(testing.allocator, adapter.conn(), .{ .flush_timeout = .fromMilliseconds(200) });
+    var bus: Transport = try .initConn(testing.allocator, adapter.conn(), .{ .flush_timeout = .fromMilliseconds(200) });
     defer bus.deinit(io);
     try testing.expect(!bus.isReady());
 

@@ -488,7 +488,7 @@ test "the server gives the client through its trusted_proxies" {
         .{ .{ .list = &.{"192.0.2.0/24"} }, ip("192.0.2.9:5000"), "203.0.113.5:0" },
         .{ .{ .list = &.{"192.0.2.0/24"} }, ip("10.0.0.1:5000"), "10.0.0.1:5000" },
     }) |case| {
-        var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&controller}, .trusted_proxies = case[0] });
+        var server = try Server.init(testing.allocator, .{ .controllers = .{&controller} }, .{ .listen = .{ .backend = b.backend() }, .trusted_proxies = case[0] });
         defer server.deinit(test_io);
         try server.start(test_io);
         var res = try who(&b, case[1], forwarded);
@@ -506,7 +506,7 @@ test "X-Request-Id only from a trusted peer" {
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
     {
-        var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&controller}, .trusted_proxies = .private });
+        var server = try Server.init(testing.allocator, .{ .controllers = .{&controller} }, .{ .listen = .{ .backend = b.backend() }, .trusted_proxies = .private });
         defer server.deinit(test_io);
         try server.start(test_io);
         var trusted = try who(&b, ip("10.0.0.1:5000"), &.{.{ "X-Request-Id", "req-42" }});
@@ -525,7 +525,7 @@ test "X-Request-Id only from a trusted peer" {
     }
     {
         // By default every peer is trusted, one without an address too.
-        var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&controller} });
+        var server = try Server.init(testing.allocator, .{ .controllers = .{&controller} }, .{ .listen = .{ .backend = b.backend() } });
         defer server.deinit(test_io);
         try server.start(test_io);
         var res = try who(&b, null, &.{.{ "x-request-id", "edge-7f3a" }});
@@ -533,7 +533,7 @@ test "X-Request-Id only from a trusted peer" {
         try testing.expectEqualStrings("null edge-7f3a", res.body);
     }
     {
-        var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&controller}, .trusted_proxies = .none });
+        var server = try Server.init(testing.allocator, .{ .controllers = .{&controller} }, .{ .listen = .{ .backend = b.backend() }, .trusted_proxies = .none });
         defer server.deinit(test_io);
         try server.start(test_io);
         var res = try who(&b, ip("10.0.0.1:5000"), &.{.{ "x-request-id", "req-42" }});

@@ -27,6 +27,10 @@
 //! full, Disconnected when it is 0), flushes fail with Disconnected, and
 //! new subscriptions go out once connected again.
 //!
+//! Under zefir.App the client is a bean of its own: `start` connects it,
+//! `wait` returns once it closes and says why, and `shutdown` drains it by
+//! a deadline; `connect`, `drain` and `close` stay for direct use.
+//!
 //! The fields are internal: use the methods. Tests may ask
 //! `outbound.roomWaiters()` whether a publish waits for room, and
 //! `inbox.pendingCount()`, `inbox.awaitingCount()` and
@@ -951,7 +955,7 @@ fn ping(client: *Client, timeout: Io.Timeout) FlushError!Io.Duration {
         .closed => return error.ConnectionClosed,
         .disconnected, .connecting, .reconnecting => return error.Disconnected,
     }
-    const start = Io.Clock.awake.now(io);
+    const sent_at = Io.Clock.awake.now(io);
     const ping_sent = client.outbound.putPing(io, .flush) catch |err| switch (err) {
         error.Closed => return error.ConnectionClosed,
         error.Disconnected => return error.Disconnected,
@@ -963,7 +967,7 @@ fn ping(client: *Client, timeout: Io.Timeout) FlushError!Io.Duration {
         error.Timeout => return error.Timeout,
         error.Canceled => return error.Canceled,
     };
-    const round_trip = start.durationTo(Io.Clock.awake.now(io));
+    const round_trip = sent_at.durationTo(Io.Clock.awake.now(io));
     client.counters.rtt.store(@intCast(std.math.clamp(round_trip.nanoseconds, 0, Counters.none - 1)), .monotonic);
     return round_trip;
 }
@@ -1059,6 +1063,98 @@ pub fn deinit(client: *Client) void {
     client.gpa.free(client.read_buffer);
     client.options.deinit(client.gpa);
     client.freed = true;
+}
+
+pub const WaitError = error{
+    /// The connection was lost and the client did not reconnect: reconnect
+    /// is off, or it was draining.
+    ConnectionLost,
+    /// A server refused the credentials twice the same way in a row.
+    AuthenticationFailed,
+    /// `reconnect.max_attempts` attempts in a row failed.
+    ReconnectFailed,
+} || Io.Cancelable;
+
+pub const ShutdownError = error{
+    /// The drain did not finish by the deadline: the client closed anyway.
+    Timeout,
+    /// No memory for the PING that confirms the drain: the client closed.
+    OutOfMemory,
+} || Io.Cancelable;
+
+/// How much earlier than its deadline `shutdown` ends the drain, so that
+/// the caller still has time for what comes after it.
+const shutdown_reserve: Io.Duration = .fromMilliseconds(250);
+
+/// For zefir.App, which starts the client before the beans that take it:
+/// `connect()`. `io` is the client's own, the one of `init`.
+pub fn start(client: *Client, io: Io) ConnectError!void {
+    _ = io;
+    return client.connect();
+}
+
+/// For zefir.App, which watches the client with it: waits until the client
+/// closes, then says why. `{}` when it was closed by `close`, `drain` or
+/// `shutdown`, whether the drain finished or not; the error when it closed
+/// by itself, and then zefir.App stops the application: the connection was
+/// lost with reconnect off, a server refused the credentials, or
+/// `reconnect.max_attempts` attempts failed. While the client reconnects it
+/// waits on. Canceling the wait leaves the client running. `io` is the
+/// client's own, the one of `init`.
+pub fn wait(client: *Client, io: Io) WaitError!void {
+    _ = io;
+    client.checkHome();
+    const own = client.io;
+    client.mutex.lockUncancelable(own);
+    defer client.mutex.unlock(own);
+    // The manager closes the client itself when it gives up, without
+    // closeWith: only the status tells. A wait may end early: look again.
+    while (client.status != .closed) try client.changed.wait(own, &client.mutex, null);
+    return switch (client.close_reason orelse .closed) {
+        .closed, .drained, .drain_failed => {},
+        .connection_lost, .connect_failed => error.ConnectionLost,
+        .auth_failed => error.AuthenticationFailed,
+        .reconnect_failed => error.ReconnectFailed,
+    };
+}
+
+/// For zefir.App, which stops the client after the servers that use it:
+/// `drain` by `deadline`, then closed, whatever it returns. The drain ends
+/// 250 ms before `deadline` at the latest, so that the caller has time for
+/// what comes after. A client without a connection, as while it
+/// reconnects, has nothing to drain and closes at once; so does one whose
+/// connection is lost during the drain: both return `{}`. `error.Timeout`
+/// when the drain did not finish in time; the client is closed then too,
+/// and holds no task. `io` is the client's own, the one of `init`.
+pub fn shutdown(client: *Client, io: Io, deadline: Io.Clock.Timestamp) ShutdownError!void {
+    _ = io;
+    client.checkHome();
+    defer client.close();
+    const due = time.deadline(client.io, .{ .deadline = deadline.subDuration(.{ .raw = shutdown_reserve, .clock = deadline.clock }) }).?;
+    switch (client.state()) {
+        .connected, .draining => {},
+        .disconnected, .connecting, .reconnecting, .closed => return,
+    }
+    client.drain(.{ .timeout = .{ .deadline = due } }) catch |err| switch (err) {
+        error.Timeout => return error.Timeout,
+        // The connection went before or during the drain: the client is
+        // closed and holds no task.
+        error.Disconnected, error.ConnectionClosed => return,
+        error.OutOfMemory, error.Canceled => |e| return e,
+        // Another drain runs: its end closes the client.
+        error.ConnectionDraining => return client.awaitClosed(due),
+    };
+}
+
+/// Waits until the client is closed, or `due` passes: `error.Timeout`.
+fn awaitClosed(client: *Client, due: Io.Clock.Timestamp) ShutdownError!void {
+    const io = client.io;
+    client.mutex.lockUncancelable(io);
+    defer client.mutex.unlock(io);
+    while (client.status != .closed) {
+        if (time.expired(io, due)) return error.Timeout;
+        try client.changed.wait(io, &client.mutex, due);
+    }
 }
 
 /// Where the client is in its life now; see `State`. Another task may

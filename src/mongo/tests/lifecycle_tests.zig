@@ -460,3 +460,162 @@ fn shutdownConcernClears(io: Io) !void {
     try testing.expectEqual(@as(u64, 2), driver.stats().clears);
     try testing.expectEqual(@as(usize, 0), driver.stats().connections);
 }
+
+// The methods of a zefir.App bean: start and shutdown.
+
+/// The deadline `ms` milliseconds from now, as zefir.App passes it.
+fn inMs(io: Io, ms: i64) Io.Clock.Timestamp {
+    return .fromNow(io, .{ .raw = .fromMilliseconds(ms), .clock = .awake });
+}
+
+/// Milliseconds from `deadline` to now; negative before it.
+fn msPast(io: Io, deadline: Io.Clock.Timestamp) i64 {
+    return deadline.durationTo(Io.Clock.Timestamp.now(io, .awake)).raw.toMilliseconds();
+}
+
+test "start connects as connect does" {
+    try within5s(testing.io, startConnects, .{testing.io});
+}
+
+fn startConnects(io: Io) !void {
+    var served: Served = undefined;
+    try served.start(io, .zero);
+    defer served.stop(io);
+    var driver: Client = try .init(testing.allocator, io, .{ .uri = try served.uri("") });
+    defer driver.deinit();
+    try driver.start(io);
+    try testing.expectEqual(@as(usize, 1), driver.stats().connections);
+    try run(io, &driver, ping, null, "");
+    // Once connected, a second start does nothing, as connect.
+    try driver.start(io);
+    try testing.expectEqual(@as(usize, 1), driver.stats().connections);
+}
+
+test "start gives up at start_timeout" {
+    try within5s(testing.io, startGivesUp, .{testing.io});
+}
+
+fn startGivesUp(io: Io) !void {
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var heard: Io.Event = .unset;
+    var done: Io.Event = .unset;
+    var server = try io.concurrent(hearHelloThenHold, .{ io, &listener, &heard, &done });
+    defer {
+        done.set(io);
+        server.await(io) catch {};
+    }
+    var buffer: [64]u8 = undefined;
+    var driver: Client = try .init(testing.allocator, io, .{ .uri = try FakeServer.uri(&listener, &buffer), .start_timeout = .fromMilliseconds(300) });
+    defer driver.deinit();
+    // start says why in a warning.
+    const level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = level;
+    const began = time.now(io);
+    try testing.expectError(error.DeadlineExceeded, driver.start(io));
+    const took = began.durationTo(time.now(io)).toMilliseconds();
+    try testing.expect(took >= 250 and took < 500);
+}
+
+test "shutdown with a near deadline ends a call in flight by deadline − r" {
+    try within5s(testing.io, shutdownCutsCall, .{testing.io});
+}
+
+fn shutdownCutsCall(io: Io) !void {
+    var served: Served = undefined;
+    try served.start(io, .fromSeconds(5));
+    defer served.stop(io);
+    // close_timeout is 5 s: the deadline cuts it.
+    var driver: Client = try .init(testing.allocator, io, .{ .uri = try served.uri("") });
+    defer driver.deinit();
+    try driver.start(io);
+    var call = try io.concurrent(run, .{ io, &driver, slow, error.ConnectionLost, "close() of the client cut the exchange" });
+    defer call.cancel(io) catch {};
+    try awaitReceived(io, &served.script, "slow", 1);
+    const deadline = inMs(io, 600);
+    driver.shutdown(io, deadline);
+    try testing.expect(msPast(io, deadline) <= -250 + 200);
+    try call.await(io);
+    try testing.expectEqual(@as(usize, 0), driver.stats().connections);
+}
+
+/// Opens a cursor that it holds on `find`, and answers `killCursors` only
+/// after 5 s.
+const Holding = struct {
+    pub fn answer(h: *Holding, io: Io, arena: std.mem.Allocator, request: *const Script.Request) Script.HandlerError!Script.Answer {
+        _ = h;
+        _ = io;
+        if (std.mem.eql(u8, request.name, "killCursors")) return .{ .delayed = .{ .after = .fromSeconds(5), .reply = Script.ok } };
+        if (!std.mem.eql(u8, request.name, "find")) return .{ .reply = Script.ok };
+        const reply = Script.cursorReply(arena, "app.users", 7, .first, &.{bson.literal(.{ ._id = 1 })}) catch return error.OutOfMemory;
+        return .{ .reply = reply };
+    }
+};
+
+test "shutdown cuts the killCursors by its deadline too" {
+    try within5s(testing.io, shutdownCutsKills, .{testing.io});
+}
+
+fn shutdownCutsKills(io: Io) !void {
+    var holding: Holding = .{};
+    var script: Script = .init(testing.allocator, .init(&holding));
+    defer script.deinit();
+    var listener = try FakeServer.listen(io);
+    defer listener.deinit(io);
+    var server = try io.concurrent(FakeServer.serve, .{ io, &listener, &script });
+    defer server.cancel(io) catch {};
+    var buffer: [64]u8 = undefined;
+    var driver: Client = try .init(testing.allocator, io, .{ .uri = try FakeServer.uri(&listener, &buffer) });
+    defer driver.deinit();
+    try driver.start(io);
+    const users: mongo.Command = .{ .database = "app", .body = bson.literal(.{ .find = "users" }) };
+    // The cursor goes before the client.
+    const cursor = try driver.openCursor(io, .of(.root), users, .{});
+    defer cursor.deinit(io);
+    try testing.expectEqual(@as(usize, 1), driver.stats().open_cursors);
+    // cursor_close_timeout is 1 s: the deadline cuts it.
+    const deadline = inMs(io, 600);
+    driver.shutdown(io, deadline);
+    try testing.expect(msPast(io, deadline) <= -250 + 200);
+    try awaitReceived(io, &script, "killCursors", 1);
+    try testing.expectEqual(@as(usize, 0), driver.stats().open_cursors);
+}
+
+/// Where the mongod of the application below listens.
+const Settings = struct { uri: []const u8 };
+
+/// An application whose client App builds, starts and stops.
+const MongoRoot = struct {
+    pub const module: core.app.Module = .{
+        .factories = &.{Mongo},
+        .values = &.{*const Settings},
+    };
+
+    pub const Mongo = struct {
+        pub fn mongoClient(gpa: std.mem.Allocator, io: Io, settings: *const Settings) !Client {
+            return .init(gpa, io, .{ .uri = settings.uri });
+        }
+    };
+};
+
+test "mongo.Client under core.App: start and stop" {
+    try within5s(testing.io, underApp, .{testing.io});
+}
+
+fn underApp(io: Io) !void {
+    var served: Served = undefined;
+    try served.start(io, .zero);
+    defer served.stop(io);
+    const settings: Settings = .{ .uri = try served.uri("") };
+    var app = try core.App(MongoRoot).init(testing.allocator, io, .{&settings}, .{});
+    defer app.deinit();
+    try app.start();
+    const driver: *Client = app.get(Client);
+    try run(io, driver, ping, null, "");
+    app.requestStop();
+    try app.wait();
+    try testing.expectEqual(core.app.State.stopped, app.state());
+    try testing.expectEqual(null, app.failure());
+    try run(io, driver, ping, error.Closed, "the client is closed");
+}

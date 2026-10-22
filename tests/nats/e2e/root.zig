@@ -166,4 +166,5 @@ test {
     _ = @import("messaging.zig");
     _ = @import("rpc.zig");
     _ = @import("reliability.zig");
+    _ = @import("app_methods.zig");
 }

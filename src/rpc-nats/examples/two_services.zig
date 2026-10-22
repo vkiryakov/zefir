@@ -68,14 +68,13 @@ pub fn main(init: std.process.Init) !void {
     });
     defer users_nc.deinit();
     try users_nc.connect();
-    var users_adapter: rpc_nats.ZefirNats = .{ .client = &users_nc };
-    var users_bus: rpc_nats.Transport = try .init(gpa, users_adapter.conn(), .{ .inbox_prefix = "_INBOX_users" });
+    var users_bus: rpc_nats.Transport = try .init(gpa, &users_nc, .{ .inbox_prefix = "_INBOX_users" });
     defer users_bus.deinit(io);
     var repo: users.UserRepository = .init(gpa);
     defer repo.deinit();
     _ = try repo.insert(.root, io, init.arena.allocator(), "Ada Lovelace", "ada@example.com");
     var handler: users.UserHandler = .{ .repo = &repo };
-    var server = try rpc.Server.init(gpa, .{ .transport = users_bus.serverTransport(), .handlers = .{&handler} });
+    var server = try rpc.Server.init(gpa, .{ .handlers = .{&handler} }, .{ .transport = users_bus.serverTransport() });
     defer server.deinit(io);
     try server.start(io);
     logger.scoped("users").info("Serving", .{ .nats_user = config.users.nats_user });
@@ -88,21 +87,19 @@ pub fn main(init: std.process.Init) !void {
     });
     defer orders_nc.deinit();
     try orders_nc.connect();
-    var orders_adapter: rpc_nats.ZefirNats = .{ .client = &orders_nc };
-    var orders_bus: rpc_nats.Transport = try .init(gpa, orders_adapter.conn(), .{ .inbox_prefix = "_INBOX_orders" });
+    var orders_bus: rpc_nats.Transport = try .init(gpa, &orders_nc, .{ .inbox_prefix = "_INBOX_orders" });
     defer orders_bus.deinit(io);
-    var client = try rpc.Client.init(gpa, .{ .transport = orders_bus.clientTransport() });
+    var client = try rpc.Client.init(gpa, .{}, .{ .transport = orders_bus.clientTransport() });
     defer client.deinit();
     const orders_log = logger.scoped("orders");
     try getUser(&client, io, orders_log, "_INBOX_orders");
 
     // The same NATS user with the default inbox, _INBOX: the broker refuses
     // the subscription, and the first call says so. A second transport on
-    // one connection takes an adapter of its own.
-    var default_adapter: rpc_nats.ZefirNats = .{ .client = &orders_nc };
-    var default_bus: rpc_nats.Transport = try .init(gpa, default_adapter.conn(), .{});
+    // one connection makes an adapter of its own, as every init does.
+    var default_bus: rpc_nats.Transport = try .init(gpa, &orders_nc, .{});
     defer default_bus.deinit(io);
-    var default_client = try rpc.Client.init(gpa, .{ .transport = default_bus.clientTransport() });
+    var default_client = try rpc.Client.init(gpa, .{}, .{ .transport = default_bus.clientTransport() });
     defer default_client.deinit();
     try getUser(&default_client, io, orders_log, "_INBOX");
 }

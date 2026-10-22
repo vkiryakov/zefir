@@ -34,11 +34,11 @@ pub fn main(init: std.process.Init) !void {
     var memory: rpc.testing.MemoryTransport = try .init(gpa, .{});
     defer memory.deinit(io);
     var users: Users = .{};
-    var server = try rpc.Server.init(gpa, .{ .transport = memory.serverTransport(), .handlers = .{&users} });
+    var server = try rpc.Server.init(gpa, .{ .handlers = .{&users} }, .{ .transport = memory.serverTransport() });
     defer server.deinit(io);
     try server.start(io);
 
-    var client = try rpc.Client.init(gpa, .{ .transport = memory.clientTransport() });
+    var client = try rpc.Client.init(gpa, .{}, .{ .transport = memory.clientTransport() });
     defer client.deinit();
     for ([_]u64{ 42, 7 }) |id| {
         var result = try client.call(io, .root, UserApi.getUser, .{ .id = id }, .{});

@@ -66,7 +66,6 @@ pub const fast_reconnect: nats.ReconnectOptions = .{ .min_delay = .fromMilliseco
 /// One service on NATS. Initialize in place; it stays where it is.
 pub const Node = struct {
     nc: nats.Client,
-    adapter: rpc_nats.ZefirNats,
     bus: rpc_nats.Transport,
     server: ?rpc.Server,
     client: rpc.Client,
@@ -81,16 +80,15 @@ pub const Node = struct {
         });
         errdefer n.nc.deinit();
         try n.nc.connect();
-        n.adapter = .{ .client = &n.nc };
-        n.bus = try .init(testing.allocator, n.adapter.conn(), options);
+        n.bus = try .init(testing.allocator, &n.nc, options);
         errdefer n.bus.deinit(io);
-        n.client = try .init(testing.allocator, .{ .transport = n.bus.clientTransport() });
+        n.client = try .init(testing.allocator, .{}, .{ .transport = n.bus.clientTransport() });
         n.server = null;
     }
 
     /// Serves `handler` on the transport.
     pub fn serve(n: *Node, io: Io, handler: anytype) !void {
-        n.server = try rpc.Server.init(testing.allocator, .{ .transport = n.bus.serverTransport(), .handlers = .{handler} });
+        n.server = try rpc.Server.init(testing.allocator, .{ .handlers = .{handler} }, .{ .transport = n.bus.serverTransport() });
         errdefer {
             n.server.?.deinit(io);
             n.server = null;

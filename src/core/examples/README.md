@@ -2,9 +2,14 @@
 
 **The execution context of Zefir services.** One small value carries an
 operation's deadline, its cancellation token and its W3C trace identity
-through your code — without allocating, reading a clock or doing I/O.
-Transports (RPC, HTTP, job queues) create it; your code passes it down and
-checks it.
+through your code. Transports (RPC, HTTP, job queues) create it; your code
+passes it down and checks it. Like every primitive of core, it never
+allocates, reads a clock or does I/O.
+
+core also holds `zefir.App`, the root of an application: it builds the
+application out of modules and starts and stops its servers. App is the one
+exception to the rule above, since it holds memory, runs tasks and reads the
+clock. **[Read the guide of App →](app/README.md)**
 
 ```zig
 var token: core.CancellationToken = .init; // owned by the request
@@ -42,7 +47,7 @@ Examples that `zig build test` compiles and runs:
 Add Zefir to your `build.zig.zon`; core ships since v0.2.0:
 
 ```sh
-zig fetch --save git+https://github.com/vkiryakov/zefir#v0.9.0
+zig fetch --save git+https://github.com/vkiryakov/zefir#v0.10.0
 ```
 
 Then import the `zefir-core` module in `build.zig`:
@@ -175,8 +180,8 @@ returned once by a cancelation point and follows `recancel` and
 ## Deadlines and clocks
 
 Deadlines are `std.Io.Timestamp` values on the **`std.Io.Clock.awake`**
-clock: monotonic and not affected by changes to the system time. core never
-reads the clock — you pass `now`:
+clock: monotonic and not affected by changes to the system time. The
+primitives of core never read the clock — you pass `now`:
 
 ```zig
 const now = std.Io.Clock.awake.now(io);
@@ -334,12 +339,13 @@ state.
 | What | Limit |
 | --- | --- |
 | `Context` | 96 bytes, passed by value |
-| Allocation, clock reads, I/O | none |
+| Allocation, clock reads, I/O | none in `Context`, `Deadline`, `CancellationToken`, the trace types and `ErrorCode`; `App` allocates, reads the clock and runs tasks |
 | traceparent written | 55 characters, version `00` |
 | tracestate | 32 entries; key and value up to 256 characters; no total length limit |
 
 Not in core: creating spans, sampling, exporting, generating ids, changing
-or truncating a tracestate, linked tokens, waking waiting tasks, baggage.
+or truncating a tracestate, linked tokens, a token that wakes waiting
+tasks, baggage.
 
 ## Benchmarks
 

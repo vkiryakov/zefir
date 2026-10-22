@@ -113,7 +113,7 @@ test "a request of a zefir client reaches the engine; the response goes to its r
     const io = testing.io;
     var fake: FakeConn = .init(testing.allocator, .{});
     defer fake.deinit(io);
-    var bus: Transport = try .init(testing.allocator, fake.conn(), .{});
+    var bus: Transport = try .initConn(testing.allocator, fake.conn(), .{});
     defer bus.deinit(io);
     var recorder: RecordingDispatcher = try .init(testing.allocator, .{ .routes = &routes });
     defer recorder.deinit(io);
@@ -161,7 +161,7 @@ test "a request of nats req: no zefir headers, names in any case" {
     const io = testing.io;
     var fake: FakeConn = .init(testing.allocator, .{});
     defer fake.deinit(io);
-    var bus: Transport = try .init(testing.allocator, fake.conn(), .{});
+    var bus: Transport = try .initConn(testing.allocator, fake.conn(), .{});
     defer bus.deinit(io);
     var recorder: RecordingDispatcher = try .init(testing.allocator, .{ .routes = &routes });
     defer recorder.deinit(io);
@@ -195,7 +195,7 @@ test "a request without a reply subject, or with one outside reply_prefixes, is 
     const io = testing.io;
     var fake: FakeConn = .init(testing.allocator, .{});
     defer fake.deinit(io);
-    var bus: Transport = try .init(testing.allocator, fake.conn(), .{});
+    var bus: Transport = try .initConn(testing.allocator, fake.conn(), .{});
     defer bus.deinit(io);
     var recorder: RecordingDispatcher = try .init(testing.allocator, .{ .routes = &routes });
     defer recorder.deinit(io);
@@ -216,7 +216,7 @@ test "a request without a reply subject, or with one outside reply_prefixes, is 
     // Another prefix, by the options.
     var other_fake: FakeConn = .init(testing.allocator, .{});
     defer other_fake.deinit(io);
-    var other: Transport = try .init(testing.allocator, other_fake.conn(), .{ .reply_prefixes = &.{ "_INBOX", "replies" } });
+    var other: Transport = try .initConn(testing.allocator, other_fake.conn(), .{ .reply_prefixes = &.{ "_INBOX", "replies" } });
     defer other.deinit(io);
     var other_recorder: RecordingDispatcher = try .init(testing.allocator, .{ .routes = &routes });
     defer other_recorder.deinit(io);
@@ -229,7 +229,7 @@ test "refusals of the engine and of the transport arrive with Zefir-Rpc-Refused"
     const io = testing.io;
     var fake: FakeConn = .init(testing.allocator, .{});
     defer fake.deinit(io);
-    var bus: Transport = try .init(testing.allocator, fake.conn(), .{});
+    var bus: Transport = try .initConn(testing.allocator, fake.conn(), .{});
     defer bus.deinit(io);
     var recorder: RecordingDispatcher = try .init(testing.allocator, .{ .routes = &routes });
     defer recorder.deinit(io);
@@ -274,7 +274,7 @@ test "start fails cleanly: denied subjects, no link, no answer to the flush" {
     {
         var fake: FakeConn = .init(testing.allocator, .{ .deny_subscribe = &.{"users.v1.listUsers"} });
         defer fake.deinit(io);
-        var bus: Transport = try .init(testing.allocator, fake.conn(), .{});
+        var bus: Transport = try .initConn(testing.allocator, fake.conn(), .{});
         defer bus.deinit(io);
         var recorder: RecordingDispatcher = try .init(testing.allocator, .{ .routes = &routes });
         defer recorder.deinit(io);
@@ -287,7 +287,7 @@ test "start fails cleanly: denied subjects, no link, no answer to the flush" {
     {
         var fake: FakeConn = .init(testing.allocator, .{});
         defer fake.deinit(io);
-        var bus: Transport = try .init(testing.allocator, fake.conn(), .{});
+        var bus: Transport = try .initConn(testing.allocator, fake.conn(), .{});
         defer bus.deinit(io);
         var recorder: RecordingDispatcher = try .init(testing.allocator, .{ .routes = &routes });
         defer recorder.deinit(io);
@@ -296,7 +296,7 @@ test "start fails cleanly: denied subjects, no link, no answer to the flush" {
         try testing.expectError(error.Unavailable, recorder.start(io, bus.serverTransport()));
         fake.reconnect(io);
         fake.hangFlush(io, true);
-        var quick: Transport = try .init(testing.allocator, fake.conn(), .{ .flush_timeout = .fromMilliseconds(50) });
+        var quick: Transport = try .initConn(testing.allocator, fake.conn(), .{ .flush_timeout = .fromMilliseconds(50) });
         defer quick.deinit(io);
         const began = std.Io.Clock.awake.now(io);
         try testing.expectError(error.Unavailable, recorder.start(io, quick.serverTransport()));
@@ -372,7 +372,7 @@ test "a start that cannot start every receiving task takes no request with those
     var fake: FakeConn = .init(testing.allocator, .{});
     defer fake.deinit(io);
     var adapter: RequestOnFlush = .{ .fake = &fake, .armed = true };
-    var bus: Transport = try .init(testing.allocator, .init(&adapter), .{});
+    var bus: Transport = try .initConn(testing.allocator, .init(&adapter), .{});
     defer bus.deinit(io);
     const three = [_]rpc.Route{ get_user, list_users, .{ .service = "users", .version = 1, .method = "deleteUser" } };
     var recorder: RecordingDispatcher = try .init(testing.allocator, .{ .routes = &three });
@@ -397,7 +397,7 @@ test "a route without a NATS subject is a configuration error" {
     const io = testing.io;
     var fake: FakeConn = .init(testing.allocator, .{});
     defer fake.deinit(io);
-    var bus: Transport = try .init(testing.allocator, fake.conn(), .{});
+    var bus: Transport = try .initConn(testing.allocator, fake.conn(), .{});
     defer bus.deinit(io);
     var recorder: RecordingDispatcher = try .init(testing.allocator, .{ .routes = &.{ get_user, .{ .service = "_INBOX", .version = 1, .method = "x" } } });
     defer recorder.deinit(io);
@@ -412,7 +412,7 @@ test "lifecycle: a second start is AddressInUse; drain and close twice; start ag
     const io = testing.io;
     var fake: FakeConn = .init(testing.allocator, .{});
     defer fake.deinit(io);
-    var bus: Transport = try .init(testing.allocator, fake.conn(), .{ .subject_prefix = "shop" });
+    var bus: Transport = try .initConn(testing.allocator, fake.conn(), .{ .subject_prefix = "shop" });
     defer bus.deinit(io);
     var recorder: RecordingDispatcher = try .init(testing.allocator, .{ .routes = &routes });
     defer recorder.deinit(io);
@@ -456,7 +456,7 @@ test "receiving: a slow consumer is counted, a dropped link waited out, a closed
     defer testing.log_level = log_level;
     var fake: FakeConn = .init(testing.allocator, .{});
     defer fake.deinit(io);
-    var bus: Transport = try .init(testing.allocator, fake.conn(), .{});
+    var bus: Transport = try .initConn(testing.allocator, fake.conn(), .{});
     defer bus.deinit(io);
     var recorder: RecordingDispatcher = try .init(testing.allocator, .{ .routes = &routes });
     defer recorder.deinit(io);
@@ -505,7 +505,7 @@ test "receiving: a revoked permission stops the server with AccessDenied" {
     defer testing.log_level = log_level;
     var fake: FakeConn = .init(testing.allocator, .{});
     defer fake.deinit(io);
-    var bus: Transport = try .init(testing.allocator, fake.conn(), .{});
+    var bus: Transport = try .initConn(testing.allocator, fake.conn(), .{});
     defer bus.deinit(io);
     var recorder: RecordingDispatcher = try .init(testing.allocator, .{ .routes = &routes });
     defer recorder.deinit(io);
@@ -532,7 +532,7 @@ test "receiving: a subscription that ends while the server runs stops it with Un
     const io = testing.io;
     var fake: FakeConn = .init(testing.allocator, .{});
     defer fake.deinit(io);
-    var bus: Transport = try .init(testing.allocator, fake.conn(), .{});
+    var bus: Transport = try .initConn(testing.allocator, fake.conn(), .{});
     defer bus.deinit(io);
     var recorder: RecordingDispatcher = try .init(testing.allocator, .{ .routes = &routes });
     defer recorder.deinit(io);
@@ -551,7 +551,7 @@ test "Reply.send without a link to the broker: Closed" {
     const io = testing.io;
     var fake: FakeConn = .init(testing.allocator, .{});
     defer fake.deinit(io);
-    var bus: Transport = try .init(testing.allocator, fake.conn(), .{});
+    var bus: Transport = try .initConn(testing.allocator, fake.conn(), .{});
     defer bus.deinit(io);
     var recorder: RecordingDispatcher = try .init(testing.allocator, .{ .routes = &routes });
     defer recorder.deinit(io);
@@ -572,7 +572,7 @@ test "Reply.send: over max_payload is ResponseTooLarge, a small failure goes aft
     const io = testing.io;
     var fake: FakeConn = .init(testing.allocator, .{ .max_payload = 512 });
     defer fake.deinit(io);
-    var bus: Transport = try .init(testing.allocator, fake.conn(), .{});
+    var bus: Transport = try .initConn(testing.allocator, fake.conn(), .{});
     defer bus.deinit(io);
     var recorder: RecordingDispatcher = try .init(testing.allocator, .{ .routes = &routes });
     defer recorder.deinit(io);
@@ -611,7 +611,7 @@ test "close straight from running: the subscriptions it drains do not stop the s
     const io = testing.io;
     var fake: FakeConn = .init(testing.allocator, .{});
     defer fake.deinit(io);
-    var bus: Transport = try .init(testing.allocator, fake.conn(), .{});
+    var bus: Transport = try .initConn(testing.allocator, fake.conn(), .{});
     defer bus.deinit(io);
     for (0..20) |_| {
         var recorder: RecordingDispatcher = try .init(testing.allocator, .{ .routes = &many_routes });
@@ -629,7 +629,7 @@ test "close while a request is in admission: the call is abandoned and refused" 
     const io = testing.io;
     var fake: FakeConn = .init(testing.allocator, .{});
     defer fake.deinit(io);
-    var bus: Transport = try .init(testing.allocator, fake.conn(), .{});
+    var bus: Transport = try .initConn(testing.allocator, fake.conn(), .{});
     defer bus.deinit(io);
     var recorder: RecordingDispatcher = try .init(testing.allocator, .{ .routes = &routes, .admit = .{ .hold = .fromMilliseconds(200) } });
     defer recorder.deinit(io);
@@ -679,7 +679,7 @@ test "hostile headers: 10 000 of them in 64 KiB, or one of 60 KiB, are refused b
     var fake: FakeConn = .init(testing.allocator, .{});
     defer fake.deinit(io);
     var counting: Counting = .{ .parent = testing.allocator };
-    var bus: Transport = try .init(counting.allocator(), fake.conn(), .{});
+    var bus: Transport = try .initConn(counting.allocator(), fake.conn(), .{});
     defer bus.deinit(io);
     var state: u8 = 0;
     const methods = [_]rpc.Method{.{ .route = get_user, .handler = .{ .ptr = &state, .handle = Echo.handle } }};
@@ -714,5 +714,5 @@ test "hostile headers: 10 000 of them in 64 KiB, or one of 60 KiB, are refused b
     // A request of the same size limits passes.
     try raw.call("users.v1.getUser", 2, &.{}, "echo");
     try testing.expectEqualStrings("echo", (try raw.reply(arena.allocator())).body);
-    try server.shutdown(io);
+    try server.shutdown(io, shared.far(io));
 }
