@@ -1574,6 +1574,373 @@ $ zig build run
   commands](#blocking-commands-and-the-reliable-queue) do. A typed read
   takes one stream; several at once go through `cmd.raw`.
 
+## Pub/sub
+
+Pub/sub sends a message to whoever listens at that moment: PUBLISH puts
+it on a channel, and every subscriber of the channel, or of a pattern that
+matches its name, gets it. The server keeps no message, so a subscriber
+that was not there misses it: work that must not be missed goes in a
+stream or a list.
+
+`notifications.zig` has a listener in a task of its own:
+
+```zig
+//! The notifications of the shop, with pub/sub: the packer publishes on a
+//! channel that an order is ready, the shop publishes its offers on
+//! channels of a pattern, and a listener, in a task of its own, hears what
+//! it subscribed to. A message reaches only the subscribers that listen at
+//! that moment: the server keeps none of them.
+//!
+//! Settings, from the environment:
+//!
+//!   APP_REDIS_URL        the server; redis://127.0.0.1:6379 by default
+//!   APP_REDIS_PASSWORD   the password of the user of the URL, or of the
+//!                        user default, if the server wants one
+//!
+//! In tests/redis, `zig build example-notifications` runs it against the
+//! servers of the repository's docker-compose.yml.
+
+const std = @import("std");
+const confy = @import("confy");
+const core = @import("core");
+const log = @import("log");
+const redis = @import("redis");
+const zio = @import("zio");
+const cmd = redis.cmd;
+
+pub const std_options: std.Options = .{ .logFn = log.stdLogFn };
+
+const Config = struct {
+    redis: struct {
+        url: []const u8 = "redis://127.0.0.1:6379",
+        password: ?confy.Secret = null,
+    } = .{},
+};
+
+pub fn main(init: std.process.Init) !void {
+    var config: Config = undefined;
+    confy.loadOrExit(init.arena.allocator(), &config, .{
+        .io = init.io,
+        .environ = init.environ_map,
+        .env_prefix = "APP_",
+        .sources = &.{.osEnv()},
+    });
+    const logger: log.Logger = try .init(init.gpa, init.io, .{ .format = .text });
+    defer logger.deinit();
+    logger.installStdLog();
+    const app = logger.scoped("app");
+    const rt = try zio.Runtime.init(init.gpa, .{ .executors = .auto });
+    defer rt.deinit();
+    const io = rt.io();
+
+    var client: redis.Client = try .init(init.gpa, io, .{
+        .url = config.redis.url,
+        .password = if (config.redis.password) |password| password.expose() else null,
+    });
+    defer client.deinit();
+    try client.connect(io, within(io, .fromSeconds(10)), null);
+    defer client.close(io);
+    const op: redis.OperationContext = .of(within(io, .fromSeconds(10)));
+
+    // The listener: a channel by its name, and channels by a pattern. It
+    // has a connection of its own, and subscribe returns once the server
+    // confirmed each name. It must stay where it is until close.
+    var sub = try client.subscribe(io, op, .{ .channels = &.{"orders:ready"}, .patterns = &.{"offers:*"} });
+    defer sub.close(io);
+    app.info("Subscribed", .{ .subscribers = client.stats().subscribers });
+    var heard_all: std.Io.Event = .unset;
+    var listener = try io.concurrent(listen, .{ io, &sub, app, &heard_all });
+    defer listener.cancel(io) catch {};
+
+    // PUBLISH answers how many subscribers got the message.
+    var delivered: u64 = 0;
+    delivered += try client.run(io, op, cmd.publish("orders:ready", "order 1001 is packed"), .{});
+    delivered += try client.run(io, op, cmd.publish("offers:beans", "two packs for the price of one"), .{});
+    delivered += try client.run(io, op, cmd.publish("offers:cups", "a cup with every pack"), .{});
+    // Nobody listens to this channel: the message goes nowhere.
+    const unheard = try client.run(io, op, cmd.publish("news", "open at 8 tomorrow"), .{});
+
+    // Once the listener heard the three, close the subscriber from here:
+    // its next in the other task returns null.
+    try heard_all.wait(io);
+    sub.close(io);
+    try listener.await(io);
+    app.info("Published", .{ .delivered = delivered, .unheard = unheard, .subscribers = client.stats().subscribers });
+}
+
+/// A context whose deadline is `budget` away.
+fn within(io: std.Io, budget: std.Io.Duration) core.Context {
+    return core.Context.root.withDeadline(.after(std.Io.Clock.awake.now(io), budget));
+}
+
+/// Logs every message of `sub` until it closes, and sets `heard_all` once
+/// three came. Keep such a loop quick: a subscriber that falls behind the
+/// messages, the server cuts off.
+fn listen(io: std.Io, sub: *redis.Subscriber, app: log.Logger, heard_all: *std.Io.Event) redis.Error!void {
+    var heard: usize = 0;
+    while (try sub.next(io)) |message| {
+        // The message lives until the next call of next: copy what must
+        // last longer.
+        app.info("Heard", .{ .channel = message.channel, .pattern = message.pattern, .payload = message.payload });
+        heard += 1;
+        if (heard == 3) heard_all.set(io);
+    }
+    app.info("Subscriber closed", .{ .heard = heard });
+}
+```
+
+```text
+$ zig build run
+2026-10-22T05:28:18.076Z INFO  [app] Subscribed subscribers=1
+2026-10-22T05:28:18.096Z INFO  [app] Heard channel=orders:ready pattern=null payload="order 1001 is packed"
+2026-10-22T05:28:18.115Z INFO  [app] Heard channel=offers:beans pattern=offers:* payload="two packs for the price of one"
+2026-10-22T05:28:18.125Z INFO  [app] Heard channel=offers:cups pattern=offers:* payload="a cup with every pack"
+2026-10-22T05:28:18.143Z INFO  [app] Subscriber closed heard=3
+2026-10-22T05:28:18.143Z INFO  [app] Published delivered=3 unheard=0 subscribers=0
+```
+
+- **`client.subscribe`** opens a connection of its own, outside the pool,
+  with the handshake of the pool's connections, subscribes to the channels
+  and the patterns, and returns once the server has confirmed each, within
+  the deadline of `op`. The subscriber must stay where it is, as the client
+  must; `stats().subscribers` counts the open ones.
+- **`next(io)`** waits for the next message without a deadline: a
+  subscriber lives long. The message lives until the next `next`, and
+  `pattern` is the pattern it matched, null for a channel subscribed by its
+  name.
+- **`close(io)`** may come from any task: the `next` that waits in another
+  task returns null, and `close` frees the subscriber once it has. The
+  client's `close` ends every subscriber the same way, and their own
+  `close` then frees them.
+- **The channels stay as they were made.** To change them, close the
+  subscriber and subscribe again.
+- **Silence.** After `idle_ping` without a word from the server, 15 s by
+  default, the subscriber sends PING, and when nothing comes within as
+  long again, `next` is `ConnectionLost`: without TCP keepalive, a dead
+  connection would be silent forever.
+- **A broken connection** is `ConnectionLost`, and `next` after it is
+  `Closed`. Nothing subscribes again by itself, and the messages published
+  meanwhile are lost: close the subscriber and subscribe again.
+- **A slow subscriber** the server cuts off, once the messages it has not
+  read pass `client-output-buffer-limit pubsub`: 32 MiB, or 8 MiB for a
+  minute, by default. Keep the loop of `next` quick, and hand the messages
+  to a queue of your own.
+
+## Errors and what is safe to retry
+
+Every call fails with one of 16 errors, `redis.Error`, and
+`redis.outcome(err)` says whether the server may have run the command:
+
+- `.not_sent`: nothing reached the server, and the call is safe to make
+  again;
+- `.may_have_executed`: the server may have run it, wholly or in part:
+  make it again only if running it twice does no harm.
+
+Safe to make again is not the same as worth making again. A call that is
+`.not_sent` goes through only once what stopped it has changed:
+
+- **`Unavailable` and `PoolExhausted`** are worth a retry after a pause:
+  the server may be back, or a connection free, by then;
+- **`DeadlineExceeded` and `Cancelled`** only with a new context: under the
+  same one the call stops again at once;
+- **`InvalidArgument`, `Unsupported`, `Closed` and
+  `AuthenticationFailed`** fail the same way however often the call goes,
+  until the call, the options, the client or the user changes.
+
+| Error | Outcome | When |
+|---|---|---|
+| `InvalidArgument` | not sent | the call breaks a rule of the client: bad options or URL, an empty list, a duration under 1 ms, NaN, a command of the connection in `raw`, a reply that needs memory without `.allocator`; the database of the URL is not on the server |
+| `Unsupported` | not sent | what v0.1 does not do: `rediss://`, options in the URL; a server other than Redis 7.2 or later or Valkey 8 or later, in cluster or Sentinel mode |
+| `Closed` | not sent | the client or the subscriber was closed, or the `Conn` lost its connection with an error before |
+| `Unavailable` | not sent | no connection: the server is not there, or is full, or refused it; the pool is paused after a clear; `connect` has not succeeded |
+| `AuthenticationFailed` | not sent | the server refused the user or the password (WRONGPASS), or wants a password that it did not get (NOAUTH) |
+| `PoolExhausted` | not sent | the deadline came while the call waited in line for a connection |
+| `DeadlineExceeded` | not sent | less than 1 ms, or than a round trip, was left of the deadline before sending, or 150 ms or less for a blocking command; or the deadline passed while a connection opened |
+| `Cancelled` | not sent | the token or the task was canceled before sending |
+| `ConnectionLost` | may have run | the connection broke after the command started to go out, or `close` cut it; a subscriber lost its connection |
+| `Timeout` | may have run | the deadline passed after the command went out |
+| `Interrupted` | may have run | the task was canceled while the command was out |
+| `ProtocolViolation` | may have run | the reply broke RESP3 |
+| `ReplyTooLarge` | may have run | the reply was larger than `max_reply_bytes`, or nested deeper than 64 levels |
+| `ServerError` | may have run | the server answered with an error |
+| `UnexpectedReply` | may have run | the reply does not fit the type that the call named |
+| `OutOfMemory` | may have run | always: where the memory ran out is unknown |
+
+A Zig error carries no data, so the details go to the `redis.Diagnostics`
+that a call gets in `.diagnostics`: `message()`, the server's error as it
+sent it or the client's own text; `code()`, the first word of the server's
+error, such as `WRONGTYPE`, and `isCode(name)` to test it; `phase`, where
+the error happened; and for a pipeline or a transaction `command`, the
+index of the command it is about, and `answered`, the replies that came
+before a break. Every call starts it afresh. A subscriber and an iterator
+keep their own, for the errors of their `next`. The client's texts never
+hold arguments, values or passwords; a server's text may quote arguments,
+as `ERR unknown command` does, so log it where such values may go.
+
+**A `ServerError` that did not run.** `ServerError` is "may have run", as
+an error in the middle of a Lua script leaves the writes it made. Some
+codes, though, the server gives before it runs a command at all, and with
+them even a command that must not run twice is safe to make again:
+
+| Code | What the server says |
+|---|---|
+| `NOAUTH` | the connection has not authenticated |
+| `NOPERM` | the user may not run the command, or touch one of its keys |
+| `OOM` | the command would take more memory than `maxmemory` gives the server |
+| `MISCONF` | the server cannot save its data to disk, and refuses writes |
+| `NOREPLICAS` | fewer replicas are in reach than `min-replicas-to-write` asks |
+| `READONLY` | the server is a replica, which takes no writes |
+| `MASTERDOWN` | the replica lost its master, and serves no stale data |
+| `LOADING` | the server is still loading its data from disk |
+| `BUSY` | a script has run too long, and holds the server |
+| `EXECABORT` | the server dropped a whole transaction: none of it ran |
+
+`outcome(error.ServerError)` stays `.may_have_executed` with each of them:
+the class belongs to the name of the error, and your code refines it by
+the code, with `diagnostics.isCode("EXECABORT")` and the others.
+
+`errors.zig` makes a few calls fail on purpose:
+
+```zig
+//! The errors of calls, against a server: what each says, and whether the
+//! command may have run. A counter that is a list, a number that is text,
+//! calls that break the client's rules, and a transaction that the server
+//! drops whole. Each run starts afresh.
+//!
+//! Settings, from the environment:
+//!
+//!   APP_REDIS_URL        the server; redis://127.0.0.1:6379 by default
+//!   APP_REDIS_PASSWORD   the password of the user of the URL, or of the
+//!                        user default, if the server wants one
+//!
+//! In tests/redis, `zig build example-errors` runs it against the servers
+//! of the repository's docker-compose.yml.
+
+const std = @import("std");
+const confy = @import("confy");
+const core = @import("core");
+const log = @import("log");
+const redis = @import("redis");
+const zio = @import("zio");
+const cmd = redis.cmd;
+
+pub const std_options: std.Options = .{ .logFn = log.stdLogFn };
+
+const Config = struct {
+    redis: struct {
+        url: []const u8 = "redis://127.0.0.1:6379",
+        password: ?confy.Secret = null,
+    } = .{},
+};
+
+pub fn main(init: std.process.Init) !void {
+    var config: Config = undefined;
+    confy.loadOrExit(init.arena.allocator(), &config, .{
+        .io = init.io,
+        .environ = init.environ_map,
+        .env_prefix = "APP_",
+        .sources = &.{.osEnv()},
+    });
+    const logger: log.Logger = try .init(init.gpa, init.io, .{ .format = .text });
+    defer logger.deinit();
+    logger.installStdLog();
+    const app = logger.scoped("app");
+    const rt = try zio.Runtime.init(init.gpa, .{ .executors = .auto });
+    defer rt.deinit();
+    const io = rt.io();
+
+    var client: redis.Client = try .init(init.gpa, io, .{
+        .url = config.redis.url,
+        .password = if (config.redis.password) |password| password.expose() else null,
+    });
+    defer client.deinit();
+    try client.connect(io, within(io, .fromSeconds(10)), null);
+    defer client.close(io);
+
+    const op: redis.OperationContext = .of(within(io, .fromSeconds(10)));
+    _ = try client.run(io, op, cmd.del(&.{ "motd", "orders:paid", "stock:coffee" }), .{});
+    try client.run(io, op, cmd.set("motd", "Fresh beans from Ethiopia", .{}), .{});
+    _ = try client.run(io, op, cmd.rpush("orders:paid", .{"ann"}), .{});
+
+    var d: redis.Diagnostics = .{};
+
+    // ServerError: the server refused the command, with its code first. A
+    // list is no counter.
+    if (client.run(io, op, cmd.incr("orders:paid"), .{ .diagnostics = &d })) |_| {
+        app.info("Counted", .{});
+    } else |err| report(app, "A count", err, &d);
+
+    // UnexpectedReply: the reply does not fit the type that the call named,
+    // a number here. The client read the reply to its end, so the
+    // connection goes back to the pool.
+    if (client.run(io, op, cmd.get(i64, "motd"), .{ .diagnostics = &d })) |_| {
+        app.info("A number", .{});
+    } else |err| report(app, "A read", err, &d);
+
+    // InvalidArgument: the client stops a call that breaks its rules before
+    // anything goes out: a delete of no keys; a command that would change
+    // the connection for the calls after it.
+    if (client.run(io, op, cmd.del(&.{}), .{ .diagnostics = &d })) |_| {
+        app.info("Deleted", .{});
+    } else |err| report(app, "A delete", err, &d);
+    if (client.run(io, op, cmd.raw(void, .{ "SELECT", 1 }), .{ .diagnostics = &d })) |_| {
+        app.info("Selected", .{});
+    } else |err| report(app, "A raw command", err, &d);
+
+    // EXECABORT: the server refused a command of a transaction as it queued
+    // it, and dropped the whole transaction. The class of ServerError says
+    // that it may have run; its code says that none of it did.
+    var conn = try client.acquire(io, op);
+    defer conn.release(io);
+    if (conn.transaction(io, op, .{
+        cmd.set("stock:coffee", 10, .{}),
+        cmd.raw(void, .{ "RESTOCK", "coffee" }),
+    }, .{ .diagnostics = &d })) |_| {
+        app.info("Restocked", .{});
+    } else |err| {
+        report(app, "A transaction", err, &d);
+        if (d.refused()) |refused| app.info("Refused", .{ .command = d.command, .code = refused.code });
+        app.info("Dropped whole", .{ .stock_set = try client.run(io, op, cmd.exists(&.{"stock:coffee"}), .{}) });
+    }
+}
+
+/// A context whose deadline is `budget` away.
+fn within(io: std.Io, budget: std.Io.Duration) core.Context {
+    return core.Context.root.withDeadline(.after(std.Io.Clock.awake.now(io), budget));
+}
+
+/// Logs `err` of `what`, the server's code, if a server gave it, the
+/// details, and whether the command may have run.
+fn report(app: log.Logger, comptime what: []const u8, err: redis.Error, d: *const redis.Diagnostics) void {
+    app.warn(what ++ " failed", .{ .reason = err, .outcome = redis.outcome(err), .code = d.code(), .details = d.message() });
+}
+```
+
+```text
+$ zig build run
+2026-10-22T05:28:20.285Z WARN  [app] A count failed reason=ServerError outcome=may_have_executed code=WRONGTYPE details="WRONGTYPE Operation against a key holding the wrong kind of value"
+2026-10-22T05:28:20.300Z WARN  [app] A read failed reason=UnexpectedReply outcome=may_have_executed code="" details="the reply is a bulk string of 25 bytes, and the call asked for ?i64"
+2026-10-22T05:28:20.300Z WARN  [app] A delete failed reason=InvalidArgument outcome=not_sent code="" details="redis.cmd.del: no keys: DEL takes one or more"
+2026-10-22T05:28:20.300Z WARN  [app] A raw command failed reason=InvalidArgument outcome=not_sent code="" details="redis.cmd.raw: SELECT would send the later calls on the connection to another database: put the database in the path of the URL"
+2026-10-22T05:28:20.407Z WARN  [app] A transaction failed reason=ServerError outcome=may_have_executed code=EXECABORT details="EXECABORT Transaction discarded because of previous errors."
+2026-10-22T05:28:20.407Z INFO  [app] Refused command=1 code=ERR
+2026-10-22T05:28:20.450Z INFO  [app] Dropped whole stock_set=0
+```
+
+- **`ServerError`**: a list is no counter. The code is `WRONGTYPE`, and the
+  text is the server's.
+- **`UnexpectedReply`**: the reply was a string of 25 bytes, and the call
+  asked for a number. The client read the whole reply, so the connection
+  went back to the pool, fine.
+- **`InvalidArgument`** stopped two calls before anything went out: a
+  delete of no keys, and SELECT through `raw`, which would have sent the
+  later calls on that connection to another database.
+- **EXECABORT**: the server refused RESTOCK, a command it does not know, as
+  it queued it, and dropped the whole transaction. The code of the call is
+  EXECABORT; `diagnostics.command` is the index of the refused command,
+  and `diagnostics.refused()` its own code and text, `ERR` here. The SET
+  before it never ran.
+
 ## Deadlines and cancellation
 
 A call takes a `redis.OperationContext`, whose `ctx` is the
