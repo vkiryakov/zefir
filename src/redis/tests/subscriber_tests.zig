@@ -405,7 +405,10 @@ fn halves(io: Io) !void {
     defer peer.close(testing.io);
     var client: Client = try .init(testing.allocator, io, .{ .url = peer.url() });
     defer client.deinit();
-    var sub = try subscribeThrough(io, &peer, &client, .fromMilliseconds(100));
+    // The rest must come within idle_ping of the subscriber's read, and a
+    // loaded machine may run the peer's second send long after its 50 ms:
+    // idle_ping is far longer than the pause.
+    var sub = try subscribeThrough(io, &peer, &client, .fromSeconds(1));
     defer sub.close(io);
 
     var reading = try io.concurrent(nextOf, .{ &sub, io });
