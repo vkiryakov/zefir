@@ -1,9 +1,9 @@
-//! Calls of `redis.cmd.raw` and of the client that must not compile, one
-//! test each: reply types that no reply reads into, arguments that cannot
-//! be written, values that are not commands, and WATCH where it cannot
-//! run. `zig build test-redis`
-//! compiles every test on its own and checks its error message; the list
-//! of messages is in build.zig.
+//! Calls of `redis.cmd` and of the client that must not compile, one test
+//! each: reply types that no reply reads into, arguments that cannot be
+//! written, values that are not commands, WATCH where it cannot run, and
+//! functions of the catalog given a type they do not take. `zig build
+//! test-redis` compiles every test on its own and checks its error
+//! message; the list of messages is in build.zig.
 
 const std = @import("std");
 const redis = @import("redis");
@@ -77,4 +77,8 @@ test "watch in a pipeline of the client" {
 test "watch in a transaction" {
     var conn: redis.Conn = undefined;
     _ = try conn.transaction(std.testing.io, .of(.root), .{ cmd.raw(?i64, .{ "GET", "k" }), cmd.watch(&.{"stock:coffee"}) }, .{});
+}
+
+test "get of a struct" {
+    _ = cmd.get(Address, "user:42");
 }

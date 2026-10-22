@@ -886,7 +886,8 @@ pub fn build(b: *std.Build) void {
     addMongoGuide(b, test_mongo, .{ .core = core, .mongo = mongo }, target, optimize, tsan);
 
     // redis compile errors: reply types that no reply reads into,
-    // arguments that cannot be written, and WATCH where it cannot run. Each
+    // arguments that cannot be written, WATCH where it cannot run, and
+    // functions of the catalog given a type they do not take. Each
     // test of the file must fail to compile with the message next to its
     // name, which names the call, the field or the argument, and the fix;
     // the filter compiles one test at a time. A type declared in the file
@@ -917,6 +918,7 @@ pub fn build(b: *std.Build) void {
         .{ "watch on the client", "redis.Client.run: WATCH holds its keys on the connection it goes on: run it on a connection of client.acquire" },
         .{ "watch in a pipeline of the client", "redis.Client.pipeline: WATCH holds its keys on the connection it goes on: run it on a connection of client.acquire" },
         .{ "watch in a transaction", "redis.Conn.transaction: WATCH inside a transaction is refused by the server: run it with conn.run before the transaction" },
+        .{ "get of a struct", "redis.cmd.get: GET returns a string; a hash is hgetall" },
     }, 0..) |case, i| {
         const compile = b.addTest(.{
             .name = b.fmt("redis-compile-error-{d}", .{i}),
