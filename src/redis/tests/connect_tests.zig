@@ -18,6 +18,7 @@ const Peer = FakeServer.Peer;
 const time = @import("../engine/time.zig");
 const replies = @import("hello_replies.zig");
 const within5s = @import("time_limit.zig").within5s;
+const WindowsLike = @import("windows_like_io.zig").WindowsLike;
 
 fn portOf(peer: *const Peer) u16 {
     return peer.listener.?.socket.address.getPort();
@@ -212,36 +213,74 @@ fn refusedContexts(io: Io) !void {
     try testing.expect(!try connectsWithin(io, &peer, .fromMilliseconds(50)));
 }
 
-test "close stops a connect in progress, close twice is fine, and connect after close is Closed" {
-    try within5s(testing.io, closeWhileConnecting, .{testing.io});
+test "close stops a connect in progress, close twice is fine, and connect after close is Closed, also where a shutdown does not end a read and where the client starts slowly" {
+    var windows: WindowsLike = undefined;
+    var slow: SlowConnect = undefined;
+    for ([_]Io{ testing.io, windows.io(), slow.io() }) |io| try within5s(testing.io, closeWhileConnecting, .{io});
 }
 
 fn connectStopped(client: *Client, io: Io, d: *Diagnostics) !void {
     try testing.expectError(error.Closed, client.connect(io, .root, d));
 }
 
+/// `silent`, which sets `heard` once it has HELLO.
+fn hearHello(peer: *Peer, io: Io, heard: *Io.Event) !void {
+    try peer.accept(io);
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    _ = (try peer.readCommand(arena.allocator())) orelse return error.TestUnexpectedResult;
+    heard.set(io);
+    try testing.expectEqual(@as(usize, 0), try peer.readToEnd());
+}
+
+/// The client on `io`, the server's side on `std.testing.io`.
 fn closeWhileConnecting(io: Io) !void {
-    var peer: Peer = try .listen(io);
-    defer peer.close(io);
-    var server = try io.concurrent(silent, .{ &peer, io });
-    defer server.cancel(io) catch {};
+    var peer: Peer = try .listen(testing.io);
+    defer peer.close(testing.io);
+    var heard: Io.Event = .unset;
+    var server = try testing.io.concurrent(hearHello, .{ &peer, testing.io, &heard });
+    defer server.cancel(testing.io) catch {};
     var client: Client = try .init(testing.allocator, io, .{ .url = peer.url() });
     defer client.deinit();
     var d: Diagnostics = .{};
     var connecting = try io.concurrent(connectStopped, .{ &client, io, &d });
     defer connecting.cancel(io) catch {};
-    // The client waits for the reply to HELLO, or soon will.
-    try io.sleep(.fromMilliseconds(50), .awake);
+    // Once the server has HELLO, the client waits for the reply, or soon
+    // will: close stops it either way. A sleep in place of this wait loses
+    // to a client that starts slowly, which close stops before HELLO.
+    try heard.wait(testing.io);
     const start = time.now(io);
     client.close(io);
     try connecting.await(io);
     try testing.expect(start.durationTo(time.now(io)).toMilliseconds() < 1000);
     try testing.expectEqualStrings("the client was closed while it connected", d.message());
-    try server.await(io);
+    try server.await(testing.io);
     client.close(io);
     try testing.expectError(error.Closed, client.connect(io, .root, &d));
     try testing.expectEqualStrings("the client is closed", d.message());
 }
+
+/// `std.testing.io` whose connections come 100 ms late, as on a busy
+/// machine: the socket connects at once and is handed over after the
+/// wait; a cancelation of the wait closes it.
+const SlowConnect = struct {
+    vtable: Io.VTable,
+
+    fn io(s: *SlowConnect) Io {
+        s.vtable = testing.io.vtable.*;
+        s.vtable.netConnectIp = connectLate;
+        return .{ .userdata = testing.io.userdata, .vtable = &s.vtable };
+    }
+
+    fn connectLate(userdata: ?*anyopaque, address: *const net.IpAddress, options: net.IpAddress.ConnectOptions) net.IpAddress.ConnectError!net.Socket {
+        const socket = try testing.io.vtable.netConnectIp(userdata, address, options);
+        testing.io.sleep(.fromMilliseconds(100), .awake) catch |err| {
+            testing.io.vtable.netClose(userdata, &.{socket});
+            return err;
+        };
+        return socket;
+    }
+};
 
 test "deinit without close closes the connection" {
     try within5s(testing.io, deinitCloses, .{testing.io});
