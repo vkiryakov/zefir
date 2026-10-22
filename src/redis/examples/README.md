@@ -2142,6 +2142,10 @@ them even a command that must not run twice is safe to make again:
 | `BUSY` | a script has run too long, and holds the server |
 | `EXECABORT` | the server dropped a whole transaction: none of it ran |
 
+These are the server's own refusals. A script gives its error any code it
+likes, after the writes it made: an error of `cmd.eval` or
+`cmd.evalScript` may have run, whatever its code.
+
 `outcome(error.ServerError)` stays `.may_have_executed` with each of them:
 the class belongs to the name of the error, and your code refines it by
 the code, with `diagnostics.isCode("EXECABORT")` and the others.

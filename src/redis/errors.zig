@@ -27,7 +27,9 @@
 //! dropped whole. With them the caller may make even a command that is not
 //! idempotent again; `outcome` still says `.may_have_executed`, since the
 //! class belongs to the name of the error, and `diagnostics.isCode` tells
-//! the rest.
+//! the rest. These are the server's own refusals: a script gives its error
+//! any code, after the writes it made, so an error of `cmd.eval` or
+//! `cmd.evalScript` may have run, whatever its code.
 //!
 //! ```zig
 //! var diagnostics: redis.Diagnostics = .{};
