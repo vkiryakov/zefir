@@ -87,6 +87,8 @@ const session = [_]Step{
     .{ .curl = "curl -I localhost:8080/" },
     .{ .curl = "curl -I localhost:8080/todos/today" },
     .{ .curl = "curl -i localhost:8080/.env" },
+    // The OpenAPI document
+    .{ .curl = "curl -I localhost:8080/api/openapi.json" },
 };
 
 test "the guide shows every curl command of the service with its response, and the service's log" {

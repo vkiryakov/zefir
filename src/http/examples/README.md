@@ -13,9 +13,10 @@ the `field_rules` of zefir-validator: outside names, transforms such as
 by the same rules. Middleware are your own code, on three levels and in the
 order you write them, and one error handler turns every error into a
 response. Static files, streamed responses and server-sent events are built
-in. The server parses HTTP/1.1 itself, strictly, and runs on
-[zio](https://github.com/lalinsky/zio); for tests, the same server runs in
-memory.
+in, and [zefir-openapi](../../openapi/examples/README.md) builds the OpenAPI
+document of the API from the same types. The server parses HTTP/1.1
+itself, strictly, and runs on [zio](https://github.com/lalinsky/zio); for
+tests, the same server runs in memory.
 
 > [!IMPORTANT]
 > **Not implemented yet (TODO):**
@@ -25,7 +26,6 @@ memory.
 >   you build.
 > - **File uploads.** A body of `multipart/form-data` is not taken apart;
 >   `ctx.request.bodyReader()` reads a body as a stream.
-> - **OpenAPI.** No document is generated from the routes yet.
 > - **`http.Patch(T)`.** PATCH routes work, and their body fills `?T`
 >   fields, where a missing field and `null` look the same: a field can be
 >   changed, but not cleared to `null`.
@@ -178,6 +178,9 @@ GET /api/v1/todos
   canceled when its client leaves; a stop lets the requests at work finish.
 - **Tests without a network.** `http.testing.Backend` serves the same
   server from memory.
+- **An OpenAPI document of the API.** The compiler builds it from the routes,
+  the DTOs and the errors of the server, with zefir-openapi, and a test
+  keeps its file up to date.
 
 ## Contents
 
@@ -193,6 +196,7 @@ GET /api/v1/todos
 - [Authentication and CORS](#authentication-and-cors)
 - [Server-sent events](#server-sent-events)
 - [Static files](#static-files)
+- [The OpenAPI document](#the-openapi-document)
 - [Tests](#tests)
 - [Limits and timeouts](#limits-and-timeouts)
 - [Benchmark](#benchmark)
@@ -1157,13 +1161,26 @@ fn free(allocator: std.mem.Allocator, todo: Todo) void {
 - **A literal wins over a parameter**, and a parameter over `{*rest}`: so
   `/export.csv` is no `{id}`. Two routes of one method on one path stop the
   build, with a message that names both.
-- **The options of a route**: `.middleware` (see
-  [Middleware](#middleware)), `.max_body_bytes` instead of the server's
-  1 MiB, and `.timeout` instead of its deadline of 30 seconds, here 300 for
-  the export. The options are compile-time values of any type, so a
-  duration is written in full: `std.Io.Duration.fromSeconds(300)`. Where a
-  type is known, as in the fields of `http.native.Backend.init` or of a
-  cookie, `.fromSeconds(300)` is enough.
+- **The options of a route** say what the server needs to know of it:
+  - what it reads: `.path`, `.query`, `.headers` and `.cookies`, and its
+    body, `.body` for JSON or `.form` for a form, each the type of a DTO
+    (see [Input](#input));
+  - `.responses`, its statuses, when it answers with something else than
+    the default 200 or 204 (see [Responses](#responses));
+  - `.middleware` (see [Middleware](#middleware)), `.max_body_bytes` instead
+    of the server's 1 MiB, and `.timeout` instead of its deadline of 30
+    seconds, here 300 for the export;
+  - of `http.sse.get`, which has no body and no `.responses`: `.events`,
+    `.heartbeat` and `.on_close` (see
+    [Server-sent events](#server-sent-events)).
+
+  The options are compile-time values of any type, so a duration is
+  written in full: `std.Io.Duration.fromSeconds(300)`. Where a type is
+  known, as in the fields of `http.native.Backend.init` or of a cookie,
+  `.fromSeconds(300)` is enough.
+- **A route is a type.** `http.get(…)` and the others return one, so a
+  route can have a name, as `Create` above, and its handler reads what it
+  declares with `ctx.input(Create)` (see [Input](#input)).
 
 What a handler returns:
 
@@ -1653,6 +1670,57 @@ Content-Length: 93
   `ctx.allocator()`, until the request has ended. The repository copies
   what it keeps.
 
+**The input of a route, declared.** Each route of the todos says what it
+reads, in its options, by the same DTOs:
+
+```zig
+.list = http.get("", .{ .query = dto.ListTodosQuery }),
+.get = http.get("/{id}", .{ .path = dto.TodoIdPath }),
+```
+
+- **A DTO is checked for its source where the route declares it**, as the
+  calls check it: a nested struct in a query, `v.rename` in a DTO of
+  headers, a type of field that JSON cannot hold stop the build there.
+- **The path and its DTO are checked both ways.** Each `{x}` of the whole
+  path, the controller's prefix and the route's path, is a field of the DTO
+  of `.path` whose outside name is `x`: `{id}` is the field `id`, and
+  `{projectId}` a field with `v.rename("projectId")`. Each field without a
+  default that is not `?T` is a `{x}` of the path. A path parameter without
+  its field, or a field without its parameter, does not build, and the
+  message names the route, the path and the DTO.
+- **`.body` and `.form` together** do not build: a body is JSON or a form.
+
+A route with a name reads all it declares in one call, `ctx.input`.
+`create` declares its headers and its body:
+
+```zig
+const Create = http.post("", .{
+    .body = dto.CreateTodoRequest,
+    .headers = dto.CreateTodoHeaders,
+```
+
+and reads them so, as fields of one struct:
+
+```zig
+// Exactly what Create declares: in.headers, then in.body.
+const in = try ctx.input(Create);
+const user = try owner(ctx);
+// The same Idempotency-Key again, a retry: the todo it made, as it is.
+if (in.headers.idempotency_key) |key| {
+```
+
+- **The struct has a field for each source the route declares**: `path`,
+  `query`, `headers`, `cookies`, and `body` or `form`. A source it does not
+  declare is not there to read.
+- **It reads them in that order**, the body last, and returns the first
+  error, as `try` on each call one after the other would. Its error set is
+  the union of theirs, so the strict error check of the server sees the
+  same errors.
+- **The calls of their own stay**: `ctx.query(T)` and the others work as
+  before, as `list` and `update` use them. On a route of a controller with
+  `pub const openapi`, a Debug build checks that `T` is what the route
+  declares for that source (see [The OpenAPI document](#the-openapi-document)).
+
 ## Responses
 
 The responses a handler writes itself go through `ctx.response`:
@@ -1731,6 +1799,51 @@ Both errors are mistakes of the program, 500.
 `ctx.response.setCookie` and `redirect` are shown in
 [Authentication and CORS](#authentication-and-cors): signing in sets a cookie
 and sends the browser back to the page.
+
+**The statuses of a route.** A handler of `http.Json(T)` answers 200 by
+default, and one of `!void` that writes nothing 204. A handler sets another
+status when it returns, as `create` does for a new todo:
+
+```zig
+return .{ .value = .from(todo), .status = 201 };
+```
+
+The compiler does not see that number, so a route that answers otherwise
+lists its statuses in `.responses`, by the names of `std.http.Status`.
+`create` answers 201 for a new todo and 200 for a retry, the export writes
+CSV itself, and signing in is a redirect:
+
+```zig
+// 201 for a new todo, 200 for a retry with the same Idempotency-Key.
+.responses = .{ .created = .{}, .ok = .{} },
+```
+
+```zig
+.responses = .{ .ok = .{ .content_type = "text/csv" } },
+```
+
+```zig
+.login = http.post("", .{ .form = LoginForm, .responses = .{ .see_other = .{} }, .max_body_bytes = 1024 }),
+```
+
+| An entry | The response |
+| --- | --- |
+| `.ok = .{}` on a route of `http.Json(T)` | 200 with the value, a `T` |
+| `.created = .{}` and the other 2xx of such a route | that status, with a `T` too |
+| `.see_other = .{}`, or any status of a route of `!void` | that status without a body |
+| `.ok = .{ .content_type = "text/csv" }` | a body the handler writes, of that type |
+| `.ok = .{ .json = U }` | JSON of `U`, which the handler writes with `ctx.response.json` |
+
+- **The list is all of them.** It takes the place of the default: a route
+  with `.responses = .{ .created = .{} }` has no 200.
+- **The answers to errors are not in it**: `mapError` gives their statuses
+  and bodies (see [Errors](#errors)).
+- **A wrong entry does not build**: a key that is not a name of
+  `std.http.Status`, or `.content_type` or `.json` on a 2xx of a route of
+  `http.Json(T)`, whose body is always `T`.
+- **A Debug build checks** each response of a route of a controller with
+  `pub const openapi` against its list: see
+  [The OpenAPI document](#the-openapi-document).
 
 ## Errors
 
@@ -2853,6 +2966,108 @@ Content-Length: 100
   deadline: a large file to a slow client takes its time, and the backend's
   write timeout cuts a client that stops reading.
 
+## The OpenAPI document
+
+An OpenAPI document describes an API to those who call it without its
+code: generators of clients, pages of documentation, Postman, tests of
+contracts. [zefir-openapi](../../openapi/examples/README.md) builds the
+document of this service when it compiles, from the same types the server
+runs on: the routes and what they declare, the DTOs and their
+`field_rules`, the errors of each route as `mapError` answers them, and the
+middleware of each route. So the document cannot list a route that is not
+there, or leave out an error that a route returns. Its guide tells all of
+it; this is what the service does.
+
+`Service.start` builds the document from the type of the options of the
+server, and `docs`, a controller of zefir-openapi, serves it:
+
+```zig
+s.docs = try .init(gpa, comptime zefir.openapi.document(@TypeOf(options), .{
+    .info = .{
+        .title = "Todos API",
+        .version = "1.0.0",
+        .description = "The todos of each user: made, changed, deleted, exported as CSV and followed live.",
+    },
+    // The health check of the load balancer is no part of the API.
+    .exclude = &.{HealthController},
+}));
+```
+
+What the compiler cannot see, the texts of the document, each type
+declares next to its code, in a typed `pub const openapi`. The DTO of the
+path of a todo, in `dto.zig`:
+
+```zig
+pub const openapi: zefir.openapi.Doc(@This()) = .{
+    .fields = .{ .id = .{ .description = "The id of the todo.", .example = 1 } },
+};
+```
+
+- **A DTO**, in a `zefir.openapi.Doc(@This())`: its description, an
+  example, and a text for each field. Its constraints, `maxLength`,
+  `minimum` and the others, come from its `field_rules`.
+- **A controller**, in a `zefir.openapi.ControllerDoc(@This())`: the tag of
+  its routes, and an entry for each method of its `.methods`, with a
+  `.summary` at least, as `TodosV1Controller` and `SessionController`
+  above. A route without its entry does not build.
+- **A middleware**, in a `zefir.openapi.MiddlewareDoc`: `TokenAuth` the two
+  ways a client says who it is, `requireUser` that a route behind it needs
+  one of them, `requirePermission` the permission it needs (see
+  [Authentication and CORS](#authentication-and-cors)). A middleware that
+  declares one is a type: a function cannot carry a declaration.
+
+The document is `/api/openapi.json`, as `application/json` with an `ETag`
+and `Cache-Control: no-cache`, and a client that sends that `ETag` back in
+`If-None-Match` gets 304 without a body:
+
+```text
+$ curl -I localhost:8080/api/openapi.json
+HTTP/1.1 200 OK
+content-type: application/json
+x-request-id: 9e0c8a5d2b7f41c6a3d8e5f1b2c7a940
+etag: "c352f36245194471"
+cache-control: no-cache
+x-content-type-options: nosniff
+vary: Origin
+Date: Sat, 17 Oct 2026 20:02:45 GMT
+Content-Length: 54561
+```
+
+`/api/docs` is a page of it, which a browser opens: a reference of the API
+in which each route can be tried out. The browser loads Scalar, the code of
+the page, from jsDelivr, a release pinned by its hash.
+
+**The file in the repository.** `openapi.json`, next to `build.zig`, holds
+the same bytes. The last test of `todos_test.zig` compares the document
+with it, and `zig build openapi` runs that test to write the file from the
+code. A change of the API that the file does not show fails
+`zig build test`, with the first line that differs:
+
+```text
+error: openapi.json is out of date; run `zig build openapi`
+```
+
+So a change of the API shows in the review of a pull request, in
+`openapi.json`, and the file changes only when the API does.
+
+**The Debug check.** The controllers of the service declare
+`pub const openapi`, so in a Debug build, which `zig build test` and
+`zig build run` make, the server compares what each of their routes does
+with what it declares: each input call, each response, from the handler, a
+middleware or the error handler, and `subscribe`. A mismatch is not what
+the client gets: the server answers 500 and logs what differs. Say
+`create` returned `.status = 202`, which `.responses` does not list:
+
+```text
+zefir.http: POST /api/v1/todos (TodosV1Controller.create) answered 202, which it does not declare in .responses
+```
+
+The tests reach every route, so each declaration is checked, and the
+document says what the server does. The answers the server writes itself,
+404 and 405 of the router, 503 of overload and 504 of a deadline, are no
+answers of a route and are not checked. In ReleaseSafe and ReleaseFast
+none of this is compiled.
+
 ## Tests
 
 `http.testing.Backend` serves the same server, the same controllers and
@@ -3549,9 +3764,10 @@ $ APP_AUTH_ANN_TOKEN=ann-secret APP_AUTH_BOB_TOKEN=bob-secret zig build run
 2026-10-17T20:02:45.032Z INFO  [access] Request method=HEAD path=/ status=200 user=- err=- request=4a2a2c782ef295446038f0aefb1b4fb0 duration_ms=0
 2026-10-17T20:02:45.033Z INFO  [access] Request method=HEAD path=/todos/today status=200 user=- err=- request=4f8770e1c8c1b0e0cf3f88debceeab4a duration_ms=0
 2026-10-17T20:02:45.033Z INFO  [access] Request method=GET path=/.env status=404 user=- err=RouteNotFound request=6bcb4d2c288468ad324e01449d4fa1bd duration_ms=0
+2026-10-17T20:02:45.034Z INFO  [access] Request method=HEAD path=/api/openapi.json status=200 user=- err=- request=9e0c8a5d2b7f41c6a3d8e5f1b2c7a940 duration_ms=0
 ^C
-2026-10-17T20:02:45.033Z INFO  [app] Stopping signal=interrupt
-2026-10-17T20:02:45.033Z INFO  [app] Stopped
+2026-10-17T20:02:45.035Z INFO  [app] Stopping signal=interrupt
+2026-10-17T20:02:45.035Z INFO  [app] Stopped
 ```
 
 Every request of the guide left a record of `AccessLog`, with its status,
