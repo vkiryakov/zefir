@@ -207,10 +207,8 @@ say. With it, an instance hears the others, not itself.
 Add Zefir to your `build.zig.zon`; nats ships since v0.5.0:
 
 ```sh
-zig fetch --save git+https://github.com/vkiryakov/zefir#dev
+zig fetch --save git+https://github.com/vkiryakov/zefir#v0.11.0
 ```
-
-This guide is on the `dev` branch, so the command fetches its latest commit; `--save` pins that commit. For the latest release, v0.10.0, fetch `#v0.10.0` instead.
 
 The client needs an `std.Io` with real concurrency. For services, add zio
 too. zio has no release for Zig 0.17 yet, so pin the commit Zefir is tested
