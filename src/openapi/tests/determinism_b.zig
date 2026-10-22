@@ -8,6 +8,7 @@ const zefir = @import("zefir");
 const http = zefir.http;
 
 const testing = std.testing;
+const golden = @import("golden_options").dir ++ std.fs.path.sep_str;
 
 test "the documents of todos are those of their files whatever order the compiler met its errors in" {
     // The first mention of these errors in the program.
@@ -26,6 +27,6 @@ test "the documents of todos are those of their files whatever order the compile
     var service: todos.Service = .{};
     try service.start(testing.allocator, testing.io, backend.backend());
     defer service.deinit(testing.io);
-    try zefir.openapi.testing.expectFile(testing.io, service.docs_3_1, "golden/todos-3.1.json");
-    try zefir.openapi.testing.expectFile(testing.io, service.docs_3_2, "golden/todos-3.2.json");
+    try zefir.openapi.testing.expectFile(testing.io, service.docs_3_1, golden ++ "todos-3.1.json");
+    try zefir.openapi.testing.expectFile(testing.io, service.docs_3_2, golden ++ "todos-3.2.json");
 }

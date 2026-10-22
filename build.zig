@@ -1589,7 +1589,10 @@ fn addHttpCompileChecks(
 /// files in src/openapi/tests/golden, in 3.1 and 3.2, and sends each
 /// application's requests; determinism_a.zig and determinism_b.zig make the
 /// compiler meet the errors of one application in two orders and compare
-/// its documents with the same files. They run in src/openapi/tests.
+/// its documents with the same files. They find the files by the absolute
+/// path of golden/, `golden_options.dir`, and run where every test runs:
+/// with -Dtsan on macOS a test binary finds its TSan runtime by a path
+/// relative to that directory, so a test run elsewhere does not start.
 /// `zig build openapi` runs golden_test with ZEFIR_OPENAPI_UPDATE=1: it
 /// rewrites the files from the code.
 fn addOpenapiGoldens(
@@ -1601,6 +1604,8 @@ fn addOpenapiGoldens(
     tsan: bool,
 ) void {
     const update_step = b.step("openapi", "Rewrite the OpenAPI documents of zefir's tests from the code");
+    const golden = b.addOptions();
+    golden.addOption([]const u8, "dir", b.root.joinString(b.allocator, "src/openapi/tests/golden") catch @panic("OOM"));
     for ([_][]const u8{ "golden_test", "determinism_a", "determinism_b" }) |name| {
         const t = b.addTest(.{
             .name = b.fmt("openapi-{s}", .{name}),
@@ -1612,12 +1617,11 @@ fn addOpenapiGoldens(
                 .imports = &.{.{ .name = "zefir", .module = zefir }},
             }),
         });
+        t.root_module.addOptions("golden_options", golden);
         const run = addRun(b, t, tsan);
-        run.setCwd(b.path("src/openapi/tests"));
         test_step.dependOn(&run.step);
         if (!std.mem.eql(u8, name, "golden_test")) continue;
         const update = addRun(b, t, tsan);
-        update.setCwd(b.path("src/openapi/tests"));
         update.setEnvironmentVariable("ZEFIR_OPENAPI_UPDATE", "1");
         update_step.dependOn(&update.step);
     }

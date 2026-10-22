@@ -2,7 +2,8 @@
 //! golden/, in 3.1 and 3.2. Each application's requests get the statuses
 //! they list, each of them a response of the operation in the document; in
 //! Debug the server also checks that each answer is one the route declares.
-//! The build runs these tests in src/openapi/tests; `zig build openapi`
+//! The build gives these tests the absolute path of golden/,
+//! `golden_options.dir`, so they run in any directory; `zig build openapi`
 //! runs them with ZEFIR_OPENAPI_UPDATE=1, which rewrites the files.
 const std = @import("std");
 const zefir = @import("zefir");
@@ -11,6 +12,7 @@ const Request = @import("apps/request.zig").Request;
 
 const testing = std.testing;
 const Node = @FieldType(zefir.openapi.Document, "root");
+const golden = @import("golden_options").dir ++ std.fs.path.sep_str;
 
 test "todos: the documents and the statuses of its requests" {
     try expectApp("todos", @import("apps/todos.zig"), "/api");
@@ -37,8 +39,8 @@ fn expectApp(comptime name: []const u8, comptime App: type, comptime prefix: []c
     var service: App.Service = .{};
     try service.start(testing.allocator, testing.io, backend.backend());
     defer service.deinit(testing.io);
-    try zefir.openapi.testing.expectFile(testing.io, service.docs_3_1, "golden/" ++ name ++ "-3.1.json");
-    try zefir.openapi.testing.expectFile(testing.io, service.docs_3_2, "golden/" ++ name ++ "-3.2.json");
+    try zefir.openapi.testing.expectFile(testing.io, service.docs_3_1, golden ++ name ++ "-3.1.json");
+    try zefir.openapi.testing.expectFile(testing.io, service.docs_3_2, golden ++ name ++ "-3.2.json");
     for (App.requests) |req| {
         var res = try backend.request(testing.io, .{ .method = req.method, .target = req.target, .headers = req.headers, .body = req.body });
         defer res.deinit();
