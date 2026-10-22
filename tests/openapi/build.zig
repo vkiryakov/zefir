@@ -12,6 +12,12 @@
 //!                     Schema of OAS 3.1 and 3.2 (oas/, as spec.openapis.org
 //!                     publishes it) with ajv; prints `<n> documents,
 //!                     <k> invalid` and fails on one
+//!   zig build codec   serve the golden applications of zefir-openapi on
+//!                     the backend of zefir-http in memory (codec.zig),
+//!                     then check each body they read and write, errors
+//!                     included, against its schema in their documents
+//!                     with ajv; prints `<n> exchanges, <k> invalid` and
+//!                     fails on one
 //!   zig build check   build the Zig programs without running them; no
 //!                     Docker needed
 
@@ -39,8 +45,30 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
+    // The golden applications, served by codec.zig: one module, as they
+    // share a file.
+    const apps = b.createModule(.{
+        .root_source_file = zefir.path("src/openapi/tests/apps/apps.zig"),
+        .target = host,
+        .optimize = .Debug,
+        .imports = &.{.{ .name = "zefir", .module = zefir.module("zefir") }},
+    });
+    const codec = b.addExecutable(.{
+        .name = "codec",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("codec.zig"),
+            .target = host,
+            .optimize = .Debug,
+            .imports = &.{
+                .{ .name = "zefir", .module = zefir.module("zefir") },
+                .{ .name = "apps", .module = apps },
+            },
+        }),
+    });
+
     const check = b.step("check", "Build the Zig programs without running them; no Docker needed");
     check.dependOn(&regex_vectors.step);
+    check.dependOn(&codec.step);
 
     const vectors = b.addRunArtifact(regex_vectors).addOutputFileArg("regex_vectors.json");
     const regex = b.step("regex", "Check the regular expressions of v.schemaOf with ajv (ECMA-262) and Go (RE2), in Docker");
@@ -49,6 +77,10 @@ pub fn build(b: *std.Build) void {
 
     const oas = b.step("oas", "Check the OpenAPI documents of zefir against the official JSON Schema of OAS 3.1 and 3.2 with ajv, in Docker");
     oas.dependOn(&dockerCheck(b, "check the documents against OAS", node_image, "node", npm_ci ++ " && node oas.mjs /pkg/oas /zefir", zefir_root, null).step);
+
+    const exchanges = b.addRunArtifact(codec).addOutputFileArg("codec.json");
+    const codec_step = b.step("codec", "Check the bodies of the golden applications of zefir-openapi against their schemas with ajv, in Docker");
+    codec_step.dependOn(&dockerCheck(b, "check the bodies against their schemas", node_image, "node", npm_ci ++ " && node codec.mjs \"$0\" /zefir/src/openapi/tests/golden", zefir_root, exchanges).step);
 }
 
 /// Runs `command` in a container of `image`, in a copy of the directory
