@@ -168,7 +168,10 @@ pub const Diagnostics = struct {
     /// is about.
     command: ?usize = null,
     /// For a pipeline or a transaction that broke off: how many replies
-    /// came before it did. Those commands ran; the rest may have.
+    /// came before it did. Of a pipeline, those commands ran, and the rest
+    /// may have. Of a transaction, they are the +OK of MULTI and the
+    /// +QUEUED of each command queued: whether EXEC ran the commands is
+    /// unknown.
     answered: ?usize = null,
     code_buffer: [32]u8 = undefined,
     code_len: u8 = 0,
