@@ -14,6 +14,13 @@ pub const Program = struct {
     buffer: [4096]u8 = undefined,
     reader: ?Io.File.Reader = null,
     log: std.ArrayList(u8) = .empty,
+    /// Kills the program after the limit of `limit`.
+    guard: ?Io.Future(void) = null,
+    /// Guards `waited` against the guard.
+    mutex: Io.Mutex = .init,
+    /// The test waits for the end of the program: its id may soon be
+    /// another process's, so the guard leaves it alone.
+    waited: bool = false,
 
     pub const Stream = enum { stdout, stderr };
 
@@ -33,10 +40,28 @@ pub const Program = struct {
     }
 
     pub fn deinit(p: *Program, io: Io) void {
+        if (p.guard) |*guard| guard.cancel(io);
         // The program has ended when the test got to its end.
         if (p.child.id != null) p.child.kill(io);
         p.log.deinit(testing.allocator);
         p.environ.deinit();
+    }
+
+    /// Kills the program once `seconds` have passed, unless the test
+    /// already waits for its end: a program that hangs then ends the
+    /// reading of its log, and the test fails and prints that log instead
+    /// of hanging `zig build e2e`.
+    pub fn limit(p: *Program, io: Io, seconds: i64) !void {
+        p.guard = try io.concurrent(killAfter, .{ p, io, seconds });
+    }
+
+    fn killAfter(p: *Program, io: Io, seconds: i64) void {
+        io.sleep(.fromSeconds(seconds), .awake) catch return;
+        p.mutex.lockUncancelable(io);
+        defer p.mutex.unlock(io);
+        if (p.waited) return;
+        std.debug.print("the program still runs after {d} s: killed\n", .{seconds});
+        std.posix.kill(p.child.id.?, .KILL) catch {};
     }
 
     /// The next line of the log, kept; null at its end.
@@ -70,6 +95,11 @@ pub const Program = struct {
     pub fn stop(p: *Program, io: Io, signal: std.posix.SIG) !std.process.Child.Term {
         try std.posix.kill(p.child.id.?, signal);
         while (try p.line(io)) |_| {}
+        {
+            p.mutex.lockUncancelable(io);
+            defer p.mutex.unlock(io);
+            p.waited = true;
+        }
         return p.child.wait(io);
     }
 

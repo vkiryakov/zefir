@@ -15,7 +15,7 @@ const Program = @import("child.zig").Program;
 
 const testing = std.testing;
 
-test "SIGTERM stops an App: exit 0, and the log shows both phases of the stop" {
+test "SIGTERM stops an App: exit 0, and the log shows the stop of its server" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     const rt = try zio.Runtime.init(testing.allocator, .{ .executors = .exact(2) });
     defer rt.deinit();
@@ -25,6 +25,7 @@ test "SIGTERM stops an App: exit 0, and the log shows both phases of the stop" {
     var digits: [5]u8 = undefined;
     var program: Program = try .start(io, programs.signals, &.{.{ "APP_PORT", try std.fmt.bufPrint(&digits, "{d}", .{port}) }}, .stderr);
     defer program.deinit(io);
+    try program.limit(io, 30);
     try client.waitListening(io, port, .fromSeconds(10));
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
@@ -37,8 +38,7 @@ test "SIGTERM stops an App: exit 0, and the log shows both phases of the stop" {
         std.debug.print("the program {f}; its log:\n{s}\n", .{ term, program.log.items });
         return error.TestUnexpectedExit;
     }
-    // The first phase asks the server to stop, the second shuts it down,
-    // and the stop ends.
+    // The stop begins, the server is shut down, and the stop ends.
     try program.expectInOrder(&.{
         "info(zefir_app): stopping",
         "info(zefir_app): Root.Servers.httpServer stopped",
@@ -56,6 +56,7 @@ test "a server that does not stop in time: exit 1, and stderr names it" {
     var digits: [5]u8 = undefined;
     var program: Program = try .start(io, programs.deaf, &.{.{ "APP_PORT", try std.fmt.bufPrint(&digits, "{d}", .{port}) }}, .stderr);
     defer program.deinit(io);
+    try program.limit(io, 30);
     try client.waitListening(io, port, .fromSeconds(10));
     // A request that never ends: its connection stays open until the
     // process exits.

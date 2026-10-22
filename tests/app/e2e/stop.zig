@@ -131,11 +131,19 @@ fn stopDuringWork(io: Io) !void {
         }
         try io.sleep(.fromMilliseconds(1), .awake);
     }
+    // Each server shows draining before its own task closes the listener
+    // and drains the transport: wait for those, a second at most.
     const address: Io.net.IpAddress = try .parseIp4("127.0.0.1", port);
-    if (address.connect(io, .{ .mode = .stream })) |stream| {
+    while (address.connect(io, .{ .mode = .stream })) |stream| {
         stream.close(io);
-        return error.TestConnectedWhileDraining;
+        if (sinceMs(io, asked) > 1000) return error.TestConnectedWhileDraining;
+        try io.sleep(.fromMilliseconds(1), .awake);
     } else |_| {}
+    const bus = app.get(rpc.testing.MemoryTransport);
+    while (bus.isReady()) {
+        if (sinceMs(io, asked) > 1000) return error.TestTransportNotDrained;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
     var refused = users.call(io, .root, UserApi.getUser, .{ .id = 2 }, .{});
     if (refused) |*result| {
         result.deinit();
