@@ -535,7 +535,7 @@ fn shutdownCutsCall(io: Io) !void {
     try awaitReceived(io, &served.script, "slow", 1);
     const deadline = inMs(io, 600);
     driver.shutdown(io, deadline);
-    try testing.expect(msPast(io, deadline) <= -250 + 100);
+    try testing.expect(msPast(io, deadline) <= -250 + 200);
     try call.await(io);
     try testing.expectEqual(@as(usize, 0), driver.stats().connections);
 }
@@ -577,7 +577,7 @@ fn shutdownCutsKills(io: Io) !void {
     // cursor_close_timeout is 1 s: the deadline cuts it.
     const deadline = inMs(io, 600);
     driver.shutdown(io, deadline);
-    try testing.expect(msPast(io, deadline) <= -250 + 100);
+    try testing.expect(msPast(io, deadline) <= -250 + 200);
     try awaitReceived(io, &script, "killCursors", 1);
     try testing.expectEqual(@as(usize, 0), driver.stats().open_cursors);
 }

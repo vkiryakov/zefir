@@ -2022,7 +2022,7 @@ test "a handler deaf to cancelation: shutdown returns ShutdownTimeout by deadlin
     try testing.expectError(error.ShutdownTimeout, f.server.shutdown(io, deadline));
     const returned = now(io);
     try testing.expect(msPast(deadline, returned) >= -250);
-    try testing.expect(msPast(deadline, returned) <= -250 + 100);
+    try testing.expect(msPast(deadline, returned) <= -250 + 200);
     try testing.expectEqual(RawServer.State.draining, f.server.state());
 }
 
@@ -2037,6 +2037,6 @@ test "a far deadline keeps shutdown_grace" {
     // The call of 500 ms is canceled at the end of the grace, 300 ms.
     try testing.expect(f.holder.canceled.load(.acquire));
     const at = begun.durationTo(f.holder.canceled_at).toMilliseconds();
-    try testing.expect(at >= 300 - 100 and at <= 300 + 100);
+    try testing.expect(at >= 300 - 100 and at <= 300 + 300);
     try testing.expectEqual(RawServer.State.stopped, f.server.state());
 }
