@@ -20,6 +20,7 @@ const catalog = [_][]const []const u8{
     &@import("zsets_tests.zig").covered,
     &@import("scripting_tests.zig").covered,
     &@import("streams_tests.zig").covered,
+    &@import("pubsub_tests.zig").covered,
 };
 
 /// The functions that other tests run: `raw` in raw_tests.zig and in the
@@ -76,7 +77,9 @@ test "every function of redis.cmd has a test of the catalog, and every name of a
         }
         return error.TestUnexpectedResult;
     }
-    try testing.expect(functions.len > 50);
+    // The whole catalog of the design's §4: the 89 functions of its tables
+    // and raw, watch and unwatch.
+    try testing.expectEqual(@as(usize, 92), functions.len);
 }
 
 test "a function taken out of its list fails the check, which names it; so does a name that is no function" {

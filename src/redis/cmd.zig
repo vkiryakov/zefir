@@ -34,6 +34,7 @@
 //!   `xreadgroup`, `xack`, `xgroupCreate`, `xpending`, `xpendingRange`,
 //!   `xautoclaim`, `xdel`, `xtrim`. XREAD and XREADGROUP read one stream,
 //!   and with `.block` take their timeout from the deadline of the call.
+//! - Pub/sub: `publish`.
 //! - `raw(T, args)` — a command that the catalog lacks: `args` is a tuple
 //!   of strings, numbers, bools and enums, the name of the command first,
 //!   or a slice of strings, and the reply reads into `T` by the rules of
@@ -64,6 +65,7 @@ const sets = @import("cmd/sets.zig");
 const zsets = @import("cmd/zsets.zig");
 const scripting = @import("cmd/scripting.zig");
 const streams = @import("cmd/streams.zig");
+const pubsub = @import("cmd/pubsub.zig");
 
 pub const get = strings.get;
 pub const Get = strings.Get;
@@ -266,6 +268,9 @@ pub const Xdel = streams.Xdel;
 pub const xtrim = streams.xtrim;
 pub const Xtrim = streams.Xtrim;
 pub const XtrimOptions = streams.XtrimOptions;
+
+pub const publish = pubsub.publish;
+pub const Publish = pubsub.Publish;
 
 pub const raw = raw_command.raw;
 pub const Raw = raw_command.Raw;
