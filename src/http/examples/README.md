@@ -3074,12 +3074,28 @@ So a change of the API shows in the review of a pull request, in
 `pub const openapi`, so in a Debug build, which `zig build test` and
 `zig build run` make, the server compares what each of their routes does
 with what it declares: each input call, each response, from the handler, a
-middleware or the error handler, and `subscribe`. A mismatch is not what
-the client gets: the server answers 500 and logs what differs. Say
-`create` returned `.status = 202`, which `.responses` does not list:
+middleware or the error handler, and `subscribe`. The input calls of the
+error handler are not compared: what it reads to choose its answer is no
+input of the route. The statuses that `mapError` gives the errors of a
+route are the answers of the error handler: a handler or a middleware
+that answers one of them itself, with a body of its own, declares it in
+`.responses`, or in the `.responses` of the middleware's `openapi`. A
+mismatch is not what the client gets: the server answers 500 and logs
+what differs. Say `create` returned `.status = 202`, which `.responses`
+does not list:
 
 ```text
 zefir.http: POST /api/v1/todos (TodosV1Controller.create) answered 202, which it does not declare in .responses
+```
+
+The stream of events takes no `.responses`: it answers with its stream,
+with 204 when `events` returns without `subscribe`, and with what
+`mapError` gives its errors. Say a middleware of the application, one
+that limits the streams of a user, answered 429 itself there, without the
+429 in its `openapi`:
+
+```text
+zefir.http: GET /api/v1/todos/events (TodosV1Controller.events) answered 429, which it does not declare: an SSE route answers with its stream, 204 and what mapError gives its errors; declare it in the .responses of the openapi of the middleware that answers, or keep the handler and the error handler to those
 ```
 
 The tests reach every route, so each declaration is checked, and the

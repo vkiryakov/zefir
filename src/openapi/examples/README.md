@@ -1594,10 +1594,17 @@ controller with `pub const openapi`, a Debug build of the server compares
 what the route does with what it declares:
 
 - **each input call**: its type must be what the route, or a middleware of
-  its chain, declares for that source;
+  its chain, declares for that source. The input calls of the error
+  handler are not compared: what it reads to choose its answer, a header
+  of the request say, is no input of the route;
 - **each response**, from the handler, from a middleware that answers
   itself, or from the error handler: its status and its media type must be
-  in the document of the route;
+  in the document of the route. The answers that `mapError` gives the
+  errors of the route are the error handler's alone: a handler or a
+  middleware that answers such a status itself, a 409 with a body of its
+  own say, declares it, in the `.responses` of the route or in those of
+  the middleware's `openapi`. An SSE route answers with its stream, or
+  with 204 when its handler returns without `subscribe`;
 - **`subscribe`** of `http.sse.Manager(E)`: `E` must be the `.events` of
   the route.
 
@@ -1608,6 +1615,15 @@ own problem+json, and logs a line:
 ```text
 zefir.http: GET /api/v1/todos (TodosV1Controller.list) reads the query as ListQuery, but declares .query = ListTodosQuery
 zefir.http: POST /api/v1/todos (TodosV1Controller.create) answered 202, which it does not declare in .responses
+```
+
+An SSE route has no `.responses`, so its line says what the route may
+answer and where to declare more. Say a middleware of the application,
+one that limits the streams of a user, answered 429 itself on the stream
+of events, without the 429 in its `openapi`:
+
+```text
+zefir.http: GET /api/v1/todos/events (TodosV1Controller.events) answered 429, which it does not declare: an SSE route answers with its stream, 204 and what mapError gives its errors; declare it in the .responses of the openapi of the middleware that answers, or keep the handler and the error handler to those
 ```
 
 A test on `http.testing` sees the 500 and fails, so tests that reach every
