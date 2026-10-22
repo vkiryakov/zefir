@@ -191,4 +191,5 @@ test {
     _ = @import("commands.zig");
     _ = @import("scripts.zig");
     _ = @import("streams.zig");
+    _ = @import("pubsub.zig");
 }
