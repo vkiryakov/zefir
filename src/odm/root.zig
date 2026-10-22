@@ -60,9 +60,13 @@ pub const Client = driver.Client;
 /// The documents of a find or an aggregate, from a driver.
 pub const RawCursor = driver.RawCursor;
 
+/// What tests of odm and of the code over it need: `testing.FakeDriver`.
+pub const testing = @import("testing.zig");
+
 test {
     std.testing.refAllDecls(@This());
     _ = @import("signature.zig");
     _ = @import("tests/errors_tests.zig");
     _ = @import("tests/driver_tests.zig");
+    _ = @import("tests/fake_driver_tests.zig");
 }
