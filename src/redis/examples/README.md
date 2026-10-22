@@ -333,12 +333,14 @@ const Config = struct {
 };
 
 /// A customer's profile, as the hash user:<id> keeps it: a field of the
-/// hash for each field of the struct.
+/// hash for each field of the struct. `visits` is optional, so that HSET
+/// of a profile without it leaves it out, and never resets what HINCRBY
+/// counted.
 const Profile = struct {
     name: []const u8,
     age: u8,
     plan: enum { free, pro } = .free,
-    visits: i64 = 0,
+    visits: ?i64 = null,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -443,16 +445,16 @@ Start a server as in [Installation](#installation), then the program:
 
 ```text
 $ zig build run
-2026-10-22T05:28:00.991Z INFO  [app] Connected
-2026-10-22T05:28:01.016Z INFO  [app] Signed in session=7f3a9c user=42
-2026-10-22T05:28:01.017Z INFO  [app] Session expires in_minutes=30
-2026-10-22T05:28:01.024Z INFO  [app] Home page views=1 ttl_set=true motd="Fresh beans from Ethiopia"
-2026-10-22T05:28:01.041Z INFO  [app] Home page views=2 ttl_set=true motd="Fresh beans from Ethiopia"
-2026-10-22T05:28:01.048Z INFO  [app] Home page views=3 ttl_set=true motd="Fresh beans from Ethiopia"
-2026-10-22T05:28:01.091Z INFO  [app] Visit user=42 visits=1
-2026-10-22T05:28:01.092Z INFO  [app] Profile name=Ann age=30 plan=pro visits=1
-2026-10-22T05:28:01.110Z INFO  [app] Signed out deleted=1 session=null
-2026-10-22T05:28:01.110Z INFO  [app] Done connections=1 in_use=0
+2026-10-22T07:52:41.397Z INFO  [app] Connected
+2026-10-22T07:52:41.398Z INFO  [app] Signed in session=7f3a9c user=42
+2026-10-22T07:52:41.399Z INFO  [app] Session expires in_minutes=30
+2026-10-22T07:52:41.400Z INFO  [app] Home page views=1 ttl_set=true motd="Fresh beans from Ethiopia"
+2026-10-22T07:52:41.400Z INFO  [app] Home page views=2 ttl_set=true motd="Fresh beans from Ethiopia"
+2026-10-22T07:52:41.400Z INFO  [app] Home page views=3 ttl_set=true motd="Fresh beans from Ethiopia"
+2026-10-22T07:52:41.401Z INFO  [app] Visit user=42 visits=1
+2026-10-22T07:52:41.401Z INFO  [app] Profile name=Ann age=30 plan=pro visits=1
+2026-10-22T07:52:41.402Z INFO  [app] Signed out deleted=1 session=null
+2026-10-22T07:52:41.402Z INFO  [app] Done connections=1 in_use=0
 ```
 
 What happens, from the top:
@@ -491,7 +493,8 @@ What happens, from the top:
   back in one read: one round trip, see [Pipelines](#pipelines).
 - **A hash.** HSET writes a field for each field of a `Profile`, and
   HGETALL reads them back into one; HINCRBY counts a field up on the
-  server.
+  server. `visits` is optional: HSET of a profile without it leaves it
+  out, so it never resets what HINCRBY counted.
 - **The end.** `stats` shows one connection, idle: the calls went one
   after another, and the pool kept the connection that `connect` opened.
 
@@ -2693,8 +2696,9 @@ pub const Profile = struct {
     name: []const u8,
     age: u8,
     plan: enum { free, pro } = .free,
-    /// How many times the customer came, as `visit` counts them.
-    visits: i64 = 0,
+    /// How many times the customer came, as `visit` counts them; null in a
+    /// profile to save, which leaves the count as it is.
+    visits: ?i64 = null,
 };
 
 pub fn init(client: *redis.Client) Profiles {
@@ -2702,7 +2706,7 @@ pub fn init(client: *redis.Client) Profiles {
 }
 
 /// Keeps `profile` as the profile of the customer `id`: a field of the
-/// hash for each field of the struct.
+/// hash for each field of the struct that is not null.
 pub fn save(profiles: Profiles, io: std.Io, op: redis.OperationContext, id: u64, profile: Profile) redis.Error!void {
     var buffer: [32]u8 = undefined;
     try profiles.client.run(io, op, cmd.hset(key(&buffer, id), profile), .{});
@@ -2764,7 +2768,7 @@ test "a profile is read from its hash" {
     try testing.expectEqual(30, ann.age);
     try testing.expectEqual(.pro, ann.plan);
     // A field that the hash lacks takes its default.
-    try testing.expectEqual(0, ann.visits);
+    try testing.expectEqual(null, ann.visits);
     try server.finish(io); // the script ran to its end, and nothing else came
 }
 
@@ -2787,13 +2791,14 @@ test "a customer without a profile has none: HGETALL of a key that is not there 
     try server.finish(io);
 }
 
-test "a profile is saved as a field of the hash for each field of the struct, and a visit counts in its field" {
+test "a profile is saved as a field of the hash for each field of the struct but a null one, and a visit counts in its field" {
     const io = testing.io;
     const gpa = testing.allocator;
-    // The fields go in the order of the struct, the enum as its name; the
+    // The fields go in the order of the struct, the enum as its name, and
+    // the null visits not at all, so a save never resets their count; the
     // server answers HSET with how many fields were new.
     var server: FakeServer = try .start(gpa, io, &.{
-        .expect(.{ "HSET", "user:42", "name", "Ann", "age", "30", "plan", "pro", "visits", "0" }, .{ .integer = 4 }),
+        .expect(.{ "HSET", "user:42", "name", "Ann", "age", "30", "plan", "pro" }, .{ .integer = 3 }),
         .expect(.{ "HINCRBY", "user:42", "visits", "1" }, .{ .integer = 1 }),
     });
     defer server.stop(io);
@@ -2814,6 +2819,8 @@ test "a profile is saved as a field of the hash for each field of the struct, an
 }
 ```
 
+- `visits` is optional: `save` leaves it out, so it never resets what
+  `visit` counted.
 - The client is real and talks to the server over loopback, so the
   deadlines, the cancellation and the errors in a test are those of
   production.

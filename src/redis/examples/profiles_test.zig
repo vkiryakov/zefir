@@ -31,7 +31,7 @@ test "a profile is read from its hash" {
     try testing.expectEqual(30, ann.age);
     try testing.expectEqual(.pro, ann.plan);
     // A field that the hash lacks takes its default.
-    try testing.expectEqual(0, ann.visits);
+    try testing.expectEqual(null, ann.visits);
     try server.finish(io); // the script ran to its end, and nothing else came
 }
 
@@ -54,13 +54,14 @@ test "a customer without a profile has none: HGETALL of a key that is not there 
     try server.finish(io);
 }
 
-test "a profile is saved as a field of the hash for each field of the struct, and a visit counts in its field" {
+test "a profile is saved as a field of the hash for each field of the struct but a null one, and a visit counts in its field" {
     const io = testing.io;
     const gpa = testing.allocator;
-    // The fields go in the order of the struct, the enum as its name; the
+    // The fields go in the order of the struct, the enum as its name, and
+    // the null visits not at all, so a save never resets their count; the
     // server answers HSET with how many fields were new.
     var server: FakeServer = try .start(gpa, io, &.{
-        .expect(.{ "HSET", "user:42", "name", "Ann", "age", "30", "plan", "pro", "visits", "0" }, .{ .integer = 4 }),
+        .expect(.{ "HSET", "user:42", "name", "Ann", "age", "30", "plan", "pro" }, .{ .integer = 3 }),
         .expect(.{ "HINCRBY", "user:42", "visits", "1" }, .{ .integer = 1 }),
     });
     defer server.stop(io);

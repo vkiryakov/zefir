@@ -33,12 +33,14 @@ const Config = struct {
 };
 
 /// A customer's profile, as the hash user:<id> keeps it: a field of the
-/// hash for each field of the struct.
+/// hash for each field of the struct. `visits` is optional, so that HSET
+/// of a profile without it leaves it out, and never resets what HINCRBY
+/// counted.
 const Profile = struct {
     name: []const u8,
     age: u8,
     plan: enum { free, pro } = .free,
-    visits: i64 = 0,
+    visits: ?i64 = null,
 };
 
 pub fn main(init: std.process.Init) !void {

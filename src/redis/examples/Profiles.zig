@@ -14,8 +14,9 @@ pub const Profile = struct {
     name: []const u8,
     age: u8,
     plan: enum { free, pro } = .free,
-    /// How many times the customer came, as `visit` counts them.
-    visits: i64 = 0,
+    /// How many times the customer came, as `visit` counts them; null in a
+    /// profile to save, which leaves the count as it is.
+    visits: ?i64 = null,
 };
 
 pub fn init(client: *redis.Client) Profiles {
@@ -23,7 +24,7 @@ pub fn init(client: *redis.Client) Profiles {
 }
 
 /// Keeps `profile` as the profile of the customer `id`: a field of the
-/// hash for each field of the struct.
+/// hash for each field of the struct that is not null.
 pub fn save(profiles: Profiles, io: std.Io, op: redis.OperationContext, id: u64, profile: Profile) redis.Error!void {
     var buffer: [32]u8 = undefined;
     try profiles.client.run(io, op, cmd.hset(key(&buffer, id), profile), .{});
