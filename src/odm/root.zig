@@ -38,6 +38,7 @@
 const std = @import("std");
 const errors = @import("errors.zig");
 const driver = @import("driver.zig");
+const schema = @import("model/schema.zig");
 
 /// The errors that a driver returns, each in its class of `outcome`.
 pub const DriverError = errors.DriverError;
@@ -60,6 +61,26 @@ pub const Client = driver.Client;
 /// The documents of a find or an aggregate, from a driver.
 pub const RawCursor = driver.RawCursor;
 
+/// The schema of a model, which the model declares in itself:
+/// `pub const odm_schema: odm.Schema(User) = .{ .collection = "users", .id = .id };`.
+pub const Schema = schema.Schema;
+/// The BSON keys of a model's top-level fields: a `?[]const u8 = null` for
+/// each field.
+pub const Names = schema.Names;
+/// An index of a model's collection, which `ensureIndexes` creates.
+pub const Index = schema.Index;
+/// One key of an index: a path of the model and its order,
+/// `.{ .email = .asc }`, `.{ .@"profile.city" = .desc }`.
+pub const IndexKey = schema.IndexKey;
+pub const IndexOrder = schema.IndexOrder;
+/// The paths of a model's fields, by their Zig names joined by '.'.
+pub const Path = schema.Path;
+/// What an insert takes: the model itself, or the model without its id
+/// when the id is a `bson.ObjectId` that odm always makes.
+pub const Insert = schema.Insert;
+/// The type of a model's id, without the optional.
+pub const Id = schema.Id;
+
 /// What tests of odm and of the code over it need: `testing.FakeDriver`.
 pub const testing = @import("testing.zig");
 
@@ -69,4 +90,5 @@ test {
     _ = @import("tests/errors_tests.zig");
     _ = @import("tests/driver_tests.zig");
     _ = @import("tests/fake_driver_tests.zig");
+    _ = @import("tests/model_tests.zig");
 }
