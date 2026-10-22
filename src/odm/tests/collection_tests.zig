@@ -165,7 +165,7 @@ test "every call starts with clean diagnostics" {
     try testing.expectEqualStrings("", d.message());
     try testing.expectEqualStrings("", d.path());
     try testing.expect(d.violation == null);
-    try testing.expect(d.cause == null);
+    try testing.expectEqual(@as(?anyerror, null), d.cause);
     try testing.expectEqual(@as(?i32, null), d.code);
     try testing.expectEqual(@as(?usize, null), d.index);
 }

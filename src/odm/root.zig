@@ -140,6 +140,10 @@ pub const InsertManyResult = collection.InsertManyResult;
 pub const UpdateResult = collection.UpdateResult;
 pub const UpsertResult = collection.UpsertResult;
 pub const DeleteResult = collection.DeleteResult;
+/// The documents of a read, one at a time: `while (try cursor.next(io,
+/// ctx, arena)) |doc|`. It holds a lease of its own, and may outlive its
+/// session; `deinit` it.
+pub const Cursor = @import("Cursor.zig").Cursor;
 
 /// What tests of odm and of the code over it need: `testing.FakeDriver`.
 pub const testing = @import("testing.zig");
@@ -166,4 +170,5 @@ test {
     _ = @import("tests/tenant_tests.zig");
     _ = @import("tests/provision_concurrency_tests.zig");
     _ = @import("tests/collection_tests.zig");
+    _ = @import("tests/cursor_tests.zig");
 }

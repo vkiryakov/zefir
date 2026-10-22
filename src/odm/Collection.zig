@@ -7,6 +7,9 @@
 //! const users = acme.collection(User);
 //! const ann = try users.insertOne(io, ctx, .{ .email = "ann@example.com", .name = "Ann", .created_at = .now(io) });
 //! _ = try users.updateOne(io, ctx, .{ .id = ann.id }, .{ .set = .{ .status = .blocked }, .inc = .{ .age = 1 } });
+//! var adults = try users.find(io, ctx, .{ .status = .active, .age = .{ .gte = 18 } }, .{ .sort = .{ .age = .desc }, .limit = 100 });
+//! defer adults.deinit(io);
+//! while (try adults.next(io, ctx, arena)) |user| _ = user; // the strings of user live in arena
 //! ```
 //!
 //! - The collection is `T.odm_schema.collection` in the database of the
@@ -38,7 +41,12 @@ const errors = @import("errors.zig");
 const driver = @import("driver.zig");
 const schema = @import("model/schema.zig");
 const codec = @import("model/codec.zig");
+const filter_ = @import("query/filter.zig");
+const options_ = @import("query/options.zig");
+const leases = @import("registry/generation.zig");
+const cursors = @import("Cursor.zig");
 const Session = @import("Session.zig");
+const Cursor = cursors.Cursor;
 const Error = errors.Error;
 const Diagnostics = errors.Diagnostics;
 const Client = driver.Client;
@@ -80,6 +88,46 @@ pub fn Collection(comptime T: type) type {
             const memory = call.begin(c.session, io);
             defer call.end();
             return call.finish(insertManyIn(T, c.session, io, ctx, memory, docs, arena));
+        }
+
+        /// The first document that `filter` matches, decoded into `arena`,
+        /// or null. `options` is a literal of `sort` and `skip`.
+        pub fn findOne(c: Self, io: Io, ctx: core.Context, filter: anytype, options: anytype, arena: Allocator) Error!?T {
+            return c.findOneAs(T, io, ctx, filter, options, arena);
+        }
+
+        /// As `findOne`, into `P`, a projection of the model: a struct of
+        /// fields of `T`, of their types or their optionals. The server
+        /// sends only those fields.
+        pub fn findOneAs(c: Self, comptime P: type, io: Io, ctx: core.Context, filter: anytype, options: anytype, arena: Allocator) Error!?P {
+            var call: Call = undefined;
+            const memory = call.begin(c.session, io);
+            defer call.end();
+            return call.finish(findOneIn(T, P, c.session, io, ctx, memory, filter, options, arena));
+        }
+
+        /// A cursor over the documents that `filter` matches. `options` is
+        /// a literal of `sort`, `skip`, `limit` and `batch_size`:
+        /// `.{ .sort = .{ .age = .desc }, .limit = 100 }`. `deinit` it.
+        pub fn find(c: Self, io: Io, ctx: core.Context, filter: anytype, options: anytype) Error!Cursor(T) {
+            return c.findAs(T, io, ctx, filter, options);
+        }
+
+        /// As `find`, with documents of `P`, a projection of the model.
+        pub fn findAs(c: Self, comptime P: type, io: Io, ctx: core.Context, filter: anytype, options: anytype) Error!Cursor(P) {
+            var call: Call = undefined;
+            const memory = call.begin(c.session, io);
+            defer call.end();
+            return call.finish(findIn(T, P, c.session, io, ctx, memory, filter, options));
+        }
+
+        /// How many documents `filter` matches; the capability `count` of
+        /// the driver, else `Unsupported`.
+        pub fn count(c: Self, io: Io, ctx: core.Context, filter: anytype) Error!u64 {
+            var call: Call = undefined;
+            const memory = call.begin(c.session, io);
+            defer call.end();
+            return call.finish(countIn(T, c.session, io, ctx, memory, filter));
         }
     };
 }
@@ -189,6 +237,96 @@ pub fn callOptions(s: *Session, memory: Allocator) Client.CallOptions {
 pub fn fail(d: *Diagnostics, err: anytype, comptime fmt: []const u8, args: anytype) @TypeOf(err) {
     d.set(null, null, fmt, args);
     return err;
+}
+
+/// The BSON of `filter`, a filter of `T`, in `memory`; `EncodeFailed` or
+/// `InvalidArgument` with a text in `d`.
+pub fn encodeFilter(comptime T: type, memory: Allocator, filter: anytype, d: *Diagnostics) Error!bson.RawDocument {
+    return filter_.encode(T, memory, filter) catch |err| switch (err) {
+        error.EncodeFailed => fail(d, err, "odm: the filter did not become BSON: a string is not UTF-8, a pattern holds NUL, or documents nest deeper than 100", .{}),
+        error.InvalidArgument => fail(d, err, "odm: an and, or or nor of the filter takes an empty []const odm.Filter({s}); it needs one filter at least", .{@typeName(T)}),
+        error.OutOfMemory => err,
+    };
+}
+
+/// The projection that a read of `T` into `P` sends, or null when `P` is
+/// the model itself.
+pub fn projectionOf(comptime T: type, comptime P: type, memory: Allocator) Error!?bson.RawDocument {
+    if (P == T) return null;
+    return try options_.projection(T, P, memory);
+}
+
+/// The decoder of the documents of `T` into `P`, the model or a
+/// projection of it, for a cursor.
+pub fn decoderOf(comptime T: type, comptime P: type) *const cursors.Decode(P) {
+    return &struct {
+        fn decode(arena: Allocator, raw: bson.RawDocument, d: *Diagnostics) cursors.DecodeError!P {
+            return codec.decode(T, P, arena, raw, d) catch |err| return decodeFailure(P, err, d);
+        }
+    }.decode;
+}
+
+/// `err` of a decode into `P`, with its text in `d`; the path and the cause
+/// are there already.
+pub fn decodeFailure(comptime P: type, err: cursors.DecodeError, d: *Diagnostics) cursors.DecodeError {
+    switch (err) {
+        error.DecodeFailed => d.set(null, null, "odm: a document of the server does not fit {s}", .{@typeName(P)}),
+        error.InvalidBson => d.set(null, null, "odm: a document of the server is not valid BSON", .{}),
+        error.OutOfMemory => {},
+    }
+    return err;
+}
+
+/// A cursor over the documents of `request`, holding a lease of its own on
+/// the generation of `s`: a cursor may outlive its session.
+pub fn openCursor(comptime T: type, comptime P: type, s: *Session, io: Io, ctx: core.Context, memory: Allocator, request: *const Client.FindRequest) Error!Cursor(P) {
+    leases.acquire(s.registry, io, s.generation);
+    errdefer leases.release(s.registry, io, s.generation);
+    const raw = try s.generation.client.find(io, ctx, request, callOptions(s, memory));
+    return .{ .registry = s.registry, .generation = s.generation, .raw = raw, .decode = decoderOf(T, P) };
+}
+
+/// The first document of `request`, decoded into `arena`, or null. The
+/// cursor of the driver lives only in the call, under the lease of the
+/// session.
+pub fn readFirst(comptime T: type, comptime P: type, s: *Session, io: Io, ctx: core.Context, memory: Allocator, request: *const Client.FindRequest, arena: Allocator) Error!?P {
+    const raw = try s.generation.client.find(io, ctx, request, callOptions(s, memory));
+    defer raw.deinit(io);
+    const doc = try raw.next(io, ctx, &s.diag) orelse return null;
+    return try decoderOf(T, P)(arena, doc, &s.diag);
+}
+
+/// How many documents of `T` `filter` matches.
+pub fn countIn(comptime T: type, s: *Session, io: Io, ctx: core.Context, memory: Allocator, filter: anytype) Error!u64 {
+    const request: Client.CountRequest = .{ .ns = namespace(T, s), .filter = try encodeFilter(T, memory, filter, &s.diag) };
+    return s.generation.client.count(io, ctx, &request, callOptions(s, memory));
+}
+
+fn findOneIn(comptime T: type, comptime P: type, s: *Session, io: Io, ctx: core.Context, memory: Allocator, filter: anytype, options: anytype, arena: Allocator) Error!?P {
+    const parts = try options_.find(T, .findOne, memory, options);
+    const request: Client.FindRequest = .{
+        .ns = namespace(T, s),
+        .filter = try encodeFilter(T, memory, filter, &s.diag),
+        .sort = parts.sort,
+        .projection = try projectionOf(T, P, memory),
+        .skip = parts.skip,
+        .limit = 1,
+    };
+    return readFirst(T, P, s, io, ctx, memory, &request, arena);
+}
+
+fn findIn(comptime T: type, comptime P: type, s: *Session, io: Io, ctx: core.Context, memory: Allocator, filter: anytype, options: anytype) Error!Cursor(P) {
+    const parts = try options_.find(T, .find, memory, options);
+    const request: Client.FindRequest = .{
+        .ns = namespace(T, s),
+        .filter = try encodeFilter(T, memory, filter, &s.diag),
+        .sort = parts.sort,
+        .projection = try projectionOf(T, P, memory),
+        .skip = parts.skip,
+        .limit = parts.limit,
+        .batch_size = parts.batch_size,
+    };
+    return openCursor(T, P, s, io, ctx, memory, &request);
 }
 
 fn insertOneIn(comptime T: type, s: *Session, io: Io, ctx: core.Context, memory: Allocator, doc: *const Insert(T)) Error!InsertOneResult(T) {
