@@ -105,15 +105,18 @@ pub const Message = struct {
 /// The next message, which lives until the next call, even when another
 /// task closes the subscriber meanwhile; null once the subscriber is
 /// closed, by its `close` or the client's. It waits as long as it takes,
-/// sending PING
-/// after `idle_ping` of silence. What went wrong goes to `diagnostics()`;
-/// after an error the subscriber is done with, and `next` is
-/// `error.Closed`.
+/// sending PING after `idle_ping` of silence. What went wrong goes to
+/// `diagnostics()`; after an error the subscriber is done with, and `next`
+/// is `error.Closed`.
 pub fn next(sub: *Subscriber, io: Io) Error!?Message {
     sub.enter();
-    defer sub.leave();
     sub.running.lockUncancelable(io);
-    defer sub.running.unlock(io);
+    // `busy` clears before the lock goes: once a `close` in another task
+    // has the lock, this call writes nothing more to the subscriber.
+    defer {
+        sub.leave();
+        sub.running.unlock(io);
+    }
     const state = sub.state;
     calls.checkUse(sub.client, io);
     const d = &sub.details;
@@ -135,10 +138,11 @@ pub fn diagnostics(sub: *const Subscriber) *const Diagnostics {
 
 /// Closes the subscriber from any task: it cuts the connection, so that a
 /// `next` that waits in another task returns null, and so does every later
-/// one; it waits for that `next`, and closes the connection. It frees
-/// nothing: a message that the reading task holds stays as it came until
-/// its next `next`, and `deinit` frees the subscriber. A second call
-/// returns once the first is done.
+/// one; it returns once that `next` is done with the subscriber, and
+/// closes the connection. It frees nothing: a message that the reading
+/// task holds stays as it came until its next `next`, and that task may
+/// call `next` again, so the subscriber goes only once the task has been
+/// awaited, by `deinit`. A second call returns once the first is done.
 pub fn close(sub: *Subscriber, io: Io) void {
     if (sub.closing.swap(true, .acq_rel)) {
         sub.closed.waitUncancelable(io);

@@ -541,6 +541,78 @@ fn closeWhileWaiting(io: Io) !void {
     try server.finish(testing.io);
 }
 
+/// An `Io` for the end of a `next` that `close` cuts: `std.testing.io`, with
+/// two holds, each once after `arm`. The read that the cut ends returns
+/// 200 ms late, so that `close` waits for `next` on its lock; the wake of
+/// that lock returns to `next` 300 ms late, so that `close` returns while
+/// `next` has the rest of its end still to run.
+const SlowEnd = struct {
+    vtable: Io.VTable,
+
+    var lock: std.atomic.Value(usize) = .init(0);
+    var hold_read: std.atomic.Value(bool) = .init(false);
+    var hold_wake: std.atomic.Value(bool) = .init(false);
+
+    fn io(s: *SlowEnd) Io {
+        s.vtable = testing.io.vtable.*;
+        s.vtable.batchAwaitConcurrent = batchAwaitConcurrent;
+        s.vtable.futexWake = futexWake;
+        return .{ .userdata = testing.io.userdata, .vtable = &s.vtable };
+    }
+
+    fn arm(mutex: *const Io.Mutex) void {
+        lock.store(@intFromPtr(&mutex.state.raw), .release);
+        hold_read.store(true, .release);
+        hold_wake.store(true, .release);
+    }
+
+    fn batchAwaitConcurrent(userdata: ?*anyopaque, batch: *Io.Batch, timeout: Io.Timeout) Io.Batch.AwaitConcurrentError!void {
+        defer if (hold_read.swap(false, .acq_rel)) holdOn(200);
+        return testing.io.vtable.batchAwaitConcurrent(userdata, batch, timeout);
+    }
+
+    fn futexWake(userdata: ?*anyopaque, ptr: *const u32, max_waiters: u32) void {
+        testing.io.vtable.futexWake(userdata, ptr, max_waiters);
+        if (@intFromPtr(ptr) == lock.load(.acquire) and hold_wake.swap(false, .acq_rel)) holdOn(300);
+    }
+
+    fn holdOn(ms: i64) void {
+        testing.io.sleep(.fromMilliseconds(ms), .awake) catch {};
+    }
+};
+
+test "close from another task returns once next is done with the subscriber: nothing of next writes to it after, so it may go once the reading task is awaited" {
+    var slow: SlowEnd = undefined;
+    try within5s(testing.io, endOfNext, .{slow.io()});
+}
+
+/// The client on `io`, the server on `std.testing.io`.
+fn endOfNext(io: Io) !void {
+    var server: FakeServer = try .start(testing.allocator, testing.io, &.{.expect(.{ "SUBSCRIBE", "orders" }, .subscribed(&.{"orders"}))});
+    defer server.stop(testing.io);
+    var client: Client = undefined;
+    try connected(io, &client, .{ .url = server.url() });
+    defer client.deinit();
+    var sub = try client.subscribe(io, .of(.root), .{ .channels = &.{"orders"}, .idle_ping = .fromSeconds(3) });
+    defer sub.deinit();
+    var reading = try io.concurrent(nextOf, .{ &sub, io });
+    defer stopReading(&reading, io);
+    // Long enough for next to wait on the socket.
+    try redis.testing.sleepAtLeast(testing.io, .fromMilliseconds(100));
+    SlowEnd.arm(&sub.running);
+    sub.close(io);
+    // A subscriber that went at once: nothing of next may write to it now.
+    const kept = sub;
+    const bytes = std.mem.asBytes(&sub);
+    @memset(bytes, 0xAA);
+    const result = reading.await(io);
+    const untouched = std.mem.allEqual(u8, bytes, 0xAA);
+    sub = kept;
+    try testing.expectEqual(@as(?redis.Subscriber.Message, null), try result);
+    try testing.expect(untouched);
+    try server.finish(testing.io);
+}
+
 /// An allocator for the client that keeps what it frees: a freed block is
 /// filled with 0xAA and kept until `deinit`, so that a read after a free
 /// sees 0xAA, where it would crash with the block returned to the system.
