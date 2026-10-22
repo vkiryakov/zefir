@@ -134,4 +134,5 @@ test {
     _ = @import("acl.zig");
     _ = @import("outage.zig");
     _ = @import("adapter.zig");
+    _ = @import("app.zig");
 }
