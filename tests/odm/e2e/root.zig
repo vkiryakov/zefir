@@ -45,8 +45,9 @@ pub fn onZio(comptime scenario: fn (Io) anyerror!void) !void {
 
 /// Runs `scenario` in a task of its own and cancels it when it takes
 /// longer than `time_limit`: a server that stops answering fails the test
-/// instead of hanging it.
-fn withinTimeLimit(io: Io, comptime scenario: fn (Io) anyerror!void) anyerror!void {
+/// instead of hanging it. The stress tests run their scenarios through it
+/// too.
+pub fn withinTimeLimit(io: Io, comptime scenario: fn (Io) anyerror!void) anyerror!void {
     const Race = union(enum) {
         done: anyerror!void,
         timer: Io.Cancelable!void,
@@ -64,6 +65,11 @@ fn withinTimeLimit(io: Io, comptime scenario: fn (Io) anyerror!void) anyerror!vo
         .done => |result| result,
         .timer => error.TestTimedOut,
     };
+}
+
+/// A context whose deadline is `duration` from now, for the calls of odm.
+pub fn within(io: Io, duration: Io.Duration) core.Context {
+    return core.Context.root.withDeadline(.after(Io.Clock.awake.now(io), duration));
 }
 
 var names: std.atomic.Value(u32) = .init(0);
@@ -112,14 +118,57 @@ pub const Admin = struct {
         try a.at(name).drop(io, op(io), .{ .allocator = testing.allocator });
     }
 
+    /// `dropDatabase` for a `defer` at the end of a test: a failure is
+    /// printed, not returned.
+    pub fn dropDatabaseAtEnd(a: *Admin, io: Io, name: []const u8) void {
+        a.dropDatabase(io, name) catch |err| std.debug.print("drop of the database {s}: {t}\n", .{ name, err });
+    }
+
     /// Makes `user` with `password` in `database`, with `roles`: a list of
     /// `.{ .role = "readWrite", .db = "odm_a" }`.
     pub fn createUser(a: *Admin, io: Io, database: []const u8, user: []const u8, password: []const u8, roles: anytype) !void {
         try a.command(io, database, .{ .createUser = user, .pwd = password, .roles = roles });
     }
 
+    /// `createUser`, after the drop of a user of the name that a run that
+    /// died left.
+    pub fn freshUser(a: *Admin, io: Io, database: []const u8, user: []const u8, password: []const u8, roles: anytype) !void {
+        try a.dropUserIfAny(io, database, user);
+        try a.createUser(io, database, user, password, roles);
+    }
+
     pub fn dropUser(a: *Admin, io: Io, database: []const u8, user: []const u8) !void {
         try a.command(io, database, .{ .dropUser = user });
+    }
+
+    /// Drops `user` of `database`; one that is not there (code 11,
+    /// UserNotFound) is no error.
+    pub fn dropUserIfAny(a: *Admin, io: Io, database: []const u8, user: []const u8) !void {
+        var d: mongo.Diagnostics = .{};
+        const reply = a.at(database).runCommand(io, op(io), .{ .dropUser = user }, .{ .allocator = testing.allocator, .diagnostics = &d }) catch |err| {
+            if (err == error.CommandFailed and d.server != null and d.server.?.code == 11) return;
+            std.debug.print("the drop of the user {s} of {s}: {t}: {s}\n", .{ user, database, err, d.message() });
+            return err;
+        };
+        reply.deinit();
+    }
+
+    /// `dropUserIfAny` for a `defer` at the end of a test: a failure is
+    /// printed, not returned.
+    pub fn dropUserAtEnd(a: *Admin, io: Io, database: []const u8, user: []const u8) void {
+        a.dropUserIfAny(io, database, user) catch {};
+    }
+
+    /// Gives `user` of `database` a new password, in place: the server
+    /// refuses the old one from now on, to every new connection.
+    pub fn changePassword(a: *Admin, io: Io, database: []const u8, user: []const u8, password: []const u8) !void {
+        try a.command(io, database, .{ .updateUser = user, .pwd = password });
+    }
+
+    /// The collection `name` of `database`, for what the tests write and
+    /// read past odm, as another writer would.
+    pub fn collection(a: *Admin, database: []const u8, name: []const u8) mongo.Collection {
+        return a.at(database).collection(name);
     }
 
     /// Configures `failCommand` to act on the next command that `data`
@@ -148,14 +197,16 @@ pub const Admin = struct {
     }
 };
 
-/// The context of a call of an `Admin`: 30 s.
-fn op(io: Io) mongo.OperationContext {
-    return .of(core.Context.root.withDeadline(.after(Io.Clock.awake.now(io), .fromSeconds(30))));
+/// The context of a call of an `Admin`, and of the calls that the tests
+/// make through its collections: 30 s.
+pub fn op(io: Io) mongo.OperationContext {
+    return .of(within(io, .fromSeconds(30)));
 }
 
 test {
     testing.refAllDecls(@This());
     _ = @import("conformance.zig");
+    _ = @import("tenants.zig");
 }
 
 test "an Admin of mongo-auth makes a user that writes to its database, and drops both" {
