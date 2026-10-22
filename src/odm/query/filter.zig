@@ -6,6 +6,10 @@
 //! .{ .status = .active, .age = .{ .gte = 18, .lt = 65 } }   // {status: "active", age: {$gte: 18, $lt: 65}}
 //! .{ .created_at = .{ .gte = since } }                      // {createdAt: {$gte: …}}: the key of names
 //! .{ .profile = null }                                      // {profile: null}: null or no field
+//! .{ .profile = .{ .city = "Paris" } }                      // {"profile.city": "Paris"}: a path
+//! .{ .profile = .{ .eq = p } }                              // {profile: {city: …, country: …}}: whole
+//! .{ .tags = "admin" }                                      // {tags: "admin"}: an item of the list
+//! .{ .items = .{ .elem_match = .{ .sku = "x", .qty = .{ .gt = 5 } } } }
 //! .{ .@"or" = .{ .{ .age = .{ .lt = 18 } }, .{ .status = .blocked } } }
 //! ```
 //!
@@ -14,8 +18,16 @@
 //!   or more.
 //! - The value of a field is a value, which the field equals, or a literal
 //!   of operators: `eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `in`, `nin`,
-//!   `exists`, `regex`, `not`. Which of them a field takes depends on its
-//!   type (design §4.5). A literal of `eq` alone is the value itself.
+//!   `exists`, `regex`, `not`, and for lists `all`, `size`, `elem_match`.
+//!   Which of them a field takes depends on its type (design §4.5). A
+//!   literal of `eq` alone is the value itself.
+//! - A literal on a struct, or on a list of structs, whose keys are fields
+//!   of the struct is conditions on their paths, never the match of a whole
+//!   document: that takes `.eq`, and a value of the struct without it does
+//!   not compile (design §5.9). A whole document is written in the order of
+//!   its fields, without its null optionals, as the documents of odm are.
+//! - A value of a list field is an item that the list holds; the whole list
+//!   takes `.eq`, all its items `.all`.
 //! - A value known at run time must fit the field without narrowing; a
 //!   value known at compile time is checked itself: its range, its tag, its
 //!   UTF-8 (query/values.zig). Either way it goes into BSON as a value of
@@ -151,14 +163,94 @@ fn requireFilters(comptime T: type, comptime op: []const u8, comptime V: type) v
 }
 
 /// Writes the condition `@field(parent, name)` on the field at `at`: an
-/// equality, or the operators of a literal.
+/// equality, the conditions on the paths of a literal of fields, or the
+/// operators of a literal of operators.
 fn writeCondition(b: *Builder, comptime at: At, comptime L: type, comptime name: []const u8, parent: L) WriteError!void {
     const V = @FieldType(L, name);
-    if (comptime values.isLiteral(V, Unwrap(at.F))) {
-        comptime requireOperators(at, V);
-        return writeOperatorsAt(b, at, V, @field(parent, name));
+    // A value of the items of a list is an item to match, not a literal.
+    const literal = comptime (values.isLiteral(V, Unwrap(at.F)) and if (ItemOf(at)) |Item| values.isLiteral(V, Unwrap(Item)) else true);
+    if (literal) {
+        return switch (comptime classify(at, V)) {
+            .paths => writePaths(b, at, V, @field(parent, name)),
+            .operators => writeOperatorsAt(b, at, V, @field(parent, name)),
+        };
     }
-    try writeEqualityAt(b, at, L, name, parent);
+    try writeEqualityAt(b, at, L, name, parent, true);
+}
+
+/// The struct whose fields a literal on a field of type `F` names as paths:
+/// the struct of the field, or the struct of the items of a list; null for
+/// any other field.
+fn Fields(comptime F: type) ?type {
+    const S = Unwrap(F);
+    if (schema.isDocument(S)) return S;
+    const Item = schema.ListItem(S) orelse return null;
+    return if (schema.isDocument(Unwrap(Item))) Unwrap(Item) else null;
+}
+
+/// The declared type of the items of the field at `at`, when it is a list.
+fn ItemOf(comptime at: At) ?type {
+    return schema.ListItem(Unwrap(at.F));
+}
+
+/// What a literal on the field at `at` is (design §5.9).
+const Kind = enum {
+    /// All its keys are fields of the struct of the field, or of its items:
+    /// conditions on their paths.
+    paths,
+    /// None is: operators of the field itself.
+    operators,
+};
+
+fn classify(comptime at: At, comptime V: type) Kind {
+    const keys = @typeInfo(V).@"struct".field_names;
+    if (keys.len == 0) @compileError("odm: " ++ subject(at) ++ ": an empty literal matches nothing here; drop it");
+    const S = Fields(at.F);
+    var paths = false;
+    var operators = false;
+    for (keys) |key| {
+        const is_field = if (S) |Struct| @hasField(Struct, key) else false;
+        const is_operator = operator(key) != null;
+        if (is_field and is_operator) @compileError("odm: " ++ subject(at) ++ ": '" ++ key ++ "' is both a field of " ++ @typeName(S.?) ++ " and an operator: rename the field");
+        if (!is_field and !is_operator) unknownKey(at, S, key);
+        if (is_field) paths = true else operators = true;
+    }
+    if (paths and operators) @compileError("odm: " ++ subject(at) ++ ": write either fields of " ++ @typeName(S.?) ++ " or operators in one literal, not both");
+    return if (paths) .paths else .operators;
+}
+
+/// Stops the build at a key that is neither a field of `S` nor an
+/// operator, naming the field or the operator it is nearest to.
+fn unknownKey(comptime at: At, comptime S: ?type, comptime key: []const u8) noreturn {
+    const operators = @typeInfo(Op).@"enum".field_names;
+    if (S) |Struct| {
+        const field = values.didYouMean(@typeInfo(Struct).@"struct".field_names, key);
+        if (field.len > 0 or values.didYouMean(operators, key).len == 0) @compileError("odm: " ++ subject(at) ++ " has no field '" ++ key ++ "'" ++ field);
+    }
+    @compileError("odm: unknown filter operator '" ++ key ++ "' on " ++ subject(at) ++ values.didYouMean(operators, key));
+}
+
+/// Writes the conditions of the literal `value` on the paths of the fields
+/// of the struct of the field at `at`: `"profile.city": "Paris"`.
+fn writePaths(b: *Builder, comptime at: At, comptime V: type, value: V) WriteError!void {
+    const S = comptime Fields(at.F).?;
+    inline for (@typeInfo(V).@"struct".field_names) |name| {
+        try writeCondition(b, comptime inner(at, S, name), V, name, value);
+    }
+}
+
+/// The field `name` of `S`, the struct of the field at `at`, on a path
+/// through it.
+fn inner(comptime at: At, comptime S: type, comptime name: []const u8) At {
+    const F = @FieldType(S, name);
+    const items_optional = if (ItemOf(at)) |Item| @typeInfo(Item) == .optional else false;
+    return .{
+        .T = at.T,
+        .path = at.path ++ "." ++ name,
+        .key = if (at.key.len == 0) name else at.key ++ "." ++ name,
+        .F = F,
+        .optional = at.optional or items_optional or @typeInfo(F) == .optional,
+    };
 }
 
 /// The operators of a filter, by their names in a literal.
@@ -187,9 +279,14 @@ fn requireOperators(comptime at: At, comptime V: type) void {
 }
 
 /// Whether the operator `op` applies to a field of type `F`, by the table
-/// of design §4.5.
+/// of design §4.5. On a list, gt, gte, lt, lte and regex compare its items,
+/// so they apply when they apply to the items.
 fn applies(comptime op: Op, comptime F: type) bool {
     const S = Unwrap(F);
+    if (schema.ListItem(S)) |Item| return switch (op) {
+        .gt, .gte, .lt, .lte, .regex => applies(op, Item),
+        else => true,
+    };
     return switch (op) {
         .eq, .ne, .exists => true,
         .gt, .gte, .lt, .lte => ordered(S),
@@ -226,19 +323,44 @@ fn nullable(comptime at: At, comptime X: type) type {
     return if (at.optional and @typeInfo(X) != .optional) ?X else X;
 }
 
+/// Stops the build at a null that the field at `at` never equals: a
+/// document always has the field, and it is not a list that holds nulls.
 fn requireNull(comptime at: At) void {
-    if (!at.optional) @compileError("odm: " ++ subject(at) ++ " is not optional: null matches no document");
+    if (at.optional) return;
+    if (ItemOf(at)) |Item| if (@typeInfo(Item) == .optional) return;
+    @compileError("odm: " ++ subject(at) ++ " is not optional: null matches no document");
 }
 
-/// The type of a value that the field at `at` equals (`eq`), or does not
-/// (`ne`): `@field(L, name)`. Stops the build when the value does not fit.
-fn equality(comptime at: At, comptime L: type, comptime name: []const u8, comptime op: []const u8) type {
-    const X = nullable(at, at.F);
-    if (@FieldType(L, name) == @TypeOf(null)) {
+/// The type of the value `@field(L, name)` that the field at `at` equals
+/// (`eq`), or does not (`ne`), which `implicit` says stands without `.eq`:
+/// a value of the field; for a list an item, or the whole list with `.eq`;
+/// for a struct the whole document with `.eq`. Stops the build when the
+/// value does not fit.
+fn equality(comptime at: At, comptime L: type, comptime name: []const u8, comptime op: []const u8, comptime implicit: bool) type {
+    const M = @typeName(at.T);
+    const V = @FieldType(L, name);
+    const what = op ++ " on";
+    if (V == @TypeOf(null)) {
         requireNull(at);
-        return X;
+        return nullable(at, at.F);
     }
-    values.checkValue(op ++ " on", @typeName(at.T), at.path, X, L, name);
+    const S = Unwrap(at.F);
+    if (schema.isDocument(S) and implicit) {
+        const first = @typeInfo(S).@"struct".field_names[0];
+        const last = if (std.mem.findScalarLast(u8, at.path, '.')) |dot| at.path[dot + 1 ..] else at.path;
+        @compileError("odm: " ++ subject(at) ++ " is a document: match its fields, .{ ." ++ last ++ " = .{ ." ++ first ++ " = ... } }, or the whole document with .{ .eq = value }");
+    }
+    if (ItemOf(at)) |Item| {
+        const E = nullable(at, Item);
+        const item = if (values.isComptime(L, name)) values.comptimeFits(V, E) else values.fits(V, E);
+        if (item or !values.isList(V)) {
+            values.checkValue(what, M, at.path ++ "[]", E, L, name);
+            return E;
+        }
+        if (implicit) @compileError("odm: " ++ subject(at) ++ " is a list: match an item with an item, all items with .all, the whole list with .eq");
+    }
+    const X = nullable(at, at.F);
+    values.checkValue(what, M, at.path, X, L, name);
     return X;
 }
 
@@ -251,9 +373,10 @@ fn needsEq(comptime X: type) bool {
 }
 
 /// Writes the equality of the field at `at` with `@field(parent, name)` as
-/// `key: value`, or as `key: {$eq: value}` where `needsEq` says so.
-fn writeEqualityAt(b: *Builder, comptime at: At, comptime L: type, comptime name: []const u8, parent: L) WriteError!void {
-    const X = comptime equality(at, L, name, "eq");
+/// `key: value`, or as `key: {$eq: value}` where `needsEq` says so;
+/// `implicit` when the value stands without `.eq`.
+fn writeEqualityAt(b: *Builder, comptime at: At, comptime L: type, comptime name: []const u8, parent: L, comptime implicit: bool) WriteError!void {
+    const X = comptime equality(at, L, name, "eq", implicit);
     const value = @field(parent, name);
     if (comptime needsEq(X)) {
         try b.beginDocument(at.key);
@@ -267,45 +390,57 @@ fn writeEqualityAt(b: *Builder, comptime at: At, comptime L: type, comptime name
 /// key: `key: {$gte: 18, $lt: 65}`, or `key: value` for `eq` alone.
 fn writeOperatorsAt(b: *Builder, comptime at: At, comptime V: type, value: V) WriteError!void {
     const keys = @typeInfo(V).@"struct".field_names;
-    if (keys.len == 1 and comptime std.mem.eql(u8, keys[0], "eq")) return writeEqualityAt(b, at, V, "eq", value);
+    if (keys.len == 1 and comptime std.mem.eql(u8, keys[0], "eq")) return writeEqualityAt(b, at, V, "eq", value, false);
     try b.beginDocument(at.key);
     try writeOperators(b, at, V, value);
     try b.end();
+}
+
+/// The type of the values that gt, gte, lt, lte, in and nin compare the
+/// field at `at` with — the field's own, or its items' for a list — and the
+/// path that names them in the messages.
+fn compared(comptime at: At) struct { type, []const u8 } {
+    if (ItemOf(at)) |Item| return .{ Item, at.path ++ "[]" };
+    return .{ at.F, at.path };
 }
 
 /// Writes the operators of the literal `value` on the field at `at` into
 /// the document open in `b`: `$gte: 18`, `$in: [...]`.
 fn writeOperators(b: *Builder, comptime at: At, comptime V: type, value: V) WriteError!void {
     const M = @typeName(at.T);
+    const X, const path = comptime compared(at);
     inline for (@typeInfo(V).@"struct".field_names) |name| {
         const op = comptime operator(name).?;
         comptime requireApplies(at, op);
         const key = comptime keyOfOp(op);
         switch (op) {
-            .eq, .ne => try values.writeValue(b, key, comptime equality(at, V, name, name), @field(value, name)),
+            .eq, .ne => try values.writeValue(b, key, comptime equality(at, V, name, name, false), @field(value, name)),
             .gt, .gte, .lt, .lte => {
-                const X = Unwrap(at.F);
-                comptime values.checkValue(name ++ " on", M, at.path, X, V, name);
-                try values.writeValue(b, key, X, @field(value, name));
+                comptime values.checkValue(name ++ " on", M, path, Unwrap(X), V, name);
+                try values.writeValue(b, key, Unwrap(X), @field(value, name));
             },
-            .in, .nin => try writeIn(b, key, at, V, name, value),
+            .in, .nin => try writeList(b, key, at, comptime nullable(at, X), path, V, name, value),
+            .all => try writeList(b, key, at, X, path, V, name, value),
             .exists => {
                 comptime values.checkValue("exists on", M, at.path, bool, V, name);
                 try values.writeValue(b, key, bool, @field(value, name));
             },
+            .size => {
+                comptime values.checkValue("size on", M, at.path, u32, V, name);
+                try values.writeValue(b, key, i64, @field(value, name));
+            },
             .regex => try writeRegex(b, key, at, V, name, value),
             .not => try writeNot(b, at, V, name, value),
-            .all, .size, .elem_match => comptime unreachable,
+            .elem_match => try writeElemMatch(b, at, V, name, value),
         }
     }
 }
 
-/// Writes `$in` or `$nin`: the array of the values in the tuple or the list
-/// `@field(parent, name)`, each a value that the field equals.
-fn writeIn(b: *Builder, comptime key: []const u8, comptime at: At, comptime L: type, comptime name: []const u8, parent: L) WriteError!void {
-    const X = comptime nullable(at, at.F);
+/// Writes `$in`, `$nin` or `$all`: the array of the values of `X` in the
+/// tuple or the list `@field(parent, name)`.
+fn writeList(b: *Builder, comptime key: []const u8, comptime at: At, comptime X: type, comptime path: []const u8, comptime L: type, comptime name: []const u8, parent: L) WriteError!void {
     const O = @FieldType(L, name);
-    comptime requireList(at, name, X, O, at.path);
+    comptime requireList(at, name, X, path, O);
     const list = @field(parent, name);
     try b.beginArray(key);
     if (comptime values.TupleOf(O)) |Tuple| {
@@ -320,7 +455,7 @@ fn writeIn(b: *Builder, comptime key: []const u8, comptime at: At, comptime L: t
 /// Stops the build unless `O` is a list of values of `X`: a tuple, checked
 /// item by item with `path` in the messages, or a slice or an array that
 /// fits `[]const X`.
-fn requireList(comptime at: At, comptime op: []const u8, comptime X: type, comptime O: type, comptime path: []const u8) void {
+fn requireList(comptime at: At, comptime op: []const u8, comptime X: type, comptime path: []const u8, comptime O: type) void {
     const M = @typeName(at.T);
     if (values.TupleOf(O)) |Tuple| {
         for (@typeInfo(Tuple).@"struct".field_names) |i| {
@@ -357,5 +492,25 @@ fn writeNot(b: *Builder, comptime at: At, comptime L: type, comptime name: []con
     comptime requireOperators(at, O);
     try b.beginDocument("$not");
     try writeOperators(b, at, O, operand);
+    try b.end();
+}
+
+/// Writes `$elemMatch`: conditions that one item of the list at `at` meets
+/// together, as a literal of the fields of a struct item or of operators on
+/// an item of values. Their keys are those of the item, and the messages
+/// name it with "[]": "items[].sku".
+fn writeElemMatch(b: *Builder, comptime at: At, comptime L: type, comptime name: []const u8, parent: L) WriteError!void {
+    const Item = comptime ItemOf(at).?;
+    const item: At = .{ .T = at.T, .path = at.path ++ "[]", .key = "", .F = Item, .optional = @typeInfo(Item) == .optional };
+    const O = @FieldType(L, name);
+    if (comptime !values.isLiteral(O, Unwrap(Item))) {
+        @compileError("odm: elem_match on " ++ subject(at) ++ " takes a literal of conditions on the items of the list; got " ++ @typeName(O));
+    }
+    const operand = @field(parent, name);
+    try b.beginDocument("$elemMatch");
+    switch (comptime classify(item, O)) {
+        .paths => try writePaths(b, item, O, operand),
+        .operators => try writeOperators(b, item, O, operand),
+    }
     try b.end();
 }

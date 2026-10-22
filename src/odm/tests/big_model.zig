@@ -119,30 +119,32 @@ test "big model: a find over twelve paths" {
     defer arena.deinit();
     var min: i32 = 1;
     _ = &min;
+    // Twelve paths: top-level fields of each kind, an item of a list,
+    // paths into structs two levels deep, one item of a list of structs,
+    // and two fields in a logical operator.
     const doc = try filter.encode(Big, arena.allocator(), .{
-        .f0 = true,
         .f1 = .{ .gte = min, .lt = 10 },
-        .f2 = .{ .ne = 3 },
-        .f4 = .{ .in = .{ 1, 2, 3 } },
-        .f5 = .{ .lte = 2.5 },
         .f6 = .{ .regex = "^a" },
         .f7 = .{ .in = .{ .one, .two } },
-        .f8 = .{ .gte = since },
         .f9 = id,
         .f11 = null,
+        .f12 = "x",
+        .a = .{ .a4 = .{ .gt = 5 }, .deep = .{ .d6 = "y" } },
+        .b = .{ .b2 = .{ .ne = 3 } },
+        .c = .{ .elem_match = .{ .c1 = 2 } },
         .@"or" = .{ .{ .f3 = 1 }, .{ .f16 = .{ .exists = true } } },
     });
     try expectDoc(arena.allocator(), .{
-        .fZero = true,
         .fOne = .{ .@"$gte" = @as(i32, 1), .@"$lt" = @as(i32, 10) },
-        .f2 = .{ .@"$ne" = @as(i64, 3) },
-        .f4 = .{ .@"$in" = .{ @as(i64, 1), @as(i64, 2), @as(i64, 3) } },
-        .f5 = .{ .@"$lte" = 2.5 },
         .f6 = .{ .@"$regex" = "^a" },
         .f7 = .{ .@"$in" = .{ "one", "two" } },
-        .f8 = .{ .@"$gte" = since },
         .f9 = id,
         .f11 = null,
+        .f12 = "x",
+        .@"a.a4" = .{ .@"$gt" = @as(i64, 5) },
+        .@"a.deep.d6" = "y",
+        .@"b.b2" = .{ .@"$ne" = @as(i64, 3) },
+        .c = .{ .@"$elemMatch" = .{ .c1 = @as(i32, 2) } },
         .@"$or" = .{ .{ .f3 = @as(i32, 1) }, .{ .f16 = .{ .@"$exists" = true } } },
     }, doc);
 }

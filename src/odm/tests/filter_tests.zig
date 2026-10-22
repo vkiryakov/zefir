@@ -125,3 +125,58 @@ test "values that BSON cannot hold are EncodeFailed" {
     const re: bson.Regex = .{ .pattern = nul, .options = "" };
     try testing.expectError(error.EncodeFailed, filter.encode(User, arena.allocator(), .{ .email = .{ .regex = re } }));
 }
+
+const paris: User.Profile = .{ .city = "Paris", .country = "FR" };
+
+test "a literal on a struct is conditions on the paths of its fields" {
+    try expectFilter(User, .{ .profile = .{ .city = "Paris" } }, .{ .@"profile.city" = "Paris" });
+    try expectFilter(User, .{ .profile = .{ .city = .{ .in = .{ "Paris", "Lyon" } } } }, .{ .@"profile.city" = .{ .@"$in" = .{ "Paris", "Lyon" } } });
+    try expectFilter(Account, .{ .address = .{ .city = "Lyon", .country = "FR" } }, .{ .@"address.city" = "Lyon", .@"address.country" = "FR" });
+    // A path into an optional struct may be missing, so it takes null.
+    try expectFilter(User, .{ .profile = .{ .city = null } }, .{ .@"profile.city" = null });
+    try expectFilter(Account, .{ .address = .{ .zip = .{ .exists = false } } }, .{ .@"address.zip" = .{ .@"$exists" = false } });
+}
+
+test "a whole document only with eq, written without its null optionals" {
+    try expectFilter(User, .{ .profile = .{ .eq = paris } }, .{ .profile = .{ .city = "Paris", .country = "FR" } });
+    const lyon: models.Address = .{ .city = "Lyon", .country = "FR" };
+    try expectFilter(Account, .{ .address = .{ .eq = lyon } }, .{ .address = .{ .city = "Lyon", .country = "FR" } });
+    try expectFilter(Account, .{ .address = .{ .ne = lyon } }, .{ .address = .{ .@"$ne" = .{ .city = "Lyon", .country = "FR" } } });
+    // The operators of the struct field itself.
+    try expectFilter(User, .{ .profile = .{ .exists = false } }, .{ .profile = .{ .@"$exists" = false } });
+    var maybe: ?User.Profile = null;
+    try expectFilter(User, .{ .profile = .{ .eq = maybe } }, .{ .profile = null });
+    maybe = paris;
+    try expectFilter(User, .{ .profile = .{ .eq = maybe } }, .{ .profile = .{ .city = "Paris", .country = "FR" } });
+}
+
+test "a list matches by an item, by all items, by its size or as a whole" {
+    try expectFilter(Account, .{ .tags = "admin" }, .{ .tags = "admin" });
+    try expectFilter(Account, .{ .tags = .{ .all = .{ "a", "b" } } }, .{ .tags = .{ .@"$all" = .{ "a", "b" } } });
+    try expectFilter(Account, .{ .tags = .{ .size = 2 } }, .{ .tags = .{ .@"$size" = @as(i64, 2) } });
+    try expectFilter(Account, .{ .tags = .{ .in = .{ "a", "b" } } }, .{ .tags = .{ .@"$in" = .{ "a", "b" } } });
+    const list: []const []const u8 = &.{ "a", "b" };
+    try expectFilter(Account, .{ .tags = .{ .eq = list } }, .{ .tags = .{ "a", "b" } });
+    try expectFilter(Account, .{ .tags = .{ .eq = .{ "a", "b" } } }, .{ .tags = .{ "a", "b" } });
+    try expectFilter(Account, .{ .tags = .{ .gt = "m", .not = .{ .size = 0 } } }, .{ .tags = .{ .@"$gt" = "m", .@"$not" = .{ .@"$size" = @as(i64, 0) } } });
+    var n: u16 = 3;
+    _ = &n;
+    try expectFilter(Account, .{ .tags = .{ .size = n } }, .{ .tags = .{ .@"$size" = @as(i64, 3) } });
+    // An optional list takes null; its items are strings still.
+    try expectFilter(Account, .{ .labels = null }, .{ .labels = null });
+    try expectFilter(Account, .{ .labels = "x" }, .{ .labels = "x" });
+}
+
+test "a literal on a list of structs is paths through it, and elem_match one item" {
+    try expectFilter(Account, .{ .items = .{ .sku = "x" } }, .{ .@"items.sku" = "x" });
+    try expectFilter(Account, .{ .items = .{ .elem_match = .{ .sku = "x", .qty = .{ .gt = 5 } } } }, .{
+        .items = .{ .@"$elemMatch" = .{ .sku = "x", .qty = .{ .@"$gt" = @as(i64, 5) } } },
+    });
+    try expectFilter(Account, .{ .tags = .{ .elem_match = .{ .regex = "^a" } } }, .{ .tags = .{ .@"$elemMatch" = .{ .@"$regex" = "^a" } } });
+    // Inside elem_match, eq keeps its operator on an item of values.
+    try expectFilter(Account, .{ .tags = .{ .elem_match = .{ .eq = "a" } } }, .{ .tags = .{ .@"$elemMatch" = .{ .@"$eq" = "a" } } });
+    // An item that a list holds, as a whole document.
+    const item: models.Item = .{ .sku = "x", .qty = 2 };
+    try expectFilter(Account, .{ .items = item }, .{ .items = .{ .sku = "x", .qty = @as(i64, 2) } });
+    try expectFilter(Account, .{ .items = .{ .in = .{item} } }, .{ .items = .{ .@"$in" = .{.{ .sku = "x", .qty = @as(i64, 2) }} } });
+}

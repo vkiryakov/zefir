@@ -574,3 +574,40 @@ test "compile error: or of a number" {
 test "compile error: and of no filters" {
     _ = try filter.encode(User, std.testing.allocator, .{ .@"and" = .{} });
 }
+
+// Filters on documents and lists.
+
+test "compile error: a field that a nested struct does not have" {
+    _ = try filter.encode(User, std.testing.allocator, .{ .profile = .{ .ctiy = "Paris" } });
+}
+
+test "compile error: a document without eq" {
+    const p: User.Profile = .{ .city = "Paris", .country = "FR" };
+    _ = try filter.encode(User, std.testing.allocator, .{ .profile = p });
+}
+
+test "compile error: a list as the value of a list" {
+    const list: []const []const u8 = &.{ "a", "b" };
+    _ = try filter.encode(Account, std.testing.allocator, .{ .tags = list });
+}
+
+test "compile error: fields and operators in one literal" {
+    _ = try filter.encode(User, std.testing.allocator, .{ .profile = .{ .city = "x", .exists = true } });
+}
+
+/// A model with a struct whose field is named like an operator.
+const Box = struct {
+    id: ?bson.ObjectId = null,
+    inner: Inner,
+
+    pub const Inner = struct { size: u32 };
+    pub const odm_schema: odm.Schema(Box) = .{ .collection = "boxes", .id = .id };
+};
+
+test "compile error: a key that is a field and an operator" {
+    _ = try filter.encode(Box, std.testing.allocator, .{ .inner = .{ .size = 1 } });
+}
+
+test "compile error: an empty literal on a struct" {
+    _ = try filter.encode(User, std.testing.allocator, .{ .profile = .{} });
+}

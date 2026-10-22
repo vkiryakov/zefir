@@ -70,4 +70,11 @@ pub const compile_errors = [_]Case{
     .{ .name = "compile error: null on a required field", .expect = "odm: tests.compile_errors.User.email is not optional: null matches no document" },
     .{ .name = "compile error: or of a number", .expect = "odm: or takes a tuple of filters of tests.compile_errors.User, such as .{ .{ .a = 1 }, .{ .b = 2 } }, or a []const odm.Filter(tests.compile_errors.User); got comptime_int" },
     .{ .name = "compile error: and of no filters", .expect = "odm: and needs at least one filter" },
+    // Filters on documents and lists.
+    .{ .name = "compile error: a field that a nested struct does not have", .expect = "odm: tests.compile_errors.User.profile has no field 'ctiy'; did you mean 'city'?" },
+    .{ .name = "compile error: a document without eq", .expect = "odm: tests.compile_errors.User.profile is a document: match its fields, .{ .profile = .{ .city = ... } }, or the whole document with .{ .eq = value }" },
+    .{ .name = "compile error: a list as the value of a list", .expect = "odm: tests.compile_errors.Account.tags is a list: match an item with an item, all items with .all, the whole list with .eq" },
+    .{ .name = "compile error: fields and operators in one literal", .expect = "odm: tests.compile_errors.User.profile: write either fields of tests.compile_errors.User.Profile or operators in one literal, not both" },
+    .{ .name = "compile error: a key that is a field and an operator", .expect = "odm: tests.compile_errors.Box.inner: 'size' is both a field of tests.compile_errors.Box.Inner and an operator: rename the field" },
+    .{ .name = "compile error: an empty literal on a struct", .expect = "odm: tests.compile_errors.User.profile: an empty literal matches nothing here; drop it" },
 };
