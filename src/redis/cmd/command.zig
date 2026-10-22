@@ -1,8 +1,10 @@
 //! What the commands of the catalog share, internal to the module. Most
 //! of them are a word and then arguments of a few kinds in a fixed order,
 //! with a reply read into a fixed type: `Command` makes such a type from
-//! the struct of its arguments. The commands that write themselves follow
-//! the same rules for their arguments, through the functions below.
+//! the struct of its arguments, `Blocking` one whose timeout in seconds
+//! goes last, and `Cursor` a page of a scan. The commands that write
+//! themselves follow the same rules for their arguments, through the
+//! functions below.
 //!
 //! The fields of the struct of arguments go out in their order:
 //!
@@ -31,9 +33,11 @@ const std = @import("std");
 const Io = std.Io;
 const resp = @import("../resp.zig");
 const types = @import("types.zig");
+const contract = @import("contract.zig");
 const Diagnostics = @import("../errors.zig").Diagnostics;
 
 const args = resp.args;
+const Block = types.Block;
 const End = types.End;
 const KeyValue = types.KeyValue;
 
@@ -63,6 +67,53 @@ pub fn Command(comptime call: []const u8, comptime word: []const u8, comptime R:
 
         pub fn name(_: @This()) []const u8 {
             return word;
+        }
+    };
+}
+
+/// The type of a blocking command whose timeout goes last, in seconds:
+/// `word`, the fields of `Args`, then the timeout, as BLPOP, BRPOP and
+/// BLMOVE. It carries the mark of the contract, so under a deadline the
+/// client takes the timeout from what is left of it; `instead` names what
+/// waits less, for the text of DeadlineExceeded when too little is left.
+pub fn Blocking(comptime call: []const u8, comptime word: []const u8, comptime R: type, comptime Args: type, comptime instead: []const u8) type {
+    comptime resp.checkReply(R, call);
+    return struct {
+        args: Args,
+        wait: Block,
+
+        const Self = @This();
+
+        pub const Reply = R;
+
+        pub const blocking: contract.Blocking = .{ .unit = .seconds, .instead = instead };
+
+        pub fn check(c: Self, diagnostics: ?*Diagnostics) error{InvalidArgument}!void {
+            try checkFields(c.args, call, word, diagnostics);
+            return contract.checkBlock(c.wait, call, diagnostics);
+        }
+
+        pub fn write(c: Self, w: resp.Writer) resp.Writer.Error!void {
+            return c.writeWith(w, contract.given(c.wait));
+        }
+
+        pub fn writeWith(c: Self, w: resp.Writer, timeout_ms: u64) resp.Writer.Error!void {
+            try w.arrayHeader(2 + countFields(c.args));
+            try w.bulk(word);
+            try writeFields(w, c.args);
+            try contract.writeTimeout(w, .seconds, timeout_ms);
+        }
+
+        pub fn read(_: Self, r: *resp.Reader, arena: ?std.mem.Allocator, diagnostics: ?*Diagnostics) resp.DecodeError!R {
+            return resp.decode(R, r, arena, diagnostics);
+        }
+
+        pub fn name(_: Self) []const u8 {
+            return word;
+        }
+
+        pub fn timeout(c: Self) Block {
+            return c.wait;
         }
     };
 }
@@ -278,10 +329,11 @@ pub fn Values(comptime V: type, comptime call: []const u8) type {
 /// that the command does not hold the pointer.
 pub fn values(v: anytype, comptime call: []const u8) Values(@TypeOf(v), call) {
     const V = @TypeOf(v);
-    return switch (@typeInfo(V)) {
-        .pointer => |info| if (info.size == .one and isTuple(info.child) and !allStrings(info.child)) v.* else v,
-        else => v,
+    const copied = comptime switch (@typeInfo(V)) {
+        .pointer => |info| info.size == .one and isTuple(info.child) and !allStrings(info.child),
+        else => false,
     };
+    return if (copied) v.* else v;
 }
 
 fn checkedValues(comptime Tuple: type, comptime call: []const u8) type {

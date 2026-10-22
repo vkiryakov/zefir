@@ -19,6 +19,9 @@
 //! - Hashes: `hset`, `hsetnx`, `hget`, `hmget`, `hgetall`, `hdel`,
 //!   `hexists`, `hlen`, `hincrby`, `hincrbyfloat`, `hkeys`, `hscan` (one
 //!   page). A hash reads into a struct and is written from one.
+//! - Lists: `lpush`, `rpush`, `lpop`, `rpop`, `llen`, `lrange`, `ltrim`,
+//!   `lrem`, `lindex`, `lmove`, and the blocking `blpop`, `brpop`,
+//!   `blmove`, whose timeouts come from the deadline of the call.
 //! - `raw(T, args)` — a command that the catalog lacks: `args` is a tuple
 //!   of strings, numbers, bools and enums, the name of the command first,
 //!   or a slice of strings, and the reply reads into `T` by the rules of
@@ -44,6 +47,7 @@ const transactions = @import("cmd/transactions.zig");
 const strings = @import("cmd/strings.zig");
 const keys = @import("cmd/keys.zig");
 const hashes = @import("cmd/hashes.zig");
+const lists = @import("cmd/lists.zig");
 
 pub const get = strings.get;
 pub const Get = strings.Get;
@@ -124,6 +128,33 @@ pub const Hscan = hashes.Hscan;
 /// The options of `hscan`, `sscan` and `zscan`: the cursor, MATCH and
 /// COUNT.
 pub const CursorOptions = @import("cmd/command.zig").CursorOptions;
+
+pub const lpush = lists.lpush;
+pub const Lpush = lists.Lpush;
+pub const rpush = lists.rpush;
+pub const Rpush = lists.Rpush;
+pub const lpop = lists.lpop;
+pub const Lpop = lists.Lpop;
+pub const rpop = lists.rpop;
+pub const Rpop = lists.Rpop;
+pub const llen = lists.llen;
+pub const Llen = lists.Llen;
+pub const lrange = lists.lrange;
+pub const Lrange = lists.Lrange;
+pub const ltrim = lists.ltrim;
+pub const Ltrim = lists.Ltrim;
+pub const lrem = lists.lrem;
+pub const Lrem = lists.Lrem;
+pub const lindex = lists.lindex;
+pub const Lindex = lists.Lindex;
+pub const lmove = lists.lmove;
+pub const Lmove = lists.Lmove;
+pub const blpop = lists.blpop;
+pub const Blpop = lists.Blpop;
+pub const brpop = lists.brpop;
+pub const Brpop = lists.Brpop;
+pub const blmove = lists.blmove;
+pub const Blmove = lists.Blmove;
 
 pub const raw = raw_command.raw;
 pub const Raw = raw_command.Raw;
