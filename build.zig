@@ -91,16 +91,6 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    const orm = b.addModule("zefir-orm", .{
-        .root_source_file = b.path("src/orm/root.zig"),
-        .target = target,
-        .optimize = optimize,
-        .sanitize_thread = tsan,
-        .imports = &.{
-            .{ .name = "log", .module = log },
-        },
-    });
-
     // BSON, the format of MongoDB's documents, for zefir-mongo and any
     // other driver. It imports nothing.
     const mongo_bson = b.addModule("zefir-mongo-bson", .{
@@ -110,8 +100,24 @@ pub fn build(b: *std.Build) void {
         .sanitize_thread = tsan,
     });
 
+    // A typed ODM for MongoDB: models, queries, connections and tenants.
+    // It reaches a database only through its driver contract, so it
+    // imports no driver.
+    const odm = b.addModule("zefir-odm", .{
+        .root_source_file = b.path("src/odm/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+        .imports = &.{
+            .{ .name = "mongo-bson", .module = mongo_bson },
+            .{ .name = "core", .module = core },
+            .{ .name = "validator", .module = validator },
+        },
+    });
+
     // MongoDB for zefir applications: the client and the collection API,
-    // on the BSON of mongo-bson.
+    // on the BSON of mongo-bson, and the reference driver of zefir-odm,
+    // which implements odm's driver contract.
     const mongo = b.addModule("zefir-mongo", .{
         .root_source_file = b.path("src/mongo/root.zig"),
         .target = target,
@@ -120,6 +126,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "core", .module = core },
             .{ .name = "mongo-bson", .module = mongo_bson },
+            .{ .name = "odm", .module = odm },
         },
     });
     mongo.addImport("build_options", build_options);
@@ -146,7 +153,7 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // Umbrella module: @import("zefir").core, .log, .confy, .validator, .rpc, .rpc_nats, .mongo_bson, .orm, .mongo, .nats, .http, .jwt
+    // Umbrella module: @import("zefir").core, .log, .confy, .validator, .rpc, .rpc_nats, .mongo_bson, .odm, .mongo, .nats, .http, .jwt
     const zefir = b.addModule("zefir", .{
         .root_source_file = b.path("src/zefir.zig"),
         .target = target,
@@ -160,7 +167,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "rpc", .module = rpc },
             .{ .name = "rpc-nats", .module = rpc_nats },
             .{ .name = "mongo-bson", .module = mongo_bson },
-            .{ .name = "orm", .module = orm },
+            .{ .name = "odm", .module = odm },
             .{ .name = "mongo", .module = mongo },
             .{ .name = "nats", .module = nats },
             .{ .name = "http", .module = http },
@@ -180,7 +187,7 @@ pub fn build(b: *std.Build) void {
     const test_rpc = addModuleTestStep(b, test_step, "rpc");
     const test_rpc_nats = addModuleTestStep(b, test_step, "rpc-nats");
     const test_mongo_bson = addModuleTestStep(b, test_step, "mongo-bson");
-    const test_orm = addModuleTestStep(b, test_step, "orm");
+    const test_odm = addModuleTestStep(b, test_step, "odm");
     const test_mongo = addModuleTestStep(b, test_step, "mongo");
     const test_nats = addModuleTestStep(b, test_step, "nats");
     const test_http = addModuleTestStep(b, test_step, "http");
@@ -191,8 +198,8 @@ pub fn build(b: *std.Build) void {
     // where usize has 32 bits.
     const validator_compile_step = b.step("compile-validator-tests", "Build the validator's test binaries for -Dtarget without running them");
     for (
-        [_]*std.Build.Module{ core, log, confy, validator, rpc, rpc_nats, mongo_bson, orm, mongo, nats, http, jwt, zefir },
-        [_]*std.Build.Step{ test_core, test_log, test_confy, test_validator, test_rpc, test_rpc_nats, test_mongo_bson, test_orm, test_mongo, test_nats, test_http, test_jwt, test_zefir },
+        [_]*std.Build.Module{ core, log, confy, validator, rpc, rpc_nats, mongo_bson, odm, mongo, nats, http, jwt, zefir },
+        [_]*std.Build.Step{ test_core, test_log, test_confy, test_validator, test_rpc, test_rpc_nats, test_mongo_bson, test_odm, test_mongo, test_nats, test_http, test_jwt, test_zefir },
     ) |module, module_test_step| {
         const tests = b.addTest(.{ .root_module = module });
         module_test_step.dependOn(&addRun(b, tests, tsan).step);

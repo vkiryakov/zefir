@@ -256,8 +256,8 @@ b.step("run", "Run the service").dependOn(&b.addRunArtifact(exe).step);
 > zefir-mongo is also part of the umbrella module: with
 > `zefir.module("zefir")` imported as `zefir`, it is
 > `@import("zefir").mongo`, and its BSON `@import("zefir").mongo_bson`.
-> It imports only zefir-core and zefir-mongo-bson; zio comes from your
-> build.
+> It imports only zefir-core, zefir-mongo-bson and zefir-odm, which
+> brings zefir-validator; zio comes from your build.
 
 You need a mongod to talk to. With Docker:
 
