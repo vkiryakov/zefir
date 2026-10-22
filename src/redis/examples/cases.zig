@@ -9,8 +9,8 @@ pub const server_programs = [_][]const u8{};
 
 /// The tests of the guide, against `redis.testing.FakeServer`:
 /// `zig build test-redis` runs them.
-pub const tests = [_][]const u8{};
+pub const tests = [_][]const u8{ "profiles_test", "deadlines_test", "pipeline_test" };
 
 /// The other files that README.md shows as they are: the code of the
 /// application that profiles_test.zig tests.
-pub const files = [_][]const u8{};
+pub const files = [_][]const u8{"Profiles"};
