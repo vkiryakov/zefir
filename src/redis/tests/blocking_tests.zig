@@ -20,6 +20,7 @@ const blocking = @import("../engine/blocking.zig");
 const time = @import("../engine/time.zig");
 const within5s = @import("time_limit.zig").within5s;
 const expectFromDeadline = @import("../cmd/fixture.zig").expectFromDeadline;
+const argOf = @import("../cmd/fixture.zig").argOf;
 
 /// BLPOP key timeout, the timeout in seconds; its reply read as a number.
 const Pop = struct {
@@ -152,9 +153,11 @@ const Late = struct {
 /// sent: BLPOP's in seconds, XREAD's in milliseconds.
 fn sent(io: Io, server: *FakeServer, i: usize) !u64 {
     const args = (try server.entry(io, i)).args;
+    if (args.len < 3) return error.TestUnexpectedResult;
     if (std.mem.eql(u8, args[0], "XREAD")) return std.fmt.parseInt(u64, args[2], 10);
     const text = args[2];
     const dot = std.mem.findScalar(u8, text, '.') orelse return 1000 * try std.fmt.parseInt(u64, text, 10);
+    if (text.len - dot - 1 > 3) return error.TestUnexpectedResult;
     var fraction: [3]u8 = @splat('0');
     @memcpy(fraction[0 .. text.len - dot - 1], text[dot + 1 ..]);
     return 1000 * try std.fmt.parseInt(u64, text[0..dot], 10) + try std.fmt.parseInt(u64, &fraction, 10);
@@ -265,7 +268,7 @@ fn withoutDeadline(io: Io) !void {
     const start = time.now(io);
     try testing.expectEqual(@as(?i64, null), try client.run(io, .of(.root), pop(.forever), .{}));
     try testing.expect(start.durationTo(time.now(io)).toMilliseconds() >= 300);
-    try testing.expectEqualStrings("0", (try server.entry(io, 2)).args[2]);
+    try testing.expectEqualStrings("0", try argOf(io, &server, 2, 2));
 }
 
 test "a pipeline takes the timeouts of its blocking commands from the deadline when it writes them, and without one waits for all of them and timeout more" {

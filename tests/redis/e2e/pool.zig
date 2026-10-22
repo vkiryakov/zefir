@@ -137,7 +137,7 @@ fn pausedServer(io: Io) !void {
     try testing.expectError(error.Unavailable, client.run(io, .of(.root), ping, .{ .diagnostics = &d }));
     var expected: [96]u8 = undefined;
     try testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "127.0.0.1:{d} did not answer within connect_timeout (300 ms)", .{e2e.servers.stall_port}), d.message());
-    try testing.expectEqual(redis.Diagnostics.Phase.connect, d.phase.?);
+    try testing.expectEqual(@as(?redis.Diagnostics.Phase, .connect), d.phase);
     try testing.expectError(error.DeadlineExceeded, client.run(io, within(io, .fromMilliseconds(100)), ping, .{ .diagnostics = &d }));
     try testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "the deadline passed while the client connected to 127.0.0.1:{d}", .{e2e.servers.stall_port}), d.message());
     stats = client.stats();

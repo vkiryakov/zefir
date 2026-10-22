@@ -85,7 +85,7 @@ fn expectText(d: *const redis.Diagnostics, part: []const u8) !void {
         std.debug.print("the text: {s}\n", .{d.message()});
         return error.TestUnexpectedText;
     }
-    try testing.expectEqual(redis.Diagnostics.Phase.handshake, d.phase.?);
+    try testing.expectEqual(@as(?redis.Diagnostics.Phase, .handshake), d.phase);
 }
 
 test "the server sees what the handshake told it: the library and its version, the name of the client and the database of the URL" {

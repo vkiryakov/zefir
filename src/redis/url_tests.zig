@@ -71,8 +71,8 @@ test "the user and the password are percent-decoded; an empty user is the user d
     {
         var url = try parse("redis://app:s3cr%40t@cache/1");
         defer url.deinit(testing.allocator);
-        try testing.expectEqualStrings("app", url.username.?);
-        try testing.expectEqualStrings("s3cr@t", url.password.?);
+        try testing.expectEqualDeep(@as(?[]const u8, "app"), url.username);
+        try testing.expectEqualDeep(@as(?[]const u8, "s3cr@t"), url.password);
         try testing.expectEqualStrings("cache", url.host);
         try testing.expectEqual(@as(u32, 1), url.database);
     }
@@ -80,20 +80,20 @@ test "the user and the password are percent-decoded; an empty user is the user d
         var url = try parse("redis://:secret@cache");
         defer url.deinit(testing.allocator);
         try testing.expect(url.username == null);
-        try testing.expectEqualStrings("secret", url.password.?);
+        try testing.expectEqualDeep(@as(?[]const u8, "secret"), url.password);
     }
     {
         var url = try parse("redis://app@cache");
         defer url.deinit(testing.allocator);
-        try testing.expectEqualStrings("app", url.username.?);
+        try testing.expectEqualDeep(@as(?[]const u8, "app"), url.username);
         try testing.expect(url.password == null);
     }
     {
         // The first ':' ends the user; the password may hold more.
         var url = try parse("redis://app:a:b%3A@cache");
         defer url.deinit(testing.allocator);
-        try testing.expectEqualStrings("app", url.username.?);
-        try testing.expectEqualStrings("a:b:", url.password.?);
+        try testing.expectEqualDeep(@as(?[]const u8, "app"), url.username);
+        try testing.expectEqualDeep(@as(?[]const u8, "a:b:"), url.password);
     }
 }
 
@@ -197,21 +197,22 @@ test "the password comes from the URL or from Options.password, never both, and 
     {
         var owned: OwnedOptions = try .init(testing.allocator, .{ .url = "redis://app@cache", .password = "x" });
         defer owned.deinit(testing.allocator);
-        const c = owned.credentials().?;
+        const c = owned.credentials() orelse return error.TestUnexpectedResult;
         try testing.expectEqualStrings("app", c.username);
         try testing.expectEqualStrings("x", c.password);
     }
     {
         var owned: OwnedOptions = try .init(testing.allocator, .{ .url = "redis://:secret@cache" });
         defer owned.deinit(testing.allocator);
-        const c = owned.credentials().?;
+        const c = owned.credentials() orelse return error.TestUnexpectedResult;
         try testing.expectEqualStrings("default", c.username);
         try testing.expectEqualStrings("secret", c.password);
     }
     {
         var owned: OwnedOptions = try .init(testing.allocator, .{ .url = "redis://cache", .password = "secret" });
         defer owned.deinit(testing.allocator);
-        try testing.expectEqualStrings("default", owned.credentials().?.username);
+        const c = owned.credentials() orelse return error.TestUnexpectedResult;
+        try testing.expectEqualStrings("default", c.username);
     }
     {
         var owned: OwnedOptions = try .init(testing.allocator, .{ .url = "redis://cache" });
@@ -285,13 +286,13 @@ test "the copy holds everything the caller may free" {
     try testing.expectEqualStrings("cache.internal", owned.url.host);
     try testing.expectEqual(@as(u16, 16380), owned.url.port);
     try testing.expectEqual(@as(u32, 2), owned.url.database);
-    try testing.expectEqualStrings("api-1", owned.client_name.?);
+    try testing.expectEqualDeep(@as(?[]const u8, "api-1"), owned.client_name);
     try testing.expectEqual(@as(u32, 4), owned.max_connections);
-    try testing.expectEqual(Io.Duration.fromSeconds(2), owned.timeout.?);
+    try testing.expectEqual(@as(?Io.Duration, .fromSeconds(2)), owned.timeout);
     try testing.expectEqual(Io.Duration.fromSeconds(3), owned.connect_timeout);
     try testing.expectEqual(Io.Duration.fromSeconds(4), owned.close_timeout);
     try testing.expectEqual(@as(usize, 1 << 20), owned.max_reply_bytes);
-    const c = owned.credentials().?;
+    const c = owned.credentials() orelse return error.TestUnexpectedResult;
     try testing.expectEqualStrings("app", c.username);
     try testing.expectEqualStrings("s3cret", c.password);
 }
@@ -300,7 +301,7 @@ test "the defaults are those of the design" {
     var owned: OwnedOptions = try .init(testing.allocator, .{ .url = "redis://cache" });
     defer owned.deinit(testing.allocator);
     try testing.expectEqual(@as(u32, 32), owned.max_connections);
-    try testing.expectEqual(Io.Duration.fromSeconds(5), owned.timeout.?);
+    try testing.expectEqual(@as(?Io.Duration, .fromSeconds(5)), owned.timeout);
     try testing.expectEqual(Io.Duration.fromSeconds(5), owned.connect_timeout);
     try testing.expectEqual(Io.Duration.fromSeconds(5), owned.close_timeout);
     try testing.expectEqual(@as(usize, 64 * 1024 * 1024), owned.max_reply_bytes);
@@ -319,7 +320,8 @@ test "deinit wipes the copies of the URL and the password before it frees them" 
     var from_options: OwnedOptions = try .init(testing.allocator, .{ .url = "redis://app@cache", .password = "hunter2" });
     defer from_options.deinit(testing.allocator);
     from_options.wipe();
-    try testing.expect(std.mem.allEqual(u8, from_options.password.?, 0));
+    const password = from_options.password orelse return error.TestUnexpectedResult;
+    try testing.expect(std.mem.allEqual(u8, password, 0));
     try testing.expect(std.mem.allEqual(u8, from_options.url.bytes, 0));
 }
 

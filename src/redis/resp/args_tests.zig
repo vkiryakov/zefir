@@ -27,8 +27,9 @@ fn expectWritten(expected: []const u8, value: anytype) !void {
 fn floatText(buffer: []u8, value: anytype) ![]const u8 {
     const bytes = try written(value);
     defer testing.allocator.free(bytes);
-    const header_end = std.mem.find(u8, bytes, "\r\n").?;
+    const header_end = std.mem.find(u8, bytes, "\r\n") orelse return error.TestUnexpectedResult;
     const len = try std.fmt.parseInt(usize, bytes[1..header_end], 10);
+    if (bytes.len < header_end + 2 + len) return error.TestUnexpectedResult;
     const text = bytes[header_end + 2 ..][0..len];
     try testing.expectEqualStrings("\r\n", bytes[header_end + 2 + len ..]);
     @memcpy(buffer[0..len], text);

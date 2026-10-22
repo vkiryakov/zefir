@@ -131,7 +131,7 @@ test "an empty string in a field is an empty string, not null" {
     const map = "%4\r\n$4\r\nname\r\n$0\r\n\r\n$3\r\nage\r\n$1\r\n1\r\n$4\r\nplan\r\n$3\r\npro\r\n$4\r\nnote\r\n$0\r\n\r\n";
     const profile = try read(Profile, arena.allocator(), map, null);
     try testing.expectEqualStrings("", profile.name);
-    try testing.expectEqualStrings("", profile.note.?);
+    try testing.expectEqualDeep(@as(?[]const u8, ""), profile.note);
 }
 
 test "extra fields are skipped, whatever they hold" {
@@ -175,7 +175,7 @@ test "an empty hash is null in an optional" {
     try testing.expectEqualDeep(Defaults{}, try read(Defaults, arena.allocator(), "%0\r\n", null));
     try testing.expectError(error.UnexpectedReply, read(Profile, arena.allocator(), "%0\r\n", null));
     // An empty list is still a list.
-    try testing.expectEqual(@as(usize, 0), (try read(?[]const i64, arena.allocator(), "*0\r\n", null)).?.len);
+    try testing.expectEqualDeep(@as(?[]const i64, &.{}), try read(?[]const i64, arena.allocator(), "*0\r\n", null));
 }
 
 test "a hash of any fields reads into a slice of redis.FieldValue in the server's order" {

@@ -74,7 +74,7 @@ fn oneWrite(io: Io) !void {
         const r = (try conn.transaction(io, .of(.root), .{ incr_a, cmd.raw(?[]const u8, .{ "GET", "b" }) }, .{ .allocator = arena.allocator() })) orelse
             return error.TestUnexpectedResult;
         try testing.expectEqual(@as(i64, 1), try r[0]);
-        try testing.expectEqualStrings("x", (try r[1]).?);
+        try testing.expectEqualDeep(@as(?[]const u8, "x"), try r[1]);
     }
     try server.await(io);
 }

@@ -51,7 +51,7 @@ fn entries(io: Io) !void {
     try testing.expectEqualDeep(all[2..], try s.run(cmd.xrange(Order, k, .{})));
     try testing.expectEqual(@as(u64, 0), try s.run(cmd.xtrim(k, .{ .min_id = third_id }, .{})));
 
-    const fourth = (try s.run(cmd.xaddNoMkstream(k, Order{ .id = 4, .total = 40 }, .{}))).?;
+    const fourth = (try s.run(cmd.xaddNoMkstream(k, Order{ .id = 4, .total = 40 }, .{}))) orelse return error.TestUnexpectedResult;
     try testing.expectEqualDeep(@as([]const redis.Entry(Order), &.{ all[2], .{ .id = fourth, .fields = .{ .id = 4, .total = 40 } } }), try s.run(cmd.xrange(Order, k, .{})));
     try testing.expectEqual(@as(?redis.StreamId, null), try s.run(cmd.xaddNoMkstream(none, Order{ .id = 5, .total = 50 }, .{})));
     try testing.expectEqual(@as(u64, 0), try s.run(cmd.exists(&.{none})));

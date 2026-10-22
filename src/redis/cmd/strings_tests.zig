@@ -11,7 +11,8 @@ const testing = std.testing;
 const redis = @import("../root.zig");
 const cmd = redis.cmd;
 const FakeServer = redis.testing.FakeServer;
-const Fixture = @import("fixture.zig").Fixture;
+const fixture = @import("fixture.zig");
+const Fixture = fixture.Fixture;
 const within5s = @import("../tests/time_limit.zig").within5s;
 
 /// The functions of `redis.cmd` that this file tests, for the check that
@@ -72,7 +73,7 @@ fn values(io: Io) !void {
     // A value goes out and comes back byte for byte.
     try t.run(io, cmd.set("bin", "a\r\nb\x00c", .{}));
     try testing.expectEqualDeep(@as(?[]const u8, "a\r\nb\x00c"), try t.run(io, cmd.get([]const u8, "bin")));
-    try testing.expectEqualStrings("a\r\nb\x00c", (try server.entry(io, 17)).args[2]);
+    try testing.expectEqualStrings("a\r\nb\x00c", try fixture.argOf(io, &server, 17, 2));
     try server.finish(io);
 }
 

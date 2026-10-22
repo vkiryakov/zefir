@@ -142,7 +142,7 @@ fn refusedThenTaken(io: Io) !void {
     defer client.deinit();
     var d: Diagnostics = .{};
     try testing.expectError(error.Unavailable, client.connect(io, within(io, .fromSeconds(5)), &d));
-    try testing.expectEqual(Diagnostics.Phase.handshake, d.phase.?);
+    try testing.expectEqual(@as(?Diagnostics.Phase, .handshake), d.phase);
     server.acceptConnections(io);
     try client.connect(io, within(io, .fromSeconds(5)), &d);
     client.close(io);
@@ -188,7 +188,7 @@ fn neverAnswers(io: Io) !void {
     var d: Diagnostics = .{};
     try testing.expectError(error.Unavailable, client.connect(io, .root, &d));
     try testing.expectEqualStrings(try std.fmt.bufPrint(&buffer, "127.0.0.1:{d} did not answer within connect_timeout (100 ms)", .{portOf(&peer)}), d.message());
-    try testing.expectEqual(Diagnostics.Phase.connect, d.phase.?);
+    try testing.expectEqual(@as(?Diagnostics.Phase, .connect), d.phase);
     try server.await(io);
 }
 

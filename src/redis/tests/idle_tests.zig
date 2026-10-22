@@ -61,8 +61,7 @@ fn pingFirst(io: Io) !void {
     try redis.testing.sleepAtLeast(io, idling);
     try testing.expectEqual(@as(?i64, 5), try client.run(io, .of(.root), get, .{}));
     const ping = try server.entry(io, 0);
-    try testing.expectEqualStrings("PING", ping.args[0]);
-    try testing.expectEqual(@as(usize, 1), ping.args.len);
+    try testing.expectEqualDeep(@as([]const []const u8, &.{"PING"}), ping.args);
     try testing.expectEqual(ping.connection, (try server.entry(io, 1)).connection);
     // A connection that idled for less goes out as it is.
     client.pool.options.idle_check = .fromSeconds(10);
@@ -98,7 +97,7 @@ fn idledInConn(io: Io) !void {
     try testing.expectEqual(@as(?i64, 6), try client.run(io, .of(.root), get, .{}));
     try testing.expectEqual(@as(usize, 3), server.received(io));
     const ping = try server.entry(io, 1);
-    try testing.expectEqualStrings("PING", ping.args[0]);
+    try testing.expectEqualDeep(@as([]const []const u8, &.{"PING"}), ping.args);
     try testing.expectEqual(ping.connection, (try server.entry(io, 0)).connection);
     try testing.expectEqual(ping.connection, (try server.entry(io, 2)).connection);
     try server.finish(io);
@@ -213,7 +212,7 @@ fn silentPing(io: Io) !void {
         try testing.expectError(error.DeadlineExceeded, client.run(io, ctx, get, .{ .diagnostics = &d }));
         try testing.expect(ctx.ctx.isExpired(time.now(io)));
         try testing.expectEqualStrings("the deadline passed while PING checked a connection that had idled", d.message());
-        try testing.expectEqual(Diagnostics.Phase.checkout, d.phase.?);
+        try testing.expectEqual(@as(?Diagnostics.Phase, .checkout), d.phase);
         const counts = client.pool.counts(io);
         try testing.expectEqual(@as(usize, 0), counts.idle + counts.in_use);
         try testing.expectEqual(@as(u64, 0), counts.clears);

@@ -76,7 +76,7 @@ fn expectDecodeError(comptime T: type, expected: anyerror, bytes: []const u8, al
 fn expectUnexpected(comptime T: type, bytes: []const u8) !void {
     const d = try expectDecodeError(T, error.UnexpectedReply, bytes, 0);
     try testing.expectEqualStrings("", d.code());
-    try testing.expectEqual(Diagnostics.Phase.receive, d.phase.?);
+    try testing.expectEqual(@as(?Diagnostics.Phase, .receive), d.phase);
 }
 
 test "void takes any reply but an error, and drops it" {
@@ -292,7 +292,7 @@ test "an error at the top is ServerError for every type, with its code and text"
         const d = try expectDecodeError(T, error.ServerError, wrongtype, 0);
         try testing.expectEqualStrings("WRONGTYPE", d.code());
         try testing.expectEqualStrings("WRONGTYPE Operation against a key holding the wrong kind of value", d.message());
-        try testing.expectEqual(Diagnostics.Phase.receive, d.phase.?);
+        try testing.expectEqual(@as(?Diagnostics.Phase, .receive), d.phase);
         const blob = try expectDecodeError(T, error.ServerError, syntax, 0);
         try testing.expectEqualStrings("SYNTAX", blob.code());
         try testing.expectEqualStrings("SYNTAX invalid syntax", blob.message());

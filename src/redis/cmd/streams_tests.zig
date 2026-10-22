@@ -131,8 +131,10 @@ fn blocking(io: Io) !void {
     try testing.expectEqualDeep(@as([]const Entry, &.{order}), try t.runIn(io, within(io, .fromMilliseconds(100)), cmd.xread(Order, "orders", .{ .after = .{ .id = first } })));
 
     try fixture.expectFromDeadline(io, start, try blockOf(io, &server, 0));
-    try testing.expectEqualDeep(@as([]const []const u8, &.{ "XREAD", "BLOCK" }), (try server.entry(io, 0)).args[0..2]);
-    try testing.expectEqualDeep(@as([]const []const u8, &.{ "STREAMS", "orders", "$" }), (try server.entry(io, 0)).args[3..]);
+    const xread = (try server.entry(io, 0)).args;
+    try testing.expectEqual(@as(usize, 6), xread.len);
+    try testing.expectEqualDeep(@as([]const []const u8, &.{ "XREAD", "BLOCK" }), xread[0..2]);
+    try testing.expectEqualDeep(@as([]const []const u8, &.{ "STREAMS", "orders", "$" }), xread[3..]);
     try testing.expectEqualDeep(@as([]const []const u8, &.{ "XREADGROUP", "GROUP", "g", "c1", "BLOCK", "0", "STREAMS", "orders", ">" }), (try server.entry(io, 1)).args);
     try testing.expectEqual(@as(u64, 200), try blockOf(io, &server, 2));
     try testing.expectEqualDeep(@as([]const []const u8, &.{ "XREAD", "STREAMS", "orders", "1526919030474-0" }), (try server.entry(io, 3)).args);

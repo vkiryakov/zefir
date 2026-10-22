@@ -79,7 +79,7 @@ fn beforeConnect(io: Io) !void {
     var d: Diagnostics = .{};
     try testing.expectError(error.Unavailable, client.run(io, .of(.root), get, .{ .diagnostics = &d }));
     try testing.expectEqualStrings("connect() has not succeeded", d.message());
-    try testing.expectEqual(Diagnostics.Phase.checkout, d.phase.?);
+    try testing.expectEqual(@as(?Diagnostics.Phase, .checkout), d.phase);
     try testing.expectEqual(@as(usize, 0), server.received(io));
 }
 
@@ -230,7 +230,7 @@ fn lateReply(io: Io) !void {
     try testing.expectError(error.Timeout, client.run(io, ctx, get, .{ .diagnostics = &d }));
     try testing.expect(ctx.ctx.isExpired(time.now(io)));
     try testing.expectEqualStrings("the deadline passed before the reply came", d.message());
-    try testing.expectEqual(Diagnostics.Phase.wait, d.phase.?);
+    try testing.expectEqual(@as(?Diagnostics.Phase, .wait), d.phase);
     try testing.expectEqual(@as(usize, 0), client.pool.counts(io).idle + client.pool.counts(io).in_use);
     try testing.expectEqual(@as(?i64, 8), try client.run(io, .of(.root), get, .{}));
     try testing.expectEqual(@as(u32, 1), try connectionOf(io, &server, 0));
@@ -305,7 +305,7 @@ fn shortestRoundTrip(io: Io) !void {
         var d: Diagnostics = .{};
         try testing.expectError(error.DeadlineExceeded, client.run(io, within(io, .fromMilliseconds(10)), get, .{ .diagnostics = &d }));
         try testing.expect(std.mem.startsWith(u8, d.message(), "less of the deadline was left than the shortest round trip to the server ("));
-        try testing.expectEqual(Diagnostics.Phase.send, d.phase.?);
+        try testing.expectEqual(@as(?Diagnostics.Phase, .send), d.phase);
     }
     try server.await(io);
 }
@@ -322,7 +322,7 @@ fn waitWithToken(io: Io, client: *Client, token: *const core.CancellationToken) 
     var d: Diagnostics = .{};
     try testing.expectError(error.Cancelled, client.run(io, .of(core.Context.root.withCancellation(token)), get, .{ .diagnostics = &d }));
     try testing.expectEqualStrings("the token was canceled before the command went out", d.message());
-    try testing.expectEqual(Diagnostics.Phase.send, d.phase.?);
+    try testing.expectEqual(@as(?Diagnostics.Phase, .send), d.phase);
 }
 
 fn canceledInLine(io: Io) !void {

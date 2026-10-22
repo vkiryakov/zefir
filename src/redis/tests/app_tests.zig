@@ -61,7 +61,7 @@ fn starts(io: Io) !void {
     try testing.expectEqual(@as(usize, 1), client.stats().connections);
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
-    try testing.expectEqualStrings("v", (try client.run(io, .of(.root), redis.cmd.get([]const u8, "k"), .{ .allocator = arena.allocator() })).?);
+    try testing.expectEqualDeep(@as(?[]const u8, "v"), try client.run(io, .of(.root), redis.cmd.get([]const u8, "k"), .{ .allocator = arena.allocator() }));
     try server.finish(io);
 }
 

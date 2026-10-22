@@ -69,7 +69,7 @@ fn tupleOfCommands(io: Io) !void {
     comptime std.debug.assert(@TypeOf(r) == @Tuple(&.{ redis.CommandError!i64, redis.CommandError!bool, redis.CommandError!?[]const u8 }));
     try testing.expectEqual(@as(i64, 1), try r[0]);
     try testing.expect(try r[1]);
-    try testing.expectEqualStrings("hi", (try r[2]).?);
+    try testing.expectEqualDeep(@as(?[]const u8, "hi"), try r[2]);
     for (0..3) |i| try testing.expectEqual(@as(u32, 1), try connectionOf(io, &server, i));
     try server.finish(io);
 }
@@ -108,7 +108,7 @@ fn manyCommands(io: Io) !void {
     try testing.expectEqual(@as(usize, 1000), server.received(io));
     for (0..1000) |i| {
         const entry = try server.entry(io, i);
-        try testing.expectEqualStrings(parts[i][1], entry.args[1]);
+        try testing.expectEqualDeep(@as([]const []const u8, &parts[i]), entry.args);
         try testing.expectEqual(@as(u32, 1), entry.connection);
     }
 }

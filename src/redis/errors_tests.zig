@@ -68,7 +68,7 @@ test "a server text longer than the buffer is cut before a character that does n
     try testing.expectEqualStrings(text[0..511], d.message());
     try testing.expect(std.unicode.utf8ValidateSlice(d.message()));
     try testing.expectEqualStrings("ERR", d.code());
-    try testing.expectEqual(Diagnostics.Phase.receive, d.phase.?);
+    try testing.expectEqual(@as(?Diagnostics.Phase, .receive), d.phase);
     try testing.expectEqual(@as(?anyerror, null), d.cause);
 
     // A character that ends right at the end of the buffer stays.
@@ -114,8 +114,8 @@ test "a client's text has no code, and replaces a server's" {
     try testing.expectEqualStrings("wrote 12 of 40 bytes", d.message());
     try testing.expectEqualStrings("", d.code());
     try testing.expect(!d.isCode("ERR"));
-    try testing.expectEqual(Diagnostics.Phase.send, d.phase.?);
-    try testing.expectEqual(error.BrokenPipe, d.cause.?);
+    try testing.expectEqual(@as(?Diagnostics.Phase, .send), d.phase);
+    try testing.expectEqual(@as(?anyerror, error.BrokenPipe), d.cause);
 
     // A long client text is cut the same way as a server's.
     const cut = @as([511]u8, @splat('a')) ++ "ж".*;
@@ -131,7 +131,7 @@ test "refused() is null until its setter, then the refused command's code and te
     d.setServer(.receive, "EXECABORT Transaction discarded because of previous errors.");
     d.setRefused("NOPERM User u has no permissions to run the 'set' command");
     d.command = 1;
-    const refused = d.refused().?;
+    const refused = d.refused() orelse return error.TestUnexpectedResult;
     try testing.expectEqualStrings("NOPERM", refused.code);
     try testing.expectEqualStrings("NOPERM User u has no permissions to run the 'set' command", refused.message);
     // The refusal leaves the error of EXEC as it was.
@@ -146,8 +146,9 @@ test "refused() is null until its setter, then the refused command's code and te
     @memcpy(long[511..513], "ж");
     @memset(long[513..], 'b');
     d.setRefused(&long);
-    try testing.expectEqualStrings(long[0..511], d.refused().?.message);
-    try testing.expectEqualStrings("ERR", d.refused().?.code);
+    const cut = d.refused() orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings(long[0..511], cut.message);
+    try testing.expectEqualStrings("ERR", cut.code);
 }
 
 test "a new Diagnostics holds nothing" {

@@ -11,7 +11,8 @@ const testing = std.testing;
 const redis = @import("../root.zig");
 const cmd = redis.cmd;
 const FakeServer = redis.testing.FakeServer;
-const Fixture = @import("fixture.zig").Fixture;
+const fixture = @import("fixture.zig");
+const Fixture = fixture.Fixture;
 const within5s = @import("../tests/time_limit.zig").within5s;
 
 /// The functions of `redis.cmd` that this file tests, for the check that
@@ -54,7 +55,7 @@ fn structs(io: Io) !void {
     const fields: []const redis.FieldValue = &.{ .{ .field = "a", .value = "1" }, .{ .field = "b", .value = "2" } };
     try testing.expectEqualDeep(@as(?[]const redis.FieldValue, fields), try t.run(io, cmd.hgetall([]const redis.FieldValue, "k")));
     try testing.expectEqualDeep(@as(?[]const u8, ""), try t.run(io, cmd.hget([]const u8, "bin", "a\r\nb\x00c")));
-    try testing.expectEqualStrings("a\r\nb\x00c", (try server.entry(io, 2)).args[2]);
+    try testing.expectEqualStrings("a\r\nb\x00c", try fixture.argOf(io, &server, 2, 2));
     try server.finish(io);
 }
 

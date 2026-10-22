@@ -62,6 +62,15 @@ pub fn expectFromDeadline(io: Io, since: Io.Timestamp, timeout_ms: u64) !void {
     return error.TestUnexpectedResult;
 }
 
+/// Argument `k` of the command number `i` of the journal of `server`: a
+/// command with fewer arguments fails the test.
+pub fn argOf(io: Io, server: *FakeServer, i: usize, k: usize) ![]const u8 {
+    const args = (try server.entry(io, i)).args;
+    if (k < args.len) return args[k];
+    std.debug.print("command {d} of the journal has {d} arguments, no args[{d}]\n", .{ i, args.len, k });
+    return error.TestUnexpectedResult;
+}
+
 /// A handler of `FakeServer` that answers each command with the next of
 /// `replies`, in the order the commands come: for commands whose
 /// arguments vary, such as a timeout taken from a deadline.

@@ -102,7 +102,7 @@ fn expectRefused(io: Io, setup: handshake.Setup, side: Side, expected: anyerror,
         try testing.expectEqual(expected, err);
         var buffer: [512]u8 = undefined;
         try testing.expectEqualStrings(try expand(&buffer, message, portOf(&peer)), d.message());
-        try testing.expectEqual(Diagnostics.Phase.handshake, d.phase.?);
+        try testing.expectEqual(@as(?Diagnostics.Phase, .handshake), d.phase);
     }
     return d;
 }
@@ -351,7 +351,7 @@ fn closedInHandshake(io: Io) !void {
     try server.await(io);
     var buffer: [256]u8 = undefined;
     try testing.expectEqualStrings(try std.fmt.bufPrint(&buffer, "the server at 127.0.0.1:{d} closed the connection during the handshake; a server that requires TLS does so, and v0.1 does not speak TLS", .{port}), d.message());
-    try testing.expectEqual(Diagnostics.Phase.handshake, d.phase.?);
+    try testing.expectEqual(@as(?Diagnostics.Phase, .handshake), d.phase);
 }
 
 test "a database that the server lacks is InvalidArgument, another error of SELECT Unavailable, and an error of CLIENT SETINFO is skipped" {

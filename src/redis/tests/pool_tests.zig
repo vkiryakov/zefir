@@ -213,7 +213,7 @@ test "before connect a call is Unavailable, and after close it is Closed" {
     try pool.enter(io, &d);
     try testing.expectError(error.Unavailable, pool.checkOut(io, fakes.opener(), within(io, 1000), &d));
     try testing.expectEqualStrings("connect() has not succeeded", d.message());
-    try testing.expectEqual(Diagnostics.Phase.checkout, d.phase.?);
+    try testing.expectEqual(@as(?Diagnostics.Phase, .checkout), d.phase);
     pool.leave(io);
     pool.close(io, .zero);
     try testing.expectError(error.Closed, pool.enter(io, &d));
@@ -284,7 +284,7 @@ fn checkOutFails(io: Io, pool: *Pool, fakes: *Fakes, deadline: ?core.Deadline, e
         return error.TestUnexpectedResult;
     } else |err| try testing.expectEqual(expected, err);
     try testing.expectEqualStrings(message, d.message());
-    try testing.expectEqual(Diagnostics.Phase.checkout, d.phase.?);
+    try testing.expectEqual(@as(?Diagnostics.Phase, .checkout), d.phase);
 }
 
 fn checkOutAndIn(io: Io, pool: *Pool, fakes: *Fakes) !void {

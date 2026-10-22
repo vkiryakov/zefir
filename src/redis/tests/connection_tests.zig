@@ -118,7 +118,7 @@ fn flushOnce(io: Io) !void {
     try io.sleep(.fromMilliseconds(50), .awake);
     try testing.expect(!heard.load(.acquire));
     try p.conn.flush(&d);
-    try testing.expectEqualStrings("Ann", (try p.conn.receive(get, arena.allocator(), &d)).?);
+    try testing.expectEqualDeep(@as(?[]const u8, "Ann"), try p.conn.receive(get, arena.allocator(), &d));
     try testing.expectEqual(@as(i64, 7), try p.conn.receive(incr, null, &d));
     try server.await(io);
     try testing.expect(p.conn.usable);
@@ -197,7 +197,7 @@ fn malformed(io: Io) !void {
         var d: Diagnostics = .{};
         try testing.expectError(error.ProtocolViolation, p.conn.exchange(cmd.raw(void, .{"PING"}), null, deadline5s(io), &d));
         try testing.expect(!p.conn.usable);
-        try testing.expectEqual(Diagnostics.Phase.receive, d.phase.?);
+        try testing.expectEqual(@as(?Diagnostics.Phase, .receive), d.phase);
         try testing.expectEqualStrings("the reply broke RESP3", d.message());
     }
 }
@@ -233,7 +233,7 @@ fn closedByServer(io: Io) !void {
     var d: Diagnostics = .{};
     try testing.expectError(error.ConnectionLost, p.conn.exchange(cmd.raw(void, .{"PING"}), null, deadline5s(io), &d));
     try testing.expect(!p.conn.usable);
-    try testing.expectEqual(Diagnostics.Phase.wait, d.phase.?);
+    try testing.expectEqual(@as(?Diagnostics.Phase, .wait), d.phase);
     var buffer: [64]u8 = undefined;
     try testing.expectEqualStrings(try std.fmt.bufPrint(&buffer, "the server at 127.0.0.1:{d} closed the connection", .{p.port()}), d.message());
 }
@@ -274,7 +274,7 @@ fn replyTooLate(io: Io) !void {
     try testing.expectError(error.Timeout, p.conn.exchange(cmd.raw(void, .{"PING"}), null, deadline, &d));
     try testing.expect(time.expired(io, deadline));
     try testing.expect(!p.conn.usable);
-    try testing.expectEqual(Diagnostics.Phase.wait, d.phase.?);
+    try testing.expectEqual(@as(?Diagnostics.Phase, .wait), d.phase);
     try testing.expectEqualStrings("the deadline passed before the reply came", d.message());
 }
 

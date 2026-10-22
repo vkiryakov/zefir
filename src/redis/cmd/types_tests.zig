@@ -94,9 +94,9 @@ test "Popped, Scored and ScanPage: pairs and pages" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const popped = try read(?types.Popped([]const u8), a, "*2\r\n$5\r\nqueue\r\n$3\r\njob\r\n");
-    try testing.expectEqualStrings("queue", popped.?.key);
-    try testing.expectEqualStrings("job", popped.?.value);
+    const popped = (try read(?types.Popped([]const u8), a, "*2\r\n$5\r\nqueue\r\n$3\r\njob\r\n")) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("queue", popped.key);
+    try testing.expectEqualStrings("job", popped.value);
     try testing.expectEqual(@as(?types.Popped(i64), null), try read(?types.Popped(i64), a, "_\r\n"));
     const d = try expectUnexpected(types.Popped([]const u8), "*3\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n");
     try testing.expectEqualStrings("the reply is an array of 3 elements, and the call asked for cmd.types.Popped([]const u8)", d.message());
@@ -106,6 +106,7 @@ test "Popped, Scored and ScanPage: pairs and pages" {
     try testing.expectEqual(@as(f64, 12.5), scored.score);
     // ZRANGE … WITHSCORES in RESP3: an array of pairs.
     const range = try read([]const types.Scored([]const u8), a, "*2\r\n*2\r\n$3\r\nann\r\n,12.5\r\n*2\r\n$3\r\nbob\r\n:1\r\n");
+    try testing.expectEqual(@as(usize, 2), range.len);
     try testing.expectEqualStrings("bob", range[1].member);
     try testing.expectEqual(@as(f64, 1), range[1].score);
 
@@ -116,6 +117,7 @@ test "Popped, Scored and ScanPage: pairs and pages" {
     // ZSCAN and HSCAN: a flat array of pairs, scores as bulk strings.
     const members = try read(types.ScanPage(types.Scored([]const u8)), a, "*2\r\n$1\r\n0\r\n*4\r\n$3\r\nann\r\n$4\r\n12.5\r\n$3\r\nbob\r\n$3\r\ninf\r\n");
     try testing.expectEqual(@as(u64, 0), members.cursor);
+    try testing.expectEqual(@as(usize, 2), members.items.len);
     try testing.expectEqualStrings("ann", members.items[0].member);
     try testing.expectEqual(@as(f64, 12.5), members.items[0].score);
     try testing.expectEqual(std.math.inf(f64), members.items[1].score);
@@ -131,12 +133,13 @@ test "Entry: an id and the fields as a struct, null when the entry was deleted" 
     const a = arena.allocator();
     const entry = try read(types.Entry(Profile), a, "*2\r\n$15\r\n1526919030474-0\r\n*4\r\n$4\r\nname\r\n$3\r\nAnn\r\n$3\r\nage\r\n$2\r\n30\r\n");
     try testing.expectEqual(StreamId{ .ms = 1526919030474, .seq = 0 }, entry.id);
-    try testing.expectEqualStrings("Ann", entry.fields.?.name);
-    try testing.expectEqual(@as(u8, 30), entry.fields.?.age);
+    const ann = entry.fields orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("Ann", ann.name);
+    try testing.expectEqual(@as(u8, 30), ann.age);
     const deleted = try read(types.Entry(Profile), a, "*2\r\n$15\r\n1526919030474-0\r\n_\r\n");
     try testing.expect(deleted.fields == null);
     const any = try read(types.Entry([]const types.FieldValue), a, "*2\r\n$3\r\n1-1\r\n*2\r\n$1\r\nk\r\n$1\r\nv\r\n");
-    try testing.expectEqualStrings("k", any.fields.?[0].field);
+    try testing.expectEqualDeep(@as(?[]const types.FieldValue, &.{.{ .field = "k", .value = "v" }}), any.fields);
 }
 
 test "PendingSummary, Pending and Claimed: the replies of XPENDING and XAUTOCLAIM" {
@@ -145,8 +148,8 @@ test "PendingSummary, Pending and Claimed: the replies of XPENDING and XAUTOCLAI
     const a = arena.allocator();
     const summary = try read(types.PendingSummary, a, "*4\r\n:2\r\n$15\r\n1526919030474-0\r\n$15\r\n1526919030474-1\r\n*1\r\n*2\r\n$5\r\nalice\r\n$1\r\n2\r\n");
     try testing.expectEqual(@as(u64, 2), summary.count);
-    try testing.expectEqual(StreamId{ .ms = 1526919030474, .seq = 0 }, summary.first.?);
-    try testing.expectEqual(StreamId{ .ms = 1526919030474, .seq = 1 }, summary.last.?);
+    try testing.expectEqual(@as(?StreamId, .{ .ms = 1526919030474, .seq = 0 }), summary.first);
+    try testing.expectEqual(@as(?StreamId, .{ .ms = 1526919030474, .seq = 1 }), summary.last);
     try testing.expectEqual(@as(usize, 1), summary.consumers.len);
     try testing.expectEqualStrings("alice", summary.consumers[0].name);
     try testing.expectEqual(@as(u64, 2), summary.consumers[0].count);
@@ -164,7 +167,8 @@ test "PendingSummary, Pending and Claimed: the replies of XPENDING and XAUTOCLAI
     try testing.expectEqual(StreamId.zero, claimed.next);
     try testing.expectEqual(@as(usize, 1), claimed.entries.len);
     try testing.expectEqual(StreamId{ .ms = 5, .seq = 1 }, claimed.entries[0].id);
-    try testing.expectEqualStrings("Bob", claimed.entries[0].fields.?.name);
+    const bob = claimed.entries[0].fields orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("Bob", bob.name);
     try testing.expectEqualDeep(@as([]const StreamId, &.{.{ .ms = 4, .seq = 0 }}), claimed.deleted);
 }
 

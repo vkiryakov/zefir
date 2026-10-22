@@ -38,7 +38,7 @@ fn expectConnects(io: Io, url: []const u8) !void {
 fn expectRefused(io: Io, url: []const u8) !redis.Diagnostics {
     var d: redis.Diagnostics = .{};
     try testing.expectError(error.AuthenticationFailed, connectOnce(io, url, &d));
-    try testing.expectEqual(redis.Diagnostics.Phase.handshake, d.phase.?);
+    try testing.expectEqual(@as(?redis.Diagnostics.Phase, .handshake), d.phase);
     return d;
 }
 
