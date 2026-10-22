@@ -176,4 +176,5 @@ test {
     _ = @import("tests/collection_tests.zig");
     _ = @import("tests/cursor_tests.zig");
     _ = @import("tests/query_tests.zig");
+    _ = @import("tests/concurrency_tests.zig");
 }
