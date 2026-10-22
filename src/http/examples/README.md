@@ -3050,12 +3050,19 @@ the page, from jsDelivr, a release pinned by its hash.
 
 **The file in the repository.** `openapi.json`, next to `build.zig`, holds
 the same bytes. The last test of `todos_test.zig` compares the document
-with it, and `zig build openapi` runs that test to write the file from the
-code. A change of the API that the file does not show fails
-`zig build test`, with the first line that differs:
+with it. `zig build openapi` runs the tests of `todos_test.zig` with
+`ZEFIR_OPENAPI_UPDATE=1`, and then that test writes the file from the code
+instead. A change of the API that the file does not show fails
+`zig build test` with the first line that differs, its number and both
+texts. Say the summary of `get` becomes "Get one todo":
 
 ```text
-error: openapi.json is out of date; run `zig build openapi`
+$ zig build test
+error: 'todos_test.test.the OpenAPI document is openapi.json, which the service serves with a page of it' failed:
+       openapi.json:533: the file and the document differ
+         file:             "summary": "Get a todo",
+         document:         "summary": "Get one todo",
+       error: openapi.json is out of date; run `zig build openapi`
 ```
 
 So a change of the API shows in the review of a pull request, in
