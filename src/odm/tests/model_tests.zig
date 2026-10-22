@@ -1,11 +1,13 @@
 //! Tests of the types that odm makes from a model: `odm.Schema`,
 //! `odm.Names`, `odm.Index`, `odm.IndexKey`, `odm.Path`, `odm.Insert` and
-//! `odm.Id`.
+//! `odm.Id`; and of the checks of a model, which tests/compile_errors.zig
+//! takes case by case.
 
 const std = @import("std");
 const testing = std.testing;
 const bson = @import("mongo-bson");
 const odm = @import("../root.zig");
+const schema = @import("../model/schema.zig");
 const models = @import("models.zig");
 const User = models.User;
 const Account = models.Account;
@@ -71,4 +73,58 @@ test "Insert and Id follow the kind of the id" {
     try testing.expect(odm.Id(Gen) == bson.ObjectId);
     try testing.expect(odm.Insert(Slug) == Slug);
     try testing.expect(odm.Id(Slug) == []const u8);
+}
+
+test "the fixtures are models" {
+    comptime odm.assertModel(User);
+    comptime odm.assertModel(Account);
+    comptime odm.assertModel(Gen);
+    comptime odm.assertModel(Slug);
+    try testing.expectEqual(.optional_object_id, comptime schema.idKind(User));
+    try testing.expectEqual(.object_id, comptime schema.idKind(Gen));
+    try testing.expectEqual(.given, comptime schema.idKind(Slug));
+    try testing.expectEqualStrings("id", comptime schema.idName(Slug));
+    try testing.expectEqualStrings("createdAt", comptime schema.keyOf(User, "created_at"));
+    try testing.expectEqualStrings("_id", comptime schema.keyOf(User, "id"));
+    try testing.expectEqualStrings("email", comptime schema.keyOf(User, "email"));
+}
+
+/// A model with the indexes that the checks take: a text index on a string
+/// and a list of strings, a TTL on an optional date, a hashed key, unique
+/// keys on an optional path with `sparse` and, without it, together with
+/// the id, and the same paths in another order or with another order.
+const Indexed = struct {
+    id: ?bson.ObjectId = null,
+    title: []const u8,
+    words: []const []const u8 = &.{},
+    expires_at: ?bson.DateTime = null,
+    profile: ?models.User.Profile = null,
+
+    pub const odm_schema: odm.Schema(Indexed) = .{
+        .collection = "indexed",
+        .id = .id,
+        .indexes = &.{
+            .{ .keys = &.{ .{ .title = .text }, .{ .words = .text } } },
+            .{ .keys = &.{.{ .expires_at = .asc }}, .expire_after_seconds = 3600 },
+            .{ .keys = &.{.{ .title = .hashed }} },
+            .{ .keys = &.{.{ .@"profile.city" = .asc }}, .unique = true, .sparse = true },
+            // odm always writes the id, so this key is never missing.
+            .{ .keys = &.{ .{ .@"profile.city" = .asc }, .{ .id = .asc } }, .unique = true },
+            .{ .keys = &.{.{ .@"profile.city" = .desc }}, .unique = true, .sparse = true },
+            .{ .keys = &.{ .{ .title = .asc }, .{ .expires_at = .desc } } },
+            .{ .keys = &.{ .{ .expires_at = .desc }, .{ .title = .asc } } },
+        },
+    };
+};
+
+test "the checks take the indexes that MongoDB takes" {
+    comptime odm.assertModel(Indexed);
+    // A path is optional by the types on the way, the id's included; the
+    // checks never take the id as missing.
+    const paths = comptime schema.paths(Indexed);
+    try testing.expect(paths[0].optional);
+    try testing.expect(!paths[1].optional);
+    try testing.expectEqualStrings("profile.city", paths[5].name);
+    try testing.expect(paths[5].optional);
+    try testing.expect(paths[5].Type == []const u8);
 }

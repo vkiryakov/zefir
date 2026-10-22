@@ -27,6 +27,7 @@
 
 const std = @import("std");
 const bson = @import("mongo-bson");
+const v = @import("validator");
 
 /// The comptime branch quota of the walks over a model: a model with many
 /// fields and paths never stops a build with "evaluation exceeded".
@@ -189,17 +190,21 @@ fn isDocument(comptime T: type) bool {
 
 /// Stops the build when `T` cannot be a model at all.
 fn requireStruct(comptime T: type) void {
-    switch (@typeInfo(T)) {
-        .@"struct" => |info| if (!info.is_tuple and info.field_names.len > 0) return,
-        else => {},
-    }
-    @compileError("odm: " ++ @typeName(T) ++ " is not a model: a model is a struct with named fields");
+    if (!isModelShape(T)) @compileError("odm: " ++ @typeName(T) ++ " is not a model: a model is a struct with named fields");
+}
+
+fn isModelShape(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .@"struct" => |info| !info.is_tuple and info.field_names.len > 0,
+        else => false,
+    };
 }
 
 /// What an insert of the model `T` takes: `T` itself, or, when the id of
 /// `T` is a `bson.ObjectId` (not optional), `T` without the id, which odm
 /// always makes. The other fields keep their types and default values.
 pub fn Insert(comptime T: type) type {
+    check(T);
     if (idKind(T) != .object_id) return T;
     const info = @typeInfo(T).@"struct";
     const id = idName(T);
@@ -221,6 +226,7 @@ pub fn Insert(comptime T: type) type {
 /// The type of the id of the model `T`, without the optional:
 /// `bson.ObjectId` for `?bson.ObjectId`.
 pub fn Id(comptime T: type) type {
+    check(T);
     return Unwrap(@FieldType(T, idName(T)));
 }
 
@@ -246,4 +252,186 @@ pub fn idKind(comptime T: type) IdKind {
     if (F == ?bson.ObjectId) return .optional_object_id;
     if (F == bson.ObjectId) return .object_id;
     return .given;
+}
+
+/// The BSON key of the top-level field `field` of the model `T`: `_id` for
+/// the id, else its name in `odm_schema.names`, else its Zig name.
+pub fn keyOf(comptime T: type, comptime field: []const u8) []const u8 {
+    if (std.mem.eql(u8, field, idName(T))) return "_id";
+    if (@hasField(Names(T), field)) {
+        if (@field(T.odm_schema.names, field)) |key| return key;
+    }
+    return field;
+}
+
+/// Every check of a model, at compile time: its shape, its schema (the
+/// collection, the id, the BSON names, the indexes), the types of its
+/// fields, then the declarations of zefir-validator in it and below it.
+/// A problem stops the build with a message that starts with "odm: " and
+/// names the model by `@typeName`; those of the validator start with
+/// "validator: ". `odm.assertModel`, `Insert`, `Id` and the typed
+/// operations call it.
+pub fn check(comptime T: type) void {
+    comptime {
+        @setEvalBranchQuota(eval_quota);
+        const M = @typeName(T);
+        requireStruct(T);
+        if (!@hasDecl(T, "odm_schema")) @compileError("odm: " ++ M ++ " has no pub const odm_schema; declare pub const odm_schema: odm.Schema(" ++ M ++ ") = .{ .collection = \"...\", .id = .id };");
+        if (@TypeOf(T.odm_schema) != Schema(T)) @compileError("odm: " ++ M ++ ".odm_schema must be an odm.Schema(" ++ M ++ "); got " ++ @typeName(@TypeOf(T.odm_schema)));
+        checkCollection(M, T.odm_schema.collection);
+        checkId(T, M);
+        checkNames(T, M);
+        // A model is both read and written.
+        if (bson.codec.check.document(T, .decode)) |problem| @compileError("odm: " ++ M ++ ": " ++ problem);
+        if (bson.codec.check.document(T, .encode)) |problem| @compileError("odm: " ++ M ++ ": " ++ problem);
+        if (fieldOf(T, "", isF32)) |path| @compileError("odm: " ++ M ++ "." ++ path ++ " is f32: a BSON double has 64 bits, and decoding one into f32 rounds it; use f64");
+        if (fieldOf(T, "", hasOptionalDefault)) |path| @compileError("odm: " ++ M ++ "." ++ path ++ " is optional, and its default is not null: odm leaves a null optional out of the document, and a field that is not there reads back as its default; make the default null");
+        checkIndexes(T, M);
+        v.assertRules(T);
+    }
+}
+
+fn checkCollection(comptime M: []const u8, comptime name: []const u8) void {
+    const at = "odm: " ++ M ++ ".odm_schema.collection";
+    if (name.len == 0) @compileError(at ++ " is empty");
+    if (std.mem.findAny(u8, name, "$\x00") != null) @compileError(at ++ " holds '$' or NUL");
+    if (std.mem.startsWith(u8, name, "system.")) @compileError(at ++ " starts with \"system.\"");
+    if (name.len > 191) @compileError(at ++ " is longer than 191 bytes");
+    if (!std.unicode.utf8ValidateSlice(name)) @compileError(at ++ " is not UTF-8");
+}
+
+fn checkId(comptime T: type, comptime M: []const u8) void {
+    const id = idName(T);
+    const F = @FieldType(T, id);
+    if (@typeInfo(F) == .optional and F != ?bson.ObjectId) {
+        @compileError("odm: " ++ M ++ "." ++ id ++ " is the id of the model and is " ++ @typeName(F) ++
+            ": an id is bson.ObjectId, ?bson.ObjectId, or a value of another type that you give on insert and that is not optional");
+    }
+    if (@hasField(T, "_id") and !std.mem.eql(u8, id, "_id")) {
+        @compileError("odm: " ++ M ++ "._id is not the id of the model: set odm_schema.id = ._id, or rename the field");
+    }
+}
+
+/// The names of `odm_schema.names`, the BSON names of all fields, and the
+/// Zig names that a filter takes for its logical operators.
+fn checkNames(comptime T: type, comptime M: []const u8) void {
+    const fields = @typeInfo(T).@"struct".field_names;
+    const id = idName(T);
+    for (fields) |field| {
+        const key = @field(T.odm_schema.names, field) orelse continue;
+        const at = "odm: " ++ M ++ ".odm_schema.names." ++ field;
+        if (std.mem.eql(u8, field, id)) @compileError(at ++ ": the id of the model is always _id in the database; drop this name");
+        if (key.len == 0 or key[0] == '$' or std.mem.findAny(u8, key, ".\x00") != null) {
+            @compileError(at ++ ": \"" ++ key ++ "\" is not a field name of a document: it is empty, starts with '$', or holds '.' or NUL");
+        }
+    }
+    for (fields, 0..) |a, i| {
+        const key = keyOf(T, a);
+        for (fields[i + 1 ..]) |b| {
+            if (std.mem.eql(u8, key, keyOf(T, b))) @compileError("odm: " ++ M ++ ": the fields '" ++ a ++ "' and '" ++ b ++ "' both have the BSON name \"" ++ key ++ "\"");
+        }
+    }
+    for (fields) |field| {
+        for ([_][]const u8{ "and", "or", "nor" }) |operator| {
+            if (std.mem.eql(u8, field, operator)) {
+                @compileError("odm: " ++ M ++ "." ++ field ++ ": and, or and nor are the logical operators of filters; rename the field and keep its BSON name with odm_schema.names");
+            }
+        }
+    }
+}
+
+/// The path of the first field of the struct `S` and of the structs in it,
+/// through optionals and lists, for which `found(Field, attrs)` holds, or
+/// null. The path names the fields by their Zig names joined by '.', with
+/// `[]` for each list on the way: "items[].qty". The codec check has
+/// refused the types that hold themselves.
+fn fieldOf(comptime S: type, comptime prefix: []const u8, comptime found: anytype) ?[]const u8 {
+    const info = @typeInfo(S).@"struct";
+    for (info.field_names, info.field_types, info.field_attrs) |name, F, attrs| {
+        const path = prefix ++ name;
+        if (found(F, attrs)) return path;
+        if (inType(F, path, found)) |inner| return inner;
+    }
+    return null;
+}
+
+/// `fieldOf` for the structs that a value of type `F` at `path` holds; an
+/// f32 that is a list's item is found here too.
+fn inType(comptime F: type, comptime path: []const u8, comptime found: anytype) ?[]const u8 {
+    const T = Unwrap(F);
+    if (isDocument(T)) return fieldOf(T, path ++ ".", found);
+    const Item = ListItem(T) orelse return null;
+    if (found(Item, .{})) return path ++ "[]";
+    return inType(Item, path ++ "[]", found);
+}
+
+fn isF32(comptime F: type, comptime _: std.lang.Type.Struct.FieldAttributes) bool {
+    return Unwrap(F) == f32;
+}
+
+fn hasOptionalDefault(comptime F: type, comptime attrs: std.lang.Type.Struct.FieldAttributes) bool {
+    if (@typeInfo(F) != .optional) return false;
+    const default = attrs.defaultValue(F) orelse return false;
+    return default != null;
+}
+
+fn checkIndexes(comptime T: type, comptime M: []const u8) void {
+    const indexes = T.odm_schema.indexes;
+    for (indexes, 0..) |index, i| {
+        const at = std.fmt.comptimePrint("odm: {s}.odm_schema.indexes[{d}]", .{ M, i });
+        if (index.keys.len == 0) @compileError(at ++ " has no keys");
+        for (index.keys, 0..) |key, j| {
+            for (index.keys[0..j]) |earlier| {
+                if (@backingInt(earlier) == @backingInt(key)) @compileError(at ++ ": the key '" ++ @tagName(key) ++ "' comes twice");
+            }
+            const F = entryOf(T, key).Type;
+            if (orderOf(key) == .text and !isText(F)) {
+                @compileError(at ++ ": a text key needs a string field; " ++ M ++ "." ++ @tagName(key) ++ " is " ++ @typeName(F));
+            }
+        }
+        if (index.expire_after_seconds != null) {
+            if (index.keys.len != 1 or Unwrap(entryOf(T, index.keys[0]).Type) != bson.DateTime) {
+                @compileError(at ++ ": expire_after_seconds needs one key on a bson.DateTime field");
+            }
+        }
+        for (indexes[0..i], 0..) |earlier, e| {
+            if (sameKeys(earlier.keys, index.keys)) @compileError(std.fmt.comptimePrint("odm: {s}.odm_schema.indexes[{d}] and [{d}] have the same keys", .{ M, e, i }));
+        }
+        if (index.unique and !index.sparse) {
+            for (index.keys) |key| {
+                // odm always writes the id.
+                if (!entryOf(T, key).optional or std.mem.eql(u8, @tagName(key), idName(T))) break;
+            } else {
+                @compileError(at ++ " is unique on " ++ M ++ "." ++ @tagName(index.keys[0]) ++ ", which is optional: odm leaves null out, and the documents without the field would collide in the index as null; add .sparse = true");
+            }
+        }
+    }
+}
+
+/// The path of a key of an index of `T`.
+fn entryOf(comptime T: type, comptime key: IndexKey(T)) PathEntry {
+    return paths(T)[@backingInt(key)];
+}
+
+fn orderOf(comptime key: anytype) IndexOrder {
+    return switch (key) {
+        inline else => |order| order,
+    };
+}
+
+fn sameKeys(comptime a: anytype, comptime b: @TypeOf(a)) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |x, y| {
+        if (@backingInt(x) != @backingInt(y) or orderOf(x) != orderOf(y)) return false;
+    }
+    return true;
+}
+
+/// Whether a text index takes a field of type `F`: a string, or a list of
+/// strings.
+fn isText(comptime F: type) bool {
+    const T = Unwrap(F);
+    if (T == []const u8) return true;
+    const Item = ListItem(T) orelse return false;
+    return Unwrap(Item) == []const u8;
 }

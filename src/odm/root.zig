@@ -81,6 +81,14 @@ pub const Insert = schema.Insert;
 /// The type of a model's id, without the optional.
 pub const Id = schema.Id;
 
+/// Every check of a model at compile time: its schema, the types of its
+/// fields and its `field_rules`. Zig compiles only code that is used, so a
+/// package that declares models has them checked in a test:
+/// `test { comptime odm.assertModel(User); }`. Does nothing at run time.
+pub fn assertModel(comptime T: type) void {
+    comptime schema.check(T);
+}
+
 /// What tests of odm and of the code over it need: `testing.FakeDriver`.
 pub const testing = @import("testing.zig");
 

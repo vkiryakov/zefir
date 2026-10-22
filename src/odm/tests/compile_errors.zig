@@ -11,8 +11,78 @@
 const std = @import("std");
 const Io = std.Io;
 const core = @import("core");
+const bson = @import("mongo-bson");
+const v = @import("validator");
 const odm = @import("../root.zig");
 const Client = odm.Client;
+
+// The models of tests/models.zig, declared here so that the messages name
+// them `tests.compile_errors.User` and so on.
+
+const User = struct {
+    id: ?bson.ObjectId = null,
+    email: []const u8,
+    name: []const u8,
+    age: u32 = 0,
+    status: Status = .active,
+    profile: ?Profile = null,
+    created_at: bson.DateTime,
+
+    pub const Status = enum { active, blocked, deleted };
+    pub const Profile = struct { city: []const u8, country: []const u8 };
+
+    pub const odm_schema: odm.Schema(User) = .{
+        .collection = "users",
+        .id = .id,
+        .names = .{ .created_at = "createdAt" },
+        .indexes = &.{
+            .{ .keys = &.{.{ .email = .asc }}, .unique = true },
+            .{ .keys = &.{ .{ .status = .asc }, .{ .created_at = .desc } } },
+        },
+    };
+
+    pub const field_rules = .{
+        .email = .{ v.minLength(5), v.maxLength(255) },
+        .age = v.range(0, 150),
+    };
+};
+
+const Item = struct { sku: []const u8, qty: u32 };
+
+const Address = struct { city: []const u8, country: []const u8, zip: ?[]const u8 = null };
+
+const Account = struct {
+    id: ?bson.ObjectId = null,
+    email: []const u8,
+    name: []const u8,
+    age: u32 = 0,
+    status: User.Status = .active,
+    profile: ?User.Profile = null,
+    created_at: bson.DateTime,
+    nickname: ?[]const u8 = null,
+    tags: []const []const u8 = &.{},
+    labels: ?[]const []const u8 = null,
+    items: []const Item = &.{},
+    address: Address,
+    visits: u32,
+    score: ?f64 = null,
+
+    pub const odm_schema: odm.Schema(Account) = .{ .collection = "accounts", .id = .id, .names = .{ .created_at = "createdAt" } };
+};
+
+const Gen = struct {
+    id: bson.ObjectId,
+    n: i32 = 0,
+
+    pub const odm_schema: odm.Schema(Gen) = .{ .collection = "gens", .id = .id };
+};
+
+const Slug = struct {
+    id: []const u8,
+    title: []const u8,
+
+    pub const odm_schema: odm.Schema(Slug) = .{ .collection = "slugs", .id = .id };
+};
 
 /// The methods of the contract for a client of type `T`, which a fixture
 /// takes one by one.
@@ -171,4 +241,292 @@ const CursorWithoutNext = struct {
 test "compile error: a cursor without next" {
     var cursor: CursorWithoutNext = .{};
     _ = odm.RawCursor.init(&cursor);
+}
+
+// The checks of a model: odm.assertModel, one case per row of the design's
+// table "Model and schema".
+
+test "compile error: assertModel of an integer" {
+    comptime odm.assertModel(u32);
+}
+
+test "compile error: assertModel of a tuple" {
+    comptime odm.assertModel(struct { u32, u8 });
+}
+
+const NoSchema = struct { id: ?bson.ObjectId = null, name: []const u8 };
+
+test "compile error: a model without odm_schema" {
+    comptime odm.assertModel(NoSchema);
+}
+
+const SchemaOfAnotherType = struct {
+    id: ?bson.ObjectId = null,
+    pub const odm_schema: u32 = 0;
+};
+
+test "compile error: odm_schema of another type" {
+    comptime odm.assertModel(SchemaOfAnotherType);
+}
+
+const NoCollection = struct {
+    id: ?bson.ObjectId = null,
+    pub const odm_schema: odm.Schema(NoCollection) = .{ .collection = "", .id = .id };
+};
+
+test "compile error: an empty collection name" {
+    comptime odm.assertModel(NoCollection);
+}
+
+const DollarCollection = struct {
+    id: ?bson.ObjectId = null,
+    pub const odm_schema: odm.Schema(DollarCollection) = .{ .collection = "a$b", .id = .id };
+};
+
+test "compile error: a collection name with a dollar" {
+    comptime odm.assertModel(DollarCollection);
+}
+
+const SystemCollection = struct {
+    id: ?bson.ObjectId = null,
+    pub const odm_schema: odm.Schema(SystemCollection) = .{ .collection = "system.users", .id = .id };
+};
+
+test "compile error: a collection of the system" {
+    comptime odm.assertModel(SystemCollection);
+}
+
+const LongCollection = struct {
+    id: ?bson.ObjectId = null,
+    pub const odm_schema: odm.Schema(LongCollection) = .{ .collection = &@as([192]u8, @splat('a')), .id = .id };
+};
+
+test "compile error: a collection name of 192 bytes" {
+    comptime odm.assertModel(LongCollection);
+}
+
+const BinaryCollection = struct {
+    id: ?bson.ObjectId = null,
+    pub const odm_schema: odm.Schema(BinaryCollection) = .{ .collection = "users\xff", .id = .id };
+};
+
+test "compile error: a collection name that is not UTF-8" {
+    comptime odm.assertModel(BinaryCollection);
+}
+
+const OptionalSlug = struct {
+    id: ?[]const u8 = null,
+    title: []const u8,
+    pub const odm_schema: odm.Schema(OptionalSlug) = .{ .collection = "slugs", .id = .id };
+};
+
+test "compile error: an optional id that is not an ObjectId" {
+    comptime odm.assertModel(OptionalSlug);
+}
+
+const StrayId = struct {
+    id: ?bson.ObjectId = null,
+    _id: u32,
+    pub const odm_schema: odm.Schema(StrayId) = .{ .collection = "strays", .id = .id };
+};
+
+test "compile error: a field _id that is not the id" {
+    comptime odm.assertModel(StrayId);
+}
+
+const NamedId = struct {
+    id: ?bson.ObjectId = null,
+    pub const odm_schema: odm.Schema(NamedId) = .{ .collection = "named", .id = .id, .names = .{ .id = "x" } };
+};
+
+test "compile error: a BSON name for the id" {
+    comptime odm.assertModel(NamedId);
+}
+
+const EmptyName = struct {
+    id: ?bson.ObjectId = null,
+    name: []const u8,
+    pub const odm_schema: odm.Schema(EmptyName) = .{ .collection = "names", .id = .id, .names = .{ .name = "" } };
+};
+
+test "compile error: an empty BSON name" {
+    comptime odm.assertModel(EmptyName);
+}
+
+const DollarName = struct {
+    id: ?bson.ObjectId = null,
+    name: []const u8,
+    pub const odm_schema: odm.Schema(DollarName) = .{ .collection = "names", .id = .id, .names = .{ .name = "$a" } };
+};
+
+test "compile error: a BSON name that starts with a dollar" {
+    comptime odm.assertModel(DollarName);
+}
+
+const DottedName = struct {
+    id: ?bson.ObjectId = null,
+    name: []const u8,
+    pub const odm_schema: odm.Schema(DottedName) = .{ .collection = "names", .id = .id, .names = .{ .name = "a.b" } };
+};
+
+test "compile error: a BSON name with a dot" {
+    comptime odm.assertModel(DottedName);
+}
+
+const TwinNames = struct {
+    id: ?bson.ObjectId = null,
+    a: u32,
+    b: u32,
+    pub const odm_schema: odm.Schema(TwinNames) = .{ .collection = "twins", .id = .id, .names = .{ .b = "a" } };
+};
+
+test "compile error: two fields under one BSON name" {
+    comptime odm.assertModel(TwinNames);
+}
+
+const Operator = struct {
+    id: ?bson.ObjectId = null,
+    @"or": u32,
+    pub const odm_schema: odm.Schema(Operator) = .{ .collection = "operators", .id = .id };
+};
+
+test "compile error: a field named as a logical operator" {
+    comptime odm.assertModel(Operator);
+}
+
+const Unsigned = struct {
+    id: ?bson.ObjectId = null,
+    n: u64,
+    pub const odm_schema: odm.Schema(Unsigned) = .{ .collection = "unsigned", .id = .id };
+};
+
+test "compile error: a field of u64" {
+    comptime odm.assertModel(Unsigned);
+}
+
+const Narrow = struct {
+    id: ?bson.ObjectId = null,
+    x: f32,
+    pub const odm_schema: odm.Schema(Narrow) = .{ .collection = "narrow", .id = .id };
+};
+
+test "compile error: a field of f32" {
+    comptime odm.assertModel(Narrow);
+}
+
+const NarrowItems = struct {
+    id: ?bson.ObjectId = null,
+    items: []const struct { x: f32 } = &.{},
+    pub const odm_schema: odm.Schema(NarrowItems) = .{ .collection = "narrow", .id = .id };
+};
+
+test "compile error: an f32 in the items of a list" {
+    comptime odm.assertModel(NarrowItems);
+}
+
+const OptionalDefault = struct {
+    id: ?bson.ObjectId = null,
+    n: ?u32 = 5,
+    pub const odm_schema: odm.Schema(OptionalDefault) = .{ .collection = "defaults", .id = .id };
+};
+
+test "compile error: an optional whose default is not null" {
+    comptime odm.assertModel(OptionalDefault);
+}
+
+const NestedDefault = struct {
+    id: ?bson.ObjectId = null,
+    inner: struct { n: ?u32 = 5 },
+    pub const odm_schema: odm.Schema(NestedDefault) = .{ .collection = "defaults", .id = .id };
+};
+
+test "compile error: an optional default inside a subdocument" {
+    comptime odm.assertModel(NestedDefault);
+}
+
+const NoKeys = struct {
+    id: ?bson.ObjectId = null,
+    email: []const u8,
+    pub const odm_schema: odm.Schema(NoKeys) = .{ .collection = "keys", .id = .id, .indexes = &.{.{ .keys = &.{} }} };
+};
+
+test "compile error: an index without keys" {
+    comptime odm.assertModel(NoKeys);
+}
+
+const KeyTwice = struct {
+    id: ?bson.ObjectId = null,
+    email: []const u8,
+    pub const odm_schema: odm.Schema(KeyTwice) = .{
+        .collection = "keys",
+        .id = .id,
+        .indexes = &.{.{ .keys = &.{ .{ .email = .asc }, .{ .email = .desc } } }},
+    };
+};
+
+test "compile error: an index with one key twice" {
+    comptime odm.assertModel(KeyTwice);
+}
+
+const TextNumber = struct {
+    id: ?bson.ObjectId = null,
+    age: u32,
+    pub const odm_schema: odm.Schema(TextNumber) = .{ .collection = "texts", .id = .id, .indexes = &.{.{ .keys = &.{.{ .age = .text }} }} };
+};
+
+test "compile error: a text key on a number" {
+    comptime odm.assertModel(TextNumber);
+}
+
+const TtlString = struct {
+    id: ?bson.ObjectId = null,
+    email: []const u8,
+    pub const odm_schema: odm.Schema(TtlString) = .{
+        .collection = "ttls",
+        .id = .id,
+        .indexes = &.{.{ .keys = &.{.{ .email = .asc }}, .expire_after_seconds = 60 }},
+    };
+};
+
+test "compile error: a TTL on a string" {
+    comptime odm.assertModel(TtlString);
+}
+
+const SameIndexes = struct {
+    id: ?bson.ObjectId = null,
+    email: []const u8,
+    pub const odm_schema: odm.Schema(SameIndexes) = .{
+        .collection = "same",
+        .id = .id,
+        .indexes = &.{ .{ .keys = &.{.{ .email = .asc }} }, .{ .keys = &.{.{ .email = .asc }}, .unique = true } },
+    };
+};
+
+test "compile error: two indexes with the same keys" {
+    comptime odm.assertModel(SameIndexes);
+}
+
+const UniqueOptional = struct {
+    id: ?bson.ObjectId = null,
+    profile: ?User.Profile = null,
+    pub const odm_schema: odm.Schema(UniqueOptional) = .{
+        .collection = "uniques",
+        .id = .id,
+        .indexes = &.{.{ .keys = &.{.{ .@"profile.city" = .asc }}, .unique = true }},
+    };
+};
+
+test "compile error: a unique index on an optional path without sparse" {
+    comptime odm.assertModel(UniqueOptional);
+}
+
+const Typo = struct {
+    id: ?bson.ObjectId = null,
+    name: []const u8,
+    pub const odm_schema: odm.Schema(Typo) = .{ .collection = "typos", .id = .id };
+    pub const field_rules = .{ .nmae = v.minLength(1) };
+};
+
+test "compile error: field_rules of a field that is not there" {
+    comptime odm.assertModel(Typo);
 }
