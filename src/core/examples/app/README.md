@@ -70,16 +70,11 @@ defer app.deinit();
 
 ## Installation
 
-Add Zefir to your `build.zig.zon`:
+Add Zefir to your `build.zig.zon`; App ships since v0.10.0:
 
 ```sh
-zig fetch --save git+https://github.com/vkiryakov/zefir#dev
+zig fetch --save git+https://github.com/vkiryakov/zefir#v0.10.0
 ```
-
-This guide is on the `dev` branch, so the command fetches its latest
-commit; `--save` pins that commit. The latest release is v0.9.0, fetched
-with `#v0.9.0`, but zefir.App is not in it: App is on `dev` until the next
-release.
 
 The shop runs on zio. zio has no release for Zig 0.17 yet, so pin the
 commit Zefir is tested with:

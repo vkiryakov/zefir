@@ -231,15 +231,11 @@ everything happens in the calls of your tasks.
 
 ## Installation
 
-Add Zefir to your `build.zig.zon`:
+Add Zefir to your `build.zig.zon`; redis ships since v0.10.0:
 
 ```sh
-zig fetch --save git+https://github.com/vkiryakov/zefir#dev
+zig fetch --save git+https://github.com/vkiryakov/zefir#v0.10.0
 ```
-
-zefir-redis is on the `dev` branch until the next release. The command
-fetches the latest commit of `dev`; `--save` pins that commit. The latest
-release, v0.9.0, came before zefir-redis, so `#v0.9.0` does not have it.
 
 A service runs on [zio](https://github.com/lalinsky/zio). zio has no
 release for Zig 0.17 yet, so pin the commit Zefir is tested with:
@@ -2580,10 +2576,10 @@ line of [the quick start](#quick-start) shows:
 
 ## Under zefir.App
 
-zefir.App, the container of zefir-core that will build the parts of a
-service, start them in order and stop them all within one deadline, is
-planned. The client has the two methods that it will call, and they work
-today, as [connect.zig](#what-can-go-wrong-at-the-start) shows:
+zefir.App, the container of zefir-core, builds the parts of a service,
+starts them in order and stops them all within one deadline. The client
+has the two methods that it calls, and they work without App too, as
+[connect.zig](#what-can-go-wrong-at-the-start) shows:
 
 - **`start(io)`** is `connect` under a deadline of `start_timeout`, 10 s
   by default. When the client cannot connect, `start` writes why to the
