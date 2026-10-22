@@ -143,4 +143,5 @@ test {
     _ = @import("tests/fingerprint_tests.zig");
     _ = @import("tests/registry_tests.zig");
     _ = @import("tests/registry_concurrency_tests.zig");
+    _ = @import("tests/names_tests.zig");
 }
