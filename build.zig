@@ -8,6 +8,7 @@ const jwt_cases = @import("src/jwt/tests/cases.zig");
 const jwt_guide = @import("src/jwt/examples/cases.zig");
 const mongo_guide = @import("src/mongo/examples/cases.zig");
 const odm_cases = @import("src/odm/tests/cases.zig");
+const odm_guide = @import("src/odm/examples/cases.zig");
 const redis_guide = @import("src/redis/examples/cases.zig");
 
 pub fn build(b: *std.Build) void {
@@ -934,6 +935,14 @@ pub fn build(b: *std.Build) void {
         .{ .name = "core", .module = core },
         .{ .name = "validator", .module = validator },
     }, target, optimize);
+    addOdmGuide(b, test_odm, .{
+        .core = core,
+        .log = log,
+        .confy = confy,
+        .validator = validator,
+        .mongo_bson = mongo_bson,
+        .odm = odm,
+    }, target, optimize, tsan);
 
     // mongo compile errors of the collection API: documents of types that
     // its operations cannot take. Each message names the operation, the
@@ -1365,6 +1374,87 @@ fn addMongoGuide(
         readme.addAnonymousImport(b.fmt("{s}.out", .{name}), .{ .root_source_file = run.captureStdOut(.{}) });
     }
     test_mongo.dependOn(&addRun(b, b.addTest(.{ .name = "mongo-guide-readme", .root_module = readme }), tsan).step);
+}
+
+/// The modules that the examples of the odm guide import here. zefir-mongo
+/// is not among them: what `test-odm` builds never imports it, so that the
+/// graph of the CI scripts stays without cycles.
+const OdmGuideModules = struct {
+    core: *std.Build.Module,
+    log: *std.Build.Module,
+    confy: *std.Build.Module,
+    validator: *std.Build.Module,
+    mongo_bson: *std.Build.Module,
+    odm: *std.Build.Module,
+};
+
+/// The examples of src/odm/examples/README.md, the guide of zefir-odm, as
+/// cases.zig there lists them: the tests on odm.testing.FakeDriver, and
+/// the programs that need no server, each through example_main.zig, which
+/// exits with code 3 on a panic instead of aborting and with code 4 past
+/// its time limit; it must exit with 0. readme_test.zig then checks that
+/// README.md shows every file as it is and every run of those programs as
+/// it printed. The programs that need mongod import zio and zefir-mongo:
+/// only tests/odm builds and runs them.
+fn addOdmGuide(
+    b: *std.Build,
+    test_odm: *std.Build.Step,
+    m: OdmGuideModules,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+    tsan: bool,
+) void {
+    const dir = "src/odm/examples/";
+    const imports: []const std.Build.Module.Import = &.{
+        .{ .name = "core", .module = m.core },
+        .{ .name = "log", .module = m.log },
+        .{ .name = "confy", .module = m.confy },
+        .{ .name = "validator", .module = m.validator },
+        .{ .name = "mongo-bson", .module = m.mongo_bson },
+        .{ .name = "odm", .module = m.odm },
+    };
+    for (odm_guide.tests) |name| {
+        const tests = b.addTest(.{
+            .name = b.fmt("odm-guide-{s}", .{name}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(b.fmt(dir ++ "{s}.zig", .{name})),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+                .imports = imports,
+            }),
+        });
+        test_odm.dependOn(&addRun(b, tests, tsan).step);
+    }
+
+    const readme = b.createModule(.{
+        .root_source_file = b.path(dir ++ "readme_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+    });
+    for (odm_guide.programs) |name| {
+        const exe = b.addExecutable(.{
+            .name = b.fmt("odm-guide-{s}", .{name}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(dir ++ "example_main.zig"),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+                .imports = &.{.{ .name = "example", .module = b.createModule(.{
+                    .root_source_file = b.path(b.fmt(dir ++ "{s}.zig", .{name})),
+                    .target = target,
+                    .optimize = optimize,
+                    .sanitize_thread = tsan,
+                    .imports = imports,
+                }) }},
+            }),
+        });
+        const run = addRun(b, exe, tsan);
+        run.expectExitCode(0);
+        readme.addAnonymousImport(b.fmt("{s}.out", .{name}), .{ .root_source_file = run.captureStdOut(.{}) });
+    }
+    test_odm.dependOn(&addRun(b, b.addTest(.{ .name = "odm-guide-readme", .root_module = readme }), tsan).step);
 }
 
 /// The modules that the examples of the redis guide import here.
