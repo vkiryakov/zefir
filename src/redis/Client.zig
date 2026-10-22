@@ -203,9 +203,10 @@ pub fn connect(c: *Client, io: Io, ctx: core.Context, diagnostics: ?*Diagnostics
 /// Ends the client's work, in this order: the subscribers end, and their
 /// `next` returns null, while their memory waits for their own `close`;
 /// new calls, and those waiting for a connection, get `error.Closed`;
-/// connections being opened stop; the calls in flight get up to
-/// `close_timeout` to end, and after it their exchanges are cut
-/// (`error.ConnectionLost`); then the connections close. A second call
+/// connections being opened stop; the calls in flight and the Conns given
+/// out get up to `close_timeout` to end, a Conn by its release, and after
+/// it their exchanges are cut (`error.ConnectionLost`); then the
+/// connections close, that of a Conn left at its release. A second call
 /// returns once the first is done. The task's cancelation waits until it
 /// returns. QUIT does not go out: the connections just close.
 pub fn close(c: *Client, io: Io) void {
@@ -358,13 +359,15 @@ pub fn iterate(c: *Client, command: anytype, options: requests.IterateOptions) I
 /// `conn.release`: for WATCH and the transaction that depends on it
 /// (`redis.Conn`). It waits in line for one as a call does, within the
 /// deadline of `op`, else `timeout` from now: `error.PoolExhausted` when
-/// the deadline ends there. Release every Conn before `deinit`.
+/// the deadline ends there. `close` waits for the Conn as for a call in
+/// flight, up to `close_timeout`. Release every Conn before `deinit`.
 pub fn acquire(c: *Client, io: Io, op: OperationContext) Error!Conn {
     calls.checkUse(c, io);
     try calls.checkContext(io, op, null);
     try c.pool.enter(io, null);
     defer c.pool.leave(io);
     const entry = try c.pool.checkOut(io, c.opener(), calls.deadlineOf(c, io, op, .none), null);
+    c.pool.hold(io);
     if (std.debug.runtime_safety) _ = c.conns.fetchAdd(1, .monotonic);
     return .{ .client = c, .entry = entry };
 }

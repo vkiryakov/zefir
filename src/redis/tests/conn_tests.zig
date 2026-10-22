@@ -2,8 +2,9 @@
 //! `redis.testing.FakeServer` over loopback: `client.acquire` waits in line
 //! as a call does, `release` gives the connection back or closes it when
 //! keys may be under WATCH on it, an error that closes the connection
-//! leaves the Conn empty, and `client.close` cuts a call of a Conn as one
-//! of the client. Every test runs under a time limit of 5 s.
+//! leaves the Conn empty, and `client.close` gives a Conn `close_timeout`
+//! as a call of the client, between its calls too, then cuts it. Every
+//! test runs under a time limit of 5 s.
 
 const std = @import("std");
 const Io = std.Io;
@@ -14,7 +15,9 @@ const cmd = redis.cmd;
 const Client = redis.Client;
 const Diagnostics = redis.Diagnostics;
 const FakeServer = redis.testing.FakeServer;
+const Peer = FakeServer.Peer;
 const time = @import("../engine/time.zig");
+const peers = @import("peers.zig");
 const within5s = @import("time_limit.zig").within5s;
 
 fn within(io: Io, duration: Io.Duration) redis.OperationContext {
@@ -243,5 +246,80 @@ fn closeCutsConn(io: Io) !void {
     var d: Diagnostics = .{};
     try testing.expectError(error.Closed, conn.run(io, .of(.root), get, .{ .diagnostics = &d }));
     try testing.expectError(error.Closed, client.acquire(io, .of(.root)));
+    try testing.expectEqual(@as(usize, 0), client.stats().connections);
+}
+
+test "close gives a Conn held between calls close_timeout: the transaction after its WATCH runs meanwhile, and close returns once the Conn is released" {
+    try within5s(testing.io, closeWaitsForConn, .{testing.io});
+}
+
+const queued: FakeServer.Reply = .{ .raw = "+QUEUED\r\n" };
+
+/// The client's close, which sets `done` once it returns.
+fn closeThenSet(client: *Client, io: Io, done: *Io.Event) void {
+    client.close(io);
+    done.set(io);
+}
+
+fn closeWaitsForConn(io: Io) !void {
+    var server: FakeServer = try .start(testing.allocator, io, &.{
+        .expect(.{ "WATCH", "stock" }, .ok),
+        .expect(.{ "GET", "stock" }, .{ .integer = 5 }),
+        .expect(.{"MULTI"}, .ok),
+        .expect(.{ "DECR", "stock" }, queued),
+        .expect(.{"EXEC"}, .{ .array = &.{.{ .integer = 4 }} }),
+    });
+    defer server.stop(io);
+    var client: Client = undefined;
+    try connected(io, &client, .{ .url = server.url(), .close_timeout = .fromSeconds(2) });
+    defer client.deinit();
+    var conn = try client.acquire(io, .of(.root));
+    defer conn.release(io);
+    try conn.run(io, .of(.root), cmd.watch(&.{"stock"}), .{});
+    try testing.expectEqual(@as(?i64, 5), try conn.run(io, .of(.root), cmd.raw(?i64, .{ "GET", "stock" }), .{}));
+    var closed: Io.Event = .unset;
+    const start = time.now(io);
+    var closing = try io.concurrent(closeThenSet, .{ &client, io, &closed });
+    defer closing.cancel(io);
+    // The close has begun, and waits for the Conn.
+    try redis.testing.sleepAtLeast(io, .fromMilliseconds(100));
+    try testing.expect(!closed.isSet());
+    const done = try conn.transaction(io, .of(.root), .{cmd.raw(i64, .{ "DECR", "stock" })}, .{});
+    const results = done orelse return error.TestExpectedResults;
+    try testing.expectEqual(@as(i64, 4), try results[0]);
+    conn.release(io);
+    closing.await(io);
+    try testing.expect(start.durationTo(time.now(io)).toMilliseconds() < 1500);
+    try testing.expectEqual(@as(usize, 0), client.stats().connections);
+    try server.finish(io);
+}
+
+test "a Conn not released holds close up for close_timeout, then its connection is cut: its calls are Closed, and release closes the connection" {
+    try within5s(testing.io, closeCutsHeldConn, .{testing.io});
+}
+
+fn closeCutsHeldConn(io: Io) !void {
+    var peer: Peer = try .listen(io);
+    defer peer.close(io);
+    var client: Client = try .init(testing.allocator, io, .{ .url = peer.url(), .close_timeout = .fromMilliseconds(300) });
+    defer client.deinit();
+    var connecting = try io.concurrent(Client.connect, .{ &client, io, core.Context.root, null });
+    defer connecting.cancel(io) catch {};
+    try peer.accept(io);
+    try peers.shakeHands(&peer, io, .zero);
+    try connecting.await(io);
+    // The Conn takes the connection that connect opened.
+    var conn = try client.acquire(io, .of(.root));
+    defer conn.release(io);
+    const start = time.now(io);
+    client.close(io);
+    try testing.expect(start.durationTo(time.now(io)).toMilliseconds() >= 300);
+    // The cut shut the connection down: the peer reads its end.
+    _ = try peer.readToEnd();
+    var d: Diagnostics = .{};
+    try testing.expectError(error.Closed, conn.run(io, .of(.root), get, .{ .diagnostics = &d }));
+    try testing.expectEqualStrings("the client is closed", d.message());
+    try testing.expectEqual(@as(usize, 1), client.stats().connections);
+    conn.release(io);
     try testing.expectEqual(@as(usize, 0), client.stats().connections);
 }

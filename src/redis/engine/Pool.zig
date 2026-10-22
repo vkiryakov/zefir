@@ -40,7 +40,10 @@
 //!   the pool ready again.
 //! - `close` refuses new calls and those in line (`error.Closed`), stops
 //!   the openings, lets the exchanges in progress end within its time,
-//!   then cuts them, and closes the connections last.
+//!   then cuts them, and closes the connections last. A Conn that holds a
+//!   connection counts as an exchange in progress until its release: its
+//!   calls go on within that time, and after it its connection is cut and
+//!   its calls are `error.Closed`.
 //!
 //! A connection holds its `Entry`, the pool's part of it, as a field; the
 //! pool opens connections through the caller's `Opener`, so that tests
@@ -82,12 +85,20 @@ line: List = .{},
 waiting: usize = 0,
 /// The calls between `enter` and `leave`.
 calls: usize = 0,
+/// The Conns that hold a connection, between `hold` and `unhold`: `close`
+/// gives them its time, as it does the calls.
+held: usize = 0,
+/// Set once `close` cut the exchanges in progress: a call of a Conn is
+/// `error.Closed` from then on.
+cut: bool = false,
 /// A probe of the paused pool is opening a connection.
 probing: bool = false,
 /// When the latest probe started.
 last_probe: ?Io.Timestamp = null,
-/// Set once the pool is closing and no call is left.
+/// Set once the pool is closing and no call and no Conn is left.
 drained: Io.Event = .unset,
+/// Set once the pool is closing and no call is left, after the cut.
+calls_done: Io.Event = .unset,
 /// Set once `close` is done.
 closed: Io.Event = .unset,
 
@@ -180,7 +191,7 @@ pub fn init(options: Options) Pool {
 /// After `close`: frees nothing, since `close` closed every connection.
 pub fn deinit(pool: *Pool) void {
     std.debug.assert(pool.state == .closed or pool.state == .initialized);
-    std.debug.assert(pool.idle_count == 0 and pool.in_use_count == 0 and pool.opening_count == 0 and pool.calls == 0);
+    std.debug.assert(pool.idle_count == 0 and pool.in_use_count == 0 and pool.opening_count == 0 and pool.calls == 0 and pool.held == 0);
     pool.* = undefined;
 }
 
@@ -200,6 +211,42 @@ pub fn leave(pool: *Pool, io: Io) void {
     pool.mutex.lockUncancelable(io);
     defer pool.mutex.unlock(io);
     pool.calls -= 1;
+    pool.signalDrained(io);
+}
+
+/// Counts in the call of a Conn, which holds its connection already: it
+/// goes on while the pool is closing, within the time of `close`, and is
+/// `error.Closed` once `close` cut the exchanges or is done. `leave` ends
+/// it.
+pub fn enterHeld(pool: *Pool, io: Io, d: ?*Diagnostics) Error!void {
+    pool.mutex.lockUncancelable(io);
+    defer pool.mutex.unlock(io);
+    switch (pool.state) {
+        .closed => return fail(d, .checkout, error.Closed, "the client is closed", .{}),
+        .closing => {
+            if (pool.cut) return fail(d, .checkout, error.Closed, "the client is closed", .{});
+            // A call again: once `close` cuts, it waits for this one too.
+            // Nobody waits on the event before the cut.
+            pool.calls_done.reset();
+        },
+        .initialized, .ready, .paused => {},
+    }
+    pool.calls += 1;
+}
+
+/// Counts in a Conn that took a connection, within the call of `acquire`:
+/// `close` waits for it as for a call, until `unhold`.
+pub fn hold(pool: *Pool, io: Io) void {
+    pool.mutex.lockUncancelable(io);
+    defer pool.mutex.unlock(io);
+    pool.held += 1;
+}
+
+/// Counts out a Conn that gave its connection back.
+pub fn unhold(pool: *Pool, io: Io) void {
+    pool.mutex.lockUncancelable(io);
+    defer pool.mutex.unlock(io);
+    pool.held -= 1;
     pool.signalDrained(io);
 }
 
@@ -261,22 +308,25 @@ pub fn checkIn(pool: *Pool, io: Io, entry: *Entry, after: After) void {
 }
 
 /// Refuses new calls and those in line (`error.Closed`) and stops the
-/// openings; gives the exchanges in progress `timeout` to end, then cuts
-/// them, and returns once every call has left and every connection is
-/// closed: `drain`, then `finish`. The task's cancelation waits until it
-/// returns. A second call, at once or later, returns once the first is
-/// done.
+/// openings; gives the exchanges in progress and the Conns `timeout` to
+/// end, then cuts them, and returns once every call has left and every
+/// idle connection is closed: `drain`, then `finish`. The task's
+/// cancelation waits until it returns. A second call, at once or later,
+/// returns once the first is done.
 pub fn close(pool: *Pool, io: Io, timeout: Io.Duration) void {
     if (pool.drain(io, timeout)) pool.finish(io);
 }
 
 /// The first step of `close`: refuses new calls and those in line
 /// (`error.Closed`) and stops the openings; gives the exchanges in
-/// progress `timeout` to end, then cuts them, and returns once every call
-/// has left. The idle connections stay open until `finish`. True for the
-/// call that closes the pool, which calls `finish`; a later one returns
-/// false once that `finish` is done. The task's cancelation waits until
-/// it returns.
+/// progress and the Conns that hold a connection `timeout` to end, as a
+/// Conn ends at its release, then cuts the connections in use, and
+/// returns once every call has left. A Conn left after the cut keeps its
+/// connection, cut, until its release closes it; its calls are
+/// `error.Closed`. The idle connections stay open until `finish`. True
+/// for the call that closes the pool, which calls `finish`; a later one
+/// returns false once that `finish` is done. The task's cancelation waits
+/// until it returns.
 pub fn drain(pool: *Pool, io: Io, timeout: Io.Duration) bool {
     const protection = io.swapCancelProtection(.blocked);
     defer _ = io.swapCancelProtection(protection);
@@ -306,13 +356,15 @@ pub fn drain(pool: *Pool, io: Io, timeout: Io.Duration) bool {
     }
     if (!pool.drained.isSet()) {
         pool.mutex.lockUncancelable(io);
+        pool.cut = true;
         var in_use = pool.in_use.first;
         while (in_use) |node| : (in_use = node.next) {
             const entry = entryOf(node);
             entry.hooks.cut(entry, io);
         }
         pool.mutex.unlock(io);
-        pool.drained.waitUncancelable(io);
+        // The calls end at once now; a Conn may stay until its release.
+        pool.calls_done.waitUncancelable(io);
     }
     return true;
 }
@@ -607,7 +659,9 @@ fn wakeAll(pool: *Pool, io: Io) void {
 }
 
 fn signalDrained(pool: *Pool, io: Io) void {
-    if (pool.state == .closing and pool.calls == 0) pool.drained.set(io);
+    if (pool.state != .closing or pool.calls != 0) return;
+    pool.calls_done.set(io);
+    if (pool.held == 0) pool.drained.set(io);
 }
 
 /// Closes the connections of `dead`, outside the lock.

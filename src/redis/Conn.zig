@@ -29,8 +29,13 @@
 //!   `OutOfMemory`) leaves the Conn empty: its calls are `error.Closed`
 //!   from then on, and `release` only frees it. `ServerError` and
 //!   `UnexpectedReply` leave the connection as it was.
-//! - `client.close` gives a call of a Conn `close_timeout` to end, as any
-//!   call in flight, then cuts it; calls after it are `error.Closed`.
+//! - `client.close` gives a Conn `close_timeout`, as a call in flight:
+//!   its calls go on meanwhile, such as the transaction after its WATCH,
+//!   and `close` returns once the Conn is released. After that time its
+//!   exchange in progress is cut (`error.ConnectionLost`), and so is its
+//!   connection: its calls are `error.Closed`, and `release` closes the
+//!   connection. A Conn that is not released holds `close` up for
+//!   `close_timeout`.
 //!
 //! The methods take `*Conn`, for the Conn holds the state of its
 //! connection: `var conn`. One task at a time calls a Conn, and every
@@ -88,7 +93,7 @@ pub fn run(conn: *Conn, io: Io, op: OperationContext, command: anytype, options:
     try calls.checkContext(io, op, d);
     _ = try calls.roomOf(c, io, op, .{command}, null, d);
     const connection = try conn.held(d);
-    try c.pool.enter(io, d);
+    try c.pool.enterHeld(io, d);
     defer c.pool.leave(io);
     const deadline = calls.deadlineOf(c, io, op, calls.waitOf(.{command}));
     const reply = calls.one(c, connection, io, op, command, options, deadline, d) catch |err| {
@@ -113,7 +118,7 @@ pub fn pipeline(conn: *Conn, io: Io, op: OperationContext, commands: anytype, op
     _ = try calls.roomOf(c, io, op, commands, null, d);
     const connection = try conn.held(d);
     var results = try calls.slots(Results(@TypeOf(commands)), commands, options);
-    try c.pool.enter(io, d);
+    try c.pool.enterHeld(io, d);
     defer c.pool.leave(io);
     const deadline = calls.deadlineOf(c, io, op, calls.waitOf(commands));
     calls.many(c, connection, io, op, commands, &results, options, deadline, d) catch |err| {
@@ -174,7 +179,7 @@ pub fn transaction(conn: *Conn, io: Io, op: OperationContext, commands: anytype,
     try calls.checkContext(io, op, d);
     const connection = try conn.held(d);
     var results = try calls.slots(Queued(@TypeOf(commands)), commands, options);
-    try c.pool.enter(io, d);
+    try c.pool.enterHeld(io, d);
     defer c.pool.leave(io);
     // Nothing blocks inside a transaction.
     const deadline = calls.deadlineOf(c, io, op, .none);
@@ -200,7 +205,10 @@ pub fn release(conn: *Conn, io: Io) void {
     if (conn.released) return;
     const c = conn.client;
     calls.checkUse(c, io);
-    if (conn.entry) |entry| c.pool.checkIn(io, entry, if (conn.watching) .broken else .ok);
+    if (conn.entry) |entry| {
+        c.pool.checkIn(io, entry, if (conn.watching) .broken else .ok);
+        c.pool.unhold(io);
+    }
     conn.entry = null;
     conn.released = true;
     if (std.debug.runtime_safety) _ = c.conns.fetchSub(1, .monotonic);
@@ -230,6 +238,7 @@ fn held(conn: *const Conn, d: ?*Diagnostics) Error!*Connection {
 fn after(conn: *Conn, io: Io, left: Pool.After) void {
     if (left == .ok) return;
     conn.client.pool.checkIn(io, conn.entry.?, left);
+    conn.client.pool.unhold(io);
     conn.entry = null;
 }
 
