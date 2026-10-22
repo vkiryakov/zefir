@@ -72,11 +72,29 @@ const log = std.log.scoped(.http);
 
 /// The server as the handler of its backend.
 pub fn handler(server: *Server) Backend.Handler {
-    return .{ .ptr = server, .serve = serveErased };
+    return .{ .ptr = server, .serve = serveErased, .fail = failErased };
 }
 
 fn serveErased(ptr: *anyopaque, io: std.Io, exchange: *Exchange) void {
     serve(@ptrCast(@alignCast(ptr)), io, exchange);
+}
+
+/// The backend broke: the server keeps the first error, stops, and wakes
+/// `wait`, which returns the error.
+fn failErased(ptr: *anyopaque, io: std.Io, err: Backend.FatalError) void {
+    const server: *Server = @ptrCast(@alignCast(ptr));
+    // The log may take a cancelable lock; the backend's cancelation stays.
+    const protection = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(protection);
+    {
+        server.internal.mutex.lockUncancelable(io);
+        defer server.internal.mutex.unlock(io);
+        if (server.internal.fatal != null) return;
+        server.internal.fatal = err;
+    }
+    log.warn("the backend broke with error.{t}; the server stops", .{err});
+    server.requestStop(io);
+    server.internal.wait_event.set(io);
 }
 
 /// The race of a request's two tasks and of its deadline: the first to

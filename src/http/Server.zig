@@ -109,6 +109,9 @@ pub const Internal = struct {
     /// The earliest deadline a `shutdown` gave, on the awake clock; under
     /// `mutex`. It ends the grace of the stop in time.
     deadline: ?core.Deadline = null,
+    /// The error of a backend that broke, the first (`Backend.Handler.fail`);
+    /// under `mutex`. `wait` and `shutdown` return it.
+    fatal: ?Backend.FatalError = null,
     /// The requests at work, as `.max_in_flight` counts them: `serve` takes a
     /// place before a request runs and gives it back at its end.
     in_flight: std.atomic.Value(u32) = .init(0),
@@ -149,8 +152,10 @@ pub const InitError = error{ InvalidConfiguration, OutOfMemory };
 /// missing, is not a directory or does not open (`InvalidStaticRoot`,
 /// logged with the mount, the path and the error of the system).
 pub const StartError = Backend.StartError || error{ InvalidState, UnsupportedByBackend, InvalidStaticRoot };
-/// The wait was canceled, or the server never started (`InvalidState`).
-pub const WaitError = error{InvalidState} || std.Io.Cancelable;
+/// The backend broke (`Unavailable`: it takes no new requests;
+/// `Unexpected`), and the server stops by itself; the wait was canceled;
+/// or the server never started (`InvalidState`).
+pub const WaitError = Backend.FatalError || error{InvalidState} || std.Io.Cancelable;
 pub const ShutdownError = error{ShutdownTimeout} || WaitError;
 
 /// From whom to believe `X-Forwarded-For` and `Forwarded`: everybody,
@@ -568,11 +573,20 @@ fn backendCanServe(server: *const Server) bool {
     return true;
 }
 
-/// Waits until the server has stopped; `error.InvalidState` before
-/// `start`. Canceling the wait does not stop the server.
+/// Waits until the server has stopped. Returns at once with the error of a
+/// backend that broke: the server then stops by itself. `error.InvalidState`
+/// before `start`. Canceling the wait does not stop the server.
 pub fn wait(server: *Server, io: std.Io) WaitError!void {
     if (server.internal.state_value.load(.acquire) == .configured) return error.InvalidState;
     try server.internal.wait_event.wait(io);
+    return server.fatalError(io);
+}
+
+/// The error of a backend that broke, if one did.
+fn fatalError(server: *Server, io: std.Io) Backend.FatalError!void {
+    server.internal.mutex.lockUncancelable(io);
+    defer server.internal.mutex.unlock(io);
+    if (server.internal.fatal) |err| return err;
 }
 
 /// `start` and `wait`: for a service that runs one server until it stops.
@@ -617,7 +631,8 @@ pub fn requestStop(server: *Server, io: std.Io) void {
 /// `error.ShutdownTimeout` when the server has not stopped by then: a
 /// handler that ignores its cancelation. The server stays in `draining`
 /// until such requests end. Treat it as fatal and end the process; `deinit`
-/// would wait for them without a limit.
+/// would wait for them without a limit. Once stopped, the error of a
+/// backend that broke, as `wait` returns it.
 pub fn shutdown(server: *Server, io: std.Io, deadline: std.Io.Clock.Timestamp) ShutdownError!void {
     const due: core.Deadline = .at(deadline.toClock(io, .awake).raw);
     server.limitGrace(io, due);
@@ -626,6 +641,7 @@ pub fn shutdown(server: *Server, io: std.Io, deadline: std.Io.Clock.Timestamp) S
         error.Timeout => return error.ShutdownTimeout,
         error.Canceled => |e| return e,
     };
+    return server.fatalError(io);
 }
 
 /// Keeps the earliest deadline of a `shutdown` and wakes the lifecycle
@@ -1318,4 +1334,41 @@ test "a far deadline keeps shutdown_grace" {
     const at = begun.durationTo(f.holder.canceled_at).toMilliseconds();
     try testing.expect(at >= 300 - 100 and at <= 300 + 100);
     try testing.expectEqual(State.stopped, f.server.state());
+}
+
+test "a backend that fails stops the server: wait returns its error at once" {
+    const io = testing.io;
+    var f: HoldFixture = .{};
+    try f.start(io, .fromSeconds(10));
+    defer f.stop(io);
+    const level = testing.log_level;
+    testing.log_level = .err; // the server warns that its backend broke
+    defer testing.log_level = level;
+
+    f.backend.fail(io, error.Unavailable);
+    // At once: the request held in the server keeps the stop in its grace.
+    try testing.expectError(error.Unavailable, f.server.wait(io));
+    try testing.expectEqual(State.draining, f.server.state());
+    try testing.expect(!f.server.isReady());
+}
+
+test "after a failure shutdown returns the same error" {
+    const io = testing.io;
+    var backend: TestingBackend = .init(testing.allocator);
+    defer backend.deinit();
+    var health: HealthController = .{};
+    var server = try init(testing.allocator, .{ .controllers = .{&health} }, .{ .listen = .{ .backend = backend.backend() } });
+    defer server.deinit(io);
+    try server.start(io);
+    const level = testing.log_level;
+    testing.log_level = .err; // the server warns that its backend broke
+    defer testing.log_level = level;
+
+    backend.fail(io, error.Unavailable);
+    // Only the first failure counts.
+    backend.fail(io, error.Unexpected);
+    try testing.expectError(error.Unavailable, server.shutdown(io, far(io)));
+    try testing.expectEqual(State.stopped, server.state());
+    try testing.expectError(error.Unavailable, server.wait(io));
+    try testing.expectError(error.Unavailable, server.shutdown(io, far(io)));
 }

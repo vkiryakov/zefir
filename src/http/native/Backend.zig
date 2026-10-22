@@ -22,7 +22,8 @@
 //! it waits in the kernel's queue until one closes. When the server stops,
 //! the backend stops listening; a connection that waits for a request
 //! closes at once, a busy one after its response, which says
-//! `Connection: close`. A backend serves one server, once.
+//! `Connection: close`. A listener that breaks stops the server, whose
+//! `wait` returns `error.Unavailable`. A backend serves one server, once.
 //!
 //! A port taken by another server: on Windows the server's `start` is
 //! `error.AddressInUse`. On Linux and macOS it starts, and the two share
@@ -196,7 +197,13 @@ fn acceptLoop(b: *Backend, io: std.Io) void {
         const stream = b.listener.?.accept(io) catch |err| {
             b.slots.post(io);
             switch (err) {
-                error.Canceled, error.SocketNotListening => return,
+                error.Canceled => return,
+                // The listener broke under the server, which stops; not
+                // when `stopAccepting` closed it.
+                error.SocketNotListening => {
+                    if (b.accepting.load(.acquire)) b.handler.fail(b.handler.ptr, io, error.Unavailable);
+                    return;
+                },
                 error.ConnectionAborted, error.WouldBlock => continue,
                 else => {
                     // Out of descriptors or memory, or the network is down:

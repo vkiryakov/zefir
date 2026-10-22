@@ -202,6 +202,19 @@ pub fn backend(b: *Backend) Interface {
     return .{ .ptr = b, .vtable = &vtable };
 }
 
+/// Breaks the backend, as a listener that fails breaks
+/// `http.native.Backend`: the server keeps `err`, stops, and its `wait`
+/// returns `err` at once. For tests of what a service does when its server
+/// breaks. Does nothing before the server's `start`.
+pub fn fail(b: *Backend, io: std.Io, err: Interface.FatalError) void {
+    const handler = handler: {
+        b.mutex.lockUncancelable(io);
+        defer b.mutex.unlock(io);
+        break :handler b.handler orelse return;
+    };
+    handler.fail(handler.ptr, io, err);
+}
+
 /// Hands `req` to the server and returns its response once the request
 /// has ended. When the caller is canceled, the request still ends first,
 /// then the call returns `error.Canceled`.
