@@ -81,6 +81,30 @@ pub const Outcome = struct {
     }
 };
 
+/// The result of one call of the registry in a task that is canceled while
+/// the call runs, and whether the cancelation still reached the task after
+/// the call: the calls that defer it must not lose it.
+pub const Canceled = struct {
+    result: CallError!void = {},
+    /// error.Canceled came at the first wait of the task after the call.
+    after: bool = false,
+
+    pub fn set(c: *Canceled, io: Io, result: CallError!void) void {
+        c.result = result;
+        io.sleep(.fromSeconds(30), .awake) catch |err| switch (err) {
+            error.Canceled => c.after = true,
+        };
+    }
+};
+
+/// The journal of the fake holds `n` calls. Only its length is read: a
+/// task may add to it meanwhile.
+pub const Journaled = struct { fake: *FakeDriver, n: usize };
+
+pub fn isJournaled(e: Journaled, io: Io) bool {
+    return e.fake.journal(io).len >= e.n;
+}
+
 /// Until `holds(arg, io)`, looking every millisecond; error.Timeout after
 /// 30 s on the .awake clock, so that a call that never returns fails the
 /// test. Under ThreadSanitizer on a loaded machine, the drain behind the

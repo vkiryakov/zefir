@@ -20,7 +20,8 @@
 //! cause in `cursor.diagnostics()`, and the cursor goes on: the next `next`
 //! reads the document after it. Each call of the cursor starts its
 //! diagnostics afresh. One task at a time calls `next`, `nextRaw` and
-//! `deinit` of a cursor; in safe builds two at once panic.
+//! `deinit` of a cursor; in safe builds two at once panic, and so does a
+//! call after its `deinit`, a second `deinit` too.
 
 const std = @import("std");
 const Io = std.Io;
@@ -48,6 +49,8 @@ pub fn Cursor(comptime T: type) type {
         diag: Diagnostics = .{},
         /// In safe builds: a call of the cursor is in progress.
         busy: if (std.debug.runtime_safety) std.atomic.Value(bool) else void = if (std.debug.runtime_safety) .init(false) else {},
+        /// In safe builds: `deinit` came.
+        released: if (std.debug.runtime_safety) bool else void = if (std.debug.runtime_safety) false else {},
 
         const Self = @This();
 
@@ -80,9 +83,16 @@ pub fn Cursor(comptime T: type) type {
             c.raw.deinit(io);
             leases.release(c.registry, io, c.generation);
             c.* = undefined;
+            // After the reset, for the check of the next call.
+            if (std.debug.runtime_safety) c.released = true;
         }
 
         fn enter(c: *Self, io: Io) void {
+            // Before anything else: after its deinit the cursor points to
+            // nothing.
+            if (std.debug.runtime_safety) {
+                if (c.released) @panic("zefir-odm: a cursor used after its deinit: deinit a cursor once, after its last next");
+            }
             c.registry.checkUse(io);
             if (std.debug.runtime_safety) {
                 if (c.busy.swap(true, .acquire)) @panic("zefir-odm: a cursor used by two tasks at once: one task at a time calls next and deinit of a cursor");

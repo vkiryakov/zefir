@@ -115,9 +115,10 @@ provisioning: List = .{},
 /// The generations closed by force since `init`.
 forced: usize = 0,
 state: State = .running,
-/// The result of the shutdown, for a second call; set once `shut` is.
+/// The result of the shutdown, for a second call; set before `shut` is.
 shutdown_result: errors.ShutdownError!void = {},
-/// Set once the shutdown is done.
+/// Set once the shutdown is done, as the last thing it does: a call that
+/// waits for it may deinit the registry right after.
 shut: Io.Event = .unset,
 /// The operations of collections and their errors (`stats`).
 operations: std.atomic.Value(u64) = .init(0),
@@ -250,8 +251,8 @@ pub fn deinit(r: *Registry, io: Io) void {
     if (std.debug.runtime_safety and leases > 0) @panic("zefir-odm: Registry.deinit() with sessions or cursors left: deinit them first");
     switch (state) {
         .running => r.shutdown(io, .now(io, .awake)) catch {},
-        .stopping => r.shut.waitUncancelable(io),
-        .stopped => {},
+        // A shutdown sets `shut` once it no longer touches the registry.
+        .stopping, .stopped => r.shut.waitUncancelable(io),
     }
     // Every generation is closed. One still in the list holds leases, a
     // mistake of the program: its memory stays, a leak rather than a use
@@ -272,33 +273,33 @@ pub fn deinit(r: *Registry, io: Io) void {
 /// the other, all until the deadline, and close. When leases are left at
 /// the deadline, their generations are closed by force, their holders get
 /// `Closed`, the log a warning, and the result is `error.ShutdownTimeout`:
-/// tasks that held them are still alive. A second call waits for the first
-/// and returns its result. The task's cancelation waits until it returns.
+/// tasks that held them are still alive. The closes go one after the
+/// other, and a client closes the cursors that the server holds for it
+/// within a budget of the driver's own (zefir-mongo:
+/// `cursor_close_timeout`, 1 s by default): a forced shutdown may return
+/// that much past the deadline for each connection with such cursors. A
+/// second call waits for the first and returns its result. The task's
+/// cancelation waits until it returns.
 pub fn shutdown(r: *Registry, io: Io, deadline: Io.Clock.Timestamp) errors.ShutdownError!void {
     r.checkUse(io);
     const protection = io.swapCancelProtection(.blocked);
     defer _ = io.swapCancelProtection(protection);
     const until = deadline.toClock(io, .awake).raw;
     r.mutex.lockUncancelable(io);
-    switch (r.state) {
-        .running => {},
-        .stopping => {
-            r.mutex.unlock(io);
-            r.shut.waitUncancelable(io);
-            return r.shutdown_result;
-        },
-        .stopped => {
-            const result = r.shutdown_result;
-            r.mutex.unlock(io);
-            return result;
-        },
+    if (r.state != .running) {
+        // The first call sets `shut` once it no longer touches the registry.
+        r.mutex.unlock(io);
+        r.shut.waitUncancelable(io);
+        return r.shutdown_result;
     }
     r.state = .stopping;
     // The calls that wait for their turn look again, and stop.
     r.cond.broadcast(io);
     var pending: List = .{};
     var live: List = .{};
-    // Closed by force before, with holders left: their leases count too.
+    // Closed by force with holders left, before the shutdown or by the
+    // drain of another task during it: the leases left at the deadline
+    // count.
     var closed: List = .{};
     var it = r.generations.first;
     while (it) |node| : (it = node.next) {
@@ -310,6 +311,9 @@ pub fn shutdown(r: *Registry, io: Io, deadline: Io.Clock.Timestamp) errors.Shutd
             },
             .active, .draining => {
                 generation.beginRetire(io, g, .live);
+                // A pin of the shutdown's own besides, should the drain of
+                // another task close it by force first.
+                g.pins += 1;
                 live.append(&g.shutdown_node);
             },
             .closed => {
@@ -324,7 +328,21 @@ pub fn shutdown(r: *Registry, io: Io, deadline: Io.Clock.Timestamp) errors.Shutd
     while (pending.popFirst()) |node| _ = generation.finishRetire(r, io, Generation.ofShutdown(node), now, .pending);
     var left: usize = 0;
     while (live.popFirst()) |node| {
-        if (generation.finishRetire(r, io, Generation.ofShutdown(node), until, .live).forced) |n| left += n;
+        const g = Generation.ofShutdown(node);
+        const retired = generation.finishRetire(r, io, g, until, .live);
+        if (!retired.closer and retired.forced != null) {
+            // Another task closed it by force: its holders get Closed and
+            // give their leases back, which count only when left at the
+            // deadline.
+            closed.append(&g.shutdown_node);
+            continue;
+        }
+        if (retired.forced) |n| left += n;
+        r.mutex.lockUncancelable(io);
+        g.pins -= 1;
+        const free = generation.settle(r, g);
+        r.mutex.unlock(io);
+        if (free) generation.destroy(r, g);
     }
 
     var dead: List = .{};
@@ -339,13 +357,15 @@ pub fn shutdown(r: *Registry, io: Io, deadline: Io.Clock.Timestamp) errors.Shutd
         g.pins -= 1;
         if (generation.settle(r, g)) dead.append(&g.shutdown_node);
     }
+    const result: errors.ShutdownError!void = if (left > 0) error.ShutdownTimeout else {};
     r.state = .stopped;
-    r.shutdown_result = if (left > 0) error.ShutdownTimeout else {};
-    const result = r.shutdown_result;
-    r.shut.set(io);
+    r.shutdown_result = result;
     r.mutex.unlock(io);
     while (dead.popFirst()) |node| generation.destroy(r, Generation.ofShutdown(node));
     if (left > 0) Warning.log(.{ .shutdown_forced = .{ .leases = left } });
+    // The last touch of the registry: once `shut` is set, a second call
+    // returns, and its caller may deinit the registry.
+    r.shut.set(io);
     return result;
 }
 
@@ -442,7 +462,7 @@ fn ready(r: *Registry, io: Io, ctx: core.Context, id: []const u8, d: ?*Diagnosti
         .mine => |c| c,
     };
     c.busy = true;
-    return r.connectHeld(io, ctx, c, d, .keep);
+    return r.connectHeld(io, ctx, id, c, d, .keep);
 }
 
 /// What a failed connect does to its connection.
@@ -456,8 +476,10 @@ const OnFailure = enum {
 /// The connect of `c`, called under the lock, which it lets go, with the
 /// turn of `c` held (`busy`), which it ends. The current generation holds
 /// a lease for the call of the driver, made out of the lock. The driver's
-/// text of a failure goes to `last_failure`, the log and `d`.
-fn connectHeld(r: *Registry, io: Io, ctx: core.Context, c: *Connection, d: ?*Diagnostics, on_failure: OnFailure) Error!void {
+/// text of a failure goes to `last_failure`, the log and `d`. The log
+/// names `c` by `id`, the caller's: once the turn ends, a removal that
+/// waited for it may free `c`.
+fn connectHeld(r: *Registry, io: Io, ctx: core.Context, id: []const u8, c: *Connection, d: ?*Diagnostics, on_failure: OnFailure) Error!void {
     if (r.state != .running) {
         // The shutdown may have closed its generation already.
         c.busy = false;
@@ -503,7 +525,7 @@ fn connectHeld(r: *Registry, io: Io, ctx: core.Context, c: *Connection, d: ?*Dia
     if (free) generation.destroy(r, g);
     if (failed) |err| {
         if (d) |x| x.* = failure;
-        Warning.log(.{ .connect_failed = .{ .id = c.id, .err = err, .message = failure.message() } });
+        Warning.log(.{ .connect_failed = .{ .id = id, .err = err, .message = failure.message() } });
     } else if (result) |_| {} else |_| {
         // The shutdown came while it connected.
         if (d) |x| x.set(null, null, "odm: the registry is shutting down", .{});
@@ -519,9 +541,11 @@ fn connectHeld(r: *Registry, io: Io, ctx: core.Context, c: *Connection, d: ?*Dia
 /// `Options.drain_timeout` at the most, and closes it; leases left get
 /// `Closed`, and the log a warning. An active connection whose current
 /// settings are these has nothing to do: a repeat of the same event
-/// changes nothing. A registered or failed connection takes a fresh client
-/// even with the same settings. On a failure the current generation stays
-/// and the state does not change; `config.diagnostics`,
+/// changes nothing. The settings are judged in the call's turn, after the
+/// operation on the connection in progress, such as another replacement,
+/// which may change them. A registered or failed connection takes a fresh
+/// client even with the same settings. On a failure the current generation
+/// stays and the state does not change; `config.diagnostics`,
 /// `connectionStats(io, id).last_failure` and the log say why.
 pub fn replaceConnection(r: *Registry, io: Io, ctx: core.Context, id: []const u8, config: ConnectionConfig) Error!void {
     r.checkUse(io);
@@ -696,10 +720,11 @@ pub fn ping(r: *Registry, io: Io, ctx: core.Context, id: []const u8) Error!void 
 /// when it is not yet. A `.new` one with an unknown id is registered and
 /// connected; with a known id it is taken as it is when its settings are
 /// the same, and else `ProvisioningConflict`: `replaceConnection` changes
-/// them. Then the binding is published at once, whole: `tenant()` finds
-/// the old one or the new one, never a half. On a failure the old binding
-/// stays, and a new connection that this call made goes again; the
-/// driver's text or odm's is in `request.diagnostics`.
+/// them. The settings are judged after the operation on the connection in
+/// progress, if any. Then the binding is published at once, whole:
+/// `tenant()` finds the old one or the new one, never a half. On a failure
+/// the old binding stays, and a new connection that this call made goes
+/// again; the driver's text or odm's is in `request.diagnostics`.
 pub fn provisionTenant(r: *Registry, io: Io, ctx: core.Context, request: Provision) Error!void {
     r.checkUse(io);
     const d = request.diagnostics;
@@ -854,7 +879,7 @@ fn readyNew(r: *Registry, io: Io, ctx: core.Context, new: NewConnection, print: 
                 else => return err,
             };
             r.mutex.lockUncancelable(io);
-            return r.connectHeld(io, ctx, c, d, .remove);
+            return r.connectHeld(io, ctx, new.id, c, d, .remove);
         }
         const c = switch (r.awaitTurn(io, ctx, new.id, .{ .settings = print }, d) catch |err| {
             r.mutex.unlock(io);
@@ -872,7 +897,7 @@ fn readyNew(r: *Registry, io: Io, ctx: core.Context, new: NewConnection, print: 
             .mine => |c| c,
         };
         c.busy = true;
-        return r.connectHeld(io, ctx, c, d, .keep);
+        return r.connectHeld(io, ctx, new.id, c, d, .keep);
     }
 }
 
@@ -974,7 +999,8 @@ pub fn tenant(r: *Registry, io: Io, tenant_id: []const u8) Error!Session {
     return s;
 }
 
-/// A snapshot of the registry.
+/// A snapshot of the registry. Once `shutdown` begins, no connection is
+/// in service, so `connections` counts none but the removals in progress.
 pub fn stats(r: *Registry, io: Io) Stats {
     r.checkUse(io);
     r.mutex.lockUncancelable(io);
@@ -991,6 +1017,9 @@ pub fn stats(r: *Registry, io: Io) Stats {
     var it = r.connections.first;
     while (it) |node| : (it = node.next) {
         const c = Connection.of(node);
+        result.tenants += c.tenants;
+        // The records keep the states they had when the shutdown began.
+        if (r.state != .running) continue;
         switch (c.state) {
             .registered => result.connections.registered += 1,
             .connecting => result.connections.connecting += 1,
@@ -999,7 +1028,6 @@ pub fn stats(r: *Registry, io: Io) Stats {
             // Out of the list: counted in `removing`.
             .removing => {},
         }
-        result.tenants += c.tenants;
     }
     var gens = r.generations.first;
     while (gens) |node| : (gens = node.next) {
@@ -1095,8 +1123,10 @@ fn awaitTurn(r: *Registry, io: Io, ctx: core.Context, id: []const u8, skip: Skip
         switch (skip) {
             .never => {},
             .active => if (c.state == .active) return .done,
-            .same => |print| if (c.state == .active and fingerprint.eql(print, &c.fingerprint)) return .done,
-            .settings => |print| {
+            // The settings are judged once no operation holds the
+            // connection: a replacement in progress publishes others.
+            .same => |print| if (!c.busy and c.state == .active and fingerprint.eql(print, &c.fingerprint)) return .done,
+            .settings => |print| if (!c.busy) {
                 if (!fingerprint.eql(print, &c.fingerprint)) return fail(d, error.ProvisioningConflict, "odm: connection {s} exists with other settings: change them with replaceConnection", .{id});
                 if (c.state == .active) return .done;
             },

@@ -12,6 +12,8 @@ const Registry = odm.Registry;
 const Warning = @import("../registry/connection.zig").Warning;
 const support = @import("support.zig");
 const Outcome = support.Outcome;
+const Canceled = support.Canceled;
+const Journaled = support.Journaled;
 const eventually = support.eventually;
 
 fn registerTask(o: *Outcome, r: *Registry, io: Io, id: []const u8, uri: []const u8) void {
@@ -329,6 +331,13 @@ fn removing(r: *Registry, io: Io) bool {
     return r.stats(io).connections.removing == 1;
 }
 
+/// A count of clients that the fake must have opened.
+const Opened = struct { fake: *FakeDriver, n: usize };
+
+fn isOpened(e: Opened, io: Io) bool {
+    return e.fake.counts(io).opened >= e.n;
+}
+
 test "replace" {
     const io = testing.io;
     var fake: FakeDriver = .init(testing.allocator);
@@ -401,6 +410,37 @@ test "the same settings again change nothing" {
     // No password is not the empty one.
     try registry.replaceConnection(io, .root, "shared-1", .{ .uri = "fake://b", .password = "" });
     try testing.expectEqual(@as(u64, 3), (try registry.connectionStats(io, "shared-1")).generation);
+}
+
+test "a replacement judges its settings after the one in progress" {
+    const io = testing.io;
+    var fake: FakeDriver = .init(testing.allocator);
+    defer fake.deinit();
+    var registry: Registry = .init(testing.allocator, io, fake.driver(), .{});
+    defer registry.deinit(io);
+
+    try fake.plan("fake://b", .{ .connect_delay = .fromMilliseconds(500) });
+    try registry.registerConnection(io, "x", .{ .uri = "fake://a" });
+    try registry.connect(io, .root, "x");
+    var group: Io.Group = .init;
+    defer group.cancel(io);
+    var replace: Outcome = .{};
+    try group.concurrent(io, replaceTask, .{ &replace, &registry, io, "x", "fake://b" });
+    // The replacement holds the turn once it has opened its client.
+    try eventually(io, Opened{ .fake = &fake, .n = 2 }, isOpened);
+    // The settings that the connection has now: the replacement in
+    // progress publishes others, so this one comes after it and puts them
+    // back.
+    try registry.replaceConnection(io, .root, "x", .{ .uri = "fake://a" });
+    try try replace.wait(io);
+    try testing.expectEqual(@as(u64, 3), (try registry.connectionStats(io, "x")).generation);
+    const counts = fake.counts(io);
+    try testing.expectEqual(@as(usize, 3), counts.opened);
+    try testing.expectEqual(@as(usize, 2), counts.freed);
+    // The current settings are those of the later call.
+    try registry.ping(io, .root, "x");
+    const journal = fake.journal(io);
+    try testing.expectEqualStrings("fake://a", journal[journal.len - 1].uri);
 }
 
 test "registered and failed take a fresh client even with the same settings" {
@@ -653,6 +693,8 @@ test "shutdown" {
         try testing.expectEqual(@as(usize, 0), s.forced);
         try testing.expectEqual(@as(usize, 0), s.leases);
         try testing.expectEqual(@as(usize, 0), s.draining);
+        // No connection is in service any more.
+        try testing.expectEqual(Registry.Stats.Connections{ .registered = 0, .connecting = 0, .active = 0, .failed = 0, .removing = 0 }, s.connections);
 
         var d: odm.Diagnostics = .{};
         try testing.expectError(error.ShuttingDown, registry.registerConnection(io, "new", .{ .uri = "fake://c", .diagnostics = &d }));
@@ -752,6 +794,242 @@ test "a lease past the deadline of shutdown is closed by force" {
         try testing.expectEqual(@as(usize, 0), s.leases);
         try testing.expectEqual(@as(usize, 0), s.draining);
         try testing.expectError(error.ShutdownTimeout, registry.shutdown(io, .now(io, .awake)));
+    }
+    const counts = fake.counts(io);
+    try testing.expectEqual(counts.opened, counts.freed);
+}
+
+test "a shutdown counts the leases left at its deadline of a generation that a drain closed by force meanwhile" {
+    const io = testing.io;
+    var fake: FakeDriver = .init(testing.allocator);
+    defer fake.deinit();
+    const level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = level;
+    {
+        var registry: Registry = .init(testing.allocator, io, fake.driver(), .{ .drain_timeout = .fromSeconds(1) });
+        defer registry.deinit(io);
+        var gate: FakeDriver.Gate = .{};
+        try fake.plan("fake://a", .{ .gate = &gate });
+        try registry.registerConnection(io, "shared-1", .{ .uri = "fake://a" });
+        try registry.connect(io, .root, "shared-1");
+        var group: Io.Group = .init;
+        defer group.cancel(io);
+        defer gate.open(io);
+        var ping: Outcome = .{};
+        try group.concurrent(io, pingTask, .{ &ping, &registry, io, "shared-1" });
+        try gate.waitFor(io, 1);
+        var replace: Outcome = .{};
+        try group.concurrent(io, replaceTask, .{ &replace, &registry, io, "shared-1", "fake://b" });
+        try eventually(io, Published{ .r = &registry, .id = "shared-1", .generation = 2, .draining = 1 }, isPublished);
+        // The shutdown takes the old generation while the replacement
+        // drains it, and the drain runs out first: the replacement closes
+        // it by force, with the ping's lease left.
+        var stop: Outcome = .{};
+        try group.concurrent(io, shutdownTask, .{ &stop, &registry, io, Io.Duration.fromSeconds(10) });
+        try testing.expectError(error.Closed, try ping.wait(io));
+        try try replace.wait(io);
+        // The ping gave its lease back long before the deadline of the
+        // shutdown: none was left then.
+        try try stop.wait(io);
+        const s = registry.stats(io);
+        try testing.expectEqual(@as(usize, 1), s.forced);
+        try testing.expectEqual(@as(usize, 0), s.leases);
+    }
+    const counts = fake.counts(io);
+    try testing.expectEqual(@as(usize, 2), counts.opened);
+    try testing.expectEqual(counts.opened, counts.freed);
+}
+
+fn replaceCanceled(c: *Canceled, r: *Registry, io: Io, id: []const u8, uri: []const u8) void {
+    c.set(io, r.replaceConnection(io, .root, id, .{ .uri = uri }));
+}
+
+fn removeCanceled(c: *Canceled, r: *Registry, io: Io, id: []const u8) void {
+    c.set(io, r.removeConnection(io, id));
+}
+
+fn shutdownCanceled(c: *Canceled, r: *Registry, io: Io, budget: Io.Duration) void {
+    c.set(io, r.shutdown(io, .fromNow(io, .{ .raw = budget, .clock = .awake })));
+}
+
+fn stopping(r: *Registry, io: Io) bool {
+    _ = r.connectionStats(io, "held") catch |err| return err == error.ShuttingDown;
+    return false;
+}
+
+test "a replacement canceled in its drain drains to the end, and its task gets the cancelation after it" {
+    const io = testing.io;
+    var fake: FakeDriver = .init(testing.allocator);
+    defer fake.deinit();
+    const level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = level;
+    var registry: Registry = .init(testing.allocator, io, fake.driver(), .{ .drain_timeout = .fromMilliseconds(500) });
+    defer registry.deinit(io);
+    var gate: FakeDriver.Gate = .{};
+    try fake.plan("fake://a", .{ .gate = &gate });
+    try registry.registerConnection(io, "shared-1", .{ .uri = "fake://a" });
+    try registry.connect(io, .root, "shared-1");
+    {
+        var group: Io.Group = .init;
+        defer group.cancel(io);
+        defer gate.open(io);
+        var ping: Outcome = .{};
+        try group.concurrent(io, pingTask, .{ &ping, &registry, io, "shared-1" });
+        try gate.waitFor(io, 1);
+        var replace: Canceled = .{};
+        var task = try io.concurrent(replaceCanceled, .{ &replace, &registry, io, "shared-1", "fake://b" });
+        defer task.cancel(io);
+        try eventually(io, Published{ .r = &registry, .id = "shared-1", .generation = 2, .draining = 1 }, isPublished);
+        // The cancelation waits until the drain runs out and closes the old
+        // generation by force.
+        task.cancel(io);
+        try replace.result;
+        try testing.expect(replace.after);
+        try testing.expectError(error.Closed, try ping.wait(io));
+    }
+    const s = registry.stats(io);
+    try testing.expectEqual(@as(usize, 1), s.forced);
+    try testing.expectEqual(@as(usize, 0), s.leases);
+    try testing.expectEqual(@as(u64, 2), (try registry.connectionStats(io, "shared-1")).generation);
+    try eventually(io, Freed{ .fake = &fake, .n = 1 }, isFreed);
+    const counts = fake.counts(io);
+    try testing.expectEqual(@as(usize, 1), counts.closed);
+    try testing.expectEqual(@as(usize, 1), counts.close_calls);
+}
+
+test "a replacement canceled in the connect of its client rolls back, and its task stays canceled" {
+    const io = testing.io;
+    var fake: FakeDriver = .init(testing.allocator);
+    defer fake.deinit();
+    const level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = level;
+    var registry: Registry = .init(testing.allocator, io, fake.driver(), .{});
+    defer registry.deinit(io);
+    // Only the cancelation ends this connect.
+    try fake.plan("fake://b", .{ .connect_delay = .fromSeconds(60) });
+    try registry.registerConnection(io, "shared-1", .{ .uri = "fake://a" });
+    try registry.connect(io, .root, "shared-1");
+    const mark = fake.journal(io).len;
+    {
+        var replace: Canceled = .{};
+        var task = try io.concurrent(replaceCanceled, .{ &replace, &registry, io, "shared-1", "fake://b" });
+        defer task.cancel(io);
+        // The connect of the new client is out.
+        try eventually(io, Journaled{ .fake = &fake, .n = mark + 1 }, support.isJournaled);
+        task.cancel(io);
+        try testing.expectError(error.Cancelled, replace.result);
+        try testing.expect(replace.after);
+    }
+    // The new generation went; the current one serves on.
+    const s = try registry.connectionStats(io, "shared-1");
+    try testing.expectEqual(odm.ConnectionState.active, s.state);
+    try testing.expectEqual(@as(u64, 1), s.generation);
+    try testing.expectEqual(@as(usize, 0), s.draining);
+    try testing.expectEqual(odm.DriverError.Cancelled, s.last_failure.?.err);
+    const counts = fake.counts(io);
+    try testing.expectEqual(@as(usize, 2), counts.opened);
+    try testing.expectEqual(@as(usize, 1), counts.closed);
+    try testing.expectEqual(@as(usize, 1), counts.freed);
+    try registry.ping(io, .root, "shared-1");
+    const journal = fake.journal(io);
+    try testing.expectEqualStrings("fake://a", journal[journal.len - 1].uri);
+}
+
+/// Opens `gate` a little later, in a task of its own.
+fn openLater(gate: *FakeDriver.Gate, io: Io) void {
+    io.sleep(.fromMilliseconds(100), .awake) catch {};
+    gate.open(io);
+}
+
+test "a removal canceled in its drain removes to the end, and its task gets the cancelation after it" {
+    const io = testing.io;
+    var fake: FakeDriver = .init(testing.allocator);
+    defer fake.deinit();
+    // The removal frees its record after the drain, in its canceled task.
+    // On macOS std drops a cancelation that comes during the stack trace
+    // that std.testing.allocator takes at a free, so the registry's memory
+    // comes from an allocator that takes none.
+    var gpa: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{ .stack_trace_frames = 0 });
+    {
+        var registry: Registry = .init(gpa.allocator(), io, fake.driver(), .{});
+        defer registry.deinit(io);
+        var gate: FakeDriver.Gate = .{};
+        try fake.plan("fake://held", .{ .gate = &gate });
+        try registry.registerConnection(io, "held", .{ .uri = "fake://held" });
+        try registry.connect(io, .root, "held");
+        {
+            var group: Io.Group = .init;
+            defer group.cancel(io);
+            defer gate.open(io);
+            var ping: Outcome = .{};
+            try group.concurrent(io, pingTask, .{ &ping, &registry, io, "held" });
+            try gate.waitFor(io, 1);
+            var remove: Canceled = .{};
+            var task = try io.concurrent(removeCanceled, .{ &remove, &registry, io, "held" });
+            defer task.cancel(io);
+            try eventually(io, &registry, removing);
+            // The ping returns once the gate opens, and the drain ends then.
+            try group.concurrent(io, openLater, .{ &gate, io });
+            // The cancelation waits for the drain.
+            task.cancel(io);
+            try remove.result;
+            try testing.expect(remove.after);
+            try try ping.wait(io);
+        }
+        try testing.expectError(error.ConnectionNotFound, registry.connectionStats(io, "held"));
+        const s = registry.stats(io);
+        try testing.expectEqual(@as(usize, 0), s.connections.removing);
+        try testing.expectEqual(@as(usize, 0), s.forced);
+        try testing.expectEqual(@as(usize, 0), s.leases);
+        const counts = fake.counts(io);
+        try testing.expectEqual(@as(usize, 1), counts.closed);
+        try testing.expectEqual(@as(usize, 1), counts.freed);
+        // The id is free again: the record went.
+        try registry.registerConnection(io, "held", .{ .uri = "fake://held" });
+    }
+    try testing.expectEqual(@as(usize, 0), gpa.deinit());
+}
+
+test "a shutdown in a canceled task goes to its end, and a second one returns its result" {
+    const io = testing.io;
+    var fake: FakeDriver = .init(testing.allocator);
+    defer fake.deinit();
+    const level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = level;
+    {
+        var registry: Registry = .init(testing.allocator, io, fake.driver(), .{});
+        defer registry.deinit(io);
+        var gate: FakeDriver.Gate = .{};
+        try fake.plan("fake://held", .{ .gate = &gate });
+        try registry.registerConnection(io, "held", .{ .uri = "fake://held" });
+        try registry.connect(io, .root, "held");
+        try registry.registerConnection(io, "idle", .{ .uri = "fake://idle" });
+        var group: Io.Group = .init;
+        defer group.cancel(io);
+        defer gate.open(io);
+        var ping: Outcome = .{};
+        try group.concurrent(io, pingTask, .{ &ping, &registry, io, "held" });
+        try gate.waitFor(io, 1);
+        var stop: Canceled = .{};
+        var task = try io.concurrent(shutdownCanceled, .{ &stop, &registry, io, Io.Duration.fromMilliseconds(500) });
+        defer task.cancel(io);
+        try eventually(io, &registry, stopping);
+        // The cancelation waits until the deadline closes the held
+        // generation by force.
+        task.cancel(io);
+        try testing.expectError(error.ShutdownTimeout, stop.result);
+        try testing.expect(stop.after);
+        try testing.expectError(error.Closed, try ping.wait(io));
+        try testing.expectError(error.ShutdownTimeout, registry.shutdown(io, .now(io, .awake)));
+        // Every client is closed.
+        const counts = fake.counts(io);
+        try testing.expectEqual(@as(usize, 2), counts.opened);
+        try testing.expectEqual(@as(usize, 2), counts.closed);
+        try testing.expectEqual(@as(usize, 1), registry.stats(io).forced);
     }
     const counts = fake.counts(io);
     try testing.expectEqual(counts.opened, counts.freed);

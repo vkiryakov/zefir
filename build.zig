@@ -531,11 +531,12 @@ pub fn build(b: *std.Build) void {
     // odm panic programs: a registry moved after its first
     // registerConnection(), a call on another std.Io, Registry.deinit()
     // with sessions left, a session or a cursor that two tasks call at once,
-    // and a collection used after the deinit of its session panic in safe
-    // builds. Each program must print the panic message and end in its own
-    // panic handler, which exits with code 3 instead of aborting. They get
-    // their own Debug copies of odm and the modules it imports, made above
-    // for the mongo programs, whatever -Doptimize says.
+    // a collection used after the deinit of its session, and a second
+    // deinit of a session or of a cursor panic in safe builds. Each program
+    // must print the panic message and end in its own panic handler, which
+    // exits with code 3 instead of aborting. They get their own Debug
+    // copies of odm and the modules it imports, made above for the mongo
+    // programs, whatever -Doptimize says.
     for ([_][2][]const u8{
         .{ "moved_registry", "panic: zefir-odm: Registry moved after its first registerConnection(): keep it where it was" },
         .{ "another_io", "panic: zefir-odm: a call on another std.Io than the registry's: pass the io of Registry.init" },
@@ -543,6 +544,8 @@ pub fn build(b: *std.Build) void {
         .{ "session_two_tasks", "panic: zefir-odm: a session used by two tasks at once: take a session for each task" },
         .{ "collection_after_deinit", "panic: zefir-odm: a collection used after the deinit of its session" },
         .{ "cursor_two_tasks", "panic: zefir-odm: a cursor used by two tasks at once: one task at a time calls next and deinit of a cursor" },
+        .{ "session_deinit_twice", "panic: zefir-odm: Session.deinit() twice: deinit a session once" },
+        .{ "cursor_deinit_twice", "panic: zefir-odm: a cursor used after its deinit: deinit a cursor once, after its last next" },
     }) |case| {
         const exe = b.addExecutable(.{
             .name = b.fmt("odm-panic-{s}", .{case[0]}),
@@ -560,6 +563,30 @@ pub fn build(b: *std.Build) void {
         // expectStdErrMatch accepts any exit: only the panic handler exits
         // with 3, so a program that printed the text and returned fails.
         run.expectExitCode(3);
+        test_odm.dependOn(&run.step);
+    }
+
+    // odm race programs: orders of events in the registry that a test
+    // cannot hold still under the test runner, each in a process of its
+    // own with a log function or a driver that holds it still: a connect
+    // that fails while a removal waits for its turn, and a deinit right
+    // after a second shutdown. Each exits with 0, with 1 when the registry
+    // went wrong, and with 3 on a panic. Debug builds with the Debug copy
+    // of odm made above, whatever -Doptimize says.
+    for ([_][]const u8{ "connect_failed_remove", "shutdown_twice" }) |name| {
+        const exe = b.addExecutable(.{
+            .name = b.fmt("odm-race-{s}", .{name}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(b.fmt("src/odm/testdata/race/{s}.zig", .{name})),
+                .target = target,
+                .optimize = .Debug,
+                .imports = &.{
+                    .{ .name = "odm", .module = panic_odm },
+                },
+            }),
+        });
+        const run = b.addRunArtifact(exe);
+        run.expectExitCode(0);
         test_odm.dependOn(&run.step);
     }
 

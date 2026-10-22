@@ -443,6 +443,103 @@ test "a new connection with a known id" {
     try testing.expectEqual(odm.ConnectionState.failed, (try registry.connectionStats(io, "locked")).state);
 }
 
+/// A count of clients that the fake must have opened.
+const Opened = struct { fake: *FakeDriver, n: usize };
+
+fn isOpened(e: Opened, io: Io) bool {
+    return e.fake.counts(io).opened >= e.n;
+}
+
+test "a .new waits for the replacement of its connection in progress, then finds its settings" {
+    const io = testing.io;
+    var fake: FakeDriver = .init(testing.allocator);
+    defer fake.deinit();
+    var registry: Registry = .init(testing.allocator, io, fake.driver(), .{});
+    defer registry.deinit(io);
+
+    const before: odm.NewConnection = .{ .id = "big-1", .uri = "fake://big", .password = "a" };
+    try registry.provisionTenant(io, .root, .{ .tenant = "big", .connection = .{ .new = before }, .database = "big", .version = 1 });
+    // The connection moves to a new password, and its new client takes a
+    // while to connect.
+    try fake.plan("fake://big", .{ .connect_delay = .fromMilliseconds(500) });
+    var group: Io.Group = .init;
+    defer group.cancel(io);
+    var replace: Outcome = .{};
+    try group.concurrent(io, replaceTaskWith, .{ &replace, &registry, io, "big-1", odm.ConnectionConfig{ .uri = "fake://big", .password = "b" } });
+    // The replacement holds the turn once it has opened its client.
+    try eventually(io, Opened{ .fake = &fake, .n = 2 }, isOpened);
+    // The event of the tenant that brings the same change: its settings
+    // are those of the replacement, which the connection has once it is
+    // done.
+    var after = before;
+    after.password = "b";
+    try registry.provisionTenant(io, .root, .{ .tenant = "big", .connection = .{ .new = after }, .database = "big_v2", .version = 2 });
+    try try replace.wait(io);
+    try expectDatabase(&registry, io, "big", "big_v2");
+    const s = try registry.connectionStats(io, "big-1");
+    try testing.expectEqual(@as(u64, 2), s.generation);
+    try testing.expectEqual(@as(usize, 1), s.tenants);
+    try testing.expectEqual(@as(usize, 2), fake.counts(io).opened);
+}
+
+fn replaceTaskWith(o: *Outcome, r: *Registry, io: Io, id: []const u8, config: odm.ConnectionConfig) void {
+    o.set(r.replaceConnection(io, .root, id, config));
+}
+
+fn provisionCanceled(c: *support.Canceled, r: *Registry, io: Io, request: odm.Provision) void {
+    c.set(io, r.provisionTenant(io, .root, request));
+}
+
+test "a .new canceled in its connect rolls back: no connection, no tenant" {
+    const io = testing.io;
+    var fake: FakeDriver = .init(testing.allocator);
+    defer fake.deinit();
+    const level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = level;
+    // The rollback frees the connection and the binding in the canceled
+    // task. On macOS std drops a cancelation that comes during the stack
+    // trace that std.testing.allocator takes at a free, so the registry's
+    // memory comes from an allocator that takes none.
+    var gpa: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{ .stack_trace_frames = 0 });
+    {
+        var registry: Registry = .init(gpa.allocator(), io, fake.driver(), .{});
+        defer registry.deinit(io);
+        // Only the cancelation ends this connect.
+        try fake.plan("fake://big", .{ .connect_delay = .fromSeconds(60) });
+        {
+            var provision: support.Canceled = .{};
+            var task = try io.concurrent(provisionCanceled, .{ &provision, &registry, io, odm.Provision{
+                .tenant = "big",
+                .connection = .{ .new = .{ .id = "big-1", .uri = "fake://big" } },
+                .database = "big",
+                .version = 1,
+            } });
+            defer task.cancel(io);
+            // The connect of the new client is out.
+            try eventually(io, support.Journaled{ .fake = &fake, .n = 1 }, support.isJournaled);
+            task.cancel(io);
+            try testing.expectError(error.Cancelled, provision.result);
+            try testing.expect(provision.after);
+        }
+        try testing.expectError(error.ConnectionNotFound, registry.connectionStats(io, "big-1"));
+        try testing.expectError(error.TenantNotFound, registry.tenant(io, "big"));
+        const counts = fake.counts(io);
+        try testing.expectEqual(@as(usize, 1), counts.opened);
+        try testing.expectEqual(@as(usize, 1), counts.closed);
+        try testing.expectEqual(@as(usize, 1), counts.freed);
+        const s = registry.stats(io);
+        try testing.expectEqual(Registry.Stats.Connections{ .registered = 0, .connecting = 0, .active = 0, .failed = 0, .removing = 0 }, s.connections);
+        try testing.expectEqual(@as(usize, 0), s.tenants);
+        try testing.expectEqual(@as(usize, 0), s.leases);
+        // The tenant's queue is free: the same event again goes through.
+        try fake.plan("fake://big", .{});
+        try registry.provisionTenant(io, .root, .{ .tenant = "big", .connection = .{ .new = .{ .id = "big-1", .uri = "fake://big" } }, .database = "big", .version = 1 });
+        try expectDatabase(&registry, io, "big", "big");
+    }
+    try testing.expectEqual(@as(usize, 0), gpa.deinit());
+}
+
 test "remove connection with a tenant bound" {
     const io = testing.io;
     var fake: FakeDriver = .init(testing.allocator);
