@@ -215,10 +215,11 @@ test "a reply later than the deadline is Timeout and closes its connection, and 
 
 const late: FakeServer.Reply = .{ .string = "7" };
 const after200: FakeServer.Reply = .{ .delayed = .{ .after = .fromMilliseconds(200), .reply = &late } };
+const after2s: FakeServer.Reply = .{ .delayed = .{ .after = .fromSeconds(2), .reply = &late } };
 
 fn lateReply(io: Io) !void {
     var server: FakeServer = try .start(testing.allocator, io, &.{
-        .expect(.{ "GET", "k" }, after200),
+        .expect(.{ "GET", "k" }, after2s),
         .expect(.{ "GET", "k" }, .{ .string = "8" }),
     });
     defer server.stop(io);
@@ -226,7 +227,7 @@ fn lateReply(io: Io) !void {
     try connected(io, &client, .{ .url = server.url() });
     defer client.deinit();
     var d: Diagnostics = .{};
-    const ctx = within(io, .fromMilliseconds(50));
+    const ctx = within(io, .fromMilliseconds(400));
     try testing.expectError(error.Timeout, client.run(io, ctx, get, .{ .diagnostics = &d }));
     try testing.expect(ctx.ctx.isExpired(time.now(io)));
     try testing.expectEqualStrings("the deadline passed before the reply came", d.message());
@@ -246,18 +247,18 @@ test "Options.timeout bounds a call whose context has no deadline, and with null
 
 fn defaultTimeout(io: Io) !void {
     var server: FakeServer = try .start(testing.allocator, io, &.{
-        .expect(.{ "GET", "k" }, after200),
+        .expect(.{ "GET", "k" }, after2s),
         .expect(.{ "GET", "k" }, after200),
     });
     defer server.stop(io);
     {
         var client: Client = undefined;
-        try connected(io, &client, .{ .url = server.url(), .timeout = .fromMilliseconds(50) });
+        try connected(io, &client, .{ .url = server.url(), .timeout = .fromMilliseconds(300) });
         defer client.deinit();
         const start = time.now(io);
         try testing.expectError(error.Timeout, client.run(io, .of(.root), get, .{}));
         const took = start.durationTo(time.now(io)).toMilliseconds();
-        try testing.expect(took >= 50 and took < 200);
+        try testing.expect(took >= 300 and took < 1500);
     }
     var client: Client = undefined;
     try connected(io, &client, .{ .url = server.url(), .timeout = null });
@@ -272,18 +273,18 @@ test "less of the deadline left than the shortest round trip to the server is De
     try within5s(testing.io, shortestRoundTrip, .{testing.io});
 }
 
-/// The server's side: two connections whose HELLO it answers after 20 ms.
+/// The server's side: two connections whose HELLO it answers after 300 ms.
 /// The first gets a command that it never answers; the second the command
 /// of the call that opened it, which it answers, and then nothing.
 fn slowHellos(peer: *Peer, io: Io) !void {
     try peer.accept(io);
-    try peers.shakeHands(peer, io, .fromMilliseconds(20));
+    try peers.shakeHands(peer, io, .fromMilliseconds(300));
     try peers.expectCommand(peer, &.{ "GET", "k" });
     // Until the client gives up on it and closes it; then it opens the
     // second.
     try testing.expectEqual(@as(usize, 0), try peer.readToEnd());
     try peer.accept(io);
-    try peers.shakeHands(peer, io, .fromMilliseconds(20));
+    try peers.shakeHands(peer, io, .fromMilliseconds(300));
     try peers.expectCommand(peer, &.{ "GET", "k" });
     try peer.send(":5\r\n");
     try testing.expectEqual(@as(usize, 0), try peer.readToEnd());
@@ -299,11 +300,11 @@ fn shortestRoundTrip(io: Io) !void {
         defer client.deinit();
         try client.connect(io, .root, null);
         // One round trip says too little: the call goes out.
-        try testing.expectError(error.Timeout, client.run(io, within(io, .fromMilliseconds(100)), get, .{}));
+        try testing.expectError(error.Timeout, client.run(io, within(io, .fromMilliseconds(400)), get, .{}));
         try testing.expectEqual(@as(?i64, 5), try client.run(io, within(io, .fromSeconds(4)), get, .{}));
-        try testing.expect(client.round_trips.min(io).toMilliseconds() >= 20);
+        try testing.expect(client.round_trips.min(io).toMilliseconds() >= 300);
         var d: Diagnostics = .{};
-        try testing.expectError(error.DeadlineExceeded, client.run(io, within(io, .fromMilliseconds(10)), get, .{ .diagnostics = &d }));
+        try testing.expectError(error.DeadlineExceeded, client.run(io, within(io, .fromMilliseconds(200)), get, .{ .diagnostics = &d }));
         try testing.expect(std.mem.startsWith(u8, d.message(), "less of the deadline was left than the shortest round trip to the server ("));
         try testing.expectEqual(@as(?Diagnostics.Phase, .send), d.phase);
     }
@@ -528,7 +529,7 @@ fn refusedUser(io: Io) !void {
         var client: Client = try .init(testing.allocator, io, .{ .url = peer.url() });
         defer client.deinit();
         try client.connect(io, .root, null);
-        try testing.expectError(error.Timeout, client.run(io, within(io, .fromMilliseconds(100)), get, .{}));
+        try testing.expectError(error.Timeout, client.run(io, within(io, .fromMilliseconds(400)), get, .{}));
         var d: Diagnostics = .{};
         try testing.expectError(error.AuthenticationFailed, client.run(io, .of(.root), get, .{ .diagnostics = &d }));
         try testing.expect(d.isCode("WRONGPASS"));

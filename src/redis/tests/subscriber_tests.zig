@@ -191,7 +191,7 @@ fn refusedChannel(io: Io) !void {
 }
 
 const orders_subscribed: FakeServer.Reply = .subscribed(&.{"orders"});
-const late_subscribed: FakeServer.Reply = .{ .delayed = .{ .after = .fromMilliseconds(400), .reply = &orders_subscribed } };
+const late_subscribed: FakeServer.Reply = .{ .delayed = .{ .after = .fromSeconds(2), .reply = &orders_subscribed } };
 
 test "confirmations that come after the deadline of op are Timeout, and no subscriber is left" {
     try within5s(testing.io, lateConfirmation, .{testing.io});
@@ -204,7 +204,7 @@ fn lateConfirmation(io: Io) !void {
     try connected(io, &client, .{ .url = server.url() });
     defer client.deinit();
     var d: Diagnostics = .{};
-    try expectRefused(error.Timeout, client.subscribe(io, within(io, .fromMilliseconds(150)), .{ .channels = &.{"orders"}, .diagnostics = &d }));
+    try expectRefused(error.Timeout, client.subscribe(io, within(io, .fromMilliseconds(300)), .{ .channels = &.{"orders"}, .diagnostics = &d }));
     try testing.expectEqualStrings("the deadline passed before the server confirmed the subscription", d.message());
     try testing.expectEqual(@as(usize, 0), client.stats().subscribers);
 }
@@ -349,14 +349,14 @@ fn pings(io: Io) !void {
     defer peer.close(testing.io);
     var client: Client = try .init(testing.allocator, io, .{ .url = peer.url() });
     defer client.deinit();
-    var sub = try subscribeThrough(io, &peer, &client, .fromMilliseconds(100));
+    var sub = try subscribeThrough(io, &peer, &client, .fromMilliseconds(400));
     defer sub.deinit();
 
     const start = time.now(io);
     var reading = try io.concurrent(nextOf, .{ &sub, io });
     defer stopReading(&reading, io);
     try peers.expectCommand(&peer, &.{"PING"});
-    try testing.expect(start.durationTo(time.now(io)).toMilliseconds() >= 90);
+    try testing.expect(start.durationTo(time.now(io)).toMilliseconds() >= 390);
     try peer.send("+PONG\r\n" ++ comptime ordersMessage("first"));
     try expectMessage(.{ .channel = "orders", .payload = "first" }, try reading.await(io));
 

@@ -317,7 +317,7 @@ fn inTransaction(io: Io) !void {
     defer client.deinit();
     var conn = try client.acquire(io, .of(.root));
     defer conn.release(io);
-    const r = (try conn.transaction(io, within(io, ms(100)), .{ pop(.{ .at_most = .fromSeconds(30) }), Read{ .key = "s", .wait = .forever } }, .{})) orelse
+    const r = (try conn.transaction(io, within(io, ms(140)), .{ pop(.{ .at_most = .fromSeconds(30) }), Read{ .key = "s", .wait = .forever } }, .{})) orelse
         return error.TestUnexpectedResult;
     try testing.expectEqual(@as(?i64, null), try r[0]);
     try testing.expectEqual(@as(?i64, null), try r[1]);

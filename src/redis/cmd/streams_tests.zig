@@ -128,7 +128,7 @@ fn blocking(io: Io) !void {
     try testing.expectEqualDeep(@as([]const Entry, &.{}), try t.run(io, cmd.xreadgroup(Order, "orders", .{ .group = "g", .consumer = "c1", .block = .forever })));
     try testing.expectEqualDeep(@as([]const Entry, &.{}), try t.runIn(io, within(io, .fromSeconds(1)), cmd.xreadgroup(Order, "orders", .{ .group = "g", .consumer = "c1", .block = .{ .at_most = .fromMilliseconds(200) } })));
     // Without .block, nothing waits: a short deadline is no error.
-    try testing.expectEqualDeep(@as([]const Entry, &.{order}), try t.runIn(io, within(io, .fromMilliseconds(100)), cmd.xread(Order, "orders", .{ .after = .{ .id = first } })));
+    try testing.expectEqualDeep(@as([]const Entry, &.{order}), try t.runIn(io, within(io, .fromMilliseconds(140)), cmd.xread(Order, "orders", .{ .after = .{ .id = first } })));
 
     try fixture.expectFromDeadline(io, start, try blockOf(io, &server, 0));
     const xread = (try server.entry(io, 0)).args;

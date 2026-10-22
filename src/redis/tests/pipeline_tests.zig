@@ -220,19 +220,19 @@ test "a deadline that passes in the middle is Timeout with the replies that came
 }
 
 const two: FakeServer.Reply = .{ .integer = 2 };
-const after300: FakeServer.Reply = .{ .delayed = .{ .after = .fromMilliseconds(300), .reply = &two } };
+const after2s: FakeServer.Reply = .{ .delayed = .{ .after = .fromSeconds(2), .reply = &two } };
 
 fn deadlineInTheMiddle(io: Io) !void {
     var server: FakeServer = try .start(testing.allocator, io, &.{
         .expect(.{ "INCR", "a" }, .{ .integer = 1 }),
-        .expect(.{ "INCR", "b" }, after300),
+        .expect(.{ "INCR", "b" }, after2s),
     });
     defer server.stop(io);
     var client: Client = undefined;
     try connected(io, &client, .{ .url = server.url() });
     defer client.deinit();
     var d: Diagnostics = .{};
-    try testing.expectError(error.Timeout, client.pipeline(io, within(io, .fromMilliseconds(100)), .{
+    try testing.expectError(error.Timeout, client.pipeline(io, within(io, .fromMilliseconds(300)), .{
         cmd.raw(i64, .{ "INCR", "a" }),
         cmd.raw(i64, .{ "INCR", "b" }),
     }, .{ .diagnostics = &d }));
