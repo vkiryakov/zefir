@@ -19,6 +19,13 @@
 //! holds the driver's text, the log a warning, and `connect` may come
 //! again.
 //!
+//! `replaceConnection` opens a new generation with new settings, connects
+//! it and publishes it at once; then it waits, in the caller's task, until
+//! the leases of the old one come back, for `Options.drain_timeout` at the
+//! most, and closes it. The same settings again do nothing. Leases left
+//! after the drain get `Closed`, and their memory stays until they are
+//! given back. `removeConnection` drains and closes the same way.
+//!
 //! The registry has no tasks of its own. It keeps one `std.Io.Mutex` for
 //! short work on memory, and never holds it across a call of the driver, a
 //! wait or a log line. Every call comes on the `io` of `init`.
@@ -64,8 +71,13 @@ ids: bson.ObjectId.Generator,
 key: fingerprint.Key,
 /// The connections that ids find.
 connections: List = .{},
+/// The connections that `removeConnection` took out of `connections` and
+/// drains.
+removing: usize = 0,
 /// Every generation until it is freed.
 generations: List = .{},
+/// The generations closed by force since `init`.
+forced: usize = 0,
 state: State = .running,
 /// The operations of collections and their errors (`stats`).
 operations: std.atomic.Value(u64) = .init(0),
@@ -238,6 +250,144 @@ pub fn connect(r: *Registry, io: Io, ctx: core.Context, id: []const u8) Error!vo
     return result;
 }
 
+/// Replaces the settings of the connection `id`: opens a client with
+/// `config` and connects it under `ctx`, publishes it as the new current
+/// generation, then waits until the leases of the old one come back, for
+/// `Options.drain_timeout` at the most, and closes it; leases left get
+/// `Closed`, and the log a warning. An active connection whose current
+/// settings are these has nothing to do: a repeat of the same event
+/// changes nothing. A registered or failed connection takes a fresh client
+/// even with the same settings. On a failure the current generation stays
+/// and the state does not change; `config.diagnostics`,
+/// `connectionStats(io, id).last_failure` and the log say why.
+pub fn replaceConnection(r: *Registry, io: Io, ctx: core.Context, id: []const u8, config: ConnectionConfig) Error!void {
+    const d = config.diagnostics;
+    if (d) |x| x.* = .{};
+    const print = fingerprint.of(&r.key, config.uri, config.password);
+    r.mutex.lockUncancelable(io);
+    const c = switch (r.awaitTurn(io, ctx, id, .{ .same = &print }, d) catch |err| {
+        r.mutex.unlock(io);
+        return err;
+    }) {
+        .done => {
+            r.mutex.unlock(io);
+            return;
+        },
+        .mine => |c| c,
+    };
+    c.busy = true;
+    const number = c.current.?.number + 1;
+    r.mutex.unlock(io);
+    defer r.endTurn(io, c);
+
+    // The driver's text of a failure goes to `config.diagnostics`,
+    // `last_failure` and the log.
+    var failure: Diagnostics = .{};
+    var settings = config;
+    settings.diagnostics = &failure;
+    const fresh = try r.gpa.create(Generation);
+    const client = r.driver.open(io, &settings) catch |err| {
+        r.gpa.destroy(fresh);
+        r.mutex.lockUncancelable(io);
+        c.last_failure = .init(err, failure.message());
+        r.mutex.unlock(io);
+        report(id, err, &failure, d);
+        return err;
+    };
+    // Its own lease, while it connects.
+    fresh.* = .{ .client = client, .number = number, .connection = c, .leases = 1 };
+    r.mutex.lockUncancelable(io);
+    const stopping = r.state != .running;
+    if (!stopping) r.generations.append(&fresh.node);
+    r.mutex.unlock(io);
+    if (stopping) {
+        client.close(io);
+        generation.destroy(r, fresh);
+        return fail(d, error.ShuttingDown, "odm: the registry is shutting down", .{});
+    }
+
+    const connected = client.connect(io, ctx, &failure);
+
+    r.mutex.lockUncancelable(io);
+    if (r.state != .running) {
+        r.abandon(io, fresh);
+        r.mutex.unlock(io);
+        _ = generation.finishRetire(r, io, fresh, Io.Clock.awake.now(io), .pending);
+        return fail(d, error.ShuttingDown, "odm: the registry is shutting down", .{});
+    }
+    connected catch |err| {
+        // The rollback: the new generation goes, the current one stays.
+        r.abandon(io, fresh);
+        c.last_failure = .init(err, failure.message());
+        r.mutex.unlock(io);
+        _ = generation.finishRetire(r, io, fresh, Io.Clock.awake.now(io), .pending);
+        report(id, err, &failure, d);
+        return err;
+    };
+    // The publication, under one lock: from now on sessions get only the
+    // new generation.
+    const old = c.current.?;
+    c.current = fresh;
+    c.fingerprint = print;
+    c.state = .active;
+    fresh.state = .active;
+    const free = generation.drop(r, io, fresh);
+    std.debug.assert(!free);
+    generation.beginRetire(io, old, .live);
+    r.mutex.unlock(io);
+
+    const until = Io.Clock.awake.now(io).addDuration(r.options.drain_timeout);
+    const retired = generation.finishRetire(r, io, old, until, .live);
+    if (retired.closer) if (retired.forced) |left| {
+        Warning.log(.{ .forced = .{ .id = id, .generation = number - 1, .leases = left, .after = r.options.drain_timeout } });
+    };
+}
+
+/// Removes the connection `id`, which no tenant may be bound to
+/// (`ConnectionInUse`): its id finds nothing at once, then its generation
+/// drains, for `Options.drain_timeout` at the most, and closes. It waits
+/// for the operation on the connection in progress, if any, until its task
+/// is canceled; nothing changes before the removal begins.
+pub fn removeConnection(r: *Registry, io: Io, id: []const u8) Error!void {
+    r.mutex.lockUncancelable(io);
+    const c = switch (r.awaitTurn(io, .root, id, .never, null) catch |err| {
+        r.mutex.unlock(io);
+        return err;
+    }) {
+        .done => unreachable,
+        .mine => |c| c,
+    };
+    if (c.tenants > 0) {
+        r.mutex.unlock(io);
+        return error.ConnectionInUse;
+    }
+    r.connections.remove(&c.node);
+    r.removing += 1;
+    c.state = .removing;
+    var it = r.generations.first;
+    while (it) |node| : (it = node.next) {
+        const g = Generation.of(node);
+        if (g.connection == c) g.connection = null;
+    }
+    const current = c.current.?;
+    c.current = null;
+    const number = current.number;
+    generation.beginRetire(io, current, .live);
+    // The calls that wait for this id look again, and find it gone.
+    r.cond.broadcast(io);
+    r.mutex.unlock(io);
+
+    const until = Io.Clock.awake.now(io).addDuration(r.options.drain_timeout);
+    const retired = generation.finishRetire(r, io, current, until, .live);
+    r.mutex.lockUncancelable(io);
+    r.removing -= 1;
+    r.mutex.unlock(io);
+    if (retired.closer) if (retired.forced) |left| {
+        Warning.log(.{ .forced = .{ .id = id, .generation = number, .leases = left, .after = r.options.drain_timeout } });
+    };
+    c.destroy(r.gpa);
+}
+
 /// One round trip to the server of the connection `id`, through its current
 /// generation, under the deadline of `ctx`.
 pub fn ping(r: *Registry, io: Io, ctx: core.Context, id: []const u8) Error!void {
@@ -251,9 +401,9 @@ pub fn stats(r: *Registry, io: Io) Stats {
     r.mutex.lockUncancelable(io);
     defer r.mutex.unlock(io);
     var result: Stats = .{
-        .connections = .{ .registered = 0, .connecting = 0, .active = 0, .failed = 0, .removing = 0 },
+        .connections = .{ .registered = 0, .connecting = 0, .active = 0, .failed = 0, .removing = r.removing },
         .draining = 0,
-        .forced = 0,
+        .forced = r.forced,
         .leases = 0,
         .tenants = 0,
         .operations = r.operations.load(.monotonic),
@@ -267,7 +417,8 @@ pub fn stats(r: *Registry, io: Io) Stats {
             .connecting => result.connections.connecting += 1,
             .active => result.connections.active += 1,
             .failed => result.connections.failed += 1,
-            .removing => result.connections.removing += 1,
+            // Out of the list: counted in `removing`.
+            .removing => {},
         }
         result.tenants += c.tenants;
     }
@@ -331,6 +482,9 @@ const Skip = union(enum) {
     never,
     /// An active connection: `connect`.
     active,
+    /// An active connection whose settings have this fingerprint:
+    /// `replaceConnection`.
+    same: *const fingerprint.Fingerprint,
 };
 
 /// The connection `id` for a call that needs it to itself, under the lock,
@@ -345,6 +499,7 @@ fn awaitTurn(r: *Registry, io: Io, ctx: core.Context, id: []const u8, skip: Skip
         switch (skip) {
             .never => {},
             .active => if (c.state == .active) return .done,
+            .same => |print| if (c.state == .active and fingerprint.eql(print, &c.fingerprint)) return .done,
         }
         if (!c.busy) return .{ .mine = c };
         if (ctx.isCancelled()) return fail(d, error.Cancelled, "odm: the token was canceled while the call waited for another operation on the connection", .{});
@@ -359,6 +514,28 @@ fn awaitTurn(r: *Registry, io: Io, ctx: core.Context, id: []const u8, skip: Skip
             },
         };
     }
+}
+
+/// Lets the next operation on `c` go.
+fn endTurn(r: *Registry, io: Io, c: *Connection) void {
+    r.mutex.lockUncancelable(io);
+    defer r.mutex.unlock(io);
+    c.busy = false;
+    r.cond.broadcast(io);
+}
+
+/// Under the lock: a new generation that will not be published gives its
+/// own lease back, and its `finishRetire` closes it.
+fn abandon(r: *Registry, io: Io, g: *Generation) void {
+    generation.beginRetire(io, g, .pending);
+    const free = generation.drop(r, io, g);
+    std.debug.assert(!free);
+}
+
+/// The failure of a replacement, for the caller and the log.
+fn report(id: []const u8, err: errors.DriverError, failure: *const Diagnostics, d: ?*Diagnostics) void {
+    if (d) |x| x.* = failure.*;
+    Warning.log(.{ .connect_failed = .{ .id = id, .err = err, .message = failure.message() } });
 }
 
 /// A lease of the current generation of `id` for one call.
