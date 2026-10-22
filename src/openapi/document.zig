@@ -839,7 +839,9 @@ const ErrorStatus = struct { status: u16, examples: []const Member };
 /// its body. One example per body, under the name of its error, the first
 /// by name of those with that body; at 500, only the errors `mapError`
 /// names, and one example `internal` for those its fallback gives 500. An
-/// error that ends a request without a response, `Canceled`, has none.
+/// error that ends a request without a response, `Canceled`, has none. A
+/// status that is not a final one, 200 to 599, stops the build: the server
+/// answers 500 instead.
 /// The order is the statuses' and the names', not the error set's: the
 /// compiler orders an error set by the errors it met first anywhere in
 /// the program.
@@ -856,6 +858,9 @@ fn errorStatuses(comptime H: type, comptime E: type, comptime at: []const u8) []
     for (sortedNames(names)) |name| {
         if (std.mem.eql(u8, name, "Canceled") or std.mem.eql(u8, name, "Cancelled")) continue;
         const res = H.mapError(@field(anyerror, name));
+        if (res.status < 200 or res.status > 599)
+            fail(schema.typeName(H) ++ ".mapError(error." ++ name ++ ") gives the status " ++ std.fmt.comptimePrint("{d}", .{res.status}) ++
+                ", which is not a final status of HTTP; give it one of 200 to 599");
         const body: Node = if (shown) example.value(Body, res.body, problem, schema.typeName(H) ++ ".mapError(error." ++ name ++ ")") else .null;
         if (res.status == 500 and res.from_fallback) {
             if (internal == null) internal = body;
