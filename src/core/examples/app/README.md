@@ -910,7 +910,7 @@ by its type:
 | `std.Io` | the `io` App was given |
 | `*const zefir.app.Status` | the state of App, read-only |
 | `zefir.app.Controllers(M)`, `zefir.app.Handlers(M)` | a tuple of pointers to the controllers (handlers) of module M and of every module M reaches |
-| `*T` or `*const T` | the bean of type T, or the value of type T from `.values` |
+| `*T` or `*const T` | the bean of type T, or the value of type T from `.values`; a value as `*T` only when the root declares `*T` |
 | `T` | a copy of the bean or the value of type T |
 | a struct that is not a bean | a struct of dependencies, filled by these same rules |
 
@@ -1238,7 +1238,23 @@ fn pressCtrlC(app: *zefir.App(AppModule), probe: *Probe, io: std.Io) !void {
 }
 ```
 
-With a step `stuck` in `build.zig` that runs it:
+Its step in `build.zig`, next to those of the shop:
+
+```zig
+// build.zig of the shop
+const stuck = b.addExecutable(.{
+    .name = "stuck",
+    .root_module = b.createModule(.{
+        .root_source_file = b.path("src/stuck.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "zefir", .module = zefir.module("zefir") }},
+    }),
+});
+b.step("stuck", "Run a server that does not stop").dependOn(&b.addRunArtifact(stuck).step);
+```
+
+And its run:
 
 ```text
 $ zig build stuck
@@ -1362,5 +1378,6 @@ It does not complete:
 - **after `controllers.`** of `Controllers(M)`: the tuple is handed to the
   server as it is;
 - **the parts of a server**, `.controllers`, `.middleware`,
-  `.error_handler` and `.handlers`, which `init` takes as `anytype`: a typo
-  there is a compile error that lists them.
+  `.error_handler`, `.strict_errors`, `.handlers` and `.authenticator`,
+  which `init` takes as `anytype`: a typo there is a compile error that
+  lists them.
