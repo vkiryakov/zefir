@@ -38,6 +38,10 @@
 //! `v.fieldNamed` give it to a codec. `v.transform` runs the transforms
 //! (`v.trim`, `v.toLower`, `v.transformWith(f)`, ...); call it before
 //! `v.check` so that the rules check the transformed value.
+//!
+//! `v.schemaOf` gives an element of `field_rules` as JSON Schema keywords,
+//! for a program that describes a DTO to its clients, such as an OpenAPI
+//! document.
 
 const std = @import("std");
 const core = @import("core.zig");
@@ -53,6 +57,7 @@ const identifiers = @import("identifiers.zig");
 const dates = @import("dates.zig");
 const lists = @import("lists.zig");
 const custom_rules = @import("custom.zig");
+const schema = @import("schema.zig");
 
 pub const Violation = core.Violation;
 pub const Rule = core.Rule;
@@ -248,6 +253,9 @@ pub const containsNone = lists.containsNone;
 pub const each = lists.each;
 pub const custom = custom_rules.custom;
 
+pub const RuleSchema = schema.RuleSchema;
+pub const schemaOf = schema.schemaOf;
+
 test {
     _ = core;
     _ = walk;
@@ -262,6 +270,7 @@ test {
     _ = dates;
     _ = lists;
     _ = custom_rules;
+    _ = schema;
 }
 
 test "limits have their documented values" {

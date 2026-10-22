@@ -13,6 +13,7 @@
 //! only.
 const std = @import("std");
 const core = @import("core.zig");
+const schema = @import("schema.zig");
 const Rule = core.Rule;
 const Outcome = core.Outcome;
 
@@ -806,6 +807,149 @@ pub fn fqdn(comptime options: FqdnOptions) Rule {
             }
         }.eval,
     });
+}
+
+// ------------------------------------------------------------------ schema
+
+/// A latitude as `isLatitude` reads it, without anchors.
+const latitude_pattern = "[+-]?(?:(?:[0-9]|[1-8][0-9])(?:\\.[0-9]+)?|90(?:\\.0+)?)";
+
+/// A longitude as `isLongitude` reads it, without anchors.
+const longitude_pattern = "[+-]?(?:(?:[0-9]{1,2}|1[0-7][0-9])(?:\\.[0-9]+)?|180(?:\\.0+)?)";
+
+/// A number of `isIpv4`, 0 to 255 without a leading zero.
+const octet_pattern = "(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])";
+
+const ipv4_pattern = "^(?:" ++ octet_pattern ++ "\\.){3}" ++ octet_pattern ++ "$";
+
+/// The characters and the length of the text forms of `isIpv6`: a pattern
+/// for the approximate rules, which `format` completes.
+const ipv6_shape_pattern = "^[0-9A-Fa-f:.]{2,45}$";
+
+/// A top-level domain, as `isTld` takes it.
+const tld_pattern = "(?:[A-Za-z]{2,63}|[Xx][Nn][0-9A-Za-z-]{1,60}[0-9A-Za-z])";
+
+/// An address of `isEmail` but for the 64 bytes of its local part: the
+/// atext of `isAtext` around single dots, `@` and a name of `isFqdn(.{})`,
+/// whose 253 bytes the 254 of the address bound.
+const email_pattern = "^[0-9A-Za-z!#$%&'*+/=?^_`{|}~-]+(?:\\.[0-9A-Za-z!#$%&'*+/=?^_`{|}~-]+)*@(?:" ++ labelPattern(false) ++ "\\.)+" ++ tld_pattern ++ "$";
+
+/// A label of `isLabel`: 1-63 letters, digits and hyphens (and `_` when
+/// `underscores`), without a hyphen at either end.
+fn labelPattern(comptime underscores: bool) []const u8 {
+    const edge = if (underscores) "[0-9A-Za-z_]" else "[0-9A-Za-z]";
+    const inside = if (underscores) "[0-9A-Za-z_-]" else "[0-9A-Za-z-]";
+    return edge ++ "(?:" ++ inside ++ "{0,61}" ++ edge ++ ")?";
+}
+
+/// The JSON Schema keywords of a rule of this file on the unwrapped field
+/// type `T`, for `v.schemaOf`. The grammars are ASCII and regular, so most
+/// rules are exact patterns; `email`, `httpUrl`, `ip` and `ipv6` would need
+/// long ones and get `format` with a short pattern instead.
+pub fn schemaOf(comptime rule: Rule, comptime T: type) schema.RuleSchema {
+    return switch (rule.kind) {
+        .number_string => schema.exact(&.{schema.pattern("^[+-]?(?:[0-9]+|[0-9]*\\.[0-9]+)$")}),
+        .decimal => decimalSchema(rule),
+        .boolean_string => schema.exact(&.{schema.keyword("enum", schema.array(&.{ schema.string("true"), schema.string("false"), schema.string("1"), schema.string("0") }))}),
+        .hexadecimal => schema.exact(&.{schema.pattern("^(?:0[xXhH])?[0-9A-Fa-f]+$")}),
+        .octal => schema.exact(&.{schema.pattern("^(?:0[oO])?[0-7]+$")}),
+        .port => schema.exact(&.{schema.pattern("^(?:0|[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])$")}),
+        .latitude => coordinateSchema(T, latitude_pattern, 90),
+        .longitude => coordinateSchema(T, longitude_pattern, 180),
+        .lat_long => schema.exact(&.{schema.pattern("^(?:" ++ latitude_pattern ++ ", ?" ++ longitude_pattern ++
+            "|\\(" ++ latitude_pattern ++ ", ?" ++ longitude_pattern ++ "\\))$")}),
+        .email => schema.approximate(&.{ schema.format("email"), schema.count("maxLength", 254), schema.pattern(email_pattern) }, "a valid email address"),
+        .http_url => schema.approximate(&.{ schema.format("uri"), schema.pattern("^[Hh][Tt][Tt][Pp][Ss]?://") }, "a valid HTTP or HTTPS URL"),
+        .fqdn => fqdnSchema(.{
+            .require_tld = rule.params[0].value.bool,
+            .allow_underscores = rule.params[1].value.bool,
+            .allow_trailing_dot = rule.params[2].value.bool,
+            .allow_wildcard = rule.params[3].value.bool,
+        }),
+        .ip => schema.approximate(&.{schema.keyword("anyOf", schema.array(&.{
+            schema.object(&.{ schema.format("ipv4"), schema.pattern(ipv4_pattern) }),
+            schema.object(&.{ schema.format("ipv6"), schema.pattern(ipv6_shape_pattern) }),
+        }))}, "a valid IPv4 or IPv6 address"),
+        .ipv4 => schema.exact(&.{ schema.format("ipv4"), schema.pattern(ipv4_pattern) }),
+        .ipv6 => schema.approximate(&.{ schema.format("ipv6"), schema.pattern(ipv6_shape_pattern) }, "a valid IPv6 address"),
+        .mac_address => schema.exact(&.{schema.pattern(macAddressPattern(.{
+            .eui = @field(MacAddressOptions.Eui, rule.params[0].value.tag),
+            .format = @field(MacAddressOptions.Format, rule.params[1].value.tag),
+        }))}),
+        else => unreachable,
+    };
+}
+
+/// `latitude` or `longitude`: the bounds on a float field, the pattern of
+/// its string form otherwise.
+fn coordinateSchema(comptime T: type, comptime pattern: []const u8, comptime limit: comptime_int) schema.RuleSchema {
+    if (core.isFloat(T)) return schema.exact(&.{ schema.count("minimum", -limit), schema.count("maximum", limit) });
+    return schema.exact(&.{schema.pattern("^" ++ pattern ++ "$")});
+}
+
+/// `decimal(options)`: a sign, digits, and a point with the digits the
+/// options allow. A count above `schema.max_repeat` loosens the pattern to
+/// one that RE2 reads, and the schema is approximate.
+fn decimalSchema(comptime rule: Rule) schema.RuleSchema {
+    const force = rule.params[0].value.bool;
+    const fewest = rule.params[1].value.int;
+    const most: ?comptime_int = if (rule.params.len > 2) rule.params[2].value.int else null;
+    const capped = fewest > schema.max_repeat or (most != null and most.? > schema.max_repeat);
+    const digits = if (capped) schema.repetition(@min(fewest, schema.max_repeat), null) else schema.repetition(fewest, most);
+    const fraction = "[0-9]*\\.[0-9]" ++ digits;
+    const regex = if (force) "^[+-]?" ++ fraction ++ "$" else "^[+-]?(?:[0-9]+|" ++ fraction ++ ")$";
+    if (capped) return schema.approximate(&.{schema.pattern(regex)}, "the number of digits after the point");
+    return schema.exact(&.{schema.pattern(regex)});
+}
+
+/// `fqdn(options)`: `hostname` for the names it covers (no `_`, no
+/// wildcard), the length of `isFqdn`, the labels, and with `require_tld`
+/// off a `not` for a last label of digits only.
+fn fqdnSchema(comptime options: FqdnOptions) schema.RuleSchema {
+    var keywords: []const schema.RuleSchema.Keyword = &.{};
+    if (!options.allow_underscores and !options.allow_wildcard) keywords = keywords ++ &[_]schema.RuleSchema.Keyword{schema.format("hostname")};
+    const label = labelPattern(options.allow_underscores);
+    const name = if (options.require_tld) "(?:" ++ label ++ "\\.)+" ++ tld_pattern else "(?:" ++ label ++ "\\.)*" ++ label;
+    const regex = "^" ++ (if (options.allow_wildcard) "(?:\\*\\.)?" else "") ++ name ++ (if (options.allow_trailing_dot) "\\.?" else "") ++ "$";
+    keywords = keywords ++ &[_]schema.RuleSchema.Keyword{
+        if (options.allow_trailing_dot)
+            // The trailing dot does not count toward the 253 bytes.
+            schema.keyword("anyOf", schema.array(&.{
+                schema.object(&.{schema.count("maxLength", max_domain_bytes)}),
+                schema.object(&.{ schema.count("maxLength", max_domain_bytes + 1), schema.pattern("\\.$") }),
+            }))
+        else
+            schema.count("maxLength", max_domain_bytes),
+        schema.pattern(regex),
+    };
+    if (!options.require_tld) keywords = keywords ++ &[_]schema.RuleSchema.Keyword{schema.keyword("not", schema.stringPattern("(?:^|\\.)[0-9]+\\.?$"))};
+    return schema.exact(keywords);
+}
+
+/// `macAddress(options)`: each size and form that `isMacAddress` takes, as
+/// alternatives; one separator throughout.
+fn macAddressPattern(comptime options: MacAddressOptions) []const u8 {
+    const pair = "[0-9A-Fa-f]{2}";
+    const quad = "[0-9A-Fa-f]{4}";
+    const sizes: []const comptime_int = switch (options.eui) {
+        .any => &.{ 6, 8 },
+        .eui48 => &.{6},
+        .eui64 => &.{8},
+    };
+    var forms: []const []const u8 = &.{};
+    for (sizes) |octets| {
+        switch (options.format) {
+            .bare => forms = forms ++ &[_][]const u8{"[0-9A-Fa-f]" ++ schema.repetition(2 * octets, 2 * octets)},
+            .separated => {
+                for ([_][]const u8{ ":", "-", " " }) |separator|
+                    forms = forms ++ &[_][]const u8{pair ++ "(?:" ++ separator ++ pair ++ ")" ++ schema.repetition(octets - 1, octets - 1)};
+                forms = forms ++ &[_][]const u8{quad ++ "(?:\\." ++ quad ++ ")" ++ schema.repetition(octets / 2 - 1, octets / 2 - 1)};
+            },
+        }
+    }
+    var out: []const u8 = "^(?:";
+    for (forms, 0..) |form, i| out = out ++ (if (i == 0) "" else "|") ++ form;
+    return out ++ ")$";
 }
 
 /// The arguments the hints show for an uncalled constructor of this file:

@@ -25,6 +25,7 @@ const json_in = @import("input/json_in.zig");
 const collect = @import("input/violations.zig");
 const plan = @import("plan.zig");
 const mw = @import("middleware.zig");
+const check = @import("check.zig");
 const static_files = @import("static.zig");
 const Subscription = @import("sse/Subscription.zig");
 
@@ -91,6 +92,8 @@ pub const Internal = struct {
     /// The static file that the request opened, which goes out once the
     /// request has ended within its deadline.
     static_file: ?static_files.File = null,
+    /// What the Debug check keeps of the request (check.zig).
+    check: check.State = .{},
 };
 
 /// The errors of `body`. `PayloadTooLarge` (413): over the limit.
@@ -123,6 +126,22 @@ fn InputError(comptime T: type, comptime source: strings.Source) type {
 fn JsonError(comptime T: type) type {
     comptime json_in.check(T);
     return ExtractError || BodyError || v.TransformError(T);
+}
+
+/// The error set of `input` for the route `R`: those of the calls it
+/// makes for what `R` declares, together.
+pub fn InputErrors(comptime R: type) type {
+    comptime {
+        routes.expectRoute(R, "ctx.input");
+        var E: type = error{};
+        if (R.Path != void) E = E || InputError(R.Path, .path);
+        if (R.Query != void) E = E || InputError(R.Query, .query);
+        if (R.Headers != void) E = E || InputError(R.Headers, .headers);
+        if (R.Cookies != void) E = E || InputError(R.Cookies, .cookies);
+        if (R.Body != void) E = E || JsonError(R.Body);
+        if (R.Form != void) E = E || BodyError || InputError(R.Form, .form);
+        return E;
+    }
 }
 
 /// The `std.Io` of the request, for every wait and every I/O: a database,
@@ -278,6 +297,7 @@ fn readWhole(ctx: *Context) BodyError![]const u8 {
 /// it is. Then the rules: `ValidationFailed` again, with the validator's
 /// violations. The strings of the result live in the request's arena.
 pub fn path(ctx: *Context, comptime T: type) InputError(T, .path)!T {
+    check.input(ctx, .path, T);
     const names = ctx.internal.param_names;
     const values = ctx.internal.params;
     const pairs = try ctx.internal.arena.alloc(strings.Pair, @min(names.len, values.len));
@@ -293,6 +313,7 @@ pub fn path(ctx: *Context, comptime T: type) InputError(T, .path)!T {
 /// `%HH` a byte; bad percent-encoding, invalid UTF-8 and more than
 /// `.max_query_params` parameters are `error.InvalidRequest` (400).
 pub fn query(ctx: *Context, comptime T: type) InputError(T, .query)!T {
+    check.input(ctx, .query, T);
     const pairs = try urlencoded.parse(ctx.internal.arena, ctx.request.internal.query, ctx.internal.max_query_params);
     return ctx.extract(T, .query, pairs, strings.unknownPolicy(T, ctx.internal.unknown_fields.query));
 }
@@ -323,6 +344,7 @@ pub fn query(ctx: *Context, comptime T: type) InputError(T, .query)!T {
 /// const body = try ctx.json(dto.CreateTodoRequest);
 /// ```
 pub fn json(ctx: *Context, comptime T: type) JsonError(T)!T {
+    check.input(ctx, .body, T);
     if (!isJson(ctx.request.header("content-type"))) return error.UnsupportedMediaType;
     const bytes = try ctx.body();
     const arena = ctx.internal.arena;
@@ -345,6 +367,7 @@ pub fn json(ctx: *Context, comptime T: type) JsonError(T)!T {
 /// Another `Content-Type` is `error.UnsupportedMediaType` (415), before
 /// the body is read.
 pub fn form(ctx: *Context, comptime T: type) (BodyError || InputError(T, .form))!T {
+    check.input(ctx, .form, T);
     if (!isForm(ctx.request.header("content-type"))) return error.UnsupportedMediaType;
     const bytes = try ctx.body();
     const pairs = try urlencoded.parse(ctx.internal.arena, bytes, ctx.internal.max_query_params);
@@ -359,6 +382,7 @@ pub fn form(ctx: *Context, comptime T: type) (BodyError || InputError(T, .form))
 /// compile error; its transforms and rules work, and its violations name
 /// the headers.
 pub fn headers(ctx: *Context, comptime T: type) InputError(T, .headers)!T {
+    check.input(ctx, .headers, T);
     const fields = ctx.request.internal.exchange.fields;
     const pairs = try ctx.internal.arena.alloc(strings.Pair, fields.len);
     for (pairs, fields) |*pair, f| pair.* = .{ .name = f.name, .value = f.value };
@@ -369,8 +393,35 @@ pub fn headers(ctx: *Context, comptime T: type) InputError(T, .headers)!T {
 /// sent, without the quotes around it. Of two cookies with one name the
 /// first wins; unknown cookies are ignored.
 pub fn cookies(ctx: *Context, comptime T: type) InputError(T, .cookies)!T {
+    check.input(ctx, .cookies, T);
     const pairs = try cookie_input.parse(ctx.internal.arena, ctx.request.internal.exchange.fields);
     return ctx.extract(T, .cookies, pairs, .ignore);
+}
+
+/// All the input that the route `R` declares, in one call: what `.path`,
+/// `.query`, `.headers`, `.cookies`, then `.body` (as `json`) or `.form`
+/// declare, read in this order as those calls read them, into
+/// `http.Input(R)`. The first error returns, as a `try` of each call in a
+/// row would, and the error set is theirs together. `R` is the handler's
+/// own route, named so that both the routes and the handler use it:
+///
+/// ```zig
+/// const Create = http.post("", .{ .body = dto.CreateTodoRequest, .headers = dto.CreateTodoHeaders });
+///
+/// pub fn create(self: *TodosV1Controller, ctx: *http.Context) !http.Json(dto.TodoResponse) {
+///     const in = try ctx.input(Create); // in.body and in.headers
+///     // ...
+/// }
+/// ```
+pub fn input(ctx: *Context, comptime R: type) InputErrors(R)!routes.Input(R) {
+    var in: routes.Input(R) = undefined;
+    if (R.Path != void) in.path = try ctx.path(R.Path);
+    if (R.Query != void) in.query = try ctx.query(R.Query);
+    if (R.Headers != void) in.headers = try ctx.headers(R.Headers);
+    if (R.Cookies != void) in.cookies = try ctx.cookies(R.Cookies);
+    if (R.Body != void) in.body = try ctx.json(R.Body);
+    if (R.Form != void) in.form = try ctx.form(R.Form);
+    return in;
 }
 
 /// The violations of the input call that last failed with
@@ -949,12 +1000,159 @@ const InputController = struct {
     }
 };
 
-test "query: max_query_params plus one is 400" {
+/// A route that declares the whole input of its handler: parameters, the
+/// query, the headers, the cookies and a JSON body.
+const SaveTodo = routes.put("/users/{userId}/todos/{id}", .{
+    .path = TodoPath,
+    .query = StrictQuery,
+    .headers = KeyHeaders,
+    .cookies = Prefs,
+    .body = CreateTodo,
+});
+/// A form body after the query.
+const SignUpForm = routes.post("/signup", .{ .query = StrictQuery, .form = SignUp });
+/// No input at all.
+const Bare = routes.get("/bare", .{});
+
+/// Reads its input with `ctx.input`. Its servers turn the strict error
+/// check off: the input of `save` has no transform errors, but this keeps
+/// the tests on the input alone.
+const DeclaredController = struct {
+    /// Whether the body had been read when `ctx.input` failed in `save`.
+    body_read: ?bool = null,
+
+    pub const http_routes = routes.routes(.{ .methods = .{
+        .save = SaveTodo,
+        .signup = SignUpForm,
+        .bare = Bare,
+    } });
+
+    pub fn save(self: *DeclaredController, ctx: *Context) !void {
+        const in = ctx.input(SaveTodo) catch |err| {
+            self.body_read = ctx.internal.body != null;
+            return err;
+        };
+        try InputController.say(ctx, "user {d} todo {d} page {d} key={s} sid={s} title={s}", .{
+            in.path.user_id, in.path.id, in.query.page, in.headers.idempotency_key orelse "-", in.cookies.session, in.body.title,
+        });
+    }
+    pub fn signup(_: *DeclaredController, ctx: *Context) !void {
+        const in = try ctx.input(SignUpForm);
+        try InputController.say(ctx, "{s} page {d}", .{ in.form.email, in.query.page });
+    }
+    pub fn bare(_: *DeclaredController, ctx: *Context) !void {
+        const in = try ctx.input(Bare);
+        try InputController.say(ctx, "{d} fields", .{@typeInfo(@TypeOf(in)).@"struct".field_names.len});
+    }
+};
+
+test "input: reads the path, the query, the headers, the cookies, then the body; the first error returns" {
     const test_io = testing.io;
-    var input: InputController = .{};
+    var declared: DeclaredController = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(testing.allocator, .{ .controllers = .{&input}, .strict_errors = false }, .{ .listen = .{ .backend = b.backend() } });
+    var server = try Server.init(testing.allocator, .{ .controllers = .{&declared}, .strict_errors = false }, .{ .listen = .{ .backend = b.backend() } });
+    defer server.deinit(test_io);
+    try server.start(test_io);
+
+    const payload = "{\"title\":\" Buy milk \",\"userName\":\"ann\"}";
+    var ok = try b.request(test_io, .{ .method = .PUT, .target = "/users/7/todos/3?page=2", .headers = &.{
+        .{ "content-type", "application/json" }, .{ "idempotency-key", "k-1" }, .{ "cookie", "sid=s-1" },
+    }, .body = payload });
+    defer ok.deinit();
+    try testing.expectEqualStrings("user 7 todo 3 page 2 key=k-1 sid=s-1 title=Buy milk", ok.body);
+
+    // Each source broken, and every one after it: the violation is of the
+    // first, and the body is read only when everything before it passed.
+    const json_type = [2][]const u8{ "content-type", "application/json" };
+    const good_key = [2][]const u8{ "idempotency-key", "k-1" };
+    const long_key = [2][]const u8{ "idempotency-key", "123456789" };
+    const good_sid = [2][]const u8{ "cookie", "sid=s-1" };
+    for ([_]struct { []const u8, []const [2][]const u8, []const u8, [2][]const u8, bool }{
+        .{ "/users/x/todos/3?page=x", &.{ json_type, long_key }, "{}", .{ "http.invalid_type", "userId" }, false },
+        .{ "/users/7/todos/3?page=x", &.{ json_type, long_key }, "{}", .{ "http.invalid_type", "page" }, false },
+        .{ "/users/7/todos/3?utm=1", &.{ json_type, long_key }, "{}", .{ "http.unknown_field", "utm" }, false },
+        .{ "/users/7/todos/3", &.{ json_type, long_key }, "{}", .{ "validation.max_length", "Idempotency-Key" }, false },
+        .{ "/users/7/todos/3", &.{ json_type, good_key }, "{}", .{ "http.missing_field", "sid" }, false },
+        .{ "/users/7/todos/3", &.{ json_type, good_key, good_sid }, "{\"userName\":\"ann\"}", .{ "http.missing_field", "title" }, true },
+    }) |case| {
+        declared.body_read = null;
+        var res = try b.request(test_io, .{ .method = .PUT, .target = case[0], .headers = case[1], .body = case[2] });
+        defer res.deinit();
+        errdefer std.debug.print("PUT {s}\n", .{case[0]});
+        try expectViolations(&res, &.{case[3]});
+        try testing.expectEqual(case[4], declared.body_read.?);
+    }
+    // A body of another type, once the rest has passed: 415.
+    var plain = try b.request(test_io, .{ .method = .PUT, .target = "/users/7/todos/3", .headers = &.{ .{ "content-type", "text/plain" }, good_sid }, .body = payload });
+    defer plain.deinit();
+    try testing.expectEqual(415, plain.status);
+}
+
+test "input: a form body after the query; a route without input reads nothing" {
+    const test_io = testing.io;
+    var declared: DeclaredController = .{};
+    var b: TestingBackend = .init(testing.allocator);
+    defer b.deinit();
+    var server = try Server.init(testing.allocator, .{ .controllers = .{&declared}, .strict_errors = false }, .{ .listen = .{ .backend = b.backend() } });
+    defer server.deinit(test_io);
+    try server.start(test_io);
+    var signup = try post(&b, "/signup?page=3", "application/x-www-form-urlencoded", "email=A@b.example&displayName=Ann");
+    defer signup.deinit();
+    try testing.expectEqualStrings("a@b.example page 3", signup.body);
+    var as_json = try post(&b, "/signup?page=3", "application/json", "{}");
+    defer as_json.deinit();
+    try testing.expectEqual(415, as_json.status);
+    var bare = try get(&b, "/bare?x=1", &.{});
+    defer bare.deinit();
+    try testing.expectEqualStrings("0 fields", bare.body);
+}
+
+/// The error set of a call's result.
+fn ErrorsOf(comptime T: type) type {
+    return @typeInfo(T).error_union.error_set;
+}
+
+/// Whether the error sets `A` and `B` hold the same names.
+fn sameErrors(comptime A: type, comptime B: type) bool {
+    const names = @typeInfo(A).error_set.error_names.?;
+    if (names.len != @typeInfo(B).error_set.error_names.?.len) return false;
+    for (names) |name| {
+        if (!hasError(B, name)) return false;
+    }
+    return true;
+}
+
+test "input: its error set is the union of those of the calls it makes" {
+    const ctx: *Context = undefined;
+    const save = ErrorsOf(@TypeOf(ctx.path(TodoPath))) || ErrorsOf(@TypeOf(ctx.query(StrictQuery))) ||
+        ErrorsOf(@TypeOf(ctx.headers(KeyHeaders))) || ErrorsOf(@TypeOf(ctx.cookies(Prefs))) || ErrorsOf(@TypeOf(ctx.json(CreateTodo)));
+    try testing.expect(comptime sameErrors(ErrorsOf(@TypeOf(ctx.input(SaveTodo))), save));
+    const signup = ErrorsOf(@TypeOf(ctx.query(StrictQuery))) || ErrorsOf(@TypeOf(ctx.form(SignUp)));
+    try testing.expect(comptime sameErrors(ErrorsOf(@TypeOf(ctx.input(SignUpForm))), signup));
+    // The transform of a DTO brings its own error, as it does to a call.
+    const Search = routes.get("/search", .{ .query = SearchQuery });
+    try testing.expect(comptime hasError(ErrorsOf(@TypeOf(ctx.input(Search))), "TooManyTags"));
+    try testing.expectEqual(0, @typeInfo(ErrorsOf(@TypeOf(ctx.input(Bare)))).error_set.error_names.?.len);
+}
+
+test "Input: a field for each source the route declares, in the order input reads them" {
+    const save = @typeInfo(routes.Input(SaveTodo)).@"struct";
+    try testing.expectEqual(5, save.field_names.len);
+    inline for (.{ "path", "query", "headers", "cookies", "body" }, save.field_names) |want, got| try testing.expectEqualStrings(want, got);
+    inline for (.{ TodoPath, StrictQuery, KeyHeaders, Prefs, CreateTodo }, save.field_types) |Want, Got| try testing.expect(Want == Got);
+    const signup = @typeInfo(routes.Input(SignUpForm)).@"struct";
+    try testing.expectEqual(2, signup.field_names.len);
+    try testing.expectEqualStrings("form", signup.field_names[1]);
+    try testing.expectEqual(0, @typeInfo(routes.Input(Bare)).@"struct".field_names.len);
+}
+
+test "query: max_query_params plus one is 400" {
+    const test_io = testing.io;
+    var inputs: InputController = .{};
+    var b: TestingBackend = .init(testing.allocator);
+    defer b.deinit();
+    var server = try Server.init(testing.allocator, .{ .controllers = .{&inputs}, .strict_errors = false }, .{ .listen = .{ .backend = b.backend() } });
     defer server.deinit(test_io);
     try server.start(test_io);
 
@@ -975,10 +1173,10 @@ test "query: max_query_params plus one is 400" {
 
 test "query: bad percent-encoding and invalid UTF-8 are 400" {
     const test_io = testing.io;
-    var input: InputController = .{};
+    var inputs: InputController = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(testing.allocator, .{ .controllers = .{&input}, .strict_errors = false }, .{ .listen = .{ .backend = b.backend() } });
+    var server = try Server.init(testing.allocator, .{ .controllers = .{&inputs}, .strict_errors = false }, .{ .listen = .{ .backend = b.backend() } });
     defer server.deinit(test_io);
     try server.start(test_io);
     // In an unknown parameter too: the query is taken apart as a whole.
@@ -997,10 +1195,10 @@ test "query: bad percent-encoding and invalid UTF-8 are 400" {
 
 test "query: + is a space, in the path it is not" {
     const test_io = testing.io;
-    var input: InputController = .{};
+    var inputs: InputController = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(testing.allocator, .{ .controllers = .{&input}, .strict_errors = false }, .{ .listen = .{ .backend = b.backend() } });
+    var server = try Server.init(testing.allocator, .{ .controllers = .{&inputs}, .strict_errors = false }, .{ .listen = .{ .backend = b.backend() } });
     defer server.deinit(test_io);
     try server.start(test_io);
     var plus = try get(&b, "/names/a+b?q=a+b", &.{});
@@ -1013,10 +1211,10 @@ test "query: + is a space, in the path it is not" {
 
 test "query: 150 unknown parameters are 422 with the first 100 violations" {
     const test_io = testing.io;
-    var input: InputController = .{};
+    var inputs: InputController = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(testing.allocator, .{ .controllers = .{&input}, .strict_errors = false }, .{ .listen = .{ .backend = b.backend() }, .max_query_params = 200 });
+    var server = try Server.init(testing.allocator, .{ .controllers = .{&inputs}, .strict_errors = false }, .{ .listen = .{ .backend = b.backend() }, .max_query_params = 200 });
     defer server.deinit(test_io);
     try server.start(test_io);
     var target: std.ArrayList(u8) = .empty;
@@ -1036,11 +1234,11 @@ test "query: 150 unknown parameters are 422 with the first 100 violations" {
 test "form: urlencoded only; unknown fields rejected unless the DTO ignores them" {
     const test_io = testing.io;
     const form_type = "application/x-www-form-urlencoded";
-    var input: InputController = .{};
+    var inputs: InputController = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
     {
-        var server = try Server.init(testing.allocator, .{ .controllers = .{&input}, .strict_errors = false }, .{ .listen = .{ .backend = b.backend() } });
+        var server = try Server.init(testing.allocator, .{ .controllers = .{&inputs}, .strict_errors = false }, .{ .listen = .{ .backend = b.backend() } });
         defer server.deinit(test_io);
         try server.start(test_io);
         var ok = try post(&b, "/signup", form_type, "email=+Ann%40Example.COM+&displayName=Ann");
@@ -1073,7 +1271,7 @@ test "form: urlencoded only; unknown fields rejected unless the DTO ignores them
     }
     {
         // The server's policies: bodies ignore, queries refuse.
-        var server = try Server.init(testing.allocator, .{ .controllers = .{&input}, .strict_errors = false }, .{ .listen = .{ .backend = b.backend() }, .unknown_fields = .{ .body = .ignore, .query = .reject } });
+        var server = try Server.init(testing.allocator, .{ .controllers = .{&inputs}, .strict_errors = false }, .{ .listen = .{ .backend = b.backend() }, .unknown_fields = .{ .body = .ignore, .query = .reject } });
         defer server.deinit(test_io);
         try server.start(test_io);
         var extra = try post(&b, "/signup", form_type, "email=a@b.example&displayName=A&role=admin");
@@ -1093,11 +1291,11 @@ test "form: a DTO's unknown_fields works untyped and typed" {
     try testing.expectEqual(.ignore, strings.unknownPolicy(SearchQuery, .ignore));
 
     const test_io = testing.io;
-    var input: InputController = .{};
+    var inputs: InputController = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
     // The DTO's word wins over the server's, both ways.
-    var server = try Server.init(testing.allocator, .{ .controllers = .{&input}, .strict_errors = false }, .{ .listen = .{ .backend = b.backend() }, .unknown_fields = .{ .body = .reject, .query = .ignore } });
+    var server = try Server.init(testing.allocator, .{ .controllers = .{&inputs}, .strict_errors = false }, .{ .listen = .{ .backend = b.backend() }, .unknown_fields = .{ .body = .reject, .query = .ignore } });
     defer server.deinit(test_io);
     try server.start(test_io);
     for ([_][]const u8{ "/loose", "/typed" }) |target| {
@@ -1116,10 +1314,10 @@ test "form: a DTO's unknown_fields works untyped and typed" {
 
 test "path: parameters fill fields by outside names" {
     const test_io = testing.io;
-    var input: InputController = .{};
+    var inputs: InputController = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(testing.allocator, .{ .controllers = .{&input}, .strict_errors = false }, .{ .listen = .{ .backend = b.backend() }, .prefix = "/api" });
+    var server = try Server.init(testing.allocator, .{ .controllers = .{&inputs}, .strict_errors = false }, .{ .listen = .{ .backend = b.backend() }, .prefix = "/api" });
     defer server.deinit(test_io);
     try server.start(test_io);
     var ok = try get(&b, "/api/users/7/todos/3", &.{});
@@ -1139,10 +1337,10 @@ test "path: parameters fill fields by outside names" {
 
 test "headers: any case; repeats fill a slice" {
     const test_io = testing.io;
-    var input: InputController = .{};
+    var inputs: InputController = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(testing.allocator, .{ .controllers = .{&input}, .strict_errors = false }, .{ .listen = .{ .backend = b.backend() } });
+    var server = try Server.init(testing.allocator, .{ .controllers = .{&inputs}, .strict_errors = false }, .{ .listen = .{ .backend = b.backend() } });
     defer server.deinit(test_io);
     try server.start(test_io);
     var ok = try get(&b, "/headers", &.{ .{ "IDEMPOTENCY-KEY", "  k-1 " }, .{ "x-tag", "a" }, .{ "Accept", "*/*" }, .{ "X-Tag", "b, c" } });
@@ -1165,10 +1363,10 @@ test "headers: any case; repeats fill a slice" {
 
 test "cookies: outside names; the first of two equal names wins" {
     const test_io = testing.io;
-    var input: InputController = .{};
+    var inputs: InputController = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(testing.allocator, .{ .controllers = .{&input}, .strict_errors = false }, .{ .listen = .{ .backend = b.backend() } });
+    var server = try Server.init(testing.allocator, .{ .controllers = .{&inputs}, .strict_errors = false }, .{ .listen = .{ .backend = b.backend() } });
     defer server.deinit(test_io);
     try server.start(test_io);
     var ok = try get(&b, "/cookies", &.{ .{ "Cookie", "sid=first; theme=\"dark\"; session=zig-name" }, .{ "cookie", "sid=second" } });
@@ -1181,10 +1379,10 @@ test "cookies: outside names; the first of two equal names wins" {
 
 test "transforms run after mapping and before rules" {
     const test_io = testing.io;
-    var input: InputController = .{};
+    var inputs: InputController = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(testing.allocator, .{ .controllers = .{&input}, .strict_errors = false }, .{ .listen = .{ .backend = b.backend() } });
+    var server = try Server.init(testing.allocator, .{ .controllers = .{&inputs}, .strict_errors = false }, .{ .listen = .{ .backend = b.backend() } });
     defer server.deinit(test_io);
     try server.start(test_io);
     var milk = try get(&b, "/search?q=++Milk+&tags=home,shop", &.{});
@@ -1209,10 +1407,10 @@ test "a custom transform's error reaches the caller as it is" {
     try testing.expect(comptime hasError(InputError(SearchQuery, .query), "TooManyTags"));
     try testing.expect(comptime hasError(InputError(SearchQuery, .query), "ValidationFailed"));
     const test_io = testing.io;
-    var input: InputController = .{};
+    var inputs: InputController = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(testing.allocator, .{ .controllers = .{&input}, .strict_errors = false }, .{ .listen = .{ .backend = b.backend() } });
+    var server = try Server.init(testing.allocator, .{ .controllers = .{&inputs}, .strict_errors = false }, .{ .listen = .{ .backend = b.backend() } });
     defer server.deinit(test_io);
     try server.start(test_io);
     const level = testing.log_level;
@@ -1220,17 +1418,17 @@ test "a custom transform's error reaches the caller as it is" {
     defer testing.log_level = level;
     var res = try get(&b, "/search?q=milk&tags=a,b&tags=c,d", &.{});
     defer res.deinit();
-    try testing.expectEqual(@as(?anyerror, error.TooManyTags), input.seen);
+    try testing.expectEqual(@as(?anyerror, error.TooManyTags), inputs.seen);
     try testing.expectEqual(500, res.status);
     try testing.expectEqual(0, (try problemOf(&res)).errors.len);
 }
 
 test "validateSelf violations use outside names" {
     const test_io = testing.io;
-    var input: InputController = .{};
+    var inputs: InputController = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(testing.allocator, .{ .controllers = .{&input}, .strict_errors = false }, .{ .listen = .{ .backend = b.backend() } });
+    var server = try Server.init(testing.allocator, .{ .controllers = .{&inputs}, .strict_errors = false }, .{ .listen = .{ .backend = b.backend() } });
     defer server.deinit(test_io);
     try server.start(test_io);
     var ok = try get(&b, "/range?from=3&to=5", &.{});
@@ -1253,10 +1451,10 @@ test "the checkAll report is freed" {
     const test_io = testing.io;
     // The server's allocator, counted: the reports come from it.
     var counted: std.testing.FailingAllocator = .init(testing.allocator, .{});
-    var input: InputController = .{};
+    var inputs: InputController = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(counted.allocator(), .{ .controllers = .{&input}, .strict_errors = false }, .{ .listen = .{ .backend = b.backend() } });
+    var server = try Server.init(counted.allocator(), .{ .controllers = .{&inputs}, .strict_errors = false }, .{ .listen = .{ .backend = b.backend() } });
     defer server.deinit(test_io);
     try server.start(test_io);
     const live = counted.allocations - counted.deallocations;

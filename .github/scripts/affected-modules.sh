@@ -11,6 +11,8 @@
 # tests/redis/, the end-to-end tests of nats, of rpc-nats, of http, of
 # mongo and of redis, count as their modules; tests/app/, the end-to-end
 # tests of zefir.App, which import the umbrella module, counts as zefir.
+# tests/openapi/, the checks of the JSON Schema that zefir-openapi and the
+# validator write, counts as openapi, which imports the validator.
 # docker-compose.yml, the servers of nats, rpc-nats, mongo and redis,
 # counts as all four.
 # examples/rpc-custom-transport/, a transport outside zefir that CI runs
@@ -26,7 +28,7 @@ set -eu
 # The modules and what the tests of each one import. Keep this in sync with
 # build.zig: the `.imports` of each module and of the programs that its
 # test-<module> step builds. CI tests only the modules listed here.
-modules="core log confy validator rpc rpc-nats orm mongo redis nats http jwt zefir"
+modules="core log confy validator rpc rpc-nats orm mongo redis nats http jwt openapi zefir"
 imports() {
     case $1 in
     core) ;;
@@ -54,20 +56,30 @@ imports() {
     # tests read their settings with confy and log with log.
     redis) echo core confy log ;;
     # http imports core and validator; the examples of its guide read
-    # their settings with confy and log with log.
-    http) echo core validator confy log ;;
+    # their settings with confy, log with log, and declare the texts of
+    # their OpenAPI document with openapi, which imports http in turn.
+    http) echo core validator confy log openapi ;;
     # jwt imports validator alone; the examples of its guide, an http
     # middleware and an rpc authenticator, also import core, confy, log,
     # http and rpc.
     jwt) echo validator core confy log http rpc ;;
-    zefir) echo core log confy validator rpc rpc-nats orm mongo redis nats http jwt ;;
+    # openapi reads the server through http and the rules through the
+    # validator.
+    openapi) echo http validator ;;
+    zefir) echo core log confy validator rpc rpc-nats orm mongo redis nats http jwt openapi ;;
     esac
 }
 
 # Succeeds when module $1 imports module $2, directly or through others.
+# $3 holds the modules walked to get to $1, which are not walked again: the
+# imports may go round, as http's guide imports openapi, which imports
+# http.
 depends_on() {
     for dep in $(imports "$1"); do
-        if [ "$dep" = "$2" ] || depends_on "$dep" "$2"; then
+        case " ${3-} $1 " in
+        *" $dep "*) continue ;;
+        esac
+        if [ "$dep" = "$2" ] || depends_on "$dep" "$2" "${3-} $1"; then
             return 0
         fi
     done
@@ -105,6 +117,7 @@ elif [ $# -eq 2 ] && [ -n "$1" ] && [ -n "$2" ]; then
         tests/http/*) changed="$changed http" ;;
         tests/mongo/*) changed="$changed mongo" ;;
         tests/redis/*) changed="$changed redis" ;;
+        tests/openapi/*) changed="$changed openapi" ;;
         tests/app/*) changed="$changed zefir" ;;
         examples/rpc-custom-transport/*) changed="$changed rpc" ;;
         docker-compose.yml) changed="$changed nats rpc-nats mongo redis" ;;

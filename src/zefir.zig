@@ -16,6 +16,7 @@ pub const redis = @import("redis");
 pub const nats = @import("nats");
 pub const http = @import("http");
 pub const jwt = @import("jwt");
+pub const openapi = @import("openapi");
 
 test {
     @import("std").testing.refAllDecls(@This());

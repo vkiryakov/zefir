@@ -8,6 +8,7 @@
 //! never backtrack and run in time linear in the input.
 const std = @import("std");
 const core = @import("core.zig");
+const schema = @import("schema.zig");
 const Rule = core.Rule;
 
 // ------------------------------------------------------------------ json, jwt
@@ -750,6 +751,45 @@ fn cssAlpha(s: []const u8, i: *usize) bool {
     if (!cssNumber(s, i)) return false;
     if (i.* < s.len and s[i.*] == '%') i.* += 1;
     return true;
+}
+
+// ------------------------------------------------------------------ schema
+
+/// The JSON Schema keywords of a rule of this file on the unwrapped field
+/// type `T`, for `v.schemaOf`. The base encodings, `semVer` and `hexColor`
+/// are exact patterns, the canonical bits of base32 and base64 included;
+/// the others would need long or unbounded ones and get `format` (when the
+/// registry of OpenAPI has one) with a short pattern instead.
+pub fn schemaOf(comptime rule: Rule, comptime T: type) schema.RuleSchema {
+    _ = T;
+    return switch (rule.kind) {
+        .json => schema.approximate(&.{
+            schema.keyword("contentMediaType", schema.string("application/json")),
+            schema.pattern("^[\t\n\r ]*[\\[{]"),
+        }, "a JSON object or array"),
+        .jwt => schema.approximate(&.{schema.pattern("^[0-9A-Za-z_-]+\\.[0-9A-Za-z_-]+\\.[0-9A-Za-z_-]*$")}, "a JWT of three base64url segments"),
+        .base32 => schema.exact(&.{schema.pattern("^(?:[A-Z2-7]{8})*(?:[A-Z2-7][AEIMQUY4]======|[A-Z2-7]{3}[AQ]====|[A-Z2-7]{4}[ACEGIKMOQSUWY246]===|[A-Z2-7]{6}[AIQY]=)?$")}),
+        .base58 => schema.exact(&.{schema.pattern("^[1-9A-HJ-NP-Za-km-z]*$")}),
+        .base64 => schema.exact(&.{
+            schema.keyword("contentEncoding", schema.string("base64")),
+            schema.pattern("^(?:[0-9A-Za-z+/]{4})*(?:[0-9A-Za-z+/][AQgw]==|[0-9A-Za-z+/]{2}[AEIMQUYcgkosw048]=)?$"),
+        }),
+        .base64_url => schema.exact(&.{
+            schema.keyword("contentEncoding", schema.string("base64url")),
+            schema.pattern("^(?:[0-9A-Za-z_-]{4})*(?:[0-9A-Za-z_-][AQgw]|[0-9A-Za-z_-]{2}[AEIMQUYcgkosw048])?$"),
+        }),
+        .data_uri => schema.approximate(&.{ schema.format("uri"), schema.pattern("^data:") }, "a valid data URI"),
+        .magnet_uri => schema.approximate(&.{ schema.format("uri"), schema.pattern("^magnet:\\?") }, "a valid magnet URI"),
+        .mime_type => schema.approximate(&.{ schema.format("media-range"), schema.pattern("^[A-Za-z]+/[0-9A-Za-z]") }, "a valid MIME type"),
+        .locale => schema.approximate(&.{ schema.format("language"), schema.pattern("^[A-Za-z]{1,8}(?:-[0-9A-Za-z]{1,8})*$") }, "a well-formed BCP 47 language tag"),
+        .sem_ver => schema.exact(&.{schema.pattern("^(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)" ++
+            "(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?" ++
+            "(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$")}),
+        .hex_color => schema.exact(&.{schema.pattern("^#(?:[0-9A-Fa-f]{3,4}|[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$")}),
+        .rgb_color => schema.approximate(&.{schema.pattern("^rgba?\\([^)]*\\)$")}, "a valid CSS rgb() or rgba() color"),
+        .hsl_color => schema.approximate(&.{schema.pattern("^[Hh][Ss][Ll][Aa]?\\([^)]*\\)$")}, "a valid CSS hsl() or hsla() color"),
+        else => unreachable,
+    };
 }
 
 // ------------------------------------------------------------------ byte classes

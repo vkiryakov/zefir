@@ -11,8 +11,9 @@
 //!   APP_CORS_ORIGIN      the origin of a page on another site that may
 //!                        call the API; http://localhost:5173 by default
 //!
-//! In tests/http, `zig build examples` runs it and sends it the requests
-//! of the guide.
+//! The objects of the service, its server and its OpenAPI document are
+//! built in Service.zig, for `main` and the tests alike. In tests/http,
+//! `zig build examples` runs it and sends it the requests of the guide.
 
 const std = @import("std");
 const confy = @import("confy");
@@ -20,14 +21,7 @@ const http = @import("http");
 const log = @import("log");
 const zio = @import("zio");
 const auth = @import("auth.zig");
-const Cors = @import("cors.zig").Cors;
-const errors = @import("errors.zig");
-const mw = @import("middleware.zig");
-const Billing = @import("Billing.zig");
-const HealthController = @import("HealthController.zig");
-const SessionController = @import("SessionController.zig");
-const TodoRepository = @import("TodoRepository.zig");
-const TodosV1Controller = @import("TodosV1Controller.zig");
+const Service = @import("Service.zig");
 
 /// zefir-http logs through std.log; this sends its records to the logger.
 pub const std_options: std.Options = .{ .logFn = log.stdLogFn };
@@ -64,57 +58,29 @@ pub fn main(init: std.process.Init) !void {
     const io = rt.io();
     const gpa = init.gpa;
 
-    // What the handlers use. It outlives the server: its deinit comes after
-    // the server's, which runs first, in the reverse order of the defers.
-    var repo: TodoRepository = .init(gpa);
-    defer repo.deinit();
-    var billing: Billing = .{};
-    var live: http.sse.Manager = .init(gpa, .{});
-    defer live.deinit(io);
-
-    // The objects of the middleware; the server borrows them.
+    // The users and their tokens, and the origin of CORS, from the
+    // settings; the service borrows them.
     const users = [_]auth.TokenAuth.User{
         .{ .token = config.auth.ann_token, .id = "ann", .permissions = &.{ "todos", "todos:delete" } },
         .{ .token = config.auth.bob_token, .id = "bob", .permissions = &.{"todos"} },
     };
-    var token_auth: auth.TokenAuth = .{ .users = &users };
     const origins = [_][]const u8{config.cors_origin};
-    var cors: Cors = .{ .origins = &origins };
-    var access_log: mw.AccessLog = .{ .logger = logger.scoped("access") };
-    var plans: mw.PlanLookup = .{ .billing = &billing, .repo = &repo };
-    var app_errors: errors.AppErrors = .{};
-
-    var todos_v1: TodosV1Controller = .{ .repo = &repo, .live = &live, .plans = &plans };
-    var sessions: SessionController = .{ .token_auth = &token_auth, .live = &live };
-    var health: HealthController = .{};
 
     // The network: connections, the strict HTTP/1.1 parser, keep-alive.
     var native: http.native.Backend = try .init(gpa, .{ .port = config.port });
     defer native.deinit();
-    var server = try http.Server.init(gpa, .{
-        .controllers = .{ &todos_v1, &sessions, &health },
-        // Every request runs these, in this order, before its route is chosen.
-        .middleware = .{ mw.requestId, &access_log, http.onResponse(mw.securityHeaders), &cors, &token_auth },
-        .error_handler = &app_errors,
-    }, .{
-        .listen = .{ .backend = native.backend() },
-        // Before the routes of the controllers: /api/v1/todos, /api/health.
-        .prefix = "/api",
-        // The page and its files; a path without a file gets index.html, so
-        // that the page's own router reads the path.
-        .static = &.{http.static("/", .{ .root = config.public_dir, .spa_fallback = "index.html" })},
-    });
-    defer server.deinit(io);
-
-    try server.start(io);
+    var service: Service = .{ .users = &users, .origins = &origins, .public_dir = config.public_dir, .logger = logger };
+    try service.start(gpa, io, native.backend());
+    // It runs before the defers above: the server stops before its backend.
+    defer service.deinit(gpa, io);
     app.info("Serving", .{ .port = native.port() });
 
     // Ctrl+C or SIGTERM begins a graceful stop; `wait` returns once it is over.
-    var on_interrupt = try io.concurrent(stopOnSignal, .{ io, &server, app, .interrupt });
+    var on_interrupt = try io.concurrent(stopOnSignal, .{ io, &service.server, app, .interrupt });
     defer on_interrupt.cancel(io) catch {};
-    var on_terminate = try io.concurrent(stopOnSignal, .{ io, &server, app, .terminate });
+    var on_terminate = try io.concurrent(stopOnSignal, .{ io, &service.server, app, .terminate });
     defer on_terminate.cancel(io) catch {};
-    try server.wait(io);
+    try service.server.wait(io);
     app.info("Stopped", .{});
 }
 

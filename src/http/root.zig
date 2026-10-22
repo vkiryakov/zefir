@@ -35,6 +35,7 @@ const errors = @import("errors.zig");
 const dto = @import("dto.zig");
 const middleware = @import("middleware.zig");
 const static_files = @import("static.zig");
+const describe_file = @import("describe.zig");
 
 pub const Server = @import("Server.zig");
 pub const Backend = @import("Backend.zig");
@@ -53,6 +54,14 @@ pub const ResponseState = Context.Response.State;
 /// rule of the validator; the field under its outside name.
 pub const Violation = @import("validator").Violation;
 pub const RouteInfo = route_decls.RouteInfo;
+/// What a route serves: `.rest`, a request and its response, or `.sse`, a
+/// stream.
+pub const RouteKind = route_decls.Kind;
+/// A status that a route declares in `.responses`, as its type keeps it
+/// in `responses`.
+pub const RouteResponse = route_decls.RouteResponse;
+/// What `ctx.input(R)` gives: the input that the route `R` declares.
+pub const Input = route_decls.Input;
 pub const TrustedProxies = Server.TrustedProxies;
 
 // Errors.
@@ -75,6 +84,12 @@ pub const static = static_files.static;
 pub const Static = static_files.Static;
 pub const StaticOptions = static_files.StaticOptions;
 
+// The server described at compile time, for a generator of documents.
+pub const describe = describe_file.describe;
+pub const Description = describe_file.Description;
+pub const RouteDescription = describe_file.RouteDescription;
+pub const ChainElement = describe_file.ChainElement;
+
 pub const routes = route_decls.routes;
 pub const get = route_decls.get;
 pub const post = route_decls.post;
@@ -94,6 +109,8 @@ test {
     _ = @import("path.zig");
     _ = @import("router.zig");
     _ = @import("plan.zig");
+    _ = @import("describe.zig");
+    _ = @import("check.zig");
     _ = @import("Server.zig");
     _ = @import("errors.zig");
     _ = @import("strict.zig");

@@ -32,6 +32,7 @@ const core = @import("core");
 const Backend = @import("Backend.zig");
 const NativeBackend = @import("native/Backend.zig");
 const Context = @import("Context.zig");
+const check = @import("check.zig");
 const dto = @import("dto.zig");
 const flow = @import("flow.zig");
 const mw = @import("middleware.zig");
@@ -263,6 +264,9 @@ const Route = struct {
     /// The route's own middleware, after the server's: the controller's,
     /// then the method's.
     links: []const mw.Link,
+    /// What the route declares, for the Debug check of a controller with
+    /// `openapi` (check.zig); null for another controller.
+    check: check.TableRef,
 };
 
 /// What the routes and the mounts need of the backend: the routes' is
@@ -348,6 +352,7 @@ pub fn init(gpa: std.mem.Allocator, parts: anytype, options: Options) InitError!
             .timeout = r.timeout,
             .heartbeat = r.heartbeat,
             .links = links[offset..][0..r.chain.len],
+            .check = comptime check.tableOf(r.Controller, r.handler, r.Route, p.global ++ r.chain, p.Handler),
         };
         offset += r.chain.len;
         filled += 1;
@@ -788,6 +793,9 @@ const TestingBackend = @import("testing/Backend.zig");
 const Json = @import("dto.zig").Json;
 const normalize = @import("path.zig").normalize;
 
+/// The events of the users' stream.
+const UserEvent = union(enum) { joined: struct { id: u64 } };
+
 const UsersV1Controller = struct {
     pub const http_routes = route_decls.routes(.{
         .prefix = "/v1/users",
@@ -795,7 +803,7 @@ const UsersV1Controller = struct {
             .list = route_decls.get("", .{}),
             .get = route_decls.get("/{id}", .{ .timeout = std.Io.Duration.fromSeconds(5) }),
             .remove = route_decls.delete("/{id}", .{}),
-            .events = sse.get("/events", .{ .on_close = .eventsClosed }),
+            .events = sse.get("/events", .{ .events = UserEvent, .on_close = .eventsClosed }),
         },
     });
 
@@ -1389,4 +1397,14 @@ test "a testing backend that fails once the server has stopped does nothing" {
     backend.fail(io, error.Unavailable);
     try server.wait(io);
     try server.shutdown(io, far(io));
+}
+
+test "http.Server names only its lifecycle, its options and their errors in public" {
+    const names = [_][]const u8{
+        "Internal",             "State",       "InitError", "StartError", "WaitError", "ShutdownError", "TrustedProxies",
+        "UnknownFieldsOptions", "JsonOptions", "Options",   "init",       "start",     "wait",          "run",
+        "requestStop",          "shutdown",    "isReady",   "state",      "deinit",
+    };
+    inline for (names) |name| try testing.expect(@hasDecl(Server, name));
+    try testing.expectEqual(names.len, comptime std.meta.declarations(Server).len);
 }

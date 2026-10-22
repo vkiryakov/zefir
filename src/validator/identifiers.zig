@@ -10,6 +10,7 @@
 //! input, allocates nothing and reads each byte a bounded number of times.
 const std = @import("std");
 const core = @import("core.zig");
+const schema = @import("schema.zig");
 const Rule = core.Rule;
 const Outcome = core.Outcome;
 
@@ -515,6 +516,53 @@ pub fn isEthereumAddress(s: []const u8) bool {
         if ((nibble >= 8) != std.ascii.isUpper(c)) return false;
     }
     return true;
+}
+
+// ------------------------------------------------------------------ schema
+
+/// The JSON Schema keywords of a rule of this file on the unwrapped field
+/// type `T`, for `v.schemaOf`. An identifier without a check digit is an
+/// exact pattern; a checksum is beyond a pattern, so the rules with one get
+/// the form of the identifier, approximate.
+pub fn schemaOf(comptime rule: Rule, comptime T: type) schema.RuleSchema {
+    _ = T;
+    return switch (rule.kind) {
+        .uuid => schema.exact(&.{ schema.format("uuid"), schema.pattern("^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$") }),
+        .mongo_id => schema.exact(&.{schema.pattern("^[0-9A-Fa-f]{24}$")}),
+        .firebase_push_id => schema.exact(&.{schema.pattern("^[0-9A-Za-z_-]{20}$")}),
+        .hash => blk: {
+            const digits = hexLength(@field(HashAlgorithm, rule.params[0].value.tag));
+            break :blk schema.exact(&.{schema.pattern("^[0-9A-Fa-f]" ++ schema.repetition(digits, digits) ++ "$")});
+        },
+        .credit_card => schema.approximate(&.{schema.pattern("^[0-9]{12,19}$")}, "a valid credit card number, with its Luhn check digit"),
+        .isbn => schema.approximate(&.{schema.pattern("^(?:[0-9]{9}[0-9X]|97(?:8[0-9]|9[1-9])[0-9]{9})$")}, "a valid ISBN-10 or ISBN-13, with its check digit"),
+        .isbn10 => schema.approximate(&.{schema.pattern("^[0-9]{9}[0-9X]$")}, "a valid ISBN-10, with its check digit"),
+        .isbn13 => schema.approximate(&.{schema.pattern("^97(?:8[0-9]|9[1-9])[0-9]{9}$")}, "a valid ISBN-13, with its check digit"),
+        .issn => schema.approximate(&.{schema.pattern("^[0-9]{4}-[0-9]{3}[0-9X]$")}, "a valid ISSN, with its check digit"),
+        .ean => schema.approximate(&.{schema.pattern("^(?:[0-9]{8}|[0-9]{13,14})$")}, "a valid EAN, with its check digit"),
+        .isin => schema.approximate(&.{schema.pattern("^[A-Z]{2}[0-9A-Z]{9}[0-9]$")}, "a valid ISIN, with its check digit"),
+        .isrc => schema.exact(&.{schema.pattern("^[A-Z]{2}[0-9A-Z]{3}[0-9]{7}$")}),
+        .bic => schema.exact(&.{schema.pattern("^[A-Z]{6}[0-9A-Z]{2}(?:[0-9A-Z]{3})?$")}),
+        .iban => schema.approximate(&.{schema.pattern("^[A-Z]{2}(?:0[2-9]|[1-8][0-9]|9[0-8])[0-9A-Z]{11,30}$")}, "a valid IBAN, with its MOD 97-10 check digits"),
+        .btc_address => btcAddressSchema(@field(BtcNetwork, rule.params[0].value.tag)),
+        .ethereum_address => schema.approximate(&.{schema.pattern("^0x[0-9A-Fa-f]{40}$")}, "a valid Ethereum address, with the EIP-55 checksum when the letters mix cases"),
+        else => unreachable,
+    };
+}
+
+/// `btcAddress(network)`: the prefix, the alphabet and the length of each
+/// form; the checksums are beyond a pattern. A Base58Check address of
+/// mainnet starts with `1` (version 0x00) or `3` (0x05), one of testnet with
+/// `m` or `n` (0x6f) or `2` (0xc4).
+fn btcAddressSchema(comptime network: BtcNetwork) schema.RuleSchema {
+    const segwit, const base58, const name = switch (network) {
+        .mainnet => .{ "bc1", "[13]", "Bitcoin address" },
+        .testnet => .{ "tb1", "[2mn]", "Bitcoin testnet address" },
+        .any => .{ "(?:bc|tb)1", "[123mn]", "Bitcoin mainnet or testnet address" },
+    };
+    // Bech32 has no 1, b, i or o; Base58 no 0, O, I or l.
+    const regex = "^(?:" ++ segwit ++ "[02-9ac-hj-np-z]{7,87}|" ++ base58 ++ "[1-9A-HJ-NP-Za-km-z]{0,34})$";
+    return schema.approximate(&.{schema.pattern(regex)}, "a valid " ++ name ++ ", with its checksum");
 }
 
 // ------------------------------------------------------------------ tests
