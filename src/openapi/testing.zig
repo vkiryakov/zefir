@@ -40,7 +40,7 @@ const Document = @import("document.zig").Document;
 /// `path`, relative to the working directory of the test, or absolute. A
 /// file that differs, or none, fails the test: it prints the first line
 /// that differs, its number and both texts, and
-/// `error: openapi.json is out of date; run `zig build openapi``. A `\r`
+/// ``error: openapi.json is out of date; run `zig build openapi` ``. A `\r`
 /// before a `\n` of the file is not a difference: a checkout on Windows may
 /// have them. With `ZEFIR_OPENAPI_UPDATE=1` in the environment of the test
 /// it writes the file instead.
