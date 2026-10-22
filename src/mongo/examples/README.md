@@ -1921,7 +1921,7 @@ const core = @import("core");
 const log = @import("log");
 const mongo = @import("mongo");
 const zio = @import("zio");
-const bson = mongo.bson;
+const bson = @import("mongo-bson");
 
 /// App and the client log through std.log; this sends their records to
 /// the logger.
