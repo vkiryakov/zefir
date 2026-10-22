@@ -44,9 +44,26 @@ const Example = struct {
     command: []const u8,
 };
 
+/// mongo-plain, for the programs without a user.
+const plain: []const [2][]const u8 = &.{.{ "APP_MONGO_URI", "mongodb://127.0.0.1:27117" }};
+
 /// The programs, in the order of the guide: `server_programs` of
 /// src/odm/examples/cases.zig, which guide_test.zig checks.
-const examples = [_]Example{};
+const examples = [_]Example{
+    .{ .name = "quick_start", .env = plain, .command = "$ zig build run" },
+    .{
+        .name = "tenants",
+        // The shared server is mongo-plain; big-co is the user app of
+        // mongo-auth, whose rights end at its database, app.
+        .env = &.{
+            .{ "APP_SHARED_URI", "mongodb://127.0.0.1:27117" },
+            .{ "APP_BIG_URI", "mongodb://app@127.0.0.1:27118/app" },
+            .{ "APP_BIG_PASSWORD", "app-pass" },
+            .{ "APP_BIG_DATABASE", "app" },
+        },
+        .command = "$ APP_BIG_URI=mongodb://admin@127.0.0.1:27018 APP_BIG_PASSWORD=change-me zig build run",
+    },
+};
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});

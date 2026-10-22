@@ -32,6 +32,9 @@ production, and reaches MongoDB through zefir-mongo.
 - [Tests without MongoDB](#tests-without-mongodb)
 - [For authors of drivers](#for-authors-of-drivers)
 
+Programs that `zig build e2e` in `tests/odm` builds and runs against
+mongod, checking what they print against this guide:
+[quick start](quick_start.zig) · [tenants](tenants.zig).
 Programs that `zig build test-odm` runs without a server:
 [models](models.zig) · [queries](queries.zig).
 
@@ -70,6 +73,295 @@ flowchart LR
 
 The code of a request sees a session and its collections, never a server
 or a password, and a session reaches only its tenant's database.
+
+## Installation
+
+Add Zefir to your `build.zig.zon`:
+
+```sh
+zig fetch --save git+https://github.com/vkiryakov/zefir#dev
+```
+
+zefir-odm is on the `dev` branch until the next release. The command
+fetches the latest commit of `dev`; `--save` pins that commit. The latest
+release, v0.9.0, came before zefir-odm, so `#v0.9.0` does not have it.
+
+A service runs on [zio](https://github.com/lalinsky/zio). zio has no
+release for Zig 0.17 yet, so pin the commit Zefir is tested with:
+
+```sh
+zig fetch --save git+https://github.com/lalinsky/zio#d15034f1a4d9ddaa42829aae8f7e02d37cd1093a
+```
+
+Then import the modules in `build.zig`: odm; mongo, whose `OdmDriver`
+talks to the server; and mongo-bson, for the types of documents, such as
+`bson.ObjectId`. A model with `field_rules` uses validator, and the
+programs of this guide also use Zefir's confy for settings, log for
+records and core for deadlines:
+
+```zig
+// build.zig
+const zefir = b.dependency("zefir", .{ .target = target, .optimize = optimize });
+const zio = b.dependency("zio", .{ .target = target, .optimize = optimize });
+
+const exe = b.addExecutable(.{
+    .name = "shop",
+    .root_module = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "odm", .module = zefir.module("zefir-odm") },
+            .{ .name = "mongo", .module = zefir.module("zefir-mongo") },
+            .{ .name = "mongo-bson", .module = zefir.module("zefir-mongo-bson") },
+            .{ .name = "validator", .module = zefir.module("zefir-validator") },
+            .{ .name = "zio", .module = zio.module("zio") },
+            .{ .name = "confy", .module = zefir.module("zefir-confy") },
+            .{ .name = "log", .module = zefir.module("zefir-log") },
+            .{ .name = "core", .module = zefir.module("zefir-core") },
+        },
+    }),
+});
+b.installArtifact(exe);
+b.step("run", "Run the service").dependOn(&b.addRunArtifact(exe).step);
+```
+
+> [!TIP]
+> zefir-odm is also part of the umbrella module: with
+> `zefir.module("zefir")` imported as `zefir`, it is `@import("zefir").odm`.
+> odm imports zefir-core, zefir-validator and zefir-mongo-bson, and no
+> driver: zefir-mongo imports odm, to implement its contract. A package
+> that only declares models, shared by several services, needs odm and
+> mongo-bson alone.
+
+You need a mongod to talk to. With Docker:
+
+```sh
+docker run --rm -p 27017:27017 mongo:9.0.4
+```
+
+## Quick start
+
+The customers of the shop of one tenant, acme. The program connects,
+makes the e-mail of a customer unique, signs four customers up, finds the
+adults, gives one a birthday, lets one go, and counts the adults again:
+
+```zig
+//! The quick start of the guide: the customers of a shop, for the tenant
+//! "acme", in the collection "users" of its database. It connects, makes
+//! the e-mail of a customer unique, signs customers up, finds the adults
+//! among them, gives one a birthday, lets one go, and counts the adults
+//! again. Each run starts from an empty collection.
+//!
+//! Settings, from the environment:
+//!
+//!   APP_MONGO_URI        the server; mongodb://127.0.0.1:27017 by default
+//!   APP_MONGO_PASSWORD   the password of the user that the URI names, if
+//!                        it names one
+//!
+//! In tests/odm, `zig build example-quick_start` runs it against the
+//! servers of the repository's docker-compose.yml.
+
+const std = @import("std");
+const confy = @import("confy");
+const core = @import("core");
+const log = @import("log");
+const mongo = @import("mongo");
+const odm = @import("odm");
+const zio = @import("zio");
+const bson = @import("mongo-bson");
+
+/// odm and the driver log through std.log; this sends their records to
+/// the logger.
+pub const std_options: std.Options = .{ .logFn = log.stdLogFn };
+
+const Config = struct {
+    mongo: struct {
+        uri: []const u8 = "mongodb://127.0.0.1:27017",
+        /// Kept out of the URI, and out of every log.
+        password: ?confy.Secret = null,
+    } = .{},
+};
+
+/// A customer of the shop, as the collection keeps it.
+const User = struct {
+    /// null: odm makes an ObjectId when it inserts the customer.
+    id: ?bson.ObjectId = null,
+    email: []const u8,
+    name: []const u8,
+    age: u32 = 0,
+
+    pub const odm_schema: odm.Schema(User) = .{
+        .collection = "users",
+        .id = .id,
+        .indexes = &.{.{ .keys = &.{.{ .email = .asc }}, .unique = true }},
+    };
+};
+
+pub fn main(init: std.process.Init) !void {
+    var config: Config = undefined;
+    confy.loadOrExit(init.arena.allocator(), &config, .{
+        .io = init.io,
+        .environ = init.environ_map,
+        .env_prefix = "APP_",
+        .sources = &.{.osEnv()},
+    });
+    // The logger outlives the runtime, so it takes `init.io`, through which
+    // the tasks of the runtime may log too.
+    const logger: log.Logger = try .init(init.gpa, init.io, .{ .format = .text });
+    defer logger.deinit();
+    logger.installStdLog();
+    const app = logger.scoped("app");
+
+    // One runtime for the program, with an executor per CPU core. The
+    // registry and every call of it run on its `io`.
+    const rt = try zio.Runtime.init(init.gpa, .{ .executors = .auto });
+    defer rt.deinit();
+    const io = rt.io();
+
+    // The driver and the registry: one of each for the whole program.
+    // Neither does I/O yet.
+    var driver: mongo.OdmDriver = .init(init.gpa);
+    var registry: odm.Registry = .init(init.gpa, io, driver.driver(), .{});
+    defer registry.deinit(io);
+    // A connection: this server, with this login. Registering it opens a
+    // client of the driver without the network; connect opens the first
+    // network connection and logs in, under its deadline.
+    try registry.registerConnection(io, "main", .{
+        .uri = config.mongo.uri,
+        .password = if (config.mongo.password) |password| password.expose() else null,
+    });
+    registry.connect(io, within(io, .fromSeconds(10)), "main") catch |err| {
+        const stats = try registry.connectionStats(io, "main");
+        app.err("Cannot connect", .{ .reason = err, .details = if (stats.last_failure) |*failure| failure.message() else "" });
+        return err;
+    };
+    app.info("Connected", .{});
+    // A tenant: acme, whose database is "acme", on that connection.
+    try registry.provisionTenant(io, within(io, .fromSeconds(10)), .{
+        .tenant = "acme",
+        .connection = .{ .existing = "main" },
+        .database = "acme",
+        .version = 1,
+    });
+
+    try run(io, init.gpa, &registry, app);
+
+    const stats = registry.stats(io);
+    app.info("Done", .{ .tenants = stats.tenants, .operations = stats.operations, .leases = stats.leases });
+}
+
+/// A context whose deadline is `budget` away.
+fn within(io: std.Io, budget: std.Io.Duration) core.Context {
+    return core.Context.root.withDeadline(.after(std.Io.Clock.awake.now(io), budget));
+}
+
+/// The application: it asks the registry for its tenant, and sees a
+/// collection, not the connection.
+fn run(io: std.Io, gpa: std.mem.Allocator, registry: *odm.Registry, app: log.Logger) !void {
+    // The memory of the results, all freed at the end.
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // Five seconds for all of it: each call has what is left of them.
+    const ctx = within(io, .fromSeconds(5));
+
+    // A session on the tenant's database, for this task, and the
+    // collection of User in it.
+    var acme = try registry.tenant(io, "acme");
+    defer acme.deinit(io);
+    const users = acme.collection(User);
+
+    // Start afresh, and make the e-mail of a customer unique.
+    _ = try users.deleteMany(io, ctx, .{});
+    try users.ensureIndexes(io, ctx);
+
+    // A customer; odm makes the id, and says which.
+    const ann = try users.insertOne(io, ctx, .{ .email = "ann@example.com", .name = "Ann", .age = 30 });
+    app.info("Signed up", .{ .name = "Ann", .id = ann.id });
+    // Three more, in one request.
+    const more = [_]User{
+        .{ .email = "bob@example.com", .name = "Bob", .age = 17 },
+        .{ .email = "cleo@example.com", .name = "Cleo", .age = 41 },
+        .{ .email = "dan@example.com", .name = "Dan", .age = 25 },
+    };
+    const signed = try users.insertMany(io, ctx, &more, arena);
+    app.info("Signed up", .{ .count = signed.ids.len });
+
+    // The adults, the oldest first. The cursor brings them batch by batch,
+    // each one decoded into a User in the arena.
+    var adults = try users.find(io, ctx, .{ .age = .{ .gte = 18 } }, .{ .sort = .{ .age = .desc } });
+    defer adults.deinit(io);
+    while (try adults.next(io, ctx, arena)) |user| app.info("Adult", .{ .name = user.name, .age = user.age });
+
+    // Bob has a birthday.
+    const birthday = try users.updateOne(io, ctx, .{ .email = "bob@example.com" }, .{ .inc = .{ .age = 1 } });
+    app.info("Birthday", .{ .matched = birthday.matched, .modified = birthday.modified });
+    // Dan leaves the shop.
+    const left = try users.deleteOne(io, ctx, .{ .email = "dan@example.com" });
+    app.info("Left", .{ .deleted = left.deleted });
+    const count = try users.count(io, ctx, .{ .age = .{ .gte = 18 } });
+    app.info("Adults now", .{ .count = count });
+}
+```
+
+Start a mongod as in [Installation](#installation), then the program:
+
+```text
+$ zig build run
+2026-10-22T14:48:18.011Z INFO  [app] Connected
+2026-10-22T14:48:18.014Z INFO  [app] Signed up name=Ann id=6ada22329d273800a4779333
+2026-10-22T14:48:18.014Z INFO  [app] Signed up count=3
+2026-10-22T14:48:18.015Z INFO  [app] Adult name=Cleo age=41
+2026-10-22T14:48:18.015Z INFO  [app] Adult name=Ann age=30
+2026-10-22T14:48:18.015Z INFO  [app] Adult name=Dan age=25
+2026-10-22T14:48:18.016Z INFO  [app] Birthday matched=1 modified=1
+2026-10-22T14:48:18.017Z INFO  [app] Left deleted=1
+2026-10-22T14:48:18.018Z INFO  [app] Adults now count=3
+2026-10-22T14:48:18.019Z INFO  [app] Done tenants=1 operations=8 leases=0
+```
+
+What happens, from the top:
+
+- **Settings.** `confy.loadOrExit` fills `Config` from the environment:
+  `APP_MONGO_URI` is `mongo.uri`, and `APP_MONGO_PASSWORD` is
+  `mongo.password`, a `confy.Secret`, which no log prints. It stays out
+  of the connection string, and `expose()` hands it to the registry,
+  which passes it to the driver and keeps no copy.
+- **Logs.** odm writes its warnings to `std.log.scoped(.odm)`, and the
+  driver to `.mongo`; `std_options` with `log.stdLogFn` and
+  `logger.installStdLog()` send them to zefir-log, see
+  [Shutdown, statistics and logs](#shutdown-statistics-and-logs).
+- **The runtime.** Everything runs on the `std.Io` of zio, `rt.io()`,
+  with an executor per CPU core. The registry takes that `io` at `init`,
+  and every call of the registry, of its sessions and of their
+  collections comes on it: in safe builds a call on another `std.Io`
+  panics, `rt.blockingIo()` of the same runtime too.
+- **The driver and the registry.** `mongo.OdmDriver` opens the clients
+  that the registry asks for, and lives longer than the registry.
+  `odm.Registry.init` does no I/O and starts no task: the registry works
+  in the calls of your tasks only.
+- **The connection.** `registerConnection` names it "main" and opens a
+  client of the driver, without the network; `connect` opens the first
+  network connection and logs in, under its deadline. A server that is
+  not there, or a wrong password, shows here, at the start:
+  `connectionStats(io, "main").last_failure` holds the driver's text.
+- **The tenant.** `provisionTenant` binds acme to the connection "main"
+  and to its database, "acme"; version 1 is its first event, see
+  [Tenants](#tenants).
+- **A session.** `registry.tenant(io, "acme")` gives a session on acme's
+  database, with a lease of the connection, and `acme.collection(User)`
+  the collection of the model in it. `defer acme.deinit(io)` gives the
+  lease back.
+- **Contexts.** Each call takes a `core.Context`: here five seconds for
+  all the calls of `run`, each with what is left of them.
+- **Memory.** The strings of the users that `next` decodes, and the ids
+  of `insertMany`, live in the arena, which goes all at once at the end.
+  A cursor needs its `deinit`.
+- **The end.** `stats` counts the eight operations, and no lease is out:
+  the session went back. `registry.deinit(io)` closes the connection and
+  frees the registry; a service shuts it down first, with a deadline, see
+  [Shutdown, statistics and logs](#shutdown-statistics-and-logs).
 
 ## Models
 
@@ -944,3 +1236,326 @@ Two paths take BSON as it is, and check nothing against the model:
 They reach what the login of the connection may reach: a `$out` or
 `$merge` stage, or a command, may name another database. Keep the input
 of users out of them, see [Security](#security).
+
+## Tenants
+
+A *tenant* is a customer of the service: here a company with its shop.
+Each tenant has a database of its own, and its requests reach only that
+database. The registry takes tenants in two modes, which a service may
+mix:
+
+- **Mode A: a shared connection.** Many tenants on one server with one
+  login, each in its own database. One pool serves them all. The login
+  reaches all their databases, so the registry keeps them apart: by the
+  binding of each tenant to its database.
+- **Mode B: a connection of the tenant's own**, a server of its own for a
+  big customer, or a login of its own on the shared server. The rights of
+  that login keep the tenant in its database on the server itself.
+
+```mermaid
+flowchart LR
+    subgraph registry["odm.Registry"]
+        acme["tenant acme:<br/>database acme"]
+        globex["tenant globex:<br/>database globex"]
+        big["tenant big-co:<br/>database bigco"]
+        shared(["connection shared"])
+        own(["connection big-co"])
+        acme --> shared
+        globex --> shared
+        big --> own
+    end
+    shared --> server1[("the shared mongod")]
+    own --> server2[("the mongod of big-co")]
+```
+
+`tenants.zig` serves three shops this way:
+
+```zig
+//! Tenants: the shops of three companies in one service. acme and globex
+//! share a server and its login, each with a database of its own; big-co
+//! has a server and a login of its own. The service hears of its tenants
+//! by events with versions, applies them to the registry as they come,
+//! late and twice included, and serves the requests of each tenant in its
+//! own database, after it checked that the caller may use that tenant.
+//! Each run starts from empty collections.
+//!
+//! Settings, from the environment:
+//!
+//!   APP_SHARED_URI        the shared server; mongodb://127.0.0.1:27017 by
+//!                         default
+//!   APP_SHARED_PASSWORD   the password of the user of APP_SHARED_URI, if
+//!                         it names one
+//!   APP_BIG_URI           the server of big-co and its user, such as
+//!                         mongodb://admin@127.0.0.1:27018
+//!   APP_BIG_PASSWORD      that user's password
+//!   APP_BIG_DATABASE      the database of big-co; bigco by default
+//!
+//! In tests/odm, `zig build example-tenants` runs it against the servers
+//! of the repository's docker-compose.yml.
+
+const std = @import("std");
+const confy = @import("confy");
+const core = @import("core");
+const log = @import("log");
+const mongo = @import("mongo");
+const odm = @import("odm");
+const zio = @import("zio");
+const bson = @import("mongo-bson");
+
+pub const std_options: std.Options = .{ .logFn = log.stdLogFn };
+
+const Config = struct {
+    shared: struct {
+        uri: []const u8 = "mongodb://127.0.0.1:27017",
+        password: ?confy.Secret = null,
+    } = .{},
+    big: struct {
+        uri: []const u8,
+        password: ?confy.Secret = null,
+        database: []const u8 = "bigco",
+    },
+};
+
+/// An order of a shop, in the collection "orders" of its tenant.
+const Order = struct {
+    id: ?bson.ObjectId = null,
+    customer: []const u8,
+    item: []const u8,
+    cents: u32,
+
+    pub const odm_schema: odm.Schema(Order) = .{
+        .collection = "orders",
+        .id = .id,
+        .indexes = &.{.{ .keys = &.{.{ .customer = .asc }} }},
+    };
+};
+
+/// Who calls: the subject of the request's token and the tenants it may
+/// use, as the authentication of the service finds them.
+const Caller = struct { name: []const u8, tenants: []const []const u8 };
+
+pub fn main(init: std.process.Init) !void {
+    var config: Config = undefined;
+    confy.loadOrExit(init.arena.allocator(), &config, .{
+        .io = init.io,
+        .environ = init.environ_map,
+        .env_prefix = "APP_",
+        .sources = &.{.osEnv()},
+    });
+    const logger: log.Logger = try .init(init.gpa, init.io, .{ .format = .text });
+    defer logger.deinit();
+    logger.installStdLog();
+    const app = logger.scoped("app");
+    const rt = try zio.Runtime.init(init.gpa, .{ .executors = .auto });
+    defer rt.deinit();
+    const io = rt.io();
+
+    var driver: mongo.OdmDriver = .init(init.gpa);
+    var registry: odm.Registry = .init(init.gpa, io, driver.driver(), .{});
+    defer registry.deinit(io);
+    // The shared server, as the service starts.
+    try registry.registerConnection(io, "shared", .{
+        .uri = config.shared.uri,
+        .password = if (config.shared.password) |password| password.expose() else null,
+    });
+    try registry.connect(io, within(io, .fromSeconds(10)), "shared");
+
+    // The events of the tenants, as they come: two on the shared
+    // connection, each in its own database, and one with a connection of
+    // its own, which the provisioning registers and connects.
+    apply(&registry, io, app, .{ .tenant = "acme", .connection = .{ .existing = "shared" }, .database = "acme", .version = 1 });
+    apply(&registry, io, app, .{ .tenant = "globex", .connection = .{ .existing = "shared" }, .database = "globex", .version = 1 });
+    apply(&registry, io, app, .{
+        .tenant = "big-co",
+        .connection = .{ .new = .{
+            .id = "big-co",
+            .uri = config.big.uri,
+            .password = if (config.big.password) |password| password.expose() else null,
+        } },
+        .database = config.big.database,
+        .version = 1,
+    });
+    // The same event again, as a queue may deliver it twice: nothing
+    // changes. The same version with other settings is a conflict; a newer
+    // one applies; an older one that came late changes nothing.
+    apply(&registry, io, app, .{ .tenant = "acme", .connection = .{ .existing = "shared" }, .database = "acme", .version = 1 });
+    apply(&registry, io, app, .{ .tenant = "acme", .connection = .{ .existing = "shared" }, .database = "acme-eu", .version = 1 });
+    apply(&registry, io, app, .{ .tenant = "acme", .connection = .{ .existing = "shared" }, .database = "acme", .version = 2 });
+    apply(&registry, io, app, .{ .tenant = "acme", .connection = .{ .existing = "shared" }, .database = "acme", .version = 1 });
+
+    // Each run starts afresh.
+    for ([_][]const u8{ "acme", "globex", "big-co" }) |tenant_id| {
+        var session = try registry.tenant(io, tenant_id);
+        defer session.deinit(io);
+        _ = try session.collection(Order).deleteMany(io, within(io, .fromSeconds(5)), .{});
+    }
+
+    // Requests. Ann works for acme, Bo for big-co.
+    const ann: Caller = .{ .name = "ann", .tenants = &.{"acme"} };
+    const bo: Caller = .{ .name = "bo", .tenants = &.{"big-co"} };
+    const ops: Caller = .{ .name = "ops", .tenants = &.{ "acme", "globex", "big-co", "initech" } };
+    serve(&registry, io, app, ann, "acme", .{ .customer = "cleo", .item = "green tea", .cents = 450 });
+    serve(&registry, io, app, ann, "globex", .{ .customer = "cleo", .item = "black tea", .cents = 390 });
+    serve(&registry, io, app, bo, "big-co", .{ .customer = "dan", .item = "oolong", .cents = 820 });
+    serve(&registry, io, app, ops, "initech", .{ .customer = "eve", .item = "sencha", .cents = 610 });
+
+    // Each tenant sees its own orders only.
+    for ([_][]const u8{ "acme", "globex", "big-co" }) |tenant_id| {
+        var session = try registry.tenant(io, tenant_id);
+        defer session.deinit(io);
+        const orders = try session.collection(Order).count(io, within(io, .fromSeconds(5)), .{});
+        app.info("Orders", .{ .tenant = tenant_id, .count = orders });
+    }
+
+    // globex leaves: new requests do not find it.
+    try registry.removeTenant(io, "globex");
+    serve(&registry, io, app, ops, "globex", .{ .customer = "cleo", .item = "black tea", .cents = 390 });
+
+    const stats = registry.stats(io);
+    app.info("Done", .{ .active = stats.connections.active, .tenants = stats.tenants, .leases = stats.leases });
+}
+
+/// A context whose deadline is `budget` away.
+fn within(io: std.Io, budget: std.Io.Duration) core.Context {
+    return core.Context.root.withDeadline(.after(std.Io.Clock.awake.now(io), budget));
+}
+
+/// Applies an event of a tenant to the registry, and makes the indexes of
+/// its database, which starts empty. The same event again changes nothing,
+/// and so does an older one: the queue of the events may take both as
+/// done.
+fn apply(registry: *odm.Registry, io: std.Io, app: log.Logger, event: odm.Provision) void {
+    var d: odm.Diagnostics = .{};
+    var request = event;
+    request.diagnostics = &d;
+    const ctx = within(io, .fromSeconds(10));
+    registry.provisionTenant(io, ctx, request) catch |err| {
+        app.warn("Event not applied", .{ .tenant = event.tenant, .version = event.version, .reason = err, .details = d.message() });
+        return;
+    };
+    var session = registry.tenant(io, event.tenant) catch return;
+    defer session.deinit(io);
+    session.collection(Order).ensureIndexes(io, ctx) catch |err| {
+        app.warn("No indexes", .{ .tenant = event.tenant, .reason = err, .details = session.diagnostics().message() });
+        return;
+    };
+    app.info("Event applied", .{ .tenant = event.tenant, .version = event.version });
+}
+
+/// Serves a request and logs how it went.
+fn serve(registry: *odm.Registry, io: std.Io, app: log.Logger, caller: Caller, tenant_id: []const u8, order: Order) void {
+    const id = placeOrder(registry, io, within(io, .fromSeconds(5)), caller, tenant_id, order) catch |err| {
+        app.warn("Refused", .{ .tenant = tenant_id, .caller = caller.name, .reason = err });
+        return;
+    };
+    app.info("Order placed", .{ .tenant = tenant_id, .caller = caller.name, .id = id });
+}
+
+const PlaceError = odm.Error || error{Forbidden};
+
+/// The handler of `POST /tenants/{tenant}/orders`, with the fields of the
+/// request as its parameters. The tenant id comes from the path, which the
+/// caller wrote: the handler checks that the caller may use that tenant
+/// before it asks the registry, which takes any id it knows.
+fn placeOrder(registry: *odm.Registry, io: std.Io, ctx: core.Context, caller: Caller, tenant_id: []const u8, order: Order) PlaceError!bson.ObjectId {
+    for (caller.tenants) |allowed| {
+        if (std.mem.eql(u8, allowed, tenant_id)) break;
+    } else return error.Forbidden;
+    var session = try registry.tenant(io, tenant_id);
+    defer session.deinit(io);
+    const placed = try session.collection(Order).insertOne(io, ctx, order);
+    return placed.id;
+}
+```
+
+It needs a second mongod, with a user. The image of mongo makes a root
+user from two variables; this one listens on 27018, next to the shared
+one:
+
+```sh
+docker run --rm -p 27018:27017 -e MONGO_INITDB_ROOT_USERNAME=admin -e MONGO_INITDB_ROOT_PASSWORD=change-me mongo:9.0.4
+```
+
+```text
+$ APP_BIG_URI=mongodb://admin@127.0.0.1:27018 APP_BIG_PASSWORD=change-me zig build run
+2026-10-22T14:48:18.755Z INFO  [app] Event applied tenant=acme version=1
+2026-10-22T14:48:18.755Z INFO  [app] Event applied tenant=globex version=1
+2026-10-22T14:48:18.781Z INFO  [app] Event applied tenant=big-co version=1
+2026-10-22T14:48:18.782Z INFO  [app] Event applied tenant=acme version=1
+2026-10-22T14:48:18.782Z WARN  [app] Event not applied tenant=acme version=1 reason=ProvisioningConflict details="odm: version 1 is the tenant's version, with other settings"
+2026-10-22T14:48:18.783Z INFO  [app] Event applied tenant=acme version=2
+2026-10-22T14:48:18.783Z WARN  [app] Event not applied tenant=acme version=1 reason=StaleVersion details="odm: version 1 is older than the tenant's version 2"
+2026-10-22T14:48:18.785Z INFO  [app] Order placed tenant=acme caller=ann id=6ada22325be6de08a0e53a72
+2026-10-22T14:48:18.785Z WARN  [app] Refused tenant=globex caller=ann reason=Forbidden
+2026-10-22T14:48:18.786Z INFO  [app] Order placed tenant=big-co caller=bo id=6ada22325be6de08a0e53a73
+2026-10-22T14:48:18.786Z WARN  [app] Refused tenant=initech caller=ops reason=TenantNotFound
+2026-10-22T14:48:18.787Z INFO  [app] Orders tenant=acme count=1
+2026-10-22T14:48:18.787Z INFO  [app] Orders tenant=globex count=0
+2026-10-22T14:48:18.788Z INFO  [app] Orders tenant=big-co count=1
+2026-10-22T14:48:18.788Z WARN  [app] Refused tenant=globex caller=ops reason=TenantNotFound
+2026-10-22T14:48:18.788Z INFO  [app] Done active=2 tenants=2 leases=0
+```
+
+### Events and versions
+
+A service hears of its tenants from elsewhere: a queue, a call of another
+service, its own settings. Each event of a tenant has a version, which
+grows with each change of the tenant, and `provisionTenant` applies it by
+this table:
+
+| The tenant | The version of the event | Its settings | What happens |
+|---|---|---|---|
+| unknown | any | | the tenant is bound |
+| known | lower than the tenant's | | `StaleVersion`, and nothing changes |
+| known | the tenant's | the same | success, and nothing changes |
+| known | the tenant's | other | `ProvisioningConflict` |
+| known | higher | any | the tenant is bound anew |
+
+The settings are the same when the database and the connection are:
+`.existing` of the same id, or `.new` of the same id, URI and password. A
+queue may deliver an event twice, and an old one late. The same event
+again succeeds and changes nothing; an old one is `StaleVersion` and
+changes nothing; so the service may take both as done, as the run does
+with the second event of acme at version 1 and the last one. Two events
+of one tenant at once take turns.
+
+`.new` makes the tenant's own connection: the registry registers it and
+connects it. When that fails, for a wrong password or a server that is
+not there, the registry removes it again, and the tenant stays as it was.
+A `.new` with the id of a connection that is there already reuses it when
+its URI and password are the same, and is `ProvisioningConflict` when
+they are not: credentials change with `replaceConnection`, see
+[Connections and credentials](#connections-and-credentials).
+
+The registry publishes a binding whole, once its connection works: a
+request sees the tenant as it was before the event or as it is after it,
+never half of each. A session taken before keeps its database and its
+connection until its `deinit`.
+
+`removeTenant(io, id)` unbinds a tenant, and later requests get
+`TenantNotFound`, as the last request for globex does. Its connection
+stays: `removeConnection` removes a connection once no tenant is bound to
+it. Removing takes no version, and the registry keeps no memory of the
+tenants it removed: an old event that comes after a removal binds the
+tenant again. Where that matters, the service keeps the events of a
+tenant in order.
+
+A new tenant's database starts empty, so `apply` makes the indexes of
+the model after each event; the same indexes again cost a call and change
+nothing.
+
+### Who may use a tenant
+
+The registry trusts the id it gets: `registry.tenant(io, id)` gives a
+session of any tenant it knows. Which tenants a caller may use is for the
+application to decide, at the edge of the request, before it asks the
+registry. `placeOrder` is a handler of zefir-http with the fields of its
+request as parameters: the tenant id of the path, the caller that the
+authentication of the service found, and the order of the body. Ann may
+use acme only, so her order for globex is `Forbidden` before the registry
+sees the id. An id that the caller may use, but that the registry does
+not know, is `TenantNotFound`.
+
+What keeps one tenant out of another's data, and what does not, is in
+[Security](#security).
+
