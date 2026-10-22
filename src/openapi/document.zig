@@ -48,8 +48,9 @@ const Writer = std.Io.Writer;
 pub const Document = struct {
     /// The tree of the document.
     root: Node,
-    /// The server's prefix comes when the program runs, from its config:
-    /// the document has no `servers`, and `Docs` puts the prefix in when it
+    /// The document was built without `.prefix` and `.servers`, as for a
+    /// prefix that comes from the config when the program runs: it has no
+    /// `servers`, and `Docs` puts the prefix of its own route there when it
     /// serves the document.
     runtime_prefix: bool = false,
     /// The `.prefix` it was built with; null for none. In Debug, `Docs`
