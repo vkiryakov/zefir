@@ -11,11 +11,11 @@
 //! At compile time `tableOf` builds what a route declares: the DTO of each
 //! source of its input, the responses it answers with (its `.responses`,
 //! else its default response: 200 `application/json` for `http.Json(T)`,
-//! 204 for `!void`, 200 `text/event-stream` for SSE), the errors it can
-//! give the error handler, whose answers `mapError` gives, and the events
-//! of an SSE route; and what the middleware of its chain declare in their
-//! own `pub const openapi`: the `.query`, `.headers` and `.cookies` they
-//! read, and the `.responses` they write themselves.
+//! 204 for `!void`, 200 `text/event-stream` or 204 for SSE), the errors it
+//! can give the error handler, whose answers `mapError` gives, and the
+//! events of an SSE route; and what the middleware of its chain declare in
+//! their own `pub const openapi`: the `.query`, `.headers` and `.cookies`
+//! they read, and the `.responses` they write themselves.
 //!
 //! At run time it compares:
 //! - each input call (`ctx.path`, `query`, `headers`, `cookies`, `json`,
@@ -167,9 +167,11 @@ fn ValueOf(comptime C: type, comptime handler: []const u8) type {
     return if (Payload == void) void else Payload.Value;
 }
 
-/// The responses of the route `R`, whose handler answers with `Value`.
+/// The responses of the route `R`, whose handler answers with `Value`. An
+/// SSE route answers with its stream, or with 204 when its handler returns
+/// without `subscribe`, which tells an EventSource to stop reconnecting.
 fn answersOf(comptime R: type, comptime Value: type) []const Answer {
-    if (R.route_kind == .sse) return &.{.{ .status = 200, .media = "text/event-stream" }};
+    if (R.route_kind == .sse) return &.{ .{ .status = 200, .media = "text/event-stream" }, .{ .status = 204, .media = null } };
     if (R.responses.len == 0) return &.{if (Value != void) .{ .status = 200, .media = "application/json" } else .{ .status = 204, .media = null }};
     var out: [R.responses.len]Answer = undefined;
     for (R.responses, &out) |r, *answer| {
@@ -639,8 +641,13 @@ test "tableOf: .responses as declared, a void route's 204, an SSE route's stream
     try testing.expectEqual(idOf(TodoPath), remove.own[@backingInt(Source.path)].?.id);
 
     const events = comptime tableOf(TodosV1Controller, "events", TodosV1Controller.Events, &.{}, errors.DefaultErrors).?;
+    try testing.expectEqual(2, events.responses.len);
     try testing.expectEqual(200, events.responses[0].status);
     try testing.expectEqualStrings("text/event-stream", events.responses[0].media.?);
+    // A handler that returns without subscribe: an EventSource stops
+    // reconnecting.
+    try testing.expectEqual(204, events.responses[1].status);
+    try testing.expectEqual(null, events.responses[1].media);
     try testing.expectEqual(idOf(TodoEvent), events.events.?.id);
 }
 
@@ -795,6 +802,7 @@ const ItemsV1Controller = struct {
     }
 
     pub fn events(self: *ItemsV1Controller, ctx: *sse.Context) !void {
+        if (is(ctx.internal.http, "stop")) return;
         if (is(ctx.internal.http, "other events")) {
             _ = try self.other.subscribe(ctx, "items");
             return;
@@ -953,12 +961,13 @@ test "check: the calls and the answers a route declares pass" {
     // An error of the route, answered by mapError.
     try f.expectPassed(.GET, "/api/v1/items/1", "missing", 404);
     try f.expectPassed(.GET, "/api/v1/items/0x", "", 422);
-    // The stream of the route's events.
+    // The stream of the route's events, or 204 without subscribe.
     const s = try f.backend.open(testing.io, .{ .method = .GET, .target = "/api/v1/items/events" });
     defer s.deinit(testing.io);
     try testing.expectEqual(200, s.status);
     try testing.expectEqualStrings("text/event-stream", s.header("content-type").?);
     try f.expectLine(null);
+    try f.expectPassed(.GET, "/api/v1/items/events", "stop", 204);
 }
 
 test "check: an input call of another type, or of a source the route does not declare, is a 500 with its line" {
