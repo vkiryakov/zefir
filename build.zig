@@ -919,6 +919,12 @@ pub fn build(b: *std.Build) void {
         .{ "watch in a pipeline of the client", "redis.Client.pipeline: WATCH holds its keys on the connection it goes on: run it on a connection of client.acquire" },
         .{ "watch in a transaction", "redis.Conn.transaction: WATCH inside a transaction is refused by the server: run it with conn.run before the transaction" },
         .{ "get of a struct", "redis.cmd.get: GET returns a string; a hash is hgetall" },
+        .{ "hset of a tuple", "redis.cmd.hset: a tuple has no field names: give the values names, such as .{ .name = name }" },
+        .{ "hset of a number", "redis.cmd.hset: the fields are a struct, such as .{ .name = name }, or a slice of redis.FieldValue; got comptime_int" },
+        .{ "hset of a nested struct", "redis.cmd.hset: field 'address' is compile_errors.Address, a struct: " ++ one_value ++ ", and a hash has no nesting; move its fields into the outer struct" },
+        .{ "hset of a slice of numbers", "redis.cmd.hset: field 'scores' is []const i64: " ++ one_value ++ ", not a list; keep a list in a key of its own" },
+        .{ "hset of a union", "redis.cmd.hset: field 'shape' is compile_errors.Shape, a union: " ++ one_value ++ "; keep its tag and its value in fields of their own" },
+        .{ "hset of a pointer", "redis.cmd.hset: field 'owner' is *const compile_errors.User, a pointer: " ++ one_value ++ "; hold the value itself" },
     }, 0..) |case, i| {
         const compile = b.addTest(.{
             .name = b.fmt("redis-compile-error-{d}", .{i}),

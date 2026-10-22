@@ -110,6 +110,7 @@ test {
     _ = @import("tests/blocking_tests.zig");
     _ = @import("cmd/strings_tests.zig");
     _ = @import("cmd/keys_tests.zig");
+    _ = @import("cmd/hashes_tests.zig");
 }
 
 test "the package version reaches the module" {

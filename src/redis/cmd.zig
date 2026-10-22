@@ -16,6 +16,9 @@
 //!   `incrbyfloat`.
 //! - Keys: `del`, `unlink`, `exists`, `expire`, `persist`, `ttl`,
 //!   `keyType`, `rename`, `scan` (one page), `ping`.
+//! - Hashes: `hset`, `hsetnx`, `hget`, `hmget`, `hgetall`, `hdel`,
+//!   `hexists`, `hlen`, `hincrby`, `hincrbyfloat`, `hkeys`, `hscan` (one
+//!   page). A hash reads into a struct and is written from one.
 //! - `raw(T, args)` — a command that the catalog lacks: `args` is a tuple
 //!   of strings, numbers, bools and enums, the name of the command first,
 //!   or a slice of strings, and the reply reads into `T` by the rules of
@@ -40,6 +43,7 @@ const raw_command = @import("cmd/raw.zig");
 const transactions = @import("cmd/transactions.zig");
 const strings = @import("cmd/strings.zig");
 const keys = @import("cmd/keys.zig");
+const hashes = @import("cmd/hashes.zig");
 
 pub const get = strings.get;
 pub const Get = strings.Get;
@@ -92,6 +96,34 @@ pub const Scan = keys.Scan;
 pub const ScanOptions = keys.ScanOptions;
 pub const ping = keys.ping;
 pub const Ping = keys.Ping;
+
+pub const hset = hashes.hset;
+pub const Hset = hashes.Hset;
+pub const hsetnx = hashes.hsetnx;
+pub const Hsetnx = hashes.Hsetnx;
+pub const hget = hashes.hget;
+pub const Hget = hashes.Hget;
+pub const hmget = hashes.hmget;
+pub const Hmget = hashes.Hmget;
+pub const hgetall = hashes.hgetall;
+pub const Hgetall = hashes.Hgetall;
+pub const hdel = hashes.hdel;
+pub const Hdel = hashes.Hdel;
+pub const hexists = hashes.hexists;
+pub const Hexists = hashes.Hexists;
+pub const hlen = hashes.hlen;
+pub const Hlen = hashes.Hlen;
+pub const hincrby = hashes.hincrby;
+pub const Hincrby = hashes.Hincrby;
+pub const hincrbyfloat = hashes.hincrbyfloat;
+pub const Hincrbyfloat = hashes.Hincrbyfloat;
+pub const hkeys = hashes.hkeys;
+pub const Hkeys = hashes.Hkeys;
+pub const hscan = hashes.hscan;
+pub const Hscan = hashes.Hscan;
+/// The options of `hscan`, `sscan` and `zscan`: the cursor, MATCH and
+/// COUNT.
+pub const CursorOptions = @import("cmd/command.zig").CursorOptions;
 
 pub const raw = raw_command.raw;
 pub const Raw = raw_command.Raw;

@@ -82,3 +82,27 @@ test "watch in a transaction" {
 test "get of a struct" {
     _ = cmd.get(Address, "user:42");
 }
+
+test "hset of a tuple" {
+    _ = cmd.hset("user:42", .{ "Ann", 30 });
+}
+
+test "hset of a number" {
+    _ = cmd.hset("user:42", 42);
+}
+
+test "hset of a nested struct" {
+    _ = cmd.hset("user:42", @as(User, undefined));
+}
+
+test "hset of a slice of numbers" {
+    _ = cmd.hset("player:7", @as(Player, undefined));
+}
+
+test "hset of a union" {
+    _ = cmd.hset("drawing:1", @as(Drawing, undefined));
+}
+
+test "hset of a pointer" {
+    _ = cmd.hset("post:1", @as(Post, undefined));
+}
