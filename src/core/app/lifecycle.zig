@@ -19,6 +19,9 @@ const log = std.log.scoped(.zefir_app);
 /// One per entry: set once nothing waits in the entry's `wait` any more.
 pub const Watch = struct {
     returned: Io.Event = .unset,
+    /// App could not start the entry's watcher: while App stops, the stop
+    /// task waits in the entry's `wait` itself.
+    unwatched: bool = false,
 };
 
 /// The lifecycle of one App, in its block.
@@ -106,7 +109,9 @@ pub const Runtime = struct {
         const protection = rt.io.swapCancelProtection(.blocked);
         defer _ = rt.io.swapCancelProtection(protection);
         rt.watchers.concurrent(rt.io, watcher, .{ rt, i }) catch |err| {
-            // No watcher waits on it.
+            // No watcher waits on it; the stop task waits in the entry's
+            // `wait` itself.
+            rt.watches[i].unwatched = true;
             rt.watches[i].returned.set(rt.io);
             return err;
         };
@@ -252,7 +257,7 @@ pub fn start(rt: *Runtime) anyerror!void {
         };
         count = i + 1;
         if (entry.vtable.wait != null) rt.watch(i) catch |err| {
-            log.warn("{s} did not start: error.{s}", .{ entry.name, @errorName(err) });
+            log.warn("{s} started, but App could not watch it: error.{s}", .{ entry.name, @errorName(err) });
             rt.startFailed(i, err);
             break true;
         };
@@ -391,8 +396,14 @@ fn stopTask(rt: *Runtime) void {
                 log.warn("{s} did not stop cleanly: error.{s}", .{ entry.name, @errorName(err) });
                 rt.shutdownFailed(k, err);
             }
-        } else if (entry.vtable.wait != null) {
-            if (untilSet(&rt.watches[k].returned, io, rt.deadline)) |_| {
+        } else if (entry.vtable.wait) |waitFn| {
+            if (rt.watches[k].unwatched) {
+                // No watcher waits in its `wait`: the stop task does. A wait
+                // deaf to the stop holds it past the deadline, as a deaf
+                // shutdown does, and the owner's wait gives up then.
+                waitFn(entry.ptr, io) catch {};
+                log.info("{s} stopped", .{entry.name});
+            } else if (untilSet(&rt.watches[k].returned, io, rt.deadline)) |_| {
                 log.info("{s} stopped", .{entry.name});
             } else |_| rt.didNotStop(k);
         }

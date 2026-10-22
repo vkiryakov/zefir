@@ -193,6 +193,36 @@ test "no task for a watcher: the start rolls back with ConcurrencyUnavailable" {
     try rig.expect("deinit", &.{ "Waiter", "A" });
 }
 
+test "no task for the watcher of a bean without shutdown: the rollback waits in its wait itself" {
+    const Root = struct {
+        pub const module: zapp.Module = .{ .providers = &.{gates.Worker}, .values = &.{*Rig} };
+    };
+    const level = quiet();
+    defer testing.log_level = level;
+    // The stop task takes one task, the Worker's own task the other; the
+    // watcher gets none.
+    var threaded: Io.Threaded = .init(testing.allocator, .{ .concurrent_limit = .limited(2) });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var rig: Rig = .init(io);
+    defer rig.release();
+    var app = try zapp.App(Root).init(testing.allocator, io, .{&rig}, budget(50));
+    // The Worker's task runs until the test opens its gate, so the
+    // rollback runs out of time in the Worker's wait.
+    const started = app.start();
+    app.deinit();
+    try rig.expect("deinit", &.{});
+    try testing.expectError(error.ShutdownTimeout, started);
+    try expectFailure(&app, "Root.Worker", .start, error.ConcurrencyUnavailable);
+    try testing.expectEqual(zapp.State.failed, app.state());
+    rig.open("Worker");
+    try awaitEnded(&app);
+    // Its wait returned by itself: the Worker stopped, and deinit frees it.
+    try rig.expect("waited", &.{"Worker"});
+    app.deinit();
+    try rig.expect("deinit", &.{"Worker"});
+}
+
 test "no task for the stop: start returns ConcurrencyUnavailable and starts nothing" {
     const Root = struct {
         pub const module: zapp.Module = .{ .providers = &.{ gates.A, gates.Waiter }, .values = &.{*Rig} };
