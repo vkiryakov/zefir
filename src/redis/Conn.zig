@@ -13,7 +13,9 @@
 //!
 //! - `run` and `pipeline` take the same commands as the client's, and keep
 //!   its rules: the deadline, the token, the memory of the reply, the
-//!   errors. Only they run `cmd.watch` and `cmd.unwatch`.
+//!   errors. Only they run `cmd.watch` and `cmd.unwatch`. `transaction`
+//!   runs commands between MULTI and EXEC, null when a key under WATCH
+//!   changed.
 //! - While the task holds it, the pool does not touch the connection, and
 //!   `client.stats()` counts it in use. `client.acquire` waits in line for
 //!   it as a call does: `error.PoolExhausted` when the deadline ends there.
@@ -114,6 +116,64 @@ pub fn pipeline(conn: *Conn, io: Io, op: OperationContext, commands: anytype, op
         conn.mark(contract.Element(@TypeOf(commands)), if (result) |_| true else |_| false);
     }
     return results;
+}
+
+/// Runs `commands` as a transaction on the connection of the Conn, and
+/// returns their results as `pipeline` does, or null when a key under
+/// WATCH changed and the server ran none of them.
+///
+/// MULTI goes out on its own first, so that a server that refuses it, as
+/// for a user without +multi, gets none of the commands:
+/// `error.ServerError`. The commands and EXEC then go out in one write.
+/// An error of one command as EXEC runs it, such as WRONGTYPE, is the
+/// value in its place, and the other commands ran: there is no rollback.
+/// A server that drops the whole transaction answers EXEC with EXECABORT,
+/// and nothing ran: `error.ServerError` whose `diagnostics.code()` is
+/// "EXECABORT". When the server refused a command as it queued it, an
+/// unknown one or one the user may not run, `diagnostics.command` is its
+/// index and `diagnostics.refused()` its own code and text; when EXEC
+/// failed a check of its own (READONLY, OOM), both are null.
+///
+/// The token is checked before MULTI and once more before the commands go
+/// out: canceled in between, the call is `error.Cancelled`, and the
+/// connection closes rather than stay inside MULTI. A connection that
+/// breaks once MULTI went out leaves it open whether EXEC ran:
+/// `diagnostics.answered` counts the replies that came, MULTI's and each
+/// QUEUED among them. Inside a transaction a blocking command does not
+/// block, and its timeout goes to the server as given. EXEC ends the
+/// WATCH of the connection, so `release` keeps the connection after a
+/// transaction that sent it.
+///
+/// ```zig
+/// const done = try conn.transaction(io, op, .{
+///     redis.cmd.raw(i64, .{ "DECR", "stock:coffee" }),
+///     redis.cmd.raw(u64, .{ "RPUSH", "orders:new", order_id }),
+/// }, .{});
+/// _ = done orelse return error.TryAgain; // the stock changed after WATCH
+/// ```
+pub fn transaction(conn: *Conn, io: Io, op: OperationContext, commands: anytype, options: RunOptions) Error!?Queued(@TypeOf(commands)) {
+    const c = conn.client;
+    calls.checkUse(c, io);
+    const d = options.diagnostics;
+    if (d) |x| x.* = .{};
+    try calls.checkCommands(commands, options, d, "redis.Conn.transaction");
+    try calls.checkContext(io, op, d);
+    const connection = try conn.held(d);
+    var results = try calls.slots(Queued(@TypeOf(commands)), commands, options);
+    try c.pool.enter(io, d);
+    defer c.pool.leave(io);
+    const deadline = calls.deadlineOf(c, io, op);
+    const executed = calls.transaction(c, connection, io, op, commands, &results, options, deadline, d, &conn.watching) catch |err| {
+        conn.after(io, calls.afterExchange(connection, err, d));
+        return err;
+    };
+    return if (executed) results else null;
+}
+
+/// What `transaction` returns for commands of type `Commands`, when the
+/// server ran them: the results of a pipeline of them.
+fn Queued(comptime Commands: type) type {
+    return contract.Results(Commands, "redis.Conn.transaction", .transaction);
 }
 
 /// Gives the connection back to the pool, or closes it when keys may be

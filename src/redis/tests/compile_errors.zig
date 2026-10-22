@@ -73,3 +73,8 @@ test "watch in a pipeline of the client" {
     var client: redis.Client = undefined;
     _ = try client.pipeline(std.testing.io, .of(.root), .{ cmd.raw(?i64, .{ "GET", "k" }), cmd.watch(&.{"stock:coffee"}) }, .{});
 }
+
+test "watch in a transaction" {
+    var conn: redis.Conn = undefined;
+    _ = try conn.transaction(std.testing.io, .of(.root), .{ cmd.raw(?i64, .{ "GET", "k" }), cmd.watch(&.{"stock:coffee"}) }, .{});
+}

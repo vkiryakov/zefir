@@ -106,6 +106,7 @@ test {
     _ = @import("tests/lifecycle_tests.zig");
     _ = @import("tests/pipeline_tests.zig");
     _ = @import("tests/conn_tests.zig");
+    _ = @import("tests/transaction_tests.zig");
 }
 
 test "the package version reaches the module" {

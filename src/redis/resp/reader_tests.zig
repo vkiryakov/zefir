@@ -337,3 +337,56 @@ test "skipAttributes keeps the rules: no push inside an attribute, and the budge
     var short: Reader = .init(&cut, roomy);
     try testing.expectError(error.EndOfStream, short.skipAttributes());
 }
+
+test "a nested reader reads one element of an array as a reply of its own, and rejoin gives the array its place back" {
+    var in: std.Io.Reader = .fixed("*3\r\n:1\r\n*2\r\n$1\r\na\r\n*1\r\n_\r\n+OK\r\n" ++ "+NEXT\r\n");
+    // The reply takes 31 bytes.
+    var outer: Reader = .init(&in, 35);
+    try testing.expectEqual(Element{ .array = 3 }, try outer.next());
+    var first = outer.nested();
+    try testing.expectEqual(Element{ .integer = 1 }, try first.next());
+    try testing.expect(first.done());
+    outer.rejoin(&first);
+    try testing.expect(!outer.done());
+    // Skipping a nested reply skips that element only, all it holds.
+    var second = outer.nested();
+    try second.skipReply();
+    try testing.expect(second.done());
+    outer.rejoin(&second);
+    var third = outer.nested();
+    try testing.expectEqual(Element.simple_string, try third.next());
+    var buffer: [2]u8 = undefined;
+    try testing.expectEqualStrings("OK", (try third.payloadPrefix(&buffer)).bytes);
+    outer.rejoin(&third);
+    try testing.expect(outer.done());
+    // The three took what the array left of the budget.
+    try testing.expectEqual(@as(usize, 4), outer.budget);
+    try testing.expectEqualStrings("+NEXT\r\n", in.buffered());
+}
+
+test "a nested reader keeps the rules of the reply it is in: no push, and the budget and the depth of the whole" {
+    var push: std.Io.Reader = .fixed("*1\r\n>1\r\n:1\r\n");
+    var outer: Reader = .init(&push, roomy);
+    _ = try outer.next();
+    var inner = outer.nested();
+    try testing.expectError(error.ProtocolViolation, inner.next());
+
+    var long: std.Io.Reader = .fixed("*1\r\n$10\r\n0123456789\r\n");
+    outer = .init(&long, 12);
+    _ = try outer.next();
+    inner = outer.nested();
+    try testing.expectError(error.ReplyTooLarge, inner.next());
+
+    // 64 levels in all: the array and 63 inside its element.
+    const deep = comptime deep: {
+        var bytes: []const u8 = "";
+        for (0..65) |_| bytes = bytes ++ "*1\r\n";
+        break :deep bytes ++ ":1\r\n";
+    };
+    var deep_in: std.Io.Reader = .fixed(deep);
+    outer = .init(&deep_in, roomy);
+    _ = try outer.next();
+    inner = outer.nested();
+    for (0..63) |_| _ = try inner.next();
+    try testing.expectError(error.ReplyTooLarge, inner.next());
+}

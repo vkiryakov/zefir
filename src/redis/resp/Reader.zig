@@ -25,6 +25,10 @@
 //! - `skipAttributes()`, before `next`, skips the attributes at the top of
 //!   the reply and leaves its first element unread, for a look at its type
 //!   byte.
+//! - `nested()` gives a reader of the next element of the aggregate being
+//!   read, as a reply of its own, and `rejoin` takes it back: the array of
+//!   EXEC holds the replies of the commands of a transaction, and each
+//!   command reads its own.
 //!
 //! What the reader takes care of:
 //!
@@ -213,6 +217,32 @@ pub fn skipAttributes(r: *Reader) Error!void {
 /// Whether the reply has been read to its end.
 pub fn done(r: *const Reader) bool {
     return r.started and r.depth == 0 and r.pending == .none;
+}
+
+/// A reader of the next element of the aggregate that `r` holds open,
+/// which reads it as a reply of its own: its `skipReply` skips that
+/// element only, and `done` tells when it is read. It keeps the rules of
+/// the reply that holds it: a push inside is a ProtocolViolation, and the
+/// depth and the budget are those of the whole. Give it back to `r` with
+/// `rejoin` once it is done, before `r` reads on.
+pub fn nested(r: *const Reader) Reader {
+    std.debug.assert(r.depth > 0 and r.pending == .none and r.open[r.depth - 1] > 0);
+    var element: Reader = .{ .in = r.in, .budget = r.budget, .depth = r.depth };
+    // The aggregates that hold the element, closed once it is read: none
+    // of them has another element for this reader.
+    @memset(element.open[0 .. r.depth - 1], 0);
+    element.open[r.depth - 1] = 1;
+    return element;
+}
+
+/// Takes back `element`, a reader of `nested` that has read its element
+/// whole: what it used of the budget, and the place of the element in the
+/// aggregate.
+pub fn rejoin(r: *Reader, element: *const Reader) void {
+    std.debug.assert(element.done());
+    r.budget = element.budget;
+    r.open[r.depth - 1] -= 1;
+    r.complete();
 }
 
 /// Skips what is left of the element `next` returned last: the bytes of a

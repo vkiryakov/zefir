@@ -184,10 +184,8 @@ pub fn many(c: *Client, conn: *Connection, io: Io, op: OperationContext, command
     // The call has checked the type of the commands: a tuple, or many.
     const tuple = comptime @typeInfo(@TypeOf(commands)) == .@"struct";
     conn.begin(deadline);
-    writeAll(conn, commands, tuple, d) catch |err| {
-        if (d) |x| x.answered = 0;
-        return err;
-    };
+    writeCommands(conn, commands, d) catch |err| return ended(conn, err, d, 0);
+    conn.flush(d) catch |err| return ended(conn, err, d, 0);
     var cells: Cells = .{ .d = d };
     if (tuple) {
         inline for (0..@typeInfo(@TypeOf(commands)).@"struct".field_types.len) |i| {
@@ -198,11 +196,207 @@ pub fn many(c: *Client, conn: *Connection, io: Io, op: OperationContext, command
     }
 }
 
-fn writeAll(conn: *Connection, commands: anytype, comptime tuple: bool, d: ?*Diagnostics) Error!void {
-    if (tuple) {
+/// Writes `commands`, a tuple or many of one type, into the buffer of
+/// `conn`: what does not fit goes out, the rest at the next flush.
+fn writeCommands(conn: *Connection, commands: anytype, d: ?*Diagnostics) Error!void {
+    if (comptime @typeInfo(@TypeOf(commands)) == .@"struct") {
         inline for (0..@typeInfo(@TypeOf(commands)).@"struct".field_types.len) |i| try conn.write(commands[i], d);
     } else for (commands) |command| try conn.write(command, d);
-    try conn.flush(d);
+}
+
+/// How many commands `commands` holds.
+fn countOf(commands: anytype) usize {
+    if (comptime @typeInfo(@TypeOf(commands)) == .@"struct") return @typeInfo(@TypeOf(commands)).@"struct".field_types.len;
+    return commands.len;
+}
+
+/// The commands of a transaction on `conn`, which the call has checked,
+/// by `deadline`, into `results`: MULTI on its own, then the commands and
+/// EXEC in one write, the QUEUED of each, and the replies of EXEC, each in
+/// its place as in a pipeline. False when a key under WATCH changed, and
+/// the server ran none of them. `watching` turns false once EXEC has gone
+/// out, since EXEC ends the WATCH of the connection whatever its outcome.
+///
+/// A server that drops the transaction answers EXEC with EXECABORT, the
+/// ServerError of the call: when it refused a command as it queued it,
+/// the diagnostics hold that command's index in `command` and its own
+/// error in `refused()`. A reply out of step, a QUEUED where EXEC's array
+/// was due or an array of another length, is a ProtocolViolation.
+/// Anything that stops the call once MULTI is in leaves the connection
+/// unusable, so that it closes rather than stay inside MULTI.
+pub fn transaction(c: *Client, conn: *Connection, io: Io, op: OperationContext, commands: anytype, results: anytype, options: RunOptions, deadline: ?core.Deadline, d: ?*Diagnostics, watching: *bool) Error!bool {
+    try beforeSend(c, io, op, deadline, d);
+    // MULTI goes on its own: a server that refuses it, such as for a user
+    // without +multi, gets none of the commands, which would run outside a
+    // transaction in one write with it.
+    conn.exchange(Multi{}, null, deadline, d) catch |err| return ended(conn, err, d, 0);
+    var answered: usize = 1;
+    beforeSend(c, io, op, deadline, d) catch |err| {
+        conn.usable = false;
+        return err;
+    };
+    writeCommands(conn, commands, d) catch |err| return ended(conn, err, d, answered);
+    conn.write(Exec{}, d) catch |err| return ended(conn, err, d, answered);
+    conn.flush(d) catch |err| return ended(conn, err, d, answered);
+    watching.* = false;
+
+    // QUEUED for each command, or the error of its refusal: the first
+    // refusal is what EXECABORT is about.
+    var queue: Diagnostics = .{};
+    var refusal: ?usize = null;
+    var refused: Diagnostics = .{};
+    for (0..countOf(commands)) |i| {
+        conn.receive(Queued{}, null, &queue) catch |err| switch (err) {
+            error.ServerError => if (refusal == null) {
+                refusal = i;
+                refused = queue;
+            },
+            else => {
+                if (d) |x| x.* = queue;
+                return ended(conn, err, d, answered);
+            },
+        };
+        answered += 1;
+    }
+
+    var cells: Cells = .{ .d = d };
+    const exec: ExecReply(@TypeOf(commands), @TypeOf(results)) = .{ .commands = commands, .results = results, .cells = &cells };
+    return conn.receive(exec, options.allocator, d) catch |err| {
+        if (err == error.ServerError) {
+            if (d) |x| if (x.isCode("EXECABORT")) if (refusal) |i| {
+                x.command = i;
+                x.setRefused(refused.message());
+            };
+            return err;
+        }
+        // Not about the command of an error inside EXEC that came before.
+        if (d) |x| x.command = null;
+        return ended(conn, err, d, answered);
+    };
+}
+
+/// The error that ends a pipeline or a transaction after `answered`
+/// replies: a reply out of step is a ProtocolViolation, which closes the
+/// connection; an error of the server is the call's as it is; any other
+/// error the exchange's, with the count of replies in the diagnostics.
+fn ended(conn: *Connection, err: Error, d: ?*Diagnostics, answered: usize) Error {
+    if (err == error.ServerError) return err;
+    if (d) |x| x.answered = answered;
+    if (err != error.UnexpectedReply) return err;
+    conn.usable = false;
+    return error.ProtocolViolation;
+}
+
+/// MULTI, whose reply is +OK.
+const Multi = struct {
+    pub const Reply = void;
+
+    pub fn write(_: Multi, w: resp.Writer) resp.Writer.Error!void {
+        try w.command(&.{"MULTI"});
+    }
+
+    pub fn read(_: Multi, r: *resp.Reader, _: ?Allocator, d: ?*Diagnostics) resp.DecodeError!void {
+        return confirmation(r, "OK", d, "MULTI was answered with {f}, where +OK was due");
+    }
+};
+
+/// The reply of a command queued in a transaction: +QUEUED, or the error
+/// of its refusal.
+const Queued = struct {
+    pub const Reply = void;
+
+    pub fn read(_: Queued, r: *resp.Reader, _: ?Allocator, d: ?*Diagnostics) resp.DecodeError!void {
+        return confirmation(r, "QUEUED", d, "a command of the transaction was answered with {f}, where +QUEUED was due");
+    }
+};
+
+/// EXEC, whose reply `ExecReply` reads.
+const Exec = struct {
+    pub fn write(_: Exec, w: resp.Writer) resp.Writer.Error!void {
+        try w.command(&.{"EXEC"});
+    }
+};
+
+/// Reads a reply that must be the simple string `expected`: an error is
+/// ServerError, anything else UnexpectedReply with `text` about what came.
+/// The rest of an aggregate stays unread: the stream is out of step, and
+/// the connection closes.
+fn confirmation(r: *resp.Reader, comptime expected: []const u8, d: ?*Diagnostics, comptime text: []const u8) resp.DecodeError!void {
+    const first = try r.next();
+    var len: ?usize = null;
+    switch (first) {
+        .simple_error, .bulk_error => {
+            var decoder: resp.Decoder = .{ .reader = r, .arena = null, .diagnostics = d };
+            return decoder.serverError();
+        },
+        .simple_string => {
+            var buffer: [expected.len]u8 = undefined;
+            const got = try r.payloadPrefix(&buffer);
+            if (got.len == expected.len and std.mem.eql(u8, got.bytes, expected)) return;
+            len = got.len;
+        },
+        else => {},
+    }
+    if (d) |x| x.set(.receive, null, text, .{resp.Kind{ .element = first, .len = len }});
+    return error.UnexpectedReply;
+}
+
+/// The reply of EXEC: null when a key under WATCH changed, an error when
+/// the server dropped the transaction, or an array of the replies of the
+/// commands, each of which its command reads into its place of `results`,
+/// as a reply of its own.
+fn ExecReply(comptime Commands: type, comptime Results: type) type {
+    return struct {
+        commands: Commands,
+        results: Results,
+        cells: *Cells,
+
+        const Self = @This();
+        /// False when a key under WATCH changed.
+        pub const Reply = bool;
+
+        pub fn read(e: Self, r: *resp.Reader, arena: ?Allocator, d: ?*Diagnostics) resp.DecodeError!bool {
+            const first = try r.next();
+            const n = countOf(e.commands);
+            var len: ?usize = null;
+            switch (first) {
+                .null => return false,
+                .simple_error, .bulk_error => {
+                    var decoder: resp.Decoder = .{ .reader = r, .arena = null, .diagnostics = d };
+                    return decoder.serverError();
+                },
+                .array => |count| if (count == n) {
+                    if (comptime @typeInfo(Commands) == .@"struct") {
+                        inline for (0..@typeInfo(Commands).@"struct".field_types.len) |i| e.results.*[i] = try e.cell(r, e.commands[i], arena, i);
+                    } else for (e.commands, e.results.*, 0..) |command, *slot, i| {
+                        slot.* = try e.cell(r, command, arena, i);
+                    }
+                    return true;
+                },
+                .simple_string => {
+                    var none: [0]u8 = undefined;
+                    len = (try r.payloadPrefix(&none)).len;
+                },
+                else => {},
+            }
+            if (d) |x| x.set(.receive, null, "EXEC was answered with {f}, where an array of {d} replies was due", .{ resp.Kind{ .element = first, .len = len }, n });
+            return error.UnexpectedReply;
+        }
+
+        /// The reply of command `i`, the next element of the array of EXEC.
+        fn cell(e: Self, r: *resp.Reader, command: anytype, arena: ?Allocator, i: usize) resp.DecodeError!(CommandError!@TypeOf(command).Reply) {
+            var element = r.nested();
+            const result: CommandError!@TypeOf(command).Reply = if (command.read(&element, arena, e.cells.sink())) |value| value else |err| switch (err) {
+                error.ServerError, error.UnexpectedReply => |failed| failed: {
+                    e.cells.note(i);
+                    break :failed failed;
+                },
+                else => |other| return other,
+            };
+            r.rejoin(&element);
+            return result;
+        }
+    };
 }
 
 /// The replies of a pipeline as they come: the caller's diagnostics take
@@ -217,23 +411,33 @@ const Cells = struct {
     recorded: bool = false,
 
     fn receive(cells: *Cells, conn: *Connection, command: anytype, arena: ?Allocator, i: usize) Error!(CommandError!@TypeOf(command).Reply) {
-        const sink: ?*Diagnostics = if (cells.d == null) null else if (cells.recorded) &cells.scratch else cells.d;
-        return conn.receive(command, arena, sink) catch |err| switch (err) {
+        return conn.receive(command, arena, cells.sink()) catch |err| switch (err) {
             error.ServerError, error.UnexpectedReply => |e| {
-                if (!cells.recorded) if (cells.d) |x| {
-                    x.command = i;
-                };
-                cells.recorded = true;
+                cells.note(i);
                 return @as(CommandError!@TypeOf(command).Reply, e);
             },
             else => |e| {
-                if (cells.d) |x| {
-                    if (cells.recorded) x.* = cells.scratch;
-                    x.answered = i;
-                }
-                return e;
+                if (cells.d) |x| if (cells.recorded) {
+                    x.* = cells.scratch;
+                };
+                return ended(conn, e, cells.d, i);
             },
         };
+    }
+
+    /// Where the next error of a command goes.
+    fn sink(cells: *Cells) ?*Diagnostics {
+        if (cells.d == null) return null;
+        return if (cells.recorded) &cells.scratch else cells.d;
+    }
+
+    /// Notes an error of the command `i`: the first stays in the caller's
+    /// diagnostics, with its index.
+    fn note(cells: *Cells, i: usize) void {
+        if (!cells.recorded) if (cells.d) |x| {
+            x.command = i;
+        };
+        cells.recorded = true;
     }
 };
 

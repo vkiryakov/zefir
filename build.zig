@@ -868,6 +868,7 @@ pub fn build(b: *std.Build) void {
         .{ "run of a value that is not a command", "redis.Client.run: u32 is not a command: make one with redis.cmd, such as redis.cmd.get([]const u8, key)" },
         .{ "watch on the client", "redis.Client.run: WATCH holds its keys on the connection it goes on: run it on a connection of client.acquire" },
         .{ "watch in a pipeline of the client", "redis.Client.pipeline: WATCH holds its keys on the connection it goes on: run it on a connection of client.acquire" },
+        .{ "watch in a transaction", "redis.Conn.transaction: WATCH inside a transaction is refused by the server: run it with conn.run before the transaction" },
     }, 0..) |case, i| {
         const compile = b.addTest(.{
             .name = b.fmt("redis-compile-error-{d}", .{i}),
