@@ -4,7 +4,7 @@
 
 <p align="center">
   <strong>A modular framework for building services in Zig.</strong><br>
-  Web servers, web services and APIs, built from modules you pick: typed configuration, request deadlines, cancellation, tracing, structured logging, validation, a NATS client, RPC, an HTTP server, an async MongoDB driver, a Redis client and JSON Web Tokens today; an ODM next.
+  Web servers, web services and APIs, built from modules you pick: typed configuration, request deadlines, cancellation, tracing, structured logging, validation, a NATS client, RPC, an HTTP server, an async MongoDB driver, a Redis client, JSON Web Tokens and an application container today; an ODM next.
 </p>
 
 <p align="center">

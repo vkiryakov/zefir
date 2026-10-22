@@ -2576,10 +2576,10 @@ line of [the quick start](#quick-start) shows:
 
 ## Under zefir.App
 
-zefir.App, the container of zefir-core that will build the parts of a
-service, start them in order and stop them all within one deadline, is
-planned. The client has the two methods that it will call, and they work
-today, as [connect.zig](#what-can-go-wrong-at-the-start) shows:
+zefir.App, the container of zefir-core, builds the parts of a service,
+starts them in order and stops them all within one deadline. The client
+has the two methods that it calls, and they work without App too, as
+[connect.zig](#what-can-go-wrong-at-the-start) shows:
 
 - **`start(io)`** is `connect` under a deadline of `start_timeout`, 10 s
   by default. When the client cannot connect, `start` writes why to the

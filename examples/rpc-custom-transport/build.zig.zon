@@ -10,7 +10,7 @@
         // package pins a release of zefir here.
         .zefir = .{
             .url = "git+https://github.com/vkiryakov/zefir#v0.10.0",
-            .hash = "zefir-0.10.0-533VDURBnQCXd2RDIemgdfmEzmEyNZDW5w1BjlyLBIH8",
+            .hash = "zefir-0.10.0-533VDUvrpACyOwBn43ovCVKq8rZPfhecj_OdVz6NcjtC",
             .lazy = true,
         },
     },
