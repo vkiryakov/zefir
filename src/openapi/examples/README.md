@@ -1380,7 +1380,9 @@ errdefer s.docs.deinit(gpa);
   as `application/json`: the same bytes as `openapi.json` in the
   repository, with their `ETag` and `Cache-Control: no-cache`. A client
   asks each time, and gets 304 without a body while the document has not
-  changed:
+  changed. The service of the http guide, whose document is in
+  [its chapter](#the-document-of-the-http-guides-service), serves it so,
+  with the fields its middleware adds, such as `x-request-id`:
 
 ```text
 $ curl -I localhost:8080/api/openapi.json
