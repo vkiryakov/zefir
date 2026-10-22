@@ -1,13 +1,16 @@
 //! `http.Server`: one type for every application.
-//! `init` does the compile-time work over its options (plan.zig): it reads
-//! the routes of the controllers, checks them and builds the router's trie;
-//! at run time it copies the server's prefix and keeps the table of routes.
+//! `init` takes the parts of a server, which the compiler checks by type,
+//! and its `Options`. It does the compile-time work over the parts
+//! (plan.zig): it reads the routes of the controllers, checks them and
+//! builds the router's trie; at run time it copies the server's prefix and
+//! keeps the table of routes.
 //!
 //! ```zig
 //! var server = try http.Server.init(gpa, .{
-//!     .backend = native.backend(),
-//!     .prefix = "/api", // only for controllers; may come from the config
 //!     .controllers = .{ &todos_v1, &health },
+//! }, .{
+//!     .listen = .{ .port = 8080 },
+//!     .prefix = "/api", // only for controllers; may come from the config
 //! });
 //! defer server.deinit(io);
 //! try server.run(io);
@@ -27,6 +30,7 @@
 const std = @import("std");
 const core = @import("core");
 const Backend = @import("Backend.zig");
+const NativeBackend = @import("native/Backend.zig");
 const Context = @import("Context.zig");
 const dto = @import("dto.zig");
 const flow = @import("flow.zig");
@@ -50,7 +54,11 @@ internal: Internal,
 
 pub const Internal = struct {
     gpa: std.mem.Allocator,
+    /// Where requests come from: the backend of `.listen`.
     backend: Backend,
+    /// The native backend the server made for `.listen = .port` or
+    /// `.native`; `deinit` frees it last. Null for a backend of your own.
+    native: ?*NativeBackend,
     /// The server's prefix, copied: it may come from the config.
     prefix: []const u8,
     /// The routes of all controllers, in the order of `.controllers`, each in
@@ -64,7 +72,10 @@ pub const Internal = struct {
     /// The server's middleware: every request runs it before its route is
     /// applied.
     middleware: []const mw.Link,
-    /// The options of `init` with their defaults.
+    /// What the server keeps of its `Options`: all of them but `.listen`,
+    /// `.prefix` and `.static`, with the list of `.trusted_proxies`
+    /// copied. The prefix and the mounts are copied apart and the backend
+    /// is `backend`, so nothing here points into the caller's memory.
     settings: Settings,
     /// `.trusted_proxies`, its list parsed.
     trust: proxies.Trust,
@@ -95,14 +106,18 @@ pub const Internal = struct {
     wait_event: std.Io.Event = .unset,
     /// Set when the server has stopped: `shutdown` returns.
     shutdown_event: std.Io.Event = .unset,
-    /// Set when the grace of a stop is over and what still runs is canceled;
-    /// also when the server stops. `shutdown` waits a second more from here.
-    grace_over: std.Io.Event = .unset,
+    /// The earliest deadline a `shutdown` gave, on the awake clock; under
+    /// `mutex`. It ends the grace of the stop in time.
+    deadline: ?core.Deadline = null,
+    /// The error of a backend that broke, the first (`Backend.Handler.fail`);
+    /// under `mutex`. `wait` and `shutdown` return it.
+    fatal: ?Backend.FatalError = null,
     /// The requests at work, as `.max_in_flight` counts them: `serve` takes a
     /// place before a request runs and gives it back at its end.
     in_flight: std.atomic.Value(u32) = .init(0),
-    /// Set when `in_flight` or `streams` drops to zero. Only the lifecycle
-    /// task waits on it, and resets it before it looks at the counts.
+    /// Set when `in_flight` or `streams` drops to zero, and when a
+    /// `shutdown` brings a deadline. Only the lifecycle task waits on it,
+    /// and resets it before it looks at the counts and the deadline.
     idle: std.Io.Event = .unset,
     /// The SSE streams open now, as `.max_streams` counts them: `subscribe`
     /// takes a place, the end of the stream gives it back.
@@ -127,7 +142,8 @@ pub const State = enum(u8) { configured, starting, running, draining, stopped };
 /// whose path is not "/" or such as a prefix, two mounts on one path, an
 /// empty root, an index file that is not one name, a `spa_fallback` with a
 /// segment that a request could not name (a hidden one, say), or a
-/// `cache_control` with CR, LF or NUL.
+/// `cache_control` with CR, LF or NUL; options of `.listen = .native` that
+/// `http.native.Backend.init` refuses.
 pub const InitError = error{ InvalidConfiguration, OutOfMemory };
 /// The backend's errors from its `start`, a task the runtime did not give,
 /// a second `start` (`InvalidState`), a route that needs what the backend
@@ -136,8 +152,10 @@ pub const InitError = error{ InvalidConfiguration, OutOfMemory };
 /// missing, is not a directory or does not open (`InvalidStaticRoot`,
 /// logged with the mount, the path and the error of the system).
 pub const StartError = Backend.StartError || error{ InvalidState, UnsupportedByBackend, InvalidStaticRoot };
-/// The wait was canceled, or the server never started (`InvalidState`).
-pub const WaitError = error{InvalidState} || std.Io.Cancelable;
+/// The backend broke (`Unavailable`: it takes no new requests;
+/// `Unexpected`), and the server stops by itself; the wait was canceled;
+/// or the server never started (`InvalidState`).
+pub const WaitError = Backend.FatalError || error{InvalidState} || std.Io.Cancelable;
 pub const ShutdownError = error{ShutdownTimeout} || WaitError;
 
 /// From whom to believe `X-Forwarded-For` and `Forwarded`: everybody,
@@ -157,9 +175,24 @@ pub const JsonOptions = struct {
     max_depth: u16 = 64,
 };
 
-/// The options of `init` as the server keeps them, with their defaults.
-/// Durations are `std.Io.Duration`.
-pub const Settings = struct {
+/// The settings of a server, the second argument of `init`: where its
+/// requests come from, the prefix of its routes, its static files, its
+/// limits and its times. Durations are `std.Io.Duration`, written as
+/// declaration literals: `.request_timeout = .fromSeconds(10)`.
+pub const Options = struct {
+    /// Where requests come from. It has no default: a server without it
+    /// does not compile.
+    listen: Listen,
+    /// Before the routes of the controllers, such as "/api"; may come from
+    /// the config: `init` copies it.
+    prefix: []const u8 = "",
+    /// Static files, mounts of `http.static`:
+    /// `&.{http.static("/", .{ .root = "public" })}`. `init` copies and
+    /// checks them, `start` opens their roots.
+    static: []const Static = &.{},
+    /// From whom to believe `X-Forwarded-For` and `Forwarded`; `init` copies
+    /// a list.
+    trusted_proxies: TrustedProxies = .all,
     unknown_fields: UnknownFieldsOptions = .{},
     json: JsonOptions = .{},
     /// The body of a request; a route may set its own.
@@ -174,6 +207,35 @@ pub const Settings = struct {
     /// How long a stop waits for the requests at work.
     shutdown_grace: Duration = .fromSeconds(10),
     /// How long all `onFinish` of one request may take.
+    finish_timeout: Duration = .fromSeconds(5),
+
+    /// Where the requests of a server come from.
+    pub const Listen = union(enum) {
+        /// An `http.native.Backend` on this port of every IPv4 interface,
+        /// with its defaults. The server makes it and frees it.
+        port: u16,
+        /// An `http.native.Backend` with these options: its address, limits
+        /// and timeouts. The server makes it and frees it.
+        native: NativeBackend.Options,
+        /// A backend of your own, which outlives the server:
+        /// `http.testing.Backend` in tests.
+        backend: Backend,
+    };
+};
+
+const Static = static_files.Static;
+
+/// The options as the server keeps them: those of `Options` but `.listen`,
+/// `.prefix` and `.static`, with the list of `.trusted_proxies` copied.
+const Settings = struct {
+    unknown_fields: UnknownFieldsOptions = .{},
+    json: JsonOptions = .{},
+    max_body_bytes: usize = 1 << 20,
+    max_query_params: u32 = 100,
+    max_in_flight: u32 = 10_000,
+    max_streams: u32 = 10_000,
+    request_timeout: ?Duration = .fromSeconds(30),
+    shutdown_grace: Duration = .fromSeconds(10),
     finish_timeout: Duration = .fromSeconds(5),
     trusted_proxies: TrustedProxies = .all,
 };
@@ -203,7 +265,8 @@ const Route = struct {
     links: []const mw.Link,
 };
 
-/// What the routes need of the backend, known at compile time.
+/// What the routes and the mounts need of the backend: the routes' is
+/// known at compile time, the mounts' at run time.
 const Needs = struct {
     /// The first SSE route, which needs `flush`.
     flush: ?u32 = null,
@@ -211,18 +274,12 @@ const Needs = struct {
     static_mounts: usize = 0,
 };
 
-/// Builds a server from `options`, a struct literal:
-/// `.backend` and `.controllers` (a tuple of pointers to controllers, at
-/// least one), and optionally `.prefix` (before the routes of the
-/// controllers, such as "/api"), `.middleware`, `.error_handler`,
-/// `.strict_errors`, `.unknown_fields`, `.json`, `.max_body_bytes`,
-/// `.max_query_params`, `.max_in_flight`, `.max_streams`,
-/// `.request_timeout`, `.shutdown_grace`, `.finish_timeout` and
-/// `.trusted_proxies`, as `Settings` describes them, and `.static`, a
-/// tuple of mounts: `.{ http.static("/", .{ .root = "public" }) }`. The
-/// options are
-/// `anytype`, so a duration among them is written in full:
-/// `std.Io.Duration.fromSeconds(10)`, not `.fromSeconds(10)`.
+/// Builds a server from its parts and its options, without I/O.
+///
+/// `parts` is a struct literal of what the compiler checks by type:
+/// `.controllers`, a tuple of pointers to controllers, at least one, and
+/// optionally `.middleware`, `.error_handler` and `.strict_errors`.
+/// `options` are its settings, `Options`.
 ///
 /// `.middleware` is the server's middleware (middleware.zig): every
 /// request runs it, in order, before its route is applied, then the
@@ -238,38 +295,35 @@ const Needs = struct {
 /// handler that returns `anyerror`. `.strict_errors = false`, known at
 /// compile time, turns the check off.
 ///
-/// The controllers, the error handler and the objects of the middleware
-/// are borrowed and live as long as the server; the prefix, the list of
-/// trusted proxies and the strings of the mounts are copied. No I/O: the
+/// The controllers, the error handler, the objects of the middleware and
+/// a backend of `.listen = .{ .backend = ... }` are borrowed and live as
+/// long as the server; the prefix, the list of trusted proxies and the
+/// strings of the mounts are copied, and the backend of `.port` or
+/// `.native` is the server's own. No I/O: the backend listens and the
 /// roots of the mounts open in `start`.
-pub fn init(gpa: std.mem.Allocator, options: anytype) InitError!Server {
-    const O = @TypeOf(options);
-    const p = comptime plan.of(O);
+pub fn init(gpa: std.mem.Allocator, parts: anytype, options: Options) InitError!Server {
+    const P = @TypeOf(parts);
+    const p = comptime plan.of(P);
     // The loops below unroll once per route and per setting.
     @setEvalBranchQuota(1000 + 100 * p.routes.len);
 
     var settings: Settings = .{};
-    inline for (@typeInfo(Settings).@"struct".field_names) |name| {
-        // The list of trusted proxies is copied below.
-        if (comptime std.mem.eql(u8, name, "trusted_proxies")) continue;
-        if (@hasField(O, name)) @field(settings, name) = optionValue(@FieldType(Settings, name), @field(options, name));
-    }
+    inline for (@typeInfo(Settings).@"struct".field_names) |name| @field(settings, name) = @field(options, name);
     if (!validSettings(settings)) return error.InvalidConfiguration;
 
-    const given: []const u8 = if (@hasField(O, "prefix")) options.prefix else "";
-    if (!path_rules.validPrefix(given)) return error.InvalidConfiguration;
-    const prefix = try gpa.dupe(u8, given);
+    if (!path_rules.validPrefix(options.prefix)) return error.InvalidConfiguration;
+    const prefix = try gpa.dupe(u8, options.prefix);
     errdefer gpa.free(prefix);
 
-    if (@hasField(O, "trusted_proxies")) settings.trusted_proxies = try trustedProxiesOf(gpa, options.trusted_proxies);
+    settings.trusted_proxies = try trustedProxiesOf(gpa, options.trusted_proxies);
     errdefer freeSettings(gpa, settings);
     const trust = try proxies.Trust.init(gpa, settings.trusted_proxies);
     errdefer trust.deinit(gpa);
 
-    const mounts = try static_files.copyMounts(gpa, if (@hasField(O, "static")) options.static else .{});
+    const mounts = try static_files.copyMounts(gpa, options.static);
     errdefer static_files.freeMounts(gpa, mounts);
 
-    const links = try linksOf(gpa, p, options);
+    const links = try linksOf(gpa, p, parts);
     errdefer gpa.free(links);
 
     const table = try gpa.alloc(Route, p.routes.len);
@@ -286,7 +340,7 @@ pub fn init(gpa: std.mem.Allocator, options: anytype) InitError!Server {
         table[i] = .{
             .info = .{ .method = r.method, .pattern = pattern, .controller = r.controller_name, .handler = r.handler },
             .kind = r.kind,
-            .controller = options.controllers[r.controller_index],
+            .controller = parts.controllers[r.controller_index],
             .handle = HandlerOf(r.Controller, r.handler, r.kind).handle,
             .on_close = if (r.on_close) |name| OnCloseOf(r.Controller, name).call else null,
             .params = r.params,
@@ -299,9 +353,12 @@ pub fn init(gpa: std.mem.Allocator, options: anytype) InitError!Server {
         filled += 1;
     }
 
+    // Last: nothing fails after it.
+    const native, const backend = try backendOf(gpa, options.listen);
     return .{ .internal = .{
         .gpa = gpa,
-        .backend = options.backend,
+        .backend = backend,
+        .native = native,
         .prefix = prefix,
         .routes = table,
         .router = .{ .nodes = p.nodes, .prefix = prefix, .max_params = p.max_params },
@@ -309,26 +366,40 @@ pub fn init(gpa: std.mem.Allocator, options: anytype) InitError!Server {
         .middleware = links[0..p.global.len],
         .settings = settings,
         .trust = trust,
-        .needs = comptime needsOf(O, p),
-        .error_handler = if (@hasField(O, "error_handler")) .of(p.Handler, options.error_handler) else .default,
+        .needs = needsOf(p, mounts.len),
+        .error_handler = if (@hasField(P, "error_handler")) .of(p.Handler, parts.error_handler) else .default,
         .mounts = mounts,
     } };
 }
 
+/// The backend of `.listen`, and the native backend the server makes for
+/// `.port` and `.native`, which `deinit` frees.
+fn backendOf(gpa: std.mem.Allocator, listen: Options.Listen) InitError!struct { ?*NativeBackend, Backend } {
+    const native_options: NativeBackend.Options = switch (listen) {
+        .backend => |own| return .{ null, own },
+        .port => |port| .{ .port = port },
+        .native => |given| given,
+    };
+    const native = try gpa.create(NativeBackend);
+    errdefer gpa.destroy(native);
+    native.* = try .init(gpa, native_options);
+    return .{ native, native.backend() };
+}
+
 /// The links of every chain of `p`, in one allocation: the server's
-/// middleware, each with the object `options.middleware` points to, then
+/// middleware, each with the object `parts.middleware` points to, then
 /// the own middleware of each route, a field of a controller with that
 /// controller.
-fn linksOf(gpa: std.mem.Allocator, comptime p: plan.Plan, options: anytype) error{OutOfMemory}![]mw.Link {
+fn linksOf(gpa: std.mem.Allocator, comptime p: plan.Plan, parts: anytype) error{OutOfMemory}![]mw.Link {
     const own = comptime routeLinks(p);
     const links = try gpa.alloc(mw.Link, p.global.len + own.len);
     inline for (p.global, 0..) |e, i| {
         links[i] = comptime mw.linkOf(e);
-        if (e.binding == .pointer) links[i].ptr = mw.objectAt(options.middleware, e.path);
+        if (e.binding == .pointer) links[i].ptr = mw.objectAt(parts.middleware, e.path);
     }
-    const count = @typeInfo(@TypeOf(options.controllers)).@"struct".field_names.len;
+    const count = @typeInfo(@TypeOf(parts.controllers)).@"struct".field_names.len;
     var controllers: [count]*anyopaque = undefined;
-    inline for (&controllers, 0..) |*slot, i| slot.* = options.controllers[i];
+    inline for (&controllers, 0..) |*slot, i| slot.* = parts.controllers[i];
     for (own, links[p.global.len..]) |l, *link| {
         link.* = l.link;
         if (l.controller) |ci| link.ptr = controllers[ci];
@@ -356,38 +427,12 @@ fn routeLinks(comptime p: plan.Plan) []const RouteLink {
     return &final;
 }
 
-fn needsOf(comptime O: type, comptime p: plan.Plan) Needs {
-    var needs: Needs = .{};
-    for (p.routes, 0..) |r, i| {
-        if (r.kind == .sse and needs.flush == null) needs.flush = i;
-    }
-    if (@hasField(O, "static")) {
-        const info = @typeInfo(@FieldType(O, "static"));
-        if (info == .@"struct") needs.static_mounts = info.@"struct".field_names.len;
-    }
-    return needs;
-}
-
-/// An option as the type of its field. In the options of an `anytype`, a
-/// nested literal such as `.{ .body = .ignore }` has a struct type of its
-/// own, which does not coerce to `UnknownFieldsOptions`: its fields are
-/// taken one by one.
-fn optionValue(comptime T: type, value: anytype) T {
-    const V = @TypeOf(value);
-    if (V == T) return value;
-    switch (@typeInfo(T)) {
-        .@"struct" => if (@typeInfo(V) == .@"struct") {
-            var out: T = .{};
-            inline for (@typeInfo(V).@"struct".field_names) |name| {
-                if (!@hasField(T, name)) @compileError("zefir.http: Server.init: " ++ plan.shortName(@typeName(T)) ++ " has no option ." ++ name);
-                @field(out, name) = optionValue(@FieldType(T, name), @field(value, name));
-            }
-            return out;
-        },
-        .optional => |o| if (V != @TypeOf(null)) return optionValue(o.child, value),
-        else => {},
-    }
-    return value;
+fn needsOf(comptime p: plan.Plan, static_mounts: usize) Needs {
+    const flush: ?u32 = comptime first: {
+        for (p.routes, 0..) |r, i| if (r.kind == .sse) break :first i;
+        break :first null;
+    };
+    return .{ .flush = flush, .static_mounts = static_mounts };
 }
 
 fn validSettings(s: Settings) bool {
@@ -397,47 +442,24 @@ fn validSettings(s: Settings) bool {
 }
 
 /// `.trusted_proxies`, its list copied.
-fn trustedProxiesOf(gpa: std.mem.Allocator, value: anytype) error{OutOfMemory}!TrustedProxies {
-    const V = @TypeOf(value);
-    if (V == TrustedProxies) return switch (value) {
+fn trustedProxiesOf(gpa: std.mem.Allocator, value: TrustedProxies) error{OutOfMemory}!TrustedProxies {
+    return switch (value) {
         .list => |list| .{ .list = try copyList(gpa, list) },
         else => value,
     };
-    if (@typeInfo(V) == .@"struct") {
-        const names = @typeInfo(V).@"struct".field_names;
-        if (comptime names.len != 1 or !std.mem.eql(u8, names[0], "list"))
-            @compileError("zefir.http: Server.init: .trusted_proxies is .all, .private, .none or .{ .list = &.{\"10.1.0.0/16\"} }");
-        return .{ .list = try copyList(gpa, value.list) };
-    }
-    return value;
 }
 
-/// A copy of a list of strings: a slice, or `&.{ ... }` of strings of
-/// different types, such as a value from the config next to a literal.
-/// Such a tuple is copied element by element: behind a pointer it does
-/// not coerce to a slice safely.
-fn copyList(gpa: std.mem.Allocator, list: anytype) error{OutOfMemory}![]const []const u8 {
-    const info = @typeInfo(@TypeOf(list));
-    const Tuple = if (info == .pointer and info.pointer.size == .one and @typeInfo(info.pointer.child) == .@"struct") info.pointer.child else void;
-    const len = if (Tuple != void) @typeInfo(Tuple).@"struct".field_names.len else list.len;
-    const copy = try gpa.alloc([]const u8, len);
+/// A copy of a list of strings.
+fn copyList(gpa: std.mem.Allocator, list: []const []const u8) error{OutOfMemory}![]const []const u8 {
+    const copy = try gpa.alloc([]const u8, list.len);
     var done: usize = 0;
     errdefer {
         for (copy[0..done]) |item| gpa.free(item);
         gpa.free(copy);
     }
-    if (Tuple != void) {
-        inline for (0..len) |i| {
-            const item: []const u8 = list.*[i];
-            copy[i] = try gpa.dupe(u8, item);
-            done += 1;
-        }
-    } else {
-        const slice: []const []const u8 = list;
-        for (copy, slice) |*slot, item| {
-            slot.* = try gpa.dupe(u8, item);
-            done += 1;
-        }
+    for (copy, list) |*slot, item| {
+        slot.* = try gpa.dupe(u8, item);
+        done += 1;
     }
     return copy;
 }
@@ -551,11 +573,20 @@ fn backendCanServe(server: *const Server) bool {
     return true;
 }
 
-/// Waits until the server has stopped; `error.InvalidState` before
-/// `start`. Canceling the wait does not stop the server.
+/// Waits until the server has stopped. Returns at once with the error of a
+/// backend that broke: the server then stops by itself. `error.InvalidState`
+/// before `start`. Canceling the wait does not stop the server.
 pub fn wait(server: *Server, io: std.Io) WaitError!void {
     if (server.internal.state_value.load(.acquire) == .configured) return error.InvalidState;
     try server.internal.wait_event.wait(io);
+    return server.fatalError(io);
+}
+
+/// The error of a backend that broke, if one did.
+fn fatalError(server: *Server, io: std.Io) Backend.FatalError!void {
+    server.internal.mutex.lockUncancelable(io);
+    defer server.internal.mutex.unlock(io);
+    if (server.internal.fatal) |err| return err;
 }
 
 /// `start` and `wait`: for a service that runs one server until it stops.
@@ -568,8 +599,9 @@ pub fn run(server: *Server, io: std.Io) (StartError || WaitError)!void {
 /// waits; a second call does nothing. The backend takes no new requests,
 /// the SSE streams are closed (each sends what was published to it before,
 /// then the end of its response), the requests at work and those streams
-/// get `.shutdown_grace` to end, those that outlive it are canceled without
-/// a response or cut, and the server stops.
+/// get `.shutdown_grace` to end (less, by the deadline of a `shutdown`),
+/// those that outlive it are canceled without a response or cut, and the
+/// server stops.
 pub fn requestStop(server: *Server, io: std.Io) void {
     server.internal.mutex.lockUncancelable(io);
     defer server.internal.mutex.unlock(io);
@@ -578,7 +610,6 @@ pub fn requestStop(server: *Server, io: std.Io) void {
             server.internal.state_value.store(.stopped, .release);
             server.internal.wait_event.set(io);
             server.internal.shutdown_event.set(io);
-            server.internal.grace_over.set(io);
         },
         .starting, .running => |current| {
             // While starting, `start` moves on to draining itself.
@@ -590,26 +621,52 @@ pub fn requestStop(server: *Server, io: std.Io) void {
     }
 }
 
-/// `requestStop` and a wait for the stop. `error.ShutdownTimeout` when
-/// requests did not end within `.shutdown_grace` and, after they were
-/// canceled, `.finish_timeout` for their `onFinish` phases and one second
-/// more (a handler that ignores its cancelation): the server stays in
-/// `draining` until they end. Treat it as fatal and end the process;
-/// `deinit` would wait for such requests without a limit.
-pub fn shutdown(server: *Server, io: std.Io) ShutdownError!void {
+/// `requestStop` and a wait for the stop, which returns 250 ms before
+/// `deadline` at the latest. The deadline cuts `.shutdown_grace`, also a
+/// grace that began before this call: the grace ends by `deadline` less
+/// one second, `.finish_timeout` and those 250 ms, so that the requests it
+/// cancels have time to end and the caller time for what comes after. Of
+/// several calls the earliest deadline counts.
+///
+/// `error.ShutdownTimeout` when the server has not stopped by then: a
+/// handler that ignores its cancelation. The server stays in `draining`
+/// until such requests end. Treat it as fatal and end the process; `deinit`
+/// would wait for them without a limit. Once stopped, the error of a
+/// backend that broke, as `wait` returns it.
+pub fn shutdown(server: *Server, io: std.Io, deadline: std.Io.Clock.Timestamp) ShutdownError!void {
+    const due: core.Deadline = .at(deadline.toClock(io, .awake).raw);
+    server.limitGrace(io, due);
     server.requestStop(io);
-    try server.internal.grace_over.wait(io);
-    const budget: Duration = .{ .nanoseconds = cancel_budget.nanoseconds +| server.internal.settings.finish_timeout.nanoseconds };
-    waiting.untilSet(&server.internal.shutdown_event, io, .after(std.Io.Clock.awake.now(io), budget)) catch |err| switch (err) {
+    waiting.untilSet(&server.internal.shutdown_event, io, before(due, shutdown_reserve)) catch |err| switch (err) {
         error.Timeout => return error.ShutdownTimeout,
         error.Canceled => |e| return e,
     };
+    return server.fatalError(io);
 }
 
-/// How long the requests canceled at the end of a stop's grace have to
-/// end, past the time of their `onFinish` phases, before `shutdown` gives
-/// up on them.
+/// Keeps the earliest deadline of a `shutdown` and wakes the lifecycle
+/// task, whose grace it may cut.
+fn limitGrace(server: *Server, io: std.Io, due: core.Deadline) void {
+    {
+        server.internal.mutex.lockUncancelable(io);
+        defer server.internal.mutex.unlock(io);
+        server.internal.deadline = if (server.internal.deadline) |given| given.earliest(due) else due;
+    }
+    server.internal.idle.set(io);
+}
+
+/// `due`, `by` earlier.
+fn before(due: core.Deadline, by: Duration) core.Deadline {
+    return .{ .expires = .{ .nanoseconds = due.expires.nanoseconds -| by.nanoseconds } };
+}
+
+/// The time a stop keeps after its grace, past `.finish_timeout`, for the
+/// requests it cancels to end: a deadline ends the grace this much earlier.
 const cancel_budget: Duration = .fromSeconds(1);
+
+/// How much earlier than its deadline `shutdown` returns, so that the
+/// caller still has time for what comes after it.
+const shutdown_reserve: Duration = .fromMilliseconds(250);
 
 /// Running, and the backend takes requests. Thread-safe; for health
 /// checks.
@@ -622,8 +679,9 @@ pub fn state(server: *const Server) State {
     return server.internal.state_value.load(.acquire);
 }
 
-/// Stops the server if it runs, waits for the stop and frees the tables.
-/// No other task may still be in `wait`, `run` or `shutdown`.
+/// Stops the server if it runs, waits for the stop and frees the tables,
+/// and last the backend of `.listen = .port` or `.native`. No other task
+/// may still be in `wait`, `run` or `shutdown`.
 pub fn deinit(server: *Server, io: std.Io) void {
     // No cancelation point: a cancelation request of the caller stays.
     const protection = io.swapCancelProtection(.blocked);
@@ -638,6 +696,10 @@ pub fn deinit(server: *Server, io: std.Io) void {
     server.internal.gpa.free(server.internal.routes);
     server.internal.gpa.free(server.internal.links);
     server.internal.gpa.free(server.internal.prefix);
+    if (server.internal.native) |native| {
+        native.deinit();
+        server.internal.gpa.destroy(native);
+    }
     server.* = undefined;
 }
 
@@ -649,7 +711,6 @@ fn markStopped(server: *Server, io: std.Io) void {
     }
     server.internal.wait_event.set(io);
     server.internal.shutdown_event.set(io);
-    server.internal.grace_over.set(io);
 }
 
 fn joinLifecycle(server: *Server, io: std.Io) void {
@@ -663,9 +724,10 @@ fn joinLifecycle(server: *Server, io: std.Io) void {
 /// The lifecycle task: waits for a stop and leads it. The backend takes no
 /// new requests and the SSE streams are closed at once; the requests at
 /// work, and the streams that still send what was published before, get
-/// `.shutdown_grace` to end; then the backend cancels what still runs (a
-/// request it cancels ends without a response, a stream cut) and the server
-/// stops once every task of the backend has ended.
+/// `.shutdown_grace` to end, or less by the deadline of a `shutdown`; then
+/// the backend cancels what still runs (a request it cancels ends without
+/// a response, a stream cut) and the server stops once every task of the
+/// backend has ended.
 fn runLifecycle(server: *Server, io: std.Io) void {
     // Nothing cancels this task, and its waits are no cancelation points.
     const protection = io.swapCancelProtection(.blocked);
@@ -673,20 +735,21 @@ fn runLifecycle(server: *Server, io: std.Io) void {
     server.internal.stop_event.waitUncancelable(io);
     server.internal.start_done.waitUncancelable(io);
     if (server.internal.rollback) return;
-    const grace_end: core.Deadline = .after(std.Io.Clock.awake.now(io), server.internal.settings.shutdown_grace);
+    const began = std.Io.Clock.awake.now(io);
     server.internal.backend.stopAccepting(io);
     flow.closeStreams(server, io);
-    server.waitIdle(io, grace_end);
-    server.internal.grace_over.set(io);
+    server.waitIdle(io, began);
     server.internal.backend.cancelAll(io);
     server.internal.backend.wait(io);
     server.markStopped(io);
 }
 
-/// Waits until no request is at work and no stream is open, or `deadline`
-/// passes: the stop has closed the streams, which end once they have sent
-/// what was published before. Only the lifecycle task calls it.
-fn waitIdle(server: *Server, io: std.Io, deadline: core.Deadline) void {
+/// Waits until no request is at work and no stream is open, or the grace
+/// of the stop that `began` ends: the stop has closed the streams, which
+/// end once they have sent what was published before. A deadline of a
+/// `shutdown` that comes meanwhile wakes it to cut the grace. Only the
+/// lifecycle task calls it.
+fn waitIdle(server: *Server, io: std.Io, began: std.Io.Timestamp) void {
     while (true) {
         server.internal.idle.reset();
         // Read-modify-writes, not loads: they order the reset before the
@@ -694,12 +757,30 @@ fn waitIdle(server: *Server, io: std.Io, deadline: core.Deadline) void {
         // plain load may read the count from before that while the reset
         // lands after its `set`, and the stop would sleep through it.
         if (server.internal.in_flight.fetchAdd(0, .acq_rel) == 0 and server.internal.streams.fetchAdd(0, .acq_rel) == 0) return;
-        waiting.untilSet(&server.internal.idle, io, deadline) catch |err| switch (err) {
+        waiting.untilSet(&server.internal.idle, io, server.graceEnd(io, began)) catch |err| switch (err) {
             error.Timeout => return,
             // The lifecycle task waits with cancelation blocked.
             error.Canceled => unreachable,
         };
     }
+}
+
+/// The end of the grace of the stop that `began`: `.shutdown_grace` later,
+/// or earlier by the deadline of a `shutdown`, which keeps one second,
+/// `.finish_timeout` and the reserve of `shutdown` for what comes after;
+/// never before `began`.
+fn graceEnd(server: *Server, io: std.Io, began: std.Io.Timestamp) core.Deadline {
+    const grace: core.Deadline = .after(began, server.internal.settings.shutdown_grace);
+    const due = due: {
+        server.internal.mutex.lockUncancelable(io);
+        defer server.internal.mutex.unlock(io);
+        break :due server.internal.deadline orelse return grace;
+    };
+    const after_grace: Duration = .{ .nanoseconds = cancel_budget.nanoseconds +| server.internal.settings.finish_timeout.nanoseconds +|
+        shutdown_reserve.nanoseconds };
+    const cut = before(due, after_grace);
+    if (cut.expires.nanoseconds < began.nanoseconds) return .at(began);
+    return grace.earliest(cut);
 }
 
 const testing = std.testing;
@@ -744,7 +825,7 @@ test "Server.init builds the table and deinit frees it" {
     defer backend.deinit();
     // The prefix of a config: init copies it.
     const config_prefix = try testing.allocator.dupe(u8, "/api");
-    var server = init(testing.allocator, .{ .backend = backend.backend(), .prefix = config_prefix, .controllers = .{ &users, &health } }) catch |err| {
+    var server = init(testing.allocator, .{ .controllers = .{ &users, &health } }, .{ .listen = .{ .backend = backend.backend() }, .prefix = config_prefix }) catch |err| {
         testing.allocator.free(config_prefix);
         return err;
     };
@@ -792,14 +873,14 @@ test "init checks the prefix without I/O" {
     var health: HealthController = .{};
     var backend: TestingBackend = .init(testing.allocator);
     defer backend.deinit();
-    var server = try init(testing.allocator, .{ .backend = backend.backend(), .controllers = .{&health} });
+    var server = try init(testing.allocator, .{ .controllers = .{&health} }, .{ .listen = .{ .backend = backend.backend() } });
     defer server.deinit(testing.io);
     try testing.expectEqualStrings("/", server.internal.routes[0].info.pattern);
     try testing.expectEqualStrings("/health", server.internal.routes[1].info.pattern);
     try testing.expectEqual(State.configured, server.state());
 
     for ([_][]const u8{ "api", "/api/", "/", "//api", "/a//b", "/a b", "/a%20b", "/./a", "/a/..", "/{x}", "/a?b", "/a#b", "/caf\xc3\xa9" }) |prefix| {
-        testing.expectError(error.InvalidConfiguration, init(testing.allocator, .{ .backend = backend.backend(), .prefix = prefix, .controllers = .{&health} })) catch |err| {
+        testing.expectError(error.InvalidConfiguration, init(testing.allocator, .{ .controllers = .{&health} }, .{ .listen = .{ .backend = backend.backend() }, .prefix = prefix })) catch |err| {
             std.debug.print("prefix {s}\n", .{prefix});
             return err;
         };
@@ -811,7 +892,7 @@ test "init reads every option of section 4 with its default" {
     var backend: TestingBackend = .init(testing.allocator);
     defer backend.deinit();
     {
-        var server = try init(testing.allocator, .{ .backend = backend.backend(), .controllers = .{&health} });
+        var server = try init(testing.allocator, .{ .controllers = .{&health} }, .{ .listen = .{ .backend = backend.backend() } });
         defer server.deinit(testing.io);
         const s = server.internal.settings;
         try testing.expectEqual(dto.UnknownFields.reject, s.unknown_fields.body);
@@ -832,8 +913,9 @@ test "init reads every option of section 4 with its default" {
         // Nested literals, null, a duration in full, a list from the config.
         const cidrs = try testing.allocator.dupe(u8, "10.1.0.0/16");
         var server = init(testing.allocator, .{
-            .backend = backend.backend(),
             .controllers = .{&health},
+        }, .{
+            .listen = .{ .backend = backend.backend() },
             .unknown_fields = .{ .body = .ignore },
             .json = .{ .max_depth = 16 },
             .max_body_bytes = 8 << 20,
@@ -880,13 +962,57 @@ test "init reads every option of section 4 with its default" {
     // Values that cannot work.
     const backend_value = backend.backend();
     const controllers = .{&health};
-    try testing.expectError(error.InvalidConfiguration, init(testing.allocator, .{ .backend = backend_value, .controllers = controllers, .max_in_flight = 0 }));
-    try testing.expectError(error.InvalidConfiguration, init(testing.allocator, .{ .backend = backend_value, .controllers = controllers, .max_streams = 0 }));
-    try testing.expectError(error.InvalidConfiguration, init(testing.allocator, .{ .backend = backend_value, .controllers = controllers, .json = .{ .max_depth = 0 } }));
-    try testing.expectError(error.InvalidConfiguration, init(testing.allocator, .{ .backend = backend_value, .controllers = controllers, .request_timeout = Duration.zero }));
-    try testing.expectError(error.InvalidConfiguration, init(testing.allocator, .{ .backend = backend_value, .controllers = controllers, .shutdown_grace = Duration.fromSeconds(-1) }));
-    try testing.expectError(error.InvalidConfiguration, init(testing.allocator, .{ .backend = backend_value, .controllers = controllers, .finish_timeout = Duration.fromSeconds(-1) }));
-    try testing.expectError(error.InvalidConfiguration, init(testing.allocator, .{ .backend = backend_value, .controllers = controllers, .trusted_proxies = .{ .list = &.{ "10.0.0.0/8", "10.0.0.0/33" } } }));
+    try testing.expectError(error.InvalidConfiguration, init(testing.allocator, .{ .controllers = controllers }, .{ .listen = .{ .backend = backend_value }, .max_in_flight = 0 }));
+    try testing.expectError(error.InvalidConfiguration, init(testing.allocator, .{ .controllers = controllers }, .{ .listen = .{ .backend = backend_value }, .max_streams = 0 }));
+    try testing.expectError(error.InvalidConfiguration, init(testing.allocator, .{ .controllers = controllers }, .{ .listen = .{ .backend = backend_value }, .json = .{ .max_depth = 0 } }));
+    try testing.expectError(error.InvalidConfiguration, init(testing.allocator, .{ .controllers = controllers }, .{ .listen = .{ .backend = backend_value }, .request_timeout = Duration.zero }));
+    try testing.expectError(error.InvalidConfiguration, init(testing.allocator, .{ .controllers = controllers }, .{ .listen = .{ .backend = backend_value }, .shutdown_grace = Duration.fromSeconds(-1) }));
+    try testing.expectError(error.InvalidConfiguration, init(testing.allocator, .{ .controllers = controllers }, .{ .listen = .{ .backend = backend_value }, .finish_timeout = Duration.fromSeconds(-1) }));
+    try testing.expectError(error.InvalidConfiguration, init(testing.allocator, .{ .controllers = controllers }, .{ .listen = .{ .backend = backend_value }, .trusted_proxies = .{ .list = &.{ "10.0.0.0/8", "10.0.0.0/33" } } }));
+}
+
+test "typed options take declaration literals" {
+    var health: HealthController = .{};
+    var backend: TestingBackend = .init(testing.allocator);
+    defer backend.deinit();
+    var server = try init(testing.allocator, .{ .controllers = .{&health} }, .{
+        .listen = .{ .backend = backend.backend() },
+        .request_timeout = .fromSeconds(10),
+        .shutdown_grace = .fromSeconds(3),
+    });
+    defer server.deinit(testing.io);
+    try testing.expectEqual(10, server.internal.settings.request_timeout.?.toSeconds());
+    try testing.expectEqual(3, server.internal.settings.shutdown_grace.toSeconds());
+    try testing.expect(server.internal.native == null);
+}
+
+test "a server on .listen = .port owns its native backend" {
+    var health: HealthController = .{};
+    var server = try init(testing.allocator, .{ .controllers = .{&health} }, .{ .listen = .{ .port = 0 } });
+    // deinit without start: the backend is freed, and it never listened.
+    defer server.deinit(testing.io);
+    const native = server.internal.native.?;
+    try testing.expectEqual(@as(*anyopaque, native), server.internal.backend.ptr);
+    try testing.expectEqual(null, native.listener);
+    try testing.expectEqual(0, native.port());
+    var any: [64]u8 = undefined;
+    try testing.expectEqualStrings("0.0.0.0:0", try std.fmt.bufPrint(&any, "{f}", .{native.address}));
+}
+
+test "a server on .listen = .native takes the backend's options" {
+    var health: HealthController = .{};
+    var server = try init(testing.allocator, .{ .controllers = .{&health} }, .{ .listen = .{
+        .native = .{ .address = "127.0.0.1", .port = 0, .timeouts = .{ .idle = .fromSeconds(5) } },
+    } });
+    defer server.deinit(testing.io);
+    const native = server.internal.native.?;
+    try testing.expectEqual(5, native.timeouts.idle.toSeconds());
+    var address: [64]u8 = undefined;
+    try testing.expectEqualStrings("127.0.0.1:0", try std.fmt.bufPrint(&address, "{f}", .{native.address}));
+    // Options the backend refuses: the server is not built, and nothing leaks.
+    try testing.expectError(error.InvalidConfiguration, init(testing.allocator, .{ .controllers = .{&health} }, .{ .listen = .{
+        .native = .{ .address = "localhost", .port = 80 },
+    } }));
 }
 
 fn initAndDeinit(gpa: std.mem.Allocator) !void {
@@ -895,12 +1021,16 @@ fn initAndDeinit(gpa: std.mem.Allocator) !void {
     var backend: TestingBackend = .init(gpa);
     defer backend.deinit();
     var server = try init(gpa, .{
-        .backend = backend.backend(),
-        .prefix = "/api",
         .controllers = .{ &users, &health },
+    }, .{
+        .listen = .{ .backend = backend.backend() },
+        .prefix = "/api",
         .trusted_proxies = .{ .list = &.{ "10.0.0.0/8", "fc00::/7" } },
     });
     server.deinit(testing.io);
+    // The native backend the server makes for itself.
+    var on_port = try init(gpa, .{ .controllers = .{&health} }, .{ .listen = .{ .port = 0 }, .prefix = "/api" });
+    on_port.deinit(testing.io);
 }
 
 test "Server.init frees what it took when memory runs out" {
@@ -948,7 +1078,7 @@ test "start refuses a backend without a capability a route needs" {
     var health: HealthController = .{};
 
     // An SSE route needs flush.
-    var server = try init(testing.allocator, .{ .backend = fake.backend(), .controllers = .{ &users, &health } });
+    var server = try init(testing.allocator, .{ .controllers = .{ &users, &health } }, .{ .listen = .{ .backend = fake.backend() } });
     defer server.deinit(io);
     const level = testing.log_level;
     testing.log_level = .err; // the warning names the route
@@ -960,15 +1090,15 @@ test "start refuses a backend without a capability a route needs" {
     try server.wait(io);
 
     // Without SSE the same backend serves.
-    var plain = try init(testing.allocator, .{ .backend = fake.backend(), .controllers = .{&health} });
+    var plain = try init(testing.allocator, .{ .controllers = .{&health} }, .{ .listen = .{ .backend = fake.backend() } });
     defer plain.deinit(io);
     try plain.start(io);
     try testing.expectEqual(1, fake.starts);
-    try plain.shutdown(io);
+    try plain.shutdown(io, far(io));
 
     // Static files need streaming_response.
     var no_stream: FakeBackend = .{ .can = .{ .http1 = true, .flush = true } };
-    var with_static = try init(testing.allocator, .{ .backend = no_stream.backend(), .controllers = .{&health}, .static = .{static_files.static("/", .{ .root = "public" })} });
+    var with_static = try init(testing.allocator, .{ .controllers = .{&health} }, .{ .listen = .{ .backend = no_stream.backend() }, .static = &.{static_files.static("/", .{ .root = "public" })} });
     defer with_static.deinit(io);
     try testing.expectEqual(1, with_static.internal.needs.static_mounts);
     try testing.expectError(error.UnsupportedByBackend, with_static.start(io));
@@ -996,7 +1126,7 @@ test "lifecycle: configured → running → draining → stopped; a second start
     var backend: TestingBackend = .init(testing.allocator);
     defer backend.deinit();
     var gate: GateController = .{};
-    var server = try init(testing.allocator, .{ .backend = backend.backend(), .controllers = .{&gate} });
+    var server = try init(testing.allocator, .{ .controllers = .{&gate} }, .{ .listen = .{ .backend = backend.backend() } });
     defer server.deinit(io);
 
     try testing.expectEqual(State.configured, server.state());
@@ -1042,7 +1172,7 @@ test "lifecycle: configured → running → draining → stopped; a second start
     try testing.expectEqual(204, res.status);
     try server.wait(io);
     try testing.expectEqual(State.stopped, server.state());
-    try server.shutdown(io);
+    try server.shutdown(io, far(io));
     try testing.expectError(error.InvalidState, server.start(io));
 }
 
@@ -1051,9 +1181,212 @@ test "shutdown and deinit of a server that never started" {
     var backend: TestingBackend = .init(testing.allocator);
     defer backend.deinit();
     var health: HealthController = .{};
-    var server = try init(testing.allocator, .{ .backend = backend.backend(), .controllers = .{&health} });
+    var server = try init(testing.allocator, .{ .controllers = .{&health} }, .{ .listen = .{ .backend = backend.backend() } });
     defer server.deinit(io);
-    try server.shutdown(io);
+    try server.shutdown(io, far(io));
     try testing.expectEqual(State.stopped, server.state());
     try testing.expectError(error.InvalidState, server.start(io));
+}
+
+/// A route that holds its request: on a gate the test opens in its
+/// `defer`, or for `sleep`. `deaf` ignores the request's cancelation and
+/// waits for the gate alone.
+const HoldController = struct {
+    entered: std.Io.Event = .unset,
+    gate: std.Io.Event = .unset,
+    sleep: ?Duration = null,
+    deaf: bool = false,
+    /// The handler's wait ended with `error.Canceled`, at `canceled_at`.
+    canceled: std.atomic.Value(bool) = .init(false),
+    canceled_at: std.Io.Timestamp = .zero,
+
+    pub const http_routes = route_decls.routes(.{ .methods = .{ .hold = route_decls.get("/hold", .{}) } });
+
+    pub fn hold(self: *HoldController, ctx: *Context) !void {
+        const io = ctx.io();
+        self.entered.set(io);
+        if (self.deaf) return self.gate.waitUncancelable(io);
+        const held = if (self.sleep) |d| io.sleep(d, .awake) else self.gate.wait(io);
+        held catch |err| {
+            self.canceled_at = std.Io.Clock.awake.now(io);
+            self.canceled.store(true, .release);
+            return err;
+        };
+    }
+};
+
+/// A server of a `HoldController` with the grace `grace` and a
+/// `.finish_timeout` of 200 ms, started, with one request held in it;
+/// `stop` opens the gate, ends the request and frees it all.
+const HoldFixture = struct {
+    holder: HoldController = .{},
+    backend: TestingBackend = undefined,
+    server: Server = undefined,
+    pending: std.Io.Future(TestingBackend.RequestError!TestingBackend.Response) = undefined,
+
+    fn start(f: *HoldFixture, io: std.Io, grace: Duration) !void {
+        f.backend = .init(testing.allocator);
+        errdefer f.backend.deinit();
+        f.server = try init(testing.allocator, .{ .controllers = .{&f.holder} }, .{
+            .listen = .{ .backend = f.backend.backend() },
+            .shutdown_grace = grace,
+            .finish_timeout = .fromMilliseconds(200),
+        });
+        errdefer f.server.deinit(io);
+        try f.server.start(io);
+        f.pending = try io.concurrent(requestHold, .{ &f.backend, io });
+        f.holder.entered.wait(io) catch |err| {
+            f.holder.gate.set(io);
+            if (f.pending.await(io)) |res| {
+                var r = res;
+                r.deinit();
+            } else |_| {}
+            return err;
+        };
+    }
+
+    fn stop(f: *HoldFixture, io: std.Io) void {
+        f.holder.gate.set(io);
+        if (f.pending.await(io)) |res| {
+            var r = res;
+            r.deinit();
+        } else |_| {}
+        f.server.deinit(io);
+        f.backend.deinit();
+    }
+};
+
+fn requestHold(backend: *TestingBackend, io: std.Io) TestingBackend.RequestError!TestingBackend.Response {
+    return backend.request(io, .{ .method = .GET, .target = "/hold" });
+}
+
+/// Milliseconds from `deadline` to `t`: negative before it.
+fn msPast(deadline: std.Io.Clock.Timestamp, t: std.Io.Timestamp) i64 {
+    return deadline.raw.durationTo(t).toMilliseconds();
+}
+
+const far = waiting.far;
+
+test "a deadline before the end of the grace cancels the requests in time" {
+    const io = testing.io;
+    var f: HoldFixture = .{};
+    try f.start(io, .fromSeconds(10));
+    defer f.stop(io);
+
+    const deadline: std.Io.Clock.Timestamp = .fromNow(io, .{ .raw = .fromSeconds(3), .clock = .awake });
+    try f.server.shutdown(io, deadline);
+    const returned = std.Io.Clock.awake.now(io);
+    // The grace ended 1 s, .finish_timeout and r before the deadline, not
+    // after 10 s, and the request was canceled then.
+    try testing.expect(f.holder.canceled.load(.acquire));
+    try testing.expect(msPast(deadline, f.holder.canceled_at) >= -1450);
+    try testing.expect(msPast(deadline, returned) <= -250 + 50);
+    try testing.expectEqual(State.stopped, f.server.state());
+}
+
+test "a deadline that comes after requestStop shortens the grace" {
+    const io = testing.io;
+    var f: HoldFixture = .{};
+    try f.start(io, .fromSeconds(10));
+    defer f.stop(io);
+
+    // The grace of 10 s runs: the backend takes no new requests.
+    f.server.requestStop(io);
+    var tries: u32 = 0;
+    while (f.backend.backend().isReady()) : (tries += 1) {
+        if (tries == 2000) return error.TestUnexpectedResult;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+    const deadline: std.Io.Clock.Timestamp = .fromNow(io, .{ .raw = .fromSeconds(2), .clock = .awake });
+    try f.server.shutdown(io, deadline);
+    const returned = std.Io.Clock.awake.now(io);
+    try testing.expect(f.holder.canceled.load(.acquire));
+    try testing.expect(msPast(deadline, f.holder.canceled_at) >= -1450);
+    try testing.expect(msPast(deadline, returned) <= -250 + 50);
+    try testing.expectEqual(State.stopped, f.server.state());
+}
+
+test "a handler deaf to cancelation: shutdown returns ShutdownTimeout by deadline − r" {
+    const io = testing.io;
+    var f: HoldFixture = .{ .holder = .{ .deaf = true } };
+    try f.start(io, .fromSeconds(10));
+    // Opens the gate first: the request ends, then the stop.
+    defer f.stop(io);
+
+    const deadline: std.Io.Clock.Timestamp = .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake });
+    try testing.expectError(error.ShutdownTimeout, f.server.shutdown(io, deadline));
+    const returned = std.Io.Clock.awake.now(io);
+    try testing.expect(msPast(deadline, returned) >= -250);
+    try testing.expect(msPast(deadline, returned) <= -250 + 200);
+    try testing.expectEqual(State.draining, f.server.state());
+}
+
+test "a far deadline keeps shutdown_grace" {
+    const io = testing.io;
+    var f: HoldFixture = .{ .holder = .{ .sleep = .fromMilliseconds(500) } };
+    try f.start(io, .fromMilliseconds(300));
+    defer f.stop(io);
+
+    const begun = std.Io.Clock.awake.now(io);
+    try f.server.shutdown(io, far(io));
+    // The request of 500 ms is canceled at the end of the grace, 300 ms.
+    try testing.expect(f.holder.canceled.load(.acquire));
+    const at = begun.durationTo(f.holder.canceled_at).toMilliseconds();
+    try testing.expect(at >= 300 - 100 and at <= 300 + 300);
+    try testing.expectEqual(State.stopped, f.server.state());
+}
+
+test "a backend that fails stops the server: wait returns its error at once" {
+    const io = testing.io;
+    var f: HoldFixture = .{};
+    try f.start(io, .fromSeconds(10));
+    defer f.stop(io);
+    const level = testing.log_level;
+    testing.log_level = .err; // the server warns that its backend broke
+    defer testing.log_level = level;
+
+    f.backend.fail(io, error.Unavailable);
+    // At once: the request held in the server keeps the stop in its grace.
+    try testing.expectError(error.Unavailable, f.server.wait(io));
+    try testing.expectEqual(State.draining, f.server.state());
+    try testing.expect(!f.server.isReady());
+}
+
+test "after a failure shutdown returns the same error" {
+    const io = testing.io;
+    var backend: TestingBackend = .init(testing.allocator);
+    defer backend.deinit();
+    var health: HealthController = .{};
+    var server = try init(testing.allocator, .{ .controllers = .{&health} }, .{ .listen = .{ .backend = backend.backend() } });
+    defer server.deinit(io);
+    try server.start(io);
+    const level = testing.log_level;
+    testing.log_level = .err; // the server warns that its backend broke
+    defer testing.log_level = level;
+
+    backend.fail(io, error.Unavailable);
+    // Only the first failure counts.
+    backend.fail(io, error.Unexpected);
+    try testing.expectError(error.Unavailable, server.shutdown(io, far(io)));
+    try testing.expectEqual(State.stopped, server.state());
+    try testing.expectError(error.Unavailable, server.wait(io));
+    try testing.expectError(error.Unavailable, server.shutdown(io, far(io)));
+}
+
+test "a testing backend that fails once the server has stopped does nothing" {
+    const io = testing.io;
+    var backend: TestingBackend = .init(testing.allocator);
+    defer backend.deinit();
+    var health: HealthController = .{};
+    var server = try init(testing.allocator, .{ .controllers = .{&health} }, .{ .listen = .{ .backend = backend.backend() } });
+    defer server.deinit(io);
+    try server.start(io);
+    try server.shutdown(io, far(io));
+    const level = testing.log_level;
+    testing.log_level = .err; // were the failure taken, the server would warn
+    defer testing.log_level = level;
+
+    backend.fail(io, error.Unavailable);
+    try server.wait(io);
+    try server.shutdown(io, far(io));
 }

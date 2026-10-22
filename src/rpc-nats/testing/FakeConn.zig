@@ -6,7 +6,7 @@
 //! ```zig
 //! var fake: rpc_nats.testing.FakeConn = .init(gpa, .{});
 //! defer fake.deinit(io); // after the transport's deinit
-//! var bus: rpc_nats.Transport = try .init(gpa, fake.conn(), .{});
+//! var bus: rpc_nats.Transport = try .initConn(gpa, fake.conn(), .{});
 //! defer bus.deinit(io);
 //! ```
 //!

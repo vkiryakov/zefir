@@ -24,9 +24,10 @@ declared=$(sed -n 's/.*b\.addModule("\([a-z-]*\)".*/\1/p' "$here/../../build.zig
 known=$(sh "$script" --all | tr ' ' '\n' | sort)
 expect "the script knows the modules of build.zig" "$(echo $declared)" "$(echo $known)"
 
-# An acceptance criterion of zefir-rpc: it depends on no application
-# container and no optional module, so build.zig gives it only core and
-# validator.
+# An acceptance criterion of zefir-rpc: it depends on no optional module,
+# so build.zig gives it only core and validator. The application container,
+# zefir.App, lives in core, which rpc imports; that rpc does not use it is
+# the check "no module but core and the umbrella uses core.App" below.
 rpc_imports=$(awk '
     /b\.addModule\("zefir-rpc",/ { inside = 1; next }
     inside && /^    }\);/ { exit }
@@ -98,6 +99,27 @@ jwt_foreign=$(grep -rhoE '@import\("[^"]*"\)' "$here/../../src/jwt" --include='*
     sed 's/@import("\(.*\)")/\1/' | grep -vE '^(std|builtin|validator)$|\.zig$' | sort -u)
 expect "the code of zefir-jwt imports only std, builtin and validator" "" "$(echo $jwt_foreign)"
 
+# zefir-core stands on std alone, its application container zefir.App
+# too: build.zig gives it no imports, and its code imports only std,
+# builtin and its own files. src/core/app/tests/, src/core/examples/ and
+# bench.zig hold programs with imports of their own.
+core_imports=$(awk '
+    /b\.addModule\("zefir-core",/ { inside = 1; next }
+    inside && /^    }\);/ { exit }
+    inside && match($0, /\.name = "[^"]*"/) { print substr($0, RSTART + 9, RLENGTH - 10) }
+' "$here/../../build.zig" | sort)
+expect "zefir-core imports nothing" "" "$(echo $core_imports)"
+core_foreign=$(grep -rhoE '@import\("[^"]*"\)' "$here/../../src/core" --include='*.zig' --exclude-dir=tests --exclude-dir=examples --exclude=bench.zig |
+    sed 's/@import("\(.*\)")/\1/' | grep -vE '^(std|builtin)$|\.zig$' | sort -u)
+expect "the code of zefir-core imports only std and builtin" "" "$(echo $core_foreign)"
+# zefir.App is the root of an application: a module of zefir works without
+# it and never names it. Only core, which holds it, and the umbrella, which
+# re-exports it, do; tests, test helpers and examples may.
+app_users=$(cd "$here/../.." && grep -rnE '(core|@import\("core"\))\.(App|app)\b' src --include='*.zig' \
+    --exclude-dir=core --exclude-dir=tests --exclude-dir=testing --exclude-dir=examples --exclude='*_tests.zig' --exclude=zefir.zig |
+    grep -vE '^[^:]*:[0-9]+:[[:space:]]*//' | sort)
+expect "no module but core and the umbrella uses core.App" "" "$(echo $app_users)"
+
 repo=$(mktemp -d)
 trap 'rm -rf "$repo"' EXIT
 cd "$repo"
@@ -163,6 +185,7 @@ edit tests/mongo/build.zig.zon                  | mongo zefir
 edit tests/mongo/stress/storm.zig               | mongo zefir
 edit tests/redis/e2e/root.zig                   | redis zefir
 edit tests/redis/conf/users.acl                 | redis zefir
+edit tests/app/build.zig                        | zefir
 edit examples/rpc-custom-transport/src/root.zig | rpc rpc-nats jwt zefir
 edit examples/rpc-custom-transport/consumer/build.zig | rpc rpc-nats jwt zefir
 edit examples/rpc-custom-transport/README.md    | rpc rpc-nats jwt zefir

@@ -109,6 +109,13 @@ jobs:
         shell: bash
         working-directory: tests/redis
         run: zig build check --summary all
+      # The same for tests/app, the end-to-end tests of zefir.App, which
+      # import the umbrella module: app-e2e runs them, and its shop against
+      # NATS and mongod runs on a developer's machine only.
+      - if: contains(format(' {0} ', env.MODULES), ' zefir ')
+        shell: bash
+        working-directory: tests/app
+        run: zig build check --summary all
 
   # The tests again under ThreadSanitizer; it does not build for Windows.
   tsan:
@@ -166,7 +173,7 @@ jobs:
           zig fmt --check build.zig build.zig.zon src tests examples
           --exclude tests/nats/zig-pkg --exclude tests/rpc-nats/zig-pkg
           --exclude tests/http/zig-pkg --exclude tests/mongo/zig-pkg
-          --exclude tests/redis/zig-pkg
+          --exclude tests/redis/zig-pkg --exclude tests/app/zig-pkg
           --exclude examples/rpc-custom-transport/zig-pkg
           --exclude examples/rpc-custom-transport/consumer/zig-pkg
 
@@ -337,6 +344,33 @@ jobs:
       - name: Run the end-to-end tests
         shell: bash
         working-directory: tests/http
+        timeout-minutes: 10
+        run: zig build e2e --summary all
+
+  # The end-to-end tests of tests/app: zefir.App with a server of
+  # zefir-http on http.native over loopback and one of zefir-rpc on the
+  # memory transport, on zio with one executor and with four; then programs
+  # with an App, stopped by SIGTERM, and the shop of the guide of App with
+  # its curl session (both skipped on Windows, which cannot send a signal to
+  # one process). It is not a required check. It runs when zefir is among
+  # the modules to test, so on every push to main or dev and on a manual
+  # run.
+  app-e2e:
+    name: app-e2e (${{ matrix.os }})
+    needs: changes
+    if: contains(format(' {0} ', needs.changes.outputs.modules), ' zefir ')
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: mlugg/setup-zig@v2
+      - name: Run the end-to-end tests
+        shell: bash
+        working-directory: tests/app
         timeout-minutes: 10
         run: zig build e2e --summary all
 

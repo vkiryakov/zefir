@@ -2260,6 +2260,58 @@ test "servers that announce lame duck mode at every handshake are not hit in a t
     try testing.expect(count >= 3 and count <= 6);
 }
 
+/// `std.testing.io` whose socket closes each take `delay` first: the
+/// client's teardown of a connection takes longer than its `min_delay`, as
+/// on a busy runner that prints a stack trace while it tears down.
+const SlowClose = struct {
+    const delay: Io.Duration = .fromMilliseconds(60);
+
+    const vtable: Io.VTable = vtable: {
+        var v = std.testing.io.vtable.*;
+        v.netClose = netClose;
+        break :vtable v;
+    };
+
+    fn io() Io {
+        return .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+    }
+
+    fn netClose(userdata: ?*anyopaque, sockets: []const net.Socket) void {
+        std.testing.io.vtable.sleep(userdata, .{ .duration = .{ .raw = delay, .clock = .awake } }) catch {};
+        std.testing.io.vtable.netClose(userdata, sockets);
+    }
+};
+
+test "lame duck at every handshake, and a teardown slower than min_delay: still not a tight loop" {
+    const io = testing.io;
+    var a = try FakeServer.listen(io);
+    defer a.deinit(io);
+    var b = try FakeServer.listen(io);
+    defer b.deinit(io);
+    var first: LameDuckEveryTime = .{};
+    var second: LameDuckEveryTime = .{};
+    var server_a = try io.concurrent(LameDuckEveryTime.serve, .{ &first, io, &a, b.socket.address.getPort() });
+    defer server_a.cancel(io) catch {};
+    var server_b = try io.concurrent(LameDuckEveryTime.serve, .{ &second, io, &b, a.socket.address.getPort() });
+    defer server_b.cancel(io) catch {};
+    var urls: [2][64]u8 = undefined;
+    // Only the client's sockets close slowly.
+    var client: Client = try .init(testing.allocator, SlowClose.io(), .{
+        .servers = &.{ try FakeServer.url(&a, &urls[0]), try FakeServer.url(&b, &urls[1]) },
+        .randomize_servers = false,
+        .reconnect = .{ .min_delay = .fromMilliseconds(50), .max_delay = .fromSeconds(5) },
+    });
+    defer client.deinit();
+    try client.connect();
+    try io.sleep(.fromMilliseconds(1000), .awake);
+    client.close();
+    // A connection lasts until its exit is known, not until its teardown
+    // ends: each still counts as short, and the waits still grow. Moving
+    // at once would make a connection every 60 ms or so.
+    const count = first.accepted.load(.monotonic) + second.accepted.load(.monotonic);
+    try testing.expect(count >= 3 and count <= 6);
+}
+
 /// The handshake, then a hang-up at once; then serves every connection
 /// after; counts them.
 fn serveHangUpThenServe(io: Io, listener: *net.Server, accepted: *std.atomic.Value(u32)) anyerror!void {

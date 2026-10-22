@@ -1,4 +1,4 @@
-//! Must not compile: a misspelled option of Server.init.
+//! Must not compile: a misspelled part of Server.init.
 const std = @import("std");
 const http = @import("http");
 
@@ -14,6 +14,6 @@ const UsersV1Controller = struct {
 test {
     var users: UsersV1Controller = .{};
     const backend: http.Backend = undefined;
-    var server = try http.Server.init(std.testing.allocator, .{ .backend = backend, .contollers = .{&users} });
+    var server = try http.Server.init(std.testing.allocator, .{ .contollers = .{&users} }, .{ .listen = .{ .backend = backend } });
     defer server.deinit(std.testing.io);
 }

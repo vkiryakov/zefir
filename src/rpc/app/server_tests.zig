@@ -20,6 +20,7 @@ const MemoryTransport = @import("../testing/MemoryTransport.zig");
 const ServerTransport = @import("../ServerTransport.zig");
 
 const testing = std.testing;
+const far = @import("../wait.zig").far;
 
 const GetUserRequest = struct { id: u64 };
 const User = struct { id: u64, name: []const u8, email: ?[]const u8 = null };
@@ -143,7 +144,7 @@ test "a call decodes the request, runs the method and encodes its response" {
     try f.open();
     defer f.close(io);
     var users: UserHandler = .{};
-    var server: Server = try .init(testing.allocator, .{ .transport = f.memory.serverTransport(), .handlers = .{&users} });
+    var server: Server = try .init(testing.allocator, .{ .handlers = .{&users} }, .{ .transport = f.memory.serverTransport() });
     defer server.deinit(io);
     try server.start(io);
 
@@ -164,7 +165,7 @@ test "the methods of the engine carry the routes, the settings and the contract'
     var memory: MemoryTransport = try .init(testing.allocator, .{});
     defer memory.deinit(io);
     var users: UserHandler = .{};
-    var server: Server = try .init(testing.allocator, .{ .transport = memory.serverTransport(), .handlers = .{&users} });
+    var server: Server = try .init(testing.allocator, .{ .handlers = .{&users} }, .{ .transport = memory.serverTransport() });
     defer server.deinit(io);
 
     const methods = server.engine.methods;
@@ -181,25 +182,45 @@ test "the methods of the engine carry the routes, the settings and the contract'
     try testing.expectEqual(@as(i64, 1500), methods[2].timeout.?.toMilliseconds());
 }
 
-test "a lower max_timeout lowers the default_timeout that a literal of limits leaves out" {
+test "rpc.Server takes typed options" {
+    const io = testing.io;
+    var f: Fixture = undefined;
+    try f.open();
+    defer f.close(io);
+    var users: UserHandler = .{};
+    var server: Server = try .init(testing.allocator, .{ .handlers = .{&users} }, .{
+        .transport = f.memory.serverTransport(),
+        .shutdown_grace = .fromSeconds(10),
+        .limits = .{ .max_active_tasks = 1024 },
+    });
+    defer server.deinit(io);
+    try testing.expectEqual(@as(u32, 1024), server.engine.limits.max_active_tasks);
+    try server.start(io);
+    var got = try f.call(io, usersRoute("getUser"), "{\"id\":\"42\"}");
+    try expectBody(&got, "{\"id\":\"42\",\"name\":\"user-42\",\"email\":null}");
+}
+
+test "limits with a max_timeout below the default timeout still build a server" {
     const io = testing.io;
     var memory: MemoryTransport = try .init(testing.allocator, .{});
     defer memory.deinit(io);
     var users: UserHandler = .{};
-    var server: Server = try .init(testing.allocator, .{
+    // The default timeout is for methods of the engine without a limit of
+    // their own; rpc.Server has none, and lowers it to the maximum.
+    var server: Server = try .init(testing.allocator, .{ .handlers = .{&users} }, .{
         .transport = memory.serverTransport(),
-        .handlers = .{&users},
-        .limits = .{ .max_timeout = std.Io.Duration.fromSeconds(1) },
+        .limits = .{ .max_timeout = .fromSeconds(1) },
     });
     defer server.deinit(io);
     try testing.expectEqual(@as(i64, 1000), server.engine.limits.default_timeout.toMilliseconds());
     try testing.expectEqual(@as(i64, 1000), server.engine.limits.max_timeout.toMilliseconds());
-    // Set both, they must agree.
-    try testing.expectError(error.InvalidConfiguration, Server.init(testing.allocator, .{
+    // Both written: the default comes down to the maximum as well.
+    var both: Server = try .init(testing.allocator, .{ .handlers = .{&users} }, .{
         .transport = memory.serverTransport(),
-        .handlers = .{&users},
-        .limits = .{ .default_timeout = std.Io.Duration.fromSeconds(5), .max_timeout = std.Io.Duration.fromSeconds(1) },
-    }));
+        .limits = .{ .default_timeout = .fromSeconds(5), .max_timeout = .fromSeconds(1) },
+    });
+    defer both.deinit(io);
+    try testing.expectEqual(@as(i64, 1000), both.engine.limits.default_timeout.toMilliseconds());
 }
 
 test "a body that does not decode is refused with what is wrong and where" {
@@ -208,7 +229,7 @@ test "a body that does not decode is refused with what is wrong and where" {
     try f.open();
     defer f.close(io);
     var users: UserHandler = .{};
-    var server: Server = try .init(testing.allocator, .{ .transport = f.memory.serverTransport(), .handlers = .{&users} });
+    var server: Server = try .init(testing.allocator, .{ .handlers = .{&users} }, .{ .transport = f.memory.serverTransport() });
     defer server.deinit(io);
     try server.start(io);
 
@@ -235,8 +256,9 @@ test "the decoder keeps the server's limits of depth and items" {
     defer f.close(io);
     var users: UserHandler = .{};
     var server: Server = try .init(testing.allocator, .{
-        .transport = f.memory.serverTransport(),
         .handlers = .{&users},
+    }, .{
+        .transport = f.memory.serverTransport(),
         .limits = .{ .max_json_depth = 2, .max_container_items = 3 },
     });
     defer server.deinit(io);
@@ -256,7 +278,7 @@ test "the errors of a method map through the contract, the framework's names, el
     try f.open();
     defer f.close(io);
     var users: UserHandler = .{};
-    var server: Server = try .init(testing.allocator, .{ .transport = f.memory.serverTransport(), .handlers = .{&users} });
+    var server: Server = try .init(testing.allocator, .{ .handlers = .{&users} }, .{ .transport = f.memory.serverTransport() });
     defer server.deinit(io);
     try server.start(io);
 
@@ -274,8 +296,9 @@ test "a response that JSON cannot carry or that is too large is refused by its s
     defer f.close(io);
     var users: UserHandler = .{ .ratio = std.math.nan(f64) };
     var server: Server = try .init(testing.allocator, .{
-        .transport = f.memory.serverTransport(),
         .handlers = .{&users},
+    }, .{
+        .transport = f.memory.serverTransport(),
         .limits = .{ .max_response_bytes = 1024 },
     });
     defer server.deinit(io);
@@ -384,7 +407,7 @@ test "a request against its rules is refused with every violation, and the metho
     try f.open();
     defer f.close(io);
     var accounts: Accounts = .{};
-    var server: Server = try .init(testing.allocator, .{ .transport = f.memory.serverTransport(), .handlers = .{&accounts} });
+    var server: Server = try .init(testing.allocator, .{ .handlers = .{&accounts} }, .{ .transport = f.memory.serverTransport() });
     defer server.deinit(io);
     try server.start(io);
 
@@ -413,7 +436,7 @@ test "more than 100 violations: the first 100 and truncated" {
     try f.open();
     defer f.close(io);
     var accounts: Accounts = .{};
-    var server: Server = try .init(testing.allocator, .{ .transport = f.memory.serverTransport(), .handlers = .{&accounts} });
+    var server: Server = try .init(testing.allocator, .{ .handlers = .{&accounts} }, .{ .transport = f.memory.serverTransport() });
     defer server.deinit(io);
     try server.start(io);
 
@@ -453,9 +476,10 @@ test "violations over max_response_bytes: the first that fit and truncated, and 
     var accounts: Accounts = .{};
     var peek: Peek = .{};
     var server: Server = try .init(testing.allocator, .{
-        .transport = f.memory.serverTransport(),
         .handlers = .{&accounts},
         .middleware = .{&peek},
+    }, .{
+        .transport = f.memory.serverTransport(),
         .limits = .{ .max_response_bytes = 1024 },
     });
     defer server.deinit(io);
@@ -489,7 +513,7 @@ test "a response against the server's own rules is internal, with the details on
     try f.open();
     defer f.close(io);
     var accounts: Accounts = .{};
-    var server: Server = try .init(testing.allocator, .{ .transport = f.memory.serverTransport(), .handlers = .{&accounts} });
+    var server: Server = try .init(testing.allocator, .{ .handlers = .{&accounts} }, .{ .transport = f.memory.serverTransport() });
     defer server.deinit(io);
     try server.start(io);
     const log_level = testing.log_level;
@@ -508,8 +532,9 @@ test "a request whose value outgrows the memory of a call is refused with resour
     defer f.close(io);
     var accounts: Accounts = .{};
     var server: Server = try .init(testing.allocator, .{
-        .transport = f.memory.serverTransport(),
         .handlers = .{&accounts},
+    }, .{
+        .transport = f.memory.serverTransport(),
         .limits = .{ .max_request_bytes = 16 * 1024, .max_request_memory_bytes = 64 * 1024 },
     });
     defer server.deinit(io);
@@ -631,9 +656,10 @@ test "middleware runs server, handler, method, each level left to right, and unw
     var shop: Shop = .{ .audit = &audit, .fraud = .{ .before = "fraud>", .after = "<fraud" } };
     var limiter: Marker = .{ .before = "server-object>", .after = "<server-object" };
     var server: Server = try .init(testing.allocator, .{
-        .transport = f.memory.serverTransport(),
         .handlers = .{&shop},
         .middleware = .{ marker("server-fn"), &limiter },
+    }, .{
+        .transport = f.memory.serverTransport(),
     });
     defer server.deinit(io);
     try server.start(io);
@@ -709,9 +735,10 @@ test "middleware sees the request as the client encoded it, the encoded response
     var accounts: Accounts = .{};
     var peek: Peek = .{};
     var server: Server = try .init(testing.allocator, .{
-        .transport = f.memory.serverTransport(),
         .handlers = .{&accounts},
         .middleware = .{&peek},
+    }, .{
+        .transport = f.memory.serverTransport(),
     });
     defer server.deinit(io);
     try server.start(io);
@@ -808,7 +835,7 @@ test "the rules of next.run() hold for the links of handlers and methods" {
     try f.open();
     defer f.close(io);
     var rules_handler: Rules = .{};
-    var server: Server = try .init(testing.allocator, .{ .transport = f.memory.serverTransport(), .handlers = .{&rules_handler} });
+    var server: Server = try .init(testing.allocator, .{ .handlers = .{&rules_handler} }, .{ .transport = f.memory.serverTransport() });
     defer server.deinit(io);
     try server.start(io);
     // The engine warns about links that break the rules.
@@ -861,7 +888,7 @@ test "one server serves two versions of a contract, each on its own routes" {
     defer f.close(io);
     var v1: UserHandler = .{};
     var v2: UserHandlerV2 = .{};
-    var server: Server = try .init(testing.allocator, .{ .transport = f.memory.serverTransport(), .handlers = .{ &v1, &v2 } });
+    var server: Server = try .init(testing.allocator, .{ .handlers = .{ &v1, &v2 } }, .{ .transport = f.memory.serverTransport() });
     defer server.deinit(io);
     try server.start(io);
 
@@ -950,7 +977,7 @@ test "a handler's errors: ctx.fail exactly, the contract's table, the framework'
     try f.open();
     defer f.close(io);
     var tickets: Tickets = .{};
-    var server: Server = try .init(testing.allocator, .{ .transport = f.memory.serverTransport(), .handlers = .{&tickets} });
+    var server: Server = try .init(testing.allocator, .{ .handlers = .{&tickets} }, .{ .transport = f.memory.serverTransport() });
     defer server.deinit(io);
     try server.start(io);
 
@@ -1020,7 +1047,7 @@ test "the violations of ctx.fail in a method: at most 100, paths as in validatio
     try f.open();
     defer f.close(io);
     var seats: Seats = .{};
-    var server: Server = try .init(testing.allocator, .{ .transport = f.memory.serverTransport(), .handlers = .{&seats} });
+    var server: Server = try .init(testing.allocator, .{ .handlers = .{&seats} }, .{ .transport = f.memory.serverTransport() });
     defer server.deinit(io);
     try server.start(io);
     const taken: model.Failure = .{ .code = .already_exists, .app_code = "seats.taken", .message = "Seat is taken", .field = "row" };
@@ -1087,9 +1114,10 @@ test "middleware fails a call exactly with ctx.fail" {
     defer f.close(io);
     var tickets: Tickets = .{};
     var server: Server = try .init(testing.allocator, .{
-        .transport = f.memory.serverTransport(),
         .handlers = .{&tickets},
         .middleware = .{closedForMaintenance},
+    }, .{
+        .transport = f.memory.serverTransport(),
     });
     defer server.deinit(io);
     try server.start(io);
@@ -1104,9 +1132,10 @@ test "a failure of a stage that middleware swallows stays the outcome, with its 
     defer f.close(io);
     var tickets: Tickets = .{};
     var server: Server = try .init(testing.allocator, .{
-        .transport = f.memory.serverTransport(),
         .handlers = .{&tickets},
         .middleware = .{swallowAll},
+    }, .{
+        .transport = f.memory.serverTransport(),
     });
     defer server.deinit(io);
     try server.start(io);
@@ -1125,9 +1154,10 @@ test "a failure of a stage that middleware replaces: the outcome is its error, a
     defer f.close(io);
     var tickets: Tickets = .{};
     var denied_server: Server = try .init(testing.allocator, .{
-        .transport = f.memory.serverTransport(),
         .handlers = .{&tickets},
         .middleware = .{replaceWithDenied},
+    }, .{
+        .transport = f.memory.serverTransport(),
     });
     defer denied_server.deinit(io);
     try denied_server.start(io);
@@ -1142,9 +1172,10 @@ test "a failure of a stage that middleware replaces: the outcome is its error, a
     var exact_memory: MemoryTransport = try .init(testing.allocator, .{});
     defer exact_memory.deinit(io);
     var exact_server: Server = try .init(testing.allocator, .{
-        .transport = exact_memory.serverTransport(),
         .handlers = .{&tickets},
         .middleware = .{replaceWithExact},
+    }, .{
+        .transport = exact_memory.serverTransport(),
     });
     defer exact_server.deinit(io);
     try exact_server.start(io);
@@ -1200,9 +1231,10 @@ test "the authenticator of rpc.Server and the auth of each method" {
     var who: Who = .{};
     var alice: Alice = .{};
     var server: Server = try .init(testing.allocator, .{
-        .transport = f.memory.serverTransport(),
         .handlers = .{&who},
         .authenticator = &alice,
+    }, .{
+        .transport = f.memory.serverTransport(),
     });
     defer server.deinit(io);
     try server.start(io);
@@ -1269,7 +1301,7 @@ test "a server with more than a thousand links builds without a quota of the app
     try f.open();
     defer f.close(io);
     var busy: Busy = .{};
-    var server: Server = try .init(testing.allocator, .{ .transport = f.memory.serverTransport(), .handlers = .{&busy} });
+    var server: Server = try .init(testing.allocator, .{ .handlers = .{&busy} }, .{ .transport = f.memory.serverTransport() });
     defer server.deinit(io);
     try server.start(io);
     try testing.expectEqual(@as(usize, 1100), server.engine.methods[1].middleware.len);
@@ -1286,7 +1318,7 @@ test "rpc.Server has the lifecycle of the engine" {
     var memory: MemoryTransport = try .init(testing.allocator, .{});
     defer memory.deinit(io);
     var users: UserHandler = .{};
-    var server: Server = try .init(testing.allocator, .{ .transport = memory.serverTransport(), .handlers = .{&users} });
+    var server: Server = try .init(testing.allocator, .{ .handlers = .{&users} }, .{ .transport = memory.serverTransport() });
     defer server.deinit(io);
     try testing.expectEqual(Server.State.configured, server.state());
     try testing.expect(!server.isReady());
@@ -1306,7 +1338,7 @@ test "rpc.Server has the lifecycle of the engine" {
     try runner.await(io);
     try testing.expectEqual(Server.State.stopped, server.state());
     try testing.expect(!server.isReady());
-    try server.shutdown(io);
+    try server.shutdown(io, far(io));
     try server.wait(io);
 }
 
@@ -1316,13 +1348,15 @@ test "init refuses limits that cannot work, and frees what it took when memory r
     defer memory.deinit(io);
     var users: UserHandler = .{};
     try testing.expectError(error.InvalidConfiguration, Server.init(testing.allocator, .{
-        .transport = memory.serverTransport(),
         .handlers = .{&users},
+    }, .{
+        .transport = memory.serverTransport(),
         .limits = .{ .max_active_tasks = 0 },
     }));
     try testing.expectError(error.InvalidConfiguration, Server.init(testing.allocator, .{
-        .transport = memory.serverTransport(),
         .handlers = .{&users},
+    }, .{
+        .transport = memory.serverTransport(),
         .shutdown_grace = std.Io.Duration.fromMilliseconds(-1),
     }));
     // Every allocation fails once; the test's allocator reports a leak.
@@ -1331,7 +1365,7 @@ test "init refuses limits that cannot work, and frees what it took when memory r
     var fail_index: usize = 0;
     while (true) : (fail_index += 1) {
         var failing: std.testing.FailingAllocator = .init(testing.allocator, .{ .fail_index = fail_index });
-        var server = Server.init(failing.allocator(), .{ .transport = memory.serverTransport(), .handlers = .{&users} }) catch |err| {
+        var server = Server.init(failing.allocator(), .{ .handlers = .{&users} }, .{ .transport = memory.serverTransport() }) catch |err| {
             try testing.expectEqual(error.OutOfMemory, err);
             continue;
         };
@@ -1402,7 +1436,7 @@ test "the deadline cancels a method that waits, and the server does not wait out
     var replied: std.Io.Timestamp = undefined;
     var stopped: std.Io.Timestamp = undefined;
     {
-        var server: Server = try .init(testing.allocator, .{ .transport = f.memory.serverTransport(), .handlers = .{&naps} });
+        var server: Server = try .init(testing.allocator, .{ .handlers = .{&naps} }, .{ .transport = f.memory.serverTransport() });
         defer {
             // deinit waits for the end of the method.
             server.deinit(io);
@@ -1427,7 +1461,7 @@ test "a call that ended while its middleware ran does not run the method" {
     defer f.close(io);
     var naps: Naps = .{};
     {
-        var server: Server = try .init(testing.allocator, .{ .transport = f.memory.serverTransport(), .handlers = .{&naps} });
+        var server: Server = try .init(testing.allocator, .{ .handlers = .{&naps} }, .{ .transport = f.memory.serverTransport() });
         defer server.deinit(io);
         try server.start(io);
         var result = try f.call(io, napsRoute("late"), "{}");

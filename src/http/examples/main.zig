@@ -92,16 +92,17 @@ pub fn main(init: std.process.Init) !void {
     var native: http.native.Backend = try .init(gpa, .{ .port = config.port });
     defer native.deinit();
     var server = try http.Server.init(gpa, .{
-        .backend = native.backend(),
-        // Before the routes of the controllers: /api/v1/todos, /api/health.
-        .prefix = "/api",
         .controllers = .{ &todos_v1, &sessions, &health },
         // Every request runs these, in this order, before its route is chosen.
         .middleware = .{ mw.requestId, &access_log, http.onResponse(mw.securityHeaders), &cors, &token_auth },
         .error_handler = &app_errors,
+    }, .{
+        .listen = .{ .backend = native.backend() },
+        // Before the routes of the controllers: /api/v1/todos, /api/health.
+        .prefix = "/api",
         // The page and its files; a path without a file gets index.html, so
         // that the page's own router reads the path.
-        .static = .{http.static("/", .{ .root = config.public_dir, .spa_fallback = "index.html" })},
+        .static = &.{http.static("/", .{ .root = config.public_dir, .spa_fallback = "index.html" })},
     });
     defer server.deinit(io);
 

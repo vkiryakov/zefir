@@ -15,6 +15,6 @@ test {
     var users: UsersV1Controller = .{};
     var backend: http.testing.Backend = .init(std.testing.allocator);
     defer backend.deinit();
-    var server = try http.Server.init(std.testing.allocator, .{ .backend = backend.backend(), .controllers = .{&users}, .unknown_fields = .{ .bdy = .reject } });
+    var server = try http.Server.init(std.testing.allocator, .{ .controllers = .{&users} }, .{ .listen = .{ .backend = backend.backend() }, .unknown_fields = .{ .bdy = .reject } });
     defer server.deinit(std.testing.io);
 }

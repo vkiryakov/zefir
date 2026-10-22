@@ -236,7 +236,7 @@ test "local of a missing type is LocalMissing; the values go once the request ha
     controller.order = .initBuffer(&controller.buffer);
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&controller}, .strict_errors = false });
+    var server = try Server.init(testing.allocator, .{ .controllers = .{&controller}, .strict_errors = false }, .{ .listen = .{ .backend = b.backend() } });
     defer server.deinit(io);
     try server.start(io);
     const level = testing.log_level;

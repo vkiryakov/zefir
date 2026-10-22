@@ -1144,7 +1144,7 @@ const Fixture = struct {
 
     fn start(f: *Fixture, io: std.Io) !void {
         f.backend = .init(testing.allocator);
-        f.server = try .init(testing.allocator, .{ .backend = f.backend.backend(), .controllers = .{&f.exports}, .strict_errors = false });
+        f.server = try .init(testing.allocator, .{ .controllers = .{&f.exports}, .strict_errors = false }, .{ .listen = .{ .backend = f.backend.backend() } });
         f.server.start(io) catch |err| {
             f.server.deinit(io);
             return err;

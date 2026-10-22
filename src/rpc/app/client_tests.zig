@@ -16,8 +16,10 @@ const Context = @import("../engine/Context.zig").Context;
 const ClientContext = @import("../engine/RawClient.zig").ClientContext;
 const ClientNext = @import("../middleware.zig").ClientNext;
 const Credentials = @import("../credentials.zig").Credentials;
+const auth = @import("../auth.zig");
 
 const testing = std.testing;
+const far = @import("../wait.zig").far;
 
 const GetUserRequest = struct { id: u64 };
 const User = struct {
@@ -139,7 +141,7 @@ const Scripted = struct {
 };
 
 fn scriptedClient(script: *Scripted) !Client {
-    return Client.init(testing.allocator, .{ .transport = ClientTransport.init(script) });
+    return Client.init(testing.allocator, .{}, .{ .transport = ClientTransport.init(script) });
 }
 
 fn expectFailure(failure: model.Failure, code: core.ErrorCode, app_code: []const u8, message: []const u8) !void {
@@ -428,7 +430,7 @@ test "the metadata of the response" {
 test "a response that takes more memory than the client allows is ResponseTooLarge" {
     var script: Scripted = .{};
     defer script.deinit();
-    var client: Client = try .init(testing.allocator, .{ .transport = ClientTransport.init(&script), .max_response_bytes = 64 * 1024 });
+    var client: Client = try .init(testing.allocator, .{}, .{ .transport = ClientTransport.init(&script), .max_response_bytes = 64 * 1024 });
     defer client.deinit();
 
     // 10 000 nulls in 50 KB of JSON ask for 80 MB: refused before any of it
@@ -533,7 +535,7 @@ test "every failed allocation ends a call with OutOfMemory and leaves nothing be
             var script: Scripted = .{ .answer = answer };
             defer script.deinit();
             var failing: std.testing.FailingAllocator = .init(testing.allocator, .{ .fail_index = fail_index });
-            var client = Client.init(failing.allocator(), .{ .transport = ClientTransport.init(&script) }) catch continue;
+            var client = Client.init(failing.allocator(), .{}, .{ .transport = ClientTransport.init(&script) }) catch continue;
             defer client.deinit();
             var r = client.call(testing.io, .root, UserApi.createUser, .{ .name = "Ann", .email = "ann@example.com" }, .{}) catch |err| {
                 try testing.expectEqual(error.OutOfMemory, err);
@@ -549,7 +551,7 @@ test "every failed allocation ends a call with OutOfMemory and leaves nothing be
         var script: Scripted = .{};
         defer script.deinit();
         var failing: std.testing.FailingAllocator = .init(testing.allocator, .{ .fail_index = fail_index });
-        var client = Client.init(failing.allocator(), .{ .transport = ClientTransport.init(&script) }) catch continue;
+        var client = Client.init(failing.allocator(), .{}, .{ .transport = ClientTransport.init(&script) }) catch continue;
         defer client.deinit();
         var r = client.call(testing.io, .root, UserApi.createUser, .{ .name = "", .email = "" }, .{}) catch |err| {
             try testing.expectEqual(error.OutOfMemory, err);
@@ -586,9 +588,10 @@ test "init takes credentials and middleware as literals, and the limits" {
 
     var tagger: Tagger = .{};
     var bearer: Client = try .init(testing.allocator, .{
+        .middleware = .{&tagger},
+    }, .{
         .transport = ClientTransport.init(&script),
         .credentials = .{ .bearer = token },
-        .middleware = .{&tagger},
         .default_timeout = std.Io.Duration.fromSeconds(5),
         .max_pending = 7,
         .max_response_bytes = 4096,
@@ -610,7 +613,7 @@ test "init takes credentials and middleware as literals, and the limits" {
     anonymous.deinit();
     try testing.expectEqual(@as(?[]const u8, null), script.authorization);
 
-    var basic: Client = try .init(testing.allocator, .{
+    var basic: Client = try .init(testing.allocator, .{}, .{
         .transport = ClientTransport.init(&script),
         .credentials = .{ .basic = .{ .user = "svc", .password = token } },
     });
@@ -619,11 +622,21 @@ test "init takes credentials and middleware as literals, and the limits" {
     b.deinit();
     try testing.expectEqualStrings("Basic c3ZjOnQtMQ==", script.authorization.?);
 
-    var none: Client = try .init(testing.allocator, .{ .transport = ClientTransport.init(&script), .credentials = .none, .middleware = .{refuseAll} });
+    var none: Client = try .init(testing.allocator, .{ .middleware = .{refuseAll} }, .{ .transport = ClientTransport.init(&script), .credentials = .none });
     defer none.deinit();
     const calls = script.calls;
     try testing.expectError(error.Unavailable, none.call(testing.io, .root, UserApi.getUser, .{ .id = 1 }, .{}));
     try testing.expectEqual(calls, script.calls);
+}
+
+test "rpc.Client refuses values that would refuse every call" {
+    var script: Scripted = .{ .answer = .{ .ok = "{}" } };
+    defer script.deinit();
+    const on = ClientTransport.init(&script);
+    try testing.expectError(error.InvalidConfiguration, Client.init(testing.allocator, .{}, .{ .transport = on, .max_pending = 0 }));
+    try testing.expectError(error.InvalidConfiguration, Client.init(testing.allocator, .{}, .{ .transport = on, .max_response_bytes = 0 }));
+    try testing.expectError(error.InvalidConfiguration, Client.init(testing.allocator, .{}, .{ .transport = on, .default_timeout = .zero }));
+    try testing.expectError(error.InvalidConfiguration, Client.init(testing.allocator, .{}, .{ .transport = on, .default_timeout = .fromMilliseconds(-5) }));
 }
 
 // End to end through the memory transport and rpc.Server.
@@ -669,6 +682,54 @@ const UserHandler = struct {
     }
 };
 
+/// Notes the bearer token of the last call, or that it came without
+/// credentials; any token is an identity.
+const SeesBearer = struct {
+    token: [16]u8 = undefined,
+    len: usize = 0,
+    anonymous: bool = false,
+
+    pub fn authenticate(self: *SeesBearer, ctx: *const auth.AuthContext) auth.AuthError!?auth.IdentityView {
+        switch (ctx.credentials) {
+            .none => {
+                self.anonymous = true;
+                return null;
+            },
+            .bearer => |token| {
+                @memcpy(self.token[0..token.len], token);
+                self.len = token.len;
+                self.anonymous = false;
+                return .{ .subject = "u1" };
+            },
+            else => return error.InvalidCredentials,
+        }
+    }
+};
+
+test "rpc.Client takes its credentials in typed options" {
+    const io = testing.io;
+    var memory: MemoryTransport = try .init(testing.allocator, .{});
+    defer memory.deinit(io);
+    var users: UserHandler = .{};
+    var sees: SeesBearer = .{};
+    var server: Server = try .init(testing.allocator, .{ .handlers = .{&users}, .authenticator = &sees }, .{ .transport = memory.serverTransport() });
+    defer server.deinit(io);
+    try server.start(io);
+
+    var signed: Client = try .init(testing.allocator, .{}, .{ .transport = memory.clientTransport(), .credentials = .{ .bearer = "t-1" } });
+    defer signed.deinit();
+    var r = try signed.call(io, .root, UserApi.getUser, .{ .id = 1 }, .{ .timeout = .fromSeconds(10) });
+    r.deinit();
+    try testing.expectEqualStrings("t-1", sees.token[0..sees.len]);
+    try testing.expect(!sees.anonymous);
+
+    var plain: Client = try .init(testing.allocator, .{}, .{ .transport = memory.clientTransport(), .credentials = .none });
+    defer plain.deinit();
+    var a = try plain.call(io, .root, UserApi.getUser, .{ .id = 1 }, .{ .timeout = .fromSeconds(10) });
+    a.deinit();
+    try testing.expect(sees.anonymous);
+}
+
 /// Calls `getUser` with `id` from a task of its own and checks the answer.
 fn callUser(client: *Client, io: std.Io, id: u64) anyerror!void {
     var r = try client.call(io, .root, UserApi.getUser, .{ .id = id }, .{ .timeout = .fromSeconds(10) });
@@ -683,10 +744,10 @@ test "calls from many tasks at once through the memory transport and rpc.Server"
     var memory: MemoryTransport = try .init(testing.allocator, .{});
     defer memory.deinit(io);
     var users: UserHandler = .{};
-    var server: Server = try .init(testing.allocator, .{ .transport = memory.serverTransport(), .handlers = .{&users} });
+    var server: Server = try .init(testing.allocator, .{ .handlers = .{&users} }, .{ .transport = memory.serverTransport() });
     defer server.deinit(io);
     try server.start(io);
-    var client: Client = try .init(testing.allocator, .{ .transport = memory.clientTransport() });
+    var client: Client = try .init(testing.allocator, .{}, .{ .transport = memory.clientTransport() });
     defer client.deinit();
 
     var callers: [32]std.Io.Future(anyerror!void) = undefined;
@@ -704,5 +765,5 @@ test "calls from many tasks at once through the memory transport and rpc.Server"
     var doubled = try client.call(io, .root, UserApi.plot, .{ .x = 1.25 }, .{});
     defer doubled.deinit();
     try testing.expectEqual(@as(f64, 2.5), doubled.outcome.ok.x);
-    try server.shutdown(io);
+    try server.shutdown(io, far(io));
 }

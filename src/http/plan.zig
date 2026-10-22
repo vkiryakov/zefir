@@ -1,8 +1,9 @@
 //! The compile-time plan of a server:
-//! `of(@TypeOf(options))` reads the options of `Server.init` and the
-//! routes of its controllers, builds the router's trie and stops the build
-//! on a mistake, with a message that names the place and what to write:
-//! - an unknown option, or no `.backend` or `.controllers`;
+//! `of(@TypeOf(parts))` reads the parts of `Server.init` and the routes of
+//! its controllers, builds the router's trie and stops the build on a
+//! mistake, with a message that names the place and what to write:
+//! - parts that are not a struct literal, an unknown part, or no
+//!   `.controllers`;
 //! - a controller that is not a pointer to a mutable instance, has no
 //!   `pub const http_routes`, or whose `http_routes` is not
 //!   `http.routes(...)`;
@@ -74,26 +75,24 @@ pub const Plan = struct {
     global: []const mw.Elem,
 };
 
-const known_options = [_][]const u8{
-    "backend",       "prefix",          "controllers",    "middleware",     "error_handler",    "static",
-    "strict_errors", "unknown_fields",  "json",           "max_body_bytes", "max_query_params", "max_in_flight",
-    "max_streams",   "request_timeout", "shutdown_grace", "finish_timeout", "trusted_proxies",
-};
+/// The parts of `Server.init`: what the compiler checks by type. The
+/// settings, with a type of their own, are `Server.Options`.
+const known_parts = [_][]const u8{ "controllers", "middleware", "error_handler", "strict_errors" };
 
-pub fn of(comptime O: type) Plan {
+pub fn of(comptime P: type) Plan {
     var quota: u32 = 100_000;
     @setEvalBranchQuota(quota);
-    if (@typeInfo(O) != .@"struct") @compileError("zefir.http: Server.init takes a struct literal of options, got " ++ @typeName(O));
-    for (@typeInfo(O).@"struct".field_names) |name| {
-        if (!contains(&known_options, name)) @compileError("zefir.http: Server.init: unknown option ." ++ name);
+    if (@typeInfo(P) != .@"struct") @compileError("zefir.http: Server.init takes a struct literal of parts, got " ++ @typeName(P));
+    for (@typeInfo(P).@"struct".field_names) |name| {
+        if (!contains(&known_parts, name))
+            @compileError("zefir.http: Server.init: unknown part ." ++ name ++ "; the parts are .controllers, .middleware, .error_handler and .strict_errors");
     }
-    if (!@hasField(O, "backend")) @compileError("zefir.http: Server.init needs .backend, such as native.backend()");
     const controllers_form = "zefir.http: Server.init .controllers is a tuple of pointers to controllers, at least one: .{ &todos_v1, &health }";
-    if (!@hasField(O, "controllers")) @compileError(controllers_form);
-    const cinfo = @typeInfo(@FieldType(O, "controllers"));
+    if (!@hasField(P, "controllers")) @compileError(controllers_form);
+    const cinfo = @typeInfo(@FieldType(P, "controllers"));
     if (cinfo != .@"struct" or !cinfo.@"struct".is_tuple or cinfo.@"struct".field_names.len == 0) @compileError(controllers_form);
 
-    const Global = if (@hasField(O, "middleware")) @FieldType(O, "middleware") else @TypeOf(.{});
+    const Global = if (@hasField(P, "middleware")) @FieldType(P, "middleware") else @TypeOf(.{});
     quota += elem_quota * elemsIn(Global);
     @setEvalBranchQuota(quota);
     const global = mw.unfold(Global, .{ .level = .global }, &.{});
@@ -152,8 +151,8 @@ pub fn of(comptime O: type) Plan {
         }
     }
     const nodes = router.build(specs);
-    const Handler = errorHandlerOf(O);
-    if (strictOf(O)) strict.check(Handler, shortName(@typeName(Handler)), strictEntries(table, global));
+    const Handler = errorHandlerOf(P);
+    if (strictOf(P)) strict.check(Handler, shortName(@typeName(Handler)), strictEntries(table, global));
     return .{ .routes = table, .nodes = nodes, .max_params = max_params, .Handler = Handler, .global = global };
 }
 
@@ -365,7 +364,6 @@ pub fn shortName(comptime full: []const u8) []const u8 {
 }
 
 const testing = std.testing;
-const Backend = @import("Backend.zig");
 const Json = @import("dto.zig").Json;
 
 /// A value of the tests' types.
@@ -421,10 +419,9 @@ const HealthController = struct {
 test "routes: patterns are the controller prefix plus the path; options are kept" {
     var users: UsersV1Controller = .{};
     var health: HealthController = .{};
-    const backend: Backend = undefined;
     // UsersV1Controller.create returns an error of its own, which only an
     // error handler maps.
-    const p = comptime of(@TypeOf(.{ .backend = backend, .prefix = "/api", .controllers = .{ &users, &health }, .strict_errors = false }));
+    const p = comptime of(@TypeOf(.{ .controllers = .{ &users, &health }, .strict_errors = false }));
     try testing.expectEqual(6, p.routes.len);
     try testing.expectEqual(2, p.max_params);
 

@@ -9,6 +9,11 @@ const core = @import("zefir-core");
 const rpc = @import("zefir-rpc");
 const mailbox = @import("rpc-mailbox");
 
+/// A deadline 30 s away, for a test that only needs a stop.
+fn far(io: std.Io) std.Io.Clock.Timestamp {
+    return .fromNow(io, .{ .raw = .fromSeconds(30), .clock = .awake });
+}
+
 test "the mailbox passes the conformance suite of rpc" {
     var harness: mailbox.testing.Harness = .{};
     var report = try rpc.testing.conformance.run(std.testing.io, std.testing.allocator, &harness, .{});
@@ -57,7 +62,7 @@ test "rpc.Server and rpc.Client over the mailbox" {
 
     var server_side: mailbox.Server = .init(&broker);
     var users: UserHandler = .{};
-    var server = try rpc.Server.init(gpa, .{ .transport = server_side.serverTransport(), .handlers = .{&users} });
+    var server = try rpc.Server.init(gpa, .{ .handlers = .{&users} }, .{ .transport = server_side.serverTransport() });
     defer server.deinit(io);
     try server.start(io);
 
@@ -65,7 +70,7 @@ test "rpc.Server and rpc.Client over the mailbox" {
     // Before connect: deinit also frees a client whose connect failed.
     defer client_side.deinit(io);
     try client_side.connect(io);
-    var client = try rpc.Client.init(gpa, .{ .transport = client_side.clientTransport() });
+    var client = try rpc.Client.init(gpa, .{}, .{ .transport = client_side.clientTransport() });
     defer client.deinit();
 
     var found = try client.call(io, .root, api.UserApi.getUser, .{ .id = 1 }, .{});
@@ -77,7 +82,7 @@ test "rpc.Server and rpc.Client over the mailbox" {
     try std.testing.expectEqualStrings("users.not_found", missing.outcome.failure.app_code);
 
     // Once the server stops, its queue is gone: the call surely did not run.
-    try server.shutdown(io);
+    try server.shutdown(io, far(io));
     try std.testing.expectError(error.Unavailable, client.call(io, .root, api.UserApi.getUser, .{ .id = 1 }, .{}));
 }
 
@@ -133,7 +138,7 @@ test "the server's deadline is the client's, the time in the queue counted; the 
     try std.testing.expectEqual(@as(?i96, deadline.expires.nanoseconds), witness.expires);
     // The reply queue and the correlation ids are secrets of the call.
     try std.testing.expect(!witness.named_peer);
-    try server.shutdown(io);
+    try server.shutdown(io, far(io));
 }
 
 test "a second connect of the mailbox's client does nothing" {

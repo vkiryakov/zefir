@@ -993,11 +993,12 @@ pub fn main(init: std.process.Init) !void {
     var backend: http.testing.Backend = .init(gpa);
     defer backend.deinit();
     var server = try http.Server.init(gpa, .{
-        .backend = backend.backend(),
-        .prefix = "/api",
         .controllers = .{ &login, &orders },
         .middleware = .{&jwt_auth},
         .error_handler = &app_errors,
+    }, .{
+        .listen = .{ .backend = backend.backend() },
+        .prefix = "/api",
     });
     defer server.deinit(io);
     try server.start(io);
@@ -1176,11 +1177,12 @@ const Service = struct {
         s.app_errors = .{};
         s.backend = .init(testing.allocator);
         s.server = try .init(testing.allocator, .{
-            .backend = s.backend.backend(),
-            .prefix = "/api",
             .controllers = .{ &s.login, &s.orders },
             .middleware = .{&s.jwt_auth},
             .error_handler = &s.app_errors,
+        }, .{
+            .listen = .{ .backend = s.backend.backend() },
+            .prefix = "/api",
         });
         errdefer s.server.deinit(io);
         try s.server.start(io);
@@ -1612,9 +1614,9 @@ const Billing = struct {
         try b.useKeys(&b.keys);
         b.authenticator = .{ .verifier = &b.verifier };
         b.handler = .{};
-        b.server = try .init(testing.allocator, io, .{ .handlers = .{&b.handler}, .authenticator = &b.authenticator });
+        b.server = try .init(testing.allocator, io, .{ .handlers = .{&b.handler}, .authenticator = &b.authenticator }, .{});
         errdefer b.server.deinit();
-        b.client = try b.server.client(.{});
+        b.client = try b.server.client(.{}, .{});
     }
 
     fn stop(b: *Billing) void {

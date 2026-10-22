@@ -134,8 +134,6 @@ fn write(w: *std.Io.Writer) !void {
         \\    var backend: http.testing.Backend = .init(std.testing.allocator);
         \\    defer backend.deinit();
         \\    var server = try http.Server.init(std.testing.allocator, .{
-        \\        .backend = backend.backend(),
-        \\        .prefix = "/api",
         \\        .controllers = .{
     );
     for (0..controllers) |c| try w.print("{s}&c{d}", .{ if (c == 0) " " else ", ", c });
@@ -144,6 +142,9 @@ fn write(w: *std.Io.Writer) !void {
     try w.writeAll(
         \\ },
         \\        .error_handler = &app_errors,
+        \\    }, .{
+        \\        .listen = .{ .backend = backend.backend() },
+        \\        .prefix = "/api",
         \\    });
         \\    defer server.deinit(std.testing.io);
         \\
@@ -251,7 +252,7 @@ fn writeLongNames(w: *std.Io.Writer) !void {
         \\    var app_errors: AppErrors = .{};
         \\    var backend: http.testing.Backend = .init(std.testing.allocator);
         \\    defer backend.deinit();
-        \\    var server = try http.Server.init(std.testing.allocator, .{ .backend = backend.backend(), .controllers = .{&billing}, .error_handler = &app_errors });
+        \\    var server = try http.Server.init(std.testing.allocator, .{ .controllers = .{&billing}, .error_handler = &app_errors }, .{ .listen = .{ .backend = backend.backend() } });
         \\    defer server.deinit(std.testing.io);
         \\}
         \\

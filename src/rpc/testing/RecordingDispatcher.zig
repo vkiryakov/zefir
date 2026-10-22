@@ -54,6 +54,7 @@ const core = @import("core");
 const model = @import("../model.zig");
 const transport = @import("../transport.zig");
 const ServerTransport = @import("../ServerTransport.zig");
+const sleepAtLeast = @import("sleep.zig").sleepAtLeast;
 const Dispatcher = transport.Dispatcher;
 const Incoming = transport.Incoming;
 const Reply = transport.Reply;
@@ -593,7 +594,7 @@ fn admitFn(ptr: *anyopaque, io: std.Io, head: *const transport.RequestHead, body
         break :admission .{ admission, hold };
     };
     // Blocked: the hold cannot be canceled, and it is bounded.
-    if (hold) |duration| io.sleep(duration, .awake) catch {};
+    if (hold) |duration| sleepAtLeast(io, duration) catch {};
     return admission;
 }
 
@@ -728,7 +729,7 @@ fn startFn(ptr: *anyopaque, io: std.Io, reply: Reply) ?model.Failure {
     };
     // Blocked: the hold cannot be canceled, and it is bounded. The test may
     // answer and release the call, or break the link, meanwhile.
-    io.sleep(hold, .awake) catch {};
+    sleepAtLeast(io, hold) catch {};
     r.mutex.lockUncancelable(io);
     defer r.mutex.unlock(io);
     c.starting = false;
@@ -779,6 +780,7 @@ fn cancelFn(ptr: *anyopaque, io: std.Io) void {
 }
 
 const testing = std.testing;
+const early_io = @import("early_io.zig");
 
 const get_user: model.Route = .{ .service = "users", .version = 1, .method = "getUser" };
 const list_users: model.Route = .{ .service = "users", .version = 1, .method = "listUsers" };
@@ -1115,13 +1117,32 @@ test "admit hold: admit returns after the hold, and waitAdmitted sees the call m
     try recorder.waitAdmitted(io, 1);
     try testing.expectEqual(State.accepted, (try recorder.call(io, 0)).state);
     admitter.await(io);
-    // A sleep may wake a little early on Windows.
-    try testing.expect(begun.durationTo(std.Io.Clock.awake.now(io)).nanoseconds >= std.Io.Duration.fromMilliseconds(90).nanoseconds);
+    try testing.expect(begun.durationTo(std.Io.Clock.awake.now(io)).nanoseconds >= std.Io.Duration.fromMilliseconds(100).nanoseconds);
     (try accepted(admission.?)).abandon(io);
     // A refusal does not hold.
     const unknown = headOf(list_users);
     _ = try refused(recorder.dispatcher().admit(io, &unknown, 0));
     try recorder.waitAdmitted(io, 2);
+    recorder.close(io);
+    try expectViolations(&recorder, &.{});
+}
+
+test "admit and start hold for their whole time, though a sleep of the Io ends early" {
+    // Each sleep of this io ends 16 ms early, as a sleep of std's Io on Windows may.
+    const io = early_io.io();
+    const hold: std.Io.Duration = .fromMilliseconds(50);
+    var recorder: RecordingDispatcher = try .init(testing.allocator, .{ .routes = &.{get_user}, .admit = .{ .hold = hold }, .start = .{ .hold = hold } });
+    defer recorder.deinit(io);
+    const head = headOf(get_user);
+    const admitting = std.Io.Clock.awake.now(io);
+    const incoming = try accepted(recorder.dispatcher().admit(io, &head, 0));
+    try testing.expect(admitting.durationTo(std.Io.Clock.awake.now(io)).nanoseconds >= hold.nanoseconds);
+    var reply: FakeReply = .{};
+    const starting = std.Io.Clock.awake.now(io);
+    try testing.expectEqual(@as(?model.Failure, null), incoming.start(io, .init(&reply)));
+    try testing.expect(starting.durationTo(std.Io.Clock.awake.now(io)).nanoseconds >= hold.nanoseconds);
+    try recorder.respond(io, 0, &.{ .status = .ok });
+    try recorder.releaseCall(io, 0, .completed);
     recorder.close(io);
     try expectViolations(&recorder, &.{});
 }
