@@ -1,0 +1,289 @@
+//! `redis.cmd`: the commands, as values. A function of `cmd` sends
+//! nothing: it returns a small value whose type knows the command on the
+//! wire and the type of its reply, and the client runs it. The value holds
+//! the slices it was given, so they must live while it runs; it holds no
+//! state, so it may be built once and run many times.
+//!
+//! The functions are named after the commands of Redis, in lower case; a
+//! form of a command with another reply is a function of its own, such as
+//! `setNx`. Where the caller picks the type of the reply, it comes first:
+//! `get(T, key)`. A duration is a `std.Io.Duration` of 1 ms or more; an
+//! empty list where the command takes one or more, a duration under 1 ms
+//! and NaN are `error.InvalidArgument` before anything goes out.
+//!
+//! - Strings and counters: `get`, `set`, `setNx`, `setXx`, `getdel`,
+//!   `getex`, `mget`, `mset`, `incr`, `decr`, `incrby`, `decrby`,
+//!   `incrbyfloat`.
+//! - Keys: `del`, `unlink`, `exists`, `expire`, `persist`, `ttl`,
+//!   `keyType`, `rename`, `scan` (one page), `ping`.
+//! - Hashes: `hset`, `hsetnx`, `hget`, `hmget`, `hgetall`, `hdel`,
+//!   `hexists`, `hlen`, `hincrby`, `hincrbyfloat`, `hkeys`, `hscan` (one
+//!   page). A hash reads into a struct and is written from one.
+//! - Lists: `lpush`, `rpush`, `lpop`, `rpop`, `llen`, `lrange`, `ltrim`,
+//!   `lrem`, `lindex`, `lmove`, and the blocking `blpop`, `brpop`,
+//!   `blmove`, whose timeouts come from the deadline of the call.
+//! - Sets: `sadd`, `srem`, `sismember`, `smembers`, `scard`, `spop`,
+//!   `sinter`, `sunion`, `sdiff`, `sscan` (one page).
+//! - Sorted sets: `zadd`, `zincrby`, `zscore`, `zrank`, `zrevrank`,
+//!   `zrem`, `zcard`, `zcount`, `zrange`, `zrangeByScore`, `zpopmin`,
+//!   `zpopmax`, `zremrangebyscore`, `zremrangebyrank`, `zscan` (one page).
+//!   A range read into `redis.Scored(M)` asks for WITHSCORES.
+//! - Scripts: `eval` of a text, and `evalScript` of a `redis.Script`,
+//!   which `run` sends by its SHA1, and by its text after NOSCRIPT.
+//! - Streams: `xadd`, `xaddNoMkstream`, `xlen`, `xrange`, `xrevrange`,
+//!   `xread`, `xreadgroup`, `xack`, `xgroupCreate`, `xpending`,
+//!   `xpendingRange`, `xautoclaim`, `xdel`, `xtrim`. XREAD and XREADGROUP
+//!   read one stream, and with `.block` take their timeout from the
+//!   deadline of the call.
+//! - Pub/sub: `publish`.
+//! - `raw(T, args)` — a command that the catalog lacks: `args` is a tuple
+//!   of strings, numbers, bools and enums, the name of the command first,
+//!   or a slice of strings, and the reply reads into `T` by the rules of
+//!   the decoder, `redis.Value` for a reply of any shape. `Raw(T, Args)` is
+//!   its type.
+//! - `watch(keys)`, `unwatch()` — the keys the next transaction of a
+//!   `redis.Conn` depends on; only a Conn runs them.
+//!
+//! The type of each command is named after its function, capitalized:
+//! `cmd.Get(T)`, `cmd.Set(V)`, `cmd.Incr`, so that an array of commands
+//! of one type can go in a pipeline. What a type is made of is internal.
+//! `cmd.Ttl` and `cmd.KeyType` are the types of the commands `ttl` and
+//! `keyType`; what they return is `redis.Ttl` and `redis.KeyType`.
+//!
+//! ```zig
+//! try client.run(io, op, redis.cmd.set("session:42", token, .{ .ttl = .fromSeconds(3600) }), .{});
+//! const rank = try client.run(io, op, redis.cmd.zrank("leaders", "ann"), .{});
+//! // OBJECT is not in the catalog.
+//! const encoding = try client.run(io, op, redis.cmd.raw(?[]const u8, .{ "OBJECT", "ENCODING", "leaders" }), .{ .allocator = arena });
+//! ```
+
+const std = @import("std");
+const raw_command = @import("cmd/raw.zig");
+const transactions = @import("cmd/transactions.zig");
+const strings = @import("cmd/strings.zig");
+const keys = @import("cmd/keys.zig");
+const hashes = @import("cmd/hashes.zig");
+const lists = @import("cmd/lists.zig");
+const sets = @import("cmd/sets.zig");
+const zsets = @import("cmd/zsets.zig");
+const scripting = @import("cmd/scripting.zig");
+const streams = @import("cmd/streams.zig");
+const pubsub = @import("cmd/pubsub.zig");
+
+pub const get = strings.get;
+pub const Get = strings.Get;
+pub const set = strings.set;
+pub const Set = strings.Set;
+pub const SetOptions = strings.SetOptions;
+pub const setNx = strings.setNx;
+pub const SetNx = strings.SetNx;
+pub const SetNxOptions = strings.SetNxOptions;
+pub const setXx = strings.setXx;
+pub const SetXx = strings.SetXx;
+pub const getdel = strings.getdel;
+pub const Getdel = strings.Getdel;
+pub const getex = strings.getex;
+pub const Getex = strings.Getex;
+pub const GetexOptions = strings.GetexOptions;
+pub const mget = strings.mget;
+pub const Mget = strings.Mget;
+pub const mset = strings.mset;
+pub const Mset = strings.Mset;
+pub const incr = strings.incr;
+pub const Incr = strings.Incr;
+pub const decr = strings.decr;
+pub const Decr = strings.Decr;
+pub const incrby = strings.incrby;
+pub const Incrby = strings.Incrby;
+pub const decrby = strings.decrby;
+pub const Decrby = strings.Decrby;
+pub const incrbyfloat = strings.incrbyfloat;
+pub const Incrbyfloat = strings.Incrbyfloat;
+
+pub const del = keys.del;
+pub const Del = keys.Del;
+pub const unlink = keys.unlink;
+pub const Unlink = keys.Unlink;
+pub const exists = keys.exists;
+pub const Exists = keys.Exists;
+pub const expire = keys.expire;
+pub const Expire = keys.Expire;
+pub const persist = keys.persist;
+pub const Persist = keys.Persist;
+pub const ttl = keys.ttl;
+pub const Ttl = keys.Ttl;
+pub const keyType = keys.keyType;
+pub const KeyType = keys.KeyType;
+pub const rename = keys.rename;
+pub const Rename = keys.Rename;
+pub const scan = keys.scan;
+pub const Scan = keys.Scan;
+pub const ScanOptions = keys.ScanOptions;
+pub const ping = keys.ping;
+pub const Ping = keys.Ping;
+
+pub const hset = hashes.hset;
+pub const Hset = hashes.Hset;
+pub const hsetnx = hashes.hsetnx;
+pub const Hsetnx = hashes.Hsetnx;
+pub const hget = hashes.hget;
+pub const Hget = hashes.Hget;
+pub const hmget = hashes.hmget;
+pub const Hmget = hashes.Hmget;
+pub const hgetall = hashes.hgetall;
+pub const Hgetall = hashes.Hgetall;
+pub const hdel = hashes.hdel;
+pub const Hdel = hashes.Hdel;
+pub const hexists = hashes.hexists;
+pub const Hexists = hashes.Hexists;
+pub const hlen = hashes.hlen;
+pub const Hlen = hashes.Hlen;
+pub const hincrby = hashes.hincrby;
+pub const Hincrby = hashes.Hincrby;
+pub const hincrbyfloat = hashes.hincrbyfloat;
+pub const Hincrbyfloat = hashes.Hincrbyfloat;
+pub const hkeys = hashes.hkeys;
+pub const Hkeys = hashes.Hkeys;
+pub const hscan = hashes.hscan;
+pub const Hscan = hashes.Hscan;
+/// The options of `hscan`, `sscan` and `zscan`: the cursor, MATCH and
+/// COUNT.
+pub const CursorOptions = @import("cmd/command.zig").CursorOptions;
+
+pub const lpush = lists.lpush;
+pub const Lpush = lists.Lpush;
+pub const rpush = lists.rpush;
+pub const Rpush = lists.Rpush;
+pub const lpop = lists.lpop;
+pub const Lpop = lists.Lpop;
+pub const rpop = lists.rpop;
+pub const Rpop = lists.Rpop;
+pub const llen = lists.llen;
+pub const Llen = lists.Llen;
+pub const lrange = lists.lrange;
+pub const Lrange = lists.Lrange;
+pub const ltrim = lists.ltrim;
+pub const Ltrim = lists.Ltrim;
+pub const lrem = lists.lrem;
+pub const Lrem = lists.Lrem;
+pub const lindex = lists.lindex;
+pub const Lindex = lists.Lindex;
+pub const lmove = lists.lmove;
+pub const Lmove = lists.Lmove;
+pub const blpop = lists.blpop;
+pub const Blpop = lists.Blpop;
+pub const brpop = lists.brpop;
+pub const Brpop = lists.Brpop;
+pub const blmove = lists.blmove;
+pub const Blmove = lists.Blmove;
+
+pub const sadd = sets.sadd;
+pub const Sadd = sets.Sadd;
+pub const srem = sets.srem;
+pub const Srem = sets.Srem;
+pub const sismember = sets.sismember;
+pub const Sismember = sets.Sismember;
+pub const smembers = sets.smembers;
+pub const Smembers = sets.Smembers;
+pub const scard = sets.scard;
+pub const Scard = sets.Scard;
+pub const spop = sets.spop;
+pub const Spop = sets.Spop;
+pub const sinter = sets.sinter;
+pub const Sinter = sets.Sinter;
+pub const sunion = sets.sunion;
+pub const Sunion = sets.Sunion;
+pub const sdiff = sets.sdiff;
+pub const Sdiff = sets.Sdiff;
+pub const sscan = sets.sscan;
+pub const Sscan = sets.Sscan;
+
+pub const zadd = zsets.zadd;
+pub const Zadd = zsets.Zadd;
+pub const ZaddOptions = zsets.ZaddOptions;
+pub const zincrby = zsets.zincrby;
+pub const Zincrby = zsets.Zincrby;
+pub const zscore = zsets.zscore;
+pub const Zscore = zsets.Zscore;
+pub const zrank = zsets.zrank;
+pub const Zrank = zsets.Zrank;
+pub const zrevrank = zsets.zrevrank;
+pub const Zrevrank = zsets.Zrevrank;
+pub const zrem = zsets.zrem;
+pub const Zrem = zsets.Zrem;
+pub const zcard = zsets.zcard;
+pub const Zcard = zsets.Zcard;
+pub const zcount = zsets.zcount;
+pub const Zcount = zsets.Zcount;
+pub const zrange = zsets.zrange;
+pub const Zrange = zsets.Zrange;
+pub const ZrangeOptions = zsets.ZrangeOptions;
+pub const zrangeByScore = zsets.zrangeByScore;
+pub const ZrangeByScore = zsets.ZrangeByScore;
+pub const ZrangeByScoreOptions = zsets.ZrangeByScoreOptions;
+pub const zpopmin = zsets.zpopmin;
+pub const Zpopmin = zsets.Zpopmin;
+pub const zpopmax = zsets.zpopmax;
+pub const Zpopmax = zsets.Zpopmax;
+pub const zremrangebyscore = zsets.zremrangebyscore;
+pub const Zremrangebyscore = zsets.Zremrangebyscore;
+pub const zremrangebyrank = zsets.zremrangebyrank;
+pub const Zremrangebyrank = zsets.Zremrangebyrank;
+pub const zscan = zsets.zscan;
+pub const Zscan = zsets.Zscan;
+
+pub const eval = scripting.eval;
+pub const Eval = scripting.Eval;
+pub const evalScript = scripting.evalScript;
+pub const EvalScript = scripting.EvalScript;
+
+pub const xadd = streams.xadd;
+pub const Xadd = streams.Xadd;
+pub const XaddOptions = streams.XaddOptions;
+pub const xaddNoMkstream = streams.xaddNoMkstream;
+pub const XaddNoMkstream = streams.XaddNoMkstream;
+pub const xlen = streams.xlen;
+pub const Xlen = streams.Xlen;
+pub const xrange = streams.xrange;
+pub const Xrange = streams.Xrange;
+pub const XrangeOptions = streams.XrangeOptions;
+pub const xrevrange = streams.xrevrange;
+pub const Xrevrange = streams.Xrevrange;
+pub const xread = streams.xread;
+pub const Xread = streams.Xread;
+pub const XreadOptions = streams.XreadOptions;
+pub const xreadgroup = streams.xreadgroup;
+pub const Xreadgroup = streams.Xreadgroup;
+pub const XreadgroupOptions = streams.XreadgroupOptions;
+pub const xack = streams.xack;
+pub const Xack = streams.Xack;
+pub const xgroupCreate = streams.xgroupCreate;
+pub const XgroupCreate = streams.XgroupCreate;
+pub const XgroupCreateOptions = streams.XgroupCreateOptions;
+pub const xpending = streams.xpending;
+pub const Xpending = streams.Xpending;
+pub const xpendingRange = streams.xpendingRange;
+pub const XpendingRange = streams.XpendingRange;
+pub const XpendingRangeOptions = streams.XpendingRangeOptions;
+pub const xautoclaim = streams.xautoclaim;
+pub const Xautoclaim = streams.Xautoclaim;
+pub const XautoclaimOptions = streams.XautoclaimOptions;
+pub const xdel = streams.xdel;
+pub const Xdel = streams.Xdel;
+pub const xtrim = streams.xtrim;
+pub const Xtrim = streams.Xtrim;
+pub const XtrimOptions = streams.XtrimOptions;
+
+pub const publish = pubsub.publish;
+pub const Publish = pubsub.Publish;
+
+pub const raw = raw_command.raw;
+pub const Raw = raw_command.Raw;
+pub const watch = transactions.watch;
+pub const Watch = transactions.Watch;
+pub const unwatch = transactions.unwatch;
+pub const Unwatch = transactions.Unwatch;
+
+test {
+    std.testing.refAllDecls(@This());
+}
