@@ -31,7 +31,8 @@
 //! error and the reason. A password never is: the buffer that HELLO went
 //! out from is wiped, and the error of a server without HELLO, which
 //! quotes HELLO's arguments, the password among them, goes neither to the
-//! diagnostics nor to the log, and is wiped too.
+//! diagnostics nor to the log: it is read into one buffer, with no copy,
+//! and that buffer is wiped, as is what the connection read.
 
 const std = @import("std");
 const Io = std.Io;
@@ -95,21 +96,27 @@ const needs = "v0.1 needs Redis 7.2 or later, or Valkey 8 or later";
 /// Shakes hands on `conn`: HELLO, its check, then SETINFO and SELECT. The
 /// connection keeps the server's id of it and the round trip of HELLO.
 pub fn run(conn: *Connection, setup: Setup, d: *Diagnostics) Error!void {
+    var refusal: Refusal = .{};
+    return runWith(conn, setup, d, &refusal);
+}
+
+/// `run`, reading the text of HELLO's refusal into `refusal` and nowhere
+/// else. A server without HELLO quotes the password in it, so `refusal`
+/// is wiped before it returns, whatever came.
+pub fn runWith(conn: *Connection, setup: Setup, d: *Diagnostics, refusal: *Refusal) Error!void {
+    defer std.crypto.secureZero(u8, &refusal.buffer);
     const io = conn.stream.io;
     const start = time.now(io);
-    const exchanged = conn.exchange(Hello{ .setup = &setup, .address = conn.address }, null, null, d);
+    const exchanged = conn.exchange(Hello{ .setup = &setup, .address = conn.address, .refusal = refusal }, null, null, d);
     // HELLO carried the password: the buffer it went out from forgets it.
     if (setup.auth != null) std.crypto.secureZero(u8, &conn.write_buffer);
     var answer = exchanged catch |err| return failed(conn, err, d);
     conn.rtt = start.durationTo(time.now(io));
     switch (answer) {
-        .refused => |*refusal| {
-            defer {
-                // A server without HELLO quoted the password, here and in
-                // what the connection read.
-                std.crypto.secureZero(u8, &refusal.buffer);
-                std.crypto.secureZero(u8, &conn.read_buffer);
-            }
+        .refused => {
+            // A server without HELLO quoted the password in what the
+            // connection read too.
+            defer std.crypto.secureZero(u8, &conn.read_buffer);
             return refused(conn, refusal.text(), d);
         },
         .server => |*info| {
@@ -126,6 +133,8 @@ const Hello = struct {
     setup: *const Setup,
     /// The server, for the texts of errors.
     address: Address,
+    /// Where the text of a refusal goes: no copy of it is made.
+    refusal: *Refusal,
 
     pub const Reply = Answer;
 
@@ -154,9 +163,8 @@ const Hello = struct {
         const first = try r.next();
         switch (first) {
             .simple_error, .bulk_error => {
-                var refusal: Refusal = .{};
-                refusal.len = (try r.payloadPrefix(&refusal.buffer)).bytes.len;
-                return .{ .refused = refusal };
+                h.refusal.len = (try r.payloadPrefix(&h.refusal.buffer)).bytes.len;
+                return .refused;
             },
             .map => |pairs| {
                 var info: Info = .{};
@@ -235,9 +243,11 @@ fn kindOf(r: *resp.Reader, element: resp.Reader.Element) resp.Reader.Error!resp.
     return .{ .element = element, .len = len };
 }
 
+/// What HELLO got: the fields of the server, or a refusal, whose text is
+/// in `Hello.refusal`.
 const Answer = union(enum) {
     server: Info,
-    refused: Refusal,
+    refused,
 };
 
 /// The fields of HELLO's map that the check reads.
@@ -263,7 +273,7 @@ const Field = struct {
 };
 
 /// The text of HELLO's error: as much of it as `Diagnostics` keeps.
-const Refusal = struct {
+pub const Refusal = struct {
     buffer: [512]u8 = undefined,
     len: usize = 0,
 

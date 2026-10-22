@@ -296,6 +296,37 @@ fn helloErrors(io: Io) !void {
     }
 }
 
+test "the refusal of a server without HELLO, which quotes the password, is read into one buffer, and the handshake wipes it and what the connection read" {
+    try within5s(testing.io, wipedRefusal, .{testing.io});
+}
+
+fn wipedRefusal(io: Io) !void {
+    const level = quiet();
+    defer testing.log_level = level;
+    var peer: Peer = try .listen(io);
+    defer peer.close(io);
+    const port = portOf(&peer);
+    var server = try io.concurrent(serve, .{ &peer, io, Side{ .hello = replies.redis_5_unknown_auth } });
+    defer server.cancel(io) catch {};
+    const address: Io.net.IpAddress = try .parseIp4("127.0.0.1", port);
+    const conn = try Connection.create(testing.allocator, io, try address.connect(io, .{ .mode = .stream }), .{ .host = "127.0.0.1", .port = port }, 1 << 20);
+    var destroyed = false;
+    defer if (!destroyed) conn.destroy();
+    // What the buffer held before: the handshake must leave none of it.
+    var refusal: handshake.Refusal = .{};
+    @memset(&refusal.buffer, 0xAA);
+    var d: Diagnostics = .{};
+    const auth: handshake.Setup = .{ .auth = .{ .username = "default", .password = "secret" } };
+    try testing.expectError(error.Unsupported, handshake.runWith(conn, auth, &d, &refusal));
+    try testing.expect(std.mem.allEqual(u8, &refusal.buffer, 0));
+    try testing.expect(std.mem.find(u8, &conn.read_buffer, "secret") == null);
+    try testing.expect(std.mem.find(u8, &conn.write_buffer, "secret") == null);
+    try testing.expect(std.mem.find(u8, d.buffer[0..], "secret") == null);
+    conn.destroy();
+    destroyed = true;
+    try server.await(io);
+}
+
 test "the end of the stream during the handshake is Unavailable" {
     try within5s(testing.io, closedInHandshake, .{testing.io});
 }
