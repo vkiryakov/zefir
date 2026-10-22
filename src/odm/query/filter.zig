@@ -47,6 +47,12 @@ const values = @import("values.zig");
 const Allocator = std.mem.Allocator;
 const Builder = bson.Builder;
 const Unwrap = schema.Unwrap;
+const At = values.At;
+const subject = values.subject;
+const top = values.top;
+const inner = values.inner;
+const Fields = values.Fields;
+const ItemOf = values.ItemOf;
 
 /// The BSON of `filter`, a filter of the model `T`, in `arena`: a literal
 /// of the model's fields, or `.{}` for every document, which needs no
@@ -88,28 +94,6 @@ fn requireFilter(comptime T: type, comptime L: type) void {
     if (!isFilter(T, L)) @compileError("odm: a filter of " ++ @typeName(T) ++ " is a literal of its fields, or .{} for every document; got " ++ @typeName(L));
 }
 
-/// Where a condition stands: a path of the model's fields.
-const At = struct {
-    /// The model.
-    T: type,
-    /// The Zig names of the fields on the way, joined by '.', for the
-    /// messages: "profile.city".
-    path: []const u8,
-    /// The key that the condition goes under in its document: the BSON
-    /// path, such as "createdAt".
-    key: []const u8,
-    /// The type of the field, as declared.
-    F: type,
-    /// Whether a document may lack the field: it is optional, or a field on
-    /// the way is.
-    optional: bool,
-};
-
-/// "{M}.{path}", the subject of the messages about the field at `at`.
-fn subject(comptime at: At) []const u8 {
-    return @typeName(at.T) ++ "." ++ at.path;
-}
-
 /// Writes the fields of the filter literal `filter` of `T` into the
 /// document open in `b`.
 fn writeFilter(comptime T: type, b: *Builder, filter: anytype) WriteError!void {
@@ -125,13 +109,6 @@ fn writeFilter(comptime T: type, b: *Builder, filter: anytype) WriteError!void {
 
 fn isLogical(comptime name: []const u8) bool {
     return std.mem.eql(u8, name, "and") or std.mem.eql(u8, name, "or") or std.mem.eql(u8, name, "nor");
-}
-
-/// The top-level field `name` of the model `T`.
-fn top(comptime T: type, comptime name: []const u8) At {
-    if (!@hasField(T, name)) @compileError("odm: " ++ @typeName(T) ++ " has no field '" ++ name ++ "'" ++ values.didYouMean(@typeInfo(T).@"struct".field_names, name));
-    const F = @FieldType(T, name);
-    return .{ .T = T, .path = name, .key = schema.keyOf(T, name), .F = F, .optional = @typeInfo(F) == .optional };
 }
 
 /// Writes `$and`, `$or` or `$nor`: the array of the filters in the tuple
@@ -178,21 +155,6 @@ fn writeCondition(b: *Builder, comptime at: At, comptime L: type, comptime name:
     try writeEqualityAt(b, at, L, name, parent, true);
 }
 
-/// The struct whose fields a literal on a field of type `F` names as paths:
-/// the struct of the field, or the struct of the items of a list; null for
-/// any other field.
-fn Fields(comptime F: type) ?type {
-    const S = Unwrap(F);
-    if (schema.isDocument(S)) return S;
-    const Item = schema.ListItem(S) orelse return null;
-    return if (schema.isDocument(Unwrap(Item))) Unwrap(Item) else null;
-}
-
-/// The declared type of the items of the field at `at`, when it is a list.
-fn ItemOf(comptime at: At) ?type {
-    return schema.ListItem(Unwrap(at.F));
-}
-
 /// What a literal on the field at `at` is (design §5.9).
 const Kind = enum {
     /// All its keys are fields of the struct of the field, or of its items:
@@ -237,20 +199,6 @@ fn writePaths(b: *Builder, comptime at: At, comptime V: type, value: V) WriteErr
     inline for (@typeInfo(V).@"struct".field_names) |name| {
         try writeCondition(b, comptime inner(at, S, name), V, name, value);
     }
-}
-
-/// The field `name` of `S`, the struct of the field at `at`, on a path
-/// through it.
-fn inner(comptime at: At, comptime S: type, comptime name: []const u8) At {
-    const F = @FieldType(S, name);
-    const items_optional = if (ItemOf(at)) |Item| @typeInfo(Item) == .optional else false;
-    return .{
-        .T = at.T,
-        .path = at.path ++ "." ++ name,
-        .key = if (at.key.len == 0) name else at.key ++ "." ++ name,
-        .F = F,
-        .optional = at.optional or items_optional or @typeInfo(F) == .optional,
-    };
 }
 
 /// The operators of a filter, by their names in a literal.

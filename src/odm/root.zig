@@ -39,6 +39,7 @@ const std = @import("std");
 const errors = @import("errors.zig");
 const driver = @import("driver.zig");
 const schema = @import("model/schema.zig");
+const options = @import("query/options.zig");
 
 /// The errors that a driver returns, each in its class of `outcome`.
 pub const DriverError = errors.DriverError;
@@ -81,6 +82,10 @@ pub const Insert = schema.Insert;
 /// The type of a model's id, without the optional.
 pub const Id = schema.Id;
 
+/// The order of a key of a sort: `.{ .sort = .{ .age = .desc } }`, or a
+/// `Direction` known only at run time.
+pub const Direction = options.Direction;
+
 /// Every check of a model at compile time: its schema, the types of its
 /// fields and its `field_rules`. Zig compiles only code that is used, so a
 /// package that declares models has them checked in a test:
@@ -102,5 +107,6 @@ test {
     _ = @import("tests/codec_tests.zig");
     _ = @import("tests/values_tests.zig");
     _ = @import("tests/filter_tests.zig");
+    _ = @import("tests/options_tests.zig");
     _ = @import("tests/big_model.zig");
 }

@@ -15,6 +15,7 @@ const bson = @import("mongo-bson");
 const v = @import("validator");
 const odm = @import("../root.zig");
 const filter = @import("../query/filter.zig");
+const options = @import("../query/options.zig");
 const Client = odm.Client;
 
 // The models of tests/models.zig, declared here so that the messages name
@@ -610,4 +611,44 @@ test "compile error: a key that is a field and an operator" {
 
 test "compile error: an empty literal on a struct" {
     _ = try filter.encode(User, std.testing.allocator, .{ .profile = .{} });
+}
+
+// Find options, sorts and projections, through query/options.zig.
+
+test "compile error: an option that find does not have" {
+    _ = try options.find(User, .find, std.testing.allocator, .{ .limt = 1 });
+}
+
+test "compile error: a limit of findOne" {
+    _ = try options.find(User, .findOne, std.testing.allocator, .{ .limit = 1 });
+}
+
+test "compile error: a limit that is a string" {
+    _ = try options.find(User, .find, std.testing.allocator, .{ .limit = "x" });
+}
+
+test "compile error: a sort by a number" {
+    _ = try options.find(User, .find, std.testing.allocator, .{ .sort = .{ .age = 1 } });
+}
+
+test "compile error: a sort by a field that is not there" {
+    _ = try options.sort(User, std.testing.allocator, .{ .agee = .asc });
+}
+
+const NameTypo = struct { nmae: []const u8 };
+
+test "compile error: a projection field that the model does not have" {
+    _ = try options.projection(User, NameTypo, std.testing.allocator);
+}
+
+const WideAge = struct { age: i64 };
+
+test "compile error: a projection field of another type" {
+    _ = try options.projection(User, WideAge, std.testing.allocator);
+}
+
+const RequiredProfile = struct { profile: User.Profile };
+
+test "compile error: a required projection field of an optional one" {
+    _ = try options.projection(User, RequiredProfile, std.testing.allocator);
 }

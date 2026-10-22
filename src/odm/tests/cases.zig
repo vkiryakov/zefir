@@ -77,4 +77,13 @@ pub const compile_errors = [_]Case{
     .{ .name = "compile error: fields and operators in one literal", .expect = "odm: tests.compile_errors.User.profile: write either fields of tests.compile_errors.User.Profile or operators in one literal, not both" },
     .{ .name = "compile error: a key that is a field and an operator", .expect = "odm: tests.compile_errors.Box.inner: 'size' is both a field of tests.compile_errors.Box.Inner and an operator: rename the field" },
     .{ .name = "compile error: an empty literal on a struct", .expect = "odm: tests.compile_errors.User.profile: an empty literal matches nothing here; drop it" },
+    // Find options, sorts and projections.
+    .{ .name = "compile error: an option that find does not have", .expect = "odm: find has no option 'limt'; did you mean 'limit'?" },
+    .{ .name = "compile error: a limit of findOne", .expect = "odm: findOne has no option 'limit'" },
+    .{ .name = "compile error: a limit that is a string", .expect = "odm: limit is a u32; got *const [1:0]u8" },
+    .{ .name = "compile error: a sort by a number", .expect = "odm: sort of tests.compile_errors.User.age takes .asc or .desc; got comptime_int" },
+    .{ .name = "compile error: a sort by a field that is not there", .expect = "odm: tests.compile_errors.User has no field 'agee'; did you mean 'age'?" },
+    .{ .name = "compile error: a projection field that the model does not have", .expect = "odm: tests.compile_errors.NameTypo.nmae is not a field of tests.compile_errors.User; did you mean 'name'?" },
+    .{ .name = "compile error: a projection field of another type", .expect = "odm: tests.compile_errors.WideAge.age is i64, but tests.compile_errors.User.age is u32: a projection field has the type of the model's field or its optional" },
+    .{ .name = "compile error: a required projection field of an optional one", .expect = "odm: tests.compile_errors.RequiredProfile.profile is required, but tests.compile_errors.User.profile is optional: make it ?tests.compile_errors.User.Profile" },
 };

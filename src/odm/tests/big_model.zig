@@ -8,6 +8,7 @@ const testing = std.testing;
 const bson = @import("mongo-bson");
 const odm = @import("../root.zig");
 const filter = @import("../query/filter.zig");
+const options = @import("../query/options.zig");
 
 pub const Kind = enum { one, two, three };
 
@@ -147,4 +148,26 @@ test "big model: a find over twelve paths" {
         .c = .{ .@"$elemMatch" = .{ .c1 = @as(i32, 2) } },
         .@"$or" = .{ .{ .f3 = @as(i32, 1) }, .{ .f16 = .{ .@"$exists" = true } } },
     }, doc);
+
+    // The options of the find: a sort over paths two levels deep and
+    // through a list of structs, and its counts.
+    const find = try options.find(Big, .find, arena.allocator(), .{
+        .sort = .{ .f2 = .desc, .a = .{ .deep = .{ .d1 = .asc } }, .c = .{ .c4 = .desc } },
+        .skip = 5,
+        .limit = 100,
+        .batch_size = 50,
+    });
+    try expectDoc(arena.allocator(), .{ .f2 = @as(i32, -1), .@"a.deep.d1" = @as(i32, 1), .@"c.c4" = @as(i32, -1) }, find.sort.?);
+    try testing.expectEqual(100, find.limit);
+
+    // A projection with structs inside structs, an optional struct and a
+    // list of structs.
+    const View = struct {
+        f6: []const u8,
+        a: struct { deep: struct { d6: []const u8 } },
+        b: ?struct { b9: bson.ObjectId },
+        c: []const struct { c1: i32 },
+    };
+    const one: i32 = 1;
+    try expectDoc(arena.allocator(), .{ .f6 = one, .@"a.deep.d6" = one, .@"b.b9" = one, .@"c.c1" = one, ._id = @as(i32, 0) }, try options.projection(Big, View, arena.allocator()));
 }

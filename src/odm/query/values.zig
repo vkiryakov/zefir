@@ -1,8 +1,9 @@
 //! The rules that the literals of queries share — filters, sorts and
 //! updates: which values a field takes, how a literal of conditions is told
 //! from a value of a field, how the fields of a literal that are known at
-//! compile time are read, and how a checked value is written as a value of
-//! its field.
+//! compile time are read, how a checked value is written as a value of its
+//! field, and how a path steps from a field of a model into the fields of
+//! its structs (`At`).
 //!
 //! A value known only at run time must fit the type of its field without
 //! narrowing (`fits`): `u16` for a `u32` field, never `u64`. A value known
@@ -239,7 +240,7 @@ pub fn comptimeProblem(comptime F: type, comptime value: anytype) ?[]const u8 {
         if (@typeInfo(F) == .optional) {
             const X = @typeInfo(F).optional.child;
             if (V == @TypeOf(null)) return null;
-            if (@typeInfo(V) == .optional) return if (value) |inner| comptimeProblem(X, inner) else null;
+            if (@typeInfo(V) == .optional) return if (value) |present| comptimeProblem(X, present) else null;
             return comptimeProblem(X, value);
         }
         switch (@typeInfo(F)) {
@@ -330,7 +331,7 @@ pub fn writeValue(b: *Builder, key: []const u8, comptime X: type, value: anytype
     if (@typeInfo(X) == .optional) {
         const Child = @typeInfo(X).optional.child;
         if (@typeInfo(V) == .optional) {
-            return if (value) |inner| writeValue(b, key, Child, inner) else b.putNull(key);
+            return if (value) |present| writeValue(b, key, Child, present) else b.putNull(key);
         }
         return writeValue(b, key, Child, value);
     }
@@ -349,4 +350,74 @@ pub fn writeValue(b: *Builder, key: []const u8, comptime X: type, value: anytype
     // fits, as the check saw.
     const converted: X = if (comptime @typeInfo(X) == .int and @typeInfo(V) == .int) @intCast(value) else value;
     try bson.codec.writeElement(b, key, converted, .{ .skip_nulls = true });
+}
+
+/// Where a condition, a key of a sort or a change of an update stands: a
+/// path of the fields of a model.
+pub const At = struct {
+    /// The model.
+    T: type,
+    /// The Zig names of the fields on the way, joined by '.', for the
+    /// messages: "profile.city"; "items[]" names an item of a list.
+    path: []const u8,
+    /// The key that the condition goes under in its document: the BSON
+    /// path, such as "createdAt" or "profile.city"; inside `$elemMatch` the
+    /// path in the item, "" for the item itself.
+    key: []const u8,
+    /// The type of the field, as declared.
+    F: type,
+    /// Whether a document may lack the field: it is optional, or a field on
+    /// the way is.
+    optional: bool,
+};
+
+/// "{M}.{path}", the subject of the messages about the field at `at`.
+pub fn subject(comptime at: At) []const u8 {
+    return @typeName(at.T) ++ "." ++ at.path;
+}
+
+/// The top-level field `name` of the model `T`, whose key is its BSON name
+/// (`_id` for the id). Stops the build when `T` has no such field.
+pub fn top(comptime T: type, comptime name: []const u8) At {
+    if (!@hasField(T, name)) @compileError("odm: " ++ @typeName(T) ++ " has no field '" ++ name ++ "'" ++ didYouMean(@typeInfo(T).@"struct".field_names, name));
+    const F = @FieldType(T, name);
+    return .{ .T = T, .path = name, .key = schema.keyOf(T, name), .F = F, .optional = @typeInfo(F) == .optional };
+}
+
+/// The field `name` of the struct of the field at `at`, which `Fields`
+/// gives, on a path through it. Stops the build when the struct has no
+/// such field.
+pub fn field(comptime at: At, comptime name: []const u8) At {
+    const S = Fields(at.F).?;
+    if (!@hasField(S, name)) @compileError("odm: " ++ subject(at) ++ " has no field '" ++ name ++ "'" ++ didYouMean(@typeInfo(S).@"struct".field_names, name));
+    return inner(at, S, name);
+}
+
+/// The struct whose fields a literal on a field of type `F` names as paths:
+/// the struct of the field, or the struct of the items of a list; null for
+/// any other field.
+pub fn Fields(comptime F: type) ?type {
+    const S = Unwrap(F);
+    if (schema.isDocument(S)) return S;
+    const Item = ListItem(S) orelse return null;
+    return if (schema.isDocument(Unwrap(Item))) Unwrap(Item) else null;
+}
+
+/// The declared type of the items of the field at `at`, when it is a list.
+pub fn ItemOf(comptime at: At) ?type {
+    return ListItem(Unwrap(at.F));
+}
+
+/// The field `name` of `S`, the struct of the field at `at`, on a path
+/// through it: a key of BSON that goes on with its Zig name.
+pub fn inner(comptime at: At, comptime S: type, comptime name: []const u8) At {
+    const F = @FieldType(S, name);
+    const items_optional = if (ItemOf(at)) |Item| @typeInfo(Item) == .optional else false;
+    return .{
+        .T = at.T,
+        .path = at.path ++ "." ++ name,
+        .key = if (at.key.len == 0) name else at.key ++ "." ++ name,
+        .F = F,
+        .optional = at.optional or items_optional or @typeInfo(F) == .optional,
+    };
 }
