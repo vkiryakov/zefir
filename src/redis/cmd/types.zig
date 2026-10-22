@@ -166,6 +166,8 @@ pub const StreamId = struct {
     ms: u64,
     seq: u64,
 
+    /// `0-0`, before every entry: where a walk of a group's pending
+    /// entries starts, and the id after which XREADGROUP reads them all.
     pub const zero: StreamId = .{ .ms = 0, .seq = 0 };
 
     /// The id of `text`, `<ms>-<seq>` in decimal without leading zeros, as
@@ -186,6 +188,8 @@ pub const StreamId = struct {
         return n;
     }
 
+    /// Writes the id as the server does, `<ms>-<seq>`: the `{f}` of
+    /// `print`.
     pub fn format(id: StreamId, w: *std.Io.Writer) std.Io.Writer.Error!void {
         try w.print("{d}-{d}", .{ id.ms, id.seq });
     }

@@ -2,9 +2,11 @@
 //! `client.stats()` returns a snapshot.
 
 /// The open connections of the pool: the `idle` ones and those `in_use`
-/// by a call.
+/// by a call or a Conn.
 connections: usize,
+/// Open connections that no call or Conn holds.
 idle: usize,
+/// Open connections that a call or a `redis.Conn` holds.
 in_use: usize,
 /// Connections being opened.
 opening: usize,
@@ -14,4 +16,6 @@ waiting: usize,
 subscribers: usize,
 /// The generation of the pool, and how many times it was cleared.
 generation: u64,
+/// How many times the pool was cleared: a connection that broke, or a
+/// server that refused the user, clears it.
 clears: u64,

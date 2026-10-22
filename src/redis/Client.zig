@@ -136,8 +136,13 @@ pub const Stats = @import("Stats.zig");
 /// The URL as `init` reads it.
 pub const Url = @import("url.zig").Url;
 
+/// What `init` fails with: `InvalidArgument` for options or a URL that
+/// break a rule, `Unsupported` for a URL of what the client does not
+/// serve, such as TLS or a UNIX socket, and `OutOfMemory`; the text goes to
+/// `Options.diagnostics`.
 pub const InitError = error{ InvalidArgument, Unsupported, OutOfMemory };
 
+/// What the calls of the client fail with: `redis.Error`.
 pub const Error = errors.Error;
 
 /// What `run` returns for a command of type `C`; a compile error when `C`

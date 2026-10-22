@@ -147,6 +147,8 @@ pub fn xlen(key: []const u8) Xlen {
 
 pub const Xlen = Command("redis.cmd.xlen", "XLEN", u64, Key);
 
+/// The options of `xrange` and `xrevrange`: the ids of the range, and how
+/// many entries.
 pub const XrangeOptions = struct {
     /// The first id of the range; null: `-`, the first of the stream.
     start: ?StreamId = null,
@@ -229,6 +231,8 @@ fn writeBlock(w: resp.Writer, timeout_ms: ?u64) resp.Writer.Error!void {
     }
 }
 
+/// The options of `xread`: where to read, how many entries, and how long
+/// to wait for them.
 pub const XreadOptions = struct {
     /// Where to read: after an id, the last one read; or `.latest`, `$`,
     /// the entries added from now on, which makes sense with `.block`.
@@ -302,6 +306,8 @@ pub fn Xread(comptime T: type) type {
     };
 }
 
+/// The options of `xreadgroup`: the group and its consumer, where to read,
+/// how many entries, and how long to wait for them.
 pub const XreadgroupOptions = struct {
     /// The group, which `xgroupCreate` made.
     group: []const u8,
@@ -421,6 +427,8 @@ pub fn xack(key: []const u8, group: []const u8, ids: []const StreamId) Xack {
 
 pub const Xack = Command("redis.cmd.xack", "XACK", u64, struct { key: []const u8, group: []const u8, ids: []const StreamId });
 
+/// The options of `xgroupCreate`: where the group starts, and whether the
+/// stream is made.
 pub const XgroupCreateOptions = struct {
     /// Where the group starts: `.latest`, `$`, the entries added from now
     /// on; `.{ .id = .zero }` for all the stream holds.
@@ -475,6 +483,7 @@ pub fn xpending(key: []const u8, group: []const u8) Xpending {
 
 pub const Xpending = Command("redis.cmd.xpending", "XPENDING", types.PendingSummary, Group);
 
+/// The options of `xpendingRange`: which pending entries, and how many.
 pub const XpendingRangeOptions = struct {
     /// At most this many entries.
     count: u64,
@@ -536,6 +545,8 @@ pub const XpendingRange = struct {
     }
 };
 
+/// The options of `xautoclaim`: the group, the consumer that claims, and
+/// which pending entries.
 pub const XautoclaimOptions = struct {
     /// The group.
     group: []const u8,
@@ -604,6 +615,7 @@ pub fn xdel(key: []const u8, ids: []const StreamId) Xdel {
 
 pub const Xdel = Command("redis.cmd.xdel", "XDEL", u64, struct { key: []const u8, ids: []const StreamId });
 
+/// The options of `xtrim`: how exactly it trims.
 pub const XtrimOptions = struct {
     /// `~`: whole nodes only, which is cheaper; the stream may keep some
     /// more entries.

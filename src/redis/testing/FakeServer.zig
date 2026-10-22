@@ -63,6 +63,8 @@ pub const Delayed = replies.Delayed;
 pub const Malformed = replies.Malformed;
 pub const Peer = @import("Peer.zig");
 
+/// The options of `startWith`: the script, a handler, and what the server
+/// says of itself.
 pub const Options = struct {
     /// The script, in the order its steps run.
     steps: []const Step = &.{},

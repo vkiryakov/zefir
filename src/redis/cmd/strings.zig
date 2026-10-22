@@ -37,6 +37,7 @@ pub fn Get(comptime T: type) type {
     return Command("redis.cmd.get", "GET", ?T, Key);
 }
 
+/// The options of `set` and `setXx`: the time to live of the key.
 pub const SetOptions = struct {
     /// PX: the key expires after this time, 1 ms or more. Null: the key
     /// has no time to live, or with `keep_ttl` the one it had.
@@ -45,6 +46,7 @@ pub const SetOptions = struct {
     keep_ttl: bool = false,
 };
 
+/// The options of `setNx`: the time to live of a new key.
 pub const SetNxOptions = struct {
     /// PX: the key expires after this time, 1 ms or more.
     ttl: ?Io.Duration = null,
@@ -155,6 +157,7 @@ pub fn Getdel(comptime T: type) type {
     return Command("redis.cmd.getdel", "GETDEL", ?T, Key);
 }
 
+/// The options of `getex`: a new time to live, or none.
 pub const GetexOptions = struct {
     /// PX: a new time to live, 1 ms or more; not with `persist`.
     ttl: ?Io.Duration = null,

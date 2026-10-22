@@ -34,6 +34,9 @@ const contract = @import("cmd/contract.zig");
 const command = @import("cmd/command.zig");
 const Client = @import("Client.zig");
 
+/// The items of type `T` of a scan, one at a time: `client.iterate` makes
+/// it, `next` gives each item and fetches the pages, and `deinit` frees
+/// the page in hand.
 pub fn Iterator(comptime T: type) type {
     return struct {
         client: *Client,

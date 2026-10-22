@@ -27,6 +27,8 @@ source: []const u8,
 /// The SHA1 of `source` in lower-case hex, as EVALSHA takes it.
 sha1: [40]u8,
 
+/// A script of `source`, which it borrows, and its SHA1: computed at
+/// comptime for a constant, at run time otherwise.
 pub fn init(source: []const u8) Script {
     // At comptime the hash of a script of a few KiB takes this many steps.
     @setEvalBranchQuota(1_000_000);

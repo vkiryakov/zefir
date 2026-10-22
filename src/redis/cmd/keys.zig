@@ -90,6 +90,7 @@ pub fn rename(key: []const u8, new_key: []const u8) Rename {
 
 pub const Rename = Command("redis.cmd.rename", "RENAME", void, struct { key: []const u8, new_key: []const u8 });
 
+/// The options of `scan`: the page, and which keys it keeps.
 pub const ScanOptions = struct {
     /// The cursor of the page: 0 for the first, then the cursor that the
     /// page before returned, until it returns 0.

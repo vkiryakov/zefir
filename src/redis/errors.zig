@@ -163,6 +163,8 @@ pub const Diagnostics = struct {
         message: []const u8,
     };
 
+    /// Where the error happened; null when the call stopped at a check of
+    /// its arguments, its options or its context, before any I/O.
     phase: ?Phase = null,
     /// The error of std underneath, for logs, not for logic.
     cause: ?anyerror = null,

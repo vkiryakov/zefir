@@ -28,6 +28,8 @@ const Key = struct { key: []const u8 };
 const Member = struct { key: []const u8, member: []const u8 };
 const Bounds = struct { key: []const u8, min: ScoreBound, max: ScoreBound };
 
+/// The options of `zadd`: which members it adds or updates, and what it
+/// counts.
 pub const ZaddOptions = struct {
     /// NX (`.absent`): only add new members; XX (`.present`): only update
     /// the members the set has.
@@ -149,6 +151,7 @@ pub fn zcount(key: []const u8, min: ScoreBound, max: ScoreBound) Zcount {
 
 pub const Zcount = Command("redis.cmd.zcount", "ZCOUNT", u64, Bounds);
 
+/// The options of `zrange`: the order of the ranks.
 pub const ZrangeOptions = struct {
     /// REV: the ranks count from the highest score.
     rev: bool = false,
@@ -196,6 +199,7 @@ pub fn Zrange(comptime T: type) type {
     };
 }
 
+/// The options of `zrangeByScore`: the order, and a part of the range.
 pub const ZrangeByScoreOptions = struct {
     /// REV: from the highest score down; the bounds stay the lower first.
     rev: bool = false,

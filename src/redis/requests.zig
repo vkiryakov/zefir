@@ -15,25 +15,32 @@ pub const OperationContext = struct {
     /// For the client's logs; never sent to the server.
     tracing: Tracing = .{},
 
+    /// The context of a call under `ctx`, without tracing.
     pub fn of(ctx: core.Context) OperationContext {
         return .{ .ctx = ctx };
     }
 };
 
+/// What the client's logs say about the caller of a call.
 pub const Tracing = struct {
     /// The caller's operation, such as "sessions.get".
     operation: ?[]const u8 = null,
 };
 
+/// The options of one call: `run` and `pipeline` of the client, and the
+/// calls of a `redis.Conn`.
 pub const RunOptions = struct {
     /// The memory of the reply, an arena: the client takes from it during
     /// the call only and frees nothing, so the reply lives as long as the
     /// arena. A reply whose type holds strings or slices needs it; for
     /// numbers, bools, enums and `void` it may stay null.
     allocator: ?std.mem.Allocator = null,
+    /// What went wrong when the call fails, for logs: the call clears it
+    /// first.
     diagnostics: ?*Diagnostics = null,
 };
 
+/// The options of `client.iterate`.
 pub const IterateOptions = struct {
     /// The memory of the pages: the iterator holds each in an arena of its
     /// own over it until the next page, and frees it in `deinit`, so a
@@ -43,6 +50,8 @@ pub const IterateOptions = struct {
     diagnostics: ?*Diagnostics = null,
 };
 
+/// The options of `client.subscribe`: what to subscribe to, and how long
+/// a silence may last.
 pub const SubscribeOptions = struct {
     /// The channels whose messages come, by their names: SUBSCRIBE.
     channels: []const []const u8 = &.{},
