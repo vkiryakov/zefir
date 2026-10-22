@@ -19,7 +19,9 @@
 //!   `Cache-Control: no-cache`: a client asks each time, and while the
 //!   document has not changed it gets 304 without a body.
 //! - `GET /docs`: the page of Scalar, a reference of the API in the
-//!   browser, which reads the document from the route above. The browser
+//!   browser, which reads the document from the route above, by its path
+//!   from the server's root: the page finds it at each path the router
+//!   gives the page, `/docs/` with its '/' too. The browser
 //!   loads Scalar from jsDelivr, a release pinned here and checked by its
 //!   hash (Subresource Integrity), so a `Content-Security-Policy` of the
 //!   application must allow scripts of https://cdn.jsdelivr.net.
@@ -71,8 +73,10 @@ pub fn Docs(comptime opts: DocsOptions) type {
             /// Where `servers` goes in `bytes`, right after `info`, when
             /// the prefix comes at run time; null when it does not.
             servers_at: ?usize,
-            /// The page; null without one.
+            /// The page but the path of the document in it, which a
+            /// request gets at `page_url_at`; null without a page.
             page: ?[]const u8,
+            page_url_at: usize,
         };
 
         /// Marks a controller of documentation: a document leaves it out.
@@ -90,12 +94,13 @@ pub fn Docs(comptime opts: DocsOptions) type {
             document.write(&out.writer) catch return error.OutOfMemory;
             const bytes = try out.toOwnedSlice();
             errdefer gpa.free(bytes);
-            const page_bytes: ?[]const u8 = if (opts.page == null) null else try pageOf(gpa, titleOf(document), comptime relative(opts.page.?, opts.json));
+            const page_of: ?Page = if (opts.page == null) null else try pageOf(gpa, titleOf(document));
             return .{ .document = document, .internal = .{
                 .bytes = bytes,
                 .etag = etagOf(bytes),
                 .servers_at = if (document.runtime_prefix) serversAt(document) else null,
-                .page = page_bytes,
+                .page = if (page_of) |p| p.bytes else null,
+                .page_url_at = if (page_of) |p| p.url_at else 0,
             } };
         }
 
@@ -120,9 +125,20 @@ pub fn Docs(comptime opts: DocsOptions) type {
             try ctx.response.setHeader("content-type", "application/json");
         }
 
-        /// `GET` of the page.
+        /// `GET` of the page, which names the document by its path from
+        /// the server's root: the server's prefix and `.json`.
         pub fn page(d: *Self, ctx: *http.Context) !void {
-            try ctx.response.html(d.internal.page.?);
+            const i = &d.internal;
+            const bytes = i.page.?;
+            // The pattern of the route is the server's prefix, then the path.
+            const pattern = ctx.route().?.pattern;
+            const prefix = pattern[0 .. pattern.len - opts.page.?.len];
+            try ctx.response.html(try std.fmt.allocPrint(ctx.allocator(), "{s}{f}{f}{s}", .{
+                bytes[0..i.page_url_at],
+                Html{ .text = prefix },
+                Html{ .text = opts.json },
+                bytes[i.page_url_at..],
+            }));
         }
 
         /// The bytes of the document this request gets, and their ETag:
@@ -142,8 +158,8 @@ pub fn Docs(comptime opts: DocsOptions) type {
     };
 }
 
-/// A path of a route of `Docs` starts with '/': the page finds the
-/// document by its path relative to its own.
+/// A path of a route of `Docs` starts with '/', after the server's prefix:
+/// the page names the document by both.
 fn expectPath(comptime path: []const u8, comptime option: []const u8, comptime example: []const u8) void {
     if (path.len == 0 or path[0] != '/')
         @compileError("zefir.openapi: Docs: ." ++ option ++ " is \"" ++ path ++ "\", which does not start with '/'; " ++
@@ -232,10 +248,13 @@ fn titleOf(document: Document) []const u8 {
     return "API";
 }
 
-/// The page of Scalar for the document titled `title`, at `url` relative
-/// to the page.
-fn pageOf(gpa: std.mem.Allocator, title: []const u8, comptime url: []const u8) error{OutOfMemory}![]const u8 {
-    return std.fmt.allocPrint(gpa,
+/// The page of Scalar but the path of the document in it, which goes at
+/// `url_at`.
+const Page = struct { bytes: []const u8, url_at: usize };
+
+/// The page for the document titled `title`.
+fn pageOf(gpa: std.mem.Allocator, title: []const u8) error{OutOfMemory}!Page {
+    const head = try std.fmt.allocPrint(gpa,
         \\<!doctype html>
         \\<html>
         \\  <head>
@@ -244,12 +263,17 @@ fn pageOf(gpa: std.mem.Allocator, title: []const u8, comptime url: []const u8) e
         \\    <title>{f}</title>
         \\  </head>
         \\  <body>
-        \\    <script id="api-reference" data-url="{f}"></script>
+        \\    <script id="api-reference" data-url="
+    , .{Html{ .text = title }});
+    defer gpa.free(head);
+    const tail = std.fmt.comptimePrint(
+        \\"></script>
         \\    <script src="{s}" integrity="{s}" crossorigin="anonymous"></script>
         \\  </body>
         \\</html>
         \\
-    , .{ Html{ .text = title }, Html{ .text = url }, scalar.url, scalar.integrity });
+    , .{ scalar.url, scalar.integrity });
+    return .{ .bytes = try std.mem.concat(gpa, u8, &.{ head, tail }), .url_at = head.len };
 }
 
 /// Text in HTML, as an element's content or an attribute's value.
@@ -267,45 +291,7 @@ const Html = struct {
     }
 };
 
-/// The URL of the path `to` relative to the page at `from`, both paths of
-/// one server: what the browser resolves against the page's URL, prefix
-/// and all. A first segment with ':' would read as a scheme, so such a URL
-/// begins with "./".
-fn relative(comptime from: []const u8, comptime to: []const u8) []const u8 {
-    comptime {
-        // The page's directory: its path to its last '/'.
-        const dir = from[0 .. std.mem.findScalarLast(u8, from, '/').? + 1];
-        // The longest directory both paths begin with.
-        var common: usize = 0;
-        var i: usize = 0;
-        while (i < dir.len and i < to.len and dir[i] == to[i]) : (i += 1) {
-            if (dir[i] == '/') common = i + 1;
-        }
-        var up: []const u8 = "";
-        for (dir[common..]) |c| {
-            if (c == '/') up = up ++ "../";
-        }
-        const rest = to[common..];
-        const first = rest[0 .. std.mem.findScalar(u8, rest, '/') orelse rest.len];
-        if (up.len == 0 and (rest.len == 0 or std.mem.findScalar(u8, first, ':') != null)) up = "./";
-        return up ++ rest;
-    }
-}
-
 const testing = std.testing;
-
-test "relative: the document's URL from the page's" {
-    try testing.expectEqualStrings("openapi.json", comptime relative("/docs", "/openapi.json"));
-    try testing.expectEqualStrings("openapi.json", comptime relative("/", "/openapi.json"));
-    try testing.expectEqualStrings("spec/openapi.json", comptime relative("/docs", "/spec/openapi.json"));
-    try testing.expectEqualStrings("openapi.json", comptime relative("/internal/docs", "/internal/openapi.json"));
-    try testing.expectEqualStrings("v1/openapi.json", comptime relative("/api/docs", "/api/v1/openapi.json"));
-    try testing.expectEqualStrings("../openapi.json", comptime relative("/docs/", "/openapi.json"));
-    try testing.expectEqualStrings("../../openapi.json", comptime relative("/a/b/docs", "/openapi.json"));
-    try testing.expectEqualStrings("../api/openapi.json", comptime relative("/apix/docs", "/api/openapi.json"));
-    try testing.expectEqualStrings("./", comptime relative("/docs", "/"));
-    try testing.expectEqualStrings("./a:b.json", comptime relative("/docs", "/a:b.json"));
-}
 
 test "notModified: *, a tag of a list or of a line, weak or not; never a part of a tag" {
     const tag = "\"0123456789abcdef\"";

@@ -1,7 +1,8 @@
 //! zefir.openapi.Docs on the backend of zefir-http in memory: the document
 //! at its route with its ETag and `Cache-Control: no-cache`, 304 for a
 //! client that has it, HEAD, the page of Scalar with its pinned version and
-//! hash, no page, a prefix that comes at run time, and two documents on two
+//! hash, which finds the document at each path the router gives the page,
+//! no page, a prefix that comes at run time, and two documents on two
 //! paths. A document never holds the routes of `Docs`.
 const std = @import("std");
 const http = @import("http");
@@ -173,7 +174,7 @@ test "HEAD of the document: the head of GET, without the body" {
     try testing.expectEqualStrings(&etagOf(bytes), res.header("etag").?);
 }
 
-test "GET of the page: Scalar of the pinned version, checked by its hash, and the document relative to the page" {
+test "GET of the page: Scalar of the pinned version, checked by its hash, and the path of the document" {
     var f: Fixture = .{ .backend = undefined };
     try f.start();
     defer f.stop();
@@ -191,12 +192,58 @@ test "GET of the page: Scalar of the pinned version, checked by its hash, and th
         \\    <title>Todos &amp; lists &lt;API&gt;</title>
         \\  </head>
         \\  <body>
-        \\    <script id="api-reference" data-url="openapi.json"></script>
+        \\    <script id="api-reference" data-url="/api/openapi.json"></script>
         \\    <script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference@1.75.1/dist/browser/standalone.js" integrity="sha384-G+2Q2i9l3PPfmYkk0b4BAIUrs7xb/DNaTL1wCYYab4c9dIKlCyiqzC0Qx3eq9Wf6" crossorigin="anonymous"></script>
         \\  </body>
         \\</html>
         \\
     , res.body);
+}
+
+/// The path a browser fetches the document from, on the page at `page`:
+/// the value of its `data-url`, relative to the page's directory unless it
+/// begins with '/'.
+fn documentPath(buf: []u8, page: []const u8, body: []const u8) ![]const u8 {
+    const marker = "data-url=\"";
+    const start = (std.mem.find(u8, body, marker) orelse return error.TestNoDataUrl) + marker.len;
+    const url = body[start .. start + std.mem.findScalar(u8, body[start..], '"').?];
+    if (url.len > 0 and url[0] == '/') return url;
+    return std.fmt.bufPrint(buf, "{s}{s}", .{ page[0 .. std.mem.findScalarLast(u8, page, '/').? + 1], url });
+}
+
+/// The page at `page` gets 200, and the document it names too.
+fn expectPageFindsDocument(backend: *http.testing.Backend, page: []const u8, document_path: []const u8) !void {
+    var res = try get(backend, page, &.{});
+    defer res.deinit();
+    try testing.expectEqual(200, res.status);
+    var buf: [256]u8 = undefined;
+    const path = try documentPath(&buf, page, res.body);
+    try testing.expectEqualStrings(document_path, path);
+    var doc = try get(backend, path, &.{});
+    defer doc.deinit();
+    try testing.expectEqual(200, doc.status);
+    try testing.expectEqualStrings("application/json", doc.header("content-type").?);
+}
+
+test "the page finds the document at each path the router gives it: a '/' at its end, a page at the prefix itself" {
+    var f: Fixture = .{ .backend = undefined };
+    try f.start();
+    defer f.stop();
+    try expectPageFindsDocument(&f.backend, "/api/docs", "/api/openapi.json");
+    try expectPageFindsDocument(&f.backend, "/api/docs/", "/api/openapi.json");
+
+    var backend: http.testing.Backend = .init(testing.allocator);
+    defer backend.deinit();
+    var todos: TodosController = .{};
+    var docs: Docs(.{ .page = "/" }) = undefined;
+    const options = .{ .backend = backend.backend(), .prefix = "/api", .controllers = .{ &todos, &docs } };
+    docs = try .init(testing.allocator, comptime document(@TypeOf(options), .{ .info = info }));
+    defer docs.deinit(testing.allocator);
+    var server: http.Server = try .init(testing.allocator, options);
+    defer server.deinit(testing.io);
+    try server.start(testing.io);
+    try expectPageFindsDocument(&backend, "/api", "/api/openapi.json");
+    try expectPageFindsDocument(&backend, "/api/", "/api/openapi.json");
 }
 
 test ".page = null: no page; the document stays" {
@@ -253,6 +300,8 @@ test "a prefix from the config: servers holds the prefix it serves, right after 
     var again = try get(&backend, "/api/openapi.json", &.{.{ "if-none-match", &etag }});
     defer again.deinit();
     try testing.expectEqual(304, again.status);
+    // The page names the document by the prefix it serves.
+    try expectPageFindsDocument(&backend, "/api/docs/", "/api/openapi.json");
 }
 
 test "an empty prefix from the config: no servers" {
@@ -300,7 +349,6 @@ test "two Docs on two paths serve two documents, each with its page" {
     defer inside.deinit();
     try expectPaths(inside.body, &.{"/v1/admin/stats"});
     try testing.expect(!std.mem.eql(u8, outside.header("etag").?, inside.header("etag").?));
-    var page = try get(&backend, "/api/internal/docs", &.{});
-    defer page.deinit();
-    try testing.expect(std.mem.find(u8, page.body, "<script id=\"api-reference\" data-url=\"openapi.json\"></script>") != null);
+    try expectPageFindsDocument(&backend, "/api/internal/docs", "/api/internal/openapi.json");
+    try expectPageFindsDocument(&backend, "/api/docs", "/api/openapi.json");
 }
