@@ -1,0 +1,156 @@
+//! `redis.Conn`: a connection of the client's pool held by one task, from
+//! `client.acquire` until `release`, for what keeps state on a connection:
+//! WATCH and the transaction that depends on it.
+//!
+//! ```zig
+//! // Take a coffee off the stock, only if nobody took the last one first.
+//! var conn = try client.acquire(io, op);
+//! defer conn.release(io);
+//! try conn.run(io, op, redis.cmd.watch(&.{"stock:coffee"}), .{});
+//! const left = try conn.run(io, op, redis.cmd.raw(?i64, .{ "GET", "stock:coffee" }), .{}) orelse 0;
+//! if (left == 0) return error.OutOfStock;
+//! ```
+//!
+//! - `run` and `pipeline` take the same commands as the client's, and keep
+//!   its rules: the deadline, the token, the memory of the reply, the
+//!   errors. Only they run `cmd.watch` and `cmd.unwatch`.
+//! - While the task holds it, the pool does not touch the connection, and
+//!   `client.stats()` counts it in use. `client.acquire` waits in line for
+//!   it as a call does: `error.PoolExhausted` when the deadline ends there.
+//! - `release` gives the connection back to the pool, unless keys may be
+//!   under WATCH on it: then it closes the connection, so that no later
+//!   call gets the keys of another, and sends no UNWATCH behind the
+//!   caller's back. To keep the connection, run `cmd.unwatch()` first.
+//!   `release` again does nothing.
+//! - An error after which the connection closes (`ConnectionLost`,
+//!   `Timeout`, `Interrupted`, `ProtocolViolation`, `ReplyTooLarge`,
+//!   `OutOfMemory`) leaves the Conn empty: its calls are `error.Closed`
+//!   from then on, and `release` only frees it. `ServerError` and
+//!   `UnexpectedReply` leave the connection as it was.
+//! - `client.close` gives a call of a Conn `close_timeout` to end, as any
+//!   call in flight, then cuts it; calls after it are `error.Closed`.
+//!
+//! The methods take `*Conn`, for the Conn holds the state of its
+//! connection: `var conn`.
+
+const std = @import("std");
+const Io = std.Io;
+const errors = @import("errors.zig");
+const Error = errors.Error;
+const Diagnostics = errors.Diagnostics;
+const requests = @import("requests.zig");
+const OperationContext = requests.OperationContext;
+const RunOptions = requests.RunOptions;
+const contract = @import("cmd/contract.zig");
+const calls = @import("calls.zig");
+const Client = @import("Client.zig");
+const Connection = @import("engine/Connection.zig");
+const Pool = @import("engine/Pool.zig");
+const Conn = @This();
+
+client: *Client,
+/// The connection; null once an error closed it, or after `release`.
+entry: ?*Pool.Entry,
+/// Whether keys may be under WATCH on the connection: set by a WATCH that
+/// succeeded, cleared by UNWATCH and once a transaction sent EXEC.
+watching: bool = false,
+released: bool = false,
+
+/// What `run` returns for a command of type `C`.
+pub fn ReplyOf(comptime C: type) type {
+    return contract.ReplyOn(C, "redis.Conn.run", .conn);
+}
+
+/// What `pipeline` returns for commands of type `Commands`, as for the
+/// client: `redis.Client.Results`.
+pub fn Results(comptime Commands: type) type {
+    return contract.Results(Commands, "redis.Conn.pipeline", .conn);
+}
+
+/// Runs `command` on the connection of the Conn and returns its reply, by
+/// the rules of `client.run`.
+pub fn run(conn: *Conn, io: Io, op: OperationContext, command: anytype, options: RunOptions) Error!ReplyOf(@TypeOf(command)) {
+    const c = conn.client;
+    calls.checkUse(c, io);
+    const d = options.diagnostics;
+    if (d) |x| x.* = .{};
+    try calls.checkCommand(command, options, d);
+    try calls.checkContext(io, op, d);
+    const connection = try conn.held(d);
+    try c.pool.enter(io, d);
+    defer c.pool.leave(io);
+    const deadline = calls.deadlineOf(c, io, op);
+    const reply = calls.one(c, connection, io, op, command, options, deadline, d) catch |err| {
+        conn.after(io, calls.afterExchange(connection, err, d));
+        return err;
+    };
+    conn.mark(@TypeOf(command), true);
+    return reply;
+}
+
+/// Runs `commands` on the connection of the Conn in one exchange, by the
+/// rules of `client.pipeline`.
+pub fn pipeline(conn: *Conn, io: Io, op: OperationContext, commands: anytype, options: RunOptions) Error!Results(@TypeOf(commands)) {
+    const c = conn.client;
+    calls.checkUse(c, io);
+    const d = options.diagnostics;
+    if (d) |x| x.* = .{};
+    try calls.checkCommands(commands, options, d, "redis.Conn.pipeline");
+    try calls.checkContext(io, op, d);
+    const connection = try conn.held(d);
+    var results = try calls.slots(Results(@TypeOf(commands)), commands, options);
+    try c.pool.enter(io, d);
+    defer c.pool.leave(io);
+    const deadline = calls.deadlineOf(c, io, op);
+    calls.many(c, connection, io, op, commands, &results, options, deadline, d) catch |err| {
+        conn.after(io, calls.afterExchange(connection, err, d));
+        return err;
+    };
+    if (comptime @typeInfo(@TypeOf(commands)) == .@"struct") {
+        inline for (@typeInfo(@TypeOf(commands)).@"struct".field_types, 0..) |C, i| {
+            conn.mark(C, if (results[i]) |_| true else |_| false);
+        }
+    } else for (results) |result| {
+        conn.mark(contract.Element(@TypeOf(commands)), if (result) |_| true else |_| false);
+    }
+    return results;
+}
+
+/// Gives the connection back to the pool, or closes it when keys may be
+/// under WATCH on it; after an error that closed it, only frees the Conn.
+/// A second call does nothing.
+pub fn release(conn: *Conn, io: Io) void {
+    if (conn.released) return;
+    const c = conn.client;
+    calls.checkUse(c, io);
+    if (conn.entry) |entry| c.pool.checkIn(io, entry, if (conn.watching) .broken else .ok);
+    conn.entry = null;
+    conn.released = true;
+}
+
+/// The connection of the Conn, or `error.Closed` when it has none.
+fn held(conn: *const Conn, d: ?*Diagnostics) Error!*Connection {
+    if (conn.entry) |entry| return Connection.of(entry);
+    if (conn.released) return calls.fail(d, .checkout, error.Closed, "the Conn was released", .{});
+    return calls.fail(d, .checkout, error.Closed, "the Conn lost its connection to an error before: release it, and acquire another", .{});
+}
+
+/// What an exchange that failed left of the connection: one that is no
+/// longer usable goes back to the pool, which closes it, and the Conn is
+/// empty.
+fn after(conn: *Conn, io: Io, left: Pool.After) void {
+    if (left == .ok) return;
+    conn.client.pool.checkIn(io, conn.entry.?, left);
+    conn.entry = null;
+}
+
+/// Notes what a command of type `C` did to the WATCH of the connection,
+/// when it `succeeded`.
+fn mark(conn: *Conn, comptime C: type, succeeded: bool) void {
+    switch (comptime contract.scopeOf(C)) {
+        .any => {},
+        .connection => |rule| if (succeeded) {
+            conn.watching = rule.watching;
+        },
+    }
+}

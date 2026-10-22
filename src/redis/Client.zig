@@ -84,6 +84,7 @@ const OperationContext = requests.OperationContext;
 const RunOptions = requests.RunOptions;
 const contract = @import("cmd/contract.zig");
 const calls = @import("calls.zig");
+const Conn = @import("Conn.zig");
 const OwnedOptions = @import("OwnedOptions.zig");
 const Address = @import("engine/Address.zig");
 const Connection = @import("engine/Connection.zig");
@@ -119,7 +120,7 @@ pub const Error = errors.Error;
 /// What `run` returns for a command of type `C`; a compile error when `C`
 /// is not a command.
 pub fn ReplyOf(comptime C: type) type {
-    return contract.ReplyOf(C, "redis.Client.run");
+    return contract.ReplyOn(C, "redis.Client.run", .client);
 }
 
 /// What `pipeline` returns for commands of type `Commands`: for a tuple of
@@ -127,7 +128,7 @@ pub fn ReplyOf(comptime C: type) type {
 /// its order, `T` the type of its reply; for many commands of one type, a
 /// slice of them.
 pub fn Results(comptime Commands: type) type {
-    return contract.Results(Commands, "redis.Client.pipeline");
+    return contract.Results(Commands, "redis.Client.pipeline", .client);
 }
 
 /// Checks `options` and copies what it keeps; no I/O. Why it refused them
@@ -270,6 +271,20 @@ pub fn pipeline(c: *Client, io: Io, op: OperationContext, commands: anytype, opt
         return err;
     };
     return results;
+}
+
+/// A connection of the pool for the calling task alone, until
+/// `conn.release`: for WATCH and the transaction that depends on it
+/// (`redis.Conn`). It waits in line for one as a call does, within the
+/// deadline of `op`, else `timeout` from now: `error.PoolExhausted` when
+/// the deadline ends there. Release every Conn before `deinit`.
+pub fn acquire(c: *Client, io: Io, op: OperationContext) Error!Conn {
+    calls.checkUse(c, io);
+    try calls.checkContext(io, op, null);
+    try c.pool.enter(io, null);
+    defer c.pool.leave(io);
+    const entry = try c.pool.checkOut(io, c.opener(), calls.deadlineOf(c, io, op), null);
+    return .{ .client = c, .entry = entry };
 }
 
 fn opener(c: *Client) Pool.Opener {

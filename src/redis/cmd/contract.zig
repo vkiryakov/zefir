@@ -24,9 +24,15 @@
 //!   "GET", for the client's texts about it; never a value.
 //!
 //! Declarations that tell the client more about a command come with the
-//! commands that need them: the scope of a command that keeps state on
-//! its connection (WATCH), where a blocking command takes its timeout and
-//! in which units, the cursor of a SCAN command.
+//! commands that need them:
+//!
+//! - `pub const scope: contract.Scope = .{ .connection = … }` — a command
+//!   that keeps state on its connection: WATCH and UNWATCH. Only a
+//!   `redis.Conn` runs it, with `run` or in a pipeline, and the Conn
+//!   notes whether keys are under WATCH after it succeeded; on the client
+//!   and inside a transaction it stops the build (`ReplyOn`).
+//! - where a blocking command takes its timeout and in which units, and
+//!   the cursor of a SCAN command, come with those commands.
 //!
 //! A pipeline and a transaction take their commands as a tuple of command
 //! values, each of its own type, or as many commands of one type: a slice
@@ -42,6 +48,60 @@ pub fn ReplyOf(comptime C: type, comptime call: []const u8) type {
             @hasDecl(C, "check") and @hasDecl(C, "write") and @hasDecl(C, "read") and @hasDecl(C, "name");
         if (!is_command) @compileError(call ++ ": " ++ @typeName(C) ++ " is not a command: make one with redis.cmd, such as redis.cmd.get([]const u8, key)");
         return C.Reply;
+    }
+}
+
+/// Where a command keeps what it does: `.any` for most, which leave
+/// nothing behind on their connection; `.connection` for one whose type
+/// declares `pub const scope`, with what it does there.
+pub const Scope = union(enum) {
+    any,
+    connection: OnConnection,
+};
+
+/// What a command of `scope = .connection` does to its connection, and why
+/// the client and a transaction cannot run it, for their compile errors.
+pub const OnConnection = struct {
+    /// Whether keys are under WATCH on the connection once the command
+    /// succeeded: true after WATCH, false after UNWATCH.
+    watching: bool,
+    /// Why the client cannot run it: "WATCH holds its keys on the
+    /// connection it goes on".
+    on_client: []const u8,
+    /// Why a transaction cannot hold it, and the fix.
+    in_transaction: []const u8,
+};
+
+pub fn scopeOf(comptime C: type) Scope {
+    return if (@hasDecl(C, "scope")) C.scope else .any;
+}
+
+/// Where a call runs its commands.
+pub const Place = enum {
+    /// `client.run` and `client.pipeline`: a connection of the pool, for
+    /// that call alone.
+    client,
+    /// `conn.run` and `conn.pipeline`: the connection of a task.
+    conn,
+    /// `conn.transaction`, between MULTI and EXEC.
+    transaction,
+};
+
+/// `ReplyOf`, and a compile error that starts with `call` for a command of
+/// `scope = .connection` where `place` cannot run it: on the client, or
+/// inside a transaction.
+pub fn ReplyOn(comptime C: type, comptime call: []const u8, comptime place: Place) type {
+    comptime {
+        const Reply = ReplyOf(C, call);
+        switch (scopeOf(C)) {
+            .any => {},
+            .connection => |rule| switch (place) {
+                .client => @compileError(call ++ ": " ++ rule.on_client ++ ": run it on a connection of client.acquire"),
+                .transaction => @compileError(call ++ ": " ++ rule.in_transaction),
+                .conn => {},
+            },
+        }
+        return Reply;
     }
 }
 
@@ -73,12 +133,12 @@ pub fn Element(comptime Commands: type) type {
 /// What a pipeline or a transaction of `Commands` returns: for a tuple, a
 /// tuple of `CommandError!R`, one for each command in its order, `R` the
 /// type of its reply; for many commands of one type, a slice of them.
-pub fn Results(comptime Commands: type, comptime call: []const u8) type {
+pub fn Results(comptime Commands: type, comptime call: []const u8, comptime place: Place) type {
     comptime {
-        if (!isTuple(Commands, call)) return []const (CommandError!ReplyOf(Element(Commands), call));
+        if (!isTuple(Commands, call)) return []const (CommandError!ReplyOn(Element(Commands), call, place));
         const commands = @typeInfo(Commands).@"struct".field_types;
         var types: [commands.len]type = undefined;
-        for (commands, &types) |C, *slot| slot.* = CommandError!ReplyOf(C, call);
+        for (commands, &types) |C, *slot| slot.* = CommandError!ReplyOn(C, call, place);
         return @Tuple(&types);
     }
 }

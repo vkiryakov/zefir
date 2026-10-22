@@ -837,11 +837,12 @@ pub fn build(b: *std.Build) void {
     }
     addMongoGuide(b, test_mongo, .{ .core = core, .mongo = mongo }, target, optimize, tsan);
 
-    // redis compile errors: reply types that no reply reads into, and
-    // arguments that cannot be written. Each test of the file must fail to
-    // compile with the message next to its name, which names the call, the
-    // field or the argument, and the fix; the filter compiles one test at a
-    // time. A type declared in the file is named after the file.
+    // redis compile errors: reply types that no reply reads into,
+    // arguments that cannot be written, and WATCH where it cannot run. Each
+    // test of the file must fail to compile with the message next to its
+    // name, which names the call, the field or the argument, and the fix;
+    // the filter compiles one test at a time. A type declared in the file
+    // is named after the file.
     const redis_compile_errors = b.createModule(.{
         .root_source_file = b.path("src/redis/tests/compile_errors.zig"),
         .target = target,
@@ -865,6 +866,8 @@ pub fn build(b: *std.Build) void {
         .{ "argument of a non-exhaustive enum", "redis.cmd.raw: args[2] is compile_errors.Open, a non-exhaustive enum: a value without a tag has no name to write; make the enum exhaustive" },
         .{ "arguments that are a string", "redis.cmd.raw: the arguments are a tuple, such as .{ \"GET\", key }, or a slice of strings; got *const [3:0]u8" },
         .{ "run of a value that is not a command", "redis.Client.run: u32 is not a command: make one with redis.cmd, such as redis.cmd.get([]const u8, key)" },
+        .{ "watch on the client", "redis.Client.run: WATCH holds its keys on the connection it goes on: run it on a connection of client.acquire" },
+        .{ "watch in a pipeline of the client", "redis.Client.pipeline: WATCH holds its keys on the connection it goes on: run it on a connection of client.acquire" },
     }, 0..) |case, i| {
         const compile = b.addTest(.{
             .name = b.fmt("redis-compile-error-{d}", .{i}),

@@ -10,15 +10,24 @@
 //!   the decoder, `redis.Value` for a reply of any shape. `Raw(T, Args)` is
 //!   its type.
 //!
+//! - `watch(keys)`, `unwatch()` — the keys the next transaction of a
+//!   `redis.Conn` depends on; only a Conn runs them. `Watch` and
+//!   `Unwatch` are their types.
+//!
 //! ```zig
 //! const rank = try client.run(io, op, redis.cmd.raw(?u64, .{ "ZRANK", "leaders", "ann" }), .{});
 //! ```
 
 const std = @import("std");
 const raw_command = @import("cmd/raw.zig");
+const transactions = @import("cmd/transactions.zig");
 
 pub const raw = raw_command.raw;
 pub const Raw = raw_command.Raw;
+pub const watch = transactions.watch;
+pub const Watch = transactions.Watch;
+pub const unwatch = transactions.unwatch;
+pub const Unwatch = transactions.Unwatch;
 
 test {
     std.testing.refAllDecls(@This());

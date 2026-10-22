@@ -1,6 +1,7 @@
 //! Calls of `redis.cmd.raw` and of the client that must not compile, one
 //! test each: reply types that no reply reads into, arguments that cannot
-//! be written, and values that are not commands. `zig build test-redis`
+//! be written, values that are not commands, and WATCH where it cannot
+//! run. `zig build test-redis`
 //! compiles every test on its own and checks its error message; the list
 //! of messages is in build.zig.
 
@@ -61,4 +62,14 @@ test "arguments that are a string" {
 test "run of a value that is not a command" {
     var client: redis.Client = undefined;
     _ = try client.run(std.testing.io, .of(.root), @as(u32, 7), .{});
+}
+
+test "watch on the client" {
+    var client: redis.Client = undefined;
+    try client.run(std.testing.io, .of(.root), cmd.watch(&.{"stock:coffee"}), .{});
+}
+
+test "watch in a pipeline of the client" {
+    var client: redis.Client = undefined;
+    _ = try client.pipeline(std.testing.io, .of(.root), .{ cmd.raw(?i64, .{ "GET", "k" }), cmd.watch(&.{"stock:coffee"}) }, .{});
 }
