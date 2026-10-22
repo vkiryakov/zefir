@@ -216,10 +216,8 @@ sequenceDiagram
 Add Zefir to your `build.zig.zon`; rpc ships since v0.6.0:
 
 ```sh
-zig fetch --save git+https://github.com/vkiryakov/zefir#dev
+zig fetch --save git+https://github.com/vkiryakov/zefir#v0.10.0
 ```
-
-This guide is on the `dev` branch, so the command fetches its latest commit; `--save` pins that commit. For the latest release, v0.9.0, fetch `#v0.9.0` instead.
 
 Then import the modules in `build.zig`. The examples also read their
 settings with confy, log with log, and take contexts from core. The package
