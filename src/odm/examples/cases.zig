@@ -9,7 +9,7 @@
 
 /// The programs that need no server: `zig build test-odm` runs each, and
 /// README.md shows its run as `$ zig build run`.
-pub const programs = [_][]const u8{};
+pub const programs = [_][]const u8{ "models", "queries" };
 
 /// The programs that need mongod: tests/odm runs them.
 pub const server_programs = [_][]const u8{};
