@@ -45,6 +45,11 @@
 //!   page of a scan, SCAN, HSCAN, SSCAN or ZSCAN: the type of its items,
 //!   and the command as `client.iterate` sends it again for each page,
 //!   with the cursor that the page before returned (`command.Paged`).
+//! - `pub fn writeSha(c: C, w: resp.Writer) resp.Writer.Error!void` — a
+//!   script of `redis.Script`: alone in `run` it goes out as `writeSha`
+//!   writes it, EVALSHA, and after NOSCRIPT, which says that the script
+//!   did not run, as `write` writes it, EVAL with its text, on the same
+//!   connection; in a pipeline and a transaction as `write` writes it.
 //!
 //! A pipeline and a transaction take their commands as a tuple of command
 //! values, each of its own type, or as many commands of one type: a slice
@@ -205,6 +210,10 @@ pub const Blocking = struct {
 
 pub fn isBlocking(comptime C: type) bool {
     return @hasDecl(C, "blocking");
+}
+
+pub fn isScript(comptime C: type) bool {
+    return @hasDecl(C, "writeSha");
 }
 
 /// The timeout of `block` in milliseconds, rounded down, 0 for forever:

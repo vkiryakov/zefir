@@ -227,12 +227,51 @@ pub fn beforeSend(c: *Client, io: Io, op: OperationContext, deadline: ?core.Dead
 /// `options.allocator`. A blocking command takes its timeout from the
 /// deadline of `op`, if any.
 pub fn one(c: *Client, conn: *Connection, io: Io, op: OperationContext, command: anytype, options: RunOptions, deadline: ?core.Deadline, d: ?*Diagnostics) Error!@TypeOf(command).Reply {
+    if (comptime contract.isScript(@TypeOf(command))) return script(c, conn, io, op, command, options, deadline, d);
     try beforeSend(c, io, op, deadline, d);
     const room = try roomOf(c, io, op, .{command}, .send, d);
     conn.begin(deadline);
     try writeCommand(conn, command, room, d);
     try conn.flush(d);
     return conn.receive(command, options.allocator, d);
+}
+
+/// A script of `redis.Script` alone on `conn`: EVALSHA, its SHA1 only.
+/// NOSCRIPT says that the server lacks the script and ran nothing, so its
+/// text, EVAL, follows on the same connection, as a new send: no retry.
+fn script(c: *Client, conn: *Connection, io: Io, op: OperationContext, command: anytype, options: RunOptions, deadline: ?core.Deadline, d: ?*Diagnostics) Error!@TypeOf(command).Reply {
+    try beforeSend(c, io, op, deadline, d);
+    const sha: Sha(@TypeOf(command)) = .{ .command = command };
+    conn.begin(deadline);
+    try conn.write(sha, d);
+    try conn.flush(d);
+    var own: Diagnostics = .{};
+    const why = d orelse &own;
+    if (conn.receive(sha, options.allocator, why)) |reply| return reply else |err| {
+        if (err != error.ServerError or !why.isCode("NOSCRIPT")) return err;
+    }
+    why.* = .{};
+    try beforeSend(c, io, op, deadline, d);
+    try conn.write(command, d);
+    try conn.flush(d);
+    return conn.receive(command, options.allocator, d);
+}
+
+/// The script `C` as EVALSHA, its reply as the script's.
+fn Sha(comptime C: type) type {
+    return struct {
+        command: C,
+
+        pub const Reply = C.Reply;
+
+        pub fn write(s: @This(), w: resp.Writer) resp.Writer.Error!void {
+            return s.command.writeSha(w);
+        }
+
+        pub fn read(s: @This(), r: *resp.Reader, arena: ?Allocator, d: ?*Diagnostics) resp.DecodeError!C.Reply {
+            return s.command.read(r, arena, d);
+        }
+    };
 }
 
 /// Writes `command` into the buffer of `conn`: a blocking one with its

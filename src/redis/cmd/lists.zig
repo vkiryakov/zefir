@@ -35,8 +35,8 @@ const Move = struct { source: []const u8, destination: []const u8, from: End, to
 /// LPUSH `key` `values`: the values go in at the left end, one after
 /// another, so the last ends up first; the length of the list after it.
 /// One value at least.
-pub fn lpush(key: []const u8, values: anytype) Lpush(command.Values(@TypeOf(values), "redis.cmd.lpush")) {
-    return .{ .args = .{ .key = key, .values = command.values(values, "redis.cmd.lpush") } };
+pub fn lpush(key: []const u8, values: anytype) Lpush(command.Values(@TypeOf(values), "redis.cmd.lpush", "values")) {
+    return .{ .args = .{ .key = key, .values = command.values(values, "redis.cmd.lpush", "values") } };
 }
 
 pub fn Lpush(comptime V: type) type {
@@ -45,8 +45,8 @@ pub fn Lpush(comptime V: type) type {
 
 /// RPUSH `key` `values`: the values go in at the right end, in their
 /// order; the length of the list after it. One value at least.
-pub fn rpush(key: []const u8, values: anytype) Rpush(command.Values(@TypeOf(values), "redis.cmd.rpush")) {
-    return .{ .args = .{ .key = key, .values = command.values(values, "redis.cmd.rpush") } };
+pub fn rpush(key: []const u8, values: anytype) Rpush(command.Values(@TypeOf(values), "redis.cmd.rpush", "values")) {
+    return .{ .args = .{ .key = key, .values = command.values(values, "redis.cmd.rpush", "values") } };
 }
 
 pub fn Rpush(comptime V: type) type {

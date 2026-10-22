@@ -12,6 +12,7 @@
 //!   `client.acquire` until `release`: for WATCH and transactions.
 //! - `redis.Iterator(T)` — the items of a scan one at a time, from
 //!   `client.iterate`, a page per exchange.
+//! - `redis.Script` — a Lua script and its SHA1, for `cmd.evalScript`.
 //! - `redis.OperationContext`, `redis.Tracing`, `redis.RunOptions`,
 //!   `redis.IterateOptions` — what a call takes besides its command: the
 //!   caller's context, with its deadline and token, and the memory of the
@@ -42,6 +43,7 @@ const resp = @import("resp.zig");
 pub const Client = @import("Client.zig");
 pub const Conn = @import("Conn.zig");
 pub const Iterator = @import("Iterator.zig").Iterator;
+pub const Script = @import("Script.zig");
 pub const cmd = @import("cmd.zig");
 pub const testing = @import("testing.zig");
 
@@ -120,6 +122,7 @@ test {
     _ = @import("cmd/lists_tests.zig");
     _ = @import("cmd/sets_tests.zig");
     _ = @import("cmd/zsets_tests.zig");
+    _ = @import("cmd/scripting_tests.zig");
     _ = @import("cmd/coverage_tests.zig");
 }
 

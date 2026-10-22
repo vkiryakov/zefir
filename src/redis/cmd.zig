@@ -28,6 +28,8 @@
 //!   `zrem`, `zcard`, `zcount`, `zrange`, `zrangeByScore`, `zpopmin`,
 //!   `zpopmax`, `zremrangebyscore`, `zremrangebyrank`, `zscan` (one page).
 //!   A range read into `redis.Scored(M)` asks for WITHSCORES.
+//! - Scripts: `eval` of a text, and `evalScript` of a `redis.Script`,
+//!   which `run` sends by its SHA1, and by its text after NOSCRIPT.
 //! - `raw(T, args)` — a command that the catalog lacks: `args` is a tuple
 //!   of strings, numbers, bools and enums, the name of the command first,
 //!   or a slice of strings, and the reply reads into `T` by the rules of
@@ -56,6 +58,7 @@ const hashes = @import("cmd/hashes.zig");
 const lists = @import("cmd/lists.zig");
 const sets = @import("cmd/sets.zig");
 const zsets = @import("cmd/zsets.zig");
+const scripting = @import("cmd/scripting.zig");
 
 pub const get = strings.get;
 pub const Get = strings.Get;
@@ -218,6 +221,11 @@ pub const zremrangebyrank = zsets.zremrangebyrank;
 pub const Zremrangebyrank = zsets.Zremrangebyrank;
 pub const zscan = zsets.zscan;
 pub const Zscan = zsets.Zscan;
+
+pub const eval = scripting.eval;
+pub const Eval = scripting.Eval;
+pub const evalScript = scripting.evalScript;
+pub const EvalScript = scripting.EvalScript;
 
 pub const raw = raw_command.raw;
 pub const Raw = raw_command.Raw;

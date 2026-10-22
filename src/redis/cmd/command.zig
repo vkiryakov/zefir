@@ -27,8 +27,9 @@
 //!   it: a string as `[]const u8`, a number literal as `i64` or `f64`, an
 //!   enum literal as the name of its tag. `checkArg` stops the build for
 //!   a type that no argument is.
-//! - `Values(V, call)` and `values(v, call)` — the values of LPUSH and
-//!   RPUSH: a slice of strings, or a tuple of values.
+//! - `Values(V, call, what)` and `values(v, call, what)` — the values of
+//!   LPUSH and RPUSH and the arguments of scripts: a slice of strings, or
+//!   a tuple of values.
 //! - `millis` and `writeMillis` — a duration as milliseconds.
 //! - `writeBound` — a bound of a range of scores.
 
@@ -384,27 +385,28 @@ pub fn checkArg(comptime V: type, comptime call: []const u8, comptime what: []co
     comptime args.checkType(V, call, what, false);
 }
 
-/// The type in which LPUSH and RPUSH keep their values, `V` the type the
-/// caller gave: a list of strings, or a pointer to a tuple of strings, as
-/// `[]const []const u8`; a tuple of values, or a pointer to one, as the
-/// tuple. Anything else stops the build.
-pub fn Values(comptime V: type, comptime call: []const u8) type {
+/// The type in which LPUSH and RPUSH keep their values, and a script its
+/// arguments, `V` the type the caller gave: a list of strings, or a
+/// pointer to a tuple of strings, as `[]const []const u8`; a tuple of
+/// values, or a pointer to one, as the tuple. Anything else stops the
+/// build; `what` names them in the message, "values" or "args".
+pub fn Values(comptime V: type, comptime call: []const u8, comptime what: []const u8) type {
     comptime {
         if (args.isStringList(V)) return []const []const u8;
-        if (isTuple(V)) return checkedValues(V, call);
+        if (isTuple(V)) return checkedValues(V, call, what);
         switch (@typeInfo(V)) {
             .pointer => |info| if (info.size == .one and isTuple(info.child)) {
-                return if (allStrings(info.child)) []const []const u8 else checkedValues(info.child, call);
+                return if (allStrings(info.child)) []const []const u8 else checkedValues(info.child, call, what);
             },
             else => {},
         }
-        @compileError(call ++ ": the values are a slice of strings, such as &.{ \"a\", \"b\" }, or a tuple of values, such as .{ \"a\", 42 }; got " ++ @typeName(V));
+        @compileError(call ++ ": the " ++ what ++ " are a slice of strings, such as &.{ \"a\", \"b\" }, or a tuple of values, such as .{ \"a\", 42 }; got " ++ @typeName(V));
     }
 }
 
-/// `v` as LPUSH and RPUSH keep it: a tuple behind a pointer is copied, so
-/// that the command does not hold the pointer.
-pub fn values(v: anytype, comptime call: []const u8) Values(@TypeOf(v), call) {
+/// `v` as LPUSH and RPUSH, and a script, keep it: a tuple behind a pointer
+/// is copied, so that the command does not hold the pointer.
+pub fn values(v: anytype, comptime call: []const u8, comptime what: []const u8) Values(@TypeOf(v), call, what) {
     const V = @TypeOf(v);
     const copied = comptime switch (@typeInfo(V)) {
         .pointer => |info| info.size == .one and isTuple(info.child) and !allStrings(info.child),
@@ -413,9 +415,9 @@ pub fn values(v: anytype, comptime call: []const u8) Values(@TypeOf(v), call) {
     return if (copied) v.* else v;
 }
 
-fn checkedValues(comptime Tuple: type, comptime call: []const u8) type {
+fn checkedValues(comptime Tuple: type, comptime call: []const u8, comptime what: []const u8) type {
     for (@typeInfo(Tuple).@"struct".field_types, 0..) |F, i| {
-        args.checkType(F, call, std.fmt.comptimePrint("values[{d}]", .{i}), true);
+        args.checkType(F, call, std.fmt.comptimePrint("{s}[{d}]", .{ what, i }), true);
     }
     return Tuple;
 }
