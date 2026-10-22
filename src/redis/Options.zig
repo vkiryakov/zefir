@@ -40,6 +40,9 @@ timeout: ?Duration = .fromSeconds(5),
 /// How long DNS, TCP and the handshake of a new connection may take; the
 /// deadline of the call may cut it shorter.
 connect_timeout: Duration = .fromSeconds(5),
+/// The deadline of `start`, for zefir.App: the first connection, its
+/// handshake included.
+start_timeout: Duration = .fromSeconds(10),
 /// How long `close` lets the calls in flight finish before it cuts them.
 close_timeout: Duration = .fromSeconds(5),
 /// The largest reply, in bytes on the wire; a larger one is

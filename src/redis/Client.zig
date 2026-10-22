@@ -79,6 +79,11 @@
 //! 9. Pushes between replies and attributes are skipped; a push is logged
 //!    at debug.
 //!
+//! Under zefir.App the client is a bean of its own: `start` is `connect`
+//! under a deadline of `Options.start_timeout`, which logs why it failed,
+//! and `shutdown` is `close` by the deadline of App's stop. `connect` and
+//! `close` stay for direct use.
+//!
 //! After `connect` the client must stay where it is, and every call comes
 //! on the `io` of `init`: in safe builds, a call on a moved copy of the
 //! client or on another `std.Io` panics.
@@ -103,6 +108,7 @@ const Pool = @import("engine/Pool.zig");
 const connect_ = @import("engine/connect.zig");
 const subscription = @import("engine/subscription.zig");
 const time = @import("engine/time.zig");
+const log = std.log.scoped(.redis);
 const Client = @This();
 
 gpa: Allocator,
@@ -207,6 +213,40 @@ pub fn close(c: *Client, io: Io) void {
     c.subscribers.closeAll(io);
     c.pool.close(io, c.options.close_timeout);
 }
+
+/// For zefir.App, which starts the client before the beans that use it:
+/// `connect` under a deadline `Options.start_timeout` away. Why it failed
+/// goes to the log, as a warning: under App no caller sees the
+/// `Diagnostics`. A program that wants them calls `connect`. Once the
+/// client is connected, it does nothing.
+pub fn start(c: *Client, io: Io) Error!void {
+    var diagnostics: Diagnostics = .{};
+    const ctx = core.Context.root.withDeadline(.after(time.now(io), c.options.start_timeout));
+    c.connect(io, ctx, &diagnostics) catch |err| {
+        log.warn("start failed: error.{t}: {s}", .{ err, diagnostics.message() });
+        return err;
+    };
+}
+
+/// For zefir.App, which stops the client after the beans that use it:
+/// `close` by `deadline`. The subscribers end first; the calls in flight
+/// get `close_timeout` to end, cut so that the wait ends 250 ms before
+/// `deadline` at the latest, then their exchanges are cut, and the client
+/// is closed when it returns. It has no error to return: nothing of the
+/// client runs after it. As a second `close`, it returns once the first is
+/// done.
+pub fn shutdown(c: *Client, io: Io, deadline: Io.Clock.Timestamp) !void {
+    calls.checkUse(c, io);
+    const due: core.Deadline = .at(deadline.toClock(io, .awake).raw.subDuration(shutdown_reserve));
+    const left = due.remaining(time.now(io));
+    const budget = if (left.nanoseconds < c.options.close_timeout.nanoseconds) left else c.options.close_timeout;
+    c.subscribers.closeAll(io);
+    c.pool.close(io, budget);
+}
+
+/// How much earlier than its deadline `shutdown` ends its wait, so that the
+/// caller, which waits for it until that deadline, sees it return in time.
+const shutdown_reserve: Io.Duration = .fromMilliseconds(250);
 
 /// A snapshot of the connections and of the calls waiting for them.
 pub fn stats(c: *Client) Stats {

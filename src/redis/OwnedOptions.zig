@@ -18,6 +18,7 @@ client_name: ?[]u8,
 max_connections: u32,
 timeout: ?Duration,
 connect_timeout: Duration,
+start_timeout: Duration,
 close_timeout: Duration,
 max_reply_bytes: usize,
 
@@ -41,6 +42,7 @@ pub fn init(gpa: Allocator, options: Options) Error!OwnedOptions {
     if (options.max_connections == 0) return fail(d, "max_connections is 0: the pool needs at least one connection", .{});
     if (options.timeout) |timeout| try checkDuration(timeout, "timeout", ", or null for calls without a deadline of their own", d);
     try checkDuration(options.connect_timeout, "connect_timeout", "", d);
+    try checkDuration(options.start_timeout, "start_timeout", "", d);
     try checkDuration(options.close_timeout, "close_timeout", "", d);
     if (options.max_reply_bytes < min_reply_bytes) return fail(d, "max_reply_bytes is {d}: it is 65536 (64 KiB) or more", .{options.max_reply_bytes});
     if (options.client_name) |name| try checkClientName(name, d);
@@ -69,6 +71,7 @@ pub fn init(gpa: Allocator, options: Options) Error!OwnedOptions {
         .max_connections = options.max_connections,
         .timeout = options.timeout,
         .connect_timeout = options.connect_timeout,
+        .start_timeout = options.start_timeout,
         .close_timeout = options.close_timeout,
         .max_reply_bytes = options.max_reply_bytes,
     };
