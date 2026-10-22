@@ -834,3 +834,43 @@ test "compile error: set_on_insert of an optional field by an optional value" {
     _ = &maybe;
     _ = try update.encode(Account, std.testing.allocator, .{ .set_on_insert = .{ .nickname = maybe } }, .upsert);
 }
+
+// The rules of upsertOne, through update.checkUpsert, which upsertOne
+// calls with the types of its literals.
+
+const some_time: bson.DateTime = .{ .milliseconds = 0 };
+
+test "compile error: an upsert without required fields" {
+    const email: []const u8 = "ann@example.com";
+    comptime update.checkUpsert(Account, @TypeOf(.{ .email = email }), @TypeOf(.{
+        .set = .{ .address = .{ .city = "Lyon" } },
+        .set_on_insert = .{ .created_at = some_time },
+        .inc = .{ .visits = 1 },
+    }));
+}
+
+test "compile error: an upsert of Slug without its id" {
+    comptime update.checkUpsert(Slug, @TypeOf(.{}), @TypeOf(.{ .set = .{ .title = "Ann" } }));
+}
+
+test "compile error: null in the filter of an upsert" {
+    comptime update.checkUpsert(Account, @TypeOf(.{ .nickname = null }), @TypeOf(.{ .set = .{ .name = "Ann" } }));
+}
+
+test "compile error: an optional value in the filter of an upsert" {
+    var maybe: ?[]const u8 = "ann";
+    _ = &maybe;
+    comptime update.checkUpsert(Account, @TypeOf(.{ .nickname = maybe }), @TypeOf(.{ .set = .{ .name = "Ann" } }));
+}
+
+test "compile error: an item of a list in the filter of an upsert" {
+    comptime update.checkUpsert(Account, @TypeOf(.{ .tags = "admin" }), @TypeOf(.{ .set = .{ .name = "Ann" } }));
+}
+
+test "compile error: a path through a list in the filter of an upsert" {
+    comptime update.checkUpsert(Account, @TypeOf(.{ .items = .{ .sku = "x" } }), @TypeOf(.{ .set = .{ .name = "Ann" } }));
+}
+
+test "compile error: or in the filter of an upsert" {
+    comptime update.checkUpsert(Account, @TypeOf(.{ .@"or" = .{ .{ .email = "a" }, .{ .email = "b" } } }), @TypeOf(.{ .set = .{ .name = "Ann" } }));
+}

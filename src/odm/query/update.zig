@@ -458,3 +458,180 @@ fn get(value: anytype, comptime names: []const []const u8) Get(@TypeOf(value), n
 fn Get(comptime V: type, comptime names: []const []const u8) type {
     return if (names.len == 0) V else Get(@FieldType(V, names[0]), names[1..]);
 }
+
+/// Stops the build unless an upsertOne of `T` with a filter of type `F` and
+/// an update of type `U` inserts, when no document matches, one that the
+/// model reads (design §5.10). The server builds that document from the
+/// equalities of the filter and the operators of the update, so:
+///
+/// - both are literals, and the values in them may be known at run time;
+/// - every required field of the model (not optional, without a default)
+///   comes from an equality of the filter (`.f = value`,
+///   `.f = .{ .eq = value }`), `set`, `set_on_insert`, or an operator that
+///   makes the field: `inc`, `mul`, `min`, `max`, `push`, `add_to_set`;
+///   each struct that the insert builds from paths gets its required
+///   fields so too;
+/// - an id that the application gives comes from an equality of the filter
+///   or `set_on_insert`; the server makes an ObjectId;
+/// - the equalities of the filter are values that odm would write: not
+///   null, not an optional, not an item where a list goes; and no path of
+///   the filter goes through a list, and no logical operator is in it.
+///
+/// The rules of zefir-validator do not run for upsertOne.
+pub fn checkUpsert(comptime T: type, comptime F: type, comptime U: type) void {
+    comptime {
+        @setEvalBranchQuota(schema.eval_quota);
+        schema.check(T);
+        filter.requireFilter(T, F);
+        const given = filterGives(T, F) ++ updateGives(analyze(T, U, .upsert));
+        requireId(T, given);
+        requireFields(T, given);
+    }
+}
+
+/// The id that the document of an upsert of `T` gets from an equality of
+/// `conditions` or from `set_on_insert` of `changes`, the literals that
+/// `checkUpsert` took; null when they give none, and the server makes an
+/// ObjectId. The id is the caller's value: a string id borrows its bytes.
+pub fn upsertId(comptime T: type, conditions: anytype, changes: anytype) ?schema.Id(T) {
+    const id = comptime schema.idName(T);
+    const F = @TypeOf(conditions);
+    if (comptime @hasField(F, id)) {
+        const V = @FieldType(F, id);
+        const condition = @field(conditions, id);
+        if (comptime !filter.isConditions(values.top(T, id), V)) return condition;
+        if (comptime @hasField(V, "eq")) return condition.eq;
+    }
+    const U = @TypeOf(changes);
+    if (comptime @hasField(U, "set_on_insert") and @hasField(@FieldType(U, "set_on_insert"), id)) return @field(changes.set_on_insert, id);
+    return null;
+}
+
+/// The start of the messages about the filter of an upsert.
+fn upsertOf(comptime at: At) []const u8 {
+    return "odm: upsertOne of " ++ @typeName(at.T) ++ ": ";
+}
+
+/// The paths that the equalities of the filter literal `F` copy into the
+/// document of an upsert, after the rules of upsertOne on them.
+fn filterGives(comptime T: type, comptime F: type) []const []const u8 {
+    var out: []const []const u8 = &.{};
+    for (@typeInfo(F).@"struct".field_names) |name| {
+        if (filter.isLogical(name)) {
+            @compileError("odm: upsertOne of " ++ @typeName(T) ++ ": " ++ name ++ " in the filter: the server takes equalities from it into the document it may insert, and odm checks only the fields of the filter itself; put the conditions in the fields of the filter");
+        }
+        out = out ++ conditionGives(values.top(T, name), F, name);
+    }
+    return out;
+}
+
+/// The paths that the condition `@field(L, name)` on the field at `at`
+/// copies into the document of an upsert: its own for an equality, those
+/// of the fields of a literal of paths, none for other operators.
+fn conditionGives(comptime at: At, comptime L: type, comptime name: []const u8) []const []const u8 {
+    const V = @FieldType(L, name);
+    if (!filter.isConditions(at, V)) {
+        requireCopy(at, L, name);
+        return &.{at.path};
+    }
+    switch (filter.classify(at, V)) {
+        .paths => {
+            const keys = @typeInfo(V).@"struct".field_names;
+            if (values.ItemOf(at) != null) {
+                @compileError(upsertOf(at) ++ "the filter's path " ++ at.path ++ "." ++ keys[0] ++ " goes through the list " ++ subject(at) ++ ", and the document it may insert would get a document there, not a list; use .elem_match");
+            }
+            var out: []const []const u8 = &.{};
+            for (keys) |key| out = out ++ conditionGives(values.field(at, key), V, key);
+            return out;
+        },
+        .operators => {
+            if (!@hasField(V, "eq")) return &.{};
+            requireCopy(at, V, "eq");
+            return &.{at.path};
+        },
+    }
+}
+
+/// Stops the build unless the equality `@field(L, name)` on the field at
+/// `at` is a value that odm would write, as the server copies it into the
+/// document of an upsert: not null, not an optional, and not an item of a
+/// list where the list goes.
+fn requireCopy(comptime at: At, comptime L: type, comptime name: []const u8) void {
+    const V = @FieldType(L, name);
+    const of = upsertOf(at) ++ "the filter's ";
+    if (V == @TypeOf(null)) {
+        @compileError(of ++ subject(at) ++ " = null would go into the document it may insert, and odm does not store null; match a missing field with .{ " ++ fieldLiteral(at.path, ".{ .exists = false }") ++ " }");
+    }
+    if (values.ItemOf(at)) |Item| {
+        const item = if (values.isComptime(L, name)) values.comptimeFits(V, Item) else values.fits(V, Item);
+        if (item or !values.isList(V)) {
+            @compileError(of ++ subject(at) ++ " = item would put the item where the list goes in the document it may insert; match the whole list with .eq, or the item with .elem_match");
+        }
+    }
+    if (@typeInfo(V) == .optional) {
+        @compileError(of ++ "equality on " ++ subject(at) ++ " needs a " ++ @typeName(Unwrap(at.F)) ++ "; got " ++ @typeName(V) ++ ": it goes into the document the upsert may insert, and odm does not store null");
+    }
+}
+
+/// The paths that the operators of an upsert give its document: those of
+/// all but `unset`, `pull` and `pop`.
+fn updateGives(comptime changes: []const Change) []const []const u8 {
+    var out: []const []const u8 = &.{};
+    for (changes) |c| {
+        if (creates(c.op)) out = out ++ &[_][]const u8{c.at.path};
+    }
+    return out;
+}
+
+/// Stops the build when the id of `T` is one that the application gives,
+/// and `given` lacks it.
+fn requireId(comptime T: type, comptime given: []const []const u8) void {
+    if (schema.idKind(T) != .given) return;
+    const id = schema.idName(T);
+    if (holds(given, id) or below(given, id)) return;
+    @compileError("odm: upsertOne of " ++ @typeName(T) ++ " may insert a document without its id '" ++ id ++ "', which is " ++ @typeName(@FieldType(T, id)) ++ ": give it by equality in the filter or in set_on_insert");
+}
+
+/// Stops the build when a required field of `T`, or of a struct built from
+/// paths, is not among the paths that the upsert gives, naming them all.
+fn requireFields(comptime T: type, comptime given: []const []const u8) void {
+    const lacking = missing(T, "", given, schema.idName(T));
+    if (lacking.len == 0) return;
+    var list: []const u8 = "";
+    for (lacking, 0..) |path, i| list = list ++ (if (i == 0) "'" else ", '") ++ path ++ "'";
+    @compileError("odm: upsertOne of " ++ @typeName(T) ++ " may insert a document without its required fields " ++ list ++ ": give each by equality in the filter, in set, in set_on_insert, or with an operator that creates it, such as inc or push");
+}
+
+/// The required fields of the struct `S`, whose fields have the paths
+/// `prefix` and their names, that `given` lacks: a field neither given,
+/// optional nor with a default, and those of each struct that the
+/// insert builds from paths. `skip` is a field that is not looked at.
+fn missing(comptime S: type, comptime prefix: []const u8, comptime given: []const []const u8, comptime skip: []const u8) []const []const u8 {
+    const info = @typeInfo(S).@"struct";
+    var out: []const []const u8 = &.{};
+    for (info.field_names, info.field_types, info.field_attrs) |name, F, attrs| {
+        const path = prefix ++ name;
+        if (std.mem.eql(u8, name, skip) or holds(given, path)) continue;
+        if (below(given, path)) {
+            out = out ++ missing(Unwrap(F), path ++ ".", given, "");
+        } else if (@typeInfo(F) != .optional and attrs.default_value_ptr == null) {
+            out = out ++ &[_][]const u8{path};
+        }
+    }
+    return out;
+}
+
+fn holds(comptime paths: []const []const u8, comptime path: []const u8) bool {
+    for (paths) |p| {
+        if (std.mem.eql(u8, p, path)) return true;
+    }
+    return false;
+}
+
+/// Whether one of `paths` is inside the field at `path`.
+fn below(comptime paths: []const []const u8, comptime path: []const u8) bool {
+    for (paths) |p| {
+        if (within(path, p)) return true;
+    }
+    return false;
+}

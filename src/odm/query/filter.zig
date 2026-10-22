@@ -95,7 +95,8 @@ fn isFilter(comptime T: type, comptime L: type) bool {
     };
 }
 
-fn requireFilter(comptime T: type, comptime L: type) void {
+/// Stops the build unless `L` is the type of a filter literal of `T`.
+pub fn requireFilter(comptime T: type, comptime L: type) void {
     if (!isFilter(T, L)) @compileError("odm: a filter of " ++ @typeName(T) ++ " is a literal of its fields, or .{} for every document; got " ++ @typeName(L));
 }
 
@@ -112,7 +113,8 @@ fn writeFilter(comptime T: type, b: *Builder, filter: anytype) WriteError!void {
     }
 }
 
-fn isLogical(comptime name: []const u8) bool {
+/// Whether `name` is a logical operator of a filter: and, or, nor.
+pub fn isLogical(comptime name: []const u8) bool {
     return std.mem.eql(u8, name, "and") or std.mem.eql(u8, name, "or") or std.mem.eql(u8, name, "nor");
 }
 
@@ -149,9 +151,7 @@ fn requireFilters(comptime T: type, comptime op: []const u8, comptime V: type) v
 /// operators of a literal of operators.
 fn writeCondition(b: *Builder, comptime at: At, comptime L: type, comptime name: []const u8, parent: L) WriteError!void {
     const V = @FieldType(L, name);
-    // A value of the items of a list is an item to match, not a literal.
-    const literal = comptime (values.isLiteral(V, Unwrap(at.F)) and if (ItemOf(at)) |Item| values.isLiteral(V, Unwrap(Item)) else true);
-    if (literal) {
+    if (comptime isConditions(at, V)) {
         return switch (comptime classify(at, V)) {
             .paths => writePaths(b, at, V, @field(parent, name)),
             .operators => writeOperatorsAt(b, at, V, @field(parent, name)),
@@ -160,8 +160,15 @@ fn writeCondition(b: *Builder, comptime at: At, comptime L: type, comptime name:
     try writeEqualityAt(b, at, L, name, parent, true);
 }
 
+/// Whether a value of `V` on the field at `at` is a literal of conditions,
+/// which `classify` tells apart, and not a value that the field equals. A
+/// value of the items of a list is an item to match, not a literal.
+pub fn isConditions(comptime at: At, comptime V: type) bool {
+    return values.isLiteral(V, Unwrap(at.F)) and if (ItemOf(at)) |Item| values.isLiteral(V, Unwrap(Item)) else true;
+}
+
 /// What a literal on the field at `at` is (design §5.9).
-const Kind = enum {
+pub const Kind = enum {
     /// All its keys are fields of the struct of the field, or of its items:
     /// conditions on their paths.
     paths,
@@ -169,7 +176,10 @@ const Kind = enum {
     operators,
 };
 
-fn classify(comptime at: At, comptime V: type) Kind {
+/// What the literal of conditions `V` on the field at `at` is. Stops the
+/// build at an empty literal, at a key that is neither a field nor an
+/// operator, and at a literal of both.
+pub fn classify(comptime at: At, comptime V: type) Kind {
     const keys = @typeInfo(V).@"struct".field_names;
     if (keys.len == 0) @compileError("odm: " ++ subject(at) ++ ": an empty literal matches nothing here; drop it");
     const S = Fields(at.F);
