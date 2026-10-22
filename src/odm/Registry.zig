@@ -267,14 +267,13 @@ pub fn deinit(r: *Registry, io: Io) void {
 /// now on `registerConnection`, `connect`, `replaceConnection`,
 /// `removeConnection`, `ping`, `connectionStats`, `provisionTenant`,
 /// `removeTenant`, `tenant` and the calls waiting for their turn get
-/// `ShuttingDown`. Generations that never connected close
-/// at once, and a connect in one of them gets `ShuttingDown`; the others
-/// drain one after the other, all until the deadline, and close. When
-/// leases are left at the deadline, their generations are closed by
-/// force, their holders get `Closed`, the log a warning, and the result is
-/// `error.ShutdownTimeout`: tasks that held them are still alive. A second
-/// call waits for the first and returns its result. The task's
-/// cancelation waits until it returns.
+/// `ShuttingDown`. Generations that never connected close at once, and a
+/// connect in one of them gets `ShuttingDown`; the others drain one after
+/// the other, all until the deadline, and close. When leases are left at
+/// the deadline, their generations are closed by force, their holders get
+/// `Closed`, the log a warning, and the result is `error.ShutdownTimeout`:
+/// tasks that held them are still alive. A second call waits for the first
+/// and returns its result. The task's cancelation waits until it returns.
 pub fn shutdown(r: *Registry, io: Io, deadline: Io.Clock.Timestamp) errors.ShutdownError!void {
     r.checkUse(io);
     const protection = io.swapCancelProtection(.blocked);

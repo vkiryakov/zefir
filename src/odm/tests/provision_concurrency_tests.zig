@@ -202,7 +202,7 @@ const Reader = struct {
     registry: *Registry,
     stop: std.atomic.Value(bool) = .init(false),
     /// The version of the latest session, 0 before the first one.
-    seen: u64 = 0,
+    seen: std.atomic.Value(u64) = .init(0),
     sessions: usize = 0,
     problems: usize = 0,
 
@@ -212,17 +212,22 @@ const Reader = struct {
                 var session = got;
                 defer session.deinit(io);
                 const version = std.fmt.parseInt(u64, session.database()["acme_v".len..], 10) catch 0;
-                if (version < reader.seen or version == 0) reader.problems += 1;
-                reader.seen = version;
+                if (version < reader.seen.load(.monotonic) or version == 0) reader.problems += 1;
+                reader.seen.store(version, .release);
                 reader.sessions += 1;
             } else |err| {
                 // Only before the first provisioning: no binding yet.
-                if (err != error.TenantNotFound or reader.seen != 0) reader.problems += 1;
+                if (err != error.TenantNotFound or reader.seen.load(.monotonic) != 0) reader.problems += 1;
             }
             io.sleep(.fromMicroseconds(50), .awake) catch return;
         }
     }
 };
+
+fn sawLast(reader: *Reader, io: Io) bool {
+    _ = io;
+    return reader.seen.load(.acquire) == 20;
+}
 
 test "eight tasks provision versions 1 to 20 of one tenant" {
     const io = testing.io;
@@ -252,8 +257,8 @@ test "eight tasks provision versions 1 to 20 of one tenant" {
             for (0..Storm.tasks) |k| try writers.concurrent(io, Storm.provision, .{ &storm, io, k });
             try writers.await(io);
         }
-        // A few more sessions of the end state.
-        try io.sleep(.fromMilliseconds(5), .awake);
+        // Until a session of the end state came.
+        try eventually(io, &reader, sawLast);
         reader.stop.store(true, .release);
         try readers.await(io);
     }
@@ -262,7 +267,6 @@ test "eight tasks provision versions 1 to 20 of one tenant" {
     try testing.expectEqual(@as(usize, 20), storm.applied.load(.monotonic) + storm.stale.load(.monotonic));
     try testing.expectEqual(@as(usize, 0), reader.problems);
     try testing.expect(reader.sessions > 0);
-    try testing.expectEqual(@as(u64, 20), reader.seen);
     // Version 20 is the end state: its database on its connection.
     var session = try registry.tenant(io, "acme");
     defer session.deinit(io);
