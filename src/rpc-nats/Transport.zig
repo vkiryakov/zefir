@@ -3,10 +3,15 @@
 //! `serverTransport()`, its clients get `clientTransport()`.
 //!
 //! ```zig
-//! var bus: rpc_nats.Transport = try .init(gpa, adapter.conn(), .{});
+//! var bus: rpc_nats.Transport = try .init(gpa, &nc, .{}); // nc: a nats.Client
 //! defer bus.deinit(io); // after the server's deinit and the last call
 //! var server: rpc.Server = try .init(gpa, .{ .handlers = .{&users} }, .{ .transport = bus.serverTransport() });
 //! ```
+//!
+//! `init` takes a `nats.Client` and makes the adapter of zefir-nats,
+//! `rpc_nats.ZefirNats`, on the heap; `initConn` takes the `rpc_nats.Conn`
+//! of any adapter: one of zefir-nats with a `pending` of its own, one of
+//! another NATS library, or `rpc_nats.testing.FakeConn`.
 //!
 //! The server subscribes to the subject of every route in the queue group
 //! `queue_group`, so the replicas of a service share its requests, and
@@ -73,11 +78,15 @@
 //! allocated and freed from the tasks of the engine. `serverTransport()`
 //! and `clientTransport()` point at the transport, and so do its tasks:
 //! from the first of them to `deinit` it stays where it is, never copied
-//! or moved.
+//! or moved. Before that it may move, as zefir.App moves the value a
+//! factory returns into its memory: nothing points at it yet, and the
+//! adapter of `init` lives on the heap.
 
 const std = @import("std");
 const rpc = @import("rpc");
+const nats = @import("nats");
 const Conn = @import("Conn.zig");
+const ZefirNats = @import("ZefirNats.zig");
 const subject = @import("subject.zig");
 const shared = @import("shared.zig");
 const server_side = @import("server.zig");
@@ -87,6 +96,8 @@ const Transport = @This();
 
 gpa: std.mem.Allocator,
 conn: Conn,
+/// The adapter `init` made for `conn`, on the heap; null after `initConn`.
+adapter: ?*ZefirNats = null,
 options: Options,
 /// The copies of the strings of `options`: `options` points here.
 strings: []u8,
@@ -104,6 +115,10 @@ counts: std.EnumArray(shared.Counter, std.atomic.Value(u64)) = .initFill(.init(0
 confirming: std.Io.Mutex = .init,
 server: server_side.State = .{},
 client: client_side.State = .{},
+
+/// zefir.App builds and frees this transport, but its start, drain and close
+/// belong to the rpc server: App does not drive them.
+pub const app_lifecycle = false;
 
 pub const Options = struct {
     /// The first tokens of every subject, such as "shop": then a method
@@ -172,9 +187,31 @@ pub const Counters = struct {
     slow_consumer_errors: u64,
 };
 
-/// A transport on `conn`, which must outlive it. Copies the strings of
-/// `options` and takes the memory for `max_pending` waiting calls.
-pub fn init(gpa: std.mem.Allocator, conn: Conn, options: Options) InitError!Transport {
+/// A transport on `client`, which must outlive it, through an adapter
+/// `rpc_nats.ZefirNats` of its own on the heap, with the default `pending`.
+/// Copies the strings of `options` and takes the memory for `max_pending`
+/// waiting calls. In a factory of zefir.App, the transport is a bean on
+/// the bean of the client:
+///
+/// ```zig
+/// pub fn bus(gpa: std.mem.Allocator, client: *nats.Client) !rpc_nats.Transport {
+///     return .init(gpa, client, .{});
+/// }
+/// ```
+pub fn init(gpa: std.mem.Allocator, client: *nats.Client, options: Options) InitError!Transport {
+    const adapter = try gpa.create(ZefirNats);
+    errdefer gpa.destroy(adapter);
+    adapter.* = .{ .client = client };
+    var t = try initConn(gpa, adapter.conn(), options);
+    t.adapter = adapter;
+    return t;
+}
+
+/// A transport on `conn`, which must outlive it: an adapter of zefir-nats
+/// with a `pending` of its own, an adapter of another NATS library, or
+/// `rpc_nats.testing.FakeConn`. Copies the strings of `options` and takes
+/// the memory for `max_pending` waiting calls.
+pub fn initConn(gpa: std.mem.Allocator, conn: Conn, options: Options) InitError!Transport {
     try check(options);
     var strings_len: usize = options.queue_group.len + options.inbox_prefix.len;
     if (options.subject_prefix) |prefix| strings_len += prefix.len;
@@ -236,6 +273,7 @@ pub fn deinit(t: *Transport, io: std.Io) void {
     t.pending.deinit();
     t.gpa.free(t.reply_prefixes);
     t.gpa.free(t.strings);
+    if (t.adapter) |adapter| t.gpa.destroy(adapter);
     t.* = undefined;
 }
 
@@ -357,7 +395,7 @@ test "init copies the options and refuses wrong ones" {
     var prefix = "shop".*;
     var reply = "_INBOX_shop".*;
     const replies = [_][]const u8{&reply};
-    var bus: Transport = try .init(testing.allocator, .init(&unused), .{ .subject_prefix = &prefix, .reply_prefixes = &replies, .inbox_prefix = "_INBOX_shop" });
+    var bus: Transport = try .initConn(testing.allocator, .init(&unused), .{ .subject_prefix = &prefix, .reply_prefixes = &replies, .inbox_prefix = "_INBOX_shop" });
     defer bus.deinit(testing.io);
     prefix = "XXXX".*;
     reply = "XXXXXXXXXXX".*;
@@ -382,11 +420,11 @@ test "init copies the options and refuses wrong ones" {
         .{ .publish_timeout = .fromNanoseconds(-1) },
         .{ .max_pending = 0 },
     };
-    for (wrong) |options| try testing.expectError(error.InvalidConfiguration, Transport.init(testing.allocator, .init(&unused), options));
+    for (wrong) |options| try testing.expectError(error.InvalidConfiguration, Transport.initConn(testing.allocator, .init(&unused), options));
     try testing.checkAllAllocationFailures(testing.allocator, struct {
         fn make(gpa: std.mem.Allocator) !void {
             var adapter: Unused = .{};
-            var t: Transport = try .init(gpa, .init(&adapter), .{ .subject_prefix = "shop", .reply_prefixes = &.{ "_INBOX", "_INBOX_x" } });
+            var t: Transport = try .initConn(gpa, .init(&adapter), .{ .subject_prefix = "shop", .reply_prefixes = &.{ "_INBOX", "_INBOX_x" } });
             t.deinit(testing.io);
         }
     }.make, .{});
@@ -394,7 +432,7 @@ test "init copies the options and refuses wrong ones" {
 
 test "info: NATS request-reply" {
     var unused: Unused = .{};
-    var bus: Transport = try .init(testing.allocator, .init(&unused), .{});
+    var bus: Transport = try .initConn(testing.allocator, .init(&unused), .{});
     defer bus.deinit(testing.io);
     const info_ = bus.info();
     try testing.expectEqualStrings("nats", info_.name);

@@ -55,14 +55,13 @@ pub fn main(init: std.process.Init) !void {
     const io = rt.io();
     const gpa = init.gpa;
 
-    // The connection to NATS, which the program owns; the adapter gives the
-    // transport what it needs of it; the transport carries the calls of the
-    // server and of the clients alike. Each stays where it is from here on.
+    // The connection to NATS, which the program owns, and the transport on
+    // it, which carries the calls of the server and of the clients alike.
+    // Each stays where it is from here on.
     var nc: nats.Client = try .init(gpa, io, .{ .servers = &.{config.nats.url}, .name = "user-service" });
     defer nc.deinit();
     try nc.connect();
-    var adapter: rpc_nats.ZefirNats = .{ .client = &nc };
-    var bus: rpc_nats.Transport = try .init(gpa, adapter.conn(), .{});
+    var bus: rpc_nats.Transport = try .init(gpa, &nc, .{});
     defer bus.deinit(io); // after the server's deinit, before the connection's
 
     var repo: users.UserRepository = .init(gpa);

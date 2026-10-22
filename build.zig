@@ -78,8 +78,8 @@ pub fn build(b: *std.Build) void {
     });
     nats.addImport("build_options", build_options);
 
-    // nats only for its adapter, rpc_nats.ZefirNats: Zig compiles that file
-    // only for an application that uses it.
+    // nats for the connection of the transport: rpc_nats.Transport.init
+    // takes a *nats.Client and makes its adapter, rpc_nats.ZefirNats.
     const rpc_nats = b.addModule("zefir-rpc-nats", .{
         .root_source_file = b.path("src/rpc-nats/root.zig"),
         .target = target,

@@ -68,8 +68,7 @@ pub fn main(init: std.process.Init) !void {
     });
     defer users_nc.deinit();
     try users_nc.connect();
-    var users_adapter: rpc_nats.ZefirNats = .{ .client = &users_nc };
-    var users_bus: rpc_nats.Transport = try .init(gpa, users_adapter.conn(), .{ .inbox_prefix = "_INBOX_users" });
+    var users_bus: rpc_nats.Transport = try .init(gpa, &users_nc, .{ .inbox_prefix = "_INBOX_users" });
     defer users_bus.deinit(io);
     var repo: users.UserRepository = .init(gpa);
     defer repo.deinit();
@@ -88,8 +87,7 @@ pub fn main(init: std.process.Init) !void {
     });
     defer orders_nc.deinit();
     try orders_nc.connect();
-    var orders_adapter: rpc_nats.ZefirNats = .{ .client = &orders_nc };
-    var orders_bus: rpc_nats.Transport = try .init(gpa, orders_adapter.conn(), .{ .inbox_prefix = "_INBOX_orders" });
+    var orders_bus: rpc_nats.Transport = try .init(gpa, &orders_nc, .{ .inbox_prefix = "_INBOX_orders" });
     defer orders_bus.deinit(io);
     var client = try rpc.Client.init(gpa, .{}, .{ .transport = orders_bus.clientTransport() });
     defer client.deinit();
@@ -98,9 +96,8 @@ pub fn main(init: std.process.Init) !void {
 
     // The same NATS user with the default inbox, _INBOX: the broker refuses
     // the subscription, and the first call says so. A second transport on
-    // one connection takes an adapter of its own.
-    var default_adapter: rpc_nats.ZefirNats = .{ .client = &orders_nc };
-    var default_bus: rpc_nats.Transport = try .init(gpa, default_adapter.conn(), .{});
+    // one connection makes an adapter of its own, as every init does.
+    var default_bus: rpc_nats.Transport = try .init(gpa, &orders_nc, .{});
     defer default_bus.deinit(io);
     var default_client = try rpc.Client.init(gpa, .{}, .{ .transport = default_bus.clientTransport() });
     defer default_client.deinit();

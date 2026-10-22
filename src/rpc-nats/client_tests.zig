@@ -6,6 +6,7 @@
 const std = @import("std");
 const core = @import("core");
 const rpc = @import("rpc");
+const nats = @import("nats");
 const Conn = @import("Conn.zig");
 const Transport = @import("Transport.zig");
 const FakeConn = @import("testing/FakeConn.zig");
@@ -143,7 +144,7 @@ test "a call: the request as it goes on the wire, and its response back" {
     const io = testing.io;
     var fake: FakeConn = .init(testing.allocator, .{});
     defer fake.deinit(io);
-    var bus: Transport = try .init(testing.allocator, fake.conn(), .{});
+    var bus: Transport = try .initConn(testing.allocator, fake.conn(), .{});
     defer bus.deinit(io);
     var service: Service = try .init(&fake, "users.v1.getUser");
     defer service.deinit();
@@ -213,7 +214,7 @@ test "replies a client cannot take: no responders, statuses, a foreign ADR-32 fa
     const io = testing.io;
     var fake: FakeConn = .init(testing.allocator, .{});
     defer fake.deinit(io);
-    var bus: Transport = try .init(testing.allocator, fake.conn(), .{});
+    var bus: Transport = try .initConn(testing.allocator, fake.conn(), .{});
     defer bus.deinit(io);
 
     var nobody: Caller = .init(&bus, .{ .route = .{ .service = "missing", .version = 1, .method = "x" } });
@@ -252,7 +253,7 @@ test "errors before sending: no link, a deadline too close, a denied subject, a 
     const io = testing.io;
     var fake: FakeConn = .init(testing.allocator, .{ .max_payload = 1024, .deny_publish = &.{"secret.>"} });
     defer fake.deinit(io);
-    var bus: Transport = try .init(testing.allocator, fake.conn(), .{ .max_pending = 1 });
+    var bus: Transport = try .initConn(testing.allocator, fake.conn(), .{ .max_pending = 1 });
     defer bus.deinit(io);
     var service: Service = try .init(&fake, "users.v1.getUser");
     defer service.deinit();
@@ -286,12 +287,12 @@ test "the inbox: denied, or its flush unanswered, leaves nothing; the next call 
     {
         var fake: FakeConn = .init(testing.allocator, .{ .deny_subscribe = &.{"_INBOX.>"} });
         defer fake.deinit(io);
-        var bus: Transport = try .init(testing.allocator, fake.conn(), .{});
+        var bus: Transport = try .initConn(testing.allocator, fake.conn(), .{});
         defer bus.deinit(io);
         try testing.expectError(error.AccessDenied, callNow(&bus, .{}));
         try testing.expectEqual(@as(usize, 0), fake.subscriptionCount(io));
         // Another inbox prefix, which the permissions allow.
-        var orders: Transport = try .init(testing.allocator, fake.conn(), .{ .inbox_prefix = "_INBOX_orders" });
+        var orders: Transport = try .initConn(testing.allocator, fake.conn(), .{ .inbox_prefix = "_INBOX_orders" });
         defer orders.deinit(io);
         try testing.expectError(error.Unavailable, callNow(&orders, .{}));
         try testing.expectEqual(@as(usize, 1), fake.subscriptionCount(io));
@@ -299,7 +300,7 @@ test "the inbox: denied, or its flush unanswered, leaves nothing; the next call 
     {
         var fake: FakeConn = .init(testing.allocator, .{});
         defer fake.deinit(io);
-        var bus: Transport = try .init(testing.allocator, fake.conn(), .{});
+        var bus: Transport = try .initConn(testing.allocator, fake.conn(), .{});
         defer bus.deinit(io);
         var service: Service = try .init(&fake, "users.v1.getUser");
         defer service.deinit();
@@ -322,7 +323,7 @@ test "the deadline: Timeout on time; a late response is dropped and counted" {
     const io = testing.io;
     var fake: FakeConn = .init(testing.allocator, .{});
     defer fake.deinit(io);
-    var bus: Transport = try .init(testing.allocator, fake.conn(), .{});
+    var bus: Transport = try .initConn(testing.allocator, fake.conn(), .{});
     defer bus.deinit(io);
     var service: Service = try .init(&fake, "users.v1.getUser");
     defer service.deinit();
@@ -354,7 +355,7 @@ test "cancel: Canceled once, the slot is free again, the late response is droppe
     const io = testing.io;
     var fake: FakeConn = .init(testing.allocator, .{});
     defer fake.deinit(io);
-    var bus: Transport = try .init(testing.allocator, fake.conn(), .{ .max_pending = 1 });
+    var bus: Transport = try .initConn(testing.allocator, fake.conn(), .{ .max_pending = 1 });
     defer bus.deinit(io);
     var service: Service = try .init(&fake, "users.v1.getUser");
     defer service.deinit();
@@ -383,7 +384,7 @@ test "a reconnect: a waiting call lives on and gets its response; new calls are 
     const io = testing.io;
     var fake: FakeConn = .init(testing.allocator, .{});
     defer fake.deinit(io);
-    var bus: Transport = try .init(testing.allocator, fake.conn(), .{});
+    var bus: Transport = try .initConn(testing.allocator, fake.conn(), .{});
     defer bus.deinit(io);
     var service: Service = try .init(&fake, "users.v1.getUser");
     defer service.deinit();
@@ -406,7 +407,7 @@ test "the connection closes for good: a waiting call gets ConnectionLost, a new 
     const io = testing.io;
     var fake: FakeConn = .init(testing.allocator, .{});
     defer fake.deinit(io);
-    var bus: Transport = try .init(testing.allocator, fake.conn(), .{});
+    var bus: Transport = try .initConn(testing.allocator, fake.conn(), .{});
     defer bus.deinit(io);
     var service: Service = try .init(&fake, "users.v1.getUser");
     defer service.deinit();
@@ -442,7 +443,7 @@ test "end to end: rpc.RawClient and rpc.RawServer on one connection, an inbox of
     const io = testing.io;
     var fake: FakeConn = .init(testing.allocator, .{});
     defer fake.deinit(io);
-    var bus: Transport = try .init(testing.allocator, fake.conn(), .{ .subject_prefix = "shop", .inbox_prefix = "_INBOX_orders" });
+    var bus: Transport = try .initConn(testing.allocator, fake.conn(), .{ .subject_prefix = "shop", .inbox_prefix = "_INBOX_orders" });
     defer bus.deinit(io);
     var state: u8 = 0;
     const methods = [_]rpc.Method{
@@ -481,7 +482,7 @@ test "calls that come while another starts the inbox wait for it no longer than 
     const io = testing.io;
     var fake: FakeConn = .init(testing.allocator, .{});
     defer fake.deinit(io);
-    var bus: Transport = try .init(testing.allocator, fake.conn(), .{});
+    var bus: Transport = try .initConn(testing.allocator, fake.conn(), .{});
     defer bus.deinit(io);
     var service: Service = try .init(&fake, "users.v1.getUser");
     defer service.deinit();
@@ -519,7 +520,7 @@ test "an inbox that broke: the waiting call gets ConnectionLost, the next call s
     defer testing.log_level = log_level;
     var fake: FakeConn = .init(testing.allocator, .{});
     defer fake.deinit(io);
-    var bus: Transport = try .init(testing.allocator, fake.conn(), .{});
+    var bus: Transport = try .initConn(testing.allocator, fake.conn(), .{});
     defer bus.deinit(io);
     var service: Service = try .init(&fake, "users.v1.getUser");
     defer service.deinit();
@@ -554,7 +555,7 @@ test "a call canceled while it starts the inbox leaves it idle; the next call st
     const io = testing.io;
     var fake: FakeConn = .init(testing.allocator, .{});
     defer fake.deinit(io);
-    var bus: Transport = try .init(testing.allocator, fake.conn(), .{});
+    var bus: Transport = try .initConn(testing.allocator, fake.conn(), .{});
     defer bus.deinit(io);
     var service: Service = try .init(&fake, "users.v1.getUser");
     defer service.deinit();
@@ -591,7 +592,7 @@ test "a request without a deadline goes out with the largest budget and waits fo
     const io = testing.io;
     var fake: FakeConn = .init(testing.allocator, .{});
     defer fake.deinit(io);
-    var bus: Transport = try .init(testing.allocator, fake.conn(), .{});
+    var bus: Transport = try .initConn(testing.allocator, fake.conn(), .{});
     defer bus.deinit(io);
     var service: Service = try .init(&fake, "users.v1.getUser");
     defer service.deinit();
@@ -619,7 +620,7 @@ test "the inbox as a slow consumer: counted, and the calls go on" {
     defer testing.log_level = log_level;
     var fake: FakeConn = .init(testing.allocator, .{});
     defer fake.deinit(io);
-    var bus: Transport = try .init(testing.allocator, fake.conn(), .{});
+    var bus: Transport = try .initConn(testing.allocator, fake.conn(), .{});
     defer bus.deinit(io);
     var service: Service = try .init(&fake, "users.v1.getUser");
     defer service.deinit();
@@ -694,7 +695,7 @@ test "an inbox that ends as it starts, while another call waits for the start: b
             defer fake.deinit(io);
             var adapter: EndingInbox = .{ .fake = &fake, .ending = ending };
             {
-                var bus: Transport = try .init(testing.allocator, .init(&adapter), .{});
+                var bus: Transport = try .initConn(testing.allocator, .init(&adapter), .{});
                 defer bus.deinit(io);
                 var first: Caller = .init(&bus, .{ .timeout = .fromSeconds(5) });
                 defer first.deinit();
@@ -732,7 +733,7 @@ test "a request lost when the link drops ends at its deadline with Timeout" {
     const io = testing.io;
     var fake: FakeConn = .init(testing.allocator, .{});
     defer fake.deinit(io);
-    var bus: Transport = try .init(testing.allocator, fake.conn(), .{});
+    var bus: Transport = try .initConn(testing.allocator, fake.conn(), .{});
     defer bus.deinit(io);
     var service: Service = try .init(&fake, "users.v1.getUser");
     defer service.deinit();
@@ -840,7 +841,7 @@ const OverlapStage = struct {
         s.fake = .init(testing.allocator, .{ .deny_subscribe = deny_subscribe });
         errdefer s.fake.deinit(io);
         s.adapter = .{ .fake = &s.fake };
-        s.bus = try .init(testing.allocator, .init(&s.adapter), .{});
+        s.bus = try .initConn(testing.allocator, .init(&s.adapter), .{});
         errdefer s.bus.deinit(io);
         s.state = 0;
         const methods = [_]rpc.Method{.{ .route = get_user, .handler = .{ .ptr = &s.state, .handle = Methods.echo } }};
@@ -925,4 +926,57 @@ test "a denied inbox fails the first call, not the close of a server that overla
     try overlapped;
     try stopped;
     try testing.expectError(error.AccessDenied, caller.result);
+}
+
+test "init on a nats.Client builds both sides and frees its adapter" {
+    const io = testing.io;
+    // A client that never connects: nothing listens on port 1.
+    var nc: nats.Client = try .init(testing.allocator, io, .{ .servers = &.{"nats://127.0.0.1:1"} });
+    defer nc.deinit();
+    var bus: Transport = try .init(testing.allocator, &nc, .{});
+    defer bus.deinit(io);
+    _ = bus.serverTransport();
+    _ = bus.clientTransport();
+    // Both sides reach the client through the transport's own adapter.
+    try testing.expect(bus.adapter.?.client == &nc);
+    try testing.expect(!bus.isReady());
+    try testing.expectError(error.Unavailable, callNow(&bus, .{}));
+    // An allocation that fails frees the adapter too.
+    try testing.checkAllAllocationFailures(testing.allocator, struct {
+        fn make(gpa: std.mem.Allocator, client: *nats.Client) !void {
+            var t: Transport = try .init(gpa, client, .{});
+            t.deinit(testing.io);
+        }
+    }.make, .{&nc});
+}
+
+/// An application whose NATS transport App builds, on a connection the
+/// test owns.
+const BusRoot = struct {
+    pub const module: core.app.Module = .{
+        .factories = &.{Nats},
+        .values = &.{*FakeConn},
+    };
+
+    pub const Nats = struct {
+        pub fn bus(gpa: std.mem.Allocator, fake: *FakeConn) !Transport {
+            return .initConn(gpa, fake.conn(), .{});
+        }
+    };
+};
+
+test "rpc_nats.Transport is a bean App builds and frees" {
+    const io = testing.io;
+    var fake: FakeConn = .init(testing.allocator, .{});
+    defer fake.deinit(io);
+    var app = try core.App(BusRoot).init(testing.allocator, io, .{&fake}, .{});
+    defer app.deinit();
+    try app.start();
+    // App leaves the transport's start to the server of rpc: nothing
+    // subscribed.
+    try testing.expectEqual(0, fake.subscriptionCount(io));
+    const bus: *Transport = app.get(Transport);
+    try testing.expect(bus.isReady());
+    try app.shutdown();
+    try testing.expectEqual(core.app.State.stopped, app.state());
 }

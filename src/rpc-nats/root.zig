@@ -21,8 +21,7 @@
 //! var nc: nats.Client = try .init(gpa, io, .{ .servers = &.{"nats://127.0.0.1:4222"} });
 //! defer nc.deinit();
 //! try nc.connect();
-//! var adapter: rpc_nats.ZefirNats = .{ .client = &nc };
-//! var bus: rpc_nats.Transport = try .init(gpa, adapter.conn(), .{});
+//! var bus: rpc_nats.Transport = try .init(gpa, &nc, .{});
 //! defer bus.deinit(io);
 //! var server: rpc.Server = try .init(gpa, .{ .handlers = .{&users} }, .{ .transport = bus.serverTransport() });
 //! defer server.deinit(io);
@@ -31,7 +30,8 @@
 //! The transport needs six operations from a NATS connection,
 //! `rpc_nats.Conn`; an adapter of a NATS library fills them in, and every
 //! library then puts the same bytes on the wire. `rpc_nats.ZefirNats` is the
-//! adapter of zefir-nats.
+//! adapter of zefir-nats, which `Transport.init` makes on a `nats.Client`;
+//! `Transport.initConn` takes the `Conn` of any adapter.
 
 const std = @import("std");
 

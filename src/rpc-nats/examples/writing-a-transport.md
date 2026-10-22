@@ -102,6 +102,8 @@ const Transport = @This();
 
 gpa: std.mem.Allocator,
 conn: Conn,
+/// The adapter `init` made for `conn`, on the heap; null after `initConn`.
+adapter: ?*ZefirNats = null,
 options: Options,
 /// The copies of the strings of `options`: `options` points here.
 strings: []u8,
@@ -124,6 +126,8 @@ client: client_side.State = .{},
 - `conn` is the NATS connection, as the six operations the transport needs
   of it, `rpc_nats.Conn` (see
   [Another NATS library](README.md#tests-and-other-nats-libraries)).
+  `init` takes a `nats.Client` and makes `adapter`, the adapter of
+  zefir-nats, on the heap; `initConn` takes the `Conn` of any adapter.
 - `pending` holds the calls of the client side that wait for their
   responses.
 - `server` and `client` are the state of each side, in `server.zig` and
@@ -1140,7 +1144,7 @@ const Harness = struct {
     pub fn setUp(h: *Harness, io: std.Io, gpa: std.mem.Allocator) !conformance.Pair {
         _ = io;
         h.fake = .init(gpa, .{});
-        h.bus = try .init(gpa, h.fake.conn(), .{});
+        h.bus = try .initConn(gpa, h.fake.conn(), .{});
         return .{ .client = h.bus.clientTransport(), .server = h.bus.serverTransport() };
     }
 
@@ -1261,7 +1265,7 @@ test "the connection closes for good: a waiting call gets ConnectionLost, a new 
     const io = testing.io;
     var fake: FakeConn = .init(testing.allocator, .{});
     defer fake.deinit(io);
-    var bus: Transport = try .init(testing.allocator, fake.conn(), .{});
+    var bus: Transport = try .initConn(testing.allocator, fake.conn(), .{});
     defer bus.deinit(io);
     var service: Service = try .init(&fake, "users.v1.getUser");
     defer service.deinit();

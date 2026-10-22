@@ -35,18 +35,16 @@ const Clock = struct {
     }
 };
 
-/// One side's connection, adapter and transport. Initialize in place.
+/// One side's connection and transport. Initialize in place.
 const Side = struct {
     nc: nats.Client,
-    adapter: rpc_nats.ZefirNats,
     bus: rpc_nats.Transport,
 
     fn init(s: *Side, io: Io) !void {
         s.nc = try .init(testing.allocator, io, .{ .servers = &.{servers.restart}, .reconnect = services.fast_reconnect });
         errdefer s.nc.deinit();
         try s.nc.connect();
-        s.adapter = .{ .client = &s.nc };
-        s.bus = try .init(testing.allocator, s.adapter.conn(), .{});
+        s.bus = try .init(testing.allocator, &s.nc, .{});
     }
 
     fn deinit(s: *Side, io: Io) void {

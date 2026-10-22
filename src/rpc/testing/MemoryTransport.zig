@@ -88,6 +88,10 @@ fail_next: std.atomic.Value(ErrorInt) = .init(0),
 
 const ErrorInt = @Int(.unsigned, @bitSizeOf(anyerror));
 
+/// zefir.App builds and frees this transport, but its start, drain and close
+/// belong to the rpc server: App does not drive them.
+pub const app_lifecycle = false;
+
 /// The errors `failNext` injects: those of `rpc.ClientTransport.call`
 /// except `Canceled`, which only a canceled task may get.
 pub const InjectedError = error{

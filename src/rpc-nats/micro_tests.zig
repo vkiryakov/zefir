@@ -116,7 +116,7 @@ const Stage = struct {
         const io = testing.io;
         s.fake = .init(testing.allocator, .{});
         errdefer s.fake.deinit(io);
-        s.bus = try .init(testing.allocator, s.fake.conn(), options);
+        s.bus = try .initConn(testing.allocator, s.fake.conn(), options);
         errdefer s.bus.deinit(io);
         try s.startServer();
         errdefer s.server.deinit(io);

@@ -229,6 +229,10 @@ pub const Server = struct {
 
     const Phase = enum(u8) { idle, running, draining, closing, closed };
 
+    /// zefir.App builds and frees this transport, but its start, drain and close
+    /// belong to the rpc server: App does not drive them.
+    pub const app_lifecycle = false;
+
     pub fn init(broker: *Broker) Server {
         return .{ .broker = broker };
     }
