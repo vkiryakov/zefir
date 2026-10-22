@@ -155,15 +155,11 @@ for a weaker check.
 
 ## Installation
 
-Add Zefir to your `build.zig.zon`:
+Add Zefir to your `build.zig.zon`; jwt ships since v0.10.0:
 
 ```sh
-zig fetch --save git+https://github.com/vkiryakov/zefir#dev
+zig fetch --save git+https://github.com/vkiryakov/zefir#v0.10.0
 ```
-
-zefir-jwt is on the `dev` branch until the next release. The command
-fetches the latest commit of `dev`; `--save` pins that commit. The latest
-release, v0.9.0, came before zefir-jwt, so `#v0.9.0` does not have it.
 
 Then import the modules in `build.zig`. The orders service of this guide
 signs and checks tokens with jwt, declares the rules of its claims with

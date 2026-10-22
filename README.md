@@ -4,7 +4,7 @@
 
 <p align="center">
   <strong>A modular framework for building services in Zig.</strong><br>
-  Web servers, web services and APIs, built from modules you pick: typed configuration, request deadlines, cancellation, tracing, structured logging, validation, a NATS client, RPC, an HTTP server and an async MongoDB driver today; an ODM next.
+  Web servers, web services and APIs, built from modules you pick: typed configuration, request deadlines, cancellation, tracing, structured logging, validation, a NATS client, RPC, an HTTP server, an async MongoDB driver, a Redis client and JSON Web Tokens today; an ODM next.
 </p>
 
 <p align="center">
@@ -399,13 +399,13 @@ On a shared GitHub runner, 4 vCPUs of an AMD EPYC 7763, a server on zio with fou
 
 ## Installation
 
-Requires **Zig 0.17.0**. Add the dependency to your `build.zig.zon`. This is the `dev` branch, the next version in progress, so the command fetches its latest commit:
+Requires **Zig 0.17.0**. Add the dependency to your `build.zig.zon`; the latest release is **v0.10.0**:
 
 ```sh
-zig fetch --save git+https://github.com/vkiryakov/zefir#dev
+zig fetch --save git+https://github.com/vkiryakov/zefir#v0.10.0
 ```
 
-`--save` pins the commit it fetched, so your build doesn't change when `dev` moves on. For the latest release, **v0.9.0**, fetch `#v0.9.0` instead; other versions are on the [releases page](https://github.com/vkiryakov/zefir/releases), and a commit hash works too.
+Other versions are on the [releases page](https://github.com/vkiryakov/zefir/releases); a commit hash works too.
 
 Then import the modules you need in your `build.zig`:
 
