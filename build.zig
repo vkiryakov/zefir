@@ -7,6 +7,7 @@ const http_guide = @import("src/http/examples/cases.zig");
 const jwt_cases = @import("src/jwt/tests/cases.zig");
 const jwt_guide = @import("src/jwt/examples/cases.zig");
 const openapi_cases = @import("src/openapi/tests/cases.zig");
+const openapi_guide = @import("src/openapi/examples/cases.zig");
 const mongo_guide = @import("src/mongo/examples/cases.zig");
 
 pub fn build(b: *std.Build) void {
@@ -1649,13 +1650,16 @@ fn addOpenapiGoldens(
     }
 }
 
-/// The small application of src/openapi/examples/README.md, the guide of
-/// zefir-openapi: service_test.zig compares its document with openapi.json
-/// there. The test finds the file by its absolute path,
-/// `paths.openapi_json`, and runs where every test runs, as the golden
-/// tests do (see addOpenapiGoldens); `zig build openapi`, `update_step`,
-/// runs it with ZEFIR_OPENAPI_UPDATE=1, which rewrites the file. Its
-/// main.zig imports zio: only tests/http builds it.
+/// The guide of zefir-openapi, src/openapi/examples/README.md, as cases.zig
+/// there lists its files. service_test.zig compares the document of the
+/// small application with openapi.json there: it finds the file by its
+/// absolute path, `paths.openapi_json`, and runs where every test runs, as
+/// the golden tests do (see addOpenapiGoldens); `zig build openapi`,
+/// `update_step`, runs it with ZEFIR_OPENAPI_UPDATE=1, which rewrites the
+/// file. readme_test.zig checks README.md against the files of the
+/// application, the service of the http guide and its document, the golden
+/// documents and the probes. The application's main.zig imports zio: only
+/// tests/http builds it.
 fn addOpenapiGuide(
     b: *std.Build,
     test_openapi: *std.Build.Step,
@@ -1683,6 +1687,42 @@ fn addOpenapiGuide(
     const update = addRun(b, service_test, tsan);
     update.setEnvironmentVariable("ZEFIR_OPENAPI_UPDATE", "1");
     update_step.dependOn(&update.step);
+
+    const http_dir = "src/http/examples/";
+    const readme = b.createModule(.{
+        .root_source_file = b.path(dir ++ "readme_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+        .imports = &.{
+            .{ .name = "guide-check", .module = b.createModule(.{
+                .root_source_file = b.path(http_dir ++ "guide_check.zig"),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+            }) },
+            .{ .name = "openapi-cases", .module = b.createModule(.{
+                .root_source_file = b.path("src/openapi/tests/cases.zig"),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+            }) },
+            .{ .name = "http-cases", .module = b.createModule(.{
+                .root_source_file = b.path("src/http/tests/cases.zig"),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+            }) },
+        },
+    });
+    for (openapi_guide.http_files) |name| {
+        readme.addAnonymousImport(b.fmt("http-{s}", .{name}), .{ .root_source_file = b.path(b.fmt(http_dir ++ "{s}.zig", .{name})) });
+    }
+    readme.addAnonymousImport("http-openapi.json", .{ .root_source_file = b.path(http_dir ++ "openapi.json") });
+    for (openapi_guide.golden) |name| {
+        readme.addAnonymousImport(b.fmt("golden-{s}", .{name}), .{ .root_source_file = b.path(b.fmt("src/openapi/tests/golden/{s}.json", .{name})) });
+    }
+    test_openapi.dependOn(&addRun(b, b.addTest(.{ .name = "openapi-guide-readme", .root_module = readme }), tsan).step);
 }
 
 /// The compile checks of zefir-openapi, from the list in

@@ -133,6 +133,8 @@ pub fn build(b: *std.Build) void {
         .test_runner = .{ .path = b.path("test_runner.zig"), .mode = .simple },
     });
     guide.root_module.addAnonymousImport("guide", .{ .root_source_file = zefir.path(examples_dir ++ "README.md") });
+    // The guide of zefir-openapi shows some of the commands too.
+    guide.root_module.addAnonymousImport("openapi-guide", .{ .root_source_file = zefir.path("src/openapi/examples/README.md") });
     // In `e2e` after the tests; `examples` runs it alone.
     for ([_]*std.Build.Step{ e2e_step, b.step("examples", "Run the service of the guide with its curl session and check the guide") }, 0..) |step, i| {
         const run_guide = b.addRunArtifact(guide);

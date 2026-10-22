@@ -55,6 +55,10 @@ pub const compile_errors = [_]Fixture{
     .{ .file = dir ++ "route_anyerror.zig", .expect = "zefir.openapi: TodosController.list returns anyerror; the document needs the errors it can return: give it an error set" },
     // The paths of the controller of documentation.
     .{ .file = dir ++ "docs_path_relative.zig", .expect = "zefir.openapi: Docs: .json is \"openapi.json\", which does not start with '/'; write the path of the route within the server's prefix, such as .json = \"/openapi.json\"" },
+    // A mistake that src/openapi/examples/README.md shows in its small
+    // application, whose message no other probe gives: the guide's check
+    // finds each error it shows here.
+    .{ .file = dir ++ "guide_path_without_field.zig", .expect = "zefir.http: TodosController.get: {todo_id} in \"/v1/todos/{todo_id}\" has no field in .path = TodoIdPath" },
 };
 
 const dir = "src/openapi/tests/compile_errors/";
