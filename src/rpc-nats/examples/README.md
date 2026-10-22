@@ -255,8 +255,9 @@ pub fn main(init: std.process.Init) !void {
     defer repo.deinit();
     var handler: users.UserHandler = .{ .repo = &repo };
     var server = try rpc.Server.init(gpa, .{
-        .transport = bus.serverTransport(),
         .handlers = .{&handler},
+    }, .{
+        .transport = bus.serverTransport(),
     });
     defer server.deinit(io);
     // Subscribes to users.v1.createUser and the other methods; returns once
@@ -264,7 +265,7 @@ pub fn main(init: std.process.Init) !void {
     try server.start(io);
     app.info("Serving", .{ .service = "users", .version = 1 });
 
-    var client = try rpc.Client.init(gpa, .{ .transport = bus.clientTransport() });
+    var client = try rpc.Client.init(gpa, .{}, .{ .transport = bus.clientTransport() });
     defer client.deinit();
 
     var created = try client.call(io, .root, api.UserApi.createUser, .{ .name = "Ada Lovelace", .email = "ada@example.com" }, .{});
@@ -526,7 +527,7 @@ pub fn main(init: std.process.Init) !void {
     defer repo.deinit();
     _ = try repo.insert(.root, io, init.arena.allocator(), "Ada Lovelace", "ada@example.com");
     var handler: users.UserHandler = .{ .repo = &repo };
-    var server = try rpc.Server.init(gpa, .{ .transport = users_bus.serverTransport(), .handlers = .{&handler} });
+    var server = try rpc.Server.init(gpa, .{ .handlers = .{&handler} }, .{ .transport = users_bus.serverTransport() });
     defer server.deinit(io);
     try server.start(io);
     logger.scoped("users").info("Serving", .{ .nats_user = config.users.nats_user });
@@ -542,7 +543,7 @@ pub fn main(init: std.process.Init) !void {
     var orders_adapter: rpc_nats.ZefirNats = .{ .client = &orders_nc };
     var orders_bus: rpc_nats.Transport = try .init(gpa, orders_adapter.conn(), .{ .inbox_prefix = "_INBOX_orders" });
     defer orders_bus.deinit(io);
-    var client = try rpc.Client.init(gpa, .{ .transport = orders_bus.clientTransport() });
+    var client = try rpc.Client.init(gpa, .{}, .{ .transport = orders_bus.clientTransport() });
     defer client.deinit();
     const orders_log = logger.scoped("orders");
     try getUser(&client, io, orders_log, "_INBOX_orders");
@@ -553,7 +554,7 @@ pub fn main(init: std.process.Init) !void {
     var default_adapter: rpc_nats.ZefirNats = .{ .client = &orders_nc };
     var default_bus: rpc_nats.Transport = try .init(gpa, default_adapter.conn(), .{});
     defer default_bus.deinit(io);
-    var default_client = try rpc.Client.init(gpa, .{ .transport = default_bus.clientTransport() });
+    var default_client = try rpc.Client.init(gpa, .{}, .{ .transport = default_bus.clientTransport() });
     defer default_client.deinit();
     try getUser(&default_client, io, orders_log, "_INBOX");
 }

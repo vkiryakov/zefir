@@ -110,7 +110,7 @@ pub fn main(init: std.process.Init) !void {
     var users: UserHandler = .{ .repo = &repo };
     var users_link: rpc.testing.MemoryTransport = try .init(gpa, .{});
     defer users_link.deinit(io);
-    var users_server = try rpc.Server.init(gpa, .{ .transport = users_link.serverTransport(), .handlers = .{&users} });
+    var users_server = try rpc.Server.init(gpa, .{ .handlers = .{&users} }, .{ .transport = users_link.serverTransport() });
     defer users_server.deinit(io);
     try users_server.start(io);
 
@@ -118,8 +118,9 @@ pub fn main(init: std.process.Init) !void {
     // The defers stop the server first, then free the client it uses.
     var breaker: CircuitBreaker = .{ .logger = logger.scoped("breaker") };
     var users_client = try rpc.Client.init(gpa, .{
-        .transport = users_link.clientTransport(),
         .middleware = .{&breaker},
+    }, .{
+        .transport = users_link.clientTransport(),
     });
     defer users_client.deinit();
     var orders: OrderHandler = .{
@@ -128,12 +129,12 @@ pub fn main(init: std.process.Init) !void {
     };
     var orders_link: rpc.testing.MemoryTransport = try .init(gpa, .{});
     defer orders_link.deinit(io);
-    var orders_server = try rpc.Server.init(gpa, .{ .transport = orders_link.serverTransport(), .handlers = .{&orders} });
+    var orders_server = try rpc.Server.init(gpa, .{ .handlers = .{&orders} }, .{ .transport = orders_link.serverTransport() });
     defer orders_server.deinit(io);
     try orders_server.start(io);
 
     // The shop, a client of orders.
-    var client = try rpc.Client.init(gpa, .{ .transport = orders_link.clientTransport() });
+    var client = try rpc.Client.init(gpa, .{}, .{ .transport = orders_link.clientTransport() });
     defer client.deinit();
 
     // A shop built against an older orders-api, whose Item had no rule for

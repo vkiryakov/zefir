@@ -63,11 +63,10 @@ pub fn main(init: std.process.Init) !void {
     var memory: rpc.testing.MemoryTransport = try .init(gpa, .{});
     defer memory.deinit(io);
     var server = try rpc.Server.init(gpa, .{
-        .transport = memory.serverTransport(),
         .handlers = .{&reports},
-        // A value in the options of init is written in full:
-        // std.Io.Duration.fromMilliseconds, not .fromMilliseconds.
-        .shutdown_grace = std.Io.Duration.fromMilliseconds(config.shutdown.grace_ms),
+    }, .{
+        .transport = memory.serverTransport(),
+        .shutdown_grace = .fromMilliseconds(config.shutdown.grace_ms),
         // Two calls at once; one more is refused at admission.
         .limits = .{ .max_inflight = 2 },
     });
@@ -75,7 +74,7 @@ pub fn main(init: std.process.Init) !void {
     try server.start(io);
     app.info("Serving", .{ .state = server.state(), .ready = server.isReady() });
 
-    var client = try rpc.Client.init(gpa, .{ .transport = memory.clientTransport() });
+    var client = try rpc.Client.init(gpa, .{}, .{ .transport = memory.clientTransport() });
     defer client.deinit();
 
     // Two calls in tasks of their own; the stop begins while both run. On an

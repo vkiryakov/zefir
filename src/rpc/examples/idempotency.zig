@@ -69,14 +69,15 @@ pub fn main(init: std.process.Init) !void {
     var memory: rpc.testing.MemoryTransport = try .init(gpa, .{});
     defer memory.deinit(io);
     var server = try rpc.Server.init(gpa, .{
-        .transport = memory.serverTransport(),
         .handlers = .{&users},
         .middleware = .{&idempotency},
+    }, .{
+        .transport = memory.serverTransport(),
     });
     defer server.deinit(io);
     try server.start(io);
 
-    var client = try rpc.Client.init(gpa, .{ .transport = memory.clientTransport() });
+    var client = try rpc.Client.init(gpa, .{}, .{ .transport = memory.clientTransport() });
     defer client.deinit();
 
     // The key names the operation, here the sign-up form the user sent: it

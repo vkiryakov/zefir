@@ -10,10 +10,10 @@
 //!     var t = try rpc.testing.Server.init(std.testing.allocator, std.testing.io, .{
 //!         .handlers = .{&users},
 //!         .authenticator = &auth,
-//!     });
+//!     }, .{});
 //!     defer t.deinit();
 //!
-//!     var client = try t.client(.{ .credentials = .{ .bearer = "test" } });
+//!     var client = try t.client(.{}, .{ .credentials = .{ .bearer = "test" } });
 //!     defer client.deinit();
 //!
 //!     var r = try client.call(std.testing.io, .root, api.UserApi.getUser, .{ .id = 1 }, .{});
@@ -31,6 +31,8 @@ const std = @import("std");
 const AppServer = @import("../app/Server.zig");
 const AppClient = @import("../app/Client.zig");
 const MemoryTransport = @import("MemoryTransport.zig");
+const Limits = @import("../engine/RawServer.zig").Limits;
+const Credentials = @import("../credentials.zig").Credentials;
 
 const Server = @This();
 
@@ -44,33 +46,56 @@ server: *AppServer,
 
 pub const InitError = AppServer.InitError || AppServer.StartError;
 
-/// Builds and starts a server of `options`: those of `rpc.Server.init`
-/// without `.transport`, that is `.handlers` and, if needed,
-/// `.authenticator`, `.middleware`, `.limits` and `.shutdown_grace`. The
+/// The settings of `rpc.Server.Options` but `.transport`: the server runs
+/// on a memory transport of its own.
+pub const Options = struct {
+    limits: Limits = .{},
+    shutdown_grace: std.Io.Duration = .fromSeconds(10),
+};
+
+/// The settings of `rpc.Client.Options` but `.transport`: clients use the
+/// server's memory transport.
+pub const ClientOptions = struct {
+    credentials: Credentials = .none,
+    default_timeout: std.Io.Duration = .fromSeconds(3),
+    max_pending: u32 = 1024,
+    max_response_bytes: usize = 1 << 20,
+};
+
+/// Builds and starts a server of `parts`, those of `rpc.Server.init`:
+/// `.handlers` and, if needed, `.authenticator` and `.middleware`. The
 /// transport and the server live on the heap, so the value that `init`
 /// returns may be moved. `gpa` is thread-safe, as `std.testing.allocator`
 /// is: handlers and clients allocate from their own tasks.
-pub fn init(gpa: std.mem.Allocator, io: std.Io, options: anytype) InitError!Server {
-    comptime check(serverOptionsProblem(@TypeOf(options)));
+pub fn init(gpa: std.mem.Allocator, io: std.Io, parts: anytype, options: Options) InitError!Server {
     const memory = try gpa.create(MemoryTransport);
     errdefer gpa.destroy(memory);
     memory.* = try .init(gpa, .{});
     errdefer memory.deinit(io);
     const server = try gpa.create(AppServer);
     errdefer gpa.destroy(server);
-    server.* = try .init(gpa, withTransport(options, memory.serverTransport()));
+    server.* = try .init(gpa, parts, .{
+        .transport = memory.serverTransport(),
+        .limits = options.limits,
+        .shutdown_grace = options.shutdown_grace,
+    });
     errdefer server.deinit(io);
     try server.start(io);
     return .{ .gpa = gpa, .io = io, .memory = memory, .server = server };
 }
 
-/// A client on the server's transport, built from `options`: those of
-/// `rpc.Client.init` without `.transport`, such as
-/// `.{ .credentials = .{ .bearer = "test" } }` or `.{}`. Its `deinit`
-/// comes before the server's.
-pub fn client(t: *Server, options: anytype) error{OutOfMemory}!AppClient {
-    comptime check(clientOptionsProblem(@TypeOf(options)));
-    return AppClient.init(t.gpa, withTransport(options, t.memory.clientTransport()));
+/// A client on the server's transport, of `parts`, those of
+/// `rpc.Client.init` (`.middleware`, or `.{}`), and `options`, such as
+/// `.{ .credentials = .{ .bearer = "test" } }`. Its `deinit` comes before
+/// the server's.
+pub fn client(t: *Server, parts: anytype, options: ClientOptions) AppClient.InitError!AppClient {
+    return AppClient.init(t.gpa, parts, .{
+        .transport = t.memory.clientTransport(),
+        .credentials = options.credentials,
+        .default_timeout = options.default_timeout,
+        .max_pending = options.max_pending,
+        .max_response_bytes = options.max_response_bytes,
+    });
 }
 
 /// Stops the server, waits for the calls it runs, and frees the server and
@@ -83,57 +108,6 @@ pub fn deinit(t: *Server) void {
     t.memory.deinit(t.io);
     t.gpa.destroy(t.memory);
     t.* = undefined;
-}
-
-fn check(comptime problem: ?[]const u8) void {
-    if (problem) |message| @compileError(message);
-}
-
-/// The options of `rpc.testing.Server.init`, of type `O`: a struct literal
-/// without `.transport`. `rpc.Server.init` checks the rest.
-fn serverOptionsProblem(comptime O: type) ?[]const u8 {
-    const at = "rpc.testing.Server.init: ";
-    if (!isStructLiteral(O)) return at ++ "options must be a struct literal such as .{ .handlers = .{&users} }, got " ++ @typeName(O);
-    if (@hasField(O, "transport")) return at ++ ".transport is not an option here: the server runs on a memory transport of its own";
-    return null;
-}
-
-/// The options of `client`: a struct literal without `.transport`;
-/// `rpc.Client.init` checks the rest.
-fn clientOptionsProblem(comptime O: type) ?[]const u8 {
-    const at = "rpc.testing.Server.client: ";
-    if (!isStructLiteral(O)) return at ++ "options must be a struct literal such as .{ .credentials = .{ .bearer = \"test\" } } or .{}, got " ++ @typeName(O);
-    if (@hasField(O, "transport")) return at ++ ".transport is not an option here: clients use the server's memory transport";
-    return null;
-}
-
-/// A struct that is not a tuple, or the empty literal `.{}`.
-fn isStructLiteral(comptime O: type) bool {
-    return switch (@typeInfo(O)) {
-        .@"struct" => |info| !info.is_tuple or info.field_names.len == 0,
-        else => false,
-    };
-}
-
-/// `O`, the type of a struct literal, with one more field: `transport` of
-/// type `T`. Comptime fields stay comptime, with their values.
-fn WithTransport(comptime O: type, comptime T: type) type {
-    const info = @typeInfo(O).@"struct";
-    const no_attributes = [_]std.lang.Type.Struct.FieldAttributes{.{}};
-    return @Struct(.auto, null, info.field_names ++ .{"transport"}, info.field_types ++ .{T}, info.field_attrs ++ no_attributes);
-}
-
-/// `options` with `.transport = transport`: options are `anytype`, so a
-/// new field means a new type.
-fn withTransport(options: anytype, transport: anytype) WithTransport(@TypeOf(options), @TypeOf(transport)) {
-    const O = @TypeOf(options);
-    const info = @typeInfo(O).@"struct";
-    var full: WithTransport(O, @TypeOf(transport)) = undefined;
-    inline for (info.field_names, info.field_attrs) |name, attrs| {
-        if (!attrs.@"comptime") @field(full, name) = @field(options, name);
-    }
-    full.transport = transport;
-    return full;
 }
 
 const testing = std.testing;
@@ -178,7 +152,7 @@ const Greeter = struct {
 
 /// Starts a test server for `greeter` and returns it by value.
 fn startGreeter(greeter: *Greeter, auth: *rpc.testing.StaticAuthenticator) !Server {
-    return Server.init(testing.allocator, testing.io, .{ .handlers = .{greeter}, .authenticator = auth });
+    return Server.init(testing.allocator, testing.io, .{ .handlers = .{greeter}, .authenticator = auth }, .{});
 }
 
 test "a test server serves its handlers to clients on its transport, and moves freely" {
@@ -189,7 +163,7 @@ test "a test server serves its handlers to clients on its transport, and moves f
     try testing.expectEqual(rpc.Server.State.running, t.server.state());
     try testing.expect(t.server.isReady());
 
-    var plain = try t.client(.{});
+    var plain = try t.client(.{}, .{});
     defer plain.deinit();
     var r = try plain.call(testing.io, .root, GreeterApi.greet, .{ .name = "Ann" }, .{});
     defer r.deinit();
@@ -204,7 +178,22 @@ test "a test server serves its handlers to clients on its transport, and moves f
     defer anonymous.deinit();
     try testing.expectEqual(@import("core").ErrorCode.unauthenticated, anonymous.outcome.failure.code);
 
-    var signed = try t.client(.{ .credentials = .{ .bearer = "test" }, .default_timeout = std.Io.Duration.fromSeconds(5) });
+    var signed = try t.client(.{}, .{ .credentials = .{ .bearer = "test" }, .default_timeout = std.Io.Duration.fromSeconds(5) });
+    defer signed.deinit();
+    var me = try signed.call(testing.io, .root, GreeterApi.whoami, .{}, .{});
+    defer me.deinit();
+    try testing.expectEqualStrings("u1", me.outcome.ok.text);
+}
+
+test "rpc.testing.Server takes parts and typed options" {
+    var greeter: Greeter = .{};
+    var auth: rpc.testing.StaticAuthenticator = .{ .identity = .{ .subject = "u1" } };
+    var t = try Server.init(testing.allocator, testing.io, .{ .handlers = .{&greeter}, .authenticator = &auth }, .{
+        .limits = .{ .max_active_tasks = 8 },
+    });
+    defer t.deinit();
+    try testing.expectEqual(@as(u32, 8), t.server.engine.limits.max_active_tasks);
+    var signed = try t.client(.{}, .{ .credentials = .{ .bearer = "t" } });
     defer signed.deinit();
     var me = try signed.call(testing.io, .root, GreeterApi.whoami, .{}, .{});
     defer me.deinit();
@@ -217,11 +206,12 @@ test "the hooks of the memory transport reach the clients of a test server" {
     var t = try Server.init(testing.allocator, testing.io, .{
         .handlers = .{&greeter},
         .authenticator = &auth,
+    }, .{
         .limits = .{ .max_active_tasks = 8 },
         .shutdown_grace = std.Io.Duration.fromSeconds(1),
     });
     defer t.deinit();
-    var plain = try t.client(.{});
+    var plain = try t.client(.{}, .{});
     defer plain.deinit();
     t.memory.failNext(error.Unavailable);
     try testing.expectError(error.Unavailable, plain.call(testing.io, .root, GreeterApi.greet, .{ .name = "Ann" }, .{}));
@@ -270,10 +260,10 @@ test "middleware of the server and of its clients, functions and objects, passes
         .handlers = .{&greeter},
         .authenticator = &auth,
         .middleware = .{ markResponse, &sees },
-    });
+    }, .{});
     defer t.deinit();
     var counts: CountsSuccess = .{};
-    var linked = try t.client(.{ .middleware = .{ tagRequest, &counts }, .credentials = .none });
+    var linked = try t.client(.{ .middleware = .{ tagRequest, &counts } }, .{ .credentials = .none });
     defer linked.deinit();
 
     var r = try linked.call(testing.io, .root, GreeterApi.greet, .{ .name = "Ann" }, .{});
@@ -291,13 +281,14 @@ test "a server that does not start leaves nothing behind" {
     try testing.expectError(error.InvalidConfiguration, Server.init(testing.allocator, testing.io, .{
         .handlers = .{&greeter},
         .authenticator = &auth,
+    }, .{
         .limits = .{ .max_active_tasks = 0 },
     }));
     // Every allocation that fails, in turn.
     var fail_index: usize = 0;
     while (true) : (fail_index += 1) {
         var failing: FailAt = .{ .parent = testing.allocator, .fail_index = fail_index };
-        var t = Server.init(failing.allocator(), testing.io, .{ .handlers = .{&greeter}, .authenticator = &auth }) catch |err| {
+        var t = Server.init(failing.allocator(), testing.io, .{ .handlers = .{&greeter}, .authenticator = &auth }, .{}) catch |err| {
             try testing.expectEqual(error.OutOfMemory, err);
             continue;
         };
@@ -342,35 +333,3 @@ const FailAt = struct {
         f.parent.rawFree(memory, alignment, ret_addr);
     }
 };
-
-test "the options of a test server and of its clients leave out the transport" {
-    try testing.expectEqual(@as(?[]const u8, null), comptime serverOptionsProblem(struct { handlers: struct { *Greeter } }));
-    try testing.expectEqual(@as(?[]const u8, null), comptime clientOptionsProblem(@TypeOf(.{})));
-    try testing.expectEqualStrings(
-        "rpc.testing.Server.init: .transport is not an option here: the server runs on a memory transport of its own",
-        comptime serverOptionsProblem(struct { transport: rpc.ServerTransport, handlers: struct { *Greeter } }).?,
-    );
-    try testing.expectEqualStrings(
-        "rpc.testing.Server.init: options must be a struct literal such as .{ .handlers = .{&users} }, got *testing.Server.Greeter",
-        comptime serverOptionsProblem(*Greeter).?,
-    );
-    try testing.expectEqualStrings(
-        "rpc.testing.Server.client: .transport is not an option here: clients use the server's memory transport",
-        comptime clientOptionsProblem(struct { transport: rpc.ClientTransport }).?,
-    );
-    try testing.expectEqualStrings(
-        "rpc.testing.Server.client: options must be a struct literal such as .{ .credentials = .{ .bearer = \"test\" } } or .{}, got struct { u8 }",
-        comptime clientOptionsProblem(struct { u8 }).?,
-    );
-}
-
-test "a struct literal gets a transport, its comptime fields kept" {
-    var users: u32 = 7;
-    const full = withTransport(.{ .handlers = .{&users}, .limits = .{ .max_active_tasks = 1024 } }, @as(u8, 42));
-    const Full = @TypeOf(full);
-    try testing.expectEqual(@as(u8, 42), full.transport);
-    try testing.expectEqual(@as(u32, 7), full.handlers[0].*);
-    try testing.expectEqual(1024, full.limits.max_active_tasks);
-    try testing.expect(@typeInfo(Full).@"struct".field_attrs[1].@"comptime");
-    try testing.expect(!@typeInfo(Full).@"struct".field_attrs[0].@"comptime");
-}

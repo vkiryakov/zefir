@@ -24,7 +24,7 @@
 //! var adapter: rpc_nats.ZefirNats = .{ .client = &nc };
 //! var bus: rpc_nats.Transport = try .init(gpa, adapter.conn(), .{});
 //! defer bus.deinit(io);
-//! var server: rpc.Server = try .init(gpa, .{ .transport = bus.serverTransport(), .handlers = .{&users} });
+//! var server: rpc.Server = try .init(gpa, .{ .handlers = .{&users} }, .{ .transport = bus.serverTransport() });
 //! defer server.deinit(io);
 //! ```
 //!

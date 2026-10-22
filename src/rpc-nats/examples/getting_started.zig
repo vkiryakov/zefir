@@ -69,8 +69,9 @@ pub fn main(init: std.process.Init) !void {
     defer repo.deinit();
     var handler: users.UserHandler = .{ .repo = &repo };
     var server = try rpc.Server.init(gpa, .{
-        .transport = bus.serverTransport(),
         .handlers = .{&handler},
+    }, .{
+        .transport = bus.serverTransport(),
     });
     defer server.deinit(io);
     // Subscribes to users.v1.createUser and the other methods; returns once
@@ -78,7 +79,7 @@ pub fn main(init: std.process.Init) !void {
     try server.start(io);
     app.info("Serving", .{ .service = "users", .version = 1 });
 
-    var client = try rpc.Client.init(gpa, .{ .transport = bus.clientTransport() });
+    var client = try rpc.Client.init(gpa, .{}, .{ .transport = bus.clientTransport() });
     defer client.deinit();
 
     var created = try client.call(io, .root, api.UserApi.createUser, .{ .name = "Ada Lovelace", .email = "ada@example.com" }, .{});

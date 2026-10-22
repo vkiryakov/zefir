@@ -42,9 +42,10 @@ test {
     const limiter: RateLimiter = .{ .per_minute = 100 };
     // The limiter by value: a link of the server is a pointer to an object.
     var server: rpc.Server = try .init(std.testing.allocator, .{
-        .transport = memory.serverTransport(),
         .handlers = .{&users},
         .middleware = .{ logCalls, limiter },
+    }, .{
+        .transport = memory.serverTransport(),
     });
     defer server.deinit(std.testing.io);
 }

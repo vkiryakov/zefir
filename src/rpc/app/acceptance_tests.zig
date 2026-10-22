@@ -107,10 +107,10 @@ const Counting = struct {
 
 test "A3: the server reports every violation of a request, and the client reads them all" {
     var users: Users(strict) = .{};
-    var t = try rpc.testing.Server.init(testing.allocator, testing.io, .{ .handlers = .{&users} });
+    var t = try rpc.testing.Server.init(testing.allocator, testing.io, .{ .handlers = .{&users} }, .{});
     defer t.deinit();
     // A client of the loose package sends what the server refuses.
-    var client = try t.client(.{});
+    var client = try t.client(.{}, .{});
     defer client.deinit();
 
     var r = try client.call(testing.io, .root, loose.UserApi.createUser, .{ .name = "", .email = "nope", .tags = &.{ "a", "" } }, .{});
@@ -141,10 +141,10 @@ test "A3: the server reports every violation of a request, and the client reads 
 
 test "A3: the client does not send a request against its rules" {
     var users: Users(strict) = .{};
-    var t = try rpc.testing.Server.init(testing.allocator, testing.io, .{ .handlers = .{&users} });
+    var t = try rpc.testing.Server.init(testing.allocator, testing.io, .{ .handlers = .{&users} }, .{});
     defer t.deinit();
     var counting: Counting = .{ .inner = t.memory.clientTransport() };
-    var client: rpc.Client = try .init(testing.allocator, .{ .transport = rpc.ClientTransport.init(&counting) });
+    var client: rpc.Client = try .init(testing.allocator, .{}, .{ .transport = rpc.ClientTransport.init(&counting) });
     defer client.deinit();
 
     var r = try client.call(testing.io, .root, strict.UserApi.createUser, .{ .name = "", .email = "ann@example.com" }, .{});
@@ -168,9 +168,9 @@ test "A3: a response against the rules is rpc.invalid_response on the server and
     testing.log_level = .err;
     defer testing.log_level = log_level;
     var strict_users: Users(strict) = .{};
-    var strict_server = try rpc.testing.Server.init(testing.allocator, testing.io, .{ .handlers = .{&strict_users} });
+    var strict_server = try rpc.testing.Server.init(testing.allocator, testing.io, .{ .handlers = .{&strict_users} }, .{});
     defer strict_server.deinit();
-    var loose_client = try strict_server.client(.{});
+    var loose_client = try strict_server.client(.{}, .{});
     defer loose_client.deinit();
     var refused = try loose_client.call(testing.io, .root, loose.UserApi.renameUser, .{ .id = 1, .new_name = "" }, .{});
     defer refused.deinit();
@@ -178,9 +178,9 @@ test "A3: a response against the rules is rpc.invalid_response on the server and
 
     // A loose server answers what a strict client refuses.
     var loose_users: Users(loose) = .{};
-    var loose_server = try rpc.testing.Server.init(testing.allocator, testing.io, .{ .handlers = .{&loose_users} });
+    var loose_server = try rpc.testing.Server.init(testing.allocator, testing.io, .{ .handlers = .{&loose_users} }, .{});
     defer loose_server.deinit();
-    var strict_client = try loose_server.client(.{});
+    var strict_client = try loose_server.client(.{}, .{});
     defer strict_client.deinit();
     var d: rpc.transport.Diagnostics = .{};
     try testing.expectError(error.InvalidResponse, strict_client.call(testing.io, .root, strict.UserApi.renameUser, .{ .id = 1, .new_name = "" }, .{ .diagnostics = &d }));
@@ -277,9 +277,9 @@ fn expectHello(client: *rpc.Client, credentials: ?rpc.Credentials, expected: ?[]
 test "A6 and A7: credentials of every kind reach the authenticator: the client's, the call's own, or none" {
     var who: Who = .{};
     var echoing: Echoing = .{};
-    var t = try rpc.testing.Server.init(testing.allocator, testing.io, .{ .handlers = .{&who}, .authenticator = &echoing });
+    var t = try rpc.testing.Server.init(testing.allocator, testing.io, .{ .handlers = .{&who}, .authenticator = &echoing }, .{});
     defer t.deinit();
-    var client = try t.client(.{ .credentials = .{ .basic = .{ .user = "billing", .password = "s3cret" } } });
+    var client = try t.client(.{}, .{ .credentials = .{ .basic = .{ .user = "billing", .password = "s3cret" } } });
     defer client.deinit();
 
     // Null: the client's credentials.
@@ -290,7 +290,7 @@ test "A6 and A7: credentials of every kind reach the authenticator: the client's
     try expectHello(&client, .{ .custom = "ApiKey k-1" }, "custom:ApiKey k-1");
     try expectHello(&client, .{ .basic = .{ .user = "ann", .password = "p:w" } }, "basic:ann:p:w");
 
-    var anonymous = try t.client(.{});
+    var anonymous = try t.client(.{}, .{});
     defer anonymous.deinit();
     try expectHello(&anonymous, null, null);
     try expectHello(&anonymous, .{ .bearer = "t-2" }, "bearer:t-2");
@@ -299,16 +299,16 @@ test "A6 and A7: credentials of every kind reach the authenticator: the client's
 test "A6: a method that requires an identity refuses anonymous calls; an optional one lets them in" {
     var who: Who = .{};
     var echoing: Echoing = .{};
-    var t = try rpc.testing.Server.init(testing.allocator, testing.io, .{ .handlers = .{&who}, .authenticator = &echoing });
+    var t = try rpc.testing.Server.init(testing.allocator, testing.io, .{ .handlers = .{&who}, .authenticator = &echoing }, .{});
     defer t.deinit();
-    var anonymous = try t.client(.{});
+    var anonymous = try t.client(.{}, .{});
     defer anonymous.deinit();
     var refused = try anonymous.call(testing.io, .root, WhoApi.whoami, .{}, .{});
     defer refused.deinit();
     try expectFailure(refused.outcome.failure, .unauthenticated, "rpc.unauthenticated", "Authentication required");
     try expectHello(&anonymous, null, null);
 
-    var signed = try t.client(.{ .credentials = .{ .bearer = "t-1" } });
+    var signed = try t.client(.{}, .{ .credentials = .{ .bearer = "t-1" } });
     defer signed.deinit();
     var me = try signed.call(testing.io, .root, WhoApi.whoami, .{}, .{});
     defer me.deinit();
@@ -317,9 +317,9 @@ test "A6: a method that requires an identity refuses anonymous calls; an optiona
 
 test "A6: credentials on a server without an authenticator are unauthenticated" {
     var who: OpenWho = .{};
-    var t = try rpc.testing.Server.init(testing.allocator, testing.io, .{ .handlers = .{&who} });
+    var t = try rpc.testing.Server.init(testing.allocator, testing.io, .{ .handlers = .{&who} }, .{});
     defer t.deinit();
-    var client = try t.client(.{ .credentials = .{ .bearer = "t-1" } });
+    var client = try t.client(.{}, .{ .credentials = .{ .bearer = "t-1" } });
     defer client.deinit();
     var r = try client.call(testing.io, .root, WhoApi.hello, .{}, .{});
     defer r.deinit();
@@ -348,10 +348,10 @@ const Rotating = struct {
 test "A6: a credentials provider is asked before every call" {
     var who: Who = .{};
     var echoing: Echoing = .{};
-    var t = try rpc.testing.Server.init(testing.allocator, testing.io, .{ .handlers = .{&who}, .authenticator = &echoing });
+    var t = try rpc.testing.Server.init(testing.allocator, testing.io, .{ .handlers = .{&who}, .authenticator = &echoing }, .{});
     defer t.deinit();
     var rotating: Rotating = .{};
-    var client = try t.client(.{ .credentials = .{ .provider = rotating.credentialsProvider() } });
+    var client = try t.client(.{}, .{ .credentials = .{ .provider = rotating.credentialsProvider() } });
     defer client.deinit();
     try expectHello(&client, null, "bearer:token-1");
     try expectHello(&client, null, "bearer:token-2");
@@ -441,14 +441,14 @@ const Frontend = struct {
 test "A7: a nested call with ctx.operation() keeps the caller's deadline and continues its trace" {
     const io = testing.io;
     var backend: Backend = .{};
-    var users = try rpc.testing.Server.init(testing.allocator, io, .{ .handlers = .{&backend} });
+    var users = try rpc.testing.Server.init(testing.allocator, io, .{ .handlers = .{&backend} }, .{});
     defer users.deinit();
-    var users_client = try users.client(.{});
+    var users_client = try users.client(.{}, .{});
     defer users_client.deinit();
     var frontend: Frontend = .{ .users = &users_client };
-    var front = try rpc.testing.Server.init(testing.allocator, io, .{ .handlers = .{&frontend} });
+    var front = try rpc.testing.Server.init(testing.allocator, io, .{ .handlers = .{&frontend} }, .{});
     defer front.deinit();
-    var client = try front.client(.{});
+    var client = try front.client(.{}, .{});
     defer client.deinit();
 
     const caller_trace = try core.w3c.parseTraceparent("00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01");
@@ -560,9 +560,9 @@ test "A8: an old client and a new server, and a new client and an old server, fo
     // field the client does not know, the client skips the field it does
     // not know.
     var later_users: LaterUsers = .{};
-    var new_server = try rpc.testing.Server.init(testing.allocator, testing.io, .{ .handlers = .{&later_users} });
+    var new_server = try rpc.testing.Server.init(testing.allocator, testing.io, .{ .handlers = .{&later_users} }, .{});
     defer new_server.deinit();
-    var old_client = try new_server.client(.{});
+    var old_client = try new_server.client(.{}, .{});
     defer old_client.deinit();
     var old = try old_client.call(testing.io, .root, first.UserApi.getUser, .{ .id = 1 }, .{});
     defer old.deinit();
@@ -572,9 +572,9 @@ test "A8: an old client and a new server, and a new client and an old server, fo
     // A new client of an old server: the server skips the new field of the
     // request, the client takes null for the field the server does not send.
     var first_users: FirstUsers = .{};
-    var old_server = try rpc.testing.Server.init(testing.allocator, testing.io, .{ .handlers = .{&first_users} });
+    var old_server = try rpc.testing.Server.init(testing.allocator, testing.io, .{ .handlers = .{&first_users} }, .{});
     defer old_server.deinit();
-    var new_client = try old_server.client(.{});
+    var new_client = try old_server.client(.{}, .{});
     defer new_client.deinit();
     var new = try new_client.call(testing.io, .root, later.UserApi.getUser, .{ .id = 1, .with_nickname = true }, .{});
     defer new.deinit();
@@ -582,7 +582,7 @@ test "A8: an old client and a new server, and a new client and an old server, fo
     try testing.expectEqual(@as(?[]const u8, null), new.outcome.ok.nickname);
 
     // The new client of the new server gets the new field.
-    var both_new = try new_server.client(.{});
+    var both_new = try new_server.client(.{}, .{});
     defer both_new.deinit();
     var full = try both_new.call(testing.io, .root, later.UserApi.getUser, .{ .id = 1, .with_nickname = true }, .{});
     defer full.deinit();
@@ -593,9 +593,9 @@ test "A8: an old client and a new server, and a new client and an old server, fo
 test "A8: two versions of a contract on one server" {
     var v1: FirstUsers = .{};
     var v2: SecondUsers = .{};
-    var t = try rpc.testing.Server.init(testing.allocator, testing.io, .{ .handlers = .{ &v1, &v2 } });
+    var t = try rpc.testing.Server.init(testing.allocator, testing.io, .{ .handlers = .{ &v1, &v2 } }, .{});
     defer t.deinit();
-    var client = try t.client(.{});
+    var client = try t.client(.{}, .{});
     defer client.deinit();
 
     var one = try client.call(testing.io, .root, first.UserApi.getUser, .{ .id = 1 }, .{});
@@ -784,10 +784,10 @@ test "A9: getUser returns the user" {
     var t = try rpc.testing.Server.init(std.testing.allocator, std.testing.io, .{
         .handlers = .{&users},
         .authenticator = &auth,
-    });
+    }, .{});
     defer t.deinit();
 
-    var client = try t.client(.{ .credentials = .{ .bearer = "test" } });
+    var client = try t.client(.{}, .{ .credentials = .{ .bearer = "test" } });
     defer client.deinit();
 
     var r = try client.call(std.testing.io, .root, api.UserApi.getUser, .{ .id = 1 }, .{});
@@ -802,9 +802,9 @@ test "A9: the example's handler through the whole chain: permissions, the fraud 
     var fraud_check: FraudCheck = .allowAll();
     var users: UserHandler = .init(&repo, &fraud_check);
     var auth: rpc.testing.StaticAuthenticator = .{ .identity = .{ .subject = "u1", .permissions = &.{"users.write"} } };
-    var t = try rpc.testing.Server.init(testing.allocator, io, .{ .handlers = .{&users}, .authenticator = &auth });
+    var t = try rpc.testing.Server.init(testing.allocator, io, .{ .handlers = .{&users}, .authenticator = &auth }, .{});
     defer t.deinit();
-    var client = try t.client(.{ .credentials = .{ .bearer = "test" } });
+    var client = try t.client(.{}, .{ .credentials = .{ .bearer = "test" } });
     defer client.deinit();
 
     var created = try client.call(io, .root, api.UserApi.createUser, .{ .name = "Grace", .email = "grace@example.com" }, .{});
@@ -841,7 +841,7 @@ test "A9: the example's handler through the whole chain: permissions, the fraud 
     try expectFailure(gone.outcome.failure, .not_found, "users.not_found", "User not found");
 
     // getUser lets anonymous callers in; the rest requires an identity.
-    var anonymous = try t.client(.{});
+    var anonymous = try t.client(.{}, .{});
     defer anonymous.deinit();
     var ada = try anonymous.call(io, .root, api.UserApi.getUser, .{ .id = 1 }, .{});
     defer ada.deinit();

@@ -501,9 +501,9 @@ test "an App starts two rpc.Server, serves through both, and stops them on reque
     var second_memory: MemoryTransport = try .init(testing.allocator, .{});
     defer second_memory.deinit(io);
     var echo: AppEcho = .{};
-    var first: Server = try .init(testing.allocator, .{ .transport = first_memory.serverTransport(), .handlers = .{&echo} });
+    var first: Server = try .init(testing.allocator, .{ .handlers = .{&echo} }, .{ .transport = first_memory.serverTransport() });
     defer first.deinit(io);
-    var second: Server = try .init(testing.allocator, .{ .transport = second_memory.serverTransport(), .handlers = .{&echo} });
+    var second: Server = try .init(testing.allocator, .{ .handlers = .{&echo} }, .{ .transport = second_memory.serverTransport() });
     defer second.deinit(io);
 
     var app: MiniApp = .{};
@@ -523,10 +523,10 @@ test "when the second rpc.Server does not start, the App stops the first and ret
     var memory: MemoryTransport = try .init(testing.allocator, .{});
     defer memory.deinit(io);
     var echo: AppEcho = .{};
-    var first: Server = try .init(testing.allocator, .{ .transport = memory.serverTransport(), .handlers = .{&echo} });
+    var first: Server = try .init(testing.allocator, .{ .handlers = .{&echo} }, .{ .transport = memory.serverTransport() });
     defer first.deinit(io);
     // The same address: its transport is taken by the first.
-    var second: Server = try .init(testing.allocator, .{ .transport = memory.serverTransport(), .handlers = .{&echo} });
+    var second: Server = try .init(testing.allocator, .{ .handlers = .{&echo} }, .{ .transport = memory.serverTransport() });
     defer second.deinit(io);
 
     var app: MiniApp = .{};
@@ -551,12 +551,13 @@ test "an rpc.Server whose shutdown runs out of time: the App reports it and leav
     var deaf: DeafEcho = .{};
     var echo: AppEcho = .{};
     var server: Server = try .init(testing.allocator, .{
-        .transport = memory.serverTransport(),
         .handlers = .{&deaf},
+    }, .{
+        .transport = memory.serverTransport(),
         .shutdown_grace = std.Io.Duration.fromMilliseconds(50),
     });
     defer server.deinit(io);
-    var other: Server = try .init(testing.allocator, .{ .transport = other_memory.serverTransport(), .handlers = .{&echo} });
+    var other: Server = try .init(testing.allocator, .{ .handlers = .{&echo} }, .{ .transport = other_memory.serverTransport() });
     defer other.deinit(io);
     // Whatever happens, the handler ends before the server's deinit.
     defer deaf.gate.set(io);

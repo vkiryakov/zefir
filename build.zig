@@ -591,8 +591,9 @@ pub fn build(b: *std.Build) void {
     // message next to its name (the whole text after "error: "), and the
     // notes that lead to the user's code: those of a contract lead through
     // the return type of rpc.Contract, that of rpc.implement straight to the
-    // call, that of rpc.Client.call through the type of its request. A type
-    // declared in a file is named after the file.
+    // call, that of rpc.Client.call through the type of its request. A
+    // mistake in the typed options of rpc.Client.init is Zig's own error,
+    // with Zig's notes. A type declared in a file is named after the file.
     const contract_notes: []const []const u8 = &.{ "note: called at comptime here", "note: generic function instantiated here" };
     const implement_notes: []const []const u8 = &.{"note: called at comptime here"};
     const server_notes: []const []const u8 = &.{"note: called at comptime here"};
@@ -629,8 +630,10 @@ pub fn build(b: *std.Build) void {
         .{ "server_same_route", "rpc.Server.init: server_same_route.UserHandler and server_same_route.OtherUserHandler both serve users.v1", server_notes },
         .{ "server_auth_without_authenticator", "rpc.Server.init: server_auth_without_authenticator.UserHandler.getUser requires auth, but .authenticator is not set", server_notes },
         .{ "server_middleware", "rpc.Server.init: .middleware[1] must be fn (*rpc.Context, *rpc.Next) anyerror!void or a pointer to a type with pub fn run(self, *rpc.Context, *rpc.Next) anyerror!void", server_notes },
-        .{ "client_unknown_option", "rpc.Client.init: unknown option .timeout; the options are .transport, .credentials, .middleware, .default_timeout, .max_pending and .max_response_bytes", client_notes },
-        .{ "client_credentials_literal", "rpc.Client.init: .credentials = .bearer needs a value, such as .{ .bearer = token }; only .none stands alone", client_notes },
+        .{ "server_unknown_part", "rpc.Server.init: unknown part .transport; the parts are .handlers, .middleware and .authenticator", server_notes },
+        .{ "client_unknown_part", "rpc.Client.init: unknown part .credentials; the parts are .middleware", client_notes },
+        .{ "client_unknown_option", "no field named 'timeout' in struct 'app.Client.Options'", &.{"note: struct declared here"} },
+        .{ "client_credentials_literal", "coercion from enum '@typeInfo(credentials.Credentials).@\"union\".tag_type.?' to union 'credentials.Credentials' must initialize '[]const u8' field 'bearer'", &.{ "note: field 'bearer' declared here", "note: union declared here" } },
         .{ "client_not_a_method", "rpc.Client.call: the method must be a method of a contract, such as UserApi.getUser; got the contract users.v1 itself", call_notes },
     }) |case| {
         const compile = b.addTest(.{

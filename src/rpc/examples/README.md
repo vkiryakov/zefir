@@ -75,11 +75,11 @@ pub fn main(init: std.process.Init) !void {
     var memory: rpc.testing.MemoryTransport = try .init(gpa, .{});
     defer memory.deinit(io);
     var users: Users = .{};
-    var server = try rpc.Server.init(gpa, .{ .transport = memory.serverTransport(), .handlers = .{&users} });
+    var server = try rpc.Server.init(gpa, .{ .handlers = .{&users} }, .{ .transport = memory.serverTransport() });
     defer server.deinit(io);
     try server.start(io);
 
-    var client = try rpc.Client.init(gpa, .{ .transport = memory.clientTransport() });
+    var client = try rpc.Client.init(gpa, .{}, .{ .transport = memory.clientTransport() });
     defer client.deinit();
     for ([_]u64{ 42, 7 }) |id| {
         var result = try client.call(io, .root, UserApi.getUser, .{ .id = id }, .{});
@@ -426,13 +426,14 @@ pub fn main(init: std.process.Init) !void {
     defer memory.deinit(io);
 
     var server = try rpc.Server.init(gpa, .{
-        .transport = memory.serverTransport(),
         .handlers = .{&users},
+    }, .{
+        .transport = memory.serverTransport(),
     });
     defer server.deinit(io); // stops the server, after the client's deinit
     try server.start(io);
 
-    var client = try rpc.Client.init(gpa, .{ .transport = memory.clientTransport() });
+    var client = try rpc.Client.init(gpa, .{}, .{ .transport = memory.clientTransport() });
     defer client.deinit();
     // The caller's context. It has no deadline, so every call gets the
     // client's default timeout, 3 seconds.
@@ -636,10 +637,12 @@ What each part does:
   gets `rpc_nats.Transport` instead, on a connection to the broker, and
   its contract, handlers and calls stay the same; see the
   [guide of rpc-nats](../../rpc-nats/examples/README.md).
-- `rpc.Server.init` builds the server from its options and checks every
-  handler when it compiles. `start` starts taking calls; `deinit`, in the
-  defer, stops the server and waits for the calls in flight.
-- `rpc.Client.init` builds a client on the client side of the transport.
+- `rpc.Server.init` builds the server from its parts, the handlers, and
+  its options, the transport, and checks every handler when it compiles.
+  `start` starts taking calls; `deinit`, in the defer, stops the server
+  and waits for the calls in flight.
+- `rpc.Client.init` builds a client on the client side of the transport;
+  it has no parts here, `.{}`.
   `client.call(io, ctx, api.UserApi.getUser, .{ .id = ada.id }, .{})` takes
   the method itself, so the compiler knows the types: the request must fit
   `GetUserRequest`, and `.ok` is an `api.User`.
@@ -852,24 +855,29 @@ constants: the server encodes the response before it frees the arena. Work
 in parallel inside a method goes in an `std.Io.Group` of its own that the
 method awaits before it returns; its tasks do not use the arena.
 
-### The server's options
+### The server's parts and options
+
+`rpc.Server.init(gpa, parts, options)` takes two struct literals. The
+parts are what the compiler checks by their types:
+
+| Part | What |
+| --- | --- |
+| `.handlers` | pointers to the handlers, at least one: `.{ &users, &orders }`; two handlers may not serve one route |
+| `.authenticator` | optional: a pointer to the object that checks credentials (see [Authentication](#authentication)) |
+| `.middleware` | optional: the server's level of middleware, around every call: `.{ &access_log, &limiter }` |
+
+The options are `rpc.Server.Options`, values of fixed types:
 
 | Option | What |
 | --- | --- |
 | `.transport` | the server side of a transport: `memory.serverTransport()`, `bus.serverTransport()` |
-| `.handlers` | pointers to the handlers, at least one: `.{ &users, &orders }`; two handlers may not serve one route |
-| `.authenticator` | optional: a pointer to the object that checks credentials (see [Authentication](#authentication)) |
-| `.middleware` | optional: the server's level of middleware, around every call: `.{ &access_log, &limiter }` |
 | `.limits` | optional: the limits to change, `.{ .max_active_tasks = 1024 }` (see [Limits](#limits)) |
 | `.shutdown_grace` | optional: how long calls in flight may run after the stop begins; 10 seconds |
 
-The options are a struct literal of any type, so a value inside them has
-no type to take a declaration literal from: write
-`.shutdown_grace = std.Io.Duration.fromSeconds(10)`, not
-`.shutdown_grace = .fromSeconds(10)`, which does not compile; the same
-among the limits, `.limits = .{ .max_timeout = std.Io.Duration.fromSeconds(60) }`.
-Inside the options of a call, `.timeout = .fromMilliseconds(500)` works:
-that field has its type.
+The options have their type, so declaration literals work in them:
+`.shutdown_grace = .fromSeconds(10)`, and among the limits,
+`.limits = .{ .max_timeout = .fromSeconds(60) }`. Another name among the
+parts stops the build with the list of the parts.
 
 The handlers, the authenticator and the objects of middleware are borrowed:
 their owner, usually `main`, keeps them alive until the server's `deinit`.
@@ -914,14 +922,21 @@ reconnects, not the client. One client calls any contracts on its
 transport; build several when calls need other credentials or other
 middleware.
 
+`rpc.Client.init(gpa, parts, options)` takes the client's middleware as
+its one part, `.{ .middleware = .{ clientMetrics, &breaker } }`: functions
+and pointers to objects, in order; `.{}` for none. The rest are the
+options, `rpc.Client.Options`:
+
 | Option of `rpc.Client.init` | What | Default |
 | --- | --- | --- |
 | `.transport` | the client side of a transport, which outlives the client | — |
 | `.credentials` | those of every call that brings none: `.{ .bearer = token }`, `.{ .basic = .{ .user = …, .password = … } }`, `.{ .provider = … }`, `.none` | `.none` |
-| `.middleware` | the client's middleware, in order: functions and pointers to objects | `.{}` |
-| `.default_timeout` | the timeout of a call that sets none: `std.Io.Duration.fromSeconds(3)`, written in full as on the server | 3 s |
-| `.max_pending` | calls in flight at once | 1024 |
-| `.max_response_bytes` | the largest response body | 1 MiB |
+| `.default_timeout` | the timeout of a call that sets none, such as `.fromSeconds(3)`; above zero | 3 s |
+| `.max_pending` | calls in flight at once; at least one | 1024 |
+| `.max_response_bytes` | the largest response body; at least one byte | 1 MiB |
+
+A limit of zero would refuse every call: `init` returns
+`error.InvalidConfiguration` for it.
 
 `init` copies the credentials, and `deinit` wipes the copy. A `.provider`
 is for tokens that change, such as those of OAuth: an
@@ -1141,7 +1156,7 @@ pub fn main(init: std.process.Init) !void {
     var users: UserHandler = .{ .repo = &repo };
     var users_link: rpc.testing.MemoryTransport = try .init(gpa, .{});
     defer users_link.deinit(io);
-    var users_server = try rpc.Server.init(gpa, .{ .transport = users_link.serverTransport(), .handlers = .{&users} });
+    var users_server = try rpc.Server.init(gpa, .{ .handlers = .{&users} }, .{ .transport = users_link.serverTransport() });
     defer users_server.deinit(io);
     try users_server.start(io);
 
@@ -1149,8 +1164,9 @@ pub fn main(init: std.process.Init) !void {
     // The defers stop the server first, then free the client it uses.
     var breaker: CircuitBreaker = .{ .logger = logger.scoped("breaker") };
     var users_client = try rpc.Client.init(gpa, .{
-        .transport = users_link.clientTransport(),
         .middleware = .{&breaker},
+    }, .{
+        .transport = users_link.clientTransport(),
     });
     defer users_client.deinit();
     var orders: OrderHandler = .{
@@ -1159,12 +1175,12 @@ pub fn main(init: std.process.Init) !void {
     };
     var orders_link: rpc.testing.MemoryTransport = try .init(gpa, .{});
     defer orders_link.deinit(io);
-    var orders_server = try rpc.Server.init(gpa, .{ .transport = orders_link.serverTransport(), .handlers = .{&orders} });
+    var orders_server = try rpc.Server.init(gpa, .{ .handlers = .{&orders} }, .{ .transport = orders_link.serverTransport() });
     defer orders_server.deinit(io);
     try orders_server.start(io);
 
     // The shop, a client of orders.
-    var client = try rpc.Client.init(gpa, .{ .transport = orders_link.clientTransport() });
+    var client = try rpc.Client.init(gpa, .{}, .{ .transport = orders_link.clientTransport() });
     defer client.deinit();
 
     // A shop built against an older orders-api, whose Item had no rule for
@@ -1372,7 +1388,7 @@ Links stand on three levels:
 
 | Level | Where | An object comes from |
 | --- | --- | --- |
-| the server | `rpc.Server.init(gpa, .{ .middleware = .{ &access_log, &limiter } })` | a pointer in the tuple |
+| the server | the parts of `rpc.Server.init`: `.middleware = .{ &access_log, &limiter }` | a pointer in the tuple |
 | the handler | `rpc.implement(Api, .{ .middleware = .{.audit} })` | a field of the handler: `.audit` is `self.audit` |
 | the method | `.methods = .{ .deleteUser = .{ .middleware = .{mw.requirePermission("users.delete")} } }` | a field of the handler, the same way |
 
@@ -1770,17 +1786,18 @@ pub fn main(init: std.process.Init) !void {
     var memory: rpc.testing.MemoryTransport = try .init(gpa, .{});
     defer memory.deinit(io);
     var server = try rpc.Server.init(gpa, .{
-        .transport = memory.serverTransport(),
         .handlers = .{&users},
         .authenticator = &auth,
         // The server's level: around every call of every handler.
         .middleware = .{&limiter},
+    }, .{
+        .transport = memory.serverTransport(),
     });
     defer server.deinit(io);
     try server.start(io);
 
     // One client; every call brings the credentials of its caller.
-    var client = try rpc.Client.init(gpa, .{ .transport = memory.clientTransport() });
+    var client = try rpc.Client.init(gpa, .{}, .{ .transport = memory.clientTransport() });
     defer client.deinit();
     var admin_tokens: AdminTokens = .{ .token = config.auth.admin_token };
     const anonymous: rpc.Credentials = .none;
@@ -1874,15 +1891,17 @@ $ APP_AUTH_ADMIN_TOKEN=admin-secret APP_AUTH_REPORTING_TOKEN=reporting-secret zi
 
 `rpc.testing.Server` runs handlers with everything `rpc.Server` does around
 them, authentication, middleware, JSON, validation and the mapping of
-errors, on a memory transport, and `t.client(options)` gives clients of it.
-A test of a service needs no network:
+errors, on a memory transport of its own. Its `init` takes the parts of
+`rpc.Server.init` and the options but `.transport`, and `t.client(parts,
+options)` gives clients of it, with the parts and the options of
+`rpc.Client.init` but `.transport`. A test of a service needs no network:
 
 ```zig
 //! Tests of the users service without a network: `rpc.testing.Server`
 //! runs the handlers with the whole chain of `rpc.Server` (authentication,
 //! middleware, JSON, validation, the mapping of errors) on a memory
-//! transport, and `t.client(.{})` calls them. Building the server here also
-//! runs the compile-time checks of the handlers in `zig build test`.
+//! transport, and `t.client(.{}, .{})` calls them. Building the server here
+//! also runs the compile-time checks of the handlers in `zig build test`.
 
 const std = @import("std");
 const rpc = @import("rpc");
@@ -1897,9 +1916,9 @@ test "a created user can be read back" {
     var repo: UserRepository = .init(testing.allocator);
     defer repo.deinit();
     var users: UserHandler = .{ .repo = &repo };
-    var t = try rpc.testing.Server.init(testing.allocator, testing.io, .{ .handlers = .{&users} });
+    var t = try rpc.testing.Server.init(testing.allocator, testing.io, .{ .handlers = .{&users} }, .{});
     defer t.deinit();
-    var client = try t.client(.{});
+    var client = try t.client(.{}, .{});
     defer client.deinit();
 
     var created = try client.call(testing.io, .root, api.UserApi.createUser, .{ .name = "Ada Lovelace", .email = "ada@example.com" }, .{});
@@ -1913,9 +1932,9 @@ test "an unknown user is the failure users.not_found" {
     var repo: UserRepository = .init(testing.allocator);
     defer repo.deinit();
     var users: UserHandler = .{ .repo = &repo };
-    var t = try rpc.testing.Server.init(testing.allocator, testing.io, .{ .handlers = .{&users} });
+    var t = try rpc.testing.Server.init(testing.allocator, testing.io, .{ .handlers = .{&users} }, .{});
     defer t.deinit();
-    var client = try t.client(.{});
+    var client = try t.client(.{}, .{});
     defer client.deinit();
 
     var r = try client.call(testing.io, .root, api.UserApi.getUser, .{ .id = 42 }, .{});
@@ -1928,9 +1947,9 @@ test "a request against the rules is not sent" {
     var repo: UserRepository = .init(testing.allocator);
     defer repo.deinit();
     var users: UserHandler = .{ .repo = &repo };
-    var t = try rpc.testing.Server.init(testing.allocator, testing.io, .{ .handlers = .{&users} });
+    var t = try rpc.testing.Server.init(testing.allocator, testing.io, .{ .handlers = .{&users} }, .{});
     defer t.deinit();
-    var client = try t.client(.{});
+    var client = try t.client(.{}, .{});
     defer client.deinit();
 
     var r = try client.call(testing.io, .root, api.UserApi.createUser, .{ .name = "", .email = "ada@example.com" }, .{});
@@ -1944,9 +1963,9 @@ test "a lost response ends the call at its deadline" {
     var repo: UserRepository = .init(testing.allocator);
     defer repo.deinit();
     var users: UserHandler = .{ .repo = &repo };
-    var t = try rpc.testing.Server.init(testing.allocator, testing.io, .{ .handlers = .{&users} });
+    var t = try rpc.testing.Server.init(testing.allocator, testing.io, .{ .handlers = .{&users} }, .{});
     defer t.deinit();
-    var client = try t.client(.{});
+    var client = try t.client(.{}, .{});
     defer client.deinit();
 
     // The hooks of the memory transport bring the failures of a network.
@@ -1988,9 +2007,9 @@ test "deleteUser needs the permission users.delete" {
     var users: GuardedUsers = .{ .inner = .{ .repo = &repo } };
     // Every call with credentials, whatever they are, gets this identity.
     var auth: rpc.testing.StaticAuthenticator = .{ .identity = .{ .subject = "reporting" } };
-    var t = try rpc.testing.Server.init(testing.allocator, testing.io, .{ .handlers = .{&users}, .authenticator = &auth });
+    var t = try rpc.testing.Server.init(testing.allocator, testing.io, .{ .handlers = .{&users}, .authenticator = &auth }, .{});
     defer t.deinit();
-    var client = try t.client(.{ .credentials = .{ .bearer = "test" } });
+    var client = try t.client(.{}, .{ .credentials = .{ .bearer = "test" } });
     defer client.deinit();
 
     var created = try client.call(testing.io, .root, api.UserApi.createUser, .{ .name = "Ada Lovelace", .email = "ada@example.com" }, .{});
@@ -2009,9 +2028,10 @@ test "deleteUser needs the permission users.delete" {
 }
 ```
 
-- `rpc.testing.Server.init` takes the options of `rpc.Server.init` without
-  `.transport`, and starts the server; `deinit` stops it. Clients end
-  before it: declare them after it, and their defers run first.
+- `rpc.testing.Server.init` takes the parts of `rpc.Server.init` and its
+  options but `.transport`, and starts the server; `deinit` stops it.
+  Clients end before it: declare them after it, and their defers run
+  first.
 - `rpc.testing.StaticAuthenticator` gives every call with credentials the
   identity it holds, and makes calls without credentials anonymous. It
   checks nothing, so it is for tests only.
@@ -2098,15 +2118,16 @@ pub fn main(init: std.process.Init) !void {
     var memory: rpc.testing.MemoryTransport = try .init(gpa, .{});
     defer memory.deinit(io);
     var server = try rpc.Server.init(gpa, .{
-        .transport = memory.serverTransport(),
         .handlers = .{&users},
         // First in the chain, it sees the outcome of every link after it.
         .middleware = .{&access_log},
+    }, .{
+        .transport = memory.serverTransport(),
     });
     defer server.deinit(io);
     try server.start(io);
 
-    var client = try rpc.Client.init(gpa, .{ .transport = memory.clientTransport() });
+    var client = try rpc.Client.init(gpa, .{}, .{ .transport = memory.clientTransport() });
     defer client.deinit();
 
     // The trace of the request the gateway got, from its traceparent header.
@@ -2271,14 +2292,15 @@ pub fn main(init: std.process.Init) !void {
     var memory: rpc.testing.MemoryTransport = try .init(gpa, .{});
     defer memory.deinit(io);
     var server = try rpc.Server.init(gpa, .{
-        .transport = memory.serverTransport(),
         .handlers = .{&users},
         .middleware = .{&idempotency},
+    }, .{
+        .transport = memory.serverTransport(),
     });
     defer server.deinit(io);
     try server.start(io);
 
-    var client = try rpc.Client.init(gpa, .{ .transport = memory.clientTransport() });
+    var client = try rpc.Client.init(gpa, .{}, .{ .transport = memory.clientTransport() });
     defer client.deinit();
 
     // The key names the operation, here the sign-up form the user sent: it
@@ -2435,11 +2457,10 @@ pub fn main(init: std.process.Init) !void {
     var memory: rpc.testing.MemoryTransport = try .init(gpa, .{});
     defer memory.deinit(io);
     var server = try rpc.Server.init(gpa, .{
-        .transport = memory.serverTransport(),
         .handlers = .{&reports},
-        // A value in the options of init is written in full:
-        // std.Io.Duration.fromMilliseconds, not .fromMilliseconds.
-        .shutdown_grace = std.Io.Duration.fromMilliseconds(config.shutdown.grace_ms),
+    }, .{
+        .transport = memory.serverTransport(),
+        .shutdown_grace = .fromMilliseconds(config.shutdown.grace_ms),
         // Two calls at once; one more is refused at admission.
         .limits = .{ .max_inflight = 2 },
     });
@@ -2447,7 +2468,7 @@ pub fn main(init: std.process.Init) !void {
     try server.start(io);
     app.info("Serving", .{ .state = server.state(), .ready = server.isReady() });
 
-    var client = try rpc.Client.init(gpa, .{ .transport = memory.clientTransport() });
+    var client = try rpc.Client.init(gpa, .{}, .{ .transport = memory.clientTransport() });
     defer client.deinit();
 
     // Two calls in tasks of their own; the stop begins while both run. On an

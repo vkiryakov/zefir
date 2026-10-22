@@ -57,7 +57,7 @@ test "rpc.Server and rpc.Client over the mailbox" {
 
     var server_side: mailbox.Server = .init(&broker);
     var users: UserHandler = .{};
-    var server = try rpc.Server.init(gpa, .{ .transport = server_side.serverTransport(), .handlers = .{&users} });
+    var server = try rpc.Server.init(gpa, .{ .handlers = .{&users} }, .{ .transport = server_side.serverTransport() });
     defer server.deinit(io);
     try server.start(io);
 
@@ -65,7 +65,7 @@ test "rpc.Server and rpc.Client over the mailbox" {
     // Before connect: deinit also frees a client whose connect failed.
     defer client_side.deinit(io);
     try client_side.connect(io);
-    var client = try rpc.Client.init(gpa, .{ .transport = client_side.clientTransport() });
+    var client = try rpc.Client.init(gpa, .{}, .{ .transport = client_side.clientTransport() });
     defer client.deinit();
 
     var found = try client.call(io, .root, api.UserApi.getUser, .{ .id = 1 }, .{});

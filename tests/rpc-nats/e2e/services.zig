@@ -84,13 +84,13 @@ pub const Node = struct {
         n.adapter = .{ .client = &n.nc };
         n.bus = try .init(testing.allocator, n.adapter.conn(), options);
         errdefer n.bus.deinit(io);
-        n.client = try .init(testing.allocator, .{ .transport = n.bus.clientTransport() });
+        n.client = try .init(testing.allocator, .{}, .{ .transport = n.bus.clientTransport() });
         n.server = null;
     }
 
     /// Serves `handler` on the transport.
     pub fn serve(n: *Node, io: Io, handler: anytype) !void {
-        n.server = try rpc.Server.init(testing.allocator, .{ .transport = n.bus.serverTransport(), .handlers = .{handler} });
+        n.server = try rpc.Server.init(testing.allocator, .{ .handlers = .{handler} }, .{ .transport = n.bus.serverTransport() });
         errdefer {
             n.server.?.deinit(io);
             n.server = null;

@@ -5,7 +5,7 @@
 //! ```zig
 //! var bus: rpc_nats.Transport = try .init(gpa, adapter.conn(), .{});
 //! defer bus.deinit(io); // after the server's deinit and the last call
-//! var server: rpc.Server = try .init(gpa, .{ .transport = bus.serverTransport(), .handlers = .{&users} });
+//! var server: rpc.Server = try .init(gpa, .{ .handlers = .{&users} }, .{ .transport = bus.serverTransport() });
 //! ```
 //!
 //! The server subscribes to the subject of every route in the queue group
