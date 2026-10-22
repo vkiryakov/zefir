@@ -49,6 +49,19 @@ pub fn within(io: Io, duration: Io.Duration) redis.OperationContext {
     return .of(core.Context.root.withDeadline(.after(time.now(io), duration)));
 }
 
+/// Checks `timeout_ms`, the timeout that a blocking command sent under a
+/// deadline of 1 s set at `since` or later: what that deadline left
+/// beyond the margin of 150 ms as the command went out, so 850 at most,
+/// and less than 850 by no more than the time since `since`, which a
+/// loaded machine may stretch. The exact rule is the test of
+/// `blocking.derive`.
+pub fn expectFromDeadline(io: Io, since: Io.Timestamp, timeout_ms: u64) !void {
+    const elapsed: u64 = @intCast(since.durationTo(time.now(io)).toMilliseconds());
+    if (timeout_ms <= 850 and timeout_ms + elapsed + 1 >= 850) return;
+    std.debug.print("a timeout of {d} ms from a deadline of 1 s, {d} ms after the deadline was set\n", .{ timeout_ms, elapsed });
+    return error.TestUnexpectedResult;
+}
+
 /// A handler of `FakeServer` that answers each command with the next of
 /// `replies`, in the order the commands come: for commands whose
 /// arguments vary, such as a timeout taken from a deadline.

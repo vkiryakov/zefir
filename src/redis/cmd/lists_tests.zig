@@ -109,6 +109,7 @@ fn blocking(io: Io) !void {
     defer t.deinit();
 
     const popped: redis.Popped([]const u8) = .{ .key = "q", .value = "job" };
+    const start = Io.Clock.awake.now(io);
     try testing.expectEqualDeep(@as(?redis.Popped([]const u8), popped), try t.runIn(io, within(io, .fromSeconds(1)), cmd.blpop([]const u8, &.{"q"}, .{ .at_most = .fromSeconds(30) })));
     try testing.expectEqualDeep(@as(?redis.Popped([]const u8), null), try t.runIn(io, within(io, .fromSeconds(1)), cmd.blpop([]const u8, &.{"q"}, .forever)));
     const right: redis.Popped([]const u8) = .{ .key = "r", .value = "x" };
@@ -119,10 +120,7 @@ fn blocking(io: Io) !void {
 
     try expectSent(io, &server, 0, &.{ "BLPOP", "q" });
     try expectSent(io, &server, 1, &.{ "BLPOP", "q" });
-    for ([_]usize{ 0, 1, 4 }) |i| {
-        const timeout_ms = try sent(io, &server, i);
-        try testing.expect(timeout_ms >= 800 and timeout_ms <= 850);
-    }
+    for ([_]usize{ 0, 1, 4 }) |i| try fixture.expectFromDeadline(io, start, try sent(io, &server, i));
     try expectSent(io, &server, 2, &.{ "BRPOP", "q", "r" });
     try testing.expectEqualStrings("0.2", (try server.entry(io, 2)).args[3]);
     try expectSent(io, &server, 3, &.{ "BLMOVE", "src", "dst", "LEFT", "RIGHT" });

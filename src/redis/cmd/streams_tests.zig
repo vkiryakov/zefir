@@ -123,14 +123,14 @@ fn blocking(io: Io) !void {
     try t.init(io, &server);
     defer t.deinit();
 
+    const start = Io.Clock.awake.now(io);
     try testing.expectEqualDeep(@as([]const Entry, &.{order}), try t.runIn(io, within(io, .fromSeconds(1)), cmd.xread(Order, "orders", .{ .after = .latest, .block = .{ .at_most = .fromSeconds(5) } })));
     try testing.expectEqualDeep(@as([]const Entry, &.{}), try t.run(io, cmd.xreadgroup(Order, "orders", .{ .group = "g", .consumer = "c1", .block = .forever })));
     try testing.expectEqualDeep(@as([]const Entry, &.{}), try t.runIn(io, within(io, .fromSeconds(1)), cmd.xreadgroup(Order, "orders", .{ .group = "g", .consumer = "c1", .block = .{ .at_most = .fromMilliseconds(200) } })));
     // Without .block, nothing waits: a short deadline is no error.
     try testing.expectEqualDeep(@as([]const Entry, &.{order}), try t.runIn(io, within(io, .fromMilliseconds(100)), cmd.xread(Order, "orders", .{ .after = .{ .id = first } })));
 
-    const block = try blockOf(io, &server, 0);
-    try testing.expect(block >= 800 and block <= 850);
+    try fixture.expectFromDeadline(io, start, try blockOf(io, &server, 0));
     try testing.expectEqualDeep(@as([]const []const u8, &.{ "XREAD", "BLOCK" }), (try server.entry(io, 0)).args[0..2]);
     try testing.expectEqualDeep(@as([]const []const u8, &.{ "STREAMS", "orders", "$" }), (try server.entry(io, 0)).args[3..]);
     try testing.expectEqualDeep(@as([]const []const u8, &.{ "XREADGROUP", "GROUP", "g", "c1", "BLOCK", "0", "STREAMS", "orders", ">" }), (try server.entry(io, 1)).args);

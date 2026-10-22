@@ -19,6 +19,7 @@ const contract = @import("../cmd/contract.zig");
 const blocking = @import("../engine/blocking.zig");
 const time = @import("../engine/time.zig");
 const within5s = @import("time_limit.zig").within5s;
+const expectFromDeadline = @import("../cmd/fixture.zig").expectFromDeadline;
 
 /// BLPOP key timeout, the timeout in seconds; its reply read as a number.
 const Pop = struct {
@@ -180,13 +181,11 @@ fn fromDeadline(io: Io) !void {
     var client: Client = undefined;
     try connected(io, &client, .{ .url = server.url() });
     defer client.deinit();
+    const start = time.now(io);
     try testing.expectEqual(@as(?i64, null), try client.run(io, within(io, .fromSeconds(1)), pop(.{ .at_most = .fromSeconds(30) }), .{}));
     try testing.expectEqual(@as(?i64, null), try client.run(io, within(io, .fromSeconds(1)), Read{ .key = "s", .wait = .{ .at_most = .fromSeconds(30) } }, .{}));
     try testing.expectEqual(@as(?i64, null), try client.run(io, within(io, .fromSeconds(1)), pop(.forever), .{}));
-    for (0..3) |i| {
-        const timeout_ms = try sent(io, &server, i);
-        try testing.expect(timeout_ms >= 800 and timeout_ms <= 850);
-    }
+    for (0..3) |i| try expectFromDeadline(io, start, try sent(io, &server, i));
     try testing.expectEqual(@as(?i64, null), try client.run(io, within(io, .fromSeconds(1)), pop(.{ .at_most = ms(200) }), .{}));
     try testing.expectEqual(@as(u64, 200), try sent(io, &server, 3));
 }
@@ -278,21 +277,23 @@ fn inPipeline(io: Io) !void {
     var server: FakeServer = try .startWith(testing.allocator, io, .{ .handler = .init(&late) });
     defer server.stop(io);
     var client: Client = undefined;
-    try connected(io, &client, .{ .url = server.url(), .timeout = ms(300) });
+    try connected(io, &client, .{ .url = server.url(), .timeout = ms(500) });
     defer client.deinit();
+    const start = time.now(io);
     const r = try client.pipeline(io, within(io, .fromSeconds(1)), .{ cmd.raw(?i64, .{ "GET", "k" }), pop(.{ .at_most = .fromSeconds(30) }), pop(.{ .at_most = ms(100) }) }, .{});
     try testing.expectEqual(@as(?i64, null), try r[1]);
-    const first = try sent(io, &server, 1);
-    try testing.expect(first >= 800 and first <= 850);
+    try expectFromDeadline(io, start, try sent(io, &server, 1));
     try testing.expectEqual(@as(u64, 100), try sent(io, &server, 2));
-    // Without a deadline: 300 ms for each, and timeout, 300 ms, more.
-    late.delay_ms.store(350, .release);
-    const both = [_]Pop{ pop(.{ .at_most = ms(300) }), pop(.{ .at_most = ms(300) }) };
+    // Without a deadline: 600 ms for each, and timeout, 500 ms, more, so
+    // 1.7 s. The server answers each 610 ms late, 1.22 s in all: longer
+    // than one of them and timeout, and well within the deadline.
+    late.delay_ms.store(610, .release);
+    const both = [_]Pop{ pop(.{ .at_most = ms(600) }), pop(.{ .at_most = ms(600) }) };
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const done = try client.pipeline(io, .of(.root), &both, .{ .allocator = arena.allocator() });
     for (done) |each| try testing.expectEqual(@as(?i64, null), try each);
-    try testing.expectEqual(@as(u64, 300), try sent(io, &server, 3));
+    try testing.expectEqual(@as(u64, 600), try sent(io, &server, 3));
 }
 
 test "in a transaction a blocking command does not block: its timeout goes as given, and a short deadline is no error" {
