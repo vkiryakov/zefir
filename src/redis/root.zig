@@ -113,6 +113,7 @@ test {
     _ = @import("cmd/hashes_tests.zig");
     _ = @import("cmd/lists_tests.zig");
     _ = @import("cmd/sets_tests.zig");
+    _ = @import("cmd/coverage_tests.zig");
 }
 
 test "the package version reaches the module" {
