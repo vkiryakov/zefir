@@ -1,4 +1,4 @@
-//! The shop of the design of zefir.App, shop/, against real servers: the
+//! The shop with NATS and MongoDB, shop/, against real servers: the
 //! NATS server `plain` and the mongod server `mongo-plain` of the
 //! repository's docker-compose.yml, which `zig build up` starts. The test
 //! starts the shop on a free port, waits until it is ready, places an order

@@ -1,7 +1,7 @@
 //! The code of zefir.App that runs on zio, in a package of its own: the
 //! end-to-end tests of App with real servers, programs that the tests run
-//! in processes of their own, the shop of the design against NATS and
-//! mongod, and the shop of the guide of App.
+//! in processes of their own, the shop with NATS and MongoDB, and the
+//! shop of the guide of App.
 //!
 //!   zig build e2e        run the end-to-end tests: servers of zefir-http on
 //!                        http.native over loopback and of zefir-rpc on the
@@ -13,7 +13,7 @@
 //!                        each with its response, and the shop's log
 //!                        (Linux and macOS)
 //!   zig build shop       start the NATS and mongod servers in Docker, then
-//!                        run the shop of the design of App, shop/,
+//!                        run the shop with NATS and MongoDB, shop/,
 //!                        against them: an order over HTTP, read back over
 //!                        rpc through NATS, then SIGTERM (Linux and macOS)
 //!   zig build up         start the NATS server `plain` and the mongod
@@ -143,7 +143,7 @@ pub fn build(b: *std.Build) void {
         step.dependOn(&run_guide.step);
     }
 
-    // The shop of the design of App, shop/: its program, and the test that
+    // The shop with NATS and MongoDB, shop/: its program, and the test that
     // starts it against the servers of `up`, whose path it gets.
     const shop = b.addExecutable(.{
         .name = "shop",
@@ -177,7 +177,7 @@ pub fn build(b: *std.Build) void {
     run_shop.stdio = .inherit;
     run_shop.has_side_effects = true;
     run_shop.step.dependOn(&up.step);
-    b.step("shop", "Start NATS and mongod in Docker, then run the shop of the App design against them").dependOn(&run_shop.step);
+    b.step("shop", "Start NATS and mongod in Docker, then run the shop with NATS and MongoDB, shop/, against them").dependOn(&run_shop.step);
 
     // Everything above built and nothing run.
     const check_step = b.step("check", "Build the end-to-end tests, the programs, the shops and the session of the guide without running them");

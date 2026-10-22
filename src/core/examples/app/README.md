@@ -163,8 +163,8 @@ orders; another service of the shop's company asks for a user over rpc;
 Kubernetes asks `/readyz` whether the shop takes work. It has two servers,
 HTTP for the users and rpc for the other services, and two stores, one for
 the users and one for the orders. It keeps everything in memory, so that it
-runs alone: no database and no NATS are needed. The same shop against NATS
-and MongoDB is in `tests/app/shop/` of the repository.
+runs alone: no database and no NATS are needed. A shop of the same shape
+against NATS and MongoDB is in `tests/app/shop/` of the repository.
 
 The shop is three modules. `AppModule` is the root: the module that `main`
 gives to App, which reaches the others through its imports.

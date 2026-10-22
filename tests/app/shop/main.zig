@@ -1,6 +1,6 @@
-//! The shop of the design of zefir.App, against NATS and MongoDB: HTTP on
-//! its port, rpc over NATS, two databases of one client of Mongo. SIGTERM
-//! or Ctrl+C stops it gracefully. Settings: Config.zig.
+//! The shop with NATS and MongoDB, on zefir.App: HTTP on its port, rpc
+//! over NATS, two databases of one client of Mongo. SIGTERM or Ctrl+C
+//! stops it gracefully. Settings: Config.zig.
 
 const std = @import("std");
 const zio = @import("zio");

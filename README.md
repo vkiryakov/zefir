@@ -512,7 +512,7 @@ The end-to-end tests of zefir.App, with the shop of its guide, are a package of 
 cd tests/app
 zig build e2e        # the end-to-end tests, programs stopped by SIGTERM, then the shop of the guide with its curl commands, checked against the guide
 zig build examples   # only the shop of the guide and its check (Linux and macOS)
-zig build shop       # the shop of the App design against NATS and mongod, which it starts in Docker
+zig build shop       # the shop with NATS and MongoDB, shop/, against the servers it starts in Docker
 zig build check      # build all of it without running it; no servers needed
 ```
 
