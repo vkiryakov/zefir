@@ -829,6 +829,7 @@ fn routeName(ctx: *const Context) []const u8 {
 }
 
 const testing = std.testing;
+const far = waiting.far;
 const TestingBackend = @import("testing/Backend.zig");
 const routes = @import("routes.zig");
 const Json = @import("dto.zig").Json;
@@ -2246,7 +2247,7 @@ test "requestStop: requests finish within shutdown_grace, the rest are canceled,
     server.requestStop(io);
     // The quick ones end within the grace, with their responses.
     stops.gate.set(io);
-    try server.shutdown(io);
+    try server.shutdown(io, far(io));
     // The stuck ones are canceled when the grace is over.
     const elapsed = sinceMs(io, start);
     try testing.expect(elapsed >= 300 and elapsed < 1300);
@@ -2298,7 +2299,7 @@ test "shutdown gives up on a request that ignores its cancelation; the stop ends
     var stops: StopController = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    // No onFinish to wait for: the budget after the grace is one second.
+    // No onFinish to wait for.
     var server = try Server.init(testing.allocator, .{ .controllers = .{&stops} }, .{ .listen = .{ .backend = b.backend() }, .shutdown_grace = std.Io.Duration.fromMilliseconds(50), .finish_timeout = std.Io.Duration.zero });
     defer server.deinit(io);
     try server.start(io);
@@ -2309,10 +2310,12 @@ test "shutdown gives up on a request that ignores its cancelation; the stop ends
     defer if (result) |*res| res.deinit();
     try waitCount(io, &stops.entered, 1);
 
-    // The grace, then a second for the canceled request: it works on.
+    // A deadline a second away leaves no grace: the request is canceled at
+    // once, works on, and shutdown waits until 250 ms before the deadline.
     const start = std.Io.Clock.awake.now(io);
-    try testing.expectError(error.ShutdownTimeout, server.shutdown(io));
-    try testing.expect(sinceMs(io, start) >= 1000);
+    const deadline: std.Io.Clock.Timestamp = .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake });
+    try testing.expectError(error.ShutdownTimeout, server.shutdown(io, deadline));
+    try testing.expect(sinceMs(io, start) >= 750);
     try testing.expectEqual(Server.State.draining, server.state());
     // The stop ends when the request does, without a response.
     try server.wait(io);
@@ -2367,7 +2370,7 @@ test "the stop does not cut short an onFinish at work: it gets its .finish_timeo
     // The grace ends while the onFinish works; the stop's cancelation does
     // not reach it, and the stop ends with it, in time.
     const start = std.Io.Clock.awake.now(io);
-    try server.shutdown(io);
+    try server.shutdown(io, far(io));
     try testing.expect(sinceMs(io, start) >= 200);
     try client.await(io);
     try testing.expectEqual(204, result.?.status);

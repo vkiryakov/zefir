@@ -106,14 +106,15 @@ pub const Internal = struct {
     wait_event: std.Io.Event = .unset,
     /// Set when the server has stopped: `shutdown` returns.
     shutdown_event: std.Io.Event = .unset,
-    /// Set when the grace of a stop is over and what still runs is canceled;
-    /// also when the server stops. `shutdown` waits a second more from here.
-    grace_over: std.Io.Event = .unset,
+    /// The earliest deadline a `shutdown` gave, on the awake clock; under
+    /// `mutex`. It ends the grace of the stop in time.
+    deadline: ?core.Deadline = null,
     /// The requests at work, as `.max_in_flight` counts them: `serve` takes a
     /// place before a request runs and gives it back at its end.
     in_flight: std.atomic.Value(u32) = .init(0),
-    /// Set when `in_flight` or `streams` drops to zero. Only the lifecycle
-    /// task waits on it, and resets it before it looks at the counts.
+    /// Set when `in_flight` or `streams` drops to zero, and when a
+    /// `shutdown` brings a deadline. Only the lifecycle task waits on it,
+    /// and resets it before it looks at the counts and the deadline.
     idle: std.Io.Event = .unset,
     /// The SSE streams open now, as `.max_streams` counts them: `subscribe`
     /// takes a place, the end of the stream gives it back.
@@ -584,8 +585,9 @@ pub fn run(server: *Server, io: std.Io) (StartError || WaitError)!void {
 /// waits; a second call does nothing. The backend takes no new requests,
 /// the SSE streams are closed (each sends what was published to it before,
 /// then the end of its response), the requests at work and those streams
-/// get `.shutdown_grace` to end, those that outlive it are canceled without
-/// a response or cut, and the server stops.
+/// get `.shutdown_grace` to end (less, by the deadline of a `shutdown`),
+/// those that outlive it are canceled without a response or cut, and the
+/// server stops.
 pub fn requestStop(server: *Server, io: std.Io) void {
     server.internal.mutex.lockUncancelable(io);
     defer server.internal.mutex.unlock(io);
@@ -594,7 +596,6 @@ pub fn requestStop(server: *Server, io: std.Io) void {
             server.internal.state_value.store(.stopped, .release);
             server.internal.wait_event.set(io);
             server.internal.shutdown_event.set(io);
-            server.internal.grace_over.set(io);
         },
         .starting, .running => |current| {
             // While starting, `start` moves on to draining itself.
@@ -606,26 +607,50 @@ pub fn requestStop(server: *Server, io: std.Io) void {
     }
 }
 
-/// `requestStop` and a wait for the stop. `error.ShutdownTimeout` when
-/// requests did not end within `.shutdown_grace` and, after they were
-/// canceled, `.finish_timeout` for their `onFinish` phases and one second
-/// more (a handler that ignores its cancelation): the server stays in
-/// `draining` until they end. Treat it as fatal and end the process;
-/// `deinit` would wait for such requests without a limit.
-pub fn shutdown(server: *Server, io: std.Io) ShutdownError!void {
+/// `requestStop` and a wait for the stop, which returns 250 ms before
+/// `deadline` at the latest. The deadline cuts `.shutdown_grace`, also a
+/// grace that began before this call: the grace ends by `deadline` less
+/// one second, `.finish_timeout` and those 250 ms, so that the requests it
+/// cancels have time to end and the caller time for what comes after. Of
+/// several calls the earliest deadline counts.
+///
+/// `error.ShutdownTimeout` when the server has not stopped by then: a
+/// handler that ignores its cancelation. The server stays in `draining`
+/// until such requests end. Treat it as fatal and end the process; `deinit`
+/// would wait for them without a limit.
+pub fn shutdown(server: *Server, io: std.Io, deadline: std.Io.Clock.Timestamp) ShutdownError!void {
+    const due: core.Deadline = .at(deadline.toClock(io, .awake).raw);
+    server.limitGrace(io, due);
     server.requestStop(io);
-    try server.internal.grace_over.wait(io);
-    const budget: Duration = .{ .nanoseconds = cancel_budget.nanoseconds +| server.internal.settings.finish_timeout.nanoseconds };
-    waiting.untilSet(&server.internal.shutdown_event, io, .after(std.Io.Clock.awake.now(io), budget)) catch |err| switch (err) {
+    waiting.untilSet(&server.internal.shutdown_event, io, before(due, shutdown_reserve)) catch |err| switch (err) {
         error.Timeout => return error.ShutdownTimeout,
         error.Canceled => |e| return e,
     };
 }
 
-/// How long the requests canceled at the end of a stop's grace have to
-/// end, past the time of their `onFinish` phases, before `shutdown` gives
-/// up on them.
+/// Keeps the earliest deadline of a `shutdown` and wakes the lifecycle
+/// task, whose grace it may cut.
+fn limitGrace(server: *Server, io: std.Io, due: core.Deadline) void {
+    {
+        server.internal.mutex.lockUncancelable(io);
+        defer server.internal.mutex.unlock(io);
+        server.internal.deadline = if (server.internal.deadline) |given| given.earliest(due) else due;
+    }
+    server.internal.idle.set(io);
+}
+
+/// `due`, `by` earlier.
+fn before(due: core.Deadline, by: Duration) core.Deadline {
+    return .{ .expires = .{ .nanoseconds = due.expires.nanoseconds -| by.nanoseconds } };
+}
+
+/// The time a stop keeps after its grace, past `.finish_timeout`, for the
+/// requests it cancels to end: a deadline ends the grace this much earlier.
 const cancel_budget: Duration = .fromSeconds(1);
+
+/// How much earlier than its deadline `shutdown` returns, so that the
+/// caller still has time for what comes after it.
+const shutdown_reserve: Duration = .fromMilliseconds(250);
 
 /// Running, and the backend takes requests. Thread-safe; for health
 /// checks.
@@ -670,7 +695,6 @@ fn markStopped(server: *Server, io: std.Io) void {
     }
     server.internal.wait_event.set(io);
     server.internal.shutdown_event.set(io);
-    server.internal.grace_over.set(io);
 }
 
 fn joinLifecycle(server: *Server, io: std.Io) void {
@@ -684,9 +708,10 @@ fn joinLifecycle(server: *Server, io: std.Io) void {
 /// The lifecycle task: waits for a stop and leads it. The backend takes no
 /// new requests and the SSE streams are closed at once; the requests at
 /// work, and the streams that still send what was published before, get
-/// `.shutdown_grace` to end; then the backend cancels what still runs (a
-/// request it cancels ends without a response, a stream cut) and the server
-/// stops once every task of the backend has ended.
+/// `.shutdown_grace` to end, or less by the deadline of a `shutdown`; then
+/// the backend cancels what still runs (a request it cancels ends without
+/// a response, a stream cut) and the server stops once every task of the
+/// backend has ended.
 fn runLifecycle(server: *Server, io: std.Io) void {
     // Nothing cancels this task, and its waits are no cancelation points.
     const protection = io.swapCancelProtection(.blocked);
@@ -694,20 +719,21 @@ fn runLifecycle(server: *Server, io: std.Io) void {
     server.internal.stop_event.waitUncancelable(io);
     server.internal.start_done.waitUncancelable(io);
     if (server.internal.rollback) return;
-    const grace_end: core.Deadline = .after(std.Io.Clock.awake.now(io), server.internal.settings.shutdown_grace);
+    const began = std.Io.Clock.awake.now(io);
     server.internal.backend.stopAccepting(io);
     flow.closeStreams(server, io);
-    server.waitIdle(io, grace_end);
-    server.internal.grace_over.set(io);
+    server.waitIdle(io, began);
     server.internal.backend.cancelAll(io);
     server.internal.backend.wait(io);
     server.markStopped(io);
 }
 
-/// Waits until no request is at work and no stream is open, or `deadline`
-/// passes: the stop has closed the streams, which end once they have sent
-/// what was published before. Only the lifecycle task calls it.
-fn waitIdle(server: *Server, io: std.Io, deadline: core.Deadline) void {
+/// Waits until no request is at work and no stream is open, or the grace
+/// of the stop that `began` ends: the stop has closed the streams, which
+/// end once they have sent what was published before. A deadline of a
+/// `shutdown` that comes meanwhile wakes it to cut the grace. Only the
+/// lifecycle task calls it.
+fn waitIdle(server: *Server, io: std.Io, began: std.Io.Timestamp) void {
     while (true) {
         server.internal.idle.reset();
         // Read-modify-writes, not loads: they order the reset before the
@@ -715,12 +741,30 @@ fn waitIdle(server: *Server, io: std.Io, deadline: core.Deadline) void {
         // plain load may read the count from before that while the reset
         // lands after its `set`, and the stop would sleep through it.
         if (server.internal.in_flight.fetchAdd(0, .acq_rel) == 0 and server.internal.streams.fetchAdd(0, .acq_rel) == 0) return;
-        waiting.untilSet(&server.internal.idle, io, deadline) catch |err| switch (err) {
+        waiting.untilSet(&server.internal.idle, io, server.graceEnd(io, began)) catch |err| switch (err) {
             error.Timeout => return,
             // The lifecycle task waits with cancelation blocked.
             error.Canceled => unreachable,
         };
     }
+}
+
+/// The end of the grace of the stop that `began`: `.shutdown_grace` later,
+/// or earlier by the deadline of a `shutdown`, which keeps one second,
+/// `.finish_timeout` and the reserve of `shutdown` for what comes after;
+/// never before `began`.
+fn graceEnd(server: *Server, io: std.Io, began: std.Io.Timestamp) core.Deadline {
+    const grace: core.Deadline = .after(began, server.internal.settings.shutdown_grace);
+    const due = due: {
+        server.internal.mutex.lockUncancelable(io);
+        defer server.internal.mutex.unlock(io);
+        break :due server.internal.deadline orelse return grace;
+    };
+    const after_grace: Duration = .{ .nanoseconds = cancel_budget.nanoseconds +| server.internal.settings.finish_timeout.nanoseconds +|
+        shutdown_reserve.nanoseconds };
+    const cut = before(due, after_grace);
+    if (cut.expires.nanoseconds < began.nanoseconds) return .at(began);
+    return grace.earliest(cut);
 }
 
 const testing = std.testing;
@@ -1034,7 +1078,7 @@ test "start refuses a backend without a capability a route needs" {
     defer plain.deinit(io);
     try plain.start(io);
     try testing.expectEqual(1, fake.starts);
-    try plain.shutdown(io);
+    try plain.shutdown(io, far(io));
 
     // Static files need streaming_response.
     var no_stream: FakeBackend = .{ .can = .{ .http1 = true, .flush = true } };
@@ -1112,7 +1156,7 @@ test "lifecycle: configured → running → draining → stopped; a second start
     try testing.expectEqual(204, res.status);
     try server.wait(io);
     try testing.expectEqual(State.stopped, server.state());
-    try server.shutdown(io);
+    try server.shutdown(io, far(io));
     try testing.expectError(error.InvalidState, server.start(io));
 }
 
@@ -1123,7 +1167,155 @@ test "shutdown and deinit of a server that never started" {
     var health: HealthController = .{};
     var server = try init(testing.allocator, .{ .controllers = .{&health} }, .{ .listen = .{ .backend = backend.backend() } });
     defer server.deinit(io);
-    try server.shutdown(io);
+    try server.shutdown(io, far(io));
     try testing.expectEqual(State.stopped, server.state());
     try testing.expectError(error.InvalidState, server.start(io));
+}
+
+/// A route that holds its request: on a gate the test opens in its
+/// `defer`, or for `sleep`. `deaf` ignores the request's cancelation and
+/// waits for the gate alone.
+const HoldController = struct {
+    entered: std.Io.Event = .unset,
+    gate: std.Io.Event = .unset,
+    sleep: ?Duration = null,
+    deaf: bool = false,
+    /// The handler's wait ended with `error.Canceled`, at `canceled_at`.
+    canceled: std.atomic.Value(bool) = .init(false),
+    canceled_at: std.Io.Timestamp = .zero,
+
+    pub const http_routes = route_decls.routes(.{ .methods = .{ .hold = route_decls.get("/hold", .{}) } });
+
+    pub fn hold(self: *HoldController, ctx: *Context) !void {
+        const io = ctx.io();
+        self.entered.set(io);
+        if (self.deaf) return self.gate.waitUncancelable(io);
+        const held = if (self.sleep) |d| io.sleep(d, .awake) else self.gate.wait(io);
+        held catch |err| {
+            self.canceled_at = std.Io.Clock.awake.now(io);
+            self.canceled.store(true, .release);
+            return err;
+        };
+    }
+};
+
+/// A server of a `HoldController` with the grace `grace` and a
+/// `.finish_timeout` of 200 ms, started, with one request held in it;
+/// `stop` opens the gate, ends the request and frees it all.
+const HoldFixture = struct {
+    holder: HoldController = .{},
+    backend: TestingBackend = undefined,
+    server: Server = undefined,
+    pending: std.Io.Future(TestingBackend.RequestError!TestingBackend.Response) = undefined,
+
+    fn start(f: *HoldFixture, io: std.Io, grace: Duration) !void {
+        f.backend = .init(testing.allocator);
+        errdefer f.backend.deinit();
+        f.server = try init(testing.allocator, .{ .controllers = .{&f.holder} }, .{
+            .listen = .{ .backend = f.backend.backend() },
+            .shutdown_grace = grace,
+            .finish_timeout = .fromMilliseconds(200),
+        });
+        errdefer f.server.deinit(io);
+        try f.server.start(io);
+        f.pending = try io.concurrent(requestHold, .{ &f.backend, io });
+        f.holder.entered.wait(io) catch |err| {
+            f.holder.gate.set(io);
+            if (f.pending.await(io)) |res| {
+                var r = res;
+                r.deinit();
+            } else |_| {}
+            return err;
+        };
+    }
+
+    fn stop(f: *HoldFixture, io: std.Io) void {
+        f.holder.gate.set(io);
+        if (f.pending.await(io)) |res| {
+            var r = res;
+            r.deinit();
+        } else |_| {}
+        f.server.deinit(io);
+        f.backend.deinit();
+    }
+};
+
+fn requestHold(backend: *TestingBackend, io: std.Io) TestingBackend.RequestError!TestingBackend.Response {
+    return backend.request(io, .{ .method = .GET, .target = "/hold" });
+}
+
+/// Milliseconds from `deadline` to `t`: negative before it.
+fn msPast(deadline: std.Io.Clock.Timestamp, t: std.Io.Timestamp) i64 {
+    return deadline.raw.durationTo(t).toMilliseconds();
+}
+
+const far = waiting.far;
+
+test "a deadline before the end of the grace cancels the requests in time" {
+    const io = testing.io;
+    var f: HoldFixture = .{};
+    try f.start(io, .fromSeconds(10));
+    defer f.stop(io);
+
+    const deadline: std.Io.Clock.Timestamp = .fromNow(io, .{ .raw = .fromSeconds(3), .clock = .awake });
+    try f.server.shutdown(io, deadline);
+    const returned = std.Io.Clock.awake.now(io);
+    // The grace ended 1 s, .finish_timeout and r before the deadline, not
+    // after 10 s, and the request was canceled then.
+    try testing.expect(f.holder.canceled.load(.acquire));
+    try testing.expect(msPast(deadline, f.holder.canceled_at) >= -1450);
+    try testing.expect(msPast(deadline, returned) <= -250 + 50);
+    try testing.expectEqual(State.stopped, f.server.state());
+}
+
+test "a deadline that comes after requestStop shortens the grace" {
+    const io = testing.io;
+    var f: HoldFixture = .{};
+    try f.start(io, .fromSeconds(10));
+    defer f.stop(io);
+
+    // The grace of 10 s runs: the backend takes no new requests.
+    f.server.requestStop(io);
+    var tries: u32 = 0;
+    while (f.backend.backend().isReady()) : (tries += 1) {
+        if (tries == 2000) return error.TestUnexpectedResult;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+    const deadline: std.Io.Clock.Timestamp = .fromNow(io, .{ .raw = .fromSeconds(2), .clock = .awake });
+    try f.server.shutdown(io, deadline);
+    const returned = std.Io.Clock.awake.now(io);
+    try testing.expect(f.holder.canceled.load(.acquire));
+    try testing.expect(msPast(deadline, f.holder.canceled_at) >= -1450);
+    try testing.expect(msPast(deadline, returned) <= -250 + 50);
+    try testing.expectEqual(State.stopped, f.server.state());
+}
+
+test "a handler deaf to cancelation: shutdown returns ShutdownTimeout by deadline − r" {
+    const io = testing.io;
+    var f: HoldFixture = .{ .holder = .{ .deaf = true } };
+    try f.start(io, .fromSeconds(10));
+    // Opens the gate first: the request ends, then the stop.
+    defer f.stop(io);
+
+    const deadline: std.Io.Clock.Timestamp = .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake });
+    try testing.expectError(error.ShutdownTimeout, f.server.shutdown(io, deadline));
+    const returned = std.Io.Clock.awake.now(io);
+    try testing.expect(msPast(deadline, returned) >= -250);
+    try testing.expect(msPast(deadline, returned) <= -250 + 100);
+    try testing.expectEqual(State.draining, f.server.state());
+}
+
+test "a far deadline keeps shutdown_grace" {
+    const io = testing.io;
+    var f: HoldFixture = .{ .holder = .{ .sleep = .fromMilliseconds(500) } };
+    try f.start(io, .fromMilliseconds(300));
+    defer f.stop(io);
+
+    const begun = std.Io.Clock.awake.now(io);
+    try f.server.shutdown(io, far(io));
+    // The request of 500 ms is canceled at the end of the grace, 300 ms.
+    try testing.expect(f.holder.canceled.load(.acquire));
+    const at = begun.durationTo(f.holder.canceled_at).toMilliseconds();
+    try testing.expect(at >= 300 - 100 and at <= 300 + 100);
+    try testing.expectEqual(State.stopped, f.server.state());
 }

@@ -748,7 +748,7 @@ fn streamSlots(io: Io) !void {
     }
 
     // The stop ends them, each with its last chunk.
-    try f.server.shutdown(io);
+    try f.server.shutdown(io, runtime.far(io));
     for (&held) |*c| {
         const res = try c.readResponse(io, arena.allocator(), .{});
         try testing.expectEqual(200, res.status);

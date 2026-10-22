@@ -55,3 +55,9 @@ test "untilSet: an event that is set wins, even past the deadline; else Timeout 
     try untilSet(&later, io, .after(std.Io.Clock.awake.now(io), .fromSeconds(1 << 40)));
     try setter.await(io);
 }
+
+/// For the module's tests: a deadline 30 s away, for a test that only
+/// needs a stop.
+pub fn far(io: std.Io) std.Io.Clock.Timestamp {
+    return .fromNow(io, .{ .raw = .fromSeconds(30), .clock = .awake });
+}

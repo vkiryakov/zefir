@@ -153,7 +153,12 @@ fn runAll(io: Io, out: *Io.Writer, public_dir: []const u8) !void {
     for (scenarios) |scenario| {
         for (levels) |level| try measure(io, out, native.port(), scenario, level);
     }
-    try server.shutdown(io);
+    try server.shutdown(io, far(io));
+}
+
+/// A deadline 30 s away, for the stop at the end.
+fn far(io: Io) Io.Clock.Timestamp {
+    return .fromNow(io, .{ .raw = .fromSeconds(30), .clock = .awake });
 }
 
 /// One client: `latencies.len` requests on one connection, the time of

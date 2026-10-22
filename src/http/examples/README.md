@@ -3210,12 +3210,12 @@ stateDiagram-v2
 
 | Method | What it does |
 | --- | --- |
-| `init(gpa, options)` | builds the server; the compiler checks the routes, the middleware and the errors; no I/O |
+| `init(gpa, parts, options)` | builds the server; the compiler checks the routes, the middleware and the errors; no I/O |
 | `start(io)` | checks the backend and the roots of the static files, starts taking requests, returns once it does |
 | `wait(io)` | waits until the server has stopped |
 | `run(io)` | `start`, then `wait` |
 | `requestStop(io)` | begins a graceful stop; from any task, a handler too; never waits |
-| `shutdown(io)` | `requestStop`, then a wait until the server has stopped |
+| `shutdown(io, deadline)` | `requestStop`, then a wait until the server has stopped, 250 ms before `deadline` at the latest |
 | `isReady()`, `state()` | for health checks: running and taking requests; the state |
 | `deinit(io)` | stops the server if it runs, waits, frees it |
 
@@ -3228,7 +3228,7 @@ What a stop does:
    before, then the end of its response, and its client reconnects, to
    another instance.
 3. The requests at work and the streams get `.shutdown_grace`, 10 seconds,
-   to end.
+   to end, or less when the deadline of `shutdown` comes sooner.
 4. What has not ended then is canceled: its next wait through `std.Io`
    returns `error.Canceled`, and its client gets no response, or a stream
    that is cut.
@@ -3283,8 +3283,10 @@ $ APP_AUTH_ANN_TOKEN=ann-secret APP_AUTH_BOB_TOKEN=bob-secret zig build run
 Every request of the guide left a record of `AccessLog`, with its status,
 its user, the error it ended with, and the id of the request, which the
 response carried as `x-request-id`; the stream ended by Ctrl+C has
-`err=Canceled`. When a handler ignores its cancelation and runs on,
-`shutdown` returns `error.ShutdownTimeout` once the grace,
-`.finish_timeout` and one second more are over, and the server stays
-`draining`: end the process then. The App of zefir-core will drive these
+`err=Canceled`. The deadline of `shutdown(io, deadline)` cuts
+`.shutdown_grace`: the grace ends by the deadline less one second,
+`.finish_timeout` and 250 ms, so that the canceled requests have time to
+end, and `shutdown` returns by `deadline − 250 ms`. When a handler ignores its
+cancelation and runs on, `shutdown` returns `error.ShutdownTimeout` then,
+and the server stays `draining`: end the process. The App of zefir-core will drive these
 methods for a whole service, on its signals.

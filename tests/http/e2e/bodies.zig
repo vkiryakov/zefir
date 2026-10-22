@@ -456,7 +456,7 @@ fn stopDuringDrain(io: Io) !void {
     try c.send(io, try std.mem.concat(a, u8, &.{ try postHead(a, "/early", 10 << 10), &@as([100]u8, @splat('x')) }));
     try testing.expectEqual(401, (try c.readResponse(io, a, .{})).status);
     const start = Io.Clock.awake.now(io);
-    try f.server.shutdown(io);
+    try f.server.shutdown(io, runtime.far(io));
     try e2e.expectWithin("the stop while the body drained", e2e.sinceMs(io, start), 0, 900);
     try c.expectEnd(io, .fromSeconds(2));
 }

@@ -522,6 +522,7 @@ pub fn onFinishPhases(ctx: *Context, outcome: Outcome, over: *const std.atomic.V
 // ships none.
 
 const testing = std.testing;
+const far = @import("wait.zig").far;
 const core = @import("core");
 const Server = @import("Server.zig");
 const TestingBackend = @import("testing/Backend.zig");
@@ -1099,7 +1100,7 @@ test "onFinish runs exactly once: success, error, early response, client gone, d
     defer client.cancel(io) catch {};
     defer if (result) |*res| res.deinit();
     try waitCount(io, &outcomes.entered, 1);
-    try server.shutdown(io);
+    try server.shutdown(io, far(io));
     try client.await(io);
     try testing.expect(result.?.aborted);
     try expectOutcome(&finisher, 6, 0, true, error.Canceled);
