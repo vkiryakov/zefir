@@ -14,6 +14,7 @@ const core = @import("core");
 const bson = @import("mongo-bson");
 const v = @import("validator");
 const odm = @import("../root.zig");
+const filter = @import("../query/filter.zig");
 const Client = odm.Client;
 
 // The models of tests/models.zig, declared here so that the messages name
@@ -529,4 +530,47 @@ const Typo = struct {
 
 test "compile error: field_rules of a field that is not there" {
     comptime odm.assertModel(Typo);
+}
+
+// Filters: one case per row of the design's table "Filters", through the
+// encoder of query/filter.zig.
+
+test "compile error: a filter on a field that is not there" {
+    _ = try filter.encode(User, std.testing.allocator, .{ .agee = .{ .gte = 18 } });
+}
+
+test "compile error: an unknown filter operator" {
+    _ = try filter.encode(User, std.testing.allocator, .{ .age = .{ .gtee = 18 } });
+}
+
+test "compile error: regex on a number" {
+    _ = try filter.encode(User, std.testing.allocator, .{ .age = .{ .regex = "1" } });
+}
+
+test "compile error: size on a string" {
+    _ = try filter.encode(User, std.testing.allocator, .{ .email = .{ .size = 1 } });
+}
+
+test "compile error: a string where a number goes" {
+    _ = try filter.encode(User, std.testing.allocator, .{ .age = .{ .gte = "18" } });
+}
+
+test "compile error: a number out of the range of its field" {
+    _ = try filter.encode(User, std.testing.allocator, .{ .age = -1 });
+}
+
+test "compile error: a tag that the enum does not have" {
+    _ = try filter.encode(User, std.testing.allocator, .{ .status = .actve });
+}
+
+test "compile error: null on a required field" {
+    _ = try filter.encode(User, std.testing.allocator, .{ .email = null });
+}
+
+test "compile error: or of a number" {
+    _ = try filter.encode(User, std.testing.allocator, .{ .@"or" = 5 });
+}
+
+test "compile error: and of no filters" {
+    _ = try filter.encode(User, std.testing.allocator, .{ .@"and" = .{} });
 }

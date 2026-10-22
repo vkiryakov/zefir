@@ -101,5 +101,6 @@ test {
     _ = @import("tests/model_tests.zig");
     _ = @import("tests/codec_tests.zig");
     _ = @import("tests/values_tests.zig");
+    _ = @import("tests/filter_tests.zig");
     _ = @import("tests/big_model.zig");
 }

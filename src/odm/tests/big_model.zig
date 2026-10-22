@@ -7,6 +7,7 @@ const std = @import("std");
 const testing = std.testing;
 const bson = @import("mongo-bson");
 const odm = @import("../root.zig");
+const filter = @import("../query/filter.zig");
 
 pub const Kind = enum { one, two, three };
 
@@ -99,7 +100,49 @@ pub const Big = struct {
     };
 };
 
+const id = bson.ObjectId.parseHex("652f8a1b9c0d4e5f60718293") catch unreachable;
+const since: bson.DateTime = .{ .milliseconds = 1_760_000_000_000 };
+
+/// `got` is the document `expected`, byte for byte.
+fn expectDoc(arena: std.mem.Allocator, expected: anytype, got: bson.RawDocument) !void {
+    const want = try bson.encode(arena, expected, .{});
+    if (!std.mem.eql(u8, want.bytes, got.bytes)) {
+        std.debug.print("expected {f}\n   found {f}\n", .{ want.raw(), got });
+        return error.TestExpectedEqual;
+    }
+}
+
 test "big model: a find over twelve paths" {
     comptime odm.assertModel(Big);
     try testing.expectEqual(63, @typeInfo(odm.Path(Big)).@"enum".field_names.len);
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var min: i32 = 1;
+    _ = &min;
+    const doc = try filter.encode(Big, arena.allocator(), .{
+        .f0 = true,
+        .f1 = .{ .gte = min, .lt = 10 },
+        .f2 = .{ .ne = 3 },
+        .f4 = .{ .in = .{ 1, 2, 3 } },
+        .f5 = .{ .lte = 2.5 },
+        .f6 = .{ .regex = "^a" },
+        .f7 = .{ .in = .{ .one, .two } },
+        .f8 = .{ .gte = since },
+        .f9 = id,
+        .f11 = null,
+        .@"or" = .{ .{ .f3 = 1 }, .{ .f16 = .{ .exists = true } } },
+    });
+    try expectDoc(arena.allocator(), .{
+        .fZero = true,
+        .fOne = .{ .@"$gte" = @as(i32, 1), .@"$lt" = @as(i32, 10) },
+        .f2 = .{ .@"$ne" = @as(i64, 3) },
+        .f4 = .{ .@"$in" = .{ @as(i64, 1), @as(i64, 2), @as(i64, 3) } },
+        .f5 = .{ .@"$lte" = 2.5 },
+        .f6 = .{ .@"$regex" = "^a" },
+        .f7 = .{ .@"$in" = .{ "one", "two" } },
+        .f8 = .{ .@"$gte" = since },
+        .f9 = id,
+        .f11 = null,
+        .@"$or" = .{ .{ .f3 = @as(i32, 1) }, .{ .f16 = .{ .@"$exists" = true } } },
+    }, doc);
 }

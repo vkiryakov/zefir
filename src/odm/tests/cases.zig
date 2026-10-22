@@ -59,4 +59,15 @@ pub const compile_errors = [_]Case{
     .{ .name = "compile error: two indexes with the same keys", .expect = "odm: tests.compile_errors.SameIndexes.odm_schema.indexes[0] and [1] have the same keys" },
     .{ .name = "compile error: a unique index on an optional path without sparse", .expect = "odm: tests.compile_errors.UniqueOptional.odm_schema.indexes[0] is unique on tests.compile_errors.UniqueOptional.profile.city, which is optional: odm leaves null out, and the documents without the field would collide in the index as null; add .sparse = true" },
     .{ .name = "compile error: field_rules of a field that is not there", .expect = "validator: tests.compile_errors.Typo.field_rules.nmae: no such field; did you mean \"name\"?" },
+    // Filters.
+    .{ .name = "compile error: a filter on a field that is not there", .expect = "odm: tests.compile_errors.User has no field 'agee'; did you mean 'age'?" },
+    .{ .name = "compile error: an unknown filter operator", .expect = "odm: unknown filter operator 'gtee' on tests.compile_errors.User.age; did you mean 'gte'?" },
+    .{ .name = "compile error: regex on a number", .expect = "odm: regex does not apply to tests.compile_errors.User.age, which is u32" },
+    .{ .name = "compile error: size on a string", .expect = "odm: size does not apply to tests.compile_errors.User.email, which is []const u8" },
+    .{ .name = "compile error: a string where a number goes", .expect = "odm: gte on tests.compile_errors.User.age needs a u32; got *const [2:0]u8" },
+    .{ .name = "compile error: a number out of the range of its field", .expect = "odm: tests.compile_errors.User.age is u32, and -1 is out of its range" },
+    .{ .name = "compile error: a tag that the enum does not have", .expect = "odm: tests.compile_errors.User.status is tests.compile_errors.User.Status, which has no tag 'actve'; did you mean 'active'?" },
+    .{ .name = "compile error: null on a required field", .expect = "odm: tests.compile_errors.User.email is not optional: null matches no document" },
+    .{ .name = "compile error: or of a number", .expect = "odm: or takes a tuple of filters of tests.compile_errors.User, such as .{ .{ .a = 1 }, .{ .b = 2 } }, or a []const odm.Filter(tests.compile_errors.User); got comptime_int" },
+    .{ .name = "compile error: and of no filters", .expect = "odm: and needs at least one filter" },
 };
