@@ -112,6 +112,7 @@ test "a Value nests up to the reader's depth, and no deeper" {
         }
         var value = try read(arena.allocator(), bytes.items);
         for (0..levels) |_| {
+            if (value != .array) return error.TestUnexpectedResult;
             try testing.expectEqual(1, value.array.len);
             value = value.array[0];
         }

@@ -271,6 +271,7 @@ test "redis.Value takes every frame but an error at the top" {
         }
         const got = try decodeOk(Value, arena.allocator(), bytes);
         if (expected == .double and std.math.isNan(expected.double)) {
+            try testing.expect(got == .double);
             try testing.expect(std.math.isNan(got.double));
             continue;
         }
