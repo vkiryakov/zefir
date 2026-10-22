@@ -42,3 +42,18 @@ pub const IterateOptions = struct {
     /// What went wrong with a page: each `next` that fetches one sets it.
     diagnostics: ?*Diagnostics = null,
 };
+
+pub const SubscribeOptions = struct {
+    /// The channels whose messages come, by their names: SUBSCRIBE.
+    channels: []const []const u8 = &.{},
+    /// The patterns of channels whose messages come, such as `events.*`:
+    /// PSUBSCRIBE. One of the two lists has a name at least.
+    patterns: []const []const u8 = &.{},
+    /// After this long without a frame from the server, the subscriber
+    /// sends PING; when nothing comes within as long again, `next` is
+    /// `error.ConnectionLost`. 1 ms or more.
+    idle_ping: std.Io.Duration = .fromSeconds(15),
+    /// Why `subscribe` failed; the errors of `next` go to
+    /// `Subscriber.diagnostics()`.
+    diagnostics: ?*Diagnostics = null,
+};

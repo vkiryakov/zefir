@@ -18,9 +18,12 @@ const RunOptions = requests.RunOptions;
 const contract = @import("cmd/contract.zig");
 const resp = @import("resp.zig");
 const Client = @import("Client.zig");
+const Address = @import("engine/Address.zig");
 const Connection = @import("engine/Connection.zig");
 const Pool = @import("engine/Pool.zig");
 const blocking = @import("engine/blocking.zig");
+const connect_ = @import("engine/connect.zig");
+const handshake = @import("engine/handshake.zig");
 const time = @import("engine/time.zig");
 const Block = @import("cmd/types.zig").Block;
 
@@ -595,6 +598,40 @@ pub fn afterExchange(conn: *Connection, err: Error, d: ?*Diagnostics) Pool.After
     // The phase stays: the cut may come while the command goes out.
     if (d) |x| x.set(x.phase, null, "close() of the client cut the exchange", .{});
     return .broken;
+}
+
+/// Opens a connection to the client's server, the handshake included,
+/// within `connect_timeout` and `deadline`, whichever ends first: for the
+/// pool, and for a subscriber, whose connection is its own. `attempt` lets
+/// `close` stop it.
+pub fn open(c: *Client, io: Io, deadline: ?core.Deadline, attempt: *connect_.Attempt, d: ?*Diagnostics) Error!*Connection {
+    const url = &c.options.url;
+    // The host is in the copy of the URL, which outlives the connection.
+    const address: Address = .{ .host = url.host, .port = url.port };
+    const budget = connect_.budget(time.now(io), c.options.connect_timeout, deadline);
+    const setup = handshake.setupOf(&c.options);
+    const conn = connect_.open(io, c.gpa, address, c.options.max_reply_bytes, &setup, budget.deadline, attempt, d) catch |err| return switch (err) {
+        error.Unavailable, error.Unsupported, error.AuthenticationFailed, error.InvalidArgument, error.OutOfMemory => |e| e,
+        error.Timeout => switch (budget.by) {
+            .deadline => fail(d, .connect, error.DeadlineExceeded, "the deadline passed while the client connected to {f}", .{address}),
+            .connect_timeout => fail(d, .connect, error.Unavailable, "{f} did not answer within connect_timeout ({d} ms)", .{ address, c.options.connect_timeout.toMilliseconds() }),
+        },
+        error.Canceled => cancelled(io, d, "the task was canceled while the client connected"),
+        error.Stopped => fail(d, .connect, error.Closed, "the client was closed while it connected", .{}),
+        error.ConcurrencyUnavailable => {
+            if (d) |x| x.set(.connect, err, "no task to connect to {f} in: the std.Io has no room for one", .{address});
+            return error.Unavailable;
+        },
+    };
+    if (conn.rtt) |rtt| c.round_trips.add(io, rtt);
+    return conn;
+}
+
+/// `error.Cancelled` of a task that was canceled while the client
+/// connected, which stays canceled.
+pub fn cancelled(io: Io, d: ?*Diagnostics, comptime text: []const u8) Error {
+    io.recancel();
+    return fail(d, .connect, error.Cancelled, text, .{});
 }
 
 pub fn fail(d: ?*Diagnostics, phase: ?Diagnostics.Phase, err: Error, comptime fmt: []const u8, args: anytype) Error {

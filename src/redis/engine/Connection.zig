@@ -178,7 +178,7 @@ fn skipPushes(conn: *Connection) resp.Reader.Error!void {
 }
 
 /// The error of an exchange whose reading failed in `phase`.
-fn failed(conn: *Connection, err: resp.Reader.Error, d: ?*Diagnostics, phase: Diagnostics.Phase) Error {
+pub fn failed(conn: *Connection, err: resp.Reader.Error, d: ?*Diagnostics, phase: Diagnostics.Phase) Error {
     switch (err) {
         error.ReadFailed, error.EndOfStream => return conn.broken(d, phase),
         error.ProtocolViolation => {

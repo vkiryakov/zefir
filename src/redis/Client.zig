@@ -3,9 +3,10 @@
 //! options and does no I/O; `connect` opens the first connection under
 //! the caller's deadline, so that a server of the wrong kind or a password
 //! it refuses shows at start; `run` sends a command of `redis.cmd` and
-//! returns its reply, `pipeline` sends many in one exchange, and `iterate`
-//! walks the pages of a scan; `close` ends the work and `deinit` frees
-//! everything.
+//! returns its reply, `pipeline` sends many in one exchange, `iterate`
+//! walks the pages of a scan, and `subscribe` gives the messages of
+//! channels on a connection of its own; `close` ends the work and `deinit`
+//! frees everything.
 //! There is no TLS: the client belongs on a trusted network only.
 //!
 //! ```zig
@@ -94,13 +95,13 @@ const RunOptions = requests.RunOptions;
 const contract = @import("cmd/contract.zig");
 const calls = @import("calls.zig");
 const Conn = @import("Conn.zig");
+const Subscriber = @import("Subscriber.zig");
 const Iterator = @import("Iterator.zig").Iterator;
 const OwnedOptions = @import("OwnedOptions.zig");
-const Address = @import("engine/Address.zig");
 const Connection = @import("engine/Connection.zig");
 const Pool = @import("engine/Pool.zig");
 const connect_ = @import("engine/connect.zig");
-const handshake = @import("engine/handshake.zig");
+const subscription = @import("engine/subscription.zig");
 const time = @import("engine/time.zig");
 const Client = @This();
 
@@ -118,6 +119,8 @@ home: if (std.debug.runtime_safety) std.atomic.Value(usize) else void = if (std.
 /// How many Conns of `acquire` are not released, in safe builds: `deinit`
 /// with one panics.
 conns: if (std.debug.runtime_safety) std.atomic.Value(usize) else void = if (std.debug.runtime_safety) .init(0) else {},
+/// The subscribers of `subscribe`, on connections of their own.
+subscribers: subscription.Registry = .{},
 
 /// The options of `init`.
 pub const Options = @import("Options.zig");
@@ -209,7 +212,7 @@ pub fn stats(c: *Client) Stats {
         .in_use = counts.in_use,
         .opening = counts.opening,
         .waiting = counts.waiting,
-        .subscribers = 0,
+        .subscribers = c.subscribers.count(c.io),
         .generation = counts.generation,
         .clears = counts.clears,
     };
@@ -320,39 +323,29 @@ pub fn acquire(c: *Client, io: Io, op: OperationContext) Error!Conn {
     return .{ .client = c, .entry = entry };
 }
 
+/// A subscriber of `options.channels` and `options.patterns`, on a
+/// connection of its own outside the pool, with the same handshake:
+/// SUBSCRIBE and PSUBSCRIBE go out in one write, and it returns once the
+/// server has confirmed each name, within the deadline of `op`, else
+/// `timeout` from now. A refusal of the server, such as NOPERM, is
+/// `error.ServerError`. `redis.Subscriber` says the rest.
+///
+/// ```zig
+/// var sub = try client.subscribe(io, op, .{ .channels = &.{"orders"} });
+/// defer sub.close(io);
+/// ```
+pub fn subscribe(c: *Client, io: Io, op: OperationContext, options: requests.SubscribeOptions) Error!Subscriber {
+    return .{ .client = c, .state = .init(try subscription.subscribe(c, io, op, options)) };
+}
+
 fn opener(c: *Client) Pool.Opener {
     return .{ .context = c, .open = openForPool };
 }
 
 fn openForPool(context: *anyopaque, io: Io, deadline: ?core.Deadline, attempt: *connect_.Attempt, d: ?*Diagnostics) Error!*Pool.Entry {
     const c: *Client = @ptrCast(@alignCast(context));
-    const conn = try c.open(io, deadline, attempt, d);
+    const conn = try calls.open(c, io, deadline, attempt, d);
     return &conn.pooled;
-}
-
-/// Opens a connection within `connect_timeout` and the deadline of the
-/// call, whichever ends first.
-fn open(c: *Client, io: Io, deadline: ?core.Deadline, attempt: *connect_.Attempt, d: ?*Diagnostics) Error!*Connection {
-    const url = &c.options.url;
-    // The host is in the copy of the URL, which outlives the connection.
-    const address: Address = .{ .host = url.host, .port = url.port };
-    const budget = connect_.budget(time.now(io), c.options.connect_timeout, deadline);
-    const setup = handshake.setupOf(&c.options);
-    const conn = connect_.open(io, c.gpa, address, c.options.max_reply_bytes, &setup, budget.deadline, attempt, d) catch |err| return switch (err) {
-        error.Unavailable, error.Unsupported, error.AuthenticationFailed, error.InvalidArgument, error.OutOfMemory => |e| e,
-        error.Timeout => switch (budget.by) {
-            .deadline => calls.fail(d, .connect, error.DeadlineExceeded, "the deadline passed while the client connected to {f}", .{address}),
-            .connect_timeout => calls.fail(d, .connect, error.Unavailable, "{f} did not answer within connect_timeout ({d} ms)", .{ address, c.options.connect_timeout.toMilliseconds() }),
-        },
-        error.Canceled => cancelled(io, d, "the task was canceled while the client connected"),
-        error.Stopped => calls.fail(d, .connect, error.Closed, "the client was closed while it connected", .{}),
-        error.ConcurrencyUnavailable => {
-            if (d) |x| x.set(.connect, err, "no task to connect to {f} in: the std.Io has no room for one", .{address});
-            return error.Unavailable;
-        },
-    };
-    if (conn.rtt) |rtt| c.round_trips.add(io, rtt);
-    return conn;
 }
 
 /// The context before `connect` opens anything: less than 1 ms left of
@@ -362,11 +355,5 @@ fn checkConnect(io: Io, ctx: core.Context, d: ?*Diagnostics) Error!void {
         return calls.fail(d, .connect, error.DeadlineExceeded, "less than 1 ms was left of the deadline before the client connected", .{});
     };
     if (ctx.isCancelled()) return calls.fail(d, .connect, error.Cancelled, "the token was canceled before the client connected", .{});
-    io.checkCancel() catch return cancelled(io, d, "the task was canceled before the client connected");
-}
-
-/// `error.Cancelled` of a task that was canceled, which stays canceled.
-fn cancelled(io: Io, d: ?*Diagnostics, comptime text: []const u8) Error {
-    io.recancel();
-    return calls.fail(d, .connect, error.Cancelled, text, .{});
+    io.checkCancel() catch return calls.cancelled(io, d, "the task was canceled before the client connected");
 }
