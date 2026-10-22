@@ -113,6 +113,9 @@ round_trips: time.RoundTrips = .{},
 /// of the client somewhere else panics. Atomic: any task may call while
 /// another connects.
 home: if (std.debug.runtime_safety) std.atomic.Value(usize) else void = if (std.debug.runtime_safety) .init(0) else {},
+/// How many Conns of `acquire` are not released, in safe builds: `deinit`
+/// with one panics.
+conns: if (std.debug.runtime_safety) std.atomic.Value(usize) else void = if (std.debug.runtime_safety) .init(0) else {},
 
 /// The options of `init`.
 pub const Options = @import("Options.zig");
@@ -156,6 +159,9 @@ pub fn init(gpa: Allocator, io: Io, options: Options) InitError!Client {
 /// URL and of the password wiped.
 pub fn deinit(c: *Client) void {
     calls.checkHome(c);
+    if (std.debug.runtime_safety and c.conns.load(.monotonic) != 0) {
+        @panic("zefir-redis: Client.deinit() with a Conn not released: release every Conn before the client");
+    }
     c.close(c.io);
     c.pool.deinit();
     c.options.deinit(c.gpa);
@@ -294,6 +300,7 @@ pub fn acquire(c: *Client, io: Io, op: OperationContext) Error!Conn {
     try c.pool.enter(io, null);
     defer c.pool.leave(io);
     const entry = try c.pool.checkOut(io, c.opener(), calls.deadlineOf(c, io, op, .none), null);
+    if (std.debug.runtime_safety) _ = c.conns.fetchAdd(1, .monotonic);
     return .{ .client = c, .entry = entry };
 }
 

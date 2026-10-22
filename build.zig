@@ -380,8 +380,9 @@ pub fn build(b: *std.Build) void {
         test_mongo.dependOn(&run.step);
     }
 
-    // redis panic programs: a client moved after connect() and a call on
-    // another std.Io panic in safe builds. Each program must print the
+    // redis panic programs: a client moved after connect(), a call on
+    // another std.Io, a Conn of two tasks at once and a client deinited
+    // before its Conn panic in safe builds. Each program must print the
     // panic message and end in its own panic handler, which exits with
     // code 3 instead of aborting. They get their own Debug copy of redis,
     // whatever -Doptimize says.
@@ -397,6 +398,8 @@ pub fn build(b: *std.Build) void {
     for ([_][2][]const u8{
         .{ "moved_client", "panic: zefir-redis: Client moved after connect(): keep it where connect() ran (see the guide)" },
         .{ "another_io", "panic: zefir-redis: a call on another std.Io than the client's: pass the io of Client.init" },
+        .{ "conn_two_tasks", "panic: zefir-redis: a Conn used by two tasks at once: one task at a time calls a Conn" },
+        .{ "deinit_live_conn", "panic: zefir-redis: Client.deinit() with a Conn not released: release every Conn before the client" },
     }) |case| {
         const exe = b.addExecutable(.{
             .name = b.fmt("redis-panic-{s}", .{case[0]}),

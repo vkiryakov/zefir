@@ -33,7 +33,10 @@
 //!   call in flight, then cuts it; calls after it are `error.Closed`.
 //!
 //! The methods take `*Conn`, for the Conn holds the state of its
-//! connection: `var conn`.
+//! connection: `var conn`. One task at a time calls a Conn, and every
+//! Conn is released before the client's `deinit`: in safe builds, a call
+//! from a second task while one runs, and `deinit` with a Conn not
+//! released, panic.
 
 const std = @import("std");
 const Io = std.Io;
@@ -57,6 +60,9 @@ entry: ?*Pool.Entry,
 /// succeeded, cleared by UNWATCH and once a transaction sent EXEC.
 watching: bool = false,
 released: bool = false,
+/// In safe builds: set while a method runs, so that a second task that
+/// calls meanwhile panics.
+busy: if (std.debug.runtime_safety) std.atomic.Value(bool) else void = if (std.debug.runtime_safety) .init(false) else {},
 
 /// What `run` returns for a command of type `C`.
 pub fn ReplyOf(comptime C: type) type {
@@ -72,6 +78,8 @@ pub fn Results(comptime Commands: type) type {
 /// Runs `command` on the connection of the Conn and returns its reply, by
 /// the rules of `client.run`.
 pub fn run(conn: *Conn, io: Io, op: OperationContext, command: anytype, options: RunOptions) Error!ReplyOf(@TypeOf(command)) {
+    conn.enter();
+    defer conn.leave();
     const c = conn.client;
     calls.checkUse(c, io);
     const d = options.diagnostics;
@@ -94,6 +102,8 @@ pub fn run(conn: *Conn, io: Io, op: OperationContext, command: anytype, options:
 /// Runs `commands` on the connection of the Conn in one exchange, by the
 /// rules of `client.pipeline`.
 pub fn pipeline(conn: *Conn, io: Io, op: OperationContext, commands: anytype, options: RunOptions) Error!Results(@TypeOf(commands)) {
+    conn.enter();
+    defer conn.leave();
     const c = conn.client;
     calls.checkUse(c, io);
     const d = options.diagnostics;
@@ -154,6 +164,8 @@ pub fn pipeline(conn: *Conn, io: Io, op: OperationContext, commands: anytype, op
 /// _ = done orelse return error.TryAgain; // the stock changed after WATCH
 /// ```
 pub fn transaction(conn: *Conn, io: Io, op: OperationContext, commands: anytype, options: RunOptions) Error!?Queued(@TypeOf(commands)) {
+    conn.enter();
+    defer conn.leave();
     const c = conn.client;
     calls.checkUse(c, io);
     const d = options.diagnostics;
@@ -183,12 +195,26 @@ fn Queued(comptime Commands: type) type {
 /// under WATCH on it; after an error that closed it, only frees the Conn.
 /// A second call does nothing.
 pub fn release(conn: *Conn, io: Io) void {
+    conn.enter();
+    defer conn.leave();
     if (conn.released) return;
     const c = conn.client;
     calls.checkUse(c, io);
     if (conn.entry) |entry| c.pool.checkIn(io, entry, if (conn.watching) .broken else .ok);
     conn.entry = null;
     conn.released = true;
+    if (std.debug.runtime_safety) _ = c.conns.fetchSub(1, .monotonic);
+}
+
+/// In safe builds: a call while another task's runs panics.
+fn enter(conn: *Conn) void {
+    if (std.debug.runtime_safety and conn.busy.swap(true, .acquire)) {
+        @panic("zefir-redis: a Conn used by two tasks at once: one task at a time calls a Conn");
+    }
+}
+
+fn leave(conn: *Conn) void {
+    if (std.debug.runtime_safety) conn.busy.store(false, .release);
 }
 
 /// The connection of the Conn, or `error.Closed` when it has none.
