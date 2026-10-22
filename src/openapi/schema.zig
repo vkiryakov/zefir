@@ -897,23 +897,29 @@ fn asOf(comptime T: type) type {
 /// A type with a schema of its own in `components`: a struct, an enum or a
 /// union with a name, or with a `.name` in its `Doc`. An anonymous type,
 /// named by the compiler with a number that changes as the program does,
-/// stands inline.
+/// stands inline, and so does a generic of one.
 fn isNamed(comptime T: type) bool {
     if (docOf(T)) |doc| if (doc.name != null) return true;
     return !isAnonymous(T);
 }
 
-/// The compiler names an anonymous type after its place and a number:
-/// `dto.Order__struct_931`.
+/// The compiler names an anonymous type after its place and a number,
+/// `dto.Order__struct_931`, and a generic of one by it too,
+/// `dto.Page(dto.list__struct_935)`: the name `schemaName` would give
+/// either holds that number.
 fn isAnonymous(comptime T: type) bool {
-    const name = shortName(@typeName(T));
-    const at = std.mem.lastIndexOf(u8, name, "__") orelse return false;
-    const rest = name[at + 2 ..];
-    for ([_][]const u8{ "struct_", "union_", "enum_", "opaque_" }) |kind| {
-        if (!std.mem.startsWith(u8, rest, kind) or rest.len == kind.len) continue;
-        for (rest[kind.len..]) |c| {
-            if (!std.ascii.isDigit(c)) break;
-        } else return true;
+    return hasCompilerNumber(schemaName(@typeName(T)));
+}
+
+/// Whether `name` holds the number of an anonymous type anywhere:
+/// `__struct_`, `__union_`, `__enum_` or `__opaque_`, then a digit.
+fn hasCompilerNumber(comptime name: []const u8) bool {
+    var rest = name;
+    while (std.mem.find(u8, rest, "__")) |at| {
+        rest = rest[at + 2 ..];
+        for ([_][]const u8{ "struct_", "union_", "enum_", "opaque_" }) |kind| {
+            if (std.mem.startsWith(u8, rest, kind) and rest.len > kind.len and std.ascii.isDigit(rest[kind.len])) return true;
+        }
     }
     return false;
 }
@@ -1079,6 +1085,13 @@ test "isAnonymous: the compiler's name of an anonymous type" {
     try testing.expect(comptime isAnonymous(struct { a: u8 }));
     try testing.expect(comptime isAnonymous(enum { a }));
     try testing.expect(comptime !isAnonymous(http.Problem));
+    // A generic of one holds its number among its arguments.
+    try testing.expect(comptime isAnonymous(TestPair(struct { a: u8 }, u8)));
+    try testing.expect(comptime !isAnonymous(TestPair(http.Problem, u8)));
+}
+
+fn TestPair(comptime A: type, comptime B: type) type {
+    return struct { a: A, b: B };
 }
 
 test {

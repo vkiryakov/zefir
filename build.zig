@@ -1613,8 +1613,9 @@ fn addHttpCompileChecks(
 /// documents of the applications of src/openapi/tests/apps with their
 /// files in src/openapi/tests/golden, in 3.1 and 3.2, and sends each
 /// application's requests; determinism_a.zig and determinism_b.zig make the
-/// compiler meet the errors of one application in two orders and compare
-/// its documents with the same files. They find the files by the absolute
+/// compiler meet the errors of one application in two orders, and number
+/// the anonymous types of another in two ways, and compare their documents
+/// with the same files. They find the files by the absolute
 /// path of golden/, `golden_options.dir`, and run where every test runs:
 /// with -Dtsan on macOS a test binary finds its TSan runtime by a path
 /// relative to that directory, so a test run elsewhere does not start.

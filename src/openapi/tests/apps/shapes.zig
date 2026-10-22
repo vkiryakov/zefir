@@ -1,9 +1,10 @@
 //! A golden application of zefir-openapi: every type of design §11 in a
 //! request and in a response, as the codec reads and writes them. A type
 //! read and written whose schemas differ (`Customer`, with `Address` in
-//! it), a generic type (`Page(OrderView)`), a schema of another name
-//! (`.name`), a type that writes itself (`.as`), any JSON
-//! (`std.json.Value`), and an error handler of the application's own body.
+//! it), a generic type (`Page(OrderView)`), a generic of an anonymous type,
+//! which stands inline, a schema of another name (`.name`), a type that
+//! writes itself (`.as`), any JSON (`std.json.Value`), and an error
+//! handler of the application's own body.
 //! Its document is src/openapi/tests/golden/shapes-3.1.json and -3.2.json.
 //!
 //! Application code: zefir ships no DTO, controller or error handler.
@@ -197,7 +198,7 @@ pub const OrdersController = struct {
 
     pub const http_routes = http.routes(.{
         .prefix = "/v1/orders",
-        .methods = .{ .create = Create, .get = Get, .list = http.get("", .{}), .shipments = Shipments },
+        .methods = .{ .create = Create, .get = Get, .list = http.get("", .{}), .shipments = Shipments, .counts = http.get("/counts", .{}) },
     });
 
     pub const openapi: zefir.openapi.ControllerDoc(@This()) = .{
@@ -207,6 +208,7 @@ pub const OrdersController = struct {
             .get = .{ .summary = "Get an order" },
             .list = .{ .summary = "List orders" },
             .shipments = .{ .summary = "List the parcels of an order" },
+            .counts = .{ .summary = "Count the orders of each size" },
         },
     };
 
@@ -232,6 +234,11 @@ pub const OrdersController = struct {
         const in = try ctx.input(Shipments);
         if (in.path.id != 1) return error.OrderNotFound;
         return .{ .value = &.{.{ .id = 1, .carrier = "Post" }} };
+    }
+
+    /// A page of rows of an anonymous type.
+    pub fn counts(_: *OrdersController, _: *http.Context) !http.Json(Page(struct { size: Size, orders: u32 })) {
+        return .{ .value = .{ .items = &.{.{ .size = .medium, .orders = 1 }}, .total = 1 } };
     }
 };
 
@@ -290,4 +297,5 @@ pub const requests = [_]Request{
     .{ .method = .GET, .target = "/api/v1/orders", .status = 200 },
     .{ .method = .GET, .target = "/api/v1/orders/1/shipments", .status = 200 },
     .{ .method = .GET, .target = "/api/v1/orders/9/shipments", .status = 404 },
+    .{ .method = .GET, .target = "/api/v1/orders/counts", .status = 200 },
 };

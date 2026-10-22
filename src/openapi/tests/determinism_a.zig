@@ -2,7 +2,10 @@
 //! compiler met its errors: here the compiler meets the errors of the todos
 //! application first in one order, and every error set that holds them
 //! lists them in it; determinism_b.zig meets them in the opposite order. Both
-//! compare the documents with the same files.
+//! compare the documents with the same files. Nor does it follow the
+//! numbers the compiler gives anonymous types: determinism_b.zig makes
+//! anonymous types of no use before those of the shapes application, so
+//! that the compiler's numbers of those differ from the ones here.
 const std = @import("std");
 const zefir = @import("zefir");
 const http = zefir.http;
@@ -29,4 +32,15 @@ test "the documents of todos are those of their files whatever order the compile
     defer service.deinit(testing.io);
     try zefir.openapi.testing.expectFile(testing.io, service.docs_3_1, golden ++ "todos-3.1.json");
     try zefir.openapi.testing.expectFile(testing.io, service.docs_3_2, golden ++ "todos-3.2.json");
+}
+
+test "the documents of shapes are those of their files whatever anonymous types the compiler made before" {
+    const shapes = @import("apps/shapes.zig");
+    var backend: http.testing.Backend = .init(testing.allocator);
+    defer backend.deinit();
+    var service: shapes.Service = .{};
+    try service.start(testing.allocator, testing.io, backend.backend());
+    defer service.deinit(testing.io);
+    try zefir.openapi.testing.expectFile(testing.io, service.docs_3_1, golden ++ "shapes-3.1.json");
+    try zefir.openapi.testing.expectFile(testing.io, service.docs_3_2, golden ++ "shapes-3.2.json");
 }

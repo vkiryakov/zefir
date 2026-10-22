@@ -282,6 +282,17 @@ test "an anonymous type stands inline: the compiler's name for it changes as the
     try testing.expectEqual(1, comptime componentsOf(&.{output(Box)}).object.len);
 }
 
+test "a generic of an anonymous type stands inline too: its name holds the compiler's number of its argument" {
+    const Rows = Page(struct { sku: []const u8 });
+    try expectJson("{\"type\":\"object\",\"required\":[\"items\",\"total\"],\"properties\":{" ++
+        "\"items\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"required\":[\"sku\"],\"properties\":{\"sku\":{\"type\":\"string\"}}}}," ++
+        "\"total\":{\"type\":\"integer\",\"format\":\"uint64\",\"minimum\":0}" ++
+        "}}", comptime schemaOf(Rows, .output));
+    try testing.expectEqual(0, comptime componentsOf(&.{output(Rows)}).object.len);
+    // A generic of a named type has a schema of its own.
+    try testing.expectEqual(2, comptime componentsOf(&.{output(Page(TodoResponse))}).object.len);
+}
+
 /// Texts of a type, its fields and its variants.
 const Todo = struct {
     title: []const u8,

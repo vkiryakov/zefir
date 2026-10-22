@@ -432,6 +432,79 @@
           }
         }
       }
+    },
+    "/v1/orders/counts": {
+      "get": {
+        "operationId": "Orders.counts",
+        "tags": [
+          "Orders"
+        ],
+        "summary": "Count the orders of each size",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "A page of results.",
+                  "required": [
+                    "items",
+                    "total"
+                  ],
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "size",
+                          "orders"
+                        ],
+                        "properties": {
+                          "size": {
+                            "$ref": "#/components/schemas/Size"
+                          },
+                          "orders": {
+                            "type": "integer",
+                            "format": "uint32",
+                            "minimum": 0,
+                            "maximum": 4294967295
+                          }
+                        }
+                      }
+                    },
+                    "total": {
+                      "type": "integer",
+                      "format": "uint64",
+                      "minimum": 0
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "internal": {
+                    "value": {
+                      "code": "internal",
+                      "message": "Internal Server Error",
+                      "details": []
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
