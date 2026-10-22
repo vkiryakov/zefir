@@ -714,5 +714,5 @@ test "hostile headers: 10 000 of them in 64 KiB, or one of 60 KiB, are refused b
     // A request of the same size limits passes.
     try raw.call("users.v1.getUser", 2, &.{}, "echo");
     try testing.expectEqualStrings("echo", (try raw.reply(arena.allocator())).body);
-    try server.shutdown(io);
+    try server.shutdown(io, shared.far(io));
 }

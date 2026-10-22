@@ -1,10 +1,9 @@
-//! A minimal application container, only in tests. It shows that an App can
-//! run `rpc.RawServer` and `rpc.Server` later through their public
-//! lifecycle alone, with no change to the servers' API, as the
+//! A minimal application container, only in tests. It runs `rpc.RawServer`
+//! and `rpc.Server` through their public lifecycle alone, as the
 //! specification's acceptance criteria ask. A component is any type with
-//! `start`, `wait` and `shutdown`. Their `requestStop` is for a signal
-//! handler of an App; this one stops its components with `shutdown` alone,
-//! one after another.
+//! `start`, `wait` and `shutdown(io, deadline)`. Their `requestStop` is for
+//! a signal handler of an App; this one stops its components with
+//! `shutdown` alone, one after another, within one deadline 30 s away.
 
 const std = @import("std");
 const core = @import("core");
@@ -14,6 +13,7 @@ const Context = @import("../engine/Context.zig").Context;
 const Server = @import("../app/Server.zig");
 const contract = @import("../app/contract.zig");
 const MemoryTransport = @import("MemoryTransport.zig");
+const far = @import("../wait.zig").far;
 
 pub const MiniApp = struct {
     /// Set by `requestStop`, or by a component that stopped by itself.
@@ -79,11 +79,12 @@ pub const MiniApp = struct {
     /// before the next. The weightiest error of a shutdown, the first of
     /// equal ones.
     fn stopFirst(io: std.Io, components: anytype, comptime count: usize) ?anyerror {
+        const deadline = far(io);
         var worst: ?anyerror = null;
         comptime var i = count;
         inline while (i > 0) {
             i -= 1;
-            components[i].shutdown(io) catch |err| {
+            components[i].shutdown(io, deadline) catch |err| {
                 if (worst == null or weight(err) > weight(worst.?)) worst = err;
             };
         }
@@ -342,9 +343,10 @@ const FailsToStart = struct {
         _ = io;
     }
 
-    pub fn shutdown(f: *FailsToStart, io: std.Io) !void {
+    pub fn shutdown(f: *FailsToStart, io: std.Io, deadline: std.Io.Clock.Timestamp) !void {
         _ = f;
         _ = io;
+        _ = deadline;
     }
 };
 
@@ -417,7 +419,7 @@ const Logged = struct {
         l.log.add(.{ .name = l.name, .what = .stop_begun });
     }
 
-    pub fn shutdown(l: *Logged, io: std.Io) !void {
+    pub fn shutdown(l: *Logged, io: std.Io, _: std.Io.Clock.Timestamp) !void {
         l.log.add(.{ .name = l.name, .what = .stop_begun });
         // A component that takes a while to stop.
         try io.sleep(.fromMilliseconds(20), .awake);

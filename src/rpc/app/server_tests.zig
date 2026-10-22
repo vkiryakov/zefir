@@ -20,6 +20,7 @@ const MemoryTransport = @import("../testing/MemoryTransport.zig");
 const ServerTransport = @import("../ServerTransport.zig");
 
 const testing = std.testing;
+const far = @import("../wait.zig").far;
 
 const GetUserRequest = struct { id: u64 };
 const User = struct { id: u64, name: []const u8, email: ?[]const u8 = null };
@@ -1337,7 +1338,7 @@ test "rpc.Server has the lifecycle of the engine" {
     try runner.await(io);
     try testing.expectEqual(Server.State.stopped, server.state());
     try testing.expect(!server.isReady());
-    try server.shutdown(io);
+    try server.shutdown(io, far(io));
     try server.wait(io);
 }
 

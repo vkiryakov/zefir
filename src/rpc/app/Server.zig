@@ -235,13 +235,14 @@ pub fn requestStop(server: *Server, io: std.Io) void {
     server.engine.requestStop(io);
 }
 
-/// `requestStop` and a wait for the stop. `error.ShutdownTimeout` when
-/// handlers did not end within `shutdown_grace` and one second more after
-/// they were canceled: the server stays in `draining`. Treat it as fatal
-/// and end the process; `deinit` would wait for such handlers without a
-/// limit.
-pub fn shutdown(server: *Server, io: std.Io) ShutdownError!void {
-    return server.engine.shutdown(io);
+/// `requestStop` and a wait for the stop, which returns 250 ms before
+/// `deadline` at the latest: the deadline cuts `shutdown_grace`, so that
+/// the calls it cancels have time to end (see `rpc.RawServer.shutdown`).
+/// `error.ShutdownTimeout` when the server has not stopped by then: the
+/// server stays in `draining`. Treat it as fatal and end the process;
+/// `deinit` would wait for such handlers without a limit.
+pub fn shutdown(server: *Server, io: std.Io, deadline: std.Io.Clock.Timestamp) ShutdownError!void {
+    return server.engine.shutdown(io, deadline);
 }
 
 /// Running and the transport's own condition holds. Thread-safe; for

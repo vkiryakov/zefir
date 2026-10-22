@@ -154,7 +154,8 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // Without the users service, orders fails its calls on its own terms.
-    try users_server.shutdown(io);
+    const deadline: std.Io.Clock.Timestamp = .fromNow(io, .{ .raw = .fromSeconds(30), .clock = .awake });
+    try users_server.shutdown(io, deadline);
     shop.info("Users service stopped", .{});
     try placeOrder(&client, io, shop, orders_api.OrderApi.placeOrder, .{ .user_id = 1, .items = items });
     try placeOrder(&client, io, shop, orders_api.OrderApi.placeOrder, .{ .user_id = 1, .items = items });

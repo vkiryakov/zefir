@@ -28,6 +28,11 @@ pub const servers = struct {
 /// Five seconds, as a timeout.
 pub const five_seconds: Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } };
 
+/// A deadline 30 s away, for a scenario that only needs a stop.
+pub fn far(io: Io) Io.Clock.Timestamp {
+    return .fromNow(io, .{ .raw = .fromSeconds(30), .clock = .awake });
+}
+
 /// What a command printed; `deinit` frees it.
 pub const Output = struct {
     stdout: []u8,

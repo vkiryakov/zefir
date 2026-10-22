@@ -9,6 +9,7 @@ const v = @import("validator");
 const rpc = @import("../root.zig");
 
 const testing = std.testing;
+const far = @import("../wait.zig").far;
 
 fn expectFailure(failure: rpc.Failure, code: core.ErrorCode, app_code: []const u8, message: []const u8) !void {
     try testing.expectEqual(code, failure.code);
@@ -478,8 +479,8 @@ test "A7: a nested call with ctx.operation() keeps the caller's deadline and con
     } else |err| try testing.expectEqual(error.DeadlineExceeded, err);
     const took = started.durationTo(std.Io.Clock.awake.now(io));
     try testing.expect(took.nanoseconds < std.Io.Duration.fromSeconds(5).nanoseconds);
-    try front.server.shutdown(io);
-    try users.server.shutdown(io);
+    try front.server.shutdown(io, far(io));
+    try users.server.shutdown(io, far(io));
     // Under load the backend may refuse the call at admission, past its
     // deadline, without running the handler.
     if (backend.entered.load(.acquire)) try testing.expect(backend.canceled.load(.acquire));

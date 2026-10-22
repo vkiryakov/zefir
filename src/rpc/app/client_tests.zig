@@ -19,6 +19,7 @@ const Credentials = @import("../credentials.zig").Credentials;
 const auth = @import("../auth.zig");
 
 const testing = std.testing;
+const far = @import("../wait.zig").far;
 
 const GetUserRequest = struct { id: u64 };
 const User = struct {
@@ -764,5 +765,5 @@ test "calls from many tasks at once through the memory transport and rpc.Server"
     var doubled = try client.call(io, .root, UserApi.plot, .{ .x = 1.25 }, .{});
     defer doubled.deinit();
     try testing.expectEqual(@as(f64, 2.5), doubled.outcome.ok.x);
-    try server.shutdown(io);
+    try server.shutdown(io, far(io));
 }

@@ -1200,7 +1200,8 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // Without the users service, orders fails its calls on its own terms.
-    try users_server.shutdown(io);
+    const deadline: std.Io.Clock.Timestamp = .fromNow(io, .{ .raw = .fromSeconds(30), .clock = .awake });
+    try users_server.shutdown(io, deadline);
     shop.info("Users service stopped", .{});
     try placeOrder(&client, io, shop, orders_api.OrderApi.placeOrder, .{ .user_id = 1, .items = items });
     try placeOrder(&client, io, shop, orders_api.OrderApi.placeOrder, .{ .user_id = 1, .items = items });
@@ -2375,7 +2376,7 @@ stateDiagram-v2
 | `wait(io)` | waits until the server has stopped; at once with the error when the transport broke |
 | `run(io)` | `start`, then `wait`: for a service that runs one server until it stops |
 | `requestStop(io)` | begins a graceful stop, from any task, a handler too; never waits |
-| `shutdown(io)` | `requestStop`, then a wait until the server has stopped |
+| `shutdown(io, deadline)` | `requestStop`, then a wait until the server has stopped, 250 ms before `deadline` at the latest |
 | `isReady()`, `state()` | for health checks, from any thread: running and the transport's own condition holds; the state |
 | `deinit(io)` | stops the server if it runs, waits, frees it |
 
@@ -2384,7 +2385,7 @@ What a stop does:
 1. The transport stops taking new calls: they get `error.Unavailable`, and
    know that they did not run.
 2. The calls in flight run on for `shutdown_grace`, counted from the stop's
-   request.
+   request, or less when the deadline of `shutdown` comes sooner.
 3. When the grace is over, calls still waiting in the queue, and those the
    transport hands over from then on, get `unavailable` with `refused`, and
    the running ones are canceled: their clients get `cancelled` ("Server
@@ -2485,8 +2486,10 @@ pub fn main(init: std.process.Init) !void {
     logOutcome(app, "monthly", buildReport(&client, io, "monthly", 100));
 
     app.info("Stopping", .{ .grace_ms = config.shutdown.grace_ms });
-    // requestStop and a wait until the server has stopped.
-    try server.shutdown(io);
+    // requestStop and a wait until the server has stopped; the stop ends
+    // 250 ms before this deadline at the latest.
+    const deadline: std.Io.Clock.Timestamp = .fromNow(io, .{ .raw = .fromSeconds(30), .clock = .awake });
+    try server.shutdown(io, deadline);
     app.info("Stopped", .{ .state = server.state() });
 
     logOutcome(app, "daily", daily.await(io));
@@ -2533,11 +2536,15 @@ the stop and was not sent at all. The clients of the monthly and the
 weekly reports know for sure that they did not run, so they may retry them
 elsewhere.
 
+- The deadline of `shutdown(io, deadline)` cuts `shutdown_grace`: the
+  grace ends by the deadline less two seconds and 250 ms, the time of the
+  two waits after it, a second each, and `shutdown` returns by
+  `deadline − 250 ms`.
 - A method that never waits through `std.Io` cannot be canceled. When a
-  handler is still running a second after it was canceled, `shutdown`
-  returns `error.ShutdownTimeout` and the server stays `draining`: end the
-  process then, since `deinit` would wait for that handler without a
-  limit.
+  handler is still running a second after it was canceled, or the
+  deadline comes first, `shutdown` returns `error.ShutdownTimeout` and the
+  server stays `draining`: end the process then, since `deinit` would
+  wait for that handler without a limit.
 - `deinit` comes after every other use of the server, and before the
   transport's `deinit`; the handlers and what they use live longer than
   the server.

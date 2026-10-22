@@ -9,6 +9,7 @@ const rpc = @import("rpc");
 const Conn = @import("Conn.zig");
 const Transport = @import("Transport.zig");
 const FakeConn = @import("testing/FakeConn.zig");
+const far = @import("shared.zig").far;
 const wire = @import("wire.zig");
 const subject = @import("subject.zig");
 const client_side = @import("client.zig");
@@ -471,7 +472,7 @@ test "end to end: rpc.RawClient and rpc.RawServer on one connection, an inbox of
 
     // An unknown method of a served service: no one subscribes to it.
     try testing.expectError(error.Unavailable, client.call(io, .root, .{ .service = "users", .version = 1, .method = "nope" }, "{}", .{}));
-    try server.shutdown(io);
+    try server.shutdown(io, far(io));
     // A stopped server: no responders.
     try testing.expectError(error.Unavailable, client.call(io, .root, get_user, "{}", .{}));
 }
@@ -875,7 +876,7 @@ test "a denied inbox fails the first call, not the start of a server that overla
     try overlapped;
     try started;
     try testing.expectError(error.AccessDenied, caller.result);
-    try stage.server.shutdown(io);
+    try stage.server.shutdown(io, far(io));
 }
 
 test "a denied route fails the start of the server, not a first call that overlaps it" {
@@ -920,7 +921,7 @@ test "a denied inbox fails the first call, not the close of a server that overla
     stage.server.requestStop(io);
     const overlapped = eventually(&stage.adapter, Overlap.flushing);
     if (overlapped) |_| caller.run() else |_| {}
-    const stopped = stage.server.shutdown(io);
+    const stopped = stage.server.shutdown(io, far(io));
     try overlapped;
     try stopped;
     try testing.expectError(error.AccessDenied, caller.result);

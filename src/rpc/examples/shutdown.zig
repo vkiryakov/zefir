@@ -91,8 +91,10 @@ pub fn main(init: std.process.Init) !void {
     logOutcome(app, "monthly", buildReport(&client, io, "monthly", 100));
 
     app.info("Stopping", .{ .grace_ms = config.shutdown.grace_ms });
-    // requestStop and a wait until the server has stopped.
-    try server.shutdown(io);
+    // requestStop and a wait until the server has stopped; the stop ends
+    // 250 ms before this deadline at the latest.
+    const deadline: std.Io.Clock.Timestamp = .fromNow(io, .{ .raw = .fromSeconds(30), .clock = .awake });
+    try server.shutdown(io, deadline);
     app.info("Stopped", .{ .state = server.state() });
 
     logOutcome(app, "daily", daily.await(io));

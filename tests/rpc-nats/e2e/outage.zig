@@ -145,7 +145,7 @@ fn scenario(io: Io) !void {
         try testing.expectEqualStrings("after", r.response.body);
         break;
     }
-    try server.shutdown(io);
+    try server.shutdown(io, root.far(io));
 }
 
 test "a broker that goes away: a waiting call ends at its deadline, a new one is Unavailable at once, and calls go through once it is back" {
