@@ -51,8 +51,9 @@ imports() {
     # tests read their settings with confy and log with log.
     mongo) echo core confy log ;;
     # http imports core and validator; the examples of its guide read
-    # their settings with confy and log with log.
-    http) echo core validator confy log ;;
+    # their settings with confy, log with log, and declare the texts of
+    # their OpenAPI document with openapi, which imports http in turn.
+    http) echo core validator confy log openapi ;;
     # jwt imports validator alone; the examples of its guide, an http
     # middleware and an rpc authenticator, also import core, confy, log,
     # http and rpc.
@@ -65,9 +66,15 @@ imports() {
 }
 
 # Succeeds when module $1 imports module $2, directly or through others.
+# $3 holds the modules walked to get to $1, which are not walked again: the
+# imports may go round, as http's guide imports openapi, which imports
+# http.
 depends_on() {
     for dep in $(imports "$1"); do
-        if [ "$dep" = "$2" ] || depends_on "$dep" "$2"; then
+        case " ${3-} $1 " in
+        *" $dep "*) continue ;;
+        esac
+        if [ "$dep" = "$2" ] || depends_on "$dep" "$2" "${3-} $1"; then
             return 0
         fi
     done

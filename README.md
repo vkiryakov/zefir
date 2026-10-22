@@ -75,7 +75,7 @@ Take any module on its own, or all the finished ones at once through the umbrell
 | **Background Processing**          |                                                                                                                                              |                                                         |
 | `zefir-scheduler`                  | Scheduled jobs, cron expressions, timers                                                                                                     | 📋 Planned                                               |
 | **Developer Experience & Tooling** |                                                                                                                                              |                                                         |
-| `zefir-openapi`                    | OpenAPI generation from Zig types                                                                                                            | 📋 Planned                                               |
+| `zefir-openapi`                    | OpenAPI 3.1 and 3.2 documents of zefir-http services, built by the compiler from their routes, DTOs, errors and middleware                   | ✅ Done · [docs](src/openapi/examples/README.md)         |
 | `zefir-cli`                        | Project scaffolding, code generation                                                                                                         | 📋 Planned                                               |
 | `zefir-test`                       | Testing helpers, mocks, fixtures                                                                                                             | 📋 Planned                                               |
 

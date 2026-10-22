@@ -128,6 +128,9 @@ base=$(git rev-parse HEAD)
 
 # A change, as shell commands, and the modules it affects. The table comes
 # on descriptor 3, so that no command in the loop reads it from stdin.
+# openapi imports http, and the guide of http imports openapi: a change in
+# either affects both, and the modules that import http, and the script
+# ends all the same.
 while IFS='|' read -r change modules <&3; do
     git checkout -q --detach "$base"
     eval "$change"
@@ -158,8 +161,8 @@ edit tests/http/build.zig                       | http jwt openapi zefir
 edit tests/mongo/e2e/crud.zig                   | mongo zefir
 edit tests/mongo/build.zig.zon                  | mongo zefir
 edit tests/mongo/stress/storm.zig               | mongo zefir
-edit tests/openapi/build.zig                    | openapi zefir
-edit tests/openapi/node/regex.mjs               | openapi zefir
+edit tests/openapi/build.zig                    | http jwt openapi zefir
+edit tests/openapi/node/regex.mjs               | http jwt openapi zefir
 edit examples/rpc-custom-transport/src/root.zig | rpc rpc-nats jwt zefir
 edit examples/rpc-custom-transport/consumer/build.zig | rpc rpc-nats jwt zefir
 edit examples/rpc-custom-transport/README.md    | rpc rpc-nats jwt zefir
@@ -176,8 +179,10 @@ edit .github/workflows/ci.yml                   | core log confy validator rpc r
 edit src/http/root.zig                          | http jwt openapi zefir
 edit src/jwt/Verifier.zig                       | jwt zefir
 edit src/jwt/examples/README.md                 | jwt zefir
-edit src/openapi/schema.zig                     | openapi zefir
-edit src/jwt/Verifier.zig src/openapi/schema.zig | jwt openapi zefir
+edit src/openapi/schema.zig                     | http jwt openapi zefir
+edit src/openapi/examples/README.md             | http jwt openapi zefir
+edit src/http/examples/dto.zig                  | http jwt openapi zefir
+edit src/jwt/Verifier.zig src/openapi/schema.zig | http jwt openapi zefir
 edit src/ws/root.zig                            | core log confy validator rpc rpc-nats orm mongo nats http jwt openapi zefir
 edit src/helpers.zig                            | core log confy validator rpc rpc-nats orm mongo nats http jwt openapi zefir
 edit src/notes.md                               | core log confy validator rpc rpc-nats orm mongo nats http jwt openapi zefir
