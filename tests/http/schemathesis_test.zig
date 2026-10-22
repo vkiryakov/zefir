@@ -6,18 +6,22 @@
 //! requests that the document allows, as Ann, and checks every response
 //! against the document: its status, its media type, its headers and its
 //! body. The stream of events, /v1/todos/events, is left out: it does not
-//! end. Only data the document allows is sent: a schema may be stricter
-//! than the server, where a transform such as `v.trim` runs before a rule,
-//! and a request the server takes but the schema does not would be no
-//! mistake. Every check runs, `positive_data_acceptance` too, which wants
-//! every request of valid data taken: but the schema of a 64-bit integer
-//! has no `maximum` (the tools of JavaScript show 2^64 - 1 inexactly), so
-//! an id above it passes the schema, and the server answers it with 422.
-//! schemathesis.toml lets the three operations of /v1/todos/{id}, and no
-//! other, answer valid data with that 422. The service is a Debug build,
-//! so it checks each request and response against what its route
-//! declares, too: a mismatch is a 500, which Schemathesis reports, and a
-//! line of the log, which this test does.
+//! end. POST /session is reached only on its 401: the token of its form is
+//! one Schemathesis makes up, never Ann's, so it warns that one operation
+//! answered only 401 or 403. The 303 of a right token is checked by
+//! todos_test.zig of the guide and by the guide's curl session
+//! (`zig build examples`). Only data the document allows is sent: a schema
+//! may be stricter than the server, where a transform such as `v.trim`
+//! runs before a rule, and a request the server takes but the schema does
+//! not would be no mistake. Every check runs, `positive_data_acceptance`
+//! too, which wants every request of valid data taken: but the schema of a
+//! 64-bit integer has no `maximum` (the tools of JavaScript show 2^64 - 1
+//! inexactly), so an id above it passes the schema, and the server answers
+//! it with 422. schemathesis.toml lets the three operations of
+//! /v1/todos/{id}, and no other, answer valid data with that 422. The
+//! service is a Debug build, so it checks each request and response
+//! against what its route declares, too: a mismatch is a 500, which
+//! Schemathesis reports, and a line of the log, which this test does.
 //!
 //! The build gives the paths of the service's program and of the app's
 //! static files (`guide_options`), and of schemathesis.toml
