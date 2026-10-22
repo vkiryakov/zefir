@@ -1435,7 +1435,7 @@ drains it after they have stopped. The client is a bean as it is, made by
 a factory such as
 `pub fn natsClient(gpa: std.mem.Allocator, io: std.Io, config: *const Config) !nats.Client`,
 which returns `.init(gpa, io, .{ .servers = &.{config.nats.url}, .name = "users" })`.
-App calls three of its methods:
+App drives it with three of its methods, and frees it with `deinit`:
 
 | Method | What it does |
 | --- | --- |

@@ -1365,3 +1365,6 @@ The checklist of a transport of your own, the rules of
     address that a second server side cannot take (T14), `restartPeer` with
     `.live_broker = true` for a broker it can restart (T17). Of these,
     rpc-nats has `restartPeer`, in its live harness.
+17. **zefir.App**: the type declares `pub const app_lifecycle = false;`,
+    so that App builds and frees the transport as a bean and leaves its
+    `start`, `drain` and `close` to the server.
