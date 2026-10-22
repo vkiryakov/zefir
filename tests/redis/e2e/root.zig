@@ -137,4 +137,5 @@ test {
     _ = @import("pool.zig");
     _ = @import("pipeline.zig");
     _ = @import("transactions.zig");
+    _ = @import("commands.zig");
 }
