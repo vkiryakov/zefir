@@ -22,6 +22,8 @@
 //! - Lists: `lpush`, `rpush`, `lpop`, `rpop`, `llen`, `lrange`, `ltrim`,
 //!   `lrem`, `lindex`, `lmove`, and the blocking `blpop`, `brpop`,
 //!   `blmove`, whose timeouts come from the deadline of the call.
+//! - Sets: `sadd`, `srem`, `sismember`, `smembers`, `scard`, `spop`,
+//!   `sinter`, `sunion`, `sdiff`, `sscan` (one page).
 //! - `raw(T, args)` — a command that the catalog lacks: `args` is a tuple
 //!   of strings, numbers, bools and enums, the name of the command first,
 //!   or a slice of strings, and the reply reads into `T` by the rules of
@@ -48,6 +50,7 @@ const strings = @import("cmd/strings.zig");
 const keys = @import("cmd/keys.zig");
 const hashes = @import("cmd/hashes.zig");
 const lists = @import("cmd/lists.zig");
+const sets = @import("cmd/sets.zig");
 
 pub const get = strings.get;
 pub const Get = strings.Get;
@@ -155,6 +158,27 @@ pub const brpop = lists.brpop;
 pub const Brpop = lists.Brpop;
 pub const blmove = lists.blmove;
 pub const Blmove = lists.Blmove;
+
+pub const sadd = sets.sadd;
+pub const Sadd = sets.Sadd;
+pub const srem = sets.srem;
+pub const Srem = sets.Srem;
+pub const sismember = sets.sismember;
+pub const Sismember = sets.Sismember;
+pub const smembers = sets.smembers;
+pub const Smembers = sets.Smembers;
+pub const scard = sets.scard;
+pub const Scard = sets.Scard;
+pub const spop = sets.spop;
+pub const Spop = sets.Spop;
+pub const sinter = sets.sinter;
+pub const Sinter = sets.Sinter;
+pub const sunion = sets.sunion;
+pub const Sunion = sets.Sunion;
+pub const sdiff = sets.sdiff;
+pub const Sdiff = sets.Sdiff;
+pub const sscan = sets.sscan;
+pub const Sscan = sets.Sscan;
 
 pub const raw = raw_command.raw;
 pub const Raw = raw_command.Raw;
