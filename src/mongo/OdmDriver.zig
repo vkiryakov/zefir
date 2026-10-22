@@ -4,7 +4,7 @@
 //!
 //! ```zig
 //! var driver: mongo.OdmDriver = .init(gpa);
-//! var registry: odm.Registry = try .init(gpa, io, driver.driver(), .{});
+//! var registry: odm.Registry = .init(gpa, io, driver.driver(), .{});
 //! defer registry.deinit(io);
 //! ```
 //!

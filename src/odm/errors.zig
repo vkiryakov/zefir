@@ -14,7 +14,7 @@
 //!   broke, the error of the decoder, the path of the field, and a text.
 //!
 //! ```zig
-//! users.insertOne(io, ctx, user, arena) catch |err| {
+//! _ = users.insertOne(io, ctx, user) catch |err| {
 //!     const d = session.diagnostics();
 //!     log.warn("insert: {t}: {s} at '{s}'", .{ err, d.message(), d.path() });
 //!     if (odm.outcome(err) == .not_sent) return retryLater();
