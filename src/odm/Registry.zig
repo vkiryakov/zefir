@@ -236,12 +236,18 @@ pub fn init(gpa: Allocator, io: Io, driver: Driver, options: Options) Registry {
 
 /// Frees the memory, after a `shutdown` by now when none came before. No
 /// call may be in progress, and every session and cursor must be deinit
-/// first.
+/// first: in safe builds one left panics, and in the others the memory of
+/// its generation stays, a leak rather than a use after free.
 pub fn deinit(r: *Registry, io: Io) void {
     r.checkUse(io);
     r.mutex.lockUncancelable(io);
     const state = r.state;
+    var leases: usize = 0;
+    var it = r.generations.first;
+    while (it) |node| : (it = node.next) leases += Generation.of(node).leases;
     r.mutex.unlock(io);
+    // Before the shutdown, which would close their generations by force.
+    if (std.debug.runtime_safety and leases > 0) @panic("zefir-odm: Registry.deinit() with sessions or cursors left: deinit them first");
     switch (state) {
         .running => r.shutdown(io, .now(io, .awake)) catch {},
         .stopping => r.shut.waitUncancelable(io),

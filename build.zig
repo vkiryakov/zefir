@@ -438,11 +438,11 @@ pub fn build(b: *std.Build) void {
     }
 
     // odm panic programs: a registry moved after its first
-    // registerConnection() and a call on another std.Io panic in safe
-    // builds. Each program must print the panic message and end in its own
-    // panic handler, which exits with code 3 instead of aborting. They get
-    // their own Debug copies of odm and the modules it imports, whatever
-    // -Doptimize says.
+    // registerConnection(), a call on another std.Io and Registry.deinit()
+    // with sessions left panic in safe builds. Each program must print the
+    // panic message and end in its own panic handler, which exits with code
+    // 3 instead of aborting. They get their own Debug copies of odm and the
+    // modules it imports, whatever -Doptimize says.
     const panic_validator = b.createModule(.{
         .root_source_file = b.path("src/validator/root.zig"),
         .target = target,
@@ -461,6 +461,7 @@ pub fn build(b: *std.Build) void {
     for ([_][2][]const u8{
         .{ "moved_registry", "panic: zefir-odm: Registry moved after its first registerConnection(): keep it where it was" },
         .{ "another_io", "panic: zefir-odm: a call on another std.Io than the registry's: pass the io of Registry.init" },
+        .{ "deinit_with_leases", "panic: zefir-odm: Registry.deinit() with sessions or cursors left: deinit them first" },
     }) |case| {
         const exe = b.addExecutable(.{
             .name = b.fmt("odm-panic-{s}", .{case[0]}),
