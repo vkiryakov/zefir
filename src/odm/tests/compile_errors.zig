@@ -958,6 +958,23 @@ test "compile error: or in the filter of an upsert" {
     comptime update.checkUpsert(Account, @TypeOf(.{ .@"or" = .{ .{ .email = "a" }, .{ .email = "b" } } }), @TypeOf(.{ .set = .{ .name = "Ann" } }));
 }
 
+/// An update that gives every required field of Account but the e-mail,
+/// which the filters below give: only their in, nin or all stops the
+/// build.
+const whole_account = .{ .set = .{ .name = "Ann", .address = .{ .city = "Lyon", .country = "FR" }, .created_at = some_time, .visits = 0 } };
+
+test "compile error: in in the filter of an upsert" {
+    comptime update.checkUpsert(Account, @TypeOf(.{ .email = "a@b.c", .status = .{ .in = .{.blocked} } }), @TypeOf(whole_account));
+}
+
+test "compile error: nin in the filter of an upsert" {
+    comptime update.checkUpsert(Account, @TypeOf(.{ .email = "a@b.c", .age = .{ .nin = .{ 1, 2 } } }), @TypeOf(whole_account));
+}
+
+test "compile error: all in the filter of an upsert" {
+    comptime update.checkUpsert(Account, @TypeOf(.{ .email = "a@b.c", .address = .{ .city = "Lyon" }, .tags = .{ .all = .{"a"} } }), @TypeOf(whole_account));
+}
+
 /// A model whose id is a document, which the application gives.
 const Pair = struct {
     id: Key,

@@ -157,8 +157,10 @@ pub fn Collection(comptime T: type) type {
         /// the equalities of the filter and the operators of the update. Both
         /// are literals: the build checks that the document it may insert
         /// gets every required field of the model, its id too when the
-        /// application gives it; `set_on_insert` works here only. The rules
-        /// of the model do not check it.
+        /// application gives it, and that no field of the filter has `in`,
+        /// `nin` or `all`, which the server would copy into that document
+        /// by the number of their items; `set_on_insert` works here only.
+        /// The rules of the model do not check it.
         pub fn upsertOne(c: Self, io: Io, ctx: core.Context, filter: anytype, update: anytype) Error!UpsertResult(T) {
             comptime {
                 update_.checkUpsert(T, @TypeOf(filter), @TypeOf(update));

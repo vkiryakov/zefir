@@ -15,6 +15,8 @@ const insert = "pub fn insert(self: *@This(), io: std.Io, ctx: core.Context, req
 const aggregate = "pub fn aggregate(self: *@This(), io: std.Io, ctx: core.Context, request: *const odm.Client.AggregateRequest, options: odm.Client.CallOptions) odm.DriverError!odm.RawCursor";
 const open = "pub fn open(self: *@This(), io: std.Io, config: *const odm.ConnectionConfig) odm.Driver.OpenError!odm.Client";
 const next = "pub fn next(self: *@This(), io: std.Io, ctx: core.Context, d: ?*odm.Diagnostics) odm.DriverError!?bson.RawDocument";
+/// Why upsertOne refuses in, nin and all on the fields of its filter.
+const list_conditions = "in, nin and all stay out of the filter of an upsert, since the server copies one item of in or all into the document it may insert, an item where a list goes too, and with no item it inserts none of the filter's equalities; match by equality, or use updateOne, then insertOne when it matched nothing";
 
 pub const compile_errors = [_]Case{
     // The approved cases of the sketch, through the public API, as an
@@ -148,6 +150,9 @@ pub const compile_errors = [_]Case{
     .{ .name = "compile error: a path through a list in the filter of an upsert", .expect = "odm: upsertOne of tests.compile_errors.Account: the filter's path items.sku goes through the list tests.compile_errors.Account.items, and the document it may insert would get a document there, not a list; use .elem_match" },
     .{ .name = "compile error: an upsert that gives its id by paths", .expect = "odm: upsertOne of tests.compile_errors.Pair gives its id 'id' by paths into it: give the whole tests.compile_errors.Pair.Key by equality in the filter or in set_on_insert" },
     .{ .name = "compile error: or in the filter of an upsert", .expect = "odm: upsertOne of tests.compile_errors.Account: or in the filter: the server takes equalities from it into the document it may insert, and odm checks only the fields of the filter itself; put the conditions in the fields of the filter" },
+    .{ .name = "compile error: in in the filter of an upsert", .expect = "odm: upsertOne of tests.compile_errors.Account: the filter's in on tests.compile_errors.Account.status: " ++ list_conditions },
+    .{ .name = "compile error: nin in the filter of an upsert", .expect = "odm: upsertOne of tests.compile_errors.Account: the filter's nin on tests.compile_errors.Account.age: " ++ list_conditions },
+    .{ .name = "compile error: all in the filter of an upsert", .expect = "odm: upsertOne of tests.compile_errors.Account: the filter's all on tests.compile_errors.Account.tags: " ++ list_conditions },
     // odm.Filter and odm.Update.
     .{ .name = "compile error: a filter of another model", .expect = "odm: this filter is an odm.Filter(tests.compile_errors.Account), not of tests.compile_errors.User" },
     .{ .name = "compile error: an upsert with an odm.Filter", .expect = "odm: upsertOne of tests.compile_errors.Account takes a filter literal, not an odm.Filter(tests.compile_errors.Account): it checks at compile time that the document it may insert gets every required field" },

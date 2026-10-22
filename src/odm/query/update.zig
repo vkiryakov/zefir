@@ -490,7 +490,12 @@ fn fieldName(comptime names: []const []const u8) []const u8 {
 ///   none;
 /// - the equalities of the filter are values that odm would write: not
 ///   null, not an optional, not an item where a list goes; and no path of
-///   the filter goes through a list, and no logical operator is in it.
+///   the filter goes through a list, and no logical operator is in it;
+/// - no field of the filter has `in`, `nin` or `all`: mongod copies one
+///   item of `in` or `all` into the document as an equality, a list field
+///   then gets the item, and an empty one leaves the filter's equalities
+///   out of the document. `nin` copies nothing, and goes with them so that
+///   the rule stays one: no list conditions in an upsert.
 ///
 /// The rules of zefir-validator do not run for upsertOne.
 pub fn checkUpsert(comptime T: type, comptime F: type, comptime U: type) void {
@@ -564,6 +569,11 @@ fn conditionGives(comptime at: At, comptime L: type, comptime name: []const u8) 
             return out;
         },
         .operators => {
+            for ([_][]const u8{ "in", "nin", "all" }) |op| {
+                if (@hasField(V, op)) {
+                    @compileError(upsertOf(at) ++ "the filter's " ++ op ++ " on " ++ subject(at) ++ ": in, nin and all stay out of the filter of an upsert, since the server copies one item of in or all into the document it may insert, an item where a list goes too, and with no item it inserts none of the filter's equalities; match by equality, or use updateOne, then insertOne when it matched nothing");
+                }
+            }
             if (!@hasField(V, "eq")) return &.{};
             requireCopy(at, V, "eq");
             return &.{at.path};

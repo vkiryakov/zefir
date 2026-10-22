@@ -9,7 +9,8 @@
 //! - inc and push create a missing field;
 //! - a sparse unique index admits documents without the field;
 //! - what upsertOne inserts reads back as the model;
-//! - what the server does with `in` and `all` in the filter of an upsert.
+//! - what the server does with `in`, `nin` and `all` in the filter of an
+//!   upsert, which upsertOne refuses: through the raw contract.
 
 const std = @import("std");
 const Io = std.Io;
@@ -356,16 +357,15 @@ test "the server copies one item of in or all of an upsert filter into the docum
     try e2e.onZio(upsertInAndAll);
 }
 
-/// What mongod makes of `in` and `all` in the filter of an upsert that
-/// inserts, pinned here. odm lets them through: it takes them for
-/// conditions that give the document no field, as design Р47 refuses only
-/// null, items of lists, paths through lists and logical operators there.
-/// The server does not always agree. One item of `in`, and one of `all`,
-/// it copies into the document as an equality; on a list field that is
-/// the item where the list goes, which the model cannot read. `in` of two
-/// items it copies nothing of, `all` of two items it refuses (code 54).
-/// `in` of `null` writes a null. An empty `in` matches nothing, and the
-/// server then copies none of the filter's equalities.
+/// What mongod makes of `in`, `nin` and `all` in the filter of an upsert
+/// that inserts, pinned here through the raw contract, `odm.Client`: why
+/// upsertOne refuses them in its filter at compile time. One item of `in`,
+/// and one of `all`, the server copies into the document as an equality;
+/// on a list field that is the item where the list goes, which the model
+/// cannot read. `in` of two items it copies nothing of, `all` of two items
+/// it refuses (code 54). `in` of `null` writes a null. An empty `in`
+/// matches nothing, and the server then copies none of the filter's
+/// equalities. `nin` copies nothing.
 fn upsertInAndAll(io: Io) !void {
     const database = "odm_upsert_in";
     var admin: e2e.Admin = undefined;
@@ -374,6 +374,13 @@ fn upsertInAndAll(io: Io) !void {
     try admin.dropDatabase(io, database);
     defer admin.dropDatabaseAtEnd(io, database);
     var driver: mongo.OdmDriver = .init(testing.allocator);
+    // The client of the upserts, as odm's collections reach a driver.
+    var client = try driver.driver().open(io, &.{ .uri = e2e.servers.plain });
+    defer client.deinit();
+    try client.connect(io, within(io, .fromSeconds(10)), null);
+    defer client.close(io);
+    const raw: Raw = .{ .client = client, .database = database };
+    // The model reads what they inserted through a session.
     var registry: odm.Registry = .init(testing.allocator, io, driver.driver(), .{});
     defer registry.deinit(io);
     try open(&registry, io, database);
@@ -383,11 +390,10 @@ fn upsertInAndAll(io: Io) !void {
     const ctx = within(io, .fromSeconds(10));
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
-    const changes = .{ .set = .{ .address = .{ .city = "Pin" } } };
 
     // One item of in on a field of one value: the field equals it, and the
     // model reads it.
-    const one_in = (try people.upsertOne(io, ctx, .{ .email = "in@example.com", .status = .{ .in = .{.blocked} } }, changes)).upserted_id.?;
+    const one_in = try raw.upsert(io, .{ .email = "in@example.com", .status = .{ .@"$in" = .{"blocked"} } });
     {
         const doc = try stored(&admin, io, database, one_in);
         defer doc.deinit();
@@ -397,8 +403,8 @@ fn upsertInAndAll(io: Io) !void {
 
     // One item of all, or of in, on a list: the item goes where the list
     // goes, and the model cannot read the document.
-    const one_all = (try people.upsertOne(io, ctx, .{ .email = "all@example.com", .tags = .{ .all = .{"a"} } }, changes)).upserted_id.?;
-    const in_list = (try people.upsertOne(io, ctx, .{ .email = "in-list@example.com", .tags = .{ .in = .{"a"} } }, changes)).upserted_id.?;
+    const one_all = try raw.upsert(io, .{ .email = "all@example.com", .tags = .{ .@"$all" = .{"a"} } });
+    const in_list = try raw.upsert(io, .{ .email = "in-list@example.com", .tags = .{ .@"$in" = .{"a"} } });
     for ([_]bson.ObjectId{ one_all, in_list }) |id| {
         {
             const doc = try stored(&admin, io, database, id);
@@ -410,21 +416,23 @@ fn upsertInAndAll(io: Io) !void {
 
     // Two items of all: the server cannot tell which one the list holds,
     // and inserts nothing.
-    try testing.expectError(error.WriteFailed, people.upsertOne(io, ctx, .{ .email = "all2@example.com", .tags = .{ .all = .{ "a", "b" } } }, changes));
-    try testing.expectEqual(@as(?i32, 54), session.diagnostics().code);
+    var d: odm.Diagnostics = .{};
+    try testing.expectError(error.WriteFailed, raw.upsertWith(io, .{ .email = "all2@example.com", .tags = .{ .@"$all" = .{ "a", "b" } } }, &d));
+    try testing.expectEqual(@as(?i32, 54), d.code);
     try testing.expectEqual(@as(u64, 0), try people.count(io, ctx, .{ .email = "all2@example.com" }));
 
-    // Two items of in: it copies nothing of them.
-    const two_in = (try people.upsertOne(io, ctx, .{ .email = "in2@example.com", .status = .{ .in = .{ .active, .blocked } } }, changes)).upserted_id.?;
-    {
-        const doc = try stored(&admin, io, database, two_in);
+    // Two items of in: it copies nothing of them; nin neither.
+    const two_in = try raw.upsert(io, .{ .email = "in2@example.com", .status = .{ .@"$in" = .{ "active", "blocked" } } });
+    const nin = try raw.upsert(io, .{ .email = "nin@example.com", .status = .{ .@"$nin" = .{"blocked"} } });
+    for ([_]bson.ObjectId{ two_in, nin }, [_][]const u8{ "in2@example.com", "nin@example.com" }) |id, email| {
+        const doc = try stored(&admin, io, database, id);
         defer doc.deinit();
         try testing.expectEqual(@as(?bson.Value, null), try doc.raw().get("status"));
-        try testing.expectEqualStrings("in2@example.com", (try doc.raw().get("email")).?.string);
+        try testing.expectEqualStrings(email, (try doc.raw().get("email")).?.string);
     }
 
     // in of null on an optional: the server writes the null.
-    const in_null = (try people.upsertOne(io, ctx, .{ .email = "null@example.com", .nickname = .{ .in = .{null} } }, changes)).upserted_id.?;
+    const in_null = try raw.upsert(io, .{ .email = "null@example.com", .nickname = .{ .@"$in" = .{null} } });
     {
         const doc = try stored(&admin, io, database, in_null);
         defer doc.deinit();
@@ -433,9 +441,8 @@ fn upsertInAndAll(io: Io) !void {
 
     // An empty in matches nothing, and the document that the server
     // inserts gets none of the filter's equalities: no email.
-    var none: []const []const u8 = &.{};
-    _ = &none;
-    const empty = (try people.upsertOne(io, ctx, .{ .email = "empty@example.com", .tags = .{ .in = none } }, changes)).upserted_id.?;
+    const none: []const []const u8 = &.{};
+    const empty = try raw.upsert(io, .{ .email = "empty@example.com", .tags = .{ .@"$in" = none } });
     {
         const doc = try stored(&admin, io, database, empty);
         defer doc.deinit();
@@ -444,6 +451,39 @@ fn upsertInAndAll(io: Io) !void {
     }
     try expectUnreadable(people, &session, io, empty, "email");
 }
+
+/// The upserts of the pin above, as odm's collections send them: one
+/// update of "people" with `upsert`, and `$set` of the address.
+const Raw = struct {
+    client: odm.Client,
+    database: []const u8,
+
+    /// The id of the document that the upsert of `filter` inserted.
+    fn upsert(r: Raw, io: Io, filter: anytype) !bson.ObjectId {
+        var d: odm.Diagnostics = .{};
+        return r.upsertWith(io, filter, &d) catch |err| {
+            std.debug.print("  upsert: {t}: {s}\n", .{ err, d.message() });
+            return err;
+        };
+    }
+
+    fn upsertWith(r: Raw, io: Io, filter: anytype, d: *odm.Diagnostics) !bson.ObjectId {
+        var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const conditions = try bson.encode(a, filter, .{});
+        const changes = try bson.encode(a, .{ .@"$set" = .{ .address = .{ .city = "Pin" } } }, .{});
+        const result = try r.client.update(io, within(io, .fromSeconds(10)), &.{
+            .ns = .{ .database = r.database, .collection = "people" },
+            .filter = conditions.raw(),
+            .update = changes.raw(),
+            .mode = .one,
+            .upsert = true,
+        }, .{ .allocator = a, .diagnostics = d });
+        try testing.expectEqual(@as(u64, 0), result.matched);
+        return (result.upserted_id orelse return error.TestNothingInserted).object_id;
+    }
+};
 
 /// The model cannot read the document of `id`: `DecodeFailed` at `path`.
 fn expectUnreadable(people: odm.Collection(Person), session: *const odm.Session, io: Io, id: bson.ObjectId, path: []const u8) !void {
