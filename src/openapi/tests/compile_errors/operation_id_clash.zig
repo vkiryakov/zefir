@@ -26,5 +26,5 @@ var todos: TodosController = .{};
 var users: UsersController = .{};
 
 test {
-    _ = comptime zefir.openapi.document(@TypeOf(.{ .backend = @as(http.Backend, undefined), .controllers = .{ &todos, &users } }), .{ .info = .{ .title = "Todos API", .version = "1.0.0" } });
+    _ = comptime zefir.openapi.document(@TypeOf(.{ .controllers = .{ &todos, &users } }), .{ .info = .{ .title = "Todos API", .version = "1.0.0" } });
 }

@@ -7,7 +7,7 @@
 
 /// The programs that run on the backend in memory: `zig build test-http`
 /// runs each, and README.md shows its run as `$ zig build run`.
-pub const programs = [_][]const u8{"minute"};
+pub const programs = [_][]const u8{ "minute", "app" };
 
 /// The files of the example app that README.md shows as they are. main.zig
 /// imports zio, so only tests/http builds it.

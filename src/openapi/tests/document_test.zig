@@ -131,7 +131,7 @@ const small = struct {
 
     var todos: TodosController = .{};
     var app_errors: AppErrors = .{};
-    const Options = @TypeOf(.{ .backend = @as(http.Backend, undefined), .prefix = "/api", .controllers = .{&todos}, .error_handler = &app_errors });
+    const Parts = @TypeOf(.{ .controllers = .{&todos}, .error_handler = &app_errors });
 };
 
 /// An answer to an error with an `http.Problem`, without its null fields.
@@ -149,7 +149,7 @@ fn phraseOf(comptime status: []const u8) []const u8 {
 }
 
 test "the application of design §3: the whole document" {
-    const doc = comptime document(small.Options, .{ .info = info });
+    const doc = comptime document(small.Parts, .{ .info = info, .prefix = "/api" });
     try testing.expect(!doc.runtime_prefix);
     try expectJson(comptime "{\"openapi\":\"3.1.2\",\"info\":{\"title\":\"Todos API\",\"version\":\"1.0.0\"},\"servers\":[{\"url\":\"/api\"}],\"tags\":[{\"name\":\"Todos\"}]," ++
         "\"paths\":{\"/v1/todos/{id}\":{\"get\":{\"operationId\":\"Todos.get\",\"tags\":[\"Todos\"],\"summary\":\"Get a todo\"," ++
@@ -217,14 +217,14 @@ const rows = struct {
     };
 
     var items: ItemsController = .{};
-    const Options = @TypeOf(.{ .backend = @as(http.Backend, undefined), .controllers = .{&items} });
+    const Parts = @TypeOf(.{ .controllers = .{&items} });
 };
 
 const item_json = "{\"application/json\":{\"schema\":{\"$ref\":\"#/components/schemas/Item\"}}}";
 const internal_500 = problemJson("500", "internal", "Internal Server Error", "internal");
 
 test "success responses: each row of the table of design §7" {
-    const paths = comptime at(document(rows.Options, .{ .info = info }).root, &.{"paths"});
+    const paths = comptime at(document(rows.Parts, .{ .info = info }).root, &.{"paths"});
     // http.Json(T): 200 with T.
     // A JSON value: writing it may run out of memory, a 500 of the server.
     try expectJson(comptime "{\"200\":{\"description\":\"OK\",\"content\":" ++ item_json ++ "}," ++ internal_500 ++ "}", comptime at(paths, &.{ "/items", "get", "responses" }));
@@ -285,11 +285,11 @@ const bodiless = struct {
 
     var items: ItemsController = .{};
     var app_errors: AppErrors = .{};
-    const Options = @TypeOf(.{ .backend = @as(http.Backend, undefined), .controllers = .{&items}, .error_handler = &app_errors });
+    const Parts = @TypeOf(.{ .controllers = .{&items}, .error_handler = &app_errors });
 };
 
 test "204, 205 and 304 have no content, whatever the handler, a middleware or mapError gives them" {
-    const doc = comptime document(bodiless.Options, .{ .info = info });
+    const doc = comptime document(bodiless.Parts, .{ .info = info });
     const responses = comptime at(doc.root, &.{ "paths", "/items/sync", "put", "responses" });
     try expectJson(comptime "{\"200\":{\"description\":\"OK\",\"content\":" ++ item_json ++ "}," ++
         "\"204\":{\"description\":\"Nothing to sync.\"}," ++
@@ -348,7 +348,7 @@ const errs = struct {
 
     var items: ItemsController = .{};
     var app_errors: AppErrors = .{};
-    const Options = @TypeOf(.{ .backend = @as(http.Backend, undefined), .controllers = .{&items}, .error_handler = &app_errors });
+    const Parts = @TypeOf(.{ .controllers = .{&items}, .error_handler = &app_errors });
 };
 
 fn apiError(comptime examples: []const u8) []const u8 {
@@ -356,7 +356,7 @@ fn apiError(comptime examples: []const u8) []const u8 {
 }
 
 test "answers to errors: a response per status, an example per body by the name of its error, 500 without internal names" {
-    const doc = comptime document(errs.Options, .{ .info = info });
+    const doc = comptime document(errs.Parts, .{ .info = info });
     try expectJson(comptime "{\"204\":{\"description\":\"No Content\"}," ++
         // The page of the route and the JSON of its errors, under one status.
         "\"401\":{\"description\":\"Unauthorized\",\"content\":{\"text/html\":{\"schema\":{\"type\":\"string\"}}," ++
@@ -473,11 +473,11 @@ const secure = struct {
     var token_auth: TokenAuth = .{};
     var todos: TodosController = .{};
     var health: HealthController = .{};
-    const Options = @TypeOf(.{ .backend = @as(http.Backend, undefined), .controllers = .{ &todos, &health }, .middleware = .{&token_auth} });
+    const Parts = @TypeOf(.{ .controllers = .{ &todos, &health }, .middleware = .{&token_auth} });
 };
 
 test "security: the schemes of the chains, a route's requirement with its roles, public routes without one" {
-    const doc = comptime document(secure.Options, .{ .info = info });
+    const doc = comptime document(secure.Parts, .{ .info = info });
     const paths = comptime at(doc.root, &.{"paths"});
     // .any: each scheme declared before it, with the roles of the chain.
     try expectJson("[{\"bearer\":[\"todos\"]},{\"session\":[\"todos\"]}]", comptime at(paths, &.{ "/todos", "get", "security" }));
@@ -537,15 +537,15 @@ const live = struct {
 
     var controller: LiveController = .{};
     var plain: PlainController = .{};
-    const Options = @TypeOf(.{ .backend = @as(http.Backend, undefined), .controllers = .{&controller} });
-    const Plain = @TypeOf(.{ .backend = @as(http.Backend, undefined), .controllers = .{&plain} });
+    const Parts = @TypeOf(.{ .controllers = .{&controller} });
+    const Plain = @TypeOf(.{ .controllers = .{&plain} });
 };
 
 test "SSE in 3.1: a string, and the events with the schemas of their data in the description; 204 without a stream" {
     // Without a text of the route, the events are the description.
     const plain = comptime document(live.Plain, .{ .info = info });
     try expectJson("\"The events of the stream, each with the schema of its data: todo.created (TodoResponse), todo.deleted (TodoIdPath), ping (an empty object), count (an integer).\"", comptime at(plain.root, &.{ "paths", "/todos/events", "get", "responses", "200", "description" }));
-    const doc = comptime document(live.Options, .{ .info = info });
+    const doc = comptime document(live.Parts, .{ .info = info });
     try expectJson("{\"200\":{\"description\":\"The changes, as they happen. The events of the stream, each with the schema of its data: " ++
         "todo.created (TodoResponse), todo.deleted (TodoIdPath), ping (an empty object), count (an integer).\"," ++
         "\"content\":{\"text/event-stream\":{\"schema\":{\"type\":\"string\"}}}}," ++
@@ -564,7 +564,7 @@ fn event(comptime name: []const u8, comptime data: []const u8) []const u8 {
 }
 
 test "SSE in 3.2: itemSchema, one of the events, each with its data" {
-    const doc = comptime document(live.Options, .{ .info = info, .version = .@"3.2" });
+    const doc = comptime document(live.Parts, .{ .info = info, .version = .@"3.2" });
     try expectJson("\"3.2.1\"", comptime at(doc.root, &.{"openapi"}));
     try expectJson(comptime "{\"200\":{\"description\":\"The changes, as they happen.\",\"content\":{\"text/event-stream\":{\"itemSchema\":{\"oneOf\":[" ++
         event("todo.created", "{\"$ref\":\"#/components/schemas/TodoResponse\"}") ++ "," ++
@@ -574,8 +574,8 @@ test "SSE in 3.2: itemSchema, one of the events, each with its data" {
         "]}}}},\"204\":{\"description\":\"No Content\"}}", comptime at(doc.root, &.{ "paths", "/todos/events", "get", "responses" }));
 }
 
-/// A controller of a route, a controller without texts, a controller of
-/// documentation, and static files.
+/// A controller of a route, a controller without texts and a controller of
+/// documentation.
 const parts = struct {
     const ItemsController = struct {
         pub const http_routes = http.routes(.{ .prefix = "/items", .methods = .{ .list = http.get("", .{}) } });
@@ -601,28 +601,34 @@ const parts = struct {
     var items: ItemsController = .{};
     var health: HealthController = .{};
     var docs: DocsController = .{};
-    const static = .{http.static("/", .{ .root = "public" })};
-    const Options = @TypeOf(.{ .backend = @as(http.Backend, undefined), .controllers = .{ &items, &health, &docs }, .static = static });
+    const Parts = @TypeOf(.{ .controllers = .{ &items, &health, &docs } });
 };
 
-test "what goes in: .exclude or .include, never Docs or static files" {
-    const excluded = comptime document(parts.Options, .{ .info = info, .exclude = &.{parts.HealthController} });
+test "what goes in: .exclude or .include, never Docs" {
+    const excluded = comptime document(parts.Parts, .{ .info = info, .exclude = &.{parts.HealthController} });
     try testing.expectEqualStrings("/items", comptime keysOf(at(excluded.root, &.{"paths"})));
-    const included = comptime document(parts.Options, .{ .info = info, .include = &.{parts.ItemsController} });
+    const included = comptime document(parts.Parts, .{ .info = info, .include = &.{parts.ItemsController} });
     try testing.expectEqualStrings("/items", comptime keysOf(at(included.root, &.{"paths"})));
-    // No prefix: no servers; nothing comes at run time.
+    // No .prefix: no servers; Docs puts the server's in as it serves.
     try testing.expectEqualStrings("openapi info tags paths", comptime keysOf(excluded.root));
-    try testing.expect(!excluded.runtime_prefix);
+    try testing.expect(excluded.runtime_prefix);
 }
 
-test "servers: the prefix known at compile time, from the config, or .servers" {
-    var config_prefix: []const u8 = "/api";
-    _ = &config_prefix;
-    const Runtime = @TypeOf(.{ .backend = @as(http.Backend, undefined), .prefix = config_prefix, .controllers = .{&parts.items} });
-    const runtime = comptime document(Runtime, .{ .info = info });
+test "servers: the server's prefix given to the document, an empty one, one from the config, or .servers" {
+    const Parts = @TypeOf(.{ .controllers = .{&parts.items} });
+    const known = comptime document(Parts, .{ .info = info, .prefix = "/api" });
+    try testing.expect(!known.runtime_prefix);
+    try expectJson("[{\"url\":\"/api\"}]", comptime at(known.root, &.{"servers"}));
+    // An empty prefix: no servers, and nothing to put in.
+    const empty = comptime document(Parts, .{ .info = info, .prefix = "" });
+    try testing.expect(!empty.runtime_prefix);
+    try testing.expectEqualStrings("openapi info tags paths", comptime keysOf(empty.root));
+    // A prefix from the config, which the document does not get: Docs puts
+    // it in as it serves.
+    const runtime = comptime document(Parts, .{ .info = info });
     try testing.expect(runtime.runtime_prefix);
     try testing.expectEqualStrings("openapi info tags paths", comptime keysOf(runtime.root));
-    const given = comptime document(Runtime, .{ .info = info, .servers = &.{
+    const given = comptime document(Parts, .{ .info = info, .servers = &.{
         .{ .url = "https://api.example.com/v1", .description = "Production" },
         .{ .url = "http://localhost:8080/api" },
     } });
@@ -664,11 +670,11 @@ const named = struct {
     var v1: TodosV1Controller = .{};
     var health: HealthController = .{};
     var v2: TodosV2Controller = .{};
-    const Options = @TypeOf(.{ .backend = @as(http.Backend, undefined), .controllers = .{ &v1, &health, &v2 } });
+    const Parts = @TypeOf(.{ .controllers = .{ &v1, &health, &v2 } });
 };
 
 test "tags in the order they first come, shared and by default; operationIds; the texts of operations" {
-    const doc = comptime document(named.Options, .{ .info = .{
+    const doc = comptime document(named.Parts, .{ .info = .{
         .title = "Todos API",
         .version = "1.0.0",
         .description = "Todos of their users.",
@@ -703,11 +709,11 @@ const generic = struct {
     const Item = struct { id: u64 };
 
     var items: CrudController(Item) = .{};
-    const Options = @TypeOf(.{ .backend = @as(http.Backend, undefined), .controllers = .{&items} });
+    const Parts = @TypeOf(.{ .controllers = .{&items} });
 };
 
 test "a generic controller: its default tag and operationIds by its name without Controller and its arguments, as schemas are named" {
-    const doc = comptime document(generic.Options, .{ .info = info });
+    const doc = comptime document(generic.Parts, .{ .info = info });
     try expectJson("[{\"name\":\"Crud_Item\"}]", comptime at(doc.root, &.{"tags"}));
     try expectJson("\"Crud_Item.list\"", comptime at(doc.root, &.{ "paths", "/items", "get", "operationId" }));
 }
@@ -792,11 +798,11 @@ const params = struct {
     };
 
     var controller: ProjectTodosController = .{};
-    const Options = @TypeOf(.{ .backend = @as(http.Backend, undefined), .controllers = .{&controller} });
+    const Parts = @TypeOf(.{ .controllers = .{&controller} });
 };
 
 test "parameters: the path by outside names, the query, headers and cookies, those of a middleware" {
-    const doc = comptime document(params.Options, .{ .info = info });
+    const doc = comptime document(params.Parts, .{ .info = info });
     const get = comptime at(doc.root, &.{ "paths", "/v1/projects/{projectId}/todos/{id}", "get" });
     try expectJson("\"The server also checks how these parameters fit together.\"", comptime at(get, &.{"description"}));
     const uint64 = "{\"type\":\"integer\",\"format\":\"uint64\",\"minimum\":1}";
@@ -877,11 +883,11 @@ const bodies = struct {
     };
 
     var controller: TodosController = .{};
-    const Options = @TypeOf(.{ .backend = @as(http.Backend, undefined), .controllers = .{&controller} });
+    const Parts = @TypeOf(.{ .controllers = .{&controller} });
 };
 
 test "request bodies: JSON and a form; the named examples of a body's type, on requests and responses" {
-    const doc = comptime document(bodies.Options, .{ .info = info });
+    const doc = comptime document(bodies.Parts, .{ .info = info });
     const create = comptime at(doc.root, &.{ "paths", "/todos", "post" });
     try expectJson("{\"required\":true,\"content\":{\"application/json\":{\"schema\":{\"$ref\":\"#/components/schemas/CreateTodoRequest\"},\"examples\":{" ++
         "\"minimal\":{\"summary\":\"Only a title\",\"value\":{\"title\":\"Buy milk\",\"dueDate\":null}}," ++
@@ -889,6 +895,10 @@ test "request bodies: JSON and a form; the named examples of a body's type, on r
     try expectJson("{\"description\":\"Created\",\"content\":{\"application/json\":{\"schema\":{\"$ref\":\"#/components/schemas/TodoResponse\"},\"examples\":{\"first\":{\"value\":{\"id\":1}}}}}}", comptime at(create, &.{ "responses", "201" }));
     try expectJson("{\"required\":true,\"content\":{\"application/x-www-form-urlencoded\":{\"schema\":{\"$ref\":\"#/components/schemas/LoginForm\"}}}}", comptime at(doc.root, &.{ "paths", "/todos/login", "post", "requestBody" }));
     try expectJson("{\"type\":\"object\",\"required\":[\"user\",\"password\"],\"properties\":{\"user\":{\"type\":\"string\"},\"password\":{\"type\":\"string\"}},\"additionalProperties\":false}", comptime at(doc.root, &.{ "components", "schemas", "LoginForm" }));
+    // A server that ignores the unknown keys of a body, as the document is
+    // told: its bodies may hold more.
+    const lenient = comptime document(bodies.Parts, .{ .info = info, .unknown_fields = .{ .body = .ignore } });
+    try expectJson("{\"type\":\"object\",\"required\":[\"user\",\"password\"],\"properties\":{\"user\":{\"type\":\"string\"},\"password\":{\"type\":\"string\"}}}", comptime at(lenient.root, &.{ "components", "schemas", "LoginForm" }));
     // A comptime field is in what the server writes, not in what it reads.
     const note = comptime at(doc.root, &.{ "paths", "/todos/notes", "post" });
     try expectJson("{\"short\":{\"value\":{\"text\":\"Call back\"}}}", comptime at(note, &.{ "requestBody", "content", "application/json", "examples" }));
@@ -920,18 +930,18 @@ const wide = struct {
     };
 
     var controller: RowsController = .{};
-    const Options = @TypeOf(.{ .backend = @as(http.Backend, undefined), .controllers = .{&controller} });
+    const Parts = @TypeOf(.{ .controllers = .{&controller} });
 };
 
 test "a type of many fields, read and written, needs no quota of the application's own" {
-    const doc = comptime document(wide.Options, .{ .info = info });
+    const doc = comptime document(wide.Parts, .{ .info = info });
     const schemas = comptime at(doc.root, &.{ "components", "schemas" });
     try testing.expectEqualStrings("Problem Violation Wide_200-Input Wide_200-Output", comptime keysOf(schemas));
     try testing.expectEqual(200, comptime at(schemas, &.{ "Wide_200-Output", "properties" }).object.len);
 }
 
 test "Document.write: the bytes of the file, laid out, a newline at the end" {
-    const doc = comptime document(parts.Options, .{ .info = info, .exclude = &.{parts.HealthController} });
+    const doc = comptime document(parts.Parts, .{ .info = info, .exclude = &.{parts.HealthController} });
     var out: std.Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
     try doc.write(&out.writer);
@@ -1023,16 +1033,16 @@ const merged = struct {
     var secrets: SecretsController = .{};
     var app_errors: AppErrors = .{};
     var raw_errors: RawErrors = .{};
-    const Options = @TypeOf(.{ .backend = @as(http.Backend, undefined), .controllers = .{&items}, .error_handler = &app_errors });
-    const RawOptions = @TypeOf(.{ .backend = @as(http.Backend, undefined), .controllers = .{&secrets}, .error_handler = &raw_errors });
+    const Parts = @TypeOf(.{ .controllers = .{&items}, .error_handler = &app_errors });
+    const RawParts = @TypeOf(.{ .controllers = .{&secrets}, .error_handler = &raw_errors });
 };
 
 test "one status and media type of a middleware and of errors: one body, the examples of both" {
-    const doc = comptime document(merged.Options, .{ .info = info });
+    const doc = comptime document(merged.Parts, .{ .info = info });
     try expectJson("{\"description\":\"Slow down.\",\"content\":{\"application/json\":{\"schema\":{\"$ref\":\"#/components/schemas/ApiError\"}," ++
         "\"examples\":{\"RateLimited\":{\"value\":{\"code\":\"rate_limited\"}}}}}}", comptime at(doc.root, &.{ "paths", "/items", "get", "responses", "429" }));
     // A body that writes itself has its JSON at run time only: no examples.
-    const raw = comptime document(merged.RawOptions, .{ .info = info });
+    const raw = comptime document(merged.RawParts, .{ .info = info });
     try expectJson("{\"description\":\"Forbidden\",\"content\":{\"application/json\":{\"schema\":{\"$ref\":\"#/components/schemas/Raw\"}}}}", comptime at(raw.root, &.{ "paths", "/secrets", "get", "responses", "403" }));
     try expectJson("{\"type\":\"string\"}", comptime at(raw.root, &.{ "components", "schemas", "Raw" }));
 }

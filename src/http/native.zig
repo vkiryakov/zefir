@@ -1,15 +1,13 @@
 //! `http.native`: the backend of a server on
 //! the network, over `std.Io` (zio in production): connections, the heads
 //! and bodies of requests, responses, keep-alive and pipelining, and the
-//! watcher that sees a client leave.
+//! watcher that sees a client leave. A server makes its own from
+//! `.listen = .{ .port = 8080 }`, or from these options:
 //!
 //! ```zig
-//! var native = try http.native.Backend.init(gpa, .{
-//!     .port = 8080,
-//!     .timeouts = .{ .idle = .fromSeconds(30) },
+//! var server = try http.Server.init(gpa, .{ .controllers = .{&todos_v1} }, .{
+//!     .listen = .{ .native = .{ .port = 8080, .timeouts = .{ .idle = .fromSeconds(30) } } },
 //! });
-//! defer native.deinit();
-//! var server = try http.Server.init(gpa, .{ .backend = native.backend(), .controllers = .{&todos_v1} });
 //! ```
 const backend = @import("native/Backend.zig");
 

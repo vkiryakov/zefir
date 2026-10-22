@@ -274,7 +274,7 @@ test "value: the bytes of ctx.response.json and of an error's http.Problem" {
     var app_errors: AppErrors = .{};
     var backend: http.testing.Backend = .init(testing.allocator);
     defer backend.deinit();
-    var server: http.Server = try .init(testing.allocator, .{ .backend = backend.backend(), .controllers = .{&values}, .error_handler = &app_errors });
+    var server: http.Server = try .init(testing.allocator, .{ .controllers = .{&values}, .error_handler = &app_errors }, .{ .listen = .{ .backend = backend.backend() } });
     defer server.deinit(testing.io);
     try server.start(testing.io);
 

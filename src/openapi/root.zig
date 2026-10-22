@@ -41,7 +41,7 @@ const document_file = @import("document.zig");
 const docs_file = @import("Docs.zig");
 
 /// The document of a server, built at compile time:
-/// `zefir.openapi.document(@TypeOf(options), .{ .info = ... })`.
+/// `zefir.openapi.document(@TypeOf(parts), .{ .info = ... })`.
 pub const document = document_file.document;
 pub const Document = document_file.Document;
 /// `expectFile`: the document of an application's test against its file.

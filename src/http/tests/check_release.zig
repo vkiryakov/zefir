@@ -29,7 +29,7 @@ test "outside Debug a mismatch with the route's declarations does not change the
     var items: ItemsV1Controller = .{};
     var backend: http.testing.Backend = .init(std.testing.allocator);
     defer backend.deinit();
-    var server = try http.Server.init(std.testing.allocator, .{ .backend = backend.backend(), .controllers = .{&items} });
+    var server = try http.Server.init(std.testing.allocator, .{ .controllers = .{&items} }, .{ .listen = .{ .backend = backend.backend() } });
     defer server.deinit(io);
     try server.start(io);
 

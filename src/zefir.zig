@@ -1,6 +1,10 @@
 //! Zefir framework. Umbrella module re-exporting all subsystems.
 
 pub const core = @import("core");
+/// The application container, which lives in core: `zefir.App(AppModule)`
+/// and the namespace of its types, `zefir.app`.
+pub const app = core.app;
+pub const App = core.App;
 pub const log = @import("log");
 pub const confy = @import("confy");
 pub const validator = @import("validator");
@@ -16,6 +20,14 @@ pub const openapi = @import("openapi");
 
 test {
     @import("std").testing.refAllDecls(@This());
+}
+
+test "zefir.app and zefir.App are core's" {
+    const std = @import("std");
+    comptime {
+        std.debug.assert(app == core.app);
+        std.debug.assert(App == core.App);
+    }
 }
 
 test "zefir.log writes a confy.Secret as one [REDACTED], wherever it sits" {

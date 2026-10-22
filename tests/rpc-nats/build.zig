@@ -47,6 +47,11 @@ const examples = [_]Example{
         },
         .command = "$ APP_USERS_NATS_PASSWORD=users APP_ORDERS_NATS_PASSWORD=orders zig build run",
     },
+    .{
+        .name = "app",
+        .env = &.{.{ "APP_NATS_URL", "nats://127.0.0.1:14222" }},
+        .command = "$ zig build run",
+    },
 };
 
 pub fn build(b: *std.Build) void {
@@ -188,7 +193,12 @@ pub fn build(b: *std.Build) void {
         // After the tests, and after the example before it.
         checked.step.dependOn(previous);
         previous = &checked.step;
-        guide.root_module.addAnonymousImport(b.fmt("{s}.out", .{example.name}), .{ .root_source_file = checked.captureStdOut(.{}) });
+        // A run with side effects keeps what it printed in a directory
+        // named by its arguments, its environment and this name, and
+        // getting_started and app share their environment: the name keeps
+        // the runs apart.
+        const out = checked.captureStdOut(.{ .basename = b.fmt("{s}.out", .{example.name}) });
+        guide.root_module.addAnonymousImport(b.fmt("{s}.out", .{example.name}), .{ .root_source_file = out });
         guide.root_module.addAnonymousImport(b.fmt("{s}.zig", .{example.name}), .{ .root_source_file = source });
 
         const shown = b.addRunArtifact(exe);

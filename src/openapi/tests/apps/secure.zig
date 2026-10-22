@@ -408,9 +408,7 @@ pub const Service = struct {
         s.live = .init(gpa, .{});
         errdefer s.live.deinit(io);
         s.todos = .{ .live = &s.live };
-        const options = .{
-            .backend = backend,
-            .prefix = s.prefix,
+        const parts = .{
             .controllers = .{ &s.todos, &s.sessions, &s.admin },
             .middleware = .{&s.token_auth},
             .error_handler = &s.app_errors,
@@ -421,9 +419,9 @@ pub const Service = struct {
             .contact = .{ .name = "The projects team", .url = "https://example.com/support", .email = "projects@example.com" },
             .license = .{ .name = "Apache 2.0", .identifier = "Apache-2.0" },
         };
-        s.docs_3_1 = comptime zefir.openapi.document(@TypeOf(options), .{ .info = info });
-        s.docs_3_2 = comptime zefir.openapi.document(@TypeOf(options), .{ .info = info, .version = .@"3.2" });
-        s.server = try .init(gpa, options);
+        s.docs_3_1 = comptime zefir.openapi.document(@TypeOf(parts), .{ .info = info });
+        s.docs_3_2 = comptime zefir.openapi.document(@TypeOf(parts), .{ .info = info, .version = .@"3.2" });
+        s.server = try .init(gpa, parts, .{ .listen = .{ .backend = backend }, .prefix = s.prefix });
         errdefer s.server.deinit(io);
         try s.server.start(io);
     }

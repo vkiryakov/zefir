@@ -15,5 +15,5 @@ const TodosController = struct {
 var todos: TodosController = .{};
 
 test {
-    _ = comptime zefir.openapi.document(@TypeOf(.{ .backend = @as(http.Backend, undefined), .controllers = .{&todos} }), .{ .info = .{ .title = "Todos API", .version = "1.0.0", .license = .{ .name = "MIT", .identifier = "MIT", .url = "https://opensource.org/license/mit" } } });
+    _ = comptime zefir.openapi.document(@TypeOf(.{ .controllers = .{&todos} }), .{ .info = .{ .title = "Todos API", .version = "1.0.0", .license = .{ .name = "MIT", .identifier = "MIT", .url = "https://opensource.org/license/mit" } } });
 }

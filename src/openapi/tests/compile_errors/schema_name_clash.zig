@@ -27,5 +27,5 @@ const ItemsController = struct {
 var items: ItemsController = .{};
 
 test {
-    _ = comptime zefir.openapi.document(@TypeOf(.{ .backend = @as(http.Backend, undefined), .controllers = .{&items} }), .{ .info = .{ .title = "Todos API", .version = "1.0.0" } });
+    _ = comptime zefir.openapi.document(@TypeOf(.{ .controllers = .{&items} }), .{ .info = .{ .title = "Todos API", .version = "1.0.0" } });
 }

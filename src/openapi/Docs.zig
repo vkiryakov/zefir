@@ -6,12 +6,13 @@
 //! ```zig
 //! docs: zefir.openapi.Docs(.{}) = undefined, // GET /api/openapi.json and the page GET /api/docs
 //!
-//! const options = .{ .backend = backend, .prefix = "/api", .controllers = .{ &s.todos, &s.docs } };
-//! s.docs = try .init(gpa, comptime zefir.openapi.document(@TypeOf(options), .{
+//! const parts = .{ .controllers = .{ &s.todos, &s.docs } };
+//! s.docs = try .init(gpa, comptime zefir.openapi.document(@TypeOf(parts), .{
 //!     .info = .{ .title = "Todos API", .version = "1.0.0" },
+//!     .prefix = "/api",
 //! }));
 //! errdefer s.docs.deinit(gpa);
-//! s.server = try .init(gpa, options);
+//! s.server = try .init(gpa, parts, .{ .listen = .{ .backend = backend }, .prefix = "/api" });
 //! ```
 //!
 //! - `GET /openapi.json`: the document as `application/json`, the same
@@ -34,10 +35,10 @@
 //!   `.page = null` leaves the page out.
 //!
 //! The paths are those of the routes within the server's prefix. When the
-//! prefix comes from the config, at run time, the document has no
-//! `servers`: `Docs` puts the prefix of its own route there as it serves
-//! the document. A document never holds the routes of `Docs`, and in Debug
-//! the server does not check them against one.
+//! prefix comes from the config, at run time, the document gets no
+//! `.prefix` and has no `servers`: `Docs` puts the prefix of its own route
+//! there as it serves the document. A document never holds the routes of
+//! `Docs`, and in Debug the server does not check them against one.
 const std = @import("std");
 const http = @import("http");
 const tree = @import("json.zig");

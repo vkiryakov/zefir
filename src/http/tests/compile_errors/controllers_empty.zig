@@ -13,6 +13,6 @@ const UsersV1Controller = struct {
 
 test {
     const backend: http.Backend = undefined;
-    var server = try http.Server.init(std.testing.allocator, .{ .backend = backend, .controllers = .{} });
+    var server = try http.Server.init(std.testing.allocator, .{ .controllers = .{} }, .{ .listen = .{ .backend = backend } });
     defer server.deinit(std.testing.io);
 }

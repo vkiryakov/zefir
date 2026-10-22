@@ -43,9 +43,9 @@ const Billing = struct {
         try b.useKeys(&b.keys);
         b.authenticator = .{ .verifier = &b.verifier };
         b.handler = .{};
-        b.server = try .init(testing.allocator, io, .{ .handlers = .{&b.handler}, .authenticator = &b.authenticator });
+        b.server = try .init(testing.allocator, io, .{ .handlers = .{&b.handler}, .authenticator = &b.authenticator }, .{});
         errdefer b.server.deinit();
-        b.client = try b.server.client(.{});
+        b.client = try b.server.client(.{}, .{});
     }
 
     fn stop(b: *Billing) void {

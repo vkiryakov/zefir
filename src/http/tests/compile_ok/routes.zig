@@ -160,17 +160,18 @@ fn serve(gpa: std.mem.Allocator, prefix: []const u8) http.Server.InitError!void 
     var health: HealthController = .{};
     var app_errors: AppErrors = .{};
     const backend: http.Backend = undefined;
-    const options = .{
-        .backend = backend,
-        .prefix = prefix,
+    const parts = .{
         .controllers = .{ &todos_v1, &health },
         .middleware = .{ requestId, &access_log, .{ http.onResponse(noCache), .{ Typed, http.onFinish(countRequest) } } },
         .error_handler = &app_errors,
     };
-    // The server for a document: its prefix comes from the config.
-    const described = comptime http.describe(@TypeOf(options));
-    comptime std.debug.assert(described.prefix == null and described.routes.len == 15);
-    var server = try http.Server.init(gpa, options);
+    // The server for a document: its routes, from the type of its parts.
+    const described = comptime http.describe(@TypeOf(parts));
+    comptime std.debug.assert(described.routes.len == 15);
+    var server = try http.Server.init(gpa, parts, .{
+        .listen = .{ .backend = backend },
+        .prefix = prefix,
+    });
     defer server.deinit(std.testing.io);
     const info: http.RouteInfo = server.internal.routes[0].info;
     _ = info;

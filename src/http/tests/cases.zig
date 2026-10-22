@@ -74,9 +74,13 @@ pub const compile_errors = [_]Fixture{
     // The compiler's own: the event is a value of the union.
     .{ .file = dir ++ "sse_publish_unknown_event.zig", .expect = "no field named 'todo.archived' in union 'sse_publish_unknown_event.LiveEvent'" },
     .{ .file = dir ++ "sse_publish_wrong_data.zig", .expect = "expected type 'sse_publish_wrong_data.Todo', found 'comptime_int'" },
-    .{ .file = dir ++ "server_unknown_option.zig", .expect = "zefir.http: Server.init: unknown option .contollers" },
-    .{ .file = dir ++ "server_unknown_nested_option.zig", .expect = "zefir.http: Server.init: UnknownFieldsOptions has no option .bdy" },
-    .{ .file = dir ++ "server_trusted_proxies.zig", .expect = "zefir.http: Server.init: .trusted_proxies is .all, .private, .none or .{ .list = &.{\"10.1.0.0/16\"} }" },
+    // The parts of Server.init, and its typed options, which Zig checks.
+    .{ .file = dir ++ "server_unknown_option.zig", .expect = "zefir.http: Server.init: unknown part .contollers" ++ parts_list },
+    .{ .file = dir ++ "parts_unknown.zig", .expect = "zefir.http: Server.init: unknown part .prefix" ++ parts_list },
+    .{ .file = dir ++ "parts_not_struct.zig", .expect = "zefir.http: Server.init takes a struct literal of parts, got *parts_not_struct.UsersV1Controller" },
+    .{ .file = dir ++ "options_no_listen.zig", .expect = "missing struct field: listen" },
+    .{ .file = dir ++ "server_unknown_nested_option.zig", .expect = "no field named 'bdy' in struct 'Server.UnknownFieldsOptions'" },
+    .{ .file = dir ++ "server_trusted_proxies.zig", .expect = "no field named 'lst' in union 'proxies.TrustedProxies'" },
     // DTOs of the input.
     .{ .file = dir ++ "header_dto_rename.zig", .expect = "zefir.http: header_dto_rename.Headers.field_rules.request_id: v.rename does not apply to headers; field request_id reads the header Request-Id" },
     .{ .file = dir ++ "query_nested_struct.zig", .expect = "zefir.http: query_nested_struct.Query.filter: a struct field comes only from JSON; query, form, path, headers and cookies hold strings" },
@@ -116,6 +120,7 @@ pub const compile_errors = [_]Fixture{
 };
 
 const strict_hint = " (strict error check; .strict_errors = false turns it off)";
+const parts_list = "; the parts are .controllers, .middleware, .error_handler and .strict_errors";
 
 const dir = "src/http/tests/compile_errors/";
 

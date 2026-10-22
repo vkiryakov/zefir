@@ -78,7 +78,7 @@ Add Zefir to your `build.zig.zon`:
 zig fetch --save git+https://github.com/vkiryakov/zefir#dev
 ```
 
-This guide is on the `dev` branch, so the command fetches its latest commit; `--save` pins that commit. For the latest release, v0.9.0, fetch `#v0.9.0` instead.
+This guide is on the `dev` branch, so the command fetches its latest commit; `--save` pins that commit. For the latest release, v0.10.0, fetch `#v0.10.0` instead.
 
 Then import the `zefir-confy` module in `build.zig`:
 

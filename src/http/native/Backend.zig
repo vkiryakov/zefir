@@ -4,19 +4,26 @@
 //! after another (keep-alive and pipelining), within the limits of
 //! `Limits` and the times of `Timeouts`.
 //!
+//! A server makes one for `.listen = .{ .port = 8080 }` or `.native = .{
+//! ... }`, and frees it in its `deinit`. One made by hand outlives the
+//! server, which takes it as `.listen = .{ .backend = native.backend() }`:
+//! then `port()` names the port the system gave for 0.
+//!
 //! ```zig
-//! var native = try http.native.Backend.init(gpa, .{ .port = 8080 });
+//! var native = try http.native.Backend.init(gpa, .{ .port = 0 });
 //! defer native.deinit();
-//! var server = try http.Server.init(gpa, .{ .backend = native.backend(), .controllers = .{&todos_v1} });
+//! var server = try http.Server.init(gpa, .{ .controllers = .{&todos_v1} }, .{ .listen = .{ .backend = native.backend() } });
 //! defer server.deinit(io);
-//! try server.run(io);
+//! try server.start(io);
+//! std.debug.print("listening on {d}\n", .{native.port()});
 //! ```
 //!
 //! At most `.max_connections` connections are open at once: a client over
 //! it waits in the kernel's queue until one closes. When the server stops,
 //! the backend stops listening; a connection that waits for a request
 //! closes at once, a busy one after its response, which says
-//! `Connection: close`. A backend serves one server, once.
+//! `Connection: close`. A listener that breaks stops the server, whose
+//! `wait` returns `error.Unavailable`. A backend serves one server, once.
 //!
 //! A port taken by another server: on Windows the server's `start` is
 //! `error.AddressInUse`. On Linux and macOS it starts, and the two share
@@ -129,8 +136,8 @@ pub fn deinit(b: *Backend) void {
     b.* = undefined;
 }
 
-/// The backend for `http.Server.init`'s `.backend`. From the server's
-/// `start` on, the backend stays where it is.
+/// The backend for `.listen = .{ .backend = ... }` of `http.Server.init`.
+/// From the server's `start` on, the backend stays where it is.
 pub fn backend(b: *Backend) Interface {
     return .{ .ptr = b, .vtable = &vtable };
 }
@@ -174,12 +181,15 @@ fn start(ptr: *anyopaque, io: std.Io, handler: Interface.Handler) Interface.Star
     };
     b.address = listener.socket.address;
     b.listener = listener;
+    // Before the accept task runs: a listener that breaks at once makes
+    // that task fail the server.
+    b.accepting.store(true, .release);
     b.accept_task = io.concurrent(acceptLoop, .{ b, io }) catch |err| {
+        b.accepting.store(false, .release);
         listener.deinit(io);
         b.listener = null;
         return err;
     };
-    b.accepting.store(true, .release);
 }
 
 /// Takes a slot, then accepts a connection and serves it on a task of the
@@ -190,7 +200,13 @@ fn acceptLoop(b: *Backend, io: std.Io) void {
         const stream = b.listener.?.accept(io) catch |err| {
             b.slots.post(io);
             switch (err) {
-                error.Canceled, error.SocketNotListening => return,
+                error.Canceled => return,
+                // The listener broke under the server, which stops; not
+                // when `stopAccepting` closed it.
+                error.SocketNotListening => {
+                    if (b.accepting.load(.acquire)) b.handler.fail(b.handler.ptr, io, error.Unavailable);
+                    return;
+                },
                 error.ConnectionAborted, error.WouldBlock => continue,
                 else => {
                     // Out of descriptors or memory, or the network is down:

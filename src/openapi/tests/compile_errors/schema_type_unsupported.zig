@@ -19,5 +19,5 @@ const SensorsController = struct {
 var sensors: SensorsController = .{};
 
 test {
-    _ = comptime zefir.openapi.document(@TypeOf(.{ .backend = @as(http.Backend, undefined), .controllers = .{&sensors} }), .{ .info = .{ .title = "Todos API", .version = "1.0.0" } });
+    _ = comptime zefir.openapi.document(@TypeOf(.{ .controllers = .{&sensors} }), .{ .info = .{ .title = "Todos API", .version = "1.0.0" } });
 }

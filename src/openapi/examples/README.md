@@ -92,9 +92,9 @@ flowchart LR
 
 The server of a zefir-http service is built in one function of the
 application, `Service.start`, which `main` and the tests both call. It puts
-the options of the server together, `.controllers`, `.middleware`,
-`.error_handler`, and `zefir.openapi.document(@TypeOf(options), .{ … })`
-builds the document from the type of those options at compile time: that
+the parts of the server together, `.controllers`, `.middleware`,
+`.error_handler`, and `zefir.openapi.document(@TypeOf(parts), .{ … })`
+builds the document from the type of those parts at compile time: that
 type names every controller, every middleware and the error handler, and
 through them every route, every DTO and every error. The server that `main`
 runs is the one the document describes.
@@ -119,7 +119,7 @@ zig fetch --save git+https://github.com/vkiryakov/zefir#dev
 
 zefir-openapi is on the `dev` branch until the next release. The command
 fetches the latest commit of `dev`; `--save` pins that commit. The latest
-release, v0.9.0, came before zefir-openapi, so `#v0.9.0` does not have it.
+release, v0.10.0, came before zefir-openapi, so `#v0.10.0` does not have it.
 
 The service runs on zio. zio has no release for Zig 0.17 yet, so pin the
 commit Zefir is tested with:
@@ -337,7 +337,7 @@ pub const AppErrors = struct {
 
 ```zig
 //! Builds the server for main and for the tests. The document is built
-//! here too, from the type of the same options, so it cannot differ from
+//! here too, from the type of the same parts, so it cannot differ from
 //! the server.
 
 const std = @import("std");
@@ -354,20 +354,20 @@ app_errors: AppErrors = .{},
 server: http.Server = undefined,
 
 pub fn start(s: *Service, gpa: std.mem.Allocator, io: std.Io, backend: http.Backend) !void {
-    const options = .{
-        .backend = backend,
-        .prefix = "/api",
+    const parts = .{
         .controllers = .{ &s.todos, &s.docs },
         .error_handler = &s.app_errors,
     };
-    // The compiler builds the document from the type of options: the
+    const prefix = "/api";
+    // The compiler builds the document from the type of the parts: the
     // controllers, their routes, the DTOs, the errors of the handlers and
     // mapError. `init` writes its JSON, once.
-    s.docs = try .init(gpa, comptime zefir.openapi.document(@TypeOf(options), .{
+    s.docs = try .init(gpa, comptime zefir.openapi.document(@TypeOf(parts), .{
         .info = .{ .title = "Todos API", .version = "1.0.0" },
+        .prefix = prefix,
     }));
     errdefer s.docs.deinit(gpa);
-    s.server = try .init(gpa, options);
+    s.server = try .init(gpa, parts, .{ .listen = .{ .backend = backend }, .prefix = prefix });
     errdefer s.server.deinit(io);
     try s.server.start(io);
 }
@@ -378,13 +378,15 @@ pub fn deinit(s: *Service, gpa: std.mem.Allocator, io: std.Io) void {
 }
 ```
 
-- **`@TypeOf(options)` is known at compile time**, although `options`
-  holds pointers that exist only at run time: the document needs only the
-  types.
+- **`@TypeOf(parts)` is known at compile time**, although `parts` holds
+  pointers that exist only at run time: the document needs only the types.
+- **The prefix goes to both**: to the server in its `http.Server.Options`,
+  and to the document, which puts it in `servers`. The settings of a
+  server are values, which no type holds.
 - **`docs` is a controller of zefir-openapi**, in `.controllers` like the
-  others. Its type, `zefir.openapi.Docs(.{})`, does not depend on
-  `options`, so the options can name it. `init` writes the JSON of the
-  document once; `deinit` frees it.
+  others. Its type, `zefir.openapi.Docs(.{})`, does not depend on `parts`,
+  so the parts can name it. `init` writes the JSON of the document once;
+  `deinit` frees it.
 
 **`src/main.zig`**, the service on the network:
 
@@ -709,7 +711,7 @@ Where each part of it comes from:
 | --- | --- |
 | `"openapi": "3.1.2"` | the version by default; `.version = .@"3.2"` gives 3.2.1 |
 | `info` | `.info` of the call of `document` |
-| `servers`, `"/api"` | `.prefix` of the server: the paths of the document are within it |
+| `servers`, `"/api"` | `.prefix` of the call of `document`, the prefix of the server: the paths of the document are within it |
 | `tags`, `"Todos"` | `.tag` of the `ControllerDoc` |
 | the path `/v1/todos/{id}` | the prefix of the controller and the path of the route |
 | `"operationId": "Todos.get"` | the name of the controller without `Controller`, and its method |
@@ -956,12 +958,14 @@ them (see [Errors](#errors)).
 **The document itself**, in the call of `document`:
 
 ```zig
-s.docs = try .init(gpa, comptime zefir.openapi.document(@TypeOf(options), .{
+s.docs = try .init(gpa, comptime zefir.openapi.document(@TypeOf(parts), .{
     .info = .{
         .title = "Todos API",
         .version = "1.0.0",
         .description = "The todos of each user: made, changed, deleted, exported as CSV and followed live.",
     },
+    // The server's prefix, in the servers of the document.
+    .prefix = prefix,
     // The health check of the load balancer is no part of the API.
     .exclude = &.{HealthController},
 }));
@@ -975,8 +979,23 @@ s.docs = try .init(gpa, comptime zefir.openapi.document(@TypeOf(options), .{
 - **`.include` or `.exclude`**: the types of the controllers in the
   document, or those left out. Two documents, a public and an internal one
   say, are two calls and two `Docs` on two paths.
+- **`.prefix`**: the prefix of the server, the value its
+  `http.Server.Options` get too, which the document puts in `servers`.
+  Without it, as for a prefix that comes from the settings, the document
+  has no `servers` and `Docs` puts the prefix in as it serves the document
+  (see [Serving the document](#serving-the-document)).
+- **`.unknown_fields`**: the `.unknown_fields` of the server, the value its
+  `http.Server.Options` get too, when it is not the default: with
+  `.body = .ignore` the schemas of the bodies allow keys their DTOs do not
+  know (see [Types and rules](#types-and-rules)).
 - **`.servers`**: the servers of the document, in place of the prefix of
   the server.
+
+The settings of a server are values of the program that runs, which the
+type of the parts does not hold, so the document gets the two it needs,
+`.prefix` and `.unknown_fields`, from the call. The application gives the
+same values to the server and to the document, as `Service.start` does with
+its `prefix`.
 
 ## Types and rules
 
@@ -1409,8 +1428,9 @@ docs: zefir.openapi.Docs(.{}) = undefined, // GET /api/openapi.json and the page
 ```
 
 ```zig
-s.docs = try .init(gpa, comptime zefir.openapi.document(@TypeOf(options), .{
+s.docs = try .init(gpa, comptime zefir.openapi.document(@TypeOf(parts), .{
     .info = .{ .title = "Todos API", .version = "1.0.0" },
+    .prefix = prefix,
 }));
 errdefer s.docs.deinit(gpa);
 ```
@@ -1450,9 +1470,10 @@ Content-Length: 54633
   document and a developer's questions to Scalar's servers.
 - **The paths are options**: `zefir.openapi.Docs(.{ .json = "/openapi.json",
   .page = "/docs" })` by default; `.page = null` leaves the page out.
-- **A prefix that comes from the settings**, at run time, is not in the
-  document, nor in its file: `Docs` puts it in `servers` as it serves the
-  document, from the path of its own route.
+- **A prefix that comes from the settings**, at run time, the document
+  does not get: it is not in the document, nor in its file, and `Docs`
+  puts it in `servers` as it serves the document, from the path of its own
+  route.
 - **No document holds the routes of `Docs`**, and the Debug check does not
   check them.
 

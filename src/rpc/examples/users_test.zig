@@ -1,8 +1,8 @@
 //! Tests of the users service without a network: `rpc.testing.Server`
 //! runs the handlers with the whole chain of `rpc.Server` (authentication,
 //! middleware, JSON, validation, the mapping of errors) on a memory
-//! transport, and `t.client(.{})` calls them. Building the server here also
-//! runs the compile-time checks of the handlers in `zig build test`.
+//! transport, and `t.client(.{}, .{})` calls them. Building the server here
+//! also runs the compile-time checks of the handlers in `zig build test`.
 
 const std = @import("std");
 const rpc = @import("rpc");
@@ -17,9 +17,9 @@ test "a created user can be read back" {
     var repo: UserRepository = .init(testing.allocator);
     defer repo.deinit();
     var users: UserHandler = .{ .repo = &repo };
-    var t = try rpc.testing.Server.init(testing.allocator, testing.io, .{ .handlers = .{&users} });
+    var t = try rpc.testing.Server.init(testing.allocator, testing.io, .{ .handlers = .{&users} }, .{});
     defer t.deinit();
-    var client = try t.client(.{});
+    var client = try t.client(.{}, .{});
     defer client.deinit();
 
     var created = try client.call(testing.io, .root, api.UserApi.createUser, .{ .name = "Ada Lovelace", .email = "ada@example.com" }, .{});
@@ -33,9 +33,9 @@ test "an unknown user is the failure users.not_found" {
     var repo: UserRepository = .init(testing.allocator);
     defer repo.deinit();
     var users: UserHandler = .{ .repo = &repo };
-    var t = try rpc.testing.Server.init(testing.allocator, testing.io, .{ .handlers = .{&users} });
+    var t = try rpc.testing.Server.init(testing.allocator, testing.io, .{ .handlers = .{&users} }, .{});
     defer t.deinit();
-    var client = try t.client(.{});
+    var client = try t.client(.{}, .{});
     defer client.deinit();
 
     var r = try client.call(testing.io, .root, api.UserApi.getUser, .{ .id = 42 }, .{});
@@ -48,9 +48,9 @@ test "a request against the rules is not sent" {
     var repo: UserRepository = .init(testing.allocator);
     defer repo.deinit();
     var users: UserHandler = .{ .repo = &repo };
-    var t = try rpc.testing.Server.init(testing.allocator, testing.io, .{ .handlers = .{&users} });
+    var t = try rpc.testing.Server.init(testing.allocator, testing.io, .{ .handlers = .{&users} }, .{});
     defer t.deinit();
-    var client = try t.client(.{});
+    var client = try t.client(.{}, .{});
     defer client.deinit();
 
     var r = try client.call(testing.io, .root, api.UserApi.createUser, .{ .name = "", .email = "ada@example.com" }, .{});
@@ -64,9 +64,9 @@ test "a lost response ends the call at its deadline" {
     var repo: UserRepository = .init(testing.allocator);
     defer repo.deinit();
     var users: UserHandler = .{ .repo = &repo };
-    var t = try rpc.testing.Server.init(testing.allocator, testing.io, .{ .handlers = .{&users} });
+    var t = try rpc.testing.Server.init(testing.allocator, testing.io, .{ .handlers = .{&users} }, .{});
     defer t.deinit();
-    var client = try t.client(.{});
+    var client = try t.client(.{}, .{});
     defer client.deinit();
 
     // The hooks of the memory transport bring the failures of a network.
@@ -108,9 +108,9 @@ test "deleteUser needs the permission users.delete" {
     var users: GuardedUsers = .{ .inner = .{ .repo = &repo } };
     // Every call with credentials, whatever they are, gets this identity.
     var auth: rpc.testing.StaticAuthenticator = .{ .identity = .{ .subject = "reporting" } };
-    var t = try rpc.testing.Server.init(testing.allocator, testing.io, .{ .handlers = .{&users}, .authenticator = &auth });
+    var t = try rpc.testing.Server.init(testing.allocator, testing.io, .{ .handlers = .{&users}, .authenticator = &auth }, .{});
     defer t.deinit();
-    var client = try t.client(.{ .credentials = .{ .bearer = "test" } });
+    var client = try t.client(.{}, .{ .credentials = .{ .bearer = "test" } });
     defer client.deinit();
 
     var created = try client.call(testing.io, .root, api.UserApi.createUser, .{ .name = "Ada Lovelace", .email = "ada@example.com" }, .{});

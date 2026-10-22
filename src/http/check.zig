@@ -887,11 +887,12 @@ const CheckFixture = struct {
         f.backend = .init(testing.allocator);
         errdefer f.backend.deinit();
         f.server = try Server.init(testing.allocator, .{
-            .backend = f.backend.backend(),
-            .prefix = "/api",
             .controllers = .{ &f.items, &f.plain },
             .middleware = .{&f.token_check},
             .error_handler = &f.item_errors,
+        }, .{
+            .listen = .{ .backend = f.backend.backend() },
+            .prefix = "/api",
         });
         errdefer f.server.deinit(io);
         try f.server.start(io);

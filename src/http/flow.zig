@@ -75,11 +75,29 @@ const log = std.log.scoped(.http);
 
 /// The server as the handler of its backend.
 pub fn handler(server: *Server) Backend.Handler {
-    return .{ .ptr = server, .serve = serveErased };
+    return .{ .ptr = server, .serve = serveErased, .fail = failErased };
 }
 
 fn serveErased(ptr: *anyopaque, io: std.Io, exchange: *Exchange) void {
     serve(@ptrCast(@alignCast(ptr)), io, exchange);
+}
+
+/// The backend broke: the server keeps the first error, stops, and wakes
+/// `wait`, which returns the error.
+fn failErased(ptr: *anyopaque, io: std.Io, err: Backend.FatalError) void {
+    const server: *Server = @ptrCast(@alignCast(ptr));
+    // The log may take a cancelable lock; the backend's cancelation stays.
+    const protection = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(protection);
+    {
+        server.internal.mutex.lockUncancelable(io);
+        defer server.internal.mutex.unlock(io);
+        if (server.internal.fatal != null) return;
+        server.internal.fatal = err;
+    }
+    log.warn("the backend broke with error.{t}; the server stops", .{err});
+    server.requestStop(io);
+    server.internal.wait_event.set(io);
 }
 
 /// The race of a request's two tasks and of its deadline: the first to
@@ -875,6 +893,7 @@ fn routeName(ctx: *const Context) []const u8 {
 }
 
 const testing = std.testing;
+const far = waiting.far;
 const TestingBackend = @import("testing/Backend.zig");
 const routes = @import("routes.zig");
 const Json = @import("dto.zig").Json;
@@ -953,7 +972,7 @@ const Fixture = struct {
 
     fn start(f: *Fixture, io: std.Io) !void {
         f.backend = .init(testing.allocator);
-        f.server = try .init(testing.allocator, .{ .backend = f.backend.backend(), .prefix = "/api", .controllers = .{&f.todos}, .strict_errors = false });
+        f.server = try .init(testing.allocator, .{ .controllers = .{&f.todos}, .strict_errors = false }, .{ .listen = .{ .backend = f.backend.backend() }, .prefix = "/api" });
         f.server.start(io) catch |err| {
             f.server.deinit(io);
             return err;
@@ -1038,7 +1057,7 @@ test "205 goes with an empty body, Content-Length: 0, whatever the handler wrote
     var forms: FormsController = .{};
     var backend: TestingBackend = .init(testing.allocator);
     defer backend.deinit();
-    var server: Server = try .init(testing.allocator, .{ .backend = backend.backend(), .controllers = .{&forms} });
+    var server: Server = try .init(testing.allocator, .{ .controllers = .{&forms} }, .{ .listen = .{ .backend = backend.backend() } });
     defer server.deinit(io);
     try server.start(io);
 
@@ -1293,7 +1312,7 @@ fn ErrorFixture(comptime H: type) type {
         fn start(f: *Self) !void {
             f.backend = .init(testing.allocator);
             errdefer f.backend.deinit();
-            f.server = try .init(testing.allocator, .{ .backend = f.backend.backend(), .controllers = .{&f.todos}, .error_handler = &f.handler });
+            f.server = try .init(testing.allocator, .{ .controllers = .{&f.todos}, .error_handler = &f.handler }, .{ .listen = .{ .backend = f.backend.backend() } });
             f.server.start(testing.io) catch |err| {
                 f.server.deinit(testing.io);
                 return err;
@@ -1343,7 +1362,7 @@ test "own body format: a struct as application/json; http.Problem as application
     var todos: FailingV1Controller = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&todos}, .strict_errors = false });
+    var server = try Server.init(testing.allocator, .{ .controllers = .{&todos}, .strict_errors = false }, .{ .listen = .{ .backend = b.backend() } });
     defer server.deinit(testing.io);
     try server.start(testing.io);
     const level = testing.log_level;
@@ -1724,7 +1743,7 @@ test "review focus 5: on a route of the document, 504, 503, 405, OPTIONS and HEA
     var docs: DocumentedController = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&docs}, .max_in_flight = 1 });
+    var server = try Server.init(testing.allocator, .{ .controllers = .{&docs} }, .{ .listen = .{ .backend = b.backend() }, .max_in_flight = 1 });
     defer server.deinit(io);
     try server.start(io);
     const level = testing.log_level;
@@ -1786,7 +1805,7 @@ test "review focus 5: on a route of the document, the 503 of a request the runti
     var docs: DocumentedController = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&docs} });
+    var server = try Server.init(testing.allocator, .{ .controllers = .{&docs} }, .{ .listen = .{ .backend = b.backend() } });
     defer server.deinit(io);
     try server.start(io);
     const level = testing.log_level;
@@ -2109,7 +2128,7 @@ test "when the runtime gives no task, the request gets 503" {
     var waits: WaitController = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&waits}, .strict_errors = false });
+    var server = try Server.init(testing.allocator, .{ .controllers = .{&waits}, .strict_errors = false }, .{ .listen = .{ .backend = b.backend() } });
     defer server.deinit(io);
     try server.start(io);
     const level = testing.log_level;
@@ -2146,7 +2165,7 @@ test "a handler past its deadline gets 504, and its I/O returns Canceled" {
     var waits: WaitController = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&waits}, .strict_errors = false });
+    var server = try Server.init(testing.allocator, .{ .controllers = .{&waits}, .strict_errors = false }, .{ .listen = .{ .backend = b.backend() } });
     defer server.deinit(io);
     try server.start(io);
 
@@ -2170,7 +2189,7 @@ test "a client that leaves cancels the request: no response, the handler sees Ca
     var waits: WaitController = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&waits}, .strict_errors = false });
+    var server = try Server.init(testing.allocator, .{ .controllers = .{&waits}, .strict_errors = false }, .{ .listen = .{ .backend = b.backend() } });
     defer server.deinit(io);
     try server.start(io);
 
@@ -2255,7 +2274,7 @@ test "a response that went out whole before its client left is not cut in its ou
     var finished: LastOutcome = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&after}, .middleware = .{&finished}, .strict_errors = false });
+    var server = try Server.init(testing.allocator, .{ .controllers = .{&after}, .middleware = .{&finished}, .strict_errors = false }, .{ .listen = .{ .backend = b.backend() } });
     defer server.deinit(io);
     try server.start(io);
 
@@ -2280,7 +2299,7 @@ test "a body read to its length, without a read of nothing, lets the watcher see
     var after: AfterController = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&after}, .strict_errors = false });
+    var server = try Server.init(testing.allocator, .{ .controllers = .{&after}, .strict_errors = false }, .{ .listen = .{ .backend = b.backend() } });
     defer server.deinit(io);
     try server.start(io);
 
@@ -2300,7 +2319,7 @@ test "after a deadline the operation reports DeadlineExceeded, never Cancelled" 
     var waits: WaitController = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&waits}, .strict_errors = false });
+    var server = try Server.init(testing.allocator, .{ .controllers = .{&waits}, .strict_errors = false }, .{ .listen = .{ .backend = b.backend() } });
     defer server.deinit(io);
     try server.start(io);
 
@@ -2319,7 +2338,7 @@ test "the request over max_in_flight gets 503" {
     var waits: WaitController = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&waits}, .strict_errors = false, .max_in_flight = 2 });
+    var server = try Server.init(testing.allocator, .{ .controllers = .{&waits}, .strict_errors = false }, .{ .listen = .{ .backend = b.backend() }, .max_in_flight = 2 });
     defer server.deinit(io);
     try server.start(io);
 
@@ -2384,7 +2403,7 @@ test "in-flight slots come back after every outcome" {
     var waits: WaitController = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&waits}, .strict_errors = false, .max_in_flight = 4 });
+    var server = try Server.init(testing.allocator, .{ .controllers = .{&waits}, .strict_errors = false }, .{ .listen = .{ .backend = b.backend() }, .max_in_flight = 4 });
     defer server.deinit(io);
     try server.start(io);
     const level = testing.log_level;
@@ -2444,7 +2463,7 @@ test "a handler that ends at its deadline gets exactly one outcome" {
     var waits: WaitController = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&waits}, .strict_errors = false });
+    var server = try Server.init(testing.allocator, .{ .controllers = .{&waits}, .strict_errors = false }, .{ .listen = .{ .backend = b.backend() } });
     defer server.deinit(io);
     try server.start(io);
 
@@ -2513,7 +2532,7 @@ test "requestStop: requests finish within shutdown_grace, the rest are canceled,
     var stops: StopController = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&stops}, .shutdown_grace = std.Io.Duration.fromMilliseconds(300) });
+    var server = try Server.init(testing.allocator, .{ .controllers = .{&stops} }, .{ .listen = .{ .backend = b.backend() }, .shutdown_grace = std.Io.Duration.fromMilliseconds(300) });
     defer server.deinit(io);
     try server.start(io);
 
@@ -2529,7 +2548,7 @@ test "requestStop: requests finish within shutdown_grace, the rest are canceled,
     server.requestStop(io);
     // The quick ones end within the grace, with their responses.
     stops.gate.set(io);
-    try server.shutdown(io);
+    try server.shutdown(io, far(io));
     // The stuck ones are canceled when the grace is over.
     const elapsed = sinceMs(io, start);
     try testing.expect(elapsed >= 300 and elapsed < 1300);
@@ -2559,7 +2578,7 @@ test "requestStop from a handler: its response goes out, then the server stops" 
     var stops: StopController = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&stops} });
+    var server = try Server.init(testing.allocator, .{ .controllers = .{&stops} }, .{ .listen = .{ .backend = b.backend() } });
     defer server.deinit(io);
     try server.start(io);
     stops.server = &server;
@@ -2581,8 +2600,8 @@ test "shutdown gives up on a request that ignores its cancelation; the stop ends
     var stops: StopController = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    // No onFinish to wait for: the budget after the grace is one second.
-    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&stops}, .shutdown_grace = std.Io.Duration.fromMilliseconds(50), .finish_timeout = std.Io.Duration.zero });
+    // No onFinish to wait for.
+    var server = try Server.init(testing.allocator, .{ .controllers = .{&stops} }, .{ .listen = .{ .backend = b.backend() }, .shutdown_grace = std.Io.Duration.fromMilliseconds(50), .finish_timeout = std.Io.Duration.zero });
     defer server.deinit(io);
     try server.start(io);
 
@@ -2592,10 +2611,12 @@ test "shutdown gives up on a request that ignores its cancelation; the stop ends
     defer if (result) |*res| res.deinit();
     try waitCount(io, &stops.entered, 1);
 
-    // The grace, then a second for the canceled request: it works on.
+    // A deadline a second away leaves no grace: the request is canceled at
+    // once, works on, and shutdown waits until 250 ms before the deadline.
     const start = std.Io.Clock.awake.now(io);
-    try testing.expectError(error.ShutdownTimeout, server.shutdown(io));
-    try testing.expect(sinceMs(io, start) >= 1000);
+    const deadline: std.Io.Clock.Timestamp = .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake });
+    try testing.expectError(error.ShutdownTimeout, server.shutdown(io, deadline));
+    try testing.expect(sinceMs(io, start) >= 750);
     try testing.expectEqual(Server.State.draining, server.state());
     // The stop ends when the request does, without a response.
     try server.wait(io);
@@ -2630,10 +2651,11 @@ test "the stop does not cut short an onFinish at work: it gets its .finish_timeo
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
     var server = try Server.init(testing.allocator, .{
-        .backend = b.backend(),
         .controllers = .{&waits},
         .middleware = .{&slow},
         .strict_errors = false,
+    }, .{
+        .listen = .{ .backend = b.backend() },
         .shutdown_grace = std.Io.Duration.fromMilliseconds(20),
         .finish_timeout = std.Io.Duration.fromSeconds(2),
     });
@@ -2649,7 +2671,7 @@ test "the stop does not cut short an onFinish at work: it gets its .finish_timeo
     // The grace ends while the onFinish works; the stop's cancelation does
     // not reach it, and the stop ends with it, in time.
     const start = std.Io.Clock.awake.now(io);
-    try server.shutdown(io);
+    try server.shutdown(io, far(io));
     try testing.expect(sinceMs(io, start) >= 200);
     try client.await(io);
     try testing.expectEqual(204, result.?.status);

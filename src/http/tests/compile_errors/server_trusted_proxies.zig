@@ -15,6 +15,6 @@ test {
     var users: UsersV1Controller = .{};
     var backend: http.testing.Backend = .init(std.testing.allocator);
     defer backend.deinit();
-    var server = try http.Server.init(std.testing.allocator, .{ .backend = backend.backend(), .controllers = .{&users}, .trusted_proxies = .{ .lst = &.{"10.0.0.0/8"} } });
+    var server = try http.Server.init(std.testing.allocator, .{ .controllers = .{&users} }, .{ .listen = .{ .backend = backend.backend() }, .trusted_proxies = .{ .lst = &.{"10.0.0.0/8"} } });
     defer server.deinit(std.testing.io);
 }

@@ -38,3 +38,9 @@ pub fn lockConfirming(t: *Transport, io: std.Io, deadline: core.Deadline) error{
         try io.sleep(confirm_poll, .awake);
     }
 }
+
+/// For the module's tests: a deadline 30 s away, for a test that only
+/// needs a stop.
+pub fn far(io: std.Io) std.Io.Clock.Timestamp {
+    return .fromNow(io, .{ .raw = .fromSeconds(30), .clock = .awake });
+}

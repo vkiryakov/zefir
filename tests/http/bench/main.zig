@@ -143,16 +143,22 @@ fn runAll(io: Io, out: *Io.Writer, public_dir: []const u8) !void {
     var native = try http.native.Backend.init(gpa, .{ .address = "127.0.0.1", .port = 0 });
     defer native.deinit();
     var server = try http.Server.init(gpa, .{
-        .backend = native.backend(),
         .controllers = .{&app},
-        .static = .{http.static("/", .{ .root = public_dir })},
+    }, .{
+        .listen = .{ .backend = native.backend() },
+        .static = &.{http.static("/", .{ .root = public_dir })},
     });
     defer server.deinit(io);
     try server.start(io);
     for (scenarios) |scenario| {
         for (levels) |level| try measure(io, out, native.port(), scenario, level);
     }
-    try server.shutdown(io);
+    try server.shutdown(io, far(io));
+}
+
+/// A deadline 30 s away, for the stop at the end.
+fn far(io: Io) Io.Clock.Timestamp {
+    return .fromNow(io, .{ .raw = .fromSeconds(30), .clock = .awake });
 }
 
 /// One client: `latencies.len` requests on one connection, the time of

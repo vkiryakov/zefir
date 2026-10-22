@@ -1,5 +1,7 @@
 //! zefir-core — the execution context shared by Zefir modules: deadlines,
-//! cancellation, W3C trace context and transport-neutral error codes.
+//! cancellation, W3C trace context and transport-neutral error codes; and
+//! the application container `App` (its types are in `app`), which builds
+//! an application out of modules and drives the lifecycle of its servers.
 //!
 //! ```zig
 //! var token: core.CancellationToken = .init;
@@ -13,8 +15,12 @@
 //! }
 //! ```
 //!
-//! Nothing here allocates, reads a clock or does I/O: the caller passes the
-//! current time in. A `Context` owns nothing. It borrows the
+//! The primitives — `Context`, `Deadline`, `CancellationToken`, the trace
+//! types, `ErrorCode` and `isSensitive` — never allocate, read a clock or do
+//! I/O: the caller passes the current time in. `App`, the root of an
+//! application, is the exception: it holds memory from the allocator it is
+//! given, runs tasks on its `std.Io` and reads the clock for the deadline of
+//! its shutdown. A `Context` owns nothing. It borrows the
 //! `CancellationToken` and the tracestate bytes of its trace, so it must not
 //! outlive the scope that owns them: the request, the call, the message or
 //! the job. Pass contexts down by value, and the allocator and `std.Io` as
@@ -37,9 +43,12 @@ pub const ErrorInfo = errors.ErrorInfo;
 pub const ContextError = errors.ContextError;
 pub const w3c = @import("w3c.zig");
 pub const isSensitive = @import("sensitive.zig").isSensitive;
+pub const app = @import("app.zig");
+pub const App = app.App;
 
 test {
     std.testing.refAllDecls(@This());
+    _ = @import("app.zig");
     _ = @import("Context.zig");
     _ = @import("CancellationToken.zig");
     _ = @import("Deadline.zig");
@@ -81,7 +90,14 @@ fn findAllocatorParamIn(comptime T: type, comptime visited: []const type) ?[]con
 }
 
 test "no public function takes an allocator" {
-    try std.testing.expectEqual(@as(?[]const u8, null), comptime findAllocatorParam(@This()));
+    // zefir.app, the root of an application, is the exception: App holds memory, runs
+    // tasks and reads the clock (design §14.2). It is skipped here on purpose, and
+    // the check below makes sure the exception is real.
+    try std.testing.expectEqual(@as(?[]const u8, null), comptime findAllocatorParamIn(@This(), &.{app}));
+    const Probe = struct {
+        pub const module: app.Module = .{};
+    };
+    try std.testing.expect(@typeInfo(@TypeOf(app.App(Probe).init)).@"fn".param_types[0].? == std.mem.Allocator);
 
     const Planted = struct {
         pub const Inner = struct {

@@ -19,5 +19,5 @@ const LiveController = struct {
 var live: LiveController = .{};
 
 test {
-    _ = comptime zefir.openapi.document(@TypeOf(.{ .backend = @as(http.Backend, undefined), .controllers = .{&live} }), .{ .info = .{ .title = "Live API", .version = "1.0.0" } });
+    _ = comptime zefir.openapi.document(@TypeOf(.{ .controllers = .{&live} }), .{ .info = .{ .title = "Live API", .version = "1.0.0" } });
 }

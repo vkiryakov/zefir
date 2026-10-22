@@ -1,7 +1,7 @@
 //! The document of a server, which the compiler builds:
-//! `zefir.openapi.document(@TypeOf(options), .{ .info = ... })` reads what
+//! `zefir.openapi.document(@TypeOf(parts), .{ .info = ... })` reads what
 //! `http.describe` tells of the server that `http.Server.init` builds from
-//! options of that type, and gives the tree of its OpenAPI document, every
+//! parts of that type, and gives the tree of its OpenAPI document, every
 //! check done. The program writes the tree once, when it runs: `Docs`
 //! serves those bytes, and `openapi.testing.expectFile` compares them with
 //! the file in the repository.
@@ -61,28 +61,29 @@ pub const Document = struct {
     }
 };
 
-/// The document of the server that `http.Server.init` builds from options
-/// of type `Options`, as `opts` describes it. Call it at compile time, in
-/// the function that builds the server, with the type of the same options:
+/// The document of the server that `http.Server.init` builds from parts
+/// of type `Parts`, as `opts` describes it. Call it at compile time, in
+/// the function that builds the server, with the type of the same parts;
+/// the settings of the server that the document needs, its prefix and its
+/// `.unknown_fields`, it gets in `opts`:
 ///
 /// ```zig
-/// const options = .{ .backend = backend, .prefix = "/api", .controllers = .{ &s.todos, &s.docs } };
-/// s.docs = try .init(gpa, comptime zefir.openapi.document(@TypeOf(options), .{
+/// const parts = .{ .controllers = .{ &s.todos, &s.docs } };
+/// s.docs = try .init(gpa, comptime zefir.openapi.document(@TypeOf(parts), .{
 ///     .info = .{ .title = "Todos API", .version = "1.0.0" },
+///     .prefix = "/api",
 /// }));
-/// s.server = try .init(gpa, options);
+/// s.server = try .init(gpa, parts, .{ .listen = .{ .backend = backend }, .prefix = "/api" });
 /// ```
 ///
 /// It raises its own eval branch quota by its work: the application sets
 /// none.
-pub fn document(comptime Options: type, comptime opts: DocumentOptions) Document {
+pub fn document(comptime Parts: type, comptime opts: DocumentOptions) Document {
     comptime {
-        const d = http.describe(Options);
+        const d = http.describe(Parts);
         @setEvalBranchQuota(quotaOf(d.routes.len));
-        const unknown = d.unknown_fields orelse fail("Server.init .unknown_fields comes at run time, but the document needs it at compile time: " ++
-            "whether a body may hold keys its DTO does not know decides its schema; write it as a literal, such as .unknown_fields = .{ .body = .ignore }");
         const routes = documented(d, opts);
-        var registry: schema.Registry = .init(unknown.body);
+        var registry: schema.Registry = .init(opts.unknown_fields.body);
         for (routes) |r| use(&registry, d, r);
         registry.finish();
         const reg = registry;
@@ -93,12 +94,12 @@ pub fn document(comptime Options: type, comptime opts: DocumentOptions) Document
             } } },
             .{ .key = "info", .value = infoNode(opts.info) },
         };
-        if (serversNode(d.prefix, opts.servers)) |servers| members = members ++ [_]Member{.{ .key = "servers", .value = servers }};
+        if (serversNode(opts.prefix, opts.servers)) |servers| members = members ++ [_]Member{.{ .key = "servers", .value = servers }};
         const tags = tagsNode(routes);
         if (tags.array.len > 0) members = members ++ [_]Member{.{ .key = "tags", .value = tags }};
         members = members ++ [_]Member{.{ .key = "paths", .value = pathsNode(&reg, d, routes, opts.version) }};
         if (componentsNode(&reg, routes)) |components| members = members ++ [_]Member{.{ .key = "components", .value = components }};
-        return .{ .root = .{ .object = members }, .runtime_prefix = d.prefix == null and opts.servers.len == 0 };
+        return .{ .root = .{ .object = members }, .runtime_prefix = opts.prefix == null and opts.servers.len == 0 };
     }
 }
 
@@ -229,7 +230,8 @@ fn infoNode(comptime info: DocumentOptions.Info) Node {
 }
 
 /// `.servers` of the options, else the server's prefix when it is known
-/// and not empty; null for none: no prefix, or one that comes at run time.
+/// and not empty; null for none: an empty prefix, or one that comes at run
+/// time.
 fn serversNode(comptime prefix: ?[]const u8, comptime servers: []const DocumentOptions.Server) ?Node {
     if (servers.len > 0) {
         var out: [servers.len]Node = undefined;

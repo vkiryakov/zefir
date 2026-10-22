@@ -211,12 +211,26 @@ pub const MiddlewareDoc = struct {
 ///   server-sent events have a schema;
 /// - `.include` or `.exclude`: the controllers of the document, by type,
 ///   instead of all of them: `.exclude = &.{HealthController}`;
+/// - `.prefix`: the server's `.prefix`, the same value as in its
+///   `http.Server.Options`, which the document puts in `servers`; null,
+///   for a prefix that comes from the config, leaves `servers` to `Docs`,
+///   which puts the prefix of its own route there as it serves the
+///   document;
+/// - `.unknown_fields`: the server's `.unknown_fields`, the same value as
+///   in its `http.Server.Options`: whether a body may hold keys its DTO
+///   does not know decides its schema;
 /// - `.servers`: the document's servers, instead of the server's prefix.
+///
+/// The settings of a server are values of the program that runs, so the
+/// document cannot read them from the type of the parts: the application
+/// gives the same values to both.
 pub const DocumentOptions = struct {
     info: Info,
     version: Version = .@"3.1",
     include: []const type = &.{},
     exclude: []const type = &.{},
+    prefix: ?[]const u8 = null,
+    unknown_fields: http.Server.UnknownFieldsOptions = .{},
     servers: []const Server = &.{},
 
     pub const Info = struct { title: []const u8, version: []const u8, description: ?[]const u8 = null, contact: ?Contact = null, license: ?License = null };
@@ -500,7 +514,7 @@ test "the Debug check of zefir-http reads a typed MiddlewareDoc on a controller 
     var items: ItemsController = .{};
     var backend: http.testing.Backend = .init(testing.allocator);
     defer backend.deinit();
-    var server: http.Server = try .init(testing.allocator, .{ .backend = backend.backend(), .controllers = .{&items} });
+    var server: http.Server = try .init(testing.allocator, .{ .controllers = .{&items} }, .{ .listen = .{ .backend = backend.backend() } });
     defer server.deinit(testing.io);
     try server.start(testing.io);
     const level = testing.log_level;

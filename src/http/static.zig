@@ -2,7 +2,7 @@
 //! a directory of the disk under a path of the site.
 //!
 //! ```zig
-//! .static = .{
+//! .static = &.{
 //!     http.static("/assets", .{ .root = "public/assets", .cache_control = "public, max-age=31536000, immutable" }),
 //!     http.static("/", .{ .root = "public", .spa_fallback = "index.html" }),
 //! },
@@ -89,29 +89,21 @@ pub const Mount = struct {
     dir: ?Io.Dir = null,
 };
 
-const static_form = "zefir.http: Server.init .static is a tuple of http.static(...) values: .{ http.static(\"/\", .{ .root = \"public\" }) }";
-
-/// The mounts of the option `.static`, a tuple of `Static`, copied and
-/// checked without I/O: the syntax of each mount, as of a server's prefix
-/// (and "/"), no two mounts on one path, an index file that is one name, a
-/// SPA file whose every segment is one a request could name, a
-/// `Cache-Control` value without CR, LF or NUL, a root that is not empty.
-/// `InvalidConfiguration` otherwise.
-pub fn copyMounts(gpa: std.mem.Allocator, option: anytype) Server.InitError![]Mount {
-    const info = @typeInfo(@TypeOf(option));
-    if (info != .@"struct" or !(info.@"struct".is_tuple or info.@"struct".field_names.len == 0)) @compileError(static_form);
-    inline for (info.@"struct".field_types) |F| {
-        if (F != Static) @compileError(static_form);
-    }
-    const count = info.@"struct".field_names.len;
-    const mounts = try gpa.alloc(Mount, count);
+/// The mounts of the option `.static` copied and checked without I/O: the
+/// syntax of each mount, as of a server's prefix (and "/"), no two mounts
+/// on one path, an index file that is one name, a SPA file whose every
+/// segment is one a request could name, a `Cache-Control` value without
+/// CR, LF or NUL, a root that is not empty. `InvalidConfiguration`
+/// otherwise.
+pub fn copyMounts(gpa: std.mem.Allocator, statics: []const Static) Server.InitError![]Mount {
+    const mounts = try gpa.alloc(Mount, statics.len);
     var done: usize = 0;
     errdefer {
         for (mounts[0..done]) |m| freeMount(gpa, m);
         gpa.free(mounts);
     }
-    inline for (0..count) |i| {
-        mounts[i] = try copyMount(gpa, option[i]);
+    for (mounts, statics) |*m, s| {
+        m.* = try copyMount(gpa, s);
         done += 1;
     }
     for (mounts, 0..) |a, i| {
@@ -401,9 +393,9 @@ const Fixture = struct {
     backend: TestingBackend = undefined,
     server: Server = undefined,
 
-    fn start(f: *Fixture, statics: anytype) !void {
+    fn start(f: *Fixture, statics: []const Static) !void {
         f.backend = .init(testing.allocator);
-        f.server = try .init(testing.allocator, .{ .backend = f.backend.backend(), .prefix = "/api", .controllers = .{&f.ping}, .static = statics });
+        f.server = try .init(testing.allocator, .{ .controllers = .{&f.ping} }, .{ .listen = .{ .backend = f.backend.backend() }, .prefix = "/api", .static = statics });
         f.server.start(testing.io) catch |err| {
             f.server.deinit(testing.io);
             return err;
@@ -448,7 +440,7 @@ test "start fails with InvalidStaticRoot for a missing root or a file root" {
         var ping: PingV1Controller = .{};
         var backend: TestingBackend = .init(testing.allocator);
         defer backend.deinit();
-        var server = try Server.init(testing.allocator, .{ .backend = backend.backend(), .controllers = .{&ping}, .static = .{
+        var server = try Server.init(testing.allocator, .{ .controllers = .{&ping} }, .{ .listen = .{ .backend = backend.backend() }, .static = &.{
             static("/assets", .{ .root = site.assets }),
             static("/", .{ .root = root }),
         } });
@@ -464,7 +456,7 @@ test "start fails with InvalidStaticRoot for a missing root or a file root" {
 
     // A root that opens serves.
     var f: Fixture = .{};
-    try f.start(.{static("/", .{ .root = site.public })});
+    try f.start(&.{static("/", .{ .root = site.public })});
     defer f.stop();
     try testing.expectEqual(200, try f.statusOf("/a.txt"));
 }
@@ -475,11 +467,11 @@ test "two mounts with one prefix fail init" {
     defer backend.deinit();
     const b = backend.backend();
     const gpa = testing.allocator;
-    try testing.expectError(error.InvalidConfiguration, Server.init(gpa, .{ .backend = b, .controllers = .{&ping}, .static = .{ static("/assets", .{ .root = "a" }), static("/assets", .{ .root = "b" }) } }));
-    try testing.expectError(error.InvalidConfiguration, Server.init(gpa, .{ .backend = b, .controllers = .{&ping}, .static = .{ static("/", .{ .root = "a" }), static("/x", .{ .root = "b" }), static("/", .{ .root = "c" }) } }));
+    try testing.expectError(error.InvalidConfiguration, Server.init(gpa, .{ .controllers = .{&ping} }, .{ .listen = .{ .backend = b }, .static = &.{ static("/assets", .{ .root = "a" }), static("/assets", .{ .root = "b" }) } }));
+    try testing.expectError(error.InvalidConfiguration, Server.init(gpa, .{ .controllers = .{&ping} }, .{ .listen = .{ .backend = b }, .static = &.{ static("/", .{ .root = "a" }), static("/x", .{ .root = "b" }), static("/", .{ .root = "c" }) } }));
     // The syntax of a mount is that of a prefix, and "/".
     for ([_][]const u8{ "", "assets", "/assets/", "//assets", "/a//b", "/a/../b", "/./a", "/a b", "/a%20b", "/{x}", "/a?b" }) |mount| {
-        testing.expectError(error.InvalidConfiguration, Server.init(gpa, .{ .backend = b, .controllers = .{&ping}, .static = .{static(mount, .{ .root = "public" })} })) catch |err| {
+        testing.expectError(error.InvalidConfiguration, Server.init(gpa, .{ .controllers = .{&ping} }, .{ .listen = .{ .backend = b }, .static = &.{static(mount, .{ .root = "public" })} })) catch |err| {
             std.debug.print("mount {s}\n", .{mount});
             return err;
         };
@@ -497,14 +489,14 @@ test "two mounts with one prefix fail init" {
         .{ .root = "public", .cache_control = "no-store\r\nx-a: 1" },
         .{ .root = "" },
     }) |options| {
-        try testing.expectError(error.InvalidConfiguration, Server.init(gpa, .{ .backend = b, .controllers = .{&ping}, .static = .{static("/", options)} }));
+        try testing.expectError(error.InvalidConfiguration, Server.init(gpa, .{ .controllers = .{&ping} }, .{ .listen = .{ .backend = b }, .static = &.{static("/", options)} }));
     }
 
     // The strings come from the config: init copies them.
     const mount = try gpa.dupe(u8, "/assets");
     const root = try gpa.dupe(u8, "public/assets");
     const spa = try gpa.dupe(u8, "app/index.html");
-    var server = Server.init(gpa, .{ .backend = b, .controllers = .{&ping}, .static = .{ static(mount, .{ .root = root, .spa_fallback = spa, .cache_control = "no-cache" }), static("/", .{ .root = "public", .index = null }) } }) catch |err| {
+    var server = Server.init(gpa, .{ .controllers = .{&ping} }, .{ .listen = .{ .backend = b }, .static = &.{ static(mount, .{ .root = root, .spa_fallback = spa, .cache_control = "no-cache" }), static("/", .{ .root = "public", .index = null }) } }) catch |err| {
         for ([_][]const u8{ mount, root, spa }) |s| gpa.free(s);
         return err;
     };
@@ -525,7 +517,7 @@ fn memoryOfMounts(gpa: std.mem.Allocator) !void {
     var ping: PingV1Controller = .{};
     var backend: TestingBackend = .init(gpa);
     defer backend.deinit();
-    var server = try Server.init(gpa, .{ .backend = backend.backend(), .controllers = .{&ping}, .static = .{
+    var server = try Server.init(gpa, .{ .controllers = .{&ping} }, .{ .listen = .{ .backend = backend.backend() }, .static = &.{
         static("/assets", .{ .root = "assets", .spa_fallback = "app/index.html", .cache_control = "no-cache" }),
         static("/", .{ .root = "public" }),
     } });
@@ -543,7 +535,7 @@ test "controllers win; the longest mount wins" {
     try site.create(arena_state.allocator());
     defer site.tmp.cleanup();
     var f: Fixture = .{};
-    try f.start(.{ static("/", .{ .root = site.public }), static("/assets", .{ .root = site.assets }) });
+    try f.start(&.{ static("/", .{ .root = site.public }), static("/assets", .{ .root = site.assets }) });
     defer f.stop();
 
     // A route of a controller, though public/api/v1/ping is a file.
@@ -582,7 +574,7 @@ test "POST on a mount: 405 for a file, OPTIONS 204; 404 for a missing one and un
     try site.create(arena_state.allocator());
     defer site.tmp.cleanup();
     var f: Fixture = .{};
-    try f.start(.{static("/", .{ .root = site.public, .spa_fallback = "index.html" })});
+    try f.start(&.{static("/", .{ .root = site.public, .spa_fallback = "index.html" })});
     defer f.stop();
 
     // A file, and the index file of /: 405, the methods of a file.
@@ -628,7 +620,7 @@ test "static: .., %2e%2e, %2F, %5C, NUL, an absolute path and hidden files are 4
     try site.create(arena_state.allocator());
     defer site.tmp.cleanup();
     var f: Fixture = .{};
-    try f.start(.{static("/", .{ .root = site.public })});
+    try f.start(&.{static("/", .{ .root = site.public })});
     defer f.stop();
 
     // What is served, for comparison.
@@ -713,7 +705,7 @@ test "static: a symlink inside the root is not served, nor a symlinked directory
     };
     for (links) |l| if (!try symLink(site.tmp.dir, l[0], l[1], l[2])) return error.SkipZigTest;
     var f: Fixture = .{};
-    try f.start(.{static("/", .{ .root = site.public })});
+    try f.start(&.{static("/", .{ .root = site.public })});
     defer f.stop();
 
     try testing.expectEqual(200, try f.statusOf("/a.txt"));
@@ -755,7 +747,7 @@ test "static: Windows names are refused on every system" {
         for (names) |name| try site.tmp.dir.writeFile(testing.io, .{ .sub_path = try std.fmt.allocPrint(arena_state.allocator(), "public/{s}", .{name}), .data = "device" });
     }
     var f: Fixture = .{};
-    try f.start(.{static("/", .{ .root = site.public })});
+    try f.start(&.{static("/", .{ .root = site.public })});
     defer f.stop();
 
     for ([_][]const u8{
@@ -795,7 +787,7 @@ test "static: a file with its type, length, nosniff and Cache-Control; HEAD with
     try site.create(arena_state.allocator());
     defer site.tmp.cleanup();
     var f: Fixture = .{};
-    try f.start(.{
+    try f.start(&.{
         static("/assets", .{ .root = site.assets, .cache_control = "public, max-age=31536000, immutable" }),
         static("/", .{ .root = site.public }),
     });
@@ -854,7 +846,7 @@ test "static: index file and SPA fallback, not under the server prefix" {
     // Without a SPA file: a directory gives its index file, or nothing.
     {
         var f: Fixture = .{};
-        try f.start(.{static("/", .{ .root = site.public })});
+        try f.start(&.{static("/", .{ .root = site.public })});
         defer f.stop();
         for ([_][2][]const u8{ .{ "/", "<h1>home</h1>" }, .{ "/docs", "<h1>docs</h1>" }, .{ "/docs/", "<h1>docs</h1>" } }) |row| {
             var res = try f.get(row[0]);
@@ -871,7 +863,7 @@ test "static: index file and SPA fallback, not under the server prefix" {
     // With index = null a directory serves nothing.
     {
         var f: Fixture = .{};
-        try f.start(.{static("/", .{ .root = site.public, .index = null })});
+        try f.start(&.{static("/", .{ .root = site.public, .index = null })});
         defer f.stop();
         try testing.expectEqual(404, try f.statusOf("/"));
         try testing.expectEqual(404, try f.statusOf("/docs"));
@@ -880,7 +872,7 @@ test "static: index file and SPA fallback, not under the server prefix" {
     // A single-page application.
     {
         var f: Fixture = .{};
-        try f.start(.{
+        try f.start(&.{
             static("/assets", .{ .root = site.assets }),
             static("/", .{ .root = site.public, .spa_fallback = "index.html" }),
         });
@@ -923,7 +915,7 @@ test "conditional: If-None-Match beats If-Modified-Since" {
     try site.create(arena);
     defer site.tmp.cleanup();
     var f: Fixture = .{};
-    try f.start(.{static("/", .{ .root = site.public, .cache_control = "no-cache" })});
+    try f.start(&.{static("/", .{ .root = site.public, .cache_control = "no-cache" })});
     defer f.stop();
 
     var first = try f.get("/a.txt");
@@ -980,7 +972,7 @@ test "ranges: 206, a suffix range, several ranges, 416 with */N, If-Range" {
     try site.create(arena);
     defer site.tmp.cleanup();
     var f: Fixture = .{};
-    try f.start(.{static("/", .{ .root = site.public })});
+    try f.start(&.{static("/", .{ .root = site.public })});
     defer f.stop();
     var first = try f.get("/data.bin");
     defer first.deinit();
@@ -1074,12 +1066,13 @@ test "static: the server's deadline holds for its middleware and the open of the
         var backend: TestingBackend = .init(testing.allocator);
         defer backend.deinit();
         var server = try Server.init(testing.allocator, .{
-            .backend = backend.backend(),
-            .prefix = "/api",
             .controllers = .{&ping},
             .middleware = .{SlowRun},
+        }, .{
+            .listen = .{ .backend = backend.backend() },
+            .prefix = "/api",
             .request_timeout = std.Io.Duration.fromMilliseconds(5),
-            .static = .{static("/", .{ .root = site.public })},
+            .static = &.{static("/", .{ .root = site.public })},
         });
         defer server.deinit(testing.io);
         try server.start(testing.io);
@@ -1100,12 +1093,13 @@ test "static: the server's deadline holds for its middleware and the open of the
         var backend: TestingBackend = .init(testing.allocator);
         defer backend.deinit();
         var server = try Server.init(testing.allocator, .{
-            .backend = backend.backend(),
-            .prefix = "/api",
             .controllers = .{&ping},
             .middleware = .{SlowHead},
+        }, .{
+            .listen = .{ .backend = backend.backend() },
+            .prefix = "/api",
             .request_timeout = std.Io.Duration.fromMilliseconds(50),
-            .static = .{static("/", .{ .root = site.public })},
+            .static = &.{static("/", .{ .root = site.public })},
         });
         defer server.deinit(testing.io);
         try server.start(testing.io);

@@ -1,0 +1,109 @@
+//! The module graph of zefir.App, and the tuples of controllers and
+//! handlers a server factory takes.
+const Module = @import("../app.zig").Module;
+const names = @import("names.zig");
+
+const pre = names.pre;
+const name = names.name;
+
+/// A module of the graph: its type, the graph indices of its imports, and
+/// whether the root overrides it.
+pub const Mod = struct { T: type, imports: []const usize, overridden: bool = false };
+
+/// The modules X reaches through `.imports`, X included: imports first,
+/// depth-first in `.imports` order, each module once, X last. X and every
+/// import are checked to be modules first. A module X overrides is in the
+/// graph without its imports: App builds nothing of it.
+pub fn modulesOf(comptime X: type) []const Mod {
+    return ModulesOf(X).value;
+}
+
+fn ModulesOf(comptime X: type) type {
+    return struct {
+        const value = computeModules(X);
+    };
+}
+
+fn computeModules(comptime X: type) []const Mod {
+    @setEvalBranchQuota(names.eval_quota);
+    checkModule(pre(X), X, null);
+    var done: []const Mod = &.{};
+    _ = visit(X, X, &.{}, &done);
+    return done;
+}
+
+/// Places T after its imports. `done` marks the modules placed, so a module
+/// imported by many is visited once; `path` holds the modules on the way
+/// from X to T, for the text of a cycle.
+fn visit(comptime X: type, comptime T: type, comptime path: []const type, comptime done: *[]const Mod) usize {
+    for (done.*, 0..) |m, i| if (m.T == T) return i;
+    for (path, 0..) |P, i| if (P == T) @compileError(pre(X) ++ "module import cycle: " ++ names.chain(path[i..] ++ &[_]type{T}));
+    const overridden = T != X and names.contains(X.module.overrides, T);
+    const list: []const type = if (overridden) &.{} else T.module.imports;
+    var imports: []const usize = &.{};
+    for (list, 0..) |I, n| {
+        checkModule(pre(X), I, T);
+        if (names.contains(list[0..n], I)) @compileError(pre(X) ++ name(T) ++ ".imports: " ++ name(I) ++ " is there twice");
+        imports = imports ++ &[_]usize{visit(X, I, path ++ &[_]type{T}, done)};
+    }
+    done.* = done.* ++ &[_]Mod{.{ .T = T, .imports = imports, .overridden = overridden }};
+    return done.*.len - 1;
+}
+
+/// T, a root itself (`from` null) or an entry of `from.imports`, must
+/// declare `pub const module: zefir.app.Module`; `at` starts the message.
+fn checkModule(comptime at: []const u8, comptime T: type, comptime from: ?type) void {
+    const where = if (from) |F| name(F) ++ ".imports: " else "";
+    if (!names.isModule(T))
+        @compileError(at ++ where ++ names.typeName(T) ++ " is not a module: it has no `pub const module: zefir.app.Module`");
+    if (@TypeOf(T.module) != Module)
+        @compileError(at ++ where ++ name(T) ++ ".module is not a zefir.app.Module; declare it as `pub const module: zefir.app.Module = .{ ... }`");
+}
+
+/// Whether module j is among the modules module k imports, directly or
+/// through its imports: a visit in breadth with marks, so that a module
+/// imported along many paths is looked at once.
+pub fn reaches(comptime mods: []const Mod, comptime k: usize, comptime j: usize) bool {
+    var seen: [mods.len]bool = @splat(false);
+    var queue: [mods.len]usize = undefined;
+    queue[0] = k;
+    var head: usize = 0;
+    var tail: usize = 1;
+    while (head < tail) : (head += 1) for (mods[queue[head]].imports) |i| {
+        if (i == j) return true;
+        if (seen[i]) continue;
+        seen[i] = true;
+        queue[tail] = i;
+        tail += 1;
+    };
+    return false;
+}
+
+/// The tuple of pointers to the controllers of module M and of every
+/// module M reaches, for a param of a server factory:
+/// `controllers: zefir.app.Controllers(AppModule)`. The modules come in the
+/// order of the graph of M (imports first, M last), each module's
+/// controllers in list order. Two modules that reach the same controllers
+/// give one type. A module the root overrides in a test adds none.
+pub fn Controllers(comptime M: type) type {
+    return ListTuple(M, "controllers");
+}
+
+/// Like `Controllers`, for the handlers of rpc.
+pub fn Handlers(comptime M: type) type {
+    return ListTuple(M, "handlers");
+}
+
+/// Reads only `.imports`, `.overrides` and the list itself: reading
+/// `.factories` here would make a factory that takes `Controllers(M)` of
+/// its own module depend on itself.
+fn ListTuple(comptime M: type, comptime list: []const u8) type {
+    @setEvalBranchQuota(names.eval_quota);
+    // M is checked here first, so that the message names the tuple, not an App.
+    checkModule("zefir.app." ++ (if (list[0] == 'c') "Controllers(" else "Handlers(") ++ names.typeName(M) ++ "): ", M, null);
+    var types: []const type = &.{};
+    for (modulesOf(M)) |m| if (!m.overridden) for (@field(m.T.module, list)) |C| {
+        types = types ++ &[_]type{*C};
+    };
+    return @Tuple(types);
+}

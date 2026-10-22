@@ -71,6 +71,9 @@ pub fn run(client: *Client) void {
         const server = opened.server;
         pacing.up_since = Io.Clock.awake.now(client.io);
         const exit = serve(client, opened);
+        // Its life ends when its exit is known: the teardown, slow on a
+        // busy host, is no part of it for the pacing.
+        pacing.down_at = Io.Clock.awake.now(client.io);
         next = if (teardown(client, server, exit)) reconnect(client, &pacing, exit == .lame_duck) else null;
     }
 }
@@ -85,6 +88,8 @@ const Pacing = struct {
     level: u32 = 0,
     /// When the last connection came up.
     up_since: ?Io.Timestamp = null,
+    /// When the exit of the last connection was known, before its teardown.
+    down_at: ?Io.Timestamp = null,
 
     /// The connection is lost: was it a good one? Leaving a server in lame
     /// duck mode is no failure, and the move is immediate, once the
@@ -93,8 +98,10 @@ const Pacing = struct {
     fn lost(p: *Pacing, io: Io, options: Options.ReconnectOptions, lame_duck: bool) void {
         const since = p.up_since orelse return;
         p.up_since = null;
+        const until = p.down_at orelse Io.Clock.awake.now(io);
+        p.down_at = null;
         const stable = if (lame_duck) options.min_delay else options.max_delay;
-        if (since.durationTo(Io.Clock.awake.now(io)).nanoseconds >= stable.nanoseconds) {
+        if (since.durationTo(until).nanoseconds >= stable.nanoseconds) {
             p.level = 0;
         } else {
             p.level +|= 1;

@@ -182,15 +182,13 @@ pub const Service = struct {
     server: http.Server = undefined,
 
     pub fn start(s: *Service, gpa: std.mem.Allocator, io: std.Io, backend: http.Backend) !void {
-        const options = .{
-            .backend = backend,
-            .prefix = "/api",
+        const parts = .{
             .controllers = .{&s.profiles},
         };
         const info: zefir.openapi.DocumentOptions.Info = .{ .title = "Profiles API", .version = "1.0.0" };
-        s.docs_3_1 = comptime zefir.openapi.document(@TypeOf(options), .{ .info = info });
-        s.docs_3_2 = comptime zefir.openapi.document(@TypeOf(options), .{ .info = info, .version = .@"3.2" });
-        s.server = try .init(gpa, options);
+        s.docs_3_1 = comptime zefir.openapi.document(@TypeOf(parts), .{ .info = info, .prefix = "/api" });
+        s.docs_3_2 = comptime zefir.openapi.document(@TypeOf(parts), .{ .info = info, .version = .@"3.2", .prefix = "/api" });
+        s.server = try .init(gpa, parts, .{ .listen = .{ .backend = backend }, .prefix = "/api" });
         errdefer s.server.deinit(io);
         try s.server.start(io);
     }

@@ -19,6 +19,6 @@ const ItemsV1Controller = struct {
 test {
     var items: ItemsV1Controller = .{};
     const backend: http.Backend = undefined;
-    var server = try http.Server.init(std.testing.allocator, .{ .backend = backend, .controllers = .{&items} });
+    var server = try http.Server.init(std.testing.allocator, .{ .controllers = .{&items} }, .{ .listen = .{ .backend = backend } });
     defer server.deinit(std.testing.io);
 }

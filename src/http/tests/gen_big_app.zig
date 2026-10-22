@@ -208,9 +208,7 @@ fn write(w: *std.Io.Writer, kind: Kind) !void {
         \\    var app_errors: AppErrors = .{};
         \\    var backend: http.testing.Backend = .init(std.testing.allocator);
         \\    defer backend.deinit();
-        \\    const options = .{
-        \\        .backend = backend.backend(),
-        \\        .prefix = "/api",
+        \\    const parts = .{
         \\        .controllers = .{
     );
     for (0..kind.controllers()) |c| try w.print("{s}&c{d}", .{ if (c == 0) " " else ", ", c });
@@ -220,13 +218,16 @@ fn write(w: *std.Io.Writer, kind: Kind) !void {
         \\ },
         \\        .error_handler = &app_errors,
         \\    };
-        \\    var server = try http.Server.init(std.testing.allocator, options);
+        \\    var server = try http.Server.init(std.testing.allocator, parts, .{
+        \\        .listen = .{ .backend = backend.backend() },
+        \\        .prefix = "/api",
+        \\    });
         \\    defer server.deinit(std.testing.io);
         \\
     );
     try w.print("    try std.testing.expectEqual({d}, server.internal.routes.len);\n", .{kind.controllers() * routes_per_controller});
     if (kind == .openapi) try w.print(
-        \\    const document = comptime zefir.openapi.document(@TypeOf(options), .{{ .info = .{{ .title = "Big API", .version = "1.0.0" }} }});
+        \\    const document = comptime zefir.openapi.document(@TypeOf(parts), .{{ .info = .{{ .title = "Big API", .version = "1.0.0" }} }});
         \\    var paths: usize = 0;
         \\    for (document.root.object) |m| {{
         \\        if (std.mem.eql(u8, m.key, "paths")) paths = m.value.object.len;
@@ -345,7 +346,7 @@ fn writeLongNames(w: *std.Io.Writer) !void {
         \\    var app_errors: AppErrors = .{};
         \\    var backend: http.testing.Backend = .init(std.testing.allocator);
         \\    defer backend.deinit();
-        \\    var server = try http.Server.init(std.testing.allocator, .{ .backend = backend.backend(), .controllers = .{&billing}, .error_handler = &app_errors });
+        \\    var server = try http.Server.init(std.testing.allocator, .{ .controllers = .{&billing}, .error_handler = &app_errors }, .{ .listen = .{ .backend = backend.backend() } });
         \\    defer server.deinit(std.testing.io);
         \\}
         \\

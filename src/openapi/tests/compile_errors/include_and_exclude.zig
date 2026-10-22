@@ -22,5 +22,5 @@ var todos: TodosController = .{};
 var health: HealthController = .{};
 
 test {
-    _ = comptime zefir.openapi.document(@TypeOf(.{ .backend = @as(http.Backend, undefined), .controllers = .{ &todos, &health } }), .{ .info = .{ .title = "Todos API", .version = "1.0.0" }, .include = &.{TodosController}, .exclude = &.{HealthController} });
+    _ = comptime zefir.openapi.document(@TypeOf(.{ .controllers = .{ &todos, &health } }), .{ .info = .{ .title = "Todos API", .version = "1.0.0" }, .include = &.{TodosController}, .exclude = &.{HealthController} });
 }

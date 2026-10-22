@@ -1,15 +1,17 @@
 //! The server, described at compile time:
-//! `http.describe(@TypeOf(options))` gives what `http.Server.init` builds
-//! from options of that type, for a generator of documents such as
+//! `http.describe(@TypeOf(parts))` gives what `http.Server.init` builds
+//! from parts of that type, for a generator of documents such as
 //! zefir-openapi. It reads the plan the server builds: the routes in their
 //! order, the declarations of each, its chain of middleware and the errors
-//! it can return, the error handler and the prefix.
+//! it can return, and the error handler. The settings of the server, its
+//! `http.Server.Options`, are values the program gets when it runs, so
+//! they are not in it.
 //!
 //! Nothing here runs unless it is called: a server whose application
 //! builds no document does not pay for it.
 //!
 //! ```zig
-//! const d = comptime http.describe(@TypeOf(options));
+//! const d = comptime http.describe(@TypeOf(parts));
 //! for (d.routes) |r| ... // r.method, r.template, r.Route.Path, r.Errors, ...
 //! ```
 const std = @import("std");
@@ -19,7 +21,6 @@ const routes = @import("routes.zig");
 const router = @import("router.zig");
 const mw = @import("middleware.zig");
 const strings = @import("input/strings.zig");
-const Server = @import("Server.zig");
 
 /// One element of a chain of middleware.
 pub const ChainElement = struct {
@@ -64,14 +65,8 @@ pub const RouteDescription = struct {
     Errors: type,
 };
 
-/// The server that options of one type build.
+/// The server that parts of one type build.
 pub const Description = struct {
-    /// The server's `.prefix`: "" without one; null when it comes at run
-    /// time, from the config.
-    prefix: ?[]const u8,
-    /// The server's `.unknown_fields`, the defaults without it; null when
-    /// it comes at run time.
-    unknown_fields: ?Server.UnknownFieldsOptions,
     /// In the order of `.controllers`, each in the order of its `.methods`.
     routes: []const RouteDescription,
     /// The type of the object `.error_handler` points to, or the default
@@ -90,13 +85,12 @@ pub const Description = struct {
     }
 };
 
-/// The server that `http.Server.init` builds from options of type
-/// `Options`, at compile time. It checks them as `Server.init` does, and
-/// raises its own eval branch quota by its work: the application sets
-/// none.
-pub fn describe(comptime Options: type) Description {
+/// The server that `http.Server.init` builds from parts of type `Parts`,
+/// at compile time. It checks them as `Server.init` does, and raises its
+/// own eval branch quota by its work: the application sets none.
+pub fn describe(comptime Parts: type) Description {
     comptime {
-        const p = plan.of(Options);
+        const p = plan.of(Parts);
         var elements: u64 = 0;
         for (p.routes) |r| elements += p.global.len + r.chain.len;
         @setEvalBranchQuota(@intCast(@min(10_000 + 2_000 * p.routes.len + 200 * elements, std.math.maxInt(u32))));
@@ -124,8 +118,6 @@ pub fn describe(comptime Options: type) Description {
         }
         const Map = @typeInfo(@TypeOf(p.Handler.mapError)).@"fn".return_type.?;
         return .{
-            .prefix = prefixOf(Options),
-            .unknown_fields = unknownFieldsOf(Options),
             .routes = out,
             .ErrorHandler = p.Handler,
             .ErrorBody = Map.Body,
@@ -160,33 +152,7 @@ fn payloadOf(comptime R: type) type {
     return if (@typeInfo(R) == .error_union) @typeInfo(R).error_union.payload else R;
 }
 
-/// The server's prefix: "" without `.prefix`, null when its value comes at
-/// run time.
-fn prefixOf(comptime O: type) ?[]const u8 {
-    const info = @typeInfo(O).@"struct";
-    for (info.field_names, info.field_types, info.field_attrs) |name, T, attrs| {
-        if (!std.mem.eql(u8, name, "prefix")) continue;
-        if (!attrs.@"comptime") return null;
-        const value: []const u8 = attrs.defaultValue(T).?;
-        return value;
-    }
-    return "";
-}
-
-/// The server's `.unknown_fields`: the defaults without it, null when its
-/// value comes at run time.
-fn unknownFieldsOf(comptime O: type) ?Server.UnknownFieldsOptions {
-    const info = @typeInfo(O).@"struct";
-    for (info.field_names, info.field_types, info.field_attrs) |name, T, attrs| {
-        if (!std.mem.eql(u8, name, "unknown_fields")) continue;
-        if (!attrs.@"comptime") return null;
-        return plan.optionValue(Server.UnknownFieldsOptions, attrs.defaultValue(T).?);
-    }
-    return .{};
-}
-
 const testing = std.testing;
-const Backend = @import("Backend.zig");
 const Context = @import("Context.zig");
 const sse = @import("sse.zig");
 const errors = @import("errors.zig");
@@ -298,8 +264,7 @@ test "describe: the routes in the order of the controllers and their methods, wi
     var users: UsersV1Controller = .{};
     var health: HealthController = .{};
     var app_errors: AppErrors = .{};
-    const backend: Backend = undefined;
-    const d = comptime describe(@TypeOf(.{ .backend = backend, .prefix = "/api", .controllers = .{ &users, &health }, .error_handler = &app_errors }));
+    const d = comptime describe(@TypeOf(.{ .controllers = .{ &users, &health }, .error_handler = &app_errors }));
     try testing.expectEqual(6, d.routes.len);
     const want = [_]struct { std.http.Method, routes.Kind, []const u8, []const u8, bool }{
         .{ .GET, .rest, "/v1/users", "list", false },
@@ -338,8 +303,7 @@ test "describe: the routes in the order of the controllers and their methods, wi
 test "describe: the chain of each route and the errors it can return" {
     var users: UsersV1Controller = .{};
     var app_errors: AppErrors = .{};
-    const backend: Backend = undefined;
-    const d = comptime describe(@TypeOf(.{ .backend = backend, .controllers = .{&users}, .middleware = .{requestId}, .error_handler = &app_errors }));
+    const d = comptime describe(@TypeOf(.{ .controllers = .{&users}, .middleware = .{requestId}, .error_handler = &app_errors }));
     try testing.expectEqual(1, d.global.len);
     try testing.expectEqualStrings("requestId", d.global[0].name);
     // The server's elements, the controller's, the method's.
@@ -363,47 +327,14 @@ test "describe: the chain of each route and the errors it can return" {
     try testing.expectEqual(1, comptime errorNames(d.routes[3].Errors).len);
 }
 
-test "describe: the prefix and unknown_fields as literals, from the config, or left out" {
-    var users: UsersV1Controller = .{};
-    var app_errors: AppErrors = .{};
-    const backend: Backend = undefined;
-    const literal = comptime describe(@TypeOf(.{
-        .backend = backend,
-        .prefix = "/api",
-        .controllers = .{&users},
-        .error_handler = &app_errors,
-        .unknown_fields = .{ .query = .reject },
-    }));
-    try testing.expectEqualStrings("/api", literal.prefix.?);
-    try testing.expectEqual(Server.UnknownFieldsOptions{ .body = .reject, .query = .reject }, literal.unknown_fields.?);
-
-    var config_prefix: []const u8 = "/api";
-    var config_unknown: Server.UnknownFieldsOptions = .{ .body = .ignore };
-    _ = .{ &config_prefix, &config_unknown };
-    const runtime = comptime describe(@TypeOf(.{
-        .backend = backend,
-        .prefix = config_prefix,
-        .controllers = .{&users},
-        .error_handler = &app_errors,
-        .unknown_fields = config_unknown,
-    }));
-    try testing.expectEqual(null, runtime.prefix);
-    try testing.expectEqual(null, runtime.unknown_fields);
-
-    const none = comptime describe(@TypeOf(.{ .backend = backend, .controllers = .{&users}, .error_handler = &app_errors }));
-    try testing.expectEqualStrings("", none.prefix.?);
-    try testing.expectEqual(Server.UnknownFieldsOptions{}, none.unknown_fields.?);
-}
-
 test "describe: the error handler and the body of its responses" {
     var users: UsersV1Controller = .{};
     var app_errors: AppErrors = .{};
-    const backend: Backend = undefined;
-    const mapped = comptime describe(@TypeOf(.{ .backend = backend, .controllers = .{&users}, .error_handler = &app_errors }));
+    const mapped = comptime describe(@TypeOf(.{ .controllers = .{&users}, .error_handler = &app_errors }));
     try testing.expect(mapped.ErrorHandler == AppErrors and mapped.ErrorBody == ApiError);
     // Without .error_handler: the default one, and problem+json.
     var health: HealthController = .{};
-    const default = comptime describe(@TypeOf(.{ .backend = backend, .controllers = .{&health} }));
+    const default = comptime describe(@TypeOf(.{ .controllers = .{&health} }));
     try testing.expect(default.ErrorHandler == errors.DefaultErrors and default.ErrorBody == errors.Problem);
 }
 

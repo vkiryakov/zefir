@@ -50,10 +50,10 @@ const Fixture = struct {
     fn start(f: *Fixture) !void {
         f.backend = .init(testing.allocator);
         errdefer f.backend.deinit();
-        const options = .{ .backend = f.backend.backend(), .prefix = "/api", .controllers = .{ &f.todos, &f.docs } };
-        f.docs = try .init(testing.allocator, comptime document(@TypeOf(options), .{ .info = info }));
+        const parts = .{ .controllers = .{ &f.todos, &f.docs } };
+        f.docs = try .init(testing.allocator, comptime document(@TypeOf(parts), .{ .info = info, .prefix = "/api" }));
         errdefer f.docs.deinit(testing.allocator);
-        f.server = try .init(testing.allocator, options);
+        f.server = try .init(testing.allocator, parts, .{ .listen = .{ .backend = f.backend.backend() }, .prefix = "/api" });
         errdefer f.server.deinit(testing.io);
         try f.server.start(testing.io);
     }
@@ -236,10 +236,10 @@ test "the page finds the document at each path the router gives it: a '/' at its
     defer backend.deinit();
     var todos: TodosController = .{};
     var docs: Docs(.{ .page = "/" }) = undefined;
-    const options = .{ .backend = backend.backend(), .prefix = "/api", .controllers = .{ &todos, &docs } };
-    docs = try .init(testing.allocator, comptime document(@TypeOf(options), .{ .info = info }));
+    const parts = .{ .controllers = .{ &todos, &docs } };
+    docs = try .init(testing.allocator, comptime document(@TypeOf(parts), .{ .info = info, .prefix = "/api" }));
     defer docs.deinit(testing.allocator);
-    var server: http.Server = try .init(testing.allocator, options);
+    var server: http.Server = try .init(testing.allocator, parts, .{ .listen = .{ .backend = backend.backend() }, .prefix = "/api" });
     defer server.deinit(testing.io);
     try server.start(testing.io);
     try expectPageFindsDocument(&backend, "/api", "/api/openapi.json");
@@ -251,10 +251,10 @@ test ".page = null: no page; the document stays" {
     defer backend.deinit();
     var todos: TodosController = .{};
     var docs: Docs(.{ .page = null }) = undefined;
-    const options = .{ .backend = backend.backend(), .prefix = "/api", .controllers = .{ &todos, &docs } };
-    docs = try .init(testing.allocator, comptime document(@TypeOf(options), .{ .info = info }));
+    const parts = .{ .controllers = .{ &todos, &docs } };
+    docs = try .init(testing.allocator, comptime document(@TypeOf(parts), .{ .info = info, .prefix = "/api" }));
     defer docs.deinit(testing.allocator);
-    var server: http.Server = try .init(testing.allocator, options);
+    var server: http.Server = try .init(testing.allocator, parts, .{ .listen = .{ .backend = backend.backend() }, .prefix = "/api" });
     defer server.deinit(testing.io);
     try server.start(testing.io);
 
@@ -274,17 +274,17 @@ test "a prefix from the config: servers holds the prefix it serves, right after 
     // As from a config: the prefix is not known at compile time.
     var prefix: []const u8 = "/api";
     _ = &prefix;
-    const options = .{ .backend = backend.backend(), .prefix = prefix, .controllers = .{ &todos, &docs } };
-    docs = try .init(testing.allocator, comptime document(@TypeOf(options), .{ .info = info }));
+    const parts = .{ .controllers = .{ &todos, &docs } };
+    docs = try .init(testing.allocator, comptime document(@TypeOf(parts), .{ .info = info }));
     defer docs.deinit(testing.allocator);
     try testing.expect(docs.document.runtime_prefix);
-    var server: http.Server = try .init(testing.allocator, options);
+    var server: http.Server = try .init(testing.allocator, parts, .{ .listen = .{ .backend = backend.backend() }, .prefix = prefix });
     defer server.deinit(testing.io);
     try server.start(testing.io);
 
     // The document of the same server, its prefix known at compile time.
-    const Known = @TypeOf(.{ .backend = backend.backend(), .prefix = "/api", .controllers = .{ &todos, &docs } });
-    const known = try written(comptime document(Known, .{ .info = info }));
+    const Known = @TypeOf(.{ .controllers = .{ &todos, &docs } });
+    const known = try written(comptime document(Known, .{ .info = info, .prefix = "/api" }));
     defer testing.allocator.free(known);
     const without = try written(docs.document);
     defer testing.allocator.free(without);
@@ -311,10 +311,10 @@ test "an empty prefix from the config: no servers" {
     var docs: Docs(.{}) = undefined;
     var prefix: []const u8 = "";
     _ = &prefix;
-    const options = .{ .backend = backend.backend(), .prefix = prefix, .controllers = .{ &todos, &docs } };
-    docs = try .init(testing.allocator, comptime document(@TypeOf(options), .{ .info = info }));
+    const parts = .{ .controllers = .{ &todos, &docs } };
+    docs = try .init(testing.allocator, comptime document(@TypeOf(parts), .{ .info = info }));
     defer docs.deinit(testing.allocator);
-    var server: http.Server = try .init(testing.allocator, options);
+    var server: http.Server = try .init(testing.allocator, parts, .{ .listen = .{ .backend = backend.backend() }, .prefix = prefix });
     defer server.deinit(testing.io);
     try server.start(testing.io);
 
@@ -333,12 +333,12 @@ test "two Docs on two paths serve two documents, each with its page" {
     var admin: AdminController = .{};
     var public: Docs(.{}) = undefined;
     var internal: Docs(.{ .json = "/internal/openapi.json", .page = "/internal/docs" }) = undefined;
-    const options = .{ .backend = backend.backend(), .prefix = "/api", .controllers = .{ &todos, &admin, &public, &internal } };
-    public = try .init(testing.allocator, comptime document(@TypeOf(options), .{ .info = info, .exclude = &.{AdminController} }));
+    const parts = .{ .controllers = .{ &todos, &admin, &public, &internal } };
+    public = try .init(testing.allocator, comptime document(@TypeOf(parts), .{ .info = info, .exclude = &.{AdminController}, .prefix = "/api" }));
     defer public.deinit(testing.allocator);
-    internal = try .init(testing.allocator, comptime document(@TypeOf(options), .{ .info = info, .include = &.{AdminController} }));
+    internal = try .init(testing.allocator, comptime document(@TypeOf(parts), .{ .info = info, .include = &.{AdminController}, .prefix = "/api" }));
     defer internal.deinit(testing.allocator);
-    var server: http.Server = try .init(testing.allocator, options);
+    var server: http.Server = try .init(testing.allocator, parts, .{ .listen = .{ .backend = backend.backend() }, .prefix = "/api" });
     defer server.deinit(testing.io);
     try server.start(testing.io);
 

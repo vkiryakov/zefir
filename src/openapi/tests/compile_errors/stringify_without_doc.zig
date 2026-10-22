@@ -27,5 +27,5 @@ const PricesController = struct {
 var prices: PricesController = .{};
 
 test {
-    _ = comptime zefir.openapi.document(@TypeOf(.{ .backend = @as(http.Backend, undefined), .controllers = .{&prices} }), .{ .info = .{ .title = "Todos API", .version = "1.0.0" } });
+    _ = comptime zefir.openapi.document(@TypeOf(.{ .controllers = .{&prices} }), .{ .info = .{ .title = "Todos API", .version = "1.0.0" } });
 }

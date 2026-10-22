@@ -1,6 +1,6 @@
 //! The server of the todo service, built in one place for `main` and for
 //! the tests: the objects of the service, the server, and its OpenAPI
-//! document, which the compiler builds from the type of the same options,
+//! document, which the compiler builds from the type of the same parts,
 //! so that the document cannot differ from the server it describes. What
 //! differs between `main` and a test comes in the fields without a
 //! default: the users and their tokens, the origins of CORS, the directory
@@ -65,32 +65,36 @@ pub fn start(s: *Service, gpa: std.mem.Allocator, io: std.Io, backend: http.Back
     s.todos_v1 = .{ .repo = &s.repo, .live = &s.live, .plans = &s.plans };
     s.sessions = .{ .token_auth = &s.token_auth, .live = &s.live };
 
-    const options = .{
-        .backend = backend,
-        // Before the routes of the controllers: /api/v1/todos, /api/health.
-        .prefix = "/api",
+    const parts = .{
         .controllers = .{ &s.todos_v1, &s.sessions, &s.health, &s.docs },
         // Every request runs these, in this order, before its route is chosen.
         .middleware = .{ mw.requestId, &s.access_log, http.onResponse(mw.securityHeaders), &s.cors, &s.token_auth },
         .error_handler = &s.app_errors,
-        // The page and its files; a path without a file gets index.html, so
-        // that the page's own router reads the path.
-        .static = .{http.static("/", .{ .root = s.public_dir, .spa_fallback = "index.html" })},
     };
-    // The compiler builds the document from the type of options: each
+    // Before the routes of the controllers: /api/v1/todos, /api/health.
+    const prefix = "/api";
+    // The compiler builds the document from the type of the parts: each
     // route with its input, its responses and its errors, and the security
     // of its middleware. `init` writes its JSON, once.
-    s.docs = try .init(gpa, comptime zefir.openapi.document(@TypeOf(options), .{
+    s.docs = try .init(gpa, comptime zefir.openapi.document(@TypeOf(parts), .{
         .info = .{
             .title = "Todos API",
             .version = "1.0.0",
             .description = "The todos of each user: made, changed, deleted, exported as CSV and followed live.",
         },
+        // The server's prefix, in the servers of the document.
+        .prefix = prefix,
         // The health check of the load balancer is no part of the API.
         .exclude = &.{HealthController},
     }));
     errdefer s.docs.deinit(gpa);
-    s.server = try .init(gpa, options);
+    s.server = try .init(gpa, parts, .{
+        .listen = .{ .backend = backend },
+        .prefix = prefix,
+        // The page and its files; a path without a file gets index.html, so
+        // that the page's own router reads the path.
+        .static = &.{http.static("/", .{ .root = s.public_dir, .spa_fallback = "index.html" })},
+    });
     errdefer s.server.deinit(io);
     try s.server.start(io);
 }

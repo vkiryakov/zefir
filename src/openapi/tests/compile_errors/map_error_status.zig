@@ -29,5 +29,5 @@ var teapots: TeapotsController = .{};
 var app_errors: AppErrors = .{};
 
 test {
-    _ = comptime zefir.openapi.document(@TypeOf(.{ .backend = @as(http.Backend, undefined), .controllers = .{&teapots}, .error_handler = &app_errors }), .{ .info = .{ .title = "Teapots API", .version = "1.0.0" } });
+    _ = comptime zefir.openapi.document(@TypeOf(.{ .controllers = .{&teapots}, .error_handler = &app_errors }), .{ .info = .{ .title = "Teapots API", .version = "1.0.0" } });
 }

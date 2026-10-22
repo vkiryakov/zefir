@@ -17,6 +17,6 @@ test {
     _ = &strict;
     var backend: http.testing.Backend = .init(std.testing.allocator);
     defer backend.deinit();
-    var server = try http.Server.init(std.testing.allocator, .{ .backend = backend.backend(), .controllers = .{&users}, .strict_errors = strict });
+    var server = try http.Server.init(std.testing.allocator, .{ .controllers = .{&users}, .strict_errors = strict }, .{ .listen = .{ .backend = backend.backend() } });
     defer server.deinit(std.testing.io);
 }

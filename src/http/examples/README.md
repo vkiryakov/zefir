@@ -53,9 +53,6 @@ tests, the same server runs in memory.
 >   [Server-sent events](#server-sent-events) work; a client that
 >   reconnects gets the events from then on, since the server keeps no
 >   history to send it the ones it missed.
-> - **The App container.** `Service.start` of the application builds the
->   objects of a service and its server; the App of zefir-core, which will
->   run the lifecycle of many components, is planned.
 
 A whole program: a controller, a server, and three requests to it. The
 server runs on the backend in memory, `http.testing`, which needs no
@@ -117,12 +114,15 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
 
     // The backend in memory serves the server without a network; on the
-    // network, http.native.Backend takes its place.
+    // network, .listen = .{ .port = 8080 } takes its place.
     var backend: http.testing.Backend = .init(gpa);
     defer backend.deinit();
     var todos: TodosV1Controller = .{ .gpa = gpa };
     defer todos.deinit();
-    var server = try http.Server.init(gpa, .{ .backend = backend.backend(), .prefix = "/api", .controllers = .{&todos} });
+    var server = try http.Server.init(gpa, .{ .controllers = .{&todos} }, .{
+        .listen = .{ .backend = backend.backend() },
+        .prefix = "/api",
+    });
     defer server.deinit(io);
     try server.start(io);
 
@@ -202,8 +202,9 @@ GET /api/v1/todos
 - [Benchmark](#benchmark)
 - [Stopping gracefully](#stopping-gracefully)
 
-`zig build test-http` builds and runs "http in a minute" and the tests of
-the example app, and checks them against this guide. The service runs on
+`zig build test-http` builds and runs "http in a minute", the service
+under zefir.App and the tests of the example app, and checks them against
+this guide. The service runs on
 the network: in `tests/http`, `zig build examples` starts it, sends it every
 curl command of this guide, and checks each response, and the log of the
 service, against what the guide shows.
@@ -328,8 +329,8 @@ zig fetch --save git+https://github.com/vkiryakov/zefir#dev
 This guide is on the `dev` branch: the declarations of a route's input and
 statuses, `ctx.input`, the typed events of a stream and the OpenAPI
 document are there until the next release. The command fetches the latest
-commit of `dev`; `--save` pins that commit. The latest release, v0.9.0,
-came before them, so `#v0.9.0` does not have them.
+commit of `dev`; `--save` pins that commit. The latest release, v0.10.0,
+came before them, so `#v0.10.0` does not have them.
 
 A service runs on zio. zio has no release for Zig 0.17 yet, so pin the
 commit Zefir is tested with:
@@ -514,7 +515,9 @@ What each part does:
 - **The runtime**: zio with an executor per CPU core. Every request runs in
   a task of its own on it, and so does everything the request waits for.
 - **`http.native.Backend`** is the network: it listens on the port, reads
-  the requests of each connection, and writes the responses.
+  the requests of each connection, and writes the responses. `main`
+  makes its own, to log the port the system gives for `APP_PORT=0`;
+  `.listen = .{ .port = config.port }` would have the server make it.
 - **`Service.start`** builds the service on that backend, below. The tests
   call it too, on the backend in memory, so they test the very server that
   `main` runs.
@@ -528,7 +531,7 @@ The service itself, its objects and its server, is built in one place,
 ```zig
 //! The server of the todo service, built in one place for `main` and for
 //! the tests: the objects of the service, the server, and its OpenAPI
-//! document, which the compiler builds from the type of the same options,
+//! document, which the compiler builds from the type of the same parts,
 //! so that the document cannot differ from the server it describes. What
 //! differs between `main` and a test comes in the fields without a
 //! default: the users and their tokens, the origins of CORS, the directory
@@ -593,32 +596,36 @@ pub fn start(s: *Service, gpa: std.mem.Allocator, io: std.Io, backend: http.Back
     s.todos_v1 = .{ .repo = &s.repo, .live = &s.live, .plans = &s.plans };
     s.sessions = .{ .token_auth = &s.token_auth, .live = &s.live };
 
-    const options = .{
-        .backend = backend,
-        // Before the routes of the controllers: /api/v1/todos, /api/health.
-        .prefix = "/api",
+    const parts = .{
         .controllers = .{ &s.todos_v1, &s.sessions, &s.health, &s.docs },
         // Every request runs these, in this order, before its route is chosen.
         .middleware = .{ mw.requestId, &s.access_log, http.onResponse(mw.securityHeaders), &s.cors, &s.token_auth },
         .error_handler = &s.app_errors,
-        // The page and its files; a path without a file gets index.html, so
-        // that the page's own router reads the path.
-        .static = .{http.static("/", .{ .root = s.public_dir, .spa_fallback = "index.html" })},
     };
-    // The compiler builds the document from the type of options: each
+    // Before the routes of the controllers: /api/v1/todos, /api/health.
+    const prefix = "/api";
+    // The compiler builds the document from the type of the parts: each
     // route with its input, its responses and its errors, and the security
     // of its middleware. `init` writes its JSON, once.
-    s.docs = try .init(gpa, comptime zefir.openapi.document(@TypeOf(options), .{
+    s.docs = try .init(gpa, comptime zefir.openapi.document(@TypeOf(parts), .{
         .info = .{
             .title = "Todos API",
             .version = "1.0.0",
             .description = "The todos of each user: made, changed, deleted, exported as CSV and followed live.",
         },
+        // The server's prefix, in the servers of the document.
+        .prefix = prefix,
         // The health check of the load balancer is no part of the API.
         .exclude = &.{HealthController},
     }));
     errdefer s.docs.deinit(gpa);
-    s.server = try .init(gpa, options);
+    s.server = try .init(gpa, parts, .{
+        .listen = .{ .backend = backend },
+        .prefix = prefix,
+        // The page and its files; a path without a file gets index.html, so
+        // that the page's own router reads the path.
+        .static = &.{http.static("/", .{ .root = s.public_dir, .spa_fallback = "index.html" })},
+    });
     errdefer s.server.deinit(io);
     try s.server.start(io);
 }
@@ -640,13 +647,18 @@ pub fn deinit(s: *Service, gpa: std.mem.Allocator, io: std.Io) void {
   controllers, each with pointers to what it uses. They are fields of the
   service, and the server borrows them, so the service stays where it is
   until `deinit`, which stops the server before it frees them.
-- **`http.Server.init`** takes the controllers, the server's middleware, the
-  error handler and the static files. The compiler checks all of it here:
-  the routes of every controller, the signature of every handler, every
-  middleware of every route, and every error a route can return.
+- **`http.Server.init`** takes two arguments. The first holds the parts the
+  compiler checks: the controllers, the server's middleware and the error
+  handler. It checks them all here: the routes of every controller, the
+  signature of every handler, every middleware of every route, and every
+  error a route can return. The second, `http.Server.Options`, holds the
+  settings: where the requests come from, the prefix and the static
+  files.
 - **`zefir.openapi.document`** builds the OpenAPI document of the API from
-  the type of the same options, and `docs`, a controller of zefir-openapi,
+  the type of the same parts, and `docs`, a controller of zefir-openapi,
   serves it with a page of it: see [The OpenAPI document](#the-openapi-document).
+  The settings are values, which no type holds, so the document gets the
+  prefix of the server too.
 - **`server.start`** opens the static files' directory and starts taking
   requests.
 
@@ -1186,8 +1198,8 @@ fn free(allocator: std.mem.Allocator, todo: Todo) void {
 
   The options are compile-time values of any type, so a duration is
   written in full: `std.Io.Duration.fromSeconds(300)`. Where a type is
-  known, as in the fields of `http.native.Backend.init` or of a cookie,
-  `.fromSeconds(300)` is enough.
+  known, as in `http.Server.Options`, the options of
+  `http.native.Backend.init` or a cookie, `.fromSeconds(300)` is enough.
 - **A route is a type.** `http.get(…)` and the others return one, so a
   route can have a name, as `Create` above, and its handler reads what it
   declares with `ctx.input(Create)` (see [Input](#input)).
@@ -2835,7 +2847,7 @@ Content-Length: 104
 The page of the service and its files come from the directory `public/`:
 
 ```zig
-.static = .{http.static("/", .{ .root = s.public_dir, .spa_fallback = "index.html" })},
+.static = &.{http.static("/", .{ .root = s.public_dir, .spa_fallback = "index.html" })},
 ```
 
 ```html
@@ -2991,16 +3003,20 @@ middleware of each route. So the document cannot list a route that is not
 there, or leave out an error that a route returns. Its guide tells all of
 it; this is what the service does.
 
-`Service.start` builds the document from the type of the options of the
-server, and `docs`, a controller of zefir-openapi, serves it:
+`Service.start` builds the document from the type of the parts of the
+server, and `docs`, a controller of zefir-openapi, serves it. The prefix of
+the server is one of its settings, a value that no type holds, so the
+document gets it too, for its `servers`:
 
 ```zig
-s.docs = try .init(gpa, comptime zefir.openapi.document(@TypeOf(options), .{
+s.docs = try .init(gpa, comptime zefir.openapi.document(@TypeOf(parts), .{
     .info = .{
         .title = "Todos API",
         .version = "1.0.0",
         .description = "The todos of each user: made, changed, deleted, exported as CSV and followed live.",
     },
+    // The server's prefix, in the servers of the document.
+    .prefix = prefix,
     // The health check of the load balancer is no part of the API.
     .exclude = &.{HealthController},
 }));
@@ -3735,12 +3751,12 @@ stateDiagram-v2
 
 | Method | What it does |
 | --- | --- |
-| `init(gpa, options)` | builds the server; the compiler checks the routes, the middleware and the errors; no I/O |
+| `init(gpa, parts, options)` | builds the server; the compiler checks the routes, the middleware and the errors; no I/O |
 | `start(io)` | checks the backend and the roots of the static files, starts taking requests, returns once it does |
 | `wait(io)` | waits until the server has stopped |
 | `run(io)` | `start`, then `wait` |
 | `requestStop(io)` | begins a graceful stop; from any task, a handler too; never waits |
-| `shutdown(io)` | `requestStop`, then a wait until the server has stopped |
+| `shutdown(io, deadline)` | `requestStop`, then a wait until the server has stopped, 250 ms before `deadline` at the latest |
 | `isReady()`, `state()` | for health checks: running and taking requests; the state |
 | `deinit(io)` | stops the server if it runs, waits, frees it |
 
@@ -3753,7 +3769,7 @@ What a stop does:
    before, then the end of its response, and its client reconnects, to
    another instance.
 3. The requests at work and the streams get `.shutdown_grace`, 10 seconds,
-   to end.
+   to end, or less when the deadline of `shutdown` comes sooner.
 4. What has not ended then is canceled: its next wait through `std.Io`
    returns `error.Canceled`, and its client gets no response, or a stream
    that is cut.
@@ -3809,8 +3825,142 @@ $ APP_AUTH_ANN_TOKEN=ann-secret APP_AUTH_BOB_TOKEN=bob-secret zig build run
 Every request of the guide left a record of `AccessLog`, with its status,
 its user, the error it ended with, and the id of the request, which the
 response carried as `x-request-id`; the stream ended by Ctrl+C has
-`err=Canceled`. When a handler ignores its cancelation and runs on,
-`shutdown` returns `error.ShutdownTimeout` once the grace,
-`.finish_timeout` and one second more are over, and the server stays
-`draining`: end the process then. The App of zefir-core will drive these
-methods for a whole service, on its signals.
+`err=Canceled`.
+
+The deadline of `shutdown(io, deadline)` cuts `.shutdown_grace`: the grace
+ends by the deadline less one second, `.finish_timeout` and 250 ms, so that
+the canceled requests have time to end, and `shutdown` returns by
+`deadline − 250 ms`. When a handler ignores its cancelation and runs on,
+`shutdown` returns `error.ShutdownTimeout` then, and the server stays
+`draining`: end the process.
+
+### Under zefir.App
+
+A service with several servers, or with clients of NATS and MongoDB next to
+its server, hands their lifecycle to `zefir.App` of zefir-core: App builds
+the beans of the service out of modules, starts them in order, watches
+them, and stops them all within one deadline. The guides of the modules
+write it `core.App`: it is `zefir.App` of the umbrella module.
+
+The module below declares what App builds: the backend in memory, a
+provider; `HealthController`, a controller; and `Servers`, whose function
+`httpServer` makes the server of them. App passes each parameter of that
+function by its type: its allocator, the config that `main` hands to
+`init`, the backend it built, and `core.app.Controllers(AppModule)`, the
+controllers of the module:
+
+```zig
+//! The health check of the todo service under zefir.App, on the backend in
+//! memory: a module declares the backend, the controller and the factory
+//! of the server; App builds them in the order of their dependencies,
+//! starts the server, and stops it. Its setting comes from the environment
+//! through confy:
+//!
+//!   APP_PREFIX   before the routes of the controllers, `/api` by default
+
+const std = @import("std");
+const confy = @import("confy");
+const core = @import("core");
+const http = @import("http");
+const HealthController = @import("HealthController.zig");
+
+/// App writes each start and stop of a bean to the log, at info: this run
+/// prints warnings only.
+pub const std_options: std.Options = .{ .log_level = .warn };
+
+const Config = struct {
+    prefix: []const u8 = "/api",
+};
+
+/// What App builds: the backend, the controller, and the server, which a
+/// factory makes of them.
+pub const AppModule = struct {
+    pub const module: core.app.Module = .{
+        .providers = &.{http.testing.Backend},
+        .controllers = &.{HealthController},
+        .factories = &.{Servers},
+        .values = &.{*const Config},
+    };
+
+    pub const Servers = struct {
+        /// The server: App passes the controllers of the module, and the
+        /// backend and the config, by their types.
+        pub fn httpServer(
+            gpa: std.mem.Allocator,
+            config: *const Config,
+            backend: *http.testing.Backend,
+            controllers: core.app.Controllers(AppModule),
+        ) !http.Server {
+            return .init(gpa, .{ .controllers = controllers }, .{
+                .listen = .{ .backend = backend.backend() },
+                .prefix = config.prefix,
+            });
+        }
+    };
+};
+
+pub fn main(init: std.process.Init) !void {
+    var config: Config = undefined;
+    confy.loadOrExit(init.arena.allocator(), &config, .{
+        .io = init.io,
+        .environ = init.environ_map,
+        .env_prefix = "APP_",
+        .sources = &.{.osEnv()},
+    });
+    const io = init.io;
+
+    // Builds the backend, the controller and the server, and starts the
+    // server: it takes requests once start returns.
+    var app = try core.App(AppModule).init(init.gpa, io, .{&config}, .{});
+    defer app.deinit();
+    try app.start();
+
+    var buffer: [1024]u8 = undefined;
+    var stdout = std.Io.File.stdout().writer(io, &buffer);
+    const out = &stdout.interface;
+    try out.print("the app is {t}\n", .{app.state()});
+
+    const target = try std.fmt.allocPrint(init.arena.allocator(), "{s}/health", .{config.prefix});
+    var res = try app.get(http.testing.Backend).request(io, .{ .method = .GET, .target = target });
+    defer res.deinit();
+    try out.print("GET {s}\n→ {d} {s}\n", .{ target, res.status, res.body });
+
+    // What a signal does in a service: App asks every server to stop, then
+    // shuts each down within its shutdown_timeout, and wait returns.
+    app.requestStop();
+    try app.wait();
+    try out.print("the app is {t}\n", .{app.state()});
+    try out.flush();
+}
+```
+
+```text
+$ zig build run
+the app is running
+GET /api/health
+→ 200 {"status":"ok"}
+the app is stopped
+```
+
+- **`init`** builds the beans in the order of their dependencies: the
+  backend and the controller, then the server, which takes them.
+- **`app.start()`** starts the server, then watches its `wait`: a server
+  that stops by itself, such as one whose backend broke and whose `wait`
+  returns `error.Unavailable`, stops the whole App.
+- **`app.requestStop()`** begins the stop. App asks every server to stop at
+  once, then calls the `shutdown(io, deadline)` of every server together,
+  each in a task of its own, with one deadline for all: its
+  `.shutdown_timeout`, 25 seconds by default, after the stop began. Each
+  server's `shutdown` returns 250 ms before that deadline at the latest,
+  so App has time for the rest.
+- **`app.wait()`** returns once the stop is over: `{}` here, or the error
+  of the bean that stopped the App, which `app.failure()` names.
+
+App writes each step to `std.log`, at info: `AppModule.Servers.httpServer
+started`, `stopping`, `AppModule.Servers.httpServer stopped`, `stopped`;
+this run prints warnings only. On the network, the factory takes a port
+from the config instead of the backend in memory, which leaves
+`.providers`: `.listen = .{ .port = config.port }`. A service's `main` calls
+`app.run()`, which starts App and waits for its stop, and a task on
+`zio.Signal` calls `app.requestStop()`, as `stopOnSignal` calls
+`server.requestStop` above.

@@ -26,5 +26,5 @@ var v1: TodosV1Controller = .{};
 var v2: TodosV2Controller = .{};
 
 test {
-    _ = comptime zefir.openapi.document(@TypeOf(.{ .backend = @as(http.Backend, undefined), .controllers = .{ &v1, &v2 } }), .{ .info = .{ .title = "Todos API", .version = "1.0.0" } });
+    _ = comptime zefir.openapi.document(@TypeOf(.{ .controllers = .{ &v1, &v2 } }), .{ .info = .{ .title = "Todos API", .version = "1.0.0" } });
 }

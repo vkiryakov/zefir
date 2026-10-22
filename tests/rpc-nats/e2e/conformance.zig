@@ -18,15 +18,13 @@ const servers = root.servers;
 /// connection, as one application does.
 const Harness = struct {
     nc: nats.Client = undefined,
-    adapter: rpc_nats.ZefirNats = undefined,
     bus: rpc_nats.Transport = undefined,
 
     pub fn setUp(h: *Harness, io: Io, gpa: std.mem.Allocator) !conformance.Pair {
         h.nc = try .init(gpa, io, .{ .servers = &.{servers.restart}, .reconnect = services.fast_reconnect });
         errdefer h.nc.deinit();
         try h.nc.connect();
-        h.adapter = .{ .client = &h.nc };
-        h.bus = try .init(gpa, h.adapter.conn(), .{});
+        h.bus = try .init(gpa, &h.nc, .{});
         return .{ .client = h.bus.clientTransport(), .server = h.bus.serverTransport() };
     }
 

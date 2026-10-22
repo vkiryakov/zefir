@@ -164,7 +164,7 @@ const Fixture = struct {
         f.app = .{};
         f.native = try .init(gpa, .{ .address = "127.0.0.1", .port = 0, .limits = settings.limits, .timeouts = settings.timeouts });
         errdefer f.native.deinit();
-        f.server = try http.Server.init(gpa, .{ .backend = f.native.backend(), .controllers = .{&f.app}, .strict_errors = false });
+        f.server = try http.Server.init(gpa, .{ .controllers = .{&f.app}, .strict_errors = false }, .{ .listen = .{ .backend = f.native.backend() } });
         errdefer f.server.deinit(io);
         try f.server.start(io);
     }
@@ -316,7 +316,7 @@ fn takenPort(io: Io) !void {
     var app: App = .{};
     var native = try http.native.Backend.init(gpa, .{ .address = "127.0.0.1", .port = first.native.port() });
     defer native.deinit();
-    var second = try http.Server.init(gpa, .{ .backend = native.backend(), .controllers = .{&app}, .strict_errors = false });
+    var second = try http.Server.init(gpa, .{ .controllers = .{&app}, .strict_errors = false }, .{ .listen = .{ .backend = native.backend() } });
     defer second.deinit(io);
     if (builtin.os.tag == .windows) {
         try testing.expectError(error.AddressInUse, second.start(io));
@@ -692,7 +692,7 @@ fn sameOnBoth(io: Io) !void {
     var app: App = .{};
     var memory: http.testing.Backend = .init(gpa);
     defer memory.deinit();
-    var server = try http.Server.init(gpa, .{ .backend = memory.backend(), .controllers = .{&app}, .strict_errors = false });
+    var server = try http.Server.init(gpa, .{ .controllers = .{&app}, .strict_errors = false }, .{ .listen = .{ .backend = memory.backend() } });
     defer server.deinit(io);
     try server.start(io);
 
