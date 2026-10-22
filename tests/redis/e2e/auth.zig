@@ -2,7 +2,8 @@
 //! password `<name>-pass`, on the image that REDIS_IMAGE names: `app` and
 //! `default` connect; a wrong password and the user `gone`, which is off,
 //! are AuthenticationFailed, and so is no password, with the hint of
-//! NOAUTH; `limited` reaches its keys `app:*` and no other.
+//! NOAUTH; `limited` reaches its keys `app:*` and no other; `reader` gets
+//! a key and may not set one.
 
 const std = @import("std");
 const Io = std.Io;
@@ -25,6 +26,17 @@ fn connectOnce(io: Io, url: []const u8, d: *redis.Diagnostics) redis.Error!void 
     };
     defer client.deinit();
     try client.connect(io, within(io, .fromSeconds(10)), d);
+}
+
+/// A client of `url`, connected.
+fn connectedTo(io: Io, client: *redis.Client, url: []const u8) !void {
+    client.* = try .init(testing.allocator, io, .{ .url = url });
+    errdefer client.deinit();
+    var d: redis.Diagnostics = .{};
+    client.connect(io, within(io, .fromSeconds(10)), &d) catch |err| {
+        std.debug.print("connect {s}: {t}: {s}\n", .{ url, err, d.message() });
+        return err;
+    };
 }
 
 fn expectConnects(io: Io, url: []const u8) !void {
@@ -84,4 +96,32 @@ fn limitedKeys(io: Io) !void {
     defer client.run(io, op, cmd.raw(void, .{ "DEL", "app:1" }), .{}) catch {};
     try testing.expectError(error.ServerError, client.run(io, op, cmd.raw(void, .{ "SET", "other:1", "x" }), .{ .diagnostics = &d }));
     try testing.expect(d.isCode("NOPERM"));
+}
+
+test "the user reader gets a key that app set, and its SET is ServerError NOPERM" {
+    try e2e.onZio(readerOnly);
+}
+
+fn readerOnly(io: Io) !void {
+    const key = "e2e:auth:reader";
+    const op: redis.OperationContext = .of(within(io, .fromSeconds(10)));
+    var d: redis.Diagnostics = .{};
+    var app: redis.Client = undefined;
+    try connectedTo(io, &app, "redis://app:app-pass@127.0.0.1:16380");
+    defer app.deinit();
+    app.run(io, op, cmd.set(key, "x", .{}), .{ .diagnostics = &d }) catch |err| {
+        std.debug.print("SET {s}: {t}: {s}\n", .{ key, err, d.message() });
+        return err;
+    };
+    defer _ = app.run(io, op, cmd.del(&.{key}), .{}) catch 0;
+
+    var reader: redis.Client = undefined;
+    try connectedTo(io, &reader, "redis://reader:reader-pass@127.0.0.1:16380");
+    defer reader.deinit();
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    try testing.expectEqualDeep(@as(?[]const u8, "x"), try reader.run(io, op, cmd.get([]const u8, key), .{ .allocator = arena.allocator() }));
+    try testing.expectError(error.ServerError, reader.run(io, op, cmd.set(key, "y", .{}), .{ .diagnostics = &d }));
+    try testing.expect(d.isCode("NOPERM"));
+    try testing.expectEqualDeep(@as(?[]const u8, "x"), try app.run(io, op, cmd.get([]const u8, key), .{ .allocator = arena.allocator() }));
 }
