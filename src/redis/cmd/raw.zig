@@ -17,8 +17,8 @@
 //! A blocking command through `raw` waits only as long as the deadline of
 //! its call: its timeout is not taken from the deadline as for the
 //! blocking commands of the catalog. Give it one shorter than what is left
-//! of the deadline by 150 ms at least, for a quiet server answers a
-//! timeout up to 100 ms late.
+//! of the deadline by 150 ms and a round trip at least, for a quiet server
+//! answers a timeout up to 100 ms late.
 
 const std = @import("std");
 const resp = @import("../resp.zig");

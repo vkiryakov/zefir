@@ -51,11 +51,12 @@
 //!    `error.DeadlineExceeded` and nothing goes out; once the command went
 //!    out, the error is `error.Timeout` and its connection closes. A
 //!    blocking command of the catalog sends the server what the deadline
-//!    leaves beyond 150 ms, or its own timeout when shorter, for a quiet
-//!    server answers a timeout up to 100 ms late: the call ends with an
-//!    empty reply before the deadline, not with `error.Timeout`. With 150
-//!    ms or less left, it is `error.DeadlineExceeded`, and the text names
-//!    the command that does not block. Without a deadline of the context,
+//!    leaves beyond 150 ms and the shortest round trip, or its own timeout
+//!    when shorter, for a quiet server answers a timeout up to 100 ms
+//!    late: the call ends with an empty reply before the deadline, not
+//!    with `error.Timeout`. With less than 151 ms and that round trip
+//!    left, it is `error.DeadlineExceeded`, and the text names the command
+//!    that does not block. Without a deadline of the context,
 //!    it sends its own timeout, and `timeout` of the options is the margin
 //!    after it.
 //! 4. Cancellation. The token is no alarm: the client checks it before the

@@ -1509,15 +1509,19 @@ answer null. The timeout is a `redis.Block`: `.forever`, or
 written out, and a 0 never waits forever by mistake.
 
 **The timeout comes from the deadline.** Under a deadline, the client
-sends the server what the deadline leaves, less 150 ms, or the command's
-own timeout when that is shorter:
+sends the server what the deadline leaves, less 150 ms and the shortest
+round trip, or the command's own timeout when that is shorter:
 
 | Deadline of the call | Timeout of the command | The server gets | The call waits |
 |---|---|---|---|
-| R left | `.at_most = t` | the shorter of `t` and R − 150 ms | until the deadline |
-| R left | `.forever` | R − 150 ms | until the deadline |
+| R left | `.at_most = t` | the shorter of `t` and R − 150 ms − rtt | until the deadline |
+| R left | `.forever` | R − 150 ms − rtt | until the deadline |
 | none | `.at_most = t` | `t` | `t`, and `Options.timeout` more |
 | none | `.forever` | 0: forever | until the task is canceled or the client closes |
+
+Here rtt is the shortest round trip to the server that the client has
+measured, on the HELLO of its latest connections: the least time a reply
+takes, 0 until it has opened two.
 
 Why 150 ms: Redis checks the timeouts of the clients it blocks when its
 loop of events goes to sleep, and a quiet server sleeps until its next
@@ -1526,10 +1530,11 @@ timer, 100 ms later at most, as it wakes ten times a second by default
 timeout. Were the timeout all that the deadline leaves, that null would
 come after the deadline: `Timeout` instead of null, a closed connection,
 and a value that the server gave out in that moment, lost. With the margin
-the null comes before the deadline, from a quiet server too. With 150 ms
-or less left, the call is `DeadlineExceeded` and nothing goes out; the
-text names the command that does not block, `lmove` for `blmove`. The
-tests of [deadlines](#deadlines-and-cancellation) show both.
+the null comes before the deadline, from a quiet server too. When that
+leaves the server less than 1 ms, with less than 151 ms and the round
+trip left, the call is `DeadlineExceeded` and nothing goes out; the text
+names the command that does not block, `lmove` for `blmove`. The tests of
+[deadlines](#deadlines-and-cancellation) show both.
 
 **A read that takes the value can lose it.** BLPOP takes the value off the
 server as it answers. When the answer comes after the deadline after all,
@@ -1571,8 +1576,8 @@ groups](#streams-and-consumer-groups).
   gets what is left of the deadline as the pipeline goes out: give a
   pipeline one at most, and last.
 - **Through `cmd.raw`** a blocking command gets no timeout from the
-  deadline: give it a timeout of the server at least 150 ms shorter than
-  what is left of the deadline.
+  deadline: give it a timeout of the server shorter than what is left of
+  the deadline by 150 ms and a round trip at least.
 
 ## Scripts
 
@@ -2102,7 +2107,7 @@ Safe to make again is not the same as worth making again. A call that is
 | `Unavailable` | not sent | no connection: the server is not there, or is full, or refused it; the pool is paused after a clear; `connect` has not succeeded |
 | `AuthenticationFailed` | not sent | the server refused the user or the password (WRONGPASS), or wants a password that it did not get (NOAUTH) |
 | `PoolExhausted` | not sent | the deadline came while the call waited in line for a connection |
-| `DeadlineExceeded` | not sent | less than 1 ms, or than a round trip, was left of the deadline before sending, or 150 ms or less for a blocking command; or the deadline passed while a connection opened |
+| `DeadlineExceeded` | not sent | less than 1 ms, or than a round trip, was left of the deadline before sending, or less than 151 ms and a round trip for a blocking command; or the deadline passed while a connection opened |
 | `Cancelled` | not sent | the token or the task was canceled before sending |
 | `ConnectionLost` | may have run | the connection broke after the command started to go out, or `close` cut it; a subscriber lost its connection |
 | `Timeout` | may have run | the deadline passed after the command went out |

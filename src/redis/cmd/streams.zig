@@ -14,8 +14,9 @@
 //! XREAD and XREADGROUP read one stream, and no entry is an empty slice;
 //! several streams at once go through `cmd.raw`. With `.block` they wait
 //! on the server, blocking commands whose timeout goes in milliseconds:
-//! under a deadline the server gets what it leaves beyond 150 ms, so that
-//! a quiet stream ends the call with an empty slice before the deadline.
+//! under a deadline the server gets what it leaves beyond 150 ms and the
+//! shortest round trip to the server, so that a quiet stream ends the call
+//! with an empty slice before the deadline.
 //!
 //! A group remembers what each consumer took until XACK: an entry that its
 //! consumer never acknowledged stays pending, for XPENDING to show and for

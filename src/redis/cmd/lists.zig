@@ -9,9 +9,9 @@
 //! A blocking command waits on the server until a value comes or its
 //! timeout, a `redis.Block`, ends; it holds its connection of the pool all
 //! that time. Under a deadline, the server gets what the deadline leaves
-//! beyond 150 ms instead, when that is shorter, so that the call ends with
-//! null rather than a Timeout; too little left is DeadlineExceeded before
-//! anything goes out. A value that the server hands out is gone from the
+//! beyond 150 ms and the shortest round trip to the server instead, when
+//! that is shorter, so that the call ends with null rather than a Timeout;
+//! too little left is DeadlineExceeded before anything goes out. A value that the server hands out is gone from the
 //! list, so a queue that must not lose one moves it with `blmove` into a
 //! list of work in progress, and takes it out of there once done.
 //!
