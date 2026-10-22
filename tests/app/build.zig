@@ -1,10 +1,12 @@
 //! The code of zefir.App that runs on zio, in a package of its own: the
-//! end-to-end tests of App with real servers.
+//! end-to-end tests of App with real servers, and programs that the tests
+//! run in processes of their own.
 //!
 //!   zig build e2e        run the end-to-end tests: servers of zefir-http on
 //!                        http.native over loopback and of zefir-rpc on the
 //!                        memory transport, beans of one App, on zio with
-//!                        one executor and with four
+//!                        one executor and with four; then the programs of
+//!                        programs/, stopped by SIGTERM (Linux and macOS)
 //!   zig build up         start the NATS server `plain` and the mongod
 //!                        server `mongo-plain` of the repository's
 //!                        docker-compose.yml and wait until they are healthy
@@ -36,6 +38,25 @@ pub fn build(b: *std.Build) void {
         .imports = &.{.{ .name = "zio", .module = zio.module("zio") }},
     });
 
+    // The programs that the end-to-end tests start in processes of their
+    // own, each an App on zio: their paths go to the tests.
+    const programs = b.addOptions();
+    for ([_][]const u8{ "signals", "deaf" }) |name| {
+        const exe = b.addExecutable(.{
+            .name = name,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(b.fmt("programs/{s}.zig", .{name})),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "zefir", .module = zefir.module("zefir") },
+                    .{ .name = "zio", .module = zio.module("zio") },
+                },
+            }),
+        });
+        programs.addOptionPath(name, exe.getEmittedBin());
+    }
+
     const e2e = b.addTest(.{
         .name = "e2e",
         .root_module = b.createModule(.{
@@ -46,6 +67,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "zefir", .module = zefir.module("zefir") },
                 .{ .name = "zio", .module = zio.module("zio") },
                 .{ .name = "runtime", .module = runtime },
+                .{ .name = "programs", .module = programs.createModule() },
             },
         }),
         // One line per test; a panic exits with code 3 instead of aborting.
@@ -56,9 +78,9 @@ pub fn build(b: *std.Build) void {
     // network and the clock.
     run_e2e.stdio = .inherit;
     run_e2e.has_side_effects = true;
-    b.step("e2e", "Run the end-to-end tests of zefir.App on zio").dependOn(&run_e2e.step);
+    b.step("e2e", "Run the end-to-end tests of zefir.App on zio, then its programs stopped by SIGTERM").dependOn(&run_e2e.step);
 
     // Everything above built and nothing run.
-    const check_step = b.step("check", "Build the end-to-end tests without running them");
+    const check_step = b.step("check", "Build the end-to-end tests and the programs without running them");
     check_step.dependOn(&e2e.step);
 }
