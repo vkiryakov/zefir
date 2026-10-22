@@ -29,6 +29,8 @@
 //!   fonts (`font-src https://fonts.scalar.com`). The requests of "Try it"
 //!   go from the browser straight to the API, never through a proxy, so
 //!   the `connect-src` of a strict policy must allow the API's origin.
+//!   The page has no AI panel, which would send the document and a
+//!   developer's questions to Scalar's servers.
 //!   `.page = null` leaves the page out.
 //!
 //! The paths are those of the routes within the server's prefix. When the
@@ -60,8 +62,11 @@ const scalar = struct {
     /// attribute `data-configuration`: an empty `proxyUrl` sends each
     /// request of "Try it" from the browser straight to the API. Without
     /// it, a default of Scalar's decides whether a request to an absolute
-    /// URL goes through its proxy, https://proxy.scalar.com.
-    const configuration = "{\"proxyUrl\":\"\"}";
+    /// URL goes through its proxy, https://proxy.scalar.com. A disabled
+    /// `agent` leaves out the AI panel, which Scalar shows on a local page,
+    /// such as one of localhost, and which sends the document and the
+    /// questions of a developer to Scalar's servers.
+    const configuration = "{\"proxyUrl\":\"\",\"agent\":{\"disabled\":true}}";
 };
 
 /// The controller of documentation for the paths of `opts`.

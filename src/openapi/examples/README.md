@@ -1446,7 +1446,8 @@ Content-Length: 54633
   loads, `font-src https://fonts.scalar.com`. A route tried out there,
   with "Try it", is a request from the browser straight to the API, never
   through a proxy, so the `connect-src` of a strict policy must allow the
-  origin of the API.
+  origin of the API. The page has no AI panel, which would send the
+  document and a developer's questions to Scalar's servers.
 - **The paths are options**: `zefir.openapi.Docs(.{ .json = "/openapi.json",
   .page = "/docs" })` by default; `.page = null` leaves the page out.
 - **A prefix that comes from the settings**, at run time, is not in the
