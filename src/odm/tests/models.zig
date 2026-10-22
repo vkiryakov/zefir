@@ -74,3 +74,21 @@ pub const Slug = struct {
 
     pub const odm_schema: odm.Schema(Slug) = .{ .collection = "slugs", .id = .id };
 };
+
+/// The types of BSON that the other models lack: a document as the server
+/// gives it, a value of any type, a regular expression, bytes, a decimal,
+/// a timestamp, a bool, and lists of documents and of values.
+pub const Event = struct {
+    id: ?bson.ObjectId = null,
+    flag: bool = false,
+    meta: bson.RawDocument,
+    any: bson.Value,
+    re: bson.Regex,
+    blob: bson.Binary,
+    amount: bson.Decimal128,
+    ts: bson.Timestamp,
+    parts: []const bson.RawDocument = &.{},
+    values: []const bson.Value = &.{},
+
+    pub const odm_schema: odm.Schema(Event) = .{ .collection = "events", .id = .id };
+};

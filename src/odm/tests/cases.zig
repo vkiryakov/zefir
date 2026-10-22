@@ -59,6 +59,15 @@ pub const compile_errors = [_]Case{
     .{ .name = "compile error: a BSON name with a dot", .expect = "odm: tests.compile_errors.DottedName.odm_schema.names.name: \"a.b\" is not a field name of a document: it is empty, starts with '$', or holds '.' or NUL" },
     .{ .name = "compile error: two fields under one BSON name", .expect = "odm: tests.compile_errors.TwinNames: the fields 'a' and 'b' both have the BSON name \"a\"" },
     .{ .name = "compile error: a field named as a logical operator", .expect = "odm: tests.compile_errors.Operator.or: and, or and nor are the logical operators of filters; rename the field and keep its BSON name with odm_schema.names" },
+    // Names that a document cannot hold, at every level, and ids that the
+    // server refuses.
+    .{ .name = "compile error: a field whose name repeats a path", .expect = "odm: tests.compile_errors.DottedTwin: the field 'profile.city' holds '.', which odm reads as a step of a path; rename the field" },
+    .{ .name = "compile error: a field whose name holds a dot", .expect = "odm: tests.compile_errors.Dotted: the field 'user.name' holds '.', which odm reads as a step of a path; rename the field" },
+    .{ .name = "compile error: a field whose name starts with a dollar", .expect = "odm: tests.compile_errors.DollarField.$weird: the name \"$weird\" starts with '$', which MongoDB reads as an operator; rename the field, or give it a BSON name with odm_schema.names" },
+    .{ .name = "compile error: a field of a struct in a list whose name starts with a dollar", .expect = "odm: tests.compile_errors.DollarInside.filter[].$ne: the name \"$ne\" starts with '$', which MongoDB reads as an operator; rename the field" },
+    .{ .name = "compile error: a BSON name that is not UTF-8", .expect = "odm: tests.compile_errors.BinaryName.odm_schema.names.name: the name is not UTF-8" },
+    .{ .name = "compile error: an id that is an array of bytes", .expect = "odm: tests.compile_errors.UuidId.id is the id of the model and is [16]u8: MongoDB takes no array or regular expression as _id; for bytes, such as a UUID, use bson.Binary" },
+    .{ .name = "compile error: an id that is a regular expression", .expect = "odm: tests.compile_errors.RegexId.id is the id of the model and is types.Regex: MongoDB takes no array or regular expression as _id; for bytes, such as a UUID, use bson.Binary" },
     .{ .name = "compile error: a field of u64", .expect = "odm: tests.compile_errors.Unsigned: field 'n' is u64, which BSON has no type for: its integers are signed; use i64" },
     .{ .name = "compile error: a field of f32", .expect = "odm: tests.compile_errors.Narrow.x is f32: a BSON double has 64 bits, and decoding one into f32 rounds it; use f64" },
     .{ .name = "compile error: an f32 in the items of a list", .expect = "odm: tests.compile_errors.NarrowItems.items[].x is f32: a BSON double has 64 bits, and decoding one into f32 rounds it; use f64" },
@@ -89,6 +98,11 @@ pub const compile_errors = [_]Case{
     .{ .name = "compile error: fields and operators in one literal", .expect = "odm: tests.compile_errors.User.profile: write either fields of tests.compile_errors.User.Profile or operators in one literal, not both" },
     .{ .name = "compile error: a key that is a field and an operator", .expect = "odm: tests.compile_errors.Box.inner: 'size' is both a field of tests.compile_errors.Box.Inner and an operator: rename the field" },
     .{ .name = "compile error: an empty literal on a struct", .expect = "odm: tests.compile_errors.User.profile: an empty literal matches nothing here; drop it" },
+    // Lists of the values that a filter writes under $eq, and $ne, which
+    // takes no regular expression.
+    .{ .name = "compile error: in over a list of documents", .expect = "odm: in does not apply to tests.compile_errors.Event.parts, which is []const RawDocument: its items would read as operators or patterns, not as values; match each item by equality in .@\"or\"" },
+    .{ .name = "compile error: all over a list of values of any type", .expect = "odm: all does not apply to tests.compile_errors.Event.values, which is []const value.Value: its items would read as operators or patterns, not as values; match each item by equality in .@\"or\"" },
+    .{ .name = "compile error: ne of a regular expression", .expect = "odm: ne does not apply to tests.compile_errors.Event.re, which is types.Regex: MongoDB takes no regular expression in $ne; put the equality in .nor instead" },
     // Find options, sorts and projections.
     .{ .name = "compile error: an option that find does not have", .expect = "odm: find has no option 'limt'; did you mean 'limit'?" },
     .{ .name = "compile error: a limit of findOne", .expect = "odm: findOne has no option 'limit'" },
@@ -141,6 +155,13 @@ pub const compile_errors = [_]Case{
     .{ .name = "compile error: push of a literal without each", .expect = "odm: push of tests.compile_errors.Account.tags takes an item of the list, or .{ .each = items } for several" },
     .{ .name = "compile error: inc beyond the BSON integer of its field", .expect = "odm: inc of tests.compile_errors.Account.visits needs an integer that fits i64, the BSON integer of u32; got 9223372036854775808" },
     .{ .name = "compile error: set_on_insert of an optional field by an optional value", .expect = "odm: set_on_insert of tests.compile_errors.Account.nickname needs a []const u8; got ?[]const u8: odm does not store null, so set the field when the value is there, and leave it out when it is not" },
+    // The operators of lists on an array of a fixed length, which they
+    // would make longer or shorter: a document that the model cannot read.
+    .{ .name = "compile error: push to an array of a fixed length", .expect = "odm: push of tests.compile_errors.Color.rgb: [3]u8 has a fixed length, and push changes it; set the whole array with .set" },
+    .{ .name = "compile error: add_to_set to an array of a fixed length", .expect = "odm: add_to_set of tests.compile_errors.Color.rgb: [3]u8 has a fixed length, and add_to_set changes it; set the whole array with .set" },
+    .{ .name = "compile error: pull from an array of a fixed length", .expect = "odm: pull of tests.compile_errors.Color.rgb: [3]u8 has a fixed length, and pull changes it; set the whole array with .set" },
+    .{ .name = "compile error: pop of an array of a fixed length", .expect = "odm: pop of tests.compile_errors.Color.rgb: [3]u8 has a fixed length, and pop changes it; set the whole array with .set" },
+    .{ .name = "compile error: an upsert that pushes to an array of a fixed length", .expect = "odm: push of tests.compile_errors.Color.rgb: [3]u8 has a fixed length, and push changes it; set the whole array with .set" },
     // The rules of upsertOne.
     .{ .name = "compile error: an upsert without required fields", .expect = "odm: upsertOne of tests.compile_errors.Account may insert a document without its required fields 'name', 'address.country': give each by equality in the filter, in set, in set_on_insert, or with an operator that creates it, such as inc or push" },
     .{ .name = "compile error: an upsert of Slug without its id", .expect = "odm: upsertOne of tests.compile_errors.Slug may insert a document without its id 'id', which is []const u8: give it by equality in the filter or in set_on_insert" },
@@ -153,6 +174,7 @@ pub const compile_errors = [_]Case{
     .{ .name = "compile error: in in the filter of an upsert", .expect = "odm: upsertOne of tests.compile_errors.Account: the filter's in on tests.compile_errors.Account.status: " ++ list_conditions },
     .{ .name = "compile error: nin in the filter of an upsert", .expect = "odm: upsertOne of tests.compile_errors.Account: the filter's nin on tests.compile_errors.Account.age: " ++ list_conditions },
     .{ .name = "compile error: all in the filter of an upsert", .expect = "odm: upsertOne of tests.compile_errors.Account: the filter's all on tests.compile_errors.Account.tags: " ++ list_conditions },
+    .{ .name = "compile error: an optional list in the filter of an upsert", .expect = "odm: upsertOne of tests.compile_errors.Account: the filter's equality on tests.compile_errors.Account.labels needs a []const []const u8; got ?[]const []const u8: it goes into the document the upsert may insert, and odm does not store null" },
     // odm.Filter and odm.Update.
     .{ .name = "compile error: a filter of another model", .expect = "odm: this filter is an odm.Filter(tests.compile_errors.Account), not of tests.compile_errors.User" },
     .{ .name = "compile error: an upsert with an odm.Filter", .expect = "odm: upsertOne of tests.compile_errors.Account takes a filter literal, not an odm.Filter(tests.compile_errors.Account): it checks at compile time that the document it may insert gets every required field" },

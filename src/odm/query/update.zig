@@ -28,7 +28,9 @@
 //!   `pull` an item, or conditions on the items as `elem_match` takes them;
 //!   `pop` `.first` or `.last`. These and the operators of numbers take
 //!   optional fields too: on a document without the field the server makes
-//!   it, or does nothing for `pull` and `pop`.
+//!   it, or does nothing for `pull` and `pop`. An array of a fixed length,
+//!   `[N]E`, takes none of the four: they would change its length, and
+//!   `set` changes it whole.
 //! - An update never changes the id; `set_on_insert` gives it when an
 //!   upsert inserts. A path changes once in an update, and no path changed
 //!   holds another one changed (`address` and `address.zip`).
@@ -312,9 +314,15 @@ fn ordered(comptime S: type) bool {
     };
 }
 
-/// The type of the items of the list at `at`, which `op` changes.
+/// The type of the items of the list at `at`, which `op` changes. An array
+/// of a fixed length does not take `op`: the document would get another
+/// length, which the model does not read.
 fn listOf(comptime op: Op, comptime at: At) type {
-    return values.ItemOf(at) orelse @compileError("odm: " ++ @tagName(op) ++ " needs a list; " ++ subject(at) ++ " is " ++ @typeName(at.F));
+    const Item = values.ItemOf(at) orelse @compileError("odm: " ++ @tagName(op) ++ " needs a list; " ++ subject(at) ++ " is " ++ @typeName(at.F));
+    if (@typeInfo(Unwrap(at.F)) == .array) {
+        @compileError("odm: " ++ @tagName(op) ++ " of " ++ subject(at) ++ ": " ++ @typeName(Unwrap(at.F)) ++ " has a fixed length, and " ++ @tagName(op) ++ " changes it; set the whole array with .set");
+    }
+    return Item;
 }
 
 /// How `push` or `add_to_set` writes `@field(L, name)` on the list at `at`:
@@ -593,7 +601,8 @@ fn requireCopy(comptime at: At, comptime L: type, comptime name: []const u8) voi
     }
     if (values.ItemOf(at)) |Item| {
         const item = if (values.isComptime(L, name)) values.comptimeFits(V, Item) else values.fits(V, Item);
-        if (item or !values.isList(V)) {
+        // An optional list is a whole list, which the check below refuses.
+        if (item or !values.isList(Unwrap(V))) {
             @compileError(of ++ subject(at) ++ " = item would put the item where the list goes in the document it may insert; match the whole list with .eq, or the item with .elem_match");
         }
     }

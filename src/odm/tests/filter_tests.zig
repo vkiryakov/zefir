@@ -167,6 +167,61 @@ test "a list matches by an item, by all items, by its size or as a whole" {
     try expectFilter(Account, .{ .labels = "x" }, .{ .labels = "x" });
 }
 
+test "a whole optional list, known at run time, with eq and ne" {
+    var wanted: ?[]const []const u8 = &.{ "a", "b" };
+    try expectFilter(Account, .{ .labels = .{ .eq = wanted } }, .{ .labels = .{ "a", "b" } });
+    try expectFilter(Account, .{ .labels = .{ .ne = wanted } }, .{ .labels = .{ .@"$ne" = .{ "a", "b" } } });
+    wanted = null;
+    try expectFilter(Account, .{ .labels = .{ .eq = wanted } }, .{ .labels = null });
+}
+
+const Event = models.Event;
+
+/// A document whose first key starts with '$', as data from a client may
+/// be: written as `{f: doc}` it would read as the operator $ne.
+const operators = bson.literal(.{ .@"$ne" = null });
+
+test "a document, a value of any type and a regular expression go under $eq" {
+    try expectFilter(Event, .{ .meta = operators }, .{ .meta = .{ .@"$eq" = operators } });
+    try expectFilter(Event, .{ .meta = .{ .eq = operators } }, .{ .meta = .{ .@"$eq" = operators } });
+    try expectFilter(Event, .{ .meta = .{ .ne = operators } }, .{ .meta = .{ .@"$ne" = operators } });
+    const any: bson.Value = .{ .document = operators };
+    try expectFilter(Event, .{ .any = any }, .{ .any = .{ .@"$eq" = any } });
+    try expectFilter(Event, .{ .any = .{ .eq = any } }, .{ .any = .{ .@"$eq" = any } });
+    try expectFilter(Event, .{ .any = .{ .ne = any } }, .{ .any = .{ .@"$ne" = any } });
+    // A regular expression is compared, not matched.
+    const re: bson.Regex = .{ .pattern = "^a", .options = "i" };
+    try expectFilter(Event, .{ .re = re }, .{ .re = .{ .@"$eq" = re } });
+    try expectFilter(Event, .{ .re = .{ .eq = re } }, .{ .re = .{ .@"$eq" = re } });
+    // So is an item of a list of documents or of values.
+    try expectFilter(Event, .{ .parts = operators }, .{ .parts = .{ .@"$eq" = operators } });
+    try expectFilter(Event, .{ .values = any }, .{ .values = .{ .@"$eq" = any } });
+}
+
+test "bool, bytes, decimals, timestamps and ObjectIds, enums and a field of a regular expression" {
+    try expectFilter(Event, .{ .flag = true }, .{ .flag = true });
+    try expectFilter(Event, .{ .flag = .{ .in = .{ true, false } } }, .{ .flag = .{ .@"$in" = .{ true, false } } });
+    try expectFilter(Event, .{ .flag = .{ .exists = true } }, .{ .flag = .{ .@"$exists" = true } });
+    try expectFilter(Event, .{ .flag = .{ .not = .{ .eq = true } } }, .{ .flag = .{ .@"$not" = .{ .@"$eq" = true } } });
+    const blob: bson.Binary = .{ .subtype = .generic, .bytes = "abc" };
+    try expectFilter(Event, .{ .blob = blob }, .{ .blob = blob });
+    try expectFilter(Event, .{ .blob = .{ .nin = .{blob} } }, .{ .blob = .{ .@"$nin" = .{blob} } });
+    const amount: bson.Decimal128 = .{ .bytes = @splat(1) };
+    try expectFilter(Event, .{ .amount = .{ .gte = amount, .lt = amount } }, .{ .amount = .{ .@"$gte" = amount, .@"$lt" = amount } });
+    const ts: bson.Timestamp = .{ .seconds = 1_760_000_000, .increment = 1 };
+    try expectFilter(Event, .{ .ts = .{ .gt = ts } }, .{ .ts = .{ .@"$gt" = ts } });
+    try expectFilter(Event, .{ .id = .{ .gt = id } }, .{ ._id = .{ .@"$gt" = id } });
+    try expectFilter(User, .{ .status = .{ .ne = .blocked } }, .{ .status = .{ .@"$ne" = "blocked" } });
+    try expectFilter(User, .{ .status = .{ .nin = .{.deleted} } }, .{ .status = .{ .@"$nin" = .{"deleted"} } });
+    try expectFilter(User, .{ .status = .{ .not = .{ .in = .{.blocked} } } }, .{ .status = .{ .@"$not" = .{ .@"$in" = .{"blocked"} } } });
+    // A field of a regular expression takes eq and exists; MongoDB takes
+    // no regular expression in $ne, so the documents that do not equal it
+    // take the equality in nor.
+    const re: bson.Regex = .{ .pattern = "^a", .options = "" };
+    try expectFilter(Event, .{ .re = .{ .exists = false } }, .{ .re = .{ .@"$exists" = false } });
+    try expectFilter(Event, .{ .nor = .{.{ .re = re }} }, .{ .@"$nor" = .{.{ .re = .{ .@"$eq" = re } }} });
+}
+
 test "a literal on a list of structs is paths through it, and elem_match one item" {
     try expectFilter(Account, .{ .items = .{ .sku = "x" } }, .{ .@"items.sku" = "x" });
     try expectFilter(Account, .{ .items = .{ .elem_match = .{ .sku = "x", .qty = .{ .gt = 5 } } } }, .{

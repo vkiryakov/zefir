@@ -480,6 +480,85 @@ test "compile error: a field named as a logical operator" {
     comptime odm.assertModel(Operator);
 }
 
+/// A field whose Zig name holds a dot, next to the path that it repeats,
+/// with an index, so that odm's paths of the model are made.
+const DottedTwin = struct {
+    id: ?bson.ObjectId = null,
+    profile: User.Profile,
+    @"profile.city": []const u8,
+    pub const odm_schema: odm.Schema(DottedTwin) = .{
+        .collection = "twins",
+        .id = .id,
+        .indexes = &.{.{ .keys = &.{.{ .profile = .asc }} }},
+    };
+};
+
+test "compile error: a field whose name repeats a path" {
+    comptime odm.assertModel(DottedTwin);
+}
+
+const Dotted = struct {
+    id: ?bson.ObjectId = null,
+    @"user.name": []const u8,
+    pub const odm_schema: odm.Schema(Dotted) = .{ .collection = "dotted", .id = .id };
+};
+
+test "compile error: a field whose name holds a dot" {
+    comptime odm.assertModel(Dotted);
+}
+
+const DollarField = struct {
+    id: ?bson.ObjectId = null,
+    @"$weird": u32,
+    pub const odm_schema: odm.Schema(DollarField) = .{ .collection = "dollars", .id = .id };
+};
+
+test "compile error: a field whose name starts with a dollar" {
+    comptime odm.assertModel(DollarField);
+}
+
+const DollarInside = struct {
+    id: ?bson.ObjectId = null,
+    filter: []const Clause = &.{},
+    pub const Clause = struct { @"$ne": u32 };
+    pub const odm_schema: odm.Schema(DollarInside) = .{ .collection = "clauses", .id = .id };
+};
+
+test "compile error: a field of a struct in a list whose name starts with a dollar" {
+    comptime odm.assertModel(DollarInside);
+}
+
+const BinaryName = struct {
+    id: ?bson.ObjectId = null,
+    name: []const u8,
+    pub const odm_schema: odm.Schema(BinaryName) = .{ .collection = "binary_names", .id = .id, .names = .{ .name = "\xff" } };
+};
+
+test "compile error: a BSON name that is not UTF-8" {
+    comptime odm.assertModel(BinaryName);
+}
+
+/// A UUID as 16 bytes: an array, which _id cannot be.
+const UuidId = struct {
+    id: [16]u8,
+    name: []const u8,
+    pub const odm_schema: odm.Schema(UuidId) = .{ .collection = "devices", .id = .id };
+};
+
+test "compile error: an id that is an array of bytes" {
+    comptime odm.assertModel(UuidId);
+}
+
+const RegexId = struct {
+    id: bson.Regex,
+    name: []const u8,
+    pub const odm_schema: odm.Schema(RegexId) = .{ .collection = "patterns", .id = .id };
+};
+
+test "compile error: an id that is a regular expression" {
+    comptime odm.assertModel(RegexId);
+}
+
 const Unsigned = struct {
     id: ?bson.ObjectId = null,
     n: u64,
@@ -695,6 +774,38 @@ test "compile error: a key that is a field and an operator" {
 
 test "compile error: an empty literal on a struct" {
     _ = try filter.encode(User, std.testing.allocator, .{ .profile = .{} });
+}
+
+/// The types of BSON that a filter writes under $eq, as tests/models.zig
+/// declares them.
+const Event = struct {
+    id: ?bson.ObjectId = null,
+    flag: bool = false,
+    meta: bson.RawDocument,
+    any: bson.Value,
+    re: bson.Regex,
+    blob: bson.Binary,
+    amount: bson.Decimal128,
+    ts: bson.Timestamp,
+    parts: []const bson.RawDocument = &.{},
+    values: []const bson.Value = &.{},
+
+    pub const odm_schema: odm.Schema(Event) = .{ .collection = "events", .id = .id };
+};
+
+test "compile error: in over a list of documents" {
+    const doc = bson.literal(.{ .a = 1 });
+    _ = try filter.encode(Event, std.testing.allocator, .{ .parts = .{ .in = .{doc} } });
+}
+
+test "compile error: all over a list of values of any type" {
+    const any: bson.Value = .{ .int32 = 1 };
+    _ = try filter.encode(Event, std.testing.allocator, .{ .values = .{ .all = .{any} } });
+}
+
+test "compile error: ne of a regular expression" {
+    const re: bson.Regex = .{ .pattern = "^a", .options = "" };
+    _ = try filter.encode(Event, std.testing.allocator, .{ .re = .{ .ne = re } });
 }
 
 // Find options, sorts and projections, through query/options.zig.
@@ -918,6 +1029,36 @@ test "compile error: set_on_insert of an optional field by an optional value" {
     _ = try update.encode(Account, std.testing.allocator, .{ .set_on_insert = .{ .nickname = maybe } }, .upsert);
 }
 
+/// A model with an array of a fixed length, which the operators of lists
+/// would make longer or shorter.
+const Color = struct {
+    id: ?bson.ObjectId = null,
+    name: []const u8,
+    rgb: [3]u8,
+
+    pub const odm_schema: odm.Schema(Color) = .{ .collection = "colors", .id = .id };
+};
+
+test "compile error: push to an array of a fixed length" {
+    _ = try update.encode(Color, std.testing.allocator, .{ .push = .{ .rgb = 7 } }, .update);
+}
+
+test "compile error: add_to_set to an array of a fixed length" {
+    _ = try update.encode(Color, std.testing.allocator, .{ .add_to_set = .{ .rgb = 7 } }, .update);
+}
+
+test "compile error: pull from an array of a fixed length" {
+    _ = try update.encode(Color, std.testing.allocator, .{ .pull = .{ .rgb = 0 } }, .update);
+}
+
+test "compile error: pop of an array of a fixed length" {
+    _ = try update.encode(Color, std.testing.allocator, .{ .pop = .{ .rgb = .last } }, .update);
+}
+
+test "compile error: an upsert that pushes to an array of a fixed length" {
+    comptime update.checkUpsert(Color, @TypeOf(.{ .name = "red" }), @TypeOf(.{ .push = .{ .rgb = 7 } }));
+}
+
 // The rules of upsertOne, through update.checkUpsert, which upsertOne
 // calls with the types of its literals.
 
@@ -973,6 +1114,12 @@ test "compile error: nin in the filter of an upsert" {
 
 test "compile error: all in the filter of an upsert" {
     comptime update.checkUpsert(Account, @TypeOf(.{ .email = "a@b.c", .address = .{ .city = "Lyon" }, .tags = .{ .all = .{"a"} } }), @TypeOf(whole_account));
+}
+
+test "compile error: an optional list in the filter of an upsert" {
+    var wanted: ?[]const []const u8 = &.{"a"};
+    _ = &wanted;
+    comptime update.checkUpsert(Account, @TypeOf(.{ .email = "a@b.c", .labels = .{ .eq = wanted } }), @TypeOf(whole_account));
 }
 
 /// A model whose id is a document, which the application gives.

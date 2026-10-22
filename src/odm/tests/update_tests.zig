@@ -84,6 +84,14 @@ test "the operators of lists take an item, items, or conditions on the items" {
     try expectUpdate(Account, .{ .pop = .{ .items = .first } }, .update, .{ .@"$pop" = .{ .items = @as(i32, -1) } });
 }
 
+test "pull of a document or of a value of any type goes under $eq" {
+    // A document whose first key starts with '$' stays a value.
+    const operators = bson.literal(.{ .@"$ne" = null });
+    try expectUpdate(models.Event, .{ .pull = .{ .parts = operators } }, .update, .{ .@"$pull" = .{ .parts = .{ .@"$eq" = operators } } });
+    const any: bson.Value = .{ .document = operators };
+    try expectUpdate(models.Event, .{ .pull = .{ .values = any } }, .update, .{ .@"$pull" = .{ .values = .{ .@"$eq" = any } } });
+}
+
 test "the operators of numbers take an integer of the field's BSON integer, negative too" {
     try expectUpdate(Account, .{ .max = .{ .created_at = now } }, .update, .{ .@"$max" = .{ .createdAt = now } });
     try expectUpdate(Account, .{ .min = .{ .email = "a" } }, .update, .{ .@"$min" = .{ .email = "a" } });

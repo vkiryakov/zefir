@@ -20,7 +20,10 @@
 //!   of operators: `eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `in`, `nin`,
 //!   `exists`, `regex`, `not`, and for lists `all`, `size`, `elem_match`.
 //!   Which of them a field takes depends on its type (design §4.5). A
-//!   literal of `eq` alone is the value itself.
+//!   literal of `eq` alone is the value itself. A list of documents or of
+//!   values of any type takes no `in`, `nin` or `all`, whose items would
+//!   read as operators or patterns, and `ne` takes no regular expression,
+//!   which MongoDB refuses in `$ne`.
 //! - A literal on a struct, or on a list of structs, whose keys are fields
 //!   of the struct is conditions on their paths, never the match of a whole
 //!   document: that takes `.eq`, and a value of the struct without it does
@@ -281,16 +284,20 @@ fn requireOperators(comptime at: At, comptime V: type) void {
 }
 
 /// Whether the operator `op` applies to a field of type `F`, by the table
-/// of design §4.5. On a list, gt, gte, lt, lte and regex compare its items,
-/// so they apply when they apply to the items.
+/// of design §4.5. On a list, gt, gte, lt, lte, regex and ne compare its
+/// items, so they apply when they apply to the items; in, nin and all do
+/// not take the items that an equality writes under `$eq` (`opaqueItem`).
+/// MongoDB takes no regular expression in `$ne`.
 fn applies(comptime op: Op, comptime F: type) bool {
     const S = Unwrap(F);
     if (schema.ListItem(S)) |Item| return switch (op) {
-        .gt, .gte, .lt, .lte, .regex => applies(op, Item),
+        .gt, .gte, .lt, .lte, .regex, .ne => applies(op, Item),
+        .in, .nin, .all => !opaqueItem(Item),
         else => true,
     };
     return switch (op) {
-        .eq, .ne, .exists => true,
+        .eq, .exists => true,
+        .ne => S != bson.Regex,
         .gt, .gte, .lt, .lte => ordered(S),
         .in, .nin, .not => !equalsOnly(S) and !schema.isDocument(S),
         .regex => S == []const u8,
@@ -315,8 +322,26 @@ fn equalsOnly(comptime S: type) bool {
     return !(S == bson.Binary or S == bson.Decimal128 or S == bson.ObjectId or S == bson.DateTime or S == bson.Timestamp);
 }
 
+/// Whether an item of a list is a document or a value of any type, whose
+/// keys could be operators, or which could be a regular expression: in a
+/// list of `in`, `nin` or `all` it would not stand for a value. A regular
+/// expression itself is no such item: a regex value equals a regex item.
+fn opaqueItem(comptime Item: type) bool {
+    const S = Unwrap(Item);
+    return S == bson.RawDocument or S == bson.OwnedDocument or S == bson.Value;
+}
+
 fn requireApplies(comptime at: At, comptime op: Op) void {
-    if (!applies(op, at.F)) @compileError("odm: " ++ @tagName(op) ++ " does not apply to " ++ subject(at) ++ ", which is " ++ @typeName(at.F));
+    if (applies(op, at.F)) return;
+    const what = "odm: " ++ @tagName(op) ++ " does not apply to " ++ subject(at) ++ ", which is " ++ @typeName(at.F);
+    if (op == .ne) {
+        const S = Unwrap(ItemOf(at) orelse at.F);
+        if (S == bson.Regex) @compileError(what ++ ": MongoDB takes no regular expression in $ne; put the equality in .nor instead");
+    }
+    if (op == .in or op == .nin or op == .all) if (ItemOf(at)) |Item| if (opaqueItem(Item)) {
+        @compileError(what ++ ": its items would read as operators or patterns, not as values; match each item by equality in .@\"or\"");
+    };
+    @compileError(what);
 }
 
 /// `X`, or `?X` when a document may lack the field at `at`: the type of a
@@ -355,7 +380,8 @@ fn equality(comptime at: At, comptime L: type, comptime name: []const u8, compti
     if (ItemOf(at)) |Item| {
         const E = nullable(at, Item);
         const item = if (values.isComptime(L, name)) values.comptimeFits(V, E) else values.fits(V, E);
-        if (item or !values.isList(V)) {
+        // An optional list is a whole list too.
+        if (item or !values.isList(Unwrap(V))) {
             values.checkValue(what, M, at.path ++ "[]", E, L, name);
             return E;
         }

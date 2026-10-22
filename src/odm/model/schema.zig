@@ -129,10 +129,13 @@ pub fn paths(comptime T: type) []const PathEntry {
 /// The paths of the fields of the struct `S`, under `prefix`. `outer`
 /// holds the structs on the way, so that a type that holds itself ends a
 /// path instead of an endless descent; the check of the model reports it.
+/// A name with a dot stops the build here: the schema of the model makes
+/// its paths before any other check of the model runs.
 fn walkPaths(comptime S: type, comptime prefix: []const u8, comptime optional: bool, comptime outer: []const type) []const PathEntry {
     var out: []const PathEntry = &.{};
     const info = @typeInfo(S).@"struct";
     for (info.field_names, info.field_types) |name, F| {
+        requireNoDot(@typeName(outer[0]), prefix, name);
         const path = if (prefix.len == 0) name else prefix ++ "." ++ name;
         const maybe = optional or @typeInfo(F) == .optional;
         out = out ++ &[_]PathEntry{.{ .name = path, .Type = F, .optional = maybe }};
@@ -148,6 +151,15 @@ fn holds(comptime types: []const type, comptime T: type) bool {
         if (Other == T) return true;
     }
     return false;
+}
+
+/// Stops the build at the field `name` of the struct at `prefix` of the
+/// model `M` when the name holds a dot: odm reads a dot as a step of a
+/// path, in filters, updates, sorts and indexes.
+fn requireNoDot(comptime M: []const u8, comptime prefix: []const u8, comptime name: []const u8) void {
+    if (std.mem.findScalar(u8, name, '.') == null) return;
+    const at = if (prefix.len == 0) M else M ++ "." ++ prefix;
+    @compileError("odm: " ++ at ++ ": the field '" ++ name ++ "' holds '.', which odm reads as a step of a path; rename the field");
 }
 
 /// The struct whose fields the paths of a field of type `F` go on into:
@@ -284,6 +296,7 @@ pub fn check(comptime T: type) void {
         // A model is both read and written.
         if (bson.codec.check.document(T, .decode)) |problem| @compileError("odm: " ++ M ++ ": " ++ problem);
         if (bson.codec.check.document(T, .encode)) |problem| @compileError("odm: " ++ M ++ ": " ++ problem);
+        checkKeys(T, M);
         if (fieldOf(T, "", isF32)) |path| @compileError("odm: " ++ M ++ "." ++ path ++ " is f32: a BSON double has 64 bits, and decoding one into f32 rounds it; use f64");
         if (fieldOf(T, "", hasOptionalDefault)) |path| @compileError("odm: " ++ M ++ "." ++ path ++ " is optional, and its default is not null: odm leaves a null optional out of the document, and a field that is not there reads back as its default; make the default null");
         checkIndexes(T, M);
@@ -307,6 +320,11 @@ fn checkId(comptime T: type, comptime M: []const u8) void {
         @compileError("odm: " ++ M ++ "." ++ id ++ " is the id of the model and is " ++ @typeName(F) ++
             ": an id is bson.ObjectId, ?bson.ObjectId, or a value of another type that you give on insert and that is not optional");
     }
+    // The server refuses them on the first insert.
+    if (ListItem(F) != null or F == bson.Regex) {
+        @compileError("odm: " ++ M ++ "." ++ id ++ " is the id of the model and is " ++ @typeName(F) ++
+            ": MongoDB takes no array or regular expression as _id; for bytes, such as a UUID, use bson.Binary");
+    }
     if (@hasField(T, "_id") and !std.mem.eql(u8, id, "_id")) {
         @compileError("odm: " ++ M ++ "._id is not the id of the model: set odm_schema.id = ._id, or rename the field");
     }
@@ -324,6 +342,7 @@ fn checkNames(comptime T: type, comptime M: []const u8) void {
         if (key.len == 0 or key[0] == '$' or std.mem.findAny(u8, key, ".\x00") != null) {
             @compileError(at ++ ": \"" ++ key ++ "\" is not a field name of a document: it is empty, starts with '$', or holds '.' or NUL");
         }
+        if (!std.unicode.utf8ValidateSlice(key)) @compileError(at ++ ": the name is not UTF-8");
     }
     for (fields, 0..) |a, i| {
         const key = keyOf(T, a);
@@ -337,6 +356,51 @@ fn checkNames(comptime T: type, comptime M: []const u8) void {
                 @compileError("odm: " ++ M ++ "." ++ field ++ ": and, or and nor are the logical operators of filters; rename the field and keep its BSON name with odm_schema.names");
             }
         }
+    }
+}
+
+/// The names of the fields of `T` and of the structs in it, through
+/// optionals and lists, as a document holds them: the BSON name of a
+/// top-level field (`checkNames` checks those of `odm_schema.names`), the
+/// Zig name of one below; no Zig name holds a dot. The codec check has
+/// refused the types that hold themselves.
+fn checkKeys(comptime T: type, comptime M: []const u8) void {
+    const info = @typeInfo(T).@"struct";
+    for (info.field_names, info.field_types) |name, F| {
+        requireNoDot(M, "", name);
+        // The id is _id in the database.
+        const renamed = @field(T.odm_schema.names, name) != null or std.mem.eql(u8, name, idName(T));
+        if (!renamed) checkKey(M, name, name, true);
+        checkKeysIn(F, M, name);
+    }
+}
+
+fn checkKeysIn(comptime F: type, comptime M: []const u8, comptime path: []const u8) void {
+    const S = Unwrap(F);
+    if (isDocument(S)) {
+        const info = @typeInfo(S).@"struct";
+        for (info.field_names, info.field_types) |name, Field| {
+            requireNoDot(M, path, name);
+            checkKey(M, path ++ "." ++ name, name, false);
+            checkKeysIn(Field, M, path ++ "." ++ name);
+        }
+        return;
+    }
+    const Item = ListItem(S) orelse return;
+    checkKeysIn(Item, M, path ++ "[]");
+}
+
+/// Stops the build at the name `key` of the field at `path`, unless a
+/// document can hold it: it does not start with '$' and is UTF-8. Zig
+/// refuses an empty name and a NUL in one already.
+fn checkKey(comptime M: []const u8, comptime path: []const u8, comptime key: []const u8, comptime top: bool) void {
+    const fix = if (top) "rename the field, or give it a BSON name with odm_schema.names" else "rename the field";
+    if (key[0] == '$') @compileError("odm: " ++ M ++ "." ++ path ++ ": the name \"" ++ key ++ "\" starts with '$', which MongoDB reads as an operator; " ++ fix);
+    if (!std.unicode.utf8ValidateSlice(key)) {
+        // Not the name itself: the message stays UTF-8.
+        const parent = path[0 .. path.len - key.len];
+        const at = if (parent.len == 0) M else M ++ "." ++ parent[0 .. parent.len - 1];
+        @compileError("odm: " ++ at ++ ": a field has a name that is not UTF-8, which a document needs; " ++ fix);
     }
 }
 
