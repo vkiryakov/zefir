@@ -929,13 +929,22 @@ something else than one 200 of `http.Json(T)`, or the 204 of `!void`:
 | --- | --- | --- |
 | returns `http.Json(T)` | none | 200, `application/json`, `T` |
 | returns `http.Json(T)` | `.{ .created = .{}, .ok = .{} }` | 201 and 200, both `T` |
+| returns `http.Json(T)` | `.{ .ok = .{}, .no_content = .{} }` | 200 with `T`, and 204 without content |
 | returns `void` and writes nothing | none | 204 |
 | writes a stream, a file or HTML | `.{ .ok = .{ .content_type = "text/csv" } }` | 200, `text/csv`, a string |
 | writes JSON with `ctx.response.json` | `.{ .ok = .{ .json = U } }` | 200, `application/json`, `U` |
 | redirects | `.{ .see_other = .{} }` | 303, no body |
 
-The answers to errors are not listed there: `mapError` gives them (see
-[Errors](#errors)).
+204, 205 and 304 never have content, in the document or on the wire, even
+on a route of `http.Json(T)`, so a `.content_type` or a `.json` on one of
+them does not build:
+
+```text
+error: zefir.http: http.put("/sync"): .responses.no_content declares a body, but a 204 response has none; write .no_content = .{}
+```
+
+The answers to errors are not listed in `.responses`: `mapError` gives
+them (see [Errors](#errors)).
 
 **The document itself**, in the call of `document`:
 

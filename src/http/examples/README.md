@@ -1839,7 +1839,8 @@ CSV itself, and signing in is a redirect:
 | An entry | The response |
 | --- | --- |
 | `.ok = .{}` on a route of `http.Json(T)` | 200 with the value, a `T` |
-| `.created = .{}` and the other 2xx of such a route | that status, with a `T` too |
+| `.created = .{}` and the other 2xx of such a route, but 204 and 205 | that status, with a `T` too |
+| `.no_content = .{}`, `.reset_content = .{}` or `.not_modified = .{}`, on any route | 204, 205 or 304, without a body: the value of an `http.Json(T)` does not go out |
 | `.see_other = .{}`, or any status of a route of `!void` | that status without a body |
 | `.ok = .{ .content_type = "text/csv" }` | a body the handler writes, of that type |
 | `.ok = .{ .json = U }` | JSON of `U`, which the handler writes with `ctx.response.json` |
@@ -1849,8 +1850,9 @@ CSV itself, and signing in is a redirect:
 - **The answers to errors are not in it**: `mapError` gives their statuses
   and bodies (see [Errors](#errors)).
 - **A wrong entry does not build**: a key that is not a name of
-  `std.http.Status`, or `.content_type` or `.json` on a 2xx of a route of
-  `http.Json(T)`, whose body is always `T`.
+  `std.http.Status`; `.content_type` or `.json` on a 2xx of a route of
+  `http.Json(T)`, whose body is always `T`; and either on 204, 205 or 304,
+  which never have a body.
 - **A Debug build checks** each response of a route of a controller with
   `pub const openapi` against its list: see
   [The OpenAPI document](#the-openapi-document).
