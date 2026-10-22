@@ -43,8 +43,6 @@ production, and reaches MongoDB through zefir-mongo.
 > - **Migrations** of documents and indexes, beyond `ensureIndexes`.
 > - **Subscriptions to the events of tenants**, over NATS or anything
 >   else: the service hears them and calls `provisionTenant`.
-> - **The App container of zefir-core**: `main` builds the registry and
->   shuts it down; wrappers for App are planned.
 > - **Active Record**: a model is data, and a collection does the work.
 > - **Timestamps that odm keeps**, such as `created_at` and `updated_at`.
 > - **BSON names inside nested structs**: there a key is the Zig name of
@@ -137,6 +135,7 @@ while (try adults.next(io, ctx, arena)) |user| app.info("Adult", .{ .name = user
 - [Connections and credentials](#connections-and-credentials)
 - [Errors and what is safe to retry](#errors-and-what-is-safe-to-retry)
 - [Shutdown, statistics and logs](#shutdown-statistics-and-logs)
+- [Under zefir.App](#under-zefirapp)
 - [Security](#security)
 - [Tests without MongoDB](#tests-without-mongodb)
 - [For authors of drivers](#for-authors-of-drivers)
@@ -146,7 +145,8 @@ mongod, checking what they print against this guide:
 [quick start](quick_start.zig) · [tenants](tenants.zig) ·
 [rotation](rotation.zig) · [errors](errors.zig).
 Programs that `zig build test-odm` runs without a server:
-[models](models.zig) · [queries](queries.zig). Tests that it runs:
+[models](models.zig) · [queries](queries.zig) · [under App](app.zig).
+Tests that it runs:
 [the tests of an application](users_test.zig) ·
 [the conformance suite](conformance_test.zig).
 
@@ -2373,6 +2373,162 @@ The records then have the scopes `odm` and `mongo`, as in the runs of
 `rotation.zig` and `errors.zig`. Without the bridge they go where std.log
 writes by default, to stderr.
 
+
+## Under zefir.App
+
+A service hands the lifecycle of its parts to `zefir.App` of zefir-core:
+App builds the beans of the service out of modules, starts them in order,
+and stops them all within one deadline. The registry is a bean as it is:
+its `init` makes no call to the network and starts no task,
+`shutdown(io, deadline)` is its stop, and `deinit(io)` frees it. The
+guides of the modules write App `core.App`: it is `zefir.App` of the
+umbrella module.
+
+The module below declares what App builds: the driver, the registry,
+which the factory `Odm.registry` makes on it, and `Tenants`, the bean of
+the service that binds its tenants in its `start`:
+
+```zig
+//! The registry under zefir.App, without a server: a module declares the
+//! driver, the registry, which a factory makes on it, and the tenants of
+//! the service, a bean whose `start` binds them. App builds the beans in
+//! the order of their dependencies, starts the tenants, and at the stop
+//! shuts the registry down within its deadline, then frees it. The driver
+//! is `odm.testing.FakeDriver`, which runs no query; a service declares
+//! `mongo.OdmDriver` in its place. `zig build test-odm` runs it.
+
+const std = @import("std");
+const core = @import("core");
+const log = @import("log");
+const odm = @import("odm");
+const bson = @import("mongo-bson");
+
+/// App and odm log through std.log; this sends their records to the
+/// logger.
+pub const std_options: std.Options = .{ .logFn = log.stdLogFn };
+
+/// The settings of the service; a service reads them with confy, as the
+/// quick start does.
+const Config = struct {
+    /// The connection string of the shared server.
+    uri: []const u8,
+    /// The tenants that the service knows when it starts.
+    tenants: []const []const u8,
+};
+
+/// A customer of a tenant.
+const Customer = struct {
+    id: ?bson.ObjectId = null,
+    name: []const u8,
+
+    pub const odm_schema: odm.Schema(Customer) = .{ .collection = "customers", .id = .id };
+};
+
+/// The tenants of the service. App builds it by its fields and starts it
+/// once the registry is built: the connection of the settings, and a
+/// tenant on it for each name, in a database of that name. The events of
+/// tenants that come later call `provisionTenant` the same way.
+pub const Tenants = struct {
+    registry: *odm.Registry,
+    config: *const Config,
+
+    pub fn start(tenants: *Tenants, io: std.Io) !void {
+        const registry = tenants.registry;
+        try registry.registerConnection(io, "main", .{ .uri = tenants.config.uri });
+        // The network, under a deadline.
+        const ctx = core.Context.root.withDeadline(.after(std.Io.Clock.awake.now(io), .fromSeconds(10)));
+        try registry.connect(io, ctx, "main");
+        for (tenants.config.tenants) |name| {
+            try registry.provisionTenant(io, ctx, .{ .tenant = name, .connection = .{ .existing = "main" }, .database = name, .version = 1 });
+        }
+    }
+};
+
+/// What App builds: the driver and the tenants, by their `init` and their
+/// fields, and the registry, which a factory makes.
+pub const AppModule = struct {
+    pub const module: core.app.Module = .{
+        .providers = &.{ odm.testing.FakeDriver, Tenants },
+        .factories = &.{Odm},
+        .values = &.{*const Config},
+    };
+
+    pub const Odm = struct {
+        /// The registry on the driver App built. App shuts it down
+        /// (`shutdown`) at the stop, after the beans that take it, and
+        /// frees it (`deinit`).
+        pub fn registry(gpa: std.mem.Allocator, io: std.Io, driver: *odm.testing.FakeDriver) odm.Registry {
+            return .init(gpa, io, driver.driver(), .{});
+        }
+    };
+};
+
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+    const logger: log.Logger = try .init(init.gpa, io, .{ .format = .text });
+    defer logger.deinit();
+    logger.installStdLog();
+    const app_log = logger.scoped("app");
+
+    const config: Config = .{ .uri = "fake://shop", .tenants = &.{ "acme", "globex" } };
+    var app = try core.App(AppModule).init(init.gpa, io, .{&config}, .{});
+    defer app.deinit();
+    // Once start returns, the tenants are bound.
+    try app.start();
+    const registry: *odm.Registry = app.get(odm.Registry);
+    app_log.info("Started", .{ .tenants = registry.stats(io).tenants });
+
+    // A request of the tenant acme, as a handler makes it.
+    {
+        var acme = try registry.tenant(io, "acme");
+        defer acme.deinit(io);
+        const ann = try acme.collection(Customer).insertOne(io, .root, .{ .name = "Ann" });
+        app_log.info("Signed up", .{ .tenant = "acme", .id = ann.id });
+    }
+
+    // What a signal does in a service: App shuts the registry down within
+    // its shutdown_timeout, and wait returns.
+    app.requestStop();
+    try app.wait();
+    app_log.info("Stopped", .{ .state = app.state() });
+}
+```
+
+```text
+$ zig build run
+2026-10-22T16:07:03.782Z INFO  [zefir_app] AppModule.Tenants started
+2026-10-22T16:07:03.783Z INFO  [app] Started tenants=2
+2026-10-22T16:07:03.783Z INFO  [app] Signed up tenant=acme id=6ada34a7f1daad5214062bf8
+2026-10-22T16:07:03.783Z INFO  [zefir_app] stopping
+2026-10-22T16:07:03.783Z INFO  [zefir_app] AppModule.Odm.registry stopped
+2026-10-22T16:07:03.783Z INFO  [zefir_app] stopped
+2026-10-22T16:07:03.783Z INFO  [app] Stopped state=stopped
+```
+
+- **The driver is a bean too.** A service declares `mongo.OdmDriver`
+  among its providers in place of the fake, built by its `init(gpa)`, and
+  the factory takes `*mongo.OdmDriver`. App keeps its beans where it built
+  them, as both need: the driver while the registry uses it, the registry
+  from its first `registerConnection` on.
+- **The tenants are the service's.** The registry has no `start`:
+  registering a connection, connecting it and provisioning tenants are
+  calls of the service, with its settings and its deadlines. A bean such
+  as `Tenants` makes them in its `start`, which App calls once the
+  registry is built; when it fails, App stops what it started, the
+  registry with it, and `start` returns the error. The events of tenants
+  that come later call `provisionTenant` on the same registry, from any
+  task.
+- **The stop.** App calls `registry.shutdown(io, deadline)` with the
+  deadline of its stop, `.shutdown_timeout` of `App.init`, 25 s by
+  default: after the servers stopped and after the beans that take the
+  registry, the reverse of their creation, so the sessions of the last
+  requests come back first. Leases left at the deadline are closed by
+  force, and `shutdown` returns `error.ShutdownTimeout`, which App takes
+  as fatal: `run` ends the process with code 1. `app.deinit()` then
+  calls `registry.deinit(io)`.
+- **One `io`.** App hands the factory the `io` of `App.init`, and every
+  call of the registry comes on it: under zio, `rt.io()`, as the quick
+  start says.
 
 ## Security
 
